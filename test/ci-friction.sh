@@ -72,9 +72,13 @@ case "$path" in
     serve "logs/$jid.txt" "log-$jid";;
   search/issues*)
     q="$(printf '%s' "$path" | sed -E 's/.*"([^"]+)"[^"]*$/\1/')"
+    if [ -e "$T/fail-flaky" ] && [[ "$path" == *Flaky* ]]; then cat "$T/fail-flaky" >&2; exit 1; fi
     if [ -e "$T/once-ratelimit" ]; then rm -f "$T/once-ratelimit"; echo "gh: API rate limit exceeded for user ID 1. If you reach out to GitHub Support for help, please include your request ID. (HTTP 403)" >&2; exit 1; fi
     key="$(printf '%s' "$q" | sed -E 's/[^A-Za-z0-9]+/-/g')"
+    spage="$(printf '%s' "$path" | sed -nE 's/.*[?&]page=([0-9]+).*/\1/p')"
+    [ -n "$spage" ] || spage=1
     f="search/$key.json"
+    [ "$spage" = "1" ] || f="search/$key-p$spage.json"  # page 2+ has its own fixture, else empty
     if [ -e "$scen/$f" ]; then cat "$scen/$f"; else printf '{"total_count":0,"items":[]}'; fi;;
   *issues/*/events*)
     n="$(printf '%s' "$path" | sed -E 's/.*issues\/([0-9]+).*/\1/')"
@@ -213,7 +217,7 @@ run_friction --json >/dev/null
 run_friction --json >/dev/null
 [ "$(grep -c 'actions/jobs/801/logs' "$FAKE_GH_LOG")" = "1" ] \
   || fail "log fetched once: [$(cat "$FAKE_GH_LOG")]"
-[ "$(grep -c 'search/issues' "$FAKE_GH_LOG")" = "1" ] \
+[ "$(grep -c 'search/issues.*doors' "$FAKE_GH_LOG")" = "1" ] \
   || fail "search once per name: [$(cat "$FAKE_GH_LOG")]"
 [ "$(grep -c 'issues/1386' "$FAKE_GH_LOG")" = "1" ] \
   || fail "cached open issue re-read: [$(cat "$FAKE_GH_LOG")]"
@@ -317,7 +321,7 @@ setup repeat
 : >"$T/once-ratelimit"
 run_friction --json
 [ "$CODE" = "1" ] || fail "rate limit then success exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
-[ "$(grep -c 'search/issues' "$FAKE_GH_LOG")" = "2" ] \
+[ "$(grep -c 'search/issues.*doors' "$FAKE_GH_LOG")" = "2" ] \
   || fail "rate-limited search retried once: [$(cat "$FAKE_GH_LOG")]"
 grep -q "rate_limit" "$FAKE_GH_LOG" || fail "rate limit reset read: [$(cat "$FAKE_GH_LOG")]"
 [ "$(jget "d['repeats'][0]['issue']")" = "1386" ] || fail "rate-limited search linked: [$OUT]"
@@ -328,14 +332,56 @@ mkdir -p "$HOME/.cache/switchyard"
 python3 -c "import json; json.dump({'jobs': {}, 'issues': {'fiber-core doors::watch': {'issue': None, 'issue_state': None, 'closed_at': None, 'updated_at': None, 'searched_at': '2026-10-09T10:00:00Z'}}, 'branches': {}}, open('$HOME/.cache/switchyard/ci-friction.json', 'w'))"
 run_friction --json
 [ "$CODE" = "1" ] || fail "stale no-issue exits 1 (got $CODE): [$OUT]"
-[ "$(grep -c 'search/issues' "$FAKE_GH_LOG")" = "1" ] || fail "stale no-issue searched: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'search/issues.*doors' "$FAKE_GH_LOG")" = "1" ] || fail "stale no-issue searched: [$(cat "$FAKE_GH_LOG")]"
 [ "$(jget "d['repeats'][0]['issue']")" = "1386" ] || fail "stale no-issue linked: [$OUT]"
 # a no-issue entry searched under 6 h ago is not searched again
 setup repeat
 mkdir -p "$HOME/.cache/switchyard"
 python3 -c "import json; json.dump({'jobs': {}, 'issues': {'fiber-core doors::watch': {'issue': None, 'issue_state': None, 'closed_at': None, 'updated_at': None, 'searched_at': '2026-10-09T17:00:00Z'}}, 'branches': {}}, open('$HOME/.cache/switchyard/ci-friction.json', 'w'))"
 run_friction --json
-[ "$(grep -c 'search/issues' "$FAKE_GH_LOG")" = "0" ] || fail "fresh no-issue not searched: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'search/issues.*doors' "$FAKE_GH_LOG")" = "0" ] || fail "fresh no-issue not searched: [$(cat "$FAKE_GH_LOG")]"
+
+# --- flaky: open "Flaky test:" issues; 2+ sightings exit 1 and print a line ---
+# flaky: one uncached search; 1602 has 1 sighting, 1601 has 2, and the old and
+# non-prefix titles are excluded
+setup flaky
+run_friction --json
+[ "$CODE" = "1" ] || fail "flaky 2+ exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "[(f['test'], f['issue'], f['sightings']) for f in d['flaky']]")" = \
+  "[('fiber-core doors::slow', 1602, 1), ('main::ci_flake_probe passes_only_on_a_retry', 1601, 2)]" ] \
+  || fail "flaky entries: [$OUT]"
+[ "$(grep -c 'Flaky' "$FAKE_GH_LOG")" = "1" ] || fail "one flaky search: [$(cat "$FAKE_GH_LOG")]"
+setup flaky
+run_friction
+[ "$CODE" = "1" ] || fail "flaky text exits 1 (got $CODE): [$OUT]"
+grep -qx "flaky: main::ci_flake_probe passes_only_on_a_retry issue #1601 sightings 2" <<<"$OUT" \
+  || fail "flaky text line: [$OUT]"
+grep -q "^flaky: fiber-core doors" <<<"$OUT" && fail "1-sighting flaky has no text line: [$OUT]"
+grep -q "no repeats" <<<"$OUT" && fail "a flaky finding is not quiet: [$OUT]"
+# one sighting: listed in JSON, exit 0 when nothing else, no text line
+setup flaky1
+run_friction --json
+[ "$CODE" = "0" ] || fail "1-sighting flaky exits 0 (got $CODE): [$OUT]"
+[ "$(jget "[(f['test'], f['sightings']) for f in d['flaky']]")" = "[('fiber-core doors::slow', 1)]" ] \
+  || fail "1-sighting listed: [$OUT]"
+setup flaky1
+run_friction
+[ "$CODE" = "0" ] || fail "1-sighting text exits 0 (got $CODE): [$OUT]"
+grep -q "no repeats" <<<"$OUT" || fail "1-sighting quiet line: [$OUT]"
+grep -q "^flaky:" <<<"$OUT" && fail "1-sighting no text line: [$OUT]"
+# page 1 is full of old matches; the recent two-sighting issue on page 2 is listed
+setup flakypage
+run_friction --json
+[ "$CODE" = "1" ] || fail "flaky page 2 exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "[(f['test'], f['issue'], f['sightings']) for f in d['flaky']]")" = \
+  "[('fiber-core late::one', 1701, 2)]" ] || fail "flaky page 2 listed: [$OUT]"
+[ "$(grep -c 'Flaky' "$FAKE_GH_LOG")" = "2" ] || fail "two flaky pages: [$(cat "$FAKE_GH_LOG")]"
+grep -q 'updated:>=2026-10-08T18:30:00Z' "$FAKE_GH_LOG" || fail "cutoff in query: [$(cat "$FAKE_GH_LOG")]"
+# the flaky search failing is exit 2
+setup onelane
+echo "HTTP 401 Unauthorized" >"$T/fail-flaky"
+run_friction --json
+[ "$CODE" = "2" ] || fail "flaky search failure exits 2 (got $CODE): [$OUT]"
 
 # --- exits: 2 on usage and on listing failures, state still written ---
 OUT="$(python3 "$FRICTION" --since 24h 2>"$T/stderr.txt")"; CODE=$?

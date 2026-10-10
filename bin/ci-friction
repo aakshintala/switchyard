@@ -14,8 +14,11 @@
 # design[] counts every other class except missed-mutant and other.
 #
 # An issue search runs once per new test name; a cached open issue is re-read
-# when its test is sighted again. Exit codes: 0 none, 1 a repeat or a
-# recurrence after close, 2 error. With --json only JSON is printed.
+# when its test is sighted again. One uncached search lists the open
+# "Flaky test: <test>" issues (retry-passed flakes); a flake with 2+ sightings
+# (the issue's comments plus one) counts as a finding. Exit codes: 0 none, 1 a
+# repeat, a recurrence after close, or a flaky finding, 2 error. With --json
+# only JSON is printed.
 # CI_FRICTION_NOW (ISO UTC) pins "now"; it exists for tests only.
 import json, os, re, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
@@ -44,6 +47,7 @@ except ValueError:
 SERVER_ERR = re.compile(r"HTTP 5\d\d")
 RATE_LIMIT = re.compile(r"rate limit exceeded", re.I)  # gh puts "(HTTP 403)" last
 NO_ISSUE_TTL = timedelta(hours=6)  # a no-issue lookup is retried after this
+FLAKY_PREFIX = "Flaky test: "  # title prefix of the issues flake_report files
 USAGE = ("usage: ci-friction --repo owner/name [--since 24h] [--state PATH] "
          "[--min-lanes 2] [--json]")
 
@@ -563,6 +567,25 @@ def main(argv):
                                  "lanes": after,
                                  "last_seen": max(s[2] for s in seen[key])})
 
+    # open "Flaky test: <binary> <test>" issues filed by flake_report: one search per run, no cache
+    flaky = []
+    try:
+        found = gh_paged("search/issues?q=repo:%s+is:issue+is:open+in:title+\"Flaky+test:\""
+                         "+updated:>=%s" % (repo, iso(cutoff)), "items")
+    except Fatal as e:
+        print("ci-friction: %s" % e, file=sys.stderr)
+        ok = False
+        found = []
+    for it in found:
+        title = it.get("title") or ""
+        upd = parse_ts(it.get("updated_at") or "")
+        if not title.startswith(FLAKY_PREFIX) or not upd or upd < cutoff:
+            continue
+        flaky.append({"test": title[len(FLAKY_PREFIX):], "issue": it.get("number"),
+                      "sightings": 1 + int(it.get("comments") or 0)})
+    flaky.sort(key=lambda f: f["test"])
+    flaky_hot = [f for f in flaky if f["sightings"] >= 2]
+
     design_out = [{"cause": c, "count": n, "lanes": sorted(ls)}
                   for c, (n, ls) in sorted(design.items(), key=lambda kv: (-kv[1][0], kv[0]))]
 
@@ -579,9 +602,10 @@ def main(argv):
         return 2
     if want_json:
         print(json.dumps({"since": iso(cutoff), "repeats": repeats,
-                          "recurred_after_close": recurred, "design": design_out}))
-        return 1 if (repeats or recurred) else 0
-    if not repeats and not recurred:
+                          "recurred_after_close": recurred, "design": design_out,
+                          "flaky": flaky}))
+        return 1 if (repeats or recurred or flaky_hot) else 0
+    if not repeats and not recurred and not flaky_hot:
         print("ci-friction %s: no repeats in the last %s" % (repo, since or "24h"))
         return 0
     for rp in repeats:
@@ -593,6 +617,8 @@ def main(argv):
         if not any(r["test"] == rc["test"] for r in repeats):
             print("recurred: %s after #%s closed %s lanes %s" % (
                 rc["test"], rc["issue"], rc["closed_at"], ",".join(rc["lanes"])))
+    for f in flaky_hot:
+        print("flaky: %s issue #%s sightings %s" % (f["test"], f["issue"], f["sightings"]))
     return 1
 
 
