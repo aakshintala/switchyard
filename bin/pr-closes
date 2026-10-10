@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # pr-closes: before a merge, check that a PR closes exactly the issues it means to.
 # Usage: pr-closes <pr> [--repo OWNER/NAME]
-#        pr-closes --check   (reads `gh pr view --json title,body,commits` JSON on stdin)
+#        pr-closes --check   (reads `gh pr view --json number,title,body,commits` JSON on stdin)
+#        A keyword naming the PR's own number (#N, or OWNER/REPO#N for its own repo)
+#        is ignored, since GitHub closes issues only.
 #        Scans the PR title, body and every commit message for a GitHub closing
 #        keyword (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved,
 #        any case, optional colon) before #N or OWNER/REPO#N. The issues the PR
@@ -32,6 +34,7 @@ SCAN='
      or any(.commits[]; type != "object" or ([.oid, .messageHeadline, .messageBody]
                                             | map(type) != ["string", "string", "string"]))
   then error("not PR JSON") else . end
+  | . as $pr | ($pr.number // "" | tostring) as $num
   | [.body | clean | split("\n")[]
      | capture("^\\s*resolves:?[ \\t]*" + ref; "i") | .ref | ascii_downcase] as $resolves
   | (["title", .title], ["body", .body],
@@ -41,15 +44,17 @@ SCAN='
   | .[1] | clean
   | match("(?<![A-Za-z0-9_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\\s*" + ref; "gi")
   | (.captures[] | select(.name == "ref") | .string | ascii_downcase) as $ref
+  | select($ref != "#" + $num and $ref != ($repo | ascii_downcase) + "#" + $num)
   | [($resolves | index([$ref]) != null), $ref, $label, .string] | @tsv
 '
 
-# check: reads PR JSON on stdin, prints the report, returns 0, 1 or 2.
+# check [OWNER/NAME]: reads PR JSON on stdin, prints the report, returns 0, 1 or 2.
+# With no repo (--check), OWNER/REPO#N refs are never treated as the PR's own.
 check() {
-  local json rows
+  local json rows repo="${1:-}"
   json="$(cat)"
   [ -n "$json" ] || { echo "pr-closes: no PR JSON on stdin" >&2; return 2; }
-  rows="$(jq -r "$SCAN" <<<"$json" 2>/dev/null)" \
+  rows="$(jq -r --arg repo "$repo" "$SCAN" <<<"$json" 2>/dev/null)" \
     || { echo "pr-closes: input is not PR JSON" >&2; return 2; }
 
   local ok ref label text stray=0 total=0
@@ -89,6 +94,6 @@ if [ -z "$repo" ]; then
     || { echo "pr-closes: cannot find the repo; pass --repo OWNER/NAME" >&2; exit 2; }
 fi
 
-json="$(gh pr view "$pr" --repo "$repo" --json title,body,commits)" \
+json="$(gh pr view "$pr" --repo "$repo" --json number,title,body,commits)" \
   || { echo "pr-closes: cannot read PR $pr in $repo" >&2; exit 2; }
-printf '%s' "$json" | check
+printf '%s' "$json" | check "$repo"
