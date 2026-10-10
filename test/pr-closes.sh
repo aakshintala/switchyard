@@ -90,6 +90,36 @@ grep -q '^#5 commit 4444444' <<<"$out" || fail "keyword after SOH flagged: [$out
 check "$(pr_json 'Thing' 'Resolves #1' 5555555 'closes #8' '')"
 [ "$rc" = "1" ] || fail "headline closes #8 exits 1 (got $rc)"
 
+# a keyword naming the PR's own number is ignored (number 1895 in the JSON).
+check "$(pr_json 'Thing' 'Resolves #1' 6666666 'fix #1895' '' | jq -c '. + {number: 1895}')"
+[ "$rc" = "0" ] || fail "fix own #1895 exits 0 (got $rc: $out)"
+case "$out" in OK*) ;; *) fail "fix own #1895 prints OK: [$out]" ;; esac
+# in --check there is no repo, so a ref to another repo's #1895 still counts.
+check "$(pr_json 'Thing' 'Resolves #1' 6666666 'fix other/repo#1895' '' | jq -c '. + {number: 1895}')"
+[ "$rc" = "1" ] || fail "fix other/repo#1895 exits 1 (got $rc: $out)"
+# without number in the JSON nothing is skipped.
+check "$(pr_json 'Thing' 'Resolves #1' 6666666 'fix #1895' '')"
+[ "$rc" = "1" ] || fail "fix #1895 without number exits 1 (got $rc: $out)"
+
+# full mode, with gh mocked: own repo (case-insensitive) is skipped, another repo is flagged.
+(
+  gh() {
+    case "$1" in
+      pr) printf '%s' "$MOCK_PR" ;;
+      *) return 1 ;;
+    esac
+  }
+  export -f gh
+  MOCK_PR="$(pr_json 'Thing' $'Resolves #1\nFixes O/R#1895' | jq -c '. + {number: 1895}')"
+  export MOCK_PR
+  fout="$(bash "$PRC" 1895 --repo o/r 2>&1)"; frc=$?
+  [ "$frc" = "0" ] || fail "own repo O/R#1895 is ignored in full mode (got $frc: $fout)"
+  MOCK_PR="$(pr_json 'Thing' $'Resolves #1\nFixes other/repo#1895' | jq -c '. + {number: 1895}')"
+  export MOCK_PR
+  fout="$(bash "$PRC" 1895 --repo o/r 2>&1)"; frc=$?
+  [ "$frc" = "1" ] || fail "other/repo#1895 is flagged in full mode (got $frc: $fout)"
+) || exit 1
+
 # input that is not PR JSON exits 2
 printf '{}' | bash "$PRC" --check >/dev/null 2>&1; [ "$?" = "2" ] || fail "{} exits 2"
 printf '' | bash "$PRC" --check >/dev/null 2>&1; [ "$?" = "2" ] || fail "empty stdin exits 2"
