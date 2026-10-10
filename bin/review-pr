@@ -14,7 +14,8 @@
 #   review-pr collect <job-id>...
 #     posts the one PR comment with the patch-id, prints the verdict digest,
 #     removes the worktrees, and exits 1 when any job is unfinished or wrote a
-#     verdict outside the shared vocabulary below.
+#     verdict outside the shared vocabulary below. Collecting an already-collected
+#     job id reprints its verdict and finding lines from the job record and posts nothing.
 #   review-pr run <same args as start>
 #     start, then delegate watch on every job id start launched, then collect on
 #     those ids. Prints start's lines, then collect's output, and exits with
@@ -551,6 +552,28 @@ cmd_run() {
   cmd_collect ${started_ids[@]+"${started_ids[@]}"}
 }
 
+# reprint_collected JOB_ID...: an id with no state file but a job record was
+# collected before. Reprint its verdict and finding lines from the record, in
+# argument order. Posts and removes nothing.
+reprint_collected() {
+  for jid in "$@"; do
+    if [ -f "$state_dir/$jid" ] || [ ! -f "$jobs_dir/$jid.json" ]; then
+      continue
+    fi
+    printf 'COLLECTED %s %s: already posted to the PR; findings reprinted from the job record, nothing posted\n' "$jid" "$jobs_dir/$jid.json"
+    text="$(jq -r '.result.text // empty' "$jobs_dir/$jid.json" 2>/dev/null || true)"
+    while IFS= read -r line; do
+      norm="$(norm_line "$line")"
+      case "$norm" in
+        VERDICT*|FIX-*) printf '%s\n' "$line";;
+      esac
+      case "$line" in
+        P1\ *|P2\ *|P3\ *) printf '%s\n' "$line";;
+      esac
+    done <<<"$text"
+  done
+}
+
 cmd_collect() {
   [ $# -ge 1 ] || usage
 
@@ -580,10 +603,15 @@ cmd_collect() {
   id_list=()
   unknown_f="$tmp/unknown.txt"
   : >"$unknown_f"
+  recollect=0
   for jid in "$@"; do
     case "$jid" in ""|-*) usage;; esac
     sf="$state_dir/$jid"
     if [ ! -f "$sf" ]; then
+      if [ -f "$jobs_dir/$jid.json" ]; then
+        recollect=$((recollect + 1))
+        continue
+      fi
       printf 'UNFINISHED %s MISSING gate=none %s\n' "$jid" "$sf" >>"$unknown_f"
       continue
     fi
@@ -596,6 +624,14 @@ cmd_collect() {
     fi
     id_list[${#id_list[@]}]="$jid"
   done
+
+  if [ "$recollect" -gt 0 ]; then
+    reprint_collected "$@"
+    # Nothing left to post or remove: every id was collected before.
+    if [ "${#id_list[@]}" -eq 0 ] && [ ! -s "$unknown_f" ]; then
+      exit 0
+    fi
+  fi
 
   have_review=""; have_overbuild=""; have_verify=""
   for jid in ${id_list[@]+"${id_list[@]}"}; do

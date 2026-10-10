@@ -435,6 +435,28 @@ reset_state
 out="$(bash "$REVIEW" collect job-nope 2>/dev/null)" && fail "unknown id collect exits 1"
 grep -q "^UNFINISHED job-nope MISSING" <<<"$out" || fail "unknown id is UNFINISHED"
 
+# --- case: a second collect of collected ids reprints findings, posts nothing
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record review DONE "VERDICT standards: CHANGES
+P2 rename the helper
+VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "start exits 0"
+bash "$REVIEW" collect job-review job-overbuild >/dev/null 2>&1 || fail "first collect exits 0"
+rm -f "$T/state/comment-pr.txt"
+out="$(bash "$REVIEW" collect job-review job-overbuild 2>/dev/null)" || fail "re-collect exits 0"
+[ "$(grep -c '^COLLECTED job-' <<<"$out")" = "2" ] || fail "re-collect prints a COLLECTED line for each id: [$out]"
+grep -q "^VERDICT standards: CHANGES$" <<<"$out" || fail "re-collect reprints the reviewer verdict"
+grep -q "^P2 rename the helper$" <<<"$out" || fail "re-collect reprints the P2 line"
+grep -q UNFINISHED <<<"$out" && fail "re-collect is not UNFINISHED"
+[ ! -e "$T/state/comment-pr.txt" ] || fail "re-collect makes no gh pr comment call"
+out="$(bash "$REVIEW" collect job-review job-overbuild job-nope 2>/dev/null)" && fail "re-collect with an unknown id exits 1"
+grep -q "^UNFINISHED job-nope MISSING" <<<"$out" || fail "unknown id beside collected ids is UNFINISHED"
+
 # --- case: verify mode runs one job with SINCE and FINDINGS filled
 reset_state
 printf 'ci\tpending\n' >"$T/checks.txt"
