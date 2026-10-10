@@ -1,0 +1,6 @@
+{"total_count": 4, "items": [
+  {"number": 1601, "state": "open", "title": "Flaky test: main::ci_flake_probe passes_only_on_a_retry", "updated_at": "2026-10-09T10:00:00Z", "comments": 1},
+  {"number": 1602, "state": "open", "title": "Flaky test: fiber-core doors::slow", "updated_at": "2026-10-09T11:00:00Z", "comments": 0},
+  {"number": 1603, "state": "open", "title": "Flaky test: fiber-core old::thing", "updated_at": "2026-10-01T00:00:00Z", "comments": 5},
+  {"number": 1604, "state": "open", "title": "Bug: Flaky test: fiber-core x::y", "updated_at": "2026-10-09T12:00:00Z", "comments": 3}
+]}
