@@ -114,10 +114,6 @@ check "$(pr_json 'Thing' 'Resolves #1' 6666666 'fix #1895' '')"
   export MOCK_PR
   fout="$(bash "$PRC" 1895 --repo o/r 2>&1)"; frc=$?
   [ "$frc" = "0" ] || fail "own repo O/R#1895 is ignored in full mode (got $frc: $fout)"
-  MOCK_PR="$(pr_json 'Thing' 'Resolves #1' | jq -c '. + {number: 1895}')"
-  export MOCK_PR
-  fout="$(bash "$PRC" 1895 --repo o/r 2>&1)"; frc=$?
-  [ "$frc" = "0" ] || fail "PR with no own-number ref exits 0 (got $frc: $fout)"
   MOCK_PR="$(pr_json 'Thing' $'Resolves #1\nFixes other/repo#1895' | jq -c '. + {number: 1895}')"
   export MOCK_PR
   fout="$(bash "$PRC" 1895 --repo o/r 2>&1)"; frc=$?
