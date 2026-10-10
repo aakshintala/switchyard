@@ -75,7 +75,10 @@ case "$path" in
     if [ -e "$T/fail-flaky" ] && [[ "$path" == *Flaky* ]]; then cat "$T/fail-flaky" >&2; exit 1; fi
     if [ -e "$T/once-ratelimit" ]; then rm -f "$T/once-ratelimit"; echo "gh: API rate limit exceeded for user ID 1. If you reach out to GitHub Support for help, please include your request ID. (HTTP 403)" >&2; exit 1; fi
     key="$(printf '%s' "$q" | sed -E 's/[^A-Za-z0-9]+/-/g')"
+    spage="$(printf '%s' "$path" | sed -nE 's/.*[?&]page=([0-9]+).*/\1/p')"
+    [ -n "$spage" ] || spage=1
     f="search/$key.json"
+    [ "$spage" = "1" ] || f="search/$key-p$spage.json"  # page 2+ has its own fixture, else empty
     if [ -e "$scen/$f" ]; then cat "$scen/$f"; else printf '{"total_count":0,"items":[]}'; fi;;
   *issues/*/events*)
     n="$(printf '%s' "$path" | sed -E 's/.*issues\/([0-9]+).*/\1/')"
@@ -366,6 +369,14 @@ run_friction
 [ "$CODE" = "0" ] || fail "1-sighting text exits 0 (got $CODE): [$OUT]"
 grep -q "no repeats" <<<"$OUT" || fail "1-sighting quiet line: [$OUT]"
 grep -q "^flaky:" <<<"$OUT" && fail "1-sighting no text line: [$OUT]"
+# page 1 is full of old matches; the recent two-sighting issue on page 2 is listed
+setup flakypage
+run_friction --json
+[ "$CODE" = "1" ] || fail "flaky page 2 exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "[(f['test'], f['issue'], f['sightings']) for f in d['flaky']]")" = \
+  "[('fiber-core late::one', 1701, 2)]" ] || fail "flaky page 2 listed: [$OUT]"
+[ "$(grep -c 'Flaky' "$FAKE_GH_LOG")" = "2" ] || fail "two flaky pages: [$(cat "$FAKE_GH_LOG")]"
+grep -q 'updated:>=2026-10-08T18:30:00Z' "$FAKE_GH_LOG" || fail "cutoff in query: [$(cat "$FAKE_GH_LOG")]"
 # the flaky search failing is exit 2
 setup onelane
 echo "HTTP 401 Unauthorized" >"$T/fail-flaky"

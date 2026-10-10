@@ -570,8 +570,8 @@ def main(argv):
     # open "Flaky test: <binary> <test>" issues filed by flake_report: one search per run, no cache
     flaky = []
     try:
-        found = json.loads(gh_api("search/issues?q=repo:%s+is:issue+is:open+in:title+\"Flaky+test:\""
-                                  "&per_page=100" % repo)).get("items", [])
+        found = gh_paged("search/issues?q=repo:%s+is:issue+is:open+in:title+\"Flaky+test:\""
+                         "+updated:>=%s" % (repo, iso(cutoff)), "items")
     except Fatal as e:
         print("ci-friction: %s" % e, file=sys.stderr)
         ok = False
