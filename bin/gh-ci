@@ -5,8 +5,8 @@
 #        gh-ci wait <pr> [--timeout <s>]
 # Exit codes: 0 ok, 1 failure, 2 usage, 3 merge conflict (snapshot and
 # watch-verified at once; wait after 30 s of DIRTY re-checks), 124 wait timeout.
-# Repo: --repo OWNER/NAME (any subcommand, any position) overrides GH_CI_REPO,
-# which overrides the current checkout's origin. With none of the three, exit 2.
+# Repo: --repo OWNER/NAME (any subcommand, any position), then GH_CI_REPO, then
+# origin's GitHub URL (no network call), then `gh repo view`. With none, exit 2.
 # GH_CI_INTERVAL the watch poll seconds (default 30).
 set -euo pipefail
 usage() {
@@ -374,8 +374,23 @@ if [ -n "$REPO_FLAG" ]; then
 elif [ -n "${GH_CI_REPO:-}" ]; then
   REPO="$GH_CI_REPO"
 else
-  REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
-  [ -n "$REPO" ] || { echo "gh-ci: no repo: pass --repo OWNER/NAME, set GH_CI_REPO, or run in a checkout whose origin is on GitHub" >&2; exit 2; }
+  # origin's GitHub URL first: no network call. gh repo view only when that fails.
+  origin="$(git remote get-url origin 2>/dev/null || true)"
+  last=""
+  if [[ "$origin" =~ ^(git@github\.com:|ssh://git@github\.com/|https://github\.com/)([^/]+)/([^/]+)$ ]]; then
+    REPO="${BASH_REMATCH[2]}/${BASH_REMATCH[3]%.git}"
+  else
+    REPO=""
+    if out="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>&1)"; then
+      REPO="$out"
+    else
+      last="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 || true)"
+    fi
+  fi
+  if [ -z "$REPO" ]; then
+    echo "gh-ci: no repo: pass --repo OWNER/NAME, set GH_CI_REPO, or run in a checkout whose origin is on GitHub${last:+ (gh: $last)}" >&2
+    exit 2
+  fi
 fi
 case "$cmd" in
   snapshot) cmd_snapshot "$@" ;;
