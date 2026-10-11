@@ -16,9 +16,12 @@
 # An issue search runs once per new test name; a cached open issue is re-read
 # when its test is sighted again. One uncached search lists the open
 # "Flaky test: <test>" issues (retry-passed flakes); a flake with 2+ sightings
-# (the issue's comments plus one) counts as a finding. Exit codes: 0 none, 1 a
-# repeat, a recurrence after close, or a flaky finding, 2 error. With --json
-# only JSON is printed.
+# (the issue's comments plus one) counts as a finding. Read-only: an open
+# "blocked" issue whose named blockers (a "## Blocked by" section's #N refs,
+# and "waits for #N" anywhere) are all closed is a stale-blocked finding; a
+# blocker whose lookup fails counts as open. Exit codes: 0 none, 1 a
+# repeat, a recurrence after close, a flaky finding, or a stale-blocked issue,
+# 2 error. With --json only JSON is printed.
 # CI_FRICTION_NOW (ISO UTC) pins "now"; it exists for tests only.
 import json, os, re, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
@@ -48,6 +51,11 @@ SERVER_ERR = re.compile(r"HTTP 5\d\d")
 RATE_LIMIT = re.compile(r"rate limit exceeded", re.I)  # gh puts "(HTTP 403)" last
 NO_ISSUE_TTL = timedelta(hours=6)  # a no-issue lookup is retried after this
 FLAKY_PREFIX = "Flaky test: "  # title prefix of the issues flake_report files
+# #N or owner/name#N; the lookbehind keeps a ref from starting inside a word or path
+REF = re.compile(r"(?<![\w./-])(?:([\w.-]+/[\w.-]+))?#(\d+)(?!\w)")
+# ATX heading: up to 3 leading spaces, 1-6 #, then text and optional closing #s
+HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+WAITS = re.compile(r"waits for\s+(?:([\w.-]+/[\w.-]+))?#(\d+)(?!\w)", re.I)
 USAGE = ("usage: ci-friction --repo owner/name [--since 24h] [--state PATH] "
          "[--min-lanes 2] [--json]")
 
@@ -277,6 +285,29 @@ def closing_commit(repo, number):
     if closer.get("__typename") == "PullRequest":
         return ((closer.get("mergeCommit") or {}).get("oid")) or None
     return closer.get("oid") or None
+
+
+def named_blockers(body, repo):
+    """[(display, repo, n)] for each blocker the body names, deduplicated.
+    A bare #N is in `repo`; owner/name#N is in owner/name."""
+    section, inside = [], False
+    for line in body.splitlines():
+        h = HEADING.match(line)
+        if h:
+            inside = (h.group(1) or "").strip().lower() == "blocked by"
+        elif inside:
+            section.append(line)
+    refs = [m for line in section for m in REF.finditer(line)]
+    refs += list(WAITS.finditer(body))
+    out, seen = [], set()
+    for m in refs:
+        other, n = m.group(1), int(m.group(2))
+        target = other or repo
+        if (target.lower(), n) in seen:
+            continue
+        seen.add((target.lower(), n))
+        out.append(("%s#%d" % (other, n) if other else "#%d" % n, target, n))
+    return out
 
 
 def load_state(path):
@@ -586,6 +617,37 @@ def main(argv):
     flaky.sort(key=lambda f: f["test"])
     flaky_hot = [f for f in flaky if f["sightings"] >= 2]
 
+    # blocked issues whose named blockers are all closed; nothing is cached or edited
+    try:
+        blocked = gh_paged("repos/%s/issues?state=open&labels=blocked" % repo, None)
+    except Fatal as e:
+        print("ci-friction: %s" % e, file=sys.stderr)
+        ok = False
+        blocked = []
+    closed = {}  # (repo, n) -> closed?, one lookup per blocker per run
+    stale = []
+    for it in blocked:
+        if not isinstance(it, dict) or it.get("pull_request"):
+            continue
+        refs = named_blockers(it.get("body") or "", repo)
+        if not refs:
+            continue
+        names = []
+        for display, target, n in refs:
+            if (target.lower(), n) not in closed:
+                try:
+                    got = json.loads(gh_api("repos/%s/issues/%d" % (target, n)))
+                    closed[(target.lower(), n)] = got.get("state") == "closed"
+                except (Fatal, ValueError, AttributeError) as e:
+                    print("ci-friction: %s (treated as open)" % e, file=sys.stderr)
+                    closed[(target.lower(), n)] = False
+            if not closed[(target.lower(), n)]:
+                break
+            names.append(display)
+        else:
+            stale.append({"issue": it.get("number"), "title": it.get("title"),
+                          "blockers": names})
+
     design_out = [{"cause": c, "count": n, "lanes": sorted(ls)}
                   for c, (n, ls) in sorted(design.items(), key=lambda kv: (-kv[1][0], kv[0]))]
 
@@ -603,9 +665,9 @@ def main(argv):
     if want_json:
         print(json.dumps({"since": iso(cutoff), "repeats": repeats,
                           "recurred_after_close": recurred, "design": design_out,
-                          "flaky": flaky}))
-        return 1 if (repeats or recurred or flaky_hot) else 0
-    if not repeats and not recurred and not flaky_hot:
+                          "flaky": flaky, "stale_blocked": stale}))
+        return 1 if (repeats or recurred or flaky_hot or stale) else 0
+    if not repeats and not recurred and not flaky_hot and not stale:
         print("ci-friction %s: no repeats in the last %s" % (repo, since or "24h"))
         return 0
     for rp in repeats:
@@ -619,6 +681,9 @@ def main(argv):
                 rc["test"], rc["issue"], rc["closed_at"], ",".join(rc["lanes"])))
     for f in flaky_hot:
         print("flaky: %s issue #%s sightings %s" % (f["test"], f["issue"], f["sightings"]))
+    for s_ in stale:
+        print("stale-blocked: issue #%s, blockers %s all closed"
+              % (s_["issue"], ", ".join(s_["blockers"])))
     return 1
 
 

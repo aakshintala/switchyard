@@ -1,0 +1,1 @@
+[{"number": 601, "title": "Indented heading opens the section", "state": "open", "body": "  ## Blocked by\n- #216\n"}, {"number": 602, "title": "Closing hashes on the heading", "state": "open", "body": "## Blocked by ##\n- #217\n"}, {"number": 603, "title": "Indented next heading ends the section", "state": "open", "body": "## Blocked by\n- #218\n  ## Notes\n- #219\n"}]

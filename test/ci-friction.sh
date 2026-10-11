@@ -88,9 +88,13 @@ case "$path" in
     if [ -e "$scen/events/$n-p$page.json" ]; then cat "$scen/events/$n-p$page.json";
     elif [ "$page" = "1" ] && [ -e "$scen/events/$n.json" ]; then cat "$scen/events/$n.json";
     else printf '[]'; fi;;
+  *repos/*/issues\?*)
+    if [ -e "$scen/blocked.json" ]; then cat "$scen/blocked.json"; else printf '[]'; fi;;
   *repos/*/issues/*)
-    n="$(printf '%s' "$path" | sed -E 's/.*issues\/([0-9]+)[^0-9]*$/\1/')"
-    serve "issues/$n.json" "issues-$n";;
+    # the --repo fixtures are issues/<n>.json; other repos are issues/<owner>-<name>-<n>.json
+    set -- $(printf '%s' "$path" | sed -E 's/.*repos\/([^/]+)\/([^/]+)\/issues\/([0-9]+).*/\1 \2 \3/')
+    if [ "$1/$2" = "O/N" ]; then serve "issues/$3.json" "issues-$3"
+    else serve "issues/$1-$2-$3.json" "issues-$1-$2-$3"; fi;;
   *pulls\?*)
     br="$(printf '%s' "$path" | sed -E 's/.*head=[^:]+:([^&]+).*/\1/')"
     key="$(printf '%s' "$br" | sed -E 's/[^A-Za-z0-9]+/-/g')"
@@ -382,6 +386,50 @@ setup onelane
 echo "HTTP 401 Unauthorized" >"$T/fail-flaky"
 run_friction --json
 [ "$CODE" = "2" ] || fail "flaky search failure exits 2 (got $CODE): [$OUT]"
+
+# --- stale blocked: an open blocked issue whose named blockers are all closed ---
+# cases: 501 Blocked by two closed; 502 waits for; 503 one open; 412 shape with
+# an open owner-ruling ref and a cross-repo ref; 505 cross-repo closed while
+# --repo's #206 is open; 506 names no blocker; 507 a lookup that fails; 508 a PR
+setup stale
+run_friction --json
+[ "$CODE" = "1" ] || fail "stale exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "[(s['issue'], s['blockers']) for s in d['stale_blocked']]")" = \
+  "[(501, ['#216', '#217']), (502, ['#218']), (505, ['aakshintala/switchyard#206'])]" ] \
+  || fail "stale list: [$OUT]"
+[ "$(jget "d['stale_blocked'][0]['title']")" = "Two closed blockers under Blocked by" ] \
+  || fail "stale title: [$OUT]"
+# a blocker named by several issues is looked up once; the cross-repo ref never
+# touches --repo's own #206
+[ "$(grep -c 'issues/216$' "$FAKE_GH_LOG")" = "1" ] || fail "blocker looked up once: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'repos/O/N/issues/206$' "$FAKE_GH_LOG")" = "0" ] \
+  || fail "cross-repo ref not resolved against --repo: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'labels=blocked' "$FAKE_GH_LOG")" = "1" ] || fail "one blocked list: [$(cat "$FAKE_GH_LOG")]"
+# a failed lookup is treated as open (not flagged) and warned about
+grep -q "230" "$T/stderr.txt" || fail "failed lookup warned: [$(cat "$T/stderr.txt")]"
+setup stale
+run_friction
+grep -qx "stale-blocked: issue #501, blockers #216, #217 all closed" <<<"$OUT" \
+  || fail "stale text line: [$OUT]"
+grep -Eq "issue #(503|412|506|507|508) " <<<"$OUT" && fail "unflagged issue in text: [$OUT]"
+# none stale, other inputs clean: exit 0
+setup stale-none
+run_friction --json
+[ "$CODE" = "0" ] || fail "no stale exits 0 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "d['stale_blocked']")" = "[]" ] || fail "no stale list: [$OUT]"
+setup stale-none
+run_friction
+grep -q "no repeats" <<<"$OUT" || fail "no stale quiet line: [$OUT]"
+
+# --- ATX headings: up to 3 leading spaces, closing hashes, indented next heading ends the section ---
+# 601 indented "## Blocked by" opens; 602 "## Blocked by ##" opens; 603 an
+# indented "  ## Notes" ends the section, so its open #219 is not counted
+setup stale-indent
+run_friction --json
+[ "$CODE" = "1" ] || fail "stale-indent exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "[(s['issue'], s['blockers']) for s in d['stale_blocked']]")" = \
+  "[(601, ['#216']), (602, ['#217']), (603, ['#218'])]" ] \
+  || fail "ATX heading forms: [$OUT]"
 
 # --- exits: 2 on usage and on listing failures, state still written ---
 OUT="$(python3 "$FRICTION" --since 24h 2>"$T/stderr.txt")"; CODE=$?
