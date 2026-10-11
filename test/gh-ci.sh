@@ -401,13 +401,11 @@ grep -qx "head: unreadable timeout after 7s" <<<"$OUT" || fail "unreadable timeo
 reset_state
 touch "$T/state/not-found"
 set_heads "$A"
-set_checks '[{"bucket":"pass","name":"ci"}]'
 run_wait 7 --timeout 7
 [ "$CODE" = "1" ] || fail "not-found PR exits 1 at once (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
 [ ! -e "$T/state/sleeps.txt" ] || fail "not-found PR never sleeps: [$(tr '\n' ' ' <"$T/state/sleeps.txt")]"
 [ -z "$OUT" ] || fail "not-found PR prints no verdict: [$OUT]"
 grep -qx "PR 7 not found in O/N" "$T/stderr.txt" || fail "not-found line: [$(cat "$T/stderr.txt")]"
-rm -f "$T/state/not-found"
 
 # --- case: a failed recheck retries from the top; no pass before a readable recheck
 reset_state
