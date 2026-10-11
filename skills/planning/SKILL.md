@@ -50,13 +50,13 @@ Done when every section is filled under its own heading, every hit of the Files 
 
 ### 3. Verify
 
-Fill `briefs/verifier.md` with `PLAN=@<plan file>` and the base, and run it in a checkout of the base on a `strong` model from a different family than yours, or a `frontier` one when the plan's rung is `frontier`. For each line it returns, fix the plan or record a ruling. A core ruling still open parks the ticket (see `implement`).
+Fill `briefs/verifier.md` with `PLAN=@<plan file>` and the base, and run it in a checkout of the base on a `strong` model from a different family than yours, or a `frontier` one when the plan's rung is `frontier`. When a worker wrote the plan, its brief forbids delegating, so the session that started it runs the Verifier and hands each line back. For each line it returns, fix the plan or record a ruling. A core ruling still open parks the ticket (see `implement`).
 
 Done when the Verifier says `PLAN OK`, or every line it returned is answered in the plan.
 
 ### 4. Post
 
-Post the plan with `~/.agents/bin/post-plan <issue> <plan file> --repo <owner/name>`. It splits a plan over GitHub's comment limit at its `## ` headings into several comments, and prints one URL per part. When the plan changes, run it again: it edits its own comments in place (GitHub keeps their history), adds or deletes parts as the size needs. A section over the limit exits 1 and posts nothing: split that section.
+Post the plan with `~/.agents/bin/post-plan <issue> <plan file> --repo <owner/name>`. It splits a plan over GitHub's comment limit at its `## ` headings into several comments, and prints one URL per part. When the plan changes, run it again: it edits its own comments in place (GitHub keeps their history), adds or deletes parts as the size needs. A section over the limit exits 1 and posts nothing: split that section. For one part of a split ticket, add `--part <label>` (e.g. `--part P3`): each part's plan then keeps its own comments, and a part never edits or deletes another's.
 
 Done when `post-plan` exits 0 with the current plan.
 

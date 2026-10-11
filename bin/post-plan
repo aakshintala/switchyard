@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # post-plan: post a plan file to an issue as one comment per part.
-# Usage: post-plan <issue> <plan-file> [--repo OWNER/NAME]
+# Usage: post-plan <issue> <plan-file> [--repo OWNER/NAME] [--part LABEL]
 #        post-plan -h | --help
 #        Splits the plan into parts of at most MAX_PART (60000) characters
-#        each, including the part's `<!-- post-plan i/n -->` header line.
+#        each, including the part's header line: `<!-- post-plan i/n -->`,
+#        or `<!-- post-plan LABEL i/n -->` with --part LABEL (LABEL matches
+#        ^[A-Za-z0-9._-]+$; anything else is bad usage). Use --part when
+#        several plans for one issue (one per ticket part) must not
+#        overwrite each other.
 #        Cuts only before lines starting with `## ` and packs as many whole
 #        sections as fit into each part, in order; text before the first
 #        `## ` belongs to the first part. A section that alone exceeds the
-#        limit names its heading on stderr and nothing is posted. Comments
-#        on the issue whose body starts with `<!-- post-plan ` and whose
-#        author is the current user are reused oldest-first: part i edits
-#        the i-th in place, each extra part creates a comment, and each
-#        leftover marked comment is deleted. Prints one comment URL
+#        limit names its heading on stderr and nothing is posted. Reusable
+#        comments are those on the issue by the current user whose body
+#        starts with this run's header form: `<!-- post-plan i/n -->` for an
+#        unlabelled run, or `<!-- post-plan LABEL ` for --part LABEL. Those
+#        are reused oldest-first: part i edits the i-th in place, each extra
+#        part creates a comment, and each leftover is deleted. Other plans
+#        on the issue are never touched. Prints one comment URL
 #        (html_url) per part. Without --repo, the repo comes from
 #        `gh repo view`. Exits 0 on success, 1 on an oversized section or a
 #        failed `gh` call, 2 on bad usage or an unreadable plan file.
@@ -21,7 +27,7 @@ set -euo pipefail
 MAX_PART=60000
 
 usage_text() {
-  echo "usage: post-plan <issue> <plan-file> [--repo OWNER/NAME]"
+  echo "usage: post-plan <issue> <plan-file> [--repo OWNER/NAME] [--part LABEL]"
   echo "       post-plan -h | --help"
 }
 
@@ -38,6 +44,12 @@ Post PLAN-FILE to ISSUE as one comment per part, reusing this script's own
 prior comments oldest-first: edit in place, create the extras, delete the
 leftovers. Each part holds at most 60000 characters including its
 <!-- post-plan i/n --> header line, cut only before ## headings.
+
+With --part LABEL the header is <!-- post-plan LABEL i/n -->, and only
+comments with that label are reused or deleted, so a plan for another part
+of the same ticket is left alone. LABEL may hold only letters, digits, dot,
+underscore and dash.
+
 Exits 0 on success, 1 on an oversized section or a failed gh call, 2 on
 bad usage or an unreadable plan file.
 EOF
@@ -53,9 +65,15 @@ fi
 issue="$1"; plan="$2"; shift 2
 case "$issue" in ''|*[!0-9]*) usage ;; esac
 repo=""
+part=""
+label_re='^[A-Za-z0-9._-]+$'
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2 ;;
+    --part)
+      [ $# -ge 2 ] || usage
+      [[ "$2" =~ $label_re ]] || usage
+      part="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -123,10 +141,19 @@ pack() {
   echo "$nparts"
 }
 
+# header I N: the header line of part I of N, with the --part label if any.
+header() {
+  if [ -n "$part" ]; then
+    printf '<!-- post-plan %s %d/%d -->' "$part" "$1" "$2"
+  else
+    printf '<!-- post-plan %d/%d -->' "$1" "$2"
+  fi
+}
+
 # The header grows with the part count, so re-pack until it settles.
 n=1
 while :; do
-  marker="$(printf '<!-- post-plan %d/%d -->' "$n" "$n")"
+  marker="$(header "$n" "$n")"
   budget=$((MAX_PART - ${#marker} - 1))
   newn="$(pack "$budget")"
   if [ "$newn" -eq "$n" ]; then break; fi
@@ -142,8 +169,8 @@ me="$(gh api user --jq .login)" \
 [ -n "$me" ] || { echo "post-plan: cannot read the current GitHub user" >&2; exit 1; }
 comments="$(gh api "repos/$repo/issues/$issue/comments" --paginate)" \
   || { echo "post-plan: cannot list comments on $repo issue $issue" >&2; exit 1; }
-jq -r --arg me "$me" \
-  '[sort_by(.id)[] | select(((.body // "") | startswith("<!-- post-plan ")) and (.user.login == $me)) | .id] | .[]' \
+jq -r --arg me "$me" --arg part "$part" \
+  '[sort_by(.id)[] | select(.user.login == $me and ((.body // "") as $b | if $part == "" then ($b | test("^<!-- post-plan [0-9]+/[0-9]+ -->")) else ($b | startswith("<!-- post-plan " + $part + " ")) end)) | .id] | .[]' \
   <<<"$comments" >"$tmp/ids.txt" \
   || { echo "post-plan: cannot read the issue comments" >&2; exit 1; }
 total_ids="$(wc -l <"$tmp/ids.txt" | tr -d ' ')"
@@ -151,7 +178,7 @@ total_ids="$(wc -l <"$tmp/ids.txt" | tr -d ' ')"
 i=1
 while [ "$i" -le "$n" ]; do
   body="$tmp/body-$i.md"
-  printf '%s\n' "<!-- post-plan $i/$n -->" >"$body"
+  printf '%s\n' "$(header "$i" "$n")" >"$body"
   cat "$(partfile "$i")" >>"$body"
   if [ "$i" -le "$total_ids" ]; then
     id="$(sed -n "${i}p" "$tmp/ids.txt")"

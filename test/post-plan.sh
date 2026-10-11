@@ -222,4 +222,52 @@ bash "$POST" -h >"$T/stdout.txt" 2>"$T/stderr.txt"; rc=$?
 run_post 7 "$T/missing.md" --repo "$REPO"
 [ "$rc" = "2" ] || fail "unreadable plan file exits 2 (got $rc)"
 
+# --- case: --part edits only its own labelled comment, never the unlabelled one
+reset_state
+cat >"$T/comments.json" <<'EOF'
+[
+  {"id":401,"body":"<!-- post-plan 1/1 -->\nold unlabelled","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/401"},
+  {"id":402,"body":"<!-- post-plan P2 1/1 -->\nold part two","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/402"}
+]
+EOF
+run_post 7 "$T/plan1.md" --repo "$REPO" --part P2
+[ "$rc" = "0" ] || fail "--part P2 exits 0 (got $rc: $(cat "$T/stderr.txt"))"
+[ "$(sed -n '1p' "$T/patched-402.md")" = "<!-- post-plan P2 1/1 -->" ] || fail "--part P2 edits the P2 comment with a P2 header"
+[ ! -e "$T/patched-401.md" ] || fail "--part P2 does not edit the unlabelled comment"
+[ ! -e "$T/deleted-401" ] || fail "--part P2 does not delete the unlabelled comment"
+[ ! -e "$T/created-1.md" ] || fail "--part P2 creates nothing when its comment is reused"
+
+# --- case: an unlabelled run never touches a labelled comment
+reset_state
+cat >"$T/comments.json" <<'EOF'
+[
+  {"id":411,"body":"<!-- post-plan P1 1/1 -->\nold part one","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/411"}
+]
+EOF
+run_post 7 "$T/plan1.md" --repo "$REPO"
+[ "$rc" = "0" ] || fail "unlabelled run exits 0 (got $rc: $(cat "$T/stderr.txt"))"
+[ "$(sed -n '1p' "$T/created-1.md")" = "<!-- post-plan 1/1 -->" ] || fail "unlabelled run creates a comment with an unlabelled header"
+[ ! -e "$T/patched-411.md" ] || fail "unlabelled run does not edit a labelled comment"
+[ ! -e "$T/deleted-411" ] || fail "unlabelled run does not delete a labelled comment"
+
+# --- case: --part deletes its extra labelled comments, edits the oldest
+reset_state
+cat >"$T/comments.json" <<'EOF'
+[
+  {"id":421,"body":"<!-- post-plan P1 1/2 -->\nold one","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/421"},
+  {"id":422,"body":"<!-- post-plan P1 2/2 -->\nold two","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/422"}
+]
+EOF
+run_post 7 "$T/plan1.md" --repo "$REPO" --part P1
+[ "$rc" = "0" ] || fail "--part P1 re-post exits 0 (got $rc: $(cat "$T/stderr.txt"))"
+[ "$(sed -n '1p' "$T/patched-421.md")" = "<!-- post-plan P1 1/1 -->" ] || fail "--part P1 edits the oldest P1 comment"
+[ ! -e "$T/patched-422.md" ] || fail "--part P1 does not edit the second P1 comment"
+[ -e "$T/deleted-422" ] || fail "--part P1 deletes the second P1 comment"
+
+# --- case: a bad --part label is bad usage and makes no gh calls
+reset_state
+run_post 7 "$T/plan1.md" --repo "$REPO" --part 'bad label'
+[ "$rc" = "2" ] || fail "--part with a space exits 2 (got $rc)"
+[ ! -e "$T/calls.log" ] || fail "bad --part makes no gh calls"
+
 echo "post-plan: all cases passed"
