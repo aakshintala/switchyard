@@ -257,6 +257,8 @@ head_checks() {
 # only after the same head reads DIRTY for 30 s of 5 s polls (GitHub
 # recomputes mergeability late after a push), or once the timeout budget
 # is spent while DIRTY.
+# An unreadable head (a failed API read) is pending: the wait sleeps and reads
+# again, and times out with 124 if the head stays unreadable.
 # On a draft PR (isDraft read once at the start), the base branch's
 # required names are skipped and the checks call drops --required: the
 # wait settles on the checks the head actually has, an empty list stays
@@ -292,7 +294,15 @@ cmd_wait() {
     echo "gh-ci: cannot read required checks; judging every check on the head" >&2
   fi
   while true; do
-    read -r head state < <(head_state "$pr") || return 1
+    if ! read -r head state < <(head_state "$pr"); then
+      if [ "$slept" -ge "$timeout" ]; then
+        echo "head: unreadable timeout after ${timeout}s"
+        return 124
+      fi
+      sleep "$interval"
+      slept=$((slept + interval))
+      continue
+    fi
     if [ "$state" = "DIRTY" ]; then
       [ "$head" = "$dirty_head" ] || { dirty_head="$head"; dirty_for=0; }
       if [ "$dirty_for" -ge 30 ] || [ "$slept" -ge "$timeout" ]; then
@@ -335,7 +345,15 @@ cmd_wait() {
       slept=$((slept + interval))
       continue
     fi
-    read -r head2 state2 < <(head_state "$pr") || return 1
+    if ! read -r head2 state2 < <(head_state "$pr"); then
+      if [ "$slept" -ge "$timeout" ]; then
+        echo "head: unreadable timeout after ${timeout}s"
+        return 124
+      fi
+      sleep "$interval"
+      slept=$((slept + interval))
+      continue
+    fi
     if [ "$head2" != "$head" ] || [ "$state2" = "DIRTY" ]; then
       continue
     fi
