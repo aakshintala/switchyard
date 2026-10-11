@@ -52,7 +52,7 @@ Done when every section is filled under its own heading, every hit of the Files 
 
 ### 3. Verify
 
-Fill `briefs/verifier.md` with `PLAN=@<plan file>`, `ISSUE`, `REPO` and `BASE` (it takes no `SPEC` or `WORKFLOW_DOC`), and run it in a checkout of the base on a `strong` model from a different family than yours, or a `frontier` one when the plan's rung is `frontier`. When a worker wrote the plan, its brief forbids delegating, so the session that started it runs the Verifier and hands each line back. For each line it returns, fix the plan or record a ruling. A line saying a ruling contradicts the ticket or a doc is a `core` item: park the ticket at once, without a revision round. A core ruling still open parks the ticket (see `implement`).
+Fill `briefs/verifier.md` with `PLAN=@<plan file>`, `ISSUE`, `REPO` and `BASE` (it takes no `SPEC` or `WORKFLOW_DOC`), and run it in a checkout of the base on a `strong` model from a different family than yours, or a `frontier` one when the plan's rung is `frontier`. When a worker wrote the plan, its brief forbids delegating, so the session that started it runs the Verifier and hands each line back. For each line it returns, fix the plan or record a ruling. A line saying a ruling contradicts the ticket or a doc, or invents behaviour a person sees where the doc is silent, is a `core` item: park the ticket at once, without a revision round. A core ruling still open parks the ticket (see `implement`).
 
 Every answer is an edit the Verifier hasn't seen, so run it again on the revised plan. A plan that hasn't passed when the workflow's round limit runs out parks the ticket, with the open lines as its question.
 
