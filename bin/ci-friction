@@ -53,6 +53,8 @@ NO_ISSUE_TTL = timedelta(hours=6)  # a no-issue lookup is retried after this
 FLAKY_PREFIX = "Flaky test: "  # title prefix of the issues flake_report files
 # #N or owner/name#N; the lookbehind keeps a ref from starting inside a word or path
 REF = re.compile(r"(?<![\w./-])(?:([\w.-]+/[\w.-]+))?#(\d+)(?!\w)")
+# ATX heading: up to 3 leading spaces, 1-6 #, then text and optional closing #s
+HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
 WAITS = re.compile(r"waits for\s+(?:([\w.-]+/[\w.-]+))?#(\d+)(?!\w)", re.I)
 USAGE = ("usage: ci-friction --repo owner/name [--since 24h] [--state PATH] "
          "[--min-lanes 2] [--json]")
@@ -290,8 +292,9 @@ def named_blockers(body, repo):
     A bare #N is in `repo`; owner/name#N is in owner/name."""
     section, inside = [], False
     for line in body.splitlines():
-        if re.match(r"#+\s", line):
-            inside = re.match(r"#+\s+blocked by\s*$", line, re.I) is not None
+        h = HEADING.match(line)
+        if h:
+            inside = (h.group(1) or "").strip().lower() == "blocked by"
         elif inside:
             section.append(line)
     refs = [m for line in section for m in REF.finditer(line)]

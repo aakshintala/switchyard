@@ -421,6 +421,16 @@ setup stale-none
 run_friction
 grep -q "no repeats" <<<"$OUT" || fail "no stale quiet line: [$OUT]"
 
+# --- ATX headings: up to 3 leading spaces, closing hashes, indented next heading ends the section ---
+# 601 indented "## Blocked by" opens; 602 "## Blocked by ##" opens; 603 an
+# indented "  ## Notes" ends the section, so its open #219 is not counted
+setup stale-indent
+run_friction --json
+[ "$CODE" = "1" ] || fail "stale-indent exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "[(s['issue'], s['blockers']) for s in d['stale_blocked']]")" = \
+  "[(601, ['#216']), (602, ['#217']), (603, ['#218'])]" ] \
+  || fail "ATX heading forms: [$OUT]"
+
 # --- exits: 2 on usage and on listing failures, state still written ---
 OUT="$(python3 "$FRICTION" --since 24h 2>"$T/stderr.txt")"; CODE=$?
 [ "$CODE" = "2" ] || fail "missing repo exits 2 (got $CODE)"
