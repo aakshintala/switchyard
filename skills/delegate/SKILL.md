@@ -27,6 +27,8 @@ At session start, propose a pool per rung from `delegate models` and `~/.agents/
 
 A provider's headroom is its remaining quota on its tightest window (session, weekly or monthly): the lowest percent on its line from `~/.agents/bin/quota`. Map providers by backend or prefix: the `cursor` backend, `opencode-go/*`, `claude-*`, and `openai-codex/*`.
 
+Mechanical jobs (rebase conflicts and compile fixes, formatting and lint fixes, mutant-killing tests, renames, moves, repeated edits) take the cheapest `standard` model; when it fails, the next cheapest. A Claude model that reviews, verifies or diagnoses runs at `:medium`, and `:high` only after it fails twice on one finding. A diagnosis reports the cause and its evidence, and leaves the fix to a lane.
+
 Escalation: when a model fails, go up one rung. When a `frontier` model fails, stop and ask the owner. Never escalate to a model with no rung.
 
 Review rule: review with a model from a different family than the implementer's, at the same rung or higher. Family means the model's maker, such as Anthropic, OpenAI, xAI or Cursor, not its backend or provider.
@@ -39,7 +41,7 @@ Every brief carries exactly one of these lines, verbatim:
 - Sub-orchestrator: "You may delegate through `delegate`; workers you start must not delegate
   further."
 
-A brief without one is incomplete.
+A brief without one is incomplete. A worker brief with a gate also carries, verbatim: "Run the gate in the foreground. If it is too slow for one tool call, run the narrowest affected test set in the foreground and leave the full gate to delegate's own gate at job end. Run every process in the foreground."
 
 ## Running
 
@@ -57,14 +59,14 @@ Every job can write, so a read task says "do not edit" in its brief, the record'
 
 **Write the gate as a shell command** that `/bin/sh -c` runs: an English postcondition is a
 syntax error, and nothing is checked. Make it the next consumer's first action: if a packer
-feeds a runner, the gate runs the runner. A gate that greps for a file is not a gate. Read
+feeds a runner, the gate runs the runner. A gate that greps for a file is not a gate. Until switchyard #323 ships, `gateResult.outputTail` keeps only the tail, so write a gate whose early lines matter (a test's panic) as `<cmd> > <log> 2>&1; rc=$?; tail -60 <log>; exit $rc`. Read
 `result.gateResult` in the record, and rerun the check yourself when `passed` is false.
 
 `delegate resume <id>` takes the new prompt on stdin and prints the new job id. `--model` must
 stay on the same backend. It adds `supersededBy` to the old record. A `CANCELLED`, `STALLED` or
 `ERROR` record with a session id can be resumed; it exits 2 for a `RUNNING` job or a record with
 no session id. Cursor, pi and claude were verified (2026-10-04) to resume a session cancelled
-mid-turn. Answer `NEEDS_CONTEXT` with it.
+mid-turn. Answer `NEEDS_CONTEXT` with it. A resumed lane whose `result.changeSet.newCommits` comes back empty committed nothing: start a fresh job.
 
 `--tool-idle-ms` widens how long a running tool may stay silent before the idle watchdog
 kills the job (default 1800000, 30 min; a model silent between tools gets 300000). It also
