@@ -58,6 +58,8 @@ gh() (
         [ ! -e "$T/state/view-fail" ] || { echo "gh: API rate limit exceeded (HTTP 403)" >&2; exit 1; }
         h="$(head -1 "$T/state/heads.txt")"; m=CLEAN
         case "$jq" in *head*)
+          # a not-found state file makes the head read fail as a wrong PR number does
+          [ ! -e "$T/state/not-found" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
           # a FAIL line makes that head read fail once, as a network blip does
           if [ "$(head -1 "$T/state/heads.txt")" = FAIL ]; then
             advance "$T/state/heads.txt" >/dev/null
@@ -134,7 +136,7 @@ export -f gh sleep
 reset_state() {
   rm -f "$T/state/sleeps.txt" "$T/state/gh-args.txt" "$T/state/banned.txt" "$T/state/merge-state.txt" "$T/state/view-fail"
   rm -f "$T/state/heads.txt" "$T/state/checks.txt" "$T/state/runs.txt" "$T/state/rules" "$T/state/rules-fail" "$T/state/classic" "$T/state/draft"
-  rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail"
+  rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail" "$T/state/not-found"
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
   : >"$T/state/gh-args.txt"
 }
@@ -394,6 +396,16 @@ run_wait 7 --timeout 7
 [ "$CODE" = "124" ] || fail "unreadable head times out with 124 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
 grep -qx "head: unreadable timeout after 7s" <<<"$OUT" || fail "unreadable timeout line: [$OUT]"
 ! grep -q "CI: " <<<"$OUT" || fail "unreadable head prints no verdict: [$OUT]"
+
+# --- case: a PR not found (HTTP 404 on the head read) fails at once with 1, no sleep
+reset_state
+touch "$T/state/not-found"
+set_heads "$A"
+run_wait 7 --timeout 7
+[ "$CODE" = "1" ] || fail "not-found PR exits 1 at once (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ ! -e "$T/state/sleeps.txt" ] || fail "not-found PR never sleeps: [$(tr '\n' ' ' <"$T/state/sleeps.txt")]"
+[ -z "$OUT" ] || fail "not-found PR prints no verdict: [$OUT]"
+grep -qx "PR 7 not found in O/N" "$T/stderr.txt" || fail "not-found line: [$(cat "$T/stderr.txt")]"
 
 # --- case: a failed recheck retries from the top; no pass before a readable recheck
 reset_state
