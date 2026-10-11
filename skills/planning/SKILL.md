@@ -38,7 +38,7 @@ A plan is a sketch of contracts and invariants, never code: a function body in a
 
 The quoted rules are what the Verifier, the reviews and any finding are judged against: a finding that contradicts a quoted rule is refuted by quoting it.
 
-A hazard you know of is settled in the plan: a ruling (what the code does about it), or an invariant under Interfaces, which the Verifier attacks and the lane keeps. Review Focus holds only places to look. A hazard you can't rule on is a `core` ruling, and parks the ticket.
+A hazard you know of is settled in the plan: a ruling (what the code does about it), or an invariant under Interfaces, which the Verifier attacks and the lane keeps. Review Focus holds only places to look. A hazard you can't rule on is a `core` ruling, and parks the ticket. So is a ruling that contradicts a ticket criterion or a doc sentence, or that invents behaviour a person sees where the doc is silent: the ticket and the docs belong to whoever triages them, so such a ruling parks the ticket before the Verifier runs and never ships in a plan.
 
 The rung is `standard` by default. It is `strong` when Interfaces or Review Focus involve state carried across calls, concurrency or timing, replay, or a quoted rule with several cases, and `frontier` for cross-cutting design.
 
@@ -52,9 +52,11 @@ Done when every section is filled under its own heading, every hit of the Files 
 
 ### 3. Verify
 
-Fill `briefs/verifier.md` with `PLAN=@<plan file>`, `ISSUE`, `REPO` and `BASE` (it takes no `SPEC` or `WORKFLOW_DOC`), and run it in a checkout of the base on a `strong` model from a different family than yours, or a `frontier` one when the plan's rung is `frontier`. When a worker wrote the plan, its brief forbids delegating, so the session that started it runs the Verifier and hands each line back. For each line it returns, fix the plan or record a ruling. A core ruling still open parks the ticket (see `implement`).
+Fill `briefs/verifier.md` with `PLAN=@<plan file>`, `ISSUE`, `REPO` and `BASE` (it takes no `SPEC` or `WORKFLOW_DOC`), and run it in a checkout of the base on a `strong` model from a different family than yours, or a `frontier` one when the plan's rung is `frontier`. When a worker wrote the plan, its brief forbids delegating, so the session that started it runs the Verifier and hands each line back. For each line it returns, fix the plan or record a ruling. A line saying a ruling contradicts the ticket or a doc, or invents behaviour a person sees where the doc is silent, is a `core` item: park the ticket at once, without a revision round. A core ruling still open parks the ticket (see `implement`).
 
-Done when the Verifier says `PLAN OK`, or every line it returned is answered in the plan.
+Every answer is an edit the Verifier hasn't seen, so run it again on the revised plan. A plan that hasn't passed when the workflow's round limit runs out parks the ticket, with the open lines as its question.
+
+Done when the Verifier says `PLAN OK` on the plan as it will be posted.
 
 ### 4. Post
 
