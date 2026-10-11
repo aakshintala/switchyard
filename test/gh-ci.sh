@@ -798,4 +798,32 @@ OUT="$(bash "$GHCI" snapshot 7 --repo nameonly 2>"$T/stderr.txt")"; CODE=$?
 [ "$CODE" = "2" ] || fail "--repo not OWNER/NAME exits 2 (got $CODE)"
 [ ! -s "$T/state/gh-args.txt" ] || fail "bad --repo makes no gh call"
 
+# --- cases: origin's GitHub URL names the repo with no gh repo view call.
+# --- Each form reaches the REST read for O/N, and gh is never asked to view.
+for url in git@github.com:O/N.git git@github.com:O/N ssh://git@github.com/O/N.git \
+  ssh://git@github.com/O/N https://github.com/O/N.git https://github.com/O/N; do
+  (
+    gh() { echo "gh $*" >>"$T/state/origin-args.txt"; exit 1; }
+    export -f gh
+    cd "$(mktemp -d)" || exit 1
+    git init -q . && git remote add origin "$url"
+    rm -f "$T/state/origin-args.txt"
+    env -u GH_CI_REPO bash "$GHCI" snapshot 7 >/dev/null 2>&1 || true
+    grep -q 'repos/O/N/pulls/7' "$T/state/origin-args.txt" || fail "origin $url names O/N: [$(cat "$T/state/origin-args.txt" 2>/dev/null)]"
+    ! grep -q 'repo view' "$T/state/origin-args.txt" || fail "origin $url skips gh repo view"
+  ) || exit 1
+done
+
+# --- case: no origin, gh repo view fails: exit 2 with its last stderr line appended
+(
+  gh() { if [ "$1" = repo ]; then echo boom >&2; exit 1; fi; exit 1; }
+  export -f gh
+  cd "$(mktemp -d)" || exit 1
+  git init -q .
+  env -u GH_CI_REPO bash "$GHCI" snapshot 7 >/dev/null 2>"$T/stderr.txt"; CODE=$?
+  [ "$CODE" = "2" ] || fail "no origin and failing gh repo view exits 2 (got $CODE)"
+  grep -q 'no repo' "$T/stderr.txt" || fail "no origin names the no repo error: [$(cat "$T/stderr.txt")]"
+  grep -q 'boom' "$T/stderr.txt" || fail "no origin keeps gh's stderr: [$(cat "$T/stderr.txt")]"
+) || exit 1
+
 echo "gh-ci: all cases passed"
