@@ -1,0 +1,1 @@
+{"total_count": 1, "jobs": [{"id": 912, "run_id": 712, "name": "Tests (ubuntu-24.04)", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "failure", "created_at": "2026-10-09T17:20:00Z", "started_at": "2026-10-09T17:20:10Z", "completed_at": "2026-10-09T17:40:00Z", "steps": []}]}
