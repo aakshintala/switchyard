@@ -295,10 +295,7 @@ cmd_wait() {
   fi
   while true; do
     if ! read -r head state < <(head_state "$pr"); then
-      if [ "$slept" -ge "$timeout" ]; then
-        echo "head: unreadable timeout after ${timeout}s"
-        return 124
-      fi
+      [ "$slept" -lt "$timeout" ] || { echo "head: unreadable timeout after ${timeout}s"; return 124; }
       sleep "$interval"
       slept=$((slept + interval))
       continue
@@ -346,10 +343,7 @@ cmd_wait() {
       continue
     fi
     if ! read -r head2 state2 < <(head_state "$pr"); then
-      if [ "$slept" -ge "$timeout" ]; then
-        echo "head: unreadable timeout after ${timeout}s"
-        return 124
-      fi
+      [ "$slept" -lt "$timeout" ] || { echo "head: unreadable timeout after ${timeout}s"; return 124; }
       sleep "$interval"
       slept=$((slept + interval))
       continue
