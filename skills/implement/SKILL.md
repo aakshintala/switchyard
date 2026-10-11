@@ -7,8 +7,8 @@ You are the orchestrator for one ticket. The **main orchestrator** is the sessio
 
 ## Rules
 
-- **Never wait on a human.** A sub-orchestrator posts a decision it can't make to the tracker, with its options and a recommendation: a comment on the ticket it blocks, or a `needs-info` ticket when it blocks none. It may also open follow-up tickets. It searches the tracker for an existing issue before opening one, reports each decision to its parent (the link, what it blocks, what it keeps building), lists every issue it opened or commented on in its report, and keeps building what the decision doesn't block. It never writes a handoff. The main orchestrator keeps the conversation with the owner (what to ask, when, and in what order). It asks the owner once, at the start, whether they'll be around for rulings, and switches on "going away" or "back": when they're present, ask in chat; when they're away, comment on the ticket the decision blocks (or open a new ticket when it blocks none) and keep building the rest.
-- **Park** a ticket when an open decision touches its core outcome: post the question on the ticket, label it `needs-info` (per `docs/agents/triage-labels.md`), and stop work on it.
+- **Never wait on a human.** A sub-orchestrator posts a decision it can't make to the tracker, with its options and a recommendation: a comment on the ticket it blocks, or a ticket with the `needs-info` role's label when it blocks none. It may also open follow-up tickets. It searches the tracker for an existing issue before opening one, reports each decision to its parent (the link, what it blocks, what it keeps building), lists every issue it opened or commented on in its report, and keeps building what the decision doesn't block. It never writes a handoff. The main orchestrator keeps the conversation with the owner (what to ask, when, and in what order). It asks the owner once, at the start, whether they'll be around for rulings, and switches on "going away" or "back": when they're present, ask in chat; when they're away, comment on the ticket the decision blocks (or open a new ticket when it blocks none) and keep building the rest.
+- **Park** a ticket when an open decision touches its core outcome: post the question on the ticket, apply the label `docs/agents/triage-labels.md` maps to the `needs-info` role, and stop work on it.
 - **Hold** the merge, and only the merge, on an open decision that doesn't touch the core outcome (a name, a registry row, a message's wording): build and review everything with the recommended default in place, and merge once it's ruled.
 - **Judge by evidence.** Read the diff and the gate output, never a worker's report. Report success only with fresh output of the gate in the same message.
 - **The gate** is the lane's gate command plus three pre-push checks: the worktree's HEAD descends from the remote branch's tip, every changed file is in the plan's Files, and `git log origin/main..<branch> --stat` shows only this ticket's commits.
@@ -60,7 +60,7 @@ Done when the preflight has returned and no `core` item is open, or the ticket i
 
 ### 3. Plan
 
-Follow `planning` steps 1–5.
+Follow `planning` steps 1–5. When a worker writes the plan, its brief covers `planning` steps 1–2 and ends with the plan file; you run steps 3–5 yourself, since a worker's brief forbids delegating and the Verifier is a job of its own.
 
 Done when the lane brief is filled.
 
