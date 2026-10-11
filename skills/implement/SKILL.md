@@ -66,6 +66,8 @@ Done when the lane brief is filled.
 
 ### 4. Lane
 
+A plan written before this run goes stale when `origin/main` changes what it describes. Before dispatching one, list the commits since it was last posted: `git log --oneline origin/main --since=<updatedAt of its newest plan comment> -- <every path under Files>`. Any output sends the plan back through `planning` step 3 against the current base; dispatch once the Verifier passes.
+
 For a new ticket, cut a worktree from `origin/main`; a re-plan's lane works in the PR's worktree. Dispatch the lane brief on a model at the plan's Rung (per the `delegate` skill). The lane brief was filled with `fill-brief --out <absolute path>`; use the printed line verbatim as the lane's prompt, never a hand-written path.
 
 A plan split into parts runs each part through steps 4–8 in order, the next lane cut once the previous part has merged.
