@@ -21,13 +21,22 @@ CONFLICT_RC=3
 
 # head_state <pr>: prints "<full head SHA> <merge state>", the merge state in
 # the upper case of the GraphQL mergeStateStatus (REST mergeable_state, upper-cased).
-# Fails when the head is unreadable.
+# Fails when the head is unreadable: returns 4 when gh's error is a 404 (the PR
+# is not in this repo), else 1.
 head_state() {
-  local sha state
-  read -r sha state < <(gh api "repos/$REPO/pulls/$1" --jq '"\(.head.sha) \(.mergeable_state // "unknown" | ascii_upcase)"') || true
-  if [[ "${sha:-}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  local sha="" state="" out="" err="" rc=0 errf
+  errf="$(mktemp)"
+  out=$(gh api "repos/$REPO/pulls/$1" --jq '"\(.head.sha) \(.mergeable_state // "unknown" | ascii_upcase)"' 2>"$errf") || rc=$?
+  err=$(cat "$errf"); rm -f "$errf"
+  if [ "$rc" -ne 0 ] && grep -qE 'HTTP 404|Not Found' <<<"$err"; then
+    echo "PR $1 not found in $REPO" >&2
+    return 4
+  fi
+  read -r sha state <<<"$out" || true
+  if [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "$sha ${state:-}"
   else
+    [ -z "$err" ] || printf '%s\n' "$err" >&2
     echo "could not read the head of PR $1" >&2
     return 1
   fi
@@ -258,7 +267,8 @@ head_checks() {
 # recomputes mergeability late after a push), or once the timeout budget
 # is spent while DIRTY.
 # An unreadable head (a failed API read) is pending: the wait sleeps and reads
-# again, and times out with 124 if the head stays unreadable.
+# again, and times out with 124 if the head stays unreadable. A 404 on the head
+# read is not pending: the PR number is wrong, so the wait returns 1 at once.
 # On a draft PR (isDraft read once at the start), the base branch's
 # required names are skipped and the checks call drops --required: the
 # wait settles on the checks the head actually has, an empty list stays
@@ -280,7 +290,7 @@ cmd_wait() {
   [ -n "$pr" ] || usage
   case "$timeout" in ''|*[!0-9]*) usage;; esac
   local interval="${GH_CI_INTERVAL:-30}"
-  local slept=0 head head2 state state2 checks_json max_src max_map filtered padded verdict
+  local slept=0 head head2 state state2 checks_json max_src max_map filtered padded verdict hs hs_rc
   local dirty_head="" dirty_for=0 draft=false
   if [ "$(gh api "repos/$REPO/pulls/$pr" --jq .draft 2>/dev/null)" = "true" ]; then
     draft=true
@@ -294,12 +304,15 @@ cmd_wait() {
     echo "gh-ci: cannot read required checks; judging every check on the head" >&2
   fi
   while true; do
-    if ! read -r head state < <(head_state "$pr"); then
+    hs_rc=0; hs=$(head_state "$pr") || hs_rc=$?
+    [ "$hs_rc" -ne 4 ] || return 1
+    if [ "$hs_rc" -ne 0 ]; then
       [ "$slept" -lt "$timeout" ] || { echo "head: unreadable timeout after ${timeout}s"; return 124; }
       sleep "$interval"
       slept=$((slept + interval))
       continue
     fi
+    read -r head state <<<"$hs"
     if [ "$state" = "DIRTY" ]; then
       [ "$head" = "$dirty_head" ] || { dirty_head="$head"; dirty_for=0; }
       if [ "$dirty_for" -ge 30 ] || [ "$slept" -ge "$timeout" ]; then
@@ -342,12 +355,15 @@ cmd_wait() {
       slept=$((slept + interval))
       continue
     fi
-    if ! read -r head2 state2 < <(head_state "$pr"); then
+    hs_rc=0; hs=$(head_state "$pr") || hs_rc=$?
+    [ "$hs_rc" -ne 4 ] || return 1
+    if [ "$hs_rc" -ne 0 ]; then
       [ "$slept" -lt "$timeout" ] || { echo "head: unreadable timeout after ${timeout}s"; return 124; }
       sleep "$interval"
       slept=$((slept + interval))
       continue
     fi
+    read -r head2 state2 <<<"$hs"
     if [ "$head2" != "$head" ] || [ "$state2" = "DIRTY" ]; then
       continue
     fi
