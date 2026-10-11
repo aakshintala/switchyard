@@ -29,9 +29,13 @@ Done when both reviews have verdict lines for the current patch-id.
 
 Every verdict `APPROVE` and no open P1 or P2: the loop is done. Otherwise send every open finding in one fix round: fill `briefs/fix.md` with `~/.agents/bin/fill-brief --out <absolute path>` (`WORKFLOW_DOC` as the project's workflow doc path, findings as `FINDINGS=@<file>`; the file lists every finding since the reviewed head, earlier rounds' included, since the verify in step 3 reads it against that whole range; a CI-reported failure the round answers, such as a surviving mutant or a failing test, is a finding too, written with its CI evidence, or the verify flags its repair as out of scope) and dispatch it in the PR's worktree as a gated job, using the printed line verbatim as its prompt, never a hand-written path. When every open finding is trivial by `implement`'s fix-by-churn rule, fix them inline and run the gate yourself instead; the round still counts, and step 3 still verifies it.
 
+A **real bug** is a P1, or a behaviour defect a consumer of the change would see. When round one found no real bug, only missing tests, nits, style or docs, its fix round is the last. Step 3 is skipped. `ship-pr` takes the round-one head as `--reviewed`, with `--unverified-fixes <findings file>`, and CI, mutants included, still gates the new head.
+
 Done when the fix round covers every open finding: dispatched as a gated job, or fixed inline with the gate's output stated.
 
 ### 3. Verify
+
+Run this step when the fix round answers a real bug (step 2).
 
 Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new head>`; after a rebase, a plain diff counts the base's own merges) and gate output, never the fix worker's report. A finding the worker refuted has no fix in the diff: copy its `refuted: <evidence>` line under that finding in the findings file, so the verify checks the evidence against the code. Then run the scoped verify, which starts it, waits and collects it, as in step 1:
 
@@ -55,4 +59,4 @@ After round 2, no round 3 runs.
 
   A second round-2 stop on the same ticket parks it, whatever the earlier ruling.
 
-When you answer findings yourself, follow "Answering the findings" in `code-review`. A commit `ci-triage` makes re-enters at step 3 on the same counter, with the CI failure it answers written into the findings file.
+When you answer findings yourself, follow "Answering the findings" in `code-review`. A commit `ci-triage` makes re-enters at step 3 on the same counter, with the CI failure it answers written into the findings file. A commit that only adds tests, such as one that kills a CI-reported mutant, skips step 3, and ships with `--unverified-fixes` and that failure in the findings file.

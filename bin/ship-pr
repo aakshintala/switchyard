@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]...
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree; run --gate in
 #        the worktree on that head, once, before any rebase or push; rebase onto
 #        origin/main (see below); compare the PR diff's `git patch-id --stable` with
-#        <sha>'s; push a rebased branch with --force-with-lease; mark a draft
+#        <sha>'s (with --unverified-fixes, a mismatch posts a comment and goes on, see
+#        below); push a rebased branch with --force-with-lease; mark a draft
 #        ready (once, before the first CI wait); `gh-ci wait` (--timeout, default
 #        7200); run pr-closes; on a non-strict base with --gate, gate the PR merged
 #        with current origin/main in a throwaway merge commit (step 7); squash-merge
@@ -25,7 +26,7 @@
 #        with current origin/main counts as a gate failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict), 5 PR text needs a fix (missing --body-has lines, or stray closing keywords from pr-closes), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, or stray closing keywords from pr-closes), 124 CI wait timeout.
 #        Rebase rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -43,12 +44,19 @@
 #        happens (nothing is pushed). A merge conflict exits 3; a failing gate exits 1
 #        after the gate's last 20 lines; a pass merges as today. Without --gate the
 #        check is skipped.
+#        --unverified-fixes <file> is for a fix round that answers no real bug (review-loop
+#        step 2), so it ships with no re-review. The file must be readable and hold a
+#        non-blank line, else exit 2 before anything else. On a patch-id mismatch, once per
+#        run and before the first push or CI wait, ship-pr posts a PR comment: a first line
+#        naming the reviewed short sha, the file under `Findings:`, and `git diff --stat`
+#        from the reviewed sha to the pinned head under `Changed since review:`. A failed
+#        post exits 1 before any push. A match posts nothing. The gate and CI run as usual.
 #        --timeout bounds each CI wait, so a run can take one gate and up to 4 CI waits.
 #        SHIP_PR_INTERVAL: seconds between MERGED polls (default 5, at most 12 polls).
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]..." >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>]" >&2
   exit 2
 }
 say() { echo "ship-pr: $*" >&2; }
@@ -57,7 +65,7 @@ die() { local code="$1"; shift; say "$*"; exit "$code"; }
 [ $# -ge 1 ] || usage
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=()
+repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() unverified=""
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || usage
   case "$1" in
@@ -67,12 +75,17 @@ while [ $# -gt 0 ]; do
     --gate) gate="$2" ;;
     --timeout) timeout="$2" ;;
     --body-has) case "$2" in ''|*$'\n'*) usage ;; esac; body_has+=("$2") ;;
+    --unverified-fixes) [ -n "$2" ] || usage; unverified="$2" ;;
     *) usage ;;
   esac
   shift 2
 done
 [ -n "$repo" ] && [ -n "$reviewed" ] && [ -n "$worktree" ] || usage
 case "$timeout" in ''|*[!0-9]*) usage ;; esac
+if [ -n "$unverified" ]; then
+  [ -f "$unverified" ] && [ -r "$unverified" ] || die 2 "cannot read --unverified-fixes $unverified"
+  grep -q '[^[:space:]]' "$unverified" || die 2 "--unverified-fixes $unverified has no findings"
+fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
@@ -107,6 +120,24 @@ if [ "${#body_has[@]}" -gt 0 ]; then
   done
   [ "$missing" = 0 ] || die 5 "PR body lacks required lines; edit the PR body, then rerun"
 fi
+
+# Posts the unverified-fixes comment (step 4). Nothing is pushed if it fails.
+post_unverified() {
+  local pin="$1" short stat body rc=0
+  short="$(git -C "$worktree" rev-parse --short "$reviewed")" || die 1 "cannot name $reviewed"
+  stat="$(git -C "$worktree" diff --stat "$reviewed..$pin")" || die 1 "cannot diff $reviewed..$pin"
+  body="$(mktemp "${TMPDIR:-/tmp}/ship-pr-comment.XXXXXX")"
+  {
+    printf 'Fixes since %s shipped without re-review (review-loop step 2: no real bug in round one).\n\n' "$short"
+    printf 'Findings:\n'
+    cat "$unverified"
+    printf '\n\nChanged since review:\n%s\n' "$stat"
+  } >"$body"
+  gh pr comment "$pr" --repo "$repo" --body-file "$body" >&2 || rc=$?
+  rm -f "$body"
+  [ "$rc" = 0 ] || die 1 "cannot post the unverified-fixes comment on PR $pr; nothing pushed"
+  say "posted the unverified-fixes comment on PR $pr"
+}
 
 patch_id() {
   local id
@@ -170,7 +201,7 @@ fi
 
 # Steps 3-5 repeat when origin/main moves during the CI wait (strict only), at most 3 times.
 # lease is the branch SHA last known on the remote: head0, then each pushed pin.
-lease="$head0" retries=0
+lease="$head0" retries=0 unverified_posted=""
 while :; do
   # Step 3: rebase onto origin/main when it moved (strict) or on a reported conflict.
   if [ "$strict" = 1 ]; then
@@ -181,8 +212,13 @@ while :; do
   pin="$(git -C "$worktree" rev-parse HEAD)"
 
   # Step 4: the patch under review is the patch about to merge (review-loop's Identity rule).
-  [ "$(patch_id "$reviewed")" = "$(patch_id "$pin")" ] \
-    || die 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict"
+  if [ "$(patch_id "$reviewed")" != "$(patch_id "$pin")" ]; then
+    [ -n "$unverified" ] || die 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict"
+    if [ -z "$unverified_posted" ]; then
+      post_unverified "$pin"
+      unverified_posted=1
+    fi
+  fi
 
   # Step 5: push a rebased branch, then wait for CI on exactly that head.
   if [ "$pin" != "$lease" ]; then
