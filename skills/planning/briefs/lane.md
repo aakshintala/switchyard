@@ -15,7 +15,7 @@ __PLAN__
 - Run the tasks in order, each test first, and pass each task's gate and commit before starting the next.
 - Run only the gate and the tests your tasks name. Suites the workflow doc gives to CI, such as mutation testing (`cargo mutants`), benchmarks and backstops, run in CI: read their result from the CI log, and report when you need one reproduced.
 - Run every command in the foreground, so it ends before your turn does; start no background or detached process. When the gate outlasts one tool call, run the narrowest test set your change reaches in the foreground and leave the full gate to the job-end gate.
-- Run git and read code only in your worktree; read main's version of a file with `git show origin/main:<path>`.
+- Run every command in your worktree, each one starting `cd __WORKTREE__ &&`: a shell's working directory can reset between calls, and a build or test run elsewhere lands in another agent's checkout. Read main's version of a file with `git show origin/main:<path>`.
 - The host is macOS: use BSD tool forms, such as `sed -i ''`.
 - Mark a deliberate shortcut with a `debt: <ceiling>, <upgrade trigger>` comment. A shortcut that would weaken a rule a doc, spec or ticket states gets no marker: stop and report.
 - Commit your work before any command that discards changes (`git reset --hard`, `git checkout -- <path>`, `git restore`, a rebase). Make a scratch commit, such as one kept as evidence, on a throwaway branch (`git switch -c scratch/<name>`), then switch back to the lane branch and delete the scratch one.
