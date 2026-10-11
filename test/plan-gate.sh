@@ -53,6 +53,8 @@ expect_err "section at end of file with no command" '## Gate\n\n'
 expect_err "bare fence with no command" '## Gate\n```\n```\n'
 expect_err "two command lines" '## Gate\nbash a\nbash b\n'
 expect_err "two lines inside a fence" '## Gate\n```\nbash a\nbash b\n```\n'
+expect_err "backticked whitespace only" '## Gate\n`   `\n'
+expect_err "heading is a longer word" '## Gateway\nbash test/run\n'
 expect_err "command plus prose" '## Gate\nRun the tests.\nbash test/run\n'
 
 # exit 2: bad usage or unreadable plan

@@ -22,10 +22,10 @@ case "$1" in -h|--help) usage ;; esac
 plan="$1"
 [ -r "$plan" ] || { echo "plan-gate: cannot read plan file: $plan" >&2; exit 2; }
 
-grep -q '^## Gate' "$plan" || { echo "plan-gate: no '## Gate' heading in $plan" >&2; exit 1; }
+grep -Eq '^## Gate([[:space:]]|$)' "$plan" || { echo "plan-gate: no '## Gate' heading in $plan" >&2; exit 1; }
 
 section="$(awk '
-  !in_gate && /^## Gate/ { in_gate = 1; next }
+  !in_gate && /^## Gate([[:space:]]|$)/ { in_gate = 1; next }
   in_gate && /^## / { exit }
   in_gate { print }
 ' "$plan")"
@@ -57,6 +57,9 @@ fi
 if [ "${#cmd}" -ge 2 ] && [ "${cmd:0:1}" = '`' ] && [ "${cmd: -1}" = '`' ]; then
   cmd="${cmd:1:${#cmd}-2}"
 fi
+# a backticked blank (`   `) is no command either: trim what the backticks held
+cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+cmd="${cmd%"${cmd##*[![:space:]]}"}"
 if [ -z "$cmd" ]; then
   echo "plan-gate: the '## Gate' section holds no command: $plan" >&2
   exit 1
