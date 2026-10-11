@@ -8,9 +8,11 @@
 #        the filled template on stdout. With --out, creates <path>'s directory, writes it there and prints
 #        exactly one line on stdout: Read <path> and follow it.
 #        A template containing __PARENT__ needs a non-empty PARENT value (the
-#        parent's session name); there is no fallback.
+#        parent's session name); there is no fallback. A template containing
+#        __GATE__ needs a non-blank GATE value (not empty, not only whitespace)
+#        in the same way.
 #        Exit 1 (nothing on stdout, one problem per line on stderr) when a
-#        placeholder is left unfilled, a key matches nothing, PARENT is empty,
+#        placeholder is left unfilled, a key matches nothing, PARENT or GATE is blank,
 #        the output cannot be written, or reading it back differs. Exit 2 on bad usage, including a
 #        relative --out path.
 set -euo pipefail
@@ -90,10 +92,16 @@ while [ "$i" -lt "$nkeys" ]; do
       vals[$i]="${vv%x}"
       ;;
   esac
-  # PARENT is the parent's session name: an empty one is a failure, never a fallback.
-  if [ "${keys[$i]}" = "PARENT" ] && [ -z "${vals[$i]}" ]; then
-    add_error "empty value: PARENT"
-  fi
+  # PARENT is the parent's session name and GATE the plan's gate command: a blank
+  # one (empty or only whitespace) is a failure, never a fallback.
+  case " PARENT GATE " in
+    *" ${keys[$i]} "*)
+      case "${vals[$i]}" in
+        *[![:space:]]*) ;;
+        *) add_error "empty value: ${keys[$i]}" ;;
+      esac
+      ;;
+  esac
   i=$((i + 1))
 done
 

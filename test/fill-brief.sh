@@ -161,6 +161,22 @@ stdout="$(bash "$FILL" --out "$T/par-out.md" "$T/par.md" 'PARENT=' 'A=x' 2>/dev/
 # other keys may be empty
 [ "$(bash "$FILL" "$T/par.md" 'PARENT=p' 'A=')" = "parent p and " ] || fail "empty A still fills"
 
+# __GATE__: needs a non-blank GATE value, the same rule as PARENT
+printf 'gate: __GATE__\n' >"$T/gate.md"
+[ "$(bash "$FILL" "$T/gate.md" 'GATE=bash test/run')" = "gate: bash test/run" ] || fail "real GATE fills"
+stdout="$(bash "$FILL" "$T/gate.md" 'GATE=' 2>"$T/err-gate.txt")"; [ "$?" = "1" ] || fail "empty GATE exits 1"
+[ -z "$stdout" ] || fail "empty GATE prints nothing on stdout"
+[ "$(cat "$T/err-gate.txt")" = "empty value: GATE" ] || fail "empty GATE names GATE"
+stdout="$(bash "$FILL" "$T/gate.md" 'GATE=   ' 2>"$T/err-gate.txt")"; [ "$?" = "1" ] || fail "whitespace-only GATE exits 1"
+[ -z "$stdout" ] || fail "whitespace-only GATE prints nothing on stdout"
+[ "$(cat "$T/err-gate.txt")" = "empty value: GATE" ] || fail "whitespace-only GATE names GATE"
+rm -f "$T/gate-out.md"
+stdout="$(bash "$FILL" --out "$T/gate-out.md" "$T/gate.md" 'GATE=' 2>/dev/null)"; [ "$?" = "1" ] || fail "empty GATE with --out exits 1"
+[ -z "$stdout" ] || fail "empty GATE with --out prints nothing on stdout"
+[ ! -e "$T/gate-out.md" ] || fail "empty GATE with --out writes nothing"
+stdout="$(bash "$FILL" "$T/gate.md" "GATE=@$T/empty-val.txt" 2>/dev/null)"; [ "$?" = "1" ] || fail "empty @file GATE exits 1"
+[ -z "$stdout" ] || fail "empty @file GATE prints nothing on stdout"
+
 # --out with a relative path exits 2, nothing on stdout
 stdout="$(bash "$FILL" --out rel/brief.md "$T/o.md" 'A=1' 2>"$T/err-rel.txt")"; [ "$?" = "2" ] || fail "relative --out exits 2"
 [ -z "$stdout" ] || fail "relative --out prints nothing on stdout"
