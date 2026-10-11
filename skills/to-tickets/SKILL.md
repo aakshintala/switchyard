@@ -107,6 +107,8 @@ Written against `<origin/main SHA when filed>`
 
 </issue-template>
 
+A class ticket ("every X") carries the grep that finds its sites and the count that grep found at the `Written against` commit; the preflight re-runs it, since the count moves. Each acceptance criterion that rests on a doc names the doc and its section.
+
 In either form, avoid specific file paths or code snippets: they go stale fast. Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it and note briefly that it came from a prototype. Trim to the decision-rich parts, not a working demo, just the important bits.
 
 ### 6. Next phase
