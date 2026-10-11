@@ -331,6 +331,13 @@ def save_state(path, st):
     os.replace(tmp, path)
 
 
+def recurred_after(lanes):
+    # A closed issue's test recurred when main or two distinct lanes fail it
+    # after close. One PR lane alone is that PR's own failure, not a
+    # recurrence; its flakes go to the flaky list (see #320).
+    return "main" in lanes or len(lanes) >= 2
+
+
 def main(argv):
     repo = since = state_path = lanes = None
     want_json = False
@@ -579,7 +586,7 @@ def main(argv):
                 after = sorted({s[0] for s in sight})
             else:
                 after = sorted({s[0] for s in sight if s[2] > closed})
-            if after:
+            if recurred_after(after):
                 recurred.append({"test": key, "issue": ent["issue"],
                                  "closed_at": closed, "lanes": after, "last_seen": last})
     # recurrences for keys under min_lanes still count
@@ -593,7 +600,7 @@ def main(argv):
                 after = sorted({s[0] for s in seen[key]})
             else:
                 after = sorted({s[0] for s in seen[key] if s[2] > closed})
-            if after:
+            if recurred_after(after):
                 recurred.append({"test": key, "issue": ent["issue"], "closed_at": closed,
                                  "lanes": after,
                                  "last_seen": max(s[2] for s in seen[key])})

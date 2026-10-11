@@ -148,7 +148,7 @@ run_friction --min-lanes 1 --json
 # recurrence after a closed issue
 [ "$(jget "len(d['recurred_after_close'])")" = "1" ] || fail "one recurrence: [$OUT]"
 [ "$(jget "d['recurred_after_close'][0]['issue']")" = "1465" ] || fail "recur issue: [$OUT]"
-[ "$(jget "d['recurred_after_close'][0]['lanes']")" = "['#1401']" ] || fail "recur lanes: [$OUT]"
+[ "$(jget "d['recurred_after_close'][0]['lanes']")" = "['#1401', 'main']" ] || fail "recur lanes: [$OUT]"
 # excluded classes never appear anywhere
 grep -q "missed-mutant" <<<"$OUT" && fail "missed-mutant excluded: [$OUT]"
 grep -q '"cause": "other"' <<<"$OUT" && fail "other excluded: [$OUT]"
@@ -263,10 +263,10 @@ grep -q "other::" <<<"$OUT" && fail "signal collateral excluded: [$OUT]"
 setup fixcommit
 run_friction --min-lanes 1 --json
 [ "$CODE" = "1" ] || fail "fixcommit exits 1 (got $CODE): [$OUT]"
-[ "$(jget "[r['lanes'] for r in d['repeats']]")" = "[['#1502']]" ] \
+[ "$(jget "[r['lanes'] for r in d['repeats']]")" = "[['#1502', 'main']]" ] \
   || fail "pre-fix lane dropped: [$OUT]"
 [ "$(jget "d['recurred_after_close'][0]['issue']")" = "1470" ] || fail "recur issue: [$OUT]"
-[ "$(jget "d['recurred_after_close'][0]['lanes']")" = "['#1502']" ] \
+[ "$(jget "d['recurred_after_close'][0]['lanes']")" = "['#1502', 'main']" ] \
   || fail "recur lanes: [$OUT]"
 setup fixcommit
 run_friction --min-lanes 1 --json >/dev/null
@@ -290,17 +290,24 @@ mkdir -p "$HOME/.cache/switchyard"
 python3 -c "import json; json.dump({'jobs': {}, 'issues': {'fiber-core doors::watch': {'issue': 1470, 'issue_state': 'closed', 'closed_at': '2026-10-09T10:00:00Z', 'updated_at': '2026-10-09T10:00:00Z', 'fix_commit': None}}, 'branches': {}}, open('$HOME/.cache/switchyard/ci-friction.json', 'w'))"
 run_friction --min-lanes 1 --json
 [ "$(grep -c 'graphql' "$FAKE_GH_LOG")" = "1" ] || fail "stale null re-looked-up: [$(cat "$FAKE_GH_LOG")]"
-[ "$(jget "[r['lanes'] for r in d['repeats']]")" = "[['#1502']]" ] \
+[ "$(jget "[r['lanes'] for r in d['repeats']]")" = "[['#1502', 'main']]" ] \
   || fail "stale null recovered, pre-fix lane dropped: [$OUT]"
 
 # --- 18g: post-fix sighting before closure is still a recurrence ---
 setup fixlate
 run_friction --json
 [ "$CODE" = "1" ] || fail "fixlate exits 1 (got $CODE): [$OUT]"
-[ "$(jget "d['repeats']")" = "[]" ] || fail "single lane is no repeat: [$OUT]"
+[ "$(jget "[r['lanes'] for r in d['repeats']]")" = "[['#1502', 'main']]" ] || fail "post-fix lanes: [$OUT]"
 [ "$(jget "d['recurred_after_close'][0]['issue']")" = "1471" ] || fail "recur issue: [$OUT]"
-[ "$(jget "d['recurred_after_close'][0]['lanes']")" = "['#1502']" ] \
+[ "$(jget "d['recurred_after_close'][0]['lanes']")" = "['#1502', 'main']" ] \
   || fail "recur lanes: [$OUT]"
+
+# --- #320: one PR lane's failure after close is not a recurrence ---
+setup pronly
+run_friction --json
+[ "$CODE" = "0" ] || fail "pronly exits 0 (got $CODE): [$OUT]"
+[ "$(jget "[r['lanes'] for r in d['repeats']]")" = "[]" ] || fail "single lane is no repeat: [$OUT]"
+[ "$(jget "d['recurred_after_close']")" = "[]" ] || fail "one PR lane after close is no recurrence: [$OUT]"
 
 # --- jobs pagination: a failure on page 2 is still seen ---
 setup paged
