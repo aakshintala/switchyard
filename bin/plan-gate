@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# plan-gate: print a plan's gate command, the content under its `## Gate` heading.
+# Usage: plan-gate PLAN_FILE
+#        plan-gate -h | --help
+#        The gate is the text under the first line starting `## Gate` (whatever
+#        follows on that heading line), up to the next `## ` heading or the end
+#        of the file. It must hold exactly one non-blank command line, written
+#        bare, wrapped in single backticks, or as the only line inside a ```
+#        fence. Prints that command on stdout and exits 0.
+#        Exit 1 (nothing on stdout, one line on stderr) when the heading is
+#        missing, holds no command, or holds more than one command line.
+#        Exit 2 on bad usage or an unreadable plan file.
+set -euo pipefail
+
+usage() {
+  echo "usage: plan-gate PLAN_FILE" >&2
+  exit 2
+}
+
+[ $# -eq 1 ] || usage
+case "$1" in -h|--help) usage ;; esac
+plan="$1"
+[ -r "$plan" ] || { echo "plan-gate: cannot read plan file: $plan" >&2; exit 2; }
+
+grep -q '^## Gate' "$plan" || { echo "plan-gate: no '## Gate' heading in $plan" >&2; exit 1; }
+
+section="$(awk '
+  !in_gate && /^## Gate/ { in_gate = 1; next }
+  in_gate && /^## / { exit }
+  in_gate { print }
+' "$plan")"
+
+count=0
+cmd=""
+while IFS= read -r line; do
+  # trim both ends
+  t="${line#"${line%%[![:space:]]*}"}"
+  t="${t%"${t##*[![:space:]]}"}"
+  case "$t" in
+    "") continue ;;
+    '```'*) continue ;;
+  esac
+  count=$((count + 1))
+  cmd="$t"
+done <<<"$section"
+
+if [ "$count" -eq 0 ]; then
+  echo "plan-gate: the '## Gate' section holds no command: $plan" >&2
+  exit 1
+fi
+if [ "$count" -gt 1 ]; then
+  echo "plan-gate: the '## Gate' section holds more than one command line: $plan" >&2
+  exit 1
+fi
+
+# single backticks wrap the command: strip them
+if [ "${#cmd}" -ge 2 ] && [ "${cmd:0:1}" = '`' ] && [ "${cmd: -1}" = '`' ]; then
+  cmd="${cmd:1:${#cmd}-2}"
+fi
+if [ -z "$cmd" ]; then
+  echo "plan-gate: the '## Gate' section holds no command: $plan" >&2
+  exit 1
+fi
+
+printf '%s\n' "$cmd"
