@@ -85,6 +85,9 @@ gh() (
     ready)
       [ ! -e "$ST/ready-fail" ] || exit 1
       echo false >"$ST/draft";;
+    comment)
+      [ ! -e "$ST/comment-fail" ] || exit 1
+      while [ $# -gt 0 ]; do [ "$1" = "--body-file" ] && cp "$2" "$ST/comment.txt"; shift; done;;
     merge)
       if [ -e "$ST/merge-fail-once" ]; then
         cat "$ST/merge-fail-once" >&2
@@ -620,5 +623,62 @@ grep -q '^pending: ci$' <<<"$OUT" || fail "absent required check named: [$OUT]"
 setup; echo true >"$ST/draft"; touch "$ST/ready-fail"
 ship; expect 1 "gh pr ready fails"; ! grep -q '^gh pr \(checks\|merge\)' "$ST/gh.log" || fail "no CI wait or merge after ready fails"
 [ -d "$WT" ] || fail "worktree kept when ready fails"
+
+# ===== --unverified-fixes: a fix round with no real bug ships without a re-review
+F="$T/findings.txt"; printf 'P2: missing test for x\n' >"$F"
+BLANK="$T/blank.txt"; printf '\n  \t\n' >"$BLANK"
+no_gh() { [ ! -s "$ST/gh.log" ] || fail "$1: no gh call before the usage check: [$(cat "$ST/gh.log")]"; }
+comment_count() { grep -c '^gh pr comment' "$ST/gh.log" 2>/dev/null || true; }
+
+# 1. a mismatch with the option: no exit 4, one comment, then a normal merge
+setup
+echo changed >"$WT/feature.txt"; git -C "$WT" commit -qam "fix nit"; git -C "$WT" push -q origin feature
+SHORT="$(git -C "$WT" rev-parse --short "$HEAD0")"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$F"
+expect 0 "mismatch with --unverified-fixes merges"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line after unverified fixes: [$OUT]"
+[ "$(comment_count)" -eq 1 ] || fail "one comment: [$(cat "$ST/gh.log")]"
+[ "$(head -n 1 "$ST/comment.txt")" = "Fixes since $SHORT shipped without re-review (review-loop step 2: no real bug in round one)." ] \
+  || fail "comment first line: [$(head -n 1 "$ST/comment.txt")]"
+grep -qx 'Findings:' "$ST/comment.txt" && grep -q 'P2: missing test for x' "$ST/comment.txt" || fail "comment holds the findings: [$(cat "$ST/comment.txt")]"
+grep -qx 'Changed since review:' "$ST/comment.txt" && grep -q 'feature.txt' "$ST/comment.txt" || fail "comment holds the stat: [$(cat "$ST/comment.txt")]"
+grep -q '^gh pr merge' "$ST/gh.log" || fail "unverified fixes: merged"
+[ ! -e "$WT" ] || fail "unverified fixes: worktree removed"
+
+# 2. a mismatch without the option: exit 4, as before
+setup
+echo changed >"$WT/feature.txt"; git -C "$WT" commit -qam "fix nit"; git -C "$WT" push -q origin feature
+ship; expect 4 "mismatch without --unverified-fixes exits 4"; no_merge "mismatch without the option"
+[ "$(comment_count)" -eq 0 ] || fail "no comment without the option"
+
+# 3. a missing file, and an all-blank file: exit 2 before any gh call
+setup; run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$T/missing.txt"
+expect 2 "missing findings file"; untouched "missing findings file"; no_gh "missing findings file"
+setup; run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$BLANK"
+expect 2 "all-blank findings file"; untouched "all-blank findings file"; no_gh "all-blank findings file"
+setup; run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes ""
+expect 2 "empty findings path"; no_gh "empty findings path"
+
+# 4. a match with the option: no comment
+setup; ship --unverified-fixes "$F"; expect 0 "match with --unverified-fixes merges"
+[ "$(comment_count)" -eq 0 ] || fail "match: no comment posted"
+
+# 5. a failed comment post: exit 1 and nothing pushed. The rebase moves the local
+# head, so only the origin branch is checked.
+setup
+echo changed >"$WT/feature.txt"; git -C "$WT" commit -qam "fix nit"; git -C "$WT" push -q origin feature
+advance_main other.txt o; touch "$ST/comment-fail"
+O0="$(origin_head)"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$F"
+expect 1 "failed comment post"; [ "$(origin_head)" = "$O0" ] || fail "failed comment post: nothing pushed"
+no_merge "failed comment post"; [ -d "$WT" ] || fail "failed comment post: worktree kept"
+
+# 6. one comment per run: main moves during CI and the retried patch still differs
+setup
+echo changed >"$WT/feature.txt"; git -C "$WT" commit -qam "fix nit"; git -C "$WT" push -q origin feature
+checks_hook "$BUMP_MAIN"
+ship --unverified-fixes "$F"; expect 0 "retry with --unverified-fixes merges"
+grep -q 'retry 1 of 3' <<<"$ERR" || fail "retry happened: [$ERR]"
+[ "$(comment_count)" -eq 1 ] || fail "one comment per run: [$(comment_count)]"
 
 echo "ship-pr: all cases passed"
