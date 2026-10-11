@@ -9,6 +9,7 @@ __PLAN__
 ## Rules
 
 - The plan's Files section is your fence. When you need a file outside it, stop and report. Before pushing, check the branch's whole diff against it: `git diff --name-only origin/main...HEAD`.
+- Before the first task, check the plan against __BASE__, which may be newer than the plan: every path it names that the plan does not create exists (`git cat-file -e HEAD:<path>`), and `git grep -n` finds every existing function, type, constant and test it names, tests in every crate or package included. A miss means main moved under the plan: stop and report each miss with what main has in its place.
 - Every acceptance criterion and doc requirement the ticket names ships. When one can't, stop and report it as a design question.
 - Stop and report before you add or change a public interface the plan's Interfaces don't list, delete or weaken a test or doc sentence you did not add, loosen any test's timeout, wait, retry count or numeric tolerance (your own tests included) that neither the plan nor the ticket's acceptance criteria call for, or add a dependency. For a looser bound, report the cause it would hide.
 - Run the tasks in order, each test first, and pass each task's gate and commit before starting the next.
