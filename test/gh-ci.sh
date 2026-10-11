@@ -58,6 +58,11 @@ gh() (
         [ ! -e "$T/state/view-fail" ] || { echo "gh: API rate limit exceeded (HTTP 403)" >&2; exit 1; }
         h="$(head -1 "$T/state/heads.txt")"; m=CLEAN
         case "$jq" in *head*)
+          # a FAIL line makes that head read fail once, as a network blip does
+          if [ "$(head -1 "$T/state/heads.txt")" = FAIL ]; then
+            advance "$T/state/heads.txt" >/dev/null
+            echo "gh: error connecting to api.github.com" >&2; exit 1
+          fi
           h="$(advance "$T/state/heads.txt")"
           if [ -e "$T/state/merge-state.txt" ]; then m="$(advance "$T/state/merge-state.txt")"; fi;;
         esac
@@ -370,15 +375,34 @@ grep -qF "$CONFLICT_MSG" "$T/stderr.txt" || fail "snapshot conflict message: [$(
 OUT="$(bash "$GHCI" watch-verified 99 --pr 7 2>"$T/stderr.txt")"; CODE=$?
 [ "$CODE" = "3" ] || fail "watch-verified conflict exits 3 (got $CODE): [$OUT]"
 
-# --- case: unreadable head never exits 0
+# --- case: an unreadable head is pending: the first read fails, the next succeeds
+export GH_CI_INTERVAL=7
 reset_state
-set_heads "$A"
+set_heads FAIL "$A"
 set_checks '[{"bucket":"pass","name":"ci"}]'
-touch "$T/state/view-fail"
-OUT="$(bash "$GHCI" wait 7 2>"$T/stderr.txt")"; CODE=$?
-[ "$CODE" != "0" ] || fail "unreadable head exits non-zero (got $CODE): [$OUT]"
-grep -qi "could not read the head" "$T/stderr.txt" || fail "unreadable head message: [$(cat "$T/stderr.txt")]"
-[ ! -e "$T/state/sleeps.txt" ] || fail "unreadable head never sleeps"
+run_wait 7
+[ "$CODE" = "0" ] || fail "one failed head read then green exits 0 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+grep -q "head: ${A:0:8} CI: pass" <<<"$OUT" || fail "failed head read names the head read after it: [$OUT]"
+grep -q "could not read the head of PR 7" "$T/stderr.txt" || fail "failed head read is reported: [$(cat "$T/stderr.txt")]"
+sleeps_are 1 7 || fail "failed head read sleeps once: [$(tr '\n' ' ' <"$T/state/sleeps.txt")]"
+
+# --- case: a head that is never readable times out with 124, not 1
+reset_state
+set_heads FAIL FAIL FAIL FAIL FAIL FAIL FAIL FAIL
+set_checks '[{"bucket":"pass","name":"ci"}]'
+run_wait 7 --timeout 7
+[ "$CODE" = "124" ] || fail "unreadable head times out with 124 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+grep -qx "head: unreadable timeout after 7s" <<<"$OUT" || fail "unreadable timeout line: [$OUT]"
+! grep -q "CI: " <<<"$OUT" || fail "unreadable head prints no verdict: [$OUT]"
+
+# --- case: a failed recheck retries from the top; no pass before a readable recheck
+reset_state
+set_heads "$A" FAIL "$A"
+set_checks '[{"bucket":"pass","name":"ci"}]'
+run_wait 7
+[ "$CODE" = "0" ] || fail "failed recheck then readable exits 0 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(grep -c "CI: pass" <<<"$OUT")" = "1" ] || fail "one pass line after a readable recheck: [$OUT]"
+grep -q "could not read the head of PR 7" "$T/stderr.txt" || fail "failed recheck is reported: [$(cat "$T/stderr.txt")]"
 
 # --- cases: a required check green on the head passes whenever it ran;
 # --- a required name of the base branch with no check on the head is pending
