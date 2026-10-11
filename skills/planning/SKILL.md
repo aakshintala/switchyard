@@ -52,7 +52,7 @@ Done when every section is filled under its own heading, every hit of the Files 
 
 ### 3. Verify
 
-Fill `briefs/verifier.md` with `PLAN=@<plan file>` and the base, and run it in a checkout of the base on a `strong` model from a different family than yours, or a `frontier` one when the plan's rung is `frontier`. When a worker wrote the plan, its brief forbids delegating, so the session that started it runs the Verifier and hands each line back. For each line it returns, fix the plan or record a ruling. A core ruling still open parks the ticket (see `implement`).
+Fill `briefs/verifier.md` with `PLAN=@<plan file>`, `ISSUE`, `REPO` and `BASE` (it takes no `SPEC` or `WORKFLOW_DOC`), and run it in a checkout of the base on a `strong` model from a different family than yours, or a `frontier` one when the plan's rung is `frontier`. When a worker wrote the plan, its brief forbids delegating, so the session that started it runs the Verifier and hands each line back. For each line it returns, fix the plan or record a ruling. A core ruling still open parks the ticket (see `implement`).
 
 Done when the Verifier says `PLAN OK`, or every line it returned is answered in the plan.
 
