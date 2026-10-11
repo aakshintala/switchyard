@@ -1,0 +1,10 @@
+[
+{"number":501,"title":"Two closed blockers under Blocked by","state":"open","body":"Context.\n\n## Blocked by\n\n- #216\n- #217\n\n## What to build\n\nStuff."},
+{"number":502,"title":"One closed blocker named by waits for","state":"open","body":"Merge after the fix. We Waits For #218 to land."},
+{"number":503,"title":"One closed and one open blocker","state":"open","body":"## Blocked by\n\n- #219\n- #220\n"},
+{"number":412,"title":"Fiber 412 shape","state":"open","body":"## Blocked by\n\n- #216\n- #411\n- #413\n- Owner ruling 2026-10-10: wait for #1444 and aakshintala/switchyard#206.\n\n## Notes\n\nNone."},
+{"number":505,"title":"Cross-repo blocker closed in its own repo","state":"open","body":"## Blocked by\n\n- aakshintala/switchyard#206\n"},
+{"number":506,"title":"No named blocker","state":"open","body":"Needs a decision on the schema."},
+{"number":507,"title":"Blocker lookup fails","state":"open","body":"## Blocked by\n\n- #230\n"},
+{"number":508,"title":"A pull request, not an issue","state":"open","pull_request":{"url":"https://api.github.com/repos/O/N/pulls/508"},"body":"## Blocked by\n\n- #216\n"}
+]
