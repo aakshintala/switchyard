@@ -120,8 +120,8 @@ red_commit_hint() {
   lower=$(printf '%s' "$jname" | tr '[:upper:]' '[:lower:]')
   case "$lower" in *"red commit"*) ;; *) return 0;; esac
   ticket=$(gh run view "$run" --repo "$REPO" --log 2>/dev/null \
-    | grep -m1 -E 'ticket: [0-9]+; bug: true' \
     | sed -nE 's/.*ticket: ([0-9]+); bug: true.*/\1/p') || return 0
+  ticket="${ticket%%$'\n'*}" # first match; sed reads the whole log, so gh never sees SIGPIPE under pipefail
   [ -n "$ticket" ] || return 0
   labels=$(gh issue view "$ticket" --repo "$REPO" --json labels -q '.labels[].name' 2>/dev/null) || return 0
   case "$(printf '\n%s\n' "$labels")" in *$'\nbug\n'*) return 0;; esac
