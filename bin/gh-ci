@@ -97,13 +97,7 @@ cmd_panics() {
         if (!index(full[i], "panicked at")) continue
         count = n - i + 1
         if (count > 4) count = 4
-        found = 0
-        for (start = tail_start; start + count - 1 <= n; start++) {
-          same = 1
-          for (j = 0; j < count; j++) if (full[start + j] != full[i + j]) same = 0
-          if (same) { found = 1; break }
-        }
-        if (!found) {
+        if (i < tail_start) {
           if (!printed++) printf "panic context (outside the last %d lines):\n", tail_lines
           for (j = 0; j < count; j++) print full[i + j]
         }

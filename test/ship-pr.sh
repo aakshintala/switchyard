@@ -6,6 +6,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHIP="$SCRIPT_DIR/../bin/ship-pr"
+BASE_PATH="$PATH"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -262,11 +263,46 @@ rm -f "$GATE_FILE"
 setup; advance_main other.txt o
 ship --gate 'test ! -e other.txt'; expect 0 "gate runs on the pre-rebase head"
 ! compgen -G "$TMPDIR/ship-pr-7-gate.*" >/dev/null || fail "passing gate leaves no log file"
+setup
+ship --gate "cat '$SCRIPT_DIR/fixtures/ship-pr-nextest-flaky.txt'"
+expect 0 "a flaky nextest test keeps the gate passing"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "flaky gate still merges: [$OUT]"
+grep -Fq 'ship-pr: FLAKY nextest-flaky::flaky flaky_once' <<<"$ERR" || fail "flaky test reported: [$ERR]"
+grep -Fq "thread 'flaky_once' (788635) panicked at" <<<"$ERR" || fail "failed attempt panic printed: [$ERR]"
+grep -Fq 'panic from first attempt' <<<"$ERR" || fail "failed attempt panic text printed: [$ERR]"
 setup; ship --gate 'git commit -q --allow-empty -m gate'
 expect 1 "gate that commits"; [ "$(origin_head)" = "$O0" ] || fail "gate commit never pushed"; no_merge "gate commit"
 setup; ship --gate 'echo x >>feature.txt'; expect 1 "gate that dirties"; no_merge "gate dirty"
 setup; ship --gate 'test "$PWD" = "$(cd "'"$WT"'" && pwd -P)"; test -f feature.txt'
 expect 0 "gate runs in the worktree"
+
+# disk preflight blocks a low-space gate, and its cache sweep only removes old xcrun files
+setup
+mkdir -p "$S/bin"
+printf '%s\n' '#!/bin/sh' \
+  "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/fake 1000000 950000 50000 95%% /fake\\n'" \
+  >"$S/bin/df"
+chmod +x "$S/bin/df"
+PATH="$S/bin:$BASE_PATH"; export PATH
+ship --gate 'touch "$ST/gate-ran"'
+expect 1 "low free space refuses the gate"
+grep -Fq 'ship-pr: only 0 GB free on /fake; a gate needs 20 GB. Free space, then rerun.' <<<"$ERR" \
+  || fail "low free space message: [$ERR]"
+[ ! -e "$ST/gate-ran" ] || fail "low free space starts no gate"
+no_merge "low free space"
+PATH="$BASE_PATH"; export PATH
+
+setup
+cache_dir="$T/cache-target"; cache_link="$T/cache-tmp"
+mkdir -p "$cache_dir"; ln -s "$cache_dir" "$cache_link"
+TMPDIR="$cache_link"; export TMPDIR
+touch "$TMPDIR/xcrun_db-x" "$TMPDIR/xcrun_db-fresh" "$TMPDIR/other-cache"
+touch -t 202001010000 "$TMPDIR/xcrun_db-x" "$TMPDIR/other-cache"
+ship --gate true; expect 0 "stale cache sweep follows a symlinked TMPDIR"
+[ ! -e "$TMPDIR/xcrun_db-x" ] || fail "old xcrun cache deleted through TMPDIR symlink"
+[ -f "$TMPDIR/xcrun_db-fresh" ] || fail "fresh xcrun cache kept through TMPDIR symlink"
+[ -f "$TMPDIR/other-cache" ] || fail "other old file kept through TMPDIR symlink"
+TMPDIR="$T/tmp"; export TMPDIR
 
 # ===== exit 1 and 124: push and CI
 setup; echo '[{"bucket":"fail","name":"ci"},{"bucket":"pass","name":"lint"}]' >"$ST/checks"
@@ -357,6 +393,11 @@ git --git-dir="$ORIGIN" merge-base --is-ancestor main "$mh" || fail "merge pinne
 STRICT_LINE='required checks on main are strict: rebasing when origin/main moves'
 LOOSE_LINE='required checks on main are not strict: rebasing only on a conflict'
 NOSTRICT='[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"ci"}]}}]'
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
+ship --gate 'echo "$NEXTEST_RETRIES" >>"$ST/retries"'
+expect 0 "both gate steps enable nextest retries"
+[ "$(cat "$ST/retries")" = "1
+1" ] || fail "both gate steps see NEXTEST_RETRIES=1: [$(cat "$ST/retries")]"
 FALLBACK_LINE='cannot read whether required checks on main are strict; assuming strict'
 
 setup; ship; expect 0 "default reads strict"

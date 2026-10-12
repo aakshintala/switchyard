@@ -817,6 +817,15 @@ grep -q '^  left: 1$' <<<"$PANIC_OUT" && grep -q '^ right: 2$' <<<"$PANIC_OUT" |
 PANIC_OUT="$(printf '%s\n' 'thread prune::young_fork panicked at src/prune.rs:42:5:' 'assertion failed' '  left: 1' ' right: 2' 'retry summary' \
   | bash "$GHCI" panics 5 2>"$T/stderr.txt")"; CODE=$?
 [ "$CODE" = "0" ] && [ -z "$PANIC_OUT" ] || fail "panics omits excerpts already in the tail: [$PANIC_OUT] (exit $CODE)"
+PANIC_OUT="$(printf '%s\n' \
+  'thread prune::young_fork panicked at src/prune.rs:42:5:' 'assertion failed' '  left: 1' ' right: 2' \
+  'separator' \
+  'thread prune::young_fork panicked at src/prune.rs:42:5:' 'assertion failed' '  left: 1' ' right: 2' 'tail' \
+  | bash "$GHCI" panics 5 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "duplicate panic text exits 0 (got $CODE): [$PANIC_OUT]"
+grep -q '^panic context (outside the last 5 lines):$' <<<"$PANIC_OUT" || fail "panic line index controls tail suppression: [$PANIC_OUT]"
+grep -q '^thread prune::young_fork panicked at src/prune.rs:42:5:$' <<<"$PANIC_OUT" \
+  || fail "identical text in the tail does not suppress the earlier panic: [$PANIC_OUT]"
 
 # failures usage errors exit 2
 reset_state

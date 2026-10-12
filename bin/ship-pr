@@ -41,6 +41,12 @@
 #        Not strict: after the gate, read the PR's mergeable and mergeStateStatus;
 #        rebase (after refetching origin/main) only on CONFLICTING or DIRTY. One CI
 #        wait, no retry when origin/main moves; a conflict found after CI exits 3.
+#        Before step 2, delete only regular xcrun_db-* files directly under
+#        ${TMPDIR:-/tmp} when they are over a day old; ignore deletion errors. Require
+#        at least 20 GB free on the volumes holding --worktree and ${TMPDIR:-/tmp}.
+#        Both gate runs set NEXTEST_RETRIES=1, retrying failed nextest tests once.
+#        Report each FLAKY result and its failed-attempt panic text; retries do not
+#        change the gate's exit status.
 #        With --gate, step 7 refetches origin/main after pr-closes: when it is not
 #        an ancestor of the pinned head, merge it into the pinned head in a throwaway
 #        commit in --worktree, run the gate there, and restore the pinned head whatever
@@ -81,15 +87,57 @@ exit_after_ready() {
   exit "$code"
 }
 
+report_flakes() {
+  local output_file="$1" flaky_tests test_name
+  flaky_tests="$(awk '
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line !~ /^FLAKY[[:space:]]/) next
+      marker = index(line, ") ")
+      if (marker) print substr(line, marker + 2)
+    }
+  ' "$output_file")"
+  [ -n "$flaky_tests" ] || return 1
+  while IFS= read -r test_name; do
+    [ -n "$test_name" ] && say "FLAKY $test_name"
+  done <<<"$flaky_tests"
+  return 0
+}
+
+check_free_space() {
+  local path="$1" disk_info available mount min_free_kb=20971520
+  if ! disk_info="$(df -Pk "$path" 2>/dev/null | awk 'NR > 1 { print $4 "\t" $NF; exit }')"; then
+    die 1 "cannot check free space on $path"
+  fi
+  IFS=$'\t' read -r available mount <<<"$disk_info" || true
+  case "$available" in ''|*[!0-9]*) die 1 "cannot check free space on $path" ;; esac
+  if [ "$available" -lt "$min_free_kb" ]; then
+    say "only $((available / 1048576)) GB free on $mount; a gate needs 20 GB. Free space, then rerun."
+    exit 1
+  fi
+}
+
+gate_preflight() {
+  local tmpdir="${TMPDIR:-/tmp}"
+  find -H "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true
+  check_free_space "$worktree"
+  check_free_space "$tmpdir"
+}
+
 run_gate() {
   local output_file
   output_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-gate.XXXXXX")"
-  if (cd "$worktree" && bash -c "$gate" </dev/null) >"$output_file" 2>&1; then
+  if (cd "$worktree" && NEXTEST_RETRIES=1 bash -c "$gate" </dev/null) >"$output_file" 2>&1; then
+    if report_flakes "$output_file"; then
+      GH_CI_LOG_LINES=0 bash "$here/gh-ci" panics <"$output_file" >&2
+    fi
     rm -f "$output_file"
     return 0
   fi
+  report_flakes "$output_file" || true
   tail -n 20 "$output_file" || true
-  cat "$output_file" | GH_CI_LOG_LINES=20 bash "$here/gh-ci" panics
+  GH_CI_LOG_LINES=20 bash "$here/gh-ci" panics <"$output_file"
   printf 'full gate output: %s\n' "$output_file"
   return 1
 }
@@ -209,6 +257,7 @@ rebase_main() {
 # Step 2: the gate runs once, on the PR head, before any rebase or push. It checks
 # code; it never changes what was reviewed. CI covers the rebased head.
 if [ -n "$gate" ]; then
+  gate_preflight
   say "running gate"
   run_gate || die 1 "gate failed"
   [ "$(git -C "$worktree" rev-parse HEAD)" = "$head0" ] && [ -z "$(git -C "$worktree" status --porcelain)" ] \
