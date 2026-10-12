@@ -22,6 +22,9 @@
 #        with <prefix>, literally and case-sensitively; it is checked after step 1,
 #        before the rebase, and each missing one prints `missing body line: <prefix>`.
 #        Prints `merged <squash sha>` on success. Progress goes to stderr.
+#        After marking a draft PR ready, each later failure before merge says
+#        that nothing merged and the PR is still marked ready. A step-7 gate failure
+#        includes that message after printing its tail, panic context and log path.
 #        Exit 0 merged, 1 gate/CI/push/merge failure (a gate run on the PR merged
 #        with current origin/main counts as a gate failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
@@ -62,6 +65,21 @@ usage() {
 }
 say() { echo "ship-pr: $*" >&2; }
 die() { local code="$1"; shift; say "$*"; exit "$code"; }
+pr_ready=0
+die_after_ready() {
+  local code="$1"; shift
+  if [ "$pr_ready" = 1 ]; then
+    die "$code" "$*; nothing merged, PR $pr is still marked ready"
+  fi
+  die "$code" "$@"
+}
+exit_after_ready() {
+  local code="$1"; shift
+  if [ "$pr_ready" = 1 ]; then
+    say "$*; nothing merged, PR $pr is still marked ready"
+  fi
+  exit "$code"
+}
 
 print_panic_context() {
   local full_log="$1" tail_lines="$2" tail_file panic_file
@@ -167,8 +185,8 @@ fi
 # Posts the unverified-fixes comment (step 4). Nothing is pushed if it fails.
 post_unverified() {
   local pin="$1" short stat body rc=0
-  short="$(git -C "$worktree" rev-parse --short "$reviewed")" || die 1 "cannot name $reviewed"
-  stat="$(git -C "$worktree" diff --stat "$reviewed..$pin")" || die 1 "cannot diff $reviewed..$pin"
+  short="$(git -C "$worktree" rev-parse --short "$reviewed")" || die_after_ready 1 "cannot name $reviewed"
+  stat="$(git -C "$worktree" diff --stat "$reviewed..$pin")" || die_after_ready 1 "cannot diff $reviewed..$pin"
   body="$(mktemp "${TMPDIR:-/tmp}/ship-pr-comment.XXXXXX")"
   {
     printf 'Fixes since %s shipped without re-review (review-loop step 2: no real bug in round one).\n\n' "$short"
@@ -178,7 +196,7 @@ post_unverified() {
   } >"$body"
   gh pr comment "$pr" --repo "$repo" --body-file "$body" >&2 || rc=$?
   rm -f "$body"
-  [ "$rc" = 0 ] || die 1 "cannot post the unverified-fixes comment on PR $pr; nothing pushed"
+  [ "$rc" = 0 ] || die_after_ready 1 "cannot post the unverified-fixes comment on PR $pr; nothing pushed"
   say "posted the unverified-fixes comment on PR $pr"
 }
 
@@ -213,7 +231,7 @@ rebase_main() {
   say "rebasing $branch onto origin/main"
   if ! git -C "$worktree" rebase origin/main >&2; then
     git -C "$worktree" rebase --abort >&2 || true
-    die 3 "rebase onto origin/main conflicts; resolve it, then rerun"
+    die_after_ready 3 "rebase onto origin/main conflicts; resolve it, then rerun"
   fi
 }
 
@@ -253,7 +271,7 @@ while :; do
 
   # Step 4: the patch under review is the patch about to merge (review-loop's Identity rule).
   if [ "$(patch_id "$reviewed")" != "$(patch_id "$pin")" ]; then
-    [ -n "$unverified" ] || die 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict"
+    [ -n "$unverified" ] || die_after_ready 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict"
     if [ -z "$unverified_posted" ]; then
       post_unverified "$pin"
       unverified_posted=1
@@ -264,13 +282,14 @@ while :; do
   if [ "$pin" != "$lease" ]; then
     say "pushing rebased $branch"
     git -C "$worktree" push -q --force-with-lease="$branch:$lease" origin "HEAD:refs/heads/$branch" >&2 \
-      || die 1 "push of rebased $branch failed"
+      || die_after_ready 1 "push of rebased $branch failed"
     lease="$pin"
   fi
   if [ "$draft" = "true" ]; then
     say "marking PR $pr ready"
     gh pr ready "$pr" --repo "$repo" >&2 || die 1 "gh pr ready failed"
     draft=false
+    pr_ready=1
   fi
   say "waiting for CI"
   rc=0
@@ -278,19 +297,19 @@ while :; do
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$ci_out"
     case "$rc" in
-      124) exit 124 ;;
-      3) die 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
-      *) exit 1 ;;
+      124) exit_after_ready 124 "CI timed out" ;;
+      3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
+      *) die_after_ready 1 "CI failed" ;;
     esac
   fi
-  grep -q "^head: ${pin:0:8} " <<<"$ci_out" || { printf '%s\n' "$ci_out"; die 1 "CI passed on a head other than ${pin:0:8}"; }
+  grep -q "^head: ${pin:0:8} " <<<"$ci_out" || { printf '%s\n' "$ci_out"; die_after_ready 1 "CI passed on a head other than ${pin:0:8}"; }
 
   [ "$strict" = 1 ] || break
 
   # Up to date at merge: CI "must pass on a head up to date with main".
-  git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die 1 "git fetch origin main failed"
+  git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
   git -C "$worktree" merge-base --is-ancestor origin/main "$pin" && break
-  [ "$retries" -lt 3 ] || die 1 "origin/main moved during CI after 3 retries; rerun ship-pr"
+  [ "$retries" -lt 3 ] || die_after_ready 1 "origin/main moved during CI after 3 retries; rerun ship-pr"
   retries=$((retries + 1))
   say "origin/main moved during CI; rebasing again (retry $retries of 3)"
 done
@@ -300,19 +319,19 @@ rc=0
 closes_out="$(bash "$here/pr-closes" "$pr" --repo "$repo" 2>/dev/null)" || rc=$?
 case "$rc" in
   0) ;;
-  1) printf '%s\n' "$closes_out"; exit 5 ;;
-  *) die 1 "pr-closes failed (exit $rc)" ;;
+  1) printf '%s\n' "$closes_out"; exit_after_ready 5 "pr-closes found stray closing keywords" ;;
+  *) die_after_ready 1 "pr-closes failed (exit $rc)" ;;
 esac
 
 # Step 7: on a non-strict base with --gate, gate the PR merged with current
 # origin/main. The merge is a throwaway commit in --worktree; nothing is pushed,
 # and the worktree goes back to the pinned head on every path.
 if [ "$strict" = 0 ] && [ -n "$gate" ]; then
-  git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die 1 "git fetch origin main failed"
+  git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
   if ! git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
     say "gating the PR merged with current origin/main"
     guard_restore() {
-      git -C "$worktree" reset -q --hard "$pin" >&2 || die 1 "failed to restore pinned head ${pin:0:8}"
+      git -C "$worktree" reset -q --hard "$pin" >&2 || die_after_ready 1 "failed to restore pinned head ${pin:0:8}"
     }
     trap 'guard_rc=$?; trap - EXIT INT TERM; guard_restore; exit "$guard_rc"' EXIT
     trap 'trap - EXIT INT TERM; guard_restore; exit 143' TERM
@@ -320,12 +339,12 @@ if [ "$strict" = 0 ] && [ -n "$gate" ]; then
     if ! git -C "$worktree" -c user.name=ship-pr -c user.email=ship-pr@localhost merge --no-ff --no-edit origin/main >&2; then
       guard_restore
       trap - EXIT INT TERM
-      die 3 "PR conflicts with current origin/main; rebase, then rerun"
+      die_after_ready 3 "PR conflicts with current origin/main; rebase, then rerun"
     fi
     if ! run_gate; then
       guard_restore
       trap - EXIT INT TERM
-      die 1 "the PR merged with current origin/main fails the gate"
+      die_after_ready 1 "the PR merged with current origin/main fails the gate"
     fi
     guard_restore
     trap - EXIT INT TERM
@@ -344,11 +363,11 @@ if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit 
       sleep 5
       if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
         printf '%s\n' "$merge_err" >&2
-        die 1 "gh pr merge failed"
+        die_after_ready 1 "gh pr merge failed"
       fi
       [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
       ;;
-    *) die 1 "gh pr merge failed" ;;
+    *) die_after_ready 1 "gh pr merge failed" ;;
   esac
 else
   [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
@@ -360,7 +379,7 @@ for i in $(seq 1 12); do
   if [ "${state:-}" = "MERGED" ]; then merged=1; break; fi
   [ "$i" -lt 12 ] && sleep "${SHIP_PR_INTERVAL:-5}"
 done
-[ -n "$merged" ] || die 1 "PR $pr is not MERGED after 12 polls; worktree left in place"
+[ -n "$merged" ] || die_after_ready 1 "PR $pr is not MERGED after 12 polls; worktree left in place"
 
 # Step 9: clean up from the common git dir, never from inside the worktree being removed.
 common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"

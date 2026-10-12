@@ -446,11 +446,14 @@ origin_head >/dev/null && fail "guard passes: no local merge commit leaks to ori
 
 # gate fails only on the merged tree: print panic context and restore the pinned head
 GATE_PANIC_ON_MERGED="if [ ! -e bad ]; then echo gate-step-2-pass; exit 0; fi; $GATE_PANIC"
-setup; echo "$NOSTRICT" >"$ST/rules"; advance_main bad x
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main bad x; echo true >"$ST/draft"
 ship --gate "$GATE_PANIC_ON_MERGED"
-expect 1 "not strict guard fails on the merged tree"; no_merge "guard gate fails"
+expect 1 "not strict guard fails on the merged tree"
+! grep -q '^gh pr merge' "$ST/gh.log" || fail "guard gate fails: no merge call"
 assert_gate_panic_failure "step 7 gate"
-grep -q "the PR merged with current origin/main fails the gate" <<<"$ERR" || fail "guard gate message: [$ERR]"
+grep -qF 'ship-pr: the PR merged with current origin/main fails the gate; nothing merged, PR 7 is still marked ready' <<<"$ERR" \
+  || fail "guard gate status message: [$ERR]"
+grep -q '^gh pr ready 7 --repo O/N$' "$ST/gh.log" || fail "draft marked ready before the gate fails"
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD0" ] || fail "guard gate fails: worktree back on the pinned head"
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail "guard gate fails: worktree clean"
 [ -d "$WT" ] || fail "worktree kept when the guard gate fails"
