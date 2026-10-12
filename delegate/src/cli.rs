@@ -37,10 +37,11 @@ fn usage<T>(msg: impl Into<String>) -> Result<T, Usage> {
 
 pub fn main() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(
-        args.first().map(String::as_str),
-        Some("--help" | "-h" | "help")
-    ) {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+        || matches!(args.first().map(String::as_str), Some("help"))
+    {
         println!("{USAGE}");
         return 0;
     }
