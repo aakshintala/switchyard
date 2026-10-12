@@ -42,8 +42,9 @@
 #        an ancestor of the pinned head, merge it into the pinned head in a throwaway
 #        commit in --worktree, run the gate there, and restore the pinned head whatever
 #        happens (nothing is pushed). A merge conflict exits 3; a failing gate exits 1
-#        after the gate's last 20 lines; a pass merges as today. Without --gate the
-#        check is skipped.
+#        after printing its last 20 lines, panic context outside that tail, and the path
+#        to the full output saved under ${TMPDIR:-/tmp}/ship-pr-<pr>-gate.*. Passing gates
+#        leave no log file. Without --gate the check is skipped.
 #        --unverified-fixes <file> is for a fix round that answers no real bug (review-loop
 #        step 2), so it ships with no re-review. The file must be readable and hold a
 #        non-blank line, else exit 2 before anything else. On a patch-id mismatch, once per
@@ -61,6 +62,48 @@ usage() {
 }
 say() { echo "ship-pr: $*" >&2; }
 die() { local code="$1"; shift; say "$*"; exit "$code"; }
+
+print_panic_context() {
+  local full_log="$1" tail_lines="$2" tail_file panic_file
+  tail_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-tail.XXXXXX")"
+  panic_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-panic.XXXXXX")"
+  tail -n "$tail_lines" "$full_log" >"$tail_file"
+  awk '
+    FILENAME == ARGV[1] { tail[++tail_count] = $0; next }
+    { full[++full_count] = $0 }
+    END {
+      for (i = 1; i <= full_count; i++) {
+        if (!index(full[i], "panicked at")) continue
+        count = full_count - i + 1
+        if (count > 4) count = 4
+        found = 0
+        for (start = 1; start + count - 1 <= tail_count; start++) {
+          same = 1
+          for (j = 0; j < count; j++) if (tail[start + j] != full[i + j]) same = 0
+          if (same) { found = 1; break }
+        }
+        if (!found) for (j = 0; j < count; j++) print full[i + j]
+      }
+    }' "$tail_file" "$full_log" >"$panic_file"
+  if [ -s "$panic_file" ]; then
+    printf 'panic context (outside the last %s lines):\n' "$tail_lines"
+    cat "$panic_file"
+  fi
+  rm -f "$tail_file" "$panic_file"
+}
+
+run_gate() {
+  local output_file
+  output_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-gate.XXXXXX")"
+  if (cd "$worktree" && bash -c "$gate" </dev/null) >"$output_file" 2>&1; then
+    rm -f "$output_file"
+    return 0
+  fi
+  tail -n 20 "$output_file" || true
+  print_panic_context "$output_file" 20
+  printf 'full gate output: %s\n' "$output_file"
+  return 1
+}
 
 [ $# -ge 1 ] || usage
 pr="$1"; shift
@@ -178,10 +221,7 @@ rebase_main() {
 # code; it never changes what was reviewed. CI covers the rebased head.
 if [ -n "$gate" ]; then
   say "running gate"
-  if ! gate_out="$(cd "$worktree" && bash -c "$gate" </dev/null 2>&1)"; then
-    printf '%s\n' "$gate_out" | tail -n 20
-    die 1 "gate failed"
-  fi
+  run_gate || die 1 "gate failed"
   [ "$(git -C "$worktree" rev-parse HEAD)" = "$head0" ] && [ -z "$(git -C "$worktree" status --porcelain)" ] \
     || die 1 "the gate changed the worktree; commit nothing from a gate"
 fi
@@ -282,8 +322,7 @@ if [ "$strict" = 0 ] && [ -n "$gate" ]; then
       trap - EXIT INT TERM
       die 3 "PR conflicts with current origin/main; rebase, then rerun"
     fi
-    if ! gate_out="$(cd "$worktree" && bash -c "$gate" </dev/null 2>&1)"; then
-      printf '%s\n' "$gate_out" | tail -n 20
+    if ! run_gate; then
       guard_restore
       trap - EXIT INT TERM
       die 1 "the PR merged with current origin/main fails the gate"

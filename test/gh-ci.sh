@@ -784,6 +784,26 @@ OUT="$(GH_CI_LOG_LINES=5 bash "$GHCI" failures 123 2>"$T/stderr.txt")"; CODE=$?
 LINES="$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')"
 [ "$LINES" = "6" ] || fail "5 lines kept (got $LINES)"
 
+# A panic above the tail keeps its assertion context alongside the same tail.
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}'
+{
+  echo "thread 'prune::young_fork' panicked at src/prune.rs:42:5:"
+  echo 'assertion `left == right` failed'
+  echo '  left: 1'
+  echo ' right: 2'
+  for i in $(seq 1 10); do echo "retry summary $i"; done
+} >"$T/state/log-111.txt"
+OUT="$(GH_CI_LOG_LINES=5 bash "$GHCI" failures 123 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "panic context exits 0 (got $CODE): [$OUT]"
+grep -q '^panic context (outside the last 5 lines):$' <<<"$OUT" || fail "panic context heading: [$OUT]"
+grep -q "thread 'prune::young_fork' panicked at" <<<"$OUT" || fail "panic line outside the tail: [$OUT]"
+grep -q '^assertion `left == right` failed$' <<<"$OUT" || fail "assertion outside the tail: [$OUT]"
+grep -q '^  left: 1$' <<<"$OUT" || fail "left value outside the tail: [$OUT]"
+grep -q '^ right: 2$' <<<"$OUT" || fail "right value outside the tail: [$OUT]"
+grep -q '^retry summary 6$' <<<"$OUT" || fail "keeps the last five lines: [$OUT]"
+grep -q '^retry summary 5$' <<<"$OUT" && fail "drops lines before the last five: [$OUT]"
+
 # failures usage errors exit 2
 reset_state
 run_failures; [ "$CODE" = "2" ] || fail "failures with no argument exits 2 (got $CODE)"

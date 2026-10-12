@@ -82,6 +82,37 @@ superseded_note() {
   echo "skipped $n superseded runs: $1"
 }
 
+# Print panic excerpts from the full log unless the complete excerpt is already
+# present in the tail. Keep the panic line and its next three cleaned lines.
+print_panic_context() {
+  local full_log="$1" tail_lines="$2" tail_file panic_file
+  tail_file="$(mktemp "${TMPDIR:-/tmp}/gh-ci-tail.XXXXXX")"
+  panic_file="$(mktemp "${TMPDIR:-/tmp}/gh-ci-panic.XXXXXX")"
+  tail -n "$tail_lines" "$full_log" >"$tail_file"
+  awk '
+    FILENAME == ARGV[1] { tail[++tail_count] = $0; next }
+    { full[++full_count] = $0 }
+    END {
+      for (i = 1; i <= full_count; i++) {
+        if (!index(full[i], "panicked at")) continue
+        count = full_count - i + 1
+        if (count > 4) count = 4
+        found = 0
+        for (start = 1; start + count - 1 <= tail_count; start++) {
+          same = 1
+          for (j = 0; j < count; j++) if (tail[start + j] != full[i + j]) same = 0
+          if (same) { found = 1; break }
+        }
+        if (!found) for (j = 0; j < count; j++) print full[i + j]
+      }
+    }' "$tail_file" "$full_log" >"$panic_file"
+  if [ -s "$panic_file" ]; then
+    printf 'panic context (outside the last %s lines):\n' "$tail_lines"
+    cat "$panic_file"
+  fi
+  rm -f "$tail_file" "$panic_file"
+}
+
 # failures <run> | failures --pr <n>: cleaned digest of the failed and
 # cancelled jobs. With --pr, every failure/cancelled run on the PR head, ignoring superseded runs
 # (named on one line at the end); with <run>, that run only. A cancelled job prints one line and no log;
@@ -139,12 +170,16 @@ cmd_failures() {
         failure)
           printf '=== %s / %s (%s): failure\n' "$run_name" "$jname" "$jid"
           found=1
+          local failed_log
+          failed_log="$(mktemp "${TMPDIR:-/tmp}/gh-ci-failed-log.XXXXXX")"
           gh run view "$run_id" --repo "$REPO" --job "$jid" --log-failed 2>&1 \
             | sed "s/^[^${tab}]*${tab}[^${tab}]*${tab}//" \
             | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^[:space:]]*[[:space:]]+//' \
             | sed -E "s/(${esc}\[|\^\[\[)[0-9;]*[A-Za-z]//g" \
-            | sed '/^[[:space:]]*$/d' \
-            | tail -n "$log_lines" || true;;
+            | sed '/^[[:space:]]*$/d' >"$failed_log" || true
+          tail -n "$log_lines" "$failed_log" || true
+          print_panic_context "$failed_log" "$log_lines"
+          rm -f "$failed_log";;
       esac
     done <<<"$jobs"
   done <<<"$runs_list"
