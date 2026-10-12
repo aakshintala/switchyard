@@ -56,7 +56,7 @@ Each smell reads *what it is* → *how to fix*; match it against the diff:
 Read the diff once per axis, and follow each hunk into the code around it as far as the finding needs.
 
 - **Standards**: every place the diff breaks a documented standard (cite the file and rule), and any baseline smell (name it, quote the hunk). Skip anything tooling enforces.
-- **Spec**: requirements missing or partial; requirements that look implemented but wrong (quote the spec line).
+- **Spec**: requirements missing or partial; requirements that look implemented but wrong (quote the spec line). A criterion that asks for evidence the code can no longer produce, such as a repro of a path this diff or a merged fix deleted, or a failure a diagnosis didn't find, is met by a construction argument in the PR body, quoted from the code or the diagnosis's output: judge whether the argument holds, and raise a finding only when it doesn't.
 - **Scope check** (Spec axis): every file or hunk the diff modified that the ticket didn't ask for. An unrequested edit is a finding even when it looks like an improvement.
 - When the change touches security, permission, authentication or persistence, add the adversarial branch: try spelling tricks, fail-open inputs, weaker fallback identities, unresolvable indirection and TOCTOU gaps, plus one bypass family beyond the list.
 
