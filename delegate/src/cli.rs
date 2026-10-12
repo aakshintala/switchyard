@@ -616,6 +616,7 @@ fn supervise(args: &[String]) -> i32 {
     if let Ok(v) = std::env::var("DELEGATE_RETRY_DELAYS_MS") {
         rd.retry_delays_ms = v.split(',').filter_map(|d| d.trim().parse().ok()).collect();
     }
+    rd.record_id = Some(id.clone());
     rd.status_writer = Arc::new(CliRecordWriter {
         job_id: id.clone(),
         model: model.clone(),

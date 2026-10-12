@@ -43,7 +43,7 @@ A fiber model id is `fiber/` plus Fiber's own `provider/model` reference (e.g. `
 
 ## Status records
 
-Each job writes `$TMPDIR/delegate-jobs/<jobId>.json` (use `$TMPDIR` when set, otherwise the OS temp directory). Prompt text is stored alongside as `<jobId>.prompt` until the supervisor starts. When the supervisor resumed a session past a transient provider error (a 5xx, or a first 401), `result.retries` lists each failed attempt; it is absent when there were none.
+Each job writes `$TMPDIR/delegate-jobs/<jobId>.json` (use `$TMPDIR` when set, otherwise the OS temp directory). Prompt text is stored alongside as `<jobId>.prompt` until the supervisor starts. A gate writes its full ANSI-stripped output to `<jobId>-gate.log` beside the record; later gate runs for the same job use numbered names. `result.gateResult.outputPath` names the file, and `outputTail` remains the last 2048 bytes. When the supervisor resumed a session past a transient provider error (a 5xx, or a first 401), `result.retries` lists each failed attempt; it is absent when there were none.
 
 ## Host profile
 

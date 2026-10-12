@@ -27,6 +27,8 @@ pub struct JobDeps {
     pub finalize: FinalizeFn,
     pub finalize_stall: FinalizeFn,
     pub status_writer: Arc<dyn StatusRecordWriter>,
+    /// Public CLI record ID when it differs from the registry's internal ID.
+    pub record_id: Option<String>,
     pub heartbeat_ms: u64,
     pub retry_delays_ms: Vec<u64>,
 }
@@ -40,6 +42,7 @@ impl JobDeps {
             finalize: Arc::new(finalize_run),
             finalize_stall: Arc::new(finalize_stall),
             status_writer: Arc::new(crate::status_record::file_status_record_writer()),
+            record_id: None,
             heartbeat_ms: HEARTBEAT_MS,
             retry_delays_ms: RETRY_DELAYS_MS.to_vec(),
         }
@@ -425,6 +428,7 @@ impl JobHandle {
                 Arc::clone(&job.finalize_abort),
             )
         };
+        let record_id = self.deps.record_id.as_deref().unwrap_or(job_id).to_string();
         let ctx = FinalizeCtx {
             cwd: spec.cwd.clone(),
             head_before: spec.head_before.clone(),
@@ -436,7 +440,7 @@ impl JobHandle {
             model: spec.model.clone(),
             backend: spec.backend.clone(),
             price_map: spec.price_map.clone(),
-            job_id: Some(job_id.to_string()),
+            job_id: Some(record_id.clone()),
             run_gate: None,
             signal: Some(abort),
             git_delta: None,
@@ -457,7 +461,7 @@ impl JobHandle {
                 cost_usd: None,
                 cost_estimated: true,
                 duration_ms: None,
-                job_id: Some(job_id.to_string()),
+                job_id: Some(record_id),
                 stderr_tail: None,
                 gate_result: None,
                 change_set: None,
