@@ -4,7 +4,7 @@ The project's workflow doc is __WORKFLOW_DOC__; it wins where it speaks.
 
 ## Plan
 
-__PLAN__
+Read the plan at `__PLAN__` before anything else, and reread it after any compaction. If it can't be read, stop with `STATUS: NEEDS_CONTEXT`; work only from the file, never from memory of it.
 
 ## Rules
 
