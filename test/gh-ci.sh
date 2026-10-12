@@ -113,6 +113,9 @@ gh() (
           *" --log-failed "*)
             cat "$T/state/log-$_rv_job.txt"
             exit 0;;
+          *" --log "*)
+            cat "$T/state/runlog-$_rv_run.txt" 2>/dev/null || exit 1
+            exit 0;;
           *" --json jobs "*)
             [ ! -e "$T/state/jobs-fail" ] || { echo "fake gh: cannot read jobs" >&2; exit 1; }
             cat "$T/state/jobs-$_rv_run.json"
@@ -127,7 +130,17 @@ gh() (
         echo "fake gh: unknown run $1" >&2; exit 2;;
     esac
   fi
-  echo "fake gh: only pr, run and api supported" >&2; exit 2
+  if [ "$1" = "issue" ]; then
+    shift
+    [ "${1:-}" = "view" ] || { echo "fake gh: unknown issue ${1:-}" >&2; exit 2; }
+    shift; num="$1"; shift
+    jq_f=""
+    while [ $# -gt 0 ]; do case "$1" in -q) jq_f="$2"; shift 2;; *) shift;; esac; done
+    [ -e "$T/state/issue-$num-labels.txt" ] || { echo "gh: could not resolve issue $num" >&2; exit 1; }
+    jq -Rn '{labels: [inputs | select(length > 0) | {name: .}]}' "$T/state/issue-$num-labels.txt" | jq -r "$jq_f"
+    exit 0
+  fi
+  echo "fake gh: only pr, run, issue and api supported" >&2; exit 2
 )
 sleep() ( echo "$*" >>"$T/state/sleeps.txt" )
 export T
@@ -138,6 +151,7 @@ reset_state() {
   rm -f "$T/state/heads.txt" "$T/state/checks.txt" "$T/state/runs.txt" "$T/state/rules" "$T/state/rules-fail" "$T/state/classic" "$T/state/draft"
   rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail" "$T/state/not-found"
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
+  rm -f "$T/state"/issue-*-labels.txt "$T/state"/runlog-*.txt
   : >"$T/state/gh-args.txt"
 }
 
@@ -826,6 +840,39 @@ PANIC_OUT="$(printf '%s\n' \
 grep -q '^panic context (outside the last 5 lines):$' <<<"$PANIC_OUT" || fail "panic line index controls tail suppression: [$PANIC_OUT]"
 grep -q '^thread prune::young_fork panicked at src/prune.rs:42:5:$' <<<"$PANIC_OUT" \
   || fail "identical text in the tail does not suppress the earlier panic: [$PANIC_OUT]"
+
+# a failed "red commit" job whose ticket has lost its bug label: the hint
+# names the ticket and the run, and says to rerun the whole run
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"Bug fix fails at the red commit","conclusion":"failure"}]}'
+printf 'myjob\tmystep\t2026-10-07T12:00:01Z FAIL red\n' >"$T/state/log-111.txt"
+printf 'select\tcheck\t2026-10-07T12:00:00Z ticket: 77; bug: true\n' >"$T/state/runlog-123.txt"
+printf '%s\n' test-only >"$T/state/issue-77-labels.txt"
+run_failures 123
+[ "$CODE" = "0" ] || fail "red-commit hint exits 0 (got $CODE): [$OUT]"
+grep -qx "ticket #77 no longer has the bug label: rerun the whole run (gh run rerun 123, not --failed) or push" <<<"$OUT" \
+  || fail "red-commit hint names #77 and run 123: [$OUT]"
+
+# the same failure with the bug label still on the ticket: no hint
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"Bug fix fails at the red commit","conclusion":"failure"}]}'
+printf 'myjob\tmystep\t2026-10-07T12:00:01Z FAIL red\n' >"$T/state/log-111.txt"
+printf 'select\tcheck\t2026-10-07T12:00:00Z ticket: 77; bug: true\n' >"$T/state/runlog-123.txt"
+printf '%s\n' bug test-only >"$T/state/issue-77-labels.txt"
+run_failures 123
+[ "$CODE" = "0" ] || fail "red-commit with bug exits 0 (got $CODE): [$OUT]"
+grep -q "no longer has the bug label" <<<"$OUT" && fail "bug still labelled: no hint: [$OUT]"
+
+# a failed job with another name never looks the ticket up
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}'
+printf 'myjob\tmystep\t2026-10-07T12:00:01Z FAIL build\n' >"$T/state/log-111.txt"
+printf 'select\tcheck\t2026-10-07T12:00:00Z ticket: 77; bug: true\n' >"$T/state/runlog-123.txt"
+printf '%s\n' test-only >"$T/state/issue-77-labels.txt"
+run_failures 123
+[ "$CODE" = "0" ] || fail "other job exits 0 (got $CODE): [$OUT]"
+grep -q "no longer has the bug label" <<<"$OUT" && fail "other job name: no hint: [$OUT]"
+grep -q "gh issue" "$T/state/gh-args.txt" && fail "other job name: issue never looked up: [$(cat "$T/state/gh-args.txt")]"
 
 # failures usage errors exit 2
 reset_state

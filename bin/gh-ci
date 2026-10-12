@@ -112,6 +112,22 @@ cmd_panics() {
 # log lines (job/step columns, ISO timestamps, ANSI colours, real or
 # printed as literal ^[ text, and blank lines removed). A report, so exit 0 after printing; exit 1 when gh
 # cannot read the PR, runs or jobs.
+# red_commit_hint <run id> <job name>: a failed "red commit" job reruns from
+# the cached selection under --failed, so when the run's ticket has lost its
+# bug label, say a whole-run rerun is needed. Any failed lookup prints nothing.
+red_commit_hint() {
+  local run="$1" jname="$2" lower ticket labels
+  lower=$(printf '%s' "$jname" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in *"red commit"*) ;; *) return 0;; esac
+  ticket=$(gh run view "$run" --repo "$REPO" --log 2>/dev/null \
+    | sed -nE 's/.*ticket: ([0-9]+); bug: true.*/\1/p') || return 0
+  ticket="${ticket%%$'\n'*}" # first match; sed reads the whole log, so gh never sees SIGPIPE under pipefail
+  [ -n "$ticket" ] || return 0
+  labels=$(gh issue view "$ticket" --repo "$REPO" --json labels -q '.labels[].name' 2>/dev/null) || return 0
+  case "$(printf '\n%s\n' "$labels")" in *$'\nbug\n'*) return 0;; esac
+  echo "ticket #$ticket no longer has the bug label: rerun the whole run (gh run rerun $run, not --failed) or push"
+}
+
 cmd_failures() {
   local log_lines="${GH_CI_LOG_LINES:-60}"
   case "$log_lines" in ''|*[!0-9]*) usage;; esac
@@ -173,7 +189,8 @@ cmd_failures() {
             | sed '/^[[:space:]]*$/d' >"$failed_log" || true
           tail -n "$log_lines" "$failed_log" || true
           cmd_panics "$log_lines" <"$failed_log"
-          rm -f "$failed_log";;
+          rm -f "$failed_log"
+          red_commit_hint "$run_id" "$jname";;
       esac
     done <<<"$jobs"
   done <<<"$runs_list"
