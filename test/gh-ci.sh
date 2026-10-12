@@ -224,6 +224,23 @@ grep -q "head: ${A:0:8} CI: fail" <<<"$OUT" || fail "fail header: [$OUT]"
 grep -q "^failing: ci$" <<<"$OUT" || fail "failing job named: [$OUT]"
 grep -q "failing: lint" <<<"$OUT" && fail "passing job not listed: [$OUT]"
 
+# --- cases: --fail-fast. A failed required check returns at once while another
+# --- required check is still pending; without the flag the wait keeps polling.
+FF_RULES='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"},{"context":"lint"}]}}]'
+reset_state
+set_heads "$A"; echo "$FF_RULES" >"$T/state/rules"
+set_checks '[{"bucket":"fail","name":"ci"},{"bucket":"pending","name":"lint"}]'
+run_wait 7 --timeout 7 --fail-fast
+[ "$CODE" = "1" ] || fail "--fail-fast returns 1 on a failure with a check pending (got $CODE): [$OUT]"
+grep -q "^failing: ci$" <<<"$OUT" || fail "--fail-fast names the failing check: [$OUT]"
+[ ! -e "$T/state/sleeps.txt" ] || fail "--fail-fast does not wait for the pending check: [$(tr '\n' ' ' <"$T/state/sleeps.txt")]"
+
+reset_state
+set_heads "$A"; echo "$FF_RULES" >"$T/state/rules"
+set_checks '[{"bucket":"fail","name":"ci"},{"bucket":"pending","name":"lint"}]'
+run_wait 7 --timeout 7
+[ "$CODE" = "124" ] || fail "without --fail-fast a pending check keeps the wait going (got $CODE): [$OUT]"
+
 # --- case: cancel counts as failing
 reset_state
 set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
