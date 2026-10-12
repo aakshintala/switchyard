@@ -106,9 +106,7 @@ report_flakes() {
 }
 
 check_free_space() {
-  local path="$1" disk_info available mount min_free_kb
-  min_free_kb="${SHIP_PR_MIN_FREE_KB:-20971520}"
-  case "$min_free_kb" in ''|*[!0-9]*) min_free_kb=20971520 ;; esac
+  local path="$1" disk_info available mount min_free_kb=20971520
   if ! disk_info="$(df -Pk "$path" 2>/dev/null | awk 'NR > 1 { print $4 "\t" $NF; exit }')"; then
     die 1 "cannot check free space on $path"
   fi
@@ -122,7 +120,7 @@ check_free_space() {
 
 gate_preflight() {
   local tmpdir="${TMPDIR:-/tmp}"
-  find "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true
+  find -H "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true
   check_free_space "$worktree"
   check_free_space "$tmpdir"
 }

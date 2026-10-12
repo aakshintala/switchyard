@@ -6,6 +6,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHIP="$SCRIPT_DIR/../bin/ship-pr"
+BASE_PATH="$PATH"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -277,23 +278,31 @@ expect 0 "gate runs in the worktree"
 
 # disk preflight blocks a low-space gate, and its cache sweep only removes old xcrun files
 setup
-df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/fake 1000000 950000 50000 95%% /fake\n'; }
-export -f df
+mkdir -p "$S/bin"
+printf '%s\n' '#!/bin/sh' \
+  "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/fake 1000000 950000 50000 95%% /fake\\n'" \
+  >"$S/bin/df"
+chmod +x "$S/bin/df"
+PATH="$S/bin:$BASE_PATH"; export PATH
 ship --gate 'touch "$ST/gate-ran"'
 expect 1 "low free space refuses the gate"
 grep -Fq 'ship-pr: only 0 GB free on /fake; a gate needs 20 GB. Free space, then rerun.' <<<"$ERR" \
   || fail "low free space message: [$ERR]"
 [ ! -e "$ST/gate-ran" ] || fail "low free space starts no gate"
 no_merge "low free space"
-unset -f df
+PATH="$BASE_PATH"; export PATH
 
 setup
+cache_dir="$T/cache-target"; cache_link="$T/cache-tmp"
+mkdir -p "$cache_dir"; ln -s "$cache_dir" "$cache_link"
+TMPDIR="$cache_link"; export TMPDIR
 touch "$TMPDIR/xcrun_db-x" "$TMPDIR/xcrun_db-fresh" "$TMPDIR/other-cache"
 touch -t 202001010000 "$TMPDIR/xcrun_db-x" "$TMPDIR/other-cache"
-ship --gate true; expect 0 "stale cache sweep does not block a gate"
-[ ! -e "$TMPDIR/xcrun_db-x" ] || fail "old xcrun cache deleted"
-[ -f "$TMPDIR/xcrun_db-fresh" ] || fail "fresh xcrun cache kept"
-[ -f "$TMPDIR/other-cache" ] || fail "other old file kept"
+ship --gate true; expect 0 "stale cache sweep follows a symlinked TMPDIR"
+[ ! -e "$TMPDIR/xcrun_db-x" ] || fail "old xcrun cache deleted through TMPDIR symlink"
+[ -f "$TMPDIR/xcrun_db-fresh" ] || fail "fresh xcrun cache kept through TMPDIR symlink"
+[ -f "$TMPDIR/other-cache" ] || fail "other old file kept through TMPDIR symlink"
+TMPDIR="$T/tmp"; export TMPDIR
 
 # ===== exit 1 and 124: push and CI
 setup; echo '[{"bucket":"fail","name":"ci"},{"bucket":"pass","name":"lint"}]' >"$ST/checks"
