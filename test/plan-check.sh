@@ -81,9 +81,8 @@ expect_clean "new exempts a Files path and its task line" "$(mkplan newok '## Fi
 expect_problems "newer is not new" "$(mkplan newer '## Files\n- `src/nope.rs` (newer)\n')" \
   'missing path: src/nope.rs (line 5)'
 
-# 5. an ambiguous basename does not resolve
-expect_problems "ambiguous basename" "$(mkplan ambig '## Rulings\nSee `x.rs`.\n')" \
-  'missing path: x.rs (line 5)'
+# 5. an ambiguous suffix (two files end in /x.rs) resolves but stays out of the Files check
+expect_clean "ambiguous suffix is not outside Files" "$(mkplan ambig '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `x.rs`.\n')"
 
 # 6. a task path outside Files
 expect_problems "task path outside Files" "$(mkplan outside '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `docs/guide.md` and `src/lib.rs`.\n')" \
@@ -106,6 +105,38 @@ expect_problems "symbols" "$(mkplan syms '## Rulings\nCall `NoSuchThing()` and `
 
 # 11. a plain lowercase word or a prose token is not a symbol or a path
 expect_clean "plain words are not checked" "$(mkplan words '## Rulings\nUse `cargo`, `run` and `bash test/run` as written.\n')"
+
+# 11a. skip rule: placeholders, globs, spaces, bare extensions and `/`, `.`, `..` are not checked
+expect_clean "skipped tokens" "$(mkplan skiptok '## Rulings\n`providers/<name>.lua` `tests/*.json` `a b/x.rs` `.lua` `/` `.` `..` `../x`\n')"
+
+# 11b. suffix rule: a path matching nothing is reported only under a top-level entry
+expect_problems "suffix: top-level zero match is missing" "$(mkplan topzero '## Rulings\nSee `docs/nope.md` and `providers/acme.json`.\n')" \
+  'missing path: docs/nope.md (line 5)'
+expect_clean "suffix: non-top-level zero match is skipped" "$(mkplan fixture '## Rulings\nSee `providers/acme.json`.\n')"
+expect_clean "suffix: a Files suffix resolves for a task" "$(mkplan suffixok '## Files\n- `unique.toml`\n\n## Tasks\n1. Edit `cfg/unique.toml`.\n')"
+
+# 11c. brace rule: one group expands per alternative; two groups are skipped
+expect_problems "braces: each alternative checked" "$(mkplan braces '## Files\n- `src/{lib,later}.rs`\n\n## Rulings\nSee `src/{nope,lib}.rs` and `{a,b}/{c,d}.rs`.\n')" \
+  'missing path: src/nope.rs (line 8)'
+expect_problems "braces: an alternative outside Files" "$(mkplan bouts '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/{lib,later}.rs`.\n')" \
+  'outside Files: src/later.rs (line 8)'
+
+# 11d. path::symbol rule: the path and the symbol are checked separately
+expect_problems "path::symbol: unknown symbol" "$(mkplan split1 '## Rulings\n`src/lib.rs::make_widget` and `src/lib.rs::NoSuch`.\n')" \
+  'unknown symbol: NoSuch (line 5)'
+expect_problems "path::symbol: missing path" "$(mkplan split2 '## Rulings\n`src/nope.rs::make_widget`.\n')" \
+  'missing path: src/nope.rs (line 5)'
+
+# 11e. directory rule: a directory resolves by its trailing slash; Files covers it by prefix
+expect_clean "directory covered by a Files path" "$(mkplan dirok '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/`.\n')"
+expect_problems "directory not covered by Files" "$(mkplan dirout '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/` and `docs/`.\n')" \
+  'outside Files: docs/ (line 8)'
+
+# 11f. symbol rule: Tasks is not checked; Red commit is; a backticked token on a new line exempts
+expect_clean "symbols in Tasks are not checked" "$(mkplan tasksym '## Tasks\n1. Add `NoSuchThing()`.\n')"
+expect_problems "symbols in Red commit are checked" "$(mkplan redsym '## Red commit\n`Frob_Thing`\n')" \
+  'unknown symbol: Frob_Thing (line 5)'
+expect_clean "new line exempts a symbol in a backticked token" "$(mkplan newsym '## Rulings\nAdd new `src/x.rs::Brand_New`.\nCall `Brand_New`.\n')"
 
 # 12. --base overrides the Base line: src/later.rs is absent at BASE1
 later="$(mkplan later '## Files\n- `src/later.rs`\n')"

@@ -6,13 +6,21 @@
 #        the plan's repo (default: the current directory). Callers pass --base
 #        origin/main to check against the fresh base.
 #        Reads the single-backtick tokens outside fenced blocks and the `## Gate`
-#        section, and checks:
-#        1. a path (no spaces; a `/` or a source or doc extension) resolves at REV,
-#           by full path or by a basename that names exactly one file. A path on a
-#           line with the word `new` is exempt.
-#        2. every resolved path in `## Tasks` or `## Red commit` is in `## Files`.
-#        3. a symbol (an identifier with `_`, `::` or an uppercase letter after its
-#           first character) occurs at REV, or a plan line says `new` with it.
+#        section. Skipped: a token with `<`, `>`, `*` or a space, and `/`, `.`,
+#        `..` or a bare extension. A token with one `{a,b}` group is checked once
+#        per alternative; with more than one group it is skipped. A `path::symbol`
+#        token is split and both halves are checked.
+#        1. A path (a `/` or a source or doc extension) resolves at REV: by full
+#           path, a directory by its trailing `/`, or by a suffix that names exactly
+#           one file. A suffix naming two or more files resolves but is left out of
+#           check 2. A path that matches nothing is reported only when its first
+#           segment is a top-level entry at REV. A path on a line with the word
+#           `new` is exempt.
+#        2. Every resolved path in `## Tasks` or `## Red commit` is in `## Files`.
+#           A directory counts as in Files when a Files path starts with it.
+#        3. A symbol (an identifier with `_`, `::` or an uppercase letter after its
+#           first character) outside `## Tasks` occurs at REV, or a line with the
+#           word `new` holds a backticked token containing its last `::` segment.
 #        Exit 0, nothing printed: clean. Exit 1: one line per problem on stdout.
 #        Exit 2 on bad usage, an unreadable plan, no Base line and no --base, or a
 #        REV that is not a commit in DIR.
@@ -35,6 +43,15 @@ problem() {
   FOUND=1
 }
 
+# is_path TOKEN: no spaces, and a `/` or a known extension
+is_path() {
+  case "$1" in
+    *" "*) return 1 ;;
+    */*|*.rs|*.md|*.toml|*.lua|*.json|*.sh|*.yml|*.yaml|*.lock|*.txt|*.snap) return 0 ;;
+  esac
+  return 1
+}
+
 # is_symbol TOKEN: an identifier with `_`, `::` or an uppercase letter after its first character
 is_symbol() {
   local s="$1" symre='^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$'
@@ -45,9 +62,112 @@ is_symbol() {
   [[ ${s:1} =~ [A-Z] ]]
 }
 
-# named_new TOKEN: true when a plan line holds both TOKEN and the whole word `new`
-named_new() {
-  awk -v t="$1" 'index($0, t) && tolower($0) ~ /(^|[^a-z0-9_])new([^a-z0-9_]|$)/ { found = 1 } END { exit (found ? 0 : 1) }' "$plan"
+# exempt_new NAME: true when a plan line has the whole word `new` and a backticked token holding NAME
+exempt_new() {
+  awk -v s="$1" '
+    tolower($0) ~ /(^|[^a-z0-9_])new([^a-z0-9_]|$)/ {
+      n = split($0, parts, "`")
+      for (i = 2; i <= n; i += 2)
+        if (parts[i] ~ ("(^|[^A-Za-z0-9_])" s "([^A-Za-z0-9_]|$)")) found = 1
+    }
+    END { exit (found ? 0 : 1) }' "$plan"
+}
+
+# check_path PATH: resolve PATH at REV, then apply checks 1 and 2 to it
+check_path() {
+  local p="$1" res="" out cnt m seg
+  case "$p" in
+    */) if git -C "$dir" cat-file -e "$rev:${p%/}" 2>/dev/null; then res="$p"; fi ;;
+    *) if git -C "$dir" cat-file -e "$rev:$p" 2>/dev/null; then res="$p"; fi ;;
+  esac
+  if [ -z "$res" ]; then
+    out="$(awk -v t="$p" '{
+      if ($0 == t || (length($0) > length(t) && substr($0, length($0) - length(t)) == "/" t)) { c++; m = $0 }
+    } END { printf "%d\t%s\n", c, m }' <<<"$tree")"
+    cnt="${out%%$'\t'*}"
+    m="${out#*$'\t'}"
+    if [ "$cnt" = 1 ]; then
+      res="$m"
+    elif [ "$cnt" -ge 2 ]; then
+      return 0
+    fi
+  fi
+  if [ -z "$res" ]; then
+    if [ "$CUR_NEW" = 1 ]; then
+      [ "$CUR_SEC" != files ] || FILES="$FILES$p|"
+      return 0
+    fi
+    seg="${p%%/*}"
+    case "$TOPLIST" in *"|$seg|"*) ;; *) return 0 ;; esac
+    if ! seen "m:$p"; then
+      problem "missing path: $p (line $CUR_LN)"
+    fi
+    return 0
+  fi
+  case "$CUR_SEC" in
+    files) FILES="$FILES$res|" ;;
+    tasks|red) TASKS="$TASKS$res"$'\t'"$CUR_LN"$'\n' ;;
+  esac
+  return 0
+}
+
+# check_symbol SYMBOL: check 3, skipped inside the Tasks section
+check_symbol() {
+  local s="$1" last
+  [ "$CUR_SEC" != tasks ] || return 0
+  case "$s" in *"()") s="${s%??}" ;; esac
+  last="${s##*::}"
+  if git -C "$dir" grep -q -w -F -e "$last" "$rev" 2>/dev/null; then return 0; fi
+  if exempt_new "$last"; then return 0; fi
+  if ! seen "s:$1"; then
+    problem "unknown symbol: $1 (line $CUR_LN)"
+  fi
+  return 0
+}
+
+# check_plain TOKEN: one token, with no brace group left to expand
+check_plain() {
+  local p="$1"
+  if [[ $p =~ $portre ]]; then p="${p%"${BASH_REMATCH[0]}"}"; fi
+  case "$p" in
+    *.rs::*|*.md::*|*.toml::*|*.lua::*|*.json::*|*.sh::*|*.yml::*|*.yaml::*|*.lock::*|*.txt::*|*.snap::*)
+      check_path "${p%%::*}"
+      check_symbol "${p#*::}"
+      return 0 ;;
+  esac
+  if is_path "$p"; then
+    check_path "$p"
+  elif is_symbol "$p"; then
+    check_symbol "$p"
+  fi
+  return 0
+}
+
+# check_token TOKEN: skip rules, then brace expansion, then check_plain
+check_token() {
+  local t="$1" tmp n pre rest inner suf item
+  case "$t" in *"<"*|*">"*|*"*"*|*" "*) return 0 ;; esac
+  case "$t" in
+    /|.|..) return 0 ;;
+    .*) case "$t" in */*) ;; *) return 0 ;; esac ;;
+  esac
+  case "$t" in
+    *"{"*)
+      case "$t" in *"}"*) ;; *) return 0 ;; esac
+      tmp="${t//\{/}"
+      n=$(( ${#t} - ${#tmp} ))
+      [ "$n" -eq 1 ] || return 0
+      pre="${t%%\{*}"
+      rest="${t#*\{}"
+      inner="${rest%%\}*}"
+      suf="${rest#*\}}"
+      while IFS= read -r item; do
+        check_plain "$pre$item$suf"
+      done <<<"$(awk -v s="$inner" 'BEGIN { n = split(s, a, ","); for (i = 1; i <= n; i++) print a[i] }')"
+      return 0 ;;
+  esac
+  check_plain "$t"
+  return 0
 }
 
 plan=""
@@ -78,6 +198,7 @@ if ! git -C "$dir" rev-parse -q --verify "$rev^{commit}" >/dev/null 2>&1; then
 fi
 
 tree="$(git -C "$dir" ls-tree -r --name-only "$rev")"
+TOPLIST="|$(git -C "$dir" ls-tree --name-only "$rev" | tr '\n' '|')"
 
 # One record per token: section, line number, whether the line says `new`, the token.
 # Fenced blocks and the Gate section are skipped.
@@ -107,57 +228,21 @@ SEEN="|"
 FILES="|"
 TASKS=""
 
-while IFS=$'\t' read -r sec ln isnew tok; do
+while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW tok; do
   [ -n "$tok" ] || continue
-  p="$tok"
-  if [[ $p =~ $portre ]]; then p="${p%"${BASH_REMATCH[0]}"}"; fi
-
-  is_path=0
-  case "$p" in
-    *" "*) ;;
-    */*|*.rs|*.md|*.toml|*.lua|*.json|*.sh|*.yml|*.yaml|*.lock|*.txt|*.snap) is_path=1 ;;
-  esac
-
-  if [ "$is_path" = 1 ]; then
-    res=""
-    if git -C "$dir" cat-file -e "$rev:$p" 2>/dev/null; then
-      res="$p"
-    else
-      case "$p" in
-        */*) ;;
-        *) res="$(awk -v b="$p" '{ n = split($0, a, "/"); if (a[n] == b) { c++; m = $0 } } END { if (c == 1) print m }' <<<"$tree")" ;;
-      esac
-    fi
-    if [ -z "$res" ]; then
-      if [ "$isnew" = 1 ]; then
-        [ "$sec" != files ] || FILES="$FILES$p|"
-      elif ! seen "m:$tok"; then
-        problem "missing path: $tok (line $ln)"
-      fi
-    else
-      case "$sec" in
-        files) FILES="$FILES$res|" ;;
-        tasks|red) TASKS="$TASKS$res"$'\t'"$ln"$'\n' ;;
-      esac
-    fi
-  elif is_symbol "$tok"; then
-    name="$tok"
-    case "$name" in *"()") name="${name%??}" ;; esac
-    last="${name##*::}"
-    if git -C "$dir" grep -q -w -F -e "$last" "$rev" 2>/dev/null; then
-      :
-    elif named_new "$tok"; then
-      :
-    elif ! seen "s:$tok"; then
-      problem "unknown symbol: $tok (line $ln)"
-    fi
-  fi
+  check_token "$tok"
 done <<<"$records"
 
 # Task and Red commit paths must sit under Files; Files is complete only now.
 while IFS=$'\t' read -r p ln; do
   [ -n "$p" ] || continue
-  case "$FILES" in *"|$p|"*) continue ;; esac
+  case "$p" in
+    */)
+      d="${p%/}"
+      case "$FILES" in *"|$d/"*) continue ;; esac ;;
+    *)
+      case "$FILES" in *"|$p|"*) continue ;; esac ;;
+  esac
   if ! seen "o:$p"; then
     problem "outside Files: $p (line $ln)"
   fi
