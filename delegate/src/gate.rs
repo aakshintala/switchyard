@@ -7,6 +7,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Only the last 2048 bytes of stdout+stderr are reported, so keep that much of each.
@@ -24,14 +25,87 @@ pub struct GateOpts<'a> {
     pub signal: Option<&'a Abort>,
 }
 
-fn read_all(mut r: impl Read) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut buf = [0u8; 4096];
-    while let Ok(n) = r.read(&mut buf) {
-        if n == 0 {
-            break;
+#[derive(Clone, Copy, Default)]
+enum AnsiState {
+    #[default]
+    Text,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+#[derive(Default)]
+struct AnsiStripper {
+    state: AnsiState,
+}
+
+impl AnsiStripper {
+    fn write_stripped(&mut self, bytes: &[u8], writer: &mut impl Write) -> std::io::Result<()> {
+        let mut clean = Vec::with_capacity(bytes.len());
+        for &byte in bytes {
+            match self.state {
+                AnsiState::Text if byte == b'\x1b' => self.state = AnsiState::Escape,
+                AnsiState::Text => clean.push(byte),
+                AnsiState::Escape => {
+                    self.state = match byte {
+                        b'[' => AnsiState::Csi,
+                        b']' => AnsiState::Osc,
+                        _ => AnsiState::Text,
+                    };
+                }
+                AnsiState::Csi if (b'@'..=b'~').contains(&byte) => {
+                    self.state = AnsiState::Text;
+                }
+                AnsiState::Csi => {}
+                AnsiState::Osc if byte == 0x07 => self.state = AnsiState::Text,
+                AnsiState::Osc if byte == b'\x1b' => self.state = AnsiState::OscEscape,
+                AnsiState::Osc => {}
+                AnsiState::OscEscape if byte == b'\\' || byte == 0x07 => {
+                    self.state = AnsiState::Text;
+                }
+                AnsiState::OscEscape if byte == b'\x1b' => {}
+                AnsiState::OscEscape => self.state = AnsiState::Osc,
+            }
         }
-        output.extend_from_slice(&buf[..n]);
+        writer.write_all(&clean)
+    }
+}
+
+#[derive(Default)]
+struct StreamOutput {
+    tail: Vec<u8>,
+    error: Option<String>,
+}
+
+fn read_stream(mut reader: impl Read, name: &str, log: Option<Arc<Mutex<File>>>) -> StreamOutput {
+    let mut output = StreamOutput {
+        tail: Vec::with_capacity(KEEP),
+        error: None,
+    };
+    let mut stripper = AnsiStripper::default();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                output.error = Some(format!("cannot read gate {name}: {e}"));
+                break;
+            }
+        };
+        output.tail.extend_from_slice(&buf[..n]);
+        if output.tail.len() > KEEP {
+            output.tail.drain(..output.tail.len() - KEEP);
+        }
+        if let Some(log) = &log
+            && output.error.is_none()
+        {
+            let mut file = log.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = stripper.write_stripped(&buf[..n], &mut *file) {
+                output.error = Some(format!("cannot write gate output log: {e}"));
+            }
+        }
     }
     output
 }
@@ -56,11 +130,20 @@ fn create_output_log(job_id: &str) -> std::io::Result<(PathBuf, File)> {
     unreachable!("gate log run counter exhausted")
 }
 
+fn append_error(error: &mut Option<String>, message: String) {
+    if let Some(error) = error {
+        error.push_str("; ");
+        error.push_str(&message);
+    } else {
+        *error = Some(message);
+    }
+}
+
 fn record_output(output: &str, file: &mut Option<File>, error: &mut Option<String>) {
     if let Some(file) = file
         && let Err(e) = file.write_all(output.as_bytes())
     {
-        *error = Some(format!("cannot write gate output log: {e}"));
+        append_error(error, format!("cannot write gate output log: {e}"));
     }
 }
 
@@ -133,9 +216,12 @@ fn run_gate_inner(
     let pgid = child.id() as libc::pid_t;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
+    let output_log = output_file.take().map(|file| Arc::new(Mutex::new(file)));
+    let out_log = output_log.clone();
+    let err_log = output_log.clone();
     let (status, killed, out, err) = std::thread::scope(|s| {
-        let out = s.spawn(|| read_all(stdout));
-        let err = s.spawn(|| read_all(stderr));
+        let out = s.spawn(move || read_stream(stdout, "stdout", out_log));
+        let err = s.spawn(move || read_stream(stderr, "stderr", err_log));
         let mut termed_at: Option<Instant> = None;
         let status = loop {
             match child.try_wait() {
@@ -169,13 +255,23 @@ fn run_gate_inner(
             err.join().unwrap_or_default(),
         )
     });
-    let combined = String::from_utf8_lossy(&out).into_owned() + &String::from_utf8_lossy(&err);
-    let clean_output = strip_ansi(&combined);
-    record_output(&clean_output, &mut output_file, &mut output_error);
-    let out_tail = &out[out.len().saturating_sub(KEEP)..];
-    let err_tail = &err[err.len().saturating_sub(KEEP)..];
+    if let Some(error) = out.error {
+        append_error(&mut output_error, error);
+    }
+    if let Some(error) = err.error {
+        append_error(&mut output_error, error);
+    }
+    if let Some(log) = output_log {
+        let mut file = log.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = file.flush() {
+            append_error(
+                &mut output_error,
+                format!("cannot flush gate output log: {e}"),
+            );
+        }
+    }
     let combined_tail =
-        String::from_utf8_lossy(out_tail).into_owned() + &String::from_utf8_lossy(err_tail);
+        String::from_utf8_lossy(&out.tail).into_owned() + &String::from_utf8_lossy(&err.tail);
     let exit_code = match status {
         Some(st) => st.code().unwrap_or(1),
         None => 1,
@@ -282,7 +378,7 @@ mod tests {
     fn gate_output_file_keeps_every_line_and_strips_ansi() {
         let job_id = crate::util::random_uuid();
         let r = run_gate_for_job(
-            r#"seq 1 3000; printf '\033[31mansi\033[0m\n'; seq 3001 4000 >&2"#,
+            r#"seq 1 4000; printf '\033[31mansi\033[0m\n'"#,
             &std::env::current_dir().unwrap().to_string_lossy(),
             &job_id,
             gate_opts(),
@@ -292,9 +388,8 @@ mod tests {
         let path = PathBuf::from(r.output_path.as_deref().unwrap());
         assert_eq!(path.parent(), job_record_path(&job_id).parent());
 
-        let mut expected = (1..=3000).map(|n| format!("{n}\n")).collect::<String>();
+        let mut expected = (1..=4000).map(|n| format!("{n}\n")).collect::<String>();
         expected.push_str("ansi\n");
-        expected.push_str(&(3001..=4000).map(|n| format!("{n}\n")).collect::<String>());
         let output = fs::read_to_string(&path).unwrap();
         assert_eq!(output, expected);
         assert!(!output.contains('\x1b'));
@@ -307,7 +402,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let cwd = cwd.to_string_lossy();
         let first = run_gate_for_job("printf first", &cwd, &job_id, gate_opts());
-        let second = run_gate_for_job("printf second", &cwd, &job_id, gate_opts());
+        let second = run_gate_for_job("printf second >&2", &cwd, &job_id, gate_opts());
         let first_path = PathBuf::from(first.output_path.as_deref().unwrap());
         let second_path = PathBuf::from(second.output_path.as_deref().unwrap());
 
@@ -332,6 +427,21 @@ mod tests {
         assert_eq!(fs::read_to_string(&second_path).unwrap(), "second");
         let _ = fs::remove_file(first_path);
         let _ = fs::remove_file(second_path);
+    }
+
+    #[test]
+    fn ansi_stripper_handles_escape_sequences_split_across_chunks() {
+        let mut stripper = AnsiStripper::default();
+        let mut output = Vec::new();
+
+        stripper
+            .write_stripped(b"before\x1b[3", &mut output)
+            .unwrap();
+        stripper
+            .write_stripped(b"1mred\x1b[0m-after", &mut output)
+            .unwrap();
+
+        assert_eq!(output, b"beforered-after");
     }
 
     #[test]

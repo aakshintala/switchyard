@@ -483,6 +483,11 @@ fn gate_fail_downgrades_and_records_output() {
         "{done}"
     );
     let output_path = done["result"]["gateResult"]["outputPath"].as_str().unwrap();
+    let basename = Path::new(output_path)
+        .file_name()
+        .unwrap()
+        .to_string_lossy();
+    assert!(basename.starts_with(&format!("{id}-gate")), "{basename}");
     assert!(
         printed.contains(output_path),
         "watch output omitted {output_path}"
