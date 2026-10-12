@@ -48,7 +48,7 @@ Skip the preflight when a new ticket is **current**: the preflight exists to cat
 
 - It names every file it touches and leaves no decision open.
 - Every named file exists at `origin/main` (`git cat-file -e origin/main:<file>`).
-- The ticket body names its filing commit, and `git log origin/main --since=<since> -- <named files> <docs it cites>` prints nothing. `<since>` is the later of the filing commit's date (`git show -s --format=%cI <commit>`) and the body's last edit (`gh api graphql -f query='{repository(owner:"<o>",name:"<r>"){issue(number:<n>){lastEditedAt}}}'`; null means never edited).
+- The ticket body names its filing commit, and `git log <filing commit>..origin/main -- <named files> <docs it cites>` prints nothing (two dots: what landed after the filing commit, never the commit itself). When the body was edited after that commit's date (`git show -s --format=%cI <commit>` against `gh api graphql -f query='{repository(owner:"<o>",name:"<r>"){issue(number:<n>){lastEditedAt}}}'`; null means never edited), add `--since=<lastEditedAt>`.
 
 A ticket whose files all sit under a prototype path the workflow doc names checks its named files alone, not the docs it cites. Any miss runs the full preflight below. After a skip, whoever writes the plan gets the ticket in place of the preflight's report.
 
