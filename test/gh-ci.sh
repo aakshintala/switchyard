@@ -836,6 +836,12 @@ reset_state
 run_failures abc; [ "$CODE" = "2" ] || fail "failures abc exits 2 (got $CODE)"
 [ ! -s "$T/state/gh-args.txt" ] || fail "failures abc makes no gh call: [$(cat "$T/state/gh-args.txt")]"
 
+# a run id whose jobs cannot be read hints at --pr, exit 1
+reset_state
+: >"$T/state/jobs-fail"
+run_failures 2136; [ "$CODE" = "1" ] || fail "failures 2136 with unreadable jobs exits 1 (got $CODE)"
+grep -q 'gh-ci failures --pr 2136' "$T/stderr.txt" || fail "unreadable run hints at --pr: [$(cat "$T/stderr.txt")]"
+
 # --- cases: --repo. From a non-git cwd with no GH_CI_REPO, the flag alone
 # --- names the repo (leading position here), and it never asks gh for the
 # --- checkout's origin
