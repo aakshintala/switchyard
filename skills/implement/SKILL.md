@@ -66,7 +66,7 @@ Done when the lane brief is filled.
 
 ### 4. Lane
 
-A plan written before this run goes stale when `origin/main` changes what it describes. Before dispatching one, list the commits since it was last posted: `git log --oneline origin/main --since=<updatedAt of its newest plan comment> -- <every path under Files>`. Any output sends the plan back through `planning` step 3 against the current base; dispatch once the Verifier passes.
+**Stale-plan check.** A plan goes stale when `origin/main` changes a file it names. Before each Verifier round and before dispatching a lane, run `git diff --stat <the plan's Base line> origin/main -- <every path under Files>`. Empty output means the plan is current, even when the SHAs differ: go on. Otherwise revise the tasks that touch the changed files against the current base, update the Base line, and send the plan through `planning` step 3; dispatch once the Verifier passes. A plan with no Base line takes its newest plan comment's `updatedAt`: `git log --oneline origin/main --since=<updatedAt> -- <every path under Files>`.
 
 For a new ticket, cut a worktree from `origin/main`; a re-plan's lane works in the PR's worktree. Dispatch the lane brief on a model at the plan's Rung (per the `delegate` skill). The lane brief was filled with `fill-brief --out <absolute path>`; use the printed line verbatim as the lane's prompt, never a hand-written path.
 
