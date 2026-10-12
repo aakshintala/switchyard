@@ -77,6 +77,10 @@ expect_problems "missing path" "$(mkplan missing '## Rulings\nSee `src/nope.rs`.
 # 3. a path on a line with the word new is exempt; a task line needs new too
 expect_clean "new exempts a Files path and its task line" "$(mkplan newok '## Files\n- `src/brand.rs` (New file)\n\n## Tasks\n1. Write new `src/brand.rs` with `WidgetThing`.\n')"
 
+# 3a. a new task path that is not in Files is still checked by check 2
+expect_problems "new task path outside Files" "$(mkplan newout '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Create new `bin/brand-new-check`.\n')" \
+  'outside Files: bin/brand-new-check (line 8)'
+
 # 4. new as part of a longer word does not exempt
 expect_problems "newer is not new" "$(mkplan newer '## Files\n- `src/nope.rs` (newer)\n')" \
   'missing path: src/nope.rs (line 5)'

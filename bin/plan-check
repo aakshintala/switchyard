@@ -15,7 +15,7 @@
 #           one file. A suffix naming two or more files resolves but is left out of
 #           check 2. A path that matches nothing is reported only when its first
 #           segment is a top-level entry at REV. A path on a line with the word
-#           `new` is exempt.
+#           `new` is exempt from that missing report; check 2 still applies to it.
 #        2. Every resolved path in `## Tasks` or `## Red commit` is in `## Files`.
 #           A directory counts as in Files when a Files path starts with it.
 #        3. A symbol (an identifier with `_`, `::` or an uppercase letter after its
@@ -94,7 +94,11 @@ check_path() {
   fi
   if [ -z "$res" ]; then
     if [ "$CUR_NEW" = 1 ]; then
-      [ "$CUR_SEC" != files ] || FILES="$FILES$p|"
+      # A new path is exempt from the missing report only; check 2 still applies.
+      case "$CUR_SEC" in
+        files) FILES="$FILES$p|" ;;
+        tasks|red) TASKS="$TASKS$p"$'\t'"$CUR_LN"$'\n' ;;
+      esac
       return 0
     fi
     seg="${p%%/*}"
