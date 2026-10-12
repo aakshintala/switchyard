@@ -321,6 +321,32 @@ fn watch_unknown_job_exits_2() {
 }
 
 #[test]
+fn unknown_subcommands_explain_watch_and_exit_2() {
+    let e = Env::new("unknown-subcommand");
+    for name in ["status", "result"] {
+        let out = e.delegate(&[name, "x"], None);
+        assert_eq!(out.status.code(), Some(2), "{name}");
+        assert!(out.stdout.is_empty(), "{name}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let (message, usage) = stderr.split_once('\n').expect("message followed by usage");
+        assert_eq!(
+            message,
+            format!(
+                "unknown subcommand {name}; `delegate watch <jobId>` prints a job's state and result, and the id that superseded it"
+            )
+        );
+        assert!(usage.starts_with("usage: delegate run "), "{usage}");
+        assert!(usage.contains("delegate watch <jobId>"), "{usage}");
+    }
+
+    let out = e.delegate(&[], None);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("usage: delegate run "), "{stderr}");
+    assert!(!stderr.contains("unknown subcommand"), "{stderr}");
+}
+
+#[test]
 fn positional_prompt_exits_2_without_reading_stdin() {
     let e = Env::new("positional");
     // stdin stays open: the old code read it to EOF and hung here.
