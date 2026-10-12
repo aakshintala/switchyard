@@ -22,9 +22,9 @@
 #        with <prefix>, literally and case-sensitively; it is checked after step 1,
 #        before the rebase, and each missing one prints `missing body line: <prefix>`.
 #        Prints `merged <squash sha>` on success. Progress goes to stderr.
-#        After marking a draft PR ready, each later failure before merge says
-#        that nothing merged and the PR is still marked ready. A step-7 gate failure
-#        includes that message after printing its tail, panic context and log path.
+#        After marking a draft PR ready, each later failure before `gh pr merge` says
+#        that nothing merged and the PR is still marked ready. If MERGED is not confirmed
+#        after the merge attempt, the error says the merge status could not be confirmed.
 #        Exit 0 merged, 1 gate/CI/push/merge failure (a gate run on the PR merged
 #        with current origin/main counts as a gate failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
@@ -65,49 +65,20 @@ usage() {
 }
 say() { echo "ship-pr: $*" >&2; }
 die() { local code="$1"; shift; say "$*"; exit "$code"; }
-pr_ready=0
+pr_ready=0 merge_attempted=0
 die_after_ready() {
   local code="$1"; shift
-  if [ "$pr_ready" = 1 ]; then
+  if [ "$pr_ready" = 1 ] && [ "$merge_attempted" = 0 ]; then
     die "$code" "$*; nothing merged, PR $pr is still marked ready"
   fi
   die "$code" "$@"
 }
 exit_after_ready() {
   local code="$1"; shift
-  if [ "$pr_ready" = 1 ]; then
+  if [ "$pr_ready" = 1 ] && [ "$merge_attempted" = 0 ]; then
     say "$*; nothing merged, PR $pr is still marked ready"
   fi
   exit "$code"
-}
-
-print_panic_context() {
-  local full_log="$1" tail_lines="$2" tail_file panic_file
-  tail_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-tail.XXXXXX")"
-  panic_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-panic.XXXXXX")"
-  tail -n "$tail_lines" "$full_log" >"$tail_file"
-  awk '
-    FILENAME == ARGV[1] { tail[++tail_count] = $0; next }
-    { full[++full_count] = $0 }
-    END {
-      for (i = 1; i <= full_count; i++) {
-        if (!index(full[i], "panicked at")) continue
-        count = full_count - i + 1
-        if (count > 4) count = 4
-        found = 0
-        for (start = 1; start + count - 1 <= tail_count; start++) {
-          same = 1
-          for (j = 0; j < count; j++) if (tail[start + j] != full[i + j]) same = 0
-          if (same) { found = 1; break }
-        }
-        if (!found) for (j = 0; j < count; j++) print full[i + j]
-      }
-    }' "$tail_file" "$full_log" >"$panic_file"
-  if [ -s "$panic_file" ]; then
-    printf 'panic context (outside the last %s lines):\n' "$tail_lines"
-    cat "$panic_file"
-  fi
-  rm -f "$tail_file" "$panic_file"
 }
 
 run_gate() {
@@ -118,7 +89,7 @@ run_gate() {
     return 0
   fi
   tail -n 20 "$output_file" || true
-  print_panic_context "$output_file" 20
+  cat "$output_file" | GH_CI_LOG_LINES=20 bash "$here/gh-ci" panics
   printf 'full gate output: %s\n' "$output_file"
   return 1
 }
@@ -333,9 +304,9 @@ if [ "$strict" = 0 ] && [ -n "$gate" ]; then
     guard_restore() {
       git -C "$worktree" reset -q --hard "$pin" >&2 || die_after_ready 1 "failed to restore pinned head ${pin:0:8}"
     }
-    trap 'guard_rc=$?; trap - EXIT INT TERM; guard_restore; exit "$guard_rc"' EXIT
-    trap 'trap - EXIT INT TERM; guard_restore; exit 143' TERM
-    trap 'trap - EXIT INT TERM; guard_restore; exit 130' INT
+    trap 'guard_rc=$?; trap - EXIT INT TERM; guard_restore; if [ "$guard_rc" -ne 0 ]; then exit_after_ready "$guard_rc" "gate aborted"; else exit "$guard_rc"; fi' EXIT
+    trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 143 "gate interrupted"' TERM
+    trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 130 "gate interrupted"' INT
     if ! git -C "$worktree" -c user.name=ship-pr -c user.email=ship-pr@localhost merge --no-ff --no-edit origin/main >&2; then
       guard_restore
       trap - EXIT INT TERM
@@ -354,6 +325,7 @@ fi
 
 # Step 8: merge pinned to the checked head, then wait for GitHub to say MERGED.
 say "merging PR $pr at ${pin:0:8}"
+merge_attempted=1
 merge_err=""
 if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
   printf '%s\n' "$merge_err" >&2
@@ -379,7 +351,7 @@ for i in $(seq 1 12); do
   if [ "${state:-}" = "MERGED" ]; then merged=1; break; fi
   [ "$i" -lt 12 ] && sleep "${SHIP_PR_INTERVAL:-5}"
 done
-[ -n "$merged" ] || die_after_ready 1 "PR $pr is not MERGED after 12 polls; worktree left in place"
+[ -n "$merged" ] || die 1 "merge status could not be confirmed after 12 polls; worktree left in place"
 
 # Step 9: clean up from the common git dir, never from inside the worktree being removed.
 common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"

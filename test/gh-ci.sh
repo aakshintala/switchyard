@@ -804,6 +804,20 @@ grep -q '^ right: 2$' <<<"$OUT" || fail "right value outside the tail: [$OUT]"
 grep -q '^retry summary 6$' <<<"$OUT" || fail "keeps the last five lines: [$OUT]"
 grep -q '^retry summary 5$' <<<"$OUT" && fail "drops lines before the last five: [$OUT]"
 
+# panics reads stdin and emits only excerpts missing from the supplied tail.
+PANIC_OUT="$(printf '%s\n' \
+  'thread prune::young_fork panicked at src/prune.rs:42:5:' \
+  'assertion failed' '  left: 1' ' right: 2' \
+  'retry summary 1' 'retry summary 2' 'retry summary 3' 'retry summary 4' 'retry summary 5' \
+  | env -u GH_CI_REPO GH_CI_LOG_LINES=5 bash "$GHCI" panics 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "panics stdin command exits 0 (got $CODE): [$PANIC_OUT]"
+grep -q '^panic context (outside the last 5 lines):$' <<<"$PANIC_OUT" || fail "panics heading: [$PANIC_OUT]"
+grep -q '^thread prune::young_fork panicked at src/prune.rs:42:5:$' <<<"$PANIC_OUT" || fail "panics prints its marker: [$PANIC_OUT]"
+grep -q '^  left: 1$' <<<"$PANIC_OUT" && grep -q '^ right: 2$' <<<"$PANIC_OUT" || fail "panics prints assertion values: [$PANIC_OUT]"
+PANIC_OUT="$(printf '%s\n' 'thread prune::young_fork panicked at src/prune.rs:42:5:' 'assertion failed' '  left: 1' ' right: 2' 'retry summary' \
+  | bash "$GHCI" panics 5 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] && [ -z "$PANIC_OUT" ] || fail "panics omits excerpts already in the tail: [$PANIC_OUT] (exit $CODE)"
+
 # failures usage errors exit 2
 reset_state
 run_failures; [ "$CODE" = "2" ] || fail "failures with no argument exits 2 (got $CODE)"

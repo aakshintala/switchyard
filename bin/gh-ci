@@ -2,18 +2,18 @@
 # gh-ci: quiet, low-call GitHub CI helpers for agent flywheels.
 # Usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>
 #        gh-ci resample <pr> "<job name>" --until <regex> [--max <n>]
-#        gh-ci wait <pr> [--timeout <s>]
+#        gh-ci wait <pr> [--timeout <s>] | panics [<tail-lines>] (reads log from stdin)
 # Exit codes: 0 ok, 1 failure, 2 usage, 3 merge conflict (snapshot and
 # watch-verified at once; wait after 30 s of DIRTY re-checks), 124 wait timeout.
-# Repo: --repo OWNER/NAME (any subcommand, any position), then GH_CI_REPO, then
+# Repo: --repo OWNER/NAME (any subcommand, any position; panics needs none), then GH_CI_REPO, then
 # origin's GitHub URL (no network call), then `gh repo view`. With none, exit 2.
 # GH_CI_INTERVAL the watch poll seconds (default 30).
 set -euo pipefail
 usage() {
   echo "usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>" >&2
   echo "       gh-ci resample <pr> \"<job name>\" --until <regex> [--max <n>]" >&2
-  echo "       gh-ci wait <pr> [--timeout <s>]" >&2
-  echo "       every subcommand takes --repo OWNER/NAME (overrides GH_CI_REPO and the checkout's origin)" >&2
+  echo "       gh-ci wait <pr> [--timeout <s>] | panics [<tail-lines>] (reads log from stdin)" >&2
+  echo "       every GitHub subcommand takes --repo OWNER/NAME (overrides GH_CI_REPO and the checkout's origin)" >&2
   exit 2
 }
 
@@ -82,35 +82,33 @@ superseded_note() {
   echo "skipped $n superseded runs: $1"
 }
 
-# Print panic excerpts from the full log unless the complete excerpt is already
-# present in the tail. Keep the panic line and its next three cleaned lines.
-print_panic_context() {
-  local full_log="$1" tail_lines="$2" tail_file panic_file
-  tail_file="$(mktemp "${TMPDIR:-/tmp}/gh-ci-tail.XXXXXX")"
-  panic_file="$(mktemp "${TMPDIR:-/tmp}/gh-ci-panic.XXXXXX")"
-  tail -n "$tail_lines" "$full_log" >"$tail_file"
-  awk '
-    FILENAME == ARGV[1] { tail[++tail_count] = $0; next }
-    { full[++full_count] = $0 }
+# panics [<tail-lines>]: print panic excerpts from stdin unless already in its tail.
+# Each excerpt contains the panic line and its next three lines.
+cmd_panics() {
+  [ "$#" -le 1 ] || usage
+  local tail_lines="${1:-${GH_CI_LOG_LINES:-60}}"
+  case "$tail_lines" in ''|*[!0-9]*) usage;; esac
+  awk -v tail_lines="$tail_lines" '
+    { full[++n] = $0 }
     END {
-      for (i = 1; i <= full_count; i++) {
+      tail_start = n - tail_lines + 1
+      if (tail_start < 1) tail_start = 1
+      for (i = 1; i <= n; i++) {
         if (!index(full[i], "panicked at")) continue
-        count = full_count - i + 1
+        count = n - i + 1
         if (count > 4) count = 4
         found = 0
-        for (start = 1; start + count - 1 <= tail_count; start++) {
+        for (start = tail_start; start + count - 1 <= n; start++) {
           same = 1
-          for (j = 0; j < count; j++) if (tail[start + j] != full[i + j]) same = 0
+          for (j = 0; j < count; j++) if (full[start + j] != full[i + j]) same = 0
           if (same) { found = 1; break }
         }
-        if (!found) for (j = 0; j < count; j++) print full[i + j]
+        if (!found) {
+          if (!printed++) printf "panic context (outside the last %d lines):\n", tail_lines
+          for (j = 0; j < count; j++) print full[i + j]
+        }
       }
-    }' "$tail_file" "$full_log" >"$panic_file"
-  if [ -s "$panic_file" ]; then
-    printf 'panic context (outside the last %s lines):\n' "$tail_lines"
-    cat "$panic_file"
-  fi
-  rm -f "$tail_file" "$panic_file"
+    }'
 }
 
 # failures <run> | failures --pr <n>: cleaned digest of the failed and
@@ -178,7 +176,7 @@ cmd_failures() {
             | sed -E "s/(${esc}\[|\^\[\[)[0-9;]*[A-Za-z]//g" \
             | sed '/^[[:space:]]*$/d' >"$failed_log" || true
           tail -n "$log_lines" "$failed_log" || true
-          print_panic_context "$failed_log" "$log_lines"
+          cmd_panics "$log_lines" <"$failed_log"
           rm -f "$failed_log";;
       esac
     done <<<"$jobs"
@@ -431,7 +429,11 @@ if [ -n "$REPO_FLAG" ]; then
 fi
 [ $# -ge 1 ] || usage
 cmd="$1"; shift
-case "$cmd" in snapshot|failures|watch-verified|resample|wait) ;; *) usage ;; esac
+case "$cmd" in snapshot|failures|watch-verified|resample|wait|panics) ;; *) usage ;; esac
+if [ "$cmd" = panics ]; then
+  cmd_panics "$@"
+  exit 0
+fi
 if [ -n "$REPO_FLAG" ]; then
   REPO="$REPO_FLAG"
 elif [ -n "${GH_CI_REPO:-}" ]; then

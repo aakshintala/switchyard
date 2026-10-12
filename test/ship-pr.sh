@@ -599,7 +599,10 @@ grep -q 'cleanup:' <<<"$ERR" && fail "a missing remote ref counts as done, whate
 setup; touch "$ST/delete-fails"; ship; expect 0 "remote delete fails, branch still there"
 grep -q 'cleanup: push origin --delete feature failed' <<<"$ERR" || fail "a remote branch still there is reported: [$ERR]"
 
-setup; touch "$ST/no-merge"; ship; expect 1 "never MERGED"
+setup; echo true >"$ST/draft"; touch "$ST/no-merge"; ship; expect 1 "never MERGED"
+grep -qF 'ship-pr: merge status could not be confirmed after 12 polls; worktree left in place' <<<"$ERR" \
+  || fail "unconfirmed merge status message: [$ERR]"
+! grep -qE 'nothing merged|still marked ready' <<<"$ERR" || fail "post-merge polling makes no merge or ready claim: [$ERR]"
 [ -d "$WT" ] || fail "worktree kept when never MERGED"
 [ "$(origin_head)" = "$HEAD0" ] || fail "origin branch kept when never MERGED"
 [ "$(wc -l <"$ST/sleeps.txt")" -eq 11 ] || fail "11 sleeps across 12 polls: [$(cat "$ST/sleeps.txt")]"
