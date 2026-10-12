@@ -27,7 +27,7 @@ __PLAN__
 - Set work aside with a commit. To compare against main, build main in a throwaway worktree (`git worktree add --detach ../cmp-<branch> origin/main`, then `git worktree remove` it). The stash stack is shared with every other worktree of the repo, so `git stash` can pop another agent's changes.
 - Before pushing, run the formatter the gate checks with (e.g. `cargo fmt` for `cargo fmt --check`) and commit what it changes, then the gate passes: `__GATE__`. Run each of its commands on its own with output redirected to a file, and read its exit code before the next; a pipe hides the exit code.
 - Refer to other issues as `see #N` or `#N's case` in commit messages and PR text. GitHub closes any issue a closing keyword (close, fix, resolve and their forms) precedes, so the only issue reference you write with one is the PR body's closing line.
-- Push the branch. When no PR is open on it, open a draft PR whose title says what the change does, with no issue number (the squash merge appends the PR's own), and whose body starts with `__CLOSING__`. The body names only the checks that ran, each with its command. Then end the job: whoever started you waits on CI.
+- Push the branch. When no PR is open on it, open a draft PR whose title says what the change does, with no issue number (the squash merge appends the PR's own), and whose body starts with `__CLOSING__`. The body holds every line the workflow doc requires in a PR body, and names only the checks that ran, each with its command. Then end the job: whoever started you waits on CI.
 
 ## Report
 

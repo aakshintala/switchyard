@@ -23,7 +23,7 @@ __FINDINGS__
 - Run only the gate and the tests your findings name. Suites the workflow doc gives to CI, such as mutation testing (`cargo mutants`), benchmarks and backstops, run in CI: read their result from the CI log, and report when you need one reproduced.
 - Run every command in the foreground, so it ends before your turn does; start no background or detached process. When the gate outlasts one tool call, run the narrowest test set your change reaches in the foreground and leave the full gate to the job-end gate.
 - Set work aside with a commit. The stash stack is shared with every other worktree of the repo, so `git stash` can pop another agent's changes.
-- Before pushing, the gate passes: `__GATE__`. Fold every fix from this round into one push, since each push restarts CI.
+- Before pushing, the gate passes: `__GATE__`. Fold every fix from this round into one push, since each push restarts CI. When the round changes what the PR does, update the body lines the workflow doc requires to match.
 
 ## Report
 
