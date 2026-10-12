@@ -13,6 +13,8 @@ fail() {
 }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-ship-pr.XXXXXX")"
+mkdir -p "$T/tmp"
+export TMPDIR="$T/tmp"
 trap 'rm -rf "$T"' EXIT
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
@@ -169,6 +171,24 @@ untouched() {
 }
 expect() { [ "$CODE" = "$1" ] || fail "$2: exit $1 (got $CODE): out=[$OUT] err=[$ERR]"; }
 no_merge() { ! grep -q '^gh pr \(merge\|ready\)' "$ST/gh.log" 2>/dev/null || fail "$1: no ready or merge call"; }
+GATE_PANIC='echo gate-start; echo "thread prune::young_fork panicked at src/prune.rs:42:5:"; echo "assertion left == right failed"; echo "  left: 1"; echo " right: 2"; for i in $(seq 1 25); do echo "gate-tail-$i"; done; exit 1'
+assert_gate_panic_failure() {
+  local label="$1" gate_file
+  grep -q 'panicked at' <<<"$OUT" || fail "$label: panic line printed: [$OUT]"
+  grep -q 'assertion .*left == right.* failed' <<<"$OUT" || fail "$label: assertion printed: [$OUT]"
+  grep -q '^  left: 1$' <<<"$OUT" || fail "$label: left value printed: [$OUT]"
+  grep -q '^ right: 2$' <<<"$OUT" || fail "$label: right value printed: [$OUT]"
+  grep -q '^gate-tail-6$' <<<"$OUT" || fail "$label: last 20 lines printed: [$OUT]"
+  grep -q '^gate-tail-5$' <<<"$OUT" && fail "$label: output before the last 20 lines omitted: [$OUT]"
+  gate_file="$(sed -n 's/^full gate output: //p' <<<"$OUT")"
+  case "$gate_file" in "$TMPDIR"/ship-pr-7-gate.*) ;; *) fail "$label: named log path printed: [$gate_file]" ;; esac
+  [ -f "$gate_file" ] || fail "$label: full output file exists: [$gate_file]"
+  [ "$(wc -l <"$gate_file" | tr -d ' ')" = 30 ] || fail "$label: file holds all 30 output lines: [$(wc -l <"$gate_file")]"
+  grep -qx 'gate-start' "$gate_file" || fail "$label: file holds the first line"
+  grep -q 'panicked at' "$gate_file" || fail "$label: file holds the panic"
+  for i in $(seq 1 25); do grep -qx "gate-tail-$i" "$gate_file" || fail "$label: file is missing gate-tail-$i"; done
+  rm -f "$gate_file"
+}
 
 # ===== exit 2: usage and preconditions
 setup
@@ -230,14 +250,18 @@ no_merge "pushed head with a changed patch"
 
 # ===== exit 1: gate
 setup
-ship --gate 'echo gate-line-1; echo gate-line-2; exit 3'
+ship --gate "$GATE_PANIC"
 expect 1 "failing gate"; untouched "failing gate"
-grep -q gate-line-2 <<<"$OUT" || fail "gate tail on stdout: [$OUT]"
+assert_gate_panic_failure "step 2 gate"
 no_merge "failing gate"
 setup; advance_main other.txt o
-ship --gate 'exit 3'; expect 1 "failing gate after main moved"; untouched "failing gate after main moved"
+ship --gate 'echo main-moved-gate; exit 3'; expect 1 "failing gate after main moved"; untouched "failing gate after main moved"
+GATE_FILE="$(sed -n 's/^full gate output: //p' <<<"$OUT")"
+[ -f "$GATE_FILE" ] || fail "failing gate after main moved: log exists: [$GATE_FILE]"
+rm -f "$GATE_FILE"
 setup; advance_main other.txt o
 ship --gate 'test ! -e other.txt'; expect 0 "gate runs on the pre-rebase head"
+! compgen -G "$TMPDIR/ship-pr-7-gate.*" >/dev/null || fail "passing gate leaves no log file"
 setup; ship --gate 'git commit -q --allow-empty -m gate'
 expect 1 "gate that commits"; [ "$(origin_head)" = "$O0" ] || fail "gate commit never pushed"; no_merge "gate commit"
 setup; ship --gate 'echo x >>feature.txt'; expect 1 "gate that dirties"; no_merge "gate dirty"
@@ -420,12 +444,16 @@ grep -q "^gh pr merge 7 --repo O/N --squash --match-head-commit $HEAD0\$" "$ST/g
 [ ! -e "$WT" ] || fail "guard passes: worktree removed"
 origin_head >/dev/null && fail "guard passes: no local merge commit leaks to origin"
 
-# gate fails only on the merged tree: exit 1, no merge, worktree back on the pinned head and clean
-setup; echo "$NOSTRICT" >"$ST/rules"; advance_main bad x
-ship --gate 'echo gate-merged-line; test ! -e bad'
-expect 1 "not strict guard fails on the merged tree"; no_merge "guard gate fails"
-grep -q gate-merged-line <<<"$OUT" || fail "guard gate tail printed: [$OUT]"
-grep -q "the PR merged with current origin/main fails the gate" <<<"$ERR" || fail "guard gate message: [$ERR]"
+# gate fails only on the merged tree: print panic context and restore the pinned head
+GATE_PANIC_ON_MERGED="if [ ! -e bad ]; then echo gate-step-2-pass; exit 0; fi; $GATE_PANIC"
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main bad x; echo true >"$ST/draft"
+ship --gate "$GATE_PANIC_ON_MERGED"
+expect 1 "not strict guard fails on the merged tree"
+! grep -q '^gh pr merge' "$ST/gh.log" || fail "guard gate fails: no merge call"
+assert_gate_panic_failure "step 7 gate"
+grep -qF 'ship-pr: the PR merged with current origin/main fails the gate; nothing merged, PR 7 is still marked ready' <<<"$ERR" \
+  || fail "guard gate status message: [$ERR]"
+grep -q '^gh pr ready 7 --repo O/N$' "$ST/gh.log" || fail "draft marked ready before the gate fails"
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD0" ] || fail "guard gate fails: worktree back on the pinned head"
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail "guard gate fails: worktree clean"
 [ -d "$WT" ] || fail "worktree kept when the guard gate fails"
@@ -571,7 +599,10 @@ grep -q 'cleanup:' <<<"$ERR" && fail "a missing remote ref counts as done, whate
 setup; touch "$ST/delete-fails"; ship; expect 0 "remote delete fails, branch still there"
 grep -q 'cleanup: push origin --delete feature failed' <<<"$ERR" || fail "a remote branch still there is reported: [$ERR]"
 
-setup; touch "$ST/no-merge"; ship; expect 1 "never MERGED"
+setup; echo true >"$ST/draft"; touch "$ST/no-merge"; ship; expect 1 "never MERGED"
+grep -qF 'ship-pr: merge status could not be confirmed after 12 polls; worktree left in place' <<<"$ERR" \
+  || fail "unconfirmed merge status message: [$ERR]"
+! grep -qE 'nothing merged|still marked ready' <<<"$ERR" || fail "post-merge polling makes no merge or ready claim: [$ERR]"
 [ -d "$WT" ] || fail "worktree kept when never MERGED"
 [ "$(origin_head)" = "$HEAD0" ] || fail "origin branch kept when never MERGED"
 [ "$(wc -l <"$ST/sleeps.txt")" -eq 11 ] || fail "11 sleeps across 12 polls: [$(cat "$ST/sleeps.txt")]"
