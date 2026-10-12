@@ -1,0 +1,33 @@
+   Compiling nextest-flaky v0.1.0 (/tmp/nextest-flaky.dyoxrC)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.62s
+────────────
+ Nextest run ID 27770f6b-2232-4739-a8ed-4e5a5f8433f8 with nextest profile: default
+    Starting 1 test across 2 binaries
+       START [         ] (1/1) nextest-flaky::flaky flaky_once
+
+running 1 test
+
+thread 'flaky_once' (788635) panicked at tests/flaky.rs:8:5:
+panic from first attempt
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test flaky_once ... FAILED
+
+failures:
+
+failures:
+    flaky_once
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  TRY 1 FAIL [   0.015s] (───) nextest-flaky::flaky flaky_once
+ TRY 2 START [         ] (───) nextest-flaky::flaky flaky_once
+
+running 1 test
+test flaky_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  TRY 2 PASS [   0.011s] (1/1) nextest-flaky::flaky flaky_once
+────────────
+     Summary [   0.028s] 1 test run: 1 passed (1 flaky), 0 skipped
+   FLAKY 2/2 [   0.011s] (1/1) nextest-flaky::flaky flaky_once
