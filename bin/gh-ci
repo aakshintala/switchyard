@@ -148,7 +148,9 @@ cmd_failures() {
     [ -n "${run_id:-}" ] || continue
     case "$run_name" in ''|null) run_name="$run_id";; esac
     jobs_json=$(gh run view "$run_id" --repo "$REPO" --json jobs) \
-      || { echo "could not read jobs for run $run_id" >&2; return 1; }
+      || { echo "could not read jobs for run $run_id" >&2
+           [ -n "$pr" ] || echo "if $run_id is a PR number, use: gh-ci failures --pr $run_id" >&2
+           return 1; }
     jobs=$(printf '%s' "$jobs_json" | jq -r '.jobs[] | select(.conclusion=="failure" or .conclusion=="cancelled") | "\(.conclusion)\t\(.databaseId)\t\(.name)"') \
       || { echo "could not parse jobs for run $run_id" >&2; return 1; }
     [ -n "$jobs" ] || continue
