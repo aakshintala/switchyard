@@ -53,7 +53,10 @@ pub fn main() -> i32 {
         Some("models") => crate::cli_info::models().map_err(Usage),
         Some("doctor") => crate::cli_info::doctor().map_err(Usage),
         Some("__supervise") => return supervise(&args[1..]),
-        _ => usage(USAGE),
+        Some(name) => usage(format!(
+            "unknown subcommand {name}; `delegate watch <jobId>` prints a job's state and result, and the id that superseded it\n{USAGE}"
+        )),
+        None => usage(USAGE),
     };
     match res {
         Ok(code) => code,
