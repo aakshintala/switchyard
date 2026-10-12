@@ -30,7 +30,7 @@ Run step 1, skip steps 2–3, then build in a worktree cut from `origin/main`. T
 
 Take it when the ticket is **determined**: it adds no new type, event, config key or doc decision, and its files are named in the ticket or found by one grep. A move, a rename or a mechanical removal is determined; a refactor that chooses new boundaries is not.
 
-Run steps 1–2. When the preflight finds no `core` item, or step 2 skipped it as current, skip step 3: write a plan file of four parts: Rung `standard`; Files (the preflight's file list, or the ticket's when step 2 skipped it); Tasks (the ticket's acceptance criteria, each with the test or command that shows it met); and Red commit, as `planning`'s template defines it. Fill `../planning/briefs/lane.md` yourself, with `PLAN` set to that file's absolute path. `GATE` is the workflow doc's gate. Then run steps 4–9 as written. When a build fails twice on the same finding, write the plan (step 3) and continue from there.
+Run steps 1–2. When the preflight finds no `core` item, or step 2 skipped it as current, skip step 3: write a plan file of four parts: Rung `standard`; Files (the preflight's file list, or the ticket's when step 2 skipped it); Tasks (the ticket's acceptance criteria, each with the test or command that shows it met); and Red commit, as `planning`'s template defines it. Fill `../planning/briefs/lane.md` yourself, with the keys `planning` step 5 lists: `PLAN` is that file's absolute path, and `GATE` is the workflow doc's gate. Then run steps 4–9 as written. When a build fails twice on the same finding, write the plan (step 3) and continue from there.
 
 ### 1. Check setup
 
