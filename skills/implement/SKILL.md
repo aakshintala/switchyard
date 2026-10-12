@@ -90,7 +90,7 @@ Done when `review-loop` is done.
 
 ### 7. CI
 
-`ship-pr` (step 8) waits on CI; come here when it reports failing checks. Run `ci-triage` until the required checks are green on the current head SHA. Wait on the PR with `gh-ci wait <pr> --repo <owner/name>`, in the wait mode `ci-triage` gives; it follows a new head pushed mid-wait. Green comes from a fix, never a rerun: a flake gets `ci-triage`'s one fresh build and a `test-only` issue, and `gh-ci resample` only measures how often a failure happens.
+`ship-pr` (step 8) waits on CI; come here when it reports failing checks. Run `ci-triage` until the required checks are green on the current head SHA. Wait on the PR with `gh-ci wait <pr> --repo <owner/name>`, in the wait mode `ci-triage` gives; it follows a new head pushed mid-wait. Green comes from a fix, never a rerun, except `ci-triage`'s one job rerun for an infrastructure failure: a flake gets `ci-triage`'s one fresh build and a `test-only` issue, and `gh-ci resample` only measures how often a failure happens.
 
 Done when CI is green on the head a verdict covers.
 
