@@ -41,9 +41,9 @@
 #        Not strict: after the gate, read the PR's mergeable and mergeStateStatus;
 #        rebase (after refetching origin/main) only on CONFLICTING or DIRTY. One CI
 #        wait, no retry when origin/main moves; a conflict found after CI exits 3.
-#        Before step 2, delete only regular xcrun_db-* files directly under
-#        ${TMPDIR:-/tmp} when they are over a day old; ignore deletion errors. Require
-#        at least 20 GB free on the volumes holding --worktree and ${TMPDIR:-/tmp}.
+#        On every invocation, before step 2, delete only regular xcrun_db-* files directly under
+#        ${TMPDIR:-/tmp} when they are over a day old; ignore deletion errors. With --gate,
+#        require at least 20 GB free on the volumes holding --worktree and ${TMPDIR:-/tmp}.
 #        Both gate runs set NEXTEST_RETRIES=1, retrying failed nextest tests once.
 #        Report each FLAKY result and its failed-attempt panic text; retries do not
 #        change the gate's exit status.
@@ -120,7 +120,6 @@ check_free_space() {
 
 gate_preflight() {
   local tmpdir="${TMPDIR:-/tmp}"
-  find -H "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true
   check_free_space "$worktree"
   check_free_space "$tmpdir"
 }
@@ -166,6 +165,9 @@ if [ -n "$unverified" ]; then
   [ -f "$unverified" ] && [ -r "$unverified" ] || die 2 "cannot read --unverified-fixes $unverified"
   grep -q '[^[:space:]]' "$unverified" || die 2 "--unverified-fixes $unverified has no findings"
 fi
+
+tmpdir="${TMPDIR:-/tmp}"
+find -H "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true
 
 here="$(cd "$(dirname "$0")" && pwd)"
 

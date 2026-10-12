@@ -293,6 +293,15 @@ no_merge "low free space"
 PATH="$BASE_PATH"; export PATH
 
 setup
+TMPDIR="$T/tmp"; export TMPDIR
+mkdir -p "$TMPDIR"
+touch "$TMPDIR/xcrun_db-x" "$TMPDIR/xcrun_db-fresh"
+touch -t 202001010000 "$TMPDIR/xcrun_db-x"
+ship; expect 0 "stale cache sweep runs without --gate"
+[ ! -e "$TMPDIR/xcrun_db-x" ] || fail "no-gate run deletes old xcrun cache"
+[ -f "$TMPDIR/xcrun_db-fresh" ] || fail "no-gate run keeps fresh xcrun cache"
+
+setup
 cache_dir="$T/cache-target"; cache_link="$T/cache-tmp"
 mkdir -p "$cache_dir"; ln -s "$cache_dir" "$cache_link"
 TMPDIR="$cache_link"; export TMPDIR
