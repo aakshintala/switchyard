@@ -21,7 +21,8 @@
 #        Each --body-has <prefix> (repeatable) requires a PR body line that starts
 #        with <prefix>, literally and case-sensitively; it is checked after step 1,
 #        before the rebase, and each missing one prints `missing body line: <prefix>`.
-#        Prints `merged <squash sha>` on success. Progress goes to stderr.
+#        Prints `merged <squash sha>` on success. Progress goes to stderr, and so do
+#        gh-ci's check counts while CI runs.
 #        After marking a draft PR ready, each later failure before `gh pr merge` says
 #        that nothing merged and the PR is still marked ready. If MERGED is not confirmed
 #        after the merge attempt, the error says the merge status could not be confirmed.
@@ -315,7 +316,8 @@ while :; do
   fi
   say "waiting for CI"
   rc=0
-  ci_out="$(GH_CI_REPO="$repo" bash "$here/gh-ci" wait "$pr" --timeout "$timeout" 2>&1)" || rc=$?
+  # gh-ci's stderr (its check counts while it waits) flows to ours live; only its stdout is parsed.
+  ci_out="$(GH_CI_REPO="$repo" bash "$here/gh-ci" wait "$pr" --timeout "$timeout")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$ci_out"
     case "$rc" in
