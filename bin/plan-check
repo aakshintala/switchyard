@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# plan-check: check a plan's paths and symbols against its base before a Verifier reads it.
+# Usage: plan-check PLAN_FILE [--base REV] [--cwd DIR]
+#        plan-check -h | --help
+#        REV is --base, else the plan's `Base: <sha>` line. DIR is a git clone of
+#        the plan's repo (default: the current directory). Callers pass --base
+#        origin/main to check against the fresh base.
+#        Reads the single-backtick tokens outside fenced blocks and the `## Gate`
+#        section, and checks:
+#        1. a path (no spaces; a `/` or a source or doc extension) resolves at REV,
+#           by full path or by a basename that names exactly one file. A path on a
+#           line with the word `new` is exempt.
+#        2. every resolved path in `## Tasks` or `## Red commit` is in `## Files`.
+#        3. a symbol (an identifier with `_`, `::` or an uppercase letter after its
+#           first character) occurs at REV, or a plan line says `new` with it.
+#        Exit 0, nothing printed: clean. Exit 1: one line per problem on stdout.
+#        Exit 2 on bad usage, an unreadable plan, no Base line and no --base, or a
+#        REV that is not a commit in DIR.
+set -euo pipefail
+
+usage() {
+  echo "usage: plan-check PLAN_FILE [--base REV] [--cwd DIR]" >&2
+  exit 2
+}
+
+# seen KEY: true when KEY was already reported; otherwise records it
+seen() {
+  case "$SEEN" in *"|$1|"*) return 0 ;; esac
+  SEEN="$SEEN$1|"
+  return 1
+}
+
+problem() {
+  printf '%s\n' "$1"
+  FOUND=1
+}
+
+# is_symbol TOKEN: an identifier with `_`, `::` or an uppercase letter after its first character
+is_symbol() {
+  local s="$1" symre='^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$'
+  case "$s" in *"()") s="${s%??}" ;; esac
+  case "$s" in *"{"*) return 1 ;; esac
+  [[ $s =~ $symre ]] || return 1
+  case "$s" in *_*|*::*) return 0 ;; esac
+  [[ ${s:1} =~ [A-Z] ]]
+}
+
+# named_new TOKEN: true when a plan line holds both TOKEN and the whole word `new`
+named_new() {
+  awk -v t="$1" 'index($0, t) && tolower($0) ~ /(^|[^a-z0-9_])new([^a-z0-9_]|$)/ { found = 1 } END { exit (found ? 0 : 1) }' "$plan"
+}
+
+plan=""
+rev=""
+dir="."
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage ;;
+    --base) [ $# -ge 2 ] && [ -n "$2" ] || usage; rev="$2"; shift 2 ;;
+    --cwd) [ $# -ge 2 ] || usage; dir="$2"; shift 2 ;;
+    -*) usage ;;
+    *) [ -z "$plan" ] || usage; plan="$1"; shift ;;
+  esac
+done
+[ -n "$plan" ] || usage
+[ -r "$plan" ] || { echo "plan-check: cannot read plan file: $plan" >&2; exit 2; }
+
+if [ -z "$rev" ]; then
+  rev="$(awk '/^Base:[[:space:]]/ { print $2; exit }' "$plan")"
+  if [ -z "$rev" ]; then
+    echo "plan-check: no Base line in $plan and no --base" >&2
+    exit 2
+  fi
+fi
+if ! git -C "$dir" rev-parse -q --verify "$rev^{commit}" >/dev/null 2>&1; then
+  echo "plan-check: $rev is not a commit in $dir" >&2
+  exit 2
+fi
+
+tree="$(git -C "$dir" ls-tree -r --name-only "$rev")"
+
+# One record per token: section, line number, whether the line says `new`, the token.
+# Fenced blocks and the Gate section are skipped.
+records="$(awk '
+  /^[[:space:]]*```/ { infence = !infence; next }
+  infence { next }
+  /^## / {
+    cur = "other"
+    if ($0 ~ /^## Files([[:space:]]|$)/) cur = "files"
+    else if ($0 ~ /^## Tasks([[:space:]]|$)/) cur = "tasks"
+    else if ($0 ~ /^## Red commit([[:space:]]|$)/) cur = "red"
+    else if ($0 ~ /^## Gate([[:space:]]|$)/) cur = "gate"
+    next
+  }
+  cur == "gate" { next }
+  {
+    isnew = (tolower($0) ~ /(^|[^a-z0-9_])new([^a-z0-9_]|$)/)
+    n = split($0, parts, "`")
+    for (i = 2; i <= n; i += 2)
+      if (parts[i] != "") printf "%s\t%d\t%d\t%s\n", cur, NR, isnew, parts[i]
+  }
+' "$plan")"
+
+portre=':[0-9]+(-[0-9]+)?$'
+FOUND=0
+SEEN="|"
+FILES="|"
+TASKS=""
+
+while IFS=$'\t' read -r sec ln isnew tok; do
+  [ -n "$tok" ] || continue
+  p="$tok"
+  if [[ $p =~ $portre ]]; then p="${p%"${BASH_REMATCH[0]}"}"; fi
+
+  is_path=0
+  case "$p" in
+    *" "*) ;;
+    */*|*.rs|*.md|*.toml|*.lua|*.json|*.sh|*.yml|*.yaml|*.lock|*.txt|*.snap) is_path=1 ;;
+  esac
+
+  if [ "$is_path" = 1 ]; then
+    res=""
+    if git -C "$dir" cat-file -e "$rev:$p" 2>/dev/null; then
+      res="$p"
+    else
+      case "$p" in
+        */*) ;;
+        *) res="$(awk -v b="$p" '{ n = split($0, a, "/"); if (a[n] == b) { c++; m = $0 } } END { if (c == 1) print m }' <<<"$tree")" ;;
+      esac
+    fi
+    if [ -z "$res" ]; then
+      if [ "$isnew" = 1 ]; then
+        [ "$sec" != files ] || FILES="$FILES$p|"
+      elif ! seen "m:$tok"; then
+        problem "missing path: $tok (line $ln)"
+      fi
+    else
+      case "$sec" in
+        files) FILES="$FILES$res|" ;;
+        tasks|red) TASKS="$TASKS$res"$'\t'"$ln"$'\n' ;;
+      esac
+    fi
+  elif is_symbol "$tok"; then
+    name="$tok"
+    case "$name" in *"()") name="${name%??}" ;; esac
+    last="${name##*::}"
+    if git -C "$dir" grep -q -w -F -e "$last" "$rev" 2>/dev/null; then
+      :
+    elif named_new "$tok"; then
+      :
+    elif ! seen "s:$tok"; then
+      problem "unknown symbol: $tok (line $ln)"
+    fi
+  fi
+done <<<"$records"
+
+# Task and Red commit paths must sit under Files; Files is complete only now.
+while IFS=$'\t' read -r p ln; do
+  [ -n "$p" ] || continue
+  case "$FILES" in *"|$p|"*) continue ;; esac
+  if ! seen "o:$p"; then
+    problem "outside Files: $p (line $ln)"
+  fi
+done <<<"$TASKS"
+
+if [ "$FOUND" = 1 ]; then
+  exit 1
+fi
+exit 0
