@@ -17,6 +17,11 @@ mod tests {
     }
 
     #[test]
+    fn status_block_asks_for_long_shell_timeouts() {
+        assert!(status_block().contains("600 seconds"));
+    }
+
+    #[test]
     fn record_sh_reads_status_instruction_file() {
         const RECORD_SH: &str = include_str!("../scripts/record.sh");
         assert!(
