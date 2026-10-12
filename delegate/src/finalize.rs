@@ -35,14 +35,15 @@ fn run_gate_ctx(ctx: &FinalizeCtx, cwd: &str) -> GateResult {
     if let Some(rg) = &ctx.run_gate {
         rg(&ctx.gate, cwd, ctx.signal.as_ref())
     } else {
-        crate::gate::run_gate(
-            &ctx.gate,
-            cwd,
-            crate::gate::GateOpts {
-                timeout_ms: ctx.gate_timeout_ms,
-                signal: ctx.signal.as_ref(),
-            },
-        )
+        let opts = crate::gate::GateOpts {
+            timeout_ms: ctx.gate_timeout_ms,
+            signal: ctx.signal.as_ref(),
+        };
+        if let Some(job_id) = ctx.job_id.as_deref() {
+            crate::gate::run_gate_for_job(&ctx.gate, cwd, job_id, opts)
+        } else {
+            crate::gate::run_gate(&ctx.gate, cwd, opts)
+        }
     }
 }
 
@@ -202,6 +203,7 @@ mod tests {
             exit_code: 1,
             passed: false,
             output_tail: "FAIL".into(),
+            output_path: None,
             error: None,
         }));
         let out = finalize_run(&ok_result(), &ctx);
@@ -218,6 +220,7 @@ mod tests {
             exit_code: 0,
             passed: true,
             output_tail: String::new(),
+            output_path: None,
             error: None,
         }));
         let out = finalize_run(&ok_result(), &ctx);
@@ -244,6 +247,7 @@ mod tests {
             exit_code: 1,
             passed: false,
             output_tail: "FAIL".into(),
+            output_path: None,
             error: None,
         }));
         let res = BackendResult {
@@ -264,6 +268,7 @@ mod tests {
             exit_code: 1,
             passed: false,
             output_tail: "FAIL".into(),
+            output_path: None,
             error: None,
         }));
         let res = BackendResult {
@@ -352,6 +357,7 @@ mod tests {
                 exit_code: 0,
                 passed: true,
                 output_tail: String::new(),
+                output_path: None,
                 error: None,
             }
         }));

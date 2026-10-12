@@ -464,7 +464,10 @@ fn gate_fail_downgrades_and_records_output() {
         "ship it",
         &[],
     );
-    let done = e.wait_terminal(&id);
+    let watched = e.delegate(&["watch", &id, "--timeout", "10"], None);
+    assert_eq!(watched.status.code(), Some(0));
+    let printed = String::from_utf8(watched.stdout).unwrap();
+    let done: Value = serde_json::from_str(&printed).unwrap();
     assert_eq!(done["status"], "DONE_WITH_CONCERNS");
     assert_eq!(done["result"]["gateResult"]["passed"], false);
     assert_eq!(done["result"]["gateResult"]["exitCode"], 1);
@@ -478,6 +481,15 @@ fn gate_fail_downgrades_and_records_output() {
             .unwrap()
             .contains("AssertionError"),
         "{done}"
+    );
+    let output_path = done["result"]["gateResult"]["outputPath"].as_str().unwrap();
+    assert!(
+        printed.contains(output_path),
+        "watch output omitted {output_path}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(output_path).unwrap(),
+        "AssertionError\n"
     );
     assert_eq!(done["resume"]["gate"], "echo AssertionError; exit 1");
     assert_eq!(done["resume"]["toolIdleMs"], serde_json::json!(2500));

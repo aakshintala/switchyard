@@ -91,6 +91,8 @@ pub struct GateResult {
     pub exit_code: i32,
     pub passed: bool,
     pub output_tail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
