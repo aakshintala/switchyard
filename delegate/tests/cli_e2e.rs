@@ -675,6 +675,19 @@ fn two_runs_in_the_same_cwd_both_reach_terminal() {
 }
 
 #[test]
+fn subcommand_help_prints_usage_and_succeeds() {
+    let e = Env::new("subcommand-help");
+    for args in [vec!["run", "--help"], vec!["watch", "-h"]] {
+        let out = e.delegate(&args, None);
+        assert_eq!(out.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("usage: delegate run --model M"), "{stdout}");
+        assert!(stdout.contains("delegate doctor"), "{stdout}");
+        assert!(out.stderr.is_empty());
+    }
+}
+
+#[test]
 fn capability_flag_is_an_unknown_flag_error() {
     let e = Env::new("capflag");
     let out = e.delegate(
