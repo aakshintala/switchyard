@@ -59,8 +59,8 @@ Every job can write, so a read task says "do not edit" in its brief, the record'
 
 **Write the gate as a shell command** that `/bin/sh -c` runs: an English postcondition is a
 syntax error, and nothing is checked. Make it the next consumer's first action: if a packer
-feeds a runner, the gate runs the runner. A gate that greps for a file is not a gate. Until switchyard #323 ships, `gateResult.outputTail` keeps only the tail, so write a gate whose early lines matter (a test's panic) as `<cmd> > <log> 2>&1; rc=$?; tail -60 <log>; exit $rc`. Read
-`result.gateResult` in the record, and rerun the check yourself when `passed` is false.
+feeds a runner, the gate runs the runner. A gate that greps for a file is not a gate. Read
+`result.gateResult` in the record, never the job's own report of its gate, and rerun the check yourself when `passed` is false.
 
 `delegate resume <id>` takes the new prompt on stdin and prints the new job id. `--model` must
 stay on the same backend. It adds `supersededBy` to the old record. A `CANCELLED`, `STALLED` or
@@ -98,7 +98,7 @@ killed it: rerun, with a larger `--tool-idle-ms` if it stalled inside a tool). `
 `NEEDS_CONTEXT` it is the question.
 
 - `result.gateResult`: a failing gate downgrades `DONE` to `DONE_WITH_CONCERNS`; it holds the
-  gate's `exitCode` and `outputTail`.
+  gate's `exitCode`, `outputTail` and `outputPath`, the file with the gate's full output.
 - `result.changeSet`: git delta for the cwd (`newCommits`, `filesChanged`, `diffstat`,
   `uncommittedFiles`).
 - `result.concerns`: warnings from the CLI, e.g. commits landed but the tree is still dirty.
