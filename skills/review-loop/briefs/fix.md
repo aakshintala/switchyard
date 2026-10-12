@@ -23,8 +23,8 @@ __FINDINGS__
 - Run only the gate and the tests your findings name. Suites the workflow doc gives to CI, such as mutation testing (`cargo mutants`), benchmarks and backstops, run in CI: read their result from the CI log, and report when you need one reproduced.
 - Run every command in the foreground, so it ends before your turn does; start no background or detached process. When the gate outlasts one tool call, run the narrowest test set your change reaches in the foreground and leave the full gate to the job-end gate.
 - Set work aside with a commit. The stash stack is shared with every other worktree of the repo, so `git stash` can pop another agent's changes.
-- Before pushing, the gate passes: `__GATE__`. Fold every fix from this round into one push, since each push restarts CI. When the round changes what the PR does, update the body lines the workflow doc requires to match.
+- Before pushing, the gate passes: `__GATE__`. Push once, with every fix from this round, once the required checks on the head you started from have all passed or one has failed: `~/.agents/bin/gh-ci wait __PR__ --repo __REPO__ --fail-fast` waits for that. A push cancels the run in flight and loses the results it hasn't reported. When that run failed, name its failed jobs in your report, so the next round takes them. When the round changes what the PR does, update the body lines the workflow doc requires to match.
 
 ## Report
 
-The pushed head SHA, then one line per finding: `fixed` or `refuted: <evidence>`. Then **Friction**: up to 3 bullets ("none" is fine). End with a STATUS line.
+The pushed head SHA, the failed jobs of the run you waited on (or `CI: pass`), then one line per finding: `fixed` or `refuted: <evidence>`. Then **Friction**: up to 3 bullets ("none" is fine). End with a STATUS line.

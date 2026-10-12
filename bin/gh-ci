@@ -2,7 +2,7 @@
 # gh-ci: quiet, low-call GitHub CI helpers for agent flywheels.
 # Usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>
 #        gh-ci resample <pr> "<job name>" --until <regex> [--max <n>]
-#        gh-ci wait <pr> [--timeout <s>] | panics [<tail-lines>] (reads log from stdin)
+#        gh-ci wait <pr> [--timeout <s>] [--fail-fast] | panics [<tail-lines>] (reads log from stdin)
 # Exit codes: 0 ok, 1 failure, 2 usage, 3 merge conflict (snapshot and
 # watch-verified at once; wait after 30 s of DIRTY re-checks), 124 wait timeout.
 # Repo: --repo OWNER/NAME (any subcommand, any position; panics needs none), then GH_CI_REPO, then
@@ -12,7 +12,7 @@ set -euo pipefail
 usage() {
   echo "usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>" >&2
   echo "       gh-ci resample <pr> \"<job name>\" --until <regex> [--max <n>]" >&2
-  echo "       gh-ci wait <pr> [--timeout <s>] | panics [<tail-lines>] (reads log from stdin)" >&2
+  echo "       gh-ci wait <pr> [--timeout <s>] [--fail-fast] | panics [<tail-lines>] (reads log from stdin)" >&2
   echo "       every GitHub subcommand takes --repo OWNER/NAME (overrides GH_CI_REPO and the checkout's origin)" >&2
   exit 2
 }
@@ -324,12 +324,15 @@ head_checks() {
 # required names were read and there are none, the verdict is pass without
 # calling the checks API. Checks from superseded workflow runs are ignored; the newest-run
 # map comes from every check on the head, read in the same call.
+# --fail-fast: a failed or cancelled required check returns 1 at once, even while
+# another required check is still pending (the failing lines are the same).
 cmd_wait() {
-  local pr="" timeout=7200 req="[]" empty_ok=false names
+  local pr="" timeout=7200 req="[]" empty_ok=false names fail_fast=false
   while [ $# -gt 0 ]; do case "$1" in
     --timeout)
       [ $# -ge 2 ] || usage
       timeout="$2"; shift 2;;
+    --fail-fast) fail_fast=true; shift;;
     --*) usage;;
     *) [ -z "$pr" ] || usage; pr="$1"; shift;;
   esac; done
@@ -384,9 +387,10 @@ cmd_wait() {
           || checks_json='{}'
       fi
     fi
-    verdict=$(printf '%s' "$checks_json" | jq -r --argjson empty_ok "$empty_ok" '
+    verdict=$(printf '%s' "$checks_json" | jq -r --argjson empty_ok "$empty_ok" --argjson fail_fast "$fail_fast" '
       if type == "array" and length == 0 and $empty_ok then "pass"
       elif type != "array" or length == 0 then "pending"
+      elif $fail_fast and any(.[]; .bucket == "fail" or .bucket == "cancel") then "fail"
       elif any(.[]; .bucket != "pass" and .bucket != "skipping" and .bucket != "fail" and .bucket != "cancel") then "pending"
       elif any(.[]; .bucket == "fail" or .bucket == "cancel") then "fail"
       else "pass" end' 2>/dev/null) || verdict=pending
