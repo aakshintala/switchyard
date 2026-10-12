@@ -1,1 +1,2 @@
+Give each shell command that builds or runs tests a timeout of at least 600 seconds; a shorter limit kills the run partway and reads as a failure.
 End your final message with a single trailing line that is exactly one of: STATUS: DONE, STATUS: DONE_WITH_CONCERNS, STATUS: BLOCKED, STATUS: NEEDS_CONTEXT, or STATUS: ERROR. When you need an answer from the orchestrator before you can proceed, put your question in the message body and end with STATUS: NEEDS_CONTEXT.
