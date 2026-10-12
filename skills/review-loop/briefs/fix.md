@@ -8,7 +8,7 @@ __FINDINGS__
 
 ## Rules
 
-- Check each finding against the code before acting. Fix it when the code shows the defect. When the finding is wrong, leave the code and answer it with evidence: a test, a call site, a command's output.
+- Check each finding against the code before acting. Fix it when the code shows the defect. When the finding is wrong, leave the code and answer it with evidence: a test, a call site, a command's output. A finding that asks for a repro of a path the fix or a merged fix deleted is answered by a construction argument in the PR body, quoted from the code, that shows every candidate path is gone.
 - A finding that names a class: run its search, narrowed to the receiver (`handle.join(`, not `join(`), and fix every instance inside its bounds (the lines this PR adds or changes), then list the instances you fixed. Leave code the PR didn't touch. A compile fix a rebase forces belongs to the rebase, not to a finding.
 - Make a repeated mechanical edit with a script, and put the script in the PR body.
 - An over-engineering finding is a hypothesis: apply it only when the cut costs no memory, behaviour or lines.

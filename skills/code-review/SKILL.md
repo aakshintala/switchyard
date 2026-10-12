@@ -56,7 +56,7 @@ Each smell reads *what it is* → *how to fix*; match it against the diff:
 Read the diff once per axis, and follow each hunk into the code around it as far as the finding needs.
 
 - **Standards**: every place the diff breaks a documented standard (cite the file and rule), and any baseline smell (name it, quote the hunk). Skip anything tooling enforces.
-- **Spec**: requirements missing or partial; requirements that look implemented but wrong (quote the spec line).
+- **Spec**: requirements missing or partial; requirements that look implemented but wrong (quote the spec line). A criterion that asks for evidence the code can no longer produce, such as a repro of a path this diff or a merged fix deleted, is met by a construction argument in the PR body, quoted from the code, that shows every candidate path is gone: judge whether it holds, and raise a finding only when it doesn't.
 - **Scope check** (Spec axis): every file or hunk the diff modified that the ticket didn't ask for. An unrequested edit is a finding even when it looks like an improvement.
 - When the change touches security, permission, authentication or persistence, add the adversarial branch: try spelling tricks, fail-open inputs, weaker fallback identities, unresolvable indirection and TOCTOU gaps, plus one bypass family beyond the list.
 
@@ -77,7 +77,7 @@ When the defect is a pattern that can recur, the finding names its class and a s
 
 ## Scoped verify
 
-The input is the earlier findings and the repair diff (the change since the reviewed head, with any rebase onto a moved base factored out). Check each finding against the code: fixed, refuted, or still open. A finding that carries a `refuted: <evidence>` line is refuted when that evidence holds on the PR head (the cited test exists and asserts it, the cited call site or doc line reads as quoted); otherwise it stays open. For a finding with a class, run its search on the PR head: one instance left inside its bounds keeps it open. Run the scope check (step 4) on the repair diff: a repair that edits beyond its findings and the instances of their classes is a new finding.
+The input is the earlier findings and the repair diff (the change since the reviewed head, with any rebase onto a moved base factored out). Check each finding against the code: fixed, refuted, or still open. A finding that carries a `refuted: <evidence>` line is refuted when that evidence holds on the PR head (the cited test exists and asserts it, the cited call site or doc line reads as quoted); otherwise it stays open. A refutation by construction argument holds only when the argument does: read the code it quotes and judge the reasoning, beyond checking that the quotes match. For a finding with a class, run its search on the PR head: one instance left inside its bounds keeps it open. Run the scope check (step 4) on the repair diff: a repair that edits beyond its findings and the instances of their classes is a new finding.
 
 ```
 FIX-OK
