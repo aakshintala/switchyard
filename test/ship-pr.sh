@@ -65,7 +65,63 @@ gh() (
     if [ -n "$jq" ]; then jq -r "$jq" <<<"$json"; else echo "$json"; fi
     exit 0
   fi
-  [ "$1" = "pr" ] || { echo "fake gh: only pr and api supported" >&2; exit 2; }
+  [ "$1" = "pr" ] || [ "$1" = "run" ] || { echo "fake gh: only pr, run and api supported" >&2; exit 2; }
+  if [ "$1" = "run" ]; then
+    shift
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        if [ -e "$ST/run-list.json" ]; then cat "$ST/run-list.json"; else echo '[]'; fi;;
+      view)
+        rid="$1"; shift
+        jqex=""; json_fields=""; job=""; want_log=""; want_failed_log=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --jq) jqex="$2"; shift 2;;
+            --json) json_fields="$2"; shift 2;;
+            --job) job="$2"; shift 2;;
+            --log) want_log=1; shift;;
+            --log-failed) want_failed_log=1; shift;;
+            --repo|--commit|--limit|--branch|--workflow) shift; [ $# -gt 0 ] && shift;;
+            *) shift;;
+          esac
+        done
+        if [ -n "$want_failed_log" ]; then
+          [ -e "$ST/log-$rid-$job.log" ] && cat "$ST/log-$rid-$job.log" || true
+        elif [ -n "$want_log" ]; then
+          [ -e "$ST/log-$rid.log" ] && cat "$ST/log-$rid.log" || true
+        else
+          case "$json_fields" in
+            *jobs*)
+              if [ -e "$ST/jobs-$rid.json" ]; then
+                json="$(jq -c '{jobs: .}' "$ST/jobs-$rid.json")"
+              else
+                json='{"jobs":[]}'
+              fi;;
+            *name*)
+              json="$(jq -nc --arg r "$rid" '{name: ("run-" + $r)}')";;
+            *headSha*)
+              h="$(git --git-dir="$ORIGIN" rev-parse refs/heads/feature 2>/dev/null || cat "$ST/lasthead")"
+              json="$(jq -nc --arg h "$h" '{headSha: $h}')";;
+            *status*)
+              json='{"status":"completed"}';;
+            *) json='{}';;
+          esac
+          if [ -n "$jqex" ]; then jq -r "$jqex" <<<"$json"; else echo "$json"; fi
+        fi;;
+      rerun)
+        rid="$1"
+        if [ -e "$ST/rerun-fail" ]; then
+          if grep -qxF "$rid" "$ST/rerun-fail" 2>/dev/null || grep -qx 'all' "$ST/rerun-fail" 2>/dev/null; then
+            echo "gh: rerun of $rid failed" >&2
+            exit 1
+          fi
+        fi
+        [ ! -e "$ST/rerun-keeps-failing" ] && echo '[{"bucket":"pass","name":"ci"}]' >"$ST/checks" || true;;
+      *) echo "fake gh: unknown run $sub" >&2; exit 2;;
+    esac
+    exit 0
+  fi
   shift
   sub="$1"; shift
   case "$sub" in
@@ -76,6 +132,10 @@ gh() (
         echo "$h" >"$ST/lasthead"
       else
         h="$(cat "$ST/lasthead")"
+      fi
+      if [ -e "$ST/head-first-stale" ]; then
+        h="$(cat "$ST/head-first-stale")"
+        rm -f "$ST/head-first-stale"
       fi
       state="$(rd state OPEN)"
       json="$(jq -nc --arg h "$h" --arg s "$state" --arg d "$(rd draft false)" --arg ms "$(rd merge-state CLEAN)" --arg mg "$(rd mergeable MERGEABLE)" --arg b "$(rd body 'Resolves #97')" \
@@ -95,9 +155,10 @@ gh() (
       if [ -e "$ST/merge-fail-once" ]; then
         cat "$ST/merge-fail-once" >&2
         rm -f "$ST/merge-fail-once"
+        [ ! -e "$ST/merge-fails-but-merges" ] || echo MERGED >"$ST/state"
         exit 1
       fi
-      if [ -e "$ST/merge-fail-msg" ]; then cat "$ST/merge-fail-msg" >&2; exit 1; fi
+      if [ -e "$ST/merge-fail-msg" ]; then cat "$ST/merge-fail-msg" >&2; [ ! -e "$ST/merge-fails-but-merges" ] || echo MERGED >"$ST/state"; exit 1; fi
       [ ! -e "$ST/merge-fail" ] || exit 1
       [ -e "$ST/no-merge" ] || echo MERGED >"$ST/state"
       [ ! -e "$ST/merge-deletes-branch" ] || git --git-dir="$ORIGIN" update-ref -d refs/heads/feature;;
@@ -722,7 +783,7 @@ run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$F"
 expect 0 "mismatch with --unverified-fixes merges"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line after unverified fixes: [$OUT]"
 [ "$(comment_count)" -eq 1 ] || fail "one comment: [$(cat "$ST/gh.log")]"
-[ "$(head -n 1 "$ST/comment.txt")" = "Fixes since $SHORT shipped without re-review (review-loop step 2: no real bug in round one)." ] \
+[ "$(head -n 1 "$ST/comment.txt")" = "Fixes since $SHORT shipped without re-review (review-loop step 3: no real bug in round one)." ] \
   || fail "comment first line: [$(head -n 1 "$ST/comment.txt")]"
 grep -qx 'Findings:' "$ST/comment.txt" && grep -q 'P2: missing test for x' "$ST/comment.txt" || fail "comment holds the findings: [$(cat "$ST/comment.txt")]"
 grep -qx 'Changed since review:' "$ST/comment.txt" && grep -q 'feature.txt' "$ST/comment.txt" || fail "comment holds the stat: [$(cat "$ST/comment.txt")]"
@@ -764,5 +825,135 @@ checks_hook "$BUMP_MAIN"
 ship --unverified-fixes "$F"; expect 0 "retry with --unverified-fixes merges"
 grep -q 'retry 1 of 3' <<<"$ERR" || fail "retry happened: [$ERR]"
 [ "$(comment_count)" -eq 1 ] || fail "one comment per run: [$(comment_count)]"
+
+# ===== (A) rerun CI once when the failure is outside the diff
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":101,"name":"ci","workflowName":"CI","event":"push","conclusion":"cancelled"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"cancelled","databaseId":201,"name":"ci"}]' >"$ST/jobs-101.json"
+ship; expect 0 "cancelled failure reruns once and merges"
+grep -q 'gh run rerun 101 --failed' "$ST/gh.log" || fail "cancelled: rerun called: [$(cat "$ST/gh.log")]"
+grep -q 'CI failure outside the diff' <<<"$ERR" || fail "cancelled: outside message: [$ERR]"
+grep -q 'rerunning failed jobs once' <<<"$ERR" || fail "cancelled: rerun message: [$ERR]"
+grep -q 'file the flake' <<<"$ERR" || fail "cancelled: flake message: [$ERR]"
+grep -q 'ci' <<<"$ERR" || fail "cancelled: reason names the job: [$ERR]"
+[ "$(grep -c 'gh run rerun' "$ST/gh.log")" -eq 1 ] || fail "cancelled: exactly one rerun"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "cancelled rerun merges: [$OUT]"
+
+setup; echo '[{"bucket":"fail","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":102,"name":"ci","workflowName":"CI","event":"push","conclusion":"failure"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"failure","databaseId":202,"name":"ci"}]' >"$ST/jobs-102.json"
+printf '%s\n' "thread 't' panicked at src/outside.rs:10:5:" "assertion failed" >"$ST/log-102-202.log"
+ship; expect 0 "panic outside the diff reruns once and merges"
+grep -q 'gh run rerun 102 --failed' "$ST/gh.log" || fail "panic outside: rerun called"
+grep -q 'src/outside.rs' <<<"$ERR" || fail "panic outside: reason names the path: [$ERR]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "panic outside rerun merges: [$OUT]"
+
+setup; echo '[{"bucket":"fail","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":103,"name":"ci","workflowName":"CI","event":"push","conclusion":"failure"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"failure","databaseId":203,"name":"ci"}]' >"$ST/jobs-103.json"
+printf '%s\n' "thread 't' panicked at feature.txt:1:1:" "boom" >"$ST/log-103-203.log"
+ship; expect 1 "panic inside the diff never reruns"
+! grep -q 'gh run rerun' "$ST/gh.log" || fail "panic inside: no rerun"
+! grep -q 'outside the diff' <<<"$ERR" || fail "panic inside: no outside message: [$ERR]"
+grep -q 'CI failed' <<<"$ERR" || fail "panic inside: CI failed message: [$ERR]"
+
+setup; echo '[{"bucket":"fail","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":104,"name":"ci","workflowName":"CI","event":"push","conclusion":"failure"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"failure","databaseId":204,"name":"ci"}]' >"$ST/jobs-104.json"
+printf '%s\n' "build failed: clippy error" "no panic here" >"$ST/log-104-204.log"
+ship; expect 1 "failed job with no panic never reruns"
+! grep -q 'gh run rerun' "$ST/gh.log" || fail "no panic: no rerun"
+grep -q 'CI failed' <<<"$ERR" || fail "no panic: CI failed message: [$ERR]"
+
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":105,"name":"ci","workflowName":"CI","event":"push","conclusion":"cancelled"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"cancelled","databaseId":205,"name":"ci"}]' >"$ST/jobs-105.json"
+echo 105 >"$ST/rerun-fail"
+ship; expect 1 "failed rerun names the run"
+grep -q 'gh run rerun 105 --failed' "$ST/gh.log" || fail "rerun-fail: rerun attempted"
+grep -q 'gh run rerun 105 --failed failed' <<<"$ERR" || fail "rerun-fail message names the run: [$ERR]"
+
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":106,"name":"ci","workflowName":"CI","event":"push","conclusion":"cancelled"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"cancelled","databaseId":206,"name":"ci"}]' >"$ST/jobs-106.json"
+touch "$ST/rerun-keeps-failing"
+ship; expect 1 "rerun wait that also fails exits 1"
+grep -q 'CI failure outside the diff' <<<"$ERR" || fail "second fail: outside message"
+[ "$(grep -c 'gh run rerun' "$ST/gh.log")" -eq 1 ] || fail "second fail: exactly one rerun"
+grep -q 'CI failed' <<<"$ERR" || fail "second fail: CI failed message: [$ERR]"
+no_merge "rerun wait fails"
+
+# ===== (B) retry the merge once on a GraphQL error, polling MERGED after a failed retry
+setup; printf 'GraphQL error: something went wrong' >"$ST/merge-fail-once"
+ship; expect 0 "GraphQL error retries once"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line after GraphQL retry: [$OUT]"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "GraphQL: merge called twice"
+grep -q 'retrying once' <<<"$ERR" || fail "GraphQL retry message: [$ERR]"
+grep -q 'GraphQL' <<<"$ERR" || fail "GraphQL error printed: [$ERR]"
+grep -q '^5$' "$ST/sleeps.txt" || fail "GraphQL retry sleeps 5 s"
+[ ! -e "$WT" ] || fail "worktree removed after a GraphQL retry"
+
+setup; printf 'GraphQL error: still broken' >"$ST/merge-fail-msg"; touch "$ST/merge-fails-but-merges"
+ship; expect 0 "failed GraphQL retry still polls MERGED"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "merged despite GraphQL retry failure: [$OUT]"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "GraphQL merged-despite-error: two merge calls"
+
+setup; printf 'Base branch was modified. Review and try the merge again.' >"$ST/merge-fail-msg"
+ship; expect 1 "failed retry still polls MERGED before failing"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "failed retry polls: two merge calls"
+grep -q 'gh pr merge failed' <<<"$ERR" || fail "failed retry says the merge command failed: [$ERR]"
+[ -d "$WT" ] || fail "worktree kept when the retry fails and nothing merged"
+grep -qx '1' "$ST/sleeps.txt" || fail "failed retry polls MERGED (sleep 1): [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
+
+# ===== (C) wait for GitHub head to match the local HEAD
+setup; git -C "$WT" commit -q --amend -m 'feature, reworded'
+git -C "$WT" push -q --force-with-lease origin HEAD:refs/heads/feature
+echo "$HEAD0" >"$ST/head-first-stale"
+ship; expect 0 "fresh push shows up within 60 s"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "head wait merges: [$OUT]"
+grep -qx '2' "$ST/sleeps.txt" || fail "head wait sleeps 2 s: [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
+
+setup; bump_ref refs/heads/feature
+ship; expect 2 "HEAD that never matches exits 2 after 60 s"
+grep -q 'is not the PR head' <<<"$ERR" || fail "head wait timeout message: [$ERR]"
+[ "$(grep -c '^2$' "$ST/sleeps.txt")" -eq 30 ] || fail "head wait polls 30 times: [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
+untouched "head wait timeout"; no_merge "head wait timeout"
+
+# ===== (D) pr-closes runs before the gate, never after CI
+setup; echo 'Resolves #97. also fixes #9' >"$ST/body"
+ship --gate 'touch "$ST/gate-ran"; exit 1'; expect 5 "stray text fails before the gate"
+[ ! -e "$ST/gate-ran" ] || fail "pr-closes before the gate starts no gate"
+! grep -q 'running gate' <<<"$ERR" || fail "pr-closes before the gate: no gate message: [$ERR]"
+grep -q '^#9 body: fixes #9$' <<<"$OUT" || fail "stray line printed: [$OUT]"
+no_merge "pr-closes before gate"
+! grep -q 'check-runs' "$ST/gh.log" || fail "pr-closes before the gate: no CI call"
+
+setup; printf 'Resolves #97\n' >"$ST/body"
+checks_hook 'printf "Resolves #97\nfixes #9\n" >"$ST/body"'
+ship; expect 0 "pr-closes never runs after CI"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "late stray body still merges: [$OUT]"
+
+# ===== (E) --allow-commit-closes
+setup; printf 'Resolves #97\n' >"$ST/body"
+printf '[{"oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","messageHeadline":"Fixes #9","messageBody":""}]' >"$ST/commits"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --allow-commit-closes
+expect 0 "commit-only matches warn and merge"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "commit-only merges: [$OUT]"
+grep -q 'allowing' <<<"$ERR" || fail "commit-only warning: [$ERR]"
+grep -q '#9' <<<"$ERR" || fail "commit-only warning names the issue: [$ERR]"
+! grep -q '#9' <<<"$OUT" || fail "commit-only match stays off stdout: [$OUT]"
+
+setup; printf 'Resolves #97\n' >"$ST/body"
+printf '[{"oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","messageHeadline":"Fixes #9","messageBody":""}]' >"$ST/commits"
+ship; expect 5 "commit-only matches fail without the flag"
+no_merge "commit-only without the flag"
+
+setup; printf 'Resolves #97. also fixes #9\n' >"$ST/body"
+printf '[{"oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","messageHeadline":"Fixes #8","messageBody":""}]' >"$ST/commits"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --allow-commit-closes
+expect 5 "title or body matches still exit 5 with the flag"
+grep -q '^#9 body: fixes #9$' <<<"$OUT" || fail "body stray still printed: [$OUT]"
+grep -q 'allowing' <<<"$ERR" || fail "commit warning alongside body failure: [$ERR]"
+no_merge "body match with the flag"
 
 echo "ship-pr: all cases passed"
