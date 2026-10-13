@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>]
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>] [--allow-commit-closes]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
-#        open and its head branch is checked out clean in --worktree; run --gate in
-#        the worktree on that head, once, before any rebase or push; rebase onto
+#        open and its head branch is checked out clean in --worktree, waiting up to
+#        60 s for GitHub's head to match the local HEAD; require each --body-has
+#        line and run pr-closes (see below); run --gate in the worktree on that head,
+#        once, before any rebase or push; rebase onto
 #        origin/main (see below); compare the PR diff's `git patch-id --stable` with
 #        <sha>'s (with --unverified-fixes, a mismatch posts a comment and goes on, see
 #        below); push a rebased branch with --force-with-lease; mark a draft
 #        ready (once, before the first CI wait); `gh-ci wait` (--timeout, default
-#        7200); run pr-closes; on a non-strict base with --gate, gate the PR merged
+#        7200), rerunning failed jobs once when the failure is outside the diff
+#        (see below); on a non-strict base with --gate, gate the PR merged
 #        with current origin/main in a throwaway merge commit (step 7); squash-merge
-#        pinned to the checked head; wait for MERGED; remove the worktree and the
+#        pinned to the checked head, retrying once on a base race or GraphQL error
+#        and polling MERGED even after a failed retry; wait for MERGED; remove the worktree and the
 #        local and remote branch.
 #        The CI wait trusts the repo's required checks: one green on the exact
 #        head counts whenever it ran, so marking ready need not start a new run,
@@ -21,7 +25,31 @@
 #        Each --body-has <prefix> (repeatable) requires a PR body line that starts
 #        with <prefix>, literally and case-sensitively; it is checked after step 1,
 #        before the rebase, and each missing one prints `missing body line: <prefix>`.
-#        Prints `merged <squash sha>` on success. Progress goes to stderr, and so do
+#        Step 2 runs pr-closes just after the --body-has check, before any gate,
+#        rebase, push or CI wait. With --allow-commit-closes, a stray match whose
+#        report's second field is `commit <sha>` is printed to stderr as a warning
+#        and does not fail; a title or body match still exits 5. Without the flag
+#        every stray match exits 5. Both repos that use ship-pr squash with the PR
+#        title and body as the commit message, so a commit message keyword never
+#        reaches main.
+#        When `gh-ci wait` fails on the pinned head, ship-pr reads `gh-ci failures
+#        --pr <pr>` and, only when the failure is outside the diff, reruns each failed
+#        or cancelled run on the pinned head with `gh run rerun <run id> --failed`,
+#        once per invocation, then waits again with the same --timeout. Outside the
+#        diff means every failed or cancelled job was cancelled (a job that hits its
+#        timeout-minutes reports as cancelled), or every failed job logged a
+#        `panicked at <path>:<line>` location and none of those paths is in
+#        `git diff --name-only origin/main...<pin>`. A failed job with no panic
+#        location counts as inside the diff and is never rerun. A failed rerun exits 1
+#        naming the run. After rerunning, ship-pr polls each rerun run until its
+#        attempt passes the pre-rerun one before waiting again; no new attempt
+#        within 120 s exits 1 naming the run.
+#        Prints `merged <squash sha>` on success. A `gh pr merge` error containing
+#        `GraphQL` retries once like `Base branch was modified`, sleeping 5 s first.
+#        After a failed retry of either kind ship-pr still polls for MERGED, since
+#        GitHub sometimes merges despite the error, and exits 1 saying the merge
+#        command failed only when the poll never sees MERGED.
+#        Progress goes to stderr, and so do
 #        gh-ci's check counts while CI runs.
 #        After marking a draft PR ready, each later failure before `gh pr merge` says
 #        that nothing merged and the PR is still marked ready. If MERGED is not confirmed
@@ -42,13 +70,13 @@
 #        Not strict: after the gate, read the PR's mergeable and mergeStateStatus;
 #        rebase (after refetching origin/main) only on CONFLICTING or DIRTY. One CI
 #        wait, no retry when origin/main moves; a conflict found after CI exits 3.
-#        On every invocation, before step 2, delete only regular xcrun_db-* files directly under
+#        On every invocation, before step 3, delete only regular xcrun_db-* files directly under
 #        ${TMPDIR:-/tmp} when they are over a day old; ignore deletion errors. With --gate,
 #        require at least 20 GB free on the volumes holding --worktree and ${TMPDIR:-/tmp}.
 #        Both gate runs set NEXTEST_RETRIES=1, retrying failed nextest tests once.
 #        Report each FLAKY result and its failed-attempt panic text; retries do not
 #        change the gate's exit status.
-#        With --gate, step 7 refetches origin/main after pr-closes: when it is not
+#        With --gate, step 7 refetches origin/main after step 2: when it is not
 #        an ancestor of the pinned head, merge it into the pinned head in a throwaway
 #        commit in --worktree, run the gate there, and restore the pinned head whatever
 #        happens (nothing is pushed). A merge conflict exits 3; a failing gate exits 1
@@ -56,7 +84,7 @@
 #        to the full output saved under ${TMPDIR:-/tmp}/ship-pr-<pr>-gate.*. Passing gates
 #        leave no log file. Without --gate the check is skipped.
 #        --unverified-fixes <file> is for a fix round that answers no real bug (review-loop
-#        step 2), so it ships with no re-review. The file must be readable and hold a
+#        step 3), so it ships with no re-review. The file must be readable and hold a
 #        non-blank line, else exit 2 before anything else. On a patch-id mismatch, once per
 #        run and before the first push or CI wait, ship-pr posts a PR comment: a first line
 #        naming the reviewed short sha, the file under `Findings:`, and `git diff --stat`
@@ -67,7 +95,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>]" >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>] [--allow-commit-closes]" >&2
   exit 2
 }
 say() { echo "ship-pr: $*" >&2; }
@@ -145,8 +173,11 @@ run_gate() {
 [ $# -ge 1 ] || usage
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() unverified=""
+repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() unverified="" allow_commit_closes=""
 while [ $# -gt 0 ]; do
+  case "$1" in
+    --allow-commit-closes) allow_commit_closes=1; shift; continue ;;
+  esac
   [ $# -ge 2 ] || usage
   case "$1" in
     --repo) repo="$2" ;;
@@ -184,7 +215,16 @@ git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die 2 "$wo
   || die 2 "$worktree does not have $branch checked out"
 [ -z "$(git -C "$worktree" status --porcelain)" ] || die 2 "$worktree has uncommitted changes"
 git -C "$worktree" fetch -q origin >&2 || die 1 "git fetch origin failed"
-[ "$(git -C "$worktree" rev-parse HEAD)" = "$head0" ] \
+local_head="$(git -C "$worktree" rev-parse HEAD)"
+if [ "$local_head" != "$head0" ]; then
+  for _wait in $(seq 1 30); do
+    sleep 2
+    head0="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid 2>/dev/null)" \
+      || die 2 "cannot read PR $pr in $repo"
+    [ "$local_head" = "$head0" ] && break
+  done
+fi
+[ "$local_head" = "$head0" ] \
   || die 2 "$worktree HEAD is not the PR head $head0; pull or push first"
 git -C "$worktree" rev-parse --verify -q "$reviewed^{commit}" >/dev/null \
   || die 2 "--reviewed $reviewed is not a commit in $worktree"
@@ -204,14 +244,42 @@ if [ "${#body_has[@]}" -gt 0 ]; then
   [ "$missing" = 0 ] || die 5 "PR body lacks required lines; edit the PR body, then rerun"
 fi
 
-# Posts the unverified-fixes comment (step 4). Nothing is pushed if it fails.
+# Step 2: no stray closing keywords, before any gate, rebase, push or CI wait.
+rc=0
+closes_out="$(bash "$here/pr-closes" "$pr" --repo "$repo" 2>/dev/null)" || rc=$?
+case "$rc" in
+  0) ;;
+  1)
+    if [ -n "$allow_commit_closes" ]; then
+      stray_text=""
+      while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        case "$line" in
+          *" commit "*) say "warning: allowing $line" ;;
+          *) stray_text="${stray_text}${line}
+" ;;
+        esac
+      done <<<"$closes_out"
+      if [ -n "$stray_text" ]; then
+        printf '%s' "$stray_text"
+        exit_after_ready 5 "pr-closes found stray closing keywords"
+      fi
+    else
+      printf '%s\n' "$closes_out"
+      exit_after_ready 5 "pr-closes found stray closing keywords"
+    fi
+    ;;
+  *) die_after_ready 1 "pr-closes failed (exit $rc)" ;;
+esac
+
+# Posts the unverified-fixes comment (step 5). Nothing is pushed if it fails.
 post_unverified() {
   local pin="$1" short stat body rc=0
   short="$(git -C "$worktree" rev-parse --short "$reviewed")" || die_after_ready 1 "cannot name $reviewed"
   stat="$(git -C "$worktree" diff --stat "$reviewed..$pin")" || die_after_ready 1 "cannot diff $reviewed..$pin"
   body="$(mktemp "${TMPDIR:-/tmp}/ship-pr-comment.XXXXXX")"
   {
-    printf 'Fixes since %s shipped without re-review (review-loop step 2: no real bug in round one).\n\n' "$short"
+    printf 'Fixes since %s shipped without re-review (review-loop step 3: no real bug in round one).\n\n' "$short"
     printf 'Findings:\n'
     cat "$unverified"
     printf '\n\nChanged since review:\n%s\n' "$stat"
@@ -257,7 +325,57 @@ rebase_main() {
   fi
 }
 
-# Step 2: the gate runs once, on the PR head, before any rebase or push. It checks
+# Rerun CI once when the failure is outside the diff (step 6). Shared across the
+# strict-mode retry loop: at most one rerun per invocation.
+ci_rerun_done=""
+ci_outside_reason() {
+  local failures headers failed_headers cancelled_headers cancelled_names panic_paths diff_files
+  failures="$(GH_CI_REPO="$repo" bash "$here/gh-ci" failures --pr "$pr" 2>/dev/null)" || return 1
+  [ -n "$failures" ] || return 1
+  headers="$(printf '%s\n' "$failures" | grep '^=== ' || true)"
+  [ -n "$headers" ] || return 1
+  failed_headers="$(printf '%s\n' "$headers" | grep ': failure' || true)"
+  cancelled_headers="$(printf '%s\n' "$headers" | grep ': cancelled' || true)"
+  if [ -z "$failed_headers" ]; then
+    [ -n "$cancelled_headers" ] || return 1
+    cancelled_names="$(printf '%s\n' "$cancelled_headers" | sed -E 's/^=== .* \/ (.*): cancelled$/\1/' | sort -u | paste -sd ',' - | sed 's/,/, /g')"
+    [ -n "$cancelled_names" ] || return 1
+    printf 'cancelled jobs: %s' "$cancelled_names"
+    return 0
+  fi
+  if ! printf '%s\n' "$failures" | awk '
+    /^=== / {
+      if (in_failed && !saw_panic) exit 1
+      in_failed = ($0 ~ /: failure$/)
+      saw_panic = 0
+      next
+    }
+    in_failed && /panicked at [^[:space:]:]+:[0-9]+/ { saw_panic = 1 }
+    END { if (in_failed && !saw_panic) exit 1 }
+  '; then
+    return 1
+  fi
+  panic_paths="$(printf '%s\n' "$failures" | grep -oE 'panicked at [^[:space:]:]+:[0-9]+' | sed -E 's/^panicked at //; s/:[0-9]+$//' | sort -u || true)"
+  [ -n "$panic_paths" ] || return 1
+  diff_files="$(git -C "$worktree" diff --name-only "origin/main...$pin" 2>/dev/null)" || return 1
+  while IFS= read -r p || [ -n "$p" ]; do
+    [ -n "$p" ] || continue
+    if printf '%s\n' "$diff_files" | grep -qxF "$p"; then
+      return 1
+    fi
+  done <<<"$panic_paths"
+  printf 'panics at %s' "$(printf '%s\n' "$panic_paths" | paste -sd ',' - | sed 's/,/, /g')"
+  return 0
+}
+ci_failed_run_ids() {
+  local list ids
+  list="$(gh run list --repo "$repo" --commit "$pin" --limit 100 --json databaseId,conclusion,workflowName,name,event 2>/dev/null)" || return 1
+  ids="$(printf '%s' "$list" | jq -r '. as $all | ([.[] | {k: "\(.workflowName // .name // "")\u001f\(.event // "")" , id: .databaseId}] | group_by(.k) | map(max_by(.id).id)) as $newest | $all[] | select(.conclusion=="failure" or .conclusion=="cancelled") | select(.databaseId as $id | $newest | index($id)) | "\(.databaseId)"' 2>/dev/null)" || return 1
+  [ -n "$ids" ] || return 1
+  printf '%s\n' "$ids"
+}
+
+# Step 3: the gate runs once, on the PR head, before any rebase or push. It checks
 # code; it never changes what was reviewed. CI covers the rebased head.
 if [ -n "$gate" ]; then
   gate_preflight
@@ -280,11 +398,11 @@ if [ "$strict" = 0 ]; then
   fi
 fi
 
-# Steps 3-5 repeat when origin/main moves during the CI wait (strict only), at most 3 times.
+# Steps 4-6 repeat when origin/main moves during the CI wait (strict only), at most 3 times.
 # lease is the branch SHA last known on the remote: head0, then each pushed pin.
 lease="$head0" retries=0 unverified_posted=""
 while :; do
-  # Step 3: rebase onto origin/main when it moved (strict) or on a reported conflict.
+  # Step 4: rebase onto origin/main when it moved (strict) or on a reported conflict.
   if [ "$strict" = 1 ]; then
     git -C "$worktree" merge-base --is-ancestor origin/main HEAD || rebase_main
   elif [ -n "$conflict" ]; then
@@ -292,7 +410,7 @@ while :; do
   fi
   pin="$(git -C "$worktree" rev-parse HEAD)"
 
-  # Step 4: the patch under review is the patch about to merge (review-loop's Identity rule).
+  # Step 5: the patch under review is the patch about to merge (review-loop's Identity rule).
   if [ "$(patch_id "$reviewed")" != "$(patch_id "$pin")" ]; then
     [ -n "$unverified" ] || die_after_ready 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict"
     if [ -z "$unverified_posted" ]; then
@@ -301,7 +419,7 @@ while :; do
     fi
   fi
 
-  # Step 5: push a rebased branch, then wait for CI on exactly that head.
+  # Step 6: push a rebased branch, then wait for CI on exactly that head.
   if [ "$pin" != "$lease" ]; then
     say "pushing rebased $branch"
     git -C "$worktree" push -q --force-with-lease="$branch:$lease" origin "HEAD:refs/heads/$branch" >&2 \
@@ -316,14 +434,66 @@ while :; do
   fi
   say "waiting for CI"
   rc=0
-  # gh-ci's stderr (its check counts while it waits) flows to ours live; only its stdout is parsed.
   ci_out="$(GH_CI_REPO="$repo" bash "$here/gh-ci" wait "$pr" --timeout "$timeout")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$ci_out"
     case "$rc" in
       124) exit_after_ready 124 "CI timed out" ;;
       3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
-      *) die_after_ready 1 "CI failed" ;;
+      *)
+        if [ -z "$ci_rerun_done" ]; then
+          if reason="$(ci_outside_reason 2>/dev/null)"; then
+            if run_ids="$(ci_failed_run_ids 2>/dev/null)"; then
+              say "CI failure outside the diff ($reason); rerunning failed jobs once — file the flake"
+              pre_attempts=""
+              while IFS= read -r rid || [ -n "$rid" ]; do
+                [ -n "$rid" ] || continue
+                pre="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>/dev/null)" \
+                  || die_after_ready 1 "cannot read attempt of run $rid before rerun"
+                IFS=$'\t' read -r pre_attempt _ <<<"$pre" || true
+                pre_attempts="${pre_attempts}${rid} ${pre_attempt:-0}
+"
+              done <<<"$run_ids"
+              while IFS= read -r rid || [ -n "$rid" ]; do
+                [ -n "$rid" ] || continue
+                gh run rerun "$rid" --failed --repo "$repo" >&2 || die_after_ready 1 "gh run rerun $rid --failed failed"
+              done <<<"$run_ids"
+              ci_rerun_done=1
+              elapsed=0
+              while :; do
+                waiting=""
+                while IFS= read -r rid || [ -n "$rid" ]; do
+                  [ -n "$rid" ] || continue
+                  pre_one="$(printf '%s\n' "$pre_attempts" | awk -v r="$rid" '$1 == r { print $2; exit }')"
+                  cur="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>/dev/null)" \
+                    || { waiting="${waiting}${rid} "; continue; }
+                  IFS=$'\t' read -r cur_attempt cur_status <<<"$cur" || true
+                  [ "${cur_status:-}" != "completed" ] && continue
+                  case "${cur_attempt:-}" in ''|*[!0-9]*) waiting="${waiting}${rid} "; continue ;; esac
+                  case "${pre_one:-}" in ''|*[!0-9]*) pre_one=0 ;; esac
+                  [ "$cur_attempt" -gt "$pre_one" ] || waiting="${waiting}${rid} "
+                done <<<"$run_ids"
+                [ -z "$waiting" ] && break
+                [ "$elapsed" -ge 120 ] && die_after_ready 1 "run ${waiting%% *} shows no new attempt 120 s after rerun"
+                sleep 5
+                elapsed=$((elapsed + 5))
+              done
+              say "waiting for CI"
+              rc=0
+              ci_out="$(GH_CI_REPO="$repo" bash "$here/gh-ci" wait "$pr" --timeout "$timeout")" || rc=$?
+              if [ "$rc" -ne 0 ]; then
+                printf '%s\n' "$ci_out"
+                case "$rc" in
+                  124) exit_after_ready 124 "CI timed out" ;;
+                  3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
+                  *) die_after_ready 1 "CI failed" ;;
+                esac
+              fi
+            fi
+          fi
+        fi
+        [ "$rc" -eq 0 ] || die_after_ready 1 "CI failed"
+        ;;
     esac
   fi
   grep -q "^head: ${pin:0:8} " <<<"$ci_out" || { printf '%s\n' "$ci_out"; die_after_ready 1 "CI passed on a head other than ${pin:0:8}"; }
@@ -337,15 +507,6 @@ while :; do
   retries=$((retries + 1))
   say "origin/main moved during CI; rebasing again (retry $retries of 3)"
 done
-
-# Step 6: no stray closing keywords. Commit-message-only matches are the caller's call.
-rc=0
-closes_out="$(bash "$here/pr-closes" "$pr" --repo "$repo" 2>/dev/null)" || rc=$?
-case "$rc" in
-  0) ;;
-  1) printf '%s\n' "$closes_out"; exit_after_ready 5 "pr-closes found stray closing keywords" ;;
-  *) die_after_ready 1 "pr-closes failed (exit $rc)" ;;
-esac
 
 # Step 7: on a non-strict base with --gate, gate the PR merged with current
 # origin/main. The merge is a throwaway commit in --worktree; nothing is pushed,
@@ -380,17 +541,22 @@ fi
 say "merging PR $pr at ${pin:0:8}"
 merge_attempted=1
 merge_err=""
+merge_failed=""
 if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
   printf '%s\n' "$merge_err" >&2
   case "$merge_err" in
-    *"Base branch was modified"*)
-      say "base branch was modified during merge; retrying once after 5 s"
+    *"Base branch was modified"*|*"GraphQL"*)
+      case "$merge_err" in
+        *"GraphQL"*) say "GraphQL error during merge; retrying once after 5 s" ;;
+        *) say "base branch was modified during merge; retrying once after 5 s" ;;
+      esac
       sleep 5
       if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
         printf '%s\n' "$merge_err" >&2
-        die_after_ready 1 "gh pr merge failed"
+        merge_failed=1
+      else
+        [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
       fi
-      [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
       ;;
     *) die_after_ready 1 "gh pr merge failed" ;;
   esac
@@ -404,7 +570,7 @@ for i in $(seq 1 12); do
   if [ "${state:-}" = "MERGED" ]; then merged=1; break; fi
   [ "$i" -lt 12 ] && sleep "${SHIP_PR_INTERVAL:-5}"
 done
-[ -n "$merged" ] || die 1 "merge status could not be confirmed after 12 polls; worktree left in place"
+[ -n "$merged" ] || { [ -n "$merge_failed" ] && die 1 "gh pr merge failed"; die 1 "merge status could not be confirmed after 12 polls; worktree left in place"; }
 
 # Step 9: clean up from the common git dir, never from inside the worktree being removed.
 common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"

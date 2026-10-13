@@ -7,7 +7,8 @@
 # watch-verified at once; wait after 30 s of DIRTY re-checks), 124 wait timeout.
 # Repo: --repo OWNER/NAME (any subcommand, any position; panics needs none), then GH_CI_REPO, then
 # origin's GitHub URL (no network call), then `gh repo view`. With none, exit 2.
-# GH_CI_INTERVAL the watch poll seconds (default 30).
+# GH_CI_INTERVAL the watch poll seconds (default 30). Under Claude Code
+# (CLAUDECODE set, any non-empty value), wait raises --timeout below 600 to 600.
 set -euo pipefail
 usage() {
   echo "usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>" >&2
@@ -342,6 +343,10 @@ cmd_wait() {
   esac; done
   [ -n "$pr" ] || usage
   case "$timeout" in ''|*[!0-9]*) usage;; esac
+  if [ -n "${CLAUDECODE:-}" ] && [ "$timeout" -lt 600 ]; then
+    echo "gh-ci: --timeout $timeout raised to 600 under Claude Code (waits run in the background)" >&2
+    timeout=600
+  fi
   local interval="${GH_CI_INTERVAL:-30}"
   local slept=0 head head2 state state2 checks_json max_src max_map filtered padded verdict hs hs_rc
   local dirty_head="" dirty_for=0 draft=false progress p_pend p_pass p_fail
