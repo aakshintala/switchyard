@@ -41,7 +41,9 @@
 #        `panicked at <path>:<line>` location and none of those paths is in
 #        `git diff --name-only origin/main...<pin>`. A failed job with no panic
 #        location counts as inside the diff and is never rerun. A failed rerun exits 1
-#        naming the run.
+#        naming the run. After rerunning, ship-pr polls each rerun run until its
+#        attempt passes the pre-rerun one before waiting again; no new attempt
+#        within 120 s exits 1 naming the run.
 #        Prints `merged <squash sha>` on success. A `gh pr merge` error containing
 #        `GraphQL` retries once like `Base branch was modified`, sleeping 5 s first.
 #        After a failed retry of either kind ship-pr still polls for MERGED, since
@@ -368,7 +370,7 @@ ci_outside_reason() {
 ci_failed_run_ids() {
   local list ids
   list="$(gh run list --repo "$repo" --commit "$pin" --limit 100 --json databaseId,conclusion,workflowName,name,event 2>/dev/null)" || return 1
-  ids="$(printf '%s' "$list" | jq -r '. as $all | ([.[] | {k: "\(.workflowName // .name // "")" , id: .databaseId}] | group_by(.k) | map(max_by(.id).id)) as $newest | $all[] | select(.conclusion=="failure" or .conclusion=="cancelled") | select(.databaseId as $id | $newest | index($id)) | "\(.databaseId)"' 2>/dev/null)" || return 1
+  ids="$(printf '%s' "$list" | jq -r '. as $all | ([.[] | {k: "\(.workflowName // .name // "")\u001f\(.event // "")" , id: .databaseId}] | group_by(.k) | map(max_by(.id).id)) as $newest | $all[] | select(.conclusion=="failure" or .conclusion=="cancelled") | select(.databaseId as $id | $newest | index($id)) | "\(.databaseId)"' 2>/dev/null)" || return 1
   [ -n "$ids" ] || return 1
   printf '%s\n' "$ids"
 }
@@ -439,17 +441,43 @@ while :; do
       124) exit_after_ready 124 "CI timed out" ;;
       3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
       *)
-        reran=""
         if [ -z "$ci_rerun_done" ]; then
           if reason="$(ci_outside_reason 2>/dev/null)"; then
             if run_ids="$(ci_failed_run_ids 2>/dev/null)"; then
               say "CI failure outside the diff ($reason); rerunning failed jobs once — file the flake"
+              pre_attempts=""
+              while IFS= read -r rid || [ -n "$rid" ]; do
+                [ -n "$rid" ] || continue
+                pre="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>/dev/null)" \
+                  || die_after_ready 1 "cannot read attempt of run $rid before rerun"
+                IFS=$'\t' read -r pre_attempt _ <<<"$pre" || true
+                pre_attempts="${pre_attempts}${rid} ${pre_attempt:-0}
+"
+              done <<<"$run_ids"
               while IFS= read -r rid || [ -n "$rid" ]; do
                 [ -n "$rid" ] || continue
                 gh run rerun "$rid" --failed --repo "$repo" >&2 || die_after_ready 1 "gh run rerun $rid --failed failed"
               done <<<"$run_ids"
               ci_rerun_done=1
-              reran=1
+              elapsed=0
+              while :; do
+                waiting=""
+                while IFS= read -r rid || [ -n "$rid" ]; do
+                  [ -n "$rid" ] || continue
+                  pre_one="$(printf '%s\n' "$pre_attempts" | awk -v r="$rid" '$1 == r { print $2; exit }')"
+                  cur="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>/dev/null)" \
+                    || { waiting="${waiting}${rid} "; continue; }
+                  IFS=$'\t' read -r cur_attempt cur_status <<<"$cur" || true
+                  [ "${cur_status:-}" != "completed" ] && continue
+                  case "${cur_attempt:-}" in ''|*[!0-9]*) waiting="${waiting}${rid} "; continue ;; esac
+                  case "${pre_one:-}" in ''|*[!0-9]*) pre_one=0 ;; esac
+                  [ "$cur_attempt" -gt "$pre_one" ] || waiting="${waiting}${rid} "
+                done <<<"$run_ids"
+                [ -z "$waiting" ] && break
+                [ "$elapsed" -ge 120 ] && die_after_ready 1 "run ${waiting%% *} shows no new attempt 120 s after rerun"
+                sleep 5
+                elapsed=$((elapsed + 5))
+              done
               say "waiting for CI"
               rc=0
               ci_out="$(GH_CI_REPO="$repo" bash "$here/gh-ci" wait "$pr" --timeout "$timeout")" || rc=$?
@@ -464,9 +492,7 @@ while :; do
             fi
           fi
         fi
-        if [ "$rc" -ne 0 ] || [ -z "$reran" ]; then
-          [ "$rc" -eq 0 ] && [ -n "$reran" ] || die_after_ready 1 "CI failed"
-        fi
+        [ "$rc" -eq 0 ] || die_after_ready 1 "CI failed"
         ;;
     esac
   fi

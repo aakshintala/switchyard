@@ -95,6 +95,25 @@ gh() (
           [ -e "$ST/log-$rid.log" ] && cat "$ST/log-$rid.log" || true
         else
           case "$json_fields" in
+            *attempt*)
+              # a requested rerun's new attempt appears after attempt-delay polls
+              if [ -e "$ST/rerun-requested-$rid" ] && [ -e "$ST/attempt-delay-$rid" ]; then
+                n="$(cat "$ST/attempt-delay-$rid")"
+                case "$n" in ''|*[!0-9]*) n=1 ;; esac
+                if [ "$n" -le 1 ]; then
+                  rm -f "$ST/attempt-delay-$rid" "$ST/rerun-requested-$rid"
+                  a="$(cat "$ST/attempt-$rid.txt" 2>/dev/null || echo 1)"
+                  case "$a" in ''|*[!0-9]*) a=1 ;; esac
+                  echo "$((a + 1))" >"$ST/attempt-$rid.txt"
+                  echo completed >"$ST/status-$rid.txt"
+                  [ ! -e "$ST/rerun-keeps-failing" ] && echo '[{"bucket":"pass","name":"ci"}]' >"$ST/checks" || true
+                else
+                  echo "$((n - 1))" >"$ST/attempt-delay-$rid"
+                fi
+              fi
+              a="$(cat "$ST/attempt-$rid.txt" 2>/dev/null || echo 1)"
+              s="$(cat "$ST/status-$rid.txt" 2>/dev/null || echo completed)"
+              json="$(jq -nc --argjson a "$a" --arg s "$s" '{attempt: $a, status: $s}')";;
             *jobs*)
               if [ -e "$ST/jobs-$rid.json" ]; then
                 json="$(jq -c '{jobs: .}' "$ST/jobs-$rid.json")"
@@ -120,7 +139,15 @@ gh() (
             exit 1
           fi
         fi
-        [ ! -e "$ST/rerun-keeps-failing" ] && echo '[{"bucket":"pass","name":"ci"}]' >"$ST/checks" || true;;
+        touch "$ST/rerun-requested-$rid"
+        if [ ! -e "$ST/attempt-delay-$rid" ]; then
+          rm -f "$ST/rerun-requested-$rid"
+          a="$(cat "$ST/attempt-$rid.txt" 2>/dev/null || echo 1)"
+          case "$a" in ''|*[!0-9]*) a=1 ;; esac
+          echo "$((a + 1))" >"$ST/attempt-$rid.txt"
+          echo completed >"$ST/status-$rid.txt"
+          [ ! -e "$ST/rerun-keeps-failing" ] && echo '[{"bucket":"pass","name":"ci"}]' >"$ST/checks" || true
+        fi;;
       *) echo "fake gh: unknown run $sub" >&2; exit 2;;
     esac
     exit 0
@@ -885,6 +912,34 @@ grep -q 'CI failure outside the diff' <<<"$ERR" || fail "second fail: outside me
 [ "$(grep -c 'gh run rerun' "$ST/gh.log")" -eq 1 ] || fail "second fail: exactly one rerun"
 grep -q 'CI failed' <<<"$ERR" || fail "second fail: CI failed message: [$ERR]"
 no_merge "rerun wait fails"
+
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":111,"name":"CI","workflowName":"CI","event":"pull_request","conclusion":"cancelled"},{"databaseId":112,"name":"CI","workflowName":"CI","event":"push","conclusion":"success"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"cancelled","databaseId":211,"name":"ci"}]' >"$ST/jobs-111.json"
+ship; expect 0 "failed pull_request run reruns despite a newer successful push run"
+grep -q 'gh run rerun 111 --failed' "$ST/gh.log" || fail "mixed event: pull_request run rerun"
+! grep -q 'gh run rerun 112' "$ST/gh.log" || fail "mixed event: successful push run never rerun"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "mixed event rerun merges: [$OUT]"
+
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":107,"name":"ci","workflowName":"CI","event":"push","conclusion":"cancelled"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"cancelled","databaseId":207,"name":"ci"}]' >"$ST/jobs-107.json"
+echo 3 >"$ST/attempt-delay-107"
+ship; expect 0 "rerun waits for the new attempt before the second wait"
+grep -q 'gh run rerun 107 --failed' "$ST/gh.log" || fail "delayed: rerun called"
+grep -q 'attempt' "$ST/gh.log" || fail "delayed: attempt polled: [$(cat "$ST/gh.log")]"
+[ "$(grep -c '^5$' "$ST/sleeps.txt")" -eq 2 ] || fail "delayed: two 5 s attempt polls: [$(cat "$ST/sleeps.txt")]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "delayed rerun merges: [$OUT]"
+
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":108,"name":"ci","workflowName":"CI","event":"push","conclusion":"cancelled"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"cancelled","databaseId":208,"name":"ci"}]' >"$ST/jobs-108.json"
+echo 999 >"$ST/attempt-delay-108"
+ship; expect 1 "missing rerun attempt exits 1 naming the run"
+grep -q '108' <<<"$ERR" || fail "missing attempt names the run: [$ERR]"
+grep -q 'no new attempt' <<<"$ERR" || fail "missing attempt message: [$ERR]"
+[ "$(grep -c '^5$' "$ST/sleeps.txt")" -eq 24 ] || fail "missing attempt polls 120 s: [$(cat "$ST/sleeps.txt")]"
+no_merge "missing attempt"
 
 # ===== (B) retry the merge once on a GraphQL error, polling MERGED after a failed retry
 setup; printf 'GraphQL error: something went wrong' >"$ST/merge-fail-once"
