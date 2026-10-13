@@ -2,6 +2,9 @@
 # test/run: run every test file in this directory.
 # Usage: test/run
 set -uo pipefail
+# CLAUDECODE must not change gh-ci wait timeouts under test: suites that need
+# it set it per case, so start unset however the gate is invoked.
+unset CLAUDECODE
 
 D="$(cd "$(dirname "$0")" && pwd)"
 failed=0

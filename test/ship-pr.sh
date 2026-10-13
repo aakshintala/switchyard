@@ -21,6 +21,9 @@ trap 'rm -rf "$T"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export GH_CI_INTERVAL=7 SHIP_PR_INTERVAL=1
+# CLAUDECODE must not change gh-ci wait timeouts under test (ship-pr passes
+# --timeout 0 and 14 in cases below), so start unset however the suite is invoked.
+unset CLAUDECODE
 MERGE_SHA="1f2e3d4c5b6a79881726354433221100ffeeddcc"
 
 # --- fake gh. Reads $ST (state dir) and $ORIGIN. The PR head is origin's
