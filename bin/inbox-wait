@@ -4,8 +4,10 @@
 #        Prints the path of every regular *.md file directly in <inbox-dir>,
 #        one per line, and exits 0. Files moved to <inbox-dir>/read/ do not
 #        count. Returns at once when a file is already waiting; otherwise
-#        blocks until one arrives, using `fswatch -1` or `inotifywait` when
-#        either is on PATH and checking every 2 seconds when neither is.
+#        blocks until one arrives, rechecking at least every 2 seconds:
+#        `inotifywait -q -t 2` when it is on PATH, `sleep 2` otherwise.
+#        (No unbounded native wait: a file landing between the last check
+#        and the watcher's start would otherwise be missed until a later event.)
 set -euo pipefail
 
 usage() {
@@ -34,13 +36,9 @@ mkdir -p -- "$dir"
 
 if waiting; then exit 0; fi
 
-if command -v fswatch >/dev/null 2>&1; then
+if command -v inotifywait >/dev/null 2>&1; then
   while ! waiting; do
-    fswatch -1 "$dir" >/dev/null 2>&1 || true
-  done
-elif command -v inotifywait >/dev/null 2>&1; then
-  while ! waiting; do
-    inotifywait -q -e create -e moved_to -- "$dir" >/dev/null 2>&1 || true
+    inotifywait -q -t 2 -e create -e moved_to -- "$dir" >/dev/null 2>&1 || true
   done
 else
   while ! waiting; do

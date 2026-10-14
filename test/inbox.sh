@@ -15,6 +15,41 @@ fail() {
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-inbox.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 
+# Stub sleep first on PATH, in a PATH with no inotifywait, so inbox-wait
+# takes its sleep branch and every pause is observable: each stub call
+# appends one line to SLEEP_MARK, then really sleeps briefly. Waiter tests
+# sync on the marker (bounded deadline loops) instead of blind sleeps.
+REALSLEEP="$(command -v sleep)"
+STUBSLEEP="$T/stubsleep"
+mkdir -p "$STUBSLEEP"
+export SLEEP_MARK="$T/sleep-marks.log"
+: >"$SLEEP_MARK"
+cat >"$STUBSLEEP/sleep" <<STUB
+#!/usr/bin/env bash
+printf 'sleep %s\n' "\$*" >>"$SLEEP_MARK"
+exec "$REALSLEEP" 0.1
+STUB
+chmod +x "$STUBSLEEP/sleep"
+WAITPATH="$STUBSLEEP"
+while IFS= read -r d; do
+  [ -n "$d" ] || continue
+  [ -x "$d/inotifywait" ] || WAITPATH="$WAITPATH:$d"
+done < <(printf '%s' "$PATH" | tr ':' '\n')
+
+# wait_marks <n>: fail unless the stub sleep has been called at least n
+# times within 5 s; the waiter has then reached its pause point n times.
+# The 5 s is only a failure bound, never the synchronization.
+wait_marks() {
+  local n="$1" deadline=50 lines=0
+  while [ "$deadline" -gt 0 ]; do
+    lines="$(wc -l <"$SLEEP_MARK" | tr -d ' ')"
+    [ "$lines" -ge "$n" ] && return 0
+    "$REALSLEEP" 0.1
+    deadline=$((deadline - 1))
+  done
+  fail "waiter did not reach its pause point $n time(s): [$lines marks]"
+}
+
 # Two concurrent sends from the same sender produce two complete files.
 INBOX="$T/inbox"
 printf 'first message' | bash "$SEND" "$INBOX" lane >"$T/p1" &
@@ -60,12 +95,14 @@ out="$(bash "$WAIT" "$WBOX")"; rc=$?
 [ "$out" = "$delivered" ] || fail "wait prints the waiting path: [$out] vs [$delivered]"
 
 # inbox-wait on an empty inbox, started in the background, exits within 5 s
-# of a later inbox-send and prints that path.
+# of a later inbox-send and prints that path. The send goes out only after
+# the marker shows the waiter has reached its pause point.
 EBOX="$T/empty"
 mkdir -p "$EBOX"
-bash "$WAIT" "$EBOX" >"$T/wout" 2>"$T/werr" &
+: >"$SLEEP_MARK"
+PATH="$WAITPATH" bash "$WAIT" "$EBOX" >"$T/wout" 2>"$T/werr" &
 wpid=$!
-sleep 1
+wait_marks 1
 later="$(printf 'wake up' | bash "$SEND" "$EBOX" lane)"
 SECONDS=0
 while kill -0 "$wpid" 2>/dev/null; do
@@ -75,13 +112,15 @@ done
 wait "$wpid" || fail "wait exits 0 after the send"
 [ "$(cat "$T/wout")" = "$later" ] || fail "wait prints the new path: [$(cat "$T/wout")] vs [$later]"
 
-# A file in read/ alone does not end the wait (kill after 3 s).
+# A file in read/ alone does not end the wait: once the marker shows at
+# least two pause points the waiter is still parked, so kill it and pass.
 RBOX="$T/readbox"
 mkdir -p "$RBOX/read"
 printf 'already read' >"$RBOX/read/lane-20200101T000000Z-$$-1.md"
-bash "$WAIT" "$RBOX" >"$T/rout" 2>/dev/null &
+: >"$SLEEP_MARK"
+PATH="$WAITPATH" bash "$WAIT" "$RBOX" >"$T/rout" 2>/dev/null &
 rpid=$!
-sleep 3
+wait_marks 2
 if kill -0 "$rpid" 2>/dev/null; then
   kill "$rpid" 2>/dev/null || true
   wait "$rpid" 2>/dev/null || true
