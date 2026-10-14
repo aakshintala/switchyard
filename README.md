@@ -10,7 +10,7 @@ Started from [mattpocock/skills](https://github.com/mattpocock/skills) and rewor
 | --- | --- |
 | `skills/` | One folder per skill: `SKILL.md`, plus brief templates in `briefs/` where the skill starts other jobs. |
 | `delegate/` | The `delegate` CLI (Rust): runs a brief on another model and reports a job record. |
-| `bin/` | Scripts the skills call: `fill-brief`, `plan-gate` (a plan's gate command, from its `## Gate` heading), `review-pr`, `gh-ci`, `pr-closes`, `ship-pr`, `check-pack`, `agent-cost` (token and cache cost of recent agents, by kind), `ci-health` (hourly fiber CI health check), `ci-friction` (same test failing across CI lanes). |
+| `bin/` | Scripts the skills call: `fill-brief`, `plan-gate` (a plan's gate command, from its `## Gate` heading), `review-pr`, `gh-ci`, `pr-closes`, `ship-pr`, `check-pack`, `agent-cost` (token and cache cost of recent agents, by kind), `ci-health` (hourly fiber CI health check), `ci-friction` (same test failing across CI lanes), `inbox-send` (deliver a stdin message to a file inbox, atomically, or over ssh when `INBOX_HOST` is set), `inbox-wait` (block until an inbox file waits and print its path). |
 | `claude-code/agents/` | Claude Code agent definitions: `ticket-orchestrator` (a flywheel lane, run as its own `claude --bg` session) and `claude-worker` (a Claude lane, Verifier or fix job). |
 | `test/` | Tests for the scripts. `test/run` runs every suite. |
 | `docs/agents/` | This repo's own setup for the skills: issue tracker, triage labels, workflow doc. |

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# inbox-send: deliver a message (on stdin) to a file inbox, atomically.
+# Usage: inbox-send <inbox-dir> <sender>   (message on stdin; delivered path on stdout)
+#        When INBOX_HOST is set, the message is sent over ssh to
+#        `bash ~/.agents/bin/inbox-send <dir> <sender>` on that host instead.
+#        The sender must match ^[A-Za-z0-9._-]+$, anything else exits 2.
+set -euo pipefail
+
+usage() {
+  echo "usage: inbox-send <inbox-dir> <sender>  (message on stdin)" >&2
+  exit 2
+}
+
+[ $# -eq 2 ] || usage
+dir="$1" sender="$2"
+
+case "$sender" in
+  ''|*[!A-Za-z0-9._-]*)
+    echo "inbox-send: bad sender '$sender': use only letters, digits, . _ -" >&2
+    exit 2
+    ;;
+esac
+
+if [ -n "${INBOX_HOST:-}" ]; then
+  host="$INBOX_HOST"
+  qdir="$(printf '%q' "$dir")"
+  qsender="$(printf '%q' "$sender")"
+  # Scrub INBOX_HOST from the far side's environment: sshd never forwards
+  # it, but a stub ssh that runs the command locally (as the tests use)
+  # would otherwise recurse into remote mode forever.
+  INBOX_HOST= exec ssh "$host" "bash ~/.agents/bin/inbox-send $qdir $qsender"
+fi
+
+mkdir -p -- "$dir"
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+tmp="$(mktemp "$dir/.tmp.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+cat >"$tmp"
+dest=""
+while :; do
+  dest="$dir/$sender-$ts-$$-$RANDOM.md"
+  [ -e "$dest" ] || break
+done
+mv -- "$tmp" "$dest"
+trap - EXIT
+printf '%s\n' "$dest"

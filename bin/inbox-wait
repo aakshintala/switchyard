@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# inbox-wait: block until a file inbox holds an unread message, then list it.
+# Usage: inbox-wait <inbox-dir>
+#        Prints the path of every regular *.md file directly in <inbox-dir>,
+#        one per line, and exits 0. Files moved to <inbox-dir>/read/ do not
+#        count. Returns at once when a file is already waiting; otherwise
+#        blocks until one arrives, using `fswatch -1` or `inotifywait` when
+#        either is on PATH and checking every 2 seconds when neither is.
+set -euo pipefail
+
+usage() {
+  echo "usage: inbox-wait <inbox-dir>" >&2
+  exit 2
+}
+
+[ $# -eq 1 ] || usage
+dir="$1"
+
+# waiting: print every regular *.md file directly in the inbox, one per line.
+# Exits 0 when at least one was printed, 1 when none was. Dotfiles (such as
+# inbox-send's .tmp.* staging files) never match *.md, so they are never printed.
+waiting() {
+  local f found=1
+  for f in "$dir"/*.md; do
+    [ -e "$f" ] || continue
+    [ -f "$f" ] || continue
+    printf '%s\n' "$f"
+    found=0
+  done
+  return "$found"
+}
+
+mkdir -p -- "$dir"
+
+if waiting; then exit 0; fi
+
+if command -v fswatch >/dev/null 2>&1; then
+  while ! waiting; do
+    fswatch -1 "$dir" >/dev/null 2>&1 || true
+  done
+elif command -v inotifywait >/dev/null 2>&1; then
+  while ! waiting; do
+    inotifywait -q -e create -e moved_to -- "$dir" >/dev/null 2>&1 || true
+  done
+else
+  while ! waiting; do
+    sleep 2
+  done
+fi
+exit 0
