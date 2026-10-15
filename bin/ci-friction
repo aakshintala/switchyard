@@ -125,8 +125,12 @@ def clean(text):
     return [TS.sub("", ANSI.sub("", l)) for l in text.splitlines()]
 
 
-def classify(name, steps, text):
-    """Port of classify.py. Returns (class, detail, tests[])."""
+def classify(name, steps, text, timed_out=False):
+    """Port of classify.py. Returns (class, detail, tests[]).
+
+    ``timed_out`` is the caller's is_timeout(job) verdict — a cancelled job
+    only counts as a timeout when it ran into its timeout-minutes (#440).
+    """
     step = next((s.get("name", "") for s in steps or []
                  if s.get("conclusion") == "failure"), "")
     lines = clean(text)
@@ -207,9 +211,17 @@ def classify(name, steps, text):
         return ("mutants-baseline", "unmutated baseline failed", [])
     if install:
         return ("infra", install[0][:140], [])
-    if any("The operation was canceled" in l or "has exceeded the maximum execution time" in l
-           for l in lines):
+    # A cancel alone doesn't mean the job hit its bound: a newer push
+    # supersedes the run and prints the same line (#440). Only an
+    # exceeded-execution-time line, or a cancel that ran into the lane's
+    # timeout-minutes (is_timeout, with its 30 s slack), is a timeout; any
+    # other cancelled job is a superseded run.
+    if any("has exceeded the maximum execution time" in l for l in lines):
         return ("timeout", "job hit timeout-minutes", [])
+    if any("The operation was canceled" in l for l in lines):
+        if timed_out:
+            return ("timeout", "job hit timeout-minutes", [])
+        return ("cancelled", "superseded by a newer push", [])
     return ("other", (errs[-1] if errs else (lines[-1] if lines else ""))[:160], [])
 
 
@@ -467,7 +479,8 @@ def main(argv):
                             ok = False
                             continue
                     else:
-                        cls, det, tests = classify(j.get("name"), j.get("steps"), log)
+                        cls, det, tests = classify(j.get("name"), j.get("steps"), log,
+                                                   timed_out=is_timeout(j))
                     jobs_st[jid] = {"class": cls, "detail": det, "tests": tests,
                                     "lane": lane, "os": osof(j.get("labels")),
                                     "completed_at": done_at,
@@ -485,7 +498,9 @@ def main(argv):
                              ent.get("completed_at", done_at),
                              ent.get("head_sha", r.get("head_sha"))))
                         resight.add(key)
-                elif cls not in ("missed-mutant", "other"):
+                elif cls not in ("missed-mutant", "other", "cancelled"):
+                    # A superseded cancel (#440) is noise by design: it says
+                    # nothing about friction, so it stays out of design[].
                     c, laneset = design.get(cls, (0, set()))
                     laneset.add(ent.get("lane", lane))
                     design[cls] = (c + 1, laneset)
