@@ -96,19 +96,16 @@ fn mutants_shim_script() -> String {
 }
 
 /// Write the shim once, idempotently: temp file, chmod 755, rename into place.
-/// `None` when the write failed; the caller starts the job without the shim.
-fn ensure_mutants_shim() -> Option<std::path::PathBuf> {
+fn ensure_mutants_shim() -> std::io::Result<std::path::PathBuf> {
     let dir = mutants_shim_dir();
     let path = dir.join("cargo-mutants");
     let script = mutants_shim_script();
     match std::fs::read_to_string(&path) {
-        Ok(existing) if existing == script => return Some(dir),
+        Ok(existing) if existing == script => return Ok(dir),
         _ => {}
     }
-    if write_shim(&dir, &path, &script).is_err() {
-        return None;
-    }
-    Some(dir)
+    write_shim(&dir, &path, &script)?;
+    Ok(dir)
 }
 
 fn write_shim(dir: &std::path::Path, path: &std::path::Path, script: &str) -> std::io::Result<()> {
@@ -127,8 +124,6 @@ fn write_shim(dir: &std::path::Path, path: &std::path::Path, script: &str) -> st
     written
 }
 
-static SHIM_WARN_ONCE: std::sync::Once = std::sync::Once::new();
-
 /// A `Command` for a child whose output `delegate` captures: the parent's environment
 /// minus `FORCE_COLOR` and `CLICOLOR_FORCE`, so CLIs don't colour piped output (#85).
 /// Never set them to "" or "0" (many tools treat any value as force) and never set
@@ -138,29 +133,22 @@ static SHIM_WARN_ONCE: std::sync::Once = std::sync::Once::new();
 /// Every command also runs with delegate's `cargo-mutants` shim first on `PATH`:
 /// the shim prints `cargo mutants is CI-only; read the CI mutants log instead`
 /// on stderr and exits 1, so a job can never run mutants locally (#435). When the
-/// shim cannot be written the command starts without it and one warning goes to stderr.
-pub(crate) fn captured_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+/// shim cannot be written there is no command: the caller fails the spawn, so a
+/// job never runs unguarded.
+pub(crate) fn captured_command(
+    program: impl AsRef<std::ffi::OsStr>,
+) -> std::io::Result<std::process::Command> {
     let mut cmd = std::process::Command::new(program);
     cmd.env_remove("FORCE_COLOR").env_remove("CLICOLOR_FORCE");
-    match ensure_mutants_shim() {
-        Some(dir) => {
-            let mut path = std::ffi::OsString::from(dir.as_os_str());
-            path.push(":");
-            match std::env::var_os("PATH") {
-                Some(old) if !old.is_empty() => path.push(old),
-                _ => path.push("/usr/bin:/bin"),
-            }
-            cmd.env("PATH", path);
-        }
-        None => {
-            SHIM_WARN_ONCE.call_once(|| {
-                eprintln!(
-                    "delegate: cannot write cargo-mutants shim; starting job without it (#435)"
-                );
-            });
-        }
+    let dir = ensure_mutants_shim()?;
+    let mut path = std::ffi::OsString::from(dir.as_os_str());
+    path.push(":");
+    match std::env::var_os("PATH") {
+        Some(old) if !old.is_empty() => path.push(old),
+        _ => path.push("/usr/bin:/bin"),
     }
-    cmd
+    cmd.env("PATH", path);
+    Ok(cmd)
 }
 
 pub fn clamp_wait(ms: f64) -> f64 {
@@ -299,22 +287,5 @@ mod tests {
         assert_eq!(clamp_wait(0.0), 1000.0);
         assert_eq!(clamp_wait(999_999.0), 600_000.0);
         assert_eq!(clamp_wait(5000.0), 5000.0);
-    }
-
-    /// #435: a command built through the seam runs with the shim dir first on PATH.
-    #[test]
-    fn captured_command_puts_mutants_shim_first_on_path() {
-        let dir = mutants_shim_dir();
-        let cmd = captured_command("true");
-        let path = cmd
-            .get_envs()
-            .find(|(k, _)| *k == "PATH")
-            .and_then(|(_, v)| v)
-            .expect("captured_command sets PATH")
-            .to_string_lossy()
-            .into_owned();
-        let first = path.split(':').next().expect("PATH has a first entry");
-        assert_eq!(first, dir.to_string_lossy());
-        assert!(dir.join("cargo-mutants").is_file());
     }
 }

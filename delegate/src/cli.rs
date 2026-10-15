@@ -160,9 +160,12 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
     }
     // Own session and process group, stdio closed: the supervisor outlives this process.
     let exe = std::env::current_exe().map_err(|e| LaunchErr::Usage(e.to_string()))?;
+    let mut cmd = captured_command(&exe).map_err(|e| {
+        let _ = std::fs::remove_file(&prompt_file);
+        LaunchErr::Usage(format!("cannot write cargo-mutants shim: {e}"))
+    })?;
     let mut child = unsafe {
-        captured_command(&exe)
-            .args(&supervise_args)
+        cmd.args(&supervise_args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

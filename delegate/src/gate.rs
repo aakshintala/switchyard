@@ -189,7 +189,22 @@ fn run_gate_inner(
     };
     let timeout = Duration::from_millis(opts.timeout_ms.unwrap_or(DEFAULT_GATE_TIMEOUT_MS));
     let start = Instant::now();
-    let spawned = captured_command("/bin/sh")
+    let mut cmd = match captured_command("/bin/sh") {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            let output = format!("cannot write cargo-mutants shim: {e}");
+            record_output(&strip_ansi(&output), &mut output_file, &mut output_error);
+            return GateResult {
+                command: command.to_string(),
+                exit_code: 1,
+                passed: false,
+                output_tail: output,
+                output_path: output_path.map(|p| p.to_string_lossy().into_owned()),
+                error: output_error,
+            };
+        }
+    };
+    let spawned = cmd
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
