@@ -10,7 +10,8 @@
 #        A template containing __PARENT__ needs a non-empty PARENT value (the
 #        parent's session name); there is no fallback. A template containing
 #        __GATE__ needs a non-blank GATE value (not empty, not only whitespace)
-#        in the same way.
+#        in the same way. A template containing __EXTRA__ fills it with the empty
+#        string when no EXTRA= argument is given; no other key has a default.
 #        Exit 1 (nothing on stdout, one problem per line on stderr) when a
 #        placeholder is left unfilled, a key matches nothing, PARENT or GATE is blank,
 #        the output cannot be written, or reading it back differs. Exit 2 on bad usage, including a
@@ -76,6 +77,19 @@ for arg in ${args[@]+"${args[@]:1}"}; do
   keys[${#keys[@]}]="$k"
   vals[${#vals[@]}]="$v"
 done
+
+# A template with __EXTRA__ and no EXTRA argument fills it with the empty string.
+# No other key has a default.
+if [[ "$orig" == *"__EXTRA__"* ]]; then
+  have_extra=0
+  for k in ${keys[@]+"${keys[@]}"}; do
+    [ "$k" = EXTRA ] && have_extra=1
+  done
+  if [ "$have_extra" = 0 ]; then
+    keys[${#keys[@]}]=EXTRA
+    vals[${#vals[@]}]=""
+  fi
+fi
 
 nkeys=${#keys[@]}
 i=0
