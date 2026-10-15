@@ -78,7 +78,7 @@ Done when the lane reports a PR URL and head SHA, or a failure triage.
 
 Confirm the remote tip equals the lane's reported SHA (`git log origin/<branch> -1`), read the diff, and run the gate yourself. A file outside the fence or a failing check goes back to the lane, or you take the work back.
 
-When CI runs mutation testing on the diff, take its mutant list from the first draft run, by the workflow doc's commands, and map each mutant to a catching test or a function-level exemption with its reason before the first review. A mutant with neither gets a test before the next push. Repeat after each code push.
+When CI runs mutation testing on the diff, take its mutant list from the first draft run, by the workflow doc's commands, and map each mutant to a catching test or a function-level exemption with its reason before the first review. Record an unviable mutant (one that doesn't compile) as `unviable`: it needs neither. A viable mutant with neither gets a test before the next push. Repeat after each code push.
 
 Done when the gate passes on the remote tip.
 
