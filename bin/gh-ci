@@ -73,9 +73,12 @@ cmd_snapshot() {
   pending=$(echo "$out" | awk -F'\t' '$2 == "pending" || $2 == "queued" {n++} END {print n+0}')
   fails=$(echo "$out" | awk -F'\t' '$2 == "fail" {n++} END {print n+0}')
   echo "pending: $pending failing: $fails"
-  # no checks means no tab-separated check line: gh prints "no checks
-  # reported on the '<branch>' branch" and exits non-zero instead
+  # no checks means gh reports "no checks reported": any other failure
+  # (auth, network) has no tab either but prints no merge line
   if grep -q $'\t' <<<"$out"; then
+    return 0
+  fi
+  if ! grep -q 'no checks reported' <<<"$out"; then
     return 0
   fi
   merge_json=""
@@ -295,12 +298,13 @@ required_names() {
   printf '%s\n' "$rules" "$classic" | grep -v '^$' | sort -u || true
 }
 
-# head_checks <sha>: the head's check runs as {name, bucket}, over REST: the
+# head_checks <sha>: the head's check runs as {name, bucket, run}, over REST: the
 # latest attempt of each check (filter=latest, so a rerun replaces its failed
 # first attempt), and the head's workflow runs for the workflow and event of
 # each check's run ID. Checks from a superseded run of the same workflow and
-# event are dropped; checks without an Actions run ID are kept. Fails when a
-# call fails.
+# event are dropped; checks without an Actions run ID are kept with run null.
+# Only the --job caller reads run; the other caller drops it again so its
+# output is unchanged. Fails when a call fails.
 head_checks() {
   local sha="$1" runs
   runs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$sha&per_page=100" \
@@ -320,7 +324,7 @@ head_checks() {
       ] as $recs
       | ($recs | map(select(.run != null)) | group_by(.key)
          | map({key: .[0].key, value: (map(.run) | max)}) | from_entries) as $max
-      | $recs | map(select(.run == null or .run >= $max[.key]) | {name, bucket})' || return 1
+      | $recs | map(select(.run == null or .run >= $max[.key]) | {name, bucket, run})' || return 1
 }
 
 # wait <pr> [--timeout <s>]: block until no required check on the PR's
@@ -414,15 +418,19 @@ cmd_wait() {
     fi
     dirty_head=""
     if [ -n "$job" ]; then
-      # the named job only: head_checks already keeps the newest run's job
+      # the named job only: only an Actions job of the newest run counts;
+      # a non-Actions check-run with the same name stays pending
       checks_json=$(head_checks "$head") || checks_json='{}'
       checks_json=$(printf '%s' "$checks_json" | jq -c --arg name "$job" '
-        if type != "array" then . else map(select(.name == $name)) end' 2>/dev/null) \
+        if type != "array" then . else map(select(.name == $name and .run != null) | {name, bucket}) end' 2>/dev/null) \
         || checks_json='{}'
     elif [ "$empty_ok" = true ] && [ "$req" = "[]" ]; then
       checks_json='[]'
     else
       checks_json=$(head_checks "$head") || checks_json='{}'
+      # drop the run id: only the --job path reads it
+      checks_json=$(printf '%s' "$checks_json" | jq -c 'if type != "array" then . else map({name, bucket}) end' 2>/dev/null) \
+        || checks_json='{}'
       if [ "$draft" != true ] && [ "$empty_ok" = true ]; then
         # the required set, then a pending record for each required name with no check
         checks_json=$(printf '%s' "$checks_json" | jq -c --argjson req "$req" '
