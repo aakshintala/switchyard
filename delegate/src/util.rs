@@ -81,15 +81,74 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// The `cargo-mutants` shim every job's `PATH` starts with: mutants never run
+/// locally, so the shim refuses and points at the CI log (#435).
+pub(crate) const MUTANTS_SHIM_MESSAGE: &str =
+    "cargo mutants is CI-only; read the CI mutants log instead";
+
+/// Directory holding the `cargo-mutants` shim, under delegate's state dir (#435).
+pub(crate) fn mutants_shim_dir() -> std::path::PathBuf {
+    crate::status_record::jobs_dir().join("shim")
+}
+
+fn mutants_shim_script() -> String {
+    format!("#!/bin/sh\nprintf '%s\\n' '{MUTANTS_SHIM_MESSAGE}' >&2\nexit 1\n")
+}
+
+/// Write the shim once, idempotently: temp file, chmod 755, rename into place.
+fn ensure_mutants_shim() -> std::io::Result<std::path::PathBuf> {
+    let dir = mutants_shim_dir();
+    let path = dir.join("cargo-mutants");
+    let script = mutants_shim_script();
+    match std::fs::read_to_string(&path) {
+        Ok(existing) if existing == script => return Ok(dir),
+        _ => {}
+    }
+    write_shim(&dir, &path, &script)?;
+    Ok(dir)
+}
+
+fn write_shim(dir: &std::path::Path, path: &std::path::Path, script: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".cargo-mutants.{}.tmp", random_uuid()));
+    let written: std::io::Result<()> = (|| {
+        std::fs::write(&tmp, script)?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
 /// A `Command` for a child whose output `delegate` captures: the parent's environment
 /// minus `FORCE_COLOR` and `CLICOLOR_FORCE`, so CLIs don't colour piped output (#85).
 /// Never set them to "" or "0" (many tools treat any value as force) and never set
 /// `NO_COLOR` (cursor-agent lets `FORCE_COLOR` override it). Args, cwd, stdio and the
 /// process group are the caller's to set.
-pub(crate) fn captured_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+///
+/// Every command also runs with delegate's `cargo-mutants` shim first on `PATH`:
+/// the shim prints `cargo mutants is CI-only; read the CI mutants log instead`
+/// on stderr and exits 1, so a job can never run mutants locally (#435). When the
+/// shim cannot be written there is no command: the caller fails the spawn, so a
+/// job never runs unguarded.
+pub(crate) fn captured_command(
+    program: impl AsRef<std::ffi::OsStr>,
+) -> std::io::Result<std::process::Command> {
     let mut cmd = std::process::Command::new(program);
     cmd.env_remove("FORCE_COLOR").env_remove("CLICOLOR_FORCE");
-    cmd
+    let dir = ensure_mutants_shim()?;
+    let mut path = std::ffi::OsString::from(dir.as_os_str());
+    path.push(":");
+    match std::env::var_os("PATH") {
+        Some(old) if !old.is_empty() => path.push(old),
+        _ => path.push("/usr/bin:/bin"),
+    }
+    cmd.env("PATH", path);
+    Ok(cmd)
 }
 
 pub fn clamp_wait(ms: f64) -> f64 {

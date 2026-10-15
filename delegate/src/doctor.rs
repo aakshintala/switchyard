@@ -30,7 +30,18 @@ pub(crate) fn command_err(bin: &str, r: &AgentCommandResult, what: &str) -> Stri
 }
 
 pub fn default_run_agent_command(bin: &str, args: &[String]) -> AgentCommandResult {
-    let child = match captured_command(bin)
+    let mut cmd = match captured_command(bin) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            return AgentCommandResult {
+                ok: false,
+                stdout: String::new(),
+                stderr: String::new(),
+                error: Some(format!("cannot write cargo-mutants shim: {e}")),
+            };
+        }
+    };
+    let child = match cmd
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

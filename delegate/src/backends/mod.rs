@@ -123,6 +123,7 @@ pub(crate) struct Started {
 
 pub(crate) fn start_child(spec: &JobSpec) -> Result<Started, String> {
     let spawned = captured_command(&spec.bin)
+        .map_err(|e| format!("cannot write cargo-mutants shim: {e}"))?
         .args(&spec.argv)
         .current_dir(&spec.cwd)
         .stdin(Stdio::null())
