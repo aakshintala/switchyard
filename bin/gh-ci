@@ -2,7 +2,7 @@
 # gh-ci: quiet, low-call GitHub CI helpers for agent flywheels.
 # Usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>
 #        gh-ci resample <pr> "<job name>" --until <regex> [--max <n>]
-#        gh-ci wait <pr> [--timeout <s>] [--fail-fast] | panics [<tail-lines>] (reads log from stdin)
+#        gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--job <name>] | panics [<tail-lines>] (reads log from stdin)
 # Exit codes: 0 ok, 1 failure, 2 usage, 3 merge conflict (snapshot and
 # watch-verified at once; wait after 30 s of DIRTY re-checks), 124 wait timeout.
 # Repo: --repo OWNER/NAME (any subcommand, any position; panics needs none), then GH_CI_REPO, then
@@ -13,7 +13,7 @@ set -euo pipefail
 usage() {
   echo "usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>" >&2
   echo "       gh-ci resample <pr> \"<job name>\" --until <regex> [--max <n>]" >&2
-  echo "       gh-ci wait <pr> [--timeout <s>] [--fail-fast] | panics [<tail-lines>] (reads log from stdin)" >&2
+  echo "       gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--job <name>] | panics [<tail-lines>] (reads log from stdin)" >&2
   echo "       every GitHub subcommand takes --repo OWNER/NAME (overrides GH_CI_REPO and the checkout's origin)" >&2
   exit 2
 }
@@ -345,16 +345,26 @@ head_checks() {
 # map comes from every check on the head, read in the same call.
 # --fail-fast: a failed or cancelled required check returns 1 at once, even while
 # another required check is still pending (the failing lines are the same).
+# --job <name>: wait on the newest run's job of exactly that name instead
+# of the required set. The draft read and the required names are skipped;
+# checks_json is the head's checks filtered to that exact name, so an empty
+# list stays pending until the job appears and concludes. The verdict lines
+# name the job: "head: <head8> job: <name> pass" or "head: <head8> job:
+# <name> fail" plus the failing line. Combines with --fail-fast and --timeout.
 # Progress: each poll that reads the checks prints one stderr line,
 # "gh-ci: <head8> pending=<n> passed=<n> failing=<n>", when those counts differ
 # from the last line printed (the first readable poll always prints). Passed
 # counts pass and skipping; failing counts fail and cancel. Stdout is unchanged.
 cmd_wait() {
-  local pr="" timeout=7200 req="[]" empty_ok=false names fail_fast=false last_progress=""
+  local pr="" timeout=7200 req="[]" empty_ok=false names fail_fast=false last_progress="" job=""
   while [ $# -gt 0 ]; do case "$1" in
     --timeout)
       [ $# -ge 2 ] || usage
       timeout="$2"; shift 2;;
+    --job)
+      [ $# -ge 2 ] || usage
+      [ -n "${2:-}" ] || usage
+      job="$2"; shift 2;;
     --fail-fast) fail_fast=true; shift;;
     --*) usage;;
     *) [ -z "$pr" ] || usage; pr="$1"; shift;;
@@ -368,16 +378,18 @@ cmd_wait() {
   local interval="${GH_CI_INTERVAL:-30}"
   local slept=0 head head2 state state2 checks_json max_src max_map filtered padded verdict hs hs_rc
   local dirty_head="" dirty_for=0 draft=false progress p_pend p_pass p_fail
-  if [ "$(gh api "repos/$REPO/pulls/$pr" --jq .draft 2>/dev/null)" = "true" ]; then
-    draft=true
-  fi
-  if [ "$draft" = true ]; then
-    :
-  elif names=$(required_names "$pr" 2>/dev/null); then
-    req=$(printf '%s' "$names" | jq -Rsc 'split("\n") | map(select(. != ""))')
-    empty_ok=true
-  else
-    echo "gh-ci: cannot read required checks; judging every check on the head" >&2
+  if [ -z "$job" ]; then
+    if [ "$(gh api "repos/$REPO/pulls/$pr" --jq .draft 2>/dev/null)" = "true" ]; then
+      draft=true
+    fi
+    if [ "$draft" = true ]; then
+      :
+    elif names=$(required_names "$pr" 2>/dev/null); then
+      req=$(printf '%s' "$names" | jq -Rsc 'split("\n") | map(select(. != ""))')
+      empty_ok=true
+    else
+      echo "gh-ci: cannot read required checks; judging every check on the head" >&2
+    fi
   fi
   while true; do
     hs_rc=0; hs=$(head_state "$pr") || hs_rc=$?
@@ -401,7 +413,13 @@ cmd_wait() {
       continue
     fi
     dirty_head=""
-    if [ "$empty_ok" = true ] && [ "$req" = "[]" ]; then
+    if [ -n "$job" ]; then
+      # the named job only: head_checks already keeps the newest run's job
+      checks_json=$(head_checks "$head") || checks_json='{}'
+      checks_json=$(printf '%s' "$checks_json" | jq -c --arg name "$job" '
+        if type != "array" then . else map(select(.name == $name)) end' 2>/dev/null) \
+        || checks_json='{}'
+    elif [ "$empty_ok" = true ] && [ "$req" = "[]" ]; then
       checks_json='[]'
     else
       checks_json=$(head_checks "$head") || checks_json='{}'
@@ -452,11 +470,17 @@ cmd_wait() {
       continue
     fi
     if [ "$verdict" = "fail" ]; then
-      echo "head: ${head:0:8} CI: fail"
+      if [ -n "$job" ]; then
+        echo "head: ${head:0:8} job: $job fail"
+      else
+        echo "head: ${head:0:8} CI: fail"
+      fi
       printf '%s' "$checks_json" | jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | "failing: \(.name)"' 2>/dev/null || true
       return 1
     fi
-    if [ "$draft" = true ]; then
+    if [ -n "$job" ]; then
+      echo "head: ${head:0:8} job: $job pass"
+    elif [ "$draft" = true ]; then
       echo "head: ${head:0:8} CI: pass (draft: required checks run once ready)"
     else
       echo "head: ${head:0:8} CI: pass"

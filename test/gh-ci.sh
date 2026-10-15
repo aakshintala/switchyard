@@ -719,6 +719,64 @@ run_wait 7
 [ ! -e "$T/state/banned.txt" ] || fail "no banned gh pr call in the loop"
 grep -q 'gh api repos/O/N/pulls/7 --jq' "$T/state/gh-args.txt" || fail "head read over REST pulls"
 
+# --- cases: --job waits on the newest run's job of exactly that name (#439)
+# the job is absent, then pending, then passes while another check stays
+# pending: the wait returns on the job, not the run
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks \
+  '[]' \
+  '[{"bucket":"pending","name":"e2e"}]' \
+  '[{"bucket":"pass","name":"e2e"},{"bucket":"pending","name":"lint"}]'
+run_wait 7 --job e2e
+[ "$CODE" = "0" ] || fail "job pass exits 0 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} job: e2e pass" <<<"$OUT" || fail "job pass line: [$OUT]"
+grep -q "CI: " <<<"$OUT" && fail "job pass prints no CI line: [$OUT]"
+! grep -q 'rules/branches' "$T/state/gh-args.txt" || fail "job: required names never read: [$(cat "$T/state/gh-args.txt")]"
+! grep -q -- '--jq .draft' "$T/state/gh-args.txt" || fail "job: draft never read: [$(cat "$T/state/gh-args.txt")]"
+
+# the job fails while other checks are pending: exit 1 with failing: <name>
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"fail","name":"e2e"},{"bucket":"pending","name":"lint"}]'
+run_wait 7 --job e2e
+[ "$CODE" = "1" ] || fail "job fail exits 1 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} job: e2e fail" <<<"$OUT" || fail "job fail line: [$OUT]"
+grep -q "^failing: e2e$" <<<"$OUT" || fail "failing job named: [$OUT]"
+grep -q "failing: lint" <<<"$OUT" && fail "other checks not listed: [$OUT]"
+
+# the job never appears: 124 at the timeout
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"pass","name":"lint"}]'
+run_wait 7 --job e2e --timeout 7
+[ "$CODE" = "124" ] || fail "absent job times out (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} timeout after 7s" <<<"$OUT" || fail "absent job timeout header: [$OUT]"
+
+# the name match is exact: "<name> extra" does not count
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"pass","name":"e2e extra"}]'
+run_wait 7 --job e2e --timeout 0
+[ "$CODE" = "124" ] || fail "inexact name stays pending (got $CODE): [$OUT]"
+grep -q "job: e2e pass" <<<"$OUT" && fail "inexact name never passes: [$OUT]"
+
+# --job with no value or an empty value is usage
+reset_state
+run_wait 7 --job; [ "$CODE" = "2" ] || fail "--job with no value exits 2 (got $CODE)"
+run_wait 7 --job ""; [ "$CODE" = "2" ] || fail "--job with an empty value exits 2 (got $CODE)"
+
+# a draft PR with --job still waits on the named job: an empty list stays
+# pending instead of passing at once with the draft note
+reset_state
+set_heads "$A"; echo true >"$T/state/draft"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[]' '[{"bucket":"pass","name":"e2e"}]'
+run_wait 7 --job e2e
+[ "$CODE" = "0" ] || fail "draft job pass exits 0 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} job: e2e pass" <<<"$OUT" || fail "draft job pass line: [$OUT]"
+grep -q "draft" <<<"$OUT" && fail "draft note never printed with --job: [$OUT]"
+[ -s "$T/state/sleeps.txt" ] || fail "draft empty list stays pending: never passes at once"
+
 # --- case: usage errors exit 2
 reset_state
 run_wait; [ "$CODE" = "2" ] || fail "missing pr exits 2 (got $CODE)"
