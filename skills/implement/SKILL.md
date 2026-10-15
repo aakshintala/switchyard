@@ -12,7 +12,7 @@ You are the orchestrator for one ticket. The **main orchestrator** is the sessio
 - **Hold** the merge, and only the merge, on an open decision that doesn't touch the core outcome (a name, a registry row, a message's wording): build and review everything with the recommended default in place, and merge once it's ruled.
 - **Judge by evidence.** Read the diff and the gate output, never a worker's report. Report success only with fresh output of the gate in the same message.
 - **The gate** is the lane's gate command plus three pre-push checks: the worktree's HEAD descends from the remote branch's tip, every changed file is in the plan's Files, and `git log origin/main..<branch> --stat` shows only this ticket's commits.
-- **Fix by churn.** Make a trivial change (a one-line deletion, a rename, a PR-body or label fix) inline, then run the gate yourself and state its output. Send a change that may start a run-and-fix loop (new behaviour, a fix whose cause isn't confirmed, an edit across several files) to a gated job.
+- **Fix by churn.** Make a trivial change (a one-line deletion, a rename, a PR-body or label fix) inline, then run the gate yourself and state its output. Send a change that may start a run-and-fix loop (new behaviour, a fix whose cause isn't confirmed (see Confirmed bug), an edit across several files) to a gated job.
 - **The category follows the cause.** A project may gate `bug` fixes on a test that goes red first. When the confirmed cause turns out to be in test code, or the ticket adds behaviour no doc promised and fixes no hang, crash or lost data, relabel it (`test-only` or `enhancement`, per `docs/agents/triage-labels.md`) with a comment giving the cause, before the PR opens. When CI already ran on the old label, rerun the whole run after relabelling (`gh run rerun <run id>`, never `--failed`: it reuses the cached label read), or push.
 - **One worktree per job**, named for its branch, deleted on merge.
 
@@ -22,7 +22,7 @@ Planning is spent where the ticket leaves something to decide. Two kinds of tick
 
 ### Confirmed bug
 
-Take it when the root cause is **confirmed**: a red test, or a `diagnosing-bugs` result, names the faulty code, and the fix stays in the faulty module, the call sites a signature change forces, and its test. A small diff whose cause is a guess takes the full path. The cause decides, not the size.
+Take it when the root cause is **confirmed**: a red test, a `diagnosing-bugs` result, or the ticket or a posted plan names the faulty code, giving both the failing assertion or symptom and the code path that produces it, with `file:line`. The fix stays in the faulty module, the call sites a signature change forces, and its test. A cause that is still a hypothesis or an open diagnosis, however small the diff, takes the full path. The cause decides, not the size.
 
 Run step 1, skip steps 2–3, then build in a worktree cut from `origin/main`. The fence is that module, those call sites and the test, and it stands in for the plan's Files in the gate. Use an existing confirming test, or add one that goes red before the fix. When the workflow doc gates `bug` fixes on a commit that fails first, that test is the branch's first commit, alone, and the fix follows in its own commit. Make the fix inline when **Fix by churn** allows, otherwise as a gated job whose brief names the cause, the fence and the gate, and has the job push, open a draft PR with the ticket's `Resolves` line, and report its URL and head SHA. Inline, do those three yourself. Then run steps 5–9 as written. Leave the fast path for step 2 when the fix spreads past the fence or the test won't go red.
 
@@ -46,7 +46,7 @@ Done when you know the tracker, labels, workflow doc and models, and the task ha
 
 Skip the preflight when a new ticket is **current**: the preflight exists to catch a stale ticket, and a current one cannot be stale. A ticket is current when all three hold, checked from an up-to-date clone:
 
-- It names every file it touches and leaves no decision open.
+- It names every file it touches and leaves no decision or diagnosis open.
 - Every named file exists at `origin/main` (`git cat-file -e origin/main:<file>`).
 - The ticket body names its filing commit, and `git log <filing commit>..origin/main -- <named files> <docs it cites>` prints nothing (two dots: what landed after the filing commit, never the commit itself). When the body was edited after that commit's date (`git show -s --format=%cI <commit>` against `gh api graphql -f query='{repository(owner:"<o>",name:"<r>"){issue(number:<n>){lastEditedAt}}}'`; null means never edited), add `--since=<lastEditedAt>`.
 
@@ -60,7 +60,7 @@ Done when the preflight has returned and no `core` item is open, or the ticket i
 
 ### 3. Plan
 
-Follow `planning` steps 1–5. When a worker writes the plan, its brief covers `planning` steps 1–2 and ends with the plan file; you run steps 3–5 yourself, since a worker's brief forbids delegating and the Verifier is a job of its own.
+Follow `planning` steps 1–5. When a worker writes the plan, its brief covers `planning` steps 1–2 and ends with the plan file; you run steps 3–5 yourself, since a worker's brief forbids delegating and the Verifier is a job of its own. The brief also tells the worker where to stop: at a blocked seam, or a `core` item the preflight missed, it ends the plan file with a `Blocked` section (the seam or item, the options, a recommendation) and writes no task past it. You park the ticket (see Rules) with that section as the question.
 
 Done when the lane brief is filled.
 
