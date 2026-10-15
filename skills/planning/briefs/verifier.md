@@ -8,10 +8,10 @@ Read the plan at `__PLAN__` before anything else, and reread it after any compac
 
 ## Report
 
-Max 300 words, one line each: what, where, the smallest fix.
+Max 300 words, one line each: what, where, the smallest fix, and `core` (it contradicts the ticket or a doc, invents behaviour a person sees, or leaves a hazard unruled) or `non-blocking`.
 1. Contradictions between the plan and the ticket, the docs or the code.
 2. Rulings the plan makes without listing them under Rulings, and each ruling on behaviour a person sees that no ticket line, doc or earlier ruling on the ticket decides.
-3. A rule under Rules this ticket implements that is not quoted word for word from its cited file and section, or a governing rule the ticket or its docs state that the plan leaves out.
+3. A rule under Rules this ticket implements that is not quoted word for word from its cited file and section at __BASE__ (a sentence found only on another branch or an open PR fails), or a governing rule the ticket or its docs state that the plan leaves out.
 4. Design-level over-engineering: a new abstraction, dependency or configuration the ticket doesn't need.
 5. Each invariant under Interfaces: construct an input that breaks it. Read the build profiles first: `panic = "abort"` voids a panic-safety invariant. Report the breaking input, or the strongest input you tried and why the invariant holds against it.
 6. An open design choice in Review Focus: a hazard the plan names without a ruling or an invariant.
