@@ -67,6 +67,6 @@ Done when `post-plan` exits 0 with the current plan.
 
 ### 5. Brief the lane
 
-Fill `briefs/lane.md` with `PLAN=<plan file's absolute path>`, `ISSUE`, `REPO`, `WORKFLOW_DOC`, the base, worktree, branch, `GATE="$(~/.agents/bin/plan-gate <plan file>)"` and `CLOSING`: `Resolves #<n>` for a PR that finishes the ticket, `Part of #<n>` for one part of a split. The brief's stop limits are structural: they catch a change of scope, and a large change inside scope is review's to judge.
+Fill `briefs/lane.md` with `PLAN=<plan file's absolute path>`, `ISSUE`, `REPO`, `WORKFLOW_DOC`, the base, worktree, branch, `GATE="$(~/.agents/bin/plan-gate <plan file>)"` and `CLOSING`: `Resolves #<n>` for a PR that finishes the ticket, `Part of #<n>` for one part of a split. `EXTRA` (optional, empty by default) carries lines the brief must hold verbatim, such as the workflow doc's PR-body lines, a label for the PR or a testing rule the project's notes require. The brief's stop limits are structural: they catch a change of scope, and a large change inside scope is review's to judge.
 
 Done when `fill-brief` exits 0.

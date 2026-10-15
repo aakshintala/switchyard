@@ -37,6 +37,16 @@ printf 'hi __WHO__\n' >"$T/k2.md"
 bash "$FILL" "$T/k2.md" 'WHO=you' 'EXTRA=1' >/dev/null 2>"$T/err3.txt" && fail "unknown key with valid fill exits 1"
 grep -q '^unknown key: EXTRA$' "$T/err3.txt" || fail "unknown key with valid fill names EXTRA"
 
+# __EXTRA__ defaults to empty when no EXTRA argument is given
+printf 'before\n__EXTRA__\nafter\n' >"$T/ex.md"
+out="$(bash "$FILL" "$T/ex.md" 2>"$T/err-ex.txt")" || fail "__EXTRA__ with no EXTRA argument exits 0"
+[ "$out" = "$(printf 'before\n\nafter')" ] || fail "__EXTRA__ with no EXTRA argument fills to an empty line: got [$out]"
+out="$(bash "$FILL" "$T/ex.md" 'EXTRA=line')" || fail "EXTRA=line exits 0"
+[ "$out" = "$(printf 'before\nline\nafter')" ] || fail "EXTRA=line fills __EXTRA__: got [$out]"
+# EXTRA given for a template without __EXTRA__ is an unknown key
+bash "$FILL" "$T/t.md" 'A=1' 'B=2' 'EXTRA=x' >/dev/null 2>"$T/err-ex2.txt" && fail "EXTRA without __EXTRA__ exits 1"
+grep -q '^unknown key: EXTRA$' "$T/err-ex2.txt" || fail "EXTRA without __EXTRA__ names EXTRA"
+
 # key early in a long template must not trip pipefail + grep -q EPIPE (issue #55)
 { echo '__A__'; seq 1 5000 | sed 's/^/filler line /'; } >"$T/big.md"
 bash "$FILL" "$T/big.md" 'A=x' >"$T/big-out.txt" 2>"$T/big-err.txt" || fail "a key early in a long template is known"
