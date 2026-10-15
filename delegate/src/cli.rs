@@ -11,11 +11,11 @@ use crate::status_record::{
     CliRecordWriter, job_record_path, write_atomic, write_cancelled, write_supervisor_died,
 };
 use crate::types::{Config, JobSpec, ResumeContext};
-use crate::util::{json_compact, random_uuid, resolve_path};
+use crate::util::{captured_command, json_compact, random_uuid, resolve_path};
 use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
@@ -161,7 +161,7 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
     // Own session and process group, stdio closed: the supervisor outlives this process.
     let exe = std::env::current_exe().map_err(|e| LaunchErr::Usage(e.to_string()))?;
     let mut child = unsafe {
-        Command::new(exe)
+        captured_command(&exe)
             .args(&supervise_args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

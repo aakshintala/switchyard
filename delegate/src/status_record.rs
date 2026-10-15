@@ -8,11 +8,15 @@ pub trait StatusRecordWriter: Send + Sync {
     fn write(&self, job_id: &str, record: &PollResult);
 }
 
+/// Delegate's state directory: job records, gate logs, and the `cargo-mutants`
+/// shim (`shim/`) every job's `PATH` starts with (#435).
+pub fn jobs_dir() -> PathBuf {
+    std::env::temp_dir().join("delegate-jobs")
+}
+
 /// Status JSON for one job under `$TMPDIR/delegate-jobs/`.
 pub fn job_record_path(job_id: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join("delegate-jobs")
-        .join(format!("{job_id}.json"))
+    jobs_dir().join(format!("{job_id}.json"))
 }
 
 pub struct FileStatusRecordWriter;
