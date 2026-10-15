@@ -78,8 +78,6 @@ for arg in ${args[@]+"${args[@]:1}"}; do
   vals[${#vals[@]}]="$v"
 done
 
-# A template with __EXTRA__ and no EXTRA argument fills it with the empty string.
-# No other key has a default.
 if [[ "$orig" == *"__EXTRA__"* ]]; then
   have_extra=0
   for k in ${keys[@]+"${keys[@]}"}; do
