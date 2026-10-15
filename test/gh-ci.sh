@@ -43,9 +43,25 @@ gh() (
     fi
   }
   if [ "$1" = "pr" ]; then
+    shift
+    # snapshot's reads, served from state files when a snapshot case sets them up
+    if [ "${1:-}" = "checks" ] && [ -e "$T/state/pr-checks.txt" ]; then
+      cat "$T/state/pr-checks.txt"
+      rc=0
+      if [ -e "$T/state/pr-checks-rc" ]; then rc="$(cat "$T/state/pr-checks-rc")"; fi
+      exit "$rc"
+    fi
+    if [ "${1:-}" = "view" ] && { [ -e "$T/state/pr-view.json" ] || [ -e "$T/state/pr-view-fail" ]; }; then
+      if [ -e "$T/state/pr-view-fail" ]; then
+        echo "fake gh: cannot read merge status" >&2
+        exit 1
+      fi
+      cat "$T/state/pr-view.json"
+      exit 0
+    fi
     # the loop must read REST: a pr view or pr checks call is a failure
-    echo "gh $*" >>"$T/state/banned.txt"
-    echo "fake gh: gh pr $2 is refused: gh-ci wait reads REST (repos/O/N/pulls, commits/SHA/check-runs)" >&2
+    echo "gh pr $*" >>"$T/state/banned.txt"
+    echo "fake gh: gh pr $1 is refused: gh-ci wait reads REST (repos/O/N/pulls, commits/SHA/check-runs)" >&2
     exit 9
   fi
   if [ "$1" = "api" ]; then
@@ -155,6 +171,7 @@ reset_state() {
   rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail" "$T/state/not-found"
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
   rm -f "$T/state"/issue-*-labels.txt "$T/state"/runlog-*.txt
+  rm -f "$T/state/pr-checks.txt" "$T/state/pr-checks-rc" "$T/state/pr-view.json" "$T/state/pr-view-fail"
   : >"$T/state/gh-args.txt"
 }
 
@@ -436,6 +453,43 @@ grep -qF "$CONFLICT_MSG" "$T/stderr.txt" || fail "snapshot conflict message: [$(
 [ ! -e "$T/state/sleeps.txt" ] || fail "snapshot conflict never sleeps"
 OUT="$(bash "$GHCI" watch-verified 99 --pr 7 2>"$T/stderr.txt")"; CODE=$?
 [ "$CODE" = "3" ] || fail "watch-verified conflict exits 3 (got $CODE): [$OUT]"
+
+# --- cases: snapshot with no checks on the head prints a merge line (#438).
+# --- "no checks" is gh pr checks output with no tab-separated check line.
+# no checks: pr checks reports none and exits 1, so snapshot reads
+# mergeable and mergeStateStatus and prints them with the hint
+reset_state
+set_heads "$A"
+printf "%s\n" "no checks reported on the 'b' branch" >"$T/state/pr-checks.txt"
+echo 1 >"$T/state/pr-checks-rc"
+printf '%s' '{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}' >"$T/state/pr-view.json"
+OUT="$(bash "$GHCI" snapshot 7 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "snapshot no-checks exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'head: %s\nCI: unknown\nFlake: unknown\npending: 0 failing: 0\nmerge: mergeable=CONFLICTING state=DIRTY; no checks on this head; a conflicting PR gets none: check mergeable or rebase' "${A:0:8}")" ] \
+  || fail "snapshot no-checks merge line: [$OUT]"
+grep -q 'pr view' "$T/state/gh-args.txt" || fail "snapshot no-checks reads pr view: [$(cat "$T/state/gh-args.txt")]"
+
+# pr view fails: the merge values are unknown but the hint stays, still exit 0
+reset_state
+set_heads "$A"
+printf "%s\n" "no checks reported on the 'b' branch" >"$T/state/pr-checks.txt"
+echo 1 >"$T/state/pr-checks-rc"
+touch "$T/state/pr-view-fail"
+printf '%s' '{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}' >"$T/state/pr-view.json"
+OUT="$(bash "$GHCI" snapshot 7 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "snapshot pr-view-fail exits 0 (got $CODE): [$OUT]"
+grep -q '^merge: unknown; no checks on this head; a conflicting PR gets none: check mergeable or rebase$' <<<"$OUT" \
+  || fail "snapshot unknown merge line: [$OUT]"
+
+# one check: no merge line and no pr view call
+reset_state
+set_heads "$A"
+printf 'ci\tpass\n' >"$T/state/pr-checks.txt"
+printf '%s' '{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}' >"$T/state/pr-view.json"
+OUT="$(bash "$GHCI" snapshot 7 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "snapshot with a check exits 0 (got $CODE): [$OUT]"
+grep -q '^merge: ' <<<"$OUT" && fail "snapshot with a check prints no merge line: [$OUT]"
+grep -q 'pr view' "$T/state/gh-args.txt" && fail "snapshot with a check makes no pr view call: [$(cat "$T/state/gh-args.txt")]"
 
 # --- case: an unreadable head is pending: the first read fails, the next succeeds
 export GH_CI_INTERVAL=7

@@ -58,10 +58,11 @@ pr_head() {
 }
 
 # snapshot <pr>: head SHA + CI/flake verdicts + pending/failing counts.
-# Two API calls total: one pr view, one pr checks.
+# Two API calls total: one pr view, one pr checks; a third pr view for
+# mergeable and mergeStateStatus happens only with no checks on the head.
 cmd_snapshot() {
   local pr="${1:?missing pr number}"
-  local out head ci flake pending fails
+  local out head ci flake pending fails merge_json merge_pair mergeable mstate
   head=$(pr_head "$pr")
   echo "head: ${head:0:8}"
   out=$(gh pr checks "$pr" --repo "$REPO" 2>&1 || true)
@@ -72,6 +73,23 @@ cmd_snapshot() {
   pending=$(echo "$out" | awk -F'\t' '$2 == "pending" || $2 == "queued" {n++} END {print n+0}')
   fails=$(echo "$out" | awk -F'\t' '$2 == "fail" {n++} END {print n+0}')
   echo "pending: $pending failing: $fails"
+  # no checks means no tab-separated check line: gh prints "no checks
+  # reported on the '<branch>' branch" and exits non-zero instead
+  if grep -q $'\t' <<<"$out"; then
+    return 0
+  fi
+  merge_json=""
+  merge_json=$(gh pr view "$pr" --repo "$REPO" --json mergeable,mergeStateStatus 2>/dev/null) || merge_json=""
+  merge_pair=""
+  if [ -n "$merge_json" ]; then
+    merge_pair=$(printf '%s' "$merge_json" | jq -r '"\(.mergeable // "") \(.mergeStateStatus // "")"' 2>/dev/null) || merge_pair=""
+  fi
+  read -r mergeable mstate <<<"$merge_pair" || true
+  if [ -n "${mergeable:-}" ] && [ -n "${mstate:-}" ]; then
+    echo "merge: mergeable=$mergeable state=$mstate; no checks on this head; a conflicting PR gets none: check mergeable or rebase"
+  else
+    echo "merge: unknown; no checks on this head; a conflicting PR gets none: check mergeable or rebase"
+  fi
 }
 
 # superseded_note: after a --pr digest, one line naming the failed or
