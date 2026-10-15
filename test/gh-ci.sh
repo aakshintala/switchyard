@@ -238,8 +238,8 @@ set_checks \
 run_wait 7
 [ "$CODE" = "0" ] || fail "progress case exits 0 (got $CODE): [$OUT]"
 [ "$OUT" = "head: ${A:0:8} CI: pass" ] || fail "progress case stdout unchanged: [$OUT]"
-[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending 1 passed 1 failing 0
-gh-ci: ${A:0:8} pending 0 passed 2 failing 0" ] || fail "progress lines on change only, on stderr: [$(cat "$T/stderr.txt")]"
+[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending=1 passed=1 failing=0
+gh-ci: ${A:0:8} pending=0 passed=2 failing=0" ] || fail "progress lines on change only, on stderr: [$(cat "$T/stderr.txt")]"
 
 # --- case: progress counts failing checks, and stdout keeps its failing lines
 reset_state
@@ -250,8 +250,8 @@ set_checks \
 run_wait 7
 [ "$CODE" = "1" ] || fail "failing progress case exits 1 (got $CODE): [$OUT]"
 [ "$OUT" = "$(printf 'head: %s CI: fail\nfailing: ci' "${A:0:8}")" ] || fail "failing progress case stdout unchanged: [$OUT]"
-[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending 1 passed 1 failing 0
-gh-ci: ${A:0:8} pending 0 passed 1 failing 1" ] || fail "failing progress lines: [$(cat "$T/stderr.txt")]"
+[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending=1 passed=1 failing=0
+gh-ci: ${A:0:8} pending=0 passed=1 failing=1" ] || fail "failing progress lines: [$(cat "$T/stderr.txt")]"
 
 # --- cases: --fail-fast. A failed required check returns at once while another
 # --- required check is still pending; without the flag the wait keeps polling.

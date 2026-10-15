@@ -408,7 +408,7 @@ TMPDIR="$T/tmp"; export TMPDIR
 setup; echo '[{"bucket":"fail","name":"ci"},{"bucket":"pass","name":"lint"}]' >"$ST/checks"
 ship; expect 1 "failing CI"; untouched "failing CI, no rebase, no push"
 grep -q '^failing: ci$' <<<"$OUT" || fail "failing line printed: [$OUT]"
-grep -qx "gh-ci: ${HEAD0:0:8} pending 0 passed 0 failing 1" <<<"$ERR" || fail "gh-ci progress reaches ship-pr stderr: [$ERR]"
+grep -qx "gh-ci: ${HEAD0:0:8} pending=0 passed=0 failing=1" <<<"$ERR" || fail "gh-ci progress reaches ship-pr stderr: [$ERR]"
 grep -q 'pending' <<<"$OUT" && fail "progress stays off ship-pr stdout: [$OUT]"
 no_merge "failing CI"
 [ -d "$WT" ] || fail "worktree kept after failing CI"
@@ -420,7 +420,7 @@ grep -q "PR conflicts with origin/main after the push; rebase again, then rerun"
 
 setup; echo '[{"bucket":"pending","name":"ci"}]' >"$ST/checks"
 ship --timeout 0; expect 124 "CI timeout"; no_merge "CI timeout"
-[ "$(grep -c "^gh-ci: ${HEAD0:0:8} pending 1 passed 0 failing 0$" <<<"$ERR")" = 1 ] || fail "one progress line while the counts hold: [$ERR]"
+[ "$(grep -c "^gh-ci: ${HEAD0:0:8} pending=1 passed=0 failing=0$" <<<"$ERR")" = 1 ] || fail "one progress line while the counts hold: [$ERR]"
 
 setup; echo '[{"bucket":"pending","name":"ci"}]' >"$ST/checks"
 ship --timeout 14; expect 124 "CI timeout after sleeps"

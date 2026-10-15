@@ -328,7 +328,7 @@ head_checks() {
 # --fail-fast: a failed or cancelled required check returns 1 at once, even while
 # another required check is still pending (the failing lines are the same).
 # Progress: each poll that reads the checks prints one stderr line,
-# "gh-ci: <head8> pending <n> passed <n> failing <n>", when those counts differ
+# "gh-ci: <head8> pending=<n> passed=<n> failing=<n>", when those counts differ
 # from the last line printed (the first readable poll always prints). Passed
 # counts pass and skipping; failing counts fail and cancel. Stdout is unchanged.
 cmd_wait() {
@@ -400,7 +400,7 @@ cmd_wait() {
       "\([.[] | select(.bucket != "pass" and .bucket != "skipping" and .bucket != "fail" and .bucket != "cancel")] | length) \([.[] | select(.bucket == "pass" or .bucket == "skipping")] | length) \([.[] | select(.bucket == "fail" or .bucket == "cancel")] | length)" end' 2>/dev/null) || progress=""
     if [ -n "$progress" ] && [ "$progress" != "$last_progress" ]; then
       read -r p_pend p_pass p_fail <<<"$progress"
-      echo "gh-ci: ${head:0:8} pending $p_pend passed $p_pass failing $p_fail" >&2
+      echo "gh-ci: ${head:0:8} pending=$p_pend passed=$p_pass failing=$p_fail" >&2
       last_progress="$progress"
     fi
     verdict=$(printf '%s' "$checks_json" | jq -r --argjson empty_ok "$empty_ok" --argjson fail_fast "$fail_fast" '
