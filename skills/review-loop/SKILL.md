@@ -1,6 +1,6 @@
 ---
 name: review-loop
-description: "Review, repair and verify a PR until it can merge: two reviews from a different model family, fix rounds with scoped verifies, and a two-round stop. Use when a PR needs review before merge, whether it came from implement, the flywheel's PR-stack mode, or triage."
+description: "Review, repair and verify a PR until it can merge: reviews from a different model family, fix rounds with scoped verifies, and a two-round stop. Use when a PR needs review before merge, whether it came from implement, the flywheel's PR-stack mode, or triage."
 ---
 
 The loop for one PR. Reviews run on models from a different family than the one that wrote most of the PR, at the same rung or higher; pick them per the `delegate` skill. When a pick lands on that family, swap it and say so on the PR.
@@ -12,18 +12,18 @@ The loop for one PR. Reviews run on models from a different family than the one 
 ### 1. Review
 
 ```
-~/.agents/bin/review-pr run <pr> --repo <owner/name> --cwd <clone> --head <pushed sha> [--issue <n>]... [--spec <n>] --model <correctness> --overbuild-model <over-engineering> [--workflow-doc <path>]
+~/.agents/bin/review-pr run <pr> --repo <owner/name> --cwd <clone> --head <pushed sha> [--issue <n>]... [--spec <n>] --model <correctness> --overbuild-model <over-engineering> [--axes <list>] [--workflow-doc <path>]
 ```
 
-`--head` is the full SHA of the PR head you expect reviewed, usually the commit you just pushed (`git rev-parse HEAD`): `review-pr` waits for GitHub to report it and reviews exactly that commit, so a push never gets reviewed at its old head. Pass `--issue` once per ticket the PR resolves, and once per issue holding a ruling that changes the PR's scope; link that ruling in the PR body too. A PR with no ticket leaves out `--issue` and `--spec` and is reviewed against its own description. `run` launches the correctness review (`code-review`) and the over-engineering review (`overbuild-review`), waits for both, collects them, and exits with collect's code; if the wait fails it exits non-zero and prints the `collect:` line to resume with. The split form, `start` then `collect`, is for a caller that must do other work while the reviews run: `start` returns at once with one `<role> <job-id>` line per job, you wait with `delegate watch` on those ids, then run collect with the ids as printed.
+`--head` is the full SHA of the PR head you expect reviewed, usually the commit you just pushed (`git rev-parse HEAD`): `review-pr` waits for GitHub to report it and reviews exactly that commit, so a push never gets reviewed at its old head. Pass `--issue` once per ticket the PR resolves, and once per issue holding a ruling that changes the PR's scope; link that ruling in the PR body too. A PR with no ticket leaves out `--issue` and `--spec` and is reviewed against its own description. `run` launches one job per axis: Standards and Spec (`code-review`, one axis each) and Overbuild (`overbuild-review`), waits for all, collects them, and exits with collect's code; `--axes standards[,spec][,overbuild]` runs a subset (default all three; `--overbuild-model` is needed only with `overbuild`), and the project's workflow doc says when a smaller set is enough; if the wait fails it exits non-zero and prints the `collect:` line to resume with. The split form, `start` then `collect`, is for a caller that must do other work while the reviews run: `start` returns at once with one `<role> <job-id>` line per job, you wait with `delegate watch` on those ids, then run collect with the ids as printed.
 
 ```
 ~/.agents/bin/review-pr collect <job-id>...
 ```
 
-Pass every job id that `start` printed, in one call: a full `collect` removes the run's worktrees, and a run you never collect in full leaks them into the clone. It posts both reviews on the PR with the patch-id, and prints only the verdicts, findings, CI state, and any job that didn't finish. An `UNFINISHED` line means that review didn't run: start again only after this full collect, and read nothing in its absence as approval. A `BAD-VERDICT` line names a reviewer line outside the shared vocabulary: treat it as no verdict and start again.
+Pass every job id that `start` printed, in one call: a full `collect` removes the run's worktrees, and a run you never collect in full leaks them into the clone. It posts the reviews on the PR with the patch-id, and prints only the verdicts (one `VERDICT <axis>` line per axis that ran), findings, CI state, and any job that didn't finish. An `UNFINISHED` line means that review didn't run: start again only after this full collect, and read nothing in its absence as approval. A `BAD-VERDICT` line names a reviewer line outside the shared vocabulary: treat it as no verdict and start again.
 
-Done when both reviews have verdict lines for the current patch-id.
+Done when every axis that ran has a verdict line for the current patch-id.
 
 ### 2. Route
 
