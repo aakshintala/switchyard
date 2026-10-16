@@ -43,6 +43,8 @@ Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new h
 ~/.agents/bin/review-pr run <pr> --repo <owner/name> --cwd <clone> --head <pushed sha> --model <correctness> --verify <findings file> --since <reviewed head>
 ```
 
+`review-pr collect --findings-out <path>` produces the findings file.
+
 `FIX-OK`: the loop is done. `FIX-INCOMPLETE`: back to step 2 with the open findings, while the counter is below 2.
 
 Done when the verify has printed `FIX-OK` or `FIX-INCOMPLETE` for the current patch-id.

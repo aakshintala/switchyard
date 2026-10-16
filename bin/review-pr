@@ -2,7 +2,9 @@
 # review-pr: run a PR's reviews through the delegate CLI, post one PR comment,
 # and print a verdict digest for the orchestrator.
 # Usage:
-#   review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M --overbuild-model M2 [--workflow-doc PATH] [--head SHA]
+#   review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M [--overbuild-model M2] [--axes LIST] [--workflow-doc PATH] [--head SHA]
+#     LIST is standards[,spec][,overbuild], default all three: one job per
+#     axis. --overbuild-model is required only when overbuild is listed.
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--workflow-doc PATH] [--head SHA]
 #     --since is the reviewed head; verify diffs from its repair base on current base.
 #     launches one job per review role, prints "<role> <job-id>" per job, then
@@ -10,9 +12,11 @@
 #     with every id spelled out, and returns at once. Wait for the ids with the
 #     delegation tool's wait command (delegate watch), in the wait mode your
 #     harness instructions prescribe.
-#     --verify ignores --issue, --spec and --overbuild-model, one stderr note each.
-#   review-pr collect <job-id>...
+#     --verify ignores --issue, --spec and --overbuild-model, one stderr note each
+#     (--axes too, when passed).
+#   review-pr collect <job-id>... [--findings-out PATH]
 #     posts the one PR comment with the patch-id, prints the verdict digest,
+#     writes the open findings (or "no open findings") to PATH when asked,
 #     removes the worktrees, and exits 1 when any job is unfinished or wrote a
 #     verdict outside the shared vocabulary below. Collecting an already-collected
 #     job id reprints its verdict and finding lines from the job record and posts nothing.
@@ -28,8 +32,8 @@ set -euo pipefail
 # Verdict vocabulary. This block is the one place every verdict line the
 # parser accepts is defined; the review briefs and the review skills state
 # the same lines.
-#   review role:    VERDICT standards: APPROVE|CHANGES
-#                   VERDICT spec: APPROVE|CHANGES
+#   standards role: VERDICT standards: APPROVE|CHANGES
+#   spec role:      VERDICT spec: APPROVE|CHANGES
 #   overbuild role: VERDICT: APPROVE|CHANGES
 # (collect prints the overbuild verdict as VERDICT overbuild: APPROVE|CHANGES.)
 #   verify role:    FIX-OK | FIX-INCOMPLETE (trailing detail allowed)
@@ -39,10 +43,10 @@ set -euo pipefail
 # verdict: loud failure, never UNFINISHED.
 
 usage() {
-  echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M --overbuild-model M2 [--workflow-doc PATH] [--head SHA]" >&2
+  echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M [--overbuild-model M2] [--axes standards[,spec][,overbuild]] [--workflow-doc PATH] [--head SHA]" >&2
   echo "       review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--workflow-doc PATH] [--head SHA]" >&2
   echo "       review-pr run <same args as start>" >&2
-  echo "       review-pr collect <job-id>..." >&2
+  echo "       review-pr collect <job-id>... [--findings-out PATH]" >&2
   exit 2
 }
 
@@ -62,7 +66,8 @@ finished_run_mins=60
 
 brief_for() {
   case "$1" in
-    review) printf '%s' "$briefs_dir/review.md";;
+    standards) printf '%s' "$briefs_dir/standards.md";;
+    spec) printf '%s' "$briefs_dir/spec.md";;
     overbuild) printf '%s' "$briefs_dir/over-engineering-review.md";;
     verify) printf '%s' "$briefs_dir/verify.md";;
   esac
@@ -78,9 +83,13 @@ norm_line() {
 # form (verify may have trailing detail after whitespace).
 is_verdict() {
   case "$1" in
-    review)
+    standards)
       case "$2" in
-        "VERDICT standards: APPROVE"|"VERDICT standards: CHANGES"|\
+        "VERDICT standards: APPROVE"|"VERDICT standards: CHANGES") return 0;;
+      esac
+      return 1;;
+    spec)
+      case "$2" in
         "VERDICT spec: APPROVE"|"VERDICT spec: CHANGES") return 0;;
       esac
       return 1;;
@@ -255,7 +264,7 @@ cmd_start() {
   case "$pr" in -*|"") usage;; esac
 
   repo=""; clone=""; issues=(); issue_count=0; specn=""; model=""; omodel=""
-  verify=""; since=""; wdoc=""; head=""
+  verify=""; since=""; wdoc=""; head=""; axes=""; axes_given=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2;;
@@ -281,6 +290,7 @@ cmd_start() {
       --spec) [ $# -ge 2 ] || usage; specn="$2"; shift 2;;
       --model) [ $# -ge 2 ] || usage; model="$2"; shift 2;;
       --overbuild-model) [ $# -ge 2 ] || usage; omodel="$2"; shift 2;;
+      --axes) [ $# -ge 2 ] || usage; axes="$2"; axes_given="1"; shift 2;;
       --verify) [ $# -ge 2 ] || usage; verify="$2"; shift 2;;
       --since) [ $# -ge 2 ] || usage; since="$2"; shift 2;;
       --workflow-doc) [ $# -ge 2 ] || usage; wdoc="$2"; shift 2;;
@@ -292,6 +302,16 @@ cmd_start() {
   [ -n "$repo" ] || usage
   [ -n "$clone" ] && [ -d "$clone" ] || usage
   [ -n "$model" ] || usage
+  if [ -z "$axes" ]; then axes="standards,spec,overbuild"; fi
+  # One job starts per listed axis; an unknown name is a usage error.
+  axes_rest="$axes,"
+  while [ -n "$axes_rest" ]; do
+    ax="${axes_rest%%,*}"; axes_rest="${axes_rest#*,}"
+    case "$ax" in
+      standards|spec|overbuild) ;;
+      *) echo "review-pr: unknown axis: $ax (standards, spec, overbuild)" >&2; exit 2;;
+    esac
+  done
   if [ -n "$verify" ]; then
     mode="verify"
     [ -n "$since" ] || usage
@@ -310,9 +330,15 @@ cmd_start() {
     if [ -n "$omodel" ]; then
       echo "review-pr: --overbuild-model is not used with --verify; ignored" >&2
     fi
+    if [ -n "$axes_given" ]; then
+      echo "review-pr: --axes is not used with --verify; ignored" >&2
+    fi
   else
     mode="review"
-    [ -n "$omodel" ] || usage
+    # --overbuild-model is required only when the overbuild axis runs.
+    case ",$axes," in
+      *,overbuild,*) [ -n "$omodel" ] || usage;;
+    esac
     # A PR with no ticket is its own spec: gh issue view accepts a PR number.
     if [ "$issue_count" -eq 0 ]; then
       issue="$pr"
@@ -349,13 +375,19 @@ cmd_start() {
   fi
 
   if [ "$mode" = "review" ]; then
-    roles="review overbuild"
+    roles=""
+    axes_rest="$axes,"
+    while [ -n "$axes_rest" ]; do
+      ax="${axes_rest%%,*}"; axes_rest="${axes_rest#*,}"
+      case " $roles " in *" $ax "*) ;; *) roles="$roles $ax";; esac
+    done
+    roles="${roles# }"
   else
     roles="verify"
   fi
   model_for() {
     case "$1" in
-      review|verify) printf '%s' "$model";;
+      standards|spec|verify) printf '%s' "$model";;
       overbuild) printf '%s' "$omodel";;
     esac
   }
@@ -494,7 +526,11 @@ cmd_start() {
     brief_src="$(brief_for "$role")"
     brief="$run_dir/brief-$role.md"
     case "$role" in
-      review)
+      standards)
+        bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" \
+          "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
+        ;;
+      spec)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" "ISSUE=$issue" \
           "SPEC=$specn" "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
         ;;
@@ -519,6 +555,7 @@ cmd_start() {
       printf 'sha=%s\n' "$sha"
       printf 'patch_id=%s\n' "$patch_id"
       printf 'model=%s\n' "$(model_for "$role")"
+      printf 'axes=%s\n' "$axes"
       printf 'clone=%s\n' "$clone"
       printf 'worktree=%s\n' "$wt"
       printf 'run_dir=%s\n' "$run_dir"
@@ -575,7 +612,21 @@ reprint_collected() {
 }
 
 cmd_collect() {
-  [ $# -ge 1 ] || usage
+  findings_out=""
+  ids=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --findings-out)
+        [ $# -ge 2 ] || usage
+        [ -z "$findings_out" ] || usage
+        findings_out="$2"; shift 2
+        case "$findings_out" in ""|-*) usage;; esac;;
+      -*|"") usage;;
+      *) ids[${#ids[@]}]="$1"; shift;;
+    esac
+  done
+  [ "${#ids[@]}" -ge 1 ] || usage
+  set -- "${ids[@]}"
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/review-pr.collect.XXXXXX")"
   state_rm=()
@@ -633,20 +684,39 @@ cmd_collect() {
     fi
   fi
 
-  have_review=""; have_overbuild=""; have_verify=""
+  have_standards=""; have_spec=""; have_overbuild=""; have_verify=""
   for jid in ${id_list[@]+"${id_list[@]}"}; do
     r="$(state_get "$state_dir/$jid" role)"
     case "$r" in
-      review) have_review="1";;
+      standards) have_standards="1";;
+      spec) have_spec="1";;
       overbuild) have_overbuild="1";;
       verify) have_verify="1";;
     esac
   done
+  # A collect needs every axis the run started: the expected axes ride in
+  # the first state file found (the three-axis default when none is found).
+  expected_axes="standards,spec,overbuild"
+  if [ "${#id_list[@]}" -ge 1 ]; then
+    expected_axes="$(state_get "$state_dir/${id_list[0]}" axes)"
+    [ -n "$expected_axes" ] || expected_axes="standards,spec,overbuild"
+  fi
   roles_ok=""
-  if [ -n "$have_verify" ] && [ -z "$have_review" ] && [ -z "$have_overbuild" ]; then
+  if [ -n "$have_verify" ] && [ -z "$have_standards" ] && [ -z "$have_spec" ] && [ -z "$have_overbuild" ]; then
     roles_ok="1"
-  elif [ -n "$have_review" ] && [ -n "$have_overbuild" ] && [ -z "$have_verify" ]; then
+  elif [ -z "$have_verify" ] && { [ -n "$have_standards" ] || [ -n "$have_spec" ] || [ -n "$have_overbuild" ]; }; then
     roles_ok="1"
+    axes_rest="$expected_axes,"
+    while [ -n "$axes_rest" ]; do
+      ax="${axes_rest%%,*}"; axes_rest="${axes_rest#*,}"
+      have=""
+      case "$ax" in
+        standards) have="$have_standards";;
+        spec) have="$have_spec";;
+        overbuild) have="$have_overbuild";;
+      esac
+      [ -n "$have" ] || roles_ok=""
+    done
   fi
   short="unknown"
   if [ -n "$sha" ]; then short="${sha:0:8}"; fi
@@ -659,11 +729,20 @@ cmd_collect() {
     printf 'patch-id %s\n' "${patch_id:-none}"
     printf 'CI %s %s\n' "$short" "$ci"
     cat "$unknown_f"
-    [ -n "$have_review" ] || printf 'UNFINISHED review MISSING gate=none collect needs every role job id\n'
-    if [ -z "$have_verify" ]; then
-      [ -n "$have_overbuild" ] || printf 'UNFINISHED overbuild MISSING gate=none collect needs every role job id\n'
-    elif [ -n "$have_review" ] || [ -n "$have_overbuild" ]; then
+    if [ -n "$have_verify" ]; then
       printf 'UNFINISHED verify MIXED gate=none collect needs every role job id\n'
+    else
+      axes_rest="$expected_axes,"
+      while [ -n "$axes_rest" ]; do
+        ax="${axes_rest%%,*}"; axes_rest="${axes_rest#*,}"
+        have=""
+        case "$ax" in
+          standards) have="$have_standards";;
+          spec) have="$have_spec";;
+          overbuild) have="$have_overbuild";;
+        esac
+        [ -n "$have" ] || printf 'UNFINISHED %s MISSING gate=none collect needs every role job id\n' "$ax"
+      done
     fi
     # Caller error, not a finished run: keep every state file, worktree and
     # run dir (a sibling worktree lives in the same run dir) for the retry
@@ -749,8 +828,8 @@ cmd_collect() {
             printf '%s\n' "$norm" >>"$verdicts_f"
           fi
           case "$role:$norm" in
-            review:"VERDICT standards: "*) std_ok="1";;
-            review:"VERDICT spec: "*) spec_ok="1";;
+            standards:"VERDICT standards: "*) std_ok="1";;
+            spec:"VERDICT spec: "*) spec_ok="1";;
             overbuild:*) ob_ok="1";;
             verify:*) fix_ok="1";;
           esac
@@ -784,7 +863,8 @@ cmd_collect() {
     else
       complete=""
       case "$role" in
-        review) [ -n "$std_ok" ] && [ -n "$spec_ok" ] && complete="1";;
+        standards) [ -n "$std_ok" ] && complete="1";;
+        spec) [ -n "$spec_ok" ] && complete="1";;
         overbuild) [ -n "$ob_ok" ] && complete="1";;
         verify) [ -n "$fix_ok" ] && complete="1";;
       esac
@@ -806,6 +886,18 @@ cmd_collect() {
   printf 'CI %s %s\n' "$short" "$ci"
   cat "$bad_f"
   cat "$unfinished_f"
+
+  # --findings-out feeds run --verify: the open findings, one per line, or
+  # the no-findings line its empty-file check names.
+  if [ -n "$findings_out" ]; then
+    findings_dir="$(dirname "$findings_out")"
+    case "$findings_dir" in ""|".") ;; *) mkdir -p "$findings_dir";; esac
+    if grep -q '^P[123] ' "$verdicts_f" 2>/dev/null; then
+      grep '^P[123] ' "$verdicts_f" >"$findings_out"
+    else
+      printf 'no open findings\n' >"$findings_out"
+    fi
+  fi
 
   if [ "$unfinished" -gt 0 ] || [ "$bad" -gt 0 ]; then exit 1; fi
   exit 0
