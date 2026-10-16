@@ -19,7 +19,8 @@
 #     writes the open findings (or "no open findings") to PATH when asked,
 #     removes the worktrees, and exits 1 when any job is unfinished or wrote a
 #     verdict outside the shared vocabulary below. Collecting an already-collected
-#     job id reprints its verdict and finding lines from the job record and posts nothing.
+#     job id reprints its verdict and finding lines from the job record, writes
+#     --findings-out the same way, and posts nothing.
 #   review-pr run <same args as start>
 #     start, then delegate watch on every job id start launched, then collect on
 #     those ids. Prints start's lines, then collect's output, and exits with
@@ -589,10 +590,25 @@ cmd_run() {
   cmd_collect ${started_ids[@]+"${started_ids[@]}"}
 }
 
-# reprint_collected JOB_ID...: an id with no state file but a job record was
+# write_findings PATH SRC: write the open findings to PATH: the P1-P3 lines of
+# SRC, one per line, or "no open findings". Shared by collect's main path and
+# its reprint of collected jobs, so both write the same shape.
+write_findings() {
+  findings_dir="$(dirname "$1")"
+  case "$findings_dir" in ""|".") ;; *) mkdir -p "$findings_dir";; esac
+  if grep -q '^P[123] ' "$2" 2>/dev/null; then
+    grep '^P[123] ' "$2" >"$1"
+  else
+    printf 'no open findings\n' >"$1"
+  fi
+}
+
+# reprint_collected SRC JOB_ID...: an id with no state file but a job record was
 # collected before. Reprint its verdict and finding lines from the record, in
-# argument order. Posts and removes nothing.
+# argument order, and append its P1-P3 lines to SRC for write_findings. Posts
+# and removes nothing.
 reprint_collected() {
+  src_f="$1"; shift
   for jid in "$@"; do
     if [ -f "$state_dir/$jid" ] || [ ! -f "$jobs_dir/$jid.json" ]; then
       continue
@@ -605,7 +621,7 @@ reprint_collected() {
         VERDICT*|FIX-*) printf '%s\n' "$line";;
       esac
       case "$line" in
-        P1\ *|P2\ *|P3\ *) printf '%s\n' "$line";;
+        P1\ *|P2\ *|P3\ *) printf '%s\n' "$line"; printf '%s\n' "$line" >>"$src_f";;
       esac
     done <<<"$text"
   done
@@ -655,6 +671,8 @@ cmd_collect() {
   unknown_f="$tmp/unknown.txt"
   : >"$unknown_f"
   recollect=0
+  reprint_f="$tmp/reprint.txt"
+  : >"$reprint_f"
   for jid in "$@"; do
     case "$jid" in ""|-*) usage;; esac
     sf="$state_dir/$jid"
@@ -677,9 +695,10 @@ cmd_collect() {
   done
 
   if [ "$recollect" -gt 0 ]; then
-    reprint_collected "$@"
+    reprint_collected "$reprint_f" "$@"
     # Nothing left to post or remove: every id was collected before.
     if [ "${#id_list[@]}" -eq 0 ] && [ ! -s "$unknown_f" ]; then
+      if [ -n "$findings_out" ]; then write_findings "$findings_out" "$reprint_f"; fi
       exit 0
     fi
   fi
@@ -890,13 +909,8 @@ cmd_collect() {
   # --findings-out feeds run --verify: the open findings, one per line, or
   # the no-findings line its empty-file check names.
   if [ -n "$findings_out" ]; then
-    findings_dir="$(dirname "$findings_out")"
-    case "$findings_dir" in ""|".") ;; *) mkdir -p "$findings_dir";; esac
-    if grep -q '^P[123] ' "$verdicts_f" 2>/dev/null; then
-      grep '^P[123] ' "$verdicts_f" >"$findings_out"
-    else
-      printf 'no open findings\n' >"$findings_out"
-    fi
+    cat "$reprint_f" "$verdicts_f" >"$tmp/findings-src.txt"
+    write_findings "$findings_out" "$tmp/findings-src.txt"
   fi
 
   if [ "$unfinished" -gt 0 ] || [ "$bad" -gt 0 ]; then exit 1; fi

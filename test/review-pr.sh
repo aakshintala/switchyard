@@ -1292,4 +1292,28 @@ bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
   --verify "$T/clean-findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || \
   fail "run --verify accepts the no-findings file"
 
+# --- case: a reprint of a collected job writes --findings-out too, and posts nothing
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: CHANGES
+P2 slow.ts:9 — missing check — add it
+P1 slow.ts:3 — wrong total — sum the parts
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "reprint start exits 0"
+bash "$REVIEW" collect job-standards job-spec job-overbuild --findings-out "$T/reprint-a.txt" \
+  >/dev/null 2>&1 || fail "reprint first collect exits 0"
+cp "$T/reprint-a.txt" "$T/reprint-a.saved"
+[ -f "$T/state/comment-pr.txt" ] || fail "reprint first collect posts the comment"
+rm -f "$T/reprint-a.txt" "$T/state/comment-pr.txt"
+bash "$REVIEW" collect job-standards job-spec job-overbuild --findings-out "$T/reprint-b.txt" \
+  >/dev/null 2>&1 || fail "reprint collect exits 0"
+[ -f "$T/reprint-b.txt" ] || fail "reprint collect --findings-out writes the file"
+cmp -s "$T/reprint-a.saved" "$T/reprint-b.txt" || fail "reprint findings file matches the first collect's file"
+[ ! -e "$T/state/comment-pr.txt" ] || fail "reprint collect posts no PR comment"
+
 echo "review-pr: all cases passed"
