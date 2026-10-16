@@ -6,7 +6,9 @@
 #        the plan's repo (default: the current directory). Callers pass --base
 #        origin/main to check against the fresh base.
 #        Reads the single-backtick tokens outside fenced blocks and the `## Gate`
-#        section. Skipped: a token with `<`, `>`, `*` or a space, and `/`, `.`,
+#        section. Skipped: a token with `<`, `>` or a space, a token with `*`
+#        outside `## Files` (a `*` token in `## Files` is kept as a cover
+#        pattern, never reported), and `/`, `.`,
 #        `..` or a bare extension. A token with one `{a,b}` group is checked once
 #        per alternative; with more than one group it is skipped. A `path::symbol`
 #        token is split and both halves are checked.
@@ -22,9 +24,11 @@
 #        2. Every resolved path in `## Tasks` or `## Red commit` is in `## Files`,
 #           unless its line holds `reads`, `read-only` or `fixture`.
 #           A directory counts as in Files when a Files path starts with it.
+#           A Files entry ending in `/` covers every path under it, and a Files
+#           entry holding `*` covers every path it matches.
 #        3. A symbol (an identifier with `_`, `::` or an uppercase letter after its
 #           first character) outside `## Tasks` occurs at REV, or a line with the
-#           word `new`, `removed`, `remove`, `deleted` or `delete` holds a
+#           word `new`, `removed`, `remove`, `deleted`, `delete` or `example` holds a
 #           backticked token containing its last `::` segment.
 #        Exit 0, nothing printed: clean. Exit 1: one line per problem on stdout,
 #        each ending with the fix it accepts.
@@ -68,10 +72,11 @@ is_symbol() {
   [[ ${s:1} =~ [A-Z] ]]
 }
 
-# exempt_new NAME: true when a plan line has the whole word `new`, `removed`, `remove`, `deleted` or `delete` and a backticked token holding NAME
+# exempt_new NAME: true when a plan line has the whole word `new`, `removed`, `remove`, `deleted`, `delete` or `example` and a backticked token holding NAME
+# The `example` word exempts a line from check 3 only: check 1 keeps the shorter list.
 exempt_new() {
   awk -v s="$1" '
-    tolower($0) ~ /(^|[^a-z0-9_])(new|removed|remove|deleted|delete)([^a-z0-9_]|$)/ {
+    tolower($0) ~ /(^|[^a-z0-9_])(new|removed|remove|deleted|delete|example)([^a-z0-9_]|$)/ {
       n = split($0, parts, "`")
       for (i = 2; i <= n; i += 2)
         if (parts[i] ~ ("(^|[^A-Za-z0-9_])" s "([^A-Za-z0-9_]|$)")) found = 1
@@ -130,7 +135,7 @@ check_symbol() {
   if git -C "$dir" grep -q -w -F -e "$last" "$rev" 2>/dev/null; then return 0; fi
   if exempt_new "$last"; then return 0; fi
   if ! seen "s:$1"; then
-    problem "unknown symbol: $1 (line $CUR_LN): correct it, or mark the line new or removed"
+    problem "unknown symbol: $1 (line $CUR_LN): correct it, or mark the line new, removed or example"
   fi
   return 0
 }
@@ -153,10 +158,16 @@ check_plain() {
   return 0
 }
 
-# check_token TOKEN: skip rules, then brace expansion, then check_plain
+# check_token TOKEN: skip rules, then brace expansion, then check_plain.
+# A Files-section token holding `*` is recorded as a cover pattern before the skip.
 check_token() {
   local t="$1" tmp n pre rest inner suf item
-  case "$t" in *"<"*|*">"*|*"*"*|*" "*) return 0 ;; esac
+  case "$t" in *"*"*)
+    case "$t" in *"<"*|*">"*|*" "*) return 0 ;; esac
+    case "$CUR_SEC" in files) GLOBS="$GLOBS$t"$'\n' ;; esac
+    return 0 ;;
+  esac
+  case "$t" in *"<"*|*">"*|*" "*) return 0 ;; esac
   case "$t" in
     /|.|..) return 0 ;;
     .*) case "$t" in */*) ;; *) return 0 ;; esac ;;
@@ -178,6 +189,23 @@ check_token() {
   esac
   check_plain "$t"
   return 0
+}
+
+# in_files PATH: true when a Files directory entry is a prefix of PATH,
+# or a Files glob pattern matches it
+in_files() {
+  local f="$1" e g tmp
+  tmp="${FILES#|}"
+  while [ -n "$tmp" ]; do
+    e="${tmp%%|*}"; tmp="${tmp#*|}"
+    case "$e" in */) case "$f" in "$e"*) return 0 ;; esac ;; esac
+  done
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    # Unquoted $g on purpose: the Files entry is a glob here, not a literal.
+    case "$f" in $g) return 0 ;; esac
+  done <<<"$GLOBS"
+  return 1
 }
 
 plan=""
@@ -233,10 +261,11 @@ records="$(awk '
   }
 ' "$plan")"
 
-portre=':[0-9]+(-[0-9]+)?$'
+portre=':[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$'
 FOUND=0
 SEEN="|"
 FILES="|"
+GLOBS=""
 TASKS=""
 
 while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW CUR_READ tok; do
@@ -254,6 +283,7 @@ while IFS=$'\t' read -r p ln; do
     *)
       case "$FILES" in *"|$p|"*) continue ;; esac ;;
   esac
+  if in_files "$p"; then continue; fi
   if ! seen "o:$p"; then
     problem "outside Files: $p (line $ln): add it to Files, or mark the line reads"
   fi

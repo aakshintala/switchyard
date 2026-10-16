@@ -105,7 +105,16 @@ expect_clean "fence and Gate skipped" "$(mkplan skip '## Files\n- `src/lib.rs`\n
 
 # 10. symbols: unknown ones are reported, new ones and existing ones pass
 expect_problems "symbols" "$(mkplan syms '## Rulings\nCall `NoSuchThing()` and `Frob_Thing`.\nAdd `Brand_New` (new).\nUse `make_widget()` and `make_widget()` again.\n')" \
-  'unknown symbol: NoSuchThing() (line 5): correct it, or mark the line new or removed\nunknown symbol: Frob_Thing (line 5): correct it, or mark the line new or removed'
+  'unknown symbol: NoSuchThing() (line 5): correct it, or mark the line new, removed or example\nunknown symbol: Frob_Thing (line 5): correct it, or mark the line new, removed or example'
+
+# 10a. example exempts check 3 only (see #443): an example line is clean,
+# the same token unmarked fails with the new message, and an example line
+# with a missing path still reports it
+expect_clean "example exempts unknown symbols" "$(mkplan exampleok '## Rulings\nAn example `c_history` value.\n')"
+expect_problems "unmarked symbol fails with new message" "$(mkplan exampleno '## Rulings\nThe `c_history` value.\n')" \
+  'unknown symbol: c_history (line 5): correct it, or mark the line new, removed or example'
+expect_problems "example does not exempt a missing path" "$(mkplan examplepath '## Rulings\nAn example `src/nope.rs`.\n')" \
+  'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
 
 # 11. a plain lowercase word or a prose token is not a symbol or a path
 expect_clean "plain words are not checked" "$(mkplan words '## Rulings\nUse `cargo`, `run` and `bash test/run` as written.\n')"
@@ -127,7 +136,7 @@ expect_problems "braces: an alternative outside Files" "$(mkplan bouts '## Files
 
 # 11d. path::symbol rule: the path and the symbol are checked separately
 expect_problems "path::symbol: unknown symbol" "$(mkplan split1 '## Rulings\n`src/lib.rs::make_widget` and `src/lib.rs::NoSuch`.\n')" \
-  'unknown symbol: NoSuch (line 5): correct it, or mark the line new or removed'
+  'unknown symbol: NoSuch (line 5): correct it, or mark the line new, removed or example'
 expect_problems "path::symbol: missing path" "$(mkplan split2 '## Rulings\n`src/nope.rs::make_widget`.\n')" \
   'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
 
@@ -139,7 +148,7 @@ expect_problems "directory not covered by Files" "$(mkplan dirout '## Files\n- `
 # 11f. symbol rule: Tasks is not checked; Red commit is; a backticked token on a new line exempts
 expect_clean "symbols in Tasks are not checked" "$(mkplan tasksym '## Tasks\n1. Add `NoSuchThing()`.\n')"
 expect_problems "symbols in Red commit are checked" "$(mkplan redsym '## Red commit\n`Frob_Thing`\n')" \
-  'unknown symbol: Frob_Thing (line 5): correct it, or mark the line new or removed'
+  'unknown symbol: Frob_Thing (line 5): correct it, or mark the line new, removed or example'
 expect_clean "new line exempts a symbol in a backticked token" "$(mkplan newsym '## Rulings\nAdd new `src/x.rs::Brand_New`.\nCall `Brand_New`.\n')"
 
 # 11g. read mark: a task path on a line with reads/read-only/fixture stays out of check 2, but must still resolve
@@ -155,7 +164,21 @@ expect_problems "removed task path outside Files" "$(mkplan removedout '## Files
 
 # 11i. problem lines name the fix they accept
 expect_problems "problem lines name the fix" "$(mkplan fixes '## Files\n- `src/lib.rs`\n\n## Rulings\nSee `src/nope.rs`.\nCall `Frob_Thing`.\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" \
-  'missing path: src/nope.rs (line 8): correct it, or mark the line new or removed\nunknown symbol: Frob_Thing (line 9): correct it, or mark the line new or removed\noutside Files: docs/guide.md (line 12): add it to Files, or mark the line reads'
+  'missing path: src/nope.rs (line 8): correct it, or mark the line new or removed\nunknown symbol: Frob_Thing (line 9): correct it, or mark the line new, removed or example\noutside Files: docs/guide.md (line 12): add it to Files, or mark the line reads'
+
+# 11j. line lists: a comma list of numbers and ranges is lines of the file (see #462)
+expect_clean "comma list on a Files path" "$(mkplan linelist '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1,2`.\n')"
+expect_clean "mixed range and number list on a Files path" "$(mkplan linemix '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1-2,5`.\n')"
+expect_problems "comma list on a missing path names the path" "$(mkplan linemissing '## Rulings\nSee `src/nope.rs:1,2`.\n')" \
+  'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
+
+# 11k. Files directory and glob entries cover task paths (see #462)
+expect_clean "Files directory covers a task path under it" "$(mkplan dircover '## Files\n- `src/`\n\n## Tasks\n1. Edit `src/lib.rs`.\n')"
+expect_problems "Files directory does not cover a path outside it" "$(mkplan diroutside '## Files\n- `src/`\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" \
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line reads'
+expect_clean "Files glob covers a matching task path" "$(mkplan globcover '## Files\n- `src/*.rs`\n\n## Tasks\n1. Edit `src/lib.rs`.\n')"
+expect_problems "Files glob does not cover a non-matching path" "$(mkplan globoutside '## Files\n- `src/*.rs`\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" \
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line reads'
 
 # 12. --base overrides the Base line: src/later.rs is absent at BASE1
 later="$(mkplan later '## Files\n- `src/later.rs`\n')"

@@ -47,6 +47,16 @@ expect_out "section ends at next heading" '## Gate\nbash test/run\n## Notes\nbas
 
 # exit 1 cases
 expect_err "missing heading" '# Plan\n\nbash test/run\n'
+# a command that still holds a backtick after stripping is rejected (see #324)
+printf '%b' '## Gate\n`scripts/check` → PASS\n' >"$T/plan.md"
+stdout="$(bash "$GATE" "$T/plan.md" 2>"$T/err.txt")" && fail "backtick annotation exits 1"
+[ -z "$stdout" ] || fail "backtick annotation prints nothing on stdout"
+want="plan-gate: the '## Gate' command holds a backtick: $T/plan.md: \`scripts/check\` → PASS"
+[ "$(cat "$T/err.txt")" = "$want" ] || fail "backtick annotation: got [$(cat "$T/err.txt")], want [$want]"
+# a plain command with no backtick still passes
+printf '%b' '## Gate\nscripts/check\n' >"$T/plan.md"
+out="$(bash "$GATE" "$T/plan.md" 2>"$T/err.txt")" || fail "plain command exits 0"
+[ "$out" = "scripts/check" ] || fail "plain command: got [$out]"
 expect_err "heading only in prose" 'see the Gate section\n'
 expect_err "empty section" '## Gate\n\n## Next\nbash x\n'
 expect_err "section at end of file with no command" '## Gate\n\n'
