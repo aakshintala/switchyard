@@ -24,7 +24,7 @@
 #           A directory counts as in Files when a Files path starts with it.
 #        3. A symbol (an identifier with `_`, `::` or an uppercase letter after its
 #           first character) outside `## Tasks` occurs at REV, or a line with the
-#           word `new`, `removed`, `remove`, `deleted` or `delete` holds a
+#           word `new`, `removed`, `remove`, `deleted`, `delete` or `example` holds a
 #           backticked token containing its last `::` segment.
 #        Exit 0, nothing printed: clean. Exit 1: one line per problem on stdout,
 #        each ending with the fix it accepts.
@@ -68,10 +68,11 @@ is_symbol() {
   [[ ${s:1} =~ [A-Z] ]]
 }
 
-# exempt_new NAME: true when a plan line has the whole word `new`, `removed`, `remove`, `deleted` or `delete` and a backticked token holding NAME
+# exempt_new NAME: true when a plan line has the whole word `new`, `removed`, `remove`, `deleted`, `delete` or `example` and a backticked token holding NAME
+# The `example` word exempts a line from check 3 only: check 1 keeps the shorter list.
 exempt_new() {
   awk -v s="$1" '
-    tolower($0) ~ /(^|[^a-z0-9_])(new|removed|remove|deleted|delete)([^a-z0-9_]|$)/ {
+    tolower($0) ~ /(^|[^a-z0-9_])(new|removed|remove|deleted|delete|example)([^a-z0-9_]|$)/ {
       n = split($0, parts, "`")
       for (i = 2; i <= n; i += 2)
         if (parts[i] ~ ("(^|[^A-Za-z0-9_])" s "([^A-Za-z0-9_]|$)")) found = 1
@@ -130,7 +131,7 @@ check_symbol() {
   if git -C "$dir" grep -q -w -F -e "$last" "$rev" 2>/dev/null; then return 0; fi
   if exempt_new "$last"; then return 0; fi
   if ! seen "s:$1"; then
-    problem "unknown symbol: $1 (line $CUR_LN): correct it, or mark the line new or removed"
+    problem "unknown symbol: $1 (line $CUR_LN): correct it, or mark the line new, removed or example"
   fi
   return 0
 }
