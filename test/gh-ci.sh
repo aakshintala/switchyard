@@ -695,6 +695,16 @@ run_wait 7 --timeout 0
 [ "$CODE" = "0" ] || fail "rerun of a failed check passes (got $CODE): [$OUT]"
 grep -q 'filter=latest' "$T/state/gh-args.txt" || fail "check runs read with filter=latest: [$(cat "$T/state/gh-args.txt")]"
 
+# --- case: a rerun in flight keeps the wait pending: the old failure's
+# --- check-run is completed but its run is not completed (#282)
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+printf '%s\n' '[{"id":1,"name":"ci","status":"completed","conclusion":"failure","details_url":"https://github.com/O/N/actions/runs/5/job/11"}]' >"$T/state/checks.txt"
+echo '[{"id":5,"name":"CI","event":"pull_request","status":"in_progress"}]' >"$T/state/runs.txt"
+run_wait 7 --timeout 0
+[ "$CODE" = "124" ] || fail "rerun in flight stays pending (got $CODE): [$OUT]"
+grep -q "^pending: ci$" <<<"$OUT" || fail "rerun in flight names ci pending: [$OUT]"
+
 # --- cases: REST check-run conclusions map onto the buckets the verdict reads
 # the loop never calls gh pr view or gh pr checks (refused by the stand-in)
 reset_state
