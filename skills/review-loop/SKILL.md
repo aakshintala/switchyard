@@ -45,7 +45,7 @@ Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new h
 
 `review-pr collect --findings-out <path>` produces the findings file.
 
-The verify prints `review-pr: repair base <sha> (<since> replayed onto <base>)`: it replays the reviewed head onto the current base so the diff holds only the fix round. It needs no action.
+The verify prints `review-pr: repair base <sha> (<since> replayed onto <base>)`: it replays the reviewed head onto the current base so the diff holds only the fix round, and needs no action. A line above it saying the head "does not replay cleanly" means the diff also holds the rebase's conflict resolution: judge that part as part of the repair.
 
 `FIX-OK`: the loop is done. `FIX-INCOMPLETE`: back to step 2 with the open findings, while the counter is below 2.
 
