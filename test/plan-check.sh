@@ -166,6 +166,20 @@ expect_problems "removed task path outside Files" "$(mkplan removedout '## Files
 expect_problems "problem lines name the fix" "$(mkplan fixes '## Files\n- `src/lib.rs`\n\n## Rulings\nSee `src/nope.rs`.\nCall `Frob_Thing`.\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" \
   'missing path: src/nope.rs (line 8): correct it, or mark the line new or removed\nunknown symbol: Frob_Thing (line 9): correct it, or mark the line new, removed or example\noutside Files: docs/guide.md (line 12): add it to Files, or mark the line reads'
 
+# 11j. line lists: a comma list of numbers and ranges is lines of the file (see #462)
+expect_clean "comma list on a Files path" "$(mkplan linelist '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1,2`.\n')"
+expect_clean "mixed range and number list on a Files path" "$(mkplan linemix '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1-2,5`.\n')"
+expect_problems "comma list on a missing path names the path" "$(mkplan linemissing '## Rulings\nSee `src/nope.rs:1,2`.\n')" \
+  'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
+
+# 11k. Files directory and glob entries cover task paths (see #462)
+expect_clean "Files directory covers a task path under it" "$(mkplan dircover '## Files\n- `src/`\n\n## Tasks\n1. Edit `src/lib.rs`.\n')"
+expect_problems "Files directory does not cover a path outside it" "$(mkplan diroutside '## Files\n- `src/`\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" \
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line reads'
+expect_clean "Files glob covers a matching task path" "$(mkplan globcover '## Files\n- `src/*.rs`\n\n## Tasks\n1. Edit `src/lib.rs`.\n')"
+expect_problems "Files glob does not cover a non-matching path" "$(mkplan globoutside '## Files\n- `src/*.rs`\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" \
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line reads'
+
 # 12. --base overrides the Base line: src/later.rs is absent at BASE1
 later="$(mkplan later '## Files\n- `src/later.rs`\n')"
 expect_clean "Base line resolves src/later.rs" "$later"
