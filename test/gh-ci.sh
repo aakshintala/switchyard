@@ -695,6 +695,16 @@ run_wait 7 --timeout 0
 [ "$CODE" = "0" ] || fail "rerun of a failed check passes (got $CODE): [$OUT]"
 grep -q 'filter=latest' "$T/state/gh-args.txt" || fail "check runs read with filter=latest: [$(cat "$T/state/gh-args.txt")]"
 
+# --- case: a rerun in flight keeps the wait pending: the old failure's
+# --- check-run is completed but its run is not completed (#282)
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+printf '%s\n' '[{"id":1,"name":"ci","status":"completed","conclusion":"failure","details_url":"https://github.com/O/N/actions/runs/5/job/11"}]' >"$T/state/checks.txt"
+echo '[{"id":5,"name":"CI","event":"pull_request","status":"in_progress"}]' >"$T/state/runs.txt"
+run_wait 7 --timeout 0
+[ "$CODE" = "124" ] || fail "rerun in flight stays pending (got $CODE): [$OUT]"
+grep -q "^pending: ci$" <<<"$OUT" || fail "rerun in flight names ci pending: [$OUT]"
+
 # --- cases: REST check-run conclusions map onto the buckets the verdict reads
 # the loop never calls gh pr view or gh pr checks (refused by the stand-in)
 reset_state
@@ -1149,9 +1159,9 @@ done
   grep -q 'boom' "$T/stderr.txt" || fail "no origin keeps gh's stderr: [$(cat "$T/stderr.txt")]"
 ) || exit 1
 
-# --- case: under Claude Code a short --timeout is raised to 600
+# --- case: under Claude Code a short --timeout is ignored, not raised
 reset_state
-export GH_CI_INTERVAL=300
+export GH_CI_INTERVAL=3600
 export CLAUDECODE=1
 set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
 set_checks '[{"bucket":"pending","name":"ci"}]'
@@ -1159,11 +1169,11 @@ run_wait 7 --timeout 300
 unset CLAUDECODE
 export GH_CI_INTERVAL=7
 [ "$CODE" = "124" ] || fail "Claude Code short timeout exits 124 (got $CODE): [$OUT]"
-grep -q "head: ${A:0:8} timeout after 600s" <<<"$OUT" || fail "Claude Code timeout raised to 600: [$OUT]"
-grep -q "gh-ci: --timeout 300 raised to 600 under Claude Code (waits run in the background)" "$T/stderr.txt" \
-  || fail "Claude Code raise line: [$(cat "$T/stderr.txt")]"
-[ "$(cat "$T/state/sleeps.txt")" = "300
-300" ] || fail "raised timeout sleeps twice with 300: [$(cat "$T/state/sleeps.txt")]"
+grep -q "head: ${A:0:8} timeout after 7200s" <<<"$OUT" || fail "Claude Code short timeout uses 7200: [$OUT]"
+grep -q "gh-ci: --timeout 300 ignored under Claude Code (waits run in the background); using 7200" "$T/stderr.txt" \
+  || fail "Claude Code ignore line: [$(cat "$T/stderr.txt")]"
+[ "$(cat "$T/state/sleeps.txt")" = "3600
+3600" ] || fail "ignored timeout sleeps twice with 3600: [$(cat "$T/state/sleeps.txt")]"
 
 # --- case: under Claude Code --timeout 600 passes through unchanged
 reset_state
@@ -1176,7 +1186,7 @@ unset CLAUDECODE
 export GH_CI_INTERVAL=7
 [ "$CODE" = "124" ] || fail "Claude Code 600 timeout exits 124 (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} timeout after 600s" <<<"$OUT" || fail "600 timeout header unchanged: [$OUT]"
-! grep -q "raised to 600" "$T/stderr.txt" || fail "no raise line at 600: [$(cat "$T/stderr.txt")]"
+! grep -q "ignored under Claude Code" "$T/stderr.txt" || fail "no ignore line at 600: [$(cat "$T/stderr.txt")]"
 [ "$(cat "$T/state/sleeps.txt")" = "600" ] || fail "600 timeout sleeps once: [$(cat "$T/state/sleeps.txt")]"
 
 # --- case: under Claude Code --timeout above 600 passes through unchanged
@@ -1190,7 +1200,7 @@ unset CLAUDECODE
 export GH_CI_INTERVAL=7
 [ "$CODE" = "124" ] || fail "Claude Code 900 timeout exits 124 (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} timeout after 900s" <<<"$OUT" || fail "900 timeout header unchanged: [$OUT]"
-! grep -q "raised to 600" "$T/stderr.txt" || fail "no raise line at 900: [$(cat "$T/stderr.txt")]"
+! grep -q "ignored under Claude Code" "$T/stderr.txt" || fail "no ignore line at 900: [$(cat "$T/stderr.txt")]"
 
 # --- case: without CLAUDECODE a short --timeout is unchanged
 reset_state
@@ -1201,7 +1211,7 @@ run_wait 7 --timeout 300
 export GH_CI_INTERVAL=7
 [ "$CODE" = "124" ] || fail "plain short timeout exits 124 (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} timeout after 300s" <<<"$OUT" || fail "plain short timeout header unchanged: [$OUT]"
-! grep -q "raised to 600" "$T/stderr.txt" || fail "no raise line without CLAUDECODE: [$(cat "$T/stderr.txt")]"
+! grep -q "ignored under Claude Code" "$T/stderr.txt" || fail "no ignore line without CLAUDECODE: [$(cat "$T/stderr.txt")]"
 [ "$(cat "$T/state/sleeps.txt")" = "300" ] || fail "plain short timeout sleeps once: [$(cat "$T/state/sleeps.txt")]"
 
 echo "gh-ci: all cases passed"
