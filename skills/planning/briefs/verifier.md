@@ -1,6 +1,7 @@
 Check this plan for issue #__ISSUE__ in __REPO__ against the code it cites. Do not edit anything. Do not delegate further.
 
 Read the ticket (`gh issue view __ISSUE__ --repo __REPO__ --comments`) and every file the plan names, at __BASE__, in your working directory. You check by reading and searching code; the lane builds and runs the Gate, so your report needs no build or test output.
+__EXTRA__
 
 ## Plan
 
