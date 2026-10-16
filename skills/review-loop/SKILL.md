@@ -12,7 +12,7 @@ The loop for one PR. Reviews run on models from a different family than the one 
 ### 1. Review
 
 ```
-~/.agents/bin/review-pr run <pr> --repo <owner/name> --cwd <clone> --head <pushed sha> [--issue <n>]... [--spec <n>] --model <correctness> --overbuild-model <over-engineering> [--axes <list>] [--workflow-doc <path>]
+~/.agents/bin/review-pr run <pr> --repo <owner/name> --cwd <clone> --head <pushed sha> [--issue <n>]... [--spec <n>] --model <correctness> [--overbuild-model <over-engineering>] [--axes <list>] [--workflow-doc <path>]
 ```
 
 `--head` is the full SHA of the PR head you expect reviewed, usually the commit you just pushed (`git rev-parse HEAD`): `review-pr` waits for GitHub to report it and reviews exactly that commit, so a push never gets reviewed at its old head. Pass `--issue` once per ticket the PR resolves, and once per issue holding a ruling that changes the PR's scope; link that ruling in the PR body too. A PR with no ticket leaves out `--issue` and `--spec` and is reviewed against its own description. `run` launches one job per axis: Standards and Spec (`code-review`, one axis each) and Overbuild (`overbuild-review`), waits for all, collects them, and exits with collect's code; `--axes standards[,spec][,overbuild]` runs a subset (default all three; `--overbuild-model` is needed only with `overbuild`), and the project's workflow doc says when a smaller set is enough; if the wait fails it exits non-zero and prints the `collect:` line to resume with. The split form, `start` then `collect`, is for a caller that must do other work while the reviews run: `start` returns at once with one `<role> <job-id>` line per job, you wait with `delegate watch` on those ids, then run collect with the ids as printed.
