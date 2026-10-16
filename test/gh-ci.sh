@@ -43,9 +43,25 @@ gh() (
     fi
   }
   if [ "$1" = "pr" ]; then
+    shift
+    # snapshot's reads, served from state files when a snapshot case sets them up
+    if [ "${1:-}" = "checks" ] && [ -e "$T/state/pr-checks.txt" ]; then
+      cat "$T/state/pr-checks.txt"
+      rc=0
+      if [ -e "$T/state/pr-checks-rc" ]; then rc="$(cat "$T/state/pr-checks-rc")"; fi
+      exit "$rc"
+    fi
+    if [ "${1:-}" = "view" ] && { [ -e "$T/state/pr-view.json" ] || [ -e "$T/state/pr-view-fail" ]; }; then
+      if [ -e "$T/state/pr-view-fail" ]; then
+        echo "fake gh: cannot read merge status" >&2
+        exit 1
+      fi
+      cat "$T/state/pr-view.json"
+      exit 0
+    fi
     # the loop must read REST: a pr view or pr checks call is a failure
-    echo "gh $*" >>"$T/state/banned.txt"
-    echo "fake gh: gh pr $2 is refused: gh-ci wait reads REST (repos/O/N/pulls, commits/SHA/check-runs)" >&2
+    echo "gh pr $*" >>"$T/state/banned.txt"
+    echo "fake gh: gh pr $1 is refused: gh-ci wait reads REST (repos/O/N/pulls, commits/SHA/check-runs)" >&2
     exit 9
   fi
   if [ "$1" = "api" ]; then
@@ -155,6 +171,7 @@ reset_state() {
   rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail" "$T/state/not-found"
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
   rm -f "$T/state"/issue-*-labels.txt "$T/state"/runlog-*.txt
+  rm -f "$T/state/pr-checks.txt" "$T/state/pr-checks-rc" "$T/state/pr-view.json" "$T/state/pr-view-fail"
   : >"$T/state/gh-args.txt"
 }
 
@@ -174,7 +191,11 @@ set_checks() {
         name: .name,
         status: (if .bucket == "pending" then "in_progress" else "completed" end),
         conclusion: ({pass: "success", fail: "failure", cancel: "cancelled", skipping: "skipped"}[.bucket] // null),
-        details_url: (.link // null)}] | to_entries | map(.value + {id: .key})' >>"$T/state/checks.txt"
+        details_url: (.link // null),
+        app: (if (.app | type) == "object" then .app
+              elif (.app | type) == "string" then {slug: .app}
+              elif ((.link // "") | test("/actions/runs/[0-9]+/")) then {slug: "github-actions"}
+              else null end)}] | to_entries | map(.value + {id: .key})' >>"$T/state/checks.txt"
     printf '%s' "$s" | jq -c '[.[] | select((.link // "") | test("/actions/runs/[0-9]+/"))
         | {id: (.link | capture("/actions/runs/(?<r>[0-9]+)/").r | tonumber), name: .workflow, event: .event}] | unique_by(.id)' \
       >>"$T/state/runs.txt"
@@ -238,8 +259,8 @@ set_checks \
 run_wait 7
 [ "$CODE" = "0" ] || fail "progress case exits 0 (got $CODE): [$OUT]"
 [ "$OUT" = "head: ${A:0:8} CI: pass" ] || fail "progress case stdout unchanged: [$OUT]"
-[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending 1 passed 1 failing 0
-gh-ci: ${A:0:8} pending 0 passed 2 failing 0" ] || fail "progress lines on change only, on stderr: [$(cat "$T/stderr.txt")]"
+[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending=1 passed=1 failing=0
+gh-ci: ${A:0:8} pending=0 passed=2 failing=0" ] || fail "progress lines on change only, on stderr: [$(cat "$T/stderr.txt")]"
 
 # --- case: progress counts failing checks, and stdout keeps its failing lines
 reset_state
@@ -250,8 +271,8 @@ set_checks \
 run_wait 7
 [ "$CODE" = "1" ] || fail "failing progress case exits 1 (got $CODE): [$OUT]"
 [ "$OUT" = "$(printf 'head: %s CI: fail\nfailing: ci' "${A:0:8}")" ] || fail "failing progress case stdout unchanged: [$OUT]"
-[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending 1 passed 1 failing 0
-gh-ci: ${A:0:8} pending 0 passed 1 failing 1" ] || fail "failing progress lines: [$(cat "$T/stderr.txt")]"
+[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending=1 passed=1 failing=0
+gh-ci: ${A:0:8} pending=0 passed=1 failing=1" ] || fail "failing progress lines: [$(cat "$T/stderr.txt")]"
 
 # --- cases: --fail-fast. A failed required check returns at once while another
 # --- required check is still pending; without the flag the wait keeps polling.
@@ -436,6 +457,55 @@ grep -qF "$CONFLICT_MSG" "$T/stderr.txt" || fail "snapshot conflict message: [$(
 [ ! -e "$T/state/sleeps.txt" ] || fail "snapshot conflict never sleeps"
 OUT="$(bash "$GHCI" watch-verified 99 --pr 7 2>"$T/stderr.txt")"; CODE=$?
 [ "$CODE" = "3" ] || fail "watch-verified conflict exits 3 (got $CODE): [$OUT]"
+
+# --- cases: snapshot with no checks on the head prints a merge line (#438).
+# --- "no checks" is gh pr checks output with no tab-separated check line.
+# no checks: pr checks reports none and exits 1, so snapshot reads
+# mergeable and mergeStateStatus and prints them with the hint
+reset_state
+set_heads "$A"
+printf "%s\n" "no checks reported on the 'b' branch" >"$T/state/pr-checks.txt"
+echo 1 >"$T/state/pr-checks-rc"
+printf '%s' '{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}' >"$T/state/pr-view.json"
+OUT="$(bash "$GHCI" snapshot 7 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "snapshot no-checks exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'head: %s\nCI: unknown\nFlake: unknown\npending: 0 failing: 0\nmerge: mergeable=CONFLICTING state=DIRTY; no checks on this head; a conflicting PR gets none: check mergeable or rebase' "${A:0:8}")" ] \
+  || fail "snapshot no-checks merge line: [$OUT]"
+grep -q 'pr view' "$T/state/gh-args.txt" || fail "snapshot no-checks reads pr view: [$(cat "$T/state/gh-args.txt")]"
+
+# pr view fails: the merge values are unknown but the hint stays, still exit 0
+reset_state
+set_heads "$A"
+printf "%s\n" "no checks reported on the 'b' branch" >"$T/state/pr-checks.txt"
+echo 1 >"$T/state/pr-checks-rc"
+touch "$T/state/pr-view-fail"
+printf '%s' '{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}' >"$T/state/pr-view.json"
+OUT="$(bash "$GHCI" snapshot 7 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "snapshot pr-view-fail exits 0 (got $CODE): [$OUT]"
+grep -q '^merge: unknown; no checks on this head; a conflicting PR gets none: check mergeable or rebase$' <<<"$OUT" \
+  || fail "snapshot unknown merge line: [$OUT]"
+
+# a gh failure other than "no checks" prints no merge line, still exit 0
+reset_state
+set_heads "$A"
+printf "%s\n" "fake gh: HTTP 502" >"$T/state/pr-checks.txt"
+echo 1 >"$T/state/pr-checks-rc"
+printf '%s' '{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' >"$T/state/pr-view.json"
+OUT="$(bash "$GHCI" snapshot 7 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "snapshot gh-failure exits 0 (got $CODE): [$OUT]"
+grep -q '^CI: unknown$' <<<"$OUT" || fail "snapshot gh-failure keeps CI unknown: [$OUT]"
+grep -q '^merge: ' <<<"$OUT" && fail "snapshot gh-failure prints no merge line: [$OUT]"
+grep -q 'pr view' "$T/state/gh-args.txt" && fail "snapshot gh-failure makes no pr view call: [$(cat "$T/state/gh-args.txt")]"
+
+# one check: no merge line and no pr view call
+reset_state
+set_heads "$A"
+printf 'ci\tpass\n' >"$T/state/pr-checks.txt"
+printf '%s' '{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}' >"$T/state/pr-view.json"
+OUT="$(bash "$GHCI" snapshot 7 2>"$T/stderr.txt")"; CODE=$?
+[ "$CODE" = "0" ] || fail "snapshot with a check exits 0 (got $CODE): [$OUT]"
+grep -q '^merge: ' <<<"$OUT" && fail "snapshot with a check prints no merge line: [$OUT]"
+grep -q 'pr view' "$T/state/gh-args.txt" && fail "snapshot with a check makes no pr view call: [$(cat "$T/state/gh-args.txt")]"
 
 # --- case: an unreadable head is pending: the first read fails, the next succeeds
 export GH_CI_INTERVAL=7
@@ -664,6 +734,81 @@ run_wait 7
 [ "$CODE" = "0" ] || fail "pending then green over REST (got $CODE): [$OUT]"
 [ ! -e "$T/state/banned.txt" ] || fail "no banned gh pr call in the loop"
 grep -q 'gh api repos/O/N/pulls/7 --jq' "$T/state/gh-args.txt" || fail "head read over REST pulls"
+
+# --- cases: --job waits on the newest run's job of exactly that name (#439)
+# the job is absent, then pending, then passes while another check stays
+# pending: the wait returns on the job, not the run
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks \
+  '[]' \
+  '[{"bucket":"pending","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"github-actions"}}]' \
+  '[{"bucket":"pass","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"github-actions"}},{"bucket":"pending","name":"lint","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52","app":{"slug":"github-actions"}}]'
+run_wait 7 --job e2e
+[ "$CODE" = "0" ] || fail "job pass exits 0 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} job: e2e pass" <<<"$OUT" || fail "job pass line: [$OUT]"
+grep -q "CI: " <<<"$OUT" && fail "job pass prints no CI line: [$OUT]"
+! grep -q 'rules/branches' "$T/state/gh-args.txt" || fail "job: required names never read: [$(cat "$T/state/gh-args.txt")]"
+! grep -q -- '--jq .draft' "$T/state/gh-args.txt" || fail "job: draft never read: [$(cat "$T/state/gh-args.txt")]"
+
+# the job fails while other checks are pending: exit 1 with failing: <name>
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"fail","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"github-actions"}},{"bucket":"pending","name":"lint","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52","app":{"slug":"github-actions"}}]'
+run_wait 7 --job e2e
+[ "$CODE" = "1" ] || fail "job fail exits 1 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} job: e2e fail" <<<"$OUT" || fail "job fail line: [$OUT]"
+grep -q "^failing: e2e$" <<<"$OUT" || fail "failing job named: [$OUT]"
+grep -q "failing: lint" <<<"$OUT" && fail "other checks not listed: [$OUT]"
+
+# the job never appears: 124 at the timeout
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"pass","name":"lint"}]'
+run_wait 7 --job e2e --timeout 7
+[ "$CODE" = "124" ] || fail "absent job times out (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} timeout after 7s" <<<"$OUT" || fail "absent job timeout header: [$OUT]"
+
+# the name match is exact: "<name> extra" does not count
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"pass","name":"e2e extra"}]'
+run_wait 7 --job e2e --timeout 0
+[ "$CODE" = "124" ] || fail "inexact name stays pending (got $CODE): [$OUT]"
+grep -q "job: e2e pass" <<<"$OUT" && fail "inexact name never passes: [$OUT]"
+
+# a non-Actions check-run named e2e with no Actions job e2e stays pending
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"pass","name":"e2e","link":"https://example.com/status/1"}]'
+run_wait 7 --job e2e --timeout 0
+[ "$CODE" = "124" ] || fail "non-Actions e2e stays pending (got $CODE): [$OUT]"
+grep -q "job: e2e pass" <<<"$OUT" && fail "non-Actions e2e never passes: [$OUT]"
+
+# an external check-run named e2e with an Actions-shaped link but a
+# non-Actions app stays pending: only the head's own Actions jobs count
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"pass","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"some-app"}}]'
+run_wait 7 --job e2e --timeout 0
+[ "$CODE" = "124" ] || fail "external-app e2e stays pending (got $CODE): [$OUT]"
+grep -q "job: e2e pass" <<<"$OUT" && fail "external-app e2e never passes: [$OUT]"
+
+# --job with no value or an empty value is usage
+reset_state
+run_wait 7 --job; [ "$CODE" = "2" ] || fail "--job with no value exits 2 (got $CODE)"
+run_wait 7 --job ""; [ "$CODE" = "2" ] || fail "--job with an empty value exits 2 (got $CODE)"
+
+# a draft PR with --job still waits on the named job: an empty list stays
+# pending instead of passing at once with the draft note
+reset_state
+set_heads "$A"; echo true >"$T/state/draft"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[]' '[{"bucket":"pass","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"github-actions"}}]'
+run_wait 7 --job e2e
+[ "$CODE" = "0" ] || fail "draft job pass exits 0 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} job: e2e pass" <<<"$OUT" || fail "draft job pass line: [$OUT]"
+grep -q "draft" <<<"$OUT" && fail "draft note never printed with --job: [$OUT]"
+[ -s "$T/state/sleeps.txt" ] || fail "draft empty list stays pending: never passes at once"
 
 # --- case: usage errors exit 2
 reset_state
