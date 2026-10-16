@@ -231,7 +231,7 @@ if [ -z "$rev" ]; then
   fi
 fi
 if ! git -C "$dir" rev-parse -q --verify "$rev^{commit}" >/dev/null 2>&1; then
-  echo "plan-check: $rev is not a commit in $dir" >&2
+  echo "plan-check: $rev is not a commit in $dir; run it in the plan's repo clone, or pass --cwd DIR" >&2
   exit 2
 fi
 

@@ -203,6 +203,7 @@ noline="$T/noline.md"
 printf '# Plan\n\n## Files\n- `src/lib.rs`\n' >"$noline"
 expect_code "no Base line and no --base" 2 "$noline" --cwd "$R"
 expect_code "--base is not a commit" 2 "$clean" --base nosuchrev --cwd "$R"
+grep -q -- "--cwd DIR" "$T/err.txt" || fail "--base is not a commit: stderr names --cwd DIR"
 expect_code "--cwd is not a repo" 2 "$clean" --cwd "$T/empty"
 
 echo "plan-check: all cases passed"
