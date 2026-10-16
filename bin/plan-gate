@@ -6,7 +6,10 @@
 #        follows on that heading line), up to the next `## ` heading or the end
 #        of the file. It must hold exactly one non-blank command line, written
 #        bare, wrapped in single backticks, or as the only line inside a ```
-#        fence. Prints that command on stdout and exits 0.
+#        fence. Prints that command on stdout and exits 0. After one wrapping
+#        backtick pair is stripped, the command must hold no backtick: an
+#        annotation such as `cmd` → PASS is rejected, since /bin/sh would run
+#        it as command substitution. A gate that needs substitution uses $(...).
 #        Exit 1 (nothing on stdout, one line on stderr) when the heading is
 #        missing, holds no command, or holds more than one command line.
 #        Exit 2 on bad usage or an unreadable plan file.
@@ -64,5 +67,11 @@ if [ -z "$cmd" ]; then
   echo "plan-gate: the '## Gate' section holds no command: $plan" >&2
   exit 1
 fi
+
+case "$cmd" in
+  *'`'*)
+    echo "plan-gate: the '## Gate' command holds a backtick: $plan: $cmd" >&2
+    exit 1 ;;
+esac
 
 printf '%s\n' "$cmd"
