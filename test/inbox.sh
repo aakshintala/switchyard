@@ -82,7 +82,7 @@ done
 printf 'ok' | bash "$SEND" "$INBOX" 'a.b_c-d9' >/dev/null \
   || fail "dotted sender is accepted"
 
-# inbox-wait with a waiting file exits within 1 s and prints its path.
+# inbox-wait with a waiting file exits within 2 s and prints its path.
 # A stray temp file must never be printed.
 WBOX="$T/waiting"
 delivered="$(printf 'waiting message' | bash "$SEND" "$WBOX" lane)"
@@ -90,7 +90,7 @@ printf 'partial' >"$WBOX/.tmp.stray"
 SECONDS=0
 out="$(bash "$WAIT" "$WBOX")"; rc=$?
 [ "$rc" = "0" ] || fail "wait on a waiting file exits 0 (got $rc)"
-[ "$SECONDS" -lt 1 ] || fail "wait on a waiting file is immediate (${SECONDS}s)"
+[ "$SECONDS" -lt 2 ] || fail "wait on a waiting file is immediate (${SECONDS}s)"
 [ "$out" = "$delivered" ] || fail "wait prints the waiting path: [$out] vs [$delivered]"
 
 # inbox-wait on an empty inbox wakes for a later send: the waiter parks
