@@ -883,6 +883,69 @@ set_run 555 "$A" '{"status":"completed","conclusion":"success"}'
 run_wait 7 --job e2e --run 555; [ "$CODE" = "2" ] || fail "--run with --job exits 2 (got $CODE)"
 run_wait 7 --run abc; [ "$CODE" = "2" ] || fail "--run abc exits 2 (got $CODE)"
 
+# --- cases: --run without a PR waits on the run alone with no head check (#309)
+# no PR, pass: exit 0 with "run: <id> pass" and no head read
+reset_state
+set_run 559 "$A" '{"status":"in_progress","conclusion":null}' '{"status":"completed","conclusion":"success"}'
+run_wait --run 559
+[ "$CODE" = "0" ] || fail "run-alone pass exits 0 (got $CODE): [$OUT]"
+grep -q "^run: 559 pass$" <<<"$OUT" || fail "run-alone pass line: [$OUT]"
+grep -q "head:" <<<"$OUT" && fail "run-alone pass prints no head: [$OUT]"
+! grep -q 'pulls' "$T/state/gh-args.txt" || fail "run-alone pass makes no head read: [$(cat "$T/state/gh-args.txt")]"
+[ -s "$T/state/sleeps.txt" ] || fail "run-alone pass waits at least once"
+
+# no PR, fail: exit 1 with "run: <id> fail" and the failing job
+reset_state
+set_run 560 "$A" '{"status":"completed","conclusion":"failure"}'
+printf '%s' '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}' >"$T/state/jobs-560.json"
+run_wait --run 560
+[ "$CODE" = "1" ] || fail "run-alone fail exits 1 (got $CODE): [$OUT]"
+grep -q "^run: 560 fail$" <<<"$OUT" || fail "run-alone fail line: [$OUT]"
+grep -q "^failing: build$" <<<"$OUT" || fail "run-alone failing job named: [$OUT]"
+! grep -q 'pulls' "$T/state/gh-args.txt" || fail "run-alone fail makes no head read: [$(cat "$T/state/gh-args.txt")]"
+
+# no PR, timeout: exit 124 with "run <id> timeout after <n>s"
+reset_state
+set_run 561 "$A" '{"status":"in_progress","conclusion":null}'
+run_wait --run 561 --timeout 7
+[ "$CODE" = "124" ] || fail "run-alone timeout exits 124 (got $CODE): [$OUT]"
+grep -q "^run 561 timeout after 7s$" <<<"$OUT" || fail "run-alone timeout line: [$OUT]"
+
+# --run with --pr: a run on the head passes, a run on another sha is stale
+reset_state
+set_heads "$A"
+set_run 562 "$A" '{"status":"completed","conclusion":"success"}'
+run_wait --run 562 --pr 7
+[ "$CODE" = "0" ] || fail "run --pr pass exits 0 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} run: 562 pass" <<<"$OUT" || fail "run --pr pass line: [$OUT]"
+reset_state
+set_heads "$A"
+set_run 563 "$B" '{"status":"completed","conclusion":"success"}'
+run_wait --run 563 --pr 7
+[ "$CODE" = "1" ] || fail "run --pr stale exits 1 (got $CODE): [$OUT]"
+grep -qF "run 563 is on ${B:0:8}, PR head is ${A:0:8}: stale run" "$T/stderr.txt" || fail "run --pr stale line: [$(cat "$T/stderr.txt")]"
+[ ! -e "$T/state/sleeps.txt" ] || fail "run --pr stale never sleeps"
+
+# the positional PR form still works: pass and fail
+reset_state
+set_heads "$A"
+set_run 564 "$A" '{"status":"completed","conclusion":"success"}'
+run_wait 7 --run 564
+[ "$CODE" = "0" ] || fail "positional run pass exits 0 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} run: 564 pass" <<<"$OUT" || fail "positional run pass line: [$OUT]"
+reset_state
+set_heads "$A"
+set_run 565 "$A" '{"status":"completed","conclusion":"failure"}'
+printf '%s' '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}' >"$T/state/jobs-565.json"
+run_wait 7 --run 565
+[ "$CODE" = "1" ] || fail "positional run fail exits 1 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} run: 565 fail" <<<"$OUT" || fail "positional run fail line: [$OUT]"
+grep -q "^failing: build$" <<<"$OUT" || fail "positional run failing job named: [$OUT]"
+
+# --pr without --run is usage
+reset_state
+run_wait --pr 7; [ "$CODE" = "2" ] || fail "wait --pr without --run exits 2 (got $CODE)"
+
 # --- case: usage errors exit 2
 reset_state
 run_wait; [ "$CODE" = "2" ] || fail "missing pr exits 2 (got $CODE)"

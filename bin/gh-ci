@@ -367,9 +367,10 @@ head_checks() {
 # list stays pending until the job appears and concludes. The verdict lines
 # name the job: "head: <head8> job: <name> pass" or "head: <head8> job:
 # <name> fail" plus the failing line. Combines with --fail-fast and --timeout.
-# --run <id>: wait on ONE workflow run by id and return that run's own
-# conclusion. The run's headSha must equal the PR head, else a stale-run
-# exit 1. Polls the run's status to completed with the same
+# --run <id> [--pr <n>]: wait on ONE workflow run by id and return that run's
+# own conclusion. With --pr, the run's headSha must equal the PR head, else
+# a stale-run exit 1; without --pr there is no head lookup and no head check.
+# Polls the run's status to completed with the same
 # sleep/timeout accounting as the other waits (timeout exit 124). Prints
 # "head: <head8> run: <id> pass" or "head: <head8> run: <id> fail" plus
 # one "failing: <job>" line per failed job of that run. --fail-fast is
@@ -379,20 +380,25 @@ head_checks() {
 # "gh-ci: <head8> pending=<n> passed=<n> failing=<n>", when those counts differ
 # from the last line printed (the first readable poll always prints). Passed
 # counts pass and skipping; failing counts fail and cancel. Stdout is unchanged.
-# wait_run <pr> <run> <timeout> <interval>: the --run path. Verifies the
-# run is on the PR head, then polls the run's status to completed. Prints
+# wait_run <pr> <run> <timeout> <interval>: the --run path. With a non-empty
+# <pr> verifies the run is on the PR head, then polls the run's status to
+# completed. Prints
 # "head: <head8> run: <id> pass" on success/skipped/neutral, else
 # "head: <head8> run: <id> fail" plus one failing line per failed or
-# cancelled job of that run. Timeout exit 124 with the usual header.
+# cancelled job of that run. Without a PR prints "run: <id> pass" or
+# "run: <id> fail" and "run <id> timeout after <n>s". Timeout exit 124
+# with the usual header.
 wait_run() {
   local pr="$1" run="$2" timeout="$3" interval="$4"
-  local head run_sha slept=0 run_json status concl jobs_json
-  head=$(pr_head "$pr") || return $?
-  run_sha=$(gh run view "$run" --repo "$REPO" --json headSha --jq .headSha) \
-    || { echo "could not read run $run" >&2; return 1; }
-  if [ "$run_sha" != "$head" ]; then
-    echo "run $run is on ${run_sha:0:8}, PR head is ${head:0:8}: stale run" >&2
-    return 1
+  local head="" run_sha slept=0 run_json status concl jobs_json
+  if [ -n "$pr" ]; then
+    head=$(pr_head "$pr") || return $?
+    run_sha=$(gh run view "$run" --repo "$REPO" --json headSha --jq .headSha) \
+      || { echo "could not read run $run" >&2; return 1; }
+    if [ "$run_sha" != "$head" ]; then
+      echo "run $run is on ${run_sha:0:8}, PR head is ${head:0:8}: stale run" >&2
+      return 1
+    fi
   fi
   while true; do
     run_json=$(gh run view "$run" --repo "$REPO" --json status,conclusion 2>/dev/null) || run_json=""
@@ -400,7 +406,11 @@ wait_run() {
     concl=$(printf '%s' "$run_json" | jq -r '.conclusion // ""' 2>/dev/null) || concl=""
     if [ "$status" != "completed" ]; then
       if [ "$slept" -ge "$timeout" ]; then
-        echo "head: ${head:0:8} timeout after ${timeout}s"
+        if [ -n "$head" ]; then
+          echo "head: ${head:0:8} timeout after ${timeout}s"
+        else
+          echo "run $run timeout after ${timeout}s"
+        fi
         return 124
       fi
       sleep "$interval"
@@ -408,17 +418,25 @@ wait_run() {
       continue
     fi
     case "$concl" in success|skipped|neutral)
-      echo "head: ${head:0:8} run: $run pass"
+      if [ -n "$head" ]; then
+        echo "head: ${head:0:8} run: $run pass"
+      else
+        echo "run: $run pass"
+      fi
       return 0;;
     esac
-    echo "head: ${head:0:8} run: $run fail"
+    if [ -n "$head" ]; then
+      echo "head: ${head:0:8} run: $run fail"
+    else
+      echo "run: $run fail"
+    fi
     jobs_json=$(gh run view "$run" --repo "$REPO" --json jobs 2>/dev/null) || jobs_json=""
     printf '%s' "$jobs_json" | jq -r '.jobs[]? | select(.conclusion=="failure" or .conclusion=="cancelled") | "failing: \(.name)"' 2>/dev/null || true
     return 1
   done
 }
 cmd_wait() {
-  local pr="" timeout=7200 req="[]" empty_ok=false names fail_fast=false last_progress="" job="" run=""
+  local pr="" pr_opt="" timeout=7200 req="[]" empty_ok=false names fail_fast=false last_progress="" job="" run=""
   while [ $# -gt 0 ]; do case "$1" in
     --timeout)
       [ $# -ge 2 ] || usage
@@ -427,6 +445,10 @@ cmd_wait() {
       [ $# -ge 2 ] || usage
       [ -n "${2:-}" ] || usage
       job="$2"; shift 2;;
+    --pr)
+      [ $# -ge 2 ] || usage
+      case "${2:-}" in ''|*[!0-9]*) usage;; esac
+      pr_opt="$2"; shift 2;;
     --run)
       [ $# -ge 2 ] || usage
       case "${2:-}" in ''|*[!0-9]*) usage;; esac
@@ -435,8 +457,10 @@ cmd_wait() {
     --*) usage;;
     *) [ -z "$pr" ] || usage; pr="$1"; shift;;
   esac; done
-  [ -n "$pr" ] || usage
   [ -z "$run" ] || [ -z "$job" ] || usage
+  if [ -n "$pr_opt" ] && [ -z "$run" ]; then usage; fi
+  if [ -n "$pr" ] && [ -n "$pr_opt" ]; then usage; fi
+  if [ -z "$run" ] && [ -z "$pr" ]; then usage; fi
   case "$timeout" in ''|*[!0-9]*) usage;; esac
   if [ -n "${CLAUDECODE:-}" ] && [ "$timeout" -lt 600 ]; then
     echo "gh-ci: --timeout $timeout ignored under Claude Code (waits run in the background); using 7200" >&2
@@ -444,7 +468,7 @@ cmd_wait() {
   fi
   local interval="${GH_CI_INTERVAL:-30}"
   if [ -n "$run" ]; then
-    wait_run "$pr" "$run" "$timeout" "$interval"
+    wait_run "${pr_opt:-$pr}" "$run" "$timeout" "$interval"
     return $?
   fi
   local slept=0 head head2 state state2 checks_json max_src max_map filtered padded verdict hs hs_rc
