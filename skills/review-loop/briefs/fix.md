@@ -9,7 +9,7 @@ __FINDINGS__
 ## Rules
 
 - Check each finding against the code before acting. Fix it when the code shows the defect. When the finding is wrong, leave the code and answer it with evidence: a test, a call site, a command's output. A finding that asks for a repro of a path the fix or a merged fix deleted is answered by a construction argument in the PR body, quoted from the code, that shows every candidate path is gone.
-- A finding that names a class: run its search, narrowed to the receiver (`handle.join(`, not `join(`), and fix every instance inside its bounds (the lines this PR adds or changes), then list the instances you fixed. Leave code the PR didn't touch. A compile fix a rebase forces belongs to the rebase, not to a finding.
+- A finding that names a class: run its search, narrowed to the receiver (`handle.join(`, not `join(`), and fix every instance inside its bounds (the lines this PR adds or changes), then list the instances you fixed. A finding that names a pattern a test relies on (a real-clock hold, a `sleep`, a fixed wait) is a class: search the PR's diff for that pattern and remove it from every test the PR adds or changes. Leave code the PR didn't touch. A compile fix a rebase forces belongs to the rebase, not to a finding.
 - Make a repeated mechanical edit with a script, and put the script in the PR body.
 - An over-engineering finding is a hypothesis: apply it only when the cut costs no memory, behaviour or lines.
 - Stay inside the fence: __FENCE__. When you need a file outside it, stop and report. A change to a test harness or fixture that more than the finding uses is checked against the ticket's scope note first; when it goes past the note, stop and report `NEEDS_CONTEXT`.
