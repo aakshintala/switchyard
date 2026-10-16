@@ -191,7 +191,11 @@ set_checks() {
         name: .name,
         status: (if .bucket == "pending" then "in_progress" else "completed" end),
         conclusion: ({pass: "success", fail: "failure", cancel: "cancelled", skipping: "skipped"}[.bucket] // null),
-        details_url: (.link // null)}] | to_entries | map(.value + {id: .key})' >>"$T/state/checks.txt"
+        details_url: (.link // null),
+        app: (if (.app | type) == "object" then .app
+              elif (.app | type) == "string" then {slug: .app}
+              elif ((.link // "") | test("/actions/runs/[0-9]+/")) then {slug: "github-actions"}
+              else null end)}] | to_entries | map(.value + {id: .key})' >>"$T/state/checks.txt"
     printf '%s' "$s" | jq -c '[.[] | select((.link // "") | test("/actions/runs/[0-9]+/"))
         | {id: (.link | capture("/actions/runs/(?<r>[0-9]+)/").r | tonumber), name: .workflow, event: .event}] | unique_by(.id)' \
       >>"$T/state/runs.txt"
@@ -738,8 +742,8 @@ reset_state
 set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
 set_checks \
   '[]' \
-  '[{"bucket":"pending","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51"}]' \
-  '[{"bucket":"pass","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51"},{"bucket":"pending","name":"lint","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52"}]'
+  '[{"bucket":"pending","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"github-actions"}}]' \
+  '[{"bucket":"pass","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"github-actions"}},{"bucket":"pending","name":"lint","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52","app":{"slug":"github-actions"}}]'
 run_wait 7 --job e2e
 [ "$CODE" = "0" ] || fail "job pass exits 0 (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} job: e2e pass" <<<"$OUT" || fail "job pass line: [$OUT]"
@@ -750,7 +754,7 @@ grep -q "CI: " <<<"$OUT" && fail "job pass prints no CI line: [$OUT]"
 # the job fails while other checks are pending: exit 1 with failing: <name>
 reset_state
 set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
-set_checks '[{"bucket":"fail","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51"},{"bucket":"pending","name":"lint","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52"}]'
+set_checks '[{"bucket":"fail","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"github-actions"}},{"bucket":"pending","name":"lint","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52","app":{"slug":"github-actions"}}]'
 run_wait 7 --job e2e
 [ "$CODE" = "1" ] || fail "job fail exits 1 (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} job: e2e fail" <<<"$OUT" || fail "job fail line: [$OUT]"
@@ -781,6 +785,15 @@ run_wait 7 --job e2e --timeout 0
 [ "$CODE" = "124" ] || fail "non-Actions e2e stays pending (got $CODE): [$OUT]"
 grep -q "job: e2e pass" <<<"$OUT" && fail "non-Actions e2e never passes: [$OUT]"
 
+# an external check-run named e2e with an Actions-shaped link but a
+# non-Actions app stays pending: only the head's own Actions jobs count
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"pass","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"some-app"}}]'
+run_wait 7 --job e2e --timeout 0
+[ "$CODE" = "124" ] || fail "external-app e2e stays pending (got $CODE): [$OUT]"
+grep -q "job: e2e pass" <<<"$OUT" && fail "external-app e2e never passes: [$OUT]"
+
 # --job with no value or an empty value is usage
 reset_state
 run_wait 7 --job; [ "$CODE" = "2" ] || fail "--job with no value exits 2 (got $CODE)"
@@ -790,7 +803,7 @@ run_wait 7 --job ""; [ "$CODE" = "2" ] || fail "--job with an empty value exits 
 # pending instead of passing at once with the draft note
 reset_state
 set_heads "$A"; echo true >"$T/state/draft"; echo "$RULES_CI" >"$T/state/rules"
-set_checks '[]' '[{"bucket":"pass","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51"}]'
+set_checks '[]' '[{"bucket":"pass","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"github-actions"}}]'
 run_wait 7 --job e2e
 [ "$CODE" = "0" ] || fail "draft job pass exits 0 (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} job: e2e pass" <<<"$OUT" || fail "draft job pass line: [$OUT]"
