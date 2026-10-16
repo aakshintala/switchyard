@@ -139,6 +139,13 @@ gh() (
             [ ! -e "$T/state/jobs-fail" ] || { echo "fake gh: cannot read jobs" >&2; exit 1; }
             cat "$T/state/jobs-$_rv_run.json"
             exit 0;;
+          *" --json headSha "*)
+            cat "$T/state/run-$_rv_run-head.txt"
+            exit 0;;
+          *" --json status"*)
+            [ ! -e "$T/state/run-$_rv_run-poll-fail" ] || { echo "fake gh: cannot read run" >&2; exit 1; }
+            advance "$T/state/run-$_rv_run-poll.txt"
+            exit 0;;
           *" --json name "*)
             cat "$T/state/run-name-$_rv_run.txt" 2>/dev/null || printf '%s\n' "wf-$_rv_run"
             exit 0;;
@@ -170,6 +177,7 @@ reset_state() {
   rm -f "$T/state/heads.txt" "$T/state/checks.txt" "$T/state/runs.txt" "$T/state/rules" "$T/state/rules-fail" "$T/state/classic" "$T/state/draft"
   rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail" "$T/state/not-found"
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
+  rm -f "$T/state"/run-*-head.txt "$T/state"/run-*-poll.txt "$T/state"/run-*-poll-fail
   rm -f "$T/state"/issue-*-labels.txt "$T/state"/runlog-*.txt
   rm -f "$T/state/pr-checks.txt" "$T/state/pr-checks-rc" "$T/state/pr-view.json" "$T/state/pr-view-fail"
   : >"$T/state/gh-args.txt"
@@ -177,6 +185,14 @@ reset_state() {
 
 set_heads() { printf '%s\n' "$@" >"$T/state/heads.txt"; }
 set_merge() { printf '%s\n' "$@" >"$T/state/merge-state.txt"; }
+
+# set_run <id> <head-sha> <poll-json>...: the run's head plus one
+# status/conclusion JSON object per poll, last line sticky.
+set_run() {
+  local id="$1" sha="$2"; shift 2
+  printf '%s\n' "$sha" >"$T/state/run-$id-head.txt"
+  printf '%s\n' "$@" >"$T/state/run-$id-poll.txt"
+}
 
 # set_checks <gh-shaped check list>...: one state per poll. Each list (name,
 # bucket, and for Actions runs the link and workflow/event) becomes REST check
@@ -819,6 +835,116 @@ run_wait 7 --job e2e
 grep -q "head: ${A:0:8} job: e2e pass" <<<"$OUT" || fail "draft job pass line: [$OUT]"
 grep -q "draft" <<<"$OUT" && fail "draft note never printed with --job: [$OUT]"
 [ -s "$T/state/sleeps.txt" ] || fail "draft empty list stays pending: never passes at once"
+
+# --- cases: --run waits on ONE workflow run by id and returns its own conclusion (#309)
+export GH_CI_INTERVAL=7
+# a failing dispatch run fails even though the PR's required checks pass (a plain wait would pass)
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"pass","name":"ci"}]'
+set_run 555 "$A" '{"status":"in_progress","conclusion":null}' '{"status":"completed","conclusion":"failure"}'
+printf '%s' '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}' >"$T/state/jobs-555.json"
+run_wait 7 --run 555
+[ "$CODE" = "1" ] || fail "run fail exits 1 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} run: 555 fail" <<<"$OUT" || fail "run fail line: [$OUT]"
+grep -q "^failing: build$" <<<"$OUT" || fail "run failing job named: [$OUT]"
+! grep -q 'check-runs' "$T/state/gh-args.txt" || fail "run: the head checks are never read: [$(cat "$T/state/gh-args.txt")]"
+! grep -q 'rules/branches' "$T/state/gh-args.txt" || fail "run: required names never read: [$(cat "$T/state/gh-args.txt")]"
+
+# the run passes: exit 0 with the run pass line
+reset_state
+set_heads "$A"
+set_run 556 "$A" '{"status":"in_progress","conclusion":null}' '{"status":"completed","conclusion":"success"}'
+run_wait 7 --run 556
+[ "$CODE" = "0" ] || fail "run pass exits 0 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} run: 556 pass" <<<"$OUT" || fail "run pass line: [$OUT]"
+
+# the run is on another sha: stale, exit 1 with no waiting
+reset_state
+set_heads "$A"
+set_run 557 "$B" '{"status":"completed","conclusion":"success"}'
+run_wait 7 --run 557
+[ "$CODE" = "1" ] || fail "stale run exits 1 (got $CODE): [$OUT]"
+grep -qF "run 557 is on ${B:0:8}, PR head is ${A:0:8}: stale run" "$T/stderr.txt" || fail "stale line: [$(cat "$T/stderr.txt")]"
+[ ! -e "$T/state/sleeps.txt" ] || fail "stale run never sleeps: [$(cat "$T/state/sleeps.txt")]"
+
+# a run that never completes times out with 124
+reset_state
+set_heads "$A"
+set_run 558 "$A" '{"status":"in_progress","conclusion":null}'
+run_wait 7 --run 558 --timeout 7
+[ "$CODE" = "124" ] || fail "run timeout exits 124 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} timeout after 7s" <<<"$OUT" || fail "run timeout header: [$OUT]"
+
+# --run with --job, or with a non-numeric id, is usage
+reset_state
+set_heads "$A"
+set_run 555 "$A" '{"status":"completed","conclusion":"success"}'
+run_wait 7 --job e2e --run 555; [ "$CODE" = "2" ] || fail "--run with --job exits 2 (got $CODE)"
+run_wait 7 --run abc; [ "$CODE" = "2" ] || fail "--run abc exits 2 (got $CODE)"
+
+# --- cases: --run without a PR waits on the run alone with no head check (#309)
+# no PR, pass: exit 0 with "run: <id> pass" and no head read
+reset_state
+set_run 559 "$A" '{"status":"in_progress","conclusion":null}' '{"status":"completed","conclusion":"success"}'
+run_wait --run 559
+[ "$CODE" = "0" ] || fail "run-alone pass exits 0 (got $CODE): [$OUT]"
+grep -q "^run: 559 pass$" <<<"$OUT" || fail "run-alone pass line: [$OUT]"
+grep -q "head:" <<<"$OUT" && fail "run-alone pass prints no head: [$OUT]"
+! grep -q 'pulls' "$T/state/gh-args.txt" || fail "run-alone pass makes no head read: [$(cat "$T/state/gh-args.txt")]"
+[ -s "$T/state/sleeps.txt" ] || fail "run-alone pass waits at least once"
+
+# no PR, fail: exit 1 with "run: <id> fail" and the failing job
+reset_state
+set_run 560 "$A" '{"status":"completed","conclusion":"failure"}'
+printf '%s' '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}' >"$T/state/jobs-560.json"
+run_wait --run 560
+[ "$CODE" = "1" ] || fail "run-alone fail exits 1 (got $CODE): [$OUT]"
+grep -q "^run: 560 fail$" <<<"$OUT" || fail "run-alone fail line: [$OUT]"
+grep -q "^failing: build$" <<<"$OUT" || fail "run-alone failing job named: [$OUT]"
+! grep -q 'pulls' "$T/state/gh-args.txt" || fail "run-alone fail makes no head read: [$(cat "$T/state/gh-args.txt")]"
+
+# no PR, timeout: exit 124 with "run <id> timeout after <n>s"
+reset_state
+set_run 561 "$A" '{"status":"in_progress","conclusion":null}'
+run_wait --run 561 --timeout 7
+[ "$CODE" = "124" ] || fail "run-alone timeout exits 124 (got $CODE): [$OUT]"
+grep -q "^run 561 timeout after 7s$" <<<"$OUT" || fail "run-alone timeout line: [$OUT]"
+
+# --run with --pr: a run on the head passes, a run on another sha is stale
+reset_state
+set_heads "$A"
+set_run 562 "$A" '{"status":"completed","conclusion":"success"}'
+run_wait --run 562 --pr 7
+[ "$CODE" = "0" ] || fail "run --pr pass exits 0 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} run: 562 pass" <<<"$OUT" || fail "run --pr pass line: [$OUT]"
+reset_state
+set_heads "$A"
+set_run 563 "$B" '{"status":"completed","conclusion":"success"}'
+run_wait --run 563 --pr 7
+[ "$CODE" = "1" ] || fail "run --pr stale exits 1 (got $CODE): [$OUT]"
+grep -qF "run 563 is on ${B:0:8}, PR head is ${A:0:8}: stale run" "$T/stderr.txt" || fail "run --pr stale line: [$(cat "$T/stderr.txt")]"
+[ ! -e "$T/state/sleeps.txt" ] || fail "run --pr stale never sleeps"
+
+# the positional PR form still works: pass and fail
+reset_state
+set_heads "$A"
+set_run 564 "$A" '{"status":"completed","conclusion":"success"}'
+run_wait 7 --run 564
+[ "$CODE" = "0" ] || fail "positional run pass exits 0 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} run: 564 pass" <<<"$OUT" || fail "positional run pass line: [$OUT]"
+reset_state
+set_heads "$A"
+set_run 565 "$A" '{"status":"completed","conclusion":"failure"}'
+printf '%s' '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}' >"$T/state/jobs-565.json"
+run_wait 7 --run 565
+[ "$CODE" = "1" ] || fail "positional run fail exits 1 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} run: 565 fail" <<<"$OUT" || fail "positional run fail line: [$OUT]"
+grep -q "^failing: build$" <<<"$OUT" || fail "positional run failing job named: [$OUT]"
+
+# --pr without --run is usage
+reset_state
+run_wait --pr 7; [ "$CODE" = "2" ] || fail "wait --pr without --run exits 2 (got $CODE)"
 
 # --- case: usage errors exit 2
 reset_state
