@@ -43,14 +43,18 @@ t require repo issue branch worktree run pr
 repo="$(t get repo)"; issue="$(t get issue)"; branch="$(t get branch)"
 worktree="$(t get worktree)"; run="$(t get run)"; pr="$(t get pr)"
 mkdir -p "$run"
+round="$(t get round 2>/dev/null || printf '0')"; case "$round" in ''|*[!0-9]*) round=0;; esac
+slot="fix$((round + 1))"
 if stored="$(t get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
-  [ "$stored" = "$actual" ] || { echo "tkt-fix: head drift: state $state head=$stored worktree $worktree HEAD=$actual" >&2; exit 3; }
+  pr_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)" || { echo "tkt-fix: cannot read PR $pr head" >&2; exit 2; }
+  if [ "$stored" = "$actual" ] && git -C "$worktree" merge-base --is-ancestor "$pr_head" "$stored" 2>/dev/null; then :;
+  elif [ -n "$(t get "job.$slot" 2>/dev/null || true)" ] && git -C "$worktree" merge-base --is-ancestor "$stored" "$actual" 2>/dev/null && { [ "$pr_head" = "$stored" ] || [ "$pr_head" = "$actual" ]; }; then
+    t set head "$actual" # crash rerun: adopt the stored job's commits, reach its slot
+  else echo "tkt-fix: head drift: state $state head=$stored worktree $worktree HEAD=$actual pr $pr head=$pr_head" >&2; exit 3; fi
 fi
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
 [ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
-round="$(t get round 2>/dev/null || printf '0')"; case "$round" in ''|*[!0-9]*) round=0;; esac
-slot="fix$((round + 1))"
 
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
@@ -87,19 +91,21 @@ if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
 
 git -C "$worktree" fetch origin >/dev/null 2>&1 || { echo "tkt-fix: fetch failed in $worktree" >&2; exit 2; }
 new_head="$(git -C "$worktree" rev-parse HEAD)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
+# Persist the job's head before the wait and push below: a stop past this
+# point reruns from the worktree HEAD instead of drifting from it.
+t set head "$new_head"
 remote_head="$(git -C "$worktree" rev-parse --verify "origin/$branch" 2>/dev/null || true)"
 ci_note=""
 if [ "$remote_head" != "$new_head" ] && { [ -z "$remote_head" ] || git -C "$worktree" merge-base --is-ancestor "$remote_head" "$new_head" 2>/dev/null; }; then
-  crc=0; "$ghci" wait "$pr" >"$tmp/ci.out" 2>&1 || crc=$?
+  crc=0; "$ghci" wait "$pr" --repo "$repo" >"$tmp/ci.out" 2>&1 || crc=$?
   [ "$crc" = "0" ] || [ "$crc" = "1" ] || emit "CI-WAIT rc=$crc" 1 "$(cat "$tmp/ci.out")"
   [ "$crc" = "0" ] || ci_note="$(grep . "$tmp/ci.out" | head -n 10)"
   if ! push_out="$(git -C "$worktree" push origin "$branch" 2>&1)"; then emit "PUSH-FAIL" 1 "$push_out"; fi
 fi
 
-grc=0; t set head "$new_head"
-# Head moves before the gate: the fix job's commits already drifted it,
-# and the gate refuses drift. A failed gate leaves head set; the round
-# still counts only on PASS below.
+grc=0
+# The gate refuses drift, so it runs on the persisted head; the round still
+# counts only on PASS below.
 "$tktgate" "$state" --checks-only --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
 [ "$grc" -eq 0 ] || pass tkt-gate "$tmp/gate.out" "$grc"

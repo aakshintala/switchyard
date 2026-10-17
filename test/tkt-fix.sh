@@ -31,8 +31,8 @@ ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 
 # Stub tkt-job: $T/jobmode holds done (commit fix.txt, exit 0), pushed (exit
-# 0, no commit: the job pushed itself), evil (commit evil.txt, exit 0), ask
-# or nocommits (exit 1). Logs its full argument list for slot assertions.
+# 0, no commit: the job pushed itself), evil (commit evil.txt, exit 0) or
+# ask (exit 1). Logs its full argument list for slot assertions.
 printf 'done' >"$T/jobmode"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
@@ -51,9 +51,6 @@ case "\$(cat "$T/jobmode")" in
   ask)
     echo "TKT tkt-job ASK id=j1 log=x"
     echo "which design rules the retry?"
-    exit 1;;
-  nocommits)
-    echo "TKT tkt-job NO-COMMITS id=j1 gate=PASS log=x"
     exit 1;;
 esac
 exit 0
@@ -85,14 +82,19 @@ exit 0
 EOF
 chmod +x "$T/bin/review-pr"
 
-# Stub gh: $T/prhead holds WT:<dir> (serve that worktree's HEAD) for the
-# gate's PR-head drift check.
+# Stub gh: $T/prhead holds WT:<dir> (serve that worktree's HEAD) or
+# ORIGIN:<gitdir>:<ref> (serve that ref, tracking pushes) for the PR-head
+# drift checks in tkt-fix and the gate.
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 case " \$* " in *" headRefOid "*)
   content="\$(cat "$T/prhead")"
-  case "\$content" in WT:*) git -C "\${content#WT:}" rev-parse HEAD;; *) printf '%s' "\$content";; esac;;
+  case "\$content" in
+    WT:*) git -C "\${content#WT:}" rev-parse HEAD;;
+    ORIGIN:*) rest="\${content#ORIGIN:}"; git --git-dir="\${rest%:*}" rev-parse --verify "\${rest##*:}";;
+    *) printf '%s' "\$content";;
+  esac;;
 esac
 exit 0
 EOF
@@ -207,6 +209,7 @@ printf '1' >"$T/cimode"
 printf 'failing: nightly\n' >"$T/ciout"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "unpushed exited $?"
 grep -q "gh-ci|wait 7" "$T/calls.log" || fail "gh-ci wait did not run"
+grep -q "gh-ci|wait 7 --repo switchyard" "$T/calls.log" || fail "gh-ci wait missed --repo switchyard"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "push did not land"
 grep -q "failing: nightly" <<<"$out" || fail "failed CI jobs missing from digest"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
@@ -244,5 +247,65 @@ bash "$TKT" "$S" 2>/dev/null && fail "bare flags exited 0"
 [ "$?" = "2" ] || fail "bare flags exited $?, want 2"
 bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
 [ "$?" = "2" ] || fail "resume without prompt exited $?, want 2"
+
+# 8. A remotely advanced PR exits 3 before dispatching a second job.
+setup_case prdrift
+printf '0000000000000000000000000000000000000001' >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "pr drift exited 0"
+[ "$?" = "3" ] || fail "pr drift exited $?, want 3"
+grep -q "head drift" "$T/stderr" || fail "drift message missing from stderr"
+grep -q "job|" "$T/calls.log" && fail "fix job dispatched despite PR drift"
+
+# 9. Crash before the push: the stored fix job's commits are adopted.
+setup_case crashunpushed
+printf 'fixed\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+printf 'ORIGIN:%s:tkt-529' "$CDIR/origin.git" >"$T/prhead"
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+printf 'pushed' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "crash rerun exited $?"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
+expect_slot fix1
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "crash head not adopted"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "crash push did not land"
+
+# 10. Crash after the push: the rerun skips the wait, keeps the head.
+setup_case crashpushed
+printf 'fixed\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+git -C "$WT" push -q origin tkt-529
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+printf 'pushed' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "pushed crash rerun exited $?"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "pushed crash head not adopted"
+grep -q "gh-ci|" "$T/calls.log" && fail "gh-ci wait ran on a pushed head"
+
+# 11. A failed CI wait still persists the job's head for the rerun.
+setup_case ciwaitfail
+printf '2' >"$T/cimode"
+printf 'wait broke\n' >"$T/ciout"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "ci-wait-fail exited 0"
+[ "$?" = "1" ] || fail "ci-wait-fail exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix CI-WAIT rc=2" || fail "bad verdict: $(head -n 1 <<<"$out")"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "head not persisted on CI-WAIT"
+
+# 12. Head persisted with the push pending: the rerun pushes, not drifts.
+setup_case pushpending
+printf 'fixed\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+printf 'ORIGIN:%s:tkt-529' "$CDIR/origin.git" >"$T/prhead"
+printf 'pushed' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "push-pending rerun exited $?"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "pending push did not land"
 
 echo "tkt-fix assertions passed"
