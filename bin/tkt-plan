@@ -156,7 +156,7 @@ do_verify() {
     args+=(EXTRA="")
   fi
   [ -z "$model" ] || args+=(--model "$model")
-  review verifier "$vbrief" "$run/$repo-$issue-verifier-out-r$((round + 1)).md" ${args[@]+"${args[@]}"}
+  review "verifier-r$((round + 1))" "$vbrief" "$run/$repo-$issue-verifier-out-r$((round + 1)).md" ${args[@]+"${args[@]}"}
   verdict_for "$REPORT"
   t set verifier_round "$((round + 1))"
   emit "$RV" "$REC" "$(head -n 38 "$REPORT")"
@@ -221,6 +221,11 @@ do_set() {
   t set plan "$plan"
   t set verifier_round 0
   t set confirmed_for ""
+  # A new plan must never inherit an old approval: blank every job id this
+  # command can have stored, so the next round dispatches fresh.
+  t set job.verifier-r1 ""
+  t set job.verifier-r2 ""
+  t set job.confirm ""
   emit "SET plan=$plan" 0 "plan=$plan"
 }
 

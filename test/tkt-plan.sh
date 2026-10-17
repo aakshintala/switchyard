@@ -172,11 +172,13 @@ expect_verdict "TKT tkt-plan LINES n=3 out=* log=*" "LINES"
 grep -q "Files leaves out test/x" <<<"$OUT" || fail "LINES digest carries the report"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "LINES counts the round"
 grep -q "verifier-out-r1.md" "$T/stub.log" || fail "round 1 writes verifier-out-r1.md"
+grep -q "slot=verifier-r1" "$T/stub.log" || fail "round 1 uses slot verifier-r1"
 printf 'ok' >"$T/mode"
 run_plan verify
 [ "$RC" -eq 0 ] || fail "PLAN-OK exits 0"
 expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "PLAN-OK"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "PLAN-OK counts the round"
+grep -q "slot=verifier-r2" "$T/stub.log" || fail "round 2 dispatches a new job on slot verifier-r2"
 grep -q "verifier.md" "$T/stub.log" || fail "verify fills the verifier brief"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "ROUND-LIMIT exits 1"
@@ -225,12 +227,19 @@ grep -q "post|.*--part P3" "$T/stub.log" || fail "--part reaches post-plan"
 setup_case set
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+bash "$TKT_STATE" "$S" set job.verifier-r1 j-old-1 || fail "seed round 1 job"
+bash "$TKT_STATE" "$S" set job.verifier-r2 j-old-2 || fail "seed round 2 job"
+bash "$TKT_STATE" "$S" set job.confirm j-old-c || fail "seed confirm job"
 printf '# another plan\n' >"$CDIR/other.md"
 run_plan set "$CDIR/other.md"
 [ "$RC" -eq 0 ] || fail "SET exits 0"
 expect_verdict "TKT tkt-plan SET plan=$CDIR/other.md log=*" "SET"
 [ "$(bash "$TKT_STATE" "$S" get plan)" = "$CDIR/other.md" ] || fail "SET stores the plan path"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "0" ] || fail "SET resets the round counter"
+[ -z "$(bash "$TKT_STATE" "$S" get confirmed_for)" ] || fail "SET clears the confirm record"
+[ -z "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" ] || fail "SET retires the round 1 job"
+[ -z "$(bash "$TKT_STATE" "$S" get job.verifier-r2)" ] || fail "SET retires the round 2 job"
+[ -z "$(bash "$TKT_STATE" "$S" get job.confirm)" ] || fail "SET retires the confirm job"
 
 # --- a missing plan key exits 2 and names it ---
 setup_case missing-key
