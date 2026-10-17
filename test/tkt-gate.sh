@@ -3,6 +3,8 @@
 # A stub plan-gate on a temp TKT_BIN prints the canned gate command; stub gate
 # commands live there too. Real git on throwaway repos with a bare origin.
 # Tests set HOME and TMPDIR to a temp dir and never read $HOME/.agents.
+# GIT_CONFIG_NOSYSTEM keeps the cases off the host git config, and each case
+# pins its own branch refs, so init.defaultBranch cannot break the clone.
 # No test touches the network.
 set -uo pipefail
 
@@ -19,7 +21,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-gate.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
-export PATH="$T/bin:$PATH"
+export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1
 
 # Stub plan-gate: print the canned gate command for the case.
 cat >"$T/bin/plan-gate" <<EOF
@@ -62,6 +64,7 @@ setup_case() {
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR/run"
   git init -q --bare "$CDIR/origin.git"
+  git --git-dir="$CDIR/origin.git" symbolic-ref HEAD refs/heads/main
   git init -q "$CDIR/seed"
   git -C "$CDIR/seed" symbolic-ref HEAD refs/heads/main
   git -C "$CDIR/seed" config user.email t@t
