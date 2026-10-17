@@ -248,91 +248,87 @@ bash "$TKT" "$S" 2>/dev/null && fail "bare flags exited 0"
 bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
 [ "$?" = "2" ] || fail "resume without prompt exited $?, want 2"
 
+# Previous script for must-fail checks: temp copy only, worktree untouched.
+mkdir -p "$T/oldbin"
+git -C "$SCRIPT_DIR/.." show c86d8f6:bin/tkt-fix >"$T/oldbin/tkt-fix" || fail "cannot extract previous tkt-fix"
+[ -s "$T/oldbin/tkt-fix" ] || fail "empty previous tkt-fix"
+ln -sf "$REAL_BIN/tkt-state" "$T/oldbin/tkt-state" || fail "symlink old tkt-state"
+OLD_TKT="$T/oldbin/tkt-fix"
+
 # 8. DRIFT A: forward worktree commit with no job recorded exits 3.
 setup_case drifta
 printf 'outside\n' >"$WT/evil.txt"
 git -C "$WT" add evil.txt
 git -C "$WT" commit -qm "outside: evil.txt"
 NEW="$(git -C "$WT" rev-parse HEAD)"
-ORIGIN="$(git -C "$WT" rev-parse "origin/tkt-529")"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "drift-a exited 0"
 [ "$?" = "3" ] || fail "drift-a exited $?, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "state head=$OLD" <<<"$out" || fail "state head missing from DRIFT digest"
-grep -q "origin/tkt-529=$ORIGIN" <<<"$out" || fail "origin sha missing from DRIFT digest"
+grep -q "PR head=$NEW" <<<"$out" || fail "PR head missing from DRIFT digest"
 grep -q "worktree HEAD=$NEW" <<<"$out" || fail "worktree sha missing from DRIFT digest"
 grep -q "job|" "$T/calls.log" && fail "fix job dispatched on DRIFT A"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "drift-a commit was pushed"
-
-# 9. Crash before the push: the recorded job reruns, then wait and push.
-setup_case crashunpushed
-printf 'fixed\n' >"$WT/fix.txt"
-git -C "$WT" add fix.txt
-git -C "$WT" commit -qm "fix: fix.txt"
+# Must fail on the previous script: old digest has origin, not PR head.
+setup_case olddrifta
+printf 'outside\n' >"$WT/evil.txt"
+git -C "$WT" add evil.txt
+git -C "$WT" commit -qm "outside: evil.txt"
 NEW="$(git -C "$WT" rev-parse HEAD)"
-printf 'ORIGIN:%s:tkt-529' "$CDIR/origin.git" >"$T/prhead"
+oldrc=0; oldout="$(bash "$OLD_TKT" "$S" --verify 2>"$T/stderr-old")" || oldrc=$?
+[ "$oldrc" = "3" ] || fail "old drift-a exited $oldrc, want 3 (old check setup broken)"
+head -n 1 <<<"$oldout" | grep -q "TKT tkt-fix DRIFT" || fail "old drift-a verdict not DRIFT (setup broken)"
+if grep -q "PR head=$NEW" <<<"$oldout"; then fail "old script unexpectedly passes DRIFT A digest"; fi
+
+# 9. RECOVER: a stored job for this round's slot exits 3, no dispatch, no push.
+setup_case recover
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "recover exited 0"
+[ "$?" = "3" ] || fail "recover exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "bad verdict: $(head -n 1 <<<"$out")"
+grep -q "job=j1" <<<"$out" || fail "job id missing from RECOVER digest"
+grep -q "slot=fix1" <<<"$out" || fail "slot missing from RECOVER digest"
+grep -q "job|" "$T/calls.log" && fail "fix job dispatched on RECOVER"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "recover pushed"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "head moved on RECOVER"
+# Must fail on the previous script: old code reruns the slot through tkt-job.
+setup_case oldrecover
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
 printf 'pushed' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "crash rerun exited $?"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
-expect_slot fix1
-[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "crash head not adopted"
-[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "crash push did not land"
+oldrc=0; oldout="$(bash "$OLD_TKT" "$S" --verify 2>"$T/stderr-old")" || oldrc=$?
+grep -q "job|" "$T/calls.log" || fail "old recover did not dispatch (setup broken: rc=$oldrc out=$oldout)"
+if [ "$oldrc" = "3" ] && head -n 1 <<<"$oldout" | grep -q "TKT tkt-fix RECOVER"; then fail "old script unexpectedly passes RECOVER"; fi
+[ "$oldrc" = "3" ] && fail "old recover exited 3, expected old rerun to proceed (setup broken: $oldout)"
 
-# 10. Crash after the push: the rerun skips the wait, keeps the head.
-setup_case crashpushed
+# 10. DRIFT B: PR head rewound to an ancestor of state head exits 3.
+setup_case driftb
 printf 'fixed\n' >"$WT/fix.txt"
 git -C "$WT" add fix.txt
 git -C "$WT" commit -qm "fix: fix.txt"
 git -C "$WT" push -q origin tkt-529
 NEW="$(git -C "$WT" rev-parse HEAD)"
-bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
-printf 'pushed' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "pushed crash rerun exited $?"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
-[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "pushed crash head not adopted"
-grep -q "gh-ci|" "$T/calls.log" && fail "gh-ci wait ran on a pushed head"
-
-# 11. A failed CI wait still persists the job's head for the rerun.
-setup_case ciwaitfail
-printf '2' >"$T/cimode"
-printf 'wait broke\n' >"$T/ciout"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "ci-wait-fail exited 0"
-[ "$?" = "1" ] || fail "ci-wait-fail exited $?, want 1"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix CI-WAIT rc=2" || fail "bad verdict: $(head -n 1 <<<"$out")"
-NEW="$(git -C "$WT" rev-parse HEAD)"
-[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "head not persisted on CI-WAIT"
-
-# 12. Head persisted with the push pending: the rerun pushes, not drifts.
-setup_case pushpending
-printf 'fixed\n' >"$WT/fix.txt"
-git -C "$WT" add fix.txt
-git -C "$WT" commit -qm "fix: fix.txt"
-NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
-bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
-printf 'ORIGIN:%s:tkt-529' "$CDIR/origin.git" >"$T/prhead"
-printf 'pushed' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "push-pending rerun exited $?"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
-[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "pending push did not land"
-
-# 13. DRIFT B: origin behind state with no job recorded exits 3.
-setup_case driftb
-printf 'fixed\n' >"$WT/fix.txt"
-git -C "$WT" add fix.txt
-git -C "$WT" commit -qm "fix: fix.txt"
-NEW="$(git -C "$WT" rev-parse HEAD)"
-bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
-ORIGIN="$(git -C "$WT" rev-parse "origin/tkt-529")"
-[ "$ORIGIN" = "$OLD" ] || fail "origin moved in drift-b setup"
+printf '%s' "$OLD" >"$T/prhead"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "drift-b exited 0"
 [ "$?" = "3" ] || fail "drift-b exited $?, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "state head=$NEW" <<<"$out" || fail "state head missing from DRIFT digest"
-grep -q "origin/tkt-529=$ORIGIN" <<<"$out" || fail "origin sha missing from DRIFT digest"
+grep -q "PR head=$OLD" <<<"$out" || fail "PR head missing from DRIFT digest"
 grep -q "worktree HEAD=$NEW" <<<"$out" || fail "worktree sha missing from DRIFT digest"
 grep -q "job|" "$T/calls.log" && fail "fix job dispatched on DRIFT B"
-[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "drift-b pushed"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "drift-b moved origin"
+# Must fail on the previous script: old code checks origin, sees agreement, dispatches.
+setup_case olddriftb
+printf 'fixed\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+git -C "$WT" push -q origin tkt-529
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+printf '%s' "$OLD" >"$T/prhead"
+printf 'pushed' >"$T/jobmode"
+oldrc=0; oldout="$(bash "$OLD_TKT" "$S" --verify 2>"$T/stderr-old")" || oldrc=$?
+grep -q "job|" "$T/calls.log" || fail "old drift-b did not dispatch (setup broken: rc=$oldrc out=$oldout)"
+if grep -q "PR head=$OLD" <<<"$oldout"; then fail "old script unexpectedly passes DRIFT B"; fi
 
 echo "tkt-fix assertions passed"
