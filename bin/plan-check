@@ -33,8 +33,17 @@
 #        Exit 0, nothing printed: clean. Exit 1: one line per problem on stdout,
 #        each ending with the fix it accepts.
 #        Exit 2 on bad usage, an unreadable plan, no Base line and no --base, or a
-#        REV that is not a commit in DIR.
+#        REV that is not a commit in DIR. The token reader, path resolver and
+#        Files cover rules live in lib/plan-tokens.sh, sourced below.
 set -euo pipefail
+
+lib="$(cd "$(dirname "$0")" && pwd)/lib/plan-tokens.sh"
+if [ ! -r "$lib" ]; then
+  echo "plan-check: cannot read shared lib: $lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$lib"
 
 usage() {
   echo "usage: plan-check PLAN_FILE [--base REV] [--cwd DIR]" >&2
@@ -84,45 +93,32 @@ exempt_new() {
     END { exit (found ? 0 : 1) }' "$plan"
 }
 
-# check_path PATH: resolve PATH at REV, then apply checks 1 and 2 to it
+# check_path PATH: resolve PATH at REV (resolve_path), then apply checks 1 and 2 to it
 check_path() {
-  local p="$1" res="" out cnt m seg
-  case "$p" in
-    */) if git -C "$dir" cat-file -e "$rev:${p%/}" 2>/dev/null; then res="$p"; fi ;;
-    *) if git -C "$dir" cat-file -e "$rev:$p" 2>/dev/null; then res="$p"; fi ;;
-  esac
-  if [ -z "$res" ]; then
-    out="$(awk -v t="$p" '{
-      if ($0 == t || (length($0) > length(t) && substr($0, length($0) - length(t)) == "/" t)) { c++; m = $0 }
-    } END { printf "%d\t%s\n", c, m }' <<<"$tree")"
-    cnt="${out%%$'\t'*}"
-    m="${out#*$'\t'}"
-    if [ "$cnt" = 1 ]; then
-      res="$m"
-    elif [ "$cnt" -ge 2 ]; then
-      return 0
-    fi
-  fi
-  if [ -z "$res" ]; then
-    if [ "$CUR_NEW" = 1 ]; then
-      # A new or removed path is exempt from the missing report only; check 2 still applies unless the line also marks it read-only.
+  local p="$1" seg
+  resolve_path "$p"
+  case "$RES_KIND" in
+    ambiguous) return 0 ;;
+    found)
       case "$CUR_SEC" in
-        files) FILES="$FILES$p|" ;;
-        tasks|red) [ "$CUR_READ" = 1 ] || TASKS="$TASKS$p"$'\t'"$CUR_LN"$'\n' ;;
+        files) FILES="$FILES$RES|" ;;
+        tasks|red) [ "$CUR_READ" = 1 ] || TASKS="$TASKS$RES"$'\t'"$CUR_LN"$'\n' ;;
       esac
-      return 0
-    fi
-    seg="${p%%/*}"
-    case "$TOPLIST" in *"|$seg|"*) ;; *) return 0 ;; esac
-    if ! seen "m:$p"; then
-      problem "missing path: $p (line $CUR_LN): correct it, or mark the line new or removed"
-    fi
+      return 0 ;;
+  esac
+  if [ "$CUR_NEW" = 1 ]; then
+    # A new or removed path is exempt from the missing report only; check 2 still applies unless the line also marks it read-only.
+    case "$CUR_SEC" in
+      files) FILES="$FILES$p|" ;;
+      tasks|red) [ "$CUR_READ" = 1 ] || TASKS="$TASKS$p"$'\t'"$CUR_LN"$'\n' ;;
+    esac
     return 0
   fi
-  case "$CUR_SEC" in
-    files) FILES="$FILES$res|" ;;
-    tasks|red) [ "$CUR_READ" = 1 ] || TASKS="$TASKS$res"$'\t'"$CUR_LN"$'\n' ;;
-  esac
+  seg="${p%%/*}"
+  case "$TOPLIST" in *"|$seg|"*) ;; *) return 0 ;; esac
+  if ! seen "m:$p"; then
+    problem "missing path: $p (line $CUR_LN): correct it, or mark the line new or removed"
+  fi
   return 0
 }
 
@@ -140,72 +136,15 @@ check_symbol() {
   return 0
 }
 
-# check_plain TOKEN: one token, with no brace group left to expand
-check_plain() {
-  local p="$1"
-  if [[ $p =~ $portre ]]; then p="${p%"${BASH_REMATCH[0]}"}"; fi
-  case "$p" in
-    *.rs::*|*.md::*|*.toml::*|*.lua::*|*.json::*|*.sh::*|*.yml::*|*.yaml::*|*.lock::*|*.txt::*|*.snap::*)
-      check_path "${p%%::*}"
-      check_symbol "${p#*::}"
-      return 0 ;;
+# handle_token KIND VALUE: the expand_token callback replacing check_token's dispatch.
+# A glob is already recorded as a cover pattern by expand_token itself.
+handle_token() {
+  case "$1" in
+    glob) return 0 ;;
+    path) check_path "$2" ;;
+    symbol) check_symbol "$2" ;;
   esac
-  if is_path "$p"; then
-    check_path "$p"
-  elif is_symbol "$p"; then
-    check_symbol "$p"
-  fi
   return 0
-}
-
-# check_token TOKEN: skip rules, then brace expansion, then check_plain.
-# A Files-section token holding `*` is recorded as a cover pattern before the skip.
-check_token() {
-  local t="$1" tmp n pre rest inner suf item
-  case "$t" in *"*"*)
-    case "$t" in *"<"*|*">"*|*" "*) return 0 ;; esac
-    case "$CUR_SEC" in files) GLOBS="$GLOBS$t"$'\n' ;; esac
-    return 0 ;;
-  esac
-  case "$t" in *"<"*|*">"*|*" "*) return 0 ;; esac
-  case "$t" in
-    /|.|..) return 0 ;;
-    .*) case "$t" in */*) ;; *) return 0 ;; esac ;;
-  esac
-  case "$t" in
-    *"{"*)
-      case "$t" in *"}"*) ;; *) return 0 ;; esac
-      tmp="${t//\{/}"
-      n=$(( ${#t} - ${#tmp} ))
-      [ "$n" -eq 1 ] || return 0
-      pre="${t%%\{*}"
-      rest="${t#*\{}"
-      inner="${rest%%\}*}"
-      suf="${rest#*\}}"
-      while IFS= read -r item; do
-        check_plain "$pre$item$suf"
-      done <<<"$(awk -v s="$inner" 'BEGIN { n = split(s, a, ","); for (i = 1; i <= n; i++) print a[i] }')"
-      return 0 ;;
-  esac
-  check_plain "$t"
-  return 0
-}
-
-# in_files PATH: true when a Files directory entry is a prefix of PATH,
-# or a Files glob pattern matches it
-in_files() {
-  local f="$1" e g tmp
-  tmp="${FILES#|}"
-  while [ -n "$tmp" ]; do
-    e="${tmp%%|*}"; tmp="${tmp#*|}"
-    case "$e" in */) case "$f" in "$e"*) return 0 ;; esac ;; esac
-  done
-  while IFS= read -r g; do
-    [ -n "$g" ] || continue
-    # Unquoted $g on purpose: the Files entry is a glob here, not a literal.
-    case "$f" in $g) return 0 ;; esac
-  done <<<"$GLOBS"
-  return 1
 }
 
 plan=""
@@ -240,28 +179,8 @@ TOPLIST="|$(git -C "$dir" ls-tree --name-only "$rev" | tr '\n' '|')"
 
 # One record per token: section, line number, whether the line says `new` etc, whether it says `reads` etc, the token.
 # Fenced blocks and the Gate section are skipped.
-records="$(awk '
-  /^[[:space:]]*```/ { infence = !infence; next }
-  infence { next }
-  /^## / {
-    cur = "other"
-    if ($0 ~ /^## Files([[:space:]]|$)/) cur = "files"
-    else if ($0 ~ /^## Tasks([[:space:]]|$)/) cur = "tasks"
-    else if ($0 ~ /^## Red commit([[:space:]]|$)/) cur = "red"
-    else if ($0 ~ /^## Gate([[:space:]]|$)/) cur = "gate"
-    next
-  }
-  cur == "gate" { next }
-  {
-    isnew = (tolower($0) ~ /(^|[^a-z0-9_])(new|removed|remove|deleted|delete)([^a-z0-9_]|$)/)
-    isread = (tolower($0) ~ /(^|[^a-z0-9_])(reads|read-only|fixture)([^a-z0-9_]|$)/)
-    n = split($0, parts, "`")
-    for (i = 2; i <= n; i += 2)
-      if (parts[i] != "") printf "%s\t%d\t%d\t%d\t%s\n", cur, NR, isnew, isread, parts[i]
-  }
-' "$plan")"
+records="$(plan_records "$plan")"
 
-portre=':[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$'
 FOUND=0
 SEEN="|"
 FILES="|"
@@ -270,20 +189,13 @@ TASKS=""
 
 while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW CUR_READ tok; do
   [ -n "$tok" ] || continue
-  check_token "$tok"
+  expand_token "$tok" handle_token
 done <<<"$records"
 
 # Task and Red commit paths must sit under Files; Files is complete only now.
 while IFS=$'\t' read -r p ln; do
   [ -n "$p" ] || continue
-  case "$p" in
-    */)
-      d="${p%/}"
-      case "$FILES" in *"|$d/"*) continue ;; esac ;;
-    *)
-      case "$FILES" in *"|$p|"*) continue ;; esac ;;
-  esac
-  if in_files "$p"; then continue; fi
+  if covered "$p"; then continue; fi
   if ! seen "o:$p"; then
     problem "outside Files: $p (line $ln): add it to Files, or mark the line reads"
   fi
