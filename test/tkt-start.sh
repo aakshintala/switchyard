@@ -110,11 +110,20 @@ fresh_clone() {
   mkdir -p "$RUN"
 }
 
-# Run tkt-start in CLONE; sets OUT (stdout) and RC. Never fails the suite.
+# common_args prints one arg per line; load_args reads them into ARGS so
+# values holding spaces and # survive intact.
+load_args() {
+  ARGS=()
+  while IFS= read -r line; do
+    ARGS+=("$line")
+  done < <(common_args)
+}
+
+# Run tkt-start in CLONE on ARGS plus any extra args; sets OUT and RC.
 run_start() {
   OUT=""
   RC=0
-  OUT="$(cd "$CLONE" && bash "$TKT" "$@" 2>"$CDIR/stderr")" || RC=$?
+  OUT="$(cd "$CLONE" && bash "$TKT" "${ARGS[@]}" "$@" 2>"$CDIR/stderr")" || RC=$?
   [ -n "$OUT" ] || OUT="$(cat "$CDIR/stderr")"
 }
 
@@ -174,8 +183,8 @@ git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 0 ] || fail "current: exit $RC"
 expect_line1 "CURRENT " current
 expect_state current
@@ -186,10 +195,10 @@ expect_logfile current
 git -C "$WT" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1 && fail "current: worktree tracks an upstream"
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "current: tkt-job must not run"
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "current: plan-sweep must not run"
-case "$OUT" in *"since="*) ;; *) fail "current: digest misses since evidence" ;; esac
+case "$OUT" in *"no edit info"*) ;; *) fail "current: digest misses edit evidence" ;; esac
 # A rerun reuses the worktree and adds no duplicate list lines.
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 0 ] || fail "rerun: exit $RC"
 expect_line1 "CURRENT " rerun
 [ "$(grep -c '^body_has=' "$(state_path)")" -eq 2 ] || fail "rerun: body_has duplicated"
@@ -204,8 +213,8 @@ printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
 git -C "$CLONE" worktree add --no-track -b keepbranch "$WT" origin/main >/dev/null
 printf 'marker\n' >"$WT/marker.txt"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 0 ] || fail "reused: exit $RC"
 expect_line1 "CURRENT " reused
 [ -f "$WT/marker.txt" ] || fail "reused: marker gone, worktree was recreated"
@@ -219,8 +228,8 @@ git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nfiling commit: %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 1 ] || fail "stale: exit $RC"
 expect_line1 "PREFLIGHT core=2 out=" stale
 expect_logfile stale
@@ -255,16 +264,16 @@ fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf '2026-06-01T00:00:00Z\n' >"$T/edited"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 1 ] || fail "edited: exit $RC"
 expect_line1 "PREFLIGHT core=2 out=" edited
 case "$OUT" in *"since=2026-06-01T00:00:00Z"*) ;; *) fail "edited: digest misses the since form" ;; esac
 # An edit before the filing commit date runs no since check.
 printf '2025-06-01T00:00:00Z\n' >"$T/edited"
 : >"$T/calls.log"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 1 ] || fail "oldedit: exit $RC"
 expect_line1 "PREFLIGHT core=2 out=" oldedit
 case "$OUT" in *"since="*) fail "oldedit: digest must not claim a since check" ;; esac
@@ -276,12 +285,33 @@ git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
-# shellcheck disable=SC2046
-run_start $(common_args) --files f.txt,missing.txt
+load_args
+run_start --files "f.txt, missing.txt"
 [ "$RC" -eq 1 ] || fail "missing: exit $RC"
 expect_line1 "PREFLIGHT core=2 out=" missing
 grep -q '^tkt-job|' "$T/calls.log" || fail "missing: tkt-job must run"
 case "$OUT" in *"missing-file:missing.txt"*) ;; *) fail "missing: digest misses the reason" ;; esac
+
+# --- unreadable or unresolvable filing commit: preflight ---
+reset_stub; new_origin badfiling
+cmt f.txt one filing 2026-01-01T00:00:00+00:00 >/dev/null
+git -C "$SEED" push -q origin HEAD:main
+fresh_clone
+printf 'Work for #42 with no filing line.\n' >"$T/body"
+printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+load_args
+run_start
+[ "$RC" -eq 1 ] || fail "badfiling: exit $RC"
+expect_line1 "PREFLIGHT core=2 out=" badfiling
+grep -q '^tkt-job|' "$T/calls.log" || fail "badfiling: tkt-job must run"
+case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badfiling: digest misses the reason" ;; esac
+printf 'Work for #42.\n\nWritten against deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' >"$T/body"
+: >"$T/calls.log"
+load_args
+run_start
+[ "$RC" -eq 1 ] || fail "badsha: exit $RC"
+expect_line1 "PREFLIGHT core=2 out=" badsha
+case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badsha: digest misses the reason" ;; esac
 
 # --- preflight with 0 core lines exits 0 with the nonblocking count ---
 reset_stub; new_origin zerocore
@@ -292,8 +322,8 @@ fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
 printf '1. non-blocking -- one\n2. non-blocking -- two\n3. non-blocking -- three\n' >"$T/jobout"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 0 ] || fail "zerocore: exit $RC"
 expect_line1 "PREFLIGHT core=0 nonblocking=3 out=" zerocore
 expect_logfile zerocore
@@ -307,8 +337,8 @@ fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
 printf '1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 1 ] || fail "twocore: exit $RC"
 expect_line1 "PREFLIGHT core=2 out=" twocore
 case "$OUT" in *"nonblocking="*) fail "twocore: nonzero core must not carry nonblocking" ;; esac
@@ -321,8 +351,8 @@ git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
-# shellcheck disable=SC2046
-run_start $(common_args) --no-preflight
+load_args
+run_start --no-preflight
 [ "$RC" -eq 1 ] || fail "noflightstale: exit $RC"
 expect_line1 "STALE reason=" noflightstale
 expect_logfile noflightstale
@@ -336,8 +366,8 @@ git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
-# shellcheck disable=SC2046
-run_start $(common_args) --no-preflight
+load_args
+run_start --no-preflight
 [ "$RC" -eq 0 ] || fail "noflightcurrent: exit $RC"
 expect_line1 "CURRENT " noflightcurrent
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "noflightcurrent: tkt-job must not run"
@@ -350,26 +380,27 @@ fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
 for flag in --run --repo --issue --spec --branch --worktree --workflow-doc --closing; do
-  args=()
-  # shellcheck disable=SC2046
-  for a in $(common_args); do
+  load_args
+  args=(); skip=0
+  for a in ${ARGS[@]+"${ARGS[@]}"}; do
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
     case "$a" in
       "$flag") skip=1; continue ;;
     esac
-    if [ "${skip:-0}" -eq 1 ]; then skip=0; continue; fi
     args+=("$a")
   done
-  run_start "${args[@]}"
+  ARGS=(${args[@]+"${args[@]}"})
+  run_start
   [ "$RC" -eq 2 ] || fail "usage $flag: exit $RC"
-  grep -qF "$flag" "$CDIR/stderr" || fail "usage $flag: stderr does not name it"
+  grep -qF -- "$flag" "$CDIR/stderr" || fail "usage $flag: stderr does not name it"
 done
 # A --model without role= exits 2; a bad --merge-gate exits 2.
-# shellcheck disable=SC2046
-run_start $(common_args) --model solorole
+load_args
+run_start --model solorole
 [ "$RC" -eq 2 ] || fail "usage model: exit $RC"
 grep -qF -- "--model" "$CDIR/stderr" || fail "usage model: stderr does not name --model"
-# shellcheck disable=SC2046
-run_start $(common_args) --merge-gate someday
+load_args
+run_start --merge-gate someday
 [ "$RC" -eq 2 ] || fail "usage gate: exit $RC"
 grep -qF -- "--merge-gate" "$CDIR/stderr" || fail "usage gate: stderr does not name --merge-gate"
 
@@ -381,8 +412,8 @@ fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
 printf '1' >"$T/gh-fail"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 4 ] || fail "ghfail: exit $RC"
 expect_line1 "STEP-FAIL step=github" ghfail
 case "$OUT" in *CURRENT*) fail "ghfail: must never print CURRENT" ;; esac
@@ -397,8 +428,8 @@ fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
 printf '1' >"$T/job-fail"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 3 ] || fail "jobfail: exit $RC"
 expect_line1 "STEP-FAIL step=tkt-job rc=3" jobfail
 case "$OUT" in *CURRENT*) fail "jobfail: must never print CURRENT" ;; esac
@@ -412,11 +443,39 @@ fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
 printf '1' >"$T/sweep-fail"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 6 ] || fail "sweepfail: exit $RC"
 expect_line1 "STEP-FAIL step=plan-sweep rc=6" sweepfail
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "sweepfail: tkt-job must not run after sweep fails"
+
+# --- worktree add failure exits with its code naming the step ---
+reset_stub; new_origin wtaddfail
+FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
+git -C "$SEED" push -q origin HEAD:main
+fresh_clone
+printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
+printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+git -C "$CLONE" branch tkt-start origin/main
+load_args
+run_start
+[ "$RC" -eq 255 ] || fail "wtaddfail: exit $RC"
+expect_line1 "STEP-FAIL step=worktree rc=255" wtaddfail
+case "$OUT" in *CURRENT*) fail "wtaddfail: must never print CURRENT" ;; esac
+
+# --- fetch failure exits with its code naming the step ---
+reset_stub; new_origin fetchfail
+FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
+git -C "$SEED" push -q origin HEAD:main
+fresh_clone
+printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
+printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+git -C "$CLONE" remote set-url origin "$CDIR/definitely-missing.git"
+load_args
+run_start
+[ "$RC" -eq 128 ] || fail "fetchfail: exit $RC"
+expect_line1 "STEP-FAIL step=fetch rc=128" fetchfail
+[ ! -e "$WT" ] || fail "fetchfail: worktree must not be created"
 
 # --- a held state lock exits 2 naming the holder ---
 reset_stub; new_origin locked
@@ -428,8 +487,8 @@ printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
 mkdir -p "$RUN"
 mkdir "$RUN/widget-42.state.lock"
 printf '12345\n' >"$RUN/widget-42.state.lock/pid"
-# shellcheck disable=SC2046
-run_start $(common_args)
+load_args
+run_start
 [ "$RC" -eq 2 ] || fail "locked: exit $RC"
 expect_line1 "BUSY holder=12345" locked
 grep -q '12345' "$CDIR/stderr" || fail "locked: stderr does not name pid"
