@@ -78,7 +78,8 @@ bounds the gate.
 the only way to wait; run it in the background the way your harness's instructions say. On
 timeout, it prints the still-RUNNING records, exits 1 and writes one stderr line per job. The
 `progress` field holds the partial state: phase, last tool, last assistant text, files touched,
-tokens, elapsed time and session id. Run `watch` again to keep waiting.
+tokens, elapsed time and session id. Run `watch` again to keep waiting. A job's state and result
+come from `watch` and the record file below; `delegate` has no `status` or `result` subcommand.
 
 ```bash
 delegate watch <id-a> <id-b> --timeout 1800
