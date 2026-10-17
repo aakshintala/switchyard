@@ -11,18 +11,28 @@ tkt_state="$script_dir/tkt-state"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tkt() { "$tkt_state" "$state" "$@"; }
 
-# Ship lock: held across the ship-pr run and the digest. It uses its own
-# <state>.ship.lock path so it never nests with tkt-state's <state>.lock
-# (journal writes take that one). Released on every exit path via trap;
-# command-substitution subshells inherit the trap, so only the top shell
-# (BASH_SUBSHELL 0) may release it.
+# Command lock: <state>.lock, the same path tkt-state takes for every write.
+# Held only around the ship-pr run and its log work; released (pid file
+# removed, then rmdir) before any tkt journal or tkt write, including the one
+# inside emit. Released on every exit path via trap; command-substitution
+# subshells inherit the trap, so only the top shell (BASH_SUBSHELL 0) may
+# release it.
 locked=0
-lockdir="$state.ship.lock"
+lockdir="$state.lock"
 cleanup_lock() {
   if [ "$locked" = "1" ] && [ "${BASH_SUBSHELL:-0}" = "0" ]; then
-    rm -rf "$lockdir"
+    rm -f "$lockdir/pid"
+    rmdir "$lockdir" 2>/dev/null || rm -rf "$lockdir"
   fi
 }
+release_lock() {
+  if [ "$locked" = "1" ] && [ "${BASH_SUBSHELL:-0}" = "0" ]; then
+    rm -f "$lockdir/pid"
+    rmdir "$lockdir" 2>/dev/null || rm -rf "$lockdir"
+    locked=0
+  fi
+}
+trap cleanup_lock EXIT
 
 # Verdict on line 1 plus at most 40 digest lines, to stdout and the run log.
 emit() {
@@ -34,6 +44,7 @@ emit() {
 $(printf '%s\n' "$@" | head -n 40)"
   fi
   printf '%s\n' "$out" | tee -a "$runlog"
+  release_lock
   tkt journal "tkt-ship $verdict"
   exit "$code"
 }
@@ -77,18 +88,6 @@ if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
   emit "DRIFT state=$stored_head worktree=$actual pr=$pr_head" 3 "$msg"
 fi
 
-if mkdir "$lockdir" 2>/dev/null; then
-  locked=1
-  printf '%s\n' "$$" >"$lockdir/pid"
-  trap cleanup_lock EXIT
-else
-  holder="$(cat "$lockdir/pid" 2>/dev/null || true)"
-  [ -n "$holder" ] || holder="unknown"
-  msg="tkt-ship: ship already running (pid $holder): $lockdir"
-  printf '%s\n' "$msg" >&2
-  emit "BUSY holder=$holder" 2 "$msg"
-fi
-
 args=("$pr" --repo "$repo" --reviewed "$reviewed" --worktree "$worktree")
 while IFS= read -r b; do
   [ -n "$b" ] || continue
@@ -105,6 +104,23 @@ if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then
   gate_cmd="$("$bin_dir/plan-gate" "$(tkt get plan)")" || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $(tkt get plan)"
   e="$(tkt get env 2>/dev/null || true)"
   args+=(--gate "${e:+$e }$gate_cmd")
+fi
+
+if mkdir "$lockdir" 2>/dev/null; then
+  locked=1
+  printf '%s\n' "$$" >"$lockdir/pid"
+else
+  holder="$(cat "$lockdir/pid" 2>/dev/null || true)"
+  [ -n "$holder" ] || holder="unknown"
+  msg="tkt-ship: ship already running (pid $holder): $lockdir"
+  printf '%s\n' "$msg" >&2
+  # BUSY bypasses emit: the lock is held by someone else, so a journal
+  # write (which takes the same lock) cannot succeed. Same stdout shape
+  # as emit, without the journal.
+  out="TKT tkt-ship BUSY holder=$holder log=$runlog
+$msg"
+  printf '%s\n' "$out" | tee -a "$runlog"
+  exit 2
 fi
 
 # Digest the gh-ci failures section of the run log: per failed job its name,

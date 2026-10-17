@@ -139,7 +139,7 @@ run_ship
 expect_line1 "MERGED sha=cafef00d1234 " merged
 expect_journal merged MERGED
 expect_logfile merged
-[ ! -e "$S.ship.lock" ] || fail "merged: lock not released"
+[ ! -e "$S.lock" ] || fail "merged: lock not released"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 41 ] || fail "merged: over 40 digest lines"
 
 # --- flake note on stderr text ---
@@ -298,14 +298,25 @@ expect_line1 "DRIFT state=$H worktree=$H pr=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 # --- held ship lock exits 2 naming the holder's pid ---
 reset_stub; setup_case locked
-mkdir "$S.ship.lock"
-printf '12345\n' >"$S.ship.lock/pid"
+mkdir "$S.lock"
+printf '12345\n' >"$S.lock/pid"
 run_ship
 [ "$RC" -eq 2 ] || fail "locked: exit $RC"
 expect_line1 "BUSY holder=12345" locked
 grep -q '12345' "$CDIR/stderr" || fail "locked: stderr does not name pid"
 [ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "locked: ship-pr must not run"
-rm -rf "$S.ship.lock"
+rm -rf "$S.lock"
+
+# --- live holder pid on <state>.lock exits 2 naming the pid, ship-pr not invoked ---
+reset_stub; setup_case livelock
+mkdir "$S.lock"
+printf '%s\n' "$$" >"$S.lock/pid"
+run_ship
+[ "$RC" -eq 2 ] || fail "livelock: exit $RC"
+expect_line1 "BUSY holder=$$" livelock
+grep -q "$$" "$CDIR/stderr" || fail "livelock: stderr does not name pid"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "livelock: ship-pr must not run"
+rm -rf "$S.lock"
 
 # --- flags from state reach ship-pr ---
 reset_stub; setup_case flags
