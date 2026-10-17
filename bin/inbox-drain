@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# inbox-drain: print every unread message in an inbox and archive each to read/.
+# Usage: inbox-drain <inbox-dir> [--count]
+#        Prints `INBOX n=<count>` first, then each message oldest first: a
+#        header with the sender and UTC time taken from the filename
+#        `inbox-send` writes, then the body bytes exactly as stored. Each
+#        printed message is moved to <inbox-dir>/read/. With --count only
+#        the first line is printed and nothing is moved (read/ is not
+#        created). The listing is taken once at start, so a file arriving
+#        during the drain stays for the next drain. A missing inbox dir
+#        prints INBOX n=0. A failed move exits 1 with the rest still unread.
+set -euo pipefail
+
+usage() {
+  echo "usage: inbox-drain <inbox-dir> [--count]" >&2
+  exit 2
+}
+
+if [ $# -eq 1 ]; then
+  count_only=0
+elif [ $# -eq 2 ] && [ "$2" = "--count" ]; then
+  count_only=1
+else
+  usage
+fi
+dir="$1"
+
+# The listing is taken once here at start: files created later are never
+# printed and never moved.
+list="$(mktemp "${TMPDIR:-/tmp}/inbox-drain.XXXXXX")"
+trap 'rm -f "$list"' EXIT
+count=0
+for f in "$dir"/*.md; do
+  [ -e "$f" ] || continue
+  [ -f "$f" ] || continue
+  # inbox-send names files <sender>-<ts>-<pid>-<rand>.md, and the sender
+  # may itself hold - and .; the last three dash fields are the timestamp,
+  # pid and rand, everything before them is the sender.
+  base="${f##*/}"
+  rest="${base%.md}"
+  rest="${rest%-*}"
+  rest="${rest%-*}"
+  ts="${rest##*-}"
+  sender="${rest%-*}"
+  case "$ts" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
+      time="$ts"
+      ;;
+    *)
+      # Not the shape inbox-send writes: still an unread message, drained
+      # with the whole name as sender and an unknown time.
+      time="unknown"
+      sender="${base%.md}"
+      ts=""
+      ;;
+  esac
+  printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$base" "$f" "$sender" "$time" >>"$list"
+  count=$((count + 1))
+done
+
+printf 'INBOX n=%s\n' "$count"
+
+if [ "$count_only" -eq 1 ]; then
+  exit 0
+fi
+
+# Oldest first: the timestamp field, then the filename. The sender charset
+# inbox-send allows holds no tabs, so tab-separated fields stay intact.
+while IFS=$'\t' read -r _ts _base f sender time; do
+  printf 'FROM %s AT %s\n' "$sender" "$time"
+  # The body goes through unchanged: cat, never command substitution.
+  cat <"$f"
+  # A body with no trailing newline still ends on its own line.
+  if [ -s "$f" ] && [ -n "$(tail -c 1 <"$f")" ]; then
+    printf '\n'
+  fi
+  # read/ appears on the first move; a failed move exits 1 with the rest
+  # of the listing still in the inbox.
+  mkdir -p -- "$dir/read"
+  mv -- "$f" "$dir/read/" || exit 1
+done < <(LC_ALL=C sort -t $'\t' -k1,1 -k2,2 "$list")
+exit 0

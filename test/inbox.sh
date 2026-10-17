@@ -6,6 +6,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SEND="$SCRIPT_DIR/../bin/inbox-send"
 WAIT="$SCRIPT_DIR/../bin/inbox-wait"
+DRAIN="$SCRIPT_DIR/../bin/inbox-drain"
 
 fail() {
   [ -z "${WATCH:-}" ] || unwatch
@@ -146,5 +147,119 @@ remote_out="$(printf 'remote hello' | PATH="$STUB:$PATH" INBOX_HOST="mac-host" b
 [ "$(cat "$remote_out")" = "remote hello" ] || fail "remote file is complete: [$(cat "$remote_out")]"
 grep -q 'mac-host' "$SSH_LOG" || fail "stub ssh got the host: [$(cat "$SSH_LOG" 2>/dev/null)]"
 grep -q 'inbox-send' "$SSH_LOG" || fail "stub ssh got the command: [$(cat "$SSH_LOG" 2>/dev/null)]"
+
+# inbox-drain on an empty inbox prints INBOX n=0 and exits 0.
+EMPTYDRAIN="$T/emptydrain"
+mkdir -p "$EMPTYDRAIN"
+printf 'hidden' >"$EMPTYDRAIN/.hidden.md"
+printf 'not markdown' >"$EMPTYDRAIN/note.txt"
+dout="$(bash "$DRAIN" "$EMPTYDRAIN")"; rc=$?
+[ "$rc" = "0" ] || fail "drain on empty inbox exits 0 (got $rc)"
+[ "$dout" = "INBOX n=0" ] || fail "drain on empty inbox prints INBOX n=0: [$dout]"
+[ "$(find "$EMPTYDRAIN" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "2" ] \
+  || fail "drain leaves dotfiles and non-md files alone"
+
+# inbox-drain on a missing dir is not an error.
+dout="$(bash "$DRAIN" "$T/no-such-dir")"; rc=$?
+[ "$rc" = "0" ] || fail "drain on missing dir exits 0 (got $rc)"
+[ "$dout" = "INBOX n=0" ] || fail "drain on missing dir prints INBOX n=0: [$dout]"
+
+# Bad usage exits 2: no dir, or an unknown argument.
+bash "$DRAIN" >/dev/null 2>&1; [ "$?" = "2" ] || fail "drain with no dir exits 2"
+bash "$DRAIN" "$EMPTYDRAIN" --bogus >/dev/null 2>&1; [ "$?" = "2" ] || fail "drain with unknown arg exits 2"
+bash "$DRAIN" "$EMPTYDRAIN" --count extra >/dev/null 2>&1; [ "$?" = "2" ] || fail "drain with extra args exits 2"
+
+# Two messages drain oldest first, each with its sender and time, body
+# intact (the first body has no trailing newline); both end in read/.
+DBOX="$T/drainbox"
+first_path="$(printf 'first message' | bash "$SEND" "$DBOX" alice)"
+sleep 1
+second_path="$(printf 'second body\nwith newline\n' | bash "$SEND" "$DBOX" bob)"
+first_base="$(basename "$first_path")"
+second_base="$(basename "$second_path")"
+first_ts="$(printf '%s' "$first_base" | sed -n 's/.*-\([0-9]\{8\}T[0-9]\{6\}Z\)-.*-.*\.md/\1/p')"
+second_ts="$(printf '%s' "$second_base" | sed -n 's/.*-\([0-9]\{8\}T[0-9]\{6\}Z\)-.*-.*\.md/\1/p')"
+[ -n "$first_ts" ] || fail "first filename holds a timestamp: [$first_base]"
+[ -n "$second_ts" ] || fail "second filename holds a timestamp: [$second_base]"
+dout="$(bash "$DRAIN" "$DBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "drain exits 0 (got $rc)"
+[ "$(printf '%s\n' "$dout" | head -n 1)" = "INBOX n=2" ] \
+  || fail "drain prints INBOX n=2 first: [$dout]"
+printf '%s\n' "$dout" | grep -q "alice" || fail "drain prints the first sender: [$dout]"
+printf '%s\n' "$dout" | grep -q "$first_ts" || fail "drain prints the first time: [$dout]"
+printf '%s\n' "$dout" | grep -q "bob" || fail "drain prints the second sender: [$dout]"
+printf '%s\n' "$dout" | grep -q "$second_ts" || fail "drain prints the second time: [$dout]"
+printf '%s\n' "$dout" | grep -q 'first message' || fail "drain prints the first body: [$dout]"
+printf '%s\n' "$dout" | grep -q 'second body' || fail "drain prints the second body: [$dout]"
+first_line="$(printf '%s\n' "$dout" | grep -n 'first message' | cut -d: -f1)"
+second_line="$(printf '%s\n' "$dout" | grep -n 'second body' | cut -d: -f1)"
+[ "$first_line" -lt "$second_line" ] || fail "drain prints oldest first: [$dout]"
+[ "$(find "$DBOX" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "0" ] \
+  || fail "drained files leave the inbox: [$(ls "$DBOX")]"
+[ "$(find "$DBOX/read" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "2" ] \
+  || fail "both drained files end in read/: [$(ls "$DBOX/read")]"
+grep -q 'first message' "$DBOX/read"/*.md || fail "first body survived in read/"
+grep -q 'second body' "$DBOX/read"/*.md || fail "second body survived in read/"
+
+# --count prints INBOX n=2 only, moves nothing and creates no read/;
+# the next plain drain still prints and moves both.
+CBOX="$T/countbox"
+printf 'one' | bash "$SEND" "$CBOX" alice >/dev/null
+sleep 1
+printf 'two' | bash "$SEND" "$CBOX" bob >/dev/null
+cout="$(bash "$DRAIN" "$CBOX" --count)"; rc=$?
+[ "$rc" = "0" ] || fail "drain --count exits 0 (got $rc)"
+[ "$cout" = "INBOX n=2" ] || fail "drain --count prints only INBOX n=2: [$cout]"
+[ "$(find "$CBOX" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "2" ] \
+  || fail "drain --count moves nothing: [$(ls "$CBOX")]"
+[ ! -e "$CBOX/read" ] || fail "drain --count creates no read/"
+dout="$(bash "$DRAIN" "$CBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "plain drain after --count exits 0 (got $rc)"
+[ "$(printf '%s\n' "$dout" | head -n 1)" = "INBOX n=2" ] \
+  || fail "plain drain after --count still prints both: [$dout]"
+[ "$(find "$CBOX/read" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "2" ] \
+  || fail "plain drain after --count moves both"
+
+# A file arriving during the drain stays for the next drain: a PATH stub
+# for cat sends one message on its first call, then runs the real tool.
+LBOX="$T/latebox"
+printf 'early' | bash "$SEND" "$LBOX" alice >/dev/null
+REALCAT="$(command -v cat)"
+DRAINSTUB="$T/drainstub"
+mkdir -p "$DRAINSTUB"
+rm -f "$T/cat-fired"
+cat >"$DRAINSTUB/cat" <<STUB
+#!/usr/bin/env bash
+if [ ! -f "$T/cat-fired" ]; then
+  touch "$T/cat-fired"
+  PATH="/usr/bin:/bin" printf 'late arrival' | bash "$SEND" "$LBOX" late >/dev/null
+fi
+exec "$REALCAT" "\$@"
+STUB
+chmod +x "$DRAINSTUB/cat"
+dout="$(PATH="$DRAINSTUB:$PATH" bash "$DRAIN" "$LBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "drain with a late arrival exits 0 (got $rc)"
+[ "$(printf '%s\n' "$dout" | head -n 1)" = "INBOX n=1" ] \
+  || fail "drain with a late arrival prints INBOX n=1: [$dout]"
+printf '%s\n' "$dout" | grep -q 'early' || fail "drain prints the early message: [$dout]"
+printf '%s\n' "$dout" | grep -q 'late arrival' \
+  && fail "late arrival waits for the next drain: [$dout]"
+[ "$(find "$LBOX" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "1" ] \
+  || fail "late file stays unread: [$(ls "$LBOX")]"
+[ "$(find "$LBOX/read" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "1" ] \
+  || fail "early file moved to read/: [$(ls "$LBOX/read")]"
+dout2="$(bash "$DRAIN" "$LBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "next drain exits 0 (got $rc)"
+[ "$(printf '%s\n' "$dout2" | head -n 1)" = "INBOX n=1" ] \
+  || fail "next drain prints INBOX n=1: [$dout2]"
+printf '%s\n' "$dout2" | grep -q 'late arrival' \
+  || fail "next drain prints the late message: [$dout2]"
+[ "$(find "$LBOX" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "0" ] \
+  || fail "next drain moves the late file"
+
+# read/ is never listed: a drain with only archived files prints INBOX n=0.
+dout="$(bash "$DRAIN" "$LBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "drain after all moved exits 0 (got $rc)"
+[ "$dout" = "INBOX n=0" ] || fail "read/ files are never listed: [$dout]"
 
 echo "inbox: all cases passed"
