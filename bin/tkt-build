@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# tkt-build: implement steps 4-6, first round: lane, pre-push checks and gate,
+# the mutant list, the map job beside the first review, one merged findings file.
+# Usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
+# Reuses tkt-state, tkt-job, tkt-gate, gh-ci wait --job, review-pr start|collect
+# and delegate watch. The map template is skills/review-loop/briefs/mutant-map.md.
+set -euo pipefail
+
+usage() {
+  echo "usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]" >&2
+  exit 2
+}
+
+[ $# -ge 1 ] || usage
+state="$1"
+shift
+from=lane
+lane_model=""
+review_model=""
+overbuild_model=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --from) [ $# -ge 2 ] || usage; from="$2"; shift 2 ;;
+    --lane-model) [ $# -ge 2 ] || usage; lane_model="$2"; shift 2 ;;
+    --review-model) [ $# -ge 2 ] || usage; review_model="$2"; shift 2 ;;
+    --overbuild-model) [ $# -ge 2 ] || usage; overbuild_model="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+case "$from" in lane|gate|review) ;; *) usage ;; esac
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+tkt_state="$script_dir/tkt-state"
+bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+tktjob="$bin_dir/tkt-job"
+tktgate="$bin_dir/tkt-gate"
+ghci="$bin_dir/gh-ci"
+reviewpr="$bin_dir/review-pr"
+plangate="$bin_dir/plan-gate"
+if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
+lane_brief="$HOME/.agents/skills/planning/briefs/lane.md"
+map_brief="$HOME/.agents/skills/review-loop/briefs/mutant-map.md"
+tkt() { "$tkt_state" "$state" "$@"; }
+
+# Probe the shared lock and release it at once: the lane and review waits below
+# outlive any lock, and tkt-state locks each write itself.
+lockdir="$state.lock"
+if mkdir "$lockdir" 2>/dev/null; then
+  rmdir "$lockdir"
+else
+  if pid="$(cat "$lockdir/pid" 2>/dev/null)" && [ -n "$pid" ]; then
+    echo "tkt-build: state locked by pid $pid" >&2
+  else
+    echo "tkt-build: state locked" >&2
+  fi
+  exit 2
+fi
+
+tmpd="$(mktemp -d "${TMPDIR:-/tmp}/tkt-build.XXXXXX")"
+trap 'rm -rf "$tmpd"' EXIT
+
+# The C0 stdout shape: the verdict on line 1 with the run log, then at most 40
+# digest lines. The log carries the worktree head, so a rerun never overwrites
+# a failure. Always journals, best-effort so a failure path never fails.
+emit() {
+  local verdict="$1" ec="$2"
+  shift 2
+  local rdir="${run:-$(dirname "$state")}"
+  mkdir -p "$rdir" 2>/dev/null || true
+  local twelve="nohead"
+  if [ -n "${worktree:-}" ]; then
+    twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
+  fi
+  local logpath="$rdir/${slug:-build}-${issue:-0}-tkt-build-$twelve-$(date +%H%M%S).log"
+  local out="TKT tkt-build $verdict log=$logpath"
+  if [ $# -gt 0 ]; then
+    out="$out
+$(printf '%s\n' "$@" | head -n 40)"
+  fi
+  printf '%s\n' "$out" | tee -a "$logpath"
+  tkt journal "tkt-build $verdict" 2>/dev/null || true
+  exit "$ec"
+}
+
+require_keys() {
+  if ! req_err="$(tkt require "$@" 2>&1)"; then
+    printf '%s\n' "$req_err" >&2
+    key="$(printf '%s\n' "$req_err" | sed -n 's/.*missing key: //p' | head -n 1)"
+    [ -n "$key" ] || key="unknown"
+    emit "PRECONDITION missing=$key" 2 "$req_err"
+  fi
+}
+
+# Re-emit a lane or gate stop under tkt-build with its exit code. A TKT verdict
+# line keeps its words; bare stderr (a usage error, which prints no verdict
+# line) becomes a STEP-ERROR.
+forward() {
+  local step="$1" inner="$2" rc="$3" err="$4" first words rest
+  first="$(head -n 1 <<<"$inner")"
+  case "$first" in
+    "TKT tkt-"*)
+      words="$(sed -e 's/^TKT tkt-[^ ]* //' -e 's/ log=[^ ]*$//' <<<"$first")"
+      rest="$(tail -n +2 <<<"$inner")"
+      if [ -n "$rest" ]; then
+        emit "$words" "$rc" "$rest"
+      else
+        emit "$words" "$rc"
+      fi
+      ;;
+    *)
+      cat "$err" >&2
+      emit "$step-ERROR" "$rc" "$(tail -n 20 "$err")"
+      ;;
+  esac
+}
+
+require_keys repo issue branch worktree run plan spec
+repo="$(tkt get repo)"
+issue="$(tkt get issue)"
+branch="$(tkt get branch)"
+worktree="$(tkt get worktree)"
+run="$(tkt get run)"
+plan="$(tkt get plan)"
+spec="$(tkt get spec)"
+slug="${repo//\//-}"
+mkdir -p "$run"
+
+# A stored head the worktree left behind stops the run before it acts.
+if stored_head="$(tkt get head 2>/dev/null)"; then
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$stored_head" != "$actual" ]; then
+    msg="tkt-build: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual"
+    printf '%s\n' "$msg" >&2
+    emit "DRIFT state=$stored_head worktree=$actual" 3 "$msg"
+  fi
+fi
+
+base="$(awk '/^Base:[[:space:]]/ {print $2; exit}' "$plan" 2>/dev/null || true)"
+[ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan"
+plan_files=()
+while IFS= read -r p || [ -n "$p" ]; do
+  [ -n "$p" ] || continue
+  plan_files+=("$p")
+done < <(awk '/^## Files([[:space:]]|$)/{f=1;next} f&&/^## /{exit} f' "$plan" | grep -o '`[^`]*`' | tr -d '`' | grep -v '^$' || true)
+if [ "${#plan_files[@]}" -gt 0 ]; then
+  stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${plan_files[@]}" 2>"$tmpd/git-err")" || {
+    emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+  }
+  if [ -n "$stat_out" ]; then
+    n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${plan_files[@]}" 2>/dev/null | wc -l | tr -d ' ')"
+    emit "STALE n=$n base=$base" 1 "$stat_out"
+  fi
+fi
+
+# The lane, then the PR it leaves: its number and head from gh pr list.
+if [ "$from" = lane ]; then
+  require_keys closing workflow_doc
+  closing="$(tkt get closing)"
+  gate_cmd="$("$plangate" "$plan" 2>"$tmpd/pg-err")" || emit "PRECONDITION missing=gate" 2 "$(cat "$tmpd/pg-err")"
+  attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
+  lane_args=(--slot lane --template "$lane_brief" --gate-from-plan --expect-commits "BASE=$base" "GATE=$gate_cmd" "CLOSING=$closing" "ATTRIBUTION=$attr")
+  if [ -n "$lane_model" ]; then
+    lane_args+=(--model "$lane_model")
+  fi
+  rc=0
+  lane_out="$("$tktjob" "$state" "${lane_args[@]}" 2>"$tmpd/lane-err")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    forward LANE "$lane_out" "$rc" "$tmpd/lane-err"
+  fi
+fi
+
+if [ "$from" != review ]; then
+  pr_json="$(gh pr list --head "$branch" --repo "$repo" --json number,headRefOid 2>/dev/null || true)"
+  pr="$(jq -r '.[0].number // empty' <<<"$pr_json" 2>/dev/null || true)"
+  head="$(jq -r '.[0].headRefOid // empty' <<<"$pr_json" 2>/dev/null || true)"
+  if [ -z "$pr" ] || [ -z "$head" ]; then
+    emit "PRECONDITION missing=pr" 2 "tkt-build: no PR for branch $branch (gh pr list --head $branch --json number,headRefOid)"
+  fi
+  tkt set pr "$pr"
+  tkt set head "$head"
+else
+  require_keys pr head
+  pr="$(tkt get pr)"
+  head="$(tkt get head)"
+  pr_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+  if [ "$pr_head" != "$head" ]; then
+    msg="tkt-build: head drift: state head=$head worktree $worktree HEAD=$head pr $pr head=${pr_head:-unreadable}"
+    printf '%s\n' "$msg" >&2
+    emit "DRIFT state=$head worktree=$head pr=${pr_head:-unreadable}" 3 "$msg"
+  fi
+fi
+
+if [ "$from" != review ]; then
+  rc=0
+  gate_out="$("$tktgate" "$state" --expect-head "$head" 2>"$tmpd/gate-err")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    forward GATE "$gate_out" "$rc" "$tmpd/gate-err"
+  fi
+fi
+
+# The mutant list, when the launcher names the job whose log holds it.
+mutants_file=""
+mutant_count=0
+if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
+  mutants_file="$run/$slug-$issue-mutants-${head:0:12}.txt"
+  : >"$mutants_file"
+  "$ghci" wait "$pr" --job "$mutant_job" --repo "$repo" >/dev/null 2>&1 || true
+  tmp_log="$tmpd/mutant-log"
+  : >"$tmp_log"
+  runs="$(gh run list --repo "$repo" --commit "$head" --limit 5 --json databaseId 2>/dev/null | jq -r '.[].databaseId' 2>/dev/null || true)"
+  for rid in $runs; do
+    jid="$(gh run view "$rid" --repo "$repo" --json jobs 2>/dev/null | jq -r ".jobs[] | select(.name==\"$mutant_job\") | .databaseId" 2>/dev/null | tail -n 1 || true)"
+    if [ -n "$jid" ]; then
+      gh run view "$rid" --repo "$repo" --job "$jid" --log >"$tmp_log" 2>/dev/null || true
+      break
+    fi
+  done
+  grep -E '^[^ ]+\.rs:[0-9]+:[0-9]+: |^mutants in the diff: ' "$tmp_log" >"$mutants_file" || true
+  mutant_count="$(grep -c . "$mutants_file" || true)"
+fi
+
+rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
+om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
+if [ -z "$rm" ]; then
+  emit "PRECONDITION missing=model.review" 2 "tkt-state: missing key: model.review"
+fi
+if [ -z "$om" ]; then
+  emit "PRECONDITION missing=model.overbuild" 2 "tkt-state: missing key: model.overbuild"
+fi
+rc=0
+start_out="$("$reviewpr" start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --spec "$spec" --model "$rm" --overbuild-model "$om" 2>"$tmpd/start-err")" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-err")"
+fi
+rids="$(grep -E '^(standards|spec|overbuild) [^ ]+$' <<<"$start_out" | awk '{print $2}' || true)"
+
+map_note=""
+map_id=""
+map_out="$run/$slug-$issue-map-r0.md"
+if [ "$mutant_count" -gt 0 ]; then
+  map_rc=0
+  map_job_out="$("$tktjob" "$state" --slot map --template "$map_brief" --out-file "$map_out" "MUTANTS=@$mutants_file" 2>"$tmpd/map-err")" || map_rc=$?
+  if [ "$map_rc" -ne 0 ]; then
+    map_note="map failed rc=$map_rc: $(head -n 1 <<<"$map_job_out")"
+  fi
+  map_id="$(sed -n 's/^TKT tkt-job .* id=\([^ ]*\).*/\1/p' <<<"${map_job_out:-}" | head -n 1)"
+fi
+# Unquoted on purpose: rids and map_id are id lists, one watchdog for all.
+# shellcheck disable=SC2086
+"$delegate" watch $rids $map_id >/dev/null 2>&1 || true
+
+findings_file="$run/$slug-$issue-findings-r0.md"
+rc=0
+collect_out="$("$reviewpr" collect $rids --findings-out "$findings_file" 2>"$tmpd/collect-err")" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  emit "REVIEW-INCOMPLETE" "$rc" "$collect_out" "$(tail -n 5 "$tmpd/collect-err")"
+fi
+
+# Each map line the brief marks needs-test or removed joins the findings as a
+# P2 with its CI evidence; caught, exempted and unviable lines stay out.
+merged=0
+if [ -f "$map_out" ]; then
+  hits="$(grep -E '=> (needs-test|removed):' "$map_out" || true)"
+  if [ -n "$hits" ]; then
+    while IFS= read -r mline; do
+      printf 'P2 %s [mutants %s]\n' "$mline" "$mutants_file" >>"$findings_file"
+      merged=$((merged + 1))
+    done <<<"$hits"
+  fi
+fi
+
+p1="$(grep -c '^P1 ' "$findings_file" || true)"
+p2="$(grep -c '^P2 ' "$findings_file" || true)"
+p3="$(grep -c '^P3 ' "$findings_file" || true)"
+n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect_out" || true)"
+
+tkt set reviewed "$head"
+tkt set findings "$findings_file"
+tkt set round 0
+
+# APPROVE needs every axis APPROVE, no open P1 or P2, and no mutant lines: one
+# bad-count sum instead of a conjunction, so a P3 alone never blocks.
+bad=$((3 - n_approve + p1 + p2 + merged))
+approve_digest="$collect_out"
+digest="$(cat "$findings_file")"
+if [ -n "$map_note" ]; then
+  approve_digest="$map_note
+$approve_digest"
+  digest="$map_note
+$digest"
+fi
+if [ "$bad" -eq 0 ]; then
+  emit "APPROVE pr=$pr head=$head findings=$findings_file" 0 "$approve_digest"
+else
+  emit "CHANGES p1=$p1 p2=$p2 p3=$p3 mutants=$merged findings=$findings_file" 1 "$digest"
+fi
