@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# tkt-state: read and write a ticket state file and journal.
+# Usage: tkt-state <state file> <command> [args]
+#   get <key>: print the first value for the key.
+#   list <key>: print every value for the key, one per line.
+#   set <key> <value>: replace every line for the key with one line.
+#   add <key> <value>: append one line for the key.
+#   journal <line>: append a timestamped line to the sibling .journal file.
+#   require <key>...: exit 2 naming the first missing key, exit 0 when all
+#     are present.
+# The state file holds one key=value per line; the key ends at the first =
+# and the value is the rest of the line, so values may hold spaces and =.
+# The file is never sourced. Every write takes a mkdir lock, goes through a
+# temp file in the target's directory, then moves into place. Exit 0 when ok;
+# exit 2 on bad usage, a missing key, a value holding a newline, or a held lock.
+set -euo pipefail
+
+locked=0
+tmpfile=""
+keptfile=""
+
+cleanup() {
+  if [ -n "$tmpfile" ] && [ -e "$tmpfile" ]; then
+    rm -f "$tmpfile"
+  fi
+  if [ -n "$keptfile" ] && [ -e "$keptfile" ]; then
+    rm -f "$keptfile"
+  fi
+  if [ "$locked" = "1" ]; then
+    rm -rf "$lockdir"
+  fi
+}
+trap cleanup EXIT
+
+usage() {
+  echo "usage: tkt-state <state file> <command> [args]" >&2
+  exit 2
+}
+
+[ $# -ge 2 ] || usage
+state="$1"
+cmd="$2"
+shift 2
+lockdir="$state.lock"
+
+# A key names one key=value line, so it holds no = and no newline.
+check_key() {
+  case "$1" in
+    ""|*=*|*$'\n'*)
+      usage
+      ;;
+  esac
+}
+
+# A value is one line, so it holds no newline.
+reject_newline() {
+  case "$1" in
+    *$'\n'*)
+      echo "tkt-state: value contains a newline" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# Split a state line into prefix/rest at the first =; a line without = holds
+# no value. Globals: prefix, rest.
+split_line() {
+  case "$1" in
+    *=*)
+      prefix="${1%%=*}"
+      rest="${1#*=}"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# Print the first value for the key; return 1 when the key is missing.
+state_get() {
+  [ -f "$state" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    if split_line "$line" && [ "$prefix" = "$1" ]; then
+      printf '%s\n' "$rest"
+      return 0
+    fi
+  done <"$state"
+  return 1
+}
+
+# Print every value for the key, one per line; a missing key prints nothing.
+state_list() {
+  [ -f "$state" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if split_line "$line" && [ "$prefix" = "$1" ]; then
+      printf '%s\n' "$rest"
+    fi
+  done <"$state"
+  return 0
+}
+
+# Take the mkdir lock for a write. A held lock exits 2 naming the pid the
+# lock's holder stored; only a lock this process took is removed on exit.
+take_lock() {
+  if mkdir "$lockdir" 2>/dev/null; then
+    locked=1
+    printf '%s\n' "$$" >"$lockdir/pid"
+  else
+    if [ -d "$lockdir" ]; then
+      pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
+      if [ -n "$pid" ]; then
+        echo "tkt-state: state locked by pid $pid" >&2
+      else
+        echo "tkt-state: state locked" >&2
+      fi
+    else
+      echo "tkt-state: cannot lock $state" >&2
+    fi
+    exit 2
+  fi
+}
+
+# Stage a rewrite of the target file: copy what exists into a temp file in
+# the target's directory. Globals: tmpfile.
+stage() {
+  dir="$(dirname "$1")"
+  tmpfile="$(mktemp "$dir/.tkt-state.XXXXXX")"
+  if [ -f "$1" ]; then
+    cat "$1" >"$tmpfile"
+  fi
+}
+
+case "$cmd" in
+  get)
+    [ $# -eq 1 ] || usage
+    check_key "$1"
+    if state_get "$1"; then
+      exit 0
+    else
+      echo "tkt-state: missing key: $1" >&2
+      exit 2
+    fi
+    ;;
+  list)
+    [ $# -eq 1 ] || usage
+    check_key "$1"
+    state_list "$1"
+    ;;
+  set)
+    [ $# -eq 2 ] || usage
+    check_key "$1"
+    reject_newline "$2"
+    take_lock
+    stage "$state"
+    keptfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
+    while IFS= read -r line || [ -n "$line" ]; do
+      if split_line "$line" && [ "$prefix" = "$1" ]; then
+        continue
+      fi
+      printf '%s\n' "$line" >>"$keptfile"
+    done <"$tmpfile"
+    printf '%s=%s\n' "$1" "$2" >>"$keptfile"
+    mv "$keptfile" "$state"
+    keptfile=""
+    rm -f "$tmpfile"
+    tmpfile=""
+    ;;
+  add)
+    [ $# -eq 2 ] || usage
+    check_key "$1"
+    reject_newline "$2"
+    take_lock
+    stage "$state"
+    printf '%s=%s\n' "$1" "$2" >>"$tmpfile"
+    mv "$tmpfile" "$state"
+    tmpfile=""
+    ;;
+  journal)
+    [ $# -eq 1 ] || usage
+    reject_newline "$1"
+    take_lock
+    journal="${state%.state}.journal"
+    stage "$journal"
+    stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s %s\n' "$stamp" "$1" >>"$tmpfile"
+    mv "$tmpfile" "$journal"
+    tmpfile=""
+    ;;
+  require)
+    [ $# -ge 1 ] || usage
+    for key in "$@"; do
+      check_key "$key"
+      if ! state_get "$key" >/dev/null; then
+        echo "tkt-state: missing key: $key" >&2
+        exit 2
+      fi
+    done
+    ;;
+  *)
+    usage
+    ;;
+esac
