@@ -62,7 +62,9 @@ tkt() {
 emit() {
   local verdict="$1" code="$2" twelve logpath output
   twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
-  logpath="$run/$repo-$issue-tkt-gate-$twelve-$(date +%H%M%S).log"
+  logpath="$(mktemp "$run/$repo-$issue-tkt-gate-$twelve-XXXXXX")"
+  mv "$logpath" "$logpath.log"
+  logpath="$logpath.log"
   output="TKT tkt-gate $verdict log=$logpath
 $digest"
   printf '%s\n' "$output" >"$logpath"
@@ -232,7 +234,9 @@ if [ "$checks_only" -eq 0 ]; then
     env_prefix="$e "
   fi
   script="$run/$repo-$issue-tkt-gate.sh"
-  gatelog="$run/$repo-$issue-tkt-gate-$(date +%s).log"
+  gatelog="$(mktemp "$run/$repo-$issue-tkt-gate-XXXXXX")"
+  mv "$gatelog" "$gatelog.log"
+  gatelog="$gatelog.log"
   write_gate_script "$script" "$gatelog" "$env_prefix" "$gate_cmd" "tkt-gate: the pre-push gate on the remote tip"
   rc=0
   (cd "$worktree" && bash "$script") >/dev/null 2>&1 || rc=$?

@@ -164,6 +164,21 @@ run_gate
 expect_verdict "TKT tkt-gate PASS head=$H log=*" "empty PASS"
 grep -qx "commits=0 merges=0" <<<"$OUT" || fail "empty PASS counts zero commits"
 
+# --- rerun logs: two runs on the same head keep two logs ---
+setup_case rerun-logs
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+run_gate
+[ "$RC" -eq 0 ] || fail "first rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+log1="$(first_line)"; log1="${log1##*log=}"
+run_gate
+[ "$RC" -eq 0 ] || fail "second rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+log2="$(first_line)"; log2="${log2##*log=}"
+[ "$log1" != "$log2" ] || fail "reruns keep two logs"
+[ -f "$log1" ] && [ -f "$log2" ] || fail "both rerun logs exist"
+
 # --- TIP: a local commit the origin never saw runs no gate ---
 setup_case tip-unpushed
 write_plan
