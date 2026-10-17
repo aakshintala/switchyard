@@ -7,7 +7,7 @@ Failed CI is evidence. Classify it before touching code or rerunning anything. T
 
 ### 1. Read
 
-`gh-ci snapshot <pr> --repo <owner/name>` for the head SHA and status, then `gh-ci failures --pr <pr> --repo <owner/name>` for every failed or cancelled job on that head, each failed job with the tail of its failed-step log. Read the digest before opening any raw log, and hand it to the fix job as its evidence. For a mutation-testing job the digest tails one shard: hand on every failed shard's surviving mutants (`gh run view <id> --repo <owner/name> --log-failed | grep -E 'MISSED|TIMEOUT'`). A cancelled job has no log: a newer push or run superseded it, or it hit its job timeout; check which before calling it red.
+Read `tkt-ship`'s digest first when one exists. `gh-ci snapshot <pr> --repo <owner/name>` for the head SHA and status, then `gh-ci failures --pr <pr> --repo <owner/name>` for every failed or cancelled job on that head, each failed job with the tail of its failed-step log. Read the digest before opening any raw log, and hand it to the fix job as its evidence. For a mutation-testing job the digest tails one shard: hand on every failed shard's surviving mutants (`gh run view <id> --repo <owner/name> --log-failed | grep -E 'MISSED|TIMEOUT'`). A cancelled job has no log: a newer push or run superseded it, or it hit its job timeout; check which before calling it red.
 
 Done when every red leg has its failing test or step named.
 
