@@ -32,6 +32,7 @@ printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 if [ -f "$T/gh-fail" ]; then exit 4; fi
 case " \$* " in
   *" lastEditedAt "*) cat "$T/edited"; exit 0 ;;
+  *" pr view "*) cat "$T/prhead"; exit 0 ;;
 esac
 cat "$T/body"
 exit 0
@@ -71,6 +72,7 @@ reset_stub() {
   : >"$T/calls.log"
   rm -f "$T/gh-fail" "$T/sweep-fail" "$T/job-fail"
   printf 'null\n' >"$T/edited"
+  : >"$T/prhead"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
 }
 
@@ -175,6 +177,23 @@ expect_state() {
   grep -q "tkt-start check " "$j" || fail "$1: journal misses check step"
 }
 
+# std_docs: the workflow-doc and extra fixtures every case writes.
+std_docs() {
+  printf 'touch\n' >"$CDIR/wf.md"
+  printf 'extra\n' >"$CDIR/extra.md"
+}
+
+# load_args_without FLAG: ARGS from common_args minus FLAG and its value.
+load_args_without() {
+  ARGS=()
+  skip=0
+  while IFS= read -r line; do
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    if [ "$line" = "$1" ]; then skip=1; continue; fi
+    ARGS+=("$line")
+  done < <(common_args)
+}
+
 # --- new worktree on a current ticket ---
 reset_stub; new_origin current
 FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
@@ -182,7 +201,7 @@ OTHER="$(cmt other.txt two other 2026-02-01T00:00:00+00:00)"
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 load_args
 run_start
 [ "$RC" -eq 0 ] || fail "current: exit $RC"
@@ -210,7 +229,7 @@ FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 git -C "$CLONE" worktree add --no-track -b keepbranch "$WT" origin/main >/dev/null
 printf 'marker\n' >"$WT/marker.txt"
 load_args
@@ -227,7 +246,7 @@ cmt f.txt two change 2026-02-01T00:00:00+00:00
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nfiling commit: %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 load_args
 run_start
 [ "$RC" -eq 1 ] || fail "stale: exit $RC"
@@ -263,7 +282,7 @@ git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
 printf '2026-06-01T00:00:00Z\n' >"$T/edited"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 load_args
 run_start
 [ "$RC" -eq 1 ] || fail "edited: exit $RC"
@@ -278,17 +297,27 @@ run_start
 expect_line1 "PREFLIGHT core=2 out=" oldedit
 case "$OUT" in *"since="*) fail "oldedit: digest must not claim a since check" ;; esac
 
-# --- named file missing at origin/main: preflight ---
+# --- named file missing at origin/main: preflight through the real sweep ---
+# The stub below exits 0 for anything; the real plan-sweep exits 1 on the
+# missing token, which tkt-start must tolerate and still preflight.
 reset_stub; new_origin missing
 FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
+cp "$T/tktbin/plan-sweep" "$T/tktbin/plan-sweep.stub"
+cat >"$T/tktbin/plan-sweep" <<EOF
+#!/usr/bin/env bash
+exec "$SCRIPT_DIR/../bin/plan-sweep" "\$@"
+EOF
+chmod +x "$T/tktbin/plan-sweep"
 load_args
 run_start --files "f.txt, missing.txt"
+mv "$T/tktbin/plan-sweep.stub" "$T/tktbin/plan-sweep"
 [ "$RC" -eq 1 ] || fail "missing: exit $RC"
 expect_line1 "PREFLIGHT core=2 out=" missing
+[ ! -f "$RUN/widget-42-sweep.md" ] || fail "missing: the real sweep writes nothing on unresolved tokens"
 grep -q '^tkt-job|' "$T/calls.log" || fail "missing: tkt-job must run"
 case "$OUT" in *"missing-file:missing.txt"*) ;; *) fail "missing: digest misses the reason" ;; esac
 
@@ -298,7 +327,7 @@ cmt f.txt one filing 2026-01-01T00:00:00+00:00 >/dev/null
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42 with no filing line.\n' >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 load_args
 run_start
 [ "$RC" -eq 1 ] || fail "badfiling: exit $RC"
@@ -320,7 +349,7 @@ cmt f.txt two change 2026-02-01T00:00:00+00:00
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 printf '1. non-blocking -- one\n2. non-blocking -- two\n3. non-blocking -- three\n' >"$T/jobout"
 load_args
 run_start
@@ -335,13 +364,86 @@ cmt f.txt two change 2026-02-01T00:00:00+00:00
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 printf '1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
 load_args
 run_start
 [ "$RC" -eq 1 ] || fail "twocore: exit $RC"
 expect_line1 "PREFLIGHT core=2 out=" twocore
 case "$OUT" in *"nonblocking="*) fail "twocore: nonzero core must not carry nonblocking" ;; esac
+
+# --- stale with no --files: the sweep is skipped, the preflight still runs ---
+reset_stub; new_origin nofiles
+FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
+cmt f.txt two change 2026-02-01T00:00:00+00:00
+git -C "$SEED" push -q origin HEAD:main
+fresh_clone
+printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
+std_docs
+load_args_without --files
+run_start
+[ "$RC" -eq 1 ] || fail "nofiles: exit $RC"
+expect_line1 "PREFLIGHT core=2 out=" nofiles
+grep -q '^tkt-job|' "$T/calls.log" || fail "nofiles: tkt-job must run"
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "nofiles: plan-sweep must be skipped"
+case "$OUT" in *"sweep=none"*) ;; *) fail "nofiles: digest must mark the sweep skipped" ;; esac
+
+# --- backticked core lines count: 1. `core` — parks the ticket ---
+reset_stub; new_origin backtick
+FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
+cmt f.txt two change 2026-02-01T00:00:00+00:00
+git -C "$SEED" push -q origin HEAD:main
+fresh_clone
+printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
+std_docs
+printf '1. `core` — first\n2. plain note\n' >"$T/jobout"
+load_args
+run_start
+[ "$RC" -eq 1 ] || fail "backtick: exit $RC"
+expect_line1 "PREFLIGHT core=1 out=" backtick
+
+# --- stored head drift: exit 3 naming state, worktree and pr heads ---
+reset_stub; new_origin drift
+FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
+git -C "$SEED" push -q origin HEAD:main
+fresh_clone
+printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
+std_docs
+load_args
+run_start
+[ "$RC" -eq 0 ] || fail "driftsetup: exit $RC"
+TKTSTATE="$SCRIPT_DIR/../bin/tkt-state"
+ACTUAL="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKTSTATE" "$(state_path)" set head deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+load_args
+run_start
+[ "$RC" -eq 3 ] || fail "drift: exit $RC"
+expect_line1 "DRIFT state=deadbeef" drift
+case "$OUT" in *"worktree=$ACTUAL"*) ;; *) fail "drift: digest misses the worktree HEAD" ;; esac
+case "$OUT" in *"pr=none"*) ;; *) fail "drift: digest misses the pr head" ;; esac
+case "$OUT" in *CURRENT*) fail "drift: must never print CURRENT" ;; esac
+bash "$TKTSTATE" "$(state_path)" set head "$ACTUAL"
+load_args
+run_start
+[ "$RC" -eq 0 ] || fail "driftmatch: exit $RC"
+expect_line1 "CURRENT " driftmatch
+bash "$TKTSTATE" "$(state_path)" set pr 7
+printf 'baadf00dbaadf00dbaadf00dbaadf00dbaadf00d\n' >"$T/prhead"
+load_args
+run_start
+[ "$RC" -eq 3 ] || fail "prdrift: exit $RC"
+expect_line1 "DRIFT state=$ACTUAL" prdrift
+case "$OUT" in *"pr=baadf00d"*) ;; *) fail "prdrift: digest misses the pr head" ;; esac
+printf '%s\n' "$ACTUAL" >"$T/prhead"
+load_args
+run_start
+[ "$RC" -eq 0 ] || fail "prmatch: exit $RC"
+expect_line1 "CURRENT " prmatch
+printf '1' >"$T/gh-fail"
+load_args
+run_start
+[ "$RC" -eq 2 ] || fail "prunreadable: exit $RC"
+expect_line1 "PRECONDITION pr=unreadable" prunreadable
 
 # --- --no-preflight on a stale ticket: check only, no job, exit 1 ---
 reset_stub; new_origin noflightstale
@@ -350,7 +452,7 @@ cmt f.txt two change 2026-02-01T00:00:00+00:00
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 load_args
 run_start --no-preflight
 [ "$RC" -eq 1 ] || fail "noflightstale: exit $RC"
@@ -359,37 +461,15 @@ expect_logfile noflightstale
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "noflightstale: tkt-job must not run"
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "noflightstale: plan-sweep must not run"
 
-# --- --no-preflight on a current ticket: CURRENT, exit 0 ---
-reset_stub; new_origin noflightcurrent
-FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
-git -C "$SEED" push -q origin HEAD:main
-fresh_clone
-printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
-load_args
-run_start --no-preflight
-[ "$RC" -eq 0 ] || fail "noflightcurrent: exit $RC"
-expect_line1 "CURRENT " noflightcurrent
-[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "noflightcurrent: tkt-job must not run"
-
 # --- missing required flag exits 2 naming it ---
 reset_stub; new_origin usage
 FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 for flag in --run --repo --issue --spec --branch --worktree --workflow-doc --closing; do
-  load_args
-  args=(); skip=0
-  for a in ${ARGS[@]+"${ARGS[@]}"}; do
-    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
-    case "$a" in
-      "$flag") skip=1; continue ;;
-    esac
-    args+=("$a")
-  done
-  ARGS=(${args[@]+"${args[@]}"})
+  load_args_without "$flag"
   run_start
   [ "$RC" -eq 2 ] || fail "usage $flag: exit $RC"
   grep -qF -- "$flag" "$CDIR/stderr" || fail "usage $flag: stderr does not name it"
@@ -410,7 +490,7 @@ FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 printf '1' >"$T/gh-fail"
 load_args
 run_start
@@ -426,7 +506,7 @@ cmt f.txt two change 2026-02-01T00:00:00+00:00
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 printf '1' >"$T/job-fail"
 load_args
 run_start
@@ -441,7 +521,7 @@ cmt f.txt two change 2026-02-01T00:00:00+00:00
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 printf '1' >"$T/sweep-fail"
 load_args
 run_start
@@ -455,7 +535,7 @@ FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 git -C "$CLONE" branch tkt-start origin/main
 load_args
 run_start
@@ -469,7 +549,7 @@ FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 git -C "$CLONE" remote set-url origin "$CDIR/definitely-missing.git"
 load_args
 run_start
@@ -483,7 +563,7 @@ FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
 git -C "$SEED" push -q origin HEAD:main
 fresh_clone
 printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
-printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
+std_docs
 mkdir -p "$RUN"
 mkdir "$RUN/widget-42.state.lock"
 printf '12345\n' >"$RUN/widget-42.state.lock/pid"

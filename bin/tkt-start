@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# tkt-start: create ticket state, cut or reuse the worktree, run the current
-# check, then run the preflight job when the check fails. The current check
-# is the C8 step 3 trio (named files at origin/main, an empty log since the
-# filing commit, the --since form after an edit); a miss means plan-sweep
-# then tkt-job --slot preflight. Failures pass the step's code through and
-# never print CURRENT or core=0.
+# tkt-start: write ticket state, cut or reuse the worktree, run the C8 step 3
+# current check, and on a miss run plan-sweep plus tkt-job --slot preflight.
+# A sweep exit 1 (unresolved tokens, e.g. a missing named file) still runs the
+# preflight; with no --files the sweep is skipped. A stored head that differs
+# from the worktree HEAD or the PR head exits 3 before any state write.
 # Usage: tkt-start --run DIR --repo R --issue N --spec PATH --branch B
 #   --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX]
 #   [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate]
@@ -16,43 +15,29 @@ usage() {
   exit 2
 }
 
-run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; wf=""; closing=""
-env_p=""; extra=""; m_gate=""; mutant=""; files=""; no_preflight=0
+run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
+env=""; extra=""; merge_gate=""; mutant_job=""; files=""; no_preflight=0
 body_has=(); models=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --run) [ $# -ge 2 ] || usage; run="$2"; shift 2 ;;
-    --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2 ;;
-    --issue) [ $# -ge 2 ] || usage; issue="$2"; shift 2 ;;
-    --spec) [ $# -ge 2 ] || usage; spec="$2"; shift 2 ;;
-    --branch) [ $# -ge 2 ] || usage; branch="$2"; shift 2 ;;
-    --worktree) [ $# -ge 2 ] || usage; worktree="$2"; shift 2 ;;
-    --workflow-doc) [ $# -ge 2 ] || usage; wf="$2"; shift 2 ;;
-    --closing) [ $# -ge 2 ] || usage; closing="$2"; shift 2 ;;
-    --env) [ $# -ge 2 ] || usage; env_p="$2"; shift 2 ;;
     --body-has) [ $# -ge 2 ] || usage; body_has+=("$2"); shift 2 ;;
-    --extra) [ $# -ge 2 ] || usage; extra="$2"; shift 2 ;;
-    --merge-gate) [ $# -ge 2 ] || usage; m_gate="$2"; shift 2 ;;
-    --mutant-job) [ $# -ge 2 ] || usage; mutant="$2"; shift 2 ;;
     --model) [ $# -ge 2 ] || usage; models+=("$2"); shift 2 ;;
     --files) [ $# -ge 2 ] || usage; files="${files:+$files,}$2"; shift 2 ;;
     --no-preflight) no_preflight=1; shift ;;
+    --run|--repo|--issue|--spec|--branch|--worktree|--closing|--env|--extra|--merge-gate|--mutant-job|--workflow-doc)
+      [ $# -ge 2 ] || usage; v="${1#--}"; printf -v "${v//-/_}" '%s' "$2"; shift 2 ;;
     --help|-h) usage ;;
     -* ) usage ;;
     *) usage ;;
   esac
 done
-req_flags=(--run --repo --issue --spec --branch --worktree --workflow-doc --closing)
-req_vals=("$run" "$repo" "$issue" "$spec" "$branch" "$worktree" "$wf" "$closing")
-i=0
-while [ "$i" -lt "${#req_flags[@]}" ]; do
-  if [ -z "${req_vals[$i]}" ]; then echo "tkt-start: missing required flag: ${req_flags[$i]}" >&2; exit 2; fi
-  i=$((i + 1))
+for v in run repo issue spec branch worktree workflow_doc closing; do
+  if [ -z "${!v}" ]; then echo "tkt-start: missing required flag: --${v//_/-}" >&2; exit 2; fi
 done
 for m in ${models[@]+"${models[@]}"}; do
   case "$m" in *=*) ;; *) echo "tkt-start: --model needs ROLE=ID: $m" >&2; exit 2 ;; esac
 done
-case "$m_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $m_gate" >&2; exit 2 ;; esac
+case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 tkt_state="$script_dir/tkt-state"
@@ -66,7 +51,6 @@ mkdir -p "$run"
 
 tkt() { "$tkt_state" "$state" "$@"; }
 
-# Verdict line 1 plus at most 40 digest lines, to stdout and the run log.
 emit() {
   local rest="$1" code="$2" log twelve; shift 2
   twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf nohead)"
@@ -89,7 +73,6 @@ fail_step() {
   emit "STEP-FAIL step=$1 rc=$2" "$2" "$msg"
 }
 
-# Probe the shared lock and release it at once; tkt-state locks each write.
 lockdir="$state.lock"
 if ! mkdir "$lockdir" 2>/dev/null; then
   holder="$(cat "$lockdir/pid" 2>/dev/null || true)"
@@ -99,28 +82,37 @@ if ! mkdir "$lockdir" 2>/dev/null; then
 fi
 rmdir "$lockdir"
 
-# Step 1: scalar keys overwrite, list keys only add what is not already there.
-tkt set repo "$repo"
-tkt set issue "$issue"
-tkt set spec "$spec"
-tkt set branch "$branch"
-tkt set worktree "$worktree"
-tkt set run "$run"
-tkt set workflow_doc "$wf"
-tkt set closing "$closing"
-if [ -n "$env_p" ]; then tkt set env "$env_p"; fi
+if stored_head="$(tkt get head 2>/dev/null)"; then
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || printf unknown)"
+  pr_head=""
+  if pr="$(tkt get pr 2>/dev/null)"; then
+    pr_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+    if [ -z "$pr_head" ]; then
+      msg="tkt-start: cannot read PR head: pr=$pr repo=$repo"
+      printf '%s\n' "$msg" >&2
+      emit "PRECONDITION pr=unreadable" 2 "$msg"
+    fi
+  fi
+  if [ "$stored_head" != "$actual" ] || { [ -n "$pr_head" ] && [ "$stored_head" != "$pr_head" ]; }; then
+    msg="tkt-start: head drift: state head=$stored_head worktree $worktree HEAD=$actual pr ${pr:-none} head=${pr_head:-none}"
+    printf '%s\n' "$msg" >&2
+    emit "DRIFT state=$stored_head worktree=$actual pr=${pr_head:-none}" 3 "$msg"
+  fi
+fi
+
+for k in repo issue spec branch worktree run workflow_doc closing; do tkt set "$k" "${!k}"; done
+if [ -n "$env" ]; then tkt set env "$env"; fi
 if [ -n "$extra" ]; then tkt set extra "$extra"; fi
-if [ -n "$m_gate" ]; then tkt set merge_gate "$m_gate"; fi
-if [ -n "$mutant" ]; then tkt set mutant_job "$mutant"; fi
+if [ -n "$merge_gate" ]; then tkt set merge_gate "$merge_gate"; fi
+if [ -n "$mutant_job" ]; then tkt set mutant_job "$mutant_job"; fi
 for b in ${body_has[@]+"${body_has[@]}"}; do
-  if ! tkt list body_has 2>/dev/null | grep -xF -- "$b" >/dev/null; then tkt add body_has "$b"; fi
+  tkt list body_has 2>/dev/null | grep -xF -- "$b" >/dev/null || tkt add body_has "$b"
 done
 for m in ${models[@]+"${models[@]}"}; do
-  if ! tkt list "model.${m%%=*}" 2>/dev/null | grep -xF -- "${m#*=}" >/dev/null; then tkt add "model.${m%%=*}" "${m#*=}"; fi
+  tkt list "model.${m%%=*}" 2>/dev/null | grep -xF -- "${m#*=}" >/dev/null || tkt add "model.${m%%=*}" "${m#*=}"
 done
 tkt journal "tkt-start state repo=$repo issue=$issue branch=$branch"
 
-# Step 2: fetch in this clone, then cut or reuse the worktree.
 rc=0; ferr=""
 ferr="$(git fetch -q origin 2>&1)" || rc=$?
 if [ "$rc" -ne 0 ]; then fail_step fetch "$rc" "$ferr"; fi
@@ -136,7 +128,6 @@ if [ ! -e "$worktree" ]; then
 fi
 tkt journal "tkt-start worktree $worktree $wt_note"
 
-# Step 3: the current check. --files is a comma list shared with plan-sweep.
 fpaths=()
 if [ -n "$files" ]; then
   IFS=',' read -ra parts <<<"$files"
@@ -155,19 +146,14 @@ if [ -z "$stale" ]; then
   rc=0; body=""
   body="$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then fail_step github "$rc" "$body"; fi
-  matches="$(printf '%s\n' "$body" | grep -oE '(Written against|filing commit:) [0-9a-f]{7,40}' || true)"
-  filing="$(printf '%s\n' "$matches" | sed -n '1s/.* //p')"
+  filing="$(printf '%s\n' "$body" | grep -oE '(Written against|filing commit:) [0-9a-f]{7,40}' | sed -n '1s/.* //p' || true)"
   if [ -z "$filing" ] || ! git cat-file -e "$filing^{commit}" 2>/dev/null; then
     stale=1; reason="filing-commit:unreadable"; filing=""
   fi
 fi
 if [ -z "$stale" ]; then
   rc=0; logout=""
-  if [ "${#fpaths[@]}" -gt 0 ]; then
-    logout="$(git log --oneline "$filing..origin/main" -- "${fpaths[@]}" 2>&1)" || rc=$?
-  else
-    logout="$(git log --oneline "$filing..origin/main" 2>&1)" || rc=$?
-  fi
+  logout="$(git log --oneline "$filing..origin/main" -- ${fpaths[@]+"${fpaths[@]}"} 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     stale=1; reason="log:failed"; lognote="failed"
   elif [ -n "$logout" ]; then
@@ -185,11 +171,7 @@ if [ -n "$filing" ]; then
   if [ -n "$edited" ]; then
     if [ -z "$(git log -1 --format=%H --since="$edited" "$filing" 2>/dev/null || true)" ]; then
       rc=0; sincelog=""
-      if [ "${#fpaths[@]}" -gt 0 ]; then
-        sincelog="$(git log --oneline --since="$edited" "$filing..origin/main" -- "${fpaths[@]}" 2>&1)" || rc=$?
-      else
-        sincelog="$(git log --oneline --since="$edited" "$filing..origin/main" 2>&1)" || rc=$?
-      fi
+      sincelog="$(git log --oneline --since="$edited" "$filing..origin/main" -- ${fpaths[@]+"${fpaths[@]}"} 2>&1)" || rc=$?
       if [ "$rc" -ne 0 ]; then
         stale=1; reason="since:failed"; sincenote="since=$edited failed"
       elif [ -n "$sincelog" ]; then
@@ -216,21 +198,19 @@ else
   emit "CURRENT filing=$filing files=${files:-none}" 0 "${dg[@]}"
 fi
 
-# Step 4: preflight, unless --no-preflight already reported the check.
-sweep_out="$run/$namebase-sweep.md"
+sweep_out="none"
 out="$run/$namebase-preflight-out.md"
-rc=0; sweep_txt=""
 if [ "${#fpaths[@]}" -gt 0 ]; then
+  sweep_out="$run/$namebase-sweep.md"
+  rc=0; sweep_txt=""
   sweep_txt="$("$sweep" --cwd "$worktree" --base origin/main --files "$files" --out "$sweep_out" 2>&1)" || rc=$?
-else
-  sweep_txt="$("$sweep" --cwd "$worktree" --base origin/main --out "$sweep_out" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then fail_step plan-sweep "$rc" "$sweep_txt"; fi
 fi
-if [ "$rc" -ne 0 ]; then fail_step plan-sweep "$rc" "$sweep_txt"; fi
 rc=0; job_txt=""
-job_txt="$("$tktjob" "$state" --slot preflight --template "$HOME/.agents/skills/planning/briefs/preflight.md" --out-file "$out" "ISSUE=$issue" "SPEC=$spec" "REPO=$repo" "BASE=$base" "WORKFLOW_DOC=$wf" 2>&1)" || rc=$?
+job_txt="$("$tktjob" "$state" --slot preflight --template "$HOME/.agents/skills/planning/briefs/preflight.md" --out-file "$out" "ISSUE=$issue" "SPEC=$spec" "REPO=$repo" "BASE=$base" "WORKFLOW_DOC=$workflow_doc" 2>&1)" || rc=$?
 if [ "$rc" -ne 0 ]; then fail_step tkt-job "$rc" "$job_txt"; fi
 if [ ! -f "$out" ]; then fail_step tkt-job 1 "no out file: $out"; fi
-core="$(grep -cE '^[0-9]+\. *\**core\b' "$out" || true)"
+core="$(grep -cE '^[0-9]+\. *`?\**core\b' "$out" || true)"
 nb="$(grep -cE '^[0-9]+\. *\**non-blocking\b' "$out" || true)"
 tkt journal "tkt-start preflight core=$core out=$out"
 dg+=("sweep=$sweep_out" "out=$out")
