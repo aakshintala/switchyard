@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# tkt-plan: planning steps 3-5, one Verifier round, post or plan-path set per call.
+# Usage: tkt-plan <state> verify [--extra <file>] [--model <id>] | confirm --edits <file>
+#        tkt-plan <state> post [--part <label>] | set <plan file>
+# State via tkt-state; Verifier and confirm jobs via tkt-job; the checks and
+# post-plan via TKT_BIN. Verdicts: PLAN-OK (0); LINES, STALE, PLAN-CHECK,
+# ROUND-LIMIT, POST-FAIL (1); usage or a missing key (2); bad state (3).
+set -euo pipefail
+
+usage() {
+  echo "usage: tkt-plan <state> verify [--extra <file>] [--model <id>]" >&2
+  echo "       tkt-plan <state> confirm --edits <file>" >&2
+  echo "       tkt-plan <state> post [--part <label>]" >&2
+  echo "       tkt-plan <state> set <plan file>" >&2
+  exit 2
+}
+
+[ $# -ge 2 ] || usage
+state="$1" sub="$2"; shift 2
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+tkt_state="$script_dir/tkt-state"
+bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+tktjob="$bin_dir/tkt-job"
+plancheck="$bin_dir/plan-check"
+plangate="$bin_dir/plan-gate"
+postplan="$bin_dir/post-plan"
+vbrief="$HOME/.agents/skills/planning/briefs/verifier.md"
+cbrief="$HOME/.agents/skills/planning/briefs/confirm.md"
+
+t() { "$tkt_state" "$state" "$@"; }
+
+# Probe the shared lock and release it at once: the tkt-job wait below outlives
+# any lock, and tkt-state locks each write itself.
+lockdir="$state.lock"
+if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"; else
+  pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
+  echo "tkt-plan: state locked${pid:+ by pid $pid}" >&2; exit 2
+fi
+
+t require repo issue run worktree
+repo="$(t get repo)"; issue="$(t get issue)"
+run="$(t get run)"; worktree="$(t get worktree)"
+mkdir -p "$run"
+
+# A stored head the worktree left behind stops the run before it acts.
+if stored="$(t get head 2>/dev/null)"; then
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
+    echo "tkt-plan: cannot read worktree HEAD: $worktree" >&2; exit 2; }
+  if [ "$stored" != "$actual" ]; then
+    echo "tkt-plan: head drift: state $state head=$stored worktree $worktree HEAD=$actual" >&2
+    exit 3
+  fi
+fi
+
+tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-plan.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+
+# emit VERDICT EXIT [DIGEST]: one TKT line plus digest to the per-run log and
+# stdout, journaled.
+emit() {
+  verdict="$1"; ec="$2"; shift 2
+  twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
+  logpath="$run/$repo-$issue-tkt-plan-$twelve-$(date +%H%M%S).log"
+  { printf 'TKT tkt-plan %s log=%s\n' "$verdict" "$logpath"
+    [ $# -eq 0 ] || printf '%s\n' "$@"; } >"$logpath"
+  cat "$logpath"
+  t journal "tkt-plan $verdict"
+  exit "$ec"
+}
+
+# plan_base PLAN: the plan's Base line SHA; a plan without one exits 2.
+plan_base() {
+  base="$(awk '/^Base:[[:space:]]/ { print $2; exit }' "$1")"
+  [ -n "$base" ] || { echo "tkt-plan: no Base line in $1" >&2; exit 2; }
+  printf '%s\n' "$base"
+}
+
+# plan_files PLAN: every backticked path under ## Files, one per line.
+plan_files() {
+  awk '/^## Files([[:space:]]|$)/{f=1;next} f&&/^## /{exit} f{print}' "$1" \
+    | grep -o '`[^`]*`' | tr -d '`' | grep -v '^$' || true
+}
+
+# review SLOT TEMPLATE OUT [ARGS]: run one tkt-job round; on its exit 0 set
+# REPORT to the saved report, else pass its verdict through with its digest.
+review() {
+  slot="$1"; tmpl="$2"; out="$3"; shift 3
+  set +e
+  job_out="$("$tktjob" "$state" --slot "$slot" --template "$tmpl" --out-file "$out" "$@" 2>&1)"
+  jrc=$?
+  set -e
+  [ "$jrc" -eq 0 ] || {
+    line="$(head -n 1 <<<"$job_out")"
+    words="${line#TKT tkt-job }"
+    emit "${words% log=*}" "$jrc" "$(head -n 38 <<<"$job_out")"
+  }
+  [ -r "$out" ] || { echo "tkt-plan: tkt-job wrote no report: $out" >&2; exit 3; }
+  REPORT="$out"
+}
+
+# verdict_for REPORT: PLAN-OK when the report opens with PLAN OK, else LINES.
+verdict_for() {
+  if [ "$(head -n 1 "$1")" = "PLAN OK" ]; then RV="PLAN-OK out=$1"; REC=0
+  else RV="LINES n=$(wc -l <"$1" | tr -d ' ') out=$1"; REC=1; fi
+}
+
+do_verify() {
+  extra=""; model=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --extra) [ $# -ge 2 ] || usage; extra="$2"; shift 2 ;;
+      --model) [ $# -ge 2 ] || usage; model="$2"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  t require plan
+  plan="$(t get plan)"
+  [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
+  base="$(plan_base "$plan")"
+  files=(); nfiles=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    files+=("$p"); nfiles=$((nfiles + 1))
+  done < <(plan_files "$plan")
+  if [ "$nfiles" -gt 0 ]; then
+    set +e
+    stat="$(git -C "$worktree" diff --stat "$base...origin/main" -- ${files[@]+"${files[@]}"} 2>"$tmp")"
+    grc=$?
+    set -e
+    [ "$grc" -eq 0 ] || { cat "$tmp" >&2; exit 2; }
+    if [ -n "$stat" ]; then
+      n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- ${files[@]+"${files[@]}"} | wc -l | tr -d ' ')"
+      emit "STALE n=$n base=$base" 1 "$(head -n 38 <<<"$stat")"
+    fi
+  fi
+  set +e
+  pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")"
+  prc=$?
+  set -e
+  [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
+  if [ "$prc" -eq 1 ]; then
+    emit "PLAN-CHECK n=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n 38 <<<"$pc_out")"
+  fi
+  round="$(t get verifier_round 2>/dev/null || printf '0')"
+  case "$round" in ''|*[!0-9]*) round=0 ;; esac
+  # Two Verifier rounds, then confirm: a third needs a confirm at this round.
+  if [ "$round" -ge 2 ] && [ "$(t get confirmed_for 2>/dev/null || true)" != "$round" ]; then
+    emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan confirm --edits <file>, or send the open lines to triage"
+  fi
+  args=(PLAN="$plan" BASE="$base")
+  if [ -n "$extra" ]; then
+    [ -r "$extra" ] || { echo "tkt-plan: cannot read extra file: $extra" >&2; exit 2; }
+    args+=(EXTRA="@$extra")
+  elif ! t get extra >/dev/null 2>&1; then
+    args+=(EXTRA="")
+  fi
+  [ -z "$model" ] || args+=(--model "$model")
+  review verifier "$vbrief" "$run/$repo-$issue-verifier-out-r$((round + 1)).md" ${args[@]+"${args[@]}"}
+  verdict_for "$REPORT"
+  t set verifier_round "$((round + 1))"
+  emit "$RV" "$REC" "$(head -n 38 "$REPORT")"
+}
+
+do_confirm() {
+  edits=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --edits) [ $# -ge 2 ] || usage; edits="$2"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [ -n "$edits" ] || usage
+  [ -r "$edits" ] || { echo "tkt-plan: cannot read edits file: $edits" >&2; exit 2; }
+  t require plan
+  plan="$(t get plan)"
+  [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
+  base="$(plan_base "$plan")"
+  cmodel="$(t get model.verifier 2>/dev/null)" || {
+    echo "tkt-plan: missing key: model.verifier" >&2; exit 2; }
+  review confirm "$cbrief" "$run/$repo-$issue-confirm-out.md" \
+    PLAN="$plan" BASE="$base" EDITS="@$edits" --model "$cmodel"
+  verdict_for "$REPORT"
+  round="$(t get verifier_round 2>/dev/null || printf '0')"
+  case "$round" in ''|*[!0-9]*) round=0 ;; esac
+  t set confirmed_for "$round"
+  emit "$RV" "$REC" "$(head -n 38 "$REPORT")"
+}
+
+do_post() {
+  part=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --part) [ $# -ge 2 ] || usage; part="$2"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  t require plan
+  plan="$(t get plan)"
+  [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
+  set +e
+  "$plangate" "$plan" >"$tmp" 2>&1
+  grc=$?
+  set -e
+  [ "$grc" -eq 0 ] || emit "POST-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
+  pargs=()
+  [ -z "$part" ] || pargs=(--part "$part")
+  set +e
+  urls="$("$postplan" "$issue" "$plan" --repo "$repo" ${pargs[@]+"${pargs[@]}"} 2>"$tmp")"
+  prc=$?
+  set -e
+  [ "$prc" -eq 0 ] || emit "POST-FAIL reason=post" "$prc" "$(head -n 10 "$tmp")"
+  emit "POSTED urls=$(tr '\n' ',' <<<"$urls" | sed 's/,$//')" 0 "$urls"
+}
+
+do_set() {
+  [ $# -eq 1 ] || usage
+  plan="$1"
+  case "$plan" in /*) ;; *) plan="$PWD/$plan" ;; esac
+  [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
+  t set plan "$plan"
+  t set verifier_round 0
+  t set confirmed_for ""
+  emit "SET plan=$plan" 0 "plan=$plan"
+}
+
+case "$sub" in
+  verify) do_verify "$@" ;;
+  confirm) do_confirm "$@" ;;
+  post) do_post "$@" ;;
+  set) do_set "$@" ;;
+  *) usage ;;
+esac
