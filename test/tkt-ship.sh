@@ -2,8 +2,9 @@
 # Tests for bin/tkt-ship: run ship-pr from state, rerun on 124, digest red CI.
 # Stubs for ship-pr, gh-ci, gh and plan-gate live on a temp TKT_BIN; the stub
 # ship-pr exits per $T/exitcodes (one code per call, last repeats) and prints
-# $T/shiplog to stderr. Real git on throwaway repos for drift and diff flags.
-# HOME and TMPDIR point at temp dirs; nothing touches the network.
+# $T/shiplog to stderr. The gh stub serves $T/prhead for headRefOid queries
+# and $T/ghstate otherwise. Real git on throwaway repos for drift and diff
+# flags. HOME and TMPDIR point at temp dirs; nothing touches the network.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,6 +17,7 @@ fail() {
 }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-ship.XXXXXX")"
+T="$(cd "$T" && pwd)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
@@ -38,7 +40,7 @@ chmod +x "$T/bin/ship-pr"
 
 cat >"$T/bin/gh-ci" <<EOF
 #!/usr/bin/env bash
-printf 'gh-ci|LINES=%s|%s\n' "\${GH_CI_LOG_LINES:-}" "\$*" >>"$T/calls.log"
+printf 'gh-ci|LINES=%s|cwd=%s|%s\n' "\${GH_CI_LOG_LINES:-}" "\$(pwd)" "\$*" >>"$T/calls.log"
 if [ "\${1:-}" = "failures" ]; then
   [ -f "$T/failures-log" ] && cat "$T/failures-log"
   [ ! -f "$T/ghci-fail" ] || exit 1
@@ -50,6 +52,9 @@ chmod +x "$T/bin/gh-ci"
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
+case " \$* " in
+  *" headRefOid "*) cat "$T/prhead"; exit 0 ;;
+esac
 if [ "\${1:-}" = "pr" ]; then cat "$T/ghstate"; fi
 exit 0
 EOF
@@ -62,15 +67,18 @@ reset_stub() {
   rm -f "$T/shiplog" "$T/failures-log" "$T/ghci-fail" "$T/sha" "$T/ghstate" "$T/exitcodes"
   printf '7' >"$T/exitcodes"
   printf 'OPEN' >"$T/ghstate"
+  : >"$T/prhead"
 }
 
-# New case dir with run dir, plain worktree and base state (no head: no drift).
-# Sets CDIR, WT, S.
+# New case dir with run dir, git worktree and base state (head set, PR head
+# matches: no drift). Sets CDIR, WT, S and H.
 setup_case() {
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR/run" "$CDIR/wt"
   WT="$CDIR/wt"
   S="$CDIR/tkt.state"
+  H="$(fresh_repo "$WT")"
+  printf '%s' "$H" >"$T/prhead"
   {
     printf 'repo=%s\n' acme/repo
     printf 'issue=%s\n' 515
@@ -78,6 +86,7 @@ setup_case() {
     printf 'reviewed=%s\n' rev123
     printf 'worktree=%s\n' "$WT"
     printf 'run=%s\n' "$CDIR/run"
+    printf 'head=%s\n' "$H"
   } >"$S"
 }
 
@@ -130,6 +139,7 @@ run_ship
 expect_line1 "MERGED sha=cafef00d1234 " merged
 expect_journal merged MERGED
 expect_logfile merged
+[ ! -e "$S.ship.lock" ] || fail "merged: lock not released"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 41 ] || fail "merged: over 40 digest lines"
 
 # --- flake note on stderr text ---
@@ -159,8 +169,6 @@ expect_line1 "MERGED sha=" retry
 
 # --- CI-FAIL with panics, diff flags and mutant lines ---
 reset_stub; setup_case cifail
-H="$(fresh_repo "$WT")"
-printf 'head=%s\n' "$H" >>"$S"
 printf '1' >"$T/exitcodes"
 printf 'ship-pr: CI failed\n' >"$T/shiplog"
 cat >"$T/failures-log" <<'LOGEOF'
@@ -176,7 +184,7 @@ LOGEOF
 run_ship
 [ "$RC" -eq 1 ] || fail "cifail: exit $RC"
 expect_line1 "CI-FAIL jobs=2 inside-diff=1 mutants=2" cifail
-grep -q 'gh-ci|LINES=300|failures --pr 7' "$T/calls.log" || fail "cifail: gh-ci not called with LINES=300"
+grep -F -q "gh-ci|LINES=300|cwd=$WT|failures --pr 7 --repo acme/repo" "$T/calls.log" || fail "cifail: gh-ci not called with LINES=300, --repo and worktree cwd"
 case "$OUT" in *"job: CI / unit (11)"*) ;; *) fail "cifail: no job name" ;; esac
 case "$OUT" in *"panic [in-diff]: thread 'x' panicked at src/a.go"*) ;; *) fail "cifail: no in-diff panic" ;; esac
 case "$OUT" in *"panic [outside]: thread 'y' panicked at vendor/other.go"*) ;; *) fail "cifail: no outside panic" ;; esac
@@ -222,8 +230,6 @@ expect_line1 "CONFLICT" conflict
 
 # --- patch changed ---
 reset_stub; setup_case patch
-H="$(fresh_repo "$WT")"
-printf 'head=%s\n' "$H" >>"$S"
 printf '4' >"$T/exitcodes"
 run_ship
 [ "$RC" -eq 1 ] || fail "patch: exit $RC"
@@ -253,21 +259,53 @@ run_ship
 [ "$RC" -eq 3 ] || fail "unknown: exit $RC"
 expect_line1 "UNKNOWN rc=7" unknown
 
-# --- missing state key exits 2 naming it ---
+# --- missing state key exits 2 naming it on stdout and stderr ---
 reset_stub; setup_case missingkey
 grep -v '^pr=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
 run_ship
 [ "$RC" -eq 2 ] || fail "missingkey: exit $RC"
+expect_line1 "PRECONDITION missing=pr" missingkey
+grep -q 'missing key: pr' "$CDIR/stderr" || fail "missingkey: stderr does not name pr"
 case "$OUT" in *pr*) ;; *) fail "missingkey: output does not name pr" ;; esac
 
-# --- head drift exits 3 naming both ---
+# --- missing head key exits 2 naming it on stdout and stderr ---
+reset_stub; setup_case nohead
+grep -v '^head=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+run_ship
+[ "$RC" -eq 2 ] || fail "nohead: exit $RC"
+expect_line1 "PRECONDITION missing=head" nohead
+grep -q 'missing key: head' "$CDIR/stderr" || fail "nohead: stderr does not name head"
+
+# --- head drift exits 3 naming all three SHAs on stdout and stderr ---
 reset_stub; setup_case drift
-H="$(fresh_repo "$WT")"
+grep -v '^head=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
 printf 'head=%s\n' dead00000000000000000000000000000000000000 >>"$S"
 run_ship
 [ "$RC" -eq 3 ] || fail "drift: exit $RC"
-case "$OUT" in *dead00000000000000000000000000000000000000*) ;; *) fail "drift: state head not named" ;; esac
-case "$OUT" in *"$H"*) ;; *) fail "drift: worktree HEAD not named" ;; esac
+expect_line1 "DRIFT state=dead00000000000000000000000000000000000000" drift
+case "$OUT" in *"$H"*) ;; *) fail "drift: worktree/PR HEAD not named" ;; esac
+grep -q 'dead00000000000000000000000000000000000000' "$CDIR/stderr" || fail "drift: stderr misses state head"
+grep -q "$H" "$CDIR/stderr" || fail "drift: stderr misses worktree HEAD"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "drift: ship-pr must not run"
+
+# --- PR head drift exits 3 naming all three SHAs ---
+reset_stub; setup_case prdrift
+printf '%s' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' >"$T/prhead"
+run_ship
+[ "$RC" -eq 3 ] || fail "prdrift: exit $RC"
+expect_line1 "DRIFT state=$H worktree=$H pr=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" prdrift
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "prdrift: ship-pr must not run"
+
+# --- held ship lock exits 2 naming the holder's pid ---
+reset_stub; setup_case locked
+mkdir "$S.ship.lock"
+printf '12345\n' >"$S.ship.lock/pid"
+run_ship
+[ "$RC" -eq 2 ] || fail "locked: exit $RC"
+expect_line1 "BUSY holder=12345" locked
+grep -q '12345' "$CDIR/stderr" || fail "locked: stderr does not name pid"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "locked: ship-pr must not run"
+rm -rf "$S.ship.lock"
 
 # --- flags from state reach ship-pr ---
 reset_stub; setup_case flags

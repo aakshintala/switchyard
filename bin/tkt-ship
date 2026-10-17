@@ -11,38 +11,18 @@ tkt_state="$script_dir/tkt-state"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tkt() { "$tkt_state" "$state" "$@"; }
 
-tkt require repo issue pr reviewed worktree run
-repo="$(tkt get repo)"
-issue="$(tkt get issue)"
-pr="$(tkt get pr)"
-reviewed="$(tkt get reviewed)"
-worktree="$(tkt get worktree)"
-run="$(tkt get run)"
-mkdir -p "$run"
-
-stored_head="$(tkt get head 2>/dev/null || true)"
-if [ -n "$stored_head" ]; then
-  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-ship: cannot read worktree HEAD: $worktree" >&2; exit 2; }
-  if [ "$stored_head" != "$actual" ]; then
-    echo "tkt-ship: head drift: state head=$stored_head worktree $worktree HEAD=$actual" >&2
-    exit 3
+# Ship lock: held across the ship-pr run and the digest. It uses its own
+# <state>.ship.lock path so it never nests with tkt-state's <state>.lock
+# (journal writes take that one). Released on every exit path via trap;
+# command-substitution subshells inherit the trap, so only the top shell
+# (BASH_SUBSHELL 0) may release it.
+locked=0
+lockdir="$state.ship.lock"
+cleanup_lock() {
+  if [ "$locked" = "1" ] && [ "${BASH_SUBSHELL:-0}" = "0" ]; then
+    rm -rf "$lockdir"
   fi
-fi
-
-args=("$pr" --repo "$repo" --reviewed "$reviewed" --worktree "$worktree")
-while IFS= read -r b; do
-  [ -n "$b" ] || continue
-  args+=(--body-has "$b")
-done <<<"$(tkt list body_has 2>/dev/null || true)"
-if u="$(tkt get unverified 2>/dev/null)" && [ -n "$u" ]; then
-  args+=(--unverified-fixes "$u")
-fi
-if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then
-  tkt require plan
-  gate_cmd="$("$bin_dir/plan-gate" "$(tkt get plan)")" || exit 2
-  e="$(tkt get env 2>/dev/null || true)"
-  args+=(--gate "${e:+$e }$gate_cmd")
-fi
+}
 
 # Verdict on line 1 plus at most 40 digest lines, to stdout and the run log.
 emit() {
@@ -57,6 +37,75 @@ $(printf '%s\n' "$@" | head -n 40)"
   tkt journal "tkt-ship $verdict"
   exit "$code"
 }
+
+# Run log path for failures before the ship loop assigns one per attempt.
+# tee creates it on first emit; the success path never touches it.
+rdir="$(tkt get run 2>/dev/null || true)"
+[ -n "$rdir" ] || rdir="$(dirname "$state")"
+mkdir -p "$rdir" 2>/dev/null || true
+runlog="$rdir/tkt-ship-early-$(date +%H%M%S)-$$.log"
+
+if ! req_err="$(tkt require repo issue pr reviewed worktree run head 2>&1)"; then
+  printf '%s\n' "$req_err" >&2
+  key="$(printf '%s\n' "$req_err" | sed -n 's/.*missing key: //p' | head -n 1)"
+  [ -n "$key" ] || key="unknown"
+  emit "PRECONDITION missing=$key" 2 "$req_err"
+fi
+repo="$(tkt get repo)"
+issue="$(tkt get issue)"
+pr="$(tkt get pr)"
+reviewed="$(tkt get reviewed)"
+worktree="$(tkt get worktree)"
+run="$(tkt get run)"
+mkdir -p "$run"
+
+stored_head="$(tkt get head)"
+actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
+  msg="tkt-ship: cannot read worktree HEAD: $worktree"
+  printf '%s\n' "$msg" >&2
+  emit "PRECONDITION worktree=unreadable" 2 "$msg"
+}
+pr_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+if [ -z "$pr_head" ]; then
+  msg="tkt-ship: cannot read PR head: pr=$pr repo=$repo"
+  printf '%s\n' "$msg" >&2
+  emit "PRECONDITION pr=unreadable" 2 "$msg"
+fi
+if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
+  msg="tkt-ship: head drift: state head=$stored_head worktree $worktree HEAD=$actual pr $pr head=$pr_head"
+  printf '%s\n' "$msg" >&2
+  emit "DRIFT state=$stored_head worktree=$actual pr=$pr_head" 3 "$msg"
+fi
+
+if mkdir "$lockdir" 2>/dev/null; then
+  locked=1
+  printf '%s\n' "$$" >"$lockdir/pid"
+  trap cleanup_lock EXIT
+else
+  holder="$(cat "$lockdir/pid" 2>/dev/null || true)"
+  [ -n "$holder" ] || holder="unknown"
+  msg="tkt-ship: ship already running (pid $holder): $lockdir"
+  printf '%s\n' "$msg" >&2
+  emit "BUSY holder=$holder" 2 "$msg"
+fi
+
+args=("$pr" --repo "$repo" --reviewed "$reviewed" --worktree "$worktree")
+while IFS= read -r b; do
+  [ -n "$b" ] || continue
+  args+=(--body-has "$b")
+done <<<"$(tkt list body_has 2>/dev/null || true)"
+if u="$(tkt get unverified 2>/dev/null)" && [ -n "$u" ]; then
+  args+=(--unverified-fixes "$u")
+fi
+if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then
+  if ! plan_err="$(tkt require plan 2>&1)"; then
+    printf '%s\n' "$plan_err" >&2
+    emit "PRECONDITION missing=plan" 2 "$plan_err"
+  fi
+  gate_cmd="$("$bin_dir/plan-gate" "$(tkt get plan)")" || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $(tkt get plan)"
+  e="$(tkt get env 2>/dev/null || true)"
+  args+=(--gate "${e:+$e }$gate_cmd")
+fi
 
 # Digest the gh-ci failures section of the run log: per failed job its name,
 # first failing-step line, panic lines flagged against origin/main...head, and
@@ -124,7 +173,7 @@ elif grep -Eq 'gate failed|fails the gate' "$runlog"; then
   emit "GATE-FAIL" 1 "$(tail -n 20 "$runlog")"
 else
   printf '\n--- gh-ci failures ---\n' >>"$runlog"
-  GH_CI_LOG_LINES=300 "$bin_dir/gh-ci" failures --pr "$pr" >>"$runlog" 2>&1 || true
+  (cd "$worktree" && GH_CI_LOG_LINES=300 "$bin_dir/gh-ci" failures --pr "$pr" --repo "$repo" >>"$runlog" 2>&1) || true
   digest="$(ci_digest)"
   emit "CI-FAIL $(tail -n 1 <<<"$digest" | sed 's/^SUMMARY //')" 1 "$(sed '$d' <<<"$digest")"
 fi
