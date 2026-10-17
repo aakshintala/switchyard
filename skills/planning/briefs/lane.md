@@ -17,11 +17,12 @@ Read the plan at `__PLAN__` before anything else, and reread it after any compac
 - Run every command in the foreground, so it ends before your turn does; start no background or detached process. When the gate outlasts one tool call, run the narrowest test set your change reaches in the foreground and leave the full gate to the job-end gate. The pi harness turns a command still running after 30s into a job it manages, which is not a detached process: wait on it with the `jobs` tool, `action: "wait"`, its id and `timeout: 3600`, and repeat until it ends. Don't poll its log; bare `sleep` is blocked.
 - A look or probe task (running the program or a TUI to see what it does) gets 3 probe rounds. Then end with `STATUS: NEEDS_CONTEXT` and a verdict digest: what each round showed and what stays unknown.
 - Run every command in your worktree, each one starting `cd __WORKTREE__ &&`: a shell's working directory can reset between calls, and a build or test run elsewhere lands in another agent's checkout. Read main's version of a file with `git show origin/main:<path>`.
-- The host is macOS: use BSD tool forms, such as `sed -i ''`.
+- Write shell commands that run on both macOS (BSD tools) and Linux (GNU): edit a file with the edit tool or `perl -pi -e`, since `sed -i` takes different arguments on each.
 - Commit each new script under `bin/` as executable: `chmod 755` it, then `git ls-files -s <path>` shows mode `100755`.
 - Mark a deliberate shortcut with a `debt: <ceiling>, <upgrade trigger>` comment. A shortcut that would weaken a rule a doc, spec or ticket states gets no marker: stop and report.
 - Commit your work before any command that discards changes (`git reset --hard`, `git checkout -- <path>`, `git restore`, a rebase). Make a scratch commit, such as one kept as evidence, on a throwaway branch (`git switch -c scratch/<name>`), then switch back to the lane branch and delete the scratch one.
 - Give each new comparison, match guard and `&&`/`||` condition a test that fails when it flips: for a comparison, values at, just below and just above the edge. See each new assert fail against deliberately broken code before you rely on it.
+- A test asserts behaviour: pin a fixture by a tag or by the repo it builds, never by a commit sha, which a rebase rewrites.
 - Give each blocking wait in a test you add (a join, a `recv`, an attempt-count loop) a deadline, so a bug fails the test instead of hanging it.
 - Write comments that state the rule itself, never "ruling N" or "per the plan".
 - When the plan names a Red commit, make it the branch's first commit, holding only those files.

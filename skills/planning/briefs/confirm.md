@@ -1,6 +1,6 @@
 Confirm the round-2 edits to this plan for issue #__ISSUE__ in __REPO__. Do not edit anything. Do not delegate further.
 
-Read each file the edits below cite, at __BASE__, in your working directory. You check by reading and searching code; the lane builds and runs the Gate, so your report needs no build or test output. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call.
+Read each file the edits below cite, at __BASE__, in your working directory. You check by reading and searching code; the lane builds and runs the Gate, so your report needs no build or test output. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call, and read the pack (`__PACK__`) before any of them.
 
 ## Edits
 
