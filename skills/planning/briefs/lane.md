@@ -28,11 +28,11 @@ Read the plan at `__PLAN__` before anything else, and reread it after any compac
 - When the plan names a Red commit, make it the branch's first commit, holding only those files.
 - To rebuild the branch's history, reset to the merge-base (`git reset --soft $(git merge-base HEAD origin/main)`), never to `origin/main` and never with `git checkout <branch> -- .`: both drop main's newer changes.
 - Set work aside with a commit. To compare against main, build main in a throwaway worktree (`git worktree add --detach ../cmp-<branch> origin/main`, then `git worktree remove` it). Only a worktree or branch you created is yours to remove: the shared checkout is never a target of `git worktree remove` or `git branch -D`, and `ship-pr` cleans up your own worktree. The stash stack is shared with every other worktree of the repo, so `git stash` can pop another agent's changes.
-- Before pushing, run the formatter the gate checks with (e.g. `cargo fmt` for `cargo fmt --check`) and commit what it changes, then the gate passes: `__GATE__`. Run each of its commands on its own with output redirected to a file, and read its exit code before the next; a pipe hides the exit code.
+- Before each commit, run the formatter the gate checks with (e.g. `cargo fmt` for `cargo fmt --check`), so no commit holds an unformatted file, then the gate passes before the push: `__GATE__`. Run each of its commands on its own with output redirected to a file, and read its exit code before the next; a pipe hides the exit code.
 - Refer to other issues as `see #N` or `#N's case` in commit messages and PR text. GitHub closes any issue a closing keyword (close, fix, resolve and their forms) precedes, so the only issue reference you write with one is the PR body's closing line.
 - Push the branch. When no PR is open on it, open a draft PR whose title says what the change does, with no issue number (the squash merge appends the PR's own), and whose body starts with `__CLOSING__`. The body holds every line the workflow doc requires in a PR body, the line `__ATTRIBUTION__`, and an `Implemented by: <your model id>` line, and names only the checks that ran, each with its command. Then end the job: whoever started you reads the mutant list once the job that lists it finishes, and waits on the rest of CI.
-__EXTRA__
 
 ## Report
 
 The PR URL and its head SHA, or a failure triage (the step, the command, its output tail), nothing in between. Then **Friction**: up to 3 bullets on what slowed you, what the plan or docs got wrong or left out, and what you would change ("none" is fine). End with a STATUS line.
+__EXTRA__
