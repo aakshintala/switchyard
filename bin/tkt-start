@@ -101,7 +101,7 @@ else tkt journal "tkt-start check CURRENT filing=$filing"; emit "CURRENT filing=
 sweep_out="none"; out="$run/$namebase-preflight-out.md"
 if [ "${#fpaths[@]}" -gt 0 ]; then sweep_out="$run/$namebase-sweep.md"; rc=0; sweep_txt=""
   sweep_txt="$("$sweep" --cwd "$worktree" --base origin/main --files "$files" --out "$sweep_out" 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ]; then case "$rc:$sweep_txt" in 1:*unresolved\ *) ;; *) fail_step plan-sweep "$rc" "$sweep_txt";; esac; fi; fi
+  if [ "$rc" -ne 0 ]; then if [ "$rc" -eq 1 ] && [ -n "$sweep_txt" ] && ! printf '%s\n' "$sweep_txt" | grep -qv '^unresolved '; then :; else fail_step plan-sweep "$rc" "$sweep_txt"; fi; fi; fi
 job_txt="$("$tktjob" "$state" --slot preflight --template "$HOME/.agents/skills/planning/briefs/preflight.md" --out-file "$out" "ISSUE=$issue" "SPEC=$spec" "REPO=$repo" "BASE=$base" "WORKFLOW_DOC=$workflow_doc" 2>&1)" || fail_step tkt-job "$?" "$job_txt"
 [ -f "$out" ] || fail_step tkt-job 1 "no out file: $out"
 core="$(grep -cE '^[0-9]+\. *`?\**core\b' "$out" || true)"; nb="$(grep -cE '^[0-9]+\. *\**non-blocking\b' "$out" || true)"

@@ -44,6 +44,8 @@ cat >"$T/tktbin/plan-sweep" <<EOF
 printf 'plan-sweep|%s\n' "\$*" >>"$T/calls.log"
 if [ -f "$T/sweep-fail" ]; then echo "plan-sweep: boom" >&2; exit 6; fi
 if [ -f "$T/sweep-fail1" ]; then echo "plan-sweep: boom" >&2; exit 1; fi
+if [ -f "$T/sweep-mixed" ]; then printf 'mkdir: cannot create directory: /x\nunresolved path: x\n'; exit 1; fi
+if [ -f "$T/sweep-pure" ]; then printf 'unresolved path: x\nunresolved symbol: y\n'; exit 1; fi
 out=""; prev=""
 for a in "\$@"; do
   if [ "\$prev" = "--out" ]; then out="\$a"; fi
@@ -71,7 +73,7 @@ chmod +x "$T/tktbin/tkt-job"
 # Fresh per-case controls and fixtures.
 reset_stub() {
   : >"$T/calls.log"
-  rm -f "$T/gh-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/job-fail"
+  rm -f "$T/gh-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail"
   printf 'null\n' >"$T/edited"
   : >"$T/prhead"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
@@ -545,6 +547,37 @@ run_start
 expect_line1 "STEP-FAIL step=plan-sweep rc=1" sweepop
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "sweepop: tkt-job must not run after sweep fails"
 case "$OUT" in *CURRENT*) fail "sweepop: must never print CURRENT" ;; esac
+
+# --- a plan-sweep rc 1 mixing a diagnostic with unresolved lines fails ---
+reset_stub; new_origin sweepmixed
+FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
+cmt f.txt two change 2026-02-01T00:00:00+00:00
+git -C "$SEED" push -q origin HEAD:main
+fresh_clone
+printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
+std_docs
+printf '1' >"$T/sweep-mixed"
+load_args
+run_start
+[ "$RC" -eq 1 ] || fail "sweepmixed: exit $RC"
+expect_line1 "STEP-FAIL step=plan-sweep rc=1" sweepmixed
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "sweepmixed: tkt-job must not run after sweep fails"
+case "$OUT" in *CURRENT*) fail "sweepmixed: must never print CURRENT" ;; esac
+
+# --- a plan-sweep rc 1 of only unresolved lines still preflights ---
+reset_stub; new_origin sweeppure
+FILING="$(cmt f.txt one filing 2026-01-01T00:00:00+00:00)"
+cmt f.txt two change 2026-02-01T00:00:00+00:00
+git -C "$SEED" push -q origin HEAD:main
+fresh_clone
+printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
+std_docs
+printf '1' >"$T/sweep-pure"
+load_args
+run_start
+[ "$RC" -eq 1 ] || fail "sweeppure: exit $RC"
+expect_line1 "PREFLIGHT core=2 out=" sweeppure
+grep -q '^tkt-job|' "$T/calls.log" || fail "sweeppure: tkt-job must run"
 
 # --- the real plan-sweep on an unwritable out path exits 1 with no unresolved line ---
 reset_stub; new_origin sweepreal
