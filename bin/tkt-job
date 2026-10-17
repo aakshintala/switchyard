@@ -10,9 +10,10 @@
 # Usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] |
 #   --brief <file> | --resume <job id> --prompt <file>) [--model <id>]
 #   [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]
-# Tools: TKT_BIN holds delegate, fill-brief and plan-gate (default
-# ~/.agents/bin); tkt-state sits next to this script. No --timeout ever reaches
-# delegate watch: the driver's wait owns the bound.
+# Tools: TKT_BIN holds fill-brief and plan-gate (default ~/.agents/bin) and delegate
+# when set; without TKT_BIN, delegate comes from PATH. tkt-state still sits next to
+# the script. No --timeout ever reaches delegate watch: the driver's wait owns
+# the bound.
 set -euo pipefail
 
 usage() {
@@ -71,7 +72,7 @@ fi
 # shellcheck disable=SC1090
 . "$gate_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
-delegate="$bin_dir/delegate"
+if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
 fillbrief="$bin_dir/fill-brief"
 plangate="$bin_dir/plan-gate"
 
@@ -123,6 +124,7 @@ fence_from_plan() {
 
 stored="$(tkt get "job.$slot" 2>/dev/null || true)"
 fresh=0
+reused=0
 jobid=""
 
 if [ -n "$resume" ]; then
@@ -137,6 +139,7 @@ if [ -n "$resume" ]; then
 elif [ -n "$stored" ]; then
   # A stored id never dispatches again: crash-reruns only watch.
   jobid="$stored"
+  reused=1
 else
   { [ -n "$template" ] || [ -n "$brief" ]; } || usage
   { [ -z "$template" ] || [ -z "$brief" ]; } || usage
@@ -347,6 +350,10 @@ $concerns"
 $(tail -n "$take" <<<"$text")"
     fi
   fi
+fi
+
+if [ "$reused" -eq 1 ]; then
+  verdict="$verdict reused=$jobid"
 fi
 
 twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"

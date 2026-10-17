@@ -234,7 +234,7 @@ grep -q "DONE id=stub-1" "$CDIR/tkt.journal" || fail "DONE journals the verdict"
 # A second call re-prints the same verdict without a new dispatch.
 run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 0 ] || fail "re-print exits 0"
-expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS log=*" "re-print"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS reused=stub-1 log=*" "re-print"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "re-print dispatches nothing new"
 
 # --- DONE with no gate and no commits, without --expect-commits ---
@@ -322,7 +322,7 @@ reset_stub
 printf 'job.lane=%s\n' ghost-1 >>"$S"
 run_job --slot lane
 [ "$RC" -eq 3 ] || fail "no record exits 3"
-expect_verdict "TKT tkt-job UNKNOWN id=ghost-1 log=*" "no record"
+expect_verdict "TKT tkt-job UNKNOWN id=ghost-1 reused=ghost-1 log=*" "no record"
 grep -q "^watch|ghost-1$" "$T/stub.log" || fail "no record still watches"
 grep -q "^run|" "$T/stub.log" && fail "no record dispatches nothing"
 
@@ -355,7 +355,7 @@ make_record seeded-9 DONE 0 1 2 0
 printf 'job.lane=%s\n' seeded-9 >>"$S"
 run_job --slot lane
 [ "$RC" -eq 0 ] || fail "rerun exits 0"
-expect_verdict "TKT tkt-job DONE id=seeded-9 head=bbbb commits=1 gate=PASS log=*" "rerun"
+expect_verdict "TKT tkt-job DONE id=seeded-9 head=bbbb commits=1 gate=PASS reused=seeded-9 log=*" "rerun"
 grep -q "^watch|seeded-9$" "$T/stub.log" || fail "rerun watches the stored id"
 grep -q "^run|" "$T/stub.log" && fail "rerun starts no second run"
 
@@ -366,7 +366,7 @@ make_record loop-1 DONE 0 1 2 0 none loop-1
 printf 'job.lane=%s\n' loop-1 >>"$S"
 run_job --slot lane
 [ "$RC" -eq 3 ] || fail "a supersededBy cycle exits 3"
-expect_verdict "TKT tkt-job UNKNOWN id=loop-1 log=*" "cycle"
+expect_verdict "TKT tkt-job UNKNOWN id=loop-1 reused=loop-1 log=*" "cycle"
 
 # --- a template key from neither flags nor state exits 2 naming it ---
 setup_case missing-key
@@ -427,6 +427,17 @@ make_record stub-1 DONE none 0 1 0
 run_job --slot lane --brief "$T/brief.md"
 [ "$RC" -eq 0 ] || fail "--brief exits 0"
 grep -q "prompt=$T/brief.md" "$T/stub.log" || fail "--brief reaches delegate"
+
+# --- with TKT_BIN unset, delegate comes from PATH ---
+setup_case path-delegate
+reset_stub
+mkdir -p "$T/pathbin"
+ln -s "$T/bin/delegate" "$T/pathbin/delegate" || fail "symlink delegate onto PATH"
+make_record stub-1 DONE none 0 1 0
+OUT="$(env -u TKT_BIN PATH="$T/pathbin:$PATH" bash "$TKT" "$S" --slot lane --brief "$T/brief.md" --model test-model 2>"$CDIR/stderr.txt")"; RC=$?
+[ "$RC" -eq 0 ] || fail "PATH delegate exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=0 gate=none log=*" "PATH delegate"
+grep -q "^run|model=test-model|" "$T/stub.log" || fail "PATH delegate dispatches through the PATH stub"
 
 # --- --gate-from-plan writes the gate script; its exit rules, not its echo ---
 setup_case gate-script
