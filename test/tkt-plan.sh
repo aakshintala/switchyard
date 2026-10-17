@@ -80,6 +80,22 @@ printf 'https://github.com/o/r/issues/1#issuecomment-11\nhttps://github.com/o/r/
 EOF
 chmod +x "$T/bin/post-plan"
 
+# Stub plan-sweep: prints the PACK line for --out.
+cat >"$T/bin/plan-sweep" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+printf 'sweep|%s\n' "\$*" >>"$T/stub.log"
+out=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --out) out="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'PACK %s symbols=0 files=0 outside=0\n' "\$out"
+EOF
+chmod +x "$T/bin/plan-sweep"
+
 # Commit FILE with CONTENT in the repo at DIR; prints nothing.
 wcommit() {
   printf '%s' "$3" >"$1/$2"
@@ -250,10 +266,17 @@ bash "$TKT_STATE" "$S" set job.verifier-r1 j-old-1 || fail "seed round 1 job"
 bash "$TKT_STATE" "$S" set job.verifier-r2 j-old-2 || fail "seed round 2 job"
 bash "$TKT_STATE" "$S" set job.confirm j-old-c || fail "seed confirm job"
 printf '# another plan\n' >"$CDIR/other.md"
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/base")"
+  printf '\n## Files\n\n- `f.txt`\n'
+} >"$CDIR/other.md"
 run_plan set "$CDIR/other.md"
 [ "$RC" -eq 0 ] || fail "SET exits 0"
 expect_verdict "TKT tkt-plan SET plan=$CDIR/other.md log=*" "SET"
 [ "$(bash "$TKT_STATE" "$S" get plan)" = "$CDIR/other.md" ] || fail "SET stores the plan path"
+[ "$(bash "$TKT_STATE" "$S" get pack)" = "$CDIR/run/switchyard-518-pack.md" ] || fail "SET stores the pack path"
+grep -q "sweep|.*--plan $CDIR/other.md" "$T/stub.log" || fail "SET refreshes the pack for the plan"
+grep -q "sweep|.*--cwd $WT" "$T/stub.log" || fail "SET sweeps the worktree"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "0" ] || fail "SET resets the round counter"
 [ -z "$(bash "$TKT_STATE" "$S" get confirmed_for)" ] || fail "SET clears the confirm record"
 [ -z "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" ] || fail "SET retires the round 1 job"

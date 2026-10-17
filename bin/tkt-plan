@@ -25,6 +25,7 @@ tktjob="$bin_dir/tkt-job"
 plancheck="$bin_dir/plan-check"
 plangate="$bin_dir/plan-gate"
 postplan="$bin_dir/post-plan"
+plansweep="$bin_dir/plan-sweep"
 vbrief="$HOME/.agents/skills/planning/briefs/verifier.md"
 cbrief="$HOME/.agents/skills/planning/briefs/confirm.md"
 
@@ -222,7 +223,17 @@ do_set() {
   plan="$1"
   case "$plan" in /*) ;; *) plan="$PWD/$plan" ;; esac
   [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
+  base="$(plan_base "$plan")"
+  pack_out="$run/$repo-$issue-pack.md"
+  set +e
+  sweep_out="$("$plansweep" --cwd "$worktree" --base "$base" --plan "$plan" --out "$pack_out" 2>"$tmp")"
+  src=$?
+  set -e
+  [ "$src" -eq 0 ] || { printf '%s\n' "$sweep_out" >&2; cat "$tmp" >&2; exit 2; }
+  pack="$(awk '/^PACK /{print $2; exit}' <<<"$sweep_out")"
+  [ -n "$pack" ] || { echo "tkt-plan: plan-sweep printed no PACK line" >&2; exit 2; }
   t set plan "$plan"
+  t set pack "$pack"
   t set verifier_round 0
   t set confirmed_for ""
   # A new plan must never inherit an old approval: blank every job id this
@@ -230,7 +241,7 @@ do_set() {
   t set job.verifier-r1 ""
   t set job.verifier-r2 ""
   t set job.confirm ""
-  emit "SET plan=$plan" 0 "plan=$plan"
+  emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
 }
 
 case "$sub" in
