@@ -21,7 +21,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-gate.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
-export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 T
+export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null T
 
 # Stub plan-gate: print the canned gate command for the case.
 cat >"$T/bin/plan-gate" <<EOF
