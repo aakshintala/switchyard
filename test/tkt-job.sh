@@ -578,4 +578,17 @@ run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "missing git HEAD exits 0"
 case "$(first_line)" in *nohead*) ;; *) fail "missing git HEAD logs under nohead";; esac
 
+# --- repo as owner/name still lands brief, gate script and log directly in run ---
+setup_case repo-slash
+reset_stub
+make_record stub-1 DONE none 0 1 0
+bash "$TKT_STATE" "$S" set repo owner/name || fail "set repo owner/name"
+printf 'plan=%s\n' "$T/plan.md" >>"$S"
+run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
+[ "$RC" -eq 0 ] || fail "owner/name repo exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ -f "$CDIR/run/name-502-lane-1.md" ] || fail "owner/name repo writes brief directly in run"
+[ -f "$CDIR/run/name-502-gate.sh" ] || fail "owner/name repo writes gate script directly in run"
+ls "$CDIR"/run/name-502-tkt-job-*.log >/dev/null 2>&1 || fail "owner/name repo writes log directly in run"
+[ -z "$(find "$CDIR/run" -mindepth 1 -type d)" ] || fail "owner/name repo creates no subdirectory"
+
 echo "tkt-job: all cases passed"
