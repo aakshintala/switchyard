@@ -453,12 +453,12 @@ grep -q "$H" "$CDIR/stderr.txt" || fail "drift names the worktree HEAD"
 # --- a held lock exits 2 naming the pid, and runs no gate ---
 setup_case locked
 write_plan
-mkdir "$S.lock"
-printf '424242\n' >"$S.lock/pid"
+mkdir "$S.phase"
+printf '424242\n' >"$S.phase/pid"
 run_gate
 [ "$RC" -eq 2 ] || fail "a held lock exits 2"
 grep -q "424242" "$CDIR/stderr.txt" || fail "a held lock names the pid"
 [ ! -f "$T/gate-ran" ] || fail "a held lock runs no gate"
-rm -rf "$S.lock"
+rm -rf "$S.phase"
 
 echo "tkt-gate: all cases passed"

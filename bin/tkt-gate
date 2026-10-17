@@ -74,11 +74,11 @@ $digest"
   exit "$code"
 }
 
-# Probe the shared lock and release it at once: nothing below waits, and
-# tkt-state locks each write itself.
-lockdir="$state.lock"
-if ! mkdir "$lockdir" 2>/dev/null; then
-  pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
+# Hold the phase lock for the whole command: a second run exits 2 naming the
+# holder's pid. Separate from <state>.lock, which tkt-state takes per write.
+phasedir="$state.phase"
+if ! mkdir "$phasedir" 2>/dev/null; then
+  pid="$(cat "$phasedir/pid" 2>/dev/null || true)"
   if [ -n "$pid" ]; then
     echo "tkt-gate: state locked by pid $pid" >&2
   else
@@ -86,7 +86,11 @@ if ! mkdir "$lockdir" 2>/dev/null; then
   fi
   exit 2
 fi
-rmdir "$lockdir"
+printf '%s\n' "$$" >"$phasedir/pid"
+release_phase() {
+  rm -rf "$phasedir"
+}
+trap release_phase EXIT
 
 tkt require repo issue branch worktree run
 repo="$(tkt get repo)"
