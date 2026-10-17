@@ -52,7 +52,13 @@ fi
 [ -f "$file" ] && [ -r "$file" ] \
   || { echo "post-ruling: cannot read file $file" >&2; exit 2; }
 
-# Preconditions before step 1: a missing dir exits 1 with nothing posted.
+# Preconditions before step 1: a missing dir or a bad repo exits 1 with
+# nothing posted.
+name="${repo##*/}"
+[ -n "$name" ] || {
+  echo "post-ruling: bad repo '$repo': want OWNER/NAME" >&2
+  exit 1
+}
 if [ ! -d "$run" ] || [ ! -w "$run" ]; then
   echo "post-ruling: run directory $run is missing or not writable" >&2
   exit 1
@@ -78,11 +84,6 @@ url="$(printf '%s\n' "$comment_out" | tail -n 1)"
 # Step 2: copy the file under a fresh k, one more than the largest
 # existing k for this repo name and issue. Non-numeric suffixes and other
 # issues' copies never move k.
-name="${repo##*/}"
-[ -n "$name" ] || {
-  echo "post-ruling: bad repo '$repo': want OWNER/NAME" >&2
-  exit 1
-}
 k=1
 for f in "$run/$name-$issue-ruling-"*.md; do
   [ -e "$f" ] || continue
