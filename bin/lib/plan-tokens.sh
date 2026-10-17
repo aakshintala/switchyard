@@ -1,5 +1,5 @@
 # plan-tokens: shared token reader, path resolver and Files cover rules,
-# sourced by bin/plan-check, bin/plan-sweep and the later tkt-gate.
+# sourced by bin/plan-check and bin/plan-sweep.
 # Source it from beside the calling script:
 #   lib="$(cd "$(dirname "$0")" && pwd)/lib/plan-tokens.sh"
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.

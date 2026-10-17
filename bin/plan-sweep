@@ -385,9 +385,6 @@ while IFS=$'\t' read -r name title; do
   sec="$work/sec-$sym_n.md"
   head="$work/head-$sym_n.md"
   : >"$sec"; : >"$head"
-  {
-    printf '## Symbol %s\n' "$title"
-  } | tee -a "$sec" >>"$head"
   git -C "$dir" grep -n -I -w -F -e "$name" "$rev" >"$work/hits" 2>/dev/null || true
   : >"$work/defs"; : >"$work/callers"; : >"$work/reex"; : >"$work/pins"
   has_enum=0

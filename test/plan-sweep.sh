@@ -115,6 +115,7 @@ grep -q '^src/a.rs:2:     crate::make_widget();$' "$T/pack-a.md" || fail "a: cal
 grep -q '^src/b.rs:2:     crate::make_widget();$' "$T/pack-a.md" || fail "a: caller b"
 want="$(printf 'src/a.rs caller\nsrc/b.rs caller')"
 [ "$(outside_of "$T/pack-a.md")" = "$want" ] || fail "a: Outside Files exactly two caller lines"
+[ "$(grep -c '^## Symbol make_widget$' "$T/pack-a.md")" = 1 ] || fail "a: one Symbol heading in the full pack"
 
 # b. re-export, and no matches: line without --lang rust
 run --cwd "$R" --base "$BASE" --symbols Shape --files src/shapes.rs --out "$T/pack-b.md"
@@ -198,6 +199,7 @@ grep -q '^src/a.rs caller$' "$T/pack-h.md" || fail "h: Outside kept"
 grep -q '^src/b.rs caller$' "$T/pack-h.md" || fail "h: Outside kept"
 [ "$(grep -c '^src/a.rs:2:' "$T/pack-h.md")" = 0 ] || fail "h: no caller line"
 grep -q '^## Cut$' "$T/pack-h.md" || fail "h: Cut section"
+[ "$(grep -c '^## Symbol make_widget$' "$T/pack-h.md")" = 1 ] || fail "h: one Symbol heading in the compact pack"
 
 # i. unknown token exits 1, writes nothing, leaves an existing file alone
 run --cwd "$R" --base "$BASE" --symbols NoSuchThing --files src/lib.rs --out "$T/pack-i.md"

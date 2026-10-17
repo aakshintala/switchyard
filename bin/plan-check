@@ -62,37 +62,6 @@ problem() {
   FOUND=1
 }
 
-# is_path TOKEN: no spaces, and a `/` or a known extension
-is_path() {
-  case "$1" in
-    *" "*) return 1 ;;
-    */*|*.rs|*.md|*.toml|*.lua|*.json|*.sh|*.yml|*.yaml|*.lock|*.txt|*.snap) return 0 ;;
-  esac
-  return 1
-}
-
-# is_symbol TOKEN: an identifier with `_`, `::` or an uppercase letter after its first character
-is_symbol() {
-  local s="$1" symre='^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$'
-  case "$s" in *"()") s="${s%??}" ;; esac
-  case "$s" in *"{"*) return 1 ;; esac
-  [[ $s =~ $symre ]] || return 1
-  case "$s" in *_*|*::*) return 0 ;; esac
-  [[ ${s:1} =~ [A-Z] ]]
-}
-
-# exempt_new NAME: true when a plan line has the whole word `new`, `removed`, `remove`, `deleted`, `delete` or `example` and a backticked token holding NAME
-# The `example` word exempts a line from check 3 only: check 1 keeps the shorter list.
-exempt_new() {
-  awk -v s="$1" '
-    tolower($0) ~ /(^|[^a-z0-9_])(new|removed|remove|deleted|delete|example)([^a-z0-9_]|$)/ {
-      n = split($0, parts, "`")
-      for (i = 2; i <= n; i += 2)
-        if (parts[i] ~ ("(^|[^A-Za-z0-9_])" s "([^A-Za-z0-9_]|$)")) found = 1
-    }
-    END { exit (found ? 0 : 1) }' "$plan"
-}
-
 # check_path PATH: resolve PATH at REV (resolve_path), then apply checks 1 and 2 to it
 check_path() {
   local p="$1" seg
