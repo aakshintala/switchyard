@@ -151,9 +151,13 @@ grep -q 'inbox-send' "$SSH_LOG" || fail "stub ssh got the command: [$(cat "$SSH_
 # inbox-drain on an empty inbox prints INBOX n=0 and exits 0.
 EMPTYDRAIN="$T/emptydrain"
 mkdir -p "$EMPTYDRAIN"
+printf 'hidden' >"$EMPTYDRAIN/.hidden.md"
+printf 'not markdown' >"$EMPTYDRAIN/note.txt"
 dout="$(bash "$DRAIN" "$EMPTYDRAIN")"; rc=$?
 [ "$rc" = "0" ] || fail "drain on empty inbox exits 0 (got $rc)"
 [ "$dout" = "INBOX n=0" ] || fail "drain on empty inbox prints INBOX n=0: [$dout]"
+[ "$(find "$EMPTYDRAIN" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "2" ] \
+  || fail "drain leaves dotfiles and non-md files alone"
 
 # inbox-drain on a missing dir is not an error.
 dout="$(bash "$DRAIN" "$T/no-such-dir")"; rc=$?
@@ -163,6 +167,7 @@ dout="$(bash "$DRAIN" "$T/no-such-dir")"; rc=$?
 # Bad usage exits 2: no dir, or an unknown argument.
 bash "$DRAIN" >/dev/null 2>&1; [ "$?" = "2" ] || fail "drain with no dir exits 2"
 bash "$DRAIN" "$EMPTYDRAIN" --bogus >/dev/null 2>&1; [ "$?" = "2" ] || fail "drain with unknown arg exits 2"
+bash "$DRAIN" "$EMPTYDRAIN" --count extra >/dev/null 2>&1; [ "$?" = "2" ] || fail "drain with extra args exits 2"
 
 # Two messages drain oldest first, each with its sender and time, body
 # intact (the first body has no trailing newline); both end in read/.
@@ -229,7 +234,7 @@ if [ ! -f "$T/cat-fired" ]; then
   touch "$T/cat-fired"
   PATH="/usr/bin:/bin" printf 'late arrival' | bash "$SEND" "$LBOX" late >/dev/null
 fi
-exec "$REALCAT" "$@"
+exec "$REALCAT" "\$@"
 STUB
 chmod +x "$DRAINSTUB/cat"
 dout="$(PATH="$DRAINSTUB:$PATH" bash "$DRAIN" "$LBOX")"; rc=$?
@@ -251,5 +256,10 @@ printf '%s\n' "$dout2" | grep -q 'late arrival' \
   || fail "next drain prints the late message: [$dout2]"
 [ "$(find "$LBOX" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "0" ] \
   || fail "next drain moves the late file"
+
+# read/ is never listed: a drain with only archived files prints INBOX n=0.
+dout="$(bash "$DRAIN" "$LBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "drain after all moved exits 0 (got $rc)"
+[ "$dout" = "INBOX n=0" ] || fail "read/ files are never listed: [$dout]"
 
 echo "inbox: all cases passed"
