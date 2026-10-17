@@ -430,7 +430,8 @@ while IFS=$'\t' read -r name title; do
   sort -t: -k1,1 -k2,2n "$work/defs" >"$work/defs-s"
   sort -t: -k1,1 -k2,2n "$work/reex" >"$work/reex-s"
   sort "$work/pins" >"$work/pins-s"
-  sort -t: -k1,1 -k2,2n "$work/callers" | head -n 40 >"$work/callers-s"
+  sort -t: -k1,1 -k2,2n "$work/callers" >"$work/callers-sorted"
+  head -n 40 "$work/callers-sorted" >"$work/callers-s"
   {
     printf '## Symbol %s\n' "$title"
     printf 'definitions: %s\n' "$defs_n"
