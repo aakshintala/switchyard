@@ -460,3 +460,14 @@ run_friction --json
 [ "$CODE" = "2" ] || fail "log failure exits 2 (got $CODE): [$OUT]"
 
 echo "ci-friction: all cases passed"
+
+# --- #440: a superseded cancel is cancelled and stays out of design[] ---
+setup superseded
+run_friction --min-lanes 1 --json
+[ "$CODE" = "0" ] || fail "superseded exits 0 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+# The job that ran past its timeout-minutes stays a design timeout; the
+# superseded cancel (well under the bound) does not appear anywhere.
+if grep -q '"cause": "cancelled"' <<<"$OUT"; then
+  fail "cancelled excluded from design: [$OUT]"
+fi
+[ "$(jget "d['design']")" = "[{'cause': 'timeout', 'count': 1, 'lanes': ['#1407']}]" ]
