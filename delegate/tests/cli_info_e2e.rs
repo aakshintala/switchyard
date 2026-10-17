@@ -39,7 +39,7 @@ fn pi_script(fail_model: Option<&str>) -> String {
     // --list-models answers every query with the full bundled pi table; the
     // doctor matches provider/model exactly (and thinking yes for :suffixed
     // ids), so every bundled model resolves.
-    let list = "provider model context max-out thinking images\nopenai-codex gpt-6-astra 272K 128K yes yes\nopenai-codex gpt-6-luna 272K 128K yes yes\nopenai-codex gpt-6.1-sol 272K 128K yes yes\nopencode-go muse-spark-1.3-contributor 1.1M 128K yes yes\nopencode-go glm-5.3-flash 1.1M 128K yes yes";
+    let list = "provider model context max-out thinking images\nopenai gpt-6-astra 272K 128K yes yes\nopenai gpt-6-luna 272K 128K yes yes\nopenai gpt-6.1-sol 272K 128K yes yes\nopencode-go muse-spark-1.3-contributor 1.1M 128K yes yes\nopencode-go glm-5.3-flash 1.1M 128K yes yes";
     format!(
         r#"#!/bin/sh
 case "$1" in
@@ -143,10 +143,10 @@ const SORTED_IDS: [&str; 16] = [
     "fiber/codex/gpt-6-luna",
     "fiber/codex/gpt-6-luna:medium",
     "fiber/opencode-go/muse-spark-1.3-contributor",
-    "openai-codex/gpt-6-astra",
-    "openai-codex/gpt-6-luna:medium",
-    "openai-codex/gpt-6-luna:xhigh",
-    "openai-codex/gpt-6.1-sol",
+    "openai/gpt-6-astra",
+    "openai/gpt-6-luna:medium",
+    "openai/gpt-6-luna:xhigh",
+    "openai/gpt-6.1-sol",
     "opencode-go/glm-5.3-flash",
     "opencode-go/muse-spark-1.3-contributor",
 ];
@@ -283,7 +283,7 @@ fn doctor_warns_on_pi_model_auth_failure() {
     let e = Env::new_with_pi(
         "doctor-pi-warn",
         &agent_script(FULL_LIST),
-        &pi_script(Some("openai-codex/gpt-6.1-sol")),
+        &pi_script(Some("openai/gpt-6.1-sol")),
     );
     let out = e.delegate(&["doctor"], None);
     assert_eq!(
@@ -294,7 +294,7 @@ fn doctor_warns_on_pi_model_auth_failure() {
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.contains("warn  pi: model openai-codex/gpt-6.1-sol auth check failed"),
+        stdout.contains("warn  pi: model openai/gpt-6.1-sol auth check failed"),
         "{stdout}"
     );
     assert!(!stdout.lines().any(|l| l.starts_with("fail")), "{stdout}");

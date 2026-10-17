@@ -849,7 +849,7 @@ fn resume_cross_backend_and_unknown_models_exit_2() {
     let e = Env::new("resume-xb");
     let a = e.run("first");
     e.wait_terminal(&a);
-    for m in ["openai-codex/gpt-6-luna:xhigh", "claude-sonnet-5-5"] {
+    for m in ["openai/gpt-6-luna:xhigh", "claude-sonnet-5-5"] {
         let out = e.resume(&a, &["--model", m], Some("again"));
         assert_eq!(out.status.code(), Some(2), "{m}");
         let err = String::from_utf8_lossy(&out.stderr);

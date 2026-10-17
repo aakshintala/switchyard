@@ -25,7 +25,7 @@ When the pick is a Claude model and you run in a Claude Code session, start it a
 
 At session start, propose a pool per rung from `delegate models` and `~/.agents/bin/quota`, showing each provider's headroom. The owner confirms it. When the owner is unavailable, use the last confirmed pool, step down within the rung when a provider runs low, and report the switch.
 
-A provider's headroom is its remaining quota on its tightest window (session, weekly or monthly): the lowest percent on its line from `~/.agents/bin/quota`. Map providers by backend or prefix: the `cursor` backend, `opencode-go/*`, `claude-*`, and `openai-codex/*`.
+A provider's headroom is its remaining quota on its tightest window (session, weekly or monthly): the lowest percent on its line from `~/.agents/bin/quota`. Map providers by backend or prefix: the `cursor` backend, `opencode-go/*`, `claude-*`, and `openai/*`.
 
 Mechanical jobs (rebase conflicts and compile fixes, formatting and lint fixes, mutant-killing tests, renames, moves, repeated edits) take the cheapest `standard` model; when it fails, the next cheapest. A Claude model that reviews, verifies or diagnoses runs at `:medium`, and `:high` only after it fails twice on one finding. A diagnosis reports the cause and its evidence, and leaves the fix to a lane.
 

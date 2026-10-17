@@ -140,7 +140,7 @@ mod tests {
             },
         );
         models.insert(
-            "openai-codex/gpt-6-luna".into(),
+            "openai/gpt-6-luna".into(),
             ModelEntry {
                 label: "GPT-6 Luna".into(),
                 backend: "pi".into(),
@@ -252,9 +252,9 @@ mod tests {
     #[test]
     fn pi_backend_resolves() {
         let (d, m) = base();
-        let r = resolve_model(Some("openai-codex/gpt-6-luna"), &(d.as_str(), &m)).unwrap();
-        assert_eq!(r.model, "openai-codex/gpt-6-luna");
+        let r = resolve_model(Some("openai/gpt-6-luna"), &(d.as_str(), &m)).unwrap();
+        assert_eq!(r.model, "openai/gpt-6-luna");
         assert_eq!(r.backend, "pi");
-        assert_eq!(r.price, m["openai-codex/gpt-6-luna"].price);
+        assert_eq!(r.price, m["openai/gpt-6-luna"].price);
     }
 }

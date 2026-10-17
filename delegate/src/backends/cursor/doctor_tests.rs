@@ -80,7 +80,7 @@ fn models_config() -> Config {
         },
     );
     models.insert(
-        "openai-codex/gpt-6-luna".into(),
+        "openai/gpt-6-luna".into(),
         ModelEntry {
             label: "GPT-6 Luna".into(),
             backend: "pi".into(),
@@ -325,13 +325,13 @@ fn run_doctor_happy_path() {
     t.insert("about".into(), ok_cmd(&format!("{ABOUT_FIXTURE}\n")));
     t.insert("models".into(), ok_cmd(&format!("{MODELS_FIXTURE}\n")));
     t.insert(
-        "auth check --model openai-codex/gpt-6-luna".into(),
+        "auth check --model openai/gpt-6-luna".into(),
         ok_cmd("authenticated\n"),
     );
     // pi doctor also probes membership via `pi --list-models <model>`.
     t.insert(
         "--list-models gpt-6-luna".into(),
-        ok_cmd("provider model context max-out thinking images\nopenai-codex gpt-6-luna 272K 128K yes yes\n"),
+        ok_cmd("provider model context max-out thinking images\nopenai gpt-6-luna 272K 128K yes yes\n"),
     );
     let run = stub_run(t);
     let cfg = models_config();
@@ -379,13 +379,13 @@ fn run_doctor_checks_pi_auth_and_ignores_claude() {
     t.insert("about".into(), ok_cmd(&format!("{ABOUT_FIXTURE}\n")));
     t.insert("models".into(), ok_cmd("composer-2.5 - Composer 2.5\n"));
     t.insert(
-        "auth check --model openai-codex/gpt-6-luna".into(),
+        "auth check --model openai/gpt-6-luna".into(),
         ok_cmd("authenticated\n"),
     );
     // pi doctor also probes membership via `pi --list-models <model>`.
     t.insert(
         "--list-models gpt-6-luna".into(),
-        ok_cmd("provider model context max-out thinking images\nopenai-codex gpt-6-luna 272K 128K yes yes\n"),
+        ok_cmd("provider model context max-out thinking images\nopenai gpt-6-luna 272K 128K yes yes\n"),
     );
     let run = stub_run(t);
     let mut cfg = models_config();

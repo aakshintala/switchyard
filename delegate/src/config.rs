@@ -391,7 +391,7 @@ mod tests {
         for (id, expected) in [
             ("composer-2.5", vec!["standard"]),
             ("opencode-go/glm-5.3-flash", vec!["standard"]),
-            ("openai-codex/gpt-6-luna:xhigh", vec!["standard", "strong"]),
+            ("openai/gpt-6-luna:xhigh", vec!["standard", "strong"]),
             (
                 "opencode-go/muse-spark-1.3-contributor",
                 vec!["standard", "strong"],
@@ -401,11 +401,11 @@ mod tests {
             ("grok-4.7-high", vec!["strong"]),
             ("grok-4.7-xhigh", vec!["frontier"]),
             ("claude-opus-5-5", vec!["frontier"]),
-            ("openai-codex/gpt-6.1-sol", vec!["frontier"]),
+            ("openai/gpt-6.1-sol", vec!["frontier"]),
         ] {
             assert_eq!(models[id].tiers, expected, "{id}");
         }
-        assert!(models["openai-codex/gpt-6-astra"].tiers.is_empty());
+        assert!(models["openai/gpt-6-astra"].tiers.is_empty());
         assert!(models["claude-fable-5-1"].tiers.is_empty());
     }
 
@@ -434,7 +434,7 @@ mod tests {
             serde_json::json!({
                 "default": "grok-4.7-high",
                 "models": {
-                    "openai-codex/gpt-6-luna": {
+                    "openai/gpt-6-luna": {
                         "label": "GPT-6 Luna",
                         "backend": "pi",
                         "price": { "input": 5, "output": 30, "cacheRead": 0.5, "cacheWrite": 0 }
@@ -452,9 +452,9 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.default, "grok-4.7-high");
         assert!(cfg.models.contains_key("composer-2.5"));
-        assert!(cfg.models.contains_key("openai-codex/gpt-6-luna"));
-        assert_eq!(cfg.models["openai-codex/gpt-6-luna"].backend, "pi");
-        assert_eq!(cfg.price_map["openai-codex/gpt-6-luna"].output, 30.0);
+        assert!(cfg.models.contains_key("openai/gpt-6-luna"));
+        assert_eq!(cfg.models["openai/gpt-6-luna"].backend, "pi");
+        assert_eq!(cfg.price_map["openai/gpt-6-luna"].output, 30.0);
         assert_eq!(cfg.profile.idle_ms, Some(Some(1000.0)));
     }
 

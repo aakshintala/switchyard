@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn fresh_run_mints_a_session_id_and_resume_reuses_it() {
-        let fresh = argv("openai-codex/gpt-6-luna", None, "hi");
+        let fresh = argv("openai/gpt-6-luna", None, "hi");
         assert_eq!(
             &fresh[..6],
             [
@@ -330,7 +330,7 @@ mod tests {
                 "--mode",
                 "json",
                 "--model",
-                "openai-codex/gpt-6-luna",
+                "openai/gpt-6-luna",
                 "--session-id",
             ]
         );
@@ -344,11 +344,11 @@ mod tests {
         );
         assert_eq!(&fresh[7..], ["--", "hi"]);
         // A second fresh run mints a different id.
-        let other = argv("openai-codex/gpt-6-luna", None, "hi");
+        let other = argv("openai/gpt-6-luna", None, "hi");
         assert_ne!(fresh[6], other[6]);
 
         let resume = argv(
-            "openai-codex/gpt-6-luna",
+            "openai/gpt-6-luna",
             Some("afcd8926-430b-4d9a-a552-d7c6d1b900ba"),
             "go",
         );

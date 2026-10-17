@@ -93,9 +93,9 @@ gen_eligible() {
     make_record "$prefix-$(printf '%02d' "$i")" "$model" DONE "true" "$SHA" "$sid" "$cwd"
   done
 }
-gen_eligible "openai-codex/gpt-6.1-sol" sol 20 0
+gen_eligible "openai/gpt-6.1-sol" sol 20 0
 gen_eligible "opencode-go/muse-spark-1.3-contributor" muse 10 0
-gen_eligible "openai-codex/gpt-6-luna:xhigh" luna 5 0
+gen_eligible "openai/gpt-6-luna:xhigh" luna 5 0
 # One muse session whose user content is a plain string, newest of all muse rows.
 make_session "sid-muse-str" "2026-10-01T01:00:00.000Z" "$T/wt/fiber-worktrees/job-str" \
   "String brief in $T/wt/fiber-worktrees/job-str. See $BRIEFS/shared.md.\\n\\n---\\n\\nEnd your final message with STATUS: DONE" string >/dev/null
@@ -103,33 +103,33 @@ make_record "muse-str" "opencode-go/muse-spark-1.3-contributor" DONE "true" "$SH
 
 # --- ineligible jobs, each failing exactly one check ---
 make_session "sid-run" "2026-10-01T00:00:00.000Z" "$T/wt/a" "hi $BRIEFS/shared.md" >/dev/null
-make_record "job-running" "openai-codex/gpt-6.1-sol" RUNNING "true" "$SHA" "sid-run" "$T/wt/a"
+make_record "job-running" "openai/gpt-6.1-sol" RUNNING "true" "$SHA" "sid-run" "$T/wt/a"
 make_session "sid-res" "2026-10-01T00:00:00.000Z" "$T/wt/b" "hi $BRIEFS/shared.md" >/dev/null
-make_record "job-resumed" "openai-codex/gpt-6.1-sol" DONE "true" "$SHA" "sid-res" "$T/wt/b"
+make_record "job-resumed" "openai/gpt-6.1-sol" DONE "true" "$SHA" "sid-res" "$T/wt/b"
 jq '.resumedFrom="older-id"' "$JOBS/job-resumed.json" >"$T/tmp.json" && mv "$T/tmp.json" "$JOBS/job-resumed.json"
 make_session "sid-cl" "2026-10-01T00:00:00.000Z" "$T/wt/c" "hi $BRIEFS/shared.md" >/dev/null
-make_record "job-claude" "openai-codex/gpt-6.1-sol" DONE "true" "$SHA" "sid-cl" "$T/wt/c"
+make_record "job-claude" "openai/gpt-6.1-sol" DONE "true" "$SHA" "sid-cl" "$T/wt/c"
 jq '.resume.backend="claude"' "$JOBS/job-claude.json" >"$T/tmp.json" && mv "$T/tmp.json" "$JOBS/job-claude.json"
 make_session "sid-ng" "2026-10-01T00:00:00.000Z" "$T/wt/d" "hi $BRIEFS/shared.md" >/dev/null
-make_record "job-nogate" "openai-codex/gpt-6.1-sol" DONE "" "$SHA" "sid-ng" "$T/wt/d"
+make_record "job-nogate" "openai/gpt-6.1-sol" DONE "" "$SHA" "sid-ng" "$T/wt/d"
 make_session "sid-nb" "2026-10-01T00:00:00.000Z" "$T/wt/e" "hi $BRIEFS/shared.md" >/dev/null
-make_record "job-nobase" "openai-codex/gpt-6.1-sol" DONE "true" "" "sid-nb" "$T/wt/e"
-make_record "job-noses" "openai-codex/gpt-6.1-sol" DONE "true" "$SHA" "sid-absent" "$T/wt/f"
+make_record "job-nobase" "openai/gpt-6.1-sol" DONE "true" "" "sid-nb" "$T/wt/e"
+make_record "job-noses" "openai/gpt-6.1-sol" DONE "true" "$SHA" "sid-absent" "$T/wt/f"
 make_session "sid-tmp" "2026-10-01T00:00:00.000Z" "/var/folders/x/T/review-pr.run.abc123/wt-review" "hi $BRIEFS/shared.md" >/dev/null
-make_record "job-tempcwd" "openai-codex/gpt-6.1-sol" DONE "true" "$SHA" "sid-tmp" "/var/folders/x/T/review-pr.run.abc123/wt-review"
+make_record "job-tempcwd" "openai/gpt-6.1-sol" DONE "true" "$SHA" "sid-tmp" "/var/folders/x/T/review-pr.run.abc123/wt-review"
 make_session "sid-nr" "2026-10-01T00:00:00.000Z" "/nonexistent/nowhere/xyz" "hi $BRIEFS/shared.md" >/dev/null
-make_record "job-norepo" "openai-codex/gpt-6.1-sol" DONE "true" "$SHA" "sid-nr" "/nonexistent/nowhere/xyz"
+make_record "job-norepo" "openai/gpt-6.1-sol" DONE "true" "$SHA" "sid-nr" "/nonexistent/nowhere/xyz"
 make_session "sid-mb" "2026-10-01T00:00:00.000Z" "$T/wt/g" "hi $BRIEFS/shared.md" >/dev/null
-make_record "job-missingbase" "openai-codex/gpt-6.1-sol" DONE "true" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "sid-mb" "$T/wt/g"
+make_record "job-missingbase" "openai/gpt-6.1-sol" DONE "true" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "sid-mb" "$T/wt/g"
 make_session "sid-bm" "2026-10-01T00:00:00.000Z" "$T/wt/h" "hi /absent/brief.md" >/dev/null
-make_record "job-briefmissing" "openai-codex/gpt-6.1-sol" DONE "true" "$SHA" "sid-bm" "$T/wt/h"
+make_record "job-briefmissing" "openai/gpt-6.1-sol" DONE "true" "$SHA" "sid-bm" "$T/wt/h"
 printf '# new brief\n' >"$BRIEFS/new.md"
 touch -d '2026-11-01T00:00:00Z' "$BRIEFS/new.md"
 make_session "sid-bn" "2026-10-01T00:00:00.000Z" "$T/wt/i" "hi $BRIEFS/new.md" >/dev/null
-make_record "job-briefnewer" "openai-codex/gpt-6.1-sol" DONE "true" "$SHA" "sid-bn" "$T/wt/i"
+make_record "job-briefnewer" "openai/gpt-6.1-sol" DONE "true" "$SHA" "sid-bn" "$T/wt/i"
 # pi-backend model outside the replay set
 make_session "sid-om" "2026-10-01T00:00:00.000Z" "$T/wt/j" "hi $BRIEFS/shared.md" >/dev/null
-make_record "job-othermodel" "openai-codex/gpt-6-astra" DONE "true" "$SHA" "sid-om" "$T/wt/j"
+make_record "job-othermodel" "openai/gpt-6-astra" DONE "true" "$SHA" "sid-om" "$T/wt/j"
 
 # --- select on a missing jobs dir exits 2 ---
 if REPLAY_JOBS_DIR="$T/no-such-dir" bash "$REPLAY" select --out "$T/out-missing" 2>"$T/missing-err.txt"; then
@@ -144,8 +144,8 @@ bash "$REPLAY" select --out "$OUT" >"$T/select-out.txt" || fail "select exits 0"
 [ -f "$OUT/skipped.tsv" ] || fail "select writes skipped.tsv"
 [ "$(wc -l <"$OUT/manifest.tsv")" -eq 30 ] || fail "manifest has 30 rows (got $(wc -l <"$OUT/manifest.tsv"))"
 [ "$(awk -F'\t' '$2=="codex"{c++} END{print c+0}' "$OUT/manifest.tsv")" -eq 21 ] || fail "manifest has 21 codex rows (18 sol + 3 luna)"
-[ "$(grep -c 'openai-codex/gpt-6.1-sol' "$OUT/manifest.tsv")" -eq 18 ] || fail "manifest has 18 sol rows"
-[ "$(grep -c 'openai-codex/gpt-6-luna:xhigh' "$OUT/manifest.tsv")" -eq 3 ] || fail "manifest has 3 luna rows"
+[ "$(grep -c 'openai/gpt-6.1-sol' "$OUT/manifest.tsv")" -eq 18 ] || fail "manifest has 18 sol rows"
+[ "$(grep -c 'openai/gpt-6-luna:xhigh' "$OUT/manifest.tsv")" -eq 3 ] || fail "manifest has 3 luna rows"
 [ "$(grep -c 'muse-spark' "$OUT/manifest.tsv")" -eq 9 ] || fail "manifest has 9 muse rows"
 # quota cut: oldest sol rows (sol-00, sol-01) and oldest muse/luna rows are out
 grep -q $'^sol-00\t' "$OUT/manifest.tsv" && fail "quota cuts oldest sol-00"
@@ -153,12 +153,12 @@ grep -q $'^sol-01\t' "$OUT/manifest.tsv" && fail "quota cuts oldest sol-01"
 grep -q $'^sol-19\t' "$OUT/manifest.tsv" || fail "manifest keeps newest sol-19"
 grep -q $'^muse-str\t' "$OUT/manifest.tsv" || fail "manifest keeps newest muse-str"
 # newest-first within a model: first sol row is sol-19
-first_sol="$(awk -F'\t' '$3=="openai-codex/gpt-6.1-sol"{print $1; exit}' "$OUT/manifest.tsv")"
+first_sol="$(awk -F'\t' '$3=="openai/gpt-6.1-sol"{print $1; exit}' "$OUT/manifest.tsv")"
 [ "$first_sol" = "sol-19" ] || fail "sol rows newest-first (got $first_sol)"
 # manifest columns: job share pi_model fiber_model repo base_sha session cwd started_at
 awk -F'\t' 'NF!=9{print "bad columns: "$0; bad=1} END{exit bad}' "$OUT/manifest.tsv" || fail "manifest has 9 columns"
 grep -q $'^muse-str\tmuse\topencode-go/muse-spark-1.3-contributor\tfiber/opencode-go/muse-spark-1.3-contributor\taakshintala/fiber\t'"$SHA" "$OUT/manifest.tsv" || fail "muse row maps to fiber model"
-grep -q $'^sol-19\tcodex\topenai-codex/gpt-6.1-sol\t\taakshintala/fiber\t'"$SHA" "$OUT/manifest.tsv" || fail "sol row has empty fiber model"
+grep -q $'^sol-19\tcodex\topenai/gpt-6.1-sol\t\taakshintala/fiber\t'"$SHA" "$OUT/manifest.tsv" || fail "sol row has empty fiber model"
 
 # --- every exclusion logged with its reason ---
 for pair in "job-running:still running" "job-resumed:resumed turn" "job-claude:backend" \
@@ -525,7 +525,7 @@ JOBS4="$T/jobs4"; SESS4="$T/sessions4"; OUT4="$T/out4"
 mkdir -p "$JOBS4" "$SESS4"
 SESS_SAVED="$SESS"; SESS="$SESS4"; JOBS_SAVED="$JOBS"; JOBS="$JOBS4"
 make_session "sid-sol1" "2026-10-03T00:00:00.000Z" "$T/wt/sol1" "Sol brief.\\n\\n---\\n\\nEnd STATUS: DONE" >/dev/null
-make_record "sol-only" "openai-codex/gpt-6.1-sol" DONE "true" "$SHA" "sid-sol1" "$T/wt/sol1"
+make_record "sol-only" "openai/gpt-6.1-sol" DONE "true" "$SHA" "sid-sol1" "$T/wt/sol1"
 SESS="$SESS_SAVED"; JOBS="$JOBS_SAVED"
 REPLAY_JOBS_DIR="$JOBS4" REPLAY_PI_SESSIONS="$SESS4" bash "$REPLAY" select --out "$OUT4" --total 30 >/dev/null || fail "select codex tree"
 # cargo runs in the fiber source clone even when the caller is elsewhere
