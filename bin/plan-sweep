@@ -1,0 +1,615 @@
+#!/usr/bin/env bash
+# plan-sweep: write one read-once context pack per ticket: symbol sites, outlines,
+# doc sections and the paths outside a plan's Files.
+# Usage: plan-sweep --cwd DIR --base REV (--plan FILE | --symbols LIST [--files LIST] | --files LIST)
+#                   [--docs FILE#HEADING] [--lang rust] [--max-bytes N] --out FILE
+#        DIR is a git clone of the repo, REV the base commit, LIST a comma list.
+#        In --plan mode the tokens in `## Files`, `## Interfaces` and `## Tasks`
+#        resolve by plan-check's rules (`--plan` reuses its new/removed
+#        exemptions); in `--symbols`/`--files` mode every token that resolves to
+#        nothing exits 1, with no exemptions. `--docs` prints a section verbatim
+#        from `git show REV:FILE`. Reads never touch the worktree.
+#        Per symbol at REV (`git grep -n -w`): definition sites; callers grouped
+#        by file (at most 40 lines per symbol, with the total count); `pub use`
+#        re-exports; `<Name>::` sites grouped by file (`--lang rust`, only for a
+#        name with an `enum` definition); test files and `*.snap` files naming it.
+#        Per file: an outline of `fn`, `struct`, `enum`, `impl`, `mod` and
+#        `#[path]` lines with line numbers, never a body. Outside Files lists
+#        every path a Symbol section names that the Files do not cover, one per
+#        line, with reasons in the order definition,caller,re-export,match,pin.
+#        Doc files and outlined files are never listed there.
+#        Over the `--max-bytes` cap (default 122880) the pack is rebuilt in
+#        compact form: the header, every per-symbol head, the full Outside Files
+#        list and a `## Cut` section saying what was cut. Outside Files is never
+#        cut. Exit 0 writes the pack and prints one PACK line; 1 lists each
+#        unresolved token and writes nothing; 2 is a usage error.
+#        The token reader, path resolver and Files cover rules live in
+#        lib/plan-tokens.sh, sourced below.
+set -euo pipefail
+
+lib="$(cd "$(dirname "$0")" && pwd)/lib/plan-tokens.sh"
+if [ ! -r "$lib" ]; then
+  echo "plan-sweep: cannot read shared lib: $lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$lib"
+
+usage() {
+  echo "usage: plan-sweep --cwd DIR --base REV (--plan FILE | --symbols LIST [--files LIST] | --files LIST) [--docs FILE#HEADING] [--lang rust] [--max-bytes N] --out FILE" >&2
+  exit 2
+}
+
+# trim S: drop leading and trailing spaces and tabs
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:blank:]]*}"}"
+  s="${s%"${s##*[![:blank:]]}"}"
+  printf '%s' "$s"
+}
+
+# nlines FILE: the number of lines in FILE
+nlines() {
+  local n
+  n="$(wc -l <"$1")"
+  n="${n//[[:space:]]/}"
+  printf '%s' "${n:-0}"
+}
+
+UNRESOLVED=""
+SEEN_UNRESOLVED="|"
+
+# add_unresolved KIND VALUE SUFFIX: one `unresolved ...` line, once per token
+add_unresolved() {
+  local key="$1:$2"
+  case "$SEEN_UNRESOLVED" in *"|$key|"*) return 0 ;; esac
+  SEEN_UNRESOLVED="$SEEN_UNRESOLVED$key|"
+  UNRESOLVED="${UNRESOLVED}unresolved $1: $2$3"$'\n'
+}
+
+SYMS=""
+SEEN_SYMS="|"
+
+# add_symbol NAME TITLE: one symbol section per grep name, first title wins
+add_symbol() {
+  case "$SEEN_SYMS" in *"|$1|"*) return 0 ;; esac
+  SEEN_SYMS="$SEEN_SYMS$1|"
+  SYMS="$SYMS$1"$'\t'"$2"$'\n'
+}
+
+# strip_quals LINE: trim, then drop leading pub, pub(...), async, unsafe, extern words
+strip_quals() {
+  local c="$1" rest
+  c="${c#"${c%%[![:blank:]]*}"}"
+  while :; do
+    case "$c" in
+      pub" "*|pub"	"*) c="${c#pub}" ;;
+      pub\(*)
+        rest="${c#pub\(}"
+        case "$rest" in *\)*) rest="${rest#*\)}" ;; *) break ;; esac
+        c="$rest" ;;
+      async" "*|async"	"*|unsafe" "*|unsafe"	"*|extern" "*|extern"	"*) c="${c#*[[:blank:]]}" ;;
+      *) break ;;
+    esac
+    c="${c#"${c%%[![:blank:]]*}"}"
+  done
+  printf '%s' "$c"
+}
+
+# is_reexport LINE: the code starts with `pub use` or `pub(...) use`
+is_reexport() {
+  local c="$1" rest
+  c="${c#"${c%%[![:blank:]]*}"}"
+  case "$c" in
+    "pub use"*)
+      rest="${c#pub use}"
+      case "$rest" in ""|[[:blank:]]*) return 0 ;; esac
+      return 1 ;;
+    pub\(*)
+      rest="${c#pub\(}"
+      case "$rest" in *\)*) rest="${rest#*\)}" ;; *) return 1 ;; esac
+      rest="${rest#"${rest%%[![:blank:]]*}"}"
+      case "$rest" in use|use[[:blank:]]*) return 0 ;; esac
+      return 1 ;;
+  esac
+  return 1
+}
+
+# def_keyword LINE NAME: print the declaring keyword when LINE declares NAME, else nothing
+def_keyword() {
+  local c="$1" name="$2" first rest decl
+  c="$(strip_quals "$c")"
+  case "$c" in [A-Za-z_]*) ;; *) return 0 ;; esac
+  first="${c%%[^A-Za-z0-9_]*}"
+  case "$first" in fn|struct|enum|trait|type|const|mod) ;; *) return 0 ;; esac
+  rest="${c#$first}"
+  rest="${rest#"${rest%%[![:blank:]]*}"}"
+  if [ "$first" = const ]; then
+    case "$rest" in fn[[:blank:]]*|fn) rest="${rest#fn}"; rest="${rest#"${rest%%[![:blank:]]*}"}" ;; esac
+  fi
+  decl="${rest%%[^A-Za-z0-9_]*}"
+  [ -n "$decl" ] || return 0
+  [ "$decl" = "$name" ] || return 0
+  printf '%s' "$first"
+}
+
+# is_pin PATH: print the pin kind (snap or test) when PATH is a pin file, else nothing
+is_pin() {
+  local p="$1" b
+  case "$p" in *.snap) printf 'snap'; return 0 ;; esac
+  case "/$p/" in */test/*|*/tests/*) printf 'test'; return 0 ;; esac
+  b="${p##*/}"
+  case "$b" in test_*|*_test.*) printf 'test'; return 0 ;; esac
+  return 0
+}
+
+# outline_lines PATH: outline lines with numbers for the blob at REV:PATH
+outline_lines() {
+  git -C "$dir" show "$rev:$1" | awk '
+    {
+      line = $0
+      c = line; sub(/^[[:blank:]]+/, "", c)
+      if (c ~ /^#\[path/) { printf "%d: %s\n", NR, line; next }
+      do {
+        n = c
+        sub(/^pub\([^)]*\)[[:blank:]]+/, "", c)
+        sub(/^pub[[:blank:]]+/, "", c)
+        sub(/^(async|unsafe|extern)[[:blank:]]+/, "", c)
+      } while (c != n)
+      if (c ~ /^(fn|struct|enum|impl|mod)([^A-Za-z0-9_]|$)/) printf "%d: %s\n", NR, line
+    }'
+}
+
+# doc_section FILE HEADING: print the section verbatim; exit 1 when it misses
+doc_section() {
+  git -C "$dir" show "$rev:$1" 2>/dev/null | awk -v h="$2" '
+    /^[[:space:]]*```/ { if (insec) print; infence = !infence; next }
+    infence { if (insec) print; next }
+    /^#+[[:blank:]]/ {
+      text = $0; sub(/^#+/, "", text); sub(/^[[:blank:]]/, "", text); sub(/[[:blank:]]+$/, "", text)
+      lvl = 0; tmp = $0
+      while (substr(tmp, lvl + 1, 1) == "#") lvl++
+      if (!insec) {
+        if (text == h) { insec = 1; mylvl = lvl; print }
+        next
+      }
+      if (lvl <= mylvl) exit 0
+      print; next
+    }
+    { if (insec) print }
+    END { exit (insec ? 0 : 1) }'
+}
+
+plan=""
+symbols=""
+files=""
+docs=""
+lang=""
+maxbytes="122880"
+out=""
+plan_given=0
+symbols_given=0
+files_given=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage ;;
+    --cwd) [ $# -ge 2 ] && [ -n "$2" ] || usage; dir="$2"; shift 2 ;;
+    --base) [ $# -ge 2 ] && [ -n "$2" ] || usage; rev="$2"; shift 2 ;;
+    --plan) [ $# -ge 2 ] && [ -n "$2" ] || usage; plan="$2"; plan_given=1; shift 2 ;;
+    --symbols) [ $# -ge 2 ] && [ -n "$2" ] || usage; symbols="$2"; symbols_given=1; shift 2 ;;
+    --files) [ $# -ge 2 ] && [ -n "$2" ] || usage; files="$2"; files_given=1; shift 2 ;;
+    --docs) [ $# -ge 2 ] && [ -n "$2" ] || usage; docs="$docs$2"$'\n'; shift 2 ;;
+    --lang) [ $# -ge 2 ] && [ -n "$2" ] || usage; lang="$2"; shift 2 ;;
+    --max-bytes) [ $# -ge 2 ] && [ -n "$2" ] || usage; maxbytes="$2"; shift 2 ;;
+    --out) [ $# -ge 2 ] && [ -n "$2" ] || usage; out="$2"; shift 2 ;;
+    -*) usage ;;
+    *) usage ;;
+  esac
+done
+[ -n "${dir:-}" ] || usage
+[ -n "${rev:-}" ] || usage
+[ -n "$out" ] || usage
+case "$out" in /*) ;; *) usage ;; esac
+if [ "$plan_given" = 1 ]; then
+  { [ "$symbols_given" = 0 ] && [ "$files_given" = 0 ]; } || usage
+else
+  { [ "$symbols_given" = 1 ] || [ "$files_given" = 1 ]; } || usage
+fi
+case "$lang" in ""|rust) ;; *) usage ;; esac
+case "$maxbytes" in ''|*[!0-9]*) usage ;; esac
+if [ "$maxbytes" -le 0 ]; then usage; fi
+if [ "$plan_given" = 1 ] && [ ! -r "$plan" ]; then usage; fi
+if ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then usage; fi
+if ! git -C "$dir" rev-parse -q --verify "$rev^{commit}" >/dev/null 2>&1; then usage; fi
+
+fullsha="$(git -C "$dir" rev-parse --verify "$rev^{commit}")"
+tree="$(git -C "$dir" ls-tree -r --name-only "$rev")"
+TOPLIST="|$(git -C "$dir" ls-tree --name-only "$rev" | tr '\n' '|')"
+FILES="|"
+GLOBS=""
+AMBIG=""
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/plan-sweep.XXXXXX")"
+tmpfile=""
+cleanup() {
+  [ -n "$tmpfile" ] && rm -f "$tmpfile"
+  rm -rf "$work"
+  return 0
+}
+trap cleanup EXIT
+
+# sweep_plan_token KIND VALUE: the expand_token callback for --plan mode.
+# Files-section paths build the cover set; anything resolving to nothing that
+# is not new-marked (paths) or new/example-marked (symbols) is unresolved.
+# A symbol in Tasks is never reported, but a resolved one still gets a section.
+# CALLED is set so the records loop can spot tokens expand_token dropped.
+sweep_plan_token() {
+  local kind="$1" val="$2" s last seg
+  CALLED=1
+  case "$kind" in glob) return 0 ;; esac
+  case "$kind" in
+    path)
+      resolve_path "$val"
+      case "$RES_KIND" in
+        ambiguous) return 0 ;;
+        found)
+          case "$CUR_SEC" in files) FILES="$FILES$RES|" ;; esac
+          return 0 ;;
+      esac
+      if [ "$CUR_NEW" = 1 ]; then
+        case "$CUR_SEC" in files) FILES="$FILES$val|" ;; esac
+        return 0
+      fi
+      seg="${val%%/*}"
+      case "$TOPLIST" in *"|$seg|"*) ;; *) return 0 ;; esac
+      add_unresolved "path" "$val" " (line $CUR_LN)"
+      return 0 ;;
+    symbol)
+      s="$val"
+      case "$s" in *"()") s="${s%??}" ;; esac
+      last="${s##*::}"
+      if git -C "$dir" grep -q -I -w -F -e "$last" "$rev" 2>/dev/null; then
+        add_symbol "$last" "$val"
+        return 0
+      fi
+      [ "$CUR_SEC" != tasks ] || return 0
+      if exempt_new "$last"; then return 0; fi
+      add_unresolved "symbol" "$val" " (line $CUR_LN)"
+      return 0 ;;
+  esac
+  return 0
+}
+
+# sweep_bare_word TOKEN: an Interfaces token expand_token dropped (no path or
+# symbol shape, like `Shape`) is still a symbol candidate whatever its case:
+# a hit earns a section, a miss is silent (plan-check would report neither).
+sweep_bare_word() {
+  local t="$1" s last
+  if [[ $t =~ $portre ]]; then t="${t%"${BASH_REMATCH[0]}"}"; fi
+  case "$t" in
+    *"<"*|*">"*|*" "*|*"*"*|*"{"*|*"}"*) return 0 ;;
+    /|.|..) return 0 ;;
+  esac
+  case "$t" in .*) case "$t" in */*) ;; *) return 0 ;; esac ;; esac
+  if is_path "$t"; then return 0; fi
+  s="$t"
+  case "$s" in *"()") s="${s%??}" ;; esac
+  last="${s##*::}"
+  [ -n "$last" ] || return 0
+  if git -C "$dir" grep -q -I -w -F -e "$last" "$rev" 2>/dev/null; then
+    add_symbol "$last" "$t"
+  fi
+  return 0
+}
+
+if [ "$plan_given" = 1 ]; then
+  records="$(plan_records "$plan")"
+  while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW CUR_READ tok; do
+    [ -n "$tok" ] || continue
+    case "$CUR_SEC" in files|interfaces|tasks) ;; *) continue ;; esac
+    CALLED=0
+    expand_token "$tok" sweep_plan_token
+    if [ "$CALLED" = 0 ] && [ "$CUR_SEC" = interfaces ]; then
+      sweep_bare_word "$tok"
+    fi
+  done <<<"$records"
+  case "$plan" in
+    /*) mode="plan $plan" ;;
+    *) mode="plan $(cd "$(dirname "$plan")" && pwd)/$(basename "$plan")" ;;
+  esac
+else
+  printf '%s\n' "$symbols" | tr ',' '\n' >"$work/items"
+  while IFS= read -r item; do
+    item="$(trim "$item")"
+    [ -n "$item" ] || continue
+    s="$item"
+    case "$s" in *"()") s="${s%??}" ;; esac
+    last="${s##*::}"
+    [ -n "$last" ] || continue
+    if git -C "$dir" grep -q -I -w -F -e "$last" "$rev" 2>/dev/null; then
+      add_symbol "$last" "$item"
+    else
+      add_unresolved "symbol" "$item" ""
+    fi
+  done <"$work/items"
+  printf '%s\n' "$files" | tr ',' '\n' >"$work/items"
+  while IFS= read -r item; do
+    item="$(trim "$item")"
+    [ -n "$item" ] || continue
+    resolve_path "$item"
+    case "$RES_KIND" in
+      found) FILES="$FILES$RES|" ;;
+      ambiguous) AMBIG="${AMBIG}ambiguous: $item"$'\n' ;;
+      none) add_unresolved "path" "$item" "" ;;
+    esac
+  done <"$work/items"
+  mode="symbols"
+fi
+
+# docs, in argument order, read through git show at the base
+doccount=0
+DOC_SPECS=""
+DOC_PATHS="|"
+while IFS= read -r spec; do
+  [ -n "$spec" ] || continue
+  case "$spec" in *\#*) ;; *) usage ;; esac
+  f="${spec%%\#*}"
+  h="${spec#*\#}"
+  if ! doc_section "$f" "$h" >"$work/doc-$doccount.md" 2>/dev/null; then
+    rm -f "$work/doc-$doccount.md"
+    add_unresolved "doc" "$spec" ""
+    continue
+  fi
+  DOC_SPECS="$DOC_SPECS$spec"$'\n'
+  DOC_PATHS="$DOC_PATHS$f|"
+  doccount=$((doccount + 1))
+done <<<"$docs"
+
+if [ -n "$UNRESOLVED" ]; then
+  printf '%s' "$UNRESOLVED"
+  exit 1
+fi
+
+fullpack="$work/full.md"
+symblocks=""
+symheads=""
+outlineblocks=""
+docblocks=""
+sym_n=0
+file_n=0
+: >"$work/outside-raw"
+
+while IFS=$'\t' read -r name title; do
+  [ -n "$name" ] || continue
+  sym_n=$((sym_n + 1))
+  sec="$work/sec-$sym_n.md"
+  head="$work/head-$sym_n.md"
+  : >"$sec"; : >"$head"
+  git -C "$dir" grep -n -I -w -F -e "$name" "$rev" >"$work/hits" 2>/dev/null || true
+  : >"$work/defs"; : >"$work/callers"; : >"$work/reex"; : >"$work/pins"
+  has_enum=0
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    rest="${g:${#rev}+1}"
+    path="${rest%%:*}"
+    tail="${rest#*:}"
+    lineno="${tail%%:*}"
+    text="${tail#*:}"
+    kind="$(is_pin "$path")"
+    if [ -n "$kind" ]; then
+      printf '%s %s\n' "$path" "$kind" >>"$work/pins"
+      printf '%s\tpin\n' "$path" >>"$work/outside-raw"
+      continue
+    fi
+    if is_reexport "$text"; then
+      printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/reex"
+      printf '%s\tre-export\n' "$path" >>"$work/outside-raw"
+      continue
+    fi
+    kw="$(def_keyword "$text" "$name")"
+    if [ -n "$kw" ]; then
+      printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/defs"
+      printf '%s\tdefinition\n' "$path" >>"$work/outside-raw"
+      [ "$kw" = enum ] && has_enum=1
+      continue
+    fi
+    printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/callers"
+    printf '%s\tcaller\n' "$path" >>"$work/outside-raw"
+  done <"$work/hits"
+  defs_n="$(nlines "$work/defs")"
+  callers_n="$(nlines "$work/callers")"
+  if [ "$callers_n" -gt 0 ]; then
+    caller_files="$(cut -d: -f1 "$work/callers" | sort -u | wc -l)"
+    caller_files="${caller_files//[[:space:]]/}"
+  else
+    caller_files=0
+  fi
+  if [ "$callers_n" -gt 40 ]; then shown=40; else shown="$callers_n"; fi
+  reex_n="$(nlines "$work/reex")"
+  pins_n="$(nlines "$work/pins")"
+  sort -t: -k1,1 -k2,2n "$work/defs" >"$work/defs-s"
+  sort -t: -k1,1 -k2,2n "$work/reex" >"$work/reex-s"
+  sort "$work/pins" >"$work/pins-s"
+  sort -t: -k1,1 -k2,2n "$work/callers" | head -n 40 >"$work/callers-s"
+  {
+    printf '## Symbol %s\n' "$title"
+    printf 'definitions: %s\n' "$defs_n"
+    cat "$work/defs-s"
+  } | tee -a "$sec" >>"$head"
+  {
+    printf 'callers: %s lines in %s files (shown %s)\n' "$callers_n" "$caller_files" "$shown"
+    cat "$work/callers-s"
+  } >>"$sec"
+  printf 'callers: %s lines in %s files (shown %s)\n' "$callers_n" "$caller_files" "$shown" >>"$head"
+  {
+    printf 're-exports: %s\n' "$reex_n"
+    cat "$work/reex-s"
+  } >>"$sec"
+  printf 're-exports: %s\n' "$reex_n" >>"$head"
+  if [ "$lang" = rust ] && [ "$has_enum" = 1 ]; then
+    git -C "$dir" grep -n -I -F -e "$name::" "$rev" >"$work/matches-raw" 2>/dev/null || true
+    : >"$work/matches"
+    while IFS= read -r g; do
+      [ -n "$g" ] || continue
+      rest="${g:${#rev}+1}"
+      mpath="${rest%%:*}"
+      tail="${rest#*:}"
+      mlineno="${tail%%:*}"
+      mtext="${tail#*:}"
+      match=0
+      mrest="$mtext"
+      pat="$name::"
+      while :; do
+        case "$mrest" in *"$pat"*) ;; *) break ;; esac
+        pre="${mrest%%"$pat"*}"
+        if [ -z "$pre" ]; then match=1; break; fi
+        case "$pre" in *[A-Za-z0-9_]) mrest="$pre" ;; *) match=1; break ;; esac
+      done
+      if [ "$match" = 1 ]; then
+        printf '%s:%s: %s\n' "$mpath" "$mlineno" "$mtext" >>"$work/matches"
+        printf '%s\tmatch\n' "$mpath" >>"$work/outside-raw"
+      fi
+    done <"$work/matches-raw"
+    match_n="$(nlines "$work/matches")"
+    if [ "$match_n" -gt 0 ]; then
+      match_files="$(cut -d: -f1 "$work/matches" | sort -u | wc -l)"
+      match_files="${match_files//[[:space:]]/}"
+    else
+      match_files=0
+    fi
+    sort -t: -k1,1 -k2,2n "$work/matches" >"$work/matches-s"
+    {
+      printf 'matches: %s lines in %s files\n' "$match_n" "$match_files"
+      cat "$work/matches-s"
+    } >>"$sec"
+    printf 'matches: %s lines in %s files\n' "$match_n" "$match_files" >>"$head"
+  fi
+  {
+    printf 'pins: %s files\n' "$pins_n"
+    cat "$work/pins-s"
+  } >>"$sec"
+  printf 'pins: %s files\n' "$pins_n" >>"$head"
+  symblocks="$symblocks$sec"$'\n'
+  symheads="$symheads$head"$'\n'
+done <<<"$SYMS"
+
+# outlines, in Files order; only blobs resolve to an outline
+OUTLINED="|"
+while IFS= read -r e; do
+  [ -n "$e" ] || continue
+  case "$e" in *\**) continue ;; esac
+  case "$OUTLINED" in *"|$e|"*) continue ;; esac
+  [ "$(git -C "$dir" cat-file -t "$rev:$e" 2>/dev/null || true)" = blob ] || continue
+  OUTLINED="$OUTLINED$e|"
+  file_n=$((file_n + 1))
+  ob="$work/outline-$file_n.md"
+  {
+    printf '## Outline %s\n' "$e"
+    outline_lines "$e"
+  } >"$ob"
+  outlineblocks="$outlineblocks$ob"$'\n'
+done <<<"$(printf '%s' "${FILES#|}" | tr '|' '\n')"
+
+# docs, in argument order
+docidx=0
+while IFS= read -r spec; do
+  [ -n "$spec" ] || continue
+  db="$work/docblock-$docidx.md"
+  {
+    printf '## Doc %s\n' "$spec"
+    cat "$work/doc-$docidx.md"
+  } >"$db"
+  docblocks="$docblocks$db"$'\n'
+  docidx=$((docidx + 1))
+done <<<"$DOC_SPECS"
+
+# Outside Files: every Symbol-section path the Files do not cover
+sort -u "$work/outside-raw" >"$work/outside-pairs" 2>/dev/null || : >"$work/outside-pairs"
+cut -f1 "$work/outside-pairs" 2>/dev/null | sort -u >"$work/outside-paths" || : >"$work/outside-paths"
+ob="$work/outside.md"
+{
+  printf '## Outside Files\n'
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if covered "$p"; then continue; fi
+    case "$OUTLINED" in *"|$p|"*) continue ;; esac
+    case "$DOC_PATHS" in *"|$p|"*) continue ;; esac
+    reasons=""
+    for r in definition caller re-export match pin; do
+      pair="$(printf '%s\t%s' "$p" "$r")"
+      if grep -qxF -- "$pair" "$work/outside-pairs" 2>/dev/null; then
+        [ -n "$reasons" ] && reasons="$reasons,$r" || reasons="$r"
+      fi
+    done
+    [ -n "$reasons" ] || continue
+    printf '%s %s\n' "$p" "$reasons"
+  done <"$work/outside-paths"
+} >"$ob"
+outside_n="$(($(nlines "$ob") - 1))"
+[ "$outside_n" -ge 0 ] || outside_n=0
+
+{
+  printf '# Pack\n'
+  printf 'Base: %s\n' "$fullsha"
+  printf 'Mode: %s\n' "$mode"
+  if [ -n "$AMBIG" ]; then printf '%s' "$AMBIG"; fi
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    printf '\n'
+    cat "$b"
+  done <<<"$symblocks"
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    printf '\n'
+    cat "$b"
+  done <<<"$outlineblocks"
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    printf '\n'
+    cat "$b"
+  done <<<"$docblocks"
+  printf '\n'
+  cat "$ob"
+} >"$fullpack"
+
+fullbytes="$(wc -c <"$fullpack")"
+fullbytes="${fullbytes//[[:space:]]/}"
+if [ "$fullbytes" -gt "$maxbytes" ]; then
+  cutb="$work/cut.md"
+  {
+    printf '# Pack\n'
+    printf 'Base: %s\n' "$fullsha"
+    printf 'Mode: %s\n' "$mode"
+    if [ -n "$AMBIG" ]; then printf '%s' "$AMBIG"; fi
+    while IFS= read -r b; do
+      [ -n "$b" ] || continue
+      printf '\n'
+      cat "$b"
+    done <<<"$symheads"
+    printf '\n'
+    cat "$ob"
+    printf '\n## Cut\n'
+    printf 'callers, re-export, match and pin lines, outlines, docs: pack was %s bytes, cap %s' "$fullbytes" "$maxbytes"
+  } >"$work/compact.md"
+  compactbytes="$(wc -c <"$work/compact.md")"
+  compactbytes="${compactbytes//[[:space:]]/}"
+  if [ "$compactbytes" -gt "$maxbytes" ]; then
+    printf ' Compact form is %s bytes, still over the cap.\n' "$compactbytes" >>"$work/compact.md"
+  else
+    printf '\n' >>"$work/compact.md"
+  fi
+  final="$work/compact.md"
+else
+  final="$fullpack"
+fi
+
+parent="${out%/*}"
+mkdir -p "$parent"
+tmpfile="$(mktemp "$parent/.plan-sweep.XXXXXX")"
+cat "$final" >"$tmpfile"
+mv "$tmpfile" "$out"
+tmpfile=""
+trap - EXIT
+rm -rf "$work"
+
+printf 'PACK %s symbols=%s files=%s outside=%s\n' "$out" "$sym_n" "$file_n" "$outside_n"

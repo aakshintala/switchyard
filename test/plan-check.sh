@@ -206,4 +206,17 @@ expect_code "--base is not a commit" 2 "$clean" --base nosuchrev --cwd "$R"
 grep -q -- "--cwd DIR" "$T/err.txt" || fail "--base is not a commit: stderr names --cwd DIR"
 expect_code "--cwd is not a repo" 2 "$clean" --cwd "$T/empty"
 
+# 15. the shared lib is sourced from beside the script: a relative-path run
+# from the repo root exits 0, and a copy with no lib/ beside it exits 2.
+out="$(cd "$SCRIPT_DIR/.." && bash bin/plan-check "$clean" --cwd "$R" 2>"$T/err.txt")"; code=$?
+[ "$code" = 0 ] || fail "relative path exits 0, got $code [$out]"
+[ -z "$out" ] || fail "relative path prints nothing"
+[ ! -s "$T/err.txt" ] || fail "relative path: nothing on stderr"
+mkdir -p "$T/nolib"
+cp "$SCRIPT_DIR/../bin/plan-check" "$T/nolib/plan-check"
+out="$(bash "$T/nolib/plan-check" "$clean" --cwd "$R" 2>"$T/err.txt")"; code=$?
+[ "$code" = 2 ] || fail "missing lib exits 2, got $code"
+[ -z "$out" ] || fail "missing lib: nothing on stdout"
+grep -q "lib/plan-tokens.sh" "$T/err.txt" || fail "missing lib: stderr names lib/plan-tokens.sh"
+
 echo "plan-check: all cases passed"
