@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for bin/tkt-plan: one Verifier round, post and plan-path set per call.
-# Stub plan-check, post-plan and tkt-job on a temp TKT_BIN; a symlink there
+# Stub plan-check, post-plan, plan-sweep and tkt-job on a temp TKT_BIN; a symlink there
 # reaches the real plan-gate. Real git on throwaway repos for the stale check.
 # Never starts a real job. Never reads the real $HOME/.agents.
 set -uo pipefail

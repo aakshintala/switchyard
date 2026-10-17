@@ -2,9 +2,8 @@
 # tkt-plan: planning steps 3-5, one Verifier round, post or plan-path set per call.
 # Usage: tkt-plan <state> verify [--extra <file>] [--model <id>] | confirm --edits <file>
 #        tkt-plan <state> post [--part <label>] | set <plan file>
-# State via tkt-state; Verifier and confirm jobs via tkt-job; the checks and
-# post-plan via TKT_BIN. Verdicts: PLAN-OK (0); LINES, STALE, PLAN-CHECK,
-# ROUND-LIMIT, POST-FAIL (1); usage or a missing key (2); bad state (3).
+# Verdicts: PLAN-OK (0); LINES, STALE, PLAN-CHECK, ROUND-LIMIT, POST-FAIL (1);
+# usage or a missing key (2); bad state (3).
 set -euo pipefail
 
 usage() {
@@ -31,8 +30,8 @@ cbrief="$HOME/.agents/skills/planning/briefs/confirm.md"
 
 t() { "$tkt_state" "$state" "$@"; }
 
-# Probe the shared lock and release it at once: the tkt-job wait below outlives
-# any lock, and tkt-state locks each write itself.
+# The tkt-job wait outlives any lock, and tkt-state locks each write itself,
+# so probe the shared lock and release it at once.
 lockdir="$state.lock"
 if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"; else
   pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
@@ -44,7 +43,6 @@ repo="$(t get repo)"; issue="$(t get issue)"
 run="$(t get run)"; worktree="$(t get worktree)"
 mkdir -p "$run"
 
-# A stored head the worktree left behind stops the run before it acts.
 if stored="$(t get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
     echo "tkt-plan: cannot read worktree HEAD: $worktree" >&2; exit 2; }
@@ -57,8 +55,6 @@ fi
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-plan.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
-# emit VERDICT EXIT [DIGEST]: one TKT line plus digest to the per-run log and
-# stdout, journaled.
 emit() {
   verdict="$1"; ec="$2"; shift 2
   twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
@@ -70,25 +66,31 @@ emit() {
   exit "$ec"
 }
 
-# plan_base PLAN: the plan's Base line SHA; a plan without one exits 2.
 plan_base() {
   base="$(awk '/^Base:[[:space:]]/ { print $2; exit }' "$1")"
   [ -n "$base" ] || { echo "tkt-plan: no Base line in $1" >&2; exit 2; }
   printf '%s\n' "$base"
 }
 
-# plan_files PLAN: every backticked path under ## Files, one per line.
 plan_files() {
   awk '/^## Files([[:space:]]|$)/{f=1;next} f&&/^## /{exit} f{print}' "$1" \
     | grep -o '`[^`]*`' | tr -d '`' | grep -v '^$' || true
 }
 
-# review SLOT TEMPLATE OUT [ARGS]: run one tkt-job round; on its exit 0 set
-# REPORT to the saved report, else pass its verdict through with its digest.
+load_plan() {
+  t require plan
+  plan="$(t get plan)"
+  [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
+  base="$(plan_base "$plan")"
+}
+
+# One tkt-job round: a non-zero exit passes its verdict through, else RV/REC
+# hold the report's verdict and exit. Each Verifier round takes its own slot,
+# so a stored id only ever resumes its own round's live job.
 review() {
-  slot="$1"; tmpl="$2"; out="$3"; shift 3
+  slot="$1"; tmpl="$2"; rep="$3"; shift 3
   set +e
-  job_out="$("$tktjob" "$state" --slot "$slot" --template "$tmpl" --out-file "$out" "$@" 2>&1)"
+  job_out="$("$tktjob" "$state" --slot "$slot" --template "$tmpl" --out-file "$rep" "$@" 2>&1)"
   jrc=$?
   set -e
   [ "$jrc" -eq 0 ] || {
@@ -96,14 +98,9 @@ review() {
     words="${line#TKT tkt-job }"
     emit "${words% log=*}" "$jrc" "$(head -n 38 <<<"$job_out")"
   }
-  [ -r "$out" ] || { echo "tkt-plan: tkt-job wrote no report: $out" >&2; exit 3; }
-  REPORT="$out"
-}
-
-# verdict_for REPORT: PLAN-OK when the report opens with PLAN OK, else LINES.
-verdict_for() {
-  if [ "$(head -n 1 "$1")" = "PLAN OK" ]; then RV="PLAN-OK out=$1"; REC=0
-  else RV="LINES n=$(wc -l <"$1" | tr -d ' ') out=$1"; REC=1; fi
+  [ -r "$rep" ] || { echo "tkt-plan: tkt-job wrote no report: $rep" >&2; exit 3; }
+  if [ "$(head -n 1 "$rep")" = "PLAN OK" ]; then RV="PLAN-OK out=$rep"; REC=0
+  else RV="LINES n=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; fi
 }
 
 do_verify() {
@@ -115,16 +112,13 @@ do_verify() {
       *) usage ;;
     esac
   done
-  t require plan
-  plan="$(t get plan)"
-  [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
-  base="$(plan_base "$plan")"
-  files=(); nfiles=0
+  load_plan
+  files=()
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    files+=("$p"); nfiles=$((nfiles + 1))
+    files+=("$p")
   done < <(plan_files "$plan")
-  if [ "$nfiles" -gt 0 ]; then
+  if [ "${#files[@]}" -gt 0 ]; then
     set +e
     stat="$(git -C "$worktree" diff --stat "$base...origin/main" -- ${files[@]+"${files[@]}"} 2>"$tmp")"
     grc=$?
@@ -159,9 +153,8 @@ do_verify() {
   fi
   [ -z "$model" ] || args+=(--model "$model")
   review "verifier-r$((round + 1))" "$vbrief" "$run/$repo-$issue-verifier-out-r$((round + 1)).md" ${args[@]+"${args[@]}"}
-  verdict_for "$REPORT"
   t set verifier_round "$((round + 1))"
-  emit "$RV" "$REC" "$(head -n 38 "$REPORT")"
+  emit "$RV" "$REC" "$(head -n 38 "$rep")"
 }
 
 do_confirm() {
@@ -177,19 +170,15 @@ do_confirm() {
   if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
     emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage"
   fi
-  t require plan
-  plan="$(t get plan)"
-  [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
-  base="$(plan_base "$plan")"
+  load_plan
   cmodel="$(t get model.verifier 2>/dev/null)" || {
     echo "tkt-plan: missing key: model.verifier" >&2; exit 2; }
   review confirm "$cbrief" "$run/$repo-$issue-confirm-out.md" \
     PLAN="$plan" BASE="$base" EDITS="@$edits" --model "$cmodel"
-  verdict_for "$REPORT"
   round="$(t get verifier_round 2>/dev/null || printf '0')"
   case "$round" in ''|*[!0-9]*) round=0 ;; esac
   t set confirmed_for "$round"
-  emit "$RV" "$REC" "$(head -n 38 "$REPORT")"
+  emit "$RV" "$REC" "$(head -n 38 "$rep")"
 }
 
 do_post() {
@@ -200,9 +189,7 @@ do_post() {
       *) usage ;;
     esac
   done
-  t require plan
-  plan="$(t get plan)"
-  [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
+  load_plan
   set +e
   "$plangate" "$plan" >"$tmp" 2>&1
   grc=$?
