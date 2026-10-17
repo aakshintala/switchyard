@@ -148,13 +148,12 @@ if [ "$mutant_count" -gt 0 ]; then
     fi
   fi
 fi
-if rh="$(tkt get review_head 2>/dev/null)" && [ "$rh" = "$head" ] && r0="$(tkt get review_ids 2>/dev/null)" && [ -n "$r0" ]; then rids="$r0"; start_out=""
-else
-  rc=0; start_out="$("$reviewpr" start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --spec "$spec" --model "$rm" --overbuild-model "$om" 2>"$tmpd/start-err")" || rc=$?
-  [ "$rc" -eq 0 ] || emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-err")"
-  rids="$(grep -E '^(standards|spec|overbuild) [^ ]+$' <<<"$start_out" | awk '{print $2}' | tr '\n' ' ' || true)"
-  tkt set review_ids "$rids"; tkt set review_head "$head"
-fi
+r0="$(tkt get review_ids 2>/dev/null || true)"; rh="$(tkt get review_head 2>/dev/null || true)"; rids=""; [ "$rh" = "$head" ] && rids="$r0"
+n=0; for ax in standards spec overbuild; do n=$((n+1)); [ "$(printf '%s' "$rids" | wc -w | tr -d ' ')" -ge "$n" ] && continue
+  rc=0; one="$("$reviewpr" start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --spec "$spec" --model "$rm" --overbuild-model "$om" --axes "$ax" 2>"$tmpd/start-$ax-err")" || rc=$?
+  [ "$rc" -eq 0 ] || { [ -n "$rids" ] && { tkt set review_ids "$rids"; tkt set review_head "$head"; }; emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-$ax-err")"; }
+  id="$(awk -v a="$ax" '$1==a{print $2; exit}' <<<"$one")"; [ -n "$id" ] || emit "REVIEW-INCOMPLETE" 1 "missing $ax id"
+  rids="${rids:+$rids }$id"; tkt set review_ids "$rids"; tkt set review_head "$head"; done
 # shellcheck disable=SC2086
 "$delegate" watch $rids $map_id >/dev/null 2>&1 || true
 if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
@@ -163,6 +162,7 @@ if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
   mstatus="$(jq -r '.result.status // .status // ""' "$rec" 2>/dev/null || true)"
   if [ -n "$mtext" ]; then printf '%s' "$mtext" >"$map_out"; fi
   [ "$mstatus" = "DONE" ] && [ -s "$map_out" ] || map_note="map failed status=${mstatus:-unknown}: ${mtext%%$'\n'*}"
+  if [ -z "$map_note" ]; then miss="$(grep -Eo '[^[:space:]]+\.rs:[0-9]+:[0-9]+' "$mutants_file" | while IFS= read -r k; do grep -Eq "$k.*=> *(caught by|needs-test|removed|exempted|covered|unviable)" "$map_out" || printf '%s\n' "$k"; done)"; [ -z "$miss" ] || map_note="map failed: no verdict for $(head -n 1 <<<"$miss")"; fi
 fi
 findings_file="$run/$slug-$issue-findings-r0.md"
 rc=0; collect_out="$("$reviewpr" collect $rids --findings-out "$findings_file" 2>"$tmpd/collect-err")" || rc=$?

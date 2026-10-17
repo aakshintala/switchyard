@@ -50,6 +50,7 @@ ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 # --expect-commits; map carries $T/map-text); ask modes mint NEEDS_CONTEXT.
 # Watch only logs: every record already exists, so one watch covers all ids.
 printf '0' >"$T/dcounter"
+printf '0' >"$T/rcounter"
 cat >"$T/bin/delegate" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
@@ -146,18 +147,37 @@ exit "\$(cat "$T/ghci-rc")"
 EOF
 chmod +x "$T/bin/gh-ci"
 
-# Stub review-pr: start prints three role ids; collect copies $T/findings-src
+# Stub review-pr: start launches one id per requested axis (--axes, default all
+# three); tkt-build persists each id as it launches. collect copies $T/findings-src
 # to --findings-out, prints $T/collect-out and exits $T/collect-rc.
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
 sub="\${1:-}"; shift || true
 if [ "\$sub" = "start" ]; then
   printf 'review-start|%s\n' "\$*" >>"$T/calls.log"
-  if [ "\$(cat "$T/review-mode")" = "startfail" ]; then
+  mode="\$(cat "$T/review-mode")"
+  if [ "\$mode" = "startfail" ]; then
     echo "review-pr: cannot start reviews" >&2
     exit 1
   fi
-  printf 'standards r1\nspec r2\noverbuild r3\nwatch: delegate watch r1 r2 r3\ncollect: review-pr collect r1 r2 r3\n'
+  axes="standards,spec,overbuild"
+  prev=""
+  for a in "\$@"; do
+    if [ "\$prev" = "--axes" ]; then axes="\$a"; fi
+    prev="\$a"
+  done
+  axes="\$(printf '%s' "\$axes" | tr ',' ' ')"
+  for ax in \$axes; do
+    case " \$ax " in " standards "|" spec "|" overbuild "*) ;;
+      *) echo "stub review-pr: unknown axis \$ax" >&2; exit 2;; esac
+    if [ "\$mode" = "die-after-one" ] && [ "\$ax" = "spec" ]; then
+      echo "review-pr: died after one launch" >&2
+      exit 1
+    fi
+    n="\$((\$(cat "$T/rcounter") + 1))"
+    printf '%s' "\$n" >"$T/rcounter"
+    printf '%s r%s\n' "\$ax" "\$n"
+  done
   exit 0
 fi
 if [ "\$sub" = "collect" ]; then
@@ -265,6 +285,7 @@ EOF
   printf '0' >"$T/ghci-rc"
   rm -f "$T/empty-pr" "$T/no-runs" "$T/noview"
   printf '0' >"$T/dcounter"
+  printf '0' >"$T/rcounter"
   : >"$T/calls.log"
   cat >"$T/collect-out" <<'EOF'
 patch-id deadbeef
@@ -329,7 +350,11 @@ grep -q "$H" "$brief" || fail "happy: the filled brief holds the base"
 grep -q "Resolves #528" "$brief" || fail "happy: the filled brief holds CLOSING"
 grep -q "Co-authored with Test" "$brief" || fail "happy: the filled brief holds ATTRIBUTION"
 grep -q "^gate|.*--expect-head $H$" "$T/calls.log" || fail "happy: the gate checks the lane head"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom$" "$T/calls.log" || fail "happy: review starts with state and flag values"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes standards$" "$T/calls.log" || fail "happy: standards starts with state and flag values"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes spec$" "$T/calls.log" || fail "happy: spec starts per axis"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes overbuild$" "$T/calls.log" || fail "happy: overbuild starts per axis"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "happy: one start per axis"
+rvh="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$(printf '%s' "$rvh" | wc -w | tr -d ' ')" -eq 3 ] || fail "happy: three review ids persisted"
 grep -q "^watch|r1 r2 r3$" "$T/calls.log" || fail "happy: one delegate watch covers the review ids"
 [ "$(grep -c '^watch|' "$T/calls.log")" -eq 2 ] || fail "happy: the lane watch plus one build watch"
 grep -q "^ghci|" "$T/calls.log" && fail "happy: no mutant wait without mutant_job"
@@ -676,9 +701,49 @@ run_build
 [ "$RC" -eq 0 ] || fail "review-reuse first exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 run_build
 [ "$RC" -eq 0 ] || fail "review-reuse second exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 1 ] || fail "review-reuse: one review start across both runs"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "review-reuse: three axis starts across both runs"
 rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ -n "$rv" ] || fail "review-reuse: review_ids persisted"
 [ "$(bash "$TKT_STATE" "$S" get review_head)" = "$H" ] || fail "review-reuse: review_head is the head"
+
+# --- a DONE map with prose and no per-mutant verdicts does not APPROVE ---
+setup_case map-prose
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/map-text" <<'EOF'
+All mutants look fine; no further tests needed.
+EOF
+run_build
+[ "$RC" -eq 1 ] || fail "map-prose exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-prose: prose map must not APPROVE";; esac
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "map-prose"
+grep -q "map failed: no verdict for src/a.rs:10:20" <<<"$OUT" || fail "map-prose: the digest names the uncovered mutant"
+
+# --- a DONE map missing one mutant verdict does not APPROVE ---
+setup_case map-partial-verdicts
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+looks good otherwise
+EOF
+run_build
+[ "$RC" -eq 1 ] || fail "map-partial-verdicts exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-partial-verdicts: incomplete verdicts must not APPROVE";; esac
+grep -q "map failed: no verdict for src/b.rs:3:4" <<<"$OUT" || fail "map-partial-verdicts: the digest names the missing mutant"
+
+# --- a dispatch that dies after one review launch reuses that id on rerun ---
+setup_case review-partial
+printf 'die-after-one' >"$T/review-mode"
+run_build
+[ "$RC" -eq 1 ] || fail "review-partial first exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "review-partial first"
+first_id="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$first_id" = "r1" ] || fail "review-partial: one id persisted after the death, got [$first_id]"
+[ "$(bash "$TKT_STATE" "$S" get review_head)" = "$H" ] || fail "review-partial: review_head persisted with the partial ids"
+printf 'ok' >"$T/review-mode"
+run_build
+[ "$RC" -eq 0 ] || fail "review-partial second exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-partial second"
+[ "$(grep -c -- ' --axes standards' "$T/calls.log")" -eq 1 ] || fail "review-partial: standards launched once across both runs"
+rv2="$(bash "$TKT_STATE" "$S" get review_ids)"; case " $rv2 " in " r1 "*|" r1"|*" r1"*) ;; *) fail "review-partial: first id reused, got [$rv2]";; esac
+[ "$(printf '%s' "$rv2" | wc -w | tr -d ' ')" -eq 3 ] || fail "review-partial: three ids after recovery, got [$rv2]"
 
 # --- a moved PR head is rejected before state writes ---
 setup_case moved-head
