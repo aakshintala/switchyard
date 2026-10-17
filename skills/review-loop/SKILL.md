@@ -7,7 +7,7 @@ The loop for one PR. Reviews run on models from a different family than the one 
 
 **Identity.** A verdict covers the `git patch-id --stable` of the PR's diff: a rebase that keeps the patch keeps its verdict, and any other change needs a new one. CI covers the head SHA: a green run on an older SHA never satisfies merge.
 
-**Counter.** Each PR has one counter. A fix round is one fix dispatch plus its scoped verify, and adds one.
+**Counter.** Each PR has one counter. A fix round is one fix dispatch plus its scoped verify, and adds one. With a state file it is the key `round`, which `tkt-fix` keeps.
 
 ### 1. Review
 
@@ -27,7 +27,7 @@ Done when every axis that ran has a verdict line for the current patch-id.
 
 ### 2. Route
 
-Every verdict `APPROVE` and no open P1 or P2: the loop is done. Otherwise send every open finding in one fix round: fill `briefs/fix.md` with `~/.agents/bin/fill-brief --out <absolute path>` (`WORKFLOW_DOC` as the project's workflow doc path, findings as `FINDINGS=@<file>`, `EXTRA` as in `planning`'s lane brief; the file lists every finding since the reviewed head, earlier rounds' included, since the verify in step 3 reads it against that whole range; a CI-reported failure the round answers, such as a surviving mutant or a failing test, is a finding too, written with its CI evidence, or the verify flags its repair as out of scope) and dispatch it in the PR's worktree as a gated job, using the printed line verbatim as its prompt, never a hand-written path. A fix report of `ready, not pushed` leaves the push to you: run the brief's `gh-ci wait` without `--timeout`, push when it exits 0 or 1, and carry any failed jobs it names into the next round. When every open finding is trivial by `implement`'s fix-by-churn rule, fix them inline and run the gate yourself instead; the round still counts, and step 3 still verifies it.
+Every verdict `APPROVE` and no open P1 or P2: the loop is done. Otherwise send every open finding in one fix round. With a state file, run `tkt-fix <state> --verify` when the round answers a real bug (below) and `tkt-fix <state> --no-verify` otherwise: it fills the brief, runs the gated fix job, waits for CI, pushes, adds one to `round`, and with `--verify` runs step 3. `--findings <file>` names the findings; without it the command reads the state's `findings`. The real-bug rule below stays your judgment: it picks the flag. Without state, fill `briefs/fix.md` with `~/.agents/bin/fill-brief --out <absolute path>` (`WORKFLOW_DOC` as the project's workflow doc path, findings as `FINDINGS=@<file>`, `EXTRA` as in `planning`'s lane brief; the file lists every finding since the reviewed head, earlier rounds' included, since the verify in step 3 reads it against that whole range; a CI-reported failure the round answers, such as a surviving mutant or a failing test, is a finding too, written with its CI evidence, or the verify flags its repair as out of scope) and dispatch it in the PR's worktree as a gated job, using the printed line verbatim as its prompt, never a hand-written path. A fix report of `ready, not pushed` leaves the push to you: run the brief's `gh-ci wait` without `--timeout`, push when it exits 0 or 1, and carry any failed jobs it names into the next round. When every open finding is trivial by `implement`'s fix-by-churn rule, fix them inline and run the gate yourself instead; the round still counts, and step 3 still verifies it.
 
 A **real bug** is a P1, or a behaviour defect a consumer of the change would see. When round one found no real bug, only missing tests, nits, style or docs, its fix round is the last. Step 3 is skipped. `ship-pr` takes the round-one head as `--reviewed`, with `--unverified-fixes <findings file>`, and CI, mutants included, still gates the new head.
 
@@ -44,6 +44,12 @@ Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new h
 ```
 
 `review-pr collect --findings-out <path>` produces the findings file.
+
+`tkt-fix --verify` runs this step and prints its verdict:
+
+- `FIX-OK reviewed=<sha>`: it set `reviewed`; the loop is done.
+- `FIX-INCOMPLETE round=<n>`: the open findings are the next round's findings file (state `findings`); back to step 2. With `STOP-AT-TWO` on the line, go to step 4.
+- `DRIFT`: state, PR and worktree heads differ; reconcile and rerun. `RECOVER job=<id>`: a fix job for this round already exists; rerun with `--resume <id> --prompt <file>`. `CI-WAIT`, `PUSH-FAIL`, `VERIFY-FAIL`: read the digest and the log it names.
 
 The verify prints `review-pr: repair base <sha> (<since> replayed onto <base>)`: it replays the reviewed head onto the current base so the diff holds only the fix round, and needs no action. A line above it saying the head "does not replay cleanly" means the diff also holds the rebase's conflict resolution: judge that part as part of the repair.
 

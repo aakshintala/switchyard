@@ -20,6 +20,7 @@ __FINDINGS__
 - Commit your work before any command that discards changes (`git reset --hard`, `git checkout -- <path>`, `git restore`, a rebase). Make a scratch commit, such as one kept as evidence, on a throwaway branch (`git switch -c scratch/<name>`), then switch back to the lane branch and delete the scratch one.
 - A test that kills a mutant CI reported is in scope: list it with the findings.
 - Each comparison, condition or branch your fix adds gets a test that fails when it flips; name that test in your report beside its finding.
+- A test asserts behaviour: pin a fixture by a tag or by the repo it builds, never by a commit sha, which a rebase rewrites.
 - A mutant kill holds on every CI platform by construction: the test fixes the order with a pause point or a fake clock, never thread timing or an OS-specific error such as `ConnectionReset`. CI's mutant lines refer to the head CI ran; once a commit moves code, find each mutant by its function and replacement.
 - A CI-reported mutant no test can tell apart (equivalent or redundant) is removed when deleting the condition or restructuring away the operator simplifies the code and every test passes (`removed: <why>`). Otherwise apply the exemption rule and written reason of the workflow doc or the testing doc it names (`exempted: <reason>`); with no such rule, remove it. CI fails until one lands; never report it as equivalent alone.
 - Run only the gate and the tests your findings name. Suites the workflow doc gives to CI, such as mutation testing (`cargo mutants`), benchmarks and backstops, run in CI: read their result from the CI log, and report when you need one reproduced.
@@ -30,4 +31,4 @@ __EXTRA__
 
 ## Report
 
-The pushed head SHA (or the committed SHA and `ready, not pushed`), the failed jobs of the run you waited on (or `CI: pass`), then one line per finding: `fixed` or `refuted: <evidence>`. Then **Friction**: up to 3 bullets ("none" is fine). End with a STATUS line.
+The pushed head SHA (or the committed SHA and `ready, not pushed`), the failed jobs of the run you waited on (or `CI: pass`), the gate's last output line quoted from its log (report a pass only beside a log that ends in one), then one line per finding: `fixed` or `refuted: <evidence>`. Then **Friction**: up to 3 bullets ("none" is fine). End with a STATUS line.
