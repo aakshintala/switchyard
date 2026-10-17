@@ -18,6 +18,7 @@ Read the plan at `__PLAN__` before anything else, and reread it after any compac
 - A look or probe task (running the program or a TUI to see what it does) gets 3 probe rounds. Then end with `STATUS: NEEDS_CONTEXT` and a verdict digest: what each round showed and what stays unknown.
 - Run every command in your worktree, each one starting `cd __WORKTREE__ &&`: a shell's working directory can reset between calls, and a build or test run elsewhere lands in another agent's checkout. Read main's version of a file with `git show origin/main:<path>`.
 - The host is macOS: use BSD tool forms, such as `sed -i ''`.
+- Commit each new script under `bin/` as executable: `chmod 755` it, then `git ls-files -s <path>` shows mode `100755`.
 - Mark a deliberate shortcut with a `debt: <ceiling>, <upgrade trigger>` comment. A shortcut that would weaken a rule a doc, spec or ticket states gets no marker: stop and report.
 - Commit your work before any command that discards changes (`git reset --hard`, `git checkout -- <path>`, `git restore`, a rebase). Make a scratch commit, such as one kept as evidence, on a throwaway branch (`git switch -c scratch/<name>`), then switch back to the lane branch and delete the scratch one.
 - Give each new comparison, match guard and `&&`/`||` condition a test that fails when it flips: for a comparison, values at, just below and just above the edge. See each new assert fail against deliberately broken code before you rely on it.
