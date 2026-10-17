@@ -8,7 +8,7 @@ unset CLAUDECODE
 
 D="$(cd "$(dirname "$0")" && pwd)"
 failed=0
-for t in "$D"/tkt-state.sh "$D"/fill-brief.sh "$D"/review-pr.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/gh-ci.sh "$D"/ci-health.sh "$D"/ci-friction.sh "$D"/ship-pr.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/delegate-canary.sh "$D"/inbox.sh; do
+for t in "$D"/tkt-state.sh "$D"/fill-brief.sh "$D"/review-pr.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/gh-ci.sh "$D"/ci-health.sh "$D"/ci-friction.sh "$D"/ship-pr.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/delegate-canary.sh "$D"/inbox.sh "$D"/post-ruling.sh; do
   if bash "$t"; then
     echo "PASS: $(basename "$t")"
   else
