@@ -264,6 +264,7 @@ git -C "$WT" commit -qm "fix: fix.txt"
 NEW="$(git -C "$WT" rev-parse HEAD)"
 printf 'ORIGIN:%s:tkt-529' "$CDIR/origin.git" >"$T/prhead"
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+bash "$TKT_STATE" "$S" set try.fix1 "$OLD" >/dev/null
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "crash rerun exited $?"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
@@ -279,6 +280,7 @@ git -C "$WT" commit -qm "fix: fix.txt"
 git -C "$WT" push -q origin tkt-529
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+bash "$TKT_STATE" "$S" set try.fix1 "$OLD" >/dev/null
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "pushed crash rerun exited $?"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
@@ -302,10 +304,49 @@ git -C "$WT" add fix.txt
 git -C "$WT" commit -qm "fix: fix.txt"
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
 printf 'ORIGIN:%s:tkt-529' "$CDIR/origin.git" >"$T/prhead"
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "push-pending rerun exited $?"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "pending push did not land"
+
+# 13. An unrelated commit with only a stored job id exits 3: no dispatch, no push.
+setup_case stranger
+printf 'outside\n' >"$WT/evil.txt"
+git -C "$WT" add evil.txt
+git -C "$WT" commit -qm "outside: evil.txt"
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+printf 'pushed' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "stranger commit exited 0"
+[ "$?" = "3" ] || fail "stranger commit exited $?, want 3"
+grep -q "head drift" "$T/stderr" || fail "drift message missing from stderr"
+grep -q "job|" "$T/calls.log" && fail "fix job dispatched for an unattributed commit"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "stranger commit was pushed"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "head moved on a rejected entry"
+
+# 14. A rewound remote with no pending fix job exits 3 instead of dispatching.
+setup_case rewind
+printf 'fixed\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "rewind exited 0"
+[ "$?" = "3" ] || fail "rewind exited $?, want 3"
+grep -q "head drift" "$T/stderr" || fail "drift message missing from stderr"
+grep -q "job|" "$T/calls.log" && fail "fix job dispatched after a remote rewind"
+
+# 15. Phase progress without the stored job still exits 3 on forward drift.
+setup_case tryonly
+printf 'outside\n' >"$WT/evil.txt"
+git -C "$WT" add evil.txt
+git -C "$WT" commit -qm "outside: evil.txt"
+bash "$TKT_STATE" "$S" set try.fix1 "$OLD" >/dev/null
+printf 'pushed' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "try-only entry exited 0"
+[ "$?" = "3" ] || fail "try-only entry exited $?, want 3"
+grep -q "job|" "$T/calls.log" && fail "fix job dispatched without a stored job id"
 
 echo "tkt-fix assertions passed"
