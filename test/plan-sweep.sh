@@ -168,6 +168,19 @@ grep -q '^callers: 41 lines in 1 files (shown 40)$' "$T/pack-e.md" || fail "e: c
 [ "$(grep -c '^src/many.rs:[0-9]*:     capped_fn();$' "$T/pack-e.md")" = 40 ] || fail "e: exactly 40 capped lines shown"
 grep -q '^callers: 40 lines in 1 files (shown 40)$' "$T/pack-e.md" || fail "e: exact counts"
 
+# e2. many callers do not trip pipefail: 3000 short lines still exit 0 and show 40
+{
+  printf 'pub fn big_fn() {\n}\n'
+  i=0; while [ "$i" -lt 3000 ]; do printf '    big_fn();\n'; i=$((i + 1)); done
+} >"$R/src/big.rs"
+git -C "$R" add src/big.rs
+git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m big
+BIGBASE="$(git -C "$R" rev-parse HEAD)"
+run --cwd "$R" --base "$BIGBASE" --symbols big_fn --files src/big.rs --out "$T/pack-e2.md"
+[ "$code" = 0 ] || fail "e2: exits 0, got $code [$out]"
+grep -q '^callers: 3000 lines in 1 files (shown 40)$' "$T/pack-e2.md" || fail "e2: caller counts"
+[ "$(grep -c '^src/big.rs:[0-9]*:     big_fn();$' "$T/pack-e2.md")" = 40 ] || fail "e2: exactly 40 caller lines shown"
+
 # f. outline lists items with line numbers, never a body
 run --cwd "$R" --base "$BASE" --files src/shapes.rs --out "$T/pack-f.md"
 [ "$code" = 0 ] || fail "f: exits 0, got $code [$out]"
