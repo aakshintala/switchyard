@@ -352,6 +352,27 @@ expect_verdict "TKT tkt-gate FAIL rc=4 log=*" "quiet FAIL"
 grep -qx "commits=1 merges=0" <<<"$OUT" || fail "quiet FAIL digest counts the history"
 grep -q "^gatelog=" <<<"$OUT" || fail "quiet FAIL digest names the gate log"
 
+# --- FAIL then echo: a gate that fails before its trailing echo still fails ---
+setup_case fail-echo
+write_plan
+commit_file base.txt "base changed"
+push_branch
+printf 'false; echo gate-ended\n' >"$T/gate-cmd"
+run_gate
+[ "$RC" -eq 1 ] || fail "fail-echo exits 1"
+expect_verdict "TKT tkt-gate FAIL rc=1 log=*" "fail-echo"
+grep -q "gate-ended" <<<"$OUT" && fail "fail-echo never runs the trailing echo"
+
+# --- an && chain that passes still passes ---
+setup_case chain
+write_plan
+commit_file base.txt "base changed"
+push_branch
+printf 'true && echo chain-ok\n' >"$T/gate-cmd"
+run_gate
+[ "$RC" -eq 0 ] || fail "chain exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "chain"
+
 # --- --checks-only runs no gate, even a failing one ---
 setup_case checks-only
 write_plan

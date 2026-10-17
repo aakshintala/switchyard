@@ -4,8 +4,9 @@
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.
 
 # write_gate_script SCRIPT LOG ENV_PREFIX GATE_CMD NOTE: write SCRIPT, a bash
-# script that runs GATE_CMD with ENV_PREFIX inside one redirected block to LOG,
-# then prints the last 20 log lines and GATE PASS (or GATE FAIL rc=<n>).
+# script that runs GATE_CMD with ENV_PREFIX in a subshell with errexit inside
+# one redirected block to LOG, then prints the last 20 log lines and GATE
+# PASS (or GATE FAIL rc=<n>).
 # The gate's exit code is captured before the tail and the verdict echo, so a
 # gate that fails then echoes still exits non-zero; printf carries the gate
 # literally, so nothing expands while the script is written. NOTE is the
@@ -17,7 +18,7 @@ write_gate_script() {
     printf '#!/usr/bin/env bash\n'
     printf '# Written by %s.\n' "$note"
     printf 'log=%s\n' "$log"
-    printf '{ %s%s ; } > "$log" 2>&1\n' "$env_prefix" "$gate_cmd"
+    printf '( set -e; %s%s ) > "$log" 2>&1\n' "$env_prefix" "$gate_cmd"
     printf 'rc=$?\n'
     printf 'tail -n 20 "$log"\n'
     printf 'if [ "$rc" -eq 0 ]; then echo "GATE PASS"; else echo "GATE FAIL rc=$rc"; fi\n'
