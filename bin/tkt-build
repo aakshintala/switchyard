@@ -162,18 +162,14 @@ if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
   mstatus="$(jq -r '.result.status // .status // ""' "$rec" 2>/dev/null || true)"
   if [ -n "$mtext" ]; then printf '%s' "$mtext" >"$map_out"; fi
   [ "$mstatus" = "DONE" ] && [ -s "$map_out" ] || map_note="map failed status=${mstatus:-unknown}: ${mtext%%$'\n'*}"
-  if [ -z "$map_note" ]; then miss="$(grep -Eo '[^[:space:]]+\.rs:[0-9]+:[0-9]+' "$mutants_file" | while IFS= read -r k; do grep -Eq "$k.*=> *(caught by|needs-test|removed|exempted|covered|unviable)" "$map_out" || printf '%s\n' "$k"; done)"; [ -z "$miss" ] || map_note="map failed: no verdict for $(head -n 1 <<<"$miss")"; fi
 fi
 findings_file="$run/$slug-$issue-findings-r0.md"
 rc=0; collect_out="$("$reviewpr" collect $rids --findings-out "$findings_file" 2>"$tmpd/collect-err")" || rc=$?
 # shellcheck disable=SC2086
 [ "$rc" -eq 0 ] || emit "REVIEW-INCOMPLETE" "$rc" "$collect_out" "$(tail -n 5 "$tmpd/collect-err")"
 merged=0
-if [ -f "$map_out" ]; then
-  hits="$(grep -E '=> (needs-test|removed):' "$map_out" || true)"
-  if [ -n "$hits" ]; then
-    while IFS= read -r mline; do printf 'P2 %s [mutants %s]\n' "$mline" "$mutants_file" >>"$findings_file"; merged=$((merged + 1)); done <<<"$hits"
-  fi
+if [ -z "$map_note" ] && [ "$mutant_count" -gt 0 ] && [ -f "$map_out" ]; then
+  if awk -v MF="$mutants_file" 'NR==FNR{p=index($0," => ");if(p>0){k=substr($0,1,p-1);c[k]++;if(c[k]==1){R[k]=substr($0,p+4);L[k]=$0}}next}length($0)==0{next}/^mutants in the diff:/{next}{k=$0;if(!(k in c)){print "map failed: no verdict for "k>"/dev/stderr";exit 1}if(c[k]!=1){print "map failed: duplicate verdict for "k>"/dev/stderr";exit 1}r=R[k];if(!(r=="unviable"||substr(r,1,10)=="caught by "||substr(r,1,12)=="needs-test: "||substr(r,1,9)=="removed: "||substr(r,1,10)=="exempted: ")){print "map failed: bad verdict for "k>"/dev/stderr";exit 1}if(substr(r,1,12)=="needs-test: "||substr(r,1,9)=="removed: ")print "P2 "L[k]" [mutants "MF"]"}' "$map_out" "$mutants_file" >"$tmpd/map-hits" 2>"$tmpd/map-err"; then merged=$(grep -c . "$tmpd/map-hits" || true); cat "$tmpd/map-hits" >>"$findings_file"; else map_note=$(cat "$tmpd/map-err"); merged=0; fi
 fi
 p1="$(grep -c '^P1 ' "$findings_file" || true)"; p2="$(grep -c '^P2 ' "$findings_file" || true)"; p3="$(grep -c '^P3 ' "$findings_file" || true)"
 n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect_out" || true)"

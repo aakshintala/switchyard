@@ -304,10 +304,10 @@ src/e.rs:1:1: MISSED => exempted: covered elsewhere
 EOF
   cat >"$T/mutant-log" <<'EOF'
 waiting for logs
-src/a.rs:10:20: MISSED in Selection
+src/a.rs:10:20: MISSED
 noise without a location
 mutants in the diff: 2
-src/b.rs:3:4: TIMEOUT in Selection
+src/b.rs:3:4: TIMEOUT
 EOF
   printf 'which scope rules the retry?\n' >"$T/ask-text"
 }
@@ -673,10 +673,10 @@ grep -q "prompt=.*-map-" "$T/calls.log" && fail "mutants-nojob: no map job dispa
 setup_case prefixed-log
 printf 'mutant_job=%s\n' Selection >>"$S"
 cat >"$T/mutant-log" <<'EOF'
-Selection Build 2026-10-17T00:00:00Z src/a.rs:10:20: MISSED in Selection
+Selection Build 2026-10-17T00:00:00Z src/a.rs:10:20: MISSED
 Selection Build 2026-10-17T00:00:00Z noise without a location
 Selection Build 2026-10-17T00:00:00Z mutants in the diff: 2
-Selection Build 2026-10-17T00:00:00Z src/b.rs:3:4: TIMEOUT in Selection
+Selection Build 2026-10-17T00:00:00Z src/b.rs:3:4: TIMEOUT
 EOF
 run_build
 [ "$RC" -eq 1 ] || fail "prefixed-log exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -705,29 +705,86 @@ run_build
 rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ -n "$rv" ] || fail "review-reuse: review_ids persisted"
 [ "$(bash "$TKT_STATE" "$S" get review_head)" = "$H" ] || fail "review-reuse: review_head is the head"
 
-# --- a DONE map with prose and no per-mutant verdicts does not APPROVE ---
-setup_case map-prose
+# --- a missing mutant verdict fails the map ---
+setup_case map-missing
 printf 'mutant_job=%s\n' Selection >>"$S"
-cat >"$T/map-text" <<'EOF'
-All mutants look fine; no further tests needed.
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 2
+src/b.rs:3:4: TIMEOUT
 EOF
-run_build
-[ "$RC" -eq 1 ] || fail "map-prose exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-prose: prose map must not APPROVE";; esac
-expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "map-prose"
-grep -q "map failed: no verdict for src/a.rs:10:20" <<<"$OUT" || fail "map-prose: the digest names the uncovered mutant"
-
-# --- a DONE map missing one mutant verdict does not APPROVE ---
-setup_case map-partial-verdicts
-printf 'mutant_job=%s\n' Selection >>"$S"
 cat >"$T/map-text" <<'EOF'
 src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
-looks good otherwise
 EOF
 run_build
-[ "$RC" -eq 1 ] || fail "map-partial-verdicts exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-partial-verdicts: incomplete verdicts must not APPROVE";; esac
-grep -q "map failed: no verdict for src/b.rs:3:4" <<<"$OUT" || fail "map-partial-verdicts: the digest names the missing mutant"
+[ "$RC" -eq 1 ] || fail "map-missing exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-missing: missing verdict must not APPROVE";; esac
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "map-missing"
+grep -q "map failed: no verdict for src/b.rs:3:4: TIMEOUT" <<<"$OUT" || fail "map-missing: the digest names the missing mutant"
+
+# --- a short location never covers its longer prefix sibling ---
+setup_case map-prefix
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+foo.rs:1:1: MISSED
+mutants in the diff: 2
+foo.rs:1:12: MISSED
+EOF
+cat >"$T/map-text" <<'EOF'
+foo.rs:1:12: MISSED => needs-test: long line only
+EOF
+run_build
+[ "$RC" -eq 1 ] || fail "map-prefix exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-prefix: prefix cover must not APPROVE";; esac
+grep -q "map failed: no verdict for foo.rs:1:1: MISSED" <<<"$OUT" || fail "map-prefix: the short mutant stays uncovered"
+
+# --- needs-test without the colon fails the map ---
+setup_case map-nocolon
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test bounds missing
+EOF
+run_build
+[ "$RC" -eq 1 ] || fail "map-nocolon exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-nocolon: colonless verdict must not APPROVE";; esac
+grep -q "map failed: bad verdict for src/a.rs:10:20: MISSED" <<<"$OUT" || fail "map-nocolon: the digest names the off-grammar mutant"
+
+# --- a duplicate verdict fails the map ---
+setup_case map-duplicate
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: first claim
+src/a.rs:10:20: MISSED => removed: second claim
+EOF
+run_build
+[ "$RC" -eq 1 ] || fail "map-duplicate exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-duplicate: duplicate verdict must not APPROVE";; esac
+grep -q "map failed: duplicate verdict for src/a.rs:10:20: MISSED" <<<"$OUT" || fail "map-duplicate: the digest names the duplicated mutant"
+
+# --- a valid needs-test line merges exactly one P2 finding ---
+setup_case map-valid-oneneeds
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+run_build
+[ "$RC" -eq 1 ] || fail "map-valid-oneneeds exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=0 mutants=1 findings=* log=*" "map-valid-oneneeds"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+[ "$(grep -c '^P2 ' "$ffile")" -eq 1 ] || fail "map-valid-oneneeds: exactly one P2 finding"
+grep -qx "P2 src/a.rs:10:20: MISSED => needs-test: bounds check unpinned \\[mutants $CDIR/run/switchyard-528-mutants-${H:0:12}.txt\\]" "$ffile" || fail "map-valid-oneneeds: the P2 line merges"
 
 # --- a dispatch that dies after one review launch reuses that id on rerun ---
 setup_case review-partial
