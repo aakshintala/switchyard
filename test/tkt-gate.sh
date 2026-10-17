@@ -49,7 +49,12 @@ done
 echo "error: boom"
 exit 3
 EOF
-chmod +x "$T/bin/gate-ok" "$T/bin/gate-bad"
+cat >"$T/bin/gate-quiet" <<EOF
+#!/usr/bin/env bash
+touch "$T/gate-ran"
+exit 4
+EOF
+chmod +x "$T/bin/gate-ok" "$T/bin/gate-bad" "$T/bin/gate-quiet"
 
 # New case: a bare origin, a seed main pushed to it, and a clone worktree on
 # branch tkt-517 with a base state file. Sets CDIR, WT, S.
@@ -91,7 +96,7 @@ write_plan() {
 
 ## Files
 
-- base.txt
+- `base.txt`
 
 ## Gate
 
@@ -132,6 +137,7 @@ write_plan
 commit_file base.txt "base changed"
 push_branch
 H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set env "FOO=bar" || fail "set env"
 run_gate --expect-head "$H"
 [ "$RC" -eq 0 ] || fail "PASS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-gate PASS head=$H log=*" "PASS"
@@ -149,6 +155,7 @@ setup_case pass-empty
 write_plan
 push_branch
 H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
 run_gate
 [ "$RC" -eq 0 ] || fail "empty PASS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-gate PASS head=$H log=*" "empty PASS"
@@ -161,6 +168,7 @@ commit_file base.txt "base changed"
 run_gate
 [ "$RC" -eq 1 ] || fail "TIP exits 1"
 expect_verdict "TKT tkt-gate TIP * log=*" "TIP"
+grep -q "missing" <<<"$OUT" || fail "TIP names the missing ref"
 [ ! -f "$T/gate-ran" ] || fail "TIP runs no gate"
 
 # --- TIP: the origin is behind the local HEAD, even with --expect-head=HEAD ---
@@ -175,6 +183,18 @@ run_gate --expect-head "$H"
 expect_verdict "TKT tkt-gate TIP * log=*" "behind TIP"
 grep -q "origin/tkt-517" <<<"$OUT" || fail "behind TIP names the remote ref"
 [ ! -f "$T/gate-ran" ] || fail "behind TIP runs no gate"
+
+# --- TIP: origin matches --expect-head but not the local HEAD ---
+setup_case tip-expect-stale
+write_plan
+commit_file base.txt "base changed"
+push_branch
+PUSHED="$(git -C "$WT" rev-parse HEAD)"
+commit_file base.txt "one more"
+run_gate --expect-head "$PUSHED"
+[ "$RC" -eq 1 ] || fail "stale expect TIP exits 1"
+expect_verdict "TKT tkt-gate TIP * log=*" "stale expect TIP"
+[ ! -f "$T/gate-ran" ] || fail "stale expect TIP runs no gate"
 
 # --- TIP: --expect-head names another sha ---
 setup_case tip-expect
@@ -231,16 +251,30 @@ expect_verdict "TKT tkt-gate FENCE n=30 log=*" "thirty FENCE"
 [ "$(grep -c "^g[0-9]*\.txt$" <<<"$OUT")" -eq 30 ] || fail "thirty FENCE lists every path"
 grep -q "more" <<<"$OUT" && fail "thirty FENCE has no rest line"
 
-# --- a renamed file is listed under its old path, which Files covers ---
+# --- a renamed file is listed under its old path: Files covers only the new
+# --- name, so the fence fires on the old one. Without --no-renames the diff
+# --- would list moved.txt alone and pass.
 setup_case rename
-write_plan
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `moved.txt`
+
+## Gate
+
+`gate-ok`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
 git -C "$WT" mv base.txt moved.txt
 git -C "$WT" commit -qm rename
 push_branch
-H="$(git -C "$WT" rev-parse HEAD)"
 run_gate
-[ "$RC" -eq 0 ] || fail "rename exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-gate PASS head=$H log=*" "rename"
+[ "$RC" -eq 1 ] || fail "rename exits 1"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "rename"
+grep -qx "base.txt" <<<"$OUT" || fail "rename fence lists the old path"
+[ ! -f "$T/gate-ran" ] || fail "rename runs no gate"
 
 # --- a `*` cover in Files ---
 setup_case glob
@@ -249,7 +283,7 @@ cat >"$CDIR/plan.md" <<'EOF'
 
 ## Files
 
-- bin/*
+- `bin/*`
 
 ## Gate
 
@@ -270,7 +304,7 @@ cat >"$CDIR/plan.md" <<'EOF'
 
 ## Files
 
-- test/
+- `test/`
 
 ## Gate
 
@@ -302,6 +336,18 @@ gatelog="$(grep '^gatelog=' <<<"$OUT" | head -n 1)"; gatelog="${gatelog#gatelog=
 if bash "$TKT_STATE" "$S" get head >/dev/null 2>&1; then
   fail "FAIL sets no state head"
 fi
+
+# --- FAIL with no error lines: the digest is just the tail ---
+setup_case fail-quiet
+write_plan
+commit_file base.txt "base changed"
+push_branch
+printf 'gate-quiet\n' >"$T/gate-cmd"
+run_gate
+[ "$RC" -eq 1 ] || fail "quiet FAIL exits 1"
+expect_verdict "TKT tkt-gate FAIL rc=4 log=*" "quiet FAIL"
+grep -qx "commits=1 merges=0" <<<"$OUT" || fail "quiet FAIL digest counts the history"
+grep -q "^gatelog=" <<<"$OUT" || fail "quiet FAIL digest names the gate log"
 
 # --- --checks-only runs no gate, even a failing one ---
 setup_case checks-only

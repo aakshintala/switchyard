@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# tkt-gate: pre-push checks and the gate on the remote tip.
+# Fetches, checks the branch tip against origin/<branch> (and --expect-head),
+# checks git diff --name-only --no-renames origin/main...HEAD against the
+# plan's Files or the state's fence list, records the history, then runs the
+# gate script from the plan's Gate section to a per-run log and sets state
+# head. Prints one verdict line plus a digest of at most 40 lines.
+# Every state read and write goes through tkt-state. The Files cover rule is
+# covered() from lib/plan-tokens.sh; the gate script writer is
+# write_gate_script() from lib/gate-script.sh. Neither is copied here.
+# Usage: tkt-gate <state> [--expect-head <sha>] [--checks-only]
+# Tools: TKT_BIN holds plan-gate (default ~/.agents/bin); tkt-state and lib/
+# sit next to this script. The gate runs with the worktree as its directory.
+set -euo pipefail
+
+usage() {
+  echo "usage: tkt-gate <state> [--expect-head <sha>] [--checks-only]" >&2
+  exit 2
+}
+
+[ $# -ge 1 ] || usage
+state="$1"
+shift
+
+expect_head=""
+checks_only=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --expect-head) [ $# -ge 2 ] && [ -n "$2" ] || usage; expect_head="$2"; shift 2 ;;
+    --checks-only) checks_only=1; shift ;;
+    --help|-h) usage ;;
+    -* ) usage ;;
+    *) usage ;;
+  esac
+done
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+tkt_state="$script_dir/tkt-state"
+tokens_lib="$script_dir/lib/plan-tokens.sh"
+if [ ! -r "$tokens_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $tokens_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$tokens_lib"
+gate_lib="$script_dir/lib/gate-script.sh"
+if [ ! -r "$gate_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $gate_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$gate_lib"
+bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+plangate="$bin_dir/plan-gate"
+
+tkt() {
+  "$tkt_state" "$state" "$@"
+}
+
+# emit VERDICT EXIT: write the verdict plus the digest (and the history, when
+# read) to the per-run log, print verdict plus digest, journal, and exit.
+emit() {
+  local verdict="$1" code="$2" twelve logpath output
+  twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
+  logpath="$run/$repo-$issue-tkt-gate-$twelve-$(date +%H%M%S).log"
+  output="TKT tkt-gate $verdict log=$logpath
+$digest"
+  printf '%s\n' "$output" >"$logpath"
+  if [ -n "$hist" ]; then
+    printf '%s\n' "$hist" >>"$logpath"
+  fi
+  printf '%s\n' "$output"
+  tkt journal "tkt-gate $verdict"
+  exit "$code"
+}
+
+# Probe the shared lock and release it at once: nothing below waits, and
+# tkt-state locks each write itself.
+lockdir="$state.lock"
+if ! mkdir "$lockdir" 2>/dev/null; then
+  pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ]; then
+    echo "tkt-gate: state locked by pid $pid" >&2
+  else
+    echo "tkt-gate: state locked" >&2
+  fi
+  exit 2
+fi
+rmdir "$lockdir"
+
+tkt require repo issue branch worktree run
+repo="$(tkt get repo)"
+issue="$(tkt get issue)"
+branch="$(tkt get branch)"
+worktree="$(tkt get worktree)"
+run="$(tkt get run)"
+mkdir -p "$run"
+
+# The fence comes from the plan's Files, the state's fence list, or both.
+plan="$(tkt get plan 2>/dev/null || true)"
+fence_list="$(tkt list fence 2>/dev/null || true)"
+if [ -z "$plan" ] && [ -z "$fence_list" ]; then
+  tkt require plan
+fi
+if [ -n "$plan" ] && [ ! -r "$plan" ]; then
+  echo "tkt-gate: cannot read plan: $plan" >&2
+  exit 2
+fi
+
+# A stored head the worktree left behind stops the run before it acts.
+if stored_head="$(tkt get head 2>/dev/null)"; then
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
+    echo "tkt-gate: cannot read worktree HEAD: $worktree" >&2
+    exit 2
+  }
+  if [ "$stored_head" != "$actual" ]; then
+    echo "tkt-gate: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual" >&2
+    exit 3
+  fi
+fi
+
+git -C "$worktree" fetch origin >/dev/null 2>&1 || {
+  echo "tkt-gate: fetch failed in $worktree" >&2
+  exit 2
+}
+
+hist=""
+digest=""
+
+# Tip: origin/<branch> equals the local HEAD, and equals --expect-head.
+local_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
+  echo "tkt-gate: cannot read worktree HEAD: $worktree" >&2
+  exit 2
+}
+remote_head="$(git -C "$worktree" rev-parse --verify "origin/$branch" 2>/dev/null || true)"
+tip_detail=""
+if [ -z "$remote_head" ]; then
+  tip_detail="origin/$branch missing head=$local_head"
+elif [ "$remote_head" != "$local_head" ]; then
+  tip_detail="origin/$branch=$remote_head head=$local_head"
+elif [ -n "$expect_head" ] && [ "$remote_head" != "$expect_head" ]; then
+  tip_detail="origin/$branch=$remote_head expect=$expect_head head=$local_head"
+fi
+if [ -n "$tip_detail" ]; then
+  digest="$tip_detail"
+  emit "TIP $tip_detail" 1
+fi
+
+# Fence: every changed path is covered by Files or the fence list. Renamed
+# files stay under their old path, so a cover on the old name still holds.
+FILES="|"
+GLOBS=""
+collect_fence() {
+  case "$1" in
+    glob) return 0 ;;
+    path) FILES="$FILES$2|" ;;
+    symbol) return 0 ;;
+  esac
+  return 0
+}
+if [ -n "$plan" ]; then
+  while IFS=$'\t' read -r sec _ln _new _read tok; do
+    [ "$sec" = "files" ] || continue
+    [ -n "$tok" ] || continue
+    CUR_SEC="files"
+    expand_token "$tok" collect_fence
+  done <<<"$(plan_records "$plan")"
+fi
+if [ -n "$fence_list" ]; then
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    case "$e" in
+      *"*"*) GLOBS="$GLOBS$e"$'\n' ;;
+      *) FILES="$FILES$e|" ;;
+    esac
+  done <<<"$fence_list"
+fi
+changed="$(git -C "$worktree" diff --name-only --no-renames "origin/main...HEAD" 2>/dev/null)" || {
+  echo "tkt-gate: cannot diff origin/main...HEAD in $worktree" >&2
+  exit 2
+}
+n=0
+shown=0
+digest=""
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  if covered "$p"; then continue; fi
+  n=$((n + 1))
+  if [ "$shown" -lt 30 ]; then
+    digest="$digest$p"$'\n'
+    shown=$((shown + 1))
+  fi
+done <<<"$changed"
+if [ "$n" -gt 0 ]; then
+  rest=$((n - shown))
+  if [ "$rest" -gt 0 ]; then
+    digest="$digest... and $rest more"
+  else
+    digest="${digest%$'\n'}"
+  fi
+  emit "FENCE n=$n" 1
+fi
+
+# History: the oneline list goes into the log, the counts into the digest.
+hist="$(git -C "$worktree" log --oneline "origin/main..HEAD" 2>/dev/null)" || {
+  echo "tkt-gate: cannot read history origin/main..HEAD in $worktree" >&2
+  exit 2
+}
+commits="$(git -C "$worktree" rev-list --count "origin/main..HEAD" 2>/dev/null || echo 0)"
+merges="$(git -C "$worktree" rev-list --count --merges "origin/main..HEAD" 2>/dev/null || echo 0)"
+
+gate_word="skipped"
+if [ "$checks_only" -eq 0 ]; then
+  [ -n "$plan" ] || tkt require plan
+  gate_cmd="$("$plangate" "$plan")" || exit 2
+  env_prefix=""
+  if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
+    env_prefix="$e "
+  fi
+  script="$run/$repo-$issue-tkt-gate.sh"
+  gatelog="$run/$repo-$issue-tkt-gate-$(date +%s).log"
+  write_gate_script "$script" "$gatelog" "$env_prefix" "$gate_cmd" "tkt-gate: the pre-push gate on the remote tip"
+  rc=0
+  (cd "$worktree" && bash "$script") >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    gate_word="PASS"
+  else
+    digest="commits=$commits merges=$merges
+gatelog=$gatelog
+$(tail -n 20 "$gatelog")"
+    gerr="$(grep -i -m 5 -E 'error|panick' "$gatelog" || true)"
+    if [ -n "$gerr" ]; then
+      digest="$digest
+$gerr"
+    fi
+    emit "FAIL rc=$rc" 1
+  fi
+fi
+
+digest="commits=$commits merges=$merges
+gate=$gate_word"
+tkt set head "$local_head"
+emit "PASS head=$local_head" 0
