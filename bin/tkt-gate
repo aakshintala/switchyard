@@ -121,7 +121,13 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
     exit 2
   }
   if pr="$(tkt get pr 2>/dev/null)"; then
-    pr_head="$(gh pr view "$pr" --json headRefOid --jq .headRefOid)" || {
+    # gh resolves the PR against the caller's directory, so name the
+    # worktree's repo explicitly.
+    pr_repo="$(git -C "$worktree" config --get remote.origin.url)" || {
+      echo "tkt-gate: cannot read origin URL in $worktree" >&2
+      exit 2
+    }
+    pr_head="$(gh pr view "$pr" --repo "$pr_repo" --json headRefOid --jq .headRefOid)" || {
       echo "tkt-gate: cannot read PR $pr head" >&2
       exit 2
     }

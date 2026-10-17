@@ -510,6 +510,23 @@ grep -q "$H" "$CDIR/stderr.txt" || fail "pr drift names the worktree HEAD"
 grep -q "0000000000000000000000000000000000000000" "$CDIR/stderr.txt" || fail "pr drift names the PR head"
 [ ! -f "$T/gate-ran" ] || fail "pr drift runs no gate"
 
+# --- the PR lookup names the worktree's repo even from another directory ---
+setup_case pr-repo
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+printf '%s\n' "$H" >"$T/pr-head"
+: >"$T/gh.log"
+mkdir -p "$T/elsewhere"
+OUT="$(cd "$T/elsewhere" && bash "$GATE" "$S" 2>"$CDIR/stderr.txt")"; RC=$?
+[ "$RC" -eq 0 ] || fail "pr repo exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "pr repo"
+origin_url="$(git -C "$WT" config --get remote.origin.url)"
+grep -q -- "$origin_url" "$T/gh.log" || fail "pr lookup names the worktree's repo"
+
 # --- a held lock exits 2 naming the pid, and runs no gate ---
 setup_case locked
 write_plan
