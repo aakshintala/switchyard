@@ -69,9 +69,11 @@ worktree="$(tkt get worktree)"; run="$(tkt get run)"; plan="$(tkt get plan)"; sp
 slug="${repo//\//-}"; mkdir -p "$run"
 if stored_head="$(tkt get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
-  if [ "$stored_head" != "$actual" ]; then
-    msg="tkt-build: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual"
-    printf '%s\n' "$msg" >&2; emit "DRIFT state=$stored_head worktree=$actual" 3 "$msg"
+  if [ "$from" = review ]; then pr0="$(tkt get pr 2>/dev/null || true)"; early_pr="$(gh pr view "$pr0" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+  else early_pr="$(gh pr list --head "$branch" --repo "$repo" --json headRefOid 2>/dev/null | jq -r '.[0].headRefOid // empty' 2>/dev/null || true)"; fi
+  if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$early_pr" ]; then
+    msg="tkt-build: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr ${early_pr:-unreadable}"
+    printf '%s\n' "$msg" >&2; emit "DRIFT state=$stored_head worktree=$actual pr=${early_pr:-unreadable}" 3 "$msg"
   fi
 fi
 base="$(awk '/^Base:[[:space:]]/ {print $2; exit}' "$plan" 2>/dev/null || true)"
@@ -123,25 +125,45 @@ if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
     jid="$(gh run view "$rid" --repo "$repo" --json jobs 2>/dev/null | jq -r ".jobs[] | select(.name==\"$mutant_job\") | .databaseId" 2>/dev/null | tail -n 1 || true)"
     if [ -n "$jid" ]; then gh run view "$rid" --repo "$repo" --job "$jid" --log >"$tmp_log" 2>/dev/null || true; break; fi
   done
-  grep -E '^[^ ]+\.rs:[0-9]+:[0-9]+: |^mutants in the diff: ' "$tmp_log" >"$mutants_file" || true
+  grep -Eo '[^[:space:]]+\.rs:[0-9]+:[0-9]+: .*|mutants in the diff: .*' "$tmp_log" >"$mutants_file" || true
   mutant_count="$(grep -c . "$mutants_file" || true)"
 fi
 rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
 om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
 [ -n "$rm" ] || emit "PRECONDITION missing=model.review" 2 "tkt-state: missing key: model.review"
 [ -n "$om" ] || emit "PRECONDITION missing=model.overbuild" 2 "tkt-state: missing key: model.overbuild"
-rc=0; start_out="$("$reviewpr" start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --spec "$spec" --model "$rm" --overbuild-model "$om" 2>"$tmpd/start-err")" || rc=$?
-[ "$rc" -eq 0 ] || emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-err")"
-rids="$(grep -E '^(standards|spec|overbuild) [^ ]+$' <<<"$start_out" | awk '{print $2}' || true)"
 map_note=""; map_id=""; map_out="$run/$slug-$issue-map-r0.md"
 if [ "$mutant_count" -gt 0 ]; then
-  map_rc=0; map_job_out="$("$tktjob" "$state" --slot map --template "$map_brief" --out-file "$map_out" "MUTANTS=@$mutants_file" 2>"$tmpd/map-err")" || map_rc=$?
-  [ "$map_rc" -eq 0 ] || map_note="map failed rc=$map_rc: $(head -n 1 <<<"$map_job_out")"
-  map_id="$(sed -n 's/^TKT tkt-job .* id=\([^ ]*\).*/\1/p' <<<"${map_job_out:-}" | head -n 1)"
+  if sm="$(tkt get job.map 2>/dev/null)" && [ -n "$sm" ]; then map_id="$sm"
+  else
+    mm="$(tkt get model.map 2>/dev/null || true)"
+    if [ -z "$mm" ]; then map_note="map failed: missing model.map"
+    else
+      mbrief="$run/$slug-$issue-map-1.md"
+      if "$bin_dir/fill-brief" --out "$mbrief" "$map_brief" PR="$pr" ISSUE="$issue" REPO="$repo" WORKTREE="$worktree" MUTANTS="@$mutants_file" >/dev/null 2>"$tmpd/map-brief-err"; then
+        map_id="$("$delegate" run --model "$mm" --cwd "$worktree" --prompt-file "$mbrief" 2>/dev/null | head -n 1 || true)"
+        if [ -n "$map_id" ]; then tkt set job.map "$map_id"; tkt journal "tkt-build map id=$map_id" 2>/dev/null || true
+        else map_note="map failed: no id"; fi
+      else map_note="map failed: brief $(head -n 1 "$tmpd/map-brief-err" 2>/dev/null || true)"; fi
+    fi
+  fi
 fi
-# ids are lists: one watchdog for all.
+if rh="$(tkt get review_head 2>/dev/null)" && [ "$rh" = "$head" ] && r0="$(tkt get review_ids 2>/dev/null)" && [ -n "$r0" ]; then rids="$r0"; start_out=""
+else
+  rc=0; start_out="$("$reviewpr" start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --spec "$spec" --model "$rm" --overbuild-model "$om" 2>"$tmpd/start-err")" || rc=$?
+  [ "$rc" -eq 0 ] || emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-err")"
+  rids="$(grep -E '^(standards|spec|overbuild) [^ ]+$' <<<"$start_out" | awk '{print $2}' | tr '\n' ' ' || true)"
+  tkt set review_ids "$rids"; tkt set review_head "$head"
+fi
 # shellcheck disable=SC2086
 "$delegate" watch $rids $map_id >/dev/null 2>&1 || true
+if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
+  rec="${TMPDIR:-/tmp}/delegate-jobs/$map_id.json"
+  mtext="$(jq -j -r '.result.text // ""' "$rec" 2>/dev/null || true)"
+  mstatus="$(jq -r '.result.status // .status // ""' "$rec" 2>/dev/null || true)"
+  if [ -n "$mtext" ]; then printf '%s' "$mtext" >"$map_out"; fi
+  [ "$mstatus" = "DONE" ] && [ -s "$map_out" ] || map_note="map failed status=${mstatus:-unknown}: ${mtext%%$'\n'*}"
+fi
 findings_file="$run/$slug-$issue-findings-r0.md"
 rc=0; collect_out="$("$reviewpr" collect $rids --findings-out "$findings_file" 2>"$tmpd/collect-err")" || rc=$?
 # shellcheck disable=SC2086
@@ -158,6 +180,7 @@ n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect
 tkt set reviewed "$head"; tkt set findings "$findings_file"; tkt set round 0
 # One bad-count sum: a P3 alone never blocks.
 bad=$((3 - n_approve + p1 + p2 + merged))
+[ -n "$map_note" ] && bad=$((bad + 1))
 approve_digest="$collect_out"; digest="$(cat "$findings_file")"
 if [ -n "$map_note" ]; then approve_digest="$map_note
 $approve_digest"; digest="$map_note

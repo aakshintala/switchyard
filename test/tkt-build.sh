@@ -557,7 +557,7 @@ setup_case drift
 bash "$TKT_STATE" "$S" set head 0000000000000000000000000000000000000000 || fail "set fake head"
 run_build
 [ "$RC" -eq 3 ] || fail "drift exits 3 (rc=$RC)"
-expect_verdict "TKT tkt-build DRIFT state=0000000000000000000000000000000000000000 worktree=$H log=*" "drift"
+expect_verdict "TKT tkt-build DRIFT state=0000000000000000000000000000000000000000 worktree=$H pr=* log=*" "drift"
 grep -q "$H" "$CDIR/stderr.txt" || fail "drift: stderr names the worktree HEAD"
 grep -q "^run|" "$T/calls.log" && fail "drift: the lane never dispatches"
 
@@ -624,15 +624,15 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "rerun seco
 [ "$(grep -c '^run|' "$T/calls.log")" -eq 1 ] || fail "rerun: one lane dispatch across both runs"
 [ "$(grep -c '^watch|' "$T/calls.log")" -eq 4 ] || fail "rerun: each run watches twice (job plus build)"
 
-# --- a map ASK never blocks the review verdict, but stays in the digest ---
+# --- an incomplete map never approves, but stays in the digest ---
 setup_case mapfail
 printf 'mutant_job=%s\n' Selection >>"$S"
 printf 'ask-map' >"$T/delegate-mode"
 printf 'which mutant matters?\n' >"$T/ask-text"
 run_build
-[ "$RC" -eq 0 ] || fail "mapfail exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "mapfail"
-grep -q "map failed rc=1" <<<"$OUT" || fail "mapfail: the digest notes the map stop"
+[ "$RC" -eq 1 ] || fail "mapfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "mapfail"
+grep -q "map failed" <<<"$OUT" || fail "mapfail: the digest notes the map stop"
 
 # --- a mutant job with no such job name lists no mutants and skips the map ---
 setup_case mutants-nojob
@@ -643,5 +643,61 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "mutants-no
 grep -q "prompt=.*-map-" "$T/calls.log" && fail "mutants-nojob: no map job dispatches"
 [ -e "$CDIR/run/switchyard-528-mutants-${H:0:12}.txt" ] || fail "mutants-nojob: the empty mutants file exists"
 [ -s "$CDIR/run/switchyard-528-mutants-${H:0:12}.txt" ] && fail "mutants-nojob: the mutants file is empty"
+
+# --- P1: transport-prefixed mutant log lines still list mutants ---
+setup_case prefixed-log
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+Selection Build 2026-10-17T00:00:00Z src/a.rs:10:20: MISSED in Selection
+Selection Build 2026-10-17T00:00:00Z noise without a location
+Selection Build 2026-10-17T00:00:00Z mutants in the diff: 2
+Selection Build 2026-10-17T00:00:00Z src/b.rs:3:4: TIMEOUT in Selection
+EOF
+run_build
+[ "$RC" -eq 1 ] || fail "prefixed-log exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "prefixed-log"
+mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
+[ "$(grep -c . "$mfile")" -eq 3 ] || fail "prefixed-log: three stripped lines match"
+grep -q "^src/a.rs:10:20:" "$mfile" || fail "prefixed-log: prefixes stripped"
+
+# --- an incomplete map does not APPROVE ---
+setup_case map-incomplete
+printf 'mutant_job=%s\n' Selection >>"$S"
+printf 'ask-map' >"$T/delegate-mode"
+printf 'which mutant matters?\n' >"$T/ask-text"
+run_build
+[ "$RC" -eq 1 ] || fail "map-incomplete exits 1 (rc=$RC)"
+case "$(first_line)" in "TKT tkt-build APPROVE"*) fail "map-incomplete: incomplete map must not APPROVE";; esac
+grep -q "map failed" <<<"$OUT" || fail "map-incomplete: the digest notes the map stop"
+
+# --- a rerun reuses the persisted review ids ---
+setup_case review-reuse
+run_build
+[ "$RC" -eq 0 ] || fail "review-reuse first exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+run_build
+[ "$RC" -eq 0 ] || fail "review-reuse second exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 1 ] || fail "review-reuse: one review start across both runs"
+rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ -n "$rv" ] || fail "review-reuse: review_ids persisted"
+[ "$(bash "$TKT_STATE" "$S" get review_head)" = "$H" ] || fail "review-reuse: review_head is the head"
+
+# --- a moved PR head is rejected before state writes ---
+setup_case moved-head
+bash "$TKT_STATE" "$S" set pr 7 || fail "set pr"
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
+printf '%s' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$T/prhead"
+run_build
+[ "$RC" -eq 3 ] || fail "moved-head exits 3 (rc=$RC)"
+expect_verdict "TKT tkt-build DRIFT state=$H worktree=$H pr=aaa* log=*" "moved-head"
+expect_state head "$H" moved-head
+grep -q "^run|" "$T/calls.log" && fail "moved-head: the lane never dispatches"
+
+# --- one delegate watch covers review and map ids ---
+setup_case single-watch
+printf 'mutant_job=%s\n' Selection >>"$S"
+run_build
+[ "$RC" -eq 1 ] || fail "single-watch exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "^watch|r1 r2 r3 stub-2$" "$T/calls.log" || fail "single-watch: one watch covers all ids"
+[ "$(grep -c '^watch|' "$T/calls.log")" -eq 2 ] || fail "single-watch: lane plus one build watch"
+grep -q "^watch|stub-2$" "$T/calls.log" && fail "single-watch: no solo map watch"
 
 echo "tkt-build: all cases passed"
