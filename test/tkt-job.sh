@@ -8,7 +8,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TKT="$SCRIPT_DIR/../bin/tkt-job"
 TKT_STATE="$SCRIPT_DIR/../bin/tkt-state"
-REAL_BIN="$HOME/.agents/bin"
+REAL_BIN="$SCRIPT_DIR/../bin"
 
 fail() {
   echo "FAIL: $1" >&2
