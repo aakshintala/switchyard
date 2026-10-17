@@ -195,10 +195,10 @@ else
     done
     # Only keys the template names reach fill-brief; stray flags stay out.
     k=1
-    while [ -e "$run/$repo-$issue-$slot-$k.md" ]; do
+    while [ -e "$run/${repo##*/}-$issue-$slot-$k.md" ]; do
       k=$((k + 1))
     done
-    brief="$run/$repo-$issue-$slot-$k.md"
+    brief="$run/${repo##*/}-$issue-$slot-$k.md"
     "$fillbrief" --out "$brief" "$template" ${args[@]+"${args[@]}"} >&2
   else
     [ -r "$brief" ] || {
@@ -216,8 +216,8 @@ else
     if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
       env_prefix="$e "
     fi
-    script="$run/$repo-$issue-gate.sh"
-    write_gate_script "$script" "$run/$repo-$issue-gate-$(date +%s).log" "$env_prefix" "$gate_cmd" "tkt-job: delegate runs it as the job-end gate"
+    script="$run/${repo##*/}-$issue-gate.sh"
+    write_gate_script "$script" "$run/${repo##*/}-$issue-gate-$(date +%s).log" "$env_prefix" "$gate_cmd" "tkt-job: delegate runs it as the job-end gate"
     gate="bash $script"
   fi
   if [ -z "$model" ]; then
@@ -357,7 +357,7 @@ if [ "$reused" -eq 1 ]; then
 fi
 
 twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
-logpath="$run/$repo-$issue-tkt-job-$twelve-$(date +%H%M%S).log"
+logpath="$run/${repo##*/}-$issue-tkt-job-$twelve-$(date +%H%M%S).log"
 output="TKT tkt-job $verdict log=$logpath
 $digest"
 printf '%s\n' "$output" >"$logpath"
