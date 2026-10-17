@@ -15,9 +15,9 @@
 # 2 bad usage or missing input.
 set -uo pipefail
 
-SOL_MODEL="openai-codex/gpt-6.1-sol"
+SOL_MODEL="openai/gpt-6.1-sol"
 MUSE_MODEL="opencode-go/muse-spark-1.3-contributor"
-LUNA_MODEL="openai-codex/gpt-6-luna:xhigh"
+LUNA_MODEL="openai/gpt-6-luna:xhigh"
 MUSE_FIBER_MODEL="fiber/opencode-go/muse-spark-1.3-contributor"
 
 TAB="$(printf '\t')"

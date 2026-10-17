@@ -1,2 +1,2 @@
 Warning: No project session found with id 'a86b4f04-f9fe-4fe2-88f2-9c07c39dda68'; creating a new session with that id.
-Warning: Model "no-such-model" not found for provider "openai-codex". Using custom model id.
+Warning: Model "no-such-model" not found for provider "openai". Using custom model id.

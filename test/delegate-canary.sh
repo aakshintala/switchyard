@@ -333,17 +333,17 @@ echo "task 2 cases passed"
 OUT2="$T/out-models"
 FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 224 "$T/brief.md" \
   --gate 'test -f work-marker' \
-  --pi-model openai-codex/gpt-6-luna:medium --fiber-model fiber/codex/gpt-6-luna \
+  --pi-model openai/gpt-6-luna:medium --fiber-model fiber/codex/gpt-6-luna \
   --out "$OUT2" || fail "canary run with model flags exits 0"
 PI_WT2="$(cat "$OUT2/pi/worktree")"
 FIBER_WT2="$(cat "$OUT2/fiber/worktree")"
 PI_ID2="$(jq -r .job_id "$OUT2/pi/metrics.json")"
 FIBER_ID2="$(jq -r .job_id "$OUT2/fiber/metrics.json")"
-[ "$(jq -r .model "$OUT2/pi/metrics.json")" = "openai-codex/gpt-6-luna:medium" ] || fail "pi metrics model from --pi-model"
+[ "$(jq -r .model "$OUT2/pi/metrics.json")" = "openai/gpt-6-luna:medium" ] || fail "pi metrics model from --pi-model"
 [ "$(jq -r .model "$OUT2/fiber/metrics.json")" = "fiber/codex/gpt-6-luna" ] || fail "fiber metrics model from --fiber-model"
-assert_order "openai-codex/gpt-6-luna:medium" "fiber/codex/gpt-6-luna" \
+assert_order "openai/gpt-6-luna:medium" "fiber/codex/gpt-6-luna" \
   "$PI_ID2" "$FIBER_ID2" "$PI_WT2" "$FIBER_WT2"
-grep -q '| model | openai-codex/gpt-6-luna:medium | fiber/codex/gpt-6-luna |' "$OUT2/summary.md" \
+grep -q '| model | openai/gpt-6-luna:medium | fiber/codex/gpt-6-luna |' "$OUT2/summary.md" \
   || fail "summary names each side's model"
 
 # a run with no model in its metrics.json: report still rebuilds it

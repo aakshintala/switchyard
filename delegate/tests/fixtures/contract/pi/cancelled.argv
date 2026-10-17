@@ -1,1 +1,1 @@
-pi -p --mode json --model openai-codex/gpt-6-luna --session-id aab8b00e-3999-48d2-b8ee-3ebf95ff5350 
+pi -p --mode json --model openai/gpt-6-luna --session-id aab8b00e-3999-48d2-b8ee-3ebf95ff5350 

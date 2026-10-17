@@ -217,10 +217,7 @@ mod tests {
                 },
             );
         }
-        let default = ids
-            .first()
-            .unwrap_or(&"openai-codex/gpt-6-luna")
-            .to_string();
+        let default = ids.first().unwrap_or(&"openai/gpt-6-luna").to_string();
         Config {
             default,
             price_map: models.iter().map(|(k, v)| (k.clone(), v.price)).collect(),
@@ -230,7 +227,7 @@ mod tests {
     }
 
     fn config_with_pi() -> Config {
-        config_with_pi_ids(&["openai-codex/gpt-6-luna"])
+        config_with_pi_ids(&["openai/gpt-6-luna"])
     }
 
     fn ok_result(stdout: &str) -> AgentCommandResult {
@@ -252,9 +249,9 @@ mod tests {
     }
 
     const LIST_HEADER: &str = "provider      model         context  max-out  thinking  images\n";
-    const LUNA_ROW: &str = "openai-codex  gpt-6-luna    272K     128K     yes       yes\n";
-    const LUNA_PREV_ROW: &str = "openai-codex  gpt-5.6-luna  272K     128K     yes       yes\n";
-    const NO_THINK_ROW: &str = "openai-codex  gpt-6-luna    272K     128K     no        yes\n";
+    const LUNA_ROW: &str = "openai        gpt-6-luna    272K     128K     yes       yes\n";
+    const LUNA_PREV_ROW: &str = "openai        gpt-5.6-luna  272K     128K     yes       yes\n";
+    const NO_THINK_ROW: &str = "openai        gpt-6-luna    272K     128K     no        yes\n";
 
     /// Injected `run_command`: auth checks always pass; list-models output
     /// is canned per query model.
@@ -307,7 +304,7 @@ mod tests {
             format!("{LIST_HEADER}{LUNA_PREV_ROW}{LUNA_ROW}"),
         )]);
         let run = run_with_list(list);
-        let failures = model_failures_for(&["openai-codex/gpt-6-luna"], &run);
+        let failures = model_failures_for(&["openai/gpt-6-luna"], &run);
         assert!(failures.is_empty(), "{failures:?}");
     }
 
@@ -318,10 +315,10 @@ mod tests {
             "No models matching \"no-such-model\"\n".to_string(),
         )]);
         let run = run_with_list(list);
-        let failures = model_failures_for(&["openai-codex/no-such-model"], &run);
+        let failures = model_failures_for(&["openai/no-such-model"], &run);
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(
-            failures[0].contains("model openai-codex/no-such-model not found in pi --list-models"),
+            failures[0].contains("model openai/no-such-model not found in pi --list-models"),
             "{}",
             failures[0]
         );
@@ -336,7 +333,7 @@ mod tests {
             format!("{LIST_HEADER}{LUNA_PREV_ROW}"),
         )]);
         let run = run_with_list(list);
-        let failures = model_failures_for(&["openai-codex/gpt-6-luna"], &run);
+        let failures = model_failures_for(&["openai/gpt-6-luna"], &run);
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(
             failures[0].contains("not found in pi --list-models"),
@@ -352,7 +349,7 @@ mod tests {
             format!("{LIST_HEADER}{LUNA_ROW}"),
         )]);
         let run = run_with_list(list);
-        let failures = model_failures_for(&["openai-codex/gpt-6-luna:xhigh"], &run);
+        let failures = model_failures_for(&["openai/gpt-6-luna:xhigh"], &run);
         assert!(failures.is_empty(), "{failures:?}");
     }
 
@@ -363,7 +360,7 @@ mod tests {
             format!("{LIST_HEADER}{NO_THINK_ROW}"),
         )]);
         let run = run_with_list(list);
-        let failures = model_failures_for(&["openai-codex/gpt-6-luna:xhigh"], &run);
+        let failures = model_failures_for(&["openai/gpt-6-luna:xhigh"], &run);
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(
             failures[0].contains("does not support thinking"),
@@ -417,10 +414,7 @@ mod tests {
                     assert_eq!(args[1], "gpt-6-luna");
                     ok_result(&format!("{LIST_HEADER}{LUNA_ROW}"))
                 } else {
-                    assert_eq!(
-                        args,
-                        &["auth", "check", "--model", "openai-codex/gpt-6-luna"]
-                    );
+                    assert_eq!(args, &["auth", "check", "--model", "openai/gpt-6-luna"]);
                     err_result()
                 }
             }),
@@ -439,7 +433,7 @@ mod tests {
         assert!(!failed);
         assert!(text.contains("ok    pi: pi 0.99.2 (/bin/pi)"), "{text}");
         assert!(
-            text.contains("warn  pi: model openai-codex/gpt-6-luna auth check failed: exit 1"),
+            text.contains("warn  pi: model openai/gpt-6-luna auth check failed: exit 1"),
             "{text}"
         );
     }
