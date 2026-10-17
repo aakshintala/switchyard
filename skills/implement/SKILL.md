@@ -18,7 +18,7 @@ You are the orchestrator for one ticket. The **main orchestrator** is the sessio
 
 ## Commands
 
-When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. Run each one in the background, alone in its tool call. On exit 0 start the next command at once, reading nothing; on any other exit read its stdout once, decide, and act. State and the journal are the ticket's record: read them on resume. The steps below say what each command does and what stays your judgment; a repo without state runs the steps by hand.
+When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. Run each one in the background, alone in its tool call. On exit 0 start the next command at once, reading nothing; on any other exit read its stdout once, decide, and act. State and the journal are the ticket's record: read them on resume. A repo without state runs the steps below by hand.
 
 ## Fast paths
 
