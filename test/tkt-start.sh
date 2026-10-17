@@ -149,7 +149,7 @@ grep -q '^tkt-job|' "$T/calls.log" || fail "stale: tkt-job not called"
 job_args="$(grep '^tkt-job|' "$T/calls.log" | head -n 1)"
 BASE="$(git -C "$CLONE" rev-parse origin/main)"
 for want_arg in "$RUN/widget-42.state --slot preflight" "--template $TEMPLATE" "--out-file $RUN/widget-42-preflight-out.md" \
-  "ISSUE=42" "SPEC=42" "REPO=acme/widget" "WORKFLOW_DOC=$CDIR/wf.md" "BASE=$BASE"; do
+  "ISSUE=42" "SPEC=42" "REPO=acme/widget" "WORKFLOW_DOC=$CDIR/wf.md" "BASE=$BASE" "PACK=$RUN/widget-42-sweep.md"; do
   case "$job_args" in *"$want_arg"*) ;; *) fail "stale: tkt-job misses [$want_arg]" ;; esac
 done
 [ -f "$RUN/widget-42-preflight-out.md" ] || fail "stale: no out file"
@@ -200,6 +200,8 @@ setup nofiles TWO FILING
 reload --files; run_start
 want "PREFLIGHT core=2 out=" 1 nofiles
 grep -q '^tkt-job|' "$T/calls.log" || fail "nofiles: tkt-job must run"
+job_args="$(grep '^tkt-job|' "$T/calls.log" | head -n 1)"
+case "$job_args" in *"PACK=none"*) ;; *) fail "nofiles: tkt-job misses [PACK=none]" ;; esac
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "nofiles: plan-sweep must be skipped"
 case "$OUT" in *"sweep=none"*) ;; *) fail "nofiles: digest must mark the sweep skipped" ;; esac
 # stored head drift exits 3 naming state, worktree and pr heads.
