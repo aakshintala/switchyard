@@ -91,9 +91,7 @@ if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
 
 git -C "$worktree" fetch origin >/dev/null 2>&1 || { echo "tkt-fix: fetch failed in $worktree" >&2; exit 2; }
 new_head="$(git -C "$worktree" rev-parse HEAD)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
-# Persist the job's head before the wait and push below: a stop past this
-# point reruns from the worktree HEAD instead of drifting from it.
-t set head "$new_head"
+t set head "$new_head" # persisted before the wait and push, so a rerun does not see drift
 remote_head="$(git -C "$worktree" rev-parse --verify "origin/$branch" 2>/dev/null || true)"
 ci_note=""
 if [ "$remote_head" != "$new_head" ] && { [ -z "$remote_head" ] || git -C "$worktree" merge-base --is-ancestor "$remote_head" "$new_head" 2>/dev/null; }; then
@@ -104,8 +102,6 @@ if [ "$remote_head" != "$new_head" ] && { [ -z "$remote_head" ] || git -C "$work
 fi
 
 grc=0
-# The gate refuses drift, so it runs on the persisted head; the round still
-# counts only on PASS below.
 "$tktgate" "$state" --checks-only --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
 [ "$grc" -eq 0 ] || pass tkt-gate "$tmp/gate.out" "$grc"
