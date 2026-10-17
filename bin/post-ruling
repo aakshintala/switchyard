@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# post-ruling: post a ruling file as an issue comment, copy it into the run
+# directory, adjust a label and drop an inbox line, in one call.
+# Usage: post-ruling <issue> <file> --repo OWNER/NAME --run <dir>
+#        [--remove-label <label>] [--inbox <dir> --sender <name>]
+#        1. gh issue comment <issue> --repo R --body-file <file>.
+#        2. Copy <file> to <run>/<name>-<issue>-ruling-<k>.md, where <name>
+#        is the NAME part of R and k is one more than the largest existing
+#        k for that name and issue in <run>, starting at 1.
+#        3. With --remove-label, gh issue edit <issue> --remove-label <l>.
+#        4. With --inbox, pipe `ruling for #<issue> posted: <url>; copy:
+#        <path>` on stdin to inbox-send in this script's own directory.
+#        --run and --inbox are checked before step 1 (they must exist and
+#        be writable); a missing one exits 1 with nothing posted, so a
+#        precondition never leaves a comment without a copy. --run is not
+#        created. Prints `RULING url=<comment url> copy=<path>`; on a
+#        failed step 3 or 4 the earlier steps stay done and that line is
+#        still printed. Exits 0 done, 1 a step failed, 2 usage.
+set -euo pipefail
+
+usage_text() {
+  echo "usage: post-ruling <issue> <file> --repo OWNER/NAME --run <dir> [--remove-label <label>] [--inbox <dir> --sender <name>]"
+}
+
+usage() {
+  usage_text >&2
+  exit 2
+}
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+
+[ $# -ge 2 ] || usage
+issue="$1"; file="$2"; shift 2
+case "$issue" in ''|*[!0-9]*) usage ;; esac
+case "$file" in -*) usage ;; esac
+repo=""; run=""; label=""; inbox=""; sender=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2 ;;
+    --run) [ $# -ge 2 ] || usage; run="$2"; shift 2 ;;
+    --remove-label) [ $# -ge 2 ] || usage; label="$2"; shift 2 ;;
+    --inbox) [ $# -ge 2 ] || usage; inbox="$2"; shift 2 ;;
+    --sender) [ $# -ge 2 ] || usage; sender="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+[ -n "$repo" ] || usage
+[ -n "$run" ] || usage
+if [ -n "$inbox" ] || [ -n "$sender" ]; then
+  [ -n "$inbox" ] && [ -n "$sender" ] || usage
+fi
+[ -f "$file" ] && [ -r "$file" ] \
+  || { echo "post-ruling: cannot read file $file" >&2; exit 2; }
+
+# Preconditions before step 1: a missing dir exits 1 with nothing posted.
+if [ ! -d "$run" ] || [ ! -w "$run" ]; then
+  echo "post-ruling: run directory $run is missing or not writable" >&2
+  exit 1
+fi
+if [ -n "$inbox" ]; then
+  if [ ! -d "$inbox" ] || [ ! -w "$inbox" ]; then
+    echo "post-ruling: inbox directory $inbox is missing or not writable" >&2
+    exit 1
+  fi
+fi
+
+# Step 1: post the file as a comment; the URL is gh's last stdout line.
+comment_out="$(gh issue comment "$issue" --repo "$repo" --body-file "$file")" || {
+  echo "post-ruling: gh issue comment failed for $repo issue $issue" >&2
+  exit 1
+}
+url="$(printf '%s\n' "$comment_out" | tail -n 1)"
+[ -n "$url" ] || {
+  echo "post-ruling: gh issue comment printed no URL for $repo issue $issue" >&2
+  exit 1
+}
+
+# Step 2: copy the file under a fresh k, one more than the largest
+# existing k for this repo name and issue. Non-numeric suffixes and other
+# issues' copies never move k.
+name="${repo##*/}"
+[ -n "$name" ] || {
+  echo "post-ruling: bad repo '$repo': want OWNER/NAME" >&2
+  exit 1
+}
+k=1
+for f in "$run/$name-$issue-ruling-"*.md; do
+  [ -e "$f" ] || continue
+  base="${f##*/}"
+  n="${base##*-ruling-}"
+  n="${n%.md}"
+  case "$n" in ''|*[!0-9]*) continue ;; esac
+  n="$((10#$n))"
+  [ "$n" -lt "$k" ] || k=$((n + 1))
+done
+dest="$run/$name-$issue-ruling-$k.md"
+cp -- "$file" "$dest" || {
+  echo "post-ruling: cannot copy $file to $dest" >&2
+  exit 1
+}
+
+# Step 3: drop the label. A failure exits 1 with the earlier steps done
+# and their results still printed.
+if [ -n "$label" ]; then
+  gh issue edit "$issue" --repo "$repo" --remove-label "$label" || {
+    printf 'RULING url=%s copy=%s\n' "$url" "$dest"
+    echo "post-ruling: gh issue edit failed for $repo issue $issue" >&2
+    exit 1
+  }
+fi
+
+# Step 4: one inbox line through inbox-send beside this script, never
+# through ~/.agents. A failure exits 1 the same way as step 3.
+if [ -n "$inbox" ]; then
+  printf 'ruling for #%s posted: %s; copy: %s\n' "$issue" "$url" "$dest" \
+    | bash "$script_dir/inbox-send" "$inbox" "$sender" >/dev/null || {
+    printf 'RULING url=%s copy=%s\n' "$url" "$dest"
+    echo "post-ruling: inbox-send failed for $inbox" >&2
+    exit 1
+  }
+fi
+
+printf 'RULING url=%s copy=%s\n' "$url" "$dest"

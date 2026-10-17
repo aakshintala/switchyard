@@ -18,6 +18,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-post-ruling.XXXXXX")"
 mkdir -p "$T/tmp" "$T/home"
 export HOME="$T/home" TMPDIR="$T/tmp"
 trap 'rm -rf "$T"' EXIT
+export T URL
 
 # --- fake gh: logs argv, prints a fixed comment URL for issue comment.
 # Touch $T/comment-fail ($T/edit-fail) to fail that call. The posted body
