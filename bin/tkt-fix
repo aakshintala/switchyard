@@ -43,18 +43,6 @@ worktree="$(t get worktree)"; run="$(t get run)"; pr="$(t get pr)"
 mkdir -p "$run"
 round="$(t get round 2>/dev/null || printf '0')"; case "$round" in ''|*[!0-9]*) round=0;; esac
 slot="fix$((round + 1))"
-if stored="$(t get head 2>/dev/null)"; then
-  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
-  pr_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)" || { echo "tkt-fix: cannot read PR $pr head" >&2; exit 2; }
-  job="$(t get "job.$slot" 2>/dev/null || true)"; tried="$(t get "try.$slot" 2>/dev/null || true)"
-  if [ "$stored" = "$actual" ] && { [ "$pr_head" = "$stored" ] || { [ -n "$job" ] && git -C "$worktree" merge-base --is-ancestor "$pr_head" "$stored" 2>/dev/null; }; }; then :;
-  elif [ -n "$job" ] && [ -n "$tried" ] && git -C "$worktree" merge-base --is-ancestor "$stored" "$actual" 2>/dev/null && { [ "$pr_head" = "$stored" ] || [ "$pr_head" = "$actual" ]; }; then
-    t set head "$actual"
-  else echo "tkt-fix: head drift: state $state head=$stored worktree $worktree HEAD=$actual pr $pr head=$pr_head" >&2; exit 3; fi
-fi
-[ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
-[ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
-
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -64,6 +52,15 @@ emit() {
   { printf 'TKT tkt-fix %s log=%s\n' "$verdict" "$logpath"; [ $# -eq 0 ] || printf '%s\n' "$@" | head -n 40; } >"$logpath"
   cat "$logpath"; t journal "tkt-fix $verdict"; exit "$ec"
 }
+# No job for this slot: state, origin and worktree must agree exactly.
+if [ -z "$(t get "job.$slot" 2>/dev/null || true)" ] && stored="$(t get head 2>/dev/null)"; then
+  git -C "$worktree" fetch origin >/dev/null 2>&1 || { echo "tkt-fix: fetch failed in $worktree" >&2; exit 2; }
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
+  origin="$(git -C "$worktree" rev-parse --verify "origin/$branch" 2>/dev/null || true)"
+  [ "$stored" = "$actual" ] && [ "$actual" = "$origin" ] || emit "DRIFT" 3 "state head=$stored" "origin/$branch=$origin" "worktree HEAD=$actual"
+fi
+[ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
+[ -r "$findings" ] || { echo "tkt-fix: cannot read findings: $findings" >&2; exit 2; }
 
 pass() {
   first="$(head -n 1 "$2")"; rest="$(tail -n +2 "$2")"
@@ -84,7 +81,6 @@ else
   [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
   args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" --gate-from-plan --expect-commits)
 fi
-t set "try.$slot" "$(git -C "$worktree" rev-parse HEAD)"
 jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
 if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
 [ "$jrc" -eq 0 ] || pass tkt-job "$tmp/job.out" "$jrc"

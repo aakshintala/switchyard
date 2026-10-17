@@ -248,15 +248,23 @@ bash "$TKT" "$S" 2>/dev/null && fail "bare flags exited 0"
 bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
 [ "$?" = "2" ] || fail "resume without prompt exited $?, want 2"
 
-# 8. A remotely advanced PR exits 3 before dispatching a second job.
-setup_case prdrift
-printf '0000000000000000000000000000000000000001' >"$T/prhead"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "pr drift exited 0"
-[ "$?" = "3" ] || fail "pr drift exited $?, want 3"
-grep -q "head drift" "$T/stderr" || fail "drift message missing from stderr"
-grep -q "job|" "$T/calls.log" && fail "fix job dispatched despite PR drift"
+# 8. DRIFT A: forward worktree commit with no job recorded exits 3.
+setup_case drifta
+printf 'outside\n' >"$WT/evil.txt"
+git -C "$WT" add evil.txt
+git -C "$WT" commit -qm "outside: evil.txt"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+ORIGIN="$(git -C "$WT" rev-parse "origin/tkt-529")"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "drift-a exited 0"
+[ "$?" = "3" ] || fail "drift-a exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "bad verdict: $(head -n 1 <<<"$out")"
+grep -q "state head=$OLD" <<<"$out" || fail "state head missing from DRIFT digest"
+grep -q "origin/tkt-529=$ORIGIN" <<<"$out" || fail "origin sha missing from DRIFT digest"
+grep -q "worktree HEAD=$NEW" <<<"$out" || fail "worktree sha missing from DRIFT digest"
+grep -q "job|" "$T/calls.log" && fail "fix job dispatched on DRIFT A"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "drift-a commit was pushed"
 
-# 9. Crash before the push: the stored fix job's commits are adopted.
+# 9. Crash before the push: the recorded job reruns, then wait and push.
 setup_case crashunpushed
 printf 'fixed\n' >"$WT/fix.txt"
 git -C "$WT" add fix.txt
@@ -264,7 +272,6 @@ git -C "$WT" commit -qm "fix: fix.txt"
 NEW="$(git -C "$WT" rev-parse HEAD)"
 printf 'ORIGIN:%s:tkt-529' "$CDIR/origin.git" >"$T/prhead"
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
-bash "$TKT_STATE" "$S" set try.fix1 "$OLD" >/dev/null
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "crash rerun exited $?"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
@@ -280,7 +287,6 @@ git -C "$WT" commit -qm "fix: fix.txt"
 git -C "$WT" push -q origin tkt-529
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
-bash "$TKT_STATE" "$S" set try.fix1 "$OLD" >/dev/null
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "pushed crash rerun exited $?"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
@@ -311,42 +317,22 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "push-pending rerun exi
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "pending push did not land"
 
-# 13. An unrelated commit with only a stored job id exits 3: no dispatch, no push.
-setup_case stranger
-printf 'outside\n' >"$WT/evil.txt"
-git -C "$WT" add evil.txt
-git -C "$WT" commit -qm "outside: evil.txt"
-bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
-printf 'pushed' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "stranger commit exited 0"
-[ "$?" = "3" ] || fail "stranger commit exited $?, want 3"
-grep -q "head drift" "$T/stderr" || fail "drift message missing from stderr"
-grep -q "job|" "$T/calls.log" && fail "fix job dispatched for an unattributed commit"
-[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "stranger commit was pushed"
-[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "head moved on a rejected entry"
-
-# 14. A rewound remote with no pending fix job exits 3 instead of dispatching.
-setup_case rewind
+# 13. DRIFT B: origin behind state with no job recorded exits 3.
+setup_case driftb
 printf 'fixed\n' >"$WT/fix.txt"
 git -C "$WT" add fix.txt
 git -C "$WT" commit -qm "fix: fix.txt"
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
-printf '%s' "$OLD" >"$T/prhead"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "rewind exited 0"
-[ "$?" = "3" ] || fail "rewind exited $?, want 3"
-grep -q "head drift" "$T/stderr" || fail "drift message missing from stderr"
-grep -q "job|" "$T/calls.log" && fail "fix job dispatched after a remote rewind"
-
-# 15. Phase progress without the stored job still exits 3 on forward drift.
-setup_case tryonly
-printf 'outside\n' >"$WT/evil.txt"
-git -C "$WT" add evil.txt
-git -C "$WT" commit -qm "outside: evil.txt"
-bash "$TKT_STATE" "$S" set try.fix1 "$OLD" >/dev/null
-printf 'pushed' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "try-only entry exited 0"
-[ "$?" = "3" ] || fail "try-only entry exited $?, want 3"
-grep -q "job|" "$T/calls.log" && fail "fix job dispatched without a stored job id"
+ORIGIN="$(git -C "$WT" rev-parse "origin/tkt-529")"
+[ "$ORIGIN" = "$OLD" ] || fail "origin moved in drift-b setup"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "drift-b exited 0"
+[ "$?" = "3" ] || fail "drift-b exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "bad verdict: $(head -n 1 <<<"$out")"
+grep -q "state head=$NEW" <<<"$out" || fail "state head missing from DRIFT digest"
+grep -q "origin/tkt-529=$ORIGIN" <<<"$out" || fail "origin sha missing from DRIFT digest"
+grep -q "worktree HEAD=$NEW" <<<"$out" || fail "worktree sha missing from DRIFT digest"
+grep -q "job|" "$T/calls.log" && fail "fix job dispatched on DRIFT B"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "drift-b pushed"
 
 echo "tkt-fix assertions passed"
