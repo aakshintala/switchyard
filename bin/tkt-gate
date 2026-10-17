@@ -111,13 +111,23 @@ if [ -n "$plan" ] && [ ! -r "$plan" ]; then
   exit 2
 fi
 
-# A stored head the worktree left behind stops the run before it acts.
+# A stored head the worktree left behind stops the run before it acts. With
+# a PR number in state, the PR's head must agree with both.
 if stored_head="$(tkt get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
     echo "tkt-gate: cannot read worktree HEAD: $worktree" >&2
     exit 2
   }
-  if [ "$stored_head" != "$actual" ]; then
+  if pr="$(tkt get pr 2>/dev/null)"; then
+    pr_head="$(gh pr view "$pr" --json headRefOid --jq .headRefOid)" || {
+      echo "tkt-gate: cannot read PR $pr head" >&2
+      exit 2
+    }
+    if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
+      echo "tkt-gate: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr $pr head=$pr_head" >&2
+      exit 3
+    fi
+  elif [ "$stored_head" != "$actual" ]; then
     echo "tkt-gate: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual" >&2
     exit 3
   fi

@@ -21,7 +21,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-gate.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
-export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1
+export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 T
 
 # Stub plan-gate: print the canned gate command for the case.
 cat >"$T/bin/plan-gate" <<EOF
@@ -449,6 +449,51 @@ run_gate
 grep -q "0000000000000000000000000000000000000000" "$CDIR/stderr.txt" || fail "drift names the stored head"
 grep -q "$H" "$CDIR/stderr.txt" || fail "drift names the worktree HEAD"
 [ ! -f "$T/gate-ran" ] || fail "drift runs no gate"
+
+# Stub gh: answers `pr view <n> --json headRefOid` from the canned head file,
+# as test/ship-pr.sh does.
+gh() {
+  echo "gh $*" >>"$T/gh.log"
+  if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+    h="$(cat "$T/pr-head")"
+    case "$*" in
+      *--jq*) printf '%s\n' "$h" ;;
+      *) printf '{"headRefOid":"%s"}\n' "$h" ;;
+    esac
+    return 0
+  fi
+  echo "fake gh: unsupported: gh $*" >&2
+  return 2
+}
+export -f gh
+
+# --- PR drift: state head, the worktree HEAD and the PR head agree ---
+setup_case pr-ok
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+printf '%s\n' "$H" >"$T/pr-head"
+run_gate
+[ "$RC" -eq 0 ] || fail "pr match exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "pr match"
+
+# --- PR drift: a PR head the state never saw exits 3 naming every head ---
+setup_case pr-drift
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+printf '0000000000000000000000000000000000000000\n' >"$T/pr-head"
+run_gate
+[ "$RC" -eq 3 ] || fail "pr drift exits 3"
+grep -q "$H" "$CDIR/stderr.txt" || fail "pr drift names the worktree HEAD"
+grep -q "0000000000000000000000000000000000000000" "$CDIR/stderr.txt" || fail "pr drift names the PR head"
+[ ! -f "$T/gate-ran" ] || fail "pr drift runs no gate"
 
 # --- a held lock exits 2 naming the pid, and runs no gate ---
 setup_case locked
