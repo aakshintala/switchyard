@@ -144,10 +144,11 @@ do_verify() {
   fi
   round="$(t get verifier_round 2>/dev/null || printf '0')"
   case "$round" in ''|*[!0-9]*) round=0 ;; esac
-  # Two Verifier rounds, then confirm: a third needs a confirm at this round.
-  if [ "$round" -ge 2 ] && [ "$(t get confirmed_for 2>/dev/null || true)" != "$round" ]; then
-    emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan confirm --edits <file>, or send the open lines to triage"
+  # The confirm round is the final pass: after it the open lines go to triage.
+  if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
+    emit "ROUND-LIMIT round=$round confirm=done" 1 "the confirm round is used; send the open lines to triage"
   fi
+  [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan confirm --edits <file>, or send the open lines to triage"
   args=(PLAN="$plan" BASE="$base")
   if [ -n "$extra" ]; then
     [ -r "$extra" ] || { echo "tkt-plan: cannot read extra file: $extra" >&2; exit 2; }
@@ -172,6 +173,9 @@ do_confirm() {
   done
   [ -n "$edits" ] || usage
   [ -r "$edits" ] || { echo "tkt-plan: cannot read edits file: $edits" >&2; exit 2; }
+  if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
+    emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage"
+  fi
   t require plan
   plan="$(t get plan)"
   [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }

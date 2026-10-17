@@ -185,7 +185,7 @@ run_plan verify
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "ROUND-LIMIT"
 [ "$(grep -c '^job|' "$T/stub.log")" -eq 2 ] || fail "ROUND-LIMIT starts no third job"
 
-# --- confirm records the edits, and the third round proceeds ---
+# --- confirm is the final pass: it records the round, then verify stops ---
 printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "confirm PLAN-OK exits 0"
@@ -193,13 +193,32 @@ expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "confirm records the round it covers"
 grep -q "slot=confirm" "$T/stub.log" || fail "confirm runs the confirm slot"
 grep -q "confirm.md" "$T/stub.log" || fail "confirm fills the confirm brief"
+jobs_before="$(grep -c '^job|' "$T/stub.log")"
 run_plan verify
-[ "$RC" -eq 0 ] || fail "a confirmed third round exits 0"
-expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "confirmed third round"
-[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "3" ] || fail "the third round counts"
+[ "$RC" -eq 1 ] || fail "verify after confirm exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify after confirm"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify after confirm starts no job"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "a second confirm exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "second confirm"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "a second confirm starts no job"
+
+# --- a LINES confirm still spends the one confirm round ---
+setup_case confirm-lines
+rebase_plan
+printf 'lines' >"$T/mode"
 run_plan verify
-[ "$RC" -eq 1 ] || fail "a fourth round exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=3 log=*" "fourth round"
+[ "$RC" -eq 1 ] || fail "confirm-lines round 1 exits 1"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "confirm-lines round 2 exits 1"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "confirm LINES exits 1"
+expect_verdict "TKT tkt-plan LINES n=* out=*confirm-out.md log=*" "confirm LINES"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "verify after a LINES confirm exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify after LINES confirm"
+printf 'ok' >"$T/mode"
 
 # --- a Verifier ASK passes through with its digest ---
 setup_case ask
