@@ -50,7 +50,7 @@ case "\$cmd" in
     done
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
-    printf 'run|%s|%s|%s|%s\n' "\$model" "\$cwd" "\$gate" "\$prompt" >>"\$log"
+    printf 'run|model=%s|cwd=%s|gate=%s|prompt=%s\n' "\$model" "\$cwd" "\$gate" "\$prompt" >>"\$log"
     printf 'stub-%s\n' "\$n"
     ;;
   resume)
@@ -64,7 +64,7 @@ case "\$cmd" in
     done
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
-    printf 'resume|%s|%s|stub-%s\n' "\$id" "\$prompt" "\$n" >>"\$log"
+    printf 'resume|id=%s|prompt=%s|new=stub-%s\n' "\$id" "\$prompt" "\$n" >>"\$log"
     printf 'stub-%s\n' "\$n"
     ;;
   watch)
@@ -226,11 +226,11 @@ grep -qx "result line 5" <<<"$OUT" && fail "DONE digest drops older text lines"
 grep -qx "gate log line 6" <<<"$OUT" || fail "DONE digest keeps 10 gate lines"
 grep -qx "gate log line 5" <<<"$OUT" && fail "DONE digest drops older gate lines"
 [ "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')" -le 41 ] || fail "DONE stdout is at most 41 lines"
-grep -q "model=test-model" "$T/stub.log" || fail "DONE passes the state model"
+grep -q "|model=test-model|" "$T/stub.log" || fail "DONE passes the state model"
 grep -q "prompt=$CDIR/run/switchyard-502-lane-1.md" "$T/stub.log" || fail "DONE writes brief -lane-1.md"
 [ "$(bash "$TKT_STATE" "$S" get job.lane)" = "stub-1" ] || fail "DONE stores job.lane"
-grep -q "dispatch slot=lane id=stub-1" "$CDIR/run/switchyard-502.journal" || fail "DONE journals the dispatch"
-grep -q "DONE id=stub-1" "$CDIR/run/switchyard-502.journal" || fail "DONE journals the verdict"
+grep -q "dispatch slot=lane id=stub-1" "$CDIR/tkt.journal" || fail "DONE journals the dispatch"
+grep -q "DONE id=stub-1" "$CDIR/tkt.journal" || fail "DONE journals the verdict"
 # A second call re-prints the same verdict without a new dispatch.
 run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 0 ] || fail "re-print exits 0"
@@ -331,6 +331,8 @@ setup_case chain
 reset_stub
 make_record stub-1 DONE 0 1 2 0 none stub-2
 make_record stub-2 DONE 0 1 2 0
+mkdir -p "$T/tmp/delegate-jobs"
+cp "$T/records/stub-2.json" "$T/tmp/delegate-jobs/stub-2.json"
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "chain exits 0"
 expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS log=*" "chain"
@@ -343,7 +345,7 @@ make_record stub-1 DONE 0 1 2 0
 run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md"
 [ "$RC" -eq 0 ] || fail "resume exits 0"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=1 gate=PASS log=*" "resume"
-grep -q "^resume|old-9|$T/resume-prompt.md|stub-1$" "$T/stub.log" || fail "resume calls delegate resume"
+grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" || fail "resume calls delegate resume"
 [ "$(bash "$TKT_STATE" "$S" get job.lane)" = "stub-1" ] || fail "resume stores the new id"
 
 # --- crash-rerun: a stored live id watches only ---
@@ -380,7 +382,7 @@ reset_stub
 make_record stub-1 DONE none 0 1 0
 run_job --slot lane --template "$T/tmpl-basic.md" ISSUE=999 FOO=bar
 [ "$RC" -eq 0 ] || fail "extra flags exit 0"
-brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|//')"
+brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|prompt=//')"
 grep -q "Issue 999" "$brief" || fail "a flag beats the state value"
 grep -q "Issue 502" "$brief" && fail "the state value loses to the flag"
 
@@ -392,7 +394,7 @@ printf 'extra=%s\n' "$T/extra.md" >>"$S"
 printf 'plan=%s\n' "$T/plan.md" >>"$S"
 run_job --slot lane --template "$T/tmpl-full.md"
 [ "$RC" -eq 0 ] || fail "fills exit 0"
-brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|//')"
+brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|prompt=//')"
 grep -q "extra words here" "$brief" || fail "EXTRA reads the state file"
 grep -q "bin/tkt-job" "$brief" || fail "FENCE reads the plan Files"
 grep -q "test/tkt-job.sh" "$brief" || fail "FENCE reads every plan file"
@@ -403,7 +405,7 @@ printf 'extra=%s\n' "$T/extra.md" >>"$S"
 printf 'plan=%s\n' "$T/plan.md" >>"$S"
 run_job --slot lane --template "$T/tmpl-full.md" FENCE=custom
 [ "$RC" -eq 0 ] || fail "FENCE flag exits 0"
-brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|//')"
+brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|prompt=//')"
 grep -q "custom" "$brief" || fail "a FENCE flag beats the plan"
 
 # --- a second dispatch for one slot takes a fresh brief number ---
@@ -435,7 +437,7 @@ run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
 [ "$RC" -eq 0 ] || fail "gate dispatch exits 0"
 gate_sh="$CDIR/run/switchyard-502-gate.sh"
 [ -f "$gate_sh" ] || fail "the gate script is written"
-grep -q "^run|test-model|$WT|bash $gate_sh|" "$T/stub.log" || fail "delegate gets --gate 'bash <script>'"
+grep -q "gate=bash $gate_sh" "$T/stub.log" || fail "delegate gets --gate 'bash <script>'"
 gout="$(bash "$gate_sh" 2>&1)"; grc=$?
 [ "$grc" -eq 3 ] || fail "a failing gate script exits 3 (rc=$grc)"
 grep -q "GATE FAIL rc=3" <<<"$gout" || fail "a failing gate script prints GATE FAIL rc=3"
@@ -476,7 +478,7 @@ S="$CDIR/nomodel.state"
 make_record stub-1 DONE none 0 1 0
 run_job --slot lane --template "$T/tmpl-basic.md" --model flag-model
 [ "$RC" -eq 0 ] || fail "--model exits 0"
-grep -q "model=flag-model" "$T/stub.log" || fail "--model beats the state"
+grep -q "|model=flag-model|" "$T/stub.log" || fail "--model beats the state"
 
 # --- a held lock exits 2 naming the pid, and dispatches nothing ---
 setup_case locked
@@ -499,5 +501,70 @@ grep -q "0000000000000000000000000000000000000000" "$CDIR/stderr.txt" || fail "d
 grep -q "$H" "$CDIR/stderr.txt" || fail "drift names the worktree HEAD"
 grep -q "$WT" "$CDIR/stderr.txt" || fail "drift names the worktree"
 grep -q "^run|" "$T/stub.log" && fail "drift dispatches nothing"
+
+# --- remaining usage and precondition arms, each exits 2 without dispatch ---
+setup_case usage-misc
+reset_stub
+run_job --template "$T/tmpl-basic.md"
+[ "$RC" -eq 2 ] || fail "a missing --slot exits 2"
+run_job --slot lane --template "$T/tmpl-basic.md" --bogus
+[ "$RC" -eq 2 ] || fail "an unknown flag exits 2"
+run_job --slot lane --template "$T/tmpl-basic.md" --brief "$T/brief.md"
+[ "$RC" -eq 2 ] || fail "--template with --brief exits 2"
+run_job --slot lane
+[ "$RC" -eq 2 ] || fail "no brief source exits 2"
+run_job --slot lane --brief "$T/brief.md" --prompt "$T/resume-prompt.md"
+[ "$RC" -eq 2 ] || fail "--prompt without --resume exits 2"
+run_job --slot lane --template "$T/tmpl-basic.md" --resume old-9 --prompt "$T/resume-prompt.md"
+[ "$RC" -eq 2 ] || fail "--resume tested above with --template exits 2"
+run_job --slot lane --template "$T/no-such-template.md"
+[ "$RC" -eq 2 ] || fail "an unreadable template exits 2"
+run_job --slot lane --brief "$T/no-such-brief.md"
+[ "$RC" -eq 2 ] || fail "an unreadable brief exits 2"
+grep -q "^run|" "$T/stub.log" && fail "usage errors dispatch nothing"
+[ "$(grep -c "^watch|" "$T/stub.log")" -eq 0 ] || fail "usage errors watch nothing"
+
+# --- --gate-from-plan without a plan key exits 2 naming it ---
+setup_case gate-no-plan
+reset_stub
+run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
+[ "$RC" -eq 2 ] || fail "--gate-from-plan without plan exits 2"
+grep -q "plan" "$CDIR/stderr.txt" || fail "--gate-from-plan without plan names plan"
+
+# --- a pid-less lock still blocks with exit 2 ---
+setup_case lock-no-pid
+reset_stub
+mkdir "$S.lock"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 2 ] || fail "a pid-less lock exits 2"
+grep -q "^run|" "$T/stub.log" && fail "a pid-less lock dispatches nothing"
+rm -rf "$S.lock"
+
+# --- DONE_WITH_CONCERNS with no gate is still CONCERNS ---
+setup_case concerns-nogate
+reset_stub
+make_record stub-1 DONE_WITH_CONCERNS none 1 2 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "gateless CONCERNS exits 1"
+expect_verdict "TKT tkt-job CONCERNS id=stub-1 log=*" "gateless CONCERNS"
+
+# --- empty result text writes an empty report and no report key ---
+setup_case empty-text
+reset_stub
+make_record stub-1 DONE none 0 0 0
+run_job --slot lane --template "$T/tmpl-basic.md" --out-file "$CDIR/report.md"
+[ "$RC" -eq 0 ] || fail "empty text exits 0"
+[ ! -s "$CDIR/report.md" ] || fail "empty text writes an empty report"
+case "$(first_line)" in *report=*) fail "empty text adds no report key";; esac
+
+# --- no stored head and an unreadable worktree HEAD still logs ---
+setup_case no-head-key
+reset_stub
+grep -v '^head=' "$S" | sed 's|^worktree=.*|worktree=/tmp/does-not-exist|' >"$CDIR/nohead.state"
+S="$CDIR/nohead.state"
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "missing git HEAD exits 0"
+case "$(first_line)" in *nohead*) ;; *) fail "missing git HEAD logs under nohead";; esac
 
 echo "tkt-job: all cases passed"

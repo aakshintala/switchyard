@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+# tkt-job: fill a brief, run one delegated job, wait for it and digest its record.
+# The ticket-orchestrator job engine (orch-tools-spec section 5, C2): probe the
+# shared lock, drift-check state head against the worktree, reuse a stored job
+# id, fill the brief from flags then state, write the gate script, dispatch
+# through delegate, watch with no timeout, follow supersededBy to the newest
+# record, and print one verdict line plus a digest of at most 40 lines.
+# Every state read and write goes through tkt-state; the model comes from
+# --model or state model.<slot> and is never picked here.
+# Usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] |
+#   --brief <file> | --resume <job id> --prompt <file>) [--model <id>]
+#   [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]
+# Tools: TKT_BIN holds delegate, fill-brief and plan-gate (default
+# ~/.agents/bin); tkt-state sits next to this script. No --timeout ever reaches
+# delegate watch: the driver's wait owns the bound.
+set -euo pipefail
+
+usage() {
+  echo "usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] | --brief <file> | --resume <job id> --prompt <file>) [--model <id>] [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]" >&2
+  exit 2
+}
+
+[ $# -ge 1 ] || usage
+state="$1"
+shift
+
+slot=""
+template=""
+brief=""
+resume=""
+prompt=""
+model=""
+gate=""
+gate_from_plan=0
+expect_commits=0
+out_file=""
+fills=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --slot) [ $# -ge 2 ] || usage; slot="$2"; shift 2 ;;
+    --template) [ $# -ge 2 ] || usage; template="$2"; shift 2 ;;
+    --brief) [ $# -ge 2 ] || usage; brief="$2"; shift 2 ;;
+    --resume) [ $# -ge 2 ] || usage; resume="$2"; shift 2 ;;
+    --prompt) [ $# -ge 2 ] || usage; prompt="$2"; shift 2 ;;
+    --model) [ $# -ge 2 ] || usage; model="$2"; shift 2 ;;
+    --gate) [ $# -ge 2 ] || usage; gate="$2"; shift 2 ;;
+    --gate-from-plan) gate_from_plan=1; shift ;;
+    --expect-commits) expect_commits=1; shift ;;
+    --out-file) [ $# -ge 2 ] || usage; out_file="$2"; shift 2 ;;
+    --help|-h) usage ;;
+    -* ) usage ;;
+    *=*) fills+=("$1"); shift ;;
+    *) usage ;;
+  esac
+done
+[ -n "$slot" ] || usage
+# A prompt file only resumes; a resume needs its prompt and takes no fresh
+# brief or gate. The two gate sources never combine.
+{ [ -z "$prompt" ] || [ -n "$resume" ]; } || usage
+{ [ -z "$resume" ] || [ -n "$prompt" ]; } || usage
+{ [ -z "$resume" ] || { [ -z "$template" ] && [ -z "$brief" ] && [ -z "$gate" ] && [ "$gate_from_plan" -eq 0 ]; }; } || usage
+{ [ "$gate_from_plan" -eq 0 ] || [ -z "$gate" ]; } || usage
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+tkt_state="$script_dir/tkt-state"
+bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+delegate="$bin_dir/delegate"
+fillbrief="$bin_dir/fill-brief"
+plangate="$bin_dir/plan-gate"
+
+tkt() {
+  "$tkt_state" "$state" "$@"
+}
+
+# Probe the shared lock and release it at once: the delegate wait below
+# outlives any lock, and tkt-state locks each write itself.
+lockdir="$state.lock"
+if ! mkdir "$lockdir" 2>/dev/null; then
+  pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ]; then
+    echo "tkt-job: state locked by pid $pid" >&2
+  else
+    echo "tkt-job: state locked" >&2
+  fi
+  exit 2
+fi
+rmdir "$lockdir"
+
+tkt require repo issue run worktree
+repo="$(tkt get repo)"
+issue="$(tkt get issue)"
+run="$(tkt get run)"
+worktree="$(tkt get worktree)"
+mkdir -p "$run"
+
+# A stored head the worktree left behind stops the run before it acts.
+if stored_head="$(tkt get head 2>/dev/null)"; then
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
+    echo "tkt-job: cannot read worktree HEAD: $worktree" >&2
+    exit 2
+  }
+  if [ "$stored_head" != "$actual" ]; then
+    echo "tkt-job: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual" >&2
+    exit 3
+  fi
+fi
+
+# The plan's Files section as a fence list: one path per line, bullets and
+# backticks stripped, notes kept as brief prose.
+fence_from_plan() {
+  awk 'BEGIN{in_f=0} /^## Files([[:space:]]|$)/{in_f=1;next} in_f&&/^## /{exit} in_f{print}' "$1" \
+    | sed -e 's/^[[:space:]]*[-*][[:space:]]*//' -e 's/`//g' \
+    -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -v '^$' || true
+}
+
+stored="$(tkt get "job.$slot" 2>/dev/null || true)"
+fresh=0
+jobid=""
+
+if [ -n "$resume" ]; then
+  [ -r "$prompt" ] || {
+    echo "tkt-job: cannot read prompt: $prompt" >&2
+    exit 2
+  }
+  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" | head -n 1)"
+  tkt set "job.$slot" "$jobid"
+  tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"
+  fresh=1
+elif [ -n "$stored" ]; then
+  # A stored id never dispatches again: crash-reruns only watch.
+  jobid="$stored"
+else
+  { [ -n "$template" ] || [ -n "$brief" ]; } || usage
+  { [ -z "$template" ] || [ -z "$brief" ]; } || usage
+  if [ -n "$template" ]; then
+    [ -r "$template" ] || {
+      echo "tkt-job: cannot read template: $template" >&2
+      exit 2
+    }
+    keys="$(grep -oE '__[A-Z][A-Z0-9_]*__' "$template" | sort -u | sed -e 's/^__//' -e 's/__$//' || true)"
+    args=()
+    for k in $keys; do
+      v=""
+      found=0
+      for f in ${fills[@]+"${fills[@]}"}; do
+        if [ "${f%%=*}" = "$k" ]; then
+          v="${f#*=}"
+          found=1
+          break
+        fi
+      done
+      # Flags win; FENCE falls back to the plan's Files, the rest to state.
+      # EXTRA names a file, so the state value travels with an @ prefix.
+      if [ "$found" -eq 0 ] && [ "$k" = "FENCE" ]; then
+        if plan="$(tkt get plan 2>/dev/null)" && [ -r "$plan" ]; then
+          derived="$(fence_from_plan "$plan")"
+          if [ -n "$derived" ]; then
+            v="$derived"
+            found=1
+          fi
+        fi
+      fi
+      if [ "$found" -eq 0 ] && [ "$k" = "EXTRA" ]; then
+        if e="$(tkt get extra 2>/dev/null)"; then
+          case "$e" in
+            @*) v="$e" ;;
+            *) v="@$e" ;;
+          esac
+          found=1
+        fi
+      fi
+      if [ "$found" -eq 0 ]; then
+        lower="$(printf '%s' "$k" | tr 'A-Z' 'a-z')"
+        if sv="$(tkt get "$lower" 2>/dev/null)"; then
+          v="$sv"
+          found=1
+        fi
+      fi
+      if [ "$found" -eq 0 ]; then
+        echo "tkt-job: template needs $k: no flag and no state value" >&2
+        exit 2
+      fi
+      args+=("$k=$v")
+    done
+    # Only keys the template names reach fill-brief; stray flags stay out.
+    k=1
+    while [ -e "$run/$repo-$issue-$slot-$k.md" ]; do
+      k=$((k + 1))
+    done
+    brief="$run/$repo-$issue-$slot-$k.md"
+    "$fillbrief" --out "$brief" "$template" ${args[@]+"${args[@]}"} >&2
+  else
+    [ -r "$brief" ] || {
+      echo "tkt-job: cannot read brief: $brief" >&2
+      exit 2
+    }
+  fi
+  if [ "$gate_from_plan" -eq 1 ]; then
+    tkt require plan
+    plan="$(tkt get plan)"
+    gate_cmd="$("$plangate" "$plan")" || exit 2
+    # The gate script keeps the whole chain inside the redirected block and is
+    # judged by its exit code, never the log line. printf carries the gate
+    # literally: nothing expands while the script is written.
+    env_prefix=""
+    if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
+      env_prefix="$e "
+    fi
+    script="$run/$repo-$issue-gate.sh"
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf '# Written by tkt-job: delegate runs it as the job-end gate.\n'
+      printf 'log=%s\n' "$run/$repo-$issue-gate-$(date +%s).log"
+      printf '{ %s%s ; } > "$log" 2>&1\n' "$env_prefix" "$gate_cmd"
+      printf 'rc=$?\n'
+      printf 'tail -n 20 "$log"\n'
+      printf 'if [ "$rc" -eq 0 ]; then echo "GATE PASS"; else echo "GATE FAIL rc=$rc"; fi\n'
+      printf 'exit "$rc"\n'
+    } >"$script"
+    gate="bash $script"
+  fi
+  if [ -z "$model" ]; then
+    model="$(tkt get "model.$slot" 2>/dev/null)" || {
+      echo "tkt-job: missing key: model.$slot (no --model and no state model.$slot)" >&2
+      exit 2
+    }
+  fi
+  if [ -n "$gate" ]; then
+    jobid="$("$delegate" run --model "$model" --cwd "$worktree" --gate "$gate" --prompt-file "$brief" | head -n 1)"
+  else
+    jobid="$("$delegate" run --model "$model" --cwd "$worktree" --prompt-file "$brief" | head -n 1)"
+  fi
+  tkt set "job.$slot" "$jobid"
+  tkt journal "tkt-job dispatch slot=$slot id=$jobid"
+  fresh=1
+fi
+
+"$delegate" watch "$jobid" >&2
+jobsdir="${TMPDIR:-/tmp}/delegate-jobs"
+record="$jobsdir/$jobid.json"
+
+# Follow supersededBy to the newest record; a loop is unrecognised, not a hang.
+broken=0
+seen=" $jobid "
+while [ -f "$record" ]; do
+  sup="$(jq -r '.supersededBy // empty' "$record" 2>/dev/null || true)"
+  [ -n "$sup" ] || break
+  case "$seen" in
+    *" $sup "*) broken=1; break ;;
+  esac
+  seen="$seen$sup "
+  jobid="$sup"
+  record="$jobsdir/$jobid.json"
+done
+
+verdict=""
+digest="id=$jobid"
+ec=0
+if [ "$broken" -eq 1 ] || [ ! -f "$record" ]; then
+  verdict="UNKNOWN id=$jobid"
+  ec=3
+else
+  status="$(jq -r '.result.status // .status // ""' "$record" 2>/dev/null || true)"
+  text="$(jq -j -r '.result.text // ""' "$record" 2>/dev/null || true)"
+  gate_exit="$(jq -r '.result.gateResult | if . == null then "none" elif .exitCode != null then (.exitCode | tostring) elif .passed == true then "0" else "1" end' "$record" 2>/dev/null || true)"
+  [ -n "$gate_exit" ] || gate_exit="none"
+  gate_path="$(jq -r '.result.gateResult.outputPath // ""' "$record" 2>/dev/null || true)"
+  gate_tail="$(jq -r '.result.gateResult.outputTail // ""' "$record" 2>/dev/null || true)"
+  ncommits="$(jq -r '.result.changeSet.newCommits // [] | length' "$record" 2>/dev/null || true)"
+  [ -n "$ncommits" ] || ncommits=0
+  nuncomm="$(jq -r '.result.changeSet.uncommittedFiles // [] | length' "$record" 2>/dev/null || true)"
+  [ -n "$nuncomm" ] || nuncomm=0
+  head_after="$(jq -r '.result.changeSet.headAfter // ""' "$record" 2>/dev/null || true)"
+  concerns="$(jq -j -r 'if .result.concerns == null then "" elif (.result.concerns | type) == "array" then ((.result.concerns | map(tostring)) | join("\n")) else (.result.concerns | tostring) end' "$record" 2>/dev/null || true)"
+  gate_word="none"
+  [ "$gate_exit" = "none" ] || gate_word="PASS"
+  gate_failed=0
+  if [ "$gate_exit" != "none" ] && [ "$gate_exit" != "0" ]; then
+    gate_failed=1
+    gate_word="FAIL"
+  fi
+  case "$status" in
+    NEEDS_CONTEXT) verdict="ASK id=$jobid"; ec=1 ;;
+    BLOCKED) verdict="BLOCKED id=$jobid"; ec=1 ;;
+    ERROR|STALLED|CANCELLED) verdict="JOB-ERROR status=$status id=$jobid"; ec=1 ;;
+    DONE|DONE_WITH_CONCERNS)
+      # A failed gate script rules over the status word.
+      if [ "$gate_failed" -eq 1 ]; then
+        verdict="GATE-FAIL rc=$gate_exit gatelog=${gate_path:--}"
+        ec=1
+      elif [ "$status" = "DONE_WITH_CONCERNS" ]; then
+        verdict="CONCERNS id=$jobid"
+        ec=1
+      elif [ "$expect_commits" -eq 1 ] && [ "$ncommits" -eq 0 ]; then
+        verdict="NO-COMMITS id=$jobid gate=$gate_word"
+        ec=1
+      else
+        verdict="DONE id=$jobid head=$head_after commits=$ncommits gate=$gate_word"
+        ec=0
+      fi
+      ;;
+    *) verdict="UNKNOWN id=$jobid status=${status:-?}"; ec=3 ;;
+  esac
+
+  # The report goes through jq straight to the file, so it keeps the record's
+  # exact bytes; the shell variable below cannot hold trailing newlines.
+  if [ -n "$out_file" ]; then
+    jq -j -r '.result.text // ""' "$record" >"$out_file"
+    if [ -n "$text" ]; then
+      first="${text%%$'\n'*}"
+      verdict="$verdict report=$first"
+    fi
+  fi
+
+  # Headers, then the gate tail, concerns, and the newest text lines: the
+  # digest never passes 40 lines, so the verdict stays decidable in one read.
+  digest="status=$status
+id=$jobid
+commits=$ncommits uncommitted=$nuncomm"
+  if [ "$ncommits" -gt 0 ]; then
+    shas="$(jq -r '[.result.changeSet.newCommits[]? | tostring] | join(" ")' "$record" 2>/dev/null || true)"
+    digest="$digest
+newCommits: $shas"
+  fi
+  if [ "$nuncomm" -gt 0 ]; then
+    dirty="$(jq -r '[.result.changeSet.uncommittedFiles[]? | tostring] | join(" ")' "$record" 2>/dev/null || true)"
+    digest="$digest
+uncommittedFiles: $dirty"
+  fi
+  if [ "$gate_exit" != "none" ]; then
+    digest="$digest
+gate=exit=$gate_exit log=${gate_path:- -}"
+    if [ -n "$gate_tail" ]; then
+      digest="$digest
+$(tail -n 10 <<<"$gate_tail")"
+    fi
+  fi
+  if [ -n "$concerns" ]; then
+    digest="$digest
+$concerns"
+  fi
+  if [ -n "$text" ]; then
+    used="$(printf '%s\n' "$digest" | wc -l | tr -d ' ')"
+    take=$((40 - used))
+    [ "$take" -gt 25 ] && take=25
+    [ "$take" -lt 0 ] && take=0
+    if [ "$take" -gt 0 ]; then
+      digest="$digest
+$(tail -n "$take" <<<"$text")"
+    fi
+  fi
+fi
+
+twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
+logpath="$run/$repo-$issue-tkt-job-$twelve-$(date +%H%M%S).log"
+output="TKT tkt-job $verdict log=$logpath
+$digest"
+printf '%s\n' "$output" >"$logpath"
+printf '%s\n' "$output"
+if [ "$fresh" -eq 1 ]; then
+  tkt journal "tkt-job $verdict"
+fi
+exit "$ec"
