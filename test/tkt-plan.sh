@@ -322,4 +322,53 @@ run_plan verify
 grep -q "0000000000000000000000000000000000000000" "$CDIR/stderr.txt" || fail "drift names the stored head"
 grep -q "$H" "$CDIR/stderr.txt" || fail "drift names the worktree HEAD"
 
+# --- verify with no --model resolves model.verifier through the real tkt-job ---
+mkdir -p "$T/realbin" "$T/home/.agents/skills/planning/briefs"
+for b in plan-check plan-gate post-plan plan-sweep; do ln -s "$T/bin/$b" "$T/realbin/$b" || fail "symlink $b"; done
+ln -s "$REAL_BIN/tkt-job" "$T/realbin/tkt-job" || fail "symlink real tkt-job"
+ln -s "$REAL_BIN/tkt-state" "$T/realbin/tkt-state" || fail "symlink real tkt-state"
+ln -s "$REAL_BIN/fill-brief" "$T/realbin/fill-brief" || fail "symlink real fill-brief"
+cat >"$T/realbin/delegate" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+printf 'delegate|%s\n' "\$*" >>"$T/stub.log"
+cmd="\${1:-}"; shift || true
+case "\$cmd" in
+  run)
+    model=""
+    while [ \$# -gt 0 ]; do
+      case "\$1" in
+        --model) model="\$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'run|model=%s\n' "\$model" >>"$T/stub.log"
+    mkdir -p "\$TMPDIR/delegate-jobs"
+    printf '%s' '{"result":{"status":"DONE","text":"PLAN OK\\nholds: every check ran\\n","changeSet":{}}}' >"\$TMPDIR/delegate-jobs/rmodel1.json"
+    printf 'rmodel1\n'
+    ;;
+  watch) exit 0 ;;
+  *) echo "stub delegate: unknown command \$cmd" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$T/realbin/delegate"
+printf 'Verify the plan.\n\nPlan: __PLAN__\nBase: __BASE__\n' >"$T/home/.agents/skills/planning/briefs/verifier.md"
+
+setup_case realmodel
+rebase_plan
+TKT_BIN="$T/realbin" run_plan verify
+[ "$RC" -eq 0 ] || fail "real tkt-job PLAN-OK exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "real tkt-job"
+grep -q "run|model=test-model" "$T/stub.log" || fail "real tkt-job dispatches with model.verifier"
+[ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "rmodel1" ] || fail "real tkt-job stores the round 1 job id"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "real tkt-job counts the round"
+
+# --- verify without model.verifier and without --model names the missing key ---
+grep -v '^model.verifier=' "$S" >"$CDIR/nomodel.state"
+S="$CDIR/nomodel.state"
+TKT_BIN="$T/realbin" run_plan verify
+[ "$RC" -eq 2 ] || fail "a missing model.verifier exits 2"
+grep -q "model.verifier" "$CDIR/stderr.txt" || fail "a missing model.verifier names the key"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "a missing model.verifier dispatches no job"
+
 echo "tkt-plan: all cases passed"
