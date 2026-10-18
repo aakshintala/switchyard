@@ -151,7 +151,7 @@ while [ "$attempt" -lt 4 ]; do
   attempt=$((attempt + 1))
   runlog="$run/$slug-$issue-tkt-ship-$twelve-$(date +%H%M%S).log"
   rc=0
-  "$bin_dir/ship-pr" "${args[@]}" >"$runlog" 2>&1 || rc=$?
+  (cd "$run" && "$bin_dir/ship-pr" "${args[@]}") >"$runlog" 2>&1 || rc=$?
   if [ "$rc" -eq 124 ] && [ "$attempt" -lt 4 ]; then
     sleep 1
     continue
