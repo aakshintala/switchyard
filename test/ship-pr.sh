@@ -312,6 +312,18 @@ setup; run 7 --repo O/N --reviewed "$HEAD0" --worktree "$S"; expect 2 "not a che
 setup; git -C "$WT" checkout -q -b other; ship; expect 2 "wrong branch"; untouched "wrong branch"
 setup; echo x >>"$WT/feature.txt"; ship; expect 2 "dirty tree"; untouched "dirty tree"
 setup; echo x >"$WT/untracked.txt"; ship; expect 2 "untracked file"; untouched "untracked file"
+
+# proptest-regressions seeds are not dirt: untracked seeds alone never refuse,
+# but another untracked file or a tracked change still does
+setup; mkdir -p "$WT/proptest-regressions"; echo seed >"$WT/proptest-regressions/a.txt"
+ship; expect 0 "untracked proptest-regressions alone does not refuse"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "proptest-regressions still merges: [$OUT]"
+setup; mkdir -p "$WT/proptest-regressions"; echo seed >"$WT/proptest-regressions/a.txt"
+echo x >"$WT/untracked.txt"; ship; expect 2 "proptest-regressions plus another untracked file still refuses"
+untouched "proptest-regressions plus another untracked file"
+setup; mkdir -p "$WT/proptest-regressions"; echo seed >"$WT/proptest-regressions/a.txt"
+echo x >>"$WT/feature.txt"; ship; expect 2 "a tracked change still refuses with proptest-regressions present"
+untouched "tracked change with proptest-regressions"
 setup; bump_ref refs/heads/feature; ship; expect 2 "HEAD differs from PR head"; untouched "HEAD differs"
 setup; run 7 --repo O/N --reviewed deadbeefdeadbeefdeadbeefdeadbeefdeadbeef --worktree "$WT"
 expect 2 "unknown reviewed"; untouched "unknown reviewed"
