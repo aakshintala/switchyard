@@ -43,7 +43,7 @@ Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new h
 ~/.agents/bin/review-pr run <pr> --repo <owner/name> --cwd <clone> --head <pushed sha> --model <correctness> --verify <findings file> --since <reviewed head>
 ```
 
-`review-pr collect --findings-out <path>` produces the findings file.
+`review-pr collect --findings-out <path>` produces the findings file. Pass `--context <file>` for a plan, ruling or list the findings cite that lives outside the checkout.
 
 `tkt-fix --verify` runs this step and prints its verdict:
 

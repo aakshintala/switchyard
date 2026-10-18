@@ -1316,4 +1316,63 @@ bash "$REVIEW" collect job-standards job-spec job-overbuild --findings-out "$T/r
 cmp -s "$T/reprint-a.saved" "$T/reprint-b.txt" || fail "reprint findings file matches the first collect's file"
 [ ! -e "$T/state/comment-pr.txt" ] || fail "reprint collect posts no PR comment"
 
+# --- case: --context copies outside-checkout files into the verify worktree
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P2 findings text\n' >"$T/findings.txt"
+mkdir -p "$T/ctx-a" "$T/ctx-b"
+printf 'plan text\n' >"$T/ctx-a/plan.md"
+printf 'mutant list\n' >"$T/ctx-b/plan.md"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" \
+  --context "$T/ctx-a/plan.md" --context "$T/ctx-b/plan.md" >/dev/null 2>&1 || fail "verify --context start exits 0"
+wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-verify")"
+[ -f "$wt/.review-context/plan.md" ] || fail "verify --context copies the file under its basename"
+[ -f "$wt/.review-context/1-plan.md" ] || fail "verify --context disambiguates a basename collision"
+cmp -s "$T/ctx-a/plan.md" "$wt/.review-context/plan.md" || fail "verify --context copy matches the first file"
+cmp -s "$T/ctx-b/plan.md" "$wt/.review-context/1-plan.md" || fail "verify --context collision copy matches the second file"
+grep -q '\.review-context/plan\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the context file"
+grep -q '\.review-context/1-plan\.md' "$T/state/prompt-verify.md" || fail "verify brief lists the collision copy"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify --context collect exits 0"
+
+# --- case: a missing --context file exits 1 before creating a worktree
+reset_state
+printf 'P1 x\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+st=0
+# an earlier case leaves a sibling run's worktrees behind by design, so
+# compare against the counts from before this start, like the --axes cases.
+before_wt="$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)"
+before_rd="$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null || true)"
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" --context "$T/nope.md" 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 1 ] || fail "missing --context exits 1 (got $st)"
+grep -Fxq "review-pr: --context file not found: $T/nope.md" <<<"$err" || fail "missing --context names the file"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "$before_wt" ] || \
+  fail "missing --context creates no worktree"
+[ -z "$(ls "$TMPDIR/review-pr" 2>/dev/null)" ] || fail "missing --context saves no state"
+[ "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null || true)" = "$before_rd" ] || \
+  fail "missing --context leaves no run dir"
+[ ! -e "$T/state/runs.txt" ] || fail "missing --context launches no job"
+
+# --- case: --context without --verify prints the ignore note
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_out="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 --context "$T/findings.txt" 2>"$T/stderr-ctx.txt")" || fail "review with --context exits 0"
+grep -Fxq "review-pr: --context is only used with --verify; ignored" "$T/stderr-ctx.txt" || \
+  fail "review with --context prints its ignore note"
+[ "$(grep -c 'is only used with --verify; ignored$' "$T/stderr-ctx.txt" || true)" = "1" ] || \
+  fail "review with --context prints one ignore note"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "review with --context collects"
+
 echo "review-pr: all cases passed"
