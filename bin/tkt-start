@@ -27,6 +27,12 @@ for v in run repo issue spec branch worktree workflow_doc closing; do [ -n "${!v
 case "$issue" in *[!0-9]*) echo "tkt-start: --issue needs a number: $issue" >&2; exit 2 ;; esac
 for m in ${models[@]+"${models[@]}"}; do case "$m" in *=*) ;; *) echo "tkt-start: --model needs ROLE=ID: $m" >&2; exit 2 ;; esac; done
 case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac
+spec_part=0; grep -qiE 'part of[[:space:]]+#[0-9]+' "$spec" 2>/dev/null && spec_part=1
+close_part=0; printf '%s' "$closing" | grep -qiE '^part of([[:space:]]|$)' && close_part=1
+if [ "$spec_part" -ne "$close_part" ]; then
+  echo "tkt-start: --closing '$closing' disagrees with the spec: a Part-of batch ticket needs a 'Part of #N' closing line, any other ticket a Resolves line" >&2
+  exit 2
+fi
 script_dir="$(cd "$(dirname "$0")" && pwd)"; tkt_state="$script_dir/tkt-state"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"; sweep="$bin_dir/plan-sweep"; tktjob="$bin_dir/tkt-job"
 namebase="${repo##*/}-$issue"; state="$run/$namebase.state"; mkdir -p "$run"
