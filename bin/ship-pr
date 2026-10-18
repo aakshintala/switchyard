@@ -466,7 +466,7 @@ while :; do
                 waiting=""
                 while IFS= read -r rid || [ -n "$rid" ]; do
                   [ -n "$rid" ] || continue
-                  pre_one="$(printf '%s\n' "$pre_attempts" | awk -v r="$rid" '$1 == r { print $2; exit }')"
+                  pre_one="$(awk -v r="$rid" '$1 == r { print $2; exit }' <<<"$pre_attempts")"
                   cur="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>/dev/null)" \
                     || { waiting="${waiting}${rid} "; continue; }
                   IFS=$'\t' read -r cur_attempt cur_status <<<"$cur" || true
