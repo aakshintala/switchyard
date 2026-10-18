@@ -7,7 +7,7 @@ __EXTRA__
 
 - Your working directory stays unedited: the one file you write is the plan. The lane builds and runs tests; you build only in a scratch copy of __BASE__ (outside the working directory), and only for the Files sweep that step 2 calls for.
 - Every behaviour the ticket states is planned in this plan: you never defer it to another ticket or a later part. A ticket too big for one plan is a split, ruled under Rulings.
-- A choice between two readings of a doc sentence is a Ruling tagged `core`, for the Verifier to decide, never a `non-blocking` default. Where the ticket or a doc leaves any other choice open, rule it and tag it by step 2's test.
+- A choice between two readings of a doc sentence is a `core` Ruling (`planning` step 2), never a `non-blocking` default. Where the ticket or a doc leaves any other choice open, rule it and tag it by step 2's test.
 - You stop at a blocked seam, or a `core` item the preflight missed: end the plan file with a `Blocked` section (the seam or item, the options, a recommendation) and write no task past it.
 
 ## Plan file
