@@ -1,6 +1,6 @@
 Check this plan for issue #__ISSUE__ in __REPO__ against the code it cites. Do not edit anything. Do not delegate further.
 
-Read the ticket (`gh issue view __ISSUE__ --repo __REPO__ --comments`) and every file the plan names, at __BASE__, in your working directory. You check by reading and searching code; the lane builds and runs the Gate, so your report needs no build or test output. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call, and read the pack (`__PACK__`) before any of them.
+Read the ticket (body and comments, pasted below under the extra lines: your sandbox prints nothing for `gh issue view`) and every file the plan names, at __BASE__, in your working directory. You check by reading and searching code; the lane builds and runs the Gate, so your report needs no build or test output. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call, and read the pack (`__PACK__`) before any of them.
 __EXTRA__
 
 ## Plan
@@ -9,9 +9,9 @@ Read the plan at `__PLAN__` before anything else, and reread it after any compac
 
 ## Report
 
-Max 300 words, one line each: what, where, the smallest fix, and `core` (it contradicts the ticket or a doc, invents behaviour a person sees, or leaves a hazard unruled) or `non-blocking`.
+Max 300 words, one line each: what, where, the smallest fix, and `core` (it contradicts the ticket or a doc, invents behaviour a person or a calling model sees, or leaves a hazard unruled) or `non-blocking`.
 1. Contradictions between the plan and the ticket, the docs or the code.
-2. Rulings the plan makes without listing them under Rulings, and each ruling on behaviour a person sees that no ticket line, doc or earlier ruling on the ticket decides.
+2. Rulings the plan makes without listing them under Rulings, and each ruling on behaviour a person or a calling model sees that no ticket line, doc or earlier ruling on the ticket decides.
 3. A rule under Rules this ticket implements that is not quoted word for word from its cited file and section at __BASE__ (a sentence found only on another branch or an open PR fails), or a governing rule the ticket or its docs state that the plan leaves out.
 4. Design-level over-engineering: a new abstraction, dependency or configuration the ticket doesn't need.
 5. Each invariant under Interfaces: construct an input that breaks it. Read the build profiles first: `panic = "abort"` voids a panic-safety invariant. Report the breaking input, or the strongest input you tried and why the invariant holds against it.
