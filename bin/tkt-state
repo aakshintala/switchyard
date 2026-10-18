@@ -3,8 +3,8 @@
 # Usage: tkt-state <state file> <command> [args]
 #   get <key>: print the first value for the key.
 #   list <key>: print every value for the key, one per line.
-#   set <key> <value>: replace every line for the key with one line.
-#   add <key> <value>: append one line for the key.
+#   set <key> <value>: replace every line for the key with one line (not an append).
+#   add <key> <value>: append one line for the key (the append form of set).
 #   journal <line>: append a timestamped line to the sibling .journal file.
 #   require <key>...: exit 2 naming the first missing key, exit 0 when all
 #     are present.

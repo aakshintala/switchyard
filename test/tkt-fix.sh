@@ -27,6 +27,7 @@ export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 
 ln -s "$REAL_BIN/tkt-gate" "$T/bin/tkt-gate" || fail "symlink tkt-gate"
+ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 
@@ -247,6 +248,12 @@ bash "$TKT" "$S" 2>/dev/null && fail "bare flags exited 0"
 [ "$?" = "2" ] || fail "bare flags exited $?, want 2"
 bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
 [ "$?" = "2" ] || fail "resume without prompt exited $?, want 2"
+
+# 7b. The fix brief gets the plan gate as GATE (fix.md fills __GATE__).
+setup_case gatefill
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "gatefill exited $?"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "gatefill bad verdict: $(head -n 1 <<<"$out")"
+grep -F -q "GATE=true" "$T/calls.log" || fail "gatefill: GATE=true not passed to tkt-job"
 
 
 # 8. DRIFT A: forward worktree commit with no job recorded exits 3.

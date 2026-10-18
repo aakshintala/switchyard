@@ -68,6 +68,27 @@ pr="$(tkt get pr)"
 reviewed="$(tkt get reviewed)"
 worktree="$(tkt get worktree)"
 run="$(tkt get run)"
+
+# ship-pr runs with the run dir as its cwd, so the worktree and unverified
+# paths it receives must be absolute: resolve a relative value against this
+# cwd (the one the state was written from). Prints the absolute path; a
+# relative value that exists nowhere as given prints nothing and returns 1.
+abspath() {
+  case "$1" in
+    /*) printf '%s\n' "$1"; return 0 ;;
+  esac
+  [ -e "$1" ] || return 1
+  (cd "$1" 2>/dev/null && pwd) || {
+    local d b
+    d="$(dirname "$1")"; b="$(basename "$1")"
+    printf '%s/%s\n' "$(cd "$d" && pwd)" "$b"
+  }
+}
+worktree="$(abspath "$worktree")" || {
+  msg="tkt-ship: relative path does not exist as given: $worktree"
+  printf '%s\n' "$msg" >&2
+  emit "PRECONDITION relative=$worktree" 2 "$msg"
+}
 mkdir -p "$run"
 
 stored_head="$(tkt get head)"
@@ -94,6 +115,11 @@ while IFS= read -r b; do
   args+=(--body-has "$b")
 done <<<"$(tkt list body_has 2>/dev/null || true)"
 if u="$(tkt get unverified 2>/dev/null)" && [ -n "$u" ]; then
+  u="$(abspath "$u")" || {
+    msg="tkt-ship: relative path does not exist as given: $u"
+    printf '%s\n' "$msg" >&2
+    emit "PRECONDITION relative=$u" 2 "$msg"
+  }
   args+=(--unverified-fixes "$u")
 fi
 if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then

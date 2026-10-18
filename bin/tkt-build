@@ -2,8 +2,10 @@
 # tkt-build: implement steps 4-6, first round (lane, gate, mutants, review+map, findings).
 # Usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
 set -euo pipefail
-usage() { echo "usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]" >&2; exit 2; }
+USAGE="usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]"
+usage() { echo "$USAGE" >&2; exit 2; }
 [ $# -ge 1 ] || usage
+case "$1" in -h|--help) echo "$USAGE"; exit 0 ;; esac
 state="$1"; shift
 from=lane; lane_model=""; review_model=""; overbuild_model=""
 while [ $# -gt 0 ]; do

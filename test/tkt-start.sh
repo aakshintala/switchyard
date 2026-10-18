@@ -294,4 +294,30 @@ mkdir "$RUN/widget-42.state.lock"
 printf '12345\n' >"$RUN/widget-42.state.lock/pid"; run_start
 want "BUSY holder=12345" 2 locked
 grep -q '12345' "$CDIR/stderr" || fail "locked: stderr does not name pid"
+# the lastEditedAt lookup passes owner, name and number as GraphQL variables.
+setup gqlvars ONE AGAINST
+run_start
+grep -qF -- '-F owner=acme' "$T/calls.log" || fail "gqlvars: owner not passed with -F"
+grep -qF -- '-F name=widget' "$T/calls.log" || fail "gqlvars: name not passed with -F"
+grep -qF -- '-F number=42' "$T/calls.log" || fail "gqlvars: number not passed with -F"
+grep -q 'owner: "acme"' "$T/calls.log" && fail "gqlvars: owner still interpolated into the query"
+# --closing must agree with the spec on Part-of vs Resolves.
+setup partclose ONE AGAINST
+printf 'Batch part.\n\nPart of #9\n' >"$CDIR/spec.md"
+run_start --spec "$CDIR/spec.md"
+[ "$RC" -eq 2 ] || fail "partclose: exit $RC, want 2"
+grep -qF -- '--closing' "$CDIR/stderr" || fail "partclose: stderr does not name --closing"
+run_start --spec "$CDIR/spec.md" --closing "Part of #9"
+want "CURRENT " 0 partok
+setup partrev ONE AGAINST
+run_start --closing "Part of #9"
+[ "$RC" -eq 2 ] || fail "partrev: exit $RC, want 2"
+grep -qF -- '--closing' "$CDIR/stderr" || fail "partrev: stderr does not name --closing"
+# a non-numeric --issue exits 2 naming it, before any state or worktree.
+setup numissue ONE AGAINST
+run_start --issue abc
+[ "$RC" -eq 2 ] || fail "numissue: exit $RC, want 2"
+grep -qF -- '--issue' "$CDIR/stderr" || fail "numissue: stderr does not name --issue"
+[ ! -e "$RUN/widget-abc.state" ] || fail "numissue: state must not be written"
+[ ! -e "$CDIR/wt" ] || fail "numissue: worktree must not be created"
 echo "tkt-start: all cases passed"

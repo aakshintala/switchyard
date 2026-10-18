@@ -123,6 +123,9 @@ bash "$TKT" "$S3" journal "$(printf 'x\ny')" 2>/dev/null && fail "a journal line
 # usage errors exit 2 with usage on stderr
 bash "$TKT" >/dev/null 2>"$T/err-u1.txt"; [ "$?" = "2" ] || fail "no args exits 2"
 grep -q 'usage' "$T/err-u1.txt" || fail "no args prints usage"
+# the header help text says set replaces every line and names add the append form
+grep -q 'replace every line' "$TKT" || fail "help says set replaces every line"
+grep -q 'the append form of set' "$TKT" || fail "help names add as the append form of set"
 bash "$TKT" "$S" bogus >/dev/null 2>"$T/err-u2.txt"; [ "$?" = "2" ] || fail "an unknown command exits 2"
 grep -q 'usage' "$T/err-u2.txt" || fail "an unknown command prints usage"
 bash "$TKT" "$S" get >/dev/null 2>&1; [ "$?" = "2" ] || fail "get without a key exits 2"

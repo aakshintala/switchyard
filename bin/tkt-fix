@@ -29,7 +29,12 @@ done
 [ -z "$resume$prompt" ] || { [ -n "$resume" ] && [ -n "$prompt" ]; } || usage
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"; tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+namebase_lib="$script_dir/lib/namebase.sh"
+if [ ! -r "$namebase_lib" ]; then echo "tkt-fix: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$namebase_lib"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"; reviewpr="$bin_dir/review-pr"
+plangate="$bin_dir/plan-gate"
 fbrief="$HOME/.agents/skills/review-loop/briefs/fix.md"
 t() { "$tkt_state" "$state" "$@"; }
 
@@ -38,7 +43,7 @@ if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-fix: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
 
 t require repo issue branch worktree run pr
-repo="$(t get repo)"; issue="$(t get issue)"; namebase="${repo##*/}-$issue"; branch="$(t get branch)"
+repo="$(t get repo)"; issue="$(t get issue)"; set_namebase "$repo" "$issue"; branch="$(t get branch)"
 worktree="$(t get worktree)"; run="$(t get run)"; pr="$(t get pr)"
 mkdir -p "$run"
 round="$(t get round 2>/dev/null || printf '0')"; case "$round" in ''|*[!0-9]*) round=0;; esac
@@ -79,7 +84,17 @@ write_findings() {
 if [ -n "$resume" ]; then args=(--slot "$slot" --resume "$resume" --prompt "$prompt")
 else
   [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
-  args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" --gate-from-plan --expect-commits)
+  plan="$(t get plan 2>/dev/null || true)"
+  if [ -z "$plan" ]; then
+    echo "tkt-fix: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
+    exit 2
+  fi
+  gate_cmd="$("$plangate" "$plan")" || {
+    echo "tkt-fix: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
+    exit 2
+  }
+  args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$gate_cmd" --gate-from-plan --expect-commits)
+  if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
 fi
 jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
 if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi

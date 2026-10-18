@@ -71,6 +71,13 @@ if [ ! -r "$gate_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$gate_lib"
+namebase_lib="$script_dir/lib/namebase.sh"
+if [ ! -r "$namebase_lib" ]; then
+  echo "tkt-job: cannot read shared lib: $namebase_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$namebase_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
 fillbrief="$bin_dir/fill-brief"
@@ -97,7 +104,7 @@ rmdir "$lockdir"
 tkt require repo issue run worktree
 repo="$(tkt get repo)"
 issue="$(tkt get issue)"
-namebase="${repo##*/}-$issue"
+set_namebase "$repo" "$issue"
 run="$(tkt get run)"
 worktree="$(tkt get worktree)"
 mkdir -p "$run"
@@ -153,8 +160,8 @@ else
       echo "tkt-job: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
       exit 2
     fi
-    gate_cmd="$("$plangate" "$plan" 2>/dev/null)" || {
-      echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
+    gate_cmd="$("$plangate" "$plan" 2>&1)" || {
+      echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>: $gate_cmd" >&2
       exit 2
     }
   fi
