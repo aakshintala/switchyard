@@ -64,7 +64,7 @@ Done when the preflight has returned and no `core` item is open, or the ticket i
 
 ### 3. Plan
 
-Follow `planning` steps 1–5. When a worker writes the plan, fill `../planning/briefs/planner.md` for it (keys `ISSUE`, `REPO`, `BASE`, `WORKFLOW_DOC`, `PREFLIGHT`, `PACK`, `PLAN` (the plan file's absolute path) and `EXTRA`, empty by default); it covers `planning` steps 1–2 and ends with the plan file; you run steps 3–5 yourself, since a worker's brief forbids delegating and the Verifier is a job of its own. The brief's `Blocked` rule tells the worker where to stop. You post a `Blocked` section as the question and park as Rules says: the whole ticket when the item touches its core outcome, otherwise only what depends on the answer.
+Follow `planning` steps 1–5. When a worker writes the plan, fill `../planning/briefs/planner.md` for it, with the keys `ISSUE`, `REPO`, `BASE`, `WORKFLOW_DOC`, `PREFLIGHT`, `PACK`, `PLAN` (the plan file's absolute path) and `EXTRA` (empty by default). It covers `planning` steps 1–2 and ends with the plan file; you run steps 3–5 yourself, since a worker's brief forbids delegating and the Verifier is a job of its own. The brief's `Blocked` rule tells the worker where to stop. You post a `Blocked` section as the question and park as Rules says: the whole ticket when the item touches its core outcome, otherwise only what depends on the answer.
 
 Done when the lane brief is filled.
 
