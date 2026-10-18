@@ -369,10 +369,10 @@ run_friction --json
 setup flaky
 flake_scen flaky
 cat >"$TSCEN/comments-1601.json" <<'EOF'
-[{"id": 1, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: main::ci_flake_probe passes_only_on_a_retry\nrun: https://github.com/O/N/actions/runs/9001", "created_at": "2026-10-09T10:00:00Z"}, {"id": 2, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: main::ci_flake_probe passes_only_on_a_retry\nrun: https://github.com/O/N/actions/runs/9003", "created_at": "2026-10-09T11:00:00Z"}]
+[{"id": 1, "user": {"login": "github-actions"}, "body": "The test `main::ci_flake_probe passes_only_on_a_retry` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9001.", "created_at": "2026-10-09T10:00:00Z"}, {"id": 2, "user": {"login": "github-actions"}, "body": "The test `main::ci_flake_probe passes_only_on_a_retry` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9003.", "created_at": "2026-10-09T11:00:00Z"}]
 EOF
 cat >"$TSCEN/comments-1602.json" <<'EOF'
-[{"id": 3, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/9002", "created_at": "2026-10-09T11:30:00Z"}]
+[{"id": 3, "user": {"login": "github-actions"}, "body": "The test `fiber-core doors::slow` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9002.", "created_at": "2026-10-09T11:30:00Z"}]
 EOF
 run_friction --json
 [ "$CODE" = "1" ] || fail "flaky 2+ exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
@@ -388,10 +388,10 @@ run_friction --json
 setup flaky
 flake_scen flaky
 cat >"$TSCEN/comments-1601.json" <<'EOF'
-[{"id": 1, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: main::ci_flake_probe passes_only_on_a_retry\nrun: https://github.com/O/N/actions/runs/9001", "created_at": "2026-10-09T10:00:00Z"}, {"id": 2, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: main::ci_flake_probe passes_only_on_a_retry\nrun: https://github.com/O/N/actions/runs/9003", "created_at": "2026-10-09T11:00:00Z"}]
+[{"id": 1, "user": {"login": "github-actions"}, "body": "The test `main::ci_flake_probe passes_only_on_a_retry` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9001.", "created_at": "2026-10-09T10:00:00Z"}, {"id": 2, "user": {"login": "github-actions"}, "body": "The test `main::ci_flake_probe passes_only_on_a_retry` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9003.", "created_at": "2026-10-09T11:00:00Z"}]
 EOF
 cat >"$TSCEN/comments-1602.json" <<'EOF'
-[{"id": 3, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/9002", "created_at": "2026-10-09T11:30:00Z"}]
+[{"id": 3, "user": {"login": "github-actions"}, "body": "The test `fiber-core doors::slow` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9002.", "created_at": "2026-10-09T11:30:00Z"}]
 EOF
 run_friction
 [ "$CODE" = "1" ] || fail "flaky text exits 1 (got $CODE): [$OUT]"
@@ -405,7 +405,7 @@ grep -q "no repeats" <<<"$OUT" && fail "a flaky finding is not quiet: [$OUT]"
 setup flaky1
 flake_scen flaky1
 cat >"$TSCEN/comments-1602.json" <<'EOF'
-[{"id": 3, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/9002", "created_at": "2026-10-09T11:30:00Z"}]
+[{"id": 3, "user": {"login": "github-actions"}, "body": "The test `fiber-core doors::slow` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9002.", "created_at": "2026-10-09T11:30:00Z"}]
 EOF
 run_friction --json
 [ "$CODE" = "0" ] || fail "1-sighting flaky exits 0 (got $CODE): [$OUT]"
@@ -420,7 +420,7 @@ grep -q "^flaky:" <<<"$OUT" && fail "1-sighting no text line: [$OUT]"
 setup flakypage
 flake_scen flakypage
 cat >"$TSCEN/comments-1701.json" <<'EOF'
-[{"id": 1, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core late::one\nrun: https://github.com/O/N/actions/runs/9101", "created_at": "2026-10-09T12:00:00Z"}, {"id": 2, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core late::one\nrun: https://github.com/O/N/actions/runs/9102", "created_at": "2026-10-09T13:00:00Z"}]
+[{"id": 1, "user": {"login": "github-actions"}, "body": "The test `fiber-core late::one` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9101.", "created_at": "2026-10-09T12:00:00Z"}, {"id": 2, "user": {"login": "github-actions"}, "body": "The test `fiber-core late::one` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9102.", "created_at": "2026-10-09T13:00:00Z"}]
 EOF
 run_friction --json
 [ "$CODE" = "1" ] || fail "flaky page 2 exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
@@ -428,16 +428,16 @@ run_friction --json
   "[('fiber-core late::one', 1701, 2)]" ] || fail "flaky page 2 listed: [$OUT]"
 [ "$(grep -c 'Flaky' "$FAKE_GH_LOG")" = "2" ] || fail "two flaky pages: [$(cat "$FAKE_GH_LOG")]"
 grep -q 'updated:>=2026-10-08T18:30:00Z' "$FAKE_GH_LOG" || fail "cutoff in query: [$(cat "$FAKE_GH_LOG")]"
-# --- #344: sightings count only bot flake-report comments in the window ---
+# --- #344: sightings count only bot retry comments in the window ---
 # 1650 has 1 bot sighting in window, 2 human triage comments (one quoting
-# the marker) and 1 bot sighting before the window: sightings 1, run printed.
+# the retry phrase) and 1 bot sighting before the window: sightings 1, run printed.
 setup flakyfilter
 flake_scen onelane
 cat >"$TSCEN/search/Flaky-test-.json" <<'EOF'
 {"total_count": 1, "items": [{"number": 1650, "state": "open", "title": "Flaky test: fiber-core doors::slow", "updated_at": "2026-10-09T11:00:00Z", "comments": 99}]}
 EOF
 cat >"$TSCEN/comments-1650.json" <<'EOF'
-[{"id": 1, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/9001", "created_at": "2026-10-09T12:00:00Z"}, {"id": 2, "user": {"login": "alice"}, "body": "looking into this, seems related to #1600", "created_at": "2026-10-09T13:00:00Z"}, {"id": 3, "user": {"login": "bob"}, "body": "<!-- flake-report -->\nsame failure as https://github.com/O/N/actions/runs/9002?", "created_at": "2026-10-09T14:00:00Z"}, {"id": 4, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/8999", "created_at": "2026-10-01T00:00:00Z"}]
+[{"id": 1, "user": {"login": "github-actions"}, "body": "The test `fiber-core doors::slow` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9001.", "created_at": "2026-10-09T12:00:00Z"}, {"id": 2, "user": {"login": "alice"}, "body": "looking into this, seems related to #1600", "created_at": "2026-10-09T13:00:00Z"}, {"id": 3, "user": {"login": "bob"}, "body": "Quoting the bot (\"passed after a retry on ubuntu-24.04\")? same failure as https://github.com/O/N/actions/runs/9002?", "created_at": "2026-10-09T14:00:00Z"}, {"id": 4, "user": {"login": "github-actions"}, "body": "The test `fiber-core doors::slow` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/8999.", "created_at": "2026-10-01T00:00:00Z"}]
 EOF
 run_friction --json
 [ "$CODE" = "0" ] || fail "flakyfilter exits 0 (got $CODE): [$OUT]"
