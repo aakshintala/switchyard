@@ -361,9 +361,12 @@ cmd_start() {
       *,overbuild,*) [ -n "$omodel" ] || usage;;
     esac
     # A PR with no ticket is its own spec: gh issue view accepts a PR number.
+    # Otherwise SPEC defaults to the first --issue, never the PR number.
     if [ "$issue_count" -eq 0 ]; then
       issue="$pr"
+      specn="${specn:-$pr}"
     else
+      specn="${specn:-${issues[0]}}"
       issue="${issues[0]}"
       issue_index=1
       while [ "$issue_index" -lt "$issue_count" ]; do
@@ -376,7 +379,6 @@ cmd_start() {
         issue_index=$((issue_index + 1))
       done
     fi
-    specn="${specn:-$pr}"
     [ -z "$since" ] || usage
   fi
   if [ -z "$wdoc" ]; then wdoc="none"; fi
