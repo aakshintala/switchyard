@@ -28,7 +28,7 @@ ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 
 cat >"$T/bin/ship-pr" <<EOF
 #!/usr/bin/env bash
-printf 'ship-pr|%s\n' "\$*" >>"$T/calls.log"
+printf 'ship-pr|cwd=%s|%s\n' "\$(pwd)" "\$*" >>"$T/calls.log"
 n="\$(cat "$T/count")"; printf '%s' "\$((n+1))" >"$T/count"
 codes="\$(cat "$T/exitcodes")"
 code="\$(printf '%s' "\$codes" | awk -v i="\$((n+1))" '{print (i<=NF ? \$i : \$NF)}')"
@@ -334,5 +334,19 @@ grep -F -q -- '--body-has Resolves #515' "$T/calls.log" || fail "flags: body-has
 grep -F -q -- '--body-has Co-authored-by: T' "$T/calls.log" || fail "flags: body-has 2 missing"
 grep -F -q -- "--unverified-fixes $CDIR/unverified.md" "$T/calls.log" || fail "flags: unverified missing"
 grep -F -q -- '--gate FOO=1 BAR=2 bash test/gate.sh' "$T/calls.log" || fail "flags: gate missing"
+
+# --- ship-pr runs from the run dir even when the caller is in the worktree ---
+reset_stub; setup_case shipcwd
+printf '0' >"$T/exitcodes"
+OUT=""
+RC=0
+OUT="$( (cd "$WT" && bash "$TKT" "$S" 2>"$CDIR/stderr") )" || RC=$?
+[ -n "$OUT" ] || OUT="$(cat "$CDIR/stderr")"
+[ "$RC" -eq 0 ] || fail "shipcwd: exit $RC"
+want="$(cd "$CDIR/run" && pwd -P)"
+got="$(sed -n 's/^ship-pr|cwd=\([^|]*\)|.*/\1/p' "$T/calls.log" | head -n 1)"
+[ -n "$got" ] || fail "shipcwd: no ship-pr call recorded"
+got_p="$(cd "$got" && pwd -P)"
+[ "$got_p" = "$want" ] || fail "shipcwd: ship-pr cwd [$got_p] wants [$want]"
 
 echo "tkt-ship: all cases passed"
