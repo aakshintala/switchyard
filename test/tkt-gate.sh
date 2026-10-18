@@ -56,7 +56,12 @@ cat >"$T/bin/gate-quiet" <<EOF
 touch "$T/gate-ran"
 exit 4
 EOF
-chmod +x "$T/bin/gate-ok" "$T/bin/gate-bad" "$T/bin/gate-quiet"
+cat >"$T/bin/gate-empty" <<EOF
+#!/usr/bin/env bash
+touch "$T/gate-ran"
+echo "error: no tests to run"
+EOF
+chmod +x "$T/bin/gate-ok" "$T/bin/gate-bad" "$T/bin/gate-quiet" "$T/bin/gate-empty"
 
 # New case: a bare origin, a seed main pushed to it, and a clone worktree on
 # branch tkt-517 with a base state file. Sets CDIR, WT, S.
@@ -366,6 +371,17 @@ run_gate
 expect_verdict "TKT tkt-gate FAIL rc=4 log=*" "quiet FAIL"
 grep -qx "commits=1 merges=0" <<<"$OUT" || fail "quiet FAIL digest counts the history"
 grep -q "^gatelog=" <<<"$OUT" || fail "quiet FAIL digest names the gate log"
+
+# --- a gate that runs zero tests fails even at exit 0 ---
+setup_case zero-tests
+write_plan
+commit_file base.txt "base changed"
+push_branch
+printf 'gate-empty\n' >"$T/gate-cmd"
+run_gate
+[ "$RC" -eq 1 ] || fail "zero tests exits 1"
+expect_verdict "TKT tkt-gate FAIL rc=4 log=*" "zero tests"
+grep -q "no tests to run" <<<"$OUT" || fail "zero tests digest holds the marker"
 
 # --- FAIL then echo: a gate that fails before its trailing echo still fails ---
 setup_case fail-echo
