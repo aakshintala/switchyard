@@ -301,6 +301,18 @@ grep -qF -- '-F owner=acme' "$T/calls.log" || fail "gqlvars: owner not passed wi
 grep -qF -- '-F name=widget' "$T/calls.log" || fail "gqlvars: name not passed with -F"
 grep -qF -- '-F number=42' "$T/calls.log" || fail "gqlvars: number not passed with -F"
 grep -q 'owner: "acme"' "$T/calls.log" && fail "gqlvars: owner still interpolated into the query"
+# --closing must agree with the spec on Part-of vs Resolves.
+setup partclose ONE AGAINST
+printf 'Batch part.\n\nPart of #9\n' >"$CDIR/spec.md"
+run_start --spec "$CDIR/spec.md"
+[ "$RC" -eq 2 ] || fail "partclose: exit $RC, want 2"
+grep -qF -- '--closing' "$CDIR/stderr" || fail "partclose: stderr does not name --closing"
+run_start --spec "$CDIR/spec.md" --closing "Part of #9"
+want "CURRENT " 0 partok
+setup partrev ONE AGAINST
+run_start --closing "Part of #9"
+[ "$RC" -eq 2 ] || fail "partrev: exit $RC, want 2"
+grep -qF -- '--closing' "$CDIR/stderr" || fail "partrev: stderr does not name --closing"
 # a non-numeric --issue exits 2 naming it, before any state or worktree.
 setup numissue ONE AGAINST
 run_start --issue abc
