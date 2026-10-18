@@ -211,6 +211,37 @@ cmd_failures() {
             | sed '/^[[:space:]]*$/d' >"$failed_log" || true
           tail -n "$log_lines" "$failed_log" || true
           cmd_panics "$log_lines" <"$failed_log"
+          # budget rows: the bench-report:/release-size: lines ci-friction
+          # names bench-budget/size-budget, one row per failing line
+          awk '/^bench-report:/ || (/^release-size:/ && /(over|exceed)/) {
+            orig = $0
+            line = $0
+            sub(/^(bench-report|release-size): */, "", line)
+            row = ""; val = ""; ceil = ""
+            rest = line
+            while (match(rest, /over [0-9][0-9.,]* [^ ]*/)) {
+              ceil = substr(rest, RSTART + 5, RLENGTH - 5)
+              rest = substr(rest, RSTART + RLENGTH)
+            }
+            tmp = line
+            if (match(tmp, /median [0-9][0-9.,]* [^ ]* of [^ ]*/)) {
+              m = substr(tmp, RSTART, RLENGTH)
+              sub(/^median /, "", m)
+              i = index(m, " of ")
+              val = substr(m, 1, i - 1); row = substr(m, i + 4)
+            } else if (match(tmp, /median [0-9][0-9.,]* [^ ]*/)) {
+              m = substr(tmp, RSTART, RLENGTH)
+              val = substr(m, 8)
+              row = substr(tmp, 1, RSTART - 1)
+            } else if (match(tmp, /[0-9][0-9.,]* [^ ]* over /)) {
+              m = substr(tmp, RSTART, RLENGTH)
+              val = substr(m, 1, length(m) - 6)
+              row = substr(tmp, 1, RSTART - 1)
+            }
+            gsub(/[ :,;]+$/, "", row)
+            if (row != "" && val != "" && ceil != "") printf "budget: %s %s > %s\n", row, val, ceil
+            else printf "budget: %s\n", orig
+          }' "$failed_log"
           rm -f "$failed_log"
           red_commit_hint "$run_id" "$jname";;
       esac
