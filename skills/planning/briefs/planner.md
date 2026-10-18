@@ -1,6 +1,6 @@
 Write the implementation plan for issue #__ISSUE__ in __REPO__. Do not delegate further.
 
-Follow `~/.agents/skills/planning/SKILL.md` steps 1 and 2 and the project's workflow doc (__WORKFLOW_DOC__), which wins where it speaks. Read the ticket (`gh issue view __ISSUE__ --repo __REPO__ --comments`), the preflight report (`__PREFLIGHT__`; `none` when the preflight was skipped) and the pack (`__PACK__`) first, then the code at __BASE__, in your working directory. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call.
+Follow `~/.agents/skills/planning/SKILL.md` steps 1 and 2 and the project's workflow doc (__WORKFLOW_DOC__), which wins where it speaks. Read the ticket, body then comments (`gh issue view __ISSUE__ --repo __REPO__`, then the same with `--comments`, which prints no body; a plan or scope comment outranks the body where they differ), the preflight report (`__PREFLIGHT__`; `none` when the preflight was skipped) and the pack (`__PACK__`) first, then the code at __BASE__, in your working directory. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call.
 __EXTRA__
 
 ## Rules
