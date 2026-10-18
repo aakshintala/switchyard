@@ -459,4 +459,27 @@ echo "HTTP 500 boom" >"$T/fail-log-801"
 run_friction --json
 [ "$CODE" = "2" ] || fail "log failure exits 2 (got $CODE): [$OUT]"
 
+# --- #440: a superseded cancel is cancelled, not a timeout ---
+# 731 runs 10 min of a 20 min Mutants bound with only the cancel line:
+# cancelled, out of design[]. 732 sits exactly on the bound: timeout.
+# 733 is short but names the maximum execution time: timeout.
+setup timeout-cancel
+TSCEN="$T/scen-timeout"; rm -rf "$TSCEN"; mkdir -p "$TSCEN/logs"
+cat >"$TSCEN/runs.json" <<'EOF'
+{"workflow_runs": [{"id": 730, "event": "pull_request", "conclusion": "cancelled", "status": "completed", "pull_requests": [{"number": 1405}], "head_branch": "feat/timeout", "head_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "path": ".github/workflows/ci.yml", "created_at": "2026-10-09T17:20:00Z", "updated_at": "2026-10-09T17:20:00Z", "run_attempt": 1}]}
+EOF
+cat >"$TSCEN/jobs-730.json" <<'EOF'
+{"total_count": 3, "jobs": [{"id": 731, "run_id": 730, "name": "Mutants (shard 9)", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "cancelled", "created_at": "2026-10-09T17:20:00Z", "started_at": "2026-10-09T17:20:10Z", "completed_at": "2026-10-09T17:30:10Z", "steps": []}, {"id": 732, "run_id": 730, "name": "Mutants (shard 9)", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "cancelled", "created_at": "2026-10-09T17:20:00Z", "started_at": "2026-10-09T17:10:00Z", "completed_at": "2026-10-09T17:30:00Z", "steps": []}, {"id": 733, "run_id": 730, "name": "Tests (ubuntu-24.04)", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "cancelled", "created_at": "2026-10-09T17:20:00Z", "started_at": "2026-10-09T17:25:00Z", "completed_at": "2026-10-09T17:30:00Z", "steps": []}]}
+EOF
+printf '2026-10-09T17:30:01Z The operation was canceled\n' >"$TSCEN/logs/731.txt"
+printf '2026-10-09T17:30:01Z The operation was canceled\n' >"$TSCEN/logs/732.txt"
+printf '2026-10-09T17:30:01Z Error: the job has exceeded the maximum execution time of 10 minutes\n' >"$TSCEN/logs/733.txt"
+export FAKE_SCEN="$TSCEN"
+run_friction --json
+[ "$CODE" = "0" ] || fail "timeout-cancel exits 0 (got $CODE): [$OUT]"
+[ "$(jget "[(c['cause'], c['count'], c['lanes']) for c in d['design']]")" = "[('timeout', 2, ['#1405'])]" ] \
+  || fail "only the bound and marker cancels are timeouts: [$OUT]"
+STCLASS="$(python3 -c "import json; j=json.load(open('$HOME/.cache/switchyard/ci-friction.json'))['jobs']; print(j['731']['class'], j['732']['class'], j['733']['class'])")"
+[ "$STCLASS" = "cancelled timeout timeout" ] || fail "cancel classes: [$STCLASS]"
+
 echo "ci-friction: all cases passed"
