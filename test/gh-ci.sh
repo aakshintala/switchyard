@@ -1340,4 +1340,24 @@ grep -q "head: ${A:0:8} timeout after 300s" <<<"$OUT" || fail "plain short timeo
 ! grep -q "ignored under Claude Code" "$T/stderr.txt" || fail "no ignore line without CLAUDECODE: [$(cat "$T/stderr.txt")]"
 [ "$(cat "$T/state/sleeps.txt")" = "300" ] || fail "plain short timeout sleeps once: [$(cat "$T/state/sleeps.txt")]"
 
+# --- #490: failures names the failed budget rows under the job ---
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"Benchmarks","conclusion":"failure"}]}'
+{
+  printf 'job\tstep\t2026-10-07T12:00:01Z bench-report: paging_open_ms median 15.2 ms over 12 ms budget (base 10 ms)\n'
+  printf 'job\tstep\t2026-10-07T12:00:02Z bench-report: paging_width_ms median 9.1 ms over 8 ms budget (base 7 ms)\n'
+  printf 'job\tstep\t2026-10-07T12:00:03Z some other failure line\n'
+} >"$T/state/log-111.txt"
+run_failures 123
+[ "$CODE" = "0" ] || fail "budget rows exits 0 (got $CODE): [$OUT]"
+grep -qx "budget: paging_open_ms 15.2 ms > 12 ms" <<<"$OUT" || fail "paging_open_ms named: [$OUT]"
+grep -qx "budget: paging_width_ms 9.1 ms > 8 ms" <<<"$OUT" || fail "paging_width_ms named: [$OUT]"
+# a failed log with no budget lines prints no budget block
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}'
+make_rust_log 111
+run_failures 123
+[ "$CODE" = "0" ] || fail "no-budget digest exits 0 (got $CODE): [$OUT]"
+grep -q "^budget:" <<<"$OUT" && fail "no budget block without budget lines: [$OUT]"
+
 echo "gh-ci: all cases passed"
