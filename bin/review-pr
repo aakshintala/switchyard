@@ -5,7 +5,7 @@
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M [--overbuild-model M2] [--axes LIST] [--workflow-doc PATH] [--head SHA]
 #     LIST is standards[,spec][,overbuild], default all three: one job per
 #     axis. --overbuild-model is required only when overbuild is listed.
-#   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--workflow-doc PATH] [--head SHA]
+#   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]
 #     --since is the reviewed head; verify diffs from its repair base on current base.
 #     launches one job per review role, prints "<role> <job-id>" per job, then
 #     "watch: delegate watch <id>..." and "collect: review-pr collect <id>..."
@@ -45,7 +45,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M [--overbuild-model M2] [--axes standards[,spec][,overbuild]] [--workflow-doc PATH] [--head SHA]" >&2
-  echo "       review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--workflow-doc PATH] [--head SHA]" >&2
+  echo "       review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]" >&2
   echo "       review-pr run <same args as start>" >&2
   echo "       review-pr collect <job-id>... [--findings-out PATH]" >&2
   exit 2
@@ -265,7 +265,7 @@ cmd_start() {
   case "$pr" in -*|"") usage;; esac
 
   repo=""; clone=""; issues=(); issue_count=0; specn=""; model=""; omodel=""
-  verify=""; since=""; wdoc=""; head=""; axes=""; axes_given=""
+  verify=""; since=""; wdoc=""; head=""; axes=""; axes_given=""; context_files=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2;;
@@ -294,6 +294,7 @@ cmd_start() {
       --axes) [ $# -ge 2 ] || usage; axes="$2"; axes_given="1"; shift 2;;
       --verify) [ $# -ge 2 ] || usage; verify="$2"; shift 2;;
       --since) [ $# -ge 2 ] || usage; since="$2"; shift 2;;
+      --context) [ $# -ge 2 ] || usage; context_files[${#context_files[@]}]="$2"; shift 2;;
       --workflow-doc) [ $# -ge 2 ] || usage; wdoc="$2"; shift 2;;
       --head) [ $# -ge 2 ] || usage; head="$2"; shift 2;;
       *) usage;;
@@ -321,6 +322,14 @@ cmd_start() {
       echo "review-pr: findings file $verify is empty; write the open findings, or \"no open findings\"" >&2
       exit 2
     fi
+    # Context files live outside the checkout, so each must exist now,
+    # before any worktree is created.
+    for context_path in ${context_files[@]+"${context_files[@]}"}; do
+      if [ ! -f "$context_path" ]; then
+        echo "review-pr: --context file not found: $context_path" >&2
+        exit 1
+      fi
+    done
     # Start-only flags are ignored in verify mode, one note per flag.
     if [ "$issue_count" -gt 0 ]; then
       echo "review-pr: --issue is not used with --verify; ignored" >&2
@@ -336,6 +345,9 @@ cmd_start() {
     fi
   else
     mode="review"
+    if [ "${#context_files[@]}" -gt 0 ]; then
+      echo "review-pr: --context is only used with --verify; ignored" >&2
+    fi
     # --overbuild-model is required only when the overbuild axis runs.
     case ",$axes," in
       *,overbuild,*) [ -n "$omodel" ] || usage;;
@@ -542,6 +554,25 @@ cmd_start() {
       verify)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" "SKILLS=$skills_dir" \
           "SINCE=$since" "FINDINGS=@$verify" >"$brief"
+        # Context files live outside the checkout the verifier sees, so copy
+        # each into the worktree and list it in the brief, one per line.
+        if [ "${#context_files[@]}" -gt 0 ]; then
+          mkdir -p "$wt/.review-context"
+          {
+            printf '\nContext files outside the checkout, copied into your working directory (read them as needed):\n'
+            for context_path in ${context_files[@]+"${context_files[@]}"}; do
+              context_base="$(basename "$context_path")"
+              context_dest="$context_base"
+              context_n=1
+              while [ -e "$wt/.review-context/$context_dest" ]; do
+                context_dest="$context_n-$context_base"
+                context_n=$((context_n + 1))
+              done
+              cp "$context_path" "$wt/.review-context/$context_dest"
+              printf '.review-context/%s\n' "$context_dest"
+            done
+          } >>"$brief"
+        fi
         ;;
     esac
 
