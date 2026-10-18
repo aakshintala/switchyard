@@ -22,7 +22,9 @@ cat >"$T/bin/gh" <<EOF
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 if [ -f "$T/gh-fail" ]; then exit 4; fi
 case " \$* " in
-  *" lastEditedAt "*) cat "$T/edited"; exit 0 ;;
+  *" graphql "*) cat "$T/edited"; exit 0 ;;
+  *" issue view "*" lastEditedAt "*)
+    printf 'Unknown JSON field: "lastEditedAt"\n' >&2; exit 1 ;;
   *" pr view "*) cat "$T/prhead"; exit 0 ;;
   *) cat "$T/body"; exit 0 ;;
 esac
@@ -129,6 +131,14 @@ run_start
 want "CURRENT " 0 rerun
 [ "$(grep -c '^body_has=' "$RUN/widget-42.state")" -eq 2 ] || fail "rerun: body_has duplicated"
 [ "$(grep -c '^model\.lane=' "$RUN/widget-42.state")" -eq 1 ] || fail "rerun: model.lane duplicated"
+# from any cwd: with the worktree in place, tkt-start resolves origin/main
+# through --worktree, not the caller's directory.
+setup elsewhere ONE AGAINST
+git -C "$CLONE" worktree add --no-track -b keepbranch2 "$WT" origin/main >/dev/null
+mkdir -p "$T/elsewhere"
+RC=0; OUT="$(cd "$T/elsewhere" && bash "$TKT" "${ARGS[@]}" 2>"$CDIR/stderr")" || RC=$?
+want "CURRENT " 0 elsewhere
+[ "$(git -C "$WT" rev-parse HEAD)" = "$(git -C "$CLONE" rev-parse origin/main)" ] || fail "elsewhere: worktree not at origin/main"
 # an existing worktree is reused, not recreated.
 setup reused ONE AGAINST
 git -C "$CLONE" worktree add --no-track -b keepbranch "$WT" origin/main >/dev/null
