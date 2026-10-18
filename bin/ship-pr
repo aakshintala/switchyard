@@ -102,6 +102,19 @@ usage() {
 say() { echo "ship-pr: $*" >&2; }
 die() { local code="$1"; shift; say "$*"; exit "$code"; }
 pr_ready=0 merge_attempted=0
+# fetch_retry: one bounded retry for a `git fetch` lost to a transient ref
+# lock (another session pushing at the same time). 3 tries, 1 s apart.
+fetch_retry() {
+  local tries=0
+  while :; do
+    if git -C "$worktree" fetch -q "$@" >&2; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -ge 3 ] && return 1
+    sleep 1
+  done
+}
 die_after_ready() {
   local code="$1"; shift
   if [ "$pr_ready" = 1 ] && [ "$merge_attempted" = 0 ]; then
@@ -216,7 +229,7 @@ git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die 2 "$wo
 [ "$(git -C "$worktree" symbolic-ref --short -q HEAD || true)" = "$branch" ] \
   || die 2 "$worktree does not have $branch checked out"
 [ -z "$(git -C "$worktree" status --porcelain)" ] || die 2 "$worktree has uncommitted changes"
-git -C "$worktree" fetch -q origin >&2 || die 1 "git fetch origin failed"
+fetch_retry origin || die 1 "git fetch origin failed"
 local_head="$(git -C "$worktree" rev-parse HEAD)"
 if [ "$local_head" != "$head0" ]; then
   for _wait in $(seq 1 30); do
@@ -396,7 +409,7 @@ if [ "$strict" = 0 ]; then
   [ -n "$probe" ] || say "cannot read PR $pr mergeability; not rebasing"
   case "$probe" in CONFLICTING*|*DIRTY) conflict=1 ;; esac
   if [ -n "$conflict" ]; then
-    git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die 1 "git fetch origin main failed"
+    fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die 1 "git fetch origin main failed"
   fi
 fi
 
