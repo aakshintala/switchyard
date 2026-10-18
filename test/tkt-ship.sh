@@ -104,10 +104,15 @@ fresh_repo() {
 }
 
 # Run tkt-ship on $S; sets OUT (stdout) and RC. Never fails the suite itself.
+# With a directory argument, run from there instead of this shell's cwd.
 run_ship() {
   OUT=""
   RC=0
-  OUT="$(bash "$TKT" "$S" 2>"$CDIR/stderr")" || RC=$?
+  if [ $# -gt 0 ]; then
+    OUT="$( (cd "$1" && bash "$TKT" "$S" 2>"$CDIR/stderr") )" || RC=$?
+  else
+    OUT="$(bash "$TKT" "$S" 2>"$CDIR/stderr")" || RC=$?
+  fi
   [ -n "$OUT" ] || OUT="$(cat "$CDIR/stderr")"
 }
 
@@ -338,15 +343,31 @@ grep -F -q -- '--gate FOO=1 BAR=2 bash test/gate.sh' "$T/calls.log" || fail "fla
 # --- ship-pr runs from the run dir even when the caller is in the worktree ---
 reset_stub; setup_case shipcwd
 printf '0' >"$T/exitcodes"
-OUT=""
-RC=0
-OUT="$( (cd "$WT" && bash "$TKT" "$S" 2>"$CDIR/stderr") )" || RC=$?
-[ -n "$OUT" ] || OUT="$(cat "$CDIR/stderr")"
+run_ship "$WT"
 [ "$RC" -eq 0 ] || fail "shipcwd: exit $RC"
 want="$(cd "$CDIR/run" && pwd -P)"
 got="$(sed -n 's/^ship-pr|cwd=\([^|]*\)|.*/\1/p' "$T/calls.log" | head -n 1)"
 [ -n "$got" ] || fail "shipcwd: no ship-pr call recorded"
 got_p="$(cd "$got" && pwd -P)"
 [ "$got_p" = "$want" ] || fail "shipcwd: ship-pr cwd [$got_p] wants [$want]"
+
+# --- a relative worktree in state reaches ship-pr absolute ---
+reset_stub; setup_case relwork
+printf '0' >"$T/exitcodes"
+grep -v '^worktree=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+printf 'worktree=%s\n' "relwork/wt" >>"$S"
+run_ship "$T/cases"
+[ "$RC" -eq 0 ] || fail "relwork: exit $RC"
+wtabs="$(cd "$WT" && pwd)"
+grep -F -q -- "--worktree $wtabs" "$T/calls.log" || fail "relwork: ship-pr misses the absolute worktree: $(cat "$T/calls.log")"
+
+# --- a relative worktree that exists nowhere is rejected ---
+reset_stub; setup_case relmissing
+grep -v '^worktree=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+printf 'worktree=%s\n' "relwork/nope" >>"$S"
+run_ship "$T/cases"
+[ "$RC" -eq 2 ] || fail "relmissing: exit $RC, want 2"
+expect_line1 "PRECONDITION relative=" relmissing
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "relmissing: ship-pr must not run"
 
 echo "tkt-ship: all cases passed"
