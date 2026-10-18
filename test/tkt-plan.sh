@@ -372,4 +372,17 @@ TKT_BIN="$T/realbin" run_plan verify
 grep -q "model.verifier" "$CDIR/stderr.txt" || fail "a missing model.verifier names the key"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "a missing model.verifier dispatches no job"
 
+# --- a stale verifier job id never replays: verify resets the round slot ---
+setup_case verifier-stale
+rebase_plan
+printf 'ok' >"$T/pcmode"
+bash "$TKT_STATE" "$S" set job.verifier-r1 j-stale || fail "seed stale job"
+runs_before="$(grep -c '^run|' "$T/stub.log")"
+TKT_BIN="$T/realbin" run_plan verify
+[ "$RC" -eq 0 ] || fail "stale verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "stale verify"
+[ "$(grep -c '^run|' "$T/stub.log")" = "$((runs_before + 1))" ] || fail "stale verify dispatches a fresh job"
+[ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" != "j-stale" ] || fail "stale verify retires the stale job id"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "stale verify counts the round"
+
 echo "tkt-plan: all cases passed"
