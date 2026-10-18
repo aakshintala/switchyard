@@ -93,6 +93,31 @@ grep -q -- '--limit 1000' "$GH_ARGS_LOG" || fail "gh asked with --limit 1000"
 grep -q -- '--state open' "$GH_ARGS_LOG" || fail "gh asked with --state open"
 grep -q -- '--json number,files' "$GH_ARGS_LOG" || fail "gh asked with --json number,files"
 
+# --- jitter sleeps 0.2-1.0 s -----------------------------------------------------
+# Extract jitter_sleep from the script and sample it: every sleep must land in
+# 0.2-1.0 s (the old inline expression sometimes slept "0.10" = 0.1 s), and 1.0
+# must be reachable (the old expression never slept it).
+sed -n '/^jitter_sleep()/,/^}/p' "$FC" >"$T/jitter.sh" || fail "extract jitter helper"
+[ -s "$T/jitter.sh" ] || fail "jitter helper present"
+# shellcheck disable=SC1090
+. "$T/jitter.sh"
+sleep() { printf '%s\n' "$1" >>"$T/sleeps"; }
+: >"$T/sleeps"
+i=0
+while [ "$i" -lt 500 ]; do
+  jitter_sleep
+  i=$((i + 1))
+done
+unset -f sleep
+while IFS= read -r s || [ -n "$s" ]; do
+  [ -n "$s" ] || continue
+  case "$s" in
+    0.2|0.3|0.4|0.5|0.6|0.7|0.8|0.9|1|1.0) ;;
+    *) fail "jitter out of range: $s";;
+  esac
+done <"$T/sleeps"
+grep -Eq '^(1|1\.0)$' "$T/sleeps" || fail "jitter never reaches 1.0"
+
 # a directory path is not a file on main, so it reports new.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM sub 2>/dev/null)" || fail "dir claim exits 0"
 [ "$out" = "$(printf 'GRANT sub new\nfile-claim: 1 granted, 0 refused')" ] || fail "dir reports new: $out"
