@@ -1,6 +1,6 @@
 Check this plan for issue #__ISSUE__ in __REPO__ against the code it cites. Do not edit anything. Do not delegate further.
 
-Read the ticket (body and comments, pasted below under the extra lines: your sandbox prints nothing for `gh issue view`) and every file the plan names, at __BASE__, in your working directory. You check by reading and searching code; the lane builds and runs the Gate, so your report needs no build or test output. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call, and read the pack (`__PACK__`) before any of them.
+Read the ticket (body and comments, pasted below, at the start of the extra lines: your sandbox prints nothing for `gh issue view`) and every file the plan names, at __BASE__, in your working directory. You check by reading and searching code; the lane builds and runs the Gate, so your report needs no build or test output. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call, and read the pack (`__PACK__`) before any of them.
 __EXTRA__
 
 ## Plan
