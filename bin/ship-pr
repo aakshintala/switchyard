@@ -15,7 +15,8 @@
 #        with current origin/main in a throwaway merge commit (step 7); squash-merge
 #        pinned to the checked head, retrying once on a base race or GraphQL error
 #        and polling MERGED even after a failed retry; wait for MERGED; remove the worktree and the
-#        local and remote branch, keeping the worktree and local branch when the caller's directory is inside it.
+#        local and remote branch (the worktree and local branch stay when the
+#        caller's directory is inside it).
 #        The CI wait trusts the repo's required checks: one green on the exact
 #        head counts whenever it ran, so marking ready need not start a new run,
 #        and a run that starts after the wait passed does not hold the merge. An
@@ -581,7 +582,7 @@ cd "$common"
 # to remove them by hand. The remote branch is still deleted.
 case "$start_dir/" in
   "$worktree"/*)
-    say "worktree kept: your shell is inside it; remove it with: git -C $common worktree remove $worktree && git -C $common branch -D $branch" ;;
+    say "worktree kept: your shell is inside it; remove it with: $(printf 'git -C %q worktree remove %q && git -C %q branch -D %q' "$common" "$worktree" "$common" "$branch")" ;;
   *)
     git --git-dir="$common" worktree remove "$worktree" >&2 || say "cleanup: worktree remove failed for $worktree"
     git --git-dir="$common" branch -D "$branch" >&2 || say "cleanup: branch -D $branch failed" ;;
