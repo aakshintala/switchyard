@@ -31,19 +31,21 @@ Every verdict `APPROVE` and no open P1 or P2: the loop is done. Otherwise send e
 
 A **real bug** is a P1, or a behaviour defect a consumer of the change would see. When round one found no real bug, only missing tests, nits, style or docs, its fix round is the last. Step 3 is skipped. `ship-pr` takes the round-one head as `--reviewed`, with `--unverified-fixes <findings file>`, and CI, mutants included, still gates the new head.
 
-Done when the fix round covers every open finding: dispatched as a gated job, or fixed inline with the gate's output stated.
+A finding that waits on an owner ruling leaves the loop: post it as a decision per `implement`'s "Never wait on a human" rule, park the ticket when it touches the core outcome, and keep it out of the findings file and out of the round count. The other findings go on.
+
+Done when the fix round covers every open finding: dispatched as a gated job, or fixed inline with the gate's output stated. A finding parked for a ruling is not open here.
 
 ### 3. Verify
 
 Run this step when the fix round answers a real bug (step 2).
 
-Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new head>`; after a rebase, a plain diff counts the base's own merges) and gate output, never the fix worker's report. A finding the worker refuted has no fix in the diff: copy its `refuted: <evidence>` line under that finding in the findings file, so the verify checks the evidence against the code. Then run the scoped verify, which starts it, waits and collects it, as in step 1:
+Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new head>`; after a rebase, a plain diff counts the base's own merges) and the job's `gateResult`, never the fix worker's report: a report of a passing gate beside a red `gateResult` is red. A finding the worker refuted has no fix in the diff: copy its `refuted: <evidence>` line under that finding in the findings file, so the verify checks the evidence against the code. Then run the scoped verify, which starts it, waits and collects it, as in step 1:
 
 ```
 ~/.agents/bin/review-pr run <pr> --repo <owner/name> --cwd <clone> --head <pushed sha> --model <correctness> --verify <findings file> --since <reviewed head>
 ```
 
-`review-pr collect --findings-out <path>` produces the findings file. Pass `--context <file>` for a plan, ruling or list the findings cite that lives outside the checkout.
+`review-pr collect --findings-out <path>` produces the findings file; `briefs/findings.md` is the layout for one you write. Pass `--context <file>` for a plan, ruling or list the findings cite that lives outside the checkout.
 
 `tkt-fix --verify` runs this step and prints its verdict:
 
@@ -54,6 +56,8 @@ Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new h
 The verify prints `review-pr: repair base <sha> (<since> replayed onto <base>)`: it replays the reviewed head onto the current base so the diff holds only the fix round, and needs no action. A line above it saying the head "does not replay cleanly" means the diff also holds the rebase's conflict resolution: judge that part as part of the repair.
 
 `FIX-OK`: the loop is done. `FIX-INCOMPLETE`: back to step 2 with the open findings, while the counter is below 2.
+
+A scoped verify stands for every axis: `FIX-OK` ends the loop and no full review pair follows, whichever axis raised the findings. Run a full pair (step 1) only after a re-plan or take-back (step 4), or when the verify's new findings show the repair reached code outside the findings' bounds.
 
 Done when the verify has printed `FIX-OK` or `FIX-INCOMPLETE` for the current patch-id.
 

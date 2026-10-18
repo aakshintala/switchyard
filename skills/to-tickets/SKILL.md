@@ -34,6 +34,8 @@ Break the work into **tracer bullet** tickets.
 
 </vertical-slice-rules>
 
+A diagnosis ticket states its no-failure outcome as a done-when beside the cause ("no failure in N runs, with the run log"), since a diagnosis may honestly find nothing.
+
 Give each ticket its **blocking edges**: the other tickets that must complete before it can start. A ticket with no blockers can start immediately.
 
 When the source records **weak points** (assumptions its decisions rest on that nothing has yet tested), the first tickets on the frontier exercise them: the assumptions most likely to break get built while the fewest tickets depend on them. Name the weak point each such ticket tests in its body. When a ticket names a stop condition, settle it against the code now (a grep, a file read) and record the result, or write the exact check into the ticket.

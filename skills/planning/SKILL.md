@@ -57,7 +57,7 @@ Size each task as the smallest unit that carries its own test cycle. A regressio
 
 A task with a wait, poll or retry carries a margin table: per wait, the margin is the bound minus the time of the event it waits for, in ms, computed from the code's constants (quote them) in one pass over every wait the change touches, so a Verifier round checks the table and finds no further row. A fake clock advanced on a "parked" state names the thread and the signal that the awaited state was recorded.
 
-Defaults come from the project's catalogues first: an error code from the error doc, a name or format from the doc that lists it. A fence grant for a shared file names the line. A type from another crate is written in the path form that resolves (`::tools::` when the crate has its own `mod tools`).
+Defaults come from the project's catalogues first: an error code from the error doc, a name or format from the doc that lists it. A fence grant for a shared file names the line. A new file the change or its tests need (a test module, a fixture) is a Files entry too: the lane stops on any path the plan doesn't list. A type from another crate is written in the path form that resolves (`::tools::` when the crate has its own `mod tools`).
 
 With a state file, record the plan with `tkt-plan <state> set <plan file>`: it stores the path, zeroes the round count and rewrites the pack from the plan's Files, Interfaces and Tasks, and exits 2 listing each token it cannot resolve.
 
