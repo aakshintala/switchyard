@@ -1,0 +1,565 @@
+#!/usr/bin/env bash
+# file-claim: lanes self-grant files without a round trip to the orchestrator.
+#
+# The claim store is the ref refs/claims/live in the claim repo (--repo,
+# default aakshintala/fiber; FILE_CLAIM_REMOTE overrides the remote URL, which
+# the tests point at a local bare repo). The tip commit's tree holds one blob,
+# "claims": one TAB-separated line per claimed path:
+#   path<TAB>lane<TAB>kind(plan|grant)<TAB>at(UTC ISO)<TAB>worktree(HOST:DIR)<TAB>pr
+# Every write is a compare-and-swap: fetch the ref, check against that state,
+# build blob, tree and commit (parent = fetched tip), push COMMIT:ref. A
+# non-fast-forward rejection means someone else wrote first: refetch, recheck
+# and retry, up to 8 tries with jittered 0.2-1 s sleeps.
+#
+# Usage:
+#   file-claim claim --lane ID (--plan | --grant) [--self-pr N]
+#                    [--worktree HOST:DIR] [--repo R] PATH...
+#   file-claim release --lane ID [--repo R] [PATH...]
+#   file-claim list [--lane ID] [--repo R]
+set -euo pipefail
+
+REPO_DEFAULT="aakshintala/fiber"
+REF="refs/claims/live"
+MAX_GRANT=5
+TRIES=8
+TAB=$'\t'
+NL=$'\n'
+
+usage() {
+  echo "usage: file-claim claim --lane ID (--plan | --grant) [--self-pr N] [--worktree HOST:DIR] [--repo R] PATH..." >&2
+  echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
+  echo "       file-claim list [--lane ID] [--repo R]" >&2
+  exit 2
+}
+
+die() {
+  local code="$1"
+  shift
+  echo "file-claim: $*" >&2
+  exit "$code"
+}
+
+W=""
+cleanup() {
+  if [ -n "$W" ] && [ -d "$W" ]; then
+    rm -rf "$W"
+  fi
+}
+trap cleanup EXIT
+
+new_workdir() {
+  W="$(mktemp -d "${TMPDIR:-/tmp}/file-claim.XXXXXX")"
+  git init -q --bare "$W" || die 2 "cannot init temp dir"
+}
+
+remote_for() {
+  if [ -n "${FILE_CLAIM_REMOTE:-}" ]; then
+    printf '%s' "$FILE_CLAIM_REMOTE"
+  else
+    printf 'git@github.com:%s.git' "$1"
+  fi
+}
+
+# valid_path P: canonical repo-relative paths only.
+valid_path() {
+  case "$1" in
+    ""|*"$TAB"*|*"$NL"*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;;
+  esac
+  return 0
+}
+
+# valid_field V: a TSV field must hold no tab or newline.
+valid_field() {
+  case "$1" in
+    ""|*"$TAB"*|*"$NL"*) return 1;;
+  esac
+  return 0
+}
+
+DATE_FLAVOR=""
+at_epoch() {
+  # at_epoch ISO: seconds since epoch for a UTC ISO timestamp.
+  if [ -z "$DATE_FLAVOR" ]; then
+    if date -u -d '2000-01-01T00:00:00Z' +%s >/dev/null 2>&1; then
+      DATE_FLAVOR=gnu
+    else
+      DATE_FLAVOR=bsd
+    fi
+  fi
+  if [ "$DATE_FLAVOR" = "gnu" ]; then
+    date -u -d "$1" +%s 2>/dev/null
+  else
+    date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null
+  fi
+}
+
+valid_at() {
+  case "$1" in
+    ????-??-??T??:??:??Z) ;;
+    *) return 1;;
+  esac
+  if at_epoch "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+fetch_main_tip() {
+  # fetch_main_tip REMOTE: print origin/main's commit, or die 2 when main
+  # is missing or the remote cannot be read.
+  local remote="$1" tip
+  git -C "$W" fetch -q "$remote" "+refs/heads/main:refs/file-claim/main" 2>"$W/fetch-main.err" \
+    || die 2 "cannot fetch main from $remote: $(cat "$W/fetch-main.err")"
+  tip="$(git -C "$W" rev-parse --verify --quiet 'refs/file-claim/main^{commit}' 2>/dev/null || true)"
+  [ -n "$tip" ] || die 2 "no main branch in $remote"
+  printf '%s' "$tip"
+}
+
+fetch_claim_tip() {
+  # fetch_claim_tip REMOTE: print the claims ref tip, or nothing when the ref
+  # is absent (first use). Die 2 on transport errors.
+  local remote="$1" tip
+  if git -C "$W" fetch -q "$remote" "+$REF:refs/file-claim/claims" 2>"$W/fetch-claims.err"; then
+    tip="$(git -C "$W" rev-parse --verify --quiet 'refs/file-claim/claims^{commit}' 2>/dev/null || true)"
+    printf '%s' "$tip"
+    return 0
+  fi
+  if git ls-remote -q "$remote" "$REF" 2>/dev/null | grep -q .; then
+    die 2 "cannot fetch $REF from $remote: $(cat "$W/fetch-claims.err")"
+  fi
+  if [ -n "$(git ls-remote "$remote" 'refs/heads/main' 2>/dev/null || true)" ]; then
+    return 0
+  fi
+  die 2 "cannot fetch $REF from $remote: $(cat "$W/fetch-claims.err")"
+}
+
+load_claims() {
+  # load_claims TIP FILE: write the canonical claims text at TIP to FILE.
+  # Die 2 when the blob is missing or a line is corrupt.
+  local tip="$1" file="$2" line c_path c_lane c_kind c_at c_wt c_pr tabs n
+  if [ -z "$tip" ]; then
+    : >"$file"
+    return 0
+  fi
+  git -C "$W" cat-file -p "$tip:claims" >"$file" 2>/dev/null \
+    || die 2 "claims ref holds no claims blob"
+  n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    tabs="${line//[!$TAB]/}"
+    [ "${#tabs}" = "5" ] || die 2 "claims line $n is corrupt"
+    IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr <<<"$line"
+    case "$c_kind" in
+      plan|grant) ;;
+      *) die 2 "claims line $n is corrupt";;
+    esac
+    valid_at "$c_at" || die 2 "claims line $n is corrupt"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$c_at" "$c_wt" "$c_pr"
+  done <"$file" >"$file.canonical"
+  mv "$file.canonical" "$file"
+}
+
+path_exists_on_main() {
+  # path_exists_on_main TIP PATH: 0 when PATH is a file on main's tree.
+  local tip="$1" path="$2" line rest type name
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    rest="${line#* }"
+    type="${rest%% *}"
+    name="${rest#*$TAB}"
+    if [ "$type" = "blob" ] && [ "$name" = "$path" ]; then
+      return 0
+    fi
+  done < <(git -C "$W" ls-tree "$tip" -- "$path" 2>/dev/null || true)
+  return 1
+}
+
+pr_holding_path() {
+  # pr_holding_path MAP PATH SELF: smallest open PR touching PATH, skipping
+  # SELF; nothing when none does.
+  local map="$1" path="$2" self="$3"
+  awk -F'\t' -v p="$path" -v s="$self" '$2 == p && $1 != s {print $1}' "$map" \
+    | sort -n | head -1
+}
+
+claim_holding_path() {
+  # claim_holding_path FILE PATH: the lane holding PATH, or nothing.
+  local file="$1" path="$2" line c_path c_rest c_lane
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    c_path="${line%%$TAB*}"
+    c_rest="${line#*$TAB}"
+    c_lane="${c_rest%%$TAB*}"
+    if [ "$c_path" = "$path" ]; then
+      printf '%s' "$c_lane"
+      return 0
+    fi
+  done <"$file"
+  return 0
+}
+
+count_grants() {
+  # count_grants FILE LANE: number of kind=grant lines the lane holds.
+  local file="$1" lane="$2" line c_rest c_lane c_kind n
+  n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    c_rest="${line#*$TAB}"
+    c_lane="${c_rest%%$TAB*}"
+    c_rest="${c_rest#*$TAB}"
+    c_kind="${c_rest%%$TAB*}"
+    if [ "$c_lane" = "$lane" ] && [ "$c_kind" = "grant" ]; then
+      n=$((n + 1))
+    fi
+  done <"$file"
+  printf '%s' "$n"
+}
+
+store_claims() {
+  # store_claims REMOTE FILE TIP: commit FILE as the claims blob on top of TIP
+  # and push it once. Return 3 when the ref moved under us (a raced write
+  # fails either with a non-fast-forward rejection over smart protocols or
+  # with a lock/ref mismatch over local transport): the caller refetches and
+  # retries. Die 2 on any other push failure.
+  local remote="$1" file="$2" tip="$3" err blob tree commit
+  blob="$(git -C "$W" hash-object -w "$file")" || die 2 "cannot hash claims"
+  tree="$(printf '100644 blob %s\tclaims\n' "$blob" | git -C "$W" mktree)" \
+    || die 2 "cannot build claims tree"
+  if [ -n "$tip" ]; then
+    commit="$(printf 'file-claim: update claims\n' | GIT_AUTHOR_NAME=file-claim \
+      GIT_AUTHOR_EMAIL=file-claim@localhost GIT_COMMITTER_NAME=file-claim \
+      GIT_COMMITTER_EMAIL=file-claim@localhost \
+      git -C "$W" commit-tree "$tree" -p "$tip")" || die 2 "cannot commit claims"
+  else
+    commit="$(printf 'file-claim: update claims\n' | GIT_AUTHOR_NAME=file-claim \
+      GIT_AUTHOR_EMAIL=file-claim@localhost GIT_COMMITTER_NAME=file-claim \
+      GIT_COMMITTER_EMAIL=file-claim@localhost \
+      git -C "$W" commit-tree "$tree")" || die 2 "cannot commit claims"
+  fi
+  err="$W/push.err"
+  if git -C "$W" push -q "$remote" "$commit:$REF" 2>"$err"; then
+    return 0
+  fi
+  if grep -qi 'non-fast-forward\|fetch first\|cannot lock ref' "$err"; then
+    return 3
+  fi
+  die 2 "cannot push $REF to $remote: $(cat "$err")"
+}
+
+cmd_claim() {
+  local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5"
+  shift 5
+  local remote now main_tip pr_json prmap tip claims attempt
+  local paths out new_lines
+  local i p held granted refused existing new_grants cap_hit reason pr holder
+  remote="$(remote_for "$repo")"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  [ $# -gt 0 ] || usage
+  for p in "$@"; do
+    valid_path "$p" || die 2 "not a repo-relative path: $p"
+  done
+  # One line per unique path, first-occurrence order.
+  paths=()
+  for p in "$@"; do
+    held=0
+    if [ "${#paths[@]}" -gt 0 ]; then
+      for i in "${paths[@]}"; do
+        if [ "$i" = "$p" ]; then held=1; break; fi
+      done
+    fi
+    if [ "$held" = "0" ]; then paths+=("$p"); fi
+  done
+  new_workdir
+  pr_json="$(gh pr list --repo "$repo" --state open --limit 1000 --json number,files 2>"$W/gh.err")" \
+    || die 2 "cannot list open PRs for $repo: $(cat "$W/gh.err")"
+  prmap="$W/prmap"
+  printf '%s' "$pr_json" | jq -r '.[] | .number as $n | (.files // [])[] | "\($n)\t\(.path)"' >"$prmap" 2>"$W/jq.err" \
+    || die 2 "cannot parse open PRs for $repo: $(cat "$W/jq.err")"
+  attempt=1
+  while [ "$attempt" -le "$TRIES" ]; do
+    main_tip="$(fetch_main_tip "$remote")"
+    tip="$(fetch_claim_tip "$remote")"
+    claims="$W/claims.tsv"
+    load_claims "$tip" "$claims"
+    out=()
+    new_lines=()
+    granted=0
+    refused=0
+    # Grants this call would add on top of the lane's recorded ones.
+    existing="$(count_grants "$claims" "$lane")"
+    new_grants=0
+    for p in "${paths[@]}"; do
+      if [ "$kind" = "grant" ] && [ -z "$(claim_holding_path "$claims" "$p")" ]; then
+        new_grants=$((new_grants + 1))
+      fi
+    done
+    cap_hit=0
+    if [ "$((existing + new_grants))" -gt "$MAX_GRANT" ]; then cap_hit=1; fi
+    for p in "${paths[@]}"; do
+      if path_exists_on_main "$main_tip" "$p"; then
+        reason="exists"
+      else
+        reason="new"
+      fi
+      pr="$(pr_holding_path "$prmap" "$p" "$self_pr")"
+      if [ -n "$pr" ]; then
+        out+=("REFUSE $p pr#$pr")
+        refused=$((refused + 1))
+        continue
+      fi
+      holder="$(claim_holding_path "$claims" "$p")"
+      if [ -n "$holder" ]; then
+        if [ "$holder" = "$lane" ]; then
+          out+=("GRANT $p $reason")
+          granted=$((granted + 1))
+          continue
+        fi
+        out+=("REFUSE $p lane:$holder")
+        refused=$((refused + 1))
+        continue
+      fi
+      if [ "$kind" = "grant" ] && [ "$cap_hit" = "1" ]; then
+        out+=("REFUSE $p cap")
+        refused=$((refused + 1))
+        continue
+      fi
+      out+=("GRANT $p $reason")
+      granted=$((granted + 1))
+      new_lines+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$p" "$lane" "$kind" "$now" "$worktree" "$self_pr")")
+    done
+    if [ "$refused" -gt 0 ]; then
+      printf '%s\n' "${out[@]}"
+      printf 'file-claim: %s granted, %s refused\n' "$granted" "$refused"
+      exit 1
+    fi
+    if [ "${#new_lines[@]}" -eq 0 ]; then
+      printf '%s\n' "${out[@]}"
+      printf 'file-claim: %s granted, %s refused\n' "$granted" "$refused"
+      exit 0
+    fi
+    {
+      cat "$claims"
+      printf '%s\n' "${new_lines[@]}"
+    } >"$claims.new"
+    if store_claims "$remote" "$claims.new" "$tip"; then
+      printf '%s\n' "${out[@]}"
+      printf 'file-claim: %s granted, %s refused\n' "$granted" "$refused"
+      exit 0
+    fi
+    # The ref moved under us: refetch, recheck, retry with jitter.
+    attempt=$((attempt + 1))
+    sleep "0.$((RANDOM % 9 + 2))"
+  done
+  die 2 "cannot push $REF: still rejected after $TRIES tries"
+}
+
+filter_release() {
+  # filter_release CLAIMS LANE KEPT DROPPED [PATH...]: split CLAIMS into the
+  # lines the lane keeps and the lane's dropped paths.
+  local claims="$1" lane="$2" kept="$3" dropped="$4"
+  shift 4
+  local line c_path c_rest c_lane p drop
+  : >"$kept"
+  : >"$dropped"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    c_path="${line%%$TAB*}"
+    c_rest="${line#*$TAB}"
+    c_lane="${c_rest%%$TAB*}"
+    drop=0
+    if [ "$c_lane" = "$lane" ]; then
+      if [ $# -eq 0 ]; then
+        drop=1
+      else
+        for p in "$@"; do
+          if [ "$p" = "$c_path" ]; then drop=1; break; fi
+        done
+      fi
+    fi
+    if [ "$drop" = "1" ]; then
+      printf '%s\n' "$c_path" >>"$dropped"
+    else
+      printf '%s\n' "$line" >>"$kept"
+    fi
+  done <"$claims"
+}
+
+cmd_release() {
+  local lane="$1" repo="$2"
+  shift 2
+  local remote tip claims kept dropped p line attempt
+  remote="$(remote_for "$repo")"
+  for p in "$@"; do
+    valid_path "$p" || die 2 "not a repo-relative path: $p"
+  done
+  new_workdir
+  fetch_main_tip "$remote" >/dev/null
+  tip="$(fetch_claim_tip "$remote")"
+  claims="$W/claims.tsv"
+  load_claims "$tip" "$claims"
+  kept="$W/kept.tsv"
+  dropped="$W/dropped.txt"
+  if [ $# -gt 0 ]; then
+    filter_release "$claims" "$lane" "$kept" "$dropped" "$@"
+  else
+    filter_release "$claims" "$lane" "$kept" "$dropped"
+  fi
+  if [ ! -s "$dropped" ]; then
+    exit 0
+  fi
+  attempt=1
+  while [ "$attempt" -le "$TRIES" ]; do
+    if [ "$attempt" -gt 1 ]; then
+      tip="$(fetch_claim_tip "$remote")"
+      load_claims "$tip" "$claims"
+      if [ $# -gt 0 ]; then
+        filter_release "$claims" "$lane" "$kept" "$dropped" "$@"
+      else
+        filter_release "$claims" "$lane" "$kept" "$dropped"
+      fi
+      [ -s "$dropped" ] || exit 0
+    fi
+    if store_claims "$remote" "$kept" "$tip"; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        printf 'RELEASE %s\n' "$line"
+      done <"$dropped"
+      exit 0
+    fi
+    attempt=$((attempt + 1))
+    sleep "0.$((RANDOM % 9 + 2))"
+  done
+  die 2 "cannot push $REF: still rejected after $TRIES tries"
+}
+
+cmd_list() {
+  local lane="$1" repo="$2"
+  local remote tip claims now line c_path c_rest c_lane c_kind c_at c_wt c_pr age
+  remote="$(remote_for "$repo")"
+  new_workdir
+  fetch_main_tip "$remote" >/dev/null
+  tip="$(fetch_claim_tip "$remote")"
+  claims="$W/claims.tsv"
+  load_claims "$tip" "$claims"
+  now="$(date -u +%s)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    c_path="${line%%$TAB*}"
+    c_rest="${line#*$TAB}"
+    c_lane="${c_rest%%$TAB*}"
+    c_rest="${c_rest#*$TAB}"
+    c_kind="${c_rest%%$TAB*}"
+    c_rest="${c_rest#*$TAB}"
+    c_at="${c_rest%%$TAB*}"
+    c_rest="${c_rest#*$TAB}"
+    c_wt="${c_rest%%$TAB*}"
+    c_pr="${c_rest#*$TAB}"
+    if [ -n "$lane" ] && [ "$c_lane" != "$lane" ]; then
+      continue
+    fi
+    age=$((now - $(at_epoch "$c_at")))
+    if [ "$age" -lt 0 ]; then age=0; fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$age" "$c_wt" "$c_pr"
+  done <"$claims" | LC_ALL=C sort -t "$TAB" -k1,1
+}
+
+main() {
+  [ $# -ge 1 ] || usage
+  local cmd="$1"
+  shift
+  case "$cmd" in
+    claim|release|list) ;;
+    *) usage;;
+  esac
+  local lane="" mode="" self_pr="" worktree="" repo="$REPO_DEFAULT"
+  local paths
+  paths=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lane)
+        [ $# -ge 2 ] || usage
+        lane="$2"
+        shift 2
+        ;;
+      --plan)
+        [ "$cmd" = "claim" ] || usage
+        [ -z "$mode" ] || usage
+        mode="plan"
+        shift
+        ;;
+      --grant)
+        [ "$cmd" = "claim" ] || usage
+        [ -z "$mode" ] || usage
+        mode="grant"
+        shift
+        ;;
+      --self-pr)
+        [ "$cmd" = "claim" ] || usage
+        [ $# -ge 2 ] || usage
+        self_pr="$2"
+        shift 2
+        ;;
+      --worktree)
+        [ "$cmd" = "claim" ] || usage
+        [ $# -ge 2 ] || usage
+        worktree="$2"
+        shift 2
+        ;;
+      --repo)
+        [ $# -ge 2 ] || usage
+        repo="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        while [ $# -gt 0 ]; do
+          paths+=("$1")
+          shift
+        done
+        ;;
+      --*)
+        usage
+        ;;
+      *)
+        paths+=("$1")
+        shift
+        ;;
+    esac
+  done
+  case "$self_pr" in
+    "") ;;
+    *[!0-9]*) usage;;
+  esac
+  [ -n "$repo" ] || usage
+  valid_field "$repo" || usage
+  case "$cmd" in
+    claim)
+      [ -n "$lane" ] || usage
+      valid_field "$lane" || usage
+      [ -n "$mode" ] || usage
+      if [ -z "$worktree" ]; then
+        worktree="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'unknown'):$(pwd)"
+      fi
+      valid_field "$worktree" || usage
+      [ "${#paths[@]}" -gt 0 ] || usage
+      cmd_claim "$lane" "$mode" "$self_pr" "$worktree" "$repo" "${paths[@]}"
+      ;;
+    release)
+      [ -n "$lane" ] || usage
+      valid_field "$lane" || usage
+      if [ "${#paths[@]}" -gt 0 ]; then
+        cmd_release "$lane" "$repo" "${paths[@]}"
+      else
+        cmd_release "$lane" "$repo"
+      fi
+      ;;
+    list)
+      if [ -n "$lane" ]; then
+        valid_field "$lane" || usage
+      fi
+      cmd_list "$lane" "$repo"
+      ;;
+  esac
+}
+
+main "$@"

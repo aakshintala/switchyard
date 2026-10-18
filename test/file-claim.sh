@@ -67,10 +67,13 @@ claims_blob() {
   git -C "$1" cat-file -p "$tip:claims" || fail "read claims blob"
 }
 
-N=0
+NFILE="$T/n"
+printf 0 >"$NFILE"
 fresh() {
-  N=$((N + 1))
-  new_remote "$N"
+  n="$(cat "$NFILE")"
+  n=$((n + 1))
+  printf '%s' "$n" >"$NFILE"
+  new_remote "$n"
 }
 
 CLAIM="claim --lane L --grant --worktree t:d1 --repo test/repo"
@@ -81,7 +84,7 @@ R="$(fresh)"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt newfile.txt 2>"$T/e1")" || fail "first claim exits 0: $(cat "$T/e1")"
 [ "$out" = "$(printf 'GRANT a.txt exists\nGRANT newfile.txt new\nfile-claim: 2 granted, 0 refused')" ] || fail "new vs exists lines: $out"
 blob="$(claims_blob "$R")"
-[ "$(printf '%s' "$blob" | wc -l)" = "2" ] || fail "two claim lines stored"
+[ "$(printf '%s\n' "$blob" | grep -c '^')" = "2" ] || fail "two claim lines stored"
 printf '%s' "$blob" | grep -q "^a.txt	L	grant	" || fail "a.txt stored as grant"
 [ -n "$(claim_tip "$R")" ] || fail "claims ref created by first claim"
 
@@ -149,7 +152,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA 
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt y.txt 2>/dev/null)" && fail "mixed claim exits non-zero"
 [ "$?" = "1" ] || fail "mixed claim exits 1"
 [ "$out" = "$(printf 'REFUSE x.txt lane:A\nGRANT y.txt new\nfile-claim: 1 granted, 1 refused')" ] || fail "mixed lines: $out"
-[ "$(claims_blob "$R" | wc -l)" = "1" ] || fail "mixed refusal stores y.txt too"
+[ "$(claims_blob "$R" | grep -c '^')" = "1" ] || fail "mixed refusal stores y.txt too"
 
 # --- cap of 5 grants; plan claims do not count ----------------------------------
 R="$(fresh)"
@@ -161,9 +164,9 @@ done
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g6 2>/dev/null)" && fail "6th grant exits non-zero"
 [ "$?" = "1" ] || fail "6th grant exits 1"
 [ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: 0 granted, 1 refused')" ] || fail "cap refusal: $out"
-[ "$(claims_blob "$R" | wc -l)" = "5" ] || fail "cap refusal writes nothing"
+[ "$(claims_blob "$R" | grep -c '^')" = "5" ] || fail "cap refusal writes nothing"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --plan --worktree t:dG --repo test/repo p1 p2 p3 >/dev/null 2>&1 || fail "plan claims exit 0 past the grant cap"
-[ "$(claims_blob "$R" | wc -l)" = "8" ] || fail "plan claims stored past the cap"
+[ "$(claims_blob "$R" | grep -c '^')" = "8" ] || fail "plan claims stored past the cap"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g6 2>/dev/null)" && fail "grant past cap still refused"
 [ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: 0 granted, 1 refused')" ] || fail "cap holds with plans: $out"
 
@@ -172,7 +175,7 @@ R="$(fresh)"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g1 g2 g3 >/dev/null 2>&1 || fail "setup 3 grants"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g4 g5 g6 2>/dev/null)" && fail "over-cap call exits non-zero"
 [ "$out" = "$(printf 'REFUSE g4 cap\nREFUSE g5 cap\nREFUSE g6 cap\nfile-claim: 0 granted, 3 refused')" ] || fail "over-cap lines: $out"
-[ "$(claims_blob "$R" | wc -l)" = "3" ] || fail "over-cap call writes nothing"
+[ "$(claims_blob "$R" | grep -c '^')" = "3" ] || fail "over-cap call writes nothing"
 
 # --- --plan and --grant are exclusive --------------------------------------------
 R="$(fresh)"
@@ -246,7 +249,7 @@ corrupt_remote() {
   tree="$(printf '100644 blob %s\tclaims\n' "$blob" | git -C "$w" mktree)" || fail "corrupt tree $1"
   mtip="$(git -C "$w" rev-parse main)" || fail "corrupt mtip $1"
   commit="$(printf 'corrupt\n' | GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t git -C "$w" commit-tree "$tree" -p "$mtip")" || fail "corrupt commit $1"
-  git -C "$r" update-ref refs/claims/live "$commit" || fail "corrupt ref $1"
+  git -C "$w" push -q "$r" "$commit:refs/claims/live" || fail "corrupt ref $1"
   printf '%s' "$r"
 }
 
@@ -273,17 +276,17 @@ FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo 
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane A x.txt 2>/dev/null)" || fail "release named exits 0"
 [ "$out" = "RELEASE x.txt" ] || fail "release named line: $out"
 blob="$(claims_blob "$R")"
-[ "$(printf '%s' "$blob" | wc -l)" = "2" ] || fail "one line released"
+[ "$(printf '%s\n' "$blob" | grep -c '^')" = "2" ] || fail "one line released"
 printf '%s' "$blob" | grep -q "^y.txt	A	grant	" || fail "y's claim kept"
 printf '%s' "$blob" | grep -q "^z.txt	B	grant	" || fail "B's claim kept"
 # releasing a path another lane holds drops nothing.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane A z.txt 2>/dev/null)" || fail "foreign release exits 0"
 [ -z "$out" ] || fail "foreign release prints nothing"
-[ "$(claims_blob "$R" | wc -l)" = "2" ] || fail "foreign release drops nothing"
+[ "$(claims_blob "$R" | grep -c '^')" = "2" ] || fail "foreign release drops nothing"
 # release all of a lane.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane A 2>/dev/null)" || fail "release all exits 0"
 [ "$out" = "RELEASE y.txt" ] || fail "release all line: $out"
-[ "$(claims_blob "$R" | wc -l)" = "1" ] || fail "release all drops the lane"
+[ "$(claims_blob "$R" | grep -c '^')" = "1" ] || fail "release all drops the lane"
 # a missing lane is a no-op success.
 before="$(claims_blob "$R")"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane NOBODY 2>/dev/null)" || fail "missing-lane release exits 0"
@@ -296,13 +299,13 @@ FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:wtA --repo
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --plan --worktree t:wtA --repo test/repo f1.txt >/dev/null 2>&1 || fail "list setup 2"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:wtB --repo test/repo --self-pr 7 f3.txt >/dev/null 2>&1 || fail "list setup 3"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>/dev/null)" || fail "list exits 0"
-[ "$(printf '%s' "$out" | wc -l)" = "3" ] || fail "list has 3 lines: $out"
+[ "$(printf '%s\n' "$out" | grep -c '^')" = "3" ] || fail "list has 3 lines: $out"
 [ "$(printf '%s' "$out" | cut -f1 | tr '\n' ' ')" = "f1.txt f2.txt f3.txt " ] || fail "list sorted by path: $out"
 printf '%s' "$out" | grep -Eq "^f1.txt	A	plan	[0-9]+	t:wtA	$" || fail "list plan line: $out"
 printf '%s' "$out" | grep -Eq "^f2.txt	A	grant	[0-9]+	t:wtA	$" || fail "list grant line: $out"
 printf '%s' "$out" | grep -Eq "^f3.txt	B	grant	[0-9]+	t:wtB	7$" || fail "list pr passthrough: $out"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane A --repo test/repo 2>/dev/null)" || fail "list --lane exits 0"
-[ "$(printf '%s' "$out" | wc -l)" = "2" ] || fail "list --lane filters: $out"
+[ "$(printf '%s\n' "$out" | grep -c '^')" = "2" ] || fail "list --lane filters: $out"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane NOBODY --repo test/repo 2>/dev/null)" || fail "list empty lane exits 0"
 [ -z "$out" ] || fail "list empty lane prints nothing"
 
@@ -319,10 +322,14 @@ mkdir -p "$T/gitwrap"
 cat >"$T/gitwrap/git" <<WRAP_EOF
 #!/usr/bin/env bash
 echo "push \$*" >>"$T/push.log"
-if [ "\${1:-}" = "push" ] && [ -z "\${CLAIM_HOOKED:-}" ]; then
-  export CLAIM_HOOKED=1
-  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane rival --grant --worktree t:hook --repo test/repo rival.txt >/dev/null 2>&1 || exit 2
-fi
+case " \$* " in
+  *" push "*)
+    if [ -z "\${CLAIM_HOOKED:-}" ]; then
+      export CLAIM_HOOKED=1
+      FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane rival --grant --worktree t:hook --repo test/repo rival.txt >/dev/null 2>&1 || exit 2
+    fi
+    ;;
+esac
 exec "$REAL_GIT" "\$@"
 WRAP_EOF
 chmod +x "$T/gitwrap/git"
@@ -345,8 +352,10 @@ R="$(fresh)"
 i=1
 while [ "$i" -le 20 ]; do
   p="race-$i.txt"
-  (FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA --repo test/repo "$p" >/dev/null 2>&1; echo "$?" >"$T/c1-$i") &
-  (FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo "$p" >/dev/null 2>&1; echo "$?" >"$T/c2-$i") &
+  # Fresh lanes each round so the 5-grant cap never binds: the race alone
+  # decides the single winner.
+  (FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "A$i" --grant --worktree t:dA --repo test/repo "$p" >/dev/null 2>&1; echo "$?" >"$T/c1-$i") &
+  (FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "B$i" --grant --worktree t:dB --repo test/repo "$p" >/dev/null 2>&1; echo "$?" >"$T/c2-$i") &
   wait
   c1="$(cat "$T/c1-$i")"
   c2="$(cat "$T/c2-$i")"
@@ -356,6 +365,6 @@ while [ "$i" -le 20 ]; do
   esac
   i=$((i + 1))
 done
-[ "$(claims_blob "$R" | wc -l)" = "20" ] || fail "one claim per race recorded"
+[ "$(claims_blob "$R" | grep -c '^')" = "20" ] || fail "one claim per race recorded"
 
 echo "file-claim tests passed"
