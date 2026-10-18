@@ -11,12 +11,12 @@
 # Classification follows classify.py's names and order. Repeats key on test
 # names (test-*, mutants-baseline-test jobs) and, for compile and
 # mutants-baseline-compile jobs, on `compile <crates>: <first error line>`.
-# design[] counts every other class except missed-mutant and other.
+# design[] counts every other class except missed-mutant, other and cancelled.
 #
 # An issue search runs once per new test name; a cached open issue is re-read
 # when its test is sighted again. One uncached search lists the open
 # "Flaky test: <test>" issues (retry-passed flakes); a flake with 2+ sightings
-# (the issue's comments plus one) counts as a finding. Read-only: an open
+# (github-actions retry comments inside the window) counts as a finding. Read-only: an open
 # "blocked" issue whose named blockers (a "## Blocked by" section's #N refs,
 # and "waits for #N" anywhere) are all closed is a stale-blocked finding; a
 # blocker whose lookup fails counts as open. Exit codes: 0 none, 1 a
@@ -51,6 +51,9 @@ SERVER_ERR = re.compile(r"HTTP 5\d\d")
 RATE_LIMIT = re.compile(r"rate limit exceeded", re.I)  # gh puts "(HTTP 403)" last
 NO_ISSUE_TTL = timedelta(hours=6)  # a no-issue lookup is retried after this
 FLAKY_PREFIX = "Flaky test: "  # title prefix of the issues flake_report files
+# the flake_report bot comment body; source: fiber .github/workflows/ci.yml flake_report step
+FLAKE_RETRY_PHRASE = "passed after a retry on"
+RUN_URL = re.compile(r"https://github\.com/\S+/actions/runs/\d+")
 # #N or owner/name#N; the lookbehind keeps a ref from starting inside a word or path
 REF = re.compile(r"(?<![\w./-])(?:([\w.-]+/[\w.-]+))?#(\d+)(?!\w)")
 # ATX heading: up to 3 leading spaces, 1-6 #, then text and optional closing #s
@@ -125,8 +128,11 @@ def clean(text):
     return [TS.sub("", ANSI.sub("", l)) for l in text.splitlines()]
 
 
-def classify(name, steps, text):
-    """Port of classify.py. Returns (class, detail, tests[])."""
+def classify(name, steps, text, job=None):
+    """Port of classify.py. Returns (class, detail, tests[]).
+    job is the gh job dict (or None): a cancelled job is a timeout only
+    with the exceeded-maximum-execution-time line or a full bound of
+    elapsed time, else class cancelled."""
     step = next((s.get("name", "") for s in steps or []
                  if s.get("conclusion") == "failure"), "")
     lines = clean(text)
@@ -207,9 +213,13 @@ def classify(name, steps, text):
         return ("mutants-baseline", "unmutated baseline failed", [])
     if install:
         return ("infra", install[0][:140], [])
-    if any("The operation was canceled" in l or "has exceeded the maximum execution time" in l
-           for l in lines):
+    cancelled = bool(job) and job.get("conclusion") == "cancelled"
+    canceled = any("The operation was canceled" in l for l in lines)
+    exceeded = any("has exceeded the maximum execution time" in l for l in lines)
+    if exceeded or (canceled and (not cancelled or is_timeout(job))):
         return ("timeout", "job hit timeout-minutes", [])
+    if canceled:
+        return ("cancelled", "job cancelled before its timeout bound", [])
     return ("other", (errs[-1] if errs else (lines[-1] if lines else ""))[:160], [])
 
 
@@ -447,7 +457,7 @@ def main(argv):
                 ok = False
                 continue
             for j in jobs:
-                if j.get("conclusion") != "failure" and not is_timeout(j):
+                if j.get("conclusion") not in ("failure", "cancelled"):
                     continue
                 if group(j.get("name")) in ("CI verdict", "Report a failed backstop"):
                     continue
@@ -467,7 +477,7 @@ def main(argv):
                             ok = False
                             continue
                     else:
-                        cls, det, tests = classify(j.get("name"), j.get("steps"), log)
+                        cls, det, tests = classify(j.get("name"), j.get("steps"), log, j)
                     jobs_st[jid] = {"class": cls, "detail": det, "tests": tests,
                                     "lane": lane, "os": osof(j.get("labels")),
                                     "completed_at": done_at,
@@ -485,7 +495,7 @@ def main(argv):
                              ent.get("completed_at", done_at),
                              ent.get("head_sha", r.get("head_sha"))))
                         resight.add(key)
-                elif cls not in ("missed-mutant", "other"):
+                elif cls not in ("missed-mutant", "other", "cancelled"):
                     c, laneset = design.get(cls, (0, set()))
                     laneset.add(ent.get("lane", lane))
                     design[cls] = (c + 1, laneset)
@@ -619,8 +629,27 @@ def main(argv):
         upd = parse_ts(it.get("updated_at") or "")
         if not title.startswith(FLAKY_PREFIX) or not upd or upd < cutoff:
             continue
+        try:
+            comments = gh_paged("repos/%s/issues/%s/comments" % (repo, it.get("number")), None)
+        except Fatal as e:
+            print("ci-friction: %s" % e, file=sys.stderr)
+            ok = False
+            comments = []
+        sightings, runs = 0, []
+        for c in comments:
+            if not isinstance(c, dict) or (c.get("user") or {}).get("login") != "github-actions":
+                continue
+            if FLAKE_RETRY_PHRASE not in (c.get("body") or ""):
+                continue
+            created = parse_ts(c.get("created_at") or "")
+            if not created or created < cutoff:
+                continue
+            sightings += 1
+            m = RUN_URL.search(c.get("body") or "")
+            if m:
+                runs.append(m.group(0))
         flaky.append({"test": title[len(FLAKY_PREFIX):], "issue": it.get("number"),
-                      "sightings": 1 + int(it.get("comments") or 0)})
+                      "sightings": sightings, "runs": runs})
     flaky.sort(key=lambda f: f["test"])
     flaky_hot = [f for f in flaky if f["sightings"] >= 2]
 
@@ -688,6 +717,8 @@ def main(argv):
                 rc["test"], rc["issue"], rc["closed_at"], ",".join(rc["lanes"])))
     for f in flaky_hot:
         print("flaky: %s issue #%s sightings %s" % (f["test"], f["issue"], f["sightings"]))
+        for u in f["runs"]:
+            print("  run: %s" % u)
     for s_ in stale:
         print("stale-blocked: issue #%s, blockers %s all closed"
               % (s_["issue"], ", ".join(s_["blockers"])))
