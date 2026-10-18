@@ -925,6 +925,34 @@ grep -q -- "--since $MISSING_SINCE is not fetchable" <<<"$err" || fail "missing 
 [ -z "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null)" ] || fail "missing --since leaves no run dir"
 [ ! -e "$T/state/runs.txt" ] || fail "missing --since launches no job"
 
+# --- case: a short --since the clone holds is accepted
+reset_state
+printf 'P1 findings text\n' >"$T/findings.txt"
+write_record verify DONE "rechecked
+FIX-OK all repaired
+STATUS: DONE" 0
+start_out="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$SHORT" 2>"$T/stderr-short.txt")" || fail "short --since present in clone exits 0"
+[ "$start_out" = "verify job-verify
+watch: delegate watch job-verify
+collect: review-pr collect job-verify" ] || fail "short --since prints the verify job lines: [$start_out]"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "short --since collects"
+
+# --- case: a short --since the clone lacks exits 2 before fetching
+reset_state
+printf 'P1 findings text\n' >"$T/findings.txt"
+git -C "$T/clone" cat-file -e "deadbee^{commit}" 2>/dev/null && fail "fixture deadbee unexpectedly resolves"
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since deadbee 2>&1 >/dev/null)"; st=$?
+[ "$st" -eq 2 ] || fail "short --since absent from clone exits 2 (got $st)"
+grep -Fxq "review-pr: --since needs the full 40-character sha (deadbee is not in the clone)" <<<"$err" || \
+  fail "short --since names the value and the fix: [$err]"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || \
+  fail "short --since absent creates no worktree"
+[ -z "$(ls "$TMPDIR/review-pr" 2>/dev/null)" ] || fail "short --since absent saves no state"
+[ -z "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null)" ] || fail "short --since absent leaves no run dir"
+[ ! -e "$T/state/runs.txt" ] || fail "short --since absent launches no job"
+
 # --- case: an empty or whitespace-only --verify findings file exits 2 before launch
 for blank in '' '  \n\t \n'; do
   reset_state
