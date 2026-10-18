@@ -822,4 +822,12 @@ grep -q "^watch|r1 r2 r3 stub-2$" "$T/calls.log" || fail "single-watch: one watc
 [ "$(grep -c '^watch|' "$T/calls.log")" -eq 2 ] || fail "single-watch: lane plus one build watch"
 grep -q "^watch|stub-2$" "$T/calls.log" && fail "single-watch: no solo map watch"
 
+# --- --help and -h print usage and exit 0, running nothing ---
+out="$(bash "$BUILD" --help 2>"$T/help-err.txt")"; [ "$?" -eq 0 ] || fail "--help exits 0"
+[ ! -s "$T/help-err.txt" ] || fail "--help prints nothing on stderr"
+case "$out" in "usage: tkt-build <state>"*) ;; *) fail "--help prints usage: [$out]" ;; esac
+out="$(bash "$BUILD" -h 2>"$T/help-err.txt")"; [ "$?" -eq 0 ] || fail "-h exits 0"
+[ ! -s "$T/help-err.txt" ] || fail "-h prints nothing on stderr"
+case "$out" in "usage: tkt-build <state>"*) ;; *) fail "-h prints usage: [$out]" ;; esac
+
 echo "tkt-build: all cases passed"
