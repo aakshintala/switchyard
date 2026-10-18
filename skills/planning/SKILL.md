@@ -1,6 +1,6 @@
 ---
 name: planning
-description: "Write a ticket's implementation plan: a contract sketch (rulings, files, tasks, interfaces, review focus), checked by a Verifier, posted on the ticket, and filled into the lane brief. Use when planning a ticket before a lane builds it, or filling a preflight, Verifier or lane brief."
+description: "Write a ticket's implementation plan: a contract sketch (rulings, files, tasks, interfaces, review focus), checked by a Verifier, posted on the ticket, and filled into the lane brief. Use when planning a ticket before a lane builds it, or filling a preflight, planner, Verifier or lane brief."
 ---
 
 The orchestrator writes every ticket's plan, after reading the code it describes: a lane fails on a plan describing code its author never read. The plan becomes the body of the lane's brief.
@@ -9,7 +9,7 @@ The orchestrator writes every ticket's plan, after reading the code it describes
 
 **Base.** Every brief takes `BASE`, the code the plan describes, which the orchestrator prepares (see `implement` step 2): `origin/main` for a new ticket, the PR's branch with `origin/main` merged in for a re-plan. Read, plan and verify against that base.
 
-**Pack.** `plan-sweep` writes the ticket's context pack: symbol sites, file outlines, doc sections, and an Outside Files list of the paths its symbols reach that the plan's Files do not cover. `preflight.md`, `verifier.md` and `confirm.md` take it as `PACK` (`none` when no sweep ran). With a state file, `tkt-start` writes it and `tkt-plan <state> set` rewrites it from the plan; by hand, `~/.agents/bin/plan-sweep --help` shows the call.
+**Pack.** `plan-sweep` writes the ticket's context pack: symbol sites, file outlines, doc sections, and an Outside Files list of the paths its symbols reach that the plan's Files do not cover. `preflight.md`, `planner.md`, `verifier.md` and `confirm.md` take it as `PACK` (`none` when no sweep ran). With a state file, `tkt-start` writes it and `tkt-plan <state> set` rewrites it from the plan; by hand, `~/.agents/bin/plan-sweep --help` shows the call.
 
 **Commands.** With a state file, steps 2 to 5 run through `tkt-plan` and `tkt-build`, started as `implement`'s Commands says; each step below names what its command does. Without state, the step's own text is the procedure.
 
