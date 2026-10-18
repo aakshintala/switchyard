@@ -953,6 +953,17 @@ grep -q 'no new attempt' <<<"$ERR" || fail "missing attempt message: [$ERR]"
 [ "$(grep -c '^5$' "$ST/sleeps.txt")" -eq 24 ] || fail "missing attempt polls 120 s: [$(cat "$ST/sleeps.txt")]"
 no_merge "missing attempt"
 
+# many cancelled runs: the rerun wait looks each pre-attempt up in a long
+# list, which must not die on SIGPIPE when awk exits early (pipefail)
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+jq -n '[range(3000) | {"databaseId": (1000+.), "name": "ci", "workflowName": "CI-\(.)", "event": "push", "conclusion": "cancelled"}]' >"$ST/run-list.json"
+for i in $(seq 1 3000); do
+  echo '[{"conclusion":"cancelled","databaseId":1,"name":"ci"}]' >"$ST/jobs-$((1000 + i)).json"
+done
+ship; expect 0 "many cancelled runs rerun once and merge"
+[ "$(grep -c 'gh run rerun' "$ST/gh.log")" -eq 3000 ] || fail "many runs: every run rerun once: [$(grep -c 'gh run rerun' "$ST/gh.log")]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "many reruns merge: [$OUT]"
+
 # ===== (B) retry the merge once on a GraphQL error, polling MERGED after a failed retry
 setup; printf 'GraphQL error: something went wrong' >"$ST/merge-fail-once"
 ship; expect 0 "GraphQL error retries once"
