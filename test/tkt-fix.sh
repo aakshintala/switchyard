@@ -248,6 +248,12 @@ bash "$TKT" "$S" 2>/dev/null && fail "bare flags exited 0"
 bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
 [ "$?" = "2" ] || fail "resume without prompt exited $?, want 2"
 
+# 7b. The fix brief gets the plan gate as GATE (fix.md fills __GATE__).
+setup_case gatefill
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "gatefill exited $?"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "gatefill bad verdict: $(head -n 1 <<<"$out")"
+grep -F -q "GATE=true" "$T/calls.log" || fail "gatefill: GATE=true not passed to tkt-job"
+
 
 # 8. DRIFT A: forward worktree commit with no job recorded exits 3.
 setup_case drifta
