@@ -102,6 +102,24 @@ usage() {
 say() { echo "ship-pr: $*" >&2; }
 die() { local code="$1"; shift; say "$*"; exit "$code"; }
 pr_ready=0 merge_attempted=0
+# worktree_clean: no tracked changes and no untracked files except the
+# proptest-regressions/ seeds a gate run wrote (untracked, but not dirt).
+worktree_clean() {
+  [ -z "$(git -C "$worktree" status --porcelain | grep -v '^?? .*proptest-regressions/')" ]
+}
+# fetch_retry: one bounded retry for a `git fetch` lost to a transient ref
+# lock (another session pushing at the same time). 3 tries, 1 s apart.
+fetch_retry() {
+  local tries=0
+  while :; do
+    if git -C "$worktree" fetch -q "$@" >&2; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -ge 3 ] && return 1
+    sleep 1
+  done
+}
 die_after_ready() {
   local code="$1"; shift
   if [ "$pr_ready" = 1 ] && [ "$merge_attempted" = 0 ]; then
@@ -215,8 +233,8 @@ start_dir="$(pwd -P)"
 git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die 2 "$worktree is not a git checkout"
 [ "$(git -C "$worktree" symbolic-ref --short -q HEAD || true)" = "$branch" ] \
   || die 2 "$worktree does not have $branch checked out"
-[ -z "$(git -C "$worktree" status --porcelain)" ] || die 2 "$worktree has uncommitted changes"
-git -C "$worktree" fetch -q origin >&2 || die 1 "git fetch origin failed"
+worktree_clean || die 2 "$worktree has uncommitted changes"
+fetch_retry origin || die 1 "git fetch origin failed"
 local_head="$(git -C "$worktree" rev-parse HEAD)"
 if [ "$local_head" != "$head0" ]; then
   for _wait in $(seq 1 30); do
@@ -383,7 +401,7 @@ if [ -n "$gate" ]; then
   gate_preflight
   say "running gate"
   run_gate || die 1 "gate failed"
-  [ "$(git -C "$worktree" rev-parse HEAD)" = "$head0" ] && [ -z "$(git -C "$worktree" status --porcelain)" ] \
+  [ "$(git -C "$worktree" rev-parse HEAD)" = "$head0" ] && worktree_clean \
     || die 1 "the gate changed the worktree; commit nothing from a gate"
 fi
 
@@ -396,7 +414,7 @@ if [ "$strict" = 0 ]; then
   [ -n "$probe" ] || say "cannot read PR $pr mergeability; not rebasing"
   case "$probe" in CONFLICTING*|*DIRTY) conflict=1 ;; esac
   if [ -n "$conflict" ]; then
-    git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die 1 "git fetch origin main failed"
+    fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die 1 "git fetch origin main failed"
   fi
 fi
 
@@ -466,7 +484,7 @@ while :; do
                 waiting=""
                 while IFS= read -r rid || [ -n "$rid" ]; do
                   [ -n "$rid" ] || continue
-                  pre_one="$(printf '%s\n' "$pre_attempts" | awk -v r="$rid" '$1 == r { print $2; exit }')"
+                  pre_one="$(awk -v r="$rid" '$1 == r { print $2; exit }' <<<"$pre_attempts")"
                   cur="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>/dev/null)" \
                     || { waiting="${waiting}${rid} "; continue; }
                   IFS=$'\t' read -r cur_attempt cur_status <<<"$cur" || true

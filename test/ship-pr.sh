@@ -245,6 +245,18 @@ run() {
   # never see it.
   OUT="$(
     git() (
+      if [[ " $* " == *" fetch "* ]]; then
+        echo "fetch $*" >>"$ST/fetch.log"
+        if [ -e "$ST/fetch-always-fail" ]; then
+          echo "error: cannot lock ref 'refs/remotes/origin/feature'" >&2
+          exit 1
+        fi
+        if [ -e "$ST/fetch-fail-once" ]; then
+          rm -f "$ST/fetch-fail-once"
+          echo "error: some local refs could not be updated" >&2
+          exit 1
+        fi
+      fi
       if [ -e "$ST/delete-fails" ] && [[ " $* " == *" push origin --delete "* ]]; then
         echo "error: cannot lock ref 'refs/remotes/origin/feature': unable to resolve reference" >&2
         exit 1
@@ -300,10 +312,35 @@ setup; run 7 --repo O/N --reviewed "$HEAD0" --worktree "$S"; expect 2 "not a che
 setup; git -C "$WT" checkout -q -b other; ship; expect 2 "wrong branch"; untouched "wrong branch"
 setup; echo x >>"$WT/feature.txt"; ship; expect 2 "dirty tree"; untouched "dirty tree"
 setup; echo x >"$WT/untracked.txt"; ship; expect 2 "untracked file"; untouched "untracked file"
+
+# proptest-regressions seeds are not dirt: untracked seeds alone never refuse,
+# but another untracked file or a tracked change still does
+setup; mkdir -p "$WT/proptest-regressions"; echo seed >"$WT/proptest-regressions/a.txt"
+ship; expect 0 "untracked proptest-regressions alone does not refuse"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "proptest-regressions still merges: [$OUT]"
+setup; mkdir -p "$WT/proptest-regressions"; echo seed >"$WT/proptest-regressions/a.txt"
+echo x >"$WT/untracked.txt"; ship; expect 2 "proptest-regressions plus another untracked file still refuses"
+untouched "proptest-regressions plus another untracked file"
+setup; mkdir -p "$WT/proptest-regressions"; echo seed >"$WT/proptest-regressions/a.txt"
+echo x >>"$WT/feature.txt"; ship; expect 2 "a tracked change still refuses with proptest-regressions present"
+untouched "tracked change with proptest-regressions"
 setup; bump_ref refs/heads/feature; ship; expect 2 "HEAD differs from PR head"; untouched "HEAD differs"
 setup; run 7 --repo O/N --reviewed deadbeefdeadbeefdeadbeefdeadbeefdeadbeef --worktree "$WT"
 expect 2 "unknown reviewed"; untouched "unknown reviewed"
 no_merge "preconditions"
+
+# fetch retry: a transient ref-lock failure retries instead of exiting 1
+setup; touch "$ST/fetch-fail-once"
+ship; expect 0 "fetch retries after a transient lock failure"
+[ "$(grep -c ' fetch -q origin$' "$ST/fetch.log")" -eq 2 ] || fail "transient fetch tries twice: [$(cat "$ST/fetch.log" 2>/dev/null)]"
+[ "$(grep -c '^1$' "$ST/sleeps.txt" 2>/dev/null)" = "1" ] || fail "transient fetch sleeps 1 s once: [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "transient fetch still merges: [$OUT]"
+
+setup; touch "$ST/fetch-always-fail"
+ship; expect 1 "a fetch that always fails exits non-zero after 3 tries"
+[ "$(grep -c ' fetch -q origin$' "$ST/fetch.log")" -eq 3 ] || fail "always-fail fetch tries 3 times: [$(cat "$ST/fetch.log" 2>/dev/null)]"
+[ "$(grep -c '^1$' "$ST/sleeps.txt" 2>/dev/null)" = "2" ] || fail "always-fail fetch sleeps 1 s twice: [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
+no_merge "always-fail fetch"
 
 # ===== exit 3: rebase conflict aborts cleanly
 setup
@@ -952,6 +989,17 @@ grep -q '108' <<<"$ERR" || fail "missing attempt names the run: [$ERR]"
 grep -q 'no new attempt' <<<"$ERR" || fail "missing attempt message: [$ERR]"
 [ "$(grep -c '^5$' "$ST/sleeps.txt")" -eq 24 ] || fail "missing attempt polls 120 s: [$(cat "$ST/sleeps.txt")]"
 no_merge "missing attempt"
+
+# many cancelled runs: the rerun wait looks each pre-attempt up in a long
+# list, which must not die on SIGPIPE when awk exits early (pipefail)
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+jq -n '[range(3000) | {"databaseId": (1000+.), "name": "ci", "workflowName": "CI-\(.)", "event": "push", "conclusion": "cancelled"}]' >"$ST/run-list.json"
+for i in $(seq 1 3000); do
+  echo '[{"conclusion":"cancelled","databaseId":1,"name":"ci"}]' >"$ST/jobs-$((1000 + i)).json"
+done
+ship; expect 0 "many cancelled runs rerun once and merge"
+[ "$(grep -c 'gh run rerun' "$ST/gh.log")" -eq 3000 ] || fail "many runs: every run rerun once: [$(grep -c 'gh run rerun' "$ST/gh.log")]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "many reruns merge: [$OUT]"
 
 # ===== (B) retry the merge once on a GraphQL error, polling MERGED after a failed retry
 setup; printf 'GraphQL error: something went wrong' >"$ST/merge-fail-once"

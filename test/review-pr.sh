@@ -290,6 +290,20 @@ grep -q 'Code review (Spec axis) of PR #7 in O/N for issue #1, #3 and #4 (spec #
   "$T/state/prompt-spec.md" || fail "review brief joins three distinct issues in order"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "deduplicated multi-issue collect exits 0"
 
+# --- case: --issue without --spec defaults SPEC to the first --issue, not the PR
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "issue without spec start exits 0"
+grep -q 'for issue #1 (spec #1)' "$T/state/prompt-spec.md" || fail "SPEC defaults to the first --issue, not the PR number"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "issue without spec collects"
+
 # --- case: malformed issue values and issues in verify mode fail before launch
 for bad_issue in '#3' '3x'; do
   reset_state
@@ -924,6 +938,34 @@ grep -q -- "--since $MISSING_SINCE is not fetchable" <<<"$err" || fail "missing 
 [ -z "$(ls "$TMPDIR/review-pr" 2>/dev/null)" ] || fail "missing --since saves no state"
 [ -z "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null)" ] || fail "missing --since leaves no run dir"
 [ ! -e "$T/state/runs.txt" ] || fail "missing --since launches no job"
+
+# --- case: a short --since the clone holds is accepted
+reset_state
+printf 'P1 findings text\n' >"$T/findings.txt"
+write_record verify DONE "rechecked
+FIX-OK all repaired
+STATUS: DONE" 0
+start_out="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$SHORT" 2>"$T/stderr-short.txt")" || fail "short --since present in clone exits 0"
+[ "$start_out" = "verify job-verify
+watch: delegate watch job-verify
+collect: review-pr collect job-verify" ] || fail "short --since prints the verify job lines: [$start_out]"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "short --since collects"
+
+# --- case: a short --since the clone lacks exits 2 before fetching
+reset_state
+printf 'P1 findings text\n' >"$T/findings.txt"
+git -C "$T/clone" cat-file -e "deadbee^{commit}" 2>/dev/null && fail "fixture deadbee unexpectedly resolves"
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since deadbee 2>&1 >/dev/null)"; st=$?
+[ "$st" -eq 2 ] || fail "short --since absent from clone exits 2 (got $st)"
+grep -Fxq "review-pr: --since needs the full 40-character sha (deadbee is not in the clone)" <<<"$err" || \
+  fail "short --since names the value and the fix: [$err]"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || \
+  fail "short --since absent creates no worktree"
+[ -z "$(ls "$TMPDIR/review-pr" 2>/dev/null)" ] || fail "short --since absent saves no state"
+[ -z "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null)" ] || fail "short --since absent leaves no run dir"
+[ ! -e "$T/state/runs.txt" ] || fail "short --since absent launches no job"
 
 # --- case: an empty or whitespace-only --verify findings file exits 2 before launch
 for blank in '' '  \n\t \n'; do

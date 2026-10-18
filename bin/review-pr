@@ -317,6 +317,14 @@ cmd_start() {
   if [ -n "$verify" ]; then
     mode="verify"
     [ -n "$since" ] || usage
+    # A short sha the clone holds is fine; one it lacks would fail late,
+    # after fetches, so reject it now, before fetching.
+    if ! printf '%s' "$since" | grep -Eq '^[0-9a-f]{40}$'; then
+      if ! git -C "$clone" rev-parse --verify "$since^{commit}" >/dev/null 2>&1; then
+        echo "review-pr: --since needs the full 40-character sha ($since is not in the clone)" >&2
+        exit 2
+      fi
+    fi
     [ -f "$verify" ] || usage
     if ! grep -q '[^[:space:]]' "$verify"; then
       echo "review-pr: findings file $verify is empty; write the open findings, or \"no open findings\"" >&2
@@ -353,9 +361,12 @@ cmd_start() {
       *,overbuild,*) [ -n "$omodel" ] || usage;;
     esac
     # A PR with no ticket is its own spec: gh issue view accepts a PR number.
+    # Otherwise SPEC defaults to the first --issue, never the PR number.
     if [ "$issue_count" -eq 0 ]; then
       issue="$pr"
+      specn="${specn:-$pr}"
     else
+      specn="${specn:-${issues[0]}}"
       issue="${issues[0]}"
       issue_index=1
       while [ "$issue_index" -lt "$issue_count" ]; do
@@ -368,7 +379,6 @@ cmd_start() {
         issue_index=$((issue_index + 1))
       done
     fi
-    specn="${specn:-$pr}"
     [ -z "$since" ] || usage
   fi
   if [ -z "$wdoc" ]; then wdoc="none"; fi
