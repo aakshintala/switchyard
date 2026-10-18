@@ -16,7 +16,7 @@
 # An issue search runs once per new test name; a cached open issue is re-read
 # when its test is sighted again. One uncached search lists the open
 # "Flaky test: <test>" issues (retry-passed flakes); a flake with 2+ sightings
-# (github-actions flake-report comments inside the window) counts as a finding. Read-only: an open
+# (github-actions retry comments inside the window) counts as a finding. Read-only: an open
 # "blocked" issue whose named blockers (a "## Blocked by" section's #N refs,
 # and "waits for #N" anywhere) are all closed is a stale-blocked finding; a
 # blocker whose lookup fails counts as open. Exit codes: 0 none, 1 a
@@ -51,7 +51,8 @@ SERVER_ERR = re.compile(r"HTTP 5\d\d")
 RATE_LIMIT = re.compile(r"rate limit exceeded", re.I)  # gh puts "(HTTP 403)" last
 NO_ISSUE_TTL = timedelta(hours=6)  # a no-issue lookup is retried after this
 FLAKY_PREFIX = "Flaky test: "  # title prefix of the issues flake_report files
-FLAKE_MARKER = "<!-- flake-report -->"  # sighting comments carry this; must match flake_report
+# the flake_report bot comment body; source: fiber .github/workflows/ci.yml flake_report step
+FLAKE_RETRY_PHRASE = "passed after a retry on"
 RUN_URL = re.compile(r"https://github\.com/\S+/actions/runs/\d+")
 # #N or owner/name#N; the lookbehind keeps a ref from starting inside a word or path
 REF = re.compile(r"(?<![\w./-])(?:([\w.-]+/[\w.-]+))?#(\d+)(?!\w)")
@@ -638,7 +639,7 @@ def main(argv):
         for c in comments:
             if not isinstance(c, dict) or (c.get("user") or {}).get("login") != "github-actions":
                 continue
-            if FLAKE_MARKER not in (c.get("body") or ""):
+            if FLAKE_RETRY_PHRASE not in (c.get("body") or ""):
                 continue
             created = parse_ts(c.get("created_at") or "")
             if not created or created < cutoff:
