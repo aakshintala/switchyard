@@ -57,7 +57,7 @@ Size each task as the smallest unit that carries its own test cycle. A regressio
 
 With a state file, record the plan with `tkt-plan <state> set <plan file>`: it stores the path, zeroes the round count and rewrites the pack from the plan's Files, Interfaces and Tasks, and exits 2 listing each token it cannot resolve.
 
-Done when every section is filled under its own heading, every hit of the Files sweep is listed under Files or ruled out under Rulings, the Gate covers every package in Files, the Red commit is named when the workflow doc requires one, the size is estimated with any split it calls for, every ruling is tagged and names the quoted rule or the code it rests on, and every known hazard is a ruling or an invariant, and, with a state file, `tkt-plan set` exits 0.
+Done when every section is filled under its own heading, every hit of the Files sweep is listed under Files or ruled out under Rulings, the Gate covers every package in Files, the Red commit is named when the workflow doc requires one, the size is estimated with any split it calls for, every ruling is tagged, each doc-governed or runtime ruling names the quoted rule or the code it rests on, and every known hazard is a ruling or an invariant, and, with a state file, `tkt-plan set` exits 0.
 
 ### 3. Verify
 
