@@ -15,7 +15,7 @@
 #        with current origin/main in a throwaway merge commit (step 7); squash-merge
 #        pinned to the checked head, retrying once on a base race or GraphQL error
 #        and polling MERGED even after a failed retry; wait for MERGED; remove the worktree and the
-#        local and remote branch.
+#        local and remote branch, keeping the worktree and local branch when the caller's directory is inside it.
 #        The CI wait trusts the repo's required checks: one green on the exact
 #        head counts whenever it ran, so marking ready need not start a new run,
 #        and a run that starts after the wait passed does not hold the merge. An
@@ -210,6 +210,7 @@ info="$(gh pr view "$pr" --repo "$repo" --json state,headRefName,headRefOid,isDr
 IFS=$'\t' read -r state branch head0 draft <<<"$info"
 [ "$state" = "OPEN" ] || die 2 "PR $pr is $state, not OPEN"
 worktree="$(cd "$worktree" 2>/dev/null && pwd -P)" || die 2 "no such worktree: $worktree"
+start_dir="$(pwd -P)"
 git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die 2 "$worktree is not a git checkout"
 [ "$(git -C "$worktree" symbolic-ref --short -q HEAD || true)" = "$branch" ] \
   || die 2 "$worktree does not have $branch checked out"
@@ -575,8 +576,16 @@ done
 # Step 9: clean up from the common git dir, never from inside the worktree being removed.
 common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"
 cd "$common"
-git --git-dir="$common" worktree remove "$worktree" >&2 || say "cleanup: worktree remove failed for $worktree"
-git --git-dir="$common" branch -D "$branch" >&2 || say "cleanup: branch -D $branch failed"
+# When the caller's shell started inside the worktree, removing it would break
+# that shell (getcwd fails), so keep the worktree and its branch and say how
+# to remove them by hand. The remote branch is still deleted.
+case "$start_dir/" in
+  "$worktree"/*)
+    say "worktree kept: your shell is inside it; remove it with: git -C $common worktree remove $worktree && git -C $common branch -D $branch" ;;
+  *)
+    git --git-dir="$common" worktree remove "$worktree" >&2 || say "cleanup: worktree remove failed for $worktree"
+    git --git-dir="$common" branch -D "$branch" >&2 || say "cleanup: branch -D $branch failed" ;;
+esac
 # A missing remote ref counts as done, whatever the push error says: GitHub's
 # auto-delete on merge makes the push fail with "cannot lock ref".
 if ! del_out="$(git --git-dir="$common" push origin --delete "$branch" 2>&1)"; then
