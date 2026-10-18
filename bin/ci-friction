@@ -11,7 +11,7 @@
 # Classification follows classify.py's names and order. Repeats key on test
 # names (test-*, mutants-baseline-test jobs) and, for compile and
 # mutants-baseline-compile jobs, on `compile <crates>: <first error line>`.
-# design[] counts every other class except missed-mutant and other.
+# design[] counts every other class except missed-mutant, other and cancelled.
 #
 # An issue search runs once per new test name; a cached open issue is re-read
 # when its test is sighted again. One uncached search lists the open
@@ -125,8 +125,11 @@ def clean(text):
     return [TS.sub("", ANSI.sub("", l)) for l in text.splitlines()]
 
 
-def classify(name, steps, text):
-    """Port of classify.py. Returns (class, detail, tests[])."""
+def classify(name, steps, text, job=None):
+    """Port of classify.py. Returns (class, detail, tests[]).
+    job is the gh job dict (or None): a cancelled job is a timeout only
+    with the exceeded-maximum-execution-time line or a full bound of
+    elapsed time, else class cancelled."""
     step = next((s.get("name", "") for s in steps or []
                  if s.get("conclusion") == "failure"), "")
     lines = clean(text)
@@ -207,9 +210,13 @@ def classify(name, steps, text):
         return ("mutants-baseline", "unmutated baseline failed", [])
     if install:
         return ("infra", install[0][:140], [])
-    if any("The operation was canceled" in l or "has exceeded the maximum execution time" in l
-           for l in lines):
+    cancelled = bool(job) and job.get("conclusion") == "cancelled"
+    canceled = any("The operation was canceled" in l for l in lines)
+    exceeded = any("has exceeded the maximum execution time" in l for l in lines)
+    if exceeded or (canceled and (not cancelled or is_timeout(job))):
         return ("timeout", "job hit timeout-minutes", [])
+    if canceled:
+        return ("cancelled", "job cancelled before its timeout bound", [])
     return ("other", (errs[-1] if errs else (lines[-1] if lines else ""))[:160], [])
 
 
@@ -447,7 +454,7 @@ def main(argv):
                 ok = False
                 continue
             for j in jobs:
-                if j.get("conclusion") != "failure" and not is_timeout(j):
+                if j.get("conclusion") not in ("failure", "cancelled"):
                     continue
                 if group(j.get("name")) in ("CI verdict", "Report a failed backstop"):
                     continue
@@ -467,7 +474,7 @@ def main(argv):
                             ok = False
                             continue
                     else:
-                        cls, det, tests = classify(j.get("name"), j.get("steps"), log)
+                        cls, det, tests = classify(j.get("name"), j.get("steps"), log, j)
                     jobs_st[jid] = {"class": cls, "detail": det, "tests": tests,
                                     "lane": lane, "os": osof(j.get("labels")),
                                     "completed_at": done_at,
@@ -485,7 +492,7 @@ def main(argv):
                              ent.get("completed_at", done_at),
                              ent.get("head_sha", r.get("head_sha"))))
                         resight.add(key)
-                elif cls not in ("missed-mutant", "other"):
+                elif cls not in ("missed-mutant", "other", "cancelled"):
                     c, laneset = design.get(cls, (0, set()))
                     laneset.add(ent.get("lane", lane))
                     design[cls] = (c + 1, laneset)
