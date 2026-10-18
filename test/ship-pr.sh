@@ -245,6 +245,18 @@ run() {
   # never see it.
   OUT="$(
     git() (
+      if [[ " $* " == *" fetch "* ]]; then
+        echo "fetch $*" >>"$ST/fetch.log"
+        if [ -e "$ST/fetch-always-fail" ]; then
+          echo "error: cannot lock ref 'refs/remotes/origin/feature'" >&2
+          exit 1
+        fi
+        if [ -e "$ST/fetch-fail-once" ]; then
+          rm -f "$ST/fetch-fail-once"
+          echo "error: some local refs could not be updated" >&2
+          exit 1
+        fi
+      fi
       if [ -e "$ST/delete-fails" ] && [[ " $* " == *" push origin --delete "* ]]; then
         echo "error: cannot lock ref 'refs/remotes/origin/feature': unable to resolve reference" >&2
         exit 1
@@ -304,6 +316,19 @@ setup; bump_ref refs/heads/feature; ship; expect 2 "HEAD differs from PR head"; 
 setup; run 7 --repo O/N --reviewed deadbeefdeadbeefdeadbeefdeadbeefdeadbeef --worktree "$WT"
 expect 2 "unknown reviewed"; untouched "unknown reviewed"
 no_merge "preconditions"
+
+# fetch retry: a transient ref-lock failure retries instead of exiting 1
+setup; touch "$ST/fetch-fail-once"
+ship; expect 0 "fetch retries after a transient lock failure"
+[ "$(grep -c ' fetch -q origin$' "$ST/fetch.log")" -eq 2 ] || fail "transient fetch tries twice: [$(cat "$ST/fetch.log" 2>/dev/null)]"
+[ "$(grep -c '^1$' "$ST/sleeps.txt" 2>/dev/null)" = "1" ] || fail "transient fetch sleeps 1 s once: [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "transient fetch still merges: [$OUT]"
+
+setup; touch "$ST/fetch-always-fail"
+ship; expect 1 "a fetch that always fails exits non-zero after 3 tries"
+[ "$(grep -c ' fetch -q origin$' "$ST/fetch.log")" -eq 3 ] || fail "always-fail fetch tries 3 times: [$(cat "$ST/fetch.log" 2>/dev/null)]"
+[ "$(grep -c '^1$' "$ST/sleeps.txt" 2>/dev/null)" = "2" ] || fail "always-fail fetch sleeps 1 s twice: [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
+no_merge "always-fail fetch"
 
 # ===== exit 3: rebase conflict aborts cleanly
 setup
