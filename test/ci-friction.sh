@@ -90,6 +90,12 @@ case "$path" in
     else printf '[]'; fi;;
   *repos/*/issues\?*)
     if [ -e "$scen/blocked.json" ]; then cat "$scen/blocked.json"; else printf '[]'; fi;;
+  *repos/*/issues/*/comments*)
+    n="$(printf '%s' "$path" | sed -E 's/.*issues\/([0-9]+).*/\1/')"
+    page="$(printf '%s' "$path" | sed -nE 's/.*[?&]page=([0-9]+).*/\1/p')"
+    [ -n "$page" ] || page=1
+    if [ "$page" = "1" ] && [ -e "$scen/comments-$n.json" ]; then cat "$scen/comments-$n.json";
+    else printf '[]'; fi;;
   *repos/*/issues/*)
     # the --repo fixtures are issues/<n>.json; other repos are issues/<owner>-<name>-<n>.json
     set -- $(printf '%s' "$path" | sed -E 's/.*repos\/([^/]+)\/([^/]+)\/issues\/([0-9]+).*/\1 \2 \3/')
@@ -125,6 +131,11 @@ setup() { # setup <scenario>: fresh HOME, scenario fixtures
 }
 run_friction() {
   OUT="$(python3 "$FRICTION" --repo O/N "$@" 2>"$T/stderr.txt")"; CODE=$?
+}
+flake_scen() { # flake_scen <scenario>: writable copy of a fixture scenario for overlays
+  TSCEN="$T/scen-$1"; rm -rf "$TSCEN"; cp -r "$FIX/$1" "$TSCEN"
+  mkdir -p "$TSCEN/search"
+  export FAKE_SCEN="$TSCEN"
 }
 jget() {
   python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print('"$1"')' "$OUT"
@@ -356,21 +367,46 @@ run_friction --json
 # flaky: one uncached search; 1602 has 1 sighting, 1601 has 2, and the old and
 # non-prefix titles are excluded
 setup flaky
+flake_scen flaky
+cat >"$TSCEN/comments-1601.json" <<'EOF'
+[{"id": 1, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: main::ci_flake_probe passes_only_on_a_retry\nrun: https://github.com/O/N/actions/runs/9001", "created_at": "2026-10-09T10:00:00Z"}, {"id": 2, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: main::ci_flake_probe passes_only_on_a_retry\nrun: https://github.com/O/N/actions/runs/9003", "created_at": "2026-10-09T11:00:00Z"}]
+EOF
+cat >"$TSCEN/comments-1602.json" <<'EOF'
+[{"id": 3, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/9002", "created_at": "2026-10-09T11:30:00Z"}]
+EOF
 run_friction --json
 [ "$CODE" = "1" ] || fail "flaky 2+ exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
 [ "$(jget "[(f['test'], f['issue'], f['sightings']) for f in d['flaky']]")" = \
   "[('fiber-core doors::slow', 1602, 1), ('main::ci_flake_probe passes_only_on_a_retry', 1601, 2)]" ] \
   || fail "flaky entries: [$OUT]"
+[ "$(jget "[(f['issue'], f['runs']) for f in d['flaky']]")" = \
+  "[(1602, ['https://github.com/O/N/actions/runs/9002']), (1601, ['https://github.com/O/N/actions/runs/9001', 'https://github.com/O/N/actions/runs/9003'])]" ] \
+  || fail "flaky run urls: [$OUT]"
 [ "$(grep -c 'Flaky' "$FAKE_GH_LOG")" = "1" ] || fail "one flaky search: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'issues/1601/comments' "$FAKE_GH_LOG")" = "1" ] \
+  || fail "one comments fetch per flaky issue: [$(cat "$FAKE_GH_LOG")]"
 setup flaky
+flake_scen flaky
+cat >"$TSCEN/comments-1601.json" <<'EOF'
+[{"id": 1, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: main::ci_flake_probe passes_only_on_a_retry\nrun: https://github.com/O/N/actions/runs/9001", "created_at": "2026-10-09T10:00:00Z"}, {"id": 2, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: main::ci_flake_probe passes_only_on_a_retry\nrun: https://github.com/O/N/actions/runs/9003", "created_at": "2026-10-09T11:00:00Z"}]
+EOF
+cat >"$TSCEN/comments-1602.json" <<'EOF'
+[{"id": 3, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/9002", "created_at": "2026-10-09T11:30:00Z"}]
+EOF
 run_friction
 [ "$CODE" = "1" ] || fail "flaky text exits 1 (got $CODE): [$OUT]"
 grep -qx "flaky: main::ci_flake_probe passes_only_on_a_retry issue #1601 sightings 2" <<<"$OUT" \
   || fail "flaky text line: [$OUT]"
 grep -q "^flaky: fiber-core doors" <<<"$OUT" && fail "1-sighting flaky has no text line: [$OUT]"
+grep -qx "  run: https://github.com/O/N/actions/runs/9001" <<<"$OUT" \
+  || fail "flaky run url line: [$OUT]"
 grep -q "no repeats" <<<"$OUT" && fail "a flaky finding is not quiet: [$OUT]"
 # one sighting: listed in JSON, exit 0 when nothing else, no text line
 setup flaky1
+flake_scen flaky1
+cat >"$TSCEN/comments-1602.json" <<'EOF'
+[{"id": 3, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/9002", "created_at": "2026-10-09T11:30:00Z"}]
+EOF
 run_friction --json
 [ "$CODE" = "0" ] || fail "1-sighting flaky exits 0 (got $CODE): [$OUT]"
 [ "$(jget "[(f['test'], f['sightings']) for f in d['flaky']]")" = "[('fiber-core doors::slow', 1)]" ] \
@@ -382,12 +418,32 @@ grep -q "no repeats" <<<"$OUT" || fail "1-sighting quiet line: [$OUT]"
 grep -q "^flaky:" <<<"$OUT" && fail "1-sighting no text line: [$OUT]"
 # page 1 is full of old matches; the recent two-sighting issue on page 2 is listed
 setup flakypage
+flake_scen flakypage
+cat >"$TSCEN/comments-1701.json" <<'EOF'
+[{"id": 1, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core late::one\nrun: https://github.com/O/N/actions/runs/9101", "created_at": "2026-10-09T12:00:00Z"}, {"id": 2, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core late::one\nrun: https://github.com/O/N/actions/runs/9102", "created_at": "2026-10-09T13:00:00Z"}]
+EOF
 run_friction --json
 [ "$CODE" = "1" ] || fail "flaky page 2 exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
 [ "$(jget "[(f['test'], f['issue'], f['sightings']) for f in d['flaky']]")" = \
   "[('fiber-core late::one', 1701, 2)]" ] || fail "flaky page 2 listed: [$OUT]"
 [ "$(grep -c 'Flaky' "$FAKE_GH_LOG")" = "2" ] || fail "two flaky pages: [$(cat "$FAKE_GH_LOG")]"
 grep -q 'updated:>=2026-10-08T18:30:00Z' "$FAKE_GH_LOG" || fail "cutoff in query: [$(cat "$FAKE_GH_LOG")]"
+# --- #344: sightings count only bot flake-report comments in the window ---
+# 1650 has 1 bot sighting in window, 2 human triage comments (one quoting
+# the marker) and 1 bot sighting before the window: sightings 1, run printed.
+setup flakyfilter
+flake_scen onelane
+cat >"$TSCEN/search/Flaky-test-.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 1650, "state": "open", "title": "Flaky test: fiber-core doors::slow", "updated_at": "2026-10-09T11:00:00Z", "comments": 99}]}
+EOF
+cat >"$TSCEN/comments-1650.json" <<'EOF'
+[{"id": 1, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/9001", "created_at": "2026-10-09T12:00:00Z"}, {"id": 2, "user": {"login": "alice"}, "body": "looking into this, seems related to #1600", "created_at": "2026-10-09T13:00:00Z"}, {"id": 3, "user": {"login": "bob"}, "body": "<!-- flake-report -->\nsame failure as https://github.com/O/N/actions/runs/9002?", "created_at": "2026-10-09T14:00:00Z"}, {"id": 4, "user": {"login": "github-actions"}, "body": "<!-- flake-report -->\nflake: fiber-core doors::slow\nrun: https://github.com/O/N/actions/runs/8999", "created_at": "2026-10-01T00:00:00Z"}]
+EOF
+run_friction --json
+[ "$CODE" = "0" ] || fail "flakyfilter exits 0 (got $CODE): [$OUT]"
+[ "$(jget "[(f['issue'], f['sightings'], f['runs']) for f in d['flaky']]")" = \
+  "[(1650, 1, ['https://github.com/O/N/actions/runs/9001'])]" ] \
+  || fail "only the in-window bot sighting counts: [$OUT]"
 # the flaky search failing is exit 2
 setup onelane
 echo "HTTP 401 Unauthorized" >"$T/fail-flaky"
