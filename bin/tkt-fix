@@ -38,7 +38,7 @@ if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-fix: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
 
 t require repo issue branch worktree run pr
-repo="$(t get repo)"; issue="$(t get issue)"; branch="$(t get branch)"
+repo="$(t get repo)"; issue="$(t get issue)"; namebase="${repo##*/}-$issue"; branch="$(t get branch)"
 worktree="$(t get worktree)"; run="$(t get run)"; pr="$(t get pr)"
 mkdir -p "$run"
 round="$(t get round 2>/dev/null || printf '0')"; case "$round" in ''|*[!0-9]*) round=0;; esac
@@ -48,7 +48,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 emit() {
   verdict="$1"; ec="$2"; shift 2
-  logpath="$run/$repo-$issue-tkt-fix-$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')-$(date +%H%M%S).log"
+  logpath="$run/$namebase-tkt-fix-$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')-$(date +%H%M%S).log"
   { printf 'TKT tkt-fix %s log=%s\n' "$verdict" "$logpath"; [ $# -eq 0 ] || printf '%s\n' "$@" | head -n 40; } >"$logpath"
   cat "$logpath"; t journal "tkt-fix $verdict"; exit "$ec"
 }
@@ -70,7 +70,7 @@ pass() {
 }
 
 write_findings() {
-  fr="$run/$repo-$issue-findings-r$round.md"
+  fr="$run/$namebase-findings-r$round.md"
   if grep -q '^P[123] ' "$1" 2>/dev/null; then grep '^P[123] ' "$1" >"$fr"
   else printf 'no open findings\n' >"$fr"; fi
   t set findings "$fr"

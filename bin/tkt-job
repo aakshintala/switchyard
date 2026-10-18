@@ -144,6 +144,20 @@ elif [ -n "$stored" ]; then
 else
   { [ -n "$template" ] || [ -n "$brief" ]; } || usage
   { [ -z "$template" ] || [ -z "$brief" ]; } || usage
+  # The gate comes from the plan's Gate section and is never invented: a
+  # missing plan or a gateless plan names the key and the setter on one line.
+  gate_cmd=""
+  if [ "$gate_from_plan" -eq 1 ]; then
+    plan="$(tkt get plan 2>/dev/null || true)"
+    if [ -z "$plan" ]; then
+      echo "tkt-job: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
+      exit 2
+    fi
+    gate_cmd="$("$plangate" "$plan" 2>/dev/null)" || {
+      echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
+      exit 2
+    }
+  fi
   if [ -n "$template" ]; then
     [ -r "$template" ] || {
       echo "tkt-job: cannot read template: $template" >&2
@@ -208,9 +222,6 @@ else
     }
   fi
   if [ "$gate_from_plan" -eq 1 ]; then
-    tkt require plan
-    plan="$(tkt get plan)"
-    gate_cmd="$("$plangate" "$plan")" || exit 2
     # The gate script keeps the whole chain inside the redirected block and is
     # judged by its exit code, never the log line (see bin/lib/gate-script.sh).
     env_prefix=""

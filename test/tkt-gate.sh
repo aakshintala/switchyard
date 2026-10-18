@@ -538,4 +538,18 @@ grep -q "424242" "$CDIR/stderr.txt" || fail "a held lock names the pid"
 [ ! -f "$T/gate-ran" ] || fail "a held lock runs no gate"
 rm -rf "$S.phase"
 
+# --- repo as owner/name still lands logs and scripts directly in run ---
+setup_case repo-slash
+write_plan
+bash "$TKT_STATE" "$S" set repo owner/name || fail "set repo owner/name"
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+run_gate
+[ "$RC" -eq 0 ] || fail "owner/name repo exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "owner/name repo"
+ls "$CDIR"/run/name-517-tkt-gate-*.log >/dev/null 2>&1 || fail "owner/name repo writes log directly in run"
+[ -f "$CDIR/run/name-517-tkt-gate.sh" ] || fail "owner/name repo writes gate script directly in run"
+[ -z "$(find "$CDIR/run" -mindepth 1 -type d)" ] || fail "owner/name repo creates no subdirectory"
+
 echo "tkt-gate: all cases passed"

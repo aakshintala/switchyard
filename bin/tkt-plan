@@ -22,7 +22,7 @@ if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-plan: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
 
 t require repo issue run worktree
-repo="$(t get repo)"; issue="$(t get issue)"; run="$(t get run)"; worktree="$(t get worktree)"
+repo="$(t get repo)"; issue="$(t get issue)"; namebase="${repo##*/}-$issue"; run="$(t get run)"; worktree="$(t get worktree)"
 mkdir -p "$run"
 
 if stored="$(t get head 2>/dev/null)"; then actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-plan: cannot read worktree HEAD: $worktree" >&2; exit 2; }; [ "$stored" = "$actual" ] || { echo "tkt-plan: head drift: state $state head=$stored worktree $worktree HEAD=$actual" >&2; exit 3; }; fi
@@ -32,7 +32,7 @@ trap 'rm -f "$tmp"' EXIT
 
 emit() {
   verdict="$1"; ec="$2"; shift 2
-  logpath="$run/$repo-$issue-tkt-plan-$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')-$(date +%H%M%S).log"
+  logpath="$run/$namebase-tkt-plan-$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')-$(date +%H%M%S).log"
   { printf 'TKT tkt-plan %s log=%s\n' "$verdict" "$logpath"; [ $# -eq 0 ] || printf '%s\n' "$@"; } >"$logpath"
   cat "$logpath"; t journal "tkt-plan $verdict"; exit "$ec"
 }
@@ -84,7 +84,7 @@ do_verify() {
   args=(PLAN="$plan" BASE="$base" --model "$model")
   if [ -n "$extra" ]; then [ -r "$extra" ] || { echo "tkt-plan: cannot read extra file: $extra" >&2; exit 2; }; args+=(EXTRA="@$extra")
   elif ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
-  rep="$run/$repo-$issue-verifier-out-r$((round + 1)).md"
+  rep="$run/$namebase-verifier-out-r$((round + 1)).md"
   runjob "verifier-r$((round + 1))" "$vbrief" "$rep" "${args[@]}"
   t set verifier_round "$((round + 1))"
   emit "$RV" "$REC" "$(head -n 38 "$rep")"
@@ -98,7 +98,7 @@ do_confirm() {
   [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage"
   load_plan
   cmodel="$(vmodel)" || exit 2
-  rep="$run/$repo-$issue-confirm-out.md"
+  rep="$run/$namebase-confirm-out.md"
   runjob confirm "$cbrief" "$rep" PLAN="$plan" BASE="$base" EDITS="@$edits" --model "$cmodel"
   t set confirmed_for "$(ronum)"
   emit "$RV" "$REC" "$(head -n 38 "$rep")"
@@ -120,7 +120,7 @@ do_set() {
   case "$1" in /*) plan="$1" ;; *) plan="$PWD/$1" ;; esac
   [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
   base="$(base_of "$plan")"
-  pack_out="$run/$repo-$issue-pack.md"
+  pack_out="$run/$namebase-pack.md"
   sweep_out="$("$plansweep" --cwd "$worktree" --base "$base" --plan "$plan" --out "$pack_out" 2>"$tmp")" || { printf '%s\n' "$sweep_out" >&2; cat "$tmp" >&2; exit 2; }
   pack="$(awk '/^PACK /{print $2; exit}' <<<"$sweep_out")"; [ -n "$pack" ] || { echo "tkt-plan: plan-sweep printed no PACK line" >&2; exit 2; }
   t set plan "$plan"; t set pack "$pack"; t set verifier_round 0; t set confirmed_for ""

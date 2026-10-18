@@ -535,6 +535,28 @@ run_job --slot lane --brief "$T/no-such-brief.md"
 grep -q "^run|" "$T/stub.log" && fail "usage errors dispatch nothing"
 [ "$(grep -c "^watch|" "$T/stub.log")" -eq 0 ] || fail "usage errors watch nothing"
 
+# --- --gate-from-plan without a plan names the key and the setter on one line ---
+setup_case gate-no-plan-msg
+reset_stub
+run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
+[ "$RC" -eq 2 ] || fail "missing plan gate exits 2"
+[ "$(wc -l <"$CDIR/stderr.txt" | tr -d ' ')" -eq 1 ] || fail "missing plan gate is one line: $(cat "$CDIR/stderr.txt")"
+grep -q "missing key: plan" "$CDIR/stderr.txt" || fail "missing plan gate names the plan key"
+grep -q "tkt-plan $S set" "$CDIR/stderr.txt" || fail "missing plan gate names the setter"
+[ -z "$(grep '^run|' "$T/stub.log" || true)" ] || fail "missing plan gate dispatches nothing"
+
+# --- --gate-from-plan with a gateless plan names the gate and the setter ---
+setup_case gate-no-gate-section
+reset_stub
+printf '# Plan\n\n## Files\n\n- bin/x\n' >"$CDIR/plan.md"
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
+[ "$RC" -eq 2 ] || fail "gateless plan exits 2"
+[ "$(wc -l <"$CDIR/stderr.txt" | tr -d ' ')" -eq 1 ] || fail "gateless plan error is one line: $(cat "$CDIR/stderr.txt")"
+grep -q "tkt-plan $S set" "$CDIR/stderr.txt" || fail "gateless plan error names the setter"
+grep -q "[Gg]ate" "$CDIR/stderr.txt" || fail "gateless plan error names the gate"
+[ -z "$(grep '^run|' "$T/stub.log" || true)" ] || fail "gateless plan dispatches nothing"
+
 # --- --gate-from-plan without a plan key exits 2 naming it ---
 setup_case gate-no-plan
 reset_stub
