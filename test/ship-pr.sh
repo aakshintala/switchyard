@@ -715,9 +715,8 @@ setup; ship; expect 0 "no --body-has"
 
 # ===== merge and cleanup
 setup; echo true >"$ST/draft"
-cd "$WT" || fail "cd worktree"
-run 7 --repo O/N --reviewed "$HEAD0" --worktree .
 cd "$T" || fail "cd out"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT"
 expect 0 "draft happy path"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line: [$OUT]"
 grep -q "^gh pr merge 7 --repo O/N --squash --match-head-commit $HEAD0\$" "$ST/gh.log" || fail "merge call: [$(grep merge "$ST/gh.log")]"
@@ -727,6 +726,19 @@ grep -q "^gh pr merge 7 --repo O/N --squash --match-head-commit $HEAD0\$" "$ST/g
 [ ! -e "$WT" ] || fail "worktree removed"
 git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "local branch deleted"
 origin_head >/dev/null && fail "origin branch deleted"
+
+# ===== merge and cleanup from inside the worktree: the worktree and local
+# ===== branch are kept, the origin branch is deleted
+setup; echo true >"$ST/draft"
+cd "$WT" || fail "cd worktree"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree .
+cd "$T" || fail "cd out"
+expect 0 "inside happy path"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "inside merged line: [$OUT]"
+[ -d "$WT" ] || fail "inside: worktree kept"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "inside: local branch kept"
+origin_head >/dev/null && fail "inside: origin branch deleted"
+grep -q 'worktree kept' <<<"$ERR" || fail "inside: worktree kept message: [$ERR]"
 
 setup; ship; expect 0 "non-draft happy path"
 ! grep -q '^gh pr ready' "$ST/gh.log" || fail "non-draft never marked ready"
