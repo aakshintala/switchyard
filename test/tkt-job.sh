@@ -557,6 +557,16 @@ grep -q "tkt-plan $S set" "$CDIR/stderr.txt" || fail "gateless plan error names 
 grep -q "[Gg]ate" "$CDIR/stderr.txt" || fail "gateless plan error names the gate"
 [ -z "$(grep '^run|' "$T/stub.log" || true)" ] || fail "gateless plan dispatches nothing"
 
+# --- --gate-from-plan with a gateless plan prints plan-gate's reason ---
+setup_case gate-reason
+reset_stub
+printf '# Plan\n\n## Notes\n\nnothing here\n' >"$CDIR/plan.md"
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
+[ "$RC" -eq 2 ] || fail "gateless reason exits 2"
+grep -q "no '## Gate' heading" "$CDIR/stderr.txt" || fail "gateless reason prints plan-gate's reason: $(cat "$CDIR/stderr.txt")"
+[ -z "$(grep '^run|' "$T/stub.log" || true)" ] || fail "gateless reason dispatches nothing"
+
 # --- --gate-from-plan without a plan key exits 2 naming it ---
 setup_case gate-no-plan
 reset_stub
