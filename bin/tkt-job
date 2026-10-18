@@ -153,8 +153,8 @@ else
       echo "tkt-job: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
       exit 2
     fi
-    gate_cmd="$("$plangate" "$plan" 2>/dev/null)" || {
-      echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
+    gate_cmd="$("$plangate" "$plan" 2>&1)" || {
+      echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>: $gate_cmd" >&2
       exit 2
     }
   fi
