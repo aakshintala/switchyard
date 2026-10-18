@@ -24,6 +24,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 for v in run repo issue spec branch worktree workflow_doc closing; do [ -n "${!v}" ] || { echo "tkt-start: missing required flag: --${v//_/-}" >&2; exit 2; }; done
+case "$issue" in *[!0-9]*) echo "tkt-start: --issue needs a number: $issue" >&2; exit 2 ;; esac
 for m in ${models[@]+"${models[@]}"}; do case "$m" in *=*) ;; *) echo "tkt-start: --model needs ROLE=ID: $m" >&2; exit 2 ;; esac; done
 case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac
 script_dir="$(cd "$(dirname "$0")" && pwd)"; tkt_state="$script_dir/tkt-state"
@@ -89,7 +90,7 @@ if [ -z "$stale" ]; then rc=0; logout=""
 fi
 if [ -n "$filing" ]; then
   owner="${repo%%/*}"; name="${repo##*/}"
-  edited="$(gh api graphql -f query="query { repository(owner: \"$owner\", name: \"$name\") { issue(number: $issue) { lastEditedAt } } }" --jq '.data.repository.issue.lastEditedAt' 2>&1)" || fail_step github "$?" "$edited"
+  edited="$(gh api graphql -F owner="$owner" -F name="$name" -F number="$issue" -f query='query ($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { lastEditedAt } } }' --jq '.data.repository.issue.lastEditedAt' 2>&1)" || fail_step github "$?" "$edited"
   [ "$edited" = "null" ] && edited=""
   if [ -n "$edited" ] && [ -z "$(git -C "$worktree" log -1 --format=%H --since="$edited" "$filing" 2>/dev/null || true)" ]; then rc=0; sincelog=""
     sincelog="$(git -C "$worktree" log --oneline --since="$edited" "$filing..origin/main" -- ${fpaths[@]+"${fpaths[@]}"} 2>&1)" || rc=$?
