@@ -290,6 +290,20 @@ grep -q 'Code review (Spec axis) of PR #7 in O/N for issue #1, #3 and #4 (spec #
   "$T/state/prompt-spec.md" || fail "review brief joins three distinct issues in order"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "deduplicated multi-issue collect exits 0"
 
+# --- case: --issue without --spec defaults SPEC to the first --issue, not the PR
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "issue without spec start exits 0"
+grep -q 'for issue #1 (spec #1)' "$T/state/prompt-spec.md" || fail "SPEC defaults to the first --issue, not the PR number"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "issue without spec collects"
+
 # --- case: malformed issue values and issues in verify mode fail before launch
 for bad_issue in '#3' '3x'; do
   reset_state
