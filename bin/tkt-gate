@@ -50,6 +50,13 @@ if [ ! -r "$gate_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$gate_lib"
+namebase_lib="$script_dir/lib/namebase.sh"
+if [ ! -r "$namebase_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $namebase_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$namebase_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 plangate="$bin_dir/plan-gate"
 
@@ -97,7 +104,7 @@ trap release_phase EXIT
 tkt require repo issue branch worktree run
 repo="$(tkt get repo)"
 issue="$(tkt get issue)"
-namebase="${repo##*/}-$issue"
+set_namebase "$repo" "$issue"
 branch="$(tkt get branch)"
 worktree="$(tkt get worktree)"
 run="$(tkt get run)"

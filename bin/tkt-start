@@ -34,8 +34,12 @@ if [ "$spec_part" -ne "$close_part" ]; then
   exit 2
 fi
 script_dir="$(cd "$(dirname "$0")" && pwd)"; tkt_state="$script_dir/tkt-state"
+namebase_lib="$script_dir/lib/namebase.sh"
+if [ ! -r "$namebase_lib" ]; then echo "tkt-start: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$namebase_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"; sweep="$bin_dir/plan-sweep"; tktjob="$bin_dir/tkt-job"
-namebase="${repo##*/}-$issue"; state="$run/$namebase.state"; mkdir -p "$run"
+set_namebase "$repo" "$issue"; state="$run/$namebase.state"; mkdir -p "$run"
 tkt() { "$tkt_state" "$state" "$@"; }
 emit() {
   local rest="$1" code="$2"; shift 2; local twelve log out

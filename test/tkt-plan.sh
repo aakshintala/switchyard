@@ -328,7 +328,7 @@ for b in plan-check plan-gate post-plan plan-sweep; do ln -s "$T/bin/$b" "$T/rea
 ln -s "$REAL_BIN/tkt-job" "$T/realbin/tkt-job" || fail "symlink real tkt-job"
 ln -s "$REAL_BIN/tkt-state" "$T/realbin/tkt-state" || fail "symlink real tkt-state"
 ln -s "$REAL_BIN/fill-brief" "$T/realbin/fill-brief" || fail "symlink real fill-brief"
-mkdir -p "$T/realbin/lib" && ln -s "$REAL_BIN/lib/gate-script.sh" "$T/realbin/lib/gate-script.sh" || fail "symlink real gate lib"
+ln -s "$REAL_BIN/lib" "$T/realbin/lib" || fail "symlink real lib"
 cat >"$T/realbin/delegate" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail

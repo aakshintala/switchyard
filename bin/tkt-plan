@@ -11,6 +11,10 @@ usage() {
 state="$1" sub="$2"; shift 2
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"; tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+namebase_lib="$script_dir/lib/namebase.sh"
+if [ ! -r "$namebase_lib" ]; then echo "tkt-plan: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$namebase_lib"
 tktjob="$bin_dir/tkt-job"; plancheck="$bin_dir/plan-check"; plangate="$bin_dir/plan-gate"
 postplan="$bin_dir/post-plan"; plansweep="$bin_dir/plan-sweep"
 vbrief="$HOME/.agents/skills/planning/briefs/verifier.md"; cbrief="$HOME/.agents/skills/planning/briefs/confirm.md"
@@ -22,7 +26,7 @@ if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-plan: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
 
 t require repo issue run worktree
-repo="$(t get repo)"; issue="$(t get issue)"; namebase="${repo##*/}-$issue"; run="$(t get run)"; worktree="$(t get worktree)"
+repo="$(t get repo)"; issue="$(t get issue)"; set_namebase "$repo" "$issue"; run="$(t get run)"; worktree="$(t get worktree)"
 mkdir -p "$run"
 
 if stored="$(t get head 2>/dev/null)"; then actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-plan: cannot read worktree HEAD: $worktree" >&2; exit 2; }; [ "$stored" = "$actual" ] || { echo "tkt-plan: head drift: state $state head=$stored worktree $worktree HEAD=$actual" >&2; exit 3; }; fi
