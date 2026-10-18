@@ -34,6 +34,7 @@ if [ ! -r "$namebase_lib" ]; then echo "tkt-fix: cannot read shared lib: $nameba
 # shellcheck disable=SC1090
 . "$namebase_lib"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"; reviewpr="$bin_dir/review-pr"
+plangate="$bin_dir/plan-gate"
 fbrief="$HOME/.agents/skills/review-loop/briefs/fix.md"
 t() { "$tkt_state" "$state" "$@"; }
 
@@ -83,7 +84,17 @@ write_findings() {
 if [ -n "$resume" ]; then args=(--slot "$slot" --resume "$resume" --prompt "$prompt")
 else
   [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
-  args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" --gate-from-plan --expect-commits)
+  plan="$(t get plan 2>/dev/null || true)"
+  if [ -z "$plan" ]; then
+    echo "tkt-fix: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
+    exit 2
+  fi
+  gate_cmd="$("$plangate" "$plan")" || {
+    echo "tkt-fix: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
+    exit 2
+  }
+  args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$gate_cmd" --gate-from-plan --expect-commits)
+  if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
 fi
 jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
 if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
