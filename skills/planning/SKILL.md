@@ -17,7 +17,7 @@ The orchestrator writes every ticket's plan, after reading the code it describes
 
 Start from the pack and read further code only where it points. Read every file the preflight listed and every file the plan will name. Line numbers in a ticket or brief are hints: anchor each citation by grep or heading at the base. Send bulk reading beyond that (history, issue archives, unrelated modules) to sub-agents that return summaries.
 
-Read every ruling posted on the ticket. A plan that touches a mechanism a posted ruling governs, a re-base re-plan included, quotes that ruling under Rulings and follows its words.
+Read the ticket's body and then its comments (`gh issue view <n>`, then the same with `--comments`, which prints no body); a plan or scope comment outranks the body where they differ. Read every ruling posted on the ticket. A plan that touches a mechanism a posted ruling governs, a re-base re-plan included, quotes that ruling under Rulings and follows its words.
 
 Done when you have read every file the preflight listed, every file the plan will cite and every ruling posted on the ticket.
 
