@@ -26,6 +26,8 @@ dir="$(dirname "$0")"
 } >> "$dir/argv.txt"
 n=$(cat "$dir/count" 2>/dev/null || echo 0)
 n=$((n + 1)); printf '%s' "$n" > "$dir/count"
+# Record the child's environment so tests can assert backend-set entries.
+env > "$dir/env-$n.txt"
 # Pipe-capacity filler before reading stdin: the parent must drain stdout and
 # stderr while its writer thread feeds stdin, or this deadlocks.
 if [ -n "$DELEGATE_TEST_CODEX_BIG" ]; then
@@ -175,6 +177,9 @@ impl Env {
             .env("DELEGATE_HEARTBEAT_MS", "100")
             .env("DELEGATE_RETRY_DELAYS_MS", &self.retry_delays)
             .env("DELEGATE_TEST_CODEX_EXIT", exit)
+            // Sentinel the backend must override: the codex child must see
+            // an empty RUSTC_WRAPPER even though its supervisor sees this.
+            .env("RUSTC_WRAPPER", "sentinel-from-supervisor")
             // Isolate from the developer machine's real host profile.
             .env(
                 "DELEGATE_HOST_PROFILE",
@@ -764,4 +769,18 @@ fn cancel_midstream_marks_cancelled_with_the_session_retained() {
     assert_eq!(final_rec["result"]["sessionId"], "thread-fresh-1");
     assert_eq!(e.record(&id)["status"], "CANCELLED");
     assert_eq!(e.record(&id)["result"]["sessionId"], "thread-fresh-1");
+}
+
+#[test]
+fn codex_child_env_carries_empty_rustc_wrapper() {
+    let e = Env::new("rustcwrapper");
+    let id = e.run_write("codex/gpt-6-luna", b"hi");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE");
+    // The supervisor saw the sentinel, but the codex child must see empty.
+    let env = std::fs::read_to_string(e.dir.join("env-1.txt")).unwrap();
+    assert!(
+        env.lines().any(|l| l == "RUSTC_WRAPPER="),
+        "codex child env must carry empty RUSTC_WRAPPER, got:\n{env}"
+    );
 }
