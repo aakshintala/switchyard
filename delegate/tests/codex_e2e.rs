@@ -4,7 +4,7 @@
 use serde_json::Value;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -42,7 +42,11 @@ for a in "$@"; do
   if [ "$prev" = "resume" ]; then tid="$a"; fi
   prev="$a"
 done
-sed "s/THREAD_ID/$tid/g" "$DELEGATE_TEST_CODEX_FIXTURE"
+sed "s/THREAD_ID/$tid/g" "${DELEGATE_TEST_CODEX_STREAM:-$DELEGATE_TEST_CODEX_FIXTURE}"
+# A per-invocation stderr marker proves stderr still flows to the terminal
+# while stdout carries the JSONL.
+printf 'codex-stderr-marker\n' >&2
+exit "${DELEGATE_TEST_CODEX_EXIT:-0}"
 "#;
 
 struct Env {
@@ -59,6 +63,14 @@ impl Env {
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(dir.join("fixture.jsonl"), FIXTURE).unwrap();
         Env { dir }
+    }
+
+    /// Write an alternate replay stream consumed via
+    /// `DELEGATE_TEST_CODEX_STREAM` + `DELEGATE_TEST_CODEX_EXIT`.
+    fn write_stream(&self, name: &str, contents: &str) -> PathBuf {
+        let path = self.dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
     }
 
     /// The cwd the supervisor resolves: the physical temp path.
@@ -101,6 +113,19 @@ impl Env {
     }
 
     fn delegate(&self, args: &[&str], stdin: Option<&[u8]>, big: bool) -> Output {
+        self.delegate_with(args, stdin, big, None, "0")
+    }
+
+    /// `delegate` with an alternate replay stream and fake exit code for
+    /// the fake `codex` child.
+    fn delegate_with(
+        &self,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        big: bool,
+        stream: Option<&Path>,
+        exit: &str,
+    ) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
         cmd.args(args)
             .current_dir(&self.dir)
@@ -112,11 +137,15 @@ impl Env {
             )
             .env("DELEGATE_HEARTBEAT_MS", "100")
             .env("DELEGATE_RETRY_DELAYS_MS", "0")
+            .env("DELEGATE_TEST_CODEX_EXIT", exit)
             // Isolate from the developer machine's real host profile.
             .env(
                 "DELEGATE_HOST_PROFILE",
                 self.dir.join("nonexistent-profile.json"),
             );
+        if let Some(stream) = stream {
+            cmd.env("DELEGATE_TEST_CODEX_STREAM", stream);
+        }
         if big {
             cmd.env("DELEGATE_TEST_CODEX_BIG", "1");
         }
@@ -135,7 +164,25 @@ impl Env {
     }
 
     fn run_write(&self, model: &str, prompt: &[u8]) -> String {
-        let out = self.delegate(&["run", "--model", model], Some(prompt), false);
+        self.run_write_stream(model, prompt, None, "0")
+    }
+
+    /// Run with an alternate replay stream and fake exit code. The JSONL
+    /// may contain THREAD_ID, stamped per invocation like the default.
+    fn run_write_stream(
+        &self,
+        model: &str,
+        prompt: &[u8],
+        stream: Option<&Path>,
+        exit: &str,
+    ) -> String {
+        let out = self.delegate_with(
+            &["run", "--model", model],
+            Some(prompt),
+            false,
+            stream,
+            exit,
+        );
         assert!(
             out.status.success(),
             "exit {:?}\nstderr: {}\nstdout: {}",
@@ -376,4 +423,174 @@ fn large_prompt_and_full_pipes_finish_without_deadlock() {
     assert_eq!(done["result"]["text"], "pong\nSTATUS: DONE");
     let stdin = e.stdin_bytes(1);
     assert!(stdin.starts_with(prompt.as_bytes()), "{}", stdin.len());
+}
+
+#[test]
+fn turn_failed_400_is_an_error_with_status_and_stderr() {
+    let e = Env::new("failed400");
+    let stream = e.write_stream(
+        "failed.jsonl",
+        concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"THREAD_ID\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"a\",\"type\":\"agent_message\",\"text\":\"partial\"}}\n",
+            "{\"type\":\"turn.failed\",\"error\":{\"message\":\"unexpected status 400 Bad Request: nope\"}}\n",
+        ),
+    );
+    let id = e.run_write_stream("codex/gpt-6-luna", b"brief", Some(&stream), "1");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "ERROR", "{done}");
+    let result = &done["result"];
+    assert!(
+        result["text"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected status 400"),
+        "{done}"
+    );
+    assert!(
+        result["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("\nSTATUS: ERROR"),
+        "{done}"
+    );
+    assert_eq!(result["providerStatus"], Value::Null);
+    // A non-transient status is not retried, so no retries entry carries
+    // it; the parser-level provider_status is pinned by unit tests.
+    assert!(result.get("retries").is_none(), "{done}");
+    assert_eq!(result["sessionId"], "thread-fresh-1");
+    // The child's stderr is preserved on the record, and the partial
+    // assistant text is never presented as the final answer.
+    assert!(
+        !result["text"].as_str().unwrap().contains("partial"),
+        "{done}"
+    );
+    assert!(
+        result["stderrTail"]
+            .as_str()
+            .unwrap()
+            .contains("codex-stderr-marker"),
+        "{done}"
+    );
+}
+
+#[test]
+fn error_event_429_is_an_error_without_retry() {
+    let e = Env::new("failed429");
+    let stream = e.write_stream(
+        "error.jsonl",
+        "{\"type\":\"thread.started\",\"thread_id\":\"THREAD_ID\"}\n\
+         {\"type\":\"error\",\"message\":\"exceeded retry limit, last status: 429 Too Many Requests\"}\n",
+    );
+    let id = e.run_write_stream("codex/gpt-6-luna", b"brief", Some(&stream), "1");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "ERROR", "{done}");
+    // 429 is excluded from the supervisor's transient set, so no retry
+    // entry carries it.
+    assert!(done["result"].get("retries").is_none(), "{done}");
+    assert!(
+        done["result"]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("\nSTATUS: ERROR"),
+        "{done}"
+    );
+}
+
+#[test]
+fn missing_completion_and_message_are_errors() {
+    let e = Env::new("nocompletion");
+    // A completed message with no turn.completed, clean exit.
+    let stream = e.write_stream(
+        "nocompletion.jsonl",
+        concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"THREAD_ID\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"a\",\"type\":\"agent_message\",\"text\":\"hi\"}}\n",
+        ),
+    );
+    let id = e.run_write_stream("codex/gpt-6-luna", b"brief", Some(&stream), "0");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "ERROR", "{done}");
+    assert!(
+        done["result"]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("no result line"),
+        "{done}"
+    );
+    // A completed turn with no agent message.
+    let stream = e.write_stream(
+        "nomessage.jsonl",
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1}}\n",
+    );
+    let id = e.run_write_stream("codex/gpt-6-luna", b"brief", Some(&stream), "0");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "ERROR", "{done}");
+}
+
+#[test]
+fn nonzero_exit_despite_a_message_is_an_error() {
+    let e = Env::new("unclean");
+    let id = e.run_write_stream("codex/gpt-6-luna", b"brief", None, "7");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "ERROR", "{done}");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(!text.contains("pong"), "{done}");
+    assert!(text.ends_with("\nSTATUS: ERROR"), "{done}");
+}
+
+#[test]
+fn resume_fallback_keeps_the_launched_thread_on_immediate_death() {
+    let e = Env::new("resumefallback");
+    let first = e.run_write("codex/gpt-6-luna", b"first brief");
+    let sid = e.wait_terminal(&first)["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(sid, "thread-fresh-1");
+    // The resumed child dies before its first event: the launched thread
+    // id is still the record's session.
+    let stream = e.write_stream("empty.jsonl", "");
+    let out = e.delegate_with(
+        &["resume", &first],
+        Some(b"follow up"),
+        false,
+        Some(&stream),
+        "1",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "ERROR", "{done}");
+    assert_eq!(done["resume"]["sessionId"], sid);
+    assert!(
+        done["result"]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("\nSTATUS: ERROR"),
+        "{done}"
+    );
+}
+
+#[test]
+fn negative_usage_never_estimates_a_negative_cost() {
+    let e = Env::new("negativeusage");
+    let stream = e.write_stream(
+        "negative.jsonl",
+        concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"THREAD_ID\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"a\",\"type\":\"agent_message\",\"text\":\"hi\\nSTATUS: DONE\"}}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":-4,\"output_tokens\":3}}\n",
+        ),
+    );
+    let id = e.run_write_stream("codex/gpt-6-luna", b"brief", Some(&stream), "0");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE", "{done}");
+    assert!(done["result"]["usage"].is_null(), "{done}");
+    assert!(done["result"]["costUsd"].is_null(), "{done}");
+    assert_eq!(done["result"]["costEstimated"], true);
 }
