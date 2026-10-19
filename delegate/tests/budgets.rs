@@ -73,6 +73,15 @@ case "$1" in
 esac
 "#;
 
+const FAKE_CODEX: &str = r#"#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.160.0" ;;
+  login)
+    if [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; else echo "unexpected: $*" >&2; exit 1; fi ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+"#;
+
 const RUN_BUDGET_MS: u128 = 102; // measured: 34ms on M-series Mac, budget 3x
 const RESUME_BUDGET_MS: u128 = 93; // measured: 31ms on M-series Mac, budget 3x
 const CANCEL_BUDGET_MS: u128 = 192; // measured: 64ms on M-series Mac, budget 3x
@@ -110,6 +119,9 @@ impl Env {
         let fiber = dir.join("fiber.sh");
         std::fs::write(&fiber, FAKE_FIBER).unwrap();
         std::fs::set_permissions(&fiber, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let codex = dir.join("codex.sh");
+        std::fs::write(&codex, FAKE_CODEX).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
         Env { dir }
     }
 
@@ -154,6 +166,7 @@ impl Env {
             .env("PI_BIN", self.dir.join("pi.sh"))
             .env("CLAUDE_BIN", self.dir.join("claude.sh"))
             .env("FIBER_BIN", self.dir.join("fiber.sh"))
+            .env("CODEX_BIN", self.dir.join("codex.sh"))
             .env("DELEGATE_HEARTBEAT_MS", "100");
         if args.first() == Some(&"models") || args.first() == Some(&"doctor") {
             cmd.env(

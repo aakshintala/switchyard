@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod codex;
 pub mod cursor;
 pub mod fiber;
 pub mod pi;
@@ -19,6 +20,7 @@ pub enum Backend {
     Pi,
     Claude,
     Fiber,
+    Codex,
 }
 
 impl Backend {
@@ -29,6 +31,7 @@ impl Backend {
             "pi" => Some(Self::Pi),
             "claude" => Some(Self::Claude),
             "fiber" => Some(Self::Fiber),
+            "codex" => Some(Self::Codex),
             _ => None,
         }
     }
@@ -39,11 +42,18 @@ impl Backend {
             Self::Pi => "pi",
             Self::Claude => "claude",
             Self::Fiber => "fiber",
+            Self::Codex => "codex",
         }
     }
 
     /// Implemented backends, in doctor order.
-    pub const ALL: [Backend; 4] = [Self::Cursor, Self::Pi, Self::Claude, Self::Fiber];
+    pub const ALL: [Backend; 5] = [
+        Self::Cursor,
+        Self::Pi,
+        Self::Claude,
+        Self::Fiber,
+        Self::Codex,
+    ];
 
     /// Resolved binary path (env override, then PATH, then ~/.local/bin).
     pub fn bin(self) -> String {
@@ -52,16 +62,26 @@ impl Backend {
             Self::Pi => pi::resolve_bin(None),
             Self::Claude => claude::resolve_bin(None),
             Self::Fiber => fiber::resolve_bin(None),
+            Self::Codex => codex::resolve_bin(None),
         }
     }
 
     /// Full argv (without the binary). Every job runs with writes enabled.
+    ///
+    /// This is a staging form: the prompt rides after the `--` separator,
+    /// exactly where the child would take it. Most backends execute it as-is.
+    /// Codex alone lowers it in spawn (inserting `-C <cwd>` from the spec and
+    /// replacing the trailing prompt with `-`) and pipes the staged prompt to
+    /// the child's stdin, so the staging form itself is never executed and
+    /// must never be mistaken for child wire argv in tests: assert the actual
+    /// child argv (and stdin bytes) through a fake process instead.
     pub fn argv(self, model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
         match self {
             Self::Cursor => cursor::argv(model, session, prompt),
             Self::Pi => pi::argv(model, session, prompt),
             Self::Claude => claude::argv(model, session, prompt),
             Self::Fiber => fiber::argv(model, session, prompt),
+            Self::Codex => codex::argv(model, session, prompt),
         }
     }
 
@@ -72,6 +92,7 @@ impl Backend {
             Self::Pi => pi::spawn(spec),
             Self::Claude => claude::spawn(spec),
             Self::Fiber => fiber::spawn(spec),
+            Self::Codex => codex::spawn(spec),
         }
     }
 
@@ -85,6 +106,7 @@ impl Backend {
             Self::Pi => pi::doctor::fill(report, opts),
             Self::Claude => claude::doctor::fill(report, opts),
             Self::Fiber => fiber::doctor::fill(report, opts),
+            Self::Codex => codex::doctor::fill(report, opts),
         }
     }
 
@@ -94,6 +116,7 @@ impl Backend {
             Self::Pi => pi::doctor::lines(report),
             Self::Claude => claude::doctor::lines(report),
             Self::Fiber => fiber::doctor::lines(report),
+            Self::Codex => codex::doctor::lines(report),
         }
     }
 }
@@ -122,11 +145,19 @@ pub(crate) struct Started {
 }
 
 pub(crate) fn start_child(spec: &JobSpec) -> Result<Started, String> {
+    start_child_with_stdin(spec, Stdio::null())
+}
+
+/// Like [`start_child`], but the child inherits `stdin` instead of null:
+/// codex pipes its staged prompt to the child while the other backends keep
+/// null stdin. The caller owns the prompt-sized write: do it on the drive
+/// thread while the pipes drain, never synchronously during dispatch.
+pub(crate) fn start_child_with_stdin(spec: &JobSpec, stdin: Stdio) -> Result<Started, String> {
     let spawned = captured_command(&spec.bin)
         .map_err(|e| format!("cannot write cargo-mutants shim: {e}"))?
         .args(&spec.argv)
         .current_dir(&spec.cwd)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Own process group, so cancel also stops the shell commands the agent started.
@@ -248,7 +279,54 @@ mod tests {
         assert_eq!(Backend::Claude.name(), "claude");
         assert_eq!(Backend::from_name("fiber"), Some(Backend::Fiber));
         assert_eq!(Backend::Fiber.name(), "fiber");
+        assert_eq!(Backend::from_name("codex"), Some(Backend::Codex));
+        assert_eq!(Backend::Codex.name(), "codex");
         assert!(Backend::from_name("nope").is_none());
+        assert_eq!(Backend::ALL.len(), 5);
+    }
+
+    /// A null-stdin child sees EOF at once; a piped child receives exactly
+    /// the bytes written. Codex alone uses the piped form; every other
+    /// backend keeps null stdin.
+    #[test]
+    fn null_stdin_sees_eof_at_once() {
+        let spec = crate::job::tests::spec_of(|s| {
+            s.bin = "/bin/cat".into();
+            s.argv = vec![];
+            s.cwd = "/tmp".into();
+        });
+        let mut started = start_child(&spec).expect("start cat");
+        let mut out = String::new();
+        use std::io::Read;
+        started.stdout.read_to_string(&mut out).unwrap();
+        assert_eq!(out, "");
+        let clean = started.child.wait().map(|s| s.success()).unwrap_or(false);
+        assert!(clean);
+    }
+
+    #[test]
+    fn piped_stdin_round_trips_exact_bytes() {
+        let spec = crate::job::tests::spec_of(|s| {
+            s.bin = "/bin/cat".into();
+            s.argv = vec![];
+            s.cwd = "/tmp".into();
+        });
+        let prompt = "-leading dash\nünicode \u{1F600}\n";
+        let mut started = start_child_with_stdin(&spec, Stdio::piped()).expect("start cat");
+        use std::io::Write;
+        started
+            .child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(prompt.as_bytes())
+            .unwrap();
+        let mut out = String::new();
+        use std::io::Read;
+        started.stdout.read_to_string(&mut out).unwrap();
+        assert_eq!(out, prompt);
+        let clean = started.child.wait().map(|s| s.success()).unwrap_or(false);
+        assert!(clean);
     }
 
     /// #83: an inherited FORCE_COLOR makes pi colour its stderr even into a

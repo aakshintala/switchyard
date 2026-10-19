@@ -65,6 +65,18 @@ esac
     .into()
 }
 
+fn codex_script() -> String {
+    r#"#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.160.0" ;;
+  login)
+    if [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; else echo "unexpected: $*" >&2; exit 1; fi ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+"#
+    .into()
+}
+
 struct Env {
     dir: PathBuf,
 }
@@ -90,6 +102,9 @@ impl Env {
         let fiber = dir.join("fiber.sh");
         std::fs::write(&fiber, fiber_script()).unwrap();
         std::fs::set_permissions(&fiber, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let codex = dir.join("codex.sh");
+        std::fs::write(&codex, codex_script()).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
         Env { dir }
     }
 
@@ -98,14 +113,30 @@ impl Env {
     }
 
     fn delegate_with_bin(&self, args: &[&str], stdin: Option<&str>, bin: &str) -> Output {
+        self.delegate_with_bins(
+            args,
+            stdin,
+            bin,
+            &self.dir.join("codex.sh").to_string_lossy(),
+        )
+    }
+
+    fn delegate_with_bins(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        cursor_bin: &str,
+        codex_bin: &str,
+    ) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_delegate"))
             .args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
-            .env("CURSOR_AGENT_BIN", bin)
+            .env("CURSOR_AGENT_BIN", cursor_bin)
             .env("PI_BIN", self.dir.join("pi.sh"))
             .env("CLAUDE_BIN", self.dir.join("claude.sh"))
             .env("FIBER_BIN", self.dir.join("fiber.sh"))
+            .env("CODEX_BIN", codex_bin)
             // Isolate from the developer machine's real host profile: exact
             // table assertions need the bundled models only.
             .env(
@@ -132,11 +163,16 @@ impl Drop for Env {
     }
 }
 
-const SORTED_IDS: [&str; 19] = [
+const SORTED_IDS: [&str; 24] = [
     "claude-fable-5-1",
     "claude-haiku-5-5",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
+    "codex/gpt-6-astra",
+    "codex/gpt-6-luna",
+    "codex/gpt-6-luna:medium",
+    "codex/gpt-6-luna:xhigh",
+    "codex/gpt-6.1-sol",
     "composer-2.5",
     "grok-4.7-high",
     "grok-4.7-xhigh",
@@ -193,7 +229,7 @@ fn models_lists_every_row_with_default_marked() {
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 20, "{stdout}");
+    assert_eq!(lines.len(), 25, "{stdout}");
     // Compare with spaces shown as · so a width mismatch is debuggable.
     assert_eq!(
         lines[0].replace(' ', "·"),
@@ -201,14 +237,22 @@ fn models_lists_every_row_with_default_marked() {
     );
     assert_eq!(
         lines[5].replace(' ', "·"),
+        "··codex/gpt-6-astra·····························GPT-6·Astra·(codex)·················codex·····10.00····50.00"
+    );
+    assert_eq!(
+        lines[7].replace(' ', "·"),
+        "··codex/gpt-6-luna:medium·······················GPT-6·Luna·(medium,·codex)··········codex······0.10·····0.50"
+    );
+    assert_eq!(
+        lines[10].replace(' ', "·"),
         "*·composer-2.5··································Composer·2.5························cursor·····0.50·····2.50··standard"
     );
     assert_eq!(
-        lines[12].replace(' ', "·"),
+        lines[17].replace(' ', "·"),
         "··fiber/opencode-go/muse-spark-1.3-contributor··Muse·Spark·1.3·Contributor·(fiber)··fiber······0.10·····0.20"
     );
     assert_eq!(
-        lines[19].replace(' ', "·"),
+        lines[24].replace(' ', "·"),
         "··opencode-go/muse-spark-1.3-contributor········Muse·Spark·1.3·Contributor··········pi·········0.10·····0.20··standard,strong"
     );
     // Rows sort by backend, then by id; only the default row is starred.
@@ -245,9 +289,31 @@ fn doctor_passes_against_full_fake() {
     );
     assert!(stdout.contains("ok    claude: logged in"), "{stdout}");
     assert!(stdout.contains("ok    fiber: fiber 0.0.0 ("), "{stdout}");
+    assert!(
+        stdout.contains("ok    codex: codex codex-cli 0.160.0 ("),
+        "{stdout}"
+    );
+    assert!(stdout.contains("ok    codex: logged in"), "{stdout}");
+    // Codex has no membership probe, so every configured row warns as
+    // unchecked, sorted by full row id. Warnings do not fail the doctor.
+    for id in [
+        "codex/gpt-6-astra",
+        "codex/gpt-6-luna",
+        "codex/gpt-6-luna:medium",
+        "codex/gpt-6-luna:xhigh",
+        "codex/gpt-6.1-sol",
+    ] {
+        assert!(
+            stdout.contains(&format!(
+                "warn  codex: model {id} not checked: no supported codex membership probe"
+            )),
+            "{stdout}"
+        );
+    }
+    let warns: Vec<&str> = stdout.lines().filter(|l| l.starts_with("warn")).collect();
+    assert_eq!(warns.len(), 5, "{stdout}");
     assert!(!stdout.contains("skip  claude"), "{stdout}");
-    assert!(!stdout.contains("warn"), "{stdout}");
-    assert!(!stdout.contains("fail"), "{stdout}");
+    assert!(!stdout.lines().any(|l| l.starts_with("fail")), "{stdout}");
 }
 
 #[test]
@@ -279,6 +345,17 @@ fn doctor_fails_when_binary_missing() {
         stdout.contains("fail  cursor: cursor-agent not found"),
         "{stdout}"
     );
+}
+
+#[test]
+fn doctor_fails_when_codex_binary_missing() {
+    let e = Env::new("doctor-codex-fail", &agent_script(FULL_LIST));
+    let cursor = e.dir.join("agent.sh").to_string_lossy().into_owned();
+    let out = e.delegate_with_bins(&["doctor"], None, &cursor, "/nonexistent/codex-xyz");
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("fail  codex: codex not found"), "{stdout}");
+    assert!(stdout.contains("checked override, $CODEX_BIN"), "{stdout}");
 }
 
 #[test]
