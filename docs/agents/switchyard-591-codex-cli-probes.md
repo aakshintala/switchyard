@@ -90,3 +90,17 @@ If a real transient 5xx arrives JSON-wrapped like the observed 400 (no
 `unexpected status` prefix), the parser records no `provider_status` and the
 supervisor will not retry it. Only the two Codex-rendered shapes retry today,
 per the approved spec; revisit if a wrapped 5xx is ever observed.
+
+## Live resume through `delegate` (2026-10-19T18:11Z, `codex_live.rs`)
+
+Both opt-in tests pass against the real CLI (4 turns, ~23s, ~$0.004):
+NEEDS_CONTEXT first turn then `delegate resume` continues the same thread
+(record `resume.sessionId` unchanged, second-turn text uses the first turn's
+fact), and a failed `--gate` run repairs on resume (gate passes, file
+created, same thread). The child argv is
+`exec -s workspace-write -C <work> resume <thread-id> --json -m gpt-6-luna -- -`
+with the continuation prompt on stdin.
+
+Harness note: the temp workspace must be a git repo (`git init`), otherwise
+every turn fails with the trust refusal above. No `CODEX_HOME` override or
+auth copying is needed; login comes from the owner's `~/.codex`.

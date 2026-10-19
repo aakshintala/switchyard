@@ -47,6 +47,13 @@ impl LiveEnv {
         let bin = root.join("bin");
         std::fs::create_dir_all(&work).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
+        // Codex refuses a cwd outside a git repository; the temp workspace
+        // is a throwaway repo, like the lane worktrees jobs run in.
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&work)
+            .output();
+        assert!(init.is_ok_and(|o| o.status.success()), "git init failed");
         let argv_log = bin.join("argv.txt");
         let wrapper = bin.join("codex.sh");
         // Log argv outside the model's workspace, then `exec` so cancel/kill

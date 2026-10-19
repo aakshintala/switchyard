@@ -1,6 +1,6 @@
 # delegate
 
-A small CLI that runs coding and research tasks on Cursor, pi, Claude Code, or Fiber models by driving the local `cursor-agent` binary in headless mode. Jobs are detached supervisors; you poll status from JSON files on disk.
+A small CLI that runs coding and research tasks on Cursor, pi, Claude Code, Fiber, or Codex models by driving the local `cursor-agent` binary in headless mode. Jobs are detached supervisors; you poll status from JSON files on disk.
 
 ## Install
 
@@ -35,11 +35,14 @@ Every job runs with writes enabled. A read task says "do not edit" in its brief;
 | `pi` | Implemented (`pi`, `PI_BIN`). |
 | `claude` | Implemented (`claude`, `CLAUDE_BIN`). |
 | `fiber` | Implemented (`fiber ask`, `FIBER_BIN`). |
+| `codex` | Implemented (`codex exec`, `CODEX_BIN`). |
 
 Model ids and prices come from bundled `config/models.json`, merged with your host profile.
 A Claude model id may carry a trailing `:<level>` (`low|medium|high|xhigh|max`), run as `claude --model <base> --effort <level>` (e.g. `claude-opus-5-5:high`); ids without a suffix are unchanged, and pi ids with a thinking suffix such as `openai/gpt-6-luna:xhigh` stay their own ids.
 
 A fiber model id is `fiber/` plus Fiber's own `provider/model` reference (e.g. `fiber/opencode-go/muse-spark-1.3-contributor`), run as `fiber ask --model <reference>` with resume via `--resume`; it carries no tiers so the ladder never picks it, and `delegate doctor` checks `fiber version` plus membership in `fiber models --json`. The real-fiber resume tests run with `FIBER_BIN=<path to fiber> cargo test --test fiber_live` from `delegate/`; each test spends two live Muse turns, and both skip when `FIBER_BIN` is unset.
+
+A codex model id is `codex/` plus the Codex model name with an optional `:<tier>` (`medium|xhigh`), run as `codex exec --json -s workspace-write -C <cwd> -m <model> [-c model_reasoning_effort=<tier>]` with the prompt on stdin and resume via `exec ... resume <thread-id>`; the tier suffix becomes the reasoning-effort flag and ids without a suffix send none, and it carries no tiers so the ladder never picks it. `delegate doctor` checks `codex --version` and `codex login status`, warning per configured row that no membership probe exists. The real-codex resume tests run with `CODEX_BIN=<path to codex> cargo test --test codex_live` from `delegate/`; each test spends two live turns (about $0.001 per trivial turn), both skip when `CODEX_BIN` is unset, and the temp workspace is a throwaway git repo because Codex refuses a cwd outside one.
 
 ## Status records
 
