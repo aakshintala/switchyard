@@ -217,6 +217,7 @@ additive_only() {
   git -C "$worktree" cat-file -e "origin/main:$p" 2>/dev/null || return 1
   line="$(git -C "$worktree" diff --numstat --no-renames "origin/main...HEAD" -- "$p" 2>/dev/null)" || return 1
   case "$line" in
+    # numstat: <added>\t<deleted>\t<path>; a binary file prints "-" for both counts
     [0-9]*$'\t'0$'\t'*) return 0 ;;
   esac
   return 1

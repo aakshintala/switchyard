@@ -612,16 +612,21 @@ run_gate
 expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive new file"
 grep -qx "new.txt" <<<"$OUT" || fail "additive new file digest lists new.txt"
 
-# --- additive: a new binary file is fenced ---
+# --- additive: a binary file changed on the branch is fenced (numstat prints "-") ---
 setup_case additive-binary
 write_plan
-printf '\0\1\2' >"$WT/bin.dat"
-git -C "$WT" add bin.dat
-git -C "$WT" commit -qm binary
+printf '\0\1\2' >"$CDIR/seed/bin.dat"
+git -C "$CDIR/seed" add bin.dat
+git -C "$CDIR/seed" commit -qm bin
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin && git -C "$WT" reset -q --hard origin/main
+printf '\0\1\2\3' >"$WT/bin.dat"
+git -C "$WT" commit -qam "change binary"
 push_branch
 run_gate
 [ "$RC" -eq 1 ] || fail "additive binary exits 1"
 expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive binary"
+grep -qx "bin.dat" <<<"$OUT" || fail "additive binary digest lists bin.dat"
 
 # --- additive: a mix passes the appended file and fences only the new one ---
 setup_case additive-mix
