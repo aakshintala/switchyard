@@ -5,6 +5,9 @@
 # plan's Files or the state's fence list, records the history, then runs the
 # gate script from the plan's Gate section to a per-run log and sets state
 # head. Prints one verdict line plus a digest of at most 40 lines.
+# An uncovered path still passes when it exists on origin/main and the branch
+# only adds lines to it (no deleted line, not binary), so additive edits at
+# registration points stay open; only rewritten and new paths are fenced.
 # Every state read and write goes through tkt-state. The Files cover rule is
 # covered() from lib/plan-tokens.sh; the gate script writer is
 # write_gate_script() from lib/gate-script.sh. Neither is copied here.
@@ -209,12 +212,22 @@ changed="$(git -C "$worktree" diff --name-only --no-renames "origin/main...HEAD"
   echo "tkt-gate: cannot diff origin/main...HEAD in $worktree" >&2
   exit 2
 }
+additive_only() {
+  local p="$1" line
+  git -C "$worktree" cat-file -e "origin/main:$p" 2>/dev/null || return 1
+  line="$(git -C "$worktree" diff --numstat --no-renames "origin/main...HEAD" -- "$p" 2>/dev/null)" || return 1
+  case "$line" in
+    [0-9]*$'\t'0$'\t'*) return 0 ;;
+  esac
+  return 1
+}
 n=0
 shown=0
 digest=""
 while IFS= read -r p; do
   [ -n "$p" ] || continue
   if covered "$p"; then continue; fi
+  if additive_only "$p"; then continue; fi
   n=$((n + 1))
   if [ "$shown" -lt 30 ]; then
     digest="$digest$p"$'\n'
