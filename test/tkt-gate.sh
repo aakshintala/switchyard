@@ -568,4 +568,75 @@ ls "$CDIR"/run/name-517-tkt-gate-*.log >/dev/null 2>&1 || fail "owner/name repo 
 [ -f "$CDIR/run/name-517-tkt-gate.sh" ] || fail "owner/name repo writes gate script directly in run"
 [ -z "$(find "$CDIR/run" -mindepth 1 -type d)" ] || fail "owner/name repo creates no subdirectory"
 
+# Add reg.txt (two lines) to main, then move the branch onto origin/main so the
+# branch's own commits are the only change. Sets up the additive-fence cases.
+add_main_file() {
+  printf 'one\ntwo\n' >"$CDIR/seed/reg.txt"
+  git -C "$CDIR/seed" add reg.txt
+  git -C "$CDIR/seed" commit -qm reg
+  git -C "$CDIR/seed" push -q origin main
+  git -C "$WT" fetch -q origin && git -C "$WT" reset -q --hard origin/main
+}
+
+# --- additive: an appended line to a file on origin/main passes the fence ---
+setup_case additive-append
+write_plan
+add_main_file
+printf 'three\n' >>"$WT/reg.txt"
+git -C "$WT" commit -qam "append reg"
+push_branch
+run_gate
+[ "$RC" -eq 0 ] || fail "additive append exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "additive append"
+
+# --- additive: a changed line on origin/main is a deleted line and is fenced ---
+setup_case additive-rewrite
+write_plan
+add_main_file
+printf 'ONE\ntwo\n' >"$WT/reg.txt"
+git -C "$WT" commit -qam "rewrite reg"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "additive rewrite exits 1"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive rewrite"
+grep -qx "reg.txt" <<<"$OUT" || fail "additive rewrite digest lists reg.txt"
+[ ! -f "$T/gate-ran" ] || fail "additive rewrite runs no gate"
+
+# --- additive: a new file is not on origin/main, so it is fenced ---
+setup_case additive-new
+write_plan
+commit_file new.txt "new"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "additive new file exits 1"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive new file"
+grep -qx "new.txt" <<<"$OUT" || fail "additive new file digest lists new.txt"
+
+# --- additive: a new binary file is fenced ---
+setup_case additive-binary
+write_plan
+printf '\0\1\2' >"$WT/bin.dat"
+git -C "$WT" add bin.dat
+git -C "$WT" commit -qm binary
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "additive binary exits 1"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive binary"
+
+# --- additive: a mix passes the appended file and fences only the new one ---
+setup_case additive-mix
+write_plan
+add_main_file
+printf 'base changed\n' >"$WT/base.txt"
+printf 'three\n' >>"$WT/reg.txt"
+git -C "$WT" commit -qam "covered and additive"
+commit_file new.txt "new"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "additive mix exits 1"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive mix"
+grep -qx "new.txt" <<<"$OUT" || fail "additive mix digest lists new.txt"
+grep -qx "reg.txt" <<<"$OUT" && fail "additive mix digest drops reg.txt"
+grep -qx "base.txt" <<<"$OUT" && fail "additive mix digest drops covered base.txt"
+
 echo "tkt-gate: all cases passed"
