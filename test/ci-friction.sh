@@ -261,6 +261,15 @@ run_friction --json
 [ "$(jget "d['design']")" = "[{'cause': 'no-log', 'count': 2, 'lanes': ['#1405']}]" ] \
   || fail "no-log design: [$OUT]"
 
+# --- #592: a cancelled job with no log (cancelled before start) is not no-log ---
+setup onelane-cancel
+echo "HTTP 404 not found" >"$T/fail-log-811"
+echo "HTTP 404 not found" >"$T/fail-log-812"
+run_friction --json
+[ "$CODE" = "0" ] || fail "cancelled no-log exits 0 (got $CODE): [$OUT]"
+[ "$(jget "d['design']")" = "[{'cause': 'no-log', 'count': 1, 'lanes': ['#1405']}]" ] \
+  || fail "cancelled 404 job stays out of design: [$OUT]"
+
 # --- 18f: SIGTERM/SIGKILL collateral never yields a test; panic lines do ---
 setup signals
 run_friction --min-lanes 1 --json
