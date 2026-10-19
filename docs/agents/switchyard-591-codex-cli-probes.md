@@ -104,3 +104,54 @@ with the continuation prompt on stdin.
 Harness note: the temp workspace must be a git repo (`git init`), otherwise
 every turn fails with the trust refusal above. No `CODEX_HOME` override or
 auth copying is needed; login comes from the owner's `~/.codex`.
+
+## Sandbox scope probes for #591 (2026-10-19, `CODEX_BIN` unset)
+
+Question: do `cargo`/`gh` need `--add-dir` or network access under
+`-s workspace-write`, and can permission denials or approvals hang
+`codex exec`? Throwaway git repo: `/tmp` copy of this worktree minus
+`target`/`.git`, `git init`, no commit. Every run is the backend wire form
+`codex exec --json -s workspace-write -C <work> -m gpt-6-luna -- -` with the
+prompt on stdin, each under `timeout 300`. All three runs exited 0 well
+inside the timeout: denials never hang a non-interactive `exec`.
+
+Probe (a) `cargo`/`gh` under `workspace-write`, two runs:
+
+- Run 1 (thread `01a1558a-c6de-78d1-a29c-3676c904c40c`, usage
+  `in 86900 / cached 72576 / out 331`, codex exit 0):
+  `cargo --version` → exit 0, tail `cargo 1.98.1 (797e8a9bc 2026-08-05)`.
+  `cargo metadata --offline --format-version 1` from the work root → exit
+  101, tail `error: could not find Cargo.toml in .../work or any parent
+  directory` (prompt bug: the manifest lives at `delegate/Cargo.toml`, not
+  the work root — not a sandbox signal). `gh api user --jq .login` →
+  exit 1, tail `error connecting to api.github.com / check your internet
+  connection or https://githubstatus.com`.
+- Run 2, corrected manifest (thread `01a1558b-0c17-7952-b620-11daec098197`,
+  usage `in 63126 / cached 41088 / out 865`, codex exit 0):
+  `cargo metadata --offline --manifest-path delegate/Cargo.toml
+  --format-version 1` → exit 101, 0 stdout bytes, stderr tail `error:
+  process didn't exit successfully: sccache .../bin/rustc -vV (exit status:
+  2) / sccache: error: Operation not permitted (os error 1)`. The sandbox
+  denies the machine-local `~/.cargo/config.toml` `rustc-wrapper = sccache`
+  spawn. Control: the same command run unsandboxed on this machine exits 0
+  (75650-byte JSON), so the manifest/lock are fine offline — the failure is
+  the env-specific wrapper hitting sandbox EPERM, not a missing writable
+dir or network (the `--offline` flag needs none).
+
+Probe (b) write outside the workspace (thread
+`01a1558b-8748-75c3-91d1-446453dee496`, usage `in 62666 / cached 53760 /
+out 288`, codex exit 0): asked to write one line to
+`$HOME/codex-denial-probe.txt`. Shell `printf` denied verbatim
+(`zsh:1: operation not permitted: ...`), Python-writer retry denied
+verbatim (`PermissionError: [Errno 1] Operation not permitted: ...`). No
+approval prompt appeared, `exec` returned promptly with `STATUS: DONE`, and
+no file was created (verified absent afterwards).
+
+Decision: no `--add-dir`, no network widening, no code change. `cargo
+--version` works as-is; the `cargo metadata` failure is fixed by nothing the
+backend can pass (`--add-dir` grants writable dirs, not spawn permission,
+and the command is offline), so machine-local wrapper setups stay the
+owner's concern. `gh api` needs internet, which `workspace-write` blocks by
+design — network-dependent commands are unsupported under this sandbox, and
+widening it is out of scope. Outside-workspace writes fail closed with EPERM
+and never hang.
