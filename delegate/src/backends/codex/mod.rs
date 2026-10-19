@@ -102,31 +102,19 @@ fn session_from_staging_argv(argv: &[String]) -> Option<String> {
 }
 
 /// Lower a staging argv plus the spec cwd into the real child argv and the
-/// stdin prompt bytes, without losing bytes. Inserts `-C <cwd>` after the
-/// `-s workspace-write` pair and replaces the trailing staged prompt with
-/// `-`, so no prompt byte ever reaches the child's argv.
+/// stdin prompt bytes. The staging form always ends in `-- <prompt>` (a
+/// single trailing prompt element) and always carries `-s workspace-write`;
+/// the child replaces the prompt with `-` (stdin) and gains `-C <cwd>` after
+/// the sandbox pair, so no prompt byte ever reaches the child's argv.
 fn lower_to_wire(staging: &[String], cwd: &str) -> (Vec<String>, String) {
-    let sep = staging.iter().rposition(|s| s == "--");
-    let prompt = match sep {
-        Some(i) if i + 1 < staging.len() => staging[i + 1..].join("\n"),
-        _ => String::new(),
-    };
-    let mut child: Vec<String> = match sep {
-        Some(i) => staging[..=i].to_vec(),
-        None => staging.to_vec(),
-    };
-    if sep.is_none() {
-        child.push("--".into());
-    }
+    let prompt = staging.last().cloned().unwrap_or_default();
+    let mut child: Vec<String> = staging[..staging.len().saturating_sub(1)].to_vec();
     child.push("-".into());
-    if let Some(i) = child
+    let i = child
         .windows(2)
         .position(|w| w[0] == "-s" && w[1] == "workspace-write")
-    {
-        child.splice(i + 2..i + 2, ["-C".into(), cwd.to_string()]);
-    } else {
-        child.splice(1..1, ["-C".into(), cwd.to_string()]);
-    }
+        .expect("staging argv always carries `-s workspace-write`");
+    child.splice(i + 2..i + 2, ["-C".into(), cwd.to_string()]);
     (child, prompt)
 }
 
@@ -651,18 +639,6 @@ mod tests {
             ]
         );
         assert_eq!(prompt, "go");
-    }
-
-    #[test]
-    fn wire_lowering_without_a_separator_appends_one() {
-        let (child, prompt) = lower_to_wire(&["exec".into(), "--json".into()], "/w");
-        assert_eq!(child.last().unwrap(), "-");
-        assert!(child.windows(2).any(|w| w == ["-C", "/w"]));
-        assert_eq!(prompt, "");
-        // A trailing separator with no staged prompt yields empty stdin.
-        let (child, prompt) = lower_to_wire(&["exec".into(), "--".into()], "/w");
-        assert_eq!(child.last().unwrap(), "-");
-        assert_eq!(prompt, "");
     }
 
     #[test]
