@@ -132,7 +132,7 @@ pub(crate) fn probe_version(
     if !r.ok {
         return (None, Some(command_err("codex", &r, "--version")));
     }
-    let version = r.stdout.trim();
+    let version = r.stdout.lines().next().unwrap_or("").trim();
     (
         if version.is_empty() {
             None
@@ -237,6 +237,38 @@ mod tests {
             stderr: String::new(),
             error: Some("exit 1".into()),
         }
+    }
+
+    #[test]
+    fn version_uses_the_first_non_empty_line_trimmed() {
+        let config = config_with_codex_ids(&["codex/gpt-6-luna"]);
+        let mut report = DoctorReport::default();
+        let opts = RunDoctorOpts {
+            config: &config,
+            resolve_bin: Some(&|_| "/bin/codex".into()),
+            bin_exists: Some(&|_| true),
+            run_command: Some(&|_: &str, args: &[String]| {
+                if args == ["--version"] {
+                    ok_result("  codex-cli 0.160.0\nbuild 1234\n\n")
+                } else {
+                    ok_result("Logged in using ChatGPT\n")
+                }
+            }),
+            read_package_version: None,
+        };
+        fill(&mut report, &opts);
+        let section = report
+            .sections
+            .iter()
+            .find(|s| s.backend == "codex")
+            .expect("codex section");
+        assert_eq!(section.version.as_deref(), Some("codex-cli 0.160.0"));
+        let (text, failed) = lines(&report);
+        assert!(!failed);
+        assert!(
+            text.contains("ok    codex: codex codex-cli 0.160.0 (/bin/codex)"),
+            "{text}"
+        );
     }
 
     #[test]
