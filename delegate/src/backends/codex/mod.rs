@@ -156,9 +156,7 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
             // deadlock a large prompt. It is always joined before returning.
             let mut stdin = child.stdin.take();
             let writer = std::thread::spawn(move || -> Option<String> {
-                let Some(mut sin) = stdin.take() else {
-                    return None;
-                };
+                let mut sin = stdin.take()?;
                 use std::io::Write;
                 match sin.write_all(prompt.as_bytes()) {
                     Ok(()) => None,
@@ -373,10 +371,11 @@ fn item_progress(ev: &serde_json::Value, state: &mut CodexState, terminal: bool)
         Some("file_change") => {
             if let Some(changes) = item.get("changes").and_then(|c| c.as_array()) {
                 for change in changes {
-                    if let Some(path) = change.get("path").and_then(|p| p.as_str()) {
-                        if !path.is_empty() && !state.files_touched.contains(&path.to_string()) {
-                            state.files_touched.push(path.to_string());
-                        }
+                    if let Some(path) = change.get("path").and_then(|p| p.as_str())
+                        && !path.is_empty()
+                        && !state.files_touched.contains(&path.to_string())
+                    {
+                        state.files_touched.push(path.to_string());
                     }
                 }
             }
@@ -400,13 +399,15 @@ fn status_in_message(message: &str) -> Option<u16> {
             let tail = &message[abs + needle.len()..];
             let digits: String = tail.chars().take(3).collect();
             let boundary_ok = tail.chars().nth(3).is_none_or(|c| !c.is_ascii_digit());
-            if digits.len() == 3 && digits.bytes().all(|b| b.is_ascii_digit()) && boundary_ok {
-                if let Ok(status) = digits.parse::<u16>() {
-                    if best.is_none_or(|(pos, _)| abs < pos) {
-                        best = Some((abs, status));
-                    }
-                    break;
+            if digits.len() == 3
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && boundary_ok
+                && let Ok(status) = digits.parse::<u16>()
+            {
+                if best.is_none_or(|(pos, _)| abs < pos) {
+                    best = Some((abs, status));
                 }
+                break;
             }
             from = abs + needle.len();
         }
