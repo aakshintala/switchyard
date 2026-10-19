@@ -1181,19 +1181,37 @@ mod tests {
     fn real_child_runs_and_sigterm_kills_it() {
         let spec = crate::job::tests::spec_of(|s| {
             s.bin = "/bin/sh".into();
-            // A shell child ignores the piped prompt; sleep keeps it alive.
-            s.argv = vec!["-c".into(), "exec sleep 30".into()];
+            // A shell child ignores the piped prompt; it signals readiness on
+            // stdout before `exec sleep` so the test never sleeps blind.
+            s.argv = vec!["-c".into(), "echo ready; exec sleep 30".into()];
             s.cwd = "/tmp".into();
         });
-        // Bypass lowering: this argv has no `--`, so the whole prompt path is
-        // exercised only through the fake e2e tests.
         let started =
             super::super::start_child_with_stdin(&spec, Stdio::piped()).expect("start shell");
         let kill = super::super::killer(started.pid, std::sync::Arc::clone(&started.reaped));
         let mut child = started.child;
-        let t = std::thread::spawn(move || child.wait().map(|s| s.success()).unwrap_or(false));
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let mut reader = BufReader::new(started.stdout);
+            let mut line = String::new();
+            let res = reader.read_line(&mut line).map(|_| line);
+            let _ = ready_tx.send(res);
+        });
+        let line = ready_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("child never signaled ready")
+            .expect("failed to read ready marker");
+        assert_eq!(line.trim(), "ready", "ready marker: {line:?}");
+        let (wait_tx, wait_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let clean = child.wait().map(|s| s.success()).unwrap_or(false);
+            let _ = wait_tx.send(clean);
+        });
         kill();
-        assert!(!t.join().unwrap());
+        let clean = wait_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("child did not exit after SIGTERM");
+        assert!(!clean);
     }
 }
