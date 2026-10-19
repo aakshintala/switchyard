@@ -42,7 +42,35 @@ for a in "$@"; do
   if [ "$prev" = "resume" ]; then tid="$a"; fi
   prev="$a"
 done
-sed "s/THREAD_ID/$tid/g" "${DELEGATE_TEST_CODEX_STREAM:-$DELEGATE_TEST_CODEX_FIXTURE}"
+# SLOW prompts emit the thread header promptly, then wait for the release
+# file before the rest of the stream, so the test can assert RUNNING first
+# while the supervisor already holds the thread id.
+rel="$dir/go"
+stream="${DELEGATE_TEST_CODEX_STREAM:-$DELEGATE_TEST_CODEX_FIXTURE}"
+tmp="$dir/stream-$n.jsonl"
+sed "s/THREAD_ID/$tid/g" "$stream" > "$tmp"
+case "$(cat "$dir/stdin-$n.bin")" in
+  *SLOW*)
+    head -n 1 "$tmp"
+    : > "$dir/header-sent"
+    i=0
+    while [ ! -e "$rel" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done
+    tail -n +2 "$tmp"
+    emitted=1
+    ;;
+esac
+# A fail-once file replaces the first call's stream; the call consumes it,
+# so the retry replays the default stream for the same thread.
+fail="$dir/fail-once"
+if [ -e "$fail" ]; then
+  sed "s/THREAD_ID/$tid/g" "$fail"
+  rm "$fail"
+  printf 'codex-stderr-marker\n' >&2
+  exit "${DELEGATE_TEST_CODEX_EXIT:-0}"
+fi
+if [ -z "$emitted" ]; then
+  cat "$tmp"
+fi
 # A per-invocation stderr marker proves stderr still flows to the terminal
 # while stdout carries the JSONL.
 printf 'codex-stderr-marker\n' >&2
@@ -51,10 +79,16 @@ exit "${DELEGATE_TEST_CODEX_EXIT:-0}"
 
 struct Env {
     dir: PathBuf,
+    retry_delays: String,
 }
 
 impl Env {
     fn new(name: &str) -> Self {
+        Self::with_delays(name, "0")
+    }
+
+    /// One retry delay per attempt: `"0,0"` allows two retries.
+    fn with_delays(name: &str, retry_delays: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("cdm-codex-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -62,7 +96,10 @@ impl Env {
         std::fs::write(&agent, FAKE_CODEX).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(dir.join("fixture.jsonl"), FIXTURE).unwrap();
-        Env { dir }
+        Env {
+            dir,
+            retry_delays: retry_delays.to_string(),
+        }
     }
 
     /// Write an alternate replay stream consumed via
@@ -136,7 +173,7 @@ impl Env {
                 self.dir.join("fixture.jsonl"),
             )
             .env("DELEGATE_HEARTBEAT_MS", "100")
-            .env("DELEGATE_RETRY_DELAYS_MS", "0")
+            .env("DELEGATE_RETRY_DELAYS_MS", &self.retry_delays)
             .env("DELEGATE_TEST_CODEX_EXIT", exit)
             // Isolate from the developer machine's real host profile.
             .env(
@@ -593,4 +630,138 @@ fn negative_usage_never_estimates_a_negative_cost() {
     assert!(done["result"]["usage"].is_null(), "{done}");
     assert!(done["result"]["costUsd"].is_null(), "{done}");
     assert_eq!(done["result"]["costEstimated"], true);
+}
+
+#[test]
+fn transient_503_is_resumed_on_the_same_thread_and_recorded() {
+    let e = Env::new("retry");
+    // The first attempt replays this failure for the fresh thread, then the
+    // file is consumed so the retry replays the default success stream.
+    std::fs::write(
+        e.dir.join("fail-once"),
+        concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"THREAD_ID\"}\n",
+            "{\"type\":\"turn.failed\",\"error\":{\"message\":\"unexpected status 503 Service Unavailable: upstream\"}}\n",
+        ),
+    )
+    .unwrap();
+    let id = e.run_write("codex/gpt-6-luna:medium", b"first brief");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE", "{done}");
+    let retries = done["result"]["retries"].as_array().unwrap();
+    assert_eq!(retries.len(), 1, "{done}");
+    assert_eq!(retries[0]["attempt"], 1);
+    assert_eq!(retries[0]["providerStatus"], 503);
+    assert!(
+        retries[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected status 503"),
+        "{done}"
+    );
+    assert_eq!(retries[0]["delayMs"], 0);
+    assert_eq!(retries[0]["sessionId"], "thread-fresh-1");
+    // Both attempts ran against the same thread: the fresh child minted it
+    // and the retry resumed it, with the working dir ahead of `resume`.
+    let calls = e.invocations();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let cwd = e.cwd();
+    assert_eq!(
+        calls[1],
+        vec![
+            "exec",
+            "-s",
+            "workspace-write",
+            "-C",
+            cwd.as_str(),
+            "resume",
+            "thread-fresh-1",
+            "--json",
+            "-m",
+            "gpt-6-luna",
+            "-c",
+            "model_reasoning_effort=medium",
+            "--",
+            "-",
+            "---",
+        ]
+    );
+    // The original brief ran once; the retry piped the continuation prompt.
+    let first_stdin = e.stdin_bytes(1);
+    assert!(
+        first_stdin.starts_with(b"first brief"),
+        "{}",
+        first_stdin.len()
+    );
+    let second_stdin = e.stdin_bytes(2);
+    assert!(
+        second_stdin
+            .windows(b"first brief".len())
+            .all(|w| w != b"first brief"),
+        "retry must not rerun the brief: {}",
+        String::from_utf8_lossy(&second_stdin)
+    );
+    assert!(
+        second_stdin
+            .starts_with(b"Your previous turn stopped on a transient provider error (HTTP 503)."),
+        "{}",
+        String::from_utf8_lossy(&second_stdin)
+    );
+}
+
+#[test]
+fn retries_stop_after_the_configured_delays() {
+    let e = Env::with_delays("exhaust", "0,0");
+    // Every attempt fails with a transient 503: two retries, then ERROR.
+    let stream = e.write_stream(
+        "always-fails.jsonl",
+        concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"THREAD_ID\"}\n",
+            "{\"type\":\"turn.failed\",\"error\":{\"message\":\"unexpected status 503 Service Unavailable: down\"}}\n",
+        ),
+    );
+    let id = e.run_write_stream("codex/gpt-6-luna", b"brief", Some(&stream), "1");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "ERROR", "{done}");
+    let retries = done["result"]["retries"].as_array().unwrap();
+    assert_eq!(retries.len(), 2, "{done}");
+    assert_eq!(retries[0]["attempt"], 1);
+    assert_eq!(retries[1]["attempt"], 2);
+    assert!(retries.iter().all(|r| r["providerStatus"] == 503), "{done}");
+    // Every attempt resumed the same thread the first child minted.
+    assert!(
+        retries.iter().all(|r| r["sessionId"] == "thread-fresh-1"),
+        "{done}"
+    );
+    assert_eq!(e.invocations().len(), 3, "{:?}", e.argv());
+    assert!(
+        done["result"]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("\nSTATUS: ERROR"),
+        "{done}"
+    );
+}
+
+#[test]
+fn cancel_midstream_marks_cancelled_with_the_session_retained() {
+    let e = Env::new("cancel");
+    let out = e.delegate(
+        &["run", "--model", "codex/gpt-6-luna"],
+        Some(b"SLOW do it"),
+        false,
+    );
+    assert!(out.status.success());
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    until("RUNNING", || e.record(&id)["status"] == "RUNNING");
+    // The thread header reached the supervisor before the cancel lands, so
+    // the cancelled record retains the session.
+    until("header", || e.dir.join("header-sent").exists());
+    let out = e.delegate(&["cancel", &id], None, false);
+    assert_eq!(out.status.code(), Some(0));
+    let final_rec: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(final_rec["status"], "CANCELLED");
+    assert_eq!(final_rec["result"]["sessionId"], "thread-fresh-1");
+    assert_eq!(e.record(&id)["status"], "CANCELLED");
+    assert_eq!(e.record(&id)["result"]["sessionId"], "thread-fresh-1");
 }

@@ -1085,6 +1085,92 @@ mod tests {
     }
 
     #[test]
+    fn resume_continuation_argv_inserts_cwd_ahead_of_resume() {
+        // A row without an effort suffix sends no effort flag; the
+        // continuation prompt stages at the end, then lowers to stdin
+        // with `-C <cwd>` inserted ahead of `resume`.
+        let prompt = "Your previous turn stopped on a transient provider error (HTTP 503).";
+        let staged = argv("codex/gpt-6-astra", Some("thread-9"), prompt);
+        assert_eq!(
+            staged,
+            vec![
+                "exec",
+                "-s",
+                "workspace-write",
+                "resume",
+                "thread-9",
+                "--json",
+                "-m",
+                "gpt-6-astra",
+                "--",
+                prompt,
+            ]
+        );
+        let wire: Vec<String> = staged.iter().map(|s| s.to_string()).collect();
+        let (child, stdin) = lower_to_wire(&wire, "/work/tree");
+        assert_eq!(
+            child,
+            vec![
+                "exec",
+                "-s",
+                "workspace-write",
+                "-C",
+                "/work/tree",
+                "resume",
+                "thread-9",
+                "--json",
+                "-m",
+                "gpt-6-astra",
+                "--",
+                "-",
+            ]
+        );
+        assert_eq!(stdin, prompt);
+    }
+
+    #[test]
+    fn session_extraction_needs_a_resume_thread_id() {
+        let staged = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            session_from_staging_argv(&staged(&["exec", "resume", "t-1", "--", "-"])),
+            Some("t-1".to_string())
+        );
+        // `resume` with no following id, and a fresh form, resume nothing.
+        assert_eq!(
+            session_from_staging_argv(&staged(&["exec", "resume"])),
+            None
+        );
+        assert_eq!(
+            session_from_staging_argv(&staged(&["exec", "--json", "--", "-"])),
+            None
+        );
+        assert_eq!(session_from_staging_argv(&[]), None);
+    }
+
+    #[test]
+    fn non_http_failures_carry_no_provider_status() {
+        for message in [
+            "interrupted",
+            "cancelled",
+            "https://example.com/a 503 ok",
+            "unexpected status500: no space",
+            "unexpected status : empty",
+        ] {
+            let stream = format!(
+                concat!(
+                    "{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}\n",
+                    "{{\"type\":\"turn.failed\",\"error\":{{\"message\":{m:?}}}}}\n",
+                ),
+                m = message,
+            );
+            let res = parse_stdout(&stream, false, "");
+            assert_eq!(res.is_error, Some(true), "{message}");
+            assert!(res.text.contains(message), "{message}: {}", res.text);
+            assert_eq!(res.provider_status, None, "{message}");
+        }
+    }
+
+    #[test]
     fn unknown_and_malformed_lines_are_ignored() {
         let mut state = CodexState::default();
         assert!(!handle_line(
@@ -1110,6 +1196,8 @@ mod tests {
         assert!(!res.clean_exit);
         assert_eq!(res.is_error, Some(true));
         assert!(!res.text.is_empty());
+        // A spawn failure carries no recognized status, so it is never retried.
+        assert_eq!(res.provider_status, None);
     }
 
     #[test]
