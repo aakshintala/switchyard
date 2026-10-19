@@ -125,9 +125,35 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     let (wire_argv, prompt) = lower_to_wire(&spec.argv, &spec.cwd);
     let mut wired = spec.clone();
     wired.argv = wire_argv;
-    let started = match super::start_child_with_stdin(&wired, Stdio::piped()) {
-        Ok(s) => s,
-        Err(msg) => return super::spawn_failed(&msg),
+    // Codex-only child env: an empty wrapper neutralizes the machine-local
+    // `rustc-wrapper = sccache` under the workspace-write sandbox (#591).
+    // Same construction as `super::start_child_with_stdin`, plus this entry.
+    use std::os::unix::process::CommandExt as _;
+    let mut cmd = match crate::util::captured_command(&wired.bin) {
+        Ok(cmd) => cmd,
+        Err(e) => return super::spawn_failed(&format!("cannot write cargo-mutants shim: {e}")),
+    };
+    cmd.args(&wired.argv)
+        .current_dir(&wired.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("RUSTC_WRAPPER", "")
+        .process_group(0);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return super::spawn_failed(&e.to_string()),
+    };
+    let pid = child.id() as libc::pid_t;
+    let reaped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let started = super::Started {
+        pid,
+        reaped,
+        child,
+        stdout,
+        stderr,
     };
     let pid = started.pid;
     let reaped = started.reaped;
