@@ -471,7 +471,11 @@ def main(argv):
                         log = gh_api("repos/%s/actions/jobs/%s/logs" % (repo, jid), escape=True)
                     except Fatal as e:
                         if "HTTP 404" in str(e):
-                            cls, det, tests = "no-log", "log not found (404)", []
+                            if j.get("conclusion") == "cancelled":
+                                cls, det, tests = ("cancelled",
+                                                   "cancelled before it started", [])
+                            else:
+                                cls, det, tests = "no-log", "log not found (404)", []
                         else:
                             print("ci-friction: %s" % e, file=sys.stderr)
                             ok = False
