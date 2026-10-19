@@ -1180,29 +1180,37 @@ mod tests {
     #[test]
     fn real_child_runs_and_sigterm_kills_it() {
         let spec = crate::job::tests::spec_of(|s| {
-            s.bin = "/bin/sh".into();
-            // A shell child ignores the piped prompt; it signals readiness on
-            // stdout before `exec sleep` so the test never sleeps blind.
-            s.argv = vec!["-c".into(), "echo ready; exec sleep 30".into()];
+            s.bin = "/bin/sleep".into();
+            // No shell between the pid and the signal: the child pid is
+            // `sleep` itself, so SIGTERM cannot land on a pre-exec shell.
+            s.argv = vec!["30".into()];
             s.cwd = "/tmp".into();
         });
         let started =
-            super::super::start_child_with_stdin(&spec, Stdio::piped()).expect("start shell");
-        let kill = super::super::killer(started.pid, std::sync::Arc::clone(&started.reaped));
+            super::super::start_child_with_stdin(&spec, Stdio::piped()).expect("start sleep");
+        let pid = started.pid;
+        let kill = super::super::killer(pid, std::sync::Arc::clone(&started.reaped));
         let mut child = started.child;
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            let mut reader = BufReader::new(started.stdout);
-            let mut line = String::new();
-            let res = reader.read_line(&mut line).map(|_| line);
-            let _ = ready_tx.send(res);
-        });
-        let line = ready_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("child never signaled ready")
-            .expect("failed to read ready marker");
-        assert_eq!(line.trim(), "ready", "ready marker: {line:?}");
+        // Sleep writes nothing; hold the pipes open until it exits.
+        let _stdout = started.stdout;
+        let _stderr = started.stderr;
+        // Confirm the signalled pid is the `sleep` process before SIGTERM.
+        // `ps -o comm=` prints `sleep` on Linux, `/bin/sleep` on macOS.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let comm = std::process::Command::new("ps")
+                .args(["-o", "comm=", "-p", &pid.to_string()])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if comm == "sleep" || comm.ends_with("/sleep") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pid {pid} never became sleep (last comm: {comm:?})"
+            );
+        }
         let (wait_tx, wait_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let clean = child.wait().map(|s| s.success()).unwrap_or(false);
