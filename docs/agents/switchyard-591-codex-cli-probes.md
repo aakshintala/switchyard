@@ -155,3 +155,37 @@ owner's concern. `gh api` needs internet, which `workspace-write` blocks by
 design — network-dependent commands are unsupported under this sandbox, and
 widening it is out of scope. Outside-workspace writes fail closed with EPERM
 and never hang.
+
+## Follow-up probes (2026-10-19, repair round 2)
+
+Same wire form (`codex exec --json -s workspace-write -C <work>
+-m gpt-6-luna -- -`, prompt on stdin, each under `timeout 300`) against a
+fresh throwaway copy (`/tmp/codex-probe-fix3`: this worktree minus
+`target`/`.git`, `git init`, no commit).
+
+Probe (a) cargo with sccache disabled (thread
+`01a1559b-2df0-7172-987d-4f93c8872909`, usage `in 70266 / cached 57856 /
+out 393`, codex turn `turn.completed`, empty codex stderr): the codex
+process ran with `RUSTC_WRAPPER=` (empty) in its environment, then the job
+ran `cargo metadata --offline --manifest-path delegate/Cargo.toml
+--format-version 1` → exit 0, 75540 stdout bytes, empty stderr (the
+`command_execution` item independently records `exit_code: 0`). Emptying
+`RUSTC_WRAPPER` neutralizes the machine-local `~/.cargo/config.toml`
+`rustc-wrapper = sccache` line (an empty wrapper means no wrapper), so the
+sandbox EPERM from run 2 above disappears with no backend flag involved.
+
+Probe (b) one `gh` operation the lanes actually need (thread
+`01a1559b-72b8-7fb3-96af-b068446b2bdd`, usage `in 43040 / cached 33792 /
+out 156`, codex exit 0, empty codex stderr): the job ran `gh pr view 594
+--repo aakshintala/switchyard --json state` → exit 1, stderr tail `error
+connecting to api.github.com / check your internet connection or
+https://githubstatus.com`. Same network block as the earlier `gh api`
+probe, now against a lane-real operation.
+
+Decision: no sandbox widening, no code change. Codex jobs run cargo with
+sccache disabled: a codex job's gate needs `RUSTC_WRAPPER=` (empty) in the
+job environment, and the backend deliberately does not set that variable
+itself — machine-local wrapper setups stay the owner's concern, and
+baking an env override into the backend would mask owner config rather
+than fix sandbox scope. `gh`-dependent steps run outside codex jobs: the
+orchestrator runs ship-pr and `gh`, never the job.
