@@ -189,3 +189,39 @@ itself — machine-local wrapper setups stay the owner's concern, and
 baking an env override into the backend would mask owner config rather
 than fix sandbox scope. `gh`-dependent steps run outside codex jobs: the
 orchestrator runs ship-pr and `gh`, never the job.
+
+## Round 4: cargo with RUSTC_WRAPPER= (2026-10-19)
+
+Same wire form (`codex exec --json -s workspace-write -C /tmp/codex-probe-r4
+-m gpt-6-luna -- -`, prompt on stdin, under `timeout 300`) against a fresh
+throwaway git repo (`/tmp/codex-probe-r4`: `cargo new --lib probe_crate`,
+nested `probe_crate/.git` removed, committed as `99f8e5a init`). The codex
+process was launched with `RUSTC_WRAPPER=` (empty) in its environment
+(`timeout 300 env RUSTC_WRAPPER= codex exec ...`). The prompt asked the job
+to run `cargo metadata --offline --manifest-path probe_crate/Cargo.toml
+--format-version 1 >/dev/null; echo META=$?` then `cargo check
+--manifest-path probe_crate/Cargo.toml --offline; echo CHECK=$?`.
+
+Probe (thread `01a155a8-d45c-72b1-9947-c04a312f4294`, usage `in 43132 /
+cached 33792 / out 143`, codex exit 0, empty codex stderr): the job ran both
+cargo commands in one shell. Verbatim `command_execution` item:
+
+- command: `/bin/zsh -lc 'cargo metadata --offline --manifest-path probe_crate/Cargo.toml --format-version 1 >/dev/null; echo META=$?\ncargo check --manifest-path probe_crate/Cargo.toml --offline; echo CHECK=$?'`
+- `exit_code: 0`, `status: completed`
+- `aggregated_output` verbatim:
+
+```
+META=0
+    Checking probe_crate v0.1.0 (/private/tmp/codex-probe-r4/probe_crate)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s
+CHECK=0
+```
+
+Final agent message verbatim: `META=0` / `CHECK=0`. Codex stderr verbatim:
+empty (0 bytes).
+
+META=0 and CHECK=0: the empty `RUSTC_WRAPPER=` neutralizes the
+machine-local sccache wrapper under `workspace-write`, so cargo works with
+no `--add-dir` and no network widening.
+
+Decision made (switchyard ruling): workspace-write, no network, RUSTC_WRAPPER= for codex children; gh and network steps run outside codex jobs.
