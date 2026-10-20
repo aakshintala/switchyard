@@ -33,7 +33,7 @@ t require repo issue run worktree
 repo="$(t get repo)"; issue="$(t get issue)"; set_namebase "$repo" "$issue"; run="$(t get run)"; worktree="$(t get worktree)"
 mkdir -p "$run"
 
-if stored="$(t get head 2>/dev/null)"; then actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-plan: cannot read worktree HEAD: $worktree" >&2; exit 2; }; [ "$stored" = "$actual" ] || { echo "tkt-plan: head drift: state $state head=$stored worktree $worktree HEAD=$actual" >&2; exit 3; }; fi
+if stored="$(t get head 2>/dev/null)"; then actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-plan: cannot read worktree HEAD: $worktree" >&2; exit 2; }; [ "$stored" = "$actual" ] || { echo "tkt-plan: head drift: state $state head=$stored worktree $worktree HEAD=$actual (after a rebase or main merge, run: tkt-state $state set head $actual)" >&2; exit 3; }; fi
 
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-plan.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
@@ -46,7 +46,7 @@ emit() {
 }
 
 base_of() {
-  b="$(awk '/^Base:[[:space:]]/ { print $2; exit }' "$1")"; [ -n "$b" ] || { echo "tkt-plan: no Base line in $1" >&2; exit 2; }
+  b="$(plan_base "$1")"; [ -n "$b" ] || { echo "tkt-plan: no Base line in $1" >&2; exit 2; }
   printf '%s\n' "$b"
 }
 

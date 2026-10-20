@@ -195,6 +195,17 @@ FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --plan --worktree t:dG --repo t
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g6 2>/dev/null)" && fail "grant past cap still refused"
 [ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: 0 granted, 1 refused')" ] || fail "cap holds with plans: $out"
 
+# FILE_CLAIM_MAX_GRANT raises the cap; a non-numeric value exits 2.
+R="$(fresh)"
+i=1
+while [ "$i" -le 6 ]; do
+  FILE_CLAIM_MAX_GRANT=6 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo "g$i" >/dev/null 2>&1 || fail "grant $i of 6 with FILE_CLAIM_MAX_GRANT=6 exits 0"
+  i=$((i + 1))
+done
+[ "$(claims_blob "$R" | grep -c '^')" = "6" ] || fail "FILE_CLAIM_MAX_GRANT=6: six grants stored"
+FILE_CLAIM_MAX_GRANT=abc FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g7 >/dev/null 2>&1
+[ "$?" = "2" ] || fail "non-numeric FILE_CLAIM_MAX_GRANT exits 2"
+
 # a call that would cross the cap refuses every new grant path in the call.
 R="$(fresh)"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g1 g2 g3 >/dev/null 2>&1 || fail "setup 3 grants"

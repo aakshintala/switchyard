@@ -314,6 +314,14 @@ grep -q "sweep|.*--cwd $WT" "$T/stub.log" || fail "SET sweeps the worktree"
 [ -z "$(bash "$TKT_STATE" "$S" get job.fix2)" ] || fail "SET retires the fix2 job"
 [ -z "$(bash "$TKT_STATE" "$S" get job.fix3)" ] || fail "SET retires the fix3 job"
 
+# --- a backticked Base line is read as the bare SHA ---
+setup_case basetick
+printf 'Base: `%s`\n\n## Files\n\n- `f.txt`\n' "$(cat "$CDIR/base")" >"$CDIR/tick.md"
+run_plan set "$CDIR/tick.md"
+[ "$RC" -eq 0 ] || fail "a backticked Base: SET exits 0 (rc=$RC: $(cat "$CDIR/stderr.txt"))"
+expect_verdict "TKT tkt-plan SET plan=$CDIR/tick.md log=*" "a backticked Base"
+grep -q "sweep|.*--base $(cat "$CDIR/base") --plan $CDIR/tick.md" "$T/stub.log" || fail "a backticked Base: SET sweeps with the bare SHA"
+
 # --- a missing plan key exits 2 and names it ---
 setup_case missing-key
 grep -v '^plan=' "$S" >"$CDIR/noplan.state"
@@ -352,6 +360,8 @@ run_plan verify
 [ "$RC" -eq 3 ] || fail "drift exits 3"
 grep -q "0000000000000000000000000000000000000000" "$CDIR/stderr.txt" || fail "drift names the stored head"
 grep -q "$H" "$CDIR/stderr.txt" || fail "drift names the worktree HEAD"
+grep -q "tkt-state" "$CDIR/stderr.txt" || fail "drift names tkt-state"
+grep -q "set head" "$CDIR/stderr.txt" || fail "drift names set head"
 
 # --- verify with no --model resolves model.verifier through the real tkt-job ---
 mkdir -p "$T/realbin" "$T/home/.agents/skills/planning/briefs"

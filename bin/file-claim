@@ -3,10 +3,11 @@
 # Usage: file-claim claim --lane ID (--plan | --grant) [--self-pr N] [--worktree HOST:DIR] [--repo R] PATH...
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
+# FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5); N must be a positive integer.
 set -euo pipefail
 REPO_DEFAULT="aakshintala/fiber"
 REF="refs/claims/live"
-MAX_GRANT=5
+MAX_GRANT="${FILE_CLAIM_MAX_GRANT:-5}"
 TRIES=8
 TAB=$'\t'
 NL=$'\n'
@@ -17,6 +18,8 @@ usage() {
   exit 2
 }
 die() { local c="$1"; shift; echo "file-claim: $*" >&2; exit "$c"; }
+case "$MAX_GRANT" in ''|*[!0-9]*) die 2 "FILE_CLAIM_MAX_GRANT must be a positive integer" ;; esac
+[ "$MAX_GRANT" -gt 0 ] || die 2 "FILE_CLAIM_MAX_GRANT must be a positive integer"
 W=""
 cleanup() { if [ -n "$W" ] && [ -d "$W" ]; then rm -rf "$W"; fi; }
 trap cleanup EXIT
