@@ -61,7 +61,13 @@ vmodel() {
 
 runjob() {
   slot="$1"; tmpl="$2"; rep="$3"; shift 3
-  job_out="$("$tktjob" "$state" --slot "$slot" --template "$tmpl" --out-file "$rep" "$@" 2>&1)" || { jrc=$?; line="$(head -n 1 <<<"$job_out")"; w="${line#TKT tkt-job }"; emit "${w% log=*}" "$jrc" "$(head -n 38 <<<"$job_out")"; }
+  job_out="$("$tktjob" "$state" --slot "$slot" --template "$tmpl" --out-file "$rep" "$@" 2>&1)" || {
+    jrc=$?; line="$(head -n 1 <<<"$job_out")"
+    # DONE_WITH_CONCERNS exits 1 with its report on disk: the report is the product.
+    if [ "$jrc" -ne 1 ] || [ ! -f "$rep" ] || [ "${line#"TKT tkt-job CONCERNS "}" = "$line" ]; then
+      w="${line#TKT tkt-job }"; emit "${w% log=*}" "$jrc" "$(head -n 38 <<<"$job_out")"
+    fi
+  }
   [ -r "$rep" ] || { echo "tkt-plan: tkt-job wrote no report: $rep" >&2; exit 3; }
   [ "$(head -n 1 "$rep")" = "PLAN OK" ] && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES n=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
 }
@@ -131,7 +137,7 @@ do_set() {
   sweep_out="$("$plansweep" --cwd "$worktree" --base "$base" --plan "$plan" --out "$pack_out" 2>"$tmp")" || { printf '%s\n' "$sweep_out" >&2; cat "$tmp" >&2; exit 2; }
   pack="$(awk '/^PACK /{print $2; exit}' <<<"$sweep_out")"; [ -n "$pack" ] || { echo "tkt-plan: plan-sweep printed no PACK line" >&2; exit 2; }
   t set plan "$plan"; t set pack "$pack"; t set verifier_round 0; t set confirmed_for ""
-  for s in verifier-r1 verifier-r2 confirm; do t set "job.$s" ""; done
+  for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
 }
 
