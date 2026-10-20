@@ -15,6 +15,10 @@ namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-plan: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$namebase_lib"
+tokens_lib="$script_dir/lib/plan-tokens.sh"
+if [ ! -r "$tokens_lib" ]; then echo "tkt-plan: cannot read shared lib: $tokens_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$tokens_lib"
 tktjob="$bin_dir/tkt-job"; plancheck="$bin_dir/plan-check"; plangate="$bin_dir/plan-gate"
 postplan="$bin_dir/post-plan"; plansweep="$bin_dir/plan-sweep"
 vbrief="$HOME/.agents/skills/planning/briefs/verifier.md"; cbrief="$HOME/.agents/skills/planning/briefs/confirm.md"
@@ -79,7 +83,7 @@ do_verify() {
     --model) [ $# -ge 2 ] || usage; model="$2"; shift 2;; *) usage;; esac; done
   load_plan
   files=()
-  while IFS= read -r p; do [ -n "$p" ] || continue; files+=("$p"); done < <(awk '/^## Files([[:space:]]|$)/{f=1;next} f&&/^## /{exit} f' "$plan" | grep -o '`[^`]*`' | tr -d '`' | grep -v '^$' || true)
+  while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
   if [ "${#files[@]}" -gt 0 ]; then
     stat="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${files[@]}" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
     if [ -n "$stat" ]; then n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${files[@]}" | wc -l | tr -d ' ')"; emit "STALE n=$n base=$base" 1 "$(head -n 38 <<<"$stat")"; fi

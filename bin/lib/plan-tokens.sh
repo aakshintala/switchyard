@@ -1,5 +1,5 @@
 # plan-tokens: shared token reader, path resolver and Files cover rules,
-# sourced by bin/plan-check and bin/plan-sweep.
+# sourced by bin/plan-check, bin/plan-sweep, bin/tkt-build, bin/tkt-plan and bin/tkt-gate.
 # Source it from beside the calling script:
 #   lib="$(cd "$(dirname "$0")" && pwd)/lib/plan-tokens.sh"
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.
@@ -12,6 +12,7 @@
 #     the current shell (FN must run in the caller's shell: no subshell here).
 #   resolve_path: reads dir, rev, tree; sets RES, RES_KIND (found|ambiguous|none).
 #   covered: reads FILES, GLOBS.
+#   plan_files_pathspecs: reads PLAN from its argument only.
 #   portre: a variable (not a function); expand_token reads it.
 
 portre=':[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$'
@@ -180,4 +181,17 @@ covered() {
       case "$FILES" in *"|$p|"*) return 0 ;; esac ;;
   esac
   in_files "$p"
+}
+
+# plan_files_pathspecs PLAN: one path per line, the first backticked token of
+# each line in `## Files`. Later tokens on a line are prose, not pathspecs.
+# Blank tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
+plan_files_pathspecs() {
+  awk '
+    /^## Files([[:space:]]|$)/ { f = 1; next }
+    f && /^## / { exit }
+    f && match($0, /`[^`]*`/) {
+      t = substr($0, RSTART + 1, RLENGTH - 2)
+      if (t != "") print t
+    }' "$1"
 }

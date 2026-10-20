@@ -176,6 +176,19 @@ grep -q "f.txt" <<<"$OUT" || fail "STALE digest names the changed file"
 grep -q "^check|" "$T/stub.log" && fail "STALE runs before plan-check"
 grep -q "STALE" "$CDIR/tkt.journal" || fail "STALE is journaled"
 
+# --- only a Files line's first backticked token is a pathspec ---
+# f.txt changed; it is the second token on the line, so the plan is not stale.
+setup_case prose-b
+printf 'Base: %s\n\n## Files\n\n- `g.txt` reads `f.txt` and `/reload`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+run_plan verify
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "prose-b"
+# f.txt changed and is the first token: STALE n=1, the trailing tokens add nothing.
+setup_case prose-a
+printf 'Base: %s\n\n## Files\n\n- `f.txt` reads `g.txt` and `/reload`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+run_plan verify
+expect_verdict "TKT tkt-plan STALE n=1 base=* log=*" "prose-a"
+: >"$T/stub.log"
+
 # --- plan-check lines block the round ---
 setup_case check
 rebase_plan

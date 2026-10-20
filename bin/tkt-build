@@ -20,6 +20,10 @@ done
 case "$from" in lane|gate|review) ;; *) usage ;; esac
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 tkt_state="$script_dir/tkt-state"
+tokens_lib="$script_dir/lib/plan-tokens.sh"
+if [ ! -r "$tokens_lib" ]; then echo "tkt-build: cannot read shared lib: $tokens_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$tokens_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
 reviewpr="$bin_dir/review-pr"; plangate="$bin_dir/plan-gate"
@@ -84,7 +88,7 @@ base="$(awk '/^Base:[[:space:]]/ {print $2; exit}' "$plan" 2>/dev/null || true)"
 # prose (`reads`, `/reload`) that git would take as pathspecs. plan-check and plan-sweep
 # read every token (lib/plan-tokens.sh) because they check coverage, not staleness.
 plan_files=()
-while IFS= read -r p || [ -n "$p" ]; do [ -n "$p" ] && plan_files+=("$p") || true; done < <(awk '/^## Files([[:space:]]|$)/{f=1;next} f&&/^## /{exit} f' "$plan" | sed -n 's/^[^`]*`\([^`]*\)`.*/\1/p' | grep -v '^$' || true)
+while IFS= read -r p; do plan_files+=("$p"); done < <(plan_files_pathspecs "$plan")
 if [ "${#plan_files[@]}" -gt 0 ]; then
   stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${plan_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
   if [ -n "$stat_out" ]; then
