@@ -235,8 +235,11 @@ else
     if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
       env_prefix="$e "
     fi
-    script="$run/$namebase-gate.sh"
-    write_gate_script "$script" "$run/$namebase-gate-$(date +%s).log" "$env_prefix" "$gate_cmd" "tkt-job: delegate runs it as the job-end gate"
+    # One unique stem per call: two lanes of a ticket never share a script or log.
+    stem="$(mktemp "$run/$namebase-$slot-gate-XXXXXX")"
+    script="$stem.sh"
+    mv "$stem" "$script"
+    write_gate_script "$script" "$stem.log" "$env_prefix" "$gate_cmd" "tkt-job: delegate runs it as the job-end gate"
     gate="bash $script"
   fi
   if [ -z "$model" ]; then

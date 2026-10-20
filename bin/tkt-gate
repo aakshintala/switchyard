@@ -261,7 +261,9 @@ if [ "$checks_only" -eq 0 ]; then
   if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
     env_prefix="$e "
   fi
-  script="$run/$namebase-tkt-gate.sh"
+  script="$(mktemp "$run/$namebase-tkt-gate-XXXXXX")"
+  mv "$script" "$script.sh"
+  script="$script.sh"
   gatelog="$(mktemp "$run/$namebase-tkt-gate-XXXXXX")"
   mv "$gatelog" "$gatelog.log"
   gatelog="$gatelog.log"
