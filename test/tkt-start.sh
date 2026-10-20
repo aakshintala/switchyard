@@ -186,6 +186,10 @@ want "PREFLIGHT core=2 out=" 1 missing
 [ ! -f "$RUN/widget-42-sweep.md" ] || fail "missing: the real sweep writes nothing on unresolved tokens"
 grep -q '^tkt-job|' "$T/calls.log" || fail "missing: tkt-job must run"
 case "$OUT" in *"missing-file:missing.txt"*) ;; *) fail "missing: digest misses the reason" ;; esac
+# --files: spaces split paths as commas do, so "a b,c" is three paths, not two.
+setup spaces ONE AGAINST
+reload --files; run_start --files "a b,c"
+case "$OUT" in *"files=a,b,c"*) ;; *) fail "spaces: digest misses files=a,b,c" ;; esac
 # unreadable or unresolvable filing commit preflights with a reason.
 setup badfiling ONE SKIP
 printf 'Work for #42 with no filing line.\n' >"$T/body"; run_start
