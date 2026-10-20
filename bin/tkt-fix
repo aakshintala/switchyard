@@ -115,6 +115,7 @@ fi
 grc=0
 "$tktgate" "$state" --checks-only --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
+[ "$grc" -eq 1 ] && { round=$((round + 1)); t set round "$round"; } # a gate-failed round counts
 [ "$grc" -eq 0 ] || pass tkt-gate "$tmp/gate.out" "$grc"
 round=$((round + 1)); t set round "$round"
 
