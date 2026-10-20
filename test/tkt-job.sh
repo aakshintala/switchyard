@@ -446,7 +446,9 @@ make_record stub-1 DONE none 0 1 0
 printf 'plan=%s\n' "$T/plan-fail.md" >>"$S"
 run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
 [ "$RC" -eq 0 ] || fail "gate dispatch exits 0"
-gate_sh="$CDIR/run/switchyard-502-gate.sh"
+set -- "$CDIR"/run/switchyard-502-*-gate-*.sh
+[ "$#" -eq 1 ] || fail "the gate script is written (found $#)"
+gate_sh="$1"
 [ -f "$gate_sh" ] || fail "the gate script is written"
 grep -q "gate=bash $gate_sh" "$T/stub.log" || fail "delegate gets --gate 'bash <script>'"
 gout="$(bash "$gate_sh" 2>&1)"; grc=$?
@@ -458,9 +460,31 @@ make_record stub-1 DONE none 0 1 0
 printf 'plan=%s\n' "$T/plan.md" >>"$S"
 run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
 [ "$RC" -eq 0 ] || fail "passing gate dispatch exits 0"
-gout="$(bash "$CDIR/run/switchyard-502-gate.sh" 2>&1)"; grc=$?
+set -- "$CDIR"/run/switchyard-502-*-gate-*.sh
+[ "$#" -eq 1 ] || fail "the passing gate script is written (found $#)"
+gout="$(bash "$1" 2>&1)"; grc=$?
 [ "$grc" -eq 0 ] || fail "a passing gate script exits 0"
 grep -q "GATE PASS" <<<"$gout" || fail "a passing gate script prints GATE PASS"
+
+# --- two lanes of one ticket each get their own gate script ---
+setup_case two-gate-scripts
+reset_stub
+make_record stub-1 DONE none 0 1 0
+make_record stub-2 DONE none 0 1 0
+printf 'plan=%s\n' "$T/plan-fail.md" >>"$S"
+run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
+[ "$RC" -eq 0 ] || fail "first gate dispatch exits 0 (rc=$RC)"
+bash "$TKT_STATE" "$S" set plan "$T/plan.md" || fail "set plan for the second lane"
+run_job --slot reviewer --model test-model --template "$T/tmpl-basic.md" --gate-from-plan
+[ "$RC" -eq 0 ] || fail "second gate dispatch exits 0 (rc=$RC)"
+set -- "$CDIR"/run/switchyard-502-*-gate-*.sh
+[ "$#" -eq 2 ] || fail "two lanes write two gate scripts (found $#)"
+passes=0
+fails=0
+for f in "$@"; do
+  if bash "$f" >/dev/null 2>&1; then passes=$((passes + 1)); else fails=$((fails + 1)); fi
+done
+[ "$passes" -eq 1 ] && [ "$fails" -eq 1 ] || fail "each gate script runs its own gate command (pass=$passes fail=$fails)"
 
 # --- usage and preconditions exit 2 ---
 setup_case both-gates
@@ -619,7 +643,8 @@ printf 'plan=%s\n' "$T/plan.md" >>"$S"
 run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
 [ "$RC" -eq 0 ] || fail "owner/name repo exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 [ -f "$CDIR/run/name-502-lane-1.md" ] || fail "owner/name repo writes brief directly in run"
-[ -f "$CDIR/run/name-502-gate.sh" ] || fail "owner/name repo writes gate script directly in run"
+set -- "$CDIR"/run/name-502-*-gate-*.sh
+[ "$#" -eq 1 ] && [ -f "$1" ] || fail "owner/name repo writes gate script directly in run"
 ls "$CDIR"/run/name-502-tkt-job-*.log >/dev/null 2>&1 || fail "owner/name repo writes log directly in run"
 [ -z "$(find "$CDIR/run" -mindepth 1 -type d)" ] || fail "owner/name repo creates no subdirectory"
 

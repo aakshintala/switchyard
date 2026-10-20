@@ -565,8 +565,28 @@ run_gate
 [ "$RC" -eq 0 ] || fail "owner/name repo exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-gate PASS head=$H log=*" "owner/name repo"
 ls "$CDIR"/run/name-517-tkt-gate-*.log >/dev/null 2>&1 || fail "owner/name repo writes log directly in run"
-[ -f "$CDIR/run/name-517-tkt-gate.sh" ] || fail "owner/name repo writes gate script directly in run"
+set -- "$CDIR"/run/name-517-tkt-gate-*.sh
+[ "$#" -eq 1 ] && [ -f "$1" ] || fail "owner/name repo writes gate script directly in run"
 [ -z "$(find "$CDIR/run" -mindepth 1 -type d)" ] || fail "owner/name repo creates no subdirectory"
+
+# --- two gate runs for one ticket write two gate scripts, each its own gate ---
+setup_case two-gate-scripts
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+run_gate --expect-head "$H"
+[ "$RC" -eq 0 ] || fail "first gate run exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+printf 'gate-bad\n' >"$T/gate-cmd"
+run_gate --expect-head "$H"
+set -- "$CDIR"/run/switchyard-517-tkt-gate-*.sh
+[ "$#" -eq 2 ] || fail "two gate runs write two gate scripts (found $#)"
+passes=0
+fails=0
+for f in "$@"; do
+  if (cd "$WT" && bash "$f") >/dev/null 2>&1; then passes=$((passes + 1)); else fails=$((fails + 1)); fi
+done
+[ "$passes" -eq 1 ] && [ "$fails" -eq 1 ] || fail "each gate script runs its own gate command (pass=$passes fail=$fails)"
 
 # Add reg.txt (two lines) to main, then move the branch onto origin/main so the
 # branch's own commits are the only change. Sets up the additive-fence cases.
