@@ -57,6 +57,7 @@ briefs_dir="$skills_dir/review-loop/briefs"
 fill_brief="$script_dir/fill-brief"
 jobs_dir="${TMPDIR:-/tmp}/delegate-jobs"
 state_dir="${TMPDIR:-/tmp}/review-pr"
+run_root="${REVIEW_PR_RUN_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/review-pr-runs}"
 
 # A finished run nobody collected is pruned an hour after its jobs end; a run
 # with no job records falls back to the state-file age below. The state file's
@@ -249,7 +250,7 @@ prune_stale_runs() {
   while IFS= read -r sf; do
     [ -n "$sf" ] || continue
     rd="$(state_get "$sf" run_dir)"
-    case "$rd" in "${TMPDIR:-/tmp}"/review-pr.run.*) rm -rf "$rd";; esac
+    case "$rd" in "$run_root"/review-pr.run.*) rm -rf "$rd";; esac
   done <"$stale_list"
   while IFS= read -r sf; do
     [ -n "$sf" ] || continue
@@ -445,7 +446,8 @@ cmd_start() {
   prune_stale_runs >/dev/null 2>&1 || true
 
   mkdir -p "$state_dir"
-  run_dir="$(mktemp -d "${TMPDIR:-/tmp}/review-pr.run.XXXXXX")"
+  mkdir -p "$run_root"
+  run_dir="$(mktemp -d "$run_root/review-pr.run.XXXXXX")"
 
   started_ok=""
   wt_list=()
@@ -694,7 +696,7 @@ cmd_collect() {
     done
     for sf in ${state_rm[@]+"${state_rm[@]}"}; do
       rd="$(state_get "$sf" run_dir 2>/dev/null || true)"
-      case "$rd" in "${TMPDIR:-/tmp}"/review-pr.run.*) rm -rf "$rd";; esac
+      case "$rd" in "$run_root"/review-pr.run.*) rm -rf "$rd";; esac
     done
     if [ -n "$posted_ok" ]; then
       for sf in ${state_rm[@]+"${state_rm[@]}"}; do
