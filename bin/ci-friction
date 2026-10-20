@@ -26,14 +26,20 @@
 import json, os, re, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 
-BOUND = {"Selection": 5, "Linux x86_64 checks": 5, "Tests macos": 15,
-         "Tests linux-x64": 10, "Tests linux-arm": 10, "Mutants": 20,
-         "Release build and size (Linux x86_64)": 15,
+# timeout-minutes from fiber's .github/workflows/ci.yml, as read on 2026-10-19:
+# Selection 41, Linux x86_64 checks 187, Tests linux 240 (20), Tests macos 365
+# (macos-26 25, else 20), Mutants 384 (shard_timeout default 40), Bug fix 468,
+# Release build 493 (50 on a PR, 60 on push; the PR bound is the one kept here),
+# Report a failed backstop 711, Benchmark comment 765, CI verdict 925.
+BOUND = {"Selection": 5, "Linux x86_64 checks": 5, "Tests macos": 25,
+         "Tests linux-x64": 20, "Tests linux-arm": 20, "Mutants": 40,
+         "Release build and size (Linux x86_64)": 50,
          "Bug fix fails at the red commit": 10, "Benchmark comment": 5,
          "CI verdict": 5, "Report a failed backstop": 5}
 # a::b::C -> C in compile keys, so rustc's full and short spellings match
-# bump when compile-key format changes; a state file without this one reclassifies its compile jobs
-KEY_VERSION = 2
+# bump when compile-key format or the timeout rule changes; a state file
+# without this one reclassifies its compile and timeout jobs
+KEY_VERSION = 3
 COMPILE_CLASSES = ("compile", "mutants-baseline-compile")
 TYPE_PATH = re.compile(r"\b(?:[A-Za-z_]\w*::)+([A-Za-z_]\w*)")
 ANSI = re.compile(r"(\x1b|\^\[)\[[0-9;]*[A-Za-z]")
@@ -124,15 +130,32 @@ def is_timeout(job):
     return (e - s).total_seconds() >= BOUND[g] * 60 - 30
 
 
+def superseded(r, job, allruns):
+    """A cancelled job of run r is superseded when a newer run on the same
+    head branch and event was created before the job completed."""
+    t0 = parse_ts(r.get("created_at") or "")
+    t1 = parse_ts(job.get("completed_at") or "")
+    if not t0 or not t1:
+        return False
+    for x in allruns:
+        tx = parse_ts(x.get("created_at") or "")
+        if (tx and t0 < tx < t1
+                and x.get("head_branch") == r.get("head_branch")
+                and x.get("event") == r.get("event")):
+            return True
+    return False
+
+
 def clean(text):
     return [TS.sub("", ANSI.sub("", l)) for l in text.splitlines()]
 
 
-def classify(name, steps, text, job=None):
+def classify(name, steps, text, job=None, newer_run=False):
     """Port of classify.py. Returns (class, detail, tests[]).
     job is the gh job dict (or None): a cancelled job is a timeout only
     with the exceeded-maximum-execution-time line or a full bound of
-    elapsed time, else class cancelled."""
+    elapsed time, else class cancelled. A cancel superseded by a newer run
+    is cancelled unless the maximum-execution-time line is there."""
     step = next((s.get("name", "") for s in steps or []
                  if s.get("conclusion") == "failure"), "")
     lines = clean(text)
@@ -216,6 +239,8 @@ def classify(name, steps, text, job=None):
     cancelled = bool(job) and job.get("conclusion") == "cancelled"
     canceled = any("The operation was canceled" in l for l in lines)
     exceeded = any("has exceeded the maximum execution time" in l for l in lines)
+    if cancelled and newer_run and not exceeded:
+        return ("cancelled", "superseded by a newer run", [])
     if exceeded or (canceled and (not cancelled or is_timeout(job))):
         return ("timeout", "job hit timeout-minutes", [])
     if canceled:
@@ -392,10 +417,12 @@ def main(argv):
 
     st = load_state(state_path)
     if st.get("key_version") != KEY_VERSION:
-        # compile keys cached before the path-collapse change are stale: reclassify once
+        # compile keys cached before the path-collapse change, and timeouts cached
+        # before the bound and supersession rules, are stale: reclassify once
         jobs_old = st.get("jobs") if isinstance(st.get("jobs"), dict) else {}
         st["jobs"] = {k: v for k, v in jobs_old.items()
-                      if not (isinstance(v, dict) and v.get("class") in COMPILE_CLASSES)}
+                      if not (isinstance(v, dict) and (v.get("class") in COMPILE_CLASSES
+                                                       or v.get("class") == "timeout"))}
     jobs_st = st.get("jobs") if isinstance(st.get("jobs"), dict) else {}
     issues_st = st.get("issues") if isinstance(st.get("issues"), dict) else {}
     branches_st = st.get("branches") if isinstance(st.get("branches"), dict) else {}
@@ -417,6 +444,7 @@ def main(argv):
                   file=sys.stderr)
     except Fatal as e:
         fail(str(e))
+    allruns = runs  # unfiltered: a newer run supersedes a cancel whatever its conclusion
     runs = [r for r in runs if ((r.get("conclusion") in ("failure", "cancelled")
                                  or (r.get("run_attempt") or 1) > 1)
                                 and parse_ts(r.get("created_at") or "")
@@ -481,7 +509,9 @@ def main(argv):
                             ok = False
                             continue
                     else:
-                        cls, det, tests = classify(j.get("name"), j.get("steps"), log, j)
+                        cls, det, tests = classify(
+                            j.get("name"), j.get("steps"), log, j,
+                            j.get("conclusion") == "cancelled" and superseded(r, j, allruns))
                     jobs_st[jid] = {"class": cls, "detail": det, "tests": tests,
                                     "lane": lane, "os": osof(j.get("labels")),
                                     "completed_at": done_at,

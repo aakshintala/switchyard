@@ -149,7 +149,7 @@ run_friction --min-lanes 1 --json
   "['compile fiber-core: error[E0308]: mismatched types', 'compile tui: error[E0277]: the trait bound is not satisfied', 'fiber-core base::works', 'fiber-core doors::watch']" ] \
   || fail "repeat tests: [$OUT]"
 [ "$(jget "sorted(c['cause'] for c in d['design'])")" = \
-  "['bench-artifact-missing', 'bench-budget', 'bug-red', 'ci-script-missing-at-base', 'fmt', 'infra', 'mutant-timeout', 'mutants-baseline', 'size-budget', 'timeout']" ] \
+  "['bench-artifact-missing', 'bench-budget', 'bug-red', 'ci-script-missing-at-base', 'fmt', 'infra', 'mutant-timeout', 'mutants-baseline', 'size-budget']" ] \
   || fail "design causes: [$OUT]"
 [ "$(jget "d['design'][0]['count']")" = "1" ] || fail "design counts per job: [$OUT]"
 [ "$(jget "d['design'][0]['lanes']")" = "['#1401']" ] || fail "design lanes: [$OUT]"
@@ -525,8 +525,8 @@ run_friction --json
 [ "$CODE" = "2" ] || fail "log failure exits 2 (got $CODE): [$OUT]"
 
 # --- #440: a superseded cancel is cancelled, not a timeout ---
-# 731 runs 10 min of a 20 min Mutants bound with only the cancel line:
-# cancelled, out of design[]. 732 sits exactly on the bound: timeout.
+# 731 runs 10 min of a 40 min Mutants bound with only the cancel line:
+# cancelled, out of design[]. 732 runs 20 min, short of that bound: cancelled.
 # 733 is short but names the maximum execution time: timeout.
 setup timeout-cancel
 TSCEN="$T/scen-timeout"; rm -rf "$TSCEN"; mkdir -p "$TSCEN/logs"
@@ -542,9 +542,73 @@ printf '2026-10-09T17:30:01Z Error: the job has exceeded the maximum execution t
 export FAKE_SCEN="$TSCEN"
 run_friction --json
 [ "$CODE" = "0" ] || fail "timeout-cancel exits 0 (got $CODE): [$OUT]"
-[ "$(jget "[(c['cause'], c['count'], c['lanes']) for c in d['design']]")" = "[('timeout', 2, ['#1405'])]" ] \
-  || fail "only the bound and marker cancels are timeouts: [$OUT]"
+[ "$(jget "[(c['cause'], c['count'], c['lanes']) for c in d['design']]")" = "[('timeout', 1, ['#1405'])]" ] \
+  || fail "only the marker cancel is a timeout: [$OUT]"
 STCLASS="$(python3 -c "import json; j=json.load(open('$HOME/.cache/switchyard/ci-friction.json'))['jobs']; print(j['731']['class'], j['732']['class'], j['733']['class'])")"
-[ "$STCLASS" = "cancelled timeout timeout" ] || fail "cancel classes: [$STCLASS]"
+[ "$STCLASS" = "cancelled cancelled timeout" ] || fail "cancel classes: [$STCLASS]"
+
+# --- #599: superseded cancels; the bound is fiber's ci.yml, not the old table ---
+# 750 is a 16 min cancelled release job (bound 50 min). 741 is a newer run
+# on the same branch and event, created before 750 completed.
+#   rel-sup:    741 supersedes 750: cancelled "superseded by a newer run".
+#   rel-alone:  no newer run, no marker: cancelled, not a timeout.
+#   rel-marker: newer run and the maximum-execution-time line: timeout.
+mk_release() { # mk_release <dir> <newer 0|1> <marker 0|1>
+  local d="$1" newer="$2" marker="$3" extra=""
+  rm -rf "$d"; mkdir -p "$d/logs"
+  if [ "$newer" = 1 ]; then
+    extra=',{"id": 741, "event": "pull_request", "conclusion": "success", "status": "completed", "pull_requests": [{"number": 1407}], "head_branch": "feat/sup", "head_sha": "gggggggggggggggggggggggggggggggggggggggg", "path": ".github/workflows/ci.yml", "created_at": "2026-10-09T17:10:00Z", "updated_at": "2026-10-09T17:12:00Z", "run_attempt": 1}'
+  fi
+  cat >"$d/runs.json" <<EOF
+{"workflow_runs": [{"id": 740, "event": "pull_request", "conclusion": "cancelled", "status": "completed", "pull_requests": [{"number": 1407}], "head_branch": "feat/sup", "head_sha": "ffffffffffffffffffffffffffffffffffffffff", "path": ".github/workflows/ci.yml", "created_at": "2026-10-09T17:00:00Z", "updated_at": "2026-10-09T17:16:20Z", "run_attempt": 1}$extra]}
+EOF
+  cat >"$d/jobs-740.json" <<'EOF'
+{"total_count": 1, "jobs": [{"id": 750, "run_id": 740, "name": "Release build and size (Linux x86_64)", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 2", "status": "completed", "conclusion": "cancelled", "created_at": "2026-10-09T17:00:00Z", "started_at": "2026-10-09T17:00:10Z", "completed_at": "2026-10-09T17:16:10Z", "steps": []}]}
+EOF
+  printf '2026-10-09T17:16:11Z The operation was canceled\n' >"$d/logs/750.txt"
+  if [ "$marker" = 1 ]; then
+    printf '2026-10-09T17:16:11Z Error: the job has exceeded the maximum execution time of 50 minutes\n' >"$d/logs/750.txt"
+  fi
+}
+release_class() { # release_class: the class of job 750 in the state file
+  python3 -c "import json; print(json.load(open('$HOME/.cache/switchyard/ci-friction.json'))['jobs']['750']['class'])"
+}
+
+setup release-sup
+mk_release "$T/scen-rel-sup" 1 0
+export FAKE_SCEN="$T/scen-rel-sup"
+run_friction --json
+[ "$CODE" = "0" ] || fail "release-sup exits 0 (got $CODE): [$OUT]"
+[ "$(jget "d['design']")" = "[]" ] || fail "superseded cancel stays out of design: [$OUT]"
+[ "$(release_class)" = "cancelled" ] || fail "superseded cancel class: [$(release_class)]"
+[ "$(python3 -c "import json; print(json.load(open('$HOME/.cache/switchyard/ci-friction.json'))['jobs']['750']['detail'])")" = "superseded by a newer run" ] \
+  || fail "superseded detail: [$OUT]"
+
+setup release-alone
+mk_release "$T/scen-rel-alone" 0 0
+export FAKE_SCEN="$T/scen-rel-alone"
+run_friction --json
+[ "$CODE" = "0" ] || fail "release-alone exits 0 (got $CODE): [$OUT]"
+[ "$(jget "d['design']")" = "[]" ] || fail "16 min cancel under the 50 min bound is not a timeout: [$OUT]"
+[ "$(release_class)" = "cancelled" ] || fail "16 min cancel class: [$(release_class)]"
+
+setup release-marker
+mk_release "$T/scen-rel-marker" 1 1
+export FAKE_SCEN="$T/scen-rel-marker"
+run_friction --json
+[ "$CODE" = "0" ] || fail "release-marker exits 0 (got $CODE): [$OUT]"
+[ "$(jget "[(c['cause'], c['count']) for c in d['design']]")" = "[('timeout', 1)]" ] \
+  || fail "the marker line wins over a newer run: [$OUT]"
+[ "$(release_class)" = "timeout" ] || fail "marker class: [$(release_class)]"
+
+# a state file at KEY_VERSION 2 holds 750 as a timeout: it is recomputed
+setup release-stale
+mk_release "$T/scen-rel-stale" 0 0
+export FAKE_SCEN="$T/scen-rel-stale"
+mkdir -p "$HOME/.cache/switchyard"
+python3 -c "import json; json.dump({'key_version': 2, 'jobs': {'750': {'class': 'timeout', 'detail': 'job hit timeout-minutes', 'tests': [], 'lane': '#1407', 'os': 'Linux', 'completed_at': '2026-10-09T17:16:10Z', 'head_sha': 'ffffffffffffffffffffffffffffffffffffffff'}}, 'issues': {}, 'branches': {}}, open('$HOME/.cache/switchyard/ci-friction.json', 'w'))"
+run_friction --json
+[ "$CODE" = "0" ] || fail "release-stale exits 0 (got $CODE): [$OUT]"
+[ "$(release_class)" = "cancelled" ] || fail "cached timeout reclassified: [$(release_class)]"
 
 echo "ci-friction: all cases passed"
