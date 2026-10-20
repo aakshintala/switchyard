@@ -15,6 +15,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-review-pr.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 
 export TMPDIR="$T/tmp"
+export REVIEW_PR_RUN_ROOT="$T/runs"
 mkdir -p "$TMPDIR" "$T/canned" "$T/state"
 
 # --- throwaway repos: ORIGIN carries refs/pull/7/head, CLONE is cloned from it
@@ -256,7 +257,7 @@ grep -q '__[A-Z]' "$T/state/prompt-spec.md" && fail "spec brief has no placehold
 grep -q '__[A-Z]' "$T/state/prompt-overbuild.md" && fail "overbuild brief has no placeholders left"
 grep -q 'workflow doc is none' "$T/state/prompt-spec.md" || fail "workflow doc defaults to none"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "0" ] || fail "collect removes the worktrees"
-[ -z "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null)" ] || fail "collect removes the run dir"
+[ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null)" ] || fail "collect removes the run dir"
 [ ! -e "$T/state/watch.txt" ] || fail "collect does not wait"
 
 # --- case: repeated --issue values fill the spec brief together
@@ -790,7 +791,7 @@ grep -q "$OLD_SHA" <<<"$err" || fail "--head timeout names the API head"
 grep -q "$NEW_SHA" <<<"$err" || fail "--head timeout names the expected head"
 [ ! -e "$T/state/runs.txt" ] || fail "--head timeout starts no job"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "0" ] || fail "--head timeout makes no worktree"
-[ -z "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null)" ] || fail "--head timeout makes no run dir"
+[ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null)" ] || fail "--head timeout makes no run dir"
 [ -z "$(ls "$TMPDIR/review-pr" 2>/dev/null)" ] || fail "--head timeout saves no state"
 [ ! -e "$T/state/comment.md" ] || fail "--head timeout posts nothing"
 [ "$(wc -l <"$T/state/sleeps.txt")" -eq 30 ] || fail "--head timeout polls 30 times"
@@ -936,7 +937,7 @@ grep -q -- "--since $MISSING_SINCE is not fetchable" <<<"$err" || fail "missing 
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || \
   fail "missing --since creates no worktree"
 [ -z "$(ls "$TMPDIR/review-pr" 2>/dev/null)" ] || fail "missing --since saves no state"
-[ -z "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null)" ] || fail "missing --since leaves no run dir"
+[ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null)" ] || fail "missing --since leaves no run dir"
 [ ! -e "$T/state/runs.txt" ] || fail "missing --since launches no job"
 
 # --- case: a short --since the clone holds is accepted
@@ -964,7 +965,7 @@ grep -Fxq "review-pr: --since needs the full 40-character sha (deadbee is not in
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || \
   fail "short --since absent creates no worktree"
 [ -z "$(ls "$TMPDIR/review-pr" 2>/dev/null)" ] || fail "short --since absent saves no state"
-[ -z "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null)" ] || fail "short --since absent leaves no run dir"
+[ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null)" ] || fail "short --since absent leaves no run dir"
 [ ! -e "$T/state/runs.txt" ] || fail "short --since absent launches no job"
 
 # --- case: an empty or whitespace-only --verify findings file exits 2 before launch
@@ -1022,7 +1023,7 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-stale_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$stale_rd" job-old standards 7 DONE "$T/clone"
 stale_sf="$TMPDIR/review-pr/job-old"
 stale_wt="$stale_rd/wt-standards"
@@ -1049,7 +1050,7 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-stale_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$stale_rd" job-old standards 7 RUNNING "$T/clone"
 stale_sf="$TMPDIR/review-pr/job-old"
 stale_wt="$stale_rd/wt-standards"
@@ -1071,7 +1072,7 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-stale_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$stale_rd" job-old standards 1 DONE "$T/clone" 0
 stale_sf="$TMPDIR/review-pr/job-old"
 stale_wt="$stale_rd/wt-standards"
@@ -1093,7 +1094,7 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-stale_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$stale_rd" job-old standards 7 NOREC "$T/clone"
 stale_sf="$TMPDIR/review-pr/job-old"
 stale_wt="$stale_rd/wt-standards"
@@ -1112,7 +1113,7 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-stale_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$stale_rd" job-done2 standards 2h DONE "$T/clone" 2h
 stale_sf="$TMPDIR/review-pr/job-done2"
 stale_wt="$stale_rd/wt-standards"
@@ -1131,7 +1132,7 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-stale_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$stale_rd" job-justdone standards 7h DONE "$T/clone" 10m
 stale_sf="$TMPDIR/review-pr/job-justdone"
 stale_wt="$stale_rd/wt-standards"
@@ -1153,9 +1154,9 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-young_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+young_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$young_rd" job-norec2 standards 2h NOREC "$T/clone"
-old_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+old_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$old_rd" job-norec7 standards 7h NOREC "$T/clone"
 start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "start with recordless runs exits 0"
 [ -f "$TMPDIR/review-pr/job-norec2" ] || fail "two-hour recordless state is kept"
@@ -1177,7 +1178,7 @@ STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
 gone_clone="$T/clone-gone"
-stale_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$stale_rd" job-stale-review standards 7 DONE "$gone_clone"
 stale_state "$stale_rd" job-stale-overbuild overbuild 7 DONE "$gone_clone"
 start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "start with a stale two-file run exits 0"
@@ -1198,7 +1199,7 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-stale_rd="$(mktemp -d "$TMPDIR/review-pr.run.XXXXXX")"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
 stale_state "$stale_rd" job-live-review standards 7 DONE "$T/clone"
 stale_state "$stale_rd" job-live-overbuild overbuild 7 RUNNING "$T/clone"
 start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "start with a live sibling exits 0"
@@ -1388,7 +1389,7 @@ st=0
 # an earlier case leaves a sibling run's worktrees behind by design, so
 # compare against the counts from before this start, like the --axes cases.
 before_wt="$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)"
-before_rd="$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null || true)"
+before_rd="$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)"
 err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M \
   --verify "$T/findings.txt" --since "$FAKE_SHA" --context "$T/nope.md" 2>&1 >/dev/null)" || st=$?
 [ "$st" -eq 1 ] || fail "missing --context exits 1 (got $st)"
@@ -1396,7 +1397,7 @@ grep -Fxq "review-pr: --context file not found: $T/nope.md" <<<"$err" || fail "m
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "$before_wt" ] || \
   fail "missing --context creates no worktree"
 [ -z "$(ls "$TMPDIR/review-pr" 2>/dev/null)" ] || fail "missing --context saves no state"
-[ "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null || true)" = "$before_rd" ] || \
+[ "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)" = "$before_rd" ] || \
   fail "missing --context leaves no run dir"
 [ ! -e "$T/state/runs.txt" ] || fail "missing --context launches no job"
 
@@ -1416,5 +1417,18 @@ grep -Fxq "review-pr: --context is only used with --verify; ignored" "$T/stderr-
 [ "$(grep -c 'is only used with --verify; ignored$' "$T/stderr-ctx.txt" || true)" = "1" ] || \
   fail "review with --context prints one ignore note"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "review with --context collects"
+
+# --- case: without REVIEW_PR_RUN_ROOT the run dir goes under XDG_CACHE_HOME, not TMPDIR
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+(unset REVIEW_PR_RUN_ROOT; export XDG_CACHE_HOME="$T/xdg"
+  start_review 7 --repo O/N --cwd "$T/clone" --model M --axes standards >/dev/null 2>"$T/stderr-xdg.txt") || fail "start without a run root exits 0"
+xdg_rd="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-standards")"
+case "$xdg_rd" in "$T/xdg/review-pr-runs/review-pr.run."*) ;; *) fail "run dir is under XDG_CACHE_HOME: [$xdg_rd]" ;; esac
+[ -d "$xdg_rd" ] || fail "run dir exists on disk"
+[ -z "$(ls -d "$TMPDIR"/review-pr.run.* 2>/dev/null)" ] || fail "no run dir under TMPDIR"
+(unset REVIEW_PR_RUN_ROOT; export XDG_CACHE_HOME="$T/xdg"; bash "$REVIEW" collect job-standards >/dev/null 2>&1) || fail "xdg-root review collects"
 
 echo "review-pr: all cases passed"
