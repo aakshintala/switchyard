@@ -3,8 +3,9 @@
 # Usage: plan-gate PLAN_FILE
 #        plan-gate -h | --help
 #        The gate is the text under the first line starting `## Gate` (whatever
-#        follows on that heading line), up to the next heading line or the end
-#        of the file. It must hold exactly one non-blank command line, written
+#        follows on that heading line), up to the next `# ` or `## ` heading
+#        line or the end of the file. `###` and deeper headings are part of
+#        the section and are skipped, not command lines. It must hold exactly one non-blank command line, written
 #        bare, wrapped in single backticks, or as the only line inside a ```
 #        fence. Prints that command on stdout and exits 0. After one wrapping
 #        backtick pair is stripped, the command must hold no backtick: an
@@ -29,7 +30,8 @@ grep -Eq '^## Gate([[:space:]]|$)' "$plan" || { echo "plan-gate: no '## Gate' he
 
 section="$(awk '
   !in_gate && /^## Gate([[:space:]]|$)/ { in_gate = 1; next }
-  in_gate && /^#+ / { exit }
+  in_gate && /^##? / { exit }
+  in_gate && /^###/ { next }
   in_gate { print }
 ' "$plan")"
 
