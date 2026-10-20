@@ -19,8 +19,10 @@
 #        part creates a comment, and each leftover is deleted. Other plans
 #        on the issue are never touched. Prints one comment URL
 #        (html_url) per part. Without --repo, the repo comes from
-#        `gh repo view`. Exits 0 on success, 1 on an oversized section or a
-#        failed `gh` call, 2 on bad usage or an unreadable plan file.
+#        `gh repo view`. The plan must pass plan-gate (a valid `## Gate`
+#        section) before anything is posted; plan-gate's stderr is passed on.
+#        Exits 0 on success, 1 on a failed plan-gate, an oversized section or
+#        a failed `gh` call, 2 on bad usage or an unreadable plan file.
 set -euo pipefail
 
 # GitHub rejects an issue comment over 65536 characters; stay below it.
@@ -50,8 +52,11 @@ comments with that label are reused or deleted, so a plan for another part
 of the same ticket is left alone. LABEL may hold only letters, digits, dot,
 underscore and dash.
 
-Exits 0 on success, 1 on an oversized section or a failed gh call, 2 on
-bad usage or an unreadable plan file.
+The plan must pass plan-gate (a valid ## Gate section) before anything is
+posted.
+
+Exits 0 on success, 1 on a failed plan-gate, an oversized section or a
+failed gh call, 2 on bad usage or an unreadable plan file.
 EOF
 }
 
@@ -79,6 +84,15 @@ while [ $# -gt 0 ]; do
 done
 [ -f "$plan" ] && [ -r "$plan" ] \
   || { echo "post-plan: cannot read plan file $plan" >&2; exit 2; }
+
+# A plan without a valid ## Gate would fail later in tkt-build, so check it
+# before any gh call. plan-gate's stdout (the command) is not needed here.
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+if ! gate_err="$("$script_dir/plan-gate" "$plan" 2>&1 >/dev/null)"; then
+  printf '%s\n' "$gate_err" >&2
+  echo "post-plan: plan-gate failed; nothing posted" >&2
+  exit 1
+fi
 
 tmp=""
 cleanup() { [ -n "$tmp" ] && rm -rf "$tmp"; }
