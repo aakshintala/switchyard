@@ -376,6 +376,10 @@ fi
 
 if [ "$reused" -eq 1 ]; then
   verdict="$verdict reused=$jobid"
+  case "$verdict" in
+    ASK*) digest="hint: this job asked and has finished; a rerun only re-watches it. Answer with: tkt-job $state --slot $slot --resume $jobid --prompt <file>
+$digest" ;;
+  esac
 fi
 
 twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"

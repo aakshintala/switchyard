@@ -278,6 +278,11 @@ run_job --slot lane --template "$T/tmpl-basic.md" --out-file "$CDIR/report.md"
 [ "$RC" -eq 1 ] || fail "ASK exits 1"
 expect_verdict "TKT tkt-job ASK id=stub-1 report=result\\ line\\ 1 log=*" "ASK"
 grep -q "result line 2" <<<"$OUT" || fail "ASK digest carries the question"
+# A rerun re-watches the finished job; the digest says how to answer it.
+run_job --slot lane --template "$T/tmpl-basic.md"
+expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 log=*" "ASK rerun"
+grep -q -- "--resume stub-1" <<<"$OUT" || fail "reused ASK digest names --resume"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "ASK rerun dispatches nothing new"
 cmp "$CDIR/report.md" <(jq -j -r '.result.text' "$T/tmp/delegate-jobs/stub-1.json") || fail "--out-file writes result.text in full"
 
 # --- BLOCKED ---
