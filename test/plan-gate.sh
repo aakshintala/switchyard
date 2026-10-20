@@ -45,11 +45,12 @@ expect_out "heading with trailing text" '## Gate (must pass before merge)\nbash 
 # the section ends at the next ## heading
 expect_out "section ends at next heading" '## Gate\nbash test/run\n## Notes\nbash other\n' 'bash test/run'
 
-# the section ends at any heading line, including ### subheadings
-expect_out "section ends at subheading" '## Gate\nbash test/run\n### Notes\nbash other\n' 'bash test/run'
+# a ### subheading inside the section is skipped, not a terminator
+expect_out "### Command subheading" '## Gate\n### Command\nbash test/run\n' 'bash test/run'
 
 # exit 1 cases
 expect_err "missing heading" '# Plan\n\nbash test/run\n'
+expect_err "subheading does not end the section" '## Gate\nbash test/run\n### Notes\nbash other\n'
 # a command that still holds a backtick after stripping is rejected (see #324)
 printf '%b' '## Gate\n`scripts/check` → PASS\n' >"$T/plan.md"
 stdout="$(bash "$GATE" "$T/plan.md" 2>"$T/err.txt")" && fail "backtick annotation exits 1"

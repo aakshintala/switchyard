@@ -80,8 +80,11 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
 fi
 base="$(awk '/^Base:[[:space:]]/ {print $2; exit}' "$plan" 2>/dev/null || true)"
 [ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan"
+# Only the first backticked token of a Files line is its path column; later ones are
+# prose (`reads`, `/reload`) that git would take as pathspecs. plan-check and plan-sweep
+# read every token (lib/plan-tokens.sh) because they check coverage, not staleness.
 plan_files=()
-while IFS= read -r p || [ -n "$p" ]; do [ -n "$p" ] && plan_files+=("$p") || true; done < <(awk '/^## Files([[:space:]]|$)/{f=1;next} f&&/^## /{exit} f' "$plan" | grep -o '`[^`]*`' | tr -d '`' | grep -v '^$' || true)
+while IFS= read -r p || [ -n "$p" ]; do [ -n "$p" ] && plan_files+=("$p") || true; done < <(awk '/^## Files([[:space:]]|$)/{f=1;next} f&&/^## /{exit} f' "$plan" | sed -n 's/^[^`]*`\([^`]*\)`.*/\1/p' | grep -v '^$' || true)
 if [ "${#plan_files[@]}" -gt 0 ]; then
   stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${plan_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
   if [ -n "$stat_out" ]; then

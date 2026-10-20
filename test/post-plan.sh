@@ -111,6 +111,16 @@ printf '# Title\n\nSome intro.\n\n## Design\n\nDetails here.\n\n## Risks\n\nNone
     i=$((i + 1))
   done
 } >"$T/huge.md"
+# every fixture plan carries a valid ## Gate, which post-plan checks before posting
+for f in plan1 plan2 huge; do printf '\n## Gate\n\nbash test/run\n' >>"$T/$f.md"; done
+
+# --- case: a plan without a ## Gate posts nothing and exits 1
+reset_state
+printf '# Title\n\nNo gate here.\n' >"$T/nogate.md"
+run_post 7 "$T/nogate.md" --repo "$REPO"
+[ "$rc" = "1" ] || fail "plan without a gate exits 1 (got $rc)"
+grep -q 'plan-gate failed; nothing posted' "$T/stderr.txt" || fail "plan without a gate says nothing was posted"
+[ ! -e "$T/calls.log" ] || fail "plan without a gate makes no gh calls"
 
 # --- case: a plan under the limit with no prior comments posts one comment
 reset_state

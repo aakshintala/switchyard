@@ -77,7 +77,7 @@ Done when round 1, round 2 or the confirm round says `PLAN OK` on the plan as it
 
 ### 4. Post
 
-Post the plan with `~/.agents/bin/post-plan <issue> <plan file> --repo <owner/name>`. It splits a plan over GitHub's comment limit at its `## ` headings into several comments, and prints one URL per part. When the plan changes, run it again: it edits its own comments in place (GitHub keeps their history), adds or deletes parts as the size needs. A section over the limit exits 1 and posts nothing: split that section. For one part of a split ticket, add `--part <label>` (e.g. `--part P3`): each part's plan then keeps its own comments, and a part never edits or deletes another's.
+Post the plan with `~/.agents/bin/post-plan <issue> <plan file> --repo <owner/name>`. It splits a plan over GitHub's comment limit at its `## ` headings into several comments, and prints one URL per part. It runs `plan-gate` first and posts nothing when the plan's `## Gate` is missing or invalid. When the plan changes, run it again: it edits its own comments in place (GitHub keeps their history), adds or deletes parts as the size needs. A section over the limit exits 1 and posts nothing: split that section. For one part of a split ticket, add `--part <label>` (e.g. `--part P3`): each part's plan then keeps its own comments, and a part never edits or deletes another's.
 
 With a state file, `tkt-plan <state> post [--part <label>]` runs `plan-gate` and then `post-plan`: `POSTED urls=` is done, `POST-FAIL reason=gate` or `reason=post` carries the tool's message.
 

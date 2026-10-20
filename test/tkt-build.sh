@@ -500,6 +500,38 @@ expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "stale"
 grep -q "src/a.txt" <<<"$OUT" || fail "stale: the digest names the changed file"
 grep -q "^run|" "$T/calls.log" && fail "stale: the lane never dispatches"
 
+# --- only a Files line's first backticked token is a pathspec: a later
+# non-path token (/reload) must not fail git, and the changed path still counts ---
+setup_case files-column
+mkdir -p "$CDIR/seed/src"
+printf 'main change\n' >"$CDIR/seed/src/a.txt"
+git -C "$CDIR/seed" add src/a.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt` reads `src/b.txt` and `/reload`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+run_build
+[ "$RC" -eq 1 ] || fail "files-column exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "files-column"
+
+# --- a later backticked token that changes on main is not a stale path ---
+setup_case files-second
+mkdir -p "$CDIR/seed/src"
+printf 'main change\n' >"$CDIR/seed/src/b.txt"
+git -C "$CDIR/seed" add src/b.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves b"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt` reads `src/b.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+run_build
+case "$(first_line)" in "TKT tkt-build STALE"*) fail "files-second: a later token is not a pathspec: $(first_line)";; esac
+
 # --- a plan without Files skips the stale check ---
 setup_case nofiles
 git -C "$WT" reset -q --hard origin/main
