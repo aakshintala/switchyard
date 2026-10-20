@@ -139,7 +139,7 @@ def superseded(r, job, allruns):
         return False
     for x in allruns:
         tx = parse_ts(x.get("created_at") or "")
-        if (tx and t0 < tx < t1 and x.get("id") != r.get("id")
+        if (tx and t0 < tx < t1
                 and x.get("head_branch") == r.get("head_branch")
                 and x.get("event") == r.get("event")):
             return True

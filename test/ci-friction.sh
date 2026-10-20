@@ -548,9 +548,9 @@ STCLASS="$(python3 -c "import json; j=json.load(open('$HOME/.cache/switchyard/ci
 [ "$STCLASS" = "cancelled cancelled timeout" ] || fail "cancel classes: [$STCLASS]"
 
 # --- #599: superseded cancels; the bound is fiber's ci.yml, not the old table ---
-# 750 is a 16 min cancelled release job (bound 50 min). 740 is a newer run
+# 750 is a 16 min cancelled release job (bound 50 min). 741 is a newer run
 # on the same branch and event, created before 750 completed.
-#   rel-sup:    740 supersedes 750: cancelled "superseded by a newer run".
+#   rel-sup:    741 supersedes 750: cancelled "superseded by a newer run".
 #   rel-alone:  no newer run, no marker: cancelled, not a timeout.
 #   rel-marker: newer run and the maximum-execution-time line: timeout.
 mk_release() { # mk_release <dir> <newer 0|1> <marker 0|1>
