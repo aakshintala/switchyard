@@ -7,8 +7,9 @@
 #        line or the end of the file. `###` and deeper headings are part of
 #        the section and are skipped, not command lines. It must hold exactly
 #        one non-blank command line, written bare, wrapped in single
-#        backticks, or as the only line inside a ``` fence. Prints that command on stdout and exits 0. After one wrapping
-#        backtick pair is stripped, the command must hold no backtick: an
+#        backticks, or as the only line inside a ``` fence. Prints that
+#        command on stdout and exits 0. After one wrapping backtick pair is
+#        stripped, the command must hold no backtick: an
 #        annotation such as `cmd` → PASS is rejected, since /bin/sh would run
 #        it as command substitution. A gate that needs substitution uses $(...).
 #        Exit 1 (nothing on stdout, one line on stderr) when the heading is
