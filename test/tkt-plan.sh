@@ -67,6 +67,16 @@ case "\$(cat "$T/mode")" in
     echo "which design rules the retry?"
     exit 1
     ;;
+  concerns)
+    printf 'PLAN OK\nheld: every invariant survived its breaking input\n' >"\$out"
+    echo "TKT tkt-job CONCERNS id=j1 log=x"
+    echo "reviewer is uneasy about one edge"
+    exit 1
+    ;;
+  blocked)
+    echo "TKT tkt-job BLOCKED id=j1 log=x"
+    exit 1
+    ;;
 esac
 EOF
 chmod +x "$T/bin/tkt-job"
@@ -265,6 +275,10 @@ bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
 bash "$TKT_STATE" "$S" set job.verifier-r1 j-old-1 || fail "seed round 1 job"
 bash "$TKT_STATE" "$S" set job.verifier-r2 j-old-2 || fail "seed round 2 job"
 bash "$TKT_STATE" "$S" set job.confirm j-old-c || fail "seed confirm job"
+bash "$TKT_STATE" "$S" set job.lane j-old-lane || fail "seed lane job"
+bash "$TKT_STATE" "$S" set job.fix1 j-old-fix1 || fail "seed fix1 job"
+bash "$TKT_STATE" "$S" set job.fix2 j-old-fix2 || fail "seed fix2 job"
+bash "$TKT_STATE" "$S" set job.fix3 j-old-fix3 || fail "seed fix3 job"
 printf '# another plan\n' >"$CDIR/other.md"
 {
   printf 'Base: %s\n' "$(cat "$CDIR/base")"
@@ -282,6 +296,10 @@ grep -q "sweep|.*--cwd $WT" "$T/stub.log" || fail "SET sweeps the worktree"
 [ -z "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" ] || fail "SET retires the round 1 job"
 [ -z "$(bash "$TKT_STATE" "$S" get job.verifier-r2)" ] || fail "SET retires the round 2 job"
 [ -z "$(bash "$TKT_STATE" "$S" get job.confirm)" ] || fail "SET retires the confirm job"
+[ -z "$(bash "$TKT_STATE" "$S" get job.lane)" ] || fail "SET retires the lane job"
+[ -z "$(bash "$TKT_STATE" "$S" get job.fix1)" ] || fail "SET retires the fix1 job"
+[ -z "$(bash "$TKT_STATE" "$S" get job.fix2)" ] || fail "SET retires the fix2 job"
+[ -z "$(bash "$TKT_STATE" "$S" get job.fix3)" ] || fail "SET retires the fix3 job"
 
 # --- a missing plan key exits 2 and names it ---
 setup_case missing-key
@@ -384,5 +402,24 @@ expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "stale verify"
 [ "$(grep -c '^run|' "$T/stub.log")" = "$((runs_before + 1))" ] || fail "stale verify dispatches a fresh job"
 [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" != "j-stale" ] || fail "stale verify retires the stale job id"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "stale verify counts the round"
+
+# --- DONE_WITH_CONCERNS: the report is the product, so the round stands ---
+setup_case concerns
+rebase_plan
+printf 'ok' >"$T/pcmode"
+printf 'concerns' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "CONCERNS verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "CONCERNS verify"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "CONCERNS verify counts the round"
+
+# --- BLOCKED still fails the verify, and the round is not counted ---
+setup_case blocked
+rebase_plan
+printf 'blocked' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "BLOCKED verify exits 1"
+expect_verdict "TKT tkt-plan BLOCKED id=j1 log=*" "BLOCKED verify"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round 2>/dev/null)" != "1" ] || fail "BLOCKED verify must not count the round"
 
 echo "tkt-plan: all cases passed"

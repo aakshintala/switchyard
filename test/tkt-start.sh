@@ -50,6 +50,8 @@ if [ -f "$T/job-fail" ]; then echo "tkt-job: boom" >&2; exit 3; fi
 out=""; prev=""
 for a in "\$@"; do [ "\$prev" = "--out-file" ] && out="\$a"; prev="\$a"; done
 [ -n "\$out" ] && cat "$T/jobout" >"\$out"
+if [ -f "$T/job-blocked" ]; then echo "TKT tkt-job BLOCKED id=j1 log=x"; exit 1; fi
+if [ -f "$T/job-concerns" ]; then echo "TKT tkt-job CONCERNS id=j1 log=x"; echo "reviewer is uneasy"; exit 1; fi
 exit 0
 EOF
 chmod +x "$T/tktbin/tkt-job"
@@ -67,7 +69,7 @@ reload() {
 # commit, plus a touching commit for TWO) pushed to origin/main, a clone, the
 # issue body and docs, ARGS loaded. Sets CDIR CLONE WT RUN FILING.
 setup() {
-  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail"
+  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-blocked"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
@@ -278,6 +280,16 @@ sweep_real_out="$(bash "$SCRIPT_DIR/../bin/plan-sweep" --cwd "$CLONE" --base ori
 [ "$sweep_real_rc" -eq 1 ] || fail "sweepreal: exit $sweep_real_rc"
 case "$sweep_real_out" in *unresolved\ *) fail "sweepreal: operational failure must not list unresolved tokens" ;; esac
 [ -e "$T/blocker/out.md" ] && fail "sweepreal: must write nothing on failure"
+# DONE_WITH_CONCERNS: the preflight report is the product, so a clean
+# preflight (core=0) still passes; BLOCKED still fails the step.
+setup concerns TWO FILING
+printf '1. non-blocking -- only a note\n' >"$T/jobout"; touch "$T/job-concerns"; run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 concerns
+[ -s "$RUN/widget-42-preflight-out.md" ] || fail "concerns: report file missing"
+setup blocked TWO FILING
+printf '1. non-blocking -- only a note\n' >"$T/jobout"; touch "$T/job-blocked"; run_start
+want "STEP-FAIL step=tkt-job rc=1" 1 blocked
+case "$OUT" in *PREFLIGHT*) fail "blocked: must never print PREFLIGHT" ;; esac
 # worktree add failure exits with its code naming the step.
 setup wtaddfail ONE AGAINST
 git -C "$CLONE" branch tkt-start origin/main; run_start
