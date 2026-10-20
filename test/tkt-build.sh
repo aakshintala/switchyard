@@ -546,6 +546,20 @@ run_build
 [ "$RC" -eq 0 ] || fail "nofiles exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "nofiles"
 
+# --- a backticked Base line is read as the bare SHA ---
+setup_case basetick
+git -C "$WT" reset -q --hard origin/main
+git -C "$WT" push -q -f origin tkt-528
+H="$(git -C "$WT" rev-parse HEAD)"
+printf '%s' "$H" >"$T/prhead"
+{
+  printf 'Base: `%s`\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+run_build
+[ "$RC" -eq 0 ] || fail "basetick exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "basetick"
+
 # --- a missing state key names itself ---
 setup_case missingkey
 grep -v '^spec=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"

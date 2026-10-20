@@ -132,7 +132,7 @@ done
 [ -r "$plan" ] || { echo "plan-check: cannot read plan file: $plan" >&2; exit 2; }
 
 if [ -z "$rev" ]; then
-  rev="$(awk '/^Base:[[:space:]]/ { print $2; exit }' "$plan")"
+  rev="$(plan_base "$plan")"
   if [ -z "$rev" ]; then
     echo "plan-check: no Base line in $plan and no --base" >&2
     exit 2

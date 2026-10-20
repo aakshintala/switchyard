@@ -7,6 +7,7 @@
 #   is_path: none. is_symbol: none.
 #   exempt_new: reads plan.
 #   in_files: reads FILES (|a|b| form), GLOBS (newline list).
+#   plan_base: reads PLAN from its argument only.
 #   plan_records: reads PLAN from its argument only.
 #   expand_token: reads CUR_SEC, GLOBS, portre; appends to GLOBS; calls FN in
 #     the current shell (FN must run in the caller's shell: no subshell here).
@@ -63,6 +64,12 @@ in_files() {
     case "$f" in $g) return 0 ;; esac
   done <<<"$GLOBS"
   return 1
+}
+
+# plan_base PLAN: the first token of the Base line with backticks stripped, so
+# `Base: `abc`` reads as abc. Prints nothing when there is no Base line.
+plan_base() {
+  awk '/^Base:[[:space:]]/ { gsub(/`/, "", $2); print $2; exit }' "$1"
 }
 
 # plan_records PLAN: one record per backticked token outside fenced blocks and
