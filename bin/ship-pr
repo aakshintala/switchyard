@@ -89,7 +89,8 @@
 #        non-blank line, else exit 2 before anything else. On a patch-id mismatch, once per
 #        run and before the first push or CI wait, ship-pr posts a PR comment: a first line
 #        naming the reviewed short sha, the file under `Findings:`, and `git diff --stat`
-#        from the reviewed sha to the pinned head under `Changed since review:`. A failed
+#        from the reviewed sha to the pinned head, limited to the files the repair commits
+#        touch (a merge of main adds no base files), under `Changed since review:`. A failed
 #        post exits 1 before any push. A match posts nothing. The gate and CI run as usual.
 #        --timeout bounds each CI wait, so a run can take one gate and up to 4 CI waits.
 #        SHIP_PR_INTERVAL: seconds between MERGED polls (default 5, at most 12 polls).
@@ -294,9 +295,18 @@ esac
 
 # Posts the unverified-fixes comment (step 5). Nothing is pushed if it fails.
 post_unverified() {
-  local pin="$1" short stat body rc=0
+  local pin="$1" short stat body rc=0 f
+  local files=()
   short="$(git -C "$worktree" rev-parse --short "$reviewed")" || die_after_ready 1 "cannot name $reviewed"
-  stat="$(git -C "$worktree" diff --stat "$reviewed..$pin")" || die_after_ready 1 "cannot diff $reviewed..$pin"
+  # The stat covers the repair commits' files only: a merge of main would list the base's changes.
+  while IFS= read -r -d '' f; do
+    if [ -n "$f" ]; then files+=("$f"); fi
+  done < <(git -C "$worktree" log --first-parent --no-merges --name-only -z --format= "$reviewed..$pin" | sort -zu)
+  stat=""
+  # Never an empty pathspec: that would stat every file. Only merge commits leave stat empty.
+  if [ "${#files[@]}" -gt 0 ]; then
+    stat="$(git -C "$worktree" diff --stat "$reviewed..$pin" -- "${files[@]}")" || die_after_ready 1 "cannot diff $reviewed..$pin"
+  fi
   body="$(mktemp "${TMPDIR:-/tmp}/ship-pr-comment.XXXXXX")"
   {
     printf 'Fixes since %s shipped without re-review (review-loop step 3: no real bug in round one).\n\n' "$short"

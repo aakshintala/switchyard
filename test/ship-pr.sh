@@ -869,6 +869,17 @@ grep -qx 'Changed since review:' "$ST/comment.txt" && grep -q 'feature.txt' "$ST
 grep -q '^gh pr merge' "$ST/gh.log" || fail "unverified fixes: merged"
 [ ! -e "$WT" ] || fail "unverified fixes: worktree removed"
 
+# 1b. a repair that merges main: the stat lists the repair's files, not the base's
+setup
+echo changed >"$WT/feature.txt"; git -C "$WT" commit -qam "fix nit"
+advance_main unrelated.txt u
+git -C "$WT" merge -q --no-edit origin/main; git -C "$WT" push -q origin feature
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$F"
+expect 0 "repair with a merge of main merges"
+[ "$(comment_count)" -eq 1 ] || fail "merge of main: one comment: [$(cat "$ST/gh.log")]"
+grep -q 'feature.txt' "$ST/comment.txt" || fail "merge of main: stat lists feature.txt: [$(cat "$ST/comment.txt")]"
+! grep -q 'unrelated.txt' "$ST/comment.txt" || fail "merge of main: stat omits base files: [$(cat "$ST/comment.txt")]"
+
 # 2. a mismatch without the option: exit 4, as before
 setup
 echo changed >"$WT/feature.txt"; git -C "$WT" commit -qam "fix nit"; git -C "$WT" push -q origin feature
