@@ -664,4 +664,32 @@ grep -qx "new.txt" <<<"$OUT" || fail "additive mix digest lists new.txt"
 grep -qx "reg.txt" <<<"$OUT" && fail "additive mix digest drops reg.txt"
 grep -qx "base.txt" <<<"$OUT" && fail "additive mix digest drops covered base.txt"
 
+# --- a new file the plan marks new in Tasks is covered; an unmarked one is fenced ---
+setup_case new-marked
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+
+## Tasks
+
+1. Add `made.txt` (new) with the table.
+2. Touch `stray.txt` for the helper.
+
+## Gate
+
+`gate-ok`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+commit_file made.txt "made"
+commit_file stray.txt "stray"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "new-marked exits 1"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "new-marked"
+grep -qx "stray.txt" <<<"$OUT" || fail "new-marked digest lists stray.txt"
+grep -qx "made.txt" <<<"$OUT" && fail "new-marked digest drops made.txt"
+
 echo "tkt-gate: all cases passed"

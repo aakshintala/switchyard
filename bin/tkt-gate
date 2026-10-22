@@ -192,8 +192,14 @@ collect_fence() {
   return 0
 }
 if [ -n "$plan" ]; then
-  while IFS=$'\t' read -r sec _ln _new _read tok; do
-    [ "$sec" = "files" ] || continue
+  while IFS=$'\t' read -r sec _ln isnew _read tok; do
+    # Files covers its paths; a path marked new in Tasks, Interfaces or Red
+    # commit is a file the plan creates, so it is covered too.
+    case "$sec" in
+      files) ;;
+      tasks|interfaces|red) [ "$isnew" = 1 ] || continue ;;
+      *) continue ;;
+    esac
     [ -n "$tok" ] || continue
     CUR_SEC="files"
     expand_token "$tok" collect_fence
