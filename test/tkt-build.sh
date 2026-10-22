@@ -376,8 +376,8 @@ run_build
 expect_verdict "TKT tkt-build CHANGES p1=1 p2=2 p3=1 mutants=2 findings=* log=*" "mutants"
 run_build
 [ "$RC" -eq 1 ] || fail "mutants rerun exits 1 (rc=$RC)"
-expect_verdict "TKT tkt-build CHANGES p1=1 p2=2 p3=1 mutants=2 findings=* log=*" "mutants rerun"
-[ "$(grep -c '^run|id=stub-2' "$T/calls.log")" -eq 1 ] || fail "mutants rerun: the map job reuses its id"
+expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "mutants rerun"
+[ "$(grep -c '^run|id=stub-2' "$T/calls.log")" -eq 1 ] || fail "mutants rerun: no second map job"
 grep -q "^ghci|wait 7 --job Selection --repo switchyard$" "$T/calls.log" || fail "mutants: gh-ci waits on the mutant job"
 mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
 [ "$(grep -c . "$mfile")" -eq 3 ] || fail "mutants: three log lines match"
@@ -690,10 +690,19 @@ run_build
 [ "$RC" -eq 0 ] || fail "rerun first exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "rerun first"
 run_build
-[ "$RC" -eq 0 ] || fail "rerun second exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "rerun second"
+[ "$RC" -eq 1 ] || fail "rerun second exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "rerun second"
 [ "$(grep -c '^run|' "$T/calls.log")" -eq 1 ] || fail "rerun: one lane dispatch across both runs"
-[ "$(grep -c '^watch|' "$T/calls.log")" -eq 4 ] || fail "rerun: each run watches twice (job plus build)"
+[ "$(grep -c '^watch|' "$T/calls.log")" -eq 2 ] || fail "rerun: the first build watches twice, the second watches nothing"
+
+# --- a state with round already set is refused before any job or gate ---
+setup_case round-set
+bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "seed round"
+run_build
+[ "$RC" -eq 1 ] || fail "round-set build exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build ROUND-LIMIT round=1 log=*" "round-set build"
+grep -q "continue with tkt-fix or tkt-ship" <<<"$OUT" || fail "round-set build names tkt-fix and tkt-ship"
+[ ! -s "$T/calls.log" ] || fail "round-set build dispatches nothing: $(cat "$T/calls.log")"
 
 # --- an incomplete map never approves, but stays in the digest ---
 setup_case mapfail
@@ -746,7 +755,8 @@ setup_case review-reuse
 run_build
 [ "$RC" -eq 0 ] || fail "review-reuse first exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 run_build
-[ "$RC" -eq 0 ] || fail "review-reuse second exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$RC" -eq 1 ] || fail "review-reuse second exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "review-reuse second"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "review-reuse: three axis starts across both runs"
 rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ -n "$rv" ] || fail "review-reuse: review_ids persisted"
 [ "$(bash "$TKT_STATE" "$S" get review_head)" = "$H" ] || fail "review-reuse: review_head is the head"

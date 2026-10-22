@@ -140,8 +140,13 @@ do_set() {
   pack_out="$run/$namebase-pack.md"
   sweep_out="$("$plansweep" --cwd "$worktree" --base "$base" --plan "$plan" --out "$pack_out" 2>"$tmp")" || { printf '%s\n' "$sweep_out" >&2; cat "$tmp" >&2; exit 2; }
   pack="$(awk '/^PACK /{print $2; exit}' <<<"$sweep_out")"; [ -n "$pack" ] || { echo "tkt-plan: plan-sweep printed no PACK line" >&2; exit 2; }
-  t set plan "$plan"; t set pack "$pack"; t set verifier_round 0; t set confirmed_for ""
-  for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
+  old_plan="$(t get plan 2>/dev/null || true)"
+  t set plan "$plan"; t set pack "$pack"
+  # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
+  if [ "$old_plan" != "$plan" ]; then
+    t set verifier_round 0; t set confirmed_for ""
+    for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
+  fi
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
 }
 

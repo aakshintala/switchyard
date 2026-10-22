@@ -57,6 +57,8 @@ emit() {
   { printf 'TKT tkt-fix %s log=%s\n' "$verdict" "$logpath"; [ $# -eq 0 ] || printf '%s\n' "$@" | head -n 40; } >"$logpath"
   cat "$logpath"; t journal "tkt-fix $verdict"; exit "$ec"
 }
+# Two rounds have run: only a --resume of an open slot may continue.
+[ "$round" -lt 2 ] || [ -n "$resume" ] || emit "ROUND-LIMIT round=$round" 1 "send the open findings to triage"
 # Entry: state head, PR head and worktree HEAD must agree exactly.
 if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
   prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)" || { echo "tkt-fix: cannot read PR head" >&2; exit 2; }
