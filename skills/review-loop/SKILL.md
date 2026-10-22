@@ -33,13 +33,15 @@ A **real bug** is a P1, or a behaviour defect a consumer of the change would see
 
 A finding that waits on an owner ruling leaves the loop: post it as a decision per `implement`'s "Never wait on a human" rule, park the ticket when it touches the core outcome, and keep it out of the findings file and out of the round count. The other findings go on.
 
+A **reversal** is a finding that asks to undo a change an earlier round made (a split merged back, a helper cut, a type swapped back) and names no behaviour defect. Answer it on the PR with the earlier round's reason, and keep it out of the findings file and out of the round count: fixing it only invites the reverse finding next round. A reversal that shows a real bug is an ordinary finding.
+
 Done when the fix round covers every open finding: dispatched as a gated job, or fixed inline with the gate's output stated. A finding parked for a ruling is not open here.
 
 ### 3. Verify
 
 Run this step when the fix round answers a real bug (step 2).
 
-Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new head>`; after a rebase, a plain diff counts the base's own merges) and the job's `gateResult`, never the fix worker's report: a report of a passing gate beside a red `gateResult` is red. A finding the worker refuted has no fix in the diff: copy its `refuted: <evidence>` line under that finding in the findings file, so the verify checks the evidence against the code. Then run the scoped verify, which starts it, waits and collects it, as in step 1:
+Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new head>`; after a rebase, a plain diff counts the base's own merges) and the job's `gateResult`, never the fix worker's report: a report of a passing gate beside a red `gateResult` is red. A finding the worker refuted has no fix in the diff: copy its `refuted: <evidence>` line under that finding in the findings file, so the verify checks the evidence against the code. The scoped verify judges the repair diff only; a finding on code the repair did not touch belongs to no round after the first review. Then run it, which starts it, waits and collects it, as in step 1:
 
 ```
 ~/.agents/bin/review-pr run <pr> --repo <owner/name> --cwd <clone> --head <pushed sha> --model <correctness> --verify <findings file> --since <reviewed head>
