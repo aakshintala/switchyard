@@ -314,6 +314,24 @@ grep -q "sweep|.*--cwd $WT" "$T/stub.log" || fail "SET sweeps the worktree"
 [ -z "$(bash "$TKT_STATE" "$S" get job.fix2)" ] || fail "SET retires the fix2 job"
 [ -z "$(bash "$TKT_STATE" "$S" get job.fix3)" ] || fail "SET retires the fix3 job"
 
+# --- a re-set of the same plan keeps the rounds and the job slots ---
+setup_case reset-same
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set job.verifier-r1 j-keep || fail "seed job"
+run_plan set "$CDIR/plan.md"
+[ "$RC" -eq 0 ] || fail "same-path SET exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan SET plan=$CDIR/plan.md log=*" "same-path SET"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "same-path SET keeps the round counter"
+[ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-keep" ] || fail "same-path SET keeps the job slots"
+grep -q "sweep|.*--plan $CDIR/plan.md" "$T/stub.log" || fail "same-path SET still refreshes the pack"
+# A verify after two counted rounds, with no confirm, stops before any job.
+jobs_before="$(grep -c '^job|' "$T/stub.log")"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "verify at round 2 exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "verify at round 2"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify at round 2 starts no job"
+
 # --- a backticked Base line is read as the bare SHA ---
 setup_case basetick
 printf 'Base: `%s`\n\n## Files\n\n- `f.txt`\n' "$(cat "$CDIR/base")" >"$CDIR/tick.md"

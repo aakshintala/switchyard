@@ -73,6 +73,9 @@ require_keys repo issue branch worktree run plan spec
 repo="$(tkt get repo)"; issue="$(tkt get issue)"; branch="$(tkt get branch)"
 worktree="$(tkt get worktree)"; run="$(tkt get run)"; plan="$(tkt get plan)"; spec="$(tkt get spec)"
 slug="${repo//\//-}"; mkdir -p "$run"
+# First-round tool: a state with a round already counted continues with tkt-fix or tkt-ship.
+rnd="$(tkt get round 2>/dev/null || true)"
+[ -z "$rnd" ] || emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the first round; continue with tkt-fix or tkt-ship"
 if stored_head="$(tkt get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
   if [ "$from" = review ]; then pr0="$(tkt get pr 2>/dev/null || true)"; early_pr="$(gh pr view "$pr0" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"

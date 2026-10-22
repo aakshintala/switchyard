@@ -59,7 +59,7 @@ A task with a wait, poll or retry carries a margin table: per wait, the margin i
 
 Defaults come from the project's catalogues first: an error code from the error doc, a name or format from the doc that lists it. A fence grant for a shared file names the line. A new file the change or its tests need (a test module, a fixture) is a Files entry too: the lane stops on any path the plan doesn't list. A type from another crate is written in the path form that resolves (`::tools::` when the crate has its own `mod tools`).
 
-With a state file, record the plan with `tkt-plan <state> set <plan file>`: it stores the path, zeroes the round count and rewrites the pack from the plan's Files, Interfaces and Tasks, and exits 2 listing each token it cannot resolve.
+With a state file, record the plan with `tkt-plan <state> set <plan file>`: it stores the path, keeps the round count when the path is unchanged and zeroes it for a different path, and rewrites the pack from the plan's Files, Interfaces and Tasks, and exits 2 listing each token it cannot resolve.
 
 Done when every section is filled under its own heading, every hit of the Files sweep is listed under Files or ruled out under Rulings, the Gate covers every package in Files, the Red commit is named when the workflow doc requires one, the size is estimated with any split it calls for, every ruling is tagged, each doc-governed or runtime ruling names the quoted rule or the code it rests on, and every known hazard is a ruling or an invariant, and, with a state file, `tkt-plan set` exits 0.
 

@@ -246,6 +246,21 @@ out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/st
 grep -q "job|.*--resume j9.*--prompt $CDIR/prompt.md" "$T/calls.log" || fail "resume args not forwarded"
 bash "$TKT" "$S" 2>/dev/null && fail "bare flags exited 0"
 [ "$?" = "2" ] || fail "bare flags exited $?, want 2"
+# 7a. Round 2 refuses a fresh fix before any slot or dispatch; --resume still runs.
+setup_case round-limit
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "round 2 fix exited 0"
+[ "$?" = "1" ] || fail "round 2 fix exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "bad verdict: $(head -n 1 <<<"$out")"
+grep -q "send the open findings to triage" <<<"$out" || fail "ROUND-LIMIT digest names triage"
+grep -q "job|" "$T/calls.log" && fail "round 2 fix dispatched a job"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "round moved on ROUND-LIMIT"
+setup_case round-resume
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+printf 'resume brief\n' >"$CDIR/prompt.md"
+out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || true
+head -n 1 <<<"$out" | grep -q "ROUND-LIMIT" && fail "resume at round 2 is refused"
+grep -q "job|.*--slot fix3.*--resume j9" "$T/calls.log" || fail "resume at round 2 does not dispatch on fix3"
 bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
 [ "$?" = "2" ] || fail "resume without prompt exited $?, want 2"
 
