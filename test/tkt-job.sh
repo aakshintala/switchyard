@@ -471,6 +471,56 @@ gout="$(bash "$1" 2>&1)"; grc=$?
 [ "$grc" -eq 0 ] || fail "a passing gate script exits 0"
 grep -q "GATE PASS" <<<"$gout" || fail "a passing gate script prints GATE PASS"
 
+# --- a failing nextest gate prints its failing block and the log path ---
+. "$REAL_BIN/lib/gate-script.sh"
+{
+  for i in $(seq 1 30); do echo "        PASS [   0.010s] x::t$i"; done
+  echo "        FAIL [   0.120s] x y::tests::broken"
+  echo "stdout ─── y::tests::broken"
+  echo "out line"
+  echo "stderr ─── y::tests::broken"
+  echo "thread 'y::tests::broken' panicked at crates/x/tests/y.rs:335:9:"
+  echo "boom"
+  for i in $(seq 1 25); do echo "        PASS [   0.010s] x::u$i"; done
+  echo "────────────"
+  echo "     Summary [   0.200s] 56 tests run: 55 passed, 1 failed"
+  echo "        FAIL [   0.120s] x y::tests::broken"
+} >"$T/nextest.log"
+write_gate_script "$T/nested-gate.sh" "$T/nested-gate.log" "" "cat '$T/nextest.log'; exit 100" "test"
+gout="$(bash "$T/nested-gate.sh" 2>&1)"; grc=$?
+[ "$grc" -eq 100 ] || fail "a nextest gate script keeps its exit code (rc=$grc)"
+grep -qx "gate log: $T/nested-gate.log" <<<"$gout" || fail "a failing gate prints its log path"
+grep -q "panicked at crates/x/tests/y.rs:335:9:" <<<"$gout" || fail "a failing gate prints the panic line"
+grep -qx "stderr ─── y::tests::broken" <<<"$gout" || fail "a failing gate prints the block's stderr line"
+grep -qx "boom" <<<"$gout" || fail "a failing gate prints the panic message line"
+grep -q "GATE FAIL rc=100" <<<"$gout" || fail "a failing gate still ends GATE FAIL rc=100"
+
+# --- a retried nextest failure (TRY n FAIL) prints its block too ---
+{
+  echo "  TRY 2 FAIL [   0.007s] (1/1) gate-review broken"
+  echo "  stderr ───"
+  echo "  thread 'broken' panicked at src/lib.rs:2:37:"
+  echo "  review panic"
+  for i in $(seq 1 30); do echo "        PASS [   0.010s] x::t$i"; done
+} >"$T/retry.log"
+write_gate_script "$T/retry-gate.sh" "$T/retry-gate.log" "" "cat '$T/retry.log'; exit 100" "test"
+gout="$(bash "$T/retry-gate.sh" 2>&1)"
+grep -q "panicked at src/lib.rs:2:37:" <<<"$gout" || fail "a retried failure prints the panic location"
+grep -qx "  review panic" <<<"$gout" || fail "a retried failure prints the panic message line"
+
+# --- a passing gate prints no gate log line ---
+write_gate_script "$T/pass-gate.sh" "$T/pass-gate.log" "" "echo ok" "test"
+gout="$(bash "$T/pass-gate.sh" 2>&1)"; grc=$?
+[ "$grc" -eq 0 ] || fail "a passing gate script exits 0 (rc=$grc)"
+grep -q "gate log:" <<<"$gout" && fail "a passing gate prints no gate log line"
+
+# --- a failing gate without nextest status lines prints the path line only ---
+write_gate_script "$T/plain-gate.sh" "$T/plain-gate.log" "" "echo 'plain failure'; exit 3" "test"
+gout="$(bash "$T/plain-gate.sh" 2>&1)"; grc=$?
+[ "$grc" -eq 3 ] || fail "a plain failing gate script exits 3 (rc=$grc)"
+[ "$(head -n 1 <<<"$gout")" = "gate log: $T/plain-gate.log" ] || fail "a plain failing gate prints the path line first"
+[ "$(grep -c 'gate log:' <<<"$gout")" -eq 1 ] || fail "a plain failing gate prints one path line"
+
 # --- two lanes of one ticket each get their own gate script ---
 setup_case two-gate-scripts
 reset_stub
