@@ -281,6 +281,7 @@ if [ "$checks_only" -eq 0 ]; then
   else
     digest="commits=$commits merges=$merges
 gatelog=$gatelog
+$(gate_failure_blocks "$gatelog")
 $(tail -n 20 "$gatelog")"
     gerr="$(grep -i -m 5 -E 'error|panick' "$gatelog" || true)"
     if [ -n "$gerr" ]; then

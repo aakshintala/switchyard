@@ -372,6 +372,27 @@ expect_verdict "TKT tkt-gate FAIL rc=4 log=*" "quiet FAIL"
 grep -qx "commits=1 merges=0" <<<"$OUT" || fail "quiet FAIL digest counts the history"
 grep -q "^gatelog=" <<<"$OUT" || fail "quiet FAIL digest names the gate log"
 
+# --- FAIL with a nextest block: the digest carries the failing test's block ---
+setup_case fail-nextest
+write_plan
+commit_file base.txt "base changed"
+push_branch
+{
+  for i in $(seq 1 30); do echo "        PASS [   0.010s] x::t$i"; done
+  echo "        FAIL [   0.120s] x y::tests::broken"
+  echo "stderr ─── y::tests::broken"
+  echo "thread 'y::tests::broken' panicked at crates/x/tests/y.rs:335:9:"
+  for i in $(seq 1 25); do echo "        PASS [   0.010s] x::u$i"; done
+  echo "────────────"
+  echo "     Summary [   0.200s] 56 tests run: 55 passed, 1 failed"
+  echo "        FAIL [   0.120s] x y::tests::broken"
+} >"$T/nextest.log"
+printf "cat '%s'; exit 100\n" "$T/nextest.log" >"$T/gate-cmd"
+run_gate
+[ "$RC" -eq 1 ] || fail "nextest FAIL exits 1"
+expect_verdict "TKT tkt-gate FAIL rc=100 log=*" "nextest FAIL"
+grep -qx "stderr ─── y::tests::broken" <<<"$OUT" || fail "nextest FAIL digest holds the block's stderr line"
+
 # --- a gate that runs zero tests fails even at exit 0 ---
 setup_case zero-tests
 write_plan
