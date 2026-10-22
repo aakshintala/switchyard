@@ -4,11 +4,12 @@
 # tokens still preflights; any other sweep failure exits with its code. No --files
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
 # A preflight core/non-blocking line counts when it starts with '<n>.' or '-', then spaces, then optional backtick/bold marks; a bare '*' bullet never counts.
-# Usage: tkt-start --run DIR --repo R --issue N --spec PATH --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
+# Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 set -euo pipefail
 usage() {
-  echo "usage: tkt-start --run DIR --repo R --issue N --spec PATH --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]" >&2
+  echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]" >&2
+  echo "  --spec FILE: a file holding the ticket body; a Part-of closing needs 'Part of #N' in it" >&2
   echo "  --files PATHS: paths separated by commas or spaces" >&2
   exit 2
 }
@@ -33,10 +34,17 @@ for v in run repo issue spec branch worktree workflow_doc closing; do [ -n "${!v
 case "$issue" in *[!0-9]*) echo "tkt-start: --issue needs a number: $issue" >&2; exit 2 ;; esac
 for m in ${models[@]+"${models[@]}"}; do case "$m" in *=*) ;; *) echo "tkt-start: --model needs ROLE=ID: $m" >&2; exit 2 ;; esac; done
 case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac
-spec_part=0; grep -qiE 'part of[[:space:]]+#[0-9]+' "$spec" 2>/dev/null && spec_part=1
+spec_part=0; spec_exists=0
+if [ -f "$spec" ]; then spec_exists=1; grep -qiE 'part of[[:space:]]+#[0-9]+' "$spec" && spec_part=1; fi
 close_part=0; printf '%s' "$closing" | grep -qiE '^part of([[:space:]]|$)' && close_part=1
 if [ "$spec_part" -ne "$close_part" ]; then
-  echo "tkt-start: --closing '$closing' disagrees with the spec: a Part-of batch ticket needs a 'Part of #N' closing line, any other ticket a Resolves line" >&2
+  if [ "$spec_part" -eq 1 ]; then
+    echo "tkt-start: --closing '$closing' is not a Part-of closing, but --spec '$spec' contains 'Part of #N'" >&2
+  elif [ "$spec_exists" -eq 0 ]; then
+    echo "tkt-start: --closing '$closing' is a Part-of closing, but --spec '$spec' does not exist (it must hold the ticket body with 'Part of #N')" >&2
+  else
+    echo "tkt-start: --closing '$closing' is a Part-of closing, but --spec '$spec' has no 'Part of #N'" >&2
+  fi
   exit 2
 fi
 script_dir="$(cd "$(dirname "$0")" && pwd)"; tkt_state="$script_dir/tkt-state"
