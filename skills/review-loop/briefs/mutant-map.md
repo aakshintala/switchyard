@@ -11,7 +11,7 @@ __MUTANTS__
   - `needs-test: <the behaviour no test pins>`: the mutated code still passes every test that reaches it.
   - `removed: <why>`: the code the mutant changes is gone or rewritten at the PR head.
   - `exempted: <reason>`: the workflow doc's exemption rule covers it; quote its reason.
-  - `unviable`: the mutant does not compile.
+  - `unviable`: the mutant does not compile. Write the word alone; `tkt-build` rejects `unviable: <reason>`.
 - Read the code and its tests. Run mutation tooling nowhere; a test run is for confirming a `caught by` claim, in the foreground, naming one test.
 - Run every command in your worktree, each one starting `cd __WORKTREE__ &&`.
 - The done criterion: the number of verdict lines equals the number of listed mutants.
