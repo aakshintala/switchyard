@@ -492,7 +492,21 @@ gout="$(bash "$T/nested-gate.sh" 2>&1)"; grc=$?
 grep -qx "gate log: $T/nested-gate.log" <<<"$gout" || fail "a failing gate prints its log path"
 grep -q "panicked at crates/x/tests/y.rs:335:9:" <<<"$gout" || fail "a failing gate prints the panic line"
 grep -qx "stderr ─── y::tests::broken" <<<"$gout" || fail "a failing gate prints the block's stderr line"
+grep -qx "boom" <<<"$gout" || fail "a failing gate prints the panic message line"
 grep -q "GATE FAIL rc=100" <<<"$gout" || fail "a failing gate still ends GATE FAIL rc=100"
+
+# --- a retried nextest failure (TRY n FAIL) prints its block too ---
+{
+  echo "  TRY 2 FAIL [   0.007s] (1/1) gate-review broken"
+  echo "  stderr ───"
+  echo "  thread 'broken' panicked at src/lib.rs:2:37:"
+  echo "  review panic"
+  for i in $(seq 1 30); do echo "        PASS [   0.010s] x::t$i"; done
+} >"$T/retry.log"
+write_gate_script "$T/retry-gate.sh" "$T/retry-gate.log" "" "cat '$T/retry.log'; exit 100" "test"
+gout="$(bash "$T/retry-gate.sh" 2>&1)"
+grep -q "panicked at src/lib.rs:2:37:" <<<"$gout" || fail "a retried failure prints the panic location"
+grep -qx "  review panic" <<<"$gout" || fail "a retried failure prints the panic message line"
 
 # --- a passing gate prints no gate log line ---
 write_gate_script "$T/pass-gate.sh" "$T/pass-gate.log" "" "echo ok" "test"

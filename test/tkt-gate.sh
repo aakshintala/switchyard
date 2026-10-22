@@ -382,6 +382,7 @@ push_branch
   echo "        FAIL [   0.120s] x y::tests::broken"
   echo "stderr ─── y::tests::broken"
   echo "thread 'y::tests::broken' panicked at crates/x/tests/y.rs:335:9:"
+  echo "expected 3 got 4"
   for i in $(seq 1 25); do echo "        PASS [   0.010s] x::u$i"; done
   echo "────────────"
   echo "     Summary [   0.200s] 56 tests run: 55 passed, 1 failed"
@@ -392,6 +393,7 @@ run_gate
 [ "$RC" -eq 1 ] || fail "nextest FAIL exits 1"
 expect_verdict "TKT tkt-gate FAIL rc=100 log=*" "nextest FAIL"
 grep -qx "stderr ─── y::tests::broken" <<<"$OUT" || fail "nextest FAIL digest holds the block's stderr line"
+grep -qx "expected 3 got 4" <<<"$OUT" || fail "nextest FAIL digest holds the panic message line"
 
 # --- a gate that runs zero tests fails even at exit 0 ---
 setup_case zero-tests

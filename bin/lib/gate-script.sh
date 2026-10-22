@@ -13,8 +13,8 @@ function show(s) {
   if (bn >= 60) { if (!bcut) print "... truncated"; bcut = 1; return }
   print s; bn++; total++
 }
-/^ +(PASS|FAIL|TIMEOUT|SIGABRT|SIGSEGV|LEAK|SLOW|START|RETRY|TRYING) |^─|^warning:|^error:|^     Summary/ { inblock = 0 }
-/^ +(FAIL|TIMEOUT|SIGABRT|SIGSEGV|LEAK) / { inblock = 1; bn = 0; bcut = 0 }
+/^ +(TRY [0-9]+ )?(PASS|FAIL|TIMEOUT|SIGABRT|SIGSEGV|LEAK|SLOW|START|RETRY|TRYING) |^─|^warning:|^error:|^     Summary/ { inblock = 0 }
+/^ +(TRY [0-9]+ )?(FAIL|TIMEOUT|SIGABRT|SIGSEGV|LEAK) / { inblock = 1; bn = 0; bcut = 0 }
 inblock { show($0) }
 '
 
