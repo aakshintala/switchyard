@@ -60,6 +60,8 @@ mod tests {
             output_tokens: 1_000_000.0,
             cache_read_tokens: 0.0,
             cache_write_tokens: 0.0,
+            calls: None,
+            allowance: None,
         }
     }
 

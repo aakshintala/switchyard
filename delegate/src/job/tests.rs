@@ -4,7 +4,7 @@ use super::*;
 use crate::backends::types::{BackendResult, Event, ProgressSnapshotRaw, Runner, Spawned};
 use crate::output::derive_status;
 use crate::status_record::{FileStatusRecordWriter, job_record_path};
-use crate::types::{PollResult, ResumeContext};
+use crate::types::{Allowance, PollResult, ResumeContext};
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::thread::sleep;
@@ -824,4 +824,64 @@ fn merge_attempt_sums_what_was_reported_and_takes_the_rest_from_the_last() {
     assert_eq!(merged.permission_denials.len(), 2);
     assert_eq!(merged.text, "ok\nSTATUS: DONE");
     assert_eq!(merged.provider_status, None);
+}
+
+#[test]
+fn merge_attempt_sums_call_counts_reported_by_both_attempts() {
+    let mut prev = with_usage(failed(Some(503)), 10.0);
+    prev.usage.as_mut().unwrap().calls = Some(3);
+    let mut next = with_usage(done_ok(), 20.0);
+    next.usage.as_mut().unwrap().calls = Some(4);
+
+    assert_eq!(
+        merge_attempt(&prev, next).usage.unwrap().calls,
+        Some(7)
+    );
+}
+
+#[test]
+fn merge_attempt_keeps_the_call_count_when_only_one_attempt_reports_it() {
+    for (earlier, later, expected) in [
+        (Some(3), None, Some(3)),
+        (None, Some(4), Some(4)),
+        (None, None, None),
+    ] {
+        let mut prev = with_usage(failed(Some(503)), 10.0);
+        prev.usage.as_mut().unwrap().calls = earlier;
+        let mut next = with_usage(done_ok(), 20.0);
+        next.usage.as_mut().unwrap().calls = later;
+
+        assert_eq!(merge_attempt(&prev, next).usage.unwrap().calls, expected);
+    }
+}
+
+#[test]
+fn merge_attempt_uses_latest_allowance_and_falls_back_when_later_is_absent() {
+    let earlier = Allowance {
+        window: None,
+        weekly: None,
+        as_of_ms: Some(100.0),
+    };
+    let later = Allowance {
+        window: None,
+        weekly: None,
+        as_of_ms: Some(200.0),
+    };
+
+    let mut prev = with_usage(failed(Some(503)), 10.0);
+    prev.usage.as_mut().unwrap().allowance = Some(earlier.clone());
+    let mut next = with_usage(done_ok(), 20.0);
+    assert_eq!(
+        merge_attempt(&prev, next.clone())
+            .usage
+            .unwrap()
+            .allowance,
+        Some(earlier)
+    );
+
+    next.usage.as_mut().unwrap().allowance = Some(later.clone());
+    assert_eq!(
+        merge_attempt(&prev, next).usage.unwrap().allowance,
+        Some(later)
+    );
 }

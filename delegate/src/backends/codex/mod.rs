@@ -443,6 +443,8 @@ fn normalized_usage(state: &CodexState) -> Option<Usage> {
         output_tokens: output,
         cache_read_tokens: cached,
         cache_write_tokens: state.cache_write_tokens.unwrap_or(0.0),
+        calls: None,
+        allowance: None,
     })
 }
 

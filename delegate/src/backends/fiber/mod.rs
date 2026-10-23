@@ -369,6 +369,8 @@ fn usage_and_cost(payload: &serde_json::Value) -> (Option<Usage>, Option<f64>) {
             output_tokens: output,
             cache_read_tokens: cache_read,
             cache_write_tokens: cache_write,
+            calls: None,
+            allowance: None,
         }),
         Some(cost + subscription),
     )
