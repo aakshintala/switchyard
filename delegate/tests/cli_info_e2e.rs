@@ -163,7 +163,7 @@ impl Drop for Env {
     }
 }
 
-const SORTED_IDS: [&str; 25] = [
+const SORTED_IDS: &[&str] = &[
     "claude-fable-5-1",
     "claude-haiku-5-5",
     "claude-opus-5-5",
@@ -230,7 +230,7 @@ fn models_lists_every_row_with_default_marked() {
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 26, "{stdout}");
+    // delegate/README.md:25 documents row order and the default marker.
     // Compare with spaces shown as · so a width mismatch is debuggable.
     assert_eq!(
         lines[0].replace(' ', "·"),
@@ -260,12 +260,11 @@ fn models_lists_every_row_with_default_marked() {
         lines[25].replace(' ', "·"),
         "··opencode-go/muse-spark-1.3-contributor········Muse·Spark·1.3·Contributor··········pi·········0.10·····0.20··standard,strong"
     );
-    // Rows sort by backend, then by id; only the default row is starred.
     let ids: Vec<&str> = lines[1..]
         .iter()
         .map(|l| l[2..].split_whitespace().next().unwrap())
         .collect();
-    assert_eq!(ids, SORTED_IDS);
+    assert_eq!(ids.as_slice(), SORTED_IDS);
     assert_eq!(lines.iter().filter(|l| l.starts_with('*')).count(), 1);
 }
 

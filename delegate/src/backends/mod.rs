@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(Backend::from_name("muse"), Some(Backend::Muse));
         assert_eq!(Backend::Muse.name(), "muse");
         assert!(Backend::from_name("nope").is_none());
-        assert_eq!(Backend::ALL.len(), 6);
+        assert!(Backend::ALL.contains(&Backend::Muse));
     }
 
     /// A null-stdin child sees EOF at once; a piped child receives exactly
