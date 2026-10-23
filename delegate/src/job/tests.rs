@@ -22,6 +22,7 @@ pub(crate) fn spec_of(over: impl FnOnce(&mut JobSpec)) -> JobSpec {
         gate: String::new(),
         idle_ms: None,
         tool_idle_ms: None,
+        wall_ms: None,
         price_map: HashMap::new(),
         resume_context: ResumeContext {
             model: "composer-2.5".into(),

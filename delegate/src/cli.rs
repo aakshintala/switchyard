@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) const USAGE: &str =
-    "usage: delegate run --model M [--cwd D] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--prompt-file F | stdin]
+    "usage: delegate run --model M [--cwd D] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
        delegate resume <jobId> [--model M] [--gate CMD] [--prompt-file F | stdin]
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
@@ -135,6 +135,7 @@ struct LaunchParams<'a> {
     gate: &'a str,
     tool_idle_ms: Option<f64>,
     idle_ms: Option<f64>,
+    wall_ms: Option<f64>,
     session: Option<&'a str>,
     resumed_from: Option<&'a str>,
 }
@@ -175,6 +176,10 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
     }
     if let Some(ms) = p.idle_ms {
         supervise_args.push("--idle-ms".into());
+        supervise_args.push(ms.to_string());
+    }
+    if let Some(ms) = p.wall_ms {
+        supervise_args.push("--wall-ms".into());
         supervise_args.push(ms.to_string());
     }
     if let Some(s) = p.session {
@@ -247,6 +252,7 @@ fn run(args: &[String]) -> Result<i32, Usage> {
             "--gate",
             "--tool-idle-ms",
             "--idle-ms",
+            "--wall-ms",
             "--prompt-file",
         ],
     )?;
@@ -261,6 +267,7 @@ fn run(args: &[String]) -> Result<i32, Usage> {
     let gate = flag(&kv, "--gate").unwrap_or("").to_string();
     let tool_idle_ms = positive_ms_flag(&kv, "--tool-idle-ms").or_else(usage)?;
     let idle_ms = positive_ms_flag(&kv, "--idle-ms").or_else(usage)?;
+    let wall_ms = positive_ms_flag(&kv, "--wall-ms").or_else(usage)?;
     let deps = match build_deps() {
         Ok(d) => d,
         Err(e) => {
@@ -296,6 +303,7 @@ fn run(args: &[String]) -> Result<i32, Usage> {
         gate: &gate,
         tool_idle_ms,
         idle_ms,
+        wall_ms,
         session: None,
         resumed_from: None,
     }) {
@@ -333,6 +341,7 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
     let stored_gate = old["resume"]["gate"].as_str().unwrap_or("").to_string();
     let tool_idle_ms = old["resume"]["toolIdleMs"].as_f64();
     let idle_ms = old["resume"]["idleMs"].as_f64();
+    let wall_ms = old["resume"]["wallMs"].as_f64();
 
     let deps = match build_deps() {
         Ok(d) => d,
@@ -395,6 +404,7 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
         gate: &gate,
         tool_idle_ms,
         idle_ms,
+        wall_ms,
         session: Some(&session),
         resumed_from: Some(old_id),
     }) {
@@ -565,6 +575,7 @@ fn supervise(args: &[String]) -> i32 {
             "--gate",
             "--tool-idle-ms",
             "--idle-ms",
+            "--wall-ms",
             "--session",
             "--resumed-from",
         ],
@@ -576,9 +587,10 @@ fn supervise(args: &[String]) -> i32 {
         return 2;
     };
     let gate = flag(&kv, "--gate").unwrap_or("").to_string();
-    let (Ok(tool_idle_ms), Ok(idle_ms)) = (
+    let (Ok(tool_idle_ms), Ok(idle_ms), Ok(wall_ms)) = (
         positive_ms_flag(&kv, "--tool-idle-ms"),
         positive_ms_flag(&kv, "--idle-ms"),
+        positive_ms_flag(&kv, "--wall-ms"),
     ) else {
         return 2;
     };
@@ -628,6 +640,7 @@ fn supervise(args: &[String]) -> i32 {
         gate: gate.clone(),
         idle_ms: idle_ms.map(Some),
         tool_idle_ms: tool_idle_ms.map(Some).or(config.profile.tool_idle_ms),
+        wall_ms,
         price_map,
         resume_context: ResumeContext {
             model: model.clone(),
@@ -671,6 +684,7 @@ fn supervise(args: &[String]) -> i32 {
         gate: gate.clone(),
         tool_idle_ms,
         idle_ms,
+        wall_ms,
         resumed_from: resumed_from.clone(),
     });
     let registry = JobHandle::new(rd);
@@ -896,6 +910,29 @@ mod tests {
     }
 
     #[test]
+    fn run_rejects_a_bad_wall_ms_before_it_starts_anything() {
+        for bad in ["0", "-5", "abc", "NaN", "inf"] {
+            let args: Vec<String> = ["--model", "x", "--wall-ms", bad]
+                .map(String::from)
+                .to_vec();
+            let Err(Usage(msg)) = run(&args) else {
+                panic!("a bad --wall-ms {bad} must be a usage error");
+            };
+            assert_eq!(msg, format!("invalid --wall-ms {bad}"));
+        }
+    }
+
+    #[test]
+    fn wall_ms_flag_parses_a_positive_number() {
+        for good in ["1", "600000", "1e6"] {
+            let parsed = kv(&[("--wall-ms", good)]);
+            let got = positive_ms_flag(&parsed, "--wall-ms");
+            assert!(matches!(got, Ok(Some(_))), "{good}: {got:?}");
+            assert_eq!(positive_ms_flag(&[], "--wall-ms"), Ok(None));
+        }
+    }
+
+    #[test]
     fn resume_record_keeps_idle_ms_under_resume_as_idle_ms() {
         let resume = CliResume {
             model: "muse/m".into(),
@@ -905,11 +942,22 @@ mod tests {
             gate: String::new(),
             tool_idle_ms: None,
             idle_ms: Some(1_200_000.0),
+            wall_ms: None,
         };
         let rec = serde_json::to_value(&resume).unwrap();
         // `resume()` reads this key back for the next run.
         assert_eq!(rec["idleMs"].as_f64(), Some(1_200_000.0));
         assert!(rec.get("toolIdleMs").is_some());
+        assert!(rec["wallMs"].is_null());
+
+        let capped = CliResume {
+            wall_ms: Some(10_800_000.0),
+            ..resume.clone()
+        };
+        let rec = serde_json::to_value(&capped).unwrap();
+        // No `.0`: the record keeps the number compact.
+        assert_eq!(rec["wallMs"], serde_json::json!(10_800_000));
+        assert_eq!(rec["idleMs"].as_f64(), Some(1_200_000.0));
 
         let unset = CliResume {
             idle_ms: None,

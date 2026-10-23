@@ -43,7 +43,7 @@ pub fn file_status_record_writer() -> FileStatusRecordWriter {
     FileStatusRecordWriter
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliResume {
     pub model: String,
@@ -55,6 +55,8 @@ pub struct CliResume {
     pub tool_idle_ms: Option<f64>,
     #[serde(serialize_with = "crate::util::js_num_opt")]
     pub idle_ms: Option<f64>,
+    #[serde(serialize_with = "crate::util::js_num_opt")]
+    pub wall_ms: Option<f64>,
 }
 
 /// `PollResult` plus what a watcher needs to find and resume the job, plus the resume
@@ -82,6 +84,7 @@ pub struct CliRecordWriter {
     pub gate: String,
     pub tool_idle_ms: Option<f64>,
     pub idle_ms: Option<f64>,
+    pub wall_ms: Option<f64>,
     pub resumed_from: Option<String>,
     pub last_session_id: Mutex<Option<String>>,
 }
@@ -118,6 +121,7 @@ impl StatusRecordWriter for CliRecordWriter {
                 gate: self.gate.clone(),
                 tool_idle_ms: self.tool_idle_ms,
                 idle_ms: self.idle_ms,
+                wall_ms: self.wall_ms,
             },
             resumed_from: self.resumed_from.clone(),
         };

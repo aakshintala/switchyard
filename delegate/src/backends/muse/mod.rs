@@ -1114,6 +1114,7 @@ mod tests {
             gate: String::new(),
             idle_ms: None,
             tool_idle_ms: None,
+            wall_ms: None,
             price_map: std::collections::HashMap::new(),
             resume_context: crate::types::ResumeContext {
                 model: "muse/muse-spark-1.3-contributor".to_string(),

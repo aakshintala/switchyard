@@ -1176,3 +1176,43 @@ fn muse_reminder_loop_stalls_on_the_idle_watchdog() {
     let text = done["result"]["text"].as_str().unwrap();
     assert!(text.starts_with("Idle watchdog killed this job"), "{text}");
 }
+
+#[test]
+fn wall_ms_is_recorded_and_survives_resume() {
+    let e = Env::new("wall-plumb");
+    let id = e.ok(
+        &["run", "--model", "composer-2.5", "--wall-ms", "600000"],
+        "quick",
+        &[],
+    );
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(done["resume"]["wallMs"], serde_json::json!(600000));
+    let b = e.resume_ok(&id, &[], "follow up");
+    let done = e.wait_terminal(&b);
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(done["resume"]["wallMs"], serde_json::json!(600000));
+}
+
+#[test]
+fn run_without_wall_ms_records_null_and_resume_keeps_null() {
+    let e = Env::new("wall-none");
+    let id = e.run("quick");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE");
+    assert!(done["resume"]["wallMs"].is_null(), "{done}");
+    let b = e.resume_ok(&id, &[], "follow up");
+    let done = e.wait_terminal(&b);
+    assert_eq!(done["status"], "DONE");
+    assert!(done["resume"]["wallMs"].is_null(), "{done}");
+}
+
+#[test]
+fn help_mentions_wall_ms() {
+    let e = Env::new("wall-help");
+    let out = e.delegate(&["--help"], None);
+    assert_eq!(out.status.code(), Some(0));
+    let help = String::from_utf8(out.stdout).unwrap();
+    assert!(help.contains("usage: delegate run --model M"), "{help}");
+    assert!(help.contains("[--wall-ms N]"), "{help}");
+}
