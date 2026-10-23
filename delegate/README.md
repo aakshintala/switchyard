@@ -24,6 +24,14 @@ You need Rust (`cargo`), and `cursor-agent` on PATH with `cursor-agent login` be
 | `delegate watch <jobId>...` | Block until each job is terminal (optional `--timeout` seconds). |
 | `delegate models` | List configured model ids, labels, backends, prices, and tiers. Rows are sorted by backend, then by id; `*` marks the default. |
 | `delegate doctor` | Check the binary, `cursor-agent`, login, and model menu drift. |
+| `delegate session start` | Start a detached Muse session from a brief. |
+| `delegate session send` | Start a turn or steer the active turn. |
+| `delegate session logs` | Read session events, optionally following them. |
+| `delegate session watch` | Wait until the session is idle or dead. |
+| `delegate session stop` | End the session or interrupt its turn and keep it. |
+| `delegate session list` | List local Muse sessions. |
+
+Sessions run on the machine where you call `delegate`; use `ssh` when the session belongs on another host. They use `--disable-sandbox` and `allowAll`, so the worktree is the only containment. The session guide in [the delegate skill](../skills/delegate/SKILL.md) documents JSON output, exit codes, inbox notes and the `--inbox` workflow.
 
 Every job runs with writes enabled. A read task says "do not edit" in its brief; the record's `changeSet` shows any write. Parallel jobs need separate cwds (one worktree per lane).
 
