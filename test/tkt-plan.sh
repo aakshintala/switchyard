@@ -73,6 +73,14 @@ case "\$(cat "$T/mode")" in
     echo "reviewer is uneasy about one edge"
     exit 1
     ;;
+  concerns-noise)
+    printf 'PLAN OK\nheld: every invariant survived its breaking input\n' >"\$out"
+    echo "watch noise" >&2
+    echo >&2
+    echo "TKT tkt-job CONCERNS id=j1 log=x"
+    echo "reviewer is uneasy about one edge"
+    exit 1
+    ;;
   blocked)
     echo "TKT tkt-job BLOCKED id=j1 log=x"
     exit 1
@@ -453,6 +461,16 @@ run_plan verify
 [ "$RC" -eq 0 ] || fail "CONCERNS verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "CONCERNS verify"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "CONCERNS verify counts the round"
+
+# --- stray stderr lines before the verdict do not hide DONE_WITH_CONCERNS ---
+setup_case concerns-noise
+rebase_plan
+printf 'ok' >"$T/pcmode"
+printf 'concerns-noise' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "concerns-noise verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "concerns-noise verify"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "concerns-noise verify counts the round"
 
 # --- BLOCKED still fails the verify, and the round is not counted ---
 setup_case blocked

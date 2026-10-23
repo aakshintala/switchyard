@@ -66,7 +66,7 @@ vmodel() {
 runjob() {
   slot="$1"; tmpl="$2"; rep="$3"; shift 3
   job_out="$("$tktjob" "$state" --slot "$slot" --template "$tmpl" --out-file "$rep" "$@" 2>&1)" || {
-    jrc=$?; line="$(head -n 1 <<<"$job_out")"
+    jrc=$?; line="$(grep -m1 '^TKT tkt-job ' <<<"$job_out" || head -n 1 <<<"$job_out")"
     # DONE_WITH_CONCERNS exits 1 with its report on disk: the report is the product.
     if [ "$jrc" -ne 1 ] || [ ! -f "$rep" ] || [ "${line#"TKT tkt-job CONCERNS "}" = "$line" ]; then
       w="${line#TKT tkt-job }"; emit "${w% log=*}" "$jrc" "$(head -n 38 <<<"$job_out")"
