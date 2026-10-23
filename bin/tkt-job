@@ -366,6 +366,17 @@ $(tail -n 10 <<<"$gate_tail")"
     digest="$digest
 $concerns"
   fi
+  # A dead run with a session can be resumed; the caller decides whether to.
+  case "$status" in
+    ERROR|STALLED)
+      resume_sid="$(jq -r '.resume.sessionId // ""' "$record" 2>/dev/null || true)"
+      if [ -n "$resume_sid" ]; then
+        digest="$digest
+session=$resume_sid
+hint: this job ended $status with a resumable session; its text is below. Continue it with: tkt-job $state --slot $slot --resume $jobid --prompt <file>; start a fresh job only when the session is not worth keeping."
+      fi
+      ;;
+  esac
   if [ -n "$text" ]; then
     used="$(printf '%s\n' "$digest" | wc -l | tr -d ' ')"
     take=$((40 - used))

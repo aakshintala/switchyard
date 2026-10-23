@@ -166,6 +166,12 @@ run_job() {
   OUT="$(bash "$TKT" "$S" "$@" 2>"$CDIR/stderr.txt")"; RC=$?
 }
 
+# Adds a resume.sessionId to the canned record: add_resume ID SESSION
+add_resume() {
+  local f="$T/records/$1.json"
+  jq --arg s "$2" '.resume = {sessionId: $s}' "$f" >"$f.tmp" && mv "$f.tmp" "$f" || fail "add_resume $1"
+}
+
 first_line() {
   head -n 1 <<<"$OUT"
 }
@@ -318,6 +324,53 @@ make_record stub-1 STALLED none 0 2 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 1 ] || fail "STALLED exits 1"
 expect_verdict "TKT tkt-job JOB-ERROR status=STALLED id=stub-1 log=*" "STALLED"
+
+# --- ERROR and STALLED with a resumable session name it and hint at --resume ---
+for st in ERROR STALLED; do
+  setup_case job-$st-resume
+  reset_stub
+  make_record stub-1 $st none 0 2 0
+  add_resume stub-1 sess-$st
+  run_job --slot lane --template "$T/tmpl-basic.md"
+  [ "$RC" -eq 1 ] || fail "$st with a session exits 1 (rc=$RC)"
+  expect_verdict "TKT tkt-job JOB-ERROR status=$st id=stub-1 log=*" "$st with a session"
+  grep -qx "session=sess-$st" <<<"$OUT" || fail "$st digest names the session"
+  grep -q "^hint: this job ended $st with a resumable session; its text is below. Continue it with: tkt-job " <<<"$OUT" || fail "$st digest hints at the resume"
+  grep -qF -- "--resume stub-1 --prompt <file>" <<<"$OUT" || fail "$st hint names --resume"
+  grep -qx "result line 2" <<<"$OUT" || fail "$st digest keeps the text tail"
+done
+
+# --- ERROR with no resume session prints neither a session nor a hint ---
+setup_case job-error-noresume
+reset_stub
+make_record stub-1 ERROR none 0 2 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "ERROR without a session exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job JOB-ERROR status=ERROR id=stub-1 log=*" "ERROR without a session"
+grep -q "^session=" <<<"$OUT" && fail "ERROR without a session prints no session line"
+grep -q "^hint: " <<<"$OUT" && fail "ERROR without a session prints no hint"
+
+# --- CANCELLED with a resume session gets neither a session nor a hint ---
+setup_case job-cancel-resume
+reset_stub
+make_record stub-1 CANCELLED none 0 2 0
+add_resume stub-1 sess-cancel
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "CANCELLED exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job JOB-ERROR status=CANCELLED id=stub-1 log=*" "CANCELLED"
+grep -q "^session=" <<<"$OUT" && fail "CANCELLED prints no session line"
+grep -q "^hint: " <<<"$OUT" && fail "CANCELLED prints no hint"
+
+# --- DONE with a resume session prints neither a session nor a hint ---
+setup_case done-resume
+reset_stub
+make_record stub-1 DONE 0 2 3 0
+add_resume stub-1 sess-done
+run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+[ "$RC" -eq 0 ] || fail "DONE with a session exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS log=*" "DONE with a session"
+grep -q "^session=" <<<"$OUT" && fail "DONE prints no session line"
+grep -q "^hint: " <<<"$OUT" && fail "DONE prints no hint"
 
 # --- an unknown status, and no record at all ---
 setup_case unknown-status
