@@ -123,3 +123,67 @@ killed it: rerun, with a larger `--tool-idle-ms` if it stalled inside a tool). `
 | 0 | ok |
 | 1 | `watch` timed out, or `doctor` hard failure |
 | 2 | bad input or unknown job |
+
+## Muse sessions
+
+Use `delegate session` for a long-running Muse sub-orchestrator. Each session runs on the machine where you invoke the command. Delegate does not connect to remote hosts; call it through `ssh` when needed.
+
+```bash
+delegate session start --model muse/muse-spark-1.3-contributor \
+  --brief /abs/brief.md --inbox /abs/inbox --json
+delegate session send <id> 'Check the test results'
+delegate session logs <id> --follow
+delegate session watch <id>
+delegate session stop <id>
+delegate session list
+```
+
+`start` creates a detached `muse serve` supervisor and sends the brief as the first user turn, unchanged. The brief is user-provided task text, not a system instruction. The session can send progress and its final report to the starter's file inbox with `inbox-send`; include this line in its brief:
+
+```text
+Send progress messages and your final report to the starter's file inbox with `inbox-send`.
+```
+
+Muse sessions use `--disable-sandbox` and `allowAll`. The worktree is the only containment. Keep the session's work inside its worktree.
+
+`--inbox` is a path on the session machine. The supervisor writes one-line backstop notes such as `[session <id> idle]` and `[session <id> dead]`. The note does not replace messages sent with `inbox-send`.
+
+Use `send <id> TEXT` to start a turn when idle or steer the active turn. `send <id> -` reads text from stdin; it fails rather than prompting when stdin is a terminal. For text that starts with a dash, use `send <id> -- TEXT`. Text is limited to 8 MiB, must be non-empty after trimming, and cannot contain NUL.
+
+`steered` means the host accepted the message for application on the next model continuation. It does not mean the model has acted on it yet.
+
+Plain `stop` interrupts a running turn, closes host stdin, and ends the session. `stop --interrupt` interrupts the running turn and keeps the session; at idle, it is a no-op.
+
+`watch` is level-triggered: it returns immediately when the session is already idle or dead. Call it after `send` to wait for the current turn to finish. It returns exit code 0 for idle and 4 for dead; watching does not wait for a future turn.
+
+`logs --follow` emits complete event lines as they arrive, then exits when the session is dead. Without `--follow`, logs returns the complete lines already written. A partial final line is not emitted.
+
+Every session verb accepts `--json`. Success output has these shapes:
+
+| Verb | JSON output |
+|---|---|
+| `start` | `{"ok":true,"session":<State>}` |
+| `send` | `{"ok":true,"disposition":"started|steered","session":<State>}` |
+| `logs` | `{"ok":true,"lines":[<event>, ...]}` without `--follow`; JSON lines with `--follow` |
+| `watch` | `{"ok":true,"session":<State>}` |
+| `stop` | `{"ok":true,"interrupted":true|false,"session":<State>}` |
+| `list` | `{"ok":true,"sessions":[<State>|{"id":"..","status":"unreadable"}, ...]}` |
+
+Errors produce `{"ok":false,"error":{"code":"...","message":"..."}}` on stdout and a diagnostic on stderr. `watch` on a dead session is a successful JSON response with exit code 4.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Success; `watch` found an idle session |
+| 1 | Startup, host, I/O, unreadable-state or supervisor failure |
+| 2 | Usage error |
+| 3 | No such session |
+| 4 | Dead session; `watch` found a dead session |
+| 5 | Session busy or stopping |
+
+Use this form to start a session on a remote machine through SSH:
+
+```bash
+ssh box 'cd /abs/worktree && delegate session start --model muse/muse-spark-1.3-contributor --brief /abs/brief.md --inbox ~/flywheel-inbox --json'
+```
+
+The command still runs locally on the box. `delegate` has no `--host` option. Keep `--inbox` on that machine; the caller can pull its files separately.

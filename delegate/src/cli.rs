@@ -20,14 +20,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
-const USAGE: &str =
+pub(crate) const USAGE: &str =
     "usage: delegate run --model M [--cwd D] [--gate CMD] [--tool-idle-ms N] [--prompt-file F | stdin]
        delegate resume <jobId> [--model M] [--gate CMD] [--prompt-file F | stdin]
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
        delegate models
        delegate doctor
-       delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)";
+       delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)
+       delegate session start --model muse/MODEL --brief FILE --inbox DIR [--json]
+       delegate session send <id> TEXT|- [--json]
+       delegate session logs <id> [--follow] [--json]
+       delegate session watch <id> [--json]
+       delegate session stop <id> [--interrupt] [--json]
+       delegate session list [--json]
+       Session exit codes: 0 ok, 1 failed, 2 usage, 3 no session, 4 dead, 5 busy";
 
 /// Bad input: reason on stderr, exit 2.
 struct Usage(String);
@@ -38,6 +45,9 @@ fn usage<T>(msg: impl Into<String>) -> Result<T, Usage> {
 
 pub fn main() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("session") {
+        return crate::session::main(&args[1..]);
+    }
     if args
         .iter()
         .any(|arg| matches!(arg.as_str(), "--help" | "-h"))

@@ -1332,14 +1332,15 @@ fn mark_dead(
 ) {
     let mut changed = false;
     let result = store.update(|state| {
-        if state.status != Status::Dead {
-            state::mark_dead(state, reason, exit_code, message, now_ms());
-            if keep_stopping {
-                state.stopping = true;
-            }
-            changed = true;
+        if state.status == Status::Dead {
+            return Vec::new();
         }
-        Vec::new()
+        state::mark_dead(state, reason, exit_code, message, now_ms());
+        if keep_stopping {
+            state.stopping = true;
+        }
+        changed = true;
+        vec![json!({"kind":"session.dead"})]
     });
     if result.is_err() {
         fatal_write.store(true, Ordering::SeqCst);
