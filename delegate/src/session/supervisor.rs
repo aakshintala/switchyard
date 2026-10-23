@@ -595,11 +595,11 @@ impl CallFailure {
 }
 
 fn call(shared: &Arc<Shared>, method: &str, params: Value) -> Result<Value, CallFailure> {
+    let id = shared.next_request_id.fetch_add(1, Ordering::SeqCst);
+    let line = msp::request(id, method, params);
     let deadline = Instant::now()
         .checked_add(shared.config.rpc_timeout)
         .ok_or_else(|| CallFailure::Failed("RPC deadline overflow".into()))?;
-    let id = shared.next_request_id.fetch_add(1, Ordering::SeqCst);
-    let line = msp::request(id, method, params);
     let (response_tx, response_rx) = mpsc::channel();
     lock(&shared.pending).insert(
         id,
@@ -1452,7 +1452,7 @@ fn isolate_child_descriptors(command: &mut std::process::Command) {
     unsafe {
         command.pre_exec(|| {
             #[cfg(target_os = "linux")]
-            if libc::close_range(3, u32::MAX, libc::CLOSE_RANGE_CLOEXEC) == 0 {
+            if libc::close_range(3, u32::MAX, libc::CLOSE_RANGE_CLOEXEC as libc::c_int) == 0 {
                 return Ok(());
             }
 
