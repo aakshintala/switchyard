@@ -1208,6 +1208,62 @@ fn run_without_wall_ms_records_null_and_resume_keeps_null() {
 }
 
 #[test]
+fn wall_ms_cancels_a_running_agent_and_its_group() {
+    let e = Env::new("wall-cancel");
+    let id = e.ok(
+        &["run", "--model", "composer-2.5", "--wall-ms", "1000"],
+        "CANCELME",
+        &[],
+    );
+    e.until_agent_spawned(&id);
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "CANCELLED");
+    assert_eq!(done["result"]["status"], "CANCELLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Cancelled: wall budget of 1000 ms exceeded after"),
+        "{text}"
+    );
+    assert_eq!(done["resume"]["wallMs"], serde_json::json!(1000));
+    assert_eq!(done["resume"]["sessionId"], "s-init");
+    for name in ["agent.pid", "grandchild.pid"] {
+        let pid: i64 = std::fs::read_to_string(e.dir.join(name))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        until("fake child dead", || !alive(pid));
+    }
+}
+
+#[test]
+fn wall_ms_aborts_a_running_gate() {
+    let e = Env::new("wall-gate");
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--wall-ms",
+            "1500",
+            "--gate",
+            "sleep 30",
+        ],
+        "quick",
+        &[],
+    );
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "CANCELLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Cancelled: wall budget of 1500 ms exceeded after"),
+        "{text}"
+    );
+    let err = done["result"]["gateResult"]["error"].as_str().unwrap();
+    assert!(err.contains("gate killed"), "{err}");
+}
+
+#[test]
 fn help_mentions_wall_ms() {
     let e = Env::new("wall-help");
     let out = e.delegate(&["--help"], None);
