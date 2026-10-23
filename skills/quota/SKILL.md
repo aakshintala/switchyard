@@ -1,6 +1,6 @@
 ---
 name: quota
-description: Quota left on the AI subscriptions (Claude, Codex, Cursor, OpenCode Go), read live from QuotaBar. Use when asked how much quota remains or when it resets, or when a pick rule needs headroom.
+description: Quota left on the AI subscriptions (Claude, Codex, Cursor, OpenCode Go, Muse), read live from QuotaBar. Use when asked how much quota remains or when it resets, or when a pick rule needs headroom.
 ---
 
 # Quota

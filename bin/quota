@@ -16,4 +16,4 @@ if [[ "${1:-}" == "--json" ]]; then
   exit 0
 fi
 
-jq -r '.providers[] | "\(.id) [\(.status)]: \([.quotas[] | "\(.label) \(if .percentRemaining then "\(.percentRemaining|floor)%" else "\(.balanceRemaining) \(.balanceUnit // "")" end) (\(.resetText // "no reset"))"] | join(", "))"' <<<"$json"
+jq -r '.providers[] | if .unavailable then "\(.id) [\(.status), unavailable]: \(.unavailable)" else "\(.id) [\(.status)]: \([.quotas[] | "\(.label) \(if .percentRemaining then "\(.percentRemaining|floor)%" else "\(.balanceRemaining) \(.balanceUnit // "")" end) (\(.resetText // "no reset"))"] | join(", "))" end' <<<"$json"
