@@ -74,6 +74,9 @@ mid-turn. Answer `NEEDS_CONTEXT` with it. A resumed lane whose `result.changeSet
 kills the job (default 1800000, 30 min; a model silent between tools gets 300000). It also
 bounds the gate.
 
+`--idle-ms` sets the model-idle window for that one run, overriding the host-profile `idleMs`
+(default 300000); `muse/*` runs get 1200000 from `bin/tkt-job`.
+
 ## Waiting
 
 `watch` blocks until every listed job is terminal, then prints their records on stdout. It is
