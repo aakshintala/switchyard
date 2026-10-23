@@ -89,6 +89,9 @@ pub(crate) struct FakeBackend {
     /// One result per spawn, in order; each finishes its attempt at once. A spawn past
     /// the end of the script falls back to `auto`, then to a manual handle.
     pub script: Mutex<std::collections::VecDeque<BackendResult>>,
+    /// When set, the next kill records SIGTERM but finishes nothing: the child
+    /// ignores SIGTERM. One-shot; the kill after it records SIGKILL and finishes.
+    pub ignore_first_kill: Arc<Mutex<bool>>,
 }
 
 impl FakeBackend {
@@ -128,10 +131,19 @@ impl Runner for FakeBackend {
         });
         self.handles.lock().unwrap().push(h);
         let tx = Mutex::new(tx);
+        let ignore_first = Arc::clone(&self.ignore_first_kill);
         Spawned {
             session_id,
             kill: Box::new(move || {
-                killed.lock().unwrap().push("SIGTERM");
+                let first = killed.lock().unwrap().is_empty();
+                killed
+                    .lock()
+                    .unwrap()
+                    .push(if first { "SIGTERM" } else { "SIGKILL" });
+                if first && *ignore_first.lock().unwrap() {
+                    *ignore_first.lock().unwrap() = false;
+                    return;
+                }
                 let _ = tx
                     .lock()
                     .unwrap()
@@ -870,6 +882,221 @@ fn merge_attempt_keeps_the_call_count_when_only_one_attempt_reports_it() {
 
         assert_eq!(merge_attempt(&prev, next).usage.unwrap().calls, expected);
     }
+}
+
+fn wall_text(reg: &JobHandle, id: &str, ms: f64) -> String {
+    let text = terminal_text(reg, id);
+    assert!(
+        text.starts_with(&format!(
+            "Cancelled: wall budget of {ms} ms exceeded after"
+        )),
+        "{text:?}"
+    );
+    text
+}
+
+#[test]
+fn a_job_past_its_wall_budget_is_cancelled() {
+    let s = setup_with(|_| {});
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(300.0)));
+    sleep(Duration::from_millis(100));
+    assert_eq!(s.reg.poll(&id), "RUNNING");
+    assert_eq!(settle(&s.reg, &id), "CANCELLED");
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
+    wall_text(&s.reg, &id, 300.0);
+}
+
+#[test]
+fn progress_does_not_extend_the_wall_budget() {
+    let s = setup_with(|_| {});
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(300.0)));
+    let h = s.fake.handle(0);
+    let t = Instant::now();
+    while s.reg.poll(&id) == "RUNNING" {
+        h.activity();
+        h.progress("shell", 1.0, None, &[], Some("running_tool"));
+        sleep(Duration::from_millis(20));
+    }
+    assert!(t.elapsed() < Duration::from_secs(1));
+    assert_eq!(s.reg.poll(&id), "CANCELLED");
+    wall_text(&s.reg, &id, 300.0);
+}
+
+#[test]
+fn a_job_that_finishes_inside_the_budget_is_untouched() {
+    let s = setup_with(|_| {});
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(5_000.0)));
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "DONE");
+    assert!(s.fake.handle(0).killed().is_empty());
+    let text = terminal_text(&s.reg, &id);
+    assert!(!text.contains("wall budget"), "{text:?}");
+}
+
+#[test]
+fn no_wall_budget_means_no_cap() {
+    let s = setup_with(|_| {});
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = None));
+    sleep(Duration::from_millis(400));
+    assert_eq!(s.reg.poll(&id), "RUNNING");
+    assert!(s.fake.handle(0).killed().is_empty());
+}
+
+#[test]
+fn the_wall_budget_includes_the_retry_backoff() {
+    let s = retry_setup(&[60_000], vec![failed(Some(503))]);
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(100.0)));
+    wait_stage(&s.reg, Stage::Retrying);
+    let t = Instant::now();
+    assert_eq!(settle(&s.reg, &id), "CANCELLED");
+    assert!(t.elapsed() < Duration::from_secs(1));
+    assert_eq!(argvs(&s).len(), 1);
+    wall_text(&s.reg, &id, 100.0);
+}
+
+#[test]
+fn the_wall_budget_aborts_the_job_end_gate() {
+    let saw_signal = Arc::new(AtomicBool::new(false));
+    let sink = Arc::clone(&saw_signal);
+    let gate: FinalizeFn = Arc::new(move |res: &BackendResult, ctx: &FinalizeCtx| {
+        let t = Instant::now();
+        while ctx.signal.as_ref().is_none_or(|s| !s.load(Ordering::SeqCst)) {
+            if t.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            sleep(Duration::from_millis(10));
+        }
+        sink.store(true, Ordering::SeqCst);
+        fake_finalize(res, ctx)
+    });
+    let gate2 = Arc::clone(&gate);
+    let s = setup_with(move |d| {
+        d.finalize = gate;
+        d.finalize_stall = gate2;
+    });
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(100.0)));
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "CANCELLED");
+    let out = terminal(&s.reg, &id);
+    assert_eq!(out.status, RunStatus::Cancelled);
+    wall_text(&s.reg, &id, 100.0);
+    match s.reg.poll(&id) {
+        PollResult::Terminal {
+            status, result, ..
+        } => {
+            assert_eq!(status, JobStatus::Cancelled);
+            assert_eq!(result.status, RunStatus::Cancelled);
+        }
+        other => panic!("expected terminal poll, got {other:?}"),
+    }
+    assert!(saw_signal.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_cancel_during_the_gate_reports_cancelled_in_the_result() {
+    let entered = Arc::new(AtomicBool::new(false));
+    let sink = Arc::clone(&entered);
+    let s = setup_with(move |d| {
+        d.finalize = Arc::new(move |res: &BackendResult, ctx: &FinalizeCtx| {
+            sink.store(true, Ordering::SeqCst);
+            let t = Instant::now();
+            while ctx.signal.as_ref().is_none_or(|s| !s.load(Ordering::SeqCst)) {
+                if t.elapsed() > Duration::from_secs(5) {
+                    break;
+                }
+                sleep(Duration::from_millis(10));
+            }
+            fake_finalize(res, ctx)
+        });
+    });
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    s.fake.handle(0).finish(done_ok());
+    for _ in 0..500 {
+        if entered.load(Ordering::SeqCst) {
+            break;
+        }
+        sleep(Duration::from_millis(2));
+    }
+    assert!(entered.load(Ordering::SeqCst));
+    assert_eq!(s.reg.cancel(&id), "CANCELLED");
+    let out = terminal(&s.reg, &id);
+    assert_eq!(out.status, RunStatus::Cancelled);
+    let text = terminal_text(&s.reg, &id);
+    assert!(text.starts_with("Cancelled after"), "{text:?}");
+}
+
+#[test]
+fn the_first_termination_wins() {
+    // (i) The idle stall fires first: STALLED, never the wall wording.
+    let s = setup_with(|d| d.idle_ms = Some(50.0));
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(60_000.0)));
+    assert_eq!(settle(&s.reg, &id), "STALLED");
+    let text = terminal_text(&s.reg, &id);
+    assert!(text.starts_with("Idle watchdog killed this job"), "{text:?}");
+
+    // (ii) The wall fires first: CANCELLED with the wall wording.
+    let s = setup_with(|d| d.idle_ms = Some(60_000.0));
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(100.0)));
+    assert_eq!(settle(&s.reg, &id), "CANCELLED");
+    wall_text(&s.reg, &id, 100.0);
+
+    // (iii) A cancel beats a later wall deadline: the cancel wording stands.
+    let s = setup_with(|_| {});
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(100.0)));
+    sleep(Duration::from_millis(50));
+    assert_eq!(s.reg.cancel(&id), "CANCELLED");
+    let text = terminal_text(&s.reg, &id);
+    assert!(text.starts_with("Cancelled after"), "{text:?}");
+    assert!(!text.contains("wall budget"), "{text:?}");
+
+    // (iv) A cancel after a watchdog kill SIGKILLs at once: the caller wants
+    // the process gone now, with no SIGTERM grace.
+    let s = setup_with(|d| {
+        d.idle_ms = Some(50.0);
+        d.kill_grace_ms = 60_000;
+    });
+    *s.fake.ignore_first_kill.lock().unwrap() = true;
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    sleep(Duration::from_millis(100));
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
+    let t = Instant::now();
+    assert_eq!(s.reg.cancel(&id), "CANCELLED");
+    assert!(t.elapsed() < Duration::from_secs(1));
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
+    let text = terminal_text(&s.reg, &id);
+    assert!(text.starts_with("Cancelled after"), "{text:?}");
+}
+
+#[test]
+fn a_sigterm_resistant_child_is_killed_after_the_grace() {
+    // The wall fires at 50 ms; at 250 ms only the SIGTERM has gone out.
+    let s = setup_with(|d| d.kill_grace_ms = 400);
+    *s.fake.ignore_first_kill.lock().unwrap() = true;
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(50.0)));
+    sleep(Duration::from_millis(250));
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
+    assert_eq!(settle(&s.reg, &id), "CANCELLED");
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
+    wall_text(&s.reg, &id, 50.0);
+
+    // A normal child ends on the first kill: no second signal.
+    let s = setup_with(|d| d.kill_grace_ms = 60_000);
+    let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(50.0)));
+    assert_eq!(settle(&s.reg, &id), "CANCELLED");
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
+
+    // The escalation is wall-only: an idle stall keeps its single SIGTERM.
+    let s = setup_with(|d| {
+        d.idle_ms = Some(50.0);
+        d.kill_grace_ms = 400;
+    });
+    *s.fake.ignore_first_kill.lock().unwrap() = true;
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    sleep(Duration::from_millis(250));
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "STALLED");
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
 }
 
 #[test]
