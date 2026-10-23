@@ -28,22 +28,12 @@ pub enum DeadReason {
     SupervisorDied,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub prompt_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
-}
-
-impl Default for Usage {
-    fn default() -> Self {
-        Self {
-            prompt_tokens: 0,
-            output_tokens: 0,
-            total_tokens: 0,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

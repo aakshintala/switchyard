@@ -369,15 +369,15 @@ pub fn turn_interrupt_params(session_id: &str, turn_id: Option<&str>, now_ms: u6
 
 pub fn uuid7(now_ms: u64) -> String {
     let mut bytes = [0u8; 16];
-    for (index, byte) in crate::util::random_uuid()
+    let hex: Vec<_> = crate::util::random_uuid()
         .bytes()
         .filter(|byte| *byte != b'-')
-        .collect::<Vec<_>>()
-        .chunks_exact(2)
-        .enumerate()
-    {
+        .collect();
+    let (pairs, remainder) = hex.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    for (index, pair) in pairs.iter().enumerate() {
         bytes[index] =
-            u8::from_str_radix(std::str::from_utf8(byte).expect("hex UUID"), 16).expect("hex UUID");
+            u8::from_str_radix(std::str::from_utf8(pair).expect("hex UUID"), 16).expect("hex UUID");
     }
     let timestamp = now_ms & 0x0000_ffff_ffff_ffff;
     for (index, byte) in bytes[..6].iter_mut().enumerate() {
