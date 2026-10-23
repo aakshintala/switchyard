@@ -117,6 +117,18 @@ fn lower(staging: &[String], cwd: &str) -> Vec<String> {
     wire
 }
 
+/// Apply the per-host sandbox switch to a staging argv. Sandbox on leaves
+/// the argv unchanged; sandbox off inserts one `--disable-sandbox` directly
+/// before the final `--` separator (at len-2, so a prompt of `--` stays the
+/// prompt). Only this function adds the flag.
+pub(crate) fn with_sandbox(mut argv: Vec<String>, sandbox_on: bool) -> Vec<String> {
+    if !sandbox_on {
+        let at = argv.len().saturating_sub(2);
+        argv.insert(at, "--disable-sandbox".into());
+    }
+    argv
+}
+
 pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     // The stream usually repeats this id in its `session` header; when it
     // doesn't (a crash before the first line), the result still carries it.
@@ -1188,6 +1200,27 @@ mod tests {
             .expect("workspace pair");
         assert_eq!(&recorded[at + 2..], ["--", "hi"]);
         assert!(!recorded.iter().any(|a| a == "--disable-sandbox"));
+    }
+
+    #[test]
+    fn sandbox_switch_adds_exactly_one_flag_before_the_final_separator() {
+        let staging = argv("muse/muse-spark-1.3-contributor", Some("S"), "hi");
+        assert_eq!(with_sandbox(staging.clone(), true), staging);
+        let off = with_sandbox(staging.clone(), false);
+        assert_eq!(off.len(), staging.len() + 1);
+        assert_eq!(off[off.len() - 3..], ["--disable-sandbox", "--", "hi"]);
+        assert_eq!(
+            off.iter()
+                .filter(|a| a.as_str() == "--disable-sandbox")
+                .count(),
+            1
+        );
+        // A prompt of `--` stays the prompt: the separator is at len-2.
+        let dash = argv("muse/muse-spark-1.3-contributor", Some("S"), "--");
+        let off = with_sandbox(dash, false);
+        assert_eq!(off[off.len() - 3], "--disable-sandbox");
+        assert_eq!(off[off.len() - 2], "--");
+        assert_eq!(off.last().unwrap(), "--");
     }
 
     #[test]

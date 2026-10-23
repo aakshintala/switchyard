@@ -1030,3 +1030,82 @@ fn cancel_unknown_job_exits_2() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// The muse run path takes the sandbox flag from the host profile, default
+/// off: the fake records its argv, and the recorded child argv holds
+/// `--disable-sandbox` unless the profile sets `museSandbox: true`.
+#[test]
+fn muse_run_applies_the_host_sandbox_switch() {
+    let cases: [(&str, Option<&str>, bool); 3] = [
+        ("muse-sandbox-default", None, true),
+        ("muse-sandbox-off", Some("{\"museSandbox\":false}"), true),
+        ("muse-sandbox-on", Some("{\"museSandbox\":true}"), false),
+    ];
+    for (name, profile_json, expect_disabled) in cases {
+        let e = Env::new(name);
+        let dir_str = e.dir.to_str().unwrap().to_string();
+        let fixture_src = format!(
+            "{}/tests/fixtures/contract/muse/tool-calls-fix.stdout",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::write(
+            e.dir.join("fixture.stdout"),
+            std::fs::read(fixture_src).unwrap(),
+        )
+        .unwrap();
+        let fake = e.dir.join("muse.sh");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncat {}\n",
+                e.dir.join("argv.txt").display(),
+                e.dir.join("fixture.stdout").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile_path = match profile_json {
+            Some(body) => {
+                let path = e.dir.join("host-profile.json");
+                std::fs::write(&path, body).unwrap();
+                path.to_str().unwrap().to_string()
+            }
+            // Isolate from the developer machine's real host profile.
+            None => e
+                .dir
+                .join("nonexistent-profile.json")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        };
+        let out = e.delegate_env(
+            &["run", "--model", "muse/muse-spark-1.3-contributor"],
+            Some("do the thing"),
+            &[
+                ("MUSE_BIN", fake.to_str().unwrap()),
+                ("HOME", &dir_str),
+                ("DELEGATE_HOST_PROFILE", &profile_path),
+            ],
+        );
+        let id = e.ok_output(&out);
+        let done = e.wait_terminal(&id);
+        assert_eq!(done["status"], "DONE", "{name}");
+        let argv: Vec<String> = std::fs::read_to_string(e.dir.join("argv.txt"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            argv.iter()
+                .filter(|a| a.as_str() == "--disable-sandbox")
+                .count(),
+            usize::from(expect_disabled),
+            "{name}: {argv:?}"
+        );
+        if expect_disabled {
+            let flag_at = argv.iter().position(|a| a == "--disable-sandbox").unwrap();
+            let workspace_at = argv.iter().position(|a| a == "--workspace").unwrap();
+            assert!(flag_at < workspace_at, "{name}: {argv:?}");
+        }
+    }
+}

@@ -201,6 +201,7 @@ pub struct HostProfile {
     pub gate: Option<String>,
     pub idle_ms: Option<Option<f64>>,
     pub tool_idle_ms: Option<Option<f64>>,
+    pub muse_sandbox: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

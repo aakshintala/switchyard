@@ -163,7 +163,7 @@ impl Drop for Env {
     }
 }
 
-const SORTED_IDS: [&str; 24] = [
+const SORTED_IDS: [&str; 25] = [
     "claude-fable-5-1",
     "claude-haiku-5-5",
     "claude-opus-5-5",
@@ -181,6 +181,7 @@ const SORTED_IDS: [&str; 24] = [
     "fiber/codex/gpt-6-luna:medium",
     "fiber/codex/gpt-6.1-sol",
     "fiber/opencode-go/muse-spark-1.3-contributor",
+    "muse/muse-spark-1.3-contributor",
     "openai/gpt-6-astra",
     "openai/gpt-6-luna:medium",
     "openai/gpt-6-luna:xhigh",
@@ -229,7 +230,7 @@ fn models_lists_every_row_with_default_marked() {
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 25, "{stdout}");
+    assert_eq!(lines.len(), 26, "{stdout}");
     // Compare with spaces shown as · so a width mismatch is debuggable.
     assert_eq!(
         lines[0].replace(' ', "·"),
@@ -252,7 +253,11 @@ fn models_lists_every_row_with_default_marked() {
         "··fiber/opencode-go/muse-spark-1.3-contributor··Muse·Spark·1.3·Contributor·(fiber)··fiber······0.10·····0.20"
     );
     assert_eq!(
-        lines[24].replace(' ', "·"),
+        lines[18].replace(' ', "·"),
+        "··muse/muse-spark-1.3-contributor···············Muse·Spark·1.3·Contributor·(muse)···muse·······0.10·····0.20"
+    );
+    assert_eq!(
+        lines[25].replace(' ', "·"),
         "··opencode-go/muse-spark-1.3-contributor········Muse·Spark·1.3·Contributor··········pi·········0.10·····0.20··standard,strong"
     );
     // Rows sort by backend, then by id; only the default row is starred.

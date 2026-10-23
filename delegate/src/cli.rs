@@ -576,6 +576,13 @@ fn supervise(args: &[String]) -> i32 {
     let session = flag(&kv, "--session").map(str::to_string);
     let resumed_from = flag(&kv, "--resumed-from").map(str::to_string);
     let argv = backend.argv(model, session.as_deref(), &prompt);
+    // The muse sandbox flag comes from the per-host config, default off:
+    // with the sandbox off the worktree is the only containment.
+    let argv = if backend == Backend::Muse {
+        crate::backends::muse::with_sandbox(argv, config.profile.muse_sandbox == Some(true))
+    } else {
+        argv
+    };
     // Cost is keyed on the full id; a suffixed id prices as its base row (#157).
     let mut price_map = config.price_map.clone();
     price_map.insert(model.to_string(), resolved.price);
