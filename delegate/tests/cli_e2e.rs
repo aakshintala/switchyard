@@ -1211,7 +1211,7 @@ fn run_without_wall_ms_records_null_and_resume_keeps_null() {
 fn wall_ms_cancels_a_running_agent_and_its_group() {
     let e = Env::new("wall-cancel");
     let id = e.ok(
-        &["run", "--model", "composer-2.5", "--wall-ms", "1000"],
+        &["run", "--model", "composer-2.5", "--wall-ms", "5000"],
         "CANCELME",
         &[],
     );
@@ -1221,10 +1221,10 @@ fn wall_ms_cancels_a_running_agent_and_its_group() {
     assert_eq!(done["result"]["status"], "CANCELLED");
     let text = done["result"]["text"].as_str().unwrap();
     assert!(
-        text.starts_with("Cancelled: wall budget of 1000 ms exceeded after"),
+        text.starts_with("Cancelled: wall budget of 5000 ms exceeded after"),
         "{text}"
     );
-    assert_eq!(done["resume"]["wallMs"], serde_json::json!(1000));
+    assert_eq!(done["resume"]["wallMs"], serde_json::json!(5000));
     assert_eq!(done["resume"]["sessionId"], "s-init");
     for name in ["agent.pid", "grandchild.pid"] {
         let pid: i64 = std::fs::read_to_string(e.dir.join(name))
