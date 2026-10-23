@@ -768,7 +768,7 @@ run_job --slot lane --template "$T/tmpl-basic.md" --model muse/muse-spark-1.3-co
 [ "$RC" -eq 0 ] || fail "muse without gate exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "^run|model=muse/muse-spark-1.3-contributor|" "$T/stub.log" || fail "muse without gate dispatches the muse model"
 grep -qx "idle=7200000" "$T/stub.log" || fail "muse without gate passes --tool-idle-ms 7200000"
-grep -qx "idleMs=1200000" "$T/stub.log" || fail "muse without gate passes --idle-ms 1200000"
+grep -qx "idleMs=1800000" "$T/stub.log" || fail "muse without gate passes --idle-ms 1800000"
 
 setup_case muse-idle-gate
 reset_stub
@@ -778,7 +778,7 @@ run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan --model muse/
 [ "$RC" -eq 0 ] || fail "muse with gate exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "^run|model=muse/muse-spark-1.3-contributor|.*|gate=bash " "$T/stub.log" || fail "muse with gate dispatches the gate"
 grep -qx "idle=7200000" "$T/stub.log" || fail "muse with gate passes --tool-idle-ms 7200000"
-grep -qx "idleMs=1200000" "$T/stub.log" || fail "muse with gate passes --idle-ms 1200000"
+grep -qx "idleMs=1800000" "$T/stub.log" || fail "muse with gate passes --idle-ms 1800000"
 
 # --- a non-muse model gets no tool-idle flag, gated and ungated ---
 setup_case plain-idle-nogate
