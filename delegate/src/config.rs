@@ -412,6 +412,10 @@ mod tests {
                 "opencode-go/muse-spark-1.3-contributor",
                 vec!["standard", "strong"],
             ),
+            (
+                "muse/muse-spark-1.3-contributor",
+                vec!["standard", "strong"],
+            ),
             ("claude-sonnet-5-5", vec!["strong"]),
             ("claude-haiku-5-5", vec!["standard", "strong"]),
             ("grok-4.7-high", vec!["strong"]),
