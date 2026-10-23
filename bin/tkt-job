@@ -249,9 +249,9 @@ else
     }
   fi
   # Muse's tool-idle limit is also its whole-run wall cap (30 min by default), and it bounds the job-end gate.
-  # Muse reports no running_tool phase, so a silent bash call gets the 20 min --idle-ms window instead.
+  # Muse reports no running_tool phase, so a silent bash call gets the 30 min --idle-ms window instead.
   tool_idle=()
-  case "$model" in muse/*) tool_idle=(--tool-idle-ms 7200000 --idle-ms 1200000) ;; esac
+  case "$model" in muse/*) tool_idle=(--tool-idle-ms 7200000 --idle-ms 1800000) ;; esac
   if [ -n "$gate" ]; then
     jobid="$("$delegate" run --model "$model" --cwd "$worktree" --gate "$gate" ${tool_idle[@]+"${tool_idle[@]}"} --prompt-file "$brief" | head -n 1)"
   else
