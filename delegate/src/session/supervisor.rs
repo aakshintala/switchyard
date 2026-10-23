@@ -319,6 +319,7 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr));
     command.process_group(0);
+    isolate_child_descriptors(&mut command);
     let child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -1444,6 +1445,37 @@ fn dead_reply_grace(shared: &Shared) -> Duration {
 fn remove_socket(paths: &Paths, id: &str, socket: &Path) {
     let _ = fs::set_permissions(paths.dir(id), fs::Permissions::from_mode(0o700));
     let _ = fs::remove_file(socket);
+}
+
+fn isolate_child_descriptors(command: &mut std::process::Command) {
+    // Keep Rust's exec-error pipe alive until exec, but close every inherited fd on success.
+    unsafe {
+        command.pre_exec(|| {
+            #[cfg(target_os = "linux")]
+            if libc::close_range(3, u32::MAX, libc::CLOSE_RANGE_CLOEXEC) == 0 {
+                return Ok(());
+            }
+
+            let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let max_fd = limit.assume_init().rlim_cur.min(libc::c_int::MAX as _) as libc::c_int;
+            for fd in 3..max_fd {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags == -1 {
+                    if std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF) {
+                        continue;
+                    }
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
 }
 
 fn open_host_stderr(path: &Path) -> std::io::Result<File> {

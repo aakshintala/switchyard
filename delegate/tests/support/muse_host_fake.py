@@ -236,14 +236,30 @@ def handle(frame, raw_line=None):
         send_frames(error_response(request_id, "unknown method"))
 
 
+def read_line(fd, pending):
+    while True:
+        newline = pending.find(b"\n")
+        if newline >= 0:
+            line = bytes(pending[: newline + 1])
+            del pending[: newline + 1]
+            return line
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            line = bytes(pending)
+            pending.clear()
+            return line
+        pending.extend(chunk)
+
+
 def main():
     global STOP_READING, json
     os.makedirs(FAKE_DIR, exist_ok=True)
     write_file("argv.txt", "\n".join(sys.argv[1:]) + "\n")
     write_file("host.pid", str(os.getpid()) + "\n")
     probe_descriptors()
-    source = sys.stdin.buffer
-    first = source.readline()
+    input_fd = sys.stdin.fileno()
+    pending = bytearray()
+    first = read_line(input_fd, pending)
     fast_init = b'"method":"initialize"' in first
     if fast_init:
         with open(os.path.join(FAKE_DIR, "requests.jsonl"), "a", encoding="utf-8") as output:
@@ -251,8 +267,8 @@ def main():
         if "NO_INIT_ACK" not in SCENARIOS:
             sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"1.0","capabilities":{}}}\n')
             sys.stdout.buffer.flush()
-            initialized = source.readline()
-            session_start = source.readline()
+            initialized = read_line(input_fd, pending)
+            session_start = read_line(input_fd, pending)
             with open(os.path.join(FAKE_DIR, "requests.jsonl"), "a", encoding="utf-8") as output:
                 output.write(initialized.decode("utf-8"))
                 output.write(session_start.decode("utf-8"))
@@ -284,12 +300,12 @@ def main():
             time.sleep(0.05)
             continue
 
-        ready, _, _ = select.select([source], [], [], 0.05)
+        ready, _, _ = select.select([input_fd], [], [], 0.05)
         if not ready:
             if ACTIVE_TURN is not None and os.path.exists(os.path.join(FAKE_DIR, "go")):
                 complete_turn()
             continue
-        line = source.readline()
+        line = read_line(input_fd, pending)
         if not line:
             eof = True
             continue
