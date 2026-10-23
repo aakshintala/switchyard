@@ -36,6 +36,7 @@ Every job runs with writes enabled. A read task says "do not edit" in its brief;
 | `claude` | Implemented (`claude`, `CLAUDE_BIN`). |
 | `fiber` | Implemented (`fiber ask`, `FIBER_BIN`). |
 | `codex` | Implemented (`codex exec`, `CODEX_BIN`). |
+| `muse` | Implemented (`muse exec`, `MUSE_BIN`). |
 
 Model ids and prices come from bundled `config/models.json`, merged with your host profile.
 A Claude model id may carry a trailing `:<level>` (`low|medium|high|xhigh|max`), run as `claude --model <base> --effort <level>` (e.g. `claude-opus-5-5:high`); ids without a suffix are unchanged, and pi ids with a thinking suffix such as `openai/gpt-6-luna:xhigh` stay their own ids.
@@ -44,13 +45,15 @@ A fiber model id is `fiber/` plus Fiber's own `provider/model` reference (e.g. `
 
 A codex model id is `codex/` plus the Codex model name with an optional `:<tier>` (`medium|xhigh`), run as `codex exec --json -s workspace-write -C <cwd> -m <model> [-c model_reasoning_effort=<tier>]` with the prompt on stdin and resume via `exec ... resume <thread-id>`; the tier suffix becomes the reasoning-effort flag and ids without a suffix send none, and it carries no tiers so the ladder never picks it. `delegate doctor` checks `codex --version` and `codex login status`, warning per configured row that no membership probe exists. The real-codex resume tests run with `CODEX_BIN=<path to codex> cargo test --test codex_live` from `delegate/`; each test spends two live turns (about $0.001 per trivial turn), both skip when `CODEX_BIN` is unset, and the temp workspace is a throwaway git repo because Codex refuses a cwd outside one.
 
+A muse model id is `muse/` plus the Muse model name (e.g. `muse/muse-spark-1.3-contributor`), run as `muse exec --json --disable-approval --model <model> --reasoning-effort low --workspace <cwd>` with resume via `--session-id`; it carries no tiers so the ladder never picks it, and the pi route stays the fallback where muse is missing. The sandbox is off by default on every host, so the worktree is the only containment; a host profile with `museSandbox: true` turns the muse sandbox back on. Runs record `calls` and `allowance` (window and weekly used percent plus reset times) in the job usage. A run with no tool result, model text or terminal for the idle window ends `STALLED` (a long silent tool call needs a higher `idleMs`), and every run has a hard wall cap from the tool-idle limit (30 min default). `delegate doctor` does not check muse yet.
+
 ## Status records
 
 Each job writes `$TMPDIR/delegate-jobs/<jobId>.json` (use `$TMPDIR` when set, otherwise the OS temp directory). Prompt text is stored alongside as `<jobId>.prompt` until the supervisor starts. A gate writes its full ANSI-stripped output to `<jobId>-gate.log` beside the record; later gate runs for the same job use numbered names. `result.gateResult.outputPath` names the file, and `outputTail` remains the last 2048 bytes. When the supervisor resumed a session past a transient provider error (a 5xx, or a first 401), `result.retries` lists each failed attempt; it is absent when there were none.
 
 ## Host profile
 
-Optional JSON at `~/.config/delegate/host-profile.json` (or `$XDG_CONFIG_HOME/delegate/host-profile.json`). Override the path with `DELEGATE_HOST_PROFILE`. Keys can set `default`, `models`, `gate`, `idleMs`, and `toolIdleMs`. Missing file is fine; defaults are built in.
+Optional JSON at `~/.config/delegate/host-profile.json` (or `$XDG_CONFIG_HOME/delegate/host-profile.json`). Override the path with `DELEGATE_HOST_PROFILE`. Keys can set `default`, `models`, `gate`, `idleMs`, `toolIdleMs`, and `museSandbox`. Missing file is fine; defaults are built in.
 
 ## Replay
 
