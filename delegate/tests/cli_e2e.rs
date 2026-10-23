@@ -688,6 +688,30 @@ fn silent_agent_stalls_and_record_says_why() {
 }
 
 #[test]
+fn idle_ms_flag_overrides_the_host_window_for_one_run() {
+    let e = Env::new("idle-flag");
+    let id = e.ok(
+        &["run", "--model", "composer-2.5", "--idle-ms", "200"],
+        "SILENT",
+        &[("DELEGATE_IDLE_MS", "600000")],
+    );
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "STALLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(text.contains("Idle watchdog killed this job"), "{text}");
+    assert_eq!(done["resume"]["idleMs"], serde_json::json!(200));
+}
+
+#[test]
+fn no_idle_ms_flag_records_a_null_override() {
+    let e = Env::new("idle-null");
+    let id = e.ok(&["run", "--model", "composer-2.5"], "ship it", &[]);
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE");
+    assert!(done["resume"]["idleMs"].is_null());
+}
+
+#[test]
 fn two_runs_in_the_same_cwd_both_reach_terminal() {
     // No serialisation: a second run in the same directory starts while the first is RUNNING.
     let e = Env::new("parallel");
