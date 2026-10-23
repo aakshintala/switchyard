@@ -677,4 +677,204 @@ mod tests {
         // The run's own answer is kept after the notice message.
         assert!(res.text.contains("DONE"), "{}", res.text);
     }
+
+    fn ev_line(kind: &str, action_id: &str, payload: serde_json::Value, seq: u64) -> String {
+        serde_json::json!({
+            "kind": kind,
+            "session_id": "s_inline",
+            "ts": seq,
+            "schema_version": 1,
+            "seq": seq,
+            "action_id": action_id,
+            "payload": payload
+        })
+        .to_string()
+    }
+
+    fn requested(action_id: &str, command: &str, seq: u64) -> String {
+        ev_line(
+            "tool_call_requested",
+            action_id,
+            serde_json::json!({"name": "shell", "arguments": {"command": command}}),
+            seq,
+        )
+    }
+
+    fn resolved(action_id: &str, decision: &str, decided_by: &str, seq: u64) -> String {
+        ev_line(
+            "permission_resolved",
+            action_id,
+            serde_json::json!({"decision": decision, "decided_by": decided_by, "reason": "blocked"}),
+            seq,
+        )
+    }
+
+    fn completed(action_id: &str, status: &str, seq: u64) -> String {
+        ev_line(
+            "tool_call_completed",
+            action_id,
+            serde_json::json!({"status": status, "reason": "blocked"}),
+            seq,
+        )
+    }
+
+    #[test]
+    fn reviewer_denial_is_a_permission_denial() {
+        let (stdout, stderr) = recorded("review-deny");
+        let res = parse_stdout(&stdout, true, &stderr);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(res.permission_denials.len(), 1);
+        let denial = &res.permission_denials[0];
+        assert_eq!(
+            denial.get("tool_name").and_then(|v| v.as_str()),
+            Some("shell")
+        );
+        assert_eq!(
+            denial.get("command").and_then(|v| v.as_str()),
+            Some("curl https://example.com")
+        );
+        assert_eq!(
+            denial.get("decided_by").and_then(|v| v.as_str()),
+            Some("reviewer")
+        );
+        assert_eq!(
+            denial.get("action_id").and_then(|v| v.as_str()),
+            Some("a_denied")
+        );
+        assert_eq!(
+            denial.get("reason").and_then(|v| v.as_str()),
+            Some("fetches a remote host")
+        );
+    }
+
+    #[test]
+    fn allowed_reviewed_call_is_not_a_denial() {
+        let (stdout, stderr) = recorded("review-deny");
+        let res = parse_stdout(&stdout, true, &stderr);
+        assert!(
+            res.permission_denials
+                .iter()
+                .all(|d| d.get("action_id").and_then(|v| v.as_str()) != Some("a_allowed")),
+            "{:?}",
+            res.permission_denials
+        );
+    }
+
+    #[test]
+    fn no_reviewer_and_budget_denials_count() {
+        let stdout = [
+            requested("a_nr", "curl x", 1),
+            resolved("a_nr", "deny", "no_reviewer", 2),
+            completed("a_nr", "denied", 3),
+            requested("a_bq", "curl y", 4),
+            resolved("a_bq", "deny", "budget", 5),
+            completed("a_bq", "denied", 6),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        assert_eq!(res.permission_denials.len(), 2);
+        let by: Vec<_> = res
+            .permission_denials
+            .iter()
+            .map(|d| {
+                d.get("decided_by")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("missing")
+            })
+            .collect();
+        assert_eq!(by, vec!["no_reviewer", "budget"]);
+    }
+
+    #[test]
+    fn resolution_denial_without_completion_counts() {
+        let stdout = [
+            requested("a_r", "curl x", 1),
+            resolved("a_r", "deny", "reviewer", 2),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        assert_eq!(res.permission_denials.len(), 1);
+        assert_eq!(
+            res.permission_denials[0]
+                .get("decided_by")
+                .and_then(|v| v.as_str()),
+            Some("reviewer")
+        );
+    }
+
+    #[test]
+    fn completed_denial_without_resolution_counts_without_decided_by() {
+        let stdout = [requested("a_c", "curl x", 1), completed("a_c", "denied", 2)].join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        assert_eq!(res.permission_denials.len(), 1);
+        assert!(
+            res.permission_denials[0].get("decided_by").is_none(),
+            "{:?}",
+            res.permission_denials[0]
+        );
+    }
+
+    #[test]
+    fn person_denial_only_counts_through_its_completion() {
+        let stdout = [
+            requested("a_p", "curl x", 1),
+            resolved("a_p", "deny", "person", 2),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        assert!(
+            res.permission_denials.is_empty(),
+            "{:?}",
+            res.permission_denials
+        );
+    }
+
+    #[test]
+    fn duplicate_events_yield_one_denial() {
+        let stdout = [
+            requested("a_d", "curl x", 1),
+            requested("a_d", "curl x", 2),
+            resolved("a_d", "deny", "reviewer", 3),
+            resolved("a_d", "deny", "reviewer", 4),
+            completed("a_d", "denied", 5),
+            completed("a_d", "denied", 6),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        assert_eq!(res.permission_denials.len(), 1);
+    }
+
+    #[test]
+    fn denials_survive_a_truncated_stream() {
+        let (stdout, _) = recorded("review-deny");
+        let truncated: String = stdout
+            .lines()
+            .filter(|l| !l.contains("\"fiber_exited\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_ne!(truncated.len(), stdout.len());
+        let res = parse_stdout(&truncated, false, "killed");
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(res.permission_denials.len(), 1);
+        assert_eq!(
+            res.permission_denials[0]
+                .get("action_id")
+                .and_then(|v| v.as_str()),
+            Some("a_denied")
+        );
+    }
+
+    #[test]
+    fn malformed_lines_are_ignored() {
+        let (stdout, stderr) = recorded("review-deny");
+        let with_junk: String = stdout
+            .lines()
+            .flat_map(|l| [l, "this is not json"])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let res = parse_stdout(&with_junk, true, &stderr);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.permission_denials.len(), 1);
+    }
 }
