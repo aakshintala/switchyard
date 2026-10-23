@@ -27,7 +27,7 @@ const USAGE: &str =
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
        delegate models
        delegate doctor
-       delegate run --model muse/MODEL ...  (muse exec; available, not in the pick ladder)";
+       delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)";
 
 /// Bad input: reason on stderr, exit 2.
 struct Usage(String);
