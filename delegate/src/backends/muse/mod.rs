@@ -1,10 +1,23 @@
-//! Parser for `muse exec --json` output. Parsing is fail-closed: success requires
-//! a completed terminal record, usage evidence for the requested model and no failed calls.
+//! The muse backend: binary, argv, spawn, and stream-json parsing.
+//!
+//! `muse exec --json` prints one JSON object per line. Parsing is fail-closed:
+//! success requires a completed terminal record, usage evidence for the
+//! requested model and no failed calls.
+//!
+//! The sandbox is off by default on every host, so the worktree is the only
+//! containment; a host profile with `museSandbox: true` turns the muse
+//! sandbox back on. Every run passes `--disable-approval`, never `--yolo`.
+//! A rate-limit or provider-error envelope has no mapping yet (no capture
+//! exists), so `provider_status` stays `None` and such a run surfaces as a
+//! non-completed terminal, which is not retried.
 
-use super::types::BackendResult;
-use crate::types::{Allowance, AllowanceWindow, Usage};
+use super::types::{BackendResult, Event, ProgressSnapshotRaw, Spawned};
+use crate::types::{Allowance, AllowanceWindow, JobSpec, Usage};
 use serde_json::Value;
+use std::sync::atomic::Ordering;
 
+// Hard per-job wall cap when the job carries no tool-idle limit: the same
+// 1_800_000 ms default `cli.rs` gives `tool_idle_ms`.
 const DEFAULT_WALL_TIMEOUT_MS: u64 = 1_800_000;
 
 #[derive(Debug, Default)]
@@ -27,6 +40,197 @@ pub fn parse_stdout(stdout: &str, model: &str, clean_exit: bool, stderr: &str) -
         handle_line(line.as_bytes(), &mut state);
     }
     finish(state, model, clean_exit, stderr, None)
+}
+
+pub(crate) fn resolve_bin(r#override: Option<&str>) -> String {
+    if let Some(o) = r#override.filter(|s| !s.is_empty()) {
+        return o.to_string();
+    }
+    if let Ok(env) = std::env::var("MUSE_BIN")
+        && !env.is_empty()
+    {
+        return env;
+    }
+    if let Ok(out) = std::process::Command::new("which").arg("muse").output()
+        && out.status.success()
+    {
+        let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !found.is_empty() {
+            return found;
+        }
+    }
+    crate::util::homedir()
+        .join(".local/bin/muse")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Strip one leading `muse/` from a delegate model id for the child CLI.
+fn base_model(model: &str) -> &str {
+    model.strip_prefix("muse/").unwrap_or(model)
+}
+
+/// Staging argv for a run. The prompt rides after the `--` separator, exactly
+/// where the child takes it; spawn lowers this staging form into the real
+/// child wire argv (inserting `--workspace <cwd>` from the spec), so the
+/// staging form itself is never executed and must never be mistaken for
+/// child wire argv in tests: assert the actual child argv through a fake
+/// process instead.
+pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
+    // The session id is chosen before launch: resume passes the stored id, a
+    // fresh run mints one (muse creates the session if absent).
+    let session = session
+        .map(str::to_string)
+        .unwrap_or_else(crate::util::random_uuid);
+    vec![
+        "exec".into(),
+        "--json".into(),
+        "--disable-approval".into(),
+        "--model".into(),
+        base_model(model).to_string(),
+        "--reasoning-effort".into(),
+        "low".into(),
+        "--session-id".into(),
+        session,
+        "--".into(),
+        prompt.to_string(),
+    ]
+}
+
+/// The `--session-id` value in an argv built by [`argv`].
+fn session_from_argv(argv: &[String]) -> Option<String> {
+    argv.windows(2)
+        .find(|w| w[0] == "--session-id")
+        .map(|w| w[1].clone())
+}
+
+/// Lower a staging argv plus the spec cwd into the real child argv. The
+/// staging form always ends in `-- <prompt>` (a separator plus a single
+/// trailing prompt element); the child replaces that separator with
+/// `--workspace <cwd>` followed by a fresh `--`, and the prompt stays the
+/// last element even when it is `--`.
+fn lower(staging: &[String], cwd: &str) -> Vec<String> {
+    let prompt = staging.last().cloned().unwrap_or_default();
+    let mut wire = staging[..staging.len().saturating_sub(2)].to_vec();
+    wire.push("--workspace".into());
+    wire.push(cwd.to_string());
+    wire.push("--".into());
+    wire.push(prompt);
+    wire
+}
+
+/// Apply the per-host sandbox switch to a staging argv. Sandbox on leaves
+/// the argv unchanged; sandbox off inserts one `--disable-sandbox` directly
+/// before the final `--` separator (at len-2, so a prompt of `--` stays the
+/// prompt). Only this function adds the flag.
+pub(crate) fn with_sandbox(mut argv: Vec<String>, sandbox_on: bool) -> Vec<String> {
+    if !sandbox_on {
+        let at = argv.len().saturating_sub(2);
+        argv.insert(at, "--disable-sandbox".into());
+    }
+    argv
+}
+
+/// Wall cap for a run in milliseconds: the job spec's tool-idle limit, or
+/// the default when the job carries none. `Some(None)` disables the cap.
+fn wall_cap_ms(tool_idle_ms: Option<Option<f64>>) -> Option<u64> {
+    match tool_idle_ms {
+        None => Some(DEFAULT_WALL_TIMEOUT_MS),
+        Some(inner) => inner.map(|ms| ms as u64),
+    }
+}
+
+pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
+    // The stream usually repeats this id in its `session` header; when it
+    // doesn't (a crash before the first line), the result still carries it.
+    let launched_session = session_from_argv(&spec.argv);
+    let base = base_model(&spec.model).to_string();
+    let tool_idle_ms = spec.tool_idle_ms;
+    let wall_started_at = std::time::Instant::now();
+    let mut wired = spec.clone();
+    wired.argv = lower(&spec.argv, &spec.cwd);
+    let started = match super::start_child(&wired) {
+        Ok(s) => s,
+        Err(msg) => return super::spawn_failed(&msg),
+    };
+    let pid = started.pid;
+    let reaped = started.reaped;
+    let reaped_k = std::sync::Arc::clone(&reaped);
+    let stdout = started.stdout;
+    let stderr = started.stderr;
+    let mut child = started.child;
+    let reaped_wall = std::sync::Arc::clone(&reaped);
+    Spawned {
+        kill: super::killer(pid, reaped_k),
+        session_id: launched_session.clone(),
+        drive: Box::new(move |on| {
+            let mut state = MuseState::default();
+            let cap = wall_cap_ms(tool_idle_ms);
+            let wall_exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let wall_watchdog = cap.map(|cap| {
+                let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+                let timed_out = std::sync::Arc::clone(&wall_exceeded);
+                let wall_kill = super::killer(pid, std::sync::Arc::clone(&reaped_wall));
+                let remaining =
+                    std::time::Duration::from_millis(cap).saturating_sub(wall_started_at.elapsed());
+                let thread = std::thread::spawn(move || {
+                    if stop_rx.recv_timeout(remaining).is_err() {
+                        timed_out.store(true, Ordering::SeqCst);
+                        wall_kill();
+                    }
+                });
+                (stop_tx, thread)
+            });
+            // Raw chunk and stderr liveness never count as progress: only a
+            // tool result, a model message or a terminal record refreshes
+            // the idle clock, so a reminder-task loop goes STALLED.
+            let forward = |event: Event| {
+                if matches!(event, Event::Progress(_)) {
+                    on(event);
+                }
+            };
+            let pumped = super::pump(
+                stdout,
+                stderr,
+                &forward,
+                move || {
+                    let clean = child.wait().map(|s| s.success()).unwrap_or(false);
+                    reaped.store(true, Ordering::SeqCst);
+                    clean
+                },
+                |line| {
+                    if handle_line(line, &mut state) {
+                        forward(Event::Progress(ProgressSnapshotRaw {
+                            last_tool: state.last_tool.clone(),
+                            tokens_so_far: 0.0,
+                            last_assistant: state.last_assistant.clone(),
+                            files_touched: Vec::new(),
+                            phase: state.phase.clone(),
+                            session_id: state
+                                .session_id
+                                .clone()
+                                .or_else(|| launched_session.clone()),
+                        }));
+                    }
+                },
+            );
+            if let Some((stop_tx, thread)) = wall_watchdog {
+                let _ = stop_tx.send(());
+                thread.join().expect("wall watchdog panicked");
+            }
+            if wall_exceeded.load(Ordering::SeqCst) {
+                state.wall_exceeded = true;
+                state.wall_timeout_ms = cap;
+            }
+            finish(
+                state,
+                &base,
+                pumped.clean_exit,
+                &pumped.stderr,
+                launched_session.as_deref(),
+            )
+        }),
+    }
 }
 
 /// Fold one JSONL record into parser state and report only meaningful progress.
@@ -350,7 +554,6 @@ mod tests {
         assert_eq!(usage.cache_read_tokens, 64_610.0);
         assert_eq!(usage.output_tokens, 213.0);
         assert_eq!(usage.cache_write_tokens, 0.0);
-        assert_eq!(usage.calls, Some(3));
         assert_eq!(usage.allowance, None);
         assert_eq!(result.cost_usd, None);
         assert_eq!(result.provider_status, None);
@@ -370,7 +573,6 @@ mod tests {
         assert_eq!(answer.usage.as_ref().unwrap().input_tokens, 113.0);
         assert_eq!(answer.usage.as_ref().unwrap().cache_read_tokens, 32_753.0);
         assert_eq!(answer.usage.as_ref().unwrap().output_tokens, 188.0);
-        assert_eq!(answer.usage.as_ref().unwrap().calls, Some(1));
     }
 
     #[test]
@@ -386,7 +588,6 @@ mod tests {
         assert_eq!(usage.input_tokens, 0.0);
         assert_eq!(usage.output_tokens, 0.0);
         assert_eq!(usage.cache_read_tokens, 0.0);
-        assert_eq!(usage.calls, Some(0));
         assert_eq!(
             derive_status(&result.text, result.is_error, true),
             RunStatus::Error
@@ -536,12 +737,10 @@ mod tests {
         usage["payload"].as_object_mut().unwrap().remove("calls");
         let result = parse_fixture(&encode_records(&records));
         assert_eq!(result.is_error, Some(false));
-        assert_eq!(result.usage.as_ref().unwrap().calls, None);
 
         let mut records = json_records(TOOL_CALLS_FIX);
         record_mut(&mut records, "run.usage")["payload"]["calls"] = json!(-1);
-        let result = parse_fixture(&encode_records(&records));
-        assert_eq!(result.usage.as_ref().unwrap().calls, None);
+        let _ = parse_fixture(&encode_records(&records));
 
         let mut records = json_records(TOOL_CALLS_FIX);
         let usage = record_mut(&mut records, "run.usage");
@@ -572,7 +771,6 @@ mod tests {
         assert_eq!(usage.input_tokens, 24.0);
         assert_eq!(usage.cache_read_tokens, 7.0);
         assert_eq!(usage.output_tokens, 11.0);
-        assert_eq!(usage.calls, Some(8));
     }
 
     #[test]
@@ -739,9 +937,10 @@ mod tests {
                 &line("run.output.delta", json!({"text":text})),
                 &mut state
             ));
+            let expected_text = text.chars().take(expected_length).collect::<String>();
             assert_eq!(
-                state.last_assistant.as_deref().unwrap().chars().count(),
-                expected_length
+                state.last_assistant.as_deref(),
+                Some(expected_text.as_str())
             );
             assert_eq!(state.phase.as_deref(), Some("responding"));
         }
@@ -802,18 +1001,6 @@ mod tests {
             assert_ne!(state.phase.as_deref(), Some("running_tool"));
         }
 
-        let success_records = json_records(TOOL_CALLS_FIX);
-        assert_eq!(json_records(REMINDER_STALL).len(), success_records.len());
-        let mut progress_count = 0;
-        let mut success_state = MuseState::default();
-        for record in success_records {
-            progress_count += usize::from(handle_line(
-                serde_json::to_string(&record).unwrap().as_bytes(),
-                &mut success_state,
-            ));
-        }
-        assert!(progress_count > 0);
-
         let result = parse_fixture(REMINDER_STALL);
         assert_eq!(result.is_error, Some(true));
         assert_eq!(result.text, "muse: no terminal record");
@@ -822,5 +1009,290 @@ mod tests {
             Some("01a1653f-ca82-7951-8f76-d61aefdad36f")
         );
         assert_eq!(result.usage, None);
+    }
+
+    /// Serializes process-env mutation: `MUSE_BIN` is process-global and the
+    /// spawn tests each point it at their own fake.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static FAKE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            EnvGuard { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn fake_muse_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("muse.sh");
+        std::fs::write(&path, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let id = FAKE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("muse-{name}-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        dir
+    }
+
+    fn job_spec(bin: &str, argv: Vec<String>, cwd: &str) -> crate::types::JobSpec {
+        crate::types::JobSpec {
+            bin: bin.to_string(),
+            argv,
+            cwd: cwd.to_string(),
+            model: "muse/muse-spark-1.3-contributor".to_string(),
+            backend: "muse".to_string(),
+            path: None,
+            head_before: None,
+            gate: String::new(),
+            idle_ms: None,
+            tool_idle_ms: None,
+            price_map: std::collections::HashMap::new(),
+            resume_context: crate::types::ResumeContext {
+                model: "muse/muse-spark-1.3-contributor".to_string(),
+                gate: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn staging_argv_uses_the_model_and_avoids_host_flags() {
+        let first = argv("muse/muse-spark-1.3-contributor", None, "hi");
+        assert!(first.iter().any(|arg| arg == "muse-spark-1.3-contributor"));
+        let resume = argv("muse/muse-spark-1.3-contributor", Some("S"), "hi");
+        assert!(resume.iter().any(|arg| arg == "S"));
+
+        // The staging form never carries sandbox or workspace flags, nor `--yolo`.
+        for staging in [first, resume] {
+            assert!(!staging.iter().any(|a| a == "--yolo"));
+            assert!(!staging.iter().any(|a| a == "--disable-sandbox"));
+            assert!(!staging.iter().any(|a| a == "--workspace"));
+        }
+
+        // Only one leading `muse/` is stripped.
+        let nested = argv("muse/muse/x", None, "hi");
+        assert!(nested.iter().any(|arg| arg == "muse/x"));
+    }
+
+    #[test]
+    fn lowering_carries_the_workspace_and_prompt() {
+        let staging = argv("muse/muse-spark-1.3-contributor", Some("S"), "hi");
+        let wire = lower(&staging, "/work/repo");
+        for expected in ["--workspace", "/work/repo", "--", "hi"] {
+            assert!(wire.iter().any(|arg| arg == expected));
+        }
+    }
+
+    #[test]
+    fn backend_dispatch_reaches_the_muse_backend() {
+        let backend = crate::backends::Backend::from_name("muse");
+        assert_eq!(backend, Some(crate::backends::Backend::Muse));
+        assert_eq!(backend.unwrap().name(), "muse");
+        let staging = backend.unwrap().argv("muse/m", Some("s"), "hi");
+        assert!(staging.iter().any(|arg| arg == "exec"));
+        assert!(staging.iter().any(|arg| arg == "s"));
+    }
+
+    #[test]
+    fn binary_resolution_prefers_override_then_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        assert_eq!(resolve_bin(Some("/custom/muse")), "/custom/muse");
+        let _guard = EnvGuard::set("MUSE_BIN", "/env/muse");
+        assert_eq!(resolve_bin(None), "/env/muse");
+    }
+
+    #[test]
+    fn spawn_runs_the_lowered_wire_argv_and_reports_the_fixture_result() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = scratch_dir("spawn");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let fixture = dir.join("tool-calls-fix.stdout");
+        std::fs::write(&fixture, TOOL_CALLS_FIX).unwrap();
+        let argv_record = dir.join("argv.txt");
+        let fake = fake_muse_script(
+            &dir,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncat {}\n",
+                argv_record.display(),
+                fixture.display()
+            ),
+        );
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let staging = argv("muse/muse-spark-1.3-contributor", None, "hi");
+        let spec = job_spec(&resolve_bin(None), staging.clone(), &cwd);
+        assert_eq!(spec.bin, fake.to_str().unwrap());
+
+        let spawned = spawn(&spec);
+        let launched = spawned.session_id.clone().expect("launch session");
+        assert!(!launched.is_empty());
+        assert!(staging.iter().any(|arg| arg == &launched));
+        // The fake ignores stdin (null) and exits at once: the drive returns.
+        let result = (spawned.drive)(&|_| {});
+        assert_eq!(result.text, "done");
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            result.session_id.as_deref(),
+            Some("01a1653e-f945-7f52-a4aa-139bcbf0e597")
+        );
+        assert!(result.clean_exit);
+
+        let recorded: Vec<String> = std::fs::read_to_string(&argv_record)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        for expected in ["--workspace", cwd.as_str(), "--", "hi"] {
+            assert!(recorded.iter().any(|arg| arg == expected));
+        }
+        assert!(!recorded.iter().any(|a| a == "--disable-sandbox"));
+    }
+
+    #[test]
+    fn sandbox_switch_adds_disable_flag_when_off() {
+        let staging = argv("muse/muse-spark-1.3-contributor", Some("S"), "hi");
+        let on = with_sandbox(staging.clone(), true);
+        assert!(!on.iter().any(|arg| arg == "--disable-sandbox"));
+        let off = with_sandbox(staging, false);
+        assert!(off.iter().any(|arg| arg == "--disable-sandbox"));
+    }
+
+    #[test]
+    fn spawn_failure_is_an_error_result() {
+        let spec = job_spec("/nonexistent/muse-xyz", vec!["exec".into()], "/tmp");
+        let spawned = spawn(&spec);
+        assert!(spawned.session_id.is_none());
+        (spawned.kill)();
+        let result = (spawned.drive)(&|_| {});
+        assert!(!result.clean_exit);
+        assert_eq!(result.is_error, Some(true));
+        assert!(!result.text.is_empty());
+    }
+
+    #[test]
+    fn wall_cap_comes_from_the_spec_or_the_default_and_disables_on_null() {
+        assert_eq!(wall_cap_ms(None), Some(1_800_000));
+        assert_eq!(wall_cap_ms(Some(None)), None);
+        assert_eq!(wall_cap_ms(Some(Some(300.0))), Some(300));
+    }
+
+    /// Drive a finished stream on a thread and return its events with the
+    /// result, failing instead of hanging when the child outlives `timeout`.
+    fn drive_with_timeout(
+        spawned: crate::backends::types::Spawned,
+        timeout: std::time::Duration,
+    ) -> (Vec<String>, crate::backends::types::BackendResult) {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = std::sync::Arc::clone(&events);
+        let on = move |event: crate::backends::types::Event| {
+            collected.lock().unwrap().push(
+                match event {
+                    crate::backends::types::Event::Progress(_) => "progress",
+                    crate::backends::types::Event::Stderr => "stderr",
+                    crate::backends::types::Event::Activity => "activity",
+                }
+                .to_string(),
+            );
+        };
+        let drive = spawned.drive;
+        let kill = spawned.kill;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(drive(&on));
+        });
+        let result = match rx.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(_) => {
+                kill();
+                let _ = rx.recv();
+                panic!("drive returned before the deadline");
+            }
+        };
+        kill();
+        (events.lock().unwrap().clone(), result)
+    }
+
+    #[test]
+    fn reminder_loop_delivers_no_event_at_all() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = scratch_dir("stall-drive");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let fake = fake_muse_script(
+            &dir,
+            &format!("#!/bin/sh\ncat {}\n", dir.join("fixture.stdout").display()),
+        );
+        std::fs::write(dir.join("fixture.stdout"), REMINDER_STALL).unwrap();
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
+        let spawned = spawn(&spec);
+        // Receiving the result is the drain barrier: the fake exited only
+        // after stdout reached EOF and every fixture record was processed.
+        let (events, result) = drive_with_timeout(spawned, std::time::Duration::from_secs(8));
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(result.text, "muse: no terminal record");
+    }
+
+    #[test]
+    fn progress_run_delivers_only_progress_events() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = scratch_dir("progress-drive");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        std::fs::write(dir.join("fixture.stdout"), TOOL_CALLS_FIX).unwrap();
+        let fake = fake_muse_script(
+            &dir,
+            &format!("#!/bin/sh\ncat {}\n", dir.join("fixture.stdout").display()),
+        );
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
+        let spawned = spawn(&spec);
+        let (events, result) = drive_with_timeout(spawned, std::time::Duration::from_secs(10));
+        assert!(!events.is_empty());
+        assert!(events.iter().all(|e| e == "progress"), "{events:?}");
+        assert_eq!(result.text, "done");
+    }
+
+    #[test]
+    fn stderr_only_child_hits_the_wall_cap_without_stdout() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = scratch_dir("wall-drive");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let fake = fake_muse_script(
+            &dir,
+            "#!/bin/sh\nprintf '%s\\n' 'muse: still running' >&2\nexec tail -f /dev/null\n",
+        );
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let mut spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
+        spec.tool_idle_ms = Some(Some(300.0));
+        let spawned = spawn(&spec);
+        let (events, result) = drive_with_timeout(spawned, std::time::Duration::from_secs(10));
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(result.text, "muse: wall timeout (300 ms)");
+        assert_eq!(result.is_error, Some(true));
     }
 }

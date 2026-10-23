@@ -1030,3 +1030,125 @@ fn cancel_unknown_job_exits_2() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// The Muse sandbox default and host-profile override are documented in
+/// delegate/README.md:48 and delegate/README.md:56.
+#[test]
+fn muse_run_applies_the_host_sandbox_switch() {
+    let cases: [(&str, Option<&str>, bool); 3] = [
+        ("muse-sandbox-default", None, true),
+        ("muse-sandbox-off", Some("{\"museSandbox\":false}"), true),
+        ("muse-sandbox-on", Some("{\"museSandbox\":true}"), false),
+    ];
+    for (name, profile_json, expect_disabled) in cases {
+        let e = Env::new(name);
+        let dir_str = e.dir.to_str().unwrap().to_string();
+        let fixture_src = format!(
+            "{}/tests/fixtures/contract/muse/tool-calls-fix.stdout",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::write(
+            e.dir.join("fixture.stdout"),
+            std::fs::read(fixture_src).unwrap(),
+        )
+        .unwrap();
+        let fake = e.dir.join("muse.sh");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncat {}\n",
+                e.dir.join("argv.txt").display(),
+                e.dir.join("fixture.stdout").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile_path = match profile_json {
+            Some(body) => {
+                let path = e.dir.join("host-profile.json");
+                std::fs::write(&path, body).unwrap();
+                path.to_str().unwrap().to_string()
+            }
+            // Isolate from the developer machine's real host profile.
+            None => e
+                .dir
+                .join("nonexistent-profile.json")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        };
+        let out = e.delegate_env(
+            &["run", "--model", "muse/muse-spark-1.3-contributor"],
+            Some("do the thing"),
+            &[
+                ("MUSE_BIN", fake.to_str().unwrap()),
+                ("HOME", &dir_str),
+                ("DELEGATE_HOST_PROFILE", &profile_path),
+            ],
+        );
+        let id = e.ok_output(&out);
+        let done = e.wait_terminal(&id);
+        assert_eq!(done["status"], "DONE", "{name}");
+        let argv: Vec<String> = std::fs::read_to_string(e.dir.join("argv.txt"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            argv.iter().any(|a| a == "--disable-sandbox"),
+            expect_disabled,
+            "{name}: {argv:?}"
+        );
+    }
+}
+
+/// A reminder-task loop emits no meaningful progress, so the idle watchdog
+/// ends the job STALLED. The fake drains the fixture, writes stderr, then blocks.
+#[test]
+fn muse_reminder_loop_stalls_on_the_idle_watchdog() {
+    let e = Env::new("muse-stall");
+    let dir_str = e.dir.to_str().unwrap().to_string();
+    let fixture_src = format!(
+        "{}/tests/fixtures/contract/muse/reminder-stall.stdout",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::write(
+        e.dir.join("fixture.stdout"),
+        std::fs::read(fixture_src).unwrap(),
+    )
+    .unwrap();
+    let fake = e.dir.join("muse.sh");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\ncat {}\nprintf '%s\\n' 'muse: reminder heartbeat' >&2\nexec tail -f /dev/null\n",
+            e.dir.join("fixture.stdout").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = e.dir.join("nonexistent-profile.json");
+    let out = e.delegate_env(
+        &["run", "--model", "muse/muse-spark-1.3-contributor"],
+        Some("loop forever"),
+        &[
+            ("MUSE_BIN", fake.to_str().unwrap()),
+            ("HOME", &dir_str),
+            ("DELEGATE_HOST_PROFILE", profile.to_str().unwrap()),
+            ("DELEGATE_IDLE_MS", "500"),
+        ],
+    );
+    let id = e.ok_output(&out);
+    // 20 s deadline for the 500 ms idle window, which is event driven.
+    let out = e.delegate(&["watch", &id, "--timeout", "20"], None);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let done: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(done["status"], "STALLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(text.starts_with("Idle watchdog killed this job"), "{text}");
+}

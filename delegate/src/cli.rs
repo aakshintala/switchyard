@@ -26,7 +26,8 @@ const USAGE: &str =
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
        delegate models
-       delegate doctor";
+       delegate doctor
+       delegate run --model muse/MODEL ...  (muse exec; available, not in the pick ladder)";
 
 /// Bad input: reason on stderr, exit 2.
 struct Usage(String);
@@ -576,6 +577,13 @@ fn supervise(args: &[String]) -> i32 {
     let session = flag(&kv, "--session").map(str::to_string);
     let resumed_from = flag(&kv, "--resumed-from").map(str::to_string);
     let argv = backend.argv(model, session.as_deref(), &prompt);
+    // The muse sandbox flag comes from the per-host config, default off:
+    // with the sandbox off the worktree is the only containment.
+    let argv = if backend == Backend::Muse {
+        crate::backends::muse::with_sandbox(argv, config.profile.muse_sandbox == Some(true))
+    } else {
+        argv
+    };
     // Cost is keyed on the full id; a suffixed id prices as its base row (#157).
     let mut price_map = config.price_map.clone();
     price_map.insert(model.to_string(), resolved.price);
@@ -589,7 +597,7 @@ fn supervise(args: &[String]) -> i32 {
         head_before: capture_head(cwd, None),
         gate: gate.clone(),
         idle_ms: None,
-        tool_idle_ms: tool_idle_ms.map(Some),
+        tool_idle_ms: tool_idle_ms.map(Some).or(config.profile.tool_idle_ms),
         price_map,
         resume_context: ResumeContext {
             model: model.clone(),

@@ -811,6 +811,22 @@ fn transient_status_is_a_5xx_or_a_first_401_on_an_error() {
 }
 
 #[test]
+fn muse_shaped_error_result_is_never_transient() {
+    // The muse backend never reports a provider status, so its error
+    // results must never take the retry path that rebuilds argv without
+    // the host-profile sandbox flag.
+    let mut res = BackendResult {
+        provider_status: None,
+        is_error: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(transient_status(&res, false), None);
+    assert_eq!(transient_status(&res, true), None);
+    res.provider_status = Some(503);
+    assert_eq!(transient_status(&res, false), Some(503));
+}
+
+#[test]
 fn merge_attempt_sums_what_was_reported_and_takes_the_rest_from_the_last() {
     let mut prev = with_usage(failed(Some(503)), 10.0);
     prev.duration_ms = Some(100.0);

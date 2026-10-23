@@ -92,6 +92,19 @@ fn opt_finite(
     }
 }
 
+fn opt_bool(
+    obj: &serde_json::Map<String, Value>,
+    field: &str,
+    where_: &str,
+) -> Result<Option<bool>, String> {
+    match obj.get(field) {
+        None => Ok(None),
+        Some(v) => Ok(Some(v.as_bool().ok_or_else(|| {
+            format!("invalid config: {where_}.{field} must be a boolean")
+        })?)),
+    }
+}
+
 fn opt_finite_or_null(
     obj: &serde_json::Map<String, Value>,
     field: &str,
@@ -205,6 +218,9 @@ fn decode_host_profile(raw: Option<&Value>) -> Result<HostProfile, String> {
     }
     if let Some(i) = opt_finite_or_null(obj, "toolIdleMs", "host-profile")? {
         profile.tool_idle_ms = Some(i);
+    }
+    if let Some(b) = opt_bool(obj, "museSandbox", "host-profile")? {
+        profile.muse_sandbox = Some(b);
     }
     Ok(profile)
 }
@@ -526,6 +542,42 @@ mod tests {
         })
         .unwrap_err();
         assert!(e.to_string().contains("price.cacheWrite"));
+    }
+
+    #[test]
+    fn muse_sandbox_switch_decodes_absent_true_false_and_rejects_text() {
+        for (raw, expected) in [
+            (serde_json::json!({}), None),
+            (serde_json::json!({"museSandbox": true}), Some(true)),
+            (serde_json::json!({"museSandbox": false}), Some(false)),
+        ] {
+            let mut files = HashMap::new();
+            files.insert("/m.json".into(), MODELS_DEFAULT.into());
+            files.insert("/p.json".into(), raw.to_string());
+            let cfg = load_config(LoadConfigOpts {
+                models_path: "/m.json".into(),
+                host_profile_path: Some("/p.json".into()),
+                read_file: Some(reader(files)),
+            })
+            .unwrap();
+            assert_eq!(cfg.profile.muse_sandbox, expected, "{raw}");
+        }
+        let mut files = HashMap::new();
+        files.insert("/m.json".into(), MODELS_DEFAULT.into());
+        files.insert(
+            "/p.json".into(),
+            serde_json::json!({"museSandbox": "yes"}).to_string(),
+        );
+        let err = load_config(LoadConfigOpts {
+            models_path: "/m.json".into(),
+            host_profile_path: Some("/p.json".into()),
+            read_file: Some(reader(files)),
+        })
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid config: host-profile.museSandbox must be a boolean"
+        );
     }
 
     #[test]

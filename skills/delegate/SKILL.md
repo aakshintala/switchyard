@@ -25,13 +25,15 @@ When the pick is a Claude model and you run in a Claude Code session, start it a
 
 At session start, propose a pool per rung from `delegate models` and `~/.agents/bin/quota`, showing each provider's headroom. The owner confirms it. When the owner is unavailable, use the last confirmed pool, step down within the rung when a provider runs low, and report the switch.
 
-A provider's headroom is its remaining quota on its tightest window (session, weekly or monthly): the lowest percent on its line from `~/.agents/bin/quota`. Map providers by backend or prefix: the `cursor` backend, `opencode-go/*`, `claude-*`, and `openai/*`.
+A provider's headroom is its remaining quota on its tightest window (session, weekly or monthly): the lowest percent on its line from `~/.agents/bin/quota`. Map providers by backend or prefix: the `cursor` backend, `opencode-go/*`, `claude-*`, `muse/*`, and `openai/*`.
 
 Mechanical jobs (rebase conflicts and compile fixes, formatting and lint fixes, mutant-killing tests, renames, moves, repeated edits) take the cheapest `standard` model; when it fails, the next cheapest. A Claude model that reviews, verifies or diagnoses runs at `:medium`, and `:high` only after it fails twice on one finding. A diagnosis reports the cause and its evidence, and leaves the fix to a lane.
 
 Escalation: when a model fails, go up one rung. When a `frontier` model fails, stop and ask the owner. Never escalate to a model with no rung.
 
 Review rule: review with a model from a different family than the implementer's, at the same rung or higher. Family means the model's maker, such as Anthropic, OpenAI, xAI or Cursor, not its backend or provider.
+
+Muse backend (available, not yet preferred): `muse/*` models run `muse exec` and carry no rung, so use one only when the owner names it; the pi route is the fallback where muse is missing or the sandbox that was turned on is unusable, and mapping the hit-the-limit case is still open. The sandbox is off by default on every host, so the worktree is the only containment; a host profile with `museSandbox: true` turns the muse sandbox on, blocking writes outside the workspace with network through the proxy. A run with no tool result, model text or terminal for the idle window ends `STALLED` (a long silent tool call needs a higher `idleMs`), every run has a hard wall cap from the tool-idle limit, and the job record carries `allowance` window and weekly used percent plus reset times. `delegate doctor` does not check muse yet.
 
 ## Briefs
 
