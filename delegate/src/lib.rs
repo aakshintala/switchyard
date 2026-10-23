@@ -15,6 +15,7 @@ pub mod models;
 pub mod output;
 pub mod pricing;
 pub mod prompt;
+pub mod session;
 pub mod status_record;
 pub mod stream;
 pub mod types;
