@@ -1,13 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -S
 """A local MSP host fake for supervisor tests; never starts a real model."""
 
-import json
 import os
-import re
-import select
-import signal
 import sys
-import time
 
 FAKE_DIR = os.environ["FAKE_DIR"]
 SCENARIOS = {
@@ -56,7 +51,9 @@ def event(method, params):
 
 
 def current_features(text=""):
-    words = set(re.findall(r"[A-Z][A-Z0-9_]+", text.upper()))
+    import re
+
+    words = set(re.findall(r"[A-Z][A-Z0-9_]+", text[:1024].upper()))
     return SCENARIOS | words
 
 
@@ -82,11 +79,9 @@ def emit_start_events(turn_id, command_id, text, features, include_ack=None):
     ACTIVE_TURN = turn_id
     ACTIVE_SCENARIOS = features
     HELD_TERMINAL = "cancelled" if "CANCEL_ON_GO" in features else "completed"
-    frames = []
     if include_ack is not None:
-        frames.append(include_ack)
-    frames.extend(
-        [
+        send_frames(include_ack)
+    frames = [
             event("session/statusChanged", {"sessionId": SESSION_ID, "status": "running"}),
             event("turn/started", {"sessionId": SESSION_ID, "turnId": turn_id}),
             event(
@@ -94,7 +89,6 @@ def emit_start_events(turn_id, command_id, text, features, include_ack=None):
                 {"item": {"kind": "userMessage", "turnId": turn_id, "text": text, "commandId": command_id}},
             ),
         ]
-    )
     send_frames(*frames)
 
 
@@ -121,6 +115,8 @@ def complete_turn(terminal=None):
 
 
 def start_turn(frame):
+    import time
+
     global TURN_NUMBER, STOP_READING
     params = frame.get("params", {})
     text = params.get("input", [{}])[0].get("text", "")
@@ -160,6 +156,9 @@ def start_turn(frame):
     if "PANIC_LINE" in features:
         sys.stdout.write("PANIC_LINE\n")
         sys.stdout.flush()
+    if "MULTIBYTE" in features:
+        sys.stdout.write("é" * 300 + "\n")
+        sys.stdout.flush()
     if "APPROVAL" in features:
         send_frames({"jsonrpc": "2.0", "id": 981, "method": "approval/request", "params": {"sessionId": SESSION_ID}})
     if "NOISE" in features and "NOISE_WRITTEN" not in SCENARIOS:
@@ -181,9 +180,13 @@ def start_turn(frame):
         STOP_READING = True
 
 
-def handle(frame):
+def handle(frame, raw_line=None):
     global ACTIVE_TURN, ACTIVE_SCENARIOS, HELD_TERMINAL
-    log_frame(frame)
+    if raw_line is None:
+        log_frame(frame)
+    else:
+        with open(os.path.join(FAKE_DIR, "requests.jsonl"), "a", encoding="utf-8") as output:
+            output.write(raw_line)
     method = frame.get("method")
     params = frame.get("params", {})
     request_id = frame.get("id")
@@ -205,7 +208,7 @@ def handle(frame):
         start_turn(frame)
     elif method == "turn/steer":
         command_id = params.get("commandId")
-        if "STEERREFUSE" in SCENARIOS:
+        if "STEERREFUSE" in SCENARIOS or "STEERREFUSE_HOLD" in SCENARIOS:
             frames = [error_response(request_id, "turn already ended")]
             if "STEERREFUSE_HOLD" not in SCENARIOS and ACTIVE_TURN is not None:
                 frames.append(event("turn/completed", {"turnId": ACTIVE_TURN, "terminal": "completed"}))
@@ -233,16 +236,44 @@ def handle(frame):
 
 
 def main():
-    global STOP_READING
+    global STOP_READING, json
     os.makedirs(FAKE_DIR, exist_ok=True)
     write_file("argv.txt", "\n".join(sys.argv[1:]) + "\n")
     write_file("host.pid", str(os.getpid()) + "\n")
     probe_descriptors()
-    if "IGNORE_TERM" in SCENARIOS:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-
     source = sys.stdin.buffer
-    eof = False
+    first = source.readline()
+    fast_init = b'"method":"initialize"' in first
+    if fast_init:
+        with open(os.path.join(FAKE_DIR, "requests.jsonl"), "a", encoding="utf-8") as output:
+            output.write(first.decode("utf-8"))
+        if "NO_INIT_ACK" not in SCENARIOS:
+            sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"1.0","capabilities":{}}}\n')
+            sys.stdout.buffer.flush()
+            initialized = source.readline()
+            session_start = source.readline()
+            with open(os.path.join(FAKE_DIR, "requests.jsonl"), "a", encoding="utf-8") as output:
+                output.write(initialized.decode("utf-8"))
+                output.write(session_start.decode("utf-8"))
+            if "STARTFAIL" in SCENARIOS:
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":2,"error":{"code":-32020,"message":"fake session start failed"}}\n')
+            else:
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","method":"session/started","params":{"session":{"sessionId":"fake-session"}}}\n')
+                sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":2,"result":{"session":{"sessionId":"fake-session"}}}\n')
+            sys.stdout.buffer.flush()
+    import json
+    import select
+    import time
+    if not fast_init and first:
+        try:
+            handle(json.loads(first))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+    if "IGNORE_TERM" in SCENARIOS:
+        import signal
+
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    eof = not first
     while True:
         if STOP_READING or eof:
             if eof and not ("IGNORE_EOF" in SCENARIOS or "IGNORE_TERM" in SCENARIOS):
@@ -265,7 +296,7 @@ def main():
             frame = json.loads(line)
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
-        handle(frame)
+        handle(frame, line.decode("utf-8"))
 
 
 if __name__ == "__main__":

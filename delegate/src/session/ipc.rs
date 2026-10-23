@@ -27,6 +27,9 @@ pub fn request(paths: &Paths, id: &str, req: &Value, timeout: Duration) -> Resul
     let socket = paths
         .socket_path(id)
         .map_err(|error| IpcError::Unreachable(error.to_string()))?;
+    let mut line =
+        serde_json::to_vec(req).map_err(|error| IpcError::BadReply(error.to_string()))?;
+    line.push(b'\n');
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or(IpcError::Timeout)?;
@@ -34,12 +37,15 @@ pub fn request(paths: &Paths, id: &str, req: &Value, timeout: Duration) -> Resul
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => IpcError::Timeout,
         _ => IpcError::Unreachable(error.to_string()),
     })?;
-
-    let mut line =
-        serde_json::to_vec(req).map_err(|error| IpcError::BadReply(error.to_string()))?;
-    line.push(b'\n');
-    set_remaining_write_timeout(&stream, deadline)?;
-    stream.write_all(&line).map_err(map_io_error)?;
+    for chunk in line.chunks(64 * 1024) {
+        set_remaining_write_timeout(&stream, deadline)?;
+        if Instant::now() >= deadline {
+            return Err(IpcError::Timeout);
+        }
+        stream
+            .write_all(chunk)
+            .map_err(|error| map_io_error(error, "socket write"))?;
+    }
     set_remaining_read_timeout(&stream, deadline)?;
 
     let mut reader = BufReader::new(stream);
@@ -52,7 +58,7 @@ pub fn request(paths: &Paths, id: &str, req: &Value, timeout: Duration) -> Resul
             ));
         }
         Ok(_) => {}
-        Err(error) => return Err(map_io_error(error)),
+        Err(error) => return Err(map_io_error(error, "socket read")),
     }
     reply.pop();
     serde_json::from_slice(&reply).map_err(|error| IpcError::BadReply(error.to_string()))
@@ -65,7 +71,7 @@ fn set_remaining_write_timeout(stream: &UnixStream, deadline: Instant) -> Result
     }
     stream
         .set_write_timeout(Some(remaining))
-        .map_err(|error| IpcError::Unreachable(error.to_string()))
+        .map_err(|error| IpcError::Unreachable(format!("set socket write timeout: {error}")))
 }
 
 fn set_remaining_read_timeout(stream: &UnixStream, deadline: Instant) -> Result<(), IpcError> {
@@ -75,12 +81,12 @@ fn set_remaining_read_timeout(stream: &UnixStream, deadline: Instant) -> Result<
     }
     stream
         .set_read_timeout(Some(remaining))
-        .map_err(|error| IpcError::Unreachable(error.to_string()))
+        .map_err(|error| IpcError::Unreachable(format!("set socket read timeout: {error}")))
 }
 
-fn map_io_error(error: std::io::Error) -> IpcError {
+fn map_io_error(error: std::io::Error, operation: &str) -> IpcError {
     match error.kind() {
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => IpcError::Timeout,
-        _ => IpcError::Unreachable(error.to_string()),
+        _ => IpcError::Unreachable(format!("{operation}: {error}")),
     }
 }
