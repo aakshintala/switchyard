@@ -35,5 +35,5 @@ Read the plan at `__PLAN__` before anything else, and reread it after any compac
 
 ## Report
 
-First line: `Model: <the id your runtime reports, or unknown>`. Then the PR URL and its head SHA with the gate's last output line quoted from its log (report a pass only beside a log that ends in one), or a failure triage (the step, the command, its output tail), nothing in between. Then **Friction**: up to 3 bullets on what slowed you, what the plan or docs got wrong or left out, and what you would change ("none" is fine). End with a STATUS line.
+First line: `Model: <the id your runtime reports, or unknown>`. Then the PR URL and its head SHA, or a failure triage (the step, the command, its output tail), nothing in between. Then **Friction**: up to 3 bullets on what slowed you, what the plan or docs got wrong or left out, and what you would change ("none" is fine). End with a STATUS line.
 __EXTRA__
