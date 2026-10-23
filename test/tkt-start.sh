@@ -51,7 +51,7 @@ out=""; prev=""
 for a in "\$@"; do [ "\$prev" = "--out-file" ] && out="\$a"; prev="\$a"; done
 [ -n "\$out" ] && cat "$T/jobout" >"\$out"
 if [ -f "$T/job-blocked" ]; then echo "TKT tkt-job BLOCKED id=j1 log=x"; exit 1; fi
-if [ -f "$T/job-concerns" ]; then echo "TKT tkt-job CONCERNS id=j1 log=x"; echo "reviewer is uneasy"; exit 1; fi
+if [ -f "$T/job-concerns" ]; then [ -f "$T/job-noise" ] && { echo "watch noise" >&2; echo >&2; }; echo "TKT tkt-job CONCERNS id=j1 log=x"; echo "reviewer is uneasy"; exit 1; fi
 exit 0
 EOF
 chmod +x "$T/tktbin/tkt-job"
@@ -69,7 +69,7 @@ reload() {
 # commit, plus a touching commit for TWO) pushed to origin/main, a clone, the
 # issue body and docs, ARGS loaded. Sets CDIR CLONE WT RUN FILING.
 setup() {
-  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-blocked"
+  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
@@ -290,6 +290,11 @@ setup concerns TWO FILING
 printf '1. non-blocking -- only a note\n' >"$T/jobout"; touch "$T/job-concerns"; run_start
 want "PREFLIGHT core=0 nonblocking=1 out=" 0 concerns
 [ -s "$RUN/widget-42-preflight-out.md" ] || fail "concerns: report file missing"
+# Stray stderr lines before the verdict (watch output, a blank line) are not the verdict.
+setup concerns-noise TWO FILING
+printf '1. non-blocking -- only a note\n' >"$T/jobout"; touch "$T/job-concerns" "$T/job-noise"; run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 concerns-noise
+[ -s "$RUN/widget-42-preflight-out.md" ] || fail "concerns-noise: report file missing"
 setup blocked TWO FILING
 printf '1. non-blocking -- only a note\n' >"$T/jobout"; touch "$T/job-blocked"; run_start
 want "STEP-FAIL step=tkt-job rc=1" 1 blocked
