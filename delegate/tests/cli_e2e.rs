@@ -118,7 +118,8 @@ impl Env {
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
             .env("CURSOR_AGENT_BIN", self.dir.join("agent.sh"))
-            .env("DELEGATE_HEARTBEAT_MS", "100");
+            .env("DELEGATE_HEARTBEAT_MS", "100")
+            .env_remove("DELEGATE_JOBS_DIR");
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -355,6 +356,7 @@ fn positional_prompt_exits_2_without_reading_stdin() {
         .current_dir(&e.dir)
         .env("TMPDIR", &e.dir)
         .env("CURSOR_AGENT_BIN", e.dir.join("agent.sh"))
+        .env_remove("DELEGATE_JOBS_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1050,6 +1052,149 @@ fn cancel_unknown_job_exits_2() {
     assert_eq!(out.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("unknown job nope"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cancel_finds_a_record_under_another_tmpdir() {
+    let e = Env::new("x-cancel");
+    let id = e.run("SLOW do it");
+    assert_eq!(e.record(&id)["status"], "RUNNING");
+    let other = std::env::temp_dir().join("cdm-cli-x-cancel-other");
+    let _ = std::fs::remove_dir_all(&other);
+    std::fs::create_dir_all(&other).unwrap();
+    let jobs = e.dir.join("delegate-jobs");
+    let out = e.delegate_env(
+        &["cancel", &id],
+        None,
+        &[
+            ("TMPDIR", other.to_str().unwrap()),
+            ("DELEGATE_JOBS_DIR", jobs.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let final_rec: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(final_rec["status"], "CANCELLED");
+    assert_eq!(e.record(&id)["status"], "CANCELLED");
+    e.release();
+    let _ = std::fs::remove_dir_all(&other);
+}
+
+#[test]
+fn watch_and_resume_find_a_record_under_another_tmpdir() {
+    let e = Env::new("x-watch");
+    let a = e.run("first brief");
+    let first = e.wait_terminal(&a);
+    assert_eq!(first["status"], "DONE");
+    let other = std::env::temp_dir().join("cdm-cli-x-watch-other");
+    let _ = std::fs::remove_dir_all(&other);
+    std::fs::create_dir_all(&other).unwrap();
+    let jobs = e.dir.join("delegate-jobs");
+    let over = [
+        ("TMPDIR", other.to_str().unwrap()),
+        ("DELEGATE_JOBS_DIR", jobs.to_str().unwrap()),
+    ];
+    let out = e.delegate_env(&["watch", &a], None, &over);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let seen: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(seen["status"], "DONE");
+
+    let out = e.delegate_env(&["resume", &a], Some("follow up"), &over);
+    assert!(
+        out.status.success(),
+        "exit {:?}\nstderr: {}\nstdout: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let b = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    assert_eq!(b.len(), 36);
+    // The resumed job runs under the caller's TMPDIR; watch it there.
+    let out = e.delegate_env(
+        &["watch", &b, "--timeout", "10"],
+        None,
+        &[("TMPDIR", other.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let done: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(e.record(&a)["supersededBy"], b.as_str());
+    let _ = std::fs::remove_dir_all(&other);
+}
+
+#[test]
+fn cancel_fallback_writes_back_to_the_original_record() {
+    let e = Env::new("x-fallback");
+    let id = e.run("SLOW");
+    until("cursor init session id", || {
+        e.record(&id)["resume"]["sessionId"] == "s-init"
+    });
+    let pid = e.record(&id)["supervisorPid"].as_i64().unwrap();
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    until("supervisor death", || !alive(pid));
+    let other = std::env::temp_dir().join("cdm-cli-x-fallback-other");
+    let _ = std::fs::remove_dir_all(&other);
+    std::fs::create_dir_all(&other).unwrap();
+    let jobs = e.dir.join("delegate-jobs");
+    let out = e.delegate_env(
+        &["cancel", &id],
+        None,
+        &[
+            ("TMPDIR", other.to_str().unwrap()),
+            ("DELEGATE_JOBS_DIR", jobs.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let final_rec: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(final_rec["status"], "CANCELLED");
+    assert_eq!(e.record(&id)["status"], "CANCELLED");
+    assert!(
+        !other.join("delegate-jobs").exists(),
+        "no second copy in the caller's dir"
+    );
+    e.release();
+    let _ = std::fs::remove_dir_all(&other);
+}
+
+#[test]
+fn unknown_job_names_the_searched_dirs() {
+    let e = Env::new("x-unknown");
+    let out = e.delegate(&["watch", "nope"], None);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown job nope"), "{err}");
+    assert!(
+        err.contains(&e.dir.join("delegate-jobs").display().to_string()),
+        "{err}"
+    );
+    assert!(err.contains("/tmp/delegate-jobs"), "{err}");
+}
+
+#[test]
+fn cancel_with_a_separator_id_reads_nothing_outside() {
+    let e = Env::new("x-sep");
+    std::fs::write(e.dir.join("x.json"), "{}").unwrap();
+    let out = e.delegate(&["cancel", "../x"], None);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown job ../x"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
