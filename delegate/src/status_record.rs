@@ -9,12 +9,34 @@ pub trait StatusRecordWriter: Send + Sync {
 }
 
 /// Delegate's state directory: job records, gate logs, and the `cargo-mutants`
-/// shim (`shim/`) every job's `PATH` starts with (#435).
+/// shim (`shim/`) every job's `PATH` starts with (#435). An explicit
+/// `DELEGATE_JOBS_DIR` override wins, so the switchyard operator's setting on
+/// the box reaches the records supervisors write (#386); otherwise the
+/// supervisor's `$TMPDIR/delegate-jobs`.
 pub fn jobs_dir() -> PathBuf {
-    std::env::temp_dir().join("delegate-jobs")
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+    writer_dir_from(
+        &std::env::var_os("DELEGATE_JOBS_DIR"),
+        &std::env::temp_dir(),
+        &cwd,
+    )
 }
 
-/// Status JSON for one job under the supervisor's `$TMPDIR/delegate-jobs/`.
+/// The writer side of the lookup rule: the resolved `DELEGATE_JOBS_DIR` when
+/// set and non-empty, else `tmp/delegate-jobs`. A relative override resolves
+/// against the caller's current directory, exactly like the lookup's first
+/// entry, so writers and readers agree on one rule.
+fn writer_dir_from(over: &Option<std::ffi::OsString>, tmp: &Path, cwd: &Path) -> PathBuf {
+    if let Some(o) = over
+        && !o.is_empty()
+    {
+        let p = PathBuf::from(&o);
+        return if p.is_absolute() { p } else { cwd.join(p) };
+    }
+    tmp.join("delegate-jobs")
+}
+
+/// Status JSON for one job in the writer directory (`jobs_dir`).
 /// Readers never call this directly: `cancel`, `watch` and `resume` look the
 /// record up with `find_record_path`, which searches every directory the
 /// supervisor's `TMPDIR` could have been.
@@ -37,14 +59,10 @@ pub fn search_dirs() -> Vec<PathBuf> {
 }
 
 fn dirs_from(over: Option<std::ffi::OsString>, tmp: &Path, cwd: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(o) = over
-        && !o.is_empty()
-    {
-        let p = PathBuf::from(&o);
-        dirs.push(if p.is_absolute() { p } else { cwd.join(p) });
+    let mut dirs = vec![writer_dir_from(&over, tmp, cwd)];
+    if over.as_ref().is_some_and(|o| !o.is_empty()) {
+        dirs.push(tmp.join("delegate-jobs"));
     }
-    dirs.push(tmp.join("delegate-jobs"));
     dirs.push(PathBuf::from("/tmp/delegate-jobs"));
     let mut seen = std::collections::HashSet::new();
     dirs.retain(|d| seen.insert(d.clone()));
@@ -68,7 +86,6 @@ fn find_in_dirs(job_id: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// Writers only: the found path, else `job_record_path` when no record exists.
-/// New records are still created only by `job_record_path`/`jobs_dir`.
 pub fn record_path(job_id: &str) -> PathBuf {
     find_record_path(job_id).unwrap_or_else(|| job_record_path(job_id))
 }
@@ -324,6 +341,29 @@ mod tests {
         assert_eq!(
             dirs_from(Some("/abs/dir".into()), Path::new("/jobs/caller-tmp"), cwd)[0],
             PathBuf::from("/abs/dir")
+        );
+    }
+
+    #[test]
+    fn writer_dir_prefers_the_override_else_tmp_jobs() {
+        // docs/delegate-jobs.md#writers
+        let cwd = Path::new("/jobs/cwd");
+        let tmp = Path::new("/jobs/caller-tmp");
+        assert_eq!(
+            writer_dir_from(&Some("/jobs/ship/jobs".into()), tmp, cwd),
+            PathBuf::from("/jobs/ship/jobs")
+        );
+        assert_eq!(
+            writer_dir_from(&Some("relative/dir".into()), tmp, cwd),
+            PathBuf::from("/jobs/cwd/relative/dir")
+        );
+        assert_eq!(
+            writer_dir_from(&Some("".into()), tmp, cwd),
+            PathBuf::from("/jobs/caller-tmp/delegate-jobs")
+        );
+        assert_eq!(
+            writer_dir_from(&None, tmp, cwd),
+            PathBuf::from("/jobs/caller-tmp/delegate-jobs")
         );
     }
 

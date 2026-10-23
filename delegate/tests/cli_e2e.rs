@@ -1088,6 +1088,62 @@ fn cancel_finds_a_record_under_another_tmpdir() {
 }
 
 #[test]
+fn run_writes_to_the_jobs_dir_override_and_cancel_finds_it_there() {
+    // docs/delegate-jobs.md#writers
+    let e = Env::new("jobs-dir-writes");
+    let jobs_a = e.dir.join("jobs-a");
+    let tmp_b = e.dir.join("tmp-b");
+    let tmp_c = e.dir.join("tmp-c");
+    for d in [&jobs_a, &tmp_b, &tmp_c] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let out = e.delegate_env(
+        &["run", "--model", "composer-2.5"],
+        Some("quick"),
+        &[
+            ("DELEGATE_JOBS_DIR", jobs_a.to_str().unwrap()),
+            ("TMPDIR", tmp_b.to_str().unwrap()),
+        ],
+    );
+    let id = e.ok_output(&out);
+    assert_eq!(id.len(), 36);
+    assert!(
+        jobs_a.join(format!("{id}.json")).is_file(),
+        "record lands under DELEGATE_JOBS_DIR, not TMPDIR"
+    );
+    assert!(
+        !tmp_b
+            .join("delegate-jobs")
+            .join(format!("{id}.json"))
+            .exists(),
+        "no copy under the run's TMPDIR"
+    );
+    let out = e.delegate_env(
+        &["cancel", &id],
+        None,
+        &[
+            ("TMPDIR", tmp_c.to_str().unwrap()),
+            ("DELEGATE_JOBS_DIR", jobs_a.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let final_rec: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(final_rec["result"]["jobId"], id.as_str());
+    assert!(
+        !tmp_c
+            .join("delegate-jobs")
+            .join(format!("{id}.json"))
+            .exists(),
+        "cancel writes back where it found the record"
+    );
+}
+
+#[test]
 fn watch_and_resume_find_a_record_under_another_tmpdir() {
     let e = Env::new("x-watch");
     let a = e.run("first brief");
@@ -1121,12 +1177,9 @@ fn watch_and_resume_find_a_record_under_another_tmpdir() {
     );
     let b = String::from_utf8(out.stdout).unwrap().trim().to_string();
     assert_eq!(b.len(), 36);
-    // The resumed job runs under the caller's TMPDIR; watch it there.
-    let out = e.delegate_env(
-        &["watch", &b, "--timeout", "10"],
-        None,
-        &[("TMPDIR", other.to_str().unwrap())],
-    );
+    // The resumed job inherits the caller's DELEGATE_JOBS_DIR, so its record
+    // lands in the override dir; watch it there (docs/delegate-jobs.md#writers).
+    let out = e.delegate_env(&["watch", &b, "--timeout", "10"], None, &over);
     assert_eq!(out.status.code(), Some(0));
     let done: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(done["status"], "DONE");

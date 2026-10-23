@@ -31,8 +31,9 @@ position. For example, when `DELEGATE_JOBS_DIR` already equals the caller's
 
 ## Writers
 
-New records are created only under the supervisor's `$TMPDIR/delegate-jobs`
-(`jobs_dir` / `job_record_path`); `DELEGATE_JOBS_DIR` is read-side only.
-Updates (`cancel` finalizing a record, the supervisor-died and cancelled
-fallbacks) write back to the path where the record was found (`record_path`),
-falling back to `job_record_path` when no record exists.
+New records are created in the writer directory (`jobs_dir` /
+`job_record_path`): `DELEGATE_JOBS_DIR` when set, resolved the same way as
+the lookup above, else the supervisor's `$TMPDIR/delegate-jobs`. Updates
+(`cancel` finalizing a record, the supervisor-died and cancelled fallbacks)
+write back to the path where the record was found (`record_path`), falling
+back to `job_record_path` when no record exists.
