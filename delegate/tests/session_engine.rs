@@ -4,7 +4,7 @@ use delegate::session::{
     supervisor::{self, SupervisorConfig},
 };
 use serde_json::{Value, json};
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -958,6 +958,100 @@ fn supervisor_reports_host_exit_noise_host_requests_and_bad_models() {
         "started"
     );
     assert_eq!(bad_model.stop_and_join(), 0);
+}
+
+#[test]
+fn muse_host_fake_consumes_a_turn_start_buffered_after_host_refusal() {
+    let root = temp_root("ds-coalesced-host-frames");
+    let fake_dir = root.join("fake");
+    std::fs::create_dir_all(&fake_dir).unwrap();
+    let fake = root.join("muse_host_fake.py");
+    std::fs::write(&fake, include_str!("support/muse_host_fake.py")).unwrap();
+
+    let mut child = std::process::Command::new("python3")
+        .arg("-S")
+        .arg(&fake)
+        .args([
+            "serve",
+            "--provider",
+            "meta",
+            "--model",
+            "test",
+            "--disable-sandbox",
+        ])
+        .env("FAKE_DIR", &fake_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (output_tx, output_rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if output_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let frames = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"session/start","params":{}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":981,"error":{"code":-32601,"message":"delegate does not handle host requests"}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"turn/start","params":{"input":[{"text":"coalesced"}],"commandId":"test-command"}}"#,
+        "\n",
+    );
+    let bytes = frames.as_bytes();
+    assert_eq!(stdin.write(bytes).unwrap(), bytes.len());
+    stdin.flush().unwrap();
+
+    let turn_started = loop {
+        let Ok(line) = output_rx.recv_timeout(Duration::from_secs(3)) else {
+            break false;
+        };
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if frame["id"] == 3 && frame.get("result").is_some() {
+            break true;
+        }
+    };
+    drop(stdin);
+    if !turn_started {
+        let _ = child.kill();
+    }
+    let status = child.wait().unwrap();
+    reader.join().unwrap();
+    assert!(
+        turn_started,
+        "fake host did not process buffered turn/start"
+    );
+    assert!(status.success());
+
+    let requests: Vec<Value> = std::fs::read_to_string(fake_dir.join("requests.jsonl"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert!(
+        requests
+            .iter()
+            .any(|request| { request["id"] == 981 && request["error"]["code"] == -32601 })
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request["method"] == "turn/start" && request["id"] == 3)
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

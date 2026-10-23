@@ -300,11 +300,12 @@ def main():
             time.sleep(0.05)
             continue
 
-        ready, _, _ = select.select([input_fd], [], [], 0.05)
-        if not ready:
-            if ACTIVE_TURN is not None and os.path.exists(os.path.join(FAKE_DIR, "go")):
-                complete_turn()
-            continue
+        if b"\n" not in pending:
+            ready, _, _ = select.select([input_fd], [], [], 0.05)
+            if not ready:
+                if ACTIVE_TURN is not None and os.path.exists(os.path.join(FAKE_DIR, "go")):
+                    complete_turn()
+                continue
         line = read_line(input_fd, pending)
         if not line:
             eof = True
