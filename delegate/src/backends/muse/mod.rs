@@ -31,8 +31,7 @@ pub fn parse_stdout(stdout: &str, model: &str, clean_exit: bool, stderr: &str) -
 
 /// Fold one JSONL record into parser state and report only meaningful progress.
 fn handle_line(line: &[u8], state: &mut MuseState) -> bool {
-    let line = String::from_utf8_lossy(line);
-    let Ok(record) = serde_json::from_str::<Value>(line.trim()) else {
+    let Ok(record) = serde_json::from_slice::<Value>(line) else {
         return false;
     };
 
