@@ -1,9 +1,0 @@
-{"kind":"session_started","payload":{},"schema_version":1,"seq":0,"session_id":"s_deny","ts":1}
-{"kind":"tool_call_requested","action_id":"a_allowed","payload":{"arguments":{"command":"cargo test"},"name":"shell"},"schema_version":1,"seq":1,"session_id":"s_deny","ts":2}
-{"kind":"permission_resolved","action_id":"a_allowed","payload":{"decided_by":"reviewer","decision":"allow"},"schema_version":1,"seq":2,"session_id":"s_deny","ts":3}
-{"kind":"tool_call_completed","action_id":"a_allowed","payload":{"status":"completed"},"schema_version":1,"seq":3,"session_id":"s_deny","ts":4}
-{"kind":"tool_call_requested","action_id":"a_denied","payload":{"arguments":{"command":"curl https://example.com"},"name":"shell"},"schema_version":1,"seq":4,"session_id":"s_deny","ts":5}
-{"kind":"permission_resolved","action_id":"a_denied","payload":{"decided_by":"reviewer","decision":"deny","reason":"fetches a remote host"},"schema_version":1,"seq":5,"session_id":"s_deny","ts":6}
-{"kind":"tool_call_completed","action_id":"a_denied","payload":{"reason":"fetches a remote host","status":"denied"},"schema_version":1,"seq":6,"session_id":"s_deny","ts":7}
-{"kind":"turn_completed","payload":{"outcome":"completed"},"schema_version":1,"seq":7,"session_id":"s_deny","ts":8}
-{"kind":"fiber_exited","payload":{"exit_code":0,"text":"DONE"},"schema_version":1,"seq":8,"session_id":"s_deny","ts":9}

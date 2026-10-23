@@ -246,20 +246,25 @@ fn non_empty(payload: Option<&serde_json::Value>, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The `command` argument of a tool call. `arguments` is an object, or a
-/// string holding raw text when it was not JSON.
-fn request_command(arguments: Option<&serde_json::Value>) -> Option<String> {
+/// One string argument of a tool call (`command`, `path`, ...). `arguments`
+/// is an object, or a string holding raw text when it was not JSON.
+fn tool_argument(arguments: Option<&serde_json::Value>, key: &str) -> Option<String> {
     match arguments {
         Some(serde_json::Value::Object(obj)) => obj
-            .get("command")
+            .get(key)
             .and_then(|c| c.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         Some(serde_json::Value::String(raw)) => serde_json::from_str::<serde_json::Value>(raw)
             .ok()
-            .and_then(|v| request_command(Some(&v))),
+            .and_then(|v| tool_argument(Some(&v), key)),
         _ => None,
     }
+}
+
+/// The `command` argument of a tool call.
+fn request_command(arguments: Option<&serde_json::Value>) -> Option<String> {
+    tool_argument(arguments, "command")
 }
 
 /// The record for one event's action. An event without `action_id` gets its
@@ -427,20 +432,9 @@ fn handle_line(line: &[u8], state: &mut FiberState) -> bool {
     }
 }
 
-/// The `path` argument of an `edit` or `write` call. `arguments` is an
-/// object, or a string holding raw text when it was not JSON.
+/// The `path` argument of an `edit` or `write` call.
 fn tool_path(arguments: Option<&serde_json::Value>) -> Option<String> {
-    match arguments {
-        Some(serde_json::Value::Object(obj)) => obj
-            .get("path")
-            .and_then(|p| p.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        Some(serde_json::Value::String(raw)) => serde_json::from_str::<serde_json::Value>(raw)
-            .ok()
-            .and_then(|v| tool_path(Some(&v))),
-        _ => None,
-    }
+    tool_argument(arguments, "path")
 }
 
 /// Turn the terminal `fiber_exited` (or the lack of one) into the normalized result.
@@ -875,11 +869,30 @@ mod tests {
         )
     }
 
-    fn resolved(action_id: &str, decision: &str, decided_by: &str, seq: u64) -> String {
+    fn resolved_reason(
+        action_id: &str,
+        decision: &str,
+        decided_by: &str,
+        reason: &str,
+        seq: u64,
+    ) -> String {
         ev_line(
             "permission_resolved",
             action_id,
-            serde_json::json!({"decision": decision, "decided_by": decided_by, "reason": "blocked"}),
+            serde_json::json!({"decision": decision, "decided_by": decided_by, "reason": reason}),
+            seq,
+        )
+    }
+
+    fn resolved(action_id: &str, decision: &str, decided_by: &str, seq: u64) -> String {
+        resolved_reason(action_id, decision, decided_by, "blocked", seq)
+    }
+
+    fn resolved_allow(action_id: &str, decided_by: &str, seq: u64) -> String {
+        ev_line(
+            "permission_resolved",
+            action_id,
+            serde_json::json!({"decision": "allow", "decided_by": decided_by}),
             seq,
         )
     }
@@ -893,12 +906,69 @@ mod tests {
         )
     }
 
+    fn completed_ok(action_id: &str, seq: u64) -> String {
+        ev_line(
+            "tool_call_completed",
+            action_id,
+            serde_json::json!({"status": "completed"}),
+            seq,
+        )
+    }
+
+    fn exited(text: &str, seq: u64) -> String {
+        serde_json::json!({
+            "kind": "fiber_exited",
+            "session_id": "s_inline",
+            "ts": seq,
+            "schema_version": 1,
+            "seq": seq,
+            "payload": {"exit_code": 0, "text": text}
+        })
+        .to_string()
+    }
+
+    /// One allowed call plus one reviewer-denied call, built inline so the
+    /// behavioural assertions below do not depend on a recorded fixture.
+    fn review_stream() -> String {
+        [
+            requested("a_allowed", "cargo test", 1),
+            resolved_allow("a_allowed", "reviewer", 2),
+            completed_ok("a_allowed", 3),
+            requested("a_denied", "curl https://example.com", 4),
+            resolved_reason("a_denied", "deny", "reviewer", "fetches a remote host", 5),
+            completed("a_denied", "denied", 6),
+            exited("DONE", 7),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn tool_argument_reads_command_and_path_keys() {
+        let args = serde_json::json!({"command": "curl x", "path": "a/b.rs"});
+        assert_eq!(
+            tool_argument(Some(&args), "command").as_deref(),
+            Some("curl x")
+        );
+        assert_eq!(
+            tool_argument(Some(&args), "path").as_deref(),
+            Some("a/b.rs")
+        );
+        assert_eq!(tool_argument(None, "command"), None);
+        let raw = serde_json::Value::String(r#"{"command": "make"}"#.into());
+        assert_eq!(
+            tool_argument(Some(&raw), "command").as_deref(),
+            Some("make")
+        );
+    }
+
     #[test]
     fn reviewer_denial_is_a_permission_denial() {
-        let (stdout, stderr) = recorded("review-deny");
-        let res = parse_stdout(&stdout, true, &stderr);
+        let stdout = review_stream();
+        let res = parse_stdout(&stdout, true, "");
         assert_eq!(res.text, "DONE");
         assert_eq!(res.is_error, Some(false));
+        // Contract (`denial_list`): a deny resolved by a reviewer-set member
+        // folds one entry into `permission_denials`.
         assert_eq!(res.permission_denials.len(), 1);
         let denial = &res.permission_denials[0];
         assert_eq!(
@@ -925,8 +995,8 @@ mod tests {
 
     #[test]
     fn allowed_reviewed_call_is_not_a_denial() {
-        let (stdout, stderr) = recorded("review-deny");
-        let res = parse_stdout(&stdout, true, &stderr);
+        let stdout = review_stream();
+        let res = parse_stdout(&stdout, true, "");
         assert!(
             res.permission_denials
                 .iter()
@@ -948,17 +1018,26 @@ mod tests {
         ]
         .join("\n");
         let res = parse_stdout(&stdout, false, "");
+        // Contract (`denial_list`): each denied action folds one entry into
+        // `permission_denials`. The contract promises no order across actions,
+        // so this test looks denials up by action ID, not vector position.
         assert_eq!(res.permission_denials.len(), 2);
-        let by: Vec<_> = res
+        let by_id: std::collections::HashMap<&str, &str> = res
             .permission_denials
             .iter()
             .map(|d| {
-                d.get("decided_by")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("missing")
+                (
+                    d.get("action_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("missing"),
+                    d.get("decided_by")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("missing"),
+                )
             })
             .collect();
-        assert_eq!(by, vec!["no_reviewer", "budget"]);
+        assert_eq!(by_id.get("a_nr"), Some(&"no_reviewer"));
+        assert_eq!(by_id.get("a_bq"), Some(&"budget"));
     }
 
     #[test]
@@ -969,6 +1048,8 @@ mod tests {
         ]
         .join("\n");
         let res = parse_stdout(&stdout, false, "");
+        // Contract (`denial_list`): a deny resolved by a reviewer-set member
+        // counts even without a completion event.
         assert_eq!(res.permission_denials.len(), 1);
         assert_eq!(
             res.permission_denials[0]
@@ -982,6 +1063,8 @@ mod tests {
     fn completed_denial_without_resolution_counts_without_decided_by() {
         let stdout = [requested("a_c", "curl x", 1), completed("a_c", "denied", 2)].join("\n");
         let res = parse_stdout(&stdout, false, "");
+        // Contract (`denial_list`): a denied completion counts even without a
+        // resolution event, and carries no `decided_by`.
         assert_eq!(res.permission_denials.len(), 1);
         assert!(
             res.permission_denials[0].get("decided_by").is_none(),
@@ -1017,12 +1100,14 @@ mod tests {
         ]
         .join("\n");
         let res = parse_stdout(&stdout, false, "");
+        // Contract (`ActionRecord`): the first request, resolution and
+        // completion per action win, so repeats fold to one denial.
         assert_eq!(res.permission_denials.len(), 1);
     }
 
     #[test]
     fn denials_survive_a_truncated_stream() {
-        let (stdout, _) = recorded("review-deny");
+        let stdout = review_stream();
         let truncated: String = stdout
             .lines()
             .filter(|l| !l.contains("\"fiber_exited\""))
@@ -1031,6 +1116,8 @@ mod tests {
         assert_ne!(truncated.len(), stdout.len());
         let res = parse_stdout(&truncated, false, "killed");
         assert_eq!(res.is_error, Some(true));
+        // Contract (`denial_list`): denials fold from request/resolution/
+        // completion events, so they survive a missing terminal event.
         assert_eq!(res.permission_denials.len(), 1);
         assert_eq!(
             res.permission_denials[0]
@@ -1042,14 +1129,16 @@ mod tests {
 
     #[test]
     fn malformed_lines_are_ignored() {
-        let (stdout, stderr) = recorded("review-deny");
+        let stdout = review_stream();
         let with_junk: String = stdout
             .lines()
             .flat_map(|l| [l, "this is not json"])
             .collect::<Vec<_>>()
             .join("\n");
-        let res = parse_stdout(&with_junk, true, &stderr);
+        let res = parse_stdout(&with_junk, true, "");
         assert_eq!(res.text, "DONE");
+        // Contract (`denial_list`): unparseable lines are skipped, so the
+        // denial from the well-formed events still folds to one entry.
         assert_eq!(res.permission_denials.len(), 1);
     }
 }
