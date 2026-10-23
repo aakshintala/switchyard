@@ -6,7 +6,8 @@
 //!
 //! The sandbox is off by default on every host, so the worktree is the only
 //! containment; a host profile with `museSandbox: true` turns the muse
-//! sandbox back on. Every run passes `--disable-approval`, never `--yolo`.
+//! sandbox back on. Every run passes `--disable-approval` and `--trust-workspace`
+//! (so Muse loads the repo's AGENTS.md and rules), never `--yolo`.
 //! A rate-limit or provider-error envelope has no mapping yet (no capture
 //! exists), so `provider_status` stays `None` and such a run surfaces as a
 //! non-completed terminal, which is not retried.
@@ -86,6 +87,7 @@ pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<Stri
         "exec".into(),
         "--json".into(),
         "--disable-approval".into(),
+        "--trust-workspace".into(),
         "--model".into(),
         base_model(model).to_string(),
         "--reasoning-effort".into(),
@@ -1091,6 +1093,15 @@ mod tests {
         // Only one leading `muse/` is stripped.
         let nested = argv("muse/muse/x", None, "hi");
         assert!(nested.iter().any(|arg| arg == "muse/x"));
+    }
+
+    #[test]
+    fn trust_workspace_is_on_fresh_and_resumed_runs() {
+        let fresh = argv("muse/muse-spark-1.3-contributor", None, "hi");
+        let resumed = argv("muse/muse-spark-1.3-contributor", Some("S"), "hi");
+        for staging in [fresh, resumed] {
+            assert!(staging.iter().any(|a| a == "--trust-workspace"));
+        }
     }
 
     #[test]

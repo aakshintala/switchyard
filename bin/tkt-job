@@ -248,10 +248,13 @@ else
       exit 2
     }
   fi
+  # Muse's tool-idle limit is also its whole-run wall cap (30 min by default), and it bounds the job-end gate.
+  tool_idle=()
+  case "$model" in muse/*) tool_idle=(--tool-idle-ms 7200000) ;; esac
   if [ -n "$gate" ]; then
-    jobid="$("$delegate" run --model "$model" --cwd "$worktree" --gate "$gate" --prompt-file "$brief" | head -n 1)"
+    jobid="$("$delegate" run --model "$model" --cwd "$worktree" --gate "$gate" ${tool_idle[@]+"${tool_idle[@]}"} --prompt-file "$brief" | head -n 1)"
   else
-    jobid="$("$delegate" run --model "$model" --cwd "$worktree" --prompt-file "$brief" | head -n 1)"
+    jobid="$("$delegate" run --model "$model" --cwd "$worktree" ${tool_idle[@]+"${tool_idle[@]}"} --prompt-file "$brief" | head -n 1)"
   fi
   tkt set "job.$slot" "$jobid"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid"
