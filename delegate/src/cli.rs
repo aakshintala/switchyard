@@ -596,7 +596,7 @@ fn supervise(args: &[String]) -> i32 {
         head_before: capture_head(cwd, None),
         gate: gate.clone(),
         idle_ms: None,
-        tool_idle_ms: tool_idle_ms.map(Some),
+        tool_idle_ms: tool_idle_ms.map(Some).or(config.profile.tool_idle_ms),
         price_map,
         resume_context: ResumeContext {
             model: model.clone(),

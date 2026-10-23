@@ -16,6 +16,8 @@ use crate::types::{Allowance, AllowanceWindow, JobSpec, Usage};
 use serde_json::Value;
 use std::sync::atomic::Ordering;
 
+// Hard per-job wall cap when the job carries no tool-idle limit: the same
+// 1_800_000 ms default `cli.rs` gives `tool_idle_ms`.
 const DEFAULT_WALL_TIMEOUT_MS: u64 = 1_800_000;
 
 #[derive(Debug, Default)]
@@ -129,11 +131,22 @@ pub(crate) fn with_sandbox(mut argv: Vec<String>, sandbox_on: bool) -> Vec<Strin
     argv
 }
 
+/// Wall cap for a run in milliseconds: the job spec's tool-idle limit, or
+/// the default when the job carries none. `Some(None)` disables the cap.
+fn wall_cap_ms(tool_idle_ms: Option<Option<f64>>) -> Option<u64> {
+    match tool_idle_ms {
+        None => Some(DEFAULT_WALL_TIMEOUT_MS),
+        Some(inner) => inner.map(|ms| ms as u64),
+    }
+}
+
 pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     // The stream usually repeats this id in its `session` header; when it
     // doesn't (a crash before the first line), the result still carries it.
     let launched_session = session_from_argv(&spec.argv);
     let base = base_model(&spec.model).to_string();
+    let tool_idle_ms = spec.tool_idle_ms;
+    let wall_started_at = std::time::Instant::now();
     let mut wired = spec.clone();
     wired.argv = lower(&spec.argv, &spec.cwd);
     let started = match super::start_child(&wired) {
@@ -146,23 +159,43 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     let stdout = started.stdout;
     let stderr = started.stderr;
     let mut child = started.child;
+    let reaped_wall = std::sync::Arc::clone(&reaped);
     Spawned {
         kill: super::killer(pid, reaped_k),
         session_id: launched_session.clone(),
         drive: Box::new(move |on| {
             let mut state = MuseState::default();
+            let cap = wall_cap_ms(tool_idle_ms);
+            // A second kill handle for the wall timeout: the drive kills the
+            // group itself when elapsed time passes the cap.
+            let wall_kill = super::killer(pid, reaped_wall);
+            // Raw chunk and stderr liveness never count as progress: only a
+            // tool result, a model message or a terminal record refreshes
+            // the idle clock, so a reminder-task loop goes STALLED.
+            let forward = |event: Event| {
+                if matches!(event, Event::Progress(_)) {
+                    on(event);
+                }
+            };
             let pumped = super::pump(
                 stdout,
                 stderr,
-                on,
+                &forward,
                 move || {
                     let clean = child.wait().map(|s| s.success()).unwrap_or(false);
                     reaped.store(true, Ordering::SeqCst);
                     clean
                 },
                 |line| {
+                    if let Some(cap) = cap
+                        && wall_started_at.elapsed() >= std::time::Duration::from_millis(cap)
+                    {
+                        state.wall_exceeded = true;
+                        state.wall_timeout_ms = Some(cap);
+                        wall_kill();
+                    }
                     if handle_line(line, &mut state) {
-                        on(Event::Progress(ProgressSnapshotRaw {
+                        forward(Event::Progress(ProgressSnapshotRaw {
                             last_tool: state.last_tool.clone(),
                             tokens_so_far: 0.0,
                             last_assistant: state.last_assistant.clone(),
@@ -1233,5 +1266,120 @@ mod tests {
         assert!(!result.clean_exit);
         assert_eq!(result.is_error, Some(true));
         assert!(!result.text.is_empty());
+    }
+
+    #[test]
+    fn wall_cap_comes_from_the_spec_or_the_default_and_disables_on_null() {
+        assert_eq!(wall_cap_ms(None), Some(1_800_000));
+        assert_eq!(wall_cap_ms(Some(None)), None);
+        assert_eq!(wall_cap_ms(Some(Some(300.0))), Some(300));
+    }
+
+    /// Drive a finished stream on a thread and return its events with the
+    /// result, failing instead of hanging when the child outlives `timeout`.
+    /// `kill_after` kills the child first (for fakes that stay alive); `None`
+    /// leaves the kill to the drive itself.
+    fn drive_with_timeout(
+        spawned: crate::backends::types::Spawned,
+        kill_after: Option<std::time::Duration>,
+        timeout: std::time::Duration,
+    ) -> (Vec<String>, crate::backends::types::BackendResult) {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = std::sync::Arc::clone(&events);
+        let on = move |event: crate::backends::types::Event| {
+            collected.lock().unwrap().push(
+                match event {
+                    crate::backends::types::Event::Progress(_) => "progress",
+                    crate::backends::types::Event::Stderr => "stderr",
+                    crate::backends::types::Event::Activity => "activity",
+                }
+                .to_string(),
+            );
+        };
+        let drive = spawned.drive;
+        let kill = spawned.kill;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(drive(&on));
+        });
+        if let Some(wait) = kill_after {
+            std::thread::sleep(wait);
+            kill();
+        }
+        let result = rx
+            .recv_timeout(timeout)
+            .expect("drive returned before the deadline");
+        kill();
+        (events.lock().unwrap().clone(), result)
+    }
+
+    #[test]
+    fn reminder_loop_delivers_no_event_at_all() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = scratch_dir("stall-drive");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let fake = fake_muse_script(
+            &dir,
+            &format!(
+                "#!/bin/sh\ncat {}\ni=0\nwhile [ $i -lt 300 ]; do echo \"muse: banner $i\" >&2; sleep 0.1; i=$((i+1)); done\n",
+                dir.join("fixture.stdout").display()
+            ),
+        );
+        std::fs::write(dir.join("fixture.stdout"), REMINDER_STALL).unwrap();
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
+        let spawned = spawn(&spec);
+        // The test waits 2 s, then the test's own kill ends the drive: the
+        // fake's 30 s backstop never fires while the drive is collected.
+        let (events, _) = drive_with_timeout(
+            spawned,
+            Some(std::time::Duration::from_secs(2)),
+            std::time::Duration::from_secs(8),
+        );
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn progress_run_delivers_only_progress_events() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = scratch_dir("progress-drive");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        std::fs::write(dir.join("fixture.stdout"), TOOL_CALLS_FIX).unwrap();
+        let fake = fake_muse_script(
+            &dir,
+            &format!("#!/bin/sh\ncat {}\n", dir.join("fixture.stdout").display()),
+        );
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
+        let spawned = spawn(&spec);
+        let (events, result) =
+            drive_with_timeout(spawned, None, std::time::Duration::from_secs(10));
+        assert!(!events.is_empty());
+        assert!(events.iter().all(|e| e == "progress"), "{events:?}");
+        assert_eq!(result.text, "done");
+    }
+
+    #[test]
+    fn tool_result_loop_hits_the_wall_cap() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = scratch_dir("wall-drive");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let fake = fake_muse_script(
+            &dir,
+            "#!/bin/sh\ni=0\nwhile [ $i -lt 600 ]; do printf '%s\\n' '{\"payload_type\":\"tool.result\",\"payload\":{}}'; sleep 0.05; i=$((i+1)); done\n",
+        );
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let mut spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
+        spec.tool_idle_ms = Some(Some(300.0));
+        let spawned = spawn(&spec);
+        let (_, result) = drive_with_timeout(spawned, None, std::time::Duration::from_secs(10));
+        assert_eq!(result.text, "muse: wall timeout (300 ms)");
+        assert_eq!(result.is_error, Some(true));
     }
 }

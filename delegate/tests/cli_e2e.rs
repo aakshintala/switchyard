@@ -1109,3 +1109,56 @@ fn muse_run_applies_the_host_sandbox_switch() {
         }
     }
 }
+
+/// A reminder-task loop emits no progress that matters (no tool result, no
+/// model text, no terminal), so the idle watchdog ends the job STALLED: the
+/// fake prints the synthetic stall fixture, writes stderr in a loop and
+/// sleeps, and the job kills it with the group.
+#[test]
+fn muse_reminder_loop_stalls_on_the_idle_watchdog() {
+    let e = Env::new("muse-stall");
+    let dir_str = e.dir.to_str().unwrap().to_string();
+    let fixture_src = format!(
+        "{}/tests/fixtures/contract/muse/reminder-stall.stdout",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::write(
+        e.dir.join("fixture.stdout"),
+        std::fs::read(fixture_src).unwrap(),
+    )
+    .unwrap();
+    let fake = e.dir.join("muse.sh");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\ncat {}\ni=0\nwhile [ $i -lt 300 ]; do echo \"muse: reminder heartbeat $i\" >&2; sleep 0.1; i=$((i+1)); done\nsleep 30\n",
+            e.dir.join("fixture.stdout").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = e.dir.join("nonexistent-profile.json");
+    let out = e.delegate_env(
+        &["run", "--model", "muse/muse-spark-1.3-contributor"],
+        Some("loop forever"),
+        &[
+            ("MUSE_BIN", fake.to_str().unwrap()),
+            ("HOME", &dir_str),
+            ("DELEGATE_HOST_PROFILE", profile.to_str().unwrap()),
+            ("DELEGATE_IDLE_MS", "500"),
+        ],
+    );
+    let id = e.ok_output(&out);
+    // 20 s deadline for the 500 ms idle window, which is event driven.
+    let out = e.delegate(&["watch", &id, "--timeout", "20"], None);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let done: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(done["status"], "STALLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(text.starts_with("Idle watchdog killed this job"), "{text}");
+}
