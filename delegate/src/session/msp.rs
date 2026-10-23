@@ -79,7 +79,7 @@ pub enum HostEvent {
     Ignored,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TurnError {
     pub kind: String,
     pub message: String,
@@ -421,23 +421,37 @@ pub fn host_argv(model_id: &str) -> Vec<String> {
 }
 
 pub fn resolve_muse_bin() -> String {
-    if let Ok(bin) = std::env::var("MUSE_BIN")
-        && !bin.is_empty()
-    {
-        return bin;
+    let env_bin = std::env::var("MUSE_BIN").ok();
+    let home = crate::util::homedir();
+    resolve_muse_bin_from(
+        env_bin.as_deref(),
+        || {
+            let output = std::process::Command::new("which")
+                .arg("muse")
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!path.is_empty()).then_some(path)
+        },
+        &home,
+    )
+}
+
+fn resolve_muse_bin_from(
+    env_bin: Option<&str>,
+    which_muse: impl FnOnce() -> Option<String>,
+    home: &std::path::Path,
+) -> String {
+    if let Some(bin) = env_bin.filter(|bin| !bin.is_empty()) {
+        return bin.to_string();
     }
-    if let Ok(output) = std::process::Command::new("which").arg("muse").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return path;
-        }
+    if let Some(path) = which_muse().filter(|path| !path.is_empty()) {
+        return path;
     }
-    crate::util::homedir()
-        .join(".local/bin/muse")
-        .to_string_lossy()
-        .into_owned()
+    home.join(".local/bin/muse").to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
@@ -682,59 +696,44 @@ mod tests {
     #[test]
     fn resolve_muse_bin_uses_env_then_which_then_home_fallback() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        struct Restore(Option<std::ffi::OsString>);
         impl Drop for Restore {
             fn drop(&mut self) {
-                for (key, value) in self.0.drain(..) {
-                    unsafe {
-                        if let Some(value) = value {
-                            std::env::set_var(key, value);
-                        } else {
-                            std::env::remove_var(key);
-                        }
+                unsafe {
+                    if let Some(value) = self.0.take() {
+                        std::env::set_var("MUSE_BIN", value);
+                    } else {
+                        std::env::remove_var("MUSE_BIN");
                     }
                 }
             }
         }
-        let restore = Restore(
-            ["MUSE_BIN", "PATH", "HOME"]
-                .into_iter()
-                .map(|key| (key, std::env::var_os(key)))
-                .collect(),
-        );
+        let restore = Restore(std::env::var_os("MUSE_BIN"));
         let root = std::env::temp_dir().join(format!("muse-bin-{}", crate::util::random_uuid()));
-        std::fs::create_dir_all(&root).unwrap();
-        let which = root.join("which");
-        std::fs::write(&which, "#!/bin/sh\nprintf '%s\\n' /fake/from-which\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&which, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        unsafe {
-            std::env::set_var("MUSE_BIN", "/fake/from-env");
-            std::env::set_var("PATH", &root);
-            std::env::set_var("HOME", &root);
-        }
+        unsafe { std::env::set_var("MUSE_BIN", "/fake/from-env") };
         assert_eq!(resolve_muse_bin(), "/fake/from-env");
-        unsafe { std::env::remove_var("MUSE_BIN") };
-        assert_eq!(resolve_muse_bin(), "/fake/from-which");
-        unsafe { std::env::set_var("MUSE_BIN", "") };
-        assert_eq!(resolve_muse_bin(), "/fake/from-which");
-        unsafe { std::env::remove_var("MUSE_BIN") };
-
-        std::fs::write(&which, "#!/bin/sh\nprintf '\\n'\n").unwrap();
-        assert_eq!(
-            resolve_muse_bin(),
-            root.join(".local/bin/muse").to_string_lossy().into_owned()
-        );
-        std::fs::write(&which, "#!/bin/sh\nexit 1\n").unwrap();
-        assert_eq!(
-            resolve_muse_bin(),
-            root.join(".local/bin/muse").to_string_lossy().into_owned()
-        );
         drop(restore);
-        let _ = std::fs::remove_dir_all(root);
+
+        assert_eq!(
+            resolve_muse_bin_from(Some("/fake/from-env"), || panic!("env must win"), &root),
+            "/fake/from-env"
+        );
+        assert_eq!(
+            resolve_muse_bin_from(None, || Some("/fake/from-which".into()), &root),
+            "/fake/from-which"
+        );
+        assert_eq!(
+            resolve_muse_bin_from(None, || Some(String::new()), &root),
+            root.join(".local/bin/muse").to_string_lossy()
+        );
+        assert_eq!(
+            resolve_muse_bin_from(None, || None, &root),
+            root.join(".local/bin/muse").to_string_lossy()
+        );
+        assert_eq!(
+            resolve_muse_bin_from(Some(""), || Some("/fake/from-which".into()), &root),
+            "/fake/from-which"
+        );
     }
 
     #[test]
