@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) const USAGE: &str =
-    "usage: delegate run --model M [--cwd D] [--gate CMD] [--tool-idle-ms N] [--prompt-file F | stdin]
+    "usage: delegate run --model M [--cwd D] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--prompt-file F | stdin]
        delegate resume <jobId> [--model M] [--gate CMD] [--prompt-file F | stdin]
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
@@ -102,6 +102,17 @@ fn flag<'a>(kv: &'a [(String, String)], name: &str) -> Option<&'a str> {
     kv.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
+/// A millisecond flag: `None` when absent, else a finite number above zero.
+fn positive_ms_flag(kv: &[(String, String)], name: &str) -> Result<Option<f64>, String> {
+    match flag(kv, name) {
+        None => Ok(None),
+        Some(s) => match s.parse::<f64>() {
+            Ok(n) if n.is_finite() && n > 0.0 => Ok(Some(n)),
+            _ => Err(format!("invalid {name} {s}")),
+        },
+    }
+}
+
 /// `run`'s unknown-id message, reused wherever a model flag is resolved.
 fn unknown_model(config: &Config, model: &str) -> String {
     let mut ids: Vec<_> = config.models.keys().cloned().collect();
@@ -123,6 +134,7 @@ struct LaunchParams<'a> {
     cwd: &'a str,
     gate: &'a str,
     tool_idle_ms: Option<f64>,
+    idle_ms: Option<f64>,
     session: Option<&'a str>,
     resumed_from: Option<&'a str>,
 }
@@ -159,6 +171,10 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
     if let Some(ms) = p.tool_idle_ms {
         supervise_args.push("--tool-idle-ms".into());
         // Shortest round-trip so the supervisor parses the same number back.
+        supervise_args.push(ms.to_string());
+    }
+    if let Some(ms) = p.idle_ms {
+        supervise_args.push("--idle-ms".into());
         supervise_args.push(ms.to_string());
     }
     if let Some(s) = p.session {
@@ -230,6 +246,7 @@ fn run(args: &[String]) -> Result<i32, Usage> {
             "--cwd",
             "--gate",
             "--tool-idle-ms",
+            "--idle-ms",
             "--prompt-file",
         ],
     )?;
@@ -242,13 +259,8 @@ fn run(args: &[String]) -> Result<i32, Usage> {
         return usage("--model is required");
     };
     let gate = flag(&kv, "--gate").unwrap_or("").to_string();
-    let tool_idle_ms = match flag(&kv, "--tool-idle-ms") {
-        None => None,
-        Some(s) => match s.parse::<f64>() {
-            Ok(n) if n.is_finite() && n > 0.0 => Some(n),
-            _ => return usage(format!("invalid --tool-idle-ms {s}")),
-        },
-    };
+    let tool_idle_ms = positive_ms_flag(&kv, "--tool-idle-ms").or_else(usage)?;
+    let idle_ms = positive_ms_flag(&kv, "--idle-ms").or_else(usage)?;
     let deps = match build_deps() {
         Ok(d) => d,
         Err(e) => {
@@ -283,6 +295,7 @@ fn run(args: &[String]) -> Result<i32, Usage> {
         cwd: &cwd,
         gate: &gate,
         tool_idle_ms,
+        idle_ms,
         session: None,
         resumed_from: None,
     }) {
@@ -319,6 +332,7 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
     let stored_cwd = old["resume"]["cwd"].as_str().unwrap_or("").to_string();
     let stored_gate = old["resume"]["gate"].as_str().unwrap_or("").to_string();
     let tool_idle_ms = old["resume"]["toolIdleMs"].as_f64();
+    let idle_ms = old["resume"]["idleMs"].as_f64();
 
     let deps = match build_deps() {
         Ok(d) => d,
@@ -380,6 +394,7 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
         cwd: &stored_cwd,
         gate: &gate,
         tool_idle_ms,
+        idle_ms,
         session: Some(&session),
         resumed_from: Some(old_id),
     }) {
@@ -546,7 +561,13 @@ fn supervise(args: &[String]) -> i32 {
     };
     let (kv, pos) = match parse(
         args,
-        &["--gate", "--tool-idle-ms", "--session", "--resumed-from"],
+        &[
+            "--gate",
+            "--tool-idle-ms",
+            "--idle-ms",
+            "--session",
+            "--resumed-from",
+        ],
     ) {
         Ok(v) => v,
         Err(Usage(m)) => return fail(m),
@@ -555,12 +576,11 @@ fn supervise(args: &[String]) -> i32 {
         return 2;
     };
     let gate = flag(&kv, "--gate").unwrap_or("").to_string();
-    let tool_idle_ms = match flag(&kv, "--tool-idle-ms") {
-        None => None,
-        Some(s) => match s.parse::<f64>() {
-            Ok(n) if n.is_finite() && n > 0.0 => Some(n),
-            _ => return 2,
-        },
+    let (Ok(tool_idle_ms), Ok(idle_ms)) = (
+        positive_ms_flag(&kv, "--tool-idle-ms"),
+        positive_ms_flag(&kv, "--idle-ms"),
+    ) else {
+        return 2;
     };
     let deps = match build_deps() {
         Ok(d) => d,
@@ -606,7 +626,7 @@ fn supervise(args: &[String]) -> i32 {
         path: Some(resolve_path(cwd)),
         head_before: capture_head(cwd, None),
         gate: gate.clone(),
-        idle_ms: None,
+        idle_ms: idle_ms.map(Some),
         tool_idle_ms: tool_idle_ms.map(Some).or(config.profile.tool_idle_ms),
         price_map,
         resume_context: ResumeContext {
@@ -650,6 +670,7 @@ fn supervise(args: &[String]) -> i32 {
         last_session_id: std::sync::Mutex::new(None),
         gate: gate.clone(),
         tool_idle_ms,
+        idle_ms,
         resumed_from: resumed_from.clone(),
     });
     let registry = JobHandle::new(rd);
@@ -823,5 +844,78 @@ fn settle_dead_supervisor(id: &str) {
             "cannot write status record {}: {e}",
             job_record_path(id).display()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::status_record::CliResume;
+
+    fn kv(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn idle_ms_flag_parses_a_positive_number() {
+        let args: Vec<String> = ["--idle-ms", "1200000"].map(String::from).to_vec();
+        let Ok((parsed, pos)) = parse(&args, &["--idle-ms"]) else {
+            panic!("--idle-ms must be a known run flag");
+        };
+        assert!(pos.is_empty());
+        assert_eq!(
+            positive_ms_flag(&parsed, "--idle-ms"),
+            Ok(Some(1_200_000.0))
+        );
+        assert_eq!(positive_ms_flag(&[], "--idle-ms"), Ok(None));
+    }
+
+    #[test]
+    fn idle_ms_flag_rejects_non_numbers_zero_and_negatives() {
+        for bad in ["abc", "0", "-5", "NaN", "inf"] {
+            let parsed = kv(&[("--idle-ms", bad)]);
+            assert_eq!(
+                positive_ms_flag(&parsed, "--idle-ms"),
+                Err(format!("invalid --idle-ms {bad}"))
+            );
+        }
+    }
+
+    #[test]
+    fn run_rejects_a_bad_idle_ms_before_it_starts_anything() {
+        let args: Vec<String> = ["--model", "x", "--idle-ms", "0"]
+            .map(String::from)
+            .to_vec();
+        let Err(Usage(msg)) = run(&args) else {
+            panic!("a zero --idle-ms must be a usage error");
+        };
+        assert_eq!(msg, "invalid --idle-ms 0");
+    }
+
+    #[test]
+    fn resume_record_keeps_idle_ms_under_resume_as_idle_ms() {
+        let resume = CliResume {
+            model: "muse/m".into(),
+            backend: Some("muse".into()),
+            cwd: "/tmp".into(),
+            session_id: None,
+            gate: String::new(),
+            tool_idle_ms: None,
+            idle_ms: Some(1_200_000.0),
+        };
+        let rec = serde_json::to_value(&resume).unwrap();
+        // `resume()` reads this key back for the next run.
+        assert_eq!(rec["idleMs"].as_f64(), Some(1_200_000.0));
+        assert!(rec.get("toolIdleMs").is_some());
+
+        let unset = CliResume {
+            idle_ms: None,
+            ..resume
+        };
+        let rec = serde_json::to_value(&unset).unwrap();
+        assert!(rec["idleMs"].is_null());
     }
 }
