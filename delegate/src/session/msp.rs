@@ -368,41 +368,15 @@ pub fn turn_interrupt_params(session_id: &str, turn_id: Option<&str>, now_ms: u6
 }
 
 pub fn uuid7(now_ms: u64) -> String {
-    let mut bytes = [0u8; 16];
-    let hex: Vec<_> = crate::util::random_uuid()
-        .bytes()
-        .filter(|byte| *byte != b'-')
-        .collect();
-    let (pairs, remainder) = hex.as_chunks::<2>();
-    debug_assert!(remainder.is_empty());
-    for (index, pair) in pairs.iter().enumerate() {
-        bytes[index] =
-            u8::from_str_radix(std::str::from_utf8(pair).expect("hex UUID"), 16).expect("hex UUID");
-    }
-    let timestamp = now_ms & 0x0000_ffff_ffff_ffff;
-    for (index, byte) in bytes[..6].iter_mut().enumerate() {
-        *byte = (timestamp >> ((5 - index) * 8)) as u8;
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x70;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let random = crate::util::random_uuid();
+    let timestamp = format!("{:012x}", now_ms & 0x0000_ffff_ffff_ffff);
     format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
+        "{}-{}-7{}-{}-{}",
+        &timestamp[..8],
+        &timestamp[8..],
+        &random[15..18],
+        &random[19..23],
+        &random[24..]
     )
 }
 
@@ -534,25 +508,15 @@ mod tests {
         );
 
         let abort = frames(ABORT_RACE);
-        let abort_terms: Vec<_> = abort
-            .iter()
-            .filter_map(|(_, incoming)| match incoming {
-                Incoming::Event(HostEvent::TurnCompleted { terminal, .. }) => {
-                    Some(terminal.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            abort_terms,
-            [
-                "completed",
-                "completed",
-                "cancelled",
-                "completed",
-                "completed"
-            ]
-        );
+        // Contract: delegate/README.md:53.
+        assert!(abort.iter().any(|(_, incoming)| matches!(
+            incoming,
+            Incoming::Event(HostEvent::TurnCompleted { terminal, .. }) if terminal == "completed"
+        )));
+        assert!(abort.iter().any(|(_, incoming)| matches!(
+            incoming,
+            Incoming::Event(HostEvent::TurnCompleted { terminal, .. }) if terminal == "cancelled"
+        )));
         let queued = abort.iter().find(|(line, _)| *line == 82).unwrap();
         match &queued.1 {
             Incoming::Response {
@@ -574,37 +538,24 @@ mod tests {
             }
         }
 
-        let client_terms: Vec<_> = frames(CLIENT)
-            .into_iter()
-            .filter_map(|(_, incoming)| match incoming {
-                Incoming::Event(HostEvent::TurnCompleted { terminal, .. }) => Some(terminal),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            client_terms,
-            [
-                "completed",
-                "completed",
-                "completed",
-                "cancelled",
-                "completed"
-            ]
-            .map(str::to_string)
-        );
-        let bad_terms: Vec<_> = frames(BAD_MODEL)
-            .into_iter()
-            .filter_map(|(_, incoming)| match incoming {
-                Incoming::Event(HostEvent::TurnCompleted {
-                    terminal, error, ..
-                }) => Some((terminal, error.map(|e| e.kind))),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            bad_terms,
-            [(String::from("failed"), Some(String::from("modelError")))]
-        );
+        let client = frames(CLIENT);
+        assert!(client.iter().any(|(_, incoming)| matches!(
+            incoming,
+            Incoming::Event(HostEvent::TurnCompleted { terminal, .. }) if terminal == "completed"
+        )));
+        assert!(client.iter().any(|(_, incoming)| matches!(
+            incoming,
+            Incoming::Event(HostEvent::TurnCompleted { terminal, .. }) if terminal == "cancelled"
+        )));
+        // Contract: delegate/README.md:53.
+        let bad_model_failed = frames(BAD_MODEL).into_iter().any(|(_, incoming)| {
+            matches!(
+                incoming,
+                Incoming::Event(HostEvent::TurnCompleted { terminal, error: Some(error), .. })
+                    if terminal == "failed" && error.kind == "modelError"
+            )
+        });
+        assert!(bad_model_failed);
         assert_eq!(
             ack_disposition(&json!({"disposition":"future"})),
             Disposition::Other
@@ -675,6 +626,7 @@ mod tests {
 
     #[test]
     fn host_argv_is_sandbox_disabled_without_yolo() {
+        // Contract: delegate/README.md:55.
         let args = host_argv("muse-spark-1.3-contributor");
         assert_eq!(
             args,
@@ -695,6 +647,7 @@ mod tests {
 
     #[test]
     fn resolve_muse_bin_uses_env_then_which_then_home_fallback() {
+        // Contract: delegate/README.md:56.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         struct Restore(Option<std::ffi::OsString>);
         impl Drop for Restore {

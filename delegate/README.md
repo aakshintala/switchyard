@@ -47,6 +47,19 @@ A codex model id is `codex/` plus the Codex model name with an optional `:<tier>
 
 A Muse model id is `muse/` plus the Muse model name (for example, `muse/muse-spark-1.3-contributor`). The backend runs `muse exec --json --disable-approval --model <model> --reasoning-effort low --session-id <id> [--disable-sandbox] --workspace <cwd> -- <prompt>` and reuses the session id when resuming. A host profile with `museSandbox: true` omits `--disable-sandbox`; both hosts disable the sandbox by default, so the worktree is the only containment. Muse carries no tiers, so the ladder never picks it; the pi route stays the fallback when Muse is missing. Runs record `calls` and `allowance` (window and weekly used percent plus reset times) in job usage. A run with no tool result, model text or terminal for the idle window ends `STALLED` (a long silent tool call needs a higher `idleMs`). The hard wall cap comes from the tool-idle limit (30 minutes by default) and applies even when Muse sends no stdout. `delegate doctor` does not check Muse yet.
 
+## Muse session state contracts
+
+- `turnCount` starts at zero. It increases once when a host turn starts: on an accepted `turn/start` acknowledgement with disposition `started`, or on `turn/started` when the session is idle with no active turn.
+- `Store::update` writes state before appending event lines. If the state write fails, it commits neither state nor event sequence.
+- A new session starts its event sequence at 1. Each successful append advances the sequence by one.
+- `list` orders session entries by `startedAt`, then by session id.
+- The MSP adapter preserves each `turn/completed` terminal value (`completed`, `failed` or `cancelled`) and preserves a failed turn's error kind.
+- A matching turn completion returns one event line. If pending steer ids remain, it returns one `steer.unconsumed` line and clears them.
+- The Muse session host command is `serve --provider meta --model <model-id> --disable-sandbox`.
+- Muse binary lookup checks `MUSE_BIN`, then `which muse`, then `~/.local/bin/muse`.
+- An idle `session/statusChanged` event does not end a turn. A matching `turn/completed` event does.
+- The first `mark_dead` call sets the reason and message. Later calls do not replace them.
+
 ## Status records
 
 Each job writes `$TMPDIR/delegate-jobs/<jobId>.json` (use `$TMPDIR` when set, otherwise the OS temp directory). Prompt text is stored alongside as `<jobId>.prompt` until the supervisor starts. A gate writes its full ANSI-stripped output to `<jobId>-gate.log` beside the record; later gate runs for the same job use numbered names. `result.gateResult.outputPath` names the file, and `outputTail` remains the last 2048 bytes. When the supervisor resumed a session past a transient provider error (a 5xx, or a first 401), `result.retries` lists each failed attempt; it is absent when there were none.

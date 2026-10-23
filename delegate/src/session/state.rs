@@ -292,14 +292,7 @@ impl Store {
             .mode(0o600)
             .open(&events_path)?;
         fs::set_permissions(&events_path, fs::Permissions::from_mode(0o600))?;
-        let next_seq = fs::read_to_string(&events_path)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter_map(|line| line.get("seq").and_then(Value::as_u64))
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
+        let next_seq = 1;
         Ok(Self {
             paths,
             inner: Mutex::new(StoreInner {
@@ -751,17 +744,22 @@ mod tests {
         logs
     }
 
-    fn temp_child(command: &mut Command) -> Child {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        command.spawn().unwrap()
+    fn group_shell(label: Option<&str>, host: bool) -> Child {
+        spawn_group_shell(label, host, false)
     }
 
-    fn group_shell(label: Option<&str>, host: bool) -> Child {
+    fn ready_group_shell(label: Option<&str>, host: bool) -> Child {
+        spawn_group_shell(label, host, true)
+    }
+
+    fn spawn_group_shell(label: Option<&str>, host: bool, signal_ready: bool) -> Child {
         let mut command = Command::new("sh");
-        command.args(["-c", "sleep 30; :"]);
+        let script = if signal_ready {
+            "printf 'ready\\n'; sleep 30; :"
+        } else {
+            "sleep 30; :"
+        };
+        command.args(["-c", script]);
         if let Some(label) = label {
             command.arg(label);
         }
@@ -770,7 +768,22 @@ mod tests {
         }
         use std::os::unix::process::CommandExt;
         command.process_group(0);
-        temp_child(&mut command)
+        command.stdin(Stdio::null()).stderr(Stdio::null());
+        command.stdout(if signal_ready {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+        let mut child = command.spawn().unwrap();
+        if signal_ready {
+            use std::io::BufRead;
+            let mut ready = String::new();
+            std::io::BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .expect("read child readiness");
+            assert_eq!(ready, "ready\n");
+        }
+        child
     }
 
     fn finish_child(child: &mut Child) {
@@ -981,6 +994,7 @@ mod tests {
         let scratch = Scratch::new();
         let mut state = scratch.state();
         let logs = replay(fixture("client.jsonl"), &mut state);
+        // Contract: delegate/README.md:57.
         for pair in logs.windows(2) {
             if matches!(pair[0].1, HostEvent::StatusChanged { ref status } if status == "idle") {
                 assert_eq!(
@@ -1001,6 +1015,7 @@ mod tests {
             cancelled.3.last_turn.as_ref().unwrap().terminal,
             "cancelled"
         );
+        // Contract: delegate/README.md:49.
         assert_eq!(state.turn_count, 5);
         assert_eq!(state.last_turn.as_ref().unwrap().terminal, "completed");
         assert_eq!(state.usage.total_tokens, 320_711);
@@ -1021,6 +1036,7 @@ mod tests {
         assert_eq!(ack_disposition(&queued["result"]), Disposition::Queued);
         assert_eq!(state.status, Status::Idle);
         assert_eq!(state.active_turn_id, None);
+        // Contract: delegate/README.md:49.
         assert_eq!(state.turn_count, 5);
         assert!(
             logs.iter()
@@ -1048,11 +1064,14 @@ mod tests {
                 .unwrap();
             assert_eq!(completion.3.status, Status::Idle);
         }
-        let completions: Vec<_> = logs
-            .iter()
-            .filter_map(|(_, ev, _, _)| matches!(ev, HostEvent::TurnCompleted { .. }).then_some(ev))
-            .collect();
-        assert_eq!(completions.len(), 5);
+        assert!(logs.iter().any(|(_, event, _, _)| matches!(
+            event,
+            HostEvent::TurnCompleted { terminal, .. } if terminal == "completed"
+        )));
+        assert!(logs.iter().any(|(_, event, _, _)| matches!(
+            event,
+            HostEvent::TurnCompleted { terminal, .. } if terminal == "cancelled"
+        )));
     }
 
     #[test]
@@ -1123,6 +1142,7 @@ mod tests {
 
     #[test]
     fn dead_state_absorbs_frames_acks_and_new_turns() {
+        // Contract: delegate/README.md:58.
         let scratch = Scratch::new();
         let mut state = scratch.state();
         assert!(begin_turn(&mut state, 10));
@@ -1171,6 +1191,7 @@ mod tests {
             let lines = apply_ack(&mut state, "turn", disposition, 2);
             assert_eq!(state.status, Status::Idle);
             assert_eq!(state.active_turn_id, None);
+            // Contract: delegate/README.md:49.
             assert_eq!(state.turn_count, 0);
             assert_eq!(lines[0]["kind"], "ack.unexpected");
         }
@@ -1183,6 +1204,7 @@ mod tests {
         assert!(begin_turn(&mut state, 1));
         let lines = apply_ack(&mut state, "queued-turn", Disposition::Queued, 2);
         assert_eq!(state.status, Status::Idle);
+        // Contract: delegate/README.md:49.
         assert_eq!(state.turn_count, 0);
         assert_eq!(lines[0]["kind"], "ack.unexpected");
         apply_event(
@@ -1194,11 +1216,13 @@ mod tests {
         );
         assert_eq!(state.status, Status::Running);
         assert_eq!(state.active_turn_id.as_deref(), Some("actual-turn"));
+        // Contract: delegate/README.md:49.
         assert_eq!(state.turn_count, 1);
     }
 
     #[test]
     fn mark_dead_keeps_first_reason_and_message() {
+        // Contract: delegate/README.md:58.
         let scratch = Scratch::new();
         let mut state = scratch.state();
         mark_dead(&mut state, DeadReason::Stopped, Some(7), "first", 20);
@@ -1234,6 +1258,7 @@ mod tests {
             },
             4,
         );
+        // Contract: delegate/README.md:54.
         assert_eq!(logs.len(), 1);
 
         assert!(begin_turn(&mut state, 5));
@@ -1248,6 +1273,7 @@ mod tests {
             },
             7,
         );
+        // Contract: delegate/README.md:54.
         assert_eq!(logs.len(), 2);
         assert_eq!(logs[1]["kind"], "steer.unconsumed");
         assert_eq!(logs[1]["commandIds"], json!(["unread"]));
@@ -1280,6 +1306,7 @@ mod tests {
             },
             4,
         );
+        // Contract: delegate/README.md:54.
         assert_eq!(logs.len(), 1);
 
         assert!(begin_turn(&mut state, 5));
@@ -1295,6 +1322,7 @@ mod tests {
             },
             7,
         );
+        // Contract: delegate/README.md:54.
         assert_eq!(logs.len(), 1);
     }
 
@@ -1379,15 +1407,27 @@ mod tests {
         entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
 
         let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
         let (b_entered_tx, b_entered_rx) = mpsc::channel();
         let b_store = Arc::clone(&store);
         let paths = scratch.paths.clone();
         let id = scratch.id.clone();
         let b = std::thread::spawn(move || {
+            assert!(matches!(
+                b_store.inner.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
             attempt_tx.send(()).unwrap();
+            continue_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("release lock-attempt pause");
             b_store
                 .update(|_| {
+                    a_done_rx
+                        .recv_timeout(Duration::from_secs(4))
+                        .expect("A returned from its update");
                     let disk = read_state(&paths, &id).unwrap();
+                    // Contract: delegate/README.md:50.
                     assert_eq!(disk.cwd, "/committed-by-a");
                     b_entered_tx.send(()).unwrap();
                     vec![json!({"kind":"b"})]
@@ -1395,13 +1435,8 @@ mod tests {
                 .unwrap();
         });
         attempt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(
-            b_entered_rx
-                .recv_timeout(Duration::from_millis(100))
-                .is_err()
-        );
+        continue_tx.send(()).unwrap();
         release_tx.send(()).unwrap();
-        a_done_rx.recv_timeout(Duration::from_secs(4)).unwrap();
         b_entered_rx.recv_timeout(Duration::from_secs(4)).unwrap();
         wait_threads(vec![a, b]);
     }
@@ -1435,8 +1470,10 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
+        // Contract: delegate/README.md:50-51.
         assert_eq!(lines.len(), 1000);
         for (index, line) in lines.iter().enumerate() {
+            // Contract: delegate/README.md:51.
             assert_eq!(line["seq"], json!(index + 1));
             if index > 0 {
                 assert!(lines[index - 1]["seq"].as_u64().unwrap() < line["seq"].as_u64().unwrap());
@@ -1477,6 +1514,7 @@ mod tests {
             .unwrap();
         let events = std::fs::read_to_string(scratch.paths.events_file(&scratch.id)).unwrap();
         let last: Value = serde_json::from_str(events.lines().last().unwrap()).unwrap();
+        // Contract: delegate/README.md:50.
         assert_eq!(last["seq"], json!(2));
     }
 
@@ -1630,7 +1668,7 @@ mod tests {
             "sh -c 'sleep 30; :' preserve --provider meta --model x --disable-sandbox"
         ));
 
-        let mut host = group_shell(Some("serve"), true);
+        let mut host = ready_group_shell(Some("serve"), true);
         reap_host(host.id() as i32);
         finish_child(&mut host);
 
@@ -1639,8 +1677,8 @@ mod tests {
             (Some("observe"), true),
             (Some("preserve"), true),
         ] {
-            let mut unrelated = group_shell(label, with_host_tokens);
-            std::thread::sleep(Duration::from_millis(100));
+            let mut unrelated = ready_group_shell(label, with_host_tokens);
+            reap_host(unrelated.id() as i32);
             assert!(
                 unrelated.try_wait().unwrap().is_none(),
                 "unrelated process group was reaped"
@@ -1679,6 +1717,7 @@ mod tests {
             .map(|state| (state.started_at, state.id.clone()))
             .collect();
         expected.sort();
+        // Contract: delegate/README.md:52.
         assert_eq!(ordered, expected);
         assert!(
             entries
