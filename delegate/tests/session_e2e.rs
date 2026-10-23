@@ -1055,6 +1055,17 @@ fn list_sorts_by_started_time_then_id_and_marks_unreadable() {
     let first = id_from(&h.start(b"FAST", false, "", &[]));
     let second = id_from(&h.start(b"FAST", false, "", &[]));
     let third = id_from(&h.start(b"FAST", false, "", &[]));
+    for id in [&first, &second, &third] {
+        let stopped = h.invoke(&["stop", id]);
+        assert!(
+            stopped.status.success(),
+            "failed to stop {id}: {}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+        h.wait_state(id, "session stopped before editing list state", |state| {
+            state["status"] == "dead"
+        });
+    }
     for (id, started) in [(&first, 20), (&second, 10), (&third, 10)] {
         let path = h.root().join(id).join("state.json");
         let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
