@@ -383,6 +383,9 @@ fn finish(
         .clone()
         .or_else(|| launched_session.map(str::to_string));
     let usage = state.usage_payload.as_ref().map(parse_usage);
+    // A failed model call that the run recovered from is not a diagnostic
+    // for the answer: it is noted on stderr and the answer is kept.
+    let mut failed_calls_note = None;
     let diagnostic = if state.wall_exceeded {
         Some(format!(
             "muse: wall timeout ({} ms)",
@@ -432,10 +435,10 @@ fn finish(
                         .map(|value| value.as_u64().unwrap_or(1))
                         .unwrap_or(0);
                     if failed_calls != 0 {
-                        Some(format!("muse: {failed_calls} failed model call(s)"))
-                    } else {
-                        None
+                        failed_calls_note =
+                            Some(format!("muse: {failed_calls} failed model call(s)"));
                     }
+                    None
                 }
             }
         } else {
@@ -447,6 +450,11 @@ fn finish(
         return error_result(text, session_id, usage, clean_exit, stderr);
     }
 
+    let (is_error, stderr) = match failed_calls_note {
+        Some(note) if stderr.trim().is_empty() => (Some(true), format!("{note}\n")),
+        Some(note) => (Some(true), format!("{}\n{note}\n", stderr.trim_end())),
+        None => (Some(false), stderr.to_string()),
+    };
     BackendResult {
         text: state
             .terminal
@@ -458,10 +466,10 @@ fn finish(
         session_id,
         usage,
         cost_usd: None,
-        is_error: Some(false),
+        is_error,
         duration_ms: None,
         clean_exit,
-        stderr: stderr.to_string(),
+        stderr,
         permission_denials: Vec::new(),
         provider_status: None,
     }
@@ -647,7 +655,7 @@ mod tests {
         for (failed_calls, expected_error, expected_text) in [
             (Some(0), false, "done"),
             (None, false, "done"),
-            (Some(1), true, "muse: 1 failed model call(s)"),
+            (Some(1), true, "done"),
         ] {
             let mut records = json_records(TOOL_CALLS_FIX);
             let usage = record_mut(&mut records, "run.usage");
@@ -662,7 +670,45 @@ mod tests {
             let result = parse_fixture(&encode_records(&records));
             assert_eq!(result.is_error, Some(expected_error));
             assert_eq!(result.text, expected_text);
+            assert_eq!(
+                result.stderr.contains("muse: 1 failed model call(s)"),
+                failed_calls == Some(1)
+            );
         }
+    }
+
+    #[test]
+    fn failed_model_call_keeps_a_status_line_in_the_answer() {
+        let mut records = json_records(TOOL_CALLS_FIX);
+        record_mut(&mut records, "run.terminal.completed")["payload"]["text"] =
+            json!("needs the file path\nSTATUS: NEEDS_CONTEXT");
+        record_mut(&mut records, "run.usage")["payload"]["failed_calls"] = json!(1);
+        let result = parse_fixture(&encode_records(&records));
+        assert_eq!(result.text, "needs the file path\nSTATUS: NEEDS_CONTEXT");
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.session_id.as_deref(),
+            Some("01a1653e-f945-7f52-a4aa-139bcbf0e597")
+        );
+        assert!(result.stderr.contains("muse: 1 failed model call(s)"));
+        assert_eq!(
+            derive_status(&result.text, result.is_error, true),
+            RunStatus::NeedsContext
+        );
+    }
+
+    #[test]
+    fn failed_model_call_without_a_status_line_stays_error_with_the_answer() {
+        let mut records = json_records(TOOL_CALLS_FIX);
+        record_mut(&mut records, "run.usage")["payload"]["failed_calls"] = json!(1);
+        let result = parse_fixture(&encode_records(&records));
+        assert_eq!(result.text, "done");
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.stderr.contains("muse: 1 failed model call(s)"));
+        assert_eq!(
+            derive_status(&result.text, result.is_error, true),
+            RunStatus::Error
+        );
     }
 
     #[test]
