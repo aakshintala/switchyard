@@ -5,6 +5,8 @@
 # id, fill the brief from flags then state, write the gate script, dispatch
 # through delegate, watch with no timeout, follow supersededBy to the newest
 # record, and print one verdict line plus a digest of at most 40 lines.
+# A verifier-r* slot's wall cap travels on the run call (--wall-ms); watch
+# only reads the record.
 # Every state read and write goes through tkt-state; the model comes from
 # --model or state model.<slot> and is never picked here.
 # Usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] |
@@ -252,10 +254,13 @@ else
   # Muse reports no running_tool phase, so a silent bash call gets the 30 min --idle-ms window instead.
   tool_idle=()
   case "$model" in muse/*) tool_idle=(--tool-idle-ms 7200000 --idle-ms 1800000) ;; esac
+  # Only a Verifier gets a wall cap: a lane legitimately runs for hours.
+  wall=()
+  case "$slot" in verifier-r*) wall=(--wall-ms 10800000) ;; esac
   if [ -n "$gate" ]; then
-    jobid="$("$delegate" run --model "$model" --cwd "$worktree" --gate "$gate" ${tool_idle[@]+"${tool_idle[@]}"} --prompt-file "$brief" | head -n 1)"
+    jobid="$("$delegate" run --model "$model" --cwd "$worktree" --gate "$gate" ${tool_idle[@]+"${tool_idle[@]}"} ${wall[@]+"${wall[@]}"} --prompt-file "$brief" | head -n 1)"
   else
-    jobid="$("$delegate" run --model "$model" --cwd "$worktree" ${tool_idle[@]+"${tool_idle[@]}"} --prompt-file "$brief" | head -n 1)"
+    jobid="$("$delegate" run --model "$model" --cwd "$worktree" ${tool_idle[@]+"${tool_idle[@]}"} ${wall[@]+"${wall[@]}"} --prompt-file "$brief" | head -n 1)"
   fi
   tkt set "job.$slot" "$jobid"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid"
@@ -309,7 +314,16 @@ else
   case "$status" in
     NEEDS_CONTEXT) verdict="ASK id=$jobid"; ec=1 ;;
     BLOCKED) verdict="BLOCKED id=$jobid"; ec=1 ;;
-    ERROR|STALLED|CANCELLED) verdict="JOB-ERROR status=$status id=$jobid"; ec=1 ;;
+    ERROR|STALLED|CANCELLED)
+      # A wall-budget expiry is a CANCELLED whose text starts with the wall
+      # wording; any other CANCELLED (a user cancel, a later mention) is a
+      # plain job error.
+      case "$status:$text" in
+        "CANCELLED:Cancelled: wall budget of "*)
+          verdict="WALL-CAP id=$jobid"; ec=1 ;;
+        *) verdict="JOB-ERROR status=$status id=$jobid"; ec=1 ;;
+      esac
+      ;;
     DONE|DONE_WITH_CONCERNS)
       # A failed gate script rules over the status word.
       if [ "$gate_failed" -eq 1 ]; then
