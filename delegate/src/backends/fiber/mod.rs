@@ -114,6 +114,30 @@ pub fn parse_stdout(stdout: &str, clean_exit: bool, stderr: &str) -> BackendResu
     finish(state, clean_exit, stderr)
 }
 
+/// One tool call's reviewer trail, keyed by `action_id`. The first request,
+/// the first resolution and the first completion for an action win.
+#[derive(Debug, Default)]
+struct ActionRecord {
+    action_id: Option<String>,
+    tool_name: Option<String>,
+    command: Option<String>,
+    resolution: Option<ActionResolution>,
+    completion: Option<ActionCompletion>,
+}
+
+#[derive(Debug)]
+struct ActionResolution {
+    decision: String,
+    decided_by: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct ActionCompletion {
+    status: String,
+    reason: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct FiberState {
     session_id: Option<String>,
@@ -124,6 +148,9 @@ struct FiberState {
     usage_by_generation: HashMap<String, (f64, f64)>,
     exited: Option<serde_json::Value>,
     exited_session: Option<String>,
+    actions: HashMap<String, ActionRecord>,
+    action_order: Vec<String>,
+    anonymous_actions: u64,
     /// The first `notice` with `payload.code == "no_model"`: Fiber denied
     /// every reviewed tool call for lack of a reviewer model. The run can
     /// still exit 0 with `turn_completed` completed; the result is an error
@@ -134,6 +161,56 @@ struct FiberState {
 impl FiberState {
     fn tokens_so_far(&self) -> f64 {
         self.usage_by_generation.values().map(|(i, o)| i + o).sum()
+    }
+
+    /// The denial list, in the order each action first appeared. An action
+    /// is a denial when a reviewer-set member denied it (`reviewer`,
+    /// `no_reviewer` or `budget`) or when its call completed as denied.
+    /// Keys with unknown values are omitted, never invented.
+    fn denial_list(&self) -> Vec<serde_json::Value> {
+        fn reviewer_set(s: &str) -> bool {
+            matches!(s, "reviewer" | "no_reviewer" | "budget")
+        }
+        let mut out = Vec::new();
+        for key in &self.action_order {
+            let Some(rec) = self.actions.get(key) else {
+                continue;
+            };
+            let resolution_denial = rec.resolution.as_ref().is_some_and(|r| {
+                r.decision == "deny" && r.decided_by.as_deref().is_some_and(reviewer_set)
+            });
+            let completed_denied = rec
+                .completion
+                .as_ref()
+                .is_some_and(|c| c.status == "denied");
+            if !(resolution_denial || completed_denied) {
+                continue;
+            }
+            let mut obj = serde_json::Map::new();
+            if let Some(name) = &rec.tool_name {
+                obj.insert("tool_name".into(), name.clone().into());
+            }
+            if let Some(id) = &rec.action_id {
+                obj.insert("action_id".into(), id.clone().into());
+            }
+            if let Some(resolution) = &rec.resolution {
+                if let Some(decided_by) = &resolution.decided_by {
+                    obj.insert("decided_by".into(), decided_by.clone().into());
+                }
+                if let Some(reason) = &resolution.reason {
+                    obj.insert("reason".into(), reason.clone().into());
+                }
+            } else if let Some(completion) = &rec.completion
+                && let Some(reason) = &completion.reason
+            {
+                obj.insert("reason".into(), reason.clone().into());
+            }
+            if let Some(command) = &rec.command {
+                obj.insert("command".into(), command.clone().into());
+            }
+            out.push(serde_json::Value::Object(obj));
+        }
+        out
     }
 }
 
@@ -158,6 +235,93 @@ fn cache_write_tokens(tokens: Option<&serde_json::Value>) -> f64 {
             .sum();
     }
     0.0
+}
+
+/// A non-empty string field of a payload object, or `None` when unknown.
+fn non_empty(payload: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    payload
+        .and_then(|p| p.get(key))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The `command` argument of a tool call. `arguments` is an object, or a
+/// string holding raw text when it was not JSON.
+fn request_command(arguments: Option<&serde_json::Value>) -> Option<String> {
+    match arguments {
+        Some(serde_json::Value::Object(obj)) => obj
+            .get("command")
+            .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        Some(serde_json::Value::String(raw)) => serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|v| request_command(Some(&v))),
+        _ => None,
+    }
+}
+
+/// The record for one event's action. An event without `action_id` gets its
+/// own key, so it is never merged with another.
+fn action_record<'a>(ev: &serde_json::Value, state: &'a mut FiberState) -> &'a mut ActionRecord {
+    let key = ev
+        .get("action_id")
+        .and_then(|a| a.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            state.anonymous_actions += 1;
+            format!("\u{0}anonymous:{}", state.anonymous_actions)
+        });
+    if !state.actions.contains_key(&key) {
+        let action_id = if key.starts_with('\u{0}') {
+            None
+        } else {
+            Some(key.clone())
+        };
+        state.action_order.push(key.clone());
+        state.actions.insert(
+            key.clone(),
+            ActionRecord {
+                action_id,
+                ..Default::default()
+            },
+        );
+    }
+    state.actions.get_mut(&key).expect("just inserted")
+}
+
+fn record_request(ev: &serde_json::Value, state: &mut FiberState) {
+    let rec = action_record(ev, state);
+    if rec.tool_name.is_none() {
+        let payload = ev.get("payload");
+        rec.tool_name = non_empty(payload, "name");
+        rec.command = request_command(payload.and_then(|p| p.get("arguments")));
+    }
+}
+
+fn record_resolution(ev: &serde_json::Value, state: &mut FiberState) {
+    let rec = action_record(ev, state);
+    if rec.resolution.is_none() {
+        let payload = ev.get("payload");
+        rec.resolution = Some(ActionResolution {
+            decision: non_empty(payload, "decision").unwrap_or_default(),
+            decided_by: non_empty(payload, "decided_by"),
+            reason: non_empty(payload, "reason"),
+        });
+    }
+}
+
+fn record_completion(ev: &serde_json::Value, state: &mut FiberState) {
+    let rec = action_record(ev, state);
+    if rec.completion.is_none() {
+        let payload = ev.get("payload");
+        rec.completion = Some(ActionCompletion {
+            status: non_empty(payload, "status").unwrap_or_default(),
+            reason: non_empty(payload, "reason"),
+        });
+    }
 }
 
 /// Fold one stdout line into the state. Unparseable lines are ignored.
@@ -185,6 +349,7 @@ fn handle_line(line: &[u8], state: &mut FiberState) -> bool {
     let payload = ev.get("payload");
     match kind {
         "tool_call_requested" => {
+            record_request(&ev, state);
             if let Some(name) = payload.and_then(|p| p.get("name")).and_then(|n| n.as_str())
                 && !name.is_empty()
             {
@@ -230,6 +395,14 @@ fn handle_line(line: &[u8], state: &mut FiberState) -> bool {
             }
             changed
         }
+        "permission_resolved" => {
+            record_resolution(&ev, state);
+            changed
+        }
+        "tool_call_completed" => {
+            record_completion(&ev, state);
+            changed
+        }
         "turn_completed" => changed,
         "notice" => {
             if state.notice_no_model.is_none()
@@ -272,6 +445,7 @@ fn tool_path(arguments: Option<&serde_json::Value>) -> Option<String> {
 
 /// Turn the terminal `fiber_exited` (or the lack of one) into the normalized result.
 fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
+    let permission_denials = state.denial_list();
     let session_id = state.session_id.or(state.exited_session);
     let notice_no_model = state.notice_no_model;
     let Some(exited) = state.exited else {
@@ -288,6 +462,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
             is_error: Some(true),
             clean_exit,
             stderr: stderr.to_string(),
+            permission_denials,
             ..Default::default()
         };
     };
@@ -327,7 +502,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         duration_ms: None,
         clean_exit,
         stderr: stderr.to_string(),
-        permission_denials: Vec::new(),
+        permission_denials,
         provider_status,
     }
 }

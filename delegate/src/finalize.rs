@@ -391,4 +391,37 @@ mod tests {
         let out = finalize_stall(&stalled(), &ctx);
         assert_eq!(out.job_id.as_deref(), Some("job-9"));
     }
+
+    #[test]
+    fn clean_denial_downgrades_done() {
+        let mut res = ok_result();
+        res.permission_denials = vec![serde_json::json!({
+            "tool_name": "shell",
+            "action_id": "a_denied",
+            "decided_by": "reviewer",
+            "reason": "fetches a remote host",
+            "command": "curl https://example.com",
+        })];
+        let out = finalize_run(&res, &base_ctx());
+        assert_eq!(out.status, RunStatus::DoneWithConcerns);
+        let concerns = out.concerns.expect("concerns");
+        assert!(
+            concerns
+                .iter()
+                .any(|c| c.contains("permission denied: shell")),
+            "{concerns:?}"
+        );
+    }
+
+    #[test]
+    fn denial_on_error_stays_error() {
+        let res = BackendResult {
+            clean_exit: false,
+            stderr: "boom".into(),
+            permission_denials: vec![serde_json::json!({"tool_name": "shell"})],
+            ..Default::default()
+        };
+        let out = finalize_run(&res, &base_ctx());
+        assert_eq!(out.status, RunStatus::Error);
+    }
 }
