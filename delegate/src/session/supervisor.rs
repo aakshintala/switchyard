@@ -913,9 +913,8 @@ fn handle_connection(mut stream: UnixStream, shared: Arc<Shared>) {
     if stream.set_nonblocking(false).is_err() {
         return;
     }
-    let _ = stream.set_read_timeout(Some(shared.config.request_read));
     let _ = stream.set_write_timeout(Some(shared.config.request_read));
-    match read_request_line(&mut stream) {
+    match read_request_line(&mut stream, shared.config.request_read, &shared.shutdown) {
         RequestLine::Timeout | RequestLine::Closed => (),
         RequestLine::TooLong => {
             let _ = write_reply(
@@ -959,10 +958,28 @@ enum RequestLine {
     Closed,
 }
 
-fn read_request_line(stream: &mut UnixStream) -> RequestLine {
+fn read_request_line(
+    stream: &mut UnixStream,
+    timeout: Duration,
+    shutdown: &AtomicBool,
+) -> RequestLine {
+    let deadline = Instant::now() + timeout;
     let mut line = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return RequestLine::Closed;
+        }
+        let remaining = remaining(deadline);
+        if remaining.is_zero() {
+            return RequestLine::Timeout;
+        }
+        if stream
+            .set_read_timeout(Some(remaining.min(ACCEPT_POLL)))
+            .is_err()
+        {
+            return RequestLine::Closed;
+        }
         match stream.read(&mut buffer) {
             Ok(0) => return RequestLine::Closed,
             Ok(count) => {
@@ -985,7 +1002,9 @@ fn read_request_line(stream: &mut UnixStream) -> RequestLine {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                return RequestLine::Timeout;
+                if Instant::now() >= deadline {
+                    return RequestLine::Timeout;
+                }
             }
             Err(_) => return RequestLine::Closed,
         }

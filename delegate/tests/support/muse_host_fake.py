@@ -110,14 +110,12 @@ def complete_turn(terminal=None):
             "terminal": "failed",
             "error": {"kind": "modelError", "message": "fake model unavailable"},
         }
-    send_frames(*frames)
     ACTIVE_TURN = None
+    send_frames(*frames)
 
 
 def start_turn(frame):
-    import time
-
-    global TURN_NUMBER, STOP_READING
+    global TURN_NUMBER, STOP_READING, ACTIVE_TURN, ACTIVE_SCENARIOS
     params = frame.get("params", {})
     text = params.get("input", [{}])[0].get("text", "")
     features = current_features(text)
@@ -127,16 +125,19 @@ def start_turn(frame):
 
     if "MUTE_AFTER_START" in features and TURN_NUMBER > 1:
         return
-    if "SLOW_ACK" in features:
-        time.sleep(0.15)
+    if "SLOW_ACK" in features and TURN_NUMBER > 1:
+        import time
+
+        write_file("ack.pending", "")
+        while not os.path.exists(os.path.join(FAKE_DIR, "ack.release")):
+            time.sleep(0.01)
 
     if "QUEUED_ACK" in features:
         queued = response(frame["id"], {"status": "accepted", "turnId": "queued-turn", "disposition": "queued"})
         started = event("turn/started", {"turnId": "host-started-turn"})
-        send_frames(queued, started)
-        global ACTIVE_TURN, ACTIVE_SCENARIOS
         ACTIVE_TURN = "host-started-turn"
         ACTIVE_SCENARIOS = features
+        send_frames(queued, started)
         complete_turn()
         return
 
@@ -162,10 +163,10 @@ def start_turn(frame):
     if "APPROVAL" in features:
         send_frames({"jsonrpc": "2.0", "id": 981, "method": "approval/request", "params": {"sessionId": SESSION_ID}})
     if "NOISE" in features and "NOISE_WRITTEN" not in SCENARIOS:
+        SCENARIOS.add("NOISE_WRITTEN")
         sys.stderr.write("sandbox warning: helper unavailable\n{\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n")
         sys.stderr.flush()
         send_frames("this is not JSON-RPC")
-        SCENARIOS.add("NOISE_WRITTEN")
 
     if "IDLE_EARLY" in features:
         send_frames(event("session/statusChanged", {"sessionId": SESSION_ID, "status": "idle"}))
@@ -175,9 +176,9 @@ def start_turn(frame):
             ACTIVE_SCENARIOS |= {"STEERREFUSE"} if "STEERREFUSE" in features else set()
         return
 
-    complete_turn("failed" if "BADMODEL" in features else None)
     if "STOP_READING" in features and TURN_NUMBER == 1:
         STOP_READING = True
+    complete_turn("failed" if "BADMODEL" in features else None)
 
 
 def handle(frame, raw_line=None):
@@ -226,11 +227,11 @@ def handle(frame, raw_line=None):
             send_frames(*frames)
     elif method == "turn/interrupt":
         ack = response(request_id, {"status": "accepted"})
+        if ACTIVE_TURN is not None and "HOLD_INTERRUPT" in SCENARIOS:
+            HELD_TERMINAL = "cancelled"
         send_frames(ack)
         if ACTIVE_TURN is not None and "IGNORE_INTERRUPT" not in SCENARIOS and "HOLD_INTERRUPT" not in SCENARIOS:
             complete_turn("cancelled")
-        elif ACTIVE_TURN is not None:
-            HELD_TERMINAL = "cancelled"
     elif request_id is not None:
         send_frames(error_response(request_id, "unknown method"))
 
