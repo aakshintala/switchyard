@@ -17,6 +17,31 @@ pub struct Usage {
     #[serde(serialize_with = "crate::util::js_num")]
     #[serde(default, alias = "cache_creation_input_tokens")]
     pub cache_write_tokens: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance: Option<Allowance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Allowance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<AllowanceWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly: Option<AllowanceWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::util::js_num_opt")]
+    pub as_of_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AllowanceWindow {
+    #[serde(serialize_with = "crate::util::js_num")]
+    pub used_percent: f64,
+    #[serde(serialize_with = "crate::util::js_num")]
+    pub resets_at_ms: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,4 +430,62 @@ pub struct FinalizeCtx {
         Option<Box<dyn Fn(&str, &str, Option<&crate::util::Abort>) -> GateResult + Send + Sync>>,
     pub signal: Option<crate::util::Abort>,
     pub git_delta: Option<Box<dyn Fn(&str, Option<&str>) -> Option<ChangeSet> + Send + Sync>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Allowance, AllowanceWindow, Usage};
+
+    #[test]
+    fn usage_without_muse_fields_keeps_the_old_wire_shape() {
+        let usage = Usage::default();
+        let value = serde_json::to_value(&usage).unwrap();
+        assert!(value.get("calls").is_none());
+        assert!(value.get("allowance").is_none());
+
+        let old = serde_json::json!({
+            "inputTokens": 1,
+            "outputTokens": 2,
+            "cacheReadTokens": 3,
+            "cacheWriteTokens": 4
+        });
+        let parsed: Usage = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            parsed,
+            Usage {
+                input_tokens: 1.0,
+                output_tokens: 2.0,
+                cache_read_tokens: 3.0,
+                cache_write_tokens: 4.0,
+                ..Usage::default()
+            }
+        );
+    }
+
+    #[test]
+    fn muse_usage_fields_round_trip_with_camel_case_integer_numbers() {
+        let usage = Usage {
+            calls: Some(3),
+            allowance: Some(Allowance {
+                window: Some(AllowanceWindow {
+                    used_percent: 0.0,
+                    resets_at_ms: 1_792_728_796_000.0,
+                }),
+                weekly: Some(AllowanceWindow {
+                    used_percent: 12.5,
+                    resets_at_ms: 1_792_972_800_000.0,
+                }),
+                as_of_ms: Some(1_792_711_757_414.0),
+            }),
+            ..Usage::default()
+        };
+
+        let encoded = serde_json::to_string(&usage).unwrap();
+        assert!(encoded.contains("\"usedPercent\":0"));
+        assert!(encoded.contains("\"resetsAtMs\":1792728796000"));
+        assert!(encoded.contains("\"asOfMs\":1792711757414"));
+        assert!(!encoded.contains("0.0"));
+        let decoded: Usage = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, usage);
+    }
 }

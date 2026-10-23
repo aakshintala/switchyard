@@ -266,6 +266,8 @@ mod tests {
                                 output_tokens: 12.0,
                                 cache_read_tokens: 10261.0,
                                 cache_write_tokens: 16891.0,
+                                calls: None,
+                                allowance: None,
                             }),
                             cost_usd: Some(0.0697402),
                             is_error: Some(false),

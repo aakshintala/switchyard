@@ -479,6 +479,8 @@ mod tests {
                             output_tokens: 72.0,
                             cache_read_tokens: 3872.0,
                             cache_write_tokens: 0.0,
+                            calls: None,
+                            allowance: None,
                         }),
                         cost_usd: None,
                         is_error: Some(false),

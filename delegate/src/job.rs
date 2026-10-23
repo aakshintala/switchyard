@@ -106,6 +106,8 @@ fn merge_attempt(prev: &BackendResult, next: BackendResult) -> BackendResult {
             output_tokens: a.output_tokens + b.output_tokens,
             cache_read_tokens: a.cache_read_tokens + b.cache_read_tokens,
             cache_write_tokens: a.cache_write_tokens + b.cache_write_tokens,
+            calls: b.calls,
+            allowance: b.allowance,
         }),
         (a, b) => b.or_else(|| a.clone()),
     };
