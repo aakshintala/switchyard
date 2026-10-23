@@ -22,6 +22,7 @@ pub enum Backend {
     Claude,
     Fiber,
     Codex,
+    Muse,
 }
 
 impl Backend {
@@ -33,6 +34,7 @@ impl Backend {
             "claude" => Some(Self::Claude),
             "fiber" => Some(Self::Fiber),
             "codex" => Some(Self::Codex),
+            "muse" => Some(Self::Muse),
             _ => None,
         }
     }
@@ -44,16 +46,18 @@ impl Backend {
             Self::Claude => "claude",
             Self::Fiber => "fiber",
             Self::Codex => "codex",
+            Self::Muse => "muse",
         }
     }
 
     /// Implemented backends, in doctor order.
-    pub const ALL: [Backend; 5] = [
+    pub const ALL: [Backend; 6] = [
         Self::Cursor,
         Self::Pi,
         Self::Claude,
         Self::Fiber,
         Self::Codex,
+        Self::Muse,
     ];
 
     /// Resolved binary path (env override, then PATH, then ~/.local/bin).
@@ -64,6 +68,7 @@ impl Backend {
             Self::Claude => claude::resolve_bin(None),
             Self::Fiber => fiber::resolve_bin(None),
             Self::Codex => codex::resolve_bin(None),
+            Self::Muse => muse::resolve_bin(None),
         }
     }
 
@@ -71,8 +76,9 @@ impl Backend {
     ///
     /// This is a staging form: the prompt rides after the `--` separator,
     /// exactly where the child would take it. Most backends execute it as-is.
-    /// Codex alone lowers it in spawn (inserting `-C <cwd>` from the spec and
-    /// replacing the trailing prompt with `-`) and pipes the staged prompt to
+    /// Codex and muse lower it in spawn (codex inserting `-C <cwd>` from the
+    /// spec and replacing the trailing prompt with `-`, muse inserting
+    /// `--workspace <cwd>` from the spec) and codex pipes the staged prompt to
     /// the child's stdin, so the staging form itself is never executed and
     /// must never be mistaken for child wire argv in tests: assert the actual
     /// child argv (and stdin bytes) through a fake process instead.
@@ -83,6 +89,7 @@ impl Backend {
             Self::Claude => claude::argv(model, session, prompt),
             Self::Fiber => fiber::argv(model, session, prompt),
             Self::Codex => codex::argv(model, session, prompt),
+            Self::Muse => muse::argv(model, session, prompt),
         }
     }
 
@@ -94,6 +101,7 @@ impl Backend {
             Self::Claude => claude::spawn(spec),
             Self::Fiber => fiber::spawn(spec),
             Self::Codex => codex::spawn(spec),
+            Self::Muse => muse::spawn(spec),
         }
     }
 
@@ -108,6 +116,8 @@ impl Backend {
             Self::Claude => claude::doctor::fill(report, opts),
             Self::Fiber => fiber::doctor::fill(report, opts),
             Self::Codex => codex::doctor::fill(report, opts),
+            // The muse doctor probe is a follow-up after #596.
+            Self::Muse => {}
         }
     }
 
@@ -118,6 +128,8 @@ impl Backend {
             Self::Claude => claude::doctor::lines(report),
             Self::Fiber => fiber::doctor::lines(report),
             Self::Codex => codex::doctor::lines(report),
+            // The muse doctor probe is a follow-up after #596.
+            Self::Muse => (String::new(), false),
         }
     }
 }
@@ -282,8 +294,10 @@ mod tests {
         assert_eq!(Backend::Fiber.name(), "fiber");
         assert_eq!(Backend::from_name("codex"), Some(Backend::Codex));
         assert_eq!(Backend::Codex.name(), "codex");
+        assert_eq!(Backend::from_name("muse"), Some(Backend::Muse));
+        assert_eq!(Backend::Muse.name(), "muse");
         assert!(Backend::from_name("nope").is_none());
-        assert_eq!(Backend::ALL.len(), 5);
+        assert_eq!(Backend::ALL.len(), 6);
     }
 
     /// A null-stdin child sees EOF at once; a piped child receives exactly
