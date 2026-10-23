@@ -38,19 +38,21 @@ recs="$T/records"
 cmd="\${1:-}"; shift || true
 case "\$cmd" in
   run)
-    model=""; cwd=""; gate=""; prompt=""
+    model=""; cwd=""; gate=""; prompt=""; idle=""
     while [ \$# -gt 0 ]; do
       case "\$1" in
         --model) model="\$2"; shift 2 ;;
         --cwd) cwd="\$2"; shift 2 ;;
         --gate) gate="\$2"; shift 2 ;;
         --prompt-file) prompt="\$2"; shift 2 ;;
+        --tool-idle-ms) idle="\$2"; shift 2 ;;
         *) shift ;;
       esac
     done
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
     printf 'run|model=%s|cwd=%s|gate=%s|prompt=%s\n' "\$model" "\$cwd" "\$gate" "\$prompt" >>"\$log"
+    if [ -n "\$idle" ]; then printf 'idle=%s\n' "\$idle" >>"\$log"; fi
     printf 'stub-%s\n' "\$n"
     ;;
   resume)
@@ -702,5 +704,41 @@ set -- "$CDIR"/run/name-502-*-gate-*.sh
 [ "$#" -eq 1 ] && [ -f "$1" ] || fail "owner/name repo writes gate script directly in run"
 ls "$CDIR"/run/name-502-tkt-job-*.log >/dev/null 2>&1 || fail "owner/name repo writes log directly in run"
 [ -z "$(find "$CDIR/run" -mindepth 1 -type d)" ] || fail "owner/name repo creates no subdirectory"
+
+# --- a muse model gets the 2-hour tool-idle limit, gated and ungated ---
+setup_case muse-idle-nogate
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md" --model muse/muse-spark-1.3-contributor
+[ "$RC" -eq 0 ] || fail "muse without gate exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "^run|model=muse/muse-spark-1.3-contributor|" "$T/stub.log" || fail "muse without gate dispatches the muse model"
+grep -qx "idle=7200000" "$T/stub.log" || fail "muse without gate passes --tool-idle-ms 7200000"
+
+setup_case muse-idle-gate
+reset_stub
+make_record stub-1 DONE none 0 1 0
+printf 'plan=%s\n' "$T/plan-fail.md" >>"$S"
+run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan --model muse/muse-spark-1.3-contributor
+[ "$RC" -eq 0 ] || fail "muse with gate exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "^run|model=muse/muse-spark-1.3-contributor|.*|gate=bash " "$T/stub.log" || fail "muse with gate dispatches the gate"
+grep -qx "idle=7200000" "$T/stub.log" || fail "muse with gate passes --tool-idle-ms 7200000"
+
+# --- a non-muse model gets no tool-idle flag, gated and ungated ---
+setup_case plain-idle-nogate
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "non-muse without gate exits 0"
+grep -q "^run|" "$T/stub.log" || fail "non-muse without gate dispatches"
+grep -q "^idle=" "$T/stub.log" && fail "non-muse without gate passes no tool-idle flag"
+
+setup_case plain-idle-gate
+reset_stub
+make_record stub-1 DONE none 0 1 0
+printf 'plan=%s\n' "$T/plan-fail.md" >>"$S"
+run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
+[ "$RC" -eq 0 ] || fail "non-muse with gate exits 0"
+grep -q "gate=bash " "$T/stub.log" || fail "non-muse with gate dispatches the gate"
+grep -q "^idle=" "$T/stub.log" && fail "non-muse with gate passes no tool-idle flag"
 
 echo "tkt-job: all cases passed"
