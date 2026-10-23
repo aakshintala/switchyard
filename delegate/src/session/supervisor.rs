@@ -966,7 +966,7 @@ fn read_request_line(
 ) -> RequestLine {
     let deadline = Instant::now() + timeout;
     let mut line = Vec::new();
-    let mut buffer = [0u8; 8192];
+    let mut buffer = [0u8; 64 * 1024];
     loop {
         if shutdown.load(Ordering::SeqCst) {
             return RequestLine::Closed;

@@ -1097,7 +1097,7 @@ fn supervisor_accepts_escaped_max_text_and_rejects_a_line_over_max_line() {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    let chunk = vec![b'x'; 8192];
+    let chunk = vec![b'x'; 64 * 1024];
     let mut sent = 0usize;
     while sent <= supervisor::MAX_LINE {
         let count = (supervisor::MAX_LINE + 1 - sent).min(chunk.len());
