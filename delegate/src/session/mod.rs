@@ -35,18 +35,6 @@ struct SessionError {
 
 type Result<T> = std::result::Result<T, SessionError>;
 
-#[derive(Debug, PartialEq, Eq)]
-enum SendText {
-    Argument(String),
-    Stdin,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct SendArgs {
-    text: SendText,
-    json: bool,
-}
-
 pub fn main(args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("__supervise") {
         if args.len() != 2 {
@@ -97,11 +85,12 @@ fn failed(message: impl Into<String>) -> SessionError {
     }
 }
 
-fn failure(code: &'static str, message: impl Into<String>) -> SessionError {
+fn failure(code: &str, message: impl Into<String>) -> SessionError {
+    let (code, exit) = error_exit_code(code);
     SessionError {
         code,
         message: message.into(),
-        exit: error_exit_code(code),
+        exit,
     }
 }
 
@@ -113,13 +102,13 @@ fn fail(json_mode: bool, error: SessionError) -> i32 {
     error.exit
 }
 
-fn error_exit_code(code: &str) -> i32 {
+fn error_exit_code(code: &str) -> (&'static str, i32) {
     match code {
-        "usage" => EXIT_USAGE,
-        "noSession" => EXIT_NO_SESSION,
-        "dead" => EXIT_DEAD,
-        "busy" => EXIT_BUSY,
-        _ => EXIT_FAILED,
+        "usage" => ("usage", EXIT_USAGE),
+        "noSession" => ("noSession", EXIT_NO_SESSION),
+        "dead" => ("dead", EXIT_DEAD),
+        "busy" => ("busy", EXIT_BUSY),
+        _ => ("failed", EXIT_FAILED),
     }
 }
 
@@ -139,7 +128,7 @@ fn help_requested(args: &[String]) -> bool {
         .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
 }
 
-fn parse_send_args(args: &[String]) -> std::result::Result<SendArgs, String> {
+fn parse_send_args(args: &[String]) -> std::result::Result<(String, bool), String> {
     let mut positional = Vec::new();
     let mut json_mode = false;
     let mut after_separator = false;
@@ -158,15 +147,7 @@ fn parse_send_args(args: &[String]) -> std::result::Result<SendArgs, String> {
     if positional.len() != 1 {
         return Err("send takes one TEXT; quote it, or pass - for stdin".into());
     }
-    let value = positional.remove(0);
-    Ok(SendArgs {
-        text: if value == "-" {
-            SendText::Stdin
-        } else {
-            SendText::Argument(value)
-        },
-        json: json_mode,
-    })
+    Ok((positional.remove(0), json_mode))
 }
 
 fn parse_flags(
@@ -216,41 +197,41 @@ fn has_flag(values: &[(String, String)], name: &str) -> bool {
     values.iter().any(|(key, _)| key == name)
 }
 
+fn validate(bytes: Vec<u8>, label: &str) -> std::result::Result<String, String> {
+    if bytes.len() > supervisor::MAX_TEXT {
+        return Err(format!(
+            "{label} exceeds MAX_TEXT ({} bytes)",
+            supervisor::MAX_TEXT
+        ));
+    }
+    let text =
+        String::from_utf8(bytes).map_err(|error| format!("{label} is not valid UTF-8: {error}"))?;
+    if text.as_bytes().contains(&0) {
+        return Err(format!("{label} must not contain NUL"));
+    }
+    if text.trim().is_empty() {
+        return Err(format!("{label} must not be empty or whitespace-only"));
+    }
+    Ok(text)
+}
+
 fn read_text(
     arg: &str,
     stdin: &mut dyn Read,
     stdin_is_terminal: bool,
 ) -> std::result::Result<String, String> {
-    let bytes = if arg == "-" {
-        if stdin_is_terminal {
-            return Err(
-                "send - cannot read from a terminal; provide TEXT on the command line".into(),
-            );
-        }
-        let mut bytes = Vec::new();
-        stdin
-            .take(supervisor::MAX_TEXT as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("could not read stdin: {error}"))?;
-        bytes
-    } else {
-        arg.as_bytes().to_vec()
-    };
-    if bytes.len() > supervisor::MAX_TEXT {
-        return Err(format!(
-            "text exceeds MAX_TEXT ({} bytes)",
-            supervisor::MAX_TEXT
-        ));
+    if arg != "-" {
+        return validate(arg.as_bytes().to_vec(), "TEXT");
     }
-    let text =
-        String::from_utf8(bytes).map_err(|error| format!("TEXT is not valid UTF-8: {error}"))?;
-    if text.as_bytes().contains(&0) {
-        return Err("TEXT must not contain NUL".into());
+    if stdin_is_terminal {
+        return Err("send - cannot read from a terminal; provide TEXT on the command line".into());
     }
-    if text.trim().is_empty() {
-        return Err("TEXT must not be empty or whitespace-only".into());
-    }
-    Ok(text)
+    let mut bytes = Vec::new();
+    stdin
+        .take(supervisor::MAX_TEXT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read stdin: {error}"))?;
+    validate(bytes, "TEXT")
 }
 
 fn read_brief(path: &str) -> std::result::Result<String, String> {
@@ -269,21 +250,7 @@ fn read_brief(path: &str) -> std::result::Result<String, String> {
     file.take(supervisor::MAX_TEXT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("{}: {error}", file_path.display()))?;
-    if bytes.len() > supervisor::MAX_TEXT {
-        return Err(format!(
-            "brief exceeds MAX_TEXT ({} bytes)",
-            supervisor::MAX_TEXT
-        ));
-    }
-    let text =
-        String::from_utf8(bytes).map_err(|error| format!("brief is not valid UTF-8: {error}"))?;
-    if text.as_bytes().contains(&0) {
-        return Err("brief must not contain NUL".into());
-    }
-    if text.trim().is_empty() {
-        return Err("brief must not be empty or whitespace-only".into());
-    }
-    Ok(text)
+    validate(bytes, "brief")
 }
 
 fn start(args: &[String], json_mode: bool) -> Result<i32> {
@@ -433,13 +400,12 @@ fn send(args: &[String], json_mode: bool) -> Result<i32> {
     }
     let paths = default_paths();
     let _current = load_and_settle(&paths, id)?;
-    let parsed = parse_send_args(&args[1..]).map_err(usage)?;
-    let json_mode = json_mode || parsed.json;
-    let text = match parsed.text {
-        SendText::Argument(text) => read_text(&text, &mut io::empty(), false).map_err(usage)?,
-        SendText::Stdin => {
-            read_text("-", &mut io::stdin(), io::stdin().is_terminal()).map_err(usage)?
-        }
+    let (argument, parsed_json) = parse_send_args(&args[1..]).map_err(usage)?;
+    let json_mode = json_mode || parsed_json;
+    let text = if argument == "-" {
+        read_text("-", &mut io::stdin(), io::stdin().is_terminal()).map_err(usage)?
+    } else {
+        read_text(&argument, &mut io::empty(), false).map_err(usage)?
     };
     let reply = ipc::request(
         &paths,
@@ -482,14 +448,7 @@ fn stop(args: &[String], json_mode: bool) -> Result<i32> {
         if interrupt {
             return Err(failure("dead", "session is dead"));
         }
-        if json_mode {
-            println!(
-                "{}",
-                json!({"ok":true,"interrupted":false,"session":current})
-            );
-        } else {
-            println!("stopped");
-        }
+        print_stopped(&current, json_mode);
         return Ok(EXIT_OK);
     }
     let reply = match ipc::request(
@@ -504,14 +463,7 @@ fn stop(args: &[String], json_mode: bool) -> Result<i32> {
             if !interrupt && error.code == "dead" {
                 let session = state::read_state(&paths, id)
                     .map_err(|read_error| failed(format!("state unreadable: {read_error}")))?;
-                if json_mode {
-                    println!(
-                        "{}",
-                        json!({"ok":true,"interrupted":false,"session":session})
-                    );
-                } else {
-                    println!("stopped");
-                }
+                print_stopped(&session, json_mode);
                 return Ok(EXIT_OK);
             }
             return Err(error);
@@ -539,6 +491,17 @@ fn stop(args: &[String], json_mode: bool) -> Result<i32> {
     Ok(EXIT_OK)
 }
 
+fn print_stopped(session: &state::State, json_mode: bool) {
+    if json_mode {
+        println!(
+            "{}",
+            json!({"ok":true,"interrupted":false,"session":session})
+        );
+    } else {
+        println!("stopped");
+    }
+}
+
 fn watch(args: &[String], json_mode: bool) -> Result<i32> {
     let (values, positional) = parse_flags(args, &[], &["--json"]).map_err(usage)?;
     if positional.len() != 1 {
@@ -564,6 +527,7 @@ fn watch(args: &[String], json_mode: bool) -> Result<i32> {
                 EXIT_OK
             });
         }
+        signal_test_readiness("DELEGATE_SESSION_TEST_WATCH_READY");
         thread::sleep(Duration::from_millis(WATCH_POLL));
     }
 }
@@ -623,8 +587,17 @@ fn logs(args: &[String], json_mode: bool) -> Result<i32> {
         if current.status == state::Status::Dead {
             return Ok(EXIT_OK);
         }
+        signal_test_readiness("DELEGATE_SESSION_TEST_LOGS_READY");
         thread::sleep(Duration::from_millis(LOGS_POLL));
     }
+}
+
+fn signal_test_readiness(key: &str) {
+    let Some(path) = std::env::var_os(key) else {
+        return;
+    };
+    // The black-box tests use this marker after the verb has observed its blocking state.
+    let _ = OpenOptions::new().write(true).create_new(true).open(path);
 }
 
 fn emit_log_bytes(bytes: &[u8], json_mode: bool) -> Result<()> {
@@ -781,15 +754,7 @@ fn reply_error(reply: &Value) -> SessionError {
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("session supervisor rejected request");
-    failure(
-        match code {
-            "usage" => "usage",
-            "dead" => "dead",
-            "busy" => "busy",
-            _ => "failed",
-        },
-        message,
-    )
+    failure(code, message)
 }
 
 fn status_name(status: &state::Status) -> &'static str {
@@ -879,15 +844,12 @@ mod tests {
 
     #[test]
     fn send_parser_stops_at_separator_and_recognizes_help_before_it() {
-        assert_eq!(
-            parse_send_args(&words(&["-"])).unwrap().text,
-            SendText::Stdin
-        );
+        assert_eq!(parse_send_args(&words(&["-"])).unwrap().0, "-");
         assert_eq!(
             parse_send_args(&words(&["--", "-starts-with-dash"]))
                 .unwrap()
-                .text,
-            SendText::Argument("-starts-with-dash".into())
+                .0,
+            "-starts-with-dash"
         );
         assert!(parse_send_args(&words(&["--bogus"])).is_err());
         assert!(parse_send_args(&words(&["one", "two"])).is_err());
@@ -909,11 +871,12 @@ mod tests {
             ],
             [0, 1, 2, 3, 4, 5]
         );
-        assert_eq!(error_exit_code("usage"), EXIT_USAGE);
-        assert_eq!(error_exit_code("noSession"), EXIT_NO_SESSION);
-        assert_eq!(error_exit_code("dead"), EXIT_DEAD);
-        assert_eq!(error_exit_code("busy"), EXIT_BUSY);
-        assert_eq!(error_exit_code("failed"), EXIT_FAILED);
+        assert_eq!(error_exit_code("usage"), ("usage", EXIT_USAGE));
+        assert_eq!(error_exit_code("noSession"), ("noSession", EXIT_NO_SESSION));
+        assert_eq!(error_exit_code("dead"), ("dead", EXIT_DEAD));
+        assert_eq!(error_exit_code("busy"), ("busy", EXIT_BUSY));
+        assert_eq!(error_exit_code("failed"), ("failed", EXIT_FAILED));
+        assert_eq!(error_exit_code("unexpected"), ("failed", EXIT_FAILED));
         assert_eq!(
             json_error_json("noSession", "no such session id"),
             json!({"ok":false,"error":{"code":"noSession","message":"no such session id"}})

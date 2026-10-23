@@ -3,7 +3,6 @@ use crate::session::msp::{self, Disposition, HostEvent, Incoming, RpcError};
 use crate::session::state::{self, DeadReason, Paths, State, Status, Store};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -11,7 +10,6 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ExitStatus, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -186,10 +184,6 @@ impl Drop for RunGuard {
 }
 
 pub fn run(config: SupervisorConfig, id: &str) -> i32 {
-    dead_event_ids()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .remove(id);
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_inner(config, id))).unwrap_or(1)
 }
 
@@ -1336,19 +1330,17 @@ fn mark_dead(
     keep_stopping: bool,
     fatal_write: &AtomicBool,
 ) {
-    if store.snapshot().status != Status::Dead {
-        record_dead_event_once(store, id, fatal_write);
-    }
     let mut changed = false;
     let result = store.update(|state| {
-        if state.status != Status::Dead {
-            state::mark_dead(state, reason, exit_code, message, now_ms());
-            if keep_stopping {
-                state.stopping = true;
-            }
-            changed = true;
+        if state.status == Status::Dead {
+            return Vec::new();
         }
-        Vec::new()
+        state::mark_dead(state, reason, exit_code, message, now_ms());
+        if keep_stopping {
+            state.stopping = true;
+        }
+        changed = true;
+        vec![json!({"kind":"session.dead"})]
     });
     if result.is_err() {
         fatal_write.store(true, Ordering::SeqCst);
@@ -1356,28 +1348,6 @@ fn mark_dead(
     }
     if changed && let Ok(state) = state::read_state(paths, id) {
         write_note_or_log(store, id, &state.inbox, Note::Dead, fatal_write);
-    }
-}
-
-fn dead_event_ids() -> &'static Mutex<HashSet<String>> {
-    static IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    IDS.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-fn record_dead_event_once(store: &Store, id: &str, fatal_write: &AtomicBool) {
-    let mut ids = dead_event_ids()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if ids.contains(id) {
-        return;
-    }
-    if store
-        .update(|_| vec![json!({"kind":"session.dead"})])
-        .is_ok()
-    {
-        ids.insert(id.to_string());
-    } else {
-        fatal_write.store(true, Ordering::SeqCst);
     }
 }
 

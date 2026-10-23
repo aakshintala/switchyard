@@ -261,6 +261,17 @@ impl Drop for Harness {
     }
 }
 
+fn wait_for_signal(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "readiness signal did not arrive: {path:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn wait_cli(
     child: &mut Child,
     timeout: Duration,
@@ -575,12 +586,19 @@ fn send_text_watch_and_steer_observe_the_same_turn() {
     assert_eq!(running["status"], "running");
 
     let (watch_tx, watch_rx) = mpsc::channel();
+    let ready_path = h.base.join("watch-ready-send");
+    let ready_arg = ready_path.to_string_lossy().into_owned();
     std::thread::scope(|scope| {
-        scope.spawn(|| watch_tx.send(h.invoke(&["watch", &id, "--json"])).unwrap());
-        std::thread::sleep(Duration::from_millis(300));
+        scope.spawn(|| {
+            let env = [("DELEGATE_SESSION_TEST_WATCH_READY", ready_arg.as_str())];
+            watch_tx
+                .send(h.invoke_with(&["watch", &id, "--json"], None, "", &env, None))
+                .unwrap()
+        });
+        wait_for_signal(&ready_path);
         assert!(
             watch_rx.try_recv().is_err(),
-            "watch returned on stale idle state"
+            "watch returned after observing a running session"
         );
         let steered = h.invoke(&["send", &id, "steer-me"]);
         assert!(steered.status.success());
@@ -722,8 +740,15 @@ fn slow_ack_send_returns_after_running_state_and_two_sends_race_safely() {
         let (watch_tx, watch_rx) = mpsc::channel();
         let h_ref = &h;
         let id_ref = id.as_str();
-        scope.spawn(move || watch_tx.send(h_ref.invoke(&["watch", id_ref])).unwrap());
-        std::thread::sleep(Duration::from_millis(300));
+        let ready_path = h.base.join("watch-ready-slow-ack");
+        let ready_arg = ready_path.to_string_lossy().into_owned();
+        scope.spawn(move || {
+            let env = [("DELEGATE_SESSION_TEST_WATCH_READY", ready_arg.as_str())];
+            watch_tx
+                .send(h_ref.invoke_with(&["watch", id_ref], None, "", &env, None))
+                .unwrap()
+        });
+        wait_for_signal(&ready_path);
         assert!(watch_rx.try_recv().is_err());
         std::fs::write(h.fake_dir.join("go"), "").unwrap();
         assert!(
@@ -753,6 +778,7 @@ fn slow_ack_send_returns_after_running_state_and_two_sends_race_safely() {
             String::from_utf8(second.stdout).unwrap(),
         ];
         results.sort();
+        // Contract: idle sends start; running sends steer (docs/delegate-sessions.md:11).
         assert_eq!(results, ["started\n", "steered\n"]);
     });
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
@@ -813,6 +839,7 @@ fn slow_ack_send_returns_after_running_state_and_two_sends_race_safely() {
         String::from_utf8_lossy(&raced.stderr)
     );
     assert_eq!(h.state(&reconnect_id)["dead"]["reason"], "supervisorDied");
+    // Contract: one inbox note per successful idle/dead transition; competing dead-settlers share one fallback (docs/delegate-sessions.md:13-15).
     assert_eq!(h.notes(&reconnect_id, "dead").len(), 1);
     assert_process_gone(host_pid);
 }
@@ -911,9 +938,16 @@ fn watch_logs_inbox_and_dead_session_codes_follow_state() {
     let h = Harness::new();
     let id = id_from(&h.start(b"HOLD", false, "", &[]));
     let (watch_tx, watch_rx) = mpsc::channel();
+    let ready_path = h.base.join("watch-ready-log-test");
+    let ready_arg = ready_path.to_string_lossy().into_owned();
     std::thread::scope(|scope| {
-        scope.spawn(|| watch_tx.send(h.invoke(&["watch", &id, "--json"])).unwrap());
-        std::thread::sleep(Duration::from_millis(300));
+        scope.spawn(|| {
+            let env = [("DELEGATE_SESSION_TEST_WATCH_READY", ready_arg.as_str())];
+            watch_tx
+                .send(h.invoke_with(&["watch", &id, "--json"], None, "", &env, None))
+                .unwrap()
+        });
+        wait_for_signal(&ready_path);
         assert!(watch_rx.try_recv().is_err());
         std::fs::write(h.fake_dir.join("go"), "").unwrap();
         h.wait_state(&id, "idle", |value| value["status"] == "idle");
@@ -925,6 +959,7 @@ fn watch_logs_inbox_and_dead_session_codes_follow_state() {
                 .success()
         );
     });
+    // Contract: one inbox note per successful idle/dead transition; competing dead-settlers share one fallback (docs/delegate-sessions.md:13-15).
     assert_eq!(h.notes(&id, "idle").len(), 1);
 
     let path = h.root().join(&id).join("events.jsonl");
@@ -938,13 +973,16 @@ fn watch_logs_inbox_and_dead_session_codes_follow_state() {
     assert_eq!(logs, json!({"ok":true,"lines":expected}));
 
     let (follow_tx, follow_rx) = mpsc::channel();
+    let ready_path = h.base.join("logs-ready-follow");
+    let ready_arg = ready_path.to_string_lossy().into_owned();
     let stopped = std::thread::scope(|scope| {
         scope.spawn(|| {
+            let env = [("DELEGATE_SESSION_TEST_LOGS_READY", ready_arg.as_str())];
             follow_tx
-                .send(h.invoke(&["logs", &id, "--follow", "--json"]))
+                .send(h.invoke_with(&["logs", &id, "--follow", "--json"], None, "", &env, None))
                 .unwrap()
         });
-        std::thread::sleep(Duration::from_millis(150));
+        wait_for_signal(&ready_path);
         let result = h.invoke(&["stop", &id, "--json"]);
         assert!(result.status.success());
         let follow = follow_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -953,10 +991,12 @@ fn watch_logs_inbox_and_dead_session_codes_follow_state() {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
+        // Contract: death appends session.dead before logs --follow exits (docs/delegate-sessions.md:7).
         assert_eq!(lines.last().unwrap()["kind"], "session.dead");
         result
     });
     assert_eq!(h.state(&id)["status"], "dead");
+    // Contract: one inbox note per successful idle/dead transition; competing dead-settlers share one fallback (docs/delegate-sessions.md:13-15).
     assert_eq!(h.notes(&id, "dead").len(), 1);
     assert!(stopped.stderr.is_empty());
     assert!(h.invoke(&["stop", &id]).status.success());
@@ -1081,9 +1121,11 @@ fn list_sorts_by_started_time_then_id_and_marks_unreadable() {
         .as_array()
         .unwrap()
         .clone();
+    // Contract: list includes each valid session dir and marks corrupt state unreadable (docs/delegate-sessions.md:9).
     assert_eq!(entries.len(), 4);
     let mut tied = [second.as_str(), third.as_str()];
     tied.sort();
+    // Contract: readable sessions sort by startedAt, then id (docs/delegate-sessions.md:9).
     assert_eq!(entries[0]["id"], tied[0]);
     assert_eq!(entries[1]["id"], tied[1]);
     assert_eq!(entries[2]["id"], first);
@@ -1132,6 +1174,7 @@ fn dead_supervisor_is_settled_once_and_racing_sends_are_started_then_steered() {
         assert!(list.status.success());
     });
     assert_eq!(h.state(&id)["dead"]["reason"], "supervisorDied");
+    // Contract: one inbox note per successful idle/dead transition; competing dead-settlers share one fallback (docs/delegate-sessions.md:13-15).
     assert_eq!(h.notes(&id, "dead").len(), 1);
     assert_process_gone(host_pid);
 
@@ -1152,6 +1195,7 @@ fn dead_supervisor_is_settled_once_and_racing_sends_are_started_then_steered() {
             String::from_utf8(two.stdout).unwrap(),
         ];
         replies.sort();
+        // Contract: idle sends start; running sends steer (docs/delegate-sessions.md:11).
         assert_eq!(replies, ["started\n", "steered\n"]);
     });
 }

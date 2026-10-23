@@ -31,7 +31,7 @@ You need Rust (`cargo`), and `cursor-agent` on PATH with `cursor-agent login` be
 | `delegate session stop` | End the session or interrupt its turn and keep it. |
 | `delegate session list` | List local Muse sessions. |
 
-Sessions run on the machine where you call `delegate`; use `ssh` when the session belongs on another host. They use `--disable-sandbox` and `allowAll`, so the worktree is the only containment. The session guide in [the delegate skill](../skills/delegate/SKILL.md) documents JSON output, exit codes, inbox notes and the `--inbox` workflow.
+Sessions run on the machine where you call `delegate`; use `ssh` when the session belongs on another host. They use `--disable-sandbox` and `allowAll`, so the worktree is the only containment. The session guide in [the delegate skill](../skills/delegate/SKILL.md) documents JSON output, exit codes, inbox notes and the `--inbox` workflow. [Session ordering and inbox contracts](../docs/delegate-sessions.md) records the guarantees that tests rely on.
 
 Every job runs with writes enabled. A read task says "do not edit" in its brief; the record's `changeSet` shows any write. Parallel jobs need separate cwds (one worktree per lane).
 
@@ -60,7 +60,7 @@ A Muse model id is `muse/` plus the Muse model name (for example, `muse/muse-spa
 - `turnCount` starts at zero. It increases once when a host turn starts: on an accepted `turn/start` acknowledgement with disposition `started`, or on `turn/started` when the session is idle with no active turn.
 - `Store::update` writes state before appending event lines. If the state write fails, it commits neither state nor event sequence.
 - A new session starts its event sequence at 1. Each successful append advances the sequence by one.
-- `list` orders session entries by `startedAt`, then by session id.
+- Session ordering, event and inbox guarantees are documented in [the session contracts](../docs/delegate-sessions.md).
 - The MSP adapter preserves each `turn/completed` terminal value (`completed`, `failed` or `cancelled`) and preserves a failed turn's error kind.
 - A matching turn completion returns one event line. If pending steer ids remain, it returns one `steer.unconsumed` line and clears them.
 - The Muse session host command is `serve --provider meta --model <model-id> --disable-sandbox`.
