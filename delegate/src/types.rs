@@ -368,6 +368,8 @@ pub struct ProgressSnapshot {
     pub tokens_so_far: f64,
     #[serde(serialize_with = "crate::util::js_num")]
     pub elapsed_ms: f64,
+    #[serde(serialize_with = "crate::util::js_num")]
+    pub last_event_age_ms: f64,
     pub last_assistant: Option<String>,
     pub files_touched_so_far: Vec<String>,
     pub phase: Option<String>,

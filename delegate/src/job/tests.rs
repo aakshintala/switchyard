@@ -1171,3 +1171,79 @@ fn merge_attempt_uses_latest_allowance_and_falls_back_when_later_is_absent() {
         Some(later)
     );
 }
+
+#[test]
+fn running_progress_carries_the_last_event_age() {
+    let s = setup();
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    sleep(Duration::from_millis(200));
+    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+    let age = polled["progress"]["lastEventAgeMs"]
+        .as_f64()
+        .expect("progress carries lastEventAgeMs");
+    let elapsed = polled["progress"]["elapsedMs"]
+        .as_f64()
+        .expect("progress carries elapsedMs");
+    assert!(age >= 200.0, "age {age} covers the 200 ms quiet window");
+    assert!(age <= elapsed, "age {age} never exceeds elapsed {elapsed}");
+    let dispatch_record = s.spy.nth(0).1;
+    assert!(
+        dispatch_record["progress"]["lastEventAgeMs"].is_number(),
+        "the dispatch record carries the age too"
+    );
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "DONE");
+}
+
+#[test]
+fn zero_token_events_keep_tokens_at_zero_and_a_growing_age() {
+    // Zero-token progress (the shape pi/codex/muse emit all run) keeps
+    // tokensSoFar at 0 while the silent age grows. Activity-reset coverage
+    // lives in activity_event_resets_the_last_event_age, which calls on_event
+    // directly instead of racing wall-clock time against a marker progress.
+    let s = setup();
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    s.reg.on_event(
+        &id,
+        Event::Progress(ProgressSnapshotRaw {
+            last_tool: Some("shell".into()),
+            tokens_so_far: 0.0,
+            last_assistant: None,
+            files_touched: vec![],
+            phase: Some("thinking".into()),
+            session_id: None,
+        }),
+    );
+    sleep(Duration::from_millis(200));
+    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+    assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
+    let age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
+    assert!(age >= 200.0, "quiet age {age} covers the 200 ms sleep");
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "DONE");
+}
+
+#[test]
+fn activity_event_resets_the_last_event_age() {
+    // Deterministic: on_event runs synchronously under the registry lock, so
+    // no sleep or marker progress is needed as a sync point. The age read
+    // after the call must be at most the time since just before the call;
+    // without the reset it would still carry the 200 ms quiet window.
+    let s = setup();
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    sleep(Duration::from_millis(200));
+    let before = Instant::now();
+    s.reg.on_event(&id, Event::Activity);
+    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+    let age = polled["progress"]["lastEventAgeMs"]
+        .as_f64()
+        .expect("progress carries lastEventAgeMs");
+    assert!(
+        age <= Instant::now().duration_since(before).as_millis() as f64,
+        "activity reset the age: {age} exceeds time since the event"
+    );
+    assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "DONE");
+}
+
