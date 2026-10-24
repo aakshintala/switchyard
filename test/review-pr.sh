@@ -16,7 +16,9 @@ trap 'rm -rf "$T"' EXIT
 
 export TMPDIR="$T/tmp"
 export REVIEW_PR_RUN_ROOT="$T/runs"
-mkdir -p "$TMPDIR" "$T/canned" "$T/state"
+export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
+unset DELEGATE_JOBS_DIR
+mkdir -p "$TMPDIR" "$T/canned" "$T/state" "$T/override"
 
 # --- throwaway repos: ORIGIN carries refs/pull/7/head, CLONE is cloned from it
 git init -q -b main "$T/origin"
@@ -122,8 +124,8 @@ delegate() (
       printf '%s %s\n' "$role" "$model" >>"$T/state/runs.txt"
       cp "$prompt" "$T/state/prompt-$role.md"
       id="job-$role"
-      mkdir -p "${TMPDIR:-/tmp}/delegate-jobs"
-      cp "$T/canned/$role.json" "${TMPDIR:-/tmp}/delegate-jobs/$id.json"
+      mkdir -p "${DELEGATE_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}"
+      cp "$T/canned/$role.json" "${DELEGATE_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}/$id.json"
       printf '%s\n' "$id"
       ;;
     watch)
@@ -154,7 +156,7 @@ write_record() {
 reset_state() {
   rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt"
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt"
-  rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
+  rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
 }
 
 start_review() {
@@ -1216,6 +1218,130 @@ git -C "$T/clone" worktree remove --force "$stale_rd/wt-overbuild" >/dev/null 2>
 rm -rf "$stale_rd"
 rm -f "$TMPDIR/review-pr/job-live-review" "$TMPDIR/review-pr/job-live-overbuild"
 rm -f "$TMPDIR/delegate-jobs/job-live-review.json" "$TMPDIR/delegate-jobs/job-live-overbuild.json"
+
+# --- case: collect reads records from DELEGATE_JOBS_DIR
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: CHANGES
+P1 fix the off-by-one
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "override start exits 0"
+mv "$TMPDIR/delegate-jobs/job-standards.json" "$TMPDIR/delegate-jobs/job-spec.json" \
+  "$TMPDIR/delegate-jobs/job-overbuild.json" "$T/override/" || fail "override fixture move"
+out="$(DELEGATE_JOBS_DIR="$T/override" bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || fail "override collect exits 0"
+grep -q "^VERDICT standards: APPROVE$" <<<"$out" || fail "override collect carries the standards verdict"
+grep -q "^VERDICT spec: CHANGES$" <<<"$out" || fail "override collect carries the spec verdict"
+grep -q "^VERDICT overbuild: APPROVE$" <<<"$out" || fail "override collect labels the overbuild verdict"
+grep -q "^P1 fix the off-by-one$" <<<"$out" || fail "override collect carries P1 lines"
+grep -q UNFINISHED <<<"$out" && fail "override collect has no UNFINISHED"
+[ "$(cat "$T/state/comment-pr.txt")" = "7" ] || fail "override collect posts the comment"
+
+# --- case: re-collect from the override names the override record path
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+P1 lone finding
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --axes standards >/dev/null 2>&1 || fail "recollect-override start exits 0"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "recollect-override first collect exits 0"
+mv "$TMPDIR/delegate-jobs/job-standards.json" "$T/override/" || fail "recollect-override fixture move"
+rm -f "$T/state/comment-pr.txt"
+out="$(DELEGATE_JOBS_DIR="$T/override" bash "$REVIEW" collect job-standards 2>/dev/null)" || fail "recollect-override exits 0"
+grep -qx "COLLECTED job-standards $T/override/job-standards.json: already posted to the PR; findings reprinted from the job record, nothing posted" <<<"$out" || \
+  fail "recollect-override names the override path: [$out]"
+grep -q "^VERDICT standards: APPROVE$" <<<"$out" || fail "recollect-override reprints the verdict"
+grep -q "^P1 lone finding$" <<<"$out" || fail "recollect-override reprints the P1 line"
+[ ! -e "$T/state/comment-pr.txt" ] || fail "recollect-override posts nothing"
+
+# --- case: a RUNNING record in the override waits the same as in the tmp dir
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards RUNNING "still working, no verdict yet"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "running-override start exits 0"
+mv "$TMPDIR/delegate-jobs/job-standards.json" "$T/override/" || fail "running-override fixture move"
+touch -t "$(stale_ts_for 7)" "$TMPDIR/review-pr/job-standards" || fail "running-override fixture touch"
+out="$(DELEGATE_JOBS_DIR="$T/override" bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" && fail "running-override collect exits 1"
+[ "$out" = "RUNNING standards job-standards: wait with delegate watch job-standards job-spec job-overbuild" ] || \
+  fail "running-override line names role id and watch: [$out]"
+[ ! -e "$T/state/comment.md" ] || fail "running-override collect posts no comment"
+[ -f "$TMPDIR/review-pr/job-standards" ] || fail "running-override collect keeps state for the retry"
+[ -f "$TMPDIR/review-pr/job-spec" ] || fail "running-override collect keeps the sibling state"
+
+# --- case: start prunes a run whose winning record is a stale override record
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
+stale_state "$stale_rd" job-old standards 1 DONE "$T/clone" 7
+mv "$TMPDIR/delegate-jobs/job-old.json" "$T/override/" || fail "override-prune fixture move"
+stale_sf="$TMPDIR/review-pr/job-old"
+stale_wt="$stale_rd/wt-standards"
+DELEGATE_JOBS_DIR="$T/override" start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "override-prune start exits 0"
+[ ! -e "$stale_sf" ] || fail "override prune removes the stale state file"
+[ ! -e "$stale_wt" ] || fail "override prune removes the stale worktree"
+[ ! -e "$stale_rd" ] || fail "override prune removes the stale run dir"
+[ -f "$TMPDIR/review-pr/job-standards" ] || fail "override-prune start still saves the new state"
+DELEGATE_JOBS_DIR="$T/override" bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after override prune exits 0"
+
+# --- case: a fresh RUNNING override record spares a run with a stale tmp record
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
+stale_state "$stale_rd" job-old standards 7 DONE "$T/clone"
+printf '{"status":"RUNNING"}\n' >"$T/override/job-old.json"
+stale_sf="$TMPDIR/review-pr/job-old"
+stale_wt="$stale_rd/wt-standards"
+DELEGATE_JOBS_DIR="$T/override" start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "winner-running start exits 0"
+[ -f "$stale_sf" ] || fail "running winner keeps the stale state file"
+[ -d "$stale_wt" ] || fail "running winner keeps the stale worktree"
+[ -d "$stale_rd" ] || fail "running winner keeps the stale run dir"
+DELEGATE_JOBS_DIR="$T/override" bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after winner-running exits 0"
+git -C "$T/clone" worktree remove --force "$stale_wt" >/dev/null 2>&1 || rm -rf "$stale_wt"
+rm -rf "$stale_rd"
+rm -f "$stale_sf" "$TMPDIR/delegate-jobs/job-old.json" "$T/override/job-old.json"
+
+# --- case: a stale override record prunes a run with a fresh tmp record
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
+stale_state "$stale_rd" job-old standards 7 DONE "$T/clone" 0
+printf '{"status":"DONE"}\n' >"$T/override/job-old.json"
+touch -t "$(stale_ts_for 2)" "$T/override/job-old.json" || fail "winner-stale fixture touch"
+stale_sf="$TMPDIR/review-pr/job-old"
+stale_wt="$stale_rd/wt-standards"
+DELEGATE_JOBS_DIR="$T/override" start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "winner-stale start exits 0"
+[ ! -e "$stale_sf" ] || fail "stale winner prunes the state file"
+[ ! -e "$stale_wt" ] || fail "stale winner prunes the worktree"
+[ ! -e "$stale_rd" ] || fail "stale winner prunes the run dir"
+DELEGATE_JOBS_DIR="$T/override" bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after winner-stale exits 0"
 
 # --- ci_case LABEL RUNS WANT: one review round trip whose reviewed head has the
 # check runs RUNS (TSV rows of name, status, conclusion, started_at, id, joined

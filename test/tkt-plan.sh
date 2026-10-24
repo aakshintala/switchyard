@@ -396,6 +396,7 @@ ln -s "$REAL_BIN/tkt-job" "$T/realbin/tkt-job" || fail "symlink real tkt-job"
 ln -s "$REAL_BIN/tkt-state" "$T/realbin/tkt-state" || fail "symlink real tkt-state"
 ln -s "$REAL_BIN/fill-brief" "$T/realbin/fill-brief" || fail "symlink real fill-brief"
 ln -s "$REAL_BIN/lib" "$T/realbin/lib" || fail "symlink real lib"
+ln -s "$REAL_BIN/job-record" "$T/realbin/job-record" || fail "symlink real job-record"
 cat >"$T/realbin/delegate" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail

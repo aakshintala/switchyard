@@ -23,6 +23,8 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
+unset DELEGATE_JOBS_DIR
 
 [ -x "$REAL_BIN/tkt-job" ] || fail "real tkt-job missing"
 [ -x "$REAL_BIN/tkt-gate" ] || fail "real tkt-gate missing"
@@ -45,6 +47,7 @@ ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
 ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
+ln -s "$REAL_BIN/job-record" "$T/bin/job-record" || fail "symlink job-record"
 
 # Stub delegate: run mints a DONE record at once (lane carries one commit for
 # --expect-commits; map carries $T/map-text); ask modes mint NEEDS_CONTEXT.
@@ -54,7 +57,7 @@ printf '0' >"$T/rcounter"
 cat >"$T/bin/delegate" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
-jobsdir="\${TMPDIR:-/tmp}/delegate-jobs"
+jobsdir="\${DELEGATE_JOBS_DIR:-\${TMPDIR:-/tmp}/delegate-jobs}"
 mode="\$(cat "$T/delegate-mode")"
 cmd="\${1:-}"; shift || true
 case "\$cmd" in
@@ -397,6 +400,20 @@ grep -q "unviable" "$ffile" && fail "mutants: unviable lines stay out"
 grep -q "exempted" "$ffile" && fail "mutants: exempted lines stay out"
 expect_state reviewed "$H" mutants
 expect_state round 0 mutants
+
+# --- the mutant map reads through the lookup: an override record merges ---
+setup_case mutants-override
+rm -rf "$T/tmp/delegate-jobs" "$T/override"
+printf 'mutant_job=%s\n' Selection >>"$S"
+printf 'P1 open null check\nP3 docs note\n' >"$T/findings-src"
+DELEGATE_JOBS_DIR="$T/override" run_build
+[ "$RC" -eq 1 ] || fail "mutants-override exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* mutants=* findings=* log=*" "mutants-override"
+grep -q "map failed" <<<"$OUT" && fail "mutants-override: no map failed note"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -q "needs-test: bounds check unpinned" "$ffile" || fail "mutants-override: the override map record merges"
+grep -q "removed: helper gone at head" "$ffile" || fail "mutants-override: the removed line merges"
+[ -e "$T/tmp/delegate-jobs/stub-2.json" ] && fail "mutants-override: the map record stays out of the tmp dir"
 
 # --- a CHANGES axis with clean findings still reports CHANGES ---
 setup_case changes-clean

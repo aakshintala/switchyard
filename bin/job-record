@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# job-record: print the path of one job record <id>.json.
+# The record is the first regular file found in the documented lookup order:
+# DELEGATE_JOBS_DIR (when non-empty; a relative value resolves against the
+# current directory), then $TMPDIR/delegate-jobs, then the system directory.
+# Duplicate directories are searched once, at the first position. Prints the
+# winning path, newline-terminated, exit 0; exit 1 with no output when no
+# directory holds the record, when the id is empty, or when it holds a slash.
+# JOB_RECORD_SYSTEM_DIR overrides the system directory; it exists for tests
+# and defaults to /tmp/delegate-jobs.
+# Usage: job-record <id>
+set -uo pipefail
+
+[ $# -eq 1 ] || {
+  echo "usage: job-record <id>" >&2
+  exit 2
+}
+id="$1"
+case "$id" in
+  ""|*/*) exit 1 ;;
+esac
+
+sysdir="${JOB_RECORD_SYSTEM_DIR:-/tmp/delegate-jobs}"
+
+tmp="${TMPDIR:-/tmp}"
+
+dirs=""
+if [ -n "${DELEGATE_JOBS_DIR:-}" ]; then
+  case "$DELEGATE_JOBS_DIR" in
+    /*) dirs="$DELEGATE_JOBS_DIR" ;;
+    *) dirs="$PWD/$DELEGATE_JOBS_DIR" ;;
+  esac
+fi
+dirs="$dirs
+$tmp/delegate-jobs
+$sysdir"
+
+seen=()
+while IFS= read -r dir; do
+  [ -n "$dir" ] || continue
+  dup=0
+  i=0
+  while [ "$i" -lt "${#seen[@]}" ]; do
+    if [ "${seen[$i]}" = "$dir" ]; then
+      dup=1
+      break
+    fi
+    i=$((i + 1))
+  done
+  [ "$dup" -eq 1 ] && continue
+  seen+=("$dir")
+  cand="$dir/$id.json"
+  if [ -f "$cand" ]; then
+    printf '%s\n' "$cand"
+    exit 0
+  fi
+done <<<"$dirs"
+exit 1
