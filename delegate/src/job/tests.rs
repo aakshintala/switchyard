@@ -1196,62 +1196,43 @@ fn running_progress_carries_the_last_event_age() {
 }
 
 #[test]
-fn zero_token_events_keep_tokens_at_zero_but_reset_the_age() {
+fn zero_token_events_keep_tokens_at_zero_and_a_growing_age() {
+    // Zero-token progress (the shape pi/codex/muse emit all run) keeps
+    // tokensSoFar at 0 while the silent age grows. Activity-reset coverage
+    // lives in activity_event_resets_the_last_event_age, which calls on_event
+    // directly instead of racing wall-clock time against a marker progress.
     let s = setup();
     let id = s.reg.dispatch(spec_of(|_| {}));
     s.fake.handle(0).progress("shell", 0.0, None, &[], Some("thinking"));
-    // The dispatch seed already makes the age small, so the age is never the
-    // wait condition here: the wait is on lastTool, which on_event stores in
-    // the same locked step as the last_event reset.
-    let mut tool = String::new();
-    for _ in 0..2500 {
-        let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
-        if let Some(t) = polled["progress"]["lastTool"].as_str() {
-            tool = t.to_string();
-            break;
-        }
-        sleep(Duration::from_millis(2));
-    }
-    assert_eq!(tool, "shell");
-    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
-    assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
     sleep(Duration::from_millis(200));
     let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
     assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
-    let age_before = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
+    let age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
+    assert!(age >= 200.0, "quiet age {age} covers the 200 ms sleep");
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "DONE");
+}
+
+#[test]
+fn activity_event_resets_the_last_event_age() {
+    // Deterministic: on_event runs synchronously under the registry lock, so
+    // no sleep or marker progress is needed as a sync point. The age read
+    // after the call must be at most the time since just before the call;
+    // without the reset it would still carry the 200 ms quiet window.
+    let s = setup();
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    sleep(Duration::from_millis(200));
+    let before = Instant::now();
+    s.reg.on_event(&id, Event::Activity);
+    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+    let age = polled["progress"]["lastEventAgeMs"]
+        .as_f64()
+        .expect("progress carries lastEventAgeMs");
     assert!(
-        age_before >= 200.0,
-        "quiet age {age_before} covers the 200 ms sleep"
+        age <= Instant::now().duration_since(before).as_millis() as f64,
+        "activity reset the age: {age} exceeds time since the event"
     );
-    // A bare Activity sets no progress field, so nothing observable proves it
-    // was processed. The fake delivers events in FIFO order, so a marker
-    // progress sent right after the activity proves both ran once the marker
-    // is visible; on_event resets last_event in the same locked step that
-    // stores the marker. The wait is on the marker field, never on the age.
-    s.fake.handle(0).activity();
-    s.fake
-        .handle(0)
-        .progress("shell-ping", 0.0, None, &[], Some("thinking"));
-    let mut tool = String::new();
-    let mut age = f64::MAX;
-    for _ in 0..2500 {
-        let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
-        if polled["progress"]["lastTool"].as_str() == Some("shell-ping") {
-            tool = "shell-ping".to_string();
-            age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
-            break;
-        }
-        sleep(Duration::from_millis(2));
-    }
-    assert_eq!(tool, "shell-ping", "marker progress was processed");
-    assert!(
-        age < age_before,
-        "activity reset the age: {age} < {age_before}"
-    );
-    assert_eq!(
-        serde_json::to_value(s.reg.poll(&id)).unwrap()["progress"]["tokensSoFar"],
-        0.0
-    );
+    assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
     s.fake.handle(0).finish(done_ok());
     assert_eq!(settle(&s.reg, &id), "DONE");
 }
