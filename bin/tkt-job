@@ -184,7 +184,7 @@ else
           break
         fi
       done
-      # Flags win; FENCE falls back to the plan's Files, the rest to state.
+      # Flags win; FENCE falls back to the plan's Files, EXTRA to empty, the rest to state.
       # EXTRA names a file, so the state value travels with an @ prefix.
       if [ "$found" -eq 0 ] && [ "$k" = "FENCE" ]; then
         if plan="$(tkt get plan 2>/dev/null)" && [ -r "$plan" ]; then
@@ -201,6 +201,9 @@ else
             @*) v="$e" ;;
             *) v="@$e" ;;
           esac
+          found=1
+        else
+          v=""
           found=1
         fi
       fi

@@ -478,6 +478,16 @@ run_job --slot lane --template "$T/tmpl-full.md" FENCE=custom
 brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|prompt=//')"
 grep -q "custom" "$brief" || fail "a FENCE flag beats the plan"
 
+# --- EXTRA with no flag and no state value fills with the empty string ---
+setup_case extra-default
+reset_stub
+make_record stub-1 DONE none 0 1 0
+printf 'Extra: [__EXTRA__]\n' >"$T/tmpl-extra.md"
+run_job --slot lane --template "$T/tmpl-extra.md"
+[ "$RC" -eq 0 ] || fail "EXTRA defaults to empty and exits 0"
+brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|prompt=//')"
+grep -q "^Extra: \[\]$" "$brief" || fail "EXTRA fills with the empty string"
+
 # --- a second dispatch for one slot takes a fresh brief number ---
 setup_case fresh-k
 reset_stub
