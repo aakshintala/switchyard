@@ -1218,19 +1218,36 @@ fn zero_token_events_keep_tokens_at_zero_but_reset_the_age() {
     sleep(Duration::from_millis(200));
     let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
     assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
-    let age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
-    assert!(age >= 200.0, "quiet age {age} covers the 200 ms sleep");
+    let age_before = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
+    assert!(
+        age_before >= 200.0,
+        "quiet age {age_before} covers the 200 ms sleep"
+    );
+    // A bare Activity sets no progress field, so nothing observable proves it
+    // was processed. The fake delivers events in FIFO order, so a marker
+    // progress sent right after the activity proves both ran once the marker
+    // is visible; on_event resets last_event in the same locked step that
+    // stores the marker. The wait is on the marker field, never on the age.
     s.fake.handle(0).activity();
+    s.fake
+        .handle(0)
+        .progress("shell-ping", 0.0, None, &[], Some("thinking"));
+    let mut tool = String::new();
     let mut age = f64::MAX;
     for _ in 0..2500 {
         let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
-        age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
-        if age < 150.0 {
+        if polled["progress"]["lastTool"].as_str() == Some("shell-ping") {
+            tool = "shell-ping".to_string();
+            age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
             break;
         }
         sleep(Duration::from_millis(2));
     }
-    assert!(age < 150.0, "activity resets the age, saw {age}");
+    assert_eq!(tool, "shell-ping", "marker progress was processed");
+    assert!(
+        age < age_before,
+        "activity reset the age: {age} < {age_before}"
+    );
     assert_eq!(
         serde_json::to_value(s.reg.poll(&id)).unwrap()["progress"]["tokensSoFar"],
         0.0
