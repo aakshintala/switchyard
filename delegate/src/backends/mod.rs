@@ -353,21 +353,25 @@ mod tests {
     /// on the second (SIGKILL) with signal 9.
     #[test]
     fn killer_escalates_to_sigkill_on_second_call() {
-        let ready = std::env::temp_dir().join(format!(
-            "killer-ready-{}-{}",
+        let stem = format!(
+            "killer-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
+        );
+        let ready = std::env::temp_dir().join(format!("{stem}-ready"));
+        let recvd = std::env::temp_dir().join(format!("{stem}-term"));
         let _ = std::fs::remove_file(&ready);
+        let _ = std::fs::remove_file(&recvd);
         let spec = crate::job::tests::spec_of(|s| {
             s.bin = "/bin/sh".into();
             s.argv = vec![
                 "-c".into(),
                 format!(
-                    "trap \"\" TERM; touch '{}'; while :; do sleep 1; done",
+                    "trap \"touch '{}'; trap '' TERM\" TERM; touch '{}'; while :; do sleep 1; done",
+                    recvd.display(),
                     ready.display()
                 ),
             ];
@@ -385,7 +389,15 @@ mod tests {
         assert!(ready.exists(), "trap child never became ready");
         let kill = killer(pid, reaped.clone());
         kill();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // The trap receipt acknowledges the SIGTERM: no fixed delay assumes
+        // the child processed it before asserting it survived it.
+        for _ in 0..500 {
+            if recvd.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(recvd.exists(), "trap child never saw SIGTERM");
         let still_alive = started.child.try_wait().expect("try_wait works").is_none();
         assert!(still_alive, "SIGTERM-resistant child died on SIGTERM");
         kill();
@@ -404,6 +416,7 @@ mod tests {
         assert_eq!(status.signal(), Some(9));
         reaped.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = std::fs::remove_file(&ready);
+        let _ = std::fs::remove_file(&recvd);
     }
 
     /// Once `reaped` is set, neither call signals the child, so a late kill
@@ -422,9 +435,14 @@ mod tests {
         let kill = killer(started.pid, started.reaped.clone());
         kill();
         kill();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let alive = started.child.try_wait().expect("try_wait works").is_none();
-        assert!(alive, "reaped child was signalled");
+        // Neither call may signal: watch the child for the whole window and
+        // fail at once with evidence instead of sleeping first and looking once.
+        let t = std::time::Instant::now();
+        while t.elapsed() < std::time::Duration::from_millis(300) {
+            let alive = started.child.try_wait().expect("try_wait works").is_none();
+            assert!(alive, "reaped child was signalled");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         unsafe { libc::kill(-started.pid, libc::SIGKILL) };
         let _ = started.child.wait();
         started

@@ -72,9 +72,8 @@ struct JobState {
     progress: ProgressSnapshotRaw,
     last_event: Instant,
     termination: Option<JobStatus>,
-    /// The termination came from the wall budget, not a stall or cancel.
-    wall_expired: bool,
-    /// When the watchdog first killed the child; arms the SIGKILL escalation.
+    /// When the wall budget killed the child; arms the SIGKILL escalation and
+    /// marks the wall wording. Set only on wall expiry; cleared by a user cancel.
     kill_at: Option<Instant>,
     /// The escalation already ran; it fires at most once per job.
     escalated: bool,
@@ -161,7 +160,7 @@ fn epoch_ms() -> f64 {
 }
 
 fn describe_stall_progress(job: &JobState) -> String {
-    let verb = if job.wall_expired {
+    let verb = if job.kill_at.is_some() {
         format!(
             "Cancelled: wall budget of {} ms exceeded",
             job.spec.wall_ms.unwrap_or(0.0)
@@ -272,7 +271,6 @@ impl JobHandle {
                     },
                     last_event: now,
                     termination: None,
-                    wall_expired: false,
                     kill_at: None,
                     escalated: false,
                     output: None,
@@ -402,7 +400,6 @@ impl JobHandle {
             JobStatus::Stalled
         });
         if wall {
-            job.wall_expired = true;
             job.kill_at = Some(now);
             job.finalize_abort.store(true, Ordering::SeqCst);
         }
@@ -434,8 +431,7 @@ impl JobHandle {
                     .then(|| job.started.checked_add(ms(w)))
                     .flatten()
             });
-            if job.stage != Stage::Terminal
-                && job.termination.is_none()
+            if job.termination.is_none()
                 && let Some(due) = wall_due
             {
                 if now >= due {
@@ -448,7 +444,6 @@ impl JobHandle {
             // Wall-only: an idle stall keeps its single SIGTERM, and the gate
             // has its own SIGKILL grace, so only a Running job escalates.
             if !job.escalated
-                && job.wall_expired
                 && let Some(sent) = job.kill_at
             {
                 let due = sent + kill_grace;
@@ -457,7 +452,7 @@ impl JobHandle {
                         (job.kill)();
                     }
                     job.escalated = true;
-                } else if job.stage != Stage::Terminal {
+                } else {
                     wake_at = wake_at.min(due);
                 }
             }
@@ -619,6 +614,11 @@ impl JobHandle {
             return poll_state(&st, job_id);
         }
         job.termination = Some(JobStatus::Cancelled);
+        // Plan ruling 6: a cancel after a stall or wall kill reads the cancel
+        // wording, so a wall expiry it supersedes leaves no wall mark behind.
+        // Clearing `kill_at` also disarms the SIGKILL escalation: the kill
+        // below already sends it at once (ruling on #620).
+        job.kill_at = None;
         job.finalize_abort.store(true, Ordering::SeqCst);
         (job.kill)();
         // Wakes a retry backoff, which re-checks `termination`.

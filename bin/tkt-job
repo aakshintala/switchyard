@@ -257,11 +257,9 @@ else
   # Only a Verifier gets a wall cap: a lane legitimately runs for hours.
   wall=()
   case "$slot" in verifier-r*) wall=(--wall-ms 10800000) ;; esac
-  if [ -n "$gate" ]; then
-    jobid="$("$delegate" run --model "$model" --cwd "$worktree" --gate "$gate" ${tool_idle[@]+"${tool_idle[@]}"} ${wall[@]+"${wall[@]}"} --prompt-file "$brief" | head -n 1)"
-  else
-    jobid="$("$delegate" run --model "$model" --cwd "$worktree" ${tool_idle[@]+"${tool_idle[@]}"} ${wall[@]+"${wall[@]}"} --prompt-file "$brief" | head -n 1)"
-  fi
+  gate_args=()
+  if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
+  jobid="$("$delegate" run --model "$model" --cwd "$worktree" ${gate_args[@]+"${gate_args[@]}"} ${tool_idle[@]+"${tool_idle[@]}"} ${wall[@]+"${wall[@]}"} --prompt-file "$brief" | head -n 1)"
   tkt set "job.$slot" "$jobid"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid"
   fresh=1

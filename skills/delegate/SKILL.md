@@ -80,6 +80,10 @@ bounds the gate.
 `--wall-ms N` caps the whole run in milliseconds: agent, retry backoff and job-end gate.
 It is off by default; `bin/tkt-job` passes 10800000 (3 h) for `verifier-r*` slots. Expiry
 is `CANCELLED` with `Cancelled: wall budget of ...`; a resume gets a fresh full budget.
+The first kill is SIGTERM; a wall-expired child that ignores it gets SIGKILL after the
+grace, while an idle stall sends a single SIGTERM. A user cancel after a watchdog kill
+sends SIGKILL at once and reads the cancel wording, and a wall expiry during retry
+backoff performs no respawn.
 
 ## Waiting
 
