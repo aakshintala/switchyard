@@ -467,6 +467,34 @@ fn start_validates_detaches_and_prints_shared_help() {
 }
 
 #[test]
+fn start_rejects_an_effort_suffix_and_starts_a_bare_id() {
+    let h = Harness::new();
+    let suffixed = format!("{MODEL}:high");
+    let brief = h.brief_file(b"HOLD");
+    let rejected = h.invoke(&[
+        "start",
+        "--model",
+        &suffixed,
+        "--brief",
+        brief.to_str().unwrap(),
+        "--inbox",
+        h.inbox.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_json_error(&rejected, 2, "usage");
+    let message = serde_json::from_slice::<Value>(&rejected.stdout).unwrap()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(message.contains("no reasoning-effort suffix"), "{message}");
+
+    let started = h.start(b"HOLD", false, "", &[]);
+    assert!(started.status.success());
+    let id = id_from(&started);
+    h.wait_state(&id, "first turn", |value| value["activeTurnId"].is_string());
+}
+
+#[test]
 fn start_fast_turn_and_startup_failure_paths_are_bounded() {
     let h = Harness::new();
     for marker in ["FAST", "BADMODEL"] {

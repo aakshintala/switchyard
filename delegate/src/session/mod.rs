@@ -262,12 +262,16 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     let model = flag(&values, "--model").ok_or_else(|| usage("start requires --model"))?;
     let brief_path = flag(&values, "--brief").ok_or_else(|| usage("start requires --brief"))?;
     let inbox_path = flag(&values, "--inbox").ok_or_else(|| usage("start requires --inbox"))?;
-    if !model.starts_with("muse/") {
+    let Some(model_id) = model.strip_prefix("muse/") else {
         return Err(usage("--model must use the muse/<model> form"));
-    }
-    let model_id = crate::backends::muse::base_and_effort(model).0;
+    };
     if model_id.is_empty() {
         return Err(usage("--model muse/ requires a model id"));
+    }
+    if crate::backends::muse::base_and_effort(model).1.is_some() {
+        return Err(usage(
+            "--model takes no reasoning-effort suffix on a session (sessions run at Muse's default effort)",
+        ));
     }
     let brief = read_brief(brief_path).map_err(usage)?;
     let cwd = std::env::current_dir()
