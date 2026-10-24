@@ -256,6 +256,9 @@ for spec in "--model --model solorole" "--merge-gate --merge-gate someday"; do
   [ "$RC" -eq 2 ] || fail "usage ${spec#* }: exit $RC"
   grep -qF -- "${spec%% *}" "$CDIR/stderr" || fail "usage ${spec#* }: stderr does not name ${spec%% *}"
 done
+reload; run_start --help
+[ "$RC" -eq 2 ] || fail "usage help: exit $RC"
+grep -qF -- 'ticket body' "$CDIR/stderr" || fail "usage help: stderr does not say --spec holds the ticket body"
 # failure table: name, stub flag, want rc, want line. sweep-mixed pins the
 # classifier: a mkdir-style diagnostic beside an unresolved line is still a
 # failure. sweep-pure pins the other side: all-unresolved still preflights.
@@ -328,8 +331,16 @@ printf 'Batch part.\n\nPart of #9\n' >"$CDIR/spec.md"
 run_start --spec "$CDIR/spec.md"
 [ "$RC" -eq 2 ] || fail "partclose: exit $RC, want 2"
 grep -qF -- '--closing' "$CDIR/stderr" || fail "partclose: stderr does not name --closing"
+grep -qF -- "$CDIR/spec.md" "$CDIR/stderr" || fail "partclose: stderr does not name the spec it read"
 run_start --spec "$CDIR/spec.md" --closing "Part of #9"
 want "CURRENT " 0 partok
+# a missing --spec file is named, instead of grep's redirect hiding it.
+setup specmissing ONE AGAINST
+run_start --spec "$CDIR/nope.md" --closing "Part of #9"
+[ "$RC" -eq 2 ] || fail "specmissing: exit $RC, want 2"
+grep -qF -- "$CDIR/nope.md" "$CDIR/stderr" || fail "specmissing: stderr does not name the path"
+grep -qF -- 'does not exist' "$CDIR/stderr" || fail "specmissing: stderr does not say the file is missing"
+[ ! -e "$RUN/widget-42.state" ] || fail "specmissing: state must not be written"
 setup partrev ONE AGAINST
 run_start --closing "Part of #9"
 [ "$RC" -eq 2 ] || fail "partrev: exit $RC, want 2"
