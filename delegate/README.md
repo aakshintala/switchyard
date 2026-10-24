@@ -70,7 +70,7 @@ A Muse model id is `muse/` plus the Muse model name (for example, `muse/muse-spa
 
 ## Status records
 
-Each job writes `$TMPDIR/delegate-jobs/<jobId>.json` (use `$TMPDIR` when set, otherwise the OS temp directory). Prompt text is stored alongside as `<jobId>.prompt` until the supervisor starts. A gate writes its full ANSI-stripped output to `<jobId>-gate.log` beside the record; later gate runs for the same job use numbered names. `result.gateResult.outputPath` names the file, and `outputTail` remains the last 2048 bytes. When the supervisor resumed a session past a transient provider error (a 5xx, or a first 401), `result.retries` lists each failed attempt; it is absent when there were none.
+Each job writes `DELEGATE_JOBS_DIR/<jobId>.json` when that override is set (resolved like the lookup below), else `$TMPDIR/delegate-jobs/<jobId>.json` (use `$TMPDIR` when set, otherwise the OS temp directory). Prompt text is stored alongside as `<jobId>.prompt` until the supervisor starts. `cancel`, `watch` and `resume` search `DELEGATE_JOBS_DIR` first, then the caller's `$TMPDIR/delegate-jobs`, then `/tmp/delegate-jobs`. They write back to the record where they found it. A caller under another `TMPDIR` sets `DELEGATE_JOBS_DIR` to the supervisor's jobs dir. Without it, `unknown job` names every directory searched. A gate writes its full ANSI-stripped output to `<jobId>-gate.log` beside the record; later gate runs for the same job use numbered names. `result.gateResult.outputPath` names the file, and `outputTail` remains the last 2048 bytes. When the supervisor resumed a session past a transient provider error (a 5xx, or a first 401), `result.retries` lists each failed attempt; it is absent when there were none.
 
 ## Host profile
 

@@ -9,14 +9,85 @@ pub trait StatusRecordWriter: Send + Sync {
 }
 
 /// Delegate's state directory: job records, gate logs, and the `cargo-mutants`
-/// shim (`shim/`) every job's `PATH` starts with (#435).
+/// shim (`shim/`) every job's `PATH` starts with (#435). An explicit
+/// `DELEGATE_JOBS_DIR` override wins, so the switchyard operator's setting on
+/// the box reaches the records supervisors write (#386); otherwise the
+/// supervisor's `$TMPDIR/delegate-jobs`.
 pub fn jobs_dir() -> PathBuf {
-    std::env::temp_dir().join("delegate-jobs")
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+    writer_dir_from(
+        &std::env::var_os("DELEGATE_JOBS_DIR"),
+        &std::env::temp_dir(),
+        &cwd,
+    )
 }
 
-/// Status JSON for one job under `$TMPDIR/delegate-jobs/`.
+/// The writer side of the lookup rule: the resolved `DELEGATE_JOBS_DIR` when
+/// set and non-empty, else `tmp/delegate-jobs`. A relative override resolves
+/// against the caller's current directory, exactly like the lookup's first
+/// entry, so writers and readers agree on one rule.
+fn writer_dir_from(over: &Option<std::ffi::OsString>, tmp: &Path, cwd: &Path) -> PathBuf {
+    if let Some(o) = over
+        && !o.is_empty()
+    {
+        let p = PathBuf::from(&o);
+        return if p.is_absolute() { p } else { cwd.join(p) };
+    }
+    tmp.join("delegate-jobs")
+}
+
+/// Status JSON for one job in the writer directory (`jobs_dir`).
+/// Readers never call this directly: `cancel`, `watch` and `resume` look the
+/// record up with `find_record_path`, which searches every directory the
+/// supervisor's `TMPDIR` could have been.
 pub fn job_record_path(job_id: &str) -> PathBuf {
     jobs_dir().join(format!("{job_id}.json"))
+}
+
+/// Every directory a job record could live in: an explicit `DELEGATE_JOBS_DIR`
+/// override first, then the caller's `$TMPDIR/delegate-jobs`, then the
+/// system `/tmp/delegate-jobs`. The override is dropped when empty; a
+/// relative override resolves against the caller's current directory.
+/// Duplicates are removed, keeping the first position. Never empty.
+pub fn search_dirs() -> Vec<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+    dirs_from(
+        std::env::var_os("DELEGATE_JOBS_DIR"),
+        &std::env::temp_dir(),
+        &cwd,
+    )
+}
+
+fn dirs_from(over: Option<std::ffi::OsString>, tmp: &Path, cwd: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![writer_dir_from(&over, tmp, cwd)];
+    if over.as_ref().is_some_and(|o| !o.is_empty()) {
+        dirs.push(tmp.join("delegate-jobs"));
+    }
+    dirs.push(PathBuf::from("/tmp/delegate-jobs"));
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(d.clone()));
+    dirs
+}
+
+/// The record's path in the first searched directory holding `<job_id>.json`.
+/// `None` for an empty id or one holding a path separator, which must never
+/// reach a path join.
+pub fn find_record_path(job_id: &str) -> Option<PathBuf> {
+    find_in_dirs(job_id, &search_dirs())
+}
+
+fn find_in_dirs(job_id: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    if job_id.is_empty() || job_id.contains('/') {
+        return None;
+    }
+    dirs.iter()
+        .map(|d| d.join(format!("{job_id}.json")))
+        .find(|p| p.is_file())
+}
+
+/// Writers only: the found path, else `job_record_path` when no record exists.
+pub fn record_path(job_id: &str) -> PathBuf {
+    find_record_path(job_id).unwrap_or_else(|| job_record_path(job_id))
 }
 
 pub struct FileStatusRecordWriter;
@@ -160,7 +231,7 @@ pub fn write_supervisor_died(job_id: &str, prior: &serde_json::Value) -> std::io
             "jobId": job_id,
         }),
     );
-    write_atomic(&job_record_path(job_id), &json_compact(&rec))
+    write_atomic(&record_path(job_id), &json_compact(&rec))
 }
 
 /// A RUNNING record whose supervisor is gone or had to be SIGKILLed: nobody is left to
@@ -196,7 +267,7 @@ pub fn write_cancelled(job_id: &str, prior: &serde_json::Value) -> std::io::Resu
             "jobId": job_id,
         }),
     );
-    write_atomic(&job_record_path(job_id), &json_compact(&rec))
+    write_atomic(&record_path(job_id), &json_compact(&rec))
 }
 
 #[cfg(test)]
@@ -229,6 +300,115 @@ mod tests {
         assert_eq!(dead["result"]["sessionId"], "s-init");
         assert_eq!(dead["result"]["backend"], "pi");
         let _ = fs::remove_file(job_record_path(&dead_id));
+    }
+
+    #[test]
+    fn search_order_is_override_then_tmp_then_system_tmp() {
+        // docs/delegate-jobs.md#lookup-order
+        let dirs = dirs_from(
+            Some("/jobs/ship-tmp/delegate-jobs".into()),
+            Path::new("/jobs/caller-tmp"),
+            Path::new("/jobs/cwd"),
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/jobs/ship-tmp/delegate-jobs"),
+                PathBuf::from("/jobs/caller-tmp/delegate-jobs"),
+                PathBuf::from("/tmp/delegate-jobs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_resolves_a_relative_override_against_cwd_and_drops_empty() {
+        // docs/delegate-jobs.md#empty-and-relative-override
+        let cwd = Path::new("/jobs/cwd");
+        let no_over = dirs_from(None, Path::new("/jobs/caller-tmp"), cwd);
+        assert_eq!(
+            dirs_from(Some("".into()), Path::new("/jobs/caller-tmp"), cwd),
+            no_over
+        );
+        assert_eq!(
+            dirs_from(
+                Some("relative/dir".into()),
+                Path::new("/jobs/caller-tmp"),
+                cwd
+            )[0],
+            PathBuf::from("/jobs/cwd/relative/dir")
+        );
+        assert_eq!(
+            dirs_from(Some("/abs/dir".into()), Path::new("/jobs/caller-tmp"), cwd)[0],
+            PathBuf::from("/abs/dir")
+        );
+    }
+
+    #[test]
+    fn writer_dir_prefers_the_override_else_tmp_jobs() {
+        // docs/delegate-jobs.md#writers
+        let cwd = Path::new("/jobs/cwd");
+        let tmp = Path::new("/jobs/caller-tmp");
+        assert_eq!(
+            writer_dir_from(&Some("/jobs/ship/jobs".into()), tmp, cwd),
+            PathBuf::from("/jobs/ship/jobs")
+        );
+        assert_eq!(
+            writer_dir_from(&Some("relative/dir".into()), tmp, cwd),
+            PathBuf::from("/jobs/cwd/relative/dir")
+        );
+        assert_eq!(
+            writer_dir_from(&Some("".into()), tmp, cwd),
+            PathBuf::from("/jobs/caller-tmp/delegate-jobs")
+        );
+        assert_eq!(
+            writer_dir_from(&None, tmp, cwd),
+            PathBuf::from("/jobs/caller-tmp/delegate-jobs")
+        );
+    }
+
+    #[test]
+    fn search_removes_duplicate_directories_keeping_the_first() {
+        // docs/delegate-jobs.md#duplicates
+        assert_eq!(
+            dirs_from(
+                Some("/jobs/caller-tmp/delegate-jobs".into()),
+                Path::new("/jobs/caller-tmp"),
+                Path::new("/jobs/cwd"),
+            ),
+            vec![
+                PathBuf::from("/jobs/caller-tmp/delegate-jobs"),
+                PathBuf::from("/tmp/delegate-jobs"),
+            ]
+        );
+        assert_eq!(
+            dirs_from(None, Path::new("/tmp"), Path::new("/jobs/cwd")),
+            vec![PathBuf::from("/tmp/delegate-jobs")]
+        );
+    }
+
+    #[test]
+    fn lookup_returns_the_first_directory_holding_the_record() {
+        // docs/delegate-jobs.md#lookup-order
+        let root = std::env::temp_dir().join(format!("delegate-search-{}", random_uuid()));
+        let first = root.join("a");
+        let second = root.join("b");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let id = random_uuid();
+        assert_eq!(find_in_dirs(&id, &[first.clone(), second.clone()]), None);
+        fs::write(second.join(format!("{id}.json")), "{}").unwrap();
+        assert_eq!(
+            find_in_dirs(&id, &[first.clone(), second.clone()]),
+            Some(second.join(format!("{id}.json")))
+        );
+        fs::write(first.join(format!("{id}.json")), "{}").unwrap();
+        assert_eq!(
+            find_in_dirs(&id, &[first.clone(), second.clone()]),
+            Some(first.join(format!("{id}.json")))
+        );
+        assert_eq!(find_in_dirs("../x", &[first.clone(), second.clone()]), None);
+        assert_eq!(find_in_dirs("", &[first, second]), None);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

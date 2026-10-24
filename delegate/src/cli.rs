@@ -1,5 +1,8 @@
 //! The `delegate` CLI: `run` starts a detached supervisor, `watch` reads job records.
-//! The record file under `$TMPDIR/delegate-jobs/` is the only link between them.
+//! The record file is the only link between them. `cancel`, `watch` and `resume`
+//! find it by searching `DELEGATE_JOBS_DIR`, then `$TMPDIR/delegate-jobs`, then
+//! `/tmp/delegate-jobs`: a record stays where its supervisor wrote it, so a
+//! caller under another `TMPDIR` sets `DELEGATE_JOBS_DIR` to the supervisor's dir.
 
 use crate::backends::Backend;
 use crate::config::build_deps;
@@ -8,7 +11,8 @@ use crate::job::{JobDeps, JobHandle};
 use crate::models::{base_model_id, resolve_model};
 use crate::prompt::status_block;
 use crate::status_record::{
-    CliRecordWriter, job_record_path, write_atomic, write_cancelled, write_supervisor_died,
+    CliRecordWriter, find_record_path, job_record_path, record_path, search_dirs, write_atomic,
+    write_cancelled, write_supervisor_died,
 };
 use crate::types::{Config, JobSpec, ResumeContext};
 use crate::util::{captured_command, json_compact, random_uuid, resolve_path};
@@ -322,7 +326,7 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
         return usage(USAGE);
     };
     let Some(raw) = read_record(old_id) else {
-        return usage(format!("unknown job {old_id}"));
+        return Err(missing_record(old_id));
     };
     let old: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| Usage(format!("cannot read job {old_id}: {e}")))?;
@@ -426,7 +430,7 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
             if let Some(obj) = old.as_object_mut() {
                 obj.insert("supersededBy".into(), new_id.clone().into());
             }
-            if let Err(e) = write_atomic(&job_record_path(old_id), &json_compact(&old)) {
+            if let Err(e) = write_atomic(&record_path(old_id), &json_compact(&old)) {
                 eprintln!("warning: cannot link {old_id} to {new_id}: {e}");
             }
         }
@@ -442,7 +446,7 @@ fn cancel(args: &[String]) -> Result<i32, Usage> {
         return usage(USAGE);
     };
     let Some(raw) = read_record(id) else {
-        return usage(format!("unknown job {id}"));
+        return Err(missing_record(id));
     };
     let rec: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| Usage(format!("cannot read job {id}: {e}")))?;
@@ -486,7 +490,7 @@ fn cancel(args: &[String]) -> Result<i32, Usage> {
         return Ok(0);
     }
     let Some(raw) = read_record(id).and_then(|s| serde_json::from_str(&s).ok()) else {
-        return usage(format!("unknown job {id}"));
+        return Err(missing_record(id));
     };
     cancel_write(id, &raw)
 }
@@ -512,7 +516,7 @@ fn cancel_write(id: &str, prior: &serde_json::Value) -> Result<i32, Usage> {
     if let Err(e) = write_cancelled(id, prior) {
         eprintln!(
             "cannot write status record {}: {e}",
-            job_record_path(id).display()
+            record_path(id).display()
         );
         return Ok(1);
     }
@@ -750,7 +754,21 @@ fn spawn_cancel_waiter(registry: Arc<JobHandle>, job: String, fd: i32) {
 }
 
 fn read_record(id: &str) -> Option<String> {
-    std::fs::read_to_string(job_record_path(id)).ok()
+    let path = find_record_path(id)?;
+    // The record can vanish or become unreadable between the lookup and the
+    // read; either reads as missing and gets the unknown-job error.
+    std::fs::read_to_string(path).ok()
+}
+
+/// No record in any searched directory: name the id and every directory tried,
+/// keeping the `unknown job <id>` prefix existing tests match.
+fn missing_record(id: &str) -> Usage {
+    let dirs = search_dirs()
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Usage(format!("unknown job {id} (searched: {dirs})"))
 }
 
 fn watch(args: &[String]) -> Result<i32, Usage> {
@@ -771,7 +789,7 @@ fn watch(args: &[String]) -> Result<i32, Usage> {
         .iter()
         .find(|i| i.contains('/') || read_record(i).is_none())
     {
-        return usage(format!("unknown job {id}"));
+        return Err(missing_record(id));
     }
     let start = Instant::now();
     loop {
@@ -856,7 +874,7 @@ fn settle_dead_supervisor(id: &str) {
     if let Err(e) = write_supervisor_died(id, &v) {
         eprintln!(
             "cannot write status record {}: {e}",
-            job_record_path(id).display()
+            record_path(id).display()
         );
     }
 }
