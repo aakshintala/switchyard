@@ -295,10 +295,7 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         }
     };
 
-    let model_id = initial
-        .model
-        .strip_prefix("muse/")
-        .unwrap_or(&initial.model);
+    let model_id = crate::backends::muse::base_and_effort(&initial.model).0;
     let mut command = match crate::util::captured_command(&config.muse_bin) {
         Ok(command) => command,
         Err(error) => {
@@ -549,10 +546,7 @@ fn start_host(shared: &Arc<Shared>, initial: &State, brief: &str) -> Result<(), 
         msp::notification("initialized"),
         shared.config.rpc_timeout,
     )?;
-    let model_id = initial
-        .model
-        .strip_prefix("muse/")
-        .unwrap_or(&initial.model);
+    let model_id = crate::backends::muse::base_and_effort(&initial.model).0;
     call(
         shared,
         "session/start",

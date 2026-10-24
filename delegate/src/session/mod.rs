@@ -262,9 +262,10 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     let model = flag(&values, "--model").ok_or_else(|| usage("start requires --model"))?;
     let brief_path = flag(&values, "--brief").ok_or_else(|| usage("start requires --brief"))?;
     let inbox_path = flag(&values, "--inbox").ok_or_else(|| usage("start requires --inbox"))?;
-    let Some(model_id) = model.strip_prefix("muse/") else {
+    if !model.starts_with("muse/") {
         return Err(usage("--model must use the muse/<model> form"));
-    };
+    }
+    let model_id = crate::backends::muse::base_and_effort(model).0;
     if model_id.is_empty() {
         return Err(usage("--model muse/ requires a model id"));
     }

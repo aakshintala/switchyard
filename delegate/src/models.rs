@@ -5,9 +5,15 @@ use std::collections::HashMap;
 /// The `claude --effort` values; a Claude model id may end in `:<one of these>` (#157).
 pub const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
+/// The `muse exec --reasoning-effort` values; a Muse model id may end in `:<one of these>`.
+pub const MUSE_EFFORT_LEVELS: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
 /// Resolves a model id to its models.json row id. An exact key wins; otherwise a
 /// trailing `:<level>` is stripped only when the base is a key whose backend is
-/// `claude` and the level is one of [`CLAUDE_EFFORT_LEVELS`]. An invalid level on a
+/// `claude` and the level is one of [`CLAUDE_EFFORT_LEVELS`], or whose backend is
+/// `muse` and the level is one of [`MUSE_EFFORT_LEVELS`]. An invalid level on a
 /// Claude base is an error (a plain message, not [`ModelNotAllowedError`]); everything
 /// else passes through whole and the caller rejects it as unknown.
 pub fn base_model_id<'a>(
@@ -23,17 +29,15 @@ pub fn base_model_id<'a>(
     let Some(entry) = models.get(base) else {
         return Ok(model);
     };
-    if entry.backend != "claude" {
-        return Ok(model);
-    }
-    if CLAUDE_EFFORT_LEVELS.contains(&level) {
-        Ok(base)
-    } else {
-        Err(format!(
+    match entry.backend.as_str() {
+        "muse" if MUSE_EFFORT_LEVELS.contains(&level) => Ok(base),
+        "claude" if CLAUDE_EFFORT_LEVELS.contains(&level) => Ok(base),
+        "claude" => Err(format!(
             "model \"{model}\": unknown effort level \"{level}\"; \
              use one of {}",
             CLAUDE_EFFORT_LEVELS.join(", ")
-        ))
+        )),
+        _ => Ok(model),
     }
 }
 
@@ -215,6 +219,34 @@ mod tests {
             assert_eq!(r.backend, "claude", "{id}");
             assert_eq!(r.price, m[base_id].price, "{id}");
         }
+    }
+
+    #[test]
+    fn suffixed_muse_id_resolves_as_its_base() {
+        let (d, mut m) = base();
+        let entry = ModelEntry {
+            label: "Muse Spark 1.3 Contributor (muse)".into(),
+            backend: "muse".into(),
+            price: price(0.1, 0.2, 0.002, 0.0),
+            tiers: vec![],
+        };
+        m.insert("muse/muse-spark-1.3-contributor".into(), entry);
+        for id in [
+            "muse/muse-spark-1.3-contributor:high",
+            "muse/muse-spark-1.3-contributor:ultra",
+        ] {
+            let r = resolve_model(Some(id), &(d.as_str(), &m)).unwrap();
+            assert_eq!(r.model, id, "{id}");
+            assert_eq!(r.backend, "muse", "{id}");
+            assert_eq!(r.price, m["muse/muse-spark-1.3-contributor"].price, "{id}");
+        }
+        // A colon that is not a Muse level is part of the name, so it is unknown.
+        let e = resolve_model(
+            Some("muse/muse-spark-1.3-contributor:beta"),
+            &(d.as_str(), &m),
+        )
+        .unwrap_err();
+        assert!(e.downcast_ref::<ModelNotAllowedError>().is_some());
     }
 
     #[test]
