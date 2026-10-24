@@ -169,7 +169,7 @@ n=0; for ax in standards spec overbuild; do n=$((n+1)); [ "$(printf '%s' "$rids"
 # shellcheck disable=SC2086
 "$delegate" watch $rids $map_id >/dev/null 2>&1 || true
 if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
-  rec="${TMPDIR:-/tmp}/delegate-jobs/$map_id.json"
+  rec="$(bash "$bin_dir/job-record" "$map_id" 2>/dev/null || true)"
   mtext="$(jq -j -r '.result.text // ""' "$rec" 2>/dev/null || true)"
   mstatus="$(jq -r '.result.status // .status // ""' "$rec" 2>/dev/null || true)"
   if [ -n "$mtext" ]; then printf '%s' "$mtext" >"$map_out"; fi
