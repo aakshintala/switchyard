@@ -114,6 +114,30 @@ pub fn parse_stdout(stdout: &str, clean_exit: bool, stderr: &str) -> BackendResu
     finish(state, clean_exit, stderr)
 }
 
+/// One tool call's reviewer trail, keyed by `action_id`. The first request,
+/// the first resolution and the first completion for an action win.
+#[derive(Debug, Default)]
+struct ActionRecord {
+    action_id: Option<String>,
+    tool_name: Option<String>,
+    command: Option<String>,
+    resolution: Option<ActionResolution>,
+    completion: Option<ActionCompletion>,
+}
+
+#[derive(Debug)]
+struct ActionResolution {
+    decision: String,
+    decided_by: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct ActionCompletion {
+    status: String,
+    reason: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct FiberState {
     session_id: Option<String>,
@@ -124,6 +148,9 @@ struct FiberState {
     usage_by_generation: HashMap<String, (f64, f64)>,
     exited: Option<serde_json::Value>,
     exited_session: Option<String>,
+    actions: HashMap<String, ActionRecord>,
+    action_order: Vec<String>,
+    anonymous_actions: u64,
     /// The first `notice` with `payload.code == "no_model"`: Fiber denied
     /// every reviewed tool call for lack of a reviewer model. The run can
     /// still exit 0 with `turn_completed` completed; the result is an error
@@ -134,6 +161,56 @@ struct FiberState {
 impl FiberState {
     fn tokens_so_far(&self) -> f64 {
         self.usage_by_generation.values().map(|(i, o)| i + o).sum()
+    }
+
+    /// The denial list, in the order each action first appeared. An action
+    /// is a denial when a reviewer-set member denied it (`reviewer`,
+    /// `no_reviewer` or `budget`) or when its call completed as denied.
+    /// Keys with unknown values are omitted, never invented.
+    fn denial_list(&self) -> Vec<serde_json::Value> {
+        fn reviewer_set(s: &str) -> bool {
+            matches!(s, "reviewer" | "no_reviewer" | "budget")
+        }
+        let mut out = Vec::new();
+        for key in &self.action_order {
+            let Some(rec) = self.actions.get(key) else {
+                continue;
+            };
+            let resolution_denial = rec.resolution.as_ref().is_some_and(|r| {
+                r.decision == "deny" && r.decided_by.as_deref().is_some_and(reviewer_set)
+            });
+            let completed_denied = rec
+                .completion
+                .as_ref()
+                .is_some_and(|c| c.status == "denied");
+            if !(resolution_denial || completed_denied) {
+                continue;
+            }
+            let mut obj = serde_json::Map::new();
+            if let Some(name) = &rec.tool_name {
+                obj.insert("tool_name".into(), name.clone().into());
+            }
+            if let Some(id) = &rec.action_id {
+                obj.insert("action_id".into(), id.clone().into());
+            }
+            if let Some(resolution) = &rec.resolution {
+                if let Some(decided_by) = &resolution.decided_by {
+                    obj.insert("decided_by".into(), decided_by.clone().into());
+                }
+                if let Some(reason) = &resolution.reason {
+                    obj.insert("reason".into(), reason.clone().into());
+                }
+            } else if let Some(completion) = &rec.completion
+                && let Some(reason) = &completion.reason
+            {
+                obj.insert("reason".into(), reason.clone().into());
+            }
+            if let Some(command) = &rec.command {
+                obj.insert("command".into(), command.clone().into());
+            }
+            out.push(serde_json::Value::Object(obj));
+        }
+        out
     }
 }
 
@@ -158,6 +235,98 @@ fn cache_write_tokens(tokens: Option<&serde_json::Value>) -> f64 {
             .sum();
     }
     0.0
+}
+
+/// A non-empty string field of a payload object, or `None` when unknown.
+fn non_empty(payload: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    payload
+        .and_then(|p| p.get(key))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// One string argument of a tool call (`command`, `path`, ...). `arguments`
+/// is an object, or a string holding raw text when it was not JSON.
+fn tool_argument(arguments: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    match arguments {
+        Some(serde_json::Value::Object(obj)) => obj
+            .get(key)
+            .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        Some(serde_json::Value::String(raw)) => serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|v| tool_argument(Some(&v), key)),
+        _ => None,
+    }
+}
+
+/// The `command` argument of a tool call.
+fn request_command(arguments: Option<&serde_json::Value>) -> Option<String> {
+    tool_argument(arguments, "command")
+}
+
+/// The record for one event's action. An event without `action_id` gets its
+/// own key, so it is never merged with another.
+fn action_record<'a>(ev: &serde_json::Value, state: &'a mut FiberState) -> &'a mut ActionRecord {
+    let key = ev
+        .get("action_id")
+        .and_then(|a| a.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            state.anonymous_actions += 1;
+            format!("\u{0}anonymous:{}", state.anonymous_actions)
+        });
+    if !state.actions.contains_key(&key) {
+        let action_id = if key.starts_with('\u{0}') {
+            None
+        } else {
+            Some(key.clone())
+        };
+        state.action_order.push(key.clone());
+        state.actions.insert(
+            key.clone(),
+            ActionRecord {
+                action_id,
+                ..Default::default()
+            },
+        );
+    }
+    state.actions.get_mut(&key).expect("just inserted")
+}
+
+fn record_request(ev: &serde_json::Value, state: &mut FiberState) {
+    let rec = action_record(ev, state);
+    if rec.tool_name.is_none() {
+        let payload = ev.get("payload");
+        rec.tool_name = non_empty(payload, "name");
+        rec.command = request_command(payload.and_then(|p| p.get("arguments")));
+    }
+}
+
+fn record_resolution(ev: &serde_json::Value, state: &mut FiberState) {
+    let rec = action_record(ev, state);
+    if rec.resolution.is_none() {
+        let payload = ev.get("payload");
+        rec.resolution = Some(ActionResolution {
+            decision: non_empty(payload, "decision").unwrap_or_default(),
+            decided_by: non_empty(payload, "decided_by"),
+            reason: non_empty(payload, "reason"),
+        });
+    }
+}
+
+fn record_completion(ev: &serde_json::Value, state: &mut FiberState) {
+    let rec = action_record(ev, state);
+    if rec.completion.is_none() {
+        let payload = ev.get("payload");
+        rec.completion = Some(ActionCompletion {
+            status: non_empty(payload, "status").unwrap_or_default(),
+            reason: non_empty(payload, "reason"),
+        });
+    }
 }
 
 /// Fold one stdout line into the state. Unparseable lines are ignored.
@@ -185,6 +354,7 @@ fn handle_line(line: &[u8], state: &mut FiberState) -> bool {
     let payload = ev.get("payload");
     match kind {
         "tool_call_requested" => {
+            record_request(&ev, state);
             if let Some(name) = payload.and_then(|p| p.get("name")).and_then(|n| n.as_str())
                 && !name.is_empty()
             {
@@ -230,6 +400,14 @@ fn handle_line(line: &[u8], state: &mut FiberState) -> bool {
             }
             changed
         }
+        "permission_resolved" => {
+            record_resolution(&ev, state);
+            changed
+        }
+        "tool_call_completed" => {
+            record_completion(&ev, state);
+            changed
+        }
         "turn_completed" => changed,
         "notice" => {
             if state.notice_no_model.is_none()
@@ -254,24 +432,14 @@ fn handle_line(line: &[u8], state: &mut FiberState) -> bool {
     }
 }
 
-/// The `path` argument of an `edit` or `write` call. `arguments` is an
-/// object, or a string holding raw text when it was not JSON.
+/// The `path` argument of an `edit` or `write` call.
 fn tool_path(arguments: Option<&serde_json::Value>) -> Option<String> {
-    match arguments {
-        Some(serde_json::Value::Object(obj)) => obj
-            .get("path")
-            .and_then(|p| p.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        Some(serde_json::Value::String(raw)) => serde_json::from_str::<serde_json::Value>(raw)
-            .ok()
-            .and_then(|v| tool_path(Some(&v))),
-        _ => None,
-    }
+    tool_argument(arguments, "path")
 }
 
 /// Turn the terminal `fiber_exited` (or the lack of one) into the normalized result.
 fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
+    let permission_denials = state.denial_list();
     let session_id = state.session_id.or(state.exited_session);
     let notice_no_model = state.notice_no_model;
     let Some(exited) = state.exited else {
@@ -288,6 +456,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
             is_error: Some(true),
             clean_exit,
             stderr: stderr.to_string(),
+            permission_denials,
             ..Default::default()
         };
     };
@@ -327,7 +496,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         duration_ms: None,
         clean_exit,
         stderr: stderr.to_string(),
-        permission_denials: Vec::new(),
+        permission_denials,
         provider_status,
     }
 }
@@ -676,5 +845,311 @@ mod tests {
         assert_eq!(res.session_id.as_deref(), Some("s_36e63d22c39750e1"));
         // The run's own answer is kept after the notice message.
         assert!(res.text.contains("DONE"), "{}", res.text);
+    }
+
+    fn ev_line(kind: &str, action_id: &str, payload: serde_json::Value, seq: u64) -> String {
+        serde_json::json!({
+            "kind": kind,
+            "session_id": "s_inline",
+            "ts": seq,
+            "schema_version": 1,
+            "seq": seq,
+            "action_id": action_id,
+            "payload": payload
+        })
+        .to_string()
+    }
+
+    fn requested(action_id: &str, command: &str, seq: u64) -> String {
+        ev_line(
+            "tool_call_requested",
+            action_id,
+            serde_json::json!({"name": "shell", "arguments": {"command": command}}),
+            seq,
+        )
+    }
+
+    fn resolved_reason(
+        action_id: &str,
+        decision: &str,
+        decided_by: &str,
+        reason: &str,
+        seq: u64,
+    ) -> String {
+        ev_line(
+            "permission_resolved",
+            action_id,
+            serde_json::json!({"decision": decision, "decided_by": decided_by, "reason": reason}),
+            seq,
+        )
+    }
+
+    fn resolved(action_id: &str, decision: &str, decided_by: &str, seq: u64) -> String {
+        resolved_reason(action_id, decision, decided_by, "blocked", seq)
+    }
+
+    fn resolved_allow(action_id: &str, decided_by: &str, seq: u64) -> String {
+        ev_line(
+            "permission_resolved",
+            action_id,
+            serde_json::json!({"decision": "allow", "decided_by": decided_by}),
+            seq,
+        )
+    }
+
+    fn completed(action_id: &str, status: &str, seq: u64) -> String {
+        ev_line(
+            "tool_call_completed",
+            action_id,
+            serde_json::json!({"status": status, "reason": "blocked"}),
+            seq,
+        )
+    }
+
+    fn completed_ok(action_id: &str, seq: u64) -> String {
+        ev_line(
+            "tool_call_completed",
+            action_id,
+            serde_json::json!({"status": "completed"}),
+            seq,
+        )
+    }
+
+    fn exited(text: &str, seq: u64) -> String {
+        serde_json::json!({
+            "kind": "fiber_exited",
+            "session_id": "s_inline",
+            "ts": seq,
+            "schema_version": 1,
+            "seq": seq,
+            "payload": {"exit_code": 0, "text": text}
+        })
+        .to_string()
+    }
+
+    /// One allowed call plus one reviewer-denied call, built inline so the
+    /// behavioural assertions below do not depend on a recorded fixture.
+    fn review_stream() -> String {
+        [
+            requested("a_allowed", "cargo test", 1),
+            resolved_allow("a_allowed", "reviewer", 2),
+            completed_ok("a_allowed", 3),
+            requested("a_denied", "curl https://example.com", 4),
+            resolved_reason("a_denied", "deny", "reviewer", "fetches a remote host", 5),
+            completed("a_denied", "denied", 6),
+            exited("DONE", 7),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn tool_argument_reads_command_and_path_keys() {
+        let args = serde_json::json!({"command": "curl x", "path": "a/b.rs"});
+        assert_eq!(
+            tool_argument(Some(&args), "command").as_deref(),
+            Some("curl x")
+        );
+        assert_eq!(
+            tool_argument(Some(&args), "path").as_deref(),
+            Some("a/b.rs")
+        );
+        assert_eq!(tool_argument(None, "command"), None);
+        let raw = serde_json::Value::String(r#"{"command": "make"}"#.into());
+        assert_eq!(
+            tool_argument(Some(&raw), "command").as_deref(),
+            Some("make")
+        );
+    }
+
+    #[test]
+    fn reviewer_denial_is_a_permission_denial() {
+        let stdout = review_stream();
+        let res = parse_stdout(&stdout, true, "");
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        let denial = res
+            .permission_denials
+            .iter()
+            .find(|d| d.get("action_id").and_then(|v| v.as_str()) == Some("a_denied"))
+            .expect("denial for a_denied present");
+        assert_eq!(
+            denial.get("tool_name").and_then(|v| v.as_str()),
+            Some("shell")
+        );
+        assert_eq!(
+            denial.get("command").and_then(|v| v.as_str()),
+            Some("curl https://example.com")
+        );
+        assert_eq!(
+            denial.get("decided_by").and_then(|v| v.as_str()),
+            Some("reviewer")
+        );
+        assert_eq!(
+            denial.get("action_id").and_then(|v| v.as_str()),
+            Some("a_denied")
+        );
+        assert_eq!(
+            denial.get("reason").and_then(|v| v.as_str()),
+            Some("fetches a remote host")
+        );
+    }
+
+    #[test]
+    fn allowed_reviewed_call_is_not_a_denial() {
+        let stdout = review_stream();
+        let res = parse_stdout(&stdout, true, "");
+        assert!(
+            res.permission_denials
+                .iter()
+                .all(|d| d.get("action_id").and_then(|v| v.as_str()) != Some("a_allowed")),
+            "{:?}",
+            res.permission_denials
+        );
+    }
+
+    #[test]
+    fn no_reviewer_and_budget_denials_count() {
+        let stdout = [
+            requested("a_nr", "curl x", 1),
+            resolved("a_nr", "deny", "no_reviewer", 2),
+            completed("a_nr", "denied", 3),
+            requested("a_bq", "curl y", 4),
+            resolved("a_bq", "deny", "budget", 5),
+            completed("a_bq", "denied", 6),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        let by_id: std::collections::HashMap<&str, &str> = res
+            .permission_denials
+            .iter()
+            .map(|d| {
+                (
+                    d.get("action_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("missing"),
+                    d.get("decided_by")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("missing"),
+                )
+            })
+            .collect();
+        assert_eq!(by_id.get("a_nr"), Some(&"no_reviewer"));
+        assert_eq!(by_id.get("a_bq"), Some(&"budget"));
+    }
+
+    #[test]
+    fn resolution_denial_without_completion_counts() {
+        let stdout = [
+            requested("a_r", "curl x", 1),
+            resolved("a_r", "deny", "reviewer", 2),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        let denial = res
+            .permission_denials
+            .iter()
+            .find(|d| d.get("action_id").and_then(|v| v.as_str()) == Some("a_r"))
+            .expect("denial for a_r present");
+        assert_eq!(
+            denial.get("decided_by").and_then(|v| v.as_str()),
+            Some("reviewer")
+        );
+    }
+
+    #[test]
+    fn completed_denial_without_resolution_counts_without_decided_by() {
+        let stdout = [requested("a_c", "curl x", 1), completed("a_c", "denied", 2)].join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        let denial = res
+            .permission_denials
+            .iter()
+            .find(|d| d.get("action_id").and_then(|v| v.as_str()) == Some("a_c"))
+            .expect("denial for a_c present");
+        assert!(denial.get("decided_by").is_none(), "{:?}", denial);
+    }
+
+    #[test]
+    fn person_denial_only_counts_through_its_completion() {
+        let stdout = [
+            requested("a_p", "curl x", 1),
+            resolved("a_p", "deny", "person", 2),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        assert!(
+            res.permission_denials
+                .iter()
+                .all(|d| d.get("action_id").and_then(|v| v.as_str()) != Some("a_p")),
+            "{:?}",
+            res.permission_denials
+        );
+    }
+
+    #[test]
+    fn duplicate_events_yield_one_denial() {
+        let stdout = [
+            requested("a_d", "curl x", 1),
+            requested("a_d", "curl x", 2),
+            resolved("a_d", "deny", "reviewer", 3),
+            resolved("a_d", "deny", "reviewer", 4),
+            completed("a_d", "denied", 5),
+            completed("a_d", "denied", 6),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stdout, false, "");
+        // The ticket #421 body: each denial is joined to its tool_call_requested.
+        assert!(
+            res.permission_denials
+                .iter()
+                .any(|d| d.get("action_id").and_then(|v| v.as_str()) == Some("a_d")),
+            "{:?}",
+            res.permission_denials
+        );
+        assert_eq!(
+            res.permission_denials
+                .iter()
+                .filter(|d| d.get("action_id").and_then(|v| v.as_str()) == Some("a_d"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn denials_survive_a_truncated_stream() {
+        let stdout = review_stream();
+        let truncated: String = stdout
+            .lines()
+            .filter(|l| !l.contains("\"fiber_exited\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_ne!(truncated.len(), stdout.len());
+        let res = parse_stdout(&truncated, false, "killed");
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            res.permission_denials
+                .iter()
+                .any(|d| d.get("action_id").and_then(|v| v.as_str()) == Some("a_denied")),
+            "{:?}",
+            res.permission_denials
+        );
+    }
+
+    #[test]
+    fn malformed_lines_are_ignored() {
+        let stdout = review_stream();
+        let with_junk: String = stdout
+            .lines()
+            .flat_map(|l| [l, "this is not json"])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let res = parse_stdout(&with_junk, true, "");
+        assert_eq!(res.text, "DONE");
+        assert!(
+            res.permission_denials
+                .iter()
+                .any(|d| d.get("action_id").and_then(|v| v.as_str()) == Some("a_denied")),
+            "{:?}",
+            res.permission_denials
+        );
     }
 }
