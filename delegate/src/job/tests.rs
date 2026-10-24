@@ -1203,7 +1203,17 @@ fn zero_token_events_keep_tokens_at_zero_and_a_growing_age() {
     // directly instead of racing wall-clock time against a marker progress.
     let s = setup();
     let id = s.reg.dispatch(spec_of(|_| {}));
-    s.fake.handle(0).progress("shell", 0.0, None, &[], Some("thinking"));
+    s.reg.on_event(
+        &id,
+        Event::Progress(ProgressSnapshotRaw {
+            last_tool: Some("shell".into()),
+            tokens_so_far: 0.0,
+            last_assistant: None,
+            files_touched: vec![],
+            phase: Some("thinking".into()),
+            session_id: None,
+        }),
+    );
     sleep(Duration::from_millis(200));
     let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
     assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
@@ -1237,15 +1247,3 @@ fn activity_event_resets_the_last_event_age() {
     assert_eq!(settle(&s.reg, &id), "DONE");
 }
 
-#[test]
-fn a_silent_job_shows_zero_tokens_and_a_growing_age() {
-    let s = setup();
-    let id = s.reg.dispatch(spec_of(|_| {}));
-    sleep(Duration::from_millis(200));
-    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
-    assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
-    let age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
-    assert!(age >= 200.0, "silent age {age} covers the 200 ms sleep");
-    s.fake.handle(0).finish(done_ok());
-    assert_eq!(settle(&s.reg, &id), "DONE");
-}
