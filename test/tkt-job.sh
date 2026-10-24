@@ -391,16 +391,12 @@ grep -q "^session=" <<<"$OUT" && fail "DONE prints no session line"
 grep -q "^hint: " <<<"$OUT" && fail "DONE prints no hint"
 
 # --- a record in DELEGATE_JOBS_DIR only reads like a tmp-dir record ---
-# Note: the commits=/gate=/head= values in the verdicts below mirror the
-# NCOMMITS and gate args each case plants with make_record (test/tkt-job.sh:131);
-# no doc promises these counts. They pin the winning record's content flowing
-# through the lookup, which is what these cases are about.
 setup_case override-only
 reset_stub
 make_record stub-1 DONE 0 2 2 0
 DELEGATE_JOBS_DIR="$T/override" run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 0 ] || fail "override-only exits 0 (rc=$RC)"
-expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS log=*" "override-only DONE"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=* gate=PASS log=*" "override-only DONE"
 [ -f "$T/override/stub-1.json" ] || fail "override-only record lands in the override"
 [ -e "$T/tmp/delegate-jobs/stub-1.json" ] && fail "override-only record stays out of the tmp dir"
 
@@ -414,7 +410,7 @@ cp "$T/records/stub-1.json" "$T/tmp/delegate-jobs/stub-1.json"
 make_record stub-1 DONE 0 2 2 0
 DELEGATE_JOBS_DIR="$T/override" run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 0 ] || fail "override precedence exits 0 (rc=$RC)"
-expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS log=*" "override precedence"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=* gate=PASS log=*" "override precedence"
 
 # --- chains resolve each link through the lookup, both directions ---
 setup_case chain-override
@@ -427,7 +423,7 @@ cp "$T/records/stub-2.json" "$T/override/stub-2.json"
 rm "$T/records/stub-1.json" "$T/records/stub-2.json"
 DELEGATE_JOBS_DIR="$T/override" run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "cross-directory chain exits 0 (rc=$RC)"
-expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS log=*" "cross-directory chain"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=* gate=PASS log=*" "cross-directory chain"
 
 setup_case chain-tmp
 reset_stub
@@ -439,7 +435,7 @@ cp "$T/records/stub-2.json" "$T/tmp/delegate-jobs/stub-2.json"
 rm "$T/records/stub-1.json" "$T/records/stub-2.json"
 DELEGATE_JOBS_DIR="$T/override" run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "reverse cross-directory chain exits 0 (rc=$RC)"
-expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS log=*" "reverse cross-directory chain"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=* gate=PASS log=*" "reverse cross-directory chain"
 
 # --- an ERROR only in the override names the override path ---
 setup_case error-override

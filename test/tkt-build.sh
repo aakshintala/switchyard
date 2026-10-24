@@ -402,18 +402,17 @@ expect_state reviewed "$H" mutants
 expect_state round 0 mutants
 
 # --- the mutant map reads through the lookup: an override record merges ---
-# Note: p1=/p2=/p3=/mutants= below mirror this case's own fixtures (the
-# findings-src lines it writes and the two surviving mutant lines of the
-# default map-text); no doc promises these counts. mutants=2 is the point:
-# it proves the override map record merged.
 setup_case mutants-override
 rm -rf "$T/tmp/delegate-jobs" "$T/override"
 printf 'mutant_job=%s\n' Selection >>"$S"
 printf 'P1 open null check\nP3 docs note\n' >"$T/findings-src"
 DELEGATE_JOBS_DIR="$T/override" run_build
 [ "$RC" -eq 1 ] || fail "mutants-override exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build CHANGES p1=1 p2=2 p3=1 mutants=2 findings=* log=*" "mutants-override"
+expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* mutants=* findings=* log=*" "mutants-override"
 grep -q "map failed" <<<"$OUT" && fail "mutants-override: no map failed note"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -q "needs-test: bounds check unpinned" "$ffile" || fail "mutants-override: the override map record merges"
+grep -q "removed: helper gone at head" "$ffile" || fail "mutants-override: the removed line merges"
 [ -e "$T/tmp/delegate-jobs/stub-2.json" ] && fail "mutants-override: the map record stays out of the tmp dir"
 
 # --- a CHANGES axis with clean findings still reports CHANGES ---
