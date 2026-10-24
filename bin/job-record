@@ -38,13 +38,20 @@ dirs="$dirs
 $tmp/delegate-jobs
 $sysdir"
 
-seen=""
+seen=()
 while IFS= read -r dir; do
   [ -n "$dir" ] || continue
-  case "$seen" in
-    "$dir"|"$dir "*|*" $dir"|*" $dir "*) continue ;;
-  esac
-  seen="$seen $dir"
+  dup=0
+  i=0
+  while [ "$i" -lt "${#seen[@]}" ]; do
+    if [ "${seen[$i]}" = "$dir" ]; then
+      dup=1
+      break
+    fi
+    i=$((i + 1))
+  done
+  [ "$dup" -eq 1 ] && continue
+  seen+=("$dir")
   cand="$dir/$id.json"
   if [ -f "$cand" ]; then
     printf '%s\n' "$cand"

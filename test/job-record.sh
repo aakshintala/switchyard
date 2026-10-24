@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests for bin/job-record: print the winning <id>.json path across the three
-# documented directories (DELEGATE_JOBS_DIR, $TMPDIR/delegate-jobs,
-# the system dir). Fixtures live under a temp dir; the real /tmp/delegate-jobs
-# is never read or written.
+# directories of the lookup order in docs/delegate-jobs.md:7-13
+# (DELEGATE_JOBS_DIR, $TMPDIR/delegate-jobs, the system dir). Fixtures live
+# under a temp dir; the real /tmp/delegate-jobs is never read or written.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -63,7 +63,7 @@ run_rec missing-id "DELEGATE_JOBS_DIR=$T/override"
 [ "$RC" -eq 1 ] || fail "missing exits 1 (rc=$RC)"
 [ -z "$GOT" ] || fail "missing prints nothing: $GOT"
 
-# --- precedence ---
+# --- precedence (lookup order: docs/delegate-jobs.md:7-13) ---
 plant "$T/override/all-three.json"
 plant "$T/tmp/delegate-jobs/all-three.json"
 plant "$T/sys/all-three.json"
@@ -105,6 +105,14 @@ plant "$T/sys/dup-sys.json"
 run_rec dup-sys "DELEGATE_JOBS_DIR=$T/tmp/delegate-jobs"
 [ "$RC" -eq 0 ] || fail "duplicate dirs still reach system (rc=$RC)"
 [ "$GOT" = "$T/sys/dup-sys.json" ] || fail "duplicate dirs system path: $GOT"
+
+# --- an override naming a directory with a space skips no later directory ---
+# (dedup compares whole directory strings, never space-delimited words).
+mkdir -p "$T/with space"
+plant "$T/tmp/delegate-jobs/space-id.json"
+run_rec space-id "DELEGATE_JOBS_DIR=$T/with space $T/tmp/delegate-jobs"
+[ "$RC" -eq 0 ] || fail "space-named override still reaches tmp (rc=$RC)"
+[ "$GOT" = "$T/tmp/delegate-jobs/space-id.json" ] || fail "space-named override tmp path: $GOT"
 
 # --- trailing slash on TMPDIR prints one slash ---
 plant "$T/tmp/delegate-jobs/slash-id.json"

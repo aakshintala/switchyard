@@ -391,6 +391,10 @@ grep -q "^session=" <<<"$OUT" && fail "DONE prints no session line"
 grep -q "^hint: " <<<"$OUT" && fail "DONE prints no hint"
 
 # --- a record in DELEGATE_JOBS_DIR only reads like a tmp-dir record ---
+# Note: the commits=/gate=/head= values in the verdicts below mirror the
+# NCOMMITS and gate args each case plants with make_record (test/tkt-job.sh:131);
+# no doc promises these counts. They pin the winning record's content flowing
+# through the lookup, which is what these cases are about.
 setup_case override-only
 reset_stub
 make_record stub-1 DONE 0 2 2 0
@@ -401,6 +405,7 @@ expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS log=*" 
 [ -e "$T/tmp/delegate-jobs/stub-1.json" ] && fail "override-only record stays out of the tmp dir"
 
 # --- precedence: a stale tmp-dir copy loses to the override ---
+# (lookup order: docs/delegate-jobs.md:7-13; override first, then tmp).
 setup_case override-precedence
 reset_stub
 make_record stub-1 ERROR none 0 2 0

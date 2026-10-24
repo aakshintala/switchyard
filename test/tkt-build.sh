@@ -402,6 +402,10 @@ expect_state reviewed "$H" mutants
 expect_state round 0 mutants
 
 # --- the mutant map reads through the lookup: an override record merges ---
+# Note: p1=/p2=/p3=/mutants= below mirror this case's own fixtures (the
+# findings-src lines it writes and the two surviving mutant lines of the
+# default map-text); no doc promises these counts. mutants=2 is the point:
+# it proves the override map record merged.
 setup_case mutants-override
 rm -rf "$T/tmp/delegate-jobs" "$T/override"
 printf 'mutant_job=%s\n' Selection >>"$S"
