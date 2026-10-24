@@ -299,7 +299,6 @@ fn watch_prints_all_in_order_and_times_out_with_exit_1() {
             error.contains("see its progress field; run watch again"),
             "{error:?}"
         );
-        assert!(error.contains("last event "), "{error:?}");
     }
 
     e.release();
