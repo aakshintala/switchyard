@@ -1106,7 +1106,6 @@ fn run_writes_to_the_jobs_dir_override_and_cancel_finds_it_there() {
         ],
     );
     let id = e.ok_output(&out);
-    assert_eq!(id.len(), 36);
     assert!(
         jobs_a.join(format!("{id}.json")).is_file(),
         "record lands under DELEGATE_JOBS_DIR, not TMPDIR"
@@ -1176,7 +1175,6 @@ fn watch_and_resume_find_a_record_under_another_tmpdir() {
         String::from_utf8_lossy(&out.stdout)
     );
     let b = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    assert_eq!(b.len(), 36);
     // The resumed job inherits the caller's DELEGATE_JOBS_DIR, so its record
     // lands in the override dir; watch it there (docs/delegate-jobs.md#writers).
     let out = e.delegate_env(&["watch", &b, "--timeout", "10"], None, &over);

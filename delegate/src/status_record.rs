@@ -318,7 +318,6 @@ mod tests {
                 PathBuf::from("/tmp/delegate-jobs"),
             ]
         );
-        assert!(!dirs.is_empty());
     }
 
     #[test]
