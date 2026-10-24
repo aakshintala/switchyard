@@ -1171,3 +1171,26 @@ fn merge_attempt_uses_latest_allowance_and_falls_back_when_later_is_absent() {
         Some(later)
     );
 }
+
+#[test]
+fn running_progress_carries_the_last_event_age() {
+    let s = setup();
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    sleep(Duration::from_millis(200));
+    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+    let age = polled["progress"]["lastEventAgeMs"]
+        .as_f64()
+        .expect("progress carries lastEventAgeMs");
+    let elapsed = polled["progress"]["elapsedMs"]
+        .as_f64()
+        .expect("progress carries elapsedMs");
+    assert!(age >= 200.0, "age {age} covers the 200 ms quiet window");
+    assert!(age <= elapsed, "age {age} never exceeds elapsed {elapsed}");
+    let dispatch_record = s.spy.nth(0).1;
+    assert!(
+        dispatch_record["progress"]["lastEventAgeMs"].is_number(),
+        "the dispatch record carries the age too"
+    );
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "DONE");
+}

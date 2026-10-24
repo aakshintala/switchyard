@@ -205,6 +205,7 @@ fn poll_state(st: &Inner, job_id: &str) -> PollResult {
     }
     if job.status == JobStatus::Running {
         let p = &job.progress;
+        let now = Instant::now();
         return PollResult::Running {
             status: "RUNNING",
             last_heartbeat_at: epoch_ms(),
@@ -212,7 +213,8 @@ fn poll_state(st: &Inner, job_id: &str) -> PollResult {
             progress: ProgressSnapshot {
                 last_tool: p.last_tool.clone(),
                 tokens_so_far: p.tokens_so_far,
-                elapsed_ms: job.started.elapsed().as_millis() as f64,
+                elapsed_ms: now.duration_since(job.started).as_millis() as f64,
+                last_event_age_ms: now.saturating_duration_since(job.last_event).as_millis() as f64,
                 last_assistant: p.last_assistant.clone(),
                 files_touched_so_far: p.files_touched.clone(),
                 phase: p.phase.clone(),
