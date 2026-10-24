@@ -1176,3 +1176,99 @@ fn muse_reminder_loop_stalls_on_the_idle_watchdog() {
     let text = done["result"]["text"].as_str().unwrap();
     assert!(text.starts_with("Idle watchdog killed this job"), "{text}");
 }
+
+#[test]
+fn wall_ms_is_recorded_and_survives_resume() {
+    let e = Env::new("wall-plumb");
+    let id = e.ok(
+        &["run", "--model", "composer-2.5", "--wall-ms", "600000"],
+        "quick",
+        &[],
+    );
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(done["resume"]["wallMs"], serde_json::json!(600000));
+    let b = e.resume_ok(&id, &[], "follow up");
+    let done = e.wait_terminal(&b);
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(done["resume"]["wallMs"], serde_json::json!(600000));
+}
+
+#[test]
+fn run_without_wall_ms_records_null_and_resume_keeps_null() {
+    let e = Env::new("wall-none");
+    let id = e.run("quick");
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE");
+    assert!(done["resume"]["wallMs"].is_null(), "{done}");
+    let b = e.resume_ok(&id, &[], "follow up");
+    let done = e.wait_terminal(&b);
+    assert_eq!(done["status"], "DONE");
+    assert!(done["resume"]["wallMs"].is_null(), "{done}");
+}
+
+#[test]
+fn wall_ms_cancels_a_running_agent_and_its_group() {
+    let e = Env::new("wall-cancel");
+    let id = e.ok(
+        &["run", "--model", "composer-2.5", "--wall-ms", "5000"],
+        "CANCELME",
+        &[],
+    );
+    e.until_agent_spawned(&id);
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "CANCELLED");
+    assert_eq!(done["result"]["status"], "CANCELLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Cancelled: wall budget of 5000 ms exceeded after"),
+        "{text}"
+    );
+    assert_eq!(done["resume"]["wallMs"], serde_json::json!(5000));
+    assert_eq!(done["resume"]["sessionId"], "s-init");
+    for name in ["agent.pid", "grandchild.pid"] {
+        let pid: i64 = std::fs::read_to_string(e.dir.join(name))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        until("fake child dead", || !alive(pid));
+    }
+}
+
+#[test]
+fn wall_ms_aborts_a_running_gate() {
+    let e = Env::new("wall-gate");
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--wall-ms",
+            "1500",
+            "--gate",
+            "sleep 30",
+        ],
+        "quick",
+        &[],
+    );
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "CANCELLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Cancelled: wall budget of 1500 ms exceeded after"),
+        "{text}"
+    );
+    let err = done["result"]["gateResult"]["error"].as_str().unwrap();
+    assert!(err.contains("gate killed"), "{err}");
+}
+
+#[test]
+fn help_mentions_wall_ms() {
+    let e = Env::new("wall-help");
+    let out = e.delegate(&["--help"], None);
+    assert_eq!(out.status.code(), Some(0));
+    let help = String::from_utf8(out.stdout).unwrap();
+    assert!(help.contains("usage: delegate run --model M"), "{help}");
+    assert!(help.contains("[--wall-ms N]"), "{help}");
+}

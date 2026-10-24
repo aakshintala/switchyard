@@ -15,6 +15,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_WAIT_TIMEOUT: f64 = 120_000.0;
 const HEARTBEAT_MS: u64 = 30_000;
+/// Grace after a wall-budget SIGTERM before the watchdog escalates to SIGKILL.
+const KILL_GRACE_MS: u64 = 5_000;
 /// Backoff before each retry of a transient provider error; its length caps the retries.
 const RETRY_DELAYS_MS: [u64; 2] = [10_000, 30_000];
 
@@ -31,6 +33,7 @@ pub struct JobDeps {
     pub record_id: Option<String>,
     pub heartbeat_ms: u64,
     pub retry_delays_ms: Vec<u64>,
+    pub kill_grace_ms: u64,
 }
 
 impl JobDeps {
@@ -45,6 +48,7 @@ impl JobDeps {
             record_id: None,
             heartbeat_ms: HEARTBEAT_MS,
             retry_delays_ms: RETRY_DELAYS_MS.to_vec(),
+            kill_grace_ms: KILL_GRACE_MS,
         }
     }
 }
@@ -68,6 +72,11 @@ struct JobState {
     progress: ProgressSnapshotRaw,
     last_event: Instant,
     termination: Option<JobStatus>,
+    /// When the wall budget killed the child; arms the SIGKILL escalation and
+    /// marks the wall wording. Set only on wall expiry; cleared by a user cancel.
+    kill_at: Option<Instant>,
+    /// The escalation already ran; it fires at most once per job.
+    escalated: bool,
     output: Option<RunOutput>,
 }
 
@@ -151,10 +160,15 @@ fn epoch_ms() -> f64 {
 }
 
 fn describe_stall_progress(job: &JobState) -> String {
-    let verb = if job.termination == Some(JobStatus::Cancelled) {
-        "Cancelled"
+    let verb = if job.kill_at.is_some() {
+        format!(
+            "Cancelled: wall budget of {} ms exceeded",
+            job.spec.wall_ms.unwrap_or(0.0)
+        )
+    } else if job.termination == Some(JobStatus::Cancelled) {
+        "Cancelled".to_string()
     } else {
-        "Idle watchdog killed this job"
+        "Idle watchdog killed this job".to_string()
     };
     let p = &job.progress;
     let mut parts = vec![format!(
@@ -257,6 +271,8 @@ impl JobHandle {
                     },
                     last_event: now,
                     termination: None,
+                    kill_at: None,
+                    escalated: false,
                     output: None,
                 },
             ));
@@ -371,8 +387,29 @@ impl JobHandle {
         }
     }
 
+    /// Record a watchdog kill: the first of idle stall, wall expiry and user
+    /// cancel wins. A wall expiry also aborts the job-end gate and wakes a
+    /// retry backoff, so the job finalizes at once on the failed attempt.
+    fn terminate_watchdog_kill(&self, job: &mut JobState, wall: bool, now: Instant) {
+        if job.termination.is_some() {
+            return;
+        }
+        job.termination = Some(if wall {
+            JobStatus::Cancelled
+        } else {
+            JobStatus::Stalled
+        });
+        if wall {
+            job.kill_at = Some(now);
+            job.finalize_abort.store(true, Ordering::SeqCst);
+        }
+        (job.kill)();
+        self.cv.notify_all();
+    }
+
     fn watchdog(&self, job_id: &str) {
         let heartbeat = Duration::from_millis(self.deps.heartbeat_ms);
+        let kill_grace = Duration::from_millis(self.deps.kill_grace_ms);
         let mut next_heartbeat = Instant::now() + heartbeat;
         let mut st = self.lock();
         loop {
@@ -387,6 +424,38 @@ impl JobHandle {
             }
             let now = Instant::now();
             let mut wake_at = next_heartbeat;
+            // The wall budget covers the agent, retry backoff and the job-end
+            // gate alike: it fires in every stage but Terminal.
+            let wall_due = job.spec.wall_ms.and_then(|w| {
+                (w.is_finite() && w > 0.0)
+                    .then(|| job.started.checked_add(ms(w)))
+                    .flatten()
+            });
+            if job.termination.is_none()
+                && let Some(due) = wall_due
+            {
+                if now >= due {
+                    self.terminate_watchdog_kill(job, true, now);
+                } else {
+                    wake_at = wake_at.min(due);
+                }
+            }
+            // A child that ignores SIGTERM gets one grace period, then SIGKILL.
+            // Wall-only: an idle stall keeps its single SIGTERM, and the gate
+            // has its own SIGKILL grace, so only a Running job escalates.
+            if !job.escalated
+                && let Some(sent) = job.kill_at
+            {
+                let due = sent + kill_grace;
+                if now >= due {
+                    if job.stage == Stage::Running {
+                        (job.kill)();
+                    }
+                    job.escalated = true;
+                } else {
+                    wake_at = wake_at.min(due);
+                }
+            }
             if job.stage == Stage::Running && job.termination.is_none() {
                 let spec = &job.spec;
                 let window = if job.progress.phase.as_deref() == Some("running_tool") {
@@ -397,8 +466,7 @@ impl JobHandle {
                 if let Some(w) = window {
                     let due = job.last_event + ms(w);
                     if now >= due {
-                        job.termination = Some(JobStatus::Stalled);
-                        (job.kill)();
+                        self.terminate_watchdog_kill(job, false, now);
                     } else {
                         wake_at = wake_at.min(due);
                     }
@@ -477,8 +545,10 @@ impl JobHandle {
         let mut st = self.lock();
         let mut out = out;
         out.retries = retries;
-        if let Some(term) = termination
-            && let Some((_, job)) = st.job.as_ref()
+        // Re-read: a wall expiry or cancel may have landed while the gate ran,
+        // after the snapshot above. Expiry after `retire` changes nothing.
+        if let Some((_, job)) = st.job.as_ref()
+            && let Some(term) = job.termination
         {
             out.text = describe_stall_progress(job);
             out.status = match term {
@@ -544,6 +614,11 @@ impl JobHandle {
             return poll_state(&st, job_id);
         }
         job.termination = Some(JobStatus::Cancelled);
+        // Plan ruling 6: a cancel after a stall or wall kill reads the cancel
+        // wording, so a wall expiry it supersedes leaves no wall mark behind.
+        // Clearing `kill_at` also disarms the SIGKILL escalation: the kill
+        // below already sends it at once (ruling on #620).
+        job.kill_at = None;
         job.finalize_abort.store(true, Ordering::SeqCst);
         (job.kill)();
         // Wakes a retry backoff, which re-checks `termination`.

@@ -77,6 +77,14 @@ bounds the gate.
 `--idle-ms` sets the model-idle window for that one run, overriding the host-profile `idleMs`
 (default 300000); `muse/*` runs get 1800000 from `bin/tkt-job`.
 
+`--wall-ms N` caps the whole run in milliseconds: agent, retry backoff and job-end gate.
+It is off by default; `bin/tkt-job` passes 10800000 (3 h) for `verifier-r*` slots. Expiry
+is `CANCELLED` with `Cancelled: wall budget of ...`; a resume gets a fresh full budget.
+The first kill is SIGTERM; a wall-expired child that ignores it gets SIGKILL after the
+grace, while an idle stall sends a single SIGTERM. A user cancel after a watchdog kill
+sends SIGKILL at once and reads the cancel wording, and a wall expiry during retry
+backoff performs no respawn.
+
 ## Waiting
 
 `watch` blocks until every listed job is terminal, then prints their records on stdout. It is
@@ -100,7 +108,8 @@ The record is `$TMPDIR/delegate-jobs/<id>.json` (a terminal record has no `lastH
 
 `status` is `DONE`, `DONE_WITH_CONCERNS`, `BLOCKED`, `NEEDS_CONTEXT`, `ERROR` (from the
 agent's trailing STATUS line or the supervisor), `CANCELLED`, or `STALLED` (the idle watchdog
-killed it: rerun, with a larger `--tool-idle-ms` if it stalled inside a tool). `text` is the agent's final message; for
+killed it: rerun, with a larger `--tool-idle-ms` if it stalled inside a tool). A wall-capped
+job reads `CANCELLED`, and `tkt-job` prints it as `WALL-CAP`. `text` is the agent's final message; for
 `NEEDS_CONTEXT` it is the question.
 
 - `result.gateResult`: a failing gate downgrades `DONE` to `DONE_WITH_CONCERNS`; it holds the
@@ -116,7 +125,10 @@ killed it: rerun, with a larger `--tool-idle-ms` if it stalled inside a tool). `
 - **Resume chain:** follow `supersededBy` to the newest record; the old one stays as it was.
 - **Stuck job:** `watch` rewrites a record whose supervisor pid is dead to `ERROR` ("supervisor
   died"). A live supervisor whose `lastHeartbeatAt` has gone stale is not healed: `delegate
-  cancel` it and rerun.
+  cancel` it and rerun. Before you report a job stopped, read its record (following
+  `supersededBy`): `RUNNING` means it has not stopped, even if your own wait or its output
+  ended; check `supervisorPid` with `ps -p`, and report stopped only for a terminal `status`
+  or a `RUNNING` record whose supervisor pid is gone.
 - A weak model may skip the STATUS line and guess; your review of the artifact is the backstop.
 
 ## Exit codes

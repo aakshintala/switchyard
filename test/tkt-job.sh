@@ -38,7 +38,7 @@ recs="$T/records"
 cmd="\${1:-}"; shift || true
 case "\$cmd" in
   run)
-    model=""; cwd=""; gate=""; prompt=""; idle=""; idle_ms=""
+    model=""; cwd=""; gate=""; prompt=""; idle=""; idle_ms=""; wall_ms=""
     while [ \$# -gt 0 ]; do
       case "\$1" in
         --model) model="\$2"; shift 2 ;;
@@ -47,6 +47,7 @@ case "\$cmd" in
         --prompt-file) prompt="\$2"; shift 2 ;;
         --tool-idle-ms) idle="\$2"; shift 2 ;;
         --idle-ms) idle_ms="\$2"; shift 2 ;;
+        --wall-ms) wall_ms="\$2"; shift 2 ;;
         *) shift ;;
       esac
     done
@@ -55,6 +56,7 @@ case "\$cmd" in
     printf 'run|model=%s|cwd=%s|gate=%s|prompt=%s\n' "\$model" "\$cwd" "\$gate" "\$prompt" >>"\$log"
     if [ -n "\$idle" ]; then printf 'idle=%s\n' "\$idle" >>"\$log"; fi
     if [ -n "\$idle_ms" ]; then printf 'idleMs=%s\n' "\$idle_ms" >>"\$log"; fi
+    if [ -n "\$wall_ms" ]; then printf 'wallMs=%s\n' "\$wall_ms" >>"\$log"; fi
     printf 'stub-%s\n' "\$n"
     ;;
   resume)
@@ -170,6 +172,12 @@ run_job() {
 add_resume() {
   local f="$T/records/$1.json"
   jq --arg s "$2" '.resume = {sessionId: $s}' "$f" >"$f.tmp" && mv "$f.tmp" "$f" || fail "add_resume $1"
+}
+
+# Replaces the canned record's result text: set_text ID TEXT
+set_text() {
+  local f="$T/records/$1.json"
+  jq --arg t "$2" '.result.text = $t' "$f" >"$f.tmp" && mv "$f.tmp" "$f" || fail "set_text $1"
 }
 
 first_line() {
@@ -799,5 +807,69 @@ run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
 grep -q "gate=bash " "$T/stub.log" || fail "non-muse with gate dispatches the gate"
 grep -q "^idle=" "$T/stub.log" && fail "non-muse with gate passes no tool-idle flag"
 grep -q "^idleMs=" "$T/stub.log" && fail "non-muse with gate passes no idle flag"
+
+# --- verifier-r* slots pass --wall-ms 10800000, gated and ungated ---
+setup_case wall-verifier-ungated
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot verifier-r1 --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 0 ] || fail "verifier-r1 exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -qx "wallMs=10800000" "$T/stub.log" || fail "verifier-r1 passes --wall-ms 10800000"
+
+setup_case wall-verifier-gated
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot verifier-r2 --template "$T/tmpl-basic.md" --model test-model --gate 'true'
+[ "$RC" -eq 0 ] || fail "verifier-r2 exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -qx "wallMs=10800000" "$T/stub.log" || fail "verifier-r2 passes --wall-ms 10800000 with a gate"
+grep -q "|gate=true|" "$T/stub.log" || fail "verifier-r2 dispatches the gate"
+
+# --- every other slot passes no wall cap ---
+for slot in lane preflight confirm fix1 reviewer; do
+  setup_case wall-no-$slot
+  reset_stub
+  make_record stub-1 DONE none 0 1 0
+  run_job --slot $slot --template "$T/tmpl-basic.md" --model test-model
+  [ "$RC" -eq 0 ] || fail "$slot exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  grep -q "^wallMs=" "$T/stub.log" && fail "$slot passes no wall cap"
+done
+
+# --- a wall-budget CANCELLED reports WALL-CAP with the text in the digest ---
+setup_case wall-cap
+reset_stub
+make_record stub-1 CANCELLED none 0 2 0
+set_text stub-1 'Cancelled: wall budget of 10800000 ms exceeded after 10801s. Last phase: running_tool. Last tool: shell.'
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "WALL-CAP exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job WALL-CAP id=stub-1 log=*" "WALL-CAP"
+grep -q "wall budget of 10800000 ms exceeded" <<<"$OUT" || fail "WALL-CAP digest keeps the text"
+
+# --- a user-cancelled CANCELLED stays JOB-ERROR ---
+setup_case wall-plain-cancel
+reset_stub
+make_record stub-1 CANCELLED none 0 2 0
+set_text stub-1 'Cancelled after 5s.'
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "plain CANCELLED exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job JOB-ERROR status=CANCELLED id=stub-1 log=*" "plain CANCELLED"
+
+# --- a later wall-budget mention does not trigger WALL-CAP: the match is a prefix ---
+setup_case wall-late-mention
+reset_stub
+make_record stub-1 CANCELLED none 0 2 0
+set_text stub-1 'Cancelled after 5s.
+note: the agent mentioned wall budget on its own'
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "late wall mention exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job JOB-ERROR status=CANCELLED id=stub-1 log=*" "late wall mention"
+
+# --- --resume passes no wall cap: the stored record carries it ---
+setup_case wall-resume
+reset_stub
+make_record old-9 BLOCKED none 0 2 0 none stub-1
+make_record stub-1 DONE 0 1 2 0
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md"
+[ "$RC" -eq 0 ] || fail "resume exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "^wallMs=" "$T/stub.log" && fail "resume passes no wall cap"
 
 echo "tkt-job: all cases passed"
