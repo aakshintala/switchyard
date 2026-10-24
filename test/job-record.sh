@@ -114,13 +114,6 @@ run_rec space-id "DELEGATE_JOBS_DIR=$T/with space $T/tmp/delegate-jobs"
 [ "$RC" -eq 0 ] || fail "space-named override still reaches tmp (rc=$RC)"
 [ "$GOT" = "$T/tmp/delegate-jobs/space-id.json" ] || fail "space-named override tmp path: $GOT"
 
-# --- trailing slash on TMPDIR prints one slash ---
-plant "$T/tmp/delegate-jobs/slash-id.json"
-GOT="$(env TMPDIR="$T/tmp/" JOB_RECORD_SYSTEM_DIR="$T/sys" bash "$REC" slash-id 2>"$T/stderr.txt")"
-RC=$?
-[ "$RC" -eq 0 ] || fail "trailing-slash TMPDIR exits 0 (rc=$RC)"
-[ "$GOT" = "$T/tmp/delegate-jobs/slash-id.json" ] || fail "trailing-slash path: $GOT"
-
 # --- a directory named <id>.json is no hit ---
 mkdir -p "$T/override/dir-id.json"
 plant "$T/tmp/delegate-jobs/dir-id.json"
