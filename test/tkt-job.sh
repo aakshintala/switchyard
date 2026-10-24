@@ -20,6 +20,8 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/records" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export STUB_JOBSDIR="$T/tmp/delegate-jobs"
+export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
+unset DELEGATE_JOBS_DIR
 
 [ -x "$REAL_BIN/fill-brief" ] || fail "real fill-brief missing"
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
@@ -75,10 +77,10 @@ case "\$cmd" in
     ;;
   watch)
     printf 'watch|%s\n' "\$*" >>"\$log"
-    mkdir -p "\$TMPDIR/delegate-jobs"
+    mkdir -p "\${DELEGATE_JOBS_DIR:-\$TMPDIR/delegate-jobs}"
     for wid in "\$@"; do
       if [ -f "\$recs/\$wid.json" ]; then
-        cp "\$recs/\$wid.json" "\$TMPDIR/delegate-jobs/\$wid.json"
+        cp "\$recs/\$wid.json" "\${DELEGATE_JOBS_DIR:-\$TMPDIR/delegate-jobs}/\$wid.json"
       fi
     done
     ;;
@@ -121,7 +123,7 @@ setup_case() {
 reset_stub() {
   printf '0' >"$T/counter"
   : >"$T/stub.log"
-  rm -rf "$T/tmp/delegate-jobs"
+  rm -rf "$T/tmp/delegate-jobs" "$T/override"
 }
 
 # Canned record: make_record ID STATUS GATE NCOMMITS NTEXT NTAIL [CONCERNS] [SUP] [NUNCOMMITTED]
@@ -326,12 +328,14 @@ make_record stub-1 ERROR none 0 2 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 1 ] || fail "JOB-ERROR exits 1"
 expect_verdict "TKT tkt-job JOB-ERROR status=ERROR id=stub-1 log=*" "JOB-ERROR"
+grep -qx "id=stub-1 record=$T/tmp/delegate-jobs/stub-1.json" <<<"$OUT" || fail "ERROR digest names the record path"
 setup_case job-stalled
 reset_stub
 make_record stub-1 STALLED none 0 2 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 1 ] || fail "STALLED exits 1"
 expect_verdict "TKT tkt-job JOB-ERROR status=STALLED id=stub-1 log=*" "STALLED"
+grep -qx "id=stub-1 record=$T/tmp/delegate-jobs/stub-1.json" <<<"$OUT" || fail "STALLED digest names the record path"
 
 # --- ERROR and STALLED with a resumable session name it and hint at --resume ---
 for st in ERROR STALLED; do
@@ -342,6 +346,7 @@ for st in ERROR STALLED; do
   run_job --slot lane --template "$T/tmpl-basic.md"
   [ "$RC" -eq 1 ] || fail "$st with a session exits 1 (rc=$RC)"
   expect_verdict "TKT tkt-job JOB-ERROR status=$st id=stub-1 log=*" "$st with a session"
+  grep -qx "id=stub-1 record=$T/tmp/delegate-jobs/stub-1.json" <<<"$OUT" || fail "$st digest names the record path"
   grep -qx "session=sess-$st" <<<"$OUT" || fail "$st digest names the session"
   grep -q "^hint: this job ended $st with a resumable session; its text is below. Continue it with: tkt-job " <<<"$OUT" || fail "$st digest hints at the resume"
   grep -qF -- "--resume stub-1 --prompt <file>" <<<"$OUT" || fail "$st hint names --resume"
@@ -355,6 +360,7 @@ make_record stub-1 ERROR none 0 2 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 1 ] || fail "ERROR without a session exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-job JOB-ERROR status=ERROR id=stub-1 log=*" "ERROR without a session"
+grep -qx "id=stub-1 record=$T/tmp/delegate-jobs/stub-1.json" <<<"$OUT" || fail "ERROR digest names the record path"
 grep -q "^session=" <<<"$OUT" && fail "ERROR without a session prints no session line"
 grep -q "^hint: " <<<"$OUT" && fail "ERROR without a session prints no hint"
 
@@ -366,6 +372,8 @@ add_resume stub-1 sess-cancel
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 1 ] || fail "CANCELLED exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-job JOB-ERROR status=CANCELLED id=stub-1 log=*" "CANCELLED"
+grep -qx "id=stub-1" <<<"$OUT" || fail "CANCELLED digest keeps a bare id line"
+grep -q "record=" <<<"$OUT" && fail "CANCELLED prints no record path"
 grep -q "^session=" <<<"$OUT" && fail "CANCELLED prints no session line"
 grep -q "^hint: " <<<"$OUT" && fail "CANCELLED prints no hint"
 
@@ -377,8 +385,77 @@ add_resume stub-1 sess-done
 run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 0 ] || fail "DONE with a session exits 0 (rc=$RC)"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS log=*" "DONE with a session"
+grep -qx "id=stub-1" <<<"$OUT" || fail "DONE digest keeps a bare id line"
+grep -q "record=" <<<"$OUT" && fail "DONE prints no record path"
 grep -q "^session=" <<<"$OUT" && fail "DONE prints no session line"
 grep -q "^hint: " <<<"$OUT" && fail "DONE prints no hint"
+
+# --- a record in DELEGATE_JOBS_DIR only reads like a tmp-dir record ---
+setup_case override-only
+reset_stub
+make_record stub-1 DONE 0 2 2 0
+DELEGATE_JOBS_DIR="$T/override" run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+[ "$RC" -eq 0 ] || fail "override-only exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS log=*" "override-only DONE"
+[ -f "$T/override/stub-1.json" ] || fail "override-only record lands in the override"
+[ -e "$T/tmp/delegate-jobs/stub-1.json" ] && fail "override-only record stays out of the tmp dir"
+
+# --- precedence: a stale tmp-dir copy loses to the override ---
+setup_case override-precedence
+reset_stub
+make_record stub-1 ERROR none 0 2 0
+mkdir -p "$T/tmp/delegate-jobs"
+cp "$T/records/stub-1.json" "$T/tmp/delegate-jobs/stub-1.json"
+make_record stub-1 DONE 0 2 2 0
+DELEGATE_JOBS_DIR="$T/override" run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+[ "$RC" -eq 0 ] || fail "override precedence exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS log=*" "override precedence"
+
+# --- chains resolve each link through the lookup, both directions ---
+setup_case chain-override
+reset_stub
+make_record stub-1 DONE 0 1 2 0 none stub-2
+make_record stub-2 DONE 0 1 2 0
+mkdir -p "$T/tmp/delegate-jobs" "$T/override"
+cp "$T/records/stub-1.json" "$T/tmp/delegate-jobs/stub-1.json"
+cp "$T/records/stub-2.json" "$T/override/stub-2.json"
+rm "$T/records/stub-1.json" "$T/records/stub-2.json"
+DELEGATE_JOBS_DIR="$T/override" run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "cross-directory chain exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS log=*" "cross-directory chain"
+
+setup_case chain-tmp
+reset_stub
+make_record stub-1 DONE 0 1 2 0 none stub-2
+make_record stub-2 DONE 0 1 2 0
+mkdir -p "$T/tmp/delegate-jobs" "$T/override"
+cp "$T/records/stub-1.json" "$T/override/stub-1.json"
+cp "$T/records/stub-2.json" "$T/tmp/delegate-jobs/stub-2.json"
+rm "$T/records/stub-1.json" "$T/records/stub-2.json"
+DELEGATE_JOBS_DIR="$T/override" run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "reverse cross-directory chain exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS log=*" "reverse cross-directory chain"
+
+# --- an ERROR only in the override names the override path ---
+setup_case error-override
+reset_stub
+make_record stub-1 ERROR none 0 2 0
+DELEGATE_JOBS_DIR="$T/override" run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "override ERROR exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job JOB-ERROR status=ERROR id=stub-1 log=*" "override ERROR"
+grep -qx "id=stub-1 record=$T/override/stub-1.json" <<<"$OUT" || fail "override ERROR names the override path"
+
+# --- an ERROR at the end of a chain names the newest record's path ---
+setup_case error-chain-newest
+reset_stub
+make_record stub-1 ERROR none 0 2 0 none stub-2
+make_record stub-2 ERROR none 0 2 0
+mkdir -p "$T/tmp/delegate-jobs"
+cp "$T/records/stub-2.json" "$T/tmp/delegate-jobs/stub-2.json"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "chained ERROR exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job JOB-ERROR status=ERROR id=stub-2 log=*" "chained ERROR"
+grep -qx "id=stub-2 record=$T/tmp/delegate-jobs/stub-2.json" <<<"$OUT" || fail "chained ERROR names the newest path"
 
 # --- an unknown status, and no record at all ---
 setup_case unknown-status
