@@ -269,10 +269,15 @@ else
 fi
 
 "$delegate" watch "$jobid" >&2
-jobsdir="${TMPDIR:-/tmp}/delegate-jobs"
-record="$jobsdir/$jobid.json"
+# rec_of ID: print the winning job-record path, or nothing; it never fails,
+# so a missing record reads as "no record" under set -e.
+rec_of() {
+  bash "$script_dir/job-record" "$1" 2>/dev/null || true
+}
+record="$(rec_of "$jobid")"
 
 # Follow supersededBy to the newest record; a loop is unrecognised, not a hang.
+# Each link resolves through the lookup, so a chain may span directories.
 broken=0
 seen=" $jobid "
 while [ -f "$record" ]; do
@@ -283,7 +288,7 @@ while [ -f "$record" ]; do
   esac
   seen="$seen$sup "
   jobid="$sup"
-  record="$jobsdir/$jobid.json"
+  record="$(rec_of "$jobid")"
 done
 
 verdict=""
@@ -356,9 +361,17 @@ else
 
   # Headers, then the gate tail, concerns, and the newest text lines: the
   # digest never passes 40 lines, so the verdict stays decidable in one read.
+  # ERROR and STALLED name the winning record path after the id, so lane
+  # briefs never hard-code where the record lives.
   digest="status=$status
 id=$jobid
 commits=$ncommits uncommitted=$nuncomm"
+  case "$status" in
+    ERROR|STALLED)
+      digest="status=$status
+id=$jobid record=$record
+commits=$ncommits uncommitted=$nuncomm" ;;
+  esac
   if [ "$ncommits" -gt 0 ]; then
     shas="$(jq -r '[.result.changeSet.newCommits[]? | tostring] | join(" ")' "$record" 2>/dev/null || true)"
     digest="$digest
