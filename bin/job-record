@@ -23,9 +23,6 @@ esac
 sysdir="${JOB_RECORD_SYSTEM_DIR:-/tmp/delegate-jobs}"
 
 tmp="${TMPDIR:-/tmp}"
-while [ "$tmp" != "/" ] && [ "${tmp%/}" != "$tmp" ]; do
-  tmp="${tmp%/}"
-done
 
 dirs=""
 if [ -n "${DELEGATE_JOBS_DIR:-}" ]; then
