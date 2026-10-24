@@ -427,6 +427,8 @@ mod tests {
         }
         assert!(models["openai/gpt-6-astra"].tiers.is_empty());
         assert!(models["claude-fable-5-1"].tiers.is_empty());
+        assert_eq!(models["muse/muse-wonder-1.0"].backend, "muse");
+        assert!(models["muse/muse-wonder-1.0"].tiers.is_empty());
     }
 
     #[test]
