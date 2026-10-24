@@ -13,6 +13,7 @@
 //! non-completed terminal, which is not retried.
 
 use super::types::{BackendResult, Event, ProgressSnapshotRaw, Spawned};
+use crate::models::MUSE_EFFORT_LEVELS;
 use crate::types::{Allowance, AllowanceWindow, JobSpec, Usage};
 use serde_json::Value;
 use std::sync::atomic::Ordering;
@@ -66,9 +67,16 @@ pub(crate) fn resolve_bin(r#override: Option<&str>) -> String {
         .into_owned()
 }
 
-/// Strip one leading `muse/` from a delegate model id for the child CLI.
-fn base_model(model: &str) -> &str {
-    model.strip_prefix("muse/").unwrap_or(model)
+/// Split a delegate `muse/...` id into the child model and an optional reasoning
+/// effort. Only one leading `muse/` is stripped and only a trailing
+/// `:<level>` from [`MUSE_EFFORT_LEVELS`] becomes an effort; any other colon
+/// belongs to the model itself and is passed through whole.
+pub(crate) fn base_and_effort(model: &str) -> (&str, Option<&str>) {
+    let base = model.strip_prefix("muse/").unwrap_or(model);
+    match base.rsplit_once(':') {
+        Some((b, level)) if MUSE_EFFORT_LEVELS.contains(&level) => (b, Some(level)),
+        _ => (base, None),
+    }
 }
 
 /// Staging argv for a run. The prompt rides after the `--` separator, exactly
@@ -76,27 +84,32 @@ fn base_model(model: &str) -> &str {
 /// child wire argv (inserting `--workspace <cwd>` from the spec), so the
 /// staging form itself is never executed and must never be mistaken for
 /// child wire argv in tests: assert the actual child argv through a fake
-/// process instead.
+/// process instead. `--reasoning-effort` is sent only when the id carries a
+/// level; otherwise Muse uses its own default.
 pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
     // The session id is chosen before launch: resume passes the stored id, a
     // fresh run mints one (muse creates the session if absent).
     let session = session
         .map(str::to_string)
         .unwrap_or_else(crate::util::random_uuid);
-    vec![
+    let (base, effort) = base_and_effort(model);
+    let mut args: Vec<String> = vec![
         "exec".into(),
         "--json".into(),
         "--disable-approval".into(),
         "--trust-workspace".into(),
         "--model".into(),
-        base_model(model).to_string(),
-        "--reasoning-effort".into(),
-        "low".into(),
-        "--session-id".into(),
-        session,
-        "--".into(),
-        prompt.to_string(),
-    ]
+        base.to_string(),
+    ];
+    if let Some(level) = effort {
+        args.push("--reasoning-effort".into());
+        args.push(level.to_string());
+    }
+    args.push("--session-id".into());
+    args.push(session);
+    args.push("--".into());
+    args.push(prompt.to_string());
+    args
 }
 
 /// The `--session-id` value in an argv built by [`argv`].
@@ -146,7 +159,7 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     // The stream usually repeats this id in its `session` header; when it
     // doesn't (a crash before the first line), the result still carries it.
     let launched_session = session_from_argv(&spec.argv);
-    let base = base_model(&spec.model).to_string();
+    let base = base_and_effort(&spec.model).0.to_string();
     let tool_idle_ms = spec.tool_idle_ms;
     let wall_started_at = std::time::Instant::now();
     let mut wired = spec.clone();
@@ -1140,6 +1153,86 @@ mod tests {
         // Only one leading `muse/` is stripped.
         let nested = argv("muse/muse/x", None, "hi");
         assert!(nested.iter().any(|arg| arg == "muse/x"));
+    }
+
+    #[test]
+    fn effort_suffix_is_split_only_when_it_is_a_muse_level() {
+        assert_eq!(
+            base_and_effort("muse/muse-spark-1.3-contributor:high"),
+            ("muse-spark-1.3-contributor", Some("high"))
+        );
+        assert_eq!(
+            base_and_effort("muse/muse-spark-1.3-contributor"),
+            ("muse-spark-1.3-contributor", None)
+        );
+        // A colon that is not a Muse level stays in the model name.
+        assert_eq!(
+            base_and_effort("muse/muse-spark:beta"),
+            ("muse-spark:beta", None)
+        );
+        // Only one leading `muse/` is stripped; the suffix is read after it.
+        assert_eq!(
+            base_and_effort("muse/muse/x:ultra"),
+            ("muse/x", Some("ultra"))
+        );
+    }
+
+    #[test]
+    fn effort_flag_is_sent_only_when_the_id_carries_a_level() {
+        let suffixed = argv("muse/muse-spark-1.3-contributor:high", None, "hi");
+        let pair = suffixed
+            .windows(2)
+            .find(|w| w[0] == "--reasoning-effort")
+            .expect("--reasoning-effort");
+        assert_eq!(pair[1], "high");
+        assert!(suffixed.iter().any(|a| a == "muse-spark-1.3-contributor"));
+        assert!(!suffixed.iter().any(|a| a.contains(':')));
+
+        let bare = argv("muse/muse-spark-1.3-contributor", Some("S"), "hi");
+        assert!(!bare.iter().any(|a| a == "--reasoning-effort"), "{bare:?}");
+        assert!(!bare.iter().any(|a| a == "low"), "{bare:?}");
+    }
+
+    #[test]
+    fn spawn_strips_the_effort_suffix_from_the_child_model_and_its_evidence() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = scratch_dir("spawn-effort");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let fixture = dir.join("tool-calls-fix.stdout");
+        std::fs::write(&fixture, TOOL_CALLS_FIX).unwrap();
+        let argv_record = dir.join("argv.txt");
+        let fake = fake_muse_script(
+            &dir,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\ncat {}\n",
+                argv_record.display(),
+                fixture.display()
+            ),
+        );
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let model = "muse/muse-spark-1.3-contributor:high";
+        let mut spec = job_spec(&resolve_bin(None), argv(model, None, "hi"), &cwd);
+        spec.model = model.to_string();
+
+        let spawned = spawn(&spec);
+        let result = (spawned.drive)(&|_| {});
+        // The fixture reports the bare model, so evidence matches only when the suffix is stripped.
+        assert_eq!(result.is_error, Some(false), "{}", result.text);
+
+        let recorded: Vec<String> = std::fs::read_to_string(&argv_record)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let model_at = recorded.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(recorded[model_at + 1], "muse-spark-1.3-contributor");
+        let effort_at = recorded
+            .iter()
+            .position(|a| a == "--reasoning-effort")
+            .unwrap();
+        assert_eq!(recorded[effort_at + 1], "high");
     }
 
     #[test]

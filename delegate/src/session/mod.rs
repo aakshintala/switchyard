@@ -268,6 +268,11 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     if model_id.is_empty() {
         return Err(usage("--model muse/ requires a model id"));
     }
+    if crate::backends::muse::base_and_effort(model).1.is_some() {
+        return Err(usage(
+            "--model takes no reasoning-effort suffix on a session (sessions run at Muse's default effort)",
+        ));
+    }
     let brief = read_brief(brief_path).map_err(usage)?;
     let cwd = std::env::current_dir()
         .map_err(|error| failed(format!("could not resolve cwd: {error}")))?;
