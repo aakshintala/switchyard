@@ -1194,3 +1194,60 @@ fn running_progress_carries_the_last_event_age() {
     s.fake.handle(0).finish(done_ok());
     assert_eq!(settle(&s.reg, &id), "DONE");
 }
+
+#[test]
+fn zero_token_events_keep_tokens_at_zero_but_reset_the_age() {
+    let s = setup();
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    s.fake.handle(0).progress("shell", 0.0, None, &[], Some("thinking"));
+    // The dispatch seed already makes the age small, so the age is never the
+    // wait condition here: the wait is on lastTool, which on_event stores in
+    // the same locked step as the last_event reset.
+    let mut tool = String::new();
+    for _ in 0..2500 {
+        let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+        if let Some(t) = polled["progress"]["lastTool"].as_str() {
+            tool = t.to_string();
+            break;
+        }
+        sleep(Duration::from_millis(2));
+    }
+    assert_eq!(tool, "shell");
+    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+    assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
+    sleep(Duration::from_millis(200));
+    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+    assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
+    let age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
+    assert!(age >= 200.0, "quiet age {age} covers the 200 ms sleep");
+    s.fake.handle(0).activity();
+    let mut age = f64::MAX;
+    for _ in 0..2500 {
+        let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+        age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
+        if age < 150.0 {
+            break;
+        }
+        sleep(Duration::from_millis(2));
+    }
+    assert!(age < 150.0, "activity resets the age, saw {age}");
+    assert_eq!(
+        serde_json::to_value(s.reg.poll(&id)).unwrap()["progress"]["tokensSoFar"],
+        0.0
+    );
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "DONE");
+}
+
+#[test]
+fn a_silent_job_shows_zero_tokens_and_a_growing_age() {
+    let s = setup();
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    sleep(Duration::from_millis(200));
+    let polled = serde_json::to_value(s.reg.poll(&id)).unwrap();
+    assert_eq!(polled["progress"]["tokensSoFar"], 0.0);
+    let age = polled["progress"]["lastEventAgeMs"].as_f64().unwrap();
+    assert!(age >= 200.0, "silent age {age} covers the 200 ms sleep");
+    s.fake.handle(0).finish(done_ok());
+    assert_eq!(settle(&s.reg, &id), "DONE");
+}
