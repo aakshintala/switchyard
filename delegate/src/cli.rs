@@ -771,6 +771,24 @@ fn missing_record(id: &str) -> Usage {
     Usage(format!("unknown job {id} (searched: {dirs})"))
 }
 
+/// The stored age is as of `lastHeartbeatAt`, so `watch` adds the time since
+/// that heartbeat. Records from an older supervisor carry no stored age and
+/// give no note. A heartbeat newer than now (a clock step) adds nothing.
+fn last_event_note(record: &serde_json::Value, now_ms: f64) -> Option<String> {
+    let stored_ms = record["progress"]["lastEventAgeMs"].as_f64()?;
+    let heartbeat_ms = record["lastHeartbeatAt"].as_f64().unwrap_or(now_ms);
+    let extra_ms = (now_ms - heartbeat_ms).max(0.0);
+    let total_ms = stored_ms + extra_ms;
+    Some(format!("last event {}s ago", (total_ms / 1000.0).floor()))
+}
+
+fn watch_now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+
 fn watch(args: &[String]) -> Result<i32, Usage> {
     let (kv, ids) = parse(args, &["--timeout"])?;
     if ids.is_empty() {
@@ -822,6 +840,9 @@ fn watch(args: &[String]) -> Result<i32, Usage> {
                     }
                     if let Some(tool) = progress["lastTool"].as_str() {
                         details.push(format!("last tool {tool}"));
+                    }
+                    if let Some(note) = last_event_note(record, watch_now_ms()) {
+                        details.push(note);
                     }
                     let details = if details.is_empty() {
                         String::new()
@@ -983,5 +1004,55 @@ mod tests {
         };
         let rec = serde_json::to_value(&unset).unwrap();
         assert!(rec["idleMs"].is_null());
+    }
+
+    fn running_record_with(age_ms: f64, heartbeat_ms: Option<f64>) -> serde_json::Value {
+        let mut progress = serde_json::json!({"lastEventAgeMs": age_ms});
+        if age_ms.is_nan() {
+            progress = serde_json::json!({});
+        }
+        let mut record = serde_json::json!({"status": "RUNNING", "progress": progress});
+        if let Some(h) = heartbeat_ms {
+            record["lastHeartbeatAt"] = serde_json::json!(h);
+        }
+        record
+    }
+
+    #[test]
+    fn last_event_note_adds_the_time_since_the_heartbeat() {
+        let record = running_record_with(2000.0, Some(10_000.0));
+        assert_eq!(
+            last_event_note(&record, 13_000.0),
+            Some("last event 5s ago".to_string())
+        );
+    }
+
+    #[test]
+    fn last_event_note_floors_to_whole_seconds() {
+        let record = running_record_with(1999.0, Some(10_000.0));
+        assert_eq!(
+            last_event_note(&record, 13_000.0),
+            Some("last event 4s ago".to_string())
+        );
+    }
+
+    #[test]
+    fn last_event_note_is_absent_without_a_stored_age() {
+        let record = running_record_with(f64::NAN, Some(10_000.0));
+        assert_eq!(last_event_note(&record, 13_000.0), None);
+    }
+
+    #[test]
+    fn last_event_note_ignores_a_heartbeat_newer_than_now() {
+        let record = running_record_with(2000.0, Some(10_000.0));
+        assert_eq!(
+            last_event_note(&record, 9_000.0),
+            Some("last event 2s ago".to_string())
+        );
+        let no_heartbeat = running_record_with(2000.0, None);
+        assert_eq!(
+            last_event_note(&no_heartbeat, 13_000.0),
+            Some("last event 2s ago".to_string())
+        );
     }
 }
