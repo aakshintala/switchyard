@@ -195,6 +195,19 @@ pub(crate) fn start_child_with_stdin(spec: &JobSpec, stdin: Stdio) -> Result<Sta
 /// later call. Safe on a recycled pid only because the driver sets `reaped`
 /// right after `wait`.
 pub(crate) fn killer(pid: libc::pid_t, reaped: Arc<AtomicBool>) -> Box<dyn Fn() + Send + Sync> {
+    killer_with(pid, reaped, |pid, sig| {
+        unsafe { libc::kill(pid, sig) };
+    })
+}
+
+/// Same as [`killer`], but each dispatch goes to `signal` instead of the raw
+/// `kill` syscall, so tests observe the dispatched signals themselves rather
+/// than polling the child for a fixed window.
+pub(crate) fn killer_with(
+    pid: libc::pid_t,
+    reaped: Arc<AtomicBool>,
+    signal: impl Fn(libc::pid_t, libc::c_int) + Send + Sync + 'static,
+) -> Box<dyn Fn() + Send + Sync> {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     Box::new(move || {
         if reaped.load(Ordering::SeqCst) {
@@ -202,7 +215,7 @@ pub(crate) fn killer(pid: libc::pid_t, reaped: Arc<AtomicBool>) -> Box<dyn Fn() 
         }
         let n = calls.fetch_add(1, Ordering::SeqCst);
         let sig = if n == 0 { libc::SIGTERM } else { libc::SIGKILL };
-        unsafe { libc::kill(-pid, sig) };
+        signal(-pid, sig);
     })
 }
 
@@ -419,8 +432,10 @@ mod tests {
         let _ = std::fs::remove_file(&recvd);
     }
 
-    /// Once `reaped` is set, neither call signals the child, so a late kill
-    /// cannot hit a recycled pid.
+    /// Once `reaped` is set, neither call dispatches a signal, so a late
+    /// kill cannot hit a recycled pid. The recording sink observes the
+    /// dispatches themselves, so the test needs no observation window: with
+    /// the guard removed the sink would hold `[SIGTERM, SIGKILL]`.
     #[test]
     fn killer_sends_nothing_once_reaped() {
         let spec = crate::job::tests::spec_of(|s| {
@@ -432,17 +447,17 @@ mod tests {
         started
             .reaped
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let kill = killer(started.pid, started.reaped.clone());
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&sent);
+        let kill = killer_with(started.pid, started.reaped.clone(), move |_, sig| {
+            sink.lock().expect("sink locks").push(sig);
+        });
         kill();
         kill();
-        // Neither call may signal: watch the child for the whole window and
-        // fail at once with evidence instead of sleeping first and looking once.
-        let t = std::time::Instant::now();
-        while t.elapsed() < std::time::Duration::from_millis(300) {
-            let alive = started.child.try_wait().expect("try_wait works").is_none();
-            assert!(alive, "reaped child was signalled");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        assert!(
+            sent.lock().expect("sink locks").is_empty(),
+            "reaped child was signalled"
+        );
         unsafe { libc::kill(-started.pid, libc::SIGKILL) };
         let _ = started.child.wait();
         started

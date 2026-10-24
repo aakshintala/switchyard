@@ -913,7 +913,7 @@ fn a_job_past_its_wall_budget_is_cancelled() {
     let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(300.0)));
     assert_eq!(s.reg.poll(&id), "RUNNING");
     assert_eq!(settle(&s.reg, &id), "CANCELLED");
-    // Contract (skills/delegate/SKILL.md:83-86): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
     wall_text(&s.reg, &id, 300.0);
 }
@@ -965,7 +965,7 @@ fn the_wall_budget_includes_the_retry_backoff() {
     let t = Instant::now();
     assert_eq!(settle(&s.reg, &id), "CANCELLED");
     assert!(t.elapsed() < Duration::from_secs(1));
-    // Contract (skills/delegate/SKILL.md:83-86): a wall expiry during retry backoff performs no respawn.
+    // Contract (docs/delegate-sessions.md:13-22): a wall expiry during retry backoff performs no respawn.
     assert_eq!(argvs(&s).len(), 1);
     wall_text(&s.reg, &id, 100.0);
 }
@@ -1073,12 +1073,12 @@ fn the_first_termination_wins() {
     *s.fake.ignore_first_kill.lock().unwrap() = true;
     let id = s.reg.dispatch(spec_of(|_| {}));
     wait_killed(&s, &["SIGTERM"]);
-    // Contract (skills/delegate/SKILL.md:83-86): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
     let t = Instant::now();
     assert_eq!(s.reg.cancel(&id), "CANCELLED");
     assert!(t.elapsed() < Duration::from_secs(1));
-    // Contract (skills/delegate/SKILL.md:83-86): a wall-expired child that ignores SIGTERM gets SIGKILL after the grace; a user cancel after a watchdog kill sends it at once.
+    // Contract (docs/delegate-sessions.md:13-22): a wall-expired child that ignores SIGTERM gets SIGKILL after the grace; a user cancel after a watchdog kill sends it at once.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
     let text = terminal_text(&s.reg, &id);
     assert!(text.starts_with("Cancelled after"), "{text:?}");
@@ -1096,7 +1096,7 @@ fn a_cancel_after_wall_sigterm_reads_the_cancel_wording() {
     let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(50.0)));
     wait_killed(&s, &["SIGTERM"]);
     assert_eq!(s.reg.cancel(&id), "CANCELLED");
-    // Contract (skills/delegate/SKILL.md:83-86): a wall-expired child that ignores SIGTERM gets SIGKILL after the grace; a user cancel after a watchdog kill sends it at once.
+    // Contract (docs/delegate-sessions.md:13-22): a wall-expired child that ignores SIGTERM gets SIGKILL after the grace; a user cancel after a watchdog kill sends it at once.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
     let text = terminal_text(&s.reg, &id);
     assert!(text.starts_with("Cancelled after"), "{text:?}");
@@ -1111,10 +1111,10 @@ fn a_sigterm_resistant_child_is_killed_after_the_grace() {
     *s.fake.ignore_first_kill.lock().unwrap() = true;
     let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(50.0)));
     wait_killed(&s, &["SIGTERM"]);
-    // Contract (skills/delegate/SKILL.md:83-86): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
     assert_eq!(settle(&s.reg, &id), "CANCELLED");
-    // Contract (skills/delegate/SKILL.md:83-86): a wall-expired child that ignores SIGTERM gets SIGKILL after the grace; a user cancel after a watchdog kill sends it at once.
+    // Contract (docs/delegate-sessions.md:13-22): a wall-expired child that ignores SIGTERM gets SIGKILL after the grace; a user cancel after a watchdog kill sends it at once.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM", "SIGKILL"]);
     wall_text(&s.reg, &id, 50.0);
 
@@ -1122,7 +1122,7 @@ fn a_sigterm_resistant_child_is_killed_after_the_grace() {
     let s = setup_with(|d| d.kill_grace_ms = 60_000);
     let id = s.reg.dispatch(spec_of(|sp| sp.wall_ms = Some(50.0)));
     assert_eq!(settle(&s.reg, &id), "CANCELLED");
-    // Contract (skills/delegate/SKILL.md:83-86): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
 
     // The escalation is wall-only: an idle stall keeps its single SIGTERM.
@@ -1133,11 +1133,11 @@ fn a_sigterm_resistant_child_is_killed_after_the_grace() {
     *s.fake.ignore_first_kill.lock().unwrap() = true;
     let id = s.reg.dispatch(spec_of(|_| {}));
     wait_killed(&s, &["SIGTERM"]);
-    // Contract (skills/delegate/SKILL.md:83-86): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
     s.fake.handle(0).finish(done_ok());
     assert_eq!(settle(&s.reg, &id), "STALLED");
-    // Contract (skills/delegate/SKILL.md:83-86): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
+    // Contract (docs/delegate-sessions.md:13-22): the first kill is SIGTERM; an idle stall or a clean wall kill sends just this one.
     assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
 }
 
