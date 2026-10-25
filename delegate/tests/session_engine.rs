@@ -1,3 +1,5 @@
+mod support;
+
 use delegate::session::{
     inbox, ipc,
     state::{self, DeadReason, Paths, State, Status},
@@ -121,6 +123,7 @@ impl Session {
         let configured = format!(
             "{shebang}\nimport os\nos.environ.setdefault('FAKE_DIR', {fake_dir_literal})\nos.environ.setdefault('FAKE_SCENARIO', {scenario_literal})\n{body}"
         );
+        let exec_guard = support::exec_lock();
         std::fs::write(&fake, configured).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         // macOS scans a newly executable /tmp script on first launch; keep that outside the 300 ms RPC budget.
@@ -141,6 +144,7 @@ impl Session {
             .stderr(std::process::Stdio::null())
             .status()
             .unwrap();
+        drop(exec_guard);
         assert!(warm_status.success());
         std::fs::remove_dir_all(warm_dir).unwrap();
 
@@ -968,7 +972,8 @@ fn muse_host_fake_consumes_a_turn_start_buffered_after_host_refusal() {
     let fake = root.join("muse_host_fake.py");
     std::fs::write(&fake, include_str!("support/muse_host_fake.py")).unwrap();
 
-    let mut child = std::process::Command::new("python3")
+    let exec_guard = support::exec_lock();
+    let child = std::process::Command::new("python3")
         .arg("-S")
         .arg(&fake)
         .args([
@@ -983,8 +988,9 @@ fn muse_host_fake_consumes_a_turn_start_buffered_after_host_refusal() {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+        .spawn();
+    drop(exec_guard);
+    let mut child = child.unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (output_tx, output_rx) = mpsc::channel();

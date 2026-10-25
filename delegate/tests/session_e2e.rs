@@ -1,3 +1,5 @@
+mod support;
+
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -34,6 +36,7 @@ impl Harness {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&fake_dir).unwrap();
         let fake = base.join("muse-fake");
+        let exec_guard = support::exec_lock();
         std::fs::write(&fake, include_str!("support/muse_host_fake.py")).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let warm_dir = base.join("warmup");
@@ -53,6 +56,7 @@ impl Harness {
             .stderr(Stdio::null())
             .status()
             .unwrap();
+        drop(exec_guard);
         assert!(warm.success());
         let _ = std::fs::remove_dir_all(warm_dir);
         Self {
@@ -123,7 +127,10 @@ impl Harness {
                 Ok(())
             });
         }
-        let mut child = command.spawn().unwrap();
+        let exec_guard = support::exec_lock();
+        let spawned = command.spawn();
+        drop(exec_guard);
+        let mut child = spawned.unwrap();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let (stdout_tx, stdout_rx) = mpsc::channel();
@@ -461,7 +468,10 @@ fn start_validates_detaches_and_prints_shared_help() {
         assert_eq!(output.stdout, usage.stdout);
     }
     assert_eq!(h.invoke(&["frob"]).status.code(), Some(2));
-    let global_help = Command::new(BIN).arg("help").output().unwrap();
+    let exec_guard = support::exec_lock();
+    let global_help = Command::new(BIN).arg("help").output();
+    drop(exec_guard);
+    let global_help = global_help.unwrap();
     assert!(global_help.status.success());
     assert_eq!(global_help.stdout, usage.stdout);
 }
@@ -823,13 +833,15 @@ fn slow_ack_send_returns_after_running_state_and_two_sends_race_safely() {
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(socket).unwrap();
     listener.set_nonblocking(true).unwrap();
-    let mut stand_in = Command::new("/bin/sleep")
+    let exec_guard = support::exec_lock();
+    let stand_in = Command::new("/bin/sleep")
         .arg("30")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .spawn();
+    drop(exec_guard);
+    let mut stand_in = stand_in.unwrap();
     let mut state = h.state(&reconnect_id);
     state["supervisorPid"] = json!(stand_in.id());
     std::fs::write(
