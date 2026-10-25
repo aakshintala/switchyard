@@ -322,7 +322,10 @@ fn ipc_request_reports_a_stale_socket_as_unreachable() {
         Duration::from_millis(100),
     );
 
-    assert!(matches!(result, Err(ipc::IpcError::Unreachable(_))));
+    assert!(
+        matches!(result, Err(ipc::IpcError::Unreachable(_))),
+        "{result:?}"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
