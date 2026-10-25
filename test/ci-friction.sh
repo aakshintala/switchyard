@@ -611,4 +611,23 @@ run_friction --json
 [ "$CODE" = "0" ] || fail "release-stale exits 0 (got $CODE): [$OUT]"
 [ "$(release_class)" = "cancelled" ] || fail "cached timeout reclassified: [$(release_class)]"
 
+# --- #636: an issue that names the test only as a cousin is not its ticket ---
+# the lua test's search returns one open issue whose title is a tui test and
+# whose body names the lua test once as a cousin: the test links no ticket
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/search/a-stuck-provider-load-abandons-its-mixed-extension-after-grace.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2876, "state": "open", "title": "tui event_loop resume_open_replays_the_log_to_the_tail", "body": "Possible cousin: extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace hits the same grace path.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+run_friction --json
+[ "$CODE" = "1" ] || fail "cousin exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "d['repeats'][0]['test']")" = "extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace" ] \
+  || fail "cousin test: [$OUT]"
+[ "$(grep -c 'search/issues.*a_stuck' "$FAKE_GH_LOG")" = "1" ] \
+  || fail "cousin searched once: [$(cat "$FAKE_GH_LOG")]"
+[ "$(jget "d['repeats'][0]['issue']")" = "None" ] || fail "cousin names no ticket: [$OUT]"
+[ "$(jget "d['repeats'][0]['issue_state']")" = "None" ] || fail "cousin state null: [$OUT]"
+
 echo "ci-friction: all cases passed"
