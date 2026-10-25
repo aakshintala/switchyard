@@ -245,6 +245,34 @@ run --cwd "$R" --base "$BASE" --symbols Brand_New --files src/lib.rs --out "$T/p
 [ "$code" = 1 ] || fail "j: --symbols gets no exemption, got $code"
 [ "$out" = "unresolved symbol: Brand_New" ] || fail "j: unresolved line, got [$out]"
 
+# m. --plan Tasks new-marking exits 0; unmarked Interfaces symbol exits 1
+cat >"$T/plan-m-a.md" <<EOF
+# Plan
+Base: $BASE
+
+## Files
+- \`src/lib.rs\`
+
+## Tasks
+1. Add \`Task_Only\` helper (new).
+EOF
+run --cwd "$R" --base "$BASE" --plan "$T/plan-m-a.md" --out "$T/pack-m-a.md"
+[ "$code" = 0 ] || fail "m: marked Tasks symbol exits 0, got $code [$out]"
+[ "$(grep -c 'Task_Only' "$T/pack-m-a.md")" = 0 ] || fail "m: marked token left out of the pack"
+cat >"$T/plan-m-b.md" <<EOF
+# Plan
+Base: $BASE
+
+## Files
+- \`src/lib.rs\`
+
+## Interfaces
+Calls \`Unmarked_Name\` from the shim.
+EOF
+run --cwd "$R" --base "$BASE" --plan "$T/plan-m-b.md" --out "$T/pack-m-b.md"
+[ "$code" = 1 ] || fail "m: unmarked Interfaces symbol exits 1, got $code [$out]"
+printf '%s\n' "$out" | grep -q '^unresolved symbol: Unmarked_Name' || fail "m: unresolved line, got [$out]"
+
 # k. usage: exit 2 with nothing on stdout
 usage_cases=0
 expect_usage() {
