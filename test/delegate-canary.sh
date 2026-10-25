@@ -79,6 +79,10 @@ case "\$cmd" in
     printf 'run %s %s\n' "\$model" "\$cwd" >>"\$FAKE_LOGDIR/calls.log"
     case "\$model" in
       fiber/*)
+        printf '%s\n' "\${FIBER_HOME:-UNSET}" >>"\$FAKE_LOGDIR/fiber-home.log" ;;
+    esac
+    case "\$model" in
+      fiber/*)
         if [ "\${CANARY_FAKE_FAIL:-}" = "fiber" ]; then exit 1; fi ;;
     esac
     id="job-\$\$-\$RANDOM"
@@ -819,3 +823,30 @@ jq 'del(.status)' "$OUT/pi/job.json" >"$REPN/pi/job.json"
 report_unchanged "$REPN" nostatus-job
 
 echo "report cases passed"
+
+# --- Fiber home isolation (#626): canary.sh run exports FIBER_HOME under
+# its out dir, so the Fiber lane never sees the caller's home. The fake
+# delegate logs the FIBER_HOME each fiber run inherits (the fiber/* branch
+# of fake run above). The run below passes a decoy home, and the case
+# asserts the lane saw <out>/fiber-home instead, that the directory exists,
+# and that the real $HOME/.fiber was neither created nor changed.
+: >"$FLOG/fiber-home.log"
+OUTFH="$T/out-fiber-home"
+if [ -e "$HOME/.fiber" ]; then
+  FIBER_REAL_BEFORE="$(find "$HOME/.fiber" | sort)"
+else
+  FIBER_REAL_BEFORE="absent"
+fi
+FIBER_HOME="$T/decoy-fiber" FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 242 "$T/brief.md" \
+  --gate 'test -f work-marker' --out "$OUTFH" || fail "fiber-home run exits 0"
+[ "$(cat "$FLOG/fiber-home.log")" = "$OUTFH/fiber-home" ] || fail "fiber lane saw the isolated home ($OUTFH/fiber-home)"
+[ -d "$OUTFH/fiber-home" ] || fail "isolated fiber home exists"
+if [ -e "$HOME/.fiber" ]; then
+  FIBER_REAL_AFTER="$(find "$HOME/.fiber" | sort)"
+else
+  FIBER_REAL_AFTER="absent"
+fi
+[ "$FIBER_REAL_AFTER" = "$FIBER_REAL_BEFORE" ] || fail "real fiber home untouched"
+bash "$CANARY" clean 242 --out "$OUTFH" || fail "clean 242 exits 0"
+
+echo "fiber home cases passed"
