@@ -18,5 +18,7 @@ pub mod prompt;
 pub mod session;
 pub mod status_record;
 pub mod stream;
+#[cfg(test)]
+pub(crate) mod test_env;
 pub mod types;
 pub mod util;
