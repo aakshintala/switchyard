@@ -78,6 +78,34 @@ runjob() {
   [ "$(head -n 1 "$rep")" = "PLAN OK" ] && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES n=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
 }
 
+# task_pathspec KIND VALUE: expand_token's callback for task records. Resolve
+# paths at the plan base so unique basename tokens become root-relative paths.
+task_pathspec() {
+  case "$1" in
+    glob) printf '%s\n' "$2"; return 0 ;;
+    path) ;;
+    *) return 0 ;;
+  esac
+  resolve_path "$2"
+  [ "$RES_KIND" = found ] || return 0
+  printf '%s\n' "$RES"
+}
+
+# plan_task_pathspecs PLAN: resolved paths from backticked tokens on ## Tasks
+# lines. The shared reader skips fences and non-Tasks sections; expand_token
+# handles ports, symbols and brace alternatives before resolve_path applies the
+# plan's path rules. A task path outside Files is still listed.
+plan_task_pathspecs() {
+  local tok
+  local dir="$worktree" rev="$base" tree CUR_SEC=tasks
+  tree="$(git -C "$dir" ls-tree -r --name-only "$rev")"
+  while IFS= read -r tok; do
+    [ -n "$tok" ] || continue
+    expand_token "$tok" task_pathspec
+  done < <(plan_records "$1" | awk -F '\t' '$1 == "tasks" { print $5 }')
+  return 0
+}
+
 do_verify() {
   extra=""; model=""
   while [ $# -gt 0 ]; do case "$1" in
@@ -96,14 +124,19 @@ do_verify() {
   round="$(ronum)"
   # The drift exemption is derived from recorded state, not a caller flag: a
   # verify is exempt only when a previous round recorded a base and main
-  # changed the plan Files between that base and the current one.
+  # changed a task path between that base and the current one. A Files
+  # change no task names is not drift, so the round limit applies.
   drift=0
   vbase="$(t get verified_base 2>/dev/null || true)"
-  if [ -n "$vbase" ] && [ "${#files[@]}" -gt 0 ]; then
-    if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${files[@]}" 2>/dev/null)"; then
-      [ -n "$dstat" ] && drift=1 || drift=0
-    else
-      drift=0
+  if [ -n "$vbase" ]; then
+    tpaths=()
+    while IFS= read -r p; do tpaths+=("$p"); done < <(plan_task_pathspecs "$plan")
+    if [ "${#tpaths[@]}" -gt 0 ]; then
+      if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${tpaths[@]}" 2>/dev/null)"; then
+        [ -n "$dstat" ] && drift=1 || drift=0
+      else
+        drift=0
+      fi
     fi
   fi
   if [ "$drift" -eq 0 ]; then
