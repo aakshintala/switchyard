@@ -81,7 +81,11 @@ runjob() {
 # task_pathspec KIND VALUE: expand_token's callback for task records. Resolve
 # paths at the plan base so unique basename tokens become root-relative paths.
 task_pathspec() {
-  [ "$1" = path ] || return 0
+  case "$1" in
+    glob) printf '%s\n' "$2"; return 0 ;;
+    path) ;;
+    *) return 0 ;;
+  esac
   resolve_path "$2"
   [ "$RES_KIND" = found ] || return 0
   printf '%s\n' "$RES"

@@ -582,8 +582,8 @@ expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-d sp
 # Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_drift" ] || fail "drift-d starts no job"
 
-# Resolve the same task token forms as plan-check before using them as Git
-# pathspecs: brace alternatives and unique suffixes both name real paths.
+# Expand task token forms before using them as Git pathspecs: brace alternatives
+# and unique suffixes resolve to real paths; glob tokens pass through directly.
 resolved_drift_case() {
   local name="$1" changed="$2" other="$3" token="$4" a b
   setup_case "$name"
@@ -626,6 +626,7 @@ resolved_drift_case() {
 
 resolved_drift_case drift-j src/later.rs src/lib.rs 'src/{lib,later}.rs'
 resolved_drift_case drift-k src/a.rs '' a.rs
+resolved_drift_case drift-l src/a.rs '' 'src/*.rs'
 
 # --- drift follows the task paths: a task-path change is drift ---
 setup_case drift-i
