@@ -78,29 +78,27 @@ runjob() {
   [ "$(head -n 1 "$rep")" = "PLAN OK" ] && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES n=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
 }
 
-# plan_task_pathspecs PLAN: one path per line from the backticked tokens on
-# ## Tasks lines that name a path (a slash or a known extension, per
-# is_path). A trailing :lines port or ::symbol is stripped, so
-# `src/a.rs:1-2` names src/a.rs. A task path outside Files is still
-# listed; fenced code blocks hold examples, not tasks.
+# task_pathspec KIND VALUE: expand_token's callback for task records. Resolve
+# paths at the plan base so unique basename tokens become root-relative paths.
+task_pathspec() {
+  [ "$1" = path ] || return 0
+  resolve_path "$2"
+  [ "$RES_KIND" = found ] || return 0
+  printf '%s\n' "$RES"
+}
+
+# plan_task_pathspecs PLAN: resolved paths from backticked tokens on ## Tasks
+# lines. The shared reader skips fences and non-Tasks sections; expand_token
+# handles ports, symbols and brace alternatives before resolve_path applies the
+# plan's path rules. A task path outside Files is still listed.
 plan_task_pathspecs() {
   local tok
+  local dir="$worktree" rev="$base" tree CUR_SEC=tasks
+  tree="$(git -C "$dir" ls-tree -r --name-only "$rev")"
   while IFS= read -r tok; do
     [ -n "$tok" ] || continue
-    if [[ $tok =~ $portre ]]; then tok="${tok%"${BASH_REMATCH[0]}"}"; fi
-    case "$tok" in *::*) tok="${tok%%::*}" ;; esac
-    [ -n "$tok" ] || continue
-    if is_path "$tok"; then printf '%s\n' "$tok"; fi
-  done < <(awk '
-    /^[[:space:]]*```/ { infence = !infence; next }
-    infence { next }
-    /^## Tasks([[:space:]]|$)/ { t = 1; next }
-    /^## / { if (t) exit; next }
-    t {
-      n = split($0, parts, "`")
-      for (i = 2; i <= n; i += 2)
-        if (parts[i] != "") print parts[i]
-    }' "$1")
+    expand_token "$tok" task_pathspec
+  done < <(plan_records "$1" | awk -F '\t' '$1 == "tasks" { print $5 }')
   return 0
 }
 
