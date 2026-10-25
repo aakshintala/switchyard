@@ -360,4 +360,41 @@ echo "HTTP 500 boom" >"$T/fail-jobs-101"
 run_health
 [ "$CODE" = "1" ] || fail "breach beats partial (got $CODE): [$OUT]"
 
+# --- cache: an in-progress snapshot is refetched when updated_at is unchanged ---
+# GitHub keeps a run's updated_at while its jobs finish, so a cache hit needs a
+# completed run; otherwise the backstop reuses a null conclusion and breaches.
+setup calm
+SCENA="$T/scen-a"; SCENB="$T/scen-b"; mkdir -p "$SCENA" "$SCENB"
+printf '{"workflow_runs":[]}' >"$SCENA/runs.json"
+printf '{"workflow_runs":[]}' >"$SCENB/runs.json"
+printf '{"sha":"cccccccccccccccccccccccccccccccccccccccc"}' >"$SCENA/head.json"
+printf '{"sha":"cccccccccccccccccccccccccccccccccccccccc"}' >"$SCENB/head.json"
+printf '[{"sha":"cccccccccccccccccccccccccccccccccccccccc"}]' >"$SCENA/target.json"
+printf '[{"sha":"cccccccccccccccccccccccccccccccccccccccc"}]' >"$SCENB/target.json"
+printf '{"status":"ahead","ahead_by":0}' >"$SCENA/compare.json"
+printf '{"status":"ahead","ahead_by":0}' >"$SCENB/compare.json"
+cat >"$SCENA/main-runs.json" <<'EOF'
+{"workflow_runs": [{"id": 1001, "event": "push", "conclusion": null, "status": "in_progress", "pull_requests": [], "head_branch": "main", "head_sha": "cccccccccccccccccccccccccccccccccccccccc", "path": ".github/workflows/ci.yml", "created_at": "2026-10-09T18:00:00Z", "updated_at": "2026-10-09T18:00:00Z", "run_attempt": 1}]}
+EOF
+cat >"$SCENB/main-runs.json" <<'EOF'
+{"workflow_runs": [{"id": 1001, "event": "push", "conclusion": "success", "status": "completed", "pull_requests": [], "head_branch": "main", "head_sha": "cccccccccccccccccccccccccccccccccccccccc", "path": ".github/workflows/ci.yml", "created_at": "2026-10-09T18:00:00Z", "updated_at": "2026-10-09T18:00:00Z", "run_attempt": 1}]}
+EOF
+cat >"$SCENA/jobs-1001.json" <<'EOF'
+{"total_count": 6, "jobs": [{"id": 3000, "run_id": 1001, "name": "Selection", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:00:30Z", "steps": []}, {"id": 3001, "run_id": 1001, "name": "Linux x86_64 checks", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:05:00Z", "steps": []}, {"id": 3002, "run_id": 1001, "name": "Tests (ubuntu-24.04)", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:05:00Z", "steps": []}, {"id": 3003, "run_id": 1001, "name": "Tests (ubuntu-24.04-arm)", "labels": ["ubuntu-24.04-arm"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:05:00Z", "steps": []}, {"id": 3004, "run_id": 1001, "name": "Tests (macos-26)", "labels": ["macos-26"], "runner_name": "GitHub Actions 1", "status": "in_progress", "conclusion": null, "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": null, "steps": []}, {"id": 3005, "run_id": 1001, "name": "Release build and size (Linux x86_64)", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:05:00Z", "steps": []}]}
+EOF
+cat >"$SCENB/jobs-1001.json" <<'EOF'
+{"total_count": 6, "jobs": [{"id": 3000, "run_id": 1001, "name": "Selection", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:00:30Z", "steps": []}, {"id": 3001, "run_id": 1001, "name": "Linux x86_64 checks", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:05:00Z", "steps": []}, {"id": 3002, "run_id": 1001, "name": "Tests (ubuntu-24.04)", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:05:00Z", "steps": []}, {"id": 3003, "run_id": 1001, "name": "Tests (ubuntu-24.04-arm)", "labels": ["ubuntu-24.04-arm"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:05:00Z", "steps": []}, {"id": 3004, "run_id": 1001, "name": "Tests (macos-26)", "labels": ["macos-26"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:05:00Z", "steps": []}, {"id": 3005, "run_id": 1001, "name": "Release build and size (Linux x86_64)", "labels": ["ubuntu-24.04"], "runner_name": "GitHub Actions 1", "status": "completed", "conclusion": "success", "created_at": "2026-10-09T18:00:00Z", "started_at": "2026-10-09T18:00:00Z", "completed_at": "2026-10-09T18:05:00Z", "steps": []}]}
+EOF
+export FAKE_SCEN="$SCENA"
+run_health --json
+[ "$CODE" = "1" ] || fail "in-progress run breaches (got $CODE): [$OUT]"
+grep -q '"check": "backstop"' <<<"$OUT" || fail "in-progress backstop breach: [$OUT]"
+export FAKE_SCEN="$SCENB"
+run_health --json
+[ "$CODE" = "0" ] || fail "completed run with same updated_at exits 0 (got $CODE): [$OUT]"
+[ "$(jget "d['backstop']['last_core_green_sha']")" = "cccccccccccccccccccccccccccccccccccccccc" ] || fail "green at 1001: [$OUT]"
+grep -q '"check": "backstop"' <<<"$OUT" && fail "completed backstop stays quiet: [$OUT]"
+run_health --json
+[ "$CODE" = "0" ] || fail "completed rerun exits 0 (got $CODE): [$OUT]"
+
 echo "ci-health: all cases passed"
