@@ -185,6 +185,9 @@ mv "$T/tktbin/plan-sweep.stub" "$T/tktbin/plan-sweep"
 want "PREFLIGHT core=2 out=" 1 missing
 [ ! -f "$RUN/widget-42-sweep.md" ] || fail "missing: the real sweep writes nothing on unresolved tokens"
 grep -q '^tkt-job|' "$T/calls.log" || fail "missing: tkt-job must run"
+# no pack was written, so the brief must not name it: PACK=none, as with no --files.
+job_args="$(grep '^tkt-job|' "$T/calls.log" | head -n 1)"
+case "$job_args" in *"PACK=none"*) ;; *) fail "missing: tkt-job must get PACK=none, not the absent pack" ;; esac
 case "$OUT" in *"missing-file:missing.txt"*) ;; *) fail "missing: digest misses the reason" ;; esac
 # --files: spaces split paths as commas do, so "a b,c" is three paths, not two.
 setup spaces ONE AGAINST

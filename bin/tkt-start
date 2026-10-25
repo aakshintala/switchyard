@@ -122,7 +122,8 @@ else tkt journal "tkt-start check CURRENT filing=$filing"; emit "CURRENT filing=
 sweep_out="none"; out="$run/$namebase-preflight-out.md"
 if [ "${#fpaths[@]}" -gt 0 ]; then sweep_out="$run/$namebase-sweep.md"; rc=0; sweep_txt=""
   sweep_txt="$("$sweep" --cwd "$worktree" --base origin/main --files "$files" --out "$sweep_out" 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ]; then if [ "$rc" -eq 1 ] && [ -n "$sweep_txt" ] && ! printf '%s\n' "$sweep_txt" | grep -qv '^unresolved '; then :; else fail_step plan-sweep "$rc" "$sweep_txt"; fi; fi; fi
+  if [ "$rc" -ne 0 ]; then if [ "$rc" -eq 1 ] && [ -n "$sweep_txt" ] && ! printf '%s\n' "$sweep_txt" | grep -qv '^unresolved '; then :; else fail_step plan-sweep "$rc" "$sweep_txt"; fi; fi
+  [ -f "$sweep_out" ] || sweep_out="none"; fi
 jrc=0; job_txt="$("$tktjob" "$state" --slot preflight --template "$HOME/.agents/skills/planning/briefs/preflight.md" --out-file "$out" "ISSUE=$issue" "SPEC=$spec" "REPO=$repo" "BASE=$base" "WORKFLOW_DOC=$workflow_doc" "PACK=$sweep_out" 2>&1)" || jrc=$?
 # DONE_WITH_CONCERNS exits 1 with its report on disk: the report is the product.
 if [ "$jrc" -ne 0 ]; then
