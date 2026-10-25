@@ -557,7 +557,7 @@ grep -q "verifier-out-r3-drift.md" "$T/stub.log" || fail "drift-b writes the dri
 jobs_drift="$(grep -c '^job|' "$T/stub.log")"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "drift-d spent exemption exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "drift-d spent"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-d spent"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_drift" ] || fail "drift-d starts no job"
 
 setup_case drift-c
@@ -625,6 +625,18 @@ run_plan verify
 grep -q "slot=verifier-r2" "$T/stub.log" || fail "drift-f uses the counted slot"
 grep -q "slot=verifier-r2-drift" "$T/stub.log" && fail "drift-f must not use the drift slot"
 [ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$B" ] || fail "drift-f records verified_base"
+
+setup_case drift-err
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+bash "$TKT_STATE" "$S" set verified_base deadbeefdeadbeefdeadbeefdeadbeefdeadbeef || fail "seed bogus base"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "drift-err exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-err git error"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "drift-err starts no job"
 
 setup_case drift-g
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
