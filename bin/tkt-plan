@@ -88,7 +88,7 @@ do_verify() {
   while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
   if [ "${#files[@]}" -gt 0 ]; then
     stat="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${files[@]}" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
-    if [ -n "$stat" ]; then n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${files[@]}" | wc -l | tr -d ' ')"; emit "STALE n=$n base=$base" 1 "$(head -n 38 <<<"$stat")"; fi
+    if [ -n "$stat" ]; then n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${files[@]}" | wc -l | tr -d ' ')"; emit "STALE n=$n base=$base" 1 "$({ plan_bare_dirs "$plan" "$worktree"; head -n 38 <<<"$stat"; })"; fi
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
