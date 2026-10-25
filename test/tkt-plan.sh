@@ -558,6 +558,11 @@ git -C "$WT" update-ref refs/remotes/origin/main HEAD
 rebase_plan
 B="$(cat "$CDIR/base")"
 [ "$A" != "$B" ] || fail "drift-b needs a new base"
+# Drift follows the task paths, so the drift fixture names its Files entry as a task.
+{
+  printf 'Base: %s\n' "$B"
+  printf '\n## Files\n\n- `f.txt`\n\n## Tasks\n\n1. Check `f.txt`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
 printf 'ok' >"$T/mode"
 jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan verify
@@ -576,6 +581,77 @@ run_plan verify
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-d spent"
 # Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_drift" ] || fail "drift-d starts no job"
+
+# --- drift follows the task paths: a task-path change is drift ---
+setup_case drift-i
+mkdir -p "$WT/src"
+wcommit "$WT" src/a.rs "a1"
+wcommit "$WT" src/b.rs "b1"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+git -C "$WT" rev-parse HEAD >"$CDIR/base"
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/base")"
+  printf '\n## Files\n\n- `src/a.rs`\n- `src/b.rs`\n\n## Tasks\n\n1. Edit `src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+A="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "seed verified_base"
+wcommit "$WT" src/a.rs "a2"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+git -C "$WT" rev-parse HEAD >"$CDIR/base"
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/base")"
+  printf '\n## Files\n\n- `src/a.rs`\n- `src/b.rs`\n\n## Tasks\n\n1. Edit `src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+B="$(cat "$CDIR/base")"
+[ "$A" != "$B" ] || fail "drift-i needs a new base"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-i exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "drift-i"
+grep -q "slot=verifier-r3-drift" "$T/stub.log" || fail "drift-i uses the drift slot"
+grep -q "verifier-out-r3-drift.md" "$T/stub.log" || fail "drift-i writes the drift report"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-i leaves verifier_round"
+[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "drift-i leaves confirmed_for"
+[ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$B" ] || fail "drift-i updates verified_base"
+# Contract: skills/planning/SKILL.md step 3: an exempt verify dispatches one drift job.
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "drift-i starts one job"
+
+# --- a Files change no task names is not drift: the round limit applies ---
+setup_case drift-h
+mkdir -p "$WT/src"
+wcommit "$WT" src/a.rs "a1"
+wcommit "$WT" src/b.rs "b1"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+git -C "$WT" rev-parse HEAD >"$CDIR/base"
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/base")"
+  printf '\n## Files\n\n- `src/a.rs`\n- `src/b.rs`\n\n## Tasks\n\n1. Edit `src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+A="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "seed verified_base"
+wcommit "$WT" src/b.rs "b2"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+git -C "$WT" rev-parse HEAD >"$CDIR/base"
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/base")"
+  printf '\n## Files\n\n- `src/a.rs`\n- `src/b.rs`\n\n## Tasks\n\n1. Edit `src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+B="$(cat "$CDIR/base")"
+[ "$A" != "$B" ] || fail "drift-h needs a new base"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "drift-h exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-h Files outside tasks"
+# Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "drift-h starts no job"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-h leaves verifier_round"
+[ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$A" ] || fail "drift-h leaves verified_base"
 
 setup_case drift-c
 rebase_plan
@@ -617,6 +693,11 @@ wcommit "$WT" f.txt v3
 git -C "$WT" update-ref refs/remotes/origin/main HEAD
 rebase_plan
 B="$(cat "$CDIR/base")"
+# Drift follows the task paths, so the drift fixture names its Files entry as a task.
+{
+  printf 'Base: %s\n' "$B"
+  printf '\n## Files\n\n- `f.txt`\n\n## Tasks\n\n1. Check `f.txt`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
 printf 'ask' >"$T/mode"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "drift-e ask exits 1"
