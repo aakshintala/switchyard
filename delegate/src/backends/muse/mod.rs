@@ -492,6 +492,7 @@ fn finish(
 mod tests {
     use super::*;
     use crate::output::derive_status;
+    use crate::test_env::EnvGuard;
     use crate::types::RunStatus;
     use serde_json::{Value, json};
 
@@ -1072,32 +1073,10 @@ mod tests {
         assert_eq!(result.usage, None);
     }
 
-    /// Serializes process-env mutation: `MUSE_BIN` is process-global and the
-    /// spawn tests each point it at their own fake.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Process-env mutation serialises on the shared #681 helper: `MUSE_BIN`,
+    // `HOME` and `TMPDIR` are process-global and the spawn tests each point
+    // them at their own fake.
     static FAKE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            unsafe { std::env::set_var(key, value) };
-            EnvGuard { key, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
 
     fn fake_muse_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
         let path = dir.join("muse.sh");
@@ -1195,7 +1174,7 @@ mod tests {
 
     #[test]
     fn spawn_strips_the_effort_suffix_from_the_child_model_and_its_evidence() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::lock();
         let dir = scratch_dir("spawn-effort");
         let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
         let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
@@ -1265,7 +1244,7 @@ mod tests {
 
     #[test]
     fn binary_resolution_prefers_override_then_env() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::lock();
         assert_eq!(resolve_bin(Some("/custom/muse")), "/custom/muse");
         let _guard = EnvGuard::set("MUSE_BIN", "/env/muse");
         assert_eq!(resolve_bin(None), "/env/muse");
@@ -1273,7 +1252,7 @@ mod tests {
 
     #[test]
     fn spawn_runs_the_lowered_wire_argv_and_reports_the_fixture_result() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::lock();
         let dir = scratch_dir("spawn");
         let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
         let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
@@ -1385,7 +1364,7 @@ mod tests {
 
     #[test]
     fn reminder_loop_delivers_no_event_at_all() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::lock();
         let dir = scratch_dir("stall-drive");
         let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
         let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
@@ -1407,7 +1386,7 @@ mod tests {
 
     #[test]
     fn progress_run_delivers_only_progress_events() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::lock();
         let dir = scratch_dir("progress-drive");
         let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
         let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
@@ -1428,7 +1407,7 @@ mod tests {
 
     #[test]
     fn stderr_only_child_hits_the_wall_cap_without_stdout() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::lock();
         let dir = scratch_dir("wall-drive");
         let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
         let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());

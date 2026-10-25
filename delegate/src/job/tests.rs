@@ -407,6 +407,8 @@ fn progress_events_do_not_trigger_status_writes() {
 
 #[test]
 fn file_status_record_is_overwritten_from_running_to_terminal() {
+    // Reads `job_record_path`, which follows process-global env (#681).
+    let _env = crate::test_env::lock();
     let s = setup_with(|d| d.status_writer = Arc::new(FileStatusRecordWriter));
     let id = s.reg.dispatch(spec_of(|_| {}));
     let path = job_record_path(&id);

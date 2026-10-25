@@ -521,15 +521,8 @@ fn finish(
 mod tests {
     use super::*;
 
-    // Serialises every test that sets or removes CODEX_BIN: `resolve_bin` reads
-    // it, and parallel test threads otherwise interleave their writes (#659).
-    // Poison-tolerant so one panic does not cascade into PoisonError failures.
-    static CODEX_BIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn codex_bin_lock() -> std::sync::MutexGuard<'static, ()> {
-        CODEX_BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
+    // Every test that sets or removes CODEX_BIN (or PATH) serialises on the
+    // shared #681 helper: `resolve_bin` reads process-global env.
     const THREAD: &str = "01a15538-example";
 
     fn four_event_stream() -> String {
@@ -680,7 +673,7 @@ mod tests {
 
     #[test]
     fn explicit_override_wins() {
-        let _env = codex_bin_lock();
+        let _env = crate::test_env::lock();
         assert_eq!(resolve_bin(Some("/custom/codex")), "/custom/codex");
         // An empty override falls through to the environment, not the fallback.
         let prev = std::env::var("CODEX_BIN").ok();
@@ -694,7 +687,7 @@ mod tests {
 
     #[test]
     fn env_used_when_no_override() {
-        let _env = codex_bin_lock();
+        let _env = crate::test_env::lock();
         let prev = std::env::var("CODEX_BIN").ok();
         unsafe { std::env::set_var("CODEX_BIN", "/env/codex") };
         assert_eq!(resolve_bin(None), "/env/codex");
@@ -711,26 +704,16 @@ mod tests {
 
     #[test]
     fn home_fallback_when_which_finds_no_codex() {
-        let _env = codex_bin_lock();
-        let prev_path = std::env::var_os("PATH");
-        let prev_codex = std::env::var("CODEX_BIN").ok();
+        let _env = crate::test_env::lock();
         let empty = std::env::temp_dir().join(format!("cdm-codex-nobin-{}", std::process::id()));
         std::fs::create_dir_all(&empty).unwrap();
-        unsafe { std::env::set_var("PATH", &empty) };
-        unsafe { std::env::remove_var("CODEX_BIN") };
+        let _path = crate::test_env::EnvGuard::set("PATH", empty.to_str().unwrap());
+        let _codex = crate::test_env::EnvGuard::remove("CODEX_BIN");
         let bin = resolve_bin(None);
         assert!(
             bin.ends_with(".local/bin/codex"),
             "home fallback when PATH has no codex: {bin}"
         );
-        match prev_path {
-            Some(v) => unsafe { std::env::set_var("PATH", v) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
-        match prev_codex {
-            Some(v) => unsafe { std::env::set_var("CODEX_BIN", v) },
-            None => unsafe { std::env::remove_var("CODEX_BIN") },
-        }
         let _ = std::fs::remove_dir_all(&empty);
     }
 

@@ -77,9 +77,6 @@ fn session_from_argv(argv: &[String]) -> Option<String> {
 }
 
 #[cfg(test)]
-pub(crate) static CLAUDE_BIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::backends::cursor::parse_stdout;
@@ -155,7 +152,7 @@ mod tests {
 
     #[test]
     fn env_used_when_no_override() {
-        let _guard = CLAUDE_BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env::lock();
         let prev = std::env::var("CLAUDE_BIN").ok();
         unsafe { std::env::set_var("CLAUDE_BIN", "/env/claude") };
         assert_eq!(resolve_bin(None), "/env/claude");

@@ -192,9 +192,7 @@ mod tests {
 
     #[test]
     fn probes_version_login_and_a_missing_binary() {
-        let _guard = super::super::CLAUDE_BIN_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env::lock();
         let prev = std::env::var("CLAUDE_BIN").ok();
         unsafe { std::env::set_var("CLAUDE_BIN", "/fake/claude") };
         let config = cfg();

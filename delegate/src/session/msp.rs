@@ -432,14 +432,12 @@ fn resolve_muse_bin_from(
 mod tests {
     use super::*;
     use serde_json::{Value, json};
-    use std::sync::Mutex;
 
     const CLIENT: &str = include_str!("../../tests/fixtures/contract/muse-serve/client.jsonl");
     const BAD_MODEL: &str =
         include_str!("../../tests/fixtures/contract/muse-serve/bad-model.jsonl");
     const ABORT_RACE: &str =
         include_str!("../../tests/fixtures/contract/muse-serve/client-abort-race.jsonl");
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn frames(transcript: &str) -> Vec<(usize, Incoming)> {
         transcript
@@ -648,7 +646,7 @@ mod tests {
     #[test]
     fn resolve_muse_bin_uses_env_then_which_then_home_fallback() {
         // Contract: delegate/README.md:56.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::test_env::lock();
         struct Restore(Option<std::ffi::OsString>);
         impl Drop for Restore {
             fn drop(&mut self) {

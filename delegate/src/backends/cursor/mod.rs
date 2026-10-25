@@ -297,6 +297,7 @@ mod tests {
 
     #[test]
     fn env_used_when_no_override() {
+        let _env = crate::test_env::lock();
         let prev = std::env::var("CURSOR_AGENT_BIN").ok();
         unsafe { std::env::set_var("CURSOR_AGENT_BIN", "/env/cursor-agent") };
         assert_eq!(resolve_bin(None), "/env/cursor-agent");
