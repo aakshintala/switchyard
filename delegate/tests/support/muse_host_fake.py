@@ -4,12 +4,19 @@
 import os
 import sys
 
-FAKE_DIR = os.environ["FAKE_DIR"]
-SCENARIOS = {
-    item.strip()
-    for item in os.environ.get("FAKE_SCENARIO", "").split(",")
-    if item.strip()
-}
+def load_config():
+    import json
+
+    try:
+        with open("fake-config.json", encoding="utf-8") as config:
+            data = json.load(config)
+    except FileNotFoundError:
+        return os.environ["FAKE_DIR"], os.environ.get("FAKE_SCENARIO", "")
+    return data["fakeDir"], data.get("scenario", "")
+
+
+FAKE_DIR, _SCENARIO_TEXT = load_config()
+SCENARIOS = {item.strip() for item in _SCENARIO_TEXT.split(",") if item.strip()}
 SESSION_ID = "fake-session"
 TURN_NUMBER = 0
 ACTIVE_TURN = None

@@ -2,7 +2,6 @@ mod support;
 
 use serde_json::{Value, json};
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -35,30 +34,7 @@ impl Harness {
         let inbox = base.join("inbox");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&fake_dir).unwrap();
-        let fake = base.join("muse-fake");
-        let exec_guard = support::exec_lock();
-        std::fs::write(&fake, include_str!("support/muse_host_fake.py")).unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let warm_dir = base.join("warmup");
-        let warm = Command::new(&fake)
-            .args([
-                "serve",
-                "--provider",
-                "meta",
-                "--model",
-                "warmup",
-                "--disable-sandbox",
-            ])
-            .env("FAKE_DIR", &warm_dir)
-            .env("FAKE_SCENARIO", "FAST")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
-        drop(exec_guard);
-        assert!(warm.success());
-        let _ = std::fs::remove_dir_all(warm_dir);
+        let fake = support::muse_host_fake();
         Self {
             base,
             home,
