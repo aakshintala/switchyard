@@ -190,15 +190,31 @@ covered() {
   in_files "$p"
 }
 
-# plan_files_pathspecs PLAN: one path per line, the first backticked token of
-# each line in `## Files`. Later tokens on a line are prose, not pathspecs.
-# Blank tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
-plan_files_pathspecs() {
-  awk '
-    /^## Files([[:space:]]|$)/ { f = 1; next }
-    f && /^## / { exit }
-    f && match($0, /`[^`]*`/) {
-      t = substr($0, RSTART + 1, RLENGTH - 2)
-      if (t != "") print t
-    }' "$1"
+# _plan_files_awk MODE: the `## Files` entry reader. A Files entry is a list item
+# or table row whose first backticked token follows its marker directly; prose
+# lines and prose before the token contribute nothing. MODE "lines" prints
+# "N<TAB>token" (N the plan line), any other MODE prints the token.
+_plan_files_awk='
+  /^## Files([[:space:]]|$)/ { f = 1; next }
+  f && /^## / { exit }
+  f && match($0, /^[[:space:]]*([-*]|\|)[[:space:]]+`[^`]*`/) {
+    t = substr($0, RSTART, RLENGTH); sub(/^[^`]*`/, "", t); sub(/`$/, "", t)
+    if (t == "") next
+    if (mode == "lines") print NR "\t" t; else print t
+  }'
+
+# plan_files_pathspecs PLAN: one path per line from the `## Files` entries. Blank
+# tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
+plan_files_pathspecs() { awk -v mode=paths "$_plan_files_awk" "$1"; }
+
+# plan_bare_dirs PLAN WORKTREE: one "Files line N: ..." line per entry whose path
+# has no slash and is a directory in WORKTREE: a git pathspec that covers the
+# whole tree. Names the plan line, so the planner sees which entry to fix.
+plan_bare_dirs() {
+  local n t
+  while IFS=$'\t' read -r n t; do
+    case "$t" in */*) continue ;; esac
+    [ -d "$2/$t" ] && printf 'Files line %s: `%s` is a bare directory, so it covers the whole tree\n' "$n" "$t"
+  done < <(awk -v mode=lines "$_plan_files_awk" "$1")
+  return 0
 }

@@ -195,6 +195,23 @@ setup_case prose-a
 printf 'Base: %s\n\n## Files\n\n- `f.txt` reads `g.txt` and `/reload`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
 run_plan verify
 expect_verdict "TKT tkt-plan STALE n=1 base=* log=*" "prose-a"
+# A prose line under ## Files names f.txt (changed on main) and `crates`: no pathspec from it, so not stale.
+setup_case prose-line
+printf 'Base: %s\n\n## Files\n\n- `g.txt`\nSweep run over `f.txt` and `crates`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+run_plan verify
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "prose-line"
+# Prose before a list item's first backticked token adds no pathspec: f.txt is not the path.
+setup_case prose-item
+printf 'Base: %s\n\n## Files\n\n- Sweep run over `f.txt`\n- `g.txt`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+run_plan verify
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "prose-item"
+# A list item whose path is a bare directory that changed on main: STALE names the Files line.
+setup_case bare-dir
+mkdir -p "$CDIR/wt/crates" && wcommit "$CDIR/wt" crates/c.txt "c1" && git -C "$CDIR/wt" update-ref refs/remotes/origin/main HEAD
+printf 'Base: %s\n\n## Files\n\n- `g.txt`\n- `crates`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+run_plan verify
+expect_verdict "TKT tkt-plan STALE n=1 base=* log=*" "bare-dir"
+grep -q 'Files line 6: `crates` is a bare directory' <<<"$OUT" || fail "bare-dir names the Files line"
 : >"$T/stub.log"
 
 # --- plan-check lines block the round ---
