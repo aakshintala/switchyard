@@ -195,6 +195,11 @@ setup_case prose-a
 printf 'Base: %s\n\n## Files\n\n- `f.txt` reads `g.txt` and `/reload`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
 run_plan verify
 expect_verdict "TKT tkt-plan STALE n=1 base=* log=*" "prose-a"
+# A prose line under ## Files names f.txt (changed on main) and `crates`: no pathspec from it, so not stale.
+setup_case prose-line
+printf 'Base: %s\n\n## Files\n\n- `g.txt`\nSweep run over `f.txt` and `crates`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+run_plan verify
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "prose-line"
 : >"$T/stub.log"
 
 # --- plan-check lines block the round ---

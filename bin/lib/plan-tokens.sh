@@ -191,13 +191,14 @@ covered() {
 }
 
 # plan_files_pathspecs PLAN: one path per line, the first backticked token of
-# each line in `## Files`. Later tokens on a line are prose, not pathspecs.
+# each list item or table row in `## Files`. Later tokens on a line are prose,
+# and a prose line (no leading `- `, `* ` or `| `) contributes nothing.
 # Blank tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
 plan_files_pathspecs() {
   awk '
     /^## Files([[:space:]]|$)/ { f = 1; next }
     f && /^## / { exit }
-    f && match($0, /`[^`]*`/) {
+    f && /^[[:space:]]*([-*] |\| )/ && match($0, /`[^`]*`/) {
       t = substr($0, RSTART + 1, RLENGTH - 2)
       if (t != "") print t
     }' "$1"
