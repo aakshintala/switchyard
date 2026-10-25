@@ -373,6 +373,21 @@ def recurred_after(lanes):
     return "main" in lanes or len(lanes) >= 2
 
 
+def issue_matches(key, title, body):
+    """An issue search matches the test name anywhere, even a passing
+    mention in another issue's body, so only link an issue whose title
+    names the test: the final "::" segment for the normal path, or, for a
+    flake issue under a Flaky title, the full name quoted after
+    "Full test name:" in the body."""
+    name = key.split()[-1]
+    final = name.split("::")[-1]
+    if final and final in (title or ""):
+        return True
+    if (title or "").startswith(("Flaky test: ", "Flaky: ")):
+        return "Full test name:" in (body or "") and name in (body or "")
+    return False
+
+
 def main(argv):
     repo = since = state_path = lanes = None
     want_json = False
@@ -555,8 +570,10 @@ def main(argv):
                 ok = False
                 continue
             items.sort(key=lambda it: it.get("updated_at") or "", reverse=True)
-            if items:
-                it = items[0]
+            kept = [it for it in items
+                    if issue_matches(key, it.get("title"), it.get("body"))]
+            if kept:
+                it = kept[0]
                 issues_st[key] = {"issue": it.get("number"), "issue_state": it.get("state"),
                                   "closed_at": it.get("closed_at"),
                                   "updated_at": it.get("updated_at"),

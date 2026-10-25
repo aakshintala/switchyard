@@ -630,4 +630,37 @@ run_friction --json
 [ "$(jget "d['repeats'][0]['issue']")" = "None" ] || fail "cousin names no ticket: [$OUT]"
 [ "$(jget "d['repeats'][0]['issue_state']")" = "None" ] || fail "cousin state null: [$OUT]"
 
+# --- #636: an issue whose title holds the final segment is still picked ---
+# the tui test's search returns the newer cousin #2876 first and the older
+# matching #2877 second: the kept first item, not the raw first, is linked
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) tui event_loop::resume_open_replays_the_log_to_the_tail\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) tui event_loop::resume_open_replays_the_log_to_the_tail\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/search/event-loop-resume-open-replays-the-log-to-the-tail.json" <<'EOF'
+{"total_count": 2, "items": [{"number": 2876, "state": "open", "title": "grace shutdown path flakes under load", "body": "Possible cousin: tui event_loop::resume_open_replays_the_log_to_the_tail hits the same path.", "closed_at": null, "updated_at": "2026-10-09T17:30:00Z"}, {"number": 2877, "state": "open", "title": "tui event_loop resume_open_replays_the_log_to_the_tail flakes on retry", "body": "Fails on ubuntu-24.04, passes on rerun.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+run_friction --json
+[ "$CODE" = "1" ] || fail "match-title exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "d['repeats'][0]['issue']")" = "2877" ] || fail "matching title picked: [$OUT]"
+[ "$(jget "d['repeats'][0]['issue_state']")" = "open" ] || fail "match state: [$OUT]"
+
+# --- #636: a Flaky-titled issue links only with Full test name in the body ---
+# doors::slow's Flaky issue quotes its full name after "Full test name:": a
+# ticket. doors::creak's Flaky issue names no full test name: no ticket.
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) fiber-core doors::slow\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::creak\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) fiber-core doors::slow\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::creak\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/search/doors-slow.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2878, "state": "open", "title": "Flaky: door suite flakes on macos", "body": "Full test name: doors::slow\nFails about one run in twenty.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+cat >"$TSCEN/search/doors-creak.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2879, "state": "open", "title": "Flaky: door suite flakes on macos arm", "body": "Same stack as #2878, also fails doors::creak sometimes.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+run_friction --json
+[ "$CODE" = "1" ] || fail "flaky-match exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "[(r['test'], r['issue']) for r in d['repeats']]")" = "[('fiber-core doors::creak', None), ('fiber-core doors::slow', 2878)]" ] \
+  || fail "flaky body rule: [$OUT]"
+
 echo "ci-friction: all cases passed"
