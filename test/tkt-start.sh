@@ -200,6 +200,7 @@ printf 'Work for #42.\n\nWritten against deadbeefdeadbeefdeadbeefdeadbeefdeadbee
 want "PREFLIGHT core=2 out=" 1 badsha
 case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badsha: digest misses the reason" ;; esac
 # core-count table: only the job output, want rc and want line differ.
+# Contract: bin/tkt-start header: a core/non-blocking line counts with '<n>.' or '-' then spaces and optional backtick/bold marks; a bare '*' never counts.
 for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out="; do
   IFS='|' read -r name rc want_line <<<"$spec"
   setup "$name" TWO FILING
