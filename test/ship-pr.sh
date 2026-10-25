@@ -885,6 +885,10 @@ setup
 echo changed >"$WT/feature.txt"; git -C "$WT" commit -qam "fix nit"; git -C "$WT" push -q origin feature
 ship; expect 4 "mismatch without --unverified-fixes exits 4"; no_merge "mismatch without the option"
 [ "$(comment_count)" -eq 0 ] || fail "no comment without the option"
+grep -q -- '--unverified-fixes' <<<"$ERR" || fail "exit-4 message names --unverified-fixes: [$ERR]"
+grep -q 'scoped verify' <<<"$ERR" || fail "exit-4 message names the scoped verify: [$ERR]"
+grep -q -- '--verify' <<<"$ERR" || fail "exit-4 message names --verify: [$ERR]"
+grep -q "$HEAD0" <<<"$ERR" || fail "exit-4 message keeps the reviewed sha: [$ERR]"
 
 # 3. a missing file, and an all-blank file: exit 2 before any gh call
 setup; run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$T/missing.txt"

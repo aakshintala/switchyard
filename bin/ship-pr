@@ -442,7 +442,7 @@ while :; do
 
   # Step 5: the patch under review is the patch about to merge (review-loop's Identity rule).
   if [ "$(patch_id "$reviewed")" != "$(patch_id "$pin")" ]; then
-    [ -n "$unverified" ] || die_after_ready 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict"
+    [ -n "$unverified" ] || die_after_ready 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict: when the findings were answered by a recorded ruling with no code change, rerun with --unverified-fixes <findings file>; otherwise run a scoped verify (review-pr run --verify <findings file> --since $reviewed)"
     if [ -z "$unverified_posted" ]; then
       post_unverified "$pin"
       unverified_posted=1
