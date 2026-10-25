@@ -63,16 +63,18 @@ case "\$cmd" in
     ;;
   resume)
     id="\${1:-}"; shift || true
-    prompt=""
+    prompt=""; gate=""
     while [ \$# -gt 0 ]; do
       case "\$1" in
         --prompt-file) prompt="\$2"; shift 2 ;;
+        --gate) gate="\$2"; shift 2 ;;
         *) shift ;;
       esac
     done
     n="\$((\$(cat "$T/counter") + 1))"
     printf '%s' "\$n" >"$T/counter"
     printf 'resume|id=%s|prompt=%s|new=stub-%s\n' "\$id" "\$prompt" "\$n" >>"\$log"
+    if [ -n "\$gate" ]; then printf 'resumegate=%s\n' "\$gate" >>"\$log"; fi
     printf 'stub-%s\n' "\$n"
     ;;
   watch)
@@ -959,5 +961,69 @@ make_record stub-1 DONE 0 1 2 0
 run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md"
 [ "$RC" -eq 0 ] || fail "resume exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "^wallMs=" "$T/stub.log" && fail "resume passes no wall cap"
+
+# --- --resume forwards a gate from the plan ---
+setup_case resume-gate-plan
+reset_stub
+make_record old-9 BLOCKED none 0 2 0 none stub-1
+make_record stub-1 DONE none 0 1 0
+printf 'plan=%s\n' "$T/plan.md" >>"$S"
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --gate-from-plan
+[ "$RC" -eq 0 ] || fail "resume with gate-from-plan exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" || fail "resume with gate calls delegate resume"
+grep -q "^resumegate=bash " "$T/stub.log" || fail "resume with gate-from-plan forwards a gate"
+gate_script="$(grep '^resumegate=' "$T/stub.log" | sed 's/^resumegate=bash //')"
+[ -f "$gate_script" ] || fail "resume gate script exists [$gate_script]"
+grep -q "true" "$gate_script" || fail "resume gate script holds the plan gate command"
+
+# --- --resume forwards an explicit gate ---
+setup_case resume-gate-explicit
+reset_stub
+make_record old-9 BLOCKED none 0 2 0 none stub-1
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --gate 'true'
+[ "$RC" -eq 0 ] || fail "resume with explicit gate exits 0"
+grep -qx "resumegate=true" "$T/stub.log" || fail "resume with --gate forwards it"
+
+# --- --resume without a gate flag forwards no gate ---
+setup_case resume-gate-none
+reset_stub
+make_record old-9 BLOCKED none 0 2 0 none stub-1
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md"
+[ "$RC" -eq 0 ] || fail "resume without gate exits 0"
+grep -q "^resumegate=" "$T/stub.log" && fail "resume without gate forwards no gate"
+
+# --- --resume with an empty gate inherits the stored gate ---
+setup_case resume-gate-empty
+reset_stub
+make_record old-9 BLOCKED none 0 2 0 none stub-1
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --gate ''
+[ "$RC" -eq 0 ] || fail "resume with empty gate exits 0"
+grep -q "^resumegate=" "$T/stub.log" && fail "resume with empty gate forwards no gate"
+
+# --- a fresh run with an empty gate sends no gate ---
+setup_case fresh-gate-empty
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md" --gate ''
+[ "$RC" -eq 0 ] || fail "fresh with empty gate exits 0"
+grep -q "|gate=|" "$T/stub.log" || fail "fresh with empty gate logs an empty gate"
+
+# --- --resume with --gate-from-plan and no plan names the key ---
+setup_case resume-gate-no-plan
+reset_stub
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --gate-from-plan
+[ "$RC" -eq 2 ] || fail "resume gate without plan exits 2"
+grep -q "missing key: plan" "$CDIR/stderr.txt" || fail "resume gate without plan names plan"
+grep -q "^resume|" "$T/stub.log" && fail "resume gate without plan dispatches nothing"
+
+# --- --gate with --gate-from-plan and --resume is still a usage error ---
+setup_case resume-both-gates
+reset_stub
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --gate true --gate-from-plan
+[ "$RC" -eq 2 ] || fail "resume with both gates exits 2"
+grep -q "^resume|" "$T/stub.log" && fail "both gates dispatch nothing"
 
 echo "tkt-job: all cases passed"
