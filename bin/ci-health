@@ -296,7 +296,7 @@ def main(argv):
     for r in runs:
         rid = str(r.get("id"))
         ent = runs_cache.get(rid) if isinstance(runs_cache.get(rid), dict) else None
-        if ent and ent.get("updated_at") == r.get("updated_at") and isinstance(ent.get("jobs"), list):
+        if ent and ent.get("completed") is True and ent.get("updated_at") == r.get("updated_at") and isinstance(ent.get("jobs"), list):
             jobs_by_run[rid] = ent["jobs"]
             continue
         try:
@@ -309,8 +309,10 @@ def main(argv):
                 jobs_by_run[rid] = []
             continue
         jobs_by_run[rid] = jobs
-        runs_cache[rid] = {"updated_at": r.get("updated_at"),
-                           "created_at": r.get("created_at"), "jobs": jobs}
+        if r.get("status") == "completed":
+            runs_cache[rid] = {"updated_at": r.get("updated_at"),
+                               "created_at": r.get("created_at"), "jobs": jobs,
+                               "completed": True}
 
     def queue_min(job):
         s = parse_ts(job.get("started_at"))
@@ -484,17 +486,21 @@ def main(argv):
         rid = str(r.get("id"))
         if rid not in jobs_by_run:
             ent = runs_cache.get(rid) if isinstance(runs_cache.get(rid), dict) else None
-            if ent and ent.get("updated_at") == r.get("updated_at"):
+            if ent and ent.get("completed") is True and ent.get("updated_at") == r.get("updated_at") and isinstance(ent.get("jobs"), list):
                 jobs_by_run[rid] = ent["jobs"]
             else:
                 try:
-                    jobs_by_run[rid] = gh.paged("repos/%s/actions/runs/%s/jobs" % (repo, rid), "jobs")
+                    jobs = gh.paged("repos/%s/actions/runs/%s/jobs" % (repo, rid), "jobs")
                 except subprocess.CalledProcessError:
                     gh.partial = True
                     jobs_by_run[rid] = ent["jobs"] if ent and isinstance(ent.get("jobs"), list) else []
-                runs_cache[rid] = {"updated_at": r.get("updated_at"),
-                                   "created_at": r.get("created_at"),
-                                   "jobs": jobs_by_run[rid]}
+                    continue
+                jobs_by_run[rid] = jobs
+                if r.get("status") == "completed":
+                    runs_cache[rid] = {"updated_at": r.get("updated_at"),
+                                       "created_at": r.get("created_at"),
+                                       "jobs": jobs,
+                                       "completed": True}
 
     def core_state(r):
         core = [j for j in jobs_by_run.get(str(r.get("id")), [])
