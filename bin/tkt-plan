@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # tkt-plan: planning steps 3-5, one Verifier round, post or plan-path set per call.
 set -euo pipefail
+# A verify after a recorded stale-plan revision is exempt from the round
+# limit; the exemption is derived from recorded state below.
 
 usage() {
-  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n' >&2
+  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n       tkt-plan <state> replan\n' >&2
   exit 2
 }
 
@@ -92,18 +94,44 @@ do_verify() {
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
   [ "$prc" -ne 1 ] || emit "PLAN-CHECK n=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n 38 <<<"$pc_out")"
   round="$(ronum)"
-  [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT round=$round confirm=done" 1 "the confirm round is used; send the open lines to triage"
-  [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan confirm --edits <file>, or send the open lines to triage"
+  # The drift exemption is derived from recorded state, not a caller flag: a
+  # verify is exempt only when a previous round recorded a base and main
+  # changed the plan Files between that base and the current one.
+  drift=0
+  vbase="$(t get verified_base 2>/dev/null || true)"
+  if [ -n "$vbase" ] && [ "${#files[@]}" -gt 0 ]; then
+    if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${files[@]}" 2>/dev/null)"; then
+      [ -n "$dstat" ] && drift=1 || drift=0
+    else
+      drift=0
+    fi
+  fi
+  if [ "$drift" -eq 0 ]; then
+    [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT round=$round confirm=done" 1 "the confirm round is used; send the open lines to triage"
+    [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan confirm --edits <file>, or send the open lines to triage"
+  fi
   model="$(vmodel "$model")" || exit 2
   args=(PLAN="$plan" BASE="$base" --model "$model")
   if [ -n "$extra" ]; then [ -r "$extra" ] || { echo "tkt-plan: cannot read extra file: $extra" >&2; exit 2; }; args+=(EXTRA="@$extra")
   elif ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
-  rep="$run/$namebase-verifier-out-r$((round + 1)).md"
+  if [ "$drift" -eq 1 ]; then
+    slot="verifier-r$((round + 1))-drift"
+    rep="$run/$namebase-verifier-out-r$((round + 1))-drift.md"
+  else
+    slot="verifier-r$((round + 1))"
+    rep="$run/$namebase-verifier-out-r$((round + 1)).md"
+  fi
   # A failed round leaves its job id behind while the round counter stays
   # put; without this reset the next verify would only re-watch the old job.
-  t set "job.verifier-r$((round + 1))" ""
-  runjob "verifier-r$((round + 1))" "$vbrief" "$rep" "${args[@]}"
-  t set verifier_round "$((round + 1))"
+  t set "job.$slot" ""
+  runjob "$slot" "$vbrief" "$rep" "${args[@]}"
+  # A verify that reaches a report records its base; a failed or asking job
+  # leaves the old base so the retry stays exempt. An exempt run never writes
+  # the round counters.
+  t set verified_base "$base"
+  if [ "$drift" -eq 0 ]; then
+    t set verifier_round "$((round + 1))"
+  fi
   emit "$RV" "$REC" "$(head -n 38 "$rep")"
 }
 
@@ -144,11 +172,28 @@ do_set() {
   t set plan "$plan"; t set pack "$pack"
   # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
   if [ "$old_plan" != "$plan" ]; then
-    t set verifier_round 0; t set confirmed_for ""
+    t set verifier_round 0; t set confirmed_for ""; t set verified_base ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
   fi
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
 }
 
+do_replan() {
+  [ $# -eq 0 ] || usage
+  # A re-plan has a plan, so a missing key is a usage error before any write.
+  plan_key="$(t get plan 2>/dev/null || true)"
+  if [ -z "$plan_key" ]; then echo "tkt-plan: missing key: plan" >&2; exit 2; fi
+  # Job slots and findings first, round last: a half-done replan leaves
+  # round non-empty and tkt-build refuses loudly instead of reusing a stale slot.
+  t set job.lane ""
+  t set job.fix1 ""
+  t set job.fix2 ""
+  t set job.fix3 ""
+  t set job.preflight ""
+  t set findings ""
+  t set round ""
+  emit "REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings" 0
+}
+
 case "$sub" in
-  verify) do_verify "$@";; confirm) do_confirm "$@";; post) do_post "$@";; set) do_set "$@";; *) usage;; esac
+  verify) do_verify "$@";; confirm) do_confirm "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac

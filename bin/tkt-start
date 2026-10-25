@@ -3,6 +3,7 @@
 # miss run plan-sweep plus the preflight job. Only a sweep rc 1 listing unresolved
 # tokens still preflights; any other sweep failure exits with its code. No --files
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
+# A preflight core/non-blocking line counts when it starts with '<n>.' or '-', then spaces, then optional backtick/bold marks; a bare '*' bullet never counts.
 # Usage: tkt-start --run DIR --repo R --issue N --spec PATH --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 set -euo pipefail
@@ -131,6 +132,6 @@ if [ "$jrc" -ne 0 ]; then
   esac
 fi
 [ -f "$out" ] || fail_step tkt-job 1 "no out file: $out"
-core="$(grep -cE '^[0-9]+\. *`?\**core\b' "$out" || true)"; nb="$(grep -cE '^[0-9]+\. *\**non-blocking\b' "$out" || true)"
+core="$(grep -cE '^([0-9]+\.|-) *`?\**core\b' "$out" || true)"; nb="$(grep -cE '^([0-9]+\.|-) *\**non-blocking\b' "$out" || true)"
 tkt journal "tkt-start preflight core=$core out=$out"; dg+=("sweep=$sweep_out" "out=$out"); report="$(head -n 30 "$out")"
 [ "$core" -eq 0 ] && emit "PREFLIGHT core=0 nonblocking=$nb out=$out" 0 "${dg[@]}" "$report" || emit "PREFLIGHT core=$core out=$out" 1 "${dg[@]}" "$report"

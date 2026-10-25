@@ -58,10 +58,10 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$slot" ] || usage
 # A prompt file only resumes; a resume needs its prompt and takes no fresh
-# brief or gate. The two gate sources never combine.
+# brief. A resume may carry a gate; the two gate sources never combine.
 { [ -z "$prompt" ] || [ -n "$resume" ]; } || usage
 { [ -z "$resume" ] || [ -n "$prompt" ]; } || usage
-{ [ -z "$resume" ] || { [ -z "$template" ] && [ -z "$brief" ] && [ -z "$gate" ] && [ "$gate_from_plan" -eq 0 ]; }; } || usage
+{ [ -z "$resume" ] || { [ -z "$template" ] && [ -z "$brief" ]; }; } || usage
 { [ "$gate_from_plan" -eq 0 ] || [ -z "$gate" ]; } || usage
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -132,6 +132,34 @@ fence_from_plan() {
     | grep -v '^$' || true
 }
 
+# build_gate_from_plan: set gate to 'bash <script>' from the plan Gate section.
+# The gate comes from the plan and is never invented: a missing plan or a
+# gateless plan names the key and the setter on one line.
+build_gate_from_plan() {
+  gate_cmd=""
+  plan="$(tkt get plan 2>/dev/null || true)"
+  if [ -z "$plan" ]; then
+    echo "tkt-job: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
+    exit 2
+  fi
+  gate_cmd="$("$plangate" "$plan" 2>&1)" || {
+    echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>: $gate_cmd" >&2
+    exit 2
+  }
+  # The gate script keeps the whole chain inside the redirected block and is
+  # judged by its exit code, never the log line (see bin/lib/gate-script.sh).
+  env_prefix=""
+  if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
+    env_prefix="$e "
+  fi
+  # One unique stem per call: two lanes of a ticket never share a script or log.
+  stem="$(mktemp "$run/$namebase-$slot-gate-XXXXXX")"
+  script="$stem.sh"
+  mv "$stem" "$script"
+  write_gate_script "$script" "$stem.log" "$env_prefix" "$gate_cmd" "tkt-job: delegate runs it as the job-end gate"
+  gate="bash $script"
+}
+
 stored="$(tkt get "job.$slot" 2>/dev/null || true)"
 fresh=0
 reused=0
@@ -142,7 +170,13 @@ if [ -n "$resume" ]; then
     echo "tkt-job: cannot read prompt: $prompt" >&2
     exit 2
   }
-  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" | head -n 1)"
+  if [ "$gate_from_plan" -eq 1 ]; then
+    build_gate_from_plan
+  fi
+  # An empty --gate is the same as no flag: the resume inherits the stored gate.
+  gate_args=()
+  if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
+  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
   tkt set "job.$slot" "$jobid"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"
   fresh=1
@@ -153,19 +187,10 @@ elif [ -n "$stored" ]; then
 else
   { [ -n "$template" ] || [ -n "$brief" ]; } || usage
   { [ -z "$template" ] || [ -z "$brief" ]; } || usage
-  # The gate comes from the plan's Gate section and is never invented: a
-  # missing plan or a gateless plan names the key and the setter on one line.
-  gate_cmd=""
+  # The gate comes from the plan before any brief is filled, so a missing
+  # plan or gateless plan reports in one line without a brief on disk.
   if [ "$gate_from_plan" -eq 1 ]; then
-    plan="$(tkt get plan 2>/dev/null || true)"
-    if [ -z "$plan" ]; then
-      echo "tkt-job: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
-      exit 2
-    fi
-    gate_cmd="$("$plangate" "$plan" 2>&1)" || {
-      echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>: $gate_cmd" >&2
-      exit 2
-    }
+    build_gate_from_plan
   fi
   if [ -n "$template" ]; then
     [ -r "$template" ] || {
@@ -232,20 +257,6 @@ else
       echo "tkt-job: cannot read brief: $brief" >&2
       exit 2
     }
-  fi
-  if [ "$gate_from_plan" -eq 1 ]; then
-    # The gate script keeps the whole chain inside the redirected block and is
-    # judged by its exit code, never the log line (see bin/lib/gate-script.sh).
-    env_prefix=""
-    if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
-      env_prefix="$e "
-    fi
-    # One unique stem per call: two lanes of a ticket never share a script or log.
-    stem="$(mktemp "$run/$namebase-$slot-gate-XXXXXX")"
-    script="$stem.sh"
-    mv "$stem" "$script"
-    write_gate_script "$script" "$stem.log" "$env_prefix" "$gate_cmd" "tkt-job: delegate runs it as the job-end gate"
-    gate="bash $script"
   fi
   if [ -z "$model" ]; then
     model="$(tkt get "model.$slot" 2>/dev/null)" || {

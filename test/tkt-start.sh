@@ -200,16 +200,20 @@ printf 'Work for #42.\n\nWritten against deadbeefdeadbeefdeadbeefdeadbeefdeadbee
 want "PREFLIGHT core=2 out=" 1 badsha
 case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badsha: digest misses the reason" ;; esac
 # core-count table: only the job output, want rc and want line differ.
-for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out="; do
+# Contract: bin/tkt-start header: a core/non-blocking line counts with '<n>.' or '-' then spaces and optional backtick/bold marks; a bare '*' never counts.
+for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out="; do
   IFS='|' read -r name rc want_line <<<"$spec"
   setup "$name" TWO FILING
   case "$name" in
     zerocore) printf '1. non-blocking -- one\n2. non-blocking -- two\n3. non-blocking -- three\n' >"$T/jobout" ;;
     backtick) printf '1. `core` — first\n2. plain note\n' >"$T/jobout" ;;
+    dashcore) printf -- '- core -- first\n- **core** -- second\n' >"$T/jobout" ;;
+    dashnb) printf -- '- non-blocking -- a\n' >"$T/jobout" ;;
+    starbare) printf '**core** -- x\n' >"$T/jobout" ;;
   esac
   run_start
   want "$want_line" "$rc" "$name"
-  if [ "$name" = twocore ]; then case "$OUT" in *"nonblocking="*) fail "twocore: nonzero core must not carry nonblocking" ;; esac; fi
+  if [ "$name" = twocore ] || [ "$name" = dashcore ]; then case "$OUT" in *"nonblocking="*) fail "$name: nonzero core must not carry nonblocking" ;; esac; fi
 done
 # stale with no --files: the sweep is skipped, the preflight still runs.
 setup nofiles TWO FILING

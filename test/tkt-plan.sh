@@ -482,4 +482,179 @@ run_plan verify
 expect_verdict "TKT tkt-plan BLOCKED id=j1 log=*" "BLOCKED verify"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round 2>/dev/null)" != "1" ] || fail "BLOCKED verify must not count the round"
 
+# --- replan clears the stale slots, keeping verifier counts ---
+setup_case replan
+bash "$TKT_STATE" "$S" set round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set job.lane j-lane || fail "seed lane"
+bash "$TKT_STATE" "$S" set job.fix1 j-fix1 || fail "seed fix1"
+bash "$TKT_STATE" "$S" set job.fix2 j-fix2 || fail "seed fix2"
+bash "$TKT_STATE" "$S" set job.fix3 j-fix3 || fail "seed fix3"
+bash "$TKT_STATE" "$S" set job.preflight j-pre || fail "seed preflight"
+bash "$TKT_STATE" "$S" set findings /tmp/old-findings.md || fail "seed findings"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed verifier_round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirmed_for"
+bash "$TKT_STATE" "$S" set job.verifier-r1 j-v1 || fail "seed verifier job"
+run_plan replan
+[ "$RC" -eq 0 ] || fail "replan exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings log=*" "replan"
+[ -z "$(bash "$TKT_STATE" "$S" get round 2>/dev/null || true)" ] || fail "replan clears round"
+[ -z "$(bash "$TKT_STATE" "$S" get job.lane 2>/dev/null || true)" ] || fail "replan clears job.lane"
+[ -z "$(bash "$TKT_STATE" "$S" get job.fix1 2>/dev/null || true)" ] || fail "replan clears job.fix1"
+[ -z "$(bash "$TKT_STATE" "$S" get job.fix2 2>/dev/null || true)" ] || fail "replan clears job.fix2"
+[ -z "$(bash "$TKT_STATE" "$S" get job.fix3 2>/dev/null || true)" ] || fail "replan clears job.fix3"
+[ -z "$(bash "$TKT_STATE" "$S" get job.preflight 2>/dev/null || true)" ] || fail "replan clears job.preflight"
+[ -z "$(bash "$TKT_STATE" "$S" get findings 2>/dev/null || true)" ] || fail "replan clears findings"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "replan keeps verifier_round"
+[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "replan keeps confirmed_for"
+[ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-v1" ] || fail "replan keeps verifier jobs"
+run_plan replan
+[ "$RC" -eq 0 ] || fail "replan twice exits 0"
+run_plan replan extra
+[ "$RC" -eq 2 ] || fail "replan with an argument exits 2"
+setup_case replan-noplan
+bash "$TKT_STATE" "$S" set job.lane j-keep || fail "seed lane"
+bash "$TKT_STATE" "$S" set round 2 || fail "seed round"
+grep -v '^plan=' "$S" >"$CDIR/noplan.state"
+S="$CDIR/noplan.state"
+run_plan replan
+[ "$RC" -eq 2 ] || fail "replan without plan exits 2"
+grep -q "missing key: plan" "$CDIR/stderr.txt" || fail "replan without plan names plan"
+[ "$(bash "$TKT_STATE" "$S" get job.lane)" = "j-keep" ] || fail "replan without plan leaves lane untouched"
+
+# --- drift exemption from the recorded verified_base ---
+setup_case drift-a
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-a exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "drift-a counts round 1"
+[ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$(cat "$CDIR/base")" ] || fail "drift-a records verified_base"
+
+setup_case drift-b
+rebase_plan
+A="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "seed verified_base"
+wcommit "$WT" f.txt v3
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+rebase_plan
+B="$(cat "$CDIR/base")"
+[ "$A" != "$B" ] || fail "drift-b needs a new base"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-b exempt exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "drift-b"
+grep -q "slot=verifier-r3-drift" "$T/stub.log" || fail "drift-b uses the drift slot"
+grep -q "verifier-out-r3-drift.md" "$T/stub.log" || fail "drift-b writes the drift report"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-b leaves verifier_round"
+[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "drift-b leaves confirmed_for"
+[ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$B" ] || fail "drift-b updates verified_base"
+# Contract: skills/planning/SKILL.md step 3: an exempt verify dispatches one drift job.
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "drift-b starts one job"
+jobs_drift="$(grep -c '^job|' "$T/stub.log")"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "drift-d spent exemption exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-d spent"
+# Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_drift" ] || fail "drift-d starts no job"
+
+setup_case drift-c
+rebase_plan
+A="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "seed verified_base"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "drift-c exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-c no change"
+# Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "drift-c starts no job"
+
+setup_case drift-c2
+rebase_plan
+A="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "seed verified_base"
+wcommit "$WT" g.txt other
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+rebase_plan
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "drift-c2 exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "drift-c2 same-Files edit"
+# Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "drift-c2 starts no job"
+
+setup_case drift-e
+rebase_plan
+A="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "seed verified_base"
+wcommit "$WT" f.txt v3
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+rebase_plan
+B="$(cat "$CDIR/base")"
+printf 'ask' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "drift-e ask exits 1"
+expect_verdict "TKT tkt-plan ASK id=j1 log=*" "drift-e ask"
+[ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$A" ] || fail "drift-e leaves verified_base"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-e leaves verifier_round"
+[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "drift-e leaves confirmed_for"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-e retry exits 0"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "drift-e retry exempt"
+grep -q "slot=verifier-r3-drift" "$T/stub.log" || fail "drift-e retry uses the drift slot"
+
+setup_case drift-f
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 1 || fail "seed round 1"
+wcommit "$WT" f.txt v3
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+rebase_plan
+B="$(cat "$CDIR/base")"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-f exits 0"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-f counts the round"
+grep -q "slot=verifier-r2" "$T/stub.log" || fail "drift-f uses the counted slot"
+grep -q "slot=verifier-r2-drift" "$T/stub.log" && fail "drift-f must not use the drift slot"
+[ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$B" ] || fail "drift-f records verified_base"
+
+setup_case drift-err
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+bash "$TKT_STATE" "$S" set verified_base deadbeefdeadbeefdeadbeefdeadbeefdeadbeef || fail "seed bogus base"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "drift-err exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-err git error"
+# Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "drift-err starts no job"
+
+setup_case drift-g
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+VBASE="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verified_base "$VBASE" || fail "seed verified_base"
+run_plan set "$CDIR/plan.md"
+[ "$RC" -eq 0 ] || fail "drift-g same-path set exits 0"
+[ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$VBASE" ] || fail "drift-g same-path keeps verified_base"
+printf '# another plan\n' >"$CDIR/other2.md"
+{
+  printf 'Base: %s\n' "$VBASE"
+  printf '\n## Files\n\n- `f.txt`\n'
+} >"$CDIR/other2.md"
+run_plan set "$CDIR/other2.md"
+[ "$RC" -eq 0 ] || fail "drift-g new-path set exits 0"
+[ -z "$(bash "$TKT_STATE" "$S" get verified_base 2>/dev/null || true)" ] || fail "drift-g new-path clears verified_base"
+
 echo "tkt-plan: all cases passed"
