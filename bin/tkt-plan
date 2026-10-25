@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n' >&2
+  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n       tkt-plan <state> replan\n' >&2
   exit 2
 }
 
@@ -150,5 +150,22 @@ do_set() {
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
 }
 
+do_replan() {
+  [ $# -eq 0 ] || usage
+  # A re-plan has a plan, so a missing key is a usage error before any write.
+  plan_key="$(t get plan 2>/dev/null || true)"
+  if [ -z "$plan_key" ]; then echo "tkt-plan: missing key: plan" >&2; exit 2; fi
+  # Job slots and findings first, round last: a half-done replan leaves
+  # round non-empty and tkt-build refuses loudly instead of reusing a stale slot.
+  t set job.lane ""
+  t set job.fix1 ""
+  t set job.fix2 ""
+  t set job.fix3 ""
+  t set job.preflight ""
+  t set findings ""
+  t set round ""
+  emit "REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings" 0
+}
+
 case "$sub" in
-  verify) do_verify "$@";; confirm) do_confirm "$@";; post) do_post "$@";; set) do_set "$@";; *) usage;; esac
+  verify) do_verify "$@";; confirm) do_confirm "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac
