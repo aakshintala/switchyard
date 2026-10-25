@@ -563,6 +563,7 @@ def main(argv):
     # fetch each linked issue once and drop the entry when its title no
     # longer names the test; the lookup below then searches the test again.
     if st.get("issue_match_version") != ISSUE_MATCH_VERSION:
+        cached_links_checked = True
         for key, ent in list(issues_st.items()):
             if not isinstance(ent, dict) or not ent.get("issue"):
                 continue
@@ -571,10 +572,12 @@ def main(argv):
             except Fatal as e:
                 print("ci-friction: %s" % e, file=sys.stderr)
                 ok = False
+                cached_links_checked = False
                 continue
             if not issue_matches(key, it.get("title"), it.get("body")):
                 del issues_st[key]
-        st["issue_match_version"] = ISSUE_MATCH_VERSION
+        if cached_links_checked:
+            st["issue_match_version"] = ISSUE_MATCH_VERSION
 
     # issue lookup per new test name; re-read cached open issues sighted again.
     # A no-issue entry is searched again once its searched_at is over 6 h old.
