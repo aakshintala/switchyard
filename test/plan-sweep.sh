@@ -259,7 +259,7 @@ EOF
 run --cwd "$R" --base "$BASE" --plan "$T/plan-m-a.md" --out "$T/pack-m-a.md"
 [ "$code" = 0 ] || fail "m: marked Tasks symbol exits 0, got $code [$out]"
 # Contract: skills/planning/SKILL.md:70 says unresolved new-marked symbols are omitted from the pack.
-[ "$(grep -c 'Task_Only' "$T/pack-m-a.md")" = 0 ] || fail "m: marked token left out of the pack"
+! grep -q 'Task_Only' "$T/pack-m-a.md" || fail "m: marked token left out of the pack"
 cat >"$T/plan-m-b.md" <<EOF
 # Plan
 Base: $BASE
