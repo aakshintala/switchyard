@@ -79,6 +79,16 @@ case "\$cmd" in
     printf 'run %s %s\n' "\$model" "\$cwd" >>"\$FAKE_LOGDIR/calls.log"
     case "\$model" in
       fiber/*)
+        printf '%s\n' "\${FIBER_HOME:-UNSET}" >>"\$FAKE_LOGDIR/fiber-home.log"
+        if [ -n "\${FAKE_RESOLVE_HOME:-}" ]; then
+          case "\${FIBER_HOME:-}" in
+            /*) printf '%s\n' "\$FIBER_HOME" >>"\$FAKE_LOGDIR/fiber-home-resolved.log" ;;
+            *) printf '%s\n' "\$(cd "\$cwd" && pwd)/\${FIBER_HOME:-UNSET}" >>"\$FAKE_LOGDIR/fiber-home-resolved.log" ;;
+          esac
+        fi ;;
+    esac
+    case "\$model" in
+      fiber/*)
         if [ "\${CANARY_FAKE_FAIL:-}" = "fiber" ]; then exit 1; fi ;;
     esac
     id="job-\$\$-\$RANDOM"
@@ -819,3 +829,48 @@ jq 'del(.status)' "$OUT/pi/job.json" >"$REPN/pi/job.json"
 report_unchanged "$REPN" nostatus-job
 
 echo "report cases passed"
+
+# --- Fiber home isolation (#626): canary.sh run exports FIBER_HOME under
+# its out dir, so the Fiber lane never sees the caller's home. The fake
+# delegate logs the FIBER_HOME each fiber run inherits (the fiber/* branch
+# of fake run above). The run below passes a decoy home, and the case
+# asserts the lane saw <out>/fiber-home instead, that the directory exists,
+# and that the real $HOME/.fiber was neither created nor changed.
+: >"$FLOG/fiber-home.log"
+OUTFH="$T/out-fiber-home"
+if [ -e "$HOME/.fiber" ]; then
+  FIBER_REAL_BEFORE="$(find "$HOME/.fiber" | sort)"
+else
+  FIBER_REAL_BEFORE="absent"
+fi
+FIBER_HOME="$T/decoy-fiber" FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 242 "$T/brief.md" \
+  --gate 'test -f work-marker' --out "$OUTFH" || fail "fiber-home run exits 0"
+[ "$(cat "$FLOG/fiber-home.log")" = "$OUTFH/fiber-home" ] || fail "fiber lane saw the isolated home ($OUTFH/fiber-home)"
+[ -d "$OUTFH/fiber-home" ] || fail "isolated fiber home exists"
+if [ -e "$HOME/.fiber" ]; then
+  FIBER_REAL_AFTER="$(find "$HOME/.fiber" | sort)"
+else
+  FIBER_REAL_AFTER="absent"
+fi
+[ "$FIBER_REAL_AFTER" = "$FIBER_REAL_BEFORE" ] || fail "real fiber home untouched"
+bash "$CANARY" clean 242 --out "$OUTFH" || fail "clean 242 exits 0"
+
+echo "fiber home cases passed"
+
+# --- Relative --out (#626 fix round): a relative --out still gives the
+# Fiber lane and the metrics one absolute home. The run starts in a
+# different cwd with --out as a bare directory name; the fake resolves the
+# inherited FIBER_HOME against the lane worktree it is given, the way Fiber
+# would from the lane cwd. The case asserts the lane's resolved home equals
+# the out dir resolved from the starting cwd, and that the metrics read the
+# same ev2 events through it.
+: >"$FLOG/fiber-home-resolved.log"
+mkdir -p "$T/relcwd"
+( cd "$T/relcwd" && FAKE_RESOLVE_HOME=1 FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 243 "$T/brief.md" \
+  --gate 'test -f work-marker' --out "out-rel" ) || fail "relative-out run exits 0"
+ABSREL="$(cd "$T/relcwd/out-rel" && pwd)"
+[ "$(cat "$FLOG/fiber-home-resolved.log")" = "$ABSREL/fiber-home" ] || fail "lane and metrics share one absolute home ($ABSREL/fiber-home)"
+[ "$(jq -r .cost.main "$ABSREL/fiber/metrics.json")" = "0.875" ] || fail "relative-out metrics read the isolated ev2 events"
+bash "$CANARY" clean 243 --out "$ABSREL" || fail "clean 243 exits 0"
+
+echo "relative out cases passed"
