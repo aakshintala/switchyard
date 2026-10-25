@@ -6,6 +6,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod support;
+
 const ITERATIONS: usize = 400;
 const FORKERS: usize = 16;
 
@@ -19,6 +21,7 @@ fn fake_script_exec_survives_concurrent_spawns() {
             let stop = stop.clone();
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
+                    let _guard = support::exec_lock();
                     let _ = Command::new("true").status();
                 }
             })
@@ -26,6 +29,7 @@ fn fake_script_exec_survives_concurrent_spawns() {
         .collect();
     let mut failure = None;
     for i in 0..ITERATIONS {
+        let _guard = support::exec_lock();
         let fake = dir.join(format!("fake-{i}"));
         std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
