@@ -553,11 +553,13 @@ grep -q "verifier-out-r3-drift.md" "$T/stub.log" || fail "drift-b writes the dri
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-b leaves verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "drift-b leaves confirmed_for"
 [ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$B" ] || fail "drift-b updates verified_base"
+# Contract: skills/planning/SKILL.md step 3: an exempt verify dispatches one drift job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "drift-b starts one job"
 jobs_drift="$(grep -c '^job|' "$T/stub.log")"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "drift-d spent exemption exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-d spent"
+# Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_drift" ] || fail "drift-d starts no job"
 
 setup_case drift-c
@@ -571,6 +573,7 @@ jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "drift-c exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-c no change"
+# Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "drift-c starts no job"
 
 setup_case drift-c2
@@ -586,6 +589,7 @@ jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "drift-c2 exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "drift-c2 same-Files edit"
+# Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "drift-c2 starts no job"
 
 setup_case drift-e
@@ -636,6 +640,7 @@ jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "drift-err exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-err git error"
+# Contract: skills/planning/SKILL.md step 3: a ROUND-LIMIT verify dispatches no job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "drift-err starts no job"
 
 setup_case drift-g
