@@ -1,3 +1,5 @@
+mod support;
+
 use delegate::session::{
     inbox, ipc,
     state::{self, DeadReason, Paths, State, Status},
@@ -90,10 +92,7 @@ impl Session {
         );
         let paths = Paths::new(root.clone());
         state::create_session_dir(&paths, &id).unwrap();
-        let cwd = std::env::current_dir()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let cwd = root.to_string_lossy().into_owned();
         let inbox_text = inbox
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -112,37 +111,12 @@ impl Session {
 
         let fake_dir = root.join("fake");
         std::fs::create_dir_all(&fake_dir).unwrap();
-        let fake = fake_dir.join("muse_host_fake.py");
-        let source = include_str!("support/muse_host_fake.py");
-        let (shebang, body) = source.split_once('\n').unwrap();
-        let fake_dir_literal =
-            serde_json::to_string(&fake_dir.to_string_lossy().to_string()).unwrap();
-        let scenario_literal = serde_json::to_string(scenario).unwrap();
-        let configured = format!(
-            "{shebang}\nimport os\nos.environ.setdefault('FAKE_DIR', {fake_dir_literal})\nos.environ.setdefault('FAKE_SCENARIO', {scenario_literal})\n{body}"
-        );
-        std::fs::write(&fake, configured).unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // macOS scans a newly executable /tmp script on first launch; keep that outside the 300 ms RPC budget.
-        let warm_dir = root.join("fake-warmup");
-        let warm_status = std::process::Command::new(&fake)
-            .args([
-                "serve",
-                "--provider",
-                "meta",
-                "--model",
-                "warmup",
-                "--disable-sandbox",
-            ])
-            .env("FAKE_DIR", &warm_dir)
-            .env("FAKE_SCENARIO", "FAST")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(warm_status.success());
-        std::fs::remove_dir_all(warm_dir).unwrap();
+        let fake = support::muse_host_fake();
+        std::fs::write(
+            root.join("fake-config.json"),
+            serde_json::to_string(&json!({"fakeDir": fake_dir, "scenario": scenario})).unwrap(),
+        )
+        .unwrap();
 
         if let Some(mode) = panic_mode {
             unsafe {
@@ -318,7 +292,10 @@ fn ipc_request_reports_a_stale_socket_as_unreachable() {
         Duration::from_millis(100),
     );
 
-    assert!(matches!(result, Err(ipc::IpcError::Unreachable(_))));
+    assert!(
+        matches!(result, Err(ipc::IpcError::Unreachable(_))),
+        "{result:?}"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -426,10 +403,7 @@ fn supervisor_starts_the_host_with_the_brief_and_expected_permissions() {
     assert!(current.supervisor_pid.is_some());
     let host_pid = current.host_pid.unwrap();
     assert!(host_pid > 1);
-    assert_eq!(
-        current.cwd,
-        std::env::current_dir().unwrap().to_string_lossy()
-    );
+    assert_eq!(current.cwd, session.root.to_string_lossy());
 
     let requests = session.requests();
     let start = requests
@@ -965,10 +939,10 @@ fn muse_host_fake_consumes_a_turn_start_buffered_after_host_refusal() {
     let root = temp_root("ds-coalesced-host-frames");
     let fake_dir = root.join("fake");
     std::fs::create_dir_all(&fake_dir).unwrap();
-    let fake = root.join("muse_host_fake.py");
-    std::fs::write(&fake, include_str!("support/muse_host_fake.py")).unwrap();
+    let fake = support::muse_host_fake();
 
-    let mut child = std::process::Command::new("python3")
+    let exec_guard = support::exec_lock();
+    let child = std::process::Command::new("python3")
         .arg("-S")
         .arg(&fake)
         .args([
@@ -983,8 +957,9 @@ fn muse_host_fake_consumes_a_turn_start_buffered_after_host_refusal() {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+        .spawn();
+    drop(exec_guard);
+    let mut child = child.unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (output_tx, output_rx) = mpsc::channel();
