@@ -365,6 +365,7 @@ mod tests {
 
     #[test]
     fn env_used_when_no_override() {
+        let _env = crate::test_env::lock();
         let prev = std::env::var("PI_BIN").ok();
         unsafe { std::env::set_var("PI_BIN", "/env/pi") };
         assert_eq!(resolve_bin(None), "/env/pi");

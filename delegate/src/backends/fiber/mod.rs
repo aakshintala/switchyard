@@ -617,6 +617,7 @@ mod tests {
 
     #[test]
     fn env_used_when_no_override() {
+        let _env = crate::test_env::lock();
         let prev = std::env::var("FIBER_BIN").ok();
         unsafe { std::env::set_var("FIBER_BIN", "/env/fiber") };
         assert_eq!(resolve_bin(None), "/env/fiber");

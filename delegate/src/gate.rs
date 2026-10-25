@@ -391,6 +391,9 @@ mod tests {
 
     #[test]
     fn gate_output_file_keeps_every_line_and_strips_ansi() {
+        // Reads the job-dir path, which follows process-global env: hold the
+        // shared #681 lock so a concurrent env mutation cannot move it.
+        let _env = crate::test_env::lock();
         let job_id = crate::util::random_uuid();
         let r = run_gate_for_job(
             r#"seq 1 4000; printf '\033[31mansi\033[0m\n'"#,
@@ -413,6 +416,8 @@ mod tests {
 
     #[test]
     fn gate_runs_for_one_job_keep_separate_files() {
+        // Same job-dir env dependence as the test above (#681).
+        let _env = crate::test_env::lock();
         let job_id = crate::util::random_uuid();
         let cwd = std::env::current_dir().unwrap();
         let cwd = cwd.to_string_lossy();
