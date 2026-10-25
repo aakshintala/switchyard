@@ -131,6 +131,6 @@ if [ "$jrc" -ne 0 ]; then
   esac
 fi
 [ -f "$out" ] || fail_step tkt-job 1 "no out file: $out"
-core="$(grep -cE '^[0-9]+\. *`?\**core\b' "$out" || true)"; nb="$(grep -cE '^[0-9]+\. *\**non-blocking\b' "$out" || true)"
+core="$(grep -cE '^([0-9]+\.|-) *`?\**core\b' "$out" || true)"; nb="$(grep -cE '^([0-9]+\.|-) *\**non-blocking\b' "$out" || true)"
 tkt journal "tkt-start preflight core=$core out=$out"; dg+=("sweep=$sweep_out" "out=$out"); report="$(head -n 30 "$out")"
 [ "$core" -eq 0 ] && emit "PREFLIGHT core=0 nonblocking=$nb out=$out" 0 "${dg[@]}" "$report" || emit "PREFLIGHT core=$core out=$out" 1 "${dg[@]}" "$report"
