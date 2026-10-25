@@ -78,6 +78,32 @@ runjob() {
   [ "$(head -n 1 "$rep")" = "PLAN OK" ] && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES n=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
 }
 
+# plan_task_pathspecs PLAN: one path per line from the backticked tokens on
+# ## Tasks lines that name a path (a slash or a known extension, per
+# is_path). A trailing :lines port or ::symbol is stripped, so
+# `src/a.rs:1-2` names src/a.rs. A task path outside Files is still
+# listed; fenced code blocks hold examples, not tasks.
+plan_task_pathspecs() {
+  local tok
+  while IFS= read -r tok; do
+    [ -n "$tok" ] || continue
+    if [[ $tok =~ $portre ]]; then tok="${tok%"${BASH_REMATCH[0]}"}"; fi
+    case "$tok" in *::*) tok="${tok%%::*}" ;; esac
+    [ -n "$tok" ] || continue
+    if is_path "$tok"; then printf '%s\n' "$tok"; fi
+  done < <(awk '
+    /^[[:space:]]*```/ { infence = !infence; next }
+    infence { next }
+    /^## Tasks([[:space:]]|$)/ { t = 1; next }
+    /^## / { if (t) exit; next }
+    t {
+      n = split($0, parts, "`")
+      for (i = 2; i <= n; i += 2)
+        if (parts[i] != "") print parts[i]
+    }' "$1")
+  return 0
+}
+
 do_verify() {
   extra=""; model=""
   while [ $# -gt 0 ]; do case "$1" in
@@ -96,14 +122,19 @@ do_verify() {
   round="$(ronum)"
   # The drift exemption is derived from recorded state, not a caller flag: a
   # verify is exempt only when a previous round recorded a base and main
-  # changed the plan Files between that base and the current one.
+  # changed a task path between that base and the current one. A Files
+  # change no task names is not drift, so the round limit applies.
   drift=0
   vbase="$(t get verified_base 2>/dev/null || true)"
-  if [ -n "$vbase" ] && [ "${#files[@]}" -gt 0 ]; then
-    if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${files[@]}" 2>/dev/null)"; then
-      [ -n "$dstat" ] && drift=1 || drift=0
-    else
-      drift=0
+  if [ -n "$vbase" ]; then
+    tpaths=()
+    while IFS= read -r p; do tpaths+=("$p"); done < <(plan_task_pathspecs "$plan")
+    if [ "${#tpaths[@]}" -gt 0 ]; then
+      if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${tpaths[@]}" 2>/dev/null)"; then
+        [ -n "$dstat" ] && drift=1 || drift=0
+      else
+        drift=0
+      fi
     fi
   fi
   if [ "$drift" -eq 0 ]; then
