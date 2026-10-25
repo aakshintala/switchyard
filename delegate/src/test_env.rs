@@ -108,7 +108,9 @@ mod tests {
             done_tx.send(()).unwrap();
             // Keep "b" set until the test has checked A's view, so B's own
             // restore on drop cannot hide the overwrite.
-            release_rx.recv_timeout(WAIT).expect("test never released B");
+            release_rx
+                .recv_timeout(WAIT)
+                .expect("test never released B");
         });
 
         done_rx.recv_timeout(WAIT * 2).expect("B never finished");
