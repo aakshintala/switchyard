@@ -140,6 +140,9 @@ flake_scen() { # flake_scen <scenario>: writable copy of a fixture scenario for 
 jget() {
   python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print('"$1"')' "$OUT"
 }
+repeat_value() {
+  python3 -c 'import json,sys; print(next((r.get(sys.argv[2]) for r in json.loads(sys.argv[1])["repeats"] if r["test"] == sys.argv[3]), None))' "$OUT" "$2" "$1"
+}
 
 # --- classifier: every class from one log fixture each ---
 setup classes
@@ -306,6 +309,13 @@ grep -q "compare/" "$FAKE_GH_LOG" && fail "no closer: no compare: [$(cat "$FAKE_
 
 # --- 224: a null cached by an older version is looked up again ---
 setup fixcommit
+# the one-time title re-check fetches every cached link, so the fake serves
+# the linked issue with a matching title: the entry is kept, as before
+flake_scen fixcommit
+mkdir -p "$TSCEN/issues"
+cat >"$TSCEN/issues/1470.json" <<'EOF'
+{"number": 1470, "state": "closed", "title": "fiber-core doors::watch is flaky", "closed_at": "2026-10-09T10:00:00Z", "updated_at": "2026-10-09T10:00:00Z"}
+EOF
 mkdir -p "$HOME/.cache/switchyard"
 python3 -c "import json; json.dump({'jobs': {}, 'issues': {'fiber-core doors::watch': {'issue': 1470, 'issue_state': 'closed', 'closed_at': '2026-10-09T10:00:00Z', 'updated_at': '2026-10-09T10:00:00Z', 'fix_commit': None}}, 'branches': {}}, open('$HOME/.cache/switchyard/ci-friction.json', 'w'))"
 run_friction --min-lanes 1 --json
@@ -610,5 +620,114 @@ python3 -c "import json; json.dump({'key_version': 2, 'jobs': {'750': {'class': 
 run_friction --json
 [ "$CODE" = "0" ] || fail "release-stale exits 0 (got $CODE): [$OUT]"
 [ "$(release_class)" = "cancelled" ] || fail "cached timeout reclassified: [$(release_class)]"
+
+# --- #636: an issue that names the test only as a cousin is not its ticket ---
+# the lua test's search returns one open issue whose title is a tui test and
+# whose body names the lua test once as a cousin: the test links no ticket
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/search/a-stuck-provider-load-abandons-its-mixed-extension-after-grace.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2876, "state": "open", "title": "tui event_loop resume_open_replays_the_log_to_the_tail", "body": "Possible cousin: extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace hits the same grace path.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+run_friction --json
+[ "$CODE" = "1" ] || fail "cousin exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(repeat_value "extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace" test)" = "extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace" ] \
+  || fail "cousin test: [$OUT]"
+[ "$(repeat_value "extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace" issue)" = "None" ] \
+  || fail "cousin names no ticket: [$OUT]"
+[ "$(repeat_value "extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace" issue_state)" = "None" ] \
+  || fail "cousin state null: [$OUT]"
+
+# --- #636: an issue whose title holds the final segment is still picked ---
+# the tui test's search returns the newer cousin #2876 first and the older
+# matching #2877 second: the kept first item, not the raw first, is linked
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) tui event_loop::resume_open_replays_the_log_to_the_tail\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) tui event_loop::resume_open_replays_the_log_to_the_tail\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/search/event-loop-resume-open-replays-the-log-to-the-tail.json" <<'EOF'
+{"total_count": 2, "items": [{"number": 2876, "state": "open", "title": "grace shutdown path flakes under load", "body": "Possible cousin: tui event_loop::resume_open_replays_the_log_to_the_tail hits the same path.", "closed_at": null, "updated_at": "2026-10-09T17:30:00Z"}, {"number": 2877, "state": "open", "title": "tui event_loop resume_open_replays_the_log_to_the_tail flakes on retry", "body": "Fails on ubuntu-24.04, passes on rerun.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+run_friction --json
+[ "$CODE" = "1" ] || fail "match-title exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(repeat_value "tui event_loop::resume_open_replays_the_log_to_the_tail" issue)" = "2877" ] \
+  || fail "matching title picked: [$OUT]"
+[ "$(repeat_value "tui event_loop::resume_open_replays_the_log_to_the_tail" issue_state)" = "open" ] \
+  || fail "match state: [$OUT]"
+
+# --- #636: a Flaky-titled issue links only with Full test name in the body ---
+# doors::slow's Flaky issue names its full name after "Full test name:": a
+# ticket. doors::creak's Flaky issue files its full name under another test
+# while naming doors::creak as a cousin: no ticket.
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) fiber-core doors::slow\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::creak\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) fiber-core doors::slow\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::creak\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/search/doors-slow.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2878, "state": "open", "title": "Flaky: door suite flakes on macos", "body": "Full test name: doors::slow\nFails about one run in twenty.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+cat >"$TSCEN/search/doors-creak.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2879, "state": "open", "title": "Flaky: door suite flakes on macos arm", "body": "Full test name: doors::slow\nPossible cousin: doors::creak hits it too.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+run_friction --json
+[ "$CODE" = "1" ] || fail "flaky-match exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(repeat_value "fiber-core doors::creak" issue)" = "None" ] \
+  || fail "cousin Flaky issue did not link: [$OUT]"
+[ "$(repeat_value "fiber-core doors::slow" issue)" = "2878" ] \
+  || fail "full-name Flaky issue did not link: [$OUT]"
+
+# --- #636: cached links predate the title matcher ---
+# a stale cached cousin link (#2876) is dropped; a matching link (#1386) stays.
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::watch\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::watch\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/search/a-stuck-provider-load-abandons-its-mixed-extension-after-grace.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2876, "state": "open", "title": "tui event_loop resume_open_replays_the_log_to_the_tail", "body": "Possible cousin: extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace hits the same grace path.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+cat >"$TSCEN/issues/2876.json" <<'EOF'
+{"number": 2876, "state": "open", "title": "tui event_loop resume_open_replays_the_log_to_the_tail", "body": "Possible cousin: extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace hits the same grace path.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}
+EOF
+cat >"$TSCEN/issues/1386.json" <<'EOF'
+{"number": 1386, "state": "open", "title": "fiber-core doors::watch is flaky", "closed_at": null, "updated_at": "2026-10-09T18:00:00Z"}
+EOF
+mkdir -p "$HOME/.cache/switchyard"
+python3 -c "import json; json.dump({'jobs': {}, 'issues': {'extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace': {'issue': 2876, 'issue_state': 'open', 'closed_at': None, 'updated_at': '2026-10-09T17:00:00Z', 'searched_at': '2026-10-09T10:00:00Z'}, 'fiber-core doors::watch': {'issue': 1386, 'issue_state': 'open', 'closed_at': None, 'updated_at': '2026-10-09T18:00:00Z', 'searched_at': '2026-10-09T10:00:00Z'}}, 'branches': {}}, open('$HOME/.cache/switchyard/ci-friction.json', 'w'))"
+run_friction --json
+[ "$CODE" = "1" ] || fail "recheck exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(repeat_value "extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace" issue)" = "None" ] \
+  || fail "cached cousin dropped: [$OUT]"
+[ "$(repeat_value "fiber-core doors::watch" issue)" = "1386" ] \
+  || fail "cached matching issue kept: [$OUT]"
+run_friction --json
+[ "$(repeat_value "extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace" issue)" = "None" ] \
+  || fail "second run cousin remains unlinked: [$OUT]"
+[ "$(repeat_value "fiber-core doors::watch" issue)" = "1386" ] \
+  || fail "second run matching issue remains linked: [$OUT]"
+
+# A transient failure must not mark cached links as checked for this version.
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/issues/2876.json" <<'EOF'
+{"number": 2876, "state": "open", "title": "tui event_loop resume_open_replays_the_log_to_the_tail", "body": "Possible cousin: extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace hits the same grace path.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}
+EOF
+mkdir -p "$HOME/.cache/switchyard"
+python3 -c "import json; json.dump({'jobs': {}, 'issues': {'extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace': {'issue': 2876, 'issue_state': 'open', 'closed_at': None, 'updated_at': '2026-10-09T17:00:00Z', 'searched_at': '2026-10-09T10:00:00Z'}}, 'branches': {}}, open('$HOME/.cache/switchyard/ci-friction.json', 'w'))"
+printf 'temporary issue fetch failure\n' >"$T/fail-issues-2876"
+run_friction --json
+[ "$CODE" = "2" ] || fail "failed cached fetch exits 2 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("issue_match_version", "unset"))' "$HOME/.cache/switchyard/ci-friction.json")" = "unset" ] \
+  || fail "failed cached fetch leaves match version unset"
+[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["issues"]["extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace"]["issue"])' "$HOME/.cache/switchyard/ci-friction.json")" = "2876" ] \
+  || fail "failed cached fetch preserves the link"
+rm "$T/fail-issues-2876"
+run_friction --json
+[ "$CODE" = "1" ] || fail "retry cached fetch exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(repeat_value "extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace" issue)" = "None" ] \
+  || fail "retry rechecks and drops the stale link: [$OUT]"
 
 echo "ci-friction: all cases passed"

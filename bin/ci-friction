@@ -40,6 +40,9 @@ BOUND = {"Selection": 5, "Linux x86_64 checks": 5, "Tests macos": 25,
 # bump when compile-key format or the timeout rule changes; a state file
 # without this one reclassifies its compile and timeout jobs
 KEY_VERSION = 3
+# bump when the issue-title matcher changes; a state file without this one
+# re-checks its cached per-test issue links against the matcher once
+ISSUE_MATCH_VERSION = 1
 COMPILE_CLASSES = ("compile", "mutants-baseline-compile")
 TYPE_PATH = re.compile(r"\b(?:[A-Za-z_]\w*::)+([A-Za-z_]\w*)")
 ANSI = re.compile(r"(\x1b|\^\[)\[[0-9;]*[A-Za-z]")
@@ -373,6 +376,25 @@ def recurred_after(lanes):
     return "main" in lanes or len(lanes) >= 2
 
 
+def issue_matches(key, title, body):
+    """An issue search matches the test name anywhere, even a passing
+    mention in another issue's body, so only link an issue whose title
+    names the test: the final "::" segment for the normal path, or, for a
+    flake issue under a Flaky title, the full name given after
+    "Full test name:" in the body (compared for equality, so a cousin
+    named elsewhere in the body does not match)."""
+    name = key.split()[-1]
+    final = name.split("::")[-1]
+    if final and final in (title or ""):
+        return True
+    if (title or "").startswith(("Flaky test: ", "Flaky: ")):
+        for line in (body or "").splitlines():
+            if "Full test name:" in line:
+                return line.split("Full test name:", 1)[1].strip() == name
+        return False
+    return False
+
+
 def main(argv):
     repo = since = state_path = lanes = None
     want_json = False
@@ -537,6 +559,26 @@ def main(argv):
         print("ci-friction: %s" % e, file=sys.stderr)
         ok = False
 
+    # one-time re-check: cached per-test links predate the title matcher, so
+    # fetch each linked issue once and drop the entry when its title no
+    # longer names the test; the lookup below then searches the test again.
+    if st.get("issue_match_version") != ISSUE_MATCH_VERSION:
+        cached_links_checked = True
+        for key, ent in list(issues_st.items()):
+            if not isinstance(ent, dict) or not ent.get("issue"):
+                continue
+            try:
+                it = json.loads(gh_api("repos/%s/issues/%s" % (repo, ent["issue"])))
+            except Fatal as e:
+                print("ci-friction: %s" % e, file=sys.stderr)
+                ok = False
+                cached_links_checked = False
+                continue
+            if not issue_matches(key, it.get("title"), it.get("body")):
+                del issues_st[key]
+        if cached_links_checked:
+            st["issue_match_version"] = ISSUE_MATCH_VERSION
+
     # issue lookup per new test name; re-read cached open issues sighted again.
     # A no-issue entry is searched again once its searched_at is over 6 h old.
     for key in sorted(seen):
@@ -555,8 +597,10 @@ def main(argv):
                 ok = False
                 continue
             items.sort(key=lambda it: it.get("updated_at") or "", reverse=True)
-            if items:
-                it = items[0]
+            kept = [it for it in items
+                    if issue_matches(key, it.get("title"), it.get("body"))]
+            if kept:
+                it = kept[0]
                 issues_st[key] = {"issue": it.get("number"), "issue_state": it.get("state"),
                                   "closed_at": it.get("closed_at"),
                                   "updated_at": it.get("updated_at"),
