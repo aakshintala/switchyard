@@ -3,7 +3,6 @@
 set -euo pipefail
 # A verify after a recorded stale-plan revision is exempt from the round
 # limit; the exemption is derived from recorded state below.
-drift=0
 
 usage() {
   printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n       tkt-plan <state> replan\n' >&2
