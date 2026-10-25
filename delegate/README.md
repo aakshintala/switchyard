@@ -126,6 +126,15 @@ without rerunning anything. Fiber's main and reviewer tokens and costs come
 from the `usage_recorded` events (a record with an `action_id` is main, one
 without is the reviewer); a null main cost is total minus reviewer.
 
+A canary run gives the Fiber lane an isolated home: `run` exports
+`FIBER_HOME=<out>/fiber-home` (created empty) before the first lane, so the
+lane and its metrics both read that root and the owner's real `~/.fiber`
+stays untouched. A lane that needs a real credential copies that one file in
+before the run, e.g. `~/.fiber/credentials/<name>/<label>` to
+`<out>/fiber-home/credentials/<name>/<label>` (mode `0600`), the
+`credentials/<name>/<label>` layout Fiber reads for provider credentials
+(`credentials/<name>` for an extension secret).
+
 ## Skill
 
 The skill lives in switchyard's `skills/delegate/`. Setup links `~/.claude/skills/delegate` to it, and pi reads `~/.agents/skills` directly, so both load it from the checkout and an edit is live without a reinstall.
