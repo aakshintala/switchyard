@@ -385,6 +385,10 @@ cmd_run() {
   [ -n "$repo_name" ] || { err "bad --repo '$repo'"; return 2; }
   [ -z "$clone" ] && clone="$HOME/work/$repo_name"
   [ -z "$out" ] && out="$HOME/.cache/agents/canary/$ticket"
+  # The Fiber lane gets an isolated home under the out dir, so it never
+  # touches the owner's real home; metrics read it through FIBER_HOME.
+  export FIBER_HOME="$out/fiber-home"
+  mkdir -p "$FIBER_HOME"
   git -C "$clone" rev-parse --git-common-dir >/dev/null 2>&1 \
     || { err "clone $clone is not a git checkout"; return 2; }
   clone="$(cd "$clone" && pwd)"
