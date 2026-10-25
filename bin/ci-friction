@@ -40,6 +40,9 @@ BOUND = {"Selection": 5, "Linux x86_64 checks": 5, "Tests macos": 25,
 # bump when compile-key format or the timeout rule changes; a state file
 # without this one reclassifies its compile and timeout jobs
 KEY_VERSION = 3
+# bump when the issue-title matcher changes; a state file without this one
+# re-checks its cached per-test issue links against the matcher once
+ISSUE_MATCH_VERSION = 1
 COMPILE_CLASSES = ("compile", "mutants-baseline-compile")
 TYPE_PATH = re.compile(r"\b(?:[A-Za-z_]\w*::)+([A-Za-z_]\w*)")
 ANSI = re.compile(r"(\x1b|\^\[)\[[0-9;]*[A-Za-z]")
@@ -551,6 +554,23 @@ def main(argv):
     except Fatal as e:
         print("ci-friction: %s" % e, file=sys.stderr)
         ok = False
+
+    # one-time re-check: cached per-test links predate the title matcher, so
+    # fetch each linked issue once and drop the entry when its title no
+    # longer names the test; the lookup below then searches the test again.
+    if st.get("issue_match_version") != ISSUE_MATCH_VERSION:
+        for key, ent in list(issues_st.items()):
+            if not isinstance(ent, dict) or not ent.get("issue"):
+                continue
+            try:
+                it = json.loads(gh_api("repos/%s/issues/%s" % (repo, ent["issue"])))
+            except Fatal as e:
+                print("ci-friction: %s" % e, file=sys.stderr)
+                ok = False
+                continue
+            if not issue_matches(key, it.get("title"), it.get("body")):
+                del issues_st[key]
+        st["issue_match_version"] = ISSUE_MATCH_VERSION
 
     # issue lookup per new test name; re-read cached open issues sighted again.
     # A no-issue entry is searched again once its searched_at is over 6 h old.

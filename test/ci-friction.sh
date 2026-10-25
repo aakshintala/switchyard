@@ -306,6 +306,13 @@ grep -q "compare/" "$FAKE_GH_LOG" && fail "no closer: no compare: [$(cat "$FAKE_
 
 # --- 224: a null cached by an older version is looked up again ---
 setup fixcommit
+# the one-time title re-check fetches every cached link, so the fake serves
+# the linked issue with a matching title: the entry is kept, as before
+flake_scen fixcommit
+mkdir -p "$TSCEN/issues"
+cat >"$TSCEN/issues/1470.json" <<'EOF'
+{"number": 1470, "state": "closed", "title": "fiber-core doors::watch is flaky", "closed_at": "2026-10-09T10:00:00Z", "updated_at": "2026-10-09T10:00:00Z"}
+EOF
 mkdir -p "$HOME/.cache/switchyard"
 python3 -c "import json; json.dump({'jobs': {}, 'issues': {'fiber-core doors::watch': {'issue': 1470, 'issue_state': 'closed', 'closed_at': '2026-10-09T10:00:00Z', 'updated_at': '2026-10-09T10:00:00Z', 'fix_commit': None}}, 'branches': {}}, open('$HOME/.cache/switchyard/ci-friction.json', 'w'))"
 run_friction --min-lanes 1 --json
@@ -662,5 +669,47 @@ run_friction --json
 [ "$CODE" = "1" ] || fail "flaky-match exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
 [ "$(jget "[(r['test'], r['issue']) for r in d['repeats']]")" = "[('fiber-core doors::creak', None), ('fiber-core doors::slow', 2878)]" ] \
   || fail "flaky body rule: [$OUT]"
+
+# --- #636: cached links predate the title matcher: re-check once per state ---
+# a cached cousin link (#2876) is fetched once, dropped and searched again
+# (still no ticket); a cached matching link (#1386) is fetched and kept with
+# no new search. A second run fetches nothing new: the re-check ran once.
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::watch\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::watch\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/search/a-stuck-provider-load-abandons-its-mixed-extension-after-grace.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2876, "state": "open", "title": "tui event_loop resume_open_replays_the_log_to_the_tail", "body": "Possible cousin: extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace hits the same grace path.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+cat >"$TSCEN/issues/2876.json" <<'EOF'
+{"number": 2876, "state": "open", "title": "tui event_loop resume_open_replays_the_log_to_the_tail", "body": "Possible cousin: extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace hits the same grace path.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}
+EOF
+cat >"$TSCEN/issues/1386.json" <<'EOF'
+{"number": 1386, "state": "open", "title": "fiber-core doors::watch is flaky", "closed_at": null, "updated_at": "2026-10-09T18:00:00Z"}
+EOF
+mkdir -p "$HOME/.cache/switchyard"
+python3 -c "import json; json.dump({'jobs': {}, 'issues': {'extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace': {'issue': 2876, 'issue_state': 'open', 'closed_at': None, 'updated_at': '2026-10-09T17:00:00Z', 'searched_at': '2026-10-09T10:00:00Z'}, 'fiber-core doors::watch': {'issue': 1386, 'issue_state': 'open', 'closed_at': None, 'updated_at': '2026-10-09T18:00:00Z', 'searched_at': '2026-10-09T10:00:00Z'}}, 'branches': {}}, open('$HOME/.cache/switchyard/ci-friction.json', 'w'))"
+run_friction --json
+[ "$CODE" = "1" ] || fail "recheck exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(jget "[(r['test'], r['issue']) for r in d['repeats']]")" = "[('extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace', None), ('fiber-core doors::watch', 1386)]" ] \
+  || fail "cousin dropped, match kept: [$OUT]"
+[ "$(grep -c 'issues/2876' "$FAKE_GH_LOG")" = "1" ] \
+  || fail "cached cousin fetched once: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'search/issues.*a_stuck' "$FAKE_GH_LOG")" = "1" ] \
+  || fail "dropped link searched again: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'search/issues.*doors' "$FAKE_GH_LOG")" = "0" ] \
+  || fail "kept link not searched: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'issues/1386' "$FAKE_GH_LOG")" = "2" ] \
+  || fail "kept link fetched for re-check and re-read: [$(cat "$FAKE_GH_LOG")]"
+run_friction --json >/dev/null
+[ "$(grep -c 'issues/2876' "$FAKE_GH_LOG")" = "1" ] \
+  || fail "re-check runs once per state: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'search/issues.*a_stuck' "$FAKE_GH_LOG")" = "1" ] \
+  || fail "no second search: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'issues/1386' "$FAKE_GH_LOG")" = "3" ] \
+  || fail "kept link re-read but not re-checked: [$(cat "$FAKE_GH_LOG")]"
+run_friction --json
+[ "$(jget "[(r['test'], r['issue']) for r in d['repeats']]")" = "[('extensions::lua a_stuck_provider_load_abandons_its_mixed_extension_after_grace', None), ('fiber-core doors::watch', 1386)]" ] \
+  || fail "second run linkage: [$OUT]"
 
 echo "ci-friction: all cases passed"
