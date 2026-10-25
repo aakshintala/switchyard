@@ -371,7 +371,7 @@ setup mergeddefault ONE AGAINST
   || fail "mergeddefault: stub pr list does not return []"
 # a Resolves hit stops with MERGED-STOP before any preflight work.
 setup mergedstop ONE AGAINST
-printf '[{"number":7,"body":"Fixes it.\n\nResolves #42.\n","files":[{"path":"f.txt"}]}]\n' >"$T/prlist"
+printf '%s\n' '[{"number":7,"body":"Fixes it.\n\nResolves #42.\n","files":[{"path":"f.txt"}]}]' >"$T/prlist"
 run_start
 want "MERGED-STOP pr=7" 1 mergedstop
 case "$OUT" in *CURRENT*) fail "mergedstop: must never print CURRENT" ;; esac
@@ -382,32 +382,32 @@ grep -qF -- '--limit 100' "$T/calls.log" || fail "mergedstop: search misses --li
 grep -qF -- '#42 in:body' "$T/calls.log" || fail "mergedstop: search misses [#42 in:body]"
 # a Part-of hit notes every touched path, unfiltered by --files, and continues.
 setup mergedpart ONE AGAINST
-printf '[{"number":8,"body":"First half.\n\nPart of #42\n","files":[{"path":"f.txt"},{"path":"other/dir.txt"}]}]\n' >"$T/prlist"
+printf '%s\n' '[{"number":8,"body":"First half.\n\nPart of #42\n","files":[{"path":"f.txt"},{"path":"other/dir.txt"}]}]' >"$T/prlist"
 run_start
 want "CURRENT " 0 mergedpart
 case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergedpart: digest misses the NOTE" ;; esac
 for p in f.txt other/dir.txt; do case "$OUT" in *"$p"*) ;; *) fail "mergedpart: NOTE misses [$p]" ;; esac; done
 # each Part-of hit prints its own NOTE.
 setup mergedparts ONE AGAINST
-printf '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]},{"number":9,"body":"Part of #42","files":[{"path":"g.txt"}]}]\n' >"$T/prlist"
+printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]},{"number":9,"body":"Part of #42","files":[{"path":"g.txt"}]}]' >"$T/prlist"
 run_start
 want "CURRENT " 0 mergedparts
 case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergedparts: digest misses the NOTE for PR #8" ;; esac
 case "$OUT" in *"NOTE merged Part-of PR #9"*) ;; *) fail "mergedparts: digest misses the NOTE for PR #9" ;; esac
 # Resolves wins when both kinds hit, even listed second.
 setup mergedwins ONE AGAINST
-printf '[{"number":8,"body":"Part of #42","files":[]},{"number":7,"body":"Done.\nResolves #42","files":[]}]\n' >"$T/prlist"
+printf '%s\n' '[{"number":8,"body":"Part of #42","files":[]},{"number":7,"body":"Done.\nResolves #42","files":[]}]' >"$T/prlist"
 run_start
 want "MERGED-STOP pr=7" 1 mergedwins
 case "$OUT" in *"NOTE merged Part-of"*) fail "mergedwins: a Resolves hit must stop, not note" ;; esac
 # the boundary: `#421` is no hit for issue 42, on either keyword.
 setup mergededge ONE AGAINST
-printf '[{"number":7,"body":"Unrelated.\n\nResolves #421\n","files":[]}]\n' >"$T/prlist"
+printf '%s\n' '[{"number":7,"body":"Unrelated.\n\nResolves #421\n","files":[]}]' >"$T/prlist"
 run_start
 want "CURRENT " 0 mergededge
 case "$OUT" in *MERGED-STOP*) fail "mergededge: #421 must not stop #42" ;; esac
 setup mergededgepart ONE AGAINST
-printf '[{"number":8,"body":"Part of #421","files":[{"path":"f.txt"}]}]\n' >"$T/prlist"
+printf '%s\n' '[{"number":8,"body":"Part of #421","files":[{"path":"f.txt"}]}]' >"$T/prlist"
 run_start
 want "CURRENT " 0 mergededgepart
 case "$OUT" in *"NOTE merged Part-of"*) fail "mergededgepart: #421 must not note #42" ;; esac
@@ -421,19 +421,19 @@ case "$OUT" in *PREFLIGHT*) fail "mergedfail: must never print PREFLIGHT" ;; esa
 # the search runs on the --no-preflight path too: a Resolves hit stops
 # instead of STALE, a Part-of hit notes and then STALE exits.
 setup mergednoflight TWO FILING
-printf '[{"number":7,"body":"Resolves #42","files":[]}]\n' >"$T/prlist"
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[]}]' >"$T/prlist"
 run_start --no-preflight
 want "MERGED-STOP pr=7" 1 mergednoflight
 case "$OUT" in *"STALE reason="*) fail "mergednoflight: must stop, not print STALE" ;; esac
 setup mergednoflightpart TWO FILING
-printf '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]}]\n' >"$T/prlist"
+printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]}]' >"$T/prlist"
 run_start --no-preflight
 want "STALE reason=" 1 mergednoflightpart
 case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergednoflightpart: digest misses the NOTE" ;; esac
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "mergednoflightpart: tkt-job must not run"
 # a Part-of hit on the stale path notes and still preflights.
 setup mergedstalepart TWO FILING
-printf '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]}]\n' >"$T/prlist"
+printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]}]' >"$T/prlist"
 run_start
 want "PREFLIGHT core=2 out=" 1 mergedstalepart
 case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergedstalepart: digest misses the NOTE" ;; esac
