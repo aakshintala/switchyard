@@ -380,14 +380,18 @@ def issue_matches(key, title, body):
     """An issue search matches the test name anywhere, even a passing
     mention in another issue's body, so only link an issue whose title
     names the test: the final "::" segment for the normal path, or, for a
-    flake issue under a Flaky title, the full name quoted after
-    "Full test name:" in the body."""
+    flake issue under a Flaky title, the full name given after
+    "Full test name:" in the body (compared for equality, so a cousin
+    named elsewhere in the body does not match)."""
     name = key.split()[-1]
     final = name.split("::")[-1]
     if final and final in (title or ""):
         return True
     if (title or "").startswith(("Flaky test: ", "Flaky: ")):
-        return "Full test name:" in (body or "") and name in (body or "")
+        for line in (body or "").splitlines():
+            if "Full test name:" in line:
+                return line.split("Full test name:", 1)[1].strip() == name
+        return False
     return False
 
 

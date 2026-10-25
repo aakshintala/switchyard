@@ -653,8 +653,9 @@ run_friction --json
 [ "$(jget "d['repeats'][0]['issue_state']")" = "open" ] || fail "match state: [$OUT]"
 
 # --- #636: a Flaky-titled issue links only with Full test name in the body ---
-# doors::slow's Flaky issue quotes its full name after "Full test name:": a
-# ticket. doors::creak's Flaky issue names no full test name: no ticket.
+# doors::slow's Flaky issue names its full name after "Full test name:": a
+# ticket. doors::creak's Flaky issue files its full name under another test
+# while naming doors::creak as a cousin: no ticket.
 setup repeat
 flake_scen repeat
 printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) fiber-core doors::slow\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::creak\n' >"$TSCEN/logs/801.txt"
@@ -663,7 +664,7 @@ cat >"$TSCEN/search/doors-slow.json" <<'EOF'
 {"total_count": 1, "items": [{"number": 2878, "state": "open", "title": "Flaky: door suite flakes on macos", "body": "Full test name: doors::slow\nFails about one run in twenty.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
 EOF
 cat >"$TSCEN/search/doors-creak.json" <<'EOF'
-{"total_count": 1, "items": [{"number": 2879, "state": "open", "title": "Flaky: door suite flakes on macos arm", "body": "Same stack as #2878, also fails doors::creak sometimes.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+{"total_count": 1, "items": [{"number": 2879, "state": "open", "title": "Flaky: door suite flakes on macos arm", "body": "Full test name: doors::slow\nPossible cousin: doors::creak hits it too.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
 EOF
 run_friction --json
 [ "$CODE" = "1" ] || fail "flaky-match exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
