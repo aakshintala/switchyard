@@ -676,30 +676,20 @@ mod tests {
         let _env = crate::test_env::lock();
         assert_eq!(resolve_bin(Some("/custom/codex")), "/custom/codex");
         // An empty override falls through to the environment, not the fallback.
-        let prev = std::env::var("CODEX_BIN").ok();
-        unsafe { std::env::set_var("CODEX_BIN", "/env/codex") };
+        let _codex = crate::test_env::EnvGuard::set("CODEX_BIN", "/env/codex");
         assert_eq!(resolve_bin(Some("")), "/env/codex");
-        match prev {
-            Some(v) => unsafe { std::env::set_var("CODEX_BIN", v) },
-            None => unsafe { std::env::remove_var("CODEX_BIN") },
-        }
     }
 
     #[test]
     fn env_used_when_no_override() {
         let _env = crate::test_env::lock();
-        let prev = std::env::var("CODEX_BIN").ok();
-        unsafe { std::env::set_var("CODEX_BIN", "/env/codex") };
+        let _codex = crate::test_env::EnvGuard::set("CODEX_BIN", "/env/codex");
         assert_eq!(resolve_bin(None), "/env/codex");
         // Empty env falls through to PATH or home fallback, never empty.
-        unsafe { std::env::set_var("CODEX_BIN", "") };
+        let _empty = crate::test_env::EnvGuard::set("CODEX_BIN", "");
         let bin = resolve_bin(None);
         assert!(!bin.is_empty(), "empty CODEX_BIN must fall through");
         assert!(bin.ends_with("bin/codex") || bin.contains("codex"), "{bin}");
-        match prev {
-            Some(v) => unsafe { std::env::set_var("CODEX_BIN", v) },
-            None => unsafe { std::env::remove_var("CODEX_BIN") },
-        }
     }
 
     #[test]
