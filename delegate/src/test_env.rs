@@ -77,4 +77,44 @@ mod tests {
     fn env_serial_second_holder_is_alone() {
         serial_round("second");
     }
+
+    #[test]
+    fn job_dir_var_is_held_across_a_second_taker() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        const JOB_DIR: &str = "DELEGATE_JOBS_DIR";
+        const WAIT: Duration = Duration::from_secs(2);
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let (attempt_tx, attempt_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        let a = std::thread::spawn(move || {
+            let _held = lock();
+            let _var = EnvGuard::set(JOB_DIR, "a");
+            held_tx.send(()).unwrap();
+            attempt_rx
+                .recv_timeout(WAIT)
+                .expect("B never attempted the lock");
+            // An unguarded B would have written "b" by now.
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(std::env::var(JOB_DIR).unwrap_or_default(), "a");
+        });
+        let b = std::thread::spawn(move || {
+            held_rx.recv_timeout(WAIT).expect("A never took the lock");
+            attempt_tx.send(()).unwrap();
+            let _held = lock();
+            let _var = EnvGuard::set(JOB_DIR, "b");
+            done_tx.send(()).unwrap();
+            // Keep "b" set until the test has checked A's view, so B's own
+            // restore on drop cannot hide the overwrite.
+            release_rx.recv_timeout(WAIT).expect("test never released B");
+        });
+
+        done_rx.recv_timeout(WAIT * 2).expect("B never finished");
+        let a_result = a.join();
+        let _ = release_tx.send(());
+        b.join().unwrap();
+        a_result.unwrap();
+    }
 }

@@ -281,6 +281,9 @@ mod tests {
 
     #[test]
     fn fallback_writers_preserve_the_session_and_configured_backend() {
+        // Writes and reads through `job_record_path`, which follows the
+        // process-global job-dir env (#681).
+        let _env = crate::test_env::lock();
         let prior = json!({
             "status": "RUNNING",
             "resume": {"model": "model", "backend": "pi", "sessionId": "s-init"}
@@ -413,6 +416,9 @@ mod tests {
 
     #[test]
     fn supervisor_fallback_does_not_guess_missing_backend_or_session() {
+        // Writes and reads through `job_record_path`, which follows the
+        // process-global job-dir env (#681).
+        let _env = crate::test_env::lock();
         let id = random_uuid();
         let prior = json!({
             "status": "RUNNING",
