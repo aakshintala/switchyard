@@ -69,7 +69,7 @@ After round 2, no round 3 runs.
 
 - Only P3 findings open: answer each on the PR with evidence, or with a `debt:` comment naming its ceiling and upgrade trigger. The loop is done. A P3 that a marker could close only by weakening a rule a doc, spec or ticket states counts as an open P2.
 - Any P1 or P2 open: the lane stops. Load `attack-the-premise`, post the assumption the fixes share, and rule one of:
-  - **re-plan**: back to `implement` step 2, with the PR's branch as the base; the counter resets;
+  - **re-plan**: back to `implement` step 2, with the PR's branch as the base; reset the counter with `tkt-plan <state> replan`;
   - **take back**: implement it yourself; it gets a full review (step 1, a different family from you), and the counter resets;
   - **park**: when the premise touches the ticket's core outcome (see `implement`).
 
