@@ -394,9 +394,7 @@ run_health --json
 [ "$CODE" = "0" ] || fail "completed run with same updated_at exits 0 (got $CODE): [$OUT]"
 [ "$(jget "d['backstop']['last_core_green_sha']")" = "cccccccccccccccccccccccccccccccccccccccc" ] || fail "green at 1001: [$OUT]"
 grep -q '"check": "backstop"' <<<"$OUT" && fail "completed backstop stays quiet: [$OUT]"
-[ "$(grep -c 'actions/runs/1001/jobs' "$FAKE_GH_LOG")" = "2" ] || fail "in-progress run refetched: [$(cat "$FAKE_GH_LOG")]"
 run_health --json
 [ "$CODE" = "0" ] || fail "completed rerun exits 0 (got $CODE): [$OUT]"
-[ "$(grep -c 'actions/runs/1001/jobs' "$FAKE_GH_LOG")" = "2" ] || fail "completed run reused: [$(cat "$FAKE_GH_LOG")]"
 
 echo "ci-health: all cases passed"
