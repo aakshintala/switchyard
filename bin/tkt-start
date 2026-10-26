@@ -56,12 +56,15 @@ if [ ! -r "$namebase_lib" ]; then echo "tkt-start: cannot read shared lib: $name
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"; sweep="$bin_dir/plan-sweep"; tktjob="$bin_dir/tkt-job"
 set_namebase "$repo" "$issue"; state="$run/$namebase.state"; mkdir -p "$run"
 tkt() { "$tkt_state" "$state" "$@"; }
+part_notes=()
 emit() {
-  local rest="$1" code="$2"; shift 2; local twelve log out
+  local rest="$1" code="$2"; shift 2; local twelve log out note
   twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf nohead)"
   log="$run/$namebase-tkt-start-$twelve-$(date +%H%M%S).log"; out="TKT tkt-start $rest log=$log"
   [ $# -eq 0 ] || out="$out
 $(printf '%s\n' "$@" | head -n 40)"
+  for note in ${part_notes[@]+"${part_notes[@]}"}; do out="$out
+$note"; done
   printf '%s\n' "$out" | tee "$log"; exit "$code"
 }
 fail_step() {
@@ -143,7 +146,7 @@ idx=0; while [ "$idx" -lt "$pr_count" ]; do
   idx=$((idx+1))
 done
 [ -n "$stop_pr" ] && deny "MERGED-STOP pr=$stop_pr" 1 "tkt-start: issue #$issue already resolved by merged PR #$stop_pr"
-dg+=(${notes[@]+"${notes[@]}"})
+part_notes=(${notes[@]+"${notes[@]}"})
 if [ -n "$stale" ]; then dg=("reason=$reason" ${dg[@]+"${dg[@]}"}); tkt journal "tkt-start check STALE reason=$reason filing=${filing:-none}"
   [ "$no_preflight" -eq 1 ] && emit "STALE reason=$reason filing=${filing:-none}" 1 "${dg[@]}"
 else tkt journal "tkt-start check CURRENT filing=$filing"; emit "CURRENT filing=$filing files=${files:-none}" 0 "${dg[@]}"; fi
