@@ -759,6 +759,10 @@ fn send_right_after_start_steers_an_unfinished_turn() {
 fn slow_ack_send_returns_after_running_state_and_two_sends_race_safely() {
     let h = Harness::new();
     let id = id_from(&h.start(b"FAST", false, "SLOW_ACK", &[]));
+    // A send reaches the ack-delay path only once the previous turn has gone idle.
+    h.wait_state(&id, "FAST start finished", |value| {
+        value["status"] == "idle"
+    });
     let (send_tx, send_rx) = mpsc::channel();
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -806,6 +810,10 @@ fn slow_ack_send_returns_after_running_state_and_two_sends_race_safely() {
 
     std::fs::remove_file(h.fake_dir.join("go")).unwrap();
     let race_id = id_from(&h.start(b"FAST", false, "", &[]));
+    // The first racing send reports started only once the start turn has gone idle.
+    h.wait_state(&race_id, "race start finished", |value| {
+        value["status"] == "idle"
+    });
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
         let h_ref = &h;
@@ -1225,6 +1233,10 @@ fn dead_supervisor_is_settled_once_and_racing_sends_are_started_then_steered() {
     assert_process_gone(host_pid);
 
     let second = id_from(&h.start(b"FAST", false, "", &[]));
+    // The first racing send reports started only once the start turn has gone idle.
+    h.wait_state(&second, "second start finished", |value| {
+        value["status"] == "idle"
+    });
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
         let h_ref = &h;
