@@ -325,6 +325,72 @@ fn watch_unknown_job_exits_2() {
 }
 
 #[test]
+fn status_prints_running_without_waiting() {
+    let e = Env::new("status-running");
+    let id = e.run("SLOW do it");
+    assert_eq!(e.record(&id)["status"], "RUNNING");
+    // Timeout guard: `status` must return at once; a wait would hang here and
+    // fail the test instead of the gate.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_delegate"))
+        .args(["status", &id])
+        .current_dir(&e.dir)
+        .env("TMPDIR", &e.dir)
+        .env("CURSOR_AGENT_BIN", e.dir.join("agent.sh"))
+        .env("DELEGATE_HEARTBEAT_MS", "100")
+        .env_remove("DELEGATE_JOBS_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut done = None;
+    until("delegate status returns without waiting", || {
+        done = child.try_wait().unwrap();
+        done.is_some()
+    });
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        done.unwrap().code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
+    assert!(stdout.contains("RUNNING"), "{stdout:?}");
+    assert!(stdout.contains(&id), "{stdout:?}");
+    e.release();
+    e.wait_terminal(&id);
+}
+
+#[test]
+fn status_prints_done_for_a_finished_job() {
+    let e = Env::new("status-done");
+    let id = e.run("quick");
+    e.wait_terminal(&id);
+    let out = e.delegate(&["status", &id], None);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
+    assert!(stdout.contains("DONE"), "{stdout:?}");
+    assert!(stdout.contains(&id), "{stdout:?}");
+}
+
+#[test]
+fn status_unknown_job_exits_2() {
+    let e = Env::new("status-unknown");
+    let out = e.delegate(&["status", "nope"], None);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown job nope"), "{stderr:?}");
+}
+
+#[test]
 fn unknown_subcommands_explain_watch_and_exit_2() {
     let e = Env::new("unknown-subcommand");
     for name in ["status", "result"] {
