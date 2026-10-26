@@ -62,7 +62,7 @@ pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<Stri
 }
 
 pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
-    let started = match super::start_child(spec) {
+    let started = match start_child(spec) {
         Ok(s) => s,
         Err(msg) => return super::spawn_failed(&msg),
     };
@@ -103,6 +103,48 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
             finish(state, pumped.clean_exit, &pumped.stderr)
         }),
     }
+}
+
+/// Same child setup as `super::start_child_with_stdin`, but the spawn
+/// `io::Error` stays visible: a missing binary (`ErrorKind::NotFound`)
+/// names every source the resolver consults, while any other spawn
+/// failure keeps its original text.
+/// debt: mirrors super::start_child_with_stdin, collapse into it if it ever preserves the spawn io::Error.
+fn start_child(spec: &JobSpec) -> Result<super::Started, String> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let spawned = crate::util::captured_command(&spec.bin)
+        .map_err(|e| format!("cannot write cargo-mutants shim: {e}"))?
+        .args(&spec.argv)
+        .current_dir(&spec.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Own process group, so cancel also stops the shell commands the agent started.
+        .process_group(0)
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "fiber binary not found: tried $FIBER_BIN, PATH, ~/.local/bin/fiber (selected {}): {e}",
+                spec.bin
+            ));
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let pid = child.id() as libc::pid_t;
+    // Set once the child is reaped, so a late kill can't hit a recycled pid.
+    let reaped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    Ok(super::Started {
+        pid,
+        reaped,
+        child,
+        stdout,
+        stderr,
+    })
 }
 
 /// Pure parse of a finished `fiber ask` stdout. The spawn driver uses [`finish`] too.
@@ -1188,6 +1230,28 @@ mod tests {
         assert!(res.text.contains("PATH"), "{}", res.text);
         assert!(res.text.contains("~/.local/bin/fiber"), "{}", res.text);
         assert!(res.text.contains(&bin), "{}", res.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_not_found_spawn_error_passes_through() {
+        // Spawning a directory fails with `PermissionDenied`, not
+        // `NotFound`: the error keeps its original text, unwrapped.
+        let _lock = crate::test_env::lock();
+        let dir = std::env::temp_dir().join(format!("cdm-fiber-notexec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut spec = crate::job::tests::spec_of(|s| {
+            s.bin = dir.to_str().unwrap().to_string();
+        });
+        spec.cwd = dir.to_str().unwrap().to_string();
+        let spawned = spawn(&spec);
+        let res = (spawned.drive)(&|_| {});
+        assert_eq!(res.is_error, Some(true));
+        assert!(!res.clean_exit);
+        assert!(!res.text.contains("fiber binary not found"), "{}", res.text);
+        assert!(res.text.contains("Permission denied"), "{}", res.text);
+        assert_eq!(res.text, res.stderr);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
