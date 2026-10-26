@@ -591,6 +591,10 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
 fn send_text_watch_and_steer_observe_the_same_turn() {
     let h = Harness::new();
     let id = id_from(&h.start(b"FAST", false, "", &[]));
+    // A send reports started only once the previous turn has gone idle.
+    h.wait_state(&id, "FAST start finished", |value| {
+        value["status"] == "idle"
+    });
     let sent = h.invoke(&["send", &id, "HOLD hello"]);
     assert!(sent.status.success());
     assert_eq!(sent.stdout, b"started\n");
@@ -647,6 +651,8 @@ fn send_text_watch_and_steer_observe_the_same_turn() {
     let dash = h.invoke(&["send", &id, "--", "-starts-with-dash"]);
     assert!(dash.status.success());
     assert_eq!(dash.stdout, b"started\n");
+    // A send reports started only once the previous turn has gone idle.
+    h.wait_state(&id, "dash turn finished", |value| value["status"] == "idle");
     let count_before = std::fs::read_to_string(h.fake_dir.join("requests.jsonl"))
         .unwrap()
         .lines()
@@ -726,9 +732,37 @@ fn send_text_watch_and_steer_observe_the_same_turn() {
 }
 
 #[test]
+fn send_right_after_start_steers_an_unfinished_turn() {
+    let h = Harness::new();
+    let id = id_from(&h.start(b"HOLD first", false, "", &[]));
+    // A send to a session with an unfinished turn steers instead of starting.
+    // The held-open turn forces the interleaving, so this needs no timing luck.
+    let second = h.invoke(&["send", &id, "second"]);
+    assert!(second.status.success());
+    assert_eq!(second.stdout, b"steered\n");
+    let running = h.wait_state(&id, "held turn running", |value| {
+        value["activeTurnId"].is_string() && value["status"] == "running"
+    });
+    assert_eq!(running["status"], "running");
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    h.wait_state(&id, "held turns finish", |value| value["status"] == "idle");
+    let texts = h.turn_texts();
+    for expected in ["HOLD first", "second"] {
+        assert!(
+            texts.iter().any(|text| text == expected),
+            "missing turn text {expected:?}"
+        );
+    }
+}
+
+#[test]
 fn slow_ack_send_returns_after_running_state_and_two_sends_race_safely() {
     let h = Harness::new();
     let id = id_from(&h.start(b"FAST", false, "SLOW_ACK", &[]));
+    // A send reaches the ack-delay path only once the previous turn has gone idle.
+    h.wait_state(&id, "FAST start finished", |value| {
+        value["status"] == "idle"
+    });
     let (send_tx, send_rx) = mpsc::channel();
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -776,6 +810,10 @@ fn slow_ack_send_returns_after_running_state_and_two_sends_race_safely() {
 
     std::fs::remove_file(h.fake_dir.join("go")).unwrap();
     let race_id = id_from(&h.start(b"FAST", false, "", &[]));
+    // The first racing send reports started only once the start turn has gone idle.
+    h.wait_state(&race_id, "race start finished", |value| {
+        value["status"] == "idle"
+    });
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
         let h_ref = &h;
@@ -1195,6 +1233,10 @@ fn dead_supervisor_is_settled_once_and_racing_sends_are_started_then_steered() {
     assert_process_gone(host_pid);
 
     let second = id_from(&h.start(b"FAST", false, "", &[]));
+    // The first racing send reports started only once the start turn has gone idle.
+    h.wait_state(&second, "second start finished", |value| {
+        value["status"] == "idle"
+    });
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
         let h_ref = &h;
