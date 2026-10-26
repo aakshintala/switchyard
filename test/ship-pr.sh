@@ -6,7 +6,6 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHIP="$SCRIPT_DIR/../bin/ship-pr"
-BASE_PATH="$PATH"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -17,6 +16,20 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-ship-pr.XXXXXX")"
 mkdir -p "$T/tmp"
 export TMPDIR="$T/tmp"
 trap 'rm -rf "$T"' EXIT
+
+# The gate refuses when df reports under 20 GB free, so the suite shadows df
+# with a stub reporting ample space and never depends on the host's real disk.
+fake_df() {
+  mkdir -p "$1"
+  printf '%s\n' '#!/bin/sh' \
+    "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/fake 1000000 950000 $2 95%% $3\\n'" \
+    >"$1/df"
+  chmod 755 "$1/df"
+}
+export HOME="$T/home"; mkdir -p "$HOME"
+fake_df "$T/bin" 104857600 /fake-ample
+BASE_PATH="$T/bin:$PATH"; export PATH="$BASE_PATH"
+[ "$(command -v df)" = "$T/bin/df" ] || fail "df resolves to the suite's stub, not the host's"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
