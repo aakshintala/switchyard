@@ -483,4 +483,18 @@ run --cwd "$R" --base "$EDGEBASE" --symbols Shape --files src/lib.rs --out "$T/p
 tabwant="$(printf 'src/tabbed.rs:2:     let _ = Shape;\t// tabbed')"
 grep -qF -- "$tabwant" "$T/pack-q6.md" || fail "q5: tab-bearing line keeps every byte"
 
+# q6. adjacent overlap: `xx` is never an `x` caller (the retry keeps its left edge)
+cat >"$R/src/adjacent.rs" <<'EOF'
+pub fn x() {}
+pub fn xx() {}
+EOF
+git -C "$R" add src/adjacent.rs
+git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m adjacent
+ADJBASE="$(git -C "$R" rev-parse HEAD)"
+run --cwd "$R" --base "$ADJBASE" --symbols x,xx --files src/adjacent.rs --out "$T/pack-q7.md"
+[ "$code" = 0 ] || fail "q6: exits 0, got $code [$out]"
+[ "$out" = "PACK $T/pack-q7.md symbols=2 files=1 outside=0" ] || fail "q6: PACK line, got [$out]"
+[ "$(grep -c '^callers: 0 lines in 0 files (shown 0)$' "$T/pack-q7.md")" = 2 ] || fail "q6: x keeps zero callers when xx exists"
+[ "$(grep -c '^src/adjacent.rs:2:' "$T/pack-q7.md")" = 1 ] || fail "q6: xx line held by xx alone"
+
 echo "plan-sweep: all cases passed"

@@ -284,6 +284,26 @@ pat_idx() {
   grep -nxF -- "$1" "$work/patterns" 2>/dev/null | cut -d: -f1 | head -n 1
 }
 
+# flush_batch_idx OUTDIR: stable-sort $work/batch-idx into one file per name
+# under OUTDIR in git's order. Shared by both splitters; their attribution
+# predicates stay separate.
+flush_batch_idx() {
+  LC_ALL=C sort -s -n -k1,1 "$work/batch-idx" >"$work/batch-sorted"
+  OUTDIR="$1" LC_ALL=C awk '
+    {
+      line = $0
+      t = index(line, "\t")
+      idx = substr(line, 1, t - 1)
+      rest = substr(line, t + 1)
+      if (idx != prev) {
+        if (prev != "") close(out)
+        out = ENVIRON["OUTDIR"] "/" idx
+        prev = idx
+      }
+      print rest > out
+    }' "$work/batch-sorted"
+}
+
 # split_word_hits PATFILE HITS OUTDIR: attribute each hit line to every name
 # with a whole-word occurrence (a non-word character or a string edge on both
 # sides; a failed occurrence does not stop the search for a later one), writing
@@ -309,33 +329,23 @@ split_word_hits() {
     function isword(c) {
       return (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "_"
     }
-    function word_hit(text, name,   nl, rest2, pos, before, after) {
+    function word_hit(text, name,   nl, rest2, pos, off, abs, before, after) {
       nl = length(name)
       if (nl == 0) return 0
       rest2 = text
+      off = 0
       while ((pos = index(rest2, name)) > 0) {
-        if (pos == 1) before = ""
-        else before = substr(rest2, pos - 1, 1)
-        after = substr(rest2, pos + nl, 1)
+        abs = off + pos
+        if (abs == 1) before = ""
+        else before = substr(text, abs - 1, 1)
+        after = substr(text, abs + nl, 1)
         if ((before == "" || !isword(before)) && (after == "" || !isword(after))) return 1
         rest2 = substr(rest2, pos + 1)
+        off += pos
       }
       return 0
     }' "$2" >"$work/batch-idx"
-  LC_ALL=C sort -s -n -k1,1 "$work/batch-idx" >"$work/batch-sorted"
-  OUTDIR="$3" LC_ALL=C awk '
-    {
-      line = $0
-      t = index(line, "\t")
-      idx = substr(line, 1, t - 1)
-      rest = substr(line, t + 1)
-      if (idx != prev) {
-        if (prev != "") close(out)
-        out = ENVIRON["OUTDIR"] "/" idx
-        prev = idx
-      }
-      print rest > out
-    }' "$work/batch-sorted"
+  flush_batch_idx "$3"
 }
 
 # split_qual_hits PATFILE HITS OUTDIR: attribute each hit line to every
@@ -371,20 +381,7 @@ split_qual_hits() {
       if (isword(pre)) return 0
       return 1
     }' "$2" >"$work/batch-idx"
-  LC_ALL=C sort -s -n -k1,1 "$work/batch-idx" >"$work/batch-sorted"
-  OUTDIR="$3" LC_ALL=C awk '
-    {
-      line = $0
-      t = index(line, "\t")
-      idx = substr(line, 1, t - 1)
-      rest = substr(line, t + 1)
-      if (idx != prev) {
-        if (prev != "") close(out)
-        out = ENVIRON["OUTDIR"] "/" idx
-        prev = idx
-      }
-      print rest > out
-    }' "$work/batch-sorted"
+  flush_batch_idx "$3"
 }
 
 # batch_hits PATFILE OUTDIR MODE: one full-tree `git grep -n -I -F -f` over
@@ -620,8 +617,6 @@ while IFS=$'\t' read -r name title; do
   [ -n "$name" ] || continue
   sym_n=$((sym_n + 1))
   printf 'plan-sweep: symbol %s/%s %s\n' "$sym_n" "$sym_total" "$name" >&2
-  printf '%s\n' "$name" >"$work/symname-$sym_n"
-  printf '%s\n' "$title" >"$work/symtitle-$sym_n"
   sec="$work/sec-$sym_n.md"
   head="$work/head-$sym_n.md"
   : >"$sec"; : >"$head"
@@ -668,13 +663,14 @@ if [ "$lang" = rust ]; then
   : >"$work/qualpatterns"
   : >"$work/qualmap"
   i=1
-  while [ "$i" -le "$sym_n" ]; do
+  while IFS=$'\t' read -r name _qtitle; do
+    [ -n "$name" ] || continue
     if [ -e "$work/enum-$i" ]; then
-      printf '%s::\n' "$(cat "$work/symname-$i")" >>"$work/qualpatterns"
+      printf '%s::\n' "$name" >>"$work/qualpatterns"
       printf '%s\n' "$i" >>"$work/qualmap"
     fi
     i=$((i + 1))
-  done
+  done <<<"$SYMS"
   if [ -s "$work/qualpatterns" ]; then
     batch_hits "$work/qualpatterns" "$work/qhits" qual
     j=0
@@ -695,9 +691,8 @@ if [ "$lang" = rust ]; then
 fi
 
 i=1
-while [ "$i" -le "$sym_n" ]; do
-  name="$(cat "$work/symname-$i")"
-  title="$(cat "$work/symtitle-$i")"
+while IFS=$'\t' read -r name title; do
+  [ -n "$name" ] || continue
   sec="$work/sec-$i.md"
   head="$work/head-$i.md"
   defs_n="$(nlines "$work/defs-$i")"
@@ -764,7 +759,7 @@ while [ "$i" -le "$sym_n" ]; do
   symblocks="$symblocks$sec"$'\n'
   symheads="$symheads$head"$'\n'
   i=$((i + 1))
-done
+done <<<"$SYMS"
 
 # outlines, in Files order; only blobs resolve to an outline
 OUTLINED="|"
