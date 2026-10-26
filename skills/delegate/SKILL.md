@@ -92,7 +92,7 @@ the only way to wait; run it in the background the way your harness's instructio
 timeout, it prints the still-RUNNING records, exits 1 and writes one stderr line per job. The
 `progress` field holds the partial state: phase, last tool, last assistant text, files touched,
 tokens, elapsed time, last-event age and session id. Run `watch` again to keep waiting. A job's state and result
-come from `watch` and the record file below; `delegate` has no `status` or `result` subcommand.
+come from `status` and the record file below; `status` prints the job's state without waiting, `watch` waits for and prints the result, and `delegate` has no `result` subcommand.
 
 Judge liveness by `progress.lastEventAgeMs` (ms since the last event the supervisor counted as
 liveness, the same instant `--idle-ms` measures from), never by `tokensSoFar`: `tokensSoFar` is

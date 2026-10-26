@@ -22,6 +22,7 @@ You need Rust (`cargo`), and `cursor-agent` on PATH with `cursor-agent login` be
 | `delegate resume <jobId>` | Continue a finished job that has a session id; optional model/gate overrides. |
 | `delegate cancel <jobId>` | Stop a running job and print its terminal record. |
 | `delegate watch <jobId>...` | Block until each job is terminal (optional `--timeout` seconds). |
+| `delegate status <jobId>` | Print the job's state without waiting. |
 | `delegate models` | List configured model ids, labels, backends, prices, and tiers. Rows are sorted by backend, then by id; `*` marks the default. |
 | `delegate doctor` | Check the binary, `cursor-agent`, login, and model menu drift. |
 | `delegate session start` | Start a detached Muse session from a brief. |

@@ -393,21 +393,20 @@ fn status_unknown_job_exits_2() {
 #[test]
 fn unknown_subcommands_explain_watch_and_exit_2() {
     let e = Env::new("unknown-subcommand");
-    for name in ["status", "result"] {
-        let out = e.delegate(&[name, "x"], None);
-        assert_eq!(out.status.code(), Some(2), "{name}");
-        assert!(out.stdout.is_empty(), "{name}");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let (message, usage) = stderr.split_once('\n').expect("message followed by usage");
-        assert_eq!(
-            message,
-            format!(
-                "unknown subcommand {name}; `delegate watch <jobId>` prints a job's state and result, and the id that superseded it"
-            )
-        );
-        assert!(usage.starts_with("usage: delegate run "), "{usage}");
-        assert!(usage.contains("delegate watch <jobId>"), "{usage}");
-    }
+    let name = "result";
+    let out = e.delegate(&[name, "x"], None);
+    assert_eq!(out.status.code(), Some(2), "{name}");
+    assert!(out.stdout.is_empty(), "{name}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let (message, usage) = stderr.split_once('\n').expect("message followed by usage");
+    assert_eq!(
+        message,
+        format!(
+            "unknown subcommand {name}; `delegate status <jobId>` prints a job's state, `delegate watch <jobId>` prints a job's state and result, and the id that superseded it"
+        )
+    );
+    assert!(usage.starts_with("usage: delegate run "), "{usage}");
+    assert!(usage.contains("delegate watch <jobId>"), "{usage}");
 
     let out = e.delegate(&[], None);
     assert_eq!(out.status.code(), Some(2));
