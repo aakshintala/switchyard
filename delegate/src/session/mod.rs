@@ -381,10 +381,17 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     }
 }
 
-fn mark_start_failed(paths: &state::Paths, id: &str, _supervisor_pid: u32, message: String) {
+fn mark_start_failed(paths: &state::Paths, id: &str, supervisor_pid: u32, message: String) {
     if let Ok(mut current) = state::read_state(paths, id)
         && current.status != state::Status::Dead
+        && current.dead.is_none()
     {
+        // A supervisor that never published its pid leaves no way to find a
+        // stray process, so record the parent's child pid; a published pid
+        // is never overwritten.
+        if current.supervisor_pid.is_none() {
+            current.supervisor_pid = Some(supervisor_pid as i32);
+        }
         state::mark_dead(
             &mut current,
             state::DeadReason::StartFailed,
