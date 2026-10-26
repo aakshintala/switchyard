@@ -434,11 +434,7 @@ expect 0 "gate runs in the worktree"
 
 # disk preflight blocks a low-space gate, and its cache sweep only removes old xcrun files
 setup
-mkdir -p "$S/bin"
-printf '%s\n' '#!/bin/sh' \
-  "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/fake 1000000 950000 50000 95%% /fake\\n'" \
-  >"$S/bin/df"
-chmod +x "$S/bin/df"
+fake_df "$S/bin" 50000 /fake
 PATH="$S/bin:$BASE_PATH"; export PATH
 ship --gate 'touch "$ST/gate-ran"'
 expect 1 "low free space refuses the gate"
