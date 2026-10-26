@@ -247,6 +247,37 @@ fn pi_empty_final_message_is_done_with_concerns() {
 }
 
 #[test]
+fn pi_empty_final_after_tool_call_on_resume_is_done_with_concerns() {
+    // #318: a resume that ends on a tool call with no assistant text is
+    // DONE_WITH_CONCERNS, not DONE.
+    let e = Env::new("empty-final-resume");
+    let a = e.run_write("first brief");
+    let first = e.wait_terminal(&a);
+    assert_eq!(first["status"], "DONE");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pi-tool-call-empty-final.stdout");
+    let out = e.delegate_with_fixture(&["resume", &a], Some("follow up"), &fixture);
+    assert!(
+        out.status.success(),
+        "exit {:?}\nstderr: {}\nstdout: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let b = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let done = e.wait_terminal(&b);
+    assert_eq!(done["status"], "DONE_WITH_CONCERNS");
+    assert_eq!(done["result"]["text"], "");
+    let concerns = done["result"]["concerns"].as_array().unwrap();
+    assert!(
+        concerns
+            .iter()
+            .any(|c| c.as_str().unwrap().contains("empty final message")),
+        "{concerns:?}"
+    );
+}
+
+#[test]
 fn pi_run_stays_running_until_released() {
     let e = Env::new("slow");
     let id = e.run_write("SLOW do it");
