@@ -6,7 +6,6 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHIP="$SCRIPT_DIR/../bin/ship-pr"
-BASE_PATH="$PATH"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -17,6 +16,20 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-ship-pr.XXXXXX")"
 mkdir -p "$T/tmp"
 export TMPDIR="$T/tmp"
 trap 'rm -rf "$T"' EXIT
+
+# The gate refuses when df reports under 20 GB free, so the suite shadows df
+# with a stub reporting ample space and never depends on the host's real disk.
+fake_df() {
+  mkdir -p "$1"
+  printf '%s\n' '#!/bin/sh' \
+    "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/fake 1000000 950000 $2 95%% $3\\n'" \
+    >"$1/df"
+  chmod 755 "$1/df"
+}
+export HOME="$T/home"; mkdir -p "$HOME"
+fake_df "$T/bin" 104857600 /fake-ample
+BASE_PATH="$T/bin:$PATH"; export PATH="$BASE_PATH"
+[ "$(command -v df)" = "$T/bin/df" ] || fail "df resolves to the suite's stub, not the host's"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -287,19 +300,19 @@ no_merge() { ! grep -q '^gh pr \(merge\|ready\)' "$ST/gh.log" 2>/dev/null || fai
 GATE_PANIC='echo gate-start; echo "thread prune::young_fork panicked at src/prune.rs:42:5:"; echo "assertion left == right failed"; echo "  left: 1"; echo " right: 2"; for i in $(seq 1 25); do echo "gate-tail-$i"; done; exit 1'
 assert_gate_panic_failure() {
   local label="$1" gate_file
-  grep -q 'panicked at' <<<"$OUT" || fail "$label: panic line printed: [$OUT]"
-  grep -q 'assertion .*left == right.* failed' <<<"$OUT" || fail "$label: assertion printed: [$OUT]"
-  grep -q '^  left: 1$' <<<"$OUT" || fail "$label: left value printed: [$OUT]"
-  grep -q '^ right: 2$' <<<"$OUT" || fail "$label: right value printed: [$OUT]"
-  grep -q '^gate-tail-6$' <<<"$OUT" || fail "$label: last 20 lines printed: [$OUT]"
-  grep -q '^gate-tail-5$' <<<"$OUT" && fail "$label: output before the last 20 lines omitted: [$OUT]"
+  grep -q 'panicked at' <<<"$OUT" || fail "$label: panic line printed: [$OUT] err=[$ERR]"
+  grep -q 'assertion .*left == right.* failed' <<<"$OUT" || fail "$label: assertion printed: [$OUT] err=[$ERR]"
+  grep -q '^  left: 1$' <<<"$OUT" || fail "$label: left value printed: [$OUT] err=[$ERR]"
+  grep -q '^ right: 2$' <<<"$OUT" || fail "$label: right value printed: [$OUT] err=[$ERR]"
+  grep -q '^gate-tail-6$' <<<"$OUT" || fail "$label: last 20 lines printed: [$OUT] err=[$ERR]"
+  grep -q '^gate-tail-5$' <<<"$OUT" && fail "$label: output before the last 20 lines omitted: [$OUT] err=[$ERR]"
   gate_file="$(sed -n 's/^full gate output: //p' <<<"$OUT")"
-  case "$gate_file" in "$TMPDIR"/ship-pr-7-gate.*) ;; *) fail "$label: named log path printed: [$gate_file]" ;; esac
-  [ -f "$gate_file" ] || fail "$label: full output file exists: [$gate_file]"
-  [ "$(wc -l <"$gate_file" | tr -d ' ')" = 30 ] || fail "$label: file holds all 30 output lines: [$(wc -l <"$gate_file")]"
-  grep -qx 'gate-start' "$gate_file" || fail "$label: file holds the first line"
-  grep -q 'panicked at' "$gate_file" || fail "$label: file holds the panic"
-  for i in $(seq 1 25); do grep -qx "gate-tail-$i" "$gate_file" || fail "$label: file is missing gate-tail-$i"; done
+  case "$gate_file" in "$TMPDIR"/ship-pr-7-gate.*) ;; *) fail "$label: named log path printed: [$gate_file] err=[$ERR]" ;; esac
+  [ -f "$gate_file" ] || fail "$label: full output file exists: [$gate_file] err=[$ERR]"
+  [ "$(wc -l <"$gate_file" | tr -d ' ')" = 30 ] || fail "$label: file holds all 30 output lines: [$(wc -l <"$gate_file")] err=[$ERR]"
+  grep -qx 'gate-start' "$gate_file" || fail "$label: file holds the first line err=[$ERR]"
+  grep -q 'panicked at' "$gate_file" || fail "$label: file holds the panic err=[$ERR]"
+  for i in $(seq 1 25); do grep -qx "gate-tail-$i" "$gate_file" || fail "$label: file is missing gate-tail-$i err=[$ERR]"; done
   rm -f "$gate_file"
 }
 
@@ -421,11 +434,7 @@ expect 0 "gate runs in the worktree"
 
 # disk preflight blocks a low-space gate, and its cache sweep only removes old xcrun files
 setup
-mkdir -p "$S/bin"
-printf '%s\n' '#!/bin/sh' \
-  "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/fake 1000000 950000 50000 95%% /fake\\n'" \
-  >"$S/bin/df"
-chmod +x "$S/bin/df"
+fake_df "$S/bin" 50000 /fake
 PATH="$S/bin:$BASE_PATH"; export PATH
 ship --gate 'touch "$ST/gate-ran"'
 expect 1 "low free space refuses the gate"
