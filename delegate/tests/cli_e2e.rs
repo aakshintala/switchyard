@@ -355,10 +355,7 @@ fn status_prints_running_without_waiting() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
-    assert!(stdout.contains("RUNNING"), "{stdout:?}");
-    assert!(stdout.contains(&id), "{stdout:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{id}: RUNNING\n"));
     e.release();
     e.wait_terminal(&id);
 }
@@ -375,10 +372,7 @@ fn status_prints_done_for_a_finished_job() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
-    assert!(stdout.contains("DONE"), "{stdout:?}");
-    assert!(stdout.contains(&id), "{stdout:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{id}: DONE\n"));
 }
 
 #[test]
