@@ -361,6 +361,7 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
             mark_start_failed(
                 &paths,
                 &id,
+                child.id(),
                 format!("session supervisor exited before first turn ({status})"),
             );
             return Err(failed("session supervisor exited before first turn"));
@@ -373,14 +374,14 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
             {
                 state::reap_host(host_pid);
             }
-            mark_start_failed(&paths, &id, "session startup timed out".into());
+            mark_start_failed(&paths, &id, child.id(), "session startup timed out".into());
             return Err(failed("session startup timed out"));
         }
         thread::sleep(Duration::from_millis(poll));
     }
 }
 
-fn mark_start_failed(paths: &state::Paths, id: &str, message: String) {
+fn mark_start_failed(paths: &state::Paths, id: &str, _supervisor_pid: u32, message: String) {
     if let Ok(mut current) = state::read_state(paths, id)
         && current.status != state::Status::Dead
     {
@@ -886,5 +887,99 @@ mod tests {
             json_error_json("noSession", "no such session id"),
             json!({"ok":false,"error":{"code":"noSession","message":"no such session id"}})
         );
+    }
+
+    struct FailedSetup {
+        paths: state::Paths,
+        id: String,
+        root: std::path::PathBuf,
+    }
+
+    impl Drop for FailedSetup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn failed_setup(mut session: state::State) -> FailedSetup {
+        let root = std::env::temp_dir().join(format!(
+            "delegate-start-failed-{}",
+            crate::util::random_uuid()
+        ));
+        let paths = state::Paths::new(root.clone());
+        let id = crate::util::random_uuid();
+        session.id = id.clone();
+        state::create_session_dir(&paths, &id).unwrap();
+        state::write_state(&paths, &session).unwrap();
+        FailedSetup { paths, id, root }
+    }
+
+    fn live_state(supervisor_pid: Option<i32>) -> state::State {
+        let mut session = state::new_state(
+            "placeholder",
+            "muse/muse-spark-1.3-contributor",
+            "/work",
+            "/inbox",
+            1000,
+        );
+        session.supervisor_pid = supervisor_pid;
+        session
+    }
+
+    #[test]
+    fn mark_start_failed_fills_missing_supervisor_pid() {
+        let setup = failed_setup(live_state(None));
+        mark_start_failed(&setup.paths, &setup.id, 4242, "boom".into());
+        let after = state::read_state(&setup.paths, &setup.id).unwrap();
+        assert_eq!(after.status, state::Status::Dead);
+        let dead = after.dead.expect("dead record written");
+        assert_eq!(dead.reason, state::DeadReason::StartFailed);
+        assert_eq!(dead.message, "boom");
+        assert_eq!(after.supervisor_pid, Some(4242));
+    }
+
+    #[test]
+    fn mark_start_failed_keeps_published_supervisor_pid() {
+        let setup = failed_setup(live_state(Some(4242)));
+        mark_start_failed(&setup.paths, &setup.id, 7, "boom".into());
+        let after = state::read_state(&setup.paths, &setup.id).unwrap();
+        assert_eq!(after.status, state::Status::Dead);
+        assert_eq!(after.supervisor_pid, Some(4242));
+    }
+
+    #[test]
+    fn mark_start_failed_leaves_dead_record_untouched() {
+        let mut session = live_state(None);
+        state::mark_dead(
+            &mut session,
+            state::DeadReason::SupervisorDied,
+            None,
+            "gone",
+            1001,
+        );
+        let before = session.clone();
+        let setup = failed_setup(session);
+        mark_start_failed(&setup.paths, &setup.id, 4242, "boom".into());
+        let after = state::read_state(&setup.paths, &setup.id).unwrap();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.dead, before.dead);
+        assert_eq!(after.supervisor_pid, before.supervisor_pid);
+    }
+
+    #[test]
+    fn mark_start_failed_leaves_idle_with_dead_untouched() {
+        let mut session = live_state(None);
+        session.dead = Some(state::DeadInfo {
+            reason: state::DeadReason::SupervisorDied,
+            exit_code: None,
+            message: "hand-edited".into(),
+        });
+        let before = session.clone();
+        let setup = failed_setup(session);
+        mark_start_failed(&setup.paths, &setup.id, 4242, "boom".into());
+        let after = state::read_state(&setup.paths, &setup.id).unwrap();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.dead, before.dead);
+        assert_eq!(after.supervisor_pid, before.supervisor_pid);
     }
 }
