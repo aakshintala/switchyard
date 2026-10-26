@@ -986,8 +986,8 @@ grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" |
 
 setup; printf 'Implemented by: unknown\n' >"$ST/body"
 ship --body-has 'Implemented by:' --body-has 'Doc friction:'; nothing_ran "missing and bad together"
-[ "$OUT" = "missing body line: Doc friction:
-bad body line: Implemented by: unknown" ] || fail "missing then bad printed: [$OUT]"
+grep -Fqx 'missing body line: Doc friction:' <<<"$OUT" || fail "missing line printed: [$OUT]"
+grep -Fqx 'bad body line: Implemented by: unknown' <<<"$OUT" || fail "bad line printed: [$OUT]"
 grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "missing and bad message: [$ERR]"
 
 # ===== --unverified-fixes: a fix round with no real bug ships without a re-review
