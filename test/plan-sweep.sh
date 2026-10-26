@@ -327,10 +327,12 @@ NAMES12="Shape,make_widget,count_fn01,count_fn02,count_fn03,count_fn04,count_fn0
 : >"$T/grep.log"
 run --cwd "$R" --base "$BASE" --symbols make_widget,count_fn01 --files src/lib.rs --out "$T/pack-n1.md"
 [ "$code" = 0 ] || fail "n: 2 symbols exits 0, got $code [$out]"
+# #735 Done when: a counting git wrapper shows the full-tree git grep count does not grow with the symbol count.
 [ "$(full_greps "$BASE")" = 1 ] || fail "n: 2 symbols make 1 full-tree pass, got $(full_greps "$BASE")"
 : >"$T/grep.log"
 run --cwd "$R" --base "$BASE" --symbols "$NAMES12" --files src/lib.rs --out "$T/pack-n2.md"
 [ "$code" = 0 ] || fail "n: 12 symbols exits 0, got $code [$out]"
+# #735 Done when: a counting git wrapper shows the full-tree git grep count does not grow with the symbol count.
 [ "$(full_greps "$BASE")" = 1 ] || fail "n: 12 symbols make 1 full-tree pass, got $(full_greps "$BASE")"
 cat >"$T/plan-n2.md" <<EOF
 # Plan
@@ -345,6 +347,7 @@ EOF
 : >"$T/grep.log"
 run --cwd "$R" --base "$BASE" --plan "$T/plan-n2.md" --lang rust --out "$T/pack-n3.md"
 [ "$code" = 0 ] || fail "n: plan 2 symbols exits 0, got $code [$out]"
+# #735 Done when: a counting git wrapper shows the full-tree git grep count does not grow with the symbol count.
 [ "$(full_greps "$BASE")" = 2 ] || fail "n: plan 2 symbols make 2 full-tree passes, got $(full_greps "$BASE")"
 cat >"$T/plan-n12.md" <<EOF
 # Plan
@@ -359,6 +362,7 @@ EOF
 : >"$T/grep.log"
 run --cwd "$R" --base "$BASE" --plan "$T/plan-n12.md" --lang rust --out "$T/pack-n4.md"
 [ "$code" = 0 ] || fail "n: plan 12 symbols exits 0, got $code [$out]"
+# #735 Done when: a counting git wrapper shows the full-tree git grep count does not grow with the symbol count.
 [ "$(full_greps "$BASE")" = 2 ] || fail "n: plan 12 symbols make 2 full-tree passes, got $(full_greps "$BASE")"
 PATH="$OLD_PATH"
 
@@ -366,6 +370,7 @@ PATH="$OLD_PATH"
 run --cwd "$R" --base "$BASE" --symbols make_widget,Shape --files src/lib.rs --out "$T/pack-p.md"
 [ "$code" = 0 ] || fail "p: exits 0, got $code [$out]"
 case "$out" in "PACK $T/pack-p.md symbols=2 files=1 outside="*) ;; *) fail "p: stdout is only the PACK line, got [$out]" ;; esac
+# #735 Fix direction 1 and plan Ruling 6 (stderr start line, one line per symbol).
 want="$(printf 'plan-sweep: resolving 2 symbols\nplan-sweep: symbol 1/2 make_widget\nplan-sweep: symbol 2/2 Shape')"
 [ "$(cat "$T/err.txt")" = "$want" ] || fail "p: stderr progress lines, got [$(cat "$T/err.txt")]"
 run --cwd "$R" --base "$BASE" --files src/lib.rs --out "$T/pack-p0.md"
@@ -443,6 +448,7 @@ Uses \`NoSuchSym1\`.
 EOF
 run --cwd "$R" --base "$EDGEBASE" --plan "$T/plan-q3.md" --out "$T/pack-q3.md"
 [ "$code" = 1 ] || fail "q3: exits 1, got $code"
+# plan Ruling 4: unresolved lines keep plan-line order, as the base prints them.
 want="$(printf 'unresolved symbol: NoSuchSym1 (line 8)\nunresolved path: src/nosuch.rs (line 11)')"
 [ "$out" = "$want" ] || fail "q3: plan-line order, got [$out]"
 
