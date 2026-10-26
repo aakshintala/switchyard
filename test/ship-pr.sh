@@ -68,7 +68,7 @@ gh() (
     if [ -n "$jq" ]; then jq -r "$jq" <<<"$json"; else echo "$json"; fi
     exit 0
   fi
-  [ "$1" = "pr" ] || [ "$1" = "run" ] || { echo "fake gh: only pr, run and api supported" >&2; exit 2; }
+  [ "$1" = "pr" ] || [ "$1" = "run" ] || [ "$1" = "label" ] || { echo "fake gh: only pr, run, label and api supported" >&2; exit 2; }
   if [ "$1" = "run" ]; then
     shift
     sub="$1"; shift
@@ -152,12 +152,27 @@ gh() (
     esac
     exit 0
   fi
+  if [ "$1" = "label" ]; then
+    shift
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        [ ! -e "$ST/label-list-fail" ] || exit 1
+        json="$(rd labels '[]')"
+        jq=""
+        while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jq="$2"; shift; done
+        if [ -n "$jq" ]; then jq -r "$jq" <<<"$json"; else echo "$json"; fi;;
+      *) echo "fake gh: unknown label $sub" >&2; exit 2;;
+    esac
+    exit 0
+  fi
   shift
   sub="$1"; shift
   case "$sub" in
     view)
       [ ! -e "$ST/view-fail" ] || exit 1
       case " $* " in *" --json body "*) [ ! -e "$ST/body-fail" ] || exit 1;; esac
+      case " $* " in *" --json labels "*) [ ! -e "$ST/pr-labels-fail" ] || exit 1;; esac
       if h="$(git --git-dir="$ORIGIN" rev-parse refs/heads/feature 2>/dev/null)"; then
         echo "$h" >"$ST/lasthead"
       else
@@ -170,8 +185,9 @@ gh() (
       state="$(rd state OPEN)"
       json="$(jq -nc --arg h "$h" --arg s "$state" --arg d "$(rd draft false)" --arg ms "$(rd merge-state CLEAN)" --arg mg "$(rd mergeable MERGEABLE)" --arg b "$(rd body 'Resolves #97')" \
         --argjson bn "$([ -e "$ST/body-null" ] && echo true || echo false)" --argjson c "$(rd commits '[]')" --arg m "$MERGE_SHA" \
+        --argjson l "$(rd pr-labels '[]')" \
         '{state:$s, headRefName:"feature", baseRefName:"main", headRefOid:$h, isDraft:($d=="true"), mergeStateStatus:$ms, mergeable:$mg,
-          title:"t", body:(if $bn then null else $b end), commits:$c, mergeCommit:(if $s=="MERGED" then {oid:$m} else null end)}')"
+          title:"t", body:(if $bn then null else $b end), commits:$c, labels:$l, mergeCommit:(if $s=="MERGED" then {oid:$m} else null end)}')"
       jq=""
       while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jq="$2"; shift; done
       if [ -n "$jq" ]; then jq -r "$jq" <<<"$json"; else echo "$json"; fi;;
@@ -300,11 +316,17 @@ for args in "" "abc" "7" "7 --repo O/N --reviewed x" "7 --reviewed x --worktree 
             "7 --repo O/N --worktree $WT" "7 --repo O/N --reviewed x --worktree $WT --bogus 1" \
             "7 --repo O/N --reviewed x --worktree $WT --timeout x" \
             "7 --repo O/N --reviewed x --worktree $WT --timeout -1" \
-            "7 --repo O/N --reviewed x --worktree $WT --gate"; do
+            "7 --repo O/N --reviewed x --worktree $WT --gate" \
+            "7 --repo O/N --reviewed x --worktree $WT --no-mutants-label"; do
   # shellcheck disable=SC2086
   run $args; expect 2 "usage [$args]"; untouched "usage [$args]"
   grep -q '^usage: ship-pr' <<<"$ERR" || fail "usage text for [$args]: [$ERR]"
 done
+setup
+# shellcheck disable=SC2086
+eval "run 7 --repo O/N --reviewed x --worktree $WT --no-mutants-label ''"; expect 2 "empty reason"; untouched "empty reason"
+grep -q '^usage: ship-pr' <<<"$ERR" || fail "usage text for empty reason: [$ERR]"
+[ ! -e "$ST/gh.log" ] || fail "empty reason makes no gh call"
 
 setup; touch "$ST/view-fail"; ship; expect 2 "unreadable PR"; untouched "unreadable PR"
 setup; echo CLOSED >"$ST/state"; ship; expect 2 "PR not open"; untouched "PR not open"
@@ -847,6 +869,61 @@ grep -q '^pending: ci$' <<<"$OUT" || fail "absent required check named: [$OUT]"
 setup; echo true >"$ST/draft"; touch "$ST/ready-fail"
 ship; expect 1 "gh pr ready fails"; ! grep -q '^gh pr \(checks\|merge\)' "$ST/gh.log" || fail "no CI wait or merge after ready fails"
 [ -d "$WT" ] || fail "worktree kept when ready fails"
+
+# ===== mutants label: a draft needs the label when the repo defines it,
+# ===== so mutants run on the draft from the first push
+repo_labels() { printf '%s\n' "$1" >"$ST/labels"; }
+on_pr_labels() { printf '%s\n' "$1" >"$ST/pr-labels"; }
+MUTANTS_LABEL='[{"name":"mutants"}]'
+
+# (a) repo defines mutants, draft PR without the label: exit 5, no ready call
+setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"
+ship; expect 5 "draft without the mutants label"
+untouched "draft without the mutants label"; no_merge "draft without the mutants label"
+grep -q 'PR lacks the mutants label' <<<"$ERR" || fail "missing-label message: [$ERR]"
+grep -q -- '--no-mutants-label' <<<"$ERR" || fail "missing-label names the flag: [$ERR]"
+! grep -q 'check-runs' "$ST/gh.log" || fail "missing label: no CI call"
+[ -d "$WT" ] || fail "missing label: worktree kept"
+
+# a differently-named label is not the mutants label
+setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"; on_pr_labels '[{"name":"mutants-foo"}]'
+ship; expect 5 "near-miss label still exits 5"; no_merge "near-miss label"
+
+# (b) same with the label: passes
+setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"; on_pr_labels "$MUTANTS_LABEL"
+ship; expect 0 "draft with the mutants label"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "labelled draft merged line: [$OUT]"
+[ "$(grep -c '^gh pr ready' "$ST/gh.log")" -eq 1 ] || fail "labelled draft marked ready once"
+
+# (c) repo without the label: passes unchecked, without reading PR labels
+setup; echo true >"$ST/draft"
+ship; expect 0 "repo without the mutants label passes unchecked"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "unchecked repo merged line: [$OUT]"
+! grep -q -- '--json labels' "$ST/gh.log" || fail "unchecked repo: no PR label read"
+
+# a repo with other labels only is not checked either
+setup; echo true >"$ST/draft"; repo_labels '[{"name":"docs"}]'
+ship; expect 0 "repo with other labels passes unchecked"
+
+# a non-draft is not checked even when the repo defines the label
+setup; repo_labels "$MUTANTS_LABEL"
+ship; expect 0 "non-draft skips the mutants check"
+! grep -q -- '--json labels' "$ST/gh.log" || fail "non-draft: no PR label read"
+
+# (d) --no-mutants-label skips the check and prints the reason
+setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"
+ship --no-mutants-label 'mutants not run for a docs-only change'; expect 0 "no-mutants-label passes"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "skipped check merged line: [$OUT]"
+grep -q 'mutants not run for a docs-only change' <<<"$ERR" || fail "skip reason printed: [$ERR]"
+! grep -q 'label' "$ST/gh.log" || fail "skipped check: no label read"
+
+# an unreadable label list fails before any push
+setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"; touch "$ST/label-list-fail"
+ship; expect 2 "unreadable label list"; untouched "unreadable label list"; no_merge "unreadable label list"
+
+# an unreadable PR label read fails before any push
+setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"; touch "$ST/pr-labels-fail"
+ship; expect 2 "unreadable PR labels"; untouched "unreadable PR labels"; no_merge "unreadable PR labels"
 
 # ===== --unverified-fixes: a fix round with no real bug ships without a re-review
 F="$T/findings.txt"; printf 'P2: missing test for x\n' >"$F"
