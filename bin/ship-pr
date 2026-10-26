@@ -26,6 +26,9 @@
 #        Each --body-has <prefix> (repeatable) requires a PR body line that starts
 #        with <prefix>, literally and case-sensitively; it is checked after step 1,
 #        before the rebase, and each missing one prints `missing body line: <prefix>`.
+#        When the prefix is exactly `Implemented by:`, every such line must hold
+#        model ids (comma-separated items, none empty after trimming, none
+#        `unknown` in any letter case); each bad line prints `bad body line: <line>`.
 #        When the repo defines a `mutants` label (`gh label list`), a draft PR
 #        must carry it before ship-pr marks it ready, so mutants run on the
 #        draft from the first push; a repo without the label is not checked,
@@ -64,7 +67,7 @@
 #        with current origin/main counts as a gate failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a draft missing the mutants label, or stray closing keywords from pr-closes), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a bad `Implemented by:` value, a draft missing the mutants label, or stray closing keywords from pr-closes), 124 CI wait timeout.
 #        Rebase rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -268,7 +271,30 @@ if [ "${#body_has[@]}" -gt 0 ]; then
     done <<<"$body"
     [ -n "$found" ] || { echo "missing body line: $prefix"; missing=1; }
   done
-  [ "$missing" = 0 ] || die 5 "PR body lacks required lines; edit the PR body, then rerun"
+  # An `Implemented by:` line must hold model ids: every comma-separated item
+  # is non-empty after trimming whitespace, and no item is `unknown` in any
+  # letter case. Every such line is checked; a bad one prints its text.
+  bad=0
+  for prefix in "${body_has[@]}"; do
+    [ "$prefix" = "Implemented by:" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      text="${line%$'\r'}"
+      case "$text" in "Implemented by:"*) ;; *) continue ;; esac
+      rest="${text#Implemented by:},"
+      while [ -n "$rest" ]; do
+        item="${rest%%,*}"
+        rest="${rest#*,}"
+        trimmed="$(printf '%s' "$item" | tr -d '[:space:]')"
+        lowered="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
+        if [ -z "$trimmed" ] || [ "$lowered" = "unknown" ]; then
+          echo "bad body line: $text"
+          bad=1
+          break
+        fi
+      done
+    done <<<"$body"
+  done
+  [ "$missing" = 0 ] && [ "$bad" = 0 ] || die 5 "PR body lacks required lines; edit the PR body, then rerun"
 fi
 
 # A draft carries the mutants label when the repo defines one, so mutants

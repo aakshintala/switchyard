@@ -925,6 +925,71 @@ ship; expect 2 "unreadable label list"; untouched "unreadable label list"; no_me
 setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"; touch "$ST/pr-labels-fail"
 ship; expect 2 "unreadable PR labels"; untouched "unreadable PR labels"; no_merge "unreadable PR labels"
 
+# ===== Implemented by:: the value holds model ids, never unknown or empty.
+# A bad value prints `bad body line: <line>` and exits 5, like a missing line.
+bad_impl() {
+  nothing_ran "$2"
+  [ "$OUT" = "bad body line: $1" ] || fail "$2: bad line printed: [$OUT]"
+  grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "$2: miss message: [$ERR]"
+}
+good_impl() {
+  expect 0 "$1"
+  [ "$OUT" = "merged $MERGE_SHA" ] || fail "$1: merged line: [$OUT]"
+}
+setup; printf 'Implemented by: unknown\n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by: unknown' "unknown refused"
+setup; printf 'Implemented by: UNKNOWN\n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by: UNKNOWN' "UNKNOWN refused"
+setup; printf 'Implemented by: Unknown\n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by: Unknown' "Unknown refused"
+setup; printf 'Implemented by:\n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by:' "empty value refused"
+setup; printf 'Implemented by:   \n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by:   ' "spaces value refused"
+setup; printf 'Implemented by:\tunknown\n' >"$ST/body"
+ship --body-has 'Implemented by:'; nothing_ran "tab before unknown"
+[ "$OUT" = "$(printf 'bad body line: Implemented by:\tunknown')" ] || fail "tab line printed: [$OUT]"
+grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "tab miss message: [$ERR]"
+setup; printf 'Implemented by: m/a, unknown\n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by: m/a, unknown' "unknown beside a valid id refused"
+setup; printf 'Implemented by: m/a,, m/b\n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by: m/a,, m/b' "empty item refused"
+setup; printf 'Implemented by: m/a,\n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by: m/a,' "trailing comma refused"
+setup; printf 'Implemented by: m/a\nImplemented by: unknown\n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by: unknown' "second line checked"
+setup; printf 'Implemented by: unknown\r\n' >"$ST/body"
+ship --body-has 'Implemented by:'; bad_impl 'Implemented by: unknown' "CRLF bad line printed without CR"
+
+setup; printf 'Implemented by: m/a\n' >"$ST/body"
+ship --body-has 'Implemented by:'; good_impl "one id passes"
+setup; printf 'Implemented by: m/a, claude-sonnet-5-5\n' >"$ST/body"
+ship --body-has 'Implemented by:'; good_impl "two ids pass"
+setup; printf 'Implemented by: m/unknown-2\n' >"$ST/body"
+ship --body-has 'Implemented by:'; good_impl "unknown inside an id passes"
+setup; printf 'Implemented by: unknownish\n' >"$ST/body"
+ship --body-has 'Implemented by:'; good_impl "unknownish passes"
+setup; printf 'Implemented by: m/a\r\n' >"$ST/body"
+ship --body-has 'Implemented by:'; good_impl "CRLF valid line passes"
+
+setup; printf 'Implemented by: unknown\n' >"$ST/body"
+ship; good_impl "no flag skips the value check"
+setup; printf 'Implemented by: unknown\n' >"$ST/body"
+ship --body-has 'Implemented by: unk'; good_impl "another prefix skips the value check"
+setup; printf 'Implemented by: unknown\nDoc friction: none\n' >"$ST/body"
+ship --body-has 'Doc friction:'; good_impl "another line only skips the value check"
+
+setup; printf 'Resolves #97\n' >"$ST/body"
+ship --body-has 'Implemented by:'; nothing_ran "no Implemented by line"
+[ "$OUT" = "missing body line: Implemented by:" ] || fail "missing line printed: [$OUT]"
+grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "missing message: [$ERR]"
+
+setup; printf 'Implemented by: unknown\n' >"$ST/body"
+ship --body-has 'Implemented by:' --body-has 'Doc friction:'; nothing_ran "missing and bad together"
+[ "$OUT" = "missing body line: Doc friction:
+bad body line: Implemented by: unknown" ] || fail "missing then bad printed: [$OUT]"
+grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "missing and bad message: [$ERR]"
+
 # ===== --unverified-fixes: a fix round with no real bug ships without a re-review
 F="$T/findings.txt"; printf 'P2: missing test for x\n' >"$F"
 BLANK="$T/blank.txt"; printf '\n  \t\n' >"$BLANK"
