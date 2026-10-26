@@ -444,6 +444,7 @@ resolve_candidates() {
   sym_cands="$(nlines "$work/patterns")"
   : >"$work/resolved"
   if [ "$sym_cands" -gt 0 ]; then
+    printf 'plan-sweep: resolving %s symbols\n' "$sym_cands" >&2
     batch_hits "$work/patterns" "$work/whits" word
     i=0
     while IFS= read -r name; do
@@ -610,9 +611,11 @@ sym_n=0
 file_n=0
 : >"$work/outside-raw"
 
+sym_total="$(printf '%s' "$SYMS" | grep -c . || true)"
 while IFS=$'\t' read -r name title; do
   [ -n "$name" ] || continue
   sym_n=$((sym_n + 1))
+  printf 'plan-sweep: symbol %s/%s %s\n' "$sym_n" "$sym_total" "$name" >&2
   printf '%s\n' "$name" >"$work/symname-$sym_n"
   printf '%s\n' "$title" >"$work/symtitle-$sym_n"
   sec="$work/sec-$sym_n.md"

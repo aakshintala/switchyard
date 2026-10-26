@@ -362,4 +362,19 @@ run --cwd "$R" --base "$BASE" --plan "$T/plan-n12.md" --lang rust --out "$T/pack
 [ "$(full_greps "$BASE")" = 2 ] || fail "n: plan 12 symbols make 2 full-tree passes, got $(full_greps "$BASE")"
 PATH="$OLD_PATH"
 
+# p. progress lines go to stderr only, in section order
+run --cwd "$R" --base "$BASE" --symbols make_widget,Shape --files src/lib.rs --out "$T/pack-p.md"
+[ "$code" = 0 ] || fail "p: exits 0, got $code [$out]"
+case "$out" in "PACK $T/pack-p.md symbols=2 files=1 outside="*) ;; *) fail "p: stdout is only the PACK line, got [$out]" ;; esac
+want="$(printf 'plan-sweep: resolving 2 symbols\nplan-sweep: symbol 1/2 make_widget\nplan-sweep: symbol 2/2 Shape')"
+[ "$(cat "$T/err.txt")" = "$want" ] || fail "p: stderr progress lines, got [$(cat "$T/err.txt")]"
+run --cwd "$R" --base "$BASE" --files src/lib.rs --out "$T/pack-p0.md"
+[ "$code" = 0 ] || fail "p: files-only exits 0, got $code [$out]"
+[ -z "$(cat "$T/err.txt")" ] || fail "p: files-only prints nothing on stderr, got [$(cat "$T/err.txt")]"
+run --cwd "$R" --base "$BASE" --symbols nosuch --files src/lib.rs --out "$T/pack-p1.md"
+[ "$code" = 1 ] || fail "p: unknown symbol exits 1, got $code"
+[ "$out" = "unresolved symbol: nosuch" ] || fail "p: unresolved line on stdout, got [$out]"
+[ "$(cat "$T/err.txt")" = "plan-sweep: resolving 1 symbols" ] || fail "p: start line only on stderr, got [$(cat "$T/err.txt")]"
+case "$(cat "$T/err.txt")" in *"plan-sweep: symbol "*) fail "p: no per-symbol line without a section" ;; esac
+
 echo "plan-sweep: all cases passed"
