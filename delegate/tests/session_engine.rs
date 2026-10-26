@@ -1225,8 +1225,14 @@ fn supervisor_notifies_only_after_completed_turn_and_keeps_inbox_failures_nonfat
     let idle = unaffected.until("idle despite inbox failure", |state| {
         state.status == Status::Idle && state.last_turn.is_some()
     });
-    let events = unaffected.events();
-    assert!(events.iter().any(|event| event["kind"] == "inbox.failed"));
+    // The supervisor writes inbox.failed after it publishes idle, so wait for the
+    // event itself rather than reading the events once after idle (#664).
+    unaffected.until("inbox.failed event", |_| {
+        unaffected
+            .events()
+            .iter()
+            .any(|event| event["kind"] == "inbox.failed")
+    });
     let serialized = serde_json::to_value(idle).unwrap();
     assert!(serialized.get("inboxFailed").is_none());
     assert_eq!(
