@@ -71,6 +71,15 @@ runjob() {
     jrc=$?; line="$(grep -m1 '^TKT tkt-job ' <<<"$job_out" || head -n 1 <<<"$job_out")"
     # DONE_WITH_CONCERNS exits 1 with its report on disk: the report is the product.
     if [ "$jrc" -ne 1 ] || [ ! -f "$rep" ] || [ "${line#"TKT tkt-job CONCERNS "}" = "$line" ]; then
+      case "$line" in
+        "TKT tkt-job ASK "*)
+          # An asking Verifier still spent its round: count it unless the
+          # verify is drift-exempt, where the retry stays exempt.
+          if [ "${drift:-0}" -eq 0 ] && [ -n "${round:-}" ]; then
+            t set verifier_round "$((round + 1))"
+          fi
+          ;;
+      esac
       w="${line#TKT tkt-job }"; emit "${w% log=*}" "$jrc" "$(head -n 38 <<<"$job_out")"
     fi
   }
