@@ -278,7 +278,7 @@ fi
 if [ -n "$no_mutants_label" ]; then
   say "skipping the mutants-label check: $no_mutants_label"
 elif [ "$draft" = "true" ]; then
-  repo_labels="$(gh label list --repo "$repo" --json name --jq '.[].name')" \
+  repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name')" \
     || die 2 "cannot read labels in $repo"
   if grep -qx 'mutants' <<<"$repo_labels"; then
     pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name')" \

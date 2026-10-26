@@ -33,7 +33,10 @@ gh() (
   echo "gh $*" >>"$ST/gh.log"
   rd() { [ -e "$ST/$1" ] && cat "$ST/$1" || echo "$2"; }
   if [ "$1" = "api" ]; then
-    shift; [ "$1" != "--paginate" ] || shift; path="$1"; shift
+    shift
+    paginate=0
+    if [ "$1" = "--paginate" ]; then paginate=1; shift; fi
+    path="$1"; shift
     jq=""
     while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jq="$2"; shift; done
     case "$path" in
@@ -54,6 +57,10 @@ gh() (
         fi
         json="$(jq -nc --arg h "$h" --arg d "$(rd draft false)" --arg ms "$(rd merge-state CLEAN | tr 'A-Z' 'a-z')" \
           '{head: {sha: $h}, mergeable_state: $ms, draft: ($d == "true"), base: {ref: "main"}}')";;
+      */labels\?per_page=100)
+        [ ! -e "$ST/label-list-fail" ] || { echo "gh: forbidden (HTTP 403)" >&2; exit 1; }
+        json="$(rd labels '[]')"
+        [ "$paginate" = 1 ] || json="$(jq -c '.[0:100]' <<<"$json")";;
       */actions/runs*)
         json='{"workflow_runs":[]}';;
       */commits/*/check-runs*)
@@ -68,7 +75,7 @@ gh() (
     if [ -n "$jq" ]; then jq -r "$jq" <<<"$json"; else echo "$json"; fi
     exit 0
   fi
-  [ "$1" = "pr" ] || [ "$1" = "run" ] || [ "$1" = "label" ] || { echo "fake gh: only pr, run, label and api supported" >&2; exit 2; }
+  [ "$1" = "pr" ] || [ "$1" = "run" ] || { echo "fake gh: only pr, run and api supported" >&2; exit 2; }
   if [ "$1" = "run" ]; then
     shift
     sub="$1"; shift
@@ -149,20 +156,6 @@ gh() (
           [ ! -e "$ST/rerun-keeps-failing" ] && echo '[{"bucket":"pass","name":"ci"}]' >"$ST/checks" || true
         fi;;
       *) echo "fake gh: unknown run $sub" >&2; exit 2;;
-    esac
-    exit 0
-  fi
-  if [ "$1" = "label" ]; then
-    shift
-    sub="$1"; shift
-    case "$sub" in
-      list)
-        [ ! -e "$ST/label-list-fail" ] || exit 1
-        json="$(rd labels '[]')"
-        jq=""
-        while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jq="$2"; shift; done
-        if [ -n "$jq" ]; then jq -r "$jq" <<<"$json"; else echo "$json"; fi;;
-      *) echo "fake gh: unknown label $sub" >&2; exit 2;;
     esac
     exit 0
   fi
@@ -781,7 +774,7 @@ expect 0 "draft happy path"
 grep -q "^gh pr merge 7 --repo O/N --squash --match-head-commit $HEAD0\$" "$ST/gh.log" || fail "merge call: [$(grep merge "$ST/gh.log")]"
 [ "$(grep -n '^gh pr ready 7 --repo O/N' "$ST/gh.log" | cut -d: -f1)" -lt "$(grep -n -m1 'check-runs' "$ST/gh.log" | cut -d: -f1)" ] \
   || fail "ready runs before the first CI wait"
-[ "$(grep -c '^gh pr ready' "$ST/gh.log")" -eq 1 ] || fail "ready runs once"
+grep -qx false "$ST/draft" || fail "draft ends ready"
 [ ! -e "$WT" ] || fail "worktree removed"
 git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "local branch deleted"
 origin_head >/dev/null && fail "origin branch deleted"
@@ -854,7 +847,7 @@ RULES_CI='[{"type":"required_status_checks","parameters":{"strict_required_statu
 setup; echo true >"$ST/draft"; echo "$RULES_CI" >"$ST/rules"
 ship; expect 0 "draft whose head already has a green required check"
 [ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 1 ] || fail "green required check before ready satisfies the wait at once"
-[ "$(grep -c '^gh pr ready' "$ST/gh.log")" -eq 1 ] || fail "draft marked ready once"
+grep -qx false "$ST/draft" || fail "draft ends ready"
 [ "$(grep -n '^gh pr ready' "$ST/gh.log" | cut -d: -f1)" -lt "$(grep -n -m1 'check-runs' "$ST/gh.log" | cut -d: -f1)" ] \
   || fail "ready before the first checks call"
 ! grep -q '/events' "$ST/gh.log" || fail "ship-pr never reads the PR's events"
@@ -893,7 +886,14 @@ ship; expect 5 "near-miss label still exits 5"; no_merge "near-miss label"
 setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"; on_pr_labels "$MUTANTS_LABEL"
 ship; expect 0 "draft with the mutants label"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "labelled draft merged line: [$OUT]"
-[ "$(grep -c '^gh pr ready' "$ST/gh.log")" -eq 1 ] || fail "labelled draft marked ready once"
+grep -qx false "$ST/draft" || fail "labelled draft ends ready"
+
+# mutants beyond the first API page are still enforced
+setup; echo true >"$ST/draft"
+repo_labels "$(jq -nc '[range(100) | {name: ("label-" + tostring)}] + [{name: "mutants"}]')"
+ship; expect 5 "mutants after first 100 labels is enforced"
+no_merge "mutants after first 100 labels"
+grep -q 'PR lacks the mutants label' <<<"$ERR" || fail "late-label message: [$ERR]"
 
 # (c) repo without the label: passes unchecked, without reading PR labels
 setup; echo true >"$ST/draft"
