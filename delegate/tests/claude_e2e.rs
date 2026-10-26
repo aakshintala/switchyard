@@ -173,7 +173,9 @@ fn run_watch_resume_and_auto_argv() {
 fn stale_argv_record_does_not_leak_into_run_assertion() {
     let e = Env::new("stale");
     // A stale per-run record left by an earlier `--resume` run.
+    // Count 1 makes the fake write run 2 to `argv.2`, so the stale record survives.
     std::fs::write(e.dir.join("argv.1"), "--resume\nstale-session\n").unwrap();
+    std::fs::write(e.dir.join("count"), "1").unwrap();
     let id = e.ok(&["run", "--model", "claude-sonnet-5-5"], "hi");
     e.wait_terminal(&id);
     // The assertion reads this run's record, not the seeded file.
