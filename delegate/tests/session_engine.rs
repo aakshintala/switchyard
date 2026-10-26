@@ -1176,8 +1176,14 @@ fn supervisor_accepts_escaped_max_text_and_rejects_a_line_over_max_line() {
         sent += count;
     }
     let mut reply = Vec::new();
-    let _ = stream.read_to_end(&mut reply);
-    let reply: Value = serde_json::from_slice(reply.strip_suffix(b"\n").unwrap_or(&reply)).unwrap();
+    let read = stream.read_to_end(&mut reply);
+    // The raw bytes print before the newline strip, so a lone `\n` reply stays visible.
+    let reply: Value = match serde_json::from_slice(reply.strip_suffix(b"\n").unwrap_or(&reply)) {
+        Ok(reply) => reply,
+        Err(error) => panic!(
+            "reply to oversized line did not parse: read={read:?} bytes={reply:?} error={error}"
+        ),
+    };
     assert_eq!(reply["code"], "usage");
     assert_eq!(session.stop_and_join(), 0);
 }
