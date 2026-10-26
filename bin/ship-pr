@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>] [--allow-commit-closes]
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require each --body-has
@@ -26,6 +26,11 @@
 #        Each --body-has <prefix> (repeatable) requires a PR body line that starts
 #        with <prefix>, literally and case-sensitively; it is checked after step 1,
 #        before the rebase, and each missing one prints `missing body line: <prefix>`.
+#        When the repo defines a `mutants` label (`gh label list`), a draft PR
+#        must carry it before ship-pr marks it ready, so mutants run on the
+#        draft from the first push; a repo without the label is not checked,
+#        and neither is a PR that is already ready. A draft without the label
+#        exits 5. --no-mutants-label <reason> skips the check and prints the reason.
 #        Step 2 runs pr-closes just after the --body-has check, before any gate,
 #        rebase, push or CI wait. With --allow-commit-closes, a stray match whose
 #        report's second field is `commit <sha>` is printed to stderr as a warning
@@ -59,7 +64,7 @@
 #        with current origin/main counts as a gate failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, or stray closing keywords from pr-closes), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a draft missing the mutants label, or stray closing keywords from pr-closes), 124 CI wait timeout.
 #        Rebase rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -97,7 +102,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>] [--allow-commit-closes]" >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]" >&2
   exit 2
 }
 say() { echo "ship-pr: $*" >&2; }
@@ -193,7 +198,7 @@ run_gate() {
 [ $# -ge 1 ] || usage
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() unverified="" allow_commit_closes=""
+repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() unverified="" allow_commit_closes="" no_mutants_label=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow-commit-closes) allow_commit_closes=1; shift; continue ;;
@@ -207,6 +212,7 @@ while [ $# -gt 0 ]; do
     --timeout) timeout="$2" ;;
     --body-has) case "$2" in ''|*$'\n'*) usage ;; esac; body_has+=("$2") ;;
     --unverified-fixes) [ -n "$2" ] || usage; unverified="$2" ;;
+    --no-mutants-label) [ -n "$2" ] || usage; no_mutants_label="$2" ;;
     *) usage ;;
   esac
   shift 2
@@ -263,6 +269,23 @@ if [ "${#body_has[@]}" -gt 0 ]; then
     [ -n "$found" ] || { echo "missing body line: $prefix"; missing=1; }
   done
   [ "$missing" = 0 ] || die 5 "PR body lacks required lines; edit the PR body, then rerun"
+fi
+
+# A draft carries the mutants label when the repo defines one, so mutants
+# run on the draft from the first push. Checked here, beside --body-has, so
+# a draft with no map costs no push and no CI wait. A repo without the label
+# is not checked.
+if [ -n "$no_mutants_label" ]; then
+  say "skipping the mutants-label check: $no_mutants_label"
+elif [ "$draft" = "true" ]; then
+  repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name')" \
+    || die 2 "cannot read labels in $repo"
+  if grep -qx 'mutants' <<<"$repo_labels"; then
+    pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name')" \
+      || die 2 "cannot read PR $pr labels"
+    grep -qx 'mutants' <<<"$pr_labels" \
+      || die 5 "PR lacks the mutants label; open it with --label mutants or pass --no-mutants-label <reason>"
+  fi
 fi
 
 # Step 2: no stray closing keywords, before any gate, rebase, push or CI wait.
