@@ -322,6 +322,17 @@ fn watch_unknown_job_exits_2() {
 }
 
 #[test]
+fn watch_unknown_job_hints_reboot_and_jobs_dir() {
+    let e = Env::new("unknown-hint");
+    let out = e.delegate(&["watch", "nope"], None);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown job nope"), "{stderr:?}");
+    assert!(stderr.contains("reboot"), "{stderr:?}");
+    assert!(stderr.contains("DELEGATE_JOBS_DIR"), "{stderr:?}");
+}
+
+#[test]
 fn unknown_subcommands_explain_watch_and_exit_2() {
     let e = Env::new("unknown-subcommand");
     for name in ["status", "result"] {
