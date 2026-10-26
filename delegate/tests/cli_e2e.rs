@@ -355,7 +355,10 @@ fn status_prints_running_without_waiting() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{id}: RUNNING\n"));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{id}: RUNNING\n")
+    );
     e.release();
     e.wait_terminal(&id);
 }
@@ -372,7 +375,10 @@ fn status_prints_done_for_a_finished_job() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{id}: DONE\n"));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{id}: DONE\n")
+    );
 }
 
 #[test]
