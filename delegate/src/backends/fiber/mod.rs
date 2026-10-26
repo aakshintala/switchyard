@@ -1153,4 +1153,41 @@ mod tests {
             res.permission_denials
         );
     }
+
+    #[test]
+    fn missing_binary_names_every_source() {
+        // No `FIBER_BIN`, no `fiber` on `PATH`, and an isolated `HOME`
+        // without `~/.local/bin/fiber`: resolution falls through to the
+        // home fallback, and spawning it must name each source consulted.
+        let _lock = crate::test_env::lock();
+        let dir = std::env::temp_dir().join(format!("cdm-fiber-nobin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _path = crate::test_env::EnvGuard::set("PATH", dir.to_str().unwrap());
+        let _fiber = crate::test_env::EnvGuard::remove("FIBER_BIN");
+        let _home = crate::test_env::EnvGuard::set("HOME", dir.to_str().unwrap());
+        let bin = resolve_bin(None);
+        assert!(
+            bin.ends_with(".local/bin/fiber"),
+            "home fallback when PATH has no fiber: {bin}"
+        );
+        assert!(
+            !std::path::Path::new(&bin).exists(),
+            "no binary at the fallback: {bin}"
+        );
+        let mut spec = crate::job::tests::spec_of(|s| {
+            s.bin = bin.clone();
+        });
+        spec.cwd = dir.to_str().unwrap().to_string();
+        let spawned = spawn(&spec);
+        let res = (spawned.drive)(&|_| {});
+        assert_eq!(res.is_error, Some(true));
+        assert!(!res.clean_exit);
+        assert!(res.text.contains("fiber binary not found"), "{}", res.text);
+        assert!(res.text.contains("FIBER_BIN"), "{}", res.text);
+        assert!(res.text.contains("PATH"), "{}", res.text);
+        assert!(res.text.contains("~/.local/bin/fiber"), "{}", res.text);
+        assert!(res.text.contains(&bin), "{}", res.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
