@@ -11,13 +11,16 @@ use std::time::{Duration, Instant};
 const MODEL: &str = "opencode-go/muse-spark-1.3-contributor";
 
 const FAKE_PI: &str = r#"#!/bin/sh
-# Replays a recorded `pi -p --mode json` stream. Every invocation appends its
-# argv, so run + resume assertions can read both.
+# Replays a recorded `pi -p --mode json` stream. Every invocation writes its
+# own argv record, so run + resume assertions can read each run separately.
+d="$(dirname "$0")"
+n=$(cat "$d/count" 2>/dev/null || echo 0)
+n=$((n + 1)); printf '%s' "$n" > "$d/count"
 {
   printf '%s\n' "$@"
   printf '%s\n' '---'
-} >> "$(dirname "$0")/argv.txt"
-rel="$(dirname "$0")/go"
+} > "$d/argv.$n"
+rel="$d/go"
 # SLOW jobs wait for the release file, so the test can assert RUNNING first.
 case "$*" in
   *SLOW*)
@@ -33,7 +36,7 @@ for a in "$@"; do
   prev="$a"
 done
 # A fail-once file is the first call's stream; the call consumes it.
-fail="$(dirname "$0")/fail-once"
+fail="$d/fail-once"
 if [ -e "$fail" ]; then
   sed "s/a86b4f04-f9fe-4fe2-88f2-9c07c39dda68/$sid/g" "$fail"
   rm "$fail"
@@ -67,13 +70,23 @@ impl Env {
         std::fs::write(self.dir.join("go"), "").unwrap();
     }
 
-    /// Every recorded argv line across all invocations.
-    fn argv(&self) -> Vec<String> {
-        std::fs::read_to_string(self.dir.join("argv.txt"))
-            .unwrap()
-            .lines()
-            .map(String::from)
-            .collect()
+    /// The argv text of every run, in order (one `argv.<n>` file per run).
+    fn invocations(&self) -> Vec<String> {
+        let mut runs = Vec::new();
+        let mut n = 1u32;
+        loop {
+            match std::fs::read_to_string(self.dir.join(format!("argv.{n}"))) {
+                Ok(text) => runs.push(text),
+                Err(_) => break,
+            }
+            n += 1;
+        }
+        runs
+    }
+
+    /// The argv text of the latest run.
+    fn last_argv(&self) -> String {
+        self.invocations().pop().expect("no argv record yet")
     }
 
     fn delegate(&self, args: &[&str], stdin: Option<&str>) -> Output {
@@ -142,6 +155,16 @@ fn until(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+/// The `--flag` value from one run's argv text (one argv element per line).
+fn argv_flag(argv: &str, flag: &str) -> String {
+    argv.lines()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == flag)
+        .unwrap_or_else(|| panic!("no {flag} in {argv}"))[1]
+        .to_string()
+}
+
 #[test]
 fn pi_run_finishes_with_pi_reported_cost() {
     let e = Env::new("run");
@@ -159,7 +182,7 @@ fn pi_run_finishes_with_pi_reported_cost() {
 
     // The session id was chosen before launch: argv's fresh uuid is what the
     // record carries.
-    let argv = e.argv();
+    let argv: Vec<String> = e.last_argv().lines().map(String::from).collect();
     let sid = argv
         .windows(2)
         .filter(|w| w[0] == "--session-id")
@@ -190,9 +213,9 @@ fn pi_run_stays_running_until_released() {
     until("RUNNING", || e.record(&id)["status"] == "RUNNING");
     // The fake pi writes argv one line at a time; `---` ends the block.
     until("argv", || {
-        std::fs::read_to_string(e.dir.join("argv.txt")).is_ok_and(|s| s.lines().any(|l| l == "---"))
+        std::fs::read_to_string(e.dir.join("argv.1")).is_ok_and(|s| s.lines().any(|l| l == "---"))
     });
-    let argv = e.argv();
+    let argv: Vec<String> = e.last_argv().lines().map(String::from).collect();
     let sid = argv.windows(2).find(|w| w[0] == "--session-id").unwrap()[1].clone();
     assert_eq!(e.record(&id)["resume"]["sessionId"], sid.as_str());
     e.release();
@@ -215,13 +238,9 @@ fn pi_resume_reuses_the_session_id() {
     assert_eq!(done["status"], "DONE");
     assert_eq!(done["resume"]["sessionId"], first_sid.as_str());
     // Both invocations passed the same --session-id.
-    let argv = e.argv();
-    let ids: Vec<&String> = argv
-        .windows(2)
-        .filter(|w| w[0] == "--session-id")
-        .map(|w| &w[1])
-        .collect();
-    assert_eq!(ids.len(), 2, "{argv:?}");
+    let calls = e.invocations();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let ids: Vec<String> = calls.iter().map(|c| argv_flag(c, "--session-id")).collect();
     assert_eq!(ids[0], ids[1]);
     assert_eq!(ids[1].as_str(), first_sid.as_str());
 }
@@ -263,24 +282,24 @@ fn pi_503_is_resumed_on_the_same_session_and_recorded() {
     assert_eq!(retries[0]["providerStatus"], 503);
     assert_eq!(retries[0]["error"], "opencode-go API error (503): upstream");
 
-    let argv = e.argv();
-    let ids: Vec<&String> = argv
-        .windows(2)
-        .filter(|w| w[0] == "--session-id")
-        .map(|w| &w[1])
-        .collect();
-    assert_eq!(ids.len(), 2, "{argv:?}");
+    let calls = e.invocations();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let ids: Vec<String> = calls.iter().map(|c| argv_flag(c, "--session-id")).collect();
     assert_eq!(ids[0], ids[1]);
     assert_eq!(retries[0]["sessionId"], ids[0].as_str());
     assert!(
-        argv.iter().any(|a| a
+        calls[1].lines().any(|a| a
             .starts_with("Your previous turn stopped on a transient provider error (HTTP 503).")),
-        "{argv:?}"
+        "{calls:?}"
     );
     // The original brief ran once; the retry resumed instead of rerunning it.
     assert_eq!(
-        argv.iter().filter(|a| a.contains("first brief")).count(),
+        calls
+            .iter()
+            .flat_map(|c| c.lines())
+            .filter(|a| a.contains("first brief"))
+            .count(),
         1,
-        "{argv:?}"
+        "{calls:?}"
     );
 }
