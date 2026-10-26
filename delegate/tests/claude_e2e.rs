@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 
 const FAKE: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
+n=$(cat "$dir/count" 2>/dev/null || echo 0)
+n=$((n + 1)); printf '%s' "$n" > "$dir/count"
 {
   printf '%s\n' "$@"
   printf '\n'
-} >> "$dir/argv.txt"
+} > "$dir/argv.$n"
 if [ -p "$dir/release" ]; then
   echo $$ > "$dir/agent.pid"
   cat "$dir/release" >/dev/null
@@ -49,8 +51,23 @@ impl Env {
         assert!(status.success());
     }
 
-    fn argv_text(&self) -> String {
-        std::fs::read_to_string(self.dir.join("argv.txt")).unwrap()
+    /// The argv text of every run, in order (one `argv.<n>` file per run).
+    fn invocations(&self) -> Vec<String> {
+        let mut runs = Vec::new();
+        let mut n = 1u32;
+        loop {
+            match std::fs::read_to_string(self.dir.join(format!("argv.{n}"))) {
+                Ok(text) => runs.push(text),
+                Err(_) => break,
+            }
+            n += 1;
+        }
+        runs
+    }
+
+    /// The argv text of the latest run.
+    fn last_argv(&self) -> String {
+        self.invocations().pop().expect("no argv record yet")
     }
 
     fn delegate(&self, args: &[&str], stdin: Option<&str>) -> Output {
@@ -141,18 +158,30 @@ fn run_watch_resume_and_auto_argv() {
         done["resume"]["sessionId"],
         "25dddfc3-4271-4019-9de0-6795bd6483fa"
     );
-    let argv = e.argv_text();
+    let argv = e.last_argv();
     assert!(argv.contains("\n--permission-mode\nauto\n"), "{argv}");
     assert!(!argv.contains("--resume"), "{argv}");
 
     let next = e.ok(&["resume", &id], "and plus one?");
     let resumed = e.wait_terminal(&next);
     assert_eq!(resumed["status"], "DONE");
-    let argv = e.argv_text();
+    let argv = e.last_argv();
     assert!(
         argv.contains("\n--resume\n25dddfc3-4271-4019-9de0-6795bd6483fa\n"),
         "{argv}"
     );
+}
+
+#[test]
+fn stale_argv_record_does_not_leak_into_run_assertion() {
+    let e = Env::new("stale");
+    // A stale per-run record left by an earlier `--resume` run.
+    std::fs::write(e.dir.join("argv.1"), "--resume\nstale-session\n").unwrap();
+    let id = e.ok(&["run", "--model", "claude-sonnet-5-5"], "hi");
+    e.wait_terminal(&id);
+    // The assertion reads this run's record, not the seeded file.
+    let argv = e.last_argv();
+    assert!(!argv.contains("--resume"), "{argv}");
 }
 
 #[test]
@@ -162,7 +191,7 @@ fn cancel_then_resume_reuses_the_launch_session() {
     let id = e.ok(&["run", "--model", "claude-sonnet-5-5"], "hold");
     until("agent.pid", || e.dir.join("agent.pid").exists());
     assert_eq!(e.record(&id)["status"], "RUNNING");
-    let sid = argv_flag(&e.argv_text(), "--session-id");
+    let sid = argv_flag(&e.last_argv(), "--session-id");
     assert_eq!(e.record(&id)["resume"]["sessionId"], sid.as_str());
     let out = e.delegate(&["cancel", &id], None);
     assert_eq!(
@@ -182,7 +211,7 @@ fn cancel_then_resume_reuses_the_launch_session() {
     let next = e.ok(&["resume", &id], "continue");
     let done = e.wait_terminal(&next);
     assert_eq!(done["status"], "DONE");
-    assert_eq!(argv_flag(&e.argv_text(), "--resume"), sid);
+    assert_eq!(argv_flag(&e.last_argv(), "--resume"), sid);
 }
 
 /// Flag values are one argv element per line (`printf '%s\n'`).
@@ -202,19 +231,18 @@ fn effort_suffix_runs_and_plain_resume_keeps_it() {
     let done = e.wait_terminal(&id);
     assert_eq!(done["status"], "DONE");
     assert_eq!(done["resume"]["model"], "claude-fable-5-1:low");
-    let argv = e.argv_text();
+    let argv = e.last_argv();
     assert_eq!(argv_flag(&argv, "--model"), "claude-fable-5-1", "{argv}");
     assert_eq!(argv_flag(&argv, "--effort"), "low", "{argv}");
 
     // A plain resume carries the stored suffixed id, so the effort survives.
-    let n_before = argv.len();
     let next = e.ok(&["resume", &id], "again");
     assert_eq!(e.wait_terminal(&next)["status"], "DONE");
     assert_eq!(e.record(&next)["resume"]["model"], "claude-fable-5-1:low");
-    let tail = &e.argv_text()[n_before..];
+    let tail = e.last_argv();
     assert!(tail.contains("\n--resume\n"), "{tail}");
-    assert_eq!(argv_flag(tail, "--model"), "claude-fable-5-1", "{tail}");
-    assert_eq!(argv_flag(tail, "--effort"), "low", "{tail}");
+    assert_eq!(argv_flag(&tail, "--model"), "claude-fable-5-1", "{tail}");
+    assert_eq!(argv_flag(&tail, "--effort"), "low", "{tail}");
 }
 
 #[test]
@@ -222,16 +250,15 @@ fn resume_override_can_add_or_change_effort() {
     let e = Env::new("effort-resume");
     let id = e.ok(&["run", "--model", "claude-sonnet-5-5"], "hi");
     e.wait_terminal(&id);
-    let n_before = e.argv_text().len();
     let next = e.ok(
         &["resume", &id, "--model", "claude-sonnet-5-5:high"],
         "again",
     );
     assert_eq!(e.wait_terminal(&next)["status"], "DONE");
     assert_eq!(e.record(&next)["resume"]["model"], "claude-sonnet-5-5:high");
-    let tail = &e.argv_text()[n_before..];
-    assert_eq!(argv_flag(tail, "--model"), "claude-sonnet-5-5", "{tail}");
-    assert_eq!(argv_flag(tail, "--effort"), "high", "{tail}");
+    let tail = e.last_argv();
+    assert_eq!(argv_flag(&tail, "--model"), "claude-sonnet-5-5", "{tail}");
+    assert_eq!(argv_flag(&tail, "--effort"), "high", "{tail}");
 }
 
 #[test]
