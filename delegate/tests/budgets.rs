@@ -86,7 +86,7 @@ const RUN_BUDGET_MS: u128 = 102; // measured: 34ms on M-series Mac, budget 3x
 const RESUME_BUDGET_MS: u128 = 93; // measured: 31ms on M-series Mac, budget 3x
 const CANCEL_BUDGET_MS: u128 = 192; // measured: 64ms on M-series Mac, budget 3x
 const WATCH_BUDGET_MS: u128 = 50; // measured: 2ms on M-series Mac; 50ms floor, since 3x a spawn-dominated time flakes on CI
-const DOCTOR_BUDGET_MS: u128 = 90; // measured: max 29ms over 5 local runs, budget 3x (the #12 ruling)
+const DOCTOR_BUDGET_MS: u128 = 123; // measured: max 41ms over 10 warm runs, budget 3x (#596)
 const MODELS_BUDGET_MS: u128 = 50; // measured: 2ms on M-series Mac; 50ms floor, since 3x a spawn-dominated time flakes on CI
 const SUPERVISOR_RSS_BUDGET_KB: u64 = 8736; // measured: 2912KB on M-series Mac, budget 3x
 
