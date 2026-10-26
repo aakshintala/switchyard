@@ -384,23 +384,58 @@ FILE_CLAIM_REMOTE="$D" bash "$FC" $CLAIM a.txt >/dev/null 2>&1 && fail "bad-remo
 [ "$?" = "2" ] || fail "bad-remote claim exits 2"
 
 # --- concurrency: exactly one winner, twenty rounds -----------------------------------------
+# One round of the race: both lanes start in the background before a single
+# wait, exactly as the loop always ran them; only failures gain a dump.
+race_round() {
+  local label="$1" remote="$2" path="$3" c1 c2 n c f
+  # Fresh lanes each round so the 5-grant cap never binds: the race alone
+  # decides the single winner.
+  (FILE_CLAIM_REMOTE="$remote" bash "$FC" claim --lane "A$label" --grant --worktree t:dA --repo test/repo "$path" >/dev/null 2>"$T/err1-$label"; echo "$?" >"$T/c1-$label") &
+  (FILE_CLAIM_REMOTE="$remote" bash "$FC" claim --lane "B$label" --grant --worktree t:dB --repo test/repo "$path" >/dev/null 2>"$T/err2-$label"; echo "$?" >"$T/c2-$label") &
+  wait
+  c1="$(cat "$T/c1-$label")"
+  c2="$(cat "$T/c2-$label")"
+  case "$c1$c2" in
+    01|10) ;;
+    *)
+      for n in 1 2; do
+        if [ "$n" = "1" ]; then c="$c1"; else c="$c2"; fi
+        [ -n "$c" ] || c="unknown"
+        f="$T/err$n-$label"
+        echo "round $label: lane $n (exit $c) stderr:" >&2
+        if [ ! -r "$f" ]; then
+          echo "  (unreadable: $f)" >&2
+        elif [ -s "$f" ]; then
+          sed 's/^/  /' "$f" >&2
+        else
+          echo "  (empty)" >&2
+        fi
+      done
+      fail "round $label: exits $c1 and $c2, want one 0 and one 1"
+      ;;
+  esac
+}
 R="$(fresh)"
 i=1
 while [ "$i" -le 20 ]; do
-  p="race-$i.txt"
-  # Fresh lanes each round so the 5-grant cap never binds: the race alone
-  # decides the single winner.
-  (FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "A$i" --grant --worktree t:dA --repo test/repo "$p" >/dev/null 2>&1; echo "$?" >"$T/c1-$i") &
-  (FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "B$i" --grant --worktree t:dB --repo test/repo "$p" >/dev/null 2>&1; echo "$?" >"$T/c2-$i") &
-  wait
-  c1="$(cat "$T/c1-$i")"
-  c2="$(cat "$T/c2-$i")"
-  case "$c1$c2" in
-    01|10) ;;
-    *) fail "round $i: exits $c1 and $c2, want one 0 and one 1";;
-  esac
+  race_round "$i" "$R" "race-$i.txt"
   i=$((i + 1))
 done
 [ "$(claims_blob "$R" | grep -c '^')" = "20" ] || fail "one claim per race recorded"
+
+# --- failing rounds dump each lane's stderr --------------------------------------
+# A bad remote fails both lanes at once, driving the diagnostic path without a race.
+diag_out="$( (race_round diag "$D" diag.txt) 2>&1 )"
+diag_rc=$?
+[ "$diag_rc" = "1" ] || fail "diagnostic round exits 1, got $diag_rc: $diag_out"
+printf '%s\n' "$diag_out" | grep -qxF 'round diag: lane 1 (exit 2) stderr:' || fail "lane 1 dump label: $diag_out"
+printf '%s\n' "$diag_out" | grep -qxF 'round diag: lane 2 (exit 2) stderr:' || fail "lane 2 dump label: $diag_out"
+printf '%s\n' "$diag_out" | grep -qF "  file-claim: cannot fetch main from $D" || fail "lane stderr dumped: $diag_out"
+printf '%s\n' "$diag_out" | grep -qxF 'FAIL: round diag: exits 2 and 2, want one 0 and one 1' || fail "failure line kept: $diag_out"
+dump_last="$(printf '%s\n' "$diag_out" | grep -n 'lane [12] (exit 2) stderr:' | tail -n 1 | cut -d: -f1)"
+fail_at="$(printf '%s\n' "$diag_out" | grep -n '^FAIL: round diag' | head -n 1 | cut -d: -f1)"
+[ -n "$dump_last" ] || fail "dump labels precede failure line: $diag_out"
+[ -n "$fail_at" ] || fail "failure line present: $diag_out"
+[ "$dump_last" -lt "$fail_at" ] || fail "dump precedes failure line: $diag_out"
 
 echo "file-claim tests passed"
