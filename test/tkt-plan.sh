@@ -104,7 +104,8 @@ printf 'https://github.com/o/r/issues/1#issuecomment-11\nhttps://github.com/o/r/
 EOF
 chmod +x "$T/bin/post-plan"
 
-# Stub plan-sweep: prints the PACK line for --out.
+# Stub plan-sweep: prints one progress line on stderr, then the PACK line for
+# --out; with sweepmode=fail it prints an unresolved line on stdout and exits 1.
 cat >"$T/bin/plan-sweep" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
@@ -116,6 +117,11 @@ while [ \$# -gt 0 ]; do
     *) shift ;;
   esac
 done
+printf 'plan-sweep: stub progress\n' >&2
+if [ "\$(cat "$T/sweepmode" 2>/dev/null || printf 'ok')" = fail ]; then
+  printf 'unresolved symbol: x (line 3)\n'
+  exit 1
+fi
 printf 'PACK %s symbols=0 files=0 outside=0\n' "\$out"
 EOF
 chmod +x "$T/bin/plan-sweep"
@@ -347,6 +353,7 @@ printf '# another plan\n' >"$CDIR/other.md"
 run_plan set "$CDIR/other.md"
 [ "$RC" -eq 0 ] || fail "SET exits 0"
 expect_verdict "TKT tkt-plan SET plan=$CDIR/other.md log=*" "SET"
+grep -q '^plan-sweep: stub progress$' "$CDIR/stderr.txt" || fail "SET replays the sweep progress on stderr"
 [ "$(bash "$TKT_STATE" "$S" get plan)" = "$CDIR/other.md" ] || fail "SET stores the plan path"
 [ "$(bash "$TKT_STATE" "$S" get pack)" = "$CDIR/run/switchyard-518-pack.md" ] || fail "SET stores the pack path"
 grep -q "sweep|.*--plan $CDIR/other.md" "$T/stub.log" || fail "SET refreshes the pack for the plan"
@@ -378,6 +385,19 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "verify at round 2 exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "verify at round 2"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify at round 2 starts no job"
+
+# --- a failing sweep prints its stdout once and its progress once ---
+setup_case set-fail
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/base")"
+  printf '\n## Files\n\n- `f.txt`\n'
+} >"$CDIR/other.md"
+printf 'fail' >"$T/sweepmode"
+run_plan set "$CDIR/other.md"
+[ "$RC" -eq 2 ] || fail "failing SET exits 2"
+[ "$(grep -c '^unresolved symbol: x (line 3)$' "$CDIR/stderr.txt")" = 1 ] || fail "failing SET prints the unresolved line exactly once: $(cat "$CDIR/stderr.txt")"
+[ "$(grep -c '^plan-sweep: stub progress$' "$CDIR/stderr.txt")" = 1 ] || fail "failing SET prints the progress line once: $(cat "$CDIR/stderr.txt")"
+printf 'ok' >"$T/sweepmode"
 
 # --- a backticked Base line is read as the bare SHA ---
 setup_case basetick
