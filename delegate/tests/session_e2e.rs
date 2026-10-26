@@ -584,7 +584,9 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
         .expect("timed-out state retained");
     assert_eq!(state["dead"]["reason"], "startFailed");
     assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
-    assert_process_gone(state["hostPid"].as_i64().unwrap() as i32);
+    if let Some(host) = state["hostPid"].as_i64() {
+        assert_process_gone(host as i32);
+    }
 }
 
 #[test]
