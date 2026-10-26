@@ -300,19 +300,19 @@ no_merge() { ! grep -q '^gh pr \(merge\|ready\)' "$ST/gh.log" 2>/dev/null || fai
 GATE_PANIC='echo gate-start; echo "thread prune::young_fork panicked at src/prune.rs:42:5:"; echo "assertion left == right failed"; echo "  left: 1"; echo " right: 2"; for i in $(seq 1 25); do echo "gate-tail-$i"; done; exit 1'
 assert_gate_panic_failure() {
   local label="$1" gate_file
-  grep -q 'panicked at' <<<"$OUT" || fail "$label: panic line printed: [$OUT]"
-  grep -q 'assertion .*left == right.* failed' <<<"$OUT" || fail "$label: assertion printed: [$OUT]"
-  grep -q '^  left: 1$' <<<"$OUT" || fail "$label: left value printed: [$OUT]"
-  grep -q '^ right: 2$' <<<"$OUT" || fail "$label: right value printed: [$OUT]"
-  grep -q '^gate-tail-6$' <<<"$OUT" || fail "$label: last 20 lines printed: [$OUT]"
-  grep -q '^gate-tail-5$' <<<"$OUT" && fail "$label: output before the last 20 lines omitted: [$OUT]"
+  grep -q 'panicked at' <<<"$OUT" || fail "$label: panic line printed: [$OUT] err=[$ERR]"
+  grep -q 'assertion .*left == right.* failed' <<<"$OUT" || fail "$label: assertion printed: [$OUT] err=[$ERR]"
+  grep -q '^  left: 1$' <<<"$OUT" || fail "$label: left value printed: [$OUT] err=[$ERR]"
+  grep -q '^ right: 2$' <<<"$OUT" || fail "$label: right value printed: [$OUT] err=[$ERR]"
+  grep -q '^gate-tail-6$' <<<"$OUT" || fail "$label: last 20 lines printed: [$OUT] err=[$ERR]"
+  grep -q '^gate-tail-5$' <<<"$OUT" && fail "$label: output before the last 20 lines omitted: [$OUT] err=[$ERR]"
   gate_file="$(sed -n 's/^full gate output: //p' <<<"$OUT")"
-  case "$gate_file" in "$TMPDIR"/ship-pr-7-gate.*) ;; *) fail "$label: named log path printed: [$gate_file]" ;; esac
-  [ -f "$gate_file" ] || fail "$label: full output file exists: [$gate_file]"
-  [ "$(wc -l <"$gate_file" | tr -d ' ')" = 30 ] || fail "$label: file holds all 30 output lines: [$(wc -l <"$gate_file")]"
-  grep -qx 'gate-start' "$gate_file" || fail "$label: file holds the first line"
-  grep -q 'panicked at' "$gate_file" || fail "$label: file holds the panic"
-  for i in $(seq 1 25); do grep -qx "gate-tail-$i" "$gate_file" || fail "$label: file is missing gate-tail-$i"; done
+  case "$gate_file" in "$TMPDIR"/ship-pr-7-gate.*) ;; *) fail "$label: named log path printed: [$gate_file] err=[$ERR]" ;; esac
+  [ -f "$gate_file" ] || fail "$label: full output file exists: [$gate_file] err=[$ERR]"
+  [ "$(wc -l <"$gate_file" | tr -d ' ')" = 30 ] || fail "$label: file holds all 30 output lines: [$(wc -l <"$gate_file")] err=[$ERR]"
+  grep -qx 'gate-start' "$gate_file" || fail "$label: file holds the first line err=[$ERR]"
+  grep -q 'panicked at' "$gate_file" || fail "$label: file holds the panic err=[$ERR]"
+  for i in $(seq 1 25); do grep -qx "gate-tail-$i" "$gate_file" || fail "$label: file is missing gate-tail-$i err=[$ERR]"; done
   rm -f "$gate_file"
 }
 
