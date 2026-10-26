@@ -768,7 +768,9 @@ fn missing_record(id: &str) -> Usage {
         .map(|d| d.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    Usage(format!("unknown job {id} (searched: {dirs})"))
+    Usage(format!(
+        "unknown job {id} (searched: {dirs}); the record may have been cleared by a reboot or a different TMPDIR, so set DELEGATE_JOBS_DIR to the directory the job ran under."
+    ))
 }
 
 /// The stored age is as of `lastHeartbeatAt`, so `watch` adds the time since
