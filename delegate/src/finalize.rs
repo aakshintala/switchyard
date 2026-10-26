@@ -424,4 +424,22 @@ mod tests {
         let out = finalize_run(&res, &base_ctx());
         assert_eq!(out.status, RunStatus::Error);
     }
+
+    #[test]
+    fn empty_final_message_is_a_concern_not_done() {
+        // #318: an empty final message is DONE_WITH_CONCERNS, not DONE.
+        let res = BackendResult {
+            text: String::new(),
+            is_error: Some(false),
+            clean_exit: true,
+            ..Default::default()
+        };
+        let out = finalize_run(&res, &base_ctx());
+        assert_eq!(out.status, RunStatus::DoneWithConcerns);
+        let concerns = out.concerns.expect("concerns");
+        assert!(
+            concerns.iter().any(|c| c.contains("empty final message")),
+            "{concerns:?}"
+        );
+    }
 }

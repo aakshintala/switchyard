@@ -87,12 +87,22 @@ impl Env {
     }
 
     fn delegate(&self, args: &[&str], stdin: Option<&str>) -> Output {
+        let fixture = self.fixture();
+        self.delegate_with_fixture(args, stdin, &fixture)
+    }
+
+    fn delegate_with_fixture(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        fixture: &std::path::Path,
+    ) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
         cmd.args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
             .env("PI_BIN", self.dir.join("pi.sh"))
-            .env("DELEGATE_TEST_PI_FIXTURE", self.fixture())
+            .env("DELEGATE_TEST_PI_FIXTURE", fixture)
             .env("DELEGATE_HEARTBEAT_MS", "100")
             .env("DELEGATE_RETRY_DELAYS_MS", "0")
             // Isolate from the developer machine's real host profile.
@@ -200,6 +210,35 @@ fn pi_run_finishes_with_pi_reported_cost() {
     assert!(
         argv.iter().any(|a| a.contains("What is 17 * 23?")),
         "{argv:?}"
+    );
+}
+
+#[test]
+fn pi_empty_final_message_is_done_with_concerns() {
+    // #318: a job whose final message is empty is DONE_WITH_CONCERNS, not DONE.
+    let e = Env::new("empty-final");
+    let base = std::fs::read_to_string(e.fixture()).unwrap();
+    assert!(base.contains("391\\nSTATUS: DONE"));
+    let fixture = e.dir.join("empty-final.stdout");
+    std::fs::write(&fixture, base.replace("391\\nSTATUS: DONE", "")).unwrap();
+    let out = e.delegate_with_fixture(&["run", "--model", MODEL], Some("What is 17 * 23?"), &fixture);
+    assert!(
+        out.status.success(),
+        "exit {:?}\nstderr: {}\nstdout: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE_WITH_CONCERNS");
+    assert_eq!(done["result"]["text"], "");
+    let concerns = done["result"]["concerns"].as_array().unwrap();
+    assert!(
+        concerns
+            .iter()
+            .any(|c| c.as_str().unwrap().contains("empty final message")),
+        "{concerns:?}"
     );
 }
 
