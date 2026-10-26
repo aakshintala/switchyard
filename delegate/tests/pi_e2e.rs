@@ -221,7 +221,11 @@ fn pi_empty_final_message_is_done_with_concerns() {
     assert!(base.contains("391\\nSTATUS: DONE"));
     let fixture = e.dir.join("empty-final.stdout");
     std::fs::write(&fixture, base.replace("391\\nSTATUS: DONE", "")).unwrap();
-    let out = e.delegate_with_fixture(&["run", "--model", MODEL], Some("What is 17 * 23?"), &fixture);
+    let out = e.delegate_with_fixture(
+        &["run", "--model", MODEL],
+        Some("What is 17 * 23?"),
+        &fixture,
+    );
     assert!(
         out.status.success(),
         "exit {:?}\nstderr: {}\nstdout: {}",

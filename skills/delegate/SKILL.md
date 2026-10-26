@@ -139,6 +139,7 @@ job reads `CANCELLED`, and `tkt-job` prints it as `WALL-CAP`. `text` is the agen
   ended; check `supervisorPid` with `ps -p`, and report stopped only for a terminal `status`
   or a `RUNNING` record whose supervisor pid is gone.
 - A weak model may skip the STATUS line and guess; your review of the artifact is the backstop.
+- An empty final reply is reported DONE_WITH_CONCERNS with the concern "empty final message".
 
 ## Exit codes
 

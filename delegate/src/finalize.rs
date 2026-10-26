@@ -88,6 +88,12 @@ complete, buildable change. Review the uncommitted files."
         ));
         out.status = RunStatus::DoneWithConcerns;
     }
+    // #318: an empty final message downgrades like a denial. ERROR stays ERROR;
+    // a non-empty text with no STATUS line keeps its current status.
+    if res.text.trim().is_empty() && out.status != RunStatus::Error {
+        concerns.push("empty final message".into());
+        out.status = RunStatus::DoneWithConcerns;
+    }
     if !concerns.is_empty() {
         out.concerns = Some(concerns);
     }
