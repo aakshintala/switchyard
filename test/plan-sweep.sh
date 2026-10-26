@@ -377,4 +377,110 @@ run --cwd "$R" --base "$BASE" --symbols nosuch --files src/lib.rs --out "$T/pack
 [ "$(cat "$T/err.txt")" = "plan-sweep: resolving 1 symbols" ] || fail "p: start line only on stderr, got [$(cat "$T/err.txt")]"
 case "$(cat "$T/err.txt")" in *"plan-sweep: symbol "*) fail "p: no per-symbol line without a section" ;; esac
 
+# q. overlap fixtures: committed after BASE, so cases b, c and l keep their counts
+cat >"$R/src/overlap.rs" <<'EOF'
+pub enum ShapeKind {
+    Tall,
+    Wide,
+}
+pub fn shape_pair(first: ShapeKind, second: Shape) -> u32 {
+    1
+}
+pub fn my_Shape() -> u32 {
+    2
+}
+EOF
+cat >"$R/src/qual.rs" <<'EOF'
+use crate::shapes::Shape;
+pub fn qual() -> u32 {
+    let a = (Shape::Round);
+    let b = ShapeKind::Tall;
+    let c = XShape::Round;
+    let d = 0;
+    let e = XShape::Round Shape::A;
+    1
+}
+Shape::Round
+EOF
+printf 'pub fn tabbed() {\n    let _ = Shape;\t// tabbed\n}\n' >"$R/src/tabbed.rs"
+git -C "$R" add src/overlap.rs src/qual.rs src/tabbed.rs
+git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m overlap
+EDGEBASE="$(git -C "$R" rev-parse HEAD)"
+
+# q1. overlapping names: the ShapeKind-only line is not Shape's
+run --cwd "$R" --base "$EDGEBASE" --symbols Shape,ShapeKind --files src/lib.rs --out "$T/pack-q1.md"
+[ "$code" = 0 ] || fail "q1: exits 0, got $code [$out]"
+[ "$out" = "PACK $T/pack-q1.md symbols=2 files=1 outside=6" ] || fail "q1: PACK line, got [$out]"
+grep -q '^callers: 12 lines in 5 files (shown 12)$' "$T/pack-q1.md" || fail "q1: Shape caller count"
+grep -q '^src/overlap.rs:5: pub fn shape_pair(first: ShapeKind, second: Shape) -> u32 {$' "$T/pack-q1.md" || fail "q1: both-name line counted"
+[ "$(grep -c '^src/overlap.rs:1:' "$T/pack-q1.md")" = 1 ] || fail "q1: ShapeKind-only line held by ShapeKind alone"
+[ "$(grep -c 'my_Shape' "$T/pack-q1.md")" = 0 ] || fail "q1: _-preceded Shape not attributed"
+
+# q2. the :: pass: first occurrence only, each name on its own
+run --cwd "$R" --base "$EDGEBASE" --symbols Shape,ShapeKind --files src/lib.rs --lang rust --out "$T/pack-q2.md"
+[ "$code" = 0 ] || fail "q2: exits 0, got $code [$out]"
+grep -q '^matches: 4 lines in 2 files$' "$T/pack-q2.md" || fail "q2: Shape match counts"
+grep -q '^src/qual.rs:3:     let a = (Shape::Round);$' "$T/pack-q2.md" || fail "q2: match after ( counts"
+grep -q '^src/qual.rs:10: Shape::Round$' "$T/pack-q2.md" || fail "q2: match at line start counts"
+[ "$(grep -c '^src/qual.rs:5:' "$T/pack-q2.md")" = 0 ] || fail "q2: XShape::Round alone is no match"
+[ "$(grep -c 'XShape::Round Shape::A' "$T/pack-q2.md")" = 1 ] || fail "q2: first-occurrence-only line never matches"
+grep -q '^matches: 1 lines in 1 files$' "$T/pack-q2.md" || fail "q2: ShapeKind match counts"
+grep -q '^src/qual.rs:4:     let b = ShapeKind::Tall;$' "$T/pack-q2.md" || fail "q2: ShapeKind match line"
+
+# q3. mixed unresolved plan tokens keep plan-line order
+cat >"$T/plan-q3.md" <<EOF
+# Plan
+Base: $EDGEBASE
+
+## Files
+- \`src/lib.rs\`
+
+## Interfaces
+Uses \`NoSuchSym1\`.
+
+## Tasks
+1. Fix \`src/nosuch.rs\`.
+EOF
+run --cwd "$R" --base "$EDGEBASE" --plan "$T/plan-q3.md" --out "$T/pack-q3.md"
+[ "$code" = 1 ] || fail "q3: exits 1, got $code"
+want="$(printf 'unresolved symbol: NoSuchSym1 (line 8)\nunresolved path: src/nosuch.rs (line 11)')"
+[ "$out" = "$want" ] || fail "q3: plan-line order, got [$out]"
+
+# q4. a plan with no symbol tokens starts no batch and prints nothing
+cat >"$T/plan-q4.md" <<EOF
+# Plan
+Base: $EDGEBASE
+
+## Files
+- \`src/lib.rs\`
+
+## Tasks
+1. Tidy \`src/lib.rs\`.
+EOF
+REAL_GIT2="$(command -v git)"
+mkdir -p "$T/wrap2"
+cat >"$T/wrap2/git" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$T/grep2.log"
+exec "$REAL_GIT2" "\$@"
+EOF
+chmod +x "$T/wrap2/git"
+OLD_PATH2="$PATH"
+PATH="$T/wrap2:$PATH"
+: >"$T/grep2.log"
+run --cwd "$R" --base "$EDGEBASE" --plan "$T/plan-q4.md" --out "$T/pack-q4.md"
+[ "$code" = 0 ] || fail "q4: exits 0, got $code [$out]"
+[ -z "$(cat "$T/err.txt")" ] || fail "q4: no start line on stderr, got [$(cat "$T/err.txt")]"
+[ "$(awk -v rev="$EDGEBASE" 'index($0, " grep ") && substr($0, length($0) - length(rev) + 1) == rev { n++ } END { printf "%d\n", n + 0 }' "$T/grep2.log")" = 0 ] || fail "q4: no full-tree grep runs"
+PATH="$OLD_PATH2"
+
+# q5. a bare backslash-n token resolves as on the base, tabs survive intact
+run --cwd "$R" --base "$EDGEBASE" --symbols '\n' --files src/lib.rs --out "$T/pack-q5.md"
+[ "$code" = 1 ] || fail "q5: exits 1, got $code"
+[ "$out" = 'unresolved symbol: \n' ] || fail "q5: unresolved line, got [$out]"
+run --cwd "$R" --base "$EDGEBASE" --symbols Shape --files src/lib.rs --out "$T/pack-q6.md"
+[ "$code" = 0 ] || fail "q5: Shape exits 0, got $code [$out]"
+tabwant="$(printf 'src/tabbed.rs:2:     let _ = Shape;\t// tabbed')"
+grep -qF -- "$tabwant" "$T/pack-q6.md" || fail "q5: tab-bearing line keeps every byte"
+
 echo "plan-sweep: all cases passed"
