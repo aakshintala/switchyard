@@ -8,15 +8,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 check() {
   local root="$1" meta path mode bad=0
   git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || { echo "not a git repo: $root" >&2; return 2; }
-  while IFS=$'\t' read -r meta path; do
-    [ -n "$path" ] || continue
+  while IFS= read -r -d '' rec; do
+    meta="${rec%%$'\t'*}"; path="${rec#*$'\t'}"
     case "$path" in bin/*/*) continue;; bin/*) ;; *) continue;; esac
     mode="${meta%% *}"
     if [ "$mode" != 100755 ]; then
       echo "$path: mode $mode, want 100755 (git update-index --chmod=+x $path)"
       bad=1
     fi
-  done < <(git -C "$root" ls-files -s -- bin)
+  done < <(git -C "$root" ls-files -s -z -- bin)
   return "$bad"
 }
 
@@ -41,6 +41,13 @@ grep -q 'helper' <<<"$out" && fail "bin/lib/ at 644 is exempt"
 git -C "$MODE" update-index --chmod=+x bin/tool
 out="$(check "$MODE")" || fail "755 top-level bin script with 644 lib passes"
 [ -z "$out" ] || fail "755 top-level bin script prints nothing: [$out]"
+
+# A name git quotes (non-ASCII) is still a top-level script and must be named when it is 644.
+printf 'x\n' >"$MODE/bin/café"
+git -C "$MODE" add bin
+out="$(check "$MODE")" && fail "644 quoted-name bin script exits 1"
+grep -q '^bin/café: mode 100644' <<<"$out" || fail "644 quoted-name bin script is named"
+git -C "$MODE" update-index --chmod=+x bin/café
 
 ROOT="${1:-$SCRIPT_DIR/..}"
 out="$(check "$ROOT")" || { echo "$out" >&2; fail "tracked bin/ scripts are not all 100755"; }
