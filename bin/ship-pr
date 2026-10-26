@@ -525,14 +525,25 @@ while :; do
             if run_ids="$(ci_failed_run_ids 2>/dev/null)"; then
               say "CI failure outside the diff ($reason); rerunning failed jobs once — file the flake"
               pre_attempts=""
+              # gh's stderr goes to one temp file for the loop, not one per run
+              attempt_err="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-attempt.XXXXXX")" \
+                || die_after_ready 1 "cannot create a temp file for gh stderr"
               while IFS= read -r rid || [ -n "$rid" ]; do
                 [ -n "$rid" ] || continue
-                pre="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>/dev/null)" \
-                  || die_after_ready 1 "cannot read attempt of run $rid before rerun"
+                rc=0
+                pre="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>"$attempt_err")" || rc=$?
+                if [ "$rc" -ne 0 ]; then
+                  # the first 400 bytes stay on one line; blank stderr reads (no stderr)
+                  text="$(head -c 400 <"$attempt_err" | tr '\n\r' '  ')"
+                  case "$text" in *[![:space:]]*) ;; *) text="(no stderr)" ;; esac
+                  rm -f "$attempt_err"
+                  die_after_ready 1 "cannot read attempt of run $rid before rerun: gh exit $rc: $text"
+                fi
                 IFS=$'\t' read -r pre_attempt _ <<<"$pre" || true
                 pre_attempts="${pre_attempts}${rid} ${pre_attempt:-0}
 "
               done <<<"$run_ids"
+              rm -f "$attempt_err"
               while IFS= read -r rid || [ -n "$rid" ]; do
                 [ -n "$rid" ] || continue
                 gh run rerun "$rid" --failed --repo "$repo" >&2 || die_after_ready 1 "gh run rerun $rid --failed failed"

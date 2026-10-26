@@ -116,6 +116,12 @@ gh() (
         else
           case "$json_fields" in
             *attempt*)
+              # an injected attempt-read failure exits with the file's code after printing its stderr
+              if [ -e "$ST/attempt-fail-$rid" ]; then
+                rc="$(head -n 1 "$ST/attempt-fail-$rid")"
+                tail -n +2 "$ST/attempt-fail-$rid" >&2
+                exit "$rc"
+              fi
               # a requested rerun's new attempt appears after attempt-delay polls
               if [ -e "$ST/rerun-requested-$rid" ] && [ -e "$ST/attempt-delay-$rid" ]; then
                 n="$(cat "$ST/attempt-delay-$rid")"
@@ -1155,6 +1161,33 @@ grep -q '108' <<<"$ERR" || fail "missing attempt names the run: [$ERR]"
 grep -q 'no new attempt' <<<"$ERR" || fail "missing attempt message: [$ERR]"
 [ "$(grep -c '^5$' "$ST/sleeps.txt")" -eq 24 ] || fail "missing attempt polls 120 s: [$(cat "$ST/sleeps.txt")]"
 no_merge "missing attempt"
+
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":113,"name":"ci","workflowName":"CI","event":"push","conclusion":"cancelled"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"cancelled","databaseId":213,"name":"ci"}]' >"$ST/jobs-113.json"
+printf '%s\n' '7' 'gh: HTTP 502: bad gateway' 'retry later' >"$ST/attempt-fail-113"
+ship; expect 1 "unreadable attempt 113 names gh exit code and stderr"
+[ "$(grep -c 'cannot read attempt of run 113 before rerun' <<<"$ERR")" -eq 1 ] || fail "113: attempt failure on one line: [$ERR]"
+line="$(grep 'cannot read attempt of run 113 before rerun' <<<"$ERR")"
+grep -q 'exit 7' <<<"$line" || fail "113: attempt read names gh exit code: [$ERR]"
+grep -q 'gh: HTTP 502: bad gateway' <<<"$line" || fail "113: attempt read names gh stderr: [$ERR]"
+grep -q 'retry later' <<<"$line" || fail "113: multi-line gh stderr stays on one line: [$ERR]"
+! grep -q 'gh run rerun' "$ST/gh.log" || fail "113: unreadable attempt never reruns"
+no_merge "113 unreadable attempt"
+
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":114,"name":"ci","workflowName":"CI","event":"push","conclusion":"cancelled"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"cancelled","databaseId":214,"name":"ci"}]' >"$ST/jobs-114.json"
+printf '%s\n' '9' >"$ST/attempt-fail-114"
+ship; expect 1 "unreadable attempt 114 with empty stderr names the exit code"
+[ "$(grep -c 'cannot read attempt of run 114 before rerun' <<<"$ERR")" -eq 1 ] || fail "114: attempt failure on one line: [$ERR]"
+line="$(grep 'cannot read attempt of run 114 before rerun' <<<"$ERR")"
+grep -q 'exit 9' <<<"$line" || fail "114: attempt read names gh exit code: [$ERR]"
+grep -q '(no stderr)' <<<"$line" || fail "114: empty gh stderr reads (no stderr): [$ERR]"
+! grep -q 'gh run rerun' "$ST/gh.log" || fail "114: unreadable attempt never reruns"
+no_merge "114 unreadable attempt"
+
+! compgen -G "$TMPDIR/ship-pr-7-attempt.*" >/dev/null || fail "attempt stderr temp file removed after unreadable attempt"
 
 # many cancelled runs: the rerun wait looks each pre-attempt up in a long
 # list, which must not die on SIGPIPE when awk exits early (pipefail)
