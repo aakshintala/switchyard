@@ -431,6 +431,7 @@ mod tests {
             &mut state,
         ));
         let snapshot = progress_snapshot(&state, None);
+        // Source: #625's triage comment rules tokens_so_far = input + output; fiber sums the same pair.
         assert_eq!(snapshot.tokens_so_far, 15.0);
     }
 
