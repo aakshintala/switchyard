@@ -55,11 +55,8 @@ impl Env {
     fn invocations(&self) -> Vec<String> {
         let mut runs = Vec::new();
         let mut n = 1u32;
-        loop {
-            match std::fs::read_to_string(self.dir.join(format!("argv.{n}"))) {
-                Ok(text) => runs.push(text),
-                Err(_) => break,
-            }
+        while let Ok(text) = std::fs::read_to_string(self.dir.join(format!("argv.{n}"))) {
+            runs.push(text);
             n += 1;
         }
         runs
