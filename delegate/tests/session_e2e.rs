@@ -591,6 +591,10 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
 fn send_text_watch_and_steer_observe_the_same_turn() {
     let h = Harness::new();
     let id = id_from(&h.start(b"FAST", false, "", &[]));
+    // A send reports started only once the previous turn has gone idle.
+    h.wait_state(&id, "FAST start finished", |value| {
+        value["status"] == "idle"
+    });
     let sent = h.invoke(&["send", &id, "HOLD hello"]);
     assert!(sent.status.success());
     assert_eq!(sent.stdout, b"started\n");
@@ -647,6 +651,8 @@ fn send_text_watch_and_steer_observe_the_same_turn() {
     let dash = h.invoke(&["send", &id, "--", "-starts-with-dash"]);
     assert!(dash.status.success());
     assert_eq!(dash.stdout, b"started\n");
+    // A send reports started only once the previous turn has gone idle.
+    h.wait_state(&id, "dash turn finished", |value| value["status"] == "idle");
     let count_before = std::fs::read_to_string(h.fake_dir.join("requests.jsonl"))
         .unwrap()
         .lines()
