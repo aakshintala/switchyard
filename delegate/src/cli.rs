@@ -29,6 +29,7 @@ pub(crate) const USAGE: &str =
        delegate resume <jobId> [--model M] [--gate CMD] [--prompt-file F | stdin]
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
+       delegate status <jobId>  (print the job's state without waiting)
        delegate models
        delegate doctor
        delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)
@@ -65,11 +66,12 @@ pub fn main() -> i32 {
         Some("resume") => resume(&args[1..]),
         Some("cancel") => cancel(&args[1..]),
         Some("watch") => watch(&args[1..]),
+        Some("status") => status(&args[1..]),
         Some("models") => crate::cli_info::models().map_err(Usage),
         Some("doctor") => crate::cli_info::doctor().map_err(Usage),
         Some("__supervise") => return supervise(&args[1..]),
         Some(name) => usage(format!(
-            "unknown subcommand {name}; `delegate watch <jobId>` prints a job's state and result, and the id that superseded it\n{USAGE}"
+            "unknown subcommand {name}; `delegate status <jobId>` prints a job's state, `delegate watch <jobId>` prints a job's state and result, and the id that superseded it\n{USAGE}"
         )),
         None => usage(USAGE),
     };
@@ -789,6 +791,27 @@ fn watch_now_ms() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as f64)
         .unwrap_or(0.0)
+}
+
+/// `status` prints one line with the job's state (the record's `status`) and
+/// returns at once. It never waits: any known job exits 0, whatever its state.
+/// Unknown ids reuse `watch`'s `missing_record` error.
+fn status(args: &[String]) -> Result<i32, Usage> {
+    let (_, pos) = parse(args, &[])?;
+    let [id] = pos.as_slice() else {
+        return usage(USAGE);
+    };
+    let Some(raw) = read_record(id) else {
+        return Err(missing_record(id));
+    };
+    let rec: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| Usage(format!("cannot read job {id}: {e}")))?;
+    let state = rec
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("UNKNOWN");
+    println!("{id}: {state}");
+    Ok(0)
 }
 
 fn watch(args: &[String]) -> Result<i32, Usage> {
