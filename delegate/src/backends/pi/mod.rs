@@ -94,17 +94,10 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
                 },
                 |line| {
                     if handle_line(line, &mut state) {
-                        on(Event::Progress(ProgressSnapshotRaw {
-                            last_tool: state.last_tool.clone(),
-                            tokens_so_far: 0.0,
-                            last_assistant: state.last_assistant.clone(),
-                            files_touched: Vec::new(),
-                            phase: state.phase.clone(),
-                            session_id: state
-                                .session_id
-                                .clone()
-                                .or_else(|| launched_session.clone()),
-                        }));
+                        on(Event::Progress(progress_snapshot(
+                            &state,
+                            launched_session.as_deref(),
+                        )));
                     }
                 },
             );
@@ -115,6 +108,23 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
                 launched_session.as_deref(),
             )
         }),
+    }
+}
+
+/// The progress snapshot for the current state. `tokens_so_far` carries the
+/// usage pi has already reported: input plus output, the same sum fiber
+/// reports. Cache reads and writes and cost are excluded.
+fn progress_snapshot(state: &PiState, launched_session: Option<&str>) -> ProgressSnapshotRaw {
+    ProgressSnapshotRaw {
+        last_tool: state.last_tool.clone(),
+        tokens_so_far: 0.0,
+        last_assistant: state.last_assistant.clone(),
+        files_touched: Vec::new(),
+        phase: state.phase.clone(),
+        session_id: state
+            .session_id
+            .clone()
+            .or_else(|| launched_session.map(str::to_string)),
     }
 }
 
@@ -411,6 +421,17 @@ mod tests {
             br#"{"type":"message_end","message":{"role":"user","content":[]}}"#,
             &mut state,
         ));
+    }
+
+    #[test]
+    fn progress_snapshot_reports_tokens_so_far() {
+        let mut state = PiState::default();
+        assert!(handle_line(
+            br#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.1}}}}"#,
+            &mut state,
+        ));
+        let snapshot = progress_snapshot(&state, None);
+        assert_eq!(snapshot.tokens_so_far, 15.0);
     }
 
     #[test]
