@@ -238,6 +238,222 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# note_candidate NAME: record a candidate last-component name for the one
+# batched resolution pass. Names are deduplicated when the pattern file is built.
+note_candidate() {
+  printf '%s\n' "$1" >>"$work/cand-all"
+}
+
+# strip_port TOKEN: drop a trailing :port suffix per plan-check's rule
+strip_port() {
+  local t="$1"
+  if [[ $t =~ $portre ]]; then t="${t%"${BASH_REMATCH[0]}"}"; fi
+  printf '%s' "$t"
+}
+
+# bare_last TOKEN: print the candidate last name for a port-stripped bare
+# Interfaces token, or nothing when it has no symbol shape
+bare_last() {
+  local t="$1" s last
+  case "$t" in
+    *"<"*|*">"*|*" "*|*"*"*|*"{"*|*"}"*) return 0 ;;
+    /|.|..) return 0 ;;
+  esac
+  case "$t" in .*) case "$t" in */*) ;; *) return 0 ;; esac ;; esac
+  if is_path "$t"; then return 0; fi
+  s="$t"
+  case "$s" in *"()") s="${s%??}" ;; esac
+  last="${s##*::}"
+  [ -n "$last" ] || return 0
+  printf '%s\n' "$last"
+  return 0
+}
+
+# resolved_lookup NAME: true when NAME has at least one attributed hit in the
+# batched pass. Never runs git.
+resolved_lookup() {
+  grep -qxF -- "$1" "$work/resolved" 2>/dev/null
+}
+
+# pat_idx NAME: the 1-based line number of NAME in the pattern file
+pat_idx() {
+  grep -nxF -- "$1" "$work/patterns" 2>/dev/null | cut -d: -f1 | head -n 1
+}
+
+# split_word_hits PATFILE HITS OUTDIR: attribute each hit line to every name
+# with a whole-word occurrence (a non-word character or a string edge on both
+# sides; a failed occurrence does not stop the search for a later one), writing
+# `idx<TAB>hit` rows, then sorting by idx into one file per name in git's order.
+split_word_hits() {
+  PATFILE="$1" OUTDIR="$3" REV="$rev" LC_ALL=C awk '
+    BEGIN {
+      n = 0
+      while ((getline line < ENVIRON["PATFILE"]) > 0) { names[++n] = line }
+    }
+    {
+      hit = $0
+      rest = substr(hit, length(ENVIRON["REV"]) + 2)
+      c = index(rest, ":")
+      tail = substr(rest, c + 1)
+      c = index(tail, ":")
+      text = substr(tail, c + 1)
+      for (i = 1; i <= n; i++) {
+        name = names[i]
+        if (word_hit(text, name)) printf "%d\t%s\n", i, hit
+      }
+    }
+    function isword(c) {
+      return (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "_"
+    }
+    function word_hit(text, name,   nl, rest2, pos, before, after) {
+      nl = length(name)
+      if (nl == 0) return 0
+      rest2 = text
+      while ((pos = index(rest2, name)) > 0) {
+        if (pos == 1) before = ""
+        else before = substr(rest2, pos - 1, 1)
+        after = substr(rest2, pos + nl, 1)
+        if ((before == "" || !isword(before)) && (after == "" || !isword(after))) return 1
+        rest2 = substr(rest2, pos + 1)
+      }
+      return 0
+    }' "$2" >"$work/batch-idx"
+  LC_ALL=C sort -s -n -k1,1 "$work/batch-idx" >"$work/batch-sorted"
+  OUTDIR="$3" LC_ALL=C awk '
+    {
+      line = $0
+      t = index(line, "\t")
+      idx = substr(line, 1, t - 1)
+      rest = substr(line, t + 1)
+      if (idx != prev) {
+        if (prev != "") close(out)
+        out = ENVIRON["OUTDIR"] "/" idx
+        prev = idx
+      }
+      print rest > out
+    }' "$work/batch-sorted"
+}
+
+# split_qual_hits PATFILE HITS OUTDIR: attribute each hit line to every
+# `Name::` pattern whose first occurrence has a non-identifier character or a
+# line start before it. Later occurrences are never retried.
+split_qual_hits() {
+  PATFILE="$1" OUTDIR="$3" REV="$rev" LC_ALL=C awk '
+    BEGIN {
+      n = 0
+      while ((getline line < ENVIRON["PATFILE"]) > 0) { names[++n] = line }
+    }
+    {
+      hit = $0
+      rest = substr(hit, length(ENVIRON["REV"]) + 2)
+      c = index(rest, ":")
+      tail = substr(rest, c + 1)
+      c = index(tail, ":")
+      text = substr(tail, c + 1)
+      for (i = 1; i <= n; i++) {
+        name = names[i]
+        if (qual_hit(text, name)) printf "%d\t%s\n", i, hit
+      }
+    }
+    function isword(c) {
+      return (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "_"
+    }
+    function qual_hit(text, pat,   pos, pre) {
+      if (length(pat) == 0) return 0
+      pos = index(text, pat)
+      if (pos == 0) return 0
+      if (pos == 1) return 1
+      pre = substr(text, pos - 1, 1)
+      if (isword(pre)) return 0
+      return 1
+    }' "$2" >"$work/batch-idx"
+  LC_ALL=C sort -s -n -k1,1 "$work/batch-idx" >"$work/batch-sorted"
+  OUTDIR="$3" LC_ALL=C awk '
+    {
+      line = $0
+      t = index(line, "\t")
+      idx = substr(line, 1, t - 1)
+      rest = substr(line, t + 1)
+      if (idx != prev) {
+        if (prev != "") close(out)
+        out = ENVIRON["OUTDIR"] "/" idx
+        prev = idx
+      }
+      print rest > out
+    }' "$work/batch-sorted"
+}
+
+# batch_hits PATFILE OUTDIR MODE: one full-tree `git grep -n -I -F -f` over
+# every name in PATFILE (MODE word adds -w; MODE qual does not), then one file
+# OUTDIR/N per pattern-file line holding git's hit lines for that name in
+# git's order. A failing grep leaves empty hit files, so every name then reads
+# unresolved. Never called with an empty PATFILE.
+batch_hits() {
+  local pat="$1" outdir="$2" mode="$3" total i
+  mkdir -p "$outdir"
+  total="$(nlines "$pat")"
+  i=1
+  while [ "$i" -le "$total" ]; do
+    : >"$outdir/$i"
+    i=$((i + 1))
+  done
+  if [ "$mode" = word ]; then
+    git -C "$dir" grep -n -I -F -w -f "$pat" "$rev" >"$work/batch-word" 2>/dev/null || true
+    split_word_hits "$pat" "$work/batch-word" "$outdir"
+  else
+    git -C "$dir" grep -n -I -F -f "$pat" "$rev" >"$work/batch-qual" 2>/dev/null || true
+    split_qual_hits "$pat" "$work/batch-qual" "$outdir"
+  fi
+  return 0
+}
+
+# collect_plan_token KIND VALUE: the pass-1 collector for --plan mode. Records
+# the candidate last-component name without running git or changing state.
+collect_plan_token() {
+  local kind="$1" val="$2" s last
+  CALLED=1
+  case "$kind" in glob) return 0 ;; esac
+  case "$kind" in
+    path) return 0 ;;
+    symbol)
+      s="$val"
+      case "$s" in *"()") s="${s%??}" ;; esac
+      last="${s##*::}"
+      [ -n "$last" ] || return 0
+      note_candidate "$last"
+      return 0 ;;
+  esac
+  return 0
+}
+
+# collect_bare_word TOKEN: the pass-1 collector for bare Interfaces tokens.
+collect_bare_word() {
+  local t last
+  t="$(strip_port "$1")"
+  last="$(bare_last "$t")"
+  [ -n "$last" ] || return 0
+  note_candidate "$last"
+  return 0
+}
+
+# resolve_candidates: dedupe $work/cand-all into $work/patterns, run the one
+# batched word pass and write $work/resolved, one resolved name per line.
+resolve_candidates() {
+  local i name sym_cands
+  LC_ALL=C awk '!seen[$0]++' "$work/cand-all" >"$work/patterns"
+  sym_cands="$(nlines "$work/patterns")"
+  : >"$work/resolved"
+  if [ "$sym_cands" -gt 0 ]; then
+    batch_hits "$work/patterns" "$work/whits" word
+    i=0
+    while IFS= read -r name; do
+      i=$((i + 1))
+      if [ -s "$work/whits/$i" ]; then printf '%s\n' "$name" >>"$work/resolved"; fi
+    done <"$work/patterns"
+  fi
+  return 0
+}
+
 # sweep_plan_token KIND VALUE: the expand_token callback for --plan mode.
 # Files-section paths build the cover set; anything resolving to nothing that
 # is not new-marked (paths) or new/example-marked (symbols) is unresolved.
@@ -268,7 +484,7 @@ sweep_plan_token() {
       s="$val"
       case "$s" in *"()") s="${s%??}" ;; esac
       last="${s##*::}"
-      if git -C "$dir" grep -q -I -w -F -e "$last" "$rev" 2>/dev/null; then
+      if resolved_lookup "$last"; then
         add_symbol "$last" "$val"
         return 0
       fi
@@ -284,19 +500,11 @@ sweep_plan_token() {
 # symbol shape, like `Shape`) is still a symbol candidate whatever its case:
 # a hit earns a section, a miss is silent (plan-check would report neither).
 sweep_bare_word() {
-  local t="$1" s last
-  if [[ $t =~ $portre ]]; then t="${t%"${BASH_REMATCH[0]}"}"; fi
-  case "$t" in
-    *"<"*|*">"*|*" "*|*"*"*|*"{"*|*"}"*) return 0 ;;
-    /|.|..) return 0 ;;
-  esac
-  case "$t" in .*) case "$t" in */*) ;; *) return 0 ;; esac ;; esac
-  if is_path "$t"; then return 0; fi
-  s="$t"
-  case "$s" in *"()") s="${s%??}" ;; esac
-  last="${s##*::}"
+  local t last
+  t="$(strip_port "$1")"
+  last="$(bare_last "$t")"
   [ -n "$last" ] || return 0
-  if git -C "$dir" grep -q -I -w -F -e "$last" "$rev" 2>/dev/null; then
+  if resolved_lookup "$last"; then
     add_symbol "$last" "$t"
   fi
   return 0
@@ -304,6 +512,18 @@ sweep_bare_word() {
 
 if [ "$plan_given" = 1 ]; then
   records="$(plan_records "$plan")"
+  : >"$work/cand-all"
+  while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW CUR_READ tok; do
+    [ -n "$tok" ] || continue
+    case "$CUR_SEC" in files|interfaces|tasks) ;; *) continue ;; esac
+    CALLED=0
+    expand_token "$tok" collect_plan_token
+    if [ "$CALLED" = 0 ] && [ "$CUR_SEC" = interfaces ]; then
+      collect_bare_word "$tok"
+    fi
+  done <<<"$records"
+  resolve_candidates
+  GLOBS=""
   while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW CUR_READ tok; do
     [ -n "$tok" ] || continue
     case "$CUR_SEC" in files|interfaces|tasks) ;; *) continue ;; esac
@@ -319,6 +539,7 @@ if [ "$plan_given" = 1 ]; then
   esac
 else
   printf '%s\n' "$symbols" | tr ',' '\n' >"$work/items"
+  : >"$work/cand-all"
   while IFS= read -r item; do
     item="$(trim "$item")"
     [ -n "$item" ] || continue
@@ -326,7 +547,17 @@ else
     case "$s" in *"()") s="${s%??}" ;; esac
     last="${s##*::}"
     [ -n "$last" ] || continue
-    if git -C "$dir" grep -q -I -w -F -e "$last" "$rev" 2>/dev/null; then
+    note_candidate "$last"
+  done <"$work/items"
+  resolve_candidates
+  while IFS= read -r item; do
+    item="$(trim "$item")"
+    [ -n "$item" ] || continue
+    s="$item"
+    case "$s" in *"()") s="${s%??}" ;; esac
+    last="${s##*::}"
+    [ -n "$last" ] || continue
+    if resolved_lookup "$last"; then
       add_symbol "$last" "$item"
     else
       add_unresolved "symbol" "$item" ""
@@ -382,74 +613,119 @@ file_n=0
 while IFS=$'\t' read -r name title; do
   [ -n "$name" ] || continue
   sym_n=$((sym_n + 1))
+  printf '%s\n' "$name" >"$work/symname-$sym_n"
+  printf '%s\n' "$title" >"$work/symtitle-$sym_n"
   sec="$work/sec-$sym_n.md"
   head="$work/head-$sym_n.md"
   : >"$sec"; : >"$head"
-  git -C "$dir" grep -n -I -w -F -e "$name" "$rev" >"$work/hits" 2>/dev/null || true
-  : >"$work/defs"; : >"$work/callers"; : >"$work/reex"; : >"$work/pins"
+  : >"$work/matches-raw-$sym_n"
+  idx="$(pat_idx "$name" || true)"
+  : >"$work/defs-$sym_n"; : >"$work/callers-$sym_n"; : >"$work/reex-$sym_n"; : >"$work/pins-$sym_n"
   has_enum=0
-  while IFS= read -r g; do
-    [ -n "$g" ] || continue
-    rest="${g:${#rev}+1}"
-    path="${rest%%:*}"
-    tail="${rest#*:}"
-    lineno="${tail%%:*}"
-    text="${tail#*:}"
-    kind="$(is_pin "$path")"
-    if [ -n "$kind" ]; then
-      printf '%s %s\n' "$path" "$kind" >>"$work/pins"
-      printf '%s\tpin\n' "$path" >>"$work/outside-raw"
-      continue
+  if [ -n "$idx" ]; then
+    while IFS= read -r g; do
+      [ -n "$g" ] || continue
+      rest="${g:${#rev}+1}"
+      path="${rest%%:*}"
+      tail="${rest#*:}"
+      lineno="${tail%%:*}"
+      text="${tail#*:}"
+      kind="$(is_pin "$path")"
+      if [ -n "$kind" ]; then
+        printf '%s %s\n' "$path" "$kind" >>"$work/pins-$sym_n"
+        printf '%s\tpin\n' "$path" >>"$work/outside-raw"
+        continue
+      fi
+      if is_reexport "$text"; then
+        printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/reex-$sym_n"
+        printf '%s\tre-export\n' "$path" >>"$work/outside-raw"
+        continue
+      fi
+      kw="$(def_keyword "$text" "$name")"
+      if [ -n "$kw" ]; then
+        printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/defs-$sym_n"
+        printf '%s\tdefinition\n' "$path" >>"$work/outside-raw"
+        if [ "$kw" = enum ]; then has_enum=1; fi
+        continue
+      fi
+      printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/callers-$sym_n"
+      printf '%s\tcaller\n' "$path" >>"$work/outside-raw"
+    done <"$work/whits/$idx"
+  fi
+  if [ "$has_enum" = 1 ]; then
+    : >"$work/enum-$sym_n"
+  fi
+done <<<"$SYMS"
+
+if [ "$lang" = rust ]; then
+  : >"$work/qualpatterns"
+  : >"$work/qualmap"
+  i=1
+  while [ "$i" -le "$sym_n" ]; do
+    if [ -e "$work/enum-$i" ]; then
+      printf '%s::\n' "$(cat "$work/symname-$i")" >>"$work/qualpatterns"
+      printf '%s\n' "$i" >>"$work/qualmap"
     fi
-    if is_reexport "$text"; then
-      printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/reex"
-      printf '%s\tre-export\n' "$path" >>"$work/outside-raw"
-      continue
-    fi
-    kw="$(def_keyword "$text" "$name")"
-    if [ -n "$kw" ]; then
-      printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/defs"
-      printf '%s\tdefinition\n' "$path" >>"$work/outside-raw"
-      [ "$kw" = enum ] && has_enum=1
-      continue
-    fi
-    printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/callers"
-    printf '%s\tcaller\n' "$path" >>"$work/outside-raw"
-  done <"$work/hits"
-  defs_n="$(nlines "$work/defs")"
-  callers_n="$(nlines "$work/callers")"
+    i=$((i + 1))
+  done
+  if [ -s "$work/qualpatterns" ]; then
+    batch_hits "$work/qualpatterns" "$work/qhits" qual
+    j=0
+    while IFS= read -r symidx; do
+      j=$((j + 1))
+      : >"$work/matches-raw-$symidx"
+      if [ -s "$work/qhits/$j" ]; then
+        while IFS= read -r g; do
+          [ -n "$g" ] || continue
+          printf '%s\n' "$g" >>"$work/matches-raw-$symidx"
+          rest="${g:${#rev}+1}"
+          mpath="${rest%%:*}"
+          printf '%s\tmatch\n' "$mpath" >>"$work/outside-raw"
+        done <"$work/qhits/$j"
+      fi
+    done <"$work/qualmap"
+  fi
+fi
+
+i=1
+while [ "$i" -le "$sym_n" ]; do
+  name="$(cat "$work/symname-$i")"
+  title="$(cat "$work/symtitle-$i")"
+  sec="$work/sec-$i.md"
+  head="$work/head-$i.md"
+  defs_n="$(nlines "$work/defs-$i")"
+  callers_n="$(nlines "$work/callers-$i")"
   if [ "$callers_n" -gt 0 ]; then
-    caller_files="$(cut -d: -f1 "$work/callers" | sort -u | wc -l)"
+    caller_files="$(cut -d: -f1 "$work/callers-$i" | sort -u | wc -l)"
     caller_files="${caller_files//[[:space:]]/}"
   else
     caller_files=0
   fi
   if [ "$callers_n" -gt 40 ]; then shown=40; else shown="$callers_n"; fi
-  reex_n="$(nlines "$work/reex")"
-  pins_n="$(nlines "$work/pins")"
-  sort -t: -k1,1 -k2,2n "$work/defs" >"$work/defs-s"
-  sort -t: -k1,1 -k2,2n "$work/reex" >"$work/reex-s"
-  sort "$work/pins" >"$work/pins-s"
-  sort -t: -k1,1 -k2,2n "$work/callers" >"$work/callers-sorted"
-  head -n 40 "$work/callers-sorted" >"$work/callers-s"
+  reex_n="$(nlines "$work/reex-$i")"
+  pins_n="$(nlines "$work/pins-$i")"
+  sort -t: -k1,1 -k2,2n "$work/defs-$i" >"$work/defs-s-$i"
+  sort -t: -k1,1 -k2,2n "$work/reex-$i" >"$work/reex-s-$i"
+  sort "$work/pins-$i" >"$work/pins-s-$i"
+  sort -t: -k1,1 -k2,2n "$work/callers-$i" >"$work/callers-sorted-$i"
+  head -n 40 "$work/callers-sorted-$i" >"$work/callers-s-$i"
   {
     printf '## Symbol %s\n' "$title"
     printf 'definitions: %s\n' "$defs_n"
-    cat "$work/defs-s"
+    cat "$work/defs-s-$i"
   } | tee -a "$sec" >>"$head"
   {
     printf 'callers: %s lines in %s files (shown %s)\n' "$callers_n" "$caller_files" "$shown"
-    cat "$work/callers-s"
+    cat "$work/callers-s-$i"
   } >>"$sec"
   printf 'callers: %s lines in %s files (shown %s)\n' "$callers_n" "$caller_files" "$shown" >>"$head"
   {
     printf 're-exports: %s\n' "$reex_n"
-    cat "$work/reex-s"
+    cat "$work/reex-s-$i"
   } >>"$sec"
   printf 're-exports: %s\n' "$reex_n" >>"$head"
-  if [ "$lang" = rust ] && [ "$has_enum" = 1 ]; then
-    git -C "$dir" grep -n -I -F -e "$name::" "$rev" >"$work/matches-raw" 2>/dev/null || true
-    : >"$work/matches"
+  if [ "$lang" = rust ] && [ -e "$work/enum-$i" ]; then
+    : >"$work/matches-$i"
     while IFS= read -r g; do
       [ -n "$g" ] || continue
       rest="${g:${#rev}+1}"
@@ -457,42 +733,31 @@ while IFS=$'\t' read -r name title; do
       tail="${rest#*:}"
       mlineno="${tail%%:*}"
       mtext="${tail#*:}"
-      match=0
-      mrest="$mtext"
-      pat="$name::"
-      while :; do
-        case "$mrest" in *"$pat"*) ;; *) break ;; esac
-        pre="${mrest%%"$pat"*}"
-        if [ -z "$pre" ]; then match=1; break; fi
-        case "$pre" in *[A-Za-z0-9_]) mrest="$pre" ;; *) match=1; break ;; esac
-      done
-      if [ "$match" = 1 ]; then
-        printf '%s:%s: %s\n' "$mpath" "$mlineno" "$mtext" >>"$work/matches"
-        printf '%s\tmatch\n' "$mpath" >>"$work/outside-raw"
-      fi
-    done <"$work/matches-raw"
-    match_n="$(nlines "$work/matches")"
+      printf '%s:%s: %s\n' "$mpath" "$mlineno" "$mtext" >>"$work/matches-$i"
+    done <"$work/matches-raw-$i"
+    match_n="$(nlines "$work/matches-$i")"
     if [ "$match_n" -gt 0 ]; then
-      match_files="$(cut -d: -f1 "$work/matches" | sort -u | wc -l)"
+      match_files="$(cut -d: -f1 "$work/matches-$i" | sort -u | wc -l)"
       match_files="${match_files//[[:space:]]/}"
     else
       match_files=0
     fi
-    sort -t: -k1,1 -k2,2n "$work/matches" >"$work/matches-s"
+    sort -t: -k1,1 -k2,2n "$work/matches-$i" >"$work/matches-s-$i"
     {
       printf 'matches: %s lines in %s files\n' "$match_n" "$match_files"
-      cat "$work/matches-s"
+      cat "$work/matches-s-$i"
     } >>"$sec"
     printf 'matches: %s lines in %s files\n' "$match_n" "$match_files" >>"$head"
   fi
   {
     printf 'pins: %s files\n' "$pins_n"
-    cat "$work/pins-s"
+    cat "$work/pins-s-$i"
   } >>"$sec"
   printf 'pins: %s files\n' "$pins_n" >>"$head"
   symblocks="$symblocks$sec"$'\n'
   symheads="$symheads$head"$'\n'
-done <<<"$SYMS"
+  i=$((i + 1))
+done
 
 # outlines, in Files order; only blobs resolve to an outline
 OUTLINED="|"

@@ -87,6 +87,9 @@ Detail text.
 ## Next
 After text.
 EOF
+{
+  i=1; while [ "$i" -le 10 ]; do printf 'pub fn count_fn%02d() {\n}\n' "$i"; i=$((i + 1)); done
+} >"$R/src/count.rs"
 git -C "$R" init -q
 git -C "$R" add -A
 git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m one
@@ -305,5 +308,58 @@ run --cwd "$R" --base "$BASE" --symbols Shape --files src/lib.rs --out "$T/pack-
 [ "$out" = "PACK $T/pack-l.md symbols=1 files=1 outside=3" ] || fail "l: PACK line, got [$out]"
 want="$(printf 'src/render.rs caller\nsrc/shapes.rs definition,caller\ntests/snapshots/label.snap pin')"
 [ "$(outside_of "$T/pack-l.md")" = "$want" ] || fail "l: Outside holds definition and caller reasons"
+
+# n. full-tree git grep passes do not grow with the symbol count
+REAL_GIT="$(command -v git)"
+mkdir -p "$T/wrap"
+cat >"$T/wrap/git" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$T/grep.log"
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$T/wrap/git"
+full_greps() {
+  awk -v rev="$1" 'index($0, " grep ") && substr($0, length($0) - length(rev) + 1) == rev { n++ } END { printf "%d\n", n + 0 }' "$T/grep.log"
+}
+OLD_PATH="$PATH"
+PATH="$T/wrap:$PATH"
+NAMES12="Shape,make_widget,count_fn01,count_fn02,count_fn03,count_fn04,count_fn05,count_fn06,count_fn07,count_fn08,count_fn09,count_fn10"
+: >"$T/grep.log"
+run --cwd "$R" --base "$BASE" --symbols make_widget,count_fn01 --files src/lib.rs --out "$T/pack-n1.md"
+[ "$code" = 0 ] || fail "n: 2 symbols exits 0, got $code [$out]"
+[ "$(full_greps "$BASE")" = 1 ] || fail "n: 2 symbols make 1 full-tree pass, got $(full_greps "$BASE")"
+: >"$T/grep.log"
+run --cwd "$R" --base "$BASE" --symbols "$NAMES12" --files src/lib.rs --out "$T/pack-n2.md"
+[ "$code" = 0 ] || fail "n: 12 symbols exits 0, got $code [$out]"
+[ "$(full_greps "$BASE")" = 1 ] || fail "n: 12 symbols make 1 full-tree pass, got $(full_greps "$BASE")"
+cat >"$T/plan-n2.md" <<EOF
+# Plan
+Base: $BASE
+
+## Files
+- \`src/lib.rs\`
+
+## Interfaces
+Uses \`Shape\` and \`make_widget\`.
+EOF
+: >"$T/grep.log"
+run --cwd "$R" --base "$BASE" --plan "$T/plan-n2.md" --lang rust --out "$T/pack-n3.md"
+[ "$code" = 0 ] || fail "n: plan 2 symbols exits 0, got $code [$out]"
+[ "$(full_greps "$BASE")" = 2 ] || fail "n: plan 2 symbols make 2 full-tree passes, got $(full_greps "$BASE")"
+cat >"$T/plan-n12.md" <<EOF
+# Plan
+Base: $BASE
+
+## Files
+- \`src/lib.rs\`
+
+## Interfaces
+Uses \`Shape\`, \`make_widget\`, \`count_fn01\`, \`count_fn02\`, \`count_fn03\`, \`count_fn04\`, \`count_fn05\`, \`count_fn06\`, \`count_fn07\`, \`count_fn08\`, \`count_fn09\` and \`count_fn10\`.
+EOF
+: >"$T/grep.log"
+run --cwd "$R" --base "$BASE" --plan "$T/plan-n12.md" --lang rust --out "$T/pack-n4.md"
+[ "$code" = 0 ] || fail "n: plan 12 symbols exits 0, got $code [$out]"
+[ "$(full_greps "$BASE")" = 2 ] || fail "n: plan 12 symbols make 2 full-tree passes, got $(full_greps "$BASE")"
+PATH="$OLD_PATH"
 
 echo "plan-sweep: all cases passed"
