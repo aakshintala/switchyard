@@ -25,6 +25,14 @@ When set to `yes`, PRs run through the same labels and states as issues, using t
 
 GitHub shares one number space across issues and PRs, so a bare `#42` may be either: resolve with `gh pr view 42` and fall back to `gh issue view 42`.
 
+## Merged PR checks in tkt-start
+
+`tkt-start` searches merged PR bodies after checking whether the ticket is current.
+A `Resolves #<n>` hit or a failed search stops before `plan-sweep` and `tkt-job`.
+With `--no-preflight`, it exits after the search without calling either command.
+Each `Part of #<n>` hit prints a `NOTE` with that PR's file list, even when many
+hits match. The run then continues.
+
 ## When a skill says "publish to the issue tracker"
 
 Create a GitHub issue.

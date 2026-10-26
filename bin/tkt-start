@@ -4,6 +4,7 @@
 # tokens still preflights; any other sweep failure exits with its code. No --files
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
 # A preflight core/non-blocking line counts when it starts with '<n>.' or '-', then spaces, then optional backtick/bold marks; a bare '*' bullet never counts.
+# After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line.
 # Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 set -euo pipefail
@@ -55,12 +56,15 @@ if [ ! -r "$namebase_lib" ]; then echo "tkt-start: cannot read shared lib: $name
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"; sweep="$bin_dir/plan-sweep"; tktjob="$bin_dir/tkt-job"
 set_namebase "$repo" "$issue"; state="$run/$namebase.state"; mkdir -p "$run"
 tkt() { "$tkt_state" "$state" "$@"; }
+part_notes=()
 emit() {
-  local rest="$1" code="$2"; shift 2; local twelve log out
+  local rest="$1" code="$2"; shift 2; local twelve log out note
   twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf nohead)"
   log="$run/$namebase-tkt-start-$twelve-$(date +%H%M%S).log"; out="TKT tkt-start $rest log=$log"
   [ $# -eq 0 ] || out="$out
 $(printf '%s\n' "$@" | head -n 40)"
+  for note in ${part_notes[@]+"${part_notes[@]}"}; do out="$out
+$note"; done
   printf '%s\n' "$out" | tee "$log"; exit "$code"
 }
 fail_step() {
@@ -124,6 +128,25 @@ if [ -n "$filing" ]; then
   elif [ -n "$edited" ]; then sincenote="edited=$edited not after filing"; fi
 fi
 dg=("state=$state" "worktree=$worktree $wt_note" "filing=${filing:-none} base=$base" "files=${files:-none}" "log ${filing:-none}..origin/main: $lognote" "$sincenote")
+# Merged PRs mentioning the issue run before the CURRENT exit, the
+# --no-preflight exit and the preflight dispatch. A Resolves line stops the
+# run; a Part-of line notes the PR and its files and the run continues. The
+# number's boundary is a non-digit, so #42 never matches #421, and Resolves
+# wins over Part-of.
+merged="$(gh pr list --repo "$repo" --state merged --search "#$issue in:body" --limit 100 --json number,body,files 2>&1)" || fail_step github "$?" "$merged"
+stop_pr=""; notes=(); pr_count="$(printf '%s' "$merged" | jq 'if type == "array" then length else 0 end')"
+idx=0; while [ "$idx" -lt "$pr_count" ]; do
+  pr_num="$(printf '%s' "$merged" | jq -r ".[$idx].number")"
+  pr_body="$(printf '%s' "$merged" | jq -r ".[$idx].body // \"\"")"
+  if printf '%s' "$pr_body" | grep -qiE "Resolves[[:space:]]+#$issue([^0-9]|$)"; then [ -n "$stop_pr" ] || stop_pr="$pr_num"
+  elif printf '%s' "$pr_body" | grep -qiE "Part of[[:space:]]+#$issue([^0-9]|$)"; then
+    pr_files="$(printf '%s' "$merged" | jq -r ".[$idx].files // [] | map(.path) | join(\",\")")"
+    notes+=("NOTE merged Part-of PR #$pr_num files=$pr_files")
+  fi
+  idx=$((idx+1))
+done
+[ -n "$stop_pr" ] && deny "MERGED-STOP pr=$stop_pr" 1 "tkt-start: issue #$issue already resolved by merged PR #$stop_pr"
+part_notes=(${notes[@]+"${notes[@]}"})
 if [ -n "$stale" ]; then dg=("reason=$reason" ${dg[@]+"${dg[@]}"}); tkt journal "tkt-start check STALE reason=$reason filing=${filing:-none}"
   [ "$no_preflight" -eq 1 ] && emit "STALE reason=$reason filing=${filing:-none}" 1 "${dg[@]}"
 else tkt journal "tkt-start check CURRENT filing=$filing"; emit "CURRENT filing=$filing files=${files:-none}" 0 "${dg[@]}"; fi

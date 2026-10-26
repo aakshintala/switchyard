@@ -22,6 +22,9 @@ cat >"$T/bin/gh" <<EOF
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 if [ -f "$T/gh-fail" ]; then exit 4; fi
 case " \$* " in
+  *" pr list "*)
+    if [ -f "$T/prlist-fail" ]; then echo "gh: pr list boom" >&2; exit 5; fi
+    cat "$T/prlist"; exit 0 ;;
   *" graphql "*) cat "$T/edited"; exit 0 ;;
   *" issue view "*" lastEditedAt "*)
     printf 'Unknown JSON field: "lastEditedAt"\n' >&2; exit 1 ;;
@@ -69,8 +72,8 @@ reload() {
 # commit, plus a touching commit for TWO) pushed to origin/main, a clone, the
 # issue body and docs, ARGS loaded. Sets CDIR CLONE WT RUN FILING.
 setup() {
-  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked"
-  printf 'null\n' >"$T/edited"; : >"$T/prhead"
+  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked"
+  printf 'null\n' >"$T/edited"; : >"$T/prhead"; printf '[]\n' >"$T/prlist"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
   ORIGIN="$CDIR/origin.git"; SEED="$CDIR/seed"
@@ -357,4 +360,95 @@ run_start --issue abc
 grep -qF -- '--issue' "$CDIR/stderr" || fail "numissue: stderr does not name --issue"
 [ ! -e "$RUN/widget-abc.state" ] || fail "numissue: state must not be written"
 [ ! -e "$CDIR/wt" ] || fail "numissue: worktree must not be created"
+# merged-PR search: `tkt-start` searches merged PRs for `#<issue> in:body`
+# after the currency check. A `Resolves #<issue>` hit stops with MERGED-STOP;
+# a `Part of #<issue>` hit prints a NOTE with every touched path and the run
+# continues. The boundary is a non-digit after the number, so `#42` never
+# matches `#421`. The stub's default `pr list` is empty.
+# a Resolves hit stops with MERGED-STOP before any preflight work.
+setup mergedstop ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Fixes it.\n\nResolves #42.\n","files":[{"path":"f.txt"}]}]' >"$T/prlist"
+run_start
+want "MERGED-STOP pr=7" 1 mergedstop
+case "$OUT" in *CURRENT*) fail "mergedstop: must never print CURRENT" ;; esac
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "mergedstop: tkt-job must not run" # docs/agents/issue-tracker.md:31
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "mergedstop: plan-sweep must not run" # docs/agents/issue-tracker.md:31
+grep -qF -- '--state merged' "$T/calls.log" || fail "mergedstop: search misses --state merged"
+grep -qF -- '--limit 100' "$T/calls.log" || fail "mergedstop: search misses --limit 100"
+grep -qF -- '#42 in:body' "$T/calls.log" || fail "mergedstop: search misses [#42 in:body]"
+# a Part-of hit notes every touched path, unfiltered by --files, and continues.
+setup mergedpart ONE AGAINST
+printf '%s\n' '[{"number":8,"body":"First half.\n\nPart of #42\n","files":[{"path":"f.txt"},{"path":"other/dir.txt"}]}]' >"$T/prlist"
+run_start
+want "CURRENT " 0 mergedpart
+case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergedpart: digest misses the NOTE" ;; esac
+for p in f.txt other/dir.txt; do case "$OUT" in *"$p"*) ;; *) fail "mergedpart: NOTE misses [$p]" ;; esac; done
+# each Part-of hit prints its own NOTE.
+setup mergedparts ONE AGAINST
+printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]},{"number":9,"body":"Part of #42","files":[{"path":"g.txt"}]}]' >"$T/prlist"
+run_start
+want "CURRENT " 0 mergedparts
+case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergedparts: digest misses the NOTE for PR #8" ;; esac
+case "$OUT" in *"NOTE merged Part-of PR #9"*) ;; *) fail "mergedparts: digest misses the NOTE for PR #9" ;; esac
+# Resolves wins when both kinds hit, even listed second.
+setup mergedwins ONE AGAINST
+printf '%s\n' '[{"number":8,"body":"Part of #42","files":[]},{"number":7,"body":"Done.\nResolves #42","files":[]}]' >"$T/prlist"
+run_start
+want "MERGED-STOP pr=7" 1 mergedwins
+case "$OUT" in *"NOTE merged Part-of"*) fail "mergedwins: a Resolves hit must stop, not note" ;; esac
+# the boundary: `#421` is no hit for issue 42, on either keyword.
+setup mergededge ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Unrelated.\n\nResolves #421\n","files":[]}]' >"$T/prlist"
+run_start
+want "CURRENT " 0 mergededge
+case "$OUT" in *MERGED-STOP*) fail "mergededge: #421 must not stop #42" ;; esac
+setup mergededgepart ONE AGAINST
+printf '%s\n' '[{"number":8,"body":"Part of #421","files":[{"path":"f.txt"}]}]' >"$T/prlist"
+run_start
+want "CURRENT " 0 mergededgepart
+case "$OUT" in *"NOTE merged Part-of"*) fail "mergededgepart: #421 must not note #42" ;; esac
+# a failed search fails the github step and never reports CURRENT or PREFLIGHT.
+setup mergedfail ONE AGAINST
+printf '1' >"$T/prlist-fail"; run_start
+want "STEP-FAIL step=github" 5 mergedfail
+case "$OUT" in *CURRENT*) fail "mergedfail: must never print CURRENT" ;; esac
+case "$OUT" in *PREFLIGHT*) fail "mergedfail: must never print PREFLIGHT" ;; esac
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "mergedfail: tkt-job must not run" # docs/agents/issue-tracker.md:31
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "mergedfail: plan-sweep must not run" # docs/agents/issue-tracker.md:31
+# the search runs on the --no-preflight path too: a Resolves hit stops
+# instead of STALE, a Part-of hit notes and then STALE exits.
+setup mergednoflight TWO FILING
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[]}]' >"$T/prlist"
+run_start --no-preflight
+want "MERGED-STOP pr=7" 1 mergednoflight
+case "$OUT" in *"STALE reason="*) fail "mergednoflight: must stop, not print STALE" ;; esac
+setup mergednoflightpart TWO FILING
+printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]}]' >"$T/prlist"
+run_start --no-preflight
+want "STALE reason=" 1 mergednoflightpart
+case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergednoflightpart: digest misses the NOTE" ;; esac
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "mergednoflightpart: tkt-job must not run" # docs/agents/issue-tracker.md:32
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "mergednoflightpart: plan-sweep must not run" # docs/agents/issue-tracker.md:32
+# many Part-of hits all print to stdout and the log, beyond the digest cap.
+setup mergedmany ONE AGAINST
+prlist='['
+for n in {1..40}; do
+  [ "$n" -eq 1 ] || prlist="${prlist},"
+  prlist+="{\"number\":$((100+n)),\"body\":\"Part of #42\",\"files\":[{\"path\":\"file-$n.txt\"}]}"
+done
+printf '%s]\n' "$prlist" >"$T/prlist"
+run_start
+want "CURRENT " 0 mergedmany
+mergedmany_log="$(printf '%s\n' "$OUT" | head -n 1)"; mergedmany_log="${mergedmany_log##* log=}"
+for n in {1..40}; do
+  note="NOTE merged Part-of PR #$((100+n)) files=file-$n.txt"
+  case "$OUT" in *"$note"*) ;; *) fail "mergedmany: stdout misses [$note]" ;; esac
+  grep -qF -- "$note" "$mergedmany_log" || fail "mergedmany: log misses [$note]"
+done
+# a Part-of hit on the stale path notes and still preflights.
+setup mergedstalepart TWO FILING
+printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]}]' >"$T/prlist"
+run_start
+want "PREFLIGHT core=" 1 mergedstalepart
+case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergedstalepart: digest misses the NOTE" ;; esac
 echo "tkt-start: all cases passed"
