@@ -49,8 +49,10 @@
 #        timeout-minutes reports as cancelled), or every failed job logged a
 #        `panicked at <path>:<line>` location and none of those paths is in
 #        `git diff --name-only origin/main...<pin>`. A failed job with no panic
-#        location counts as inside the diff and is never rerun. A failed rerun exits 1
-#        naming the run. After rerunning, ship-pr polls each rerun run until its
+#        location counts as inside the diff and is never rerun. A failed read of a
+#        run's attempt before the rerun exits 1 naming the run with gh's exit code
+#        and stderr; a failed rerun exits 1 naming the run. After rerunning,
+#        ship-pr polls each rerun run until its
 #        attempt passes the pre-rerun one before waiting again; no new attempt
 #        within 120 s exits 1 naming the run.
 #        Prints `merged <squash sha>` on success. A `gh pr merge` error containing
