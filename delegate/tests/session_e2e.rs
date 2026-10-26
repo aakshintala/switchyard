@@ -590,6 +590,30 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
 }
 
 #[test]
+fn startup_timeout_records_supervisor_pid() {
+    let h = Harness::new();
+    let timed_out = h.start(
+        b"NO_INIT_ACK",
+        false,
+        "NO_INIT_ACK",
+        &[("DELEGATE_SESSION_START_WAIT_MS", "0")],
+    );
+    assert_eq!(timed_out.status.code(), Some(1));
+    let state = std::fs::read_dir(h.root())
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let bytes = std::fs::read(entry.path().join("state.json")).ok()?;
+            let value: Value = serde_json::from_slice(&bytes).ok()?;
+            (value["dead"]["message"] == "session startup timed out").then_some(value)
+        })
+        .next()
+        .expect("timed-out state retained");
+    assert_eq!(state["dead"]["reason"], "startFailed");
+    assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
+}
+
+#[test]
 fn send_text_watch_and_steer_observe_the_same_turn() {
     let h = Harness::new();
     let id = id_from(&h.start(b"FAST", false, "", &[]));
