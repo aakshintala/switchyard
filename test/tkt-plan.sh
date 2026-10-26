@@ -299,6 +299,7 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "ASK exits 1"
 expect_verdict "TKT tkt-plan ASK id=j1 log=*" "ASK passthrough"
 grep -q "which design rules the retry?" <<<"$OUT" || fail "ASK digest carries the question"
+# Contract: docs/agents/workflow.md:5-6: each non-drift-exempt ASK consumes its round.
 [ "$(bash "$TKT_STATE" "$S" get verifier_round 2>/dev/null || printf '0')" = "1" ] || fail "first ASK counts round 1"
 grep -q "slot=verifier-r1" "$T/stub.log" || fail "first ASK uses slot verifier-r1"
 printf 'ask-report' >"$T/mode"
@@ -306,11 +307,13 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "second ASK exits 1"
 expect_verdict "TKT tkt-plan ASK id=j1 report=* log=*" "second ASK passthrough"
 grep -q "which design rules the retry?" <<<"$OUT" || fail "second ASK digest carries the question"
+# Contract: docs/agents/workflow.md:5-6: a second ASK is round 2.
 [ "$(bash "$TKT_STATE" "$S" get verifier_round 2>/dev/null || printf '0')" = "2" ] || fail "second ASK counts round 2"
 grep -q "slot=verifier-r2" "$T/stub.log" || fail "second ASK uses slot verifier-r2"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "ROUND-LIMIT after two ASKs exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "ROUND-LIMIT after two ASKs"
+# Contract: docs/agents/workflow.md:7: ROUND-LIMIT dispatches no additional job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 2))" ] || fail "ROUND-LIMIT after two ASKs starts no third job"
 printf 'ok' >"$T/mode"
 
