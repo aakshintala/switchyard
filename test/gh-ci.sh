@@ -721,6 +721,19 @@ run_wait 7 --timeout 0
 [ "$CODE" = "124" ] || fail "rerun in flight stays pending (got $CODE): [$OUT]"
 grep -q "^pending: ci$" <<<"$OUT" || fail "rerun in flight names ci pending: [$OUT]"
 
+# --- case: a separate queued run does not hide the completed result (#476)
+# --- two runs of the same workflow and event on the head: the older
+# --- completed green (run_attempt 1), the newer queued (run_attempt 1).
+# --- The wait settles on the completed result and names the queued run.
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+printf '%s\n' '[{"id":1,"name":"ci","status":"completed","conclusion":"success","details_url":"https://github.com/O/N/actions/runs/5/job/11"},{"id":2,"name":"setup","status":"in_progress","conclusion":null,"details_url":"https://github.com/O/N/actions/runs/6/job/21"}]' >"$T/state/checks.txt"
+echo '[{"id":5,"name":"CI","event":"pull_request","status":"completed","run_attempt":1},{"id":6,"name":"CI","event":"pull_request","status":"queued","run_attempt":1}]' >"$T/state/runs.txt"
+run_wait 7 --timeout 0
+[ "$CODE" = "0" ] || fail "separate queued run settles on the completed result (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} CI: pass" <<<"$OUT" || fail "separate queued run pass line: [$OUT]"
+grep -q "queued run 6" "$T/stderr.txt" || fail "separate queued run id on stderr: [$(cat "$T/stderr.txt")]"
+
 # --- cases: REST check-run conclusions map onto the buckets the verdict reads
 # the loop never calls gh pr view or gh pr checks (refused by the stand-in)
 reset_state
