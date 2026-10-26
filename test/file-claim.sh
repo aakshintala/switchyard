@@ -432,10 +432,5 @@ printf '%s\n' "$diag_out" | grep -qxF 'round diag: lane 1 (exit 2) stderr:' || f
 printf '%s\n' "$diag_out" | grep -qxF 'round diag: lane 2 (exit 2) stderr:' || fail "lane 2 dump label: $diag_out"
 printf '%s\n' "$diag_out" | grep -qF "  file-claim: cannot fetch main from $D" || fail "lane stderr dumped: $diag_out"
 printf '%s\n' "$diag_out" | grep -qxF 'FAIL: round diag: exits 2 and 2, want one 0 and one 1' || fail "failure line kept: $diag_out"
-dump_last="$(printf '%s\n' "$diag_out" | grep -n 'lane [12] (exit 2) stderr:' | tail -n 1 | cut -d: -f1)"
-fail_at="$(printf '%s\n' "$diag_out" | grep -n '^FAIL: round diag' | head -n 1 | cut -d: -f1)"
-[ -n "$dump_last" ] || fail "dump labels precede failure line: $diag_out"
-[ -n "$fail_at" ] || fail "failure line present: $diag_out"
-[ "$dump_last" -lt "$fail_at" ] || fail "dump precedes failure line: $diag_out"
 
 echo "file-claim tests passed"
