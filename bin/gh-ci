@@ -368,13 +368,8 @@ head_checks() {
                                       | ($runs[$r].status // "completed") == "completed"
                                         or (($runs[$r].attempt // 1) > 1)) | .run) | max)
                         // (map(.run) | max))}) | from_entries) as $auth
-      | ([$recs[] | select(.run != null) | select(.run > $auth[.key])
-          | .run as $r
-          | {id: $r,
-             status: ($runs[($r | tostring)].status // "completed"),
-             workflow: ($runs[($r | tostring)].workflow // ""),
-             event: ($runs[($r | tostring)].event // "")}] | unique) as $dropped
-      | {checks: [$recs[] | select(.run == null or .run >= $auth[.key])
+      | ([$recs[] | select(.run != null) | select(.run > $auth[.key]) | .run] | unique) as $dropped
+      | {checks: [$recs[] | select(.run == null or .run == $auth[.key])
           | .run as $r | .app_slug as $a
           | {name: .name, bucket: (if (($runs[(.run | tostring)].status // "completed") != "completed"
                                        and ($runs[(.run | tostring)].attempt // 1) > 1)
@@ -385,7 +380,7 @@ head_checks() {
                    else null end)}],
          dropped: $dropped}' ) || return 1
   printf '%s' "$payload" \
-    | jq -r '.dropped[]? | "gh-ci: separate \(.status) run \(.id) (\(.workflow)/\(.event)) is not a rerun; settling on the completed result"' >&2 \
+    | jq -r '.dropped[]? | "gh-ci: dropped run \(.)"' >&2 \
     || return 1
   printf '%s' "$payload" | jq -c '.checks' || return 1
 }

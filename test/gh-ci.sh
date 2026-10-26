@@ -107,7 +107,11 @@ gh() (
         line="$(advance "$T/state/checks.txt")"
         [ "$line" != "FAIL" ] || { echo "gh: HTTP 500 from check-runs" >&2; exit 1; }
         advance "$T/state/runs.txt" >/dev/null
-        case "$path" in *filter=latest*) line="$(jq -c '[group_by(.name)[] | max_by(.id)]' <<<"$line")";; esac
+        case "$path" in *filter=latest*)
+          if [ ! -e "$T/state/keep-checks-across-runs" ]; then
+            line="$(jq -c '[group_by(.name)[] | max_by(.id)]' <<<"$line")"
+          fi;;
+        esac
         jq -c '{total_count: length, check_runs: .}' <<<"$line";;
       *) echo "fake gh: unknown api $path" >&2; exit 2;;
     esac
@@ -173,7 +177,7 @@ export T
 export -f gh sleep
 
 reset_state() {
-  rm -f "$T/state/sleeps.txt" "$T/state/gh-args.txt" "$T/state/banned.txt" "$T/state/merge-state.txt" "$T/state/view-fail"
+  rm -f "$T/state/sleeps.txt" "$T/state/gh-args.txt" "$T/state/banned.txt" "$T/state/merge-state.txt" "$T/state/view-fail" "$T/state/keep-checks-across-runs"
   rm -f "$T/state/heads.txt" "$T/state/checks.txt" "$T/state/runs.txt" "$T/state/rules" "$T/state/rules-fail" "$T/state/classic" "$T/state/draft"
   rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail" "$T/state/not-found"
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
@@ -727,12 +731,13 @@ grep -q "^pending: ci$" <<<"$OUT" || fail "rerun in flight names ci pending: [$O
 # --- The wait settles on the completed result and names the queued run.
 reset_state
 set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
-printf '%s\n' '[{"id":1,"name":"ci","status":"completed","conclusion":"success","details_url":"https://github.com/O/N/actions/runs/5/job/11"},{"id":2,"name":"setup","status":"in_progress","conclusion":null,"details_url":"https://github.com/O/N/actions/runs/6/job/21"}]' >"$T/state/checks.txt"
+touch "$T/state/keep-checks-across-runs"
+printf '%s\n' '[{"id":1,"name":"ci","status":"completed","conclusion":"success","details_url":"https://github.com/O/N/actions/runs/5/job/11"},{"id":2,"name":"ci","status":"in_progress","conclusion":null,"details_url":"https://github.com/O/N/actions/runs/6/job/21"},{"id":3,"name":"lint","status":"in_progress","conclusion":null,"details_url":"https://github.com/O/N/actions/runs/6/job/22"}]' >"$T/state/checks.txt"
 echo '[{"id":5,"name":"CI","event":"pull_request","status":"completed","run_attempt":1},{"id":6,"name":"CI","event":"pull_request","status":"queued","run_attempt":1}]' >"$T/state/runs.txt"
 run_wait 7 --timeout 0
 [ "$CODE" = "0" ] || fail "separate queued run settles on the completed result (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} CI: pass" <<<"$OUT" || fail "separate queued run pass line: [$OUT]"
-grep -q "queued run 6" "$T/stderr.txt" || fail "separate queued run id on stderr: [$(cat "$T/stderr.txt")]"
+[ "$(grep -c '^gh-ci: dropped run 6$' "$T/stderr.txt")" = "1" ] || fail "separate queued run id reported once on stderr: [$(cat "$T/stderr.txt")]"
 
 # --- cases: REST check-run conclusions map onto the buckets the verdict reads
 # the loop never calls gh pr view or gh pr checks (refused by the stand-in)
