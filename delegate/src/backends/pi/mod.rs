@@ -117,7 +117,7 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
 fn progress_snapshot(state: &PiState, launched_session: Option<&str>) -> ProgressSnapshotRaw {
     ProgressSnapshotRaw {
         last_tool: state.last_tool.clone(),
-        tokens_so_far: 0.0,
+        tokens_so_far: state.input + state.output,
         last_assistant: state.last_assistant.clone(),
         files_touched: Vec::new(),
         phase: state.phase.clone(),
