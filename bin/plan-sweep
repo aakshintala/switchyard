@@ -13,6 +13,10 @@
 #        by file (at most 40 lines per symbol, with the total count); `pub use`
 #        re-exports; `<Name>::` sites grouped by file (`--lang rust`, only for a
 #        name with an `enum` definition); test files and `*.snap` files naming it.
+#        The sweep runs one full-tree `git grep` pass over all names (a second
+#        `<Name>::` pass only for `--lang rust` with an `enum` name), however
+#        many symbols the plan holds. Progress prints on stderr only: one
+#        `resolving N symbols` line, then one `symbol I/M NAME` line per section.
 #        Per file: an outline of `fn`, `struct`, `enum`, `impl`, `mod` and
 #        `#[path]` lines with line numbers, never a body. Outside Files lists
 #        every path a Symbol section names that the Files do not cover, one per
