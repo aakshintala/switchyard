@@ -732,6 +732,30 @@ fn send_text_watch_and_steer_observe_the_same_turn() {
 }
 
 #[test]
+fn send_right_after_start_steers_an_unfinished_turn() {
+    let h = Harness::new();
+    let id = id_from(&h.start(b"HOLD first", false, "", &[]));
+    // A send to a session with an unfinished turn steers instead of starting.
+    // The held-open turn forces the interleaving, so this needs no timing luck.
+    let second = h.invoke(&["send", &id, "second"]);
+    assert!(second.status.success());
+    assert_eq!(second.stdout, b"steered\n");
+    let running = h.wait_state(&id, "held turn running", |value| {
+        value["activeTurnId"].is_string() && value["status"] == "running"
+    });
+    assert_eq!(running["status"], "running");
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    h.wait_state(&id, "held turns finish", |value| value["status"] == "idle");
+    let texts = h.turn_texts();
+    for expected in ["HOLD first", "second"] {
+        assert!(
+            texts.iter().any(|text| text == expected),
+            "missing turn text {expected:?}"
+        );
+    }
+}
+
+#[test]
 fn slow_ack_send_returns_after_running_state_and_two_sends_race_safely() {
     let h = Harness::new();
     let id = id_from(&h.start(b"FAST", false, "SLOW_ACK", &[]));
