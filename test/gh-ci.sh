@@ -716,7 +716,7 @@ grep -q 'filter=latest' "$T/state/gh-args.txt" || fail "check runs read with fil
 reset_state
 set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
 printf '%s\n' '[{"id":1,"name":"ci","status":"completed","conclusion":"failure","details_url":"https://github.com/O/N/actions/runs/5/job/11"}]' >"$T/state/checks.txt"
-echo '[{"id":5,"name":"CI","event":"pull_request","status":"in_progress"}]' >"$T/state/runs.txt"
+echo '[{"id":5,"name":"CI","event":"pull_request","status":"in_progress","run_attempt":2}]' >"$T/state/runs.txt"
 run_wait 7 --timeout 0
 [ "$CODE" = "124" ] || fail "rerun in flight stays pending (got $CODE): [$OUT]"
 grep -q "^pending: ci$" <<<"$OUT" || fail "rerun in flight names ci pending: [$OUT]"
