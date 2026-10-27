@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Tests for bin/cargo-slot, against a fake real cargo in a mktemp -d fixture
 # (never ~/.cache/agents). Handshakes use FIFOs: a blocking open or read
-# waits for the event it needs, and the watchdog bounds the whole file. Reads
-# from a waiter's stderr take a 60 s deadline of their own. Absence checks
-# drain a reaped waiter's stderr to EOF; no test sleeps or polls.
+# waits for the event it needs, and the watchdog bounds the whole file. A
+# waiter's stderr runs through tee into R/err.log, and tee also feeds the R/err
+# FIFO, which carries the readiness line with no deadline; a waiter that exits
+# first gives that read EOF. Absence checks drain a reaped waiter's FIFO to EOF
+# and then read the whole log; no test sleeps or polls.
 # Not shown: that the waiting line prints once across several rescans. A shim
 # that printed on every rescan passes, because the suite releases a holder
 # right after the first line. Showing it needs a timed wait, which the suite
@@ -133,15 +135,15 @@ cargo_as() {
   "${CMD[@]}"
 }
 
-# spawn R [VAR=VAL ...] -- ARGS: the shim in the background, stderr on
-# R/err. Fd 9 reads R/err once the child has opened it for writing, and holds
-# no write end, so reads reach EOF when the child exits. Sets SPAWNED to its
+# spawn R [VAR=VAL ...] -- ARGS: the shim in the background, stderr through
+# tee into R/err.log and onto R/err. Fd 9 reads R/err, and holds no write end,
+# so reads reach EOF once tee and the child have exited. Sets SPAWNED to its
 # pid; after exec that is the fake's pid. The pid is recorded for cleanup.
 spawn() {
   local r="$1"
   shift
   shim_cmd "$r" "$@"
-  "${CMD[@]}" 2>"$r/err" &
+  "${CMD[@]}" 2> >(tee "$r/err.log" >"$r/err") &
   SPAWNED=$!
   PIDS+=("$SPAWNED")
   exec 9<"$r/err"
@@ -167,11 +169,20 @@ expect_no_slot_dir() {
   [ ! -e "${1:-$T/slots}" ] || fail "pass-through created the slot directory"
 }
 
-# expect_err_line TEXT: the waiter's next stderr line (fd 9) is TEXT, within 60 s.
+# expect_err_line TEXT: the waiter's next stderr line (fd 9) is TEXT. No
+# deadline: the watchdog bounds a hang, and a waiter that exits first gives EOF.
 expect_err_line() {
   local line
-  IFS= read -r -t 60 -u 9 line || fail "no stderr line within 60 s, want [$1]"
+  IFS= read -r -u 9 line || fail "no stderr line, want [$1]"
   [ "$line" = "$1" ] || fail "stderr line [$line], want [$1]"
+}
+
+# expect_waiter_log R: the waiter in R has been reaped. Draining fd 9 to EOF
+# waits for tee to finish, so the log is complete; it must be one waiting line.
+expect_waiter_log() {
+  cat <&9 >/dev/null
+  [ "$(cat "$1/err.log")" = "cargo-slot: waiting" ] ||
+    fail "waiter log is [$(cat "$1/err.log")], want one waiting line"
 }
 
 # hold_slot R SLOTS N: a holder that takes one of the N slots in SLOTS. It
@@ -368,6 +379,7 @@ waits_behind_holder() {
   kill -TERM "$wpid"
   wait "$wpid" 2>/dev/null
   [ ! -e "$w/started" ] || fail "$name: fake started after the waiter was killed"
+  expect_waiter_log "$w"
   release "$h"
   wait "$hold" 2>/dev/null
 }
@@ -447,8 +459,7 @@ wait "$C"
 rc=$?
 [ "$rc" = 0 ] || fail "third build: exit $rc, want 0 once a slot freed"
 expect_build_args "$S/c"
-rest="$(cat <&9)"
-[ -z "$rest" ] || fail "third build: stderr after the waiting line: [$rest]"
+expect_waiter_log "$S/c"
 [ -e "$S/slots/slot-1.lock" ] && [ -e "$S/slots/slot-2.lock" ] ||
   fail "slot files are missing after the runs"
 [ ! -e "$S/slots/slot-3.lock" ] || fail "a slot-3.lock was created for N=2"
@@ -555,7 +566,7 @@ IH=$HOLD_PID
 env -i PATH="$BASEPATH" HOME="$T/home" FAKE_DIR="$I/w" CARGO_SLOTS=1 \
   CARGO_SLOT_DIR="$I/slots" "$PY" -c \
   'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])' \
-  "$T/shims/cargo" build 2>"$I/w/err" &
+  "$T/shims/cargo" build 2> >(tee "$I/w/err.log" >"$I/w/err") &
 IP=$!
 PIDS+=("$IP")
 exec 9<"$I/w/err"
@@ -564,8 +575,7 @@ kill -INT "$IP"
 wait "$IP"
 rc=$?
 [ "$rc" = 130 ] || fail "SIGINT while waiting: exit $rc, want 130"
-rest="$(cat <&9)"
-[ -z "$rest" ] || fail "SIGINT while waiting: stderr after the waiting line: [$rest]"
+expect_waiter_log "$I/w"
 release "$I/h"
 wait "$IH" 2>/dev/null
 
