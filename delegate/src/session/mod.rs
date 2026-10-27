@@ -27,6 +27,31 @@ const START_POLL: u64 = 20;
 const WATCH_POLL: u64 = 50;
 const LOGS_POLL: u64 = 100;
 
+// The host a session runs on, selected by the model string alone: a
+// `muse/` prefix selects Muse, any other model string selects pi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostKind {
+    Muse,
+    Pi,
+}
+
+impl HostKind {
+    pub fn of(model: &str) -> HostKind {
+        if model.starts_with("muse/") {
+            HostKind::Muse
+        } else {
+            HostKind::Pi
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HostKind::Muse => "muse",
+            HostKind::Pi => "pi",
+        }
+    }
+}
+
 #[derive(Debug)]
 struct SessionError {
     code: &'static str,
@@ -263,16 +288,30 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     let model = flag(&values, "--model").ok_or_else(|| usage("start requires --model"))?;
     let brief_path = flag(&values, "--brief").ok_or_else(|| usage("start requires --brief"))?;
     let inbox_path = flag(&values, "--inbox").ok_or_else(|| usage("start requires --inbox"))?;
-    let Some(model_id) = model.strip_prefix("muse/") else {
-        return Err(usage("--model must use the muse/<model> form"));
-    };
-    if model_id.is_empty() {
-        return Err(usage("--model muse/ requires a model id"));
-    }
-    if crate::backends::muse::base_and_effort(model).1.is_some() {
-        return Err(usage(
-            "--model takes no reasoning-effort suffix on a session (sessions run at Muse's default effort)",
-        ));
+    if let Some(model_id) = model.strip_prefix("muse/") {
+        if model_id.is_empty() {
+            return Err(usage("--model muse/ requires a model id"));
+        }
+        if crate::backends::muse::base_and_effort(model).1.is_some() {
+            return Err(usage(
+                "--model takes no reasoning-effort suffix on a session (sessions run at Muse's default effort)",
+            ));
+        }
+    } else {
+        // A pi model names any other provider. A first segment that names a
+        // harness backend instead of a provider is rejected before any host
+        // is spawned, so it never starts a pi process that fails later.
+        let first = model.split('/').next().unwrap_or("");
+        if crate::backends::Backend::from_name(first).is_some() {
+            return Err(usage(
+                "--model must use the muse/<model> form or the <provider>/<model>[:<level>] form",
+            ));
+        }
+        if pi::parse_model(model).is_err() {
+            return Err(usage(
+                "--model must use the muse/<model> form or the <provider>/<model>[:<level>] form",
+            ));
+        }
     }
     let brief = read_brief(brief_path).map_err(usage)?;
     let cwd = std::env::current_dir()
@@ -419,7 +458,7 @@ fn send(args: &[String], json_mode: bool) -> Result<i32> {
         return Err(usage("invalid session id"));
     }
     let paths = default_paths();
-    let _current = load_and_settle(&paths, id)?;
+    let current = load_and_settle(&paths, id)?;
     let (argument, parsed_json) = parse_send_args(&args[1..]).map_err(usage)?;
     let json_mode = json_mode || parsed_json;
     let text = if argument == "-" {
@@ -427,6 +466,13 @@ fn send(args: &[String], json_mode: bool) -> Result<i32> {
     } else {
         read_text(&argument, &mut io::empty(), false).map_err(usage)?
     };
+    // pi expands a leading slash into a skill, template or extension command
+    // instead of sending the text to the model; Muse text is unchanged.
+    if text.as_bytes().first() == Some(&b'/') && HostKind::of(&current.model) == HostKind::Pi {
+        return Err(usage(
+            "text starting with / is not sent to the model: pi would expand /skill:<name> or /<template> or run an extension command instead",
+        ));
+    }
     let reply = ipc::request(
         &paths,
         id,
@@ -822,6 +868,21 @@ mod tests {
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn host_kind_selects_by_model_prefix() {
+        assert_eq!(HostKind::of("muse/x"), HostKind::Muse);
+        assert_eq!(
+            HostKind::of("muse/muse-spark-1.3-contributor"),
+            HostKind::Muse
+        );
+        assert_eq!(HostKind::of("museish/model"), HostKind::Pi);
+        assert_eq!(HostKind::of("Muse/x"), HostKind::Pi);
+        assert_eq!(HostKind::of("muse"), HostKind::Pi);
+        assert_eq!(HostKind::of("openai/gpt-6-luna:high"), HostKind::Pi);
+        assert_eq!(HostKind::Muse.label(), "muse");
+        assert_eq!(HostKind::Pi.label(), "pi");
     }
 
     #[test]

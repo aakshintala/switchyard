@@ -1,5 +1,7 @@
+use crate::session::HostKind;
 use crate::session::inbox::{self, Note};
 use crate::session::msp::{self, Disposition, HostEvent, Incoming, RpcError};
+use crate::session::pi;
 use crate::session::state::{self, DeadReason, Paths, State, Status, Store};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -22,6 +24,18 @@ pub const STEER_SETTLE: u64 = 2_000;
 pub const INTERRUPT_WAIT: u64 = 10_000;
 pub const STOP_GRACE: u64 = 10_000;
 pub const TERM_WAIT: u64 = 2_000;
+// One bound covers both pre-prompt pi calls, because a node process boots
+// before it reads stdin: separate bounds plus the prompt bound would reach
+// past START_WAIT.
+pub const PI_BOOT_WAIT: u64 = 30_000;
+
+fn pi_boot_wait() -> Duration {
+    std::env::var("DELEGATE_SESSION_PI_BOOT_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(PI_BOOT_WAIT))
+}
 pub const REQUEST_READ: u64 = 5_000;
 pub const MAX_TEXT: usize = 8 * 1024 * 1024;
 pub const MAX_LINE: usize = 6 * MAX_TEXT + 1024;
@@ -134,6 +148,8 @@ struct Shared {
     paths: Paths,
     id: String,
     config: SupervisorConfig,
+    kind: HostKind,
+    wire: Mutex<pi::Wire>,
     host: Arc<HostControl>,
     writer: Sender<WriterMessage>,
     pending: Mutex<HashMap<i64, Pending>>,
@@ -296,11 +312,13 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         }
     };
 
-    let model_id = initial
-        .model
-        .strip_prefix("muse/")
-        .unwrap_or(&initial.model);
-    let mut command = match crate::util::captured_command(&config.muse_bin) {
+    let kind = HostKind::of(&initial.model);
+    // A Muse start never resolves the pi binary.
+    let bin = match kind {
+        HostKind::Muse => config.muse_bin.clone(),
+        HostKind::Pi => crate::backends::pi::resolve_bin(None),
+    };
+    let mut command = match crate::util::captured_command(&bin) {
         Ok(command) => command,
         Err(error) => {
             let _ = fs::remove_file(&socket);
@@ -313,8 +331,37 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
             );
         }
     };
+    match kind {
+        HostKind::Muse => {
+            let model_id = initial
+                .model
+                .strip_prefix("muse/")
+                .unwrap_or(&initial.model);
+            command.args(msp::host_argv(model_id));
+        }
+        HostKind::Pi => {
+            let pi_dir = config.paths.dir(id).join("pi");
+            if let Err(error) = fs::create_dir_all(&pi_dir)
+                .and_then(|()| fs::set_permissions(&pi_dir, fs::Permissions::from_mode(0o700)))
+            {
+                let _ = fs::remove_file(&socket);
+                return finish_pre_spawn_failure(
+                    &store,
+                    &config.paths,
+                    id,
+                    DeadReason::StartFailed,
+                    &error.to_string(),
+                );
+            }
+            command.args(pi::host_argv(
+                &initial.model,
+                id,
+                &pi_dir,
+                &config.paths.brief_file(id),
+            ));
+        }
+    }
     command
-        .args(msp::host_argv(model_id))
         .current_dir(&initial.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -344,6 +391,9 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
             );
         }
     };
+    if kind == HostKind::Pi {
+        record_spawned_start(&config.paths.host_spawn_file(id), child.id());
+    }
 
     let host_pid = child.id() as i32;
     let host = Arc::new(HostControl {
@@ -357,6 +407,8 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         paths: config.paths.clone(),
         id: id.to_string(),
         config: config.clone(),
+        kind,
+        wire: Mutex::new(pi::Wire::new()),
         host: host.clone(),
         writer: writer_tx,
         pending: Mutex::new(HashMap::new()),
@@ -402,7 +454,10 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
             id,
             DeadReason::StartFailed,
             None,
-            "muse host did not provide stdin and stdout pipes",
+            &format!(
+                "{} host did not provide stdin and stdout pipes",
+                kind.label()
+            ),
             false,
             &fatal_write,
         );
@@ -411,7 +466,7 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
 
     let writer_shared = shared.clone();
     let writer_thread = thread::spawn(move || {
-        guard_thread(writer_shared, || writer_loop(writer_rx, stdin));
+        guard_thread(writer_shared, || writer_loop(writer_rx, stdin, kind));
     });
     let reader_shared = shared.clone();
     let reader_thread = thread::spawn(move || {
@@ -489,7 +544,7 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
                     id,
                     DeadReason::HostExited,
                     status.code(),
-                    "muse host exited",
+                    &format!("{} host exited", shared.kind.label()),
                     false,
                     &fatal_write,
                 );
@@ -521,7 +576,7 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
                 id,
                 DeadReason::HostExited,
                 status.and_then(|status| status.code()),
-                "muse host closed stdout",
+                &format!("{} host closed stdout", shared.kind.label()),
                 false,
                 &fatal_write,
             );
@@ -563,6 +618,9 @@ fn child_stdout(host: &HostControl) -> Option<std::process::ChildStdout> {
 }
 
 fn start_host(shared: &Arc<Shared>, initial: &State, brief: &str) -> Result<(), CallFailure> {
+    if shared.kind == HostKind::Pi {
+        return start_host_pi(shared, initial);
+    }
     let initialize = json!({
         "clientInfo": {
             "name":"delegate",
@@ -606,6 +664,48 @@ fn start_host(shared: &Arc<Shared>, initial: &State, brief: &str) -> Result<(), 
     Ok(())
 }
 
+// A bad `--model` does not fail pi's startup, so the model is validated
+// after start and before any prompt: a failure ends here with pi's message,
+// and no prompt was ever sent. `set_model` re-derives the level from pi's
+// settings, so a launch level is restored with `set_thinking_level` after.
+fn start_host_pi(shared: &Arc<Shared>, initial: &State) -> Result<(), CallFailure> {
+    let model = pi::parse_model(&initial.model).map_err(CallFailure::Failed)?;
+    let deadline = Instant::now()
+        .checked_add(pi_boot_wait())
+        .ok_or_else(|| CallFailure::Failed("pi boot deadline overflow".into()))?;
+    call_within(
+        shared,
+        "model/set",
+        json!({"provider": model.provider, "modelId": model.id}),
+        remaining(deadline),
+    )?;
+    if let Some(level) = model.level {
+        call_within(
+            shared,
+            "thinking/set",
+            json!({"level": level}),
+            remaining(deadline),
+        )?;
+    }
+    let mut admitted = false;
+    update_store(shared, |state| {
+        admitted = state::begin_turn(state, now_ms());
+        Vec::new()
+    })
+    .map_err(CallFailure::Failed)?;
+    if !admitted {
+        return Err(CallFailure::Failed(
+            "session could not start its first turn".into(),
+        ));
+    }
+    call(
+        shared,
+        "turn/start",
+        msp::turn_start_params("", pi::TRIGGER, now_ms()),
+    )?;
+    Ok(())
+}
+
 #[derive(Debug)]
 enum CallFailure {
     Rpc(RpcError),
@@ -622,10 +722,26 @@ impl CallFailure {
 }
 
 fn call(shared: &Arc<Shared>, method: &str, params: Value) -> Result<Value, CallFailure> {
+    call_within(shared, method, params, shared.config.rpc_timeout)
+}
+
+fn call_within(
+    shared: &Arc<Shared>,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value, CallFailure> {
     let id = shared.next_request_id.fetch_add(1, Ordering::SeqCst);
-    let line = msp::request(id, method, params);
+    let line = match shared.kind {
+        HostKind::Muse => msp::request(id, method, params),
+        HostKind::Pi => match lock(&shared.wire).encode(id, method, &params) {
+            Ok(line) => line,
+            Err(message) => return Err(CallFailure::Failed(message)),
+        },
+    };
+    let label = shared.kind.label();
     let deadline = Instant::now()
-        .checked_add(shared.config.rpc_timeout)
+        .checked_add(timeout)
         .ok_or_else(|| CallFailure::Failed("RPC deadline overflow".into()))?;
     let (response_tx, response_rx) = mpsc::channel();
     lock(&shared.pending).insert(
@@ -635,6 +751,12 @@ fn call(shared: &Arc<Shared>, method: &str, params: Value) -> Result<Value, Call
             response: response_tx,
         },
     );
+    if shared.kind == HostKind::Pi && shared.host_eof.load(Ordering::SeqCst) {
+        // The host closed stdout before this call reached the reader drain:
+        // fail at once instead of waiting out the bound.
+        lock(&shared.pending).remove(&id);
+        return Err(CallFailure::Failed("pi host closed stdout".into()));
+    }
     let (written_tx, written_rx) = mpsc::channel();
     if shared
         .writer
@@ -645,7 +767,8 @@ fn call(shared: &Arc<Shared>, method: &str, params: Value) -> Result<Value, Call
         .is_err()
     {
         lock(&shared.pending).remove(&id);
-        return Err(CallFailure::Failed("muse host writer stopped".into()));
+        let message = format!("{label} host writer stopped");
+        return Err(CallFailure::Failed(message));
     }
     match written_rx.recv_timeout(remaining(deadline)) {
         Ok(Ok(())) => {}
@@ -659,14 +782,16 @@ fn call(shared: &Arc<Shared>, method: &str, params: Value) -> Result<Value, Call
                 // The write finished as its deadline expired; still wait only for the remaining ack budget.
             } else {
                 lock(&shared.pending).remove(&id);
-                timeout_host(shared, method, "muse host stopped reading");
-                return Err(CallFailure::Failed("muse host stopped reading".into()));
+                let message = format!("{label} host stopped reading");
+                timeout_host(shared, method, &message);
+                return Err(CallFailure::Failed(message));
             }
         }
         Err(RecvTimeoutError::Disconnected) => {
             lock(&shared.pending).remove(&id);
-            timeout_host(shared, method, "muse host writer stopped");
-            return Err(CallFailure::Failed("muse host writer stopped".into()));
+            let message = format!("{label} host writer stopped");
+            timeout_host(shared, method, &message);
+            return Err(CallFailure::Failed(message));
         }
     }
     let result = match response_rx.recv_timeout(remaining(deadline)) {
@@ -675,16 +800,16 @@ fn call(shared: &Arc<Shared>, method: &str, params: Value) -> Result<Value, Call
             Ok(result) => result,
             Err(_) => {
                 lock(&shared.pending).remove(&id);
-                timeout_host(shared, method, "muse host request timed out");
-                return Err(CallFailure::Failed("muse host request timed out".into()));
+                let message = format!("{label} host request timed out");
+                timeout_host(shared, method, &message);
+                return Err(CallFailure::Failed(message));
             }
         },
         Err(RecvTimeoutError::Disconnected) => {
             lock(&shared.pending).remove(&id);
-            timeout_host(shared, method, "muse host response channel closed");
-            return Err(CallFailure::Failed(
-                "muse host response channel closed".into(),
-            ));
+            let message = format!("{label} host response channel closed");
+            timeout_host(shared, method, &message);
+            return Err(CallFailure::Failed(message));
         }
     };
     result.map_err(CallFailure::Rpc)
@@ -695,6 +820,7 @@ fn write_notification(
     line: String,
     timeout: Duration,
 ) -> Result<(), CallFailure> {
+    let label = shared.kind.label();
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| CallFailure::Failed("notification deadline overflow".into()))?;
@@ -705,7 +831,7 @@ fn write_notification(
             line,
             finished: Some(finished_tx),
         })
-        .map_err(|_| CallFailure::Failed("muse host writer stopped".into()))?;
+        .map_err(|_| CallFailure::Failed(format!("{label} host writer stopped")))?;
     match finished_rx.recv_timeout(remaining(deadline)) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(message)) => {
@@ -713,22 +839,21 @@ fn write_notification(
             Err(CallFailure::Failed(message))
         }
         Err(_) => {
-            timeout_host(shared, "notification", "muse host notification timed out");
-            Err(CallFailure::Failed(
-                "muse host notification timed out".into(),
-            ))
+            let message = format!("{label} host notification timed out");
+            timeout_host(shared, "notification", &message);
+            Err(CallFailure::Failed(message))
         }
     }
 }
 
-fn writer_loop(receiver: Receiver<WriterMessage>, mut stdin: ChildStdin) {
+fn writer_loop(receiver: Receiver<WriterMessage>, mut stdin: ChildStdin, kind: HostKind) {
     while let Ok(message) = receiver.recv() {
         match message {
             WriterMessage::Write { line, finished } => {
                 let result = stdin
                     .write_all(line.as_bytes())
                     .and_then(|()| stdin.write_all(b"\n"))
-                    .map_err(|error| error.to_string());
+                    .map_err(|error| write_failure_text(kind, &error));
                 if let Some(finished) = finished {
                     let _ = finished.send(result.clone());
                 }
@@ -768,38 +893,65 @@ fn reader_loop(stdout: std::process::ChildStdout, shared: Arc<Shared>) {
             Err(_) => break,
         }
     }
+    if shared.kind != HostKind::Pi {
+        shared.host_eof.store(true, Ordering::SeqCst);
+        return;
+    }
+    // A pi that dies at startup must fail `start` at once instead of waiting
+    // out the boot bound: set the flag before draining, so a call that
+    // registers after the drain still fails at once, and fail every pending
+    // request with the EOF text.
     shared.host_eof.store(true, Ordering::SeqCst);
+    let pending = std::mem::take(&mut *lock(&shared.pending));
+    for (_, request) in pending {
+        let _ = request.response.send(Err(RpcError {
+            code: 0,
+            kind: None,
+            message: "pi host closed stdout".into(),
+        }));
+    }
 }
 
 fn handle_host_line(shared: &Arc<Shared>, line: &str) {
-    match msp::parse_line(line) {
-        Incoming::Response { id, result } => handle_response(shared, id, result),
-        Incoming::Event(event) => handle_event(shared, event, line),
-        Incoming::HostRequest { id, method } => {
-            if update_store(shared, |_| {
-                vec![json!({"kind":"host.refused","method":method.clone(),"id":id.clone()})]
-            })
-            .is_err()
-            {
-                return;
+    // One pi line carries a batch of events and responses; apply them in
+    // order before reading the next line.
+    let incoming = match shared.kind {
+        HostKind::Muse => vec![msp::parse_line(line)],
+        HostKind::Pi => lock(&shared.wire).parse(line),
+    };
+    for item in incoming {
+        match item {
+            Incoming::Response { id, result } => handle_response(shared, id, result),
+            Incoming::Event(event) => handle_event(shared, event, line),
+            Incoming::HostRequest { id, method } => {
+                if update_store(shared, |_| {
+                    vec![json!({"kind":"host.refused","method":method.clone(),"id":id.clone()})]
+                })
+                .is_err()
+                {
+                    return;
+                }
+                let refusal = match shared.kind {
+                    HostKind::Muse => msp::refusal(&id),
+                    HostKind::Pi => pi::refusal(&id),
+                };
+                let _ = shared.writer.send(WriterMessage::Write {
+                    line: refusal,
+                    finished: None,
+                });
             }
-            let refusal = msp::refusal(&id);
-            let _ = shared.writer.send(WriterMessage::Write {
-                line: refusal,
-                finished: None,
-            });
-        }
-        Incoming::Unparsed(text) => {
-            if shared.panic_mode == Some(PanicMode::Apply) && text == "PANIC_LINE" {
-                let _ = shared
-                    .store
-                    .update(|_| panic!("test panic in Store::update"));
-                return;
+            Incoming::Unparsed(text) => {
+                if shared.panic_mode == Some(PanicMode::Apply) && text == "PANIC_LINE" {
+                    let _ = shared
+                        .store
+                        .update(|_| panic!("test panic in Store::update"));
+                    return;
+                }
+                let short: String = text.chars().take(200).collect();
+                let _ = update_store(shared, |_| {
+                    vec![json!({"kind":"host.unparsed","line":short})]
+                });
             }
-            let short: String = text.chars().take(200).collect();
-            let _ = update_store(shared, |_| {
-                vec![json!({"kind":"host.unparsed","line":short})]
-            });
         }
     }
 }
@@ -1210,6 +1362,12 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
     let current = shared.store.snapshot();
     let should_interrupt = should_interrupt && current.status == Status::Running;
     if should_interrupt {
+        if shared.kind == HostKind::Pi {
+            // An abort continues queued messages left in the session, so
+            // drop unsent steers first: they are reported as unconsumed on
+            // the cancelled completion instead of running after the abort.
+            let _ = call(shared, "queue/clear", json!({}));
+        }
         let session_id = current.muse_session_id.unwrap_or_default();
         let params = msp::turn_interrupt_params(&session_id, turn_id.as_deref(), now_ms());
         let _ = call(shared, "turn/interrupt", params);
@@ -1556,6 +1714,18 @@ fn record_spawned_pid(command: &mut std::process::Command, path: &Path) -> std::
     Ok(())
 }
 
+// Appends the host start time to the spawn file for a pi launch, so a later
+// reap can prove identity by pid plus start time. A failure keeps the bare
+// pid file, which reaps by the argv guard alone.
+fn record_spawned_start(path: &Path, pid: u32) {
+    let Some(start) = state::process_start(pid as i32) else {
+        return;
+    };
+    if let Ok(contents) = fs::read_to_string(path) {
+        let _ = fs::write(path, format!("{}\n{start}", contents.trim_end()));
+    }
+}
+
 fn open_host_stderr(path: &Path) -> std::io::Result<File> {
     let file = OpenOptions::new()
         .create(true)
@@ -1580,6 +1750,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+// The text a failed host write reports. The error kind is lost where
+// `writer_loop` stringifies it, so a pi write that fails because pi exited
+// before reading stdin is mapped to the EOF text here: one message whichever
+// of the write and the reader notices the death first.
+fn write_failure_text(kind: HostKind, error: &std::io::Error) -> String {
+    if kind == HostKind::Pi && error.kind() == std::io::ErrorKind::BrokenPipe {
+        "pi host closed stdout".to_string()
+    } else {
+        error.to_string()
+    }
+}
+
 fn remaining(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
@@ -1594,4 +1776,27 @@ fn now_ms() -> u64 {
 
 fn error_reply(code: &str, message: &str) -> Value {
     json!({"ok":false,"code":code,"message":message})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pi_broken_pipe_reads_as_the_eof_text() {
+        let pipe = std::io::Error::from_raw_os_error(libc::EPIPE);
+        assert_eq!(
+            write_failure_text(HostKind::Pi, &pipe),
+            "pi host closed stdout"
+        );
+        assert_ne!(
+            write_failure_text(HostKind::Muse, &pipe),
+            "pi host closed stdout"
+        );
+        let refused = std::io::Error::from_raw_os_error(libc::ECONNREFUSED);
+        assert_ne!(
+            write_failure_text(HostKind::Pi, &refused),
+            "pi host closed stdout"
+        );
+    }
 }

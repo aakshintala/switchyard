@@ -377,7 +377,9 @@ fn start_validates_detaches_and_prints_shared_help() {
         "--json",
     ]);
     assert_json_error(&unreadable, 2, "usage");
-    for model in ["museish/model", "muse/"] {
+    for model in [
+        "nomodel", "/x", "x/", "a b/c", "muse/", "codex/x", "fiber/x",
+    ] {
         let brief = h.brief_file(b"x");
         let result = h.invoke(&[
             "start",
