@@ -477,6 +477,15 @@ fn supervisor_starts_the_host_with_the_brief_and_expected_permissions() {
     assert!(current.supervisor_pid.is_some());
     let host_pid = current.host_pid.unwrap();
     assert!(host_pid > 1);
+    // prepublish spawn record holds the published host pid, mode 0600.
+    assert_eq!(
+        std::fs::read_to_string(session.paths.host_spawn_file(&session.id))
+            .unwrap()
+            .parse::<i32>()
+            .unwrap(),
+        host_pid
+    );
+    assert_eq!(mode(&session.paths.host_spawn_file(&session.id)), 0o600);
     assert_eq!(current.cwd, session.root.to_string_lossy());
 
     let requests = session.requests();
@@ -1530,4 +1539,375 @@ fn supervisor_state_write_failure_kills_host_and_removes_socket() {
         std::fs::Permissions::from_mode(0o700),
     )
     .unwrap();
+}
+
+// A supervisor killed after it spawns the host but before it publishes
+// either pid leaves no hostPid on record; these tests prove every reaper
+// path still accounts for that host. They drive the real `delegate` binary
+// as a subprocess because killing "the supervisor" must not kill the test
+// runner, and the fake host ignores stdin EOF so only a reap removes it.
+const PREPUBLISH_BIN: &str = env!("CARGO_BIN_EXE_delegate");
+const PREPUBLISH_MODEL: &str = "muse/muse-spark-1.3-contributor";
+const PREPUBLISH_HOOK_ENV: &str = "DELEGATE_SESSION_TEST_PAUSE_PREPUBLISH";
+
+struct PrepublishRoot {
+    base: std::path::PathBuf,
+    home: std::path::PathBuf,
+    fake_dir: std::path::PathBuf,
+    inbox: std::path::PathBuf,
+    brief: std::path::PathBuf,
+    ready: std::path::PathBuf,
+}
+
+struct PrepublishRun {
+    child: std::process::Child,
+    stdout: mpsc::Receiver<Vec<u8>>,
+    stderr: mpsc::Receiver<Vec<u8>>,
+}
+
+impl PrepublishRoot {
+    fn new() -> Self {
+        let base = std::path::PathBuf::from("/tmp").join(format!(
+            "dsp-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let home = base.join("home");
+        let fake_dir = base.join("fake-data");
+        let inbox = base.join("inbox");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&fake_dir).unwrap();
+        std::fs::create_dir_all(&inbox).unwrap();
+        let brief = base.join("brief.md");
+        std::fs::write(&brief, b"prepublish brief").unwrap();
+        let ready = base.join("ready");
+        Self {
+            base,
+            home,
+            fake_dir,
+            inbox,
+            brief,
+            ready,
+        }
+    }
+
+    fn fresh_id(&self) -> String {
+        format!(
+            "00000000-0000-7001-8000-{:012x}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn paths(&self) -> Paths {
+        Paths::new(self.home.join(".cache/agents/sessions"))
+    }
+
+    fn create_session(&self, id: &str) -> u64 {
+        let paths = self.paths();
+        state::create_session_dir(&paths, id).unwrap();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let value = state::new_state(
+            id,
+            PREPUBLISH_MODEL,
+            &self.base.to_string_lossy(),
+            &self.inbox.to_string_lossy(),
+            now_ms,
+        );
+        state::write_state(&paths, &value).unwrap();
+        let brief_path = paths.brief_file(id);
+        let mut brief_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&brief_path)
+            .unwrap();
+        brief_file.write_all(b"prepublish brief").unwrap();
+        std::fs::set_permissions(&brief_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        now_ms
+    }
+
+    fn spawn(
+        &self,
+        args: &[&str],
+        scenario: &str,
+        extra_env: &[(&str, &str)],
+        hook: bool,
+    ) -> PrepublishRun {
+        let mut command = std::process::Command::new(PREPUBLISH_BIN);
+        command
+            .args(args)
+            .current_dir(&self.base)
+            .env("HOME", &self.home)
+            .env("MUSE_BIN", support::muse_host_fake())
+            .env("FAKE_DIR", &self.fake_dir)
+            .env("FAKE_SCENARIO", scenario)
+            .env("DELEGATE_SESSION_GRACE_MS", "300")
+            .env_remove("TERM")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null());
+        if hook {
+            command.env(PREPUBLISH_HOOK_ENV, &self.ready);
+        }
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let exec_guard = support::exec_lock();
+        let mut child = command.spawn().unwrap();
+        drop(exec_guard);
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (stdout_tx, stdout_rx) = mpsc::channel();
+        let (stderr_tx, stderr_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::BufReader::new(stdout).read_to_end(&mut bytes);
+            let _ = stdout_tx.send(bytes);
+        });
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::BufReader::new(stderr).read_to_end(&mut bytes);
+            let _ = stderr_tx.send(bytes);
+        });
+        PrepublishRun {
+            child,
+            stdout: stdout_rx,
+            stderr: stderr_rx,
+        }
+    }
+
+    fn spawn_start(&self, scenario: &str, wait_ms: &str) -> PrepublishRun {
+        let brief = self.brief.to_str().unwrap().to_string();
+        let inbox = self.inbox.to_str().unwrap().to_string();
+        self.spawn(
+            &[
+                "session",
+                "start",
+                "--model",
+                PREPUBLISH_MODEL,
+                "--brief",
+                &brief,
+                "--inbox",
+                &inbox,
+            ],
+            scenario,
+            &[("DELEGATE_SESSION_START_WAIT_MS", wait_ms)],
+            true,
+        )
+    }
+
+    // The ready file counts only once the hook has written both pids and its
+    // trailing newline, so a partial write never parses.
+    fn wait_ready(&self) -> (i32, i32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(bytes) = std::fs::read(&self.ready)
+                && let Some(pids) = parse_ready(&bytes)
+            {
+                return pids;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "prepublish ready file did not arrive: {:?}",
+                self.ready
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn ready_pids(&self) -> Option<(i32, i32)> {
+        parse_ready(&std::fs::read(&self.ready).ok()?)
+    }
+
+    fn assert_gone(pid: i32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH)
+                );
+                return;
+            }
+            assert!(Instant::now() < deadline, "process {pid} remained alive");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+fn parse_ready(bytes: &[u8]) -> Option<(i32, i32)> {
+    if !bytes.ends_with(b"\n") {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut parts = text.split_whitespace();
+    let first = parts.next()?.parse::<i32>().ok()?;
+    let second = parts.next()?.parse::<i32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((first, second))
+}
+
+impl PrepublishRun {
+    fn kill(&mut self) {
+        self.child.kill().expect("kill the parked supervisor");
+    }
+
+    fn wait_bounded(mut self, timeout: Duration, what: &str) -> std::process::Output {
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                panic!("prepublish subprocess exceeded {timeout:?} waiting for {what}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let stdout = self
+            .stdout
+            .recv_timeout(Duration::from_secs(10))
+            .expect("stdout EOF deadline");
+        let stderr = self
+            .stderr
+            .recv_timeout(Duration::from_secs(10))
+            .expect("stderr EOF deadline");
+        std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+}
+
+impl Drop for PrepublishRoot {
+    fn drop(&mut self) {
+        if let Some((supervisor_pid, host_pid)) = self.ready_pids() {
+            unsafe {
+                libc::kill(supervisor_pid, libc::SIGKILL);
+                libc::kill(-host_pid, libc::SIGKILL);
+                libc::kill(host_pid, libc::SIGKILL);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+#[test]
+fn prepublish_kill_is_reaped_by_settle_dead_supervisor() {
+    let root = PrepublishRoot::new();
+    let id = root.fresh_id();
+    let started_at = root.create_session(&id);
+    let mut run = root.spawn(&["session", "__supervise", &id], "IGNORE_EOF", &[], true);
+    let (_, host_pid) = root.wait_ready();
+    assert_eq!(
+        unsafe { libc::kill(host_pid, 0) },
+        0,
+        "host exited before the supervisor kill"
+    );
+    run.kill();
+    let _ = run.wait_bounded(Duration::from_secs(10), "supervise exit after SIGKILL");
+    let settled = state::settle_dead_supervisor(
+        &root.paths(),
+        &id,
+        started_at + state::STARTING_GRACE_MS + 1,
+    )
+    .unwrap()
+    .expect("a pre-publication kill must settle the session dead");
+    assert_eq!(
+        settled.dead.as_ref().unwrap().reason,
+        DeadReason::StartFailed
+    );
+    assert_eq!(settled.supervisor_pid, None);
+    assert_eq!(settled.host_pid, None);
+    PrepublishRoot::assert_gone(host_pid);
+}
+
+#[test]
+fn prepublish_start_timeout_reaps_the_host() {
+    // Deterministic: park the supervisor between host spawn and publication
+    // with the hook, and force `start`'s own timeout branch off the ready
+    // file (see DELEGATE_SESSION_TEST_TIMEOUT_ON_READY). The START_WAIT
+    // budget stays high so only the trigger fires, and the assertion below
+    // fails when the timeout branch stops calling `reap_recorded_host`.
+    let root = PrepublishRoot::new();
+    let brief = root.brief.to_str().unwrap().to_string();
+    let inbox = root.inbox.to_str().unwrap().to_string();
+    let ready = root.ready.to_str().unwrap().to_string();
+    let run = root.spawn(
+        &[
+            "session",
+            "start",
+            "--model",
+            PREPUBLISH_MODEL,
+            "--brief",
+            &brief,
+            "--inbox",
+            &inbox,
+        ],
+        "IGNORE_EOF",
+        &[
+            ("DELEGATE_SESSION_START_WAIT_MS", "30000"),
+            ("DELEGATE_SESSION_TEST_TIMEOUT_ON_READY", &ready),
+        ],
+        true,
+    );
+    let output = run.wait_bounded(Duration::from_secs(20), "session start timeout exit");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("session startup timed out"),
+        "unexpected start stderr: {stderr}"
+    );
+    let (_, host_pid) = root
+        .ready_pids()
+        .expect("ready file names the prepublish host");
+    PrepublishRoot::assert_gone(host_pid);
+}
+
+#[test]
+fn prepublish_supervisor_exit_before_first_turn_reaps_the_host() {
+    let root = PrepublishRoot::new();
+    let run = root.spawn_start("IGNORE_EOF", "30000");
+    let (supervisor_pid, host_pid) = root.wait_ready();
+    unsafe {
+        libc::kill(supervisor_pid, libc::SIGKILL);
+    }
+    let output = run.wait_bounded(
+        Duration::from_secs(10),
+        "session start exit after supervisor SIGKILL",
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("session supervisor exited before first turn"),
+        "unexpected start stderr: {stderr}"
+    );
+    PrepublishRoot::assert_gone(host_pid);
+}
+
+#[test]
+fn prepublish_spawn_record_failure_stops_the_start_before_any_host_runs() {
+    let root = PrepublishRoot::new();
+    let id = root.fresh_id();
+    let _ = root.create_session(&id);
+    // A directory where the spawn record must go makes the pre-exec open fail.
+    std::fs::create_dir_all(root.paths().host_spawn_file(&id)).unwrap();
+    let run = root.spawn(&["session", "__supervise", &id], "IGNORE_EOF", &[], false);
+    let output = run.wait_bounded(
+        Duration::from_secs(10),
+        "supervise exit after record failure",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let state = state::read_state(&root.paths(), &id).unwrap();
+    assert_eq!(state.status, Status::Dead);
+    assert_eq!(state.dead.as_ref().unwrap().reason, DeadReason::StartFailed);
+    assert!(!root.fake_dir.join("host.pid").exists());
+    assert!(!root.paths().socket_path(&id).unwrap().exists());
 }

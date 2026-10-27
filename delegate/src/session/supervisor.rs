@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -320,6 +321,16 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         .stderr(Stdio::from(stderr));
     command.process_group(0);
     isolate_child_descriptors(&mut command);
+    if let Err(error) = record_spawned_pid(&mut command, &config.paths.host_spawn_file(id)) {
+        let _ = fs::remove_file(&socket);
+        return finish_pre_spawn_failure(
+            &store,
+            &config.paths,
+            id,
+            DeadReason::StartFailed,
+            &error.to_string(),
+        );
+    }
     let child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -363,6 +374,11 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         socket: socket.clone(),
         active: true,
     };
+
+    // A test hook that holds the supervisor after the host is spawned but
+    // before either pid is published, so a test can kill the supervisor in
+    // that window and prove the host is still reaped.
+    pause_before_publish(host_pid);
 
     if update_store(&shared, |state| {
         state.supervisor_pid = Some(std::process::id() as i32);
@@ -525,6 +541,17 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         &mut guard,
         code,
     )
+}
+
+fn pause_before_publish(host_pid: i32) {
+    let Some(path) = std::env::var_os("DELEGATE_SESSION_TEST_PAUSE_PREPUBLISH") else {
+        return;
+    };
+    let line = format!("{} {}\n", std::process::id(), host_pid);
+    let _ = std::fs::write(path, line);
+    loop {
+        std::thread::park();
+    }
 }
 
 fn child_stdin(host: &HostControl) -> Option<ChildStdin> {
@@ -1477,6 +1504,56 @@ fn isolate_child_descriptors(command: &mut std::process::Command) {
             Ok(())
         });
     }
+}
+
+// Records the host pid to `path` in the child after fork and before exec,
+// so the file is complete before `spawn` returns and no later supervisor
+// death can precede it. The step allocates nothing and takes no lock, and
+// it holds no open fd at exec.
+fn record_spawned_pid(command: &mut std::process::Command, path: &Path) -> std::io::Result<()> {
+    let absolute = std::path::absolute(path)?;
+    let c_path =
+        std::ffi::CString::new(absolute.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
+    unsafe {
+        command.pre_exec(move || {
+            let fd = libc::open(
+                c_path.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+                0o600,
+            );
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fchmod(fd, 0o600) != 0 {
+                libc::close(fd);
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut digits = [0u8; 12];
+            let mut end = digits.len();
+            let mut value = libc::getpid() as i64;
+            if value == 0 {
+                end -= 1;
+                digits[end] = b'0';
+            }
+            while value > 0 {
+                end -= 1;
+                digits[end] = b'0' + (value % 10) as u8;
+                value /= 10;
+            }
+            let record = &digits[end..];
+            let written = libc::write(
+                fd,
+                record.as_ptr() as *const libc::c_void,
+                record.len() as libc::size_t,
+            );
+            libc::close(fd);
+            if written as usize != record.len() {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
 }
 
 fn open_host_stderr(path: &Path) -> std::io::Result<File> {

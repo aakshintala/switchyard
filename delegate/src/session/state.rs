@@ -136,6 +136,10 @@ impl Paths {
         self.dir(id).join("brief.txt")
     }
 
+    pub fn host_spawn_file(&self, id: &str) -> PathBuf {
+        self.dir(id).join("host-spawn.pid")
+    }
+
     pub fn socket_path(&self, id: &str) -> Result<PathBuf, StateError> {
         if !valid_id(id) {
             return Err(StateError::Unreadable("invalid session id".into()));
@@ -552,12 +556,32 @@ pub fn settle_dead_supervisor(
     }
     mark_dead(&mut fresh, reason, None, message, now_ms);
     write_state(paths, &fresh)?;
-    if let Some(host_pid) = fresh.host_pid
-        && !matches!(fresh.supervisor_pid, Some(pid) if pid <= 1)
-    {
-        reap_host(host_pid);
+    if !matches!(fresh.supervisor_pid, Some(pid) if pid <= 1) {
+        reap_recorded_host(paths, id);
     }
     Ok(Some(fresh))
+}
+
+// Reaps the recorded host, preferring a published hostPid; when none was
+// published, falls back to the pre-exec spawn record. Never errors: an
+// unreadable state falls through to the spawn file, and the file is never
+// read while a hostPid is published.
+pub fn reap_recorded_host(paths: &Paths, id: &str) {
+    let pid = read_state(paths, id)
+        .ok()
+        .and_then(|state| state.host_pid)
+        .or_else(|| read_spawned_pid(paths, id));
+    if let Some(pid) = pid {
+        reap_host(pid);
+    }
+}
+
+fn read_spawned_pid(paths: &Paths, id: &str) -> Option<i32> {
+    std::fs::read_to_string(paths.host_spawn_file(id))
+        .ok()?
+        .trim()
+        .parse::<i32>()
+        .ok()
 }
 
 // debt: pid-only liveness, add a heartbeat-age check when a reused supervisor pid shows up.
@@ -1813,5 +1837,164 @@ mod tests {
                 .iter()
                 .any(|entry| matches!(entry, ListEntry::Unreadable { id } if id == "not-an-id"))
         );
+    }
+
+    #[test]
+    fn prepublish_reap_recorded_host_falls_back_to_the_spawn_file() {
+        let scratch = Scratch::new();
+        let mut host = ready_group_shell(Some("serve"), true);
+        let host_pid = host.id() as i32;
+        let id = crate::util::random_uuid();
+        let state = new_state(&id, "muse/m", "/work", "/inbox", 0);
+        create_session_dir(&scratch.paths, &id).unwrap();
+        write_state(&scratch.paths, &state).unwrap();
+        std::fs::write(scratch.paths.host_spawn_file(&id), host_pid.to_string()).unwrap();
+        reap_recorded_host(&scratch.paths, &id);
+        finish_child(&mut host);
+    }
+
+    #[test]
+    fn prepublish_published_host_pid_wins_over_the_spawn_file() {
+        let scratch = Scratch::new();
+        let mut published = ready_group_shell(Some("serve"), true);
+        let mut spawned = ready_group_shell(Some("serve"), true);
+        let spawned_pid = spawned.id() as i32;
+        let id = crate::util::random_uuid();
+        let mut state = new_state(&id, "muse/m", "/work", "/inbox", 0);
+        state.host_pid = Some(published.id() as i32);
+        create_session_dir(&scratch.paths, &id).unwrap();
+        write_state(&scratch.paths, &state).unwrap();
+        std::fs::write(scratch.paths.host_spawn_file(&id), spawned_pid.to_string()).unwrap();
+        reap_recorded_host(&scratch.paths, &id);
+        finish_child(&mut published);
+        assert!(
+            spawned.try_wait().unwrap().is_none(),
+            "spawn-file host was reaped while a hostPid was published"
+        );
+        unsafe { libc::kill(-spawned_pid, libc::SIGKILL) };
+        finish_child(&mut spawned);
+    }
+
+    #[test]
+    fn prepublish_unusable_spawn_file_reaps_nothing() {
+        let scratch = Scratch::new();
+        let mut host = ready_group_shell(Some("serve"), true);
+        let mut other = ready_group_shell(None, false);
+        for contents in ["", "abc", "0", "1", "-5", "99999999999"] {
+            let id = crate::util::random_uuid();
+            let state = new_state(&id, "muse/m", "/work", "/inbox", 0);
+            create_session_dir(&scratch.paths, &id).unwrap();
+            write_state(&scratch.paths, &state).unwrap();
+            std::fs::write(scratch.paths.host_spawn_file(&id), contents).unwrap();
+            reap_recorded_host(&scratch.paths, &id);
+        }
+        let missing_id = crate::util::random_uuid();
+        let missing = new_state(&missing_id, "muse/m", "/work", "/inbox", 0);
+        create_session_dir(&scratch.paths, &missing_id).unwrap();
+        write_state(&scratch.paths, &missing).unwrap();
+        reap_recorded_host(&scratch.paths, &missing_id);
+        let decoy_id = crate::util::random_uuid();
+        let decoy = new_state(&decoy_id, "muse/m", "/work", "/inbox", 0);
+        create_session_dir(&scratch.paths, &decoy_id).unwrap();
+        write_state(&scratch.paths, &decoy).unwrap();
+        std::fs::write(
+            scratch.paths.host_spawn_file(&decoy_id),
+            (other.id() as i32).to_string(),
+        )
+        .unwrap();
+        reap_recorded_host(&scratch.paths, &decoy_id);
+        assert!(
+            host.try_wait().unwrap().is_none(),
+            "host-shaped group died on an unusable spawn file"
+        );
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "non-host group died on an unusable spawn file"
+        );
+        unsafe { libc::kill(-(host.id() as i32), libc::SIGKILL) };
+        unsafe { libc::kill(-(other.id() as i32), libc::SIGKILL) };
+        finish_child(&mut host);
+        finish_child(&mut other);
+    }
+
+    #[test]
+    fn prepublish_settle_reaps_the_spawn_file_host() {
+        let scratch = Scratch::new();
+        let mut host = ready_group_shell(Some("serve"), true);
+        let host_pid = host.id() as i32;
+        let id = crate::util::random_uuid();
+        let state = new_state(&id, "muse/m", "/work", "/inbox", 1000);
+        create_session_dir(&scratch.paths, &id).unwrap();
+        write_state(&scratch.paths, &state).unwrap();
+        std::fs::write(scratch.paths.host_spawn_file(&id), host_pid.to_string()).unwrap();
+        assert_eq!(
+            settle_dead_supervisor(&scratch.paths, &id, 1000 + STARTING_GRACE_MS).unwrap(),
+            None
+        );
+        assert!(
+            host.try_wait().unwrap().is_none(),
+            "spawn-file host died before the grace expired"
+        );
+        let settled = settle_dead_supervisor(&scratch.paths, &id, 1000 + STARTING_GRACE_MS + 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.status, Status::Dead);
+        assert_eq!(
+            settled.dead.as_ref().unwrap().reason,
+            DeadReason::StartFailed
+        );
+        finish_child(&mut host);
+
+        let mut exited = ready_group_shell(Some("serve"), true);
+        let exited_pid = exited.id() as i32;
+        let mut dead = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let dead_pid = dead.id() as i32;
+        finish_child(&mut dead);
+        let exited_id = crate::util::random_uuid();
+        let mut exited_state = new_state(&exited_id, "muse/m", "/work", "/inbox", 0);
+        exited_state.supervisor_pid = Some(dead_pid);
+        create_session_dir(&scratch.paths, &exited_id).unwrap();
+        write_state(&scratch.paths, &exited_state).unwrap();
+        std::fs::write(
+            scratch.paths.host_spawn_file(&exited_id),
+            exited_pid.to_string(),
+        )
+        .unwrap();
+        let exited_settled = settle_dead_supervisor(&scratch.paths, &exited_id, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            exited_settled.dead.as_ref().unwrap().reason,
+            DeadReason::SupervisorDied
+        );
+        finish_child(&mut exited);
+
+        let mut guarded = ready_group_shell(Some("serve"), true);
+        let guarded_pid = guarded.id() as i32;
+        for pid in [0, 1] {
+            let guarded_id = crate::util::random_uuid();
+            let mut guarded_state = new_state(&guarded_id, "muse/m", "/work", "/inbox", 0);
+            guarded_state.supervisor_pid = Some(pid);
+            create_session_dir(&scratch.paths, &guarded_id).unwrap();
+            write_state(&scratch.paths, &guarded_state).unwrap();
+            std::fs::write(
+                scratch.paths.host_spawn_file(&guarded_id),
+                guarded_pid.to_string(),
+            )
+            .unwrap();
+            let guarded_settled = settle_dead_supervisor(&scratch.paths, &guarded_id, 1)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                guarded_settled.dead.as_ref().unwrap().reason,
+                DeadReason::SupervisorDied
+            );
+        }
+        assert!(
+            guarded.try_wait().unwrap().is_none(),
+            "corrupt supervisor pid reaped the spawn-file host"
+        );
+        unsafe { libc::kill(-guarded_pid, libc::SIGKILL) };
+        finish_child(&mut guarded);
     }
 }
