@@ -557,7 +557,7 @@ pub fn settle_dead_supervisor(
     mark_dead(&mut fresh, reason, None, message, now_ms);
     write_state(paths, &fresh)?;
     if !matches!(fresh.supervisor_pid, Some(pid) if pid <= 1) {
-        reap_recorded_host(paths, &id);
+        reap_recorded_host(paths, id);
     }
     Ok(Some(fresh))
 }
