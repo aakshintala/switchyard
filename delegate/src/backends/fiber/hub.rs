@@ -12,9 +12,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-/// Newline JSON framing cap: a hub line over 64 MiB ends the run, it is
-/// never truncated.
-const READ_CAP: u64 = 64 * 1024 * 1024;
 /// A socket path is limited to 103 bytes on macOS.
 const MAX_SOCKET_PATH: usize = 103;
 
@@ -26,22 +23,16 @@ fn crash_text(body: String) -> String {
     format!("{body}\n{FIXED}")
 }
 
-/// What went wrong reading one hub line.
+/// What went wrong reading one hub line: EOF or a read error means the
+/// connection is lost. Hub lines carry no cap, only client lines do: the hub
+/// is local, so a line is read to its newline whatever its size.
 #[derive(Debug, PartialEq)]
 enum ReadErr {
-    /// EOF or a read error: the connection is lost.
     Lost(String),
-    /// A hub line over the 64 MiB cap, never a truncation.
-    TooLong,
 }
 
 /// Read one newline-terminated hub line, keeping partial bytes across reads.
-/// A line that passes the 64 MiB cap is an error, never a truncation.
-fn read_line(reader: &mut BufReader<UnixStream>) -> Result<Vec<u8>, ReadErr> {
-    read_line_capped(reader, READ_CAP)
-}
-
-fn read_line_capped<R: BufRead>(reader: &mut R, cap: u64) -> Result<Vec<u8>, ReadErr> {
+fn read_line<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, ReadErr> {
     enum Next {
         Done(usize),
         More(usize),
@@ -57,16 +48,10 @@ fn read_line_capped<R: BufRead>(reader: &mut R, cap: u64) -> Result<Vec<u8>, Rea
             }
             match buf.iter().position(|&b| b == b'\n') {
                 Some(nl) => {
-                    if line.len() as u64 + nl as u64 > cap {
-                        return Err(ReadErr::TooLong);
-                    }
                     line.extend_from_slice(&buf[..nl]);
                     Next::Done(nl + 1)
                 }
                 None => {
-                    if line.len() as u64 + buf.len() as u64 > cap {
-                        return Err(ReadErr::TooLong);
-                    }
                     line.extend_from_slice(buf);
                     Next::More(buf.len())
                 }
@@ -116,7 +101,6 @@ fn connect(socket_path: &Path) -> Result<(HubConn, String), String> {
         writer,
     };
     let raw = read_line(&mut conn.reader).map_err(|e| match e {
-        ReadErr::TooLong => crash_text("protocol error: hub line over 64 MiB".to_string()),
         ReadErr::Lost(detail) => crash_text(format!("cannot read hub_hello from {show}: {detail}")),
     })?;
     let hello: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| {
@@ -155,21 +139,23 @@ fn hello_fiber_version(hello: &serde_json::Value) -> &str {
 }
 
 /// `FIBER_HOME` when it is set and absolute, `<homedir>/.fiber` when it is
-/// unset. An empty or relative value is an error naming `FIBER_HOME`, with
-/// no `~/.fiber` fallback.
+/// unset. An empty, relative or non-UTF-8 value is an error naming
+/// `FIBER_HOME`, with no `~/.fiber` fallback. Read with `var_os`, so a
+/// non-UTF-8 value is the error and never reads as unset.
 pub fn fiber_home() -> Result<PathBuf, String> {
-    match std::env::var("FIBER_HOME") {
-        Err(_) => Ok(crate::util::homedir().join(".fiber")),
-        Ok(v) if v.is_empty() => {
+    match std::env::var_os("FIBER_HOME") {
+        None => Ok(crate::util::homedir().join(".fiber")),
+        Some(v) if v.is_empty() => {
             Err("FIBER_HOME is set but empty; set it to an absolute path or unset it".to_string())
         }
-        Ok(v) => {
+        Some(v) => {
             let path = PathBuf::from(&v);
             if path.is_absolute() {
                 Ok(path)
             } else {
                 Err(format!(
-                    "FIBER_HOME is relative ({v}); set it to an absolute path or unset it"
+                    "FIBER_HOME is relative ({}); set it to an absolute path or unset it",
+                    v.to_string_lossy()
                 ))
             }
         }
@@ -279,7 +265,6 @@ enum WaitOutcome {
     Ack(Ack),
     Stopped(Step),
     Lost,
-    TooLong,
 }
 
 impl HubConn {
@@ -299,7 +284,6 @@ impl HubConn {
             let raw = match read_line(&mut self.reader) {
                 Ok(raw) => raw,
                 Err(ReadErr::Lost(_)) => return WaitOutcome::Lost,
-                Err(ReadErr::TooLong) => return WaitOutcome::TooLong,
             };
             let parsed: serde_json::Value = match serde_json::from_slice(&raw) {
                 Ok(v) => v,
@@ -424,11 +408,6 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
             ));
         }
         WaitOutcome::Lost => return rest.crash(lost_before_start_text(&start_id)),
-        WaitOutcome::TooLong => {
-            return rest.crash(crash_text(
-                "protocol error: hub line over 64 MiB".to_string(),
-            ));
-        }
     };
     rest.session_id = Some(session_id.clone());
     // subscribe at full.
@@ -459,13 +438,6 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
             );
         }
         WaitOutcome::Lost => return rest.crash(lost_text(&session_id)),
-        WaitOutcome::TooLong => {
-            return fail_with_cleanup(
-                &mut conn,
-                &mut rest,
-                crash_text("protocol error: hub line over 64 MiB".to_string()),
-            );
-        }
     }
     // prompt with the client-minted id C.
     let prompt_id = new_command_id();
@@ -496,25 +468,11 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
             );
         }
         WaitOutcome::Lost => return rest.crash(lost_text(&session_id)),
-        WaitOutcome::TooLong => {
-            return fail_with_cleanup(
-                &mut conn,
-                &mut rest,
-                crash_text("protocol error: hub line over 64 MiB".to_string()),
-            );
-        }
     }
     // Read to the verdict, which stops the run at once.
     loop {
         let raw = match read_line(&mut conn.reader) {
             Ok(raw) => raw,
-            Err(ReadErr::TooLong) => {
-                return fail_with_cleanup(
-                    &mut conn,
-                    &mut rest,
-                    crash_text("protocol error: hub line over 64 MiB".to_string()),
-                );
-            }
             Err(ReadErr::Lost(_)) => return rest.crash(lost_text(&session_id)),
         };
         let step = rest.handle_live(&raw);
@@ -973,7 +931,6 @@ mod tests {
                 Err(ReadErr::Lost(detail)) => {
                     panic!("fake hub timed out waiting for a client line: {detail}")
                 }
-                Err(ReadErr::TooLong) => panic!("fake hub got an over-cap client line"),
             }
         }
     }
@@ -1092,33 +1049,12 @@ mod tests {
     }
 
     #[test]
-    fn line_over_64mib_is_rejected_not_truncated() {
-        let (client, server) = UnixStream::pair().expect("socket pair");
-        let big = "x".repeat(64 * 1024 * 1024 + 1);
-        std::thread::spawn(move || {
-            let mut server = server;
-            write_line(&mut server, &big).expect("send big line");
-        });
-        let mut reader = BufReader::new(client);
-        assert_eq!(read_line(&mut reader), Err(ReadErr::TooLong));
-    }
-
-    #[test]
-    fn line_at_the_cap_reads_whole() {
-        let mut cursor = std::io::Cursor::new(format!("{}\n", "y".repeat(64)));
-        assert_eq!(read_line_capped(&mut cursor, 64).expect("at cap").len(), 64);
-        let mut cursor = std::io::Cursor::new(format!("{}\n", "y".repeat(65)));
-        assert_eq!(read_line_capped(&mut cursor, 64), Err(ReadErr::TooLong));
-    }
-
-    #[test]
-    fn cap_edge_below_at_and_above() {
-        let mut below = std::io::Cursor::new(b"1234567\n".to_vec());
-        assert_eq!(read_line_capped(&mut below, 8).expect("below"), b"1234567");
-        let mut at = std::io::Cursor::new(b"12345678\n".to_vec());
-        assert_eq!(read_line_capped(&mut at, 8).expect("at"), b"12345678");
-        let mut above = std::io::Cursor::new(b"123456789\n".to_vec());
-        assert_eq!(read_line_capped(&mut above, 8), Err(ReadErr::TooLong));
+    fn long_hub_line_reads_whole() {
+        let big = "y".repeat(2 * 1024 * 1024);
+        let mut cursor = std::io::Cursor::new(format!("{big}\n"));
+        let line = read_line(&mut cursor).expect("long line");
+        assert_eq!(line.len(), big.len());
+        assert!(line.iter().all(|&b| b == b'y'));
     }
 
     #[test]
@@ -1145,15 +1081,9 @@ mod tests {
     #[test]
     fn eof_without_a_line_is_a_lost_connection() {
         let mut empty = std::io::Cursor::new(b"".to_vec());
-        assert!(matches!(
-            read_line_capped(&mut empty, 8),
-            Err(ReadErr::Lost(_))
-        ));
+        assert!(matches!(read_line(&mut empty), Err(ReadErr::Lost(_))));
         let mut partial = std::io::Cursor::new(b"abc".to_vec());
-        assert!(matches!(
-            read_line_capped(&mut partial, 8),
-            Err(ReadErr::Lost(_))
-        ));
+        assert!(matches!(read_line(&mut partial), Err(ReadErr::Lost(_))));
     }
 
     #[test]
@@ -1189,6 +1119,14 @@ mod tests {
         );
         let _abs = crate::test_env::EnvGuard::set("FIBER_HOME", "/abs/path");
         assert_eq!(fiber_home().expect("absolute"), PathBuf::from("/abs/path"));
+        let _non_utf8 = crate::test_env::EnvGuard::set_os(
+            "FIBER_HOME",
+            std::os::unix::ffi::OsStringExt::from_vec(vec![0xff]),
+        );
+        assert!(
+            fiber_home().unwrap_err().contains("FIBER_HOME"),
+            "non-UTF-8 names the variable"
+        );
     }
 
     #[test]
@@ -1421,20 +1359,6 @@ mod tests {
     }
 
     #[test]
-    fn over_cap_line_while_waiting_is_too_long() {
-        let (mut conn, path, rx) = connect_pair(|srv| {
-            srv.send(&hello(serde_json::json!(1), "9.9.9"));
-            let big = "z".repeat(64 * 1024 * 1024 + 1);
-            write_line(&mut srv.writer, &big).expect("send big");
-        });
-        let WaitOutcome::TooLong = conn.await_ack("c_1", |_| None) else {
-            panic!("expected too-long");
-        };
-        drop(conn);
-        join_fake(&path, rx);
-    }
-
-    #[test]
     fn two_commands_never_share_an_id() {
         let a = new_command_id();
         let b = new_command_id();
@@ -1481,7 +1405,6 @@ mod tests {
                 Err(ReadErr::Lost(detail)) => {
                     panic!("fake hub expected EOF, got loss: {detail}")
                 }
-                Err(ReadErr::TooLong) => panic!("fake hub got an over-cap line"),
                 Ok(line) => panic!(
                     "fake hub got an extra line: {}",
                     String::from_utf8_lossy(&line)
@@ -1860,34 +1783,33 @@ mod tests {
     }
 
     #[test]
-    fn over_cap_line_mid_run_is_its_own_crash() {
-        let (res, received) = run_case(|srv| {
+    fn long_line_mid_run_is_folded_not_dropped() {
+        let big_text = "z".repeat(300 * 1024);
+        let (res, received) = run_case(move |srv| {
             handshake_to_prompt(srv, &[], serde_json::json!(1000));
-            let big = "z".repeat(64 * 1024 * 1024 + 1);
-            write_line(&mut srv.writer, &big).expect("send big");
-            let (close_id, close) = recv_id(srv);
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&ev(
+                "assistant_message_delta",
+                1002,
+                serde_json::json!({"text": big_text}),
+            ));
+            srv.send(&turn_completed_ev(1003, "completed", None));
+            srv.send(&exited_ev(1004, 0, "DONE", None));
+            let (_, close) = recv_id(srv);
             assert_eq!(close["command"], "close");
-            assert_eq!(close["args"]["now"], true);
-            let _ = close_id;
             srv.expect_eof();
         });
-        assert!(
-            res.text.contains("protocol error: hub line over 64 MiB"),
-            "{}",
-            res.text
-        );
-        assert!(
-            !res.text
-                .contains("No answer before the connection was lost")
-        );
-        assert_eq!(res.is_error, Some(true));
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt", "close"]
-        );
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&received[3]).expect("close")["args"]["now"],
-            true
         );
     }
 
