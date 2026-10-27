@@ -364,6 +364,11 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         active: true,
     };
 
+    // A test hook that holds the supervisor after the host is spawned but
+    // before either pid is published, so a test can kill the supervisor in
+    // that window and prove the host is still reaped.
+    pause_before_publish(host_pid);
+
     if update_store(&shared, |state| {
         state.supervisor_pid = Some(std::process::id() as i32);
         state.host_pid = Some(host_pid);
@@ -525,6 +530,17 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         &mut guard,
         code,
     )
+}
+
+fn pause_before_publish(host_pid: i32) {
+    let Some(path) = std::env::var_os("DELEGATE_SESSION_TEST_PAUSE_PREPUBLISH") else {
+        return;
+    };
+    let line = format!("{} {}\n", std::process::id(), host_pid);
+    let _ = std::fs::write(path, line);
+    loop {
+        std::thread::park();
+    }
 }
 
 fn child_stdin(host: &HostControl) -> Option<ChildStdin> {
