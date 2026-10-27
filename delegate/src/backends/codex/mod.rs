@@ -490,6 +490,7 @@ fn finish(
             session_id,
             usage: normalized_usage(&state),
             cost_usd: None,
+            cost_estimated: false,
             is_error: Some(false),
             duration_ms: None,
             clean_exit,

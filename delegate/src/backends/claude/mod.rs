@@ -267,6 +267,7 @@ mod tests {
                                 allowance: None,
                             }),
                             cost_usd: Some(0.0697402),
+                            cost_estimated: false,
                             is_error: Some(false),
                             duration_ms: Some(2245.0),
                             clean_exit: true,

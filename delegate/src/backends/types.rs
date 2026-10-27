@@ -8,6 +8,9 @@ pub struct BackendResult {
     pub usage: Option<Usage>,
     /// Cost the backend reported itself; None means price from the model table.
     pub cost_usd: Option<f64>,
+    /// True when the backend's own amount is the backend's estimate rather
+    /// than a metered charge; meaningful only when `cost_usd` is `Some`.
+    pub cost_estimated: bool,
     pub is_error: Option<bool>,
     pub duration_ms: Option<f64>,
     pub clean_exit: bool,

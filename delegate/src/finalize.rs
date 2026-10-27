@@ -21,7 +21,7 @@ pub fn base_output(
     job_id: Option<&str>,
 ) -> RunOutput {
     let (cost_usd, cost_estimated) = match res.cost_usd {
-        Some(cost) => (Some(cost), false),
+        Some(cost) => (Some(cost), res.cost_estimated),
         None => (compute_cost(res.usage.as_ref(), price_map, model), true),
     };
     let mut out = to_run_output(res, model, backend, cost_usd, cost_estimated);
@@ -338,6 +338,30 @@ mod tests {
         let out = finalize_run(&res, &ctx);
         assert_eq!(out.cost_usd, Some(1.25));
         assert!(!out.cost_estimated);
+    }
+
+    #[test]
+    fn estimated_reported_cost_stays_estimated() {
+        let mut res = ok_result();
+        res.cost_usd = Some(1.25);
+        res.cost_estimated = true;
+        res.usage = Some(Usage {
+            input_tokens: 1_000_000.0,
+            ..Default::default()
+        });
+        let mut ctx = base_ctx();
+        ctx.price_map.insert(
+            "composer-2.5".into(),
+            Price {
+                input: 0.5,
+                output: 2.5,
+                cache_read: 0.2,
+                cache_write: 0.0,
+            },
+        );
+        let out = finalize_run(&res, &ctx);
+        assert_eq!(out.cost_usd, Some(1.25));
+        assert!(out.cost_estimated);
     }
 
     #[test]

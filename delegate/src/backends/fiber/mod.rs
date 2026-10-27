@@ -538,7 +538,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
             "\nSTATUS: DONE_WITH_CONCERNS"
         });
     }
-    let (usage, cost_usd) = usage_and_cost(&payload);
+    let (usage, cost_usd, cost_estimated) = usage_and_cost(&payload);
     let provider_status = payload
         .get("error")
         .and_then(|e| e.get("provider"))
@@ -550,6 +550,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         session_id,
         usage,
         cost_usd,
+        cost_estimated,
         is_error,
         duration_ms: None,
         clean_exit,
@@ -614,12 +615,12 @@ fn prefix_notice(text: String, notice: Option<&str>) -> String {
     }
 }
 
-fn usage_and_cost(payload: &serde_json::Value) -> (Option<Usage>, Option<f64>) {
+fn usage_and_cost(payload: &serde_json::Value) -> (Option<Usage>, Option<f64>, bool) {
     let Some(usage) = payload.get("usage") else {
-        return (None, None);
+        return (None, None, false);
     };
     let Some(tokens) = usage.get("tokens") else {
-        return (None, None);
+        return (None, None, false);
     };
     let input = finite(tokens.get("input"));
     let output = finite(tokens.get("output"));
@@ -635,6 +636,10 @@ fn usage_and_cost(payload: &serde_json::Value) -> (Option<Usage>, Option<f64>) {
         .and_then(|c| c.as_f64())
         .filter(|n| n.is_finite())
         .unwrap_or(0.0);
+    // A positive subscription cost means the backend estimated the amount
+    // rather than metering a charge; zero, absent, non-finite or negative
+    // leaves the sum reported.
+    let estimated = subscription > 0.0;
     (
         Some(Usage {
             input_tokens: input,
@@ -645,6 +650,7 @@ fn usage_and_cost(payload: &serde_json::Value) -> (Option<Usage>, Option<f64>) {
             allowance: None,
         }),
         Some(cost + subscription),
+        estimated,
     )
 }
 
@@ -758,6 +764,7 @@ mod tests {
         assert_eq!(usage.cache_write_tokens, 0.0);
         let cost = res.cost_usd.expect("cost");
         assert!((cost - 0.000603378).abs() < 1e-12, "{cost}");
+        assert!(res.cost_estimated);
     }
 
     #[test]
@@ -792,6 +799,53 @@ mod tests {
         assert_eq!(usage.output_tokens, 25.0);
         assert_eq!(usage.cache_read_tokens, 5617.0);
         assert!((res.cost_usd.unwrap() - 0.000023534).abs() < 1e-12);
+        assert!(res.cost_estimated);
+    }
+
+    #[test]
+    fn subscription_cost_marks_the_amount_estimated_only_when_positive() {
+        let tokens =
+            serde_json::json!({"input": 1, "output": 1, "cache_read": 0, "cache_write": {}});
+        // (cost, subscription_cost, tokens present, expected amount, expected
+        // flag). A missing subscription_cost means the key is absent.
+        let rows = [
+            (0.0, Some(0.5), true, Some(0.5), true),
+            (0.25, Some(0.5), true, Some(0.75), true),
+            (0.0, Some(1e-9), true, Some(1e-9), true),
+            (0.25, Some(0.0), true, Some(0.25), false),
+            (0.25, None, true, Some(0.25), false),
+            (0.25, Some(-0.1), true, Some(0.15), false),
+            (0.0, Some(0.5), false, None, false),
+        ];
+        for (cost, subscription, with_tokens, expected_cost, expected_estimated) in rows {
+            let mut usage = serde_json::Map::new();
+            usage.insert("cost".into(), cost.into());
+            if let Some(s) = subscription {
+                usage.insert("subscription_cost".into(), s.into());
+            }
+            if with_tokens {
+                usage.insert("tokens".into(), tokens.clone());
+            }
+            let res = parse_stdout(
+                &exited_with_usage(serde_json::Value::Object(usage), 2),
+                true,
+                "",
+            );
+            match expected_cost {
+                Some(want) => {
+                    let got = res.cost_usd.expect("cost");
+                    assert!(
+                        (got - want).abs() < 1e-12,
+                        "cost {cost} sub {subscription:?}: got {got}, want {want}"
+                    );
+                }
+                None => assert_eq!(res.cost_usd, None, "cost {cost} sub {subscription:?}"),
+            }
+            assert_eq!(
+                res.cost_estimated, expected_estimated,
+                "cost {cost} sub {subscription:?}"
+            );
+        }
     }
 
     #[test]
@@ -803,6 +857,7 @@ mod tests {
         assert!(!res.clean_exit);
         assert!(res.usage.is_none());
         assert_eq!(res.cost_usd, None);
+        assert!(!res.cost_estimated);
         assert_eq!(res.provider_status, None);
         assert!(res.text.contains("nope"), "{}", res.text);
         assert_eq!(res.stderr, stderr);
@@ -905,6 +960,7 @@ mod tests {
         assert_eq!(res.text, "killed");
         assert_eq!(res.session_id.as_deref(), Some("s_36e63d22c39750e1"));
         assert!(res.usage.is_none());
+        assert!(!res.cost_estimated);
         assert!(!res.clean_exit);
     }
 
@@ -1027,6 +1083,18 @@ mod tests {
             "schema_version": 1,
             "seq": seq,
             "payload": {"exit_code": 0, "text": text}
+        })
+        .to_string()
+    }
+
+    fn exited_with_usage(usage: serde_json::Value, seq: u64) -> String {
+        serde_json::json!({
+            "kind": "fiber_exited",
+            "session_id": "s_inline",
+            "ts": seq,
+            "schema_version": 1,
+            "seq": seq,
+            "payload": {"exit_code": 0, "text": "ok", "usage": usage}
         })
         .to_string()
     }
