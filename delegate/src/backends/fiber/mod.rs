@@ -3,7 +3,8 @@
 //! `fiber ask --model <ref> [--resume <sid>] -- <prompt>` prints one JSON
 //! envelope per line. Every line carries `session_id` (Fiber mints it;
 //! delegate cannot choose it), and the last line is always `fiber_exited`:
-//! `exit_code`, `text` (the final answer), `usage`, and `error` on failure.
+//! `exit_code`, `text` (the final answer), `questions`, `usage`, and `error`
+//! on failure.
 //! Unlike pi, Fiber's exit code is real and `fiber_exited.exit_code`
 //! repeats it: success is a clean exit with `exit_code == 0` and no error.
 //! A stream with no `fiber_exited` is a crash.
@@ -521,7 +522,21 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    let text = prefix_notice(text, notice_no_model.as_deref());
+    let mut text = prefix_notice(text, notice_no_model.as_deref());
+    if is_error == Some(false)
+        && let Some(section) = questions_section(&payload)
+    {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&section);
+        // A denial wins: with any permission denial the questions stay in the text and the text ends with STATUS: DONE_WITH_CONCERNS, so finalize_run reports DONE_WITH_CONCERNS.
+        text.push_str(if permission_denials.is_empty() {
+            "\nSTATUS: NEEDS_CONTEXT"
+        } else {
+            "\nSTATUS: DONE_WITH_CONCERNS"
+        });
+    }
     let (usage, cost_usd) = usage_and_cost(&payload);
     let provider_status = payload
         .get("error")
@@ -541,6 +556,51 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         permission_denials,
         provider_status,
     }
+}
+
+/// Render `payload.questions` as a `Questions:` section. `Some` only when the
+/// field is a non-empty array after skipping null and blank entries; any
+/// other shape leaves the text exactly as it was. A string renders as
+/// itself, an object with a string `question` renders that text with each
+/// option's `label` on its own indented line under it, and anything else
+/// renders as compact JSON.
+fn questions_section(payload: &serde_json::Value) -> Option<String> {
+    let questions = payload.get("questions")?.as_array()?;
+    let mut items: Vec<String> = Vec::new();
+    for q in questions {
+        if let Some(s) = q.as_str() {
+            if s.trim().is_empty() {
+                continue;
+            }
+            items.push(s.to_string());
+        } else if let Some(obj) = q.as_object() {
+            if let Some(question) = obj.get("question").and_then(|v| v.as_str()) {
+                let mut item = question.to_string();
+                if let Some(options) = obj.get("options").and_then(|v| v.as_array()) {
+                    for opt in options {
+                        if let Some(label) = opt.get("label").and_then(|v| v.as_str())
+                            && !label.trim().is_empty()
+                        {
+                            item.push_str(&format!("\n  - {label}"));
+                        }
+                    }
+                }
+                items.push(item);
+            } else {
+                items.push(q.to_string());
+            }
+        } else if !q.is_null() {
+            items.push(q.to_string());
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+    let mut section = String::from("Questions:");
+    for (i, item) in items.iter().enumerate() {
+        section.push_str(&format!("\n{}. {item}", i + 1));
+    }
+    Some(section)
 }
 
 /// Put a `no_model` notice message first: the result text starts with it,
@@ -970,6 +1030,24 @@ mod tests {
         .to_string()
     }
 
+    fn exited_with_questions(text: &str, questions: serde_json::Value, seq: u64) -> String {
+        serde_json::json!({
+            "kind": "fiber_exited",
+            "session_id": "s_inline",
+            "ts": seq,
+            "schema_version": 1,
+            "seq": seq,
+            "payload": {"exit_code": 0, "text": text, "questions": questions}
+        })
+        .to_string()
+    }
+
+    fn finalize_ctx() -> crate::types::FinalizeCtx {
+        let mut ctx = crate::finalize::default_finalize_ctx("/repo", "m", "fiber");
+        ctx.git_delta = Some(Box::new(|_, _| None));
+        ctx
+    }
+
     /// One allowed call plus one reviewer-denied call, built inline so the
     /// behavioural assertions below do not depend on a recorded fixture.
     fn review_stream() -> String {
@@ -1253,5 +1331,217 @@ mod tests {
         assert!(res.text.contains("Permission denied"), "{}", res.text);
         assert_eq!(res.text, res.stderr);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn questions_without_denial_finalize_as_needs_context() {
+        let stream = exited_with_questions(
+            "need info",
+            serde_json::json!(["Which branch?", "Which crate?"]),
+            1,
+        );
+        let res = parse_stdout(&stream, true, "");
+        assert_eq!(res.is_error, Some(false));
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::NeedsContext);
+        let first = res.text.find("1. Which branch?").expect("question 1");
+        let second = res.text.find("2. Which crate?").expect("question 2");
+        assert!(first < second, "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
+    #[test]
+    fn questions_render_strings_and_objects_with_options() {
+        let stream = exited_with_questions(
+            "need info",
+            serde_json::json!([
+                "Which region?",
+                {"question": "Which env?", "options": [{"label": "prod"}, {"label": "stage"}]},
+            ]),
+            1,
+        );
+        let res = parse_stdout(&stream, true, "");
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::NeedsContext);
+        let first = res.text.find("1. Which region?").expect("question 1");
+        let second = res.text.find("2. Which env?").expect("question 2");
+        let prod = res.text.find("prod").expect("option prod");
+        let stage = res.text.find("stage").expect("option stage");
+        assert!(
+            first < second && second < prod && prod < stage,
+            "{}",
+            res.text
+        );
+        assert!(!res.text.contains("\"question\""), "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
+    #[test]
+    fn questions_with_denial_finalize_as_done_with_concerns() {
+        let stream = [
+            requested("a_denied", "curl https://example.com", 1),
+            resolved_reason("a_denied", "deny", "reviewer", "fetches a remote host", 2),
+            completed("a_denied", "denied", 3),
+            exited_with_questions("need info", serde_json::json!(["Which branch?"]), 4),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stream, true, "");
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.text.contains("1. Which branch?"), "{}", res.text);
+        assert!(
+            res.text.ends_with("STATUS: DONE_WITH_CONCERNS"),
+            "{}",
+            res.text
+        );
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::DoneWithConcerns);
+        let concerns = out.concerns.expect("concerns");
+        assert!(
+            concerns
+                .iter()
+                .any(|c| c.contains("permission denied: shell")),
+            "{concerns:?}"
+        );
+    }
+
+    #[test]
+    fn questions_before_denial_still_finalize_as_done_with_concerns() {
+        // Reverse event order: `fiber_exited` carries the questions before
+        // the denial events arrive. A denial wins regardless of order.
+        let stream = [
+            exited_with_questions("need info", serde_json::json!(["Which branch?"]), 1),
+            requested("a_denied", "curl https://example.com", 2),
+            resolved_reason("a_denied", "deny", "reviewer", "fetches a remote host", 3),
+            completed("a_denied", "denied", 4),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stream, true, "");
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.text.contains("1. Which branch?"), "{}", res.text);
+        assert!(
+            res.text.ends_with("STATUS: DONE_WITH_CONCERNS"),
+            "{}",
+            res.text
+        );
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::DoneWithConcerns);
+    }
+
+    fn assert_questions_ignored(questions: Option<serde_json::Value>) {
+        let with_q = match questions {
+            Some(q) => exited_with_questions("need info", q, 1),
+            None => exited("need info", 1),
+        };
+        let without = exited("need info", 1);
+        let a = parse_stdout(&with_q, true, "");
+        let b = parse_stdout(&without, true, "");
+        assert_eq!(a.text, b.text);
+        assert!(!a.text.contains("STATUS:"), "{}", a.text);
+        let out = crate::finalize::finalize_run(&a, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::Done);
+    }
+
+    #[test]
+    fn absent_questions_leave_todays_text() {
+        assert_questions_ignored(None);
+    }
+
+    #[test]
+    fn null_questions_leave_todays_text() {
+        assert_questions_ignored(Some(serde_json::Value::Null));
+    }
+
+    #[test]
+    fn empty_questions_leave_todays_text() {
+        assert_questions_ignored(Some(serde_json::json!([])));
+    }
+
+    #[test]
+    fn non_array_questions_leave_todays_text() {
+        assert_questions_ignored(Some(serde_json::json!("Which branch?")));
+    }
+
+    #[test]
+    fn blank_questions_leave_todays_text() {
+        assert_questions_ignored(Some(serde_json::json!([null, "", "   "])));
+    }
+
+    #[test]
+    fn failed_run_with_questions_gets_no_status_line() {
+        let stream = serde_json::json!({
+            "kind": "fiber_exited",
+            "session_id": "s_inline",
+            "ts": 1,
+            "schema_version": 1,
+            "seq": 1,
+            "payload": {"exit_code": 1, "text": "boom", "questions": ["Which branch?"]}
+        })
+        .to_string();
+        let res = parse_stdout(&stream, true, "");
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(res.text, "boom");
+        assert!(!res.text.contains("STATUS:"), "{}", res.text);
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::Error);
+    }
+
+    #[test]
+    fn unclean_exit_with_questions_gets_no_status_line() {
+        let stream = exited_with_questions("need info", serde_json::json!(["Which branch?"]), 1);
+        let res = parse_stdout(&stream, false, "");
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(res.text, "need info");
+        assert!(!res.text.contains("STATUS:"), "{}", res.text);
+    }
+
+    #[test]
+    fn non_string_scalars_render_as_compact_json() {
+        let stream =
+            exited_with_questions("need info", serde_json::json!([42, true, {"note": "x"}]), 1);
+        let res = parse_stdout(&stream, true, "");
+        assert!(res.text.contains("1. 42"), "{}", res.text);
+        assert!(res.text.contains("2. true"), "{}", res.text);
+        assert!(res.text.contains("3. {\"note\":\"x\"}"), "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
+    #[test]
+    fn blank_option_labels_are_skipped() {
+        let stream = exited_with_questions(
+            "need info",
+            serde_json::json!([
+                {"question": "Which env?", "options": [{"label": "  "}, {"label": "prod"}]},
+            ]),
+            1,
+        );
+        let res = parse_stdout(&stream, true, "");
+        assert!(res.text.contains("1. Which env?"), "{}", res.text);
+        assert!(res.text.contains("prod"), "{}", res.text);
+        assert!(!res.text.contains("  -   "), "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
+    #[test]
+    fn denial_supersedes_model_written_error_status() {
+        let stream = [
+            requested("a_denied", "curl https://example.com", 1),
+            resolved_reason("a_denied", "deny", "reviewer", "fetches a remote host", 2),
+            completed("a_denied", "denied", 3),
+            exited_with_questions(
+                "partial\nSTATUS: ERROR",
+                serde_json::json!(["Which branch?"]),
+                4,
+            ),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stream, true, "");
+        assert!(res.text.contains("1. Which branch?"), "{}", res.text);
+        assert!(
+            res.text.ends_with("STATUS: DONE_WITH_CONCERNS"),
+            "{}",
+            res.text
+        );
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::DoneWithConcerns);
     }
 }
