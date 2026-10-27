@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# ctx-hook: Claude Code PostToolUse hook. Warns a session once per level when its
+# context nears the autocompact point, so it updates its state file first.
+# Usage: hook JSON on stdin ({session_id, transcript_path}). Prints the
+#        hookSpecificOutput JSON when a level fires; silent otherwise.
+# Env:   CTX_HOOK_WARN (100000), CTX_HOOK_URGENT (115000),
+#        CTX_HOOK_DIR (~/.cache/agents/ctx-hook; per-session level state).
+# Never fails the session: any error exits 0 silently.
+set -u
+
+main() {
+  local input sid t tokens warn urgent dir level last
+  input="$(cat)" || return 0
+  sid="$(jq -r '.session_id // empty' <<<"$input")" || return 0
+  t="$(jq -r '.transcript_path // empty' <<<"$input")" || return 0
+  [[ "$sid" =~ ^[A-Za-z0-9_-]+$ ]] || return 0
+  [ -r "$t" ] || return 0
+
+  # Last usage line in the tail; the first line of a cut tail fails fromjson and is skipped.
+  tokens="$(tail -c 2097152 "$t" | jq -Rr 'fromjson? | select(.message.usage?) | .message.usage
+    | ((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0))' |
+    tail -1)"
+  case "$tokens" in '' | *[!0-9]*) return 0 ;; esac
+
+  warn="${CTX_HOOK_WARN:-100000}"
+  urgent="${CTX_HOOK_URGENT:-115000}"
+  if [ "$tokens" -ge "$urgent" ]; then
+    level=urgent
+  elif [ "$tokens" -ge "$warn" ]; then
+    level=warn
+  else
+    return 0
+  fi
+
+  dir="${CTX_HOOK_DIR:-$HOME/.cache/agents/ctx-hook}"
+  last="$(cat "$dir/$sid" 2>/dev/null)" || last=
+  if [ "$level" = warn ] && [ -n "$last" ]; then return 0; fi
+  if [ "$level" = urgent ] && [ "$last" = urgent ]; then return 0; fi
+
+  mkdir -p "$dir" && printf '%s\n' "$level" >"$dir/$sid" || return 0
+  jq -cn --arg n "$((tokens / 1000))" '{hookSpecificOutput: {hookEventName: "PostToolUse",
+    additionalContext: ("Context is at " + $n + "k of the 120k autocompact. Finish the current item, then update your state file (current state only), before starting anything new.")}}'
+}
+
+main 2>/dev/null
+exit 0
