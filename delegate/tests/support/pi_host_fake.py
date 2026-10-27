@@ -114,9 +114,9 @@ def hold_run(text):
     send(assistant_frame("working", "toolUse"))
     send({"type": "tool_execution_start", "toolName": "bash", "toolCallId": "call_1"})
     send({"type": "tool_execution_update", "toolName": "bash", "toolCallId": "call_1"})
-    write_file("tool.paused", "")
     HELD = True
     HOLD_START = time.monotonic()
+    write_file("tool.paused", "")
 
 
 def deliver_queue():
