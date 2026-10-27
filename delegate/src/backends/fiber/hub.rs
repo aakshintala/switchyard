@@ -3,8 +3,13 @@
 //! A program that drives sessions is a client of the hub: it connects to
 //! `<FIBER_HOME>/run/hub`, starts a supervised session, drives it with the
 //! driver commands and ends it with `close`, reading `fiber_exited` as the
-//! verdict. Every read on the socket is a plain blocking read: no timeout,
-//! no poll loop and no second thread.
+//! verdict. Socket reads are polled in `poll_slice` slices against the
+//! `Bounds` totals for the run; all writes go through one locked writer
+//! with a per-sequence write deadline. A second thread can stop the run
+//! with `kill` or `cancel`: one `close now` goes out (re-subscribing at
+//! `summary` when the connection holds no subscription, retried once after
+//! `stream_closed`), and the run ends when the stop wait passes or the
+//! verdict arrives first.
 
 use super::super::types::{BackendResult, Event, EventFn, ProgressSnapshotRaw};
 use super::{finish, handle_line};
