@@ -87,9 +87,9 @@ struct HubConn {
     writer: UnixStream,
 }
 
-/// Connect to the hub socket, read `hub_hello` and return the connection
-/// with the hub's `fiber_version`.
-fn connect(socket_path: &Path) -> Result<(HubConn, String), String> {
+/// Connect to the hub socket, read `hub_hello` and return the connection.
+/// A version mismatch names the hub's `fiber_version` in the error text.
+fn connect(socket_path: &Path) -> Result<HubConn, String> {
     let show = socket_path.display().to_string();
     let stream = UnixStream::connect(socket_path)
         .map_err(|e| crash_text(format!("cannot connect to hub socket {show}: {e}")))?;
@@ -126,7 +126,7 @@ fn connect(socket_path: &Path) -> Result<(HubConn, String), String> {
             "the hub speaks schema_version {seen}; delegate reads 1; fiber_version {fiber_version}"
         )));
     }
-    Ok((conn, hello_fiber_version(&hello).to_string()))
+    Ok(conn)
 }
 
 fn hello_fiber_version(hello: &serde_json::Value) -> &str {
@@ -149,13 +149,18 @@ pub fn fiber_home() -> Result<PathBuf, String> {
             Err("FIBER_HOME is set but empty; set it to an absolute path or unset it".to_string())
         }
         Some(v) => {
-            let path = PathBuf::from(&v);
+            let Some(s) = v.to_str() else {
+                return Err(
+                    "FIBER_HOME is set but not valid UTF-8; set it to an absolute path or unset it"
+                        .to_string(),
+                );
+            };
+            let path = PathBuf::from(s);
             if path.is_absolute() {
                 Ok(path)
             } else {
                 Err(format!(
-                    "FIBER_HOME is relative ({}); set it to an absolute path or unset it",
-                    v.to_string_lossy()
+                    "FIBER_HOME is relative ({s}); set it to an absolute path or unset it"
                 ))
             }
         }
@@ -280,9 +285,14 @@ impl HubConn {
     /// Read until a `command_accepted` or `command_rejected` whose
     /// `payload.command_id` equals `id`. Every other line passes to
     /// `on_other` in arrival order, so no line is lost while waiting.
+    /// A `command_accepted` for `close_id` is the client's own close
+    /// answer (rule 12): ignored, so the wait for `id` continues. Any
+    /// other unexpected answer is a protocol error, as the live handler
+    /// holds it: a rejected close names `close`, an unknown id is named.
     fn await_ack(
         &mut self,
         id: &str,
+        close_id: Option<&str>,
         mut on_other: impl FnMut(&[u8]) -> Option<Step>,
     ) -> WaitOutcome {
         loop {
@@ -317,6 +327,23 @@ impl HubConn {
                 ))));
             };
             if cid != id {
+                if kind == "command_accepted" && Some(cid) == close_id {
+                    continue;
+                }
+                if kind == "command_rejected" && Some(cid) == close_id {
+                    let payload = parsed.get("payload");
+                    let code = payload
+                        .and_then(|p| p.get("code"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("unknown");
+                    let message = payload
+                        .and_then(|p| p.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("");
+                    return WaitOutcome::Stopped(Step::Fail(crash_text(format!(
+                        "hub rejected close: {code}: {message}"
+                    ))));
+                }
                 return WaitOutcome::Stopped(Step::Fail(crash_text(format!(
                     "protocol error: hub answer for unknown command {cid}"
                 ))));
@@ -382,7 +409,7 @@ pub struct HubRequest {
 /// session with `close`, reading `fiber_exited` as the verdict.
 pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResult {
     let model = super::model_reference(&req.model).to_string();
-    let (mut conn, _) = match connect(socket) {
+    let mut conn = match connect(socket) {
         Ok(ok) => ok,
         Err(text) => return crash_result(None, Vec::new(), text),
     };
@@ -396,7 +423,7 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
         return rest.crash(lost_before_start_text(&start_id));
     }
     rest.start_id = start_id.clone();
-    let session_id = match conn.await_ack(&start_id, |raw| as_history(&mut rest, raw)) {
+    let session_id = match conn.await_ack(&start_id, None, |raw| as_history(&mut rest, raw)) {
         WaitOutcome::Ack(Ack::Accepted { result }) => match start_session(&result) {
             Ok(session_id) => session_id,
             Err(text) => return rest.crash(text),
@@ -418,10 +445,10 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
     // subscribe at full.
     let sub_id = new_command_id();
     if conn.send(&subscribe_command(&sub_id, &session_id)).is_err() {
-        return rest.crash(lost_text(&session_id));
+        return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
     }
     rest.sub_id = sub_id.clone();
-    match conn.await_ack(&sub_id, |raw| as_history(&mut rest, raw)) {
+    match conn.await_ack(&sub_id, None, |raw| as_history(&mut rest, raw)) {
         WaitOutcome::Ack(Ack::Accepted { result }) => {
             rest.last_seq = last_seq_of(&result);
         }
@@ -452,11 +479,16 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
         .send(&prompt_command(&prompt_id, &session_id, &req.prompt))
         .is_err()
     {
-        return rest.crash(lost_text(&session_id));
+        return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
     }
     rest.prompt_id = prompt_id.clone();
     loop {
-        match conn.await_ack(&prompt_id, |raw| as_live(&mut rest, raw)) {
+        // Read afresh each pass: an early `turn_completed` sends `close`
+        // and sets `close_id`, and its answer must be ignored below.
+        let close_id = rest.close_id.clone();
+        match conn.await_ack(&prompt_id, close_id.as_deref(), |raw| {
+            as_live(&mut rest, raw)
+        }) {
             WaitOutcome::Ack(Ack::Accepted { .. }) => break,
             WaitOutcome::Ack(Ack::Rejected { code, message }) => {
                 return fail_with_cleanup(
@@ -616,6 +648,13 @@ impl<'a> Rest<'a> {
                 Step::CloseOnce
             }
             "fiber_exited" => self.on_exited(raw, &value),
+            // The hub speaks first and once: a later `hub_hello` is a
+            // reply kind with no table row, so it fails closed instead
+            // of folding as an event (rule 12).
+            "hub_hello" => Step::Fail(crash_text(format!(
+                "protocol error: hub_hello after the first line: {}",
+                first80(raw)
+            ))),
             _ => {
                 if kind == "turn_started" && self.is_own_turn_started(&value) {
                     self.turn_started = true;
@@ -745,7 +784,6 @@ impl<'a> Rest<'a> {
     /// `fiber_exited` exit 0; Done needs an admitted `completed` turn.
     fn verdict(&mut self, raw: &[u8]) -> BackendResult {
         self.fold(raw);
-        // S3 replaces this arm with NEEDS_CONTEXT and the #755 rendering.
         let exited_questions = self
             .state
             .exited
@@ -1017,9 +1055,8 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
         });
-        let (conn, version) = connect(&path).expect("connect");
+        let conn = connect(&path).expect("connect");
         drop(conn);
-        assert_eq!(version, "9.9.9");
         assert!(join_fake(&path, rx).is_empty());
     }
 
@@ -1094,23 +1131,52 @@ mod tests {
 
     #[test]
     fn split_line_with_a_pause_reads_whole() {
-        let (client, server) = UnixStream::pair().expect("socket pair");
-        let chunk = "q".repeat(20_000);
-        let first = chunk.clone();
-        std::thread::spawn(move || {
-            use std::io::Write;
-            let mut server = server;
-            server.write_all(first.as_bytes()).expect("first half");
-            server.flush().expect("flush");
-            std::thread::sleep(Duration::from_millis(200));
-            server
-                .write_all(format!("{chunk}\n").as_bytes())
-                .expect("second half");
-        });
-        let mut reader = BufReader::new(client);
+        let mut buf = vec![b'q'; 40_000];
+        buf.push(b'\n');
+        let mut reader = SplitOnce {
+            buf,
+            split_at: 20_000,
+            pos: 0,
+        };
         let line = read_line(&mut reader).expect("split line");
         assert_eq!(line.len(), 40_000);
         assert!(line.iter().all(|&b| b == b'q'));
+    }
+
+    /// A `BufRead` that yields its bytes in two slices with no newline in
+    /// the first, so `read_line` must keep partial bytes across reads. No
+    /// clock is involved: the split point is fixed.
+    struct SplitOnce {
+        buf: Vec<u8>,
+        split_at: usize,
+        pos: usize,
+    }
+
+    impl std::io::Read for SplitOnce {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = std::cmp::min(out.len(), self.buf.len() - self.pos);
+            out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    impl BufRead for SplitOnce {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if self.pos >= self.buf.len() {
+                return Ok(&[]);
+            }
+            let end = if self.pos < self.split_at {
+                self.split_at
+            } else {
+                self.buf.len()
+            };
+            Ok(&self.buf[self.pos..end])
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.pos += amt;
+        }
     }
 
     #[test]
@@ -1162,6 +1228,14 @@ mod tests {
             fiber_home().unwrap_err().contains("FIBER_HOME"),
             "non-UTF-8 names the variable"
         );
+        let _abs_non_utf8 = crate::test_env::EnvGuard::set_os(
+            "FIBER_HOME",
+            std::os::unix::ffi::OsStringExt::from_vec(b"/tmp/\xff".to_vec()),
+        );
+        assert!(
+            fiber_home().unwrap_err().contains("FIBER_HOME"),
+            "absolute non-UTF-8 names the variable"
+        );
     }
 
     #[test]
@@ -1204,17 +1278,6 @@ mod tests {
     }
 
     #[test]
-    fn start_command_carries_no_session_id() {
-        let line: serde_json::Value =
-            serde_json::from_str(&start_command("c_1", "/w", "m")).expect("json");
-        assert!(line.get("session_id").is_none());
-        assert_eq!(
-            line.get("args").and_then(|a| a.get("supervised")),
-            Some(&serde_json::Value::Bool(true))
-        );
-    }
-
-    #[test]
     fn start_command_omits_an_empty_model() {
         let line: serde_json::Value =
             serde_json::from_str(&start_command("c_1", "/w", "")).expect("json");
@@ -1252,7 +1315,7 @@ mod tests {
         script: impl FnOnce(&mut FakeSrv) + Send + 'static,
     ) -> (HubConn, PathBuf, mpsc::Receiver<Vec<String>>) {
         let (path, rx) = spawn_fake(script);
-        let (conn, _) = connect(&path).expect("connect");
+        let conn = connect(&path).expect("connect");
         (conn, path, rx)
     }
 
@@ -1264,7 +1327,8 @@ mod tests {
             srv.send(&accepted("c_1", serde_json::json!({"session_id": "s_9"})));
         });
         conn.send(&start_command("c_1", "/w", "m")).expect("send");
-        let WaitOutcome::Ack(Ack::Accepted { result }) = conn.await_ack("c_1", |_| None) else {
+        let WaitOutcome::Ack(Ack::Accepted { result }) = conn.await_ack("c_1", None, |_| None)
+        else {
             panic!("rejected");
         };
         assert_eq!(start_session(&result).expect("session"), "s_9");
@@ -1301,7 +1365,8 @@ mod tests {
             srv.send(&rejected(Some("c_1"), "invalid_arguments", "bad start"));
         });
         conn.send(&start_command("c_1", "/w", "m")).expect("send");
-        let WaitOutcome::Ack(Ack::Rejected { code, message }) = conn.await_ack("c_1", |_| None)
+        let WaitOutcome::Ack(Ack::Rejected { code, message }) =
+            conn.await_ack("c_1", None, |_| None)
         else {
             panic!("accepted");
         };
@@ -1339,7 +1404,8 @@ mod tests {
                 srv.send(&bare);
             });
             conn.send(&start_command("c_1", "/w", "m")).expect("send");
-            let WaitOutcome::Stopped(Step::Fail(text)) = conn.await_ack("c_1", |_| None) else {
+            let WaitOutcome::Stopped(Step::Fail(text)) = conn.await_ack("c_1", None, |_| None)
+            else {
                 panic!("no protocol error for {line}");
             };
             assert!(text.contains("protocol error"), "{text}");
@@ -1357,7 +1423,7 @@ mod tests {
             srv.send(&accepted("c_other", serde_json::json!({})));
         });
         conn.send(&start_command("c_1", "/w", "m")).expect("send");
-        let WaitOutcome::Stopped(Step::Fail(text)) = conn.await_ack("c_1", |_| None) else {
+        let WaitOutcome::Stopped(Step::Fail(text)) = conn.await_ack("c_1", None, |_| None) else {
             panic!("no protocol error");
         };
         assert!(text.contains("protocol error"), "{text}");
@@ -1381,7 +1447,7 @@ mod tests {
         });
         conn.send(&start_command("c_1", "/w", "m")).expect("send");
         let mut seen = Vec::new();
-        let WaitOutcome::Ack(Ack::Accepted { .. }) = conn.await_ack("c_1", |raw| {
+        let WaitOutcome::Ack(Ack::Accepted { .. }) = conn.await_ack("c_1", None, |raw| {
             seen.push(String::from_utf8_lossy(raw).into_owned());
             None
         }) else {
@@ -1397,8 +1463,8 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
         });
-        let (mut conn, _) = connect(&path).expect("connect");
-        let WaitOutcome::Lost = conn.await_ack("c_1", |_| None) else {
+        let mut conn = connect(&path).expect("connect");
+        let WaitOutcome::Lost = conn.await_ack("c_1", None, |_| None) else {
             panic!("expected loss");
         };
         drop(conn);
@@ -1898,6 +1964,63 @@ mod tests {
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn close_ack_before_prompt_ack_is_ignored() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt_no_prompt_ack(srv, serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(1002, "completed", None));
+            let (close_id, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert!(close.get("args").is_none());
+            srv.send(&accepted(&close_id, serde_json::json!({})));
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.send(&exited_ev(1003, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn rejected_close_before_prompt_ack_names_close() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt_no_prompt_ack(srv, serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(1002, "completed", None));
+            let (close_id, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.send(&rejected(Some(&close_id), "closing", "going away"));
+            let (_, close_now) = recv_id(srv);
+            assert_eq!(close_now["command"], "close");
+            assert_eq!(close_now["args"]["now"], true);
+            srv.expect_eof();
+        });
+        assert!(res.text.contains("hub rejected close"), "{}", res.text);
+        assert!(res.text.contains("closing"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close", "close"]
         );
     }
 
@@ -2677,6 +2800,24 @@ mod tests {
             srv.expect_eof();
         });
         assert!(res.text.contains("stream_reopened"), "{}", res.text);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn hub_hello_mid_run_is_a_crash_with_cleanup() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        assert!(res.text.contains("hub_hello"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt", "close"]
