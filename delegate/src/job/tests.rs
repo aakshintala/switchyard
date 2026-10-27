@@ -870,6 +870,30 @@ fn merge_attempt_sums_what_was_reported_and_takes_the_rest_from_the_last() {
 }
 
 #[test]
+fn merge_attempt_keeps_a_cost_estimate_flag_from_either_attempt() {
+    // A retry whose later attempt reports no usage keeps the earlier
+    // attempt's estimated amount flagged as estimated.
+    let mut prev = with_usage(failed(Some(503)), 10.0);
+    prev.cost_estimated = true;
+    let merged = merge_attempt(&prev, done_ok());
+    assert_eq!(merged.cost_usd, Some(2.5));
+    assert_eq!(merged.usage.unwrap().input_tokens, 10.0);
+    assert!(merged.cost_estimated);
+
+    // Only the later attempt flagged.
+    let mut next = done_ok();
+    next.cost_usd = Some(1.0);
+    next.cost_estimated = true;
+    let merged = merge_attempt(&with_usage(failed(Some(503)), 10.0), next);
+    assert_eq!(merged.cost_usd, Some(3.5));
+    assert!(merged.cost_estimated);
+
+    // Neither flagged.
+    let merged = merge_attempt(&with_usage(failed(Some(503)), 10.0), done_ok());
+    assert!(!merged.cost_estimated);
+}
+
+#[test]
 fn merge_attempt_sums_call_counts_reported_by_both_attempts() {
     let mut prev = with_usage(failed(Some(503)), 10.0);
     prev.usage.as_mut().unwrap().calls = Some(3);

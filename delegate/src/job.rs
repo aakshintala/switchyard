@@ -107,7 +107,8 @@ fn sum_opt(a: Option<f64>, b: Option<f64>) -> Option<f64> {
 }
 
 /// Fold a retry's result into the job's: usage, cost and duration add up, denials
-/// accumulate, everything else is the last attempt's.
+/// accumulate, the cost estimate flag carries from either attempt, and
+/// everything else is the last attempt's.
 fn merge_attempt(prev: &BackendResult, next: BackendResult) -> BackendResult {
     let usage = match (&prev.usage, next.usage) {
         (Some(a), Some(b)) => Some(Usage {
@@ -128,6 +129,7 @@ fn merge_attempt(prev: &BackendResult, next: BackendResult) -> BackendResult {
     BackendResult {
         usage,
         cost_usd: sum_opt(prev.cost_usd, next.cost_usd),
+        cost_estimated: prev.cost_estimated || next.cost_estimated,
         duration_ms: sum_opt(prev.duration_ms, next.duration_ms),
         permission_denials,
         ..next
