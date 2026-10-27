@@ -324,6 +324,10 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     let wait = env_millis("DELEGATE_SESSION_START_WAIT_MS", START_WAIT);
     let poll = env_millis("DELEGATE_SESSION_START_POLL_MS", START_POLL).max(1);
     let deadline = Instant::now() + Duration::from_millis(wait);
+    // Test-only trigger: when set, the timeout branch fires deterministically
+    // as soon as the named ready file exists. Unset, this costs one
+    // `env::var_os` call and the wait loop is unchanged.
+    let timeout_on_ready = std::env::var_os("DELEGATE_SESSION_TEST_TIMEOUT_ON_READY");
     loop {
         let current = state::read_state(&paths, &id)
             .map_err(|error| failed(format!("state unreadable: {error}")))?;
@@ -367,7 +371,12 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
             );
             return Err(failed("session supervisor exited before first turn"));
         }
-        if Instant::now() >= deadline {
+        // The test trigger takes the same timeout branch as the real deadline,
+        // so the kill, reap and StartFailed mark under test are identical.
+        let ready_timeout = timeout_on_ready
+            .as_ref()
+            .is_some_and(|path| Path::new(path).exists());
+        if Instant::now() >= deadline || ready_timeout {
             let _ = child.kill();
             let _ = child.wait();
             state::reap_recorded_host(&paths, &id);
