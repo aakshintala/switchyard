@@ -151,9 +151,9 @@ job reads `CANCELLED`, and `tkt-job` prints it as `WALL-CAP`. `text` is the agen
 | 1 | `watch` timed out, or `doctor` hard failure |
 | 2 | bad input or unknown job |
 
-## Muse sessions
+## Sessions (Muse and pi)
 
-Use `delegate session` for a long-running Muse sub-orchestrator. Each session runs on the machine where you invoke the command. Delegate does not connect to remote hosts; call it through `ssh` when needed.
+Use `delegate session` for a long-running Muse or pi sub-orchestrator. Each session runs on the machine where you invoke the command. Delegate does not connect to remote hosts; call it through `ssh` when needed.
 
 ```bash
 delegate session start --model muse/muse-spark-1.3-contributor \
@@ -165,21 +165,41 @@ delegate session stop <id>
 delegate session list
 ```
 
-`start` creates a detached `muse serve` supervisor and sends the brief as the first user turn, unchanged. The brief is user-provided task text, not a system instruction. The session can send progress and its final report to the starter's file inbox with `inbox-send`; include this line in its brief:
+For a Muse model, `start` creates a detached `muse serve` supervisor and sends the brief as the first user turn, unchanged. The brief is user-provided task text, not a system instruction. For a pi model, `start` creates a detached `pi --mode rpc` supervisor and appends the brief file to the system prompt with `--append-system-prompt`; the first user turn is then the fixed trigger `Your instructions are in your system prompt. Begin.` The session can send progress and its final report to the starter's file inbox with `inbox-send`; include this line in its brief:
 
 ```text
 Send progress messages and your final report to the starter's file inbox with `inbox-send`.
 ```
 
-Muse sessions use `--disable-sandbox` and `allowAll`. The worktree is the only containment. Keep the session's work inside its worktree.
+Muse sessions use `--disable-sandbox` and `allowAll`. pi sessions use no sandbox and no approval, and run with the process's OS permissions. For both hosts, the worktree is the only containment. Keep the session's work inside its worktree.
 
 `--inbox` is a path on the session machine. The supervisor writes one-line backstop notes such as `[session <id> idle]` and `[session <id> dead]`. The note does not replace messages sent with `inbox-send`.
 
-Use `send <id> TEXT` to start a turn when idle or steer the active turn. `send <id> -` reads text from stdin; it fails rather than prompting when stdin is a terminal. For text that starts with a dash, use `send <id> -- TEXT`. Text is limited to 8 MiB, must be non-empty after trimming, and cannot contain NUL.
+Use `send <id> TEXT` to start a turn when idle or steer the active turn. `send <id> -` reads text from stdin; it fails rather than prompting when stdin is a terminal. For text that starts with a dash, use `send <id> -- TEXT`. Text is limited to 8 MiB, must be non-empty after trimming, and cannot contain NUL. Text starting with `/` is rejected with a usage error on a pi session: pi would expand `/skill:<name>` or `/<template>` or run an extension command instead of sending the text to the model. Muse text is sent unchanged.
 
 `steered` means the host accepted the message for application on the next model continuation. It does not mean the model has acted on it yet.
 
 Plain `stop` interrupts a running turn, closes host stdin, and ends the session. `stop --interrupt` interrupts the running turn and keeps the session; at idle, it is a no-op.
+
+### pi sessions
+
+A `--model` of the form `muse/<id>` selects Muse; any other `--model` must use the `<provider>/<id>[:<level>]` form and selects pi. A first segment that names another harness backend (for example `codex/...` or `fiber/...`) fails fast with a usage error, so `delegate session start` never launches pi for those. The thinking level is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; a colon tail that is not one of these stays in the id. A `muse/<id>` model takes no reasoning-effort suffix on a session: sessions run at Muse's default effort.
+
+The host applies `--model` after start (`set_model`, then `set_thinking_level` when a `:level` suffix was given), so a model the host rejects or missing credentials fail `start` with exit 1 (`failed`). No `models.json` lookup happens in `session start`; `delegate run` routes by the `models.json` backend instead.
+
+pi keeps its defaults: extensions, skills, and context files load into the lane, no `--no-*` flags and no `--tools` restriction are passed, and a project-trust prompt is refused. The pi boot bound is a const; there is no config knob for it. A Muse start never resolves the pi binary.
+
+A steer queued during a tool call is delivered after that turn's tool calls and before the next model call. `stop --interrupt` and plain `stop` clear the queue (`clear_queue`) before the abort, dropping unsent steers, which are reported as `steer.unconsumed`; the host survives an interrupt. A steer that races the end of a turn starts the next turn.
+
+The session records only `completed`, `failed` or `cancelled`, so a caller reads the trailing `STATUS:` line of the last `message` log line:
+
+| pi outcome | `lastTurn.terminal` | status a caller reads |
+| --- | --- | --- |
+| `agent_settled` with `aborted:false` and a normal last reply | `completed` | the trailing `STATUS:` line of the last `message` log line: DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT or BLOCKED; DONE when there is none |
+| `agent_settled` with `aborted:false` after a provider error | `failed` (`modelError`) | ERROR |
+| `agent_settled` with `aborted:true` | `cancelled` | none of the five (the job registry's CANCELLED) |
+| host exit, closed stdout, timeout | session `dead` | ERROR; `watch` exits 4 |
+| model rejected at start | session `dead` (`startFailed`) | `start` exits 1 |
 
 `watch` is level-triggered: it returns immediately when the session is already idle or dead. Call it after `send` to wait for the current turn to finish. It returns exit code 0 for idle and 4 for dead; watching does not wait for a future turn.
 

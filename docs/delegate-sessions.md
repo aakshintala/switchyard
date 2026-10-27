@@ -24,3 +24,11 @@ nothing, so a late kill cannot hit a recycled pid.
 ## Inbox notes
 
 A matching turn completion changes the session from `running` to `idle` and triggers one `[session <id> idle]` inbox note. The transition to `dead` triggers one `[session <id> dead]` note. If a verb finds a dead supervisor, a `dead.noted` marker lets only the first settling verb write the fallback note. Inbox writes are best-effort and do not change the verb's exit code.
+
+## Pi host contracts
+
+A steer queued during a tool call reaches the next continuation: it is delivered after that turn's tool calls and before the next model call, and no `steer.unconsumed` line is emitted for it.
+
+An interrupt clears the queue before the abort and the host survives: `stop --interrupt` (and a plain `stop` on a running turn) sends `clear_queue` before the abort, dropping unsent steers, which are reported as one `steer.unconsumed` line on the cancelled completion; the host process keeps running and the session returns to `idle`.
+
+A steer racing the end of a turn starts the next turn: the finished turn's `steer.unconsumed` line comes first, then the queued steer opens a new turn that carries it as its `user` line.
