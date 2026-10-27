@@ -1350,4 +1350,30 @@ mod tests {
         assert!(first < second, "{}", res.text);
         assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
     }
+
+    #[test]
+    fn questions_render_strings_and_objects_with_options() {
+        let stream = exited_with_questions(
+            "need info",
+            serde_json::json!([
+                "Which region?",
+                {"question": "Which env?", "options": [{"label": "prod"}, {"label": "stage"}]},
+            ]),
+            1,
+        );
+        let res = parse_stdout(&stream, true, "");
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::NeedsContext);
+        let first = res.text.find("1. Which region?").expect("question 1");
+        let second = res.text.find("2. Which env?").expect("question 2");
+        let prod = res.text.find("prod").expect("option prod");
+        let stage = res.text.find("stage").expect("option stage");
+        assert!(
+            first < second && second < prod && prod < stage,
+            "{}",
+            res.text
+        );
+        assert!(!res.text.contains("\"question\""), "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
 }
