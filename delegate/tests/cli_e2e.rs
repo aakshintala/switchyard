@@ -1644,25 +1644,49 @@ fn wall_ms_cancels_a_running_agent_and_its_group() {
 #[test]
 fn wall_ms_aborts_a_running_gate() {
     let e = Env::new("wall-gate");
+    let wall_ms = WALL_TRIGGER_MS.to_string();
     let id = e.ok(
         &[
             "run",
             "--model",
             "composer-2.5",
             "--wall-ms",
-            "1500",
+            wall_ms.as_str(),
             "--gate",
-            "sleep 30",
+            "touch gate.started && sleep 300",
         ],
         "quick",
         &[],
     );
-    let done = e.wait_terminal(&id);
+    // Hang detector, not an assertion: the wall expiry below ends the job.
+    let out = e.delegate(&["watch", &id, "--timeout", "30"], None);
+    assert_eq!(out.status.code(), Some(0));
+    let done: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(done["status"], "CANCELLED");
+    // The gate was running when the wall fired.
+    assert!(
+        e.dir.join("gate.started").exists(),
+        "gate never started: {done}"
+    );
     let text = done["result"]["text"].as_str().unwrap();
     assert!(
-        text.starts_with("Cancelled: wall budget of 1500 ms exceeded after"),
+        text.starts_with(&format!(
+            "Cancelled: wall budget of {WALL_TRIGGER_MS} ms exceeded after"
+        )),
         "{text}"
+    );
+    // The watchdog fires only at or past the budget, so the reported seconds
+    // figure cannot be below it.
+    let after_s: u64 = text
+        .split("after ")
+        .nth(1)
+        .and_then(|rest| rest.split('s').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        after_s >= WALL_TRIGGER_MS / 1000,
+        "wall kill fired before the budget: {text}"
     );
     let err = done["result"]["gateResult"]["error"].as_str().unwrap();
     assert!(err.contains("gate killed"), "{err}");
