@@ -2,10 +2,11 @@
 # Tests for bin/cargo-slot, against a fake real cargo in a mktemp -d fixture
 # (never ~/.cache/agents). Handshakes use FIFOs: a blocking open or read
 # waits for the event it needs, and the watchdog bounds the whole file. A
-# waiter's stderr runs through tee into R/err.log, and tee also feeds the R/err
-# FIFO, which carries the readiness line with no deadline; a waiter that exits
+# waiter's stderr goes straight to the R/err FIFO, with no pipe and no process
+# substitution: a regular file cannot block a reader, so the FIFO is what makes
+# the readiness read wait for the line with no deadline. A waiter that exits
 # first gives that read EOF. Absence checks drain a reaped waiter's FIFO to EOF
-# and then read the whole log; no test sleeps or polls.
+# and compare every line read; no test sleeps or polls.
 # Not shown: that the waiting line prints once across several rescans. A shim
 # that printed on every rescan passes, because the suite releases a holder
 # right after the first line. Showing it needs a timed wait, which the suite
@@ -135,18 +136,21 @@ cargo_as() {
   "${CMD[@]}"
 }
 
-# spawn R [VAR=VAL ...] -- ARGS: the shim in the background, stderr through
-# tee into R/err.log and onto R/err. Fd 9 reads R/err, and holds no write end,
-# so reads reach EOF once tee and the child have exited. Sets SPAWNED to its
-# pid; after exec that is the fake's pid. The pid is recorded for cleanup.
+# spawn R [VAR=VAL ...] -- ARGS: the shim in the background, stderr straight to
+# the FIFO R/err (stage made it). The background open of the write end and the
+# open of fd 9 for reading unblock each other. Fd 9 holds no write end, so its
+# reads reach EOF once the child has exited. Sets SPAWNED to its pid; after exec
+# that is the fake's pid. The pid is recorded for cleanup. ERR_SEEN collects the
+# stderr lines fd 9 yields.
 spawn() {
   local r="$1"
   shift
   shim_cmd "$r" "$@"
-  "${CMD[@]}" 2> >(tee "$r/err.log" >"$r/err") &
+  "${CMD[@]}" 2>"$r/err" &
   SPAWNED=$!
   PIDS+=("$SPAWNED")
   exec 9<"$r/err"
+  ERR_SEEN=""
 }
 
 # spawn_quiet R [VAR=VAL ...] -- ARGS: the shim in the background with stderr
@@ -174,15 +178,19 @@ expect_no_slot_dir() {
 expect_err_line() {
   local line
   IFS= read -r -u 9 line || fail "no stderr line, want [$1]"
+  ERR_SEEN+="$line"$'\n'
   [ "$line" = "$1" ] || fail "stderr line [$line], want [$1]"
 }
 
 # expect_waiter_log R: the waiter in R has been reaped. Draining fd 9 to EOF
-# waits for tee to finish, so the log is complete; it must be one waiting line.
+# collects any line not yet read; the collected lines must be exactly one
+# waiting line. R is named for the callers' readability; the lines come from fd 9.
 expect_waiter_log() {
-  cat <&9 >/dev/null
-  [ "$(cat "$1/err.log")" = "cargo-slot: waiting" ] ||
-    fail "waiter log is [$(cat "$1/err.log")], want one waiting line"
+  local rest
+  rest="$(cat <&9)"
+  [ -z "$rest" ] || ERR_SEEN+="$rest"$'\n'
+  [ "$ERR_SEEN" = $'cargo-slot: waiting\n' ] ||
+    fail "waiter stderr is [$ERR_SEEN], want one waiting line"
 }
 
 # hold_slot R SLOTS N: a holder that takes one of the N slots in SLOTS. It
@@ -566,10 +574,11 @@ IH=$HOLD_PID
 env -i PATH="$BASEPATH" HOME="$T/home" FAKE_DIR="$I/w" CARGO_SLOTS=1 \
   CARGO_SLOT_DIR="$I/slots" "$PY" -c \
   'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])' \
-  "$T/shims/cargo" build 2> >(tee "$I/w/err.log" >"$I/w/err") &
+  "$T/shims/cargo" build 2>"$I/w/err" &
 IP=$!
 PIDS+=("$IP")
 exec 9<"$I/w/err"
+ERR_SEEN=""
 expect_err_line "cargo-slot: waiting"
 kill -INT "$IP"
 wait "$IP"
