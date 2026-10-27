@@ -714,12 +714,12 @@ fn connect(socket_path: &Path, bounds: &Bounds, shared: Arc<Shared>) -> Result<H
         partial: Vec::new(),
         shared,
     };
-    let deadline = Instant::now() + clamp_bound(bounds.ack_wait);
+    let deadline = now(&conn.shared) + clamp_bound(bounds.ack_wait);
     let raw = loop {
         match conn.next_line(bounds.poll_slice) {
             Next::Line(raw) => break raw,
             Next::Tick => {
-                if Instant::now() >= deadline {
+                if now(&conn.shared) >= deadline {
                     return Err(crash_text(format!(
                         "no hub_hello within the ack bound from {show}"
                     )));
@@ -4788,6 +4788,21 @@ mod tests {
         }
     }
 
+    /// A clock the test moves by hand: frozen until the test advances it.
+    /// Only the cases marked "clock" use it; every other bound test runs on
+    /// short real `Bounds`.
+    fn manual_clock(start: Instant) -> (Hooks, Arc<Mutex<Instant>>) {
+        let now = Arc::new(Mutex::new(start));
+        let tick = Arc::clone(&now);
+        (
+            Hooks {
+                clock: Box::new(move || *tick.lock().expect("clock")),
+                pause: None,
+            },
+            now,
+        )
+    }
+
     /// After the subscribe ack, driver flag first: the prompt goes out, then
     /// the kill lands in the prompt-ack wait. The fake sends the ack, a
     /// completed turn and a clean verdict after the control's `close now`;
@@ -6167,6 +6182,366 @@ mod tests {
                 ["start", "subscribe", "prompt", "close"]
             );
         }
+    }
+
+    /// T4: a silent hub through the `subscribe` ack times out with the R9
+    /// text naming the command and the bound. The R6 cleanup runs at once:
+    /// a `summary` subscribe, then `close now`, on the known session.
+    #[test]
+    fn unanswered_subscribe_hits_the_ack_bound() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (_, sub) = recv_id(srv);
+            assert_eq!(sub["command"], "subscribe");
+            assert_eq!(sub["args"]["level"], "full");
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
+            assert_eq!(summary["session_id"], "s_1");
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.ack_wait = Duration::from_millis(50);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let res = run_turn(&req, &path, &|_| {});
+        assert!(
+            res.text
+                .contains("no answer to `subscribe` within the ack bound"),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "subscribe", "close"]
+        );
+    }
+
+    /// T4: a silent hub through the `prompt` ack times out with the R9 text.
+    /// The connection holds the subscription, so the R6 cleanup is one
+    /// `close now` and no second subscribe.
+    #[test]
+    fn unanswered_prompt_hits_the_ack_bound() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (_, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            assert_eq!(close["session_id"], "s_1");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.ack_wait = Duration::from_millis(50);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let res = run_turn(&req, &path, &|_| {});
+        assert!(
+            res.text
+                .contains("no answer to `prompt` within the ack bound"),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// T4: `turn_start_wait` runs from the `prompt` ack. With no
+    /// `turn_started`, the bound arms the stop (one `close now` goes out)
+    /// and the stop wait ends with the turn-start bound text.
+    #[test]
+    fn expired_turn_start_wait_runs_the_stop() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.turn_start_wait = Duration::from_millis(50);
+        req.bounds.turn_wait = None;
+        req.bounds.stop_wait = Duration::from_millis(50);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let res = run_turn(&req, &path, &|_| {});
+        assert!(
+            res.text.contains(
+                "no turn_started within the turn-start bound; no fiber_exited within the stop bound"
+            ),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// T4 (R17): phase bounds are totals, not idle timers. The fake keeps
+    /// events flowing until it holds the `close now`, capped well past the
+    /// bound: under totals the bound fires mid-flow; under idle semantics
+    /// the deadline would keep sliding and the cap fails loudly instead of
+    /// hanging the test.
+    #[test]
+    fn turn_start_wait_expires_while_events_flow() {
+        let (path, rx) = spawn_fake(|srv| {
+            // Short reads from the start: the loop below polls for the
+            // `close now` with one bounded read per sent delta. The peer
+            // lives for the whole run, so no close can race this call.
+            srv.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .expect("fake read timeout");
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            let mut partial = Vec::new();
+            let mut close = None;
+            for seq in 0..200u64 {
+                srv.send(&ev(
+                    "assistant_message_delta",
+                    100 + seq,
+                    serde_json::json!({"text": "still going"}),
+                ));
+                match read_line_into(&mut srv.reader, &mut partial) {
+                    Ok(Read::Line(raw)) => {
+                        let line = String::from_utf8(raw).expect("fake hub keeps lines UTF-8");
+                        let value: serde_json::Value =
+                            serde_json::from_str(&line).expect("hub line json");
+                        if value["command"] == "close" {
+                            srv.received.push(line);
+                            close = Some(value);
+                            break;
+                        }
+                    }
+                    Ok(Read::Pending) => {}
+                    Err(ReadErr::Lost(detail)) => {
+                        panic!("fake hub lost the connection: {detail}")
+                    }
+                }
+            }
+            let close = close.expect("close now never went out while events flowed");
+            assert_eq!(close["args"]["now"], true);
+            srv.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .expect("fake read timeout");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.turn_start_wait = Duration::from_millis(50);
+        req.bounds.turn_wait = None;
+        req.bounds.stop_wait = Duration::from_millis(50);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let res = run_turn(&req, &path, &|_| {});
+        assert!(
+            res.text.contains(
+                "no turn_started within the turn-start bound; no fiber_exited within the stop bound"
+            ),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// T4 (R3): a `fiber_exited` read inside a `turn_start_wait`-armed stop
+    /// wait is the verdict. The arm already sent the `close now`, so the
+    /// session is closed even though the run ends without the stop text.
+    #[test]
+    fn exit_inside_turn_start_wait_is_the_verdict() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            assert_eq!(close["session_id"], "s_1");
+            srv.send(&exited_ev(10, 1, "", Some("boom")));
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.turn_start_wait = Duration::from_millis(50);
+        req.bounds.turn_wait = None;
+        req.bounds.stop_wait = Duration::from_millis(50);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let res = run_turn(&req, &path, &|_| {});
+        assert!(
+            res.text.contains("session exited before the turn started"),
+            "{}",
+            res.text
+        );
+        assert!(res.text.contains("boom"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// T4: a silent hub through the `start` ack times out with the R9 text.
+    /// No session is open, so the cleanup sends no `close` at all.
+    #[test]
+    fn unanswered_start_sends_no_close() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (_, start) = recv_id(srv);
+            assert_eq!(start["command"], "start");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.ack_wait = Duration::from_millis(50);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let res = run_turn(&req, &path, &|_| {});
+        assert!(
+            res.text
+                .contains("no answer to `start` within the ack bound"),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.session_id, None);
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(received_commands(&join_fake(&path, rx)), ["start"]);
+    }
+
+    /// T4 (clock): `turn_wait: None` never expires. The clock jumps a day
+    /// mid-run while events flow, and the run still reaches Done: no phase
+    /// deadline is consulted for the verdict wait.
+    #[test]
+    fn turn_wait_none_ignores_a_day_jump() {
+        let (hooks, clock) = manual_clock(Instant::now());
+        let (plain_tx, plain_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            for seq in 10..13 {
+                srv.send(&ev(
+                    "assistant_message_delta",
+                    seq,
+                    serde_json::json!({"text": "still going"}),
+                ));
+            }
+            srv.send(&turn_completed_ev(13, "completed", None));
+            let (_, plain) = recv_id(srv);
+            assert_eq!(plain["command"], "close");
+            assert!(plain.get("args").is_none());
+            plain_tx.send(()).expect("plain close");
+            go_rx.recv_timeout(Duration::from_secs(15)).expect("go");
+            for seq in 14..17 {
+                srv.send(&ev(
+                    "assistant_message_delta",
+                    seq,
+                    serde_json::json!({"text": "still going"}),
+                ));
+            }
+            srv.send(&exited_ev(17, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.turn_wait = None;
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        plain_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("plain");
+        *clock.lock().expect("clock") += Duration::from_secs(24 * 3600);
+        go_tx.send(()).expect("fake");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
     }
 
     #[test]
