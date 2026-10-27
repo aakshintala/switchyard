@@ -7,6 +7,7 @@ use delegate::session::{
 };
 use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
+use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -279,11 +280,21 @@ impl Drop for Session {
     }
 }
 
+fn make_stale_socket(socket: &std::path::Path) -> OwnedFd {
+    // Base form: a bound listener. The socket inode stays accept()-able while
+    // any copy of this fd is alive, so a leaked copy lets a connect succeed
+    // even though the test dropped its own handle.
+    let listener = UnixListener::bind(socket).unwrap();
+    let fd = listener.into_raw_fd();
+    // SAFETY: `fd` is an open socket fd detached from `listener` without closing it.
+    unsafe { OwnedFd::from_raw_fd(fd) }
+}
+
 #[test]
 fn ipc_request_reports_a_stale_socket_as_unreachable() {
     let (paths, id, root) = paths();
     let socket = paths.socket_path(&id).unwrap();
-    drop(UnixListener::bind(&socket).unwrap());
+    drop(make_stale_socket(&socket));
 
     let result = ipc::request(
         &paths,
@@ -296,6 +307,44 @@ fn ipc_request_reports_a_stale_socket_as_unreachable() {
         matches!(result, Err(ipc::IpcError::Unreachable(_))),
         "{result:?}"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ipc_request_reports_a_stale_socket_as_unreachable_while_a_copy_of_its_fd_is_open() {
+    let (paths, id, root) = paths();
+    let socket = paths.socket_path(&id).unwrap();
+    let stale = make_stale_socket(&socket);
+    // Stand-in for a forked child's copy of the listening fd: it keeps the
+    // socket accept()-able after the test hands its own handle to the holder.
+    let held = stale.try_clone().unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let listener = UnixListener::from(stale);
+        // On a non-listening socket this errors at once and the thread exits.
+        if let Ok((stream, _)) = listener.accept() {
+            let mut line = String::new();
+            let _ = std::io::BufReader::new(stream).read_line(&mut line);
+        }
+        let _ = done_tx.send(());
+    });
+
+    let result = ipc::request(
+        &paths,
+        &id,
+        &json!({"op":"send","text":"hello"}),
+        Duration::from_millis(100),
+    );
+
+    // The holder reads the request line before dropping it, so the client sees
+    // a clean EOF and reports BadReply rather than an Unreachable reset.
+    assert!(
+        matches!(result, Err(ipc::IpcError::Unreachable(_))),
+        "{result:?}"
+    );
+    drop(held);
+    done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    holder.join().unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 
