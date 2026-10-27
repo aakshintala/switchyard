@@ -11,6 +11,7 @@ use super::{finish, handle_line};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// A socket path is limited to 103 bytes on macOS.
 const MAX_SOCKET_PATH: usize = 103;
@@ -23,6 +24,43 @@ fn crash_text(body: String) -> String {
     format!("{body}\n{FIXED}")
 }
 
+const ACK_WAIT: Duration = Duration::from_secs(30);
+const TURN_START_WAIT: Duration = Duration::from_secs(120);
+const STOP_WAIT: Duration = Duration::from_secs(10);
+const POLL_SLICE: Duration = Duration::from_millis(200);
+const WRITE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Bounds for every wait in the run. Each bound is a total for its wait: a
+/// line that arrives resets nothing. `turn_wait` is `None` by default, which
+/// means unbounded, as with `wall_ms` elsewhere.
+#[derive(Clone, Debug)]
+pub struct Bounds {
+    pub ack_wait: Duration,
+    pub turn_start_wait: Duration,
+    pub turn_wait: Option<Duration>,
+    pub stop_wait: Duration,
+    pub poll_slice: Duration,
+    pub write_deadline: Duration,
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Bounds {
+            ack_wait: ACK_WAIT,
+            turn_start_wait: TURN_START_WAIT,
+            turn_wait: None,
+            stop_wait: STOP_WAIT,
+            poll_slice: POLL_SLICE,
+            write_deadline: WRITE_DEADLINE,
+        }
+    }
+}
+
+/// The OS rejects a zero socket timeout, so a zero bound becomes 1 ms.
+fn clamp_bound(bound: Duration) -> Duration {
+    bound.max(Duration::from_millis(1))
+}
+
 /// What went wrong reading one hub line: EOF or a read error means the
 /// connection is lost. Hub lines carry no cap, only client lines do: the hub
 /// is local, so a line is read to its newline whatever its size.
@@ -31,38 +69,75 @@ enum ReadErr {
     Lost(String),
 }
 
-/// Read one newline-terminated hub line, keeping partial bytes across reads.
-fn read_line<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, ReadErr> {
-    enum Next {
+/// What one fill of the read buffer found: a whole line, or a quiet socket
+/// with the bytes so far kept in the caller's buffer.
+#[derive(Debug)]
+enum Read {
+    Line(Vec<u8>),
+    Pending,
+}
+
+/// What one poll of the socket found: a whole line, a quiet slice, or a
+/// lost connection. Partial bytes survive a quiet slice and complete on a
+/// later poll, so a line is never split or lost across `Tick`s.
+#[derive(Debug)]
+enum Next {
+    Line(Vec<u8>),
+    Tick,
+    Lost,
+}
+
+/// Read one hub line into `partial`, keeping bytes across polls. A read
+/// timeout (`WouldBlock` or `TimedOut`) keeps what arrived and reports
+/// `Pending`; an interruption retries; EOF or any other error loses the
+/// connection, as `read_line` always did.
+fn read_line_into<R: BufRead>(reader: &mut R, partial: &mut Vec<u8>) -> Result<Read, ReadErr> {
+    enum Found {
         Done(usize),
         More(usize),
     }
-    let mut line = Vec::new();
     loop {
-        let next = {
-            let buf = reader
-                .fill_buf()
-                .map_err(|e| ReadErr::Lost(e.to_string()))?;
-            if buf.is_empty() {
+        let next = match reader.fill_buf() {
+            Ok([]) => {
                 return Err(ReadErr::Lost("connection closed".to_string()));
             }
-            match buf.iter().position(|&b| b == b'\n') {
+            Ok(buf) => match buf.iter().position(|&b| b == b'\n') {
                 Some(nl) => {
-                    line.extend_from_slice(&buf[..nl]);
-                    Next::Done(nl + 1)
+                    partial.extend_from_slice(&buf[..nl]);
+                    Found::Done(nl + 1)
                 }
                 None => {
-                    line.extend_from_slice(buf);
-                    Next::More(buf.len())
+                    partial.extend_from_slice(buf);
+                    Found::More(buf.len())
                 }
+            },
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                return Ok(Read::Pending);
             }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(ReadErr::Lost(e.to_string())),
         };
         match next {
-            Next::Done(n) => {
+            Found::Done(n) => {
                 reader.consume(n);
-                return Ok(line);
+                return Ok(Read::Line(std::mem::take(partial)));
             }
-            Next::More(n) => reader.consume(n),
+            Found::More(n) => reader.consume(n),
+        }
+    }
+}
+
+/// Read one newline-terminated hub line, keeping partial bytes across reads.
+fn read_line<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, ReadErr> {
+    let mut partial = Vec::new();
+    loop {
+        match read_line_into(reader, &mut partial) {
+            Ok(Read::Line(line)) => return Ok(line),
+            Ok(Read::Pending) => continue,
+            Err(e) => return Err(e),
         }
     }
 }
@@ -80,16 +155,20 @@ fn first80(raw: &[u8]) -> String {
 }
 
 /// An open hub connection: the reader owns the socket, the writer is a
-/// clone of it. Reads and writes stay on the one calling thread.
+/// clone of it. Reads and writes stay on the one calling thread. `partial`
+/// keeps the bytes of an unfinished line across `Tick`s.
 #[derive(Debug)]
 struct HubConn {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
+    partial: Vec<u8>,
 }
 
 /// Connect to the hub socket, read `hub_hello` and return the connection.
-/// A version mismatch names the hub's `fiber_version` in the error text.
-fn connect(socket_path: &Path) -> Result<HubConn, String> {
+/// The hello wait is the one poll in this task: each slice is `poll_slice`
+/// long and the whole wait is `ack_wait`. A version mismatch names the
+/// hub's `fiber_version` in the error text.
+fn connect(socket_path: &Path, bounds: &Bounds) -> Result<HubConn, String> {
     let show = socket_path.display().to_string();
     let stream = UnixStream::connect(socket_path)
         .map_err(|e| crash_text(format!("cannot connect to hub socket {show}: {e}")))?;
@@ -99,10 +178,29 @@ fn connect(socket_path: &Path) -> Result<HubConn, String> {
     let mut conn = HubConn {
         reader: BufReader::new(stream),
         writer,
+        partial: Vec::new(),
     };
-    let raw = read_line(&mut conn.reader).map_err(|e| match e {
-        ReadErr::Lost(detail) => crash_text(format!("cannot read hub_hello from {show}: {detail}")),
-    })?;
+    let deadline = Instant::now() + clamp_bound(bounds.ack_wait);
+    let raw = loop {
+        match conn.next_line(bounds.poll_slice) {
+            Next::Line(raw) => break raw,
+            Next::Tick => {
+                if Instant::now() >= deadline {
+                    return Err(crash_text(format!(
+                        "no hub_hello within the ack bound from {show}"
+                    )));
+                }
+            }
+            Next::Lost => {
+                return Err(crash_text(format!(
+                    "cannot read hub_hello from {show}: connection lost"
+                )));
+            }
+        }
+    };
+    // Later reads block, so the poll timeout comes off before the run
+    // continues. The driver poll in T3 sets it again on every poll.
+    let _ = conn.reader.get_ref().set_read_timeout(None);
     let hello: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| {
         crash_text(format!(
             "protocol error: first hub line is not JSON: {}",
@@ -278,6 +376,21 @@ enum WaitOutcome {
 }
 
 impl HubConn {
+    /// One poll of the socket: a whole line, a quiet slice, or a lost
+    /// connection. The poll lasts at most `poll_slice`; bytes of an
+    /// unfinished line stay in `partial` across `Tick`s.
+    fn next_line(&mut self, poll_slice: Duration) -> Next {
+        let _ = self
+            .reader
+            .get_ref()
+            .set_read_timeout(Some(clamp_bound(poll_slice)));
+        match read_line_into(&mut self.reader, &mut self.partial) {
+            Ok(Read::Line(line)) => Next::Line(line),
+            Ok(Read::Pending) => Next::Tick,
+            Err(ReadErr::Lost(_)) => Next::Lost,
+        }
+    }
+
     fn send(&mut self, line: &str) -> std::io::Result<()> {
         write_line(&mut self.writer, line)
     }
@@ -398,10 +511,12 @@ fn last_seq_of(result: &serde_json::Value) -> Option<u64> {
 /// `supervised: true`, `subscribe` at `full`, one `prompt`, read to
 /// `turn_completed`, `close`, read `fiber_exited` as the verdict. There is
 /// no `bin` field: nothing here spawns anything.
+#[derive(Clone)]
 pub struct HubRequest {
     pub cwd: String,
     pub model: String,
     pub prompt: String,
+    pub bounds: Bounds,
 }
 
 /// Drive one supervised turn to a verdict. The client sends `prompt` itself
@@ -409,7 +524,7 @@ pub struct HubRequest {
 /// session with `close`, reading `fiber_exited` as the verdict.
 pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResult {
     let model = super::model_reference(&req.model).to_string();
-    let mut conn = match connect(socket) {
+    let mut conn = match connect(socket, &req.bounds) {
         Ok(ok) => ok,
         Err(text) => return crash_result(None, Vec::new(), text),
     };
@@ -1055,7 +1170,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
         });
-        let conn = connect(&path).expect("connect");
+        let conn = connect(&path, &Bounds::default()).expect("connect");
         drop(conn);
         assert!(join_fake(&path, rx).is_empty());
     }
@@ -1065,7 +1180,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(2), "9.9.9"));
         });
-        let err = connect(&path).unwrap_err();
+        let err = connect(&path, &Bounds::default()).unwrap_err();
         assert!(
             err.contains("the hub speaks schema_version 2; delegate reads 1"),
             "{err}"
@@ -1082,7 +1197,7 @@ mod tests {
                     .to_string(),
             );
         });
-        let err = connect(&path).unwrap_err();
+        let err = connect(&path, &Bounds::default()).unwrap_err();
         assert!(
             err.contains("the hub speaks schema_version missing; delegate reads 1"),
             "{err}"
@@ -1095,7 +1210,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send("this is not json");
         });
-        let err = connect(&path).unwrap_err();
+        let err = connect(&path, &Bounds::default()).unwrap_err();
         assert!(err.contains("protocol error"), "{err}");
         assert!(err.contains("this is not json"), "{err}");
         join_fake(&path, rx);
@@ -1106,7 +1221,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&serde_json::json!({"kind":"command_accepted","payload":{}}).to_string());
         });
-        let err = connect(&path).unwrap_err();
+        let err = connect(&path, &Bounds::default()).unwrap_err();
         assert!(err.contains("protocol error"), "{err}");
         assert!(err.contains("command_accepted"), "{err}");
         join_fake(&path, rx);
@@ -1116,8 +1231,153 @@ mod tests {
     fn missing_socket_fails_with_the_path_and_os_error() {
         let missing = PathBuf::from(format!("/tmp/dh-missing-{}", std::process::id()));
         let _ = std::fs::remove_file(&missing);
-        let err = connect(&missing).unwrap_err();
+        let err = connect(&missing, &Bounds::default()).unwrap_err();
         assert!(err.contains(&*missing.to_string_lossy()), "{err}");
+    }
+
+    #[test]
+    fn bounds_default_to_the_named_constants() {
+        let bounds = Bounds::default();
+        assert_eq!(bounds.ack_wait, ACK_WAIT);
+        assert_eq!(bounds.turn_start_wait, TURN_START_WAIT);
+        assert_eq!(bounds.turn_wait, None);
+        assert_eq!(bounds.stop_wait, STOP_WAIT);
+        assert_eq!(bounds.poll_slice, POLL_SLICE);
+        assert_eq!(bounds.write_deadline, WRITE_DEADLINE);
+    }
+
+    #[test]
+    fn zero_bounds_clamp_to_one_millisecond() {
+        assert_eq!(clamp_bound(Duration::ZERO), Duration::from_millis(1));
+        assert_eq!(
+            clamp_bound(Duration::from_millis(1)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            clamp_bound(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
+
+    /// A line split across three writes, with the fake held back on a
+    /// channel between them, reads whole and in order: the bytes before
+    /// each quiet slice stay in `partial` across the `Tick`s.
+    #[test]
+    fn line_split_across_three_writes_reads_whole() {
+        let (first_tx, first_rx) = mpsc::channel::<()>();
+        let (second_tx, second_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.writer.write_all(b"{\"kind\":").expect("first third");
+            srv.writer.flush().expect("flush");
+            first_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("first release");
+            srv.writer.write_all(b"\"turn_").expect("second third");
+            srv.writer.flush().expect("flush");
+            second_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("second release");
+            srv.writer.write_all(b"started\"}\n").expect("last third");
+            srv.writer.flush().expect("flush");
+        });
+        let stream = UnixStream::connect(&path).expect("client connect");
+        let mut conn = HubConn {
+            reader: BufReader::new(stream.try_clone().expect("clone")),
+            writer: stream,
+            partial: Vec::new(),
+        };
+        let poll = Duration::from_millis(20);
+        assert!(matches!(conn.next_line(poll), Next::Tick));
+        first_tx.send(()).expect("release first");
+        assert!(matches!(conn.next_line(poll), Next::Tick));
+        second_tx.send(()).expect("release second");
+        match conn.next_line(poll) {
+            Next::Line(line) => assert_eq!(line, b"{\"kind\":\"turn_started\"}"),
+            other => panic!("expected the whole line, got {other:?}"),
+        }
+        drop(conn);
+        join_fake(&path, rx);
+    }
+
+    #[test]
+    fn quiet_socket_is_a_tick_and_a_closed_one_is_lost() {
+        let (tx, gate) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |_srv| {
+            gate.recv_timeout(Duration::from_secs(15)).expect("release");
+        });
+        let stream = UnixStream::connect(&path).expect("client connect");
+        let mut conn = HubConn {
+            reader: BufReader::new(stream.try_clone().expect("clone")),
+            writer: stream,
+            partial: Vec::new(),
+        };
+        assert!(matches!(
+            conn.next_line(Duration::from_millis(20)),
+            Next::Tick
+        ));
+        drop(conn);
+        tx.send(()).expect("release");
+        join_fake(&path, rx);
+
+        let (quiet, quiet_rx) = spawn_fake(|_srv| {});
+        let stream = UnixStream::connect(&quiet).expect("client connect");
+        let mut conn = HubConn {
+            reader: BufReader::new(stream.try_clone().expect("clone")),
+            writer: stream,
+            partial: Vec::new(),
+        };
+        assert!(matches!(
+            conn.next_line(Duration::from_millis(20)),
+            Next::Lost
+        ));
+        drop(conn);
+        join_fake(&quiet, quiet_rx);
+    }
+
+    #[test]
+    fn silent_hub_hits_the_hello_bound() {
+        let (tx, gate) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |_srv| {
+            gate.recv_timeout(Duration::from_secs(15)).expect("release");
+        });
+        let bounds = Bounds {
+            ack_wait: Duration::from_millis(50),
+            poll_slice: Duration::from_millis(5),
+            ..Default::default()
+        };
+        let err = connect(&path, &bounds).unwrap_err();
+        assert!(err.contains("no hub_hello within the ack bound"), "{err}");
+        assert!(err.ends_with("The run ended without a verdict."), "{err}");
+        tx.send(()).expect("release");
+        join_fake(&path, rx);
+    }
+
+    /// The `Tick` arm of the hello wait keeps waiting: a hello whose first
+    /// half arrives before a quiet slice still connects.
+    #[test]
+    fn hello_after_a_quiet_slice_still_passes() {
+        let line = hello(serde_json::json!(1), "9.9.9");
+        let (path, rx) = spawn_fake(move |srv| {
+            let half = line.len() / 2;
+            srv.writer
+                .write_all(&line.as_bytes()[..half])
+                .expect("first half");
+            srv.writer.flush().expect("flush");
+            std::thread::sleep(Duration::from_millis(50));
+            srv.writer
+                .write_all(&line.as_bytes()[half..])
+                .expect("second half");
+            srv.writer.write_all(b"\n").expect("newline");
+            srv.writer.flush().expect("flush");
+        });
+        let bounds = Bounds {
+            poll_slice: Duration::from_millis(10),
+            ack_wait: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let conn = connect(&path, &bounds).expect("hello after a quiet slice");
+        drop(conn);
+        join_fake(&path, rx);
     }
 
     #[test]
@@ -1315,7 +1575,7 @@ mod tests {
         script: impl FnOnce(&mut FakeSrv) + Send + 'static,
     ) -> (HubConn, PathBuf, mpsc::Receiver<Vec<String>>) {
         let (path, rx) = spawn_fake(script);
-        let conn = connect(&path).expect("connect");
+        let conn = connect(&path, &Bounds::default()).expect("connect");
         (conn, path, rx)
     }
 
@@ -1463,7 +1723,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
         });
-        let mut conn = connect(&path).expect("connect");
+        let mut conn = connect(&path, &Bounds::default()).expect("connect");
         let WaitOutcome::Lost = conn.await_ack("c_1", None, |_| None) else {
             panic!("expected loss");
         };
@@ -1541,6 +1801,7 @@ mod tests {
             cwd: "/w".to_string(),
             model: "fiber/m".to_string(),
             prompt: "go".to_string(),
+            bounds: Bounds::default(),
         }
     }
 
