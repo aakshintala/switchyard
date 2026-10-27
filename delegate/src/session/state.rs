@@ -567,18 +567,21 @@ pub fn settle_dead_supervisor(
 // unreadable state falls through to the spawn file, and the file is never
 // read while a hostPid is published.
 pub fn reap_recorded_host(paths: &Paths, id: &str) {
-    let pid = match read_state(paths, id) {
-        Ok(state) => state.host_pid.or_else(|| read_spawned_pid(paths, id)),
-        Err(_) => read_spawned_pid(paths, id),
-    };
+    let pid = read_state(paths, id)
+        .ok()
+        .and_then(|state| state.host_pid)
+        .or_else(|| read_spawned_pid(paths, id));
     if let Some(pid) = pid {
         reap_host(pid);
     }
 }
 
 fn read_spawned_pid(paths: &Paths, id: &str) -> Option<i32> {
-    let bytes = std::fs::read(paths.host_spawn_file(id)).ok()?;
-    std::str::from_utf8(&bytes).ok()?.trim().parse::<i32>().ok()
+    std::fs::read_to_string(paths.host_spawn_file(id))
+        .ok()?
+        .trim()
+        .parse::<i32>()
+        .ok()
 }
 
 // debt: pid-only liveness, add a heartbeat-age check when a reused supervisor pid shows up.

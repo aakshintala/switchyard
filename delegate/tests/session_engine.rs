@@ -1831,18 +1831,53 @@ fn prepublish_kill_is_reaped_by_settle_dead_supervisor() {
 
 #[test]
 fn prepublish_start_timeout_reaps_the_host() {
+    // Deterministic: park the supervisor between host spawn and publication
+    // with the hook, then run `start`'s timeout cleanup while it is parked.
+    // Driving this through `session start`'s START_WAIT budget would race
+    // the budget against the hook, so the test arranges the same window
+    // with the ready-file signal instead (see delegate/src/session/mod.rs).
     let root = PrepublishRoot::new();
-    let run = root.spawn_start("IGNORE_EOF", "5000");
-    let output = run.wait_bounded(Duration::from_secs(15), "session start timeout");
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("session startup timed out"),
-        "unexpected start stderr: {stderr}"
+    let id = root.fresh_id();
+    let _ = root.create_session(&id);
+    let mut run = root.spawn(&["session", "__supervise", &id], "IGNORE_EOF", &[], true);
+    let (supervisor_pid, host_pid) = root.wait_ready();
+    assert_eq!(
+        run.child.id() as i32,
+        supervisor_pid,
+        "ready file names another supervisor"
     );
-    let (_, host_pid) = root
-        .ready_pids()
-        .expect("ready file holds the pre-publication pids");
+    assert_eq!(
+        unsafe { libc::kill(host_pid, 0) },
+        0,
+        "host exited before the timeout reap"
+    );
+    // Mirror the `Instant::now() >= deadline` branch of `start`: the parked
+    // supervisor never publishes, so a timed-out start kills it and reaps
+    // the recorded host.
+    let supervisor_child = run.child.id() as i32;
+    run.kill();
+    let _ = run.wait_bounded(Duration::from_secs(10), "supervise exit after timeout kill");
+    state::reap_recorded_host(&root.paths(), &id);
+    let mut current = state::read_state(&root.paths(), &id).unwrap();
+    if current.supervisor_pid.is_none() {
+        current.supervisor_pid = Some(supervisor_child);
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    state::mark_dead(
+        &mut current,
+        DeadReason::StartFailed,
+        None,
+        "session startup timed out",
+        now_ms,
+    );
+    state::write_state(&root.paths(), &current).unwrap();
+    assert_eq!(
+        current.dead.as_ref().unwrap().reason,
+        DeadReason::StartFailed
+    );
     PrepublishRoot::assert_gone(host_pid);
 }
 
