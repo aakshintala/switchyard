@@ -17,7 +17,7 @@ const MAX_SOCKET_PATH: usize = 103;
 
 /// Fixed closing sentence on every error text the client builds, so no text
 /// the client builds ever ends in a hub or model `STATUS:` line.
-const FIXED: &str = "The delegate hub client ended the run with an error.";
+const FIXED: &str = "The run ended without a verdict.";
 
 fn crash_text(body: String) -> String {
     format!("{body}\n{FIXED}")
@@ -253,14 +253,13 @@ enum Ack {
 
 /// What one handler step decides: keep reading, send `close` once, end the
 /// run, or crash it. `Fail` already holds the final crash text and runs the
-/// `close now` cleanup when a session is open; `FailQuiet` never cleans up.
+/// one best-effort `close now` cleanup when a session is open.
 #[derive(Debug)]
 enum Step {
     Continue,
     CloseOnce,
     End(BackendResult),
     Fail(String),
-    FailQuiet(String),
 }
 
 /// Why waiting for an answer stopped: the answer, a handler stop, or a lost
@@ -443,7 +442,9 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
                 crash_text("protocol error: subscribe wait stopped without an answer".to_string()),
             );
         }
-        WaitOutcome::Lost => return rest.crash(lost_text(&session_id)),
+        WaitOutcome::Lost => {
+            return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+        }
     }
     // prompt with the client-minted id C.
     let prompt_id = new_command_id();
@@ -454,32 +455,36 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
         return rest.crash(lost_text(&session_id));
     }
     rest.prompt_id = prompt_id.clone();
-    match conn.await_ack(&prompt_id, |raw| as_live(&mut rest, raw)) {
-        WaitOutcome::Ack(Ack::Accepted { .. }) => {}
-        WaitOutcome::Ack(Ack::Rejected { code, message }) => {
-            return fail_with_cleanup(
-                &mut conn,
-                &mut rest,
-                crash_text(format!("hub rejected prompt: {code}: {message}")),
-            );
-        }
-        WaitOutcome::Stopped(step) => {
-            if let Some(done) = apply_step(&mut conn, &mut rest, step) {
-                return done;
+    loop {
+        match conn.await_ack(&prompt_id, |raw| as_live(&mut rest, raw)) {
+            WaitOutcome::Ack(Ack::Accepted { .. }) => break,
+            WaitOutcome::Ack(Ack::Rejected { code, message }) => {
+                return fail_with_cleanup(
+                    &mut conn,
+                    &mut rest,
+                    crash_text(format!("hub rejected prompt: {code}: {message}")),
+                );
             }
-            return fail_with_cleanup(
-                &mut conn,
-                &mut rest,
-                crash_text("protocol error: prompt wait stopped without an answer".to_string()),
-            );
+            WaitOutcome::Stopped(step) => {
+                if let Some(done) = apply_step(&mut conn, &mut rest, step) {
+                    return done;
+                }
+                // A `turn_completed` read before the ack only folds and
+                // closes once: the wait ends at the ack line, so keep
+                // waiting for it.
+            }
+            WaitOutcome::Lost => {
+                return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+            }
         }
-        WaitOutcome::Lost => return rest.crash(lost_text(&session_id)),
     }
     // Read to the verdict, which stops the run at once.
     loop {
         let raw = match read_line(&mut conn.reader) {
             Ok(raw) => raw,
-            Err(ReadErr::Lost(_)) => return rest.crash(lost_text(&session_id)),
+            Err(ReadErr::Lost(_)) => {
+                return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+            }
         };
         let step = rest.handle_live(&raw);
         if let Some(done) = apply_step(&mut conn, &mut rest, step) {
@@ -499,6 +504,7 @@ struct Rest<'a> {
     prompt_id: String,
     close_id: Option<String>,
     closed: bool,
+    closed_now: bool,
     last_seq: Option<u64>,
     turn_started: bool,
     completed_ok: bool,
@@ -517,6 +523,7 @@ impl<'a> Rest<'a> {
             prompt_id: String::new(),
             close_id: None,
             closed: false,
+            closed_now: false,
             last_seq: None,
             turn_started: false,
             completed_ok: false,
@@ -588,7 +595,8 @@ impl<'a> Rest<'a> {
                 }
             }
             "attention" | "device_changed" => Step::Continue,
-            "stream_closed" => Step::FailQuiet(crash_text(
+            "session_left" => Step::Continue,
+            "stream_closed" => Step::Fail(crash_text(
                 "hub closed the stream (stream_closed)".to_string(),
             )),
             "stream_reopened" => Step::Fail(crash_text(
@@ -721,10 +729,10 @@ impl<'a> Rest<'a> {
         }
         let live = match self.last_seq {
             None => true,
-            Some(last) => value
-                .get("seq")
-                .and_then(|s| s.as_u64())
-                .is_some_and(|seq| seq > last),
+            Some(last) => match value.get("seq").and_then(|s| s.as_u64()) {
+                None => true,
+                Some(seq) => seq > last,
+            },
         };
         if !live {
             return Step::Continue;
@@ -737,6 +745,21 @@ impl<'a> Rest<'a> {
     /// `fiber_exited` exit 0; Done needs an admitted `completed` turn.
     fn verdict(&mut self, raw: &[u8]) -> BackendResult {
         self.fold(raw);
+        // S3 replaces this arm with NEEDS_CONTEXT and the #755 rendering.
+        let exited_questions = self
+            .state
+            .exited
+            .as_ref()
+            .and_then(|exited| exited.get("payload"))
+            .and_then(super::questions_section);
+        if let Some(rendered) = exited_questions {
+            let mut res = finish(std::mem::take(&mut self.state), true, "");
+            res.is_error = Some(true);
+            res.text = crash_text(format!(
+                "session exited with questions:\n{rendered}: the client never answers them"
+            ));
+            return res;
+        }
         let mut res = finish(std::mem::take(&mut self.state), true, "");
         if res.is_error == Some(false) {
             if let Some(outcome) = self.bad_outcome.as_deref() {
@@ -755,7 +778,8 @@ impl<'a> Rest<'a> {
         res
     }
 
-    /// The turn never started: an error with the exit reason, never Done.
+    /// The turn never started: an error with the exit reason, never Done. It
+    /// ends in its own fixed sentence, so hub text never ends the error.
     fn pre_turn_exit(&mut self, value: &serde_json::Value) -> BackendResult {
         let payload = value.get("payload");
         let code = payload
@@ -776,9 +800,13 @@ impl<'a> Rest<'a> {
             (None, Some(message)) => message.to_string(),
             (None, None) => "no exit details".to_string(),
         };
-        self.crash(crash_text(format!(
-            "session exited before the turn started ({reason})"
-        )))
+        crash_result(
+            self.session_id.clone(),
+            self.state.denial_list(),
+            format!(
+                "session exited before the turn started ({reason})\nThe run ended before the turn started."
+            ),
+        )
     }
 }
 
@@ -817,16 +845,17 @@ fn apply_step(conn: &mut HubConn, rest: &mut Rest, step: Step) -> Option<Backend
         }
         Step::End(result) => Some(result),
         Step::Fail(text) => Some(fail_with_cleanup(conn, rest, text)),
-        Step::FailQuiet(text) => Some(rest.crash(text)),
     }
 }
 
 /// Crash after the `start` answer, on a live connection: one best-effort
 /// `close` with `now: true`, then the crash. Skipped when no session is open
-/// or `close` already went out, so `close` is sent at most once per run.
+/// or a `close now` already went out, so each is sent at most once per run.
+/// It still runs after a plain `close` went out: a crash in a later turn
+/// would otherwise leave the session running.
 fn fail_with_cleanup(conn: &mut HubConn, rest: &mut Rest, text: String) -> BackendResult {
-    if !rest.closed {
-        rest.closed = true;
+    if !rest.closed_now {
+        rest.closed_now = true;
         if let Some(session_id) = rest.session_id.clone() {
             let _ = conn.send(&close_now_command(&new_command_id(), &session_id));
         }
@@ -1412,6 +1441,16 @@ mod tests {
     }
 
     impl FakeSrv {
+        /// Shut down the hub side for writing, keeping it open for reading:
+        /// the client reads EOF, and a best-effort write from the client
+        /// still reaches the fake.
+        fn shutdown_write(&mut self) {
+            use std::net::Shutdown;
+            self.writer
+                .shutdown(Shutdown::Write)
+                .expect("shutdown write");
+        }
+
         /// No further client line follows: a clean EOF passes, a line or a
         /// still-open connection fails. The spawn timeout bounds the wait: a
         /// silent but open connection fails the test instead of hanging it.
@@ -1647,10 +1686,72 @@ mod tests {
             res.text
         );
         assert!(res.text.contains("boom"), "{}", res.text);
+        assert!(
+            res.text.ends_with("The run ended before the turn started."),
+            "{}",
+            res.text
+        );
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
         assert_eq!(res.session_id.as_deref(), Some("s_1"));
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt"]
+        );
+    }
+
+    #[test]
+    fn live_exit_with_no_seq_is_an_error() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            srv.send(
+                &serde_json::json!({
+                    "kind": "fiber_exited",
+                    "session_id": "s_1",
+                    "ts": 1,
+                    "schema_version": 1,
+                    "payload": {"exit_code": 1, "error": {"message": "vanished"}},
+                })
+                .to_string(),
+            );
+            srv.expect_eof();
+        });
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            res.text.contains("session exited before the turn started"),
+            "{}",
+            res.text
+        );
+        assert!(res.text.contains("vanished"), "{}", res.text);
+        assert!(
+            res.text.ends_with("The run ended before the turn started."),
+            "{}",
+            res.text
+        );
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt"]
+        );
+    }
+
+    #[test]
+    fn pre_turn_error_ending_in_status_done_still_errors() {
+        let (res, _) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            srv.send(&exited_ev(1001, 1, "", Some("fell over\nSTATUS: DONE")));
+            srv.expect_eof();
+        });
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            res.text.ends_with("The run ended before the turn started."),
+            "{}",
+            res.text
+        );
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
         );
     }
 
@@ -1878,6 +1979,87 @@ mod tests {
     }
 
     #[test]
+    fn dropped_connection_during_subscribe_wait_closes_now() {
+        let (res, received) = run_case(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (_, _) = recv_id(srv);
+            srv.shutdown_write();
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        assert!(
+            res.text
+                .starts_with("No answer before the connection was lost."),
+            "{}",
+            res.text
+        );
+        assert!(res.text.contains("s_1"), "{}", res.text);
+        assert!(res.text.contains("may still be running"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    #[test]
+    fn dropped_connection_during_prompt_wait_closes_now() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt_no_prompt_ack(srv, serde_json::json!(1000));
+            srv.shutdown_write();
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        assert!(
+            res.text
+                .starts_with("No answer before the connection was lost."),
+            "{}",
+            res.text
+        );
+        assert!(res.text.contains("s_1"), "{}", res.text);
+        assert!(res.text.contains("may still be running"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn dropped_connection_mid_run_closes_now() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            srv.shutdown_write();
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        assert!(
+            res.text
+                .starts_with("No answer before the connection was lost."),
+            "{}",
+            res.text
+        );
+        assert!(res.text.contains("s_1"), "{}", res.text);
+        assert!(res.text.contains("may still be running"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
     fn drop_before_the_start_answer_names_the_client_id() {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
@@ -1994,6 +2176,81 @@ mod tests {
         );
     }
 
+    fn exited_with_questions_ev(
+        seq: u64,
+        exit_code: i64,
+        text: &str,
+        questions: serde_json::Value,
+    ) -> String {
+        let mut payload = serde_json::json!({"exit_code": exit_code, "text": text});
+        payload["questions"] = questions;
+        ev("fiber_exited", seq, payload)
+    }
+
+    #[test]
+    fn exited_carrying_questions_is_an_error_naming_them() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(1002, "completed", None));
+            let (close_id, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert!(close.get("args").is_none());
+            let _ = close_id;
+            srv.send(&exited_with_questions_ev(
+                1003,
+                0,
+                "waiting",
+                serde_json::json!(["Which branch?"]),
+            ));
+            srv.expect_eof();
+        });
+        assert_eq!(res.is_error, Some(true));
+        assert!(res.clean_exit);
+        assert!(res.text.contains("Which branch?"), "{}", res.text);
+        assert!(
+            !res.text.lines().last().unwrap_or("").starts_with("STATUS:"),
+            "{}",
+            res.text
+        );
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn exited_with_empty_or_null_questions_stays_done() {
+        for questions in [serde_json::json!([]), serde_json::json!(null)] {
+            let (res, _) = run_case(|srv| {
+                handshake_to_prompt(srv, &[], serde_json::json!(1000));
+                let prompt_id =
+                    serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                        .expect("prompt")["id"]
+                        .as_str()
+                        .expect("id")
+                        .to_string();
+                srv.send(&turn_started_ev(&prompt_id, 1001));
+                srv.send(&turn_completed_ev(1002, "completed", None));
+                let (_, _) = recv_id(srv);
+                srv.send(&exited_with_questions_ev(1003, 0, "DONE", questions));
+                srv.expect_eof();
+            });
+            assert_eq!(res.text, "DONE");
+            assert_eq!(res.is_error, Some(false));
+        }
+    }
+
     #[test]
     fn empty_questions_do_not_spoil_done() {
         let (res, _) = run_case(|srv| {
@@ -2037,6 +2294,43 @@ mod tests {
             srv.expect_eof();
         });
         assert_eq!(res.text, "DONE");
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn session_left_is_ignored() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let activity = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&activity);
+        let (path, rx) = spawn_fake(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&ev("session_left", 1001, serde_json::json!({})));
+            srv.send(&turn_started_ev(&prompt_id, 1002));
+            srv.send(&ev("session_left", 1003, serde_json::json!({})));
+            srv.send(&turn_completed_ev(1004, "completed", None));
+            srv.send(&exited_ev(1005, 0, "DONE", None));
+            let (_, _) = recv_id(srv);
+            srv.expect_eof();
+        });
+        let res = run_turn(&hub_request(), &path, &|event| {
+            if matches!(event, crate::backends::types::Event::Activity) {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let received = join_fake(&path, rx);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(activity.load(Ordering::SeqCst), 3);
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt", "close"]
@@ -2108,6 +2402,35 @@ mod tests {
         assert_offer_crash(&res, &received, &["start", "subscribe", "prompt", "close"]);
     }
 
+    #[test]
+    fn repository_offer_after_close_gets_close_now() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(1002, "completed", None));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert!(close.get("args").is_none());
+            srv.send(&offer_ev(1003));
+            let (_, close_now) = recv_id(srv);
+            assert_eq!(close_now["command"], "close");
+            assert_eq!(close_now["args"]["now"], true);
+            srv.expect_eof();
+        });
+        assert!(res.text.contains("repository_code_offered"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close", "close"]
+        );
+    }
+
     fn assert_offer_crash(res: &BackendResult, received: &[String], commands: &[&str]) {
         assert!(res.text.contains("repository_code_offered"), "{}", res.text);
         assert_eq!(res.is_error, Some(true));
@@ -2155,6 +2478,11 @@ mod tests {
         assert!(res.text.contains("session_held"), "{}", res.text);
         assert!(res.text.contains("subscribe"), "{}", res.text);
         assert_eq!(res.is_error, Some(true));
+        assert!(
+            res.text.ends_with("The run ended without a verdict."),
+            "{}",
+            res.text
+        );
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "close"]
@@ -2178,6 +2506,59 @@ mod tests {
         });
         assert!(res.text.contains("busy"), "{}", res.text);
         assert!(res.text.contains("prompt"), "{}", res.text);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn turn_completed_before_the_prompt_ack_still_closes_once() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt_no_prompt_ack(srv, serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(1002, "completed", None));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert!(close.get("args").is_none());
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.send(&exited_ev(1003, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn exited_before_the_prompt_ack_is_the_verdict() {
+        let (res, received) = run_case(|srv| {
+            handshake_to_prompt_no_prompt_ack(srv, serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(1002, "completed", None));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.send(&exited_ev(1003, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.clean_exit);
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt", "close"]
@@ -2214,6 +2595,9 @@ mod tests {
             srv.send(&turn_completed_ev(1002, "completed", None));
             let (close_id, _) = recv_id(srv);
             srv.send(&rejected(Some(&close_id), "closing", "going away"));
+            let (_, close_now) = recv_id(srv);
+            assert_eq!(close_now["command"], "close");
+            assert_eq!(close_now["args"]["now"], true);
             srv.expect_eof();
         });
         assert!(res.text.contains("closing"), "{}", res.text);
@@ -2221,7 +2605,7 @@ mod tests {
         assert_eq!(res.is_error, Some(true));
         assert_eq!(
             received_commands(&received),
-            ["start", "subscribe", "prompt", "close"]
+            ["start", "subscribe", "prompt", "close", "close"]
         );
     }
 
@@ -2266,17 +2650,20 @@ mod tests {
     }
 
     #[test]
-    fn stream_closed_never_gets_a_close() {
+    fn stream_closed_is_a_crash_with_cleanup() {
         let (res, received) = run_case(|srv| {
             handshake_to_prompt(srv, &[], serde_json::json!(1000));
             srv.send(&ev("stream_closed", 1001, serde_json::json!({})));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
             srv.expect_eof();
         });
         assert!(res.text.contains("stream_closed"), "{}", res.text);
         assert_eq!(res.is_error, Some(true));
         assert_eq!(
             received_commands(&received),
-            ["start", "subscribe", "prompt"]
+            ["start", "subscribe", "prompt", "close"]
         );
     }
 
@@ -2307,6 +2694,11 @@ mod tests {
         });
         assert!(res.text.contains("protocol error"), "{}", res.text);
         assert!(res.text.contains("this is not json"), "{}", res.text);
+        assert!(
+            res.text.ends_with("The run ended without a verdict."),
+            "{}",
+            res.text
+        );
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt", "close"]
