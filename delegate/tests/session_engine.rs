@@ -7,7 +7,7 @@ use delegate::session::{
 };
 use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -281,13 +281,38 @@ impl Drop for Session {
 }
 
 fn make_stale_socket(socket: &std::path::Path) -> OwnedFd {
-    // Base form: a bound listener. The socket inode stays accept()-able while
-    // any copy of this fd is alive, so a leaked copy lets a connect succeed
-    // even though the test dropped its own handle.
-    let listener = UnixListener::bind(socket).unwrap();
-    let fd = listener.into_raw_fd();
-    // SAFETY: `fd` is an open socket fd detached from `listener` without closing it.
-    unsafe { OwnedFd::from_raw_fd(fd) }
+    use std::os::unix::ffi::OsStrExt;
+    // A bound-but-never-listening stream socket refuses connects with
+    // ECONNREFUSED whether or not a copy of its fd is alive, so a leaked fd
+    // cannot turn this stale inode back into a reachable server.
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(raw >= 0, "socket() failed to create an AF_UNIX fd");
+    // SAFETY: `socket()` returned an open fd owned by this function.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let bytes = socket.as_os_str().as_bytes();
+    // SAFETY: zeroed; `sun_len` exists only on BSD and stays zero.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    assert!(
+        bytes.len() < addr.sun_path.len(),
+        "socket path leaves no room for its NUL terminator"
+    );
+    for (i, &b) in bytes.iter().enumerate() {
+        addr.sun_path[i] = b as libc::c_char;
+    }
+    // `sun_path` follows `sun_family` with no padding on Linux or macOS, and
+    // the trailing +1 carries the NUL terminator the length check reserved.
+    let len = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
+    // SAFETY: `addr` is a valid `sockaddr_un` of `len` bytes for `bind`.
+    let bound = unsafe {
+        libc::bind(
+            fd.as_raw_fd(),
+            &addr as *const _ as *const libc::sockaddr,
+            len,
+        )
+    };
+    assert_eq!(bound, 0, "bind() failed to claim the stale socket path");
+    fd
 }
 
 #[test]
