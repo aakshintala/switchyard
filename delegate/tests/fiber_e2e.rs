@@ -158,6 +158,11 @@ impl Env {
         serde_json::from_slice(&out.stdout).unwrap()
     }
 
+    fn record(&self, id: &str) -> Value {
+        let p = self.dir.join("delegate-jobs").join(format!("{id}.json"));
+        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+    }
+
     fn resume_ok(
         &self,
         id: &str,
@@ -347,6 +352,133 @@ fn fiber_gate_failure_resume_repairs_in_the_session() {
         calls[1]
             .windows(2)
             .any(|w| w == ["--resume", "s_36e63d22c39750e1"]),
+        "{calls:?}"
+    );
+}
+
+/// Rewrite one record file in place; the job is terminal so nobody else
+/// writes it.
+fn rewrite_record(e: &Env, id: &str, f: impl FnOnce(&mut Value)) {
+    let p = e.dir.join("delegate-jobs").join(format!("{id}.json"));
+    let mut rec: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    f(&mut rec);
+    std::fs::write(&p, serde_json::to_string(&rec).unwrap()).unwrap();
+}
+
+/// A Fiber job killed before Fiber's first output line has no session id;
+/// an explicit resume runs it fresh instead of refusing it.
+#[test]
+fn fiber_resume_without_a_session_id_runs_fresh() {
+    let e = Env::new("nors-fresh", "/dev/null", "1");
+    let id = e.run_write("Reply with the word DONE.", "/dev/null", "1");
+    let first = e.wait_terminal(&id, "/dev/null", "1");
+    assert_eq!(first["status"], "ERROR");
+    assert!(
+        first["resume"]["sessionId"].is_null(),
+        "{}",
+        first["resume"]["sessionId"]
+    );
+
+    let b = e.resume_ok(&id, &[], "try again", "resume.jsonl", "0");
+    assert_eq!(b.len(), 36);
+    let done = e.wait_terminal(&b, "resume.jsonl", "0");
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(done["resumedFrom"], id.as_str());
+    assert_eq!(done["resume"]["model"], MODEL);
+    assert_eq!(done["resume"]["cwd"], first["resume"]["cwd"]);
+    assert_eq!(done["resume"]["gate"], first["resume"]["gate"]);
+    assert_eq!(e.record(&id)["supersededBy"], b.as_str());
+
+    let calls = e.invocations();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        !calls.iter().any(|c| c.iter().any(|a| a == "--resume")),
+        "{calls:?}"
+    );
+    let dash = calls[1].iter().position(|a| a == "--").expect("separator");
+    assert!(
+        calls[1][dash + 1..].iter().any(|a| a.contains("try again")),
+        "{calls:?}"
+    );
+}
+
+/// A cancelled record with no session id stays refused on explicit resume.
+#[test]
+fn fiber_resume_of_a_cancelled_record_without_a_session_id_stays_refused() {
+    let e = Env::new("nors-cancel", "/dev/null", "1");
+    let id = e.run_write("Reply with the word DONE.", "/dev/null", "1");
+    let first = e.wait_terminal(&id, "/dev/null", "1");
+    assert_eq!(first["status"], "ERROR");
+    assert!(
+        first["resume"]["sessionId"].is_null(),
+        "{}",
+        first["resume"]["sessionId"]
+    );
+    rewrite_record(&e, &id, |rec| {
+        rec["status"] = Value::String("CANCELLED".into());
+    });
+
+    let out = e.delegate(&["resume", &id], Some("try again"), "resume.jsonl", "0");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no session id"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(e.invocations().len(), 1);
+    assert!(
+        e.record(&id).get("supersededBy").is_none(),
+        "{}",
+        e.record(&id)
+    );
+}
+
+/// An empty session id counts as absent: the explicit resume runs fresh.
+#[test]
+fn fiber_resume_with_an_empty_session_id_runs_fresh() {
+    let e = Env::new("nors-empty", "/dev/null", "1");
+    let id = e.run_write("Reply with the word DONE.", "/dev/null", "1");
+    let first = e.wait_terminal(&id, "/dev/null", "1");
+    assert_eq!(first["status"], "ERROR");
+    rewrite_record(&e, &id, |rec| {
+        rec["resume"]["sessionId"] = Value::String(String::new());
+    });
+
+    let b = e.resume_ok(&id, &[], "try again", "resume.jsonl", "0");
+    assert_eq!(b.len(), 36);
+    let done = e.wait_terminal(&b, "resume.jsonl", "0");
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(done["resumedFrom"], id.as_str());
+
+    let calls = e.invocations();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        !calls.iter().any(|c| c.iter().any(|a| a == "--resume")),
+        "{calls:?}"
+    );
+}
+
+/// A whitespace-only session id counts as absent: the resume runs fresh.
+#[test]
+fn fiber_resume_with_a_whitespace_session_id_runs_fresh() {
+    let e = Env::new("nors-blank", "/dev/null", "1");
+    let id = e.run_write("Reply with the word DONE.", "/dev/null", "1");
+    let first = e.wait_terminal(&id, "/dev/null", "1");
+    assert_eq!(first["status"], "ERROR");
+    rewrite_record(&e, &id, |rec| {
+        rec["resume"]["sessionId"] = Value::String("   ".into());
+    });
+
+    let b = e.resume_ok(&id, &[], "try again", "resume.jsonl", "0");
+    assert_eq!(b.len(), 36);
+    let done = e.wait_terminal(&b, "resume.jsonl", "0");
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(done["resumedFrom"], id.as_str());
+
+    let calls = e.invocations();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        !calls.iter().any(|c| c.iter().any(|a| a == "--resume")),
         "{calls:?}"
     );
 }

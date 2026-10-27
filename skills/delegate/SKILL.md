@@ -67,7 +67,9 @@ feeds a runner, the gate runs the runner. A gate that greps for a file is not a 
 `delegate resume <id>` takes the new prompt on stdin and prints the new job id. `--model` must
 stay on the same backend. It adds `supersededBy` to the old record. A `CANCELLED`, `STALLED` or
 `ERROR` record with a session id can be resumed; it exits 2 for a `RUNNING` job or a record with
-no session id. Cursor, pi and claude were verified (2026-10-04) to resume a session cancelled
+no session id, except a Fiber record with no session id resumes as a fresh run on an explicit
+resume. A cancelled record with no session id is still refused (exit 2), and a cancelled job
+never restarts by itself. Cursor, pi and claude were verified (2026-10-04) to resume a session cancelled
 mid-turn. Answer `NEEDS_CONTEXT` with it. A resumed lane whose `result.changeSet.newCommits` comes back empty committed nothing: start a fresh job.
 
 `--tool-idle-ms` widens how long a running tool may stay silent before the idle watchdog
