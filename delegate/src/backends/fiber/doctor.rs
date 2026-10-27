@@ -118,7 +118,7 @@ fn probe_memberships(
 /// `codex/gpt-6-luna`.
 fn without_level(reference: &str) -> &str {
     match reference.rsplit_once(':') {
-        Some((base, "low" | "medium" | "high" | "xhigh" | "max")) => base,
+        Some((base, "low" | "medium" | "high" | "xhigh" | "max" | "off" | "minimal")) => base,
         _ => reference,
     }
 }
@@ -371,15 +371,26 @@ mod tests {
             "models --json" => ok_result("{\"model\":\"codex/gpt-6-luna\"}\n"),
             other => panic!("unexpected {other}"),
         };
-        let (report, failures) = failures_for(&["fiber/codex/gpt-6-luna:medium"], &run);
-        assert!(failures.is_empty(), "{failures:?}");
-        assert!(report.failures.is_empty());
+        for id in [
+            "fiber/codex/gpt-6-luna:medium",
+            "fiber/codex/gpt-6-luna:off",
+            "fiber/codex/gpt-6-luna:minimal",
+        ] {
+            let (report, failures) = failures_for(&[id], &run);
+            assert!(failures.is_empty(), "{id}: {failures:?}");
+            assert!(report.failures.is_empty());
+        }
     }
 
     #[test]
     fn without_level_strips_only_known_levels() {
         assert_eq!(without_level("codex/gpt-6-luna:medium"), "codex/gpt-6-luna");
         assert_eq!(without_level("codex/gpt-6-luna:xhigh"), "codex/gpt-6-luna");
+        assert_eq!(without_level("codex/gpt-6-luna:off"), "codex/gpt-6-luna");
+        assert_eq!(
+            without_level("codex/gpt-6-luna:minimal"),
+            "codex/gpt-6-luna"
+        );
         assert_eq!(without_level("codex/gpt-6-luna"), "codex/gpt-6-luna");
         assert_eq!(without_level("org/model:beta"), "org/model:beta");
     }
