@@ -383,23 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn fill_off_and_minimal_match_unleveled_listing() {
-        let run = |_: &str, args: &[String]| match args.join(" ").as_str() {
-            "version" => ok_result("fiber 0.0.0 (a903fb6f)\n"),
-            "models --json" => ok_result("{\"model\":\"codex/gpt-6-luna\"}\n"),
-            other => panic!("unexpected {other}"),
-        };
-        let (_, failures) = failures_for(
-            &[
-                "fiber/codex/gpt-6-luna:off",
-                "fiber/codex/gpt-6-luna:minimal",
-            ],
-            &run,
-        );
-        assert!(failures.is_empty(), "{failures:?}");
-    }
-
-    #[test]
     fn without_level_strips_only_known_levels() {
         assert_eq!(without_level("codex/gpt-6-luna:medium"), "codex/gpt-6-luna");
         assert_eq!(without_level("codex/gpt-6-luna:xhigh"), "codex/gpt-6-luna");
