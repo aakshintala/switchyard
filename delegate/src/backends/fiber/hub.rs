@@ -116,7 +116,9 @@ enum Point {
     BeforeSubscribeAck,
     AfterSubscribeAck,
     BeforePromptWrite,
+    AfterPromptAck,
     AfterVerdictFlag,
+    HelloTick,
 }
 
 /// The run's clock: wall time in production, the test's value under test.
@@ -195,6 +197,7 @@ struct Stop {
 
 /// One ack wait: which command is unanswered, and when the wait ends in a
 /// crash (R10). The driver installs it in `Rest` around each `await_ack`.
+#[derive(Clone, Copy)]
 struct AckWait {
     what: &'static str,
     deadline: Instant,
@@ -353,22 +356,6 @@ impl Out {
             return false;
         }
         self.write_lines(&[line.to_string()])
-    }
-
-    fn send_start(&mut self, line: &str) -> bool {
-        self.send_checked(line)
-    }
-
-    fn send_subscribe(&mut self, line: &str) -> bool {
-        self.send_checked(line)
-    }
-
-    fn send_prompt(&mut self, line: &str) -> bool {
-        self.send_checked(line)
-    }
-
-    fn send_close(&mut self, line: &str) -> bool {
-        self.send_checked(line)
     }
 }
 
@@ -631,12 +618,21 @@ enum Next {
 /// Read one hub line into `partial`, keeping bytes across polls. A read
 /// timeout (`WouldBlock` or `TimedOut`) keeps what arrived and reports
 /// `Pending`; an interruption retries; EOF or any other error loses the
-/// connection, as `read_line` always did.
-fn read_line_into<R: BufRead>(reader: &mut R, partial: &mut Vec<u8>) -> Result<Read, ReadErr> {
+/// connection, as `read_line` always did. Bytes that keep arriving without a
+/// newline yield too: once `budget` has passed since the call started, the
+/// bytes so far stay in `partial` and the call reports `Pending`, so a
+/// continuously trickling unfinished line cannot hold the caller past one
+/// poll slice and the phase bounds still run.
+fn read_line_into<R: BufRead>(
+    reader: &mut R,
+    partial: &mut Vec<u8>,
+    budget: Duration,
+) -> Result<Read, ReadErr> {
     enum Found {
         Done(usize),
         More(usize),
     }
+    let start = Instant::now();
     loop {
         let next = match reader.fill_buf() {
             Ok([]) => {
@@ -666,7 +662,12 @@ fn read_line_into<R: BufRead>(reader: &mut R, partial: &mut Vec<u8>) -> Result<R
                 reader.consume(n);
                 return Ok(Read::Line(std::mem::take(partial)));
             }
-            Found::More(n) => reader.consume(n),
+            Found::More(n) => {
+                reader.consume(n);
+                if start.elapsed() >= budget {
+                    return Ok(Read::Pending);
+                }
+            }
         }
     }
 }
@@ -678,7 +679,9 @@ fn read_line_into<R: BufRead>(reader: &mut R, partial: &mut Vec<u8>) -> Result<R
 fn read_line<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, ReadErr> {
     let mut partial = Vec::new();
     loop {
-        match read_line_into(reader, &mut partial) {
+        // The fake side reads whole client lines, which always arrive
+        // together; the budget only bounds one fill, and `Pending` retries.
+        match read_line_into(reader, &mut partial, Duration::from_secs(15)) {
             Ok(Read::Line(line)) => return Ok(line),
             Ok(Read::Pending) => continue,
             Err(e) => return Err(e),
@@ -724,6 +727,11 @@ fn connect(socket_path: &Path, bounds: &Bounds, shared: Arc<Shared>) -> Result<H
         match conn.next_line(bounds.poll_slice) {
             Next::Line(raw) => break raw,
             Next::Tick => {
+                // The hello-tick tap: a test holds the second half of the
+                // hello until it observes this, so the split-hello test
+                // proves a quiet slice was waited out instead of sleeping
+                // for one.
+                pause!(&conn.shared, Point::HelloTick);
                 if now(&conn.shared) >= deadline {
                     return Err(crash_text(format!(
                         "no hub_hello within the ack bound from {show}"
@@ -931,11 +939,9 @@ impl HubConn {
     /// connection. The poll lasts at most `poll_slice`; bytes of an
     /// unfinished line stay in `partial` across `Tick`s.
     fn next_line(&mut self, poll_slice: Duration) -> Next {
-        let _ = self
-            .reader
-            .get_ref()
-            .set_read_timeout(Some(clamp_bound(poll_slice)));
-        match read_line_into(&mut self.reader, &mut self.partial) {
+        let slice = clamp_bound(poll_slice);
+        let _ = self.reader.get_ref().set_read_timeout(Some(slice));
+        match read_line_into(&mut self.reader, &mut self.partial, slice) {
             Ok(Read::Line(line)) => Next::Line(line),
             Ok(Read::Pending) => Next::Tick,
             Err(ReadErr::Lost(_)) => Next::Lost,
@@ -943,7 +949,7 @@ impl HubConn {
     }
 
     /// Test-only direct write: the driver writes only through the
-    /// intent-checked `Out::send_*` calls.
+    /// intent-checked `Out::send_checked` calls.
     #[cfg(test)]
     fn send(&mut self, line: &str) -> bool {
         lock(&self.shared.out).write_lines(&[line.to_string()])
@@ -1199,7 +1205,7 @@ fn drive_turn(
     let mut known = known_ids(&rest, &shared);
     // start: no session_id, no content, supervised.
     let start_id = new_command_id();
-    if !lock(&shared.out).send_start(&start_command(&start_id, &req.cwd, &model)) {
+    if !lock(&shared.out).send_checked(&start_command(&start_id, &req.cwd, &model)) {
         if lock(&shared.out).intent == Intent::None {
             return rest.crash(lost_before_start_text(&start_id));
         }
@@ -1240,7 +1246,7 @@ fn drive_turn(
     // subscribe at full, unless the run is stopping (R2, R14 F1/A).
     pause!(shared, Point::BeforeSubscribeWrite);
     let sub_id = new_command_id();
-    if !lock(&shared.out).send_subscribe(&subscribe_command(&sub_id, &session_id)) {
+    if !lock(&shared.out).send_checked(&subscribe_command(&sub_id, &session_id)) {
         if lock(&shared.out).intent == Intent::None {
             return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
         }
@@ -1268,6 +1274,13 @@ fn drive_turn(
         WaitOutcome::Ack(Ack::Accepted { result }) => {
             rest.last_seq = last_seq_of(&result);
             lock(&shared.out).subscribed = true;
+            // R2: a stop observed while the ack was in flight armed the stop
+            // while unsubscribed, so no `close now` has gone out yet. The ack
+            // resolves the subscription now, so it goes out at once instead
+            // of waiting for the stop wait to run its course.
+            if lock(&shared.out).intent != Intent::None {
+                shared.close_now_once();
+            }
         }
         WaitOutcome::Ack(Ack::Rejected { code, message }) => {
             // No subscription was ever held, so the cleanup re-subscribes.
@@ -1297,8 +1310,13 @@ fn drive_turn(
     pause!(shared, Point::AfterSubscribeAck);
     let prompt_id = new_command_id();
     pause!(shared, Point::BeforePromptWrite);
+    // The prompt ack budget is one total (R17): a `turn_completed` read
+    // before the ack folds and closes once but resets nothing, so the
+    // deadline is fixed before the loop instead of minting a fresh one per
+    // pass.
+    let prompt_wait = ack_deadline(&shared, &req.bounds, "prompt");
     let prompt_acked =
-        if lock(&shared.out).send_prompt(&prompt_command(&prompt_id, &session_id, &req.prompt)) {
+        if lock(&shared.out).send_checked(&prompt_command(&prompt_id, &session_id, &req.prompt)) {
             rest.prompt_id = prompt_id.clone();
             loop {
                 match conn.await_ack(
@@ -1306,7 +1324,7 @@ fn drive_turn(
                     &mut known,
                     &mut rest,
                     &shared,
-                    ack_deadline(&shared, &req.bounds, "prompt"),
+                    prompt_wait,
                     true,
                     |_| None,
                 ) {
@@ -1344,6 +1362,10 @@ fn drive_turn(
             rest.turn_wait_deadline = Some(at + clamp_bound(turn_wait));
         }
     }
+    // The phase-entry tap: a deadline test advances the manual clock only
+    // after observing this, so the turn bounds are already fixed when the
+    // clock jumps instead of being raced by it.
+    pause!(shared, Point::AfterPromptAck);
     // Read to the verdict, which stops the run at once.
     loop {
         pause!(shared, Point::BeforeRead);
@@ -1456,7 +1478,17 @@ impl<'a> Rest<'a> {
         {
             stop.reason = StopReason::Kill;
         }
-        if let Some(stop) = &self.stop
+        // R14: while a `start` or `subscribe` answer is awaited, the stop
+        // deadline waits: the driver keeps reading that answer within
+        // `ack_wait`, and only the ack bound can end the wait. A `kill`
+        // during the wait still cleans up on the answer (R6), and a silent
+        // hub still fails at the ack bound (R10), even with the intent set.
+        let defer_stop = matches!(
+            self.ack.as_ref().map(|ack| ack.what),
+            Some("start" | "subscribe")
+        );
+        if !defer_stop
+            && let Some(stop) = &self.stop
             && now >= stop.deadline
         {
             return Some(Step::Fail(stop_crash(
@@ -1847,7 +1879,7 @@ fn apply_step(conn: &mut HubConn, rest: &mut Rest, step: Step) -> Option<Backend
                     // No plain `close` once a `close now` went out or the
                     // stop is under way (R12); the id is recorded only when
                     // the line went out, so no answer is ever awaited twice.
-                    if lock(&conn.shared.out).send_close(&close_command(&id, &session_id)) {
+                    if lock(&conn.shared.out).send_checked(&close_command(&id, &session_id)) {
                         rest.close_id = Some(id);
                     }
                 }
@@ -2188,6 +2220,9 @@ mod tests {
         join_fake(&quiet, quiet_rx);
     }
 
+    /// A silent hub hits the hello bound: the bound, not a real wait,
+    /// decides. The clock jumps past `ack_wait` only after the hello wait
+    /// proves it is polling by tapping a quiet slice.
     #[test]
     fn silent_hub_hits_the_hello_bound() {
         let (tx, gate) = mpsc::channel::<()>();
@@ -2199,7 +2234,42 @@ mod tests {
             poll_slice: Duration::from_millis(5),
             ..Default::default()
         };
-        let err = connect(&path, &bounds, test_shared()).unwrap_err();
+        let start = Instant::now();
+        let (tick_tx, tick_rx) = mpsc::channel::<()>();
+        let ticked = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&ticked);
+        let now = Arc::new(Mutex::new(start));
+        let clock = Arc::clone(&now);
+        let shared = Arc::new(Shared::with_hooks(
+            Duration::from_secs(5),
+            Hooks {
+                clock: Box::new(move || *clock.lock().expect("clock")),
+                pause: Some(Box::new(move |p| {
+                    if p == Point::HelloTick && !seen.swap(true, Ordering::SeqCst) {
+                        tick_tx.send(()).expect("tick");
+                    }
+                })),
+            },
+        ));
+        let conn_rx = {
+            let path = path.clone();
+            let bounds = bounds.clone();
+            let (conn_tx, conn_rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = conn_tx.send(connect(&path, &bounds, shared));
+            });
+            conn_rx
+        };
+        // The hello wait entered and tapped a quiet slice: its deadline was
+        // fixed at entry, so jumping past it now trips exactly this bound.
+        tick_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("hello tick");
+        *now.lock().expect("clock") += Duration::from_secs(2);
+        let err = conn_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("connect returned")
+            .unwrap_err();
         assert!(err.contains("no hub_hello within the ack bound"), "{err}");
         assert!(err.ends_with("The run ended without a verdict."), "{err}");
         tx.send(()).expect("release");
@@ -2207,17 +2277,22 @@ mod tests {
     }
 
     /// The `Tick` arm of the hello wait keeps waiting: a hello whose first
-    /// half arrives before a quiet slice still connects.
+    /// half arrives before a quiet slice still connects. The fake holds the
+    /// second half until the test observes the client's quiet-slice tick, so
+    /// the tick is proved instead of slept for: no scheduling can deliver
+    /// both halves before the client reads.
     #[test]
     fn hello_after_a_quiet_slice_still_passes() {
         let line = hello(serde_json::json!(1), "9.9.9");
+        let (tick_tx, tick_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
         let (path, rx) = spawn_fake(move |srv| {
             let half = line.len() / 2;
             srv.writer
                 .write_all(&line.as_bytes()[..half])
                 .expect("first half");
             srv.writer.flush().expect("flush");
-            std::thread::sleep(Duration::from_millis(50));
+            go_rx.recv_timeout(Duration::from_secs(15)).expect("go");
             srv.writer
                 .write_all(&line.as_bytes()[half..])
                 .expect("second half");
@@ -2229,7 +2304,37 @@ mod tests {
             ack_wait: Duration::from_secs(5),
             ..Default::default()
         };
-        let conn = connect(&path, &bounds, test_shared()).expect("hello after a quiet slice");
+        let shared = Arc::new(Shared::with_hooks(
+            Duration::from_secs(5),
+            Hooks {
+                clock: Box::new(Instant::now),
+                pause: Some(Box::new(move |p| {
+                    if p == Point::HelloTick {
+                        let _ = tick_tx.send(());
+                    }
+                })),
+            },
+        ));
+        let conn_rx = {
+            let path = path.clone();
+            let bounds = bounds.clone();
+            let (conn_tx, conn_rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = conn_tx.send(connect(&path, &bounds, shared));
+            });
+            conn_rx
+        };
+        // The client tapped a quiet slice with only the first half in hand:
+        // only now may the second half go out, so the tick above is the one
+        // this test proves.
+        tick_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("hello tick");
+        go_tx.send(()).expect("fake");
+        let conn = conn_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("connect returned")
+            .expect("hello after a quiet slice");
         drop(conn);
         join_fake(&path, rx);
     }
@@ -4358,7 +4463,7 @@ mod tests {
     }
 
     /// N2: the intent is set before the socket exists. The run connects and
-    /// reads `hub_hello`, then `send_start` finds the intent and writes
+    /// reads `hub_hello`, then the intent-checked `start` write finds the intent and writes
     /// nothing: the fake sees no `start`, and the run ends at once as the
     /// stop crash with no session id.
     #[test]
@@ -4498,9 +4603,10 @@ mod tests {
         );
     }
 
-    /// F1 second case: the fake never answers `start` and `ack_wait` is a
-    /// few ms. The expiry is a crash at once (R10): no `close`, no stop
-    /// wait, even with the intent set.
+    /// F1 second case (clock): the fake never answers `start` and the clock
+    /// jumps past `ack_wait`. The expiry is a crash at once (R10): no
+    /// `close`, no stop wait, even with the intent set. No real bound is
+    /// waited out.
     #[test]
     fn unanswered_start_hits_the_ack_bound_despite_the_intent() {
         let (fired_tx, fired_rx) = mpsc::channel::<()>();
@@ -4513,11 +4619,8 @@ mod tests {
         let mut req = hub_request();
         req.bounds.ack_wait = Duration::from_millis(20);
         req.bounds.poll_slice = Duration::from_millis(5);
-        let run = spawn_turn_with(
-            req,
-            path.clone(),
-            gate_hooks(Point::BeforeStartAnswer, gate_rx, fired_tx),
-        );
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::BeforeStartAnswer, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
         let control = run.control.clone();
         let res_rx = drive_async(run);
         fired_rx
@@ -4525,6 +4628,8 @@ mod tests {
             .expect("paused");
         control.kill();
         gate_tx.send(()).expect("release");
+        ctl.fresh(2);
+        ctl.jump(Duration::from_secs(2));
         let res = res_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("result");
@@ -4544,8 +4649,100 @@ mod tests {
         assert_eq!(received_commands(&join_fake(&path, rx)), ["start"]);
     }
 
+    /// R14 (clock): a kill during the start wait defers the stop deadline
+    /// until the start answer resolves. The clock jumps past the default 10 s
+    /// `stop_wait` while the answer is in flight but short of the 30 s
+    /// `ack_wait`; the late answer still cleans up (summary subscribe, `close
+    /// now`) and the run ends as the kill crash with the session id. Without
+    /// the deferral the stop would fire mid-wait and the started session
+    /// would never be cleaned up: flip the `defer_stop` guard in `check` and
+    /// this fails with a session-less stop crash and no cleanup lines.
+    #[test]
+    fn kill_during_the_start_wait_survives_past_the_stop_deadline() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (answer_tx, answer_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            answer_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("answer go");
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            // Bounded wait for the cleanup: without the deferral the driver
+            // is already gone and nothing arrives.
+            let mut partial = Vec::new();
+            let mut summary = false;
+            let mut close = false;
+            for _ in 0..150 {
+                match read_line_into(&mut srv.reader, &mut partial, Duration::from_millis(20)) {
+                    Ok(Read::Line(raw)) => {
+                        let line = String::from_utf8(raw).expect("fake hub keeps lines UTF-8");
+                        let value: serde_json::Value =
+                            serde_json::from_str(&line).expect("hub line json");
+                        srv.received.push(line);
+                        if value["command"] == "subscribe" && value["args"]["level"] == "summary" {
+                            summary = true;
+                        }
+                        if value["command"] == "close" && value["args"]["now"] == true {
+                            close = true;
+                        }
+                        if summary && close {
+                            break;
+                        }
+                    }
+                    Ok(Read::Pending) => {}
+                    Err(ReadErr::Lost(detail)) => {
+                        panic!("fake hub lost the connection: {detail}")
+                    }
+                }
+            }
+            assert!(summary, "no summary subscribe after the late start answer");
+            assert!(close, "no close now after the late start answer");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::BeforeStartAnswer, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        ctl.fresh(2);
+        // Past the 10 s stop wait, short of the 30 s ack bound.
+        ctl.jump(Duration::from_secs(15));
+        // Without the deferral the driver already crashed here: fail fast
+        // instead of sending an answer nobody reads.
+        if let Ok(res) = res_rx.recv_timeout(Duration::from_secs(3)) {
+            panic!("stop fired during the start wait: {}", res.text);
+        }
+        answer_tx.send(()).expect("fake");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
     /// A: a kill between the start answer and the subscribe write. The
-    /// `send_subscribe` finds the intent and writes nothing; the driver
+    /// the intent-checked `subscribe` write finds the intent and writes nothing; the driver
     /// takes the F1 path: summary subscribe, `close now`, no full
     /// subscribe, no prompt, kill crash with the session id.
     #[test]
@@ -4646,9 +4843,10 @@ mod tests {
     }
 
     /// R2: a kill during the subscribe wait. After the ack the driver does
-    /// not send the prompt: the run goes to the read loop in the stopping
-    /// state, the `close now` goes out once, and the stop wait ends as the
-    /// kill crash when no `fiber_exited` comes.
+    /// not send the prompt (clock): the run goes to the read loop in the
+    /// stopping state, the `close now` goes out once, and the stop wait ends
+    /// as the kill crash when no `fiber_exited` comes. The stop wait ends by
+    /// jump, never by a real wait.
     #[test]
     fn kill_during_the_subscribe_wait_skips_the_prompt() {
         let (fired_tx, fired_rx) = mpsc::channel::<()>();
@@ -4675,11 +4873,9 @@ mod tests {
         });
         let mut req = hub_request();
         req.bounds = short_stop_bounds();
-        let run = spawn_turn_with(
-            req,
-            path.clone(),
-            gate_hooks(Point::BeforeSubscribeAck, gate_rx, fired_tx),
-        );
+        let (hooks, ctl) =
+            gated_clock(Instant::now(), Point::BeforeSubscribeAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
         let control = run.control.clone();
         let res_rx = drive_async(run);
         fired_rx
@@ -4688,6 +4884,10 @@ mod tests {
         control.kill();
         gate_tx.send(()).expect("release");
         release_tx.send(()).expect("fake");
+        // Two fresh polls prove the stop armed before the jump ends it; the
+        // deferred stop (R14) keeps a pre-answer jump from ending the wait.
+        ctl.fresh(2);
+        ctl.jump(Duration::from_secs(2));
         let res = res_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("result");
@@ -4705,8 +4905,99 @@ mod tests {
         );
     }
 
-    /// After the subscribe ack, kill first: the intent is set before the
-    /// prompt write, so the driver skips the prompt and stops.
+    /// R2 (clock): a stop observed during the subscribe wait arms the stop
+    /// while unsubscribed; accepting the ack sends the `close now` at once,
+    /// alone (the subscription just resolved, so no summary re-subscribe),
+    /// instead of waiting for the stop wait. The clock stays frozen until
+    /// the close is seen, so an un-advanced stop can never fire: the close
+    /// proves immediacy. Flip the ack-branch `close_now_once` away and the
+    /// fake's bounded wait finds no close.
+    #[test]
+    fn subscribe_ack_with_pending_kill_closes_now_at_once() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (answer_tx, answer_rx) = mpsc::channel::<()>();
+        let (close_tx, close_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, sub) = recv_id(srv);
+            assert_eq!(sub["command"], "subscribe");
+            assert_eq!(sub["args"]["level"], "full");
+            answer_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("answer go");
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            // Bounded wait for the immediate close: the frozen stop never
+            // fires, so only the ack-branch send passes.
+            let mut partial = Vec::new();
+            let mut seen = false;
+            for _ in 0..150 {
+                match read_line_into(&mut srv.reader, &mut partial, Duration::from_millis(20)) {
+                    Ok(Read::Line(raw)) => {
+                        let line = String::from_utf8(raw).expect("fake hub keeps lines UTF-8");
+                        let value: serde_json::Value =
+                            serde_json::from_str(&line).expect("hub line json");
+                        srv.received.push(line);
+                        assert_eq!(value["command"], "close");
+                        assert_eq!(value["args"]["now"], true);
+                        assert_eq!(value["session_id"], "s_1");
+                        seen = true;
+                        break;
+                    }
+                    Ok(Read::Pending) => {}
+                    Err(ReadErr::Lost(detail)) => {
+                        panic!("fake hub lost the connection: {detail}")
+                    }
+                }
+            }
+            assert!(seen, "no close now right after the subscribe ack");
+            close_tx.send(()).expect("test");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds = short_stop_bounds();
+        let (hooks, ctl) =
+            gated_clock(Instant::now(), Point::BeforeSubscribeAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        ctl.fresh(2);
+        answer_tx.send(()).expect("fake");
+        // The close arrived before any jump: the stop wait was still frozen.
+        close_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("immediate close");
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// After the subscribe ack, kill first (clock): the intent is set before
+    /// the prompt write, so the driver skips the prompt and stops. The stop
+    /// wait ends by jump, never by a real wait.
     #[test]
     fn kill_after_the_subscribe_ack_skips_the_prompt() {
         let (fired_tx, fired_rx) = mpsc::channel::<()>();
@@ -4727,11 +5018,8 @@ mod tests {
         });
         let mut req = hub_request();
         req.bounds = short_stop_bounds();
-        let run = spawn_turn_with(
-            req,
-            path.clone(),
-            gate_hooks(Point::AfterSubscribeAck, gate_rx, fired_tx),
-        );
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::AfterSubscribeAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
         let control = run.control.clone();
         let res_rx = drive_async(run);
         fired_rx
@@ -4739,6 +5027,9 @@ mod tests {
             .expect("paused");
         control.kill();
         gate_tx.send(()).expect("release");
+        // Two fresh polls prove the stop armed before the jump ends it.
+        ctl.fresh(2);
+        ctl.jump(Duration::from_secs(2));
         let res = res_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("result");
@@ -4794,8 +5085,9 @@ mod tests {
     }
 
     /// A clock the test moves by hand: frozen until the test advances it.
-    /// Only the cases marked "clock" use it; every other bound test runs on
-    /// short real `Bounds`.
+    /// The cases marked "clock" use it, directly or through `ticking_clock`
+    /// and `gated_clock` below; verdict- and channel-driven tests need no
+    /// clock at all.
     fn manual_clock(start: Instant) -> (Hooks, Arc<Mutex<Instant>>) {
         let now = Arc::new(Mutex::new(start));
         let tick = Arc::clone(&now);
@@ -4805,6 +5097,114 @@ mod tests {
                 pause: None,
             },
             now,
+        )
+    }
+
+    /// The test side of a manual clock: `jump` moves time, and `fresh`
+    /// counts only polls newer than the test's last signal, so a wait-entry
+    /// deadline is always fixed before the clock jumps instead of being
+    /// raced by it. Taps pile up while the test does other work, so every
+    /// tap carries its sequence number and stale ones never count.
+    struct ClockCtl {
+        clock: Arc<Mutex<Instant>>,
+        ticks: mpsc::Receiver<u64>,
+        seq: Arc<AtomicU64>,
+    }
+
+    impl ClockCtl {
+        /// Advance the test clock: the only way a deadline-test bound
+        /// expires. Jumps here stay far below the default 30 s/120 s/10 s
+        /// bounds, so each jump trips only the short bound under test.
+        fn jump(&self, by: Duration) {
+            *self.clock.lock().expect("clock") += by;
+        }
+
+        /// Consume taps until `n` polls newer than this call prove the driver
+        /// is waiting.
+        fn fresh(&self, n: usize) {
+            let since = self.seq.load(Ordering::SeqCst);
+            let mut fresh = 0;
+            while fresh < n {
+                let tap = self
+                    .ticks
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("driver kept polling");
+                if tap > since {
+                    fresh += 1;
+                }
+            }
+        }
+    }
+
+    /// Manual clock plus pause support for the deadline tests: every
+    /// `BeforeRead` poll taps a numbered channel (a send that never blocks),
+    /// so the test advances the clock only while the driver waits instead of
+    /// sleeping for a real bound.
+    fn ticking_clock(start: Instant) -> (Hooks, ClockCtl) {
+        let clock = Arc::new(Mutex::new(start));
+        let seq = Arc::new(AtomicU64::new(0));
+        let (tick_tx, tick_rx) = mpsc::channel::<u64>();
+        let tick = Arc::clone(&clock);
+        let count = Arc::clone(&seq);
+        let hooks = Hooks {
+            clock: Box::new(move || *tick.lock().expect("clock")),
+            pause: Some(Box::new(move |p| {
+                if p == Point::BeforeRead {
+                    tick_tx
+                        .send(count.fetch_add(1, Ordering::SeqCst))
+                        .expect("tap");
+                }
+            })),
+        };
+        (
+            hooks,
+            ClockCtl {
+                clock,
+                ticks: tick_rx,
+                seq,
+            },
+        )
+    }
+
+    /// `ticking_clock` with a one-shot blocking gate at `point`, as in
+    /// `gate_hooks` but on the manual clock.
+    fn gated_clock(
+        start: Instant,
+        point: Point,
+        gate: mpsc::Receiver<()>,
+        fired: mpsc::Sender<()>,
+    ) -> (Hooks, ClockCtl) {
+        let clock = Arc::new(Mutex::new(start));
+        let seq = Arc::new(AtomicU64::new(0));
+        let (tick_tx, tick_rx) = mpsc::channel::<u64>();
+        let done = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(Mutex::new(gate));
+        let tick = Arc::clone(&clock);
+        let count = Arc::clone(&seq);
+        let hooks = Hooks {
+            clock: Box::new(move || *tick.lock().expect("clock")),
+            pause: Some(Box::new(move |p| {
+                if p == Point::BeforeRead {
+                    tick_tx
+                        .send(count.fetch_add(1, Ordering::SeqCst))
+                        .expect("tap");
+                }
+                if p == point && !done.swap(true, Ordering::SeqCst) {
+                    fired.send(()).expect("fired");
+                    gate.lock()
+                        .expect("gate")
+                        .recv_timeout(Duration::from_secs(15))
+                        .expect("release");
+                }
+            })),
+        };
+        (
+            hooks,
+            ClockCtl {
+                clock,
+                ticks: tick_rx,
+                seq,
+            },
         )
     }
 
@@ -4869,10 +5269,11 @@ mod tests {
         );
     }
 
-    /// F3: a kill with the driver paused just before the prompt write. The
-    /// release finds `send_prompt` refusing on the intent; the run skips the
-    /// prompt, the `close now` goes out once in the stopping read loop, and
-    /// the stop wait ends with the kill crash.
+    /// F3 (clock): a kill with the driver paused just before the prompt
+    /// write. The release finds the intent-checked `prompt` write refusing on
+    /// the intent; the run skips the prompt, the `close now` goes out once in
+    /// the stopping read loop, and the stop wait ends with the kill crash.
+    /// The stop wait ends by jump, never by a real wait.
     #[test]
     fn kill_before_the_prompt_write_sends_no_prompt() {
         let (fired_tx, fired_rx) = mpsc::channel::<()>();
@@ -4893,11 +5294,8 @@ mod tests {
         });
         let mut req = hub_request();
         req.bounds = short_stop_bounds();
-        let run = spawn_turn_with(
-            req,
-            path.clone(),
-            gate_hooks(Point::BeforePromptWrite, gate_rx, fired_tx),
-        );
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::BeforePromptWrite, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
         let control = run.control.clone();
         let res_rx = drive_async(run);
         fired_rx
@@ -4905,6 +5303,9 @@ mod tests {
             .expect("paused");
         control.kill();
         gate_tx.send(()).expect("release");
+        // Two fresh polls prove the stop armed before the jump ends it.
+        ctl.fresh(2);
+        ctl.jump(Duration::from_secs(2));
         let res = res_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("result");
@@ -4922,9 +5323,10 @@ mod tests {
         );
     }
 
-    /// F2: after the `close now`, the fake sends `turn_completed` and then
-    /// nothing. The completed turn sends no plain `close` (R12: the stop is
-    /// under way), and the stop wait ends with the stop text.
+    /// F2 (clock): after the `close now`, the fake sends `turn_completed`
+    /// and then nothing. The completed turn sends no plain `close` (R12: the
+    /// stop is under way), and the stop wait ends with the stop text. The
+    /// stop wait ends by jump, never by a real wait.
     /// A `STATUS: DONE` hub line on the way still derives Error.
     #[test]
     fn completed_turn_in_the_stop_wait_sends_no_plain_close() {
@@ -4963,7 +5365,8 @@ mod tests {
         });
         let mut req = hub_request();
         req.bounds = short_stop_bounds();
-        let run = spawn_turn(req, path.clone());
+        let (hooks, ctl) = ticking_clock(Instant::now());
+        let run = spawn_turn_with(req, path.clone(), hooks);
         let control = run.control.clone();
         let res_rx = drive_async(run);
         ready_rx
@@ -4971,6 +5374,9 @@ mod tests {
             .expect("ready");
         control.kill();
         kill_done_tx.send(()).expect("fake");
+        // Two fresh polls prove the stop armed before the jump ends it.
+        ctl.fresh(2);
+        ctl.jump(Duration::from_secs(2));
         let res = res_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("result");
@@ -5040,11 +5446,12 @@ mod tests {
         );
     }
 
-    /// F2 with the stop set by an expired `turn_wait`: after `turn_started`
-    /// with no completion, the turn bound arms the stop (close now goes
-    /// out). A `turn_completed` in the stop wait sends no plain `close`
-    /// (the stop is under way), and the stop wait ends with the turn-bound
-    /// stop text.
+    /// F2 with the stop set by an expired `turn_wait` (clock): after
+    /// `turn_started` with no completion, the turn bound arms the stop
+    /// (close now goes out). A `turn_completed` in the stop wait sends no
+    /// plain `close` (the stop is under way), and the stop wait ends with
+    /// the turn-bound stop text. Both waits end by clock jumps, never by
+    /// real ones.
     #[test]
     fn expired_turn_wait_arms_the_stop() {
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -5073,7 +5480,24 @@ mod tests {
         req.bounds.turn_wait = Some(Duration::from_millis(50));
         req.bounds.stop_wait = Duration::from_millis(50);
         req.bounds.poll_slice = Duration::from_millis(5);
-        let res = run_turn(&req, &path, &|_| {});
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::AfterPromptAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("phase entry");
+        gate_tx.send(()).expect("release");
+        // Phase bounds were fixed before the gate fired: the jump trips the
+        // turn bound, and three fresh polls prove the stop armed before the
+        // second jump ends it.
+        ctl.jump(Duration::from_secs(2));
+        ctl.fresh(3);
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
         assert!(
             res.text.contains(
                 "no verdict within the turn bound; no fiber_exited within the stop bound"
@@ -5094,10 +5518,11 @@ mod tests {
         );
     }
 
-    /// R7: `cancel` then `kill` gives one `close now` and the kill text; the
-    /// kill upgrades the pending cancel. A second flow does two kills: still
-    /// one `close now`. Every pass through the read loop is gated, so the
-    /// upgrade path (not just the outcome) is forced.
+    /// R7 (clock): `cancel` then `kill` gives one `close now` and the kill
+    /// text; the kill upgrades the pending cancel. A second flow does two
+    /// kills: still one `close now`. Every pass through the read loop is
+    /// gated, so the upgrade path (not just the outcome) is forced. The stop
+    /// wait ends by jump, never by a real wait.
     #[test]
     fn stop_intent_upgrades_cancel_to_kill_with_one_close() {
         for second in [false, true] {
@@ -5129,18 +5554,31 @@ mod tests {
             });
             let mut req = hub_request();
             req.bounds = short_stop_bounds();
+            let clock = Arc::new(Mutex::new(Instant::now()));
+            let (tick_tx, tick_rx) = mpsc::channel::<u64>();
+            let tap_seq = Arc::new(AtomicU64::new(0));
+            let ctl = ClockCtl {
+                clock: Arc::clone(&clock),
+                ticks: tick_rx,
+                seq: Arc::clone(&tap_seq),
+            };
             let pause = {
                 let fired_tx = fired_tx;
                 let gate_rx = Arc::new(Mutex::new(gate_rx));
                 let armed = Arc::clone(&gated_armed);
                 move |p: Point| {
-                    if p == Point::BeforeRead && armed.load(Ordering::SeqCst) {
-                        fired_tx.send(()).expect("fired");
-                        gate_rx
-                            .lock()
-                            .expect("gate")
-                            .recv_timeout(Duration::from_secs(15))
-                            .expect("release");
+                    if p == Point::BeforeRead {
+                        tick_tx
+                            .send(tap_seq.fetch_add(1, Ordering::SeqCst))
+                            .expect("tap");
+                        if armed.load(Ordering::SeqCst) {
+                            fired_tx.send(()).expect("fired");
+                            gate_rx
+                                .lock()
+                                .expect("gate")
+                                .recv_timeout(Duration::from_secs(15))
+                                .expect("release");
+                        }
                     }
                 }
             };
@@ -5148,7 +5586,7 @@ mod tests {
                 req,
                 path.clone(),
                 Hooks {
-                    clock: Box::new(Instant::now),
+                    clock: Box::new(move || *clock.lock().expect("clock")),
                     pause: Some(Box::new(pause)),
                 },
             );
@@ -5179,6 +5617,10 @@ mod tests {
             control.kill();
             gated_armed.store(false, Ordering::SeqCst);
             gate_tx.send(()).expect("release");
+            // The gate is off now: two fresh polls prove the upgraded stop
+            // armed before the jump ends it.
+            ctl.fresh(2);
+            ctl.jump(Duration::from_secs(2));
             let res = res_rx
                 .recv_timeout(Duration::from_secs(30))
                 .expect("result");
@@ -5742,11 +6184,14 @@ mod tests {
 
     /// R18: a clean live `fiber_exited` after an accepted `close now` is
     /// the S1 exit text (not the kill text): the verdict read before any
-    /// bound wins.
+    /// bound wins. No command follows the verdict: the fake proves it with
+    /// EOF after the test drops the retained control handle, not with a
+    /// read timeout (which `read_line` maps to the same `Lost` as EOF).
     #[test]
     fn exited_after_accepted_close_now_keeps_the_exit_text() {
         let (ready_tx, ready_rx) = mpsc::channel::<()>();
         let (kill_done_tx, kill_done_rx) = mpsc::channel::<()>();
+        let (eof_go_tx, eof_go_rx) = mpsc::channel::<()>();
         let (path, rx) = spawn_fake(move |srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
             let (start_id, _) = recv_id(srv);
@@ -5766,17 +6211,13 @@ mod tests {
             let (a_id, _) = recv_id(srv);
             srv.send(&accepted(&a_id, serde_json::json!({})));
             srv.send(&exited_ev(10, 0, "clean", None));
-            srv.reader
-                .get_ref()
-                .set_read_timeout(Some(Duration::from_millis(200)))
-                .expect("fake read timeout");
-            match read_line(&mut srv.reader) {
-                Err(ReadErr::Lost(_)) => {}
-                Ok(line) => panic!(
-                    "fake saw a line after the verdict: {}",
-                    String::from_utf8_lossy(&line)
-                ),
-            }
+            // The driver is done once the test holds its result and drops
+            // the control handle: only then must the socket end, with no
+            // further command on it.
+            eof_go_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("eof go");
+            srv.expect_eof();
         });
         let mut req = hub_request();
         req.bounds.stop_wait = Duration::from_secs(30);
@@ -5793,6 +6234,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(30))
             .expect("result");
         drop(control);
+        eof_go_tx.send(()).expect("fake");
         assert!(
             res.text.contains("without a completed turn"),
             "{}",
@@ -5810,11 +6252,12 @@ mod tests {
         );
     }
 
-    /// R1 with a resumed session (case C): a replayed `fiber_exited` at or
-    /// below `last_seq` in the fold does not set the verdict flag, so a
-    /// `kill` before the prompt still writes one `close now`. With no live
+    /// R1 with a resumed session (case C, clock): a replayed `fiber_exited`
+    /// at or below `last_seq` in the fold does not set the verdict flag, so
+    /// a `kill` before the prompt still writes one `close now`. With no live
     /// exit ever, the stop wait ends with the kill crash and nothing goes
-    /// out after the `close now`.
+    /// out after the `close now`. The stop wait ends by jump, never by a
+    /// real wait.
     #[test]
     fn kill_on_a_resumed_session_closes_now_then_stops() {
         let (fired_tx, fired_rx) = mpsc::channel::<()>();
@@ -5837,11 +6280,8 @@ mod tests {
         });
         let mut req = hub_request();
         req.bounds = short_stop_bounds();
-        let run = spawn_turn_with(
-            req,
-            path.clone(),
-            gate_hooks(Point::AfterSubscribeAck, gate_rx, fired_tx),
-        );
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::AfterSubscribeAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
         let control = run.control.clone();
         let res_rx = drive_async(run);
         fired_rx
@@ -5849,6 +6289,9 @@ mod tests {
             .expect("subscribed");
         control.kill();
         gate_tx.send(()).expect("release");
+        // Two fresh polls prove the stop armed before the jump ends it.
+        ctl.fresh(2);
+        ctl.jump(Duration::from_secs(2));
         let res = res_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("result");
@@ -6088,13 +6531,12 @@ mod tests {
         );
     }
 
-    /// R3 bound race: the `turn_wait` bound fires while the turn is still
-    /// open, arming the stop (one `close now` goes out). The verdict the
-    /// fake then sends is still the outcome and no bound text appears: a
-    /// verdict read after the bound fired wins, exactly as with a jumped
-    /// clock. The `turn_completed` sends no plain `close`: the expired
-    /// bound armed the stop first. Short real bounds carry this; no clock
-    /// seam is needed.
+    /// R3 bound race (clock): the `turn_wait` bound fires while the turn is
+    /// still open, arming the stop (one `close now` goes out). The verdict
+    /// the fake then sends is still the outcome and no bound text appears: a
+    /// verdict read after the bound fired wins. The `turn_completed` sends
+    /// no plain `close`: the expired bound armed the stop first. A clock
+    /// jump fires the bound; no real wait is needed.
     #[test]
     fn readable_exit_beats_an_expired_turn_wait() {
         let (path, rx) = spawn_fake(|srv| {
@@ -6120,7 +6562,19 @@ mod tests {
         req.bounds.turn_wait = Some(Duration::from_millis(50));
         req.bounds.stop_wait = Duration::from_secs(5);
         req.bounds.poll_slice = Duration::from_millis(5);
-        let res = run_turn(&req, &path, &|_| {});
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::AfterPromptAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("phase entry");
+        gate_tx.send(()).expect("release");
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
         assert_eq!(res.text, "DONE");
         assert!(!res.text.contains("bound"), "{}", res.text);
         assert_eq!(res.is_error, Some(false));
@@ -6130,11 +6584,11 @@ mod tests {
         );
     }
 
-    /// R3 bound race, the stop wait itself: with no exit the stop runs, one
-    /// `close now` goes out, and the stop-wait crash follows at the real
-    /// deadline. When the exit arrives inside the stop wait instead, it is
-    /// the verdict. The fake gates the exit on the `close now`, so no
-    /// clock seam is needed.
+    /// R3 bound race, the stop wait itself (clock): with no exit the stop
+    /// runs, one `close now` goes out, and the stop-wait crash follows the
+    /// second clock jump. When the exit arrives inside the stop wait
+    /// instead, it is the verdict. The fake gates the exit on the `close
+    /// now`; both bounds end by jumps, never by real waits.
     #[test]
     fn stop_wait_runs_its_course_then_exit_or_bound() {
         for exit_in_wait in [false, true] {
@@ -6163,7 +6617,26 @@ mod tests {
             req.bounds.turn_wait = Some(Duration::from_millis(50));
             req.bounds.stop_wait = Duration::from_millis(50);
             req.bounds.poll_slice = Duration::from_millis(5);
-            let res = run_turn(&req, &path, &|_| {});
+            let (fired_tx, fired_rx) = mpsc::channel::<()>();
+            let (gate_tx, gate_rx) = mpsc::channel::<()>();
+            let (hooks, ctl) =
+                gated_clock(Instant::now(), Point::AfterPromptAck, gate_rx, fired_tx);
+            let run = spawn_turn_with(req, path.clone(), hooks);
+            let res_rx = drive_async(run);
+            fired_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("phase entry");
+            gate_tx.send(()).expect("release");
+            ctl.jump(Duration::from_secs(2));
+            if !exit_in_wait {
+                // Three fresh polls prove the stop armed before the second
+                // jump ends it.
+                ctl.fresh(3);
+                ctl.jump(Duration::from_secs(2));
+            }
+            let res = res_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("result");
             if exit_in_wait {
                 assert_eq!(res.text, "DONE");
                 assert_eq!(res.is_error, Some(false));
@@ -6189,8 +6662,10 @@ mod tests {
         }
     }
 
-    /// T4: a silent hub through the `subscribe` ack times out with the R9
-    /// text naming the command and the bound. The R6 cleanup runs at once:
+    /// T4 (clock): a silent hub through the `subscribe` ack times out with
+    /// the R9 text naming the command and the bound. The clock jumps past
+    /// `ack_wait` only after fresh polls prove the gated wait fixed its
+    /// deadline; no real bound is waited out. The R6 cleanup runs at once:
     /// a `summary` subscribe, then `close now`, on the known session.
     #[test]
     fn unanswered_subscribe_hits_the_ack_bound() {
@@ -6216,7 +6691,21 @@ mod tests {
         let mut req = hub_request();
         req.bounds.ack_wait = Duration::from_millis(50);
         req.bounds.poll_slice = Duration::from_millis(5);
-        let res = run_turn(&req, &path, &|_| {});
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (hooks, ctl) =
+            gated_clock(Instant::now(), Point::BeforeSubscribeAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("subscribe wait");
+        gate_tx.send(()).expect("release");
+        ctl.fresh(2);
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
         assert!(
             res.text
                 .contains("no answer to `subscribe` within the ack bound"),
@@ -6235,9 +6724,11 @@ mod tests {
         );
     }
 
-    /// T4: a silent hub through the `prompt` ack times out with the R9 text.
-    /// The connection holds the subscription, so the R6 cleanup is one
-    /// `close now` and no second subscribe.
+    /// T4 (clock): a silent hub through the `prompt` ack times out with the
+    /// R9 text. The clock jumps past `ack_wait` only after fresh polls prove
+    /// the gated wait fixed its deadline; no real bound is waited out. The
+    /// connection holds the subscription, so the R6 cleanup is one `close
+    /// now` and no second subscribe.
     #[test]
     fn unanswered_prompt_hits_the_ack_bound() {
         let (path, rx) = spawn_fake(|srv| {
@@ -6260,7 +6751,20 @@ mod tests {
         let mut req = hub_request();
         req.bounds.ack_wait = Duration::from_millis(50);
         req.bounds.poll_slice = Duration::from_millis(5);
-        let res = run_turn(&req, &path, &|_| {});
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::BeforePromptWrite, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("prompt wait");
+        gate_tx.send(()).expect("release");
+        ctl.fresh(2);
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
         assert!(
             res.text
                 .contains("no answer to `prompt` within the ack bound"),
@@ -6279,9 +6783,123 @@ mod tests {
         );
     }
 
-    /// T4: `turn_start_wait` runs from the `prompt` ack. With no
+    /// R17 (clock): lines read during the prompt ack wait reset nothing. The
+    /// fake sends `turn_started` and one `turn_completed` while the ack is
+    /// still live: the completion folds and sends the one plain `close` (no
+    /// stop is under way yet), but the ack budget stays put. A first jump
+    /// stops 10 ms short of the bound so the wait survives the completion; a
+    /// second jump past it ends the wait with the ack crash and the `close
+    /// now` cleanup. Mint the deadline per pass again and the completion
+    /// pushes it past the second jump, so the fake never sees the `close
+    /// now`.
+    #[test]
+    fn prompt_ack_completions_do_not_restart_the_budget() {
+        let (prompt_tx, prompt_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (plain_tx, plain_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            prompt_tx.send(()).expect("prompt seen");
+            // While the ack is still live: the completion folds and closes
+            // once, but must not move the budget.
+            go_rx.recv_timeout(Duration::from_secs(15)).expect("go");
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            srv.send(&turn_completed_ev(10, "completed", None));
+            let (_, plain) = recv_id(srv);
+            assert_eq!(plain["command"], "close");
+            assert!(
+                plain.get("args").is_none(),
+                "completion before the ack sends the plain close: {plain}"
+            );
+            plain_tx.send(()).expect("plain seen");
+            // Bounded wait for the ack-expiry cleanup.
+            let mut partial = Vec::new();
+            let mut now_close = false;
+            for _ in 0..150 {
+                match read_line_into(&mut srv.reader, &mut partial, Duration::from_millis(20)) {
+                    Ok(Read::Line(raw)) => {
+                        let line = String::from_utf8(raw).expect("fake hub keeps lines UTF-8");
+                        let value: serde_json::Value =
+                            serde_json::from_str(&line).expect("hub line json");
+                        srv.received.push(line);
+                        assert_eq!(value["command"], "close");
+                        assert_eq!(value["args"]["now"], true);
+                        assert_eq!(value["session_id"], "s_1");
+                        now_close = true;
+                        break;
+                    }
+                    Ok(Read::Pending) => {}
+                    Err(ReadErr::Lost(detail)) => {
+                        panic!("fake hub lost the connection: {detail}")
+                    }
+                }
+            }
+            assert!(now_close, "no close now after the ack bound");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.ack_wait = Duration::from_millis(50);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let (hooks, ctl) = ticking_clock(Instant::now());
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        prompt_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("prompt seen");
+        ctl.fresh(2);
+        // Short of the 50 ms bound, so the wait survives the completion.
+        ctl.jump(Duration::from_millis(40));
+        go_tx.send(()).expect("fake");
+        // The completion was processed (the plain close proves it) on the
+        // original budget: the second jump ends the wait unless the pass
+        // minted a fresh deadline.
+        plain_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("plain seen");
+        ctl.jump(Duration::from_millis(30));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        assert!(
+            res.text
+                .contains("no answer to `prompt` within the ack bound"),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        let received = join_fake(&path, rx);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close", "close"]
+        );
+        let plain: serde_json::Value = serde_json::from_str(&received[3]).expect("plain close");
+        assert!(
+            plain.get("args").is_none(),
+            "fourth line is the plain close: {}",
+            received[3]
+        );
+        let now_close: serde_json::Value = serde_json::from_str(&received[4]).expect("close now");
+        assert_eq!(now_close["args"]["now"], serde_json::json!(true));
+    }
+
+    /// T4 (clock): `turn_start_wait` runs from the `prompt` ack. With no
     /// `turn_started`, the bound arms the stop (one `close now` goes out)
-    /// and the stop wait ends with the turn-start bound text.
+    /// and the stop wait ends with the turn-start bound text. Both waits end
+    /// by clock jumps, never by real ones.
     #[test]
     fn expired_turn_start_wait_runs_the_stop() {
         let (path, rx) = spawn_fake(|srv| {
@@ -6305,7 +6923,24 @@ mod tests {
         req.bounds.turn_wait = None;
         req.bounds.stop_wait = Duration::from_millis(50);
         req.bounds.poll_slice = Duration::from_millis(5);
-        let res = run_turn(&req, &path, &|_| {});
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::AfterPromptAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("phase entry");
+        gate_tx.send(()).expect("release");
+        // Phase bounds were fixed before the gate fired: the jump trips the
+        // turn-start bound, and three fresh polls prove the stop armed before
+        // the second jump ends it.
+        ctl.jump(Duration::from_secs(2));
+        ctl.fresh(3);
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
         assert!(
             res.text.contains(
                 "no turn_started within the turn-start bound; no fiber_exited within the stop bound"
@@ -6325,11 +6960,11 @@ mod tests {
         );
     }
 
-    /// T4 (R17): phase bounds are totals, not idle timers. The fake keeps
-    /// events flowing until it holds the `close now`, capped well past the
-    /// bound: under totals the bound fires mid-flow; under idle semantics
-    /// the deadline would keep sliding and the cap fails loudly instead of
-    /// hanging the test.
+    /// T4 (R17, clock): phase bounds are totals, not idle timers. The fake
+    /// keeps events flowing until it holds the `close now`, capped well past
+    /// the bound: under totals the jumped bound fires mid-flow; under idle
+    /// semantics the deadline would keep sliding and the cap fails loudly
+    /// instead of hanging the test.
     #[test]
     fn turn_start_wait_expires_while_events_flow() {
         let (path, rx) = spawn_fake(|srv| {
@@ -6358,7 +6993,7 @@ mod tests {
                     100 + seq,
                     serde_json::json!({"text": "still going"}),
                 ));
-                match read_line_into(&mut srv.reader, &mut partial) {
+                match read_line_into(&mut srv.reader, &mut partial, Duration::from_millis(20)) {
                     Ok(Read::Line(raw)) => {
                         let line = String::from_utf8(raw).expect("fake hub keeps lines UTF-8");
                         let value: serde_json::Value =
@@ -6388,7 +7023,141 @@ mod tests {
         req.bounds.turn_wait = None;
         req.bounds.stop_wait = Duration::from_millis(50);
         req.bounds.poll_slice = Duration::from_millis(5);
-        let res = run_turn(&req, &path, &|_| {});
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::AfterPromptAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("phase entry");
+        gate_tx.send(()).expect("release");
+        // The bound fires mid-flow by jump, not by waiting: the close the
+        // fake holds for proves the totals reading, and three fresh polls
+        // prove the stop armed before the second jump ends it.
+        ctl.jump(Duration::from_secs(2));
+        ctl.fresh(3);
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        assert!(
+            res.text.contains(
+                "no turn_started within the turn-start bound; no fiber_exited within the stop bound"
+            ),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// Bounds are phase totals (clock): an unfinished line trickling in one
+    /// byte at a time still yields every poll slice, so the turn bound fires
+    /// mid-trickle. The fake streams bytes with sub-slice gaps and watches
+    /// for the `close now` while streaming: with the yield it arrives during
+    /// the burst, without it only after the burst ends. Yield the total poll
+    /// budget in `read_line_into` away and the close never arrives mid-burst.
+    #[test]
+    fn trickling_partial_line_still_hits_the_turn_bound() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (close_tx, close_rx) = mpsc::channel::<()>();
+        let (flow_tx, flow_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            // No `turn_started`: the turn-start bound is the one under test.
+            // Trickle one byte at a time with ~2 ms gaps: far below the 5 ms
+            // poll slice, so only the total-budget yield lets the client
+            // poll. Every tenth chunk peeks for the close with a 1 ms
+            // socket read (the budget alone cannot bound the first blocking
+            // fill). The flow signal goes out once the stream is steady, so
+            // the test only releases the driver into a live trickle: the
+            // close cannot precede the burst.
+            srv.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(1)))
+                .expect("fake read timeout");
+            let mut partial = Vec::new();
+            let mut seen = false;
+            for i in 0..2000u64 {
+                srv.writer.write_all(b"x").expect("trickle byte");
+                srv.writer.flush().expect("flush");
+                if i == 20 {
+                    flow_tx.send(()).expect("test");
+                }
+                let spin = Instant::now();
+                while spin.elapsed() < Duration::from_millis(2) {}
+                if i % 10 == 9 {
+                    match read_line_into(&mut srv.reader, &mut partial, Duration::from_millis(1)) {
+                        Ok(Read::Line(raw)) => {
+                            let line = String::from_utf8(raw).expect("fake hub keeps lines UTF-8");
+                            let value: serde_json::Value =
+                                serde_json::from_str(&line).expect("hub line json");
+                            srv.received.push(line);
+                            assert_eq!(value["command"], "close");
+                            assert_eq!(value["args"]["now"], true);
+                            seen = true;
+                            break;
+                        }
+                        Ok(Read::Pending) => {}
+                        Err(ReadErr::Lost(detail)) => {
+                            panic!("fake hub lost the connection: {detail}")
+                        }
+                    }
+                }
+            }
+            assert!(seen, "close now never arrived mid-trickle");
+            close_tx.send(()).expect("test");
+            srv.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .expect("fake read timeout");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.turn_start_wait = Duration::from_millis(50);
+        req.bounds.turn_wait = None;
+        req.bounds.stop_wait = Duration::from_millis(50);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::AfterPromptAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("phase entry");
+        // The trickle is steady and buffered before the driver is released
+        // into it: its first read-loop poll can only find data.
+        flow_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("trickle flowing");
+        gate_tx.send(()).expect("release");
+        ctl.jump(Duration::from_secs(2));
+        // The close arrived mid-trickle, before any second jump.
+        close_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("close mid-trickle");
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
         assert!(
             res.text.contains(
                 "no turn_started within the turn-start bound; no fiber_exited within the stop bound"
@@ -6436,7 +7205,21 @@ mod tests {
         req.bounds.turn_wait = None;
         req.bounds.stop_wait = Duration::from_millis(50);
         req.bounds.poll_slice = Duration::from_millis(5);
-        let res = run_turn(&req, &path, &|_| {});
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::AfterPromptAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("phase entry");
+        gate_tx.send(()).expect("release");
+        // The jump arms the stop; the exit the fake sends on the `close now`
+        // is still the verdict, with the stop wait frozen short of expiry.
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
         assert!(
             res.text.contains("session exited before the turn started"),
             "{}",
@@ -6455,8 +7238,10 @@ mod tests {
         );
     }
 
-    /// T4: a silent hub through the `start` ack times out with the R9 text.
-    /// No session is open, so the cleanup sends no `close` at all.
+    /// T4 (clock): a silent hub through the `start` ack times out with the
+    /// R9 text. The clock jumps past `ack_wait` only after fresh polls prove
+    /// the gated wait fixed its deadline; no real bound is waited out. No
+    /// session is open, so the cleanup sends no `close` at all.
     #[test]
     fn unanswered_start_sends_no_close() {
         let (path, rx) = spawn_fake(|srv| {
@@ -6468,7 +7253,20 @@ mod tests {
         let mut req = hub_request();
         req.bounds.ack_wait = Duration::from_millis(50);
         req.bounds.poll_slice = Duration::from_millis(5);
-        let res = run_turn(&req, &path, &|_| {});
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (hooks, ctl) = gated_clock(Instant::now(), Point::BeforeStartAnswer, gate_rx, fired_tx);
+        let run = spawn_turn_with(req, path.clone(), hooks);
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("start wait");
+        gate_tx.send(()).expect("release");
+        ctl.fresh(2);
+        ctl.jump(Duration::from_secs(2));
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
         assert!(
             res.text
                 .contains("no answer to `start` within the ack bound"),
