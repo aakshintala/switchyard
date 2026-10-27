@@ -2,7 +2,13 @@
 # Tests for bin/cargo-slot, against a fake real cargo in a mktemp -d fixture
 # (never ~/.cache/agents). Handshakes use FIFOs: a blocking open or read
 # waits for the event it needs, and the watchdog bounds the whole file. Reads
-# from a waiter's stderr take a 60 s deadline of their own.
+# from a waiter's stderr take a 60 s deadline of their own. Absence checks
+# drain a reaped waiter's stderr to EOF; no test sleeps or polls.
+# Not shown: that the waiting line prints once across several rescans. A shim
+# that printed on every rescan passes, because the suite releases a holder
+# right after the first line. Showing it needs a timed wait, which the suite
+# does not use. The suite proves only that a waiter takes a slot after a
+# release, which needs at least one rescan after the waiting line.
 set -uo pipefail
 
 # The suite re-execs itself into its own process group, so the watchdog can
@@ -128,16 +134,17 @@ cargo_as() {
 }
 
 # spawn R [VAR=VAL ...] -- ARGS: the shim in the background, stderr on
-# R/err, which fd 9 reads. Sets SPAWNED to its pid; after exec that is the
-# fake's pid. The pid is recorded for cleanup.
+# R/err. Fd 9 reads R/err once the child has opened it for writing, and holds
+# no write end, so reads reach EOF when the child exits. Sets SPAWNED to its
+# pid; after exec that is the fake's pid. The pid is recorded for cleanup.
 spawn() {
   local r="$1"
   shift
   shim_cmd "$r" "$@"
-  exec 9<>"$r/err"
   "${CMD[@]}" 2>"$r/err" &
   SPAWNED=$!
   PIDS+=("$SPAWNED")
+  exec 9<"$r/err"
 }
 
 # spawn_quiet R [VAR=VAL ...] -- ARGS: the shim in the background with stderr
@@ -165,16 +172,6 @@ expect_err_line() {
   local line
   IFS= read -r -t 60 -u 9 line || fail "no stderr line within 60 s, want [$1]"
   [ "$line" = "$1" ] || fail "stderr line [$line], want [$1]"
-}
-
-# await_file PATH: poll until PATH is non-empty, 300 tries at 0.1 s, then fail.
-await_file() {
-  local i
-  for i in $(seq 1 300); do
-    [ -s "$1" ] && return 0
-    sleep 0.1
-  done
-  fail "$1 never filled"
 }
 
 # hold_slot R SLOTS N: a holder that takes one of the N slots in SLOTS. It
@@ -386,9 +383,10 @@ passes_while_held() {
   stage "$w"
   hold_slot "$h" "$h/slots" 1
   hold=$HOLD_PID
-  spawn "$w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$h/slots" -- "$@"
+  spawn "$w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$h/slots" FAKE_HOLD=1 -- "$@"
   wpid=$SPAWNED
-  await_file "$w/held"
+  IFS= read -r _ <"$w/up"
+  release "$w"
   wait "$wpid"
   rc=$?
   [ "$rc" = 0 ] || fail "$name: exit $rc, want 0 from the fake"
@@ -437,21 +435,20 @@ hold_slot "$S/a" "$S/slots" 2
 A=$HOLD_PID
 hold_slot "$S/b" "$S/slots" 2
 B=$HOLD_PID
-spawn "$S/c" CARGO_SLOTS=2 CARGO_SLOT_DIR="$S/slots" -- build "a b" ""
+spawn "$S/c" CARGO_SLOTS=2 CARGO_SLOT_DIR="$S/slots" FAKE_HOLD=1 -- build "a b" ""
 C=$SPAWNED
 expect_err_line "cargo-slot: waiting"
 [ ! -e "$S/c/started" ] || fail "third build started with both slots held"
-sleep 0.5 # pacing only: lets several 0.1 s polls pass before the release
 release "$S/a"
 wait "$A" 2>/dev/null
-await_file "$S/c/held"
+IFS= read -r _ <"$S/c/up"
+release "$S/c"
 wait "$C"
 rc=$?
 [ "$rc" = 0 ] || fail "third build: exit $rc, want 0 once a slot freed"
 expect_build_args "$S/c"
-if IFS= read -r -t 1 -u 9 extra; then
-  fail "a second stderr line from the waiter: [$extra]"
-fi
+rest="$(cat <&9)"
+[ -z "$rest" ] || fail "third build: stderr after the waiting line: [$rest]"
 [ -e "$S/slots/slot-1.lock" ] && [ -e "$S/slots/slot-2.lock" ] ||
   fail "slot files are missing after the runs"
 [ ! -e "$S/slots/slot-3.lock" ] || fail "a slot-3.lock was created for N=2"
@@ -466,9 +463,10 @@ stage "$K/w"
 hold_slot "$K/h" "$K/slots" 1
 kill -9 "$HOLD_PID"
 wait "$HOLD_PID" 2>/dev/null
-spawn "$K/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$K/slots" -- build "a b" ""
+spawn "$K/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$K/slots" FAKE_HOLD=1 -- build "a b" ""
 KW=$SPAWNED
-await_file "$K/w/held"
+IFS= read -r _ <"$K/w/up"
+release "$K/w"
 wait "$KW"
 rc=$?
 [ "$rc" = 0 ] || fail "build after a killed holder: exit $rc, want 0"
@@ -554,23 +552,20 @@ stage "$I/h"
 stage "$I/w"
 hold_slot "$I/h" "$I/slots" 1
 IH=$HOLD_PID
-exec 9<>"$I/w/err"
 env -i PATH="$BASEPATH" HOME="$T/home" FAKE_DIR="$I/w" CARGO_SLOTS=1 \
   CARGO_SLOT_DIR="$I/slots" "$PY" -c \
   'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])' \
   "$T/shims/cargo" build 2>"$I/w/err" &
 IP=$!
 PIDS+=("$IP")
+exec 9<"$I/w/err"
 expect_err_line "cargo-slot: waiting"
 kill -INT "$IP"
 wait "$IP"
 rc=$?
 [ "$rc" = 130 ] || fail "SIGINT while waiting: exit $rc, want 130"
-while IFS= read -r -t 1 -u 9 line; do
-  case "$line" in
-    *Traceback*) fail "SIGINT while waiting printed a traceback" ;;
-  esac
-done
+rest="$(cat <&9)"
+[ -z "$rest" ] || fail "SIGINT while waiting: stderr after the waiting line: [$rest]"
 release "$I/h"
 wait "$IH" 2>/dev/null
 
