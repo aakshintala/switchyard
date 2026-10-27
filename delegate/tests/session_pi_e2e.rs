@@ -808,6 +808,60 @@ fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
 }
 
 #[test]
+fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
+    let h = Harness::new();
+    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "STEER_RACE", None, &[]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    let steered = h.invoke(&["send", &id, "STEER-3", "--json"]);
+    assert!(steered.status.success());
+    let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+    assert_eq!(reply["disposition"], "steered", "{reply}");
+
+    let state = h.state(&id);
+    assert_eq!(state["status"], "running");
+    assert_eq!(state["activeTurnId"], "pi-turn-2");
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    watch_ok(&h, &id);
+
+    let logs = h.logs(&id);
+    let done1 = logs
+        .iter()
+        .position(|line| line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-1")
+        .unwrap();
+    let unconsumed: Vec<usize> = logs
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line["kind"] == "steer.unconsumed")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(unconsumed.len(), 1);
+    let started2 = logs
+        .iter()
+        .position(|line| line["kind"] == "turn.started" && line["turnId"] == "pi-turn-2")
+        .unwrap();
+    let user = logs
+        .iter()
+        .position(|line| line["kind"] == "user" && line["text"] == "STEER-3")
+        .unwrap();
+    let done2 = logs
+        .iter()
+        .position(|line| line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-2")
+        .unwrap();
+    assert!(done1 < unconsumed[0] && unconsumed[0] < started2 && started2 < user && user < done2);
+
+    assert_eq!(h.state(&id)["turnCount"], 2);
+    h.notes_poll(&id, "idle", 2);
+}
+
+#[test]
 fn pi_that_exits_before_reading_stdin_fails_start_with_the_eof_text() {
     let h = Harness::new();
     let started = h.start_pi("openai/gpt-6-luna", b"B", true, "EXIT_NOW", None, &[]);
