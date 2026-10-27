@@ -477,6 +477,15 @@ fn supervisor_starts_the_host_with_the_brief_and_expected_permissions() {
     assert!(current.supervisor_pid.is_some());
     let host_pid = current.host_pid.unwrap();
     assert!(host_pid > 1);
+    // prepublish spawn record holds the published host pid, mode 0600.
+    assert_eq!(
+        std::fs::read_to_string(session.paths.host_spawn_file(&session.id))
+            .unwrap()
+            .parse::<i32>()
+            .unwrap(),
+        host_pid
+    );
+    assert_eq!(mode(&session.paths.host_spawn_file(&session.id)), 0o600);
     assert_eq!(current.cwd, session.root.to_string_lossy());
 
     let requests = session.requests();
@@ -1621,7 +1630,13 @@ impl PrepublishRoot {
         now_ms
     }
 
-    fn spawn(&self, args: &[&str], scenario: &str, extra_env: &[(&str, &str)]) -> PrepublishRun {
+    fn spawn(
+        &self,
+        args: &[&str],
+        scenario: &str,
+        extra_env: &[(&str, &str)],
+        hook: bool,
+    ) -> PrepublishRun {
         let mut command = std::process::Command::new(PREPUBLISH_BIN);
         command
             .args(args)
@@ -1631,11 +1646,13 @@ impl PrepublishRoot {
             .env("FAKE_DIR", &self.fake_dir)
             .env("FAKE_SCENARIO", scenario)
             .env("DELEGATE_SESSION_GRACE_MS", "300")
-            .env(PREPUBLISH_HOOK_ENV, &self.ready)
             .env_remove("TERM")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
+        if hook {
+            command.env(PREPUBLISH_HOOK_ENV, &self.ready);
+        }
         for (key, value) in extra_env {
             command.env(key, value);
         }
@@ -1679,6 +1696,7 @@ impl PrepublishRoot {
             ],
             scenario,
             &[("DELEGATE_SESSION_START_WAIT_MS", wait_ms)],
+            true,
         )
     }
 
@@ -1786,7 +1804,7 @@ fn prepublish_kill_is_reaped_by_settle_dead_supervisor() {
     let root = PrepublishRoot::new();
     let id = root.fresh_id();
     let started_at = root.create_session(&id);
-    let mut run = root.spawn(&["session", "__supervise", &id], "IGNORE_EOF", &[]);
+    let mut run = root.spawn(&["session", "__supervise", &id], "IGNORE_EOF", &[], true);
     let (_, host_pid) = root.wait_ready();
     assert_eq!(
         unsafe { libc::kill(host_pid, 0) },
@@ -1847,4 +1865,24 @@ fn prepublish_supervisor_exit_before_first_turn_reaps_the_host() {
         "unexpected start stderr: {stderr}"
     );
     PrepublishRoot::assert_gone(host_pid);
+}
+
+#[test]
+fn prepublish_spawn_record_failure_stops_the_start_before_any_host_runs() {
+    let root = PrepublishRoot::new();
+    let id = root.fresh_id();
+    let _ = root.create_session(&id);
+    // A directory where the spawn record must go makes the pre-exec open fail.
+    std::fs::create_dir_all(root.paths().host_spawn_file(&id)).unwrap();
+    let run = root.spawn(&["session", "__supervise", &id], "IGNORE_EOF", &[], false);
+    let output = run.wait_bounded(
+        Duration::from_secs(10),
+        "supervise exit after record failure",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let state = state::read_state(&root.paths(), &id).unwrap();
+    assert_eq!(state.status, Status::Dead);
+    assert_eq!(state.dead.as_ref().unwrap().reason, DeadReason::StartFailed);
+    assert!(!root.fake_dir.join("host.pid").exists());
+    assert!(!root.paths().socket_path(&id).unwrap().exists());
 }

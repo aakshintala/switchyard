@@ -136,6 +136,10 @@ impl Paths {
         self.dir(id).join("brief.txt")
     }
 
+    pub fn host_spawn_file(&self, id: &str) -> PathBuf {
+        self.dir(id).join("host-spawn.pid")
+    }
+
     pub fn socket_path(&self, id: &str) -> Result<PathBuf, StateError> {
         if !valid_id(id) {
             return Err(StateError::Unreadable("invalid session id".into()));
