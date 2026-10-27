@@ -695,6 +695,119 @@ fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
 }
 
 #[test]
+fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
+    let h = Harness::new();
+    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "HOLD_TOOL", None, &[]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    let steered = h.invoke(&["send", &id, "STEER-2", "--json"]);
+    assert!(steered.status.success());
+    let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+    assert_eq!(reply["disposition"], "steered", "{reply}");
+
+    let stopped = h.invoke(&["stop", &id, "--interrupt", "--json"]);
+    assert!(stopped.status.success());
+    let reply: Value = serde_json::from_slice(&stopped.stdout).unwrap();
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["interrupted"], true);
+
+    let requests = h.requests();
+    let steer_at = requests
+        .iter()
+        .position(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") == Some(&Value::from("steer"))
+        })
+        .unwrap();
+    assert_eq!(requests[steer_at + 1]["type"], "clear_queue");
+    assert_eq!(requests[steer_at + 2]["type"], "abort");
+
+    let cleared = std::fs::read_to_string(h.fake_dir.join("cleared.txt")).unwrap();
+    let cleared: Vec<Value> = cleared
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert!(
+        cleared
+            .iter()
+            .any(|list| list == &Value::from(vec![Value::from("STEER-2")])),
+        "{cleared:?}"
+    );
+
+    let logs = h.logs(&id);
+    let cancelled: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "turn.completed" && line["terminal"] == "cancelled")
+        .collect();
+    assert_eq!(cancelled.len(), 1);
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "steer.unconsumed")
+            .count(),
+        1
+    );
+    assert!(
+        logs.iter()
+            .filter(|line| line["kind"] == "user")
+            .all(|line| line["text"] != "STEER-2")
+    );
+    let delivered = std::fs::read_to_string(h.fake_dir.join("delivered.txt")).unwrap_or_default();
+    assert!(
+        !delivered.lines().any(|line| line == "STEER-2"),
+        "{delivered}"
+    );
+
+    let state = h.state(&id);
+    assert_eq!(state["status"], "idle");
+    assert!(
+        unsafe { libc::kill(state["hostPid"].as_i64().unwrap() as i32, 0) } == 0,
+        "host died across the interrupt"
+    );
+    assert!(
+        !h.fake_dir.join("tool.paused").exists(),
+        "the abort left a stale pause marker"
+    );
+
+    send_started(&h, &id, "next");
+    h.wait_file("tool.paused", "the second held tool call");
+    let steered = h.invoke(&["send", &id, "STEER-4", "--json"]);
+    assert!(steered.status.success());
+    let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+    assert_eq!(reply["disposition"], "steered", "{reply}");
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    watch_ok(&h, &id);
+
+    let logs = h.logs(&id);
+    let user_at = logs
+        .iter()
+        .position(|line| line["kind"] == "user" && line["text"] == "STEER-4")
+        .unwrap();
+    assert!(logs[user_at]["commandId"].is_string());
+    assert!(
+        logs.iter()
+            .filter(|line| line["kind"] == "user")
+            .all(|line| line["text"] != "STEER-2")
+    );
+    let delivered = std::fs::read_to_string(h.fake_dir.join("delivered.txt")).unwrap();
+    assert!(
+        delivered.lines().any(|line| line == "STEER-4"),
+        "{delivered}"
+    );
+    assert!(
+        !delivered.lines().any(|line| line == "STEER-2"),
+        "{delivered}"
+    );
+}
+
+#[test]
 fn pi_that_exits_before_reading_stdin_fails_start_with_the_eof_text() {
     let h = Harness::new();
     let started = h.start_pi("openai/gpt-6-luna", b"B", true, "EXIT_NOW", None, &[]);

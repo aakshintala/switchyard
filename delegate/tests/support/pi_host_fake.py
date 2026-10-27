@@ -347,6 +347,8 @@ def handle(command):
             return
         cleared = list(QUEUE)
         QUEUE.clear()
+        with open(path("cleared.txt"), "a", encoding="utf-8") as output:
+            output.write(json.dumps(cleared, separators=(",", ":")) + "\n")
         send({"type": "queue_update", "steering": [], "followUp": []})
         respond(command.get("id"), "clear_queue", True, {"steering": cleared, "followUp": []})
         return
