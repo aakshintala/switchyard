@@ -800,17 +800,89 @@ mod tests {
         }
     }
 
-    fn wait_threads(handles: Vec<std::thread::JoinHandle<()>>) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+    const WORKER_DEADLINE: Duration = Duration::from_secs(5);
+    const TICKS_PER_WORKER: usize = 40;
+    const OLD_TICKS_PER_WORKER: usize = 500;
+    const SLOW_UPDATE_LATENCY: Duration = Duration::from_millis(10);
+    // The 5 s guard is a hang guard, not a tunable: fail the build if it moves.
+    const _: () = assert!(WORKER_DEADLINE.as_millis() == 5_000);
+    // At the controlled per-update latency the old 500-per-worker workload
+    // cannot finish inside the guard, so the slow-update proof stays valid.
+    const _: () = assert!(
+        2 * OLD_TICKS_PER_WORKER as u128 * SLOW_UPDATE_LATENCY.as_millis()
+            > WORKER_DEADLINE.as_millis()
+    );
+    // The reduced workload at that latency stays under a quarter of the guard,
+    // so raising the count back toward 500 fails the build.
+    const _: () = assert!(
+        2 * TICKS_PER_WORKER as u128 * SLOW_UPDATE_LATENCY.as_millis() * 4
+            < WORKER_DEADLINE.as_millis()
+    );
+
+    fn threads_finish_within(handles: &[std::thread::JoinHandle<()>], budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
         while handles.iter().any(|handle| !handle.is_finished()) {
-            assert!(
-                Instant::now() < deadline,
-                "worker thread exceeded its deadline"
-            );
+            if Instant::now() >= deadline {
+                return false;
+            }
             std::thread::yield_now();
         }
+        true
+    }
+
+    fn wait_threads(handles: Vec<std::thread::JoinHandle<()>>) {
+        assert!(
+            threads_finish_within(&handles, WORKER_DEADLINE),
+            "worker thread exceeded its deadline"
+        );
         for handle in handles {
             handle.join().unwrap();
+        }
+    }
+
+    fn run_tick_workers(
+        store: &Arc<Store>,
+        per_worker: usize,
+        hook: Arc<dyn Fn() + Send + Sync>,
+    ) -> Vec<std::thread::JoinHandle<()>> {
+        let barrier = pair_barrier();
+        let mut handles = Vec::new();
+        for worker in 0..2 {
+            let store = Arc::clone(store);
+            let barrier = Arc::clone(&barrier);
+            let hook = Arc::clone(&hook);
+            handles.push(std::thread::spawn(move || {
+                meet_pair(&barrier);
+                for index in 0..per_worker {
+                    store
+                        .update(|state| {
+                            hook();
+                            state.updated_at += 1;
+                            vec![json!({"kind":"tick","worker":worker,"index":index})]
+                        })
+                        .unwrap();
+                }
+            }));
+        }
+        handles
+    }
+
+    fn assert_tick_log(scratch: &Scratch, store: &Store, total: usize) {
+        let disk = read_state(&scratch.paths, &scratch.id).unwrap();
+        assert_eq!(disk, store.snapshot());
+        let lines: Vec<Value> = std::fs::read_to_string(scratch.paths.events_file(&scratch.id))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        // Contract: delegate/README.md:62-63.
+        assert_eq!(lines.len(), total);
+        for (index, line) in lines.iter().enumerate() {
+            // Contract: delegate/README.md:62-63.
+            assert_eq!(line["seq"], json!(index + 1));
+            if index > 0 {
+                assert!(lines[index - 1]["seq"].as_u64().unwrap() < line["seq"].as_u64().unwrap());
+            }
         }
     }
 
@@ -1445,40 +1517,52 @@ mod tests {
     fn store_updates_remain_atomic_with_ordered_gap_free_sequences() {
         let scratch = Scratch::new();
         let store = Arc::new(scratch.store());
-        let barrier = pair_barrier();
-        let mut handles = Vec::new();
-        for worker in 0..2 {
-            let store = Arc::clone(&store);
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
-                meet_pair(&barrier);
-                for index in 0..500 {
-                    store
-                        .update(|state| {
-                            state.updated_at += 1;
-                            vec![json!({"kind":"tick","worker":worker,"index":index})]
-                        })
-                        .unwrap();
-                }
-            }));
-        }
+        let noop: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let handles = run_tick_workers(&store, TICKS_PER_WORKER, noop);
         wait_threads(handles);
-        let disk = read_state(&scratch.paths, &scratch.id).unwrap();
-        assert_eq!(disk, store.snapshot());
-        let lines: Vec<Value> = std::fs::read_to_string(scratch.paths.events_file(&scratch.id))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        // Contract: delegate/README.md:50-51.
-        assert_eq!(lines.len(), 1000);
-        for (index, line) in lines.iter().enumerate() {
-            // Contract: delegate/README.md:51.
-            assert_eq!(line["seq"], json!(index + 1));
-            if index > 0 {
-                assert!(lines[index - 1]["seq"].as_u64().unwrap() < line["seq"].as_u64().unwrap());
+        assert_tick_log(&scratch, &store, 2 * TICKS_PER_WORKER);
+    }
+
+    #[test]
+    fn worker_deadline_trips_on_held_update_while_sequence_property_holds() {
+        let scratch = Scratch::new();
+        let store = Arc::new(scratch.store());
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder: Arc<Mutex<Option<mpsc::Receiver<()>>>> = Arc::new(Mutex::new(Some(release_rx)));
+        // The hook runs inside the update closure under the store lock, so the
+        // first update to reach it holds both workers until the release send.
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new({
+            let holder = Arc::clone(&holder);
+            move || {
+                if let Some(rx) = holder
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    rx.recv_timeout(Duration::from_secs(4))
+                        .expect("release deadline");
+                }
             }
-        }
+        });
+        let handles = run_tick_workers(&store, TICKS_PER_WORKER, hook);
+        let tripped = !threads_finish_within(&handles, Duration::from_millis(50));
+        let _ = release_tx.send(());
+        wait_threads(handles);
+        assert!(tripped);
+        assert_tick_log(&scratch, &store, 2 * TICKS_PER_WORKER);
+    }
+
+    #[test]
+    fn reduced_tick_workload_stays_inside_the_guard_at_controlled_update_latency() {
+        let scratch = Scratch::new();
+        let store = Arc::new(scratch.store());
+        // The sleep runs inside the update closure under the store lock, so
+        // the 80 sleeps serialise: at least 800 ms, far inside the 5 s guard.
+        let hook: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(|| std::thread::sleep(SLOW_UPDATE_LATENCY));
+        let handles = run_tick_workers(&store, TICKS_PER_WORKER, hook);
+        wait_threads(handles);
+        assert_tick_log(&scratch, &store, 2 * TICKS_PER_WORKER);
     }
 
     #[test]
