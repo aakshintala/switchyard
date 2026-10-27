@@ -65,6 +65,29 @@ vmodel() {
   t get model.verifier 2>/dev/null || { echo "tkt-plan: missing key: model.verifier" >&2; exit 2; }
 }
 
+ticket_fail() {
+  echo "tkt-plan: cannot read ticket text for $repo#$issue" >&2
+  if [ -s "$tmp" ]; then head -n 1 "$tmp" >&2; fi
+  exit 2
+}
+
+# ticket_extra OUT CALLER: writes the ticket (body, then comments) to OUT, then
+# CALLER's bytes when set. One leading @ on CALLER is stripped. A blank body or
+# a failed read exits 2 before OUT is touched; OUT is built aside and moved in.
+ticket_extra() {
+  local out="$1" caller="${2#@}" body comments tf
+  if [ -n "$caller" ] && [ ! -r "$caller" ]; then echo "tkt-plan: cannot read extra file: $caller" >&2; exit 2; fi
+  if ! body="$(gh issue view "$issue" --repo "$repo" 2>"$tmp")" || [ -z "${body//[[:space:]]/}" ]; then ticket_fail; fi
+  if ! comments="$(gh issue view "$issue" --repo "$repo" --comments 2>"$tmp")"; then ticket_fail; fi
+  tf="$(mktemp "${TMPDIR:-/tmp}/tkt-ticket.XXXXXX")"
+  {
+    printf '## Ticket %s#%s\n%s\n' "$repo" "$issue" "$body"
+    [ -z "$comments" ] || printf '## Ticket comments\n%s\n' "$comments"
+    [ -z "$caller" ] || { printf '## Extra\n'; cat "$caller"; }
+  } >"$tf" || { rm -f "$tf"; exit 2; }
+  mv "$tf" "$out"
+}
+
 runjob() {
   slot="$1"; tmpl="$2"; rep="$3"; shift 3
   job_out="$("$tktjob" "$state" --slot "$slot" --template "$tmpl" --out-file "$rep" "$@" 2>&1)" || {
@@ -154,15 +177,19 @@ do_verify() {
   fi
   model="$(vmodel "$model")" || exit 2
   args=(PLAN="$plan" BASE="$base" --model "$model")
-  if [ -n "$extra" ]; then [ -r "$extra" ] || { echo "tkt-plan: cannot read extra file: $extra" >&2; exit 2; }; args+=(EXTRA="@$extra")
-  elif ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
   if [ "$drift" -eq 1 ]; then
     slot="verifier-r$((round + 1))-drift"
     rep="$run/$namebase-verifier-out-r$((round + 1))-drift.md"
+    xfile="$run/$namebase-verifier-extra-r$((round + 1))-drift.md"
   else
     slot="verifier-r$((round + 1))"
     rep="$run/$namebase-verifier-out-r$((round + 1)).md"
+    xfile="$run/$namebase-verifier-extra-r$((round + 1)).md"
   fi
+  # --extra wins over state extra; the ticket text goes before either.
+  [ -n "$extra" ] || extra="$(t get extra 2>/dev/null || true)"
+  ticket_extra "$xfile" "$extra"
+  args+=(EXTRA="@$xfile")
   # A failed round leaves its job id behind while the round counter stays
   # put; without this reset the next verify would only re-watch the old job.
   t set "job.$slot" ""

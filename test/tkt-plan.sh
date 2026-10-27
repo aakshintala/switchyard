@@ -44,16 +44,16 @@ printf 'ok' >"$T/mode"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
-slot=""; out=""
+slot=""; out=""; rest=""
 while [ \$# -gt 0 ]; do
   case "\$1" in
     --slot) slot="\$2"; shift 2 ;;
     --template) tmpl="\$2"; shift 2 ;;
     --out-file) out="\$2"; shift 2 ;;
-    *) shift ;;
+    *) rest="\$rest \$1"; shift ;;
   esac
 done
-printf 'job|slot=%s|tmpl=%s|out=%s|rest=%s\n' "\$slot" "\$tmpl" "\$out" "\$*" >>"$T/stub.log"
+printf 'job|slot=%s|tmpl=%s|out=%s|rest=%s\n' "\$slot" "\$tmpl" "\$out" "\$rest" >>"$T/stub.log"
 case "\$(cat "$T/mode")" in
   ok)
     printf 'PLAN OK\nheld: every invariant survived its breaking input\n' >"\$out"
