@@ -1400,9 +1400,23 @@ mod tests {
         let spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
         let spawned = spawn(&spec);
         let (events, result) = drive_with_timeout(spawned, std::time::Duration::from_secs(10));
-        assert!(!events.is_empty());
-        assert!(events.iter().all(|e| e == "progress"), "{events:?}");
-        assert_eq!(result.text, "done");
+        assert!(
+            !events.is_empty(),
+            "no progress events; events={events:?}; text={:?}; stderr={:?}",
+            result.text,
+            result.stderr
+        );
+        assert!(
+            events.iter().all(|e| e == "progress"),
+            "non-progress events; events={events:?}; text={:?}; stderr={:?}",
+            result.text,
+            result.stderr
+        );
+        assert_eq!(
+            result.text, "done",
+            "unexpected text; events={events:?}; text={:?}; stderr={:?}",
+            result.text, result.stderr
+        );
     }
 
     #[test]
