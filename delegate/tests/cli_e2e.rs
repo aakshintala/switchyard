@@ -67,6 +67,12 @@ case "$*" in
 esac
 "#;
 
+/// Wall budget both wall tests trigger on. Start-up latency (spawning the
+/// agent or gate) stays well below it, so the kill lands in the stage the
+/// test observes instead of during start-up; the idle windows (300 s model,
+/// 1800 s tool) stay far above it, so only the wall budget can end these jobs.
+const WALL_TRIGGER_MS: u64 = 15_000;
+
 struct Env {
     dir: PathBuf,
 }
@@ -1582,21 +1588,48 @@ fn run_without_wall_ms_records_null_and_resume_keeps_null() {
 #[test]
 fn wall_ms_cancels_a_running_agent_and_its_group() {
     let e = Env::new("wall-cancel");
+    let wall_ms = WALL_TRIGGER_MS.to_string();
     let id = e.ok(
-        &["run", "--model", "composer-2.5", "--wall-ms", "5000"],
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--wall-ms",
+            wall_ms.as_str(),
+        ],
         "CANCELME",
         &[],
     );
     e.until_agent_spawned(&id);
-    let done = e.wait_terminal(&id);
+    // The agent ran first: the wall kill has not fired yet.
+    assert_eq!(e.record(&id)["status"], "RUNNING");
+    // Hang detector, not an assertion: the wall expiry below ends the job.
+    let out = e.delegate(&["watch", &id, "--timeout", "30"], None);
+    assert_eq!(out.status.code(), Some(0));
+    let done: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(done["status"], "CANCELLED");
     assert_eq!(done["result"]["status"], "CANCELLED");
     let text = done["result"]["text"].as_str().unwrap();
     assert!(
-        text.starts_with("Cancelled: wall budget of 5000 ms exceeded after"),
+        text.starts_with(&format!(
+            "Cancelled: wall budget of {WALL_TRIGGER_MS} ms exceeded after"
+        )),
         "{text}"
     );
-    assert_eq!(done["resume"]["wallMs"], serde_json::json!(5000));
+    // The watchdog fires only at or past the budget, so the reported seconds
+    // figure cannot be below it.
+    let after_s: u64 = text
+        .split("after ")
+        .nth(1)
+        .and_then(|rest| rest.split('s').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        after_s >= WALL_TRIGGER_MS / 1000,
+        "wall kill fired before the budget: {text}"
+    );
+    assert_eq!(done["resume"]["wallMs"], serde_json::json!(WALL_TRIGGER_MS));
     assert_eq!(done["resume"]["sessionId"], "s-init");
     for name in ["agent.pid", "grandchild.pid"] {
         let pid: i64 = std::fs::read_to_string(e.dir.join(name))
