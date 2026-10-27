@@ -30,6 +30,12 @@ impl EnvGuard {
         Self { key, prev }
     }
 
+    pub(crate) fn set_os(key: &'static str, value: std::ffi::OsString) -> Self {
+        let prev = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prev }
+    }
+
     pub(crate) fn remove(key: &'static str) -> Self {
         let prev = std::env::var(key).ok();
         unsafe { std::env::remove_var(key) };

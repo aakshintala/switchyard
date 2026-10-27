@@ -10,6 +10,7 @@
 //! A stream with no `fiber_exited` is a crash.
 
 pub(crate) mod doctor;
+pub mod hub;
 
 use super::types::{BackendResult, Event, ProgressSnapshotRaw, Spawned};
 use crate::types::{JobSpec, Usage};
