@@ -625,6 +625,76 @@ fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
 }
 
 #[test]
+fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
+    let h = Harness::new();
+    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "HOLD_TOOL", None, &[]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    let steered = h.invoke(&["send", &id, "STEER-1", "--json"]);
+    assert!(steered.status.success());
+    let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+    assert_eq!(reply["disposition"], "steered", "{reply}");
+
+    let requests = h.requests();
+    let steer_at = requests
+        .iter()
+        .position(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") == Some(&Value::from("steer"))
+        })
+        .unwrap();
+    assert_eq!(requests[steer_at]["message"], "STEER-1");
+    let queue = std::fs::read_to_string(h.fake_dir.join("queue.txt")).unwrap();
+    assert!(queue.lines().any(|line| line == "STEER-1"), "{queue}");
+    assert!(
+        h.logs(&id)
+            .iter()
+            .filter(|line| line["kind"] == "user")
+            .all(|line| line["text"] != "STEER-1")
+    );
+    assert_eq!(h.state(&id)["status"], "running");
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    watch_ok(&h, &id);
+
+    let logs = h.logs(&id);
+    let completed_at = logs
+        .iter()
+        .position(|line| line["kind"] == "tool.completed")
+        .unwrap();
+    let user_at = logs
+        .iter()
+        .position(|line| line["kind"] == "user" && line["text"] == "STEER-1")
+        .unwrap();
+    assert!(logs[user_at]["commandId"].is_string());
+    let saw_at = logs
+        .iter()
+        .position(|line| line["kind"] == "message" && line["text"] == "saw: STEER-1")
+        .unwrap();
+    let done_at = logs
+        .iter()
+        .position(|line| line["kind"] == "turn.completed")
+        .unwrap();
+    assert!(completed_at < user_at && user_at < saw_at && saw_at < done_at);
+    assert!(
+        logs.iter().all(|line| line["kind"] != "steer.unconsumed"),
+        "{logs:?}"
+    );
+    let delivered = std::fs::read_to_string(h.fake_dir.join("delivered.txt")).unwrap();
+    assert_eq!(
+        delivered.lines().filter(|line| *line == "STEER-1").count(),
+        1
+    );
+}
+
+#[test]
 fn pi_that_exits_before_reading_stdin_fails_start_with_the_eof_text() {
     let h = Harness::new();
     let started = h.start_pi("openai/gpt-6-luna", b"B", true, "EXIT_NOW", None, &[]);
