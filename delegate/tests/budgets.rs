@@ -162,6 +162,7 @@ impl Env {
         cmd.args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
+            .env_remove("CLAUDECODE")
             .env("CURSOR_AGENT_BIN", self.dir.join("agent.sh"))
             .env("PI_BIN", self.dir.join("pi.sh"))
             .env("CLAUDE_BIN", self.dir.join("claude.sh"))

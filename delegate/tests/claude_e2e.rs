@@ -72,6 +72,7 @@ impl Env {
             .args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
+            .env_remove("CLAUDECODE")
             .env("CLAUDE_BIN", self.dir.join("claude.sh"))
             .env(
                 "DELEGATE_HOST_PROFILE",
