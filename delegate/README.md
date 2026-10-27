@@ -25,14 +25,14 @@ You need Rust (`cargo`), and `cursor-agent` on PATH with `cursor-agent login` be
 | `delegate status <jobId>` | Print the job's state without waiting. |
 | `delegate models` | List configured model ids, labels, backends, prices, and tiers. Rows are sorted by backend, then by id; `*` marks the default. |
 | `delegate doctor` | Check the binary, `cursor-agent`, login, and model menu drift. |
-| `delegate session start` | Start a detached Muse session from a brief. |
+| `delegate session start` | Start a detached Muse or pi session from a brief. |
 | `delegate session send` | Start a turn or steer the active turn. |
 | `delegate session logs` | Read session events, optionally following them. |
 | `delegate session watch` | Wait until the session is idle or dead. |
 | `delegate session stop` | End the session or interrupt its turn and keep it. |
-| `delegate session list` | List local Muse sessions. |
+| `delegate session list` | List local sessions. |
 
-Sessions run on the machine where you call `delegate`; use `ssh` when the session belongs on another host. They use `--disable-sandbox` and `allowAll`, so the worktree is the only containment. The session guide in [the delegate skill](../skills/delegate/SKILL.md) documents JSON output, exit codes, inbox notes and the `--inbox` workflow. [Session ordering and inbox contracts](../docs/delegate-sessions.md) records the guarantees that tests rely on.
+Sessions run on the machine where you call `delegate`; use `ssh` when the session belongs on another host. Muse sessions use `--disable-sandbox` and `allowAll`, and pi sessions use no sandbox and no approval, so the worktree is the only containment. The session guide in [the delegate skill](../skills/delegate/SKILL.md) documents JSON output, exit codes, inbox notes and the `--inbox` workflow. [Session ordering and inbox contracts](../docs/delegate-sessions.md) records the guarantees that tests rely on.
 
 Every job runs with writes enabled. A read task says "do not edit" in its brief; the record's `changeSet` shows any write. Parallel jobs need separate cwds (one worktree per lane).
 
@@ -67,6 +67,7 @@ A Muse model id is `muse/` plus the Muse model name (for example, `muse/muse-spa
 - The Muse session host command is `serve --provider meta --model <model-id> --disable-sandbox`.
 - Muse binary lookup checks `MUSE_BIN`, then `which muse`, then `~/.local/bin/muse`.
 - An idle `session/statusChanged` event does not end a turn. A matching `turn/completed` event does.
+- A pi turn ends only at `agent_settled` (`aborted:false` completes, `aborted:true` cancels).
 - The first `mark_dead` call sets the reason and message. Later calls do not replace them.
 
 ## Status records
