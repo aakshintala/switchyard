@@ -800,17 +800,72 @@ mod tests {
         }
     }
 
-    fn wait_threads(handles: Vec<std::thread::JoinHandle<()>>) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+    const WORKER_DEADLINE: Duration = Duration::from_secs(5);
+
+    fn threads_finish_within(handles: &[std::thread::JoinHandle<()>], budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
         while handles.iter().any(|handle| !handle.is_finished()) {
-            assert!(
-                Instant::now() < deadline,
-                "worker thread exceeded its deadline"
-            );
+            if Instant::now() >= deadline {
+                return false;
+            }
             std::thread::yield_now();
         }
+        true
+    }
+
+    fn wait_threads(handles: Vec<std::thread::JoinHandle<()>>) {
+        assert!(
+            threads_finish_within(&handles, WORKER_DEADLINE),
+            "worker thread exceeded its deadline"
+        );
         for handle in handles {
             handle.join().unwrap();
+        }
+    }
+
+    fn run_tick_workers(
+        store: &Arc<Store>,
+        per_worker: usize,
+        hook: Arc<dyn Fn() + Send + Sync>,
+    ) -> Vec<std::thread::JoinHandle<()>> {
+        let barrier = pair_barrier();
+        let mut handles = Vec::new();
+        for worker in 0..2 {
+            let store = Arc::clone(store);
+            let barrier = Arc::clone(&barrier);
+            let hook = Arc::clone(&hook);
+            handles.push(std::thread::spawn(move || {
+                meet_pair(&barrier);
+                for index in 0..per_worker {
+                    store
+                        .update(|state| {
+                            hook();
+                            state.updated_at += 1;
+                            vec![json!({"kind":"tick","worker":worker,"index":index})]
+                        })
+                        .unwrap();
+                }
+            }));
+        }
+        handles
+    }
+
+    fn assert_tick_log(scratch: &Scratch, store: &Store, total: usize) {
+        let disk = read_state(&scratch.paths, &scratch.id).unwrap();
+        assert_eq!(disk, store.snapshot());
+        let lines: Vec<Value> = std::fs::read_to_string(scratch.paths.events_file(&scratch.id))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        // Contract: delegate/README.md:62-63.
+        assert_eq!(lines.len(), total);
+        for (index, line) in lines.iter().enumerate() {
+            // Contract: delegate/README.md:62-63.
+            assert_eq!(line["seq"], json!(index + 1));
+            if index > 0 {
+                assert!(lines[index - 1]["seq"].as_u64().unwrap() < line["seq"].as_u64().unwrap());
+            }
         }
     }
 
@@ -1445,40 +1500,10 @@ mod tests {
     fn store_updates_remain_atomic_with_ordered_gap_free_sequences() {
         let scratch = Scratch::new();
         let store = Arc::new(scratch.store());
-        let barrier = pair_barrier();
-        let mut handles = Vec::new();
-        for worker in 0..2 {
-            let store = Arc::clone(&store);
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
-                meet_pair(&barrier);
-                for index in 0..500 {
-                    store
-                        .update(|state| {
-                            state.updated_at += 1;
-                            vec![json!({"kind":"tick","worker":worker,"index":index})]
-                        })
-                        .unwrap();
-                }
-            }));
-        }
+        let noop: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let handles = run_tick_workers(&store, 500, noop);
         wait_threads(handles);
-        let disk = read_state(&scratch.paths, &scratch.id).unwrap();
-        assert_eq!(disk, store.snapshot());
-        let lines: Vec<Value> = std::fs::read_to_string(scratch.paths.events_file(&scratch.id))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        // Contract: delegate/README.md:50-51.
-        assert_eq!(lines.len(), 1000);
-        for (index, line) in lines.iter().enumerate() {
-            // Contract: delegate/README.md:51.
-            assert_eq!(line["seq"], json!(index + 1));
-            if index > 0 {
-                assert!(lines[index - 1]["seq"].as_u64().unwrap() < line["seq"].as_u64().unwrap());
-            }
-        }
+        assert_tick_log(&scratch, &store, 1000);
     }
 
     #[test]
