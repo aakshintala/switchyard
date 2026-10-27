@@ -628,11 +628,24 @@ fn read_line_into<R: BufRead>(
     partial: &mut Vec<u8>,
     budget: Duration,
 ) -> Result<Read, ReadErr> {
+    read_line_into_at(reader, partial, budget, Instant::now)
+}
+
+/// The clock-injected core of `read_line_into`: the production caller passes
+/// the wall clock, so behavior is unchanged; the yield test passes its manual
+/// clock, so the budget proof advances time per fill instead of sleeping for
+/// a real bound.
+fn read_line_into_at<R: BufRead>(
+    reader: &mut R,
+    partial: &mut Vec<u8>,
+    budget: Duration,
+    clock: impl Fn() -> Instant,
+) -> Result<Read, ReadErr> {
     enum Found {
         Done(usize),
         More(usize),
     }
-    let start = Instant::now();
+    let start = clock();
     loop {
         let next = match reader.fill_buf() {
             Ok([]) => {
@@ -664,7 +677,7 @@ fn read_line_into<R: BufRead>(
             }
             Found::More(n) => {
                 reader.consume(n);
-                if start.elapsed() >= budget {
+                if clock().saturating_duration_since(start) >= budget {
                     return Ok(Read::Pending);
                 }
             }
@@ -4718,11 +4731,11 @@ mod tests {
         ctl.fresh(2);
         // Past the 10 s stop wait, short of the 30 s ack bound.
         ctl.jump(Duration::from_secs(15));
-        // Without the deferral the driver already crashed here: fail fast
-        // instead of sending an answer nobody reads.
-        if let Ok(res) = res_rx.recv_timeout(Duration::from_secs(3)) {
-            panic!("stop fired during the start wait: {}", res.text);
-        }
+        // The deferral holds the driver in the start wait past the jumped
+        // stop deadline: two fresh polls prove it is still waiting instead
+        // of asserting silent seconds. Without the deferral the driver
+        // already crashed here, so no poll ever taps and this fails.
+        ctl.fresh(2);
         answer_tx.send(()).expect("fake");
         let res = res_rx
             .recv_timeout(Duration::from_secs(30))
@@ -7060,121 +7073,68 @@ mod tests {
         );
     }
 
-    /// Bounds are phase totals (clock): an unfinished line trickling in one
-    /// byte at a time still yields every poll slice, so the turn bound fires
-    /// mid-trickle. The fake streams bytes with sub-slice gaps and watches
-    /// for the `close now` while streaming: with the yield it arrives during
-    /// the burst, without it only after the burst ends. Yield the total poll
-    /// budget in `read_line_into` away and the close never arrives mid-burst.
-    #[test]
-    fn trickling_partial_line_still_hits_the_turn_bound() {
-        let (fired_tx, fired_rx) = mpsc::channel::<()>();
-        let (gate_tx, gate_rx) = mpsc::channel::<()>();
-        let (close_tx, close_rx) = mpsc::channel::<()>();
-        let (flow_tx, flow_rx) = mpsc::channel::<()>();
-        let (path, rx) = spawn_fake(move |srv| {
-            srv.send(&hello(serde_json::json!(1), "9.9.9"));
-            let (start_id, _) = recv_id(srv);
-            srv.send(&accepted(
-                &start_id,
-                serde_json::json!({"session_id": "s_1"}),
-            ));
-            let (sub_id, _) = recv_id(srv);
-            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
-            let (prompt_id, _) = recv_id(srv);
-            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
-            // No `turn_started`: the turn-start bound is the one under test.
-            // Trickle one byte at a time with ~2 ms gaps: far below the 5 ms
-            // poll slice, so only the total-budget yield lets the client
-            // poll. Every tenth chunk peeks for the close with a 1 ms
-            // socket read (the budget alone cannot bound the first blocking
-            // fill). The flow signal goes out once the stream is steady, so
-            // the test only releases the driver into a live trickle: the
-            // close cannot precede the burst.
-            srv.reader
-                .get_ref()
-                .set_read_timeout(Some(Duration::from_millis(1)))
-                .expect("fake read timeout");
-            let mut partial = Vec::new();
-            let mut seen = false;
-            for i in 0..2000u64 {
-                srv.writer.write_all(b"x").expect("trickle byte");
-                srv.writer.flush().expect("flush");
-                if i == 20 {
-                    flow_tx.send(()).expect("test");
-                }
-                let spin = Instant::now();
-                while spin.elapsed() < Duration::from_millis(2) {}
-                if i % 10 == 9 {
-                    match read_line_into(&mut srv.reader, &mut partial, Duration::from_millis(1)) {
-                        Ok(Read::Line(raw)) => {
-                            let line = String::from_utf8(raw).expect("fake hub keeps lines UTF-8");
-                            let value: serde_json::Value =
-                                serde_json::from_str(&line).expect("hub line json");
-                            srv.received.push(line);
-                            assert_eq!(value["command"], "close");
-                            assert_eq!(value["args"]["now"], true);
-                            seen = true;
-                            break;
-                        }
-                        Ok(Read::Pending) => {}
-                        Err(ReadErr::Lost(detail)) => {
-                            panic!("fake hub lost the connection: {detail}")
-                        }
-                    }
-                }
+    /// Bounds are phase totals (clock): bytes of an unfinished line that keep
+    /// arriving still yield every poll slice, so the phase bounds run. Each
+    /// scripted fill moves the test clock 1 ms with no real wait, so
+    /// `Pending` can only come from the spent budget, never from a socket
+    /// timeout. Yield the total poll budget away and the poll drains the
+    /// whole burst instead of stopping at five bytes.
+    struct Trickle {
+        data: Vec<u8>,
+        at: usize,
+        clock: Arc<Mutex<Instant>>,
+    }
+
+    impl std::io::Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.at >= self.data.len() {
+                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "quiet"));
             }
-            assert!(seen, "close now never arrived mid-trickle");
-            close_tx.send(()).expect("test");
-            srv.reader
-                .get_ref()
-                .set_read_timeout(Some(Duration::from_secs(15)))
-                .expect("fake read timeout");
-            srv.expect_eof();
-        });
-        let mut req = hub_request();
-        req.bounds.turn_start_wait = Duration::from_millis(50);
-        req.bounds.turn_wait = None;
-        req.bounds.stop_wait = Duration::from_millis(50);
-        req.bounds.poll_slice = Duration::from_millis(5);
-        let (hooks, ctl) = gated_clock(Instant::now(), Point::AfterPromptAck, gate_rx, fired_tx);
-        let run = spawn_turn_with(req, path.clone(), hooks);
-        let res_rx = drive_async(run);
-        fired_rx
-            .recv_timeout(Duration::from_secs(15))
-            .expect("phase entry");
-        // The trickle is steady and buffered before the driver is released
-        // into it: its first read-loop poll can only find data.
-        flow_rx
-            .recv_timeout(Duration::from_secs(15))
-            .expect("trickle flowing");
-        gate_tx.send(()).expect("release");
-        ctl.jump(Duration::from_secs(2));
-        // The close arrived mid-trickle, before any second jump.
-        close_rx
-            .recv_timeout(Duration::from_secs(15))
-            .expect("close mid-trickle");
-        ctl.jump(Duration::from_secs(2));
-        let res = res_rx
-            .recv_timeout(Duration::from_secs(30))
-            .expect("result");
-        assert!(
-            res.text.contains(
-                "no turn_started within the turn-start bound; no fiber_exited within the stop bound"
-            ),
-            "{}",
-            res.text
-        );
-        assert_eq!(res.session_id.as_deref(), Some("s_1"));
-        assert_eq!(res.is_error, Some(true));
-        assert!(
-            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
-                == crate::types::RunStatus::Error
-        );
-        assert_eq!(
-            received_commands(&join_fake(&path, rx)),
-            ["start", "subscribe", "prompt", "close"]
-        );
+            *self.clock.lock().expect("clock") += Duration::from_millis(1);
+            let end = (self.at + 1).min(self.data.len());
+            let n = end - self.at;
+            buf[..n].copy_from_slice(&self.data[self.at..end]);
+            self.at = end;
+            Ok(n)
+        }
+    }
+
+    impl BufRead for Trickle {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if self.at >= self.data.len() {
+                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "quiet"));
+            }
+            *self.clock.lock().expect("clock") += Duration::from_millis(1);
+            Ok(&self.data[self.at..self.at + 1])
+        }
+
+        fn consume(&mut self, n: usize) {
+            self.at += n;
+        }
+    }
+
+    #[test]
+    fn trickling_bytes_yield_the_poll_budget() {
+        let start = Instant::now();
+        let clock = Arc::new(Mutex::new(start));
+        let tick = Arc::clone(&clock);
+        let mut reader = Trickle {
+            data: vec![b'x'; 64],
+            at: 0,
+            clock,
+        };
+        let mut partial = Vec::new();
+        match read_line_into_at(&mut reader, &mut partial, Duration::from_millis(5), || {
+            *tick.lock().expect("clock")
+        }) {
+            Ok(Read::Pending) => {}
+            Ok(Read::Line(_)) => panic!("trickle carries no newline"),
+            Err(ReadErr::Lost(detail)) => panic!("scripted trickle lost: {detail}"),
+        }
+        // One byte per millisecond against the 5 ms poll slice: the fifth
+        // fill spends the budget with most of the burst still unread.
+        // Without the yield the poll would drain all 64 bytes first.
+        assert_eq!(partial, vec![b'x'; 5]);
     }
 
     /// T4 (R3): a `fiber_exited` read inside a `turn_start_wait`-armed stop
