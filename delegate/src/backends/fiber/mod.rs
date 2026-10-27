@@ -3,7 +3,8 @@
 //! `fiber ask --model <ref> [--resume <sid>] -- <prompt>` prints one JSON
 //! envelope per line. Every line carries `session_id` (Fiber mints it;
 //! delegate cannot choose it), and the last line is always `fiber_exited`:
-//! `exit_code`, `text` (the final answer), `usage`, and `error` on failure.
+//! `exit_code`, `text` (the final answer), `questions`, `usage`, and `error`
+//! on failure.
 //! Unlike pi, Fiber's exit code is real and `fiber_exited.exit_code`
 //! repeats it: success is a clean exit with `exit_code == 0` and no error.
 //! A stream with no `fiber_exited` is a crash.
@@ -522,6 +523,21 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         })
         .unwrap_or_default();
     let text = prefix_notice(text, notice_no_model.as_deref());
+    let mut text = text;
+    if is_error == Some(false)
+        && let Some(section) = questions_section(&payload)
+    {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&section);
+        // A denial wins: with any permission denial the questions stay in the text and the text ends with STATUS: DONE_WITH_CONCERNS, so finalize_run reports DONE_WITH_CONCERNS.
+        text.push_str(if permission_denials.is_empty() {
+            "\nSTATUS: NEEDS_CONTEXT"
+        } else {
+            "\nSTATUS: DONE_WITH_CONCERNS"
+        });
+    }
     let (usage, cost_usd) = usage_and_cost(&payload);
     let provider_status = payload
         .get("error")
@@ -541,6 +557,51 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         permission_denials,
         provider_status,
     }
+}
+
+/// Render `payload.questions` as a `Questions:` section. `Some` only when the
+/// field is a non-empty array after skipping null and blank entries; any
+/// other shape leaves the text exactly as it was. A string renders as
+/// itself, an object with a string `question` renders that text with each
+/// option's `label` on its own indented line under it, and anything else
+/// renders as compact JSON.
+fn questions_section(payload: &serde_json::Value) -> Option<String> {
+    let questions = payload.get("questions")?.as_array()?;
+    let mut items: Vec<String> = Vec::new();
+    for q in questions {
+        if let Some(s) = q.as_str() {
+            if s.trim().is_empty() {
+                continue;
+            }
+            items.push(s.to_string());
+        } else if let Some(obj) = q.as_object() {
+            if let Some(question) = obj.get("question").and_then(|v| v.as_str()) {
+                let mut item = question.to_string();
+                if let Some(options) = obj.get("options").and_then(|v| v.as_array()) {
+                    for opt in options {
+                        if let Some(label) = opt.get("label").and_then(|v| v.as_str())
+                            && !label.trim().is_empty()
+                        {
+                            item.push_str(&format!("\n  - {label}"));
+                        }
+                    }
+                }
+                items.push(item);
+            } else {
+                items.push(q.to_string());
+            }
+        } else if !q.is_null() {
+            items.push(q.to_string());
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+    let mut section = String::from("Questions:");
+    for (i, item) in items.iter().enumerate() {
+        section.push_str(&format!("\n{}. {item}", i + 1));
+    }
+    Some(section)
 }
 
 /// Put a `no_model` notice message first: the result text starts with it,
@@ -970,6 +1031,24 @@ mod tests {
         .to_string()
     }
 
+    fn exited_with_questions(text: &str, questions: serde_json::Value, seq: u64) -> String {
+        serde_json::json!({
+            "kind": "fiber_exited",
+            "session_id": "s_inline",
+            "ts": seq,
+            "schema_version": 1,
+            "seq": seq,
+            "payload": {"exit_code": 0, "text": text, "questions": questions}
+        })
+        .to_string()
+    }
+
+    fn finalize_ctx() -> crate::types::FinalizeCtx {
+        let mut ctx = crate::finalize::default_finalize_ctx("/repo", "m", "fiber");
+        ctx.git_delta = Some(Box::new(|_, _| None));
+        ctx
+    }
+
     /// One allowed call plus one reviewer-denied call, built inline so the
     /// behavioural assertions below do not depend on a recorded fixture.
     fn review_stream() -> String {
@@ -1253,5 +1332,22 @@ mod tests {
         assert!(res.text.contains("Permission denied"), "{}", res.text);
         assert_eq!(res.text, res.stderr);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn questions_without_denial_finalize_as_needs_context() {
+        let stream = exited_with_questions(
+            "need info",
+            serde_json::json!(["Which branch?", "Which crate?"]),
+            1,
+        );
+        let res = parse_stdout(&stream, true, "");
+        assert_eq!(res.is_error, Some(false));
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::NeedsContext);
+        let first = res.text.find("1. Which branch?").expect("question 1");
+        let second = res.text.find("2. Which crate?").expect("question 2");
+        assert!(first < second, "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
     }
 }
