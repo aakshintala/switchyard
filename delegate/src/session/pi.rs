@@ -1335,10 +1335,10 @@ mod tests {
             };
             let mut val: serde_json::Value = serde_json::from_str(frame).unwrap();
             if val.get("type").and_then(|v| v.as_str()) == Some("response") {
-                if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
-                    if let Some(mapped) = recorded_to_wire.remove(id) {
-                        val["id"] = serde_json::Value::String(mapped);
-                    }
+                if let Some(id) = val.get("id").and_then(|v| v.as_str())
+                    && let Some(mapped) = recorded_to_wire.remove(id)
+                {
+                    val["id"] = serde_json::Value::String(mapped);
                 }
                 let rewritten = val.to_string();
                 let incomings = wire.parse(&rewritten);
@@ -1424,13 +1424,12 @@ mod tests {
         // Last event is the agent_settled line and none produced earlier.
         let last = incomings
             .iter()
-            .filter(|i| {
+            .rfind(|i| {
                 !matches!(
                     i,
                     crate::session::msp::Incoming::Event(crate::session::msp::HostEvent::Ignored)
                 )
             })
-            .last()
             .unwrap();
         assert!(matches!(
             last,
@@ -1452,7 +1451,7 @@ mod tests {
                 ) => Some(text.clone()),
                 _ => None,
             })
-            .last()
+            .next_back()
             .unwrap();
         assert_eq!(agent_text, "READY");
         // TurnCompleted is pi-turn-1 completed.
@@ -1507,21 +1506,20 @@ mod tests {
             };
             let mut val: serde_json::Value = serde_json::from_str(frame).unwrap();
             if val.get("type").and_then(|v| v.as_str()) == Some("response") {
-                if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
-                    if let Some(mapped) = recorded_to_wire.remove(id) {
-                        val["id"] = serde_json::Value::String(mapped);
-                    }
+                if let Some(id) = val.get("id").and_then(|v| v.as_str())
+                    && let Some(mapped) = recorded_to_wire.remove(id)
+                {
+                    val["id"] = serde_json::Value::String(mapped);
                 }
                 let incomings = wire.parse(&val.to_string());
                 for incoming in incomings {
                     match incoming {
-                        crate::session::msp::Incoming::Response { result, .. } => {
-                            if let Ok(value) = &result {
-                                let turn_id =
-                                    value["turnId"].as_str().unwrap_or_default().to_string();
-                                let disp = crate::session::msp::ack_disposition(&value);
-                                let _ = st::apply_ack(&mut state, &turn_id, disp, now);
-                            }
+                        crate::session::msp::Incoming::Response {
+                            result: Ok(value), ..
+                        } => {
+                            let turn_id = value["turnId"].as_str().unwrap_or_default().to_string();
+                            let disp = crate::session::msp::ack_disposition(&value);
+                            let _ = st::apply_ack(&mut state, &turn_id, disp, now);
                         }
                         crate::session::msp::Incoming::Event(event) => {
                             let _ = st::apply_event(&mut state, &event, now);
@@ -1638,25 +1636,24 @@ mod tests {
             };
             let mut val: serde_json::Value = serde_json::from_str(frame).unwrap();
             if val.get("type").and_then(|v| v.as_str()) == Some("response") {
-                if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
-                    if let Some(mapped) = recorded_to_wire.remove(id) {
-                        val["id"] = serde_json::Value::String(mapped);
-                    }
+                if let Some(id) = val.get("id").and_then(|v| v.as_str())
+                    && let Some(mapped) = recorded_to_wire.remove(id)
+                {
+                    val["id"] = serde_json::Value::String(mapped);
                 }
                 let incomings = wire.parse(&val.to_string());
                 for incoming in incomings {
                     match incoming {
                         crate::session::msp::Incoming::Response { result, .. } => {
-                            if let Ok(value) = &result {
-                                if value.get("turnId").is_some()
-                                    && value.get("disposition").and_then(|v| v.as_str())
-                                        == Some("started")
-                                {
-                                    let turn_id =
-                                        value["turnId"].as_str().unwrap_or_default().to_string();
-                                    let disp = crate::session::msp::ack_disposition(value);
-                                    let _ = st::apply_ack(&mut state, &turn_id, disp, now);
-                                }
+                            if let Ok(value) = &result
+                                && value.get("turnId").is_some()
+                                && value.get("disposition").and_then(|v| v.as_str())
+                                    == Some("started")
+                            {
+                                let turn_id =
+                                    value["turnId"].as_str().unwrap_or_default().to_string();
+                                let disp = crate::session::msp::ack_disposition(value);
+                                let _ = st::apply_ack(&mut state, &turn_id, disp, now);
                             }
                         }
                         crate::session::msp::Incoming::Event(event) => {
@@ -1676,10 +1673,9 @@ mod tests {
                                 tool,
                                 ..
                             } = &event
+                                && tool == "bash"
                             {
-                                if tool == "bash" {
-                                    tool_status = Some(status.clone());
-                                }
+                                tool_status = Some(status.clone());
                             }
                         }
                         _ => {}
@@ -1702,10 +1698,9 @@ mod tests {
                     }
                     if let crate::session::msp::HostEvent::ToolCompleted { status, tool, .. } =
                         &event
+                        && tool == "bash"
                     {
-                        if tool == "bash" {
-                            tool_status = Some(status.clone());
-                        }
+                        tool_status = Some(status.clone());
                     }
                 }
             }
@@ -1753,28 +1748,28 @@ mod tests {
             };
             let mut val: serde_json::Value = serde_json::from_str(frame).unwrap();
             if val.get("type").and_then(|v| v.as_str()) == Some("response") {
-                if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
-                    if let Some(mapped) = recorded_to_wire2.remove(id) {
-                        val["id"] = serde_json::Value::String(mapped);
-                    }
+                if let Some(id) = val.get("id").and_then(|v| v.as_str())
+                    && let Some(mapped) = recorded_to_wire2.remove(id)
+                {
+                    val["id"] = serde_json::Value::String(mapped);
                 }
                 // Merge with earlier map (should be empty now, but keep for safety).
-                if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
-                    if let Some(mapped) = recorded_to_wire.remove(id) {
-                        val["id"] = serde_json::Value::String(mapped);
-                    }
+                if let Some(id) = val.get("id").and_then(|v| v.as_str())
+                    && let Some(mapped) = recorded_to_wire.remove(id)
+                {
+                    val["id"] = serde_json::Value::String(mapped);
                 }
                 let incomings = wire.parse(&val.to_string());
                 for incoming in incomings {
                     match incoming {
                         crate::session::msp::Incoming::Response { result, .. } => {
-                            if let Ok(value) = &result {
-                                if value.get("turnId").is_some() {
-                                    let turn_id =
-                                        value["turnId"].as_str().unwrap_or_default().to_string();
-                                    let disp = crate::session::msp::ack_disposition(value);
-                                    let _ = st::apply_ack(&mut state, &turn_id, disp, now);
-                                }
+                            if let Ok(value) = &result
+                                && value.get("turnId").is_some()
+                            {
+                                let turn_id =
+                                    value["turnId"].as_str().unwrap_or_default().to_string();
+                                let disp = crate::session::msp::ack_disposition(value);
+                                let _ = st::apply_ack(&mut state, &turn_id, disp, now);
                             }
                         }
                         crate::session::msp::Incoming::Event(event) => {
@@ -2094,6 +2089,252 @@ mod tests {
                 state.last_turn.as_ref().map(|t| t.terminal.as_str()),
                 Some("completed")
             );
+        }
+    }
+
+    #[test]
+    fn failures_and_ui_subprotocol() {
+        use crate::session::msp::{HostEvent, Incoming};
+        use crate::session::state as st;
+        // Assistant error -> failed with modelError.
+        {
+            let mut wire = super::Wire::new();
+            let mut state = st::new_state("s-f1", "m", "/work", "/inbox", 1000);
+            let mut now = 1000;
+            now += 10;
+            assert!(st::begin_turn(&mut state, now));
+            let _ = wire
+                .encode(
+                    1,
+                    "turn/start",
+                    &serde_json::json!({"input":[{"type":"text","text":"hi"}],"commandId":"c1"}),
+                )
+                .unwrap();
+            let _ = wire.parse(
+                r#"{"id":"1","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}"#,
+            );
+            for incoming in wire.parse(r#"{"type":"agent_start"}"#) {
+                if let Incoming::Event(event) = incoming {
+                    let _ = st::apply_event(&mut state, &event, now);
+                }
+            }
+            now += 10;
+            let out = wire.parse(
+                r#"{"type":"message_end","message":{"role":"assistant","content":[],"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2},"stopReason":"error","errorMessage":"529 overloaded"}}"#,
+            );
+            for incoming in out {
+                if let Incoming::Event(event) = incoming {
+                    let _ = st::apply_event(&mut state, &event, now);
+                }
+            }
+            let out = wire.parse(r#"{"type":"agent_settled","aborted":false}"#);
+            let mut terminal = String::new();
+            let mut error: Option<crate::session::msp::TurnError> = None;
+            for incoming in out {
+                if let Incoming::Event(HostEvent::TurnCompleted {
+                    terminal: t,
+                    error: e,
+                    ..
+                }) = incoming
+                {
+                    terminal = t;
+                    error = e;
+                }
+            }
+            assert_eq!(terminal, "failed");
+            let error = error.unwrap();
+            assert_eq!(error.kind, "modelError");
+            assert_eq!(error.message, "529 overloaded");
+        }
+        // auto_retry_end failure -> failed.
+        {
+            let mut wire = super::Wire::new();
+            let out = wire.parse(r#"{"type":"agent_start"}"#);
+            assert!(
+                out.iter()
+                    .any(|i| matches!(i, Incoming::Event(HostEvent::TurnStarted { .. })))
+            );
+            let _ = wire.parse(r#"{"type":"auto_retry_end","success":false,"finalError":"x"}"#);
+            let out = wire.parse(r#"{"type":"agent_settled","aborted":false}"#);
+            match &out[0] {
+                Incoming::Event(HostEvent::TurnCompleted {
+                    terminal, error, ..
+                }) => {
+                    assert_eq!(terminal, "failed");
+                    let error = error.as_ref().unwrap();
+                    assert_eq!(error.kind, "modelError");
+                    assert_eq!(error.message, "x");
+                }
+                other => panic!("expected failed TurnCompleted, got {other:?}"),
+            }
+        }
+        // extension_ui_request dialogs and refusal.
+        {
+            let mut wire = super::Wire::new();
+            for method in ["select", "confirm", "input", "editor"] {
+                let line = serde_json::json!({
+                    "type": "extension_ui_request",
+                    "id": "uuid-1",
+                    "method": method,
+                })
+                .to_string();
+                let out = wire.parse(&line);
+                assert_eq!(out.len(), 1);
+                match &out[0] {
+                    Incoming::HostRequest { id, method: m } => {
+                        assert_eq!(id.as_str().unwrap(), "uuid-1");
+                        assert_eq!(m, method);
+                    }
+                    other => panic!("expected HostRequest for {method}, got {other:?}"),
+                }
+            }
+            let refusal = super::refusal(&serde_json::json!("uuid-1"));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&refusal).unwrap(),
+                serde_json::json!({"type":"extension_ui_response","id":"uuid-1","cancelled":true})
+            );
+            for method in [
+                "notify",
+                "setStatus",
+                "setWidget",
+                "setTitle",
+                "set_editor_text",
+            ] {
+                let line = serde_json::json!({
+                    "type": "extension_ui_request",
+                    "id": "uuid-2",
+                    "method": method,
+                })
+                .to_string();
+                let out = wire.parse(&line);
+                assert!(matches!(&out[0], Incoming::Event(HostEvent::Ignored)));
+            }
+        }
+        // Unparsed shapes.
+        {
+            let mut wire = super::Wire::new();
+            assert!(matches!(wire.parse("not json")[0], Incoming::Unparsed(_)));
+            assert!(matches!(wire.parse("[]")[0], Incoming::Unparsed(_)));
+            assert!(matches!(
+                wire.parse(
+                    r#"{"type":"response","command":"parse","success":false,"error":"Failed to parse command: x"}"#
+                )[0],
+                Incoming::Unparsed(_)
+            ));
+        }
+        // Ignored high-volume frames and missing-field robustness.
+        {
+            let mut wire = super::Wire::new();
+            for line in [
+                r#"{"type":"bogus_thing"}"#,
+                r#"{"type":"message_update"}"#,
+                r#"{"type":"message_start"}"#,
+                r#"{"type":"turn_start"}"#,
+                r#"{"type":"queue_update"}"#,
+                r#"{"type":"compaction_start"}"#,
+                r#"{"type":"compaction_end"}"#,
+                r#"{"type":"agent_start"}"#,
+                r#"{"type":"agent_settled"}"#,
+                r#"{"type":"message_end"}"#,
+                r#"{"type":"message_end","message":{}}"#,
+                r#"{"type":"message_end","message":{"role":"assistant"}}"#,
+                r#"{"type":"message_end","message":{"role":"assistant","content":[]}}"#,
+                r#"{"type":"tool_execution_start"}"#,
+                r#"{"type":"tool_execution_end"}"#,
+                r#"{"type":"auto_retry_end"}"#,
+                r#"{"type":"auto_retry_end","success":false}"#,
+                r#"{"type":"extension_ui_request"}"#,
+                r#"{"type":"extension_ui_request","method":"notify"}"#,
+                r#"{"type":"extension_error"}"#,
+                r#"{"type":"turn_end"}"#,
+                r#"{"type":"agent_end"}"#,
+            ] {
+                let out = wire.parse(line);
+                assert!(!out.is_empty());
+            }
+            // Unknown type gives Ignored.
+            let out = wire.parse(r#"{"type":"frobnicate"}"#);
+            assert!(matches!(&out[0], Incoming::Event(HostEvent::Ignored)));
+        }
+        // Saturating usage: MAX + 1 does not panic.
+        {
+            let mut wire = super::Wire::new();
+            let line = serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                        "input": u64::MAX,
+                        "output": 0,
+                        "cacheRead": 1,
+                        "cacheWrite": 0,
+                        "totalTokens": 0
+                    },
+                    "stopReason": "stop"
+                }
+            })
+            .to_string();
+            let out = wire.parse(&line);
+            assert_eq!(out.len(), 2);
+        }
+        // Cumulative saturation: two MAX messages leave all at MAX.
+        {
+            let mut wire = super::Wire::new();
+            for _ in 0..2 {
+                let line = serde_json::json!({
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [],
+                        "usage": {
+                            "input": u64::MAX,
+                            "output": u64::MAX,
+                            "cacheRead": u64::MAX,
+                            "cacheWrite": u64::MAX,
+                            "totalTokens": u64::MAX
+                        },
+                        "stopReason": "stop"
+                    }
+                })
+                .to_string();
+                let out = wire.parse(&line);
+                for incoming in out {
+                    if let Incoming::Event(HostEvent::TokenUsage {
+                        prompt,
+                        output,
+                        total,
+                    }) = incoming
+                    {
+                        assert_eq!(prompt, u64::MAX);
+                        assert_eq!(output, u64::MAX);
+                        assert_eq!(total, u64::MAX);
+                    }
+                }
+            }
+        }
+        // clear_queue underflow: 3 listed, 1 held -> empty, no panic.
+        {
+            let mut wire = super::Wire::new();
+            let _ = wire
+                .encode(
+                    1,
+                    "turn/steer",
+                    &serde_json::json!({"input":[{"type":"text","text":"a"}],"commandId":"s1"}),
+                )
+                .unwrap();
+            let _ = wire.parse(
+                r#"{"id":"1","type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}"#,
+            );
+            assert_eq!(wire.queued_steers(), 1);
+            let _ = wire
+                .encode(2, "queue/clear", &serde_json::json!({}))
+                .unwrap();
+            let out = wire.parse(
+                r#"{"id":"2","type":"response","command":"clear_queue","success":true,"data":{"steering":["a","b","c"],"followUp":[]}}"#,
+            );
+            assert!(matches!(&out[0], Incoming::Response { result: Ok(_), .. }));
+            assert_eq!(wire.queued_steers(), 0);
         }
     }
 
