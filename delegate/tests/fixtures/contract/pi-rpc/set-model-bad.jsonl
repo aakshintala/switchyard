@@ -1,0 +1,2 @@
+> {"type":"set_model","provider":"opencode-go","modelId":"no-such-model-for-rpc-probe","id":"host-bad-model-24489882-0f8f-4eff-845c-5061736d9546"}
+< {"id":"host-bad-model-24489882-0f8f-4eff-845c-5061736d9546","type":"response","command":"set_model","success":false,"error":"Model not found: opencode-go/no-such-model-for-rpc-probe"}
