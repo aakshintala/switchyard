@@ -32,6 +32,7 @@ Done when the owner has confirmed every bullet.
 - On Claude Code, start each sub-orchestrator as its own background session: `claude --bg -n <repo>-<issue> --agent ticket-orchestrator --permission-mode auto "<printed line>"`, with `PARENT` filled as this session's name as `ListAgents` prints it. A flywheel running as a subagent has no session name: stop and report that it can't start lanes. Subscribe to each lane with `SendMessage` `notify_when_idle` as a backstop. Run `claude stop <id>` once its report has arrived and been read. If the idle notice comes with no report, read `claude logs <id>`, then stop it. A finished session stays resident until stopped.
 - Give every job its own worktree: delegation doesn't enforce read-only, so a shared directory lets parallel jobs damage each other. In the shared checkout run only `git fetch`.
 - When a lane closes, start the next disjoint ticket at once. An idle lane needs a reason in the state file (no disjoint work, or a pending ruling reshapes the queue).
+- **Lane runtime**: the two bullets above on `claude --bg --agent ticket-orchestrator` are the default. A repo that ships its own flywheel scripts (fiber: `bin/mkbrief.sh`, `pilaunch.sh`, `pisend.sh`, a file inbox, state under `~/work/fiber-worktrees/flywheel/run/`) runs pi RPC lanes through them instead: its scripts override the launch, brief-fill and notify steps; every other step here still applies.
 
 **PR-stack mode**: for PRs with no ticket, run `review-loop`, then `ci-triage`, then merge by `implement` step 8, for each PR in the stack.
 
