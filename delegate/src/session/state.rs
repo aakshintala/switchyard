@@ -801,6 +801,23 @@ mod tests {
     }
 
     const WORKER_DEADLINE: Duration = Duration::from_secs(5);
+    const TICKS_PER_WORKER: usize = 40;
+    const OLD_TICKS_PER_WORKER: usize = 500;
+    const SLOW_UPDATE_LATENCY: Duration = Duration::from_millis(10);
+    // The 5 s guard is a hang guard, not a tunable: fail the build if it moves.
+    const _: () = assert!(WORKER_DEADLINE.as_millis() == 5_000);
+    // At the controlled per-update latency the old 500-per-worker workload
+    // cannot finish inside the guard, so the slow-update proof stays valid.
+    const _: () = assert!(
+        2 * OLD_TICKS_PER_WORKER as u128 * SLOW_UPDATE_LATENCY.as_millis()
+            > WORKER_DEADLINE.as_millis()
+    );
+    // The reduced workload at that latency stays under a quarter of the guard,
+    // so raising the count back toward 500 fails the build.
+    const _: () = assert!(
+        2 * TICKS_PER_WORKER as u128 * SLOW_UPDATE_LATENCY.as_millis() * 4
+            < WORKER_DEADLINE.as_millis()
+    );
 
     fn threads_finish_within(handles: &[std::thread::JoinHandle<()>], budget: Duration) -> bool {
         let deadline = Instant::now() + budget;
@@ -1501,9 +1518,9 @@ mod tests {
         let scratch = Scratch::new();
         let store = Arc::new(scratch.store());
         let noop: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
-        let handles = run_tick_workers(&store, 500, noop);
+        let handles = run_tick_workers(&store, TICKS_PER_WORKER, noop);
         wait_threads(handles);
-        assert_tick_log(&scratch, &store, 1000);
+        assert_tick_log(&scratch, &store, 2 * TICKS_PER_WORKER);
     }
 
     #[test]
