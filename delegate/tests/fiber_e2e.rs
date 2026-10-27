@@ -75,6 +75,40 @@ impl Env {
             .collect()
     }
 
+    /// Like [`delegate`](Self::delegate), but without `FIBER_BIN` and without
+    /// `PATH`, and with an isolated `HOME`: resolution falls through to
+    /// `$HOME/.local/bin/fiber`, which does not exist under the temp `HOME`.
+    /// The jobs dir stays under the temp dir via `TMPDIR`, never the real
+    /// `HOME` or `/tmp/delegate-jobs`.
+    fn delegate_nobin(&self, args: &[&str], stdin: Option<&str>) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
+        cmd.args(args)
+            .current_dir(&self.dir)
+            .env("TMPDIR", &self.dir)
+            .env("HOME", &self.dir)
+            .env_remove("FIBER_BIN")
+            .env_remove("PATH")
+            .env("DELEGATE_HEARTBEAT_MS", "100")
+            .env("DELEGATE_RETRY_DELAYS_MS", "0")
+            // Isolate from the developer machine's real host profile.
+            .env(
+                "DELEGATE_HOST_PROFILE",
+                self.dir.join("nonexistent-profile.json"),
+            );
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut si = child.stdin.take().unwrap();
+        if let Some(s) = stdin {
+            let _ = si.write_all(s.as_bytes());
+        }
+        drop(si);
+        child.wait_with_output().unwrap()
+    }
+
     fn delegate(&self, args: &[&str], stdin: Option<&str>, fixture: &str, exit: &str) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
         cmd.args(args)
@@ -184,6 +218,48 @@ fn fiber_run_finishes_with_fiber_reported_cost() {
     );
     assert!(!argv.iter().any(|a| a == "--resume"), "{argv:?}");
     assert!(!argv.iter().any(|a| a.starts_with("fiber/")), "{argv:?}");
+}
+
+#[test]
+fn fiber_missing_binary_is_an_error_record_naming_every_source() {
+    let e = Env::new("nobin", "echo.jsonl", "0");
+    assert!(
+        !e.dir.join(".local/bin/fiber").exists(),
+        "no binary at the fallback under the isolated HOME"
+    );
+    let out = e.delegate_nobin(&["run", "--model", MODEL], Some("Reply with DONE."));
+    assert!(
+        out.status.success(),
+        "exit {:?}\nstderr: {}\nstdout: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    assert_eq!(id.len(), 36);
+
+    // A failed job still exits 0 on `watch`; the error lives in the record.
+    let out = e.delegate_nobin(&["watch", &id, "--timeout", "10"], None);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rec: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(rec["status"], "ERROR");
+    assert_eq!(rec["result"]["backend"], "fiber");
+    let text = rec["result"]["text"].as_str().unwrap_or("");
+    assert!(text.contains("fiber binary not found"), "{text}");
+    assert!(text.contains("FIBER_BIN"), "{text}");
+    assert!(text.contains("PATH"), "{text}");
+    assert!(text.contains("~/.local/bin/fiber"), "{text}");
+    let selected = e
+        .dir
+        .join(".local/bin/fiber")
+        .to_string_lossy()
+        .into_owned();
+    assert!(text.contains(&selected), "{text}");
 }
 
 #[test]
