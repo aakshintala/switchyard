@@ -210,6 +210,43 @@ impl Harness {
             .collect()
     }
 
+    fn logs(&self, id: &str) -> Vec<Value> {
+        std::fs::read_to_string(self.root().join(id).join("events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect()
+    }
+
+    fn notes(&self, id: &str, kind: &str) -> Vec<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir(&self.inbox) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let expected = format!("[session {id} {kind}]\n");
+                (std::fs::read_to_string(entry.path()).ok().as_deref() == Some(expected.as_str()))
+                    .then_some(entry.path())
+            })
+            .collect()
+    }
+
+    fn notes_poll(&self, id: &str, kind: &str, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let count = self.notes(id, kind).len();
+            if count == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {expected} {kind} notes, have {count}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn only_session(&self) -> String {
         let ids: Vec<String> = std::fs::read_dir(self.root())
             .unwrap()
@@ -415,6 +452,176 @@ fn bad_model_fails_start_before_any_prompt() {
     assert_eq!(state["dead"]["reason"], "startFailed");
     let host_pid = state["hostPid"].as_i64().unwrap() as i32;
     h.assert_process_gone(host_pid);
+}
+
+fn cassette() -> String {
+    [
+        "prompt-basic.jsonl",
+        "prompt-tools.jsonl",
+        "steer-abort.jsonl",
+        "after-abort.jsonl",
+    ]
+    .into_iter()
+    .map(|name| format!("{FIXTURES}/{name}"))
+    .collect::<Vec<_>>()
+    .join(":")
+}
+
+fn send_started(h: &Harness, id: &str, text: &str) {
+    let sent = h.invoke(&["send", id, text, "--json"]);
+    assert!(
+        sent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    let reply: Value = serde_json::from_slice(&sent.stdout).unwrap();
+    assert_eq!(reply["disposition"], "started", "{reply}");
+}
+
+fn watch_ok(h: &Harness, id: &str) {
+    let watched = h.invoke(&["watch", id, "--json"]);
+    assert!(
+        watched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&watched.stderr)
+    );
+}
+
+#[test]
+fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
+    let h = Harness::new();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "OK",
+        Some(&cassette()),
+        &[],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    watch_ok(&h, &id);
+    let state = h.state(&id);
+    assert_eq!(state["status"], "idle");
+    assert_eq!(state["lastTurn"]["terminal"], "completed");
+    assert_eq!(state["turnCount"], 1);
+    assert_eq!(state["usage"]["promptTokens"], 1909);
+    assert_eq!(state["usage"]["outputTokens"], 17);
+    assert_eq!(state["usage"]["totalTokens"], 1926);
+
+    let listed = h.invoke(&["list", "--json"]);
+    assert!(listed.status.success());
+    let sessions: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let entry = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == id)
+        .cloned()
+        .unwrap();
+    assert_eq!(entry["model"], "openai/gpt-6-luna");
+
+    send_started(&h, &id, "run tools");
+    watch_ok(&h, &id);
+    let state = h.state(&id);
+    assert_eq!(state["turnCount"], 2);
+    assert_eq!(state["usage"]["totalTokens"], 7495);
+    let logs = h.logs(&id);
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "tool.started")
+            .count(),
+        2
+    );
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "tool.completed" && line["status"] == "completed")
+            .count(),
+        2
+    );
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "turn.completed")
+            .count(),
+        2
+    );
+
+    send_started(&h, &id, "sleep");
+    assert_eq!(h.state(&id)["status"], "running");
+
+    let steered = h.invoke(&["send", &id, "steer me", "--json"]);
+    assert!(steered.status.success());
+    let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert!(
+        h.logs(&id)
+            .iter()
+            .filter(|line| line["kind"] == "user")
+            .all(|line| line["text"] != "steer me")
+    );
+
+    let stopped = h.invoke(&["stop", &id, "--interrupt", "--json"]);
+    assert!(stopped.status.success());
+    let reply: Value = serde_json::from_slice(&stopped.stdout).unwrap();
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["interrupted"], true);
+
+    let requests = h.requests();
+    assert_eq!(requests[0]["type"], "set_model");
+    let steer_at = requests
+        .iter()
+        .position(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") == Some(&Value::from("steer"))
+        })
+        .unwrap();
+    assert_eq!(requests[steer_at + 1]["type"], "clear_queue");
+    assert_eq!(requests[steer_at + 2]["type"], "abort");
+
+    let state = h.state(&id);
+    assert_eq!(state["status"], "idle");
+    assert_eq!(state["lastTurn"]["terminal"], "cancelled");
+    let logs = h.logs(&id);
+    let unconsumed: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "steer.unconsumed")
+        .collect();
+    assert_eq!(unconsumed.len(), 1);
+    let named = unconsumed[0]["commandIds"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(named.len(), 1);
+    assert!(named[0].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(
+        unsafe { libc::kill(state["hostPid"].as_i64().unwrap() as i32, 0) } == 0,
+        "host died across the interrupt"
+    );
+
+    send_started(&h, &id, "again");
+    watch_ok(&h, &id);
+    let state = h.state(&id);
+    assert_eq!(state["turnCount"], 4);
+    assert_eq!(state["usage"]["promptTokens"], 12648);
+    assert_eq!(state["usage"]["outputTokens"], 1037);
+    assert_eq!(state["usage"]["totalTokens"], 13685);
+
+    assert!(!h.fake_dir.join("mismatch.txt").exists());
+    h.notes_poll(&id, "idle", 4);
+
+    let stopped = h.invoke(&["stop", &id, "--json"]);
+    assert!(stopped.status.success());
+    let state = h.state(&id);
+    assert_eq!(state["status"], "dead");
+    assert_eq!(state["dead"]["reason"], "stopped");
+    assert_eq!(state["dead"]["exitCode"], 0);
+    assert_eq!(h.invoke(&["watch", &id]).status.code(), Some(4));
 }
 
 #[test]
