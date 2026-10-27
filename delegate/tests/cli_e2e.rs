@@ -8,9 +8,17 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const FAKE_AGENT: &str = r#"#!/bin/sh
+p=$PPID
 printf '%s\n' "$@" > "$(dirname "$0")/argv.txt"
 printf '%s %s\n' "${FORCE_COLOR-unset}" "${CLICOLOR_FORCE-unset}" > "$(dirname "$0")/color.env"
 rel="$(dirname "$0")/go"
+d="$(dirname "$0")"
+# One loop turn: when FAKE_TICK names a fifo, the test releases each turn by
+# writing a line, and the fake acknowledges it; otherwise the turn is a short
+# sleep. The hold below ends only on `go`, a removed directory, or a dead
+# parent, so a held job stays RUNNING until the test releases it.
+pause() { if [ -n "$FAKE_TICK" ]; then read -r _ < "$FAKE_TICK" && echo >> "$d/acks"; else sleep 0.05; fi; }
+hold() { while [ ! -e "$rel" ] && [ -d "$d" ]; do kill -0 "$p" 2>/dev/null || exit 0; pause; done; }
 # Stays RUNNING behind a grandchild: `sleep` inherits the agent's process group, so
 # killing only the agent would leave it behind.
 case "$*" in
@@ -19,8 +27,7 @@ case "$*" in
     echo $! > "$(dirname "$0")/grandchild.pid"
     echo $$ > "$(dirname "$0")/agent.pid"
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-init"}'
-    i=0
-    while [ ! -e "$rel" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done
+    hold
     printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"late\nSTATUS: DONE","session_id":"s-9"}'
     exit 0
     ;;
@@ -28,8 +35,7 @@ esac
 # Silent jobs emit nothing, so the model-idle window is what kills them.
 case "$*" in
   *SILENT*)
-    i=0
-    while [ ! -e "$rel" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done
+    hold
     exit 0
     ;;
 esac
@@ -39,8 +45,7 @@ esac
 printf '%s\n' '{"type":"tool_call","subtype":"started","tool_call":{"shellToolCall":{"args":{"command":"ls"}}}}'
 case "$*" in
   *SLOW*)
-    i=0
-    while [ ! -e "$rel" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done
+    hold
     ;;
 esac
 case "$*" in
@@ -90,7 +95,7 @@ impl Env {
         }
     }
 
-    /// Lets SLOW jobs finish; until then they stay RUNNING (10s cap).
+    /// Lets SLOW jobs finish; until then they stay RUNNING.
     fn release(&self) {
         std::fs::write(self.dir.join("go"), "").unwrap();
     }
@@ -1638,4 +1643,109 @@ fn help_mentions_wall_ms() {
     let help = String::from_utf8(out.stdout).unwrap();
     assert!(help.contains("usage: delegate run --model M"), "{help}");
     assert!(help.contains("[--wall-ms N]"), "{help}");
+}
+
+/// The SLOW fake holds until the test releases it, not for a turn count:
+/// with a tick fifo driving each loop turn, 401 turns stay RUNNING and the
+/// fake exits only after `go` appears.
+#[test]
+fn slow_fake_holds_until_released_not_for_a_turn_count() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let e = Env::new("slow-hold");
+    let tick = e.dir.join("tick");
+    let name = std::ffi::CString::new(tick.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    // Open read+write and keep it open: the fake's per-turn `read` then
+    // blocks for a tick line instead of ever seeing EOF.
+    let mut ticks = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&tick)
+        .unwrap();
+    let mut child = ChildGuard(
+        Command::new(e.dir.join("agent.sh"))
+            .arg("-p")
+            .arg("SLOW")
+            .current_dir(&e.dir)
+            .env("FAKE_TICK", &tick)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    // 401 tick lines fit in the pipe buffer, so one write never blocks.
+    for _ in 0..401 {
+        std::io::Write::write_all(&mut ticks, b"\n").unwrap();
+    }
+    // Each consumed tick appends one `acks` line with shell builtins only;
+    // the poll ends on the fake's own acknowledgements, not on elapsed time.
+    until("401 acks or fake exit", || {
+        if child.0.try_wait().unwrap().is_some() {
+            return true;
+        }
+        std::fs::read_to_string(e.dir.join("acks"))
+            .map(|s| s.lines().count() >= 401)
+            .unwrap_or(false)
+    });
+    // The old 400-turn cap would have exited here with exactly 400 acks.
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "SLOW fake self-released before `go`"
+    );
+    e.release();
+    // Wake the blocked `read` so the loop re-checks `go` and ends.
+    std::io::Write::write_all(&mut ticks, b"\n").unwrap();
+    until("fake exits after release", || {
+        child.0.try_wait().unwrap().is_some()
+    });
+}
+
+/// A fake orphaned by a killed test wrapper exits on its own: the hold ends
+/// when the recorded parent pid is gone.
+#[test]
+fn slow_fake_exits_when_its_parent_is_killed() {
+    struct FakeGuard(i64);
+    impl Drop for FakeGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0 as i32, libc::SIGKILL);
+            }
+        }
+    }
+    let e = Env::new("slow-orphan");
+    let script = format!(
+        "{} -p SLOW & echo $! > {}/fake.pid; wait",
+        e.dir.join("agent.sh").display(),
+        e.dir.display()
+    );
+    let mut wrapper = Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .current_dir(&e.dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    until("fake started", || {
+        e.dir.join("fake.pid").exists() && e.dir.join("argv.txt").exists()
+    });
+    let pid: i64 = std::fs::read_to_string(e.dir.join("fake.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let _guard = FakeGuard(pid);
+    // SIGKILL the wrapper, then reap it: a zombie still answers `kill -0`,
+    // so the fake would never see its parent gone until the wait.
+    wrapper.kill().unwrap();
+    wrapper.wait().unwrap();
+    until("orphaned fake exits", || !alive(pid));
 }
