@@ -1762,6 +1762,22 @@ fn write_failure_text(kind: HostKind, error: &std::io::Error) -> String {
     }
 }
 
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn error_reply(code: &str, message: &str) -> Value {
+    json!({"ok":false,"code":code,"message":message})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1783,20 +1799,4 @@ mod tests {
             "pi host closed stdout"
         );
     }
-}
-
-fn remaining(deadline: Instant) -> Duration {
-    deadline.saturating_duration_since(Instant::now())
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u64::MAX as u128) as u64
-}
-
-fn error_reply(code: &str, message: &str) -> Value {
-    json!({"ok":false,"code":code,"message":message})
 }
