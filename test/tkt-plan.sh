@@ -1030,4 +1030,91 @@ printf 'ok' >"$T/pcmode"
 expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "order plan-check"
 [ "$(gh_count)" = "$gh_before" ] || fail "PLAN-CHECK reads no ticket"
 
+# --- confirm passes the ticket text, then the state extra, in its run file ---
+setup_case confirm-ticket
+rebase_plan
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+printf 'ok' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "confirm-ticket exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-confirm-extra.md"
+grep -qF "EXTRA=@$X" "$T/stub.log" || fail "confirm passes the confirm extra file as EXTRA"
+L_BODY="$(grep -n '^BODY-TEXT-791$' "$X" | cut -d: -f1)"
+L_COMM="$(grep -n '^COMMENT-TEXT-791$' "$X" | cut -d: -f1)"
+[ -n "$L_BODY" ] && [ -n "$L_COMM" ] && [ "$L_BODY" -lt "$L_COMM" ] || fail "confirm extra holds the body then the comments"
+
+setup_case confirm-state-extra
+rebase_plan
+printf 'STATE-LINE\n' >"$CDIR/state-extra.md"
+bash "$TKT_STATE" "$S" set extra "$CDIR/state-extra.md" || fail "seed confirm state extra"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "confirm-state-extra exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-confirm-extra.md"
+L_COMM="$(grep -n '^COMMENT-TEXT-791$' "$X" | cut -d: -f1)"
+L_STATE="$(grep -n '^STATE-LINE$' "$X" | cut -d: -f1)"
+[ -n "$L_COMM" ] && [ -n "$L_STATE" ] && [ "$L_COMM" -lt "$L_STATE" ] || fail "confirm puts the state extra after the ticket"
+
+setup_case confirm-bad-extra
+rebase_plan
+bash "$TKT_STATE" "$S" set extra "$CDIR/nope.md" || fail "seed missing state extra"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+gh_before="$(gh_count)"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 2 ] || fail "confirm-bad-extra exits 2 (rc=$RC)"
+grep -q "cannot read extra file: $CDIR/nope.md" "$CDIR/stderr.txt" || fail "confirm-bad-extra names the file"
+[ "$(gh_count)" = "$gh_before" ] || fail "confirm-bad-extra reads no ticket"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "confirm-bad-extra starts no job"
+
+# A confirm whose ticket read fails: exit 2, no job, no state write.
+# $1 is the case, $2 the gh mode.
+confirm_fail_case() {
+  setup_case "$1"
+  rebase_plan
+  printf 'ok' >"$T/mode"
+  printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+  cp "$S" "$CDIR/before.state"
+  printf '%s' "$2" >"$T/ghmode"
+  jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+  run_plan confirm --edits "$CDIR/edits.md"
+  printf 'ok' >"$T/ghmode"
+  [ "$RC" -eq 2 ] || fail "$1 exits 2 (rc=$RC)"
+  grep -q "tkt-plan: cannot read ticket text for switchyard#518" "$CDIR/stderr.txt" || fail "$1 names the ticket"
+  [ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "$1 starts no job"
+  cmp -s "$S" "$CDIR/before.state" || fail "$1 writes no state"
+}
+
+confirm_fail_case confirm-empty empty
+confirm_fail_case confirm-blank blank
+confirm_fail_case confirm-fail fail
+
+setup_case confirm-order
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+gh_before="$(gh_count)"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "confirm-order exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm-order"
+[ "$(gh_count)" = "$gh_before" ] || fail "a used confirm reads no ticket"
+
+# --- real templates: the filled verify and confirm briefs carry the ticket text ---
+cp "$SCRIPT_DIR/../skills/planning/briefs/verifier.md" "$T/home/.agents/skills/planning/briefs/verifier.md" || fail "copy the real verifier brief"
+cp "$SCRIPT_DIR/../skills/planning/briefs/confirm.md" "$T/home/.agents/skills/planning/briefs/confirm.md" || fail "copy the real confirm brief"
+setup_case real-brief
+rebase_plan
+printf 'pack\n' >"$CDIR/pack.md"
+bash "$TKT_STATE" "$S" set pack "$CDIR/pack.md" || fail "seed pack"
+printf 'ok' >"$T/mode"
+TKT_BIN="$T/realbin" run_plan verify
+VB="$CDIR/run/switchyard-518-verifier-r1-1.md"
+[ -r "$VB" ] || fail "real verify fills the verifier brief"
+grep -q 'BODY-TEXT-791' "$VB" && grep -q 'COMMENT-TEXT-791' "$VB" || fail "real verify brief carries the ticket text"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+TKT_BIN="$T/realbin" run_plan confirm --edits "$CDIR/edits.md"
+CB="$CDIR/run/switchyard-518-confirm-1.md"
+[ -r "$CB" ] || fail "real confirm fills the confirm brief"
+grep -q 'BODY-TEXT-791' "$CB" && grep -q 'COMMENT-TEXT-791' "$CB" || fail "real confirm brief carries the ticket text"
+
 echo "tkt-plan: all cases passed"
