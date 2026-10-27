@@ -280,6 +280,20 @@ rc=$?
 [ "$rc" = 0 ] || fail "file PATH entry: exit $rc, want 0"
 expect_build_args "$R"
 
+# The shim's own directory is skipped even for a cargo with no marker: the
+# shim here runs by path, and the cargo beside it is a plain planted file.
+mkdir -p "$T/own"
+cp "$SHIM" "$T/own/shim-by-path" && chmod 755 "$T/own/shim-by-path" || fail "cannot stage own-dir shim"
+printf '#!/bin/sh\n: >"$FAKE_DIR/own-planted"\n' >"$T/own/cargo"
+chmod 755 "$T/own/cargo"
+new_run own-dir
+env -i PATH="$T/own:$T/real:$T/py:/usr/bin:/bin" HOME="$T/home" FAKE_DIR="$R" \
+  "$T/own/shim-by-path" build "a b" ""
+rc=$?
+[ "$rc" = 0 ] || fail "own directory: exit $rc, want 0 from the real fake"
+[ ! -e "$R/own-planted" ] || fail "a cargo in the shim's own directory ran"
+expect_build_args "$R"
+
 # SIGPIPE and SIGXFSZ are ignored on entry (the parent ignores them, Python
 # ignores them too); the shim restores both to default before exec.
 new_run signals
