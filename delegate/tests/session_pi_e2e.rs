@@ -247,6 +247,18 @@ impl Harness {
         }
     }
 
+    fn wait_requests(&self, what: &str, predicate: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let requests = self.requests();
+            if predicate(&requests) {
+                return requests;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn only_session(&self) -> String {
         let ids: Vec<String> = std::fs::read_dir(self.root())
             .unwrap()
@@ -485,6 +497,47 @@ fn watch_ok(h: &Harness, id: &str) {
         "{}",
         String::from_utf8_lossy(&watched.stderr)
     );
+}
+
+#[test]
+fn ui_dialog_requests_are_refused_and_other_ui_records_ignored() {
+    let h = Harness::new();
+    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "DIALOG", None, &[]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+    watch_ok(&h, &id);
+
+    let requests = h.wait_requests("the dialog refusal", |requests| {
+        requests.iter().any(|request| {
+            request["type"] == "extension_ui_response"
+                && request["id"] == "ui-1"
+                && request["cancelled"] == true
+        })
+    });
+    assert!(
+        requests.iter().any(|request| request
+            == &serde_json::json!({"type":"extension_ui_response","id":"ui-1","cancelled":true})),
+        "{requests:?}"
+    );
+
+    let logs = h.logs(&id);
+    let refused: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "host.refused")
+        .collect();
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0]["method"], "select");
+    assert!(
+        logs.iter()
+            .all(|line| !line.to_string().contains("notify") && !line.to_string().contains("ui-2")),
+        "{logs:?}"
+    );
+    assert_eq!(h.state(&id)["status"], "idle");
 }
 
 #[test]
@@ -805,6 +858,186 @@ fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
         !delivered.lines().any(|line| line == "STEER-2"),
         "{delivered}"
     );
+}
+
+#[test]
+fn pi_failures_map_to_the_existing_contracts() {
+    // (i) A missing pi binary is a spawn error: start fails, the session is
+    // dead/startFailed.
+    {
+        let h = Harness::new();
+        let started = h.start_pi(
+            "openai/gpt-6-luna",
+            b"B",
+            true,
+            "",
+            None,
+            &[("PI_BIN", "/nonexistent/pi")],
+        );
+        let value = assert_json_error(&started, 1, "failed");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("No such file or directory"), "{message}");
+        let id = h.only_session();
+        let state = h.wait_state(&id, "dead session", |value| value["status"] == "dead");
+        assert_eq!(state["dead"]["reason"], "startFailed");
+    }
+    // (ii) A host that exits at startup fails the start fast with the EOF
+    // text, and its stderr line is kept.
+    {
+        let h = Harness::new();
+        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "EXIT_AT_START", None, &[]);
+        let value = assert_json_error(&started, 1, "failed");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("pi host"), "{message}");
+        let id = h.only_session();
+        let stderr = std::fs::read_to_string(h.root().join(&id).join("host.stderr")).unwrap();
+        assert!(stderr.contains("fake host starting"), "{stderr}");
+    }
+    // (iii) A host that dies mid-session leaves a dead/hostExited session.
+    {
+        let h = Harness::new();
+        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "DIE", None, &[]);
+        assert!(started.status.success());
+        let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+        let id = value["session"]["id"].as_str().unwrap().to_string();
+        watch_ok(&h, &id);
+        send_started(&h, &id, "second");
+        assert_eq!(h.invoke(&["watch", &id]).status.code(), Some(4));
+        let state = h.state(&id);
+        assert_eq!(state["status"], "dead");
+        assert_eq!(state["dead"]["reason"], "hostExited");
+        assert_eq!(state["dead"]["exitCode"], 3);
+    }
+    // (iv) A prompt the host handles without starting a run fails the send
+    // and leaves the session idle with its turn count unchanged.
+    {
+        let h = Harness::new();
+        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "HANDLED", None, &[]);
+        assert!(started.status.success());
+        let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+        let id = value["session"]["id"].as_str().unwrap().to_string();
+        watch_ok(&h, &id);
+        assert_eq!(h.state(&id)["turnCount"], 1);
+        let sent = h.invoke(&["send", &id, "second", "--json"]);
+        assert_json_error(&sent, 1, "failed");
+        let state = h.state(&id);
+        assert_eq!(state["status"], "idle");
+        assert_eq!(state["turnCount"], 1);
+    }
+    // (v) A prompt the host refuses fails the send the same way.
+    {
+        let h = Harness::new();
+        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "PROMPT_FAIL", None, &[]);
+        assert!(started.status.success());
+        let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+        let id = value["session"]["id"].as_str().unwrap().to_string();
+        watch_ok(&h, &id);
+        let sent = h.invoke(&["send", &id, "second", "--json"]);
+        assert_json_error(&sent, 1, "failed");
+        let state = h.state(&id);
+        assert_eq!(state["status"], "idle");
+        assert_eq!(state["turnCount"], 1);
+    }
+    // (vi) A non-JSON stdout line is logged as unparsed and the session
+    // still completes.
+    {
+        let h = Harness::new();
+        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "NOISE", None, &[]);
+        assert!(started.status.success());
+        let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+        let id = value["session"]["id"].as_str().unwrap().to_string();
+        watch_ok(&h, &id);
+        let logs = h.logs(&id);
+        let unparsed: Vec<&Value> = logs
+            .iter()
+            .filter(|line| line["kind"] == "host.unparsed")
+            .collect();
+        assert_eq!(unparsed.len(), 1);
+        let line = unparsed[0]["line"].as_str().unwrap();
+        assert!(line.len() <= 200, "{line}");
+        assert_eq!(h.state(&id)["status"], "idle");
+    }
+    // (vii) A host that never answers set_model fails the start on the boot
+    // bound, naming the method; a host that answers set_model but never
+    // set_thinking_level fails on the shared deadline, naming the second
+    // call.
+    {
+        let h = Harness::new();
+        let started = h.start_pi(
+            "openai/gpt-6-luna",
+            b"B",
+            true,
+            "SLOW_BOOT",
+            None,
+            &[("DELEGATE_SESSION_PI_BOOT_WAIT_MS", "300")],
+        );
+        let value = assert_json_error(&started, 1, "failed");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("model/set"), "{message}");
+        let id = h.only_session();
+        let state = h.wait_state(&id, "dead session", |value| value["status"] == "dead");
+        assert_eq!(state["dead"]["reason"], "startFailed");
+        assert!(
+            h.requests()
+                .iter()
+                .all(|request| request["type"] != "prompt"),
+            "a prompt was sent before the boot bound fired"
+        );
+    }
+    {
+        let h = Harness::new();
+        let begin = Instant::now();
+        let started = h.start_pi(
+            "openai/gpt-6-luna:high",
+            b"B",
+            true,
+            "SLOW_THINK",
+            None,
+            &[("DELEGATE_SESSION_PI_BOOT_WAIT_MS", "3000")],
+        );
+        let elapsed = begin.elapsed();
+        let value = assert_json_error(&started, 1, "failed");
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("thinking/set"), "{message}");
+        assert!(!message.contains("model/set"), "{message}");
+        assert!(
+            elapsed < Duration::from_millis(4000),
+            "shared boot deadline not applied: {elapsed:?}"
+        );
+        assert!(
+            h.requests()
+                .iter()
+                .all(|request| request["type"] != "prompt"),
+            "a prompt was sent before the boot bound fired"
+        );
+    }
+    // (viii) A send text starting with `/` is rejected for pi before any
+    // prompt is sent; leading whitespace is sent as-is.
+    {
+        let h = Harness::new();
+        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "", None, &[]);
+        assert!(started.status.success());
+        let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+        let id = value["session"]["id"].as_str().unwrap().to_string();
+        watch_ok(&h, &id);
+        for text in ["/skill:x", "/help"] {
+            let sent = h.invoke(&["send", &id, text, "--json"]);
+            let value = assert_json_error(&sent, 2, "usage");
+            let message = value["error"]["message"].as_str().unwrap();
+            assert!(message.contains("/skill"), "{message}");
+            assert!(message.contains("extension"), "{message}");
+        }
+        assert_eq!(
+            h.requests()
+                .iter()
+                .filter(|request| request["type"] == "prompt")
+                .count(),
+            1
+        );
+        send_started(&h, &id, " /x");
+        watch_ok(&h, &id);
+        assert_eq!(h.state(&id)["turnCount"], 2);
+    }
 }
 
 #[test]
