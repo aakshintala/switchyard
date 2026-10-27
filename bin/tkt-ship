@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tkt-ship: run ship-pr from state, rerun on 124, digest red CI.
 # Usage: tkt-ship <state>
+# State key no_mutants_label: reason passed to ship-pr as --no-mutants-label.
 set -euo pipefail
 
 usage() { echo "usage: tkt-ship <state>" >&2; exit 2; }
@@ -121,6 +122,9 @@ if u="$(tkt get unverified 2>/dev/null)" && [ -n "$u" ]; then
     emit "PRECONDITION relative=$u" 2 "$msg"
   }
   args+=(--unverified-fixes "$u")
+fi
+if nm="$(tkt get no_mutants_label 2>/dev/null)" && [ -n "$nm" ]; then
+  args+=(--no-mutants-label "$nm")
 fi
 if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then
   if ! plan_err="$(tkt require plan 2>&1)"; then
