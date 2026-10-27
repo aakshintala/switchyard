@@ -4,16 +4,58 @@
 # at most N cargo invocation trees hold a slot at once. Installed as `cargo`
 # in a directory placed first on a lane's PATH; see autonomous-flywheel.
 import errno
+import fcntl
 import os
 import signal
 import sys
+import time
 
 MARKER = b"# cargo-slot shim"
+SLOT_SUBCOMMANDS = {"build", "check", "clippy", "test", "nextest", "bench", "run", "doc", "mutants"}
+VALUE_OPTIONS = {"--config", "-C", "-Z", "--color"}
 
 
 def fail(code, msg):
     sys.stderr.write("cargo-slot: %s\n" % msg)
     sys.exit(code)
+
+
+def subcommand(args):
+    # Skip a leading +toolchain and the global options; a value option
+    # takes its next token unless it is written --opt=VAL.
+    i = 1 if args and args[0].startswith("+") else 0
+    while i < len(args):
+        if args[i] in VALUE_OPTIONS:
+            i += 2
+        elif args[i].startswith("-"):
+            i += 1
+        else:
+            return args[i]
+    return None
+
+
+def held():
+    return os.environ.get("CARGO_SLOT_HELD", "") not in ("", "0")
+
+
+def acquire_slot(slot_dir, n):
+    # One LOCK_NB try per slot file per pass; a full pass that finds none
+    # free prints the waiting line once, then sleeps 0.1 s and rescans.
+    os.makedirs(slot_dir, exist_ok=True)
+    warned = False
+    while True:
+        for k in range(1, n + 1):
+            fd = os.open(os.path.join(slot_dir, "slot-%d.lock" % k), os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                os.close(fd)
+        if not warned:
+            sys.stderr.write("cargo-slot: waiting\n")
+            sys.stderr.flush()
+            warned = True
+        time.sleep(0.1)
 
 
 def is_shim(path):
@@ -59,6 +101,16 @@ def main():
     real = find_real_cargo(os.environ.get("PATH", ""), shim_dir)
     if real is None:
         fail(127, "no cargo on PATH outside cargo-slot")
+    if subcommand(args) in SLOT_SUBCOMMANDS and not held():
+        # Minimal for now: N is not validated yet.
+        n = int(os.environ.get("CARGO_SLOTS") or 0)
+        if n > 0:
+            slot_dir = os.environ.get("CARGO_SLOT_DIR") or os.path.join(
+                os.environ.get("HOME", ""), ".cache", "agents", "cargo-slots")
+            # The fd stays inheritable so the exec'd cargo holds the slot.
+            fd = acquire_slot(slot_dir, n)
+            os.set_inheritable(fd, True)
+            os.environ["CARGO_SLOT_HELD"] = "1"
     exec_real(real, args)
 
 

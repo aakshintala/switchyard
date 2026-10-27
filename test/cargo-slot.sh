@@ -93,15 +93,21 @@ chmod 755 "$T/perlreal/cargo"
 
 BASEPATH="$T/shims:$T/real:$T/py:/usr/bin:/bin"
 
-# new_run NAME: a fresh directory for one run's fake logs and FIFOs; sets R.
-new_run() {
-  R="$T/runs/$1"
-  mkdir -p "$R" && mkfifo "$R/up" "$R/go" || fail "cannot stage run $1"
+# stage DIR: a run directory with the fake's up and go FIFOs and a stderr FIFO.
+stage() {
+  mkdir -p "$1" && mkfifo "$1/up" "$1/go" "$1/err" || fail "cannot stage $1"
 }
 
-# cargo_as R [VAR=VAL ...] -- ARGS: the installed shim, run as `cargo` in a
-# clean environment. Later VAR=VAL words override the defaults (PATH too).
-cargo_as() {
+# new_run NAME: a fresh run directory; sets R.
+new_run() {
+  R="$T/runs/$1"
+  stage "$R"
+}
+
+# shim_cmd R [VAR=VAL ...] -- ARGS: sets CMD to the installed shim run as
+# `cargo` in a clean environment. Later VAR=VAL words override the defaults
+# (PATH too).
+shim_cmd() {
   local r="$1" envs=()
   shift
   while [ "$1" != "--" ]; do
@@ -109,8 +115,27 @@ cargo_as() {
     shift
   done
   shift
-  env -i PATH="$BASEPATH" HOME="$T/home" FAKE_DIR="$r" \
-    ${envs[@]+"${envs[@]}"} "$T/shims/cargo" "$@"
+  CMD=(env -i PATH="$BASEPATH" HOME="$T/home" FAKE_DIR="$r"
+    ${envs[@]+"${envs[@]}"} "$T/shims/cargo" "$@")
+}
+
+# cargo_as: the same arguments as shim_cmd, run in the foreground.
+cargo_as() {
+  shim_cmd "$@"
+  "${CMD[@]}"
+}
+
+# spawn R [VAR=VAL ...] -- ARGS: the shim in the background, stderr on
+# R/err, which fd 9 reads. Sets SPAWNED to its pid; after exec that is the
+# fake's pid. The pid is recorded for cleanup.
+spawn() {
+  local r="$1"
+  shift
+  shim_cmd "$r" "$@"
+  exec 9<>"$r/err"
+  "${CMD[@]}" 2>"$r/err" &
+  SPAWNED=$!
+  PIDS+=("$SPAWNED")
 }
 
 expect_build_args() {
@@ -142,16 +167,16 @@ done
 
 new_run nocargo
 env -i PATH="$T/shims:$T/py" HOME="$T/home" FAKE_DIR="$R" \
-  "$T/shims/cargo" build >"$R/out" 2>"$R/err"
+  "$T/shims/cargo" build >"$R/out" 2>"$R/shim.err"
 rc=$?
 [ "$rc" = 127 ] || fail "no real cargo on PATH: exit $rc, want 127"
-grep -q 'cargo-slot:' "$R/err" || fail "no real cargo: no cargo-slot: line on stderr"
+grep -q 'cargo-slot:' "$R/shim.err" || fail "no real cargo: no cargo-slot: line on stderr"
 
 new_run pathunset
-env -u PATH FAKE_DIR="$R" "$T/py/python3" "$SHIM" build >"$R/out" 2>"$R/err"
+env -u PATH FAKE_DIR="$R" "$T/py/python3" "$SHIM" build >"$R/out" 2>"$R/shim.err"
 rc=$?
 [ "$rc" = 127 ] || fail "PATH unset: exit $rc, want 127"
-grep -q 'cargo-slot:' "$R/err" || fail "PATH unset: no cargo-slot: line on stderr"
+grep -q 'cargo-slot:' "$R/shim.err" || fail "PATH unset: no cargo-slot: line on stderr"
 
 # A symlink to the shim in a second PATH directory, and a byte copy of it,
 # are both skipped by the marker; the real fake runs.
@@ -235,6 +260,112 @@ expect_no_slot_dir
 new_run stdin
 printf 'x\n' | cargo_as "$R" FAKE_READ_STDIN=1 -- build
 [ "$(cat "$R/stdin")" = "stdin=x" ] || fail "stdin: fake read $(cat "$R/stdin")"
+
+# Task 2: subcommand classification. A slot-taking subcommand waits behind a
+# held slot, and its fake never starts. Every other subcommand passes at once.
+
+# expect_err_line TEXT: the waiter's next stderr line (fd 9) is TEXT, within 60 s.
+expect_err_line() {
+  local line
+  IFS= read -r -t 60 -u 9 line || fail "no stderr line within 60 s, want [$1]"
+  [ "$line" = "$1" ] || fail "stderr line [$line], want [$1]"
+}
+
+# await_file PATH: poll until PATH is non-empty, 300 tries at 0.1 s, then fail.
+await_file() {
+  local i
+  for i in $(seq 1 300); do
+    [ -s "$1" ] && return 0
+    sleep 0.1
+  done
+  fail "$1 never filled"
+}
+
+# hold_slot R: a holder on the only slot of R/slots. It reports its pid on
+# R/up and blocks on R/go. Sets HOLD_PID.
+hold_slot() {
+  local r="$1"
+  exec 7<>"$r/go" 8<>"$r/up"
+  spawn "$r" CARGO_SLOTS=1 CARGO_SLOT_DIR="$r/slots" FAKE_HOLD=1 -- build
+  HOLD_PID=$SPAWNED
+  IFS= read -r -t 60 -u 8 _ || fail "holder never reported its pid"
+}
+
+# release: the holder's fake reads its go line and exits 0.
+release() {
+  printf 'go\n' >&7
+}
+
+# waits_behind_holder NAME ARGS...: with the slot held, the invocation prints
+# one waiting line and its fake never starts.
+waits_behind_holder() {
+  local name="$1" h w hold wpid
+  shift
+  h="$T/runs/$name-hold"
+  w="$T/runs/$name-wait"
+  stage "$h"
+  stage "$w"
+  hold_slot "$h"
+  hold=$HOLD_PID
+  spawn "$w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$h/slots" -- "$@"
+  wpid=$SPAWNED
+  expect_err_line "cargo-slot: waiting"
+  [ ! -e "$w/started" ] || fail "$name: fake started while the slot was held"
+  kill -TERM "$wpid"
+  wait "$wpid" 2>/dev/null
+  [ ! -e "$w/started" ] || fail "$name: fake started after the waiter was killed"
+  release
+  wait "$hold" 2>/dev/null
+}
+
+# passes_while_held NAME ARGS...: with the slot held, the fake runs at once
+# and the shim exits with the fake's status.
+passes_while_held() {
+  local name="$1" h w hold wpid rc
+  shift
+  h="$T/runs/$name-hold"
+  w="$T/runs/$name-pass"
+  stage "$h"
+  stage "$w"
+  hold_slot "$h"
+  hold=$HOLD_PID
+  spawn "$w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$h/slots" -- "$@"
+  wpid=$SPAWNED
+  await_file "$w/held"
+  wait "$wpid"
+  rc=$?
+  [ "$rc" = 0 ] || fail "$name: exit $rc, want 0 from the fake"
+  release
+  wait "$hold" 2>/dev/null
+}
+
+for sub in build check clippy test nextest bench run doc mutants; do
+  waits_behind_holder "sub-$sub" "$sub"
+done
+waits_behind_holder "global-options" \
+  +nightly -Z unstable-options --config k=v -C dir --color always -q -v \
+  --locked --offline --frozen test
+waits_behind_holder "config-equals" --config=k=v build
+
+for sub in metadata fmt --version help t; do
+  passes_while_held "pass-$sub" "$sub"
+done
+passes_while_held "pass-no-args"
+passes_while_held "value-option-eats-test" -Z test fmt
+passes_while_held "plus-only-first" -q +nightly build
+
+# CARGO_SLOTS is read only for a slot-taking subcommand: a bad value on any
+# other subcommand passes straight through with exit 0 and no shim stderr.
+for pair in "abc:fmt" "abc:--version" "-1:metadata"; do
+  v="${pair%%:*}"
+  sub="${pair#*:}"
+  new_run "junk-$v-$sub"
+  cargo_as "$R" CARGO_SLOTS="$v" CARGO_SLOT_DIR="$T/slots" -- "$sub" 2>"$R/shim.err"
+  rc=$?
+  [ "$rc" = 0 ] || fail "CARGO_SLOTS=$v $sub: exit $rc, want 0 from the fake"
+  [ ! -s "$R/shim.err" ] || fail "CARGO_SLOTS=$v $sub: shim wrote [$(cat "$R/shim.err")]"
+  expect_no_slot_dir
+done
 
 echo "cargo-slot: all cases passed"
 cleanup
