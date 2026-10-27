@@ -1362,6 +1362,12 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
     let current = shared.store.snapshot();
     let should_interrupt = should_interrupt && current.status == Status::Running;
     if should_interrupt {
+        if shared.kind == HostKind::Pi {
+            // An abort continues queued messages left in the session, so
+            // drop unsent steers first: they are reported as unconsumed on
+            // the cancelled completion instead of running after the abort.
+            let _ = call(shared, "queue/clear", json!({}));
+        }
         let session_id = current.muse_session_id.unwrap_or_default();
         let params = msp::turn_interrupt_params(&session_id, turn_id.as_deref(), now_ms());
         let _ = call(shared, "turn/interrupt", params);
