@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+# cargo-slot shim
+# Caps concurrent cargo build and test runs on one host. With CARGO_SLOTS=N,
+# at most N cargo invocation trees hold a slot at once. Installed as `cargo`
+# in a directory placed first on a lane's PATH; see autonomous-flywheel.
+import errno
+import os
+import signal
+import sys
+
+MARKER = b"# cargo-slot shim"
+
+
+def fail(code, msg):
+    sys.stderr.write("cargo-slot: %s\n" % msg)
+    sys.exit(code)
+
+
+def is_shim(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(512)
+    except OSError:
+        return False
+    return MARKER in [line.rstrip() for line in head.split(b"\n")[:5]]
+
+
+def find_real_cargo(path_env, shim_dir):
+    # Skip empty, relative and non-directory entries, the shim's own
+    # directory, and every candidate that carries the shim marker.
+    for entry in path_env.split(os.pathsep):
+        if not entry or not os.path.isabs(entry) or not os.path.isdir(entry):
+            continue
+        if os.path.normpath(entry) == shim_dir:
+            continue
+        candidate = os.path.join(entry, "cargo")
+        if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+            continue
+        if is_shim(candidate):
+            continue
+        return candidate
+    return None
+
+
+def exec_real(real, args):
+    # Python ignores SIGPIPE and SIGXFSZ, and exec keeps ignored signals.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+    try:
+        os.execv(real, ["cargo"] + args)
+    except OSError as err:
+        code = 127 if err.errno == errno.ENOENT else 126
+        fail(code, "cannot exec %s: %s" % (real, err.strerror))
+
+
+def main():
+    args = sys.argv[1:]
+    shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    real = find_real_cargo(os.environ.get("PATH", ""), shim_dir)
+    if real is None:
+        fail(127, "no cargo on PATH outside cargo-slot")
+    exec_real(real, args)
+
+
+main()
