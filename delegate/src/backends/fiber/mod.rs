@@ -1376,4 +1376,56 @@ mod tests {
         assert!(!res.text.contains("\"question\""), "{}", res.text);
         assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
     }
+
+    #[test]
+    fn questions_with_denial_finalize_as_done_with_concerns() {
+        let stream = [
+            requested("a_denied", "curl https://example.com", 1),
+            resolved_reason("a_denied", "deny", "reviewer", "fetches a remote host", 2),
+            completed("a_denied", "denied", 3),
+            exited_with_questions("need info", serde_json::json!(["Which branch?"]), 4),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stream, true, "");
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.text.contains("1. Which branch?"), "{}", res.text);
+        assert!(
+            res.text.ends_with("STATUS: DONE_WITH_CONCERNS"),
+            "{}",
+            res.text
+        );
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::DoneWithConcerns);
+        let concerns = out.concerns.expect("concerns");
+        assert!(
+            concerns
+                .iter()
+                .any(|c| c.contains("permission denied: shell")),
+            "{concerns:?}"
+        );
+    }
+
+    #[test]
+    fn denial_supersedes_model_written_error_status() {
+        let stream = [
+            requested("a_denied", "curl https://example.com", 1),
+            resolved_reason("a_denied", "deny", "reviewer", "fetches a remote host", 2),
+            completed("a_denied", "denied", 3),
+            exited_with_questions(
+                "partial\nSTATUS: ERROR",
+                serde_json::json!(["Which branch?"]),
+                4,
+            ),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stream, true, "");
+        assert!(res.text.contains("1. Which branch?"), "{}", res.text);
+        assert!(
+            res.text.ends_with("STATUS: DONE_WITH_CONCERNS"),
+            "{}",
+            res.text
+        );
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::DoneWithConcerns);
+    }
 }
