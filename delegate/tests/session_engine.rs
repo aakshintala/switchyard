@@ -1208,6 +1208,8 @@ fn supervisor_rejects_bad_socket_requests_and_drops_silent_clients() {
 fn supervisor_accepts_escaped_max_text_and_rejects_a_line_over_max_line() {
     let bounds = Bounds {
         rpc_ms: 5_000,
+        // The ~48 MiB write must finish inside the request deadline.
+        read_ms: supervisor::REQUEST_READ,
         ..Bounds::default()
     };
     let mut session = Session::spawn("FAST", "brief", None, bounds);
