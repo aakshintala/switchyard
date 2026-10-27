@@ -208,6 +208,13 @@ for v in "CARGO_SLOTS=" "CARGO_SLOTS=0"; do
   expect_no_slot_dir
 done
 
+# Planted cargo files in the working directory and in tools/. Each one records
+# its own name in FAKE_DIR and exits 0, so a test shows which one ran.
+mkdir -p "$T/cwd/tools"
+printf '#!/bin/sh\n: >"$FAKE_DIR/cwd-ran"\n' >"$T/cwd/cargo"
+printf '#!/bin/sh\n: >"$FAKE_DIR/tools-ran"\n' >"$T/cwd/tools/cargo"
+chmod 755 "$T/cwd/cargo" "$T/cwd/tools/cargo"
+
 new_run nocargo
 env -i PATH="$T/shims:$T/py" HOME="$T/home" FAKE_DIR="$R" \
   "$T/shims/cargo" build >"$R/out" 2>"$R/shim.err"
@@ -215,11 +222,14 @@ rc=$?
 [ "$rc" = 127 ] || fail "no real cargo on PATH: exit $rc, want 127"
 grep -q 'cargo-slot:' "$R/shim.err" || fail "no real cargo: no cargo-slot: line on stderr"
 
+# An unset PATH searches nothing, not even the working directory.
 new_run pathunset
-env -u PATH FAKE_DIR="$R" "$T/py/python3" "$SHIM" build >"$R/out" 2>"$R/shim.err"
+( cd "$T/cwd" && env -u PATH FAKE_DIR="$R" "$T/py/python3" "$SHIM" build ) \
+  >"$R/out" 2>"$R/shim.err"
 rc=$?
 [ "$rc" = 127 ] || fail "PATH unset: exit $rc, want 127"
 grep -q 'cargo-slot:' "$R/shim.err" || fail "PATH unset: no cargo-slot: line on stderr"
+[ ! -e "$R/cwd-ran" ] || fail "PATH unset searched the working directory"
 
 # A symlink to the shim in a second PATH directory, and a byte copy of it,
 # are both skipped by the marker; the real fake runs.
@@ -257,20 +267,27 @@ rc=$?
 [ "$rc" = 0 ] || fail "directory and non-executable cargo: exit $rc, want 0"
 expect_build_args "$R"
 
-# An empty PATH element and relative elements come before the real cargo.
-# Planted cargo files in the working directory and in rel/ never run.
-mkdir -p "$T/cwd/rel"
-for f in "$T/cwd/cargo" "$T/cwd/rel/cargo"; do
-  printf '#!/bin/sh\n: >"$FAKE_DIR/planted"\n' >"$f"
-  chmod 755 "$f"
-done
-new_run relative-and-empty
+# A relative entry resolves against the working directory, so tools/cargo runs
+# ahead of the real cargo.
+new_run relative-entry
 ( cd "$T/cwd" &&
-  cargo_as "$R" PATH="::.:rel:$T/real:$T/py:/usr/bin:/bin" -- build "a b" "" )
+  cargo_as "$R" PATH="$T/shims:tools:$T/real:$T/py:/usr/bin:/bin" -- build "a b" "" )
 rc=$?
-[ "$rc" = 0 ] || fail "relative and empty PATH entries: exit $rc, want 0"
-[ ! -e "$R/planted" ] || fail "a planted cargo ran from an empty or relative PATH entry"
-expect_build_args "$R"
+[ "$rc" = 0 ] || fail "relative PATH entry: exit $rc, want 0 from tools/cargo"
+[ -e "$R/tools-ran" ] || fail "tools/cargo behind a relative PATH entry did not run"
+[ ! -e "$R/started" ] || fail "the real cargo ran ahead of tools/cargo"
+
+# An empty entry and a "." entry both name the working directory, so cwd/cargo
+# runs ahead of the real cargo.
+for entry in "" "."; do
+  new_run "cwd-entry-${entry:-empty}"
+  ( cd "$T/cwd" &&
+    cargo_as "$R" PATH="$T/shims:$entry:$T/real:$T/py:/usr/bin:/bin" -- build "a b" "" )
+  rc=$?
+  [ "$rc" = 0 ] || fail "PATH entry [$entry]: exit $rc, want 0 from cwd/cargo"
+  [ -e "$R/cwd-ran" ] || fail "PATH entry [$entry] did not name the working directory"
+  [ ! -e "$R/started" ] || fail "the real cargo ran ahead of cwd/cargo for PATH entry [$entry]"
+done
 
 # A regular file named like a PATH directory is skipped.
 : >"$T/notdir"
@@ -292,6 +309,16 @@ env -i PATH="$T/own:$T/real:$T/py:/usr/bin:/bin" HOME="$T/home" FAKE_DIR="$R" \
 rc=$?
 [ "$rc" = 0 ] || fail "own directory: exit $rc, want 0 from the real fake"
 [ ! -e "$R/own-planted" ] || fail "a cargo in the shim's own directory ran"
+expect_build_args "$R"
+
+# The same directory named by a relative entry, with the shim run by a relative
+# path from it, is still the shim's own directory and is skipped.
+new_run own-dir-relative
+( cd "$T/own" && env -i PATH=".:$T/real:$T/py:/usr/bin:/bin" HOME="$T/home" \
+  FAKE_DIR="$R" ./shim-by-path build "a b" "" )
+rc=$?
+[ "$rc" = 0 ] || fail "relative own directory: exit $rc, want 0 from the real fake"
+[ ! -e "$R/own-planted" ] || fail "a relative entry for the shim's own directory ran a cargo"
 expect_build_args "$R"
 
 # SIGPIPE and SIGXFSZ are ignored on entry (the parent ignores them, Python

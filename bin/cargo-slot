@@ -104,14 +104,17 @@ def is_shim(path):
 
 
 def find_real_cargo(path_env, shim_dir):
-    # Skip empty, relative and non-directory entries, the shim's own
-    # directory, and every candidate that carries the shim marker.
+    # An unset PATH searches nothing. Otherwise follow execvp: an empty entry
+    # is the working directory, and a relative entry resolves against it.
+    # Skip the shim's own directory, non-directories, candidates that are not
+    # executable regular files, and candidates that carry the shim marker.
+    if path_env is None:
+        return None
     for entry in path_env.split(os.pathsep):
-        if not entry or not os.path.isabs(entry) or not os.path.isdir(entry):
+        directory = os.path.abspath(entry)
+        if directory == shim_dir or not os.path.isdir(directory):
             continue
-        if os.path.normpath(entry) == shim_dir:
-            continue
-        candidate = os.path.join(entry, "cargo")
+        candidate = os.path.join(directory, "cargo")
         if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
             continue
         if is_shim(candidate):
@@ -134,7 +137,7 @@ def exec_real(real, args):
 def main():
     args = sys.argv[1:]
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    real = find_real_cargo(os.environ.get("PATH", ""), shim_dir)
+    real = find_real_cargo(os.environ.get("PATH"), shim_dir)
     if real is None:
         fail(127, "no cargo on PATH outside cargo-slot")
     if subcommand(args) in SLOT_SUBCOMMANDS and not held():
