@@ -427,6 +427,14 @@ mod tests {
         }
         assert!(models["openai/gpt-6-astra"].tiers.is_empty());
         assert!(models["claude-fable-5-1"].tiers.is_empty());
+        for id in [
+            "fiber/anthropic/claude-opus-5-5",
+            "fiber/anthropic/claude-sonnet-5-5",
+            "fiber/anthropic/claude-haiku-5-5",
+        ] {
+            assert!(models[id].tiers.is_empty(), "{id}");
+            assert_eq!(models[id].backend, "fiber", "{id}");
+        }
         assert_eq!(models["muse/muse-wonder-1.0"].backend, "muse");
         assert!(models["muse/muse-wonder-1.0"].tiers.is_empty());
     }

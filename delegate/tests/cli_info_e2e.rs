@@ -58,7 +58,7 @@ fn fiber_script() -> String {
     r#"#!/bin/sh
 case "$1" in
   version) echo "0.0.0" ;;
-  models) printf '%s\n' '{"model":"codex/gpt-6-astra","context_window":272000,"input":10,"output":50,"default":false}' '{"model":"codex/gpt-6.1-sol","context_window":272000,"input":2,"output":10,"default":false}' '{"model":"codex/gpt-6-luna","context_window":272000,"input":0.1,"output":0.5,"default":false}' '{"model":"opencode-go/muse-spark-1.3-contributor","context_window":1048576,"input":0.1,"output":0.2,"default":false}' ;;
+  models) printf '%s\n' '{"model":"codex/gpt-6-astra","context_window":272000,"input":10,"output":50,"default":false}' '{"model":"codex/gpt-6.1-sol","context_window":272000,"input":2,"output":10,"default":false}' '{"model":"codex/gpt-6-luna","context_window":272000,"input":0.1,"output":0.5,"default":false}' '{"model":"opencode-go/muse-spark-1.3-contributor","context_window":1048576,"input":0.1,"output":0.2,"default":false}' '{"model":"anthropic/claude-opus-5-5","context_window":200000,"input":4,"output":20,"default":false}' '{"model":"anthropic/claude-sonnet-5-5","context_window":200000,"input":2,"output":10,"default":false}' '{"model":"anthropic/claude-haiku-5-5","context_window":200000,"input":0.1,"output":0.5,"default":false}' ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
 esac
 "#
@@ -176,6 +176,9 @@ const EXPECTED_IDS: &[&str] = &[
     "composer-2.5",
     "grok-4.7-high",
     "grok-4.7-xhigh",
+    "fiber/anthropic/claude-haiku-5-5",
+    "fiber/anthropic/claude-opus-5-5",
+    "fiber/anthropic/claude-sonnet-5-5",
     "fiber/codex/gpt-6-astra",
     "fiber/codex/gpt-6-luna",
     "fiber/codex/gpt-6-luna:medium",
