@@ -458,7 +458,7 @@ fn send(args: &[String], json_mode: bool) -> Result<i32> {
         return Err(usage("invalid session id"));
     }
     let paths = default_paths();
-    let _current = load_and_settle(&paths, id)?;
+    let current = load_and_settle(&paths, id)?;
     let (argument, parsed_json) = parse_send_args(&args[1..]).map_err(usage)?;
     let json_mode = json_mode || parsed_json;
     let text = if argument == "-" {
@@ -466,6 +466,13 @@ fn send(args: &[String], json_mode: bool) -> Result<i32> {
     } else {
         read_text(&argument, &mut io::empty(), false).map_err(usage)?
     };
+    // pi expands a leading slash into a skill, template or extension command
+    // instead of sending the text to the model; Muse text is unchanged.
+    if text.as_bytes().first() == Some(&b'/') && HostKind::of(&current.model) == HostKind::Pi {
+        return Err(usage(
+            "text starting with / is not sent to the model: pi would expand /skill:<name> or /<template> or run an extension command instead",
+        ));
+    }
     let reply = ipc::request(
         &paths,
         id,

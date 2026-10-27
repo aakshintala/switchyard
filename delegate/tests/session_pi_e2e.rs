@@ -418,6 +418,16 @@ fn bad_model_fails_start_before_any_prompt() {
 }
 
 #[test]
+fn pi_that_exits_before_reading_stdin_fails_start_with_the_eof_text() {
+    let h = Harness::new();
+    let started = h.start_pi("openai/gpt-6-luna", b"B", true, "EXIT_NOW", None, &[]);
+    let value = assert_json_error(&started, 1, "failed");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("pi host closed stdout"), "{message}");
+    assert!(!message.contains("Broken pipe"), "{message}");
+}
+
+#[test]
 fn model_shapes_select_the_host() {
     let h = Harness::new();
     for model in [
