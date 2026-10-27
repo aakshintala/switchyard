@@ -358,6 +358,7 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
                         .unwrap_or_else(|| "session supervisor exited".into()),
                 ));
             }
+            state::reap_recorded_host(&paths, &id);
             mark_start_failed(
                 &paths,
                 &id,
@@ -369,11 +370,7 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            if let Ok(current) = state::read_state(&paths, &id)
-                && let Some(host_pid) = current.host_pid
-            {
-                state::reap_host(host_pid);
-            }
+            state::reap_recorded_host(&paths, &id);
             mark_start_failed(&paths, &id, child.id(), "session startup timed out".into());
             return Err(failed("session startup timed out"));
         }
