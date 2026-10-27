@@ -1405,6 +1405,100 @@ mod tests {
         );
     }
 
+    fn assert_questions_ignored(questions: Option<serde_json::Value>) {
+        let with_q = match questions {
+            Some(q) => exited_with_questions("need info", q, 1),
+            None => exited("need info", 1),
+        };
+        let without = exited("need info", 1);
+        let a = parse_stdout(&with_q, true, "");
+        let b = parse_stdout(&without, true, "");
+        assert_eq!(a.text, b.text);
+        assert!(!a.text.contains("STATUS:"), "{}", a.text);
+        let out = crate::finalize::finalize_run(&a, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::Done);
+    }
+
+    #[test]
+    fn absent_questions_leave_todays_text() {
+        assert_questions_ignored(None);
+    }
+
+    #[test]
+    fn null_questions_leave_todays_text() {
+        assert_questions_ignored(Some(serde_json::Value::Null));
+    }
+
+    #[test]
+    fn empty_questions_leave_todays_text() {
+        assert_questions_ignored(Some(serde_json::json!([])));
+    }
+
+    #[test]
+    fn non_array_questions_leave_todays_text() {
+        assert_questions_ignored(Some(serde_json::json!("Which branch?")));
+    }
+
+    #[test]
+    fn blank_questions_leave_todays_text() {
+        assert_questions_ignored(Some(serde_json::json!([null, "", "   "])));
+    }
+
+    #[test]
+    fn failed_run_with_questions_gets_no_status_line() {
+        let stream = serde_json::json!({
+            "kind": "fiber_exited",
+            "session_id": "s_inline",
+            "ts": 1,
+            "schema_version": 1,
+            "seq": 1,
+            "payload": {"exit_code": 1, "text": "boom", "questions": ["Which branch?"]}
+        })
+        .to_string();
+        let res = parse_stdout(&stream, true, "");
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(res.text, "boom");
+        assert!(!res.text.contains("STATUS:"), "{}", res.text);
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::Error);
+    }
+
+    #[test]
+    fn unclean_exit_with_questions_gets_no_status_line() {
+        let stream = exited_with_questions("need info", serde_json::json!(["Which branch?"]), 1);
+        let res = parse_stdout(&stream, false, "");
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(res.text, "need info");
+        assert!(!res.text.contains("STATUS:"), "{}", res.text);
+    }
+
+    #[test]
+    fn non_string_scalars_render_as_compact_json() {
+        let stream =
+            exited_with_questions("need info", serde_json::json!([42, true, {"note": "x"}]), 1);
+        let res = parse_stdout(&stream, true, "");
+        assert!(res.text.contains("1. 42"), "{}", res.text);
+        assert!(res.text.contains("2. true"), "{}", res.text);
+        assert!(res.text.contains("3. {\"note\":\"x\"}"), "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
+    #[test]
+    fn blank_option_labels_are_skipped() {
+        let stream = exited_with_questions(
+            "need info",
+            serde_json::json!([
+                {"question": "Which env?", "options": [{"label": "  "}, {"label": "prod"}]},
+            ]),
+            1,
+        );
+        let res = parse_stdout(&stream, true, "");
+        assert!(res.text.contains("1. Which env?"), "{}", res.text);
+        assert!(res.text.contains("prod"), "{}", res.text);
+        assert!(!res.text.contains("  -   "), "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
     #[test]
     fn denial_supersedes_model_written_error_status() {
         let stream = [
