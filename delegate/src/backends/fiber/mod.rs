@@ -522,8 +522,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    let text = prefix_notice(text, notice_no_model.as_deref());
-    let mut text = text;
+    let mut text = prefix_notice(text, notice_no_model.as_deref());
     if is_error == Some(false)
         && let Some(section) = questions_section(&payload)
     {
@@ -1403,6 +1402,29 @@ mod tests {
                 .any(|c| c.contains("permission denied: shell")),
             "{concerns:?}"
         );
+    }
+
+    #[test]
+    fn questions_before_denial_still_finalize_as_done_with_concerns() {
+        // Reverse event order: `fiber_exited` carries the questions before
+        // the denial events arrive. A denial wins regardless of order.
+        let stream = [
+            exited_with_questions("need info", serde_json::json!(["Which branch?"]), 1),
+            requested("a_denied", "curl https://example.com", 2),
+            resolved_reason("a_denied", "deny", "reviewer", "fetches a remote host", 3),
+            completed("a_denied", "denied", 4),
+        ]
+        .join("\n");
+        let res = parse_stdout(&stream, true, "");
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.text.contains("1. Which branch?"), "{}", res.text);
+        assert!(
+            res.text.ends_with("STATUS: DONE_WITH_CONCERNS"),
+            "{}",
+            res.text
+        );
+        let out = crate::finalize::finalize_run(&res, &finalize_ctx());
+        assert_eq!(out.status, crate::types::RunStatus::DoneWithConcerns);
     }
 
     fn assert_questions_ignored(questions: Option<serde_json::Value>) {
