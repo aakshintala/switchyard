@@ -41,6 +41,9 @@ pub fn parse_model(model: &str) -> Result<Model, String> {
             return Err("model level must not be empty".to_string());
         }
         if LEVELS.contains(&tail) {
+            if head.is_empty() {
+                return Err("model provider and id must be non-empty".to_string());
+            }
             return Ok(Model {
                 provider: provider.to_string(),
                 id: head.to_string(),
@@ -307,10 +310,6 @@ impl Wire {
             }];
         };
         let id_num = id_key.parse::<i64>().unwrap_or(0);
-        let command = object
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
         let success = object
             .get("success")
             .and_then(Value::as_bool)
@@ -495,15 +494,6 @@ impl Wire {
                 }]
             }
             "model/set" | "thinking/set" | "turn/interrupt" => {
-                if command == "clear_queue" {
-                    let count = data
-                        .get("steering")
-                        .and_then(Value::as_array)
-                        .map(|steering| steering.len())
-                        .unwrap_or(0);
-                    let keep = self.fifo.len().saturating_sub(count);
-                    self.fifo.truncate(keep);
-                }
                 vec![crate::session::msp::Incoming::Response {
                     id: id_num,
                     result: Ok(data),
@@ -782,14 +772,17 @@ impl Wire {
                     .and_then(|message| message.get("stopReason"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if stop_reason == "error" {
-                    let message_text = message
-                        .and_then(|message| message.get("errorMessage"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    self.last_assistant_error = Some(message_text);
-                }
+                self.last_assistant_error = if stop_reason == "error" {
+                    Some(
+                        message
+                            .and_then(|message| message.get("errorMessage"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
                 let usage = message.and_then(|message| message.get("usage"));
                 let input = usage
                     .and_then(|usage| usage.get("input"))
@@ -897,6 +890,10 @@ mod tests {
             let model = super::parse_model(&format!("a/b:{level}")).unwrap();
             assert_eq!(model.id, "b");
             assert_eq!(model.level.as_deref(), Some(level));
+            assert!(
+                super::parse_model(&format!("a/:{level}")).is_err(),
+                "must reject an empty id at level {level}"
+            );
         }
         let free = super::parse_model("a/b:free").unwrap();
         assert_eq!(free.id, "b:free");
@@ -1259,24 +1256,29 @@ mod tests {
         assert_eq!(wire.queued_steers(), 0);
     }
 
+    struct ReplayFrame {
+        kind: String,
+        status: crate::session::state::Status,
+        logs: Vec<serde_json::Value>,
+    }
+
+    struct ReplayResult {
+        incomings: Vec<crate::session::msp::Incoming>,
+        frames: Vec<ReplayFrame>,
+    }
+
     fn replay(
         text: &str,
         wire: &mut super::Wire,
         state: &mut crate::session::state::State,
-    ) -> Vec<crate::session::msp::Incoming> {
+    ) -> ReplayResult {
         use crate::session::msp::Incoming;
         use crate::session::state as st;
-        let mut out_all = Vec::new();
+        let mut result = ReplayResult {
+            incomings: Vec::new(),
+            frames: Vec::new(),
+        };
         let mut next_id: i64 = 1;
-        // Map recorded stdin ids to wire ids; wire ids restart per replay call,
-        // so offset by wire's history via next_id starting at 1 each call is fine
-        // only when wire is fresh. For combined steer-abort+after-abort on one
-        // wire, the caller passes the same wire and we keep incrementing.
-        // To avoid collisions, track next_id in wire via a thread-local? Simpler:
-        // use a static counter per replay call starting from a high base passed in.
-        // Here we use next_id starting at 1 and rely on caller to ensure wire is
-        // fresh or ids do not collide (pending map removes after use, so reuse is safe
-        // as long as no two pending overlap; responses come in order).
         let mut recorded_to_wire: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut command_seq: u64 = 0;
@@ -1285,12 +1287,12 @@ mod tests {
             now += 10;
             if let Some(frame) = line.strip_prefix("> ") {
                 let req: serde_json::Value = serde_json::from_str(frame).unwrap();
-                let rtype = req.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+                let kind = req.get("type").and_then(|v| v.as_str()).unwrap_or_default();
                 let recorded = req.get("id").and_then(|v| v.as_str()).unwrap_or_default();
                 let wire_id = next_id;
                 next_id += 1;
                 recorded_to_wire.insert(recorded.to_string(), wire_id.to_string());
-                match rtype {
+                match kind {
                     "prompt" => {
                         let text_msg = req
                             .get("message")
@@ -1326,58 +1328,60 @@ mod tests {
                             .encode(wire_id, "turn/interrupt", &serde_json::json!({}))
                             .unwrap();
                     }
-                    _ => panic!("unexpected stdin type {rtype}"),
+                    _ => panic!("unexpected stdin type {kind}"),
                 }
+                result.frames.push(ReplayFrame {
+                    kind: kind.to_string(),
+                    status: state.status.clone(),
+                    logs: Vec::new(),
+                });
                 continue;
             }
             let Some(frame) = line.strip_prefix("< ") else {
                 continue;
             };
             let mut val: serde_json::Value = serde_json::from_str(frame).unwrap();
-            if val.get("type").and_then(|v| v.as_str()) == Some("response") {
-                if let Some(id) = val.get("id").and_then(|v| v.as_str())
-                    && let Some(mapped) = recorded_to_wire.remove(id)
-                {
-                    val["id"] = serde_json::Value::String(mapped);
-                }
-                let rewritten = val.to_string();
-                let incomings = wire.parse(&rewritten);
-                for incoming in &incomings {
-                    match incoming {
-                        Incoming::Response { id: _, result } => {
-                            if let Ok(value) = result {
-                                // Only turn/start responses carry turnId + started disposition;
-                                // steer responses carry steered and never reach apply_ack.
-                                let is_start = value.get("turnId").is_some()
-                                    && value.get("disposition").and_then(|v| v.as_str())
-                                        == Some("started");
-                                if is_start {
-                                    let turn_id = value["turnId"].as_str().unwrap_or_default();
-                                    let disp = crate::session::msp::ack_disposition(value);
-                                    let _ = st::apply_ack(state, turn_id, disp, now);
-                                }
-                            } else {
-                                st::abort_turn(state, now);
-                            }
-                        }
-                        Incoming::Event(event) => {
-                            let _ = st::apply_event(state, event, now);
-                        }
-                        _ => {}
-                    }
-                }
-                out_all.extend(incomings);
-            } else {
-                let incomings = wire.parse(&val.to_string());
-                for incoming in &incomings {
-                    if let Incoming::Event(event) = incoming {
-                        let _ = st::apply_event(state, event, now);
-                    }
-                }
-                out_all.extend(incomings);
+            let kind = val
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if kind == "response"
+                && let Some(id) = val.get("id").and_then(|v| v.as_str())
+                && let Some(mapped) = recorded_to_wire.remove(id)
+            {
+                val["id"] = serde_json::Value::String(mapped);
             }
+            let incomings = wire.parse(&val.to_string());
+            let mut logs = Vec::new();
+            for incoming in &incomings {
+                match incoming {
+                    Incoming::Response { result, .. } => {
+                        if let Ok(value) = result {
+                            let is_start = value.get("turnId").is_some()
+                                && value.get("disposition").and_then(|v| v.as_str())
+                                    == Some("started");
+                            if is_start {
+                                let turn_id = value["turnId"].as_str().unwrap_or_default();
+                                let disposition = crate::session::msp::ack_disposition(value);
+                                let _ = st::apply_ack(state, turn_id, disposition, now);
+                            }
+                        } else {
+                            st::abort_turn(state, now);
+                        }
+                    }
+                    Incoming::Event(event) => logs.extend(st::apply_event(state, event, now)),
+                    _ => {}
+                }
+            }
+            result.frames.push(ReplayFrame {
+                kind: kind.to_string(),
+                status: state.status.clone(),
+                logs,
+            });
+            result.incomings.extend(incomings);
         }
-        out_all
+        result
     }
 
     fn non_ignored(incomings: &[crate::session::msp::Incoming]) -> Vec<String> {
@@ -1408,7 +1412,8 @@ mod tests {
         use crate::session::state as st;
         let mut wire = super::Wire::new();
         let mut state = st::new_state("s-basic", "m", "/work", "/inbox", 1000);
-        let incomings = replay(PROMPT_BASIC, &mut wire, &mut state);
+        let replayed = replay(PROMPT_BASIC, &mut wire, &mut state);
+        let incomings = replayed.incomings;
         let kinds = non_ignored(&incomings);
         assert_eq!(
             kinds,
@@ -1470,93 +1475,31 @@ mod tests {
 
     #[test]
     fn replay_prompt_tools_matches_contract() {
+        use crate::session::msp::{HostEvent, Incoming};
         use crate::session::state as st;
+
         let mut wire = super::Wire::new();
         let mut state = st::new_state("s-tools", "m", "/work", "/inbox", 1000);
-        // Drive line by line to observe running after first turn_end.
-        let mut next_id: i64 = 1;
-        let mut recorded_to_wire: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut command_seq: u64 = 0;
-        let mut now: u64 = 1000;
-        let mut saw_running_after_first_turn_end = false;
-        let mut first_turn_end_seen = false;
+        let replayed = replay(PROMPT_TOOLS, &mut wire, &mut state);
         let mut tool_started = Vec::new();
         let mut tool_completed = Vec::new();
-        for line in PROMPT_TOOLS.lines() {
-            now += 10;
-            if let Some(frame) = line.strip_prefix("> ") {
-                let req: serde_json::Value = serde_json::from_str(frame).unwrap();
-                let recorded = req["id"].as_str().unwrap_or_default().to_string();
-                let text_msg = req["message"].as_str().unwrap_or_default().to_string();
-                command_seq += 1;
-                let cmd_id = format!("cmd-{command_seq}");
-                assert!(st::begin_turn(&mut state, now));
-                let params = serde_json::json!({
-                    "input": [{"type": "text", "text": text_msg}],
-                    "commandId": cmd_id,
-                });
-                let _ = wire.encode(next_id, "turn/start", &params).unwrap();
-                recorded_to_wire.insert(recorded, next_id.to_string());
-                next_id += 1;
-                continue;
-            }
-            let Some(frame) = line.strip_prefix("< ") else {
-                continue;
-            };
-            let mut val: serde_json::Value = serde_json::from_str(frame).unwrap();
-            if val.get("type").and_then(|v| v.as_str()) == Some("response") {
-                if let Some(id) = val.get("id").and_then(|v| v.as_str())
-                    && let Some(mapped) = recorded_to_wire.remove(id)
-                {
-                    val["id"] = serde_json::Value::String(mapped);
-                }
-                let incomings = wire.parse(&val.to_string());
-                for incoming in incomings {
-                    match incoming {
-                        crate::session::msp::Incoming::Response {
-                            result: Ok(value), ..
-                        } => {
-                            let turn_id = value["turnId"].as_str().unwrap_or_default().to_string();
-                            let disp = crate::session::msp::ack_disposition(&value);
-                            let _ = st::apply_ack(&mut state, &turn_id, disp, now);
-                        }
-                        crate::session::msp::Incoming::Event(event) => {
-                            let _ = st::apply_event(&mut state, &event, now);
-                        }
-                        _ => {}
+        for incoming in &replayed.incomings {
+            if let Incoming::Event(event) = incoming {
+                match event {
+                    HostEvent::ToolStarted { tool, .. } => tool_started.push(tool.clone()),
+                    HostEvent::ToolCompleted { tool, status, .. } => {
+                        tool_completed.push((tool.clone(), status.clone()));
                     }
+                    _ => {}
                 }
-                continue;
-            }
-            // Check turn_end frame type before parsing (it is ignored but state must be running).
-            if val.get("type").and_then(|v| v.as_str()) == Some("turn_end") && !first_turn_end_seen
-            {
-                first_turn_end_seen = true;
-            }
-            let incomings = wire.parse(&val.to_string());
-            for incoming in incomings {
-                if let crate::session::msp::Incoming::Event(event) = &incoming {
-                    match event {
-                        crate::session::msp::HostEvent::ToolStarted { tool, .. } => {
-                            tool_started.push(tool.clone());
-                        }
-                        crate::session::msp::HostEvent::ToolCompleted { tool, status, .. } => {
-                            tool_completed.push((tool.clone(), status.clone()));
-                        }
-                        _ => {}
-                    }
-                    let _ = st::apply_event(&mut state, event, now);
-                }
-            }
-            if first_turn_end_seen && !saw_running_after_first_turn_end {
-                // After the first turn_end frame, the delegate turn is still running.
-                assert_eq!(state.status, crate::session::state::Status::Running);
-                saw_running_after_first_turn_end = true;
             }
         }
-        assert!(saw_running_after_first_turn_end);
-        assert_eq!(state.status, crate::session::state::Status::Idle);
+        let first_turn_end = replayed
+            .frames
+            .iter()
+            .find(|frame| frame.kind == "turn_end");
+        assert!(first_turn_end.is_some_and(|frame| frame.status == st::Status::Running));
+        assert_eq!(state.status, st::Status::Idle);
         assert_eq!(state.turn_count, 1);
         assert_eq!(tool_started, vec!["write".to_string(), "bash".to_string()]);
         assert_eq!(
@@ -1570,234 +1513,67 @@ mod tests {
         assert_eq!(state.usage.output_tokens, 845);
         assert_eq!(state.usage.total_tokens, 5569);
     }
-
     #[test]
     fn replay_steer_abort_then_after_abort() {
+        use crate::session::msp::{HostEvent, Incoming};
         use crate::session::state as st;
+
         let mut wire = super::Wire::new();
         let mut state = st::new_state("s-abort", "m", "/work", "/inbox", 1000);
-        // Replay steer-abort with explicit steer command ids to check unconsumed.
-        let mut next_id: i64 = 1;
-        let mut recorded_to_wire: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut now: u64 = 1000;
-        let mut steer_cmd = String::new();
-        let mut completion_logs: Vec<serde_json::Value> = Vec::new();
-        let mut completion: Option<(String, String, Option<crate::session::msp::TurnError>)> = None;
-        let mut tool_status: Option<String> = None;
-        for line in STEER_ABORT.lines() {
-            now += 10;
-            if let Some(frame) = line.strip_prefix("> ") {
-                let req: serde_json::Value = serde_json::from_str(frame).unwrap();
-                let rtype = req["type"].as_str().unwrap_or_default();
-                let recorded = req["id"].as_str().unwrap_or_default().to_string();
-                let wire_id = next_id;
-                next_id += 1;
-                recorded_to_wire.insert(recorded, wire_id.to_string());
-                match rtype {
-                    "prompt" => {
-                        let text_msg = req["message"].as_str().unwrap_or_default().to_string();
-                        let is_steer =
-                            req.get("streamingBehavior").and_then(|v| v.as_str()) == Some("steer");
-                        if is_steer {
-                            steer_cmd = format!("steer-cmd-{wire_id}");
-                            st::note_steer(&mut state, &steer_cmd);
-                            let params = serde_json::json!({
-                                "input": [{"type": "text", "text": text_msg}],
-                                "commandId": steer_cmd,
-                            });
-                            let _ = wire.encode(wire_id, "turn/steer", &params).unwrap();
-                        } else {
-                            let cmd_id = format!("cmd-{wire_id}");
-                            assert!(st::begin_turn(&mut state, now));
-                            let params = serde_json::json!({
-                                "input": [{"type": "text", "text": text_msg}],
-                                "commandId": cmd_id,
-                            });
-                            let _ = wire.encode(wire_id, "turn/start", &params).unwrap();
-                        }
-                    }
-                    "clear_queue" => {
-                        let _ = wire
-                            .encode(wire_id, "queue/clear", &serde_json::json!({}))
-                            .unwrap();
-                    }
-                    "abort" => {
-                        let _ = wire
-                            .encode(wire_id, "turn/interrupt", &serde_json::json!({}))
-                            .unwrap();
-                    }
-                    _ => unreachable!(),
-                }
-                continue;
-            }
-            let Some(frame) = line.strip_prefix("< ") else {
-                continue;
-            };
-            let mut val: serde_json::Value = serde_json::from_str(frame).unwrap();
-            if val.get("type").and_then(|v| v.as_str()) == Some("response") {
-                if let Some(id) = val.get("id").and_then(|v| v.as_str())
-                    && let Some(mapped) = recorded_to_wire.remove(id)
-                {
-                    val["id"] = serde_json::Value::String(mapped);
-                }
-                let incomings = wire.parse(&val.to_string());
-                for incoming in incomings {
-                    match incoming {
-                        crate::session::msp::Incoming::Response { result, .. } => {
-                            if let Ok(value) = &result
-                                && value.get("turnId").is_some()
-                                && value.get("disposition").and_then(|v| v.as_str())
-                                    == Some("started")
-                            {
-                                let turn_id =
-                                    value["turnId"].as_str().unwrap_or_default().to_string();
-                                let disp = crate::session::msp::ack_disposition(value);
-                                let _ = st::apply_ack(&mut state, &turn_id, disp, now);
-                            }
-                        }
-                        crate::session::msp::Incoming::Event(event) => {
-                            let lines = st::apply_event(&mut state, &event, now);
-                            if let crate::session::msp::HostEvent::TurnCompleted {
-                                turn_id,
-                                terminal,
-                                error,
-                            } = &event
-                            {
-                                completion =
-                                    Some((turn_id.clone(), terminal.clone(), error.clone()));
-                                completion_logs = lines;
-                            }
-                            if let crate::session::msp::HostEvent::ToolCompleted {
-                                status,
-                                tool,
-                                ..
-                            } = &event
-                                && tool == "bash"
-                            {
-                                tool_status = Some(status.clone());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                continue;
-            }
-            let incomings = wire.parse(&val.to_string());
-            for incoming in incomings {
-                if let crate::session::msp::Incoming::Event(event) = incoming {
-                    let lines = st::apply_event(&mut state, &event, now);
-                    if let crate::session::msp::HostEvent::TurnCompleted {
+        let fixtures = format!("{STEER_ABORT}\n{AFTER_ABORT}");
+        let replayed = replay(&fixtures, &mut wire, &mut state);
+        let mut completions = Vec::new();
+        let mut tool_status = None;
+        for incoming in &replayed.incomings {
+            if let Incoming::Event(event) = incoming {
+                match event {
+                    HostEvent::TurnCompleted {
                         turn_id,
                         terminal,
                         error,
-                    } = &event
-                    {
-                        completion = Some((turn_id.clone(), terminal.clone(), error.clone()));
-                        completion_logs = lines;
+                    } => {
+                        completions.push((turn_id.clone(), terminal.clone(), error.clone()));
                     }
-                    if let crate::session::msp::HostEvent::ToolCompleted { status, tool, .. } =
-                        &event
-                        && tool == "bash"
-                    {
+                    HostEvent::ToolCompleted { status, tool, .. } if tool == "bash" => {
                         tool_status = Some(status.clone());
                     }
+                    _ => {}
                 }
             }
-            // After clear_queue response, steer count is 0.
-            if frame.contains("\"command\":\"clear_queue\"") {
-                // The clear_queue response is handled above; check here after events?
-            }
         }
+
         assert_eq!(wire.queued_steers(), 0);
         assert_eq!(tool_status.as_deref(), Some("failed"));
-        let (turn_id, terminal, error) = completion.unwrap();
-        assert_eq!(turn_id, "pi-turn-1");
-        assert_eq!(terminal, "cancelled");
-        assert!(error.is_none());
-        assert!(completion_logs.iter().any(|line| {
-            line.get("kind").and_then(|v| v.as_str()) == Some("steer.unconsumed")
-                && line
-                    .get("commandIds")
-                    .and_then(|v| v.as_array())
-                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&steer_cmd)))
-        }));
-        // Then after-abort prompt is pi-turn-2, completes completed.
-        let mut next_id2 = next_id;
-        let mut recorded_to_wire2: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        for line in AFTER_ABORT.lines() {
-            now += 10;
-            if let Some(frame) = line.strip_prefix("> ") {
-                let req: serde_json::Value = serde_json::from_str(frame).unwrap();
-                let recorded = req["id"].as_str().unwrap_or_default().to_string();
-                let text_msg = req["message"].as_str().unwrap_or_default().to_string();
-                let cmd_id = format!("cmd-{next_id2}");
-                assert!(st::begin_turn(&mut state, now));
-                let params = serde_json::json!({
-                    "input": [{"type": "text", "text": text_msg}],
-                    "commandId": cmd_id,
-                });
-                let _ = wire.encode(next_id2, "turn/start", &params).unwrap();
-                recorded_to_wire2.insert(recorded, next_id2.to_string());
-                next_id2 += 1;
-                continue;
-            }
-            let Some(frame) = line.strip_prefix("< ") else {
-                continue;
-            };
-            let mut val: serde_json::Value = serde_json::from_str(frame).unwrap();
-            if val.get("type").and_then(|v| v.as_str()) == Some("response") {
-                if let Some(id) = val.get("id").and_then(|v| v.as_str())
-                    && let Some(mapped) = recorded_to_wire2.remove(id)
-                {
-                    val["id"] = serde_json::Value::String(mapped);
-                }
-                // Merge with earlier map (should be empty now, but keep for safety).
-                if let Some(id) = val.get("id").and_then(|v| v.as_str())
-                    && let Some(mapped) = recorded_to_wire.remove(id)
-                {
-                    val["id"] = serde_json::Value::String(mapped);
-                }
-                let incomings = wire.parse(&val.to_string());
-                for incoming in incomings {
-                    match incoming {
-                        crate::session::msp::Incoming::Response { result, .. } => {
-                            if let Ok(value) = &result
-                                && value.get("turnId").is_some()
-                            {
-                                let turn_id =
-                                    value["turnId"].as_str().unwrap_or_default().to_string();
-                                let disp = crate::session::msp::ack_disposition(value);
-                                let _ = st::apply_ack(&mut state, &turn_id, disp, now);
-                            }
-                        }
-                        crate::session::msp::Incoming::Event(event) => {
-                            let _ = st::apply_event(&mut state, &event, now);
-                        }
-                        _ => {}
-                    }
-                }
-                continue;
-            }
-            let incomings = wire.parse(&val.to_string());
-            for incoming in incomings {
-                if let crate::session::msp::Incoming::Event(event) = incoming {
-                    let _ = st::apply_event(&mut state, &event, now);
-                }
-            }
-        }
-        assert_eq!(state.status, crate::session::state::Status::Idle);
+        assert_eq!(completions.len(), 2);
+        assert_eq!(completions[0].0, "pi-turn-1");
+        assert_eq!(completions[0].1, "cancelled");
+        assert!(completions[0].2.is_none());
+        assert_eq!(completions[1].0, "pi-turn-2");
+        assert_eq!(completions[1].1, "completed");
+        assert!(completions[1].2.is_none());
+        assert!(
+            replayed
+                .frames
+                .iter()
+                .flat_map(|frame| &frame.logs)
+                .any(|line| {
+                    line.get("kind").and_then(|value| value.as_str()) == Some("steer.unconsumed")
+                        && line
+                            .get("commandIds")
+                            .and_then(|ids| ids.as_array())
+                            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some("cmd-2")))
+                })
+        );
+        assert_eq!(state.status, st::Status::Idle);
         assert_eq!(state.turn_count, 2);
         assert_eq!(
-            state.last_turn.as_ref().map(|t| t.terminal.as_str()),
+            state.last_turn.as_ref().map(|turn| turn.terminal.as_str()),
             Some("completed")
         );
         assert_eq!(state.usage.prompt_tokens, 6015);
         assert_eq!(state.usage.output_tokens, 175);
         assert_eq!(state.usage.total_tokens, 6190);
     }
-
     #[test]
     fn races_and_echoes_behave() {
         use crate::session::msp::{HostEvent, Incoming};
@@ -2090,6 +1866,33 @@ mod tests {
                 Some("completed")
             );
         }
+    }
+
+    #[test]
+    fn recovered_retry_completes_turn() {
+        use crate::session::msp::{HostEvent, Incoming};
+
+        let mut wire = super::Wire::new();
+        assert!(matches!(
+            wire.parse(r#"{"type":"agent_start"}"#).as_slice(),
+            [Incoming::Event(HostEvent::TurnStarted { .. })]
+        ));
+        let _ = wire.parse(
+            r#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"529 overloaded"}}"#,
+        );
+        let _ = wire.parse(r#"{"type":"auto_retry_start"}"#);
+        let _ = wire.parse(
+            r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"recovered"}],"stopReason":"stop"}}"#,
+        );
+        let _ = wire.parse(r#"{"type":"auto_retry_end","success":true}"#);
+
+        let settled = wire.parse(r#"{"type":"agent_settled","aborted":false}"#);
+        assert!(matches!(
+            settled.as_slice(),
+            [Incoming::Event(HostEvent::TurnCompleted {
+                terminal, error: None, ..
+            })] if terminal == "completed"
+        ));
     }
 
     #[test]
