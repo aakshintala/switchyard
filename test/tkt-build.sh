@@ -212,6 +212,8 @@ Read the plan at `__PLAN__` before anything else.
 
 Push the branch. The body starts with `__CLOSING__` and holds `__ATTRIBUTION__`.
 
+Implemented by: __LANE_MODEL__
+
 The gate passes: `__GATE__`.
 __EXTRA__
 EOF
@@ -463,14 +465,27 @@ grep -q "^gate|" "$T/calls.log" && fail "ask: the gate never runs"
 grep -q "^review-start|" "$T/calls.log" && fail "ask: review never starts"
 bash "$TKT_STATE" "$S" get head >/dev/null 2>&1 && fail "ask: pr and head stay unset"
 
-# --- a lane usage error (no verdict line) becomes a LANE-ERROR ---
+# --- a lane with no model is refused before dispatch, never a LANE-ERROR ---
 setup_case lane-error
 grep -v '^model\.lane=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
 run_build
 [ "$RC" -eq 2 ] || fail "lane-error exits 2 (rc=$RC)"
-expect_verdict "TKT tkt-build LANE-ERROR log=*" "lane-error"
+expect_verdict "TKT tkt-build PRECONDITION missing=model.lane log=*" "lane-error"
 grep -q "model.lane" <<<"$OUT" || fail "lane-error: the digest names the key"
 grep -q "model.lane" "$CDIR/stderr.txt" || fail "lane-error: stderr names the key"
+grep -q -- "-lane-" "$T/calls.log" && fail "lane-error: the lane never dispatches"
+
+# --- the lane brief carries the state lane model, never unknown ---
+setup_case lane-model
+run_build
+[ "$RC" -eq 0 ] || fail "lane-model exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "lane-model"
+grep -q "^run|id=stub-1|model=lane-m|" "$T/calls.log" || fail "lane-model: the lane runs on model.lane"
+brief="$(grep '^run|' "$T/calls.log" | sed 's/.*prompt=//')"
+case "$brief" in "$CDIR/run/"*) ;; *) fail "lane-model: the brief is written under \$CDIR/run";; esac
+impl="$(grep '^Implemented by:' "$brief")"
+[ "$impl" = "Implemented by: lane-m" ] || fail "lane-model: the brief holds [$impl]"
+case "$impl" in *unknown*) fail "lane-model: the Implemented by line never holds unknown";; esac
 
 # --- no PR for the branch stops the build before the gate ---
 setup_case prempty
