@@ -339,10 +339,25 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
     if stored_model.is_empty() {
         return usage(format!("cannot resume {old_id}: record has no model"));
     }
-    let Some(session) = old["resume"]["sessionId"].as_str() else {
-        return usage(format!("cannot resume {old_id}: record has no session id"));
-    };
-    let session = session.to_string();
+    let session: Option<String> = old["resume"]["sessionId"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(String::from);
+    if session.is_none() {
+        // Fiber mints the session id on its first output line, so a job
+        // killed before that has no id to resume. An explicit resume of
+        // such a record runs fresh; a cancelled record is still refused,
+        // as is a record from any other backend.
+        let cancelled = old["status"] == "CANCELLED";
+        let is_fiber = build_deps()
+            .ok()
+            .and_then(|d| resolve_model(Some(&stored_model), &d.config).ok())
+            .map(|r| r.backend == "fiber")
+            .unwrap_or(false);
+        if cancelled || !is_fiber {
+            return usage(format!("cannot resume {old_id}: record has no session id"));
+        }
+    }
     let stored_cwd = old["resume"]["cwd"].as_str().unwrap_or("").to_string();
     let stored_gate = old["resume"]["gate"].as_str().unwrap_or("").to_string();
     let tool_idle_ms = old["resume"]["toolIdleMs"].as_f64();
@@ -411,7 +426,7 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
         tool_idle_ms,
         idle_ms,
         wall_ms,
-        session: Some(&session),
+        session: session.as_deref(),
         resumed_from: Some(old_id),
     }) {
         Ok(id) => id,

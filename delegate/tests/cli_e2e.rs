@@ -1099,7 +1099,7 @@ fn resume_unknown_no_session_and_empty_prompt_exit_2() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // A record with no session id is not resumable.
+    // A non-Fiber record with no session id is not resumable.
     let slow = e.run("SILENT");
     let cancelled = e.delegate(&["cancel", &slow], None);
     assert_eq!(cancelled.status.code(), Some(0));
