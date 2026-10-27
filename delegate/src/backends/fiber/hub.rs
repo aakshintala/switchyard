@@ -62,11 +62,82 @@ fn clamp_bound(bound: Duration) -> Duration {
     bound.max(Duration::from_millis(1))
 }
 
-/// The writer side of the connection, shared with the control thread from
-/// T3. One lock per write sequence; the driver never holds it across a read.
+/// The writer side of the connection, shared with the control thread. One
+/// lock per write sequence; the driver never holds it across a read.
 #[derive(Debug)]
 struct Shared {
     out: Mutex<Out>,
+    /// Test-only clock and pause points for the race and clock tests (N5):
+    /// the production build has no field here.
+    #[cfg(test)]
+    hooks: Hooks,
+}
+
+/// Test seam (N5): a clock the test advances as a value, and pause points
+/// where the driver stops until the test releases it. No sleep, no real
+/// wait on a constant, no production field.
+#[cfg(test)]
+struct Hooks {
+    clock: Box<dyn Fn() -> Instant + Send + Sync>,
+    pause: Option<Box<dyn Fn(Point) + Send + Sync>>,
+}
+
+#[cfg(test)]
+impl Hooks {
+    fn live() -> Self {
+        Hooks {
+            clock: Box::new(Instant::now),
+            pause: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for Hooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hooks").finish()
+    }
+}
+
+/// The places the driver stops for the race tests. Fired in both builds in
+/// `pause!` calls; without `cfg(test)` the macro expands to nothing.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Point {
+    BeforeRead,
+    AfterLine,
+    BeforeStartAnswer,
+    BeforeSubscribeWrite,
+    BeforeSubscribeAck,
+    AfterSubscribeAck,
+    BeforePromptWrite,
+    AfterVerdictFlag,
+}
+
+/// The run's clock: wall time in production, the test's value under test.
+#[cfg(not(test))]
+fn now(_shared: &Shared) -> Instant {
+    Instant::now()
+}
+
+/// The run's clock: wall time in production, the test's value under test.
+#[cfg(test)]
+fn now(shared: &Shared) -> Instant {
+    (shared.hooks.clock)()
+}
+
+#[cfg(test)]
+macro_rules! pause {
+    ($shared:expr, $point:expr) => {
+        if let Some(pause) = $shared.hooks.pause.as_ref() {
+            pause($point);
+        }
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! pause {
+    ($shared:expr, $point:expr) => {};
 }
 
 /// The writable half: one sequence at a time, one budget per sequence.
@@ -82,7 +153,67 @@ struct Out {
     session_id: Option<String>,
     subscribed: bool,
     summary_sent: bool,
+    summary_ids: Vec<String>,
     close_now_id: Option<String>,
+    close_now_ids: Vec<String>,
+    close_now_open: bool,
+    intent: Intent,
+    stopping: bool,
+    retried: bool,
+}
+
+/// What the control thread asked for: `Kill` upgrades a pending `Cancel`,
+/// and the two differ only in the crash text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Intent {
+    None,
+    Cancel,
+    Kill,
+}
+
+/// Why the run is stopping: a control-thread stop, or an expired phase
+/// bound running the stop procedure as for `cancel` (R10).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopReason {
+    Kill,
+    Cancel,
+    TurnStartWait,
+    TurnWait,
+}
+
+/// A stop under way: the text is fixed at the deadline, while a `fiber_exited`
+/// read before then still wins in the line handler (R3).
+struct Stop {
+    reason: StopReason,
+    deadline: Instant,
+}
+
+/// One ack wait: which command is unanswered, and when the wait ends in a
+/// crash (R10). The driver installs it in `Rest` around each `await_ack`.
+struct AckWait {
+    what: &'static str,
+    deadline: Instant,
+}
+
+/// The ids the driver knows at one pass: answers for these are the client's
+/// own commands, never protocol errors. Rebuilt after every line read: a
+/// retry or a control-thread `close now` mints ids mid-wait.
+#[derive(Default)]
+struct KnownIds {
+    close_id: Option<String>,
+    close_now_ids: Vec<String>,
+    summary_ids: Vec<String>,
+    stream_closed_pending: bool,
+}
+
+fn known_ids(rest: &Rest, shared: &Shared) -> KnownIds {
+    let out = lock(&shared.out);
+    KnownIds {
+        close_id: rest.close_id.clone(),
+        close_now_ids: out.close_now_ids.clone(),
+        summary_ids: out.summary_ids.clone(),
+        stream_closed_pending: rest.stream_closed_deadline.is_some(),
+    }
 }
 
 /// The one way to lock `Out`: a poisoned lock is the last holder's panic,
@@ -182,19 +313,74 @@ impl Out {
     }
 }
 
+impl Out {
+    fn new(deadline: Duration) -> Self {
+        Out {
+            writer: None,
+            deadline: clamp_bound(deadline),
+            broken: false,
+            ended: false,
+            session_id: None,
+            subscribed: false,
+            summary_sent: false,
+            summary_ids: Vec::new(),
+            close_now_id: None,
+            close_now_ids: Vec::new(),
+            close_now_open: false,
+            intent: Intent::None,
+            stopping: false,
+            retried: false,
+        }
+    }
+
+    /// One intent-checked locked write: the check and the write are one
+    /// locked call, so no line goes out after the intent is set, after a
+    /// `close now`, once stopping or ended, or on a broken connection.
+    /// False stops the driver at once; the driver tells a failed intent
+    /// write from a failed connection write by reading the intent.
+    fn send_checked(&mut self, line: &str) -> bool {
+        if self.intent != Intent::None
+            || self.close_now_id.is_some()
+            || self.stopping
+            || self.ended
+            || self.broken
+        {
+            return false;
+        }
+        self.write_lines(&[line.to_string()])
+    }
+
+    fn send_start(&mut self, line: &str) -> bool {
+        self.send_checked(line)
+    }
+
+    fn send_subscribe(&mut self, line: &str) -> bool {
+        self.send_checked(line)
+    }
+
+    fn send_prompt(&mut self, line: &str) -> bool {
+        self.send_checked(line)
+    }
+
+    fn send_close(&mut self, line: &str) -> bool {
+        self.send_checked(line)
+    }
+}
+
 impl Shared {
     fn new(deadline: Duration) -> Self {
         Shared {
-            out: Mutex::new(Out {
-                writer: None,
-                deadline,
-                broken: false,
-                ended: false,
-                session_id: None,
-                subscribed: false,
-                summary_sent: false,
-                close_now_id: None,
-            }),
+            out: Mutex::new(Out::new(deadline)),
+            #[cfg(test)]
+            hooks: Hooks::live(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_hooks(deadline: Duration, hooks: Hooks) -> Self {
+        Shared {
+            out: Mutex::new(Out::new(deadline)),
+            hooks,
         }
     }
 
@@ -215,15 +401,200 @@ impl Shared {
         };
         let mut lines = Vec::with_capacity(2);
         if !out.subscribed && !out.summary_sent {
-            lines.push(subscribe_summary_command(&new_command_id(), &session_id));
+            let summary_id = new_command_id();
+            lines.push(subscribe_summary_command(&summary_id, &session_id));
+            out.summary_ids.push(summary_id);
             out.summary_sent = true;
         }
         let close_id = new_command_id();
         lines.push(close_now_command(&close_id, &session_id));
+        out.close_now_ids.push(close_id.clone());
         if out.write_lines(&lines) {
             out.close_now_id = Some(close_id);
+            out.close_now_open = true;
         }
     }
+
+    /// The one retry of a `close now` (F4, R16): after a `not_subscribed`
+    /// rejection, or a `stream_closed` read with the `close now` unanswered.
+    /// Skips an already-sent `summary` subscribe (R19): the hub would reject
+    /// a subscribe at the held level, F6 would report it as a crash, and the
+    /// retry's `close now` would not run. Runs once; write errors are
+    /// ignored (the connection goes `broken` inside).
+    fn retry_close_now(&self) {
+        let mut out = lock(&self.out);
+        if out.retried || out.ended || out.broken {
+            return;
+        }
+        out.retried = true;
+        let Some(session_id) = out.session_id.clone() else {
+            return;
+        };
+        let mut lines = Vec::with_capacity(2);
+        if !out.subscribed && !out.summary_sent {
+            let summary_id = new_command_id();
+            lines.push(subscribe_summary_command(&summary_id, &session_id));
+            out.summary_ids.push(summary_id);
+            out.summary_sent = true;
+        }
+        let close_id = new_command_id();
+        lines.push(close_now_command(&close_id, &session_id));
+        out.close_now_ids.push(close_id.clone());
+        out.close_now_id = Some(close_id);
+        out.close_now_open = true;
+        out.write_lines(&lines);
+    }
+}
+
+/// What the driver does with one hub answer for a known id.
+enum Answer {
+    /// Not ours: a protocol error (or the row's own text) naming it.
+    Unknown,
+    /// Ours, answered: keep reading.
+    Ignore,
+    /// Our `close now` was rejected `not_subscribed`: the retry went out.
+    Retried,
+    /// Our command was rejected: fail naming it.
+    Fail(String),
+}
+
+/// The `code` and `message` of a hub rejection, with S1's defaults.
+fn reject_parts(value: &serde_json::Value) -> (String, String) {
+    let payload = value.get("payload");
+    (
+        payload
+            .and_then(|p| p.get("code"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        payload
+            .and_then(|p| p.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
+}
+
+fn stream_closed_text() -> String {
+    crash_text("hub closed the stream (stream_closed)".to_string())
+}
+
+/// The crash when an ack wait expires (R10): the command, the session when
+/// known (a session whose cleanup is still unconfirmed may still be
+/// running), and no wait.
+fn ack_crash(session: Option<&str>, what: &str) -> String {
+    let mut text = format!("no answer to `{what}` within the ack bound");
+    if let Some(id) = session {
+        text += &format!(" for session {id}; the session may still be running");
+    }
+    crash_text(text)
+}
+
+/// The crash when a stop finds no `fiber_exited` within `stop_wait`, or when
+/// a stop ends before any verdict can arrive (R2, R14). Kill and cancel
+/// differ only in this text (R7). A session whose `close now` went
+/// unconfirmed may still be running.
+fn stop_crash(shared: &Shared, session: Option<String>, reason: StopReason) -> String {
+    let base = match reason {
+        StopReason::Kill => "killed by the caller",
+        StopReason::Cancel => "cancelled by the caller",
+        StopReason::TurnStartWait => {
+            "no turn_started within the turn-start bound; no fiber_exited within the stop bound"
+        }
+        StopReason::TurnWait => {
+            "no verdict within the turn bound; no fiber_exited within the stop bound"
+        }
+    };
+    let confirmed = {
+        let out = lock(&shared.out);
+        out.close_now_id.is_some() && !out.close_now_open
+    };
+    let mut text = base.to_string();
+    if let Some(id) = session
+        && !confirmed
+    {
+        text += &format!(" Session {id} gave no verdict; the session may still be running");
+    }
+    crash_text(text)
+}
+
+fn intent_reason(shared: &Shared) -> StopReason {
+    match lock(&shared.out).intent {
+        Intent::Kill => StopReason::Kill,
+        // Only the intent can fail the intent-checked writes below; a missing
+        // intent there is unreachable, and cancel is the milder text.
+        Intent::Cancel | Intent::None => StopReason::Cancel,
+    }
+}
+
+/// Classify one hub answer for the close, close-now or summary ids the
+/// driver knows: the same set in the ack waits and the live loop (N4), so a
+/// late answer is never a protocol error. Side effects (clearing
+/// `close_now_open`, the one retry) happen under the one lock here.
+fn note_answer(
+    kind: &str,
+    cid: &str,
+    value: &serde_json::Value,
+    known: &KnownIds,
+    shared: &Shared,
+) -> Answer {
+    if known.close_id.as_deref() == Some(cid) {
+        if kind == "command_accepted" {
+            return Answer::Ignore;
+        }
+        let (code, message) = reject_parts(value);
+        return Answer::Fail(crash_text(format!("hub rejected close: {code}: {message}")));
+    }
+    if kind == "command_accepted" {
+        let is_known = known.close_now_ids.iter().any(|id| id == cid)
+            || known.summary_ids.iter().any(|id| id == cid);
+        if !is_known {
+            return Answer::Unknown;
+        }
+        let mut out = lock(&shared.out);
+        if out.close_now_id.as_deref() == Some(cid) {
+            out.close_now_open = false;
+            if known.stream_closed_pending {
+                return Answer::Fail(stream_closed_text());
+            }
+        }
+        return Answer::Ignore;
+    }
+    let (code, message) = reject_parts(value);
+    if known.summary_ids.iter().any(|id| id == cid) {
+        return Answer::Fail(crash_text(format!(
+            "hub rejected subscribe at summary: {code}: {message}"
+        )));
+    }
+    if !known.close_now_ids.iter().any(|id| id == cid) {
+        return Answer::Unknown;
+    }
+    let (current, retried, session) = {
+        let out = lock(&shared.out);
+        (
+            out.close_now_id.as_deref() == Some(cid),
+            out.retried,
+            out.session_id.clone(),
+        )
+    };
+    if !current {
+        // Stale: superseded by the retry, which the hub answers next (R16).
+        return Answer::Ignore;
+    }
+    if !retried && code == "not_subscribed" {
+        shared.retry_close_now();
+        return Answer::Retried;
+    }
+    if !retried {
+        return Answer::Fail(crash_text(format!(
+            "hub rejected close now: {code}: {message}"
+        )));
+    }
+    let mut text = format!("hub rejected close now {cid}: {code}: {message}");
+    if let Some(id) = session {
+        text += &format!(" Session {id} gave no verdict; the session may still be running");
+    }
+    Answer::Fail(crash_text(text))
 }
 
 /// What went wrong reading one hub line: EOF or a read error means the
@@ -296,6 +667,9 @@ fn read_line_into<R: BufRead>(reader: &mut R, partial: &mut Vec<u8>) -> Result<R
 }
 
 /// Read one newline-terminated hub line, keeping partial bytes across reads.
+/// Test-only from T3: the driver loop and `await_ack` moved to `next_line`,
+/// so no production caller remains. Kept for the tests that still call it.
+#[cfg(test)]
 fn read_line<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, ReadErr> {
     let mut partial = Vec::new();
     loop {
@@ -563,98 +937,129 @@ impl HubConn {
         }
     }
 
+    /// Test-only direct write: the driver writes only through the
+    /// intent-checked `Out::send_*` calls.
+    #[cfg(test)]
     fn send(&mut self, line: &str) -> bool {
         lock(&self.shared.out).write_lines(&[line.to_string()])
     }
 
     /// Read until a `command_accepted` or `command_rejected` whose
     /// `payload.command_id` equals `id`. Every other line passes to
-    /// `on_other` in arrival order, so no line is lost while waiting.
-    /// A `command_accepted` for `close_id` is the client's own close
-    /// answer (rule 12): ignored, so the wait for `id` continues. Any
-    /// other unexpected answer is a protocol error, as the live handler
-    /// holds it: a rejected close names `close`, an unknown id is named.
+    /// `on_other` in arrival order (which no longer borrows `rest`: it
+    /// only observes), then folds through the loop's own handler, so no
+    /// line is lost while waiting. Answers for the known ids (the plain
+    /// close, the close-now ids, the summary-subscribe ids) are the
+    /// client's own commands: the live handler accepts the same set, so a
+    /// late answer is never a protocol error. After every `Next` the stop
+    /// and bound checks run, exactly as in the read loop (N4, R3).
+    /// The seven arguments are the plan's call shape (N4): the wait's own
+    /// data, the loop's state, the known ids, and the observer.
+    #[allow(clippy::too_many_arguments)]
     fn await_ack(
         &mut self,
         id: &str,
-        close_id: Option<&str>,
+        known: &mut KnownIds,
+        rest: &mut Rest,
+        shared: &Shared,
+        wait: AckWait,
+        live: bool,
         mut on_other: impl FnMut(&[u8]) -> Option<Step>,
     ) -> WaitOutcome {
-        loop {
-            let raw = match read_line(&mut self.reader) {
-                Ok(raw) => raw,
-                Err(ReadErr::Lost(_)) => return WaitOutcome::Lost,
-            };
-            let parsed: serde_json::Value = match serde_json::from_slice(&raw) {
-                Ok(v) => v,
-                Err(_) => {
-                    if let Some(stop) = on_other(&raw) {
-                        return WaitOutcome::Stopped(stop);
+        rest.ack = Some(wait);
+        let outcome = loop {
+            pause!(shared, Point::BeforeRead);
+            match self.next_line(rest.bounds.poll_slice) {
+                Next::Tick => {
+                    if let Some(stop) = rest.check(shared, now(shared)) {
+                        break WaitOutcome::Stopped(stop);
                     }
-                    continue;
                 }
-            };
-            let kind = parsed.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-            if kind != "command_accepted" && kind != "command_rejected" {
-                if let Some(stop) = on_other(&raw) {
-                    return WaitOutcome::Stopped(stop);
+                Next::Lost => break WaitOutcome::Lost,
+                Next::Line(raw) => {
+                    pause!(shared, Point::AfterLine);
+                    // Rebuilt after the read, before the classify: a retry
+                    // or a control-thread `close now` mints ids mid-wait.
+                    *known = known_ids(rest, shared);
+                    let (kind, value) = match parse_line(&raw) {
+                        Ok(parsed) => parsed,
+                        Err(_) => {
+                            // Not JSON or kindless: the observer sees it
+                            // first, then the handlers fail closed on it, as
+                            // they always did.
+                            if let Some(stop) = on_other(&raw) {
+                                break WaitOutcome::Stopped(stop);
+                            }
+                            if live {
+                                break WaitOutcome::Stopped(rest.handle_live(&raw, shared));
+                            }
+                            break WaitOutcome::Stopped(rest.handle_history(&raw));
+                        }
+                    };
+                    let kind = kind.as_str();
+                    if kind == "command_accepted" || kind == "command_rejected" {
+                        // Answers never reach the observer: they end the
+                        // wait, answer a known id, or fail closed.
+                        let cid = value
+                            .get("payload")
+                            .and_then(|p| p.get("command_id"))
+                            .and_then(|c| c.as_str());
+                        let Some(cid) = cid else {
+                            break WaitOutcome::Stopped(Step::Fail(crash_text(format!(
+                                "protocol error: hub answer without command_id: {}",
+                                first80(&raw)
+                            ))));
+                        };
+                        if cid == id {
+                            if kind == "command_accepted" {
+                                let result = value
+                                    .get("payload")
+                                    .and_then(|p| p.get("result"))
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null);
+                                break WaitOutcome::Ack(Ack::Accepted { result });
+                            }
+                            let (code, message) = reject_parts(&value);
+                            break WaitOutcome::Ack(Ack::Rejected { code, message });
+                        }
+                        match note_answer(kind, cid, &value, known, shared) {
+                            Answer::Ignore | Answer::Retried => {
+                                if let Some(stop) = rest.check(shared, now(shared)) {
+                                    break WaitOutcome::Stopped(stop);
+                                }
+                            }
+                            Answer::Fail(text) => {
+                                break WaitOutcome::Stopped(Step::Fail(text));
+                            }
+                            Answer::Unknown => {
+                                break WaitOutcome::Stopped(Step::Fail(crash_text(format!(
+                                    "protocol error: hub answer for unknown command {cid}"
+                                ))));
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(stop) = on_other(&raw) {
+                        break WaitOutcome::Stopped(stop);
+                    }
+                    let step = if live {
+                        rest.handle_live(&raw, shared)
+                    } else {
+                        rest.handle_history(&raw)
+                    };
+                    match step {
+                        Step::Continue => {
+                            if let Some(stop) = rest.check(shared, now(shared)) {
+                                break WaitOutcome::Stopped(stop);
+                            }
+                        }
+                        stop => break WaitOutcome::Stopped(stop),
+                    }
                 }
-                continue;
             }
-            let cid = parsed
-                .get("payload")
-                .and_then(|p| p.get("command_id"))
-                .and_then(|c| c.as_str());
-            let Some(cid) = cid else {
-                return WaitOutcome::Stopped(Step::Fail(crash_text(format!(
-                    "protocol error: hub answer without command_id: {}",
-                    first80(&raw)
-                ))));
-            };
-            if cid != id {
-                if kind == "command_accepted" && Some(cid) == close_id {
-                    continue;
-                }
-                if kind == "command_rejected" && Some(cid) == close_id {
-                    let payload = parsed.get("payload");
-                    let code = payload
-                        .and_then(|p| p.get("code"))
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("unknown");
-                    let message = payload
-                        .and_then(|p| p.get("message"))
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("");
-                    return WaitOutcome::Stopped(Step::Fail(crash_text(format!(
-                        "hub rejected close: {code}: {message}"
-                    ))));
-                }
-                return WaitOutcome::Stopped(Step::Fail(crash_text(format!(
-                    "protocol error: hub answer for unknown command {cid}"
-                ))));
-            }
-            if kind == "command_accepted" {
-                let result = parsed
-                    .get("payload")
-                    .and_then(|p| p.get("result"))
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                return WaitOutcome::Ack(Ack::Accepted { result });
-            }
-            let code = parsed
-                .get("payload")
-                .and_then(|p| p.get("code"))
-                .and_then(|c| c.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let message = parsed
-                .get("payload")
-                .and_then(|p| p.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("")
-                .to_string();
-            return WaitOutcome::Ack(Ack::Rejected { code, message });
-        }
+        };
+        rest.ack = None;
+        outcome
     }
 }
 
@@ -691,24 +1096,123 @@ pub struct HubRequest {
     pub bounds: Bounds,
 }
 
+/// The run's handle from another thread: `kill` and `cancel` set the intent
+/// under the lock, release the guard, and make sure a subscribed session
+/// gets its `close now`. They never read the socket and never call `on`.
+/// A later `kill` upgrades a pending `cancel` (R7).
+#[derive(Clone, Debug)]
+pub struct HubControl {
+    shared: Arc<Shared>,
+}
+
+impl HubControl {
+    pub fn kill(&self) {
+        self.stop(Intent::Kill);
+    }
+
+    pub fn cancel(&self) {
+        self.stop(Intent::Cancel);
+    }
+
+    fn stop(&self, intent: Intent) {
+        // A set kill stays; anything else takes the new intent.
+        let subscribed = {
+            let mut out = lock(&self.shared.out);
+            if intent == Intent::Kill || out.intent == Intent::None {
+                out.intent = intent;
+            }
+            out.subscribed
+        };
+        // The guard is released before the close locks again (D): holding it
+        // would self-deadlock, and `close_now_once` no-ops when it should.
+        if subscribed {
+            self.shared.close_now_once();
+        }
+    }
+}
+
+/// A turn that can be stopped from another thread: the control exists before
+/// the connect, so a `kill` before the socket exists is not a panic (N2).
+pub struct HubRun {
+    pub control: HubControl,
+    pub drive: Box<dyn FnOnce(EventFn<'_>) -> BackendResult + Send>,
+}
+
+/// Start one supervised turn: build the shared writer first, so the control
+/// is live before the connect.
+pub fn spawn_turn(req: HubRequest, socket: PathBuf) -> HubRun {
+    let shared = Arc::new(Shared::new(req.bounds.write_deadline));
+    let control = HubControl {
+        shared: Arc::clone(&shared),
+    };
+    HubRun {
+        control,
+        drive: Box::new(move |on| {
+            let result = drive_turn(&req, &socket, on, Arc::clone(&shared));
+            lock(&shared.out).ended = true;
+            result
+        }),
+    }
+}
+
+#[cfg(test)]
+fn spawn_turn_with(req: HubRequest, socket: PathBuf, hooks: Hooks) -> HubRun {
+    let shared = Arc::new(Shared::with_hooks(req.bounds.write_deadline, hooks));
+    let control = HubControl {
+        shared: Arc::clone(&shared),
+    };
+    HubRun {
+        control,
+        drive: Box::new(move |on| {
+            let result = drive_turn(&req, &socket, on, Arc::clone(&shared));
+            lock(&shared.out).ended = true;
+            result
+        }),
+    }
+}
+
 /// Drive one supervised turn to a verdict. The client sends `prompt` itself
 /// so it knows the command id C, never answers an approval, and ends the
 /// session with `close`, reading `fiber_exited` as the verdict.
 pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResult {
+    let run = spawn_turn(req.clone(), socket.to_path_buf());
+    (run.drive)(on)
+}
+
+fn drive_turn(
+    req: &HubRequest,
+    socket: &Path,
+    on: EventFn<'_>,
+    shared: Arc<Shared>,
+) -> BackendResult {
     let model = super::model_reference(&req.model).to_string();
-    let shared = Arc::new(Shared::new(req.bounds.write_deadline));
     let mut conn = match connect(socket, &req.bounds, Arc::clone(&shared)) {
         Ok(ok) => ok,
         Err(text) => return crash_result(None, Vec::new(), text),
     };
-    let mut rest = Rest::new(on);
+    let mut rest = Rest::new(on, &req.bounds);
+    let mut known = known_ids(&rest, &shared);
     // start: no session_id, no content, supervised.
     let start_id = new_command_id();
-    if !conn.send(&start_command(&start_id, &req.cwd, &model)) {
-        return rest.crash(lost_before_start_text(&start_id));
+    if !lock(&shared.out).send_start(&start_command(&start_id, &req.cwd, &model)) {
+        if lock(&shared.out).intent == Intent::None {
+            return rest.crash(lost_before_start_text(&start_id));
+        }
+        // N2: the intent was set before the `start` line was written: no
+        // session to name, no `close`, and the run ends at once.
+        return rest.crash(stop_crash(&shared, None, intent_reason(&shared)));
     }
     rest.start_id = start_id.clone();
-    let session_id = match conn.await_ack(&start_id, None, |raw| as_history(&mut rest, raw)) {
+    pause!(shared, Point::BeforeStartAnswer);
+    let session_id = match conn.await_ack(
+        &start_id,
+        &mut known,
+        &mut rest,
+        &shared,
+        ack_deadline(&shared, &req.bounds, "start"),
+        false,
+        |_| None,
+    ) {
         WaitOutcome::Ack(Ack::Accepted { result }) => match start_session(&result) {
             Ok(session_id) => session_id,
             Err(text) => return rest.crash(text),
@@ -728,13 +1232,34 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
     };
     rest.session_id = Some(session_id.clone());
     lock(&shared.out).session_id = Some(session_id.clone());
-    // subscribe at full.
+    // subscribe at full, unless the run is stopping (R2, R14 F1/A).
+    pause!(shared, Point::BeforeSubscribeWrite);
     let sub_id = new_command_id();
-    if !conn.send(&subscribe_command(&sub_id, &session_id)) {
-        return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+    if !lock(&shared.out).send_subscribe(&subscribe_command(&sub_id, &session_id)) {
+        if lock(&shared.out).intent == Intent::None {
+            return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+        }
+        // F1/A: the intent landed before the full `subscribe` went out:
+        // summary-subscribe and `close now` on the known session id (R6, one
+        // locked write), no full `subscribe`, no `prompt`, fail at once.
+        shared.close_now_once();
+        return fail_with_cleanup(
+            &mut conn,
+            &mut rest,
+            stop_crash(&shared, Some(session_id), intent_reason(&shared)),
+        );
     }
     rest.sub_id = sub_id.clone();
-    match conn.await_ack(&sub_id, None, |raw| as_history(&mut rest, raw)) {
+    pause!(shared, Point::BeforeSubscribeAck);
+    match conn.await_ack(
+        &sub_id,
+        &mut known,
+        &mut rest,
+        &shared,
+        ack_deadline(&shared, &req.bounds, "subscribe"),
+        false,
+        |_| None,
+    ) {
         WaitOutcome::Ack(Ack::Accepted { result }) => {
             rest.last_seq = last_seq_of(&result);
             lock(&shared.out).subscribed = true;
@@ -762,53 +1287,94 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
             return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
         }
     }
-    // prompt with the client-minted id C.
+    // prompt with the client-minted id C, unless the run is stopping: then
+    // go to the read loop in the stopping state (R2).
+    pause!(shared, Point::AfterSubscribeAck);
     let prompt_id = new_command_id();
-    if !conn.send(&prompt_command(&prompt_id, &session_id, &req.prompt)) {
-        return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
-    }
-    rest.prompt_id = prompt_id.clone();
-    loop {
-        // Read afresh each pass: an early `turn_completed` sends `close`
-        // and sets `close_id`, and its answer must be ignored below.
-        let close_id = rest.close_id.clone();
-        let prompt_shared = Arc::clone(&conn.shared);
-        match conn.await_ack(&prompt_id, close_id.as_deref(), |raw| {
-            as_live(&mut rest, &prompt_shared, raw)
-        }) {
-            WaitOutcome::Ack(Ack::Accepted { .. }) => break,
-            WaitOutcome::Ack(Ack::Rejected { code, message }) => {
-                return fail_with_cleanup(
-                    &mut conn,
+    pause!(shared, Point::BeforePromptWrite);
+    let prompt_acked =
+        if lock(&shared.out).send_prompt(&prompt_command(&prompt_id, &session_id, &req.prompt)) {
+            rest.prompt_id = prompt_id.clone();
+            loop {
+                match conn.await_ack(
+                    &prompt_id,
+                    &mut known,
                     &mut rest,
-                    crash_text(format!("hub rejected prompt: {code}: {message}")),
-                );
-            }
-            WaitOutcome::Stopped(step) => {
-                if let Some(done) = apply_step(&mut conn, &mut rest, step) {
-                    return done;
+                    &shared,
+                    ack_deadline(&shared, &req.bounds, "prompt"),
+                    true,
+                    |_| None,
+                ) {
+                    WaitOutcome::Ack(Ack::Accepted { .. }) => break true,
+                    WaitOutcome::Ack(Ack::Rejected { code, message }) => {
+                        return fail_with_cleanup(
+                            &mut conn,
+                            &mut rest,
+                            crash_text(format!("hub rejected prompt: {code}: {message}")),
+                        );
+                    }
+                    WaitOutcome::Stopped(step) => {
+                        if let Some(done) = apply_step(&mut conn, &mut rest, step) {
+                            return done;
+                        }
+                        // A `turn_completed` read before the ack only folds and
+                        // closes once: the wait ends at the ack line, so keep
+                        // waiting for it.
+                    }
+                    WaitOutcome::Lost => {
+                        return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+                    }
                 }
-                // A `turn_completed` read before the ack only folds and
-                // closes once: the wait ends at the ack line, so keep
-                // waiting for it.
             }
-            WaitOutcome::Lost => {
-                return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
-            }
+        } else if lock(&shared.out).intent == Intent::None {
+            return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+        } else {
+            false
+        };
+    if prompt_acked {
+        // Phase bounds run from the `prompt` ack to the verdict (R17).
+        let at = now(&shared);
+        rest.turn_start_deadline = Some(at + clamp_bound(rest.bounds.turn_start_wait));
+        if let Some(turn_wait) = rest.bounds.turn_wait {
+            rest.turn_wait_deadline = Some(at + clamp_bound(turn_wait));
         }
     }
     // Read to the verdict, which stops the run at once.
     loop {
-        let raw = match read_line(&mut conn.reader) {
-            Ok(raw) => raw,
-            Err(ReadErr::Lost(_)) => {
+        pause!(shared, Point::BeforeRead);
+        match conn.next_line(rest.bounds.poll_slice) {
+            Next::Tick => {
+                if let Some(stop) = rest.check(&shared, now(&shared))
+                    && let Some(done) = apply_step(&mut conn, &mut rest, stop)
+                {
+                    return done;
+                }
+            }
+            Next::Lost => {
                 return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
             }
-        };
-        let step = rest.handle_live(&raw, &conn.shared);
-        if let Some(done) = apply_step(&mut conn, &mut rest, step) {
-            return done;
+            Next::Line(raw) => {
+                pause!(shared, Point::AfterLine);
+                let step = rest.handle_live(&raw, &shared);
+                // The line first, then the stop and bound checks (R3).
+                let step = match step {
+                    Step::Continue | Step::CloseOnce => {
+                        rest.check(&shared, now(&shared)).unwrap_or(step)
+                    }
+                    end_or_fail => end_or_fail,
+                };
+                if let Some(done) = apply_step(&mut conn, &mut rest, step) {
+                    return done;
+                }
+            }
         }
+    }
+}
+
+fn ack_deadline(shared: &Shared, bounds: &Bounds, what: &'static str) -> AckWait {
+    AckWait {
+        what,
+        deadline: now(shared) + clamp_bound(bounds.ack_wait),
     }
 }
 
@@ -817,6 +1383,7 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
 struct Rest<'a> {
     state: super::FiberState,
     on: EventFn<'a>,
+    bounds: Bounds,
     session_id: Option<String>,
     start_id: String,
     sub_id: String,
@@ -828,13 +1395,19 @@ struct Rest<'a> {
     completed_ok: bool,
     bad_outcome: Option<String>,
     questions: Option<String>,
+    stop: Option<Stop>,
+    ack: Option<AckWait>,
+    turn_start_deadline: Option<Instant>,
+    turn_wait_deadline: Option<Instant>,
+    stream_closed_deadline: Option<Instant>,
 }
 
 impl<'a> Rest<'a> {
-    fn new(on: EventFn<'a>) -> Self {
+    fn new(on: EventFn<'a>, bounds: &Bounds) -> Self {
         Rest {
             state: super::FiberState::default(),
             on,
+            bounds: bounds.clone(),
             session_id: None,
             start_id: String::new(),
             sub_id: String::new(),
@@ -846,11 +1419,102 @@ impl<'a> Rest<'a> {
             completed_ok: false,
             bad_outcome: None,
             questions: None,
+            stop: None,
+            ack: None,
+            turn_start_deadline: None,
+            turn_wait_deadline: None,
+            stream_closed_deadline: None,
         }
     }
 
     fn crash(&mut self, text: String) -> BackendResult {
         crash_result(self.session_id.clone(), self.state.denial_list(), text)
+    }
+
+    /// One tick after the line of the pass (the line first, R3): arm or end
+    /// the stop, or fail an expired ack wait. Returns `None` to keep reading.
+    /// Never overrides a verdict: the caller consults it only when the line
+    /// did not end the run.
+    fn check(&mut self, shared: &Shared, now: Instant) -> Option<Step> {
+        // The R16 retry waits for its answer or this deadline, then still
+        // ends as the `stream_closed` crash.
+        if let Some(deadline) = self.stream_closed_deadline
+            && now >= deadline
+        {
+            return Some(Step::Fail(stream_closed_text()));
+        }
+        // A stop already under way ends at its deadline; a `fiber_exited`
+        // read before then wins in the line handler, never here. A `kill`
+        // upgrades a pending `cancel` (R7).
+        if lock(&shared.out).intent == Intent::Kill
+            && let Some(stop) = &mut self.stop
+        {
+            stop.reason = StopReason::Kill;
+        }
+        if let Some(stop) = &self.stop
+            && now >= stop.deadline
+        {
+            return Some(Step::Fail(stop_crash(
+                shared,
+                self.session_id.clone(),
+                stop.reason,
+            )));
+        }
+        // An unanswered ack ends the run at once (R10): a hub that does not
+        // answer will not be trusted for a verdict.
+        if let Some(ack) = &self.ack
+            && now >= ack.deadline
+        {
+            return Some(Step::Fail(ack_crash(self.session_id.as_deref(), ack.what)));
+        }
+        if self.stop.is_some() {
+            return None;
+        }
+        // The unwritten `start` fails in the driver (N2); here the intent
+        // arms the stop. With a subscription the `close now` goes out at
+        // once; without one the driver waits for the ack first (R2).
+        if lock(&shared.out).intent != Intent::None {
+            let reason = intent_reason(shared);
+            self.stop = Some(Stop {
+                reason,
+                deadline: now + clamp_bound(self.bounds.stop_wait),
+            });
+            let subscribed = {
+                let mut out = lock(&shared.out);
+                out.stopping = true;
+                out.subscribed
+            };
+            if subscribed {
+                shared.close_now_once();
+            }
+            return None;
+        }
+        // Phase bounds are totals, not idle timers: a line that arrives
+        // resets nothing (R17).
+        if !self.turn_started
+            && let Some(deadline) = self.turn_start_deadline
+            && now >= deadline
+        {
+            self.stop = Some(Stop {
+                reason: StopReason::TurnStartWait,
+                deadline: now + clamp_bound(self.bounds.stop_wait),
+            });
+            lock(&shared.out).stopping = true;
+            shared.close_now_once();
+            return None;
+        }
+        if let Some(deadline) = self.turn_wait_deadline
+            && now >= deadline
+        {
+            self.stop = Some(Stop {
+                reason: StopReason::TurnWait,
+                deadline: now + clamp_bound(self.bounds.stop_wait),
+            });
+            lock(&shared.out).stopping = true;
+            shared.close_now_once();
+            return None;
+        }
+        None
     }
 
     /// Lines read while waiting for the `start` and `subscribe` acks are
@@ -882,46 +1546,71 @@ impl<'a> Rest<'a> {
                     "protocol error: hub answer without command_id: {}",
                     first80(raw)
                 ))),
-                Some(cid) if self.close_id.as_deref() == Some(cid) => Step::Continue,
-                Some(cid) => Step::Fail(crash_text(format!(
-                    "protocol error: hub answer for unknown command {cid}"
-                ))),
+                Some(cid) => {
+                    let known = known_ids(self, shared);
+                    match note_answer("command_accepted", cid, &value, &known, shared) {
+                        Answer::Ignore | Answer::Retried => Step::Continue,
+                        Answer::Fail(text) => Step::Fail(text),
+                        Answer::Unknown => Step::Fail(crash_text(format!(
+                            "protocol error: hub answer for unknown command {cid}"
+                        ))),
+                    }
+                }
             },
             "command_rejected" => {
                 let payload = value.get("payload");
                 let cid = payload
                     .and_then(|p| p.get("command_id"))
                     .and_then(|c| c.as_str());
-                let code = payload
-                    .and_then(|p| p.get("code"))
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("unknown");
-                let message = payload
-                    .and_then(|p| p.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("");
                 match cid {
                     None => Step::Fail(crash_text(format!(
                         "protocol error: hub rejection without command_id: {}",
                         first80(raw)
                     ))),
                     Some(cid) => {
-                        let command = self.command_name(cid).to_string();
-                        Step::Fail(crash_text(format!(
-                            "hub rejected {command}: {code}: {message}"
-                        )))
+                        let known = known_ids(self, shared);
+                        match note_answer("command_rejected", cid, &value, &known, shared) {
+                            Answer::Ignore | Answer::Retried => Step::Continue,
+                            Answer::Fail(text) => Step::Fail(text),
+                            Answer::Unknown => {
+                                let (code, message) = reject_parts(&value);
+                                let command = self.command_name(cid).to_string();
+                                Step::Fail(crash_text(format!(
+                                    "hub rejected {command}: {code}: {message}"
+                                )))
+                            }
+                        }
                     }
                 }
             }
             "attention" | "device_changed" => Step::Continue,
             "session_left" => Step::Continue,
             "stream_closed" => {
-                let mut out = lock(&shared.out);
-                out.subscribed = false;
-                out.summary_sent = false;
-                Step::Fail(crash_text(
-                    "hub closed the stream (stream_closed)".to_string(),
-                ))
+                // R16: with a `close now` outstanding and unanswered, the old
+                // subscription is gone, so retry at once and keep reading;
+                // the run still ends as the `stream_closed` crash once the
+                // retry is answered or its wait passes. Otherwise the R6 path:
+                // clear, re-subscribe in the cleanup, fail at once (F).
+                let outstanding = {
+                    let out = lock(&shared.out);
+                    out.close_now_id.is_some() && out.close_now_open && !out.retried
+                };
+                if outstanding {
+                    {
+                        let mut out = lock(&shared.out);
+                        out.subscribed = false;
+                        out.summary_sent = false;
+                    }
+                    shared.retry_close_now();
+                    self.stream_closed_deadline =
+                        Some(now(shared) + clamp_bound(self.bounds.stop_wait));
+                    Step::Continue
+                } else {
+                    let mut out = lock(&shared.out);
+                    out.subscribed = false;
+                    out.summary_sent = false;
+                    Step::Fail(stream_closed_text())
+                }
             }
             "stream_reopened" => Step::Fail(crash_text(
                 "hub connection event stream_reopened ends the run".to_string(),
@@ -1140,23 +1829,6 @@ impl<'a> Rest<'a> {
     }
 }
 
-/// History handler as a free function, so the ack waits can borrow the
-/// connection and the run state apart.
-fn as_history(rest: &mut Rest, raw: &[u8]) -> Option<Step> {
-    match rest.handle_history(raw) {
-        Step::Continue => None,
-        stop => Some(stop),
-    }
-}
-
-/// Live handler as a free function, for the same borrow split.
-fn as_live(rest: &mut Rest, shared: &Shared, raw: &[u8]) -> Option<Step> {
-    match rest.handle_live(raw, shared) {
-        Step::Continue => None,
-        stop => Some(stop),
-    }
-}
-
 /// Run one step: send `close` once, end the run, or crash it. Returns `None`
 /// to keep reading.
 fn apply_step(conn: &mut HubConn, rest: &mut Rest, step: Step) -> Option<BackendResult> {
@@ -1167,13 +1839,24 @@ fn apply_step(conn: &mut HubConn, rest: &mut Rest, step: Step) -> Option<Backend
                 rest.closed = true;
                 if let Some(session_id) = rest.session_id.clone() {
                     let id = new_command_id();
-                    let _ = conn.send(&close_command(&id, &session_id));
-                    rest.close_id = Some(id);
+                    // No plain `close` once a `close now` went out or the
+                    // stop is under way (R12); the id is recorded only when
+                    // the line went out, so no answer is ever awaited twice.
+                    if lock(&conn.shared.out).send_close(&close_command(&id, &session_id)) {
+                        rest.close_id = Some(id);
+                    }
                 }
             }
             None
         }
-        Step::End(result) => Some(result),
+        Step::End(result) => {
+            // The verdict flag (R1): no command goes out after it, and a
+            // late `kill` is a no-op. Set before the pause, so a stop that
+            // lands in the pause still sends nothing.
+            lock(&conn.shared.out).ended = true;
+            pause!(&conn.shared, Point::AfterVerdictFlag);
+            Some(result)
+        }
         Step::Fail(text) => Some(fail_with_cleanup(conn, rest, text)),
     }
 }
@@ -1257,7 +1940,7 @@ fn crash_result(
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1615,16 +2298,8 @@ mod tests {
     fn spent_start_writes_neither_line_and_marks_broken() {
         let (path, rx) = spawn_fake(|_srv| {});
         let stream = UnixStream::connect(&path).expect("client connect");
-        let mut out = Out {
-            writer: Some(stream),
-            deadline: Duration::from_secs(5),
-            broken: false,
-            ended: false,
-            session_id: None,
-            subscribed: false,
-            summary_sent: false,
-            close_now_id: None,
-        };
+        let mut out = Out::new(Duration::from_secs(5));
+        out.writer = Some(stream);
         let start = Instant::now() - Duration::from_secs(10);
         assert!(!out.write_line("a", start));
         assert!(!out.write_lines(&["b".to_string()]));
@@ -1934,6 +2609,23 @@ mod tests {
         Arc::new(Shared::new(Duration::from_secs(5)))
     }
 
+    /// The arguments a direct `await_ack` test needs beyond the id: a fresh
+    /// known set, a rest to fold into, and a generous ack deadline (the
+    /// template fakes answer at once; expiry is covered at run level).
+    fn ack_harness<'a>(
+        conn: &HubConn,
+        on: EventFn<'a>,
+        what: &'static str,
+    ) -> (KnownIds, Rest<'a>, Arc<Shared>, AckWait) {
+        let shared = Arc::clone(&conn.shared);
+        let rest = Rest::new(on, &Bounds::default());
+        let wait = AckWait {
+            what,
+            deadline: now(&shared) + Duration::from_secs(60),
+        };
+        (KnownIds::default(), rest, shared, wait)
+    }
+
     /// A client connection that only reads: the writer lives in `Out`, and
     /// these tests never write.
     fn poll_conn(stream: UnixStream) -> HubConn {
@@ -1960,7 +2652,10 @@ mod tests {
             srv.send(&accepted("c_1", serde_json::json!({"session_id": "s_9"})));
         });
         assert!(conn.send(&start_command("c_1", "/w", "m")));
-        let WaitOutcome::Ack(Ack::Accepted { result }) = conn.await_ack("c_1", None, |_| None)
+        let on = |_| {};
+        let (mut known, mut rest, shared, wait) = ack_harness(&conn, &on, "start");
+        let WaitOutcome::Ack(Ack::Accepted { result }) =
+            conn.await_ack("c_1", &mut known, &mut rest, &shared, wait, false, |_| None)
         else {
             panic!("rejected");
         };
@@ -1998,8 +2693,10 @@ mod tests {
             srv.send(&rejected(Some("c_1"), "invalid_arguments", "bad start"));
         });
         assert!(conn.send(&start_command("c_1", "/w", "m")));
+        let on = |_| {};
+        let (mut known, mut rest, shared, wait) = ack_harness(&conn, &on, "start");
         let WaitOutcome::Ack(Ack::Rejected { code, message }) =
-            conn.await_ack("c_1", None, |_| None)
+            conn.await_ack("c_1", &mut known, &mut rest, &shared, wait, false, |_| None)
         else {
             panic!("accepted");
         };
@@ -2037,7 +2734,10 @@ mod tests {
                 srv.send(&bare);
             });
             assert!(conn.send(&start_command("c_1", "/w", "m")));
-            let WaitOutcome::Stopped(Step::Fail(text)) = conn.await_ack("c_1", None, |_| None)
+            let on = |_| {};
+            let (mut known, mut rest, shared, wait) = ack_harness(&conn, &on, "start");
+            let WaitOutcome::Stopped(Step::Fail(text)) =
+                conn.await_ack("c_1", &mut known, &mut rest, &shared, wait, false, |_| None)
             else {
                 panic!("no protocol error for {line}");
             };
@@ -2056,7 +2756,11 @@ mod tests {
             srv.send(&accepted("c_other", serde_json::json!({})));
         });
         assert!(conn.send(&start_command("c_1", "/w", "m")));
-        let WaitOutcome::Stopped(Step::Fail(text)) = conn.await_ack("c_1", None, |_| None) else {
+        let on = |_| {};
+        let (mut known, mut rest, shared, wait) = ack_harness(&conn, &on, "start");
+        let WaitOutcome::Stopped(Step::Fail(text)) =
+            conn.await_ack("c_1", &mut known, &mut rest, &shared, wait, false, |_| None)
+        else {
             panic!("no protocol error");
         };
         assert!(text.contains("protocol error"), "{text}");
@@ -2065,25 +2769,34 @@ mod tests {
         join_fake(&path, rx);
     }
 
+    /// Lines before the ack reach the observer in arrival order. All three
+    /// are history here, so the run-level non-JSON failure is pinned
+    /// separately (`non_json_during_subscribe_wait_is_a_crash`): a non-JSON
+    /// line can no longer pass an ack wait through, because the wait always
+    /// folds through the loop's own handler now (N4).
     #[test]
     fn lines_before_the_ack_are_kept_in_order() {
         let first = serde_json::json!({"kind":"attention","seq":1}).to_string();
-        let second = "not json at all".to_string();
-        let third = serde_json::json!({"kind":"device_changed","seq":2}).to_string();
+        let second = serde_json::json!({"kind":"session_left","seq":2}).to_string();
+        let third = serde_json::json!({"kind":"device_changed","seq":3}).to_string();
         let (mut conn, path, rx) = connect_pair(|srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
             srv.recv();
             srv.send(&serde_json::json!({"kind":"attention","seq":1}).to_string());
-            srv.send("not json at all");
-            srv.send(&serde_json::json!({"kind":"device_changed","seq":2}).to_string());
+            srv.send(&serde_json::json!({"kind":"session_left","seq":2}).to_string());
+            srv.send(&serde_json::json!({"kind":"device_changed","seq":3}).to_string());
             srv.send(&accepted("c_1", serde_json::json!({"session_id": "s_1"})));
         });
         assert!(conn.send(&start_command("c_1", "/w", "m")));
         let mut seen = Vec::new();
-        let WaitOutcome::Ack(Ack::Accepted { .. }) = conn.await_ack("c_1", None, |raw| {
-            seen.push(String::from_utf8_lossy(raw).into_owned());
-            None
-        }) else {
+        let on = |_| {};
+        let (mut known, mut rest, shared, wait) = ack_harness(&conn, &on, "start");
+        let WaitOutcome::Ack(Ack::Accepted { .. }) =
+            conn.await_ack("c_1", &mut known, &mut rest, &shared, wait, false, |raw| {
+                seen.push(String::from_utf8_lossy(raw).into_owned());
+                None
+            })
+        else {
             panic!("rejected");
         };
         assert_eq!(seen, vec![first, second, third]);
@@ -2097,7 +2810,11 @@ mod tests {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
         });
         let mut conn = connect(&path, &Bounds::default(), test_shared()).expect("connect");
-        let WaitOutcome::Lost = conn.await_ack("c_1", None, |_| None) else {
+        let on = |_| {};
+        let (mut known, mut rest, shared, wait) = ack_harness(&conn, &on, "start");
+        let WaitOutcome::Lost =
+            conn.await_ack("c_1", &mut known, &mut rest, &shared, wait, false, |_| None)
+        else {
             panic!("expected loss");
         };
         drop(conn);
@@ -3594,6 +4311,1862 @@ mod tests {
             received_commands(&received),
             ["start", "subscribe", "prompt", "close"]
         );
+    }
+
+    /// A seam pause that blocks once at `point` on `gate`, telling `fired`
+    /// first. Every blocking wait here carries a deadline, so a stuck
+    /// driver fails the test instead of hanging it.
+    fn gate_hooks(point: Point, gate: mpsc::Receiver<()>, fired: mpsc::Sender<()>) -> Hooks {
+        let done = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(Mutex::new(gate));
+        Hooks {
+            clock: Box::new(Instant::now),
+            pause: Some(Box::new(move |p| {
+                if p == point && !done.swap(true, Ordering::SeqCst) {
+                    fired.send(()).expect("fired");
+                    gate.lock()
+                        .expect("gate")
+                        .recv_timeout(Duration::from_secs(15))
+                        .expect("release");
+                }
+            })),
+        }
+    }
+
+    /// Run the drive on its own thread; the verdict arrives on the channel.
+    /// A bare `join` has no deadline, so the result travels by channel with
+    /// a `recv_timeout` at the test.
+    fn drive_async(run: HubRun) -> mpsc::Receiver<BackendResult> {
+        let (res_tx, res_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = res_tx.send((run.drive)(&|_| {}));
+        });
+        res_rx
+    }
+
+    fn short_stop_bounds() -> Bounds {
+        Bounds {
+            stop_wait: Duration::from_millis(50),
+            poll_slice: Duration::from_millis(5),
+            ..Default::default()
+        }
+    }
+
+    /// N2: the intent is set before the socket exists. The run connects and
+    /// reads `hub_hello`, then `send_start` finds the intent and writes
+    /// nothing: the fake sees no `start`, and the run ends at once as the
+    /// stop crash with no session id.
+    #[test]
+    fn kill_before_the_socket_exists_writes_nothing() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            srv.expect_eof();
+        });
+        // The run and its control drop at the end of the block, closing the
+        // writer the `close now` would have used: the fake then sees EOF.
+        let res = {
+            let run = spawn_turn(hub_request(), path.clone());
+            let control = run.control.clone();
+            control.kill();
+            (run.drive)(&|_| {})
+        };
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id, None);
+        assert!(
+            res.text.ends_with("The run ended without a verdict."),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.is_error, Some(true));
+        assert!(join_fake(&path, rx).is_empty());
+    }
+
+    /// F1: a kill during the start wait keeps reading the start answer
+    /// within `ack_wait`; on the answer it summary-subscribes and sends
+    /// `close now` on that session id (R6, one locked write), no full
+    /// subscribe, no prompt, and the run ends as the stop crash.
+    #[test]
+    fn kill_during_the_start_wait_fails_with_the_kill_text() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
+            assert_eq!(summary["session_id"], "s_1");
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            assert_eq!(close["session_id"], "s_1");
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            gate_hooks(Point::BeforeStartAnswer, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert!(
+            res.text.ends_with("The run ended without a verdict."),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// F1 with `cancel`: the same path ends as the cancel text (R7).
+    #[test]
+    fn cancel_during_the_start_wait_fails_with_the_cancel_text() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            gate_hooks(Point::BeforeStartAnswer, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.cancel();
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("cancelled by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert!(
+            res.text.ends_with("The run ended without a verdict."),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// F1 second case: the fake never answers `start` and `ack_wait` is a
+    /// few ms. The expiry is a crash at once (R10): no `close`, no stop
+    /// wait, even with the intent set.
+    #[test]
+    fn unanswered_start_hits_the_ack_bound_despite_the_intent() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (_, _) = recv_id(srv);
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.ack_wait = Duration::from_millis(20);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let run = spawn_turn_with(
+            req,
+            path.clone(),
+            gate_hooks(Point::BeforeStartAnswer, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(
+            res.text
+                .contains("no answer to `start` within the ack bound"),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.session_id, None);
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(received_commands(&join_fake(&path, rx)), ["start"]);
+    }
+
+    /// A: a kill between the start answer and the subscribe write. The
+    /// `send_subscribe` finds the intent and writes nothing; the driver
+    /// takes the F1 path: summary subscribe, `close now`, no full
+    /// subscribe, no prompt, kill crash with the session id.
+    #[test]
+    fn kill_before_the_subscribe_write_skips_the_full_subscribe() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            gate_hooks(Point::BeforeSubscribeWrite, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// A with `cancel`, and the same stop-crash shape. The no-kill control
+    /// case is every `handshake_to_prompt` run: the full subscribe at
+    /// `full` goes out when no intent is set.
+    #[test]
+    fn cancel_before_the_subscribe_write_skips_the_full_subscribe() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["args"]["level"], "summary");
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            gate_hooks(Point::BeforeSubscribeWrite, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.cancel();
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("cancelled by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// R2: a kill during the subscribe wait. After the ack the driver does
+    /// not send the prompt: the run goes to the read loop in the stopping
+    /// state, the `close now` goes out once, and the stop wait ends as the
+    /// kill crash when no `fiber_exited` comes.
+    #[test]
+    fn kill_during_the_subscribe_wait_skips_the_prompt() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, sub) = recv_id(srv);
+            assert_eq!(sub["command"], "subscribe");
+            assert_eq!(sub["args"]["level"], "full");
+            release_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("release");
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds = short_stop_bounds();
+        let run = spawn_turn_with(
+            req,
+            path.clone(),
+            gate_hooks(Point::BeforeSubscribeAck, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        release_tx.send(()).expect("fake");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// After the subscribe ack, kill first: the intent is set before the
+    /// prompt write, so the driver skips the prompt and stops.
+    #[test]
+    fn kill_after_the_subscribe_ack_skips_the_prompt() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds = short_stop_bounds();
+        let run = spawn_turn_with(
+            req,
+            path.clone(),
+            gate_hooks(Point::AfterSubscribeAck, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// An every-pass `BeforeRead` gate while `armed` is set: each read waits
+    /// for one `gate` release and tells `fired`. The test disarms it once
+    /// the driver is past the orchestrated passes.
+    fn armed_gate(
+        armed: Arc<AtomicBool>,
+        gate: mpsc::Receiver<()>,
+        fired: mpsc::Sender<()>,
+    ) -> Hooks {
+        let gate = Arc::new(Mutex::new(gate));
+        Hooks {
+            clock: Box::new(Instant::now),
+            pause: Some(Box::new(move |p| {
+                if p == Point::BeforeRead && armed.load(Ordering::SeqCst) {
+                    fired.send(()).expect("fired");
+                    gate.lock()
+                        .expect("gate")
+                        .recv_timeout(Duration::from_secs(15))
+                        .expect("release");
+                }
+            })),
+        }
+    }
+
+    /// A seam pause that only tells `fired` once at `point` and never
+    /// blocks: for flows where the test, not the driver, sets the pace.
+    fn signal_hooks(point: Point, fired: mpsc::Sender<()>) -> Hooks {
+        let done = Arc::new(AtomicBool::new(false));
+        Hooks {
+            clock: Box::new(Instant::now),
+            pause: Some(Box::new(move |p| {
+                if p == point && !done.swap(true, Ordering::SeqCst) {
+                    fired.send(()).expect("fired");
+                }
+            })),
+        }
+    }
+
+    /// After the subscribe ack, driver flag first: the prompt goes out, then
+    /// the kill lands in the prompt-ack wait. The fake sends the ack, a
+    /// completed turn and a clean verdict after the control's `close now`;
+    /// the run ends Done with one `close now` and no plain `close` (R3 wins).
+    /// The fake holds every later line until the test's kill, so no
+    /// scheduling can put the verdict before the intent.
+    #[test]
+    fn kill_after_the_prompt_went_out_keeps_one_close_now() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (prompt_tx, prompt_rx) = mpsc::channel::<()>();
+        let (kill_done_tx, kill_done_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            prompt_tx.send(()).expect("prompt seen");
+            kill_done_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("kill");
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            srv.send(&turn_completed_ev(10, "completed", None));
+            srv.send(&exited_ev(11, 0, "DONE", None));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            signal_hooks(Point::AfterSubscribeAck, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("passed");
+        prompt_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("prompt");
+        control.kill();
+        kill_done_tx.send(()).expect("fake");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(res.text, "DONE");
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// F3: a kill with the driver paused just before the prompt write. The
+    /// release finds `send_prompt` refusing on the intent; the run skips the
+    /// prompt, the `close now` goes out once in the stopping read loop, and
+    /// the stop wait ends with the kill crash.
+    #[test]
+    fn kill_before_the_prompt_write_sends_no_prompt() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds = short_stop_bounds();
+        let run = spawn_turn_with(
+            req,
+            path.clone(),
+            gate_hooks(Point::BeforePromptWrite, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// F2: after the `close now`, the fake sends `turn_completed` and then
+    /// nothing. The completed turn sends no plain `close` (R12: the stop is
+    /// under way), and the stop wait ends with the stop text.
+    /// A `STATUS: DONE` hub line on the way still derives Error.
+    #[test]
+    fn completed_turn_in_the_stop_wait_sends_no_plain_close() {
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (kill_done_tx, kill_done_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            ready_tx.send(()).expect("ready");
+            kill_done_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("kill");
+            srv.send(&ev(
+                "assistant_message_delta",
+                10,
+                serde_json::json!({"text": "STATUS: DONE"}),
+            ));
+            srv.send(&turn_completed_ev(11, "completed", None));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            release_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("release");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds = short_stop_bounds();
+        let run = spawn_turn(req, path.clone());
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        ready_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("ready");
+        control.kill();
+        kill_done_tx.send(()).expect("fake");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        release_tx.send(()).expect("fake");
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// F2 with a verdict: the `fiber_exited` the fake sends after
+    /// `turn_completed` wins over the armed stop (R3), so the run ends Done.
+    #[test]
+    fn exited_after_turn_completed_wins_over_the_armed_stop() {
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (kill_done_tx, kill_done_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            ready_tx.send(()).expect("ready");
+            kill_done_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("kill");
+            srv.send(&turn_completed_ev(10, "completed", None));
+            srv.send(&exited_ev(11, 0, "DONE", None));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.stop_wait = Duration::from_secs(5);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let run = spawn_turn(req, path.clone());
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        ready_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("ready");
+        control.kill();
+        kill_done_tx.send(()).expect("fake");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(res.text, "DONE");
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// F2 with the stop set by an expired `turn_wait`: after `turn_started`
+    /// with no completion, the turn bound arms the stop (close now goes
+    /// out). A `turn_completed` in the stop wait sends no plain `close`
+    /// (the stop is under way), and the stop wait ends with the turn-bound
+    /// stop text.
+    #[test]
+    fn expired_turn_wait_arms_the_stop() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.send(&turn_completed_ev(10, "completed", None));
+            release_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("release");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.turn_wait = Some(Duration::from_millis(50));
+        req.bounds.stop_wait = Duration::from_millis(50);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let res = run_turn(&req, &path, &|_| {});
+        assert!(
+            res.text.contains(
+                "no verdict within the turn bound; no fiber_exited within the stop bound"
+            ),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        release_tx.send(()).expect("fake");
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// R7: `cancel` then `kill` gives one `close now` and the kill text; the
+    /// kill upgrades the pending cancel. A second flow does two kills: still
+    /// one `close now`. Every pass through the read loop is gated, so the
+    /// upgrade path (not just the outcome) is forced.
+    #[test]
+    fn stop_intent_upgrades_cancel_to_kill_with_one_close() {
+        for second in [false, true] {
+            let (fired_tx, fired_rx) = mpsc::channel::<()>();
+            let (gate_tx, gate_rx) = mpsc::channel::<()>();
+            let (ready_tx, ready_rx) = mpsc::channel::<()>();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let gated_armed = Arc::new(AtomicBool::new(false));
+            let (path, rx) = spawn_fake(move |srv| {
+                srv.send(&hello(serde_json::json!(1), "9.9.9"));
+                let (start_id, _) = recv_id(srv);
+                srv.send(&accepted(
+                    &start_id,
+                    serde_json::json!({"session_id": "s_1"}),
+                ));
+                let (sub_id, _) = recv_id(srv);
+                srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+                let (prompt_id, _) = recv_id(srv);
+                srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+                srv.send(&turn_started_ev(&prompt_id, 9));
+                ready_tx.send(()).expect("ready");
+                let (_, close) = recv_id(srv);
+                assert_eq!(close["command"], "close");
+                assert_eq!(close["args"]["now"], true);
+                release_rx
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("release");
+                srv.expect_eof();
+            });
+            let mut req = hub_request();
+            req.bounds = short_stop_bounds();
+            let pause = {
+                let fired_tx = fired_tx;
+                let gate_rx = Arc::new(Mutex::new(gate_rx));
+                let armed = Arc::clone(&gated_armed);
+                move |p: Point| {
+                    if p == Point::BeforeRead && armed.load(Ordering::SeqCst) {
+                        fired_tx.send(()).expect("fired");
+                        gate_rx
+                            .lock()
+                            .expect("gate")
+                            .recv_timeout(Duration::from_secs(15))
+                            .expect("release");
+                    }
+                }
+            };
+            let run = spawn_turn_with(
+                req,
+                path.clone(),
+                Hooks {
+                    clock: Box::new(Instant::now),
+                    pause: Some(Box::new(pause)),
+                },
+            );
+            let control = run.control.clone();
+            let res_rx = drive_async(run);
+            // Pump the driver forward until the fake is in the live loop,
+            // then arm the gate: the next two passes are the orchestrated
+            // stop and upgrade.
+            gated_armed.store(true, Ordering::SeqCst);
+            loop {
+                fired_rx
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("fired");
+                if ready_rx.try_recv().is_ok() {
+                    break;
+                }
+                gate_tx.send(()).expect("release");
+            }
+            if second {
+                control.kill();
+            } else {
+                control.cancel();
+            }
+            gate_tx.send(()).expect("release");
+            fired_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("second");
+            control.kill();
+            gated_armed.store(false, Ordering::SeqCst);
+            gate_tx.send(()).expect("release");
+            let res = res_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("result");
+            drop(control);
+            assert!(res.text.contains("killed by the caller"), "{}", res.text);
+            assert!(
+                crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                    == crate::types::RunStatus::Error
+            );
+            release_tx.send(()).expect("fake");
+            assert_eq!(
+                received_commands(&join_fake(&path, rx)),
+                ["start", "subscribe", "prompt", "close"]
+            );
+        }
+    }
+
+    /// F (R16 rule): a `stream_closed` with no `close now` outstanding ends
+    /// the run at once after the R6 cleanup (summary subscribe, `close
+    /// now`): it does not wait out a long `stop_wait`, and the text is the
+    /// `stream_closed` crash, not a stop text.
+    #[test]
+    fn stream_closed_without_a_close_now_ends_at_once() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&ev("stream_closed", 9, serde_json::json!({})));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.stop_wait = Duration::from_secs(60);
+        let res = run_turn(&req, &path, &|_| {});
+        assert!(res.text.contains("stream_closed"), "{}", res.text);
+        assert!(!res.text.contains("stop bound"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "subscribe", "close"]
+        );
+    }
+
+    /// R16: with a `close now` outstanding and unanswered, a read
+    /// `stream_closed` clears the subscription flags and retries at once
+    /// (summary subscribe, then a fresh `close now`), then keeps reading.
+    /// The late rejection of the first id is ignored (stale: no second
+    /// retry); the fake's accept of the second ends the run as the
+    /// `stream_closed` crash.
+    #[test]
+    fn stream_closed_with_close_now_outstanding_retries_once() {
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (a_seen_tx, a_seen_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let armed = Arc::new(AtomicBool::new(false));
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            ready_tx.send(()).expect("ready");
+            let (a_id, close_a) = recv_id(srv);
+            assert_eq!(close_a["command"], "close");
+            assert_eq!(close_a["args"]["now"], true);
+            a_seen_tx.send(()).expect("a seen");
+            go_rx.recv_timeout(Duration::from_secs(15)).expect("go");
+            srv.send(&ev("stream_closed", 10, serde_json::json!({})));
+            srv.send(&rejected(Some(&a_id), "not_subscribed", "gone"));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
+            assert_eq!(summary["session_id"], "s_1");
+            let (b_id, close_b) = recv_id(srv);
+            assert_eq!(close_b["command"], "close");
+            assert_eq!(close_b["args"]["now"], true);
+            assert_ne!(a_id, b_id);
+            srv.send(&accepted(&b_id, serde_json::json!({})));
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            armed_gate(Arc::clone(&armed), gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        ready_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("ready");
+        armed.store(true, Ordering::SeqCst);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        a_seen_rx.recv_timeout(Duration::from_secs(15)).expect("a");
+        go_tx.send(()).expect("fake");
+        armed.store(false, Ordering::SeqCst);
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("stream_closed"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        let received = join_fake(&path, rx);
+        assert_eq!(
+            received_commands(&received),
+            [
+                "start",
+                "subscribe",
+                "prompt",
+                "close",
+                "subscribe",
+                "close"
+            ]
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&received[4]).expect("summary")["args"]["level"],
+            serde_json::json!("summary")
+        );
+    }
+
+    /// R16 accepted variant: the `close now` was answered before the
+    /// `stream_closed` read (`close_now_open` false), so the run fails at
+    /// once after the R6 cleanup and the fake receives nothing more.
+    #[test]
+    fn stream_closed_after_answered_close_now_sends_nothing() {
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (a_seen_tx, a_seen_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let armed = Arc::new(AtomicBool::new(false));
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            ready_tx.send(()).expect("ready");
+            let (a_id, close_a) = recv_id(srv);
+            assert_eq!(close_a["args"]["now"], true);
+            srv.send(&accepted(&a_id, serde_json::json!({})));
+            a_seen_tx.send(()).expect("a answered");
+            go_rx.recv_timeout(Duration::from_secs(15)).expect("go");
+            srv.send(&ev("stream_closed", 10, serde_json::json!({})));
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            armed_gate(Arc::clone(&armed), gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        ready_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("ready");
+        armed.store(true, Ordering::SeqCst);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        a_seen_rx.recv_timeout(Duration::from_secs(15)).expect("a");
+        go_tx.send(()).expect("fake");
+        armed.store(false, Ordering::SeqCst);
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("stream_closed"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// R16 retried variant: with the retry already sent, a later
+    /// `stream_closed` sends no further lines — and a retry on a subscribed
+    /// connection carries no summary (nothing was ever dropped). The kill
+    /// waits for the fake to hold the sent prompt: the subscribe ack is
+    /// processed by then, so the control's `close now` is deterministic.
+    #[test]
+    fn stream_closed_after_the_retry_sends_nothing() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (prompt_tx, prompt_rx) = mpsc::channel::<()>();
+        let (kill_done_tx, kill_done_rx) = mpsc::channel::<()>();
+        let (b_seen_tx, b_seen_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            prompt_tx.send(()).expect("prompt seen");
+            kill_done_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("kill");
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            let (a_id, _) = recv_id(srv);
+            srv.send(&rejected(Some(&a_id), "not_subscribed", "gone"));
+            let (_, retry) = recv_id(srv);
+            assert_eq!(retry["command"], "close");
+            assert_eq!(retry["args"]["now"], true);
+            assert!(
+                retry
+                    .get("args")
+                    .and(retry["args"].get("summary"))
+                    .is_none(),
+                "subscribed retry carries no summary: {}",
+                retry
+            );
+            b_seen_tx.send(()).expect("retry seen");
+            go_rx.recv_timeout(Duration::from_secs(15)).expect("go");
+            srv.send(&ev("stream_closed", 10, serde_json::json!({})));
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            signal_hooks(Point::AfterSubscribeAck, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("subscribed");
+        prompt_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("prompt");
+        control.kill();
+        kill_done_tx.send(()).expect("fake");
+        b_seen_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("retry");
+        go_tx.send(()).expect("fake");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("stream_closed"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close", "close"]
+        );
+    }
+
+    /// F4 folded into the R16 flow (R21): a `close now` rejected
+    /// `not_subscribed` after `stream_closed` retries with a summary
+    /// subscribe and a second `close now`, and nothing more. Accepting the
+    /// second ends with the `stream_closed` crash (pinned above); rejecting
+    /// it ends in a crash naming that reply (R20's text).
+    #[test]
+    fn close_now_rejected_after_stream_closed_names_the_reply() {
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (a_seen_tx, a_seen_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let armed = Arc::new(AtomicBool::new(false));
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            ready_tx.send(()).expect("ready");
+            let (a_id, _) = recv_id(srv);
+            a_seen_tx.send(()).expect("a seen");
+            go_rx.recv_timeout(Duration::from_secs(15)).expect("go");
+            srv.send(&ev("stream_closed", 10, serde_json::json!({})));
+            srv.send(&rejected(Some(&a_id), "not_subscribed", "gone"));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["args"]["level"], "summary");
+            let (b_id, _) = recv_id(srv);
+            assert_ne!(a_id, b_id);
+            srv.send(&rejected(Some(&b_id), "not_subscribed", "still gone"));
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            armed_gate(Arc::clone(&armed), gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        ready_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("ready");
+        armed.store(true, Ordering::SeqCst);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        a_seen_rx.recv_timeout(Duration::from_secs(15)).expect("a");
+        go_tx.send(()).expect("fake");
+        armed.store(false, Ordering::SeqCst);
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("not_subscribed"), "{}", res.text);
+        assert!(res.text.contains("still gone"), "{}", res.text);
+        assert!(res.text.contains("s_1"), "{}", res.text);
+        assert!(res.text.contains("may still be running"), "{}", res.text);
+        assert!(
+            res.text.ends_with("The run ended without a verdict."),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            [
+                "start",
+                "subscribe",
+                "prompt",
+                "close",
+                "subscribe",
+                "close"
+            ]
+        );
+    }
+
+    /// F6: rejecting the summary subscribe id fails at once naming
+    /// `subscribe` and the code; the `close now` that followed in the same
+    /// write is not awaited.
+    #[test]
+    fn summary_subscribe_rejected_after_stream_closed_fails_at_once() {
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (a_seen_tx, a_seen_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let armed = Arc::new(AtomicBool::new(false));
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            ready_tx.send(()).expect("ready");
+            let (a_id, _) = recv_id(srv);
+            a_seen_tx.send(()).expect("a seen");
+            go_rx.recv_timeout(Duration::from_secs(15)).expect("go");
+            srv.send(&ev("stream_closed", 10, serde_json::json!({})));
+            srv.send(&rejected(Some(&a_id), "not_subscribed", "gone"));
+            let (summary_id, summary) = recv_id(srv);
+            assert_eq!(summary["args"]["level"], "summary");
+            let (_, _) = recv_id(srv);
+            srv.send(&rejected(Some(&summary_id), "held", "summary held"));
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            armed_gate(Arc::clone(&armed), gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        ready_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("ready");
+        armed.store(true, Ordering::SeqCst);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused");
+        control.kill();
+        a_seen_rx.recv_timeout(Duration::from_secs(15)).expect("a");
+        go_tx.send(()).expect("fake");
+        armed.store(false, Ordering::SeqCst);
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("subscribe"), "{}", res.text);
+        assert!(res.text.contains("held"), "{}", res.text);
+        assert!(
+            res.text.ends_with("The run ended without a verdict."),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            [
+                "start",
+                "subscribe",
+                "prompt",
+                "close",
+                "subscribe",
+                "close"
+            ]
+        );
+    }
+
+    /// R19: the retry skips an already-sent `summary` subscribe. Staged at
+    /// the `Shared` level: a driver-level retry with a sent summary and a
+    /// run that keeps reading would need the R16 `stream_closed` clearing,
+    /// which carries the retry's own summary — so the unit pins the skip
+    /// rule exactly where it lives.
+    #[test]
+    fn retry_skips_an_already_sent_summary_subscribe() {
+        // A socket pair, not the threaded fake: the test thread is the only
+        // writer here, so nothing can close the peer under a `set_read_timeout`.
+        // The listener fake races a fast test thread that way on this platform.
+        let (client, server) = UnixStream::pair().expect("socket pair");
+        server
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .expect("read timeout");
+        let mut srv = FakeSrv {
+            reader: BufReader::new(server.try_clone().expect("clone")),
+            writer: server,
+            received: Vec::new(),
+        };
+        let shared = Arc::new(Shared::new(Duration::from_secs(5)));
+        {
+            let mut out = lock(&shared.out);
+            out.writer = Some(client);
+            out.session_id = Some("s_1".to_string());
+            out.summary_sent = true;
+        }
+        shared.retry_close_now();
+        assert!(lock(&shared.out).retried);
+        assert!(lock(&shared.out).close_now_id.is_some());
+        assert!(lock(&shared.out).summary_ids.is_empty());
+        drop(shared);
+        let (_, close) = recv_id(&mut srv);
+        assert_eq!(close["command"], "close");
+        assert_eq!(close["args"]["now"], true);
+        assert_eq!(close["session_id"], "s_1");
+        srv.expect_eof();
+        assert_eq!(received_commands(&srv.received).len(), 1);
+    }
+
+    /// The other half of R19: after a `stream_closed` clears `summary_sent`,
+    /// the retry resends the `summary` subscribe. No driver flow sets up a
+    /// cleared-then-retried state any other way — every summary-sending
+    /// path either ends the run at once or sets `retried`, which blocks a
+    /// second retry — so this pins the retry half at the `Shared` level
+    /// through the same calls the `stream_closed` arm makes.
+    #[test]
+    fn retry_after_a_cleared_summary_resends_it() {
+        // A socket pair, not the threaded fake: the test thread is the only
+        // writer here, so nothing can close the peer under a `set_read_timeout`.
+        let (client, server) = UnixStream::pair().expect("socket pair");
+        server
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .expect("read timeout");
+        let mut srv = FakeSrv {
+            reader: BufReader::new(server.try_clone().expect("clone")),
+            writer: server,
+            received: Vec::new(),
+        };
+        let shared = Arc::new(Shared::new(Duration::from_secs(5)));
+        {
+            let mut out = lock(&shared.out);
+            out.writer = Some(client);
+            out.session_id = Some("s_1".to_string());
+        }
+        shared.close_now_once();
+        assert!(lock(&shared.out).summary_sent);
+        // What the `stream_closed` arm does before the retry: the old
+        // subscription is gone, so both flags go down.
+        {
+            let mut out = lock(&shared.out);
+            out.subscribed = false;
+            out.summary_sent = false;
+        }
+        shared.retry_close_now();
+        assert!(lock(&shared.out).retried);
+        assert_eq!(lock(&shared.out).summary_ids.len(), 2);
+        assert_eq!(lock(&shared.out).close_now_ids.len(), 2);
+        drop(shared);
+        let (_, first) = recv_id(&mut srv);
+        assert_eq!(first["command"], "subscribe");
+        assert_eq!(first["args"]["level"], "summary");
+        assert_eq!(first["session_id"], "s_1");
+        let (a_id, close_a) = recv_id(&mut srv);
+        assert_eq!(close_a["command"], "close");
+        assert_eq!(close_a["args"]["now"], true);
+        let (_, second) = recv_id(&mut srv);
+        assert_eq!(second["command"], "subscribe");
+        assert_eq!(second["args"]["level"], "summary");
+        let (b_id, close_b) = recv_id(&mut srv);
+        assert_eq!(close_b["command"], "close");
+        assert_eq!(close_b["args"]["now"], true);
+        assert_ne!(a_id, b_id);
+        srv.expect_eof();
+        assert_eq!(
+            received_commands(&srv.received),
+            ["subscribe", "close", "subscribe", "close"]
+        );
+    }
+
+    /// R18: a clean live `fiber_exited` after an accepted `close now` is
+    /// the S1 exit text (not the kill text): the verdict read before any
+    /// bound wins.
+    #[test]
+    fn exited_after_accepted_close_now_keeps_the_exit_text() {
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (kill_done_tx, kill_done_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            ready_tx.send(()).expect("ready");
+            kill_done_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("kill");
+            let (a_id, _) = recv_id(srv);
+            srv.send(&accepted(&a_id, serde_json::json!({})));
+            srv.send(&exited_ev(10, 0, "clean", None));
+            srv.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .expect("fake read timeout");
+            match read_line(&mut srv.reader) {
+                Err(ReadErr::Lost(_)) => {}
+                Ok(line) => panic!(
+                    "fake saw a line after the verdict: {}",
+                    String::from_utf8_lossy(&line)
+                ),
+            }
+        });
+        let mut req = hub_request();
+        req.bounds.stop_wait = Duration::from_secs(30);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let run = spawn_turn(req, path.clone());
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        ready_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("ready");
+        control.kill();
+        kill_done_tx.send(()).expect("fake");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(
+            res.text.contains("without a completed turn"),
+            "{}",
+            res.text
+        );
+        assert!(!res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// R1 with a resumed session (case C): a replayed `fiber_exited` at or
+    /// below `last_seq` in the fold does not set the verdict flag, so a
+    /// `kill` before the prompt still writes one `close now`. With no live
+    /// exit ever, the stop wait ends with the kill crash and nothing goes
+    /// out after the `close now`.
+    #[test]
+    fn kill_on_a_resumed_session_closes_now_then_stops() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&exited_ev(500, 0, "stale", None));
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 1000})));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            assert_eq!(close["session_id"], "s_1");
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds = short_stop_bounds();
+        let run = spawn_turn_with(
+            req,
+            path.clone(),
+            gate_hooks(Point::AfterSubscribeAck, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("subscribed");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// R1 with a resumed session (case B): the `kill` lands before the
+    /// prompt on a connection whose fold held only a replayed exit. The
+    /// live `fiber_exited` the fake then sends is the S1 pre-turn verdict
+    /// (R3: the verdict read in the stop wait wins), not the kill text.
+    #[test]
+    fn resumed_session_live_exit_after_kill_is_the_verdict() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&exited_ev(500, 0, "stale", None));
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 1000})));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.send(&exited_ev(1001, 1, "", Some("boom")));
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds = short_stop_bounds();
+        let run = spawn_turn_with(
+            req,
+            path.clone(),
+            gate_hooks(Point::AfterSubscribeAck, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("subscribed");
+        control.kill();
+        gate_tx.send(()).expect("release");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert!(
+            res.text.contains("session exited before the turn started"),
+            "{}",
+            res.text
+        );
+        assert!(res.text.contains("boom"), "{}", res.text);
+        assert!(!res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(res.session_id.as_deref(), Some("s_1"));
+        assert!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                == crate::types::RunStatus::Error
+        );
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "close"]
+        );
+    }
+
+    /// R1 itself: a `kill` after a post-`turn_started` `fiber_exited` was
+    /// read writes nothing. The verdict flag is set before the seam pause,
+    /// so the stop landing in the pause is a no-op and the socket stays
+    /// silent after the verdict.
+    #[test]
+    fn kill_after_a_live_verdict_writes_nothing() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            srv.send(&turn_completed_ev(10, "completed", None));
+            let (_, plain) = recv_id(srv);
+            assert_eq!(plain["command"], "close");
+            srv.send(&exited_ev(11, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            signal_hooks(Point::AfterVerdictFlag, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("verdict");
+        control.kill();
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// R3 cancel race: the fake holds the live `fiber_exited` until the
+    /// test cancels. The test cancels only after the fake holds the
+    /// driver's plain post-turn `close`: the cancel lands before the
+    /// verdict is read, one `close now` goes out, no second plain `close`
+    /// and no new `subscribe` appear, and the verdict is Done.
+    #[test]
+    fn cancel_after_turn_completed_keeps_done_with_one_close_now() {
+        let (plain_tx, plain_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            srv.send(&turn_completed_ev(10, "completed", None));
+            let (_, plain) = recv_id(srv);
+            assert_eq!(plain["command"], "close");
+            assert!(plain.get("args").is_none());
+            plain_tx.send(()).expect("plain close");
+            go_rx.recv_timeout(Duration::from_secs(15)).expect("go");
+            srv.send(&exited_ev(11, 0, "DONE", None));
+            let (_, now) = recv_id(srv);
+            assert_eq!(now["command"], "close");
+            assert_eq!(now["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.stop_wait = Duration::from_secs(5);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let run = spawn_turn(req, path.clone());
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        plain_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("plain");
+        control.cancel();
+        go_tx.send(()).expect("fake");
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        let received = join_fake(&path, rx);
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "prompt", "close", "close"]
+        );
+        assert_eq!(
+            received
+                .iter()
+                .filter(|line| {
+                    serde_json::from_str::<serde_json::Value>(line).expect("json")["args"]["now"]
+                        == true
+                })
+                .count(),
+            1
+        );
+    }
+
+    /// R3 with `cancel` after the verdict: the flag is set, so the late
+    /// stop is a no-op and the socket stays silent after the verdict.
+    #[test]
+    fn cancel_after_the_verdict_writes_nothing() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            srv.send(&turn_completed_ev(10, "completed", None));
+            let (_, plain) = recv_id(srv);
+            assert_eq!(plain["command"], "close");
+            srv.send(&exited_ev(11, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            hub_request(),
+            path.clone(),
+            signal_hooks(Point::AfterVerdictFlag, fired_tx),
+        );
+        let control = run.control.clone();
+        let res_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("verdict");
+        control.cancel();
+        let res = res_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// R3 bound race: the `turn_wait` bound fires while the turn is still
+    /// open, arming the stop (one `close now` goes out). The verdict the
+    /// fake then sends is still the outcome and no bound text appears: a
+    /// verdict read after the bound fired wins, exactly as with a jumped
+    /// clock. The `turn_completed` sends no plain `close`: the expired
+    /// bound armed the stop first. Short real bounds carry this; no clock
+    /// seam is needed.
+    #[test]
+    fn readable_exit_beats_an_expired_turn_wait() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+            let (prompt_id, _) = recv_id(srv);
+            srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+            srv.send(&turn_started_ev(&prompt_id, 9));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.send(&turn_completed_ev(10, "completed", None));
+            srv.send(&exited_ev(11, 0, "DONE", None));
+            srv.expect_eof();
+        });
+        let mut req = hub_request();
+        req.bounds.turn_wait = Some(Duration::from_millis(50));
+        req.bounds.stop_wait = Duration::from_secs(5);
+        req.bounds.poll_slice = Duration::from_millis(5);
+        let res = run_turn(&req, &path, &|_| {});
+        assert_eq!(res.text, "DONE");
+        assert!(!res.text.contains("bound"), "{}", res.text);
+        assert_eq!(res.is_error, Some(false));
+        assert_eq!(
+            received_commands(&join_fake(&path, rx)),
+            ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    /// R3 bound race, the stop wait itself: with no exit the stop runs, one
+    /// `close now` goes out, and the stop-wait crash follows at the real
+    /// deadline. When the exit arrives inside the stop wait instead, it is
+    /// the verdict. The fake gates the exit on the `close now`, so no
+    /// clock seam is needed.
+    #[test]
+    fn stop_wait_runs_its_course_then_exit_or_bound() {
+        for exit_in_wait in [false, true] {
+            let (path, rx) = spawn_fake(move |srv| {
+                srv.send(&hello(serde_json::json!(1), "9.9.9"));
+                let (start_id, _) = recv_id(srv);
+                srv.send(&accepted(
+                    &start_id,
+                    serde_json::json!({"session_id": "s_1"}),
+                ));
+                let (sub_id, _) = recv_id(srv);
+                srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 7})));
+                let (prompt_id, _) = recv_id(srv);
+                srv.send(&accepted(&prompt_id, serde_json::json!({"last_seq": 8})));
+                srv.send(&turn_started_ev(&prompt_id, 9));
+                let (_, close) = recv_id(srv);
+                assert_eq!(close["command"], "close");
+                assert_eq!(close["args"]["now"], true);
+                if exit_in_wait {
+                    srv.send(&turn_completed_ev(10, "completed", None));
+                    srv.send(&exited_ev(11, 0, "DONE", None));
+                }
+                srv.expect_eof();
+            });
+            let mut req = hub_request();
+            req.bounds.turn_wait = Some(Duration::from_millis(50));
+            req.bounds.stop_wait = Duration::from_millis(50);
+            req.bounds.poll_slice = Duration::from_millis(5);
+            let res = run_turn(&req, &path, &|_| {});
+            if exit_in_wait {
+                assert_eq!(res.text, "DONE");
+                assert_eq!(res.is_error, Some(false));
+            } else {
+                assert!(
+                    res.text.contains(
+                        "no verdict within the turn bound; no fiber_exited within the stop bound"
+                    ),
+                    "{}",
+                    res.text
+                );
+                assert_eq!(res.is_error, Some(true));
+                assert!(
+                    crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
+                        == crate::types::RunStatus::Error
+                );
+            }
+            assert_eq!(res.session_id.as_deref(), Some("s_1"));
+            assert_eq!(
+                received_commands(&join_fake(&path, rx)),
+                ["start", "subscribe", "prompt", "close"]
+            );
+        }
     }
 
     #[test]
