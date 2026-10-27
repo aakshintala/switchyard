@@ -814,19 +814,40 @@ fn status(args: &[String]) -> Result<i32, Usage> {
     Ok(0)
 }
 
+/// Under Claude Code short `watch` waits run in the background, so a `--timeout`
+/// below 600 s is dropped and the wait runs without a timeout; every other
+/// input passes through unchanged, and 600 itself is honoured.
+fn effective_watch_timeout(secs: Option<f64>, claudecode: bool) -> Option<f64> {
+    if claudecode && secs.is_some_and(|t| t < 600.0) {
+        None
+    } else {
+        secs
+    }
+}
+
 fn watch(args: &[String]) -> Result<i32, Usage> {
     let (kv, ids) = parse(args, &["--timeout"])?;
     if ids.is_empty() {
         return usage(USAGE);
     }
     let timeout_arg = flag(&kv, "--timeout");
-    let timeout = match timeout_arg {
+    let secs = match timeout_arg {
         None => None,
         Some(s) => match s.parse::<f64>() {
-            Ok(t) if t >= 0.0 => Some(Duration::from_secs_f64(t)),
+            Ok(t) if t >= 0.0 => Some(t),
             _ => return usage(format!("invalid --timeout {s}")),
         },
     };
+    // A short wait under Claude Code runs in the background without a timeout.
+    let claudecode = std::env::var_os("CLAUDECODE").is_some_and(|v| !v.is_empty());
+    let effective = effective_watch_timeout(secs, claudecode);
+    if secs.is_some() && effective.is_none() {
+        let s = timeout_arg.expect("timeout ignored without a --timeout");
+        eprintln!(
+            "delegate watch: --timeout {s} ignored under Claude Code (waits run in the background); waiting without a timeout"
+        );
+    }
+    let timeout = effective.map(Duration::from_secs_f64);
     // An id is a file stem; a separator would escape the jobs directory.
     if let Some(id) = ids
         .iter()
@@ -1065,6 +1086,67 @@ mod tests {
     fn last_event_note_is_absent_without_a_stored_age() {
         let record = running_record_with(f64::NAN, Some(10_000.0));
         assert_eq!(last_event_note(&record, 13_000.0), None);
+    }
+
+    #[test]
+    fn effective_watch_timeout_keeps_none_without_a_flag() {
+        assert_eq!(
+            effective_watch_timeout(None, true),
+            None,
+            "(None, true) stays None"
+        );
+        assert_eq!(
+            effective_watch_timeout(None, false),
+            None,
+            "(None, false) stays None"
+        );
+    }
+
+    #[test]
+    fn effective_watch_timeout_honours_every_value_off_claude_code() {
+        assert_eq!(
+            effective_watch_timeout(Some(5.0), false),
+            Some(5.0),
+            "(Some(5.0), false) is honoured"
+        );
+        assert_eq!(
+            effective_watch_timeout(Some(0.0), false),
+            Some(0.0),
+            "(Some(0.0), false) is honoured"
+        );
+    }
+
+    #[test]
+    fn effective_watch_timeout_drops_short_timeouts_on_claude_code() {
+        assert_eq!(
+            effective_watch_timeout(Some(599.0), true),
+            None,
+            "(Some(599.0), true) is ignored"
+        );
+        assert_eq!(
+            effective_watch_timeout(Some(599.9), true),
+            None,
+            "(Some(599.9), true) is ignored"
+        );
+        assert_eq!(
+            effective_watch_timeout(Some(0.0), true),
+            None,
+            "(Some(0.0), true) is ignored"
+        );
+    }
+
+    #[test]
+    fn effective_watch_timeout_honours_600_and_above_on_claude_code() {
+        assert_eq!(
+            effective_watch_timeout(Some(600.0), true),
+            Some(600.0),
+            "(Some(600.0), true) is honoured"
+        );
+        assert_eq!(
+            effective_watch_timeout(Some(601.0), true),
+            Some(601.0),
+            "(Some(601.0), true) is honoured"
+        );
     }
 
     #[test]

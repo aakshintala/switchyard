@@ -119,7 +119,8 @@ impl Env {
             .env("TMPDIR", &self.dir)
             .env("CURSOR_AGENT_BIN", self.dir.join("agent.sh"))
             .env("DELEGATE_HEARTBEAT_MS", "100")
-            .env_remove("DELEGATE_JOBS_DIR");
+            .env_remove("DELEGATE_JOBS_DIR")
+            .env_remove("CLAUDECODE");
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -322,6 +323,108 @@ fn watch_unknown_job_exits_2() {
     assert!(stderr.contains("unknown job nope"), "{stderr:?}");
     assert!(stderr.contains("reboot"), "{stderr:?}");
     assert!(stderr.contains("DELEGATE_JOBS_DIR"), "{stderr:?}");
+}
+
+#[test]
+fn watch_timeout_is_ignored_under_claude_code_below_600() {
+    let e = Env::new("claudecode-timeout");
+    let id = e.run("quick");
+    e.wait_terminal(&id);
+
+    // Control: without CLAUDECODE a short timeout is honoured and prints nothing.
+    let out = e.delegate(&["watch", &id, "--timeout", "5"], None);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "control without CLAUDECODE: exit"
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "control without CLAUDECODE: stderr empty, got {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // An empty CLAUDECODE counts as unset: the timeout is honoured.
+    let out = e.delegate_env(
+        &["watch", &id, "--timeout", "5"],
+        None,
+        &[("CLAUDECODE", "")],
+    );
+    assert_eq!(out.status.code(), Some(0), "empty CLAUDECODE: exit");
+    assert!(
+        out.stderr.is_empty(),
+        "empty CLAUDECODE: stderr empty, got {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Under CLAUDECODE a timeout below 600 is ignored with exactly one notice line.
+    let out = e.delegate_env(
+        &["watch", &id, "--timeout", "599"],
+        None,
+        &[("CLAUDECODE", "1")],
+    );
+    assert_eq!(out.status.code(), Some(0), "CLAUDECODE with 599: exit");
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        "delegate watch: --timeout 599 ignored under Claude Code (waits run in the background); waiting without a timeout\n",
+        "CLAUDECODE with 599: stderr"
+    );
+
+    // 600 is honoured: no notice, bounded wait on a job that is already terminal.
+    let out = e.delegate_env(
+        &["watch", &id, "--timeout", "600"],
+        None,
+        &[("CLAUDECODE", "1")],
+    );
+    assert_eq!(out.status.code(), Some(0), "CLAUDECODE with 600: exit");
+    assert!(
+        out.stderr.is_empty(),
+        "CLAUDECODE with 600: stderr empty, got {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Zero is below 600, so it is ignored too.
+    let out = e.delegate_env(
+        &["watch", &id, "--timeout", "0"],
+        None,
+        &[("CLAUDECODE", "1")],
+    );
+    assert_eq!(out.status.code(), Some(0), "CLAUDECODE with 0: exit");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("delegate watch: --timeout 0 ignored under Claude Code"),
+        "CLAUDECODE with 0: stderr, got {stderr:?}"
+    );
+
+    // No --timeout under CLAUDECODE prints nothing.
+    let out = e.delegate_env(&["watch", &id], None, &[("CLAUDECODE", "1")]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "CLAUDECODE without --timeout: exit"
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "CLAUDECODE without --timeout: stderr empty, got {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A malformed --timeout still exits 2 with the usage message, never the notice.
+    let out = e.delegate_env(
+        &["watch", &id, "--timeout", "abc"],
+        None,
+        &[("CLAUDECODE", "1")],
+    );
+    assert_eq!(out.status.code(), Some(2), "CLAUDECODE with abc: exit");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("invalid --timeout abc"),
+        "CLAUDECODE with abc: usage message, got {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("ignored"),
+        "CLAUDECODE with abc: no notice, got {stderr:?}"
+    );
 }
 
 #[test]
