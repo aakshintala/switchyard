@@ -1,3 +1,5 @@
+use serde_json::Value;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 pub const TRIGGER: &str = "Your instructions are in your system prompt. Begin.";
@@ -69,6 +71,197 @@ pub fn host_argv(model: &str, session_id: &str, session_dir: &Path, brief: &Path
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+pub fn refusal(id: &Value) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "extension_ui_response",
+        "id": id.clone(),
+        "cancelled": true,
+    }))
+    .expect("serializing pi refusal cannot fail")
+}
+
+struct Pending {
+    method: String,
+    command_id: String,
+    turn_id: Option<String>,
+}
+
+#[derive(Default)]
+pub struct Wire {
+    next_turn: u64,
+    current: Option<String>,
+    unconfirmed: bool,
+    pending: HashMap<String, Pending>,
+    fifo: VecDeque<String>,
+    prompt_cumulative: u64,
+    output_cumulative: u64,
+    total_cumulative: u64,
+    last_assistant_error: Option<String>,
+    auto_retry_error: Option<String>,
+    buffered_settle: Option<(String, Option<crate::session::msp::TurnError>)>,
+}
+
+impl Wire {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn queued_steers(&self) -> usize {
+        self.fifo.len()
+    }
+
+    pub fn encode(&mut self, id: i64, method: &str, params: &Value) -> Result<String, String> {
+        let wire_id = id.to_string();
+        match method {
+            "turn/start" => {
+                let text = params
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .and_then(|input| input.first())
+                    .and_then(|item| item.get("text"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "turn/start params need input[0].text".to_string())?;
+                let command_id = params
+                    .get("commandId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                self.next_turn += 1;
+                let turn_id = format!("pi-turn-{}", self.next_turn);
+                self.current = Some(turn_id.clone());
+                self.unconfirmed = true;
+                self.last_assistant_error = None;
+                self.auto_retry_error = None;
+                self.buffered_settle = None;
+                self.pending.insert(
+                    wire_id.clone(),
+                    Pending {
+                        method: method.to_string(),
+                        command_id,
+                        turn_id: Some(turn_id),
+                    },
+                );
+                serde_json::to_string(&serde_json::json!({
+                    "id": wire_id,
+                    "type": "prompt",
+                    "message": text,
+                }))
+                .map_err(|error| error.to_string())
+            }
+            "turn/steer" => {
+                let text = params
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .and_then(|input| input.first())
+                    .and_then(|item| item.get("text"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "turn/steer params need input[0].text".to_string())?;
+                let command_id = params
+                    .get("commandId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                self.pending.insert(
+                    wire_id.clone(),
+                    Pending {
+                        method: method.to_string(),
+                        command_id,
+                        turn_id: None,
+                    },
+                );
+                serde_json::to_string(&serde_json::json!({
+                    "id": wire_id,
+                    "type": "prompt",
+                    "message": text,
+                    "streamingBehavior": "steer",
+                }))
+                .map_err(|error| error.to_string())
+            }
+            "turn/interrupt" => {
+                self.pending.insert(
+                    wire_id.clone(),
+                    Pending {
+                        method: method.to_string(),
+                        command_id: String::new(),
+                        turn_id: None,
+                    },
+                );
+                serde_json::to_string(&serde_json::json!({
+                    "id": wire_id,
+                    "type": "abort",
+                }))
+                .map_err(|error| error.to_string())
+            }
+            "queue/clear" => {
+                self.pending.insert(
+                    wire_id.clone(),
+                    Pending {
+                        method: method.to_string(),
+                        command_id: String::new(),
+                        turn_id: None,
+                    },
+                );
+                serde_json::to_string(&serde_json::json!({
+                    "id": wire_id,
+                    "type": "clear_queue",
+                }))
+                .map_err(|error| error.to_string())
+            }
+            "model/set" => {
+                let provider = params
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "model/set params need provider".to_string())?;
+                let mut model_id = params
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "model/set params need modelId".to_string())?;
+                if let Some((head, tail)) = model_id.rsplit_once(':')
+                    && LEVELS.contains(&tail)
+                {
+                    model_id = head;
+                }
+                self.pending.insert(
+                    wire_id.clone(),
+                    Pending {
+                        method: method.to_string(),
+                        command_id: String::new(),
+                        turn_id: None,
+                    },
+                );
+                serde_json::to_string(&serde_json::json!({
+                    "id": wire_id,
+                    "type": "set_model",
+                    "provider": provider,
+                    "modelId": model_id,
+                }))
+                .map_err(|error| error.to_string())
+            }
+            "thinking/set" => {
+                let level = params
+                    .get("level")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "thinking/set params need level".to_string())?;
+                self.pending.insert(
+                    wire_id.clone(),
+                    Pending {
+                        method: method.to_string(),
+                        command_id: String::new(),
+                        turn_id: None,
+                    },
+                );
+                serde_json::to_string(&serde_json::json!({
+                    "id": wire_id,
+                    "type": "set_thinking_level",
+                    "level": level,
+                }))
+                .map_err(|error| error.to_string())
+            }
+            _ => Err(format!("unknown pi method {method}")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +376,80 @@ mod tests {
         assert!(!argv.iter().any(|arg| arg == "--tools"));
         assert!(!argv.iter().any(|arg| arg == "--approve"));
         assert!(!argv.iter().any(|arg| arg.starts_with("--no-")));
+    }
+
+    #[test]
+    fn request_encoding_matches_wire() {
+        use serde_json::json;
+        let mut wire = super::Wire::new();
+        let start = wire
+            .encode(
+                2,
+                "turn/start",
+                &json!({"input":[{"type":"text","text":"hello"}],"commandId":"c1"}),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&start).unwrap(),
+            json!({"id":"2","type":"prompt","message":"hello"})
+        );
+        assert!(!start.contains("streamingBehavior"));
+        let mut wire = super::Wire::new();
+        let steer = wire
+            .encode(
+                3,
+                "turn/steer",
+                &json!({"input":[{"type":"text","text":"more"}],"commandId":"c2"}),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&steer).unwrap(),
+            json!({"id":"3","type":"prompt","message":"more","streamingBehavior":"steer"})
+        );
+        let mut wire = super::Wire::new();
+        let clear = wire.encode(4, "queue/clear", &json!({})).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&clear).unwrap(),
+            json!({"id":"4","type":"clear_queue"})
+        );
+        let mut wire = super::Wire::new();
+        let abort = wire.encode(5, "turn/interrupt", &json!({})).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&abort).unwrap(),
+            json!({"id":"5","type":"abort"})
+        );
+        let mut wire = super::Wire::new();
+        let model = wire
+            .encode(
+                1,
+                "model/set",
+                &json!({"provider":"openai","modelId":"gpt-6-luna:xhigh"}),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&model).unwrap(),
+            json!({"id":"1","type":"set_model","provider":"openai","modelId":"gpt-6-luna"})
+        );
+        let mut wire = super::Wire::new();
+        let thinking = wire
+            .encode(6, "thinking/set", &json!({"level":"xhigh"}))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&thinking).unwrap(),
+            json!({"id":"6","type":"set_thinking_level","level":"xhigh"})
+        );
+        let mut wire = super::Wire::new();
+        assert!(wire.encode(7, "nope/unknown", &json!({})).is_err());
+        let mut wire = super::Wire::new();
+        let tricky = wire
+            .encode(
+                8,
+                "turn/start",
+                &json!({"input":[{"type":"text","text":"a\"b\nc\u{1f600}"}],"commandId":"c3"}),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&tricky).unwrap();
+        assert_eq!(parsed["message"], json!("a\"b\nc\u{1f600}"));
     }
 
     #[test]
