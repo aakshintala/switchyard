@@ -26,6 +26,9 @@
     "claude-opus-5-5":   { "label": "Claude Opus 5.5",   "backend": "claude", "tiers": ["frontier"], "price": { "input": 4,  "output": 20, "cacheRead": 0.2, "cacheWrite": 5 } },
     "claude-sonnet-5-5": { "label": "Claude Sonnet 5.5", "backend": "claude", "tiers": ["strong"], "price": { "input": 2,  "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } },
     "claude-haiku-5-5":  { "label": "Claude Haiku 5.5",  "backend": "claude", "tiers": ["standard", "strong"], "price": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } },
-    "claude-fable-5-1":  { "label": "Claude Fable 5.1",  "backend": "claude", "price": { "input": 10, "output": 50, "cacheRead": 0.25, "cacheWrite": 12.5 } }
+    "claude-fable-5-1":  { "label": "Claude Fable 5.1",  "backend": "claude", "price": { "input": 10, "output": 50, "cacheRead": 0.25, "cacheWrite": 12.5 } },
+    "fiber/anthropic/claude-opus-5-5":   { "label": "Claude Opus 5.5 (fiber)",   "backend": "fiber", "price": { "input": 4,   "output": 20,  "cacheRead": 0.2,  "cacheWrite": 5 } },
+    "fiber/anthropic/claude-sonnet-5-5": { "label": "Claude Sonnet 5.5 (fiber)", "backend": "fiber", "price": { "input": 2,   "output": 10,  "cacheRead": 0.2,  "cacheWrite": 2.5 } },
+    "fiber/anthropic/claude-haiku-5-5":  { "label": "Claude Haiku 5.5 (fiber)",  "backend": "fiber", "price": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } }
   }
 }
