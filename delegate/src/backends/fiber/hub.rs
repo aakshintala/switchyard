@@ -11,6 +11,7 @@ use super::{finish, handle_line};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// A socket path is limited to 103 bytes on macOS.
@@ -59,6 +60,170 @@ impl Default for Bounds {
 /// The OS rejects a zero socket timeout, so a zero bound becomes 1 ms.
 fn clamp_bound(bound: Duration) -> Duration {
     bound.max(Duration::from_millis(1))
+}
+
+/// The writer side of the connection, shared with the control thread from
+/// T3. One lock per write sequence; the driver never holds it across a read.
+#[derive(Debug)]
+struct Shared {
+    out: Mutex<Out>,
+}
+
+/// The writable half: one sequence at a time, one budget per sequence.
+/// `writer` is set once the connect succeeds; `session_id` once the `start`
+/// is answered; `subscribed` while the hub holds a subscription for this
+/// connection.
+#[derive(Debug)]
+struct Out {
+    writer: Option<UnixStream>,
+    deadline: Duration,
+    broken: bool,
+    ended: bool,
+    session_id: Option<String>,
+    subscribed: bool,
+    summary_sent: bool,
+    close_now_id: Option<String>,
+}
+
+/// The one way to lock `Out`: a poisoned lock is the last holder's panic,
+/// not this caller's, so the guard is recovered instead of panicking.
+fn lock(mutex: &Mutex<Out>) -> MutexGuard<'_, Out> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Time left in a write budget started at `start`: `None` once spent. A
+/// zero remainder is spent too: the OS rejects a zero socket timeout.
+fn remaining(start: Instant, now: Instant, budget: Duration) -> Option<Duration> {
+    match start
+        .checked_add(budget)
+        .and_then(|end| end.checked_duration_since(now))
+    {
+        Some(left) if !left.is_zero() => Some(left),
+        _ => None,
+    }
+}
+
+impl Out {
+    /// One line within the sequence budget started at `start`: before every
+    /// `write` call the timeout is recomputed from the time left, so a hub
+    /// that drains a few bytes at a time cannot hold the lock past one
+    /// deadline. A spent budget, a missing writer, or any write error but an
+    /// interruption marks the connection `broken` and fails. A write that
+    /// fails may have written part of a line, so nothing is written to a
+    /// `broken` connection again.
+    fn write_line(&mut self, line: &str, start: Instant) -> bool {
+        let mut buf: Vec<u8> = Vec::with_capacity(line.len() + 1);
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(b'\n');
+        let mut at = 0;
+        while at < buf.len() {
+            let Some(left) = remaining(start, Instant::now(), self.deadline) else {
+                self.broken = true;
+                return false;
+            };
+            enum Outcome {
+                Wrote(usize),
+                Retry,
+                Fail,
+            }
+            let outcome = match self.writer.as_mut() {
+                None => Outcome::Fail,
+                Some(writer) => {
+                    if writer.set_write_timeout(Some(left)).is_err() {
+                        Outcome::Fail
+                    } else {
+                        match writer.write(&buf[at..]) {
+                            Ok(0) => Outcome::Fail,
+                            Ok(n) => Outcome::Wrote(n),
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Outcome::Retry,
+                            Err(_) => Outcome::Fail,
+                        }
+                    }
+                }
+            };
+            match outcome {
+                Outcome::Wrote(n) => at += n,
+                Outcome::Retry => continue,
+                Outcome::Fail => {
+                    self.broken = true;
+                    return false;
+                }
+            }
+        }
+        match self.writer.as_mut() {
+            Some(writer) => {
+                if writer.flush().is_err() {
+                    self.broken = true;
+                    return false;
+                }
+                true
+            }
+            None => {
+                self.broken = true;
+                false
+            }
+        }
+    }
+
+    /// One locked write sequence with one budget: `start` is taken once for
+    /// every line, so a `summary` subscribe plus its `close now` share one
+    /// deadline. Skips silently when the connection is `broken` or `ended`.
+    fn write_lines(&mut self, lines: &[String]) -> bool {
+        if self.broken || self.ended {
+            return false;
+        }
+        let start = Instant::now();
+        for line in lines {
+            if !self.write_line(line, start) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Shared {
+    fn new(deadline: Duration) -> Self {
+        Shared {
+            out: Mutex::new(Out {
+                writer: None,
+                deadline,
+                broken: false,
+                ended: false,
+                session_id: None,
+                subscribed: false,
+                summary_sent: false,
+                close_now_id: None,
+            }),
+        }
+    }
+
+    /// One best-effort `close now`. On a connection that holds no
+    /// subscription it first sends a `summary` subscribe in the same locked
+    /// write, then the `close now`, sharing one write budget; the hub
+    /// dropped the subscription, so `close` alone would be rejected
+    /// `not_subscribed` and the session would keep running. Runs at most
+    /// once: a set `close_now_id`, an `ended` or a `broken` connection, or
+    /// a run with no session to name all skip.
+    fn close_now_once(&self) {
+        let mut out = lock(&self.out);
+        if out.close_now_id.is_some() || out.ended || out.broken {
+            return;
+        }
+        let Some(session_id) = out.session_id.clone() else {
+            return;
+        };
+        let mut lines = Vec::with_capacity(2);
+        if !out.subscribed && !out.summary_sent {
+            lines.push(subscribe_summary_command(&new_command_id(), &session_id));
+            out.summary_sent = true;
+        }
+        let close_id = new_command_id();
+        lines.push(close_now_command(&close_id, &session_id));
+        if out.write_lines(&lines) {
+            out.close_now_id = Some(close_id);
+        }
+    }
 }
 
 /// What went wrong reading one hub line: EOF or a read error means the
@@ -142,43 +307,38 @@ fn read_line<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, ReadErr> {
     }
 }
 
-/// Write one whole newline JSON command line.
-fn write_line<W: Write>(writer: &mut W, line: &str) -> std::io::Result<()> {
-    writer.write_all(line.as_bytes())?;
-    writer.write_all(b"\n")?;
-    writer.flush()
-}
-
 /// First 80 bytes of a line, for `protocol error` crash texts.
 fn first80(raw: &[u8]) -> String {
     String::from_utf8_lossy(&raw[..raw.len().min(80)]).into_owned()
 }
 
-/// An open hub connection: the reader owns the socket, the writer is a
-/// clone of it. Reads and writes stay on the one calling thread. `partial`
-/// keeps the bytes of an unfinished line across `Tick`s.
+/// An open hub connection: the reader owns the socket, the writer lives
+/// in the shared `Out`. Reads stay on the calling thread; every write
+/// sequence locks `Out`. `partial` keeps the bytes of an unfinished line
+/// across `Tick`s.
 #[derive(Debug)]
 struct HubConn {
     reader: BufReader<UnixStream>,
-    writer: UnixStream,
     partial: Vec<u8>,
+    shared: Arc<Shared>,
 }
 
 /// Connect to the hub socket, read `hub_hello` and return the connection.
 /// The hello wait is the one poll in this task: each slice is `poll_slice`
 /// long and the whole wait is `ack_wait`. A version mismatch names the
 /// hub's `fiber_version` in the error text.
-fn connect(socket_path: &Path, bounds: &Bounds) -> Result<HubConn, String> {
+fn connect(socket_path: &Path, bounds: &Bounds, shared: Arc<Shared>) -> Result<HubConn, String> {
     let show = socket_path.display().to_string();
     let stream = UnixStream::connect(socket_path)
         .map_err(|e| crash_text(format!("cannot connect to hub socket {show}: {e}")))?;
     let writer = stream
         .try_clone()
         .map_err(|e| crash_text(format!("cannot clone hub socket {show}: {e}")))?;
+    lock(&shared.out).writer = Some(writer);
     let mut conn = HubConn {
         reader: BufReader::new(stream),
-        writer,
         partial: Vec::new(),
+        shared,
     };
     let deadline = Instant::now() + clamp_bound(bounds.ack_wait);
     let raw = loop {
@@ -318,6 +478,18 @@ fn subscribe_command(id: &str, session_id: &str) -> String {
     .to_string()
 }
 
+/// The cleanup subscribe: same shape, but at `summary`, which reads no log
+/// and adds nothing to `clients`.
+fn subscribe_summary_command(id: &str, session_id: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "command": "subscribe",
+        "session_id": session_id,
+        "args": {"level": "summary"},
+    })
+    .to_string()
+}
+
 fn prompt_command(id: &str, session_id: &str, prompt: &str) -> String {
     serde_json::json!({
         "id": id,
@@ -391,8 +563,8 @@ impl HubConn {
         }
     }
 
-    fn send(&mut self, line: &str) -> std::io::Result<()> {
-        write_line(&mut self.writer, line)
+    fn send(&mut self, line: &str) -> bool {
+        lock(&self.shared.out).write_lines(&[line.to_string()])
     }
 
     /// Read until a `command_accepted` or `command_rejected` whose
@@ -524,17 +696,15 @@ pub struct HubRequest {
 /// session with `close`, reading `fiber_exited` as the verdict.
 pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResult {
     let model = super::model_reference(&req.model).to_string();
-    let mut conn = match connect(socket, &req.bounds) {
+    let shared = Arc::new(Shared::new(req.bounds.write_deadline));
+    let mut conn = match connect(socket, &req.bounds, Arc::clone(&shared)) {
         Ok(ok) => ok,
         Err(text) => return crash_result(None, Vec::new(), text),
     };
     let mut rest = Rest::new(on);
     // start: no session_id, no content, supervised.
     let start_id = new_command_id();
-    if conn
-        .send(&start_command(&start_id, &req.cwd, &model))
-        .is_err()
-    {
+    if !conn.send(&start_command(&start_id, &req.cwd, &model)) {
         return rest.crash(lost_before_start_text(&start_id));
     }
     rest.start_id = start_id.clone();
@@ -557,17 +727,21 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
         WaitOutcome::Lost => return rest.crash(lost_before_start_text(&start_id)),
     };
     rest.session_id = Some(session_id.clone());
+    lock(&shared.out).session_id = Some(session_id.clone());
     // subscribe at full.
     let sub_id = new_command_id();
-    if conn.send(&subscribe_command(&sub_id, &session_id)).is_err() {
+    if !conn.send(&subscribe_command(&sub_id, &session_id)) {
         return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
     }
     rest.sub_id = sub_id.clone();
     match conn.await_ack(&sub_id, None, |raw| as_history(&mut rest, raw)) {
         WaitOutcome::Ack(Ack::Accepted { result }) => {
             rest.last_seq = last_seq_of(&result);
+            lock(&shared.out).subscribed = true;
         }
         WaitOutcome::Ack(Ack::Rejected { code, message }) => {
+            // No subscription was ever held, so the cleanup re-subscribes.
+            lock(&shared.out).subscribed = false;
             return fail_with_cleanup(
                 &mut conn,
                 &mut rest,
@@ -590,10 +764,7 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
     }
     // prompt with the client-minted id C.
     let prompt_id = new_command_id();
-    if conn
-        .send(&prompt_command(&prompt_id, &session_id, &req.prompt))
-        .is_err()
-    {
+    if !conn.send(&prompt_command(&prompt_id, &session_id, &req.prompt)) {
         return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
     }
     rest.prompt_id = prompt_id.clone();
@@ -601,8 +772,9 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
         // Read afresh each pass: an early `turn_completed` sends `close`
         // and sets `close_id`, and its answer must be ignored below.
         let close_id = rest.close_id.clone();
+        let prompt_shared = Arc::clone(&conn.shared);
         match conn.await_ack(&prompt_id, close_id.as_deref(), |raw| {
-            as_live(&mut rest, raw)
+            as_live(&mut rest, &prompt_shared, raw)
         }) {
             WaitOutcome::Ack(Ack::Accepted { .. }) => break,
             WaitOutcome::Ack(Ack::Rejected { code, message }) => {
@@ -633,7 +805,7 @@ pub fn run_turn(req: &HubRequest, socket: &Path, on: EventFn<'_>) -> BackendResu
                 return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
             }
         };
-        let step = rest.handle_live(&raw);
+        let step = rest.handle_live(&raw, &conn.shared);
         if let Some(done) = apply_step(&mut conn, &mut rest, step) {
             return done;
         }
@@ -651,7 +823,6 @@ struct Rest<'a> {
     prompt_id: String,
     close_id: Option<String>,
     closed: bool,
-    closed_now: bool,
     last_seq: Option<u64>,
     turn_started: bool,
     completed_ok: bool,
@@ -670,7 +841,6 @@ impl<'a> Rest<'a> {
             prompt_id: String::new(),
             close_id: None,
             closed: false,
-            closed_now: false,
             last_seq: None,
             turn_started: false,
             completed_ok: false,
@@ -697,8 +867,10 @@ impl<'a> Rest<'a> {
         Step::Continue
     }
 
-    /// Lines read once the fold point is known.
-    fn handle_live(&mut self, raw: &[u8]) -> Step {
+    /// Lines read once the fold point is known. A `stream_closed` drops the
+    /// hub-side subscription, so it clears the subscription flags: the
+    /// cleanup re-subscribes before the `close now`.
+    fn handle_live(&mut self, raw: &[u8], shared: &Shared) -> Step {
         let (kind, value) = match parse_line(raw) {
             Ok(parsed) => parsed,
             Err(text) => return Step::Fail(text),
@@ -743,9 +915,14 @@ impl<'a> Rest<'a> {
             }
             "attention" | "device_changed" => Step::Continue,
             "session_left" => Step::Continue,
-            "stream_closed" => Step::Fail(crash_text(
-                "hub closed the stream (stream_closed)".to_string(),
-            )),
+            "stream_closed" => {
+                let mut out = lock(&shared.out);
+                out.subscribed = false;
+                out.summary_sent = false;
+                Step::Fail(crash_text(
+                    "hub closed the stream (stream_closed)".to_string(),
+                ))
+            }
             "stream_reopened" => Step::Fail(crash_text(
                 "hub connection event stream_reopened ends the run".to_string(),
             )),
@@ -973,8 +1150,8 @@ fn as_history(rest: &mut Rest, raw: &[u8]) -> Option<Step> {
 }
 
 /// Live handler as a free function, for the same borrow split.
-fn as_live(rest: &mut Rest, raw: &[u8]) -> Option<Step> {
-    match rest.handle_live(raw) {
+fn as_live(rest: &mut Rest, shared: &Shared, raw: &[u8]) -> Option<Step> {
+    match rest.handle_live(raw, shared) {
         Step::Continue => None,
         stop => Some(stop),
     }
@@ -1002,17 +1179,13 @@ fn apply_step(conn: &mut HubConn, rest: &mut Rest, step: Step) -> Option<Backend
 }
 
 /// Crash after the `start` answer, on a live connection: one best-effort
-/// `close` with `now: true`, then the crash. Skipped when no session is open
-/// or a `close now` already went out, so each is sent at most once per run.
-/// It still runs after a plain `close` went out: a crash in a later turn
-/// would otherwise leave the session running.
+/// `close now`, then the crash. The attempt re-subscribes at `summary` when
+/// the connection holds no subscription, so it still lands after the hub
+/// dropped the subscription. Skipped when no session is open or a `close
+/// now` already went out. It still runs after a plain `close` went out: a
+/// crash in a later turn would otherwise leave the session running.
 fn fail_with_cleanup(conn: &mut HubConn, rest: &mut Rest, text: String) -> BackendResult {
-    if !rest.closed_now {
-        rest.closed_now = true;
-        if let Some(session_id) = rest.session_id.clone() {
-            let _ = conn.send(&close_now_command(&new_command_id(), &session_id));
-        }
-    }
+    conn.shared.close_now_once();
     rest.crash(text)
 }
 
@@ -1106,7 +1279,12 @@ mod tests {
 
     impl FakeSrv {
         fn send(&mut self, line: &str) {
-            write_line(&mut self.writer, line).expect("fake hub send");
+            // The fake side needs no write deadline: plain blocking writes.
+            self.writer
+                .write_all(line.as_bytes())
+                .expect("fake hub send");
+            self.writer.write_all(b"\n").expect("fake hub send");
+            self.writer.flush().expect("fake hub send");
         }
 
         fn recv(&mut self) -> String {
@@ -1170,7 +1348,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
         });
-        let conn = connect(&path, &Bounds::default()).expect("connect");
+        let conn = connect(&path, &Bounds::default(), test_shared()).expect("connect");
         drop(conn);
         assert!(join_fake(&path, rx).is_empty());
     }
@@ -1180,7 +1358,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(2), "9.9.9"));
         });
-        let err = connect(&path, &Bounds::default()).unwrap_err();
+        let err = connect(&path, &Bounds::default(), test_shared()).unwrap_err();
         assert!(
             err.contains("the hub speaks schema_version 2; delegate reads 1"),
             "{err}"
@@ -1197,7 +1375,7 @@ mod tests {
                     .to_string(),
             );
         });
-        let err = connect(&path, &Bounds::default()).unwrap_err();
+        let err = connect(&path, &Bounds::default(), test_shared()).unwrap_err();
         assert!(
             err.contains("the hub speaks schema_version missing; delegate reads 1"),
             "{err}"
@@ -1210,7 +1388,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send("this is not json");
         });
-        let err = connect(&path, &Bounds::default()).unwrap_err();
+        let err = connect(&path, &Bounds::default(), test_shared()).unwrap_err();
         assert!(err.contains("protocol error"), "{err}");
         assert!(err.contains("this is not json"), "{err}");
         join_fake(&path, rx);
@@ -1221,7 +1399,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&serde_json::json!({"kind":"command_accepted","payload":{}}).to_string());
         });
-        let err = connect(&path, &Bounds::default()).unwrap_err();
+        let err = connect(&path, &Bounds::default(), test_shared()).unwrap_err();
         assert!(err.contains("protocol error"), "{err}");
         assert!(err.contains("command_accepted"), "{err}");
         join_fake(&path, rx);
@@ -1231,7 +1409,7 @@ mod tests {
     fn missing_socket_fails_with_the_path_and_os_error() {
         let missing = PathBuf::from(format!("/tmp/dh-missing-{}", std::process::id()));
         let _ = std::fs::remove_file(&missing);
-        let err = connect(&missing, &Bounds::default()).unwrap_err();
+        let err = connect(&missing, &Bounds::default(), test_shared()).unwrap_err();
         assert!(err.contains(&*missing.to_string_lossy()), "{err}");
     }
 
@@ -1281,11 +1459,7 @@ mod tests {
             srv.writer.flush().expect("flush");
         });
         let stream = UnixStream::connect(&path).expect("client connect");
-        let mut conn = HubConn {
-            reader: BufReader::new(stream.try_clone().expect("clone")),
-            writer: stream,
-            partial: Vec::new(),
-        };
+        let mut conn = poll_conn(stream);
         let poll = Duration::from_millis(20);
         assert!(matches!(conn.next_line(poll), Next::Tick));
         first_tx.send(()).expect("release first");
@@ -1306,11 +1480,7 @@ mod tests {
             gate.recv_timeout(Duration::from_secs(15)).expect("release");
         });
         let stream = UnixStream::connect(&path).expect("client connect");
-        let mut conn = HubConn {
-            reader: BufReader::new(stream.try_clone().expect("clone")),
-            writer: stream,
-            partial: Vec::new(),
-        };
+        let mut conn = poll_conn(stream);
         assert!(matches!(
             conn.next_line(Duration::from_millis(20)),
             Next::Tick
@@ -1321,11 +1491,7 @@ mod tests {
 
         let (quiet, quiet_rx) = spawn_fake(|_srv| {});
         let stream = UnixStream::connect(&quiet).expect("client connect");
-        let mut conn = HubConn {
-            reader: BufReader::new(stream.try_clone().expect("clone")),
-            writer: stream,
-            partial: Vec::new(),
-        };
+        let mut conn = poll_conn(stream);
         assert!(matches!(
             conn.next_line(Duration::from_millis(20)),
             Next::Lost
@@ -1345,7 +1511,7 @@ mod tests {
             poll_slice: Duration::from_millis(5),
             ..Default::default()
         };
-        let err = connect(&path, &bounds).unwrap_err();
+        let err = connect(&path, &bounds, test_shared()).unwrap_err();
         assert!(err.contains("no hub_hello within the ack bound"), "{err}");
         assert!(err.ends_with("The run ended without a verdict."), "{err}");
         tx.send(()).expect("release");
@@ -1375,9 +1541,202 @@ mod tests {
             ack_wait: Duration::from_secs(5),
             ..Default::default()
         };
-        let conn = connect(&path, &bounds).expect("hello after a quiet slice");
+        let conn = connect(&path, &bounds, test_shared()).expect("hello after a quiet slice");
         drop(conn);
         join_fake(&path, rx);
+    }
+
+    #[test]
+    fn cleanup_subscribe_is_at_summary_level() {
+        assert_eq!(
+            subscribe_summary_command("c_9", "s_36e63d22c39750e1"),
+            r#"{"id":"c_9","command":"subscribe","session_id":"s_36e63d22c39750e1","args":{"level":"summary"}}"#
+        );
+    }
+
+    #[test]
+    fn remaining_counts_down_the_budget() {
+        let base = Instant::now();
+        assert_eq!(
+            remaining(base, base, Duration::from_secs(5)),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            remaining(base, base + Duration::from_secs(2), Duration::from_secs(5)),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            remaining(base, base + Duration::from_secs(5), Duration::from_secs(5)),
+            None
+        );
+        assert_eq!(
+            remaining(base, base + Duration::from_secs(6), Duration::from_secs(5)),
+            None
+        );
+    }
+
+    /// A panic while holding `Shared.out` must not wedge the cleanup: the
+    /// lock is recovered and the `close now` still goes out, exactly once.
+    #[test]
+    fn poisoned_lock_still_closes_now() {
+        let (path, rx) = spawn_fake(|srv| {
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            assert_eq!(close["session_id"], "s_1");
+        });
+        let stream = UnixStream::connect(&path).expect("client connect");
+        let shared = Arc::new(Shared::new(Duration::from_secs(5)));
+        {
+            let mut out = lock(&shared.out);
+            out.writer = Some(stream);
+            out.session_id = Some("s_1".to_string());
+            out.subscribed = true;
+        }
+        let poisoned = Arc::clone(&shared);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = lock(&poisoned.out);
+                panic!("holding the lock across a panic");
+            })
+            .join()
+            .is_err()
+        );
+        shared.close_now_once();
+        let received = join_fake(&path, rx);
+        assert_eq!(received.len(), 1);
+    }
+
+    /// One budget per sequence: a start already one budget in the past
+    /// writes neither line and marks the connection `broken`, with no clock
+    /// and no sleep (the start is passed explicitly, as `write_line`
+    /// takes it; `write_lines` takes it once per call).
+    #[test]
+    fn spent_start_writes_neither_line_and_marks_broken() {
+        let (path, rx) = spawn_fake(|_srv| {});
+        let stream = UnixStream::connect(&path).expect("client connect");
+        let mut out = Out {
+            writer: Some(stream),
+            deadline: Duration::from_secs(5),
+            broken: false,
+            ended: false,
+            session_id: None,
+            subscribed: false,
+            summary_sent: false,
+            close_now_id: None,
+        };
+        let start = Instant::now() - Duration::from_secs(10);
+        assert!(!out.write_line("a", start));
+        assert!(!out.write_lines(&["b".to_string()]));
+        assert!(out.broken);
+        assert!(join_fake(&path, rx).is_empty());
+    }
+
+    /// The pair shares one budget: when the writer is dead the cleanup ends
+    /// `broken` with no id stored, and the fake sees no line after the
+    /// stall.
+    #[test]
+    fn close_now_once_on_a_dead_writer_ends_broken() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .expect("fake read timeout");
+            match read_line(&mut srv.reader) {
+                Err(ReadErr::Lost(_)) => {}
+                Ok(line) => panic!(
+                    "fake saw a line after the stall: {}",
+                    String::from_utf8_lossy(&line)
+                ),
+            }
+        });
+        let stream = UnixStream::connect(&path).expect("client connect");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shut the writer");
+        let shared = Arc::new(Shared::new(Duration::from_millis(1)));
+        {
+            let mut out = lock(&shared.out);
+            out.writer = Some(stream);
+            out.session_id = Some("s_1".to_string());
+        }
+        shared.close_now_once();
+        assert!(lock(&shared.out).broken, "dead writer ends broken");
+        assert!(lock(&shared.out).close_now_id.is_none());
+        join_fake(&path, rx);
+    }
+
+    /// After a forced write error no later `close now` is attempted.
+    #[test]
+    fn broken_connection_takes_no_further_writes() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .expect("fake read timeout");
+            match read_line(&mut srv.reader) {
+                Err(ReadErr::Lost(_)) => {}
+                Ok(line) => panic!(
+                    "fake saw a line after the stall: {}",
+                    String::from_utf8_lossy(&line)
+                ),
+            }
+        });
+        let stream = UnixStream::connect(&path).expect("client connect");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shut the writer");
+        let shared = Arc::new(Shared::new(Duration::from_millis(1)));
+        {
+            let mut out = lock(&shared.out);
+            out.writer = Some(stream);
+            out.session_id = Some("s_1".to_string());
+            out.subscribed = true;
+        }
+        shared.close_now_once();
+        assert!(lock(&shared.out).broken);
+        shared.close_now_once();
+        assert!(lock(&shared.out).close_now_id.is_none());
+        join_fake(&path, rx);
+    }
+
+    /// A prompt bigger than the socket buffer stalls a fake that stopped
+    /// reading: the write fails within the write deadline, the run ends as
+    /// a lost connection, and no `close now` goes out after the stall.
+    #[test]
+    fn stalled_prompt_write_ends_as_a_lost_connection() {
+        let big = "p".repeat(4 * 1024 * 1024);
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({})));
+            // Stop reading: the client's prompt never fits the buffer.
+            release_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("release");
+        });
+        let mut req = hub_request();
+        req.prompt = big;
+        req.bounds.write_deadline = Duration::from_millis(20);
+        let res = run_turn(&req, &path, &|_| {});
+        assert!(
+            res.text
+                .starts_with("No answer before the connection was lost."),
+            "{}",
+            res.text
+        );
+        assert!(res.text.contains("s_1"), "{}", res.text);
+        assert!(res.text.contains("may still be running"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        release_tx.send(()).expect("release");
+        let received = join_fake(&path, rx);
+        assert_eq!(received_commands(&received), ["start", "subscribe"]);
     }
 
     #[test]
@@ -1571,11 +1930,25 @@ mod tests {
         .to_string()
     }
 
+    fn test_shared() -> Arc<Shared> {
+        Arc::new(Shared::new(Duration::from_secs(5)))
+    }
+
+    /// A client connection that only reads: the writer lives in `Out`, and
+    /// these tests never write.
+    fn poll_conn(stream: UnixStream) -> HubConn {
+        HubConn {
+            reader: BufReader::new(stream),
+            partial: Vec::new(),
+            shared: test_shared(),
+        }
+    }
+
     fn connect_pair(
         script: impl FnOnce(&mut FakeSrv) + Send + 'static,
     ) -> (HubConn, PathBuf, mpsc::Receiver<Vec<String>>) {
         let (path, rx) = spawn_fake(script);
-        let conn = connect(&path, &Bounds::default()).expect("connect");
+        let conn = connect(&path, &Bounds::default(), test_shared()).expect("connect");
         (conn, path, rx)
     }
 
@@ -1586,7 +1959,7 @@ mod tests {
             assert_eq!(srv.recv(), start_command("c_1", "/w", "m"));
             srv.send(&accepted("c_1", serde_json::json!({"session_id": "s_9"})));
         });
-        conn.send(&start_command("c_1", "/w", "m")).expect("send");
+        assert!(conn.send(&start_command("c_1", "/w", "m")));
         let WaitOutcome::Ack(Ack::Accepted { result }) = conn.await_ack("c_1", None, |_| None)
         else {
             panic!("rejected");
@@ -1624,7 +1997,7 @@ mod tests {
             srv.recv();
             srv.send(&rejected(Some("c_1"), "invalid_arguments", "bad start"));
         });
-        conn.send(&start_command("c_1", "/w", "m")).expect("send");
+        assert!(conn.send(&start_command("c_1", "/w", "m")));
         let WaitOutcome::Ack(Ack::Rejected { code, message }) =
             conn.await_ack("c_1", None, |_| None)
         else {
@@ -1663,7 +2036,7 @@ mod tests {
                 srv.recv();
                 srv.send(&bare);
             });
-            conn.send(&start_command("c_1", "/w", "m")).expect("send");
+            assert!(conn.send(&start_command("c_1", "/w", "m")));
             let WaitOutcome::Stopped(Step::Fail(text)) = conn.await_ack("c_1", None, |_| None)
             else {
                 panic!("no protocol error for {line}");
@@ -1682,7 +2055,7 @@ mod tests {
             srv.recv();
             srv.send(&accepted("c_other", serde_json::json!({})));
         });
-        conn.send(&start_command("c_1", "/w", "m")).expect("send");
+        assert!(conn.send(&start_command("c_1", "/w", "m")));
         let WaitOutcome::Stopped(Step::Fail(text)) = conn.await_ack("c_1", None, |_| None) else {
             panic!("no protocol error");
         };
@@ -1705,7 +2078,7 @@ mod tests {
             srv.send(&serde_json::json!({"kind":"device_changed","seq":2}).to_string());
             srv.send(&accepted("c_1", serde_json::json!({"session_id": "s_1"})));
         });
-        conn.send(&start_command("c_1", "/w", "m")).expect("send");
+        assert!(conn.send(&start_command("c_1", "/w", "m")));
         let mut seen = Vec::new();
         let WaitOutcome::Ack(Ack::Accepted { .. }) = conn.await_ack("c_1", None, |raw| {
             seen.push(String::from_utf8_lossy(raw).into_owned());
@@ -1723,7 +2096,7 @@ mod tests {
         let (path, rx) = spawn_fake(|srv| {
             srv.send(&hello(serde_json::json!(1), "9.9.9"));
         });
-        let mut conn = connect(&path, &Bounds::default()).expect("connect");
+        let mut conn = connect(&path, &Bounds::default(), test_shared()).expect("connect");
         let WaitOutcome::Lost = conn.await_ack("c_1", None, |_| None) else {
             panic!("expected loss");
         };
@@ -1752,8 +2125,8 @@ mod tests {
                     .into();
             assert_ne!(a_id, b_id);
         });
-        conn.send(&start_command(&a, "/w", "m")).expect("send");
-        conn.send(&subscribe_command(&b, "s_1")).expect("send");
+        assert!(conn.send(&start_command(&a, "/w", "m")));
+        assert!(conn.send(&subscribe_command(&b, "s_1")));
         drop(conn);
         join_fake(&path, rx);
     }
@@ -2373,6 +2746,12 @@ mod tests {
             ));
             let (_, _) = recv_id(srv);
             srv.shutdown_write();
+            // The subscribe was never acked, so the cleanup re-subscribes
+            // at `summary` before the `close now`.
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
+            assert_eq!(summary["session_id"], "s_1");
             let (_, close) = recv_id(srv);
             assert_eq!(close["command"], "close");
             assert_eq!(close["args"]["now"], true);
@@ -2389,7 +2768,7 @@ mod tests {
         assert_eq!(res.is_error, Some(true));
         assert_eq!(
             received_commands(&received),
-            ["start", "subscribe", "close"]
+            ["start", "subscribe", "subscribe", "close"]
         );
     }
 
@@ -2732,12 +3111,19 @@ mod tests {
             ));
             let (_, _) = recv_id(srv);
             srv.send(&offer_ev(500));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
             let (_, close) = recv_id(srv);
             assert_eq!(close["command"], "close");
             assert_eq!(close["args"]["now"], true);
             srv.expect_eof();
         });
-        assert_offer_crash(&res, &received, &["start", "subscribe", "close"]);
+        assert_offer_crash(
+            &res,
+            &received,
+            &["start", "subscribe", "subscribe", "close"],
+        );
     }
 
     #[test]
@@ -2854,6 +3240,10 @@ mod tests {
             ));
             let (sub_id, _) = recv_id(srv);
             srv.send(&rejected(Some(&sub_id), "session_held", "held"));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
+            assert_eq!(summary["session_id"], "s_1");
             let (_, close) = recv_id(srv);
             assert_eq!(close["command"], "close");
             assert_eq!(close["args"]["now"], true);
@@ -2869,7 +3259,7 @@ mod tests {
         );
         assert_eq!(
             received_commands(&received),
-            ["start", "subscribe", "close"]
+            ["start", "subscribe", "subscribe", "close"]
         );
     }
 
@@ -3038,6 +3428,12 @@ mod tests {
         let (res, received) = run_case(|srv| {
             handshake_to_prompt(srv, &[], serde_json::json!(1000));
             srv.send(&ev("stream_closed", 1001, serde_json::json!({})));
+            // The hub dropped the subscription with the stream, so the
+            // cleanup re-subscribes at `summary` before the `close now`.
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
+            assert_eq!(summary["session_id"], "s_1");
             let (_, close) = recv_id(srv);
             assert_eq!(close["command"], "close");
             assert_eq!(close["args"]["now"], true);
@@ -3047,7 +3443,7 @@ mod tests {
         assert_eq!(res.is_error, Some(true));
         assert_eq!(
             received_commands(&received),
-            ["start", "subscribe", "prompt", "close"]
+            ["start", "subscribe", "prompt", "subscribe", "close"]
         );
     }
 
@@ -3134,6 +3530,9 @@ mod tests {
             ));
             let (_, _) = recv_id(srv);
             srv.send("garbage before the subscribe ack");
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
             let (_, close) = recv_id(srv);
             assert_eq!(close["args"]["now"], true);
             srv.expect_eof();
@@ -3141,7 +3540,7 @@ mod tests {
         assert!(res.text.contains("protocol error"), "{}", res.text);
         assert_eq!(
             received_commands(&received),
-            ["start", "subscribe", "close"]
+            ["start", "subscribe", "subscribe", "close"]
         );
     }
 
@@ -3212,6 +3611,9 @@ mod tests {
                 "session_held",
                 "taken\nSTATUS: DONE",
             ));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["args"]["level"], "summary");
             let (_, close) = recv_id(srv);
             assert_eq!(close["args"]["now"], true);
             srv.expect_eof();
