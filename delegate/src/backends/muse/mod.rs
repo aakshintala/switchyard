@@ -1414,8 +1414,8 @@ mod tests {
         );
         assert_eq!(
             result.text, "done",
-            "unexpected text; events={events:?}; text={:?}; stderr={:?}",
-            result.text, result.stderr
+            "unexpected text; events={events:?}; stderr={:?}",
+            result.stderr
         );
     }
 
