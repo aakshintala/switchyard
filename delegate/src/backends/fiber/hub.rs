@@ -191,10 +191,16 @@ fn new_command_id() -> String {
 /// content; `subscribe`, `prompt` and `close` name the session. No `cancel`
 /// or `reply` builder exists: the client never sends them.
 fn start_command(id: &str, workspace: &str, model: &str) -> String {
+    let mut args = serde_json::Map::new();
+    args.insert("workspace".to_string(), workspace.into());
+    if !model.is_empty() {
+        args.insert("model".to_string(), model.into());
+    }
+    args.insert("supervised".to_string(), true.into());
     serde_json::json!({
         "id": id,
         "command": "start",
-        "args": {"workspace": workspace, "model": model, "supervised": true},
+        "args": args,
     })
     .to_string()
 }
@@ -1177,6 +1183,18 @@ mod tests {
             line.get("args").and_then(|a| a.get("supervised")),
             Some(&serde_json::Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn start_command_omits_an_empty_model() {
+        let line: serde_json::Value =
+            serde_json::from_str(&start_command("c_1", "/w", "")).expect("json");
+        assert!(line["args"].get("model").is_none(), "{line}");
+        assert_eq!(line["args"]["workspace"], "/w");
+        assert_eq!(line["args"]["supervised"], true);
+        let kept: serde_json::Value =
+            serde_json::from_str(&start_command("c_1", "/w", "m")).expect("json");
+        assert_eq!(kept["args"]["model"], "m");
     }
 
     fn accepted(id: &str, result: serde_json::Value) -> String {
