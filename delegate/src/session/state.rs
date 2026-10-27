@@ -1553,6 +1553,19 @@ mod tests {
     }
 
     #[test]
+    fn reduced_tick_workload_stays_inside_the_guard_at_controlled_update_latency() {
+        let scratch = Scratch::new();
+        let store = Arc::new(scratch.store());
+        // The sleep runs inside the update closure under the store lock, so
+        // the 80 sleeps serialise: at least 800 ms, far inside the 5 s guard.
+        let hook: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(|| std::thread::sleep(SLOW_UPDATE_LATENCY));
+        let handles = run_tick_workers(&store, TICKS_PER_WORKER, hook);
+        wait_threads(handles);
+        assert_tick_log(&scratch, &store, 2 * TICKS_PER_WORKER);
+    }
+
+    #[test]
     fn failed_state_write_leaves_memory_log_and_sequence_unchanged() {
         use std::os::unix::fs::PermissionsExt;
         if unsafe { libc::geteuid() } == 0 {
