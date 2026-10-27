@@ -82,6 +82,10 @@ case "$1" in
 esac
 "#;
 
+// The absolute budgets below stay as the CI budgets: when `CI` is set, the
+// run, resume, doctor and models tests keep asserting these numbers. When
+// `CI` is unset, those four tests are calibrated off a no-op baseline measured
+// in the same test process, with the budget fixed at a multiple of it.
 const RUN_BUDGET_MS: u128 = 102; // measured: 34ms on M-series Mac, budget 3x
 const RESUME_BUDGET_MS: u128 = 93; // measured: 31ms on M-series Mac, budget 3x
 const CANCEL_BUDGET_MS: u128 = 192; // measured: 64ms on M-series Mac, budget 3x
@@ -89,6 +93,11 @@ const WATCH_BUDGET_MS: u128 = 50; // measured: 2ms on M-series Mac; 50ms floor, 
 const DOCTOR_BUDGET_MS: u128 = 123; // measured: max 41ms over 10 warm runs, budget 3x (#596)
 const MODELS_BUDGET_MS: u128 = 50; // measured: 2ms on M-series Mac; 50ms floor, since 3x a spawn-dominated time flakes on CI
 const SUPERVISOR_RSS_BUDGET_KB: u64 = 8736; // measured: 2912KB on M-series Mac, budget 3x
+
+const RUN_BASELINE_MULTIPLE: u32 = 51;
+const RESUME_BASELINE_MULTIPLE: u32 = 47;
+const DOCTOR_BASELINE_MULTIPLE: u32 = 62;
+const MODELS_BASELINE_MULTIPLE: u32 = 25;
 
 /// Wall-clock and RSS samples are not meaningful when these tests run in parallel.
 static BUDGET_SERIAL: Mutex<()> = Mutex::new(());
@@ -197,6 +206,38 @@ impl Env {
         (start.elapsed().as_millis(), out)
     }
 
+    /// Median of 5 spawns of the trivial `watch nope` command through this
+    /// `Env`'s binary and temp dir, so the baseline shares the page-in and I/O
+    /// path of the timed call and runs under the same load. `watch nope` exits
+    /// non-zero (job not found), so each sample only asserts the child exited
+    /// with a code; its output is not checked.
+    fn baseline(&self) -> Duration {
+        let mut samples = Vec::with_capacity(5);
+        for _ in 0..5 {
+            let start = Instant::now();
+            let out = self.delegate(&["watch", "nope"], None);
+            let sample = start.elapsed();
+            assert!(
+                out.status.code().is_some(),
+                "baseline spawn exited by signal"
+            );
+            samples.push(sample);
+        }
+        samples.sort();
+        samples[2]
+    }
+
+    /// Warm-up spawn, then the baseline, then one timed call. Returns the
+    /// timed duration, the baseline, and the timed call's output.
+    fn wall_calibrated(&self, args: &[&str], stdin: Option<&str>) -> (Duration, Duration, Output) {
+        // One throwaway spawn so the timed sample is not paying a cold binary load.
+        let _ = self.delegate(&["watch", "nope"], None);
+        let baseline = self.baseline();
+        let start = Instant::now();
+        let out = self.delegate(args, stdin);
+        (start.elapsed(), baseline, out)
+    }
+
     fn run_id(&self, prompt: &str) -> String {
         let (ms, out) = self.wall_ms(&["run", "--model", "composer-2.5"], Some(prompt));
         assert!(
@@ -256,6 +297,8 @@ fn supervisor_rss_kb(pid: i32) -> u64 {
 /// Budgets are ~3x macOS medians; GitHub's Linux runners need 4x more headroom (#31).
 /// Wall-clock budgets fail on a loaded machine, so they are asserted only when
 /// `DELEGATE_WALL_BUDGETS` is set: CI sets it; set it locally on a quiet machine (#118).
+/// The run, resume, doctor and models budgets are calibrated off a no-op baseline
+/// when `CI` is unset (see `Env::baseline`); under `CI` they keep these absolute budgets.
 fn assert_wall_ms(cmd: &str, ms: u128, budget: u128) {
     if std::env::var_os("DELEGATE_WALL_BUDGETS").is_none() {
         eprintln!("{cmd} took {ms}ms, budget {budget}ms (not asserted; set DELEGATE_WALL_BUDGETS)");
@@ -297,11 +340,45 @@ fn check_wall(cmd: &str, took: Duration, baseline: Duration, multiple: u32) -> R
     ))
 }
 
+/// Calibrated assertion for the run, resume, doctor and models budgets. Without
+/// `DELEGATE_WALL_BUDGETS` it prints the sample without asserting. Under `CI`
+/// it keeps the absolute budget (times 4, via `assert_wall_ms`); otherwise the
+/// budget is `baseline * multiple` and the timed call runs exactly once.
+fn assert_wall_calibrated(
+    cmd: &str,
+    took: Duration,
+    baseline: Duration,
+    multiple: u32,
+    ci_budget_ms: u128,
+) {
+    if std::env::var_os("DELEGATE_WALL_BUDGETS").is_none() {
+        let budget_ms = (baseline
+            .checked_mul(multiple)
+            .unwrap_or(Duration::ZERO)
+            .as_micros()
+            + 500)
+            / 1000;
+        eprintln!(
+            "{cmd} took {}ms, budget {budget_ms}ms (not asserted; set DELEGATE_WALL_BUDGETS)",
+            (took.as_micros() + 500) / 1000,
+        );
+        return;
+    }
+    if std::env::var_os("CI").is_some() {
+        assert_wall_ms(cmd, took.as_millis(), ci_budget_ms);
+        return;
+    }
+    if let Err(msg) = check_wall(cmd, took, baseline, multiple) {
+        panic!("{msg}");
+    }
+}
+
 #[test]
 fn run_exits_within_wall_clock_budget() {
     serial_budgets(|| {
         let e = Env::new("run", FAKE_AGENT);
-        let (ms, out) = e.wall_ms(&["run", "--model", "composer-2.5"], Some("SLOW brief"));
+        let (took, baseline, out) =
+            e.wall_calibrated(&["run", "--model", "composer-2.5"], Some("SLOW brief"));
         assert!(
             out.status.success(),
             "stderr={} stdout={}",
@@ -310,7 +387,7 @@ fn run_exits_within_wall_clock_budget() {
         );
         let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
         assert_eq!(e.record(&id)["status"], "RUNNING");
-        assert_wall_ms("run", ms, RUN_BUDGET_MS);
+        assert_wall_calibrated("run", took, baseline, RUN_BASELINE_MULTIPLE, RUN_BUDGET_MS);
         e.release();
         e.wait_terminal(&id);
     });
@@ -322,7 +399,7 @@ fn resume_exits_within_wall_clock_budget() {
         let e = Env::new("resume", FAKE_AGENT);
         let a = e.run_id("quick");
         e.wait_terminal(&a);
-        let (ms, out) = e.wall_ms(&["resume", &a], Some("SLOW follow"));
+        let (took, baseline, out) = e.wall_calibrated(&["resume", &a], Some("SLOW follow"));
         assert!(
             out.status.success(),
             "stderr={} stdout={}",
@@ -331,7 +408,13 @@ fn resume_exits_within_wall_clock_budget() {
         );
         let b = String::from_utf8(out.stdout).unwrap().trim().to_string();
         assert_eq!(e.record(&b)["status"], "RUNNING");
-        assert_wall_ms("resume", ms, RESUME_BUDGET_MS);
+        assert_wall_calibrated(
+            "resume",
+            took,
+            baseline,
+            RESUME_BASELINE_MULTIPLE,
+            RESUME_BUDGET_MS,
+        );
         e.release();
         e.wait_terminal(&b);
     });
@@ -377,11 +460,14 @@ fn watch_terminal_job_within_wall_clock_budget() {
 fn doctor_and_models_within_wall_clock_budgets() {
     let info = info_agent_script();
     serial_budgets(|| {
-        for (cmd, budget) in [("doctor", DOCTOR_BUDGET_MS), ("models", MODELS_BUDGET_MS)] {
+        for (cmd, budget, multiple) in [
+            ("doctor", DOCTOR_BUDGET_MS, DOCTOR_BASELINE_MULTIPLE),
+            ("models", MODELS_BUDGET_MS, MODELS_BASELINE_MULTIPLE),
+        ] {
             let e = Env::new(cmd, &info);
             // macOS scans each freshly written fake script on its first exec; time a warm run.
             let _ = e.delegate(&[cmd], None);
-            let (ms, out) = e.wall_ms(&[cmd], None);
+            let (took, baseline, out) = e.wall_calibrated(&[cmd], None);
             if cmd == "doctor" {
                 assert_eq!(
                     out.status.code(),
@@ -396,7 +482,7 @@ fn doctor_and_models_within_wall_clock_budgets() {
                     String::from_utf8_lossy(&out.stderr)
                 );
             }
-            assert_wall_ms(cmd, ms, budget);
+            assert_wall_calibrated(cmd, took, baseline, multiple, budget);
         }
     });
 }
