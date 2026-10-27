@@ -1804,6 +1804,300 @@ mod tests {
     }
 
     #[test]
+    fn races_and_echoes_behave() {
+        use crate::session::msp::{HostEvent, Incoming};
+        use crate::session::state as st;
+        // (a) Steer queued while active, echo carries steer id, no unconsumed.
+        {
+            let mut wire = super::Wire::new();
+            let mut state = st::new_state("s-a", "m", "/work", "/inbox", 1000);
+            let mut now = 1000;
+            now += 10;
+            assert!(st::begin_turn(&mut state, now));
+            let _ = wire
+                .encode(
+                    1,
+                    "turn/start",
+                    &serde_json::json!({"input":[{"type":"text","text":"hello"}],"commandId":"start-a"}),
+                )
+                .unwrap();
+            let out = wire.parse(
+                r#"{"id":"1","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}"#,
+            );
+            for incoming in &out {
+                if let Incoming::Response {
+                    result: Ok(value), ..
+                } = incoming
+                {
+                    let turn_id = value["turnId"].as_str().unwrap();
+                    let disp = crate::session::msp::ack_disposition(value);
+                    let _ = st::apply_ack(&mut state, turn_id, disp, now);
+                }
+            }
+            now += 10;
+            let out = wire.parse(r#"{"type":"agent_start"}"#);
+            for incoming in out {
+                if let Incoming::Event(event) = incoming {
+                    let _ = st::apply_event(&mut state, &event, now);
+                }
+            }
+            now += 10;
+            let out = wire.parse(
+                r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            );
+            for incoming in out {
+                if let Incoming::Event(event) = incoming {
+                    let _ = st::apply_event(&mut state, &event, now);
+                }
+            }
+            assert_eq!(wire.queued_steers(), 0);
+            now += 10;
+            st::note_steer(&mut state, "steer-a");
+            let _ = wire
+                .encode(
+                    2,
+                    "turn/steer",
+                    &serde_json::json!({"input":[{"type":"text","text":"more"}],"commandId":"steer-a"}),
+                )
+                .unwrap();
+            let out = wire.parse(
+                r#"{"id":"2","type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}"#,
+            );
+            assert_eq!(wire.queued_steers(), 1);
+            let _ = out;
+            now += 10;
+            let out = wire.parse(
+                r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"more"}]}}"#,
+            );
+            assert_eq!(out.len(), 1);
+            match &out[0] {
+                Incoming::Event(HostEvent::UserMessage { command_id, .. }) => {
+                    assert_eq!(command_id.as_deref(), Some("steer-a"));
+                }
+                other => panic!("expected UserMessage, got {other:?}"),
+            }
+            for incoming in out {
+                if let Incoming::Event(event) = incoming {
+                    let _ = st::apply_event(&mut state, &event, now);
+                }
+            }
+            assert_eq!(wire.queued_steers(), 0);
+            assert!(state.pending_steers.is_empty());
+            now += 10;
+            let out = wire.parse(r#"{"type":"agent_settled","aborted":false}"#);
+            let mut lines = Vec::new();
+            for incoming in out {
+                if let Incoming::Event(event) = incoming {
+                    lines.extend(st::apply_event(&mut state, &event, now));
+                }
+            }
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line.get("kind").and_then(|v| v.as_str())
+                        == Some("steer.unconsumed"))
+            );
+        }
+        // (b) FIFO alignment: start + steer = 2, echoes pop front.
+        {
+            let mut wire = super::Wire::new();
+            let _ = wire
+                .encode(
+                    1,
+                    "turn/start",
+                    &serde_json::json!({"input":[{"type":"text","text":"hi"}],"commandId":"start-b"}),
+                )
+                .unwrap();
+            let _ = wire.parse(
+                r#"{"id":"1","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}"#,
+            );
+            let _ = wire
+                .encode(
+                    2,
+                    "turn/steer",
+                    &serde_json::json!({"input":[{"type":"text","text":"more"}],"commandId":"steer-b"}),
+                )
+                .unwrap();
+            let _ = wire.parse(
+                r#"{"id":"2","type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}"#,
+            );
+            assert_eq!(wire.queued_steers(), 2);
+            let out = wire.parse(
+                r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+            );
+            match &out[0] {
+                Incoming::Event(HostEvent::UserMessage { command_id, .. }) => {
+                    assert_eq!(command_id.as_deref(), Some("start-b"));
+                }
+                other => panic!("first echo must pop start, got {other:?}"),
+            }
+            assert_eq!(wire.queued_steers(), 1);
+            let out = wire.parse(
+                r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"more"}]}}"#,
+            );
+            match &out[0] {
+                Incoming::Event(HostEvent::UserMessage { command_id, .. }) => {
+                    assert_eq!(command_id.as_deref(), Some("steer-b"));
+                }
+                other => panic!("second echo must pop steer, got {other:?}"),
+            }
+            assert_eq!(wire.queued_steers(), 0);
+        }
+        // (c) Idle race: steer started starts next turn.
+        {
+            let mut wire = super::Wire::new();
+            let mut state = st::new_state("s-c", "m", "/work", "/inbox", 1000);
+            let mut now = 1000;
+            st::note_steer(&mut state, "steer-c");
+            let _ = wire
+                .encode(
+                    1,
+                    "turn/steer",
+                    &serde_json::json!({"input":[{"type":"text","text":"more"}],"commandId":"steer-c"}),
+                )
+                .unwrap();
+            let out = wire.parse(
+                r#"{"id":"1","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}"#,
+            );
+            assert_eq!(out.len(), 2);
+            now += 10;
+            for incoming in &out {
+                if let Incoming::Event(event) = incoming {
+                    let _ = st::apply_event(&mut state, event, now);
+                }
+            }
+            assert_eq!(state.status, crate::session::state::Status::Running);
+            assert_eq!(state.active_turn_id.as_deref(), Some("pi-turn-1"));
+            assert_eq!(state.turn_count, 1);
+            now += 10;
+            let after = wire.parse(r#"{"type":"agent_start"}"#);
+            assert!(
+                after
+                    .iter()
+                    .all(|i| !matches!(i, Incoming::Event(HostEvent::TurnStarted { .. })))
+            );
+            now += 10;
+            let out = wire.parse(
+                r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"more"}]}}"#,
+            );
+            for incoming in out {
+                if let Incoming::Event(event) = incoming {
+                    let _ = st::apply_event(&mut state, &event, now);
+                }
+            }
+            assert!(state.pending_steers.is_empty());
+            assert_eq!(state.active_turn_id.as_deref(), Some("pi-turn-1"));
+        }
+        // (d) Host-initiated run.
+        {
+            let mut wire = super::Wire::new();
+            let out = wire.parse(r#"{"type":"agent_start"}"#);
+            assert_eq!(out.len(), 1);
+            match &out[0] {
+                Incoming::Event(HostEvent::TurnStarted { turn_id }) => {
+                    assert_eq!(turn_id, "pi-turn-1");
+                }
+                other => panic!("expected TurnStarted, got {other:?}"),
+            }
+        }
+        // (e) Settle with no current yields no TurnCompleted.
+        {
+            let mut wire = super::Wire::new();
+            let out = wire.parse(r#"{"type":"agent_settled","aborted":false}"#);
+            assert!(
+                out.iter()
+                    .all(|i| !matches!(i, Incoming::Event(HostEvent::TurnCompleted { .. })))
+            );
+        }
+        // (f) Second agent_start yields no second TurnStarted.
+        {
+            let mut wire = super::Wire::new();
+            let first = wire.parse(r#"{"type":"agent_start"}"#);
+            assert!(
+                first
+                    .iter()
+                    .any(|i| matches!(i, Incoming::Event(HostEvent::TurnStarted { .. })))
+            );
+            let second = wire.parse(r#"{"type":"agent_start"}"#);
+            assert!(
+                second
+                    .iter()
+                    .all(|i| !matches!(i, Incoming::Event(HostEvent::TurnStarted { .. })))
+            );
+        }
+        // (g) Settle before started response buffers TurnCompleted.
+        {
+            let mut wire = super::Wire::new();
+            let mut state = st::new_state("s-g", "m", "/work", "/inbox", 1000);
+            let mut now = 1000;
+            now += 10;
+            assert!(st::begin_turn(&mut state, now));
+            let _ = wire
+                .encode(
+                    1,
+                    "turn/start",
+                    &serde_json::json!({"input":[{"type":"text","text":"hi"}],"commandId":"cmd-g"}),
+                )
+                .unwrap();
+            now += 10;
+            let out = wire.parse(r#"{"type":"agent_start"}"#);
+            for incoming in out {
+                if let Incoming::Event(event) = incoming {
+                    let _ = st::apply_event(&mut state, &event, now);
+                }
+            }
+            now += 10;
+            let out = wire.parse(r#"{"type":"agent_settled","aborted":false}"#);
+            // Buffered, so no TurnCompleted yet.
+            assert!(
+                out.iter()
+                    .all(|i| !matches!(i, Incoming::Event(HostEvent::TurnCompleted { .. })))
+            );
+            for incoming in out {
+                if let Incoming::Event(event) = incoming {
+                    let _ = st::apply_event(&mut state, &event, now);
+                }
+            }
+            // State is still running with no active turn (ack not yet applied).
+            assert_eq!(state.status, crate::session::state::Status::Running);
+            now += 10;
+            let out = wire.parse(
+                r#"{"id":"1","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}"#,
+            );
+            assert_eq!(out.len(), 2);
+            match &out[0] {
+                Incoming::Response { .. } => {}
+                other => panic!("first must be Response, got {other:?}"),
+            }
+            match &out[1] {
+                Incoming::Event(HostEvent::TurnCompleted { .. }) => {}
+                other => panic!("second must be TurnCompleted, got {other:?}"),
+            }
+            for incoming in out {
+                match incoming {
+                    Incoming::Response {
+                        result: Ok(value), ..
+                    } => {
+                        let turn_id = value["turnId"].as_str().unwrap();
+                        let disp = crate::session::msp::ack_disposition(&value);
+                        let _ = st::apply_ack(&mut state, turn_id, disp, now);
+                    }
+                    Incoming::Event(event) => {
+                        let _ = st::apply_event(&mut state, &event, now);
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(state.status, crate::session::state::Status::Idle);
+            assert_eq!(state.turn_count, 1);
+            assert_eq!(
+                state.last_turn.as_ref().map(|t| t.terminal.as_str()),
+                Some("completed")
+            );
+        }
+    }
+
+    #[test]
     fn fixtures_are_redacted_and_shaped() {
         let fixtures = [
             ("prompt-basic", PROMPT_BASIC, 18),
