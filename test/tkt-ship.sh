@@ -29,6 +29,7 @@ ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 cat >"$T/bin/ship-pr" <<EOF
 #!/usr/bin/env bash
 printf 'ship-pr|cwd=%s|%s\n' "\$(pwd)" "\$*" >>"$T/calls.log"
+for a in "\$@"; do printf 'arg|%s\n' "\$a" >>"$T/calls.log"; done
 n="\$(cat "$T/count")"; printf '%s' "\$((n+1))" >"$T/count"
 codes="\$(cat "$T/exitcodes")"
 code="\$(printf '%s' "\$codes" | awk -v i="\$((n+1))" '{print (i<=NF ? \$i : \$NF)}')"
@@ -339,6 +340,23 @@ grep -F -q -- '--body-has Resolves #515' "$T/calls.log" || fail "flags: body-has
 grep -F -q -- '--body-has Co-authored-by: T' "$T/calls.log" || fail "flags: body-has 2 missing"
 grep -F -q -- "--unverified-fixes $CDIR/unverified.md" "$T/calls.log" || fail "flags: unverified missing"
 grep -F -q -- '--gate FOO=1 BAR=2 bash test/gate.sh' "$T/calls.log" || fail "flags: gate missing"
+
+# --- no_mutants_label set: reason reaches ship-pr as one argument ---
+reset_stub; setup_case nomutants
+printf '0' >"$T/exitcodes"
+printf 'no_mutants_label=%s\n' 'test-only PR, nothing to mutate' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "nomutants: exit $RC"
+[ "$(grep -c -x -F 'arg|--no-mutants-label' "$T/calls.log")" -eq 1 ] || fail "nomutants: flag missing: $(cat "$T/calls.log")"
+got="$(grep -A1 -x -F 'arg|--no-mutants-label' "$T/calls.log" | sed -n 2p)"
+[ "$got" = 'arg|test-only PR, nothing to mutate' ] || fail "nomutants: reason not one argument, got [$got]"
+
+# --- no_mutants_label unset: ship-pr gets no such flag ---
+reset_stub; setup_case nomutantsunset
+printf '0' >"$T/exitcodes"
+run_ship
+[ "$RC" -eq 0 ] || fail "nomutantsunset: exit $RC"
+[ "$(grep -c -F 'no-mutants-label' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: flag present: $(cat "$T/calls.log")"
 
 # --- ship-pr runs from the run dir even when the caller is in the worktree ---
 reset_stub; setup_case shipcwd
