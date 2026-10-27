@@ -269,6 +269,34 @@ fn assert_wall_ms(cmd: &str, ms: u128, budget: u128) {
     assert!(ms <= budget, "{cmd} took {ms}ms, budget {budget}ms");
 }
 
+/// The calibrated budget is `baseline * multiple`. A zero baseline or a zero
+/// multiple fails instead of passing vacuously; otherwise the call passes
+/// exactly when `took <= budget`.
+fn check_wall(cmd: &str, took: Duration, baseline: Duration, multiple: u32) -> Result<(), String> {
+    let budget = baseline.checked_mul(multiple);
+    let Some(budget) = budget.filter(|b| !b.is_zero()) else {
+        return Err(format!(
+            "{cmd} took {}ms, budget 0ms (took {}us, budget 0us, baseline {}us x{multiple})",
+            (took.as_micros() + 500) / 1000,
+            took.as_micros(),
+            baseline.as_micros(),
+        ));
+    };
+    // Round half up to the nearest ms so `took 72ms, budget 72ms` in the
+    // prefix can never hide a sub-ms overrun; the suffix keeps exact values.
+    let took_ms = (took.as_micros() + 500) / 1000;
+    let budget_ms = (budget.as_micros() + 500) / 1000;
+    if took <= budget {
+        return Ok(());
+    }
+    Err(format!(
+        "{cmd} took {took_ms}ms, budget {budget_ms}ms (took {}us, budget {}us, baseline {}us x{multiple})",
+        took.as_micros(),
+        budget.as_micros(),
+        baseline.as_micros(),
+    ))
+}
+
 #[test]
 fn run_exits_within_wall_clock_budget() {
     serial_budgets(|| {
@@ -390,4 +418,61 @@ fn supervisor_rss_while_running_within_budget() {
         e.release();
         e.wait_terminal(&id);
     });
+}
+
+#[test]
+fn check_wall_budget_is_baseline_times_multiple() {
+    let baseline = Duration::from_millis(2);
+    assert!(check_wall("run", Duration::from_millis(72), baseline, 36).is_ok());
+    assert!(
+        check_wall(
+            "run",
+            Duration::from_millis(72) + Duration::from_micros(1),
+            baseline,
+            36
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn check_wall_rejects_a_zero_baseline() {
+    let err = check_wall("run", Duration::ZERO, Duration::ZERO, 36).unwrap_err();
+    assert!(err.contains("baseline"), "must name the baseline: {err}");
+}
+
+#[test]
+fn check_wall_rejects_a_zero_multiple() {
+    assert!(check_wall("run", Duration::ZERO, Duration::from_millis(5), 0).is_err());
+}
+
+#[test]
+fn check_wall_accepts_zero_took_with_a_positive_baseline() {
+    assert!(check_wall("run", Duration::ZERO, Duration::from_millis(2), 36).is_ok());
+}
+
+#[test]
+fn check_wall_scales_with_the_baseline() {
+    let took = Duration::from_millis(100);
+    assert!(check_wall("run", took, Duration::from_millis(2), 36).is_err());
+    assert!(check_wall("run", took, Duration::from_millis(4), 36).is_ok());
+}
+
+#[test]
+fn check_wall_message_shows_the_fraction() {
+    let err = check_wall(
+        "run",
+        Duration::from_micros(72_400),
+        Duration::from_micros(2_000),
+        36,
+    )
+    .unwrap_err();
+    assert!(
+        err.starts_with("run took 72ms, budget 72ms"),
+        "unexpected prefix: {err}"
+    );
+    assert!(
+        err.contains("took 72400us, budget 72000us, baseline 2000us x36"),
+        "missing exact values: {err}"
+    );
 }
