@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+# cargo-slot shim
+# Caps concurrent cargo build and test runs on one host. With CARGO_SLOTS=N,
+# at most N cargo invocation trees hold a slot at once. Installed as `cargo`
+# in a directory placed first on a lane's PATH; see autonomous-flywheel.
+import errno
+import fcntl
+import os
+import re
+import signal
+import sys
+import time
+
+MARKER = b"# cargo-slot shim"
+SLOT_SUBCOMMANDS = {"build", "check", "clippy", "test", "nextest", "bench", "run", "doc", "mutants"}
+VALUE_OPTIONS = {"--config", "-C", "-Z", "--color"}
+
+
+def fail(code, msg):
+    sys.stderr.write("cargo-slot: %s\n" % msg)
+    sys.exit(code)
+
+
+def subcommand(args):
+    # Skip a leading +toolchain and the global options; a value option
+    # takes its next token unless it is written --opt=VAL.
+    i = 1 if args and args[0].startswith("+") else 0
+    while i < len(args):
+        if args[i] in VALUE_OPTIONS:
+            i += 2
+        elif args[i].startswith("-"):
+            i += 1
+        else:
+            return args[i]
+    return None
+
+
+def held():
+    return os.environ.get("CARGO_SLOT_HELD", "") not in ("", "0")
+
+
+def slot_count():
+    # Unset and empty are inert, and so is all-zero digits; anything that is
+    # not digits only is a usage error.
+    value = os.environ.get("CARGO_SLOTS", "")
+    if value == "":
+        return 0
+    if not re.fullmatch(r"[0-9]+", value):
+        fail(2, "CARGO_SLOTS must be a positive integer, got '%s'" % value)
+    return int(value)
+
+
+def slot_dir():
+    explicit = os.environ.get("CARGO_SLOT_DIR", "")
+    if explicit:
+        return explicit
+    home = os.environ.get("HOME", "")
+    if not home:
+        fail(1, "HOME unset and CARGO_SLOT_DIR unset: no slot directory")
+    return os.path.join(home, ".cache", "agents", "cargo-slots")
+
+
+def acquire_slot(directory, n):
+    # One LOCK_NB try per slot file per pass; a full pass that finds none
+    # free prints the waiting line once, then sleeps 0.1 s and rescans.
+    # Only BlockingIOError means contention; any other error fails closed.
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as err:
+        fail(1, "cannot create slot directory %s: %s" % (directory, err.strerror))
+    warned = False
+    try:
+        while True:
+            for k in range(1, n + 1):
+                path = os.path.join(directory, "slot-%d.lock" % k)
+                try:
+                    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+                except OSError as err:
+                    fail(1, "cannot open %s: %s" % (path, err.strerror))
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return fd
+                except BlockingIOError:
+                    os.close(fd)
+                except OSError as err:
+                    os.close(fd)
+                    fail(1, "cannot lock %s: %s" % (path, err.strerror))
+            if not warned:
+                sys.stderr.write("cargo-slot: waiting\n")
+                sys.stderr.flush()
+                warned = True
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+def is_shim(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(512)
+    except OSError:
+        return False
+    return MARKER in [line.rstrip() for line in head.split(b"\n")[:5]]
+
+
+def find_real_cargo(path_env, shim_dir):
+    # An unset PATH searches nothing. Otherwise follow execvp: an empty entry
+    # is the working directory, and a relative entry resolves against it.
+    # Skip the shim's own directory, non-directories, candidates that are not
+    # executable regular files, and candidates that carry the shim marker.
+    if path_env is None:
+        return None
+    for entry in path_env.split(os.pathsep):
+        directory = os.path.abspath(entry)
+        if directory == shim_dir or not os.path.isdir(directory):
+            continue
+        candidate = os.path.join(directory, "cargo")
+        if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+            continue
+        if is_shim(candidate):
+            continue
+        return candidate
+    return None
+
+
+def exec_real(real, args):
+    # Python ignores SIGPIPE and SIGXFSZ, and exec keeps ignored signals.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+    try:
+        os.execv(real, ["cargo"] + args)
+    except OSError as err:
+        code = 127 if err.errno == errno.ENOENT else 126
+        fail(code, "cannot exec %s: %s" % (real, err.strerror))
+
+
+def main():
+    args = sys.argv[1:]
+    shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    real = find_real_cargo(os.environ.get("PATH"), shim_dir)
+    if real is None:
+        fail(127, "no cargo on PATH outside cargo-slot")
+    if subcommand(args) in SLOT_SUBCOMMANDS and not held():
+        n = slot_count()
+        if n > 0:
+            # The fd stays inheritable so the exec'd cargo holds the slot.
+            fd = acquire_slot(slot_dir(), n)
+            os.set_inheritable(fd, True)
+            os.environ["CARGO_SLOT_HELD"] = "1"
+    exec_real(real, args)
+
+
+main()
