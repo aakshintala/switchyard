@@ -213,7 +213,10 @@ do_confirm() {
   load_plan
   cmodel="$(vmodel)" || exit 2
   rep="$run/$namebase-confirm-out.md"
-  runjob confirm "$cbrief" "$rep" PLAN="$plan" BASE="$base" EDITS="@$edits" --model "$cmodel"
+  xfile="$run/$namebase-confirm-extra.md"
+  # Confirm has no --extra flag: the state extra, if any, follows the ticket text.
+  ticket_extra "$xfile" "$(t get extra 2>/dev/null || true)"
+  runjob confirm "$cbrief" "$rep" PLAN="$plan" BASE="$base" EDITS="@$edits" EXTRA="@$xfile" --model "$cmodel"
   t set confirmed_for "$(ronum)"
   emit "$RV" "$REC" "$(head -n 38 "$rep")"
 }
