@@ -192,7 +192,7 @@ impl Drop for Env {
 }
 
 #[test]
-fn fiber_run_finishes_with_fiber_reported_cost() {
+fn fiber_run_books_subscription_cost_as_estimated() {
     let e = Env::new("run", "echo.jsonl", "0");
     let id = e.run_write("Reply with the word DONE.", "echo.jsonl", "0");
     assert_eq!(id.len(), 36);
@@ -201,10 +201,10 @@ fn fiber_run_finishes_with_fiber_reported_cost() {
     assert_eq!(done["result"]["text"], "DONE");
     assert_eq!(done["result"]["backend"], "fiber");
     assert_eq!(done["result"]["model"], MODEL);
-    // Cost is fiber's own reported sum, not a table estimate.
+    // Cost is fiber's subscription cost, kept as the sum and booked as an estimate.
     let cost = done["result"]["costUsd"].as_f64().unwrap();
     assert!((cost - 0.000603378).abs() < 1e-12, "{cost}");
-    assert_eq!(done["result"]["costEstimated"], false);
+    assert_eq!(done["result"]["costEstimated"], true);
 
     // Fiber mints the session id; the stream's id is what the record carries.
     assert_eq!(done["resume"]["sessionId"], "s_36e63d22c39750e1");
