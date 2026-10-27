@@ -169,6 +169,7 @@ impl Env {
         cmd.args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
+            .env_remove("CLAUDECODE")
             .env("CODEX_BIN", self.dir.join("codex.sh"))
             .env(
                 "DELEGATE_TEST_CODEX_FIXTURE",

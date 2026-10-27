@@ -14,6 +14,7 @@ fn ask_multiplies_on_real_agent() {
         .args(["run", "--model", "composer-2.5"])
         .current_dir(&dir)
         .env("TMPDIR", &dir)
+        .env_remove("CLAUDECODE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -30,6 +31,7 @@ fn ask_multiplies_on_real_agent() {
         .args(["watch", &id, "--timeout", "300"])
         .current_dir(&dir)
         .env("TMPDIR", &dir)
+        .env_remove("CLAUDECODE")
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&watch.stdout);
@@ -122,6 +124,7 @@ fn ask_multiplies_on_real_claude() {
         .args(["run", "--model", "claude-sonnet-5-5"])
         .current_dir(&dir)
         .env("TMPDIR", &dir)
+        .env_remove("CLAUDECODE")
         .env("CLAUDE_BIN", &wrapper)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -139,6 +142,7 @@ fn ask_multiplies_on_real_claude() {
         .args(["watch", &id, "--timeout", "300"])
         .current_dir(&dir)
         .env("TMPDIR", &dir)
+        .env_remove("CLAUDECODE")
         .env("CLAUDE_BIN", &wrapper)
         .output()
         .unwrap();

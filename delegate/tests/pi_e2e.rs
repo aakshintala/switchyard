@@ -101,6 +101,7 @@ impl Env {
         cmd.args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
+            .env_remove("CLAUDECODE")
             .env("PI_BIN", self.dir.join("pi.sh"))
             .env("DELEGATE_TEST_PI_FIXTURE", fixture)
             .env("DELEGATE_HEARTBEAT_MS", "100")

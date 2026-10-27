@@ -75,6 +75,7 @@ impl LiveEnv {
             .args(args)
             .current_dir(&self.work)
             .env("TMPDIR", &self.root)
+            .env_remove("CLAUDECODE")
             .env("FIBER_BIN", &self.wrapper)
             .env(
                 "DELEGATE_HOST_PROFILE",
@@ -195,6 +196,7 @@ impl Drop for LiveEnv {
                     .args(["cancel", id])
                     .current_dir(&self.work)
                     .env("TMPDIR", &self.root)
+                    .env_remove("CLAUDECODE")
                     .env("FIBER_BIN", &self.wrapper)
                     .output();
             }
