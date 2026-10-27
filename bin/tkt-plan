@@ -208,7 +208,7 @@ do_set() {
   [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
   base="$(base_of "$plan")"
   pack_out="$run/$namebase-pack.md"
-  sweep_out="$("$plansweep" --cwd "$worktree" --base "$base" --plan "$plan" --out "$pack_out" 2>"$tmp")" || { printf '%s\n' "$sweep_out" >&2; cat "$tmp" >&2; exit 2; }
+  sweep_out="$("$plansweep" --cwd "$worktree" --base "$base" --plan "$plan" --out "$pack_out")" || { printf '%s\n' "$sweep_out" >&2; exit 2; }
   pack="$(awk '/^PACK /{print $2; exit}' <<<"$sweep_out")"; [ -n "$pack" ] || { echo "tkt-plan: plan-sweep printed no PACK line" >&2; exit 2; }
   old_plan="$(t get plan 2>/dev/null || true)"
   t set plan "$plan"; t set pack "$pack"
