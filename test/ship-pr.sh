@@ -138,6 +138,7 @@ gh() (
                 fi
               fi
               a="$(cat "$ST/attempt-$rid.txt" 2>/dev/null || echo 1)"
+              case "$a" in ''|*[!0-9]*) a=1 ;; esac
               s="$(cat "$ST/status-$rid.txt" 2>/dev/null || echo completed)"
               json="$(jq -nc --argjson a "$a" --arg s "$s" '{attempt: $a, status: $s}')";;
             *jobs*)
@@ -1186,6 +1187,16 @@ grep -q '(no stderr)' <<<"$line" || fail "114: empty gh stderr reads (no stderr)
 no_merge "114 unreadable attempt"
 
 ! compgen -G "$TMPDIR/ship-pr-7-attempt.*" >/dev/null || fail "attempt stderr temp file removed after unreadable attempt"
+
+# an empty attempt file reads as attempt 1, as the rerun branch already does:
+# the pre-rerun read must not hand jq an empty --argjson
+setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
+echo '[{"databaseId":130,"name":"ci","workflowName":"CI","event":"push","conclusion":"cancelled"}]' >"$ST/run-list.json"
+echo '[{"conclusion":"cancelled","databaseId":230,"name":"ci"}]' >"$ST/jobs-130.json"
+: >"$ST/attempt-130.txt"
+ship; expect 0 "empty attempt file reads as attempt 1"
+[ "$(grep -c 'gh run rerun 130' "$ST/gh.log")" -eq 1 ] || fail "empty attempt: rerun once: [$(grep -c 'gh run rerun 130' "$ST/gh.log")]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "empty attempt merges: [$OUT]"
 
 # many cancelled runs: the rerun wait looks each pre-attempt up in a long
 # list, which must not die on SIGPIPE when awk exits early (pipefail)
