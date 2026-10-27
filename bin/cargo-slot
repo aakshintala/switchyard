@@ -6,6 +6,7 @@
 import errno
 import fcntl
 import os
+import re
 import signal
 import sys
 import time
@@ -38,24 +39,59 @@ def held():
     return os.environ.get("CARGO_SLOT_HELD", "") not in ("", "0")
 
 
-def acquire_slot(slot_dir, n):
+def slot_count():
+    # Unset and empty are inert, and so is all-zero digits; anything that is
+    # not digits only is a usage error.
+    value = os.environ.get("CARGO_SLOTS", "")
+    if value == "":
+        return 0
+    if not re.fullmatch(r"[0-9]+", value):
+        fail(2, "CARGO_SLOTS must be a positive integer, got '%s'" % value)
+    return int(value)
+
+
+def slot_dir():
+    explicit = os.environ.get("CARGO_SLOT_DIR", "")
+    if explicit:
+        return explicit
+    home = os.environ.get("HOME", "")
+    if not home:
+        fail(1, "HOME unset and CARGO_SLOT_DIR unset: no slot directory")
+    return os.path.join(home, ".cache", "agents", "cargo-slots")
+
+
+def acquire_slot(directory, n):
     # One LOCK_NB try per slot file per pass; a full pass that finds none
     # free prints the waiting line once, then sleeps 0.1 s and rescans.
-    os.makedirs(slot_dir, exist_ok=True)
+    # Only BlockingIOError means contention; any other error fails closed.
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as err:
+        fail(1, "cannot create slot directory %s: %s" % (directory, err.strerror))
     warned = False
-    while True:
-        for k in range(1, n + 1):
-            fd = os.open(os.path.join(slot_dir, "slot-%d.lock" % k), os.O_RDWR | os.O_CREAT, 0o644)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return fd
-            except BlockingIOError:
-                os.close(fd)
-        if not warned:
-            sys.stderr.write("cargo-slot: waiting\n")
-            sys.stderr.flush()
-            warned = True
-        time.sleep(0.1)
+    try:
+        while True:
+            for k in range(1, n + 1):
+                path = os.path.join(directory, "slot-%d.lock" % k)
+                try:
+                    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+                except OSError as err:
+                    fail(1, "cannot open %s: %s" % (path, err.strerror))
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return fd
+                except BlockingIOError:
+                    os.close(fd)
+                except OSError as err:
+                    os.close(fd)
+                    fail(1, "cannot lock %s: %s" % (path, err.strerror))
+            if not warned:
+                sys.stderr.write("cargo-slot: waiting\n")
+                sys.stderr.flush()
+                warned = True
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 def is_shim(path):
@@ -102,13 +138,10 @@ def main():
     if real is None:
         fail(127, "no cargo on PATH outside cargo-slot")
     if subcommand(args) in SLOT_SUBCOMMANDS and not held():
-        # Minimal for now: N is not validated yet.
-        n = int(os.environ.get("CARGO_SLOTS") or 0)
+        n = slot_count()
         if n > 0:
-            slot_dir = os.environ.get("CARGO_SLOT_DIR") or os.path.join(
-                os.environ.get("HOME", ""), ".cache", "agents", "cargo-slots")
             # The fd stays inheritable so the exec'd cargo holds the slot.
-            fd = acquire_slot(slot_dir, n)
+            fd = acquire_slot(slot_dir(), n)
             os.set_inheritable(fd, True)
             os.environ["CARGO_SLOT_HELD"] = "1"
     exec_real(real, args)
