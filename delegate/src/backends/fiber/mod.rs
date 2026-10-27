@@ -550,6 +550,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         session_id,
         usage,
         cost_usd,
+        cost_estimated: false,
         is_error,
         duration_ms: None,
         clean_exit,
