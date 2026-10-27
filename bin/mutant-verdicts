@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# mutant-verdicts: merge one finished run's mutants-<shard> artifacts into one verdict list.
+# Usage: mutant-verdicts <run> [--repo OWNER/NAME]
+set -euo pipefail
+
+usage() {
+  echo "usage: mutant-verdicts <run> [--repo OWNER/NAME]" >&2
+  exit 2
+}
+
+run=""
+repo=""
+have_run=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)
+      [ $# -ge 2 ] || usage
+      [ -n "${2:-}" ] || usage
+      [ -z "$repo" ] || usage
+      repo="$2"
+      shift 2
+      ;;
+    --*) usage ;;
+    *)
+      [ "$have_run" -eq 0 ] || usage
+      run="$1"
+      have_run=1
+      shift
+      ;;
+  esac
+done
+
+case "$run" in
+  '' | *[!0-9]*) usage ;;
+esac
+
+gh_view() {
+  if [ -n "$repo" ]; then
+    gh run view "$run" --repo "$repo" --json status --jq .status
+  else
+    gh run view "$run" --json status --jq .status
+  fi
+}
+
+gh_download() {
+  if [ -n "$repo" ]; then
+    gh run download "$run" --repo "$repo" --pattern 'mutants-*' --dir "$1"
+  else
+    gh run download "$run" --pattern 'mutants-*' --dir "$1"
+  fi
+}
+
+# Nothing prints to stdout until every shard parsed with no conflict.
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/mutant-verdicts.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+
+if ! status="$(gh_view)"; then
+  echo "mutant-verdicts: could not read status of run $run" >&2
+  exit 1
+fi
+if [ "$status" != "completed" ]; then
+  echo "mutant-verdicts: run $run is $status, not completed" >&2
+  exit 1
+fi
+
+if ! gh_download "$tmp"; then
+  echo "mutant-verdicts: could not download mutants-* artifacts of run $run" >&2
+  exit 1
+fi
+
+shards="$tmp/shards"
+: >"$shards"
+found=0
+for d in "$tmp"/mutants-*; do
+  [ -d "$d" ] || continue
+  printf '%s\n' "$d" >>"$shards"
+  found=1
+done
+if [ "$found" -eq 0 ]; then
+  echo "mutant-verdicts: no mutants-* artifacts for run $run" >&2
+  exit 1
+fi
+
+rows="$tmp/rows"
+: >"$rows"
+while IFS= read -r shard; do
+  [ -n "$shard" ] || continue
+  for verdict in caught missed timeout unviable; do
+    file="$shard/$verdict.txt"
+    if [ ! -f "$file" ]; then
+      echo "mutant-verdicts: $shard is missing $verdict.txt" >&2
+      exit 1
+    fi
+    # The || keeps a last line without its trailing newline.
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        *[![:space:]]*) ;;
+        *) continue ;;
+      esac
+      printf '%s\t%s\n' "$line" "$verdict" >>"$rows"
+    done <"$file"
+  done
+done <"$shards"
+
+sorted="$tmp/sorted"
+LC_ALL=C sort -u "$rows" -o "$sorted"
+
+# One verdict per full mutant line: a map, never adjacent lines of a re-sorted list.
+conflicts="$(LC_ALL=C awk -F'\t' '
+  {
+    v = $NF
+    m = substr($0, 1, length($0) - length(v) - 1)
+    if (m in seen) {
+      if (seen[m] != v) {
+        bad[m] = 1
+      }
+    } else {
+      seen[m] = v
+    }
+  }
+  END {
+    for (m in bad) {
+      print m
+    }
+  }
+' "$sorted")"
+if [ -n "$conflicts" ]; then
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    echo "mutant-verdicts: conflicting verdicts for mutant: $m" >&2
+  done <<<"$conflicts"
+  exit 1
+fi
+
+cat "$sorted"
