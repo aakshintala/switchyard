@@ -1524,6 +1524,35 @@ mod tests {
     }
 
     #[test]
+    fn worker_deadline_trips_on_held_update_while_sequence_property_holds() {
+        let scratch = Scratch::new();
+        let store = Arc::new(scratch.store());
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder: Arc<Mutex<Option<mpsc::Receiver<()>>>> = Arc::new(Mutex::new(Some(release_rx)));
+        // The hook runs inside the update closure under the store lock, so the
+        // first update to reach it holds both workers until the release send.
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new({
+            let holder = Arc::clone(&holder);
+            move || {
+                if let Some(rx) = holder
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    rx.recv_timeout(Duration::from_secs(4))
+                        .expect("release deadline");
+                }
+            }
+        });
+        let handles = run_tick_workers(&store, TICKS_PER_WORKER, hook);
+        let tripped = !threads_finish_within(&handles, Duration::from_millis(50));
+        let _ = release_tx.send(());
+        wait_threads(handles);
+        assert!(tripped);
+        assert_tick_log(&scratch, &store, 2 * TICKS_PER_WORKER);
+    }
+
+    #[test]
     fn failed_state_write_leaves_memory_log_and_sequence_unchanged() {
         use std::os::unix::fs::PermissionsExt;
         if unsafe { libc::geteuid() } == 0 {
