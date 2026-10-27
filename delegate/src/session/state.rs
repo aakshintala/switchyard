@@ -567,21 +567,53 @@ pub fn settle_dead_supervisor(
 // unreadable state falls through to the spawn file, and the file is never
 // read while a hostPid is published.
 pub fn reap_recorded_host(paths: &Paths, id: &str) {
-    let pid = read_state(paths, id)
-        .ok()
-        .and_then(|state| state.host_pid)
-        .or_else(|| read_spawned_pid(paths, id));
-    if let Some(pid) = pid {
-        reap_host(pid);
-    }
+    let published = read_state(paths, id).ok().and_then(|state| state.host_pid);
+    let file_pid = read_spawned_pid(paths, id);
+    let Some(pid) = published.or(file_pid) else {
+        return;
+    };
+    // The recorded start time proves identity only for the pid it was read
+    // for; a published hostPid that differs from the file gets the guard only.
+    let recorded = (Some(pid) == file_pid)
+        .then(|| read_spawned_start(paths, id))
+        .flatten();
+    reap_host_with(pid, recorded.as_deref(), &real_ps, &real_kill, &|pid| {
+        !process_missing(pid)
+    });
 }
 
 fn read_spawned_pid(paths: &Paths, id: &str) -> Option<i32> {
     std::fs::read_to_string(paths.host_spawn_file(id))
         .ok()?
+        .lines()
+        .next()?
         .trim()
         .parse::<i32>()
         .ok()
+}
+
+// The host start time a pi launch appends to the spawn file, when present.
+// A one-line (older, or Muse) file carries no start time.
+fn read_spawned_start(paths: &Paths, id: &str) -> Option<String> {
+    let contents = std::fs::read_to_string(paths.host_spawn_file(id)).ok()?;
+    let mut lines = contents.lines();
+    lines.next()?;
+    let start = lines.next()?.trim();
+    (!start.is_empty()).then(|| start.to_string())
+}
+
+// The `ps -o lstart=` value for a live process, trimmed. `None` when `ps`
+// fails or prints nothing.
+pub(crate) fn process_start(pid: i32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let start = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!start.is_empty()).then_some(start)
 }
 
 // debt: pid-only liveness, add a heartbeat-age check when a reused supervisor pid shows up.
@@ -592,34 +624,81 @@ fn process_missing(pid: i32) -> bool {
 
 pub fn is_host_command(command: &str) -> bool {
     let tokens: Vec<_> = command.split_whitespace().collect();
-    tokens.windows(6).any(|argv| {
+    if tokens.windows(6).any(|argv| {
         argv[0] == "serve"
             && argv[1] == "--provider"
             && argv[2] == "meta"
             && argv[3] == "--model"
             && !argv[4].is_empty()
             && argv[5] == "--disable-sandbox"
-    })
+    }) {
+        return true;
+    }
+    // A pi host always carries these three flag shapes: delegate passes
+    // `--mode rpc`, `--session-id` and `--append-system-prompt` on every pi
+    // launch, so a stray process with only some of them does not match.
+    let mode_rpc = tokens
+        .windows(2)
+        .any(|pair| pair[0] == "--mode" && pair[1] == "rpc");
+    mode_rpc && tokens.contains(&"--session-id") && tokens.contains(&"--append-system-prompt")
 }
 
 pub fn reap_host(host_pid: i32) {
+    reap_host_with(host_pid, None, &real_ps, &real_kill, &|pid| {
+        !process_missing(pid)
+    });
+}
+
+fn real_ps(field: &str, pid: i32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", field, "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn real_kill(pid: i32, signal: i32) {
+    unsafe {
+        libc::kill(pid, signal);
+    }
+}
+
+// Signals a host process group only when the pid is alive and either the
+// argv guard matches or, for a pi host, the recorded start time still
+// matches the process start time read now. A recorded start time is written
+// only by a pi launch, so Muse reaping keeps the guard alone.
+fn reap_host_with(
+    host_pid: i32,
+    recorded_start: Option<&str>,
+    ps: &dyn Fn(&str, i32) -> Option<String>,
+    kill: &dyn Fn(i32, i32),
+    alive: &dyn Fn(i32) -> bool,
+) {
     if host_pid <= 1 {
         return;
     }
-    let output = std::process::Command::new("ps")
-        .args(["-o", "command=", "-p", &host_pid.to_string()])
-        .output();
-    let Ok(output) = output else { return };
-    if !output.status.success() || !is_host_command(&String::from_utf8_lossy(&output.stdout)) {
+    let Some(command) = ps("command=", host_pid) else {
+        return;
+    };
+    if !alive(host_pid) {
         return;
     }
-    unsafe { libc::kill(-host_pid, libc::SIGTERM) };
+    let guarded = is_host_command(&command);
+    let start_matches = recorded_start
+        .is_some_and(|recorded| ps("lstart=", host_pid).is_some_and(|now| now == recorded));
+    if !(guarded || start_matches) {
+        return;
+    }
+    kill(-host_pid, libc::SIGTERM);
     let deadline = Instant::now() + Duration::from_millis(250);
-    while !process_missing(host_pid) && Instant::now() < deadline {
+    while alive(host_pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    if !process_missing(host_pid) {
-        unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+    if alive(host_pid) {
+        kill(-host_pid, libc::SIGKILL);
     }
 }
 
@@ -1794,6 +1873,179 @@ mod tests {
             unsafe { libc::kill(-(unrelated.id() as i32), libc::SIGKILL) };
             finish_child(&mut unrelated);
         }
+    }
+
+    #[test]
+    fn host_command_accepts_pi_argv_and_rejects_partial_shapes() {
+        let full = "python3 /x/pi_host_fake.py --mode rpc --model a/b --session-id S --session-dir D --append-system-prompt P";
+        assert!(is_host_command(full));
+        let node = "node /x/pi --mode rpc --model a/b --session-id S --session-dir D --append-system-prompt P";
+        assert!(is_host_command(node));
+        let without_mode = "python3 /x/pi_host_fake.py --model a/b --session-id S --session-dir D --append-system-prompt P";
+        assert!(!is_host_command(without_mode));
+        let without_session = "python3 /x/pi_host_fake.py --mode rpc --model a/b --session-dir D --append-system-prompt P";
+        assert!(!is_host_command(without_session));
+        let without_prompt =
+            "python3 /x/pi_host_fake.py --mode rpc --model a/b --session-id S --session-dir D";
+        assert!(!is_host_command(without_prompt));
+        let json_mode = "python3 /x/pi_host_fake.py --mode json --model a/b --session-id S --session-dir D --append-system-prompt P";
+        assert!(!is_host_command(json_mode));
+        assert!(!is_host_command("sh -c 'sleep 30; :' observe --mode rpc"));
+        assert!(!is_host_command("echo --mode rpc --session-id x"));
+        let argv = crate::session::msp::host_argv("x");
+        assert!(is_host_command(&argv.join(" ")));
+    }
+
+    #[test]
+    fn reap_pi_shaped_group_is_signalled_and_unmatched_is_left_alone() {
+        let mut host = pi_group_shell();
+        reap_host(host.id() as i32);
+        finish_child(&mut host);
+        let mut unrelated = group_shell(None, false);
+        reap_host(unrelated.id() as i32);
+        assert!(
+            unrelated.try_wait().unwrap().is_none(),
+            "unrelated process group was reaped"
+        );
+        unsafe { libc::kill(-(unrelated.id() as i32), libc::SIGKILL) };
+        finish_child(&mut unrelated);
+    }
+
+    fn pi_group_shell() -> Child {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30; :"]);
+        command.args([
+            "--mode",
+            "rpc",
+            "--model",
+            "a/b",
+            "--session-id",
+            "S",
+            "--session-dir",
+            "D",
+            "--append-system-prompt",
+            "P",
+        ]);
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.spawn().unwrap()
+    }
+
+    fn fake_reap(
+        command: Option<&str>,
+        lstart: Option<&str>,
+        recorded: Option<&str>,
+        alive: bool,
+    ) -> Vec<(i32, i32)> {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let term_seen = std::cell::Cell::new(false);
+        let ps = |field: &str, _pid: i32| match field {
+            "command=" => command.map(str::to_string),
+            _ => lstart.map(str::to_string),
+        };
+        let kill = |pid: i32, signal: i32| {
+            calls.borrow_mut().push((pid, signal));
+            if signal == libc::SIGTERM {
+                term_seen.set(true);
+            }
+        };
+        let live = |_pid: i32| alive && !term_seen.get();
+        reap_host_with(4242, recorded, &ps, &kill, &live);
+        calls.borrow().clone()
+    }
+
+    #[test]
+    fn reap_start_time_mismatch_sends_no_signal() {
+        let calls = fake_reap(
+            Some("pi"),
+            Some("Tue Oct 27 10:00:07 2026"),
+            Some("Tue Oct 27 10:00:00 2026"),
+            true,
+        );
+        assert!(calls.is_empty(), "signalled on pid alone: {calls:?}");
+    }
+
+    #[test]
+    fn reap_start_time_match_signals_a_pi_host() {
+        let calls = fake_reap(
+            Some("pi"),
+            Some("Tue Oct 27 10:00:00 2026"),
+            Some("Tue Oct 27 10:00:00 2026"),
+            true,
+        );
+        assert_eq!(calls, vec![(-4242, libc::SIGTERM)]);
+    }
+
+    #[test]
+    fn reap_with_no_recorded_start_keeps_the_guard_only() {
+        let bare = fake_reap(Some("pi"), Some("Tue Oct 27 10:00:00 2026"), None, true);
+        assert!(
+            bare.is_empty(),
+            "guard dropped without a start time: {bare:?}"
+        );
+        let guarded = fake_reap(
+            Some(&crate::session::msp::host_argv("x").join(" ")),
+            Some("Tue Oct 27 10:00:00 2026"),
+            None,
+            true,
+        );
+        assert_eq!(guarded, vec![(-4242, libc::SIGTERM)]);
+    }
+
+    #[test]
+    fn reap_guard_alone_still_signals_when_the_start_differs() {
+        let calls = fake_reap(
+            Some(&crate::session::msp::host_argv("x").join(" ")),
+            Some("Tue Oct 27 10:00:07 2026"),
+            Some("Tue Oct 27 10:00:00 2026"),
+            true,
+        );
+        assert_eq!(calls, vec![(-4242, libc::SIGTERM)]);
+    }
+
+    #[test]
+    fn reap_dead_pid_sends_no_signal() {
+        let calls = fake_reap(
+            None,
+            Some("Tue Oct 27 10:00:00 2026"),
+            Some("Tue Oct 27 10:00:00 2026"),
+            true,
+        );
+        assert!(calls.is_empty(), "dead pid was signalled: {calls:?}");
+    }
+
+    #[test]
+    fn reap_never_signals_a_pid_that_is_not_alive() {
+        let calls = fake_reap(
+            Some(&crate::session::msp::host_argv("x").join(" ")),
+            Some("Tue Oct 27 10:00:00 2026"),
+            Some("Tue Oct 27 10:00:00 2026"),
+            false,
+        );
+        assert!(calls.is_empty(), "dead pid was signalled: {calls:?}");
+    }
+
+    #[test]
+    fn reap_spawn_file_parses_pid_and_optional_start() {
+        let scratch = Scratch::new();
+        std::fs::create_dir_all(scratch.paths.dir(&scratch.id)).unwrap();
+        std::fs::write(scratch.paths.host_spawn_file(&scratch.id), "12345").unwrap();
+        assert_eq!(read_spawned_pid(&scratch.paths, &scratch.id), Some(12345));
+        assert_eq!(read_spawned_start(&scratch.paths, &scratch.id), None);
+        std::fs::write(
+            scratch.paths.host_spawn_file(&scratch.id),
+            "12345\nTue Oct 27 10:00:00 2026",
+        )
+        .unwrap();
+        assert_eq!(read_spawned_pid(&scratch.paths, &scratch.id), Some(12345));
+        assert_eq!(
+            read_spawned_start(&scratch.paths, &scratch.id),
+            Some("Tue Oct 27 10:00:00 2026".to_string())
+        );
     }
 
     #[test]
