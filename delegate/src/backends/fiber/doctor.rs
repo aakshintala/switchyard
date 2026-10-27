@@ -118,7 +118,7 @@ fn probe_memberships(
 /// `codex/gpt-6-luna`.
 fn without_level(reference: &str) -> &str {
     match reference.rsplit_once(':') {
-        Some((base, "low" | "medium" | "high" | "xhigh" | "max")) => base,
+        Some((base, "low" | "medium" | "high" | "xhigh" | "max" | "off" | "minimal")) => base,
         _ => reference,
     }
 }
