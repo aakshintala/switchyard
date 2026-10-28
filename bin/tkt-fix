@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tkt-fix: one review-loop fix round; slot fix<round+1> keeps rounds apart:
-# tkt-job re-prints a terminal slot's digest.
+# tkt-fix: one review-loop fix round; slot fix<max(round,fixslot)+1> keeps
+# rounds apart: tkt-job re-prints a terminal slot's digest.
 # Usage: tkt-fix <state> (--verify | --no-verify) [--findings <file>]
 #   [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]
 set -euo pipefail
@@ -38,6 +38,32 @@ plangate="$bin_dir/plan-gate"
 fbrief="$HOME/.agents/skills/review-loop/briefs/fix.md"
 t() { "$tkt_state" "$state" "$@"; }
 
+# close_slot K: record slot fix<K> closed; the highest closed slot never drops.
+close_slot() {
+  cur="$(t get fixslot 2>/dev/null || printf '0')"; case "$cur" in ''|*[!0-9]*) cur=0;; esac
+  if [ "$1" -gt "$cur" ]; then t set fixslot "$1"; fi
+}
+
+# slot_owner ID: print the slot whose stored job id the walk from ID reaches
+# (itself, then supersededBy links); print nothing when none is reached.
+slot_owner() {
+  walk="$1"; seen=" $walk "
+  while [ -n "$walk" ]; do
+    k=1
+    while [ "$k" -le "$n" ]; do
+      if cand="$(t get "job.fix$k" 2>/dev/null || true)" && [ -n "$cand" ] && [ "$cand" = "$walk" ]; then printf 'fix%s\n' "$k"; return 0; fi
+      k=$((k + 1))
+    done
+    rec="$(bash "$script_dir/job-record" "$walk" 2>/dev/null || true)"
+    [ -n "$rec" ] || return 0
+    walk="$(jq -r '.supersededBy // empty' "$rec" 2>/dev/null || true)"
+    [ -n "$walk" ] || return 0
+    case "$seen" in *" $walk "*) return 0;; esac
+    seen="$seen$walk "
+  done
+  return 0
+}
+
 lockdir="$state.lock"
 if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-fix: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
@@ -47,7 +73,28 @@ repo="$(t get repo)"; issue="$(t get issue)"; set_namebase "$repo" "$issue"; bra
 worktree="$(t get worktree)"; run="$(t get run)"; pr="$(t get pr)"
 mkdir -p "$run"
 round="$(t get round 2>/dev/null || printf '0')"; case "$round" in ''|*[!0-9]*) round=0;; esac
-slot="fix$((round + 1))"
+fixslot="$(t get fixslot 2>/dev/null || printf '0')"; case "$fixslot" in ''|*[!0-9]*) fixslot=0;; esac
+if [ "$round" -gt "$fixslot" ]; then n=$((round + 1)); else n=$((fixslot + 1)); fi
+slot="fix$n"
+if [ -n "$resume" ]; then
+  # A resume reuses the slot that owns its id; an id no walk reaches falls
+  # back to the fresh slot. An id with no record at all is refused only
+  # when some slot already owns a job, so a first resume still dispatches.
+  if owned="$(slot_owner "$resume")" && [ -n "$owned" ]; then slot="$owned"
+  else
+    slot="fix$n"
+    rec="$(bash "$script_dir/job-record" "$resume" 2>/dev/null || true)"
+    if [ -z "$rec" ]; then
+      k=1; have=0
+      while [ "$k" -le "$n" ]; do
+        if cand="$(t get "job.fix$k" 2>/dev/null || true)" && [ -n "$cand" ]; then have=1; break; fi
+        k=$((k + 1))
+      done
+      if [ "$have" -eq 1 ]; then echo "tkt-fix: unknown job id: $resume" >&2; exit 2; fi
+    fi
+  fi
+fi
+knum="${slot#fix}"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -63,7 +110,23 @@ emit() {
 if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
   prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)" || { echo "tkt-fix: cannot read PR head" >&2; exit 2; }
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
-  [ "$stored" = "$prhead" ] && [ "$prhead" = "$actual" ] || emit "DRIFT" 3 "state head=$stored" "PR head=$prhead" "worktree HEAD=$actual"
+  if [ "$stored" = "$prhead" ] && [ "$prhead" = "$actual" ]; then :; else
+    # Drift the open fix job's own push caused is accepted: the PR head
+    # descends from the state head and the worktree matches the PR head,
+    # so the state head moves forward to the PR head.
+    openk="$(t get fixopen 2>/dev/null || printf '0')"; case "$openk" in ''|*[!0-9]*) openk=0;; esac
+    keep=0
+    if [ "$openk" -gt 0 ]; then
+      if fjob="$(t get "job.fix$openk" 2>/dev/null || true)" && [ -n "$fjob" ] \
+        && git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null \
+        && [ "$actual" = "$prhead" ]; then
+        t set head "$prhead"
+        t set fixopen 0
+        keep=1
+      fi
+    fi
+    [ "$keep" -eq 1 ] || emit "DRIFT" 3 "state head=$stored" "PR head=$prhead" "worktree HEAD=$actual"
+  fi
 fi
 if [ -z "$resume" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then emit "RECOVER" 3 "job=$job" "slot=$slot"; fi
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
@@ -98,13 +161,21 @@ else
   args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$gate_cmd" --gate-from-plan --expect-commits)
   if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
 fi
+t set fixopen "$knum" # this job's commits may land ahead of head
 jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
 if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
+if [ "$jrc" -eq 1 ]; then # an abnormal end closes the slot without a round
+  close_slot "$knum"
+  shead="$(t get head 2>/dev/null || true)"
+  whead="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  if [ -n "$shead" ] && [ "$shead" = "$whead" ]; then t set fixopen 0; fi
+fi
 [ "$jrc" -eq 0 ] || pass tkt-job "$tmp/job.out" "$jrc"
 
 git -C "$worktree" fetch origin >/dev/null 2>&1 || { echo "tkt-fix: fetch failed in $worktree" >&2; exit 2; }
 new_head="$(git -C "$worktree" rev-parse HEAD)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
 t set head "$new_head" # persisted before the wait and push
+t set fixopen 0 # head now covers the open job's commits
 remote_head="$(git -C "$worktree" rev-parse --verify "origin/$branch" 2>/dev/null || true)"
 ci_note=""
 if [ "$remote_head" != "$new_head" ] && { [ -z "$remote_head" ] || git -C "$worktree" merge-base --is-ancestor "$remote_head" "$new_head" 2>/dev/null; }; then
@@ -117,9 +188,9 @@ fi
 grc=0
 "$tktgate" "$state" --checks-only --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
-[ "$grc" -eq 1 ] && { round=$((round + 1)); t set round "$round"; } # a gate-failed round counts
+[ "$grc" -eq 1 ] && { round=$((round + 1)); t set round "$round"; close_slot "$knum"; } # a gate-failed round counts
 [ "$grc" -eq 0 ] || pass tkt-gate "$tmp/gate.out" "$grc"
-round=$((round + 1)); t set round "$round"
+round=$((round + 1)); t set round "$round"; close_slot "$knum"
 
 if [ "$noverify" -eq 1 ]; then
   t set unverified "$findings"
