@@ -44,16 +44,16 @@ printf 'ok' >"$T/mode"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
-slot=""; out=""
+slot=""; out=""; rest=""
 while [ \$# -gt 0 ]; do
   case "\$1" in
     --slot) slot="\$2"; shift 2 ;;
     --template) tmpl="\$2"; shift 2 ;;
     --out-file) out="\$2"; shift 2 ;;
-    *) shift ;;
+    *) rest="\$rest \$1"; shift ;;
   esac
 done
-printf 'job|slot=%s|tmpl=%s|out=%s|rest=%s\n' "\$slot" "\$tmpl" "\$out" "\$*" >>"$T/stub.log"
+printf 'job|slot=%s|tmpl=%s|out=%s|rest=%s\n' "\$slot" "\$tmpl" "\$out" "\$rest" >>"$T/stub.log"
 case "\$(cat "$T/mode")" in
   ok)
     printf 'PLAN OK\nheld: every invariant survived its breaking input\n' >"\$out"
@@ -126,6 +126,37 @@ printf 'PACK %s symbols=0 files=0 outside=0\n' "\$out"
 EOF
 chmod +x "$T/bin/plan-sweep"
 
+# Stub gh on PATH (tkt-plan resolves gh from PATH, not TKT_BIN). Each call is
+# logged as gh|<args>. The mode file holds: ok; nonl (body has no trailing
+# newline); nocomments; empty (both calls print nothing); blank (body is only
+# whitespace); fail (both calls exit 1); comments-fail (body ok, --comments exits 1).
+mkdir -p "$T/ghbin"
+printf 'ok' >"$T/ghmode"
+: >"$T/gh.log"
+cat >"$T/ghbin/gh" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+printf 'gh|%s\n' "\$*" >>"$T/gh.log"
+mode="\$(cat "$T/ghmode")"
+comments=0
+for a in "\$@"; do [ "\$a" = --comments ] && comments=1; done
+case "\$mode:\$comments" in
+  ok:0) printf 'BODY-TEXT-791\n' ;;
+  ok:1) printf 'COMMENT-TEXT-791\n' ;;
+  nonl:0) printf 'BODY-TEXT-791' ;;
+  nonl:1) printf 'COMMENT-TEXT-791\n' ;;
+  nocomments:0) printf 'BODY-TEXT-791\n' ;;
+  nocomments:1|empty:*|blank:1) ;;
+  blank:0) printf '   \n' ;;
+  comments-fail:0) printf 'BODY-TEXT-791\n' ;;
+  comments-fail:1) echo "gh: comments unavailable" >&2; exit 1 ;;
+  fail:*) echo "gh: could not reach the API" >&2; exit 1 ;;
+  *) echo "gh stub: unknown mode \$mode" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$T/ghbin/gh"
+export PATH="$T/ghbin:$PATH"
+
 # Commit FILE with CONTENT in the repo at DIR; prints nothing.
 wcommit() {
   printf '%s' "$3" >"$1/$2"
@@ -138,6 +169,7 @@ wcommit() {
 setup_case() {
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR/run"
+  printf 'ok' >"$T/ghmode"
   git init -q "$CDIR/wt"
   wcommit "$CDIR/wt" f.txt "v1"
   git -C "$CDIR/wt" rev-parse HEAD >"$CDIR/base"
@@ -615,6 +647,7 @@ grep -q "verifier-out-r3-drift.md" "$T/stub.log" || fail "drift-b writes the dri
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-b leaves verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "drift-b leaves confirmed_for"
 [ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$B" ] || fail "drift-b updates verified_base"
+[ -r "$CDIR/run/switchyard-518-verifier-extra-r3-drift.md" ] || fail "drift-b writes the drift extra file"
 # Contract: skills/planning/SKILL.md step 3: an exempt verify dispatches one drift job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "drift-b starts one job"
 jobs_drift="$(grep -c '^job|' "$T/stub.log")"
@@ -836,5 +869,252 @@ printf '# another plan\n' >"$CDIR/other2.md"
 run_plan set "$CDIR/other2.md"
 [ "$RC" -eq 0 ] || fail "drift-g new-path set exits 0"
 [ -z "$(bash "$TKT_STATE" "$S" get verified_base 2>/dev/null || true)" ] || fail "drift-g new-path clears verified_base"
+
+# --- verify passes the ticket text, body then comments, in its run file ---
+setup_case ticket-ok
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "ticket-ok exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-verifier-extra-r1.md"
+grep -qF "EXTRA=@$X" "$T/stub.log" || fail "ticket-ok passes the run file as EXTRA"
+[ -r "$X" ] || fail "ticket-ok writes the run file"
+grep -qx '## Ticket switchyard#518' "$X" || fail "ticket-ok heads the ticket text"
+L_BODY="$(grep -n '^BODY-TEXT-791$' "$X" | cut -d: -f1)"
+L_COMM="$(grep -n '^COMMENT-TEXT-791$' "$X" | cut -d: -f1)"
+[ -n "$L_BODY" ] && [ -n "$L_COMM" ] && [ "$L_BODY" -lt "$L_COMM" ] || fail "ticket-ok puts the body before the comments"
+grep -qx '## Ticket comments' "$X" || fail "ticket-ok heads the comments"
+
+# --- a caller --extra file follows the ticket text; the job gets the run file ---
+setup_case ticket-extra
+rebase_plan
+printf 'CALLER-LINE\n' >"$CDIR/caller.md"
+run_plan verify --extra "$CDIR/caller.md"
+[ "$RC" -eq 0 ] || fail "ticket-extra exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-verifier-extra-r1.md"
+grep -qF "EXTRA=@$X" "$T/stub.log" || fail "ticket-extra passes the run file as EXTRA"
+grep -qF "EXTRA=@$CDIR/caller.md" "$T/stub.log" && fail "ticket-extra never passes the caller file as EXTRA"
+L_COMM="$(grep -n '^COMMENT-TEXT-791$' "$X" | cut -d: -f1)"
+L_CALL="$(grep -n '^CALLER-LINE$' "$X" | cut -d: -f1)"
+[ -n "$L_COMM" ] && [ -n "$L_CALL" ] && [ "$L_COMM" -lt "$L_CALL" ] || fail "ticket-extra puts the caller extra after the ticket"
+grep -qx '## Extra' "$X" || fail "ticket-extra heads the caller extra"
+
+# --- --extra wins over state extra ---
+setup_case ticket-precedence
+rebase_plan
+printf 'STATE-LINE\n' >"$CDIR/state-extra.md"
+bash "$TKT_STATE" "$S" set extra "$CDIR/state-extra.md" || fail "seed state extra"
+printf 'CALLER-LINE\n' >"$CDIR/caller.md"
+run_plan verify --extra "$CDIR/caller.md"
+[ "$RC" -eq 0 ] || fail "ticket-precedence exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-verifier-extra-r1.md"
+grep -q '^CALLER-LINE$' "$X" || fail "ticket-precedence uses the --extra file"
+grep -q 'STATE-LINE' "$X" && fail "ticket-precedence ignores state extra when --extra is set"
+
+# --- state extra, bare path and @-prefixed, follows the ticket text once ---
+setup_case ticket-state-bare
+rebase_plan
+printf 'STATE-LINE\n' >"$CDIR/state-extra.md"
+bash "$TKT_STATE" "$S" set extra "$CDIR/state-extra.md" || fail "seed bare state extra"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "ticket-state-bare exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-verifier-extra-r1.md"
+L_COMM="$(grep -n '^COMMENT-TEXT-791$' "$X" | cut -d: -f1)"
+L_STATE="$(grep -n '^STATE-LINE$' "$X" | cut -d: -f1)"
+[ -n "$L_COMM" ] && [ -n "$L_STATE" ] && [ "$L_COMM" -lt "$L_STATE" ] || fail "ticket-state-bare puts state extra after the ticket"
+
+setup_case ticket-state-at
+rebase_plan
+printf 'STATE-LINE\n' >"$CDIR/state-extra.md"
+bash "$TKT_STATE" "$S" set extra "@$CDIR/state-extra.md" || fail "seed @ state extra"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "ticket-state-at exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-verifier-extra-r1.md"
+grep -q '^STATE-LINE$' "$X" || fail "ticket-state-at reads the path after one @"
+grep -qF "EXTRA=@@" "$T/stub.log" && fail "ticket-state-at never doubles the @"
+
+# --- no comments: the body alone, and no comments heading ---
+setup_case ticket-nocomments
+rebase_plan
+printf 'nocomments' >"$T/ghmode"
+run_plan verify
+printf 'ok' >"$T/ghmode"
+[ "$RC" -eq 0 ] || fail "ticket-nocomments exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-verifier-extra-r1.md"
+grep -qx 'BODY-TEXT-791' "$X" || fail "ticket-nocomments keeps the body"
+grep -q '## Ticket comments' "$X" && fail "ticket-nocomments omits the comments heading"
+
+# --- a body with no trailing newline still ends its line before the caller extra ---
+setup_case ticket-nonl
+rebase_plan
+printf 'CALLER-LINE' >"$CDIR/caller.md"
+printf 'nonl' >"$T/ghmode"
+run_plan verify --extra "$CDIR/caller.md"
+printf 'ok' >"$T/ghmode"
+[ "$RC" -eq 0 ] || fail "ticket-nonl exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-verifier-extra-r1.md"
+grep -qx '## Extra' "$X" || fail "ticket-nonl starts the extra heading on its own line"
+grep -qx 'CALLER-LINE' "$X" || fail "ticket-nonl keeps the caller line whole"
+
+# --- an unreadable caller extra exits 2 before any ticket read ---
+setup_case ticket-bad-extra
+rebase_plan
+gh_before="$(grep -c '^gh|' "$T/gh.log" || true)"
+run_plan verify --extra "$CDIR/nope.md"
+[ "$RC" -eq 2 ] || fail "ticket-bad-extra exits 2 (rc=$RC)"
+grep -q "cannot read extra file: $CDIR/nope.md" "$CDIR/stderr.txt" || fail "ticket-bad-extra names the file"
+[ "$(grep -c '^gh|' "$T/gh.log" || true)" = "$gh_before" ] || fail "ticket-bad-extra reads no ticket"
+
+# A ticket read that fails: exit 2 with the ticket message, no job, no state write.
+# $1 is the case, $2 the gh mode, $3 (optional) the seeded verifier_round.
+ticket_fail_case() {
+  setup_case "$1"
+  rebase_plan
+  printf 'ok' >"$T/mode"
+  [ -z "${3:-}" ] || bash "$TKT_STATE" "$S" set verifier_round "$3" || fail "$1 seed round"
+  bash "$TKT_STATE" "$S" set job.verifier-r1 j-keep || fail "$1 seed job"
+  cp "$S" "$CDIR/before.state"
+  printf '%s' "$2" >"$T/ghmode"
+  jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+  run_plan verify
+  printf 'ok' >"$T/ghmode"
+  [ "$RC" -eq 2 ] || fail "$1 exits 2 (rc=$RC)"
+  grep -q "tkt-plan: cannot read ticket text for switchyard#518" "$CDIR/stderr.txt" || fail "$1 names the ticket"
+  [ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "$1 starts no job"
+  cmp -s "$S" "$CDIR/before.state" || fail "$1 writes no state"
+  [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-keep" ] || fail "$1 keeps the job slot"
+}
+
+ticket_fail_case ticket-empty empty
+ticket_fail_case ticket-blank blank
+ticket_fail_case ticket-fail fail
+ticket_fail_case ticket-comments-fail comments-fail
+ticket_fail_case ticket-fail-round fail 1
+
+# --- the ticket is read only once a job is about to start ---
+gh_count() { grep -c '^gh|' "$T/gh.log" || true; }
+
+setup_case order-round-limit
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+gh_before="$(gh_count)"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "order round-limit exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "order round-limit"
+[ "$(gh_count)" = "$gh_before" ] || fail "ROUND-LIMIT reads no ticket"
+
+setup_case order-confirmed
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+gh_before="$(gh_count)"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "order confirmed exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "order confirmed"
+[ "$(gh_count)" = "$gh_before" ] || fail "confirm=done reads no ticket"
+
+setup_case order-stale
+gh_before="$(gh_count)"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "order stale exits 1"
+expect_verdict "TKT tkt-plan STALE n=1 base=* log=*" "order stale"
+[ "$(gh_count)" = "$gh_before" ] || fail "STALE reads no ticket"
+
+setup_case order-plan-check
+rebase_plan
+printf 'lines' >"$T/pcmode"
+gh_before="$(gh_count)"
+run_plan verify
+printf 'ok' >"$T/pcmode"
+[ "$RC" -eq 1 ] || fail "order plan-check exits 1"
+expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "order plan-check"
+[ "$(gh_count)" = "$gh_before" ] || fail "PLAN-CHECK reads no ticket"
+
+# --- confirm passes the ticket text, then the state extra, in its run file ---
+setup_case confirm-ticket
+rebase_plan
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+printf 'ok' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "confirm-ticket exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-confirm-extra.md"
+grep -qF "EXTRA=@$X" "$T/stub.log" || fail "confirm passes the confirm extra file as EXTRA"
+L_BODY="$(grep -n '^BODY-TEXT-791$' "$X" | cut -d: -f1)"
+L_COMM="$(grep -n '^COMMENT-TEXT-791$' "$X" | cut -d: -f1)"
+[ -n "$L_BODY" ] && [ -n "$L_COMM" ] && [ "$L_BODY" -lt "$L_COMM" ] || fail "confirm extra holds the body then the comments"
+
+setup_case confirm-state-extra
+rebase_plan
+printf 'STATE-LINE\n' >"$CDIR/state-extra.md"
+bash "$TKT_STATE" "$S" set extra "$CDIR/state-extra.md" || fail "seed confirm state extra"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "confirm-state-extra exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+X="$CDIR/run/switchyard-518-confirm-extra.md"
+L_COMM="$(grep -n '^COMMENT-TEXT-791$' "$X" | cut -d: -f1)"
+L_STATE="$(grep -n '^STATE-LINE$' "$X" | cut -d: -f1)"
+[ -n "$L_COMM" ] && [ -n "$L_STATE" ] && [ "$L_COMM" -lt "$L_STATE" ] || fail "confirm puts the state extra after the ticket"
+
+setup_case confirm-bad-extra
+rebase_plan
+bash "$TKT_STATE" "$S" set extra "$CDIR/nope.md" || fail "seed missing state extra"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+gh_before="$(gh_count)"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 2 ] || fail "confirm-bad-extra exits 2 (rc=$RC)"
+grep -q "cannot read extra file: $CDIR/nope.md" "$CDIR/stderr.txt" || fail "confirm-bad-extra names the file"
+[ "$(gh_count)" = "$gh_before" ] || fail "confirm-bad-extra reads no ticket"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "confirm-bad-extra starts no job"
+
+# A confirm whose ticket read fails: exit 2, no job, no state write.
+# $1 is the case, $2 the gh mode.
+confirm_fail_case() {
+  setup_case "$1"
+  rebase_plan
+  printf 'ok' >"$T/mode"
+  printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+  cp "$S" "$CDIR/before.state"
+  printf '%s' "$2" >"$T/ghmode"
+  jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+  run_plan confirm --edits "$CDIR/edits.md"
+  printf 'ok' >"$T/ghmode"
+  [ "$RC" -eq 2 ] || fail "$1 exits 2 (rc=$RC)"
+  grep -q "tkt-plan: cannot read ticket text for switchyard#518" "$CDIR/stderr.txt" || fail "$1 names the ticket"
+  [ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "$1 starts no job"
+  cmp -s "$S" "$CDIR/before.state" || fail "$1 writes no state"
+}
+
+confirm_fail_case confirm-empty empty
+confirm_fail_case confirm-blank blank
+confirm_fail_case confirm-fail fail
+
+setup_case confirm-order
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+gh_before="$(gh_count)"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "confirm-order exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm-order"
+[ "$(gh_count)" = "$gh_before" ] || fail "a used confirm reads no ticket"
+
+# --- real templates: the filled verify and confirm briefs carry the ticket text ---
+cp "$SCRIPT_DIR/../skills/planning/briefs/verifier.md" "$T/home/.agents/skills/planning/briefs/verifier.md" || fail "copy the real verifier brief"
+cp "$SCRIPT_DIR/../skills/planning/briefs/confirm.md" "$T/home/.agents/skills/planning/briefs/confirm.md" || fail "copy the real confirm brief"
+setup_case real-brief
+rebase_plan
+printf 'pack\n' >"$CDIR/pack.md"
+bash "$TKT_STATE" "$S" set pack "$CDIR/pack.md" || fail "seed pack"
+printf 'ok' >"$T/mode"
+TKT_BIN="$T/realbin" run_plan verify
+VB="$CDIR/run/switchyard-518-verifier-r1-1.md"
+[ -r "$VB" ] || fail "real verify fills the verifier brief"
+grep -q 'BODY-TEXT-791' "$VB" && grep -q 'COMMENT-TEXT-791' "$VB" || fail "real verify brief carries the ticket text"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+TKT_BIN="$T/realbin" run_plan confirm --edits "$CDIR/edits.md"
+CB="$CDIR/run/switchyard-518-confirm-1.md"
+[ -r "$CB" ] || fail "real confirm fills the confirm brief"
+grep -q 'BODY-TEXT-791' "$CB" && grep -q 'COMMENT-TEXT-791' "$CB" || fail "real confirm brief carries the ticket text"
 
 echo "tkt-plan: all cases passed"
