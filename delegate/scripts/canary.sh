@@ -2,12 +2,16 @@
 # canary.sh: run one ticket's brief on pi and Fiber side by side, with metrics.
 #
 # Usage:
-#   canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--repo owner/name] [--clone <path>] [--out DIR]
+#   canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]
 #   canary.sh clean <ticket> [--out DIR]
 #   canary.sh report <ticket> [--out DIR]
 #
 # report rebuilds metrics.json and summary.md from a finished run's saved
 # outputs and the Fiber event log; it reruns nothing and makes no network calls.
+#
+# `--thinking L` appends `:L` to both arms' model ids; without the flag the ids
+# pass through unchanged. The level itself is not checked here: delegate
+# rejects an unknown level, and each arm then fails as a harness error.
 #
 # Exit codes: 0 both runs finished, whatever their gates did;
 # 1 a run errored in the harness; 2 usage or setup error.
@@ -60,7 +64,7 @@ err() {
 }
 
 usage() {
-  err "usage: canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--repo owner/name] [--clone <path>] [--out DIR]"
+  err "usage: canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]"
   err "       canary.sh clean <ticket> [--out DIR]"
   err "       canary.sh report <ticket> [--out DIR]"
 }
@@ -356,7 +360,7 @@ cmd_run() {
   [ $# -ge 2 ] || { usage; return 2; }
   local ticket="$1" brief="$2"
   shift 2
-  local gate="" repo="$DEFAULT_REPO" clone="" out="" pi_model="$PI_MODEL" fiber_model="$FIBER_MODEL"
+  local gate="" repo="$DEFAULT_REPO" clone="" out="" pi_model="$PI_MODEL" fiber_model="$FIBER_MODEL" thinking=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --gate) [ $# -ge 2 ] || { err "--gate needs a value"; return 2; }; gate="$2"; shift 2 ;;
@@ -365,10 +369,15 @@ cmd_run() {
       --out) [ $# -ge 2 ] || { err "--out needs a value"; return 2; }; out="$2"; shift 2 ;;
       --pi-model) [ $# -ge 2 ] || { err "--pi-model needs a value"; return 2; }; pi_model="$2"; shift 2 ;;
       --fiber-model) [ $# -ge 2 ] || { err "--fiber-model needs a value"; return 2; }; fiber_model="$2"; shift 2 ;;
+      --thinking) [ $# -ge 2 ] && [ -n "$2" ] || { err "--thinking needs a value"; return 2; }; thinking="$2"; shift 2 ;;
       --*) err "unknown flag $1"; return 2 ;;
       *) err "unexpected argument $1"; return 2 ;;
     esac
   done
+  if [ -n "$thinking" ]; then
+    pi_model="$pi_model:$thinking"
+    fiber_model="$fiber_model:$thinking"
+  fi
   [[ "$ticket" =~ ^[0-9A-Za-z._-]+$ ]] || { err "bad ticket '$ticket'"; return 2; }
   [ -n "$gate" ] || { err "--gate is required"; return 2; }
   [ -f "$brief" ] || { err "brief file $brief missing"; return 2; }

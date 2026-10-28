@@ -367,6 +367,61 @@ assert_clean_leaves_nothing 224 "$OUT2"
 
 echo "model cases passed"
 
+# --- Thinking levels: --thinking L appends :L to both arms' models. A run
+# without the flag appends nothing, already pinned by the Task 2 happy path's
+# assert_order on the unsuffixed ids. ---
+: >"$FLOG/calls.log"
+OUT_THINK="$T/out-thinking"
+FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 245 "$T/brief.md" \
+  --gate 'test -f work-marker' --thinking high --out "$OUT_THINK" || fail "canary run with --thinking high exits 0"
+PI_WT_THINK="$(cat "$OUT_THINK/pi/worktree")"
+FIBER_WT_THINK="$(cat "$OUT_THINK/fiber/worktree")"
+PI_ID_THINK="$(jq -r .job_id "$OUT_THINK/pi/metrics.json")"
+FIBER_ID_THINK="$(jq -r .job_id "$OUT_THINK/fiber/metrics.json")"
+[ "$(jq -r .model "$OUT_THINK/pi/metrics.json")" = "opencode-go/muse-spark-1.3-contributor:high" ] || fail "pi metrics model has :high"
+[ "$(jq -r .model "$OUT_THINK/fiber/metrics.json")" = "fiber/opencode-go/muse-spark-1.3-contributor:high" ] || fail "fiber metrics model has :high"
+assert_order "opencode-go/muse-spark-1.3-contributor:high" \
+  "fiber/opencode-go/muse-spark-1.3-contributor:high" \
+  "$PI_ID_THINK" "$FIBER_ID_THINK" "$PI_WT_THINK" "$FIBER_WT_THINK"
+grep -q '| model | opencode-go/muse-spark-1.3-contributor:high | fiber/opencode-go/muse-spark-1.3-contributor:high |' "$OUT_THINK/summary.md" \
+  || fail "summary names the suffixed models"
+assert_clean_leaves_nothing 245 "$OUT_THINK"
+
+# The flag applies wherever it sits among the model flags, so both arms get
+# it even when named before them.
+: >"$FLOG/calls.log"
+OUT_LOW="$T/out-low"
+FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 246 "$T/brief.md" \
+  --gate 'test -f work-marker' \
+  --thinking low --pi-model opencode-go/muse-spark-1.3-contributor --fiber-model fiber/opencode-go/muse-spark-1.3-contributor \
+  --out "$OUT_LOW" || fail "canary run with --thinking low exits 0"
+PI_WT_LOW="$(cat "$OUT_LOW/pi/worktree")"
+FIBER_WT_LOW="$(cat "$OUT_LOW/fiber/worktree")"
+PI_ID_LOW="$(jq -r .job_id "$OUT_LOW/pi/metrics.json")"
+FIBER_ID_LOW="$(jq -r .job_id "$OUT_LOW/fiber/metrics.json")"
+[ "$(jq -r .model "$OUT_LOW/pi/metrics.json")" = "opencode-go/muse-spark-1.3-contributor:low" ] || fail "pi metrics model has :low"
+[ "$(jq -r .model "$OUT_LOW/fiber/metrics.json")" = "fiber/opencode-go/muse-spark-1.3-contributor:low" ] || fail "fiber metrics model has :low"
+assert_order "opencode-go/muse-spark-1.3-contributor:low" \
+  "fiber/opencode-go/muse-spark-1.3-contributor:low" \
+  "$PI_ID_LOW" "$FIBER_ID_LOW" "$PI_WT_LOW" "$FIBER_WT_LOW"
+assert_clean_leaves_nothing 246 "$OUT_LOW"
+
+# A missing or empty value is a usage error before any worktree is cut.
+if bash "$CANARY" run 247 "$T/brief.md" --gate true --out "$T/out-bad" --thinking 2>/dev/null; then
+  fail "missing --thinking value should not exit 0"
+else
+  [ $? -eq 2 ] || fail "missing --thinking value exits 2"
+fi
+[ ! -e "$T/out-bad/pi" ] || fail "missing --thinking value cuts no worktree"
+if bash "$CANARY" run 247 "$T/brief.md" --gate true --out "$T/out-bad" --thinking "" 2>/dev/null; then
+  fail "empty --thinking value should not exit 0"
+else
+  [ $? -eq 2 ] || fail "empty --thinking value exits 2"
+fi
+[ ! -e "$T/out-bad/pi" ] || fail "empty --thinking value cuts no worktree"
+
+echo "thinking cases passed"
+
 # --- Task 3 fixture: every sandbox class, plus one deny ---
 cat >"$T/ev3.jsonl" <<EOF
 {"kind":"usage_recorded","session_id":"s1","ts":1,"schema_version":1,"action_id":"a0","seq":1,"payload":{"generation_id":"gM","model":"m","tokens":{"input":10,"output":1,"cache_read":1,"cache_write":{}},"cost":1}}
