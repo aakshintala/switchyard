@@ -211,6 +211,7 @@ gh() (
       [ ! -e "$ST/comment-fail" ] || exit 1
       while [ $# -gt 0 ]; do [ "$1" = "--body-file" ] && cp "$2" "$ST/comment.txt"; shift; done;;
     merge)
+      if [ -e "$ST/merge-each" ]; then bash "$ST/merge-each"; fi
       if [ -e "$ST/merge-fail-once" ]; then
         cat "$ST/merge-fail-once" >&2
         rm -f "$ST/merge-fail-once"
@@ -262,6 +263,12 @@ advance_main() {
 checks_hook() { printf '%s\n' "$1" >"$ST/checks-hook"; }
 # checks_each <shell>: runs inside every CI poll (a check-runs call).
 checks_each() { printf '%s\n' "$1" >"$ST/checks-each"; }
+# merge_each <shell>: runs inside every stubbed `gh pr merge` call.
+merge_each() { printf '%s\n' "$1" >"$ST/merge-each"; }
+# merge_once <shell>: merge_each, but only on the first merge call.
+merge_once() { printf 'if [ ! -e "$ST/m1" ]; then touch "$ST/m1"; %s; fi\n' "$1" >"$ST/merge-each"; }
+# OUTDATED: the strict-mode error when the head lost the race to origin/main.
+OUTDATED='Pull request #7 is not mergeable: the head branch is not up to date with the base branch.'
 # BUMP_MAIN: an empty commit on origin's main, without a checkout.
 BUMP_MAIN='git --git-dir="$ORIGIN" update-ref refs/heads/main "$(git --git-dir="$ORIGIN" commit-tree "refs/heads/main^{tree}" -p refs/heads/main -m b)"'
 
@@ -902,6 +909,80 @@ ship; expect 1 "other merge errors never retry"
 ! grep -q 'retrying once' <<<"$ERR" || fail "no retry message on another error: [$ERR]"
 grep -q 'review required' <<<"$ERR" || fail "gh error printed: [$ERR]"
 [ -d "$WT" ] || fail "worktree kept when the merge is refused"
+
+# ===== lost race: 'the head branch is not up to date with the base branch'
+# ===== re-enters the rebase once, counted against the retries budget of 3
+setup; merge_once "$BUMP_MAIN"; printf '%s' "$OUTDATED" >"$ST/merge-fail-once"
+ship; expect 0 "lost race recovers"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line after recovery: [$OUT]"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "recovery merges twice"
+[ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 2 ] || fail "recovery waits twice"
+grep -q 'origin/main moved before the merge; rebasing again (retry 1 of 3)' <<<"$ERR" || fail "recovery message: [$ERR]"
+PIN="$(sed -n 's/.*--match-head-commit //p' "$ST/gh.log" | tail -n 1)"
+git --git-dir="$ORIGIN" merge-base --is-ancestor refs/heads/main "$PIN" || fail "second merge pinned below the moved main: [$PIN]"
+[ ! -e "$ST/sleeps.txt" ] || ! grep -qx '5' "$ST/sleeps.txt" || fail "recovery sleeps zero"
+[ ! -e "$WT" ] || fail "worktree removed after recovery"
+
+ABS_SHIP="$(cd "$SCRIPT_DIR/../bin" && pwd)/ship-pr"
+setup; merge_each "$BUMP_MAIN"; printf '%s' "$OUTDATED" >"$ST/merge-fail-msg"
+ship; expect 1 "second loss exits 1"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "second loss merges twice"
+grep -qF 'gh pr merge failed: lost the race to origin/main' <<<"$ERR" || fail "lost-race message: [$ERR]"
+grep -qF "rerun: bash $ABS_SHIP 7 --repo O/N --reviewed $HEAD0 --worktree $WT" <<<"$ERR" || fail "rerun line: [$ERR]"
+[ -d "$WT" ] || fail "worktree kept after a second loss"
+[ "$(origin_head)" != "$HEAD0" ] || fail "second pass pushed a rebased head"
+[ "$OUT" != "merged $MERGE_SHA" ] || fail "second loss never merges"
+
+setup; merge_once "$BUMP_MAIN"; printf '%s' "$OUTDATED" >"$ST/merge-fail-once"; touch "$ST/merge-fails-but-merges"
+ship; expect 0 "merged despite the error still merges"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line when already merged: [$OUT]"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 1 ] || fail "no second merge when already merged"
+! grep -q 'rebasing again' <<<"$ERR" || fail "no recovery when already merged: [$ERR]"
+
+setup; printf '%s' "$OUTDATED" >"$ST/merge-fail-msg"
+ship; expect 1 "race with main unmoved exits 1"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 1 ] || fail "no retry when main never moved"
+grep -qF 'lost the race to origin/main (origin/main has not moved' <<<"$ERR" || fail "unmoved message: [$ERR]"
+[ "$(origin_head)" = "$HEAD0" ] || fail "unmoved race pushes nothing"
+[ -d "$WT" ] || fail "worktree kept when main never moved"
+
+setup
+checks_each 'c="$(cat "$ST/n" 2>/dev/null || echo 0)"; c=$((c + 1)); echo "$c" >"$ST/n"; [ "$c" -le 2 ] && { '"$BUMP_MAIN"'; }; true'
+merge_once "$BUMP_MAIN"; printf '%s' "$OUTDATED" >"$ST/merge-fail-once"
+ship; expect 0 "race on the last retry recovers"
+grep -q 'retry 3 of 3' <<<"$ERR" || fail "third retry line: [$ERR]"
+
+setup
+checks_each 'c="$(cat "$ST/n" 2>/dev/null || echo 0)"; c=$((c + 1)); echo "$c" >"$ST/n"; [ "$c" -le 3 ] && { '"$BUMP_MAIN"'; }; true'
+merge_each "$BUMP_MAIN"; printf '%s' "$OUTDATED" >"$ST/merge-fail-msg"
+ship; expect 1 "race with no retries left exits 1"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 1 ] || fail "no recovery with no retries left"
+[ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 4 ] || fail "four CI waits before the race"
+grep -qF 'lost the race to origin/main (no retries left)' <<<"$ERR" || fail "exhausted message: [$ERR]"
+[ -d "$WT" ] || fail "worktree kept when retries are spent"
+
+setup; echo "$NOSTRICT" >"$ST/rules"; merge_each "$BUMP_MAIN"; printf '%s' "$OUTDATED" >"$ST/merge-fail-msg"
+ship; expect 1 "non-strict never recovers a lost race"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 1 ] || fail "non-strict merges once"
+! grep -q 'lost the race' <<<"$ERR" || fail "non-strict names no lost race: [$ERR]"
+! grep -q 'rebasing again' <<<"$ERR" || fail "non-strict never rebases again: [$ERR]"
+
+setup; merge_once "$BUMP_MAIN"; printf 'GraphQL error: %s' "$OUTDATED" >"$ST/merge-fail-once"
+ship; expect 0 "strict prefers the lost race over GraphQL"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line after a GraphQL race: [$OUT]"
+[ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "GraphQL race merges twice"
+[ ! -e "$ST/sleeps.txt" ] || ! grep -qx '5' "$ST/sleeps.txt" || fail "lost race sleeps zero on a GraphQL race"
+
+setup; echo true >"$ST/draft"
+merge_once "$BUMP_MAIN"; printf '%s' "$OUTDATED" >"$ST/merge-fail-once"
+ship --gate 'echo x >>"$ST/gates"'; expect 0 "recovery keeps once-only work once-only"
+[ "$(wc -l <"$ST/gates" | tr -d ' ')" -eq 1 ] || fail "gate ran exactly once across the recovery"
+[ "$(grep -c '^gh pr ready' "$ST/gh.log")" -eq 1 ] || fail "ready called exactly once across the recovery"
+
+setup; echo true >"$ST/draft"
+merge_once "$BUMP_MAIN; echo '[{\"bucket\":\"fail\",\"name\":\"ci\"}]' >\"\$ST/checks\""; printf '%s' "$OUTDATED" >"$ST/merge-fail-once"
+ship; expect 1 "CI failure after recovery still reports the ready PR"
+[ "$(tail -n 1 <<<"$ERR")" = "ship-pr: CI failed; nothing merged, PR 7 is still marked ready" ] || fail "ready suffix after recovery: [$ERR]"
 
 # ===== draft PRs: marked ready once before the CI wait; a required check green
 # ===== on the head counts whenever it ran; an absent required check is pending
