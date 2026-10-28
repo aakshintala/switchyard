@@ -10,12 +10,20 @@ pub const MUSE_EFFORT_LEVELS: [&str; 8] = [
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
+/// The thinking levels Fiber's "Naming a model" and pi accept; a `pi` or
+/// `fiber` model id may end in `:<one of these>`. Muse's eight-level list
+/// differs (`none` and `ultra` are Muse-only).
+pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 /// Resolves a model id to its models.json row id. An exact key wins; otherwise a
 /// trailing `:<level>` is stripped only when the base is a key whose backend is
-/// `claude` and the level is one of [`CLAUDE_EFFORT_LEVELS`], or whose backend is
-/// `muse` and the level is one of [`MUSE_EFFORT_LEVELS`]. An invalid level on a
-/// Claude base is an error (a plain message, not [`ModelNotAllowedError`]); everything
-/// else passes through whole and the caller rejects it as unknown.
+/// `claude` and the level is one of [`CLAUDE_EFFORT_LEVELS`], whose backend is
+/// `muse` and the level is one of [`MUSE_EFFORT_LEVELS`], or whose backend is
+/// `pi` or `fiber` and the level is one of [`THINKING_LEVELS`]. The suffix stays
+/// on the id handed to the pi and fiber harnesses. An invalid level on a
+/// Claude, pi or fiber base is an error (a plain message, not
+/// [`ModelNotAllowedError`]); everything else passes through whole and the
+/// caller rejects it as unknown.
 pub fn base_model_id<'a>(
     model: &'a str,
     models: &HashMap<String, ModelEntry>,
@@ -36,6 +44,27 @@ pub fn base_model_id<'a>(
             "model \"{model}\": unknown effort level \"{level}\"; \
              use one of {}",
             CLAUDE_EFFORT_LEVELS.join(", ")
+        )),
+        "pi" | "fiber" if THINKING_LEVELS.contains(&level) => {
+            // The base itself already ends in a level, so this is a second
+            // tail on a level-suffixed key, not a plain base with one level.
+            let doubled = base
+                .rsplit_once(':')
+                .is_some_and(|(_, tail)| THINKING_LEVELS.contains(&tail));
+            if doubled {
+                Err(format!(
+                    "model \"{model}\": unknown thinking level \"{level}\"; \
+                     use one of {}",
+                    THINKING_LEVELS.join(", ")
+                ))
+            } else {
+                Ok(base)
+            }
+        }
+        "pi" | "fiber" => Err(format!(
+            "model \"{model}\": unknown thinking level \"{level}\"; \
+             use one of {}",
+            THINKING_LEVELS.join(", ")
         )),
         _ => Ok(model),
     }
