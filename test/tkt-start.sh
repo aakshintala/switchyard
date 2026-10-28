@@ -601,4 +601,69 @@ case "$OUT" in *CURRENT*) fail "recurredbadjson: must never print CURRENT" ;; es
 case "$OUT" in *PREFLIGHT*) fail "recurredbadjson: must never print PREFLIGHT" ;; esac
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "recurredbadjson: tkt-job must not run" # docs/agents/issue-tracker.md:31
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "recurredbadjson: plan-sweep must not run" # docs/agents/issue-tracker.md:31
+# --body-ends writes one body_ends line; a repeat keeps only the last value.
+setup bodyends ONE AGAINST
+run_start --body-ends 'X'
+want "CURRENT " 0 bodyends
+[ "$(grep -c '^body_ends=' "$RUN/widget-42.state")" -eq 1 ] || fail "bodyends: wants one body_ends line"
+grep -qF 'body_ends=X' "$RUN/widget-42.state" || fail "bodyends: state misses [body_ends=X]"
+setup bodyendsrepeat ONE AGAINST
+run_start --body-ends 'A' --body-ends 'B'
+want "CURRENT " 0 bodyendsrepeat
+[ "$(grep -c '^body_ends=' "$RUN/widget-42.state")" -eq 1 ] || fail "bodyendsrepeat: wants one body_ends line"
+grep -qF 'body_ends=B' "$RUN/widget-42.state" || fail "bodyendsrepeat: state misses [body_ends=B]"
+grep -qF 'body_ends=A' "$RUN/widget-42.state" && fail "bodyendsrepeat: stale value [body_ends=A] remains"
+# an empty or blank --body-ends exits 2 naming the rule, before any state write.
+setup bodyendsempty ONE AGAINST
+run_start --body-ends ''
+[ "$RC" -eq 2 ] || fail "bodyendsempty: exit $RC"
+grep -qF 'tkt-start: --body-ends needs a value that is not blank' "$CDIR/stderr" || fail "bodyendsempty: stderr misses the blank rule"
+[ ! -e "$RUN/widget-42.state" ] || fail "bodyendsempty: state must not be written"
+setup bodyendsblank ONE AGAINST
+run_start --body-ends '  '
+[ "$RC" -eq 2 ] || fail "bodyendsblank: exit $RC"
+grep -qF 'tkt-start: --body-ends needs a value that is not blank' "$CDIR/stderr" || fail "bodyendsblank: stderr misses the blank rule"
+[ ! -e "$RUN/widget-42.state" ] || fail "bodyendsblank: state must not be written"
+# a value holding a newline exits 2 naming the rule, before any state write.
+setup bodyendsnewline ONE AGAINST
+run_start --body-ends "$(printf 'a\nb')"
+[ "$RC" -eq 2 ] || fail "bodyendsnewline: exit $RC"
+grep -qF 'tkt-start: --body-ends value holds a newline' "$CDIR/stderr" || fail "bodyendsnewline: stderr misses the newline rule"
+[ ! -e "$RUN/widget-42.state" ] || fail "bodyendsnewline: state must not be written"
+# --body-ends with no value exits 2 through usage.
+setup bodyendsnovalue ONE AGAINST
+run_start --body-ends
+[ "$RC" -eq 2 ] || fail "bodyendsnovalue: exit $RC"
+grep -qF 'usage: tkt-start' "$CDIR/stderr" || fail "bodyendsnovalue: stderr misses usage"
+[ ! -e "$RUN/widget-42.state" ] || fail "bodyendsnovalue: state must not be written"
+# a run without the flag writes no body_ends line.
+setup bodyendsabsent ONE AGAINST
+run_start
+want "CURRENT " 0 bodyendsabsent
+[ "$(grep -c '^body_ends=' "$RUN/widget-42.state")" -eq 0 ] || fail "bodyendsabsent: unexpected body_ends line"
+# end to end: tkt-start stores --body-ends, tkt-ship passes it to ship-pr.
+setup bodyendse2e ONE AGAINST
+cat >"$T/tktbin/ship-pr" <<EOF
+#!/usr/bin/env bash
+printf 'ship-pr|%s\n' "\$*" >>"$T/shipcalls.log"
+for a in "\$@"; do printf 'arg|%s\n' "\$a" >>"$T/shipcalls.log"; done
+echo "merged deadbeef1234567890"
+exit 0
+EOF
+chmod +x "$T/tktbin/ship-pr"
+: >"$T/shipcalls.log"
+run_start --body-ends 'X'
+want "CURRENT " 0 bodyendse2e
+grep -qF 'body_ends=X' "$RUN/widget-42.state" || fail "bodyendse2e: state misses [body_ends=X]"
+S2E_STATE="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set pr 7
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set reviewed rev123
+S2E_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set head "$S2E_HEAD"
+printf '%s' "$S2E_HEAD" >"$T/prhead"
+S2E_OUT="$(bash "$SCRIPT_DIR/../bin/tkt-ship" "$S2E_STATE" 2>"$CDIR/ship-stderr")" || fail "bodyendse2e: tkt-ship exit $?"
+case "$S2E_OUT" in "TKT tkt-ship MERGED"*) ;; *) fail "bodyendse2e: tkt-ship [$S2E_OUT] wants MERGED" ;; esac
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/shipcalls.log")" -eq 1 ] || fail "bodyendse2e: body-ends once: $(cat "$T/shipcalls.log")"
+got="$(grep -A1 -x -F 'arg|--body-ends' "$T/shipcalls.log" | sed -n 2p)"
+[ "$got" = 'arg|X' ] || fail "bodyendse2e: body-ends value, got [$got]"
 echo "tkt-start: all cases passed"
