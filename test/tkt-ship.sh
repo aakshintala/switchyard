@@ -249,6 +249,24 @@ run_ship
 [ "$RC" -eq 1 ] || fail "mergefail: exit $RC"
 expect_line1 "MERGE-FAIL" mergefail
 
+# --- lost-race merge error, still open ---
+reset_stub; setup_case lostrace
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: gh pr merge failed: lost the race to origin/main (the rebased head lost the race again); rerun: bash /x/ship-pr 7\n' >"$T/shiplog"
+printf 'OPEN' >"$T/ghstate"
+run_ship
+[ "$RC" -eq 1 ] || fail "lostrace: exit $RC"
+expect_line1 "MERGE-FAIL" lostrace
+
+# --- lost-race merge error but GitHub says MERGED ---
+reset_stub; setup_case lostremerged
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: gh pr merge failed: lost the race to origin/main (the rebased head lost the race again); rerun: bash /x/ship-pr 7\n' >"$T/shiplog"
+printf 'MERGED' >"$T/ghstate"
+run_ship
+[ "$RC" -eq 0 ] || fail "lostremerged: exit $RC"
+expect_line1 "MERGED" lostremerged
+
 # --- conflict ---
 reset_stub; setup_case conflict
 printf '3' >"$T/exitcodes"
