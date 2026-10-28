@@ -48,9 +48,9 @@ Every job runs with writes enabled. A read task says "do not edit" in its brief;
 | `muse` | Implemented (`muse exec`, `MUSE_BIN`). |
 
 Model ids and prices come from bundled `config/models.json`, merged with your host profile.
-A Claude model id may carry a trailing `:<level>` (`low|medium|high|xhigh|max`), run as `claude --model <base> --effort <level>` (e.g. `claude-opus-5-5:high`); ids without a suffix are unchanged, and pi ids with a thinking suffix such as `openai/gpt-6-luna:xhigh` stay their own ids.
+A Claude model id may carry a trailing `:<level>` (`low|medium|high|xhigh|max`), run as `claude --model <base> --effort <level>` (e.g. `claude-opus-5-5:high`); ids without a suffix are unchanged. A pi or fiber model id may carry a trailing thinking level (`:<off|minimal|low|medium|high|xhigh|max>`), which stays on the id handed to the harness (e.g. `opencode-go/muse-spark-1.3-contributor:high` runs as `pi --model opencode-go/muse-spark-1.3-contributor:high`); catalogue ids such as `openai/gpt-6-luna:xhigh` stay their own rows, and another colon tail is an error naming the levels.
 
-A fiber model id is `fiber/` plus Fiber's own `provider/model` reference (e.g. `fiber/opencode-go/muse-spark-1.3-contributor`), run as `fiber ask --model <reference>` with resume via `--resume`; it carries no tiers so the ladder never picks it, and `delegate doctor` checks `fiber version` plus membership in `fiber models --json`. The real-fiber resume tests run with `FIBER_BIN=<path to fiber> cargo test --test fiber_live` from `delegate/`; each test spends two live Muse turns, and both skip when `FIBER_BIN` is unset.
+A fiber model id is `fiber/` plus Fiber's own `provider/model` reference (e.g. `fiber/opencode-go/muse-spark-1.3-contributor`), run as `fiber ask --model <reference>` with resume via `--resume`; it carries no tiers so the ladder never picks it, and `delegate doctor` checks `fiber version` plus membership in `fiber models --json`. Like a pi id, it may carry a trailing thinking level (`:<off|minimal|low|medium|high|xhigh|max>`), kept on the reference handed to the harness, while another colon tail is an error naming the levels. The real-fiber resume tests run with `FIBER_BIN=<path to fiber> cargo test --test fiber_live` from `delegate/`; each test spends two live Muse turns, and both skip when `FIBER_BIN` is unset.
 
 A codex model id is `codex/` plus the Codex model name with an optional `:<tier>` (`medium|xhigh`), run as `codex exec --json -s workspace-write -C <cwd> -m <model> [-c model_reasoning_effort=<tier>]` with the prompt on stdin and resume via `exec ... resume <thread-id>`; the tier suffix becomes the reasoning-effort flag and ids without a suffix send none, and it carries no tiers so the ladder never picks it. `delegate doctor` checks `codex --version` and `codex login status`, warning per configured row that no membership probe exists. The real-codex resume tests run with `CODEX_BIN=<path to codex> cargo test --test codex_live` from `delegate/`; each test spends two live turns (about $0.001 per trivial turn), both skip when `CODEX_BIN` is unset, and the temp workspace is a throwaway git repo because Codex refuses a cwd outside one.
 
@@ -104,10 +104,10 @@ The replay `TMPDIR` is a unique `mktemp -d /tmp/frp-XXXXXX` dir per prep (path r
 ## Canary
 
 `scripts/canary.sh` runs one ticket's brief on pi and on Fiber side by side:
-`run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--repo owner/name] [--clone <path>] [--out DIR]`
+`run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]`
 cuts two worktrees from the same freshly fetched `origin/main` (branches
 `canary/<ticket>-pi` and `canary/<ticket>-fiber`), runs the brief through
-`delegate run` on each side one after the other (pi's run and watch, then Fiber's), `--pi-model` and `--fiber-model` choosing the models (default: the muse-spark pair),
+`delegate run` on each side one after the other (pi's run and watch, then Fiber's), `--pi-model` and `--fiber-model` choosing the models (default: the muse-spark pair), `--thinking L` appending `:L` to both arms' models (adding nothing when absent, and appending again to an id that already ends in a level),
 and runs the gate in each worktree once both jobs end. Each side's wall time covers only its own run. The brief is wrapped
 with a line telling each agent to commit locally and never push or open a PR.
 Output goes to `~/.cache/agents/canary/<ticket>/` (or `--out`): a `pi/` and a

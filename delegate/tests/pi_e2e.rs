@@ -375,3 +375,70 @@ fn pi_503_is_resumed_on_the_same_session_and_recorded() {
         "{calls:?}"
     );
 }
+
+#[test]
+fn pi_thinking_suffix_reaches_pi_and_survives_resume() {
+    let e = Env::new("thinking");
+    let high = format!("{MODEL}:high");
+    let out = e.delegate(&["run", "--model", &high], Some("What is 17 * 23?"));
+    assert!(
+        out.status.success(),
+        "exit {:?}\nstderr: {}\nstdout: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(e.record(&id)["resume"]["model"], high.as_str());
+    assert_eq!(argv_flag(&e.last_argv(), "--model"), high);
+
+    // The same level on resume runs the same session with the new suffix.
+    let low = format!("{MODEL}:low");
+    let out = e.delegate(&["resume", &id, "--model", &low], Some("follow up"));
+    assert!(
+        out.status.success(),
+        "exit {:?}\nstderr: {}\nstdout: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let b = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let redone = e.wait_terminal(&b);
+    assert_eq!(redone["status"], "DONE");
+    let calls = e.invocations();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(argv_flag(&calls[1], "--model"), low);
+    let first_sid = done["resume"]["sessionId"].as_str().unwrap().to_string();
+    assert_eq!(argv_flag(&calls[0], "--session-id"), first_sid);
+    assert_eq!(argv_flag(&calls[1], "--session-id"), first_sid);
+
+    // A cross-backend override is still refused on the backend, not the level.
+    let out = e.delegate(&["resume", &id, "--model", "claude-sonnet-5-5"], Some("hi"));
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("backend"), "{err}");
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn pi_bad_thinking_level_is_a_usage_error() {
+    let e = Env::new("thinking-bad");
+    let bad = format!("{MODEL}:bogus");
+    let out = e.delegate(&["run", "--model", &bad], Some("hi"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(&bad), "{err}");
+    assert!(err.contains("unknown thinking level \"bogus\""), "{err}");
+    assert!(
+        err.contains("off, minimal, low, medium, high, xhigh, max"),
+        "{err}"
+    );
+    assert!(e.invocations().is_empty());
+}
