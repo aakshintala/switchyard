@@ -4,6 +4,8 @@
 # Usage: plan-sweep --cwd DIR --base REV (--plan FILE | --symbols LIST [--files LIST] | --files LIST)
 #                   [--docs FILE#HEADING] [--lang rust] [--max-bytes N] --out FILE
 #        DIR is a git clone of the repo, REV the base commit, LIST a comma list.
+#        --files also takes words after it, so `--files a.rs b.rs` is `--files a.rs,b.rs`;
+#        a word starting with '-' ends the list, so write such a path as ./-name.
 #        In --plan mode the tokens in `## Files`, `## Interfaces` and `## Tasks`
 #        resolve by plan-check's rules (`--plan` reuses its new/removed
 #        exemptions); in `--symbols`/`--files` mode every token that resolves to
@@ -41,6 +43,7 @@ fi
 
 usage() {
   echo "usage: plan-sweep --cwd DIR --base REV (--plan FILE | --symbols LIST [--files LIST] | --files LIST) [--docs FILE#HEADING] [--lang rust] [--max-bytes N] --out FILE" >&2
+  echo "  e.g. --files src/lib.rs src/shapes.rs is --files src/lib.rs,src/shapes.rs" >&2
   exit 2
 }
 
@@ -201,7 +204,7 @@ while [ $# -gt 0 ]; do
     --base) [ $# -ge 2 ] && [ -n "$2" ] || usage; rev="$2"; shift 2 ;;
     --plan) [ $# -ge 2 ] && [ -n "$2" ] || usage; plan="$2"; plan_given=1; shift 2 ;;
     --symbols) [ $# -ge 2 ] && [ -n "$2" ] || usage; symbols="$2"; symbols_given=1; shift 2 ;;
-    --files) [ $# -ge 2 ] && [ -n "$2" ] || usage; files="$2"; files_given=1; shift 2 ;;
+    --files) [ $# -ge 2 ] && [ -n "$2" ] && [[ $2 != -* ]] || usage; files_given=1; shift; while [ $# -gt 0 ] && [[ $1 != -* ]]; do files="${files:+$files,}$1"; shift; done ;;
     --docs) [ $# -ge 2 ] && [ -n "$2" ] || usage; docs="$docs$2"$'\n'; shift 2 ;;
     --lang) [ $# -ge 2 ] && [ -n "$2" ] || usage; lang="$2"; shift 2 ;;
     --max-bytes) [ $# -ge 2 ] && [ -n "$2" ] || usage; maxbytes="$2"; shift 2 ;;
