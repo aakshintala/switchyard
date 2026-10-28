@@ -194,6 +194,26 @@ case "$OUT" in *"missing-file:missing.txt"*) ;; *) fail "missing: digest misses 
 setup spaces ONE AGAINST
 reload --files; run_start --files "a b,c"
 case "$OUT" in *"files=a,b,c"*) ;; *) fail "spaces: digest misses files=a,b,c" ;; esac
+# --files takes the words after it up to the next flag; a repeat appends.
+setup words ONE AGAINST
+reload --files; run_start --files a b c
+[ "$RC" -ne 2 ] || fail "words: --files a b c gives usage"
+case "$OUT" in *"files=a,b,c"*) ;; *) fail "words: digest misses files=a,b,c" ;; esac
+setup wordsflag ONE AGAINST
+reload --files; run_start --files a b --no-preflight
+want "STALE reason=missing-file:a" 1 wordsflag
+printf '%s\n' "$OUT" | grep -qx -- 'files=a,b' || fail "wordsflag: digest misses the whole field files=a,b"
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "wordsflag: tkt-job must not run"
+setup repeat ONE AGAINST
+reload --files; run_start --files x --files y z
+case "$OUT" in *"files=x,y,z"*) ;; *) fail "repeat: digest misses files=x,y,z" ;; esac
+setup stray ONE AGAINST
+reload --files; run_start stray
+[ "$RC" -eq 2 ] || fail "stray: bare word with no --files exits $RC"
+setup flagfirst ONE AGAINST
+reload --files; run_start --files --no-preflight
+[ "$RC" -eq 2 ] || fail "flagfirst: --files then a flag exits $RC"
+grep -qF -- --files "$CDIR/stderr" || fail "flagfirst: stderr does not name --files"
 # unreadable or unresolvable filing commit preflights with a reason.
 setup badfiling ONE SKIP
 printf 'Work for #42 with no filing line.\n' >"$T/body"; run_start

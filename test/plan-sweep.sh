@@ -193,6 +193,23 @@ grep -q '^1: pub enum Shape {$' "$T/pack-f.md" || fail "f: enum line"
 grep -q '^6: impl Shape {$' "$T/pack-f.md" || fail "f: impl line"
 grep -q '^7:     pub fn area(&self) -> u32 {$' "$T/pack-f.md" || fail "f: fn line"
 [ "$(grep -c '^8: ' "$T/pack-f.md")" = 0 ] || fail "f: no body line"
+# f2. --files takes space-separated words; a repeat appends; a following flag still parses
+run --cwd "$R" --base "$BASE" --files src/lib.rs src/shapes.rs --out "$T/pack-f2.md"
+[ "$code" = 0 ] || fail "f2: exits 0, got $code [$out]"
+[ "$out" = "PACK $T/pack-f2.md symbols=0 files=2 outside=0" ] || fail "f2: PACK line, got [$out]"
+run --cwd "$R" --base "$BASE" --files src/lib.rs --files src/shapes.rs --out "$T/pack-f3.md"
+[ "$out" = "PACK $T/pack-f3.md symbols=0 files=2 outside=0" ] || fail "f3: a repeat must append, got [$out]"
+run --cwd "$R" --base "$BASE" --files src/lib.rs src/shapes.rs --lang rust --out "$T/pack-f4.md"
+[ "$out" = "PACK $T/pack-f4.md symbols=0 files=2 outside=0" ] || fail "f4: a following flag must still parse, got [$out]"
+# an empty or blank word is skipped, not an unresolved path
+run --cwd "$R" --base "$BASE" --files src/lib.rs "" "  " src/shapes.rs --out "$T/pack-f5.md"
+[ "$out" = "PACK $T/pack-f5.md symbols=0 files=2 outside=0" ] || fail "f5: blank words must be skipped, got [$out]"
+# a path starting with '-' is written ./-name and resolves at the clone root
+DR="$T/dashrepo"; mkdir -p "$DR"; git -C "$DR" init -q
+printf 'x\n' >"$DR/-x"; git -C "$DR" add -- -x
+git -C "$DR" -c user.name=t -c user.email=t@t commit -q -m init
+run --cwd "$DR" --base HEAD --files ./-x --out "$T/pack-f6.md"
+[ "$out" = "PACK $T/pack-f6.md symbols=0 files=1 outside=0" ] || fail "f6: ./-x must resolve, got [$out]"
 
 # g. docs print the section verbatim and stop before the next heading
 run --cwd "$R" --base "$BASE" --symbols make_widget --files src/lib.rs --docs docs/guide.md#Rules --out "$T/pack-g.md"
@@ -293,6 +310,8 @@ expect_usage --cwd "$R" --base nosuchrev --symbols make_widget --files src/lib.r
 expect_usage --cwd "$R" --base "$BASE" --symbols make_widget --files src/lib.rs --lang go --out "$T/pack-k.md"
 expect_usage --cwd "$R" --base "$BASE" --symbols make_widget --files src/lib.rs --max-bytes 0 --out "$T/pack-k.md"
 expect_usage --cwd "$T/empty" --base "$BASE" --symbols make_widget --files src/lib.rs --out "$T/pack-k.md"
+expect_usage --cwd "$R" --base "$BASE" --files --out "$T/pack-k.md"
+expect_usage --cwd "$R" --base "$BASE" --symbols make_widget stray --out "$T/pack-k.md"
 
 # the shared lib is sourced from beside the script: a copy with no lib/ beside it exits 2
 mkdir -p "$T/nolib"
