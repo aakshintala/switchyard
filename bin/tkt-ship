@@ -2,6 +2,8 @@
 # tkt-ship: run ship-pr from state, rerun on 124, digest red CI.
 # Usage: tkt-ship <state>
 # State key no_mutants_label: reason passed to ship-pr as --no-mutants-label.
+# State key body_ends: text passed to ship-pr as --body-ends; absent, unreadable,
+# empty or blank passes no flag and asks for no check.
 set -euo pipefail
 
 usage() { echo "usage: tkt-ship <state>" >&2; exit 2; }
@@ -111,7 +113,13 @@ if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
 fi
 
 args=("$pr" --repo "$repo" --reviewed "$reviewed" --worktree "$worktree")
-args+=(--body-ends 'Co-authored with Claude Code.')
+# The check is opt-in: only a stored non-blank line asks ship-pr for it.
+# A missing key or failed read counts as absent and never fails the ship.
+if be="$(tkt get body_ends 2>/dev/null)"; then
+  if [ -n "${be//[[:space:]]/}" ]; then
+    args+=(--body-ends "$be")
+  fi
+fi
 while IFS= read -r b; do
   [ -n "$b" ] || continue
   args+=(--body-has "$b")
