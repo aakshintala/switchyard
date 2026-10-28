@@ -111,6 +111,7 @@ if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
 fi
 
 args=("$pr" --repo "$repo" --reviewed "$reviewed" --worktree "$worktree")
+args+=(--body-ends 'Co-authored with Claude Code.')
 while IFS= read -r b; do
   [ -n "$b" ] || continue
   args+=(--body-has "$b")

@@ -361,6 +361,9 @@ run_ship
 [ "$RC" -eq 0 ] || fail "flags: exit $RC"
 grep -F -q -- '--body-has Resolves #515' "$T/calls.log" || fail "flags: body-has 1 missing"
 grep -F -q -- '--body-has Co-authored-by: T' "$T/calls.log" || fail "flags: body-has 2 missing"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "flags: body-ends once: $(cat "$T/calls.log")"
+got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
+[ "$got" = 'arg|Co-authored with Claude Code.' ] || fail "flags: body-ends value, got [$got]"
 grep -F -q -- "--unverified-fixes $CDIR/unverified.md" "$T/calls.log" || fail "flags: unverified missing"
 grep -F -q -- '--gate FOO=1 BAR=2 bash test/gate.sh' "$T/calls.log" || fail "flags: gate missing"
 
@@ -380,6 +383,9 @@ printf '0' >"$T/exitcodes"
 run_ship
 [ "$RC" -eq 0 ] || fail "nomutantsunset: exit $RC"
 [ "$(grep -c -F 'no-mutants-label' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: flag present: $(cat "$T/calls.log")"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "nomutantsunset: body-ends once without body_has: $(cat "$T/calls.log")"
+got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
+[ "$got" = 'arg|Co-authored with Claude Code.' ] || fail "nomutantsunset: body-ends value, got [$got]"
 
 # --- ship-pr runs from the run dir even when the caller is in the worktree ---
 reset_stub; setup_case shipcwd

@@ -778,6 +778,53 @@ ship --body-has null; nothing_ran "null body"
 setup; : >"$ST/body"
 ship --body-has x; nothing_ran "empty body"
 
+# ===== --body-ends: the body's last non-blank line must equal the text
+setup
+for args in "--body-ends" "--body-ends ''" ; do
+  # shellcheck disable=SC2086
+  eval "ship $args"; expect 2 "usage [$args]"; untouched "usage [$args]"
+  grep -q '^usage: ship-pr' <<<"$ERR" || fail "usage text for [$args]: [$ERR]"
+done
+ship --body-ends "$(printf 'a\nb')"; expect 2 "newline body-ends"; untouched "newline body-ends"
+grep -q '^usage: ship-pr' <<<"$ERR" || fail "usage text for newline body-ends: [$ERR]"
+[ ! -e "$ST/gh.log" ] || fail "bad --body-ends makes no gh call"
+
+setup; printf 'Resolves #97\nCo-authored with Claude Code.\n' >"$ST/body"
+ship --body-ends 'Co-authored with Claude Code.'; expect 0 "body ends with the line"
+
+setup; printf 'Resolves #97\nCo-authored with Claude Code.\n\n\n' >"$ST/body"
+ship --body-ends 'Co-authored with Claude Code.'; expect 0 "trailing blank lines ignored"
+setup; printf 'Resolves #97\nCo-authored with Claude Code.\n  \n\t\n' >"$ST/body"
+ship --body-ends 'Co-authored with Claude Code.'; expect 0 "trailing whitespace-only lines ignored"
+setup; printf 'Resolves #97\r\nCo-authored with Claude Code.\r\n' >"$ST/body"
+ship --body-ends 'Co-authored with Claude Code.'; expect 0 "CRLF body ending"
+setup; printf 'Resolves #97\nCo-authored with Claude Code.' >"$ST/body"
+ship --body-ends 'Co-authored with Claude Code.'; expect 0 "no trailing newline"
+
+setup; printf 'Co-authored with Claude Code.\nDoc friction: none\n' >"$ST/body"
+ship --body-ends 'Co-authored with Claude Code.'; nothing_ran "attribution mid-body"
+[ "$OUT" = "body does not end with (--body-ends): Co-authored with Claude Code." ] || fail "mid-body printed: [$OUT]"
+grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "ends message: [$ERR]"
+
+for b in 'Co-authored with Claude Code. ' 'Co-authored with Claude Code.x' 'x Co-authored with Claude Code.' 'co-authored with claude code.'; do
+  setup; printf 'Resolves #97\n%s\n' "$b" >"$ST/body"
+  ship --body-ends 'Co-authored with Claude Code.'; nothing_ran "no exact match for [$b]"
+done
+
+setup; touch "$ST/body-null"
+ship --body-ends 'Co-authored with Claude Code.'; nothing_ran "null body"
+setup; : >"$ST/body"
+ship --body-ends 'Co-authored with Claude Code.'; nothing_ran "empty body"
+
+setup; printf 'Doc friction: none\n' >"$ST/body"
+ship --body-has 'Resolves #' --body-ends 'Co-authored with Claude Code.'; nothing_ran "both checks fail"
+[ "$OUT" = "missing body line: Resolves #
+body does not end with (--body-ends): Co-authored with Claude Code." ] || fail "both lines printed: [$OUT]"
+
+setup; touch "$ST/body-fail"
+ship --body-ends 'Co-authored with Claude Code.'; expect 2 "body-ends read failure"; untouched "body-ends read failure"
+grep -q 'cannot read PR 7 body' <<<"$ERR" || fail "body-ends read message: [$ERR]"
+
 setup; ship; expect 0 "no --body-has"
 ! grep -q -- '--json body' "$ST/gh.log" || fail "no --body-has: no body read before pr-closes"
 
