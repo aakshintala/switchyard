@@ -458,6 +458,69 @@ fn fiber_resume_with_an_empty_session_id_runs_fresh() {
     );
 }
 
+#[test]
+fn fiber_thinking_suffix_reaches_fiber_without_the_prefix() {
+    let e = Env::new("thinking", "echo.jsonl", "0");
+    let high = format!("{MODEL}:high");
+    let out = e.delegate(
+        &["run", "--model", &high],
+        Some("Reply with the word DONE."),
+        "echo.jsonl",
+        "0",
+    );
+    assert!(
+        out.status.success(),
+        "exit {:?}\nstderr: {}\nstdout: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let done = e.wait_terminal(&id, "echo.jsonl", "0");
+    assert_eq!(done["status"], "DONE");
+    assert_eq!(done["result"]["model"], high.as_str());
+
+    // The harness gets Fiber's own reference with the level kept, never
+    // the delegate `fiber/` prefix.
+    let reference_high = format!("{REFERENCE}:high");
+    let calls = e.invocations();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(
+        calls[0]
+            .windows(2)
+            .any(|w| w == ["--model", reference_high.as_str()]),
+        "{calls:?}"
+    );
+    assert!(
+        !calls[0].iter().any(|a| a.starts_with("fiber/")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn fiber_bad_thinking_level_is_a_usage_error() {
+    let e = Env::new("thinking-bad", "echo.jsonl", "0");
+    let bad = format!("{MODEL}:bogus");
+    let out = e.delegate(&["run", "--model", &bad], Some("hi"), "echo.jsonl", "0");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(&bad), "{err}");
+    assert!(err.contains("unknown thinking level \"bogus\""), "{err}");
+    assert!(
+        err.contains("off, minimal, low, medium, high, xhigh, max"),
+        "{err}"
+    );
+    assert!(
+        !e.dir.join("argv.txt").exists(),
+        "nothing spawned, so the fake wrote no argv"
+    );
+}
+
 /// A whitespace-only session id counts as absent: the resume runs fresh.
 #[test]
 fn fiber_resume_with_a_whitespace_session_id_runs_fresh() {

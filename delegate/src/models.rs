@@ -289,4 +289,138 @@ mod tests {
         assert_eq!(r.backend, "pi");
         assert_eq!(r.price, m["openai/gpt-6-luna"].price);
     }
+
+    fn thinking_base() -> (String, HashMap<String, ModelEntry>) {
+        let (d, mut m) = base();
+        m.insert(
+            "opencode-go/muse-spark-1.3-contributor".into(),
+            ModelEntry {
+                label: "Muse Spark 1.3 Contributor".into(),
+                backend: "pi".into(),
+                price: price(0.1, 0.2, 0.002, 0.0),
+                tiers: vec![],
+            },
+        );
+        m.insert(
+            "fiber/opencode-go/muse-spark-1.3-contributor".into(),
+            ModelEntry {
+                label: "Muse Spark 1.3 Contributor (fiber)".into(),
+                backend: "fiber".into(),
+                price: price(0.1, 0.2, 0.002, 0.0),
+                tiers: vec![],
+            },
+        );
+        // A catalogue row whose key already ends in a level keeps its own
+        // price, distinct from the bare base row's.
+        m.insert(
+            "openai/gpt-6-luna:xhigh".into(),
+            ModelEntry {
+                label: "GPT-6 Luna Extra High".into(),
+                backend: "pi".into(),
+                price: price(0.9, 0.9, 0.09, 0.9),
+                tiers: vec![],
+            },
+        );
+        (d, m)
+    }
+
+    #[test]
+    fn suffixed_pi_and_fiber_ids_resolve_as_their_base() {
+        let (d, m) = thinking_base();
+        for base_id in [
+            "opencode-go/muse-spark-1.3-contributor",
+            "fiber/opencode-go/muse-spark-1.3-contributor",
+        ] {
+            for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+                let id = format!("{base_id}:{level}");
+                let r = resolve_model(Some(&id), &(d.as_str(), &m)).unwrap();
+                assert_eq!(r.model, id, "{id}");
+                assert_eq!(r.backend, m[base_id].backend, "{id}");
+                assert_eq!(r.price, m[base_id].price, "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn exact_catalogue_key_with_a_level_is_its_own_row() {
+        let (d, m) = thinking_base();
+        let r = resolve_model(Some("openai/gpt-6-luna:xhigh"), &(d.as_str(), &m)).unwrap();
+        assert_eq!(r.model, "openai/gpt-6-luna:xhigh");
+        assert_eq!(r.backend, "pi");
+        assert_eq!(r.price, m["openai/gpt-6-luna:xhigh"].price);
+        assert_ne!(
+            m["openai/gpt-6-luna:xhigh"].price,
+            m["openai/gpt-6-luna"].price
+        );
+        // The same tail on the bare base resolves to the base row instead.
+        let r = resolve_model(Some("openai/gpt-6-luna:high"), &(d.as_str(), &m)).unwrap();
+        assert_eq!(r.model, "openai/gpt-6-luna:high");
+        assert_eq!(r.backend, "pi");
+        assert_eq!(r.price, m["openai/gpt-6-luna"].price);
+    }
+
+    #[test]
+    fn bad_thinking_level_on_pi_and_fiber_is_a_plain_error_naming_the_levels() {
+        let (d, m) = thinking_base();
+        for base_id in [
+            "opencode-go/muse-spark-1.3-contributor",
+            "fiber/opencode-go/muse-spark-1.3-contributor",
+        ] {
+            for level in ["bogus", "", "HIGH", "none", "ultra"] {
+                let id = format!("{base_id}:{level}");
+                let e = resolve_model(Some(&id), &(d.as_str(), &m)).unwrap_err();
+                assert!(
+                    e.downcast_ref::<ModelNotAllowedError>().is_none(),
+                    "{id} should not be a ModelNotAllowedError"
+                );
+                let msg = e.to_string();
+                assert!(msg.contains(&format!("model \"{id}\"")), "{msg}");
+                assert!(
+                    msg.contains(&format!("unknown thinking level \"{level}\"")),
+                    "{msg}"
+                );
+                assert!(
+                    msg.contains("off, minimal, low, medium, high, xhigh, max"),
+                    "{msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn suffix_on_unknown_pi_base_is_unknown_model() {
+        let (d, m) = thinking_base();
+        let e = resolve_model(Some("nope/model:high"), &(d.as_str(), &m)).unwrap_err();
+        assert!(e.downcast_ref::<ModelNotAllowedError>().is_some());
+    }
+
+    #[test]
+    fn double_level_on_pi_and_fiber_is_a_plain_error() {
+        let (d, mut m) = thinking_base();
+        m.insert(
+            "fiber/codex/gpt-6-luna:medium".into(),
+            ModelEntry {
+                label: "GPT-6 Luna Medium (fiber)".into(),
+                backend: "fiber".into(),
+                price: price(0.1, 0.5, 0.01, 0.125),
+                tiers: vec![],
+            },
+        );
+        for id in [
+            "openai/gpt-6-luna:xhigh:high",
+            "fiber/codex/gpt-6-luna:medium:high",
+        ] {
+            let e = resolve_model(Some(id), &(d.as_str(), &m)).unwrap_err();
+            assert!(
+                e.downcast_ref::<ModelNotAllowedError>().is_none(),
+                "{id} should not be a ModelNotAllowedError"
+            );
+            let msg = e.to_string();
+            assert!(msg.contains("unknown thinking level"), "{msg}");
+            assert!(
+                msg.contains("off, minimal, low, medium, high, xhigh, max"),
+                "{msg}"
+            );
+        }
+    }
 }
