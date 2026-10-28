@@ -14,7 +14,9 @@
 #        (see below); on a non-strict base with --gate, gate the PR merged
 #        with current origin/main in a throwaway merge commit (step 7); squash-merge
 #        pinned to the checked head, retrying once on a base race or GraphQL error
-#        and polling MERGED even after a failed retry; wait for MERGED; remove the worktree and the
+#        and re-entering the rebase once after the merge lost the race to
+#        origin/main in strict mode (no extra sleep, sharing the 3 retries);
+#        polling MERGED even after a failed retry; wait for MERGED; remove the worktree and the
 #        local and remote branch (the worktree and local branch stay when the
 #        caller's directory is inside it).
 #        The CI wait trusts the repo's required checks: one green on the exact
@@ -62,16 +64,21 @@
 #        within 120 s exits 1 naming the run.
 #        Prints `merged <squash sha>` on success. A `gh pr merge` error containing
 #        `GraphQL` retries once like `Base branch was modified`, sleeping 5 s first.
-#        After a failed retry of either kind ship-pr still polls for MERGED, since
-#        GitHub sometimes merges despite the error, and exits 1 saying the merge
-#        command failed only when the poll never sees MERGED.
+#        An error saying the head branch is not up to date with the base branch
+#        re-enters the rebase, push and CI-wait steps once in strict mode (counted
+#        against the 3 retries), after checking `gh pr view` for MERGED; a second
+#        loss, an unmoved main, or no retries left exits 1 with `lost the race to
+#        origin/main` and the rerun command. After a failed retry of any kind ship-pr
+#        still polls for MERGED, since GitHub sometimes merges despite the error,
+#        and exits 1 saying the merge command failed only when the poll never sees MERGED.
 #        Progress goes to stderr, and so do
 #        gh-ci's check counts while CI runs.
 #        After marking a draft PR ready, each later failure before `gh pr merge` says
 #        that nothing merged and the PR is still marked ready. If MERGED is not confirmed
 #        after the merge attempt, the error says the merge status could not be confirmed.
 #        Exit 0 merged, 1 gate/CI/push/merge failure (a gate run on the PR merged
-#        with current origin/main counts as a gate failure), 2 bad usage or a failed
+#        with current origin/main counts as a gate failure; a merge that lost the race
+#        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
 #        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, or stray closing keywords from pr-closes), 124 CI wait timeout.
@@ -82,7 +89,8 @@
 #        printed once.
 #        Strict: rebase onto origin/main when it moved. When origin/main moves during
 #        the CI wait, ship-pr goes back to the rebase (rebase, patch-id check, push
-#        and CI wait again; no gate), at most 3 times; the 4th move exits 1.
+#        and CI wait again; no gate), at most 3 times; the 4th move exits 1. A merge
+#        that lost the race re-enters the same rebase, sharing the 3 retries.
 #        Not strict: after the gate, read the PR's mergeable and mergeStateStatus;
 #        rebase (after refetching origin/main) only on CONFLICTING or DIRTY. One CI
 #        wait, no retry when origin/main moves; a conflict found after CI exits 3.
@@ -107,7 +115,8 @@
 #        from the reviewed sha to the pinned head, limited to the files the repair commits
 #        touch (a merge of main adds no base files), under `Changed since review:`. A failed
 #        post exits 1 before any push. A match posts nothing. The gate and CI run as usual.
-#        --timeout bounds each CI wait, so a run can take one gate and up to 4 CI waits.
+#        --timeout bounds each CI wait, so a run can take one gate and up to 4 CI waits;
+#        the 3 retries are one budget shared with a merge that lost the race.
 #        SHIP_PR_INTERVAL: seconds between MERGED polls (default 5, at most 12 polls).
 set -euo pipefail
 
