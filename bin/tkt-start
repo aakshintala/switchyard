@@ -4,7 +4,7 @@
 # tokens still preflights; any other sweep failure exits with its code. No --files
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
 # A preflight core/non-blocking line counts when it starts with '<n>.' or '-', then spaces, then optional backtick/bold marks; a bare '*' bullet never counts.
-# After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line.
+# After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 # Words after --files run to the next word starting with '-': write such a path as ./-name.
@@ -132,21 +132,39 @@ fi
 dg=("state=$state" "worktree=$worktree $wt_note" "filing=${filing:-none} base=$base" "files=${files:-none}" "log ${filing:-none}..origin/main: $lognote" "$sincenote")
 # Merged PRs mentioning the issue run before the CURRENT exit, the
 # --no-preflight exit and the preflight dispatch. A Resolves line stops the
-# run; a Part-of line notes the PR and its files and the run continues. The
-# number's boundary is a non-digit, so #42 never matches #421, and Resolves
-# wins over Part-of.
-merged="$(gh pr list --repo "$repo" --state merged --search "#$issue in:body" --limit 100 --json number,body,files 2>&1)" || fail_step github "$?" "$merged"
-stop_pr=""; notes=(); pr_count="$(printf '%s' "$merged" | jq 'if type == "array" then length else 0 end')"
+# run, unless the issue recurred: OPEN with a comment strictly newer than
+# the newest Resolves merge. A recurrence only appends a NOTE naming the
+# newest PR and the run continues. A Part-of line notes the PR and its
+# files and the run continues. The number's boundary is a non-digit, so
+# #42 never matches #421, and Resolves wins over Part-of. A Resolves merge
+# without a readable timestamp blocks the inference, and a comment without
+# one is ignored: neither can be called newer, so the run stops as before.
+# Both stamps share one fixed-width UTC shape, ordered by jq's codepoint
+# string compare, never by locale collation.
+ts_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+merged="$(gh pr list --repo "$repo" --state merged --search "#$issue in:body" --limit 100 --json number,body,files,mergedAt 2>&1)" || fail_step github "$?" "$merged"
+stop_pr=""; notes=(); recur_pr=""; recur_at=""; recur_ok=1; pr_count="$(printf '%s' "$merged" | jq 'if type == "array" then length else 0 end')"
 idx=0; while [ "$idx" -lt "$pr_count" ]; do
   pr_num="$(printf '%s' "$merged" | jq -r ".[$idx].number")"
   pr_body="$(printf '%s' "$merged" | jq -r ".[$idx].body // \"\"")"
   if printf '%s' "$pr_body" | grep -qiE "Resolves[[:space:]]+#$issue([^0-9]|$)"; then [ -n "$stop_pr" ] || stop_pr="$pr_num"
+    pr_merged="$(printf '%s' "$merged" | jq -r ".[$idx].mergedAt // \"\"")"
+    if [[ "$pr_merged" =~ $ts_re ]]; then
+      if [ -z "$recur_at" ] || [ "$(jq -n --arg a "$recur_at" --arg b "$pr_merged" '$a < $b')" = "true" ]; then
+        recur_at="$pr_merged"; recur_pr="$pr_num"
+      fi
+    else recur_ok=0; fi
   elif printf '%s' "$pr_body" | grep -qiE "Part of[[:space:]]+#$issue([^0-9]|$)"; then
     pr_files="$(printf '%s' "$merged" | jq -r ".[$idx].files // [] | map(.path) | join(\",\")")"
     notes+=("NOTE merged Part-of PR #$pr_num files=$pr_files")
   fi
   idx=$((idx+1))
 done
+if [ -n "$stop_pr" ] && [ "$recur_ok" -eq 1 ]; then
+  issue_json="$(gh issue view "$issue" --repo "$repo" --json state,comments 2>&1)" || fail_step github "$?" "$issue_json"
+  recur_hit="$(printf '%s' "$issue_json" | jq --arg at "$recur_at" 'if type == "object" and has("state") then .state == "OPEN" and ([.comments[]? | select(type == "object") | .createdAt | select(type == "string") | select(test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) | select(. > $at)] | length > 0) else error("no issue state") end' 2>&1)" || fail_step github "$?" "$recur_hit"
+  if [ "$recur_hit" = "true" ]; then notes+=("NOTE recurred after merged PR #$recur_pr"); stop_pr=""; fi
+fi
 [ -n "$stop_pr" ] && deny "MERGED-STOP pr=$stop_pr" 1 "tkt-start: issue #$issue already resolved by merged PR #$stop_pr"
 part_notes=(${notes[@]+"${notes[@]}"})
 if [ -n "$stale" ]; then dg=("reason=$reason" ${dg[@]+"${dg[@]}"}); tkt journal "tkt-start check STALE reason=$reason filing=${filing:-none}"

@@ -29,6 +29,9 @@ case " \$* " in
   *" issue view "*" lastEditedAt "*)
     printf 'Unknown JSON field: "lastEditedAt"\n' >&2; exit 1 ;;
   *" pr view "*) cat "$T/prhead"; exit 0 ;;
+  *" issue view "*"state,comments"*)
+    if [ -f "$T/issue-fail" ]; then echo "gh: issue view boom" >&2; exit 5; fi
+    cat "$T/issue"; exit 0 ;;
   *) cat "$T/body"; exit 0 ;;
 esac
 EOF
@@ -72,8 +75,9 @@ reload() {
 # commit, plus a touching commit for TWO) pushed to origin/main, a clone, the
 # issue body and docs, ARGS loaded. Sets CDIR CLONE WT RUN FILING.
 setup() {
-  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked"
+  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"; printf '[]\n' >"$T/prlist"
+  printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
   ORIGIN="$CDIR/origin.git"; SEED="$CDIR/seed"
@@ -381,10 +385,12 @@ grep -qF -- '--issue' "$CDIR/stderr" || fail "numissue: stderr does not name --i
 [ ! -e "$RUN/widget-abc.state" ] || fail "numissue: state must not be written"
 [ ! -e "$CDIR/wt" ] || fail "numissue: worktree must not be created"
 # merged-PR search: `tkt-start` searches merged PRs for `#<issue> in:body`
-# after the currency check. A `Resolves #<issue>` hit stops with MERGED-STOP;
-# a `Part of #<issue>` hit prints a NOTE with every touched path and the run
-# continues. The boundary is a non-digit after the number, so `#42` never
-# matches `#421`. The stub's default `pr list` is empty.
+# after the currency check. A `Resolves #<issue>` hit stops with MERGED-STOP,
+# unless the issue is OPEN with a comment newer than the newest Resolves merge
+# (a recurrence, noted and continued). A `Part of #<issue>` hit prints a NOTE
+# with every touched path and the run continues. The boundary is a non-digit
+# after the number, so `#42` never matches `#421`. The stub's default
+# `pr list` is empty.
 # a Resolves hit stops with MERGED-STOP before any preflight work.
 setup mergedstop ONE AGAINST
 printf '%s\n' '[{"number":7,"body":"Fixes it.\n\nResolves #42.\n","files":[{"path":"f.txt"}]}]' >"$T/prlist"
@@ -403,6 +409,7 @@ run_start
 want "CURRENT " 0 mergedpart
 case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergedpart: digest misses the NOTE" ;; esac
 for p in f.txt other/dir.txt; do case "$OUT" in *"$p"*) ;; *) fail "mergedpart: NOTE misses [$p]" ;; esac; done
+[ "$(grep -c 'state,comments' "$T/calls.log")" -eq 0 ] || fail "mergedpart: no Resolves hit, so no issue lookup"
 # each Part-of hit prints its own NOTE.
 setup mergedparts ONE AGAINST
 printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]},{"number":9,"body":"Part of #42","files":[{"path":"g.txt"}]}]' >"$T/prlist"
@@ -471,4 +478,127 @@ printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]}]' >
 run_start
 want "PREFLIGHT core=" 1 mergedstalepart
 case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergedstalepart: digest misses the NOTE" ;; esac
+# a recurrence: the issue is OPEN with a comment newer than the Resolves merge,
+# so the run notes it and continues instead of stopping.
+setup recurred ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T01:00:01Z"}]}' >"$T/issue"
+run_start
+want "CURRENT " 0 recurred
+case "$OUT" in *"NOTE recurred after merged PR #7"*) ;; *) fail "recurred: digest misses the NOTE" ;; esac
+case "$OUT" in *MERGED-STOP*) fail "recurred: must not stop" ;; esac
+grep -qF -- 'state,comments' "$T/calls.log" || fail "recurred: no issue state lookup"
+grep -qF -- 'number,body,files,mergedAt' "$T/calls.log" || fail "recurred: pr list misses mergedAt"
+# an older comment, a comment at exactly the merge time, and a closed issue
+# all still stop with MERGED-STOP and print no recurrence NOTE.
+setup recurredold ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T00:59:59Z"}]}' >"$T/issue"
+run_start
+want "MERGED-STOP pr=7" 1 recurredold
+case "$OUT" in *"NOTE recurred"*) fail "recurredold: an older comment must not recur" ;; esac
+setup recurredtie ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T01:00:00Z"}]}' >"$T/issue"
+run_start
+want "MERGED-STOP pr=7" 1 recurredtie
+case "$OUT" in *"NOTE recurred"*) fail "recurredtie: an equal comment must not recur" ;; esac
+setup recurredclosed ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+printf '%s\n' '{"state":"CLOSED","comments":[{"createdAt":"2026-10-28T01:00:01Z"}]}' >"$T/issue"
+run_start
+want "MERGED-STOP pr=7" 1 recurredclosed
+case "$OUT" in *"NOTE recurred"*) fail "recurredclosed: a closed issue must not recur" ;; esac
+# two Resolves hits: the NOTE names the newest merge, while MERGED-STOP keeps
+# the first-listed PR and a comment between the merges still stops.
+setup recurrednewest ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"},{"number":9,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T03:00:00Z"}]' >"$T/prlist"
+printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T04:00:00Z"}]}' >"$T/issue"
+run_start
+want "CURRENT " 0 recurrednewest
+case "$OUT" in *"NOTE recurred after merged PR #9"*) ;; *) fail "recurrednewest: NOTE must name the newest merge #9" ;; esac
+printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue"
+run_start
+want "MERGED-STOP pr=7" 1 recurrednewestbetween
+case "$OUT" in *"NOTE recurred"*) fail "recurrednewestbetween: a comment between the merges must not recur" ;; esac
+setup recurrednewesttie ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"},{"number":9,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue"
+run_start
+want "CURRENT " 0 recurrednewesttie
+case "$OUT" in *"NOTE recurred after merged PR #7"*) ;; *) fail "recurrednewesttie: a tied merge must name the first-listed PR #7" ;; esac
+# bad timestamps: an unreadable merge time anywhere stops, with no issue
+# lookup; an unreadable comment time is ignored, not newer.
+for spec in absent null badtext secondbad soon nullcomment; do
+  setup "recurredbad-$spec" ONE AGAINST
+  case "$spec" in
+    absent) printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[]}]' >"$T/prlist"
+      printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue" ;;
+    null) printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":null}]' >"$T/prlist"
+      printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue" ;;
+    badtext) printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"yesterday"}]' >"$T/prlist"
+      printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue" ;;
+    secondbad) printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"},{"number":9,"body":"Resolves #42","files":[],"mergedAt":"soon"}]' >"$T/prlist"
+      printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue" ;;
+    soon) printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+      printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"soon"}]}' >"$T/issue" ;;
+    nullcomment) printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+      printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":null}]}' >"$T/issue" ;;
+  esac
+  run_start
+  want "MERGED-STOP pr=7" 1 "recurredbad-$spec"
+  case "$OUT" in *"NOTE recurred"*) fail "recurredbad-$spec: must not recur" ;; esac
+  case "$spec" in
+    absent|null|badtext|secondbad)
+      [ "$(grep -c 'state,comments' "$T/calls.log")" -eq 0 ] || fail "recurredbad-$spec: unreadable merge time must skip the issue lookup" ;;
+  esac
+done
+# a recurrence beside a Part-of hit prints both NOTEs and continues.
+setup recurredpart ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"},{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]}]' >"$T/prlist"
+printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue"
+run_start
+want "CURRENT " 0 recurredpart
+case "$OUT" in *"NOTE recurred after merged PR #7"*) ;; *) fail "recurredpart: digest misses the recurrence NOTE" ;; esac
+case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "recurredpart: digest misses the Part-of NOTE" ;; esac
+# a recurrence on the stale path still preflights, with the NOTE in the
+# digest and the log.
+setup recurredstale TWO FILING
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue"
+run_start
+want "PREFLIGHT core=" 1 recurredstale
+case "$OUT" in *"NOTE recurred after merged PR #7"*) ;; *) fail "recurredstale: digest misses the NOTE" ;; esac
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 1 ] || fail "recurredstale: tkt-job must run once"
+recurredstale_log="$(printf '%s\n' "$OUT" | head -n 1)"; recurredstale_log="${recurredstale_log##* log=}"
+grep -qF -- "NOTE recurred after merged PR #7" "$recurredstale_log" || fail "recurredstale: log misses the NOTE"
+# a recurrence under --no-preflight exits STALE with the NOTE, calling neither job.
+setup recurredstalenoflight TWO FILING
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue"
+run_start --no-preflight
+want "STALE reason=" 1 recurredstalenoflight
+case "$OUT" in *"NOTE recurred after merged PR #7"*) ;; *) fail "recurredstalenoflight: digest misses the NOTE" ;; esac
+case "$OUT" in *MERGED-STOP*) fail "recurredstalenoflight: must not stop, must print STALE" ;; esac
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "recurredstalenoflight: tkt-job must not run" # docs/agents/issue-tracker.md:32
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "recurredstalenoflight: plan-sweep must not run" # docs/agents/issue-tracker.md:32
+# a failed issue lookup fails the github step and never reports CURRENT or PREFLIGHT.
+setup recurredfail ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+printf '1' >"$T/issue-fail"; run_start
+want "STEP-FAIL step=github" 5 recurredfail
+case "$OUT" in *CURRENT*) fail "recurredfail: must never print CURRENT" ;; esac
+case "$OUT" in *PREFLIGHT*) fail "recurredfail: must never print PREFLIGHT" ;; esac
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "recurredfail: tkt-job must not run" # docs/agents/issue-tracker.md:31
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "recurredfail: plan-sweep must not run" # docs/agents/issue-tracker.md:31
+setup recurredbadjson ONE AGAINST
+printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
+printf 'not json\n' >"$T/issue"; run_start
+[ "$RC" -ne 0 ] || fail "recurredbadjson: exit $RC"
+recurredbadjson_first="$(printf '%s\n' "$OUT" | head -n 1)"
+case "$recurredbadjson_first" in "TKT tkt-start STEP-FAIL step=github"*) ;; *) fail "recurredbadjson: line 1 [$recurredbadjson_first] wants STEP-FAIL step=github" ;; esac
+case "$OUT" in *CURRENT*) fail "recurredbadjson: must never print CURRENT" ;; esac
+case "$OUT" in *PREFLIGHT*) fail "recurredbadjson: must never print PREFLIGHT" ;; esac
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "recurredbadjson: tkt-job must not run" # docs/agents/issue-tracker.md:31
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "recurredbadjson: plan-sweep must not run" # docs/agents/issue-tracker.md:31
 echo "tkt-start: all cases passed"
