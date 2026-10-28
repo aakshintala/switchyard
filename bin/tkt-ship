@@ -161,8 +161,8 @@ ci_digest() {
   href="$(tkt get head 2>/dev/null || git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
   difflist=""
   [ -z "$href" ] || difflist="$(git -C "$worktree" diff --name-only "origin/main...$href" 2>/dev/null || true)"
-  awk '/--- gh-ci failures ---/{f=1;next} f' "$runlog" | awk -v diff="$difflist" '
-    BEGIN { n=split(diff, d, "\n"); for (i in d) ind[d[i]]=1 }
+  awk '/--- gh-ci failures ---/{f=1;next} f' "$runlog" | TKT_DIFF="$difflist" awk '
+    BEGIN { n=split(ENVIRON["TKT_DIFF"], d, "\n"); for (i in d) ind[d[i]]=1 }
     /^=== / { sub(/^=== /, ""); nj++; step=0; print "job: " $0; next }
     /MISSED|TIMEOUT/ { nm++; print "mutant: " $0; next }
     /panicked at [^ :]+/ { p=$0; sub(/.*panicked at /, "", p); sub(/[: ].*/, "", p)

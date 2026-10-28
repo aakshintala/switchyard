@@ -198,6 +198,29 @@ case "$OUT" in *"mutant: MISSED mutant src/a.go:12"*) ;; *) fail "cifail: no MIS
 case "$OUT" in *"mutant: TIMEOUT mutant src/b.go:3"*) ;; *) fail "cifail: no TIMEOUT line" ;; esac
 expect_journal cifail CI-FAIL
 
+# --- CI-FAIL on a multi-file diff: the list must reach awk whole (#787) ---
+reset_stub; setup_case cifail-multi
+printf 'x\n' >"$WT/src/b.go"
+git -C "$WT" -c user.email=t@t -c user.name=t add -A
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q -m two
+NH="$(git -C "$WT" rev-parse HEAD)"
+grep -v '^head=' "$S" >"$S.n"
+printf 'head=%s\n' "$NH" >>"$S.n"
+mv "$S.n" "$S"
+printf '%s' "$NH" >"$T/prhead"
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: CI failed\n' >"$T/shiplog"
+cat >"$T/failures-log" <<'LOGEOF'
+=== CI / unit (11): failure
+##[error] failing step: run unit tests
+thread 'x' panicked at src/b.go:10:5
+LOGEOF
+run_ship
+[ "$RC" -eq 1 ] || fail "cifail-multi: exit $RC"
+expect_line1 "CI-FAIL jobs=1 inside-diff=1 mutants=0" cifail-multi
+case "$OUT" in *"panic [in-diff]: thread 'x' panicked at src/b.go"*) ;; *) fail "cifail-multi: no in-diff panic in second file" ;; esac
+expect_journal cifail-multi CI-FAIL
+
 # --- gate failure skips gh-ci ---
 reset_stub; setup_case gatefail
 printf '1' >"$T/exitcodes"
