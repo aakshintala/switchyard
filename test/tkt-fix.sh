@@ -350,4 +350,217 @@ grep -q "PR head=$OLD" <<<"$out" || fail "PR head missing from DRIFT digest"
 grep -q "worktree HEAD=$NEW" <<<"$out" || fail "worktree sha missing from DRIFT digest"
 grep -q "job|" "$T/calls.log" && fail "fix job dispatched on DRIFT B"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "drift-b moved origin"
+
+# A. After an abnormal (ASK) exit, the next fresh call advances to fix2.
+if want A; then
+setup_case a
+printf 'ask' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A call 1 exited 0"
+[ "$?" = "1" ] || fail "A call 1 exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=j1" || fail "A bad verdict: $(head -n 1 <<<"$out")"
+grep -q "job|.*--slot fix1" "$T/calls.log" || fail "A call 1 did not dispatch fix1"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "0" ] || fail "A round moved after ASK"
+: >"$T/calls.log"
+printf 'done' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "A call 2 exited $?"
+grep -q "RECOVER" <<<"$out" && fail "A call 2 printed RECOVER"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "A bad verdict: $(head -n 1 <<<"$out")"
+expect_slot fix2
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "A round not 1"
+[ "$(bash "$TKT_STATE" "$S" get fixslot)" = "2" ] || fail "A fixslot not 2"
+[ "$(bash "$TKT_STATE" "$S" get job.fix1)" = "j1" ] || fail "A job.fix1 lost"
+fi
+
+# A2. A resume after ASK stays on the slot that owns the id.
+if want A2; then
+setup_case a2
+printf 'ask' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A2 call 1 exited 0"
+printf 'done' >"$T/jobmode"
+printf 'resume brief\n' >"$CDIR/prompt.md"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "A2 resume exited $?"
+grep -q "job|.*--slot fix1.*--resume j1" "$T/calls.log" || fail "A2 resume did not dispatch fix1 (log: $(cat "$T/calls.log"))"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "A2 round not 1"
+fi
+
+# A3. Resume slot lookup follows supersededBy, ends on a cycle, and exits 2
+# on an id that is not a job id at all.
+if want A3; then
+rm -f "$TMPDIR/delegate-jobs"/j1.json "$TMPDIR/delegate-jobs"/j2.json
+setup_case a3walk
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j2 >/dev/null
+mkdir -p "$TMPDIR/delegate-jobs"
+printf '{"supersededBy":"j2"}' >"$TMPDIR/delegate-jobs/j1.json"
+printf 'resume brief\n' >"$CDIR/prompt.md"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "A3 walk exited $?"
+grep -q "job|.*--slot fix1" "$T/calls.log" || fail "A3 walk: resume j1 did not dispatch fix1"
+setup_case a3cycle
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j3 >/dev/null
+printf '{"supersededBy":"j2"}' >"$TMPDIR/delegate-jobs/j1.json"
+printf '{"supersededBy":"j1"}' >"$TMPDIR/delegate-jobs/j2.json"
+printf 'resume brief\n' >"$CDIR/prompt.md"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "A3 cycle exited $?"
+grep -q "job|.*--slot fix2" "$T/calls.log" || fail "A3 cycle: resume j1 did not fall back to fix2"
+setup_case a3zz
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j2 >/dev/null
+rm -f "$TMPDIR/delegate-jobs"/j1.json "$TMPDIR/delegate-jobs"/j2.json
+printf 'resume brief\n' >"$CDIR/prompt.md"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --resume zz --prompt "$CDIR/prompt.md" 2>"$T/stderr")" && fail "A3 zz exited 0"
+[ "$?" = "2" ] || fail "A3 zz exited $?, want 2"
+grep -q "zz" "$T/stderr" || fail "A3 zz: stderr does not name zz"
+grep -q "job|" "$T/calls.log" && fail "A3 zz dispatched a job"
+fi
+
+# A4. An UNKNOWN (exit 3) close keeps RECOVER: the slot does not advance.
+if want A4; then
+setup_case a4
+printf 'unknown' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A4 call 1 exited 0"
+[ "$?" = "3" ] || fail "A4 call 1 exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix UNKNOWN" || fail "A4 bad verdict: $(head -n 1 <<<"$out")"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A4 call 2 exited 0"
+[ "$?" = "3" ] || fail "A4 call 2 exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "A4 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "slot=fix1" <<<"$out" || fail "A4 slot missing from RECOVER digest"
+grep -q "job|" "$T/calls.log" && fail "A4 call 2 dispatched a job"
+fi
+
+# A5. Abnormal exits consume no round: ASK, incomplete, incomplete reaches
+# round 2 and STOP-AT-TWO, and the next fresh call hits ROUND-LIMIT.
+if want A5; then
+setup_case a5
+printf 'ask' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A5 call 1 exited 0"
+printf 'done' >"$T/jobmode"
+printf 'incomplete' >"$T/vermode"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A5 call 2 exited 0"
+[ "$?" = "1" ] || fail "A5 call 2 exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "A5 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "STOP-AT-TWO" <<<"$out" && fail "A5 call 2 printed STOP-AT-TWO"
+expect_slot fix2
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "A5 round not 1"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A5 call 3 exited 0"
+[ "$?" = "1" ] || fail "A5 call 3 exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=2 STOP-AT-TWO" || fail "A5 bad verdict: $(head -n 1 <<<"$out")"
+expect_slot fix3
+[ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "A5 round not 2"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A5 call 4 exited 0"
+[ "$?" = "1" ] || fail "A5 call 4 exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "A5 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "job|" "$T/calls.log" && fail "A5 call 4 dispatched a job"
+fi
+
+# A6. A resume of a slot below round still adds a round when it verifies.
+if want A6; then
+setup_case a6
+printf 'ask' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A6 call 1 exited 0"
+printf 'done' >"$T/jobmode"
+printf 'incomplete' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A6 call 2 exited 0"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "A6 round not 1"
+printf 'ok' >"$T/vermode"
+printf 'resume brief\n' >"$CDIR/prompt.md"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "A6 resume exited $?"
+grep -q "job|.*--slot fix1" "$T/calls.log" || fail "A6 resume did not dispatch fix1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "A6 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "A6 round not 2"
+fi
+
+# B. Head drift from the fix job's own pushed commits is accepted.
+if want B; then
+setup_case b
+printf 'partial' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "B call 1 exited 0"
+[ "$?" = "1" ] || fail "B call 1 exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix CONCERNS" || fail "B bad verdict: $(head -n 1 <<<"$out")"
+git -C "$WT" push -q origin tkt-529
+: >"$T/calls.log"
+printf 'done' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B call 2 exited $?"
+grep -q "DRIFT" <<<"$out" && fail "B call 2 printed DRIFT"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "B bad verdict: $(head -n 1 <<<"$out")"
+expect_slot fix2
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "B head not the worktree HEAD"
+fi
+
+# C1. A PR head that does not descend from the state head still exits DRIFT.
+if want C1; then
+setup_case c1
+printf 'sibling\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "sibling: fix.txt"
+SIB="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" reset -q --hard "$OLD"
+printf 'other\n' >"$WT/evil.txt"
+git -C "$WT" add evil.txt
+git -C "$WT" commit -qm "other: evil.txt"
+OTHER="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$SIB" >/dev/null
+bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+printf '%s' "$OTHER" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "C1 exited 0"
+[ "$?" = "3" ] || fail "C1 exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "C1 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$SIB" ] || fail "C1 head moved"
+grep -q "job|" "$T/calls.log" && fail "C1 dispatched a job"
+fi
+
+# D. A no-commit abnormal close clears the open slot, so a later unrelated
+# commit still exits DRIFT instead of passing as the job's own drift.
+if want D; then
+setup_case d
+printf 'ask' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "D call 1 exited 0"
+printf 'outside\n' >"$WT/evil.txt"
+git -C "$WT" add evil.txt
+git -C "$WT" commit -qm "outside: evil.txt"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+: >"$T/calls.log"
+printf 'done' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "D call 2 exited 0"
+[ "$?" = "3" ] || fail "D call 2 exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "D bad verdict: $(head -n 1 <<<"$out")"
+grep -q "PR head=$NEW" <<<"$out" || fail "D PR head missing from DRIFT digest"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "D head moved"
+grep -q "job|" "$T/calls.log" && fail "D call 2 dispatched a job"
+fi
+
+# C2. A worktree behind the PR head still exits DRIFT.
+if want C2; then
+setup_case c2
+printf 'one\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+ONE="$(git -C "$WT" rev-parse HEAD)"
+printf 'two\n' >>"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt again"
+TWO="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" reset -q --hard "$ONE"
+bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+printf '%s' "$TWO" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "C2 exited 0"
+[ "$?" = "3" ] || fail "C2 exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "C2 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "C2 head moved"
+grep -q "job|" "$T/calls.log" && fail "C2 dispatched a job"
+fi
 echo "tkt-fix assertions passed"
