@@ -376,13 +376,16 @@ FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 245 "$T/brief.md" \
   --gate 'test -f work-marker' --thinking high --out "$OUT_THINK" || fail "canary run with --thinking high exits 0"
 PI_WT_THINK="$(cat "$OUT_THINK/pi/worktree")"
 FIBER_WT_THINK="$(cat "$OUT_THINK/fiber/worktree")"
-PI_ID_THINK="$(jq -r .job_id "$OUT_THINK/pi/metrics.json")"
-FIBER_ID_THINK="$(jq -r .job_id "$OUT_THINK/fiber/metrics.json")"
 [ "$(jq -r .model "$OUT_THINK/pi/metrics.json")" = "opencode-go/muse-spark-1.3-contributor:high" ] || fail "pi metrics model has :high"
 [ "$(jq -r .model "$OUT_THINK/fiber/metrics.json")" = "fiber/opencode-go/muse-spark-1.3-contributor:high" ] || fail "fiber metrics model has :high"
-assert_order "opencode-go/muse-spark-1.3-contributor:high" \
-  "fiber/opencode-go/muse-spark-1.3-contributor:high" \
-  "$PI_ID_THINK" "$FIBER_ID_THINK" "$PI_WT_THINK" "$FIBER_WT_THINK"
+# Suffix-only scenarios assert the two recorded model arguments, not
+# completion order: ordering is pinned once by the Task 2 happy path
+# and the model cases above, so these must not re-depend on the fake
+# watch's fixed sleep.
+grep -q "^run opencode-go/muse-spark-1.3-contributor:high $PI_WT_THINK$" "$FLOG/calls.log" \
+  || fail "pi run records the :high model"
+grep -q "^run fiber/opencode-go/muse-spark-1.3-contributor:high $FIBER_WT_THINK$" "$FLOG/calls.log" \
+  || fail "fiber run records the :high model"
 grep -q '| model | opencode-go/muse-spark-1.3-contributor:high | fiber/opencode-go/muse-spark-1.3-contributor:high |' "$OUT_THINK/summary.md" \
   || fail "summary names the suffixed models"
 assert_clean_leaves_nothing 245 "$OUT_THINK"
@@ -397,13 +400,16 @@ FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 246 "$T/brief.md" \
   --out "$OUT_LOW" || fail "canary run with --thinking low exits 0"
 PI_WT_LOW="$(cat "$OUT_LOW/pi/worktree")"
 FIBER_WT_LOW="$(cat "$OUT_LOW/fiber/worktree")"
-PI_ID_LOW="$(jq -r .job_id "$OUT_LOW/pi/metrics.json")"
-FIBER_ID_LOW="$(jq -r .job_id "$OUT_LOW/fiber/metrics.json")"
 [ "$(jq -r .model "$OUT_LOW/pi/metrics.json")" = "opencode-go/muse-spark-1.3-contributor:low" ] || fail "pi metrics model has :low"
 [ "$(jq -r .model "$OUT_LOW/fiber/metrics.json")" = "fiber/opencode-go/muse-spark-1.3-contributor:low" ] || fail "fiber metrics model has :low"
-assert_order "opencode-go/muse-spark-1.3-contributor:low" \
-  "fiber/opencode-go/muse-spark-1.3-contributor:low" \
-  "$PI_ID_LOW" "$FIBER_ID_LOW" "$PI_WT_LOW" "$FIBER_WT_LOW"
+# Suffix-only scenarios assert the two recorded model arguments, not
+# completion order: ordering is pinned once by the Task 2 happy path
+# and the model cases above, so these must not re-depend on the fake
+# watch's fixed sleep.
+grep -q "^run opencode-go/muse-spark-1.3-contributor:low $PI_WT_LOW$" "$FLOG/calls.log" \
+  || fail "pi run records the :low model"
+grep -q "^run fiber/opencode-go/muse-spark-1.3-contributor:low $FIBER_WT_LOW$" "$FLOG/calls.log" \
+  || fail "fiber run records the :low model"
 assert_clean_leaves_nothing 246 "$OUT_LOW"
 
 # A missing or empty value is a usage error before any worktree is cut.

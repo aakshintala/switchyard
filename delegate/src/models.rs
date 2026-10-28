@@ -45,13 +45,13 @@ pub fn base_model_id<'a>(
              use one of {}",
             CLAUDE_EFFORT_LEVELS.join(", ")
         )),
-        "pi" | "fiber" if THINKING_LEVELS.contains(&level) => {
-            // The base itself already ends in a level, so this is a second
-            // tail on a level-suffixed key, not a plain base with one level.
+        "pi" | "fiber" => {
+            // A second tail on a level-suffixed key is not a plain base
+            // with one level, so it is rejected like an invalid level.
             let doubled = base
                 .rsplit_once(':')
                 .is_some_and(|(_, tail)| THINKING_LEVELS.contains(&tail));
-            if doubled {
+            if !THINKING_LEVELS.contains(&level) || doubled {
                 Err(format!(
                     "model \"{model}\": unknown thinking level \"{level}\"; \
                      use one of {}",
@@ -61,11 +61,6 @@ pub fn base_model_id<'a>(
                 Ok(base)
             }
         }
-        "pi" | "fiber" => Err(format!(
-            "model \"{model}\": unknown thinking level \"{level}\"; \
-             use one of {}",
-            THINKING_LEVELS.join(", ")
-        )),
         _ => Ok(model),
     }
 }
