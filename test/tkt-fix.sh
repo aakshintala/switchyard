@@ -31,14 +31,24 @@ ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 
-# Stub tkt-job: $T/jobmode holds done (commit fix.txt, exit 0), pushed (exit
-# 0, no commit: the job pushed itself), evil (commit evil.txt, exit 0) or
-# ask (exit 1). Logs its full argument list for slot assertions.
+# Stub tkt-job: $T/jobmode holds done (commit fix.txt with "fixed-<n>", a
+# per-call counter, exit 0), pushed (exit 0, no commit: the job pushed
+# itself), evil (commit evil.txt, exit 0), ask (exit 1), partial (commit
+# fix.txt with "partial", exit 1) or unknown (exit 3). Records job.<slot>=j1
+# in state at dispatch, like the real tkt-job. Logs its full argument list
+# for slot assertions.
 printf 'done' >"$T/jobmode"
+printf '0' >"$T/jobcount"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 printf 'job|%s\n' "\$*" >>"$T/calls.log"
 state="\$1"
+slot=""; prev=""
+for a in "\$@"; do
+  if [ "\$prev" = "--slot" ]; then slot="\$a"; fi
+  prev="\$a"
+done
+[ -n "\$slot" ] && "$TKT_STATE" "\$state" set "job.\$slot" j1 >/dev/null
 wt="\$("$TKT_STATE" "\$state" get worktree)"
 commit_as_job() {
   printf '%s' "\$2" >"\$wt/\$1"
@@ -46,13 +56,24 @@ commit_as_job() {
   git -C "\$wt" -c user.email=t@t -c user.name=t commit -qm "fix: \$1"
 }
 case "\$(cat "$T/jobmode")" in
-  done) commit_as_job fix.txt "fixed"; echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
+  done)
+    n="\$((\$(cat "$T/jobcount") + 1))"
+    printf '%s' "\$n" >"$T/jobcount"
+    commit_as_job fix.txt "fixed-\$n"
+    echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   pushed) echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   evil) commit_as_job evil.txt "outside"; echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   ask)
     echo "TKT tkt-job ASK id=j1 log=x"
     echo "which design rules the retry?"
     exit 1;;
+  partial)
+    commit_as_job fix.txt "partial"
+    echo "TKT tkt-job CONCERNS id=j1 log=x"
+    exit 1;;
+  unknown)
+    echo "TKT tkt-job UNKNOWN id=j1 log=x"
+    exit 3;;
 esac
 exit 0
 EOF
@@ -103,6 +124,7 @@ chmod +x "$T/bin/gh"
 
 reset_stubs() {
   printf 'done' >"$T/jobmode"
+  printf '0' >"$T/jobcount"
   printf '0' >"$T/cimode"
   : >"$T/ciout"
   printf 'ok' >"$T/vermode"
@@ -169,6 +191,9 @@ EOF
 expect_slot() {
   grep -q "job|.*--slot $1" "$T/calls.log" || fail "expected tkt-job slot $1 (log: $(cat "$T/calls.log"))"
 }
+
+# Selector for the new cases below: empty or unset runs all of them.
+want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
 
 # 1. Verify OK on an already-pushed head: no CI wait, slot fix1, reviewed set.
 setup_case ok
