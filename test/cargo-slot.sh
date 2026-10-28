@@ -612,5 +612,94 @@ else
   [ ! -e "$R/started" ] || fail "read-only slot directory: the fake ran"
 fi
 
+# Shared-checkout guard. CARGO_SLOT_SHARED_CHECKOUT names the shared checkout;
+# a slot subcommand run from it is refused before any slot is taken. The
+# fixture is a real repo with a worktree, a subdirectory, a symlink to the repo
+# and a directory outside any repo. Its git commands ignore the global config.
+guard_git() {
+  GIT_CONFIG_GLOBAL=/dev/null git "$@"
+}
+mkdir -p "$T/shared" "$T/plain"
+guard_git -C "$T/shared" init -q || fail "guard fixture: git init"
+guard_git -C "$T/shared" -c user.name=t -c user.email=t@t -c commit.gpgsign=false \
+  commit -q --allow-empty -m init || fail "guard fixture: commit"
+guard_git -C "$T/shared" worktree add -q --detach "$T/ticket" ||
+  fail "guard fixture: worktree"
+mkdir "$T/shared/sub"
+ln -s "$T/shared" "$T/shared-link"
+
+# e. From a worktree, the var naming the shared checkout does not refuse.
+new_run guard-e
+( cd "$T/ticket" && cargo_as "$R" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" \
+  CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/guard-e" -- build "a b" "" )
+rc=$?
+[ "$rc" = 0 ] || fail "guard e (worktree): exit $rc, want 0"
+expect_build_args "$R"
+[ -e "$T/guard-e/slot-1.lock" ] || fail "guard e (worktree): no slot taken"
+
+# f. Unset var from the shared checkout: the guard is off, the slot is taken.
+new_run guard-f
+( cd "$T/shared" && cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/guard-f" -- build "a b" "" )
+rc=$?
+[ "$rc" = 0 ] || fail "guard f (unset var): exit $rc, want 0"
+expect_build_args "$R"
+[ -e "$T/guard-f/slot-1.lock" ] || fail "guard f (unset var): no slot taken"
+
+# g. Empty var from the shared checkout: the guard is off, the slot is taken.
+new_run guard-g
+( cd "$T/shared" && cargo_as "$R" CARGO_SLOT_SHARED_CHECKOUT= CARGO_SLOTS=1 \
+  CARGO_SLOT_DIR="$T/guard-g" -- build "a b" "" )
+rc=$?
+[ "$rc" = 0 ] || fail "guard g (empty var): exit $rc, want 0"
+expect_build_args "$R"
+[ -e "$T/guard-g/slot-1.lock" ] || fail "guard g (empty var): no slot taken"
+
+# h. From a directory outside any repo, the var does not refuse.
+new_run guard-h
+( cd "$T/plain" && cargo_as "$R" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOTS=1 \
+  CARGO_SLOT_DIR="$T/guard-h" -- build "a b" "" )
+rc=$?
+[ "$rc" = 0 ] || fail "guard h (outside a repo): exit $rc, want 0"
+expect_build_args "$R"
+
+# i. A non-slot subcommand from the shared checkout passes with no slot taken.
+new_run guard-i
+( cd "$T/shared" && cargo_as "$R" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOTS=1 \
+  CARGO_SLOT_DIR="$T/guard-i" -- fmt )
+rc=$?
+[ "$rc" = 0 ] || fail "guard i (fmt): exit $rc, want 0"
+[ -e "$R/started" ] || fail "guard i (fmt): the fake did not run"
+expect_no_slot_dir "$T/guard-i"
+
+# guard_refused NAME CWD [VAR=VAL ...]: check run from CWD is refused. Exit 1,
+# the guard message alone on stderr, the fake never starts, no slot directory.
+# The extra words come after the defaults, so they override them.
+guard_refused() {
+  local name="$1" dir="$2" slots="$T/guard-$1"
+  shift 2
+  new_run "guard-$name"
+  ( cd "$dir" && cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$slots" "$@" \
+    -- check 2>"$R/shim.err" )
+  local rc=$?
+  [ "$rc" = 1 ] || fail "guard $name: exit $rc, want 1"
+  [ "$(cat "$R/shim.err")" = "cargo-slot: run cargo in your ticket worktree" ] ||
+    fail "guard $name: stderr [$(cat "$R/shim.err")]"
+  [ ! -e "$R/started" ] || fail "guard $name: the fake ran"
+  [ ! -e "$slots" ] || fail "guard $name: slot directory created"
+}
+
+# a. Refused from the shared checkout itself.
+guard_refused a "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared"
+# b. Refused from a subdirectory of the shared checkout.
+guard_refused b "$T/shared/sub" CARGO_SLOT_SHARED_CHECKOUT="$T/shared"
+# c. Refused when the var is a symlink to the shared checkout.
+guard_refused c "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared-link"
+# d. Refused while a slot is already held: the guard runs before the held check.
+guard_refused d "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOT_HELD=1
+# j. Refused before CARGO_SLOTS is validated: a bad value is not exit 2 here.
+guard_refused j "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOTS=abc
+# k. GIT_* variables do not change the answer: GIT_DIR points nowhere.
+guard_refused k "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" GIT_DIR="$T/nogit"
+
 echo "cargo-slot: all cases passed"
 cleanup

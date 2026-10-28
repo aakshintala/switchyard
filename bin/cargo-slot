@@ -3,11 +3,14 @@
 # Caps concurrent cargo build and test runs on one host. With CARGO_SLOTS=N,
 # at most N cargo invocation trees hold a slot at once. Installed as `cargo`
 # in a directory placed first on a lane's PATH; see autonomous-flywheel.
+# With CARGO_SLOT_SHARED_CHECKOUT set to the shared checkout's path, a slot
+# subcommand run from that checkout is refused.
 import errno
 import fcntl
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 
@@ -37,6 +40,30 @@ def subcommand(args):
 
 def held():
     return os.environ.get("CARGO_SLOT_HELD", "") not in ("", "0")
+
+
+def in_shared_checkout():
+    # Unset and empty leave the guard off. git runs with every GIT_ variable
+    # removed, so its answer is the worktree of the process cwd. Any failure
+    # leaves the guard off: only a confirmed match refuses.
+    shared = os.environ.get("CARGO_SLOT_SHARED_CHECKOUT", "")
+    if shared == "":
+        return False
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=env,
+        )
+    except OSError:
+        return False
+    if out.returncode != 0:
+        return False
+    top = out.stdout
+    if top.endswith(b"\n"):
+        top = top[:-1]
+    return os.path.realpath(os.fsdecode(top)) == os.path.realpath(shared)
 
 
 def slot_count():
@@ -140,6 +167,8 @@ def main():
     real = find_real_cargo(os.environ.get("PATH"), shim_dir)
     if real is None:
         fail(127, "no cargo on PATH outside cargo-slot")
+    if subcommand(args) in SLOT_SUBCOMMANDS and in_shared_checkout():
+        fail(1, "run cargo in your ticket worktree")
     if subcommand(args) in SLOT_SUBCOMMANDS and not held():
         n = slot_count()
         if n > 0:
