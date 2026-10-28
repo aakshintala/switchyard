@@ -373,8 +373,8 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
     };
     // Overrides replace stored values. A model on another backend would continue the
     // wrong session, so it is rejected before anything spawns. Both ids go through
-    // `base_model_id` first so a suffixed Claude id compares on its base (#157); a bad
-    // level is a usage error of its own, not the allow-list.
+    // `base_model_id` first so a suffixed Claude, pi or fiber id compares on its
+    // base (#157); a bad level is a usage error of its own, not the allow-list.
     let model = flag(&kv, "--model").unwrap_or(&stored_model).to_string();
     if flag(&kv, "--model").is_some() {
         let stored_base = match base_model_id(&stored_model, &deps.config.models) {
