@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require each --body-has
@@ -29,6 +29,11 @@
 #        When the prefix is exactly `Implemented by:`, every such line must hold
 #        model ids (comma-separated items, none empty after trimming, none
 #        `unknown` in any letter case); each bad line prints `bad body line: <line>`.
+#        --body-ends <text> requires the body's last non-blank line to equal
+#        <text> exactly, literally and case-sensitively. A blank line is empty
+#        or whitespace-only (after stripping a trailing CR), so trailing blank
+#        lines are ignored; a body with no non-blank line fails. It is checked
+#        in the same block and prints `body does not end with (--body-ends): <text>`.
 #        When the repo defines a `mutants` label (`gh label list`), a draft PR
 #        must carry it before ship-pr marks it ready, so mutants run on the
 #        draft from the first push; a repo without the label is not checked,
@@ -69,7 +74,7 @@
 #        with current origin/main counts as a gate failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a bad `Implemented by:` value, a draft missing the mutants label, or stray closing keywords from pr-closes), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, or stray closing keywords from pr-closes), 124 CI wait timeout.
 #        Rebase rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -107,7 +112,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]" >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]" >&2
   exit 2
 }
 say() { echo "ship-pr: $*" >&2; }
@@ -203,7 +208,7 @@ run_gate() {
 [ $# -ge 1 ] || usage
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() unverified="" allow_commit_closes="" no_mutants_label=""
+repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" no_mutants_label=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow-commit-closes) allow_commit_closes=1; shift; continue ;;
@@ -216,6 +221,7 @@ while [ $# -gt 0 ]; do
     --gate) gate="$2" ;;
     --timeout) timeout="$2" ;;
     --body-has) case "$2" in ''|*$'\n'*) usage ;; esac; body_has+=("$2") ;;
+    --body-ends) case "$2" in ''|*$'\n'*) usage ;; esac; body_ends="$2" ;;
     --unverified-fixes) [ -n "$2" ] || usage; unverified="$2" ;;
     --no-mutants-label) [ -n "$2" ] || usage; no_mutants_label="$2" ;;
     *) usage ;;
@@ -262,11 +268,11 @@ git -C "$worktree" rev-parse --verify -q "$reviewed^{commit}" >/dev/null \
   || die 2 "--reviewed $reviewed is not a commit in $worktree"
 
 # Required PR body lines: checked now so a PR with wrong text costs no push and no CI wait.
-if [ "${#body_has[@]}" -gt 0 ]; then
+if [ "${#body_has[@]}" -gt 0 ] || [ -n "$body_ends" ]; then
   body="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""')" \
     || die 2 "cannot read PR $pr body"
   missing=0
-  for prefix in "${body_has[@]}"; do
+  for prefix in ${body_has[@]+"${body_has[@]}"}; do
     found=""
     while IFS= read -r line || [ -n "$line" ]; do
       case "${line%$'\r'}" in "$prefix"*) found=1; break ;; esac
@@ -277,7 +283,7 @@ if [ "${#body_has[@]}" -gt 0 ]; then
   # is non-empty after trimming whitespace, and no item is `unknown` in any
   # letter case. Every such line is checked; a bad one prints its text.
   bad=0
-  for prefix in "${body_has[@]}"; do
+  for prefix in ${body_has[@]+"${body_has[@]}"}; do
     [ "$prefix" = "Implemented by:" ] || continue
     while IFS= read -r line || [ -n "$line" ]; do
       text="${line%$'\r'}"
@@ -296,6 +302,20 @@ if [ "${#body_has[@]}" -gt 0 ]; then
       done
     done <<<"$body"
   done
+  # The body's last non-blank line must equal --body-ends exactly. Blank
+  # means empty or whitespace-only after stripping a trailing CR; the
+  # compare is a literal string compare, so glob and case syntax in the
+  # text stays literal.
+  if [ -n "$body_ends" ]; then
+    last=""
+    while IFS= read -r line || [ -n "$line" ]; do
+      text="${line%$'\r'}"
+      stripped="${text//[[:space:]]/}"
+      [ -z "$stripped" ] && continue
+      last="$text"
+    done <<<"$body"
+    [ "$last" = "$body_ends" ] || { echo "body does not end with (--body-ends): $body_ends"; missing=1; }
+  fi
   [ "$missing" = 0 ] && [ "$bad" = 0 ] || die 5 "PR body lacks required lines; edit the PR body, then rerun"
 fi
 
