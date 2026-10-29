@@ -5,7 +5,6 @@
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.
 # Globals, per function:
 #   is_path: none. is_symbol: none.
-#   exempt_new: reads plan.
 #   in_files: reads FILES (|a|b| form), GLOBS (newline list).
 #   plan_base: reads PLAN from its argument only.
 #   plan_records: reads PLAN from its argument only.
@@ -35,18 +34,6 @@ is_symbol() {
   [[ $s =~ $symre ]] || return 1
   case "$s" in *_*|*::*) return 0 ;; esac
   [[ ${s:1} =~ [A-Z] ]]
-}
-
-# exempt_new NAME: true when a plan line has the whole word `new`, `removed`, `remove`, `deleted`, `delete` or `example` and a backticked token holding NAME
-# The `example` word exempts a line from check 3 only: check 1 keeps the shorter list.
-exempt_new() {
-  awk -v s="$1" '
-    tolower($0) ~ /(^|[^a-z0-9_])(new|removed|remove|deleted|delete|example)([^a-z0-9_]|$)/ {
-      n = split($0, parts, "`")
-      for (i = 2; i <= n; i += 2)
-        if (parts[i] ~ ("(^|[^A-Za-z0-9_])" s "([^A-Za-z0-9_]|$)")) found = 1
-    }
-    END { exit (found ? 0 : 1) }' "$plan"
 }
 
 # in_files PATH: true when a Files directory entry is a prefix of PATH,

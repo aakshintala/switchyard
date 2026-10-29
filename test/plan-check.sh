@@ -106,9 +106,8 @@ expect_clean "fence and Gate skipped" "$(mkplan skip '## Files\n- `src/lib.rs`\n
 # 10. prose symbols are never checked: backticked tokens outside Files pass
 expect_clean "symbols in prose pass" "$(mkplan syms '## Rulings\nCall `NoSuchThing()` and `Frob_Thing`.\nAdd `Brand_New` (new).\nUse `make_widget()` and `make_widget()` again.\n')"
 
-# 10a. example exempts check 3 only (see #443): an example line is clean,
-# the same token unmarked fails with the new message, and an example line
-# with a missing path still reports it
+# 10a. the `example` word means nothing to the tools (see #443): prose lines
+# are clean either way, and an example line with a missing path still reports it
 expect_clean "example exempts unknown symbols" "$(mkplan exampleok '## Rulings\nAn example `c_history` value.\n')"
 expect_clean "unmarked symbol passes" "$(mkplan exampleno '## Rulings\nThe `c_history` value.\n')"
 expect_problems "example does not exempt a missing path" "$(mkplan examplepath '## Rulings\nAn example `src/nope.rs`.\n')" \

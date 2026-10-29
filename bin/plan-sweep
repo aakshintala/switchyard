@@ -460,9 +460,9 @@ resolve_candidates() {
 }
 
 # sweep_plan_token KIND VALUE: the expand_token callback for --plan mode.
-# Files-section paths build the cover set; anything resolving to nothing that
-# is not new-marked (paths) or new/example-marked (symbols) is unresolved.
-# A symbol in Tasks is never reported, but a resolved one still gets a section.
+# Files-section paths build the cover set; a path resolving to nothing that
+# is not new-marked is unresolved. A symbol that resolves earns a section;
+# one that misses is omitted, never reported.
 # CALLED is set so the records loop can spot tokens expand_token dropped.
 sweep_plan_token() {
   local kind="$1" val="$2" s last seg
@@ -491,11 +491,7 @@ sweep_plan_token() {
       last="${s##*::}"
       if resolved_lookup "$last"; then
         add_symbol "$last" "$val"
-        return 0
       fi
-      [ "$CUR_SEC" != tasks ] || return 0
-      if exempt_new "$last"; then return 0; fi
-      add_unresolved "symbol" "$val" " (line $CUR_LN)"
       return 0 ;;
   esac
   return 0
