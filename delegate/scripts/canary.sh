@@ -399,6 +399,32 @@ copy_extension_tree() {
     || { err "cannot copy $ext_dir to $FIBER_HOME/extensions"; return 1; }
 }
 
+# check_reviewer_credential_env PROVIDER PROVIDER_FILE: the reviewer's
+# credential env var must be a set-or-empty check away, never a copy. A
+# name outside the env-name form is a usage error, since it comes from a
+# file and indexes the environment. An unset or empty variable prints one
+# warning and the run goes on; the value is never printed or copied.
+# Returns 1 with one err line on a bad name, 0 otherwise.
+check_reviewer_credential_env() {
+  local provider="$1" prov_file="$2" name
+  name="$(jq -r '.credential.env // empty' "$prov_file")"
+  case "$name" in
+    [A-Za-z_]*)
+      case "$name" in
+        *[!A-Za-z0-9_]*)
+          err "The provider $provider names an invalid credential variable; refusing to read it."
+          return 1 ;;
+      esac ;;
+    *)
+      err "The provider $provider names an invalid credential variable; refusing to read it."
+      return 1 ;;
+  esac
+  if [ -z "${!name:-}" ]; then
+    err "canary: warning: $name is unset or empty; the reviewer on provider $provider needs it"
+  fi
+  return 0
+}
+
 # reviewer_source CONFIG PROVIDER PROVIDER_FILE: the reviewer pick for a
 # flag-less run, printed on two lines: the source ("config" or "package")
 # then the pick. Only the real config's providers.<provider>.reviewer_model
@@ -487,6 +513,18 @@ cmd_run() {
   local fiber_provider
   fiber_provider="$(fiber_provider_of "$fiber_model")" \
     || { usage; return 2; }
+  # The reviewer provider is the first slash-separated part of the flag
+  # value, read through fiber_provider_of with a fiber/ prefix so no
+  # crafted id reaches the glob or the copy. A value with no slash names
+  # no second provider and keeps the flag's verbatim behaviour.
+  local reviewer_provider=""
+  if [ -n "$fiber_reviewer_model" ]; then
+    case "$fiber_reviewer_model" in
+      */*)
+        reviewer_provider="$(fiber_provider_of "fiber/$fiber_reviewer_model")" \
+          || { err "--fiber-reviewer-model must be a <provider>/<model> id"; return 2; } ;;
+    esac
+  fi
   # The owner's real home is read before FIBER_HOME points at the isolated
   # one below. Only the extensions/<name> directory that provides this
   # provider is copied; credentials and config never leave the real home.
@@ -496,6 +534,18 @@ cmd_run() {
     || return 2
   ext_dir="${arm_located%%$'\n'*}"
   cand="${arm_located#*$'\n'}"
+  # A reviewer on another provider is seeded by the same rules as the arm:
+  # its extension must be installed with an env credential and no symlink,
+  # or the run stops here, before the pi arm spends anything. The same
+  # provider needs no second lookup; a shared extension tree is copied once.
+  local reviewer_located="" reviewer_ext_dir="" reviewer_file=""
+  if [ -n "$reviewer_provider" ] && [ "$reviewer_provider" != "$fiber_provider" ]; then
+    reviewer_located="$(locate_provider_extension "$real_fiber_home" "$reviewer_provider")" \
+      || return 2
+    reviewer_ext_dir="${reviewer_located%%$'\n'*}"
+    reviewer_file="${reviewer_located#*$'\n'}"
+    check_reviewer_credential_env "$reviewer_provider" "$reviewer_file" || return 2
+  fi
   # With no --fiber-reviewer-model the reviewer comes from the real
   # config's providers.<provider>.reviewer_model or the provider
   # package's default; with no source the run stops here, before any pi
@@ -535,7 +585,12 @@ cmd_run() {
   export FIBER_HOME="$(cd "$out/fiber-home" && pwd)"
   # Seed the isolated home with only the provider's extension directory, as
   # real files: the lane starts with its provider installed and nothing else.
+  # A cross-provider reviewer adds its own tree after the repoint, unless it
+  # shares the arm's directory.
   copy_extension_tree "$ext_dir" || return 2
+  if [ -n "$reviewer_ext_dir" ] && [ "$reviewer_ext_dir" != "$ext_dir" ]; then
+    copy_extension_tree "$reviewer_ext_dir" || return 2
+  fi
   git -C "$clone" rev-parse --git-common-dir >/dev/null 2>&1 \
     || { err "clone $clone is not a git checkout"; return 2; }
   clone="$(cd "$clone" && pwd)"
