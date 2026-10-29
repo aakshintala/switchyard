@@ -63,6 +63,7 @@ Every job can write, so a read task says "do not edit" in its brief, the record'
 syntax error, and nothing is checked. Make it the next consumer's first action: if a packer
 feeds a runner, the gate runs the runner. A gate that greps for a file is not a gate. Read
 `result.gateResult` in the record, never the job's own report of its gate, and rerun the check yourself when `passed` is false.
+An `ERROR` record (a provider 429 ends a job so) whose `gateResult.passed` is true and whose `changeSet.headAfter` differs from `headBefore` means the work is in place: check the diff and run the gate yourself, and do not rerun the job.
 
 `delegate resume <id>` takes the new prompt on stdin and prints the new job id. `--model` must
 stay on the same backend. It adds `supersededBy` to the old record. A `CANCELLED`, `STALLED` or
