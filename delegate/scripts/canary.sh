@@ -2,7 +2,7 @@
 # canary.sh: run one ticket's brief on pi and Fiber side by side, with metrics.
 #
 # Usage:
-#   canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]
+#   canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--fiber-reviewer-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]
 #   canary.sh clean <ticket> [--out DIR]
 #   canary.sh report <ticket> [--out DIR]
 #
@@ -64,7 +64,7 @@ err() {
 }
 
 usage() {
-  err "usage: canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]"
+  err "usage: canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--fiber-reviewer-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]"
   err "       canary.sh clean <ticket> [--out DIR]"
   err "       canary.sh report <ticket> [--out DIR]"
 }
@@ -353,6 +353,32 @@ fiber_provider_of() {
   esac
 }
 
+# reviewer_source CONFIG PROVIDER PROVIDER_FILE: the reviewer pick for a
+# flag-less run, printed on two lines: the source ("config" or "package")
+# then the pick. Only the real config's providers.<provider>.reviewer_model
+# is read from the config; the package default is the provider file's
+# .reviewer_model, then extension.json's. An unreadable or invalid file, or
+# a pick that is not a non-empty string, is no source from that location.
+# Returns 1 when no source names a reviewer. Only reads.
+reviewer_source() {
+  local config="$1" provider="$2" prov_file="$3" pick
+  pick="$(jq -r --arg p "$provider" \
+    '.providers[$p].reviewer_model | select(type == "string" and length > 0)' \
+    "$config" 2>/dev/null)" || pick=""
+  if [ -n "$pick" ]; then
+    printf 'config\n%s\n' "$pick"
+    return 0
+  fi
+  pick="$(jq -r '.reviewer_model | select(type == "string" and length > 0)' \
+    "$prov_file" 2>/dev/null)" || pick=""
+  if [ -z "$pick" ]; then
+    pick="$(jq -r '.reviewer_model | select(type == "string" and length > 0)' \
+      "${prov_file%/providers/*}/extension.json" 2>/dev/null)" || pick=""
+  fi
+  [ -n "$pick" ] || return 1
+  printf 'package\n%s\n' "$pick"
+}
+
 # clean_ticket CLONE TICKET OUT [--force]: remove whatever exists of the
 # ticket's two worktrees and two branches, then the <side>/worktree files.
 # Without --force a dirty worktree refuses (git's message, return 1).
@@ -383,7 +409,7 @@ cmd_run() {
   [ $# -ge 2 ] || { usage; return 2; }
   local ticket="$1" brief="$2"
   shift 2
-  local gate="" repo="$DEFAULT_REPO" clone="" out="" pi_model="$PI_MODEL" fiber_model="$FIBER_MODEL" thinking=""
+  local gate="" repo="$DEFAULT_REPO" clone="" out="" pi_model="$PI_MODEL" fiber_model="$FIBER_MODEL" fiber_reviewer_model="" thinking=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --gate) [ $# -ge 2 ] || { err "--gate needs a value"; return 2; }; gate="$2"; shift 2 ;;
@@ -392,6 +418,12 @@ cmd_run() {
       --out) [ $# -ge 2 ] || { err "--out needs a value"; return 2; }; out="$2"; shift 2 ;;
       --pi-model) [ $# -ge 2 ] || { err "--pi-model needs a value"; return 2; }; pi_model="$2"; shift 2 ;;
       --fiber-model) [ $# -ge 2 ] || { err "--fiber-model needs a value"; return 2; }; fiber_model="$2"; shift 2 ;;
+      --fiber-reviewer-model)
+        [ $# -ge 2 ] && [ -n "$2" ] || { err "--fiber-reviewer-model needs a value"; return 2; }
+        case "$2" in
+          *[[:space:]]*) err "--fiber-reviewer-model needs a value"; return 2 ;;
+        esac
+        fiber_reviewer_model="$2"; shift 2 ;;
       --thinking) [ $# -ge 2 ] && [ -n "$2" ] || { err "--thinking needs a value"; return 2; }; thinking="$2"; shift 2 ;;
       --*) err "unknown flag $1"; return 2 ;;
       *) err "unexpected argument $1"; return 2 ;;
@@ -435,6 +467,24 @@ cmd_run() {
   if [ -n "$(find "$ext_dir" -type l)" ]; then
     err "Refusing to copy $ext_dir: the extension tree holds a symlink."
     return 2
+  fi
+  # With no --fiber-reviewer-model the reviewer comes from the real
+  # config's providers.<provider>.reviewer_model or the provider
+  # package's default; with no source the run stops here, before any pi
+  # spend. Only reads; nothing is created before this point.
+  local reviewer_origin="" reviewer_pick=""
+  if [ -n "$fiber_reviewer_model" ]; then
+    reviewer_origin="flag"
+    reviewer_pick="$fiber_reviewer_model"
+  else
+    local reviewer_resolved=""
+    if reviewer_resolved="$(reviewer_source "$real_fiber_home/config.json" "$fiber_provider" "$cand")"; then
+      reviewer_origin="${reviewer_resolved%%$'\n'*}"
+      reviewer_pick="${reviewer_resolved#*$'\n'}"
+    else
+      err "no reviewer model for provider $fiber_provider: pass --fiber-reviewer-model <provider>/<model>"
+      return 2
+    fi
   fi
   # Resolve Fiber before any worktree, job or output dir exists, and pin the
   # binary so delegate runs the same one the summary records.
@@ -483,6 +533,22 @@ cmd_run() {
     err "a previous run exists in $out; run 'canary.sh clean $ticket' first"
     return 2
   fi
+  # Clean leaves the isolated home behind, so a stale config.json from an
+  # earlier reviewer must not survive it: remove just that file, after
+  # every setup refusal above, then write the new one. A package pick
+  # needs no file; Fiber applies its own default.
+  rm -f "$FIBER_HOME/config.json" \
+    || { err "cannot remove $FIBER_HOME/config.json"; return 2; }
+  case "$reviewer_origin" in
+    flag)
+      jq -n --arg m "$reviewer_pick" '{reviewer:{model:$m}}' \
+        >"$FIBER_HOME/config.json" \
+        || { rm -f "$FIBER_HOME/config.json"; err "cannot write $FIBER_HOME/config.json"; return 2; } ;;
+    config)
+      jq -n --arg p "$fiber_provider" --arg m "$reviewer_pick" \
+        '{providers:{($p):{reviewer_model:$m}}}' >"$FIBER_HOME/config.json" \
+        || { rm -f "$FIBER_HOME/config.json"; err "cannot write $FIBER_HOME/config.json"; return 2; } ;;
+  esac
   # Record the clone before any git mutation, so clean can always find it.
   mkdir -p "$out"
   printf '%s\n' "$clone" >"$out/clone"
