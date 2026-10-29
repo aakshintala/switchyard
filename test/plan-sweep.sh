@@ -236,7 +236,7 @@ grep -q '^## Cut$' "$T/pack-h.md" || fail "h: Cut section"
 
 # i. unknown token exits 1, writes nothing, leaves an existing file alone
 run --cwd "$R" --base "$BASE" --symbols NoSuchThing --files src/lib.rs --out "$T/pack-i.md"
-[ "$code" = 1 ] || fail "i: unknown symbol exits 1, got $code"
+[ "$code" = 1 ] || fail "i: missing name exits 1, got $code"
 [ "$out" = "unresolved symbol: NoSuchThing" ] || fail "i: unresolved line, got [$out]"
 [ ! -e "$T/pack-i.md" ] || fail "i: no pack file written"
 printf 'keep me\n' >"$T/pack-i2.md"
@@ -247,7 +247,7 @@ run --cwd "$R" --base "$BASE" --symbols make_widget --files src/nope.rs --out "$
 [ "$code" = 1 ] || fail "i: unknown path exits 1, got $code"
 [ "$out" = "unresolved path: src/nope.rs" ] || fail "i: unresolved path line, got [$out]"
 
-# j. --plan reuses the new exemption; --symbols/--files get none
+# j. --plan omits unresolved symbols; --symbols/--files get none
 cat >"$T/plan-j.md" <<EOF
 # Plan
 Base: $BASE
@@ -260,12 +260,12 @@ New \`Brand_New\` helper.
 EOF
 run --cwd "$R" --base "$BASE" --plan "$T/plan-j.md" --out "$T/pack-j.md"
 [ "$code" = 0 ] || fail "j: new symbol in plan exits 0, got $code [$out]"
-[ "$(grep -c 'Brand_New' "$T/pack-j.md")" = 0 ] || fail "j: exempt token left out of the pack"
+[ "$(grep -c 'Brand_New' "$T/pack-j.md")" = 0 ] || fail "j: omitted token left out of the pack"
 run --cwd "$R" --base "$BASE" --symbols Brand_New --files src/lib.rs --out "$T/pack-j2.md"
 [ "$code" = 1 ] || fail "j: --symbols gets no exemption, got $code"
 [ "$out" = "unresolved symbol: Brand_New" ] || fail "j: unresolved line, got [$out]"
 
-# m. --plan Tasks new-marking exits 0; unmarked Interfaces symbol exits 1
+# m. --plan never reports symbols: marked Tasks and unmarked Interfaces names exit 0
 cat >"$T/plan-m-a.md" <<EOF
 # Plan
 Base: $BASE
@@ -278,8 +278,8 @@ Base: $BASE
 EOF
 run --cwd "$R" --base "$BASE" --plan "$T/plan-m-a.md" --out "$T/pack-m-a.md"
 [ "$code" = 0 ] || fail "m: marked Tasks symbol exits 0, got $code [$out]"
-# Contract: skills/planning/SKILL.md:70 says unresolved new-marked symbols are omitted from the pack.
-! grep -q 'Task_Only' "$T/pack-m-a.md" || fail "m: marked token left out of the pack"
+# Contract: skills/planning/SKILL.md says an unresolved symbol is omitted from the pack.
+! grep -q 'Task_Only' "$T/pack-m-a.md" || fail "m: omitted token left out of the pack"
 cat >"$T/plan-m-b.md" <<EOF
 # Plan
 Base: $BASE
@@ -291,8 +291,10 @@ Base: $BASE
 Calls \`Unmarked_Name\` from the shim.
 EOF
 run --cwd "$R" --base "$BASE" --plan "$T/plan-m-b.md" --out "$T/pack-m-b.md"
-[ "$code" = 1 ] || fail "m: unmarked Interfaces symbol exits 1, got $code [$out]"
-printf '%s\n' "$out" | grep -q '^unresolved symbol: Unmarked_Name' || fail "m: unresolved line, got [$out]"
+[ "$code" = 0 ] || fail "m-b: unmarked Interfaces symbol exits 0, got $code [$out]"
+case "$out" in PACK*) ;; *) fail "m-b: PACK line, got [$out]" ;; esac
+case "$out" in *unresolved*) fail "m-b: no unresolved text, got [$out]" ;; esac
+! grep -q 'Unmarked_Name' "$T/pack-m-b.md" || fail "m-b: omitted token left out of the pack"
 
 # k. usage: exit 2 with nothing on stdout
 usage_cases=0
@@ -396,7 +398,7 @@ run --cwd "$R" --base "$BASE" --files src/lib.rs --out "$T/pack-p0.md"
 [ "$code" = 0 ] || fail "p: files-only exits 0, got $code [$out]"
 [ -z "$(cat "$T/err.txt")" ] || fail "p: files-only prints nothing on stderr, got [$(cat "$T/err.txt")]"
 run --cwd "$R" --base "$BASE" --symbols nosuch --files src/lib.rs --out "$T/pack-p1.md"
-[ "$code" = 1 ] || fail "p: unknown symbol exits 1, got $code"
+[ "$code" = 1 ] || fail "p: missing name exits 1, got $code"
 [ "$out" = "unresolved symbol: nosuch" ] || fail "p: unresolved line on stdout, got [$out]"
 [ "$(cat "$T/err.txt")" = "plan-sweep: resolving 1 symbols" ] || fail "p: start line only on stderr, got [$(cat "$T/err.txt")]"
 case "$(cat "$T/err.txt")" in *"plan-sweep: symbol "*) fail "p: no per-symbol line without a section" ;; esac
@@ -451,7 +453,7 @@ grep -q '^src/qual.rs:10: Shape::Round$' "$T/pack-q2.md" || fail "q2: match at l
 grep -q '^matches: 1 lines in 1 files$' "$T/pack-q2.md" || fail "q2: ShapeKind match counts"
 grep -q '^src/qual.rs:4:     let b = ShapeKind::Tall;$' "$T/pack-q2.md" || fail "q2: ShapeKind match line"
 
-# q3. mixed unresolved plan tokens keep plan-line order
+# q3. unresolved plan paths keep plan-line order; a missing symbol prints nothing
 cat >"$T/plan-q3.md" <<EOF
 # Plan
 Base: $EDGEBASE
@@ -460,15 +462,15 @@ Base: $EDGEBASE
 - \`src/lib.rs\`
 
 ## Interfaces
-Uses \`NoSuchSym1\`.
+Uses \`NoSuchSym1\` and \`src/nosuch1.rs\`.
 
 ## Tasks
-1. Fix \`src/nosuch.rs\`.
+1. Fix \`src/nosuch2.rs\`.
 EOF
 run --cwd "$R" --base "$EDGEBASE" --plan "$T/plan-q3.md" --out "$T/pack-q3.md"
 [ "$code" = 1 ] || fail "q3: exits 1, got $code"
 # plan Ruling 4: unresolved lines keep plan-line order, as the base prints them.
-want="$(printf 'unresolved symbol: NoSuchSym1 (line 8)\nunresolved path: src/nosuch.rs (line 11)')"
+want="$(printf 'unresolved path: src/nosuch1.rs (line 8)\nunresolved path: src/nosuch2.rs (line 11)')"
 [ "$out" = "$want" ] || fail "q3: plan-line order, got [$out]"
 
 # q4. a plan with no symbol tokens starts no batch and prints nothing
