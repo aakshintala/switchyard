@@ -1192,6 +1192,7 @@ rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":{}}}}' object-pick
 rev_bad_case '{"providers":[]}' providers-array
 rev_bad_case '{"providers":{"opencode-go":"local-id"}}' string-provider
 rev_bad_case '[]' top-level-array
+rev_bad_case '{"reviewer":{"model":"top-only"}}' top-level-reviewer-only
 
 # k. A valid real config with no reviewer_model for the provider and no
 # package default exits 2 naming the flag, with no null written anywhere.
@@ -1217,3 +1218,160 @@ grep -q -- '--fiber-reviewer-model' "$T/revk.err" || fail "pick-less message nam
 [ ! -e "$CLONE830-canary-256-fiber" ] || fail "pick-less run cuts no fiber worktree"
 
 echo "reviewer resolution cases passed"
+
+# --- Reviewer seeding (#833): a flag or config pick writes the isolated
+# config.json; a package default leaves Fiber's own fallback alone.
+# a. Flag with a same-provider id: the isolated config.json holds exactly
+# the flag's reviewer.model, next to the copied extension tree.
+REALA="$T/real-rev-a"
+mkdir -p "$REALA/.fiber"
+seed_extension "$REALA/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REALA/.fiber/extensions/opencode/providers/opencode-go.json"
+OUTA="$T/out-rev-a"
+: >"$FLOG/calls.log"
+: >"$FLOG/fiber-home.log"
+env -u FIBER_HOME HOME="$REALA" bash "$CANARY" run 257 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTA" \
+  --fiber-reviewer-model opencode-go/test-reviewer \
+  || fail "flag run exits 0"
+[ "$(jq -c . "$OUTA/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-go/test-reviewer"}}' ] \
+  || fail "flag run writes the flag's reviewer model"
+[ "$(find "$OUTA/fiber-home" -type f | wc -l | tr -d ' ')" = "3" ] || fail "flag run home holds three files"
+[ -z "$(find "$OUTA/fiber-home" -type l)" ] || fail "flag run home holds no symlink"
+[ "$(cat "$FLOG/fiber-home.log")" = "$OUTA/fiber-home" ] || fail "flag run lane saw the isolated home"
+bash "$CANARY" clean 257 --out "$OUTA" || fail "clean 257 exits 0"
+
+# b. A flag value with quotes, $ and backslash is written verbatim: the
+# value reaches jq as one argument and no shell evaluates it.
+REALB="$T/real-rev-b"
+mkdir -p "$REALB/.fiber"
+seed_extension "$REALB/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REALB/.fiber/extensions/opencode/providers/opencode-go.json"
+REVB='p/m"$(>SENT-B)\x'
+OUTB="$T/out-rev-b"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REALB" bash "$CANARY" run 258 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTB" \
+  --fiber-reviewer-model "$REVB" \
+  || fail "quoted flag run exits 0"
+[ "$(jq -r .reviewer.model "$OUTB/fiber-home/config.json")" = "$REVB" ] \
+  || fail "quoted flag value is written verbatim"
+[ ! -e SENT-B ] || fail "quoted flag value starts no shell"
+bash "$CANARY" clean 258 --out "$OUTB" || fail "clean 258 exits 0"
+
+# c. The flag wins over a real-config pick and a package default: the
+# isolated file holds only the flag's reviewer.model.
+REALC="$T/real-rev-c"
+mkdir -p "$REALC/.fiber"
+seed_extension "$REALC/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REALC/.fiber/extensions/opencode/providers/opencode-go.json"
+printf '{"providers":{"opencode-go":{"reviewer_model":"config-pick-c"}}}\n' >"$REALC/.fiber/config.json"
+OUTC="$T/out-rev-c"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REALC" bash "$CANARY" run 259 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTC" \
+  --fiber-reviewer-model opencode-go/flag-pick-c \
+  || fail "flag-wins run exits 0"
+[ "$(jq -c . "$OUTC/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-go/flag-pick-c"}}' ] \
+  || fail "flag wins over the config pick and package default"
+bash "$CANARY" clean 259 --out "$OUTC" || fail "clean 259 exits 0"
+
+# e. Flag absent, real-config pick: the isolated config.json holds exactly
+# that one key, and no other real-config content reaches the isolated home.
+REALE="$T/real-rev-e"
+mkdir -p "$REALE/.fiber"
+seed_extension "$REALE/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REALE/.fiber/extensions/opencode/providers/opencode-go.json"
+printf '{"model":"SENTINEL-TOP-MODEL","credential":"SENTINEL-TOP-CRED","credentials":{"x":"SENTINEL-TOP-CREDS"},"reviewer":{"model":"SENTINEL-TOP-REVIEWER"},"providers":{"opencode-go":{"reviewer_model":"local-id","credential":"SENTINEL-PROV-CRED","credentials":{"x":"SENTINEL-PROV-CREDS"}},"codex":{"reviewer_model":"SENTINEL-OTHER-PROV"}}}\n' >"$REALE/.fiber/config.json"
+OUTE="$T/out-rev-e"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REALE" bash "$CANARY" run 260 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTE" \
+  || fail "config-pick run exits 0"
+[ "$(jq -c . "$OUTE/fiber-home/config.json")" = '{"providers":{"opencode-go":{"reviewer_model":"local-id"}}}' ] \
+  || fail "config pick is copied with its key and provider only"
+for SENTE in SENTINEL-TOP-MODEL SENTINEL-TOP-CRED SENTINEL-TOP-CREDS \
+  SENTINEL-TOP-REVIEWER SENTINEL-PROV-CRED SENTINEL-PROV-CREDS SENTINEL-OTHER-PROV; do
+  grep -rqF "$SENTE" "$OUTE/fiber-home" && fail "isolated home leaks $SENTE"
+done
+bash "$CANARY" clean 260 --out "$OUTE" || fail "clean 260 exits 0"
+
+# f. Flag absent, config pick plus package default: the config pick wins.
+REALF="$T/real-rev-f"
+mkdir -p "$REALF/.fiber"
+seed_extension "$REALF/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"package-pick-f"}\n' >"$REALF/.fiber/extensions/opencode/providers/opencode-go.json"
+printf '{"providers":{"opencode-go":{"reviewer_model":"config-pick-f"}}}\n' >"$REALF/.fiber/config.json"
+OUTF="$T/out-rev-f"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REALF" bash "$CANARY" run 261 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTF" \
+  || fail "config-over-package run exits 0"
+[ "$(jq -c . "$OUTF/fiber-home/config.json")" = '{"providers":{"opencode-go":{"reviewer_model":"config-pick-f"}}}' ] \
+  || fail "config pick wins over the package default"
+bash "$CANARY" clean 261 --out "$OUTF" || fail "clean 261 exits 0"
+
+# g. Flag absent, package default only: exit 0 with no config.json, so
+# Fiber's own fallback applies.
+REALG="$T/real-rev-g"
+mkdir -p "$REALG/.fiber"
+seed_extension "$REALG/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REALG/.fiber/extensions/opencode/providers/opencode-go.json"
+OUTG="$T/out-rev-g"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REALG" bash "$CANARY" run 262 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTG" \
+  || fail "package-default run exits 0"
+[ ! -e "$OUTG/fiber-home/config.json" ] || fail "package default writes no config.json"
+bash "$CANARY" clean 262 --out "$OUTG" || fail "clean 262 exits 0"
+
+# h. Stale config.json: a rerun after clean on a package-default home
+# drops the earlier run's reviewer, and a new flag value replaces the old.
+REALH="$T/real-rev-h"
+mkdir -p "$REALH/.fiber"
+seed_extension "$REALH/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REALH/.fiber/extensions/opencode/providers/opencode-go.json"
+OUTH="$T/out-rev-h"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REALH" bash "$CANARY" run 263 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTH" \
+  --fiber-reviewer-model opencode-go/round-one \
+  || fail "stale first run exits 0"
+[ "$(jq -c . "$OUTH/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-go/round-one"}}' ] \
+  || fail "stale first run writes round one"
+bash "$CANARY" clean 263 --out "$OUTH" || fail "clean 263 exits 0"
+env -u FIBER_HOME HOME="$REALH" bash "$CANARY" run 263 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTH" \
+  || fail "stale second run exits 0"
+[ ! -e "$OUTH/fiber-home/config.json" ] || fail "stale config.json is gone on rerun"
+bash "$CANARY" clean 263 --out "$OUTH" || fail "clean 263 exits 0"
+env -u FIBER_HOME HOME="$REALH" bash "$CANARY" run 263 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTH" \
+  --fiber-reviewer-model opencode-go/round-two \
+  || fail "stale third run exits 0"
+[ "$(jq -c . "$OUTH/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-go/round-two"}}' ] \
+  || fail "second flag value replaces the first"
+bash "$CANARY" clean 263 --out "$OUTH" || fail "clean 263 exits 0"
+
+# l. A pre-existing symlinked config.json is replaced by a regular file the
+# script wrote, and the link target's bytes are unchanged.
+REALL="$T/real-rev-l"
+mkdir -p "$REALL/.fiber"
+seed_extension "$REALL/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REALL/.fiber/extensions/opencode/providers/opencode-go.json"
+OUTL="$T/out-rev-l"
+mkdir -p "$OUTL/fiber-home"
+printf 'decoy\n' >"$OUTL/decoy"
+ln -s "$OUTL/decoy" "$OUTL/fiber-home/config.json"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REALL" bash "$CANARY" run 264 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTL" \
+  --fiber-reviewer-model opencode-go/link-test \
+  || fail "symlinked-config run exits 0"
+[ ! -L "$OUTL/fiber-home/config.json" ] || fail "symlinked config.json is replaced"
+[ "$(jq -c . "$OUTL/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-go/link-test"}}' ] \
+  || fail "symlinked config.json holds the flag's reviewer model"
+[ "$(cat "$OUTL/decoy")" = "decoy" ] || fail "link target bytes are unchanged"
+bash "$CANARY" clean 264 --out "$OUTL" || fail "clean 264 exits 0"
+
+echo "reviewer seeding cases passed"

@@ -533,6 +533,22 @@ cmd_run() {
     err "a previous run exists in $out; run 'canary.sh clean $ticket' first"
     return 2
   fi
+  # Clean leaves the isolated home behind, so a stale config.json from an
+  # earlier reviewer must not survive it: remove just that file, after
+  # every setup refusal above, then write the new one. A package pick
+  # needs no file; Fiber applies its own default.
+  rm -f "$FIBER_HOME/config.json" \
+    || { err "cannot remove $FIBER_HOME/config.json"; return 2; }
+  case "$reviewer_origin" in
+    flag)
+      jq -n --arg m "$reviewer_pick" '{reviewer:{model:$m}}' \
+        >"$FIBER_HOME/config.json" \
+        || { rm -f "$FIBER_HOME/config.json"; err "cannot write $FIBER_HOME/config.json"; return 2; } ;;
+    config)
+      jq -n --arg p "$fiber_provider" --arg m "$reviewer_pick" \
+        '{providers:{($p):{reviewer_model:$m}}}' >"$FIBER_HOME/config.json" \
+        || { rm -f "$FIBER_HOME/config.json"; err "cannot write $FIBER_HOME/config.json"; return 2; } ;;
+  esac
   # Record the clone before any git mutation, so clean can always find it.
   mkdir -p "$out"
   printf '%s\n' "$clone" >"$out/clone"
