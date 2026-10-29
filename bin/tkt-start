@@ -5,13 +5,13 @@
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
 # A preflight core/non-blocking line counts when it starts with '<n>.' or '-', then spaces, then optional backtick/bold marks; a bare '*' bullet never counts.
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
-# Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
+# Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 # Words after --files run to the next word starting with '-': write such a path as ./-name.
 # Example: --files a b c, the same as --files a,b,c.
 set -euo pipefail
 usage() {
-  echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]" >&2
+  echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]" >&2
   echo "  --spec FILE: a file holding the ticket body; a Part-of closing needs 'Part of #N' in it" >&2
   echo "  --files PATHS: paths separated by commas or spaces, e.g. --files a b c or --files a,b,c" >&2
   exit 2
@@ -19,9 +19,11 @@ usage() {
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
 env=""; extra=""; merge_gate=""; mutant_job=""; files=""; no_preflight=0
 body_has=(); models=()
+body_ends=""; body_ends_given=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --body-has) [ $# -ge 2 ] || usage; body_has+=("$2"); shift 2 ;;
+    --body-ends) [ $# -ge 2 ] || usage; body_ends="$2"; body_ends_given=1; shift 2 ;;
     --model) [ $# -ge 2 ] || usage; models+=("$2"); shift 2 ;;
     --files) [ $# -ge 2 ] && [[ $2 != -* ]] || usage; shift; while [ $# -gt 0 ] && [[ $1 != -* ]]; do files="${files:+$files,}${1//[[:space:]]/,}"; shift; done ;;
     --no-preflight) no_preflight=1; shift ;;
@@ -37,6 +39,13 @@ for v in run repo issue spec branch worktree workflow_doc closing; do [ -n "${!v
 case "$issue" in *[!0-9]*) echo "tkt-start: --issue needs a number: $issue" >&2; exit 2 ;; esac
 for m in ${models[@]+"${models[@]}"}; do case "$m" in *=*) ;; *) echo "tkt-start: --model needs ROLE=ID: $m" >&2; exit 2 ;; esac; done
 case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac
+# A blank check line can never match a PR body, and a newline breaks the
+# state line, so both exit before any state write. The given flag tells a
+# repeat or an empty value apart from no flag at all.
+if [ "$body_ends_given" -eq 1 ]; then
+  if [ -z "${body_ends//[[:space:]]/}" ]; then echo "tkt-start: --body-ends needs a value that is not blank" >&2; exit 2; fi
+  case "$body_ends" in *$'\n'*) echo "tkt-start: --body-ends value holds a newline" >&2; exit 2 ;; esac
+fi
 spec_part=0; spec_exists=0
 if [ -f "$spec" ]; then spec_exists=1; grep -qiE 'part of[[:space:]]+#[0-9]+' "$spec" && spec_part=1; fi
 close_part=0; printf '%s' "$closing" | grep -qiE '^part of([[:space:]]|$)' && close_part=1
@@ -91,6 +100,7 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
 fi
 for k in repo issue spec branch worktree run workflow_doc closing; do tkt set "$k" "${!k}"; done
 for k in env extra merge_gate mutant_job; do [ -n "${!k}" ] && tkt set "$k" "${!k}"; done
+if [ "$body_ends_given" -eq 1 ]; then tkt set body_ends "$body_ends"; fi
 for b in ${body_has[@]+"${body_has[@]}"}; do tkt list body_has 2>/dev/null | grep -xF -- "$b" >/dev/null || tkt add body_has "$b"; done
 for m in ${models[@]+"${models[@]}"}; do tkt list "model.${m%%=*}" 2>/dev/null | grep -xF -- "${m#*=}" >/dev/null || tkt add "model.${m%%=*}" "${m#*=}"; done
 tkt journal "tkt-start state repo=$repo issue=$issue branch=$branch"

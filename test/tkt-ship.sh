@@ -351,6 +351,7 @@ rm -rf "$S.lock"
 reset_stub; setup_case flags
 printf '0' >"$T/exitcodes"
 printf 'body_has=%s\n' 'Resolves #515' 'Co-authored-by: T' >>"$S"
+printf 'body_ends=%s\n' 'Co-authored with Claude Code.' >>"$S"
 printf 'unverified text\n' >"$CDIR/unverified.md"
 printf 'unverified=%s\n' "$CDIR/unverified.md" >>"$S"
 printf 'merge_gate=%s\n' gate >>"$S"
@@ -377,15 +378,48 @@ run_ship
 got="$(grep -A1 -x -F 'arg|--no-mutants-label' "$T/calls.log" | sed -n 2p)"
 [ "$got" = 'arg|test-only PR, nothing to mutate' ] || fail "nomutants: reason not one argument, got [$got]"
 
-# --- no_mutants_label unset: ship-pr gets no such flag ---
+# --- no_mutants_label unset: ship-pr gets no such flag, and no body_ends
+# line means no --body-ends check ---
 reset_stub; setup_case nomutantsunset
 printf '0' >"$T/exitcodes"
 run_ship
 [ "$RC" -eq 0 ] || fail "nomutantsunset: exit $RC"
 [ "$(grep -c -F 'no-mutants-label' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: flag present: $(cat "$T/calls.log")"
-[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "nomutantsunset: body-ends once without body_has: $(cat "$T/calls.log")"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: body-ends without a body_ends line: $(cat "$T/calls.log")"
+
+# --- body_ends from state reaches ship-pr as one argument ---
+reset_stub; setup_case bodyends
+printf '0' >"$T/exitcodes"
+printf 'body_ends=%s\n' 'X' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "bodyends: exit $RC"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "bodyends: body-ends once: $(cat "$T/calls.log")"
 got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
-[ "$got" = 'arg|Co-authored with Claude Code.' ] || fail "nomutantsunset: body-ends value, got [$got]"
+[ "$got" = 'arg|X' ] || fail "bodyends: body-ends value, got [$got]"
+grep -v '^body_ends=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+printf 'body_ends=%s\n' 'X y' >>"$S"
+: >"$T/calls.log"
+run_ship
+[ "$RC" -eq 0 ] || fail "bodyends-space: exit $RC"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "bodyends-space: body-ends once: $(cat "$T/calls.log")"
+got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
+[ "$got" = 'arg|X y' ] || fail "bodyends-space: body-ends value, got [$got]"
+
+# --- an empty body_ends line means no check, so no flag ---
+reset_stub; setup_case bodyendsempty
+printf '0' >"$T/exitcodes"
+printf 'body_ends=\n' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "bodyendsempty: exit $RC"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 0 ] || fail "bodyendsempty: body-ends with an empty line: $(cat "$T/calls.log")"
+
+# --- a blank body_ends line means no check, so no flag ---
+reset_stub; setup_case bodyendsblank
+printf '0' >"$T/exitcodes"
+printf 'body_ends=   \n' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "bodyendsblank: exit $RC"
+[ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 0 ] || fail "bodyendsblank: body-ends with a blank line: $(cat "$T/calls.log")"
 
 # --- ship-pr runs from the run dir even when the caller is in the worktree ---
 reset_stub; setup_case shipcwd
