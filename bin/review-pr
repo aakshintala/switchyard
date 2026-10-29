@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # review-pr: run a PR's reviews through the delegate CLI, post one PR comment,
 # and print a verdict digest for the orchestrator.
+# A bare second review on a PR that already carries a review-pr comment for an
+# earlier head at a different patch-id refuses with exit 2 before starting any
+# job, and prints the scoped verify command with --since set to the last
+# reviewed head. A rerun with the same patch-id is allowed, as is a retry of
+# the same head. --full-rereview <reason> overrides the refusal for a re-plan
+# or take-back, or a verify whose new findings show the repair needs a full
+# review; the reason is printed and stored in the posted comment header. A
+# comment fetch failure exits 1; rerun once the API is reachable.
 # Usage:
-#   review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M [--overbuild-model M2] [--axes LIST] [--workflow-doc PATH] [--head SHA]
+#   review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M [--overbuild-model M2] [--axes LIST] [--workflow-doc PATH] [--head SHA] [--full-rereview REASON]
 #     LIST is standards[,spec][,overbuild], default all three: one job per
 #     axis. --overbuild-model is required only when overbuild is listed.
+#     --full-rereview is review mode only; it skips the comment check.
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]
 #     --since is the reviewed head; verify diffs from its repair base on current base.
 #     launches one job per review role, prints "<role> <job-id>" per job, then
@@ -44,7 +53,7 @@ set -euo pipefail
 # verdict: loud failure, never UNFINISHED.
 
 usage() {
-  echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M [--overbuild-model M2] [--axes standards[,spec][,overbuild]] [--workflow-doc PATH] [--head SHA]" >&2
+  echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M [--overbuild-model M2] [--axes standards[,spec][,overbuild]] [--workflow-doc PATH] [--head SHA] [--full-rereview REASON]" >&2
   echo "       review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]" >&2
   echo "       review-pr run <same args as start>" >&2
   echo "       review-pr collect <job-id>... [--findings-out PATH]" >&2
@@ -158,6 +167,28 @@ ci_state() {
     }'
 }
 
+last_review_header() {
+  # last_review_header REPO PR: print "<head> <patch-id>" for the newest
+  # review-pr comment header, or nothing when no comment matches. Newest is by
+  # created_at, then numeric id, never by output order. A first line that does
+  # not match the review-pr header shape is skipped, so a malformed newest
+  # falls back to the next valid one. Non-zero only when gh api itself fails,
+  # so an empty history or a history with no valid header is not an error.
+  local repo="$1" pr="$2"
+  local rows api_rc=0
+  rows="$(gh api --paginate --jq '.[] | select(.body | startswith("review-pr: patch-id")) | [.created_at, (.id | tostring), (.body | split("\n")[0])] | @tsv' "repos/$repo/issues/$pr/comments")" || api_rc=$?
+  if [ "$api_rc" -ne 0 ]; then return 1; fi
+  [ -n "$rows" ] || return 0
+  local last
+  last="$(printf '%s\n' "$rows" | sort -t "$(printf '\t')" -k1,1 -k2,2n | { grep -E 'review-pr: patch-id ([0-9a-f]+|none), head [0-9a-f]{40}(,.*)?$' || true; } | tail -n 1)"
+  [ -n "$last" ] || return 0
+  local pid headv
+  pid="$(printf '%s' "$last" | sed -n 's/.*review-pr: patch-id \([^,]*\), head .*/\1/p')"
+  headv="$(printf '%s' "$last" | sed -n 's/.*, head \([0-9a-f]\{40\}\).*/\1/p')"
+  [ -n "$pid" ] && [ -n "$headv" ] || return 0
+  printf '%s %s' "$headv" "$pid"
+}
+
 ci_display() {
   # ci_display REPO PR SHA: ci_state, but a draft PR with no CI prints draft.
   # A draft has no CI until ship-pr marks it ready. A failed lookup stays none.
@@ -266,6 +297,7 @@ cmd_start() {
 
   repo=""; clone=""; issues=(); issue_count=0; specn=""; model=""; omodel=""
   verify=""; since=""; wdoc=""; head=""; axes=""; axes_given=""; context_files=()
+  full_rereview=""; full_rereview_given=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2;;
@@ -297,6 +329,7 @@ cmd_start() {
       --context) [ $# -ge 2 ] || usage; context_files[${#context_files[@]}]="$2"; shift 2;;
       --workflow-doc) [ $# -ge 2 ] || usage; wdoc="$2"; shift 2;;
       --head) [ $# -ge 2 ] || usage; head="$2"; shift 2;;
+      --full-rereview) [ $# -ge 2 ] || usage; full_rereview="$2"; full_rereview_given="1"; shift 2;;
       *) usage;;
     esac
   done
@@ -304,6 +337,15 @@ cmd_start() {
   [ -n "$repo" ] || usage
   [ -n "$clone" ] && [ -d "$clone" ] || usage
   [ -n "$model" ] || usage
+  if [ -n "$full_rereview_given" ]; then
+    if ! printf '%s' "$full_rereview" | grep -q '[^[:space:]]'; then usage; fi
+    case "$full_rereview" in
+      *$'\n'*|*$'\r'*) usage;;
+    esac
+    case "$full_rereview" in -*) usage;; esac
+    if [ -n "$verify" ]; then usage; fi
+    echo "review-pr: full re-review: $full_rereview" >&2
+  fi
   if [ -z "$axes" ]; then axes="standards,spec,overbuild"; fi
   # One job starts per listed axis; an unknown name is a usage error.
   axes_rest="$axes,"
@@ -493,6 +535,30 @@ cmd_start() {
     base_tip="$(git -C "$clone" rev-parse FETCH_HEAD)"
   fi
 
+  if [ "$mode" = "review" ] && [ -z "$full_rereview_given" ]; then
+    prior=""
+    if ! prior="$(last_review_header "$repo" "$pr")"; then
+      echo "review-pr: could not read PR comments (gh api failed); not starting a review. Rerun once the API is reachable." >&2
+      exit 1
+    fi
+    if [ -n "$prior" ]; then
+      prior_head="${prior%% *}"
+      prior_pid="${prior#* }"
+      if [ "$prior_head" != "$sha" ]; then
+        refuse=""
+        if [ "$prior_pid" = "none" ] || [ "$patch_id" = "none" ]; then
+          refuse="1"
+        elif [ "$prior_pid" != "$patch_id" ]; then
+          refuse="1"
+        fi
+        if [ -n "$refuse" ]; then
+          echo "review-pr: PR $pr already has a review for head $prior_head (patch-id $prior_pid); a bare re-run reviews the whole PR again. Run the scoped verify: review-pr run $pr --repo $repo --cwd $clone --model $model --verify <findings file> --since $prior_head   (a re-plan or take-back may override with --full-rereview <reason>)" >&2
+          exit 2
+        fi
+      fi
+    fi
+  fi
+
   if [ "$mode" = "verify" ]; then
     if ! git -C "$clone" cat-file -e "$since^{commit}" 2>/dev/null; then
       git -C "$clone" fetch origin "$since" >&2 || true
@@ -597,6 +663,9 @@ cmd_start() {
       printf 'pr=%s\n' "$pr"
       printf 'sha=%s\n' "$sha"
       printf 'patch_id=%s\n' "$patch_id"
+      if [ -n "$full_rereview_given" ]; then
+        printf 'full_rereview=%s\n' "$full_rereview"
+      fi
       printf 'model=%s\n' "$(model_for "$role")"
       printf 'axes=%s\n' "$axes"
       printf 'clone=%s\n' "$clone"
@@ -709,7 +778,7 @@ cmd_collect() {
 
   # debt: single-run collect (repo/PR/SHA/patch-id come from the first state
   # file found), per-run grouping when callers mix runs in one collect.
-  repo=""; pr=""; sha=""; patch_id=""
+  repo=""; pr=""; sha=""; patch_id=""; full_rereview=""
   id_list=()
   unknown_f="$tmp/unknown.txt"
   : >"$unknown_f"
@@ -734,6 +803,7 @@ cmd_collect() {
       pr="$(state_get "$sf" pr)"
       sha="$(state_get "$sf" sha)"
       patch_id="$(state_get "$sf" patch_id)"
+      full_rereview="$(state_get "$sf" full_rereview)"
     fi
     id_list[${#id_list[@]}]="$jid"
   done
@@ -836,7 +906,11 @@ cmd_collect() {
 
   body="$tmp/comment.md"
   {
-    printf 'review-pr: patch-id %s, head %s\n' "${patch_id:-none}" "${sha:-unknown}"
+    if [ -n "$full_rereview" ]; then
+      printf 'review-pr: patch-id %s, head %s, full-rereview: %s\n' "${patch_id:-none}" "${sha:-unknown}" "$full_rereview"
+    else
+      printf 'review-pr: patch-id %s, head %s\n' "${patch_id:-none}" "${sha:-unknown}"
+    fi
     for jid in ${id_list[@]+"${id_list[@]}"}; do
       role="$(state_get "$state_dir/$jid" role)"
       rmodel="$(state_get "$state_dir/$jid" model)"
