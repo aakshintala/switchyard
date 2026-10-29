@@ -73,6 +73,7 @@ case "$path" in
   search/issues*)
     q="$(printf '%s' "$path" | sed -E 's/.*"([^"]+)"[^"]*$/\1/')"
     if [ -e "$T/fail-flaky" ] && [[ "$path" == *Flaky* ]]; then cat "$T/fail-flaky" >&2; exit 1; fi
+    if [ -e "$T/fail-flaky-tests" ] && [[ "$path" == *Flaky+tests:* ]]; then cat "$T/fail-flaky-tests" >&2; exit 1; fi
     if [ -e "$T/once-ratelimit" ]; then rm -f "$T/once-ratelimit"; echo "gh: API rate limit exceeded for user ID 1. If you reach out to GitHub Support for help, please include your request ID. (HTTP 403)" >&2; exit 1; fi
     key="$(printf '%s' "$q" | sed -E 's/[^A-Za-z0-9]+/-/g')"
     spage="$(printf '%s' "$path" | sed -nE 's/.*[?&]page=([0-9]+).*/\1/p')"
@@ -382,9 +383,9 @@ python3 -c "import json; json.dump({'jobs': {}, 'issues': {'fiber-core doors::wa
 run_friction --json
 [ "$(grep -c 'search/issues.*doors' "$FAKE_GH_LOG")" = "0" ] || fail "fresh no-issue not searched: [$(cat "$FAKE_GH_LOG")]"
 
-# --- flaky: open "Flaky test:" issues; 2+ sightings exit 1 and print a line ---
-# flaky: one uncached search; 1602 has 1 sighting, 1601 has 2, and the old and
-# non-prefix titles are excluded
+# --- flaky: open "Flaky test:"/"Flaky tests:" issues; 2+ sightings exit 1 and print a line ---
+# flaky: one uncached search per prefix; 1602 has 1 sighting, 1601 and 1801
+# have 2, and the old and non-prefix titles are excluded
 setup flaky
 flake_scen flaky
 cat >"$TSCEN/comments-1601.json" <<'EOF'
@@ -393,17 +394,24 @@ EOF
 cat >"$TSCEN/comments-1602.json" <<'EOF'
 [{"id": 3, "user": {"login": "github-actions"}, "body": "The test `fiber-core doors::slow` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9002.", "created_at": "2026-10-09T11:30:00Z"}]
 EOF
+cat >"$TSCEN/comments-1801.json" <<'EOF'
+[{"id": 5, "user": {"login": "github-actions"}, "body": "The test `fiber-core late` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9201.", "created_at": "2026-10-09T12:00:00Z"}, {"id": 6, "user": {"login": "github-actions"}, "body": "The test `fiber-core late` passed after a retry on ubuntu-24.04: https://github.com/O/N/actions/runs/9202.", "created_at": "2026-10-09T13:00:00Z"}]
+EOF
 run_friction --json
 [ "$CODE" = "1" ] || fail "flaky 2+ exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
 [ "$(jget "[(f['test'], f['issue'], f['sightings']) for f in d['flaky']]")" = \
-  "[('fiber-core doors::slow', 1602, 1), ('main::ci_flake_probe passes_only_on_a_retry', 1601, 2)]" ] \
+  "[('fiber-core doors::slow', 1602, 1), ('fiber-core late', 1801, 2), ('main::ci_flake_probe passes_only_on_a_retry', 1601, 2)]" ] \
   || fail "flaky entries: [$OUT]"
 [ "$(jget "[(f['issue'], f['runs']) for f in d['flaky']]")" = \
-  "[(1602, ['https://github.com/O/N/actions/runs/9002']), (1601, ['https://github.com/O/N/actions/runs/9001', 'https://github.com/O/N/actions/runs/9003'])]" ] \
+  "[(1602, ['https://github.com/O/N/actions/runs/9002']), (1801, ['https://github.com/O/N/actions/runs/9201', 'https://github.com/O/N/actions/runs/9202']), (1601, ['https://github.com/O/N/actions/runs/9001', 'https://github.com/O/N/actions/runs/9003'])]" ] \
   || fail "flaky run urls: [$OUT]"
-[ "$(grep -c 'Flaky' "$FAKE_GH_LOG")" = "1" ] || fail "one flaky search: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'Flaky+test:' "$FAKE_GH_LOG")" = "1" ] || fail "one legacy flaky search: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'Flaky+tests:' "$FAKE_GH_LOG")" = "1" ] || fail "one new-prefix flaky search: [$(cat "$FAKE_GH_LOG")]"
 [ "$(grep -c 'issues/1601/comments' "$FAKE_GH_LOG")" = "1" ] \
   || fail "one comments fetch per flaky issue: [$(cat "$FAKE_GH_LOG")]"
+[ "$(jget "sum(1 for f in d['flaky'] if f['issue'] == 1601)")" = "1" ] \
+  || fail "1601 listed once: [$OUT]"
+grep -q "1802" <<<"$OUT" && fail "Bug: title ignored: [$OUT]"
 setup flaky
 flake_scen flaky
 cat >"$TSCEN/comments-1601.json" <<'EOF'
@@ -417,6 +425,9 @@ run_friction
 grep -qx "flaky: main::ci_flake_probe passes_only_on_a_retry issue #1601 sightings 2" <<<"$OUT" \
   || fail "flaky text line: [$OUT]"
 grep -q "^flaky: fiber-core doors" <<<"$OUT" && fail "1-sighting flaky has no text line: [$OUT]"
+[ "$(grep -c 'issues/1801/comments' "$FAKE_GH_LOG")" = "1" ] \
+  || fail "new-prefix comments still fetched: [$(cat "$FAKE_GH_LOG")]"
+grep -q "^flaky: fiber-core late" <<<"$OUT" && fail "0-sighting new-prefix has no text line: [$OUT]"
 grep -qx "  run: https://github.com/O/N/actions/runs/9001" <<<"$OUT" \
   || fail "flaky run url line: [$OUT]"
 grep -q "no repeats" <<<"$OUT" && fail "a flaky finding is not quiet: [$OUT]"
@@ -445,7 +456,8 @@ run_friction --json
 [ "$CODE" = "1" ] || fail "flaky page 2 exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
 [ "$(jget "[(f['test'], f['issue'], f['sightings']) for f in d['flaky']]")" = \
   "[('fiber-core late::one', 1701, 2)]" ] || fail "flaky page 2 listed: [$OUT]"
-[ "$(grep -c 'Flaky' "$FAKE_GH_LOG")" = "2" ] || fail "two flaky pages: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'Flaky+test:' "$FAKE_GH_LOG")" = "2" ] || fail "two legacy flaky pages: [$(cat "$FAKE_GH_LOG")]"
+[ "$(grep -c 'Flaky+tests:' "$FAKE_GH_LOG")" = "1" ] || fail "one new-prefix flaky page: [$(cat "$FAKE_GH_LOG")]"
 grep -q 'updated:>=2026-10-08T18:30:00Z' "$FAKE_GH_LOG" || fail "cutoff in query: [$(cat "$FAKE_GH_LOG")]"
 # --- #344: sightings count only bot retry comments in the window ---
 # 1650 has 1 bot sighting in window, 2 human triage comments (one quoting
@@ -468,6 +480,13 @@ setup onelane
 echo "HTTP 401 Unauthorized" >"$T/fail-flaky"
 run_friction --json
 [ "$CODE" = "2" ] || fail "flaky search failure exits 2 (got $CODE): [$OUT]"
+# only the new-prefix search failing is exit 2 too
+setup onelane
+echo "HTTP 401 Unauthorized" >"$T/fail-flaky-tests"
+run_friction --json
+[ "$CODE" = "2" ] || fail "new-prefix search failure exits 2 (got $CODE): [$OUT]"
+grep -q "ci-friction: gh api search/issues failed" "$T/stderr.txt" \
+  || fail "new-prefix failure warned: [$(cat "$T/stderr.txt")]"
 
 # --- stale blocked: an open blocked issue whose named blockers are all closed ---
 # cases: 501 Blocked by two closed; 502 waits for; 503 one open; 412 shape with
@@ -677,6 +696,27 @@ run_friction --json
   || fail "cousin Flaky issue did not link: [$OUT]"
 [ "$(repeat_value "fiber-core doors::slow" issue)" = "2878" ] \
   || fail "full-name Flaky issue did not link: [$OUT]"
+
+# --- #636: a Flaky tests:-titled issue links only with Full test name in the body ---
+# doors::slow's Flaky tests: issue names its full name after "Full test name:":
+# a ticket. doors::creak's Flaky tests: issue files its full name under another
+# test while naming doors::creak as a cousin: no ticket.
+setup repeat
+flake_scen repeat
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) fiber-core doors::slow\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::creak\n' >"$TSCEN/logs/801.txt"
+printf '2026-10-09T17:30:01Z FAIL [   8.500s] (2/12) fiber-core doors::slow\n2026-10-09T17:30:01Z FAIL [   8.500s] (3/12) fiber-core doors::creak\n' >"$TSCEN/logs/802.txt"
+cat >"$TSCEN/search/doors-slow.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2880, "state": "open", "title": "Flaky tests: door suite flakes on macos", "body": "Full test name: doors::slow\nFails about one run in twenty.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+cat >"$TSCEN/search/doors-creak.json" <<'EOF'
+{"total_count": 1, "items": [{"number": 2881, "state": "open", "title": "Flaky tests: door suite flakes on macos arm", "body": "Full test name: doors::slow\nPossible cousin: doors::creak hits it too.", "closed_at": null, "updated_at": "2026-10-09T17:00:00Z"}]}
+EOF
+run_friction --json
+[ "$CODE" = "1" ] || fail "flaky-tests-match exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$(repeat_value "fiber-core doors::creak" issue)" = "None" ] \
+  || fail "cousin Flaky tests: issue did not link: [$OUT]"
+[ "$(repeat_value "fiber-core doors::slow" issue)" = "2880" ] \
+  || fail "full-name Flaky tests: issue did not link: [$OUT]"
 
 # --- #636: cached links predate the title matcher ---
 # a stale cached cousin link (#2876) is dropped; a matching link (#1386) stays.

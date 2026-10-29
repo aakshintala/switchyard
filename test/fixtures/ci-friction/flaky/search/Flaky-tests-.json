@@ -1,0 +1,5 @@
+{"total_count": 3, "items": [
+  {"number": 1801, "state": "open", "title": "Flaky tests: fiber-core late", "updated_at": "2026-10-09T12:00:00Z", "comments": 2},
+  {"number": 1601, "state": "open", "title": "Flaky test: main::ci_flake_probe passes_only_on_a_retry", "updated_at": "2026-10-09T10:00:00Z", "comments": 1},
+  {"number": 1802, "state": "open", "title": "Bug: Flaky tests: fiber-core x", "updated_at": "2026-10-09T12:00:00Z", "comments": 3}
+]}

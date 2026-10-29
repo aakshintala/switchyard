@@ -14,9 +14,11 @@
 # design[] counts every other class except missed-mutant, other and cancelled.
 #
 # An issue search runs once per new test name; a cached open issue is re-read
-# when its test is sighted again. One uncached search lists the open
-# "Flaky test: <test>" issues (retry-passed flakes); a flake with 2+ sightings
-# (github-actions retry comments inside the window) counts as a finding. Read-only: an open
+# when its test is sighted again. One uncached search per title prefix lists
+# the open "Flaky tests: <binary>" and "Flaky test: <binary> <test>" issues
+# (retry-passed flakes; the binary-titled ticket is sighted sooner); a flake
+# with 2+ sightings (github-actions retry comments inside the window) counts
+# as a finding. Read-only: an open
 # "blocked" issue whose named blockers (a "## Blocked by" section's #N refs,
 # and "waits for #N" anywhere) are all closed is a stale-blocked finding; a
 # blocker whose lookup fails counts as open. Exit codes: 0 none, 1 a
@@ -59,7 +61,7 @@ except ValueError:
 SERVER_ERR = re.compile(r"HTTP 5\d\d")
 RATE_LIMIT = re.compile(r"rate limit exceeded", re.I)  # gh puts "(HTTP 403)" last
 NO_ISSUE_TTL = timedelta(hours=6)  # a no-issue lookup is retried after this
-FLAKY_PREFIX = "Flaky test: "  # title prefix of the issues flake_report files
+FLAKY_PREFIXES = ("Flaky tests: ", "Flaky test: ")  # title prefixes of the issues flake_report files
 # the flake_report bot comment body; source: fiber .github/workflows/ci.yml flake_report step
 FLAKE_RETRY_PHRASE = "passed after a retry on"
 RUN_URL = re.compile(r"https://github\.com/\S+/actions/runs/\d+")
@@ -387,7 +389,7 @@ def issue_matches(key, title, body):
     final = name.split("::")[-1]
     if final and final in (title or ""):
         return True
-    if (title or "").startswith(("Flaky test: ", "Flaky: ")):
+    if (title or "").startswith(("Flaky test: ", "Flaky tests: ", "Flaky: ")):
         for line in (body or "").splitlines():
             if "Full test name:" in line:
                 return line.split("Full test name:", 1)[1].strip() == name
@@ -693,19 +695,29 @@ def main(argv):
                                  "lanes": after,
                                  "last_seen": max(s[2] for s in seen[key])})
 
-    # open "Flaky test: <binary> <test>" issues filed by flake_report: one search per run, no cache
+    # open flake_report issues under either title prefix ("Flaky tests: <binary>"
+    # names the binary sooner; "Flaky test: <binary> <test>" is the legacy
+    # form): one search per prefix per run, no cache. GitHub search tokenises
+    # titles, so each prefix gets its own query; hits dedupe by issue number,
+    # first seen wins.
     flaky = []
-    try:
-        found = gh_paged("search/issues?q=repo:%s+is:issue+is:open+in:title+\"Flaky+test:\""
-                         "+updated:>=%s" % (repo, iso(cutoff)), "items")
-    except Fatal as e:
-        print("ci-friction: %s" % e, file=sys.stderr)
-        ok = False
-        found = []
-    for it in found:
+    found = {}
+    for prefix in FLAKY_PREFIXES:
+        token = prefix.strip().rstrip(":").replace(" ", "+") + ":"
+        try:
+            batch = gh_paged("search/issues?q=repo:%s+is:issue+is:open+in:title+\"%s\""
+                             "+updated:>=%s" % (repo, token, iso(cutoff)), "items")
+        except Fatal as e:
+            print("ci-friction: %s" % e, file=sys.stderr)
+            ok = False
+            continue
+        for it in batch:
+            if isinstance(it, dict):
+                found.setdefault(it.get("number"), it)
+    for it in found.values():
         title = it.get("title") or ""
         upd = parse_ts(it.get("updated_at") or "")
-        if not title.startswith(FLAKY_PREFIX) or not upd or upd < cutoff:
+        if not title.startswith(FLAKY_PREFIXES) or not upd or upd < cutoff:
             continue
         try:
             comments = gh_paged("repos/%s/issues/%s/comments" % (repo, it.get("number")), None)
@@ -726,7 +738,12 @@ def main(argv):
             m = RUN_URL.search(c.get("body") or "")
             if m:
                 runs.append(m.group(0))
-        flaky.append({"test": title[len(FLAKY_PREFIX):], "issue": it.get("number"),
+        test = title
+        for prefix in FLAKY_PREFIXES:
+            if title.startswith(prefix):
+                test = title[len(prefix):]
+                break
+        flaky.append({"test": test, "issue": it.get("number"),
                       "sightings": sightings, "runs": runs})
     flaky.sort(key=lambda f: f["test"])
     flaky_hot = [f for f in flaky if f["sightings"] >= 2]
