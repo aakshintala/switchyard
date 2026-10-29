@@ -129,7 +129,7 @@ from the `usage_recorded` events (a record with an `action_id` is main, one
 without is the reviewer); a null main cost is total minus reviewer.
 
 A canary run gives the Fiber lane an isolated home: `run` exports
-`FIBER_HOME=<out>/fiber-home` (created empty) before the first lane, so the
+`FIBER_HOME=<out>/fiber-home` (seeded with only the fiber arm's provider extension, copied from the real home) before the first lane, so the
 lane and its metrics both read that root and the owner's real `~/.fiber`
 stays untouched. A lane that needs a real credential copies that one file in
 before the run, e.g. `~/.fiber/credentials/<name>/<label>` to

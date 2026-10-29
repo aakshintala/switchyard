@@ -330,6 +330,29 @@ canary_worktree() {
   printf '%s/%s-canary-%s-%s' "$(dirname "$clone")" "$(basename "$clone")" "$ticket" "$side"
 }
 
+# fiber_provider_of MODEL: the provider of a fiber/<provider>/<model> id,
+# with an optional :thinking suffix ignored by stopping at the second slash.
+# Prints the provider; returns 1 with no output for any other shape or for
+# a provider outside [A-Za-z0-9][A-Za-z0-9_-]*, so no crafted id reaches cp.
+fiber_provider_of() {
+  local rest="${1:-}"
+  case "$rest" in
+    fiber/*/*) rest="${rest#fiber/}" ;;
+    *) return 1 ;;
+  esac
+  local provider="${rest%%/*}"
+  [ -n "$provider" ] || return 1
+  [ -n "${rest#*/}" ] || return 1
+  case "$provider" in
+    [A-Za-z0-9]*)
+      case "$provider" in
+        *[!A-Za-z0-9_-]*) return 1 ;;
+      esac
+      printf '%s\n' "$provider" ;;
+    *) return 1 ;;
+  esac
+}
+
 # clean_ticket CLONE TICKET OUT [--force]: remove whatever exists of the
 # ticket's two worktrees and two branches, then the <side>/worktree files.
 # Without --force a dirty worktree refuses (git's message, return 1).
@@ -381,6 +404,32 @@ cmd_run() {
   [[ "$ticket" =~ ^[0-9A-Za-z._-]+$ ]] || { err "bad ticket '$ticket'"; return 2; }
   [ -n "$gate" ] || { err "--gate is required"; return 2; }
   [ -f "$brief" ] || { err "brief file $brief missing"; return 2; }
+  # The provider comes from the final fiber model id, after --thinking is
+  # applied above; a malformed id is a usage error before any side effect.
+  local fiber_provider
+  fiber_provider="$(fiber_provider_of "$fiber_model")" \
+    || { usage; return 2; }
+  # The owner's real home is read before FIBER_HOME points at the isolated
+  # one below. Only the extensions/<name> directory that provides this
+  # provider is copied; credentials and config never leave the real home.
+  local real_fiber_home="${REAL_FIBER_HOME:-${FIBER_HOME:-$HOME/.fiber}}"
+  local ext_dir="" cand cand_providers
+  for cand in "$real_fiber_home"/extensions/*/providers/"$fiber_provider".json; do
+    [ -f "$cand" ] || continue
+    cand_providers="$(dirname "$cand")"
+    ext_dir="$(dirname "$cand_providers")"
+    break
+  done
+  if [ -z "$ext_dir" ]; then
+    err "The provider $fiber_provider is not installed in $real_fiber_home. Run fiber extension install ${fiber_provider%%-*}."
+    return 2
+  fi
+  # A symlink in the extension tree could point back into the real home,
+  # so the copy below refuses the tree unless every file in it is real.
+  if [ -n "$(find "$ext_dir" -type l)" ]; then
+    err "Refusing to copy $ext_dir: the extension tree holds a symlink."
+    return 2
+  fi
   # Resolve Fiber before any worktree, job or output dir exists, and pin the
   # binary so delegate runs the same one the summary records.
   local fiber_bin fiber_version
@@ -400,6 +449,12 @@ cmd_run() {
   # relative --out would resolve to a different directory.
   mkdir -p "$out/fiber-home"
   export FIBER_HOME="$(cd "$out/fiber-home" && pwd)"
+  # Seed the isolated home with only the provider's extension directory, as
+  # real files: the lane starts with its provider installed and nothing else.
+  mkdir -p "$FIBER_HOME/extensions" \
+    || { err "cannot create $FIBER_HOME/extensions"; return 2; }
+  cp -R "$ext_dir" "$FIBER_HOME/extensions/" \
+    || { err "cannot copy $ext_dir to $FIBER_HOME/extensions"; return 2; }
   git -C "$clone" rev-parse --git-common-dir >/dev/null 2>&1 \
     || { err "clone $clone is not a git checkout"; return 2; }
   clone="$(cd "$clone" && pwd)"
