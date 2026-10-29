@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+# gh-label-guard shim
+# Refuses a lane's attempt to add or remove the needs-owner or needs-triage
+# label through gh issue/pr edit/create. Installed as `gh` in a directory
+# placed first on a lane's PATH; see autonomous-flywheel. Runs the real gh
+# for everything else.
+import errno
+import os
+import signal
+import sys
+
+MARKER = b"# gh-label-guard shim"
+
+
+def fail(code, msg):
+    sys.stderr.write("gh-label-guard: %s\n" % msg)
+    sys.exit(code)
+
+
+def is_shim(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(512)
+    except OSError:
+        return False
+    return MARKER in [line.rstrip() for line in head.split(b"\n")[:5]]
+
+
+def find_real_gh(path_env, shim_dir):
+    # An unset PATH searches nothing. Otherwise follow execvp: an empty entry
+    # is the working directory, and a relative entry resolves against it.
+    # Skip the shim's own directory, non-directories, candidates that are not
+    # executable regular files, and candidates that carry the shim marker.
+    if path_env is None:
+        return None
+    for entry in path_env.split(os.pathsep):
+        directory = os.path.abspath(entry)
+        if directory == shim_dir or not os.path.isdir(directory):
+            continue
+        candidate = os.path.join(directory, "gh")
+        if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+            continue
+        if is_shim(candidate):
+            continue
+        return candidate
+    return None
+
+
+def exec_real(real, args):
+    # Python ignores SIGPIPE and SIGXFSZ, and exec keeps ignored signals.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+    try:
+        os.execv(real, ["gh"] + args)
+    except OSError as err:
+        code = 127 if err.errno == errno.ENOENT else 126
+        fail(code, "cannot exec %s: %s" % (real, err.strerror))
+
+
+def main():
+    args = sys.argv[1:]
+    shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    real = find_real_gh(os.environ.get("PATH"), shim_dir)
+    if real is None:
+        fail(127, "no gh on PATH outside gh-label-guard")
+    exec_real(real, args)
+
+
+main()
