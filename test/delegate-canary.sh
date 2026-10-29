@@ -51,9 +51,13 @@ seed_extension() {
 export FIBER_HOME="$T/fiber-home"
 mkdir -p "$FIBER_HOME"
 # The fake real home holds an opencode and a codex extension, so every run
-# below finds its fiber arm's provider there (#830).
+# below finds its fiber arm's provider there (#830). Both providers read
+# their credential from the environment, so the credential fail-fast lets
+# every run below through.
 seed_extension "$FIBER_HOME" opencode-go opencode
 seed_extension "$FIBER_HOME" codex codex
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$FIBER_HOME/extensions/opencode/providers/opencode-go.json"
+printf '{"credential":{"env":"CODEX_API_KEY"}}\n' >"$FIBER_HOME/extensions/codex/providers/codex.json"
 
 # --- local origin (bare) and clone at $HOME/work/fiber (the defaults) ---
 git init -q --bare "$T/upstream.git"
@@ -913,8 +917,9 @@ echo "report cases passed"
 : >"$FLOG/fiber-home.log"
 OUTFH="$T/out-fiber-home"
 # The decoy home is this run's real home, so it holds the opencode
-# extension too (#830).
+# extension too (#830), with an env credential for the fail-fast.
 seed_extension "$T/decoy-fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$T/decoy-fiber/extensions/opencode/providers/opencode-go.json"
 if [ -e "$HOME/.fiber" ]; then
   FIBER_REAL_BEFORE="$(find "$HOME/.fiber" | sort)"
 else
@@ -960,6 +965,7 @@ CLONE830="$HOME/work/fiber"
 REAL830="$T/real830"
 mkdir -p "$REAL830/.fiber"
 seed_extension "$REAL830/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL830/.fiber/extensions/opencode/providers/opencode-go.json"
 REAL830_BEFORE="$(find "$REAL830/.fiber" | sort)"
 OUT830="$T/out-ext"
 : >"$FLOG/calls.log"
@@ -988,11 +994,13 @@ bash "$CANARY" clean 248 --out "$OUT830" || fail "clean 248 exits 0"
 echo "extension copy cases passed"
 
 # --- Provider extension override (#830): a codex fiber model copies only
-# the codex extension.
+# the codex extension. Its provider file names an env credential, so the
+# credential fail-fast lets the run through.
 REAL831="$T/real831"
 mkdir -p "$REAL831/.fiber"
 seed_extension "$REAL831/.fiber" opencode-go opencode
 seed_extension "$REAL831/.fiber" codex codex
+printf '{"credential":{"env":"CODEX_API_KEY"}}\n' >"$REAL831/.fiber/extensions/codex/providers/codex.json"
 OUT831="$T/out-codex"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REAL831" bash "$CANARY" run 249 "$T/brief.md" \
@@ -1038,6 +1046,7 @@ echo "missing extension cases passed"
 REAL833="$T/real833"
 mkdir -p "$REAL833/.fiber"
 seed_extension "$REAL833/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL833/.fiber/extensions/opencode/providers/opencode-go.json"
 ln -s "$REAL833/.fiber/extensions/opencode/providers/opencode-go.json" \
   "$REAL833/.fiber/extensions/opencode/providers/extra-link.json"
 OUT833="$T/out-symlink"
@@ -1056,3 +1065,28 @@ grep -qi 'symlink' "$T/symlink.err" || fail "symlink message names symlinks"
 [ ! -f "$OUT833/fiber/worktree" ] || fail "symlink run records no fiber worktree"
 
 echo "extension symlink cases passed"
+
+# --- Provider credential fail-fast (#830): the provider file names no env
+# credential, so the run exits 2 before any delegate call, worktree or
+# tracking file, without copying anything from the real home.
+REAL834="$T/real834"
+mkdir -p "$REAL834/.fiber"
+seed_extension "$REAL834/.fiber" opencode-go opencode
+printf '{}\n' >"$REAL834/.fiber/extensions/opencode/providers/opencode-go.json"
+OUT834="$T/out-cred"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REAL834" bash "$CANARY" run 252 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT834" 2>"$T/cred.err"; then
+  fail "credential-missing run should not exit 0"
+else
+  [ $? -eq 2 ] || fail "credential-missing run exits 2"
+fi
+grep -q 'The provider opencode-go needs a credential file under' "$T/cred.err" || fail "credential message names the provider"
+grep -q 'Not copied; owner ruling needed' "$T/cred.err" || fail "credential message says owner ruling needed"
+[ -s "$FLOG/calls.log" ] && fail "credential-missing run makes no delegate call"
+[ ! -e "$CLONE830-canary-252-pi" ] || fail "credential-missing run cuts no pi worktree"
+[ ! -e "$CLONE830-canary-252-fiber" ] || fail "credential-missing run cuts no fiber worktree"
+[ ! -f "$OUT834/pi/worktree" ] || fail "credential-missing run records no pi worktree"
+[ ! -f "$OUT834/fiber/worktree" ] || fail "credential-missing run records no fiber worktree"
+
+echo "credential fail-fast cases passed"

@@ -413,15 +413,21 @@ cmd_run() {
   # one below. Only the extensions/<name> directory that provides this
   # provider is copied; credentials and config never leave the real home.
   local real_fiber_home="${REAL_FIBER_HOME:-${FIBER_HOME:-$HOME/.fiber}}"
-  local ext_dir="" cand cand_providers
+  local ext_dir="" cand
   for cand in "$real_fiber_home"/extensions/*/providers/"$fiber_provider".json; do
     [ -f "$cand" ] || continue
-    cand_providers="$(dirname "$cand")"
-    ext_dir="$(dirname "$cand_providers")"
+    ext_dir="${cand%/providers/*}"
     break
   done
   if [ -z "$ext_dir" ]; then
     err "The provider $fiber_provider is not installed in $real_fiber_home. Run fiber extension install ${fiber_provider%%-*}."
+    return 2
+  fi
+  # A provider without an env credential needs a credential file the
+  # isolated home never gets, so the run stops here, before the pi arm
+  # spends anything. Credentials are never copied; the owner rules.
+  if [ -z "$(jq -r '.credential.env // empty' "$cand")" ]; then
+    err "The provider $fiber_provider needs a credential file under $real_fiber_home/credentials, which the isolated home does not get. Not copied; owner ruling needed."
     return 2
   fi
   # A symlink in the extension tree could point back into the real home,
