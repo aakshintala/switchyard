@@ -103,7 +103,11 @@ if [ "$from" = lane ]; then
   require_keys closing workflow_doc
   closing="$(tkt get closing)"
   gate_cmd="$("$plangate" "$plan" 2>"$tmpd/pg-err")" || emit "PRECONDITION missing=gate" 2 "$(cat "$tmpd/pg-err")"
-  attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
+  # body_ends wins; a missing or blank body_ends falls through to the body_has co-author.
+  attr="$(tkt get body_ends 2>/dev/null || true)"
+  if [ -z "${attr//[[:space:]]/}" ]; then
+    attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
+  fi
   lane_model="${lane_model:-$(tkt get model.lane 2>/dev/null || true)}"
   # A lane with no model names the missing key on stderr and stops before dispatch.
   if [ -z "$lane_model" ]; then
