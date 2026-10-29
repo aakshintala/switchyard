@@ -353,6 +353,52 @@ fiber_provider_of() {
   esac
 }
 
+# locate_provider_extension REAL_HOME PROVIDER: the extension directory
+# and provider file for PROVIDER under REAL_HOME, printed on two lines.
+# The first match of extensions/*/providers/<PROVIDER>.json wins. Only
+# reads; every refusal returns 1 with one err line, so callers map it to
+# return 2 before anything is created.
+locate_provider_extension() {
+  local real_home="$1" provider="$2"
+  local ext_dir="" file="" cand
+  for cand in "$real_home"/extensions/*/providers/"$provider".json; do
+    [ -f "$cand" ] || continue
+    ext_dir="${cand%/providers/*}"
+    file="$cand"
+    break
+  done
+  if [ -z "$ext_dir" ]; then
+    err "The provider $provider is not installed in $real_home. Run fiber extension install ${provider%%-*}."
+    return 1
+  fi
+  # A provider without an env credential needs a credential file the
+  # isolated home never gets, so the run stops here, before the pi arm
+  # spends anything. Credentials are never copied; the owner rules.
+  if [ -z "$(jq -r '.credential.env // empty' "$file")" ]; then
+    err "The provider $provider needs a credential file under $real_home/credentials, which the isolated home does not get. Not copied; owner ruling needed."
+    return 1
+  fi
+  # A symlink in the extension tree could point back into the real home,
+  # so the copy below refuses the tree unless every file in it is real.
+  if [ -n "$(find "$ext_dir" -type l)" ]; then
+    err "Refusing to copy $ext_dir: the extension tree holds a symlink."
+    return 1
+  fi
+  printf '%s\n%s\n' "$ext_dir" "$file"
+}
+
+# copy_extension_tree EXT_DIR: seed the isolated home (FIBER_HOME, already
+# exported and absolute) with the provider's extension directory, as real
+# files: the lane starts with its provider installed and nothing else.
+# Never copies anything else; returns 1 with one err line on failure.
+copy_extension_tree() {
+  local ext_dir="$1"
+  mkdir -p "$FIBER_HOME/extensions" \
+    || { err "cannot create $FIBER_HOME/extensions"; return 1; }
+  cp -R "$ext_dir" "$FIBER_HOME/extensions/" \
+    || { err "cannot copy $ext_dir to $FIBER_HOME/extensions"; return 1; }
+}
+
 # reviewer_source CONFIG PROVIDER PROVIDER_FILE: the reviewer pick for a
 # flag-less run, printed on two lines: the source ("config" or "package")
 # then the pick. Only the real config's providers.<provider>.reviewer_model
@@ -445,29 +491,11 @@ cmd_run() {
   # one below. Only the extensions/<name> directory that provides this
   # provider is copied; credentials and config never leave the real home.
   local real_fiber_home="${REAL_FIBER_HOME:-${FIBER_HOME:-$HOME/.fiber}}"
-  local ext_dir="" cand
-  for cand in "$real_fiber_home"/extensions/*/providers/"$fiber_provider".json; do
-    [ -f "$cand" ] || continue
-    ext_dir="${cand%/providers/*}"
-    break
-  done
-  if [ -z "$ext_dir" ]; then
-    err "The provider $fiber_provider is not installed in $real_fiber_home. Run fiber extension install ${fiber_provider%%-*}."
-    return 2
-  fi
-  # A provider without an env credential needs a credential file the
-  # isolated home never gets, so the run stops here, before the pi arm
-  # spends anything. Credentials are never copied; the owner rules.
-  if [ -z "$(jq -r '.credential.env // empty' "$cand")" ]; then
-    err "The provider $fiber_provider needs a credential file under $real_fiber_home/credentials, which the isolated home does not get. Not copied; owner ruling needed."
-    return 2
-  fi
-  # A symlink in the extension tree could point back into the real home,
-  # so the copy below refuses the tree unless every file in it is real.
-  if [ -n "$(find "$ext_dir" -type l)" ]; then
-    err "Refusing to copy $ext_dir: the extension tree holds a symlink."
-    return 2
-  fi
+  local arm_located="" ext_dir="" cand
+  arm_located="$(locate_provider_extension "$real_fiber_home" "$fiber_provider")" \
+    || return 2
+  ext_dir="${arm_located%%$'\n'*}"
+  cand="${arm_located#*$'\n'}"
   # With no --fiber-reviewer-model the reviewer comes from the real
   # config's providers.<provider>.reviewer_model or the provider
   # package's default; with no source the run stops here, before any pi
@@ -507,10 +535,7 @@ cmd_run() {
   export FIBER_HOME="$(cd "$out/fiber-home" && pwd)"
   # Seed the isolated home with only the provider's extension directory, as
   # real files: the lane starts with its provider installed and nothing else.
-  mkdir -p "$FIBER_HOME/extensions" \
-    || { err "cannot create $FIBER_HOME/extensions"; return 2; }
-  cp -R "$ext_dir" "$FIBER_HOME/extensions/" \
-    || { err "cannot copy $ext_dir to $FIBER_HOME/extensions"; return 2; }
+  copy_extension_tree "$ext_dir" || return 2
   git -C "$clone" rev-parse --git-common-dir >/dev/null 2>&1 \
     || { err "clone $clone is not a git checkout"; return 2; }
   clone="$(cd "$clone" && pwd)"
