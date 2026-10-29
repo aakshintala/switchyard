@@ -372,6 +372,36 @@ grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is j
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
 
+# --- body_ends wins over body_has for the lane ATTRIBUTION ---
+setup_case attr-ends
+bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-ends: set body_has"
+bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-ends: set body_ends"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "attr-ends exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-ends: ATTRIBUTION reaches the lane"
+
+# --- with no body_ends, a body_has co-author reaches the lane ---
+setup_case attr-body
+bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-body: set body_has"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "attr-body exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "ATTRIBUTION=Co-authored with Body" "$T/calls.log" || fail "attr-body: ATTRIBUTION reaches the lane"
+
+# --- when both keys are set, body_ends wins ---
+setup_case attr-both
+bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-both: set body_has"
+bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-both: set body_ends"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "attr-both exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-both: ATTRIBUTION reaches the lane"
+
+# --- with neither key, the ATTRIBUTION slot stays empty ---
+setup_case attr-empty
+bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-empty: set body_has"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "attr-empty exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "ATTRIBUTION= LANE_MODEL=" "$T/calls.log" || fail "attr-empty: ATTRIBUTION stays empty"
+
 # --- mutants present: the map runs beside review, needs-test and removed merge ---
 setup_case mutants
 printf 'mutant_job=%s\n' Selection >>"$S"
