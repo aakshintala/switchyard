@@ -88,6 +88,16 @@ expect_passed() {
     fail "passed [$*]: stub saw [$(cat "$T/calls")], want [$want]"
 }
 
+# refused ARGS... / passed ARGS...: one table line per covered form.
+refused() {
+  lane "$@"
+  expect_refused "$@"
+}
+passed() {
+  lane "$@"
+  expect_passed "$@"
+}
+
 # Task 1: pass-through and lookup.
 
 lane issue list
@@ -171,5 +181,85 @@ rc=$?
 [ "$rc" = 127 ] || fail "PATH unset: exit $rc, want 127"
 grep -q 'gh-label-guard:' "$T/unset-err" ||
   fail "PATH unset: no gh-label-guard: line on stderr"
+
+# Task 2: the guard.
+
+refused issue edit 5 --add-label needs-owner
+refused issue edit 5 --add-label needs-triage
+refused issue edit 5 --remove-label needs-owner
+refused issue edit 5 --remove-label needs-triage
+refused pr edit 5 --add-label needs-owner
+refused pr edit 5 --add-label needs-triage
+refused pr edit 5 --remove-label needs-owner
+refused pr edit 5 --remove-label needs-triage
+refused issue edit 5 --add-label=needs-owner
+refused issue edit 5 --add-label bug,needs-owner
+refused issue edit 5 --remove-label needs-triage,bug
+refused issue edit 5 --add-label=bug,needs-triage,x
+refused issue edit 5 --add-label bug --add-label needs-triage
+refused issue edit 5 --add-label '"needs-owner"'
+refused issue edit 5 --add-label $'needs-owner\nbug'
+refused issue edit 5 --add-label $'\nneeds-owner'
+refused issue edit 5 --add-label Needs-Owner
+refused issue edit 5 --remove-label NEEDS-TRIAGE
+refused issue edit 5 --add-label needs-owner --remove-label needs-triage
+refused issue create --label needs-owner
+refused issue new --label needs-triage
+refused pr create -l needs-owner
+refused pr new -l needs-triage
+refused pr create -lneeds-owner
+refused pr create -l=needs-owner
+refused pr create --label=bug,needs-owner
+refused pr create -l bug -l needs-triage
+refused pr create -dl needs-owner
+refused issue edit 5 --title x --body y --add-label needs-owner
+refused -R aakshintala/switchyard issue edit 5 --add-label needs-owner
+refused issue -R aakshintala/switchyard edit 5 --add-label needs-owner
+refused issue edit 5 -R aakshintala/switchyard --add-label needs-owner
+refused issue edit 5 --repo=aakshintala/switchyard --add-label needs-owner
+
+passed issue edit 5 --add-label bug
+passed issue edit 5 --remove-label needs-info
+passed issue edit 5 --add-label needs-owner-x
+passed issue edit 5 --add-label xneeds-owner
+passed issue edit 5 --add-label needs-owners
+passed issue edit 5 --add-label needs-
+passed issue edit 5 --add-label ' needs-owner'
+passed issue edit 5 --add-label 'needs owner'
+passed issue edit 5 --add-label bug,help wanted
+passed pr create --label mutants
+passed pr create -d needs-owner
+passed pr edit 5 --add-label bug --remove-label mutants
+passed issue edit 5 --title needs-owner
+passed issue edit 5 --body 'run gh issue edit 5 --add-label needs-owner'
+passed issue edit 5 --body '--add-label needs-owner'
+passed issue edit 5 --title --add-label needs-owner
+passed issue edit 5 --add-assignee needs-triage
+passed issue create --title t --body '--label needs-owner'
+passed issue edit 5 --add-label bug --title needs-triage
+passed issue edit 5 -- --add-label needs-owner
+passed issue list --label needs-owner
+passed pr list --label needs-triage
+passed issue comment 5 --body needs-owner
+passed issue view 5
+passed issue close 5
+passed label create needs-owner
+passed api repos/x/y/issues/5/labels -f 'labels[]=needs-owner'
+passed search issues --label needs-owner
+passed issue edit 5 --label needs-owner
+passed pr edit 5 -l needs-owner
+passed issue create --add-label needs-owner
+passed pr create --remove-label needs-triage
+passed issue edit 5 --add-label
+passed issue edit
+passed issue
+passed issue edit 5 --add-label '"needs-owner'
+passed -R
+
+# A refusal does not need a real gh: with no real gh on PATH, the guard
+# still refuses with 1 instead of failing the lookup with 127.
+LANE_PATH="$T/shims:$T/py"
+refused issue edit 5 --add-label needs-owner
+unset LANE_PATH
 
 echo "gh-label-guard: all cases passed"

@@ -4,12 +4,31 @@
 # label through gh issue/pr edit/create. Installed as `gh` in a directory
 # placed first on a lane's PATH; see autonomous-flywheel. Runs the real gh
 # for everything else.
+import csv
 import errno
+import io
 import os
 import signal
 import sys
 
 MARKER = b"# gh-label-guard shim"
+REFUSAL = ("gh-label-guard: refused: a lane may not add or remove the "
+           "needs-owner or needs-triage label; send the question to your "
+           "orchestrator (flywheel) instead")
+GUARDED_LABELS = ("needs-owner", "needs-triage")
+# Value flags in `gh issue edit|create --help` and `gh pr edit|create --help`
+# (union); every other flag in those four tables is boolean.
+VALUE_FLAGS = {
+    "add-assignee", "add-blocked-by", "add-blocking", "add-label",
+    "add-project", "add-reviewer", "add-sub-issue", "assignee", "attach",
+    "base", "blocked-by", "blocking", "body", "body-file", "head", "label",
+    "milestone", "parent", "project", "recover", "remove-assignee",
+    "remove-blocked-by", "remove-blocking", "remove-label", "remove-project",
+    "remove-reviewer", "remove-sub-issue", "repo", "reviewer", "template",
+    "title", "type",
+}
+# Value shorthands in those four tables (union): a b B F H l m p r R t T.
+VALUE_SHORTHANDS = set("abBFHlmprRtT")
 
 
 def fail(code, msg):
@@ -57,8 +76,90 @@ def exec_real(real, args):
         fail(code, "cannot exec %s: %s" % (real, err.strerror))
 
 
+def label_names(value):
+    # gh CSV-splits the value (stripping quotes, keeping spaces, matching
+    # case-insensitively) and applies only the first record, as Go's
+    # csv.Reader.Read does under pflag's readAsCSV. A value that is not
+    # valid CSV names no label; gh rejects it itself.
+    try:
+        # strict=True, so an unterminated quote raises csv.Error as Go's
+        # csv.Reader does; without it Python would silently drop the quote.
+        rows = list(csv.reader(io.StringIO(value), strict=True))
+    except csv.Error:
+        return []
+    for row in rows:
+        if row:
+            return row
+    return []
+
+
+def guarded_labels(args):
+    # One pass over argv, mirroring pflag, so text inside an unrelated
+    # option's value is never read as a flag. A token `--` ends option
+    # parsing; `--name=VAL` carries its value; `--name VAL` takes the next
+    # token unconditionally when name is a value flag; a `-xyz` cluster is
+    # scanned letter by letter, the first value shorthand taking the rest of
+    # the token or the next token. An unknown flag is a boolean, and a value
+    # flag with no following token is ignored.
+    positionals = []
+    flags = []
+    options_done = False
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if options_done:
+            positionals.append(token)
+        elif token == "--":
+            options_done = True
+        elif token.startswith("--"):
+            name, sep, inline = token[2:].partition("=")
+            if sep:
+                flags.append((name, inline))
+            elif name in VALUE_FLAGS and i + 1 < len(args):
+                flags.append((name, args[i + 1]))
+                i += 1
+        elif token.startswith("-") and len(token) > 1:
+            j = 1
+            while j < len(token):
+                letter = token[j]
+                if letter in VALUE_SHORTHANDS:
+                    if j + 1 < len(token):
+                        rest = token[j + 1:]
+                        if rest.startswith("="):
+                            rest = rest[1:]
+                        flags.append((letter, rest))
+                    elif i + 1 < len(args):
+                        flags.append((letter, args[i + 1]))
+                        i += 1
+                    break
+                j += 1
+        else:
+            positionals.append(token)
+        i += 1
+    if len(positionals) < 2:
+        return False
+    group, verb = positionals[0], positionals[1]
+    if group not in ("issue", "pr"):
+        return False
+    if verb == "edit":
+        watched = ("add-label", "remove-label")
+    elif verb in ("create", "new"):
+        watched = ("label", "l")
+    else:
+        return False
+    for name, value in flags:
+        if name in watched:
+            for label in label_names(value):
+                if label.lower() in GUARDED_LABELS:
+                    return True
+    return False
+
+
 def main():
     args = sys.argv[1:]
+    if guarded_labels(args):
+        sys.stderr.write(REFUSAL + "\n")
+        sys.exit(1)
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     real = find_real_gh(os.environ.get("PATH"), shim_dir)
     if real is None:
