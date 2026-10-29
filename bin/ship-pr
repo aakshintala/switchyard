@@ -706,7 +706,29 @@ while :; do
           sleep 5
           if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
             printf '%s\n' "$merge_err" >&2
-            merge_failed=1
+            lost_race2=""
+            case "$merge_err" in
+              *"the head branch is not up to date with the base branch"*)
+                [ "$strict" = 1 ] && lost_race2=1 ;;
+            esac
+            if [ -n "$lost_race2" ]; then
+              state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
+              if [ "$state" != "MERGED" ]; then
+                fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
+                if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
+                  lost_race_die "origin/main has not moved past ${pin:0:8}"
+                fi
+                [ -z "$lost_race_done" ] || lost_race_die "the rebased head lost the race again"
+                [ "$retries" -lt 3 ] || lost_race_die "no retries left"
+                lost_race_done=1
+                retries=$((retries + 1))
+                merge_attempted=0
+                say "origin/main moved before the merge; rebasing again (retry $retries of 3)"
+                continue
+              fi
+            else
+              merge_failed=1
+            fi
           else
             [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
           fi
