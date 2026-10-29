@@ -353,6 +353,32 @@ fiber_provider_of() {
   esac
 }
 
+# reviewer_source CONFIG PROVIDER PROVIDER_FILE: the reviewer pick for a
+# flag-less run, printed on two lines: the source ("config" or "package")
+# then the pick. Only the real config's providers.<provider>.reviewer_model
+# is read from the config; the package default is the provider file's
+# .reviewer_model, then extension.json's. An unreadable or invalid file, or
+# a pick that is not a non-empty string, is no source from that location.
+# Returns 1 when no source names a reviewer. Only reads.
+reviewer_source() {
+  local config="$1" provider="$2" prov_file="$3" pick
+  pick="$(jq -r --arg p "$provider" \
+    '.providers[$p].reviewer_model | select(type == "string" and length > 0)' \
+    "$config" 2>/dev/null)" || pick=""
+  if [ -n "$pick" ]; then
+    printf 'config\n%s\n' "$pick"
+    return 0
+  fi
+  pick="$(jq -r '.reviewer_model | select(type == "string" and length > 0)' \
+    "$prov_file" 2>/dev/null)" || pick=""
+  if [ -z "$pick" ]; then
+    pick="$(jq -r '.reviewer_model | select(type == "string" and length > 0)' \
+      "${prov_file%/providers/*}/extension.json" 2>/dev/null)" || pick=""
+  fi
+  [ -n "$pick" ] || return 1
+  printf 'package\n%s\n' "$pick"
+}
+
 # clean_ticket CLONE TICKET OUT [--force]: remove whatever exists of the
 # ticket's two worktrees and two branches, then the <side>/worktree files.
 # Without --force a dirty worktree refuses (git's message, return 1).
@@ -441,6 +467,24 @@ cmd_run() {
   if [ -n "$(find "$ext_dir" -type l)" ]; then
     err "Refusing to copy $ext_dir: the extension tree holds a symlink."
     return 2
+  fi
+  # With no --fiber-reviewer-model the reviewer comes from the real
+  # config's providers.<provider>.reviewer_model or the provider
+  # package's default; with no source the run stops here, before any pi
+  # spend. Only reads; nothing is created before this point.
+  local reviewer_origin="" reviewer_pick=""
+  if [ -n "$fiber_reviewer_model" ]; then
+    reviewer_origin="flag"
+    reviewer_pick="$fiber_reviewer_model"
+  else
+    local reviewer_resolved=""
+    if reviewer_resolved="$(reviewer_source "$real_fiber_home/config.json" "$fiber_provider" "$cand")"; then
+      reviewer_origin="${reviewer_resolved%%$'\n'*}"
+      reviewer_pick="${reviewer_resolved#*$'\n'}"
+    else
+      err "no reviewer model for provider $fiber_provider: pass --fiber-reviewer-model <provider>/<model>"
+      return 2
+    fi
   fi
   # Resolve Fiber before any worktree, job or output dir exists, and pin the
   # binary so delegate runs the same one the summary records.

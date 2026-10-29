@@ -1133,3 +1133,87 @@ grep -q -- '--fiber-reviewer-model needs a value' "$T/revflag.err" \
 [ ! -e "$CLONE830-canary-253-fiber" ] || fail "trailing reviewer flag cuts no fiber worktree"
 
 echo "reviewer flag validation cases passed"
+
+# --- Reviewer resolution failures (#833): with the flag absent and no
+# source naming a reviewer, the run exits 2 naming the flag before any
+# delegate call, worktree or fiber home.
+# d. No source at all: no real config.json, and a provider file and
+# extension.json with no reviewer_model.
+REALD="$T/real-rev-none"
+mkdir -p "$REALD/.fiber"
+seed_extension "$REALD/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REALD/.fiber/extensions/opencode/providers/opencode-go.json"
+OUTD="$T/out-rev-none"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REALD" bash "$CANARY" run 254 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTD" 2>"$T/revnone.err"; then
+  fail "reviewer-less run should not exit 0"
+else
+  [ $? -eq 2 ] || fail "reviewer-less run exits 2"
+fi
+grep -q -- '--fiber-reviewer-model' "$T/revnone.err" || fail "reviewer-less message names the flag"
+[ -s "$FLOG/calls.log" ] && fail "reviewer-less run makes no delegate call"
+[ ! -e "$OUTD/fiber-home" ] || fail "reviewer-less run creates no fiber home"
+[ ! -e "$CLONE830-canary-254-pi" ] || fail "reviewer-less run cuts no pi worktree"
+[ ! -e "$CLONE830-canary-254-fiber" ] || fail "reviewer-less run cuts no fiber worktree"
+[ ! -f "$OUTD/pi/worktree" ] || fail "reviewer-less run records no pi worktree"
+[ ! -f "$OUTD/fiber/worktree" ] || fail "reviewer-less run records no fiber worktree"
+
+# i. No usable real-config pick and no package default: invalid JSON (its
+# contents never reach stderr), a numeric, empty, null or object pick, a
+# providers array, a string provider entry, and a top-level array.
+REALI="$T/real-rev-bad"
+mkdir -p "$REALI/.fiber"
+seed_extension "$REALI/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REALI/.fiber/extensions/opencode/providers/opencode-go.json"
+OUTI="$T/out-rev-bad"
+rev_bad_case() { # CONFIG LABEL
+  printf '%s\n' "$1" >"$REALI/.fiber/config.json"
+  rm -rf "$OUTI"
+  : >"$FLOG/calls.log"
+  if env -u FIBER_HOME HOME="$REALI" bash "$CANARY" run 255 "$T/brief.md" \
+    --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTI" 2>"$T/revbad.err"; then
+    fail "bad config ($2) should not exit 0"
+  else
+    [ $? -eq 2 ] || fail "bad config ($2) exits 2"
+  fi
+  grep -q -- '--fiber-reviewer-model' "$T/revbad.err" || fail "bad config ($2) names the flag"
+  [ -s "$FLOG/calls.log" ] && fail "bad config ($2) makes no delegate call"
+  [ ! -e "$OUTI/fiber-home" ] || fail "bad config ($2) creates no fiber home"
+  [ ! -e "$CLONE830-canary-255-pi" ] || fail "bad config ($2) cuts no pi worktree"
+  [ ! -e "$CLONE830-canary-255-fiber" ] || fail "bad config ($2) cuts no fiber worktree"
+}
+rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":"SENTINEL-BAD-JSON"}}' invalid-json
+grep -q 'SENTINEL-BAD-JSON' "$T/revbad.err" && fail "invalid config leaks its contents to stderr"
+rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":42}}}' numeric-pick
+rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":""}}}' empty-pick
+rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":null}}}' null-pick
+rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":{}}}}' object-pick
+rev_bad_case '{"providers":[]}' providers-array
+rev_bad_case '{"providers":{"opencode-go":"local-id"}}' string-provider
+rev_bad_case '[]' top-level-array
+
+# k. A valid real config with no reviewer_model for the provider and no
+# package default exits 2 naming the flag, with no null written anywhere.
+REALK="$T/real-rev-k"
+mkdir -p "$REALK/.fiber"
+seed_extension "$REALK/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REALK/.fiber/extensions/opencode/providers/opencode-go.json"
+printf '{"providers":{"opencode-go":{"credential":{"env":"OPENCODE_API_KEY"}}}}\n' >"$REALK/.fiber/config.json"
+OUTK="$T/out-rev-k"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REALK" bash "$CANARY" run 256 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTK" 2>"$T/revk.err"; then
+  fail "pick-less run should not exit 0"
+else
+  [ $? -eq 2 ] || fail "pick-less run exits 2"
+fi
+grep -q -- '--fiber-reviewer-model' "$T/revk.err" || fail "pick-less message names the flag"
+[ -s "$FLOG/calls.log" ] && fail "pick-less run makes no delegate call"
+[ ! -e "$OUTK/fiber-home" ] || fail "pick-less run creates no fiber home"
+[ ! -e "$OUTK/fiber-home/config.json" ] || ! grep -q 'null' "$OUTK/fiber-home/config.json" \
+  || fail "pick-less run writes no null config"
+[ ! -e "$CLONE830-canary-256-pi" ] || fail "pick-less run cuts no pi worktree"
+[ ! -e "$CLONE830-canary-256-fiber" ] || fail "pick-less run cuts no fiber worktree"
+
+echo "reviewer resolution cases passed"
