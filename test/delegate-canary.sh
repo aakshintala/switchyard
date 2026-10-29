@@ -56,8 +56,8 @@ mkdir -p "$FIBER_HOME"
 # every run below through.
 seed_extension "$FIBER_HOME" opencode-go opencode
 seed_extension "$FIBER_HOME" codex codex
-printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$FIBER_HOME/extensions/opencode/providers/opencode-go.json"
-printf '{"credential":{"env":"CODEX_API_KEY"}}\n' >"$FIBER_HOME/extensions/codex/providers/codex.json"
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$FIBER_HOME/extensions/opencode/providers/opencode-go.json"
+printf '{"credential":{"env":"CODEX_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$FIBER_HOME/extensions/codex/providers/codex.json"
 
 # --- local origin (bare) and clone at $HOME/work/fiber (the defaults) ---
 git init -q --bare "$T/upstream.git"
@@ -919,7 +919,7 @@ OUTFH="$T/out-fiber-home"
 # The decoy home is this run's real home, so it holds the opencode
 # extension too (#830), with an env credential for the fail-fast.
 seed_extension "$T/decoy-fiber" opencode-go opencode
-printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$T/decoy-fiber/extensions/opencode/providers/opencode-go.json"
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$T/decoy-fiber/extensions/opencode/providers/opencode-go.json"
 if [ -e "$HOME/.fiber" ]; then
   FIBER_REAL_BEFORE="$(find "$HOME/.fiber" | sort)"
 else
@@ -965,7 +965,7 @@ CLONE830="$HOME/work/fiber"
 REAL830="$T/real830"
 mkdir -p "$REAL830/.fiber"
 seed_extension "$REAL830/.fiber" opencode-go opencode
-printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL830/.fiber/extensions/opencode/providers/opencode-go.json"
+printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REAL830/.fiber/extensions/opencode/providers/opencode-go.json"
 REAL830_BEFORE="$(find "$REAL830/.fiber" | sort)"
 OUT830="$T/out-ext"
 : >"$FLOG/calls.log"
@@ -1000,7 +1000,7 @@ REAL831="$T/real831"
 mkdir -p "$REAL831/.fiber"
 seed_extension "$REAL831/.fiber" opencode-go opencode
 seed_extension "$REAL831/.fiber" codex codex
-printf '{"credential":{"env":"CODEX_API_KEY"}}\n' >"$REAL831/.fiber/extensions/codex/providers/codex.json"
+printf '{"credential":{"env":"CODEX_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REAL831/.fiber/extensions/codex/providers/codex.json"
 OUT831="$T/out-codex"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REAL831" bash "$CANARY" run 249 "$T/brief.md" \
@@ -1090,3 +1090,46 @@ grep -q 'Not copied; owner ruling needed' "$T/cred.err" || fail "credential mess
 [ ! -f "$OUT834/fiber/worktree" ] || fail "credential-missing run records no fiber worktree"
 
 echo "credential fail-fast cases passed"
+
+# --- Reviewer flag validation (#833): an empty, whitespace-holding or
+# missing --fiber-reviewer-model value exits 2 naming the flag with its
+# "needs a value" text, before any delegate call, fiber home or worktree.
+TABV="a$(printf '\t')b"
+for REVVAL in "" "a b" "$TABV"; do
+  OUTJ="$T/out-revflag"
+  rm -rf "$OUTJ"
+  : >"$FLOG/calls.log"
+  if env -u FIBER_HOME HOME="$REAL830" bash "$CANARY" run 253 "$T/brief.md" \
+    --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTJ" \
+    --fiber-reviewer-model "$REVVAL" 2>"$T/revflag.err"; then
+    fail "reviewer flag value '$REVVAL' should not exit 0"
+  else
+    [ $? -eq 2 ] || fail "reviewer flag value '$REVVAL' exits 2"
+  fi
+  grep -q -- '--fiber-reviewer-model needs a value' "$T/revflag.err" \
+    || fail "reviewer flag value '$REVVAL' names the flag with its needs-a-value text"
+  [ -s "$FLOG/calls.log" ] && fail "reviewer flag value '$REVVAL' makes no delegate call"
+  [ ! -e "$OUTJ/fiber-home" ] || fail "reviewer flag value '$REVVAL' creates no fiber home"
+  [ ! -e "$CLONE830-canary-253-pi" ] || fail "reviewer flag value '$REVVAL' cuts no pi worktree"
+  [ ! -e "$CLONE830-canary-253-fiber" ] || fail "reviewer flag value '$REVVAL' cuts no fiber worktree"
+  [ ! -f "$OUTJ/pi/worktree" ] || fail "reviewer flag value '$REVVAL' records no pi worktree"
+  [ ! -f "$OUTJ/fiber/worktree" ] || fail "reviewer flag value '$REVVAL' records no fiber worktree"
+done
+OUTJ="$T/out-revflag"
+rm -rf "$OUTJ"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REAL830" bash "$CANARY" run 253 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTJ" \
+  --fiber-reviewer-model 2>"$T/revflag.err"; then
+  fail "trailing reviewer flag should not exit 0"
+else
+  [ $? -eq 2 ] || fail "trailing reviewer flag exits 2"
+fi
+grep -q -- '--fiber-reviewer-model needs a value' "$T/revflag.err" \
+  || fail "trailing reviewer flag names the flag with its needs-a-value text"
+[ -s "$FLOG/calls.log" ] && fail "trailing reviewer flag makes no delegate call"
+[ ! -e "$OUTJ/fiber-home" ] || fail "trailing reviewer flag creates no fiber home"
+[ ! -e "$CLONE830-canary-253-pi" ] || fail "trailing reviewer flag cuts no pi worktree"
+[ ! -e "$CLONE830-canary-253-fiber" ] || fail "trailing reviewer flag cuts no fiber worktree"
+
+echo "reviewer flag validation cases passed"

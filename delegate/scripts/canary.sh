@@ -2,7 +2,7 @@
 # canary.sh: run one ticket's brief on pi and Fiber side by side, with metrics.
 #
 # Usage:
-#   canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]
+#   canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--fiber-reviewer-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]
 #   canary.sh clean <ticket> [--out DIR]
 #   canary.sh report <ticket> [--out DIR]
 #
@@ -64,7 +64,7 @@ err() {
 }
 
 usage() {
-  err "usage: canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]"
+  err "usage: canary.sh run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--fiber-reviewer-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]"
   err "       canary.sh clean <ticket> [--out DIR]"
   err "       canary.sh report <ticket> [--out DIR]"
 }
@@ -383,7 +383,7 @@ cmd_run() {
   [ $# -ge 2 ] || { usage; return 2; }
   local ticket="$1" brief="$2"
   shift 2
-  local gate="" repo="$DEFAULT_REPO" clone="" out="" pi_model="$PI_MODEL" fiber_model="$FIBER_MODEL" thinking=""
+  local gate="" repo="$DEFAULT_REPO" clone="" out="" pi_model="$PI_MODEL" fiber_model="$FIBER_MODEL" fiber_reviewer_model="" thinking=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --gate) [ $# -ge 2 ] || { err "--gate needs a value"; return 2; }; gate="$2"; shift 2 ;;
@@ -392,6 +392,12 @@ cmd_run() {
       --out) [ $# -ge 2 ] || { err "--out needs a value"; return 2; }; out="$2"; shift 2 ;;
       --pi-model) [ $# -ge 2 ] || { err "--pi-model needs a value"; return 2; }; pi_model="$2"; shift 2 ;;
       --fiber-model) [ $# -ge 2 ] || { err "--fiber-model needs a value"; return 2; }; fiber_model="$2"; shift 2 ;;
+      --fiber-reviewer-model)
+        [ $# -ge 2 ] && [ -n "$2" ] || { err "--fiber-reviewer-model needs a value"; return 2; }
+        case "$2" in
+          *[[:space:]]*) err "--fiber-reviewer-model needs a value"; return 2 ;;
+        esac
+        fiber_reviewer_model="$2"; shift 2 ;;
       --thinking) [ $# -ge 2 ] && [ -n "$2" ] || { err "--thinking needs a value"; return 2; }; thinking="$2"; shift 2 ;;
       --*) err "unknown flag $1"; return 2 ;;
       *) err "unexpected argument $1"; return 2 ;;
