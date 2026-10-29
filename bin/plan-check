@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# plan-check: check a plan's paths and symbols against its base before a Verifier reads it.
+# plan-check: check a plan's Files paths against its base before a Verifier reads it.
 # Usage: plan-check PLAN_FILE [--base REV] [--cwd DIR]
 #        plan-check -h | --help
 #        REV is --base, else the plan's `Base: <sha>` line. DIR is a git clone of
@@ -11,7 +11,7 @@
 #        pattern, never reported), and `/`, `.`,
 #        `..` or a bare extension. A token with one `{a,b}` group is checked once
 #        per alternative; with more than one group it is skipped. A `path::symbol`
-#        token is split and both halves are checked.
+#        token is split and only the path half is checked.
 #        1. A path (a `/` or a source or doc extension) resolves at REV: by full
 #           path, a directory by its trailing `/`, or by a suffix that names exactly
 #           one file. A suffix naming two or more files resolves but is left out of
@@ -26,10 +26,9 @@
 #           A directory counts as in Files when a Files path starts with it.
 #           A Files entry ending in `/` covers every path under it, and a Files
 #           entry holding `*` covers every path it matches.
-#        3. A symbol (an identifier with `_`, `::` or an uppercase letter after its
-#           first character) outside `## Tasks` occurs at REV, or a line with the
-#           word `new`, `removed`, `remove`, `deleted`, `delete` or `example` holds a
-#           backticked token containing its last `::` segment.
+#        A backticked token outside the `## Files` list is never checked for
+#        naming a code symbol: prose may cite any name. The Verifier still
+#        reads the plan for wrong names.
 #        Exit 0, nothing printed: clean. Exit 1: one line per problem on stdout,
 #        each ending with the fix it accepts.
 #        Exit 2 on bad usage, an unreadable plan, no Base line and no --base, or a
@@ -91,27 +90,13 @@ check_path() {
   return 0
 }
 
-# check_symbol SYMBOL: check 3, skipped inside the Tasks section
-check_symbol() {
-  local s="$1" last
-  [ "$CUR_SEC" != tasks ] || return 0
-  case "$s" in *"()") s="${s%??}" ;; esac
-  last="${s##*::}"
-  if git -C "$dir" grep -q -w -F -e "$last" "$rev" 2>/dev/null; then return 0; fi
-  if exempt_new "$last"; then return 0; fi
-  if ! seen "s:$1"; then
-    problem "unknown symbol: $1 (line $CUR_LN): correct it, or mark the line new, removed or example"
-  fi
-  return 0
-}
-
 # handle_token KIND VALUE: the expand_token callback replacing check_token's dispatch.
 # A glob is already recorded as a cover pattern by expand_token itself.
+# A symbol half of a token is never checked: prose may cite any name.
 handle_token() {
   case "$1" in
-    glob) return 0 ;;
+    glob|symbol) return 0 ;;
     path) check_path "$2" ;;
-    symbol) check_symbol "$2" ;;
   esac
   return 0
 }
