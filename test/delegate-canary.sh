@@ -39,8 +39,21 @@ export HOME="$T/home"
 mkdir -p "$HOME"
 export TMPDIR="$T/tmp"
 mkdir -p "$TMPDIR"
+# seed_extension ROOT PROVIDER EXT: ROOT/extensions/EXT holds exactly two
+# regular files, providers/PROVIDER.json and extension.json.
+seed_extension() {
+  local root="$1" provider="$2" ext="$3"
+  mkdir -p "$root/extensions/$ext/providers"
+  printf '{"name": "%s"}\n' "$ext" >"$root/extensions/$ext/extension.json"
+  printf '{"id": "%s"}\n' "$provider" >"$root/extensions/$ext/providers/$provider.json"
+}
+
 export FIBER_HOME="$T/fiber-home"
 mkdir -p "$FIBER_HOME"
+# The fake real home holds an opencode and a codex extension, so every run
+# below finds its fiber arm's provider there (#830).
+seed_extension "$FIBER_HOME" opencode-go opencode
+seed_extension "$FIBER_HOME" codex codex
 
 # --- local origin (bare) and clone at $HOME/work/fiber (the defaults) ---
 git init -q --bare "$T/upstream.git"
@@ -899,6 +912,9 @@ echo "report cases passed"
 # and that the real $HOME/.fiber was neither created nor changed.
 : >"$FLOG/fiber-home.log"
 OUTFH="$T/out-fiber-home"
+# The decoy home is this run's real home, so it holds the opencode
+# extension too (#830).
+seed_extension "$T/decoy-fiber" opencode-go opencode
 if [ -e "$HOME/.fiber" ]; then
   FIBER_REAL_BEFORE="$(find "$HOME/.fiber" | sort)"
 else
@@ -935,3 +951,108 @@ ABSREL="$(cd "$T/relcwd/out-rel" && pwd)"
 bash "$CANARY" clean 243 --out "$ABSREL" || fail "clean 243 exits 0"
 
 echo "relative out cases passed"
+
+# --- Provider extension copy (#830): the run seeds the isolated home with
+# only the fiber arm's provider extension, copied from the real home. With
+# FIBER_HOME unset the real home is $HOME/.fiber, so each case below sets
+# HOME to a temp real home and points --clone at the test clone.
+CLONE830="$HOME/work/fiber"
+REAL830="$T/real830"
+mkdir -p "$REAL830/.fiber"
+seed_extension "$REAL830/.fiber" opencode-go opencode
+REAL830_BEFORE="$(find "$REAL830/.fiber" | sort)"
+OUT830="$T/out-ext"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REAL830" bash "$CANARY" run 248 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT830" \
+  || fail "extension run exits 0"
+# the isolated home holds exactly the opencode extension: its two files and
+# their directories, every file a real copy, no symlink into the real home
+[ -d "$OUT830/fiber-home/extensions/opencode" ] || fail "isolated home holds the opencode extension"
+[ "$(find "$OUT830/fiber-home" -type f | wc -l | tr -d ' ')" = "2" ] || fail "isolated home holds two files"
+[ -z "$(find "$OUT830/fiber-home" -type l)" ] || fail "isolated home holds no symlink"
+cmp -s "$REAL830/.fiber/extensions/opencode/extension.json" \
+  "$OUT830/fiber-home/extensions/opencode/extension.json" || fail "extension.json is copied"
+cmp -s "$REAL830/.fiber/extensions/opencode/providers/opencode-go.json" \
+  "$OUT830/fiber-home/extensions/opencode/providers/opencode-go.json" || fail "provider file is copied"
+[ "$(find "$OUT830/fiber-home" -mindepth 1 | sort)" = "$(printf '%s\n' \
+  "$OUT830/fiber-home/extensions" \
+  "$OUT830/fiber-home/extensions/opencode" \
+  "$OUT830/fiber-home/extensions/opencode/extension.json" \
+  "$OUT830/fiber-home/extensions/opencode/providers" \
+  "$OUT830/fiber-home/extensions/opencode/providers/opencode-go.json")" ] \
+  || fail "isolated home holds only the extension tree"
+[ "$(find "$REAL830/.fiber" | sort)" = "$REAL830_BEFORE" ] || fail "real home is unchanged"
+bash "$CANARY" clean 248 --out "$OUT830" || fail "clean 248 exits 0"
+
+echo "extension copy cases passed"
+
+# --- Provider extension override (#830): a codex fiber model copies only
+# the codex extension.
+REAL831="$T/real831"
+mkdir -p "$REAL831/.fiber"
+seed_extension "$REAL831/.fiber" opencode-go opencode
+seed_extension "$REAL831/.fiber" codex codex
+OUT831="$T/out-codex"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REAL831" bash "$CANARY" run 249 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" \
+  --fiber-model fiber/codex/gpt-6-luna --out "$OUT831" \
+  || fail "codex run exits 0"
+[ -d "$OUT831/fiber-home/extensions/codex" ] || fail "isolated home holds the codex extension"
+[ ! -e "$OUT831/fiber-home/extensions/opencode" ] || fail "isolated home holds no opencode extension"
+[ "$(find "$OUT831/fiber-home" -type f | wc -l | tr -d ' ')" = "2" ] || fail "codex home holds two files"
+[ -z "$(find "$OUT831/fiber-home" -type l)" ] || fail "codex home holds no symlink"
+cmp -s "$REAL831/.fiber/extensions/codex/extension.json" \
+  "$OUT831/fiber-home/extensions/codex/extension.json" || fail "codex extension.json is copied"
+cmp -s "$REAL831/.fiber/extensions/codex/providers/codex.json" \
+  "$OUT831/fiber-home/extensions/codex/providers/codex.json" || fail "codex provider file is copied"
+bash "$CANARY" clean 249 --out "$OUT831" || fail "clean 249 exits 0"
+
+echo "extension override cases passed"
+
+# --- Missing provider extension (#830): no extension provides opencode-go,
+# so the run exits 2 before any delegate call, worktree or tracking file.
+REAL832="$T/real832"
+mkdir -p "$REAL832/.fiber"
+OUT832="$T/out-missing"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REAL832" bash "$CANARY" run 250 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT832" 2>"$T/missing.err"; then
+  fail "missing extension should not exit 0"
+else
+  [ $? -eq 2 ] || fail "missing extension exits 2"
+fi
+grep -q 'opencode-go' "$T/missing.err" || fail "missing message names the provider"
+grep -q 'fiber extension install opencode' "$T/missing.err" || fail "missing message names the install"
+[ -s "$FLOG/calls.log" ] && fail "missing extension makes no delegate call"
+[ ! -e "$CLONE830-canary-250-pi" ] || fail "missing extension cuts no pi worktree"
+[ ! -e "$CLONE830-canary-250-fiber" ] || fail "missing extension cuts no fiber worktree"
+[ ! -f "$OUT832/pi/worktree" ] || fail "missing extension records no pi worktree"
+[ ! -f "$OUT832/fiber/worktree" ] || fail "missing extension records no fiber worktree"
+
+echo "missing extension cases passed"
+
+# --- Extension symlink (#830): a symlink anywhere in the provider's
+# extension tree exits 2 before any delegate call, worktree or tracking file.
+REAL833="$T/real833"
+mkdir -p "$REAL833/.fiber"
+seed_extension "$REAL833/.fiber" opencode-go opencode
+ln -s "$REAL833/.fiber/extensions/opencode/providers/opencode-go.json" \
+  "$REAL833/.fiber/extensions/opencode/providers/extra-link.json"
+OUT833="$T/out-symlink"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REAL833" bash "$CANARY" run 251 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT833" 2>"$T/symlink.err"; then
+  fail "symlink extension should not exit 0"
+else
+  [ $? -eq 2 ] || fail "symlink extension exits 2"
+fi
+grep -qi 'symlink' "$T/symlink.err" || fail "symlink message names symlinks"
+[ -s "$FLOG/calls.log" ] && fail "symlink extension makes no delegate call"
+[ ! -e "$CLONE830-canary-251-pi" ] || fail "symlink run cuts no pi worktree"
+[ ! -e "$CLONE830-canary-251-fiber" ] || fail "symlink run cuts no fiber worktree"
+[ ! -f "$OUT833/pi/worktree" ] || fail "symlink run records no pi worktree"
+[ ! -f "$OUT833/fiber/worktree" ] || fail "symlink run records no fiber worktree"
+
+echo "extension symlink cases passed"
