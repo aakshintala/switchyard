@@ -108,7 +108,7 @@ expect_clean "symbols in prose pass" "$(mkplan syms '## Rulings\nCall `NoSuchThi
 
 # 10a. the `example` word means nothing to the tools (see #443): prose lines
 # are clean either way, and an example line with a missing path still reports it
-expect_clean "example exempts unknown symbols" "$(mkplan exampleok '## Rulings\nAn example `c_history` value.\n')"
+expect_clean "example prose lines pass" "$(mkplan exampleok '## Rulings\nAn example `c_history` value.\n')"
 expect_clean "unmarked symbol passes" "$(mkplan exampleno '## Rulings\nThe `c_history` value.\n')"
 expect_problems "example does not exempt a missing path" "$(mkplan examplepath '## Rulings\nAn example `src/nope.rs`.\n')" \
   'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
@@ -151,7 +151,7 @@ expect_clean "reads mark exempts task paths from Files" "$(mkplan readsok '## Fi
 expect_problems "read mark does not exempt a missing path" "$(mkplan readmissing '## Tasks\n1. Reads `src/nope.rs` for context.\n')" \
   'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
 
-# 11h. removed mark: like new, exempts missing paths and unknown symbols; check 2 still applies
+# 11h. removed mark: like new, exempts missing paths; check 2 still applies
 expect_clean "removed words exempt missing paths" "$(mkplan removedpaths '## Rulings\nRemoved `src/a.rs`.\nRemove `src/b.rs`.\nDeleted `src/c.rs`.\nDelete `src/d.rs`.\n')"
 expect_problems "removed task path outside Files" "$(mkplan removedout '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Removed `src/brand.rs`.\n')" \
   'outside Files: src/brand.rs (line 8): add it to Files, or mark the line reads'

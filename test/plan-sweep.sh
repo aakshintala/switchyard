@@ -236,7 +236,7 @@ grep -q '^## Cut$' "$T/pack-h.md" || fail "h: Cut section"
 
 # i. unknown token exits 1, writes nothing, leaves an existing file alone
 run --cwd "$R" --base "$BASE" --symbols NoSuchThing --files src/lib.rs --out "$T/pack-i.md"
-[ "$code" = 1 ] || fail "i: unknown symbol exits 1, got $code"
+[ "$code" = 1 ] || fail "i: missing name exits 1, got $code"
 [ "$out" = "unresolved symbol: NoSuchThing" ] || fail "i: unresolved line, got [$out]"
 [ ! -e "$T/pack-i.md" ] || fail "i: no pack file written"
 printf 'keep me\n' >"$T/pack-i2.md"
@@ -398,7 +398,7 @@ run --cwd "$R" --base "$BASE" --files src/lib.rs --out "$T/pack-p0.md"
 [ "$code" = 0 ] || fail "p: files-only exits 0, got $code [$out]"
 [ -z "$(cat "$T/err.txt")" ] || fail "p: files-only prints nothing on stderr, got [$(cat "$T/err.txt")]"
 run --cwd "$R" --base "$BASE" --symbols nosuch --files src/lib.rs --out "$T/pack-p1.md"
-[ "$code" = 1 ] || fail "p: unknown symbol exits 1, got $code"
+[ "$code" = 1 ] || fail "p: missing name exits 1, got $code"
 [ "$out" = "unresolved symbol: nosuch" ] || fail "p: unresolved line on stdout, got [$out]"
 [ "$(cat "$T/err.txt")" = "plan-sweep: resolving 1 symbols" ] || fail "p: start line only on stderr, got [$(cat "$T/err.txt")]"
 case "$(cat "$T/err.txt")" in *"plan-sweep: symbol "*) fail "p: no per-symbol line without a section" ;; esac
