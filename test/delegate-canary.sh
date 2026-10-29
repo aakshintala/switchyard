@@ -1185,6 +1185,7 @@ rev_bad_case() { # CONFIG LABEL
 }
 rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":"SENTINEL-BAD-JSON"}}' invalid-json
 grep -q 'SENTINEL-BAD-JSON' "$T/revbad.err" && fail "invalid config leaks its contents to stderr"
+rev_bad_case 'not json at all' non-json
 rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":42}}}' numeric-pick
 rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":""}}}' empty-pick
 rev_bad_case '{"providers":{"opencode-go":{"reviewer_model":null}}}' null-pick
@@ -1232,8 +1233,9 @@ OUTA="$T/out-rev-a"
 : >"$FLOG/fiber-home.log"
 env -u FIBER_HOME HOME="$REALA" bash "$CANARY" run 257 "$T/brief.md" \
   --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTA" \
-  --fiber-reviewer-model opencode-go/test-reviewer \
+  --fiber-reviewer-model opencode-go/test-reviewer 2>"$T/rev257.err" \
   || fail "flag run exits 0"
+grep -qi warning "$T/rev257.err" && fail "same-provider flag run warns nothing"
 [ "$(jq -c . "$OUTA/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-go/test-reviewer"}}' ] \
   || fail "flag run writes the flag's reviewer model"
 [ "$(find "$OUTA/fiber-home" -type f | wc -l | tr -d ' ')" = "3" ] || fail "flag run home holds three files"
@@ -1247,16 +1249,22 @@ REALB="$T/real-rev-b"
 mkdir -p "$REALB/.fiber"
 seed_extension "$REALB/.fiber" opencode-go opencode
 printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$REALB/.fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$REALB/.fiber" p p
+printf '{"credential":{"env":"P_API_KEY"}}\n' >"$REALB/.fiber/extensions/p/providers/p.json"
 REVB='p/m"$(>SENT-B)\x'
 OUTB="$T/out-rev-b"
 : >"$FLOG/calls.log"
-env -u FIBER_HOME HOME="$REALB" bash "$CANARY" run 258 "$T/brief.md" \
+env -u FIBER_HOME HOME="$REALB" P_API_KEY=SENTINEL-P-CRED bash "$CANARY" run 258 "$T/brief.md" \
   --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTB" \
-  --fiber-reviewer-model "$REVB" \
+  --fiber-reviewer-model "$REVB" 2>"$T/rev258.err" \
   || fail "quoted flag run exits 0"
 [ "$(jq -r .reviewer.model "$OUTB/fiber-home/config.json")" = "$REVB" ] \
   || fail "quoted flag value is written verbatim"
 [ ! -e SENT-B ] || fail "quoted flag value starts no shell"
+grep -rqF SENTINEL-P-CRED "$OUTB/fiber-home" && fail "isolated home leaks the reviewer credential"
+grep -qF SENTINEL-P-CRED "$T/rev258.err" && fail "stderr leaks the reviewer credential"
+grep -rF SENTINEL-P-CRED "$OUTB/pi/delegate.log" "$OUTB/fiber/delegate.log" \
+  && fail "delegate logs leak the reviewer credential"
 bash "$CANARY" clean 258 --out "$OUTB" || fail "clean 258 exits 0"
 
 # c. The flag wins over a real-config pick and a package default: the
@@ -1375,3 +1383,312 @@ env -u FIBER_HOME HOME="$REALL" bash "$CANARY" run 264 "$T/brief.md" \
 bash "$CANARY" clean 264 --out "$OUTL" || fail "clean 264 exits 0"
 
 echo "reviewer seeding cases passed"
+
+# --- Cross-provider reviewer (#835): the flag names a reviewer on another
+# provider, so the isolated home holds both extension trees and nothing else.
+# Credentials, logs, recent.jsonl and the real config stay in the real home,
+# and the credential value never reaches the isolated home or any log.
+REAL265="$T/real-x265"
+mkdir -p "$REAL265/.fiber"
+seed_extension "$REAL265/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL265/.fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$REAL265/.fiber" muse muse
+printf '{"credential":{"env":"MUSE_API_KEY"}}\n' >"$REAL265/.fiber/extensions/muse/providers/muse.json"
+mkdir -p "$REAL265/.fiber/credentials" "$REAL265/.fiber/logs"
+printf 'SENTINEL-CRED\n' >"$REAL265/.fiber/credentials/SENTINEL-CRED"
+printf 'SENTINEL-LOG\n' >"$REAL265/.fiber/logs/SENTINEL-LOG"
+printf '{"recent":"SENTINEL-RECENT"}\n' >"$REAL265/.fiber/recent.jsonl"
+printf '{"model":"SENTINEL-TOP-MODEL"}\n' >"$REAL265/.fiber/config.json"
+REAL265_BEFORE="$(find "$REAL265/.fiber" | sort)"
+OUT265="$T/out-x265"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REAL265" MUSE_API_KEY=SENTINEL-MUSE-CRED bash "$CANARY" run 265 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT265" \
+  --fiber-reviewer-model muse/muse-spark-1.3-contributor 2>"$T/x265.err" \
+  || fail "cross-provider run exits 0"
+[ "$(find "$OUT265/fiber-home" -mindepth 1 | sort)" = "$(printf '%s\n' \
+  "$OUT265/fiber-home/config.json" \
+  "$OUT265/fiber-home/extensions" \
+  "$OUT265/fiber-home/extensions/muse" \
+  "$OUT265/fiber-home/extensions/muse/extension.json" \
+  "$OUT265/fiber-home/extensions/muse/providers" \
+  "$OUT265/fiber-home/extensions/muse/providers/muse.json" \
+  "$OUT265/fiber-home/extensions/opencode" \
+  "$OUT265/fiber-home/extensions/opencode/extension.json" \
+  "$OUT265/fiber-home/extensions/opencode/providers" \
+  "$OUT265/fiber-home/extensions/opencode/providers/opencode-go.json")" ] \
+  || fail "cross-provider home holds both trees, config.json and nothing else"
+cmp -s "$REAL265/.fiber/extensions/muse/extension.json" \
+  "$OUT265/fiber-home/extensions/muse/extension.json" || fail "muse extension.json is copied"
+cmp -s "$REAL265/.fiber/extensions/muse/providers/muse.json" \
+  "$OUT265/fiber-home/extensions/muse/providers/muse.json" || fail "muse provider file is copied"
+cmp -s "$REAL265/.fiber/extensions/opencode/extension.json" \
+  "$OUT265/fiber-home/extensions/opencode/extension.json" || fail "arm extension.json is copied"
+cmp -s "$REAL265/.fiber/extensions/opencode/providers/opencode-go.json" \
+  "$OUT265/fiber-home/extensions/opencode/providers/opencode-go.json" || fail "arm provider file is copied"
+[ -z "$(find "$OUT265/fiber-home" -type l)" ] || fail "cross-provider home holds no symlink"
+for SENTX in SENTINEL-CRED SENTINEL-LOG SENTINEL-RECENT SENTINEL-TOP-MODEL SENTINEL-MUSE-CRED; do
+  grep -rqF "$SENTX" "$OUT265/fiber-home" && fail "isolated home leaks $SENTX"
+  grep -qF "$SENTX" "$T/x265.err" && fail "stderr leaks $SENTX"
+done
+grep -rF SENTINEL-MUSE-CRED "$OUT265/pi/delegate.log" "$OUT265/fiber/delegate.log" \
+  && fail "delegate logs leak the reviewer credential"
+[ "$(jq -c . "$OUT265/fiber-home/config.json")" = '{"reviewer":{"model":"muse/muse-spark-1.3-contributor"}}' ] \
+  || fail "cross-provider run writes the flag's reviewer model"
+[ "$(find "$REAL265/.fiber" | sort)" = "$REAL265_BEFORE" ] || fail "cross-provider run leaves the real home unchanged"
+bash "$CANARY" clean 265 --out "$OUT265" || fail "clean 265 exits 0"
+
+# --- Cross-provider reviewer metrics (#835): the lane still reads the
+# isolated home through FIBER_HOME, and the reviewer split still applies.
+REAL266="$T/real-x266"
+mkdir -p "$REAL266/.fiber"
+seed_extension "$REAL266/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL266/.fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$REAL266/.fiber" muse muse
+printf '{"credential":{"env":"MUSE_API_KEY"}}\n' >"$REAL266/.fiber/extensions/muse/providers/muse.json"
+OUT266="$T/out-x266"
+: >"$FLOG/calls.log"
+: >"$FLOG/fiber-home.log"
+env -u FIBER_HOME HOME="$REAL266" MUSE_API_KEY=SENTINEL-MUSE-CRED FAKE_EVENTS="$T/ev2.jsonl" \
+  bash "$CANARY" run 266 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT266" \
+  --fiber-reviewer-model muse/muse-spark-1.3-contributor \
+  || fail "cross-provider metrics run exits 0"
+[ -d "$OUT266/fiber-home/extensions/muse" ] || fail "cross-provider home holds the muse extension"
+[ "$(cat "$FLOG/fiber-home.log")" = "$OUT266/fiber-home" ] || fail "cross-provider lane saw the isolated home"
+[ "$(jq -r .cost.main "$OUT266/fiber/metrics.json")" = "0.875" ] || fail "fiber main cost 0.875"
+bash "$CANARY" clean 266 --out "$OUT266" || fail "clean 266 exits 0"
+
+# --- Missing reviewer extension (#835): no extension provides the
+# reviewer's provider, so the run exits 2 before any delegate call,
+# worktree or tracking file.
+REAL267="$T/real-x267"
+mkdir -p "$REAL267/.fiber"
+seed_extension "$REAL267/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL267/.fiber/extensions/opencode/providers/opencode-go.json"
+OUT267="$T/out-x267"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REAL267" bash "$CANARY" run 267 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT267" \
+  --fiber-reviewer-model muse/m 2>"$T/x267.err"; then
+  fail "missing reviewer extension should not exit 0"
+else
+  [ $? -eq 2 ] || fail "missing reviewer extension exits 2"
+fi
+grep -q 'muse' "$T/x267.err" || fail "missing reviewer message names the provider"
+grep -q 'fiber extension install muse' "$T/x267.err" || fail "missing reviewer message names the install"
+[ -s "$FLOG/calls.log" ] && fail "missing reviewer extension makes no delegate call"
+[ ! -e "$OUT267/fiber-home" ] || fail "missing reviewer extension creates no fiber home"
+[ ! -e "$CLONE830-canary-267-pi" ] || fail "missing reviewer run cuts no pi worktree"
+[ ! -e "$CLONE830-canary-267-fiber" ] || fail "missing reviewer run cuts no fiber worktree"
+[ ! -f "$OUT267/pi/worktree" ] || fail "missing reviewer run records no pi worktree"
+[ ! -f "$OUT267/fiber/worktree" ] || fail "missing reviewer run records no fiber worktree"
+
+# --- Reviewer tree symlink (#835): a symlink anywhere in the reviewer's
+# extension tree exits 2, and the arm's tree is not copied either.
+REAL268="$T/real-x268"
+mkdir -p "$REAL268/.fiber"
+seed_extension "$REAL268/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL268/.fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$REAL268/.fiber" muse muse
+printf '{"credential":{"env":"MUSE_API_KEY"}}\n' >"$REAL268/.fiber/extensions/muse/providers/muse.json"
+ln -s "$REAL268/.fiber/extensions/muse/providers/muse.json" \
+  "$REAL268/.fiber/extensions/muse/providers/extra-link.json"
+OUT268="$T/out-x268"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REAL268" bash "$CANARY" run 268 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT268" \
+  --fiber-reviewer-model muse/m 2>"$T/x268.err"; then
+  fail "reviewer symlink should not exit 0"
+else
+  [ $? -eq 2 ] || fail "reviewer symlink exits 2"
+fi
+grep -qi 'symlink' "$T/x268.err" || fail "reviewer symlink message names symlinks"
+[ -s "$FLOG/calls.log" ] && fail "reviewer symlink makes no delegate call"
+[ ! -e "$OUT268/fiber-home" ] || fail "reviewer symlink creates no fiber home"
+[ ! -e "$CLONE830-canary-268-pi" ] || fail "reviewer symlink run cuts no pi worktree"
+[ ! -e "$CLONE830-canary-268-fiber" ] || fail "reviewer symlink run cuts no fiber worktree"
+[ ! -f "$OUT268/pi/worktree" ] || fail "reviewer symlink run records no pi worktree"
+[ ! -f "$OUT268/fiber/worktree" ] || fail "reviewer symlink run records no fiber worktree"
+
+# --- Reviewer non-env credential (#835): the reviewer's provider file
+# names no env credential, so the run exits 2 without copying anything.
+REAL269="$T/real-x269"
+mkdir -p "$REAL269/.fiber"
+seed_extension "$REAL269/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL269/.fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$REAL269/.fiber" muse muse
+printf '{}\n' >"$REAL269/.fiber/extensions/muse/providers/muse.json"
+OUT269="$T/out-x269"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REAL269" bash "$CANARY" run 269 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT269" \
+  --fiber-reviewer-model muse/m 2>"$T/x269.err"; then
+  fail "non-env reviewer credential should not exit 0"
+else
+  [ $? -eq 2 ] || fail "non-env reviewer credential exits 2"
+fi
+grep -q 'The provider muse needs a credential file under' "$T/x269.err" \
+  || fail "non-env reviewer message names the provider"
+grep -q 'Not copied; owner ruling needed' "$T/x269.err" \
+  || fail "non-env reviewer message says owner ruling needed"
+[ -s "$FLOG/calls.log" ] && fail "non-env reviewer credential makes no delegate call"
+[ ! -e "$OUT269/fiber-home" ] || fail "non-env reviewer credential creates no fiber home"
+[ ! -e "$CLONE830-canary-269-pi" ] || fail "non-env reviewer run cuts no pi worktree"
+[ ! -e "$CLONE830-canary-269-fiber" ] || fail "non-env reviewer run cuts no fiber worktree"
+[ ! -f "$OUT269/pi/worktree" ] || fail "non-env reviewer run records no pi worktree"
+[ ! -f "$OUT269/fiber/worktree" ] || fail "non-env reviewer run records no fiber worktree"
+
+# --- Reviewer invalid credential name (#835): the env name comes from a
+# file, so a name outside the env-name form exits 2 before any side effect.
+REAL270="$T/real-x270"
+mkdir -p "$REAL270/.fiber"
+seed_extension "$REAL270/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL270/.fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$REAL270/.fiber" muse muse
+printf '{"credential":{"env":"BAD NAME"}}\n' >"$REAL270/.fiber/extensions/muse/providers/muse.json"
+OUT270="$T/out-x270"
+: >"$FLOG/calls.log"
+if env -u FIBER_HOME HOME="$REAL270" bash "$CANARY" run 270 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT270" \
+  --fiber-reviewer-model muse/m 2>"$T/x270.err"; then
+  fail "invalid reviewer credential name should not exit 0"
+else
+  [ $? -eq 2 ] || fail "invalid reviewer credential name exits 2"
+fi
+grep -q 'muse' "$T/x270.err" || fail "invalid reviewer name message names the provider"
+[ -s "$FLOG/calls.log" ] && fail "invalid reviewer name makes no delegate call"
+[ ! -e "$OUT270/fiber-home" ] || fail "invalid reviewer name creates no fiber home"
+[ ! -e "$CLONE830-canary-270-pi" ] || fail "invalid reviewer run cuts no pi worktree"
+[ ! -e "$CLONE830-canary-270-fiber" ] || fail "invalid reviewer run cuts no fiber worktree"
+[ ! -f "$OUT270/pi/worktree" ] || fail "invalid reviewer run records no pi worktree"
+[ ! -f "$OUT270/fiber/worktree" ] || fail "invalid reviewer run records no fiber worktree"
+
+# --- Reviewer unset and empty credential (#835): each prints a one-line
+# stderr warning naming the variable and the run goes on; a set variable
+# prints no such line.
+REAL271="$T/real-x271"
+mkdir -p "$REAL271/.fiber"
+seed_extension "$REAL271/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL271/.fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$REAL271/.fiber" muse muse
+printf '{"credential":{"env":"MUSE_API_KEY"}}\n' >"$REAL271/.fiber/extensions/muse/providers/muse.json"
+OUT271="$T/out-x271"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME -u MUSE_API_KEY HOME="$REAL271" bash "$CANARY" run 271 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT271" \
+  --fiber-reviewer-model muse/m 2>"$T/x271.err" \
+  || fail "unset-credential run exits 0"
+grep -q '^run fiber' "$FLOG/calls.log" || fail "unset-credential run starts the fiber lane"
+[ "$(grep -c MUSE_API_KEY "$T/x271.err")" = "1" ] || fail "unset warning names the variable once"
+[ "$(grep -ci warning "$T/x271.err")" = "1" ] || fail "unset warning prints one warning line"
+bash "$CANARY" clean 271 --out "$OUT271" || fail "clean 271 exits 0"
+OUT272="$T/out-x272"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REAL271" MUSE_API_KEY= bash "$CANARY" run 272 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT272" \
+  --fiber-reviewer-model muse/m 2>"$T/x272.err" \
+  || fail "empty-credential run exits 0"
+grep -q '^run fiber' "$FLOG/calls.log" || fail "empty-credential run starts the fiber lane"
+[ "$(grep -c MUSE_API_KEY "$T/x272.err")" = "1" ] || fail "empty warning names the variable once"
+[ "$(grep -ci warning "$T/x272.err")" = "1" ] || fail "empty warning prints one warning line"
+bash "$CANARY" clean 272 --out "$OUT272" || fail "clean 272 exits 0"
+OUT273="$T/out-x273"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REAL271" MUSE_API_KEY=SENTINEL-MUSE-CRED bash "$CANARY" run 273 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT273" \
+  --fiber-reviewer-model muse/m 2>"$T/x273.err" \
+  || fail "set-credential run exits 0"
+grep -q MUSE_API_KEY "$T/x273.err" && fail "set credential warns nothing"
+bash "$CANARY" clean 273 --out "$OUT273" || fail "clean 273 exits 0"
+
+# --- Malformed reviewer form (#835): a value with a slash whose provider
+# part fails fiber_provider_of exits 2 naming the flag, before any lookup.
+REAL274="$T/real-x274"
+mkdir -p "$REAL274/.fiber"
+seed_extension "$REAL274/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL274/.fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$REAL274/.fiber" muse muse
+printf '{"credential":{"env":"MUSE_API_KEY"}}\n' >"$REAL274/.fiber/extensions/muse/providers/muse.json"
+TICK274=274
+for REVX in "/m" "muse/" "../x/m" "a.b/m"; do
+  OUTX="$T/out-malform-$TICK274"
+  rm -rf "$OUTX"
+  : >"$FLOG/calls.log"
+  if env -u FIBER_HOME HOME="$REAL274" bash "$CANARY" run "$TICK274" "$T/brief.md" \
+    --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTX" \
+    --fiber-reviewer-model "$REVX" 2>"$T/malform.err"; then
+    fail "malformed reviewer value '$REVX' should not exit 0"
+  else
+    [ $? -eq 2 ] || fail "malformed reviewer value '$REVX' exits 2"
+  fi
+  grep -q -- '--fiber-reviewer-model' "$T/malform.err" \
+    || fail "malformed reviewer value '$REVX' names the flag"
+  [ -s "$FLOG/calls.log" ] && fail "malformed reviewer value '$REVX' makes no delegate call"
+  [ ! -e "$OUTX/fiber-home" ] || fail "malformed reviewer value '$REVX' creates no fiber home"
+  [ ! -e "$CLONE830-canary-$TICK274-pi" ] || fail "malformed reviewer value '$REVX' cuts no pi worktree"
+  [ ! -e "$CLONE830-canary-$TICK274-fiber" ] || fail "malformed reviewer value '$REVX' cuts no fiber worktree"
+  [ ! -f "$OUTX/pi/worktree" ] || fail "malformed reviewer value '$REVX' records no pi worktree"
+  [ ! -f "$OUTX/fiber/worktree" ] || fail "malformed reviewer value '$REVX' records no fiber worktree"
+  TICK274=$((TICK274+1))
+done
+
+# --- No-slash reviewer value (#835): with no slash the flag names no
+# second provider, so the run copies one tree and warns nothing.
+REAL278="$T/real-x278"
+mkdir -p "$REAL278/.fiber"
+seed_extension "$REAL278/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL278/.fiber/extensions/opencode/providers/opencode-go.json"
+OUT278="$T/out-x278"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REAL278" bash "$CANARY" run 278 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT278" \
+  --fiber-reviewer-model bare-model 2>"$T/x278.err" \
+  || fail "no-slash run exits 0"
+[ "$(find "$OUT278/fiber-home" -type f | wc -l | tr -d ' ')" = "3" ] || fail "no-slash home holds three files"
+[ "$(jq -r .reviewer.model "$OUT278/fiber-home/config.json")" = "bare-model" ] \
+  || fail "no-slash value is written verbatim"
+grep -qi warning "$T/x278.err" && fail "no-slash run warns nothing"
+bash "$CANARY" clean 278 --out "$OUT278" || fail "clean 278 exits 0"
+
+# --- Reviewer in the arm's extension (#835): a second provider from the
+# same extension package copies the tree once and warns nothing.
+REAL279="$T/real-x279"
+mkdir -p "$REAL279/.fiber"
+seed_extension "$REAL279/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL279/.fiber/extensions/opencode/providers/opencode-go.json"
+printf '{"credential":{"env":"OPENCODE_ALT_API_KEY"}}\n' >"$REAL279/.fiber/extensions/opencode/providers/opencode-alt.json"
+OUT279="$T/out-x279"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REAL279" OPENCODE_ALT_API_KEY=SENTINEL-ALT-CRED bash "$CANARY" run 279 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT279" \
+  --fiber-reviewer-model opencode-alt/m 2>"$T/x279.err" \
+  || fail "shared-tree run exits 0"
+[ "$(find "$OUT279/fiber-home" -type f | wc -l | tr -d ' ')" = "4" ] || fail "shared tree home holds four files"
+[ "$(find "$OUT279/fiber-home/extensions" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = "1" ] \
+  || fail "shared tree copies one extension"
+[ "$(jq -c . "$OUT279/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-alt/m"}}' ] \
+  || fail "shared-tree run writes the flag's reviewer model"
+grep -qi warning "$T/x279.err" && fail "shared-tree run warns nothing"
+bash "$CANARY" clean 279 --out "$OUT279" || fail "clean 279 exits 0"
+
+# --- Malformed real config with a cross-provider flag (#835): the flag
+# wins without reading the real config, so invalid JSON stops nothing.
+REAL280="$T/real-x280"
+mkdir -p "$REAL280/.fiber"
+seed_extension "$REAL280/.fiber" opencode-go opencode
+printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL280/.fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$REAL280/.fiber" muse muse
+printf '{"credential":{"env":"MUSE_API_KEY"}}\n' >"$REAL280/.fiber/extensions/muse/providers/muse.json"
+printf 'not json at all\n' >"$REAL280/.fiber/config.json"
+OUT280="$T/out-x280"
+: >"$FLOG/calls.log"
+env -u FIBER_HOME HOME="$REAL280" MUSE_API_KEY=SENTINEL-MUSE-CRED bash "$CANARY" run 280 "$T/brief.md" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT280" \
+  --fiber-reviewer-model muse/m \
+  || fail "malformed-config flag run exits 0"
+[ "$(jq -c . "$OUT280/fiber-home/config.json")" = '{"reviewer":{"model":"muse/m"}}' ] \
+  || fail "malformed-config flag run writes the flag's reviewer model"
+bash "$CANARY" clean 280 --out "$OUT280" || fail "clean 280 exits 0"
+
+echo "cross-provider reviewer cases passed"
