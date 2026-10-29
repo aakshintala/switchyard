@@ -355,9 +355,9 @@ grep -q "$H" "$brief" || fail "happy: the filled brief holds the base"
 grep -q "Resolves #528" "$brief" || fail "happy: the filled brief holds CLOSING"
 grep -q "Co-authored with Test" "$brief" || fail "happy: the filled brief holds ATTRIBUTION"
 grep -q "^gate|.*--expect-head $H$" "$T/calls.log" || fail "happy: the gate checks the lane head"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes standards$" "$T/calls.log" || fail "happy: standards starts with state and flag values"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes spec$" "$T/calls.log" || fail "happy: spec starts per axis"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes overbuild$" "$T/calls.log" || fail "happy: overbuild starts per axis"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes standards --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: standards starts with state and flag values"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes spec --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: spec starts per axis"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes overbuild --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: overbuild starts per axis"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "happy: one start per axis"
 rvh="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$(printf '%s' "$rvh" | wc -w | tr -d ' ')" -eq 3 ] || fail "happy: three review ids persisted"
 grep -q "^watch|r1 r2 r3$" "$T/calls.log" || fail "happy: one delegate watch covers the review ids"
@@ -947,5 +947,16 @@ case "$out" in "usage: tkt-build <state>"*) ;; *) fail "--help prints usage: [$o
 out="$(bash "$BUILD" -h 2>"$T/help-err.txt")"; [ "$?" -eq 0 ] || fail "-h exits 0"
 [ ! -s "$T/help-err.txt" ] || fail "-h prints nothing on stderr"
 case "$out" in "usage: tkt-build <state>"*) ;; *) fail "-h prints usage: [$out]" ;; esac
+
+# --- tkt-build passes --full-rereview on every start, so a prior review at a
+# different patch-id does not refuse the round-0 pair ---
+setup_case full-rereview-flag
+run_build
+[ "$RC" -eq 0 ] || fail "full-rereview-flag exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "full-rereview-flag"
+for ax in standards spec overbuild; do
+  grep -q -- "--axes $ax --full-rereview tkt-build round-0 full review" "$T/calls.log" || fail "full-rereview-flag: $ax starts with the override"
+done
+[ "$(grep -c -- '--full-rereview tkt-build round-0 full review' "$T/calls.log")" -eq 3 ] || fail "full-rereview-flag: one override per axis"
 
 echo "tkt-build: all cases passed"
