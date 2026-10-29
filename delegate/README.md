@@ -104,11 +104,11 @@ The replay `TMPDIR` is a unique `mktemp -d /tmp/frp-XXXXXX` dir per prep (path r
 ## Canary
 
 `scripts/canary.sh` runs one ticket's brief on pi and on Fiber side by side:
-`run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]`
+`run <ticket> <brief file> --gate '<gate>' [--pi-model M] [--fiber-model M] [--fiber-reviewer-model M] [--thinking L] [--repo owner/name] [--clone <path>] [--out DIR]`
 cuts two worktrees from the same freshly fetched `origin/main` (branches
 `canary/<ticket>-pi` and `canary/<ticket>-fiber`), runs the brief through
 `delegate run` on each side one after the other (pi's run and watch, then Fiber's), `--pi-model` and `--fiber-model` choosing the models (default: the muse-spark pair), `--thinking L` appending `:L` to both arms' models (adding nothing when absent, and appending again to an id that already ends in a level),
-and runs the gate in each worktree once both jobs end. Each side's wall time covers only its own run. The brief is wrapped
+and runs the gate in each worktree once both jobs end. `--fiber-reviewer-model M` gives the Fiber lane a caller-chosen reviewer, written verbatim as `<provider>/<model>` (for example `muse/<model>`), with no `fiber/` prefix, which Fiber would read as provider `fiber`, e.g. `--fiber-reviewer-model opencode-go/test-reviewer`, a model the arm's extension names. The flag is not validated against the isolated home: a reviewer on another provider needs that provider's extension there, which the script does not copy. With the flag absent, the real home's `config.json` key `providers.<provider>.reviewer_model` (that key only) or the provider package's default from `providers/<provider>.json` is used; when no source names a reviewer the run exits 2 before either arm starts. Each side's wall time covers only its own run. The brief is wrapped
 with a line telling each agent to commit locally and never push or open a PR.
 Output goes to `~/.cache/agents/canary/<ticket>/` (or `--out`): a `pi/` and a
 `fiber/` directory, each holding `worktree`, `prompt.md`, `diff.patch`,
@@ -117,7 +117,7 @@ with the two-column comparison table and a `clone` file naming the clone,
 written before any git change. The worktrees sit next to the clone as
 `<clone name>-canary-<ticket>-pi` and `-fiber`. Exit codes: 0 means both runs
 finished (whatever their gates did), 1 means a run errored in the harness, 2
-means a usage or setup error; a setup failure cleans up as `clean` does.
+means a usage or setup error, including a run with no reviewer source and no `--fiber-reviewer-model`; a setup failure cleans up as `clean` does.
 `clean <ticket> [--out DIR]` works from the ticket and the `clone` file alone:
 it removes whichever of the two worktrees and branches exist (metrics stay) so
 the ticket can run again. It refuses a worktree with uncommitted changes
@@ -129,13 +129,10 @@ from the `usage_recorded` events (a record with an `action_id` is main, one
 without is the reviewer); a null main cost is total minus reviewer.
 
 A canary run gives the Fiber lane an isolated home: `run` exports
-`FIBER_HOME=<out>/fiber-home` (seeded with only the fiber arm's provider extension, copied from the real home) before the first lane, so the
+`FIBER_HOME=<out>/fiber-home` (seeded with only the fiber arm's provider extension, copied from the real home, plus a `config.json` with only the reviewer key when a reviewer is set) before the first lane, so the
 lane and its metrics both read that root and the owner's real `~/.fiber`
-stays untouched. A lane that needs a real credential copies that one file in
-before the run, e.g. `~/.fiber/credentials/<name>/<label>` to
-`<out>/fiber-home/credentials/<name>/<label>` (mode `0600`), the
-`credentials/<name>/<label>` layout Fiber reads for provider credentials
-(`credentials/<name>` for an extension secret).
+stays untouched. No credential is copied into the isolated home: a provider
+without an env credential exits 2 (as in #832).
 
 ## Skill
 
