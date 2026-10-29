@@ -14,7 +14,9 @@
 #        (see below); on a non-strict base with --gate, gate the PR merged
 #        with current origin/main in a throwaway merge commit (step 7); squash-merge
 #        pinned to the checked head, retrying once on a base race or GraphQL error
-#        and polling MERGED even after a failed retry; wait for MERGED; remove the worktree and the
+#        and re-entering the rebase once after the merge lost the race to
+#        origin/main in strict mode (no extra sleep, sharing the 3 retries);
+#        polling MERGED even after a failed retry; wait for MERGED; remove the worktree and the
 #        local and remote branch (the worktree and local branch stay when the
 #        caller's directory is inside it).
 #        The CI wait trusts the repo's required checks: one green on the exact
@@ -62,16 +64,21 @@
 #        within 120 s exits 1 naming the run.
 #        Prints `merged <squash sha>` on success. A `gh pr merge` error containing
 #        `GraphQL` retries once like `Base branch was modified`, sleeping 5 s first.
-#        After a failed retry of either kind ship-pr still polls for MERGED, since
-#        GitHub sometimes merges despite the error, and exits 1 saying the merge
-#        command failed only when the poll never sees MERGED.
+#        An error saying the head branch is not up to date with the base branch
+#        re-enters the rebase, push and CI-wait steps once in strict mode (counted
+#        against the 3 retries), after checking `gh pr view` for MERGED; a second
+#        loss, an unmoved main, or no retries left exits 1 with `lost the race to
+#        origin/main` and the rerun command. After a failed retry of any kind ship-pr
+#        still polls for MERGED, since GitHub sometimes merges despite the error,
+#        and exits 1 saying the merge command failed only when the poll never sees MERGED.
 #        Progress goes to stderr, and so do
 #        gh-ci's check counts while CI runs.
 #        After marking a draft PR ready, each later failure before `gh pr merge` says
 #        that nothing merged and the PR is still marked ready. If MERGED is not confirmed
 #        after the merge attempt, the error says the merge status could not be confirmed.
 #        Exit 0 merged, 1 gate/CI/push/merge failure (a gate run on the PR merged
-#        with current origin/main counts as a gate failure), 2 bad usage or a failed
+#        with current origin/main counts as a gate failure; a merge that lost the race
+#        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
 #        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, or stray closing keywords from pr-closes), 124 CI wait timeout.
@@ -82,7 +89,8 @@
 #        printed once.
 #        Strict: rebase onto origin/main when it moved. When origin/main moves during
 #        the CI wait, ship-pr goes back to the rebase (rebase, patch-id check, push
-#        and CI wait again; no gate), at most 3 times; the 4th move exits 1.
+#        and CI wait again; no gate), at most 3 times; the 4th move exits 1. A merge
+#        that lost the race re-enters the same rebase, sharing the 3 retries.
 #        Not strict: after the gate, read the PR's mergeable and mergeStateStatus;
 #        rebase (after refetching origin/main) only on CONFLICTING or DIRTY. One CI
 #        wait, no retry when origin/main moves; a conflict found after CI exits 3.
@@ -107,7 +115,8 @@
 #        from the reviewed sha to the pinned head, limited to the files the repair commits
 #        touch (a merge of main adds no base files), under `Changed since review:`. A failed
 #        post exits 1 before any push. A match posts nothing. The gate and CI run as usual.
-#        --timeout bounds each CI wait, so a run can take one gate and up to 4 CI waits.
+#        --timeout bounds each CI wait, so a run can take one gate and up to 4 CI waits;
+#        the 3 retries are one budget shared with a merge that lost the race.
 #        SHIP_PR_INTERVAL: seconds between MERGED polls (default 5, at most 12 polls).
 set -euo pipefail
 
@@ -206,6 +215,7 @@ run_gate() {
 }
 
 [ $# -ge 1 ] || usage
+ship_args=("$@")
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
 repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" no_mutants_label=""
@@ -239,6 +249,9 @@ tmpdir="${TMPDIR:-/tmp}"
 find -H "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true
 
 here="$(cd "$(dirname "$0")" && pwd)"
+# rerun_cmd rebuilds this invocation against this file for the lost-race diagnostic.
+rerun_cmd="$(printf '%q ' bash "$here/$(basename "$0")" ${ship_args[@]+"${ship_args[@]}"})"
+rerun_cmd="${rerun_cmd% }"
 
 # Step 1: the PR is open, its branch is checked out clean at the PR head.
 info="$(gh pr view "$pr" --repo "$repo" --json state,headRefName,headRefOid,isDraft \
@@ -501,180 +514,233 @@ fi
 
 # Steps 4-6 repeat when origin/main moves during the CI wait (strict only), at most 3 times.
 # lease is the branch SHA last known on the remote: head0, then each pushed pin.
-lease="$head0" retries=0 unverified_posted=""
+lease="$head0" retries=0 unverified_posted="" lost_race_done=""
+# lost_race_die exits 1 naming the lost race and the command that reruns it.
+lost_race_die() {
+  die_after_ready 1 "gh pr merge failed: lost the race to origin/main ($1); rerun: $rerun_cmd"
+}
+# The outer loop re-enters the rebase when the merge loses the race to
+# origin/main, sharing the 3 retries; every other path breaks out of it.
 while :; do
-  # Step 4: rebase onto origin/main when it moved (strict) or on a reported conflict.
-  if [ "$strict" = 1 ]; then
-    git -C "$worktree" merge-base --is-ancestor origin/main HEAD || rebase_main
-  elif [ -n "$conflict" ]; then
-    rebase_main
-  fi
-  pin="$(git -C "$worktree" rev-parse HEAD)"
-
-  # Step 5: the patch under review is the patch about to merge (review-loop's Identity rule).
-  if [ "$(patch_id "$reviewed")" != "$(patch_id "$pin")" ]; then
-    [ -n "$unverified" ] || die_after_ready 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict: when the findings were answered by a recorded ruling with no code change, rerun with --unverified-fixes <findings file>; otherwise run a scoped verify (review-pr run --verify <findings file> --since $reviewed)"
-    if [ -z "$unverified_posted" ]; then
-      post_unverified "$pin"
-      unverified_posted=1
+  while :; do
+    # Step 4: rebase onto origin/main when it moved (strict) or on a reported conflict.
+    if [ "$strict" = 1 ]; then
+      git -C "$worktree" merge-base --is-ancestor origin/main HEAD || rebase_main
+    elif [ -n "$conflict" ]; then
+      rebase_main
     fi
-  fi
-
-  # Step 6: push a rebased branch, then wait for CI on exactly that head.
-  if [ "$pin" != "$lease" ]; then
-    say "pushing rebased $branch"
-    git -C "$worktree" push -q --force-with-lease="$branch:$lease" origin "HEAD:refs/heads/$branch" >&2 \
-      || die_after_ready 1 "push of rebased $branch failed"
-    lease="$pin"
-  fi
-  if [ "$draft" = "true" ]; then
-    say "marking PR $pr ready"
-    gh pr ready "$pr" --repo "$repo" >&2 || die 1 "gh pr ready failed"
-    draft=false
-    pr_ready=1
-  fi
-  say "waiting for CI"
-  rc=0
-  ci_out="$(GH_CI_REPO="$repo" bash "$here/gh-ci" wait "$pr" --timeout "$timeout")" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    printf '%s\n' "$ci_out"
-    case "$rc" in
-      124) exit_after_ready 124 "CI timed out" ;;
-      3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
-      *)
-        if [ -z "$ci_rerun_done" ]; then
-          if reason="$(ci_outside_reason 2>/dev/null)"; then
-            if run_ids="$(ci_failed_run_ids 2>/dev/null)"; then
-              say "CI failure outside the diff ($reason); rerunning failed jobs once — file the flake"
-              pre_attempts=""
-              # gh's stderr goes to one temp file for the loop, not one per run
-              attempt_err="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-attempt.XXXXXX")" \
-                || die_after_ready 1 "cannot create a temp file for gh stderr"
-              while IFS= read -r rid || [ -n "$rid" ]; do
-                [ -n "$rid" ] || continue
-                rc=0
-                pre="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>"$attempt_err")" || rc=$?
-                if [ "$rc" -ne 0 ]; then
-                  # the first 400 bytes stay on one line; blank stderr reads (no stderr)
-                  text="$(head -c 400 <"$attempt_err" | tr '\n\r' '  ')"
-                  case "$text" in *[![:space:]]*) ;; *) text="(no stderr)" ;; esac
-                  rm -f "$attempt_err"
-                  die_after_ready 1 "cannot read attempt of run $rid before rerun: gh exit $rc: $text"
-                fi
-                IFS=$'\t' read -r pre_attempt _ <<<"$pre" || true
-                pre_attempts="${pre_attempts}${rid} ${pre_attempt:-0}
-"
-              done <<<"$run_ids"
-              rm -f "$attempt_err"
-              while IFS= read -r rid || [ -n "$rid" ]; do
-                [ -n "$rid" ] || continue
-                gh run rerun "$rid" --failed --repo "$repo" >&2 || die_after_ready 1 "gh run rerun $rid --failed failed"
-              done <<<"$run_ids"
-              ci_rerun_done=1
-              elapsed=0
-              while :; do
-                waiting=""
+    pin="$(git -C "$worktree" rev-parse HEAD)"
+  
+    # Step 5: the patch under review is the patch about to merge (review-loop's Identity rule).
+    if [ "$(patch_id "$reviewed")" != "$(patch_id "$pin")" ]; then
+      [ -n "$unverified" ] || die_after_ready 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict: when the findings were answered by a recorded ruling with no code change, rerun with --unverified-fixes <findings file>; otherwise run a scoped verify (review-pr run --verify <findings file> --since $reviewed)"
+      if [ -z "$unverified_posted" ]; then
+        post_unverified "$pin"
+        unverified_posted=1
+      fi
+    fi
+  
+    # Step 6: push a rebased branch, then wait for CI on exactly that head.
+    if [ "$pin" != "$lease" ]; then
+      say "pushing rebased $branch"
+      git -C "$worktree" push -q --force-with-lease="$branch:$lease" origin "HEAD:refs/heads/$branch" >&2 \
+        || die_after_ready 1 "push of rebased $branch failed"
+      lease="$pin"
+    fi
+    if [ "$draft" = "true" ]; then
+      say "marking PR $pr ready"
+      gh pr ready "$pr" --repo "$repo" >&2 || die 1 "gh pr ready failed"
+      draft=false
+      pr_ready=1
+    fi
+    say "waiting for CI"
+    rc=0
+    ci_out="$(GH_CI_REPO="$repo" bash "$here/gh-ci" wait "$pr" --timeout "$timeout")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      printf '%s\n' "$ci_out"
+      case "$rc" in
+        124) exit_after_ready 124 "CI timed out" ;;
+        3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
+        *)
+          if [ -z "$ci_rerun_done" ]; then
+            if reason="$(ci_outside_reason 2>/dev/null)"; then
+              if run_ids="$(ci_failed_run_ids 2>/dev/null)"; then
+                say "CI failure outside the diff ($reason); rerunning failed jobs once — file the flake"
+                pre_attempts=""
+                # gh's stderr goes to one temp file for the loop, not one per run
+                attempt_err="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-attempt.XXXXXX")" \
+                  || die_after_ready 1 "cannot create a temp file for gh stderr"
                 while IFS= read -r rid || [ -n "$rid" ]; do
                   [ -n "$rid" ] || continue
-                  pre_one="$(awk -v r="$rid" '$1 == r { print $2; exit }' <<<"$pre_attempts")"
-                  cur="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>/dev/null)" \
-                    || { waiting="${waiting}${rid} "; continue; }
-                  IFS=$'\t' read -r cur_attempt cur_status <<<"$cur" || true
-                  [ "${cur_status:-}" != "completed" ] && continue
-                  case "${cur_attempt:-}" in ''|*[!0-9]*) waiting="${waiting}${rid} "; continue ;; esac
-                  case "${pre_one:-}" in ''|*[!0-9]*) pre_one=0 ;; esac
-                  [ "$cur_attempt" -gt "$pre_one" ] || waiting="${waiting}${rid} "
+                  rc=0
+                  pre="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>"$attempt_err")" || rc=$?
+                  if [ "$rc" -ne 0 ]; then
+                    # the first 400 bytes stay on one line; blank stderr reads (no stderr)
+                    text="$(head -c 400 <"$attempt_err" | tr '\n\r' '  ')"
+                    case "$text" in *[![:space:]]*) ;; *) text="(no stderr)" ;; esac
+                    rm -f "$attempt_err"
+                    die_after_ready 1 "cannot read attempt of run $rid before rerun: gh exit $rc: $text"
+                  fi
+                  IFS=$'\t' read -r pre_attempt _ <<<"$pre" || true
+                  pre_attempts="${pre_attempts}${rid} ${pre_attempt:-0}
+  "
                 done <<<"$run_ids"
-                [ -z "$waiting" ] && break
-                [ "$elapsed" -ge 120 ] && die_after_ready 1 "run ${waiting%% *} shows no new attempt 120 s after rerun"
-                sleep 5
-                elapsed=$((elapsed + 5))
-              done
-              say "waiting for CI"
-              rc=0
-              ci_out="$(GH_CI_REPO="$repo" bash "$here/gh-ci" wait "$pr" --timeout "$timeout")" || rc=$?
-              if [ "$rc" -ne 0 ]; then
-                printf '%s\n' "$ci_out"
-                case "$rc" in
-                  124) exit_after_ready 124 "CI timed out" ;;
-                  3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
-                  *) die_after_ready 1 "CI failed" ;;
-                esac
+                rm -f "$attempt_err"
+                while IFS= read -r rid || [ -n "$rid" ]; do
+                  [ -n "$rid" ] || continue
+                  gh run rerun "$rid" --failed --repo "$repo" >&2 || die_after_ready 1 "gh run rerun $rid --failed failed"
+                done <<<"$run_ids"
+                ci_rerun_done=1
+                elapsed=0
+                while :; do
+                  waiting=""
+                  while IFS= read -r rid || [ -n "$rid" ]; do
+                    [ -n "$rid" ] || continue
+                    pre_one="$(awk -v r="$rid" '$1 == r { print $2; exit }' <<<"$pre_attempts")"
+                    cur="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>/dev/null)" \
+                      || { waiting="${waiting}${rid} "; continue; }
+                    IFS=$'\t' read -r cur_attempt cur_status <<<"$cur" || true
+                    [ "${cur_status:-}" != "completed" ] && continue
+                    case "${cur_attempt:-}" in ''|*[!0-9]*) waiting="${waiting}${rid} "; continue ;; esac
+                    case "${pre_one:-}" in ''|*[!0-9]*) pre_one=0 ;; esac
+                    [ "$cur_attempt" -gt "$pre_one" ] || waiting="${waiting}${rid} "
+                  done <<<"$run_ids"
+                  [ -z "$waiting" ] && break
+                  [ "$elapsed" -ge 120 ] && die_after_ready 1 "run ${waiting%% *} shows no new attempt 120 s after rerun"
+                  sleep 5
+                  elapsed=$((elapsed + 5))
+                done
+                say "waiting for CI"
+                rc=0
+                ci_out="$(GH_CI_REPO="$repo" bash "$here/gh-ci" wait "$pr" --timeout "$timeout")" || rc=$?
+                if [ "$rc" -ne 0 ]; then
+                  printf '%s\n' "$ci_out"
+                  case "$rc" in
+                    124) exit_after_ready 124 "CI timed out" ;;
+                    3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
+                    *) die_after_ready 1 "CI failed" ;;
+                  esac
+                fi
               fi
             fi
           fi
-        fi
-        [ "$rc" -eq 0 ] || die_after_ready 1 "CI failed"
-        ;;
-    esac
-  fi
-  grep -q "^head: ${pin:0:8} " <<<"$ci_out" || { printf '%s\n' "$ci_out"; die_after_ready 1 "CI passed on a head other than ${pin:0:8}"; }
-
-  [ "$strict" = 1 ] || break
-
-  # Up to date at merge: CI "must pass on a head up to date with main".
-  git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
-  git -C "$worktree" merge-base --is-ancestor origin/main "$pin" && break
-  [ "$retries" -lt 3 ] || die_after_ready 1 "origin/main moved during CI after 3 retries; rerun ship-pr"
-  retries=$((retries + 1))
-  say "origin/main moved during CI; rebasing again (retry $retries of 3)"
-done
-
-# Step 7: on a non-strict base with --gate, gate the PR merged with current
-# origin/main. The merge is a throwaway commit in --worktree; nothing is pushed,
-# and the worktree goes back to the pinned head on every path.
-if [ "$strict" = 0 ] && [ -n "$gate" ]; then
-  git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
-  if ! git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
-    say "gating the PR merged with current origin/main"
-    guard_restore() {
-      git -C "$worktree" reset -q --hard "$pin" >&2 || die_after_ready 1 "failed to restore pinned head ${pin:0:8}"
-    }
-    trap 'guard_rc=$?; trap - EXIT INT TERM; guard_restore; if [ "$guard_rc" -ne 0 ]; then exit_after_ready "$guard_rc" "gate aborted"; else exit "$guard_rc"; fi' EXIT
-    trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 143 "gate interrupted"' TERM
-    trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 130 "gate interrupted"' INT
-    if ! git -C "$worktree" -c user.name=ship-pr -c user.email=ship-pr@localhost merge --no-ff --no-edit origin/main >&2; then
-      guard_restore
-      trap - EXIT INT TERM
-      die_after_ready 3 "PR conflicts with current origin/main; rebase, then rerun"
-    fi
-    if ! run_gate; then
-      guard_restore
-      trap - EXIT INT TERM
-      die_after_ready 1 "the PR merged with current origin/main fails the gate"
-    fi
-    guard_restore
-    trap - EXIT INT TERM
-    say "gate passes on the PR merged with current origin/main"
-  fi
-fi
-
-# Step 8: merge pinned to the checked head, then wait for GitHub to say MERGED.
-say "merging PR $pr at ${pin:0:8}"
-merge_attempted=1
-merge_err=""
-merge_failed=""
-if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
-  printf '%s\n' "$merge_err" >&2
-  case "$merge_err" in
-    *"Base branch was modified"*|*"GraphQL"*)
-      case "$merge_err" in
-        *"GraphQL"*) say "GraphQL error during merge; retrying once after 5 s" ;;
-        *) say "base branch was modified during merge; retrying once after 5 s" ;;
+          [ "$rc" -eq 0 ] || die_after_ready 1 "CI failed"
+          ;;
       esac
-      sleep 5
-      if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
-        printf '%s\n' "$merge_err" >&2
-        merge_failed=1
-      else
-        [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
+    fi
+    grep -q "^head: ${pin:0:8} " <<<"$ci_out" || { printf '%s\n' "$ci_out"; die_after_ready 1 "CI passed on a head other than ${pin:0:8}"; }
+  
+    [ "$strict" = 1 ] || break
+  
+    # Up to date at merge: CI "must pass on a head up to date with main".
+    git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
+    git -C "$worktree" merge-base --is-ancestor origin/main "$pin" && break
+    [ "$retries" -lt 3 ] || die_after_ready 1 "origin/main moved during CI after 3 retries; rerun ship-pr"
+    retries=$((retries + 1))
+    say "origin/main moved during CI; rebasing again (retry $retries of 3)"
+  done
+  
+  # Step 7: on a non-strict base with --gate, gate the PR merged with current
+  # origin/main. The merge is a throwaway commit in --worktree; nothing is pushed,
+  # and the worktree goes back to the pinned head on every path.
+  if [ "$strict" = 0 ] && [ -n "$gate" ]; then
+    git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
+    if ! git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
+      say "gating the PR merged with current origin/main"
+      guard_restore() {
+        git -C "$worktree" reset -q --hard "$pin" >&2 || die_after_ready 1 "failed to restore pinned head ${pin:0:8}"
+      }
+      trap 'guard_rc=$?; trap - EXIT INT TERM; guard_restore; if [ "$guard_rc" -ne 0 ]; then exit_after_ready "$guard_rc" "gate aborted"; else exit "$guard_rc"; fi' EXIT
+      trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 143 "gate interrupted"' TERM
+      trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 130 "gate interrupted"' INT
+      if ! git -C "$worktree" -c user.name=ship-pr -c user.email=ship-pr@localhost merge --no-ff --no-edit origin/main >&2; then
+        guard_restore
+        trap - EXIT INT TERM
+        die_after_ready 3 "PR conflicts with current origin/main; rebase, then rerun"
       fi
-      ;;
-    *) die_after_ready 1 "gh pr merge failed" ;;
-  esac
-else
-  [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
-fi
+      if ! run_gate; then
+        guard_restore
+        trap - EXIT INT TERM
+        die_after_ready 1 "the PR merged with current origin/main fails the gate"
+      fi
+      guard_restore
+      trap - EXIT INT TERM
+      say "gate passes on the PR merged with current origin/main"
+    fi
+  fi
+  
+  # Step 8: merge pinned to the checked head, then wait for GitHub to say MERGED.
+  say "merging PR $pr at ${pin:0:8}"
+  merge_attempted=1
+  merge_err=""
+  merge_failed=""
+  if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
+    printf '%s\n' "$merge_err" >&2
+    lost_race=""
+    case "$merge_err" in
+      *"the head branch is not up to date with the base branch"*)
+        [ "$strict" = 1 ] && lost_race=1 ;;
+    esac
+    if [ -n "$lost_race" ]; then
+      state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
+      if [ "$state" != "MERGED" ]; then
+        fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
+        if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
+          lost_race_die "origin/main has not moved past ${pin:0:8}"
+        fi
+        [ -z "$lost_race_done" ] || lost_race_die "the rebased head lost the race again"
+        [ "$retries" -lt 3 ] || lost_race_die "no retries left"
+        lost_race_done=1
+        retries=$((retries + 1))
+        merge_attempted=0
+        say "origin/main moved before the merge; rebasing again (retry $retries of 3)"
+        continue
+      fi
+    else
+      case "$merge_err" in
+        *"Base branch was modified"*|*"GraphQL"*)
+          case "$merge_err" in
+            *"GraphQL"*) say "GraphQL error during merge; retrying once after 5 s" ;;
+            *) say "base branch was modified during merge; retrying once after 5 s" ;;
+          esac
+          sleep 5
+          if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
+            printf '%s\n' "$merge_err" >&2
+            lost_race2=""
+            case "$merge_err" in
+              *"the head branch is not up to date with the base branch"*)
+                [ "$strict" = 1 ] && lost_race2=1 ;;
+            esac
+            if [ -n "$lost_race2" ]; then
+              state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)" || state=""
+              if [ "$state" != "MERGED" ]; then
+                fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die_after_ready 1 "git fetch origin main failed"
+                if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
+                  lost_race_die "origin/main has not moved past ${pin:0:8}"
+                fi
+                [ -z "$lost_race_done" ] || lost_race_die "the rebased head lost the race again"
+                [ "$retries" -lt 3 ] || lost_race_die "no retries left"
+                lost_race_done=1
+                retries=$((retries + 1))
+                merge_attempted=0
+                say "origin/main moved before the merge; rebasing again (retry $retries of 3)"
+                continue
+              fi
+            else
+              merge_failed=1
+            fi
+          else
+            [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
+          fi
+          ;;
+        *) die_after_ready 1 "gh pr merge failed" ;;
+      esac
+    fi
+  else
+    [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
+  fi
+  break
+done
 merged="" sha=""
 for i in $(seq 1 12); do
   IFS=$'\t' read -r state sha < <(gh pr view "$pr" --repo "$repo" --json state,mergeCommit \
