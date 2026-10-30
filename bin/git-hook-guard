@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+# git-hook-guard shim
+# Refuses a lane's attempt to skip or redirect git hooks: --no-verify (-n on
+# commit) with commit or push, a -c core.hooksPath=... global option, a
+# config write to core.hooksPath, and a command run with GIT_CONFIG_COUNT /
+# GIT_CONFIG_KEY_* setting core.hooksPath or with HUSKY=0. Installed as `git`
+# in a directory placed first on a lane's PATH; see autonomous-flywheel.
+# Runs the real git for everything else, with argv unchanged.
+#
+# Not covered here (flagged for a follow-up ticket rather than invented
+# here): --config-env=core.hooksPath=VAR, GIT_CONFIG_PARAMETERS, git aliases
+# from config, --no-verify on other subcommands (merge, rebase, am), and
+# git hook run.
+import errno
+import os
+import signal
+import sys
+
+MARKER = b"# git-hook-guard shim"
+REFUSAL = ("git-hook-guard: refused: a lane may not skip or redirect git "
+           "hooks; a hook that refuses is not yours to get round, so stop "
+           "with STATUS: BLOCKED and report the refusal")
+
+
+def fail(code, msg):
+    sys.stderr.write("git-hook-guard: %s\n" % msg)
+    sys.exit(code)
+
+
+def is_shim(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(512)
+    except OSError:
+        return False
+    return MARKER in [line.rstrip() for line in head.split(b"\n")[:5]]
+
+
+def find_real_git(path_env, shim_dir):
+    # An unset PATH searches nothing. Otherwise follow execvp: an empty entry
+    # is the working directory, and a relative entry resolves against it.
+    # Skip the shim's own directory, non-directories, candidates that are not
+    # executable regular files, and candidates that carry the shim marker.
+    if path_env is None:
+        return None
+    for entry in path_env.split(os.pathsep):
+        directory = os.path.abspath(entry)
+        if directory == shim_dir or not os.path.isdir(directory):
+            continue
+        candidate = os.path.join(directory, "git")
+        if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+            continue
+        if is_shim(candidate):
+            continue
+        return candidate
+    return None
+
+
+def exec_real(real, args):
+    # Python ignores SIGPIPE and SIGXFSZ, and exec keeps ignored signals.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+    try:
+        os.execv(real, ["git"] + args)
+    except OSError as err:
+        code = 127 if err.errno == errno.ENOENT else 126
+        fail(code, "cannot exec %s: %s" % (real, err.strerror))
+
+
+def main():
+    args = sys.argv[1:]
+    shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    real = find_real_git(os.environ.get("PATH"), shim_dir)
+    if real is None:
+        fail(127, "no git on PATH outside git-hook-guard")
+    exec_real(real, args)
+
+
+main()
