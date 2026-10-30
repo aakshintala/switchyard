@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # git-hook-guard shim
 # Refuses a lane's attempt to skip or redirect git hooks: --no-verify (-n on
-# commit) with commit or push, a -c core.hooksPath=... global option, a
-# config write to core.hooksPath, and a command run with GIT_CONFIG_COUNT /
-# GIT_CONFIG_KEY_* setting core.hooksPath or with HUSKY=0. Installed as `git`
-# in a directory placed first on a lane's PATH; see autonomous-flywheel.
+# commit) with commit or push, a config write to core.hooksPath, and HUSKY=0.
+# A -c core.hooksPath=... global option or GIT_CONFIG_COUNT / GIT_CONFIG_KEY_*
+# setting core.hooksPath refuses only for the hook-running subcommands in
+# HOOK_SUBCOMMANDS, and passes through on any other. Installed as `git` in a
+# directory placed first on a lane's PATH; see autonomous-flywheel.
 # Runs the real git for everything else, with argv unchanged. A call from a
 # test run (NEXTEST_RUN_ID set, or effective cwd under the temp dir) runs
 # unchecked.
@@ -99,6 +100,11 @@ CONFIG_READ_VERBS = ("get", "list")
 NO_VERIFY_MIN = "--no-veri"
 NO_VERIFY_FULL = "--no-verify"
 INT_MAX = 2 ** 31 - 1
+# Subcommands that run hooks. Only these refuse a core.hooksPath set by the
+# -c global option or by GIT_CONFIG_COUNT / GIT_CONFIG_KEY_*: any other
+# subcommand, or none, runs no hook to skip.
+HOOK_SUBCOMMANDS = ("commit", "push", "merge", "rebase", "am", "cherry-pick",
+                    "revert")
 
 
 def hooks_key(text):
@@ -292,13 +298,16 @@ def config_count_limit():
     return n
 
 
-def bypass_in_env():
-    # GIT_CONFIG_COUNT / GIT_CONFIG_KEY_* setting core.hooksPath, or HUSKY
-    # set to exactly 0, refuses on every subcommand, including bare git.
-    # The environment keys are iterated directly, so a huge count costs
-    # nothing, and keys at or past the count never refuse.
-    if os.environ.get("HUSKY") == "0":
-        return True
+def husky_disabled():
+    # HUSKY set to exactly 0 refuses on every subcommand, including bare git.
+    return os.environ.get("HUSKY") == "0"
+
+
+def hooks_path_in_env():
+    # GIT_CONFIG_COUNT / GIT_CONFIG_KEY_* setting core.hooksPath. The
+    # environment keys are iterated directly, so a huge count costs nothing,
+    # and keys at or past the count never refuse. The caller gates this on
+    # the subcommand.
     limit = config_count_limit()
     if limit == -1:
         return False
@@ -366,13 +375,13 @@ def test_run_passes(args):
 
 
 def refused_command(args):
-    if bypass_in_env():
+    if husky_disabled():
         return True
     denied, sub, rest = parse_globals(args, [])
-    if denied:
-        return True
     if sub == "config":
         return bypass_in_config(rest)
+    if sub in HOOK_SUBCOMMANDS and (denied or hooks_path_in_env()):
+        return True
     if sub is not None:
         return bypass_in_command(sub, rest)
     return False
