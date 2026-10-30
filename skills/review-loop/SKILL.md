@@ -17,6 +17,8 @@ The loop for one PR. Reviews run on models from a different family than the one 
 
 `--head` is the full SHA of the PR head you expect reviewed, usually the commit you just pushed (`git rev-parse HEAD`): `review-pr` waits for GitHub to report it and reviews exactly that commit, so a push never gets reviewed at its old head. Pass `--issue` once per ticket the PR resolves, and once per issue holding a ruling that changes the PR's scope; link that ruling in the PR body too. A PR with no ticket leaves out `--issue` and `--spec` and is reviewed against its own description. `run` launches one job per axis: Standards and Spec (`code-review`, one axis each) and Overbuild (`overbuild-review`), waits for all, collects them, and exits with collect's code; `--axes standards[,spec][,overbuild]` runs a subset (default all three; `--overbuild-model` is needed only with `overbuild`), and the project's workflow doc says when a smaller set is enough; if the wait fails it exits non-zero and prints the `collect:` line to resume with. The split form, `start` then `collect`, is for a caller that must do other work while the reviews run: `start` returns at once with one `<role> <job-id>` line per job, you wait with `delegate watch` on those ids, then run collect with the ids as printed.
 
+A bare `review-pr run`/`start` on a PR that already carries a `review-pr` comment for an earlier head at a different patch-id exits 2 before starting any job and prints the scoped verify command with `--since` set to the last reviewed head. A rerun with the same patch-id is not refused, nor is a retry of the same head. When the comment fetch fails, the start exits 1 with `could not read PR comments`; rerun once the API is reachable. `--full-rereview <reason>` (a single line, never with `--verify`) overrides the refusal for the full pair step 3 allows after round 1; the reason is printed and stored in the posted comment header.
+
 ```
 ~/.agents/bin/review-pr collect <job-id>...
 ```
@@ -59,7 +61,7 @@ The verify prints `review-pr: repair base <sha> (<since> replayed onto <base>)`:
 
 `FIX-OK`: the loop is done. `FIX-INCOMPLETE`: back to step 2 with the open findings, while the counter is below 2.
 
-A scoped verify stands for every axis: `FIX-OK` ends the loop and no full review pair follows, whichever axis raised the findings. Run a full pair (step 1) only after a re-plan or take-back (step 4), or when the verify's new findings show the repair reached code outside the findings' bounds.
+A scoped verify stands for every axis: `FIX-OK` ends the loop and no full review pair follows, whichever axis raised the findings. A bare full pair on a PR that already has a review comment refuses (step 1). Run a full pair (step 1) only after a re-plan or take-back (step 4), or when the verify's new findings show the repair reached code outside the findings' bounds, passing `--full-rereview <reason>` for that full pair.
 
 Done when the verify has printed `FIX-OK` or `FIX-INCOMPLETE` for the current patch-id.
 
@@ -69,8 +71,8 @@ After round 2, no round 3 runs.
 
 - Only P3 findings open: answer each on the PR with evidence, or with a `debt:` comment naming its ceiling and upgrade trigger. The loop is done. A P3 that a marker could close only by weakening a rule a doc, spec or ticket states counts as an open P2.
 - Any P1 or P2 open: the lane stops. Load `attack-the-premise`, post the assumption the fixes share, and rule one of:
-  - **re-plan**: back to `implement` step 2, with the PR's branch as the base; reset the counter with `tkt-plan <state> replan`;
-  - **take back**: implement it yourself; it gets a full review (step 1, a different family from you), and the counter resets;
+  - **re-plan**: back to `implement` step 2, with the PR's branch as the base; reset the counter with `tkt-plan <state> replan`; its full review (step 1) passes `--full-rereview <reason>` since the PR already carries a review comment;
+  - **take back**: implement it yourself; it gets a full review (step 1 with `--full-rereview <reason>`, a different family from you), and the counter resets;
   - **park**: when the premise touches the ticket's core outcome (see `implement`).
 
   A second round-2 stop on the same ticket parks it, whatever the earlier ruling.

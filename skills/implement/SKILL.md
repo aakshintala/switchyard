@@ -89,7 +89,7 @@ Done when the gate passes on the remote tip.
 
 ### 6. Review
 
-Run `review-loop` on the PR.
+Run `review-loop` on the PR. A bare `review-pr run`/`start` on a PR that already has a review comment for an earlier head at a different patch-id refuses (exit 2) with the scoped verify command; `--full-rereview <reason>` overrides it for a re-plan or take-back. `tkt-build` passes `--full-rereview "tkt-build round-0 full review"` on its review pair itself.
 
 Done when `review-loop` is done.
 
