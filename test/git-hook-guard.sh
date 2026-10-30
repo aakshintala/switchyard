@@ -346,14 +346,15 @@ LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath)
 passed
 unset LANE_ENV
 
-# Fiber's tests spawn the binary with a cleared environment: only PATH and
-# HOME, no TMPDIR and no NEXTEST_RUN_ID, from a cwd outside the default temp
-# root. lane_cleared runs the shim that way and sets RC, OUT and ERR.
+# Fiber's tests spawn the binary with a cleared environment: only PATH, HOME
+# and TMPDIR, no NEXTEST_RUN_ID, from a cwd outside the temp root. TMPDIR is
+# pinned to $T/tmproot so the cwd sits outside it on every host, including
+# CI's /tmp fixture. lane_cleared runs the shim that way and sets RC, OUT and ERR.
 lane_cleared() {
   rm -f "$T/calls" "$T/stdin"
   local out rc
   out="$(cd "$T/home/work/sy-wt/lane" && env -i CALLS="$T/calls" \
-    STDIN_FILE="$T/stdin" PATH="$BASEPATH" HOME="$T/home" \
+    STDIN_FILE="$T/stdin" PATH="$BASEPATH" HOME="$T/home" TMPDIR="$T/tmproot" \
     "$T/shims/git" "$@" 2>"$T/err")"
   rc=$?
   OUT="$out"
