@@ -216,19 +216,36 @@ if [ -n "${mutant_job:-}" ]; then
           # Ruling B: a partial artifact set is unread. Count the run's
           # non-skipped Mutants (shard N) jobs against the mutants-*
           # artifacts the verdicts read; fewer artifacts means unread.
-          if shard_jobs_json="$(gh run view "$mutant_run" --repo "$repo" --json jobs 2>"$tmpd/shard-jobs-err")"; then
-            expected_shards="$(printf '%s' "$shard_jobs_json" | jq -r '[.jobs[] | select(.name | startswith("Mutants (shard ")) | select(.conclusion != "skipped")] | length' 2>/dev/null || true)"
-          else
+          # Every page of the paginated artifacts list counts: slurp all
+          # pages into one sum. Any jobs or artifacts request or count
+          # parse failure is unread with its cause; verdicts are discarded.
+          shard_count_err=""; expected_shards=""; actual_shards=""
+          if ! shard_jobs_json="$(gh run view "$mutant_run" --repo "$repo" --json jobs 2>"$tmpd/shard-jobs-err")"; then
+            shard_count_err="$(head -n 1 "$tmpd/shard-jobs-err" 2>/dev/null || true)"
+            [ -n "$shard_count_err" ] || shard_count_err="gh run view --json jobs failed for run $mutant_run"
+          elif ! expected_shards="$(printf '%s' "$shard_jobs_json" | jq -r '[.jobs[] | select(.name | startswith("Mutants (shard ")) | select(.conclusion != "skipped")] | length' 2>"$tmpd/shard-jobs-parse-err")"; then
+            shard_count_err="$(head -n 1 "$tmpd/shard-jobs-parse-err" 2>/dev/null || true)"
+            [ -n "$shard_count_err" ] || shard_count_err="could not count shard jobs for run $mutant_run"
             expected_shards=""
-          fi
-          if artifacts_json="$(gh api "repos/$repo/actions/runs/$mutant_run/artifacts" --paginate 2>"$tmpd/shard-artifacts-err")"; then
-            actual_shards="$(printf '%s' "$artifacts_json" | jq -r '[.artifacts[]? | select(.name | startswith("mutants-"))] | length' 2>/dev/null || true)"
           else
-            actual_shards=""
+            case "$expected_shards" in ''|*[!0-9]*) shard_count_err="could not count shard jobs for run $mutant_run"; expected_shards="";; esac
           fi
-          case "$expected_shards" in ''|*[!0-9]*) expected_shards="";; esac
-          case "$actual_shards" in ''|*[!0-9]*) actual_shards="";; esac
-          if [ -n "$expected_shards" ] && [ -n "$actual_shards" ] && [ "$actual_shards" -lt "$expected_shards" ]; then
+          if [ -z "$shard_count_err" ]; then
+            if ! artifacts_json="$(gh api "repos/$repo/actions/runs/$mutant_run/artifacts" --paginate 2>"$tmpd/shard-artifacts-err")"; then
+              shard_count_err="$(head -n 1 "$tmpd/shard-artifacts-err" 2>/dev/null || true)"
+              [ -n "$shard_count_err" ] || shard_count_err="gh api artifacts failed for run $mutant_run"
+            elif ! actual_shards="$(printf '%s' "$artifacts_json" | jq -s '[.[].artifacts[]? | select(.name | startswith("mutants-"))] | length' 2>"$tmpd/shard-artifacts-parse-err")"; then
+              shard_count_err="$(head -n 1 "$tmpd/shard-artifacts-parse-err" 2>/dev/null || true)"
+              [ -n "$shard_count_err" ] || shard_count_err="could not count shard artifacts for run $mutant_run"
+              actual_shards=""
+            else
+              case "$actual_shards" in ''|*[!0-9]*) shard_count_err="could not count shard artifacts for run $mutant_run"; actual_shards="";; esac
+            fi
+          fi
+          if [ -n "$shard_count_err" ]; then
+            shard_note="$shard_count_err"
+            : >"$tmpd/shard-verdicts"
+          elif [ "$actual_shards" -lt "$expected_shards" ]; then
             shard_note="only $actual_shards of $expected_shards shard artifacts present for run $mutant_run"
             : >"$tmpd/shard-verdicts"
           fi

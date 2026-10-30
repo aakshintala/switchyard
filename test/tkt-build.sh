@@ -111,8 +111,9 @@ chmod +x "$T/bin/delegate"
 # Stub gh: the PR list and head from $T/prnum and $T/prhead (empty with
 # $T/empty-pr, failing pr view with $T/noview); one run holding the mutant job;
 # the job log from $T/mutant-log (failing with $T/log-fail, cause in
-# $T/log-err); jobs from $T/jobs-json when present; artifacts from
-# $T/artifacts-json.
+# $T/log-err); jobs from $T/jobs-json when present (failing with
+# $T/jobs-fail, cause in $T/jobs-err); artifacts from $T/artifacts-json
+# (failing with $T/artifacts-fail, cause in $T/artifacts-err).
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
@@ -132,6 +133,10 @@ case " \$* " in
     if [ -f "$T/no-runs" ]; then printf '[]\n'; else printf '[{"databaseId":101}]\n'; fi
     ;;
   *"artifacts"*)
+    if [ -f "$T/artifacts-fail" ]; then
+      if [ -f "$T/artifacts-err" ]; then cat "$T/artifacts-err" >&2; fi
+      exit 1
+    fi
     cat "$T/artifacts-json"
     ;;
   *" --job "*)
@@ -142,7 +147,16 @@ case " \$* " in
     cat "$T/mutant-log"
     ;;
   *" --json jobs "*)
-    if [ -f "$T/jobs-json" ]; then cat "$T/jobs-json"; else printf '{"jobs":[{"databaseId":201,"name":"%s"}]}\n' "\$(cat "$T/mutant-job")"; fi
+    if [ -f "$T/jobs-fail" ] && [ -f "$T/jobs-first-done" ]; then
+      if [ -f "$T/jobs-err" ]; then cat "$T/jobs-err" >&2; fi
+      exit 1
+    fi
+    if [ -f "$T/jobs-first-done" ] && [ -f "$T/jobs-json2" ]; then
+      cat "$T/jobs-json2"
+    else
+      if [ -f "$T/jobs-json" ]; then cat "$T/jobs-json"; else printf '{"jobs":[{"databaseId":201,"name":"%s"}]}\n' "\$(cat "$T/mutant-job")"; fi
+    fi
+    touch "$T/jobs-first-done"
     ;;
   *)
     printf '{}\n'
@@ -320,7 +334,7 @@ EOF
   printf '0' >"$T/verdicts-rc"
   printf 'src/c.rs:5:6: MISSED\tcaught\n' >"$T/verdicts"
   printf '{"artifacts":[]}\n' >"$T/artifacts-json"
-  rm -f "$T/empty-pr" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/log-fail" "$T/log-err"
+  rm -f "$T/empty-pr" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err"
   printf '0' >"$T/dcounter"
   printf '0' >"$T/rcounter"
   : >"$T/calls.log"
@@ -1240,5 +1254,118 @@ ffile="$(bash "$TKT_STATE" "$S" get findings)"
 grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: only 2 of 3 shard artifacts present for run 101" "$ffile" || fail "shards-partial: the N of M count is reported unread"
 grep -q "survived in CI" "$ffile" && fail "shards-partial: no survivor P2 without full artifacts"
 grep -q "mutant shards unread" <<<"$OUT" || fail "shards-partial: the digest carries the unread note"
+
+# --- paginated artifacts sum across pages: two pages of one artifact each
+# count as two, so two of three expected shards still report unread ---
+setup_case shards-paginated-partial
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"},{"databaseId":303,"name":"Mutants (shard 3)","conclusion":"success"}]}\n' >"$T/jobs-json"
+printf '{"artifacts":[{"name":"mutants-a"}]}\n{"artifacts":[{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-paginated-partial exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-paginated-partial"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: only 2 of 3 shard artifacts present for run 101" "$ffile" || fail "shards-paginated-partial: paginated pages sum to 2 of 3 unread"
+grep -q "survived in CI" "$ffile" && fail "shards-paginated-partial: no survivor P2 without full artifacts"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-paginated-partial: the digest carries the unread note"
+
+# --- a failed shard-jobs request reports unread with its cause and reads no survivors ---
+setup_case shards-unread-jobsfail
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
+printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
+touch "$T/jobs-fail"
+printf 'gh: jobs blew up\nsecond line stays out\n' >"$T/jobs-err"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-jobsfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-jobsfail"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh: jobs blew up" "$ffile" || fail "shards-unread-jobsfail: the jobs cause is reported unread"
+grep -q "second line stays out" "$ffile" && fail "shards-unread-jobsfail: only the first stderr line is kept"
+grep -q "survived in CI" "$ffile" && fail "shards-unread-jobsfail: no survivor P2 without a jobs count"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-jobsfail: the digest carries the unread note"
+
+# --- a failed artifacts request reports unread with its cause and reads no survivors ---
+setup_case shards-unread-artifactsfail
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
+printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
+touch "$T/artifacts-fail"
+printf 'gh: artifacts blew up\nsecond line stays out\n' >"$T/artifacts-err"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-artifactsfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-artifactsfail"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh: artifacts blew up" "$ffile" || fail "shards-unread-artifactsfail: the artifacts cause is reported unread"
+grep -q "second line stays out" "$ffile" && fail "shards-unread-artifactsfail: only the first stderr line is kept"
+grep -q "survived in CI" "$ffile" && fail "shards-unread-artifactsfail: no survivor P2 without an artifacts count"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-artifactsfail: the digest carries the unread note"
+
+# --- an unparsable shard-jobs count reports unread and reads no survivors ---
+setup_case shards-unread-jobscount
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
+: >"$T/jobs-json2"
+printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-jobscount exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-jobscount"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: could not count shard jobs for run 101" "$ffile" || fail "shards-unread-jobscount: the jobs parse failure is reported unread"
+grep -q "survived in CI" "$ffile" && fail "shards-unread-jobscount: no survivor P2 without a jobs count"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-jobscount: the digest carries the unread note"
+
+# --- an unparsable artifacts page reports unread and reads no survivors ---
+setup_case shards-unread-artifactscount
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
+printf 'not json\n' >"$T/artifacts-json"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-artifactscount exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-artifactscount"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fq "P3 mutant shards unread: run 101 head ${H:0:12}: " "$ffile" || fail "shards-unread-artifactscount: the artifacts parse failure is reported unread"
+grep -q "survived in CI" "$ffile" && fail "shards-unread-artifactscount: no survivor P2 without an artifacts count"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-artifactscount: the digest carries the unread note"
 
 echo "tkt-build: all cases passed"
