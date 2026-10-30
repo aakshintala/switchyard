@@ -5,7 +5,9 @@
 # config write to core.hooksPath, and a command run with GIT_CONFIG_COUNT /
 # GIT_CONFIG_KEY_* setting core.hooksPath or with HUSKY=0. Installed as `git`
 # in a directory placed first on a lane's PATH; see autonomous-flywheel.
-# Runs the real git for everything else, with argv unchanged.
+# Runs the real git for everything else, with argv unchanged. A call from a
+# test run (NEXTEST_RUN_ID set, or effective cwd under the temp dir) runs
+# unchecked.
 #
 # Not covered here (flagged for a follow-up ticket rather than invented
 # here): --config-env=core.hooksPath=VAR, GIT_CONFIG_PARAMETERS, git aliases
@@ -112,10 +114,12 @@ def long_is_value(name, known):
     return len(name) > 0 and len(hits) == 1 and len(name) < len(hits[0])
 
 
-def parse_globals(args):
+def parse_globals(args, dirs):
     # One walk over argv with git's own grammar; argv is never rewritten.
-    # Returns (refused, subcommand, rest). Text inside a consumed value is
-    # never read as a flag.
+    # Returns (refused, subcommand, rest) and appends each -C value to dirs,
+    # in order. Text inside a consumed value is never read as a flag. The
+    # walk runs to the subcommand even after a hooks option, so dirs is whole.
+    denied = False
     i = 0
     while i < len(args):
         token = args[i]
@@ -134,25 +138,28 @@ def parse_globals(args):
         if token.startswith("-c") and len(token) > 2:
             # Real git rejects the joined form; refusing it is harmless.
             if hooks_key(token[2:]):
-                return True, None, []
+                denied = True
             i += 1
             continue
         if token == "-c":
             if i + 1 < len(args) and hooks_key(args[i + 1]):
-                return True, None, []
+                denied = True
             i += 2 if i + 1 < len(args) else 1
             continue
         if token == "-C":
+            if i + 1 < len(args):
+                dirs.append(args[i + 1])
             i += 2 if i + 1 < len(args) else 1
             continue
         if token.startswith("-C"):
             # An attached -C value names a directory, never a flag.
+            dirs.append(token[2:])
             i += 1
             continue
         i += 1
     if i < len(args):
-        return False, args[i], args[i + 1:]
-    return False, None, []
+        return denied, args[i], args[i + 1:]
+    return denied, None, []
 
 
 def no_verify_token(token):
@@ -319,10 +326,49 @@ def exec_real(real, args):
         fail(code, "cannot exec %s: %s" % (real, err.strerror))
 
 
+def effective_dir(args):
+    # The directory git runs in: the cwd, then each global -C in order. A
+    # relative -C joins onto the current value; an absolute one replaces it.
+    # None when the cwd is gone.
+    dirs = []
+    parse_globals(args, dirs)
+    try:
+        path = os.getcwd()
+    except OSError:
+        return None
+    for d in dirs:
+        path = os.path.join(path, d)
+    return path
+
+
+def under_temp_root(path):
+    # Path-component match on resolved paths, so /tmpfoo is not under /tmp.
+    # Anything that does not resolve to an existing directory is not under it.
+    if path is None:
+        return False
+    try:
+        root = os.path.realpath(os.environ.get("TMPDIR") or "/tmp")
+        target = os.path.realpath(path)
+        if not (os.path.isdir(root) and os.path.isdir(target)):
+            return False
+        return os.path.commonpath([root, target]) == root
+    except (OSError, ValueError):
+        return False
+
+
+def test_run_passes(args):
+    # Test suites drive git in throwaway repos under the temp dir, and nextest
+    # sets NEXTEST_RUN_ID on every test process. A lane's own worktree is never
+    # under the temp dir, so its calls keep every check.
+    if os.environ.get("NEXTEST_RUN_ID"):
+        return True
+    return under_temp_root(effective_dir(args))
+
+
 def refused_command(args):
     if bypass_in_env():
         return True
-    denied, sub, rest = parse_globals(args)
+    denied, sub, rest = parse_globals(args, [])
     if denied:
         return True
     if sub == "config":
@@ -334,7 +380,7 @@ def refused_command(args):
 
 def main():
     args = sys.argv[1:]
-    if refused_command(args):
+    if not test_run_passes(args) and refused_command(args):
         sys.stderr.write(REFUSAL + "\n")
         sys.exit(1)
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))

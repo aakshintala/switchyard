@@ -25,6 +25,10 @@ REFUSED='git-hook-guard: refused: a lane may not skip or redirect git hooks; a h
 NO_GIT='git-hook-guard: no git on PATH outside git-hook-guard'
 
 mkdir -p "$T/home" "$T/shims" "$T/real" "$T/py"
+# The shim's temp root is $T/tmproot, and no refusal case runs with its cwd or
+# -C target inside it. $T/x/tmp and $T/x/tmpfoo test the sibling-prefix case;
+# $T/home/work/sy-wt/lane stands in for a lane worktree.
+mkdir -p "$T/tmproot/work" "$T/x/tmp" "$T/x/tmpfoo" "$T/home/work/sy-wt/lane"
 PY="$(command -v python3)" || fail "python3 not on PATH"
 ln -s "$PY" "$T/py/python3"
 ln -s "$SHIM" "$T/shims/git"
@@ -52,14 +56,15 @@ BASEPATH="$T/shims:$T/real:$T/py:/usr/bin:/bin"
 
 # lane ARGS...: run the installed shim in a clean environment and capture
 # RC, OUT and ERR. LANE_PATH overrides PATH; LANE_ENV holds extra NAME=VALUE
-# words placed before the command; STUB_EXIT and STUB_READ_STDIN pass through
-# to the stub. $T/calls is reset first, so its absence after a run proves the
-# stub never ran.
+# words placed after the defaults (so it can override TMPDIR); LANE_DIR is the
+# cwd (default $T/home); STUB_EXIT and STUB_READ_STDIN pass through to the
+# stub. $T/calls is reset first, so its absence after a run proves the stub
+# never ran.
 lane() {
   rm -f "$T/calls" "$T/stdin"
   local out rc
-  out="$(env -i CALLS="$T/calls" STDIN_FILE="$T/stdin" \
-    PATH="${LANE_PATH:-$BASEPATH}" HOME="$T/home" \
+  out="$(cd "${LANE_DIR:-$T/home}" && env -i CALLS="$T/calls" STDIN_FILE="$T/stdin" \
+    PATH="${LANE_PATH:-$BASEPATH}" HOME="$T/home" TMPDIR="$T/tmproot" \
     STUB_EXIT="${STUB_EXIT:-0}" STUB_READ_STDIN="${STUB_READ_STDIN:-0}" \
     ${LANE_ENV[@]+"${LANE_ENV[@]}"} \
     "$T/shims/git" "$@" 2>"$T/err")"
@@ -331,5 +336,40 @@ unset LANE_ENV
 LANE_PATH="$T/shims:$T/py"
 refused commit --no-verify
 unset LANE_PATH
+
+# Task 3: test-run pass-through.
+
+LANE_ENV=(NEXTEST_RUN_ID=abc)
+passed commit --no-verify
+unset LANE_ENV
+LANE_ENV=(NEXTEST_RUN_ID=)
+refused commit --no-verify
+unset LANE_ENV
+
+LANE_DIR="$T/tmproot/work"
+LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath)
+passed -c core.hooksPath=/dev/null commit
+unset LANE_ENV
+passed -c core.hooksPath=/dev/null commit
+unset LANE_DIR
+
+passed -C "$T/tmproot/work" push --no-verify
+refused -C "$T/home" push --no-verify
+LANE_DIR="$T/tmproot/work"
+refused -C "$T/home" push --no-verify
+unset LANE_DIR
+
+LANE_ENV=(TMPDIR="$T/x/tmp")
+LANE_DIR="$T/x/tmpfoo"
+refused push --no-verify
+unset LANE_DIR
+unset LANE_ENV
+
+LANE_DIR="$T/home/work/sy-wt/lane"
+refused push --no-verify
+LANE_ENV=(HUSKY=0)
+refused status
+unset LANE_ENV
+unset LANE_DIR
 
 echo "git-hook-guard: all cases passed"
