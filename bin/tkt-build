@@ -138,17 +138,35 @@ if [ "$from" != review ]; then
   rc=0; gate_out="$("$tktgate" "$state" --expect-head "$head" 2>"$tmpd/gate-err")" || rc=$?
   [ "$rc" -eq 0 ] || forward GATE "$gate_out" "$rc" "$tmpd/gate-err"
 fi
-mutants_file=""; mutant_count=0; mutant_run=""
+mutants_file=""; mutant_count=0; mutant_run=""; listing_note=""
 if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
   mutants_file="$run/$slug-$issue-mutants-${head:0:12}.txt"; : >"$mutants_file"
-  "$ghci" wait "$pr" --job "$mutant_job" --timeout 600 --repo "$repo" >/dev/null 2>&1 || true
+  listing_rc=0
+  "$ghci" wait "$pr" --job "$mutant_job" --timeout 600 --repo "$repo" >/dev/null 2>"$tmpd/listing-err" || listing_rc=$?
+  if [ "$listing_rc" -ne 0 ]; then
+    listing_note="$(head -n 1 "$tmpd/listing-err" 2>/dev/null || true)"
+    [ -n "$listing_note" ] || listing_note="gh-ci wait --job failed with exit $listing_rc"
+  fi
   tmp_log="$tmpd/mutant-log"; : >"$tmp_log"
   runs="$(gh run list --repo "$repo" --commit "$head" --limit 5 --json databaseId 2>/dev/null | jq -r '.[].databaseId' 2>/dev/null || true)"
   for rid in $runs; do
     jid="$(gh run view "$rid" --repo "$repo" --json jobs 2>/dev/null | jq -r ".jobs[] | select(.name==\"$mutant_job\") | .databaseId" 2>/dev/null | tail -n 1 || true)"
-    if [ -n "$jid" ]; then gh run view "$rid" --repo "$repo" --job "$jid" --log >"$tmp_log" 2>/dev/null || true; mutant_run="$rid"; break; fi
+    if [ -n "$jid" ]; then
+      if gh run view "$rid" --repo "$repo" --job "$jid" --log >"$tmp_log" 2>"$tmpd/log-err"; then
+        mutant_run="$rid"
+      else
+        log_rc=$?
+        mutant_run="$rid"
+        if [ -z "$listing_note" ]; then
+          listing_note="$(head -n 1 "$tmpd/log-err" 2>/dev/null || true)"
+          [ -n "$listing_note" ] || listing_note="mutant log read failed for run $rid (exit $log_rc)"
+        fi
+      fi
+      break
+    fi
   done
-  grep -Eo '[^[:space:]]+\.rs:[0-9]+:[0-9]+: .*|mutants in the diff: .*' "$tmp_log" >"$mutants_file" || true
+  esc="$(printf '\033')"
+  grep -Eo '[^[:space:]]+\.rs:[0-9]+:[0-9]+: .*|mutants in the diff: .*' "$tmp_log" 2>/dev/null | tr -d '\r' | sed -E "s/${esc}\[[0-9;]*[A-Za-z]//g" >"$mutants_file" || true
   mutant_count="$(grep -c . "$mutants_file" || true)"
 fi
 rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
@@ -179,27 +197,65 @@ n=0; for ax in standards spec overbuild; do n=$((n+1)); [ "$(printf '%s' "$rids"
   rids="${rids:+$rids }$id"; tkt set review_ids "$rids"; tkt set review_head "$head"; done
 # The shard verdicts wait overlaps review: it starts once the review pair is
 # dispatched and ends before the watch, so slow shards never serialize round 1.
+# The 2400 s bound counts from the start of the wait, beside the review pair.
 # A finished run (even a red one) is read; anything unreadable is reported and
 # review proceeds without it. Nothing unread is ever treated as caught.
+# A skipped shard job holds no survivors, never unread.
 shard_note=""; : >"$tmpd/shard-verdicts"
 if [ -n "${mutant_job:-}" ]; then
-  if [ -z "${mutant_run:-}" ]; then
+  if [ -n "${listing_note:-}" ]; then
+    shard_note="$listing_note"
+  elif [ -z "${mutant_run:-}" ]; then
     shard_note="no run with $mutant_job on head"
   elif [ "$mutant_count" -gt 0 ]; then
     shard_rc=0
-    "$ghci" wait --run "$mutant_run" --pr "$pr" --timeout 600 --repo "$repo" >/dev/null 2>"$tmpd/shard-wait-err" || shard_rc=$?
+    "$ghci" wait --run "$mutant_run" --pr "$pr" --timeout 2400 --repo "$repo" >/dev/null 2>"$tmpd/shard-wait-err" || shard_rc=$?
     case "$shard_rc" in
       0|1)
         if "$mverd" "$mutant_run" --repo "$repo" >"$tmpd/shard-verdicts" 2>"$tmpd/shard-verdicts-err"; then
-          :
+          # Ruling B: a partial artifact set is unread. Count the run's
+          # non-skipped Mutants (shard N) jobs against the mutants-*
+          # artifacts the verdicts read; fewer artifacts means unread.
+          if shard_jobs_json="$(gh run view "$mutant_run" --repo "$repo" --json jobs 2>"$tmpd/shard-jobs-err")"; then
+            expected_shards="$(printf '%s' "$shard_jobs_json" | jq -r '[.jobs[] | select(.name | startswith("Mutants (shard ")) | select(.conclusion != "skipped")] | length' 2>/dev/null || true)"
+          else
+            expected_shards=""
+          fi
+          if artifacts_json="$(gh api "repos/$repo/actions/runs/$mutant_run/artifacts" --paginate 2>"$tmpd/shard-artifacts-err")"; then
+            actual_shards="$(printf '%s' "$artifacts_json" | jq -r '[.artifacts[]? | select(.name | startswith("mutants-"))] | length' 2>/dev/null || true)"
+          else
+            actual_shards=""
+          fi
+          case "$expected_shards" in ''|*[!0-9]*) expected_shards="";; esac
+          case "$actual_shards" in ''|*[!0-9]*) actual_shards="";; esac
+          if [ -n "$expected_shards" ] && [ -n "$actual_shards" ] && [ "$actual_shards" -lt "$expected_shards" ]; then
+            shard_note="only $actual_shards of $expected_shards shard artifacts present for run $mutant_run"
+            : >"$tmpd/shard-verdicts"
+          fi
         else
-          shard_note="$(head -n 1 "$tmpd/shard-verdicts-err" 2>/dev/null || true)"
-          [ -n "$shard_note" ] || shard_note="mutant-verdicts failed for run $mutant_run"
-          : >"$tmpd/shard-verdicts"
+          # A run whose shards all skipped holds no survivors, not unread:
+          # mutant-verdicts reports no artifacts, but there is nothing to read.
+          # Only when the run actually has shard jobs; a run with no shard
+          # jobs listed keeps the verdicts failure as unread.
+          if shard_jobs_json="$(gh run view "$mutant_run" --repo "$repo" --json jobs 2>/dev/null)"; then
+            total_shards="$(printf '%s' "$shard_jobs_json" | jq -r '[.jobs[] | select(.name | startswith("Mutants (shard "))] | length' 2>/dev/null || true)"
+            expected_shards="$(printf '%s' "$shard_jobs_json" | jq -r '[.jobs[] | select(.name | startswith("Mutants (shard ")) | select(.conclusion != "skipped")] | length' 2>/dev/null || true)"
+          else
+            total_shards=""; expected_shards=""
+          fi
+          case "$total_shards" in ''|*[!0-9]*) total_shards="";; esac
+          case "$expected_shards" in ''|*[!0-9]*) expected_shards="";; esac
+          if [ -n "$total_shards" ] && [ "$total_shards" -gt 0 ] && [ -n "$expected_shards" ] && [ "$expected_shards" -eq 0 ]; then
+            shard_note=""; : >"$tmpd/shard-verdicts"
+          else
+            shard_note="$(head -n 1 "$tmpd/shard-verdicts-err" 2>/dev/null || true)"
+            [ -n "$shard_note" ] || shard_note="mutant-verdicts failed for run $mutant_run"
+            : >"$tmpd/shard-verdicts"
+          fi
         fi
         ;;
       124)
-        shard_note="timeout after 600s"
+        shard_note="timeout after 2400s"
         ;;
       *)
         shard_note="$(head -n 1 "$tmpd/shard-wait-err" 2>/dev/null || true)"
