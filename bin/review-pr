@@ -184,7 +184,7 @@ last_review_header() {
   [ -n "$last" ] || return 0
   local pid headv
   pid="$(printf '%s' "$last" | sed -n 's/.*review-pr: patch-id \([^,]*\), head .*/\1/p')"
-  headv="$(printf '%s' "$last" | sed -n 's/.*, head \([0-9a-f]\{40\}\).*/\1/p')"
+  headv="$(printf '%s' "$last" | sed -n 's/.*review-pr: patch-id [^,]*, head \([0-9a-f]\{40\}\).*/\1/p')"
   [ -n "$pid" ] && [ -n "$headv" ] || return 0
   printf '%s %s' "$headv" "$pid"
 }

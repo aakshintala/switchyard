@@ -191,6 +191,20 @@ start_review() {
   bash "$REVIEW" start "$@"
 }
 
+reset_with_approvals() {
+  # reset_state plus the shared all-approve fixture: CI pass plus APPROVE
+  # records for the three review roles. Used by the refusal and
+  # full-rereview scenarios; each keeps its own comments and assertions.
+  reset_state
+  printf 'ci\tpass\n' >"$T/checks.txt"
+  write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+  write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+  write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+}
+
 stale_ts_for() {
   # stale_ts_for AGE: touch -t timestamp for AGE (hours by default;
   # trailing h for hours, m for minutes). Keeps bare numbers meaning hours
@@ -1590,14 +1604,7 @@ OTHER_HEAD="1111111111111111111111111111111111111111"
 OTHER_PID="abc123"
 
 # --- case a: refused with a prior comment at a different patch-id (default path)
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 before_wt="$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)"
 before_rd="$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)"
@@ -1614,14 +1621,7 @@ grep -Fq -- "--full-rereview" <<<"$err" || fail "refusal names the override flag
 [ "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)" = "$before_rd" ] || fail "refused start leaves no run dir"
 
 # --- case b: refused on the --head path too
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
 before_wt="$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)"
@@ -1635,14 +1635,7 @@ grep -Fq -- "--since $OTHER_HEAD" <<<"$err" || fail "refused --head names the pr
 [ "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)" = "$before_rd" ] || fail "refused --head leaves no run dir"
 
 # --- case c: run is refused before watch writes
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
   >"$T/stdout-run-refuse.txt" 2>"$T/stderr-run-refuse.txt"; st=$?
@@ -1652,130 +1645,60 @@ bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 
 grep -Fq -- "--since $OTHER_HEAD" "$T/stderr-run-refuse.txt" || fail "refused run names the prior head"
 
 # --- case d: no prior comment starts, and a non-matching comment starts
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "no prior comment starts"
 [ -f "$T/state/runs.txt" ] || fail "no prior comment launches jobs"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "no prior comment collects"
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "LGTM"
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "non-matching comment starts"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "non-matching comment collects"
 
 # --- case e: same patch-id with a different head starts (rebase kept the patch)
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $EXPECTED_PID, head $OTHER_HEAD"
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "same patch-id rerun starts"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "same patch-id rerun collects"
 
 # --- case f: different patch-id with the same head starts (unchanged-head retry)
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $FAKE_SHA"
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "same head retry starts"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "same head retry collects"
 
 # --- case g: different patch-id and different head refuses
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 2>&1 >/dev/null)"; st=$?
 [ "$st" -eq 2 ] || fail "different patch and head refuses with exit 2 (got $st)"
 [ ! -e "$T/state/runs.txt" ] || fail "different patch and head launches no job"
 
 # --- case h: newest comment wins regardless of listing order
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $EXPECTED_PID, head $FAKE_SHA"
 plant_comment "2026-10-09T11:00:00Z" 102 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 2>&1 >/dev/null)"; st=$?
 [ "$st" -eq 2 ] || fail "newest different refuses oldest-first (got $st)"
 grep -Fq -- "$OTHER_HEAD" <<<"$err" || fail "newest different names the newer head oldest-first"
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T11:00:00Z" 102 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $EXPECTED_PID, head $FAKE_SHA"
 err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 2>&1 >/dev/null)"; st=$?
 [ "$st" -eq 2 ] || fail "newest different refuses newest-first (got $st)"
 grep -Fq -- "$OTHER_HEAD" <<<"$err" || fail "newest different names the newer head newest-first"
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 plant_comment "2026-10-09T11:00:00Z" 102 "review-pr: patch-id $EXPECTED_PID, head $OTHER_HEAD"
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "newer same-patch starts oldest-first"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "newer same-patch collects oldest-first"
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T11:00:00Z" 102 "review-pr: patch-id $EXPECTED_PID, head $OTHER_HEAD"
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "newer same-patch starts newest-first"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "newer same-patch collects newest-first"
 
 # --- case i: malformed newest falls back to the older valid header
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 plant_comment "2026-10-09T11:00:00Z" 102 "review-pr: patch-id"
 err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 2>&1 >/dev/null)"; st=$?
@@ -1783,14 +1706,7 @@ err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2
 grep -Fq -- "$OTHER_HEAD" <<<"$err" || fail "malformed newest names the older valid head"
 
 # --- case j: patch-id none never counts as the same patch
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 cp "$T/diff.txt" "$T/diff-saved.txt"
 : >"$T/diff.txt"
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id none, head $OTHER_HEAD"
@@ -1800,14 +1716,7 @@ cp "$T/diff-saved.txt" "$T/diff.txt"
 [ ! -e "$T/state/runs.txt" ] || fail "none patch-ids launch no job"
 
 # --- case k: comment fetch failure fails closed with exit 1
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 touch "$T/state/fail-comments"
 err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 2>&1 >/dev/null)"; st=$?
 [ "$st" -eq 1 ] || fail "comment fetch failure exits 1 (got $st)"
@@ -1817,27 +1726,13 @@ grep -Fq "Rerun once the API is reachable" <<<"$err" || fail "fetch failure says
 [ -z "$(ls "$TMPDIR/review-pr" 2>/dev/null)" ] || fail "fetch failure saves no state"
 
 # --- case k2: malformed-only history starts (no valid header picked)
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id"
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "malformed-only history starts"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "malformed-only history collects"
 
 # --- case l: --full-rereview overrides the refusal and lands in the header
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
   --full-rereview "re-plan after round 2" 2>"$T/stderr-full.txt" >/dev/null || fail "full-rereview with a prior comment starts"
@@ -1845,28 +1740,14 @@ grep -Fq "review-pr: full re-review: re-plan after round 2" "$T/stderr-full.txt"
 grep -Fxq "full_rereview=re-plan after round 2" "$TMPDIR/review-pr/job-standards" || fail "full-rereview lands in the state file"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "full-rereview collects"
 [ "$(head -1 "$T/state/comment.md")" = "review-pr: patch-id $EXPECTED_PID, head $FAKE_SHA, full-rereview: re-plan after round 2" ] || fail "full-rereview lands in the posted header"
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 touch "$T/state/fail-comments"
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
   --full-rereview "re-plan after round 2" >/dev/null 2>&1 || fail "full-rereview skips the fetch when the API is down"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "full-rereview with a failed fetch collects"
 [ "$(head -1 "$T/state/comment.md")" = "review-pr: patch-id $EXPECTED_PID, head $FAKE_SHA, full-rereview: re-plan after round 2" ] || fail "failed-fetch override header carries the reason"
-reset_state
-printf 'ci\tpass\n' >"$T/checks.txt"
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
-STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
+reset_with_approvals
 start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
   --full-rereview "re-plan after round 2" >/dev/null 2>&1 || fail "full-rereview without a prior comment starts"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "full-rereview without prior collects"
@@ -1931,5 +1812,14 @@ STATUS: DONE" 0
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD"
 start_review 7 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "verify with a prior comment starts"
 bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with a prior comment collects"
+
+# --- case o: a reason containing ", head <SHA>" never masks the reviewed head
+reset_with_approvals
+plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD, full-rereview: take back, head $FAKE_SHA"
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 2>&1 >/dev/null)"; st=$?
+[ "$st" -eq 2 ] || fail "reason head does not mask the reviewed head (got $st)"
+grep -Fq -- "--since $OTHER_HEAD" <<<"$err" || fail "reason-head refusal names the reviewed head"
+grep -Fq -- "already has a review for head $OTHER_HEAD" <<<"$err" || fail "reason-head refusal prints the reviewed head"
+[ ! -e "$T/state/runs.txt" ] || fail "reason-head refusal launches no job"
 
 echo "review-pr: all cases passed"
