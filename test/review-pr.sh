@@ -1822,4 +1822,20 @@ grep -Fq -- "--since $OTHER_HEAD" <<<"$err" || fail "reason-head refusal names t
 grep -Fq -- "already has a review for head $OTHER_HEAD" <<<"$err" || fail "reason-head refusal prints the reviewed head"
 [ ! -e "$T/state/runs.txt" ] || fail "reason-head refusal launches no job"
 
+# --- case o2: a reason containing a complete header prefix never masks the reviewed head
+reset_with_approvals
+plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD, full-rereview: take back review-pr: patch-id def456, head 2222222222222222222222222222222222222222"
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 2>&1 >/dev/null)"; st=$?
+[ "$st" -eq 2 ] || fail "reason header prefix does not mask the reviewed head (got $st)"
+grep -Fq -- "--since $OTHER_HEAD" <<<"$err" || fail "reason-prefix refusal names the reviewed head"
+grep -Fq -- "already has a review for head $OTHER_HEAD" <<<"$err" || fail "reason-prefix refusal prints the reviewed head"
+[ ! -e "$T/state/runs.txt" ] || fail "reason-prefix refusal launches no job"
+reset_with_approvals
+plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id $OTHER_PID, head $OTHER_HEAD, full-rereview: take back review-pr: patch-id def456, head $FAKE_SHA"
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 2>&1 >/dev/null)"; st=$?
+[ "$st" -eq 2 ] || fail "reason header prefix at the current head still refuses (got $st)"
+grep -Fq -- "--since $OTHER_HEAD" <<<"$err" || fail "reason-prefix bypass refusal names the reviewed head"
+grep -Fq -- "already has a review for head $OTHER_HEAD" <<<"$err" || fail "reason-prefix bypass refusal prints the reviewed head"
+[ ! -e "$T/state/runs.txt" ] || fail "reason-prefix bypass refusal launches no job"
+
 echo "review-pr: all cases passed"

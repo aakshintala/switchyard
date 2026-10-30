@@ -182,9 +182,12 @@ last_review_header() {
   local last
   last="$(printf '%s\n' "$rows" | sort -t "$(printf '\t')" -k1,1 -k2,2n | { grep -E 'review-pr: patch-id ([0-9a-f]+|none), head [0-9a-f]{40}(,.*)?$' || true; } | tail -n 1)"
   [ -n "$last" ] || return 0
+  local header
+  header="$(printf '%s' "$last" | cut -f3-)"
+  [ -n "$header" ] || return 0
   local pid headv
-  pid="$(printf '%s' "$last" | sed -n 's/.*review-pr: patch-id \([^,]*\), head .*/\1/p')"
-  headv="$(printf '%s' "$last" | sed -n 's/.*review-pr: patch-id [^,]*, head \([0-9a-f]\{40\}\).*/\1/p')"
+  pid="$(printf '%s' "$header" | sed -n 's/^review-pr: patch-id \([^,]*\), head .*/\1/p')"
+  headv="$(printf '%s' "$header" | sed -n 's/^review-pr: patch-id [^,]*, head \([0-9a-f]\{40\}\).*/\1/p')"
   [ -n "$pid" ] && [ -n "$headv" ] || return 0
   printf '%s %s' "$headv" "$pid"
 }
