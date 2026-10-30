@@ -26,6 +26,7 @@ if [ ! -r "$tokens_lib" ]; then echo "tkt-build: cannot read shared lib: $tokens
 . "$tokens_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
+mverd="$bin_dir/mutant-verdicts"
 reviewpr="$bin_dir/review-pr"; plangate="$bin_dir/plan-gate"
 delegate="${TKT_BIN:+$TKT_BIN/}delegate"
 lane_brief="$HOME/.agents/skills/planning/briefs/lane.md"
@@ -137,17 +138,35 @@ if [ "$from" != review ]; then
   rc=0; gate_out="$("$tktgate" "$state" --expect-head "$head" 2>"$tmpd/gate-err")" || rc=$?
   [ "$rc" -eq 0 ] || forward GATE "$gate_out" "$rc" "$tmpd/gate-err"
 fi
-mutants_file=""; mutant_count=0
+mutants_file=""; mutant_count=0; mutant_run=""; listing_note=""
 if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
   mutants_file="$run/$slug-$issue-mutants-${head:0:12}.txt"; : >"$mutants_file"
-  "$ghci" wait "$pr" --job "$mutant_job" --repo "$repo" >/dev/null 2>&1 || true
+  listing_rc=0
+  "$ghci" wait "$pr" --job "$mutant_job" --timeout 600 --repo "$repo" >/dev/null 2>"$tmpd/listing-err" || listing_rc=$?
+  if [ "$listing_rc" -ne 0 ]; then
+    listing_note="$(head -n 1 "$tmpd/listing-err" 2>/dev/null || true)"
+    [ -n "$listing_note" ] || listing_note="gh-ci wait --job failed with exit $listing_rc"
+  fi
   tmp_log="$tmpd/mutant-log"; : >"$tmp_log"
   runs="$(gh run list --repo "$repo" --commit "$head" --limit 5 --json databaseId 2>/dev/null | jq -r '.[].databaseId' 2>/dev/null || true)"
   for rid in $runs; do
     jid="$(gh run view "$rid" --repo "$repo" --json jobs 2>/dev/null | jq -r ".jobs[] | select(.name==\"$mutant_job\") | .databaseId" 2>/dev/null | tail -n 1 || true)"
-    if [ -n "$jid" ]; then gh run view "$rid" --repo "$repo" --job "$jid" --log >"$tmp_log" 2>/dev/null || true; break; fi
+    if [ -n "$jid" ]; then
+      if gh run view "$rid" --repo "$repo" --job "$jid" --log >"$tmp_log" 2>"$tmpd/log-err"; then
+        mutant_run="$rid"
+      else
+        log_rc=$?
+        mutant_run="$rid"
+        if [ -z "$listing_note" ]; then
+          listing_note="$(head -n 1 "$tmpd/log-err" 2>/dev/null || true)"
+          [ -n "$listing_note" ] || listing_note="mutant log read failed for run $rid (exit $log_rc)"
+        fi
+      fi
+      break
+    fi
   done
-  grep -Eo '[^[:space:]]+\.rs:[0-9]+:[0-9]+: .*|mutants in the diff: .*' "$tmp_log" >"$mutants_file" || true
+  esc="$(printf '\033')"
+  grep -Eo '[^[:space:]]+\.rs:[0-9]+:[0-9]+: .*|mutants in the diff: .*' "$tmp_log" 2>/dev/null | tr -d '\r' | sed -E "s/${esc}\[[0-9;]*[A-Za-z]//g" >"$mutants_file" || true
   mutant_count="$(grep -c . "$mutants_file" || true)"
 fi
 rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
@@ -176,6 +195,92 @@ n=0; for ax in standards spec overbuild; do n=$((n+1)); [ "$(printf '%s' "$rids"
   [ "$rc" -eq 0 ] || { [ -n "$rids" ] && { tkt set review_ids "$rids"; tkt set review_head "$head"; }; emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-$ax-err")"; }
   id="$(awk -v a="$ax" '$1==a{print $2; exit}' <<<"$one")"; [ -n "$id" ] || emit "REVIEW-INCOMPLETE" 1 "missing $ax id"
   rids="${rids:+$rids }$id"; tkt set review_ids "$rids"; tkt set review_head "$head"; done
+# The shard verdicts wait overlaps review: it starts once the review pair is
+# dispatched and ends before the watch, so slow shards never serialize round 1.
+# The 2400 s bound counts from the start of the wait, beside the review pair.
+# A finished run (even a red one) is read; anything unreadable is reported and
+# review proceeds without it. Nothing unread is ever treated as caught.
+# A skipped shard job holds no survivors, never unread.
+shard_note=""; : >"$tmpd/shard-verdicts"
+if [ -n "${mutant_job:-}" ]; then
+  if [ -n "${listing_note:-}" ]; then
+    shard_note="$listing_note"
+  elif [ -z "${mutant_run:-}" ]; then
+    shard_note="no run with $mutant_job on head"
+  elif [ "$mutant_count" -gt 0 ]; then
+    shard_rc=0
+    "$ghci" wait --run "$mutant_run" --pr "$pr" --timeout 2400 --repo "$repo" >/dev/null 2>"$tmpd/shard-wait-err" || shard_rc=$?
+    case "$shard_rc" in
+      0|1)
+        if "$mverd" "$mutant_run" --repo "$repo" >"$tmpd/shard-verdicts" 2>"$tmpd/shard-verdicts-err"; then
+          # Ruling B: a partial artifact set is unread. Count the run's
+          # non-skipped Mutants (shard N) jobs against the mutants-*
+          # artifacts the verdicts read; fewer artifacts means unread.
+          # Every page of the paginated artifacts list counts: slurp all
+          # pages into one sum. Any jobs or artifacts request or count
+          # parse failure is unread with its cause; verdicts are discarded.
+          shard_count_err=""; expected_shards=""; actual_shards=""
+          if ! shard_jobs_json="$(gh run view "$mutant_run" --repo "$repo" --json jobs 2>"$tmpd/shard-jobs-err")"; then
+            shard_count_err="$(head -n 1 "$tmpd/shard-jobs-err" 2>/dev/null || true)"
+            [ -n "$shard_count_err" ] || shard_count_err="gh run view --json jobs failed for run $mutant_run"
+          elif ! expected_shards="$(printf '%s' "$shard_jobs_json" | jq -r '[.jobs[] | select(.name | startswith("Mutants (shard ")) | select(.conclusion != "skipped")] | length' 2>"$tmpd/shard-jobs-parse-err")"; then
+            shard_count_err="$(head -n 1 "$tmpd/shard-jobs-parse-err" 2>/dev/null || true)"
+            [ -n "$shard_count_err" ] || shard_count_err="could not count shard jobs for run $mutant_run"
+            expected_shards=""
+          else
+            case "$expected_shards" in ''|*[!0-9]*) shard_count_err="could not count shard jobs for run $mutant_run"; expected_shards="";; esac
+          fi
+          if [ -z "$shard_count_err" ]; then
+            if ! artifacts_json="$(gh api "repos/$repo/actions/runs/$mutant_run/artifacts" --paginate 2>"$tmpd/shard-artifacts-err")"; then
+              shard_count_err="$(head -n 1 "$tmpd/shard-artifacts-err" 2>/dev/null || true)"
+              [ -n "$shard_count_err" ] || shard_count_err="gh api artifacts failed for run $mutant_run"
+            elif ! actual_shards="$(printf '%s' "$artifacts_json" | jq -s '[.[].artifacts[]? | select(.name | startswith("mutants-"))] | length' 2>"$tmpd/shard-artifacts-parse-err")"; then
+              shard_count_err="$(head -n 1 "$tmpd/shard-artifacts-parse-err" 2>/dev/null || true)"
+              [ -n "$shard_count_err" ] || shard_count_err="could not count shard artifacts for run $mutant_run"
+              actual_shards=""
+            else
+              case "$actual_shards" in ''|*[!0-9]*) shard_count_err="could not count shard artifacts for run $mutant_run"; actual_shards="";; esac
+            fi
+          fi
+          if [ -n "$shard_count_err" ]; then
+            shard_note="$shard_count_err"
+            : >"$tmpd/shard-verdicts"
+          elif [ "$actual_shards" -lt "$expected_shards" ]; then
+            shard_note="only $actual_shards of $expected_shards shard artifacts present for run $mutant_run"
+            : >"$tmpd/shard-verdicts"
+          fi
+        else
+          # A run whose shards all skipped holds no survivors, not unread:
+          # mutant-verdicts reports no artifacts, but there is nothing to read.
+          # Only when the run actually has shard jobs; a run with no shard
+          # jobs listed keeps the verdicts failure as unread.
+          if shard_jobs_json="$(gh run view "$mutant_run" --repo "$repo" --json jobs 2>/dev/null)"; then
+            total_shards="$(printf '%s' "$shard_jobs_json" | jq -r '[.jobs[] | select(.name | startswith("Mutants (shard "))] | length' 2>/dev/null || true)"
+            expected_shards="$(printf '%s' "$shard_jobs_json" | jq -r '[.jobs[] | select(.name | startswith("Mutants (shard ")) | select(.conclusion != "skipped")] | length' 2>/dev/null || true)"
+          else
+            total_shards=""; expected_shards=""
+          fi
+          case "$total_shards" in ''|*[!0-9]*) total_shards="";; esac
+          case "$expected_shards" in ''|*[!0-9]*) expected_shards="";; esac
+          if [ -n "$total_shards" ] && [ "$total_shards" -gt 0 ] && [ -n "$expected_shards" ] && [ "$expected_shards" -eq 0 ]; then
+            shard_note=""; : >"$tmpd/shard-verdicts"
+          else
+            shard_note="$(head -n 1 "$tmpd/shard-verdicts-err" 2>/dev/null || true)"
+            [ -n "$shard_note" ] || shard_note="mutant-verdicts failed for run $mutant_run"
+            : >"$tmpd/shard-verdicts"
+          fi
+        fi
+        ;;
+      124)
+        shard_note="timeout after 2400s"
+        ;;
+      *)
+        shard_note="$(head -n 1 "$tmpd/shard-wait-err" 2>/dev/null || true)"
+        [ -n "$shard_note" ] || shard_note="gh-ci wait --run failed with exit $shard_rc"
+        ;;
+    esac
+  fi
+fi
 # shellcheck disable=SC2086
 "$delegate" watch $rids $map_id >/dev/null 2>&1 || true
 if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
@@ -193,6 +298,42 @@ merged=0
 if [ -z "$map_note" ] && [ "$mutant_count" -gt 0 ] && [ -f "$map_out" ]; then
   if awk -v MF="$mutants_file" 'NR==FNR{p=index($0," => ");if(p>0){k=substr($0,1,p-1);c[k]++;if(c[k]==1){R[k]=substr($0,p+4);L[k]=$0}}next}length($0)==0{next}/^mutants in the diff:/{next}{k=$0;if(!(k in c)){print "map failed: no verdict for "k>"/dev/stderr";exit 1}if(c[k]!=1){print "map failed: duplicate verdict for "k>"/dev/stderr";exit 1}r=R[k];if(!(r=="unviable"||substr(r,1,10)=="caught by "||substr(r,1,12)=="needs-test: "||substr(r,1,9)=="removed: "||substr(r,1,10)=="exempted: ")){print "map failed: bad verdict for "k>"/dev/stderr";exit 1}if(substr(r,1,12)=="needs-test: "||substr(r,1,9)=="removed: ")print "P2 "L[k]" [mutants "MF"]"}' "$map_out" "$mutants_file" >"$tmpd/map-hits" 2>"$tmpd/map-err"; then merged=$(grep -c . "$tmpd/map-hits" || true); cat "$tmpd/map-hits" >>"$findings_file"; else map_note=$(cat "$tmpd/map-err"); merged=0; fi
 fi
+# Shard survivors join the findings after the map lines, compared as fixed
+# strings throughout: only missed/timeout rows inside the diff list, skipping
+# a survivor the map already reported or exempted. Without a usable map every
+# in-diff survivor is added. An unread shard appends one P3 and never blocks.
+shard_p3=""; shard_merged=0
+if [ -n "$shard_note" ]; then
+  shard_p3="P3 mutant shards unread: run ${mutant_run:-none} head ${head:0:12}: $shard_note"
+  printf '%s\n' "$shard_p3" >>"$findings_file"
+elif [ "$mutant_count" -gt 0 ] && [ -s "$tmpd/shard-verdicts" ]; then
+  if [ -z "$map_note" ] && [ -f "$map_out" ]; then map_ok=1; map_src="$map_out"; else map_ok=0; map_src=/dev/null; fi
+  awk -v df="$mutants_file" -v mf="$map_src" -v ff="$findings_file" -v mapok="$map_ok" -v rid="$mutant_run" -v h12="${head:0:12}" '
+    FILENAME == df {
+      if ($0 ~ /^mutants in the diff:/) next
+      if (length($0) > 0) D[$0] = 1
+      next
+    }
+    FILENAME == mf {
+      if (mapok) { p = index($0, " => "); if (p > 0 && substr($0, p + 4, 10) == "exempted: ") EX[substr($0, 1, p - 1)] = 1 }
+      next
+    }
+    FILENAME == ff {
+      if (substr($0, 1, 3) == "P2 ") { p = index($0, " => "); if (p > 0) HAVE[substr($0, 1, p - 1)] = 1 }
+      next
+    }
+    {
+      if (!match($0, /\t[^\t]*$/)) next
+      v = substr($0, RSTART + 1, RLENGTH - 1); m = substr($0, 1, RSTART - 1)
+      if (v != "missed" && v != "timeout") next
+      if (!(m in D)) next
+      if ((m in EX) || (("P2 " m) in HAVE)) next
+      printf "P2 %s => survived in CI (%s) [mutants-ci run %s head %s]\n", m, v, rid, h12
+    }' "$mutants_file" "$map_src" "$findings_file" "$tmpd/shard-verdicts" >"$tmpd/shard-hits"
+  shard_merged="$(grep -c . "$tmpd/shard-hits" || true)"
+  cat "$tmpd/shard-hits" >>"$findings_file"
+fi
+merged=$((merged + shard_merged))
 p1="$(grep -c '^P1 ' "$findings_file" || true)"; p2="$(grep -c '^P2 ' "$findings_file" || true)"; p3="$(grep -c '^P3 ' "$findings_file" || true)"
 n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect_out" || true)"
 tkt set reviewed "$head"; tkt set findings "$findings_file"; tkt set round 0
@@ -203,5 +344,7 @@ approve_digest="$collect_out"; digest="$(cat "$findings_file")"
 if [ -n "$map_note" ]; then approve_digest="$map_note
 $approve_digest"; digest="$map_note
 $digest"; fi
+if [ -n "$shard_p3" ]; then approve_digest="$shard_p3
+$approve_digest"; fi
 if [ "$bad" -eq 0 ]; then emit "APPROVE pr=$pr head=$head findings=$findings_file" 0 "$approve_digest"
 else emit "CHANGES p1=$p1 p2=$p2 p3=$p3 mutants=$merged findings=$findings_file" 1 "$digest"; fi

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Tests for bin/tkt-build: lane, gate, mutant list, review beside the map job,
 # one merged findings file. Stubs on a temp TKT_BIN: delegate (mints DONE/ASK
-# records), gh (pr list/view, run list/view), gh-ci (wait) and review-pr
-# (canned start/collect). Real tkt-job and tkt-gate run behind logging
+# records), gh (pr list/view, run list/view), gh-ci (wait, with a separate
+# run-wait code) and review-pr (canned start/collect), plus mutant-verdicts
+# (canned verdict rows). Real tkt-job and tkt-gate run behind logging
 # wrappers; symlinks reach the real tkt-state, fill-brief, plan-gate and lib.
 # Real git on throwaway repos (a bare origin plus a clone). HOME and TMPDIR
 # point at temp dirs; nothing touches the network.
@@ -109,7 +110,10 @@ chmod +x "$T/bin/delegate"
 
 # Stub gh: the PR list and head from $T/prnum and $T/prhead (empty with
 # $T/empty-pr, failing pr view with $T/noview); one run holding the mutant job;
-# the job log from $T/mutant-log.
+# the job log from $T/mutant-log (failing with $T/log-fail, cause in
+# $T/log-err); jobs from $T/jobs-json when present (failing with
+# $T/jobs-fail, cause in $T/jobs-err); artifacts from $T/artifacts-json
+# (failing with $T/artifacts-fail, cause in $T/artifacts-err).
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
@@ -128,11 +132,31 @@ case " \$* " in
   *" run list "*)
     if [ -f "$T/no-runs" ]; then printf '[]\n'; else printf '[{"databaseId":101}]\n'; fi
     ;;
+  *"artifacts"*)
+    if [ -f "$T/artifacts-fail" ]; then
+      if [ -f "$T/artifacts-err" ]; then cat "$T/artifacts-err" >&2; fi
+      exit 1
+    fi
+    cat "$T/artifacts-json"
+    ;;
   *" --job "*)
+    if [ -f "$T/log-fail" ]; then
+      if [ -f "$T/log-err" ]; then cat "$T/log-err" >&2; fi
+      exit 1
+    fi
     cat "$T/mutant-log"
     ;;
   *" --json jobs "*)
-    printf '{"jobs":[{"databaseId":201,"name":"%s"}]}\n' "\$(cat "$T/mutant-job")"
+    if [ -f "$T/jobs-fail" ] && [ -f "$T/jobs-first-done" ]; then
+      if [ -f "$T/jobs-err" ]; then cat "$T/jobs-err" >&2; fi
+      exit 1
+    fi
+    if [ -f "$T/jobs-first-done" ] && [ -f "$T/jobs-json2" ]; then
+      cat "$T/jobs-json2"
+    else
+      if [ -f "$T/jobs-json" ]; then cat "$T/jobs-json"; else printf '{"jobs":[{"databaseId":201,"name":"%s"}]}\n' "\$(cat "$T/mutant-job")"; fi
+    fi
+    touch "$T/jobs-first-done"
     ;;
   *)
     printf '{}\n'
@@ -142,13 +166,31 @@ exit 0
 EOF
 chmod +x "$T/bin/gh"
 
-# Stub gh-ci: wait only, logging its args and exiting the canned code.
+# Stub gh-ci: wait only, logging its args. A `--run` wait exits the run-wait
+# code; every other wait exits the listing code. A $T/ghci-err file, when
+# present, goes to stderr (the first line is the wait's failure cause).
 cat >"$T/bin/gh-ci" <<EOF
 #!/usr/bin/env bash
 printf 'ghci|%s\n' "\$*" >>"$T/calls.log"
-exit "\$(cat "$T/ghci-rc")"
+rc="\$(cat "$T/ghci-rc")"
+case " \$* " in
+  *" --run "*) rc="\$(cat "$T/ghci-run-rc")" ;;
+esac
+if [ -f "$T/ghci-err" ]; then cat "$T/ghci-err" >&2; fi
+exit "\$rc"
 EOF
 chmod +x "$T/bin/gh-ci"
+
+# Stub mutant-verdicts: stdout from $T/verdicts, stderr from $T/verdicts-err,
+# exit from $T/verdicts-rc; logs its args.
+cat >"$T/bin/mutant-verdicts" <<EOF
+#!/usr/bin/env bash
+printf 'mverd|%s\n' "\$*" >>"$T/calls.log"
+cat "$T/verdicts"
+if [ -f "$T/verdicts-err" ]; then cat "$T/verdicts-err" >&2; fi
+exit "\$(cat "$T/verdicts-rc")"
+EOF
+chmod +x "$T/bin/mutant-verdicts"
 
 # Stub review-pr: start launches one id per requested axis (--axes, default all
 # three); tkt-build persists each id as it launches. collect copies $T/findings-src
@@ -288,7 +330,11 @@ EOF
   printf 'ok' >"$T/review-mode"
   printf '0' >"$T/collect-rc"
   printf '0' >"$T/ghci-rc"
-  rm -f "$T/empty-pr" "$T/no-runs" "$T/noview"
+  printf '0' >"$T/ghci-run-rc"
+  printf '0' >"$T/verdicts-rc"
+  printf 'src/c.rs:5:6: MISSED\tcaught\n' >"$T/verdicts"
+  printf '{"artifacts":[]}\n' >"$T/artifacts-json"
+  rm -f "$T/empty-pr" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err"
   printf '0' >"$T/dcounter"
   printf '0' >"$T/rcounter"
   : >"$T/calls.log"
@@ -413,7 +459,7 @@ run_build
 [ "$RC" -eq 1 ] || fail "mutants rerun exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "mutants rerun"
 [ "$(grep -c '^run|id=stub-2' "$T/calls.log")" -eq 1 ] || fail "mutants rerun: no second map job"
-grep -q "^ghci|wait 7 --job Selection --repo switchyard$" "$T/calls.log" || fail "mutants: gh-ci waits on the mutant job"
+grep -Fxq "ghci|wait 7 --job Selection --timeout 600 --repo switchyard" "$T/calls.log" || fail "mutants: gh-ci waits on the mutant job with the 600 s bound"
 mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
 [ "$(grep -c . "$mfile")" -eq 3 ] || fail "mutants: three log lines match"
 grep -q "^run|id=stub-1|model=lane-m|" "$T/calls.log" || fail "mutants: the lane defaults to model.lane"
@@ -958,5 +1004,368 @@ for ax in standards spec overbuild; do
   grep -q -- "--axes $ax --full-rereview tkt-build round-0 full review" "$T/calls.log" || fail "full-rereview-flag: $ax starts with the override"
 done
 [ "$(grep -c -- '--full-rereview tkt-build round-0 full review' "$T/calls.log")" -eq 3 ] || fail "full-rereview-flag: one override per axis"
+
+# --- shard survivors merge into the round-0 findings: mapped survivors stay
+# single, a survivor the map called caught gains a CI P2, rows outside the
+# diff and non-surviving rows stay out ---
+setup_case shards-survivors
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 4
+src/b.rs:3:4: TIMEOUT
+src/c.rs:5:6: MISSED
+src/d.rs:7:8: MISSED
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\nsrc/b.rs:3:4: TIMEOUT\ttimeout\nsrc/c.rs:5:6: MISSED\tmissed\nsrc/z.rs:9:9: X\tmissed\nsrc/e.rs:1:1: MISSED\tcaught\nsrc/d.rs:7:8: MISSED\tunviable\n' >"$T/verdicts"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-survivors exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=3 p3=0 mutants=3 findings=* log=*" "shards-survivors"
+grep -Fxq "ghci|wait 7 --job Selection --timeout 600 --repo switchyard" "$T/calls.log" || fail "shards-survivors: the listing wait carries --timeout 600"
+grep -Fxq "ghci|wait --run 101 --pr 7 --timeout 2400 --repo switchyard" "$T/calls.log" || fail "shards-survivors: the shard wait names the run, the pr and 2400"
+grep -Fxq "mverd|101 --repo switchyard" "$T/calls.log" || fail "shards-survivors: the verdicts read the waited run"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+[ "$(grep -cF 'P2 src/a.rs:10:20: MISSED => ' "$ffile")" -eq 1 ] || fail "shards-survivors: the mapped missed survivor is not duplicated"
+[ "$(grep -cF 'P2 src/b.rs:3:4: TIMEOUT => ' "$ffile")" -eq 1 ] || fail "shards-survivors: the mapped timeout survivor is not duplicated"
+grep -Fxq "P2 src/c.rs:5:6: MISSED => survived in CI (missed) [mutants-ci run 101 head ${H:0:12}]" "$ffile" || fail "shards-survivors: the survivor the map called caught becomes a CI P2"
+grep -q "z.rs" "$ffile" && fail "shards-survivors: a survivor outside the diff stays out"
+grep -Fq "src/e.rs" "$ffile" && fail "shards-survivors: a caught row stays out"
+grep -Fq "src/d.rs" "$ffile" && fail "shards-survivors: an unviable row stays out"
+grep -q "mutant shards unread" "$ffile" && fail "shards-survivors: a clean read reports no unread shards"
+
+# --- a survivor the map exempted stays out of the findings ---
+setup_case shards-exempted
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => exempted: covered elsewhere
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+run_build
+[ "$RC" -eq 0 ] || fail "shards-exempted exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "shards-exempted"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fq "src/a.rs" "$ffile" && fail "shards-exempted: an exempted survivor stays out"
+grep -q "mutant shards unread" "$ffile" && fail "shards-exempted: a clean read reports no unread shards"
+
+# --- when the map failed, every in-diff survivor becomes a CI P2 ---
+setup_case shards-mapfailed
+printf 'mutant_job=%s\n' Selection >>"$S"
+grep -v '^model\.map=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+printf 'src/a.rs:10:20: MISSED\tmissed\nsrc/b.rs:3:4: TIMEOUT\ttimeout\n' >"$T/verdicts"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-mapfailed exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "shards-mapfailed"
+grep -q "map failed" <<<"$OUT" || fail "shards-mapfailed: the digest notes the map stop"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P2 src/a.rs:10:20: MISSED => survived in CI (missed) [mutants-ci run 101 head ${H:0:12}]" "$ffile" || fail "shards-mapfailed: the missed survivor becomes a P2 without the map"
+grep -Fxq "P2 src/b.rs:3:4: TIMEOUT => survived in CI (timeout) [mutants-ci run 101 head ${H:0:12}]" "$ffile" || fail "shards-mapfailed: the timeout survivor becomes a P2 without the map"
+
+# --- a run-wait timeout reports the shards unread and reads no verdicts ---
+setup_case shards-unread-timeout
+printf 'mutant_job=%s\n' Selection >>"$S"
+printf '124' >"$T/ghci-run-rc"
+printf 'P1 open null check\nP3 docs note\n' >"$T/findings-src"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-timeout exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=1 p2=2 p3=2 mutants=2 findings=* log=*" "shards-unread-timeout"
+grep -q '^mverd|' "$T/calls.log" && fail "shards-unread-timeout: verdicts never read after a timeout"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -q "survived in CI" "$ffile" && fail "shards-unread-timeout: no survivor P2 without verdicts"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: timeout after 2400s" "$ffile" || fail "shards-unread-timeout: the timeout is reported unread"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-timeout: the digest carries the unread note"
+
+# --- a failed run-wait reports its first stderr line as the cause ---
+setup_case shards-unread-waitfail
+printf 'mutant_job=%s\n' Selection >>"$S"
+printf '2' >"$T/ghci-run-rc"
+printf 'gh-ci: cannot watch runs here\nsecond line stays out\n' >"$T/ghci-err"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-waitfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "shards-unread-waitfail"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh-ci: cannot watch runs here" "$ffile" || fail "shards-unread-waitfail: the wait's cause is reported unread"
+grep -q "second line stays out" "$ffile" && fail "shards-unread-waitfail: only the first stderr line is kept"
+
+# --- a failed run-wait with silent stderr still names its exit ---
+setup_case shards-unread-waitsilent
+printf 'mutant_job=%s\n' Selection >>"$S"
+printf '2' >"$T/ghci-run-rc"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-waitsilent exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "shards-unread-waitsilent"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh-ci wait --run failed with exit 2" "$ffile" || fail "shards-unread-waitsilent: the wait's exit is reported unread"
+
+# --- failed verdicts report their first stderr line as the cause ---
+setup_case shards-unread-verdicts
+printf 'mutant_job=%s\n' Selection >>"$S"
+printf '1' >"$T/verdicts-rc"
+printf 'mutant-verdicts: run 101 is in_progress, not completed\nsecond line stays out\n' >"$T/verdicts-err"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-verdicts exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "shards-unread-verdicts"
+grep -Fxq "mverd|101 --repo switchyard" "$T/calls.log" || fail "shards-unread-verdicts: the verdicts are read before reporting unread"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: mutant-verdicts: run 101 is in_progress, not completed" "$ffile" || fail "shards-unread-verdicts: the verdicts cause is reported unread"
+grep -q "second line stays out" "$ffile" && fail "shards-unread-verdicts: only the first stderr line is kept"
+
+# --- failed verdicts with silent stderr still name the run ---
+setup_case shards-unread-verdictssilent
+printf 'mutant_job=%s\n' Selection >>"$S"
+printf '1' >"$T/verdicts-rc"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-verdictssilent exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "shards-unread-verdictssilent"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: mutant-verdicts failed for run 101" "$ffile" || fail "shards-unread-verdictssilent: the verdicts failure is reported unread"
+
+# --- no run holding the mutant job reports the shards unread ---
+setup_case shards-unread-norun
+printf 'mutant_job=%s\n' Selection >>"$S"
+touch "$T/no-runs"
+run_build
+[ "$RC" -eq 0 ] || fail "shards-unread-norun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "shards-unread-norun"
+grep -q -- '--run' "$T/calls.log" && fail "shards-unread-norun: nothing waited on without a run"
+grep -q '^mverd|' "$T/calls.log" && fail "shards-unread-norun: verdicts never read without a run"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run none head ${H:0:12}: no run with Selection on head" "$ffile" || fail "shards-unread-norun: the missing run is reported unread"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-norun: the digest carries the unread note"
+
+# --- without mutant_job, no run waits and no verdicts read ---
+setup_case shards-nojob
+run_build
+[ "$RC" -eq 0 ] || fail "shards-nojob exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q -- '--run' "$T/calls.log" && fail "shards-nojob: no run wait without mutant_job"
+grep -q '^mverd|' "$T/calls.log" && fail "shards-nojob: no verdicts read without mutant_job"
+
+# --- with an empty diff list, no run waits and no verdicts read ---
+setup_case shards-emptydiff
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+log noise without any mutant location
+more noise
+EOF
+run_build
+[ "$RC" -eq 0 ] || fail "shards-emptydiff exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "shards-emptydiff"
+grep -q -- '--run' "$T/calls.log" && fail "shards-emptydiff: no run wait for an empty diff list"
+grep -q '^mverd|' "$T/calls.log" && fail "shards-emptydiff: no verdicts read for an empty diff list"
+grep -q "prompt=.*-map-" "$T/calls.log" && fail "shards-emptydiff: no map job without mutants"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -q "mutant shards unread" "$ffile" && fail "shards-emptydiff: an empty diff list stays silent"
+
+# --- a rerun reads no shard verdicts twice ---
+setup_case shards-rerun
+printf 'mutant_job=%s\n' Selection >>"$S"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-rerun first exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-rerun second exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "shards-rerun second"
+[ "$(grep -c -- '--run' "$T/calls.log")" -eq 1 ] || fail "shards-rerun: one run wait across both runs"
+[ "$(grep -c '^mverd|' "$T/calls.log")" -eq 1 ] || fail "shards-rerun: one verdicts read across both runs"
+
+# --- a listing wait failure reports unread with its cause and reads no verdicts ---
+setup_case listing-unread
+printf 'mutant_job=%s\n' Selection >>"$S"
+printf '2' >"$T/ghci-rc"
+printf 'gh-ci: listing blew up\nsecond line stays out\n' >"$T/ghci-err"
+run_build
+[ "$RC" -eq 1 ] || fail "listing-unread exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=1 mutants=2 findings=* log=*" "listing-unread"
+grep -q '^mverd|' "$T/calls.log" && fail "listing-unread: verdicts never read when the list is unread"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh-ci: listing blew up" "$ffile" || fail "listing-unread: the listing cause is reported unread"
+grep -q "second line stays out" "$ffile" && fail "listing-unread: only the first stderr line is kept"
+grep -q "mutant shards unread" <<<"$OUT" || fail "listing-unread: the digest carries the unread note"
+
+# --- a failed log read reports unread even when the count is zero ---
+setup_case logread-unread
+printf 'mutant_job=%s\n' Selection >>"$S"
+touch "$T/log-fail"
+printf 'cannot fetch job log\nsecond line stays out\n' >"$T/log-err"
+printf 'no open findings\n' >"$T/findings-src"
+run_build
+[ "$RC" -eq 0 ] || fail "logread-unread exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "logread-unread"
+grep -q '^mverd|' "$T/calls.log" && fail "logread-unread: verdicts never read when the log read fails"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: cannot fetch job log" "$ffile" || fail "logread-unread: the log cause is reported unread"
+grep -q "second line stays out" "$ffile" && fail "logread-unread: only the first stderr line is kept"
+grep -q "mutant shards unread" <<<"$OUT" || fail "logread-unread: the digest carries the unread note"
+
+# --- CR and ANSI bytes in the log are stripped before the map reads them ---
+setup_case cr-ansi
+printf 'mutant_job=%s\n' Selection >>"$S"
+printf 'src/a.rs:10:20: MISSED\r\n\x1b[31msrc/b.rs:3:4: TIMEOUT\x1b[0m\nmutants in the diff: 2\n' >"$T/mutant-log"
+run_build
+[ "$RC" -eq 1 ] || fail "cr-ansi exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "cr-ansi"
+mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
+grep -q "$(printf '\r')" "$mfile" && fail "cr-ansi: the mutants file holds no CR"
+grep -q "$(printf '\033')" "$mfile" && fail "cr-ansi: the mutants file holds no ANSI"
+grep -q "map failed" <<<"$OUT" && fail "cr-ansi: stripped lines map cleanly"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -qx "P2 src/a.rs:10:20: MISSED => needs-test: bounds check unpinned \\[mutants $mfile\\]" "$ffile" || fail "cr-ansi: the stripped needs-test line merges"
+
+# --- shards all skipped hold no survivors and report no unread ---
+setup_case shards-skipped-all
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf '1' >"$T/verdicts-rc"
+printf 'mutant-verdicts: no mutants-* artifacts for run 101\n' >"$T/verdicts-err"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"skipped"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"skipped"}]}\n' >"$T/jobs-json"
+printf '{"artifacts":[]}\n' >"$T/artifacts-json"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-skipped-all exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=0 mutants=1 findings=* log=*" "shards-skipped-all"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -q "mutant shards unread" "$ffile" && fail "shards-skipped-all: skipped shards report no unread"
+grep -q "survived in CI" "$ffile" && fail "shards-skipped-all: skipped shards hold no survivors"
+
+# --- fewer artifacts than non-skipped shards report N of M unread ---
+setup_case shards-partial
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"},{"databaseId":303,"name":"Mutants (shard 3)","conclusion":"success"}]}\n' >"$T/jobs-json"
+printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-partial exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-partial"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: only 2 of 3 shard artifacts present for run 101" "$ffile" || fail "shards-partial: the N of M count is reported unread"
+grep -q "survived in CI" "$ffile" && fail "shards-partial: no survivor P2 without full artifacts"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-partial: the digest carries the unread note"
+
+# --- paginated artifacts sum across pages: two pages of one artifact each
+# count as two, so two of three expected shards still report unread ---
+setup_case shards-paginated-partial
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"},{"databaseId":303,"name":"Mutants (shard 3)","conclusion":"success"}]}\n' >"$T/jobs-json"
+printf '{"artifacts":[{"name":"mutants-a"}]}\n{"artifacts":[{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-paginated-partial exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-paginated-partial"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: only 2 of 3 shard artifacts present for run 101" "$ffile" || fail "shards-paginated-partial: paginated pages sum to 2 of 3 unread"
+grep -q "survived in CI" "$ffile" && fail "shards-paginated-partial: no survivor P2 without full artifacts"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-paginated-partial: the digest carries the unread note"
+
+# --- a failed shard-jobs request reports unread with its cause and reads no survivors ---
+setup_case shards-unread-jobsfail
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
+printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
+touch "$T/jobs-fail"
+printf 'gh: jobs blew up\nsecond line stays out\n' >"$T/jobs-err"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-jobsfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-jobsfail"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh: jobs blew up" "$ffile" || fail "shards-unread-jobsfail: the jobs cause is reported unread"
+grep -q "second line stays out" "$ffile" && fail "shards-unread-jobsfail: only the first stderr line is kept"
+grep -q "survived in CI" "$ffile" && fail "shards-unread-jobsfail: no survivor P2 without a jobs count"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-jobsfail: the digest carries the unread note"
+
+# --- a failed artifacts request reports unread with its cause and reads no survivors ---
+setup_case shards-unread-artifactsfail
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
+printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
+touch "$T/artifacts-fail"
+printf 'gh: artifacts blew up\nsecond line stays out\n' >"$T/artifacts-err"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-artifactsfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-artifactsfail"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: gh: artifacts blew up" "$ffile" || fail "shards-unread-artifactsfail: the artifacts cause is reported unread"
+grep -q "second line stays out" "$ffile" && fail "shards-unread-artifactsfail: only the first stderr line is kept"
+grep -q "survived in CI" "$ffile" && fail "shards-unread-artifactsfail: no survivor P2 without an artifacts count"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-artifactsfail: the digest carries the unread note"
+
+# --- an unparsable shard-jobs count reports unread and reads no survivors ---
+setup_case shards-unread-jobscount
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
+: >"$T/jobs-json2"
+printf '{"artifacts":[{"name":"mutants-a"},{"name":"mutants-b"}]}\n' >"$T/artifacts-json"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-jobscount exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-jobscount"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fxq "P3 mutant shards unread: run 101 head ${H:0:12}: could not count shard jobs for run 101" "$ffile" || fail "shards-unread-jobscount: the jobs parse failure is reported unread"
+grep -q "survived in CI" "$ffile" && fail "shards-unread-jobscount: no survivor P2 without a jobs count"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-jobscount: the digest carries the unread note"
+
+# --- an unparsable artifacts page reports unread and reads no survivors ---
+setup_case shards-unread-artifactscount
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+src/a.rs:10:20: MISSED
+mutants in the diff: 1
+EOF
+cat >"$T/map-text" <<'EOF'
+src/a.rs:10:20: MISSED => needs-test: bounds check unpinned
+EOF
+printf 'src/a.rs:10:20: MISSED\tmissed\n' >"$T/verdicts"
+printf '{"jobs":[{"databaseId":201,"name":"Selection","conclusion":"success"},{"databaseId":301,"name":"Mutants (shard 1)","conclusion":"success"},{"databaseId":302,"name":"Mutants (shard 2)","conclusion":"success"}]}\n' >"$T/jobs-json"
+printf 'not json\n' >"$T/artifacts-json"
+run_build
+[ "$RC" -eq 1 ] || fail "shards-unread-artifactscount exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=1 p3=1 mutants=1 findings=* log=*" "shards-unread-artifactscount"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fq "P3 mutant shards unread: run 101 head ${H:0:12}: " "$ffile" || fail "shards-unread-artifactscount: the artifacts parse failure is reported unread"
+grep -q "survived in CI" "$ffile" && fail "shards-unread-artifactscount: no survivor P2 without an artifacts count"
+grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-artifactscount: the digest carries the unread note"
 
 echo "tkt-build: all cases passed"
