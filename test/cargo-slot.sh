@@ -704,12 +704,21 @@ expect_no_slot_dir "$T/guard-i"
 guard_refused() {
   local name="$1" dir="$2" slots="$T/guard-$1"
   shift 2
+  local shared="" w
+  for w in "$@"; do
+    case "$w" in
+      CARGO_SLOT_SHARED_CHECKOUT=*) shared="${w#CARGO_SLOT_SHARED_CHECKOUT=}" ;;
+    esac
+  done
+  local cwd
+  cwd="$(cd "$dir" && pwd -P)" || fail "guard $name: cannot resolve $dir"
+  local want="cargo-slot: cwd $cwd is inside the shared checkout $shared; cd into your ticket worktree and rerun. This is a cwd check, not a permission denial."
   new_run "guard-$name"
   ( cd "$dir" && cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$slots" "$@" \
     -- check 2>"$R/shim.err" )
   local rc=$?
   [ "$rc" = 1 ] || fail "guard $name: exit $rc, want 1"
-  [ "$(cat "$R/shim.err")" = "cargo-slot: run cargo in your ticket worktree" ] ||
+  [ "$(cat "$R/shim.err")" = "$want" ] ||
     fail "guard $name: stderr [$(cat "$R/shim.err")]"
   [ ! -e "$R/started" ] || fail "guard $name: the fake ran"
   [ ! -e "$slots" ] || fail "guard $name: slot directory created"

@@ -170,7 +170,7 @@ def main():
     if real is None:
         fail(127, "no cargo on PATH outside cargo-slot")
     if subcommand(args) in SLOT_SUBCOMMANDS and in_shared_checkout():
-        fail(1, "run cargo in your ticket worktree")
+        fail(1, "cwd %s is inside the shared checkout %s; cd into your ticket worktree and rerun. This is a cwd check, not a permission denial." % (os.getcwd(), os.environ["CARGO_SLOT_SHARED_CHECKOUT"]))
     if subcommand(args) in SLOT_SUBCOMMANDS and not held():
         n = slot_count()
         if n > 0:
