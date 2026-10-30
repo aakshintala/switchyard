@@ -200,11 +200,13 @@ refused push origin --no-verify
 refused -C dir commit --no-verify
 refused -c user.name=x commit --no-verify
 refused -c core.hooksPath=/x commit
-refused -c core.hookspath=/x status
-refused -c CORE.HOOKSPATH=/x status
-refused -c core.hooksPath status
-refused -c core.hooksPath= status
-refused -ccore.hooksPath=/x status
+passed -c core.hookspath=/x status
+passed -c CORE.HOOKSPATH=/x status
+passed -c core.hooksPath status
+passed -c core.hooksPath= status
+passed -ccore.hooksPath=/x status
+refused -c core.hooksPath=/x push
+refused -c core.hooksPath=/x merge
 refused -c user.name=x -c core.hooksPath=/x commit
 refused config core.hooksPath /x
 refused config --local core.hooksPath /x
@@ -226,25 +228,32 @@ refused config -- core.hooksPath /x
 refused -C d config core.hooksPath /x
 
 LANE_ENV=(GIT_CONFIG_COUNT=+1 GIT_CONFIG_KEY_0=core.hooksPath)
-refused status
+passed status
 unset LANE_ENV
 LANE_ENV=(GIT_CONFIG_COUNT=" 1" GIT_CONFIG_KEY_0=core.hooksPath)
-refused status
+passed status
 unset LANE_ENV
 LANE_ENV=(GIT_CONFIG_COUNT=01 GIT_CONFIG_KEY_0=core.hooksPath)
-refused status
+passed status
 unset LANE_ENV
 LANE_ENV=(GIT_CONFIG_COUNT=-1 GIT_CONFIG_KEY_0=core.hooksPath)
-refused status
+passed status
 unset LANE_ENV
 LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/x)
-refused status
+passed status
 unset LANE_ENV
 LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=Core.HooksPath GIT_CONFIG_VALUE_0=/x)
-refused status
+passed status
 unset LANE_ENV
 LANE_ENV=(GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_1=core.hooksPath)
-refused status
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null)
+passed rev-parse HEAD
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.file:///x/.insteadOf GIT_CONFIG_VALUE_0=https://github.com/)
+passed commit -m x
 unset LANE_ENV
 LANE_ENV=(HUSKY=0)
 refused commit -m x
@@ -330,6 +339,38 @@ unset LANE_ENV
 LANE_ENV=(GIT_CONFIG_COUNT=99999999999999999999 GIT_CONFIG_KEY_0=user.name)
 passed status
 unset LANE_ENV
+
+# No subcommand: a core.hooksPath -c option or environment entry runs no hook.
+passed -c core.hooksPath=/dev/null
+LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath)
+passed
+unset LANE_ENV
+
+# Fiber's tests spawn the binary with a cleared environment: only PATH and
+# HOME, no TMPDIR and no NEXTEST_RUN_ID, from a cwd outside the default temp
+# root. lane_cleared runs the shim that way and sets RC, OUT and ERR.
+lane_cleared() {
+  rm -f "$T/calls" "$T/stdin"
+  local out rc
+  out="$(cd "$T/home/work/sy-wt/lane" && env -i CALLS="$T/calls" \
+    STDIN_FILE="$T/stdin" PATH="$BASEPATH" HOME="$T/home" \
+    "$T/shims/git" "$@" 2>"$T/err")"
+  rc=$?
+  OUT="$out"
+  ERR="$(cat "$T/err")"
+  RC="$rc"
+}
+FIBER_GLOBALS=(-c core.fsmonitor=false -c core.hooksPath=/dev/null)
+lane_cleared "${FIBER_GLOBALS[@]}" ls-remote --tags --refs https://example.invalid/r
+expect_passed "${FIBER_GLOBALS[@]}" ls-remote --tags --refs https://example.invalid/r
+lane_cleared "${FIBER_GLOBALS[@]}" status
+expect_passed "${FIBER_GLOBALS[@]}" status
+lane_cleared "${FIBER_GLOBALS[@]}" commit -m x
+expect_refused "${FIBER_GLOBALS[@]}" commit -m x
+lane_cleared "${FIBER_GLOBALS[@]}" push
+expect_refused "${FIBER_GLOBALS[@]}" push
+lane_cleared "${FIBER_GLOBALS[@]}" merge x
+expect_refused "${FIBER_GLOBALS[@]}" merge x
 
 # A refusal does not need a real git: with no real git on PATH, the guard
 # still refuses with 1 instead of failing the lookup with 127.
