@@ -207,6 +207,7 @@ refused config --worktree core.hooksPath /x
 refused config --global core.hooksPath /x
 refused config --global CORE.hookspath /x
 refused config --add core.hooksPath /x
+refused config --get --add core.hooksPath /x
 refused config --replace-all core.hooksPath /x
 refused config --unset core.hooksPath
 refused config --unset-all core.hooksPath
@@ -276,6 +277,13 @@ passed config user.name
 passed config core.hooksPath
 passed config --get core.hooksPath
 passed config --get-all core.hooksPath
+passed config --get core.hooksPath /x
+passed config --get-all core.hooksPath /x
+passed config --get-regexp core.hooksPath /x
+passed config --get-urlmatch core.hooksPath https://example.com
+passed config --get-color core.hooksPath red
+passed config --get-colorbool core.hooksPath true
+passed config -l core.hooksPath /x
 passed config --list
 passed config get core.hooksPath
 passed config --global user.name x

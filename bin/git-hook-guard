@@ -83,6 +83,11 @@ CONFIG_SHORT_VALUE = set("ft")
 CONFIG_LONG_VALUE = ("file", "blob", "type", "default", "comment")
 # Flags that make config write its key.
 CONFIG_WRITE_FLAGS = ("add", "replace-all", "unset", "unset-all")
+# Flags that make config read its key; the key may carry a value filter.
+CONFIG_READ_FLAGS = (
+    "get", "get-all", "get-regexp", "get-urlmatch", "get-color",
+    "get-colorbool", "list",
+)
 # New-style config verbs as the first positional.
 CONFIG_WRITE_VERBS = ("set", "unset")
 CONFIG_READ_VERBS = ("get", "list")
@@ -210,6 +215,7 @@ def bypass_in_config(rest):
     # positional remains.
     positionals = []
     writing = False
+    reading = False
     options_done = False
     i = 0
     while i < len(rest):
@@ -220,7 +226,9 @@ def bypass_in_config(rest):
             options_done = True
         elif token.startswith("--"):
             name, sep, _ = token[2:].partition("=")
-            if sep:
+            if long_is_value(name, CONFIG_READ_FLAGS):
+                reading = True
+            elif sep:
                 pass
             elif long_is_value(name, CONFIG_LONG_VALUE) and i + 1 < len(rest):
                 i += 1
@@ -234,6 +242,8 @@ def bypass_in_config(rest):
                     if j + 1 == len(token) and i + 1 < len(rest):
                         i += 1
                     break
+                if letter == "l":
+                    reading = True
                 j += 1
         else:
             positionals.append(token)
@@ -244,6 +254,8 @@ def bypass_in_config(rest):
         return (len(positionals) > 1
                 and positionals[1].lower() == "core.hookspath")
     if positionals[0] in CONFIG_READ_VERBS:
+        return False
+    if reading and not writing:
         return False
     if len(positionals) == 1 and not writing:
         return False
