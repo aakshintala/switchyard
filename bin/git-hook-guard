@@ -56,6 +56,246 @@ def find_real_git(path_env, shim_dir):
     return None
 
 
+# Global options that take the next token as their value (unless written
+# --name=VAL); every other leading -... token is boolean.
+GLOBAL_VALUE_FLAGS = (
+    "git-dir", "work-tree", "namespace", "super-prefix", "config-env",
+    "attr-source",
+)
+# Value options of commit and push. A --name token is a value flag when name
+# matches exactly or is the unique proper prefix of one entry, as git's
+# parse-options resolves unambiguous abbreviations.
+COMMIT_LONG_VALUE = (
+    "message", "file", "author", "date", "reuse-message", "reedit-message",
+    "fixup", "squash", "template", "cleanup", "trailer",
+    "pathspec-from-file",
+)
+PUSH_LONG_VALUE = (
+    "repo", "receive-pack", "exec", "push-option", "recurse-submodules",
+)
+# Short value letters: these take the rest of the token or the next token;
+# u and S take only a value attached to the token itself.
+COMMIT_SHORT_VALUE = set("mFCct")
+COMMIT_SHORT_ATTACHED = set("uS")
+PUSH_SHORT_VALUE = set("o")
+# Value options of config, short and long; the same unique-prefix rule holds.
+CONFIG_SHORT_VALUE = set("ft")
+CONFIG_LONG_VALUE = ("file", "blob", "type", "default", "comment")
+# Flags that make config write its key.
+CONFIG_WRITE_FLAGS = ("add", "replace-all", "unset", "unset-all")
+# New-style config verbs as the first positional.
+CONFIG_WRITE_VERBS = ("set", "unset")
+CONFIG_READ_VERBS = ("get", "list")
+# --no-verify abbreviations git accepts: the full flag and its unambiguous
+# prefixes down to --no-veri (--no-ver is ambiguous with --no-verbose, so
+# git itself decides that one).
+NO_VERIFY_MIN = "--no-veri"
+NO_VERIFY_FULL = "--no-verify"
+INT_MAX = 2 ** 31 - 1
+
+
+def hooks_key(text):
+    # The key of a -c key=VAL option is the text before the first = (the
+    # whole token when there is no =), matched case-insensitively.
+    return text.split("=", 1)[0].lower() == "core.hookspath"
+
+
+def long_is_value(name, known):
+    if name in known:
+        return True
+    hits = [flag for flag in known if flag.startswith(name)]
+    return len(name) > 0 and len(hits) == 1 and len(name) < len(hits[0])
+
+
+def parse_globals(args):
+    # One walk over argv with git's own grammar; argv is never rewritten.
+    # Returns (refused, subcommand, rest). Text inside a consumed value is
+    # never read as a flag.
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == "--":
+            i += 1
+            break
+        if not token.startswith("-") or len(token) == 1:
+            break
+        if token.startswith("--"):
+            name, sep, _ = token[2:].partition("=")
+            if not sep and name in GLOBAL_VALUE_FLAGS and i + 1 < len(args):
+                i += 2
+                continue
+            i += 1
+            continue
+        if token.startswith("-c") and len(token) > 2:
+            # Real git rejects the joined form; refusing it is harmless.
+            if hooks_key(token[2:]):
+                return True, None, []
+            i += 1
+            continue
+        if token == "-c":
+            if i + 1 < len(args) and hooks_key(args[i + 1]):
+                return True, None, []
+            i += 2 if i + 1 < len(args) else 1
+            continue
+        if token == "-C":
+            i += 2 if i + 1 < len(args) else 1
+            continue
+        if token.startswith("-C"):
+            # An attached -C value names a directory, never a flag.
+            i += 1
+            continue
+        i += 1
+    if i < len(args):
+        return False, args[i], args[i + 1:]
+    return False, None, []
+
+
+def no_verify_token(token):
+    return (token == NO_VERIFY_FULL
+            or (token.startswith(NO_VERIFY_MIN)
+                and NO_VERIFY_FULL.startswith(token)))
+
+
+def bypass_in_command(sub, rest):
+    # --no-verify on commit and push; -n only on commit, where -n never
+    # means --dry-run. A value flag's value is never read as a flag, and a
+    # -- token ends option parsing.
+    if sub == "commit":
+        long_value = COMMIT_LONG_VALUE
+        short_value = COMMIT_SHORT_VALUE
+        short_attached = COMMIT_SHORT_ATTACHED
+        want_n = True
+    elif sub == "push":
+        long_value = PUSH_LONG_VALUE
+        short_value = PUSH_SHORT_VALUE
+        short_attached = set()
+        want_n = False
+    else:
+        return False
+    options_done = False
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if options_done:
+            pass
+        elif token == "--":
+            options_done = True
+        elif token.startswith("--"):
+            name, sep, _ = token[2:].partition("=")
+            if not sep:
+                if no_verify_token(token):
+                    return True
+                if long_is_value(name, long_value) and i + 1 < len(rest):
+                    i += 1
+        elif token.startswith("-") and len(token) > 1:
+            j = 1
+            while j < len(token):
+                letter = token[j]
+                if letter in short_value:
+                    if j + 1 == len(token) and i + 1 < len(rest):
+                        i += 1
+                    break
+                if letter in short_attached:
+                    break
+                if want_n and letter == "n":
+                    return True
+                j += 1
+        i += 1
+    return False
+
+
+def bypass_in_config(rest):
+    # A config write naming core.hooksPath refuses; reads pass. Scope flags
+    # do not matter. A value flag swallows the key, so the key is whatever
+    # positional remains.
+    positionals = []
+    writing = False
+    options_done = False
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if options_done:
+            positionals.append(token)
+        elif token == "--":
+            options_done = True
+        elif token.startswith("--"):
+            name, sep, _ = token[2:].partition("=")
+            if sep:
+                pass
+            elif long_is_value(name, CONFIG_LONG_VALUE) and i + 1 < len(rest):
+                i += 1
+            elif name in CONFIG_WRITE_FLAGS:
+                writing = True
+        elif token.startswith("-") and len(token) > 1:
+            j = 1
+            while j < len(token):
+                letter = token[j]
+                if letter in CONFIG_SHORT_VALUE:
+                    if j + 1 == len(token) and i + 1 < len(rest):
+                        i += 1
+                    break
+                j += 1
+        else:
+            positionals.append(token)
+        i += 1
+    if not positionals:
+        return False
+    if positionals[0] in CONFIG_WRITE_VERBS:
+        return (len(positionals) > 1
+                and positionals[1].lower() == "core.hookspath")
+    if positionals[0] in CONFIG_READ_VERBS:
+        return False
+    if len(positionals) == 1 and not writing:
+        return False
+    return positionals[0].lower() == "core.hookspath"
+
+
+def config_count_limit():
+    # GIT_CONFIG_COUNT with strtoul semantics: optional leading whitespace,
+    # an optional +, then decimal digits to the end. Returns the count, or
+    # -1 when git itself rejects the value (then the guard inspects
+    # nothing), or None when the count is unbounded (a leading -, or above
+    # INT_MAX: git dies, so the guard inspects every key, which is
+    # harmless).
+    raw = os.environ.get("GIT_CONFIG_COUNT")
+    if raw is None:
+        return 0
+    text = raw.lstrip(" \t\n\v\f\r")
+    if text.startswith("-"):
+        return None
+    if text.startswith("+"):
+        text = text[1:]
+    if not text or any(c < "0" or c > "9" for c in text):
+        return -1
+    n = int(text)
+    if n > INT_MAX:
+        return None
+    return n
+
+
+def bypass_in_env():
+    # GIT_CONFIG_COUNT / GIT_CONFIG_KEY_* setting core.hooksPath, or HUSKY
+    # set to exactly 0, refuses on every subcommand, including bare git.
+    # The environment keys are iterated directly, so a huge count costs
+    # nothing, and keys at or past the count never refuse.
+    if os.environ.get("HUSKY") == "0":
+        return True
+    limit = config_count_limit()
+    if limit == -1:
+        return False
+    for key, value in os.environ.items():
+        if not key.startswith("GIT_CONFIG_KEY_"):
+            continue
+        index = key[len("GIT_CONFIG_KEY_"):]
+        if not index or any(c < "0" or c > "9" for c in index):
+            continue
+        if limit is not None and int(index) >= limit:
+            continue
+        if value.lower() == "core.hookspath":
+            return True
+    return False
+
+
 def exec_real(real, args):
     # Python ignores SIGPIPE and SIGXFSZ, and exec keeps ignored signals.
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
@@ -67,8 +307,24 @@ def exec_real(real, args):
         fail(code, "cannot exec %s: %s" % (real, err.strerror))
 
 
+def refused_command(args):
+    if bypass_in_env():
+        return True
+    denied, sub, rest = parse_globals(args)
+    if denied:
+        return True
+    if sub == "config":
+        return bypass_in_config(rest)
+    if sub is not None:
+        return bypass_in_command(sub, rest)
+    return False
+
+
 def main():
     args = sys.argv[1:]
+    if refused_command(args):
+        sys.stderr.write(REFUSAL + "\n")
+        sys.exit(1)
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     real = find_real_git(os.environ.get("PATH"), shim_dir)
     if real is None:

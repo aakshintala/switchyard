@@ -180,4 +180,148 @@ rc=$?
 grep -q 'git-hook-guard:' "$T/unset-err" ||
   fail "PATH unset: no git-hook-guard: line on stderr"
 
+# Task 2: the guard.
+
+refused commit --no-verify
+refused push --no-verify
+refused commit -m x --no-verify
+refused commit --no-verif
+refused commit --no-veri
+refused commit -n
+refused commit -an
+refused commit -nm x
+refused commit -m x -n
+refused push origin --no-verify
+refused -C dir commit --no-verify
+refused -c user.name=x commit --no-verify
+refused -c core.hooksPath=/x commit
+refused -c core.hookspath=/x status
+refused -c CORE.HOOKSPATH=/x status
+refused -c core.hooksPath status
+refused -c core.hooksPath= status
+refused -ccore.hooksPath=/x status
+refused -c user.name=x -c core.hooksPath=/x commit
+refused config core.hooksPath /x
+refused config --local core.hooksPath /x
+refused config --worktree core.hooksPath /x
+refused config --global core.hooksPath /x
+refused config --global CORE.hookspath /x
+refused config --add core.hooksPath /x
+refused config --replace-all core.hooksPath /x
+refused config --unset core.hooksPath
+refused config --unset-all core.hooksPath
+refused config set core.hooksPath /x
+refused config unset core.hooksPath
+refused config -f f core.hooksPath /x
+refused config --typ bool core.hooksPath true
+refused config --fil f core.hooksPath /x
+refused config -t bool core.hooksPath true
+refused config -- core.hooksPath /x
+refused -C d config core.hooksPath /x
+
+LANE_ENV=(GIT_CONFIG_COUNT=+1 GIT_CONFIG_KEY_0=core.hooksPath)
+refused status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=" 1" GIT_CONFIG_KEY_0=core.hooksPath)
+refused status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=01 GIT_CONFIG_KEY_0=core.hooksPath)
+refused status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=-1 GIT_CONFIG_KEY_0=core.hooksPath)
+refused status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/x)
+refused status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=Core.HooksPath GIT_CONFIG_VALUE_0=/x)
+refused status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_1=core.hooksPath)
+refused status
+unset LANE_ENV
+LANE_ENV=(HUSKY=0)
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(HUSKY=0)
+refused status
+unset LANE_ENV
+
+passed push -n
+passed push --dry-run
+passed commit -m "--no-verify"
+passed commit -m "-n"
+passed commit --message=--no-verify
+passed commit -m--no-verify
+passed commit -F -n
+passed commit -m x -- -n
+passed commit -- --no-verify
+passed commit --verify
+passed commit --no-verbose
+passed commit --no-ver
+passed push -o --no-verify origin
+passed push --push-option --no-verify
+passed push -n origin
+passed -c user.name=x commit
+passed -c user.name=x commit -m hi
+passed -C core.hooksPath status
+passed -c core.hooksPathx=1 status
+passed -c xcore.hooksPath=1 status
+passed status
+passed log --oneline
+passed -c
+passed -C
+passed config -t bool user.name x
+passed config user.name
+passed config core.hooksPath
+passed config --get core.hooksPath
+passed config --get-all core.hooksPath
+passed config --list
+passed config get core.hooksPath
+passed config --global user.name x
+passed config user.name core.hooksPath
+passed config --file core.hooksPath user.name x
+passed config --typ bool user.name x
+passed config --default d --get user.name
+passed --config-env=core.hooksPath=V status
+LANE_ENV=(HUSKY=1)
+passed commit -m x
+unset LANE_ENV
+LANE_ENV=(HUSKY=)
+passed status
+unset LANE_ENV
+LANE_ENV=(HUSKY=00)
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name)
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_1=core.hooksPath)
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=0 GIT_CONFIG_KEY_0=core.hooksPath)
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=abc GIT_CONFIG_KEY_0=core.hooksPath)
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=1k GIT_CONFIG_KEY_0=core.hooksPath)
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=0x1 GIT_CONFIG_KEY_0=core.hooksPath)
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=-1 GIT_CONFIG_KEY_0=user.name)
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=99999999999999999999 GIT_CONFIG_KEY_0=user.name)
+passed status
+unset LANE_ENV
+
+# A refusal does not need a real git: with no real git on PATH, the guard
+# still refuses with 1 instead of failing the lookup with 127.
+LANE_PATH="$T/shims:$T/py"
+refused commit --no-verify
+unset LANE_PATH
+
 echo "git-hook-guard: all cases passed"
