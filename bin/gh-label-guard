@@ -84,13 +84,15 @@ def label_names(value):
     try:
         # strict=True, so an unterminated quote raises csv.Error as Go's
         # csv.Reader does; without it Python would silently drop the quote.
-        rows = list(csv.reader(io.StringIO(value), strict=True))
+        # Read lazily: gh applies only the first record, so a malformed
+        # later record must not erase the labels the first record names.
+        return next(
+            (row for row in csv.reader(io.StringIO(value), strict=True)
+             if row),
+            [],
+        )
     except csv.Error:
         return []
-    for row in rows:
-        if row:
-            return row
-    return []
 
 
 def guarded_labels(args):

@@ -200,6 +200,8 @@ refused issue edit 5 --add-label bug --add-label needs-triage
 refused issue edit 5 --add-label '"needs-owner"'
 refused issue edit 5 --add-label $'needs-owner\nbug'
 refused issue edit 5 --add-label $'\nneeds-owner'
+refused issue edit 5 --add-label $'needs-owner\n"'
+refused pr create --label $'needs-owner\n"'
 refused issue edit 5 --add-label Needs-Owner
 refused issue edit 5 --remove-label NEEDS-TRIAGE
 refused issue edit 5 --add-label needs-owner --remove-label needs-triage
