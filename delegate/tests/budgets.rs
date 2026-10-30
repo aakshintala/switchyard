@@ -94,10 +94,17 @@ const DOCTOR_BUDGET_MS: u128 = 123; // measured: max 41ms over 10 warm runs, bud
 const MODELS_BUDGET_MS: u128 = 50; // measured: 2ms on M-series Mac; 50ms floor, since 3x a spawn-dominated time flakes on CI
 const SUPERVISOR_RSS_BUDGET_KB: u64 = 8736; // measured: 2912KB on M-series Mac, budget 3x
 
-const RUN_BASELINE_MULTIPLE: u32 = 51;
-const RESUME_BASELINE_MULTIPLE: u32 = 47;
-const DOCTOR_BASELINE_MULTIPLE: u32 = 62;
-const MODELS_BASELINE_MULTIPLE: u32 = 25;
+// Budget is `baseline * multiple`, with the baseline measured in the same test
+// process just before the timed call. The multiples keep the old 3x intent:
+// round(3x median run time / median baseline), each over 5 samples on this
+// machine. They replace the absolute budgets above on non-CI machines.
+const RUN_BASELINE_MULTIPLE: u32 = 43; // median run 54970us, median baseline 3838us
+const RESUME_BASELINE_MULTIPLE: u32 = 31; // median run 53950us, median baseline 5156us
+const DOCTOR_BASELINE_MULTIPLE: u32 = 79; // median run 78841us, median baseline 3013us
+// Exception: the models call is spawn-dominated, so 3x would give a
+// single-digit budget a spawn alone can exceed. It keeps the old 50ms floor
+// intent instead: round(50ms / median baseline 4718us over 5 samples).
+const MODELS_BASELINE_MULTIPLE: u32 = 11;
 
 /// Wall-clock and RSS samples are not meaningful when these tests run in parallel.
 static BUDGET_SERIAL: Mutex<()> = Mutex::new(());
