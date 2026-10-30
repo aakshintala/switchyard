@@ -5,6 +5,7 @@
 # in a directory placed first on a lane's PATH; see autonomous-flywheel.
 # With CARGO_SLOT_SHARED_CHECKOUT set to the shared checkout's path, a slot
 # subcommand run from that checkout is refused.
+# `cargo mutants` is banned for lanes and refused up front; mutants run in CI.
 import errno
 import fcntl
 import os
@@ -15,7 +16,7 @@ import sys
 import time
 
 MARKER = b"# cargo-slot shim"
-SLOT_SUBCOMMANDS = {"build", "check", "clippy", "test", "nextest", "bench", "run", "doc", "mutants"}
+SLOT_SUBCOMMANDS = {"build", "check", "clippy", "test", "nextest", "bench", "run", "doc"}
 VALUE_OPTIONS = {"--config", "-C", "-Z", "--color"}
 
 
@@ -163,12 +164,13 @@ def exec_real(real, args):
 
 def main():
     args = sys.argv[1:]
+    if subcommand(args) == "mutants": fail(1, "cargo mutants is banned for lanes; mutants run in CI, read verdicts with ~/.agents/bin/mutant-verdicts <run> --repo <owner/name>")
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     real = find_real_cargo(os.environ.get("PATH"), shim_dir)
     if real is None:
         fail(127, "no cargo on PATH outside cargo-slot")
     if subcommand(args) in SLOT_SUBCOMMANDS and in_shared_checkout():
-        fail(1, "run cargo in your ticket worktree")
+        fail(1, "cwd %s is inside the shared checkout %s; cd into your ticket worktree and rerun. This is a cwd check, not a permission denial." % (os.getcwd(), os.environ["CARGO_SLOT_SHARED_CHECKOUT"]))
     if subcommand(args) in SLOT_SUBCOMMANDS and not held():
         n = slot_count()
         if n > 0:

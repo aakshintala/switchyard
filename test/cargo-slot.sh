@@ -414,9 +414,36 @@ passes_while_held() {
   wait "$hold" 2>/dev/null
 }
 
-for sub in build check clippy test nextest bench run doc mutants; do
+for sub in build check clippy test nextest bench run doc; do
   waits_behind_holder "sub-$sub" -- "$sub"
 done
+
+# `cargo mutants` never takes a slot: the shim refuses it with exit 1 before
+# any lookup or validation, so lanes cannot run mutants locally. Mutants run
+# in CI; read verdicts from there.
+refuses_mutants() {
+  local name="$1" rc want
+  shift
+  new_run "refuse-$name"
+  cargo_as "$R" CARGO_SLOT_DIR="$T/slots-$name" "$@" 2>"$R/shim.err"
+  rc=$?
+  [ "$rc" = 1 ] || fail "$name: exit $rc, want 1 refusal"
+  want='cargo-slot: cargo mutants is banned for lanes; mutants run in CI, read verdicts with ~/.agents/bin/mutant-verdicts <run> --repo <owner/name>'
+  printf '%s\n' "$want" >"$R/want.err"
+  cmp -s "$R/shim.err" "$R/want.err" ||
+    fail "$name: stderr was [$(cat "$R/shim.err")], want [$want]"
+  [ ! -e "$R/started" ] || fail "$name: fake cargo started"
+  expect_no_slot_dir "$T/slots-$name"
+}
+
+refuses_mutants plain -- mutants
+refuses_mutants list -- mutants --list
+refuses_mutants plus -- +nightly mutants
+refuses_mutants dash-c -- -C dir mutants
+refuses_mutants config -- --config k=v mutants
+refuses_mutants bad-slots CARGO_SLOTS=abc -- mutants
+refuses_mutants held CARGO_SLOTS=1 CARGO_SLOT_HELD=1 -- mutants
+refuses_mutants nocargo PATH="$T/shims:$T/py" -- mutants
 waits_behind_holder "global-options" -- \
   +nightly -Z unstable-options --config k=v -C dir --color always -q -v \
   --locked --offline --frozen test
@@ -677,12 +704,21 @@ expect_no_slot_dir "$T/guard-i"
 guard_refused() {
   local name="$1" dir="$2" slots="$T/guard-$1"
   shift 2
+  local shared="" w
+  for w in "$@"; do
+    case "$w" in
+      CARGO_SLOT_SHARED_CHECKOUT=*) shared="${w#CARGO_SLOT_SHARED_CHECKOUT=}" ;;
+    esac
+  done
+  local cwd
+  cwd="$(cd "$dir" && pwd -P)" || fail "guard $name: cannot resolve $dir"
+  local want="cargo-slot: cwd $cwd is inside the shared checkout $shared; cd into your ticket worktree and rerun. This is a cwd check, not a permission denial."
   new_run "guard-$name"
   ( cd "$dir" && cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$slots" "$@" \
     -- check 2>"$R/shim.err" )
   local rc=$?
   [ "$rc" = 1 ] || fail "guard $name: exit $rc, want 1"
-  [ "$(cat "$R/shim.err")" = "cargo-slot: run cargo in your ticket worktree" ] ||
+  [ "$(cat "$R/shim.err")" = "$want" ] ||
     fail "guard $name: stderr [$(cat "$R/shim.err")]"
   [ ! -e "$R/started" ] || fail "guard $name: the fake ran"
   [ ! -e "$slots" ] || fail "guard $name: slot directory created"
