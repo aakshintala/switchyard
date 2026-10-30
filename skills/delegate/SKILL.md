@@ -9,7 +9,8 @@ description: >
 # Delegate
 
 Run `delegate` (no arguments) for the command syntax, and `delegate models` for the live model
-table with backends, prices and tiers.
+table with backends, prices and tiers. Call it bare, from PATH: it is installed to `~/.local/bin`,
+not to `~/.agents/bin` with the pack's scripts.
 
 ## Model ladder
 
