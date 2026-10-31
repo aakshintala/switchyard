@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Tests for bin/job-record: print the winning <id>.json path across the three
-# directories of the lookup order in docs/delegate-jobs.md:7-13
-# (DELEGATE_JOBS_DIR, $TMPDIR/delegate-jobs, the system dir). Fixtures live
-# under a temp dir; the real /tmp/delegate-jobs is never read or written.
+# Tests for bin/job-record: print the winning <id>.json path across the four
+# sources in docs/delegate-jobs.md#lookup-order. Fixtures live under a temp
+# dir; the real /tmp/delegate-jobs and user cache are never read or written.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,7 +18,9 @@ while [ "$BASE" != "/" ] && [ "${BASE%/}" != "$BASE" ]; do
 done
 T="$(mktemp -d "$BASE/test-job-record.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/override" "$T/tmp/delegate-jobs" "$T/sys" "$T/cwd" "$T/cwd/rel/dir"
+export HOME="$T/home"
+export XDG_CACHE_HOME="$T/cache"
+mkdir -p "$T/override" "$T/tmp/delegate-jobs" "$T/sys" "$T/cwd" "$T/cwd/rel/dir" "$HOME"
 export TMPDIR="$T/tmp"
 export JOB_RECORD_SYSTEM_DIR="$T/sys"
 unset DELEGATE_JOBS_DIR
@@ -40,6 +41,14 @@ run_rec_args() {
 
 plant() {
   printf '{}\n' >"$1"
+}
+
+miss() {
+  local id="$1"
+  shift
+  run_rec "$id" "$@"
+  [ "$RC" -eq 1 ] || fail "$id miss exits 1 (rc=$RC)"
+  [ -z "$GOT" ] || fail "$id miss prints nothing: $GOT"
 }
 
 # --- record only in each directory ---
@@ -80,6 +89,79 @@ plant "$T/tmp/delegate-jobs/tmp-sys.json"
 plant "$T/sys/tmp-sys.json"
 run_rec tmp-sys "DELEGATE_JOBS_DIR=$T/override"
 [ "$GOT" = "$T/tmp/delegate-jobs/tmp-sys.json" ] || fail "tmp beats system: $GOT"
+
+# --- locator fallback, parsing and four-source precedence ---
+LOCATORS="$T/cache/delegate/locators"
+OUTSIDE="$T/outside jobs"
+mkdir -p "$LOCATORS" "$OUTSIDE"
+plant "$OUTSIDE/loc-only.json"
+printf '%s\n' "$OUTSIDE/loc-only.json" >"$LOCATORS/loc-only"
+run_rec loc-only
+[ "$RC" -eq 0 ] || fail "locator-only exits 0 (rc=$RC)"
+[ "$GOT" = "$OUTSIDE/loc-only.json" ] || fail "locator-only exact path: $GOT"
+
+plant "$OUTSIDE/layered.json"
+printf '%s\n' "$OUTSIDE/layered.json" >"$LOCATORS/layered"
+plant "$T/override/layered.json"
+plant "$T/tmp/delegate-jobs/layered.json"
+plant "$T/sys/layered.json"
+run_rec layered "DELEGATE_JOBS_DIR=$T/override"
+[ "$GOT" = "$T/override/layered.json" ] || fail "override beats locator: $GOT"
+rm -f "$T/override/layered.json"
+run_rec layered "DELEGATE_JOBS_DIR=$T/override"
+[ "$GOT" = "$T/tmp/delegate-jobs/layered.json" ] || fail "tmp beats locator: $GOT"
+rm -f "$T/tmp/delegate-jobs/layered.json"
+run_rec layered "DELEGATE_JOBS_DIR=$T/override"
+[ "$GOT" = "$T/sys/layered.json" ] || fail "system beats locator: $GOT"
+rm -f "$T/sys/layered.json"
+run_rec layered "DELEGATE_JOBS_DIR=$T/override"
+[ "$GOT" = "$OUTSIDE/layered.json" ] || fail "locator wins after legacy misses: $GOT"
+
+# Paths with spaces are plain text and are not shell-evaluated.
+plant "$OUTSIDE/space path.json"
+printf '%s\n' "$OUTSIDE/space path.json" >"$LOCATORS/space-path"
+run_rec space-path
+[ "$RC" -eq 0 ] || fail "space path locator exits 0 (rc=$RC)"
+[ "$GOT" = "$OUTSIDE/space path.json" ] || fail "space path is preserved: $GOT"
+
+miss stale-locator
+printf '%s\n' "$OUTSIDE/missing.json" >"$LOCATORS/stale-locator"
+printf '%s' 'relative/path.json' >"$LOCATORS/relative-locator"
+miss relative-locator
+: >"$LOCATORS/empty-locator"
+miss empty-locator
+plant "$OUTSIDE/line-one.json"
+printf '%s\n%s\n' "$OUTSIDE/line-one.json" "$OUTSIDE/line-two.json" >"$LOCATORS/multiline-locator"
+miss multiline-locator
+printf '%s\n' "$OUTSIDE/missing.json" >"$LOCATORS/unreadable-file"
+chmod 000 "$LOCATORS/unreadable-file"
+miss unreadable-file
+chmod 600 "$LOCATORS/unreadable-file"
+mkdir -p "$LOCATORS/unreadable-locator"
+miss unreadable-locator
+mkdir -p "$OUTSIDE/directory.json"
+printf '%s\n' "$OUTSIDE/directory.json" >"$LOCATORS/directory-target"
+miss directory-target
+printf 'touch %s\n' "$T/locator-pwned" >"$LOCATORS/no-evaluation"
+miss no-evaluation
+[ ! -e "$T/locator-pwned" ] || fail "locator contents are never executed"
+
+# An empty, unset or relative XDG cache uses the test-owned HOME fallback.
+HOME_LOCATORS="$HOME/.cache/delegate/locators"
+mkdir -p "$HOME_LOCATORS"
+for mode in unset empty relative; do
+  id="home-$mode"
+  target="$OUTSIDE/$id.json"
+  plant "$target"
+  printf '%s\n' "$target" >"$HOME_LOCATORS/$id"
+  case "$mode" in
+    unset) run_rec "$id" -u XDG_CACHE_HOME ;;
+    empty) run_rec "$id" "XDG_CACHE_HOME=" ;;
+    relative) run_rec "$id" "XDG_CACHE_HOME=relative/cache" ;;
+  esac
+  [ "$RC" -eq 0 ] || fail "$mode XDG uses HOME fallback (rc=$RC)"
+  [ "$GOT" = "$target" ] || fail "$mode XDG fallback path: $GOT"
+done
 
 # --- empty DELEGATE_JOBS_DIR is ignored ---
 plant "$T/tmp/delegate-jobs/empty-tmp.json"
@@ -122,8 +204,10 @@ run_rec dir-id "DELEGATE_JOBS_DIR=$T/override"
 [ "$GOT" = "$T/tmp/delegate-jobs/dir-id.json" ] || fail "dir-named id path: $GOT"
 
 # --- empty id and ids with a slash never reach a path join ---
-mkdir -p "$T/override/a"
+mkdir -p "$T/override/a" "$LOCATORS/a"
 plant "$T/override/a/b.json"
+plant "$OUTSIDE/slash-id.json"
+printf '%s\n' "$OUTSIDE/slash-id.json" >"$LOCATORS/a/b"
 run_rec "" "DELEGATE_JOBS_DIR=$T/override"
 [ "$RC" -eq 1 ] || fail "empty id exits 1 (rc=$RC)"
 [ -z "$GOT" ] || fail "empty id prints nothing: $GOT"

@@ -626,6 +626,7 @@ run_in_seal() {
     GIT_TERMINAL_PROMPT=0 \
     GIT_SSH_COMMAND=false \
     "TMPDIR=$(run_tmp "$rundir")" \
+    "XDG_CACHE_HOME=$(run_tmp "$rundir")/cache" \
     "FIBER_HOME=$RUN_OUT/fiber-home" \
     "FIBER_BIN=$FIBER_BIN" \
     "CARGO_TARGET_DIR=$RUN_OUT/target/$suffix" \

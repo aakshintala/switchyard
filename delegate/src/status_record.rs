@@ -37,9 +37,7 @@ fn writer_dir_from(over: &Option<std::ffi::OsString>, tmp: &Path, cwd: &Path) ->
 }
 
 /// Status JSON for one job in the writer directory (`jobs_dir`).
-/// Readers never call this directly: `cancel`, `watch` and `resume` look the
-/// record up with `find_record_path`, which searches every directory the
-/// supervisor's `TMPDIR` could have been.
+/// Readers find it through the legacy directories or the job's per-user locator.
 pub fn job_record_path(job_id: &str) -> PathBuf {
     jobs_dir().join(format!("{job_id}.json"))
 }
@@ -69,20 +67,128 @@ fn dirs_from(over: Option<std::ffi::OsString>, tmp: &Path, cwd: &Path) -> Vec<Pa
     dirs
 }
 
-/// The record's path in the first searched directory holding `<job_id>.json`.
+/// The first regular-file hit in the legacy directories, then the job's locator.
 /// `None` for an empty id or one holding a path separator, which must never
 /// reach a path join.
 pub fn find_record_path(job_id: &str) -> Option<PathBuf> {
-    find_in_dirs(job_id, &search_dirs())
+    find_record_path_with_locator(job_id, &search_dirs(), || locator_record_path(job_id))
+}
+
+fn valid_job_id(job_id: &str) -> bool {
+    !job_id.is_empty() && !job_id.contains('/')
 }
 
 fn find_in_dirs(job_id: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
-    if job_id.is_empty() || job_id.contains('/') {
+    if !valid_job_id(job_id) {
         return None;
     }
     dirs.iter()
         .map(|d| d.join(format!("{job_id}.json")))
         .find(|p| p.is_file())
+}
+
+fn find_record_path_with_locator(
+    job_id: &str,
+    dirs: &[PathBuf],
+    locator: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if !valid_job_id(job_id) {
+        return None;
+    }
+    find_in_dirs(job_id, dirs).or_else(|| locator().filter(|path| path.is_file()))
+}
+
+fn locator_cache_root_from(
+    xdg: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    if let Some(xdg) = xdg.filter(|path| !path.is_empty()) {
+        let path = PathBuf::from(xdg);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    let home = PathBuf::from(home?);
+    home.is_absolute().then(|| home.join(".cache"))
+}
+
+fn locator_path_from(
+    job_id: &str,
+    xdg: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    if !valid_job_id(job_id) {
+        return None;
+    }
+    Some(
+        locator_cache_root_from(xdg, home)?
+            .join("delegate/locators")
+            .join(job_id),
+    )
+}
+
+/// The per-user path where one job's locator is stored. Invalid ids or an
+/// unavailable absolute cache root are lookup misses.
+pub(crate) fn locator_path(job_id: &str) -> Option<PathBuf> {
+    let xdg = std::env::var_os("XDG_CACHE_HOME");
+    let home = std::env::var_os("HOME");
+    locator_path_from(job_id, xdg.as_deref(), home.as_deref())
+}
+
+fn parse_locator_target(contents: &str) -> Option<PathBuf> {
+    let target = contents.strip_suffix('\n').unwrap_or(contents);
+    if target.is_empty() || target.contains('\n') {
+        return None;
+    }
+    let path = PathBuf::from(target);
+    path.is_absolute().then_some(path)
+}
+
+/// Read and validate a locator without requiring its target to still exist.
+/// A stale target remains available for the unknown-job diagnostic.
+pub(crate) fn locator_record_path(job_id: &str) -> Option<PathBuf> {
+    let path = locator_path(job_id)?;
+    let contents = fs::read_to_string(path).ok()?;
+    parse_locator_target(&contents)
+}
+
+/// Publish the absolute record path once before the supervisor dispatches the job.
+pub(crate) fn write_locator(job_id: &str) -> std::io::Result<()> {
+    if !valid_job_id(job_id) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid job id",
+        ));
+    }
+    let record = job_record_path(job_id);
+    let record = if record.is_absolute() {
+        record
+    } else {
+        std::env::current_dir()?.join(record)
+    };
+    let target = record.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "job record path is not valid UTF-8",
+        )
+    })?;
+    if target.contains('\n') {
+        return Ok(());
+    }
+    let locator = locator_path(job_id).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unavailable absolute cache root",
+        )
+    })?;
+    let contents = format!("{target}\n");
+    if parse_locator_target(&contents).as_ref() != Some(&record) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "job record path does not round-trip through locator format",
+        ));
+    }
+    write_atomic(&locator, &contents)
 }
 
 /// Writers only: the found path, else `job_record_path` when no record exists.
@@ -277,6 +383,236 @@ mod tests {
 
     fn written_record(id: &str) -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(job_record_path(id)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn locator_cache_selection_uses_absolute_xdg_or_home_fallback() {
+        use crate::test_env::EnvGuard;
+        let _env = crate::test_env::lock();
+        let home = std::env::temp_dir().join(format!("delegate-locator-home-{}", random_uuid()));
+        let cache = std::env::temp_dir().join("cache root with spaces");
+        let _home = EnvGuard::set("HOME", home.to_str().unwrap());
+        let _unset = EnvGuard::remove("XDG_CACHE_HOME");
+        let expected = home.join(".cache/delegate/locators/job-id");
+        assert_eq!(locator_path("job-id"), Some(expected.clone()));
+        {
+            let _empty = EnvGuard::set("XDG_CACHE_HOME", "");
+            assert_eq!(locator_path("job-id"), Some(expected.clone()));
+        }
+        {
+            let _relative = EnvGuard::set("XDG_CACHE_HOME", "relative/cache");
+            assert_eq!(locator_path("job-id"), Some(expected));
+        }
+        {
+            let _absolute = EnvGuard::set("XDG_CACHE_HOME", cache.to_str().unwrap());
+            assert_eq!(
+                locator_path("job-id"),
+                Some(cache.join("delegate/locators/job-id"))
+            );
+        }
+        assert_eq!(locator_path(""), None);
+        assert_eq!(locator_path("a/b"), None);
+    }
+
+    #[test]
+    fn locator_contents_require_one_absolute_path_line_and_keep_spaces() {
+        let path = PathBuf::from("/home/operator/cache root/jobs/job-id.json");
+        assert_eq!(
+            parse_locator_target(path.to_str().unwrap()),
+            Some(path.clone())
+        );
+        assert_eq!(
+            parse_locator_target(&format!("{}\n", path.display())),
+            Some(path)
+        );
+        for invalid in ["", "relative/job.json", "/jobs/a\n/jobs/b", "/jobs/a\n\n"] {
+            assert_eq!(parse_locator_target(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn locator_publication_is_absolute_and_keeps_each_job_separate() {
+        use crate::test_env::EnvGuard;
+        let _env = crate::test_env::lock();
+        let root = std::env::temp_dir().join(format!("delegate-locator-{}", random_uuid()));
+        let cache = root.join("cache root");
+        let jobs = root.join("jobs root");
+        let _home = EnvGuard::set("HOME", root.to_str().unwrap());
+        let _xdg = EnvGuard::set("XDG_CACHE_HOME", cache.to_str().unwrap());
+        let _jobs = EnvGuard::set("DELEGATE_JOBS_DIR", jobs.to_str().unwrap());
+        let first = random_uuid();
+        let second = random_uuid();
+        let first_record = jobs.join(format!("{first}.json"));
+        let first_locator = cache.join("delegate/locators").join(&first);
+        write_locator(&first).unwrap();
+        assert_eq!(
+            fs::read_to_string(&first_locator).unwrap(),
+            first_record.display().to_string() + "\n"
+        );
+        assert_eq!(locator_record_path(&first), Some(first_record.clone()));
+        assert_eq!(find_record_path(&first), None, "a stale target is a miss");
+        fs::create_dir_all(first_record.parent().unwrap()).unwrap();
+        fs::write(&first_record, "{}").unwrap();
+        assert_eq!(find_record_path(&first), Some(first_record.clone()));
+
+        write_locator(&second).unwrap();
+        assert_eq!(
+            fs::read_to_string(&first_locator).unwrap(),
+            first_record.display().to_string() + "\n",
+            "publishing a second job does not overwrite the first locator"
+        );
+        assert_eq!(
+            fs::read_to_string(cache.join("delegate/locators").join(&second)).unwrap(),
+            jobs.join(format!("{second}.json")).display().to_string() + "\n"
+        );
+
+        let relative_jobs = PathBuf::from(format!("relative-jobs-{}", random_uuid()));
+        let relative_id = random_uuid();
+        let _relative = EnvGuard::set("DELEGATE_JOBS_DIR", relative_jobs.to_str().unwrap());
+        write_locator(&relative_id).unwrap();
+        assert_eq!(
+            fs::read_to_string(cache.join("delegate/locators").join(&relative_id)).unwrap(),
+            std::env::current_dir()
+                .unwrap()
+                .join(relative_jobs)
+                .join(format!("{relative_id}.json"))
+                .display()
+                .to_string()
+                + "\n",
+            "a relative record directory is published as an absolute path"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn newline_record_path_skips_locator_publication_without_truncation() {
+        use crate::test_env::EnvGuard;
+        let _env = crate::test_env::lock();
+        let root = std::env::temp_dir().join(format!("delegate-locator-newline-{}", random_uuid()));
+        let jobs = root.join("jobs\nwith-newline");
+        let _home = EnvGuard::remove("HOME");
+        let _xdg = EnvGuard::set("XDG_CACHE_HOME", "relative-cache");
+        let _jobs = EnvGuard::set("DELEGATE_JOBS_DIR", jobs.to_str().unwrap());
+        let id = random_uuid();
+        write_locator(&id).unwrap();
+        assert!(
+            !root
+                .join("relative-cache/delegate/locators")
+                .join(&id)
+                .exists(),
+            "no truncated locator is written for a newline-containing target"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn locator_lookup_waits_for_legacy_hits_and_requires_regular_files() {
+        let root = std::env::temp_dir().join(format!("delegate-locator-order-{}", random_uuid()));
+        let dirs: Vec<_> = ["override", "caller-tmp", "system"]
+            .into_iter()
+            .map(|name| root.join(name))
+            .collect();
+        let locator_record = root.join("outside/record.json");
+        fs::create_dir_all(locator_record.parent().unwrap()).unwrap();
+        fs::write(&locator_record, "not parsed here").unwrap();
+        let id = "order-id";
+
+        assert_eq!(
+            find_record_path_with_locator(id, &dirs, || Some(locator_record.clone())),
+            Some(locator_record.clone()),
+            "locator is used only after all legacy directories miss"
+        );
+        for (index, dir) in dirs.iter().enumerate().rev() {
+            fs::create_dir_all(dir).unwrap();
+            let record = dir.join(format!("{id}.json"));
+            fs::write(&record, if index == 0 { "not JSON" } else { "{}" }).unwrap();
+            assert_eq!(
+                find_record_path_with_locator(id, &dirs, || Some(locator_record.clone())),
+                Some(record),
+                "legacy directory {index} outranks later sources, even with invalid record contents"
+            );
+        }
+        let locator_read = std::cell::Cell::new(false);
+        assert_eq!(
+            find_record_path_with_locator(id, &dirs, || {
+                locator_read.set(true);
+                Some(locator_record.clone())
+            }),
+            Some(dirs[0].join(format!("{id}.json")))
+        );
+        assert!(!locator_read.get(), "legacy hits do not read the locator");
+        let directory = root.join("outside/directory.json");
+        fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            find_record_path_with_locator("directory", &[], || Some(directory.clone())),
+            None,
+            "a directory is not a locator record"
+        );
+        assert_eq!(
+            find_record_path_with_locator("", &[], || Some(locator_record.clone())),
+            None,
+            "an empty id cannot be resolved through a locator"
+        );
+        assert_eq!(
+            find_record_path_with_locator("a/b", &[], || Some(locator_record.clone())),
+            None,
+            "a slash id cannot be resolved through a locator"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_and_stale_locator_files_are_lookup_misses() {
+        use crate::test_env::EnvGuard;
+        let _env = crate::test_env::lock();
+        let root = std::env::temp_dir().join(format!("delegate-locator-invalid-{}", random_uuid()));
+        let cache = root.join("cache");
+        let locator_dir = cache.join("delegate/locators");
+        let jobs = root.join("legacy");
+        let tmp = root.join("tmp");
+        let _home = EnvGuard::set("HOME", root.to_str().unwrap());
+        let _xdg = EnvGuard::set("XDG_CACHE_HOME", cache.to_str().unwrap());
+        let _jobs = EnvGuard::set("DELEGATE_JOBS_DIR", jobs.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", tmp.to_str().unwrap());
+        fs::create_dir_all(&locator_dir).unwrap();
+        let stale = format!("stale-{}", random_uuid());
+        let stale_target = root.join("jobs/stale.json");
+        fs::write(
+            locator_dir.join(&stale),
+            stale_target.display().to_string() + "\n",
+        )
+        .unwrap();
+        assert_eq!(
+            locator_record_path(&stale),
+            Some(stale_target.clone()),
+            "a stale locator remains available for diagnostics"
+        );
+        assert_eq!(
+            find_record_path(&stale),
+            None,
+            "a stale target is not a hit"
+        );
+
+        for (name, contents) in [
+            (
+                format!("relative-{}", random_uuid()),
+                "jobs/relative.json\n",
+            ),
+            (format!("empty-{}", random_uuid()), "\n"),
+            (
+                format!("multiline-{}", random_uuid()),
+                "/jobs/one.json\n/jobs/two.json\n",
+            ),
+        ] {
+            fs::write(locator_dir.join(&name), contents).unwrap();
+            assert_eq!(locator_record_path(&name), None, "{name}");
+            assert_eq!(find_record_path(&name), None, "{name}");
+        }
+        let unreadable = format!("unreadable-{}", random_uuid());
+        fs::create_dir(locator_dir.join(&unreadable)).unwrap();
+        assert_eq!(locator_record_path(&unreadable), None);
+        assert_eq!(locator_record_path("missing"), None);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

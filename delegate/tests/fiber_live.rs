@@ -75,6 +75,7 @@ impl LiveEnv {
             .args(args)
             .current_dir(&self.work)
             .env("TMPDIR", &self.root)
+            .env("XDG_CACHE_HOME", self.root.join("xdg-cache"))
             .env_remove("CLAUDECODE")
             .env("FIBER_BIN", &self.wrapper)
             .env(
@@ -196,6 +197,7 @@ impl Drop for LiveEnv {
                     .args(["cancel", id])
                     .current_dir(&self.work)
                     .env("TMPDIR", &self.root)
+                    .env("XDG_CACHE_HOME", self.root.join("xdg-cache"))
                     .env("FIBER_BIN", &self.wrapper)
                     .output();
             }

@@ -72,6 +72,7 @@ impl Env {
             .args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
+            .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))
             .env_remove("CLAUDECODE")
             .env("CLAUDE_BIN", self.dir.join("claude.sh"))
             .env(

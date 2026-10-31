@@ -169,6 +169,7 @@ impl Env {
         cmd.args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
+            .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))
             .env_remove("CLAUDECODE")
             .env("CODEX_BIN", self.dir.join("codex.sh"))
             .env(

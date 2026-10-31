@@ -1,8 +1,7 @@
 //! The `delegate` CLI: `run` starts a detached supervisor, `watch` reads job records.
-//! The record file is the only link between them. `cancel`, `watch` and `resume`
-//! find it by searching `DELEGATE_JOBS_DIR`, then `$TMPDIR/delegate-jobs`, then
-//! `/tmp/delegate-jobs`: a record stays where its supervisor wrote it, so a
-//! caller under another `TMPDIR` sets `DELEGATE_JOBS_DIR` to the supervisor's dir.
+//! The record file is the only link between them. `cancel`, `status`, `watch` and
+//! `resume` search `DELEGATE_JOBS_DIR`, `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`,
+//! then the job's per-user locator. See `docs/delegate-jobs.md`.
 
 use crate::backends::Backend;
 use crate::config::build_deps;
@@ -11,8 +10,8 @@ use crate::job::{JobDeps, JobHandle};
 use crate::models::{base_model_id, resolve_model};
 use crate::prompt::status_block;
 use crate::status_record::{
-    CliRecordWriter, find_record_path, job_record_path, record_path, search_dirs, write_atomic,
-    write_cancelled, write_supervisor_died,
+    CliRecordWriter, find_record_path, job_record_path, locator_path, locator_record_path,
+    record_path, search_dirs, write_atomic, write_cancelled, write_locator, write_supervisor_died,
 };
 use crate::types::{Config, JobSpec, ResumeContext};
 use crate::util::{captured_command, json_compact, random_uuid, resolve_path};
@@ -708,6 +707,9 @@ fn supervise(args: &[String]) -> i32 {
         wall_ms,
         resumed_from: resumed_from.clone(),
     });
+    if let Err(e) = write_locator(id) {
+        return fail(format!("cannot write job locator for {id}: {e}"));
+    }
     let registry = JobHandle::new(rd);
     let cancel_fd = install_cancel_handler();
     let job = registry.dispatch(spec);
@@ -780,7 +782,20 @@ fn read_record(id: &str) -> Option<String> {
 /// No record in any searched directory: name the id and every directory tried,
 /// keeping the `unknown job <id>` prefix existing tests match.
 fn missing_record(id: &str) -> Usage {
-    let dirs = search_dirs()
+    let mut searched = search_dirs();
+    if let Some(locator) = locator_path(id)
+        && let Some(parent) = locator.parent()
+    {
+        searched.push(parent.to_path_buf());
+    }
+    if let Some(target) = locator_record_path(id)
+        && let Some(parent) = target.parent()
+    {
+        searched.push(parent.to_path_buf());
+    }
+    let mut seen = std::collections::HashSet::new();
+    searched.retain(|path| seen.insert(path.clone()));
+    let dirs = searched
         .iter()
         .map(|d| d.display().to_string())
         .collect::<Vec<_>>()
