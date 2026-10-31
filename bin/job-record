@@ -2,10 +2,11 @@
 # job-record: print the path of one job record <id>.json.
 # The record is the first regular file found in the documented lookup order:
 # DELEGATE_JOBS_DIR (when non-empty; a relative value resolves against the
-# current directory), then $TMPDIR/delegate-jobs, then the system directory.
+# current directory), then $TMPDIR/delegate-jobs, the system directory, and
+# finally the per-user locator.
 # Duplicate directories are searched once, at the first position. Prints the
 # winning path, newline-terminated, exit 0; exit 1 with no output when no
-# directory holds the record, when the id is empty, or when it holds a slash.
+# source holds the record, when the id is empty, or when it holds a slash.
 # JOB_RECORD_SYSTEM_DIR overrides the system directory; it exists for tests
 # and defaults to /tmp/delegate-jobs.
 # Usage: job-record <id>
@@ -55,4 +56,39 @@ while IFS= read -r dir; do
     exit 0
   fi
 done <<<"$dirs"
+
+cache_root="${XDG_CACHE_HOME:-}"
+case "$cache_root" in
+  /*) locator_dir="$cache_root/delegate/locators" ;;
+  *)
+    case "${HOME:-}" in
+      /*) locator_dir="$HOME/.cache/delegate/locators" ;;
+      *) locator_dir="" ;;
+    esac
+    ;;
+esac
+if [ -n "$locator_dir" ]; then
+  locator="$locator_dir/$id"
+  if [ -f "$locator" ]; then
+    target=""
+    extra=""
+    extra_line=0
+    {
+      IFS= read -r target
+      IFS= read -r extra && extra_line=1
+    } <"$locator" 2>/dev/null
+    # Accept one path line, with or without its final newline. A second line,
+    # even an empty one, makes the locator malformed.
+    if [ -n "$target" ] && [ "$extra_line" -eq 0 ] && [ -z "$extra" ]; then
+      case "$target" in
+        /*)
+          if [ -f "$target" ]; then
+            printf '%s\n' "$target"
+            exit 0
+          fi
+          ;;
+      esac
+    fi
+  fi
+fi
 exit 1

@@ -113,7 +113,9 @@ delegate watch <id-a> <id-b> --timeout 1800
 
 ## Reading the result
 
-The record is `DELEGATE_JOBS_DIR/<id>.json` when that override is set, else `$TMPDIR/delegate-jobs/<id>.json` (a terminal record has no `lastHeartbeatAt`). If the job started under another `TMPDIR`, set `DELEGATE_JOBS_DIR=<that dir>/delegate-jobs` before you run `cancel`, `watch` or `resume`. They search that dir first, then your `$TMPDIR/delegate-jobs`, then `/tmp/delegate-jobs`. The unknown-job error lists every directory searched:
+The record is `DELEGATE_JOBS_DIR/<id>.json` when that override is set, else `$TMPDIR/delegate-jobs/<id>.json` (a terminal record has no `lastHeartbeatAt`). `cancel`, `status`, `watch`, `resume` and `bin/job-record` search that directory, your `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`, then the per-user locator at `${XDG_CACHE_HOME:-$HOME/.cache}/delegate/locators/<id>`.
+
+The locator finds jobs started under another `TMPDIR` when both processes use the same cache root. For older records without a locator that are outside the legacy directories, set `DELEGATE_JOBS_DIR=<that dir>/delegate-jobs`. The unknown-job error lists the searched directories, including the locator directory and a stale target's parent. See [delegate job records](../../docs/delegate-jobs.md) for the locator format and lookup details. The record shape is unchanged:
 
 ```json
 {"status":"DONE","result":{"status":"DONE","text":"Renamed the helper in 4 files.\n\nSTATUS: DONE","sessionId":"7c1e0a52-3b9f-4e0c-9a55-0d6f1b2c8e41","backend":"cursor","model":"model-id","usage":{"inputTokens":18234,"outputTokens":1207,"cacheReadTokens":9100,"cacheWriteTokens":0},"costUsd":0.0148,"costEstimated":true,"durationMs":84213,"jobId":"d2f4a8e6-51c7-4b3a-8f90-6e1a7c3b5d02"},"supervisorPid":48213,"resume":{"model":"model-id","cwd":"/abs/repo","sessionId":"7c1e0a52-3b9f-4e0c-9a55-0d6f1b2c8e41","gate":"cargo test","toolIdleMs":null}}
