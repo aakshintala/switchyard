@@ -311,6 +311,142 @@ run_plan confirm --edits "$CDIR/edits.md"
 expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "second confirm"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "a second confirm starts no job"
 
+# --- every ROUND-LIMIT prints open lines from the latest report ---
+setup_case round-open-lines
+rebase_plan
+printf 'lines' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-open-lines first verify exits 1"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-open-lines second verify exits 1"
+jobs_before="$(grep -c '^job|' "$T/stub.log")"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-open-lines limit exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "round-open-lines"
+grep -qx '1. Rulings miss a contradiction in bin/x' <<<"$OUT" || fail "ROUND-LIMIT keeps the first open line"
+grep -qx '3. Gate skips package y' <<<"$OUT" || fail "ROUND-LIMIT keeps the final open line"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "round-open-lines limit starts no job"
+
+setup_case round-no-report
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-no-report seed round"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-no-report limit exits 1"
+grep -qx 'none (no report: round 2 ended without one)' <<<"$OUT" || fail "missing report names the unfinished round"
+
+setup_case round-empty-report
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-empty-report seed round"
+: >"$CDIR/empty.md"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/empty.md" || fail "round-empty-report seed report"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-empty-report limit exits 1"
+grep -qx 'none' <<<"$OUT" || fail "an empty report prints none"
+
+setup_case round-plan-ok-prefix
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-plan-ok-prefix seed round"
+printf 'PLAN OK with trailing text\nopen finding\n' >"$CDIR/report.md"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/report.md" || fail "round-plan-ok-prefix seed report"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-plan-ok-prefix limit exits 1"
+grep -qx 'PLAN OK with trailing text' <<<"$OUT" || fail "PLAN OK with trailing text is not treated as success"
+grep -qx 'open finding' <<<"$OUT" || fail "trailing-text report keeps its open lines"
+
+setup_case round-stale-confirm-report
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-stale-confirm-report seed round"
+printf '2. Current Verifier finding\n' >"$CDIR/verifier.md"
+printf 'stale confirm finding\n' >"$CDIR/run/switchyard-518-confirm-out.md"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/verifier.md" || fail "round-stale-confirm-report seed latest report"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-stale-confirm-report limit exits 1"
+grep -qx '2. Current Verifier finding' <<<"$OUT" || fail "ROUND-LIMIT uses last_report"
+grep -q 'stale confirm finding' <<<"$OUT" && fail "ROUND-LIMIT ignores a stale confirm report"
+
+setup_case round-report-cap
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-report-cap seed round"
+: >"$CDIR/report.md"
+for n in $(seq 1 40); do printf 'line-%s\n' "$n" >>"$CDIR/report.md"; done
+bash "$TKT_STATE" "$S" set last_report "$CDIR/report.md" || fail "round-report-cap seed report"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-report-cap limit exits 1"
+[ "$(grep -c '^line-' <<<"$OUT")" -eq 38 ] || fail "ROUND-LIMIT caps report lines at 38"
+grep -qx 'line-38' <<<"$OUT" || fail "ROUND-LIMIT includes the 38th report line"
+grep -qx 'line-39' <<<"$OUT" && fail "ROUND-LIMIT omits report lines after 38"
+
+setup_case round-ok-reports
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "round-ok-reports first verify exits 0"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "round-ok-reports second verify exits 0"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-ok-reports limit exits 1"
+grep -qx 'none' <<<"$OUT" || fail "a PLAN OK report has no open lines"
+
+setup_case round-drift-report
+rebase_plan
+A="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-drift-report seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "round-drift-report seed confirm"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "round-drift-report seed verified base"
+{
+  printf 'Base: %s\n' "$A"
+  printf '\n## Files\n\n- `f.txt`\n\n## Tasks\n\n1. Check `f.txt`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+wcommit "$WT" f.txt v3
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+rebase_plan
+B="$(cat "$CDIR/base")"
+{
+  printf 'Base: %s\n' "$B"
+  printf '\n## Files\n\n- `f.txt`\n\n## Tasks\n\n1. Check `f.txt`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+printf 'lines' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-drift-report exempt verify exits 1"
+expect_verdict "TKT tkt-plan LINES n=3 out=* log=*" "round-drift-report drift"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-drift-report limit exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "round-drift-report limit"
+grep -qx '3. Gate skips package y' <<<"$OUT" || fail "ROUND-LIMIT uses the exempt drift report"
+
+setup_case round-confirm-report
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "round-confirm-report verify 1 exits 0"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "round-confirm-report verify 2 exits 0"
+printf 'lines' >"$T/mode"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "round-confirm-report confirm exits 1"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-confirm-report verify limit exits 1"
+grep -qx '3. Gate skips package y' <<<"$OUT" || fail "verify ROUND-LIMIT uses the confirm report"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "round-confirm-report second confirm exits 1"
+grep -qx '3. Gate skips package y' <<<"$OUT" || fail "confirm ROUND-LIMIT uses the confirm report"
+
+setup_case round-confirm-ok
+rebase_plan
+printf 'lines' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-confirm-ok verify 1 exits 1"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-confirm-ok verify 2 exits 1"
+printf 'ok' >"$T/mode"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "round-confirm-ok confirm exits 0"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-confirm-ok verify limit exits 1"
+grep -qx 'none' <<<"$OUT" || fail "latest PLAN OK confirm report replaces prior lines"
+
 # --- a LINES confirm still spends the one confirm round ---
 setup_case confirm-lines
 rebase_plan

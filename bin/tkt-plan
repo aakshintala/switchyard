@@ -60,6 +60,19 @@ load_plan() {
 
 ronum() { n="$(t get verifier_round 2>/dev/null || printf '0')"; case "$n" in ''|*[!0-9]*) n=0;; esac; printf '%s\n' "$n"; }
 
+open_lines() {
+  local report round
+  report="$(t get last_report 2>/dev/null || true)"
+  round="$(ronum)"
+  if [ -z "$report" ] || [ ! -f "$report" ]; then
+    printf 'none (no report: round %s ended without one)\n' "$round"
+  elif [ ! -s "$report" ] || [ "$(head -n 1 "$report")" = "PLAN OK" ]; then
+    printf 'none\n'
+  else
+    head -n 38 "$report"
+  fi
+}
+
 vmodel() {
   [ -n "${1:-}" ] && { printf '%s\n' "$1"; return; }
   t get model.verifier 2>/dev/null || { echo "tkt-plan: missing key: model.verifier" >&2; exit 2; }
@@ -172,8 +185,8 @@ do_verify() {
     fi
   fi
   if [ "$drift" -eq 0 ]; then
-    [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT round=$round confirm=done" 1 "the confirm round is used; send the open lines to triage"
-    [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan confirm --edits <file>, or send the open lines to triage"
+    [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT round=$round confirm=done" 1 "the confirm round is used; send the open lines to triage" "$(open_lines)"
+    [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan confirm --edits <file>, or send the open lines to triage" "$(open_lines)"
   fi
   model="$(vmodel "$model")" || exit 2
   args=(PLAN="$plan" BASE="$base" --model "$model")
@@ -201,6 +214,7 @@ do_verify() {
   if [ "$drift" -eq 0 ]; then
     t set verifier_round "$((round + 1))"
   fi
+  t set last_report "$rep"
   emit "$RV" "$REC" "$(head -n 38 "$rep")"
 }
 
@@ -209,7 +223,7 @@ do_confirm() {
   while [ $# -gt 0 ]; do case "$1" in
     --edits) [ $# -ge 2 ] || usage; edits="$2"; shift 2;; *) usage;; esac; done
   [ -n "$edits" ] || usage; [ -r "$edits" ] || { echo "tkt-plan: cannot read edits file: $edits" >&2; exit 2; }
-  [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage"
+  [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage" "$(open_lines)"
   load_plan
   cmodel="$(vmodel)" || exit 2
   rep="$run/$namebase-confirm-out.md"
@@ -217,6 +231,7 @@ do_confirm() {
   # Confirm has no --extra flag: the state extra, if any, follows the ticket text.
   ticket_extra "$xfile" "$(t get extra 2>/dev/null || true)"
   runjob confirm "$cbrief" "$rep" PLAN="$plan" BASE="$base" EDITS="@$edits" EXTRA="@$xfile" --model "$cmodel"
+  t set last_report "$rep"
   t set confirmed_for "$(ronum)"
   emit "$RV" "$REC" "$(head -n 38 "$rep")"
 }
