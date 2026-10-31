@@ -152,7 +152,7 @@ dg=("state=$state" "worktree=$worktree $wt_note" "filing=${filing:-none} base=$b
 # Both stamps share one fixed-width UTC shape, ordered by jq's codepoint
 # string compare, never by locale collation.
 ts_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
-merged="$(gh pr list --repo "$repo" --state merged --search "#$issue in:body" --limit 100 --json number,body,files,mergedAt 2>&1)" || fail_step github "$?" "$merged"
+merged="$(gh pr list --repo "$repo" --state merged --search "#$issue in:body" --limit 100 --json number,body,mergedAt 2>&1)" || fail_step github "$?" "$merged"
 stop_pr=""; notes=(); recur_pr=""; recur_at=""; recur_ok=1; pr_count="$(printf '%s' "$merged" | jq 'if type == "array" then length else 0 end')"
 idx=0; while [ "$idx" -lt "$pr_count" ]; do
   pr_num="$(printf '%s' "$merged" | jq -r ".[$idx].number")"
@@ -165,7 +165,8 @@ idx=0; while [ "$idx" -lt "$pr_count" ]; do
       fi
     else recur_ok=0; fi
   elif printf '%s' "$pr_body" | grep -qiE "Part of[[:space:]]+#$issue([^0-9]|$)"; then
-    pr_files="$(printf '%s' "$merged" | jq -r ".[$idx].files // [] | map(.path) | join(\",\")")"
+    pr_files="$(gh api --paginate "repos/$repo/pulls/$pr_num/files?per_page=100" -q '.[].filename' 2>&1)" || fail_step github "$?" "$pr_files"
+    pr_files="$(printf '%s\n' "$pr_files" | paste -sd, -)"
     notes+=("NOTE merged Part-of PR #$pr_num files=$pr_files")
   fi
   idx=$((idx+1))
