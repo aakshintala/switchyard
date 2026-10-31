@@ -604,9 +604,7 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
             .base
             .join(format!("hold-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
         let hold = hold.to_string_lossy().into_owned();
-        let env = [
-            ("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold.as_str()),
-        ];
+        let env = [("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold.as_str())];
         std::thread::scope(|scope| {
             let _release = ReleaseOnDrop(std::path::PathBuf::from(&hold));
             let (rx, held_id) = held_start(&h, scope, marker, &env);
