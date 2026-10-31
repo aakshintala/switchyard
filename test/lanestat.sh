@@ -3,6 +3,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/ps-stub.sh"
 LANESTAT="$SCRIPT_DIR/../bin/lanestat"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
@@ -40,29 +41,7 @@ printf '/usr/local/bin/pi\n' >"$T/ps/111.comm"
 printf 'node\n' >"$T/ps/333.comm"
 printf 'S 01:23\n' >"$T/ps/333.info"
 
-cat >"$T/stub/ps" <<'STUB'
-#!/bin/sh
-case "$#:$1:$2:$3" in
-  4:-o:comm=:-p)
-    if [ -f "$LANESTAT_PS_DIR/$4.comm" ]; then
-      IFS= read -r value <"$LANESTAT_PS_DIR/$4.comm" || [ -n "${value:-}" ]
-      printf '%s\n' "$value"
-    else
-      exit 1
-    fi
-    ;;
-  4:-o:stat=,etime=:-p)
-    if [ -f "$LANESTAT_PS_DIR/$4.info" ]; then
-      IFS= read -r value <"$LANESTAT_PS_DIR/$4.info" || [ -n "${value:-}" ]
-      printf '%s\n' "$value"
-    else
-      exit 1
-    fi
-    ;;
-  *) echo "unexpected ps arguments: $*" >&2; exit 2;;
-esac
-STUB
-chmod +x "$T/stub/ps"
+write_ps_stub "$T/stub" "$T/ps"
 
 # Fix the reported clock so the strict 300-second boundary can be tested on
 # both BSD and GNU systems. The production script still gets mtime from Perl.
@@ -76,7 +55,6 @@ else
 fi
 STUB
 chmod +x "$T/stub/date"
-export LANESTAT_PS_DIR="$T/ps"
 run_stat() { PATH="$T/stub:$PATH" LANESTAT_TEST_NOW="$NOW" sh "$LANESTAT" "$@"; }
 
 run_stat "$T/run" >"$T/default.out" 2>"$T/default.err"; rc=$?

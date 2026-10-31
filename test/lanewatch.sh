@@ -4,6 +4,7 @@ set -uo pipefail
 unset LANEWATCH_INTERVAL
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/ps-stub.sh"
 LANEWATCH="$SCRIPT_DIR/../bin/lanewatch"
 LANESTAT="$SCRIPT_DIR/../bin/lanestat"
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -34,30 +35,7 @@ for pid in 111 222 444; do
   printf 'S 01:23\n' >"$T/ps/$pid.info"
 done
 
-cat >"$T/stub/ps" <<'STUB'
-#!/bin/sh
-case "$#:$1:$2:$3" in
-  4:-o:comm=:-p)
-    if [ -f "$LANEWATCH_PS_DIR/$4.comm" ]; then
-      IFS= read -r value <"$LANEWATCH_PS_DIR/$4.comm" || [ -n "${value:-}" ]
-      printf '%s\n' "$value"
-    else
-      exit 1
-    fi
-    ;;
-  4:-o:stat=,etime=:-p)
-    if [ -f "$LANEWATCH_PS_DIR/$4.info" ]; then
-      IFS= read -r value <"$LANEWATCH_PS_DIR/$4.info" || [ -n "${value:-}" ]
-      printf '%s\n' "$value"
-    else
-      exit 1
-    fi
-    ;;
-  *) echo "unexpected ps arguments: $*" >&2; exit 2;;
-esac
-STUB
-chmod +x "$T/stub/ps"
-export LANEWATCH_PS_DIR="$T/ps"
+write_ps_stub "$T/stub" "$T/ps"
 export PATH="$T/stub:$PATH"
 
 expect_invalid_interval() {
