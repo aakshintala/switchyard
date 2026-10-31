@@ -211,6 +211,15 @@ write_record() {
 }
 
 reset_state() {
+  for old_run in "$REVIEW_PR_RUN_ROOT"/review-pr.run.*; do
+    [ -d "$old_run" ] || continue
+    for old_wt in "$old_run"/wt-*; do
+      [ -d "$old_wt" ] || continue
+      git -C "$T/clone" worktree remove --force "$old_wt" >/dev/null 2>&1 || rm -rf "$old_wt"
+    done
+  done
+  git -C "$T/clone" worktree prune >/dev/null 2>&1 || true
+  rm -rf "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true
   rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt" \
     "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log"
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/issue-calls.txt"
@@ -654,12 +663,51 @@ write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
   --model M --overbuild-model M2 >/dev/null 2>&1 || fail "start exits 0"
+wt_standards="$(worktree_for standards)"
+wt_spec="$(worktree_for spec)"
+wt_overbuild="$(worktree_for overbuild)"
 out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" && fail "unfinished collect exits 1"
 rec="$TMPDIR/delegate-jobs/job-standards.json"
 grep -q "^UNFINISHED standards ERROR gate=none $rec reason: something broke mid-run$" <<<"$out" || fail "unfinished names role status gate record"
 grep -q "^CI $SHORT fail$" <<<"$out" || fail "failing CI line"
 [ "$(cat "$T/state/comment-pr.txt")" = "7" ] || fail "unfinished still posts the comment"
-[ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "0" ] || fail "unfinished still removes worktrees"
+[ -d "$wt_standards" ] || fail "unfinished keeps its worktree"
+[ ! -d "$wt_spec" ] || fail "finished spec worktree is removed"
+[ ! -d "$wt_overbuild" ] || fail "finished overbuild worktree is removed"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "1" ] || fail "unfinished keeps only its worktree"
+grep -Fxq 'resume: delegate resume job-standards' <<<"$out" || fail "unfinished prints its resume command"
+[ -f "$TMPDIR/review-pr/job-standards" ] || fail "unfinished state file is kept"
+[ ! -e "$TMPDIR/review-pr/job-spec" ] || fail "finished spec state file is removed"
+[ ! -e "$TMPDIR/review-pr/job-overbuild" ] || fail "finished overbuild state file is removed"
+run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-standards")"
+run_entries=("$run_dir"/*)
+[ "${#run_entries[@]}" = "1" ] && [ "${run_entries[0]}" = "$wt_standards" ] || fail "unfinished run keeps only its worktree"
+
+# --- case: one UNFINISHED job and one finished job keep only the resumable worktree
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec NEEDS_CONTEXT "Owner ruling needed before review can continue"
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards,spec --model M >/dev/null 2>&1 || \
+  fail "mixed completion start exits 0"
+wt_spec="$(worktree_for spec)"
+wt_standards="$(worktree_for standards)"
+run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-spec")"
+out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "mixed completion collect exits 1"
+rec="$TMPDIR/delegate-jobs/job-spec.json"
+grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "mixed completion reports unfinished spec"
+[ "$(grep -Fxc 'resume: delegate resume job-spec' <<<"$out")" = "1" ] || fail "mixed completion prints one spec resume command"
+! grep -q '^resume:.*job-standards$' <<<"$out" || fail "mixed completion prints no standards resume command"
+[ -d "$wt_spec" ] || fail "mixed completion keeps the unfinished worktree"
+[ ! -d "$wt_standards" ] || fail "mixed completion removes the finished worktree"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-spec')" = "1" ] || fail "mixed completion registers the unfinished worktree"
+! git -C "$T/clone" worktree list | grep -q 'wt-standards' || fail "mixed completion unregisters the finished worktree"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "mixed completion marks its posted comment"
+[ ! -e "$TMPDIR/review-pr/job-standards" ] || fail "mixed completion removes the finished state file"
+run_entries=("$run_dir"/*)
+[ "${#run_entries[@]}" = "1" ] && [ "${run_entries[0]}" = "$wt_spec" ] || fail "mixed completion run keeps only the unfinished worktree"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "mixed completion posts one comment"
 
 # --- case: an ERROR job's UNFINISHED line names the reason from the record
 reset_state
