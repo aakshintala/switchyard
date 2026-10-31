@@ -12,11 +12,15 @@ const REFERENCE: &str = "opencode-go/muse-spark-1.3-contributor";
 
 const FAKE_FIBER: &str = r#"#!/bin/sh
 # Replays a recorded `fiber ask` stream. Every invocation appends its
-# argv, so assertions can read it.
+# argv and drains stdin to a per-run file.
+dir="$(dirname "$0")"
+n=$(cat "$dir/count" 2>/dev/null || echo 0)
+n=$((n + 1)); printf '%s' "$n" > "$dir/count"
 {
   printf '%s\n' "$@"
   printf '%s\n' '---'
-} >> "$(dirname "$0")/argv.txt"
+} >> "$dir/argv.txt"
+cat > "$dir/stdin.$n"
 cat "$DELEGATE_TEST_FIBER_FIXTURE"
 exit "$DELEGATE_TEST_FIBER_EXIT"
 "#;
@@ -48,8 +52,8 @@ impl Env {
     }
 
     /// The appended argv log, split into one invocation per leading `ask` line.
-    /// (The prompt itself spans several lines and contains its own `---`, so the
-    /// fake's `---` separator cannot delimit invocations.)
+    /// The fake's trailing `---` is removed by `wire_argv`; prompts are recorded
+    /// separately from argv on stdin.
     fn invocations(&self) -> Vec<Vec<String>> {
         let mut calls: Vec<Vec<String>> = Vec::new();
         for line in std::fs::read_to_string(self.dir.join("argv.txt"))
@@ -66,13 +70,14 @@ impl Env {
         calls
     }
 
-    /// Every recorded argv line across all invocations.
-    fn argv(&self) -> Vec<String> {
-        std::fs::read_to_string(self.dir.join("argv.txt"))
-            .unwrap()
-            .lines()
-            .map(String::from)
-            .collect()
+    fn wire_argv(&self, invocation: usize) -> Vec<String> {
+        let mut argv = self.invocations()[invocation].clone();
+        assert_eq!(argv.pop().as_deref(), Some("---"));
+        argv
+    }
+
+    fn stdin(&self, invocation: usize) -> Vec<u8> {
+        std::fs::read(self.dir.join(format!("stdin.{invocation}"))).unwrap()
     }
 
     /// Like [`delegate`](Self::delegate), but without `FIBER_BIN` and without
@@ -193,10 +198,15 @@ impl Drop for Env {
     }
 }
 
+fn expected_prompt(prompt: &str) -> String {
+    format!("{prompt}\n\n---\n\n{}", delegate::prompt::status_block())
+}
+
 #[test]
 fn fiber_run_books_subscription_cost_as_estimated() {
     let e = Env::new("run", "echo.jsonl", "0");
-    let id = e.run_write("Reply with the word DONE.", "echo.jsonl", "0");
+    let prompt = "Reply with the word DONE.";
+    let id = e.run_write(prompt, "echo.jsonl", "0");
     assert_eq!(id.len(), 36);
     let done = e.wait_terminal(&id, "echo.jsonl", "0");
     assert_eq!(done["status"], "DONE");
@@ -211,22 +221,36 @@ fn fiber_run_books_subscription_cost_as_estimated() {
     // Fiber mints the session id; the stream's id is what the record carries.
     assert_eq!(done["resume"]["sessionId"], "s_36e63d22c39750e1");
 
-    let argv = e.argv();
+    let argv = e.wire_argv(0);
     assert!(argv.contains(&"ask".to_string()), "{argv:?}");
     assert!(
         argv.windows(2).any(|w| w == ["--model", REFERENCE]),
         "{argv:?}"
     );
-    // The prompt goes after a `--` separator so a leading `-` never parses as a flag.
-    let dash = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(
-        argv[dash + 1..]
-            .iter()
-            .any(|a| a.contains("Reply with the word DONE.")),
-        "{argv:?}"
-    );
+    assert_eq!(argv.last().map(String::as_str), Some("-"));
+    assert!(!argv.iter().any(|a| a == "--"), "{argv:?}");
+    assert!(!argv.iter().any(|a| a.contains(prompt)), "{argv:?}");
+    assert_eq!(e.stdin(1), expected_prompt(prompt).as_bytes());
     assert!(!argv.iter().any(|a| a == "--resume"), "{argv:?}");
     assert!(!argv.iter().any(|a| a.starts_with("fiber/")), "{argv:?}");
+}
+
+#[test]
+fn fiber_prompt_over_128_kib_is_sent_on_stdin() {
+    let e = Env::new("large-prompt", "echo.jsonl", "0");
+    let prompt = format!("{}!", "x".repeat(128 * 1024));
+    let expected = expected_prompt(&prompt);
+    let id = e.run_write(&prompt, "echo.jsonl", "0");
+    assert_eq!(e.wait_terminal(&id, "echo.jsonl", "0")["status"], "DONE");
+
+    let argv = e.wire_argv(0);
+    assert_eq!(argv.last().map(String::as_str), Some("-"));
+    assert!(!argv.iter().any(|arg| arg == "--"), "{argv:?}");
+    assert!(
+        !argv.iter().any(|arg| arg.contains(&prompt)),
+        "prompt in argv"
+    );
+    assert_eq!(e.stdin(1), expected.as_bytes());
 }
 
 #[test]
@@ -308,13 +332,18 @@ fn fiber_needs_context_resume_continues_the_session() {
             .any(|w| w == ["--resume", "s_36e63d22c39750e1"]),
         "{calls:?}"
     );
-    let dash = calls[1].iter().position(|a| a == "--").expect("separator");
+    let wire = e.wire_argv(1);
+    assert_eq!(wire.last().map(String::as_str), Some("-"));
+    assert!(!wire.iter().any(|arg| arg == "--"), "{wire:?}");
     assert!(
-        calls[1][dash + 1..]
-            .iter()
-            .any(|a| a.contains("the answer")),
-        "{calls:?}"
+        !wire.iter().any(|arg| arg.contains("the answer")),
+        "{wire:?}"
     );
+    assert_eq!(
+        e.stdin(1),
+        expected_prompt("Which codeword should I use?").as_bytes()
+    );
+    assert_eq!(e.stdin(2), expected_prompt("the answer").as_bytes());
 }
 
 #[test]
@@ -397,11 +426,14 @@ fn fiber_resume_without_a_session_id_runs_fresh() {
         !calls.iter().any(|c| c.iter().any(|a| a == "--resume")),
         "{calls:?}"
     );
-    let dash = calls[1].iter().position(|a| a == "--").expect("separator");
+    let wire = e.wire_argv(1);
+    assert_eq!(wire.last().map(String::as_str), Some("-"));
+    assert!(!wire.iter().any(|arg| arg == "--"), "{wire:?}");
     assert!(
-        calls[1][dash + 1..].iter().any(|a| a.contains("try again")),
-        "{calls:?}"
+        !wire.iter().any(|arg| arg.contains("try again")),
+        "{wire:?}"
     );
+    assert_eq!(e.stdin(2), expected_prompt("try again").as_bytes());
 }
 
 /// A cancelled record with no session id stays refused on explicit resume.
