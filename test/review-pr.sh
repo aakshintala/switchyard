@@ -81,7 +81,26 @@ gh() (
       printf "%s\t%s\t%s\t2026-10-09T00:00:00Z\t%d\n", $1, st, c, NR }' "$T/checks.txt"
     exit 0
   fi
-  [ "$1" = "pr" ] || { echo "fake gh: only pr supported" >&2; exit 2; }
+  if [ "$1" = "issue" ]; then
+    shift
+    [ "$1" = "view" ] || { echo "fake gh: unknown issue command $1" >&2; exit 2; }
+    issue_n="$2"; shift 2
+    issue_mode="BODY"
+    issue_flag="body"
+    while [ $# -gt 0 ]; do case "$1" in
+      --repo) shift 2;;
+      --comments) issue_mode="COMMENTS"; issue_flag="comments"; shift;;
+      *) echo "fake gh: unknown issue view arg $1" >&2; exit 2;;
+    esac; done
+    printf '%s %s\n' "$issue_n" "$issue_flag" >>"$T/state/issue-calls.txt"
+    if [ -e "$T/state/fail-issue" ]; then echo "fake gh: issue #$issue_n failed" >&2; exit 1; fi
+    if [ "$issue_flag" = "comments" ] && [ -e "$T/state/fail-issue-comments" ]; then
+      echo "fake gh: issue #$issue_n comments failed" >&2; exit 1
+    fi
+    printf 'ISSUE-%s %s\n' "$issue_n" "$issue_mode"
+    exit 0
+  fi
+  [ "$1" = "pr" ] || { echo "fake gh: only pr/issue supported" >&2; exit 2; }
   shift
   case "$1" in
     view)
@@ -103,7 +122,10 @@ gh() (
         fi
       fi
       printf '{"headRefOid":"%s","baseRefName":"main"}\n' "$h";;
-    diff) cat "$T/diff.txt";;
+    diff)
+      if [ -e "$T/state/fail-diff" ]; then echo "fake gh: diff failed" >&2; exit 1; fi
+      if [ ! -e "$T/state/empty-diff" ]; then cat "$T/diff.txt"; fi
+      ;;
     checks) cat "$T/checks.txt";;
     comment)
       if [ -e "$T/state/fail-comment" ]; then echo "fake gh: comment failed" >&2; exit 1; fi
@@ -171,7 +193,7 @@ write_record() {
 
 reset_state() {
   rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt"
-  rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt"
+  rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/issue-calls.txt"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
 }
@@ -333,6 +355,82 @@ start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --issue 3 --issue 1 --issue
 grep -q 'Code review (Spec axis) of PR #7 in O/N for issue #1, #3 and #4 (spec #2)' \
   "$T/state/prompt-spec.md" || fail "review brief joins three distinct issues in order"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "deduplicated multi-issue collect exits 0"
+
+# --- case: review worktrees receive the diff and ordered ticket text
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE\nSTATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE\nSTATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE\nSTATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --issue 3 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "prefetch review start exits 0"
+for role in standards spec overbuild; do
+  wt="$TMPDIR/review-pr/job-$role"
+  [ -f "$wt/.review-context/pr.diff" ] || fail "$role worktree holds the PR diff"
+  cmp -s "$T/diff.txt" "$wt/.review-context/pr.diff" || fail "$role diff matches the fetched PR diff"
+  ! grep -Eq '(^|[^[:alnum:]])gh[[:space:]]' "$T/state/prompt-$role.md" || fail "$role prompt does not tell the reviewer to run gh"
+  ! grep -Eq '__[A-Z]' "$T/state/prompt-$role.md" || fail "$role prompt has no placeholders"
+done
+for n in 1 3 2; do
+  issue_file="$TMPDIR/review-pr/job-spec/.review-context/issue-$n.md"
+  [ -f "$issue_file" ] || fail "spec worktree holds ticket #$n text"
+  printf 'ISSUE-%s BODY\nISSUE-%s COMMENTS\n' "$n" "$n" >"$T/expected-issue.md"
+  cmp -s "$T/expected-issue.md" "$issue_file" || fail "ticket #$n body precedes its comments"
+  grep -Fq ".review-context/issue-$n.md" "$T/state/prompt-spec.md" || fail "spec prompt names ticket #$n file"
+done
+for role in standards overbuild; do
+  ! find "$TMPDIR/review-pr/job-$role/.review-context" -name 'issue-*.md' -print | grep -q . || \
+    fail "$role worktree has no ticket text"
+  grep -Fq '.review-context/pr.diff' "$T/state/prompt-$role.md" || fail "$role prompt names the diff file"
+done
+grep -Fq '.review-context/pr.diff' "$T/state/prompt-spec.md" || fail "spec prompt names the diff file"
+printf '1 body\n1 comments\n3 body\n3 comments\n2 body\n2 comments\n' >"$T/expected-issue-calls.txt"
+cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "ticket fetches preserve issue order and fetch body then comments"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "prefetch review collect exits 0"
+
+# --- case: absent issue and spec default fetches the PR ticket only
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec DONE "VERDICT spec: APPROVE\nSTATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || fail "default ticket prefetch start exits 0"
+wt="$TMPDIR/review-pr/job-spec"
+[ -f "$wt/.review-context/issue-7.md" ] || fail "spec worktree holds PR #7 as ticket text"
+[ ! -e "$wt/.review-context/issue-1.md" ] || fail "spec worktree fetches no unrelated ticket"
+printf '7 body\n7 comments\n' >"$T/expected-issue-calls.txt"
+cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "default ticket fetches only the PR body and comments"
+bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "default ticket prefetch collect exits 0"
+
+# --- case: only the spec axis fetches ticket text
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE\nSTATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE\nSTATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || fail "standards-only prefetch start exits 0"
+[ -f "$TMPDIR/review-pr/job-standards/.review-context/pr.diff" ] || fail "standards-only worktree holds the diff"
+[ ! -e "$T/state/issue-calls.txt" ] || fail "standards-only run fetches no tickets"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "standards-only prefetch collect exits 0"
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || fail "spec-only prefetch start exits 0"
+[ -f "$TMPDIR/review-pr/job-spec/.review-context/issue-7.md" ] || fail "spec-only run fetches the PR ticket"
+bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "spec-only prefetch collect exits 0"
+
+# --- case: fetch failure stops before any worktree or job starts
+for failed_fetch in fail-diff empty-diff fail-issue fail-issue-comments; do
+  reset_state
+  printf 'ci\tpass\n' >"$T/checks.txt"
+  write_record spec DONE "VERDICT spec: APPROVE\nSTATUS: DONE" 0
+  : >"$T/state/$failed_fetch"
+  st=0
+  err="$(start_review 7 --repo O/N --cwd "$T/clone" --head "$FAKE_SHA" --axes spec \
+    --model M --issue 1 2>&1 >/dev/null)" || st=$?
+  [ "$st" -ne 0 ] || fail "$failed_fetch exits non-zero"
+  case "$failed_fetch" in
+    fail-diff|empty-diff) grep -q 'could not fetch the diff of PR 7' <<<"$err" || fail "$failed_fetch names the PR diff";;
+    fail-issue|fail-issue-comments) grep -q 'could not fetch ticket #1' <<<"$err" || fail "$failed_fetch names the ticket";;
+  esac
+  [ ! -e "$T/state/runs.txt" ] || fail "$failed_fetch starts no job"
+  [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "$failed_fetch creates no worktree"
+  [ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)" ] || fail "$failed_fetch removes its run dir"
+done
 
 # --- case: --issue without --spec defaults SPEC to the first --issue, not the PR
 reset_state
