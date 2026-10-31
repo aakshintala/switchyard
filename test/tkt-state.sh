@@ -164,4 +164,15 @@ wait "$release_pid" || fail "lock release exits 0"
 [ "$(bash "$TKT" "$S5" get k)" = "v" ] || fail "retry writes the requested value"
 [ ! -e "$S5.lock" ] || fail "retry leaves no lock behind"
 
+# A dead lock owner on this host is reaped before writing.
+S6="$T/dead-owner.state"
+sleep 0 &
+dead_pid=$!
+wait "$dead_pid"
+mkdir "$S6.lock"
+printf '%s %s\n' "$(hostname)" "$dead_pid" >"$S6.lock/pid"
+bash "$TKT" "$S6" set k v 2>"$T/err-dead-owner.txt" || fail "set reaps a dead same-host owner"
+[ "$(bash "$TKT" "$S6" get k)" = "v" ] || fail "dead-owner reaping writes the value"
+[ ! -e "$S6.lock" ] || fail "dead-owner reaping leaves no lock behind"
+
 echo "tkt-state: all cases passed"

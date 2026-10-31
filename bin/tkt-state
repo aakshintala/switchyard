@@ -98,8 +98,8 @@ state_list() {
   return 0
 }
 
-# Take the mkdir lock for a write. A held lock exits 2 naming the pid the
-# lock's holder stored; only a lock this process took is removed on exit.
+# Writes retry held locks up to 10 times by default and reap dead owners on
+# this host only. A held lock exits 2 naming its pid; only our lock is removed.
 take_lock() {
   tries="${TKT_STATE_TEST_LOCK_TRIES:-10}"
   lock_sleep="${TKT_STATE_TEST_LOCK_SLEEP:-0.2}"
@@ -112,6 +112,22 @@ take_lock() {
       return
     fi
     owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
+    if [ -n "$owner" ]; then
+      IFS=' ' read -r owner_host owner_pid owner_extra <<<"$owner"
+      if [ -n "$owner_host" ] && [ -n "$owner_pid" ] && [ -z "$owner_extra" ] && [ "$owner_host" = "$host" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+        stale="$lockdir.stale.$$"
+        if mv "$lockdir" "$stale" 2>/dev/null; then
+          stale_owner="$(cat "$stale/pid" 2>/dev/null || true)"
+          if [ "$stale_owner" = "$owner" ]; then
+            rm -rf "$stale"
+          else
+            mv "$stale" "$lockdir" 2>/dev/null || true
+          fi
+        fi
+        attempt=$((attempt + 1))
+        continue
+      fi
+    fi
     if [ "$attempt" -lt "$tries" ]; then
       sleep "$lock_sleep"
     fi
