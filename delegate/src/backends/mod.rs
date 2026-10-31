@@ -413,6 +413,7 @@ mod tests {
     /// on the second (SIGKILL) with signal 9.
     #[test]
     fn killer_escalates_to_sigkill_on_second_call() {
+        let _lock = crate::test_env::lock();
         let stem = format!(
             "killer-{}-{}",
             std::process::id(),
