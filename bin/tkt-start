@@ -95,7 +95,18 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
     [ -n "$pr_head" ] || deny "PRECONDITION pr=unreadable" 2 "tkt-start: cannot read PR head: pr=$pr repo=$repo"
   fi
   if [ "$stored_head" != "$actual" ] || { [ -n "$pr_head" ] && [ "$stored_head" != "$pr_head" ]; }; then
-    deny "DRIFT state=$stored_head worktree=$actual pr=${pr_head:-none}" 3 "tkt-start: head drift: state head=$stored_head worktree $worktree HEAD=$actual pr ${pr:-none} head=${pr_head:-none}"
+    drift_message="tkt-start: head drift: state head=$stored_head worktree $worktree HEAD=$actual pr ${pr:-none} head=${pr_head:-none}"
+    if [ -n "${pr:-}" ]; then
+      pr_state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null || true)"
+      if [ "$pr_state" = "MERGED" ]; then
+        stored_part="$(tkt get part 2>/dev/null || printf '1')"
+        case "$stored_part" in
+          ""|*[!0-9]*) ;;
+          *) next_part=$((stored_part + 1)); drift_message="tkt-start: head drift: pr $pr is merged (state head=$stored_head worktree $worktree HEAD=$actual); start the next part with --part $next_part" ;;
+        esac
+      fi
+    fi
+    deny "DRIFT state=$stored_head worktree=$actual pr=${pr_head:-none}" 3 "$drift_message"
   fi
 fi
 for k in repo issue spec branch worktree run workflow_doc closing; do tkt set "$k" "${!k}"; done

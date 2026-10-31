@@ -36,6 +36,7 @@ case " \$* " in
   *" graphql "*) cat "$T/edited"; exit 0 ;;
   *" issue view "*" lastEditedAt "*)
     printf 'Unknown JSON field: "lastEditedAt"\n' >&2; exit 1 ;;
+  *" pr view "*" --json state "*) cat "$T/prstate"; exit 0 ;;
   *" pr view "*) cat "$T/prhead"; exit 0 ;;
   *" issue view "*"state,comments"*)
     if [ -f "$T/issue-fail" ]; then echo "gh: issue view boom" >&2; exit 5; fi
@@ -84,7 +85,7 @@ reload() {
 # issue body and docs, ARGS loaded. Sets CDIR CLONE WT RUN FILING.
 setup() {
   : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
-  printf 'null\n' >"$T/edited"; : >"$T/prhead"; printf '[]\n' >"$T/prlist"
+  printf 'null\n' >"$T/edited"; : >"$T/prhead"; : >"$T/prstate"; printf '[]\n' >"$T/prlist"
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
@@ -274,8 +275,24 @@ bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set pr 7
 printf 'baadf00dbaadf00dbaadf00dbaadf00dbaadf00d\n' >"$T/prhead"; run_start
 want "DRIFT state=$ACTUAL" 3 prdrift
 case "$OUT" in *"pr=baadf00d"*) ;; *) fail "prdrift: digest misses the pr head" ;; esac
-printf '%s\n' "$ACTUAL" >"$T/prhead"; run_start
+case "$OUT" in *--part*) fail "prdrift: an unmerged or unreadable PR must keep the old message" ;; esac
+setup driftmerged ONE AGAINST; run_start
+[ "$RC" -eq 0 ] || fail "driftmerged setup: exit $RC"
+ACTUAL="$(git -C "$WT" rev-parse HEAD)"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set head "$ACTUAL"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set pr 7
+printf 'baadf00dbaadf00dbaadf00dbaadf00dbaadf00d\n' >"$T/prhead"
+printf 'MERGED\n' >"$T/prstate"; run_start
+want "DRIFT state=$ACTUAL" 3 driftmerged
+case "$OUT" in *--part*) ;; *) fail "driftmerged: message must name --part" ;; esac
+case "$OUT" in *"pr 7"*|*"pr=7"*) ;; *) fail "driftmerged: message must name PR 7" ;; esac
+setup prmatch ONE AGAINST; run_start
+ACTUAL="$(git -C "$WT" rev-parse HEAD)"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set head "$ACTUAL"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set pr 7
+printf '%s\n' "$ACTUAL" >"$T/prhead"; : >"$T/prstate"; run_start
 want "CURRENT " 0 prmatch
+[ "$(grep -cF -- '--json state' "$T/calls.log")" -eq 0 ] || fail "prmatch: merged-state lookup must not run without drift"
 printf '1' >"$T/gh-fail"; run_start
 want "PRECONDITION pr=unreadable" 2 prunreadable
 # --no-preflight on a stale ticket: check only, no job, exit 1.
