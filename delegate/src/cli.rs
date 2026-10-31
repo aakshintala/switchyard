@@ -28,7 +28,7 @@ pub(crate) const USAGE: &str =
        delegate resume <jobId> [--model M] [--gate CMD] [--prompt-file F | stdin]
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
-       delegate status <jobId>  (print the job's state without waiting)
+       delegate status <jobId>  (print state and a finished job's result summary without waiting)
        delegate models
        delegate doctor
        delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)
@@ -893,9 +893,9 @@ fn status_line(id: &str, rec: &serde_json::Value) -> String {
     }
 }
 
-/// `status` prints one line with the job's state (the record's `status`) and
-/// returns at once. It never waits: any known job exits 0, whatever its state.
-/// Unknown ids reuse `watch`'s `missing_record` error.
+/// `status` prints the job's state at once and adds available result text and
+/// change details on the same line for finished jobs. It never waits: any known
+/// job exits 0, whatever its state. Unknown ids reuse `watch`'s `missing_record` error.
 fn status(args: &[String]) -> Result<i32, Usage> {
     let (_, pos) = parse(args, &[])?;
     let [id] = pos.as_slice() else {
