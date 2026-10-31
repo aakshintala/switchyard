@@ -190,6 +190,34 @@ impl Env {
         serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
     }
 
+    fn write_record(&self, id: &str, record: &Value) {
+        let path = self.dir.join("delegate-jobs").join(format!("{id}.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec(record).unwrap()).unwrap();
+    }
+
+    fn status_output(&self, id: &str) -> Output {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_delegate"))
+            .args(["status", id])
+            .current_dir(&self.dir)
+            .env("TMPDIR", &self.dir)
+            .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))
+            .env("CURSOR_AGENT_BIN", self.dir.join("agent.sh"))
+            .env_remove("DELEGATE_JOBS_DIR")
+            .env_remove("CLAUDECODE")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut done = None;
+        until("delegate status returns", || {
+            done = child.try_wait().unwrap();
+            done.is_some()
+        });
+        child.wait_with_output().unwrap()
+    }
+
     fn wait_terminal(&self, id: &str) -> Value {
         let out = self.delegate(&["watch", id, "--timeout", "10"], None);
         assert_eq!(out.status.code(), Some(0));
@@ -535,6 +563,133 @@ fn status_prints_done_for_a_finished_job() {
         String::from_utf8_lossy(&out.stdout),
         format!("{id}: DONE\n")
     );
+}
+
+#[test]
+fn status_shows_error_text_and_uncommitted_changes() {
+    let e = Env::new("status-error-summary");
+    let id = "status-error";
+    e.write_record(
+        id,
+        &serde_json::json!({
+            "status": "ERROR",
+            "result": {
+                "status": "ERROR",
+                "text": "muse: wall timeout (7200000 ms)\nsecond line",
+                "changeSet": {
+                    "filesChanged": ["first.rs", "second.rs"],
+                    "uncommittedFiles": ["first.rs", "second.rs"],
+                    "dirtyAfter": true,
+                    "newCommits": []
+                }
+            }
+        }),
+    );
+
+    let out = e.status_output(id);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!(
+            "{id}: ERROR (muse: wall timeout (7200000 ms); 2 files changed, uncommitted, 0 commits)\n"
+        )
+    );
+}
+
+#[test]
+fn status_summary_forms() {
+    let e = Env::new("status-summary-forms");
+    let cases = vec![
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":" ","changeSet":{"filesChanged":["one.rs"],"uncommittedFiles":[],"dirtyAfter":false,"newCommits":["commit"]}}}),
+            "ERROR (1 file changed, 1 commit)",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":"","changeSet":{"filesChanged":["one.rs","two.rs"],"uncommittedFiles":[],"dirtyAfter":false,"newCommits":["one","two"]}}}),
+            "ERROR (2 files changed, 2 commits)",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"changeSet":{"filesChanged":["one.rs"],"uncommittedFiles":[],"dirtyAfter":true,"newCommits":[]}}}),
+            "ERROR (1 file changed, uncommitted, 0 commits)",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"changeSet":{"filesChanged":["one.rs"],"uncommittedFiles":["one.rs"],"dirtyAfter":false,"newCommits":[]}}}),
+            "ERROR (1 file changed, uncommitted, 0 commits)",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":"boom"}}),
+            "ERROR (boom)",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":"","changeSet":{"filesChanged":["one.rs","two.rs"],"newCommits":[]}}}),
+            "ERROR (2 files changed, 0 commits)",
+        ),
+        (
+            serde_json::json!({"status":"DONE","result":{"text":"do not show","changeSet":{"filesChanged":["one.rs"],"newCommits":[]}}}),
+            "DONE (1 file changed, 0 commits)",
+        ),
+        (
+            serde_json::json!({"status":"DONE","result":{"text":"do not show","changeSet":{"filesChanged":[],"newCommits":[]}}}),
+            "DONE",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":"\n  \nfirst real\nsecond"}}),
+            "ERROR (first real)",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":"first\rsecond"}}),
+            "ERROR (first)",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":["not text"]}}),
+            "ERROR",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":""}}),
+            "ERROR",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":"  \t "}}),
+            "ERROR",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":"","changeSet":{"newCommits":["ignored"]}}}),
+            "ERROR",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":"","changeSet":"not an object"}}),
+            "ERROR",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":"","changeSet":{"filesChanged":"not an array"}}}),
+            "ERROR",
+        ),
+        (
+            serde_json::json!({"status":"RUNNING","result":{"text":"still running","changeSet":{"filesChanged":["one.rs"],"newCommits":[]}}}),
+            "RUNNING",
+        ),
+        (
+            serde_json::json!({"status":"ERROR","result":{"text":[],"changeSet":{"filesChanged":[]}}}),
+            "ERROR",
+        ),
+        (serde_json::json!({"status":"ERROR","result":null}), "ERROR"),
+        (
+            serde_json::json!({"status":"ERROR","result":"not an object"}),
+            "ERROR",
+        ),
+    ];
+
+    for (index, (record, expected)) in cases.into_iter().enumerate() {
+        let id = format!("status-form-{index}");
+        e.write_record(&id, &record);
+        let out = e.status_output(&id);
+        assert_eq!(out.status.code(), Some(0), "case {index}");
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("{id}: {expected}\n"),
+            "case {index}"
+        );
+    }
 }
 
 #[test]
