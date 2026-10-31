@@ -22,6 +22,14 @@ cat >"$T/bin/gh" <<EOF
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 if [ -f "$T/gh-fail" ]; then exit 4; fi
 case " \$* " in
+  *" api --paginate "*)
+    if [ -f "$T/api-fail" ]; then echo "gh: api files boom" >&2; exit 5; fi
+    if [ -f "$T/api-files" ]; then cat "$T/api-files"; exit 0; fi
+    url=""
+    for arg in "\$@"; do case "\$arg" in repos/*/pulls/*/files\?*) url="\$arg";; esac; done
+    pr="\${url#*/pulls/}"; pr="\${pr%%/*}"
+    jq -r --arg n "\$pr" '.[] | select((.number|tostring) == \$n) | (.files // [])[] | .path' "$T/prlist"
+    exit 0 ;;
   *" pr list "*)
     if [ -f "$T/prlist-fail" ]; then echo "gh: pr list boom" >&2; exit 5; fi
     cat "$T/prlist"; exit 0 ;;
@@ -75,7 +83,7 @@ reload() {
 # commit, plus a touching commit for TWO) pushed to origin/main, a clone, the
 # issue body and docs, ARGS loaded. Sets CDIR CLONE WT RUN FILING.
 setup() {
-  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
+  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"; printf '[]\n' >"$T/prlist"
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
@@ -410,6 +418,24 @@ want "CURRENT " 0 mergedpart
 case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergedpart: digest misses the NOTE" ;; esac
 for p in f.txt other/dir.txt; do case "$OUT" in *"$p"*) ;; *) fail "mergedpart: NOTE misses [$p]" ;; esac; done
 [ "$(grep -c 'state,comments' "$T/calls.log")" -eq 0 ] || fail "mergedpart: no Resolves hit, so no issue lookup"
+# A Part-of PR's paginated REST response includes paths past the first 100.
+setup mergedpartpaged ONE AGAINST
+pr_files='['
+api_files=""
+i=1
+while [ "$i" -le 100 ]; do
+  [ "$i" -eq 1 ] || pr_files+=','
+  pr_files+="{\"path\":\"file-$i.txt\"}"
+  api_files+="file-$i.txt\n"
+  i=$((i + 1))
+done
+pr_files+=']'
+printf '[{"number":18,"body":"Part of #42","files":%s}]\n' "$pr_files" >"$T/prlist"
+printf '%b' "${api_files}collision.txt\n" >"$T/api-files"
+run_start
+want "CURRENT " 0 mergedpartpaged
+case "$OUT" in *"NOTE merged Part-of PR #18"*"collision.txt"*) ;; *) fail "mergedpartpaged: NOTE misses path after 100" ;; esac
+grep -qF 'gh|api --paginate repos/acme/widget/pulls/18/files?per_page=100 -q .[].filename' "$T/calls.log" || fail "mergedpartpaged: PR file read did not paginate"
 # each Part-of hit prints its own NOTE.
 setup mergedparts ONE AGAINST
 printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]},{"number":9,"body":"Part of #42","files":[{"path":"g.txt"}]}]' >"$T/prlist"
@@ -488,7 +514,7 @@ want "CURRENT " 0 recurred
 case "$OUT" in *"NOTE recurred after merged PR #7"*) ;; *) fail "recurred: digest misses the NOTE" ;; esac
 case "$OUT" in *MERGED-STOP*) fail "recurred: must not stop" ;; esac
 grep -qF -- 'state,comments' "$T/calls.log" || fail "recurred: no issue state lookup"
-grep -qF -- 'number,body,files,mergedAt' "$T/calls.log" || fail "recurred: pr list misses mergedAt"
+grep -qF -- 'number,body,' "$T/calls.log" && grep -qF -- 'mergedAt' "$T/calls.log" || fail "recurred: pr list misses body or mergedAt"
 # an older comment, a comment at exactly the merge time, and a closed issue
 # all still stop with MERGED-STOP and print no recurrence NOTE.
 setup recurredold ONE AGAINST
