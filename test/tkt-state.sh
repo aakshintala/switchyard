@@ -168,7 +168,17 @@ wait "$release_pid" || fail "lock release exits 0"
 S6="$T/dead-owner.state"
 sleep 0 &
 dead_pid=$!
-wait "$dead_pid"
+dead_wait=0
+while kill -0 "$dead_pid" 2>/dev/null && [ "$dead_wait" -lt 500 ]; do
+  sleep 0.01
+  dead_wait=$((dead_wait + 1))
+done
+if kill -0 "$dead_pid" 2>/dev/null; then
+  kill "$dead_pid" 2>/dev/null || true
+  wait "$dead_pid" 2>/dev/null || true
+  fail "dead-owner setup finishes before its deadline"
+fi
+wait "$dead_pid" || fail "dead-owner setup exits 0"
 mkdir "$S6.lock"
 printf '%s %s\n' "$(hostname)" "$dead_pid" >"$S6.lock/pid"
 bash "$TKT" "$S6" set k v 2>"$T/err-dead-owner.txt" || fail "set reaps a dead same-host owner"
@@ -222,5 +232,47 @@ printf '%s %s\n' "$(hostname)" "$$" >"$S10.lock/pid"
 [ "$(bash "$TKT" "$S10" list k)" = "$(printf 'first\nsecond')" ] || fail "list succeeds under a held lock"
 [ -d "$S10.lock" ] || fail "reads leave the held lock in place"
 rm -rf "$S10.lock"
+
+# Concurrent writers arbitrate dead-lock reaping and both retain their values.
+wait_bounded() {
+  local wait_pid="$1" wait_count=0
+  while kill -0 "$wait_pid" 2>/dev/null && [ "$wait_count" -lt 500 ]; do
+    sleep 0.01
+    wait_count=$((wait_count + 1))
+  done
+  if kill -0 "$wait_pid" 2>/dev/null; then
+    kill "$wait_pid" 2>/dev/null || true
+    wait "$wait_pid" 2>/dev/null || true
+    return 1
+  fi
+  wait "$wait_pid"
+}
+for race_round in {1..20}; do
+  race_state="$T/reaper-race-$race_round.state"
+  sleep 0 &
+  race_dead_pid=$!
+  wait_bounded "$race_dead_pid" || fail "race dead-owner setup finishes before its deadline"
+  mkdir "$race_state.lock"
+  printf '%s %s\n' "$(hostname)" "$race_dead_pid" >"$race_state.lock/pid"
+  bash "$TKT" "$race_state" add a "a-$race_round" >"$T/race-a-$race_round.log" 2>&1 &
+  race_a_pid=$!
+  bash "$TKT" "$race_state" add b "b-$race_round" >"$T/race-b-$race_round.log" 2>&1 &
+  race_b_pid=$!
+  if wait_bounded "$race_a_pid"; then
+    race_a_rc=0
+  else
+    race_a_rc=$?
+  fi
+  if wait_bounded "$race_b_pid"; then
+    race_b_rc=0
+  else
+    race_b_rc=$?
+  fi
+  [ "$race_a_rc" = "0" ] || fail "race writer a succeeds in round $race_round"
+  [ "$race_b_rc" = "0" ] || fail "race writer b succeeds in round $race_round"
+  [ "$(bash "$TKT" "$race_state" list a)" = "a-$race_round" ] || fail "race value a survives in round $race_round"
+  [ "$(bash "$TKT" "$race_state" list b)" = "b-$race_round" ] || fail "race value b survives in round $race_round"
+  [ ! -e "$race_state.lock" ] || fail "race leaves no lock in round $race_round"
+done
 
 echo "tkt-state: all cases passed"
