@@ -198,6 +198,7 @@ fn text_from_result_and_messages(result: &str, messages: &[String]) -> String {
 }
 
 /// Turn the last result line (or the lack of one) into the normalized result.
+#[allow(clippy::too_many_arguments)]
 fn finish(
     raw: Option<RawCursorJson>,
     messages: &[String],
