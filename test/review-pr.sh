@@ -121,6 +121,7 @@ gh() (
         printf '{"number":%s}\n' "$2"; exit 0
       fi
       if [ "${5:-}" = "--json" ] && [ "${6:-}" = "isDraft" ]; then
+        if [ -e "$T/state/fail-draft" ]; then echo "fake gh: draft lookup failed" >&2; exit 1; fi
         if [ -e "$T/state/draft" ]; then echo true; else echo false; fi; exit 0
       fi
       h="$FAKE_SHA"
@@ -665,6 +666,78 @@ start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
   --model M --overbuild-model M2 >/dev/null 2>&1 || fail "non-draft start exits 0"
 out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || true
 grep -qx "CI $SHORT none" <<<"$out" || fail "non-draft PR with no runs prints CI none, got [$(grep '^CI ' <<<"$out")]"
+
+# --- case: draft CI display uses draft-specific results
+reset_state
+: >"$T/checks.txt"
+: >"$T/state/draft"
+printf 'ci\tcompleted\tsuccess\t2026-10-09T10:00:00Z\t1\nlint\tcompleted\tskipped\t2026-10-09T10:00:01Z\t2\n' >"$T/canned/draft-skipped.tsv"
+export CI_RUNS_FILE="$T/canned/draft-skipped.tsv"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "draft skipped start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || true
+draft_skipped_ci="$(grep '^CI ' <<<"$out")"
+[ "$draft_skipped_ci" = "CI $SHORT draft" ] || fail "draft with skipped check should print CI $SHORT draft, got [$draft_skipped_ci]"
+rm -f "$T/state/draft"
+unset CI_RUNS_FILE
+
+reset_state
+: >"$T/checks.txt"
+: >"$T/state/draft"
+printf 'ci\tcompleted\tfailure\t2026-10-09T10:00:00Z\t1\nlint\tcompleted\tsuccess\t2026-10-09T10:00:01Z\t2\n' >"$T/canned/draft-failure.tsv"
+export CI_RUNS_FILE="$T/canned/draft-failure.tsv"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "draft failure start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || true
+draft_failure_ci="$(grep '^CI ' <<<"$out")"
+[ "$draft_failure_ci" = "CI $SHORT draft-fail" ] || fail "draft with failed check should print CI $SHORT draft-fail, got [$draft_failure_ci]"
+rm -f "$T/state/draft"
+unset CI_RUNS_FILE
+
+reset_state
+: >"$T/checks.txt"
+rm -f "$T/state/draft"
+printf 'ci\tcompleted\tsuccess\t2026-10-09T10:00:00Z\t1\nlint\tcompleted\tskipped\t2026-10-09T10:00:01Z\t2\n' >"$T/canned/ready-skipped.tsv"
+export CI_RUNS_FILE="$T/canned/ready-skipped.tsv"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "ready skipped start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || true
+ready_skipped_ci="$(grep '^CI ' <<<"$out")"
+[ "$ready_skipped_ci" = "CI $SHORT pass" ] || fail "ready PR with skipped check should print CI $SHORT pass, got [$ready_skipped_ci]"
+rm -f "$T/state/draft"
+unset CI_RUNS_FILE
+
+reset_state
+: >"$T/checks.txt"
+: >"$T/state/fail-draft"
+printf 'ci\tcompleted\tsuccess\t2026-10-09T10:00:00Z\t1\nlint\tcompleted\tskipped\t2026-10-09T10:00:01Z\t2\n' >"$T/canned/draft-lookup-failure.tsv"
+export CI_RUNS_FILE="$T/canned/draft-lookup-failure.tsv"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "draft lookup failure start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || true
+draft_lookup_failure_ci="$(grep '^CI ' <<<"$out")"
+[ "$draft_lookup_failure_ci" = "CI $SHORT none" ] || fail "failed draft lookup should print CI $SHORT none, got [$draft_lookup_failure_ci]"
+unset CI_RUNS_FILE
 
 # --- case: a decorated verdict is accepted
 reset_state
