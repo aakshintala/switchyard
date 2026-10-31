@@ -89,8 +89,10 @@ rm -rf "$S2.lock"
 # a lock without a pid file still blocks with exit 2
 S4="$T/nl.state"
 mkdir "$S4.lock"
-bash "$TKT" "$S4" set k v 2>/dev/null && fail "set under a pid-less lock exits non-zero"
+bash "$TKT" "$S4" set k v 2>"$T/err-nl-lock.txt" && fail "set under a pid-less lock exits non-zero"
 [ "$?" = "2" ] || fail "set under a pid-less lock exits 2"
+grep -q 'tkt-state: state locked$' "$T/err-nl-lock.txt" || fail "a pid-less lock uses the generic message"
+[ -d "$S4.lock" ] || fail "a pid-less lock is left in place"
 rm -rf "$S4.lock"
 
 # a write into a missing directory exits 2 instead of hanging or writing elsewhere
@@ -182,19 +184,9 @@ wait "$retry_pid" || fail "set retries until the lock is released"
 
 # A dead lock owner on this host is reaped before writing.
 S6="$T/dead-owner.state"
-sleep 0 &
+true &
 dead_pid=$!
-dead_wait=0
-while kill -0 "$dead_pid" 2>/dev/null && [ "$dead_wait" -lt 500 ]; do
-  sleep 0.01
-  dead_wait=$((dead_wait + 1))
-done
-if kill -0 "$dead_pid" 2>/dev/null; then
-  kill "$dead_pid" 2>/dev/null || true
-  wait "$dead_pid" 2>/dev/null || true
-  fail "dead-owner setup finishes before its deadline"
-fi
-wait "$dead_pid" || fail "dead-owner setup exits 0"
+wait "$dead_pid"
 mkdir "$S6.lock"
 printf '%s %s\n' "$(hostname)" "$dead_pid" >"$S6.lock/pid"
 bash "$TKT" "$S6" set k v 2>"$T/err-dead-owner.txt" || fail "set reaps a dead same-host owner"
@@ -226,18 +218,6 @@ fi
 [ "$live_owner_rc" = "2" ] || fail "live-owner lock exits 2 after the budget"
 grep -q "state locked by pid $$" "$T/err-live-owner.txt" || fail "live-owner lock names the holder"
 [ -d "$S8.lock" ] || fail "live-owner lock is left in place"
-
-# A lock without a readable owner is never reaped.
-S9="$T/unreadable-owner.state"
-mkdir "$S9.lock"
-if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S9" set k v 2>"$T/err-unreadable-owner.txt"; then
-  unreadable_owner_rc=0
-else
-  unreadable_owner_rc=$?
-fi
-[ "$unreadable_owner_rc" = "2" ] || fail "ownerless lock exits 2"
-grep -q 'tkt-state: state locked$' "$T/err-unreadable-owner.txt" || fail "ownerless lock uses the generic message"
-[ -d "$S9.lock" ] || fail "ownerless lock is left in place"
 
 # Reads ignore a held write lock.
 S10="$T/read-under-lock.state"
