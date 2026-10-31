@@ -42,6 +42,15 @@ git -C "$T/origin" commit -qm pr
 NEW_SHA="$(git -C "$T/origin" rev-parse HEAD)"
 git -C "$T/origin" checkout -q main
 git -C "$T/origin" update-ref refs/pull/8/head "$NEW_SHA"
+# PR 9 commits .review-context as a symlink to an external test directory.
+mkdir -p "$T/context-target"
+git -C "$T/origin" checkout -q -b context-link main
+ln -s "$T/context-target" "$T/origin/.review-context"
+git -C "$T/origin" add .review-context
+git -C "$T/origin" commit -qm context-link
+SYMLINK_SHA="$(git -C "$T/origin" rev-parse HEAD)"
+git -C "$T/origin" checkout -q main
+git -C "$T/origin" update-ref refs/pull/9/head "$SYMLINK_SHA"
 EXPECTED_NEW_PID="$(git -C "$T/origin" diff "main...$NEW_SHA" | git patch-id --stable | awk '{print $1}')"
 [ -n "$EXPECTED_NEW_PID" ] || fail "fixture new patch-id computable"
 git clone -q "$T/origin" "$T/clone"
@@ -81,7 +90,26 @@ gh() (
       printf "%s\t%s\t%s\t2026-10-09T00:00:00Z\t%d\n", $1, st, c, NR }' "$T/checks.txt"
     exit 0
   fi
-  [ "$1" = "pr" ] || { echo "fake gh: only pr supported" >&2; exit 2; }
+  if [ "$1" = "issue" ]; then
+    shift
+    [ "$1" = "view" ] || { echo "fake gh: unknown issue command $1" >&2; exit 2; }
+    issue_n="$2"; shift 2
+    issue_mode="BODY"
+    issue_flag="body"
+    while [ $# -gt 0 ]; do case "$1" in
+      --repo) shift 2;;
+      --comments) issue_mode="COMMENTS"; issue_flag="comments"; shift;;
+      *) echo "fake gh: unknown issue view arg $1" >&2; exit 2;;
+    esac; done
+    printf '%s %s\n' "$issue_n" "$issue_flag" >>"$T/state/issue-calls.txt"
+    if [ -e "$T/state/fail-issue" ]; then echo "fake gh: issue #$issue_n failed" >&2; exit 1; fi
+    if [ "$issue_flag" = "comments" ] && [ -e "$T/state/fail-issue-comments" ]; then
+      echo "fake gh: issue #$issue_n comments failed" >&2; exit 1
+    fi
+    printf 'ISSUE-%s %s\n' "$issue_n" "$issue_mode"
+    exit 0
+  fi
+  [ "$1" = "pr" ] || { echo "fake gh: only pr/issue supported" >&2; exit 2; }
   shift
   case "$1" in
     view)
@@ -96,6 +124,7 @@ gh() (
         if [ -e "$T/state/draft" ]; then echo true; else echo false; fi; exit 0
       fi
       h="$FAKE_SHA"
+      if [ "$2" = "9" ]; then h="$SYMLINK_SHA"; fi
       if [ -f "$T/state/heads.txt" ]; then
         h="$(head -1 "$T/state/heads.txt")"
         if [ "$(wc -l <"$T/state/heads.txt")" -gt 1 ]; then
@@ -103,7 +132,10 @@ gh() (
         fi
       fi
       printf '{"headRefOid":"%s","baseRefName":"main"}\n' "$h";;
-    diff) cat "$T/diff.txt";;
+    diff)
+      if [ -e "$T/state/fail-diff" ]; then echo "fake gh: diff failed" >&2; exit 1; fi
+      if [ ! -e "$T/state/empty-diff" ]; then cat "$T/diff.txt"; fi
+      ;;
     checks) cat "$T/checks.txt";;
     comment)
       if [ -e "$T/state/fail-comment" ]; then echo "fake gh: comment failed" >&2; exit 1; fi
@@ -157,7 +189,7 @@ delegate() (
 sleep() (
   echo "$*" >>"$T/state/sleeps.txt"
 )
-export T FAKE_SHA
+export T FAKE_SHA SYMLINK_SHA
 export -f gh delegate sleep
 
 write_record() {
@@ -171,7 +203,7 @@ write_record() {
 
 reset_state() {
   rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt"
-  rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt"
+  rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/issue-calls.txt"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
 }
@@ -189,6 +221,10 @@ plant_comment() {
 start_review() {
   # start_review ...args: run review-pr start, stdout is the "<role> <id>" lines.
   bash "$REVIEW" start "$@"
+}
+
+worktree_for() {
+  sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-$1"
 }
 
 reset_with_approvals() {
@@ -333,6 +369,165 @@ start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --issue 3 --issue 1 --issue
 grep -q 'Code review (Spec axis) of PR #7 in O/N for issue #1, #3 and #4 (spec #2)' \
   "$T/state/prompt-spec.md" || fail "review brief joins three distinct issues in order"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "deduplicated multi-issue collect exits 0"
+
+# --- case: overbuild-only ticket fetch failure starts no job
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+: >"$T/state/fail-issue"
+st=0
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --axes overbuild --issue 886 --spec 886 \
+  --model M --overbuild-model M2 2>&1 >/dev/null)" || st=$?
+[ "$st" -ne 0 ] || fail "overbuild-only issue fetch failure exits non-zero"
+grep -q 'could not fetch ticket #886' <<<"$err" || fail "overbuild-only issue failure names ticket #886"
+[ ! -e "$T/state/runs.txt" ] || fail "overbuild-only issue failure starts no job"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "overbuild-only issue failure creates no worktree"
+[ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)" ] || \
+  fail "overbuild-only issue failure removes its run dir"
+
+# --- case: review worktrees receive the diff and ordered ticket text
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --issue 3 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "prefetch review start exits 0"
+for role in standards spec overbuild; do
+  wt="$(worktree_for "$role")"
+  [ -f "$wt/.review-context/pr.diff" ] || fail "$role worktree holds the PR diff"
+  cmp -s "$T/diff.txt" "$wt/.review-context/pr.diff" || fail "$role diff matches the fetched PR diff"
+  ! grep -Eq '(^|[^[:alnum:]])gh[[:space:]]' "$T/state/prompt-$role.md" || fail "$role prompt does not tell the reviewer to run gh"
+  ! grep -Eq '__[A-Z]' "$T/state/prompt-$role.md" || fail "$role prompt has no placeholders"
+done
+for n in 1 3 2; do
+  issue_file="$(worktree_for spec)/.review-context/issue-$n.md"
+  [ -f "$issue_file" ] || fail "spec worktree holds ticket #$n text"
+  printf 'ISSUE-%s BODY\nISSUE-%s COMMENTS\n' "$n" "$n" >"$T/expected-issue.md"
+  cmp -s "$T/expected-issue.md" "$issue_file" || fail "ticket #$n body precedes its comments"
+  grep -Fq ".review-context/issue-$n.md" "$T/state/prompt-spec.md" || fail "spec prompt names ticket #$n file"
+done
+for n in 1 3 2; do
+  issue_file="$(worktree_for overbuild)/.review-context/issue-$n.md"
+  [ -f "$issue_file" ] || fail "overbuild worktree holds ticket #$n text"
+  printf 'ISSUE-%s BODY\nISSUE-%s COMMENTS\n' "$n" "$n" >"$T/expected-issue.md"
+  cmp -s "$T/expected-issue.md" "$issue_file" || fail "overbuild ticket #$n body precedes its comments"
+  grep -Fq ".review-context/issue-$n.md" "$T/state/prompt-overbuild.md" || fail "overbuild prompt names ticket #$n file"
+done
+! find "$(worktree_for standards)/.review-context" -name 'issue-*.md' -print | grep -q . || \
+  fail "standards worktree has no ticket text"
+grep -Fq '.review-context/pr.diff' "$T/state/prompt-standards.md" || fail "standards prompt names the diff file"
+grep -Fq '.review-context/pr.diff' "$T/state/prompt-spec.md" || fail "spec prompt names the diff file"
+grep -Fq '.review-context/pr.diff' "$T/state/prompt-overbuild.md" || fail "overbuild prompt names the diff file"
+printf '1 body\n1 comments\n3 body\n3 comments\n2 body\n2 comments\n' >"$T/expected-issue-calls.txt"
+cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "ticket fetches preserve issue order and fetch body then comments"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "prefetch review collect exits 0"
+
+# --- case: a checked-out .review-context symlink cannot redirect the copy
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+start_review 9 --repo O/N --cwd "$T/clone" --axes standards --head "$SYMLINK_SHA" \
+  --model M >/dev/null 2>&1 || fail "symlink context start exits 0"
+wt="$(worktree_for standards)"
+[ ! -L "$wt/.review-context" ] || fail "review context is a fresh directory, not the PR symlink"
+[ -f "$wt/.review-context/pr.diff" ] || fail "fresh review context holds the diff"
+[ ! -e "$T/context-target/pr.diff" ] || fail "copy does not write through the PR symlink"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "symlink context collect exits 0"
+
+# --- case: absent issue and spec default fetches the PR ticket only
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || fail "default ticket prefetch start exits 0"
+wt="$(worktree_for spec)/.review-context"
+[ -f "$wt/issue-7.md" ] || fail "spec worktree holds PR #7 as ticket text"
+[ ! -e "$wt/issue-1.md" ] || fail "spec worktree fetches no unrelated ticket"
+printf '7 body\n7 comments\n' >"$T/expected-issue-calls.txt"
+cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "default ticket fetches only the PR body and comments"
+bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "default ticket prefetch collect exits 0"
+
+# --- case: an explicit spec joins the PR ticket and deduplicates issues
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --spec 2 --model M >/dev/null 2>&1 || \
+  fail "explicit spec prefetch start exits 0"
+wt="$(worktree_for spec)/.review-context"
+[ -f "$wt/issue-7.md" ] || fail "explicit spec fetches the PR ticket"
+[ -f "$wt/issue-2.md" ] || fail "explicit spec fetches its ticket"
+printf '7 body\n7 comments\n2 body\n2 comments\n' >"$T/expected-issue-calls.txt"
+cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "PR ticket precedes an explicit spec ticket"
+bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "explicit spec prefetch collect exits 0"
+
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --issue 2 --issue 2 --spec 2 \
+  --model M >/dev/null 2>&1 || fail "duplicate spec ticket prefetch start exits 0"
+wt="$(worktree_for spec)/.review-context"
+[ -f "$wt/issue-2.md" ] || fail "duplicate spec ticket file exists"
+printf '2 body\n2 comments\n' >"$T/expected-issue-calls.txt"
+cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "issue and spec duplicates fetch once"
+bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "duplicate spec ticket prefetch collect exits 0"
+
+# --- case: only the spec axis fetches ticket text
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || fail "standards-only prefetch start exits 0"
+[ -f "$(worktree_for standards)/.review-context/pr.diff" ] || fail "standards-only worktree holds the diff"
+[ ! -e "$T/state/issue-calls.txt" ] || fail "standards-only run fetches no tickets"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "standards-only prefetch collect exits 0"
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || fail "spec-only prefetch start exits 0"
+[ -f "$(worktree_for spec)/.review-context/issue-7.md" ] || fail "spec-only run fetches the PR ticket"
+bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "spec-only prefetch collect exits 0"
+
+# --- case: overbuild-only runs fetch and receive ticket text
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes overbuild --issue 886 --spec 886 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "overbuild-only prefetch start exits 0"
+wt="$(worktree_for overbuild)/.review-context"
+[ -f "$wt/issue-886.md" ] || fail "overbuild-only worktree holds ticket #886"
+grep -Fq '.review-context/issue-886.md' "$T/state/prompt-overbuild.md" || \
+  fail "overbuild-only prompt names ticket #886"
+! grep -Eq '(^|[^[:alnum:]])gh[[:space:]]' "$T/state/prompt-overbuild.md" || \
+  fail "overbuild-only prompt does not tell the reviewer to run gh"
+bash "$REVIEW" collect job-overbuild >/dev/null 2>&1 || fail "overbuild-only prefetch collect exits 0"
+
+# --- case: fetch failure stops before any worktree or job starts
+for failed_fetch in fail-diff empty-diff fail-issue fail-issue-comments; do
+  reset_state
+  printf 'ci\tpass\n' >"$T/checks.txt"
+  write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+  : >"$T/state/$failed_fetch"
+  st=0
+  err="$(start_review 7 --repo O/N --cwd "$T/clone" --head "$FAKE_SHA" --axes spec \
+    --model M --issue 1 2>&1 >/dev/null)" || st=$?
+  [ "$st" -ne 0 ] || fail "$failed_fetch exits non-zero"
+  case "$failed_fetch" in
+    fail-diff|empty-diff) grep -q 'could not fetch the diff of PR 7' <<<"$err" || fail "$failed_fetch names the PR diff";;
+    fail-issue|fail-issue-comments) grep -q 'could not fetch ticket #1' <<<"$err" || fail "$failed_fetch names the ticket";;
+  esac
+  [ ! -e "$T/state/runs.txt" ] || fail "$failed_fetch starts no job"
+  [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "$failed_fetch creates no worktree"
+  [ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)" ] || fail "$failed_fetch removes its run dir"
+done
 
 # --- case: --issue without --spec defaults SPEC to the first --issue, not the PR
 reset_state

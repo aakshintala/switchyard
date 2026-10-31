@@ -12,7 +12,8 @@
 # Usage:
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] --model M [--overbuild-model M2] [--axes LIST] [--workflow-doc PATH] [--head SHA] [--full-rereview REASON]
 #     LIST is standards[,spec][,overbuild], default all three: one job per
-#     axis. --overbuild-model is required only when overbuild is listed.
+#     axis. Review mode fetches the diff and tickets into each review worktree.
+#     --overbuild-model is required only when overbuild is listed.
 #     --full-rereview is review mode only; it skips the comment check.
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]
 #     --since is the reviewed head; verify diffs from its repair base on current base.
@@ -562,6 +563,49 @@ cmd_start() {
     fi
   fi
 
+  if [ "$mode" = "review" ]; then
+    review_context="$run_dir/review-context"
+    mkdir -p "$review_context"
+    if ! gh pr diff "$pr" --repo "$repo" >"$review_context/pr.diff"; then
+      echo "review-pr: could not fetch the diff of PR $pr" >&2
+      exit 1
+    fi
+    if [ ! -s "$review_context/pr.diff" ]; then
+      echo "review-pr: could not fetch the diff of PR $pr" >&2
+      exit 1
+    fi
+
+    ticket_numbers=()
+    if [ "$issue_count" -eq 0 ]; then
+      ticket_numbers[0]="$pr"
+    else
+      issue_index=0
+      while [ "$issue_index" -lt "$issue_count" ]; do
+        ticket_numbers[${#ticket_numbers[@]}]="${issues[$issue_index]}"
+        issue_index=$((issue_index + 1))
+      done
+    fi
+    case " ${ticket_numbers[*]} " in
+      *" $specn "*) ;;
+      *) ticket_numbers[${#ticket_numbers[@]}]="$specn";;
+    esac
+    case ",$axes," in
+      *,spec,*|*,overbuild,*)
+        for ticket_n in "${ticket_numbers[@]}"; do
+          ticket_file="$review_context/issue-$ticket_n.md"
+          if ! gh issue view "$ticket_n" --repo "$repo" >"$ticket_file"; then
+            echo "review-pr: could not fetch ticket #$ticket_n body" >&2
+            exit 1
+          fi
+          if ! gh issue view "$ticket_n" --repo "$repo" --comments >>"$ticket_file"; then
+            echo "review-pr: could not fetch ticket #$ticket_n comments" >&2
+            exit 1
+          fi
+        done
+        ;;
+    esac
+  fi
+
   if [ "$mode" = "verify" ]; then
     if ! git -C "$clone" cat-file -e "$since^{commit}" 2>/dev/null; then
       git -C "$clone" fetch origin "$since" >&2 || true
@@ -621,14 +665,24 @@ cmd_start() {
     case "$role" in
       standards)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" \
-          "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
+          "DIFF_FILE=.review-context/pr.diff" "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
         ;;
       spec)
+        ticket_files=""
+        for ticket_n in "${ticket_numbers[@]}"; do
+          ticket_files="${ticket_files}${ticket_files:+ }.review-context/issue-$ticket_n.md"
+        done
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" "ISSUE=$issue" \
-          "SPEC=$specn" "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
+          "SPEC=$specn" "DIFF_FILE=.review-context/pr.diff" "TICKET_FILES=$ticket_files" \
+          "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
         ;;
       overbuild)
+        ticket_files=""
+        for ticket_n in "${ticket_numbers[@]}"; do
+          ticket_files="${ticket_files}${ticket_files:+ }.review-context/issue-$ticket_n.md"
+        done
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" \
+          "DIFF_FILE=.review-context/pr.diff" "TICKET_FILES=$ticket_files" \
           "SKILLS=$skills_dir" >"$brief"
         ;;
       verify)
@@ -655,6 +709,19 @@ cmd_start() {
         fi
         ;;
     esac
+
+    if [ "$mode" = "review" ]; then
+      rm -rf "$wt/.review-context"
+      mkdir -p "$wt/.review-context"
+      cp "$review_context/pr.diff" "$wt/.review-context/pr.diff"
+      case "$role" in
+        spec|overbuild)
+          for ticket_n in "${ticket_numbers[@]}"; do
+            cp "$review_context/issue-$ticket_n.md" "$wt/.review-context/issue-$ticket_n.md"
+          done
+          ;;
+      esac
+    fi
 
     echo "review-pr: starting $role job ($(model_for "$role"))" >&2
     jid="$(delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
