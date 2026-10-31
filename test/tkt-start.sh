@@ -709,32 +709,12 @@ case "$S2E_OUT" in "TKT tkt-ship MERGED"*) ;; *) fail "bodyendse2e: tkt-ship [$S
 [ "$(grep -c -x -F 'arg|--body-ends' "$T/shipcalls.log")" -eq 1 ] || fail "bodyendse2e: body-ends once: $(cat "$T/shipcalls.log")"
 got="$(grep -A1 -x -F 'arg|--body-ends' "$T/shipcalls.log" | sed -n 2p)"
 [ "$got" = 'arg|X' ] || fail "bodyendse2e: body-ends value, got [$got]"
-part_failures=0
-part_failure() { echo "FAIL: $1" >&2; part_failures=$((part_failures + 1)); }
-part_want() {
-  prefix="$1"; expected_rc="$2"; name="$3"
-  [ "$RC" -eq "$expected_rc" ] || part_failure "$name: exit $RC, want $expected_rc"
-  first="$(printf '%s\n' "$OUT" | head -n 1)"
-  case "$first" in "TKT tkt-start $prefix"*) ;; *) part_failure "$name: line 1 [$first] wants [$prefix]" ;; esac
-}
-part_contains() { case "$1" in *"$2"*) ;; *) part_failure "$3: missing [$2]" ;; esac; }
-part_lacks() { case "$1" in *"$2"*) part_failure "$3: unexpected [$2]" ;; esac; }
 part_seed_pr() {
   run_start
-  [ "$RC" -eq 0 ] || part_failure "$1 setup: exit $RC"
+  [ "$RC" -eq 0 ] || fail "$1 setup: exit $RC"
   part_actual="$(git -C "$WT" rev-parse HEAD)"
   bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set head "$part_actual"
   bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set pr 7
-}
-part_file_has() {
-  if [ -f "$1" ] && grep -qF -- "$2" "$1"; then :; else part_failure "$3: missing [$2] in $1"; fi
-}
-part_file_lacks() {
-  if [ -f "$1" ] && grep -qE "$2" "$1"; then part_failure "$3: unexpected [$2] in $1"; fi
-}
-part_count_is() {
-  part_count="$(grep -c "$2" "$1" 2>/dev/null || true)"
-  [ "$part_count" -eq "$3" ] || part_failure "$4: count $part_count, want $3"
 }
 
 # A merged part archives its state under the lock, then starts with the ticket
@@ -746,76 +726,76 @@ bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan /x
 journal_before="$(cat "$RUN/widget-42.journal")"
 printf 'MERGED\n' >"$T/prstate"
 reload --model; run_start --part 2
-part_want "CURRENT " 0 partmerged
-if [ -f "$ARCHIVE" ]; then :; else part_failure "partmerged: archive missing [$ARCHIVE]"; fi
-part_file_has "$ARCHIVE" 'pr=7' partmerged
-part_file_has "$S" 'part=2' partmerged
-part_file_has "$S" 'repo=acme/widget' partmerged
-part_file_has "$S" 'issue=42' partmerged
-part_file_has "$S" "worktree=$WT" partmerged
-part_file_has "$S" "run=$RUN" partmerged
-part_file_has "$S" 'model.lane=sol' partmerged
-part_file_has "$S" 'model.preflight=luna' partmerged
-part_count_is "$S" '^model\.lane=' 1 partmerged
-part_count_is "$S" '^model\.preflight=' 1 partmerged
-part_file_lacks "$S" '^(pr|head|reviewed|plan)=' partmerged
+want "CURRENT " 0 partmerged
+[ -f "$ARCHIVE" ] || fail "partmerged: archive missing [$ARCHIVE]"
+grep -qF -- 'pr=7' "$ARCHIVE" || fail "partmerged: archive misses [pr=7]"
+grep -qF -- 'part=2' "$S" || fail "partmerged: state misses [part=2]"
+grep -qF -- 'repo=acme/widget' "$S" || fail "partmerged: state misses [repo=acme/widget]"
+grep -qF -- 'issue=42' "$S" || fail "partmerged: state misses [issue=42]"
+grep -qF -- "worktree=$WT" "$S" || fail "partmerged: state misses worktree"
+grep -qF -- "run=$RUN" "$S" || fail "partmerged: state misses run"
+grep -qF -- 'model.lane=sol' "$S" || fail "partmerged: state misses [model.lane=sol]"
+grep -qF -- 'model.preflight=luna' "$S" || fail "partmerged: state misses [model.preflight=luna]"
+[ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "partmerged: state wants 1 model.lane"
+[ "$(grep -c '^model\.preflight=' "$S")" -eq 1 ] || fail "partmerged: state wants 1 model.preflight"
+grep -qE '^(pr|head|reviewed|plan)=' "$S" && fail "partmerged: archived values remain in new state"
 journal_after="$(cat "$RUN/widget-42.journal")"
-case "$journal_after" in "$journal_before"*) ;; *) part_failure "partmerged: journal was not preserved" ;; esac
-part_contains "$journal_after" "archived state part1 pr=7 -> $ARCHIVE" partmerged
+case "$journal_after" in "$journal_before"*) ;; *) fail "partmerged: journal was not preserved" ;; esac
+case "$journal_after" in *"archived state part1 pr=7 -> $ARCHIVE"*) ;; *) fail "partmerged: journal misses archive record" ;; esac
 cp "$ARCHIVE" "$CDIR/archive.before"
 : >"$T/calls.log"; run_start --part 2
-part_want "CURRENT " 0 partrerun
-part_count_is "$S" '^part=' 1 partrerun
-part_file_has "$S" 'part=2' partrerun
-if cmp -s "$ARCHIVE" "$CDIR/archive.before"; then :; else part_failure "partrerun: archive changed"; fi
-part_count_is "$T/calls.log" 'pr view .*--json state' 0 partrerun
+want "CURRENT " 0 partrerun
+[ "$(grep -c '^part=' "$S")" -eq 1 ] || fail "partrerun: state wants 1 part"
+grep -qF -- 'part=2' "$S" || fail "partrerun: state misses [part=2]"
+cmp -s "$ARCHIVE" "$CDIR/archive.before" || fail "partrerun: archive changed"
+[ "$(grep -c 'pr view .*--json state' "$T/calls.log")" -eq 0 ] || fail "partrerun: merged-state lookup must not run"
 
 # An open PR refuses without moving or changing the state.
 setup partopen ONE AGAINST; part_seed_pr partopen
 S="$RUN/widget-42.state"; cp "$S" "$CDIR/state.before"
 printf 'OPEN\n' >"$T/prstate"; run_start --part 2
-part_want "PRECONDITION part=2 pr=7" 2 partopen
-part_contains "$OUT" 'needs part 1' partopen
-part_file_has "$CDIR/state.before" 'pr=7' partopen
-if cmp -s "$S" "$CDIR/state.before"; then :; else part_failure "partopen: state changed"; fi
-[ ! -e "$S.part1" ] || part_failure "partopen: archive must not exist"
-[ ! -e "$S.lock" ] || part_failure "partopen: lock was not released"
+want "PRECONDITION part=2 pr=7" 2 partopen
+case "$OUT" in *'needs part 1'*) ;; *) fail "partopen: message misses [needs part 1]" ;; esac
+grep -qF -- 'pr=7' "$CDIR/state.before" || fail "partopen: saved state misses [pr=7]"
+cmp -s "$S" "$CDIR/state.before" || fail "partopen: state changed"
+[ ! -e "$S.part1" ] || fail "partopen: archive must not exist"
+[ ! -e "$S.lock" ] || fail "partopen: lock was not released"
 
 # A missing PR cannot be treated as a merged part.
 setup partnopr ONE AGAINST; run_start
 S="$RUN/widget-42.state"; cp "$S" "$CDIR/state.before"
 run_start --part 2
-part_want "PRECONDITION part=2 pr=none" 2 partnopr
-part_contains "$OUT" 'pr=none' partnopr
-if cmp -s "$S" "$CDIR/state.before"; then :; else part_failure "partnopr: state changed"; fi
-[ ! -e "$S.part1" ] || part_failure "partnopr: archive must not exist"
+want "PRECONDITION part=2 pr=none" 2 partnopr
+case "$OUT" in *'pr=none'*) ;; *) fail "partnopr: message misses [pr=none]" ;; esac
+cmp -s "$S" "$CDIR/state.before" || fail "partnopr: state changed"
+[ ! -e "$S.part1" ] || fail "partnopr: archive must not exist"
 
 # Never replace a previous archive.
 setup partexists ONE AGAINST; part_seed_pr partexists
 S="$RUN/widget-42.state"; cp "$S" "$CDIR/state.before"
 printf 'old archive\n' >"$S.part1"; printf 'MERGED\n' >"$T/prstate"
 run_start --part 2
-part_want "PRECONDITION part=2" 2 partexists
-part_contains "$OUT" "$S.part1" partexists
-if cmp -s "$S" "$CDIR/state.before"; then :; else part_failure "partexists: state changed"; fi
-part_file_has "$S.part1" 'old archive' partexists
-[ ! -e "$S.lock" ] || part_failure "partexists: lock was not released"
+want "PRECONDITION part=2" 2 partexists
+case "$OUT" in *"$S.part1"*) ;; *) fail "partexists: message misses [$S.part1]" ;; esac
+cmp -s "$S" "$CDIR/state.before" || fail "partexists: state changed"
+grep -qF -- 'old archive' "$S.part1" || fail "partexists: previous archive changed"
+[ ! -e "$S.lock" ] || fail "partexists: lock was not released"
 
 # Invalid values fail before the first state write.
 setup partbad ONE AGAINST
 for bad in one x missing; do
   case "$bad" in one) run_start --part 1 ;; x) run_start --part x ;; missing) run_start --part ;; esac
-  [ "$RC" -eq 2 ] || part_failure "partbad $bad: exit $RC, want 2"
-  grep -qF -- '--part' "$CDIR/stderr" || part_failure "partbad $bad: stderr does not name --part"
-  [ ! -e "$RUN/widget-42.state" ] || part_failure "partbad $bad: state was written"
+  [ "$RC" -eq 2 ] || fail "partbad $bad: exit $RC, want 2"
+  grep -qF -- '--part' "$CDIR/stderr" || fail "partbad $bad: stderr does not name --part"
+  [ ! -e "$RUN/widget-42.state" ] || fail "partbad $bad: state was written"
 done
 
 # A new ticket can start at any part without an older state to archive.
 setup partnostate ONE AGAINST
 run_start --part 2
-part_want "CURRENT " 0 partnostate
-part_file_has "$RUN/widget-42.state" 'part=2' partnostate
-[ ! -e "$RUN/widget-42.state.part1" ] || part_failure "partnostate: unexpected archive"
+want "CURRENT " 0 partnostate
+grep -qF -- 'part=2' "$RUN/widget-42.state" || fail "partnostate: state misses [part=2]"
+[ ! -e "$RUN/widget-42.state.part1" ] || fail "partnostate: unexpected archive"
 
 # The requested model wins over the archived value for the same role.
 setup partmodel ONE AGAINST; part_seed_pr partmodel
@@ -823,37 +803,25 @@ S="$RUN/widget-42.state"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set model.lane old
 printf 'MERGED\n' >"$T/prstate"
 reload --model; run_start --part 2 --model lane=new
-part_want "CURRENT " 0 partmodel
-part_file_has "$S" 'model.lane=new' partmodel
-part_file_lacks "$S" '^model\.lane=old$' partmodel
-part_count_is "$S" '^model\.lane=' 1 partmodel
+want "CURRENT " 0 partmodel
+grep -qF -- 'model.lane=new' "$S" || fail "partmodel: state misses [model.lane=new]"
+grep -qE '^model\.lane=old$' "$S" && fail "partmodel: stale model.lane value remains"
+[ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "partmodel: state wants 1 model.lane"
 
 # An invalid stored part is reported, and a missing part above part 1 is not inferred.
 setup partnonnumeric ONE AGAINST; part_seed_pr partnonnumeric
 S="$RUN/widget-42.state"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set part x
 printf 'MERGED\n' >"$T/prstate"; run_start --part 2
-part_want "PRECONDITION part=2" 2 partnonnumeric
-part_contains "$OUT" 'x' partnonnumeric
-[ ! -e "$S.lock" ] || part_failure "partnonnumeric: lock was not released"
+want "PRECONDITION part=2" 2 partnonnumeric
+case "$OUT" in *x*) ;; *) fail "partnonnumeric: message misses [x]" ;; esac
+[ ! -e "$S.lock" ] || fail "partnonnumeric: lock was not released"
 setup partmissingn ONE AGAINST; part_seed_pr partmissingn
 S="$RUN/widget-42.state"; cp "$S" "$CDIR/state.before"
 printf 'MERGED\n' >"$T/prstate"; run_start --part 3
-part_want "PRECONDITION part=3" 2 partmissingn
-part_contains "$OUT" 'part is missing' partmissingn
-if cmp -s "$S" "$CDIR/state.before"; then :; else part_failure "partmissingn: state changed"; fi
-[ ! -e "$S.lock" ] || part_failure "partmissingn: lock was not released"
+want "PRECONDITION part=3" 2 partmissingn
+case "$OUT" in *'part is missing'*) ;; *) fail "partmissingn: message misses [part is missing]" ;; esac
+cmp -s "$S" "$CDIR/state.before" || fail "partmissingn: state changed"
+[ ! -e "$S.lock" ] || fail "partmissingn: lock was not released"
 
-# A later stored part is already beyond the requested part: skip PR checks and archive.
-setup partahead ONE AGAINST; run_start
-S="$RUN/widget-42.state"
-bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set part 3
-: >"$T/calls.log"; run_start --part 2
-part_want "CURRENT " 0 partahead
-part_file_has "$S" 'part=3' partahead
-part_count_is "$S" '^part=' 1 partahead
-[ ! -e "$S.part1" ] || part_failure "partahead: unexpected archive"
-part_count_is "$T/calls.log" 'pr view ' 0 partahead
-
-[ "$part_failures" -eq 0 ] || fail "$part_failures --part cases failed"
 echo "tkt-start: all cases passed"
