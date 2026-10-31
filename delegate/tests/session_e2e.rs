@@ -147,6 +147,17 @@ impl Harness {
     }
 
     fn start(&self, brief: &[u8], json_mode: bool, scenario: &str, env: &[(&str, &str)]) -> Output {
+        self.start_timeout(brief, json_mode, scenario, env, Duration::from_secs(10))
+    }
+
+    fn start_timeout(
+        &self,
+        brief: &[u8],
+        json_mode: bool,
+        scenario: &str,
+        env: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Output {
         let brief = self.brief_file(brief);
         let mut args = vec![
             "start",
@@ -160,7 +171,7 @@ impl Harness {
         if json_mode {
             args.push("--json");
         }
-        self.invoke_with(&args, None, scenario, env, None)
+        self.invoke_timeout(&args, None, scenario, env, None, timeout)
     }
 
     fn root(&self) -> std::path::PathBuf {
@@ -324,6 +335,38 @@ fn wait_for_new_idle_session(h: &Harness, existing: &[std::path::PathBuf]) -> Va
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn held_start<'scope, 'env: 'scope>(
+    h: &'scope Harness,
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    marker: &'scope str,
+    env: &'scope [(&'scope str, &'scope str)],
+) -> (mpsc::Receiver<Output>, String) {
+    let existing = session_paths(h);
+    let (tx, rx) = mpsc::channel();
+    scope.spawn(move || {
+        tx.send(h.start_timeout(marker.as_bytes(), false, "", env, Duration::from_secs(60)))
+            .unwrap()
+    });
+    let hold = env
+        .iter()
+        .find_map(|(key, value)| {
+            (*key == "DELEGATE_SESSION_TEST_HOLD_START_UNTIL").then_some(*value)
+        })
+        .expect("held start needs its release path");
+    let held = std::path::PathBuf::from(format!("{hold}.held"));
+    wait_for_held_start(h, &held);
+    let state = wait_for_new_idle_session(h, &existing);
+    assert!(
+        matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "start returned before the held turn was released"
+    );
+    let id = state["id"]
+        .as_str()
+        .expect("new idle session has an id")
+        .to_string();
+    (rx, id)
 }
 
 fn wait_cli(
@@ -560,36 +603,17 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
         let hold = h
             .base
             .join(format!("hold-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
-        let held = std::path::PathBuf::from(format!("{}.held", hold.display()));
-        let hold_env = hold.to_string_lossy().into_owned();
-        let existing = session_paths(&h);
-        let (tx, rx) = mpsc::channel();
+        let hold = hold.to_string_lossy().into_owned();
+        let env = [("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold.as_str())];
         std::thread::scope(|scope| {
-            let _release = ReleaseOnDrop(hold.clone());
-            let h_ref = &h;
-            let hold_ref = hold_env.as_str();
-            scope.spawn(move || {
-                tx.send(h_ref.start(
-                    marker.as_bytes(),
-                    false,
-                    "",
-                    &[("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold_ref)],
-                ))
-                .unwrap()
-            });
-            wait_for_held_start(&h, &held);
-            let state = wait_for_new_idle_session(&h, &existing);
-            assert!(
-                matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
-                "start returned before the held turn was released"
-            );
+            let _release = ReleaseOnDrop(std::path::PathBuf::from(&hold));
+            let (rx, held_id) = held_start(&h, scope, marker, &env);
             std::fs::write(&hold, b"").unwrap();
             let output = rx
                 .recv_timeout(Duration::from_secs(10))
                 .expect("start did not return after releasing the hold");
-            let id = id_from(&output);
-            assert_eq!(state["id"], id);
-            assert_eq!(h.state(&id)["turnCount"], 1);
+            assert_eq!(id_from(&output), held_id);
+            assert_eq!(h.state(&held_id)["turnCount"], 1);
         });
     }
     let brief = h.brief_file(b"brief");
