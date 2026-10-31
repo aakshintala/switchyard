@@ -101,6 +101,7 @@ def acquire_slot(directory, n):
         while True:
             for k in range(1, n + 1):
                 path = os.path.join(directory, "slot-%d.lock" % k)
+                # flock locks the inode: mv slot-k.lock slot-k.lock.aside frees a slot without touching any process.
                 try:
                     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
                 except OSError as err:
@@ -162,6 +163,66 @@ def exec_real(real, args):
         fail(code, "cannot exec %s: %s" % (real, err.strerror))
 
 
+def write_holder(fd, args):
+    data = os.fsencode("%d %s\n" % (os.getpid(), " ".join(["cargo"] + args)))
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    written = 0
+    while written < len(data):
+        written += os.write(fd, data[written:])
+
+
+def run_slot_child(real, args):
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    owner_pid = os.getpid()
+    child_pid = None
+    pending = []
+
+    def forward(signum, _frame):
+        if os.getpid() != owner_pid:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+        elif child_pid is None:
+            pending.append(signum)
+        else:
+            try:
+                os.kill(child_pid, signum)
+            except ProcessLookupError:
+                pass
+
+    for signum in signals:
+        signal.signal(signum, forward)
+    try:
+        pid = os.fork()
+    except OSError as err:
+        fail(1, "cannot fork cargo: %s" % err.strerror)
+
+    if pid == 0:
+        for signum in signals:
+            signal.signal(signum, signal.SIG_DFL)
+        exec_real(real, args)
+        os._exit(127)
+
+    child_pid = pid
+    for signum in pending:
+        forward(signum, None)
+    while True:
+        try:
+            _, status = os.waitpid(pid, 0)
+            break
+        except InterruptedError:
+            continue
+
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        signum = os.WTERMSIG(status)
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+        return 128 + signum
+    return 1
+
+
 def main():
     args = sys.argv[1:]
     if subcommand(args) == "mutants": fail(1, "cargo mutants is banned for lanes; mutants run in CI, read verdicts with ~/.agents/bin/mutant-verdicts <run> --repo <owner/name>")
@@ -174,10 +235,15 @@ def main():
     if subcommand(args) in SLOT_SUBCOMMANDS and not held():
         n = slot_count()
         if n > 0:
-            # The fd stays inheritable so the exec'd cargo holds the slot.
+            # Python opens fds close-on-exec; the shim holds this lock across cargo.
             fd = acquire_slot(slot_dir(), n)
-            os.set_inheritable(fd, True)
+            write_holder(fd, args)
             os.environ["CARGO_SLOT_HELD"] = "1"
+            try:
+                status = run_slot_child(real, args)
+            finally:
+                os.close(fd)
+            sys.exit(status)
     exec_real(real, args)
 
 

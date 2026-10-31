@@ -67,8 +67,9 @@ ln -s "$SHIM" "$T/shims/cargo"
 
 # Fake real cargo. It logs its start, argc, argv and CARGO_SLOT_HELD into
 # $FAKE_DIR. FAKE_READ_STDIN=1 reads one stdin line. FAKE_HOLD=1 writes its
-# pid to $FAKE_DIR/up and blocks until $FAKE_DIR/go is written. Bash builtins
-# only, so no child inherits the lock fd.
+# pid to $FAKE_DIR/up and blocks until $FAKE_DIR/go is written. FAKE_DAEMON=1
+# starts a background child blocked on daemon.go; FAKE_SIGNAL sends the named
+# signal to the stub itself.
 cat >"$T/real/cargo" <<'FAKE'
 #!/usr/bin/env bash
 printf 'started\n' >"$FAKE_DIR/started"
@@ -81,9 +82,16 @@ if [ "${FAKE_READ_STDIN:-0}" = 1 ]; then
   IFS= read -r line || true
   printf 'stdin=%s\n' "${line-}" >"$FAKE_DIR/stdin"
 fi
+if [ "${FAKE_DAEMON:-0}" = 1 ]; then
+  ( IFS= read -r _ <"$FAKE_DIR/daemon.go" ) &
+  printf '%s\n' "$!" >"$FAKE_DIR/daemon.pid"
+fi
 if [ "${FAKE_HOLD:-0}" = 1 ]; then
   printf '%s\n' "$$" >"$FAKE_DIR/up"
   IFS= read -r _ <"$FAKE_DIR/go"
+fi
+if [ -n "${FAKE_SIGNAL:-}" ]; then
+  kill -s "$FAKE_SIGNAL" "$$"
 fi
 exit "${FAKE_EXIT:-0}"
 FAKE
@@ -736,6 +744,54 @@ guard_refused d "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOT_HE
 guard_refused j "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOTS=abc
 # k. GIT_* variables do not change the answer: GIT_DIR points nowhere.
 guard_refused k "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" GIT_DIR="$T/nogit"
+
+# Acceptance: a daemon child must not keep the slot after the cargo stub exits.
+D="$T/daemon"
+stage "$D/cargo"
+stage "$D/reacquire"
+mkfifo "$D/cargo/daemon.go" || fail "cannot stage daemon FIFO"
+spawn_quiet "$D/cargo" CARGO_SLOTS=1 CARGO_SLOT_DIR="$D/slots" \
+  FAKE_DAEMON=1 -- build
+DAEMON_CARGO=$SPAWNED
+wait "$DAEMON_CARGO"
+rc=$?
+[ "$rc" = 0 ] || fail "daemon stub: exit $rc, want 0"
+DAEMON_PID="$(cat "$D/cargo/daemon.pid")"
+kill -0 "$DAEMON_PID" 2>/dev/null || fail "daemon child did not outlive the cargo stub"
+exec 8<>"$D/reacquire/up"
+spawn "$D/reacquire" CARGO_SLOTS=1 CARGO_SLOT_DIR="$D/slots" FAKE_HOLD=1 -- build
+REACQUIRE=$SPAWNED
+if ! IFS= read -r -t 2 -u 8 _; then
+  fail "slot was not available after the cargo stub exited"
+fi
+release "$D/reacquire"
+wait "$REACQUIRE"
+rc=$?
+[ "$rc" = 0 ] || fail "build after daemon stub: exit $rc, want 0"
+kill -TERM "$DAEMON_PID" 2>/dev/null || true
+
+# Acceptance: the shim propagates an ordinary exit status and re-raises a
+# signal death with the conventional 128+N status.
+new_run slot-exit-status
+cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/status-slots" FAKE_EXIT=7 -- build
+rc=$?
+[ "$rc" = 7 ] || fail "slot child status: exit $rc, want 7"
+new_run slot-signal-status
+cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/signal-slots" FAKE_SIGNAL=TERM \
+  -- build 2>"$R/shim.err"
+rc=$?
+[ "$rc" = 143 ] || fail "slot child signal: exit $rc, want 143"
+
+# Acceptance: the lock file identifies the shim process and cargo argv while
+# the stub is still running.
+L="$T/holder-info"
+stage "$L"
+hold_slot "$L" "$L/slots" 1
+LOCK_HOLDER=$HOLD_PID
+[ "$(cat "$L/slots/slot-1.lock")" = "$LOCK_HOLDER cargo build" ] ||
+  fail "lock file does not name holder $LOCK_HOLDER and argv: $(cat "$L/slots/slot-1.lock")"
+release "$L"
+wait "$LOCK_HOLDER"
 
 echo "cargo-slot: all cases passed"
 cleanup
