@@ -44,6 +44,7 @@ printf 'ok' >"$T/mode"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
+state="\$1"
 slot=""; out=""; rest=""
 while [ \$# -gt 0 ]; do
   case "\$1" in
@@ -54,6 +55,10 @@ while [ \$# -gt 0 ]; do
   esac
 done
 printf 'job|slot=%s|tmpl=%s|out=%s|rest=%s\n' "\$slot" "\$tmpl" "\$out" "\$rest" >>"$T/stub.log"
+if [ "\$slot" = confirm ]; then
+  confirm_job="\$(bash "$REAL_BIN/tkt-state" "\$state" get job.confirm 2>/dev/null || true)"
+  printf 'confirm-job|%s\n' "\$confirm_job" >>"$T/stub.log"
+fi
 case "\$(cat "$T/mode")" in
   ok)
     printf 'PLAN OK\nheld: every invariant survived its breaking input\n' >"\$out"
@@ -311,6 +316,261 @@ run_plan confirm --edits "$CDIR/edits.md"
 expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "second confirm"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "a second confirm starts no job"
 
+# --- every ROUND-LIMIT prints open lines from the latest report ---
+setup_case round-open-lines
+rebase_plan
+printf 'lines' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-open-lines first verify exits 1"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-open-lines second verify exits 1"
+jobs_before="$(grep -c '^job|' "$T/stub.log")"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-open-lines limit exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "round-open-lines"
+grep -qx '1. Rulings miss a contradiction in bin/x' <<<"$OUT" || fail "ROUND-LIMIT keeps the first open line"
+grep -qx '3. Gate skips package y' <<<"$OUT" || fail "ROUND-LIMIT keeps the final open line"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "round-open-lines limit starts no job"
+
+setup_case round-no-report
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-no-report seed round"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-no-report limit exits 1"
+grep -qx 'none (no report: round 2 ended without one)' <<<"$OUT" || fail "missing report names the unfinished round"
+
+setup_case round-empty-report
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-empty-report seed round"
+: >"$CDIR/empty.md"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/empty.md" || fail "round-empty-report seed report"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-empty-report limit exits 1"
+grep -qx 'none' <<<"$OUT" || fail "an empty report prints none"
+
+setup_case round-plan-ok-prefix
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-plan-ok-prefix seed round"
+printf 'PLAN OK with trailing text\nopen finding\n' >"$CDIR/report.md"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/report.md" || fail "round-plan-ok-prefix seed report"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-plan-ok-prefix limit exits 1"
+grep -qx 'PLAN OK with trailing text' <<<"$OUT" || fail "PLAN OK with trailing text is not treated as success"
+grep -qx 'open finding' <<<"$OUT" || fail "trailing-text report keeps its open lines"
+
+setup_case round-stale-confirm-report
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-stale-confirm-report seed round"
+printf '2. Current Verifier finding\n' >"$CDIR/verifier.md"
+printf 'stale confirm finding\n' >"$CDIR/run/switchyard-518-confirm-out.md"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/verifier.md" || fail "round-stale-confirm-report seed latest report"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-stale-confirm-report limit exits 1"
+grep -qx '2. Current Verifier finding' <<<"$OUT" || fail "ROUND-LIMIT uses last_report"
+grep -q 'stale confirm finding' <<<"$OUT" && fail "ROUND-LIMIT ignores a stale confirm report"
+
+setup_case round-report-cap
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "round-report-cap seed round"
+: >"$CDIR/report.md"
+for n in $(seq 1 40); do printf 'line-%s\n' "$n" >>"$CDIR/report.md"; done
+bash "$TKT_STATE" "$S" set last_report "$CDIR/report.md" || fail "round-report-cap seed report"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-report-cap limit exits 1"
+[ "$(grep -c '^line-' <<<"$OUT")" -eq 38 ] || fail "ROUND-LIMIT caps report lines at 38"
+grep -qx 'line-38' <<<"$OUT" || fail "ROUND-LIMIT includes the 38th report line"
+grep -qx 'line-39' <<<"$OUT" && fail "ROUND-LIMIT omits report lines after 38"
+
+setup_case round-ok-reports
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "round-ok-reports first verify exits 0"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "round-ok-reports second verify exits 0"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-ok-reports limit exits 1"
+grep -qx 'none' <<<"$OUT" || fail "a PLAN OK report has no open lines"
+
+setup_case round-confirm-report
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "round-confirm-report verify 1 exits 0"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "round-confirm-report verify 2 exits 0"
+printf 'lines' >"$T/mode"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "round-confirm-report confirm exits 1"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-confirm-report verify limit exits 1"
+grep -qx '3. Gate skips package y' <<<"$OUT" || fail "verify ROUND-LIMIT uses the confirm report"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "round-confirm-report second confirm exits 1"
+grep -qx '3. Gate skips package y' <<<"$OUT" || fail "confirm ROUND-LIMIT uses the confirm report"
+
+setup_case round-confirm-ok
+rebase_plan
+printf 'lines' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-confirm-ok verify 1 exits 1"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-confirm-ok verify 2 exits 1"
+printf 'ok' >"$T/mode"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "round-confirm-ok confirm exits 0"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "round-confirm-ok verify limit exits 1"
+grep -qx 'none' <<<"$OUT" || fail "latest PLAN OK confirm report replaces prior lines"
+
+# --- a grant records one extra confirm round and validates its inputs ---
+setup_case grant-valid
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-valid seed confirm"
+run_plan grant-round --by switchyard --comment 1234
+[ "$RC" -eq 0 ] || fail "valid grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan SET grant=switchyard:1234 log=*" "valid grant"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "valid grant records the author"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "1234" ] || fail "valid grant records the comment"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "valid grant starts unused"
+
+setup_case grant-invalid
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-invalid seed confirm"
+bash "$TKT_STATE" "$S" set granted_by "" || fail "grant-invalid seed empty grant"
+grant_usage_case() {
+  local label="$1"
+  shift
+  run_plan grant-round "$@"
+  [ "$RC" -eq 2 ] || fail "$label exits 2 (rc=$RC)"
+  grep -q '^usage: tkt-plan' "$CDIR/stderr.txt" || fail "$label prints usage"
+  [ -z "$(bash "$TKT_STATE" "$S" get granted_by 2>/dev/null || true)" ] || fail "$label leaves granted_by unchanged"
+}
+grant_usage_case 'missing --by' --comment 1234
+grant_usage_case 'missing --comment' --by switchyard
+grant_usage_case 'empty --by' --by '' --comment 1234
+grant_usage_case 'empty --comment' --by switchyard --comment ''
+grant_usage_case 'space in --by' --by 'a b' --comment 1234
+grant_usage_case 'space in --comment' --by switchyard --comment 'x y'
+grant_usage_case 'tab in --comment' --by switchyard --comment $'x\ty'
+grant_usage_case 'unknown flag' --by switchyard --comment 1234 --other
+grant_usage_case 'stray argument' --by switchyard --comment 1234 extra
+
+setup_case grant-pending
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-pending seed confirm"
+bash "$TKT_STATE" "$S" set granted_by switchyard || fail "grant-pending seed grant author"
+bash "$TKT_STATE" "$S" set granted_comment 1234 || fail "grant-pending seed grant comment"
+run_plan grant-round --by switchyard --comment 5678
+[ "$RC" -eq 2 ] || fail "second pending grant exits 2"
+grep -q 'switchyard:1234' "$CDIR/stderr.txt" || fail "pending grant error names the existing grant"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "pending grant keeps the first author"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "1234" ] || fail "pending grant keeps the first comment"
+
+setup_case grant-replace
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-replace seed confirm"
+bash "$TKT_STATE" "$S" set granted_by old-grant || fail "grant-replace seed old grant author"
+bash "$TKT_STATE" "$S" set granted_comment 99 || fail "grant-replace seed old grant comment"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-replace seed used"
+run_plan grant-round --by 'switchyard:bot' --comment 'abc:def'
+[ "$RC" -eq 0 ] || fail "used grant can be replaced (rc=$RC)"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard:bot" ] || fail "replacement preserves colons in the author"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "abc:def" ] || fail "replacement preserves colons in the comment"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "replacement clears used state"
+
+setup_case grant-before-confirm
+rebase_plan
+bash "$TKT_STATE" "$S" set granted_by "" || fail "grant-before-confirm seed empty grant"
+run_plan grant-round --by switchyard --comment 1234
+[ "$RC" -eq 2 ] || fail "grant before confirm exits 2"
+grep -q 'tkt-plan: no limit reached: the confirm round is still open' "$CDIR/stderr.txt" || fail "grant before confirm explains the open confirm round"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_by 2>/dev/null || true)" ] || fail "grant before confirm leaves grant state unchanged"
+
+# --- a granted confirm bypasses only the confirm block, once ---
+setup_case grant-extra
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "grant-extra verify 1 exits 0"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "grant-extra verify 2 exits 0"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "grant-extra initial confirm exits 0"
+jobs_before="$(grep -c '^job|' "$T/stub.log")"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "grant-extra verify before grant exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify before grant"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "grant-extra confirm before grant exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm before grant"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "limits before grant start no job"
+run_plan grant-round --by switchyard --comment 1234
+[ "$RC" -eq 0 ] || fail "grant-extra grant exits 0"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "pending grant does not unlock verify"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify with pending grant"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "verify does not consume the pending grant"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify with pending grant starts no job"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "granted confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "granted confirm consumes the grant"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "granted confirm dispatches exactly one job"
+grep -q '^job|slot=confirm|' "$T/stub.log" || fail "granted confirm uses the confirm slot"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "verify after granted confirm exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify after granted confirm"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "confirm after granted confirm exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm after granted confirm"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "limits after granted confirm start no job"
+
+setup_case grant-ask
+rebase_plan
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-ask seed confirm"
+run_plan grant-round --by switchyard --comment ask
+[ "$RC" -eq 0 ] || fail "grant-ask grant exits 0"
+printf 'ask' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "granted ASK exits 1"
+expect_verdict "TKT tkt-plan ASK id=j1 log=*" "granted ASK"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "ASK does not consume the grant"
+printf 'ok' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "granted confirm retry exits 0"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "successful retry consumes the grant"
+
+setup_case grant-lines
+rebase_plan
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-lines seed confirm"
+run_plan grant-round --by switchyard --comment lines
+[ "$RC" -eq 0 ] || fail "grant-lines grant exits 0"
+printf 'lines' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "LINES granted confirm exits 1"
+expect_verdict "TKT tkt-plan LINES n=3 out=*confirm-out.md log=*" "LINES granted confirm"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "LINES granted confirm consumes the grant"
+
+setup_case grant-reset-job
+rebase_plan
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-reset-job seed confirm"
+bash "$TKT_STATE" "$S" set job.confirm j-old-confirm || fail "grant-reset-job seed old job"
+run_plan grant-round --by switchyard --comment reset
+[ "$RC" -eq 0 ] || fail "grant-reset-job grant exits 0"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log")"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "grant-reset-job confirm exits 0"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "granted confirm starts a fresh job"
+[ "$(grep '^confirm-job|' "$T/stub.log" | tail -n 1)" = 'confirm-job|' ] || fail "stored confirm job is cleared before dispatch"
+[ "$(bash "$TKT_STATE" "$S" get job.confirm 2>/dev/null || true)" != "j-old-confirm" ] || fail "granted confirm retires the stored job id"
+
 # --- a LINES confirm still spends the one confirm round ---
 setup_case confirm-lines
 rebase_plan
@@ -377,6 +637,10 @@ bash "$TKT_STATE" "$S" set job.lane j-old-lane || fail "seed lane job"
 bash "$TKT_STATE" "$S" set job.fix1 j-old-fix1 || fail "seed fix1 job"
 bash "$TKT_STATE" "$S" set job.fix2 j-old-fix2 || fail "seed fix2 job"
 bash "$TKT_STATE" "$S" set job.fix3 j-old-fix3 || fail "seed fix3 job"
+bash "$TKT_STATE" "$S" set granted_by switchyard || fail "seed grant author"
+bash "$TKT_STATE" "$S" set granted_comment 5555 || fail "seed grant comment"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "seed used grant"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/old-report.md" || fail "seed last report"
 printf '# another plan\n' >"$CDIR/other.md"
 {
   printf 'Base: %s\n' "$(cat "$CDIR/base")"
@@ -392,6 +656,10 @@ grep -q "sweep|.*--plan $CDIR/other.md" "$T/stub.log" || fail "SET refreshes the
 grep -q "sweep|.*--cwd $WT" "$T/stub.log" || fail "SET sweeps the worktree"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "0" ] || fail "SET resets the round counter"
 [ -z "$(bash "$TKT_STATE" "$S" get confirmed_for)" ] || fail "SET clears the confirm record"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_by 2>/dev/null || true)" ] || fail "SET clears the grant author"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_comment 2>/dev/null || true)" ] || fail "SET clears the grant comment"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "SET clears grant usage"
+[ -z "$(bash "$TKT_STATE" "$S" get last_report 2>/dev/null || true)" ] || fail "SET clears the last report"
 [ -z "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" ] || fail "SET retires the round 1 job"
 [ -z "$(bash "$TKT_STATE" "$S" get job.verifier-r2)" ] || fail "SET retires the round 2 job"
 [ -z "$(bash "$TKT_STATE" "$S" get job.confirm)" ] || fail "SET retires the confirm job"
@@ -405,11 +673,19 @@ setup_case reset-same
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
 bash "$TKT_STATE" "$S" set job.verifier-r1 j-keep || fail "seed job"
+bash "$TKT_STATE" "$S" set granted_by switchyard || fail "seed same-path grant author"
+bash "$TKT_STATE" "$S" set granted_comment keep || fail "seed same-path grant comment"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "seed same-path grant usage"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/kept-report.md" || fail "seed same-path report"
 run_plan set "$CDIR/plan.md"
 [ "$RC" -eq 0 ] || fail "same-path SET exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan SET plan=$CDIR/plan.md log=*" "same-path SET"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "same-path SET keeps the round counter"
 [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-keep" ] || fail "same-path SET keeps the job slots"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "same-path SET keeps the grant author"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "keep" ] || fail "same-path SET keeps the grant comment"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "same-path SET keeps grant usage"
+[ "$(bash "$TKT_STATE" "$S" get last_report)" = "$CDIR/kept-report.md" ] || fail "same-path SET keeps the last report"
 grep -q "sweep|.*--plan $CDIR/plan.md" "$T/stub.log" || fail "same-path SET still refreshes the pack"
 # A verify after two counted rounds, with no confirm, stops before any job.
 jobs_before="$(grep -c '^job|' "$T/stub.log")"
@@ -459,6 +735,7 @@ run_plan set
 [ "$RC" -eq 2 ] || fail "set without a file exits 2"
 OUT="$(bash "$TKT" 2>"$T/err-u.txt")"; [ "$?" = "2" ] || fail "no args exits 2"
 grep -q "usage" "$T/err-u.txt" || fail "no args prints usage"
+grep -q 'tkt-plan <state> grant-round --by <who> --comment <id>' "$T/err-u.txt" || fail "usage names grant-round"
 
 # --- a held lock exits 2 naming the pid, and runs nothing ---
 setup_case locked
@@ -584,6 +861,10 @@ bash "$TKT_STATE" "$S" set job.preflight j-pre || fail "seed preflight"
 bash "$TKT_STATE" "$S" set findings /tmp/old-findings.md || fail "seed findings"
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed verifier_round"
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirmed_for"
+bash "$TKT_STATE" "$S" set granted_by switchyard || fail "seed replan grant author"
+bash "$TKT_STATE" "$S" set granted_comment replan || fail "seed replan grant comment"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "seed replan grant usage"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/replan-report.md" || fail "seed replan report"
 bash "$TKT_STATE" "$S" set job.verifier-r1 j-v1 || fail "seed verifier job"
 run_plan replan
 [ "$RC" -eq 0 ] || fail "replan exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -597,6 +878,10 @@ expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job
 [ -z "$(bash "$TKT_STATE" "$S" get findings 2>/dev/null || true)" ] || fail "replan clears findings"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "replan keeps verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "replan keeps confirmed_for"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "replan keeps grant author"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "replan" ] || fail "replan keeps grant comment"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "replan keeps grant usage"
+[ "$(bash "$TKT_STATE" "$S" get last_report)" = "$CDIR/replan-report.md" ] || fail "replan keeps last_report"
 [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-v1" ] || fail "replan keeps verifier jobs"
 run_plan replan
 [ "$RC" -eq 0 ] || fail "replan twice exits 0"
@@ -626,6 +911,9 @@ rebase_plan
 A="$(cat "$CDIR/base")"
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
+bash "$TKT_STATE" "$S" set granted_by switchyard || fail "seed drift grant author"
+bash "$TKT_STATE" "$S" set granted_comment drift || fail "seed drift grant comment"
+bash "$TKT_STATE" "$S" set granted_used "" || fail "seed unused drift grant"
 bash "$TKT_STATE" "$S" set verified_base "$A" || fail "seed verified_base"
 wcommit "$WT" f.txt v3
 git -C "$WT" update-ref refs/remotes/origin/main HEAD
@@ -642,10 +930,14 @@ jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan verify
 [ "$RC" -eq 0 ] || fail "drift-b exempt exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "drift-b"
+[ "$(bash "$TKT_STATE" "$S" get last_report)" = "$CDIR/run/switchyard-518-verifier-out-r3-drift.md" ] || fail "drift-b records the exempt report as last_report"
 grep -q "slot=verifier-r3-drift" "$T/stub.log" || fail "drift-b uses the drift slot"
 grep -q "verifier-out-r3-drift.md" "$T/stub.log" || fail "drift-b writes the drift report"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-b leaves verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "drift-b leaves confirmed_for"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "drift-b keeps the pending grant author"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "drift" ] || fail "drift-b keeps the pending grant comment"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "drift-b leaves the grant unused"
 [ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$B" ] || fail "drift-b updates verified_base"
 [ -r "$CDIR/run/switchyard-518-verifier-extra-r3-drift.md" ] || fail "drift-b writes the drift extra file"
 # Contract: skills/planning/SKILL.md step 3: an exempt verify dispatches one drift job.
