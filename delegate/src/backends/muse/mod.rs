@@ -1,4 +1,4 @@
-//! The muse backend: binary, argv, spawn, and stream-json parsing.
+//! The muse backend: binary, staged argv, prompt-file spawn, and stream-json parsing.
 //!
 //! `muse exec --json` prints one JSON object per line. Parsing is fail-closed:
 //! success requires a completed terminal record, usage evidence for the
@@ -79,12 +79,9 @@ pub(crate) fn base_and_effort(model: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Staging argv for a run. The prompt rides after the `--` separator, exactly
-/// where the child takes it; spawn lowers this staging form into the real
-/// child wire argv (inserting `--workspace <cwd>` from the spec), so the
-/// staging form itself is never executed and must never be mistaken for
-/// child wire argv in tests: assert the actual child argv through a fake
-/// process instead. `--reasoning-effort` is sent only when the id carries a
+/// Staging argv for a run. The prompt is stored after `--` and written to a
+/// temporary 0600 file at spawn; the child receives its absolute path through
+/// `--prompt-file`. `--reasoning-effort` is sent only when the id carries a
 /// level; otherwise Muse uses its own default.
 pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
     // The session id is chosen before launch: resume passes the stored id, a
@@ -119,18 +116,57 @@ fn session_from_argv(argv: &[String]) -> Option<String> {
         .map(|w| w[1].clone())
 }
 
-/// Lower a staging argv plus the spec cwd into the real child argv. The
-/// staging form always ends in `-- <prompt>` (a separator plus a single
-/// trailing prompt element); the child replaces that separator with
-/// `--workspace <cwd>` followed by a fresh `--`, and the prompt stays the
-/// last element even when it is `--`.
-fn lower(staging: &[String], cwd: &str) -> Vec<String> {
-    let prompt = staging.last().cloned().unwrap_or_default();
+/// A private prompt file owned by one spawn. It lives in the system temp
+/// directory, not the workspace, and is removed when the drive closure ends.
+/// debt: SIGKILL can leave a file behind; add recovery if a second leaked file is observed or a stale-file sweep is added at delegate start.
+#[derive(Debug)]
+struct PromptFile {
+    path: std::path::PathBuf,
+}
+
+impl PromptFile {
+    fn create(prompt: &str) -> std::io::Result<Self> {
+        let name = format!(
+            "delegate-muse-prompt-{}-{}",
+            std::process::id(),
+            crate::util::random_uuid()
+        );
+        let path = std::path::absolute(std::env::temp_dir().join(name))?;
+        Self::create_at(&path, prompt)
+    }
+
+    fn create_at(path: &std::path::Path, prompt: &str) -> std::io::Result<Self> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        let prompt_file = Self {
+            path: path.to_path_buf(),
+        };
+        file.write_all(prompt.as_bytes())?;
+        Ok(prompt_file)
+    }
+}
+
+impl Drop for PromptFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Lower staged argv into the real child argv. Spawn replaces the staged
+/// `-- <prompt>` suffix with the workspace, prompt-file path and final `--`.
+fn lower(staging: &[String], cwd: &str, prompt_file: &std::path::Path) -> Vec<String> {
     let mut wire = staging[..staging.len().saturating_sub(2)].to_vec();
     wire.push("--workspace".into());
     wire.push(cwd.to_string());
+    wire.push("--prompt-file".into());
+    wire.push(prompt_file.to_string_lossy().into_owned());
     wire.push("--".into());
-    wire.push(prompt);
     wire
 }
 
@@ -162,8 +198,15 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     let base = base_and_effort(&spec.model).0.to_string();
     let tool_idle_ms = spec.tool_idle_ms;
     let wall_started_at = std::time::Instant::now();
+    let prompt = spec.argv.last().cloned().unwrap_or_default();
+    let prompt_file = match PromptFile::create(&prompt) {
+        Ok(file) => file,
+        Err(error) => {
+            return super::spawn_failed(&format!("cannot write muse prompt file: {error}"));
+        }
+    };
     let mut wired = spec.clone();
-    wired.argv = lower(&spec.argv, &spec.cwd);
+    wired.argv = lower(&spec.argv, &spec.cwd, &prompt_file.path);
     let started = match super::start_child(&wired) {
         Ok(s) => s,
         Err(msg) => return super::spawn_failed(&msg),
@@ -179,6 +222,7 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
         kill: super::killer(pid, reaped_k),
         session_id: launched_session.clone(),
         drive: Box::new(move |on| {
+            let _prompt_file = prompt_file;
             let mut state = MuseState::default();
             let cap = wall_cap_ms(tool_idle_ms);
             let wall_exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1085,6 +1129,57 @@ mod tests {
         path
     }
 
+    fn fake_muse_prompt_script(
+        dir: &std::path::Path,
+        fixture: &std::path::Path,
+        hold: &str,
+    ) -> std::path::PathBuf {
+        let body = format!(
+            r#"#!/bin/sh
+dir="{}"
+printf '%s\n' "$@" > "$dir/argv.txt"
+prompt_file=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--prompt-file" ]; then
+        prompt_file=$2
+        break
+    fi
+    shift
+done
+if [ -n "$prompt_file" ]; then
+    printf '%s' "$prompt_file" > "$dir/prompt-path"
+    cp "$prompt_file" "$dir/prompt-copy"
+fi
+touch "$dir/ready"
+{hold}
+cat "{}"
+"#,
+            dir.display(),
+            fixture.display(),
+        );
+        fake_muse_script(dir, &body)
+    }
+
+    fn wait_for_file(path: &std::path::Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    struct KillOnDrop(Box<dyn Fn() + Send + Sync>);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            (self.0)();
+        }
+    }
+
     fn scratch_dir(name: &str) -> crate::backends::TempDir {
         let dir = crate::backends::TempDir::new(&format!("muse-{name}"));
         std::fs::create_dir_all(dir.join("repo")).unwrap();
@@ -1219,6 +1314,13 @@ mod tests {
             .position(|a| a == "--reasoning-effort")
             .unwrap();
         assert_eq!(recorded[effort_at + 1], "high");
+        let prompt_at = recorded
+            .iter()
+            .position(|arg| arg == "--prompt-file")
+            .unwrap();
+        let prompt_path = std::path::PathBuf::from(&recorded[prompt_at + 1]);
+        assert!(!recorded.iter().any(|arg| arg == "hi"), "{recorded:?}");
+        assert!(!prompt_path.exists());
     }
 
     #[test]
@@ -1231,12 +1333,214 @@ mod tests {
     }
 
     #[test]
-    fn lowering_carries_the_workspace_and_prompt() {
+    fn lowering_carries_the_workspace_and_prompt_file_not_the_prompt() {
         let staging = argv("muse/muse-spark-1.3-contributor", Some("S"), "hi");
-        let wire = lower(&staging, "/work/repo");
-        for expected in ["--workspace", "/work/repo", "--", "hi"] {
-            assert!(wire.iter().any(|arg| arg == expected));
-        }
+        let wire = lower(&staging, "/work/repo", std::path::Path::new("/tmp/prompt"));
+        assert_eq!(
+            wire,
+            [
+                "exec",
+                "--json",
+                "--disable-approval",
+                "--trust-workspace",
+                "--model",
+                "muse-spark-1.3-contributor",
+                "--session-id",
+                "S",
+                "--workspace",
+                "/work/repo",
+                "--prompt-file",
+                "/tmp/prompt",
+                "--",
+            ]
+        );
+        assert!(
+            !wire.iter().any(|arg| arg == "hi"),
+            "prompt in argv: {wire:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_file_is_private_lives_until_child_exit_and_is_removed_after_drive() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::test_env::lock();
+        let dir = scratch_dir("prompt-live");
+        let tmpdir = dir.to_path_buf();
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let fixture = dir.join("fixture.stdout");
+        std::fs::write(&fixture, TOOL_CALLS_FIX).unwrap();
+        let hold = "i=0\nwhile [ \"$i\" -lt 500 ] && [ ! -e \"$dir/release\" ]; do sleep 0.01; i=$((i + 1)); done\n";
+        let fake = fake_muse_prompt_script(&dir, &fixture, hold);
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let prompt = "prompt byte for byte\nwith multibyte text: café";
+        let spec = job_spec(
+            &resolve_bin(None),
+            argv("muse/muse-spark-1.3-contributor", None, prompt),
+            &cwd,
+        );
+        let spawned = spawn(&spec);
+        let kill = KillOnDrop(spawned.kill);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let on = |_| {};
+            tx.send((spawned.drive)(&on)).unwrap();
+        });
+
+        wait_for_file(&dir.join("ready"));
+        let wire: Vec<String> = std::fs::read_to_string(dir.join("argv.txt"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let prompt_path = wire
+            .windows(2)
+            .find(|pair| pair[0] == "--prompt-file")
+            .map(|pair| std::path::PathBuf::from(&pair[1]));
+        let path_exists_while_running = prompt_path.as_ref().is_some_and(|path| path.is_file());
+        let path_is_absolute = prompt_path.as_ref().is_some_and(|path| path.is_absolute());
+        let path_is_in_tmpdir = prompt_path
+            .as_ref()
+            .is_some_and(|path| path.starts_with(&tmpdir));
+        let file_mode = prompt_path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.permissions().mode() & 0o777);
+        let file_contents = prompt_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok());
+        let prompt_in_argv = wire.iter().any(|arg| arg.contains(prompt));
+        std::fs::write(dir.join("release"), b"").unwrap();
+        let result = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(result) => result,
+            Err(error) => {
+                (kill.0)();
+                panic!("muse drive did not finish after release: {error}");
+            }
+        };
+
+        let path = prompt_path.expect("--prompt-file path in child argv");
+        assert!(path_is_absolute);
+        assert!(
+            path_is_in_tmpdir,
+            "{} outside {}",
+            path.display(),
+            tmpdir.display()
+        );
+        assert!(path_exists_while_running);
+        assert_eq!(file_mode, Some(0o600));
+        assert_eq!(file_contents.as_deref(), Some(prompt.as_bytes()));
+        assert!(!prompt_in_argv, "prompt in child argv: {wire:?}");
+        assert_eq!(result.is_error, Some(false), "{}", result.text);
+        assert!(
+            !path.exists(),
+            "prompt file survived drive: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn prompt_file_is_removed_after_cancelled_drive() {
+        let _lock = crate::test_env::lock();
+        let dir = scratch_dir("prompt-cancel");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let fixture = dir.join("fixture.stdout");
+        std::fs::write(&fixture, TOOL_CALLS_FIX).unwrap();
+        let fake = fake_muse_prompt_script(&dir, &fixture, "exec tail -f /dev/null\n");
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let spec = job_spec(
+            &resolve_bin(None),
+            argv("muse/muse-spark-1.3-contributor", None, "cancel me"),
+            &cwd,
+        );
+        let spawned = spawn(&spec);
+        let kill = KillOnDrop(spawned.kill);
+        wait_for_file(&dir.join("ready"));
+        let wire: Vec<String> = std::fs::read_to_string(dir.join("argv.txt"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let prompt_path = wire
+            .windows(2)
+            .find(|pair| pair[0] == "--prompt-file")
+            .map(|pair| std::path::PathBuf::from(&pair[1]));
+        let existed_before_cancel = prompt_path.as_ref().is_some_and(|path| path.is_file());
+        (kill.0)();
+        let on = |_| {};
+        let drive = spawned.drive;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(drive(&on)).unwrap());
+        let result = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(result) => result,
+            Err(error) => {
+                (kill.0)();
+                panic!("muse drive did not finish after cancel: {error}");
+            }
+        };
+        let path = prompt_path.expect("--prompt-file path in child argv");
+        assert!(existed_before_cancel);
+        assert!(
+            !path.exists(),
+            "prompt file survived cancel: {}",
+            path.display()
+        );
+        assert!(!result.clean_exit);
+    }
+
+    #[test]
+    fn prompt_file_is_removed_when_spawned_is_dropped_undriven() {
+        let _lock = crate::test_env::lock();
+        let dir = scratch_dir("prompt-undriven");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let fixture = dir.join("fixture.stdout");
+        std::fs::write(&fixture, TOOL_CALLS_FIX).unwrap();
+        let fake = fake_muse_prompt_script(&dir, &fixture, "sleep 1\n");
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let spec = job_spec(
+            &resolve_bin(None),
+            argv("muse/muse-spark-1.3-contributor", None, "undriven"),
+            &cwd,
+        );
+        let spawned = spawn(&spec);
+        wait_for_file(&dir.join("ready"));
+        let wire: Vec<String> = std::fs::read_to_string(dir.join("argv.txt"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let prompt_path = wire
+            .windows(2)
+            .find(|pair| pair[0] == "--prompt-file")
+            .map(|pair| std::path::PathBuf::from(&pair[1]));
+        let existed_before_drop = prompt_path.as_ref().is_some_and(|path| path.is_file());
+        (spawned.kill)();
+        drop(spawned);
+        let removed_after_drop = prompt_path.as_ref().is_some_and(|path| !path.exists());
+        assert!(
+            prompt_path.is_some(),
+            "--prompt-file missing from child argv: {wire:?}"
+        );
+        assert!(existed_before_drop);
+        assert!(removed_after_drop);
+    }
+
+    #[test]
+    fn prompt_file_creation_does_not_reuse_a_preexisting_path() {
+        let dir = scratch_dir("prompt-existing");
+        let path = dir.join("already-there");
+        std::fs::write(&path, b"keep this file").unwrap();
+
+        let error = PromptFile::create_at(&path, "new prompt").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep this file");
     }
 
     #[test]
@@ -1284,7 +1588,7 @@ mod tests {
         let launched = spawned.session_id.clone().expect("launch session");
         assert!(!launched.is_empty());
         assert!(staging.iter().any(|arg| arg == &launched));
-        // The fake ignores stdin (null) and exits at once: the drive returns.
+        // The fake ignores the prompt file and exits at once: the drive returns.
         let result = (spawned.drive)(&|_| {});
         assert_eq!(result.text, "done");
         assert_eq!(result.is_error, Some(false));
@@ -1299,9 +1603,18 @@ mod tests {
             .lines()
             .map(str::to_string)
             .collect();
-        for expected in ["--workspace", cwd.as_str(), "--", "hi"] {
-            assert!(recorded.iter().any(|arg| arg == expected));
+        for expected in ["--workspace", cwd.as_str(), "--prompt-file", "--"] {
+            assert!(recorded.iter().any(|arg| arg == expected), "{recorded:?}");
         }
+        let prompt_at = recorded
+            .iter()
+            .position(|arg| arg == "--prompt-file")
+            .unwrap();
+        let prompt_path = std::path::PathBuf::from(&recorded[prompt_at + 1]);
+        assert!(prompt_path.is_absolute());
+        assert!(prompt_path.starts_with(dir.to_path_buf()));
+        assert!(!prompt_path.exists());
+        assert!(!recorded.iter().any(|arg| arg == "hi"), "{recorded:?}");
         assert!(!recorded.iter().any(|a| a == "--disable-sandbox"));
     }
 

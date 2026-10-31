@@ -1884,7 +1884,89 @@ fn muse_run_applies_the_host_sandbox_switch() {
             expect_disabled,
             "{name}: {argv:?}"
         );
+        let prompt_at = argv
+            .iter()
+            .position(|arg| arg == "--prompt-file")
+            .expect("--prompt-file");
+        let prompt_path = PathBuf::from(&argv[prompt_at + 1]);
+        assert!(prompt_path.is_absolute(), "{name}: {argv:?}");
+        assert!(prompt_path.starts_with(&e.dir), "{name}: {argv:?}");
+        assert!(!prompt_path.exists(), "{name}: prompt file survived run");
+        assert!(
+            !argv.iter().any(|arg| arg == "do the thing"),
+            "{name}: {argv:?}"
+        );
     }
+}
+
+#[test]
+fn muse_prompt_over_128_kib_is_read_from_prompt_file() {
+    let e = Env::new("muse-large-prompt");
+    let dir_str = e.dir.to_str().unwrap().to_string();
+    let prompt = format!("{}!", "x".repeat(128 * 1024));
+    let expected = format!("{prompt}\n\n---\n\n{}", delegate::prompt::status_block());
+    let fixture_src = format!(
+        "{}/tests/fixtures/contract/muse/tool-calls-fix.stdout",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::write(
+        e.dir.join("fixture.stdout"),
+        std::fs::read(fixture_src).unwrap(),
+    )
+    .unwrap();
+    let argv_path = e.dir.join("argv.txt");
+    let copied_prompt = e.dir.join("prompt.received");
+    let fake = e.dir.join("muse.sh");
+    std::fs::write(
+        &fake,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > {}
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--prompt-file" ]; then cp "$2" {}; break; fi
+  shift
+done
+cat {}
+"#,
+            argv_path.display(),
+            copied_prompt.display(),
+            e.dir.join("fixture.stdout").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = e.dir.join("nonexistent-profile.json");
+    let out = e.delegate_env(
+        &["run", "--model", "muse/muse-spark-1.3-contributor"],
+        Some(&prompt),
+        &[
+            ("MUSE_BIN", fake.to_str().unwrap()),
+            ("HOME", &dir_str),
+            ("DELEGATE_HOST_PROFILE", profile.to_str().unwrap()),
+        ],
+    );
+    let id = e.ok_output(&out);
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let received = std::fs::read(&copied_prompt).unwrap();
+    assert_eq!(received, expected.as_bytes());
+    let argv: Vec<String> = std::fs::read_to_string(argv_path)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let prompt_at = argv
+        .iter()
+        .position(|arg| arg == "--prompt-file")
+        .expect("--prompt-file");
+    let prompt_path = PathBuf::from(&argv[prompt_at + 1]);
+    assert!(prompt_path.is_absolute());
+    assert!(prompt_path.starts_with(&e.dir));
+    assert!(!prompt_path.exists(), "prompt file survived run");
+    assert!(
+        !argv.iter().any(|arg| arg.contains(&prompt)),
+        "prompt in argv"
+    );
 }
 
 /// A reminder-task loop emits no meaningful progress, so the idle watchdog
