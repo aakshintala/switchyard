@@ -435,6 +435,7 @@ expect_verdict "TKT tkt-plan SET grant=switchyard:1234 log=*" "valid grant"
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "valid grant records the author"
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "1234" ] || fail "valid grant records the comment"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "valid grant starts unused"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "plain grant has no owner approval"
 
 setup_case grant-invalid
 rebase_plan
@@ -455,6 +456,10 @@ grant_usage_case 'empty --comment' --by switchyard --comment ''
 grant_usage_case 'space in --by' --by 'a b' --comment 1234
 grant_usage_case 'space in --comment' --by switchyard --comment 'x y'
 grant_usage_case 'tab in --comment' --by switchyard --comment $'x\ty'
+grant_usage_case 'empty --owner-approved' --by switchyard --comment 1234 --owner-approved ''
+grant_usage_case 'space in --owner-approved' --by switchyard --comment 1234 --owner-approved 'x y'
+grant_usage_case 'tab in --owner-approved' --by switchyard --comment 1234 --owner-approved $'x\ty'
+grant_usage_case 'missing --owner-approved value' --by switchyard --comment 1234 --owner-approved
 grant_usage_case 'unknown flag' --by switchyard --comment 1234 --other
 grant_usage_case 'stray argument' --by switchyard --comment 1234 extra
 
@@ -484,6 +489,32 @@ grep -q -- '--owner-approved' "$CDIR/stderr.txt" || fail "used grant refusal nam
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "99" ] || fail "used grant refusal keeps the first comment"
 [ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "used grant refusal keeps used state"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "used grant refusal leaves owner empty"
+
+setup_case grant-owner-approved
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-owner-approved seed confirm"
+bash "$TKT_STATE" "$S" set granted_by 'old:by' || fail "grant-owner-approved seed old grant author"
+bash "$TKT_STATE" "$S" set granted_comment 'x:y' || fail "grant-owner-approved seed old grant comment"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-owner-approved seed used"
+run_plan grant-round --by 'switchyard:bot' --comment 'abc:def' --owner-approved 'own:1'
+[ "$RC" -eq 0 ] || fail "owner-approved grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan SET grant=switchyard:bot:abc:def log=*" "owner-approved grant"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard:bot" ] || fail "owner-approved grant records the author"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "abc:def" ] || fail "owner-approved grant records the comment"
+[ "$(bash "$TKT_STATE" "$S" get granted_owner)" = "own:1" ] || fail "owner-approved grant records the approval"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "owner-approved grant starts unused"
+run_plan grant-round --by later --comment later
+[ "$RC" -eq 2 ] || fail "third grant without approval exits 2"
+grep -q 'switchyard:bot' "$CDIR/stderr.txt" || fail "third grant refusal names the latest author"
+grep -q 'abc:def' "$CDIR/stderr.txt" || fail "third grant refusal names the latest comment"
+[ "$(bash "$TKT_STATE" "$S" get granted_owner)" = "own:1" ] || fail "third grant refusal keeps owner approval"
+
+setup_case grant-first-owner-approved
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-first-owner-approved seed confirm"
+run_plan grant-round --by switchyard --comment first --owner-approved 'own:2'
+[ "$RC" -eq 0 ] || fail "first owner-approved grant exits 0 (rc=$RC)"
+[ "$(bash "$TKT_STATE" "$S" get granted_owner)" = "own:2" ] || fail "first grant records owner approval"
 
 setup_case grant-before-confirm
 rebase_plan
