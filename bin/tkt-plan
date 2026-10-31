@@ -24,6 +24,7 @@ if [ ! -r "$tokens_lib" ]; then echo "tkt-plan: cannot read shared lib: $tokens_
 tktjob="$bin_dir/tkt-job"; plancheck="$bin_dir/plan-check"; plangate="$bin_dir/plan-gate"
 postplan="$bin_dir/post-plan"; plansweep="$bin_dir/plan-sweep"
 vbrief="$HOME/.agents/skills/planning/briefs/verifier.md"; cbrief="$HOME/.agents/skills/planning/briefs/confirm.md"
+REPORT_LINES=38
 
 t() { "$tkt_state" "$state" "$@"; }
 
@@ -69,8 +70,15 @@ open_lines() {
   elif [ ! -s "$report" ] || [ "$(head -n 1 "$report")" = "PLAN OK" ]; then
     printf 'none\n'
   else
-    head -n 38 "$report"
+    head -n "$REPORT_LINES" "$report"
   fi
+}
+
+grant_pending() {
+  local granted_by granted_used
+  granted_by="$(t get granted_by 2>/dev/null || true)"
+  granted_used="$(t get granted_used 2>/dev/null || true)"
+  [ -n "$granted_by" ] && [ -z "$granted_used" ]
 }
 
 vmodel() {
@@ -116,7 +124,7 @@ runjob() {
           fi
           ;;
       esac
-      w="${line#TKT tkt-job }"; emit "${w% log=*}" "$jrc" "$(head -n 38 <<<"$job_out")"
+      w="${line#TKT tkt-job }"; emit "${w% log=*}" "$jrc" "$(head -n "$REPORT_LINES" <<<"$job_out")"
     fi
   }
   [ -r "$rep" ] || { echo "tkt-plan: tkt-job wrote no report: $rep" >&2; exit 3; }
@@ -161,11 +169,11 @@ do_verify() {
   while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
   if [ "${#files[@]}" -gt 0 ]; then
     stat="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${files[@]}" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
-    if [ -n "$stat" ]; then n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${files[@]}" | wc -l | tr -d ' ')"; emit "STALE n=$n base=$base" 1 "$({ plan_bare_dirs "$plan" "$worktree"; head -n 38 <<<"$stat"; })"; fi
+    if [ -n "$stat" ]; then n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${files[@]}" | wc -l | tr -d ' ')"; emit "STALE n=$n base=$base" 1 "$({ plan_bare_dirs "$plan" "$worktree"; head -n "$REPORT_LINES" <<<"$stat"; })"; fi
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
-  [ "$prc" -ne 1 ] || emit "PLAN-CHECK n=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n 38 <<<"$pc_out")"
+  [ "$prc" -ne 1 ] || emit "PLAN-CHECK n=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"
   round="$(ronum)"
   # The drift exemption is derived from recorded state, not a caller flag: a
   # verify is exempt only when a previous round recorded a base and main
@@ -215,7 +223,7 @@ do_verify() {
     t set verifier_round "$((round + 1))"
   fi
   t set last_report "$rep"
-  emit "$RV" "$REC" "$(head -n 38 "$rep")"
+  emit "$RV" "$REC" "$(head -n "$REPORT_LINES" "$rep")"
 }
 
 do_confirm() {
@@ -224,11 +232,9 @@ do_confirm() {
     --edits) [ $# -ge 2 ] || usage; edits="$2"; shift 2;; *) usage;; esac; done
   [ -n "$edits" ] || usage; [ -r "$edits" ] || { echo "tkt-plan: cannot read edits file: $edits" >&2; exit 2; }
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
-  granted_by="$(t get granted_by 2>/dev/null || true)"
-  granted_used="$(t get granted_used 2>/dev/null || true)"
   granted=0
   if [ -n "$confirmed_for" ]; then
-    if [ -n "$granted_by" ] && [ -z "$granted_used" ]; then
+    if grant_pending; then
       granted=1
     else
       emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage" "$(open_lines)"
@@ -245,28 +251,27 @@ do_confirm() {
   if [ "$granted" -eq 1 ]; then t set granted_used 1; fi
   t set last_report "$rep"
   t set confirmed_for "$(ronum)"
-  emit "$RV" "$REC" "$(head -n 38 "$rep")"
+  emit "$RV" "$REC" "$(head -n "$REPORT_LINES" "$rep")"
 }
 
 do_grant() {
-  who=""; comment=""; have_by=0; have_comment=0
+  who=""; comment=""
   while [ $# -gt 0 ]; do case "$1" in
-    --by) [ $# -ge 2 ] || usage; who="$2"; have_by=1; shift 2;;
-    --comment) [ $# -ge 2 ] || usage; comment="$2"; have_comment=1; shift 2;;
+    --by) [ $# -ge 2 ] || usage; who="$2"; shift 2;;
+    --comment) [ $# -ge 2 ] || usage; comment="$2"; shift 2;;
     *) usage;; esac; done
-  [ "$have_by" -eq 1 ] && [ "$have_comment" -eq 1 ] || usage
   [ -n "$who" ] && [ -n "$comment" ] || usage
-  case "$who" in *[[:space:]]*) usage;; esac
-  case "$comment" in *[[:space:]]*) usage;; esac
+  case "$who$comment" in *[[:space:]]*) usage;; esac
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   [ -n "$confirmed_for" ] || { echo "tkt-plan: no limit reached: the confirm round is still open" >&2; exit 2; }
-  granted_by="$(t get granted_by 2>/dev/null || true)"
-  granted_used="$(t get granted_used 2>/dev/null || true)"
-  if [ -n "$granted_by" ] && [ -z "$granted_used" ]; then
-    echo "tkt-plan: grant already pending: $granted_by" >&2
+  if grant_pending; then
+    pending_by="$(t get granted_by 2>/dev/null || true)"
+    pending_comment="$(t get granted_comment 2>/dev/null || true)"
+    echo "tkt-plan: grant already pending: $pending_by:$pending_comment" >&2
     exit 2
   fi
-  t set granted_by "$who:$comment"
+  t set granted_by "$who"
+  t set granted_comment "$comment"
   t set granted_used ""
   emit "SET grant=$who:$comment" 0
 }
@@ -295,7 +300,7 @@ do_set() {
   # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
   if [ "$old_plan" != "$plan" ]; then
     t set verifier_round 0; t set confirmed_for ""; t set verified_base ""
-    t set granted_by ""; t set granted_used ""; t set last_report ""
+    t set granted_by ""; t set granted_comment ""; t set granted_used ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
   fi
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
