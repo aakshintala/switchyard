@@ -688,8 +688,7 @@ mod tests {
     #[test]
     fn home_fallback_when_which_finds_no_codex() {
         let _env = crate::test_env::lock();
-        let empty = std::env::temp_dir().join(format!("cdm-codex-nobin-{}", std::process::id()));
-        std::fs::create_dir_all(&empty).unwrap();
+        let empty = crate::backends::TempDir::new("cdm-codex-nobin");
         let _path = crate::test_env::EnvGuard::set("PATH", empty.to_str().unwrap());
         let _codex = crate::test_env::EnvGuard::remove("CODEX_BIN");
         let bin = resolve_bin(None);
@@ -697,7 +696,6 @@ mod tests {
             bin.ends_with(".local/bin/codex"),
             "home fallback when PATH has no codex: {bin}"
         );
-        let _ = std::fs::remove_dir_all(&empty);
     }
 
     #[test]
