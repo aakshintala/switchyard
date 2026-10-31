@@ -1173,9 +1173,9 @@ cat "{}"
         }
     }
 
-    struct KillOnDrop(Box<dyn Fn() + Send + Sync>);
+    struct KillOnDrop<F: Fn() + Send + Sync>(F);
 
-    impl Drop for KillOnDrop {
+    impl<F: Fn() + Send + Sync> Drop for KillOnDrop<F> {
         fn drop(&mut self) {
             (self.0)();
         }
@@ -1508,7 +1508,10 @@ cat "{}"
         let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
         let fixture = dir.join("fixture.stdout");
         std::fs::write(&fixture, TOOL_CALLS_FIX).unwrap();
-        let fake = fake_muse_prompt_script(&dir, &fixture, "sleep 1\n");
+        let hold = r#"while [ ! -e "$dir/release" ]; do sleep 0.01; done
+touch "$dir/released"
+"#;
+        let fake = fake_muse_prompt_script(&dir, &fixture, hold);
         let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
         let cwd = dir.join("repo").to_string_lossy().into_owned();
         let spec = job_spec(
@@ -1517,6 +1520,7 @@ cat "{}"
             &cwd,
         );
         let spawned = spawn(&spec);
+        let kill = KillOnDrop(&*spawned.kill);
         wait_for_file(&dir.join("ready"));
         let wire: Vec<String> = std::fs::read_to_string(dir.join("argv.txt"))
             .unwrap()
@@ -1528,7 +1532,9 @@ cat "{}"
             .find(|pair| pair[0] == "--prompt-file")
             .map(|pair| std::path::PathBuf::from(&pair[1]));
         let existed_before_drop = prompt_path.as_ref().is_some_and(|path| path.is_file());
-        (spawned.kill)();
+        std::fs::write(dir.join("release"), b"release").unwrap();
+        wait_for_file(&dir.join("released"));
+        drop(kill);
         drop(spawned);
         let removed_after_drop = prompt_path.as_ref().is_some_and(|path| !path.exists());
         assert!(

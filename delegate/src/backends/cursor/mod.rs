@@ -244,13 +244,7 @@ fn finish(
             ..Default::default()
         }
     };
-    if let Some(error) = stdin_err {
-        result.is_error = Some(true);
-        if !result.stderr.is_empty() && !result.stderr.ends_with('\n') {
-            result.stderr.push('\n');
-        }
-        result.stderr.push_str(&error);
-    }
+    super::append_stdin_error(&mut result, stdin_err);
     result
 }
 

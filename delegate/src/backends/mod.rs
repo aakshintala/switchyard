@@ -119,6 +119,16 @@ impl Backend {
     /// Muse writes it to a temporary file. Spawn lowers the staging suffix to
     /// each backend's wire form, so tests must inspect the child argv and its
     /// input channel rather than treating this form as the executed argv.
+    ///
+    /// Transport evidence: Cursor's minified CLI bundle at
+    /// `~/.local/share/cursor-agent/versions/2026.10.01-14929f9/1962.index.js`,
+    /// module `./src/commands/build-prompt.ts`, byte offset 9580, reads stdin
+    /// only without a positional prompt. Claude 2.1.316's stdin probe plus
+    /// `claude --help` (`[options] [command] [prompt]`; `--input-format` defaults
+    /// to `text`) confirm stdin input without a positional prompt. Fiber's
+    /// `crates/main/src/cli.rs:978,1229` and `docs/invocation.md:65-66` document
+    /// final `-` as stdin. Muse's `muse exec --help` output (1.4.14) documents
+    /// file input on the `--prompt-file <PATH>` line.
     pub fn argv(self, model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
         match self {
             Self::Cursor => cursor::argv(model, session, prompt),
@@ -223,6 +233,15 @@ pub(crate) fn spawn_stdin_writer(
             .err()
             .map(|e| format!("{name} stdin write failed: {e}"))
     })
+}
+
+fn append_stdin_error(result: &mut BackendResult, stdin_err: Option<String>) {
+    let Some(error) = stdin_err else { return };
+    result.is_error = Some(true);
+    if !result.stderr.is_empty() && !result.stderr.ends_with('\n') {
+        result.stderr.push('\n');
+    }
+    result.stderr.push_str(&error);
 }
 
 /// Like [`start_child`], but the child inherits `stdin` instead of null:

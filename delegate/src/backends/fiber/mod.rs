@@ -513,7 +513,7 @@ fn finish(
             permission_denials,
             ..Default::default()
         };
-        append_stdin_error(&mut result, stdin_err);
+        super::append_stdin_error(&mut result, stdin_err);
         return result;
     };
     let payload = exited.get("payload").cloned().unwrap_or_default();
@@ -570,18 +570,8 @@ fn finish(
         permission_denials,
         provider_status,
     };
-    append_stdin_error(&mut result, stdin_err);
+    super::append_stdin_error(&mut result, stdin_err);
     result
-}
-
-fn append_stdin_error(result: &mut BackendResult, stdin_err: Option<String>) {
-    if let Some(error) = stdin_err {
-        result.is_error = Some(true);
-        if !result.stderr.is_empty() && !result.stderr.ends_with('\n') {
-            result.stderr.push('\n');
-        }
-        result.stderr.push_str(&error);
-    }
 }
 
 /// Lower the staged prompt into Fiber's final `-` stdin argument.
