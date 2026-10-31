@@ -194,12 +194,16 @@ last_review_header() {
 }
 
 ci_display() {
-  # ci_display REPO PR SHA: ci_state, but a draft PR with no CI prints draft.
-  # A draft has no CI until ship-pr marks it ready. A failed lookup stays none.
-  local ci
+  # ci_display REPO PR SHA: ci_state, but a draft PR never prints a bare pass.
+  # A draft prints draft, or draft-fail when a check run failed. A failed
+  # isDraft lookup reports none when ci_state would otherwise report pass.
+  local ci draft
   ci="$(ci_state "$1" "$3")"
-  if [ "$ci" = none ] && [ "$(gh pr view "$2" --repo "$1" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
-    ci=draft
+  draft="$(gh pr view "$2" --repo "$1" --json isDraft --jq .isDraft 2>/dev/null)"
+  if [ "$draft" = true ]; then
+    if [ "$ci" = fail ]; then ci=draft-fail; else ci=draft; fi
+  elif [ "$draft" != false ] && [ "$ci" = pass ]; then
+    ci=none
   fi
   printf '%s' "$ci"
 }
