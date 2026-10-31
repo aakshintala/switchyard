@@ -255,6 +255,77 @@ fn wait_for_signal(path: &std::path::Path) {
     }
 }
 
+struct ReleaseOnDrop(std::path::PathBuf);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        if !self.0.exists() {
+            let _ = std::fs::write(&self.0, b"");
+        }
+    }
+}
+
+fn session_paths(h: &Harness) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(h.root()) else {
+        return Vec::new();
+    };
+    entries.flatten().map(|entry| entry.path()).collect()
+}
+
+fn state_dump(h: &Harness) -> Vec<String> {
+    std::fs::read_dir(h.root())
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            let state = std::fs::read_to_string(path.join("state.json"))
+                .unwrap_or_else(|error| format!("<unreadable: {error}>"));
+            format!("{}: {state}", path.display())
+        })
+        .collect()
+}
+
+fn wait_for_held_start(h: &Harness, held: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !held.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "start hold marker did not arrive at {held:?}; session states: {:?}",
+            state_dump(h)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_new_idle_session(h: &Harness, existing: &[std::path::PathBuf]) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        for entry in std::fs::read_dir(h.root()).unwrap().flatten() {
+            let path = entry.path();
+            if existing.contains(&path) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(path.join("state.json")) else {
+                continue;
+            };
+            let Ok(state) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            if state["status"] == "idle" && state["turnCount"].as_u64().is_some_and(|n| n >= 1) {
+                return state;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a new idle session; session states: {:?}",
+            state_dump(h)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn wait_cli(
     child: &mut Child,
     timeout: Duration,
@@ -486,18 +557,40 @@ fn start_rejects_an_effort_suffix_and_starts_a_bare_id() {
 fn start_fast_turn_and_startup_failure_paths_are_bounded() {
     let h = Harness::new();
     for marker in ["FAST", "BADMODEL"] {
-        let output = h.start(
-            marker.as_bytes(),
-            false,
-            "",
-            &[
-                ("DELEGATE_SESSION_START_POLL_MS", "500"),
-                ("DELEGATE_SESSION_START_WAIT_MS", "2000"),
-            ],
-        );
-        let id = id_from(&output);
-        let state = h.wait_state(&id, "fast first turn", |value| value["status"] == "idle");
-        assert_eq!(state["turnCount"], 1);
+        let hold = h
+            .base
+            .join(format!("hold-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        let held = std::path::PathBuf::from(format!("{}.held", hold.display()));
+        let hold_env = hold.to_string_lossy().into_owned();
+        let existing = session_paths(&h);
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let _release = ReleaseOnDrop(hold.clone());
+            let h_ref = &h;
+            let hold_ref = hold_env.as_str();
+            scope.spawn(move || {
+                tx.send(h_ref.start(
+                    marker.as_bytes(),
+                    false,
+                    "",
+                    &[("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold_ref)],
+                ))
+                .unwrap()
+            });
+            wait_for_held_start(&h, &held);
+            let state = wait_for_new_idle_session(&h, &existing);
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "start returned before the held turn was released"
+            );
+            std::fs::write(&hold, b"").unwrap();
+            let output = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("start did not return after releasing the hold");
+            let id = id_from(&output);
+            assert_eq!(state["id"], id);
+            assert_eq!(h.state(&id)["turnCount"], 1);
+        });
     }
     let brief = h.brief_file(b"brief");
     let missing = h.base.join("missing-muse");

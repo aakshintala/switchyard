@@ -10,7 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -368,6 +368,24 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     // as soon as the named ready file exists. Unset, this costs one
     // `env::var_os` call and the wait loop is unchanged.
     let timeout_on_ready = std::env::var_os("DELEGATE_SESSION_TEST_TIMEOUT_ON_READY");
+    // Tests hold start before its first state read until the path exists or the deadline passes.
+    let hold_start_until = std::env::var_os("DELEGATE_SESSION_TEST_HOLD_START_UNTIL");
+    if let Some(release) = hold_start_until.map(PathBuf::from) {
+        let mut held = release.as_os_str().to_os_string();
+        held.push(".held");
+        File::create(held)
+            .and_then(|mut file| file.write_all(b""))
+            .map_err(|error| failed(format!("could not create start hold marker: {error}")))?;
+        loop {
+            if release.exists() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return startup_timeout(&paths, &id, &mut child);
+            }
+            thread::sleep(Duration::from_millis(poll));
+        }
+    }
     loop {
         let current = state::read_state(&paths, &id)
             .map_err(|error| failed(format!("state unreadable: {error}")))?;
@@ -417,14 +435,18 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
             .as_ref()
             .is_some_and(|path| Path::new(path).exists());
         if Instant::now() >= deadline || ready_timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            state::reap_recorded_host(&paths, &id);
-            mark_start_failed(&paths, &id, child.id(), "session startup timed out".into());
-            return Err(failed("session startup timed out"));
+            return startup_timeout(&paths, &id, &mut child);
         }
         thread::sleep(Duration::from_millis(poll));
     }
+}
+
+fn startup_timeout(paths: &state::Paths, id: &str, child: &mut std::process::Child) -> Result<i32> {
+    let _ = child.kill();
+    let _ = child.wait();
+    state::reap_recorded_host(paths, id);
+    mark_start_failed(paths, id, child.id(), "session startup timed out".into());
+    Err(failed("session startup timed out"))
 }
 
 fn mark_start_failed(paths: &state::Paths, id: &str, supervisor_pid: u32, message: String) {
