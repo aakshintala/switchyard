@@ -823,6 +823,76 @@ fn watch_now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Build the one-line status output, including the terminal result's text and change summary.
+fn status_line(id: &str, rec: &serde_json::Value) -> String {
+    let state = rec
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("UNKNOWN");
+    let result = rec.get("result").filter(|value| value.is_object());
+    let mut parts = Vec::new();
+
+    if state != "DONE" && state != "RUNNING" {
+        if let Some(text) = result
+            .and_then(|value| value.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| {
+                text.split(['\n', '\r'])
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+            })
+        {
+            parts.push(text.to_string());
+        }
+    }
+
+    if state != "RUNNING"
+        && let Some(files) = result
+            .and_then(|value| value.get("changeSet"))
+            .and_then(|change_set| change_set.get("filesChanged"))
+            .and_then(serde_json::Value::as_array)
+            .filter(|files| !files.is_empty())
+    {
+        let file_count = files.len();
+        let mut changes = format!(
+            "{file_count} file{} changed",
+            if file_count == 1 { "" } else { "s" }
+        );
+        let uncommitted =
+            result
+                .and_then(|value| value.get("changeSet"))
+                .is_some_and(|change_set| {
+                    change_set
+                        .get("uncommittedFiles")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|files| !files.is_empty())
+                        || change_set
+                            .get("dirtyAfter")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                });
+        if uncommitted {
+            changes.push_str(", uncommitted");
+        }
+        let commit_count = result
+            .and_then(|value| value.get("changeSet"))
+            .and_then(|change_set| change_set.get("newCommits"))
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        changes.push_str(&format!(
+            ", {commit_count} commit{}",
+            if commit_count == 1 { "" } else { "s" }
+        ));
+        parts.push(changes);
+    }
+
+    if parts.is_empty() {
+        format!("{id}: {state}")
+    } else {
+        format!("{id}: {state} ({})", parts.join("; "))
+    }
+}
+
 /// `status` prints one line with the job's state (the record's `status`) and
 /// returns at once. It never waits: any known job exits 0, whatever its state.
 /// Unknown ids reuse `watch`'s `missing_record` error.
@@ -836,11 +906,7 @@ fn status(args: &[String]) -> Result<i32, Usage> {
     };
     let rec: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| Usage(format!("cannot read job {id}: {e}")))?;
-    let state = rec
-        .get("status")
-        .and_then(|s| s.as_str())
-        .unwrap_or("UNKNOWN");
-    println!("{id}: {state}");
+    println!("{}", status_line(id, &rec));
     Ok(0)
 }
 

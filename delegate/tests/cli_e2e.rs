@@ -665,6 +665,10 @@ fn status_summary_forms() {
             "ERROR",
         ),
         (
+            serde_json::json!({"status":"ERROR","result":{"changeSet":{"filesChanged":["one.rs",null,3],"uncommittedFiles":"not an array","dirtyAfter":false,"newCommits":"not an array"}}}),
+            "ERROR (3 files changed, 0 commits)",
+        ),
+        (
             serde_json::json!({"status":"RUNNING","result":{"text":"still running","changeSet":{"filesChanged":["one.rs"],"newCommits":[]}}}),
             "RUNNING",
         ),
