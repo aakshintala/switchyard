@@ -275,4 +275,59 @@ for race_round in {1..20}; do
   [ ! -e "$race_state.lock" ] || fail "race leaves no lock in round $race_round"
 done
 
+# A second reaper cannot take the dead owner's lock while the first reaper pauses.
+wait_for_test_file() {
+  local test_file="$1" test_count=0
+  while [ ! -e "$test_file" ] && [ "$test_count" -lt 500 ]; do
+    sleep 0.01
+    test_count=$((test_count + 1))
+  done
+  [ -e "$test_file" ]
+}
+S11="$T/reaper-exclusive.state"
+true &
+reaper_dead_pid=$!
+wait "$reaper_dead_pid"
+mkdir "$S11.lock"
+printf '%s %s\n' "$(hostname)" "$reaper_dead_pid" >"$S11.lock/pid"
+(
+  if TKT_STATE_TEST_REAP_PAUSE="$T/reap-a" bash "$TKT" "$S11" set a one >"$T/reap-a.log" 2>&1; then
+    reaper_a_rc=0
+  else
+    reaper_a_rc=$?
+  fi
+  printf '%s\n' "$reaper_a_rc" >"$T/reap-a.result"
+) &
+reaper_a_pid=$!
+if ! wait_for_test_file "$T/reap-a.ready"; then
+  wait_bounded "$reaper_a_pid" || true
+  fail "first reaper pauses inside the protected reaping section"
+fi
+(
+  if TKT_STATE_TEST_REAP_BLOCKED="$T/reap-b.blocked" bash "$TKT" "$S11" set b two >"$T/reap-b.log" 2>&1; then
+    reaper_b_rc=0
+  else
+    reaper_b_rc=$?
+  fi
+  printf '%s\n' "$reaper_b_rc" >"$T/reap-b.result"
+) &
+reaper_b_pid=$!
+if ! wait_for_test_file "$T/reap-b.blocked"; then
+  touch "$T/reap-a.release"
+  wait_bounded "$reaper_a_pid" || true
+  wait_bounded "$reaper_b_pid" || true
+  fail "second reaper is blocked on the reap mutex"
+fi
+[ -d "$S11.lock.reap" ] || fail "first reaper holds the reap mutex"
+[ ! -e "$T/reap-b.result" ] || fail "second reaper has not taken the state lock"
+touch "$T/reap-a.release"
+wait_bounded "$reaper_a_pid" || fail "first reaper writer exits 0"
+wait_bounded "$reaper_b_pid" || fail "second reaper writer exits 0"
+[ "$(cat "$T/reap-a.result")" = "0" ] || fail "first reaper writer succeeds"
+[ "$(cat "$T/reap-b.result")" = "0" ] || fail "second reaper writer succeeds"
+[ "$(bash "$TKT" "$S11" get a)" = "one" ] || fail "first reaper value is retained"
+[ "$(bash "$TKT" "$S11" get b)" = "two" ] || fail "second reaper value is retained"
+[ ! -e "$S11.lock" ] || fail "reapers leave no state lock"
+[ ! -e "$S11.lock.reap" ] || fail "reapers leave no reap mutex"
+
 echo "tkt-state: all cases passed"

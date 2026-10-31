@@ -115,17 +115,29 @@ take_lock() {
     if [ -n "$owner" ]; then
       IFS=' ' read -r owner_host owner_pid owner_extra <<<"$owner"
       if [ -n "$owner_host" ] && [ -n "$owner_pid" ] && [ -z "$owner_extra" ] && [ "$owner_host" = "$host" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
-        stale="$lockdir.stale.$$"
-        if mv "$lockdir" "$stale" 2>/dev/null; then
-          stale_owner="$(cat "$stale/pid" 2>/dev/null || true)"
-          if [ "$stale_owner" = "$owner" ]; then
-            rm -rf "$stale"
-          else
-            mv "$stale" "$lockdir" 2>/dev/null || true
+        reap_lockdir="$lockdir.reap"
+        if mkdir "$reap_lockdir" 2>/dev/null; then
+          current_owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
+          if [ "$current_owner" = "$owner" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+            pause_file="${TKT_STATE_TEST_REAP_PAUSE:-}"
+            if [ -n "$pause_file" ]; then
+              : >"$pause_file.ready"
+              pause_count=0
+              while [ ! -e "$pause_file.release" ] && [ "$pause_count" -lt 1000 ]; do
+                sleep 0.01
+                pause_count=$((pause_count + 1))
+              done
+            fi
+            rm -rf "$lockdir" 2>/dev/null || true
           fi
+          rmdir "$reap_lockdir" 2>/dev/null || true
+          attempt=$((attempt + 1))
+          continue
         fi
-        attempt=$((attempt + 1))
-        continue
+        blocked_file="${TKT_STATE_TEST_REAP_BLOCKED:-}"
+        if [ -n "$blocked_file" ]; then
+          : >"$blocked_file"
+        fi
       fi
     fi
     if [ "$attempt" -lt "$tries" ]; then
