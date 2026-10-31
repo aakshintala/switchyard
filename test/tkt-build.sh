@@ -315,7 +315,6 @@ EOF
     printf 'worktree=%s\n' "$WT"
     printf 'run=%s\n' "$CDIR/run"
     printf 'plan=%s\n' "$CDIR/plan.md"
-    printf 'spec=%s\n' 5
     printf 'closing=%s\n' 'Resolves #528'
     printf 'workflow_doc=%s\n' docs/agents/workflow.md
     printf 'model.lane=%s\n' lane-m
@@ -682,11 +681,11 @@ grep -q "$CDIR/spec.md" "$T/calls.log" && fail "spec-path: the spec path reaches
 
 # --- a missing state key names itself ---
 setup_case missingkey
-grep -v '^spec=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+grep -v '^plan=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
 run_build
 [ "$RC" -eq 2 ] || fail "missingkey exits 2 (rc=$RC)"
-expect_verdict "TKT tkt-build PRECONDITION missing=spec log=*" "missingkey"
-grep -q 'missing key: spec' "$CDIR/stderr.txt" || fail "missingkey: stderr names spec"
+expect_verdict "TKT tkt-build PRECONDITION missing=plan log=*" "missingkey"
+grep -q 'missing key: plan' "$CDIR/stderr.txt" || fail "missingkey: stderr names plan"
 
 # --- a plan without a Base line stops the build ---
 setup_case basemissing

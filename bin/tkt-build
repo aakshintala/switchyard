@@ -70,7 +70,7 @@ forward() {
     *) cat "$err" >&2; emit "$step-ERROR" "$rc" "$(tail -n 20 "$err")" ;;
   esac
 }
-require_keys repo issue branch worktree run plan spec
+require_keys repo issue branch worktree run plan
 repo="$(tkt get repo)"; issue="$(tkt get issue)"; branch="$(tkt get branch)"
 worktree="$(tkt get worktree)"; run="$(tkt get run)"; plan="$(tkt get plan)"
 slug="${repo//\//-}"; mkdir -p "$run"

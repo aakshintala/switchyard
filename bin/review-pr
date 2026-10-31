@@ -328,19 +328,7 @@ cmd_start() {
           issue_count=$((issue_count + 1))
         fi
         shift 2;;
-      --spec)
-        [ $# -ge 2 ] || usage
-        # digits only, with at least one non-zero digit; leading zeroes are fine
-        case "$2" in
-          ""|*[!0-9]*) spec_bad=1;;
-          *[1-9]*) spec_bad="";;
-          *) spec_bad=1;;
-        esac
-        if [ -n "$spec_bad" ]; then
-          printf 'review-pr: --spec takes an issue number, got: %s\n' "$2" >&2
-          exit 2
-        fi
-        specn="$2"; shift 2;;
+      --spec) [ $# -ge 2 ] || usage; specn="$2"; shift 2;;
       --model) [ $# -ge 2 ] || usage; model="$2"; shift 2;;
       --overbuild-model) [ $# -ge 2 ] || usage; omodel="$2"; shift 2;;
       --axes) [ $# -ge 2 ] || usage; axes="$2"; axes_given="1"; shift 2;;
