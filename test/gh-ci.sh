@@ -688,6 +688,23 @@ run_wait 7
 [ "$CODE" = "0" ] || fail "replaced required cancel passes (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} CI: pass" <<<"$OUT" || fail "replaced required pass line: [$OUT]"
 
+# a newer in-progress attempt-1 run keeps a check not present in the completed run
+reset_state
+set_heads "$A"; echo true >"$T/state/draft"; echo "$RULES_CI" >"$T/state/rules"
+set_checks \
+  '[{"name":"CI (draft)","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/1/job/11"},{"name":"Tests (ubuntu-24.04)","bucket":"pending","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/2/job/21"}]' \
+  '[{"name":"CI (draft)","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/1/job/11"},{"name":"Tests (ubuntu-24.04)","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/2/job/21"}]'
+printf '%s\n' \
+  '[{"id":1,"name":"CI","event":"pull_request","status":"completed","attempt":1},{"id":2,"name":"CI","event":"pull_request","status":"in_progress","attempt":1}]' \
+  '[{"id":1,"name":"CI","event":"pull_request","status":"completed","attempt":1},{"id":2,"name":"CI","event":"pull_request","status":"completed","attempt":1}]' \
+  >"$T/state/runs.txt"
+run_wait 7
+[ "$CODE" = "0" ] || fail "new attempt-1 check eventually passes (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} CI: pass" <<<"$OUT" || fail "new attempt-1 pass line: [$OUT]"
+grep -q 'pending=1 passed=1 failing=0' "$T/stderr.txt" \
+  || fail "new attempt-1 check was reported pending before it passed: [$(cat "$T/stderr.txt")]"
+grep -q '^7$' "$T/state/sleeps.txt" || fail "new attempt-1 pending check was polled again"
+
 # required names unreadable: the newest-run map still uses every check, so a
 # cancelled required check from a superseded run is pending, not failing
 reset_state
