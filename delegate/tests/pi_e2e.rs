@@ -20,14 +20,13 @@ n=$((n + 1)); printf '%s' "$n" > "$d/count"
   printf '%s\n' "$@"
   printf '%s\n' '---'
 } > "$d/argv.$n"
+cat > "$d/stdin.$n"
 rel="$d/go"
 # SLOW jobs wait for the release file, so the test can assert RUNNING first.
-case "$*" in
-  *SLOW*)
-    i=0
-    while [ ! -e "$rel" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done
-    ;;
-esac
+if grep -q SLOW "$d/stdin.$n"; then
+  i=0
+  while [ ! -e "$rel" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done
+fi
 # Replay the fixture as this session, like the real pi echoes the id back.
 sid=""
 prev=""
@@ -175,6 +174,25 @@ fn argv_flag(argv: &str, flag: &str) -> String {
 }
 
 #[test]
+fn pi_prompt_over_128_kib_is_sent_on_stdin() {
+    let e = Env::new("large-prompt");
+    let prompt = format!("MARKER-872{}", "x".repeat(200 * 1024));
+    let id = e.run_write(&prompt);
+    e.wait_terminal(&id);
+
+    let argv = e.last_argv();
+    assert!(
+        !argv.contains("MARKER-872"),
+        "argv contained prompt text: {argv}"
+    );
+    let stdin = std::fs::read(e.dir.join("stdin.1")).unwrap();
+    assert!(
+        stdin.starts_with(prompt.as_bytes()),
+        "stdin did not start with the prompt"
+    );
+}
+
+#[test]
 fn pi_run_finishes_with_pi_reported_cost() {
     let e = Env::new("run");
     let id = e.run_write("What is 17 * 23?");
@@ -209,10 +227,8 @@ fn pi_run_finishes_with_pi_reported_cost() {
     assert!(argv.contains(&"-p".to_string()), "{argv:?}");
     assert!(argv.windows(2).any(|w| w == ["--mode", "json"]), "{argv:?}");
     assert!(argv.windows(2).any(|w| w == ["--model", MODEL]), "{argv:?}");
-    assert!(
-        argv.iter().any(|a| a.contains("What is 17 * 23?")),
-        "{argv:?}"
-    );
+    let stdin = std::fs::read_to_string(e.dir.join("stdin.1")).unwrap();
+    assert!(stdin.contains("What is 17 * 23?"), "{stdin}");
 }
 
 #[test]
@@ -360,20 +376,18 @@ fn pi_503_is_resumed_on_the_same_session_and_recorded() {
     let ids: Vec<String> = calls.iter().map(|c| argv_flag(c, "--session-id")).collect();
     assert_eq!(ids[0], ids[1]);
     assert_eq!(retries[0]["sessionId"], ids[0].as_str());
+    let retry_prompt = std::fs::read_to_string(e.dir.join("stdin.2")).unwrap();
     assert!(
-        calls[1].lines().any(|a| a
-            .starts_with("Your previous turn stopped on a transient provider error (HTTP 503).")),
-        "{calls:?}"
+        retry_prompt
+            .starts_with("Your previous turn stopped on a transient provider error (HTTP 503)."),
+        "{retry_prompt}"
     );
     // The original brief ran once; the retry resumed instead of rerunning it.
+    let original_prompt = std::fs::read_to_string(e.dir.join("stdin.1")).unwrap();
     assert_eq!(
-        calls
-            .iter()
-            .flat_map(|c| c.lines())
-            .filter(|a| a.contains("first brief"))
-            .count(),
+        original_prompt.matches("first brief").count(),
         1,
-        "{calls:?}"
+        "{original_prompt}"
     );
 }
 
