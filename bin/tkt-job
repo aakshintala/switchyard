@@ -342,12 +342,21 @@ else
       esac
       ;;
     DONE|DONE_WITH_CONCERNS)
+      # A lane DONE supersedes its concerns even when a gate or commit check
+      # below stops the job. Concerns for other slots belong to other steps.
+      if [ "$status" = "DONE" ] && [ "$slot" = lane ]; then
+        tkt set concerns.lane ""
+      fi
       # A failed gate script rules over the status word.
       if [ "$gate_failed" -eq 1 ]; then
         verdict="GATE-FAIL rc=$gate_exit gatelog=${gate_path:--}"
         ec=1
       elif [ "$status" = "DONE_WITH_CONCERNS" ]; then
         verdict="CONCERNS id=$jobid"
+        concerns_file="$run/$namebase-concerns-$slot.md"
+        if [ -n "$concerns" ]; then concern_text="$concerns"; else concern_text="$text"; fi
+        printf '%s\n' "$concern_text" >"$concerns_file"
+        tkt set "concerns.$slot" "$concerns_file"
         ec=1
       elif [ "$expect_commits" -eq 1 ] && [ "$ncommits" -eq 0 ]; then
         verdict="NO-COMMITS id=$jobid gate=$gate_word"

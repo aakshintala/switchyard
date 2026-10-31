@@ -79,6 +79,7 @@ case "\$cmd" in
     case "\$prompt" in *-lane-*) slot="lane" ;; *-map-*) slot="map" ;; esac
     status="DONE"
     commits='["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]'
+    concerns='null'
     if [ "\$slot" = "map" ]; then
       text="\$(cat "$T/map-text")"
       commits='[]'
@@ -86,14 +87,18 @@ case "\$cmd" in
       text="lane done
 STATUS: DONE"
     fi
+    if [ "\$mode" = "concerns-lane" ] && [ "\$slot" = "lane" ]; then
+      status="DONE_WITH_CONCERNS"
+      concerns='"lane is unsure about X"'
+    fi
     if { [ "\$mode" = "ask-lane" ] && [ "\$slot" = "lane" ]; } || { [ "\$mode" = "ask-map" ] && [ "\$slot" = "map" ]; }; then
       status="NEEDS_CONTEXT"
       text="\$(cat "$T/ask-text")"
       commits='[]'
     fi
     mkdir -p "\$jobsdir"
-    jq -n --arg status "\$status" --arg text "\$text" --argjson commits "\$commits" \
-      '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log"}, changeSet: {headBefore: "a", headAfter: "b", newCommits: \$commits, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: null}, supervisorPid: 1}' \
+    jq -n --arg status "\$status" --arg text "\$text" --argjson commits "\$commits" --argjson concerns "\$concerns" \
+      '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log"}, changeSet: {headBefore: "a", headAfter: "b", newCommits: \$commits, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: \$concerns}, supervisorPid: 1}' \
       >"\$jobsdir/\$id.json"
     printf '%s\n' "\$id"
     ;;
@@ -391,6 +396,7 @@ run_build --lane-model lm --review-model rrm --overbuild-model oom
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "happy"
 [ "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')" -le 41 ] || fail "happy: over 40 digest lines"
 grep -q "^job|.*--slot lane.*--template .*lane.md.*--gate-from-plan.*--expect-commits" "$T/calls.log" || fail "happy: lane runs through tkt-job"
+grep -q '^concerns=' <<<"$OUT" && fail "happy: no empty concerns digest line"
 grep -q "BASE=$H" "$T/calls.log" || fail "happy: BASE reaches the lane"
 grep -q "GATE=true" "$T/calls.log" || fail "happy: GATE reaches the lane"
 grep -q "CLOSING=Resolves #528" "$T/calls.log" || fail "happy: CLOSING reaches the lane"
@@ -530,7 +536,7 @@ run_build
 expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "startfail"
 grep -q "cannot start reviews" <<<"$OUT" || fail "startfail: the digest holds the cause"
 
-# --- a lane ASK passes through and starts nothing after it ---
+# --- a non-CONCERNS lane ASK still forwards and starts nothing after it ---
 setup_case ask
 printf 'ask-lane' >"$T/delegate-mode"
 run_build
@@ -540,6 +546,64 @@ grep -q "which scope rules the retry?" <<<"$OUT" || fail "ask: the digest holds 
 grep -q "^gate|" "$T/calls.log" && fail "ask: the gate never runs"
 grep -q "^review-start|" "$T/calls.log" && fail "ask: review never starts"
 bash "$TKT_STATE" "$S" get head >/dev/null 2>&1 && fail "ask: pr and head stay unset"
+
+# --- a CONCERNS lane continues through the gate and passes its file to reviews ---
+setup_case concerns-lane
+printf 'concerns-lane' >"$T/delegate-mode"
+run_build
+[ "$RC" -eq 0 ] || fail "concerns-lane exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "concerns-lane"
+concerns_file="$CDIR/run/switchyard-528-concerns-lane.md"
+expect_state concerns.lane "$concerns_file" concerns-lane
+printf 'lane is unsure about X\n' | cmp - "$concerns_file" || fail "concerns-lane: concerns file keeps the lane text"
+[ "$(grep -c '^gate|' "$T/calls.log")" -eq 1 ] || fail "concerns-lane: gate runs once"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "concerns-lane: review pair starts"
+[ "$(grep '^review-start|' "$T/calls.log" | grep -F -c -- "--context $concerns_file")" -eq 3 ] || fail "concerns-lane: every review start receives its context file"
+grep -q '^review-collect|' "$T/calls.log" || fail "concerns-lane: reviews are collected"
+[ "$(sed -n '2p' <<<"$OUT")" = "concerns=$concerns_file" ] || fail "concerns-lane: digest starts with the concerns path"
+
+# --- a concerns path leads a long CHANGES digest instead of being truncated ---
+setup_case concerns-changes
+printf 'concerns-lane' >"$T/delegate-mode"
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+VERDICT spec: CHANGES
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+: >"$T/findings-src"
+i=1
+while [ "$i" -le 60 ]; do printf 'P1 finding %s\n' "$i" >>"$T/findings-src"; i=$((i + 1)); done
+run_build
+[ "$RC" -eq 1 ] || fail "concerns-changes exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=* p2=* p3=* mutants=* findings=* log=*" "concerns-changes"
+concerns_file="$CDIR/run/switchyard-528-concerns-lane.md"
+[ "$(sed -n '2p' <<<"$OUT")" = "concerns=$concerns_file" ] || fail "concerns-changes: digest starts with the concerns path"
+grep -qx "concerns=$concerns_file" <<<"$OUT" || fail "concerns-changes: digest keeps concerns ahead of truncated findings"
+
+# --- CONCERNS then DONE clears context before a from-gate review ---
+setup_case cleared-concerns
+lane_brief="$CDIR/run/switchyard-528-lane-1.md"
+printf 'lane brief\n' >"$lane_brief"
+printf 'concerns-lane' >"$T/delegate-mode"
+OUT="$("$T/bin/tkt-job" "$S" --slot lane --brief "$lane_brief" --model lane-m --expect-commits 2>"$CDIR/lane-stderr.txt")"; RC=$?
+[ "$RC" -eq 1 ] || fail "cleared-concerns initial CONCERNS exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-job CONCERNS id=stub-1 log=*" "cleared-concerns initial CONCERNS"
+concerns_file="$CDIR/run/switchyard-528-concerns-lane.md"
+expect_state concerns.lane "$concerns_file" cleared-concerns initial
+printf 'done' >"$T/delegate-mode"
+bash "$TKT_STATE" "$S" set job.lane '' || fail "cleared-concerns resets the lane job id"
+OUT="$("$T/bin/tkt-job" "$S" --slot lane --brief "$lane_brief" --model lane-m --expect-commits 2>"$CDIR/lane-stderr.txt")"; RC=$?
+[ "$RC" -eq 0 ] || fail "cleared-concerns follow-up DONE exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=b commits=1 gate=PASS log=*" "cleared-concerns follow-up DONE"
+expect_state concerns.lane "" cleared-concerns follow-up
+run_build --from gate
+[ "$RC" -eq 0 ] || fail "cleared-concerns from gate exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "cleared-concerns from gate"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "cleared-concerns: every review starts"
+grep '^review-start|' "$T/calls.log" | grep -q -- '--context' && fail "cleared-concerns: review starts have no context"
+grep -q '^concerns=' <<<"$OUT" && fail "cleared-concerns: digest has no concerns line"
 
 # --- a lane with no model is refused before dispatch, never a LANE-ERROR ---
 setup_case lane-error

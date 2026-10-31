@@ -1836,22 +1836,42 @@ grep -Fxq "review-pr: --context file not found: $T/nope.md" <<<"$err" || fail "m
   fail "missing --context leaves no run dir"
 [ ! -e "$T/state/runs.txt" ] || fail "missing --context launches no job"
 
-# --- case: --context without --verify prints the ignore note
+# --- case: review --context appears in the reviewer brief; no-context brief stays unchanged
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards DONE "VERDICT standards: APPROVE
 STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || \
+  fail "review without --context starts"
+cp "$T/state/prompt-standards.md" "$T/standards-baseline.md"
+! grep -Fq 'Context files outside the checkout' "$T/standards-baseline.md" || \
+  fail "review without --context adds no context section"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "review without --context collects"
+
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
 STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
-start_out="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
-  --model M --overbuild-model M2 --context "$T/findings.txt" 2>"$T/stderr-ctx.txt")" || fail "review with --context exits 0"
-grep -Fxq "review-pr: --context is only used with --verify; ignored" "$T/stderr-ctx.txt" || \
-  fail "review with --context prints its ignore note"
-[ "$(grep -c 'is only used with --verify; ignored$' "$T/stderr-ctx.txt" || true)" = "1" ] || \
-  fail "review with --context prints one ignore note"
-bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "review with --context collects"
+mkdir -p "$T/ctx-a" "$T/ctx-b"
+printf 'first review context\n' >"$T/ctx-a/plan.md"
+printf 'second review context\n' >"$T/ctx-b/plan.md"
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M \
+  --context "$T/ctx-a/plan.md" --context "$T/ctx-b/plan.md" \
+  >/dev/null 2>"$T/stderr-ctx.txt" || fail "review with --context starts"
+! grep -Fq 'only used with --verify; ignored' "$T/stderr-ctx.txt" || \
+  fail "review with --context is not ignored"
+wt="$(worktree_for standards)"
+[ -f "$wt/.review-context/plan.md" ] || fail "review --context copies first file"
+[ -f "$wt/.review-context/1-plan.md" ] || fail "review --context disambiguates repeated basenames"
+cmp -s "$T/ctx-a/plan.md" "$wt/.review-context/plan.md" || fail "review --context copies first file contents"
+cmp -s "$T/ctx-b/plan.md" "$wt/.review-context/1-plan.md" || fail "review --context copies second file contents"
+grep -Fq '.review-context/plan.md' "$T/state/prompt-standards.md" || fail "review brief names first context file"
+grep -Fq '.review-context/1-plan.md' "$T/state/prompt-standards.md" || fail "review brief names second context file"
+baseline_lines="$(wc -l <"$T/standards-baseline.md" | tr -d ' ')"
+head -n "$baseline_lines" "$T/state/prompt-standards.md" >"$T/standards-context-prefix.md"
+cmp -s "$T/standards-baseline.md" "$T/standards-context-prefix.md" || \
+  fail "review with --context leaves the existing brief unchanged"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "review with --context collects"
 
 # --- case: without REVIEW_PR_RUN_ROOT the run dir goes under XDG_CACHE_HOME, not TMPDIR
 reset_state

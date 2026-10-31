@@ -85,6 +85,14 @@ case "\$cmd" in
         cp "\$recs/\$wid.json" "\${DELEGATE_JOBS_DIR:-\$TMPDIR/delegate-jobs}/\$wid.json"
       fi
     done
+    if [ -n "\${STUB_UNWRITABLE_RUN:-}" ]; then
+      chmod -N "\$STUB_UNWRITABLE_RUN" 2>/dev/null || true
+      chmod a-w "\$STUB_UNWRITABLE_RUN" || exit 1
+    fi
+    if [ -n "\${STUB_LOCK_STATE:-}" ]; then
+      mkdir "\$STUB_LOCK_STATE.lock"
+      printf 'testhost 424242\n' >"\$STUB_LOCK_STATE.lock/pid"
+    fi
     ;;
   *)
     echo "stub delegate: unknown command \$cmd" >&2
@@ -235,6 +243,36 @@ printf 'extra words here\n' >"$T/extra.md"
 printf 'do the thing\n' >"$T/brief.md"
 printf 'resume prompt\n' >"$T/resume-prompt.md"
 
+# --- a failed concerns-file write stops after watch and exposes the error ---
+setup_case concerns-write-fail
+reset_stub
+make_record stub-1 DONE_WITH_CONCERNS 0 1 2 0 "reviewer is uneasy"
+concerns_file="$CDIR/run/switchyard-502-concerns-lane.md"
+export STUB_UNWRITABLE_RUN="$CDIR/run"
+run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+unset STUB_UNWRITABLE_RUN
+chmod u+w "$CDIR/run" || fail "concerns-write-fail restores run permissions"
+[ "$RC" -ne 0 ] || fail "concerns-write-fail exits non-zero"
+[ -z "$OUT" ] || fail "concerns-write-fail emits no CONCERNS verdict after the file write fails"
+grep -F "$CDIR/run/switchyard-502-concerns-lane.md" "$CDIR/stderr.txt" >/dev/null || fail "concerns-write-fail stderr names the failed concerns file: $(cat "$CDIR/stderr.txt")"
+grep -qiE 'permission denied|read-only file system' "$CDIR/stderr.txt" || fail "concerns-write-fail exposes the file error: $(cat "$CDIR/stderr.txt")"
+if grep -F "$CDIR/run/switchyard-502-tkt-job-" "$CDIR/stderr.txt" >/dev/null; then fail "concerns-write-fail does not stop after the concerns write error"; fi
+if [ -e "$concerns_file" ]; then fail "concerns-write-fail does not create the concerns file"; fi
+if bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "concerns-write-fail does not store a path for the missing file"; fi
+
+# --- a failed concerns state write stops after the file is written ---
+setup_case concerns-state-fail
+reset_stub
+make_record stub-1 DONE_WITH_CONCERNS 0 1 2 0 "reviewer is uneasy"
+export TKT_STATE_TEST_LOCK_TRIES=1 STUB_LOCK_STATE="$S"
+run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+unset TKT_STATE_TEST_LOCK_TRIES STUB_LOCK_STATE
+rm -rf "$S.lock"
+[ "$RC" -ne 0 ] || fail "concerns-state-fail exits non-zero"
+[ -z "$OUT" ] || fail "concerns-state-fail emits no CONCERNS verdict after the state write fails"
+grep -q 'state locked by pid 424242' "$CDIR/stderr.txt" || fail "concerns-state-fail exposes the state error: $(cat "$CDIR/stderr.txt")"
+if bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "concerns-state-fail does not store a path after the failed state write"; fi
+
 # --- DONE with a passed gate and commits, under --expect-commits ---
 setup_case done-pass
 reset_stub
@@ -266,6 +304,18 @@ make_record stub-1 DONE none 0 3 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "plain DONE exits 0"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=0 gate=none log=*" "plain DONE"
+if ! bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "plain DONE stores an empty concerns.lane"; fi
+[ -z "$(bash "$TKT_STATE" "$S" get concerns.lane)" ] || fail "plain DONE stores concerns.lane empty"
+
+# --- DONE only clears the lane concerns key ---
+setup_case other-slot-done
+reset_stub
+make_record stub-1 DONE 0 1 2 0
+bash "$TKT_STATE" "$S" set concerns.review old-review-concerns.md || fail "seed review concerns"
+run_job --slot review --model test-model --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "non-lane DONE exits 0"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=1 gate=PASS log=*" "non-lane DONE"
+[ "$(bash "$TKT_STATE" "$S" get concerns.review)" = "old-review-concerns.md" ] || fail "non-lane DONE preserves concerns.review"
 
 # --- DONE_WITH_CONCERNS with a failed gate ---
 setup_case gate-fail
@@ -275,22 +325,57 @@ run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 1 ] || fail "GATE-FAIL exits 1"
 expect_verdict "TKT tkt-job GATE-FAIL rc=3 gatelog=/tmp/gate-test.log log=*" "GATE-FAIL"
 grep -q "reviewer is uneasy" <<<"$OUT" || fail "GATE-FAIL digest carries concerns"
+if bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "GATE-FAIL does not save concerns.lane"; fi
 
 # --- DONE with a failed gate is a GATE-FAIL too: the script exit rules ---
 setup_case done-badgate
 reset_stub
 make_record stub-1 DONE 1 1 2 0
+bash "$TKT_STATE" "$S" set concerns.lane old-concerns.md || fail "seed stale concerns for DONE failed gate"
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 1 ] || fail "DONE with failed gate exits 1"
 expect_verdict "TKT tkt-job GATE-FAIL rc=1 gatelog=/tmp/gate-test.log log=*" "DONE failed gate"
+if ! bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "DONE failed gate keeps concerns.lane as an empty key"; fi
+[ -z "$(bash "$TKT_STATE" "$S" get concerns.lane)" ] || fail "DONE failed gate clears stale concerns before routing"
 
 # --- DONE_WITH_CONCERNS with a passed gate, commits, and --expect-commits ---
 setup_case concerns
 reset_stub
-make_record stub-1 DONE_WITH_CONCERNS 0 2 3 0
+make_record stub-1 DONE_WITH_CONCERNS 0 2 3 0 "reviewer is uneasy"
 run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 1 ] || fail "CONCERNS exits 1"
 expect_verdict "TKT tkt-job CONCERNS id=stub-1 log=*" "CONCERNS"
+concerns_path="$CDIR/run/switchyard-502-concerns-lane.md"
+[ "$(bash "$TKT_STATE" "$S" get concerns.lane)" = "$concerns_path" ] || fail "CONCERNS stores its concerns path"
+printf 'reviewer is uneasy\n' | cmp - "$concerns_path" || fail "CONCERNS file stores text"
+run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+[ "$(bash "$TKT_STATE" "$S" get concerns.lane)" = "$concerns_path" ] || fail "CONCERNS rerun keeps the concerns path"
+printf 'reviewer is uneasy\n' | cmp - "$concerns_path" || fail "CONCERNS rerun keeps the concerns file"
+make_record stub-2 DONE 0 1 2 0
+bash "$TKT_STATE" "$S" set job.lane '' || fail "CONCERNS then DONE clears the old job id"
+run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+[ "$RC" -eq 0 ] || fail "CONCERNS then DONE exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS log=*" "CONCERNS then DONE"
+if ! bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "CONCERNS then DONE keeps concerns.lane as an empty key"; fi
+[ -z "$(bash "$TKT_STATE" "$S" get concerns.lane)" ] || fail "CONCERNS then DONE clears the concerns path"
+
+# --- CONCERNS array values are joined by newlines ---
+setup_case concerns-array
+reset_stub
+make_record stub-1 DONE_WITH_CONCERNS 0 2 3 0
+jq --argjson concerns '["first concern", "second concern"]' '.result.concerns = $concerns' "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp"
+mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json"
+run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+[ "$(bash "$TKT_STATE" "$S" get concerns.lane)" = "$CDIR/run/switchyard-502-concerns-lane.md" ] || fail "array CONCERNS stores its concerns path"
+printf 'first concern\nsecond concern\n' | cmp - "$CDIR/run/switchyard-502-concerns-lane.md" || fail "array CONCERNS joins items with newlines"
+
+# --- CONCERNS without concerns saves the report text ---
+setup_case concerns-null
+reset_stub
+make_record stub-1 DONE_WITH_CONCERNS 0 2 3 0
+run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+[ "$(bash "$TKT_STATE" "$S" get concerns.lane)" = "$CDIR/run/switchyard-502-concerns-lane.md" ] || fail "null CONCERNS stores its report path"
+jq -j -r '.result.text' "$T/records/stub-1.json" | cmp - "$CDIR/run/switchyard-502-concerns-lane.md" || fail "null CONCERNS saves report text"
 
 # --- NEEDS_CONTEXT with --out-file writes the full report ---
 setup_case ask
@@ -319,9 +404,12 @@ expect_verdict "TKT tkt-job BLOCKED id=stub-1 log=*" "BLOCKED"
 setup_case no-commits
 reset_stub
 make_record stub-1 DONE 0 0 2 0
+bash "$TKT_STATE" "$S" set concerns.lane old-concerns.md || fail "seed stale concerns for DONE without commits"
 run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 1 ] || fail "NO-COMMITS exits 1"
 expect_verdict "TKT tkt-job NO-COMMITS id=stub-1 gate=PASS log=*" "NO-COMMITS"
+if ! bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "NO-COMMITS keeps concerns.lane as an empty key"; fi
+[ -z "$(bash "$TKT_STATE" "$S" get concerns.lane)" ] || fail "NO-COMMITS clears stale concerns before routing"
 
 # --- ERROR and STALLED ---
 setup_case job-error
