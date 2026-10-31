@@ -1948,8 +1948,6 @@ cat {}
     let id = e.ok_output(&out);
     assert_eq!(e.wait_terminal(&id)["status"], "DONE");
 
-    let received = std::fs::read(&copied_prompt).unwrap();
-    assert_eq!(received, expected.as_bytes());
     let argv: Vec<String> = std::fs::read_to_string(argv_path)
         .unwrap()
         .lines()
@@ -1958,7 +1956,7 @@ cat {}
     let prompt_at = argv
         .iter()
         .position(|arg| arg == "--prompt-file")
-        .expect("--prompt-file");
+        .expect("child argv must carry --prompt-file");
     let prompt_path = PathBuf::from(&argv[prompt_at + 1]);
     assert!(prompt_path.is_absolute());
     assert!(prompt_path.starts_with(&e.dir));
@@ -1967,6 +1965,8 @@ cat {}
         !argv.iter().any(|arg| arg.contains(&prompt)),
         "prompt in argv"
     );
+    let received = std::fs::read(&copied_prompt).unwrap();
+    assert_eq!(received, expected.as_bytes());
 }
 
 /// A reminder-task loop emits no meaningful progress, so the idle watchdog
