@@ -25,6 +25,14 @@ if [ "${GH_STUB_FAIL:-0}" = "1" ]; then
   echo "stub gh: auth failure" >&2
   exit 1
 fi
+if [ "$1" = "api" ]; then
+  if [ -n "${GH_API_FILES:-}" ]; then cat "$GH_API_FILES"; exit 0; fi
+  url=""
+  for arg in "$@"; do case "$arg" in repos/*/pulls/*/files\?*) url="$arg";; esac; done
+  pr="${url#*/pulls/}"; pr="${pr%%/*}"
+  jq -r --arg n "$pr" '.[] | select((.number|tostring) == $n) | (.files // [])[] | .path' "$GH_PRS_JSON"
+  exit 0
+fi
 cat "$GH_PRS_JSON"
 STUB_EOF
 chmod +x "$T/stubbin/gh"
@@ -91,7 +99,7 @@ printf '%s' "$blob" | grep -q "^a.txt	L	grant	" || fail "a.txt stored as grant"
 # gh was asked for the full open-PR list, not the 30-PR default.
 grep -q -- '--limit 1000' "$GH_ARGS_LOG" || fail "gh asked with --limit 1000"
 grep -q -- '--state open' "$GH_ARGS_LOG" || fail "gh asked with --state open"
-grep -q -- '--json number,files' "$GH_ARGS_LOG" || fail "gh asked with --json number,files"
+grep -q -- '--json number' "$GH_ARGS_LOG" || fail "gh asked with --json number"
 
 # --- jitter sleeps 0.2-1.0 s -----------------------------------------------------
 # Extract jitter_sleep from the script and sample it: every sleep must land in
@@ -136,6 +144,26 @@ printf '[{"number":9,"files":[{"path":"a.txt"}]},{"number":3,"files":[{"path":"a
 export GH_PRS_JSON="$T/prs2.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt 2>/dev/null)" && fail "multi-PR claim exits non-zero"
 [ "$out" = "$(printf 'REFUSE a.txt pr#3\nfile-claim: 0 granted, 1 refused')" ] || fail "smallest PR named: $out"
+
+# A colliding path after the first 100 is returned by the paginated REST read.
+R="$(fresh)"
+pr_files='['
+api_files=""
+i=1
+while [ "$i" -le 100 ]; do
+  [ "$i" -eq 1 ] || pr_files+=','
+  pr_files+="{\"path\":\"file-$i.txt\"}"
+  api_files+="file-$i.txt\n"
+  i=$((i + 1))
+done
+pr_files+=']'
+printf '[{"number":101,"files":%s}]' "$pr_files" >"$T/prs-paginated.json"
+printf '%b' "${api_files}collision.txt\n" >"$T/api-paginated.txt"
+export GH_PRS_JSON="$T/prs-paginated.json" GH_API_FILES="$T/api-paginated.txt"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM collision.txt 2>"$T/e-paginated")" && fail "path after 100 must be refused"
+[ "$out" = "$(printf 'REFUSE collision.txt pr#101\nfile-claim: 0 granted, 1 refused')" ] || fail "paginated PR refusal: $out"
+grep -qF 'api --paginate repos/test/repo/pulls/101/files?per_page=100 -q .[].filename' "$GH_ARGS_LOG" || fail "PR file read did not paginate"
+unset GH_API_FILES
 
 # --- --self-pr skips the lane's own PR -----------------------------------------
 export GH_PRS_JSON="$T/prs1.json"
