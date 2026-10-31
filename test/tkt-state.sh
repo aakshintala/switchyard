@@ -175,4 +175,17 @@ bash "$TKT" "$S6" set k v 2>"$T/err-dead-owner.txt" || fail "set reaps a dead sa
 [ "$(bash "$TKT" "$S6" get k)" = "v" ] || fail "dead-owner reaping writes the value"
 [ ! -e "$S6.lock" ] || fail "dead-owner reaping leaves no lock behind"
 
+# A lock attributed to another host is never reaped.
+S7="$T/other-host.state"
+mkdir "$S7.lock"
+printf 'otherhost-not-this-host 4242\n' >"$S7.lock/pid"
+if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S7" set k v 2>"$T/err-other-host.txt"; then
+  other_host_rc=0
+else
+  other_host_rc=$?
+fi
+[ "$other_host_rc" = "2" ] || fail "other-host lock exits 2"
+grep -q '4242' "$T/err-other-host.txt" || fail "other-host lock names its pid"
+[ -d "$S7.lock" ] || fail "other-host lock is left in place"
+
 echo "tkt-state: all cases passed"
