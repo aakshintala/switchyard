@@ -5,19 +5,19 @@
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
 # A preflight core/non-blocking line counts when it starts with '<n>.' or '-', then spaces, then optional backtick/bold marks; a bare '*' bullet never counts.
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
-# Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
+# Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 # Words after --files run to the next word starting with '-': write such a path as ./-name.
 # Example: --files a b c, the same as --files a,b,c.
 set -euo pipefail
 usage() {
-  echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]" >&2
+  echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]" >&2
   echo "  --spec FILE: a file holding the ticket body; a Part-of closing needs 'Part of #N' in it" >&2
   echo "  --files PATHS: paths separated by commas or spaces, e.g. --files a b c or --files a,b,c" >&2
   exit 2
 }
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
-env=""; extra=""; merge_gate=""; mutant_job=""; files=""; no_preflight=0
+env=""; extra=""; merge_gate=""; mutant_job=""; files=""; no_preflight=0; part=""; part_given=0
 body_has=(); models=()
 body_ends=""; body_ends_given=0
 while [ $# -gt 0 ]; do
@@ -25,6 +25,7 @@ while [ $# -gt 0 ]; do
     --body-has) [ $# -ge 2 ] || usage; body_has+=("$2"); shift 2 ;;
     --body-ends) [ $# -ge 2 ] || usage; body_ends="$2"; body_ends_given=1; shift 2 ;;
     --model) [ $# -ge 2 ] || usage; models+=("$2"); shift 2 ;;
+    --part) [ $# -ge 2 ] || usage; part="$2"; part_given=1; shift 2 ;;
     --files) [ $# -ge 2 ] && [[ $2 != -* ]] || usage; shift; while [ $# -gt 0 ] && [[ $1 != -* ]]; do files="${files:+$files,}${1//[[:space:]]/,}"; shift; done ;;
     --no-preflight) no_preflight=1; shift ;;
     --run|--repo|--issue|--spec|--branch|--worktree|--closing|--env|--extra|--merge-gate|--mutant-job|--workflow-doc)
@@ -37,6 +38,11 @@ while [[ $files == *,,* ]]; do files="${files//,,/,}"; done
 files="${files#,}"; files="${files%,}"
 for v in run repo issue spec branch worktree workflow_doc closing; do [ -n "${!v}" ] || { echo "tkt-start: missing required flag: --${v//_/-}" >&2; exit 2; }; done
 case "$issue" in *[!0-9]*) echo "tkt-start: --issue needs a number: $issue" >&2; exit 2 ;; esac
+if [ "$part_given" -eq 1 ]; then
+  case "$part" in ""|*[!0-9]*) echo "tkt-start: --part needs an integer of 2 or more: $part" >&2; exit 2 ;; esac
+  part="$((10#$part))"
+  if [ "$part" -lt 2 ]; then echo "tkt-start: --part needs an integer of 2 or more: $part" >&2; exit 2; fi
+fi
 for m in ${models[@]+"${models[@]}"}; do case "$m" in *=*) ;; *) echo "tkt-start: --model needs ROLE=ID: $m" >&2; exit 2 ;; esac; done
 case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac
 # A blank check line can never match a PR body, and a newline breaks the
@@ -88,6 +94,87 @@ lockdir="$state.lock"; if ! mkdir "$lockdir" 2>/dev/null; then
   holder="$(cat "$lockdir/pid" 2>/dev/null || true)"; [ -n "$holder" ] || holder="unknown"
   deny "BUSY holder=$holder" 2 "tkt-start: state locked by pid $holder"
 fi; rmdir "$lockdir"
+part_archive_done=0
+if [ "$part_given" -eq 1 ]; then
+  if [ -f "$state" ]; then
+    archive_candidate=1
+    if current_part="$(tkt get part 2>/dev/null)"; then
+      case "$current_part" in
+        ""|*[!0-9]*) deny "PRECONDITION part=$part" 2 "tkt-start: --part $part found non-numeric stored part '$current_part'" ;;
+        *) if [ "$current_part" -ge "$part" ]; then archive_candidate=0; fi ;;
+      esac
+    else
+      current_part=""
+    fi
+    if [ "$archive_candidate" -eq 1 ]; then
+      if pr="$(tkt get pr 2>/dev/null)"; then :; else pr="none"; fi
+      if [ "$pr" = "none" ]; then
+        deny "PRECONDITION part=$part pr=none" 2 "tkt-start: --part $part needs part $((part - 1))'s PR merged: pr=none state=unreadable"
+      fi
+      if pr_state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state' 2>/dev/null)"; then
+        pr_state="${pr_state:-unreadable}"
+      else
+        pr_state="unreadable"
+      fi
+      if [ "$pr_state" != "MERGED" ]; then
+        deny "PRECONDITION part=$part pr=$pr" 2 "tkt-start: --part $part needs part $((part - 1))'s PR merged: pr=$pr state=$pr_state"
+      fi
+      archive="$state.part$((part - 1))"
+      if ! mkdir "$lockdir" 2>/dev/null; then
+        holder="$(cat "$lockdir/pid" 2>/dev/null || true)"; [ -n "$holder" ] || holder="unknown"
+        deny "BUSY holder=$holder" 2 "tkt-start: state locked by pid $holder"
+      fi
+      locked_part=""; locked_has_part=0
+      while IFS= read -r state_line || [ -n "$state_line" ]; do
+        case "$state_line" in part=*) locked_part="${state_line#part=}"; locked_has_part=1; break ;; esac
+      done <"$state"
+      if [ "$locked_has_part" -eq 1 ]; then
+        case "$locked_part" in
+          ""|*[!0-9]*) rmdir "$lockdir"; deny "PRECONDITION part=$part" 2 "tkt-start: --part $part found non-numeric stored part '$locked_part'" ;;
+          *) if [ "$locked_part" -ge "$part" ]; then archive_candidate=0; fi ;;
+        esac
+      else
+        locked_part=""
+      fi
+      if [ "$archive_candidate" -eq 0 ]; then
+        rmdir "$lockdir"
+      else
+        if [ -z "$locked_part" ]; then
+          if [ "$part" -eq 2 ]; then locked_part=1
+          else rmdir "$lockdir"; deny "PRECONDITION part=$part missing" 2 "tkt-start: --part $part needs a stored part key; part is missing"; fi
+        fi
+        if [ -e "$archive" ]; then
+          rmdir "$lockdir"
+          deny "PRECONDITION part=$part archive=$archive" 2 "tkt-start: archive already exists: $archive"
+        fi
+        carried_models=()
+        while IFS= read -r state_line || [ -n "$state_line" ]; do
+          case "$state_line" in
+            model.*=*)
+              model_key="${state_line%%=*}"; model_role="${model_key#model.}"; model_replaced=0
+              for m in ${models[@]+"${models[@]}"}; do
+                if [ "${m%%=*}" = "$model_role" ]; then model_replaced=1; fi
+              done
+              if [ "$model_replaced" -eq 0 ]; then carried_models+=("$state_line"); fi
+              ;;
+          esac
+        done <"$state"
+        if ! mv "$state" "$archive"; then
+          rmdir "$lockdir"
+          deny "PRECONDITION part=$part archive=$archive" 2 "tkt-start: cannot archive state: $state -> $archive"
+        fi
+        rmdir "$lockdir"
+        part_archive_done=1
+        tkt set part "$part"
+        for model_line in ${carried_models[@]+"${carried_models[@]}"}; do
+          tkt add "${model_line%%=*}" "${model_line#*=}"
+        done
+        tkt journal "tkt-start archived state part$locked_part pr=$pr -> $archive"
+      fi
+    fi
+  fi
+  if [ "$part_archive_done" -eq 0 ] && [ ! -f "$state" ]; then tkt set part "$part"; fi
+fi
 if stored_head="$(tkt get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || printf unknown)"; pr_head=""
   if pr="$(tkt get pr 2>/dev/null)"; then
