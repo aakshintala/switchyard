@@ -346,8 +346,8 @@ fn held_start<'scope, 'env: 'scope>(
     let existing = session_paths(h);
     let (tx, rx) = mpsc::channel();
     scope.spawn(move || {
-        tx.send(h.start_timeout(marker.as_bytes(), false, "", env, Duration::from_secs(60)))
-            .unwrap()
+        let _ =
+            tx.send(h.start_timeout(marker.as_bytes(), false, "", env, Duration::from_secs(60)));
     });
     let hold = env
         .iter()
@@ -709,26 +709,25 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
 }
 
 #[test]
-fn start_hold_without_release_takes_the_startup_timeout_branch() {
+fn start_hold_deadline_bounds_an_unreleased_hold() {
     let h = Harness::new();
     let hold = h.base.join(format!(
         "hold-never-{}",
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let hold_text = hold.to_str().unwrap();
     let timed_out = h.start(
         b"FAST",
         false,
         "",
         &[
-            (
-                "DELEGATE_SESSION_TEST_HOLD_START_UNTIL",
-                hold.to_str().unwrap(),
-            ),
+            ("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold_text),
             ("DELEGATE_SESSION_START_WAIT_MS", "0"),
         ],
     );
     assert_eq!(timed_out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&timed_out.stderr).contains("session startup timed out"));
+    assert!(std::path::PathBuf::from(format!("{hold_text}.held")).exists());
     let state = std::fs::read_dir(h.root())
         .unwrap()
         .flatten()
@@ -742,6 +741,119 @@ fn start_hold_without_release_takes_the_startup_timeout_branch() {
     assert_eq!(state["dead"]["reason"], "startFailed");
     assert_eq!(state["dead"]["message"], "session startup timed out");
     assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
+    if let Some(host) = state["hostPid"].as_i64() {
+        assert_process_gone(host as i32);
+    }
+}
+
+#[test]
+fn start_hold_expiry_takes_the_startup_timeout_branch_after_the_turn() {
+    let h = Harness::new();
+    let hold = h
+        .base
+        .join(format!(
+            "hold-expiry-{}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+        .to_string_lossy()
+        .into_owned();
+    let trigger = h
+        .base
+        .join(format!(
+            "timeout-trigger-{}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+        .to_string_lossy()
+        .into_owned();
+    let env = [
+        ("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold.as_str()),
+        ("DELEGATE_SESSION_TEST_TIMEOUT_ON_READY", trigger.as_str()),
+    ];
+    std::thread::scope(|scope| {
+        let _release = ReleaseOnDrop(std::path::PathBuf::from(&hold));
+        let (rx, id) = held_start(&h, scope, "FAST", &env);
+        std::fs::write(&trigger, b"").unwrap();
+        let output = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("start did not return after the timeout trigger");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("session startup timed out"));
+        assert!(output.stdout.is_empty());
+        let state = h.state(&id);
+        assert_eq!(state["dead"]["reason"], "startFailed");
+        assert_eq!(state["dead"]["message"], "session startup timed out");
+        assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
+        assert_process_gone(state["hostPid"].as_i64().unwrap() as i32);
+    });
+}
+
+#[test]
+fn start_hold_trigger_beats_release_on_one_path() {
+    let h = Harness::new();
+    let ready = h
+        .base
+        .join(format!(
+            "hold-trigger-{}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+        .to_string_lossy()
+        .into_owned();
+    let env = [
+        ("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", ready.as_str()),
+        ("DELEGATE_SESSION_TEST_TIMEOUT_ON_READY", ready.as_str()),
+    ];
+    std::thread::scope(|scope| {
+        let _release = ReleaseOnDrop(std::path::PathBuf::from(&ready));
+        let (rx, id) = held_start(&h, scope, "FAST", &env);
+        std::fs::write(&ready, b"").unwrap();
+        let output = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("start did not return after trigger and release");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("session startup timed out"));
+        let state = h.state(&id);
+        assert_eq!(state["dead"]["reason"], "startFailed");
+        assert_eq!(state["dead"]["message"], "session startup timed out");
+        assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
+        assert_process_gone(state["hostPid"].as_i64().unwrap() as i32);
+    });
+}
+
+#[test]
+fn start_hold_marker_failure_reaps_the_supervisor() {
+    let h = Harness::new();
+    let hold = h.base.join(format!(
+        "no-such-dir-{}/hold",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let output = h.start(
+        b"FAST",
+        false,
+        "",
+        &[(
+            "DELEGATE_SESSION_TEST_HOLD_START_UNTIL",
+            hold.to_str().unwrap(),
+        )],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not create start hold marker"));
+    assert!(output.stdout.is_empty());
+    let entry = std::fs::read_dir(h.root())
+        .unwrap()
+        .flatten()
+        .next()
+        .expect("start creates one session directory");
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(entry.path().join("state.json")).unwrap()).unwrap();
+    assert_eq!(state["dead"]["reason"], "startFailed");
+    assert!(
+        state["dead"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("could not create start hold marker")
+    );
+    let supervisor = state["supervisorPid"].as_i64().unwrap() as i32;
+    assert_process_gone(supervisor);
     if let Some(host) = state["hostPid"].as_i64() {
         assert_process_gone(host as i32);
     }

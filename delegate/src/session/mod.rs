@@ -279,6 +279,23 @@ fn read_brief(path: &str) -> std::result::Result<String, String> {
     validate(bytes, "brief")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoldStep {
+    Timeout,
+    Release,
+    Wait,
+}
+
+fn hold_step(trigger: bool, deadline_passed: bool, release: bool) -> HoldStep {
+    if trigger || deadline_passed {
+        HoldStep::Timeout
+    } else if release {
+        HoldStep::Release
+    } else {
+        HoldStep::Wait
+    }
+}
+
 fn start(args: &[String], json_mode: bool) -> Result<i32> {
     let (values, positional) =
         parse_flags(args, &["--model", "--brief", "--inbox"], &["--json"]).map_err(usage)?;
@@ -368,22 +385,37 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     // as soon as the named ready file exists. Unset, this costs one
     // `env::var_os` call and the wait loop is unchanged.
     let timeout_on_ready = std::env::var_os("DELEGATE_SESSION_TEST_TIMEOUT_ON_READY");
-    // Tests hold start before its first state read until the path exists or the deadline passes.
+    // Test-only hold: the first state read waits for release, the deadline or the ready-timeout file.
     let hold_start_until = std::env::var_os("DELEGATE_SESSION_TEST_HOLD_START_UNTIL");
     if let Some(release) = hold_start_until.map(PathBuf::from) {
         let mut held = release.as_os_str().to_os_string();
         held.push(".held");
-        File::create(held)
-            .and_then(|mut file| file.write_all(b""))
-            .map_err(|error| failed(format!("could not create start hold marker: {error}")))?;
+        if let Err(error) = File::create(held).and_then(|mut file| file.write_all(b"")) {
+            return abort_start(
+                &paths,
+                &id,
+                &mut child,
+                format!("could not create start hold marker: {error}"),
+            );
+        }
         loop {
-            if release.exists() {
-                break;
+            let trigger_exists = timeout_on_ready
+                .as_ref()
+                .is_some_and(|path| Path::new(path).exists());
+            let deadline_passed = Instant::now() >= deadline;
+            let release_exists = release.exists();
+            match hold_step(trigger_exists, deadline_passed, release_exists) {
+                HoldStep::Timeout => {
+                    return abort_start(
+                        &paths,
+                        &id,
+                        &mut child,
+                        "session startup timed out".into(),
+                    );
+                }
+                HoldStep::Release => break,
+                HoldStep::Wait => thread::sleep(Duration::from_millis(poll)),
             }
-            if Instant::now() >= deadline {
-                return startup_timeout(&paths, &id, &mut child);
-            }
-            thread::sleep(Duration::from_millis(poll));
         }
     }
     loop {
@@ -435,18 +467,23 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
             .as_ref()
             .is_some_and(|path| Path::new(path).exists());
         if Instant::now() >= deadline || ready_timeout {
-            return startup_timeout(&paths, &id, &mut child);
+            return abort_start(&paths, &id, &mut child, "session startup timed out".into());
         }
         thread::sleep(Duration::from_millis(poll));
     }
 }
 
-fn startup_timeout(paths: &state::Paths, id: &str, child: &mut std::process::Child) -> Result<i32> {
+fn abort_start(
+    paths: &state::Paths,
+    id: &str,
+    child: &mut std::process::Child,
+    message: String,
+) -> Result<i32> {
     let _ = child.kill();
     let _ = child.wait();
     state::reap_recorded_host(paths, id);
-    mark_start_failed(paths, id, child.id(), "session startup timed out".into());
-    Err(failed("session startup timed out"))
+    mark_start_failed(paths, id, child.id(), message.clone());
+    Err(failed(message))
 }
 
 fn mark_start_failed(paths: &state::Paths, id: &str, supervisor_pid: u32, message: String) {
@@ -890,6 +927,27 @@ mod tests {
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn hold_step_obeys_trigger_deadline_release_precedence() {
+        let cases = [
+            (true, true, true, HoldStep::Timeout),
+            (true, true, false, HoldStep::Timeout),
+            (true, false, true, HoldStep::Timeout),
+            (true, false, false, HoldStep::Timeout),
+            (false, true, true, HoldStep::Timeout),
+            (false, true, false, HoldStep::Timeout),
+            (false, false, true, HoldStep::Release),
+            (false, false, false, HoldStep::Wait),
+        ];
+        for (trigger, deadline_passed, release, expected) in cases {
+            assert_eq!(
+                hold_step(trigger, deadline_passed, release),
+                expected,
+                "trigger={trigger}, deadline_passed={deadline_passed}, release={release}"
+            );
+        }
     }
 
     #[test]
