@@ -26,10 +26,19 @@ if [ "${GH_STUB_FAIL:-0}" = "1" ]; then
   exit 1
 fi
 if [ "$1" = "api" ]; then
-  if [ -n "${GH_API_FILES:-}" ]; then cat "$GH_API_FILES"; exit 0; fi
   url=""
   for arg in "$@"; do case "$arg" in repos/*/pulls/*/files\?*) url="$arg";; esac; done
   pr="${url#*/pulls/}"; pr="${pr%%/*}"
+  if [ -n "${GH_FAIL_FILES_PR:-}" ] && [ "$pr" = "$GH_FAIL_FILES_PR" ]; then
+    count="$(cat "$GH_FAIL_FILES_COUNT" 2>/dev/null || printf 0)"
+    if [ "$count" -lt "${GH_FAIL_FILES_TIMES:-0}" ]; then
+      count=$((count + 1))
+      printf '%s' "$count" >"$GH_FAIL_FILES_COUNT"
+      echo "stub gh: transient read failure" >&2
+      exit 1
+    fi
+  fi
+  if [ -n "${GH_API_FILES:-}" ]; then cat "$GH_API_FILES"; exit 0; fi
   jq -r --arg n "$pr" '.[] | select((.number|tostring) == $n) | (.files // [])[] | .path' "$GH_PRS_JSON"
   exit 0
 fi
@@ -164,6 +173,37 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM collision.txt 2>"$T/e-paginated"
 [ "$out" = "$(printf 'REFUSE collision.txt pr#101\nfile-claim: 0 granted, 1 refused')" ] || fail "paginated PR refusal: $out"
 grep -qF 'api --paginate repos/test/repo/pulls/101/files?per_page=100 -q .[].filename' "$GH_ARGS_LOG" || fail "PR file read did not paginate"
 unset GH_API_FILES
+
+# --- transient PR file-list failures are retried per PR -------------------------
+R="$(fresh)"
+printf '[{"number":7,"files":[{"path":"a.txt"}]},{"number":8,"files":[{"path":"b.txt"}]}]' >"$T/prs-retry.json"
+export GH_PRS_JSON="$T/prs-retry.json"
+GH_RETRY_COUNT="$T/gh-retry-count"
+printf 0 >"$GH_RETRY_COUNT"
+: >"$GH_ARGS_LOG"
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_FILES_TIMES=1 GH_FAIL_FILES_COUNT="$GH_RETRY_COUNT" bash "$FC" $CLAIM c.txt 2>"$T/e-retry-once")" || fail "claim retries one transient file-list failure: $(cat "$T/e-retry-once")"
+[ "$out" = "$(printf 'GRANT c.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "claim after transient failure: $out"
+[ "$(cat "$GH_RETRY_COUNT")" = "1" ] || fail "one transient file-list failure recorded"
+[ "$(grep -cF 'pulls/7/files?per_page=100' "$GH_ARGS_LOG")" = "2" ] || fail "PR 7 file list retried once"
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_FILES_TIMES=1 GH_FAIL_FILES_COUNT="$GH_RETRY_COUNT" bash "$FC" $CLAIM a.txt 2>"$T/e-retry-refusal")" && fail "claim for a PR-held path exits non-zero"
+[ "$?" = "1" ] || fail "PR-held claim after retry exits 1"
+[ "$out" = "$(printf 'REFUSE a.txt pr#7\nfile-claim: 0 granted, 1 refused')" ] || fail "PR-held path after retry: $out"
+
+R="$(fresh)"
+GH_RETRY_COUNT="$T/gh-retry-exhausted-count"
+printf 0 >"$GH_RETRY_COUNT"
+: >"$GH_ARGS_LOG"
+FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_FILES_TIMES=99 GH_FAIL_FILES_COUNT="$GH_RETRY_COUNT" bash "$FC" $CLAIM c.txt >/dev/null 2>"$T/e-retry-exhausted" && fail "claim exits 2 after all file-list retries fail"
+[ "$?" = "2" ] || fail "exhausted file-list retries exit 2"
+grep -qF 'cannot list files for open PR #7' "$T/e-retry-exhausted" || fail "exhausted file-list error names PR 7"
+[ -z "$(claim_tip "$R")" ] || fail "exhausted file-list retries write no claim"
+[ "$(cat "$GH_RETRY_COUNT")" = "3" ] || fail "three transient file-list failures recorded"
+[ "$(grep -cF 'pulls/7/files?per_page=100' "$GH_ARGS_LOG")" = "3" ] || fail "PR 7 file list stops after three calls"
+
+FILE_CLAIM_READ_WAIT=x bash "$FC" list >/dev/null 2>"$T/e-retry-wait"
+[ "$?" = "2" ] || fail "non-numeric FILE_CLAIM_READ_WAIT exits 2"
+grep -qF 'FILE_CLAIM_READ_WAIT must be a whole number of seconds' "$T/e-retry-wait" || fail "invalid FILE_CLAIM_READ_WAIT is named"
+export GH_PRS_JSON="$T/prs-empty.json"
 
 # --- --self-pr skips the lane's own PR -----------------------------------------
 export GH_PRS_JSON="$T/prs1.json"

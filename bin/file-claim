@@ -4,10 +4,13 @@
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
 # FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5); N must be a positive integer.
+# FILE_CLAIM_READ_WAIT=N sets the retry wait in whole seconds (default 1).
 set -euo pipefail
 REPO_DEFAULT="aakshintala/fiber"
 REF="refs/claims/live"
 MAX_GRANT="${FILE_CLAIM_MAX_GRANT:-5}"
+READ_TRIES=3
+READ_WAIT="${FILE_CLAIM_READ_WAIT:-1}"
 TRIES=8
 TAB=$'\t'
 NL=$'\n'
@@ -20,6 +23,7 @@ usage() {
 die() { local c="$1"; shift; echo "file-claim: $*" >&2; exit "$c"; }
 case "$MAX_GRANT" in ''|*[!0-9]*) die 2 "FILE_CLAIM_MAX_GRANT must be a positive integer" ;; esac
 [ "$MAX_GRANT" -gt 0 ] || die 2 "FILE_CLAIM_MAX_GRANT must be a positive integer"
+case "$READ_WAIT" in ''|*[!0-9]*) die 2 "FILE_CLAIM_READ_WAIT must be a whole number of seconds" ;; esac
 W=""
 cleanup() { if [ -n "$W" ] && [ -d "$W" ]; then rm -rf "$W"; fi; }
 trap cleanup EXIT
@@ -31,6 +35,18 @@ at_epoch() {
 }
 default_remote() {
   printf '%s' "${FILE_CLAIM_REMOTE:-git@github.com:$1.git}"
+}
+read_pr_files() {
+  local repo="$1" pr="$2" attempt=1 out
+  while [ "$attempt" -le "$READ_TRIES" ]; do
+    if out="$(gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" -q '.[].filename' 2>"$W/gh.err")"; then
+      printf '%s' "$out"
+      return 0
+    fi
+    if [ "$attempt" -lt "$READ_TRIES" ]; then sleep "$READ_WAIT"; fi
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 jitter_sleep() {
   sleep "$(awk "BEGIN { print ($RANDOM % 9 + 2) / 10 }")"
@@ -110,7 +126,7 @@ cmd_claim() {
   printf '%s' "$pr_json" | jq -r '.[].number' >"$prnums" 2>"$W/jq.err" || die 2 "cannot parse open PRs for $repo: $(cat "$W/jq.err")"
   : >"$prmap"
   while IFS= read -r pr; do
-    pr_files="$(gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" -q '.[].filename' 2>"$W/gh.err")" || die 2 "cannot list files for open PR #$pr for $repo: $(cat "$W/gh.err")"
+    pr_files="$(read_pr_files "$repo" "$pr")" || die 2 "cannot list files for open PR #$pr for $repo after $READ_TRIES tries: $(cat "$W/gh.err")"
     while IFS= read -r path || [ -n "$path" ]; do
       [ -n "$path" ] || continue
       printf '%s\t%s\n' "$pr" "$path" >>"$prmap"
