@@ -832,8 +832,9 @@ fn status_line(id: &str, rec: &serde_json::Value) -> String {
     let result = rec.get("result").filter(|value| value.is_object());
     let mut parts = Vec::new();
 
-    if state != "DONE" && state != "RUNNING" {
-        if let Some(text) = result
+    if state != "DONE"
+        && state != "RUNNING"
+        && let Some(text) = result
             .and_then(|value| value.get("text"))
             .and_then(serde_json::Value::as_str)
             .and_then(|text| {
@@ -841,9 +842,8 @@ fn status_line(id: &str, rec: &serde_json::Value) -> String {
                     .map(str::trim)
                     .find(|line| !line.is_empty())
             })
-        {
-            parts.push(text.to_string());
-        }
+    {
+        parts.push(text.to_string());
     }
 
     if state != "RUNNING"
