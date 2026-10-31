@@ -19,14 +19,14 @@ You are the orchestrator for one ticket. The **main orchestrator** is the sessio
 
 ## Commands
 
-When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; every other word is a stop.
+When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; a lane `CONCERNS` continues per step 4; every other word is a stop.
 
 | Tool | Go on | Other verdicts that stop |
 | --- | --- | --- |
 | `tkt-start` | `CURRENT`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
 | `tkt-state` | exit 0 | exit 2 |
 | `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `POST-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
-| `tkt-job` | `DONE` | `CONCERNS`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
+| `tkt-job` | `DONE`, `CONCERNS` | `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-build` | `APPROVE` | `CHANGES`, `STALE`, `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `<step>-ERROR` |
 | `tkt-gate` | `PASS` | `TIP`, `FENCE`, `FAIL` |
 | `tkt-fix` | `FIX-OK`; `PUSHED` then `tkt-ship --unverified-fixes` | `FIX-INCOMPLETE`, `VERIFY-FAIL`, `PUSH-FAIL`, `CI-WAIT`, `RECOVER`, `DRIFT`, `ROUND-LIMIT`, `UNKNOWN`, gate stops |
@@ -91,6 +91,8 @@ Before the first dispatch, `tkt-start` searches the merged PRs for one that alre
 To watch a running lane, run `~/.agents/bin/lanestat <run-dir>`: a row reads `IN-TOOL <tool>` while a tool call runs, `SETTLED` when the run ended, and `STALL` after 5 minutes idle with no tool running; `~/.agents/bin/lanewatch <run-dir> [ssh-target]` prints one line per lane the first time it settles or stalls, for Monitor.
 
 A plan split into parts runs each part through steps 4–8 in order, the next lane cut once the previous part has merged.
+
+A lane `CONCERNS` verdict (from `tkt-job`, or forwarded as the first line of `tkt-build`) is not a stop: read the concerns in the file named by state key `concerns.lane`, carry them as extra context for the review (`tkt-build` does not pass them to the reviewers yet, so hold them beside the review findings) and continue with `tkt-build <state> --from gate`; a concern that questions a posted ruling, the fence or the ticket's scope routes as `ASK` does.
 
 Done when the lane reports a PR URL and head SHA, or a failure triage.
 
