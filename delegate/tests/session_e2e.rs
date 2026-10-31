@@ -147,6 +147,17 @@ impl Harness {
     }
 
     fn start(&self, brief: &[u8], json_mode: bool, scenario: &str, env: &[(&str, &str)]) -> Output {
+        self.start_timeout(brief, json_mode, scenario, env, Duration::from_secs(10))
+    }
+
+    fn start_timeout(
+        &self,
+        brief: &[u8],
+        json_mode: bool,
+        scenario: &str,
+        env: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Output {
         let brief = self.brief_file(brief);
         let mut args = vec![
             "start",
@@ -160,7 +171,7 @@ impl Harness {
         if json_mode {
             args.push("--json");
         }
-        self.invoke_with(&args, None, scenario, env, None)
+        self.invoke_timeout(&args, None, scenario, env, None, timeout)
     }
 
     fn root(&self) -> std::path::PathBuf {
@@ -253,6 +264,109 @@ fn wait_for_signal(path: &std::path::Path) {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+struct ReleaseOnDrop(std::path::PathBuf);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        if !self.0.exists() {
+            let _ = std::fs::write(&self.0, b"");
+        }
+    }
+}
+
+fn session_paths(h: &Harness) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(h.root()) else {
+        return Vec::new();
+    };
+    entries.flatten().map(|entry| entry.path()).collect()
+}
+
+fn state_dump(h: &Harness) -> Vec<String> {
+    std::fs::read_dir(h.root())
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            let state = std::fs::read_to_string(path.join("state.json"))
+                .unwrap_or_else(|error| format!("<unreadable: {error}>"));
+            format!("{}: {state}", path.display())
+        })
+        .collect()
+}
+
+fn wait_for_held_start(h: &Harness, held: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !held.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "start hold marker did not arrive at {held:?}; session states: {:?}",
+            state_dump(h)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_new_idle_session(h: &Harness, existing: &[std::path::PathBuf]) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        for entry in std::fs::read_dir(h.root()).unwrap().flatten() {
+            let path = entry.path();
+            if existing.contains(&path) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(path.join("state.json")) else {
+                continue;
+            };
+            let Ok(state) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            if state["status"] == "idle" && state["turnCount"].as_u64().is_some_and(|n| n >= 1) {
+                return state;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a new idle session; session states: {:?}",
+            state_dump(h)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn held_start<'scope, 'env: 'scope>(
+    h: &'scope Harness,
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    marker: &'scope str,
+    env: &'scope [(&'scope str, &'scope str)],
+) -> (mpsc::Receiver<Output>, String) {
+    let existing = session_paths(h);
+    let (tx, rx) = mpsc::channel();
+    scope.spawn(move || {
+        let _ =
+            tx.send(h.start_timeout(marker.as_bytes(), false, "", env, Duration::from_secs(10)));
+    });
+    let hold = env
+        .iter()
+        .find_map(|(key, value)| {
+            (*key == "DELEGATE_SESSION_TEST_HOLD_START_UNTIL").then_some(*value)
+        })
+        .expect("held start needs its release path");
+    let held = std::path::PathBuf::from(format!("{hold}.held"));
+    wait_for_held_start(h, &held);
+    let state = wait_for_new_idle_session(h, &existing);
+    assert!(
+        matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "start returned before the held turn was released"
+    );
+    let id = state["id"]
+        .as_str()
+        .expect("new idle session has an id")
+        .to_string();
+    (rx, id)
 }
 
 fn wait_cli(
@@ -486,18 +600,21 @@ fn start_rejects_an_effort_suffix_and_starts_a_bare_id() {
 fn start_fast_turn_and_startup_failure_paths_are_bounded() {
     let h = Harness::new();
     for marker in ["FAST", "BADMODEL"] {
-        let output = h.start(
-            marker.as_bytes(),
-            false,
-            "",
-            &[
-                ("DELEGATE_SESSION_START_POLL_MS", "500"),
-                ("DELEGATE_SESSION_START_WAIT_MS", "2000"),
-            ],
-        );
-        let id = id_from(&output);
-        let state = h.wait_state(&id, "fast first turn", |value| value["status"] == "idle");
-        assert_eq!(state["turnCount"], 1);
+        let hold = h
+            .base
+            .join(format!("hold-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        let hold = hold.to_string_lossy().into_owned();
+        let env = [("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold.as_str())];
+        std::thread::scope(|scope| {
+            let _release = ReleaseOnDrop(std::path::PathBuf::from(&hold));
+            let (rx, held_id) = held_start(&h, scope, marker, &env);
+            std::fs::write(&hold, b"").unwrap();
+            let output = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("start did not return after releasing the hold");
+            assert_eq!(id_from(&output), held_id);
+            assert_eq!(h.state(&held_id)["turnCount"], 1);
+        });
     }
     let brief = h.brief_file(b"brief");
     let missing = h.base.join("missing-muse");
@@ -586,6 +703,157 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
         .expect("timed-out state retained");
     assert_eq!(state["dead"]["reason"], "startFailed");
     assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
+    if let Some(host) = state["hostPid"].as_i64() {
+        assert_process_gone(host as i32);
+    }
+}
+
+#[test]
+fn start_hold_deadline_bounds_an_unreleased_hold() {
+    let h = Harness::new();
+    let hold = h.base.join(format!(
+        "hold-never-{}",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let hold_text = hold.to_str().unwrap();
+    let timed_out = h.start(
+        b"FAST",
+        false,
+        "",
+        &[
+            ("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold_text),
+            ("DELEGATE_SESSION_START_WAIT_MS", "0"),
+        ],
+    );
+    assert_eq!(timed_out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&timed_out.stderr).contains("session startup timed out"));
+    assert!(std::path::PathBuf::from(format!("{hold_text}.held")).exists());
+    let state = std::fs::read_dir(h.root())
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let bytes = std::fs::read(entry.path().join("state.json")).ok()?;
+            let value: Value = serde_json::from_slice(&bytes).ok()?;
+            (value["dead"]["message"] == "session startup timed out").then_some(value)
+        })
+        .next()
+        .expect("timed-out state retained");
+    assert_eq!(state["dead"]["reason"], "startFailed");
+    assert_eq!(state["dead"]["message"], "session startup timed out");
+    assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
+    if let Some(host) = state["hostPid"].as_i64() {
+        assert_process_gone(host as i32);
+    }
+}
+
+#[test]
+fn start_hold_expiry_takes_the_startup_timeout_branch_after_the_turn() {
+    let h = Harness::new();
+    let hold = h
+        .base
+        .join(format!(
+            "hold-expiry-{}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+        .to_string_lossy()
+        .into_owned();
+    let trigger = h
+        .base
+        .join(format!(
+            "timeout-trigger-{}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+        .to_string_lossy()
+        .into_owned();
+    let env = [
+        ("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold.as_str()),
+        ("DELEGATE_SESSION_TEST_TIMEOUT_ON_READY", trigger.as_str()),
+    ];
+    std::thread::scope(|scope| {
+        let _release = ReleaseOnDrop(std::path::PathBuf::from(&hold));
+        let (rx, id) = held_start(&h, scope, "FAST", &env);
+        std::fs::write(&trigger, b"").unwrap();
+        let output = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("start did not return after the timeout trigger");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("session startup timed out"));
+        assert!(output.stdout.is_empty());
+        let state = h.state(&id);
+        assert_eq!(state["dead"]["reason"], "startFailed");
+        assert_eq!(state["dead"]["message"], "session startup timed out");
+        assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
+        assert_process_gone(state["hostPid"].as_i64().unwrap() as i32);
+    });
+}
+
+#[test]
+fn start_hold_trigger_beats_release_on_one_path() {
+    let h = Harness::new();
+    let ready = h
+        .base
+        .join(format!(
+            "hold-trigger-{}",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+        .to_string_lossy()
+        .into_owned();
+    let env = [
+        ("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", ready.as_str()),
+        ("DELEGATE_SESSION_TEST_TIMEOUT_ON_READY", ready.as_str()),
+    ];
+    std::thread::scope(|scope| {
+        let _release = ReleaseOnDrop(std::path::PathBuf::from(&ready));
+        let (rx, id) = held_start(&h, scope, "FAST", &env);
+        std::fs::write(&ready, b"").unwrap();
+        let output = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("start did not return after trigger and release");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("session startup timed out"));
+        let state = h.state(&id);
+        assert_eq!(state["dead"]["reason"], "startFailed");
+        assert_eq!(state["dead"]["message"], "session startup timed out");
+        assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
+        assert_process_gone(state["hostPid"].as_i64().unwrap() as i32);
+    });
+}
+
+#[test]
+fn start_hold_marker_failure_reaps_the_supervisor() {
+    let h = Harness::new();
+    let hold = h.base.join(format!(
+        "no-such-dir-{}/hold",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let output = h.start(
+        b"FAST",
+        false,
+        "",
+        &[(
+            "DELEGATE_SESSION_TEST_HOLD_START_UNTIL",
+            hold.to_str().unwrap(),
+        )],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not create start hold marker"));
+    assert!(output.stdout.is_empty());
+    let entry = std::fs::read_dir(h.root())
+        .unwrap()
+        .flatten()
+        .next()
+        .expect("start creates one session directory");
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(entry.path().join("state.json")).unwrap()).unwrap();
+    assert_eq!(state["dead"]["reason"], "startFailed");
+    assert!(
+        state["dead"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("could not create start hold marker")
+    );
+    let supervisor = state["supervisorPid"].as_i64().unwrap() as i32;
+    assert_process_gone(supervisor);
     if let Some(host) = state["hostPid"].as_i64() {
         assert_process_gone(host as i32);
     }
