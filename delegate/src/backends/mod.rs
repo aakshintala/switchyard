@@ -16,6 +16,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use types::{BackendResult, Event, EventFn, Spawned};
 
+#[cfg(test)]
+pub(crate) struct TempDir(std::path::PathBuf);
+
+#[cfg(test)]
+impl TempDir {
+    pub(crate) fn new(prefix: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&path).expect("create test temp directory");
+        Self(path)
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TempDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Cursor,
@@ -493,5 +523,37 @@ mod tests {
             pumped.stderr,
             "Warning: No project session found\nError: Model \"nope/x\" not found.\n"
         );
+    }
+
+    #[test]
+    fn temp_dir_is_removed_on_drop() {
+        let _lock = crate::test_env::lock();
+        let dir = TempDir::new("backends-nested");
+        let path = dir.to_path_buf();
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("nested/file"), "contents").unwrap();
+        drop(dir);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn temp_dir_is_removed_when_scope_unwinds() {
+        let _lock = crate::test_env::lock();
+        let mut path = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let dir = TempDir::new("backends-unwind");
+            path = Some(dir.to_path_buf());
+            panic!("test panic");
+        }));
+        assert!(result.is_err());
+        assert!(!path.unwrap().exists());
+    }
+
+    #[test]
+    fn temp_dir_drop_ignores_an_already_removed_directory() {
+        let _lock = crate::test_env::lock();
+        let dir = TempDir::new("backends-already-removed");
+        std::fs::remove_dir_all(&*dir).unwrap();
+        drop(dir);
     }
 }
