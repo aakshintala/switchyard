@@ -390,7 +390,7 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     if let Some(release) = hold_start_until.map(PathBuf::from) {
         let mut held = release.as_os_str().to_os_string();
         held.push(".held");
-        if let Err(error) = File::create(held).and_then(|mut file| file.write_all(b"")) {
+        if let Err(error) = File::create(held) {
             return abort_start(
                 &paths,
                 &id,

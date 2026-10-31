@@ -299,7 +299,7 @@ fn state_dump(h: &Harness) -> Vec<String> {
 }
 
 fn wait_for_held_start(h: &Harness, held: &std::path::Path) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !held.exists() {
         assert!(
             Instant::now() < deadline,
@@ -311,7 +311,7 @@ fn wait_for_held_start(h: &Harness, held: &std::path::Path) {
 }
 
 fn wait_for_new_idle_session(h: &Harness, existing: &[std::path::PathBuf]) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         for entry in std::fs::read_dir(h.root()).unwrap().flatten() {
             let path = entry.path();
@@ -347,7 +347,7 @@ fn held_start<'scope, 'env: 'scope>(
     let (tx, rx) = mpsc::channel();
     scope.spawn(move || {
         let _ =
-            tx.send(h.start_timeout(marker.as_bytes(), false, "", env, Duration::from_secs(60)));
+            tx.send(h.start_timeout(marker.as_bytes(), false, "", env, Duration::from_secs(10)));
     });
     let hold = env
         .iter()
@@ -604,7 +604,10 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
             .base
             .join(format!("hold-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
         let hold = hold.to_string_lossy().into_owned();
-        let env = [("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold.as_str())];
+        let env = [
+            ("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold.as_str()),
+            ("DELEGATE_SESSION_START_WAIT_MS", "2000"),
+        ];
         std::thread::scope(|scope| {
             let _release = ReleaseOnDrop(std::path::PathBuf::from(&hold));
             let (rx, held_id) = held_start(&h, scope, marker, &env);
