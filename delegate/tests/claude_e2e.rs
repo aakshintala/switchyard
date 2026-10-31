@@ -15,6 +15,7 @@ n=$((n + 1)); printf '%s' "$n" > "$dir/count"
   printf '%s\n' "$@"
   printf '\n'
 } > "$dir/argv.$n"
+cat > "$dir/stdin.$n"
 if [ -p "$dir/release" ]; then
   echo $$ > "$dir/agent.pid"
   cat "$dir/release" >/dev/null
@@ -169,6 +170,25 @@ fn run_watch_resume_and_auto_argv() {
         argv.contains("\n--resume\n25dddfc3-4271-4019-9de0-6795bd6483fa\n"),
         "{argv}"
     );
+}
+
+#[test]
+fn claude_prompt_over_128_kib_is_sent_on_stdin() {
+    let e = Env::new("large-prompt");
+    let prompt = format!("{}!", "x".repeat(128 * 1024));
+    let expected = format!("{prompt}\n\n---\n\n{}", delegate::prompt::status_block());
+    let id = e.ok(&["run", "--model", "claude-sonnet-5-5"], &prompt);
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let received = std::fs::read(e.dir.join("stdin.1")).unwrap();
+    let argv = e.last_argv();
+    assert!(
+        received == expected.as_bytes(),
+        "claude stdin got {} bytes; expected {}; argv: {argv}",
+        received.len(),
+        expected.len()
+    );
+    assert!(!argv.contains(&prompt), "prompt leaked into child argv");
 }
 
 #[test]

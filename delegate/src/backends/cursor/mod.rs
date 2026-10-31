@@ -1,11 +1,11 @@
-//! The cursor-agent backend: binary, argv, spawn, and stream-json parsing.
+//! The cursor-agent backend: binary, staged argv, stdin spawn, and stream-json parsing.
 
 pub(crate) mod doctor;
 
 use super::types::{BackendResult, Event, EventFn, ProgressSnapshotRaw, Spawned};
 use crate::stream::{RawCursorJson, StreamState, init_stream_state, parse_line};
 use crate::types::JobSpec;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -63,13 +63,20 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
         .windows(2)
         .find(|w| w[0] == "--resume")
         .map(|w| w[1].clone());
-    spawn_with_session(spec, launched_session)
+    spawn_with_session(spec, launched_session, "cursor")
 }
 
 /// `launched_session` is an id chosen before launch. The stream's own id wins;
 /// this fills in when the child dies before a result line (cancel).
-pub(crate) fn spawn_with_session(spec: &JobSpec, launched_session: Option<String>) -> Spawned {
-    let started = match super::start_child(spec) {
+pub(crate) fn spawn_with_session(
+    spec: &JobSpec,
+    launched_session: Option<String>,
+    name: &'static str,
+) -> Spawned {
+    let (wire_argv, prompt) = super::split_staged_prompt(&spec.argv);
+    let mut wired = spec.clone();
+    wired.argv = wire_argv;
+    let started = match super::start_child_with_stdin(&wired, Stdio::piped()) {
         Ok(s) => s,
         Err(msg) => return super::spawn_failed(&msg),
     };
@@ -83,6 +90,8 @@ pub(crate) fn spawn_with_session(spec: &JobSpec, launched_session: Option<String
         kill: super::killer(pid, reaped_k),
         session_id: launched_session.clone(),
         drive: Box::new(move |on| {
+            let stdin = child.stdin.take();
+            let writer = super::spawn_stdin_writer(name, stdin, prompt);
             let mut state = init_stream_state();
             let mut result: Option<RawCursorJson> = None;
             let mut messages: Vec<String> = Vec::new();
@@ -97,6 +106,9 @@ pub(crate) fn spawn_with_session(spec: &JobSpec, launched_session: Option<String
                 },
                 |line| handle_line(line, &mut state, &mut result, &mut messages, on),
             );
+            let stdin_err = writer
+                .join()
+                .unwrap_or_else(|_| Some(format!("{name} stdin writer panicked")));
             finish(
                 result,
                 &messages,
@@ -105,6 +117,7 @@ pub(crate) fn spawn_with_session(spec: &JobSpec, launched_session: Option<String
                 !pumped.saw_stdout,
                 state.session_id.as_deref(),
                 launched_session.as_deref(),
+                stdin_err,
             )
         }),
     }
@@ -131,6 +144,7 @@ pub fn parse_stdout(stdout: &str, clean_exit: bool, stderr: &str) -> BackendResu
         stderr,
         stdout.is_empty(),
         state.session_id.as_deref(),
+        None,
         None,
     )
 }
@@ -184,6 +198,7 @@ fn text_from_result_and_messages(result: &str, messages: &[String]) -> String {
 }
 
 /// Turn the last result line (or the lack of one) into the normalized result.
+#[allow(clippy::too_many_arguments)]
 fn finish(
     raw: Option<RawCursorJson>,
     messages: &[String],
@@ -192,12 +207,13 @@ fn finish(
     stdout_empty: bool,
     stream_session: Option<&str>,
     launched_session: Option<&str>,
+    stdin_err: Option<String>,
 ) -> BackendResult {
     let session = || stream_session.map(str::to_string);
     let launched = || launched_session.map(str::to_string);
-    if let Some(raw) = raw {
+    let mut result = if let Some(raw) = raw {
         let result = raw.result.unwrap_or_default();
-        return BackendResult {
+        BackendResult {
             text: text_from_result_and_messages(&result, messages),
             session_id: raw.session_id.or_else(session).or_else(launched),
             usage: raw.usage,
@@ -209,30 +225,34 @@ fn finish(
             stderr: stderr.to_string(),
             permission_denials: raw.permission_denials,
             provider_status: raw.api_error_status,
-        };
-    }
-    // A non-clean exit with no stdout is the bad-model case: the text is the stderr we kept.
-    // Any other missing result line is an error. CANCELLED is the supervisor's status, never ours.
-    // ponytail: the exit code is not carried (clean_exit is a bool); carry Option<i32> if an error text ever needs it.
-    let text = if !clean_exit && stdout_empty {
-        stderr.to_string()
+        }
     } else {
-        NO_RESULT.to_string()
+        // A non-clean exit with no stdout is the bad-model case: the text is the stderr we kept.
+        // Any other missing result line is an error. CANCELLED is the supervisor's status, never ours.
+        // ponytail: the exit code is not carried (clean_exit is a bool); carry Option<i32> if an error text ever needs it.
+        let text = if !clean_exit && stdout_empty {
+            stderr.to_string()
+        } else {
+            NO_RESULT.to_string()
+        };
+        BackendResult {
+            text,
+            session_id: session().or_else(launched),
+            is_error: Some(true),
+            clean_exit,
+            stderr: stderr.to_string(),
+            ..Default::default()
+        }
     };
-    BackendResult {
-        text,
-        session_id: session().or_else(launched),
-        is_error: Some(true),
-        clean_exit,
-        stderr: stderr.to_string(),
-        ..Default::default()
-    }
+    super::append_stdin_error(&mut result, stdin_err);
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::Usage;
+    use std::io::Read;
     use std::sync::Mutex;
 
     fn drive(stdout: &[u8], stderr: &[u8], on: EventFn<'_>, clean: bool) -> BackendResult {
@@ -255,6 +275,7 @@ mod tests {
             &pumped.stderr,
             !pumped.saw_stdout,
             state.session_id.as_deref(),
+            None,
             None,
         )
     }
@@ -286,6 +307,104 @@ mod tests {
                 "go",
             ]
         );
+    }
+
+    #[test]
+    fn staged_prompt_is_written_to_cursor_stdin_without_argv() {
+        let prompt = format!("{}\nend", "x".repeat(200 * 1024));
+        let expected = prompt.clone();
+        let spec = crate::job::tests::spec_of(|s| {
+            s.bin = "/bin/cat".into();
+            s.argv = vec!["--".into(), prompt.clone()];
+        });
+        let (wire_argv, prompt) = super::super::split_staged_prompt(&spec.argv);
+        assert!(wire_argv.is_empty());
+        let mut wired = spec;
+        wired.argv = wire_argv;
+        let mut started =
+            super::super::start_child_with_stdin(&wired, std::process::Stdio::piped())
+                .expect("start cat");
+        let pid = started.pid;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut child = started.child;
+            let writer = super::super::spawn_stdin_writer("cursor", child.stdin.take(), prompt);
+            let mut output = String::new();
+            let read = started.stdout.read_to_string(&mut output);
+            let write_error = writer.join().expect("stdin writer thread");
+            let clean = child.wait().map(|status| status.success()).unwrap_or(false);
+            let _ = tx.send((output, read, write_error, clean));
+        });
+        let (output, read, write_error, clean) =
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(result) => result,
+                Err(error) => {
+                    unsafe { libc::kill(-pid, libc::SIGKILL) };
+                    panic!("cat did not finish reading the prompt before deadline: {error}");
+                }
+            };
+        read.expect("read cat output");
+        assert!(write_error.is_none(), "{write_error:?}");
+        assert_eq!(output, expected);
+        assert!(clean);
+    }
+
+    #[test]
+    fn stdin_write_failure_marks_cursor_result_as_error() {
+        let prompt = "x".repeat(4 * 1024 * 1024);
+        let spec = crate::job::tests::spec_of(|s| {
+            s.bin = "/usr/bin/true".into();
+            s.argv = vec!["--".into(), prompt];
+        });
+        let spawned = spawn_with_session(&spec, None, "cursor");
+        let kill = spawned.kill;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (spawned.drive)(&|_| {});
+            let _ = tx.send(result);
+        });
+        let result = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(result) => result,
+            Err(error) => {
+                kill();
+                panic!("cursor drive did not finish before deadline: {error}");
+            }
+        };
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.stderr.contains("cursor stdin write failed"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn stdin_write_error_is_appended_as_a_stderr_line() {
+        let error = "cursor stdin write failed: Broken pipe";
+        for (stderr, expected) in [
+            ("", error),
+            (
+                "child stderr",
+                "child stderr\ncursor stdin write failed: Broken pipe",
+            ),
+            (
+                "child stderr\n",
+                "child stderr\ncursor stdin write failed: Broken pipe",
+            ),
+        ] {
+            let result = finish(
+                None,
+                &[],
+                true,
+                stderr,
+                false,
+                None,
+                None,
+                Some(error.to_string()),
+            );
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(result.stderr, expected);
+            assert_eq!(result.text, NO_RESULT);
+        }
     }
 
     #[test]

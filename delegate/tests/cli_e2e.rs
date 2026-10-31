@@ -13,6 +13,8 @@ printf '%s\n' "$@" > "$(dirname "$0")/argv.txt"
 printf '%s %s\n' "${FORCE_COLOR-unset}" "${CLICOLOR_FORCE-unset}" > "$(dirname "$0")/color.env"
 rel="$(dirname "$0")/go"
 d="$(dirname "$0")"
+cat > "$d/stdin.txt"
+pt="$(cat "$d/stdin.txt")"
 # One loop turn: when FAKE_TICK names a fifo, the test releases each turn by
 # writing a line, and the fake acknowledges it; otherwise the turn is a short
 # sleep. The hold below ends only on `go`, a removed directory, or a dead
@@ -21,7 +23,7 @@ pause() { if [ -n "$FAKE_TICK" ]; then read -r _ < "$FAKE_TICK" && echo >> "$d/a
 hold() { while [ ! -e "$rel" ] && [ -d "$d" ]; do kill -0 "$p" 2>/dev/null || exit 0; pause; done; }
 # Stays RUNNING behind a grandchild: `sleep` inherits the agent's process group, so
 # killing only the agent would leave it behind.
-case "$*" in
+case "$* $pt" in
   *CANCELME*)
     sleep 300 &
     echo $! > "$(dirname "$0")/grandchild.pid"
@@ -33,35 +35,35 @@ case "$*" in
     ;;
 esac
 # Silent jobs emit nothing, so the model-idle window is what kills them.
-case "$*" in
+case "$* $pt" in
   *SILENT*)
     hold
     exit 0
     ;;
 esac
-case "$*" in
+case "$* $pt" in
   *SLOW*) printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-init"}' ;;
 esac
 printf '%s\n' '{"type":"tool_call","subtype":"started","tool_call":{"shellToolCall":{"args":{"command":"ls"}}}}'
-case "$*" in
+case "$* $pt" in
   *SLOW*)
     hold
     ;;
 esac
-case "$*" in
+case "$* $pt" in
   *COMMIT*)
     printf 'x\n' >> calc.py
     git add calc.py && git commit -q -m "Fix add"
     ;;
 esac
-case "$*" in
+case "$* $pt" in
   *DIRTY*)
     printf 'x\n' >> calc.py
     git add calc.py && git commit -q -m "Fix add"
     printf 'leftover\n' >> extra.py
     ;;
 esac
-case "$*" in
+case "$* $pt" in
   *ASKME*) printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"Which db?\nSTATUS: NEEDS_CONTEXT","session_id":"s-2"}' ;;
   *) printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"391\nSTATUS: DONE","session_id":"s-1"}' ;;
 esac
@@ -299,6 +301,28 @@ fn run_returns_id_while_job_runs_then_it_finishes() {
             + "\n"
     );
     until("supervisor exit", || !alive(pid));
+}
+
+#[test]
+fn cursor_prompt_over_128_kib_is_sent_on_stdin() {
+    let e = Env::new("large-prompt");
+    let prompt = format!("{}!", "x".repeat(128 * 1024));
+    let expected = format!("{prompt}\n\n---\n\n{}", delegate::prompt::status_block());
+    let id = e.run(&prompt);
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let received = std::fs::read(e.dir.join("stdin.txt")).unwrap();
+    assert!(
+        received == expected.as_bytes(),
+        "cursor stdin got {} bytes; expected {}",
+        received.len(),
+        expected.len()
+    );
+    let argv = e.argv();
+    assert!(
+        !argv.iter().any(|arg| arg.contains(&prompt)),
+        "prompt leaked into child argv"
+    );
 }
 
 #[test]
@@ -1860,7 +1884,89 @@ fn muse_run_applies_the_host_sandbox_switch() {
             expect_disabled,
             "{name}: {argv:?}"
         );
+        let prompt_at = argv
+            .iter()
+            .position(|arg| arg == "--prompt-file")
+            .expect("--prompt-file");
+        let prompt_path = PathBuf::from(&argv[prompt_at + 1]);
+        assert!(prompt_path.is_absolute(), "{name}: {argv:?}");
+        assert!(prompt_path.starts_with(&e.dir), "{name}: {argv:?}");
+        assert!(!prompt_path.exists(), "{name}: prompt file survived run");
+        assert!(
+            !argv.iter().any(|arg| arg == "do the thing"),
+            "{name}: {argv:?}"
+        );
     }
+}
+
+#[test]
+fn muse_prompt_over_128_kib_is_read_from_prompt_file() {
+    let e = Env::new("muse-large-prompt");
+    let dir_str = e.dir.to_str().unwrap().to_string();
+    let prompt = format!("{}!", "x".repeat(128 * 1024));
+    let expected = format!("{prompt}\n\n---\n\n{}", delegate::prompt::status_block());
+    let fixture_src = format!(
+        "{}/tests/fixtures/contract/muse/tool-calls-fix.stdout",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::write(
+        e.dir.join("fixture.stdout"),
+        std::fs::read(fixture_src).unwrap(),
+    )
+    .unwrap();
+    let argv_path = e.dir.join("argv.txt");
+    let copied_prompt = e.dir.join("prompt.received");
+    let fake = e.dir.join("muse.sh");
+    std::fs::write(
+        &fake,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > {}
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--prompt-file" ]; then cp "$2" {}; break; fi
+  shift
+done
+cat {}
+"#,
+            argv_path.display(),
+            copied_prompt.display(),
+            e.dir.join("fixture.stdout").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = e.dir.join("nonexistent-profile.json");
+    let out = e.delegate_env(
+        &["run", "--model", "muse/muse-spark-1.3-contributor"],
+        Some(&prompt),
+        &[
+            ("MUSE_BIN", fake.to_str().unwrap()),
+            ("HOME", &dir_str),
+            ("DELEGATE_HOST_PROFILE", profile.to_str().unwrap()),
+        ],
+    );
+    let id = e.ok_output(&out);
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let argv: Vec<String> = std::fs::read_to_string(argv_path)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let prompt_at = argv
+        .iter()
+        .position(|arg| arg == "--prompt-file")
+        .expect("child argv must carry --prompt-file");
+    let prompt_path = PathBuf::from(&argv[prompt_at + 1]);
+    assert!(prompt_path.is_absolute());
+    assert!(prompt_path.starts_with(&e.dir));
+    assert!(!prompt_path.exists(), "prompt file survived run");
+    assert!(
+        !argv.iter().any(|arg| arg.contains(&prompt)),
+        "prompt in argv"
+    );
+    let received = std::fs::read(&copied_prompt).unwrap();
+    assert_eq!(received, expected.as_bytes());
 }
 
 /// A reminder-task loop emits no meaningful progress, so the idle watchdog

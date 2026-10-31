@@ -114,15 +114,21 @@ impl Backend {
 
     /// Full argv (without the binary). Every job runs with writes enabled.
     ///
-    /// This is a staging form: the prompt rides after the `--` separator,
-    /// exactly where the child would take it. Most backends execute it as-is.
-    /// Codex, pi and muse lower it in spawn: codex inserts `-C <cwd>` from the
-    /// spec and replaces the trailing prompt with `-`, pi drops the trailing
-    /// `--` and prompt, and muse inserts `--workspace <cwd>` from the spec.
-    /// Codex and pi pipe the staged prompt to the child's stdin, so the staging
-    /// form itself is never executed and must never be mistaken for child wire
-    /// argv in tests: assert the actual child argv (and stdin bytes) through a
-    /// fake process instead.
+    /// This is a staging form: the prompt rides after `--` for job storage and
+    /// resume. Cursor, Claude, Codex, Fiber and pi send the prompt on stdin;
+    /// Muse writes it to a temporary file. Spawn lowers the staging suffix to
+    /// each backend's wire form, so tests must inspect the child argv and its
+    /// input channel rather than treating this form as the executed argv.
+    ///
+    /// Transport evidence: Cursor's minified CLI bundle at
+    /// `~/.local/share/cursor-agent/versions/2026.10.01-14929f9/1962.index.js`,
+    /// module `./src/commands/build-prompt.ts`, byte offset 9580, reads stdin
+    /// only without a positional prompt. Claude 2.1.316's stdin probe plus
+    /// `claude --help` (`[options] [command] [prompt]`; `--input-format` defaults
+    /// to `text`) confirm stdin input without a positional prompt. Fiber's
+    /// `crates/main/src/cli.rs:978,1229` and `docs/invocation.md:65-66` document
+    /// final `-` as stdin. Muse's `muse exec --help` output (1.4.14) documents
+    /// file input on the `--prompt-file <PATH>` line.
     pub fn argv(self, model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
         match self {
             Self::Cursor => cursor::argv(model, session, prompt),
@@ -202,6 +208,18 @@ pub(crate) fn start_child(spec: &JobSpec) -> Result<Started, String> {
     start_child_with_stdin(spec, Stdio::null())
 }
 
+/// Split only the staged `-- <prompt>` suffix, preserving argv for direct child invocations.
+pub(crate) fn split_staged_prompt(argv: &[String]) -> (Vec<String>, String) {
+    if argv.len() >= 2 && argv[argv.len() - 2] == "--" {
+        (
+            argv[..argv.len() - 2].to_vec(),
+            argv[argv.len() - 1].clone(),
+        )
+    } else {
+        (argv.to_vec(), String::new())
+    }
+}
+
 /// Write a staged prompt to a child's stdin and close the pipe at EOF.
 pub(crate) fn spawn_stdin_writer(
     name: &'static str,
@@ -215,6 +233,15 @@ pub(crate) fn spawn_stdin_writer(
             .err()
             .map(|e| format!("{name} stdin write failed: {e}"))
     })
+}
+
+fn append_stdin_error(result: &mut BackendResult, stdin_err: Option<String>) {
+    let Some(error) = stdin_err else { return };
+    result.is_error = Some(true);
+    if !result.stderr.is_empty() && !result.stderr.ends_with('\n') {
+        result.stderr.push('\n');
+    }
+    result.stderr.push_str(&error);
 }
 
 /// Like [`start_child`], but the child inherits `stdin` instead of null:
@@ -355,6 +382,38 @@ pub(crate) fn pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_staged_prompt_only_removes_a_final_separator_and_prompt() {
+        let (argv, prompt) = split_staged_prompt(&["--".into(), "prompt".into()]);
+        assert!(argv.is_empty());
+        assert_eq!(prompt, "prompt");
+
+        let (argv, prompt) = split_staged_prompt(&["tool".into(), "--".into(), "--".into()]);
+        assert_eq!(argv, ["tool"]);
+        assert_eq!(prompt, "--");
+
+        for original in [
+            vec![],
+            vec!["-c".into()],
+            vec!["-c".into(), "exec sleep 30".into()],
+        ] {
+            let (argv, prompt) = split_staged_prompt(&original);
+            assert_eq!(argv, original);
+            assert!(prompt.is_empty());
+        }
+    }
+
+    #[test]
+    fn split_staged_prompt_preserves_a_dash_leading_multiline_prompt() {
+        let prompt = "-leading dash\nsecond line\nünicode 😀\n";
+        let original = vec!["--print".into(), "--".into(), prompt.into()];
+
+        let (argv, actual) = split_staged_prompt(&original);
+
+        assert_eq!(argv, ["--print"]);
+        assert_eq!(actual, prompt);
+    }
 
     #[test]
     fn from_name_maps_implemented_backends_and_rejects_the_rest() {

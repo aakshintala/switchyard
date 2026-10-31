@@ -1,6 +1,6 @@
-//! The fiber backend: binary, argv, spawn, and stream-json parsing.
+//! The fiber backend: binary, staged argv, stdin spawn, and stream-json parsing.
 //!
-//! `fiber ask --model <ref> [--resume <sid>] -- <prompt>` prints one JSON
+//! `fiber ask --model <ref> [--resume <sid>] -` reads the prompt from stdin and prints one JSON
 //! envelope per line. Every line carries `session_id` (Fiber mints it;
 //! delegate cannot choose it), and the last line is always `fiber_exited`:
 //! `exit_code`, `text` (the final answer), `questions`, `usage`, and `error`
@@ -15,6 +15,7 @@ pub mod hub;
 use super::types::{BackendResult, Event, ProgressSnapshotRaw, Spawned};
 use crate::types::{JobSpec, Usage};
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::atomic::Ordering;
 
 const NO_RESULT: &str = "no result line";
@@ -47,10 +48,8 @@ pub(crate) fn model_reference(model: &str) -> &str {
     model.strip_prefix("fiber/").unwrap_or(model)
 }
 
-/// Argv for a run. `fiber ask` takes one prompt, then an optional `-`;
-/// clap consumes a `--` delimiter, so a prompt starting with `-` is passed
-/// after `--` and never parses as a flag (verified in Fiber's
-/// `crates/main/src/cli.rs`: `AskArgs.prompt` with `num_args = 0..`).
+/// Staged argv for a run. Spawn lowers the staged prompt after `--` to the
+/// wire form `fiber ask --model <ref> [--resume <sid>] -`, which reads stdin.
 pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
     let reference = model_reference(model);
     let mut args = vec!["ask".into(), "--model".into(), reference.to_string()];
@@ -64,7 +63,10 @@ pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<Stri
 }
 
 pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
-    let started = match start_child(spec) {
+    let (wire_argv, prompt) = lower(&spec.argv);
+    let mut wired = spec.clone();
+    wired.argv = wire_argv;
+    let started = match start_child(&wired, Stdio::piped()) {
         Ok(s) => s,
         Err(msg) => return super::spawn_failed(&msg),
     };
@@ -79,6 +81,8 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
         kill: super::killer(pid, reaped_k),
         session_id: None,
         drive: Box::new(move |on| {
+            let stdin = child.stdin.take();
+            let writer = super::spawn_stdin_writer("fiber", stdin, prompt);
             let mut state = FiberState::default();
             let pumped = super::pump(
                 stdout,
@@ -102,24 +106,25 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
                     }
                 },
             );
-            finish(state, pumped.clean_exit, &pumped.stderr)
+            let stdin_err = writer
+                .join()
+                .unwrap_or_else(|_| Some("fiber stdin writer panicked".into()));
+            finish(state, pumped.clean_exit, &pumped.stderr, stdin_err)
         }),
     }
 }
 
-/// Same child setup as `super::start_child_with_stdin`, but the spawn
-/// `io::Error` stays visible: a missing binary (`ErrorKind::NotFound`)
-/// names every source the resolver consults, while any other spawn
-/// failure keeps its original text.
-/// debt: mirrors super::start_child_with_stdin, collapse into it if it ever preserves the spawn io::Error.
-fn start_child(spec: &JobSpec) -> Result<super::Started, String> {
+/// Same child setup as `super::start_child_with_stdin`, but keeps the spawn
+/// `io::Error` visible: a missing binary (`ErrorKind::NotFound`) names every
+/// source the resolver consults, while any other spawn failure keeps its text.
+/// debt: keep this duplicate until start_child_with_stdin preserves the spawn io::Error.
+fn start_child(spec: &JobSpec, stdin: Stdio) -> Result<super::Started, String> {
     use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
     let spawned = crate::util::captured_command(&spec.bin)
         .map_err(|e| format!("cannot write cargo-mutants shim: {e}"))?
         .args(&spec.argv)
         .current_dir(&spec.cwd)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Own process group, so cancel also stops the shell commands the agent started.
@@ -155,7 +160,7 @@ pub fn parse_stdout(stdout: &str, clean_exit: bool, stderr: &str) -> BackendResu
     for line in stdout.split_inclusive('\n') {
         handle_line(line.as_bytes(), &mut state);
     }
-    finish(state, clean_exit, stderr)
+    finish(state, clean_exit, stderr, None)
 }
 
 /// One tool call's reviewer trail, keyed by `action_id`. The first request,
@@ -482,7 +487,12 @@ fn tool_path(arguments: Option<&serde_json::Value>) -> Option<String> {
 }
 
 /// Turn the terminal `fiber_exited` (or the lack of one) into the normalized result.
-fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
+fn finish(
+    state: FiberState,
+    clean_exit: bool,
+    stderr: &str,
+    stdin_err: Option<String>,
+) -> BackendResult {
     let permission_denials = state.denial_list();
     let session_id = state.session_id.or(state.exited_session);
     let notice_no_model = state.notice_no_model;
@@ -494,7 +504,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         } else {
             stderr.to_string()
         };
-        return BackendResult {
+        let mut result = BackendResult {
             text: prefix_notice(text, notice_no_model.as_deref()),
             session_id,
             is_error: Some(true),
@@ -503,6 +513,8 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
             permission_denials,
             ..Default::default()
         };
+        super::append_stdin_error(&mut result, stdin_err);
+        return result;
     };
     let payload = exited.get("payload").cloned().unwrap_or_default();
     let exit_code = payload
@@ -545,7 +557,7 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         .and_then(|p| p.get("status"))
         .and_then(|s| s.as_u64())
         .and_then(|s| u16::try_from(s).ok());
-    BackendResult {
+    let mut result = BackendResult {
         text,
         session_id,
         usage,
@@ -557,7 +569,16 @@ fn finish(state: FiberState, clean_exit: bool, stderr: &str) -> BackendResult {
         stderr: stderr.to_string(),
         permission_denials,
         provider_status,
-    }
+    };
+    super::append_stdin_error(&mut result, stdin_err);
+    result
+}
+
+/// Lower the staged prompt into Fiber's final `-` stdin argument.
+fn lower(staging: &[String]) -> (Vec<String>, String) {
+    let (mut wire_argv, prompt) = super::split_staged_prompt(staging);
+    wire_argv.push("-".into());
+    (wire_argv, prompt)
 }
 
 /// Render `payload.questions` as a `Questions:` section. `Some` only when the
@@ -717,6 +738,66 @@ mod tests {
         let dash = r.iter().position(|s| s == "--").expect("separator");
         assert_eq!(&r[dash + 1..], ["-x"]);
         assert!(r.windows(2).any(|w| w == ["--resume", "s_abc"]));
+    }
+
+    #[test]
+    fn lowering_sends_prompt_on_stdin_and_keeps_resume_in_wire_argv() {
+        let prompt = "-fix the bug\nwith two lines";
+        let staged = argv(
+            "fiber/opencode-go/muse-spark-1.3-contributor",
+            Some("session-id"),
+            prompt,
+        );
+
+        let (wire, actual_prompt) = lower(&staged);
+
+        assert_eq!(
+            wire,
+            [
+                "ask",
+                "--model",
+                "opencode-go/muse-spark-1.3-contributor",
+                "--resume",
+                "session-id",
+                "-",
+            ]
+        );
+        assert!(!wire.iter().any(|arg| arg == "--"));
+        assert!(!wire.iter().any(|arg| arg.contains(prompt)));
+        assert_eq!(actual_prompt, prompt);
+    }
+
+    #[test]
+    fn stdin_write_error_keeps_fiber_cli_error_text() {
+        for (stderr, expected_stderr) in [
+            ("", "fiber stdin write failed: Broken pipe"),
+            (
+                "clap output",
+                "clap output\nfiber stdin write failed: Broken pipe",
+            ),
+            (
+                "clap output\n",
+                "clap output\nfiber stdin write failed: Broken pipe",
+            ),
+        ] {
+            let state = FiberState {
+                exited: Some(serde_json::json!({
+                    "payload": {"exit_code": 2, "text": "unrecognized argument"}
+                })),
+                ..Default::default()
+            };
+
+            let result = finish(
+                state,
+                false,
+                stderr,
+                Some("fiber stdin write failed: Broken pipe".into()),
+            );
+
+            assert_eq!(result.text, "unrecognized argument");
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(result.stderr, expected_stderr);
+        }
     }
 
     #[test]

@@ -1822,14 +1822,14 @@ impl<'a> Rest<'a> {
             .and_then(|exited| exited.get("payload"))
             .and_then(super::questions_section);
         if let Some(rendered) = exited_questions {
-            let mut res = finish(std::mem::take(&mut self.state), true, "");
+            let mut res = finish(std::mem::take(&mut self.state), true, "", None);
             res.is_error = Some(true);
             res.text = crash_text(format!(
                 "session exited with questions:\n{rendered}: the client never answers them"
             ));
             return res;
         }
-        let mut res = finish(std::mem::take(&mut self.state), true, "");
+        let mut res = finish(std::mem::take(&mut self.state), true, "", None);
         if res.is_error == Some(false) {
             if let Some(outcome) = self.bad_outcome.as_deref() {
                 res.is_error = Some(true);
