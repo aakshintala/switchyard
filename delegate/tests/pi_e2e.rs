@@ -20,6 +20,7 @@ n=$((n + 1)); printf '%s' "$n" > "$d/count"
   printf '%s\n' "$@"
   printf '%s\n' '---'
 } > "$d/argv.$n"
+cat > "$d/stdin.$n"
 rel="$d/go"
 # SLOW jobs wait for the release file, so the test can assert RUNNING first.
 case "$*" in
@@ -172,6 +173,25 @@ fn argv_flag(argv: &str, flag: &str) -> String {
         .find(|w| w[0] == flag)
         .unwrap_or_else(|| panic!("no {flag} in {argv}"))[1]
         .to_string()
+}
+
+#[test]
+fn pi_prompt_over_128_kib_is_sent_on_stdin() {
+    let e = Env::new("large-prompt");
+    let prompt = format!("MARKER-872{}", "x".repeat(200 * 1024));
+    let id = e.run_write(&prompt);
+    e.wait_terminal(&id);
+
+    let argv = e.last_argv();
+    assert!(
+        !argv.contains("MARKER-872"),
+        "argv contained prompt text: {argv}"
+    );
+    let stdin = std::fs::read(e.dir.join("stdin.1")).unwrap();
+    assert!(
+        stdin.starts_with(prompt.as_bytes()),
+        "stdin did not start with the prompt"
+    );
 }
 
 #[test]
