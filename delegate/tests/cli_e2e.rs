@@ -124,10 +124,24 @@ impl Env {
     }
 
     fn delegate_env(&self, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Output {
+        self.delegate_env_with_inherited_xdg(args, stdin, env, None)
+    }
+
+    fn delegate_env_with_inherited_xdg(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        env: &[(&str, &str)],
+        inherited_xdg: Option<&Path>,
+    ) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
+        if let Some(root) = inherited_xdg {
+            cmd.env("XDG_CACHE_HOME", root);
+        }
         cmd.args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
+            .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))
             .env("CURSOR_AGENT_BIN", self.dir.join("agent.sh"))
             .env("DELEGATE_HEARTBEAT_MS", "100")
             .env_remove("DELEGATE_JOBS_DIR")
@@ -189,6 +203,14 @@ impl Drop for Env {
     }
 }
 
+struct ReleaseOnDrop(PathBuf);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.0.join("go"), "");
+    }
+}
+
 fn alive(pid: i64) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
@@ -206,6 +228,16 @@ fn run_returns_id_while_job_runs_then_it_finishes() {
     let e = Env::new("run");
     let id = e.run("SLOW do it");
     assert_eq!(id.len(), 36);
+    let locator = e.dir.join("xdg-cache/delegate/locators").join(&id);
+    assert_eq!(
+        std::fs::read_to_string(&locator).unwrap(),
+        e.dir
+            .join("delegate-jobs")
+            .join(format!("{id}.json"))
+            .display()
+            .to_string()
+            + "\n"
+    );
     let r = e.record(&id);
     assert_eq!(r["status"], "RUNNING");
     assert_eq!(r["resume"]["model"], "composer-2.5");
@@ -229,6 +261,15 @@ fn run_returns_id_while_job_runs_then_it_finishes() {
     assert_eq!(done["result"]["text"], "391\nSTATUS: DONE");
     assert_eq!(done["result"]["jobId"], id.as_str());
     assert_eq!(done["resume"]["sessionId"], "s-1");
+    assert_eq!(
+        std::fs::read_to_string(&locator).unwrap(),
+        e.dir
+            .join("delegate-jobs")
+            .join(format!("{id}.json"))
+            .display()
+            .to_string()
+            + "\n"
+    );
     until("supervisor exit", || !alive(pid));
 }
 
@@ -449,6 +490,7 @@ fn status_prints_running_without_waiting() {
         .args(["status", &id])
         .current_dir(&e.dir)
         .env("TMPDIR", &e.dir)
+        .env("XDG_CACHE_HOME", e.dir.join("xdg-cache"))
         .env("CURSOR_AGENT_BIN", e.dir.join("agent.sh"))
         .env("DELEGATE_HEARTBEAT_MS", "100")
         .env_remove("DELEGATE_JOBS_DIR")
@@ -537,6 +579,7 @@ fn positional_prompt_exits_2_without_reading_stdin() {
         .args(["run", "--model", "composer-2.5", "do X"])
         .current_dir(&e.dir)
         .env("TMPDIR", &e.dir)
+        .env("XDG_CACHE_HOME", e.dir.join("xdg-cache"))
         .env("CURSOR_AGENT_BIN", e.dir.join("agent.sh"))
         .env_remove("DELEGATE_JOBS_DIR")
         .stdin(Stdio::piped())
@@ -1242,19 +1285,49 @@ fn cancel_unknown_job_exits_2() {
 #[test]
 fn cancel_finds_a_record_under_another_tmpdir() {
     let e = Env::new("x-cancel");
-    let id = e.run("SLOW do it");
+    let inherited_cache = e.dir.join("inherited-cache-is-a-file");
+    std::fs::write(&inherited_cache, "obstructed inherited cache root").unwrap();
+    let out = e.delegate_env_with_inherited_xdg(
+        &["run", "--model", "composer-2.5"],
+        Some("SLOW do it"),
+        &[],
+        Some(&inherited_cache),
+    );
+    let id = e.ok_output(&out);
+    let _release = ReleaseOnDrop(e.dir.clone());
     assert_eq!(e.record(&id)["status"], "RUNNING");
-    let other = std::env::temp_dir().join("cdm-cli-x-cancel-other");
-    let _ = std::fs::remove_dir_all(&other);
+
+    let other = e.dir.join("caller-b");
     std::fs::create_dir_all(&other).unwrap();
-    let jobs = e.dir.join("delegate-jobs");
+    let status = e.delegate_env(
+        &["status", &id],
+        None,
+        &[("TMPDIR", other.to_str().unwrap())],
+    );
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "status could not find the record: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout),
+        format!("{id}: RUNNING\n")
+    );
+
+    let watch = e.delegate_env(
+        &["watch", &id, "--timeout", "0"],
+        None,
+        &[("TMPDIR", other.to_str().unwrap())],
+    );
+    assert_eq!(watch.status.code(), Some(1));
+    let seen: Value = serde_json::from_slice(&watch.stdout).unwrap();
+    assert_eq!(seen["status"], "RUNNING");
+
     let out = e.delegate_env(
         &["cancel", &id],
         None,
-        &[
-            ("TMPDIR", other.to_str().unwrap()),
-            ("DELEGATE_JOBS_DIR", jobs.to_str().unwrap()),
-        ],
+        &[("TMPDIR", other.to_str().unwrap())],
     );
     assert_eq!(
         out.status.code(),
@@ -1265,8 +1338,27 @@ fn cancel_finds_a_record_under_another_tmpdir() {
     let final_rec: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(final_rec["status"], "CANCELLED");
     assert_eq!(e.record(&id)["status"], "CANCELLED");
-    e.release();
-    let _ = std::fs::remove_dir_all(&other);
+    assert!(
+        !other
+            .join("delegate-jobs")
+            .join(format!("{id}.json"))
+            .exists(),
+        "caller B gets no copied record"
+    );
+    let locator = e.dir.join("xdg-cache/delegate/locators").join(&id);
+    assert_eq!(
+        std::fs::read_to_string(locator).unwrap(),
+        e.dir
+            .join("delegate-jobs")
+            .join(format!("{id}.json"))
+            .display()
+            .to_string()
+            + "\n"
+    );
+    assert!(
+        inherited_cache.is_file(),
+        "the inherited obstruction stays a file"
+    );
 }
 
 #[test]
@@ -1330,15 +1422,10 @@ fn watch_and_resume_find_a_record_under_another_tmpdir() {
     let a = e.run("first brief");
     let first = e.wait_terminal(&a);
     assert_eq!(first["status"], "DONE");
-    let other = std::env::temp_dir().join("cdm-cli-x-watch-other");
-    let _ = std::fs::remove_dir_all(&other);
+    let other = e.dir.join("caller-b");
     std::fs::create_dir_all(&other).unwrap();
-    let jobs = e.dir.join("delegate-jobs");
-    let over = [
-        ("TMPDIR", other.to_str().unwrap()),
-        ("DELEGATE_JOBS_DIR", jobs.to_str().unwrap()),
-    ];
-    let out = e.delegate_env(&["watch", &a], None, &over);
+    let in_b = [("TMPDIR", other.to_str().unwrap())];
+    let out = e.delegate_env(&["watch", &a], None, &in_b);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -1348,7 +1435,7 @@ fn watch_and_resume_find_a_record_under_another_tmpdir() {
     let seen: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(seen["status"], "DONE");
 
-    let out = e.delegate_env(&["resume", &a], Some("follow up"), &over);
+    let out = e.delegate_env(&["resume", &a], Some("follow up"), &in_b);
     assert!(
         out.status.success(),
         "exit {:?}\nstderr: {}\nstdout: {}",
@@ -1357,14 +1444,24 @@ fn watch_and_resume_find_a_record_under_another_tmpdir() {
         String::from_utf8_lossy(&out.stdout)
     );
     let b = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    // The resumed job inherits the caller's DELEGATE_JOBS_DIR, so its record
-    // lands in the override dir; watch it there (docs/delegate-jobs.md#writers).
-    let out = e.delegate_env(&["watch", &b, "--timeout", "10"], None, &over);
+    let b_path = other.join("delegate-jobs").join(format!("{b}.json"));
+    assert!(b_path.is_file(), "resume creates its record under caller B");
+    assert_eq!(
+        std::fs::read_to_string(e.dir.join("xdg-cache/delegate/locators").join(&b)).unwrap(),
+        b_path.display().to_string() + "\n"
+    );
+    let out = e.delegate_env(&["watch", &b, "--timeout", "10"], None, &in_b);
     assert_eq!(out.status.code(), Some(0));
     let done: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(done["status"], "DONE");
     assert_eq!(e.record(&a)["supersededBy"], b.as_str());
-    let _ = std::fs::remove_dir_all(&other);
+    assert!(
+        !other
+            .join("delegate-jobs")
+            .join(format!("{a}.json"))
+            .exists(),
+        "resuming does not copy the old record into caller B"
+    );
 }
 
 #[test]
@@ -1377,17 +1474,12 @@ fn cancel_fallback_writes_back_to_the_original_record() {
     let pid = e.record(&id)["supervisorPid"].as_i64().unwrap();
     unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     until("supervisor death", || !alive(pid));
-    let other = std::env::temp_dir().join("cdm-cli-x-fallback-other");
-    let _ = std::fs::remove_dir_all(&other);
+    let other = e.dir.join("caller-b");
     std::fs::create_dir_all(&other).unwrap();
-    let jobs = e.dir.join("delegate-jobs");
     let out = e.delegate_env(
         &["cancel", &id],
         None,
-        &[
-            ("TMPDIR", other.to_str().unwrap()),
-            ("DELEGATE_JOBS_DIR", jobs.to_str().unwrap()),
-        ],
+        &[("TMPDIR", other.to_str().unwrap())],
     );
     assert_eq!(
         out.status.code(),
@@ -1407,17 +1499,125 @@ fn cancel_fallback_writes_back_to_the_original_record() {
 }
 
 #[test]
+fn dead_supervisor_watch_finalizes_the_original_record_across_tmpdirs() {
+    let e = Env::new("dead-watch-location");
+    let id = e.run("SLOW");
+    let _release = ReleaseOnDrop(e.dir.clone());
+    until("cursor init session id", || {
+        e.record(&id)["resume"]["sessionId"] == "s-init"
+    });
+    let pid = e.record(&id)["supervisorPid"].as_i64().unwrap();
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    until("supervisor death", || !alive(pid));
+
+    let caller = e.dir.join("caller-b");
+    std::fs::create_dir_all(&caller).unwrap();
+    let out = e.delegate_env(
+        &["watch", &id],
+        None,
+        &[("TMPDIR", caller.to_str().unwrap())],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let final_rec: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(final_rec["status"], "ERROR");
+    assert_eq!(e.record(&id)["status"], "ERROR");
+    assert!(
+        !caller
+            .join("delegate-jobs")
+            .join(format!("{id}.json"))
+            .exists(),
+        "dead-supervisor watch does not copy the record into caller B"
+    );
+}
+
+#[test]
+fn locator_publication_failure_prevents_run_from_starting_the_agent() {
+    let e = Env::new("locator-publication-failure");
+    let obstruction = e.dir.join("cache-root-is-a-file");
+    std::fs::write(&obstruction, "not a directory").unwrap();
+    let out = e.delegate_env(
+        &["run", "--model", "composer-2.5"],
+        Some("quick"),
+        &[("XDG_CACHE_HOME", obstruction.to_str().unwrap())],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stdout.is_empty(), "failed publication prints no job id");
+    assert!(
+        !e.dir.join("argv.txt").exists(),
+        "the fake agent never starts"
+    );
+}
+
+#[test]
 fn unknown_job_names_the_searched_dirs() {
     let e = Env::new("x-unknown");
-    let out = e.delegate(&["watch", "nope"], None);
+    let override_dir = e.dir.join("override");
+    let caller = e.dir.join("caller-b");
+    let stale_parent = e.dir.join("stale-jobs");
+    let locator_dir = e.dir.join("xdg-cache/delegate/locators");
+    std::fs::create_dir_all(&locator_dir).unwrap();
+    std::fs::write(
+        locator_dir.join("nope"),
+        stale_parent.join("nope.json").display().to_string() + "\n",
+    )
+    .unwrap();
+    let out = e.delegate_env(
+        &["watch", "nope"],
+        None,
+        &[
+            ("DELEGATE_JOBS_DIR", override_dir.to_str().unwrap()),
+            ("TMPDIR", caller.to_str().unwrap()),
+        ],
+    );
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("unknown job nope"), "{err}");
-    assert!(
-        err.contains(&e.dir.join("delegate-jobs").display().to_string()),
-        "{err}"
+    for dir in [
+        override_dir,
+        caller.join("delegate-jobs"),
+        PathBuf::from("/tmp/delegate-jobs"),
+        locator_dir,
+        stale_parent,
+    ] {
+        assert!(
+            err.contains(&dir.display().to_string()),
+            "missing {} in {err}",
+            dir.display()
+        );
+    }
+}
+
+#[test]
+fn legacy_record_without_locator_is_read_without_migration() {
+    let e = Env::new("legacy-record");
+    let id = "legacy-no-locator";
+    let record = e.dir.join("delegate-jobs").join(format!("{id}.json"));
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(&record, r#"{"status":"DONE"}"#).unwrap();
+
+    let out = e.delegate(&["status", id], None);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert!(err.contains("/tmp/delegate-jobs"), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{id}: DONE\n")
+    );
+    assert!(!e.dir.join("xdg-cache/delegate/locators").join(id).exists());
 }
 
 #[test]
