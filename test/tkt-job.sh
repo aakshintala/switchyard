@@ -244,18 +244,24 @@ printf 'resume prompt\n' >"$T/resume-prompt.md"
 setup_case concerns-write-fail
 reset_stub
 make_record stub-1 DONE_WITH_CONCERNS 0 1 2 0 "reviewer is uneasy"
-STUB_UNWRITABLE_RUN="$CDIR/run" run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+mkdir "$CDIR/run/switchyard-502-concerns-lane.md" || fail "concerns-write-fail creates a directory at the concerns output path"
+export STUB_UNWRITABLE_RUN="$CDIR/run"
+run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+unset STUB_UNWRITABLE_RUN
 chmod u+w "$CDIR/run" || fail "concerns-write-fail restores run permissions"
 [ "$RC" -ne 0 ] || fail "concerns-write-fail exits non-zero"
 [ -z "$OUT" ] || fail "concerns-write-fail emits no CONCERNS verdict after the file write fails"
-grep -qiE 'permission denied|read-only file system' "$CDIR/stderr.txt" || fail "concerns-write-fail exposes the file error: $(cat "$CDIR/stderr.txt")"
+grep -F "$CDIR/run/switchyard-502-concerns-lane.md" "$CDIR/stderr.txt" >/dev/null || fail "concerns-write-fail stderr names the failed concerns file: $(cat "$CDIR/stderr.txt")"
+grep -qiE 'permission denied|read-only file system|is a directory' "$CDIR/stderr.txt" || fail "concerns-write-fail exposes the file error: $(cat "$CDIR/stderr.txt")"
 if bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "concerns-write-fail does not store a path for the missing file"; fi
 
 # --- a failed concerns state write stops after the file is written ---
 setup_case concerns-state-fail
 reset_stub
 make_record stub-1 DONE_WITH_CONCERNS 0 1 2 0 "reviewer is uneasy"
-TKT_STATE_TEST_LOCK_TRIES=1 STUB_LOCK_STATE="$S" run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+export TKT_STATE_TEST_LOCK_TRIES=1 STUB_LOCK_STATE="$S"
+run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
+unset TKT_STATE_TEST_LOCK_TRIES STUB_LOCK_STATE
 rm -rf "$S.lock"
 [ "$RC" -ne 0 ] || fail "concerns-state-fail exits non-zero"
 [ -z "$OUT" ] || fail "concerns-state-fail emits no CONCERNS verdict after the state write fails"
