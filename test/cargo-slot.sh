@@ -526,6 +526,46 @@ rc=$?
 [ "$rc" = 0 ] || fail "build after a killed holder: exit $rc, want 0"
 [ -e "$K/slots/slot-1.lock" ] || fail "slot-1.lock missing after a killed holder"
 
+# A live lock on an inode with a dead recorded pid is reclaimed to a new file.
+Q="$T/reclaim-dead"
+stage "$Q/h"
+stage "$Q/w"
+hold_slot "$Q/h" "$Q/slots" 1
+QH=$HOLD_PID
+sleep 0 &
+DEAD_PID=$!
+wait "$DEAD_PID" || fail "could not reap short-lived process $DEAD_PID"
+printf '%s cargo build\n' "$DEAD_PID" >"$Q/slots/slot-1.lock"
+spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" FAKE_HOLD=1 -- build
+QW=$SPAWNED
+IFS= read -r _ <"$Q/w/up"
+[ -e "$Q/slots/slot-1.lock.stale-$DEAD_PID" ] ||
+  fail "dead holder's lock was not moved aside"
+release "$Q/w"
+wait "$QW"
+rc=$?
+[ "$rc" = 0 ] || fail "build after reclaiming a dead recorded holder: exit $rc, want 0"
+release "$Q/h"
+wait "$QH" 2>/dev/null
+
+# A live recorded pid remains in place and the waiter continues to wait.
+Q="$T/reclaim-live"
+stage "$Q/h"
+stage "$Q/w"
+hold_slot "$Q/h" "$Q/slots" 1
+QH=$HOLD_PID
+spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" -- build
+QW=$SPAWNED
+expect_err_line "cargo-slot: waiting"
+[ ! -e "$Q/slots/slot-1.lock.stale-$QH" ] ||
+  fail "live recorded holder's lock was moved aside"
+[ ! -e "$Q/w/started" ] || fail "build started while the recorded holder was alive"
+kill -TERM "$QW"
+wait "$QW" 2>/dev/null
+expect_waiter_log "$Q/w"
+release "$Q/h"
+wait "$QH" 2>/dev/null
+
 # Nested calls. A slot-taking run records CARGO_SLOT_HELD=1 in the fake; a
 # pass-through run records it absent; a nested run under a held slot runs at
 # once even while the slot is held.

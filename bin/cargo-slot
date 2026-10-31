@@ -88,6 +88,48 @@ def slot_dir():
     return os.path.join(home, ".cache", "agents", "cargo-slots")
 
 
+def dead_holder_pid(fd):
+    try:
+        fields = os.pread(fd, 128, 0).split()
+    except OSError:
+        return None
+    if not fields or not re.fullmatch(rb"[0-9]+", fields[0]):
+        return None
+    pid = int(fields[0])
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return pid
+    except (PermissionError, OSError, OverflowError):
+        return None
+    return None
+
+
+def reclaim_dead_slot(path, fd, pid):
+    # Serialize the path check and rename: another reclaimer may have already
+    # moved this inode and installed a new, live lock file at path.
+    guard_path = os.path.join(os.path.dirname(path), ".reclaim.lock")
+    try:
+        guard_fd = os.open(guard_path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as err:
+        fail(1, "cannot open %s: %s" % (guard_path, err.strerror))
+    try:
+        try:
+            fcntl.flock(guard_fd, fcntl.LOCK_EX)
+            opened = os.fstat(fd)
+            current = os.stat(path)
+            if (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino):
+                os.rename(path, "%s.stale-%d" % (path, pid))
+        except FileNotFoundError:
+            pass  # Another reclaimer already moved this inode.
+        except OSError as err:
+            fail(1, "cannot reclaim %s: %s" % (path, err.strerror))
+    finally:
+        os.close(guard_fd)
+
+
 def acquire_slot(directory, n):
     # One LOCK_NB try per slot file per pass; a full pass that finds none
     # free prints the waiting line once, then sleeps 0.1 s and rescans.
@@ -110,6 +152,9 @@ def acquire_slot(directory, n):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     return fd
                 except BlockingIOError:
+                    pid = dead_holder_pid(fd)
+                    if pid is not None:
+                        reclaim_dead_slot(path, fd, pid)
                     os.close(fd)
                 except OSError as err:
                     os.close(fd)
@@ -203,6 +248,10 @@ def run_slot_child(real, args):
         exec_real(real, args)
         os._exit(127)
 
+    # Overcounting is deliberate: a hard-killed shim frees this slot while its
+    # cargo keeps running, and reclaim can race a waiter blocked on the old
+    # inode. Either can briefly exceed CARGO_SLOTS. Undercounting costs
+    # contention; a leaked slot can cost a lane hours.
     child_pid = pid
     for signum in pending:
         forward(signum, None)
