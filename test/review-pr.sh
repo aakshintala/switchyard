@@ -42,6 +42,15 @@ git -C "$T/origin" commit -qm pr
 NEW_SHA="$(git -C "$T/origin" rev-parse HEAD)"
 git -C "$T/origin" checkout -q main
 git -C "$T/origin" update-ref refs/pull/8/head "$NEW_SHA"
+# PR 9 commits .review-context as a symlink to an external test directory.
+mkdir -p "$T/context-target"
+git -C "$T/origin" checkout -q -b context-link main
+ln -s "$T/context-target" "$T/origin/.review-context"
+git -C "$T/origin" add .review-context
+git -C "$T/origin" commit -qm context-link
+SYMLINK_SHA="$(git -C "$T/origin" rev-parse HEAD)"
+git -C "$T/origin" checkout -q main
+git -C "$T/origin" update-ref refs/pull/9/head "$SYMLINK_SHA"
 EXPECTED_NEW_PID="$(git -C "$T/origin" diff "main...$NEW_SHA" | git patch-id --stable | awk '{print $1}')"
 [ -n "$EXPECTED_NEW_PID" ] || fail "fixture new patch-id computable"
 git clone -q "$T/origin" "$T/clone"
@@ -115,6 +124,7 @@ gh() (
         if [ -e "$T/state/draft" ]; then echo true; else echo false; fi; exit 0
       fi
       h="$FAKE_SHA"
+      if [ "$2" = "9" ]; then h="$SYMLINK_SHA"; fi
       if [ -f "$T/state/heads.txt" ]; then
         h="$(head -1 "$T/state/heads.txt")"
         if [ "$(wc -l <"$T/state/heads.txt")" -gt 1 ]; then
@@ -179,7 +189,7 @@ delegate() (
 sleep() (
   echo "$*" >>"$T/state/sleeps.txt"
 )
-export T FAKE_SHA
+export T FAKE_SHA SYMLINK_SHA
 export -f gh delegate sleep
 
 write_record() {
@@ -393,7 +403,20 @@ done
 grep -Fq '.review-context/pr.diff' "$T/state/prompt-spec.md" || fail "spec prompt names the diff file"
 printf '1 body\n1 comments\n3 body\n3 comments\n2 body\n2 comments\n' >"$T/expected-issue-calls.txt"
 cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "ticket fetches preserve issue order and fetch body then comments"
-bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null || fail "prefetch review collect exits 0"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "prefetch review collect exits 0"
+
+# --- case: a checked-out .review-context symlink cannot redirect the copy
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+start_review 9 --repo O/N --cwd "$T/clone" --axes standards --head "$SYMLINK_SHA" \
+  --model M >/dev/null 2>&1 || fail "symlink context start exits 0"
+wt="$(worktree_for standards)"
+[ ! -L "$wt/.review-context" ] || fail "review context is a fresh directory, not the PR symlink"
+[ -f "$wt/.review-context/pr.diff" ] || fail "fresh review context holds the diff"
+[ ! -e "$T/context-target/pr.diff" ] || fail "copy does not write through the PR symlink"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "symlink context collect exits 0"
 
 # --- case: absent issue and spec default fetches the PR ticket only
 reset_state

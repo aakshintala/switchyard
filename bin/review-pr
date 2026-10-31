@@ -706,6 +706,7 @@ cmd_start() {
     esac
 
     if [ "$mode" = "review" ]; then
+      rm -rf "$wt/.review-context"
       mkdir -p "$wt/.review-context"
       cp "$review_context/pr.diff" "$wt/.review-context/pr.diff"
       if [ "$role" = "spec" ]; then
