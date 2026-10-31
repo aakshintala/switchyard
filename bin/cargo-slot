@@ -154,7 +154,9 @@ def acquire_slot(directory, n):
                 except BlockingIOError:
                     pid = dead_holder_pid(fd)
                     if pid is not None:
-                        reclaim_dead_slot(path, fd, pid)
+                        time.sleep(0.2)
+                        if dead_holder_pid(fd) == pid:
+                            reclaim_dead_slot(path, fd, pid)
                     os.close(fd)
                 except OSError as err:
                     os.close(fd)
@@ -291,6 +293,7 @@ def main():
             try:
                 status = run_slot_child(real, args)
             finally:
+                os.ftruncate(fd, 0)
                 os.close(fd)
             sys.exit(status)
     exec_real(real, args)

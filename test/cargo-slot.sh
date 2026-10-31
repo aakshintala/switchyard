@@ -6,12 +6,13 @@
 # substitution: a regular file cannot block a reader, so the FIFO is what makes
 # the readiness read wait for the line with no deadline. A waiter that exits
 # first gives that read EOF. Absence checks drain a reaped waiter's FIFO to EOF
-# and compare every line read; no test sleeps or polls.
+# and compare every line read. One timed read checks the dead-holder rewrite
+# race; its helper deliberately rewrites its pid after 0.05 s.
 # Not shown: that the waiting line prints once across several rescans. A shim
 # that printed on every rescan passes, because the suite releases a holder
-# right after the first line. Showing it needs a timed wait, which the suite
-# does not use. The suite proves only that a waiter takes a slot after a
-# release, which needs at least one rescan after the waiting line.
+# right after the first line. Showing it needs a timed wait across rescans.
+# The suite proves only that a waiter takes a slot after a release, which needs
+# at least one rescan after the waiting line.
 set -uo pipefail
 
 # The suite re-execs itself into its own process group, so the watchdog can
@@ -548,6 +549,51 @@ rc=$?
 release "$Q/h"
 wait "$QH" 2>/dev/null
 
+# A live holder replaces a stale pid before the reclaimer's delayed recheck.
+# Keep the slot flocked while rewriting so a waiter cannot take the slot itself.
+Q="$T/reclaim-race"
+stage "$Q/h"
+stage "$Q/w"
+mkdir -p "$Q/slots"
+sleep 0 &
+RACE_DEAD_PID=$!
+wait "$RACE_DEAD_PID" || fail "could not reap short-lived process $RACE_DEAD_PID"
+printf '%s cargo build\n' "$RACE_DEAD_PID" >"$Q/slots/slot-1.lock"
+mkfifo "$Q/ready" "$Q/go" || fail "cannot stage reclaim-race helper FIFOs"
+"$PY" -c '
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+with open(sys.argv[2], "w") as ready:
+    ready.write("locked\n")
+time.sleep(0.05)
+os.ftruncate(fd, 0)
+os.lseek(fd, 0, os.SEEK_SET)
+os.write(fd, ("%d cargo build\n" % os.getpid()).encode())
+with open(sys.argv[3]) as go:
+    go.readline()
+' "$Q/slots/slot-1.lock" "$Q/ready" "$Q/go" &
+QH=$!
+PIDS+=("$QH")
+IFS= read -r _ <"$Q/ready"
+exec 8<>"$Q/w/up"
+spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" FAKE_HOLD=1 -- build
+QW=$SPAWNED
+if IFS= read -r -t 1 -u 8 _; then
+  fail "live holder was reclaimed after rewriting its stale pid"
+fi
+expect_err_line "cargo-slot: waiting"
+[ "$(cat "$Q/slots/slot-1.lock")" = "$QH cargo build" ] ||
+  fail "live holder did not replace the stale pid in the lock file"
+[ ! -e "$Q/slots/slot-1.lock.stale-$RACE_DEAD_PID" ] ||
+  fail "live holder's lock was moved aside after its pid rewrite"
+[ ! -e "$Q/w/started" ] || fail "build started while the live holder held the slot"
+kill -TERM "$QW"
+wait "$QW" 2>/dev/null
+expect_waiter_log "$Q/w"
+printf 'go\n' >"$Q/go"
+wait "$QH" || fail "reclaim-race helper did not exit cleanly"
+
 # A live recorded pid remains in place and the waiter continues to wait.
 Q="$T/reclaim-live"
 stage "$Q/h"
@@ -832,6 +878,7 @@ LOCK_HOLDER=$HOLD_PID
   fail "lock file does not name holder $LOCK_HOLDER and argv: $(cat "$L/slots/slot-1.lock")"
 release "$L"
 wait "$LOCK_HOLDER"
+[ ! -s "$L/slots/slot-1.lock" ] || fail "clean release left the holder pid in the lock file"
 
 echo "cargo-slot: all cases passed"
 cleanup
