@@ -320,7 +320,6 @@ EOF
     printf 'worktree=%s\n' "$WT"
     printf 'run=%s\n' "$CDIR/run"
     printf 'plan=%s\n' "$CDIR/plan.md"
-    printf 'spec=%s\n' 5
     printf 'closing=%s\n' 'Resolves #528'
     printf 'workflow_doc=%s\n' docs/agents/workflow.md
     printf 'model.lane=%s\n' lane-m
@@ -407,9 +406,9 @@ grep -q "$H" "$brief" || fail "happy: the filled brief holds the base"
 grep -q "Resolves #528" "$brief" || fail "happy: the filled brief holds CLOSING"
 grep -q "Co-authored with Test" "$brief" || fail "happy: the filled brief holds ATTRIBUTION"
 grep -q "^gate|.*--expect-head $H$" "$T/calls.log" || fail "happy: the gate checks the lane head"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes standards --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: standards starts with state and flag values"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes spec --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: spec starts per axis"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --spec 5 --model rrm --overbuild-model oom --axes overbuild --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: overbuild starts per axis"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --model rrm --overbuild-model oom --axes standards --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: standards starts with state and flag values"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --model rrm --overbuild-model oom --axes spec --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: spec starts per axis"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --head $H --issue 528 --model rrm --overbuild-model oom --axes overbuild --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: overbuild starts per axis"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "happy: one start per axis"
 rvh="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$(printf '%s' "$rvh" | wc -w | tr -d ' ')" -eq 3 ] || fail "happy: three review ids persisted"
 grep -q "^watch|r1 r2 r3$" "$T/calls.log" || fail "happy: one delegate watch covers the review ids"
@@ -732,13 +731,25 @@ run_build
 [ "$RC" -eq 0 ] || fail "basetick exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "basetick"
 
+# --- a spec file path in state never reaches review-pr; review reads --issue ---
+setup_case spec-path
+printf 'ticket body\n' >"$CDIR/spec.md"
+bash "$TKT_STATE" "$S" set spec "$CDIR/spec.md" || fail "spec-path: set spec"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "spec-path exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "spec-path"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "spec-path: one start per axis"
+grep -q "^review-start|.*--issue 528 " "$T/calls.log" || fail "spec-path: review-start carries --issue 528"
+grep -q "^review-start|.*--spec" "$T/calls.log" && fail "spec-path: review-start never carries --spec"
+grep -q "$CDIR/spec.md" "$T/calls.log" && fail "spec-path: the spec path reaches no review-pr call"
+
 # --- a missing state key names itself ---
 setup_case missingkey
-grep -v '^spec=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+grep -v '^plan=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
 run_build
 [ "$RC" -eq 2 ] || fail "missingkey exits 2 (rc=$RC)"
-expect_verdict "TKT tkt-build PRECONDITION missing=spec log=*" "missingkey"
-grep -q 'missing key: spec' "$CDIR/stderr.txt" || fail "missingkey: stderr names spec"
+expect_verdict "TKT tkt-build PRECONDITION missing=plan log=*" "missingkey"
+grep -q 'missing key: plan' "$CDIR/stderr.txt" || fail "missingkey: stderr names plan"
 
 # --- a plan without a Base line stops the build ---
 setup_case basemissing
