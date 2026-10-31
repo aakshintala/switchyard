@@ -188,4 +188,17 @@ fi
 grep -q '4242' "$T/err-other-host.txt" || fail "other-host lock names its pid"
 [ -d "$S7.lock" ] || fail "other-host lock is left in place"
 
+# A live same-host owner remains locked after the retry budget.
+S8="$T/live-owner.state"
+mkdir "$S8.lock"
+printf '%s %s\n' "$(hostname)" "$$" >"$S8.lock/pid"
+if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S8" set k v 2>"$T/err-live-owner.txt"; then
+  live_owner_rc=0
+else
+  live_owner_rc=$?
+fi
+[ "$live_owner_rc" = "2" ] || fail "live-owner lock exits 2 after the budget"
+grep -q "state locked by pid $$" "$T/err-live-owner.txt" || fail "live-owner lock names the holder"
+[ -d "$S8.lock" ] || fail "live-owner lock is left in place"
+
 echo "tkt-state: all cases passed"
