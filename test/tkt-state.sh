@@ -201,4 +201,16 @@ fi
 grep -q "state locked by pid $$" "$T/err-live-owner.txt" || fail "live-owner lock names the holder"
 [ -d "$S8.lock" ] || fail "live-owner lock is left in place"
 
+# A lock without a readable owner is never reaped.
+S9="$T/unreadable-owner.state"
+mkdir "$S9.lock"
+if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S9" set k v 2>"$T/err-unreadable-owner.txt"; then
+  unreadable_owner_rc=0
+else
+  unreadable_owner_rc=$?
+fi
+[ "$unreadable_owner_rc" = "2" ] || fail "ownerless lock exits 2"
+grep -q 'tkt-state: state locked$' "$T/err-unreadable-owner.txt" || fail "ownerless lock uses the generic message"
+[ -d "$S9.lock" ] || fail "ownerless lock is left in place"
+
 echo "tkt-state: all cases passed"
