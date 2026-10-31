@@ -574,6 +574,13 @@ cmd_start() {
       echo "review-pr: could not fetch the diff of PR $pr" >&2
       exit 1
     fi
+    if ! gh pr view "$pr" --repo "$repo" --json body -q .body >"$review_context/pr-body.md"; then
+      echo "review-pr: could not fetch the body of PR $pr" >&2
+      exit 1
+    fi
+    if ! grep -q '[^[:space:]]' "$review_context/pr-body.md"; then
+      rm -f "$review_context/pr-body.md"
+    fi
 
     ticket_numbers=()
     if [ "$issue_count" -eq 0 ]; then
@@ -690,11 +697,17 @@ cmd_start() {
           "SINCE=$since" "FINDINGS=@$verify" >"$brief"
         ;;
     esac
+    if [ "$mode" = "review" ] && [ -f "$review_context/pr-body.md" ]; then
+      printf "\nThe PR body is the lane's claim, not ground truth. Check evidence it cites; do not trust it.\nRead it at .review-context/pr-body.md.\n" >>"$brief"
+    fi
 
     if [ "$mode" = "review" ]; then
       rm -rf "$wt/.review-context"
       mkdir -p "$wt/.review-context"
       cp "$review_context/pr.diff" "$wt/.review-context/pr.diff"
+      if [ -f "$review_context/pr-body.md" ]; then
+        cp "$review_context/pr-body.md" "$wt/.review-context/pr-body.md"
+      fi
       case "$role" in
         spec|overbuild)
           for ticket_n in "${ticket_numbers[@]}"; do
