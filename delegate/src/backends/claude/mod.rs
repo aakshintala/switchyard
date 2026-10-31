@@ -67,7 +67,7 @@ pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<Stri
 /// Same child driver as cursor. The id minted in [`argv`] is kept when the
 /// stream never sends one, so a cancelled run can resume.
 pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
-    super::cursor::spawn_with_session(spec, session_from_argv(&spec.argv))
+    super::cursor::spawn_with_session(spec, session_from_argv(&spec.argv), "claude")
 }
 
 fn session_from_argv(argv: &[String]) -> Option<String> {

@@ -13,6 +13,8 @@ printf '%s\n' "$@" > "$(dirname "$0")/argv.txt"
 printf '%s %s\n' "${FORCE_COLOR-unset}" "${CLICOLOR_FORCE-unset}" > "$(dirname "$0")/color.env"
 rel="$(dirname "$0")/go"
 d="$(dirname "$0")"
+cat > "$d/stdin.txt"
+pt="$(cat "$d/stdin.txt")"
 # One loop turn: when FAKE_TICK names a fifo, the test releases each turn by
 # writing a line, and the fake acknowledges it; otherwise the turn is a short
 # sleep. The hold below ends only on `go`, a removed directory, or a dead
@@ -21,7 +23,7 @@ pause() { if [ -n "$FAKE_TICK" ]; then read -r _ < "$FAKE_TICK" && echo >> "$d/a
 hold() { while [ ! -e "$rel" ] && [ -d "$d" ]; do kill -0 "$p" 2>/dev/null || exit 0; pause; done; }
 # Stays RUNNING behind a grandchild: `sleep` inherits the agent's process group, so
 # killing only the agent would leave it behind.
-case "$*" in
+case "$* $pt" in
   *CANCELME*)
     sleep 300 &
     echo $! > "$(dirname "$0")/grandchild.pid"
@@ -33,35 +35,35 @@ case "$*" in
     ;;
 esac
 # Silent jobs emit nothing, so the model-idle window is what kills them.
-case "$*" in
+case "$* $pt" in
   *SILENT*)
     hold
     exit 0
     ;;
 esac
-case "$*" in
+case "$* $pt" in
   *SLOW*) printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-init"}' ;;
 esac
 printf '%s\n' '{"type":"tool_call","subtype":"started","tool_call":{"shellToolCall":{"args":{"command":"ls"}}}}'
-case "$*" in
+case "$* $pt" in
   *SLOW*)
     hold
     ;;
 esac
-case "$*" in
+case "$* $pt" in
   *COMMIT*)
     printf 'x\n' >> calc.py
     git add calc.py && git commit -q -m "Fix add"
     ;;
 esac
-case "$*" in
+case "$* $pt" in
   *DIRTY*)
     printf 'x\n' >> calc.py
     git add calc.py && git commit -q -m "Fix add"
     printf 'leftover\n' >> extra.py
     ;;
 esac
-case "$*" in
+case "$* $pt" in
   *ASKME*) printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"Which db?\nSTATUS: NEEDS_CONTEXT","session_id":"s-2"}' ;;
   *) printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"391\nSTATUS: DONE","session_id":"s-1"}' ;;
 esac
@@ -299,6 +301,28 @@ fn run_returns_id_while_job_runs_then_it_finishes() {
             + "\n"
     );
     until("supervisor exit", || !alive(pid));
+}
+
+#[test]
+fn cursor_prompt_over_128_kib_is_sent_on_stdin() {
+    let e = Env::new("large-prompt");
+    let prompt = format!("{}!", "x".repeat(128 * 1024));
+    let expected = format!("{prompt}\n\n---\n\n{}", delegate::prompt::status_block());
+    let id = e.run(&prompt);
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let received = std::fs::read(e.dir.join("stdin.txt")).unwrap();
+    assert!(
+        received == expected.as_bytes(),
+        "cursor stdin got {} bytes; expected {}",
+        received.len(),
+        expected.len()
+    );
+    let argv = e.argv();
+    assert!(
+        !argv.iter().any(|arg| arg.contains(&prompt)),
+        "prompt leaked into child argv"
+    );
 }
 
 #[test]

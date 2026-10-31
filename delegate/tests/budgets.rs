@@ -9,9 +9,12 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const FAKE_AGENT: &str = r#"#!/bin/sh
-printf '%s\n' "$@" > "$(dirname "$0")/argv.txt"
+d="$(dirname "$0")"
+cat > "$d/stdin.txt"
+pt="$(cat "$d/stdin.txt")"
+printf '%s\n' "$@" > "$d/argv.txt"
 rel="$(dirname "$0")/go"
-case "$*" in
+case "$* $pt" in
   *CANCELME*)
     sleep 300 &
     echo $! > "$(dirname "$0")/grandchild.pid"
@@ -22,7 +25,7 @@ case "$*" in
     exit 0
     ;;
 esac
-case "$*" in
+case "$* $pt" in
   *SLOW*)
     echo $$ > "$(dirname "$0")/agent.pid"
     i=0

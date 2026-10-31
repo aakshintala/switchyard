@@ -202,6 +202,18 @@ pub(crate) fn start_child(spec: &JobSpec) -> Result<Started, String> {
     start_child_with_stdin(spec, Stdio::null())
 }
 
+/// Split only the staged `-- <prompt>` suffix, preserving argv for direct child invocations.
+pub(crate) fn split_staged_prompt(argv: &[String]) -> (Vec<String>, String) {
+    if argv.len() >= 2 && argv[argv.len() - 2] == "--" {
+        (
+            argv[..argv.len() - 2].to_vec(),
+            argv[argv.len() - 1].clone(),
+        )
+    } else {
+        (argv.to_vec(), String::new())
+    }
+}
+
 /// Write a staged prompt to a child's stdin and close the pipe at EOF.
 pub(crate) fn spawn_stdin_writer(
     name: &'static str,
@@ -355,6 +367,38 @@ pub(crate) fn pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_staged_prompt_only_removes_a_final_separator_and_prompt() {
+        let (argv, prompt) = split_staged_prompt(&["--".into(), "prompt".into()]);
+        assert!(argv.is_empty());
+        assert_eq!(prompt, "prompt");
+
+        let (argv, prompt) = split_staged_prompt(&["tool".into(), "--".into(), "--".into()]);
+        assert_eq!(argv, ["tool"]);
+        assert_eq!(prompt, "--");
+
+        for original in [
+            vec![],
+            vec!["-c".into()],
+            vec!["-c".into(), "exec sleep 30".into()],
+        ] {
+            let (argv, prompt) = split_staged_prompt(&original);
+            assert_eq!(argv, original);
+            assert!(prompt.is_empty());
+        }
+    }
+
+    #[test]
+    fn split_staged_prompt_preserves_a_dash_leading_multiline_prompt() {
+        let prompt = "-leading dash\nsecond line\nünicode 😀\n";
+        let original = vec!["--print".into(), "--".into(), prompt.into()];
+
+        let (argv, actual) = split_staged_prompt(&original);
+
+        assert_eq!(argv, ["--print"]);
+        assert_eq!(actual, prompt);
+    }
 
     #[test]
     fn from_name_maps_implemented_backends_and_rejects_the_rest() {
