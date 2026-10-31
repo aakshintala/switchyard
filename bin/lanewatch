@@ -27,6 +27,12 @@ if [ "$#" -eq 1 ]; then
   [ -n "$target" ] || usage
 fi
 interval=${LANEWATCH_INTERVAL:-120}
+case $interval in
+  *[!0-9]*)
+    printf 'lanewatch: invalid LANEWATCH_INTERVAL: %s (must be a non-negative integer)\n' "$interval" >&2
+    exit 2
+    ;;
+esac
 here=$(cd "$(dirname "$0")" && pwd)
 label=local
 [ -z "$target" ] || label=$target

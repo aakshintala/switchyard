@@ -60,6 +60,19 @@ chmod +x "$T/stub/ps"
 export LANEWATCH_PS_DIR="$T/ps"
 export PATH="$T/stub:$PATH"
 
+expect_invalid_interval() {
+  interval_value=$1
+  LANEWATCH_INTERVAL="$interval_value" bash "$LANEWATCH" --once "$T/run" \
+    >"$T/interval.out" 2>"$T/interval.err"; rc=$?
+  [ "$rc" = 2 ] || fail "invalid interval $interval_value exits 2 (got $rc)"
+  [ ! -s "$T/interval.out" ] || fail "invalid interval $interval_value prints no stdout"
+  expected="lanewatch: invalid LANEWATCH_INTERVAL: $interval_value (must be a non-negative integer)"
+  [ "$(<"$T/interval.err")" = "$expected" ] \
+    || fail "invalid interval $interval_value prints one diagnostic: [$(<"$T/interval.err")]"
+}
+expect_invalid_interval abc
+expect_invalid_interval -1
+
 bash "$LANEWATCH" --once "$T/run" >"$T/local.out" 2>"$T/local.err"; rc=$?
 [ "$rc" = 0 ] || fail "local --once exits 0 (got $rc; $(<"$T/local.err"))"
 [ "$(wc -l <"$T/local.out" | tr -d ' ')" = 1 ] \
