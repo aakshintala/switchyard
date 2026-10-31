@@ -20,13 +20,22 @@ use types::{BackendResult, Event, EventFn, Spawned};
 pub(crate) struct TempDir(std::path::PathBuf);
 
 #[cfg(test)]
+static TEMP_DIR_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
 impl TempDir {
+    /// Creates `{prefix}-{pid}-{n}` exclusively, skipping any path that already
+    /// exists (a pid-reused leftover), so `Drop` only removes what this process made.
     pub(crate) fn new(prefix: &str) -> Self {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&path).expect("create test temp directory");
-        Self(path)
+        loop {
+            let n = TEMP_DIR_NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("create test temp directory {}: {e}", path.display()),
+            }
+        }
     }
 }
 
@@ -556,5 +565,34 @@ mod tests {
         let dir = TempDir::new("backends-already-removed");
         std::fs::remove_dir_all(&*dir).unwrap();
         drop(dir);
+    }
+
+    /// #876: a leftover at the next `{prefix}-{pid}-{n}` (pid reuse) is skipped,
+    /// never adopted, so dropping the new TempDir leaves it intact.
+    #[test]
+    fn temp_dir_skips_and_keeps_an_existing_leftover() {
+        use crate::test_env::EnvGuard;
+        let _lock = crate::test_env::lock();
+        let root = TempDir::new("backends-leftover-root");
+        let _tmp = EnvGuard::set("TMPDIR", root.to_str().unwrap());
+        let prefix = "backends-leftover";
+        // Unlocked tests may also take counter values, so cover a window of them.
+        let next = TEMP_DIR_NEXT.load(Ordering::Relaxed);
+        let leftovers: Vec<_> = (next..next + 64)
+            .map(|n| root.join(format!("{prefix}-{}-{n}", std::process::id())))
+            .collect();
+        for dir in &leftovers {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join("file"), "leftover").unwrap();
+        }
+        let dir = TempDir::new(prefix);
+        assert!(!leftovers.contains(&dir.to_path_buf()));
+        drop(dir);
+        for dir in &leftovers {
+            assert_eq!(
+                std::fs::read_to_string(dir.join("file")).unwrap(),
+                "leftover"
+            );
+        }
     }
 }
