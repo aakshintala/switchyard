@@ -213,4 +213,14 @@ fi
 grep -q 'tkt-state: state locked$' "$T/err-unreadable-owner.txt" || fail "ownerless lock uses the generic message"
 [ -d "$S9.lock" ] || fail "ownerless lock is left in place"
 
+# Reads ignore a held write lock.
+S10="$T/read-under-lock.state"
+printf 'k=first\nk=second\n' >"$S10"
+mkdir "$S10.lock"
+printf '%s %s\n' "$(hostname)" "$$" >"$S10.lock/pid"
+[ "$(bash "$TKT" "$S10" get k)" = "first" ] || fail "get succeeds under a held lock"
+[ "$(bash "$TKT" "$S10" list k)" = "$(printf 'first\nsecond')" ] || fail "list succeeds under a held lock"
+[ -d "$S10.lock" ] || fail "reads leave the held lock in place"
+rm -rf "$S10.lock"
+
 echo "tkt-state: all cases passed"
