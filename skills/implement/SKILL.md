@@ -92,7 +92,7 @@ To watch a running lane, run `~/.agents/bin/lanestat <run-dir>`: a row reads `IN
 
 A plan split into parts runs each part through steps 4–8 in order, the next lane cut once the previous part has merged.
 
-A lane `CONCERNS` verdict (from `tkt-job`, or forwarded as the first line of `tkt-build`) is not a stop: read the concerns in the file named by state key `concerns.lane`, carry them as extra context for the review (`tkt-build` does not pass them to the reviewers yet, so hold them beside the review findings) and continue with `tkt-build <state> --from gate`; a concern that questions a posted ruling, the fence or the ticket's scope routes as `ASK` does.
+A lane `CONCERNS` verdict is exit 1 from `tkt-job`, but `tkt-build` consumes it, runs the gate and review itself, and passes the file in state key `concerns.lane` to every review start as `--context`. The orchestrator reads the concerns file before accepting the review verdict. A concern that questions a posted ruling, the fence or ticket scope routes as `ASK`.
 
 Done when the lane reports a PR URL and head SHA, or a failure triage.
 

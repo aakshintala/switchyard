@@ -100,7 +100,7 @@ if [ "${#plan_files[@]}" -gt 0 ]; then
     emit "STALE n=$n base=$base" 1 "$stat_out"
   fi
 fi
-context_args=()
+context_args=(); context_file=""
 if [ "$from" = lane ]; then
   require_keys closing workflow_doc
   closing="$(tkt get closing)"
@@ -122,9 +122,8 @@ if [ "$from" = lane ]; then
   if [ "$rc" -ne 0 ]; then
     lane_verdict="$(head -n 1 <<<"$lane_out")"
     if [ "$rc" -eq 1 ] && [[ "$lane_verdict" == "TKT tkt-job CONCERNS "* ]]; then
-      require_keys concerns.lane
-      context_file="$(tkt get concerns.lane)"
-      context_args=(--context "$context_file")
+      context_file="$(tkt get concerns.lane 2>/dev/null || true)"
+      if [ -n "$context_file" ]; then context_args=(--context "$context_file"); fi
     else
       forward LANE "$lane_out" "$rc" "$tmpd/lane-err"
     fi
@@ -362,5 +361,11 @@ $approve_digest"; digest="$map_note
 $digest"; fi
 if [ -n "$shard_p3" ]; then approve_digest="$shard_p3
 $approve_digest"; fi
+if [ -n "$context_file" ]; then
+  approve_digest="concerns=$context_file
+$approve_digest"
+  digest="concerns=$context_file
+$digest"
+fi
 if [ "$bad" -eq 0 ]; then emit "APPROVE pr=$pr head=$head findings=$findings_file" 0 "$approve_digest"
 else emit "CHANGES p1=$p1 p2=$p2 p3=$p3 mutants=$merged findings=$findings_file" 1 "$digest"; fi
