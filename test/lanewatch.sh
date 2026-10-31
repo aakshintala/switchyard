@@ -44,12 +44,13 @@ expect_invalid_interval() {
     >"$T/interval.out" 2>"$T/interval.err"; rc=$?
   [ "$rc" = 2 ] || fail "invalid interval $interval_value exits 2 (got $rc)"
   [ ! -s "$T/interval.out" ] || fail "invalid interval $interval_value prints no stdout"
-  expected="lanewatch: invalid LANEWATCH_INTERVAL: $interval_value (must be a non-negative integer)"
+  expected='lanewatch: LANEWATCH_INTERVAL must be a non-negative integer'
   [ "$(<"$T/interval.err")" = "$expected" ] \
     || fail "invalid interval $interval_value prints one diagnostic: [$(<"$T/interval.err")]"
 }
 expect_invalid_interval abc
 expect_invalid_interval -1
+expect_invalid_interval $'abc\ndef'
 
 bash "$LANEWATCH" --once "$T/run" >"$T/local.out" 2>"$T/local.err"; rc=$?
 [ "$rc" = 0 ] || fail "local --once exits 0 (got $rc; $(<"$T/local.err"))"

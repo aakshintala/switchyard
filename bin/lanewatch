@@ -29,7 +29,7 @@ fi
 interval=${LANEWATCH_INTERVAL:-120}
 case $interval in
   *[!0-9]*)
-    printf 'lanewatch: invalid LANEWATCH_INTERVAL: %s (must be a non-negative integer)\n' "$interval" >&2
+    printf 'lanewatch: LANEWATCH_INTERVAL must be a non-negative integer\n' >&2
     exit 2
     ;;
 esac
