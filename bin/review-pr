@@ -844,8 +844,10 @@ cmd_collect() {
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/review-pr.collect.XXXXXX")"
   state_rm=()
   kept_state=()
+  cleanup_keep=()
   group_dirs=()
   group_ids=()
+  group_state_ids=()
   group_first_state=()
   group_posted=()
   posted_ok=""
@@ -854,7 +856,7 @@ cmd_collect() {
     if [ -n "$collect_complete" ]; then
       for sf in ${state_rm[@]+"${state_rm[@]}"}; do
         keep=""
-        for ksf in ${kept_state[@]+"${kept_state[@]}"}; do
+        for ksf in ${cleanup_keep[@]+"${cleanup_keep[@]}"}; do
           [ "$sf" = "$ksf" ] && { keep="1"; break; }
         done
         [ -n "$keep" ] || remove_state_worktree "$sf" || true
@@ -862,7 +864,7 @@ cmd_collect() {
       for rd in ${group_dirs[@]+"${group_dirs[@]}"}; do
         [ -n "$rd" ] || continue
         has_kept=""
-        for ksf in ${kept_state[@]+"${kept_state[@]}"}; do
+        for ksf in ${cleanup_keep[@]+"${cleanup_keep[@]}"}; do
           [ "$(state_get "$ksf" run_dir 2>/dev/null || true)" = "$rd" ] && has_kept="1"
         done
         case "$rd" in
@@ -873,7 +875,7 @@ cmd_collect() {
               for entry in "$rd"/* "$rd"/.[!.]* "$rd"/..?*; do
                 [ -e "$entry" ] || [ -L "$entry" ] || continue
                 entry_kept=""
-                for ksf in ${kept_state[@]+"${kept_state[@]}"}; do
+                for ksf in ${cleanup_keep[@]+"${cleanup_keep[@]}"}; do
                   [ "$entry" = "$(state_get "$ksf" worktree 2>/dev/null || true)" ] && entry_kept="1"
                 done
                 [ -n "$entry_kept" ] || rm -rf "$entry"
@@ -884,7 +886,7 @@ cmd_collect() {
       done
       for sf in ${state_rm[@]+"${state_rm[@]}"}; do
         keep=""
-        for ksf in ${kept_state[@]+"${kept_state[@]}"}; do
+        for ksf in ${cleanup_keep[@]+"${cleanup_keep[@]}"}; do
           [ "$sf" = "$ksf" ] && { keep="1"; break; }
         done
         [ -n "$keep" ] || rm -f "$sf"
@@ -946,8 +948,9 @@ cmd_collect() {
       group_keys[$group_index]="$group_key"
       group_dirs[$group_index]="$rd"
       group_ids[$group_index]="$jid"
+      group_state_ids[$group_index]="$jid"
       group_first_state[$group_index]="$sf"
-      group_posted[$group_index]="1"
+      group_posted[$group_index]=""
       if [ -z "$pr" ]; then
         repo="$(state_get "$sf" repo)"
         pr="$(state_get "$sf" pr)"
@@ -957,11 +960,43 @@ cmd_collect() {
       fi
     else
       group_ids[$group_index]="${group_ids[$group_index]} $jid"
+      group_state_ids[$group_index]="${group_state_ids[$group_index]} $jid"
     fi
-    if [ "$(state_get "$sf" posted 2>/dev/null || true)" != "1" ]; then
-      group_posted[$group_index]=""
+    if [ "$(state_get "$sf" posted 2>/dev/null || true)" = "1" ]; then
+      group_posted[$group_index]="1"
     fi
     id_list[${#id_list[@]}]="$jid"
+  done
+
+  # Keep every saved sibling in the run's cleanup set, even when this call
+  # names only one already-posted unfinished job.
+  all_state_files="$tmp/state-files.txt"
+  find "$state_dir" -type f >"$all_state_files"
+  for gi in ${!group_dirs[@]}; do
+    rd="${group_dirs[$gi]}"
+    [ -n "$rd" ] || continue
+    while IFS= read -r sibling_sf; do
+      [ -n "$sibling_sf" ] || continue
+      [ "$(state_get "$sibling_sf" run_dir 2>/dev/null || true)" = "$rd" ] || continue
+      sibling_id="${sibling_sf##*/}"
+      known_id=""
+      for existing_id in ${group_state_ids[$gi]}; do
+        [ "$existing_id" = "$sibling_id" ] && known_id="1"
+      done
+      if [ -z "$known_id" ]; then
+        group_state_ids[$gi]="${group_state_ids[$gi]} $sibling_id"
+      fi
+      known_state=""
+      for existing_sf in ${state_rm[@]+"${state_rm[@]}"}; do
+        [ "$existing_sf" = "$sibling_sf" ] && known_state="1"
+      done
+      if [ -z "$known_state" ]; then
+        state_rm[${#state_rm[@]}]="$sibling_sf"
+      fi
+      if [ "$(state_get "$sibling_sf" posted 2>/dev/null || true)" = "1" ]; then
+        group_posted[$gi]="1"
+      fi
+    done <"$all_state_files"
   done
 
   if [ "$recollect" -gt 0 ]; then
@@ -1062,7 +1097,15 @@ cmd_collect() {
   fi
 
   for gi in ${!group_dirs[@]}; do
-    [ "${group_posted[$gi]}" = "1" ] && continue
+    if [ "${group_posted[$gi]}" = "1" ]; then
+      for jid in ${group_state_ids[$gi]}; do
+        sf="$state_dir/$jid"
+        if [ "$(state_get "$sf" posted 2>/dev/null || true)" != "1" ]; then
+          printf 'posted=1\n' >>"$sf"
+        fi
+      done
+      continue
+    fi
     first_state="${group_first_state[$gi]}"
     group_repo="$(state_get "$first_state" repo)"
     group_pr="$(state_get "$first_state" pr)"
@@ -1077,7 +1120,7 @@ cmd_collect() {
       else
         printf 'review-pr: patch-id %s, head %s\n' "${group_patch_id:-none}" "${group_sha:-unknown}"
       fi
-      for jid in ${group_ids[$gi]}; do
+      for jid in ${group_state_ids[$gi]}; do
         role="$(state_get "$state_dir/$jid" role)"
         rmodel="$(state_get "$state_dir/$jid" model)"
         rec="$(job_rec "$jid")"
@@ -1090,7 +1133,7 @@ cmd_collect() {
     } >"$body"
     if [ -n "$group_pr" ] && [ -n "$group_repo" ]; then
       gh pr comment "$group_pr" --repo "$group_repo" --body-file "$body" >&2
-      for jid in ${group_ids[$gi]}; do
+      for jid in ${group_state_ids[$gi]}; do
         sf="$state_dir/$jid"
         if [ "$(state_get "$sf" posted 2>/dev/null || true)" != "1" ]; then
           printf 'posted=1\n' >>"$sf"
@@ -1171,6 +1214,7 @@ cmd_collect() {
       fi
       printf 'UNFINISHED %s %s gate=%s %s%s\n' "$role" "$status" "$gate" "$rec" "$reason_suffix" >>"$unfinished_f"
       kept_state[${#kept_state[@]}]="$sf"
+      cleanup_keep[${#cleanup_keep[@]}]="$sf"
       unfinished=$((unfinished + 1))
     else
       complete=""
@@ -1183,9 +1227,17 @@ cmd_collect() {
       if [ -z "$complete" ]; then
         printf 'UNFINISHED %s %s gate=%s %s\n' "$role" "$status" "$gate" "$rec" >>"$unfinished_f"
         kept_state[${#kept_state[@]}]="$sf"
+        cleanup_keep[${#cleanup_keep[@]}]="$sf"
         unfinished=$((unfinished + 1))
       fi
     fi
+  done
+  for sf in ${state_rm[@]+"${state_rm[@]}"}; do
+    requested=""
+    for jid in ${id_list[@]+"${id_list[@]}"}; do
+      [ "$sf" = "$state_dir/$jid" ] && requested="1"
+    done
+    [ -n "$requested" ] || cleanup_keep[${#cleanup_keep[@]}]="$sf"
   done
 
   if [ -n "$pr" ] && [ -n "$repo" ]; then
