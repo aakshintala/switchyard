@@ -72,7 +72,7 @@ forward() {
 }
 require_keys repo issue branch worktree run plan spec
 repo="$(tkt get repo)"; issue="$(tkt get issue)"; branch="$(tkt get branch)"
-worktree="$(tkt get worktree)"; run="$(tkt get run)"; plan="$(tkt get plan)"; spec="$(tkt get spec)"
+worktree="$(tkt get worktree)"; run="$(tkt get run)"; plan="$(tkt get plan)"
 slug="${repo//\//-}"; mkdir -p "$run"
 # First-round tool: a state with a round already counted continues with tkt-fix or tkt-ship.
 rnd="$(tkt get round 2>/dev/null || true)"
@@ -191,7 +191,7 @@ if [ "$mutant_count" -gt 0 ]; then
 fi
 r0="$(tkt get review_ids 2>/dev/null || true)"; rh="$(tkt get review_head 2>/dev/null || true)"; rids=""; [ "$rh" = "$head" ] && rids="$r0"
 n=0; for ax in standards spec overbuild; do n=$((n+1)); [ "$(printf '%s' "$rids" | wc -w | tr -d ' ')" -ge "$n" ] && continue
-  rc=0; one="$("$reviewpr" start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --spec "$spec" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review" 2>"$tmpd/start-$ax-err")" || rc=$?
+  rc=0; one="$("$reviewpr" start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review" 2>"$tmpd/start-$ax-err")" || rc=$?
   [ "$rc" -eq 0 ] || { [ -n "$rids" ] && { tkt set review_ids "$rids"; tkt set review_head "$head"; }; emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-$ax-err")"; }
   id="$(awk -v a="$ax" '$1==a{print $2; exit}' <<<"$one")"; [ -n "$id" ] || emit "REVIEW-INCOMPLETE" 1 "missing $ax id"
   rids="${rids:+$rids }$id"; tkt set review_ids "$rids"; tkt set review_head "$head"; done

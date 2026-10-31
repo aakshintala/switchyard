@@ -60,6 +60,7 @@ EXPECTED_PID="$(git patch-id --stable <"$T/diff.txt" | awk '{print $1}')"
 # --- fake gh
 gh() (
   set -euo pipefail
+  printf '%s\n' "$*" >>"$T/state/gh-calls.txt"
   if [ "$1" = "api" ]; then
     # check runs of a commit, as gh api --jq emits them: name, status, conclusion, started_at, id
     # plus review-pr comment history for the refusal guard, as gh api --jq emits them
@@ -205,7 +206,7 @@ write_record() {
 reset_state() {
   rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt"
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/issue-calls.txt"
-  rm -f "$T/state/comments.json" "$T/state/fail-comments"
+  rm -f "$T/state/comments.json" "$T/state/fail-comments" "$T/state/gh-calls.txt"
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
 }
 
@@ -544,6 +545,30 @@ start_review 7 --repo O/N --cwd "$T/clone" --issue 1 \
 grep -q 'for issue #1 (spec #1)' "$T/state/prompt-spec.md" || fail "SPEC defaults to the first --issue, not the PR number"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "issue without spec collects"
 
+# --- case: a --spec that is not an issue number exits 2 before any gh call
+for bad_spec in 'some/path.md' '0' '00' '3x'; do
+  reset_state
+  st=0
+  err="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec "$bad_spec" \
+    --model M --overbuild-model M2 2>&1 >/dev/null)" || st=$?
+  [ "$st" -eq 2 ] || fail "--spec $bad_spec exits 2 (got $st)"
+  [ "$err" = "review-pr: --spec takes an issue number, got: $bad_spec" ] || fail "--spec $bad_spec diagnostic: [$err]"
+  [ ! -e "$T/state/gh-calls.txt" ] || fail "--spec $bad_spec calls no gh"
+  [ ! -e "$T/state/runs.txt" ] || fail "--spec $bad_spec starts no job"
+done
+# --- case: a positive --spec with leading zeroes is accepted
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 0012 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "--spec 0012 start exits 0"
+grep -q 'for issue #1 (spec #0012)' "$T/state/prompt-spec.md" || fail "--spec 0012 is accepted and kept as given"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "--spec 0012 collects"
 # --- case: malformed issue values and issues in verify mode fail before launch
 for bad_issue in '#3' '3x'; do
   reset_state
