@@ -606,7 +606,6 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
         let hold = hold.to_string_lossy().into_owned();
         let env = [
             ("DELEGATE_SESSION_TEST_HOLD_START_UNTIL", hold.as_str()),
-            ("DELEGATE_SESSION_START_WAIT_MS", "2000"),
         ];
         std::thread::scope(|scope| {
             let _release = ReleaseOnDrop(std::path::PathBuf::from(&hold));
