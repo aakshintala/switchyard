@@ -25,7 +25,8 @@ static PI_FAKE: OnceLock<PathBuf> = OnceLock::new();
 #[allow(dead_code)] // not every test binary that includes this module spawns the fake
 pub fn muse_host_fake() -> PathBuf {
     FAKE.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("delegate-test-fake-{}", std::process::id()));
+        let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("delegate-test-fake-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("muse_host_fake.py");
         let guard = exec_lock();
@@ -64,8 +65,8 @@ pub fn muse_host_fake() -> PathBuf {
 pub fn pi_host_fake() -> PathBuf {
     PI_FAKE
         .get_or_init(|| {
-            let dir =
-                std::env::temp_dir().join(format!("delegate-test-pi-fake-{}", std::process::id()));
+            let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("delegate-test-pi-fake-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let fake = dir.join("pi_host_fake.py");
             let guard = exec_lock();
