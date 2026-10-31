@@ -383,6 +383,36 @@ mod tests {
     }
 
     #[test]
+    fn stdin_write_error_is_appended_as_a_stderr_line() {
+        let error = "cursor stdin write failed: Broken pipe";
+        for (stderr, expected) in [
+            ("", error),
+            (
+                "child stderr",
+                "child stderr\ncursor stdin write failed: Broken pipe",
+            ),
+            (
+                "child stderr\n",
+                "child stderr\ncursor stdin write failed: Broken pipe",
+            ),
+        ] {
+            let result = finish(
+                None,
+                &[],
+                true,
+                stderr,
+                false,
+                None,
+                None,
+                Some(error.to_string()),
+            );
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(result.stderr, expected);
+            assert_eq!(result.text, NO_RESULT);
+        }
+    }
+
+    #[test]
     fn explicit_override_wins() {
         assert_eq!(
             resolve_bin(Some("/custom/cursor-agent")),
