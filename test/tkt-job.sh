@@ -85,7 +85,10 @@ case "\$cmd" in
         cp "\$recs/\$wid.json" "\${DELEGATE_JOBS_DIR:-\$TMPDIR/delegate-jobs}/\$wid.json"
       fi
     done
-    if [ -n "\${STUB_UNWRITABLE_RUN:-}" ]; then chmod a-w "\$STUB_UNWRITABLE_RUN"; fi
+    if [ -n "\${STUB_UNWRITABLE_RUN:-}" ]; then
+      chmod -N "\$STUB_UNWRITABLE_RUN" 2>/dev/null || true
+      chmod a-w "\$STUB_UNWRITABLE_RUN" || exit 1
+    fi
     if [ -n "\${STUB_LOCK_STATE:-}" ]; then
       mkdir "\$STUB_LOCK_STATE.lock"
       printf 'testhost 424242\n' >"\$STUB_LOCK_STATE.lock/pid"
@@ -244,7 +247,7 @@ printf 'resume prompt\n' >"$T/resume-prompt.md"
 setup_case concerns-write-fail
 reset_stub
 make_record stub-1 DONE_WITH_CONCERNS 0 1 2 0 "reviewer is uneasy"
-mkdir "$CDIR/run/switchyard-502-concerns-lane.md" || fail "concerns-write-fail creates a directory at the concerns output path"
+concerns_file="$CDIR/run/switchyard-502-concerns-lane.md"
 export STUB_UNWRITABLE_RUN="$CDIR/run"
 run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 unset STUB_UNWRITABLE_RUN
@@ -252,7 +255,9 @@ chmod u+w "$CDIR/run" || fail "concerns-write-fail restores run permissions"
 [ "$RC" -ne 0 ] || fail "concerns-write-fail exits non-zero"
 [ -z "$OUT" ] || fail "concerns-write-fail emits no CONCERNS verdict after the file write fails"
 grep -F "$CDIR/run/switchyard-502-concerns-lane.md" "$CDIR/stderr.txt" >/dev/null || fail "concerns-write-fail stderr names the failed concerns file: $(cat "$CDIR/stderr.txt")"
-grep -qiE 'permission denied|read-only file system|is a directory' "$CDIR/stderr.txt" || fail "concerns-write-fail exposes the file error: $(cat "$CDIR/stderr.txt")"
+grep -qiE 'permission denied|read-only file system' "$CDIR/stderr.txt" || fail "concerns-write-fail exposes the file error: $(cat "$CDIR/stderr.txt")"
+if grep -F "$CDIR/run/switchyard-502-tkt-job-" "$CDIR/stderr.txt" >/dev/null; then fail "concerns-write-fail does not stop after the concerns write error"; fi
+if [ -e "$concerns_file" ]; then fail "concerns-write-fail does not create the concerns file"; fi
 if bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "concerns-write-fail does not store a path for the missing file"; fi
 
 # --- a failed concerns state write stops after the file is written ---
