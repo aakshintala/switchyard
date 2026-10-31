@@ -135,4 +135,33 @@ bash "$TKT" "$S" set 'a=b' v >/dev/null 2>"$T/err-u3.txt"; [ "$?" = "2" ] || fai
 grep -q 'usage' "$T/err-u3.txt" || fail "a key with = prints usage"
 bash "$TKT" "$S" get '' >/dev/null 2>&1; [ "$?" = "2" ] || fail "an empty key exits 2"
 
+# A write retries while a live owner's lock is held, then succeeds after release.
+S5="$T/retry.state"
+mkdir "$S5.lock"
+printf '%s %s\n' "$(hostname)" "$$" >"$S5.lock/pid"
+(
+  sleep 0.3
+  rm -rf "$S5.lock"
+) &
+release_pid=$!
+if TKT_STATE_TEST_LOCK_TRIES=50 TKT_STATE_TEST_LOCK_SLEEP=0.05 bash "$TKT" "$S5" set k v 2>"$T/err-retry.txt"; then
+  retry_rc=0
+else
+  retry_rc=$?
+fi
+wait_count=0
+while kill -0 "$release_pid" 2>/dev/null && [ "$wait_count" -lt 500 ]; do
+  sleep 0.01
+  wait_count=$((wait_count + 1))
+done
+if kill -0 "$release_pid" 2>/dev/null; then
+  kill "$release_pid" 2>/dev/null || true
+  wait "$release_pid" 2>/dev/null || true
+  fail "lock release finishes before its deadline"
+fi
+wait "$release_pid" || fail "lock release exits 0"
+[ "$retry_rc" = "0" ] || fail "set retries until the lock is released"
+[ "$(bash "$TKT" "$S5" get k)" = "v" ] || fail "retry writes the requested value"
+[ ! -e "$S5.lock" ] || fail "retry leaves no lock behind"
+
 echo "tkt-state: all cases passed"
