@@ -447,6 +447,70 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "round-confirm-ok verify limit exits 1"
 grep -qx 'none' <<<"$OUT" || fail "latest PLAN OK confirm report replaces prior lines"
 
+# --- a grant records one extra confirm round and validates its inputs ---
+setup_case grant-valid
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-valid seed confirm"
+run_plan grant-round --by switchyard --comment 1234
+[ "$RC" -eq 0 ] || fail "valid grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan SET grant=switchyard:1234 log=*" "valid grant"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard:1234" ] || fail "valid grant records who and comment"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "valid grant starts unused"
+
+setup_case grant-invalid
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-invalid seed confirm"
+bash "$TKT_STATE" "$S" set granted_by "" || fail "grant-invalid seed empty grant"
+grant_usage_case() {
+  local label="$1"
+  shift
+  run_plan grant-round "$@"
+  [ "$RC" -eq 2 ] || fail "$label exits 2 (rc=$RC)"
+  grep -q '^usage: tkt-plan' "$CDIR/stderr.txt" || fail "$label prints usage"
+  [ -z "$(bash "$TKT_STATE" "$S" get granted_by 2>/dev/null || true)" ] || fail "$label leaves granted_by unchanged"
+}
+grant_usage_case 'missing --by' --comment 1234
+grant_usage_case 'missing --comment' --by switchyard
+grant_usage_case 'empty --by' --by '' --comment 1234
+grant_usage_case 'empty --comment' --by switchyard --comment ''
+grant_usage_case 'space in --by' --by 'a b' --comment 1234
+grant_usage_case 'space in --comment' --by switchyard --comment 'x y'
+grant_usage_case 'tab in --by' --by $'switchyard\tbot' --comment 1234
+grant_usage_case 'tab in --comment' --by switchyard --comment $'x\ty'
+grant_usage_case 'newline in --by' --by $'switchyard\nbot' --comment 1234
+grant_usage_case 'newline in --comment' --by switchyard --comment $'12\n34'
+grant_usage_case 'CR in --by' --by $'switchyard\rbot' --comment 1234
+grant_usage_case 'CR in --comment' --by switchyard --comment $'12\r34'
+grant_usage_case 'unknown flag' --by switchyard --comment 1234 --other
+grant_usage_case 'stray argument' --by switchyard --comment 1234 extra
+
+setup_case grant-pending
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-pending seed confirm"
+bash "$TKT_STATE" "$S" set granted_by switchyard:1234 || fail "grant-pending seed grant"
+run_plan grant-round --by switchyard --comment 5678
+[ "$RC" -eq 2 ] || fail "second pending grant exits 2"
+grep -q 'switchyard:1234' "$CDIR/stderr.txt" || fail "pending grant error names the existing grant"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard:1234" ] || fail "pending grant keeps the first pair"
+
+setup_case grant-replace
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-replace seed confirm"
+bash "$TKT_STATE" "$S" set granted_by old-grant:99 || fail "grant-replace seed old grant"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-replace seed used"
+run_plan grant-round --by 'switchyard=bot' --comment 'abc:def'
+[ "$RC" -eq 0 ] || fail "used grant can be replaced (rc=$RC)"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard=bot:abc:def" ] || fail "replacement preserves equals and colon characters"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "replacement clears used state"
+
+setup_case grant-before-confirm
+rebase_plan
+bash "$TKT_STATE" "$S" set granted_by "" || fail "grant-before-confirm seed empty grant"
+run_plan grant-round --by switchyard --comment 1234
+[ "$RC" -eq 2 ] || fail "grant before confirm exits 2"
+grep -q 'tkt-plan: no limit reached: the confirm round is still open' "$CDIR/stderr.txt" || fail "grant before confirm explains the open confirm round"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_by 2>/dev/null || true)" ] || fail "grant before confirm leaves grant state unchanged"
+
 # --- a LINES confirm still spends the one confirm round ---
 setup_case confirm-lines
 rebase_plan

@@ -236,6 +236,29 @@ do_confirm() {
   emit "$RV" "$REC" "$(head -n 38 "$rep")"
 }
 
+do_grant() {
+  who=""; comment=""; have_by=0; have_comment=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --by) [ $# -ge 2 ] || usage; who="$2"; have_by=1; shift 2;;
+    --comment) [ $# -ge 2 ] || usage; comment="$2"; have_comment=1; shift 2;;
+    *) usage;; esac; done
+  [ "$have_by" -eq 1 ] && [ "$have_comment" -eq 1 ] || usage
+  [ -n "$who" ] && [ -n "$comment" ] || usage
+  case "$who" in *[[:space:]]*) usage;; esac
+  case "$comment" in *[[:space:]]*) usage;; esac
+  confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
+  [ -n "$confirmed_for" ] || { echo "tkt-plan: no limit reached: the confirm round is still open" >&2; exit 2; }
+  granted_by="$(t get granted_by 2>/dev/null || true)"
+  granted_used="$(t get granted_used 2>/dev/null || true)"
+  if [ -n "$granted_by" ] && [ -z "$granted_used" ]; then
+    echo "tkt-plan: grant already pending: $granted_by" >&2
+    exit 2
+  fi
+  t set granted_by "$who:$comment"
+  t set granted_used ""
+  emit "SET grant=$who:$comment" 0
+}
+
 do_post() {
   part=""
   while [ $# -gt 0 ]; do case "$1" in
@@ -283,4 +306,4 @@ do_replan() {
 }
 
 case "$sub" in
-  verify) do_verify "$@";; confirm) do_confirm "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac
+  verify) do_verify "$@";; confirm) do_confirm "$@";; grant-round) do_grant "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac
