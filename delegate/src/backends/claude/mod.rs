@@ -1,4 +1,4 @@
-//! Claude Code backend: binary, argv, and spawn. Parsing is the shared stream parser.
+//! Claude Code backend: binary, staged argv and stdin spawn. Parsing is the shared stream parser.
 
 pub(crate) mod doctor;
 

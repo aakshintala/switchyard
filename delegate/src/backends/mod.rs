@@ -114,15 +114,11 @@ impl Backend {
 
     /// Full argv (without the binary). Every job runs with writes enabled.
     ///
-    /// This is a staging form: the prompt rides after the `--` separator,
-    /// exactly where the child would take it. Most backends execute it as-is.
-    /// Codex, pi and muse lower it in spawn: codex inserts `-C <cwd>` from the
-    /// spec and replaces the trailing prompt with `-`, pi drops the trailing
-    /// `--` and prompt, and muse inserts `--workspace <cwd>` from the spec.
-    /// Codex and pi pipe the staged prompt to the child's stdin, so the staging
-    /// form itself is never executed and must never be mistaken for child wire
-    /// argv in tests: assert the actual child argv (and stdin bytes) through a
-    /// fake process instead.
+    /// This is a staging form: the prompt rides after `--` for job storage and
+    /// resume. Cursor, Claude, Codex, Fiber and pi send the prompt on stdin;
+    /// Muse writes it to a temporary file. Spawn lowers the staging suffix to
+    /// each backend's wire form, so tests must inspect the child argv and its
+    /// input channel rather than treating this form as the executed argv.
     pub fn argv(self, model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
         match self {
             Self::Cursor => cursor::argv(model, session, prompt),
