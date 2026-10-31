@@ -44,6 +44,7 @@ printf 'ok' >"$T/mode"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
+state="\$1"
 slot=""; out=""; rest=""
 while [ \$# -gt 0 ]; do
   case "\$1" in
@@ -54,6 +55,10 @@ while [ \$# -gt 0 ]; do
   esac
 done
 printf 'job|slot=%s|tmpl=%s|out=%s|rest=%s\n' "\$slot" "\$tmpl" "\$out" "\$rest" >>"$T/stub.log"
+if [ "\$slot" = confirm ]; then
+  confirm_job="\$(bash "$REAL_BIN/tkt-state" "\$state" get job.confirm 2>/dev/null || true)"
+  printf 'confirm-job|%s\n' "\$confirm_job" >>"$T/stub.log"
+fi
 case "\$(cat "$T/mode")" in
   ok)
     printf 'PLAN OK\nheld: every invariant survived its breaking input\n' >"\$out"
@@ -510,6 +515,104 @@ run_plan grant-round --by switchyard --comment 1234
 [ "$RC" -eq 2 ] || fail "grant before confirm exits 2"
 grep -q 'tkt-plan: no limit reached: the confirm round is still open' "$CDIR/stderr.txt" || fail "grant before confirm explains the open confirm round"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_by 2>/dev/null || true)" ] || fail "grant before confirm leaves grant state unchanged"
+
+# --- a granted confirm bypasses only the confirm block, once ---
+setup_case grant-extra
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "grant-extra verify 1 exits 0"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "grant-extra verify 2 exits 0"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "grant-extra initial confirm exits 0"
+jobs_before="$(grep -c '^job|' "$T/stub.log")"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "grant-extra verify before grant exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify before grant"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "grant-extra confirm before grant exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm before grant"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "limits before grant start no job"
+run_plan grant-round --by switchyard --comment 1234
+[ "$RC" -eq 0 ] || fail "grant-extra grant exits 0"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "pending grant does not unlock verify"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify with pending grant"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "verify does not consume the pending grant"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify with pending grant starts no job"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "granted confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "granted confirm consumes the grant"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "granted confirm dispatches exactly one job"
+grep -q '^job|slot=confirm|' "$T/stub.log" || fail "granted confirm uses the confirm slot"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "verify after granted confirm exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify after granted confirm"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "confirm after granted confirm exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm after granted confirm"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "limits after granted confirm start no job"
+
+setup_case grant-ask
+rebase_plan
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-ask seed confirm"
+run_plan grant-round --by switchyard --comment ask
+[ "$RC" -eq 0 ] || fail "grant-ask grant exits 0"
+printf 'ask' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "granted ASK exits 1"
+expect_verdict "TKT tkt-plan ASK id=j1 log=*" "granted ASK"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "ASK does not consume the grant"
+printf 'ok' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "granted confirm retry exits 0"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "successful retry consumes the grant"
+
+setup_case grant-after-first-confirm
+rebase_plan
+printf 'round 0, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan grant-round --by switchyard --comment early
+[ "$RC" -eq 2 ] || fail "grant before first confirm exits 2"
+printf 'ok' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "first confirm exits 0"
+run_plan grant-round --by switchyard --comment after-confirm
+[ "$RC" -eq 0 ] || fail "grant after first confirm exits 0"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "second confirm with grant exits 0"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "second confirm consumes the grant"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "third confirm hits ROUND-LIMIT"
+
+setup_case grant-lines
+rebase_plan
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-lines seed confirm"
+run_plan grant-round --by switchyard --comment lines
+[ "$RC" -eq 0 ] || fail "grant-lines grant exits 0"
+printf 'lines' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "LINES granted confirm exits 1"
+expect_verdict "TKT tkt-plan LINES n=3 out=*confirm-out.md log=*" "LINES granted confirm"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "LINES granted confirm consumes the grant"
+
+setup_case grant-reset-job
+rebase_plan
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-reset-job seed confirm"
+bash "$TKT_STATE" "$S" set job.confirm j-old-confirm || fail "grant-reset-job seed old job"
+run_plan grant-round --by switchyard --comment reset
+[ "$RC" -eq 0 ] || fail "grant-reset-job grant exits 0"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log")"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "grant-reset-job confirm exits 0"
+[ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "granted confirm starts a fresh job"
+[ "$(grep '^confirm-job|' "$T/stub.log" | tail -n 1)" = 'confirm-job|' ] || fail "stored confirm job is cleared before dispatch"
+[ "$(bash "$TKT_STATE" "$S" get job.confirm 2>/dev/null || true)" != "j-old-confirm" ] || fail "granted confirm retires the stored job id"
 
 # --- a LINES confirm still spends the one confirm round ---
 setup_case confirm-lines

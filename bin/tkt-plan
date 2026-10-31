@@ -223,14 +223,26 @@ do_confirm() {
   while [ $# -gt 0 ]; do case "$1" in
     --edits) [ $# -ge 2 ] || usage; edits="$2"; shift 2;; *) usage;; esac; done
   [ -n "$edits" ] || usage; [ -r "$edits" ] || { echo "tkt-plan: cannot read edits file: $edits" >&2; exit 2; }
-  [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage" "$(open_lines)"
+  confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
+  granted_by="$(t get granted_by 2>/dev/null || true)"
+  granted_used="$(t get granted_used 2>/dev/null || true)"
+  granted=0
+  if [ -n "$confirmed_for" ]; then
+    if [ -n "$granted_by" ] && [ -z "$granted_used" ]; then
+      granted=1
+    else
+      emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage" "$(open_lines)"
+    fi
+  fi
   load_plan
   cmodel="$(vmodel)" || exit 2
   rep="$run/$namebase-confirm-out.md"
   xfile="$run/$namebase-confirm-extra.md"
   # Confirm has no --extra flag: the state extra, if any, follows the ticket text.
   ticket_extra "$xfile" "$(t get extra 2>/dev/null || true)"
+  if [ "$granted" -eq 1 ]; then t set job.confirm ""; fi
   runjob confirm "$cbrief" "$rep" PLAN="$plan" BASE="$base" EDITS="@$edits" EXTRA="@$xfile" --model "$cmodel"
+  if [ "$granted" -eq 1 ]; then t set granted_used 1; fi
   t set last_report "$rep"
   t set confirmed_for "$(ronum)"
   emit "$RV" "$REC" "$(head -n 38 "$rep")"
