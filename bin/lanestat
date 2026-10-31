@@ -1,0 +1,97 @@
+#!/bin/sh
+# lanestat [--all] <run-dir>: one row per live pi lane in this host's run dir.
+# It stays POSIX so lanewatch can send it to `ssh bash -s` without a remote copy.
+#
+# State comes from the last tool event in the last 20 MB of the jsonl, never
+# from its last line. A prompt sent during a running tool call gets an immediate
+# `queued` response while the tool keeps running, so the last line can be a
+# response even when the lane is still in that call. A start event means
+# IN-TOOL; an end event leaves the run RUNNING unless it later settles; a
+# settled event means SETTLED; without a running tool or settled event, no write
+# for more than five minutes means STALL. If the start event falls outside the
+# last 20 MB, the lane reads STALL and the operator checks the tool by hand.
+# IN-TOOL says pi has a tool call active, not that the tool is making progress.
+# `queued` means pi has an active run; a prompt is not lost. The unrecoverable
+# shape is an active flag with nothing executing: abort, then resend with
+# flywheel's `pisend.sh wake` (not shipped here).
+#
+# A pid file outlives its lane and the host can reuse its number. Keep a row only
+# when `ps -o comm=` still names pi. A lane's TMPDIR is `~/.cache/tmp`, not
+# `/tmp`: `jobs wait` records live there, and `DELEGATE_JOBS_DIR` must point to
+# that same directory when checking a delegate job. Use `ps -g` on the saved
+# pgid for a `jobs wait` process.
+#
+# Dead pid files accumulate; --all includes them. Never `cat` a lane's
+# fiber-<n>-pi.in: it is a FIFO and reading it blocks the lane.
+set -u
+
+usage() {
+  printf 'usage: lanestat [--all] <run-dir>\n' >&2
+  exit 2
+}
+
+all=
+run=
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --all)
+      [ -z "$all" ] || usage
+      all=--all
+      ;;
+    *)
+      [ -z "$run" ] || usage
+      run=$1
+      ;;
+  esac
+  shift
+done
+[ -n "$run" ] || usage
+[ -d "$run" ] || { printf 'no such run dir: %s\n' "$run" >&2; exit 2; }
+
+now=$(date +%s)
+for pidfile in "$run"/fiber-*-pi.pid; do
+  [ -f "$pidfile" ] || continue
+  n=${pidfile##*/}
+  n=${n#fiber-}
+  n=${n%-pi.pid}
+  pid=$(cat "$pidfile" 2>/dev/null)
+  [ -n "${pid:-}" ] || continue
+
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null | head -1)
+  case ${comm##*/} in
+    pi) ;;
+    *) comm= ;;
+  esac
+  info=
+  [ -n "$comm" ] && info=$(ps -o stat=,etime= -p "$pid" 2>/dev/null | head -1 | tr -s ' ')
+  if [ -z "$info" ]; then
+    [ "$all" = --all ] && printf '%-6s %-8s %s\n' "$n" "$pid" DEAD
+    continue
+  fi
+
+  jsonl=$run/fiber-$n-pi.jsonl
+  age=99999
+  if [ -f "$jsonl" ]; then
+    mtime=$(perl -e 'print ((stat $ARGV[0])[9])' "$jsonl" 2>/dev/null)
+    [ -n "${mtime:-}" ] && age=$((now - mtime))
+  fi
+  events=$(tail -c 20000000 "$jsonl" 2>/dev/null)
+  last=$(printf '%s\n' "$events" |
+    grep -o '"type":"tool_execution_start"\|"type":"tool_execution_end"\|"type":"agent_settled"' |
+    tail -1 | sed 's/.*:"//; s/"//')
+  tool=$(printf '%s\n' "$events" |
+    grep -o '"type":"tool_execution_start","toolCallId":"[^"]*","toolName":"[a-z_]*"' |
+    tail -1 | sed 's/.*"toolName":"//; s/"//')
+  case $last in
+    tool_execution_start) state="IN-TOOL ${tool:-?}" ;;
+    agent_settled) state=SETTLED ;;
+    *)
+      if [ "$age" -gt 300 ]; then
+        state='STALL no tool, not settled'
+      else
+        state=RUNNING
+      fi
+      ;;
+  esac
+  printf '%-6s %-8s %-18s age=%-6s %s\n' "$n" "$pid" "$info" "$age" "$state"
+done
