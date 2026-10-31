@@ -1151,6 +1151,7 @@ if [ -n "$prompt_file" ]; then
     cp "$prompt_file" "$dir/prompt-copy"
 fi
 touch "$dir/ready"
+printf '%s\n' '{{"payload_type":"run.output.delta","payload":{{"text":"ready"}}}}'
 {hold}
 cat "{}"
 "#,
@@ -1459,7 +1460,18 @@ cat "{}"
         );
         let spawned = spawn(&spec);
         let kill = KillOnDrop(spawned.kill);
-        wait_for_file(&dir.join("ready"));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let on = move |event| {
+            if matches!(event, Event::Progress(_)) {
+                let _ = ready_tx.send(());
+            }
+        };
+        let drive = spawned.drive;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(drive(&on)).unwrap());
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("muse child did not report readiness");
         let wire: Vec<String> = std::fs::read_to_string(dir.join("argv.txt"))
             .unwrap()
             .lines()
@@ -1471,10 +1483,6 @@ cat "{}"
             .map(|pair| std::path::PathBuf::from(&pair[1]));
         let existed_before_cancel = prompt_path.as_ref().is_some_and(|path| path.is_file());
         (kill.0)();
-        let on = |_| {};
-        let drive = spawned.drive;
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || tx.send(drive(&on)).unwrap());
         let result = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(result) => result,
             Err(error) => {
