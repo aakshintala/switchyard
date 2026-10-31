@@ -168,16 +168,8 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
             // The writer runs on its own thread while pump drains the pipes,
             // so a child that fills stdout before reading stdin cannot
             // deadlock a large prompt. It is always joined before returning.
-            let mut stdin = child.stdin.take();
-            let writer = std::thread::spawn(move || -> Option<String> {
-                let mut sin = stdin.take()?;
-                use std::io::Write;
-                match sin.write_all(prompt.as_bytes()) {
-                    Ok(()) => None,
-                    Err(e) => Some(format!("codex stdin write failed: {e}")),
-                }
-                // `sin` drops here, so the child sees EOF.
-            });
+            let stdin = child.stdin.take();
+            let writer = super::spawn_stdin_writer("codex", stdin, prompt);
             let mut state = CodexState::default();
             let pumped = super::pump(
                 stdout,

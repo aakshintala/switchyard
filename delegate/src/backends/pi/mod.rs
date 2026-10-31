@@ -10,6 +10,7 @@ pub(crate) mod doctor;
 
 use super::types::{BackendResult, Event, ProgressSnapshotRaw, Spawned};
 use crate::types::{JobSpec, Usage};
+use std::process::Stdio;
 use std::sync::atomic::Ordering;
 
 const NO_RESULT: &str = "no result line";
@@ -64,14 +65,23 @@ fn session_from_argv(argv: &[String]) -> Option<String> {
         .map(|w| w[1].clone())
 }
 
+fn lower(staging: &[String]) -> (Vec<String>, String) {
+    let child_argv = staging[..staging.len().saturating_sub(2)].to_vec();
+    let prompt = staging.last().cloned().unwrap_or_default();
+    (child_argv, prompt)
+}
+
 pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
-    let started = match super::start_child(spec) {
+    let launched_session = session_from_argv(&spec.argv);
+    let (child_argv, prompt) = lower(&spec.argv);
+    let mut wired = spec.clone();
+    wired.argv = child_argv;
+    let started = match super::start_child_with_stdin(&wired, Stdio::piped()) {
         Ok(s) => s,
         Err(msg) => return super::spawn_failed(&msg),
     };
     // The stream usually repeats this id in its `session` header; when it
     // doesn't (a crash before the first line), the result still carries it.
-    let launched_session = session_from_argv(&spec.argv);
     let pid = started.pid;
     let reaped = started.reaped;
     let reaped_k = std::sync::Arc::clone(&reaped);
@@ -82,6 +92,8 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
         kill: super::killer(pid, reaped_k),
         session_id: launched_session.clone(),
         drive: Box::new(move |on| {
+            let stdin = child.stdin.take();
+            let writer = super::spawn_stdin_writer("pi", stdin, prompt);
             let mut state = PiState::default();
             let pumped = super::pump(
                 stdout,
@@ -101,11 +113,15 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
                     }
                 },
             );
+            let stdin_err = writer
+                .join()
+                .unwrap_or_else(|_| Some("pi stdin writer panicked".to_string()));
             finish(
                 state,
                 pumped.clean_exit,
                 &pumped.stderr,
                 launched_session.as_deref(),
+                stdin_err,
             )
         }),
     }
@@ -135,7 +151,7 @@ pub fn parse_stdout(stdout: &str, clean_exit: bool, stderr: &str) -> BackendResu
     for line in stdout.split_inclusive('\n') {
         handle_line(line.as_bytes(), &mut state);
     }
-    finish(state, clean_exit, stderr, None)
+    finish(state, clean_exit, stderr, None, None)
 }
 
 #[derive(Debug, Default)]
@@ -254,10 +270,21 @@ fn finish(
     clean_exit: bool,
     stderr: &str,
     launched_session: Option<&str>,
+    stdin_err: Option<String>,
 ) -> BackendResult {
     let session_id = state
         .session_id
         .or_else(|| launched_session.map(str::to_string));
+    if let Some(err) = stdin_err {
+        return BackendResult {
+            text: format!("{err}\nSTATUS: ERROR"),
+            session_id,
+            is_error: Some(true),
+            clean_exit,
+            stderr: stderr.to_string(),
+            ..Default::default()
+        };
+    }
     let Some(end) = state.agent_end else {
         return BackendResult {
             text: NO_RESULT.to_string(),
@@ -370,6 +397,46 @@ mod tests {
     }
 
     #[test]
+    fn lowering_removes_only_separator_and_prompt() {
+        let staging = argv("openai/gpt-6-luna", Some("session-872"), "-p");
+        let (child_argv, prompt) = lower(&staging);
+
+        assert_eq!(prompt, "-p");
+        assert_eq!(child_argv, staging[..staging.len() - 2]);
+        assert_eq!(child_argv[0], "-p");
+        assert!(
+            child_argv
+                .windows(2)
+                .any(|w| w == ["--model", "openai/gpt-6-luna"])
+        );
+        assert!(
+            child_argv
+                .windows(2)
+                .any(|w| w == ["--session-id", "session-872"])
+        );
+    }
+
+    #[test]
+    fn stdin_write_error_is_reported_and_keeps_session_and_stderr() {
+        let res = finish(
+            PiState::default(),
+            false,
+            "pi stderr tail",
+            Some("session-872"),
+            Some("pi stdin write failed: broken pipe".to_string()),
+        );
+
+        assert_eq!(
+            res.text,
+            "pi stdin write failed: broken pipe\nSTATUS: ERROR"
+        );
+        assert_eq!(res.session_id.as_deref(), Some("session-872"));
+        assert_eq!(res.stderr, "pi stderr tail");
+        assert_eq!(res.is_error, Some(true));
+        assert!(!res.clean_exit);
+    }
+
+    #[test]
     fn explicit_override_wins() {
         assert_eq!(resolve_bin(Some("/custom/pi")), "/custom/pi");
     }
@@ -457,6 +524,7 @@ mod tests {
             true,
             "",
             Some("11111111-2222-4333-8444-555555555555"),
+            None,
         );
         assert_eq!(
             res.session_id.as_deref(),

@@ -8,11 +8,12 @@ pub mod types;
 
 use crate::types::JobSpec;
 use crate::util::captured_command;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStderr, ChildStdout, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use types::{BackendResult, Event, EventFn, Spawned};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,12 +77,13 @@ impl Backend {
     ///
     /// This is a staging form: the prompt rides after the `--` separator,
     /// exactly where the child would take it. Most backends execute it as-is.
-    /// Codex and muse lower it in spawn (codex inserting `-C <cwd>` from the
-    /// spec and replacing the trailing prompt with `-`, muse inserting
-    /// `--workspace <cwd>` from the spec) and codex pipes the staged prompt to
-    /// the child's stdin, so the staging form itself is never executed and
-    /// must never be mistaken for child wire argv in tests: assert the actual
-    /// child argv (and stdin bytes) through a fake process instead.
+    /// Codex, pi and muse lower it in spawn: codex inserts `-C <cwd>` from the
+    /// spec and replaces the trailing prompt with `-`, pi drops the trailing
+    /// `--` and prompt, and muse inserts `--workspace <cwd>` from the spec.
+    /// Codex and pi pipe the staged prompt to the child's stdin, so the staging
+    /// form itself is never executed and must never be mistaken for child wire
+    /// argv in tests: assert the actual child argv (and stdin bytes) through a
+    /// fake process instead.
     pub fn argv(self, model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
         match self {
             Self::Cursor => cursor::argv(model, session, prompt),
@@ -161,9 +163,24 @@ pub(crate) fn start_child(spec: &JobSpec) -> Result<Started, String> {
     start_child_with_stdin(spec, Stdio::null())
 }
 
+/// Write a staged prompt to a child's stdin and close the pipe at EOF.
+pub(crate) fn spawn_stdin_writer(
+    name: &'static str,
+    stdin: Option<ChildStdin>,
+    prompt: String,
+) -> JoinHandle<Option<String>> {
+    std::thread::spawn(move || {
+        let mut stdin = stdin?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .err()
+            .map(|e| format!("{name} stdin write failed: {e}"))
+    })
+}
+
 /// Like [`start_child`], but the child inherits `stdin` instead of null:
-/// codex pipes its staged prompt to the child while the other backends keep
-/// null stdin. The caller owns the prompt-sized write: do it on the drive
+/// codex and pi pipe their staged prompts to the child while other backends
+/// keep null stdin. The caller owns the prompt-sized write: do it on the drive
 /// thread while the pipes drain, never synchronously during dispatch.
 pub(crate) fn start_child_with_stdin(spec: &JobSpec, stdin: Stdio) -> Result<Started, String> {
     let spawned = captured_command(&spec.bin)
