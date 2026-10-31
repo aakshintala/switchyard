@@ -98,25 +98,72 @@ state_list() {
   return 0
 }
 
-# Take the mkdir lock for a write. A held lock exits 2 naming the pid the
-# lock's holder stored; only a lock this process took is removed on exit.
+# Writes retry held locks up to 10 times by default and reap dead owners on
+# this host only. A held lock exits 2 naming its pid; only our lock is removed.
 take_lock() {
-  if mkdir "$lockdir" 2>/dev/null; then
-    locked=1
-    printf '%s\n' "$$" >"$lockdir/pid"
-  else
-    if [ -d "$lockdir" ]; then
-      pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
-      if [ -n "$pid" ]; then
-        echo "tkt-state: state locked by pid $pid" >&2
-      else
-        echo "tkt-state: state locked" >&2
-      fi
-    else
-      echo "tkt-state: cannot lock $state" >&2
+  tries="${TKT_STATE_TEST_LOCK_TRIES:-10}"
+  lock_sleep="${TKT_STATE_TEST_LOCK_SLEEP:-0.2}"
+  host="$(hostname)"
+  attempt=1
+  while [ "$attempt" -le "$tries" ]; do
+    if mkdir "$lockdir" 2>/dev/null; then
+      locked=1
+      printf '%s %s\n' "$host" "$$" >"$lockdir/pid"
+      return
     fi
-    exit 2
+    signal_file="${TKT_STATE_TEST_LOCK_SIGNAL:-}"
+    if [ -n "$signal_file" ]; then
+      printf '.\n' >>"$signal_file"
+    fi
+    owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
+    if [ -n "$owner" ]; then
+      IFS=' ' read -r owner_host owner_pid owner_extra <<<"$owner"
+      if [ -n "$owner_host" ] && [ -n "$owner_pid" ] && [ -z "$owner_extra" ] && [ "$owner_host" = "$host" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+        reap_lockdir="$lockdir.reap"
+        if mkdir "$reap_lockdir" 2>/dev/null; then
+          current_owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
+          if [ "$current_owner" = "$owner" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+            pause_file="${TKT_STATE_TEST_REAP_PAUSE:-}"
+            if [ -n "$pause_file" ]; then
+              : >"$pause_file.ready"
+              pause_count=0
+              while [ ! -e "$pause_file.release" ] && [ "$pause_count" -lt 1000 ]; do
+                sleep 0.01
+                pause_count=$((pause_count + 1))
+              done
+            fi
+            rm -rf "$lockdir" 2>/dev/null || true
+          fi
+          rmdir "$reap_lockdir" 2>/dev/null || true
+          attempt=$((attempt + 1))
+          continue
+        fi
+        blocked_file="${TKT_STATE_TEST_REAP_BLOCKED:-}"
+        if [ -n "$blocked_file" ]; then
+          : >"$blocked_file"
+        fi
+      fi
+    fi
+    if [ "$attempt" -lt "$tries" ]; then
+      sleep "$lock_sleep"
+    fi
+    attempt=$((attempt + 1))
+  done
+  if [ -d "$lockdir" ]; then
+    owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
+    if [ -n "$owner" ]; then
+      case "$owner" in
+        *' '*) pid="${owner##* }" ;;
+        *) pid="$owner" ;;
+      esac
+      echo "tkt-state: state locked by pid $pid" >&2
+    else
+      echo "tkt-state: state locked" >&2
+    fi
+  else
+    echo "tkt-state: cannot lock $state" >&2
   fi
+  exit 2
 }
 
 # Stage a rewrite of the target file: copy what exists into a temp file in

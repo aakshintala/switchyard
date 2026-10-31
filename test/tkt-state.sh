@@ -89,8 +89,10 @@ rm -rf "$S2.lock"
 # a lock without a pid file still blocks with exit 2
 S4="$T/nl.state"
 mkdir "$S4.lock"
-bash "$TKT" "$S4" set k v 2>/dev/null && fail "set under a pid-less lock exits non-zero"
+bash "$TKT" "$S4" set k v 2>"$T/err-nl-lock.txt" && fail "set under a pid-less lock exits non-zero"
 [ "$?" = "2" ] || fail "set under a pid-less lock exits 2"
+grep -q 'tkt-state: state locked$' "$T/err-nl-lock.txt" || fail "a pid-less lock uses the generic message"
+[ -d "$S4.lock" ] || fail "a pid-less lock is left in place"
 rm -rf "$S4.lock"
 
 # a write into a missing directory exits 2 instead of hanging or writing elsewhere
@@ -134,5 +136,194 @@ bash "$TKT" "$S" require >/dev/null 2>&1; [ "$?" = "2" ] || fail "require withou
 bash "$TKT" "$S" set 'a=b' v >/dev/null 2>"$T/err-u3.txt"; [ "$?" = "2" ] || fail "a key with = exits 2"
 grep -q 'usage' "$T/err-u3.txt" || fail "a key with = prints usage"
 bash "$TKT" "$S" get '' >/dev/null 2>&1; [ "$?" = "2" ] || fail "an empty key exits 2"
+
+# A write retries while a live owner's lock is held, then succeeds after release.
+S5="$T/retry.state"
+mkdir "$S5.lock"
+printf '%s %s\n' "$(hostname)" "$$" >"$S5.lock/pid"
+: >"$T/retry-hit"
+TKT_STATE_TEST_LOCK_SIGNAL="$T/retry-hit" bash "$TKT" "$S5" set k v 2>"$T/err-retry.txt" &
+retry_pid=$!
+retry_signal_count=0
+retry_wait_count=0
+while [ "$retry_signal_count" -lt 2 ] && kill -0 "$retry_pid" 2>/dev/null && [ "$retry_wait_count" -lt 500 ]; do
+  retry_signal_count="$(wc -l <"$T/retry-hit" | tr -d ' ')"
+  sleep 0.01
+  retry_wait_count=$((retry_wait_count + 1))
+done
+retry_signal_count="$(wc -l <"$T/retry-hit" | tr -d ' ')"
+if [ "$retry_signal_count" -lt 2 ]; then
+  rm -rf "$S5.lock"
+  retry_wait_count=0
+  while kill -0 "$retry_pid" 2>/dev/null && [ "$retry_wait_count" -lt 500 ]; do
+    sleep 0.01
+    retry_wait_count=$((retry_wait_count + 1))
+  done
+  if kill -0 "$retry_pid" 2>/dev/null; then
+    kill "$retry_pid" 2>/dev/null || true
+    wait "$retry_pid" 2>/dev/null || true
+  else
+    wait "$retry_pid" 2>/dev/null || true
+  fi
+  fail "two failed attempts are signaled before releasing the lock"
+fi
+rm -rf "$S5.lock"
+retry_wait_count=0
+while kill -0 "$retry_pid" 2>/dev/null && [ "$retry_wait_count" -lt 500 ]; do
+  sleep 0.01
+  retry_wait_count=$((retry_wait_count + 1))
+done
+if kill -0 "$retry_pid" 2>/dev/null; then
+  kill "$retry_pid" 2>/dev/null || true
+  wait "$retry_pid" 2>/dev/null || true
+  fail "retry writer finishes before its deadline"
+fi
+wait "$retry_pid" || fail "set retries until the lock is released"
+[ "$(bash "$TKT" "$S5" get k)" = "v" ] || fail "retry writes the requested value"
+[ ! -e "$S5.lock" ] || fail "retry leaves no lock behind"
+
+# A dead lock owner on this host is reaped before writing.
+S6="$T/dead-owner.state"
+true &
+dead_pid=$!
+wait "$dead_pid"
+mkdir "$S6.lock"
+printf '%s %s\n' "$(hostname)" "$dead_pid" >"$S6.lock/pid"
+bash "$TKT" "$S6" set k v 2>"$T/err-dead-owner.txt" || fail "set reaps a dead same-host owner"
+[ "$(bash "$TKT" "$S6" get k)" = "v" ] || fail "dead-owner reaping writes the value"
+[ ! -e "$S6.lock" ] || fail "dead-owner reaping leaves no lock behind"
+
+# A lock attributed to another host is never reaped.
+S7="$T/other-host.state"
+mkdir "$S7.lock"
+printf 'otherhost-not-this-host 4242\n' >"$S7.lock/pid"
+if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S7" set k v 2>"$T/err-other-host.txt"; then
+  other_host_rc=0
+else
+  other_host_rc=$?
+fi
+[ "$other_host_rc" = "2" ] || fail "other-host lock exits 2"
+grep -q '4242' "$T/err-other-host.txt" || fail "other-host lock names its pid"
+[ -d "$S7.lock" ] || fail "other-host lock is left in place"
+
+# A live same-host owner remains locked after the retry budget.
+S8="$T/live-owner.state"
+mkdir "$S8.lock"
+printf '%s %s\n' "$(hostname)" "$$" >"$S8.lock/pid"
+if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S8" set k v 2>"$T/err-live-owner.txt"; then
+  live_owner_rc=0
+else
+  live_owner_rc=$?
+fi
+[ "$live_owner_rc" = "2" ] || fail "live-owner lock exits 2 after the budget"
+grep -q "state locked by pid $$" "$T/err-live-owner.txt" || fail "live-owner lock names the holder"
+[ -d "$S8.lock" ] || fail "live-owner lock is left in place"
+
+# Reads ignore a held write lock.
+S10="$T/read-under-lock.state"
+printf 'k=first\nk=second\n' >"$S10"
+mkdir "$S10.lock"
+printf '%s %s\n' "$(hostname)" "$$" >"$S10.lock/pid"
+[ "$(bash "$TKT" "$S10" get k)" = "first" ] || fail "get succeeds under a held lock"
+[ "$(bash "$TKT" "$S10" list k)" = "$(printf 'first\nsecond')" ] || fail "list succeeds under a held lock"
+[ -d "$S10.lock" ] || fail "reads leave the held lock in place"
+rm -rf "$S10.lock"
+
+# Concurrent writers arbitrate dead-lock reaping and both retain their values.
+wait_bounded() {
+  local wait_pid="$1" wait_count=0
+  while kill -0 "$wait_pid" 2>/dev/null && [ "$wait_count" -lt 500 ]; do
+    sleep 0.01
+    wait_count=$((wait_count + 1))
+  done
+  if kill -0 "$wait_pid" 2>/dev/null; then
+    kill "$wait_pid" 2>/dev/null || true
+    wait "$wait_pid" 2>/dev/null || true
+    return 1
+  fi
+  wait "$wait_pid"
+}
+for race_round in {1..20}; do
+  race_state="$T/reaper-race-$race_round.state"
+  sleep 0 &
+  race_dead_pid=$!
+  wait_bounded "$race_dead_pid" || fail "race dead-owner setup finishes before its deadline"
+  mkdir "$race_state.lock"
+  printf '%s %s\n' "$(hostname)" "$race_dead_pid" >"$race_state.lock/pid"
+  bash "$TKT" "$race_state" add a "a-$race_round" >"$T/race-a-$race_round.log" 2>&1 &
+  race_a_pid=$!
+  bash "$TKT" "$race_state" add b "b-$race_round" >"$T/race-b-$race_round.log" 2>&1 &
+  race_b_pid=$!
+  if wait_bounded "$race_a_pid"; then
+    race_a_rc=0
+  else
+    race_a_rc=$?
+  fi
+  if wait_bounded "$race_b_pid"; then
+    race_b_rc=0
+  else
+    race_b_rc=$?
+  fi
+  [ "$race_a_rc" = "0" ] || fail "race writer a succeeds in round $race_round"
+  [ "$race_b_rc" = "0" ] || fail "race writer b succeeds in round $race_round"
+  [ "$(bash "$TKT" "$race_state" list a)" = "a-$race_round" ] || fail "race value a survives in round $race_round"
+  [ "$(bash "$TKT" "$race_state" list b)" = "b-$race_round" ] || fail "race value b survives in round $race_round"
+  [ ! -e "$race_state.lock" ] || fail "race leaves no lock in round $race_round"
+done
+
+# A second reaper cannot take the dead owner's lock while the first reaper pauses.
+wait_for_test_file() {
+  local test_file="$1" test_count=0
+  while [ ! -e "$test_file" ] && [ "$test_count" -lt 500 ]; do
+    sleep 0.01
+    test_count=$((test_count + 1))
+  done
+  [ -e "$test_file" ]
+}
+S11="$T/reaper-exclusive.state"
+true &
+reaper_dead_pid=$!
+wait "$reaper_dead_pid"
+mkdir "$S11.lock"
+printf '%s %s\n' "$(hostname)" "$reaper_dead_pid" >"$S11.lock/pid"
+(
+  if TKT_STATE_TEST_REAP_PAUSE="$T/reap-a" bash "$TKT" "$S11" set a one >"$T/reap-a.log" 2>&1; then
+    reaper_a_rc=0
+  else
+    reaper_a_rc=$?
+  fi
+  printf '%s\n' "$reaper_a_rc" >"$T/reap-a.result"
+) &
+reaper_a_pid=$!
+if ! wait_for_test_file "$T/reap-a.ready"; then
+  wait_bounded "$reaper_a_pid" || true
+  fail "first reaper pauses inside the protected reaping section"
+fi
+(
+  if TKT_STATE_TEST_REAP_BLOCKED="$T/reap-b.blocked" bash "$TKT" "$S11" set b two >"$T/reap-b.log" 2>&1; then
+    reaper_b_rc=0
+  else
+    reaper_b_rc=$?
+  fi
+  printf '%s\n' "$reaper_b_rc" >"$T/reap-b.result"
+) &
+reaper_b_pid=$!
+if ! wait_for_test_file "$T/reap-b.blocked"; then
+  touch "$T/reap-a.release"
+  wait_bounded "$reaper_a_pid" || true
+  wait_bounded "$reaper_b_pid" || true
+  fail "second reaper is blocked on the reap mutex"
+fi
+[ -d "$S11.lock.reap" ] || fail "first reaper holds the reap mutex"
+[ ! -e "$T/reap-b.result" ] || fail "second reaper has not taken the state lock"
+touch "$T/reap-a.release"
+wait_bounded "$reaper_a_pid" || fail "first reaper writer exits 0"
+wait_bounded "$reaper_b_pid" || fail "second reaper writer exits 0"
+[ "$(cat "$T/reap-a.result")" = "0" ] || fail "first reaper writer succeeds"
+[ "$(cat "$T/reap-b.result")" = "0" ] || fail "second reaper writer succeeds"
+[ "$(bash "$TKT" "$S11" get a)" = "one" ] || fail "first reaper value is retained"
+[ "$(bash "$TKT" "$S11" get b)" = "two" ] || fail "second reaper value is retained"
+[ ! -e "$S11.lock" ] || fail "reapers leave no state lock"
+[ ! -e "$S11.lock.reap" ] || fail "reapers leave no reap mutex"
 
 echo "tkt-state: all cases passed"
