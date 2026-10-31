@@ -79,6 +79,7 @@ case "\$cmd" in
     case "\$prompt" in *-lane-*) slot="lane" ;; *-map-*) slot="map" ;; esac
     status="DONE"
     commits='["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]'
+    concerns='null'
     if [ "\$slot" = "map" ]; then
       text="\$(cat "$T/map-text")"
       commits='[]'
@@ -86,14 +87,18 @@ case "\$cmd" in
       text="lane done
 STATUS: DONE"
     fi
+    if [ "\$mode" = "concerns-lane" ] && [ "\$slot" = "lane" ]; then
+      status="DONE_WITH_CONCERNS"
+      concerns='"lane is unsure about X"'
+    fi
     if { [ "\$mode" = "ask-lane" ] && [ "\$slot" = "lane" ]; } || { [ "\$mode" = "ask-map" ] && [ "\$slot" = "map" ]; }; then
       status="NEEDS_CONTEXT"
       text="\$(cat "$T/ask-text")"
       commits='[]'
     fi
     mkdir -p "\$jobsdir"
-    jq -n --arg status "\$status" --arg text "\$text" --argjson commits "\$commits" \
-      '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log"}, changeSet: {headBefore: "a", headAfter: "b", newCommits: \$commits, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: null}, supervisorPid: 1}' \
+    jq -n --arg status "\$status" --arg text "\$text" --argjson commits "\$commits" --argjson concerns "\$concerns" \
+      '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log"}, changeSet: {headBefore: "a", headAfter: "b", newCommits: \$commits, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: \$concerns}, supervisorPid: 1}' \
       >"\$jobsdir/\$id.json"
     printf '%s\n' "\$id"
     ;;
@@ -530,7 +535,7 @@ run_build
 expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "startfail"
 grep -q "cannot start reviews" <<<"$OUT" || fail "startfail: the digest holds the cause"
 
-# --- a lane ASK passes through and starts nothing after it ---
+# --- a non-CONCERNS lane ASK still forwards and starts nothing after it ---
 setup_case ask
 printf 'ask-lane' >"$T/delegate-mode"
 run_build
@@ -540,6 +545,20 @@ grep -q "which scope rules the retry?" <<<"$OUT" || fail "ask: the digest holds 
 grep -q "^gate|" "$T/calls.log" && fail "ask: the gate never runs"
 grep -q "^review-start|" "$T/calls.log" && fail "ask: review never starts"
 bash "$TKT_STATE" "$S" get head >/dev/null 2>&1 && fail "ask: pr and head stay unset"
+
+# --- a CONCERNS lane continues through the gate and passes its file to reviews ---
+setup_case concerns-lane
+printf 'concerns-lane' >"$T/delegate-mode"
+run_build
+[ "$RC" -eq 0 ] || fail "concerns-lane exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "concerns-lane"
+concerns_file="$CDIR/run/switchyard-528-concerns-lane.md"
+expect_state concerns.lane "$concerns_file" concerns-lane
+printf 'lane is unsure about X\n' | cmp - "$concerns_file" || fail "concerns-lane: concerns file keeps the lane text"
+[ "$(grep -c '^gate|' "$T/calls.log")" -eq 1 ] || fail "concerns-lane: gate runs once"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "concerns-lane: review pair starts"
+[ "$(grep '^review-start|' "$T/calls.log" | grep -F -c -- "--context $concerns_file")" -eq 3 ] || fail "concerns-lane: every review start receives its context file"
+grep -q '^review-collect|' "$T/calls.log" || fail "concerns-lane: reviews are collected"
 
 # --- a lane with no model is refused before dispatch, never a LANE-ERROR ---
 setup_case lane-error

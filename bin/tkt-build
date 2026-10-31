@@ -100,6 +100,7 @@ if [ "${#plan_files[@]}" -gt 0 ]; then
     emit "STALE n=$n base=$base" 1 "$stat_out"
   fi
 fi
+context_args=()
 if [ "$from" = lane ]; then
   require_keys closing workflow_doc
   closing="$(tkt get closing)"
@@ -118,7 +119,20 @@ if [ "$from" = lane ]; then
   lane_args=(--slot lane --template "$lane_brief" --gate-from-plan --expect-commits "BASE=$base" "GATE=$gate_cmd" "CLOSING=$closing" "ATTRIBUTION=$attr" "LANE_MODEL=$lane_model")
   lane_args+=(--model "$lane_model")
   rc=0; lane_out="$("$tktjob" "$state" "${lane_args[@]}" 2>"$tmpd/lane-err")" || rc=$?
-  [ "$rc" -eq 0 ] || forward LANE "$lane_out" "$rc" "$tmpd/lane-err"
+  if [ "$rc" -ne 0 ]; then
+    lane_verdict="$(head -n 1 <<<"$lane_out")"
+    if [ "$rc" -eq 1 ] && [[ "$lane_verdict" == "TKT tkt-job CONCERNS "* ]]; then
+      require_keys concerns.lane
+      context_file="$(tkt get concerns.lane)"
+      context_args=(--context "$context_file")
+    else
+      forward LANE "$lane_out" "$rc" "$tmpd/lane-err"
+    fi
+  fi
+fi
+if [ "$from" != lane ]; then
+  context_file="$(tkt get concerns.lane 2>/dev/null || true)"
+  if [ -n "$context_file" ]; then context_args=(--context "$context_file"); fi
 fi
 if [ "$from" != review ]; then
   pr_json="$(gh pr list --head "$branch" --repo "$repo" --json number,headRefOid 2>/dev/null || true)"
@@ -191,7 +205,9 @@ if [ "$mutant_count" -gt 0 ]; then
 fi
 r0="$(tkt get review_ids 2>/dev/null || true)"; rh="$(tkt get review_head 2>/dev/null || true)"; rids=""; [ "$rh" = "$head" ] && rids="$r0"
 n=0; for ax in standards spec overbuild; do n=$((n+1)); [ "$(printf '%s' "$rids" | wc -w | tr -d ' ')" -ge "$n" ] && continue
-  rc=0; one="$("$reviewpr" start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --spec "$spec" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review" 2>"$tmpd/start-$ax-err")" || rc=$?
+  start_args=(start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --spec "$spec" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review")
+  if [ "${#context_args[@]}" -gt 0 ]; then start_args+=("${context_args[@]}"); fi
+  rc=0; one="$("$reviewpr" "${start_args[@]}" 2>"$tmpd/start-$ax-err")" || rc=$?
   [ "$rc" -eq 0 ] || { [ -n "$rids" ] && { tkt set review_ids "$rids"; tkt set review_head "$head"; }; emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-$ax-err")"; }
   id="$(awk -v a="$ax" '$1==a{print $2; exit}' <<<"$one")"; [ -n "$id" ] || emit "REVIEW-INCOMPLETE" 1 "missing $ax id"
   rids="${rids:+$rids }$id"; tkt set review_ids "$rids"; tkt set review_head "$head"; done
