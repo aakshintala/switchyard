@@ -270,6 +270,12 @@ do_grant() {
     echo "tkt-plan: grant already pending: $pending_by:$pending_comment" >&2
     exit 2
   fi
+  recorded_by="$(t get granted_by 2>/dev/null || true)"
+  if [ -n "$recorded_by" ]; then
+    recorded_comment="$(t get granted_comment 2>/dev/null || true)"
+    echo "tkt-plan: grant already recorded: $recorded_by:$recorded_comment: a second grant needs the owner: use --owner-approved <comment id>" >&2
+    exit 2
+  fi
   t set granted_by "$who"
   t set granted_comment "$comment"
   t set granted_used ""

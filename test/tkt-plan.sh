@@ -469,17 +469,21 @@ grep -q 'switchyard:1234' "$CDIR/stderr.txt" || fail "pending grant error names 
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "pending grant keeps the first author"
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "1234" ] || fail "pending grant keeps the first comment"
 
-setup_case grant-replace
+setup_case grant-second-used
 rebase_plan
-bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-replace seed confirm"
-bash "$TKT_STATE" "$S" set granted_by old-grant || fail "grant-replace seed old grant author"
-bash "$TKT_STATE" "$S" set granted_comment 99 || fail "grant-replace seed old grant comment"
-bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-replace seed used"
-run_plan grant-round --by 'switchyard:bot' --comment 'abc:def'
-[ "$RC" -eq 0 ] || fail "used grant can be replaced (rc=$RC)"
-[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard:bot" ] || fail "replacement preserves colons in the author"
-[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "abc:def" ] || fail "replacement preserves colons in the comment"
-[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "replacement clears used state"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-second-used seed confirm"
+bash "$TKT_STATE" "$S" set granted_by old-grant || fail "grant-second-used seed old grant author"
+bash "$TKT_STATE" "$S" set granted_comment 99 || fail "grant-second-used seed old grant comment"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-second-used seed used"
+run_plan grant-round --by switchyard --comment 5678
+[ "$RC" -eq 2 ] || fail "second used grant exits 2 (rc=$RC)"
+grep -q 'old-grant:99' "$CDIR/stderr.txt" || fail "used grant refusal names the existing grant"
+grep -q 'needs the owner' "$CDIR/stderr.txt" || fail "used grant refusal requires the owner"
+grep -q -- '--owner-approved' "$CDIR/stderr.txt" || fail "used grant refusal names --owner-approved"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "old-grant" ] || fail "used grant refusal keeps the first author"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "99" ] || fail "used grant refusal keeps the first comment"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "used grant refusal keeps used state"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "used grant refusal leaves owner empty"
 
 setup_case grant-before-confirm
 rebase_plan
