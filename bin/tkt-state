@@ -111,6 +111,10 @@ take_lock() {
       printf '%s %s\n' "$host" "$$" >"$lockdir/pid"
       return
     fi
+    signal_file="${TKT_STATE_TEST_LOCK_SIGNAL:-}"
+    if [ -n "$signal_file" ]; then
+      printf '.\n' >>"$signal_file"
+    fi
     owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
     if [ -n "$owner" ]; then
       IFS=' ' read -r owner_host owner_pid owner_extra <<<"$owner"

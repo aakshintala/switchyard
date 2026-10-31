@@ -139,28 +139,44 @@ bash "$TKT" "$S" get '' >/dev/null 2>&1; [ "$?" = "2" ] || fail "an empty key ex
 S5="$T/retry.state"
 mkdir "$S5.lock"
 printf '%s %s\n' "$(hostname)" "$$" >"$S5.lock/pid"
-(
-  sleep 0.3
-  rm -rf "$S5.lock"
-) &
-release_pid=$!
-if TKT_STATE_TEST_LOCK_TRIES=50 TKT_STATE_TEST_LOCK_SLEEP=0.05 bash "$TKT" "$S5" set k v 2>"$T/err-retry.txt"; then
-  retry_rc=0
-else
-  retry_rc=$?
-fi
-wait_count=0
-while kill -0 "$release_pid" 2>/dev/null && [ "$wait_count" -lt 500 ]; do
+: >"$T/retry-hit"
+TKT_STATE_TEST_LOCK_SIGNAL="$T/retry-hit" TKT_STATE_TEST_LOCK_TRIES=50 TKT_STATE_TEST_LOCK_SLEEP=0.05 bash "$TKT" "$S5" set k v 2>"$T/err-retry.txt" &
+retry_pid=$!
+retry_signal_count=0
+retry_wait_count=0
+while [ "$retry_signal_count" -lt 2 ] && kill -0 "$retry_pid" 2>/dev/null && [ "$retry_wait_count" -lt 500 ]; do
+  retry_signal_count="$(wc -l <"$T/retry-hit" | tr -d ' ')"
   sleep 0.01
-  wait_count=$((wait_count + 1))
+  retry_wait_count=$((retry_wait_count + 1))
 done
-if kill -0 "$release_pid" 2>/dev/null; then
-  kill "$release_pid" 2>/dev/null || true
-  wait "$release_pid" 2>/dev/null || true
-  fail "lock release finishes before its deadline"
+retry_signal_count="$(wc -l <"$T/retry-hit" | tr -d ' ')"
+if [ "$retry_signal_count" -lt 2 ]; then
+  rm -rf "$S5.lock"
+  retry_wait_count=0
+  while kill -0 "$retry_pid" 2>/dev/null && [ "$retry_wait_count" -lt 500 ]; do
+    sleep 0.01
+    retry_wait_count=$((retry_wait_count + 1))
+  done
+  if kill -0 "$retry_pid" 2>/dev/null; then
+    kill "$retry_pid" 2>/dev/null || true
+    wait "$retry_pid" 2>/dev/null || true
+  else
+    wait "$retry_pid" 2>/dev/null || true
+  fi
+  fail "two failed attempts are signaled before releasing the lock"
 fi
-wait "$release_pid" || fail "lock release exits 0"
-[ "$retry_rc" = "0" ] || fail "set retries until the lock is released"
+rm -rf "$S5.lock"
+retry_wait_count=0
+while kill -0 "$retry_pid" 2>/dev/null && [ "$retry_wait_count" -lt 500 ]; do
+  sleep 0.01
+  retry_wait_count=$((retry_wait_count + 1))
+done
+if kill -0 "$retry_pid" 2>/dev/null; then
+  kill "$retry_pid" 2>/dev/null || true
+  wait "$retry_pid" 2>/dev/null || true
+  fail "retry writer finishes before its deadline"
+fi
+wait "$retry_pid" || fail "set retries until the lock is released"
 [ "$(bash "$TKT" "$S5" get k)" = "v" ] || fail "retry writes the requested value"
 [ ! -e "$S5.lock" ] || fail "retry leaves no lock behind"
 
