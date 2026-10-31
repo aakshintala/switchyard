@@ -19,7 +19,20 @@ You are the orchestrator for one ticket. The **main orchestrator** is the sessio
 
 ## Commands
 
-When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. Run each one in the background, alone in its tool call. On exit 0 start the next command at once, reading nothing; on any other exit read its stdout once, decide, and act. State and the journal are the ticket's record: read them on resume. A repo without state runs the steps below by hand.
+When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; every other word is a stop.
+
+| Tool | Go on | Other verdicts that stop |
+| --- | --- | --- |
+| `tkt-start` | `CURRENT`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
+| `tkt-state` | exit 0 | exit 2 |
+| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `POST-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
+| `tkt-job` | `DONE` | `CONCERNS`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
+| `tkt-build` | `APPROVE` | `CHANGES`, `STALE`, `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `<step>-ERROR` |
+| `tkt-gate` | `PASS` | `TIP`, `FENCE`, `FAIL` |
+| `tkt-fix` | `FIX-OK`; `PUSHED` then `tkt-ship --unverified-fixes` | `FIX-INCOMPLETE`, `VERIFY-FAIL`, `PUSH-FAIL`, `CI-WAIT`, `RECOVER`, `DRIFT`, `ROUND-LIMIT`, `UNKNOWN`, gate stops |
+| `tkt-ship` | `MERGED` | `PENDING`, `CONFLICT`, `PATCH-CHANGED`, `BODY`, `GATE-FAIL`, `MERGE-FAIL`, `CI-FAIL`, `PRECONDITION`, `BUSY`, `DRIFT`, `UNKNOWN` |
+
+Read a stop once, then route it by the step that owns it. State and the journal are the ticket's record: read them on resume. A repo without state runs the steps below by hand.
 
 ## Fast paths
 
