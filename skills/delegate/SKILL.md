@@ -44,6 +44,8 @@ Every brief carries exactly one of these lines, verbatim:
 - Sub-orchestrator: "You may delegate through `delegate`; workers you start must not delegate
   further."
 
+Use the implement skill's Commands table for `tkt-*` verdict routing.
+
 A brief without one is incomplete. A worker brief with a gate also carries, verbatim: "Run the gate in the foreground. If it is too slow for one tool call, run the narrowest affected test set in the foreground and leave the full gate to delegate's own gate at job end. Run every process in the foreground."
 
 ## Running
