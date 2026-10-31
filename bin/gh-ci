@@ -336,9 +336,10 @@ required_names() {
 # the same workflow and event are dropped; checks without an Actions run ID
 # are kept with run null. A check whose run is a rerun (attempt greater than
 # 1) that has not completed counts as pending, so a rerun's old failure never
-# settles the wait. A newer run with attempt 1 is a separate run, not a
-# rerun: its checks are dropped so the completed run's result settles, and
-# its id is reported on stderr.
+# settles the wait. A newer run with attempt 1 is a separate run: its checks
+# whose names the authoritative run also has are dropped so that run's result
+# settles; checks whose names only it has are kept and judged, and a run that
+# lost checks is reported on stderr.
 # run counts as an Actions job only for a github-actions check whose run ID is
 # one of the head's own workflow runs; anything else is kept with run null, so
 # the --job caller never trusts the URL alone. Only the --job caller reads run;
@@ -368,8 +369,11 @@ head_checks() {
                                       | ($runs[$r].status // "completed") == "completed"
                                         or (($runs[$r].attempt // 1) > 1)) | .run) | max)
                         // (map(.run) | max))}) | from_entries) as $auth
-      | ([$recs[] | select(.run != null) | select(.run > $auth[.key]) | .run] | unique) as $dropped
-      | {checks: [$recs[] | select(.run == null or .run == $auth[.key])
+      | ($recs | map(. as $c
+          | . + {dup: ($c.run != null and $c.run > $auth[$c.key]
+                       and any($recs[]; .run == $auth[$c.key] and .key == $c.key and .name == $c.name))})) as $tagged
+      | ([$tagged[] | select(.dup) | .run] | unique) as $dropped
+      | {checks: [$tagged[] | select(.run == null or (.run >= $auth[.key] and (.dup | not)))
           | .run as $r | .app_slug as $a
           | {name: .name, bucket: (if (($runs[(.run | tostring)].status // "completed") != "completed"
                                        and ($runs[(.run | tostring)].attempt // 1) > 1)
