@@ -5,7 +5,7 @@ set -euo pipefail
 # limit; the exemption is derived from recorded state below.
 
 usage() {
-  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n       tkt-plan <state> replan\n' >&2
+  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id>\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n       tkt-plan <state> replan\n' >&2
   exit 2
 }
 

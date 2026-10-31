@@ -774,6 +774,7 @@ run_plan set
 [ "$RC" -eq 2 ] || fail "set without a file exits 2"
 OUT="$(bash "$TKT" 2>"$T/err-u.txt")"; [ "$?" = "2" ] || fail "no args exits 2"
 grep -q "usage" "$T/err-u.txt" || fail "no args prints usage"
+grep -q 'tkt-plan <state> grant-round --by <who> --comment <id>' "$T/err-u.txt" || fail "usage names grant-round"
 
 # --- a held lock exits 2 naming the pid, and runs nothing ---
 setup_case locked
