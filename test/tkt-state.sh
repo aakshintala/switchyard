@@ -140,7 +140,7 @@ S5="$T/retry.state"
 mkdir "$S5.lock"
 printf '%s %s\n' "$(hostname)" "$$" >"$S5.lock/pid"
 : >"$T/retry-hit"
-TKT_STATE_TEST_LOCK_SIGNAL="$T/retry-hit" TKT_STATE_TEST_LOCK_TRIES=50 TKT_STATE_TEST_LOCK_SLEEP=0.05 bash "$TKT" "$S5" set k v 2>"$T/err-retry.txt" &
+TKT_STATE_TEST_LOCK_SIGNAL="$T/retry-hit" bash "$TKT" "$S5" set k v 2>"$T/err-retry.txt" &
 retry_pid=$!
 retry_signal_count=0
 retry_wait_count=0
