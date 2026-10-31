@@ -590,7 +590,7 @@ cmd_start() {
       *) ticket_numbers[${#ticket_numbers[@]}]="$specn";;
     esac
     case ",$axes," in
-      *,spec,*)
+      *,spec,*|*,overbuild,*)
         for ticket_n in "${ticket_numbers[@]}"; do
           ticket_file="$review_context/issue-$ticket_n.md"
           if ! gh issue view "$ticket_n" --repo "$repo" >"$ticket_file"; then
@@ -677,8 +677,13 @@ cmd_start() {
           "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
         ;;
       overbuild)
+        ticket_files=""
+        for ticket_n in "${ticket_numbers[@]}"; do
+          ticket_files="${ticket_files}${ticket_files:+ }.review-context/issue-$ticket_n.md"
+        done
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" \
-          "DIFF_FILE=.review-context/pr.diff" "SKILLS=$skills_dir" >"$brief"
+          "DIFF_FILE=.review-context/pr.diff" "TICKET_FILES=$ticket_files" \
+          "SKILLS=$skills_dir" >"$brief"
         ;;
       verify)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" "SKILLS=$skills_dir" \
@@ -709,11 +714,13 @@ cmd_start() {
       rm -rf "$wt/.review-context"
       mkdir -p "$wt/.review-context"
       cp "$review_context/pr.diff" "$wt/.review-context/pr.diff"
-      if [ "$role" = "spec" ]; then
-        for ticket_n in "${ticket_numbers[@]}"; do
-          cp "$review_context/issue-$ticket_n.md" "$wt/.review-context/issue-$ticket_n.md"
-        done
-      fi
+      case "$role" in
+        spec|overbuild)
+          for ticket_n in "${ticket_numbers[@]}"; do
+            cp "$review_context/issue-$ticket_n.md" "$wt/.review-context/issue-$ticket_n.md"
+          done
+          ;;
+      esac
     fi
 
     echo "review-pr: starting $role job ($(model_for "$role"))" >&2

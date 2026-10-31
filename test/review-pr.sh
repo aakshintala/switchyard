@@ -370,6 +370,22 @@ grep -q 'Code review (Spec axis) of PR #7 in O/N for issue #1, #3 and #4 (spec #
   "$T/state/prompt-spec.md" || fail "review brief joins three distinct issues in order"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "deduplicated multi-issue collect exits 0"
 
+# --- case: overbuild-only ticket fetch failure starts no job
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+: >"$T/state/fail-issue"
+st=0
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --axes overbuild --issue 886 --spec 886 \
+  --model M --overbuild-model M2 2>&1 >/dev/null)" || st=$?
+[ "$st" -ne 0 ] || fail "overbuild-only issue fetch failure exits non-zero"
+grep -q 'could not fetch ticket #886' <<<"$err" || fail "overbuild-only issue failure names ticket #886"
+[ ! -e "$T/state/runs.txt" ] || fail "overbuild-only issue failure starts no job"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "overbuild-only issue failure creates no worktree"
+[ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)" ] || \
+  fail "overbuild-only issue failure removes its run dir"
+
 # --- case: review worktrees receive the diff and ordered ticket text
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
@@ -395,12 +411,18 @@ for n in 1 3 2; do
   cmp -s "$T/expected-issue.md" "$issue_file" || fail "ticket #$n body precedes its comments"
   grep -Fq ".review-context/issue-$n.md" "$T/state/prompt-spec.md" || fail "spec prompt names ticket #$n file"
 done
-for role in standards overbuild; do
-  ! find "$(worktree_for "$role")/.review-context" -name 'issue-*.md' -print | grep -q . || \
-    fail "$role worktree has no ticket text"
-  grep -Fq '.review-context/pr.diff' "$T/state/prompt-$role.md" || fail "$role prompt names the diff file"
+for n in 1 3 2; do
+  issue_file="$(worktree_for overbuild)/.review-context/issue-$n.md"
+  [ -f "$issue_file" ] || fail "overbuild worktree holds ticket #$n text"
+  printf 'ISSUE-%s BODY\nISSUE-%s COMMENTS\n' "$n" "$n" >"$T/expected-issue.md"
+  cmp -s "$T/expected-issue.md" "$issue_file" || fail "overbuild ticket #$n body precedes its comments"
+  grep -Fq ".review-context/issue-$n.md" "$T/state/prompt-overbuild.md" || fail "overbuild prompt names ticket #$n file"
 done
+! find "$(worktree_for standards)/.review-context" -name 'issue-*.md' -print | grep -q . || \
+  fail "standards worktree has no ticket text"
+grep -Fq '.review-context/pr.diff' "$T/state/prompt-standards.md" || fail "standards prompt names the diff file"
 grep -Fq '.review-context/pr.diff' "$T/state/prompt-spec.md" || fail "spec prompt names the diff file"
+grep -Fq '.review-context/pr.diff' "$T/state/prompt-overbuild.md" || fail "overbuild prompt names the diff file"
 printf '1 body\n1 comments\n3 body\n3 comments\n2 body\n2 comments\n' >"$T/expected-issue-calls.txt"
 cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "ticket fetches preserve issue order and fetch body then comments"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "prefetch review collect exits 0"
@@ -471,6 +493,21 @@ bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "standards-only pre
 start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || fail "spec-only prefetch start exits 0"
 [ -f "$(worktree_for spec)/.review-context/issue-7.md" ] || fail "spec-only run fetches the PR ticket"
 bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "spec-only prefetch collect exits 0"
+
+# --- case: overbuild-only runs fetch and receive ticket text
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes overbuild --issue 886 --spec 886 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "overbuild-only prefetch start exits 0"
+wt="$(worktree_for overbuild)/.review-context"
+[ -f "$wt/issue-886.md" ] || fail "overbuild-only worktree holds ticket #886"
+grep -Fq '.review-context/issue-886.md' "$T/state/prompt-overbuild.md" || \
+  fail "overbuild-only prompt names ticket #886"
+! grep -Eq '(^|[^[:alnum:]])gh[[:space:]]' "$T/state/prompt-overbuild.md" || \
+  fail "overbuild-only prompt does not tell the reviewer to run gh"
+bash "$REVIEW" collect job-overbuild >/dev/null 2>&1 || fail "overbuild-only prefetch collect exits 0"
 
 # --- case: fetch failure stops before any worktree or job starts
 for failed_fetch in fail-diff empty-diff fail-issue fail-issue-comments; do
