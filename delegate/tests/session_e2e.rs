@@ -685,6 +685,45 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
 }
 
 #[test]
+fn start_hold_without_release_takes_the_startup_timeout_branch() {
+    let h = Harness::new();
+    let hold = h.base.join(format!(
+        "hold-never-{}",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let timed_out = h.start(
+        b"FAST",
+        false,
+        "",
+        &[
+            (
+                "DELEGATE_SESSION_TEST_HOLD_START_UNTIL",
+                hold.to_str().unwrap(),
+            ),
+            ("DELEGATE_SESSION_START_WAIT_MS", "0"),
+        ],
+    );
+    assert_eq!(timed_out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&timed_out.stderr).contains("session startup timed out"));
+    let state = std::fs::read_dir(h.root())
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let bytes = std::fs::read(entry.path().join("state.json")).ok()?;
+            let value: Value = serde_json::from_slice(&bytes).ok()?;
+            (value["dead"]["message"] == "session startup timed out").then_some(value)
+        })
+        .next()
+        .expect("timed-out state retained");
+    assert_eq!(state["dead"]["reason"], "startFailed");
+    assert_eq!(state["dead"]["message"], "session startup timed out");
+    assert_process_gone(state["supervisorPid"].as_i64().unwrap() as i32);
+    if let Some(host) = state["hostPid"].as_i64() {
+        assert_process_gone(host as i32);
+    }
+}
+
+#[test]
 fn startup_timeout_records_supervisor_pid() {
     let h = Harness::new();
     let timed_out = h.start(
