@@ -709,6 +709,60 @@ run_entries=("$run_dir"/*)
 [ "${#run_entries[@]}" = "1" ] && [ "${run_entries[0]}" = "$wt_spec" ] || fail "mixed completion run keeps only the unfinished worktree"
 [ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "mixed completion posts one comment"
 
+# --- case: re-collecting a kept id reads its state and never posts twice
+rm -f "$T/state/comment-pr.txt" "$T/state/comment.md"
+out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "re-collecting unfinished spec exits 1"
+grep -q '^COLLECTED job-standards ' <<<"$out" || fail "re-collect reprints the finished standards job"
+grep -Fxq "patch-id $EXPECTED_PID" <<<"$out" || fail "re-collect reads the kept run header"
+grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "re-collect reads the kept spec record"
+[ "$(grep -Fxc 'resume: delegate resume job-spec' <<<"$out")" = "1" ] || fail "re-collect prints one resume command"
+! grep -q '^UNFINISHED standards MISSING' <<<"$out" || fail "re-collect does not mark the finished job missing"
+[ ! -e "$T/state/comment-pr.txt" ] || fail "re-collect does not post another comment"
+[ -d "$wt_spec" ] || fail "re-collect keeps the unfinished worktree"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "re-collect keeps its posted marker"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+cp "$T/canned/spec.json" "$TMPDIR/delegate-jobs/job-spec.json"
+out="$(bash "$REVIEW" collect job-spec 2>/dev/null)" || fail "collecting the resumed finished spec exits 0"
+grep -Fxq 'VERDICT spec: APPROVE' <<<"$out" || fail "re-collect prints the resumed verdict"
+[ ! -e "$T/state/comment-pr.txt" ] || fail "collecting a posted kept job does not post again"
+[ ! -e "$T/state/comment.md" ] || fail "collecting a posted kept job creates no new comment body"
+[ ! -d "$wt_spec" ] || fail "finished resumed worktree is removed"
+[ ! -e "$TMPDIR/review-pr/job-spec" ] || fail "finished resumed state file is removed"
+[ ! -d "$run_dir" ] || fail "finished resumed run directory is removed"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "re-collect never duplicates the comment"
+
+# --- case: mixed collect posts only for the fresh run
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec NEEDS_CONTEXT "Owner ruling needed before review can continue"
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || \
+  fail "kept-run mixed fixture start exits 0"
+wt_spec="$(worktree_for spec)"
+out="$(bash "$REVIEW" collect job-spec 2>/dev/null)" && fail "kept-run mixed fixture collect exits 1"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "kept-run mixed fixture stores its posted marker"
+fresh_run_dir="$REVIEW_PR_RUN_ROOT/review-pr.run.fresh"
+mkdir -p "$fresh_run_dir" "$TMPDIR/review-pr" "$TMPDIR/delegate-jobs"
+fresh_wt="$fresh_run_dir/wt-spec-fresh"
+git -C "$T/clone" worktree add -q --detach "$fresh_wt" "$FAKE_SHA" || fail "fresh mixed worktree setup"
+{
+  printf 'role=spec\nrepo=O/N\npr=7\nsha=%s\npatch_id=fresh-group-pid\n' "$FAKE_SHA"
+  printf 'model=Fresh-M\naxes=spec\nclone=%s\nworktree=%s\nrun_dir=%s\n' "$T/clone" "$fresh_wt" "$fresh_run_dir"
+} >"$TMPDIR/review-pr/job-fresh"
+write_record spec DONE "VERDICT spec: APPROVE
+fresh group marker" 0
+cp "$T/canned/spec.json" "$TMPDIR/delegate-jobs/job-fresh.json"
+out="$(bash "$REVIEW" collect job-spec job-fresh 2>/dev/null)" && fail "mixed kept and fresh collect exits 1"
+grep -q '^UNFINISHED spec NEEDS_CONTEXT ' <<<"$out" || fail "mixed collect still reports the kept job"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "mixed collect posts one new comment"
+[ "$(grep -c 'fresh group marker' "$T/state/comments.log")" = "1" ] || fail "mixed collect posts the fresh job once"
+grep -Fq 'review-pr: patch-id fresh-group-pid' "$T/state/comments.log" || fail "mixed comment uses the fresh run header"
+[ -d "$wt_spec" ] || fail "mixed collect keeps the already-posted worktree"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "mixed collect preserves the kept posted marker"
+[ ! -d "$fresh_wt" ] || fail "mixed collect removes the finished fresh worktree"
+[ ! -e "$TMPDIR/review-pr/job-fresh" ] || fail "mixed collect removes the finished fresh state file"
+[ ! -d "$fresh_run_dir" ] || fail "mixed collect removes the fresh run directory"
+
 # --- case: an ERROR job's UNFINISHED line names the reason from the record
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
