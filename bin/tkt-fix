@@ -68,9 +68,9 @@ lockdir="$state.lock"
 if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-fix: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
 
-t require repo issue branch worktree run pr
+t require repo issue branch worktree run
 repo="$(t get repo)"; issue="$(t get issue)"; set_namebase "$repo" "$issue"; branch="$(t get branch)"
-worktree="$(t get worktree)"; run="$(t get run)"; pr="$(t get pr)"
+worktree="$(t get worktree)"; run="$(t get run)"
 mkdir -p "$run"
 round="$(t get round 2>/dev/null || printf '0')"; case "$round" in ''|*[!0-9]*) round=0;; esac
 fixslot="$(t get fixslot 2>/dev/null || printf '0')"; case "$fixslot" in ''|*[!0-9]*) fixslot=0;; esac
@@ -106,6 +106,44 @@ emit() {
 }
 # Two rounds have run: only a --resume of an open slot may continue.
 [ "$round" -lt 2 ] || [ -n "$resume" ] || emit "ROUND-LIMIT round=$round" 1 "send the open findings to triage"
+# Fill missing PR identity before checking entry drift or dispatching a fix.
+pr="$(t get pr 2>/dev/null || true)"
+stored="$(t get head 2>/dev/null || true)"
+if [ -z "$pr" ] || [ -z "$stored" ]; then
+  if ! pr_list="$(gh pr list --head "$branch" --repo "$repo" --state open --json number,headRefOid 2>/dev/null)"; then
+    echo "tkt-fix: PRECONDITION missing=pr: cannot list PRs for branch $branch" >&2
+    exit 2
+  fi
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$pr_list"; then
+    echo "tkt-fix: PRECONDITION missing=pr: cannot list PRs for branch $branch" >&2
+    exit 2
+  fi
+  if [ -n "$pr" ]; then
+    entry="$(jq -c --arg pr "$pr" '[.[] | select((.number | tostring) == $pr)][0] // empty' <<<"$pr_list" 2>/dev/null || true)"
+  else
+    entry="$(jq -c '.[0] // empty' <<<"$pr_list" 2>/dev/null || true)"
+  fi
+  if [ -z "$entry" ]; then
+    echo "tkt-fix: PRECONDITION missing=pr: no open PR for branch $branch in $repo" >&2
+    exit 2
+  fi
+  if [ -z "$pr" ]; then
+    pr="$(jq -r 'if .number == null then "" else (.number | tostring) end' <<<"$entry" 2>/dev/null || true)"
+    if [ -z "$pr" ]; then
+      echo "tkt-fix: PRECONDITION missing=pr: no open PR for branch $branch in $repo" >&2
+      exit 2
+    fi
+  fi
+  if [ -z "$stored" ]; then
+    stored="$(jq -r 'if .headRefOid == null then "" else (.headRefOid | tostring) end' <<<"$entry" 2>/dev/null || true)"
+    if [ -z "$stored" ]; then
+      echo "tkt-fix: PRECONDITION missing=head: open PR for branch $branch has no headRefOid" >&2
+      exit 2
+    fi
+  fi
+  [ -n "$(t get pr 2>/dev/null || true)" ] || t set pr "$pr"
+  [ -n "$(t get head 2>/dev/null || true)" ] || t set head "$stored"
+fi
 # Entry: state head, PR head and worktree HEAD must agree exactly.
 if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
   prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)" || { echo "tkt-fix: cannot read PR head" >&2; exit 2; }
