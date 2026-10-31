@@ -742,22 +742,24 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
-    use std::sync::{Arc, Condvar, Mutex, mpsc};
+    use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
     use std::time::{Duration, Instant};
 
     struct Scratch {
         paths: Paths,
         id: String,
+        _lock: MutexGuard<'static, ()>,
     }
 
     impl Scratch {
         fn new() -> Self {
+            let _lock = crate::test_env::lock();
             let root = std::env::temp_dir()
                 .join(format!("delegate-session-{}", crate::util::random_uuid()));
             std::fs::create_dir_all(&root).unwrap();
             let paths = Paths::new(root);
             let id = crate::util::random_uuid();
-            Self { paths, id }
+            Self { paths, id, _lock }
         }
 
         fn state(&self) -> State {

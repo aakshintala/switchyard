@@ -16,6 +16,45 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use types::{BackendResult, Event, EventFn, Spawned};
 
+#[cfg(test)]
+pub(crate) struct TempDir(std::path::PathBuf);
+
+#[cfg(test)]
+static TEMP_DIR_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+impl TempDir {
+    /// Creates `{prefix}-{pid}-{n}` exclusively, skipping any path that already
+    /// exists (a pid-reused leftover), so `Drop` only removes what this process made.
+    pub(crate) fn new(prefix: &str) -> Self {
+        loop {
+            let n = TEMP_DIR_NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("create test temp directory {}: {e}", path.display()),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TempDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Cursor,
@@ -383,6 +422,7 @@ mod tests {
     /// on the second (SIGKILL) with signal 9.
     #[test]
     fn killer_escalates_to_sigkill_on_second_call() {
+        let _lock = crate::test_env::lock();
         let stem = format!(
             "killer-{}-{}",
             std::process::id(),
@@ -493,5 +533,66 @@ mod tests {
             pumped.stderr,
             "Warning: No project session found\nError: Model \"nope/x\" not found.\n"
         );
+    }
+
+    #[test]
+    fn temp_dir_is_removed_on_drop() {
+        let _lock = crate::test_env::lock();
+        let dir = TempDir::new("backends-nested");
+        let path = dir.to_path_buf();
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("nested/file"), "contents").unwrap();
+        drop(dir);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn temp_dir_is_removed_when_scope_unwinds() {
+        let _lock = crate::test_env::lock();
+        let mut path = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let dir = TempDir::new("backends-unwind");
+            path = Some(dir.to_path_buf());
+            panic!("test panic");
+        }));
+        assert!(result.is_err());
+        assert!(!path.unwrap().exists());
+    }
+
+    #[test]
+    fn temp_dir_drop_ignores_an_already_removed_directory() {
+        let _lock = crate::test_env::lock();
+        let dir = TempDir::new("backends-already-removed");
+        std::fs::remove_dir_all(&*dir).unwrap();
+        drop(dir);
+    }
+
+    /// #876: a leftover at the next `{prefix}-{pid}-{n}` (pid reuse) is skipped,
+    /// never adopted, so dropping the new TempDir leaves it intact.
+    #[test]
+    fn temp_dir_skips_and_keeps_an_existing_leftover() {
+        use crate::test_env::EnvGuard;
+        let _lock = crate::test_env::lock();
+        let root = TempDir::new("backends-leftover-root");
+        let _tmp = EnvGuard::set("TMPDIR", root.to_str().unwrap());
+        let prefix = "backends-leftover";
+        // Unlocked tests may also take counter values, so cover a window of them.
+        let next = TEMP_DIR_NEXT.load(Ordering::Relaxed);
+        let leftovers: Vec<_> = (next..next + 64)
+            .map(|n| root.join(format!("{prefix}-{}-{n}", std::process::id())))
+            .collect();
+        for dir in &leftovers {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join("file"), "leftover").unwrap();
+        }
+        let dir = TempDir::new(prefix);
+        assert!(!leftovers.contains(&dir.to_path_buf()));
+        drop(dir);
+        for dir in &leftovers {
+            assert_eq!(
+                std::fs::read_to_string(dir.join("file")).unwrap(),
+                "leftover"
+            );
+        }
     }
 }

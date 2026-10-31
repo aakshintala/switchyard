@@ -1083,6 +1083,7 @@ mod tests {
 
     #[test]
     fn mark_start_failed_fills_missing_supervisor_pid() {
+        let _lock = crate::test_env::lock();
         let setup = failed_setup(live_state(None));
         mark_start_failed(&setup.paths, &setup.id, 4242, "boom".into());
         let after = state::read_state(&setup.paths, &setup.id).unwrap();
@@ -1095,6 +1096,7 @@ mod tests {
 
     #[test]
     fn mark_start_failed_keeps_published_supervisor_pid() {
+        let _lock = crate::test_env::lock();
         let setup = failed_setup(live_state(Some(4242)));
         mark_start_failed(&setup.paths, &setup.id, 7, "boom".into());
         let after = state::read_state(&setup.paths, &setup.id).unwrap();
@@ -1104,6 +1106,7 @@ mod tests {
 
     #[test]
     fn mark_start_failed_leaves_dead_record_untouched() {
+        let _lock = crate::test_env::lock();
         let mut session = live_state(None);
         state::mark_dead(
             &mut session,
@@ -1123,6 +1126,7 @@ mod tests {
 
     #[test]
     fn mark_start_failed_leaves_idle_with_dead_untouched() {
+        let _lock = crate::test_env::lock();
         let mut session = live_state(None);
         session.dead = Some(state::DeadInfo {
             reason: state::DeadReason::SupervisorDied,

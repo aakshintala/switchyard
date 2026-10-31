@@ -1077,8 +1077,6 @@ mod tests {
     // Process-env mutation serialises on the shared #681 helper: `MUSE_BIN`,
     // `HOME` and `TMPDIR` are process-global and the spawn tests each point
     // them at their own fake.
-    static FAKE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
     fn fake_muse_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
         let path = dir.join("muse.sh");
         std::fs::write(&path, body).unwrap();
@@ -1087,10 +1085,8 @@ mod tests {
         path
     }
 
-    fn scratch_dir(name: &str) -> std::path::PathBuf {
-        let id = FAKE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("muse-{name}-{}-{id}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn scratch_dir(name: &str) -> crate::backends::TempDir {
+        let dir = crate::backends::TempDir::new(&format!("muse-{name}"));
         std::fs::create_dir_all(dir.join("repo")).unwrap();
         dir
     }
@@ -1114,6 +1110,16 @@ mod tests {
                 gate: String::new(),
             },
         }
+    }
+
+    #[test]
+    fn scratch_dir_is_removed_on_drop() {
+        let _lock = crate::test_env::lock();
+        let dir = scratch_dir("drop");
+        let path = dir.to_path_buf();
+        assert!(dir.join("repo").is_dir());
+        drop(dir);
+        assert!(!path.exists());
     }
 
     #[test]

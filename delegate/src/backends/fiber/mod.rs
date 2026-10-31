@@ -1349,9 +1349,7 @@ mod tests {
         // without `~/.local/bin/fiber`: resolution falls through to the
         // home fallback, and spawning it must name each source consulted.
         let _lock = crate::test_env::lock();
-        let dir = std::env::temp_dir().join(format!("cdm-fiber-nobin-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::backends::TempDir::new("cdm-fiber-nobin");
         let _path = crate::test_env::EnvGuard::set("PATH", dir.to_str().unwrap());
         let _fiber = crate::test_env::EnvGuard::remove("FIBER_BIN");
         let _home = crate::test_env::EnvGuard::set("HOME", dir.to_str().unwrap());
@@ -1377,7 +1375,6 @@ mod tests {
         assert!(res.text.contains("PATH"), "{}", res.text);
         assert!(res.text.contains("~/.local/bin/fiber"), "{}", res.text);
         assert!(res.text.contains(&bin), "{}", res.text);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1385,9 +1382,7 @@ mod tests {
         // Spawning a directory fails with `PermissionDenied`, not
         // `NotFound`: the error keeps its original text, unwrapped.
         let _lock = crate::test_env::lock();
-        let dir = std::env::temp_dir().join(format!("cdm-fiber-notexec-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::backends::TempDir::new("cdm-fiber-notexec");
         let mut spec = crate::job::tests::spec_of(|s| {
             s.bin = dir.to_str().unwrap().to_string();
         });
@@ -1399,7 +1394,6 @@ mod tests {
         assert!(!res.text.contains("fiber binary not found"), "{}", res.text);
         assert!(res.text.contains("Permission denied"), "{}", res.text);
         assert_eq!(res.text, res.stderr);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

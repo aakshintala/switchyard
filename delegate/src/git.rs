@@ -180,6 +180,7 @@ mod tests {
 
     #[test]
     fn git_delta_null_outside_repo() {
+        let _lock = crate::test_env::lock();
         let dir = std::env::temp_dir().join(format!("cd-nogit-{}", crate::util::random_uuid()));
         fs::create_dir_all(&dir).unwrap();
         let s = dir.to_string_lossy().into_owned();
@@ -190,6 +191,7 @@ mod tests {
 
     #[test]
     fn git_delta_computes() {
+        let _lock = crate::test_env::lock();
         let dir = make_repo();
         let s = dir.to_string_lossy().into_owned();
         let head0 = capture_head(&s, None).unwrap();
@@ -217,6 +219,7 @@ mod tests {
 
     #[test]
     fn resolve_named_worktree() {
+        let _lock = crate::test_env::lock();
         let dir = make_repo();
         let wt_dir = dir.join("wt-side");
         Command::new("git")
