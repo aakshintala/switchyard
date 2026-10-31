@@ -295,6 +295,7 @@ do_set() {
   # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
   if [ "$old_plan" != "$plan" ]; then
     t set verifier_round 0; t set confirmed_for ""; t set verified_base ""
+    t set granted_by ""; t set granted_used ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
   fi
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
