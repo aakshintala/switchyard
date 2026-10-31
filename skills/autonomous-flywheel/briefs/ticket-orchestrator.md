@@ -7,4 +7,4 @@ Settings:
 
 You are a sub-orchestrator: post every decision you can't make to the tracker and report it to me as `implement`'s rules say, and keep building what it doesn't block. Wait on your jobs in the wait mode your harness instructions prescribe. Your parent is `__PARENT__`: send it your report (on Claude Code by `SendMessage`, elsewhere as your last message), and end.
 
-Report, nothing in between: the merge commit SHA, or the PR URL with a failure triage and the exact action someone must take; then every issue you opened or commented on. Then **Friction**: up to 3 bullets ("none" is fine). End with a STATUS line.
+Report, nothing in between: the merge commit SHA, or the PR URL with a failure triage and the exact action someone must take (a triage on CI grounds names the run id on the PR's head, every non-success job and, quoted, its failing test, else its failing step or runner error, or what cancelled it); then every issue you opened or commented on. Then **Friction**: up to 3 bullets ("none" is fine). End with a STATUS line.
