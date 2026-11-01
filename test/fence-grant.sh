@@ -229,7 +229,7 @@ run_fg 77 --paths docs/tui.md --ranges='docs/{tui,tui}.md:1-2' --dry
 assert_rc 0 'ranges brace expansion'
 
 reset_case
-run_fg 77 --paths='crates/new/{one,two}.rs' --new='crates/new/{one,two}.rs' --dry
+run_fg 77 --paths='crates/new/{one,two}.rs' '--new=crates/new/{one,two}.rs' --dry
 assert_rc 0 'new paths brace expansion'
 assert_out "$(printf 'GRANT crates/new/one.rs\nGRANT crates/new/two.rs\nGRANT')" 'new path output'
 
@@ -468,7 +468,7 @@ assert_out '' 'expect without line stdout'
 assert_stderr "$USAGE" 'expect without line usage'
 assert_no_grant 'expect without line'
 
-for bad_repo in noslash a/b/c /x x/; do
+for bad_repo in '' noslash a/b/c /x x/; do
   reset_case
   run_fg 77 --paths docs/tui.md --repo "$bad_repo"
   assert_usage "invalid repo $bad_repo"
