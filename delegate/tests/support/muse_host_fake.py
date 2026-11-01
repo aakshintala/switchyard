@@ -205,6 +205,10 @@ def handle(frame, raw_line=None):
     elif method == "initialized":
         return
     elif method == "session/start":
+        if "HOLD_START" in SCENARIOS:
+            import time
+
+            time.sleep(0.6)
         if "STARTFAIL" in SCENARIOS:
             send_frames(error_response(request_id, "fake session start failed"))
         else:
@@ -260,6 +264,8 @@ def read_line(fd, pending):
 
 def main():
     global STOP_READING, json
+    import time
+
     os.makedirs(FAKE_DIR, exist_ok=True)
     write_file("argv.txt", "\n".join(sys.argv[1:]) + "\n")
     write_file("host.pid", str(os.getpid()) + "\n")
@@ -279,6 +285,8 @@ def main():
             with open(os.path.join(FAKE_DIR, "requests.jsonl"), "a", encoding="utf-8") as output:
                 output.write(initialized.decode("utf-8"))
                 output.write(session_start.decode("utf-8"))
+            if "HOLD_START" in SCENARIOS:
+                time.sleep(0.6)
             if "STARTFAIL" in SCENARIOS:
                 sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":2,"error":{"code":-32020,"message":"fake session start failed"}}\n')
             else:
@@ -287,7 +295,6 @@ def main():
             sys.stdout.buffer.flush()
     import json
     import select
-    import time
     if not fast_init and first:
         try:
             handle(json.loads(first))

@@ -721,7 +721,7 @@ fn supervisor_interrupt_stop_keeps_session_and_idle_interrupt_is_a_noop() {
     assert_eq!(running.send("continue").unwrap()["disposition"], "started");
     assert_eq!(running.stop_and_join(), 0);
 
-    let mut idle = Session::spawn("FAST", "brief", None, Bounds::default());
+    let mut idle = Session::spawn("FAST,HOLD_START", "brief", None, Bounds::default());
     idle.until("idle session", |state| {
         state.status == Status::Idle && state.last_turn.is_some()
     });
@@ -1170,6 +1170,15 @@ fn supervisor_startup_and_runtime_failures_are_recorded() {
         DeadReason::HostUnresponsive
     );
     assert_eq!(muted.wait_run(), 0);
+}
+
+#[test]
+#[should_panic(expected = "went Dead while waiting for idle session")]
+fn until_fails_fast_when_the_session_goes_dead() {
+    let session = Session::spawn("STARTFAIL", "brief", None, Bounds::default());
+    session.until("idle session", |state| {
+        state.status == Status::Idle && state.last_turn.is_some()
+    });
 }
 
 #[test]
