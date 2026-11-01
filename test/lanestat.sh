@@ -701,4 +701,357 @@ assert_row 820 "SETTLED DONE-UNREAD $job_home$" "$(<"$T/jobs-override.out")"
 # (The fixture's tool end above already carried this lane's id before death.)
 assert_row 823 'DEAD-PROVIDER provider exhausted$' "$(<"$T/jobs.out")"
 
+make_lane() {
+  local run_dir=$1 lane_pid=$2
+  mkdir -p "$run_dir"
+  printf '%s\n' "$lane_pid" >"$run_dir/fiber-$lane_pid-pi.pid"
+  printf 'pi\n' >"$T/ps/$lane_pid.comm"
+  printf 'S 00:01\n' >"$T/ps/$lane_pid.info"
+  : >"$run_dir/fiber-$lane_pid-pi.jsonl"
+}
+set_epoch_mtime() {
+  perl -e 'utime($ARGV[1], $ARGV[1], $ARGV[0]) or die "utime: $!"' "$1" "$2" \
+    || fail "set fixture mtime $2 for $1"
+}
+write_ruling() {
+  local run_dir=$1 name=$2 epoch=$3
+  printf 'ruling fixture\n' >"$run_dir/$name"
+  set_epoch_mtime "$run_dir/$name" "$epoch"
+}
+write_text_message() {
+  local file=$1 timestamp=$2 text=$3
+  printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%s"}],"timestamp":%s}}\n' \
+    "$text" "$timestamp" >>"$file"
+}
+write_question_lane() {
+  local lane_pid=$1 timestamp=$2 text=$3
+  new_case "question-$lane_pid" "$lane_pid"
+  write_text_message "$case_dir/fiber-$lane_pid-pi.jsonl" "$timestamp" "$text"
+  printf '{"type":"agent_settled"}\n' >>"$case_dir/fiber-$lane_pid-pi.jsonl"
+}
+make_fixture_repo() {
+  local repo=$1 epoch=$2 no_commit=${3:-no}
+  mkdir -p "$repo"
+  git -C "$repo" init -q || fail "initialize fixture repo $repo"
+  git -C "$repo" config user.name 'Switchyard Test' || fail "configure fixture repo"
+  git -C "$repo" config user.email 'switchyard-test@example.invalid' || fail "configure fixture repo"
+  [ "$no_commit" = yes ] && return
+  printf 'fixture\n' >"$repo/file"
+  git -C "$repo" add file || fail "add fixture repo file"
+  GIT_AUTHOR_DATE="@$epoch +0000" GIT_COMMITTER_DATE="@$epoch +0000" \
+    git -C "$repo" commit -q -m fixture </dev/null || fail "commit fixture repo"
+}
+write_loop_lane() {
+  local run_dir=$1 lane_pid=$2 message_time=$3 settle_count=$4 text=${5:-'No question.'}
+  make_lane "$run_dir" "$lane_pid"
+  write_text_message "$run_dir/fiber-$lane_pid-pi.jsonl" "$message_time" "$text"
+  while [ "$settle_count" -gt 0 ]; do
+    printf '{"type":"agent_settled"}\n' >>"$run_dir/fiber-$lane_pid-pi.jsonl"
+    settle_count=$((settle_count - 1))
+  done
+}
+
+# PARK follows the latest assistant text message and only an unanswered ruling.
+write_question_lane 900 1700000000000 'Which?'
+printf '%s\n' \
+  '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Which?"}]}}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Which?"}]}]}' \
+  >>"$case_dir/fiber-900-pi.jsonl"
+check_case_row 900 'SETTLED PARK last=none$'
+write_question_lane 901 1700000000000 'STATUS: BLOCKED'
+check_case_row 901 'SETTLED PARK last=none$'
+write_question_lane 902 1700000000000 'The request is UNBLOCKED.'
+check_case_row 902 'SETTLED PARK last=none$'
+write_question_lane 903 1700000000000 'Earlier?\nDone.'
+check_case_row 903 'SETTLED$'
+write_question_lane 904 1700000000000 'Earlier?'
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Which?"}],"timestamp":1700000000001}}' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","name":"read"}],"timestamp":1700000000002}}' \
+  '{"type":"agent_settled"}' >>"$case_dir/fiber-904-pi.jsonl"
+check_case_row 904 'SETTLED PARK last=none$'
+write_question_lane 905 1700000000000 'Question?'
+printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Final."}],"timestamp":1700000000001}}\n' \
+  >>"$case_dir/fiber-905-pi.jsonl"
+check_case_row 905 'SETTLED$'
+write_question_lane 906 1700000000000 'Which?'
+write_ruling "$case_dir" switchyard-906-ruling-1.md 1699999999
+check_case_row 906 'SETTLED PARK last=none$'
+write_question_lane 907 1700000000000 'Which?'
+write_ruling "$case_dir" switchyard-907-ruling-1.md 1700000000
+check_case_row 907 'SETTLED PARK last=none$'
+write_question_lane 908 1700000000000 'Which?'
+write_ruling "$case_dir" switchyard-908-ruling-1.md 1700000001
+check_case_row 908 'SETTLED$'
+write_question_lane 909 1700000000000 'Which?'
+write_ruling "$case_dir" switchyard-909-ruling-1.md 1700000001
+check_case_row 909 'SETTLED$'
+write_question_lane 910 1700000000000 'Which?'
+write_ruling "$case_dir" fiber-910-ruling-1.md 1700000001
+check_case_row 910 'SETTLED$'
+write_question_lane 911 1700000000000 'Which?'
+write_ruling "$case_dir" fiber-911-fence-grant-1.md 1700000001
+check_case_row 911 'SETTLED$'
+write_question_lane 912 1700000000000 'Which?'
+write_ruling "$case_dir" switchyard-999-ruling-1.md 1700000001
+check_case_row 912 'SETTLED PARK last=none$'
+write_question_lane 913 1700000000000 'Which?'
+write_ruling "$case_dir" fiber-9137-ruling-1.md 1700000001
+check_case_row 913 'SETTLED PARK last=none$'
+write_question_lane 914 1700000000000 'Which?'
+write_ruling "$case_dir" fiber-914-surveyor-ruling.md 1700000001
+check_case_row 914 'SETTLED PARK last=none$'
+write_question_lane 915 1700000000000 'Earlier?\nDone.'
+check_case_row 915 'SETTLED$'
+write_question_lane 916 1700000000000 'Which?'
+printf '%s\n' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  '{"type":"agent_start"}' \
+  '{"type":"turn_start"}' \
+  '{"type":"message_start","message":{"role":"assistant"}}' \
+  '{"type":"message_update","delta":"streaming"}' \
+  >>"$case_dir/fiber-916-pi.jsonl"
+check_case_row 916 'RUNNING$'
+write_question_lane 917 1700000000000 'Which?'
+write_ruling "$case_dir" switchyard-917-ruling-1.md 1700000000
+printf '%s\n' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  '{"type":"agent_start"}' \
+  '{"type":"turn_start"}' \
+  >>"$case_dir/fiber-917-pi.jsonl"
+check_case_row 917 'WEDGED last=none$'
+new_case malformed-question 918
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Which?"}],"timestamp":1700000000000' \
+  '{"type":"agent_settled"}' >"$case_dir/fiber-918-pi.jsonl"
+check_case_row 918 'SETTLED$'
+new_case nested-timestamp-question 919
+write_ruling "$case_dir" switchyard-919-ruling-1.md 1700000000
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","arguments":{"timestamp":1700000000001}},{"type":"text","text":"Which?"}],"timestamp":1700000000000}}' \
+  '{"type":"agent_settled"}' >"$case_dir/fiber-919-pi.jsonl"
+check_case_row 919 'SETTLED PARK last=none$'
+new_case truncated-question 920
+perl -e 'print q({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Which?"}],"timestamp":1700000000000,"padding":"}), "x" x 20000001, q("}) . chr(10) . q({"type":"agent_settled"}) . chr(10)' \
+  >"$case_dir/fiber-920-pi.jsonl"
+check_case_row 920 'SETTLED$'
+new_case nonnumeric-question-time 924
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Which?"}],"timestamp":"not numeric"}}' \
+  '{"type":"agent_settled"}' >"$case_dir/fiber-924-pi.jsonl"
+check_case_row 924 'SETTLED$'
+new_case missing-question-time 925
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Which?"}]}}' \
+  '{"type":"agent_settled"}' >"$case_dir/fiber-925-pi.jsonl"
+check_case_row 925 'SETTLED$'
+new_case joined-text-blocks 926
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Earlier?"},{"type":"text","text":"Done."}],"timestamp":1700000000000}}' \
+  '{"type":"agent_settled"}' >"$case_dir/fiber-926-pi.jsonl"
+check_case_row 926 'SETTLED$'
+new_case park-open-tool 927
+write_text_message "$case_dir/fiber-927-pi.jsonl" 1700000000000 'Which?'
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}' \
+  >>"$case_dir/fiber-927-pi.jsonl"
+check_case_row 927 'IN-TOOL bash$'
+new_case second-question-after-ruling 928
+write_text_message "$case_dir/fiber-928-pi.jsonl" 1700000000000 'First question?'
+printf '{"type":"agent_settled"}\n' >>"$case_dir/fiber-928-pi.jsonl"
+write_ruling "$case_dir" switchyard-928-ruling-1.md 1700000001
+write_text_message "$case_dir/fiber-928-pi.jsonl" 1700000002000 'Second question?'
+printf '{"type":"agent_settled"}\n' >>"$case_dir/fiber-928-pi.jsonl"
+check_case_row 928 'SETTLED PARK last=none$'
+
+# PARK answer boundary: strictly newer rulings answer; equality is still open.
+for pair in '921 1699999999 park' '922 1700000000 park' '923 1700000001 plain'; do
+  set -- $pair
+  write_question_lane "$1" 1700000000000 'Which?'
+  write_ruling "$case_dir" "fiber-$1-ruling-1.md" "$2"
+  case $3 in
+    park) expected='SETTLED PARK last=none$' ;;
+    plain) expected='SETTLED$' ;;
+  esac
+  check_case_row "$1" "$expected"
+done
+
+# LOOP requires two post-ruling settles and a worktree commit no newer than R.
+loop_ruling=1700000100
+repo="$T/repo-loop-base"
+make_fixture_repo "$repo" "$loop_ruling"
+new_case loop-one-settle 930
+write_ruling "$case_dir" switchyard-930-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$case_dir/switchyard-930.state"
+write_loop_lane "$case_dir" 930 1700000200000 1
+check_case_row 930 'SETTLED$'
+new_case loop-two-settles 931
+write_ruling "$case_dir" switchyard-931-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$case_dir/switchyard-931.state"
+write_loop_lane "$case_dir" 931 1700000200000 2
+check_case_row 931 'SETTLED LOOP last=none$'
+new_case loop-park-and-loop 932
+write_ruling "$case_dir" switchyard-932-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$case_dir/switchyard-932.state"
+write_loop_lane "$case_dir" 932 1700000200000 2 'Which?'
+check_case_row 932 'SETTLED PARK LOOP last=none$'
+new_case loop-pre-and-equal-cut 933
+write_ruling "$case_dir" switchyard-933-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$case_dir/switchyard-933.state"
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[],"timestamp":1700000050000}}' \
+  '{"type":"agent_settled"}' \
+  '{"type":"message_end","message":{"role":"assistant","content":[],"timestamp":1700000100000}}' \
+  '{"type":"agent_settled"}' \
+  '{"type":"message_end","message":{"role":"assistant","content":[],"timestamp":1700000200000}}' \
+  >>"$case_dir/fiber-933-pi.jsonl"
+check_case_row 933 'SETTLED$'
+new_case loop-nested-time 934
+write_ruling "$case_dir" switchyard-934-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$case_dir/switchyard-934.state"
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","arguments":{"timestamp":1700000200000}}],"timestamp":1700000050000}}' \
+  '{"type":"agent_settled"}' \
+  '{"type":"agent_settled"}' \
+  >>"$case_dir/fiber-934-pi.jsonl"
+check_case_row 934 'SETTLED$'
+repo_new="$T/repo-loop-new"
+make_fixture_repo "$repo_new" "$((loop_ruling + 1))"
+new_case loop-commit-after 935
+write_ruling "$case_dir" switchyard-935-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo_new" >"$case_dir/switchyard-935.state"
+write_loop_lane "$case_dir" 935 1700000200000 2
+check_case_row 935 'SETTLED$'
+new_case loop-ruling-moves 936
+write_ruling "$case_dir" switchyard-936-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo_new" >"$case_dir/switchyard-936.state"
+write_loop_lane "$case_dir" 936 1700000200000 2
+write_ruling "$case_dir" switchyard-936-ruling-2.md "$((loop_ruling + 1))"
+check_case_row 936 'SETTLED LOOP last=none$'
+new_case loop-no-worktree-file 937
+write_ruling "$case_dir" switchyard-937-ruling-1.md "$loop_ruling"
+write_loop_lane "$case_dir" 937 1700000200000 2
+check_case_row 937 'SETTLED$'
+new_case loop-state-no-path 938
+write_ruling "$case_dir" switchyard-938-ruling-1.md "$loop_ruling"
+printf 'issue=938\n' >"$case_dir/switchyard-938.state"
+write_loop_lane "$case_dir" 938 1700000200000 2
+check_case_row 938 'SETTLED$'
+new_case loop-invalid-repo 939
+write_ruling "$case_dir" switchyard-939-ruling-1.md "$loop_ruling"
+mkdir -p "$T/not-a-repo"
+printf 'worktree=%s\n' "$T/not-a-repo" >"$case_dir/switchyard-939.state"
+write_loop_lane "$case_dir" 939 1700000200000 2
+check_case_row 939 'SETTLED$'
+repo_no_commit="$T/repo-no-commit"
+make_fixture_repo "$repo_no_commit" "$loop_ruling" yes
+new_case loop-no-commit 940
+write_ruling "$case_dir" switchyard-940-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo_no_commit" >"$case_dir/switchyard-940.state"
+write_loop_lane "$case_dir" 940 1700000200000 2
+check_case_row 940 'SETTLED$'
+new_case loop-wrong-state-name 941
+write_ruling "$case_dir" switchyard-941-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$case_dir/fiber-9417.state"
+write_loop_lane "$case_dir" 941 1700000200000 2
+check_case_row 941 'SETTLED$'
+new_case loop-state-fallback 942
+write_ruling "$case_dir" switchyard-942-ruling-1.md "$loop_ruling"
+printf 'owner=none\n' >"$case_dir/fiber-942.state"
+printf 'worktree=%s\n' "$repo" >"$case_dir/switchyard-942.state"
+write_loop_lane "$case_dir" 942 1700000200000 2
+check_case_row 942 'SETTLED LOOP last=none$'
+new_case loop-fiber-state 943
+write_ruling "$case_dir" switchyard-943-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$case_dir/fiber-943.state"
+write_loop_lane "$case_dir" 943 1700000200000 2
+check_case_row 943 'SETTLED LOOP last=none$'
+new_case loop-artifact-files 944
+write_ruling "$case_dir" switchyard-944-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$case_dir/switchyard-944.state"
+write_loop_lane "$case_dir" 944 1700000200000 2
+printf 'notes\n' >"$case_dir/fiber-944-notes.md"
+printf 'findings\n' >"$case_dir/fiber-944-findings-1.md"
+set_epoch_mtime "$case_dir/fiber-944-notes.md" "$((loop_ruling + 10))"
+set_epoch_mtime "$case_dir/fiber-944-findings-1.md" "$((loop_ruling + 10))"
+check_case_row 944 'SETTLED LOOP last=none$'
+new_case loop-no-ruling 945
+printf 'worktree=%s\n' "$repo" >"$case_dir/switchyard-945.state"
+write_loop_lane "$case_dir" 945 1700000200000 2
+check_case_row 945 'SETTLED$'
+repo_older="$T/repo-loop-older"
+make_fixture_repo "$repo_older" "$((loop_ruling - 1))"
+new_case loop-commit-before 946
+write_ruling "$case_dir" switchyard-946-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo_older" >"$case_dir/switchyard-946.state"
+write_loop_lane "$case_dir" 946 1700000200000 2
+check_case_row 946 'SETTLED LOOP last=none$'
+new_case loop-three-settles 947
+write_ruling "$case_dir" switchyard-947-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$case_dir/switchyard-947.state"
+write_loop_lane "$case_dir" 947 1700000200000 3
+check_case_row 947 'SETTLED LOOP last=none$'
+
+# JSON::PP failure disables only decoded features; regex state and LOOP survive.
+missing_json="$T/no-json"
+mkdir -p "$missing_json/JSON"
+printf 'die "hidden JSON::PP\\n";\n' >"$missing_json/JSON/PP.pm"
+json_run="$T/missing-json-run"
+mkdir -p "$json_run"
+make_lane "$json_run" 950
+write_text_message "$json_run/fiber-950-pi.jsonl" 1700000000000 'Which?'
+printf '{"type":"agent_settled"}\n' >>"$json_run/fiber-950-pi.jsonl"
+write_ruling "$json_run" switchyard-950-ruling-1.md 1699999999
+write_ruling "$json_run" switchyard-951-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$json_run/switchyard-951.state"
+write_loop_lane "$json_run" 951 1700000200000 2
+write_job_lane 952 "$job_done"
+cp "$job_run/fiber-952-pi.jsonl" "$json_run/fiber-952-pi.jsonl"
+cp "$job_run/fiber-952-pi.pid" "$json_run/fiber-952-pi.pid"
+make_lane "$json_run" 953
+printf '%s\n' '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  >"$json_run/fiber-953-pi.jsonl"
+make_lane "$json_run" 954
+printf '%s\n' '{"type":"auto_retry_end","success":false,"finalError":"provider exhausted"}' \
+  '{"type":"agent_settled"}' >"$json_run/fiber-954-pi.jsonl"
+make_lane "$json_run" 955
+printf '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}\n' \
+  >"$json_run/fiber-955-pi.jsonl"
+env PERL5LIB="$missing_json" PATH="$T/stub:$PATH" LANESTAT_TEST_NOW="$NOW" \
+  DELEGATE_JOBS_DIR="$DELEGATE_JOBS_DIR" JOB_RECORD_SYSTEM_DIR="$JOB_RECORD_SYSTEM_DIR" TMPDIR="$TMPDIR" \
+  sh "$LANESTAT" "$json_run" >"$T/missing-json.out" 2>"$T/missing-json.err"
+assert_row 950 'SETTLED$' "$(<"$T/missing-json.out")"
+assert_row 951 'SETTLED LOOP last=none$' "$(<"$T/missing-json.out")"
+assert_row 952 'SETTLED$' "$(<"$T/missing-json.out")"
+assert_row 953 'WEDGED last=none$' "$(<"$T/missing-json.out")"
+assert_row 954 'DEAD-PROVIDER provider exhausted$' "$(<"$T/missing-json.out")"
+assert_row 955 'IN-TOOL bash$' "$(<"$T/missing-json.out")"
+
+# Running under ssh bash -s keeps its script stdin intact while Perl reads logs.
+stdin_run="$T/ssh-stdin-run"
+mkdir -p "$stdin_run"
+make_lane "$stdin_run" 960
+write_text_message "$stdin_run/fiber-960-pi.jsonl" 1700000000000 'Which?'
+printf '{"type":"agent_settled"}\n' >>"$stdin_run/fiber-960-pi.jsonl"
+write_ruling "$stdin_run" switchyard-960-ruling-1.md 1699999999
+make_lane "$stdin_run" 961
+write_ruling "$stdin_run" switchyard-961-ruling-1.md "$loop_ruling"
+printf 'worktree=%s\n' "$repo" >"$stdin_run/switchyard-961.state"
+write_loop_lane "$stdin_run" 961 1700000200000 2
+make_lane "$stdin_run" 962
+printf '{"type":"tool_execution_end","toolCallId":"job","result":"%s"}\n' "$job_done" \
+  >"$stdin_run/fiber-962-pi.jsonl"
+printf '{"type":"agent_settled"}\n' >>"$stdin_run/fiber-962-pi.jsonl"
+run_stat "$stdin_run" >"$T/ssh-local.out" 2>"$T/ssh-local.err"; rc=$?
+[ "$rc" = 0 ] || fail "ssh stdin fixture local run exits 0 (got $rc)"
+env PATH="$T/stub:$PATH" LANESTAT_TEST_NOW="$NOW" \
+  DELEGATE_JOBS_DIR="$DELEGATE_JOBS_DIR" JOB_RECORD_SYSTEM_DIR="$JOB_RECORD_SYSTEM_DIR" TMPDIR="$TMPDIR" \
+  bash -s -- "$stdin_run" <"$LANESTAT" >"$T/ssh-script.out" 2>"$T/ssh-script.err"
+cmp -s "$T/ssh-local.out" "$T/ssh-script.out" || fail "bash -s preserves all lane rows"
+assert_row 960 'SETTLED PARK last=none$' "$(<"$T/ssh-script.out")"
+assert_row 961 'SETTLED LOOP last=none$' "$(<"$T/ssh-script.out")"
+assert_row 962 "SETTLED DONE-UNREAD $job_done$" "$(<"$T/ssh-script.out")"
+
 echo 'lanestat: all cases passed'

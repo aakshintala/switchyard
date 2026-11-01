@@ -113,16 +113,33 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     mtime=$(perl -e 'print ((stat $ARGV[0])[9])' "$jsonl" 2>/dev/null)
     [ -n "${mtime:-}" ] && age=$((now - mtime))
   fi
-  event_output=$(tail -c 20000000 "$jsonl" 2>/dev/null | LS_JOB_DIRS="$job_dirs" perl -ne '
+  ruling_time=0
+  for ruling_file in "$run"/*-"$n"-ruling-*.md "$run/fiber-$n-fence-grant-"*.md; do
+    [ -f "$ruling_file" ] || continue
+    ruling_mtime=$(perl -e 'my @s = stat $ARGV[0]; print $s[9] if @s' "$ruling_file" 2>/dev/null)
+    case $ruling_mtime in
+      ''|*[!0-9]*) ;;
+      *) [ "$ruling_mtime" -gt "$ruling_time" ] && ruling_time=$ruling_mtime ;;
+    esac
+  done
+  ruling_ms=$((ruling_time * 1000))
+  event_output=$(tail -c 20000000 "$jsonl" 2>/dev/null | LS_JOB_DIRS="$job_dirs" LS_RULING_MS="$ruling_ms" perl -ne '
     our @open;
     our $settled;
     our $after_prompt;
     our $dead_pending;
     our $dead;
     our $last_tool;
+    our $question_line;
+    our $settle_cut;
+    our $settles;
+    our $ruling_ms;
     our @job_ids;
     our %seen_job_ids;
     $last_tool = "none" unless defined $last_tool;
+    $settle_cut = 0 unless defined $settle_cut;
+    $settles = 0 unless defined $settles;
+    $ruling_ms = $ENV{LS_RULING_MS} unless defined $ruling_ms;
     if (/"type":"tool_execution_start","toolCallId":"([^"]*)","toolName":"([^"]*)"/) {
       push @open, [$1, $2];
       $last_tool = $2;
@@ -192,6 +209,14 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         $after_prompt = 0;
       }
     }
+    if (/"type":"message_end","message":{"role":"assistant"/ && /"type":"text"/) {
+      $question_line = $_;
+    }
+    if ($ruling_ms > 0 && /"type":"message_end"/) {
+      my @timestamps = /"timestamp":(\d+)/g;
+      $settle_cut = 1 if @timestamps && $timestamps[-1] > $ruling_ms;
+    }
+    $settles++ if $settle_cut && /"type":"agent_settled"/;
     if (/"type":"(?:tool_execution_end|message_end)"/) {
       while (/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/g) {
         push @job_ids, $1 unless $seen_job_ids{$1}++;
@@ -208,6 +233,38 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         print "STATE SETTLED" . chr(10);
       }
       print "LAST $last_tool" . chr(10);
+      print "SETTLES $settles" . chr(10);
+      if (defined $question_line && eval { require JSON::PP; 1 }) {
+        my $candidate = eval { JSON::PP::decode_json($question_line) };
+        if (!$@ && ref($candidate) eq "HASH" && ref($candidate->{message}) eq "HASH") {
+          my $message = $candidate->{message};
+          my $timestamp = $message->{timestamp};
+          if (defined $timestamp && !ref($timestamp) && $timestamp =~ /\A[0-9]+\z/) {
+            my @texts;
+            if (ref($message->{content}) eq "ARRAY") {
+              for my $block (@{$message->{content}}) {
+                if (ref($block) eq "HASH" && defined $block->{type} && $block->{type} eq "text" && defined $block->{text} && !ref($block->{text})) {
+                  push @texts, $block->{text};
+                }
+              }
+            }
+            if (@texts) {
+              my $text = join("\n", @texts);
+              my $final_line;
+              for my $line (reverse split /\n/, $text, -1) {
+                $line =~ s/\s+\z//;
+                if ($line =~ /\S/) {
+                  $final_line = $line;
+                  last;
+                }
+              }
+              if (defined $final_line && (substr($final_line, -1, 1) eq "?" || index($final_line, "BLOCKED") >= 0)) {
+                print "Q $timestamp" . chr(10);
+              }
+            }
+          }
+        }
+      }
       if (@job_ids && eval { require JSON::PP; 1 }) {
         my @dirs = split /\n/, defined $ENV{LS_JOB_DIRS} ? $ENV{LS_JOB_DIRS} : "";
         my @finished_ids;
@@ -292,6 +349,11 @@ for pidfile in "$run"/fiber-*-pi.pid; do
   event_last=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 5) == "LAST " { print substr($0, 6); exit }')
   event_last=$(printf '%s' "${event_last:-none}" | perl -pe 's/\s/_/g')
   event_ids=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 4) == "IDS " { print substr($0, 5); exit }')
+  event_question=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 2) == "Q " { print substr($0, 3); exit }')
+  event_settles=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 8) == "SETTLES " { print substr($0, 9); exit }')
+  case $event_settles in
+    ''|*[!0-9]*) event_settles=0 ;;
+  esac
   case $event_state in
     'IN-TOOL '*) state=$event_state ;;
     SETTLED|WEDGED)
@@ -312,13 +374,41 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       fi
       ;;
   esac
-  case $state in
-    WEDGED) state="$state last=$event_last" ;;
-  esac
+  park=no
+  loop=no
   case $state in
     SETTLED|SETTLED-OLD)
+      case $event_question in
+        ''|*[!0-9]*) ;;
+        *) [ "$ruling_ms" -le "$event_question" ] && park=yes ;;
+      esac
+      if [ "$ruling_time" -gt 0 ] && [ "$event_settles" -ge 2 ]; then
+        worktree=
+        for lane_state in "$run"/*-"$n.state"; do
+          [ -f "$lane_state" ] || continue
+          lane_worktree=$(awk 'index($0, "worktree=") == 1 { print substr($0, 10); exit }' "$lane_state")
+          if [ -n "$lane_worktree" ]; then
+            worktree=$lane_worktree
+            break
+          fi
+        done
+        if [ -n "$worktree" ]; then
+          if commit_time=$(git -C "$worktree" log -1 --format=%ct </dev/null 2>/dev/null); then
+            case $commit_time in
+              ''|*[!0-9]*) ;;
+              *) [ "$commit_time" -le "$ruling_time" ] && loop=yes ;;
+            esac
+          fi
+        fi
+      fi
+      [ "$park" = no ] || state="$state PARK"
+      [ "$loop" = no ] || state="$state LOOP"
+      if [ "$park" = yes ] || [ "$loop" = yes ]; then
+        state="$state last=$event_last"
+      fi
       [ -z "$event_ids" ] || state="$state DONE-UNREAD $event_ids"
       ;;
+    WEDGED) state="$state last=$event_last" ;;
   esac
   printf '%-6s %-8s %-18s age=%-6s %s\n' "$n" "$pid" "$info" "$age" "$state"
   rows=$((rows + 1))
