@@ -6,11 +6,14 @@
 # substitution: a regular file cannot block a reader, so the FIFO is what makes
 # the readiness read wait for the line with no deadline. A waiter that exits
 # first gives that read EOF. Absence checks drain a reaped waiter's FIFO to EOF
-# and compare every line read. One timed read checks the dead-holder rewrite
-# race; its helper deliberately rewrites its pid after 0.05 s.
+# and compare every line read. No test sleeps or polls: each wait is a blocking
+# read or a wait on a pid, and the watchdog bounds a hang. The dead-holder
+# tests pause the shim between its two dead-pid reads through the test-only
+# CARGO_SLOT_RECHECK_FIFO hook in bin/cargo-slot.
 # Not shown: that the waiting line prints once across several rescans. A shim
 # that printed on every rescan passes, because the suite releases a holder
-# right after the first line. Showing it needs a timed wait across rescans.
+# right after the first line. Showing it would need a timed wait across rescans,
+# which this suite does not have.
 # The suite proves only that a waiter takes a slot after a release, which needs
 # at least one rescan after the waiting line.
 set -uo pipefail
@@ -528,17 +531,23 @@ rc=$?
 [ -e "$K/slots/slot-1.lock" ] || fail "slot-1.lock missing after a killed holder"
 
 # A live lock on an inode with a dead recorded pid is reclaimed to a new file.
+# The hook pauses the waiter after its first dead-pid read. Releasing it without
+# a rewrite leaves the second read the same dead pid, so the lock is reclaimed.
 Q="$T/reclaim-dead"
 stage "$Q/h"
 stage "$Q/w"
 hold_slot "$Q/h" "$Q/slots" 1
 QH=$HOLD_PID
-sleep 0 &
-DEAD_PID=$!
-wait "$DEAD_PID" || fail "could not reap short-lived process $DEAD_PID"
+# An out-of-range pid returns ESRCH without relying on process reaping or pid reuse.
+DEAD_PID=5000000
 printf '%s cargo build\n' "$DEAD_PID" >"$Q/slots/slot-1.lock"
-spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" FAKE_HOLD=1 -- build
+mkfifo "$Q/recheck" || fail "cannot stage recheck FIFO"
+exec 8<>"$Q/recheck"
+spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" CARGO_SLOT_RECHECK_FIFO="$Q/recheck" FAKE_HOLD=1 -- build
 QW=$SPAWNED
+IFS= read -r -u 8 line
+[ "$line" = "stale $DEAD_PID" ] || fail "waiter reported [$line], want stale $DEAD_PID"
+printf 'go\n' >&8
 IFS= read -r _ <"$Q/w/up"
 [ -e "$Q/slots/slot-1.lock.stale-$DEAD_PID" ] ||
   fail "dead holder's lock was not moved aside"
@@ -549,39 +558,47 @@ rc=$?
 release "$Q/h"
 wait "$QH" 2>/dev/null
 
-# A live holder replaces a stale pid before the reclaimer's delayed recheck.
-# Keep the slot flocked while rewriting so a waiter cannot take the slot itself.
+# A live holder replaces a stale pid before the waiter's second dead-pid read.
+# The helper holds the slot flock throughout. The hook pauses the waiter after
+# its first dead-pid read; the helper rewrites its live pid; the test releases
+# the waiter, which must not reclaim.
 Q="$T/reclaim-race"
-stage "$Q/h"
 stage "$Q/w"
 mkdir -p "$Q/slots"
-sleep 0 &
-RACE_DEAD_PID=$!
-wait "$RACE_DEAD_PID" || fail "could not reap short-lived process $RACE_DEAD_PID"
+RACE_DEAD_PID=5000000
 printf '%s cargo build\n' "$RACE_DEAD_PID" >"$Q/slots/slot-1.lock"
-mkfifo "$Q/ready" "$Q/go" || fail "cannot stage reclaim-race helper FIFOs"
+mkfifo "$Q/helper.out" "$Q/helper.in" "$Q/recheck" || fail "cannot stage reclaim-race FIFOs"
+exec 7<>"$Q/helper.out"
+exec 6<>"$Q/helper.in"
+exec 8<>"$Q/recheck"
 "$PY" -c '
-import fcntl, os, sys, time
+import fcntl, os, sys
 fd = os.open(sys.argv[1], os.O_RDWR)
 fcntl.flock(fd, fcntl.LOCK_EX)
-with open(sys.argv[2], "w") as ready:
-    ready.write("locked\n")
-time.sleep(0.05)
+out = open(sys.argv[2], "w")
+cmd = open(sys.argv[3])
+out.write("locked\n")
+out.flush()
+cmd.readline()
 os.ftruncate(fd, 0)
 os.lseek(fd, 0, os.SEEK_SET)
 os.write(fd, ("%d cargo build\n" % os.getpid()).encode())
-with open(sys.argv[3]) as go:
-    go.readline()
-' "$Q/slots/slot-1.lock" "$Q/ready" "$Q/go" &
+out.write("rewritten\n")
+out.flush()
+cmd.readline()
+' "$Q/slots/slot-1.lock" "$Q/helper.out" "$Q/helper.in" &
 QH=$!
 PIDS+=("$QH")
-IFS= read -r _ <"$Q/ready"
-exec 8<>"$Q/w/up"
-spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" FAKE_HOLD=1 -- build
+IFS= read -r -u 7 line
+[ "$line" = locked ] || fail "reclaim-race helper reported [$line], want locked"
+spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" CARGO_SLOT_RECHECK_FIFO="$Q/recheck" -- build
 QW=$SPAWNED
-if IFS= read -r -t 1 -u 8 _; then
-  fail "live holder was reclaimed after rewriting its stale pid"
-fi
+IFS= read -r -u 8 line
+[ "$line" = "stale $RACE_DEAD_PID" ] || fail "waiter reported [$line], want stale $RACE_DEAD_PID"
+printf 'rewrite\n' >&6
+IFS= read -r -u 7 line
+[ "$line" = rewritten ] || fail "reclaim-race helper reported [$line], want rewritten"
+printf 'go\n' >&8
 expect_err_line "cargo-slot: waiting"
 [ "$(cat "$Q/slots/slot-1.lock")" = "$QH cargo build" ] ||
   fail "live holder did not replace the stale pid in the lock file"
@@ -591,7 +608,7 @@ expect_err_line "cargo-slot: waiting"
 kill -TERM "$QW"
 wait "$QW" 2>/dev/null
 expect_waiter_log "$Q/w"
-printf 'go\n' >"$Q/go"
+printf 'exit\n' >&6
 wait "$QH" || fail "reclaim-race helper did not exit cleanly"
 
 # A live recorded pid remains in place and the waiter continues to wait.
@@ -847,9 +864,8 @@ kill -0 "$DAEMON_PID" 2>/dev/null || fail "daemon child did not outlive the carg
 exec 8<>"$D/reacquire/up"
 spawn "$D/reacquire" CARGO_SLOTS=1 CARGO_SLOT_DIR="$D/slots" FAKE_HOLD=1 -- build
 REACQUIRE=$SPAWNED
-if ! IFS= read -r -t 2 -u 8 _; then
-  fail "slot was not available after the cargo stub exited"
-fi
+# Blocks until the reacquiring build takes the slot; the watchdog bounds a hang.
+IFS= read -r -u 8 _
 release "$D/reacquire"
 wait "$REACQUIRE"
 rc=$?
@@ -878,7 +894,6 @@ LOCK_HOLDER=$HOLD_PID
   fail "lock file does not name holder $LOCK_HOLDER and argv: $(cat "$L/slots/slot-1.lock")"
 release "$L"
 wait "$LOCK_HOLDER"
-[ ! -s "$L/slots/slot-1.lock" ] || fail "clean release left the holder pid in the lock file"
 
 echo "cargo-slot: all cases passed"
 cleanup

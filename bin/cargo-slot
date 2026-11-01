@@ -96,13 +96,11 @@ def dead_holder_pid(fd):
     if not fields or not re.fullmatch(rb"[0-9]+", fields[0]):
         return None
     pid = int(fields[0])
-    if pid <= 0:
-        return None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return pid
-    except (PermissionError, OSError, OverflowError):
+    except (OSError, OverflowError):
         return None
     return None
 
@@ -130,6 +128,19 @@ def reclaim_dead_slot(path, fd, pid):
         os.close(guard_fd)
 
 
+def recheck_wait(pid):
+    # Test-only hook: with CARGO_SLOT_RECHECK_FIFO set, write "stale <pid>" to
+    # that FIFO and block on one line from it, in place of the 0.2 s re-check.
+    fifo = os.environ.get("CARGO_SLOT_RECHECK_FIFO", "")
+    if fifo == "":
+        time.sleep(0.2)
+        return
+    with open(fifo, "w") as out:
+        out.write("stale %d\n" % pid)
+    with open(fifo) as cmd:
+        cmd.readline()
+
+
 def acquire_slot(directory, n):
     # One LOCK_NB try per slot file per pass; a full pass that finds none
     # free prints the waiting line once, then sleeps 0.1 s and rescans.
@@ -154,7 +165,7 @@ def acquire_slot(directory, n):
                 except BlockingIOError:
                     pid = dead_holder_pid(fd)
                     if pid is not None:
-                        time.sleep(0.2)
+                        recheck_wait(pid)
                         if dead_holder_pid(fd) == pid:
                             reclaim_dead_slot(path, fd, pid)
                     os.close(fd)
@@ -214,64 +225,37 @@ def write_holder(fd, args):
     data = os.fsencode("%d %s\n" % (os.getpid(), " ".join(["cargo"] + args)))
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
-    written = 0
-    while written < len(data):
-        written += os.write(fd, data[written:])
+    os.write(fd, data)
 
 
 def run_slot_child(real, args):
-    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-    owner_pid = os.getpid()
-    child_pid = None
-    pending = []
-
-    def forward(signum, _frame):
-        if os.getpid() != owner_pid:
-            signal.signal(signum, signal.SIG_DFL)
-            os.kill(os.getpid(), signum)
-        elif child_pid is None:
-            pending.append(signum)
-        else:
-            try:
-                os.kill(child_pid, signum)
-            except ProcessLookupError:
-                pass
-
-    for signum in signals:
-        signal.signal(signum, forward)
     try:
         pid = os.fork()
     except OSError as err:
         fail(1, "cannot fork cargo: %s" % err.strerror)
-
     if pid == 0:
-        for signum in signals:
-            signal.signal(signum, signal.SIG_DFL)
         exec_real(real, args)
-        os._exit(127)
 
+    def forward(signum, _frame):
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, forward)
     # Overcounting is deliberate: a hard-killed shim frees this slot while its
     # cargo keeps running, and reclaim can race a waiter blocked on the old
     # inode. Either can briefly exceed CARGO_SLOTS. Undercounting costs
     # contention; a leaked slot can cost a lane hours.
-    child_pid = pid
-    for signum in pending:
-        forward(signum, None)
-    while True:
-        try:
-            _, status = os.waitpid(pid, 0)
-            break
-        except InterruptedError:
-            continue
-
-    if os.WIFEXITED(status):
-        return os.WEXITSTATUS(status)
-    if os.WIFSIGNALED(status):
-        signum = os.WTERMSIG(status)
+    _, status = os.waitpid(pid, 0)
+    code = os.waitstatus_to_exitcode(status)
+    if code < 0:
+        signum = -code
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
-        return 128 + signum
-    return 1
+        return 128 - code
+    return code
 
 
 def main():
@@ -293,7 +277,6 @@ def main():
             try:
                 status = run_slot_child(real, args)
             finally:
-                os.ftruncate(fd, 0)
                 os.close(fd)
             sys.exit(status)
     exec_real(real, args)
