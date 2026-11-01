@@ -5,7 +5,7 @@ set -euo pipefail
 # limit; the exemption is derived from recorded state below.
 
 usage() {
-  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--owner-approved <id>]\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n       tkt-plan <state> replan\n' >&2
+  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--owner-approved <id>]\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
   exit 2
 }
 
@@ -57,6 +57,30 @@ load_plan() {
   t require plan; plan="$(t get plan)"
   [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
   base="$(base_of "$plan")"
+}
+
+plan_verdict_ok() {
+  local no_verifier="$1" stored stored_base
+  stored="$(t get plan_verdict 2>/dev/null || true)"
+  stored_base="$(t get plan_verdict_base 2>/dev/null || true)"
+  if [ -z "$stored" ] && [ "$no_verifier" -eq 1 ]; then
+    t set plan_verdict skipped
+    t set plan_verdict_base "$base"
+    stored=skipped
+    stored_base="$base"
+  fi
+  if { [ "$stored" = ok ] || [ "$stored" = skipped ]; } && [ "$stored_base" = "$base" ]; then
+    return 0
+  fi
+  case "$stored" in
+    "") verdict_refusal=none ;;
+    ok|skipped) verdict_refusal=stale ;;
+    *) verdict_refusal="$stored" ;;
+  esac
+  [ -n "$stored" ] || stored=none
+  [ -n "$stored_base" ] || stored_base=none
+  verdict_digest="plan_verdict=$stored plan_verdict_base=$stored_base plan_base=$base"
+  return 1
 }
 
 ronum() { n="$(t get verifier_round 2>/dev/null || printf '0')"; case "$n" in ''|*[!0-9]*) n=0;; esac; printf '%s\n' "$n"; }
@@ -164,6 +188,8 @@ do_verify() {
   while [ $# -gt 0 ]; do case "$1" in
     --extra) [ $# -ge 2 ] || usage; extra="$2"; shift 2;;
     --model) [ $# -ge 2 ] || usage; model="$2"; shift 2;; *) usage;; esac; done
+  t set plan_verdict ""
+  t set plan_verdict_base ""
   load_plan
   files=()
   while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
@@ -215,6 +241,8 @@ do_verify() {
   # put; without this reset the next verify would only re-watch the old job.
   t set "job.$slot" ""
   runjob "$slot" "$vbrief" "$rep" "${args[@]}"
+  if [ "$REC" -eq 0 ]; then t set plan_verdict ok; else t set plan_verdict lines; fi
+  t set plan_verdict_base "$base"
   # A verify that reaches a report records its base; a failed or asking job
   # leaves the old base so the retry stays exempt. An exempt run never writes
   # the round counters.
@@ -248,6 +276,8 @@ do_confirm() {
   ticket_extra "$xfile" "$(t get extra 2>/dev/null || true)"
   if [ "$granted" -eq 1 ]; then t set job.confirm ""; fi
   runjob confirm "$cbrief" "$rep" PLAN="$plan" BASE="$base" EDITS="@$edits" EXTRA="@$xfile" --model "$cmodel"
+  if [ "$REC" -eq 0 ]; then t set plan_verdict ok; else t set plan_verdict lines; fi
+  t set plan_verdict_base "$base"
   if [ "$granted" -eq 1 ]; then t set granted_used 1; fi
   t set last_report "$rep"
   t set confirmed_for "$(ronum)"
@@ -285,10 +315,13 @@ do_grant() {
 }
 
 do_post() {
-  part=""
+  part=""; no_verifier=0
   while [ $# -gt 0 ]; do case "$1" in
-    --part) [ $# -ge 2 ] || usage; part="$2"; shift 2;; *) usage;; esac; done
+    --part) [ $# -ge 2 ] || usage; part="$2"; shift 2;;
+    --no-verifier) no_verifier=1; shift;;
+    *) usage;; esac; done
   load_plan
+  if ! plan_verdict_ok "$no_verifier"; then emit "POST-FAIL reason=verdict verdict=$verdict_refusal" 1 "$verdict_digest"; fi
   "$plangate" "$plan" >"$tmp" 2>&1 || emit "POST-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
   pargs=(); [ -z "$part" ] || pargs=(--part "$part")
   urls="$("$postplan" "$issue" "$plan" --repo "$repo" ${pargs[@]+"${pargs[@]}"} 2>"$tmp")" || emit "POST-FAIL reason=post" "$?" "$(head -n 10 "$tmp")"
@@ -296,8 +329,10 @@ do_post() {
 }
 
 do_set() {
-  [ $# -eq 1 ] || usage
-  case "$1" in /*) plan="$1" ;; *) plan="$PWD/$1" ;; esac
+  [ $# -ge 1 ] || usage
+  plan_arg="$1"; shift; no_verifier=0
+  if [ $# -gt 0 ]; then [ "$#" -eq 1 ] && [ "$1" = --no-verifier ] || usage; no_verifier=1; fi
+  case "$plan_arg" in /*) plan="$plan_arg" ;; *) plan="$PWD/$plan_arg" ;; esac
   [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
   base="$(base_of "$plan")"
   pack_out="$run/$namebase-pack.md"
@@ -307,9 +342,15 @@ do_set() {
   t set plan "$plan"; t set pack "$pack"
   # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
   if [ "$old_plan" != "$plan" ]; then
+    t set plan_verdict ""; t set plan_verdict_base ""
     t set verifier_round 0; t set confirmed_for ""; t set verified_base ""
     t set granted_by ""; t set granted_comment ""; t set granted_used ""; t set granted_owner ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
+  elif [ "$no_verifier" -eq 0 ] && [ "$(t get plan_verdict 2>/dev/null || true)" = skipped ]; then
+    t set plan_verdict ""; t set plan_verdict_base ""
+  fi
+  if [ "$no_verifier" -eq 1 ] && [ -z "$(t get plan_verdict 2>/dev/null || true)" ]; then
+    t set plan_verdict skipped; t set plan_verdict_base "$base"
   fi
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
 }
@@ -321,6 +362,8 @@ do_replan() {
   if [ -z "$plan_key" ]; then echo "tkt-plan: missing key: plan" >&2; exit 2; fi
   # Job slots and findings first, round last: a half-done replan leaves
   # round non-empty and tkt-build refuses loudly instead of reusing a stale slot.
+  t set plan_verdict ""
+  t set plan_verdict_base ""
   t set job.lane ""
   t set job.fix1 ""
   t set job.fix2 ""
