@@ -24,7 +24,7 @@ You need Rust (`cargo`), and `cursor-agent` on PATH with `cursor-agent login` be
 | `delegate watch <jobId>...` | Block until each job is terminal (optional `--timeout` seconds). |
 | `delegate status <jobId>` | Print the job's state without waiting; add a short same-line summary of available result text and changes for finished jobs. |
 | `delegate models` | List configured model ids, labels, backends, prices, and tiers. Rows are sorted by backend, then by id; `*` marks the default. |
-| `delegate doctor` | Check the binary, `cursor-agent`, login, and model menu drift. |
+| `delegate doctor` | Check configured backend binaries, login state, the Fiber hub socket, and model menu drift. |
 | `delegate session start` | Start a detached Muse or pi session from a brief. |
 | `delegate session send` | Start a turn or steer the active turn. |
 | `delegate session logs` | Read session events, optionally following them. |
@@ -43,14 +43,14 @@ Every job runs with writes enabled. A read task says "do not edit" in its brief;
 | `cursor` | Implemented (`cursor-agent`, `CURSOR_AGENT_BIN`). |
 | `pi` | Implemented (`pi`, `PI_BIN`). |
 | `claude` | Implemented (`claude`, `CLAUDE_BIN`). |
-| `fiber` | Implemented (`fiber ask`, `FIBER_BIN`). |
+| `fiber` | Implemented (supervised hub sessions, `FIBER_HOME`; `FIBER_BIN` for doctor). |
 | `codex` | Implemented (`codex exec`, `CODEX_BIN`). |
 | `muse` | Implemented (`muse exec`, `MUSE_BIN`). |
 
 Model ids and prices come from bundled `config/models.json`, merged with your host profile.
 A Claude model id may carry a trailing `:<level>` (`low|medium|high|xhigh|max`), run as `claude --model <base> --effort <level>` (e.g. `claude-opus-5-5:high`); ids without a suffix are unchanged. A pi or fiber model id may carry a trailing thinking level (`:<off|minimal|low|medium|high|xhigh|max>`), which stays on the id handed to the harness (e.g. `opencode-go/muse-spark-1.3-contributor:high` runs as `pi --model opencode-go/muse-spark-1.3-contributor:high`); catalogue ids such as `openai/gpt-6-luna:xhigh` stay their own rows, and another colon tail is an error naming the levels.
 
-A fiber model id is `fiber/` plus Fiber's own `provider/model` reference (e.g. `fiber/opencode-go/muse-spark-1.3-contributor`), run as `fiber ask --model <reference>` with resume via `--resume`; it carries no tiers so the ladder never picks it, and `delegate doctor` checks `fiber version` plus membership in `fiber models --json`. Like a pi id, it may carry a trailing thinking level (`:<off|minimal|low|medium|high|xhigh|max>`), kept on the reference handed to the harness, while another colon tail is an error naming the levels. The real-fiber resume tests run with `FIBER_BIN=<path to fiber> cargo test --test fiber_live` from `delegate/`; each test spends two live Muse turns, and both skip when `FIBER_BIN` is unset.
+A fiber model id is `fiber/` plus Fiber's own `provider/model` reference (e.g. `fiber/opencode-go/muse-spark-1.3-contributor`). Jobs use supervised sessions through the Unix socket at `$FIBER_HOME/run/hub` (default `~/.fiber/run/hub`): a fresh job starts a supervised session, and resume reconnects to the saved session before sending new input. Jobs do not spawn Fiber or fall back to a per-run command. Fiber models carry no tiers, so the ladder never picks them. `delegate doctor` checks `fiber version`, membership in `fiber models --json`, and hub socket reachability; a missing or unreachable hub is a warning, not a doctor failure. Like a pi id, a Fiber id may carry a trailing thinking level (`:<off|minimal|low|medium|high|xhigh|max>`), kept on the model reference sent to the hub, while another colon tail is an error naming the levels. The real-Fiber resume tests run with `FIBER_BIN=<path to fiber> cargo test --test fiber_live` from `delegate/`; each test spends two live Muse turns and skips when the binary or hub socket is unavailable.
 
 A codex model id is `codex/` plus the Codex model name with an optional `:<tier>` (`medium|xhigh`), run as `codex exec --json -s workspace-write -C <cwd> -m <model> [-c model_reasoning_effort=<tier>]` with the prompt on stdin and resume via `exec ... resume <thread-id>`; the tier suffix becomes the reasoning-effort flag and ids without a suffix send none, and it carries no tiers so the ladder never picks it. `delegate doctor` checks `codex --version` and `codex login status`, warning per configured row that no membership probe exists. The real-codex resume tests run with `CODEX_BIN=<path to codex> cargo test --test codex_live` from `delegate/`; each test spends two live turns (about $0.001 per trivial turn), both skip when `CODEX_BIN` is unset, and the temp workspace is a throwaway git repo because Codex refuses a cwd outside one.
 

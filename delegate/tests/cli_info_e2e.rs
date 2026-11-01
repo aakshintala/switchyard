@@ -132,6 +132,7 @@ impl Env {
             .args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
+            .env("FIBER_HOME", self.dir.join("fh"))
             .env("CURSOR_AGENT_BIN", cursor_bin)
             .env("PI_BIN", self.dir.join("pi.sh"))
             .env("CLAUDE_BIN", self.dir.join("claude.sh"))
@@ -276,8 +277,12 @@ fn doctor_passes_against_full_fake() {
         "{stdout}"
     );
     assert!(stdout.contains("ok    codex: logged in"), "{stdout}");
+    assert!(
+        stdout.contains("warn  fiber: hub not reachable at "),
+        "{stdout}"
+    );
     // Codex has no membership probe, so every configured row warns as
-    // unchecked, sorted by full row id. Warnings do not fail the doctor.
+    // unchecked, sorted by full row id. Hub and membership warnings do not fail the doctor.
     for id in [
         "codex/gpt-6-astra",
         "codex/gpt-6-luna",
@@ -293,7 +298,7 @@ fn doctor_passes_against_full_fake() {
         );
     }
     let warns: Vec<&str> = stdout.lines().filter(|l| l.starts_with("warn")).collect();
-    assert_eq!(warns.len(), 5, "{stdout}");
+    assert_eq!(warns.len(), 6, "{stdout}");
     assert!(!stdout.contains("skip  claude"), "{stdout}");
     assert!(!stdout.lines().any(|l| l.starts_with("fail")), "{stdout}");
 }
