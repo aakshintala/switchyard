@@ -17,8 +17,8 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-job.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/home" "$T/tmp" "$T/cache" "$T/bin" "$T/records" "$T/cases"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" XDG_CACHE_HOME="$T/cache"
+mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/records" "$T/cases"
+export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export STUB_JOBSDIR="$T/tmp/delegate-jobs"
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
 unset DELEGATE_JOBS_DIR
