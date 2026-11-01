@@ -42,7 +42,113 @@
 #      it re-holds the file it just released.
 set -u
 set -f
-. "$(dirname "$0")/fw-lib.sh"
+_fw_run() { printf '%s' "${FW_RUN:-/Users/aakshintala/work/fiber-worktrees/flywheel/run}"; }
+_fw_box_host() { printf '%s' "${FW_BOX_HOST:-roundhouse-7010-plus-1.local}"; }
+
+# Read `claude agents --json` on stdin; print live lane names (fiber-*,
+# busy/idle). Exits 1 when stdin is not parseable JSON (fail closed).
+_fw_lane_names_json() {
+  python3 -c 'import json,sys
+try:
+  data = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+if not isinstance(data, list):
+  sys.exit(1)
+out = []
+for a in data:
+  try:
+    n = a.get("name", "")
+    s = a.get("status", "")
+  except Exception:
+    continue
+  if n.startswith("fiber-") and s in ("busy", "idle"):
+    out.append(n)
+print(" ".join(out))' 2>/dev/null
+}
+
+# Prints Mac lane names; exit 1 when the command fails or output is unparseable.
+# Stderr of the claude command goes to ${FW_CLAUDE_ERR:-/dev/null}.
+fw_lane_names_mac() {
+  _fw_out=$("${FW_CLAUDE:-claude}" agents --json 2>"${FW_CLAUDE_ERR:-/dev/null}") || return 1
+  printf '%s' "$_fw_out" | _fw_lane_names_json || return 1
+  return 0
+}
+
+# One ssh round trip gathering every box fact; results cached in FW_BOX_*.
+# FW_BOX_RC holds ssh's exit code; FW_BOX_OK is 1 only with intact markers.
+_fw_box_probe() {
+  if [ -n "${FW_BOX_PROBED:-}" ]; then return 0; fi
+  FW_BOX_PROBED=1
+  FW_BOX_OK=0
+  FW_BOX_RC=0
+  FW_BOX_RAW=""
+  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
+  case "$_fw_raw" in
+    *FWSEC=UPTIME*FWSEC=END*) FW_BOX_OK=1; FW_BOX_RAW="$_fw_raw" ;;
+  esac
+  return 0
+}
+
+_fw_box_section() {
+  _fw_box_probe
+  if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
+  printf '%s\n' "$FW_BOX_RAW" | awk -v s="FWSEC=$1" '$0 == s {on = 1; next} /^FWSEC=/ {on = 0} on {print}'
+  return 0
+}
+
+# Prints box lane names; exit 1 when ssh failed or output is unparseable.
+fw_box_lane_names() {
+  _fw_box_probe
+  if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
+  _fw_s=$(_fw_box_section AGENTS) || return 1
+  [ -n "$_fw_s" ] || return 1
+  printf '%s' "$_fw_s" | _fw_lane_names_json || return 1
+  return 0
+}
+
+# Prints live Mac pi-lane names, `fiber-<n>` per live `fiber-<n>-pi.pid`.
+# A pi lane is invisible to `claude agents`, so a fence probe that reads only
+# that command loses every pi lane's hold once its grant files age out of the
+# six-hour window (2026-10-31: a sweep printed "live lanes:" empty with 14 pi
+# lanes running). Exit 1 when the run directory is missing (fail closed).
+fw_pi_lane_names_mac() {
+  _fw_rd=$(_fw_run)
+  [ -d "$_fw_rd" ] || return 1
+  case "$-" in *f*) _fw_hadf=1;; *) _fw_hadf=0;; esac
+  set +f
+  _fw_names=""
+  for _fw_f in "$_fw_rd"/fiber-*-pi.pid; do
+    [ -f "$_fw_f" ] || continue
+    _fw_p=$(cat "$_fw_f" 2>/dev/null)
+    case "$_fw_p" in ''|*[!0-9]*) continue;; esac
+    kill -0 "$_fw_p" 2>/dev/null || continue
+    _fw_n=${_fw_f##*/fiber-}
+    _fw_n=${_fw_n%-pi.pid}
+    _fw_names="$_fw_names fiber-$_fw_n"
+  done
+  [ "$_fw_hadf" -eq 1 ] && set -f
+  printf '%s' "${_fw_names# }"
+  return 0
+}
+
+# Prints live box pi-lane names from the one box probe. Exit 1 when ssh failed
+# or the section's end marker is missing (fail closed).
+fw_pi_lane_names_box() {
+  _fw_box_probe
+  if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
+  _fw_s=$(_fw_box_section PILANES) || return 1
+  case "$_fw_s" in *PILANESOK*) : ;; *) return 1;; esac
+  printf '%s' "$_fw_s" | grep '^fiber-' | tr '\n' ' '
+  return 0
+}
+
+# Epoch mtime of a file; empty when unknown. Portable (macOS/Linux stat).
+fw_mtime() {
+  _fw_m=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null) || _fw_m=""
+  case "$_fw_m" in *[!0-9]*|'') printf '';; *) printf '%s' "$_fw_m";; esac
+  return 0
+}
 
 _usage() { echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]" >&2; }
 
