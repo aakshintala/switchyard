@@ -1,7 +1,8 @@
-//! fiber doctor probes: `fiber version` and `fiber models --json`
-//! membership for each configured `fiber/...` model. Fiber has no auth-check
-//! command yet, so these two checks are the whole probe.
+//! Fiber doctor probes the optional `fiber` binary and the hub socket used by
+//! runs. The binary supplies version and configured-model checks; the hub
+//! check determines whether a job can connect.
 
+use super::hub;
 use super::{model_reference, resolve_bin};
 use crate::cli_info::status_line;
 use crate::doctor::{AgentCommandResult, RunDoctorOpts, command_err};
@@ -22,6 +23,8 @@ pub(crate) fn fill(report: &mut DoctorReport, opts: &RunDoctorOpts<'_>) {
         None => crate::doctor::default_run_agent_command(bin, args),
     };
 
+    let hub_failure = probe_hub(hub::fiber_home().and_then(|home| hub::hub_socket_path(&home)));
+
     // Only this backend's models are checked. Others are skip lines in the CLI.
     let mut configured_ids: Vec<String> = opts
         .config
@@ -37,6 +40,7 @@ pub(crate) fn fill(report: &mut DoctorReport, opts: &RunDoctorOpts<'_>) {
             backend: "fiber".into(),
             found: false,
             path: Some(path),
+            model_failures: hub_failure.into_iter().collect(),
             ..Default::default()
         });
         return;
@@ -46,7 +50,8 @@ pub(crate) fn fill(report: &mut DoctorReport, opts: &RunDoctorOpts<'_>) {
     if let Some(e) = &ver_err {
         report.failures.push(format!("fiber version failed: {e}"));
     }
-    let model_failures = probe_memberships(&path, &configured_ids, &run_command);
+    let mut model_failures: Vec<String> = hub_failure.into_iter().collect();
+    model_failures.extend(probe_memberships(&path, &configured_ids, &run_command));
     report.sections.push(DoctorBackendSection {
         backend: "fiber".into(),
         found: true,
@@ -64,6 +69,9 @@ pub(crate) fn lines(report: &DoctorReport) -> (String, bool) {
     };
     let mut text = String::new();
     let mut failed = false;
+    for m in &sec.model_failures {
+        text += &status_line("warn", &format!("fiber: {m}"));
+    }
     if !sec.found {
         text += &status_line(
             "warn",
@@ -82,10 +90,18 @@ pub(crate) fn lines(report: &DoctorReport) -> (String, bool) {
             failed = true;
         }
     }
-    for m in &sec.model_failures {
-        text += &status_line("warn", &format!("fiber: {m}"));
-    }
     (text, failed)
+}
+
+/// Check the socket without waiting for a protocol greeting.
+fn probe_hub(socket: Result<std::path::PathBuf, String>) -> Option<String> {
+    let path = match socket {
+        Ok(path) => path,
+        Err(message) => return Some(message),
+    };
+    std::os::unix::net::UnixStream::connect(&path)
+        .err()
+        .map(|error| format!("hub not reachable at {}: {error}", path.display()))
 }
 
 /// Check that each configured id's reference appears in `fiber models --json`.
@@ -176,6 +192,7 @@ mod tests {
     use super::*;
     use crate::types::{Config, HostProfile, ModelEntry, Price};
     use std::collections::HashMap;
+    use std::os::unix::net::UnixListener;
 
     fn config_with_fiber_ids(ids: &[&str]) -> Config {
         let mut models: HashMap<String, ModelEntry> = HashMap::new();
@@ -207,6 +224,14 @@ mod tests {
         }
     }
 
+    fn listening_hub() -> (crate::backends::TempDir, UnixListener, std::path::PathBuf) {
+        let home = crate::backends::TempDir::new("cdm-fiber-doctor-home");
+        let socket = super::super::hub::hub_socket_path(&home).unwrap();
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        (home, listener, socket)
+    }
+
     fn ok_result(stdout: &str) -> AgentCommandResult {
         AgentCommandResult {
             ok: true,
@@ -229,6 +254,10 @@ mod tests {
         ids: &[&str],
         run: &(dyn Fn(&str, &[String]) -> AgentCommandResult + Sync),
     ) -> (DoctorReport, Vec<String>) {
+        let _lock = crate::test_env::lock();
+        let _tmp = crate::test_env::EnvGuard::set("TMPDIR", "/tmp");
+        let (home, _listener, _) = listening_hub();
+        let _fiber_home = crate::test_env::EnvGuard::set("FIBER_HOME", home.to_str().unwrap());
         let config = config_with_fiber_ids(ids);
         let mut report = DoctorReport::default();
         let opts = RunDoctorOpts {
@@ -247,6 +276,39 @@ mod tests {
             .model_failures
             .clone();
         (report, failures)
+    }
+
+    #[test]
+    fn probe_hub_accepts_a_listening_socket() {
+        let _lock = crate::test_env::lock();
+        let _tmp = crate::test_env::EnvGuard::set("TMPDIR", "/tmp");
+        let (_home, _listener, socket) = listening_hub();
+        assert_eq!(probe_hub(Ok(socket)), None);
+    }
+
+    #[test]
+    fn probe_hub_names_a_missing_socket() {
+        let _lock = crate::test_env::lock();
+        let _tmp = crate::test_env::EnvGuard::set("TMPDIR", "/tmp");
+        let home = crate::backends::TempDir::new("cdm-fiber-doctor-missing");
+        let socket = super::super::hub::hub_socket_path(&home).unwrap();
+        let message = probe_hub(Ok(socket.clone())).expect("missing socket warning");
+        assert!(message.contains(&socket.display().to_string()), "{message}");
+        assert!(message.contains("No such file or directory"), "{message}");
+    }
+
+    #[test]
+    fn probe_hub_reports_a_stale_socket() {
+        let _lock = crate::test_env::lock();
+        let _tmp = crate::test_env::EnvGuard::set("TMPDIR", "/tmp");
+        let home = crate::backends::TempDir::new("cdm-fiber-doctor-stale");
+        let socket = super::super::hub::hub_socket_path(&home).unwrap();
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        drop(listener);
+        let message = probe_hub(Ok(socket.clone())).expect("stale socket warning");
+        assert!(message.contains(&socket.display().to_string()), "{message}");
+        assert!(message.contains("Connection refused"), "{message}");
     }
 
     #[test]
@@ -348,6 +410,10 @@ mod tests {
 
     #[test]
     fn fill_missing_binary_is_a_warning() {
+        let _lock = crate::test_env::lock();
+        let _tmp = crate::test_env::EnvGuard::set("TMPDIR", "/tmp");
+        let home = crate::backends::TempDir::new("cdm-fiber-doctor-nohub");
+        let _fiber_home = crate::test_env::EnvGuard::set("FIBER_HOME", home.to_str().unwrap());
         let config = config_with_fiber_ids(&["fiber/opencode-go/muse-spark-1.3-contributor"]);
         let mut report = DoctorReport::default();
         let opts = RunDoctorOpts {
@@ -361,7 +427,9 @@ mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         let (text, failed) = lines(&report);
         assert!(!failed);
-        assert!(text.starts_with("warn  fiber: fiber not found"), "{text}");
+        assert!(text.contains("warn  fiber: fiber not found"), "{text}");
+        assert!(text.contains("warn  fiber: hub not reachable at"), "{text}");
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
     }
 
     #[test]
