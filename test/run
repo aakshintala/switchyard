@@ -1,14 +1,103 @@
 #!/usr/bin/env bash
 # test/run: run every test file in this directory.
-# Usage: test/run
+# Usage: test/run [--self-test-parallel-failure]; internal: test/run --run-parallel <paths...>
 set -uo pipefail
 # CLAUDECODE must not change gh-ci wait timeouts under test: suites that need
 # it set it per case, so start unset however the gate is invoked.
 unset CLAUDECODE
 
 D="$(cd "$(dirname "$0")" && pwd)"
+
+# --- parallel helper: run suites at most 3 at once. Each suite's output
+# goes to its own file under $PAR_T (a temp dir created with mktemp -d);
+# each file is printed without interleaving in allowlist order as each
+# finishes (batches block in order). Any failure sets failed=1.
+run_parallel() {
+  _batch=""
+  _count=0
+  for _t in "$@"; do
+    _base="$(basename "$_t")"
+    bash "$_t" >"$PAR_T/$_base.log" 2>&1 &
+    _batch="$_batch $!:$_base"
+    _count=$((_count + 1))
+    if [ "$_count" -ge 3 ]; then
+      for _item in $_batch; do
+        _pid="${_item%%:*}"; _name="${_item##*:}"
+        wait "$_pid"; _rc=$?
+        cat "$PAR_T/$_name.log"
+        if [ "$_rc" -eq 0 ]; then
+          echo "PASS: $_name"
+        else
+          echo "FAIL: $_name (exit $_rc)" >&2
+          failed=1
+        fi
+      done
+      _batch=""
+      _count=0
+    fi
+  done
+  for _item in $_batch; do
+    _pid="${_item%%:*}"; _name="${_item##*:}"
+    wait "$_pid"; _rc=$?
+    cat "$PAR_T/$_name.log"
+    if [ "$_rc" -eq 0 ]; then
+      echo "PASS: $_name"
+    else
+      echo "FAIL: $_name (exit $_rc)" >&2
+      failed=1
+    fi
+  done
+}
+
+# --- controlled internal mode: run the given paths through run_parallel
+# with the same final failure exit logic. The temp output dir is cleaned
+# by its own scoped trap. Used by deterministic_parallel_failure_case so
+# the proof asserts the actual test/run process exit code.
+if [ "${1:-}" = "--run-parallel" ]; then
+  shift
+  RP_T="$(mktemp -d "${TMPDIR:-/tmp}/test-run-parallel-inner.XXXXXX")"
+  trap 'rm -rf "$RP_T"' EXIT
+  PAR_T="$RP_T"
+  failed=0
+  run_parallel "$@"
+  [ "$failed" = "0" ] || exit 1
+  echo "all suites passed"
+  exit 0
+fi
+
+# --- deterministic parallel-failure proof (embedded: no new files). Uses
+# controlled stubs (not real suites): runs them through run_parallel,
+# asserts the inner run exits 1 and shows the stub failure output plus the
+# failing suite name. The case itself exits 0 on success. Temp dirs are
+# cleaned by traps scoped to this subshell.
+deterministic_parallel_failure_case() (
+  ST="$(mktemp -d "${TMPDIR:-/tmp}/test-run-deterministic.XXXXXX")"
+  trap 'rm -rf "$ST"' EXIT
+  printf '#!/usr/bin/env bash\necho "deterministic stub pass"\nexit 0\n' >"$ST/deterministic-stub-pass.sh"
+  printf '#!/usr/bin/env bash\necho "UNIQUE-FAIL-MARKER-936 parallel failure output"\nexit 1\n' >"$ST/deterministic-stub-fail.sh"
+  chmod +x "$ST"/deterministic-stub-pass.sh "$ST"/deterministic-stub-fail.sh
+  out="$ST/combined.log"
+  bash "$0" --run-parallel "$ST/deterministic-stub-pass.sh" "$ST/deterministic-stub-fail.sh" >"$out" 2>&1
+  rc=$?
+  [ "$rc" -eq 1 ] || return 1
+  grep -q "UNIQUE-FAIL-MARKER-936" "$out" || return 1
+  grep -q "deterministic-stub-fail.sh" "$out" || return 1
+  grep -h "UNIQUE-FAIL-MARKER-936\|FAIL: deterministic-stub-fail.sh" "$out"
+  return 0
+)
+
+if [ "${1:-}" = "--self-test-parallel-failure" ]; then
+  if deterministic_parallel_failure_case; then
+    echo "PASS: deterministic-parallel-failure"
+    exit 0
+  else
+    echo "FAIL: deterministic-parallel-failure" >&2
+    exit 1
+  fi
+fi
+
 failed=0
-for t in "$D"/tkt-state.sh "$D"/tkt-job.sh "$D"/job-record.sh "$D"/tkt-plan.sh "$D"/tkt-gate.sh "$D"/fill-brief.sh "$D"/review-pr.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/gh-ci.sh "$D"/ci-health.sh "$D"/ci-friction.sh "$D"/ship-pr.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/plan-sweep.sh "$D"/delegate-replay.sh "$D"/delegate-canary.sh "$D"/inbox.sh "$D"/lanestat.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/tkt-ship.sh "$D"/tkt-start.sh "$D"/tkt-fix.sh "$D"/tkt-build.sh "$D"/file-claim.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/git-hook-guard.sh "$D"/fence-grant.sh; do
+for t in "$D"/tkt-state.sh "$D"/tkt-job.sh "$D"/job-record.sh "$D"/tkt-gate.sh "$D"/fill-brief.sh "$D"/review-pr.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/gh-ci.sh "$D"/ci-health.sh "$D"/ci-friction.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/plan-sweep.sh "$D"/delegate-replay.sh "$D"/delegate-canary.sh "$D"/inbox.sh "$D"/lanestat.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/tkt-ship.sh "$D"/tkt-fix.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/git-hook-guard.sh "$D"/fence-grant.sh; do
   if bash "$t"; then
     echo "PASS: $(basename "$t")"
   else
@@ -16,10 +105,21 @@ for t in "$D"/tkt-state.sh "$D"/tkt-job.sh "$D"/job-record.sh "$D"/tkt-plan.sh "
     failed=1
   fi
 done
+# Allowlist (exactly these five run parallel, at most 3 at once):
+# ship-pr.sh, tkt-build.sh, tkt-start.sh, file-claim.sh, tkt-plan.sh.
+PAR_T="$(mktemp -d "${TMPDIR:-/tmp}/test-run-parallel.XXXXXX")"
+trap 'rm -rf "$PAR_T"' EXIT
+run_parallel "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/file-claim.sh "$D"/tkt-plan.sh
 if bash "$D"/cargo-slot.sh; then
   echo "PASS: cargo-slot.sh"
 else
   echo "FAIL: cargo-slot.sh (exit $?)" >&2
+  failed=1
+fi
+if deterministic_parallel_failure_case; then
+  echo "PASS: deterministic-parallel-failure"
+else
+  echo "FAIL: deterministic-parallel-failure (expected parallel failure not proven)" >&2
   failed=1
 fi
 [ "$failed" = "0" ] || exit 1
