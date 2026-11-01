@@ -452,4 +452,95 @@ printf '%s\n' \
   >"$case_dir/fiber-740-pi.jsonl"
 check_case_row 740 'SETTLED$'
 
+# An exhausted provider is distinct from a settled lane and is never re-woken.
+dead_run="$T/dead-provider"
+mkdir -p "$dead_run"
+for pid in 750 751 752 753 754 755 756 757 758 759 760 761; do
+  printf '%s\n' "$pid" >"$dead_run/fiber-$pid-pi.pid"
+  printf 'pi\n' >"$T/ps/$pid.comm"
+  printf 'S 00:01\n' >"$T/ps/$pid.info"
+done
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}' \
+  '{"type":"tool_execution_end","toolCallId":"t"}' \
+  '{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"opencode-go API error (402): Insufficient account funds\nsecond line"}' \
+  '{"type":"agent_settled"}' \
+  >"$dead_run/fiber-750-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}' \
+  '{"type":"tool_execution_end","toolCallId":"t"}' \
+  '{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"provider unicode\u000asecond line"}' \
+  '{"type":"agent_settled"}' \
+  >"$dead_run/fiber-751-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}' \
+  '{"type":"tool_execution_end","toolCallId":"t"}' \
+  '{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"provider cr\rsecond\u000Athird"}' \
+  '{"type":"agent_settled"}' \
+  >"$dead_run/fiber-752-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":true,"attempt":1}' \
+  '{"type":"agent_settled"}' \
+  >"$dead_run/fiber-753-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"provider failed"}' \
+  '{"type":"agent_start"}' \
+  '{"type":"agent_settled"}' \
+  >"$dead_run/fiber-754-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":false,"attempt":3}' \
+  '{"type":"agent_settled"}' \
+  >"$dead_run/fiber-755-pi.jsonl"
+for pid in 756 757 758 759 760 761; do
+  printf '%s\n' \
+    '{"type":"agent_start"}' \
+    '{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"provider exhausted"}' \
+    '{"type":"agent_settled"}' \
+    >"$dead_run/fiber-$pid-pi.jsonl"
+done
+printf '%s\n' '{"type":"response","command":"prompt","success":false,"error":"x"}' \
+  >>"$dead_run/fiber-756-pi.jsonl"
+printf '%s\n' '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  >>"$dead_run/fiber-757-pi.jsonl"
+printf '%s\n' '{"type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}' \
+  >>"$dead_run/fiber-758-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":false,"finalError":""}' \
+  '{"type":"agent_settled"}' \
+  >"$dead_run/fiber-759-pi.jsonl"
+long_error="$(perl -e 'print "x" x 201')"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  "{\"type\":\"auto_retry_end\",\"success\":false,\"finalError\":\"$long_error\"}" \
+  '{"type":"agent_settled"}' \
+  >"$dead_run/fiber-760-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"provider exhausted"}' \
+  '{"type":"agent_settled"}' \
+  '{"type":"message_start","message":{"role":"assistant"}}' \
+  >"$dead_run/fiber-761-pi.jsonl"
+run_stat "$dead_run" >"$T/dead-provider.out" 2>"$T/dead-provider.err"; rc=$?
+[ "$rc" = 0 ] || fail "dead-provider fixture exits 0 (got $rc; $(<"$T/dead-provider.err"))"
+assert_row 750 'DEAD-PROVIDER opencode-go API error \(402\): Insufficient account funds$' "$(<"$T/dead-provider.out")"
+assert_row 751 'DEAD-PROVIDER provider unicode$' "$(<"$T/dead-provider.out")"
+assert_row 752 'DEAD-PROVIDER provider cr$' "$(<"$T/dead-provider.out")"
+assert_row 753 'SETTLED$' "$(<"$T/dead-provider.out")"
+assert_row 754 'SETTLED$' "$(<"$T/dead-provider.out")"
+assert_row 755 'SETTLED$' "$(<"$T/dead-provider.out")"
+assert_row 756 'DEAD-PROVIDER provider exhausted$' "$(<"$T/dead-provider.out")"
+assert_row 757 'WEDGED last=none$' "$(<"$T/dead-provider.out")"
+assert_row 758 'DEAD-PROVIDER provider exhausted$' "$(<"$T/dead-provider.out")"
+assert_row 759 'DEAD-PROVIDER unknown$' "$(<"$T/dead-provider.out")"
+expected_error="$(perl -e 'print "x" x 200')"
+assert_row 760 "DEAD-PROVIDER $expected_error\$" "$(<"$T/dead-provider.out")"
+assert_row 761 'SETTLED$' "$(<"$T/dead-provider.out")"
+
 echo 'lanestat: all cases passed'

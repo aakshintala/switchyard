@@ -97,6 +97,8 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     our @open;
     our $settled;
     our $after_prompt;
+    our $dead_pending;
+    our $dead;
     our $last_tool;
     $last_tool = "none" unless defined $last_tool;
     if (/"type":"tool_execution_start","toolCallId":"([^"]*)","toolName":"([^"]*)"/) {
@@ -104,8 +106,10 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       $last_tool = $2;
       $settled = 0;
       $after_prompt = 0;
+      $dead = undef;
     } elsif (/"type":"tool_execution_end","toolCallId":"([^"]*)"/) {
       $after_prompt = 0;
+      $dead = undef;
       for (my $i = $#open; $i >= 0; $i--) {
         if ($open[$i]->[0] eq $1) {
           splice @open, $i, 1;
@@ -117,9 +121,50 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       @open = ();
       $settled = 1;
       $after_prompt = 0;
+      $dead = $dead_pending;
+      $dead_pending = undef;
+    } elsif (/"type":"agent_start"/ || /"type":"auto_retry_start"/) {
+      $dead_pending = undef;
+      $dead = undef;
+    } elsif (/"type":"auto_retry_end"/) {
+      if (/"success":true/) {
+        $dead_pending = undef;
+        $dead = undef;
+      } elsif (/"success":false/ && /"finalError":"((?:[^"\\]|\\.)*)"/) {
+        my $raw_error = $1;
+        my $message = "";
+        while (length $raw_error) {
+          if ($raw_error =~ s/^([^\\]+)//) {
+            $message .= $1;
+          } elsif ($raw_error =~ s/^\\(?:n|r|u000a|u000d).*$//i) {
+            last;
+          } elsif ($raw_error =~ s/^\\\\//) {
+            $message .= "\\";
+          } elsif ($raw_error =~ s/^\\"//) {
+            $message .= "\"";
+          } elsif ($raw_error =~ s/^\\t//) {
+            $message .= "\t";
+          } elsif ($raw_error =~ s/^\\(?:b|f)//) {
+            $message .= " ";
+          } elsif ($raw_error =~ s/^\\u000([0-9a-f])//i) {
+            $message .= chr(hex($1));
+          } elsif ($raw_error =~ s/^\\u[0-9a-f]{4}//i) {
+            next;
+          } elsif ($raw_error =~ s/^\\.//s) {
+            next;
+          }
+        }
+        $message =~ s/[\x00-\x1f\x7f]/ /g;
+        $message =~ s/\s+$//;
+        $message = substr($message, 0, 200);
+        $dead_pending = length($message) ? $message : "unknown";
+      }
     } elsif (/"type":"response"/ && /"command":"prompt"/ && /"success":true/ && !/"(?:disposition|status)":"queued"/) {
       $after_prompt = 1;
+      $dead_pending = undef;
+      $dead = undef;
     } elsif (/"type":"message_start"/) {
+      $dead = undef;
       if ($after_prompt) {
         $settled = 0;
         $after_prompt = 0;
@@ -128,6 +173,8 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     END {
       if (@open) {
         print "STATE IN-TOOL " . $open[-1]->[1] . chr(10);
+      } elsif ($settled && defined $dead) {
+        print "STATE DEAD $dead" . chr(10);
       } elsif ($settled && $after_prompt) {
         print "STATE WEDGED" . chr(10);
       } elsif ($settled) {
@@ -150,6 +197,7 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         state=SETTLED
       fi
       ;;
+    'DEAD '* ) state="DEAD-PROVIDER ${event_state#DEAD }" ;;
     *)
       if [ "$age" -gt 300 ]; then
         state='STALL no tool, not settled'
