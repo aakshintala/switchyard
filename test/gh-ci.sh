@@ -27,6 +27,7 @@ unset CLAUDECODE
 
 A="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+export A B
 
 # --- fake gh. pulls: head sha advances per head read (draft and base reads
 # --- do not); merge states (default CLEAN) advance with it, served lower-case
@@ -124,9 +125,12 @@ gh() (
         case "$ref" in
           missing) echo "gh: Not Found (HTTP 404)" >&2; exit 1;;
           nope) echo "gh: No commit found for SHA: nope (HTTP 422)" >&2; exit 1;;
-          *[!0-9a-fA-F]*|'' ) jq -n --arg sha "$A" '$sha' | jq -r "$jq";;
-          *) [ "${#ref}" -eq 40 ] || { echo "gh: No commit found for SHA: $ref (HTTP 422)" >&2; exit 1; }
-             jq -n --arg sha "$ref" '$sha' | jq -r "$jq";;
+          *)
+            [ ! -e "$T/state/ref-fail" ] || { echo "gh: internal server error (HTTP 500)" >&2; exit 1; }
+            sha="$A"
+            [ ! -e "$T/state/resolved-sha" ] || sha="$(cat "$T/state/resolved-sha")"
+            [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]] && sha="$ref"
+            jq -n --arg sha "$sha" '{sha: $sha}' | jq -r "$jq";;
         esac;;
       *) echo "fake gh: unknown api $path" >&2; exit 2;;
     esac
@@ -194,7 +198,7 @@ export -f gh sleep
 reset_state() {
   rm -f "$T/state/sleeps.txt" "$T/state/gh-args.txt" "$T/state/banned.txt" "$T/state/merge-state.txt" "$T/state/view-fail" "$T/state/keep-checks-across-runs"
   rm -f "$T/state/heads.txt" "$T/state/checks.txt" "$T/state/runs.txt" "$T/state/rules" "$T/state/rules-fail" "$T/state/classic" "$T/state/classic-fail" "$T/state/draft"
-  rm -f "$T/state/default-branch" "$T/state/default-branch-fail"
+  rm -f "$T/state/default-branch" "$T/state/default-branch-fail" "$T/state/resolved-sha" "$T/state/ref-fail"
   rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail" "$T/state/not-found"
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
   rm -f "$T/state"/run-*-head.txt "$T/state"/run-*-poll.txt "$T/state"/run-*-poll-fail
@@ -256,6 +260,265 @@ run_verdict() {
 }
 
 RULES_CI='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]'
+RULES_CI_LINT='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"},{"context":"lint"}]}}]'
+
+# --- cases: verdict judges check runs against the base's required names
+# required failure is red; passing non-required checks do not affect it
+reset_state
+set_checks '[{"bucket":"fail","name":"ci"},{"bucket":"pass","name":"setup"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "required failure exits 0 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$OUT" = "$(printf 'RED\nREQUIRED: ci')" ] || fail "required failure output and tag: [$OUT]"
+
+# required and non-blocking failures are both listed, required first
+reset_state
+set_checks '[{"bucket":"fail","name":"ci"},{"bucket":"fail","name":"Journey suite"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "two failures exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'RED\nREQUIRED: ci\nNON-BLOCKING: Journey suite')" ] || fail "both failure tags in order: [$OUT]"
+
+# multiple failing names sort within their tag groups
+reset_state
+set_checks '[{"bucket":"fail","name":"setup"},{"bucket":"fail","name":"lint"},{"bucket":"fail","name":"ci"},{"bucket":"fail","name":"Journey suite"}]'
+echo "$RULES_CI_LINT" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "multiple tagged failures exit 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'RED\nREQUIRED: ci\nREQUIRED: lint\nNON-BLOCKING: Journey suite\nNON-BLOCKING: setup')" ] || fail "failure tags are sorted by group: [$OUT]"
+
+# RED takes precedence over a pending required check
+reset_state
+set_checks '[{"bucket":"fail","name":"ci"},{"bucket":"pending","name":"lint"}]'
+echo "$RULES_CI_LINT" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "RED beats NOT YET exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'RED\nREQUIRED: ci')" ] || fail "RED beats NOT YET: [$OUT]"
+
+# a required pending check is NOT YET
+reset_state
+set_checks '[{"bucket":"pending","name":"ci"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "required pending exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "NOT YET" ] || fail "required pending output: [$OUT]"
+
+# a required name missing from the commit is pending, not green
+reset_state
+set_checks '[{"bucket":"pass","name":"setup"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "absent required name exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "NOT YET" ] || fail "absent required name is pending: [$OUT]"
+
+# NOT YET beats a non-blocking failure, which remains tagged
+reset_state
+set_checks '[{"bucket":"pending","name":"ci"},{"bucket":"fail","name":"Journey suite"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "NOT YET with non-blocking failure exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'NOT YET\nNON-BLOCKING: Journey suite')" ] || fail "NOT YET beats NOT RED and keeps tag: [$OUT]"
+
+# a non-required failure beside green required checks is NOT RED
+reset_state
+set_checks '[{"bucket":"pass","name":"ci"},{"bucket":"fail","name":"Journey suite"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "non-required failure exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'NOT RED\nNON-BLOCKING: Journey suite')" ] || fail "non-required failure output: [$OUT]"
+
+# a non-required cancelled check is also NOT RED
+reset_state
+set_checks '[{"bucket":"pass","name":"ci"},{"bucket":"cancel","name":"Journey suite"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "non-required cancelled check exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'NOT RED\nNON-BLOCKING: Journey suite')" ] || fail "non-required cancellation output: [$OUT]"
+
+# a pending non-required check is ignored
+reset_state
+set_checks '[{"bucket":"pass","name":"ci"},{"bucket":"pending","name":"setup"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "non-required pending check exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "GREEN" ] || fail "non-required pending is ignored: [$OUT]"
+
+# a non-required failure still makes the result NOT RED when another check is pending
+reset_state
+set_checks '[{"bucket":"pass","name":"ci"},{"bucket":"pending","name":"setup"},{"bucket":"fail","name":"Journey suite"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "non-required failure with pending check exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'NOT RED\nNON-BLOCKING: Journey suite')" ] || fail "non-required pending ignored beside failure: [$OUT]"
+
+# all checks green gives GREEN, and a skipped required check counts as passing
+reset_state
+set_checks '[{"bucket":"pass","name":"ci"},{"bucket":"pass","name":"setup"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "all green exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "GREEN" ] || fail "all green output: [$OUT]"
+reset_state
+set_checks '[{"bucket":"skipping","name":"ci"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "skipped required check exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "GREEN" ] || fail "skipped required check passes: [$OUT]"
+
+# a cancelled required check is a required failure
+reset_state
+set_checks '[{"bucket":"cancel","name":"ci"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "required cancellation exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'RED\nREQUIRED: ci')" ] || fail "required cancellation output: [$OUT]"
+
+# with no required names, failures are NOT RED and passes are GREEN
+reset_state
+set_checks '[{"bucket":"fail","name":"Journey suite"}]'
+echo '[]' >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "empty required set failure exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'NOT RED\nNON-BLOCKING: Journey suite')" ] || fail "empty set failure is non-blocking: [$OUT]"
+reset_state
+set_checks '[{"bucket":"pass","name":"setup"}]'
+echo '[]' >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "empty required set pass exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "GREEN" ] || fail "empty set pass output: [$OUT]"
+
+# no check runs with an empty required set is GREEN, with a stderr diagnostic
+reset_state
+echo '[]' >"$T/state/rules"
+set_checks '[]'
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "zero checks exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "GREEN" ] || fail "zero checks output: [$OUT]"
+grep -q "gh-ci: no checks on $A" "$T/stderr.txt" || fail "zero checks diagnostic: [$(cat "$T/stderr.txt")]"
+
+# failed reads print no verdict and exit 1
+reset_state
+set_checks '[]'; touch "$T/state/rules-fail"
+run_verdict feature/x
+[ "$CODE" = "1" ] || fail "unreadable rules exit 1 (got $CODE): [$OUT]"
+[ -z "$OUT" ] || fail "unreadable rules print no verdict: [$OUT]"
+grep -q 'cannot read required checks' "$T/stderr.txt" || fail "rules error names required checks: [$(cat "$T/stderr.txt")]"
+reset_state
+set_checks '[]'; echo "$RULES_CI" >"$T/state/rules"; touch "$T/state/classic-fail"
+run_verdict feature/x
+[ "$CODE" = "1" ] || fail "unreadable classic protection exits 1 (got $CODE): [$OUT]"
+[ -z "$OUT" ] || fail "unreadable classic protection prints no verdict: [$OUT]"
+grep -q 'cannot read required checks' "$T/stderr.txt" || fail "classic error names required checks: [$(cat "$T/stderr.txt")]"
+reset_state
+touch "$T/state/default-branch-fail"
+run_verdict feature/x
+[ "$CODE" = "1" ] || fail "unreadable default branch exits 1 (got $CODE): [$OUT]"
+[ -z "$OUT" ] || fail "unreadable default branch prints no verdict: [$OUT]"
+grep -q 'default branch' "$T/stderr.txt" || fail "default branch error is named: [$(cat "$T/stderr.txt")]"
+reset_state
+: >"$T/state/default-branch"
+run_verdict feature/x
+[ "$CODE" = "1" ] || fail "empty default branch exits 1 (got $CODE): [$OUT]"
+[ -z "$OUT" ] || fail "empty default branch prints no verdict: [$OUT]"
+grep -q 'default branch' "$T/stderr.txt" || fail "empty default branch error is named: [$(cat "$T/stderr.txt")]"
+reset_state
+echo "$RULES_CI" >"$T/state/rules"; set_checks FAIL
+run_verdict feature/x
+[ "$CODE" = "1" ] || fail "unreadable check runs exit 1 (got $CODE): [$OUT]"
+[ -z "$OUT" ] || fail "unreadable check runs print no verdict: [$OUT]"
+grep -q 'checks' "$T/stderr.txt" || fail "check-runs error is named: [$(cat "$T/stderr.txt")]"
+
+# unknown refs exit 2 before the checks API is called
+for missing_ref in missing nope; do
+  reset_state
+  run_verdict "$missing_ref"
+  [ "$CODE" = "2" ] || fail "missing ref $missing_ref exits 2 (got $CODE): [$OUT]"
+  [ -z "$OUT" ] || fail "missing ref $missing_ref prints no verdict: [$OUT]"
+  grep -q "ref $missing_ref not found" "$T/stderr.txt" || fail "missing ref $missing_ref message: [$(cat "$T/stderr.txt")]"
+  ! grep -q 'check-runs' "$T/state/gh-args.txt" || fail "missing ref $missing_ref does not call checks API"
+done
+reset_state
+touch "$T/state/ref-fail"
+run_verdict feature/x
+[ "$CODE" = "1" ] || fail "other ref read errors exit 1 (got $CODE): [$OUT]"
+[ -z "$OUT" ] || fail "other ref read errors print no verdict: [$OUT]"
+grep -q 'cannot resolve ref feature/x' "$T/stderr.txt" || fail "other ref error is named: [$(cat "$T/stderr.txt")]"
+
+# branch names resolve once to their SHA; a full SHA is also a valid ref
+reset_state
+echo "$RULES_CI" >"$T/state/rules"; set_checks '[{"bucket":"pass","name":"ci"}]'
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "branch ref resolves (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+grep -q "commits/$A/check-runs" "$T/state/gh-args.txt" || fail "checks use the resolved commit SHA"
+! grep -q 'commits/feature/x/check-runs' "$T/state/gh-args.txt" || fail "check runs never use branch text"
+reset_state
+echo "$RULES_CI" >"$T/state/rules"; set_checks '[{"bucket":"pass","name":"ci"}]'
+run_verdict "$A"
+[ "$CODE" = "0" ] || fail "40-hex ref resolves (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+grep -q "commits/$A/check-runs" "$T/state/gh-args.txt" || fail "full SHA used for check runs"
+for bad_sha in "${A:1}" "${A}a"; do
+  reset_state
+  echo "$bad_sha" >"$T/state/resolved-sha"
+  run_verdict feature/x
+  [ "$CODE" = "1" ] || fail "resolved SHA length ${#bad_sha} is rejected (got $CODE): [$OUT]"
+  [ -z "$OUT" ] || fail "invalid resolved SHA prints no verdict: [$OUT]"
+  grep -q 'commit SHA' "$T/stderr.txt" || fail "invalid resolved SHA is diagnosed: [$(cat "$T/stderr.txt")]"
+done
+reset_state
+echo "$RULES_CI" >"$T/state/rules"; set_checks '[{"bucket":"pass","name":"ci"}]'
+run_verdict v1.0
+[ "$CODE" = "0" ] || fail "single-period tag ref is valid (got $CODE): [$OUT]"
+reset_state
+echo "$RULES_CI" >"$T/state/rules"; set_checks '[{"bucket":"pass","name":"ci"}]'
+run_verdict abc123
+[ "$CODE" = "0" ] || fail "short hexadecimal ref is resolved, not rejected by syntax (got $CODE): [$OUT]"
+
+# the default branch, not a hard-coded main, supplies required names
+reset_state
+echo trunk >"$T/state/default-branch"
+echo "$RULES_CI" >"$T/state/rules"; set_checks '[{"bucket":"pass","name":"ci"}]'
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "trunk default branch verdict exits 0 (got $CODE): [$OUT]"
+grep -q 'repos/O/N/rules/branches/trunk' "$T/state/gh-args.txt" || fail "rules read from trunk"
+grep -q 'repos/O/N/branches/trunk/protection/required_status_checks' "$T/state/gh-args.txt" || fail "classic protection read from trunk"
+! grep -q 'branches/main' "$T/state/gh-args.txt" || fail "no required names read from main"
+
+# verdict reads check runs, never workflow run lists or PR commands
+! grep -q 'gh run list' "$T/state/gh-args.txt" || fail "verdict never selects newest workflow run"
+[ ! -s "$T/state/banned.txt" ] || fail "verdict never calls gh pr: [$(cat "$T/state/banned.txt")]"
+
+# ref usage errors make no GitHub calls and usage advertises verdict
+for bad_args in no-args two-refs dash-ref; do
+  reset_state
+  case "$bad_args" in
+    no-args) OUT="$(bash "$GHCI" verdict --repo "$GH_CI_REPO" 2>"$T/stderr.txt")"; CODE=$?;;
+    two-refs) OUT="$(bash "$GHCI" verdict one two --repo "$GH_CI_REPO" 2>"$T/stderr.txt")"; CODE=$?;;
+    dash-ref) OUT="$(bash "$GHCI" verdict -x --repo "$GH_CI_REPO" 2>"$T/stderr.txt")"; CODE=$?;;
+  esac
+  [ "$CODE" = "2" ] || fail "verdict $bad_args usage exits 2 (got $CODE): [$OUT]"
+  [ -z "$OUT" ] || fail "verdict $bad_args usage prints no stdout: [$OUT]"
+  grep -q '^usage: gh-ci' "$T/stderr.txt" || fail "verdict $bad_args prints usage: [$(cat "$T/stderr.txt")]"
+  ! grep -q '^gh api ' "$T/state/gh-args.txt" || fail "verdict $bad_args makes no gh API call"
+done
+grep -q 'verdict <branch-or-sha>' "$T/stderr.txt" || fail "usage names verdict"
+
+# unsafe refs are usage errors; whitespace and URL metacharacters never reach gh
+for bad_ref in '' 'feature with space' 'a?b' 'a#b' 'a%b' 'a..b' '/leading' 'trailing/'; do
+  reset_state
+  run_verdict "$bad_ref"
+  [ "$CODE" = "2" ] || fail "unsafe ref [$bad_ref] exits 2 (got $CODE): [$OUT]"
+  [ ! -s "$T/state/gh-args.txt" ] || fail "unsafe ref [$bad_ref] makes no gh call"
+done
+
+# newlines in failing check names cannot forge additional output tags
+reset_state
+set_checks '[{"bucket":"pass","name":"ci"},{"bucket":"fail","name":"Journey\nNON-BLOCKING: forged"}]'
+echo "$RULES_CI" >"$T/state/rules"
+run_verdict feature/x
+[ "$CODE" = "0" ] || fail "newline name verdict exits 0 (got $CODE): [$OUT]"
+[ "$OUT" = "$(printf 'NOT RED\nNON-BLOCKING: Journey NON-BLOCKING: forged')" ] || fail "newline name is sanitized: [$OUT]"
+
+# existing wait behaviour remains covered after the required-name split
 
 # --- case: pending then green, with a passing name containing
 # --- "failing: 0 pending: 0" (proves no substring matching)
