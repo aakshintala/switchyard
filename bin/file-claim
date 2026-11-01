@@ -41,6 +41,10 @@ read_pr_files() {
   while [ "$attempt" -le "$READ_TRIES" ]; do
     if gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" -q '.[].filename' >"$file" 2>"$W/gh.err"; then
       got="$(awk 'length($0) > 0 { n++ } END { print n+0 }' "$file")"
+      # The GitHub PR files API returns at most 3000 entries.
+      # PRs with more than 3000 changed files never reconcile: this function fails on every attempt and file-claim exits 2 on every call.
+      # This exit 2 is deterministic; retrying does not help.
+      # Fiber is far below the cap, so no code changes are needed.
       if [ "$got" = "$expected" ]; then return 0; fi
       printf 'file list has %s files, changedFiles is %s\n' "$got" "$expected" >"$W/gh.err"
     fi
