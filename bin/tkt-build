@@ -203,8 +203,10 @@ if [ "$mutant_count" -gt 0 ]; then
   fi
 fi
 r0="$(tkt get review_ids 2>/dev/null || true)"; rh="$(tkt get review_head 2>/dev/null || true)"; rids=""; [ "$rh" = "$head" ] && rids="$r0"
+spec_issue="$(tkt get spec_issue 2>/dev/null || true)"
 n=0; for ax in standards spec overbuild; do n=$((n+1)); [ "$(printf '%s' "$rids" | wc -w | tr -d ' ')" -ge "$n" ] && continue
   start_args=(start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review")
+  if [ -n "$spec_issue" ]; then start_args+=(--spec "$spec_issue"); fi
   if [ "${#context_args[@]}" -gt 0 ]; then start_args+=("${context_args[@]}"); fi
   rc=0; one="$("$reviewpr" "${start_args[@]}" 2>"$tmpd/start-$ax-err")" || rc=$?
   [ "$rc" -eq 0 ] || { [ -n "$rids" ] && { tkt set review_ids "$rids"; tkt set review_head "$head"; }; emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-$ax-err")"; }

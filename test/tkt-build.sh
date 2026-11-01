@@ -743,6 +743,26 @@ grep -q "^review-start|.*--issue 528 " "$T/calls.log" || fail "spec-path: review
 grep -q "^review-start|.*--spec" "$T/calls.log" && fail "spec-path: review-start never carries --spec"
 grep -q "$CDIR/spec.md" "$T/calls.log" && fail "spec-path: the spec path reaches no review-pr call"
 
+# --- a spec issue is passed to every review start without passing the spec path ---
+setup_case spec-issue
+printf 'ticket body\n' >"$CDIR/spec.md"
+bash "$TKT_STATE" "$S" set spec "$CDIR/spec.md" || fail "spec-issue: set spec path"
+bash "$TKT_STATE" "$S" set spec_issue 445 || fail "spec-issue: set spec issue"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "spec-issue exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "spec-issue"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "spec-issue: one start per axis"
+[ "$(grep -c -- '--spec 445' "$T/calls.log")" -eq 3 ] || fail "spec-issue: all review starts carry --spec 445"
+grep -qF -- "$CDIR/spec.md" "$T/calls.log" && fail "spec-issue: spec path reaches no review-pr call"
+
+# --- an unset spec_issue and spec key add no --spec argument ---
+setup_case no-spec-issue
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "no-spec-issue exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "no-spec-issue"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "no-spec-issue: one start per axis"
+grep '^review-start|' "$T/calls.log" | grep -q -- '--spec' && fail "no-spec-issue: no review start carries --spec"
+
 # --- a missing state key names itself ---
 setup_case missingkey
 grep -v '^plan=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
