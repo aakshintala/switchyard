@@ -19,15 +19,21 @@
 # WEDGED means a settled lane received a successful non-queued prompt and no
 # tool event or message_start followed it; abort, then resend with flywheel's
 # `pisend.sh wake` (not shipped here). A queued prompt means pi has an active
-# run and is not lost. `last=<tool>` accompanies WEDGED, PARK and LOOP; its
-# whitespace is replaced with underscores. PARK and LOOP mark a settled lane
-# waiting for the orchestrator; DONE-UNREAD names completed delegate jobs.
-# DEAD-PROVIDER means the last turn exhausted provider retries; do not re-wake.
-# With a non-`/tmp` lane TMPDIR, set DELEGATE_JOBS_DIR on the watcher to the
-# lane's delegate-jobs directory. DELEGATE_JOBS_DIR, TMPDIR,
-# JOB_RECORD_SYSTEM_DIR and LANESTAT_SETTLED_MAX are not forwarded over ssh;
-# remote values come from the remote environment. DONE-UNREAD lists finished
-# job ids from the lane's jsonl; send a message naming those jobs.
+# run and is not lost. DEAD-PROVIDER <provider>/<model>: <message> means the
+# last assistant message ended with an error and used no tokens; do not re-wake.
+# `last=<tool>` accompanies WEDGED, PARK and LOOP;
+# its whitespace is replaced with underscores. PARK means the lane needs an
+# answer, LOOP leaves the decision to the orchestrator, and DONE-UNREAD <ids>
+# names completed jobs the lane has not read. Answer PARK with a ruling or
+# fence-grant file. Let the orchestrator decide LOOP. Abort and resend WEDGED.
+# Do not re-wake DEAD-PROVIDER. Message the lane naming the jobs in
+# DONE-UNREAD <ids>. `lanewatch` prints dated event rows once per settle minute
+# and sends PARK, LOOP, WEDGED, DEAD-PROVIDER and DONE-UNREAD to
+# LANEWATCH_INBOX when it is set; plain SETTLED and STALL stay on stdout. The
+# watcher never stops a lane. Set DELEGATE_JOBS_DIR on the watcher when a
+# lane's jobs live under a non-`/tmp` TMPDIR, or DONE-UNREAD stays silent.
+# DELEGATE_JOBS_DIR, TMPDIR, JOB_RECORD_SYSTEM_DIR and LANESTAT_SETTLED_MAX are
+# not forwarded over ssh; remote values come from the remote environment.
 #
 # A pid file outlives its lane and the host can reuse its number. Keep a row only
 # when `ps -o comm=` still names pi. A lane's TMPDIR is `~/.cache/tmp`, not
