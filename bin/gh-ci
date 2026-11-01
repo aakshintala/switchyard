@@ -479,7 +479,11 @@ cmd_verdict() {
   fi
   [ "$checks" != "[]" ] || echo "gh-ci: no checks on $sha" >&2
   printf '%s\n' "$judged"
-  return 0
+  case "${judged%%$'\n'*}" in
+    RED) return 1 ;;
+    "NOT YET") return 124 ;;
+    *) return 0 ;;
+  esac
 }
 
 # wait <pr> [--timeout <s>]: block until no required check on the PR's

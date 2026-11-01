@@ -268,7 +268,7 @@ reset_state
 set_checks '[{"bucket":"fail","name":"ci"},{"bucket":"pass","name":"setup"}]'
 echo "$RULES_CI" >"$T/state/rules"
 run_verdict feature/x
-[ "$CODE" = "0" ] || fail "required failure exits 0 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$CODE" = "1" ] || fail "required failure exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
 [ "$OUT" = "$(printf 'RED\nREQUIRED: ci')" ] || fail "required failure output and tag: [$OUT]"
 
 # required and non-blocking failures are both listed, required first
@@ -276,7 +276,7 @@ reset_state
 set_checks '[{"bucket":"fail","name":"ci"},{"bucket":"fail","name":"Journey suite"}]'
 echo "$RULES_CI" >"$T/state/rules"
 run_verdict feature/x
-[ "$CODE" = "0" ] || fail "two failures exits 0 (got $CODE): [$OUT]"
+[ "$CODE" = "1" ] || fail "two failures exits 1 (got $CODE): [$OUT]"
 [ "$OUT" = "$(printf 'RED\nREQUIRED: ci\nNON-BLOCKING: Journey suite')" ] || fail "both failure tags in order: [$OUT]"
 
 # multiple failing names sort within their tag groups
@@ -284,7 +284,7 @@ reset_state
 set_checks '[{"bucket":"fail","name":"setup"},{"bucket":"fail","name":"lint"},{"bucket":"fail","name":"ci"},{"bucket":"fail","name":"Journey suite"}]'
 echo "$RULES_CI_LINT" >"$T/state/rules"
 run_verdict feature/x
-[ "$CODE" = "0" ] || fail "multiple tagged failures exit 0 (got $CODE): [$OUT]"
+[ "$CODE" = "1" ] || fail "multiple tagged failures exit 1 (got $CODE): [$OUT]"
 [ "$OUT" = "$(printf 'RED\nREQUIRED: ci\nREQUIRED: lint\nNON-BLOCKING: Journey suite\nNON-BLOCKING: setup')" ] || fail "failure tags are sorted by group: [$OUT]"
 
 # RED takes precedence over a pending required check
@@ -292,7 +292,7 @@ reset_state
 set_checks '[{"bucket":"fail","name":"ci"},{"bucket":"pending","name":"lint"}]'
 echo "$RULES_CI_LINT" >"$T/state/rules"
 run_verdict feature/x
-[ "$CODE" = "0" ] || fail "RED beats NOT YET exits 0 (got $CODE): [$OUT]"
+[ "$CODE" = "1" ] || fail "RED beats NOT YET exits 1 (got $CODE): [$OUT]"
 [ "$OUT" = "$(printf 'RED\nREQUIRED: ci')" ] || fail "RED beats NOT YET: [$OUT]"
 
 # a required pending check is NOT YET
@@ -300,7 +300,7 @@ reset_state
 set_checks '[{"bucket":"pending","name":"ci"}]'
 echo "$RULES_CI" >"$T/state/rules"
 run_verdict feature/x
-[ "$CODE" = "0" ] || fail "required pending exits 0 (got $CODE): [$OUT]"
+[ "$CODE" = "124" ] || fail "required pending exits 124 (got $CODE): [$OUT]"
 [ "$OUT" = "NOT YET" ] || fail "required pending output: [$OUT]"
 
 # a required name missing from the commit is pending, not green
@@ -308,7 +308,7 @@ reset_state
 set_checks '[{"bucket":"pass","name":"setup"}]'
 echo "$RULES_CI" >"$T/state/rules"
 run_verdict feature/x
-[ "$CODE" = "0" ] || fail "absent required name exits 0 (got $CODE): [$OUT]"
+[ "$CODE" = "124" ] || fail "absent required name exits 124 (got $CODE): [$OUT]"
 [ "$OUT" = "NOT YET" ] || fail "absent required name is pending: [$OUT]"
 
 # NOT YET beats a non-blocking failure, which remains tagged
@@ -316,7 +316,7 @@ reset_state
 set_checks '[{"bucket":"pending","name":"ci"},{"bucket":"fail","name":"Journey suite"}]'
 echo "$RULES_CI" >"$T/state/rules"
 run_verdict feature/x
-[ "$CODE" = "0" ] || fail "NOT YET with non-blocking failure exits 0 (got $CODE): [$OUT]"
+[ "$CODE" = "124" ] || fail "NOT YET with non-blocking failure exits 124 (got $CODE): [$OUT]"
 [ "$OUT" = "$(printf 'NOT YET\nNON-BLOCKING: Journey suite')" ] || fail "NOT YET beats NOT RED and keeps tag: [$OUT]"
 
 # a non-required failure beside green required checks is NOT RED
@@ -370,7 +370,7 @@ reset_state
 set_checks '[{"bucket":"cancel","name":"ci"}]'
 echo "$RULES_CI" >"$T/state/rules"
 run_verdict feature/x
-[ "$CODE" = "0" ] || fail "required cancellation exits 0 (got $CODE): [$OUT]"
+[ "$CODE" = "1" ] || fail "required cancellation exits 1 (got $CODE): [$OUT]"
 [ "$OUT" = "$(printf 'RED\nREQUIRED: ci')" ] || fail "required cancellation output: [$OUT]"
 
 # with no required names, failures are NOT RED and passes are GREEN
@@ -442,7 +442,7 @@ touch "$T/state/ref-fail"
 run_verdict feature/x
 [ "$CODE" = "1" ] || fail "other ref read errors exit 1 (got $CODE): [$OUT]"
 [ -z "$OUT" ] || fail "other ref read errors print no verdict: [$OUT]"
-grep -q 'cannot resolve ref feature/x' "$T/stderr.txt" || fail "other ref error is named: [$(cat "$T/stderr.txt")]"
+grep -q '^gh-ci: cannot resolve ref feature/x in O/N$' "$T/stderr.txt" || fail "other ref error is named: [$(cat "$T/stderr.txt")]"
 
 # branch names resolve once to their SHA; a full SHA is also a valid ref
 reset_state
