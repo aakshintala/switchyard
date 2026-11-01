@@ -536,6 +536,19 @@ cmd_start() {
 
   git -C "$clone" fetch origin "pull/$pr/head" >&2
 
+  if [ -n "$head" ] && [ "${#head}" -lt 40 ]; then
+    if ! resolved="$(git -C "$clone" rev-parse --verify --quiet "$head^{commit}" 2>/dev/null)"; then
+      echo "review-pr: --head $head matches no commit, or more than one, in $clone" >&2
+      exit 2
+    fi
+    if [ "$resolved" != "$api_head" ]; then
+      echo "review-pr: --head $head matches no commit, or more than one, in $clone" >&2
+      exit 2
+    fi
+    head="$resolved"
+    sha="$resolved"
+  fi
+
   if [ -n "$head" ]; then
     if ! git -C "$clone" cat-file -e "$head^{commit}" 2>/dev/null; then
       git -C "$clone" fetch origin "$head" >&2 || true

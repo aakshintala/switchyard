@@ -1362,8 +1362,77 @@ STATUS: DONE" 0
   [ ! -e "$T/state/sleeps.txt" ] || fail "--head $prefix_length-character prefix matches without waiting"
   wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-standards")"
   [ "$(git -C "$wt" rev-parse HEAD)" = "$NEW_SHA" ] || fail "--head $prefix_length-character worktree commit"
+  [ "$(sed -n 's/^sha=//p' "$TMPDIR/review-pr/job-standards")" = "$NEW_SHA" ] || \
+    fail "--head $prefix_length-character state records the full commit"
   bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "--head $prefix_length-character collect exits 0"
 done
+
+# --- case: a full --head bypasses short-prefix resolution
+reset_state
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+git() {
+  if [ "$1" = "-C" ] && [ "$2" = "$T/clone" ] && [ "$3" = "rev-parse" ] && \
+    [ "$4" = "--verify" ] && [ "$5" = "--quiet" ]; then
+    printf '%s\n' "$FAKE_SHA"
+    return 0
+  fi
+  command git "$@"
+}
+export -f git
+start_review 8 --repo O/N --cwd "$T/clone" --axes standards --model M \
+  --head "$NEW_SHA" >/dev/null 2>&1 || fail "full --head skips short-prefix resolution"
+unset -f git
+[ ! -e "$T/state/sleeps.txt" ] || fail "full --head matches without waiting"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "full --head collect exits 0"
+
+# --- case: resolution must agree with the API head reported during the wait
+reset_state
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+head_prefix="${NEW_SHA:0:7}"
+git() {
+  if [ "$1" = "-C" ] && [ "$2" = "$T/clone" ] && [ "$3" = "rev-parse" ] && \
+    [ "$4" = "--verify" ] && [ "$5" = "--quiet" ]; then
+    printf '%s\n' "$FAKE_SHA"
+    return 0
+  fi
+  command git "$@"
+}
+export -f git
+err="$(start_review 8 --repo O/N --cwd "$T/clone" --axes standards --model M \
+  --head "$head_prefix" 2>&1 >/dev/null)"
+st=$?
+unset -f git
+[ "$st" -eq 2 ] || fail "a prefix resolving away from the API head exits 2"
+expected="review-pr: --head $head_prefix matches no commit, or more than one, in $T/clone"
+grep -Fxq "$expected" <<<"$err" || fail "mismatched --head resolution message: [$err]"
+[ ! -e "$TMPDIR/review-pr/job-standards" ] || fail "mismatched --head resolution saves no state"
+
+# --- case: a prefix that cannot be resolved in the clone exits 2
+reset_state
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+head_prefix="${NEW_SHA:0:7}"
+git() {
+  if [ "$1" = "-C" ] && [ "$2" = "$T/clone" ] && [ "$3" = "rev-parse" ] && \
+    [ "$4" = "--verify" ] && [ "$5" = "--quiet" ]; then
+    return 1
+  fi
+  command git "$@"
+}
+export -f git
+err="$(start_review 8 --repo O/N --cwd "$T/clone" --axes standards --model M \
+  --head "$head_prefix" 2>&1 >/dev/null)"
+st=$?
+unset -f git
+[ "$st" -eq 2 ] || fail "unresolvable --head prefix exits 2"
+expected="review-pr: --head $head_prefix matches no commit, or more than one, in $T/clone"
+grep -Fxq "$expected" <<<"$err" || fail "unresolvable --head prefix message: [$err]"
+[ ! -e "$TMPDIR/review-pr/job-standards" ] || fail "unresolvable --head prefix saves no state"
 
 # --- case: an unknown --head prefix waits and names the input when it gives up
 reset_state
