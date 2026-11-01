@@ -5,7 +5,7 @@ set -euo pipefail
 # limit; the exemption is derived from recorded state below.
 
 usage() {
-  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id>\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n       tkt-plan <state> replan\n' >&2
+  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--owner-approved <id>]\n       tkt-plan <state> post [--part <label>]\n       tkt-plan <state> set <plan file>\n       tkt-plan <state> replan\n' >&2
   exit 2
 }
 
@@ -255,24 +255,32 @@ do_confirm() {
 }
 
 do_grant() {
-  who=""; comment=""
+  who=""; comment=""; owner=""
   while [ $# -gt 0 ]; do case "$1" in
     --by) [ $# -ge 2 ] || usage; who="$2"; shift 2;;
     --comment) [ $# -ge 2 ] || usage; comment="$2"; shift 2;;
+    --owner-approved) [ $# -ge 2 ] && [ -n "$2" ] || usage; owner="$2"; shift 2;;
     *) usage;; esac; done
   [ -n "$who" ] && [ -n "$comment" ] || usage
-  case "$who$comment" in *[[:space:]]*) usage;; esac
+  case "$who$comment$owner" in *[[:space:]]*) usage;; esac
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   [ -n "$confirmed_for" ] || { echo "tkt-plan: no limit reached: the confirm round is still open" >&2; exit 2; }
-  if grant_pending; then
-    pending_by="$(t get granted_by 2>/dev/null || true)"
+  granted_by="$(t get granted_by 2>/dev/null || true)"
+  granted_used="$(t get granted_used 2>/dev/null || true)"
+  if [ -n "$granted_by" ] && [ -z "$granted_used" ]; then
     pending_comment="$(t get granted_comment 2>/dev/null || true)"
-    echo "tkt-plan: grant already pending: $pending_by:$pending_comment" >&2
+    echo "tkt-plan: grant already pending: $granted_by:$pending_comment" >&2
+    exit 2
+  fi
+  if [ -n "$granted_by" ] && [ -z "$owner" ]; then
+    recorded_comment="$(t get granted_comment 2>/dev/null || true)"
+    echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a second grant needs the owner: use --owner-approved <comment id>" >&2
     exit 2
   fi
   t set granted_by "$who"
   t set granted_comment "$comment"
   t set granted_used ""
+  t set granted_owner "$owner"
   emit "SET grant=$who:$comment" 0
 }
 
@@ -300,7 +308,7 @@ do_set() {
   # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
   if [ "$old_plan" != "$plan" ]; then
     t set verifier_round 0; t set confirmed_for ""; t set verified_base ""
-    t set granted_by ""; t set granted_comment ""; t set granted_used ""; t set last_report ""
+    t set granted_by ""; t set granted_comment ""; t set granted_used ""; t set granted_owner ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
   fi
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
