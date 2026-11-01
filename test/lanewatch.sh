@@ -15,11 +15,13 @@ strip_timestamp() {
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-lanewatch.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/run" "$T/stall" "$T/run dir" "$T/wedged" "$T/stub" "$T/ps" \
-  "$T/tmp" "$T/tmp/delegate-jobs" "$T/delegate-jobs" "$T/system-jobs"
+  "$T/tmp" "$T/tmp/delegate-jobs" "$T/delegate-jobs" "$T/system-jobs" "$T/home/.agents/bin"
 DELEGATE_JOBS_DIR="$T/delegate-jobs"
 JOB_RECORD_SYSTEM_DIR="$T/system-jobs"
 TMPDIR="$T/tmp"
-export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR
+HOME="$T/home"
+cp "$SCRIPT_DIR/../bin/inbox-send" "$HOME/.agents/bin/inbox-send"
+export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR HOME
 set_minute_mtime() {
   perl -e 'utime($ARGV[1], $ARGV[1], $ARGV[0]) or die "utime: $!"' "$1" "$2" \
     || fail "set settled log mtime $2"
@@ -150,6 +152,13 @@ default_loop_rc=$?
 cat >"$T/stub/ssh" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$@" >"$SSH_ARGS_FILE"
+for arg do cmd=$arg; done
+case $cmd in
+  *inbox-send*)
+    if [ -n "${SSH_FAIL_FILE:-}" ] && [ ! -e "$SSH_FAIL_FILE" ]; then exit 255; fi
+    exec bash -c "$cmd"
+    ;;
+esac
 cat >"$SSH_STDIN_FILE"
 # The failed command's partial output must be discarded with the error.
 if [ -n "${SSH_OUTPUT:-}" ]; then
@@ -410,5 +419,33 @@ LANEWATCH_INBOX="$T/inbox-no-token" SSH_MODE=success SSH_OUTPUT="$no_tokens" \
   || fail "tool names never trigger PARK or LOOP delivery"
 [ "$(wc -l <"$T/no-token.out" | tr -d ' ')" = 2 ] \
   || fail "only the two plain settled rows are recognized"
+
+# A failed remote inbox send stays unseen and retries after the host recovers.
+mkdir -p "$T/stub-retry"
+cat >"$T/stub-retry/sleep" <<'STUB'
+#!/bin/sh
+count=0
+if [ -f "$SLEEP_COUNT_FILE" ]; then
+  IFS= read -r count <"$SLEEP_COUNT_FILE" || [ -n "${count:-}" ]
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$SLEEP_COUNT_FILE"
+if [ "$count" -eq 1 ]; then touch "$SSH_FAIL_FILE"; fi
+if [ "$count" -eq 2 ]; then kill "$PPID"; fi
+STUB
+chmod +x "$T/stub-retry/sleep"
+retry_enable="$T/ssh-retry-enable"
+rm -f "$retry_enable"
+PATH="$T/stub-retry:$T/stub:$PATH" LANEWATCH_INTERVAL=0 \
+  LANEWATCH_INBOX="$T/inbox-remote-retry" INBOX_HOST=mac-host \
+  SSH_FAIL_FILE="$retry_enable" SSH_MODE=success SSH_ARGS_FILE="$T/ssh.args" \
+  SSH_STDIN_FILE="$T/ssh.stdin" SLEEP_COUNT_FILE="$T/ssh-retry-sleeps" \
+  bash "$LANEWATCH" "$events" >"$T/ssh-retry.out" 2>"$T/ssh-retry.err"
+[ "$(count_inbox_files "$T/inbox-remote-retry")" = 1 ] \
+  || fail "remote inbox retry delivers after the host recovers"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [^ ]+ WATCH-ERROR local inbox-send exit 255$' "$T/ssh-retry.out" \
+  || fail "failed inbox send prints a dated WATCH-ERROR: [$(<"$T/ssh-retry.out")]"
+[ "$(grep -c 'local lane 2001 .*SETTLED PARK last=bash' "$T/ssh-retry.out")" = 2 ] \
+  || fail "failed delivery leaves PARK unseen for retry"
 
 echo 'lanewatch: all cases passed'

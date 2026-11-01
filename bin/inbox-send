@@ -28,7 +28,7 @@ if [ -n "${INBOX_HOST:-}" ]; then
   # Scrub INBOX_HOST from the far side's environment: sshd never forwards
   # it, but a stub ssh that runs the command locally (as the tests use)
   # would otherwise recurse into remote mode forever.
-  INBOX_HOST= exec ssh "$host" "bash ~/.agents/bin/inbox-send $qdir $qsender"
+  INBOX_HOST= exec ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "bash ~/.agents/bin/inbox-send $qdir $qsender"
 fi
 
 mkdir -p -- "$dir"
