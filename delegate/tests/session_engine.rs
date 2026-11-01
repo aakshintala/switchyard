@@ -161,6 +161,9 @@ impl Session {
             if predicate(&current) {
                 return current;
             }
+            if current.status == Status::Dead {
+                panic!("session went Dead while waiting for {what}: {current:?}");
+            }
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for {what}: {current:?}"
