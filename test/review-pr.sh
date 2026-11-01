@@ -1649,6 +1649,27 @@ stale_base="$(basename "$stale_rd")"
 [ -f "$TMPDIR/review-pr/job-standards" ] || fail "pruning start still saves the new state"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after prune exits 0"
 
+# --- case: prune bounds the reap log after recording new paths
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+reap_log="$HOME/.cache/agents/review-pr-reap.log"
+mkdir -p "$(dirname "$reap_log")"
+seq 1 1005 >"$reap_log"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
+stale_state "$stale_rd" job-old standards 7 DONE "$T/clone"
+stale_sf="$TMPDIR/review-pr/job-old"
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 \
+  >/dev/null 2>&1 || fail "start with an oversized reap log exits 0"
+[ "$(wc -l <"$reap_log" | tr -d ' ')" = "1000" ] || fail "prune keeps exactly 1000 reap-log lines"
+tail -n 1 "$reap_log" | grep -Fq "path=$stale_sf" || fail "prune keeps the newest reap-log line"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after reap-log trim exits 0"
+
 # --- case: start keeps a stale state file whose job is still running
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
@@ -2077,6 +2098,36 @@ err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2
 [ "$err" = "review-pr: unknown axis: bogus (standards, spec, overbuild)" ] || fail "unknown axis names the axis: [$err]"
 [ ! -e "$T/state/runs.txt" ] || fail "unknown axis starts no job"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "$before" ] || fail "unknown axis makes no worktree"
+
+# --- case: --axes standards,spec does not need --overbuild-model
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M --axes standards,spec >/dev/null 2>&1 || \
+  fail "axes standards,spec without --overbuild-model starts"
+[ -f "$TMPDIR/review-pr/job-standards" ] && [ -f "$TMPDIR/review-pr/job-spec" ] || \
+  fail "axes standards,spec starts both requested jobs"
+[ ! -e "$TMPDIR/review-pr/job-overbuild" ] || fail "axes standards,spec starts no overbuild job"
+bash "$REVIEW" collect job-standards job-spec >/dev/null 2>&1 || fail "axes standards,spec without --overbuild-model collects"
+
+# --- case: default overbuild axis names its missing model for start and run
+for entry in start run; do
+  reset_state
+  if [ "$entry" = start ]; then
+    err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M 2>&1 >/dev/null)"; st=$?
+  else
+    err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M 2>&1 >/dev/null)"; st=$?
+  fi
+  [ "$st" -eq 2 ] || fail "$entry without --overbuild-model exits 2 (got $st)"
+  grep -Fq -- "--overbuild-model" <<<"$err" || fail "$entry missing-model error names --overbuild-model"
+  grep -Fq -- "overbuild" <<<"$err" || fail "$entry missing-model error names the overbuild axis"
+  grep -Fq -- "--axes standards,spec" <<<"$err" || fail "$entry missing-model error names how to skip overbuild"
+  [ ! -e "$T/state/runs.txt" ] && [ ! -e "$T/state/watch.txt" ] || \
+    fail "$entry with missing overbuild model starts no job"
+done
 
 # --- case: collect --findings-out writes the file run --verify reads
 reset_state

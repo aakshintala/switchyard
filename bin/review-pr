@@ -244,6 +244,12 @@ reap_log() {
     >>"$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
 }
 
+# trim_reap_log: keep the last 1000 reap-log lines. This is best-effort.
+trim_reap_log() {
+  local f="$HOME/.cache/agents/review-pr-reap.log"
+  tail -n 1000 "$f" >"$f.tmp" && mv "$f.tmp" "$f" || true
+}
+
 # prune_stale_runs: remove worktrees, run dirs and state files for runs nobody
 # collected. A run is every state file sharing one run dir; it is pruned only
 # when none of its jobs is RUNNING and each of its state files meets one of
@@ -317,6 +323,7 @@ prune_stale_runs() {
     rm -f "$sf"
   done <"$stale_list"
   rm -f "$stale_list" "$all_list" "$old_list" "$done_list"
+  trim_reap_log
   return 0
 }
 
@@ -426,7 +433,11 @@ cmd_start() {
     mode="review"
     # --overbuild-model is required only when the overbuild axis runs.
     case ",$axes," in
-      *,overbuild,*) [ -n "$omodel" ] || usage;;
+      *,overbuild,*)
+        [ -n "$omodel" ] || {
+          echo "review-pr: --overbuild-model is required: the overbuild axis needs it. Pass --overbuild-model M2, or --axes standards,spec to skip overbuild." >&2
+          exit 2
+        };;
     esac
     # A PR with no ticket is its own spec: gh issue view accepts a PR number.
     # Otherwise SPEC defaults to the first --issue, never the PR number.
@@ -495,7 +506,6 @@ cmd_start() {
         exit 2
       fi
       head="$resolved"
-      sha="$resolved"
     fi
     # Wait for the API to report the full head the caller pushed; create
     # nothing until it does.
