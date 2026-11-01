@@ -273,7 +273,7 @@ printf '%s\n' \
 set_minute_mtime "$wedged_run/fiber-2004-pi.jsonl" "$settle_minute"
 watch_lane "$dead_run" 2005
 printf '%s\n' \
-  '{"type":"auto_retry_end","success":false,"finalError":"provider PARK LOOP SETTLED"}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"p","model":"m","usage":{"totalTokens":0},"stopReason":"error","errorMessage":"provider PARK LOOP SETTLED"}]}' \
   '{"type":"agent_settled"}' \
   >"$dead_run/fiber-2005-pi.jsonl"
 set_minute_mtime "$dead_run/fiber-2005-pi.jsonl" "$settle_minute"
@@ -308,7 +308,7 @@ LANEWATCH_INBOX="$T/inbox-wedged" bash "$LANEWATCH" --once "$wedged_run" \
 [ "$(count_inbox_files "$T/inbox-wedged")" = 1 ] || fail "WEDGED sends one inbox message"
 LANEWATCH_INBOX="$T/inbox-dead" bash "$LANEWATCH" --once "$dead_run" \
   >"$T/dead-event.out" 2>"$T/dead-event.err"
-grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [^ ]+ local lane 2005 .*DEAD-PROVIDER provider PARK LOOP SETTLED$' "$T/dead-event.out" \
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [^ ]+ local lane 2005 .*DEAD-PROVIDER p/m: provider PARK LOOP SETTLED$' "$T/dead-event.out" \
   || fail "DEAD-PROVIDER forwards its whole row without token-scanning the message"
 [ "$(count_inbox_files "$T/inbox-dead")" = 1 ] || fail "DEAD-PROVIDER sends one inbox message"
 LANEWATCH_INBOX="$T/inbox-plain" bash "$LANEWATCH" --once "$plain_run" \

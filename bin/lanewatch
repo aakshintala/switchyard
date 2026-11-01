@@ -5,10 +5,12 @@
 # not re-wake; DONE-UNREAD <ids> means message the lane naming those jobs.
 # With LANEWATCH_INBOX set, those events are also sent to that inbox. Plain
 # SETTLED and STALL rows are stdout-only. The watcher never stops a lane.
-# The minute key mixes this clock with lanestat's age: clock skew or ssh latency
-# across a minute boundary can announce twice. Set DELEGATE_JOBS_DIR on the
-# watcher when lane job records live under a non-/tmp TMPDIR. Never read a
-# lane's fiber-<n>-pi.in: it is a FIFO. Silence means no new event, not failure.
+# The minute key mixes this clock with lanestat's age: clock skew, ssh latency,
+# or a new log write near a minute boundary can announce the same settle twice.
+# Every ssh, lanestat or inbox-send failure prints WATCH-ERROR. Set
+# DELEGATE_JOBS_DIR on the watcher when lane job records live under a non-/tmp
+# TMPDIR. Never read a lane's fiber-<n>-pi.in: it is a FIFO. Silence means no
+# new event, not failure.
 set -u
 
 ts() { date "+%Y-%m-%d %H:%M:%S %Z"; }

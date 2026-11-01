@@ -20,7 +20,8 @@
 # tool event or message_start followed it; abort, then resend with flywheel's
 # `pisend.sh wake` (not shipped here). A queued prompt means pi has an active
 # run and is not lost. DEAD-PROVIDER <provider>/<model>: <message> means the
-# last assistant message ended with an error and used no tokens; do not re-wake.
+# last agent_end assistant message had stopReason=error and
+# usage.totalTokens=0; do not re-wake.
 # `last=<tool>` accompanies WEDGED, PARK and LOOP;
 # its whitespace is replaced with underscores. PARK means the lane needs an
 # answer, LOOP leaves the decision to the orchestrator, and DONE-UNREAD <ids>
@@ -133,7 +134,6 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     our @open;
     our $settled;
     our $after_prompt;
-    our $dead_pending;
     our $dead;
     our $last_tool;
     our $question_line;
@@ -166,47 +166,56 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       @open = ();
       $settled = 1;
       $after_prompt = 0;
-      $dead = $dead_pending;
-      $dead_pending = undef;
     } elsif (/"type":"agent_start"/ || /"type":"auto_retry_start"/) {
-      $dead_pending = undef;
       $dead = undef;
-    } elsif (/"type":"auto_retry_end"/) {
-      if (/"success":true/) {
-        $dead_pending = undef;
-        $dead = undef;
-      } elsif (/"success":false/ && /"finalError":"((?:[^"\\]|\\.)*)"/) {
-        my $raw_error = $1;
-        my $message = "";
-        while (length $raw_error) {
-          if ($raw_error =~ s/^([^\\]+)//) {
-            $message .= $1;
-          } elsif ($raw_error =~ s/^\\(?:n|r|u000a|u000d).*$//i) {
-            last;
-          } elsif ($raw_error =~ s/^\\\\//) {
-            $message .= "\\";
-          } elsif ($raw_error =~ s/^\\"//) {
-            $message .= "\"";
-          } elsif ($raw_error =~ s/^\\t//) {
-            $message .= "\t";
-          } elsif ($raw_error =~ s/^\\(?:b|f)//) {
-            $message .= " ";
-          } elsif ($raw_error =~ s/^\\u000([0-9a-f])//i) {
-            $message .= chr(hex($1));
-          } elsif ($raw_error =~ s/^\\u[0-9a-f]{4}//i) {
-            next;
-          } elsif ($raw_error =~ s/^\\.//s) {
-            next;
-          }
-        }
-        $message =~ s/[\x00-\x1f\x7f]/ /g;
-        $message =~ s/\s+$//;
-        $message = substr($message, 0, 200);
-        $dead_pending = length($message) ? $message : "unknown";
+    } elsif (/"type"\s*:\s*"agent_end"/) {
+      $dead = undef;
+      my $assistant_start = -1;
+      while (/(?<!\\)"role"\s*:\s*"assistant"/g) {
+        $assistant_start = $-[0];
       }
-    } elsif (/"type":"response"/ && /"command":"prompt"/ && /"success":true/ && !/"(?:disposition|status)":"queued"/) {
+      pos($_) = 0;
+      if ($assistant_start >= 0) {
+        my $assistant = substr($_, $assistant_start);
+        my ($provider) = $assistant =~ /(?<!\\)"provider"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+        my ($model) = $assistant =~ /(?<!\\)"model"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+        my ($tokens) = $assistant =~ /(?<!\\)"usage"\s*:\s*\{[^}]*?"totalTokens"\s*:\s*(\d+)/;
+        my ($stop_reason) = $assistant =~ /(?<!\\)"stopReason"\s*:\s*"([^"\\]*)"/;
+        if (defined $tokens && $tokens == 0 && defined $stop_reason && $stop_reason eq "error") {
+          my ($raw_error) = $assistant =~ /(?<!\\)"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+          $raw_error = "" unless defined $raw_error;
+          my $message = "";
+          while (length $raw_error) {
+            if ($raw_error =~ s/^([^\\]+)//) {
+              $message .= $1;
+            } elsif ($raw_error =~ s/^\\(?:n|r|u000a|u000d).*$//i) {
+              last;
+            } elsif ($raw_error =~ s/^\\\\//) {
+              $message .= "\\";
+            } elsif ($raw_error =~ s/^\\"//) {
+              $message .= "\"";
+            } elsif ($raw_error =~ s/^\\t//) {
+              $message .= "\t";
+            } elsif ($raw_error =~ s/^\\(?:b|f)//) {
+              $message .= " ";
+            } elsif ($raw_error =~ s/^\\u000([0-9a-f])//i) {
+              $message .= chr(hex($1));
+            } elsif ($raw_error =~ s/^\\u[0-9a-f]{4}//i) {
+              next;
+            } elsif ($raw_error =~ s/^\\.//s) {
+              next;
+            }
+          }
+          $message =~ s/[\x00-\x1f\x7f]/ /g;
+          $message =~ s/\s+$//;
+          $provider = "unknown" unless defined $provider && length $provider;
+          $model = "unknown" unless defined $model && length $model;
+          $message = length($message) ? $message : "no output";
+          $dead = "$provider/$model: $message";
+        }
+      }
+    } elsif (/"type"\s*:\s*"response"/ && /"command"\s*:\s*"prompt"/ && /"success"\s*:\s*true/ && !/"(?:disposition|status)"\s*:\s*"queued"/) {
       $after_prompt = 1;
-      $dead_pending = undef;
       $dead = undef;
     } elsif (/"type":"message_start"/) {
       $dead = undef;
