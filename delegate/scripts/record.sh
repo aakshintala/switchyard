@@ -39,7 +39,6 @@ esac
 
 printf '%q ' "${argv[@]}" > "$out/$name.argv"; echo >> "$out/$name.argv"
 cd "$cwd" || exit 2
-[ "$backend" = cursor ] && argv+=(-- "$prompt") && prompt=
 "${argv[@]}" < <(printf '%s' "$prompt") > "$out/$name.stdout" 2> "$out/$name.stderr" &
 pid=$!
 [ -n "${CANCEL_AFTER:-}" ] && sleep "$CANCEL_AFTER" && kill -TERM "$pid" 2>/dev/null
