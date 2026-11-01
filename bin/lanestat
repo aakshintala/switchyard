@@ -57,6 +57,7 @@ case $settled_max in
 esac
 
 now=$(date +%s)
+rows=0
 for pidfile in "$run"/fiber-*-pi.pid; do
   [ -f "$pidfile" ] || continue
   n=${pidfile##*/}
@@ -83,16 +84,36 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     mtime=$(perl -e 'print ((stat $ARGV[0])[9])' "$jsonl" 2>/dev/null)
     [ -n "${mtime:-}" ] && age=$((now - mtime))
   fi
-  events=$(tail -c 20000000 "$jsonl" 2>/dev/null)
-  last=$(printf '%s\n' "$events" |
-    grep -o '"type":"tool_execution_start"\|"type":"tool_execution_end"\|"type":"agent_settled"' |
-    tail -1 | sed 's/.*:"//; s/"//')
-  tool=$(printf '%s\n' "$events" |
-    grep -o '"type":"tool_execution_start","toolCallId":"[^"]*","toolName":"[a-z_]*"' |
-    tail -1 | sed 's/.*"toolName":"//; s/"//')
-  case $last in
-    tool_execution_start) state="IN-TOOL ${tool:-?}" ;;
-    agent_settled)
+  event_state=$(tail -c 20000000 "$jsonl" 2>/dev/null | perl -ne '
+    our @open;
+    our $settled;
+    if (/"type":"tool_execution_start","toolCallId":"([^"]*)","toolName":"([^"]*)"/) {
+      push @open, [$1, $2];
+      $settled = 0;
+    } elsif (/"type":"tool_execution_end","toolCallId":"([^"]*)"/) {
+      for (my $i = $#open; $i >= 0; $i--) {
+        if ($open[$i]->[0] eq $1) {
+          splice @open, $i, 1;
+          $settled = 0;
+          last;
+        }
+      }
+    } elsif (/"type":"agent_settled"/) {
+      @open = ();
+      $settled = 1;
+    }
+    END {
+      if (@open) {
+        my $tool = $open[-1]->[1];
+        print "IN-TOOL $tool" . chr(10);
+      } elsif ($settled) {
+        print "SETTLED" . chr(10);
+      }
+    }
+  ')
+  case $event_state in
+    'IN-TOOL '*) state=$event_state ;;
+    SETTLED)
       if [ "$age" -gt "$settled_max" ]; then
         state=SETTLED-OLD
       else
@@ -108,4 +129,6 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       ;;
   esac
   printf '%-6s %-8s %-18s age=%-6s %s\n' "$n" "$pid" "$info" "$age" "$state"
+  rows=$((rows + 1))
 done
+[ "$rows" -gt 0 ] || printf 'lanestat: no live lanes in %s\n' "$run"
