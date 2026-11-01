@@ -495,25 +495,17 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "A6 bad verdict: $(he
 [ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "A6 round not 2"
 fi
 
-# B. Head drift from the fix job's own pushed commits is accepted.
-if want B; then
-setup_case b
-printf 'partial' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B CONCERNS round exited $?"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "B bad verdict: $(head -n 1 <<<"$out")"
-grep -q "DRIFT" <<<"$out" && fail "B printed DRIFT"
-expect_slot fix1
-[ "$(bash "$TKT_STATE" "$S" get head)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "B head not the worktree HEAD"
-fi
-
 # B1. A fix job CONCERNS continues to the gate and the verify, which gets the
-# concerns file as --context; the digest names the file. Nothing stops.
+# concerns file as --context; the digest names the file. Nothing stops, no drift.
 if want B1; then
 setup_case concerns-fix
 printf 'partial' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B1 exited $? (want 0): $(head -n 1 <<<"$out")"
 CF="$CDIR/run/switchyard-529-concerns-fix1.md"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "B1 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "DRIFT" <<<"$out" && fail "B1 printed DRIFT"
+expect_slot fix1
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "B1 head not the worktree HEAD"
 [ "$(sed -n '2p' <<<"$out")" = "head=$(git -C "$WT" rev-parse HEAD)" ] || fail "B1 digest line 2 is not head="
 grep -qxF "concerns=$CF" <<<"$out" || fail "B1 digest lacks concerns=$CF: $out"
 [ "$(bash "$TKT_STATE" "$S" get concerns.fix1)" = "$CF" ] || fail "B1 concerns.fix1 not stored"
@@ -535,6 +527,17 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "B2 bad verdict: $(he
 grep -q -- "--context" "$T/calls.log" && fail "B2 clean round sent stale context: $(cat "$T/calls.log")"
 grep -q "concerns=" <<<"$out" && fail "B2 clean round digest names stale concerns"
 expect_slot fix2
+fi
+
+# B3. A concerns round whose verify is incomplete still names the concerns file.
+if want B3; then
+setup_case concerns-incomplete
+printf 'partial' >"$T/jobmode"
+printf 'incomplete' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "B3 incomplete exited 0"
+[ "$?" = "1" ] || fail "B3 incomplete exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "B3 bad verdict: $(head -n 1 <<<"$out")"
+grep -qxF "concerns=$CDIR/run/switchyard-529-concerns-fix1.md" <<<"$out" || fail "B3 digest lacks concerns line"
 fi
 
 # C1. A PR head that does not descend from the state head still exits DRIFT.

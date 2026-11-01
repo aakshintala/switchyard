@@ -260,7 +260,7 @@ case "$fixline" in
   FIX-OK*) t set reviewed "$new_head"; write_findings "$tmp/verify.out"
     emit "FIX-OK reviewed=$new_head" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
   FIX-INCOMPLETE*) write_findings "$tmp/verify.out"; open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
-    if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" "$ci_note"; fi
-    emit "FIX-INCOMPLETE round=$round" 1 "$open" "$ci_note" ;;
+    if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
+    emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
   *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$tmp/verify.out")" ;;
 esac
