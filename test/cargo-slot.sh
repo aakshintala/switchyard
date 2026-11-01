@@ -6,12 +6,16 @@
 # substitution: a regular file cannot block a reader, so the FIFO is what makes
 # the readiness read wait for the line with no deadline. A waiter that exits
 # first gives that read EOF. Absence checks drain a reaped waiter's FIFO to EOF
-# and compare every line read; no test sleeps or polls.
+# and compare every line read. No test sleeps or polls: each wait is a blocking
+# read or a wait on a pid, and the watchdog bounds a hang. The dead-holder
+# tests pause the shim between its two dead-pid reads through the test-only
+# CARGO_SLOT_RECHECK_FIFO hook in bin/cargo-slot.
 # Not shown: that the waiting line prints once across several rescans. A shim
 # that printed on every rescan passes, because the suite releases a holder
-# right after the first line. Showing it needs a timed wait, which the suite
-# does not use. The suite proves only that a waiter takes a slot after a
-# release, which needs at least one rescan after the waiting line.
+# right after the first line. Showing it would need a timed wait across rescans,
+# which this suite does not have.
+# The suite proves only that a waiter takes a slot after a release, which needs
+# at least one rescan after the waiting line.
 set -uo pipefail
 
 # The suite re-execs itself into its own process group, so the watchdog can
@@ -67,8 +71,9 @@ ln -s "$SHIM" "$T/shims/cargo"
 
 # Fake real cargo. It logs its start, argc, argv and CARGO_SLOT_HELD into
 # $FAKE_DIR. FAKE_READ_STDIN=1 reads one stdin line. FAKE_HOLD=1 writes its
-# pid to $FAKE_DIR/up and blocks until $FAKE_DIR/go is written. Bash builtins
-# only, so no child inherits the lock fd.
+# pid to $FAKE_DIR/up and blocks until $FAKE_DIR/go is written. FAKE_DAEMON=1
+# starts a background child blocked on daemon.go; FAKE_SIGNAL sends the named
+# signal to the stub itself.
 cat >"$T/real/cargo" <<'FAKE'
 #!/usr/bin/env bash
 printf 'started\n' >"$FAKE_DIR/started"
@@ -81,9 +86,16 @@ if [ "${FAKE_READ_STDIN:-0}" = 1 ]; then
   IFS= read -r line || true
   printf 'stdin=%s\n' "${line-}" >"$FAKE_DIR/stdin"
 fi
+if [ "${FAKE_DAEMON:-0}" = 1 ]; then
+  ( IFS= read -r _ <"$FAKE_DIR/daemon.go" ) &
+  printf '%s\n' "$!" >"$FAKE_DIR/daemon.pid"
+fi
 if [ "${FAKE_HOLD:-0}" = 1 ]; then
   printf '%s\n' "$$" >"$FAKE_DIR/up"
   IFS= read -r _ <"$FAKE_DIR/go"
+fi
+if [ -n "${FAKE_SIGNAL:-}" ]; then
+  kill -s "$FAKE_SIGNAL" "$$"
 fi
 exit "${FAKE_EXIT:-0}"
 FAKE
@@ -518,6 +530,109 @@ rc=$?
 [ "$rc" = 0 ] || fail "build after a killed holder: exit $rc, want 0"
 [ -e "$K/slots/slot-1.lock" ] || fail "slot-1.lock missing after a killed holder"
 
+# A live lock on an inode with a dead recorded pid is reclaimed to a new file.
+# The hook pauses the waiter after its first dead-pid read. Releasing it without
+# a rewrite leaves the second read the same dead pid, so the lock is reclaimed.
+Q="$T/reclaim-dead"
+stage "$Q/h"
+stage "$Q/w"
+hold_slot "$Q/h" "$Q/slots" 1
+QH=$HOLD_PID
+# An out-of-range pid returns ESRCH without relying on process reaping or pid reuse.
+DEAD_PID=5000000
+printf '%s cargo build\n' "$DEAD_PID" >"$Q/slots/slot-1.lock"
+# Keep both peers open without blocking: notifications on 8, acknowledgements on 5.
+mkfifo "$Q/recheck" "$Q/recheck.ack" || fail "cannot stage recheck FIFOs"
+exec 8<>"$Q/recheck"
+exec 5<>"$Q/recheck.ack"
+spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" CARGO_SLOT_RECHECK_FIFO="$Q/recheck" FAKE_HOLD=1 -- build
+QW=$SPAWNED
+IFS= read -r -u 8 line
+[ "$line" = "stale $DEAD_PID" ] || fail "waiter reported [$line], want stale $DEAD_PID"
+printf 'go\n' >&5
+IFS= read -r _ <"$Q/w/up"
+[ -e "$Q/slots/slot-1.lock.stale-$DEAD_PID" ] ||
+  fail "dead holder's lock was not moved aside"
+release "$Q/w"
+wait "$QW"
+rc=$?
+[ "$rc" = 0 ] || fail "build after reclaiming a dead recorded holder: exit $rc, want 0"
+release "$Q/h"
+wait "$QH" 2>/dev/null
+
+# A live holder replaces a stale pid before the waiter's second dead-pid read.
+# The helper holds the slot flock throughout. The hook pauses the waiter after
+# its first dead-pid read; the helper rewrites its live pid; the test releases
+# the waiter, which must not reclaim.
+Q="$T/reclaim-race"
+stage "$Q/w"
+mkdir -p "$Q/slots"
+RACE_DEAD_PID=5000000
+printf '%s cargo build\n' "$RACE_DEAD_PID" >"$Q/slots/slot-1.lock"
+mkfifo "$Q/helper.out" "$Q/helper.in" "$Q/recheck" "$Q/recheck.ack" || fail "cannot stage reclaim-race FIFOs"
+exec 7<>"$Q/helper.out"
+exec 6<>"$Q/helper.in"
+# Open both hook peers before spawning; never read acknowledgements as notifications.
+exec 8<>"$Q/recheck"
+exec 5<>"$Q/recheck.ack"
+"$PY" -c '
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+out = open(sys.argv[2], "w")
+cmd = open(sys.argv[3])
+out.write("locked\n")
+out.flush()
+cmd.readline()
+os.ftruncate(fd, 0)
+os.lseek(fd, 0, os.SEEK_SET)
+os.write(fd, ("%d cargo build\n" % os.getpid()).encode())
+out.write("rewritten\n")
+out.flush()
+cmd.readline()
+' "$Q/slots/slot-1.lock" "$Q/helper.out" "$Q/helper.in" &
+QH=$!
+PIDS+=("$QH")
+IFS= read -r -u 7 line
+[ "$line" = locked ] || fail "reclaim-race helper reported [$line], want locked"
+spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" CARGO_SLOT_RECHECK_FIFO="$Q/recheck" -- build
+QW=$SPAWNED
+IFS= read -r -u 8 line
+[ "$line" = "stale $RACE_DEAD_PID" ] || fail "waiter reported [$line], want stale $RACE_DEAD_PID"
+printf 'rewrite\n' >&6
+IFS= read -r -u 7 line
+[ "$line" = rewritten ] || fail "reclaim-race helper reported [$line], want rewritten"
+printf 'go\n' >&5
+expect_err_line "cargo-slot: waiting"
+[ "$(cat "$Q/slots/slot-1.lock")" = "$QH cargo build" ] ||
+  fail "live holder did not replace the stale pid in the lock file"
+[ ! -e "$Q/slots/slot-1.lock.stale-$RACE_DEAD_PID" ] ||
+  fail "live holder's lock was moved aside after its pid rewrite"
+[ ! -e "$Q/w/started" ] || fail "build started while the live holder held the slot"
+kill -TERM "$QW"
+wait "$QW" 2>/dev/null
+expect_waiter_log "$Q/w"
+printf 'exit\n' >&6
+wait "$QH" || fail "reclaim-race helper did not exit cleanly"
+
+# A live recorded pid remains in place and the waiter continues to wait.
+Q="$T/reclaim-live"
+stage "$Q/h"
+stage "$Q/w"
+hold_slot "$Q/h" "$Q/slots" 1
+QH=$HOLD_PID
+spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" -- build
+QW=$SPAWNED
+expect_err_line "cargo-slot: waiting"
+[ ! -e "$Q/slots/slot-1.lock.stale-$QH" ] ||
+  fail "live recorded holder's lock was moved aside"
+[ ! -e "$Q/w/started" ] || fail "build started while the recorded holder was alive"
+kill -TERM "$QW"
+wait "$QW" 2>/dev/null
+expect_waiter_log "$Q/w"
+release "$Q/h"
+wait "$QH" 2>/dev/null
+
 # Nested calls. A slot-taking run records CARGO_SLOT_HELD=1 in the fake; a
 # pass-through run records it absent; a nested run under a held slot runs at
 # once even while the slot is held.
@@ -736,6 +851,53 @@ guard_refused d "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOT_HE
 guard_refused j "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOTS=abc
 # k. GIT_* variables do not change the answer: GIT_DIR points nowhere.
 guard_refused k "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" GIT_DIR="$T/nogit"
+
+# Acceptance: a daemon child must not keep the slot after the cargo stub exits.
+D="$T/daemon"
+stage "$D/cargo"
+stage "$D/reacquire"
+mkfifo "$D/cargo/daemon.go" || fail "cannot stage daemon FIFO"
+spawn_quiet "$D/cargo" CARGO_SLOTS=1 CARGO_SLOT_DIR="$D/slots" \
+  FAKE_DAEMON=1 -- build
+DAEMON_CARGO=$SPAWNED
+wait "$DAEMON_CARGO"
+rc=$?
+[ "$rc" = 0 ] || fail "daemon stub: exit $rc, want 0"
+DAEMON_PID="$(cat "$D/cargo/daemon.pid")"
+kill -0 "$DAEMON_PID" 2>/dev/null || fail "daemon child did not outlive the cargo stub"
+exec 8<>"$D/reacquire/up"
+spawn "$D/reacquire" CARGO_SLOTS=1 CARGO_SLOT_DIR="$D/slots" FAKE_HOLD=1 -- build
+REACQUIRE=$SPAWNED
+# Blocks until the reacquiring build takes the slot; the watchdog bounds a hang.
+IFS= read -r -u 8 _
+release "$D/reacquire"
+wait "$REACQUIRE"
+rc=$?
+[ "$rc" = 0 ] || fail "build after daemon stub: exit $rc, want 0"
+kill -TERM "$DAEMON_PID" 2>/dev/null || true
+
+# Acceptance: the shim propagates an ordinary exit status and re-raises a
+# signal death with the conventional 128+N status.
+new_run slot-exit-status
+cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/status-slots" FAKE_EXIT=7 -- build
+rc=$?
+[ "$rc" = 7 ] || fail "slot child status: exit $rc, want 7"
+new_run slot-signal-status
+cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/signal-slots" FAKE_SIGNAL=TERM \
+  -- build 2>"$R/shim.err"
+rc=$?
+[ "$rc" = 143 ] || fail "slot child signal: exit $rc, want 143"
+
+# Acceptance: the lock file identifies the shim process and cargo argv while
+# the stub is still running.
+L="$T/holder-info"
+stage "$L"
+hold_slot "$L" "$L/slots" 1
+LOCK_HOLDER=$HOLD_PID
+[ "$(cat "$L/slots/slot-1.lock")" = "$LOCK_HOLDER cargo build" ] ||
+  fail "lock file does not name holder $LOCK_HOLDER and argv: $(cat "$L/slots/slot-1.lock")"
+release "$L"
+wait "$LOCK_HOLDER"
 
 echo "cargo-slot: all cases passed"
 cleanup

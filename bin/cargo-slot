@@ -88,6 +88,60 @@ def slot_dir():
     return os.path.join(home, ".cache", "agents", "cargo-slots")
 
 
+def dead_holder_pid(fd):
+    try:
+        fields = os.pread(fd, 128, 0).split()
+    except OSError:
+        return None
+    if not fields or not re.fullmatch(rb"[0-9]+", fields[0]):
+        return None
+    pid = int(fields[0])
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return pid
+    except (OSError, OverflowError):
+        return None
+    return None
+
+
+def reclaim_dead_slot(path, fd, pid):
+    # Serialize the path check and rename: another reclaimer may have already
+    # moved this inode and installed a new, live lock file at path.
+    guard_path = os.path.join(os.path.dirname(path), ".reclaim.lock")
+    try:
+        guard_fd = os.open(guard_path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as err:
+        fail(1, "cannot open %s: %s" % (guard_path, err.strerror))
+    try:
+        try:
+            fcntl.flock(guard_fd, fcntl.LOCK_EX)
+            opened = os.fstat(fd)
+            current = os.stat(path)
+            if (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino):
+                os.rename(path, "%s.stale-%d" % (path, pid))
+        except FileNotFoundError:
+            pass  # Another reclaimer already moved this inode.
+        except OSError as err:
+            fail(1, "cannot reclaim %s: %s" % (path, err.strerror))
+    finally:
+        os.close(guard_fd)
+
+
+def recheck_wait(pid):
+    # Test-only hook: with CARGO_SLOT_RECHECK_FIFO set, write "stale <pid>" to
+    # that FIFO and block on one line from <path>.ack instead of the 0.2 s
+    # re-check. Separate FIFOs prevent consuming our own notification.
+    fifo = os.environ.get("CARGO_SLOT_RECHECK_FIFO", "")
+    if fifo == "":
+        time.sleep(0.2)
+        return
+    with open(fifo, "w") as out:
+        out.write("stale %d\n" % pid)
+    with open(fifo + ".ack") as cmd:
+        cmd.readline()
+
+
 def acquire_slot(directory, n):
     # One LOCK_NB try per slot file per pass; a full pass that finds none
     # free prints the waiting line once, then sleeps 0.1 s and rescans.
@@ -101,6 +155,7 @@ def acquire_slot(directory, n):
         while True:
             for k in range(1, n + 1):
                 path = os.path.join(directory, "slot-%d.lock" % k)
+                # flock locks the inode: mv slot-k.lock slot-k.lock.aside frees a slot without touching any process.
                 try:
                     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
                 except OSError as err:
@@ -109,6 +164,11 @@ def acquire_slot(directory, n):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     return fd
                 except BlockingIOError:
+                    pid = dead_holder_pid(fd)
+                    if pid is not None:
+                        recheck_wait(pid)
+                        if dead_holder_pid(fd) == pid:
+                            reclaim_dead_slot(path, fd, pid)
                     os.close(fd)
                 except OSError as err:
                     os.close(fd)
@@ -162,6 +222,43 @@ def exec_real(real, args):
         fail(code, "cannot exec %s: %s" % (real, err.strerror))
 
 
+def write_holder(fd, args):
+    data = os.fsencode("%d %s\n" % (os.getpid(), " ".join(["cargo"] + args)))
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, data)
+
+
+def run_slot_child(real, args):
+    try:
+        pid = os.fork()
+    except OSError as err:
+        fail(1, "cannot fork cargo: %s" % err.strerror)
+    if pid == 0:
+        exec_real(real, args)
+
+    def forward(signum, _frame):
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, forward)
+    # Overcounting is deliberate: a hard-killed shim frees this slot while its
+    # cargo keeps running, and reclaim can race a waiter blocked on the old
+    # inode. Either can briefly exceed CARGO_SLOTS. Undercounting costs
+    # contention; a leaked slot can cost a lane hours.
+    _, status = os.waitpid(pid, 0)
+    code = os.waitstatus_to_exitcode(status)
+    if code < 0:
+        signum = -code
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+        return 128 - code
+    return code
+
+
 def main():
     args = sys.argv[1:]
     if subcommand(args) == "mutants": fail(1, "cargo mutants is banned for lanes; mutants run in CI, read verdicts with ~/.agents/bin/mutant-verdicts <run> --repo <owner/name>")
@@ -174,10 +271,15 @@ def main():
     if subcommand(args) in SLOT_SUBCOMMANDS and not held():
         n = slot_count()
         if n > 0:
-            # The fd stays inheritable so the exec'd cargo holds the slot.
+            # Python opens fds close-on-exec; the shim holds this lock across cargo.
             fd = acquire_slot(slot_dir(), n)
-            os.set_inheritable(fd, True)
+            write_holder(fd, args)
             os.environ["CARGO_SLOT_HELD"] = "1"
+            try:
+                status = run_slot_child(real, args)
+            finally:
+                os.close(fd)
+            sys.exit(status)
     exec_real(real, args)
 
 
