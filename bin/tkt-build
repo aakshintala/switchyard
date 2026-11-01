@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # tkt-build: implement steps 4-6, first round (lane, gate, mutants, review+map, findings).
 # spec_issue, when set, is passed to every round-0 review-pr start as --spec.
-# Usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
+# Usage: tkt-build <state> [--from lane|gate|review] [--no-verifier] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
 set -euo pipefail
-USAGE="usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]"
+USAGE="usage: tkt-build <state> [--from lane|gate|review] [--no-verifier] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]"
 usage() { echo "$USAGE" >&2; exit 2; }
 [ $# -ge 1 ] || usage
 case "$1" in -h|--help) echo "$USAGE"; exit 0 ;; esac
 state="$1"; shift
-from=lane; lane_model=""; review_model=""; overbuild_model=""
+from=lane; no_verifier=0; lane_model=""; review_model=""; overbuild_model=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --from) [ $# -ge 2 ] || usage; from="$2"; shift 2 ;;
+    --no-verifier) no_verifier=1; shift ;;
     --lane-model) [ $# -ge 2 ] || usage; lane_model="$2"; shift 2 ;;
     --review-model) [ $# -ge 2 ] || usage; review_model="$2"; shift 2 ;;
     --overbuild-model) [ $# -ge 2 ] || usage; overbuild_model="$2"; shift 2 ;;
@@ -89,6 +90,26 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
 fi
 base="$(plan_base "$plan" 2>/dev/null || true)"
 [ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan"
+verdict="$(tkt get plan_verdict 2>/dev/null || true)"
+verdict_base="$(tkt get plan_verdict_base 2>/dev/null || true)"
+if [ -z "$verdict" ] && [ "$no_verifier" -eq 1 ]; then
+  tkt set plan_verdict skipped
+  tkt set plan_verdict_base "$base"
+  verdict=skipped
+  verdict_base="$base"
+fi
+if { [ "$verdict" = ok ] || [ "$verdict" = skipped ]; } && [ "$verdict_base" = "$base" ]; then
+  :
+else
+  case "$verdict" in
+    "") verdict_refusal=none ;;
+    ok|skipped) verdict_refusal=stale ;;
+    *) verdict_refusal="$verdict" ;;
+  esac
+  [ -n "$verdict" ] || verdict=none
+  [ -n "$verdict_base" ] || verdict_base=none
+  emit "VERDICT-REFUSED verdict=$verdict_refusal" 1 "plan_verdict=$verdict plan_verdict_base=$verdict_base plan_base=$base"
+fi
 # Only the first backticked token of a Files line is its path column; later ones are
 # prose (`reads`, `/reload`) that git would take as pathspecs. plan-check and plan-sweep
 # read every token (lib/plan-tokens.sh) because they check coverage, not staleness.

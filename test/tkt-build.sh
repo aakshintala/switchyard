@@ -328,6 +328,8 @@ EOF
     printf 'model.map=%s\n' mm
     printf 'extra=%s\n' "$CDIR/extra.md"
     printf 'body_has=%s\n' 'Resolves #528' 'Co-authored with Test <t@t>'
+    printf 'plan_verdict=%s\n' ok
+    printf 'plan_verdict_base=%s\n' "$H"
   } >"$S"
   printf 'extra words\n' >"$CDIR/extra.md"
   printf 'done' >"$T/delegate-mode"
@@ -665,6 +667,7 @@ git -C "$WT" fetch -q origin
   printf 'Base: %s\n' "$(cat "$CDIR/main0")"
   printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
 } >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "stale: seed matching verdict base"
 run_build
 [ "$RC" -eq 1 ] || fail "stale exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "stale"
@@ -684,6 +687,7 @@ git -C "$WT" fetch -q origin
   printf 'Base: %s\n' "$(cat "$CDIR/main0")"
   printf '\n## Files\n\n- `src/a.txt` reads `src/b.txt` and `/reload`\n\n## Gate\n\n`true`\n'
 } >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "files-column: seed matching verdict base"
 run_build
 [ "$RC" -eq 1 ] || fail "files-column exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "files-column"
@@ -700,6 +704,7 @@ git -C "$WT" fetch -q origin
   printf 'Base: %s\n' "$(cat "$CDIR/main0")"
   printf '\n## Files\n\n- `src/a.txt` reads `src/b.txt`\n\n## Gate\n\n`true`\n'
 } >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "files-second: seed matching verdict base"
 run_build
 case "$(first_line)" in "TKT tkt-build STALE"*) fail "files-second: a later token is not a pathspec: $(first_line)";; esac
 
@@ -713,6 +718,7 @@ printf '%s' "$H" >"$T/prhead"
   printf 'Base: %s\n' "$H"
   printf '\n## Gate\n\n`true`\n'
 } >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$H" || fail "nofiles: seed matching verdict base"
 run_build
 [ "$RC" -eq 0 ] || fail "nofiles exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "nofiles"
@@ -727,6 +733,7 @@ printf '%s' "$H" >"$T/prhead"
   printf 'Base: `%s`\n' "$H"
   printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
 } >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$H" || fail "basetick: seed matching verdict base"
 run_build
 [ "$RC" -eq 0 ] || fail "basetick exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "basetick"
@@ -784,6 +791,7 @@ setup_case gitfail
   printf 'Base: %s\n' 0000000000000000000000000000000000000000
   printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
 } >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "gitfail: seed matching verdict base"
 run_build
 [ "$RC" -eq 2 ] || fail "gitfail exits 2 (rc=$RC)"
 expect_verdict "TKT tkt-build PRECONDITION git=failed log=*" "gitfail"
@@ -1462,5 +1470,80 @@ ffile="$(bash "$TKT_STATE" "$S" get findings)"
 grep -Fq "P3 mutant shards unread: run 101 head ${H:0:12}: " "$ffile" || fail "shards-unread-artifactscount: the artifacts parse failure is reported unread"
 grep -q "survived in CI" "$ffile" && fail "shards-unread-artifactscount: no survivor P2 without an artifacts count"
 grep -q "mutant shards unread" <<<"$OUT" || fail "shards-unread-artifactscount: the digest carries the unread note"
+
+# --- the stored verdict blocks a build before any job dispatch ---
+setup_case verdict-lines
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed LINES verdict"
+run_build
+[ "$RC" -eq 1 ] || fail "LINES verdict refusal exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "LINES verdict refusal"
+grep -q '^job|' "$T/calls.log" && fail "LINES verdict refusal dispatches no tkt-job"
+expect_state plan_verdict lines "LINES verdict refusal"
+expect_state plan_verdict_base "$H" "LINES verdict refusal"
+
+# --- PLAN OK and the fast-path skipped verdict both permit the build ---
+setup_case verdict-ok
+run_build
+[ "$RC" -eq 0 ] || fail "PLAN OK verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "PLAN OK verdict proceeds"
+setup_case verdict-skipped
+bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed skipped verdict"
+run_build
+[ "$RC" -eq 0 ] || fail "skipped verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "skipped verdict proceeds"
+
+# --- a missing verdict refuses, while --no-verifier fills only an empty pair ---
+setup_case verdict-none
+bash "$TKT_STATE" "$S" set plan_verdict "" || fail "clear plan verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "" || fail "clear plan verdict base"
+run_build
+[ "$RC" -eq 1 ] || fail "missing verdict refusal exits 1"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=none log=*" "missing verdict refusal"
+grep -q '^job|' "$T/calls.log" && fail "missing verdict refusal dispatches no tkt-job"
+setup_case verdict-no-verifier
+bash "$TKT_STATE" "$S" set plan_verdict "" || fail "clear no-verifier verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "" || fail "clear no-verifier verdict base"
+run_build --no-verifier
+[ "$RC" -eq 0 ] || fail "--no-verifier with an empty verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "--no-verifier with an empty verdict"
+expect_state plan_verdict skipped "--no-verifier stores skipped"
+expect_state plan_verdict_base "$H" "--no-verifier stores the base"
+setup_case verdict-no-verifier-lines
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed no-verifier LINES verdict"
+run_build --no-verifier
+[ "$RC" -eq 1 ] || fail "--no-verifier cannot replace LINES"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--no-verifier preserves LINES"
+grep -q '^job|' "$T/calls.log" && fail "--no-verifier over LINES dispatches no tkt-job"
+expect_state plan_verdict lines "--no-verifier preserves stored verdict"
+
+# --- accepted verdicts require the exact current plan base ---
+setup_case verdict-stale
+bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed mismatched verdict base"
+run_build
+[ "$RC" -eq 1 ] || fail "mismatched verdict base exits 1"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "mismatched verdict base"
+grep -q '^job|' "$T/calls.log" && fail "stale verdict dispatches no tkt-job"
+setup_case verdict-stale-flag
+bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed flagged mismatched verdict base"
+run_build --no-verifier
+[ "$RC" -eq 1 ] || fail "--no-verifier does not replace a stale pair"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "--no-verifier with stale verdict"
+expect_state plan_verdict ok "--no-verifier preserves stale verdict"
+
+# --- the verdict check runs before either --from lane split ---
+setup_case verdict-from-gate
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed --from gate LINES"
+run_build --from gate
+[ "$RC" -eq 1 ] || fail "--from gate verdict refusal exits 1"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--from gate verdict refusal"
+grep -q '^job|' "$T/calls.log" && fail "--from gate refusal dispatches no tkt-job"
+setup_case verdict-from-review
+bash "$TKT_STATE" "$S" set pr 7 || fail "seed review PR"
+bash "$TKT_STATE" "$S" set head "$H" || fail "seed review head"
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed --from review LINES"
+run_build --from review
+[ "$RC" -eq 1 ] || fail "--from review verdict refusal exits 1"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--from review verdict refusal"
+grep -q '^job|' "$T/calls.log" && fail "--from review refusal dispatches no tkt-job"
 
 echo "tkt-build: all cases passed"
