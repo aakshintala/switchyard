@@ -141,7 +141,6 @@ cycle() {
       key_kinds+=("$kind")
     done
     new_keys=()
-    new_key_kinds=()
     has_new=no
     deliver_new=no
     for ((i = 0; i < ${#keys[@]}; i++)); do
