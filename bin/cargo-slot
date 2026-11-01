@@ -130,14 +130,15 @@ def reclaim_dead_slot(path, fd, pid):
 
 def recheck_wait(pid):
     # Test-only hook: with CARGO_SLOT_RECHECK_FIFO set, write "stale <pid>" to
-    # that FIFO and block on one line from it, in place of the 0.2 s re-check.
+    # that FIFO and block on one line from <path>.ack instead of the 0.2 s
+    # re-check. Separate FIFOs prevent consuming our own notification.
     fifo = os.environ.get("CARGO_SLOT_RECHECK_FIFO", "")
     if fifo == "":
         time.sleep(0.2)
         return
     with open(fifo, "w") as out:
         out.write("stale %d\n" % pid)
-    with open(fifo) as cmd:
+    with open(fifo + ".ack") as cmd:
         cmd.readline()
 
 

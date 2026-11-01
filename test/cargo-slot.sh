@@ -541,13 +541,15 @@ QH=$HOLD_PID
 # An out-of-range pid returns ESRCH without relying on process reaping or pid reuse.
 DEAD_PID=5000000
 printf '%s cargo build\n' "$DEAD_PID" >"$Q/slots/slot-1.lock"
-mkfifo "$Q/recheck" || fail "cannot stage recheck FIFO"
+# Keep both peers open without blocking: notifications on 8, acknowledgements on 5.
+mkfifo "$Q/recheck" "$Q/recheck.ack" || fail "cannot stage recheck FIFOs"
 exec 8<>"$Q/recheck"
+exec 5<>"$Q/recheck.ack"
 spawn "$Q/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$Q/slots" CARGO_SLOT_RECHECK_FIFO="$Q/recheck" FAKE_HOLD=1 -- build
 QW=$SPAWNED
 IFS= read -r -u 8 line
 [ "$line" = "stale $DEAD_PID" ] || fail "waiter reported [$line], want stale $DEAD_PID"
-printf 'go\n' >&8
+printf 'go\n' >&5
 IFS= read -r _ <"$Q/w/up"
 [ -e "$Q/slots/slot-1.lock.stale-$DEAD_PID" ] ||
   fail "dead holder's lock was not moved aside"
@@ -567,10 +569,12 @@ stage "$Q/w"
 mkdir -p "$Q/slots"
 RACE_DEAD_PID=5000000
 printf '%s cargo build\n' "$RACE_DEAD_PID" >"$Q/slots/slot-1.lock"
-mkfifo "$Q/helper.out" "$Q/helper.in" "$Q/recheck" || fail "cannot stage reclaim-race FIFOs"
+mkfifo "$Q/helper.out" "$Q/helper.in" "$Q/recheck" "$Q/recheck.ack" || fail "cannot stage reclaim-race FIFOs"
 exec 7<>"$Q/helper.out"
 exec 6<>"$Q/helper.in"
+# Open both hook peers before spawning; never read acknowledgements as notifications.
 exec 8<>"$Q/recheck"
+exec 5<>"$Q/recheck.ack"
 "$PY" -c '
 import fcntl, os, sys
 fd = os.open(sys.argv[1], os.O_RDWR)
@@ -598,7 +602,7 @@ IFS= read -r -u 8 line
 printf 'rewrite\n' >&6
 IFS= read -r -u 7 line
 [ "$line" = rewritten ] || fail "reclaim-race helper reported [$line], want rewritten"
-printf 'go\n' >&8
+printf 'go\n' >&5
 expect_err_line "cargo-slot: waiting"
 [ "$(cat "$Q/slots/slot-1.lock")" = "$QH cargo build" ] ||
   fail "live holder did not replace the stale pid in the lock file"
