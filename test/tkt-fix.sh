@@ -110,7 +110,10 @@ chmod +x "$T/bin/review-pr"
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
-case " \$* " in *" headRefOid "*)
+case " \$* " in *" pr list "*)
+  cat "$T/prlist"
+  exit "\$(cat "$T/prlistrc")";;
+  *" headRefOid "*)
   content="\$(cat "$T/prhead")"
   case "\$content" in
     WT:*) git -C "\${content#WT:}" rev-parse HEAD;;
@@ -128,6 +131,8 @@ reset_stubs() {
   printf '0' >"$T/cimode"
   : >"$T/ciout"
   printf 'ok' >"$T/vermode"
+  printf '[]' >"$T/prlist"
+  printf '0' >"$T/prlistrc"
   : >"$T/calls.log"
 }
 
@@ -190,6 +195,10 @@ EOF
 
 expect_slot() {
   grep -q "job|.*--slot $1" "$T/calls.log" || fail "expected tkt-job slot $1 (log: $(cat "$T/calls.log"))"
+}
+
+drop_state_key() {
+  grep -v "^$1=" "$S" >"$S.tmp" && mv "$S.tmp" "$S"
 }
 
 # Selector for the new cases below: empty or unset runs all of them.
@@ -563,4 +572,113 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "C2 bad verdict: $(hea
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "C2 head moved"
 grep -q "job|" "$T/calls.log" && fail "C2 dispatched a job"
 fi
+
+# 10a. Missing PR and head are filled from the branch's open PR before dispatch.
+setup_case fill-both-ask
+drop_state_key pr
+drop_state_key head
+printf '[{"number":7,"headRefOid":"%s"}]' "$OLD" >"$T/prlist"
+printf 'ask' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "fill-both ASK exited 0"
+[ "$?" = "1" ] || fail "fill-both ASK exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=j1" || fail "fill-both bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get pr)" = "7" ] || fail "fill-both did not store PR number"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "fill-both did not store PR head"
+grep -Fx "gh|pr list --head tkt-529 --repo switchyard --state open --json number,headRefOid" "$T/calls.log" >/dev/null || fail "fill-both lookup args differ"
+
+# 10b. A filled PR and head work through a pushed fix round.
+setup_case fill-both-done
+printf 'fixed\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+git -C "$WT" push -q origin tkt-529
+NEW="$(git -C "$WT" rev-parse HEAD)"
+drop_state_key pr
+drop_state_key head
+printf '[{"number":7,"headRefOid":"%s"}]' "$NEW" >"$T/prlist"
+printf 'pushed' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "fill-both pushed round exited $?"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "fill-both pushed round bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get pr)" = "7" ] || fail "fill-both pushed round lost PR number"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "fill-both pushed round lost head"
+
+# 10c. Stored PR and head values suppress lookup and remain unchanged.
+setup_case fill-both-stored
+printf '[{"number":99,"headRefOid":"different"}]' >"$T/prlist"
+printf 'ask' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "stored-values ASK exited 0"
+[ "$?" = "1" ] || fail "stored-values ASK exited $?, want 1"
+[ "$(bash "$TKT_STATE" "$S" get pr)" = "7" ] || fail "stored-values PR changed"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "stored-values head changed"
+grep -q '^gh|pr list ' "$T/calls.log" && fail "stored values still triggered PR lookup"
+
+# 10d. A stored PR selects its matching entry, not the first entry.
+setup_case fill-head-by-pr
+drop_state_key head
+printf '[{"number":99,"headRefOid":"other"},{"number":7,"headRefOid":"%s"}]' "$OLD" >"$T/prlist"
+printf 'ask' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "head-by-PR ASK exited 0"
+[ "$?" = "1" ] || fail "head-by-PR ASK exited $?, want 1"
+[ "$(bash "$TKT_STATE" "$S" get pr)" = "7" ] || fail "head-by-PR changed stored PR"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "head-by-PR selected the wrong PR"
+
+# 10e. A missing PR is filled from the first entry without replacing head.
+setup_case fill-pr-by-head
+drop_state_key pr
+printf '[{"number":11,"headRefOid":"%s"},{"number":7,"headRefOid":"other"}]' "$OLD" >"$T/prlist"
+printf 'ask' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "PR-by-head ASK exited 0"
+[ "$?" = "1" ] || fail "PR-by-head ASK exited $?, want 1"
+[ "$(bash "$TKT_STATE" "$S" get pr)" = "11" ] || fail "PR-by-head did not select first PR"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "PR-by-head replaced stored head"
+
+# 10f. No open PR fails before dispatch or fixopen writes.
+setup_case fill-empty
+drop_state_key pr
+drop_state_key head
+printf '[]' >"$T/prlist"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "empty PR list exited 0"
+[ "$?" = "2" ] || fail "empty PR list exited $?, want 2"
+grep -q 'PRECONDITION missing=pr: no open PR for branch tkt-529 in switchyard' "$T/stderr" || fail "empty PR list error missing: $(cat "$T/stderr")"
+grep -q '^job|' "$T/calls.log" && fail "empty PR list dispatched a job"
+if bash "$TKT_STATE" "$S" get fixopen >/dev/null 2>&1; then fail "empty PR list wrote fixopen"; fi
+
+# 10g. A failed gh lookup is distinguished from an empty list.
+setup_case fill-gh-fail
+drop_state_key pr
+drop_state_key head
+printf '[{"number":7,"headRefOid":"%s"}]' "$OLD" >"$T/prlist"
+printf '1' >"$T/prlistrc"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "failed PR lookup exited 0"
+[ "$?" = "2" ] || fail "failed PR lookup exited $?, want 2"
+grep -q 'PRECONDITION missing=pr: cannot list PRs for branch tkt-529' "$T/stderr" || fail "failed PR lookup error missing: $(cat "$T/stderr")"
+grep -q '^job|' "$T/calls.log" && fail "failed PR lookup dispatched a job"
+
+# 10h. Invalid JSON is a failed lookup, not an empty PR list.
+setup_case fill-invalid-json
+drop_state_key pr
+drop_state_key head
+printf 'not-json' >"$T/prlist"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "invalid PR JSON exited 0"
+[ "$?" = "2" ] || fail "invalid PR JSON exited $?, want 2"
+grep -q 'PRECONDITION missing=pr: cannot list PRs for branch tkt-529' "$T/stderr" || fail "invalid PR JSON error missing: $(cat "$T/stderr")"
+grep -q '^job|' "$T/calls.log" && fail "invalid PR JSON dispatched a job"
+
+# 10i. A stored PR missing from the open list fails before dispatch.
+setup_case fill-no-match
+drop_state_key head
+printf '[{"number":99,"headRefOid":"other"}]' >"$T/prlist"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "non-matching PR list exited 0"
+[ "$?" = "2" ] || fail "non-matching PR list exited $?, want 2"
+grep -q '^job|' "$T/calls.log" && fail "non-matching PR list dispatched a job"
+
+# 10j. A matching entry with no head fails before dispatch.
+setup_case fill-empty-head
+drop_state_key head
+printf '[{"number":7,"headRefOid":""}]' >"$T/prlist"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "empty PR head exited 0"
+[ "$?" = "2" ] || fail "empty PR head exited $?, want 2"
+grep -q 'PRECONDITION missing=head:' "$T/stderr" || fail "empty PR head error missing: $(cat "$T/stderr")"
+grep -q '^job|' "$T/calls.log" && fail "empty PR head dispatched a job"
+
 echo "tkt-fix assertions passed"

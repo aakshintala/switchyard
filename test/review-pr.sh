@@ -124,6 +124,12 @@ gh() (
         if [ -e "$T/state/fail-draft" ]; then echo "fake gh: draft lookup failed" >&2; exit 1; fi
         if [ -e "$T/state/draft" ]; then echo true; else echo false; fi; exit 0
       fi
+      if [ "${5:-}" = "--json" ] && [ "${6:-}" = "body" ]; then
+        printf '%s\n' "$2" >>"$T/state/body-calls.txt"
+        if [ -e "$T/state/fail-body" ]; then echo "fake gh: body failed" >&2; exit 1; fi
+        if [ -f "$T/state/pr-body.txt" ]; then cat "$T/state/pr-body.txt"; else printf '\n'; fi
+        exit 0
+      fi
       h="$FAKE_SHA"
       if [ "$2" = "9" ]; then h="$SYMLINK_SHA"; fi
       if [ -f "$T/state/heads.txt" ]; then
@@ -149,6 +155,8 @@ gh() (
       esac; done
       printf '%s' "$pr" >"$T/state/comment-pr.txt"
       cp "$body" "$T/state/comment.md"
+      cat "$body" >>"$T/state/comments.log"
+      printf '\n' >>"$T/state/comments.log"
       echo "https://example.invalid/x/pull/$pr"
       ;;
     *) echo "fake gh: unknown $1" >&2; exit 2;;
@@ -203,7 +211,17 @@ write_record() {
 }
 
 reset_state() {
-  rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt"
+  for old_run in "$REVIEW_PR_RUN_ROOT"/review-pr.run.*; do
+    [ -d "$old_run" ] || continue
+    for old_wt in "$old_run"/wt-*; do
+      [ -d "$old_wt" ] || continue
+      git -C "$T/clone" worktree remove --force "$old_wt" >/dev/null 2>&1 || rm -rf "$old_wt"
+    done
+  done
+  git -C "$T/clone" worktree prune >/dev/null 2>&1 || true
+  rm -rf "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true
+  rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt" \
+    "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log"
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/issue-calls.txt"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
@@ -428,6 +446,57 @@ printf '1 body\n1 comments\n3 body\n3 comments\n2 body\n2 comments\n' >"$T/expec
 cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "ticket fetches preserve issue order and fetch body then comments"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "prefetch review collect exits 0"
 
+# --- case: a non-empty PR body reaches every reviewer as an untrusted claim
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'claim: 30-run load proof\n' >"$T/state/pr-body.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "non-empty body start exits 0"
+for role in standards spec overbuild; do
+  body_file="$(worktree_for "$role")/.review-context/pr-body.md"
+  [ -f "$body_file" ] || fail "$role worktree holds the PR body"
+  cmp -s "$T/state/pr-body.txt" "$body_file" || fail "$role worktree body matches the fetched body"
+  grep -Fq "The PR body is the lane's claim, not ground truth. Check evidence it cites; do not trust it." \
+    "$T/state/prompt-$role.md" || fail "$role prompt treats the PR body as an untrusted claim"
+  grep -Fq '.review-context/pr-body.md' "$T/state/prompt-$role.md" || fail "$role prompt names the PR body file"
+done
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "non-empty body collect exits 0"
+
+for body_kind in empty whitespace; do
+  reset_state
+  printf 'ci\tpass\n' >"$T/checks.txt"
+  if [ "$body_kind" = empty ]; then : >"$T/state/pr-body.txt"; else printf ' \t\n  \n' >"$T/state/pr-body.txt"; fi
+  write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+  start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || \
+    fail "$body_kind body start exits 0"
+  wt="$(worktree_for standards)/.review-context"
+  [ ! -e "$wt/pr-body.md" ] || fail "$body_kind body creates no PR body file"
+  ! grep -Fq "The PR body is the lane's claim" "$T/state/prompt-standards.md" || \
+    fail "$body_kind body adds no claim line"
+  bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "$body_kind body collect exits 0"
+done
+
+# --- case: a --context pr-body.md is disambiguated from the fetched PR body
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'claim from PR\n' >"$T/state/pr-body.txt"
+printf 'outside context\n' >"$T/pr-body.md"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M --context "$T/pr-body.md" \
+  >/dev/null 2>&1 || fail "body context collision start exits 0"
+wt="$(worktree_for standards)/.review-context"
+cmp -s "$T/state/pr-body.txt" "$wt/pr-body.md" || fail "the fetched body keeps its canonical path"
+cmp -s "$T/pr-body.md" "$wt/1-pr-body.md" || fail "the context file gets a disambiguated path"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "body context collision collect exits 0"
+
 # --- case: a checked-out .review-context symlink cannot redirect the copy
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
@@ -511,7 +580,7 @@ grep -Fq '.review-context/issue-886.md' "$T/state/prompt-overbuild.md" || \
 bash "$REVIEW" collect job-overbuild >/dev/null 2>&1 || fail "overbuild-only prefetch collect exits 0"
 
 # --- case: fetch failure stops before any worktree or job starts
-for failed_fetch in fail-diff empty-diff fail-issue fail-issue-comments; do
+for failed_fetch in fail-diff empty-diff fail-issue fail-issue-comments fail-body; do
   reset_state
   printf 'ci\tpass\n' >"$T/checks.txt"
   write_record spec DONE "VERDICT spec: APPROVE
@@ -524,6 +593,7 @@ STATUS: DONE" 0
   case "$failed_fetch" in
     fail-diff|empty-diff) grep -q 'could not fetch the diff of PR 7' <<<"$err" || fail "$failed_fetch names the PR diff";;
     fail-issue|fail-issue-comments) grep -q 'could not fetch ticket #1' <<<"$err" || fail "$failed_fetch names the ticket";;
+    fail-body) grep -q 'could not fetch the body of PR 7' <<<"$err" || fail "$failed_fetch names the PR body";;
   esac
   [ ! -e "$T/state/runs.txt" ] || fail "$failed_fetch starts no job"
   [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "$failed_fetch creates no worktree"
@@ -569,6 +639,7 @@ collect: review-pr collect job-verify" ] || fail "verify with $flag prints the v
   grep -Fxq "review-pr: $flag is not used with --verify; ignored" "$T/stderr-ignored.txt" || \
     fail "verify with $flag prints its ignored note"
   [ "$(wc -l <"$T/state/runs.txt" | tr -d ' ')" = "1" ] || fail "verify with $flag launches its job"
+  [ ! -e "$T/state/body-calls.txt" ] || fail "verify with $flag does not fetch the PR body"
   bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with $flag collects"
 done
 reset_state
@@ -592,12 +663,141 @@ write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
   --model M --overbuild-model M2 >/dev/null 2>&1 || fail "start exits 0"
+wt_standards="$(worktree_for standards)"
+wt_spec="$(worktree_for spec)"
+wt_overbuild="$(worktree_for overbuild)"
 out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" && fail "unfinished collect exits 1"
 rec="$TMPDIR/delegate-jobs/job-standards.json"
 grep -q "^UNFINISHED standards ERROR gate=none $rec reason: something broke mid-run$" <<<"$out" || fail "unfinished names role status gate record"
 grep -q "^CI $SHORT fail$" <<<"$out" || fail "failing CI line"
 [ "$(cat "$T/state/comment-pr.txt")" = "7" ] || fail "unfinished still posts the comment"
-[ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "0" ] || fail "unfinished still removes worktrees"
+[ -d "$wt_standards" ] || fail "unfinished keeps its worktree"
+[ ! -d "$wt_spec" ] || fail "finished spec worktree is removed"
+[ ! -d "$wt_overbuild" ] || fail "finished overbuild worktree is removed"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "1" ] || fail "unfinished keeps only its worktree"
+grep -Fxq 'resume: delegate resume job-standards' <<<"$out" || fail "unfinished prints its resume command"
+[ -f "$TMPDIR/review-pr/job-standards" ] || fail "unfinished state file is kept"
+[ ! -e "$TMPDIR/review-pr/job-spec" ] || fail "finished spec state file is removed"
+[ ! -e "$TMPDIR/review-pr/job-overbuild" ] || fail "finished overbuild state file is removed"
+run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-standards")"
+run_entries=("$run_dir"/*)
+[ "${#run_entries[@]}" = "1" ] && [ "${run_entries[0]}" = "$wt_standards" ] || fail "unfinished run keeps only its worktree"
+
+# --- case: one UNFINISHED job and one finished job keep only the resumable worktree
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec NEEDS_CONTEXT "Owner ruling needed before review can continue"
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards,spec --model M >/dev/null 2>&1 || \
+  fail "mixed completion start exits 0"
+wt_spec="$(worktree_for spec)"
+wt_standards="$(worktree_for standards)"
+run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-spec")"
+out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "mixed completion collect exits 1"
+rec="$TMPDIR/delegate-jobs/job-spec.json"
+grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "mixed completion reports unfinished spec"
+[ "$(grep -Fxc 'resume: delegate resume job-spec' <<<"$out")" = "1" ] || fail "mixed completion prints one spec resume command"
+! grep -q '^resume:.*job-standards$' <<<"$out" || fail "mixed completion prints no standards resume command"
+[ -d "$wt_spec" ] || fail "mixed completion keeps the unfinished worktree"
+[ ! -d "$wt_standards" ] || fail "mixed completion removes the finished worktree"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-spec')" = "1" ] || fail "mixed completion registers the unfinished worktree"
+! git -C "$T/clone" worktree list | grep -q 'wt-standards' || fail "mixed completion unregisters the finished worktree"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "mixed completion marks its posted comment"
+[ ! -e "$TMPDIR/review-pr/job-standards" ] || fail "mixed completion removes the finished state file"
+run_entries=("$run_dir"/*)
+[ "${#run_entries[@]}" = "1" ] && [ "${run_entries[0]}" = "$wt_spec" ] || fail "mixed completion run keeps only the unfinished worktree"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "mixed completion posts one comment"
+
+# --- case: re-collecting a kept id reads its state and never posts twice
+rm -f "$T/state/comment-pr.txt" "$T/state/comment.md"
+out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "re-collecting unfinished spec exits 1"
+grep -q '^COLLECTED job-standards ' <<<"$out" || fail "re-collect reprints the finished standards job"
+grep -Fxq "patch-id $EXPECTED_PID" <<<"$out" || fail "re-collect reads the kept run header"
+grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "re-collect reads the kept spec record"
+[ "$(grep -Fxc 'resume: delegate resume job-spec' <<<"$out")" = "1" ] || fail "re-collect prints one resume command"
+! grep -q '^UNFINISHED standards MISSING' <<<"$out" || fail "re-collect does not mark the finished job missing"
+[ ! -e "$T/state/comment-pr.txt" ] || fail "re-collect does not post another comment"
+[ -d "$wt_spec" ] || fail "re-collect keeps the unfinished worktree"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "re-collect keeps its posted marker"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+cp "$T/canned/spec.json" "$TMPDIR/delegate-jobs/job-spec.json"
+out="$(bash "$REVIEW" collect job-spec 2>/dev/null)" || fail "collecting the resumed finished spec exits 0"
+grep -Fxq 'VERDICT spec: APPROVE' <<<"$out" || fail "re-collect prints the resumed verdict"
+[ ! -e "$T/state/comment-pr.txt" ] || fail "collecting a posted kept job does not post again"
+[ ! -e "$T/state/comment.md" ] || fail "collecting a posted kept job creates no new comment body"
+[ ! -d "$wt_spec" ] || fail "finished resumed worktree is removed"
+[ ! -e "$TMPDIR/review-pr/job-spec" ] || fail "finished resumed state file is removed"
+[ ! -d "$run_dir" ] || fail "finished resumed run directory is removed"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "re-collect never duplicates the comment"
+
+# --- case: mixed collect posts only for the fresh run
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec NEEDS_CONTEXT "Owner ruling needed before review can continue"
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || \
+  fail "kept-run mixed fixture start exits 0"
+wt_spec="$(worktree_for spec)"
+out="$(bash "$REVIEW" collect job-spec 2>/dev/null)" && fail "kept-run mixed fixture collect exits 1"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "kept-run mixed fixture stores its posted marker"
+fresh_run_dir="$REVIEW_PR_RUN_ROOT/review-pr.run.fresh"
+mkdir -p "$fresh_run_dir" "$TMPDIR/review-pr" "$TMPDIR/delegate-jobs"
+fresh_wt="$fresh_run_dir/wt-spec-fresh"
+git -C "$T/clone" worktree add -q --detach "$fresh_wt" "$FAKE_SHA" || fail "fresh mixed worktree setup"
+{
+  printf 'role=spec\nrepo=O/N\npr=7\nsha=%s\npatch_id=fresh-group-pid\n' "$FAKE_SHA"
+  printf 'model=Fresh-M\naxes=spec\nclone=%s\nworktree=%s\nrun_dir=%s\n' "$T/clone" "$fresh_wt" "$fresh_run_dir"
+} >"$TMPDIR/review-pr/job-fresh"
+write_record spec DONE "VERDICT spec: APPROVE
+fresh group marker" 0
+cp "$T/canned/spec.json" "$TMPDIR/delegate-jobs/job-fresh.json"
+out="$(bash "$REVIEW" collect job-spec job-fresh 2>/dev/null)" && fail "mixed kept and fresh collect exits 1"
+grep -q '^UNFINISHED spec NEEDS_CONTEXT ' <<<"$out" || fail "mixed collect still reports the kept job"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "mixed collect posts one new comment"
+[ "$(grep -c 'fresh group marker' "$T/state/comments.log")" = "1" ] || fail "mixed collect posts the fresh job once"
+grep -Fq 'review-pr: patch-id fresh-group-pid' "$T/state/comments.log" || fail "mixed comment uses the fresh run header"
+[ -d "$wt_spec" ] || fail "mixed collect keeps the already-posted worktree"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "mixed collect preserves the kept posted marker"
+[ ! -d "$fresh_wt" ] || fail "mixed collect removes the finished fresh worktree"
+[ ! -e "$TMPDIR/review-pr/job-fresh" ] || fail "mixed collect removes the finished fresh state file"
+[ ! -d "$fresh_run_dir" ] || fail "mixed collect removes the fresh run directory"
+
+# --- case: partial kept re-collect preserves the unrequested sibling
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards ERROR "standards review stopped"
+write_record spec NEEDS_CONTEXT "UNREQUESTED-SIBLING-MARKER"
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || \
+  fail "partial kept fixture start exits 0"
+wt_standards="$(worktree_for standards)"
+run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-standards")"
+wt_spec="$run_dir/wt-spec"
+git -C "$T/clone" worktree add -q --detach "$wt_spec" "$FAKE_SHA" || fail "unrequested sibling worktree setup"
+{
+  printf 'role=spec\nrepo=O/N\npr=7\nsha=%s\npatch_id=%s\n' "$FAKE_SHA" "$EXPECTED_PID"
+  printf 'model=M\naxes=standards\nclone=%s\nworktree=%s\nrun_dir=%s\n' "$T/clone" "$wt_spec" "$run_dir"
+} >"$TMPDIR/review-pr/job-spec"
+cp "$T/canned/spec.json" "$TMPDIR/delegate-jobs/job-spec.json"
+out="$(bash "$REVIEW" collect job-standards 2>/dev/null)" && fail "partial kept fixture collect exits 1"
+grep -q '^UNFINISHED standards ERROR ' <<<"$out" || fail "partial kept fixture reports standards"
+[ -d "$wt_standards" ] && [ -d "$wt_spec" ] || fail "partial kept re-collect preserves the unrequested sibling"
+[ -f "$TMPDIR/review-pr/job-spec" ] || fail "partial kept re-collect preserves the sibling state"
+awk -F= '$1 != "posted" { print }' "$TMPDIR/review-pr/job-standards" >"$T/state/job-standards.tmp" && \
+  mv "$T/state/job-standards.tmp" "$TMPDIR/review-pr/job-standards"
+out="$(bash "$REVIEW" collect job-standards 2>/dev/null)" && fail "partial kept re-collect exits 1"
+grep -q '^UNFINISHED standards ERROR ' <<<"$out" || fail "partial kept re-collect reports standards"
+[ -d "$wt_standards" ] && [ -d "$wt_spec" ] || fail "partial kept re-collect preserves the unrequested sibling"
+[ -f "$TMPDIR/review-pr/job-spec" ] || fail "partial kept re-collect preserves the sibling state"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-standards" || fail "partial kept re-collect marks the requested job posted"
+! grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "partial kept re-collect does not mark the unrequested sibling posted"
+! grep -Fq 'UNREQUESTED-SIBLING-MARKER' "$T/state/comment.md" || \
+  fail "partial kept re-collect comment body names no unrequested job"
+! grep -Fq '## spec ' "$T/state/comment.md" || fail "partial kept re-collect comment has no unrequested sibling section"
+run_entries=("$run_dir"/*)
+[ "${#run_entries[@]}" = "2" ] && [ "${run_entries[0]}" = "$wt_spec" ] && \
+  [ "${run_entries[1]}" = "$wt_standards" ] || fail "partial kept re-collect leaves both worktrees registered"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "partial kept re-collect posts only requested ids"
 
 # --- case: an ERROR job's UNFINISHED line names the reason from the record
 reset_state
@@ -1836,22 +2036,42 @@ grep -Fxq "review-pr: --context file not found: $T/nope.md" <<<"$err" || fail "m
   fail "missing --context leaves no run dir"
 [ ! -e "$T/state/runs.txt" ] || fail "missing --context launches no job"
 
-# --- case: --context without --verify prints the ignore note
+# --- case: review --context appears in the reviewer brief; no-context brief stays unchanged
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards DONE "VERDICT standards: APPROVE
 STATUS: DONE" 0
-write_record spec DONE "VERDICT spec: APPROVE
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || \
+  fail "review without --context starts"
+cp "$T/state/prompt-standards.md" "$T/standards-baseline.md"
+! grep -Fq 'Context files outside the checkout' "$T/standards-baseline.md" || \
+  fail "review without --context adds no context section"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "review without --context collects"
+
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
 STATUS: DONE" 0
-write_record overbuild DONE "VERDICT: APPROVE
-STATUS: DONE" 0
-start_out="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
-  --model M --overbuild-model M2 --context "$T/findings.txt" 2>"$T/stderr-ctx.txt")" || fail "review with --context exits 0"
-grep -Fxq "review-pr: --context is only used with --verify; ignored" "$T/stderr-ctx.txt" || \
-  fail "review with --context prints its ignore note"
-[ "$(grep -c 'is only used with --verify; ignored$' "$T/stderr-ctx.txt" || true)" = "1" ] || \
-  fail "review with --context prints one ignore note"
-bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "review with --context collects"
+mkdir -p "$T/ctx-a" "$T/ctx-b"
+printf 'first review context\n' >"$T/ctx-a/plan.md"
+printf 'second review context\n' >"$T/ctx-b/plan.md"
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M \
+  --context "$T/ctx-a/plan.md" --context "$T/ctx-b/plan.md" \
+  >/dev/null 2>"$T/stderr-ctx.txt" || fail "review with --context starts"
+! grep -Fq 'only used with --verify; ignored' "$T/stderr-ctx.txt" || \
+  fail "review with --context is not ignored"
+wt="$(worktree_for standards)"
+[ -f "$wt/.review-context/plan.md" ] || fail "review --context copies first file"
+[ -f "$wt/.review-context/1-plan.md" ] || fail "review --context disambiguates repeated basenames"
+cmp -s "$T/ctx-a/plan.md" "$wt/.review-context/plan.md" || fail "review --context copies first file contents"
+cmp -s "$T/ctx-b/plan.md" "$wt/.review-context/1-plan.md" || fail "review --context copies second file contents"
+grep -Fq '.review-context/plan.md' "$T/state/prompt-standards.md" || fail "review brief names first context file"
+grep -Fq '.review-context/1-plan.md' "$T/state/prompt-standards.md" || fail "review brief names second context file"
+baseline_lines="$(wc -l <"$T/standards-baseline.md" | tr -d ' ')"
+head -n "$baseline_lines" "$T/state/prompt-standards.md" >"$T/standards-context-prefix.md"
+cmp -s "$T/standards-baseline.md" "$T/standards-context-prefix.md" || \
+  fail "review with --context leaves the existing brief unchanged"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "review with --context collects"
 
 # --- case: without REVIEW_PR_RUN_ROOT the run dir goes under XDG_CACHE_HOME, not TMPDIR
 reset_state
