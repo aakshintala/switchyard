@@ -244,6 +244,19 @@ reap_log() {
     >>"$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
 }
 
+# trim_reap_log: keep the last 1000 reap-log lines. This is best-effort, and
+# the temporary copy stays in the log directory so the replacement is atomic.
+trim_reap_log() {
+  local reap_file="$HOME/.cache/agents/review-pr-reap.log" reap_tmp
+  [ -f "$reap_file" ] || return 0
+  reap_tmp="$(mktemp "$(dirname "$reap_file")/.review-pr-reap.XXXXXX" 2>/dev/null)" || return 0
+  tail -n 1000 "$reap_file" >"$reap_tmp" 2>/dev/null &&
+    mv "$reap_tmp" "$reap_file" 2>/dev/null || {
+      rm -f "$reap_tmp" 2>/dev/null || true
+    }
+  return 0
+}
+
 # prune_stale_runs: remove worktrees, run dirs and state files for runs nobody
 # collected. A run is every state file sharing one run dir; it is pruned only
 # when none of its jobs is RUNNING and each of its state files meets one of
@@ -256,7 +269,10 @@ reap_log() {
 # then the guarded run dirs, then the state files.
 prune_stale_runs() {
   local sf all_list old_list stale_list done_list rd sib sib_rd sib_rec sib_status run_ok
-  [ -d "$state_dir" ] || return 0
+  if [ ! -d "$state_dir" ]; then
+    trim_reap_log
+    return 0
+  fi
   all_list="$(mktemp "${TMPDIR:-/tmp}/review-pr.prune-all.XXXXXX")"
   old_list="$(mktemp "${TMPDIR:-/tmp}/review-pr.prune-old.XXXXXX")"
   stale_list="$(mktemp "${TMPDIR:-/tmp}/review-pr.prune.XXXXXX")"
@@ -317,6 +333,7 @@ prune_stale_runs() {
     rm -f "$sf"
   done <"$stale_list"
   rm -f "$stale_list" "$all_list" "$old_list" "$done_list"
+  trim_reap_log
   return 0
 }
 
@@ -426,7 +443,11 @@ cmd_start() {
     mode="review"
     # --overbuild-model is required only when the overbuild axis runs.
     case ",$axes," in
-      *,overbuild,*) [ -n "$omodel" ] || usage;;
+      *,overbuild,*)
+        [ -n "$omodel" ] || {
+          echo "review-pr: --overbuild-model is required: the overbuild axis needs it. Pass --overbuild-model M2, or --axes standards,spec to skip overbuild." >&2
+          exit 2
+        };;
     esac
     # A PR with no ticket is its own spec: gh issue view accepts a PR number.
     # Otherwise SPEC defaults to the first --issue, never the PR number.
@@ -495,7 +516,6 @@ cmd_start() {
         exit 2
       fi
       head="$resolved"
-      sha="$resolved"
     fi
     # Wait for the API to report the full head the caller pushed; create
     # nothing until it does.
