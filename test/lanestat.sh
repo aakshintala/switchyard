@@ -278,11 +278,11 @@ new_case case-6 706
 printf '%s\n' \
   '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
   '{"type":"agent_settled"}' \
-  '{"type":"tool_execution_start","toolCallId":"B","toolName":"read"}' \
+  '{"type":"tool_execution_start","toolCallId":"B","toolName":"B"}' \
   >"$case_dir/fiber-706-pi.jsonl"
 run_stat "$case_dir" >"$T/case-6.out" 2>"$T/case-6.err"; rc=$?
 [ "$rc" = 0 ] || fail "case 6 exits 0 (got $rc)"
-assert_row 706 'IN-TOOL read$' "$(<"$T/case-6.out")"
+assert_row 706 'IN-TOOL B$' "$(<"$T/case-6.out")"
 
 new_case case-7 707
 printf '%s\n' \
