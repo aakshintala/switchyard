@@ -108,6 +108,11 @@ gh() (
         [ -e "$T/state/classic" ] || { echo "gh: Branch not protected (HTTP 404)" >&2; exit 1; }
         json="$(cat "$T/state/classic")"
         jq -r "$jq" <<<"$json";;
+      repos/O/N/actions/runs/*/jobs*)
+        run_id="${path#repos/O/N/actions/runs/}"; run_id="${run_id%%/*}"
+        [ -e "$T/state/run-jobs-$run_id.txt" ] || { echo "fake gh: cannot read jobs for run $run_id" >&2; exit 1; }
+        count="$(cat "$T/state/run-jobs-$run_id.txt")"
+        if [ "$count" = missing ]; then echo '{}'; else jq -n --arg count "$count" '{total_count: ($count | tonumber)}'; fi;;
       repos/O/N/actions/runs*)
         jq -c '{total_count: length, workflow_runs: .}' <<<"$(head -1 "$T/state/runs.txt")";;
       repos/O/N/commits/*/check-runs*)
@@ -201,7 +206,7 @@ reset_state() {
   rm -f "$T/state/default-branch" "$T/state/default-branch-fail" "$T/state/resolved-sha" "$T/state/ref-fail"
   rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail" "$T/state/not-found"
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
-  rm -f "$T/state"/run-*-head.txt "$T/state"/run-*-poll.txt "$T/state"/run-*-poll-fail
+  rm -f "$T/state"/run-jobs-*.txt "$T/state"/run-*-head.txt "$T/state"/run-*-poll.txt "$T/state"/run-*-poll-fail
   rm -f "$T/state"/issue-*-labels.txt "$T/state"/runlog-*.txt
   rm -f "$T/state/pr-checks.txt" "$T/state/pr-checks-rc" "$T/state/pr-view.json" "$T/state/pr-view-fail"
   : >"$T/state/gh-args.txt"
@@ -1045,6 +1050,19 @@ run_wait 7 --timeout 0
 [ "$CODE" = "124" ] || fail "rerun in flight stays pending (got $CODE): [$OUT]"
 grep -q "^pending: ci$" <<<"$OUT" || fail "rerun in flight names ci pending: [$OUT]"
 
+# Pass counts describe only required checks, not every check on the head:
+# two required passes, two non-required passes and a dropped duplicate run.
+reset_state
+set_heads "$A"; echo "$RULES_CI_LINT" >"$T/state/rules"
+touch "$T/state/keep-checks-across-runs"
+set_checks '[{"name":"ci","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51"},{"name":"lint","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52"},{"name":"unit","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/53"},{"name":"package","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/54"},{"name":"ci","bucket":"pending","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/6/job/61"}]'
+printf '%s\n' '[{"id":5,"name":"CI","event":"pull_request","status":"completed","run_attempt":1},{"id":6,"name":"CI","event":"pull_request","status":"queued","run_attempt":1}]' >"$T/state/runs.txt"
+run_wait 7
+[ "$CODE" = "0" ] || fail "required pass-count reproduction settles (got $CODE): [$OUT]"
+grep -Fxq "gh-ci: ${A:0:8} pending=0 passed=2 failing=0" "$T/stderr.txt" \
+  || fail "required passes count only ci and lint: [$(cat "$T/stderr.txt")]"
+! grep -q '/actions/runs/[0-9]*/jobs?' "$T/state/gh-args.txt" || fail "normal pass does not inspect workflow jobs"
+
 # --- case: a separate queued run does not hide the completed result (#476)
 # --- two runs of the same workflow and event on the head: the older
 # --- completed green (run_attempt 1), the newer queued (run_attempt 1).
@@ -1057,7 +1075,11 @@ echo '[{"id":5,"name":"CI","event":"pull_request","status":"completed","run_atte
 run_wait 7 --timeout 0
 [ "$CODE" = "0" ] || fail "separate queued run settles on the completed result (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} CI: pass" <<<"$OUT" || fail "separate queued run pass line: [$OUT]"
-[ "$(grep -c '^gh-ci: dropped run 6$' "$T/stderr.txt")" = "1" ] || fail "separate queued run id reported once on stderr: [$(cat "$T/stderr.txt")]"
+[ "$(grep -Fxc "gh-ci: ignoring run 6: its checks duplicate a completed run's" "$T/stderr.txt")" = "1" ] || fail "separate queued run id reported once on stderr: [$(cat "$T/stderr.txt")]"
+dropped_line="$(grep -F "gh-ci: ignoring run 6:" "$T/stderr.txt")"
+if printf '%s' "$dropped_line" | tr '[:upper:]' '[:lower:]' | grep -Eq 'fail|error'; then
+  fail "dropped-run line has no failure wording: [$dropped_line]"
+fi
 
 # --- cases: REST check-run conclusions map onto the buckets the verdict reads
 # the loop never calls gh pr view or gh pr checks (refused by the stand-in)
@@ -1698,4 +1720,176 @@ run_failures 123
 [ "$CODE" = "0" ] || fail "no-budget digest exits 0 (got $CODE): [$OUT]"
 grep -q "^budget:" <<<"$OUT" && fail "no budget block without budget lines: [$OUT]"
 
+# Never-started checks: bound, API failures, heads, and wait modes.
+export GH_CI_INTERVAL=30
+unset GH_CI_NO_JOBS_AFTER
+
+setup_missing_ci() {
+  reset_state
+  set_heads "$A"
+  echo "$RULES_CI" >"$T/state/rules"
+  set_checks '[]'
+}
+
+# Two minutes is exactly four sleeps at 30 s; a head with no workflow run
+# reports the missing required check but no jobless run.
+setup_missing_ci
+run_wait 7 --no-jobs-after 2
+[ "$CODE" = "4" ] || fail "missing required check exits 4 at two minutes (got $CODE): [$OUT]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "4" ] || fail "two-minute bound sleeps four times: [$(cat "$T/state/sleeps.txt")]"
+grep -Fxq 'gh-ci: check ci has no check run after 2 min; it never started' <<<"$OUT" || fail "missing check output: [$OUT]"
+! grep -q '^gh-ci: run ' <<<"$OUT" || fail "no workflow run is named when there are none: [$OUT]"
+
+# A zero-minute bound is evaluated on the first poll, without sleeping.
+setup_missing_ci
+run_wait 7 --no-jobs-after 0
+[ "$CODE" = "4" ] || fail "zero-minute bound fires on the first poll (got $CODE): [$OUT]"
+[ ! -e "$T/state/sleeps.txt" ] || fail "zero-minute bound does not sleep: [$(cat "$T/state/sleeps.txt")]"
+
+# Only a run with total_count exactly zero is named; a missing jobs response
+# does not name a run.
+setup_missing_ci
+echo '[{"id":9,"name":"CI"},{"id":8,"name":"CI"},{"id":7,"name":"CI"}]' >"$T/state/runs.txt"
+echo 0 >"$T/state/run-jobs-9.txt"
+echo 2 >"$T/state/run-jobs-8.txt"
+echo missing >"$T/state/run-jobs-7.txt"
+run_wait 7 --no-jobs-after 2
+[ "$CODE" = "4" ] || fail "jobless run exits 4 (got $CODE): [$OUT]"
+grep -Fxq 'gh-ci: run 9 has no jobs after 2 min; it never started' <<<"$OUT" || fail "zero-job run named: [$OUT]"
+! grep -q '^gh-ci: run 8 ' <<<"$OUT" || fail "run with jobs is not named: [$OUT]"
+! grep -q '^gh-ci: run 7 ' <<<"$OUT" || fail "run with missing total_count is not named: [$OUT]"
+
+setup_missing_ci
+echo '[{"id":9,"name":"CI"}]' >"$T/state/runs.txt"
+run_wait 7 --no-jobs-after 2
+[ "$CODE" = "4" ] || fail "jobs lookup failure does not block no-start exit (got $CODE): [$OUT]"
+[ "$(grep -c '^gh-ci: check ci ' <<<"$OUT")" = "1" ] || fail "jobs lookup failure leaves only the missing-check line: [$OUT]"
+! grep -q '^gh-ci: run ' <<<"$OUT" || fail "failed jobs lookup names no run: [$OUT]"
+
+# The environment sets the bound; the flag overrides it.
+setup_missing_ci
+GH_CI_NO_JOBS_AFTER=2 run_wait 7
+[ "$CODE" = "4" ] || fail "environment bound exits 4 (got $CODE): [$OUT]"
+grep -Fq 'after 2 min' <<<"$OUT" || fail "environment bound is reported: [$OUT]"
+setup_missing_ci
+GH_CI_NO_JOBS_AFTER=2 run_wait 7 --no-jobs-after 1
+[ "$CODE" = "4" ] || fail "flag overrides environment bound (got $CODE): [$OUT]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "2" ] || fail "one-minute flag sleeps twice: [$(cat "$T/state/sleeps.txt")]"
+grep -Fq 'after 1 min' <<<"$OUT" || fail "flag override is reported: [$OUT]"
+setup_missing_ci
+GH_CI_NO_JOBS_AFTER=invalid run_wait 7 --no-jobs-after 1
+[ "$CODE" = "4" ] || fail "flag overrides invalid environment bound (got $CODE): [$OUT]"
+
+# The default is ten minutes, tested with a fake 30 s poll interval.
+setup_missing_ci
+run_wait 7
+[ "$CODE" = "4" ] || fail "default bound exits 4 (got $CODE): [$OUT]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "20" ] || fail "default ten-minute bound sleeps twenty times: [$(wc -l <"$T/state/sleeps.txt")]"
+grep -Fq 'after 10 min' <<<"$OUT" || fail "default bound is reported as ten minutes: [$OUT]"
+
+# Polls just below the bound still time out; a poll just above it fires.
+setup_missing_ci
+export GH_CI_INTERVAL=59
+run_wait 7 --no-jobs-after 1 --timeout 59
+[ "$CODE" = "124" ] || fail "59 seconds is below a one-minute bound (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "below-bound poll does not report no-start: [$OUT]"
+setup_missing_ci
+export GH_CI_INTERVAL=7
+run_wait 7 --no-jobs-after 1
+[ "$CODE" = "4" ] || fail "63 seconds crosses a one-minute bound (got $CODE): [$OUT]"
+[ "$(grep -c '^7$' "$T/state/sleeps.txt")" = "9" ] || fail "one-minute bound fires on the ninth 7 s poll: [$(cat "$T/state/sleeps.txt")]"
+export GH_CI_INTERVAL=30
+
+for bad_bound in abc ''; do
+  setup_missing_ci
+  run_wait 7 --no-jobs-after "$bad_bound"
+  [ "$CODE" = "2" ] || fail "invalid no-jobs bound [$bad_bound] exits 2 (got $CODE): [$OUT]"
+  grep -q '^usage: gh-ci' "$T/stderr.txt" || fail "invalid no-jobs bound prints usage: [$(cat "$T/stderr.txt")]"
+done
+setup_missing_ci
+GH_CI_NO_JOBS_AFTER='' run_wait 7
+[ "$CODE" = "2" ] || fail "empty environment bound exits 2 (got $CODE): [$OUT]"
+grep -q '^usage: gh-ci' "$T/stderr.txt" || fail "empty environment bound prints usage: [$(cat "$T/stderr.txt")]"
+
+# Missing lint exits 4, while a required ci check that exists and stays pending
+# remains pending and reaches the ordinary timeout.
+reset_state
+set_heads "$A"; echo "$RULES_CI_LINT" >"$T/state/rules"
+set_checks '[{"name":"ci","bucket":"pending"}]'
+run_wait 7 --no-jobs-after 2
+[ "$CODE" = "4" ] || fail "one missing required name exits 4 (got $CODE): [$OUT]"
+grep -Fxq 'gh-ci: check lint has no check run after 2 min; it never started' <<<"$OUT" || fail "only missing lint named: [$OUT]"
+! grep -q 'check ci has no check run' <<<"$OUT" || fail "present pending ci is not missing: [$OUT]"
+
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"name":"ci","bucket":"pending"}]'
+run_wait 7 --no-jobs-after 2 --timeout 60
+[ "$CODE" = "124" ] || fail "present pending check reaches timeout, not no-start (got $CODE): [$OUT]"
+grep -q 'pending: ci' <<<"$OUT" || fail "present pending check stays named pending: [$OUT]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "2" ] || fail "short timeout sleeps twice: [$(cat "$T/state/sleeps.txt")]"
+
+setup_missing_ci
+run_wait 7 --no-jobs-after 2 --timeout 60
+[ "$CODE" = "124" ] || fail "short timeout wins before no-start bound (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "unreached bound does not report no-start: [$OUT]"
+
+# DIRTY grace sleeps count toward the bound even though checks are not polled.
+setup_missing_ci
+set_merge DIRTY DIRTY DIRTY CLEAN
+run_wait 7 --no-jobs-after 1
+[ "$CODE" = "4" ] || fail "DIRTY grace time counts toward no-start (got $CODE): [$OUT]"
+[ "$(grep -c '^5$' "$T/state/sleeps.txt")" = "3" ] || fail "three DIRTY grace polls sleep five seconds: [$(cat "$T/state/sleeps.txt")]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "2" ] || fail "DIRTY grace time leaves two 30-second polls: [$(cat "$T/state/sleeps.txt")]"
+
+# A new head restarts the bound at its first poll, after one prior interval.
+setup_missing_ci
+set_heads "$A" "$B"
+run_wait 7 --no-jobs-after 2
+[ "$CODE" = "4" ] || fail "head change eventually reaches no-start bound (got $CODE): [$OUT]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "5" ] || fail "head change restarts the bound after one prior sleep: [$(cat "$T/state/sleeps.txt")]"
+
+# A failed required check remains visible beside the missing check.
+reset_state
+set_heads "$A"; echo "$RULES_CI_LINT" >"$T/state/rules"
+set_checks '[{"name":"lint","bucket":"fail"}]'
+run_wait 7 --no-jobs-after 2
+[ "$CODE" = "4" ] || fail "missing check with another failure exits 4 (got $CODE): [$OUT]"
+grep -Fxq 'gh-ci: check ci has no check run after 2 min; it never started' <<<"$OUT" || fail "missing ci named beside failure: [$OUT]"
+grep -Fxq 'failing: lint' <<<"$OUT" || fail "failed lint remains visible: [$OUT]"
+
+# A failed check-runs call at the bound cannot make every required name look missing.
+setup_missing_ci
+set_checks '[]' '[]' '[]' '[]' FAIL
+run_wait 7 --no-jobs-after 2 --timeout 180
+[ "$CODE" = "124" ] || fail "failed check-runs call cannot trigger no-start (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "failed check-runs call has no missing-name output: [$OUT]"
+
+# Drafts, --job and --run waits do not use the no-start bound.
+setup_missing_ci
+touch "$T/state/draft"
+echo true >"$T/state/draft"
+run_wait 7 --no-jobs-after 0 --timeout 0
+[ "$CODE" = "124" ] || fail "draft empty checks do not trigger no-start (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "draft has no no-start output: [$OUT]"
+setup_missing_ci
+run_wait 7 --no-jobs-after 0 --job ci --timeout 0
+[ "$CODE" = "124" ] || fail "job wait does not trigger no-start (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "job wait has no no-start output: [$OUT]"
+setup_missing_ci
+set_run 9 "$A" '{"status":"in_progress"}'
+run_wait 7 --no-jobs-after 0 --run 9 --timeout 0
+[ "$CODE" = "124" ] || fail "run wait does not trigger no-start (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "run wait has no no-start output: [$OUT]"
+
+# A required check that appears before the bound passes normally.
+setup_missing_ci
+set_checks '[]' '[]' '[{"name":"ci","bucket":"pass"}]'
+run_wait 7 --no-jobs-after 2
+[ "$CODE" = "0" ] || fail "check appearing before bound passes (got $CODE): [$OUT]"
+grep -q 'CI: pass' <<<"$OUT" || fail "appearing check settles normally: [$OUT]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "2" ] || fail "appearing check is read after two sleeps: [$(cat "$T/state/sleeps.txt")]"
+
+export GH_CI_INTERVAL=7
+unset GH_CI_NO_JOBS_AFTER
 echo "gh-ci: all cases passed"
