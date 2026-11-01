@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for bin/gh-ci wait, using stand-in gh and sleep functions
+# Tests for bin/gh-ci wait and verdict, using stand-in gh and sleep functions
 # (no network). The wait loop reads REST only: the pull request
 # (repos/O/N/pulls/n), the head's workflow runs and its check runs. Fake gh
 # serves those from state files (last line sticky) and logs its args. Any
@@ -73,6 +73,11 @@ gh() (
       *) [ -n "$path" ] || path="$1"; shift;;
     esac; done
     case "$path" in
+      repos/O/N)
+        [ ! -e "$T/state/default-branch-fail" ] || { echo "gh: cannot read default branch (HTTP 403)" >&2; exit 1; }
+        default_branch="main"
+        [ ! -e "$T/state/default-branch" ] || default_branch="$(cat "$T/state/default-branch")"
+        jq -n --arg default_branch "$default_branch" '{default_branch: $default_branch}' | jq -r "$jq";;
       repos/O/N/pulls/7)
         [ ! -e "$T/state/view-fail" ] || { echo "gh: API rate limit exceeded (HTTP 403)" >&2; exit 1; }
         h="$(head -1 "$T/state/heads.txt")"; m=CLEAN
@@ -93,11 +98,12 @@ gh() (
         jq -n --arg sha "$h" --arg m "$m" --argjson draft "$draft" \
           '{head: {sha: $sha}, mergeable_state: $m, draft: $draft, base: {ref: "main"}}' \
           | jq -r "$jq";;
-      repos/O/N/rules/branches/main)
+      repos/O/N/rules/branches/main|repos/O/N/rules/branches/trunk)
         [ ! -e "$T/state/rules-fail" ] || { echo "gh: forbidden (HTTP 403)" >&2; exit 1; }
         json="$(cat "$T/state/rules" 2>/dev/null || echo '[]')"
         jq -r "$jq" <<<"$json";;
-      repos/O/N/branches/main/protection/required_status_checks)
+      repos/O/N/branches/main/protection/required_status_checks|repos/O/N/branches/trunk/protection/required_status_checks)
+        [ ! -e "$T/state/classic-fail" ] || { echo "gh: forbidden (HTTP 403)" >&2; exit 1; }
         [ -e "$T/state/classic" ] || { echo "gh: Branch not protected (HTTP 404)" >&2; exit 1; }
         json="$(cat "$T/state/classic")"
         jq -r "$jq" <<<"$json";;
@@ -113,6 +119,15 @@ gh() (
           fi;;
         esac
         jq -c '{total_count: length, check_runs: .}' <<<"$line";;
+      repos/O/N/commits/*)
+        ref="${path#repos/O/N/commits/}"
+        case "$ref" in
+          missing) echo "gh: Not Found (HTTP 404)" >&2; exit 1;;
+          nope) echo "gh: No commit found for SHA: nope (HTTP 422)" >&2; exit 1;;
+          *[!0-9a-fA-F]*|'' ) jq -n --arg sha "$A" '$sha' | jq -r "$jq";;
+          *) [ "${#ref}" -eq 40 ] || { echo "gh: No commit found for SHA: $ref (HTTP 422)" >&2; exit 1; }
+             jq -n --arg sha "$ref" '$sha' | jq -r "$jq";;
+        esac;;
       *) echo "fake gh: unknown api $path" >&2; exit 2;;
     esac
     exit 0
@@ -178,7 +193,8 @@ export -f gh sleep
 
 reset_state() {
   rm -f "$T/state/sleeps.txt" "$T/state/gh-args.txt" "$T/state/banned.txt" "$T/state/merge-state.txt" "$T/state/view-fail" "$T/state/keep-checks-across-runs"
-  rm -f "$T/state/heads.txt" "$T/state/checks.txt" "$T/state/runs.txt" "$T/state/rules" "$T/state/rules-fail" "$T/state/classic" "$T/state/draft"
+  rm -f "$T/state/heads.txt" "$T/state/checks.txt" "$T/state/runs.txt" "$T/state/rules" "$T/state/rules-fail" "$T/state/classic" "$T/state/classic-fail" "$T/state/draft"
+  rm -f "$T/state/default-branch" "$T/state/default-branch-fail"
   rm -f "$T/state/runs.json" "$T/state/runs-fail" "$T/state/jobs-fail" "$T/state/not-found"
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
   rm -f "$T/state"/run-*-head.txt "$T/state"/run-*-poll.txt "$T/state"/run-*-poll-fail
@@ -234,6 +250,9 @@ OUT=""; CODE=0
 run_wait() {
   OUT="$(bash "$GHCI" wait "$@" 2>"$T/stderr.txt")"; CODE=$?
   [ ! -s "$T/state/banned.txt" ] || fail "wait called gh pr view or gh pr checks: [$(cat "$T/state/banned.txt")]"
+}
+run_verdict() {
+  OUT="$(bash "$GHCI" verdict "$@" --repo "$GH_CI_REPO" 2>"$T/stderr.txt")"; CODE=$?
 }
 
 RULES_CI='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]'
