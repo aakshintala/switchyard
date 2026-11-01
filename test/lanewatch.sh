@@ -152,7 +152,11 @@ cat >"$T/stub/ssh" <<'STUB'
 printf '%s\n' "$@" >"$SSH_ARGS_FILE"
 cat >"$SSH_STDIN_FILE"
 # The failed command's partial output must be discarded with the error.
-printf '222      222      S 01:23 age=5 SETTLED\n'
+if [ -n "${SSH_OUTPUT:-}" ]; then
+  printf '%s\n' "$SSH_OUTPUT"
+else
+  printf '222      222      S 01:23 age=5 SETTLED\n'
+fi
 if [ "$SSH_MODE" = fail ]; then
   exit 255
 fi
@@ -193,5 +197,218 @@ bash "$LANEWATCH" --once >"$T/once-only.out" 2>"$T/once-only.err"; rc=$?
 [ "$rc" = 2 ] || fail "--once without run dir exits 2 (got $rc)"
 bash "$LANEWATCH" --once "$T/run" box.example extra >"$T/extra.out" 2>"$T/extra.err"; rc=$?
 [ "$rc" = 2 ] || fail "extra argument exits 2 (got $rc)"
+
+watch_lane() {
+  local run_dir=$1 lane_pid=$2
+  mkdir -p "$run_dir"
+  printf '%s\n' "$lane_pid" >"$run_dir/fiber-$lane_pid-pi.pid"
+  printf 'pi\n' >"$T/ps/$lane_pid.comm"
+  printf 'S 00:01\n' >"$T/ps/$lane_pid.info"
+  : >"$run_dir/fiber-$lane_pid-pi.jsonl"
+}
+watch_ruling() {
+  local run_dir=$1 lane_pid=$2 epoch=$3
+  printf 'ruling fixture\n' >"$run_dir/switchyard-$lane_pid-ruling-1.md"
+  set_minute_mtime "$run_dir/switchyard-$lane_pid-ruling-1.md" "$epoch"
+}
+watch_message() {
+  local file=$1 timestamp=$2 text=$3
+  printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%s"}],"timestamp":%s}}\n' \
+    "$text" "$timestamp" >>"$file"
+}
+count_inbox_files() {
+  [ -d "$1" ] || { printf '0\n'; return; }
+  find "$1" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' '
+}
+
+# PARK, LOOP, WEDGED and DEAD-PROVIDER are sent to the inbox; other rows stay stdout-only.
+events="$T/events"
+answered="$T/answered"
+loop_run="$T/loop-events"
+wedged_run="$T/wedged-events"
+dead_run="$T/dead-events"
+plain_run="$T/plain-events"
+watch_lane "$events" 2001
+printf '%s\n' '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}' \
+  >"$events/fiber-2001-pi.jsonl"
+watch_message "$events/fiber-2001-pi.jsonl" 1700000200000 'Which?'
+printf '{"type":"agent_settled"}\n' >>"$events/fiber-2001-pi.jsonl"
+watch_ruling "$events" 2001 1700000100
+set_minute_mtime "$events/fiber-2001-pi.jsonl" "$settle_minute"
+watch_lane "$answered" 2002
+watch_message "$answered/fiber-2002-pi.jsonl" 1700000000000 'Which?'
+printf '{"type":"agent_settled"}\n' >>"$answered/fiber-2002-pi.jsonl"
+watch_ruling "$answered" 2002 1700000001
+set_minute_mtime "$answered/fiber-2002-pi.jsonl" "$settle_minute"
+watch_repo="$T/watch-worktree"
+mkdir -p "$watch_repo"
+git -C "$watch_repo" init -q || fail "initialize watcher worktree fixture"
+git -C "$watch_repo" config user.name 'Switchyard Test' || fail "configure watcher worktree"
+git -C "$watch_repo" config user.email 'switchyard-test@example.invalid' || fail "configure watcher worktree"
+printf 'fixture\n' >"$watch_repo/file"
+git -C "$watch_repo" add file || fail "add watcher worktree fixture"
+GIT_AUTHOR_DATE='@1700000100 +0000' GIT_COMMITTER_DATE='@1700000100 +0000' \
+  git -C "$watch_repo" commit -q -m fixture </dev/null || fail "commit watcher worktree fixture"
+watch_lane "$loop_run" 2003
+watch_message "$loop_run/fiber-2003-pi.jsonl" 1700000200000 'No question.'
+printf '%s\n' '{"type":"agent_settled"}' '{"type":"agent_settled"}' \
+  >>"$loop_run/fiber-2003-pi.jsonl"
+watch_ruling "$loop_run" 2003 1700000100
+printf 'worktree=%s\n' "$watch_repo" >"$loop_run/switchyard-2003.state"
+set_minute_mtime "$loop_run/fiber-2003-pi.jsonl" "$settle_minute"
+watch_lane "$wedged_run" 2004
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  >"$wedged_run/fiber-2004-pi.jsonl"
+set_minute_mtime "$wedged_run/fiber-2004-pi.jsonl" "$settle_minute"
+watch_lane "$dead_run" 2005
+printf '%s\n' \
+  '{"type":"auto_retry_end","success":false,"finalError":"provider PARK LOOP SETTLED"}' \
+  '{"type":"agent_settled"}' \
+  >"$dead_run/fiber-2005-pi.jsonl"
+set_minute_mtime "$dead_run/fiber-2005-pi.jsonl" "$settle_minute"
+watch_lane "$plain_run" 2006
+printf '{"type":"agent_settled"}\n' >"$plain_run/fiber-2006-pi.jsonl"
+set_minute_mtime "$plain_run/fiber-2006-pi.jsonl" "$settle_minute"
+
+LANEWATCH_INBOX="$T/inbox-park" bash "$LANEWATCH" --once "$events" >"$T/park-event.out" 2>"$T/park-event.err"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [^ ]+ local lane 2001 .*age=[0-9]+.*SETTLED PARK last=bash$' "$T/park-event.out" \
+  || fail "PARK row names lane, last tool and age: [$(<"$T/park-event.out")]"
+[ "$(count_inbox_files "$T/inbox-park")" = 1 ] || fail "PARK sends one inbox message"
+grep -q 'local lane 2001 .*age=.*SETTLED PARK last=bash' "$T/inbox-park"/*.md \
+  || fail "PARK inbox body is the dated lane row"
+LANEWATCH_INBOX="$T/inbox-answered" bash "$LANEWATCH" --once "$answered" \
+  >"$T/answered-event.out" 2>"$T/answered-event.err"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [^ ]+ local lane 2002 .*SETTLED$' "$T/answered-event.out" \
+  || fail "answered PARK leaves a plain settled row"
+if grep -q 'PARK' "$T/answered-event.out"; then fail "answered PARK is not announced"; fi
+[ ! -e "$T/inbox-answered" ] || fail "answered PARK sends no inbox message"
+LANEWATCH_INBOX="$T/inbox-loop" LANEWATCH_INTERVAL=0 SLEEP_LOG="$T/loop-sleeps" \
+  SLEEP_COUNT_FILE="$T/loop-sleep-count" bash "$LANEWATCH" "$loop_run" \
+  >"$T/loop-event.out" 2>"$T/loop-event.err"
+[ "$(count_inbox_files "$T/inbox-loop")" = 1 ] || fail "LOOP sends one inbox message"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [^ ]+ local lane 2003 .*SETTLED LOOP last=none$' "$T/loop-event.out" \
+  || fail "LOOP is announced once and does not stop the lane"
+[ "$(PATH="$T/stub:$PATH" ps -o comm= -p 2003)" = pi ] || fail "LOOP leaves the lane process stub untouched"
+sh "$LANESTAT" "$loop_run" >"$T/loop-next.out"
+grep -Eq '^2003[[:space:]].*SETTLED LOOP last=none$' "$T/loop-next.out" \
+  || fail "LOOP lane still appears on the next lanestat cycle"
+LANEWATCH_INBOX="$T/inbox-wedged" bash "$LANEWATCH" --once "$wedged_run" \
+  >"$T/wedged-event.out" 2>"$T/wedged-event.err"
+[ "$(count_inbox_files "$T/inbox-wedged")" = 1 ] || fail "WEDGED sends one inbox message"
+LANEWATCH_INBOX="$T/inbox-dead" bash "$LANEWATCH" --once "$dead_run" \
+  >"$T/dead-event.out" 2>"$T/dead-event.err"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [^ ]+ local lane 2005 .*DEAD-PROVIDER provider PARK LOOP SETTLED$' "$T/dead-event.out" \
+  || fail "DEAD-PROVIDER forwards its whole row without token-scanning the message"
+[ "$(count_inbox_files "$T/inbox-dead")" = 1 ] || fail "DEAD-PROVIDER sends one inbox message"
+LANEWATCH_INBOX="$T/inbox-plain" bash "$LANEWATCH" --once "$plain_run" \
+  >"$T/plain-event.out" 2>"$T/plain-event.err"
+[ "$(wc -l <"$T/plain-event.out" | tr -d ' ')" = 1 ] || fail "plain SETTLED still prints"
+[ ! -e "$T/inbox-plain" ] || fail "plain SETTLED sends no inbox message"
+LANEWATCH_INBOX="$T/inbox-stall" bash "$LANEWATCH" --once "$T/stall" \
+  >"$T/stall-inbox.out" 2>"$T/stall-inbox.err"
+[ ! -e "$T/inbox-stall" ] || fail "STALL sends no inbox message"
+running_run="$T/running-events"
+watch_lane "$running_run" 2011
+printf '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}\n' \
+  >"$running_run/fiber-2011-pi.jsonl"
+LANEWATCH_INBOX="$T/inbox-running" bash "$LANEWATCH" --once "$running_run" \
+  >"$T/running-inbox.out" 2>"$T/running-inbox.err"
+[ ! -e "$T/inbox-running" ] || fail "running lanes send no inbox message"
+[ ! -s "$T/running-inbox.out" ] || fail "plain running lane prints no event"
+watch_lane "$T/combined" 2007
+printf '%s\n' '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}' \
+  >"$T/combined/fiber-2007-pi.jsonl"
+watch_message "$T/combined/fiber-2007-pi.jsonl" 1700000200000 'Which?'
+printf '%s\n' '{"type":"agent_settled"}' '{"type":"agent_settled"}' \
+  >>"$T/combined/fiber-2007-pi.jsonl"
+watch_ruling "$T/combined" 2007 1700000100
+printf 'worktree=%s\n' "$watch_repo" >"$T/combined/switchyard-2007.state"
+set_minute_mtime "$T/combined/fiber-2007-pi.jsonl" "$settle_minute"
+LANEWATCH_INBOX="$T/inbox-combined" bash "$LANEWATCH" --once "$T/combined" \
+  >"$T/combined-event.out" 2>"$T/combined-event.err"
+[ "$(wc -l <"$T/combined-event.out" | tr -d ' ')" = 1 ] \
+  || fail "PARK and LOOP on one row print one line"
+[ "$(count_inbox_files "$T/inbox-combined")" = 1 ] \
+  || fail "PARK and LOOP on one row send one inbox message"
+grep -q 'SETTLED PARK LOOP last=bash' "$T/inbox-combined"/*.md \
+  || fail "combined inbox row preserves all event tokens"
+LANEWATCH_INBOX='' bash "$LANEWATCH" --once "$wedged_run" \
+  >"$T/empty-inbox.out" 2>"$T/empty-inbox.err"
+[ ! -e "$T/empty-inbox" ] || fail "empty inbox setting creates no directory"
+grep -q 'local lane 2004 .*WEDGED' "$T/empty-inbox.out" \
+  || fail "empty inbox setting preserves stdout events"
+
+# A sorted id set deduplicates DONE-UNREAD independently of settle minutes.
+done_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+second_id=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+printf '{"status":"RUNNING"}\n' >"$DELEGATE_JOBS_DIR/$done_id.json"
+done_run="$T/done-events"
+watch_lane "$done_run" 2010
+printf '{"type":"tool_execution_end","toolCallId":"job","result":"%s"}\n' "$done_id" \
+  >"$done_run/fiber-2010-pi.jsonl"
+printf '{"type":"agent_settled"}\n' >>"$done_run/fiber-2010-pi.jsonl"
+set_minute_mtime "$done_run/fiber-2010-pi.jsonl" "$settle_minute"
+mkdir -p "$T/stub-events"
+cat >"$T/stub-events/sleep" <<'STUB'
+#!/bin/sh
+count=0
+if [ -f "$SLEEP_COUNT_FILE" ]; then
+  IFS= read -r count <"$SLEEP_COUNT_FILE" || [ -n "${count:-}" ]
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$SLEEP_COUNT_FILE"
+case $count in
+  1) printf '{"status":"DONE"}\n' >"$DONE_JOB1" ;;
+  3)
+    printf '{"status":"DONE"}\n' >"$DONE_JOB2"
+    printf '{"type":"tool_execution_end","toolCallId":"job2","result":"%s"}\n' "$DONE_ID2" \
+      >>"$DONE_JSONL"
+    ;;
+  4) perl -e 'utime($ARGV[1], $ARGV[1], $ARGV[0]) or die "utime: $!"' "$DONE_JSONL" "$DONE_NEXT_MINUTE" ;;
+esac
+if [ "$count" -eq 5 ]; then kill "$PPID"; fi
+STUB
+chmod +x "$T/stub-events/sleep"
+PATH="$T/stub-events:$T/stub:$PATH" LANEWATCH_INTERVAL=0 LANEWATCH_INBOX="$T/inbox-done" \
+  SLEEP_COUNT_FILE="$T/done-sleep-count" DONE_JOB1="$DELEGATE_JOBS_DIR/$done_id.json" \
+  DONE_JOB2="$DELEGATE_JOBS_DIR/$second_id.json" DONE_ID2="$second_id" \
+  DONE_JSONL="$done_run/fiber-2010-pi.jsonl" DONE_NEXT_MINUTE="$((settle_minute + 60))" \
+  bash "$LANEWATCH" "$done_run" >"$T/done-events.out" 2>"$T/done-events.err"
+[ "$(count_inbox_files "$T/inbox-done")" = 2 ] \
+  || fail "new finished job ids deliver once, unchanged set never redelivers"
+[ "$(grep -Ec 'local lane 2010 .*SETTLED$' "$T/done-events.out")" = 1 ] \
+  || fail "the first settled poll prints without DONE-UNREAD"
+[ "$(grep -c "DONE-UNREAD $done_id" "$T/done-events.out")" = 3 ] \
+  || fail "DONE-UNREAD prints on first finish, new id set and new settle minute"
+[ "$(grep -c "DONE-UNREAD $done_id $second_id" "$T/done-events.out")" = 2 ] \
+  || fail "the sorted second job set is repeated without another delivery"
+for message in "$T/inbox-done"/*.md; do
+  grep -q 'local lane 2010 .*age=.*DONE-UNREAD' "$message" \
+    || fail "DONE-UNREAD inbox body names its lane and age: [$message]"
+done
+
+# Token parsing never mistakes a tool name or DEAD-PROVIDER message for a kind.
+padded='321 321 S 01:23 age=40    SETTLED  PARK  last=bash'
+LANEWATCH_INBOX="$T/inbox-padded" SSH_MODE=success SSH_OUTPUT="$padded" \
+  SSH_ARGS_FILE="$T/ssh.args" SSH_STDIN_FILE="$T/ssh.stdin" \
+  bash "$LANEWATCH" --once "$remote_run" box.example >"$T/padded.out" 2>"$T/padded.err"
+[ "$(count_inbox_files "$T/inbox-padded")" = 1 ] || fail "padded row recognizes PARK"
+grep -q 'SETTLED  PARK  last=bash' "$T/inbox-padded"/*.md \
+  || fail "padded row body keeps its tokens"
+single='321 321 S 01:23 age=40 SETTLED PARK last=bash'
+LANEWATCH_INBOX="$T/inbox-single" SSH_MODE=success SSH_OUTPUT="$single" \
+  SSH_ARGS_FILE="$T/ssh.args" SSH_STDIN_FILE="$T/ssh.stdin" \
+  bash "$LANEWATCH" --once "$remote_run" box.example >"$T/single.out" 2>"$T/single.err"
+[ "$(count_inbox_files "$T/inbox-single")" = 1 ] || fail "single-space row recognizes PARK"
+no_tokens=$'321 321 S 01:23 age=40 IN-TOOL SETTLED\n322 322 S 01:23 age=40 SETTLED last=PARK\n323 323 S 01:23 age=40 SETTLED last=LOOP\n324 324 S 01:23 age=40 RUNNING last=LOOP'
+LANEWATCH_INBOX="$T/inbox-no-token" SSH_MODE=success SSH_OUTPUT="$no_tokens" \
+  SSH_ARGS_FILE="$T/ssh.args" SSH_STDIN_FILE="$T/ssh.stdin" \
+  bash "$LANEWATCH" --once "$remote_run" box.example >"$T/no-token.out" 2>"$T/no-token.err"
+[ "$(count_inbox_files "$T/inbox-no-token")" = 0 ] \
+  || fail "tool names never trigger PARK or LOOP delivery"
+[ "$(wc -l <"$T/no-token.out" | tr -d ' ')" = 2 ] \
+  || fail "only the two plain settled rows are recognized"
 
 echo 'lanewatch: all cases passed'
