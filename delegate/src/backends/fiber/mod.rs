@@ -1,22 +1,16 @@
-//! The fiber backend: binary, staged argv, stdin spawn, and stream-json parsing.
+//! The Fiber backend: supervised hub sessions and stream-json parsing.
 //!
-//! `fiber ask --model <ref> [--resume <sid>] -` reads the prompt from stdin and prints one JSON
-//! envelope per line. Every line carries `session_id` (Fiber mints it;
-//! delegate cannot choose it), and the last line is always `fiber_exited`:
-//! `exit_code`, `text` (the final answer), `questions`, `usage`, and `error`
-//! on failure.
-//! Unlike pi, Fiber's exit code is real and `fiber_exited.exit_code`
-//! repeats it: success is a clean exit with `exit_code == 0` and no error.
-//! A stream with no `fiber_exited` is a crash.
+//! Every job uses the Fiber hub: fresh jobs start a supervised session, and
+//! resumed jobs subscribe to their existing session. `fiber_exited` carries
+//! final text, questions, usage, and errors. A stream with no `fiber_exited`
+//! is a crash.
 
 pub(crate) mod doctor;
 pub mod hub;
 
-use super::types::{BackendResult, Event, ProgressSnapshotRaw, Spawned};
+use super::types::{BackendResult, Spawned};
 use crate::types::{JobSpec, Usage};
 use std::collections::HashMap;
-use std::process::Stdio;
-use std::sync::atomic::Ordering;
 
 const NO_RESULT: &str = "no result line";
 
@@ -48,8 +42,8 @@ pub(crate) fn model_reference(model: &str) -> &str {
     model.strip_prefix("fiber/").unwrap_or(model)
 }
 
-/// Staged argv for a run. Spawn lowers the staged prompt after `--` to the
-/// wire form `fiber ask --model <ref> [--resume <sid>] -`, which reads stdin.
+/// Staged argv for a run. The hub driver recovers the prompt after `--` and
+/// sends it as a `prompt` command.
 pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<String> {
     let reference = model_reference(model);
     let mut args = vec!["ask".into(), "--model".into(), reference.to_string()];
@@ -62,99 +56,36 @@ pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<Stri
     args
 }
 
-pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
-    let (wire_argv, prompt) = lower(&spec.argv);
-    let mut wired = spec.clone();
-    wired.argv = wire_argv;
-    let started = match start_child(&wired, Stdio::piped()) {
-        Ok(s) => s,
-        Err(msg) => return super::spawn_failed(&msg),
-    };
-    // Fiber mints the session id; it arrives in the stream, never in argv.
-    let pid = started.pid;
-    let reaped = started.reaped;
-    let reaped_k = std::sync::Arc::clone(&reaped);
-    let stdout = started.stdout;
-    let stderr = started.stderr;
-    let mut child = started.child;
-    Spawned {
-        kill: super::killer(pid, reaped_k),
-        session_id: None,
-        drive: Box::new(move |on| {
-            let stdin = child.stdin.take();
-            let writer = super::spawn_stdin_writer("fiber", stdin, prompt);
-            let mut state = FiberState::default();
-            let pumped = super::pump(
-                stdout,
-                stderr,
-                on,
-                move || {
-                    let clean = child.wait().map(|s| s.success()).unwrap_or(false);
-                    reaped.store(true, Ordering::SeqCst);
-                    clean
-                },
-                |line| {
-                    if handle_line(line, &mut state) {
-                        on(Event::Progress(ProgressSnapshotRaw {
-                            last_tool: state.last_tool.clone(),
-                            tokens_so_far: state.tokens_so_far(),
-                            last_assistant: state.last_assistant.clone(),
-                            files_touched: state.files_touched.clone(),
-                            phase: state.phase.clone(),
-                            session_id: state.session_id.clone(),
-                        }));
-                    }
-                },
-            );
-            let stdin_err = writer
-                .join()
-                .unwrap_or_else(|_| Some("fiber stdin writer panicked".into()));
-            finish(state, pumped.clean_exit, &pumped.stderr, stdin_err)
-        }),
+fn hub_request(spec: &JobSpec) -> hub::HubRequest {
+    let (staged_argv, prompt) = super::split_staged_prompt(&spec.argv);
+    let resume = staged_argv
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--resume").then(|| pair[1].clone()));
+    hub::HubRequest {
+        cwd: spec.cwd.clone(),
+        model: spec.model.clone(),
+        prompt,
+        bounds: hub::Bounds::default(),
+        resume,
     }
 }
 
-/// Same child setup as `super::start_child_with_stdin`, but keeps the spawn
-/// `io::Error` visible: a missing binary (`ErrorKind::NotFound`) names every
-/// source the resolver consults, while any other spawn failure keeps its text.
-/// debt: keep this duplicate until start_child_with_stdin preserves the spawn io::Error.
-fn start_child(spec: &JobSpec, stdin: Stdio) -> Result<super::Started, String> {
-    use std::os::unix::process::CommandExt;
-    let spawned = crate::util::captured_command(&spec.bin)
-        .map_err(|e| format!("cannot write cargo-mutants shim: {e}"))?
-        .args(&spec.argv)
-        .current_dir(&spec.cwd)
-        .stdin(stdin)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Own process group, so cancel also stops the shell commands the agent started.
-        .process_group(0)
-        .spawn();
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!(
-                "fiber binary not found: tried $FIBER_BIN, PATH, ~/.local/bin/fiber (selected {}): {e}",
-                spec.bin
-            ));
-        }
-        Err(e) => return Err(e.to_string()),
+pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
+    let request = hub_request(spec);
+    let session_id = request.resume.clone();
+    let socket = match hub::fiber_home().and_then(|home| hub::hub_socket_path(&home)) {
+        Ok(socket) => socket,
+        Err(message) => return super::spawn_failed(&message),
     };
-    let pid = child.id() as libc::pid_t;
-    // Set once the child is reaped, so a late kill can't hit a recycled pid.
-    let reaped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-    Ok(super::Started {
-        pid,
-        reaped,
-        child,
-        stdout,
-        stderr,
-    })
+    let hub::HubRun { control, drive } = hub::spawn_turn(request, socket);
+    Spawned {
+        kill: Box::new(move || control.kill()),
+        session_id,
+        drive,
+    }
 }
 
-/// Pure parse of a finished `fiber ask` stdout. The spawn driver uses [`finish`] too.
+/// Pure parse of recorded Fiber JSONL. Live runs use the hub driver.
 pub fn parse_stdout(stdout: &str, clean_exit: bool, stderr: &str) -> BackendResult {
     let mut state = FiberState::default();
     for line in stdout.split_inclusive('\n') {
@@ -574,13 +505,6 @@ fn finish(
     result
 }
 
-/// Lower the staged prompt into Fiber's final `-` stdin argument.
-fn lower(staging: &[String]) -> (Vec<String>, String) {
-    let (mut wire_argv, prompt) = super::split_staged_prompt(staging);
-    wire_argv.push("-".into());
-    (wire_argv, prompt)
-}
-
 /// Render `payload.questions` as a `Questions:` section. `Some` only when the
 /// field is a non-empty array after skipping null and blank entries; any
 /// other shape leaves the text exactly as it was. A string renders as
@@ -698,6 +622,15 @@ mod tests {
         (stdout, stderr)
     }
 
+    fn staged_spec(model: &str, session: Option<&str>, prompt: &str, cwd: &str) -> JobSpec {
+        crate::job::tests::spec_of(|spec| {
+            spec.model = model.to_string();
+            spec.cwd = cwd.to_string();
+            spec.bin = "/not/a/fiber/binary".to_string();
+            spec.argv = argv(model, session, prompt);
+        })
+    }
+
     #[test]
     fn fresh_run_has_no_resume_and_resume_reuses_the_session() {
         let fresh = argv("fiber/opencode-go/muse-spark-1.3-contributor", None, "hi");
@@ -750,30 +683,29 @@ mod tests {
     }
 
     #[test]
-    fn lowering_sends_prompt_on_stdin_and_keeps_resume_in_wire_argv() {
-        let prompt = "-fix the bug\nwith two lines";
-        let staged = argv(
-            "fiber/opencode-go/muse-spark-1.3-contributor",
-            Some("session-id"),
-            prompt,
-        );
+    fn hub_request_recovers_staged_inputs_and_prompt_suffixes() {
+        let model = "fiber/opencode-go/muse-spark-1.3-contributor:high";
+        let cwd = "/work/tree";
+        for prompt in [
+            "--",
+            "first line\nsecond line",
+            "-starts with a dash",
+            "--resume not-session",
+        ] {
+            let fresh = staged_spec(model, None, prompt, cwd);
+            let request = hub_request(&fresh);
+            assert_eq!(request.cwd, cwd);
+            assert_eq!(request.model, fresh.model);
+            assert_eq!(request.prompt, prompt);
+            assert_eq!(request.resume, None);
 
-        let (wire, actual_prompt) = lower(&staged);
-
-        assert_eq!(
-            wire,
-            [
-                "ask",
-                "--model",
-                "opencode-go/muse-spark-1.3-contributor",
-                "--resume",
-                "session-id",
-                "-",
-            ]
-        );
-        assert!(!wire.iter().any(|arg| arg == "--"));
-        assert!(!wire.iter().any(|arg| arg.contains(prompt)));
-        assert_eq!(actual_prompt, prompt);
+            let resumed = staged_spec(model, Some("s_1"), prompt, cwd);
+            let request = hub_request(&resumed);
+            assert_eq!(request.cwd, cwd);
+            assert_eq!(request.model, resumed.model);
+            assert_eq!(request.prompt, prompt);
+            assert_eq!(request.resume.as_deref(), Some("s_1"));
+        }
     }
 
     #[test]
@@ -1434,56 +1366,90 @@ mod tests {
     }
 
     #[test]
-    fn missing_binary_names_every_source() {
-        // No `FIBER_BIN`, no `fiber` on `PATH`, and an isolated `HOME`
-        // without `~/.local/bin/fiber`: resolution falls through to the
-        // home fallback, and spawning it must name each source consulted.
+    fn missing_hub_names_the_socket_without_fallback() {
         let _lock = crate::test_env::lock();
-        let dir = crate::backends::TempDir::new("cdm-fiber-nobin");
-        let _path = crate::test_env::EnvGuard::set("PATH", dir.to_str().unwrap());
-        let _fiber = crate::test_env::EnvGuard::remove("FIBER_BIN");
-        let _home = crate::test_env::EnvGuard::set("HOME", dir.to_str().unwrap());
-        let bin = resolve_bin(None);
-        assert!(
-            bin.ends_with(".local/bin/fiber"),
-            "home fallback when PATH has no fiber: {bin}"
+        let dir = crate::backends::TempDir::new("cdm-fiber-nohub");
+        let _home = crate::test_env::EnvGuard::set("FIBER_HOME", dir.to_str().unwrap());
+        let spec = staged_spec(
+            "fiber/opencode-go/muse-spark-1.3-contributor",
+            None,
+            "hi",
+            "/tmp",
         );
-        assert!(
-            !std::path::Path::new(&bin).exists(),
-            "no binary at the fallback: {bin}"
-        );
-        let mut spec = crate::job::tests::spec_of(|s| {
-            s.bin = bin.clone();
-        });
-        spec.cwd = dir.to_str().unwrap().to_string();
+        let socket = hub::hub_socket_path(&dir).unwrap();
         let spawned = spawn(&spec);
+        assert_eq!(spawned.session_id, None);
         let res = (spawned.drive)(&|_| {});
         assert_eq!(res.is_error, Some(true));
-        assert!(!res.clean_exit);
-        assert!(res.text.contains("fiber binary not found"), "{}", res.text);
-        assert!(res.text.contains("FIBER_BIN"), "{}", res.text);
-        assert!(res.text.contains("PATH"), "{}", res.text);
-        assert!(res.text.contains("~/.local/bin/fiber"), "{}", res.text);
-        assert!(res.text.contains(&bin), "{}", res.text);
+        assert!(
+            res.text.contains("cannot connect to hub socket"),
+            "{}",
+            res.text
+        );
+        assert!(
+            res.text.contains(&socket.display().to_string()),
+            "{}",
+            res.text
+        );
+        let legacy_route = ["fiber", "ask"].join(" ");
+        assert!(!res.text.contains(&legacy_route), "{}", res.text);
+        assert!(!res.text.contains("fiber binary not found"), "{}", res.text);
     }
 
     #[test]
-    fn non_not_found_spawn_error_passes_through() {
-        // Spawning a directory fails with `PermissionDenied`, not
-        // `NotFound`: the error keeps its original text, unwrapped.
+    fn resumed_spawn_exposes_its_session_before_connecting() {
         let _lock = crate::test_env::lock();
-        let dir = crate::backends::TempDir::new("cdm-fiber-notexec");
-        let mut spec = crate::job::tests::spec_of(|s| {
-            s.bin = dir.to_str().unwrap().to_string();
-        });
-        spec.cwd = dir.to_str().unwrap().to_string();
+        let dir = crate::backends::TempDir::new("cdm-fiber-resume-nohub");
+        let _home = crate::test_env::EnvGuard::set("FIBER_HOME", dir.to_str().unwrap());
+        let spec = staged_spec(
+            "fiber/opencode-go/muse-spark-1.3-contributor",
+            Some("s_1"),
+            "answer",
+            "/tmp",
+        );
         let spawned = spawn(&spec);
+        assert_eq!(spawned.session_id.as_deref(), Some("s_1"));
         let res = (spawned.drive)(&|_| {});
         assert_eq!(res.is_error, Some(true));
-        assert!(!res.clean_exit);
-        assert!(!res.text.contains("fiber binary not found"), "{}", res.text);
-        assert!(res.text.contains("Permission denied"), "{}", res.text);
-        assert_eq!(res.text, res.stderr);
+    }
+
+    #[test]
+    fn invalid_fiber_home_names_its_boundary_error() {
+        let _lock = crate::test_env::lock();
+        for (home, expected) in [
+            ("relative".to_string(), "FIBER_HOME is relative".to_string()),
+            (format!("/{}", "h".repeat(120)), "103-byte".to_string()),
+        ] {
+            let _home = crate::test_env::EnvGuard::set("FIBER_HOME", &home);
+            let spec = staged_spec(
+                "fiber/opencode-go/muse-spark-1.3-contributor",
+                None,
+                "hi",
+                "/tmp",
+            );
+            let spawned = spawn(&spec);
+            let res = (spawned.drive)(&|_| {});
+            assert_eq!(res.is_error, Some(true));
+            assert!(res.text.contains(&expected), "{}", res.text);
+            drop(_home);
+        }
+    }
+
+    #[test]
+    fn kill_before_drive_does_not_panic() {
+        let _lock = crate::test_env::lock();
+        let dir = crate::backends::TempDir::new("cdm-fiber-kill-nohub");
+        let _home = crate::test_env::EnvGuard::set("FIBER_HOME", dir.to_str().unwrap());
+        let spec = staged_spec(
+            "fiber/opencode-go/muse-spark-1.3-contributor",
+            None,
+            "hi",
+            "/tmp",
+        );
+        let spawned = spawn(&spec);
+        (spawned.kill)();
+        let res = (spawned.drive)(&|_| {});
+        assert_eq!(res.is_error, Some(true));
     }
 
     #[test]
