@@ -226,6 +226,24 @@ remove_state_worktree() {
   fi
 }
 
+# reap_log STATE_FILE PATH: record one path before it is removed. The log is
+# best-effort so a logging failure never prevents stale-run cleanup.
+reap_log() {
+  local sf="$1" path="$2" rec reason
+  [ -n "$path" ] && [ -e "$path" ] || return 0
+  rec="$(job_rec "${sf##*/}")"
+  if [ -n "$rec" ]; then
+    reason="stale>${finished_run_mins}m"
+  else
+    reason="stale>${stale_run_mins}m"
+  fi
+  mkdir -p "$HOME/.cache/agents" 2>/dev/null || true
+  printf '%s\t%s\t%s\t%s\t%s\tpath=%s\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$(hostname -s)" \
+    "$(state_get "$sf" run_dir)" "${sf##*/}" "$reason" "$path" \
+    >>"$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
+}
+
 # prune_stale_runs: remove worktrees, run dirs and state files for runs nobody
 # collected. A run is every state file sharing one run dir; it is pruned only
 # when none of its jobs is RUNNING and each of its state files meets one of
@@ -285,15 +303,17 @@ prune_stale_runs() {
   done <"$all_list"
   while IFS= read -r sf; do
     [ -n "$sf" ] || continue
+    reap_log "$sf" "$(state_get "$sf" worktree)"
     remove_state_worktree "$sf"
   done <"$stale_list"
   while IFS= read -r sf; do
     [ -n "$sf" ] || continue
     rd="$(state_get "$sf" run_dir)"
-    case "$rd" in "$run_root"/review-pr.run.*) rm -rf "$rd";; esac
+    case "$rd" in "$run_root"/review-pr.run.*) reap_log "$sf" "$rd"; rm -rf "$rd";; esac
   done <"$stale_list"
   while IFS= read -r sf; do
     [ -n "$sf" ] || continue
+    reap_log "$sf" "$sf"
     rm -f "$sf"
   done <"$stale_list"
   rm -f "$stale_list" "$all_list" "$old_list" "$done_list"
@@ -431,8 +451,8 @@ cmd_start() {
   fi
   if [ -z "$wdoc" ]; then wdoc="none"; fi
   if [ -n "$head" ]; then
-    if ! printf '%s' "$head" | grep -Eq '^[0-9a-f]{40}$'; then
-      echo 'review-pr: --head needs the full 40-character SHA (git rev-parse <sha>)' >&2
+    if ! printf '%s' "$head" | grep -Eq '^[0-9a-f]{7,40}$'; then
+      echo "review-pr: --head needs a commit SHA of 7 to 40 hex characters, not $head" >&2
       exit 2
     fi
   fi
@@ -464,8 +484,21 @@ cmd_start() {
   }
 
   if [ -n "$head" ]; then
-    # Wait for the API to report the head the caller pushed; create nothing
-    # until it does.
+    if [ "${#head}" -lt 40 ]; then
+      resolved="$(git -C "$clone" rev-parse --verify --quiet "$head^{commit}" 2>/dev/null)" || true
+      if [ -z "$resolved" ]; then
+        git -C "$clone" fetch origin "pull/$pr/head" >&2 || true
+        resolved="$(git -C "$clone" rev-parse --verify --quiet "$head^{commit}" 2>/dev/null)" || true
+      fi
+      if [ -z "$resolved" ]; then
+        echo "review-pr: --head $head matches no commit, or more than one, in $clone" >&2
+        exit 2
+      fi
+      head="$resolved"
+      sha="$resolved"
+    fi
+    # Wait for the API to report the full head the caller pushed; create
+    # nothing until it does.
     sha="$head"
     waited=0
     while :; do
@@ -1232,7 +1265,7 @@ cmd_collect() {
   cat "$bad_f"
   cat "$unfinished_f"
   for ksf in ${kept_state[@]+"${kept_state[@]}"}; do
-    printf 'resume: delegate resume %s\n' "${ksf##*/}"
+    printf 'resume: delegate resume %s (on %s)\n' "${ksf##*/}" "$(hostname -s)"
   done
 
   # --findings-out feeds run --verify: the open findings, one per line, or

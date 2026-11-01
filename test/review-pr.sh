@@ -13,6 +13,8 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-review-pr.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
+export HOME="$T/home"
+mkdir -p "$HOME"
 
 export TMPDIR="$T/tmp"
 export REVIEW_PR_RUN_ROOT="$T/runs"
@@ -54,6 +56,14 @@ git -C "$T/origin" update-ref refs/pull/9/head "$SYMLINK_SHA"
 EXPECTED_NEW_PID="$(git -C "$T/origin" diff "main...$NEW_SHA" | git patch-id --stable | awk '{print $1}')"
 [ -n "$EXPECTED_NEW_PID" ] || fail "fixture new patch-id computable"
 git clone -q "$T/origin" "$T/clone"
+# A second PR head is reachable only through its pull ref, not a cloned branch.
+git -C "$T/origin" checkout -q --detach "$FAKE_SHA"
+printf 'fetch-only head\n' >"$T/origin/fetch-only.txt"
+git -C "$T/origin" add fetch-only.txt
+git -C "$T/origin" commit -qm 'fetch-only head'
+FETCH_SHA="$(git -C "$T/origin" rev-parse HEAD)"
+git -C "$T/origin" update-ref refs/pull/10/head "$FETCH_SHA"
+git -C "$T/origin" checkout -q main
 EXPECTED_PID="$(git patch-id --stable <"$T/diff.txt" | awk '{print $1}')"
 [ -n "$EXPECTED_PID" ] || fail "fixture patch-id computable"
 
@@ -224,6 +234,7 @@ reset_state() {
     "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log"
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/issue-calls.txt"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
+  rm -f "$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
 }
 
@@ -258,6 +269,24 @@ STATUS: DONE" 0
 STATUS: DONE" 0
   write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
+}
+
+assert_reap_line() {
+  expected_run="$1"; expected_id="$2"; expected_reason="$3"; expected_path="path=$4"
+  alternate_id="${5:-$expected_id}"
+  log="$HOME/.cache/agents/review-pr-reap.log"
+  awk -F '\t' -v host="$(hostname -s)" -v run="$expected_run" -v jid="$expected_id" \
+    -v alternate_id="$alternate_id" -v reason="$expected_reason" -v path="$expected_path" '
+    NF == 6 && length($1) == 20 && substr($1, 5, 1) == "-" && \
+      substr($1, 8, 1) == "-" && substr($1, 11, 1) == "T" && \
+      substr($1, 14, 1) == ":" && substr($1, 17, 1) == ":" && \
+      substr($1, 20, 1) == "Z" && $2 == host && $3 == run && \
+      ($4 == jid || $4 == alternate_id) && $5 == reason && $6 == path { found++ }
+    END { exit found != 1 }
+  ' "$log" || {
+    while IFS= read -r line; do printf 'reap log row: %s\n' "$line" >&2; done <"$log"
+    fail "reap log line for $4"
+  }
 }
 
 stale_ts_for() {
@@ -675,7 +704,7 @@ grep -q "^CI $SHORT fail$" <<<"$out" || fail "failing CI line"
 [ ! -d "$wt_spec" ] || fail "finished spec worktree is removed"
 [ ! -d "$wt_overbuild" ] || fail "finished overbuild worktree is removed"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "1" ] || fail "unfinished keeps only its worktree"
-grep -Fxq 'resume: delegate resume job-standards' <<<"$out" || fail "unfinished prints its resume command"
+grep -Fxq "resume: delegate resume job-standards (on $(hostname -s))" <<<"$out" || fail "unfinished prints its host-qualified resume command"
 [ -f "$TMPDIR/review-pr/job-standards" ] || fail "unfinished state file is kept"
 [ ! -e "$TMPDIR/review-pr/job-spec" ] || fail "finished spec state file is removed"
 [ ! -e "$TMPDIR/review-pr/job-overbuild" ] || fail "finished overbuild state file is removed"
@@ -697,8 +726,8 @@ run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-spec")"
 out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "mixed completion collect exits 1"
 rec="$TMPDIR/delegate-jobs/job-spec.json"
 grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "mixed completion reports unfinished spec"
-[ "$(grep -Fxc 'resume: delegate resume job-spec' <<<"$out")" = "1" ] || fail "mixed completion prints one spec resume command"
-! grep -q '^resume:.*job-standards$' <<<"$out" || fail "mixed completion prints no standards resume command"
+[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s))" <<<"$out")" = "1" ] || fail "mixed completion prints one host-qualified spec resume command"
+! grep -q '^resume:.*job-standards ' <<<"$out" || fail "mixed completion prints no standards resume command"
 [ -d "$wt_spec" ] || fail "mixed completion keeps the unfinished worktree"
 [ ! -d "$wt_standards" ] || fail "mixed completion removes the finished worktree"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-spec')" = "1" ] || fail "mixed completion registers the unfinished worktree"
@@ -715,7 +744,7 @@ out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "re-c
 grep -q '^COLLECTED job-standards ' <<<"$out" || fail "re-collect reprints the finished standards job"
 grep -Fxq "patch-id $EXPECTED_PID" <<<"$out" || fail "re-collect reads the kept run header"
 grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "re-collect reads the kept spec record"
-[ "$(grep -Fxc 'resume: delegate resume job-spec' <<<"$out")" = "1" ] || fail "re-collect prints one resume command"
+[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s))" <<<"$out")" = "1" ] || fail "re-collect prints one host-qualified resume command"
 ! grep -q '^UNFINISHED standards MISSING' <<<"$out" || fail "re-collect does not mark the finished job missing"
 [ ! -e "$T/state/comment-pr.txt" ] || fail "re-collect does not post another comment"
 [ -d "$wt_spec" ] || fail "re-collect keeps the unfinished worktree"
@@ -1334,13 +1363,76 @@ wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-standards")"
 [ "$(git -C "$wt" rev-parse HEAD)" = "$NEW_SHA" ] || fail "--head matching worktree head"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "--head matching collect exits 0"
 
-# --- case: --head must be a full SHA
+# --- case: real-git short prefixes resolve before the API wait
+for prefix_length in 7 8 39; do
+  reset_state
+  write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+  printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+  head_prefix="${NEW_SHA:0:$prefix_length}"
+  start_review 8 --repo O/N --cwd "$T/clone" --axes standards --model M \
+    --head "$head_prefix" >/dev/null 2>&1 || fail "--head $prefix_length-character prefix starts review"
+  [ ! -e "$T/state/sleeps.txt" ] || fail "--head $prefix_length-character prefix matches without waiting"
+  wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-standards")"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$NEW_SHA" ] || fail "--head $prefix_length-character worktree commit"
+  [ "$(sed -n 's/^sha=//p' "$TMPDIR/review-pr/job-standards")" = "$NEW_SHA" ] || \
+    fail "--head $prefix_length-character state records the full commit"
+  bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "--head $prefix_length-character collect exits 0"
+done
+
+# --- case: a short prefix fetches a PR head missing from the clone
+reset_state
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+! git -C "$T/clone" cat-file -e "$FETCH_SHA^{commit}" 2>/dev/null || \
+  fail "fetch-only PR commit starts absent from the clone"
+printf '%s\n' "$FETCH_SHA" >"$T/state/heads.txt"
+fetch_prefix="${FETCH_SHA:0:7}"
+start_review 10 --repo O/N --cwd "$T/clone" --axes standards --model M \
+  --head "$fetch_prefix" >/dev/null 2>&1 || fail "short prefix fetches and starts the review"
+[ ! -e "$T/state/sleeps.txt" ] || fail "fetched short prefix matches without waiting"
+[ "$(sed -n 's/^sha=//p' "$TMPDIR/review-pr/job-standards")" = "$FETCH_SHA" ] || \
+  fail "fetched short prefix stores the full commit"
+wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-standards")"
+[ "$(git -C "$wt" rev-parse HEAD)" = "$FETCH_SHA" ] || fail "fetched short-prefix worktree commit"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "fetched short-prefix collect exits 0"
+
+# --- case: a real unknown prefix exits before waiting or creating state
+reset_state
+git -C "$T/clone" fetch origin pull/8/head >/dev/null 2>&1 || fail "unknown-prefix fixture fetch"
+unknown_n=0
+while :; do
+  unknown_prefix="$(printf '%07x' "$unknown_n")"
+  if ! git -C "$T/clone" rev-parse --verify --quiet \
+    "$unknown_prefix^{commit}" >/dev/null 2>&1; then
+    break
+  fi
+  unknown_n=$((unknown_n + 1))
+done
+err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --axes standards \
+  --head "$unknown_prefix" 2>&1 >/dev/null)"
+st=$?
+[ "$st" -eq 2 ] || fail "unknown --head prefix exits 2"
+expected="review-pr: --head $unknown_prefix matches no commit, or more than one, in $T/clone"
+grep -Fxq "$expected" <<<"$err" || fail "unknown --head prefix message: [$err]"
+[ ! -e "$T/state/sleeps.txt" ] || fail "unknown --head prefix does not wait"
+[ ! -e "$T/state/runs.txt" ] || fail "unknown --head prefix launches no job"
+[ ! -e "$TMPDIR/review-pr/job-standards" ] || fail "unknown --head prefix saves no state"
+
+# --- case: --head rejects values outside 7 to 40 lowercase hex characters
 reset_state
 err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
   --head abc123 2>&1 >/dev/null)"
-[ $? -eq 2 ] || fail "--head short sha is a usage error"
-[ "$err" = "review-pr: --head needs the full 40-character SHA (git rev-parse <sha>)" ] || \
-  fail "--head short sha message: [$err]"
+[ "$?" -eq 2 ] || fail "--head abc123 is a usage error"
+expected='review-pr: --head needs a commit SHA of 7 to 40 hex characters, not abc123'
+[ "$err" = "$expected" ] || fail "--head abc123 message: [$err]"
+for bad_head in zzzzzzz "${NEW_SHA}a"; do
+  err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
+    --head "$bad_head" 2>&1 >/dev/null)"
+  [ "$?" -eq 2 ] || fail "invalid --head $bad_head is a usage error"
+  expected="review-pr: --head needs a commit SHA of 7 to 40 hex characters, not $bad_head"
+  [ "$err" = "$expected" ] || fail "invalid --head message: [$err]"
+done
 
 # --- case: --head in verify mode
 reset_state
@@ -1547,6 +1639,11 @@ collect: review-pr collect job-standards job-spec job-overbuild" ] || fail "prun
 [ ! -e "$stale_sf" ] || fail "prune removes the stale state file"
 [ ! -e "$stale_wt" ] || fail "prune removes the stale worktree"
 [ ! -e "$stale_rd" ] || fail "prune removes the stale run dir"
+reap_log="$HOME/.cache/agents/review-pr-reap.log"
+[ "$(wc -l <"$reap_log" | tr -d ' ')" = "3" ] || fail "reap logs each stale worktree, run dir, and state path"
+assert_reap_line "$stale_rd" job-old 'stale>60m' "$stale_wt"
+assert_reap_line "$stale_rd" job-old 'stale>60m' "$stale_rd"
+assert_reap_line "$stale_rd" job-old 'stale>60m' "$stale_sf"
 stale_base="$(basename "$stale_rd")"
 [ "$(git -C "$T/clone" worktree list | grep -c "$stale_base/wt-" || true)" = "0" ] || fail "prune unregisters the stale worktree"
 [ -f "$TMPDIR/review-pr/job-standards" ] || fail "pruning start still saves the new state"
@@ -1591,6 +1688,7 @@ start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbu
 [ -f "$stale_sf" ] || fail "fresh state is kept"
 [ -d "$stale_wt" ] || fail "fresh worktree is kept"
 [ -d "$stale_rd" ] || fail "fresh run dir is kept"
+[ ! -s "$HOME/.cache/agents/review-pr-reap.log" ] || fail "a young finished run is not logged"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after fresh-stale exits 0"
 git -C "$T/clone" worktree remove --force "$stale_wt" >/dev/null 2>&1 || rm -rf "$stale_wt"
 rm -rf "$stale_rd"
@@ -1674,10 +1772,67 @@ start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbu
 [ -d "$young_rd/wt-standards" ] || fail "two-hour recordless worktree is kept"
 [ ! -e "$TMPDIR/review-pr/job-norec7" ] || fail "prune removes the seven-hour recordless state"
 [ ! -e "$old_rd" ] || fail "prune removes the seven-hour recordless run dir"
+reap_log="$HOME/.cache/agents/review-pr-reap.log"
+[ "$(wc -l <"$reap_log" | tr -d ' ')" = "3" ] || fail "reap logs each recordless stale path"
+assert_reap_line "$old_rd" job-norec7 'stale>360m' "$old_rd/wt-standards"
+assert_reap_line "$old_rd" job-norec7 'stale>360m' "$old_rd"
+assert_reap_line "$old_rd" job-norec7 'stale>360m' "$TMPDIR/review-pr/job-norec7"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after recordless ages exits 0"
 git -C "$T/clone" worktree remove --force "$young_rd/wt-standards" >/dev/null 2>&1 || rm -rf "$young_rd/wt-standards"
 rm -rf "$young_rd"
 rm -f "$TMPDIR/review-pr/job-norec2"
+
+# --- case: empty or missing worktree paths are not added to the reap log
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+reap_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
+stale_state "$reap_rd" job-empty standards 7 DONE "$T/clone"
+stale_state "$reap_rd" job-missing spec 7 DONE "$T/clone"
+git -C "$T/clone" worktree remove --force "$reap_rd/wt-standards" >/dev/null 2>&1 || fail "empty-path worktree cleanup"
+git -C "$T/clone" worktree remove --force "$reap_rd/wt-spec" >/dev/null 2>&1 || fail "missing-path worktree cleanup"
+awk -F= '$1 != "worktree" { print } END { print "worktree=" }' \
+  "$TMPDIR/review-pr/job-empty" >"$T/state/job-empty.tmp" && \
+  mv "$T/state/job-empty.tmp" "$TMPDIR/review-pr/job-empty"
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 \
+  >/dev/null 2>&1 || fail "start with empty and missing worktree paths exits 0"
+reap_log="$HOME/.cache/agents/review-pr-reap.log"
+[ "$(wc -l <"$reap_log" | tr -d ' ')" = "3" ] || fail "empty and missing worktree paths are not logged"
+assert_reap_line "$reap_rd" job-empty 'stale>60m' "$TMPDIR/review-pr/job-empty"
+assert_reap_line "$reap_rd" job-missing 'stale>60m' "$TMPDIR/review-pr/job-missing"
+# find() may visit either stale sibling first; only that one logs the shared run dir.
+assert_reap_line "$reap_rd" job-empty 'stale>60m' "$reap_rd" job-missing
+! grep -Fq "path=$reap_rd/wt-standards" "$reap_log" || fail "empty worktree path creates no reap line"
+! grep -Fq "path=$reap_rd/wt-spec" "$reap_log" || fail "missing worktree path creates no reap line"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after empty-path prune exits 0"
+
+# --- case: a reap-log failure does not stop stale-run cleanup
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+rm -rf "$HOME/.cache"
+printf 'not a directory\n' >"$HOME/.cache"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
+stale_state "$stale_rd" job-log-fail standards 7 DONE "$T/clone"
+stale_sf="$TMPDIR/review-pr/job-log-fail"
+stale_wt="$stale_rd/wt-standards"
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 \
+  >/dev/null 2>&1 || fail "reap-log failure does not fail start"
+[ ! -e "$stale_sf" ] && [ ! -e "$stale_wt" ] && [ ! -e "$stale_rd" ] || \
+  fail "reap-log failure still removes stale paths"
+rm -f "$HOME/.cache"
+mkdir -p "$HOME/.cache/agents"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after failed reap log exits 0"
 
 # --- case: start prunes a stale two-file run sharing one run dir when the clone is gone
 reset_state
