@@ -366,6 +366,8 @@ PI_ID2="$(jq -r .job_id "$OUT2/pi/metrics.json")"
 FIBER_ID2="$(jq -r .job_id "$OUT2/fiber/metrics.json")"
 [ "$(jq -r .model "$OUT2/pi/metrics.json")" = "openai/gpt-6-luna:medium" ] || fail "pi metrics model from --pi-model"
 [ "$(jq -r .model "$OUT2/fiber/metrics.json")" = "fiber/codex/gpt-6-luna" ] || fail "fiber metrics model from --fiber-model"
+# This check is not race-sensitive: the fake watch has no delay here (FAKE_WATCH_SLEEP unset).
+# Task 2 alone pins backgrounded-watch ordering.
 assert_order "openai/gpt-6-luna:medium" "fiber/codex/gpt-6-luna" \
   "$PI_ID2" "$FIBER_ID2" "$PI_WT2" "$FIBER_WT2"
 grep -q '| model | openai/gpt-6-luna:medium | fiber/codex/gpt-6-luna |' "$OUT2/summary.md" \
@@ -393,10 +395,8 @@ PI_WT_THINK="$(cat "$OUT_THINK/pi/worktree")"
 FIBER_WT_THINK="$(cat "$OUT_THINK/fiber/worktree")"
 [ "$(jq -r .model "$OUT_THINK/pi/metrics.json")" = "opencode-go/muse-spark-1.3-contributor:high" ] || fail "pi metrics model has :high"
 [ "$(jq -r .model "$OUT_THINK/fiber/metrics.json")" = "fiber/opencode-go/muse-spark-1.3-contributor:high" ] || fail "fiber metrics model has :high"
-# Suffix-only scenarios assert the two recorded model arguments, not
-# completion order: ordering is pinned once by the Task 2 happy path
-# and the model cases above, so these must not re-depend on the fake
-# watch's fixed sleep.
+# Ordering is pinned by the Task 2 happy path alone; these cases assert
+# recorded model arguments and must not depend on the watch delay.
 grep -q "^run opencode-go/muse-spark-1.3-contributor:high $PI_WT_THINK$" "$FLOG/calls.log" \
   || fail "pi run records the :high model"
 grep -q "^run fiber/opencode-go/muse-spark-1.3-contributor:high $FIBER_WT_THINK$" "$FLOG/calls.log" \
@@ -417,10 +417,8 @@ PI_WT_LOW="$(cat "$OUT_LOW/pi/worktree")"
 FIBER_WT_LOW="$(cat "$OUT_LOW/fiber/worktree")"
 [ "$(jq -r .model "$OUT_LOW/pi/metrics.json")" = "opencode-go/muse-spark-1.3-contributor:low" ] || fail "pi metrics model has :low"
 [ "$(jq -r .model "$OUT_LOW/fiber/metrics.json")" = "fiber/opencode-go/muse-spark-1.3-contributor:low" ] || fail "fiber metrics model has :low"
-# Suffix-only scenarios assert the two recorded model arguments, not
-# completion order: ordering is pinned once by the Task 2 happy path
-# and the model cases above, so these must not re-depend on the fake
-# watch's fixed sleep.
+# Ordering is pinned by the Task 2 happy path alone; these cases assert
+# recorded model arguments and must not depend on the watch delay.
 grep -q "^run opencode-go/muse-spark-1.3-contributor:low $PI_WT_LOW$" "$FLOG/calls.log" \
   || fail "pi run records the :low model"
 grep -q "^run fiber/opencode-go/muse-spark-1.3-contributor:low $FIBER_WT_LOW$" "$FLOG/calls.log" \
