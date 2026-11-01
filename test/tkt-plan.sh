@@ -206,6 +206,12 @@ rebase_plan() {
   } >"$CDIR/plan.md"
 }
 
+set_plan_base() {
+  local new_base="$1"
+  { printf 'Base: %s\n' "$new_base"; tail -n +2 "$CDIR/plan.md"; } >"$CDIR/plan.tmp"
+  mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+}
+
 # Run tkt-plan on the current case state; sets OUT and RC, stderr kept in file.
 run_plan() {
   OUT="$(bash "$TKT" "$S" "$@" 2>"$CDIR/stderr.txt")"; RC=$?
@@ -1545,6 +1551,51 @@ mv "$CDIR/changed.md" "$CDIR/plan.md"
 run_plan post
 [ "$RC" -eq 1 ] || fail "post after Base changes exits 1"
 expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "post after Base changes"
+
+# --- verdict-ok-ancestor-unchanged: an unchanged Files path survives a descendant Base ---
+setup_case verdict-ok-ancestor-unchanged
+stored_base="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "ancestor-unchanged: seed ok verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$stored_base" || fail "ancestor-unchanged: seed verdict base"
+printf 'unrelated\n' >"$WT/other.txt"
+git -C "$WT" add other.txt
+git -C "$WT" -c user.email=t@t -c user.name=t commit -qm unrelated
+current_base="$(git -C "$WT" rev-parse HEAD)"
+set_plan_base "$current_base"
+run_plan post
+[ "$RC" -eq 0 ] || fail "ancestor-unchanged: descendant base with unchanged Files exits 0"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "ancestor-unchanged"
+
+# --- verdict-ok-ancestor-files-changed: changing a Files path on a descendant Base is stale ---
+setup_case verdict-ok-ancestor-files-changed
+stored_base="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "ancestor-files-changed: seed ok verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$stored_base" || fail "ancestor-files-changed: seed verdict base"
+printf 'changed\n' >"$WT/f.txt"
+git -C "$WT" add f.txt
+git -C "$WT" -c user.email=t@t -c user.name=t commit -qm changed-file
+current_base="$(git -C "$WT" rev-parse HEAD)"
+set_plan_base "$current_base"
+run_plan post
+[ "$RC" -eq 1 ] || fail "ancestor-files-changed: changed Files path exits 1"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "ancestor-files-changed"
+
+# --- verdict-ok-sibling-base: a sibling current Base is stale ---
+setup_case verdict-ok-sibling-base
+stored_base="$(git -C "$WT" rev-parse HEAD)"
+common_base="$(git -C "$WT" rev-list --max-parents=0 "$stored_base")"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "sibling-base: seed ok verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$stored_base" || fail "sibling-base: seed verdict base"
+git -C "$WT" checkout -q --detach "$common_base"
+printf 'sibling\n' >"$WT/sibling.txt"
+git -C "$WT" add sibling.txt
+git -C "$WT" -c user.email=t@t -c user.name=t commit -qm sibling
+current_base="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" checkout -q "$stored_base"
+set_plan_base "$current_base"
+run_plan post
+[ "$RC" -eq 1 ] || fail "sibling-base: non-descendant base exits 1"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "sibling-base"
 
 # --- every verify refusal after argument parsing clears the previous verdict ---
 seed_ok_verdict() {

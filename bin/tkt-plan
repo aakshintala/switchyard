@@ -64,7 +64,7 @@ load_plan() {
 # pair, in tkt-plan and tkt-build. Upgrade trigger: a third caller of the verdict
 # check; then move it to bin/lib/ and source it from both scripts.
 plan_verdict_ok() {
-  local no_verifier="$1" stored stored_base
+  local no_verifier="$1" stored stored_base p files=()
   stored="$(t get plan_verdict 2>/dev/null || true)"
   stored_base="$(t get plan_verdict_base 2>/dev/null || true)"
   if [ -z "$stored" ] && [ "$no_verifier" -eq 1 ]; then
@@ -73,7 +73,14 @@ plan_verdict_ok() {
     stored=skipped
     stored_base="$base"
   fi
-  if { [ "$stored" = ok ] || [ "$stored" = skipped ]; } && [ "$stored_base" = "$base" ]; then
+  if [ "$stored" = ok ]; then
+    [ "$stored_base" = "$base" ] && return 0
+    while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
+    if git -C "$worktree" merge-base --is-ancestor "$stored_base" "$base" 2>/dev/null &&
+      { [ "${#files[@]}" -eq 0 ] || git -C "$worktree" diff --quiet "$stored_base..$base" -- "${files[@]}" 2>/dev/null; }; then
+      return 0
+    fi
+  elif [ "$stored" = skipped ] && [ "$stored_base" = "$base" ]; then
     return 0
   fi
   case "$stored" in

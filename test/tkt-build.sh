@@ -374,6 +374,19 @@ run_build() {
   OUT="$(bash "$BUILD" "$S" "$@" 2>"$CDIR/stderr.txt")"; RC=$?
 }
 
+set_plan_base() {
+  local new_base="$1"
+  { printf 'Base: %s\n' "$new_base"; tail -n +2 "$CDIR/plan.md"; } >"$CDIR/plan.tmp"
+  mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+}
+
+advance_build_head() {
+  git -C "$WT" push -q origin tkt-528
+  H="$(git -C "$WT" rev-parse HEAD)"
+  printf '%s' "$H" >"$T/prhead"
+  bash "$TKT_STATE" "$S" set head "$H" || fail "advance build head state"
+}
+
 first_line() {
   head -n 1 <<<"$OUT"
 }
@@ -1529,6 +1542,42 @@ run_build --no-verifier
 [ "$RC" -eq 1 ] || fail "--no-verifier does not replace a stale pair"
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "--no-verifier with stale verdict"
 expect_state plan_verdict ok "--no-verifier preserves stale verdict"
+
+# --- verdict-ok-ancestor-unchanged: a descendant Base with no Files diff proceeds ---
+setup_case verdict-ok-ancestor-unchanged
+git -C "$WT" commit --allow-empty -qm unrelated
+advance_build_head
+set_plan_base "$H"
+run_build
+[ "$RC" -eq 0 ] || fail "ancestor-unchanged: descendant base with unchanged Files proceeds (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "ancestor-unchanged"
+grep -q '^job|' "$T/calls.log" || fail "ancestor-unchanged: build dispatches tkt-job"
+
+# --- verdict-ok-ancestor-files-changed: a changed Files path on a descendant Base is stale ---
+setup_case verdict-ok-ancestor-files-changed
+printf 'changed\n' >"$WT/src/a.txt"
+git -C "$WT" add src/a.txt
+git -C "$WT" commit -qm changed-file
+advance_build_head
+set_plan_base "$H"
+run_build
+[ "$RC" -eq 1 ] || fail "ancestor-files-changed: changed Files path is refused"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "ancestor-files-changed"
+grep -q '^job|' "$T/calls.log" && fail "ancestor-files-changed: stale verdict dispatches no tkt-job"
+
+# --- verdict-ok-sibling-base: a sibling current Base is stale ---
+setup_case verdict-ok-sibling-base
+git -C "$WT" checkout -q --detach "$(cat "$CDIR/main0")"
+printf 'sibling\n' >"$WT/sibling.txt"
+git -C "$WT" add sibling.txt
+git -C "$WT" commit -qm sibling
+current_base="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" checkout -q "$H"
+set_plan_base "$current_base"
+run_build
+[ "$RC" -eq 1 ] || fail "sibling-base: non-descendant base is refused"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "sibling-base"
+grep -q '^job|' "$T/calls.log" && fail "sibling-base: stale verdict dispatches no tkt-job"
 
 # --- the verdict check runs before either --from lane split ---
 setup_case verdict-from-gate
