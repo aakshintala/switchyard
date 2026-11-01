@@ -2,12 +2,17 @@
 # gh-ci: quiet, low-call GitHub CI helpers for agent flywheels.
 # Usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>
 #        gh-ci verdict <branch-or-sha> | gh-ci resample <pr> "<job name>" --until <regex> [--max <n>]
-#        gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)
+#        gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--no-jobs-after <min>] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)
 # verdict judges required checks against the default branch; wait <pr> reads the PR's own base.
 # Exit codes: 0 ok, 1 failure (verdict prints RED on stdout; lookup errors
 # print no verdict), 2 usage, 3 merge conflict (snapshot and watch-verified
-# at once; wait after 30 s of DIRTY re-checks), 124: verdict means a required
+# at once; wait after 30 s of DIRTY re-checks), 4 wait: a required name had no
+# check run on the head after --no-jobs-after; 124: verdict means a required
 # check is pending now (no wait); wait means the wait timed out with checks still pending.
+# --no-jobs-after <min> (default 10; GH_CI_NO_JOBS_AFTER): a required name with
+# no check run after this bound exits 4. A job behind needs: may not get a check
+# run until upstream jobs finish; raise the bound for such workflows. A required
+# path-filtered check that never runs also exits 4 after the bound.
 # Repo: --repo OWNER/NAME (any subcommand, any position; panics needs none), then GH_CI_REPO, then
 # origin's GitHub URL (no network call), then `gh repo view`. With none, exit 2.
 # GH_CI_INTERVAL the watch poll seconds (default 30). Under Claude Code
@@ -16,7 +21,8 @@ set -euo pipefail
 usage() {
   echo "usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>" >&2
   echo "       gh-ci verdict <branch-or-sha> | resample <pr> \"<job name>\" --until <regex> [--max <n>]" >&2
-  echo "       gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)" >&2
+  echo "       gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--no-jobs-after <min>] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)" >&2
+  echo "       --no-jobs-after defaults to 10 min (GH_CI_NO_JOBS_AFTER); exit 4 means a required check never started" >&2
   echo "       every GitHub subcommand takes --repo OWNER/NAME (overrides GH_CI_REPO and the checkout's origin)" >&2
   echo "       verdict judges required checks against the default branch; wait <pr> reads the PR's own base" >&2
   echo "       124 from verdict means a required check is pending now (nothing waited); from wait it means the wait timed out with checks still pending" >&2
@@ -24,6 +30,7 @@ usage() {
 }
 
 CONFLICT_RC=3
+NO_START_RC=4
 
 # head_state <pr>: prints "<full head SHA> <merge state>", the merge state in
 # the upper case of the GraphQL mergeStateStatus (REST mergeable_state, upper-cased).
@@ -400,6 +407,23 @@ head_checks() {
   printf '%s' "$payload" | jq -c '.checks' || return 1
 }
 
+# jobless_runs <sha>: print head workflow run IDs with no jobs. Only the first
+# 100 runs are checked; list or jobs API failures and missing total_count name
+# nothing. This helper runs only when a required check reaches the no-start bound.
+jobless_runs() {
+  local sha="$1" runs_json run_ids run_id jobs_json
+  runs_json=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&per_page=100" 2>/dev/null) || return 0
+  run_ids=$(printf '%s' "$runs_json" | jq -r '.workflow_runs[]?.id | select(type == "number" or type == "string")' 2>/dev/null) || return 0
+  while IFS= read -r run_id || [ -n "$run_id" ]; do
+    [ -n "$run_id" ] || continue
+    jobs_json=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=1" 2>/dev/null) || continue
+    if jq -e 'type == "object" and .total_count == 0' <<<"$jobs_json" >/dev/null 2>&1; then
+      printf '%s\n' "$run_id"
+    fi
+  done <<<"$run_ids"
+  return 0
+}
+
 # verdict <branch-or-sha>: judge this commit's checks against the default
 # branch's required names. Failed checks are tagged REQUIRED or NON-BLOCKING.
 cmd_verdict() {
@@ -591,10 +615,15 @@ wait_run() {
 }
 cmd_wait() {
   local pr="" pr_opt="" timeout=7200 req="[]" empty_ok=false names fail_fast=false last_progress="" job="" run=""
+  local no_jobs_after=10 ns_head="" ns_from=0 ns_missing='[]'
+  [ "${GH_CI_NO_JOBS_AFTER+x}" != x ] || no_jobs_after="$GH_CI_NO_JOBS_AFTER"
   while [ $# -gt 0 ]; do case "$1" in
     --timeout)
       [ $# -ge 2 ] || usage
       timeout="$2"; shift 2;;
+    --no-jobs-after)
+      [ $# -ge 2 ] || usage
+      no_jobs_after="$2"; shift 2;;
     --job)
       [ $# -ge 2 ] || usage
       [ -n "${2:-}" ] || usage
@@ -616,6 +645,7 @@ cmd_wait() {
   if [ -n "$pr" ] && [ -n "$pr_opt" ]; then usage; fi
   if [ -z "$run" ] && [ -z "$pr" ]; then usage; fi
   case "$timeout" in ''|*[!0-9]*) usage;; esac
+  case "$no_jobs_after" in ''|*[!0-9]*) usage;; esac
   if [ -n "${CLAUDECODE:-}" ] && [ "$timeout" -lt 600 ]; then
     echo "gh-ci: --timeout $timeout ignored under Claude Code (waits run in the background); using 7200" >&2
     timeout=7200
@@ -625,7 +655,7 @@ cmd_wait() {
     wait_run "${pr_opt:-$pr}" "$run" "$timeout" "$interval"
     return $?
   fi
-  local slept=0 head head2 state state2 checks_json max_src max_map filtered padded verdict hs hs_rc
+  local slept=0 head head2 state state2 checks_json max_src max_map filtered padded verdict hs hs_rc missing_count missing_name run_id
   local dirty_head="" dirty_for=0 draft=false progress p_pend p_pass p_fail
   if [ -z "$job" ]; then
     if [ "$(gh api "repos/$REPO/pulls/$pr" --jq .draft 2>/dev/null)" = "true" ]; then
@@ -662,6 +692,13 @@ cmd_wait() {
       continue
     fi
     dirty_head=""
+    if [ -z "$ns_head" ]; then
+      ns_head="$head"
+    elif [ "$head" != "$ns_head" ]; then
+      ns_head="$head"
+      ns_from="$slept"
+    fi
+    ns_missing='[]'
     if [ -n "$job" ]; then
       # the named job only: only an Actions job of the newest run counts;
       # a non-Actions check-run with the same name stays pending
@@ -676,6 +713,12 @@ cmd_wait() {
       # drop the run id: only the --job path reads it
       checks_json=$(printf '%s' "$checks_json" | jq -c 'if type != "array" then . else map({name, bucket}) end' 2>/dev/null) \
         || checks_json='{}'
+      if [ "$draft" != true ] && [ "$empty_ok" = true ] && [ "$req" != "[]" ]; then
+        ns_missing=$(printf '%s' "$checks_json" | jq -c --argjson req "$req" '
+          if type != "array" then [] else
+            [$req[] as $name | select(all(.[]; .name != $name)) | $name] end' 2>/dev/null) \
+          || ns_missing='[]'
+      fi
       if [ "$draft" != true ] && [ "$empty_ok" = true ]; then
         # the required set, then a pending record for each required name with no check
         checks_json=$(printf '%s' "$checks_json" | jq -c --argjson req "$req" '
@@ -701,6 +744,19 @@ cmd_wait() {
       else "pass" end' 2>/dev/null) || verdict=pending
     case "$verdict" in pass|fail) ;; *) verdict="pending";; esac
     if [ "$verdict" = "pending" ]; then
+      missing_count=$(printf '%s' "$ns_missing" | jq -r 'length' 2>/dev/null) || missing_count=0
+      if [ "$((slept - ns_from))" -ge "$((10#$no_jobs_after * 60))" ] && [ "$missing_count" -gt 0 ]; then
+        while IFS= read -r missing_name || [ -n "$missing_name" ]; do
+          [ -n "$missing_name" ] || continue
+          printf 'gh-ci: check %s has no check run after %s min; it never started\n' "$missing_name" "$no_jobs_after"
+        done < <(printf '%s' "$ns_missing" | jq -r '.[] | gsub("[\\r\\n]"; " ")')
+        while IFS= read -r run_id || [ -n "$run_id" ]; do
+          [ -n "$run_id" ] || continue
+          printf 'gh-ci: run %s has no jobs after %s min; it never started\n' "$run_id" "$no_jobs_after"
+        done < <(jobless_runs "$head")
+        printf '%s' "$checks_json" | jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | "failing: \(.name | gsub("[\\r\\n]"; " "))"' 2>/dev/null || true
+        return "$NO_START_RC"
+      fi
       if [ "$slept" -ge "$timeout" ]; then
         echo "head: ${head:0:8} timeout after ${timeout}s"
         printf '%s' "$checks_json" | jq -r '.[] | select(.bucket != "pass" and .bucket != "skipping" and .bucket != "fail" and .bucket != "cancel") | "pending: \(.name)"' 2>/dev/null || true
