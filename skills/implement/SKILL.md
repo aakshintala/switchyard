@@ -5,6 +5,8 @@ description: "Take one ticket from start to merge: preflight, plan, Verifier, la
 
 You are the orchestrator for one ticket. The **main orchestrator** is the session the owner started; a **sub-orchestrator** was started by another orchestrator's brief.
 
+When you were started with a brief or notes file, that file is your contract. Where it speaks to a step below, such as entering at a later step or skipping a phase, it wins and the steps are only the default path. The Rules still apply, and you say in your report where you followed the file over a step.
+
 ## Rules
 
 - **Never wait on a human.** A sub-orchestrator posts a decision it can't make to the tracker, with its options and a recommendation: a comment on the ticket it blocks, or a ticket with the `needs-info` role's label when it blocks none. It may also open follow-up tickets. It searches the tracker for an existing issue before opening one, reports each decision to its parent (the link, what it blocks, what it keeps building), lists every issue it opened or commented on in its report, and keeps building what the decision doesn't block. It never writes a handoff. The main orchestrator keeps the conversation with the owner (what to ask, when, and in what order). It asks the owner once, at the start, whether they'll be around for rulings, and switches on "going away" or "back": when they're present, ask in chat; when they're away, comment on the ticket the decision blocks (or open a new ticket when it blocks none) and keep building the rest.
