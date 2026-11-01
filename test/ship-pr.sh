@@ -36,7 +36,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 export GH_CI_INTERVAL=7 SHIP_PR_INTERVAL=1
 # CLAUDECODE must not change gh-ci wait timeouts under test (ship-pr passes
 # --timeout 0 and 14 in cases below), so start unset however the suite is invoked.
-unset CLAUDECODE
+unset CLAUDECODE GH_CI_NO_JOBS_AFTER
 MERGE_SHA="1f2e3d4c5b6a79881726354433221100ffeeddcc"
 
 # --- fake gh. Reads $ST (state dir) and $ORIGIN. The PR head is origin's
@@ -1423,5 +1423,45 @@ expect 5 "title or body matches still exit 5 with the flag"
 grep -q '^#9 body: fixes #9$' <<<"$OUT" || fail "body stray still printed: [$OUT]"
 grep -q 'allowing' <<<"$ERR" || fail "commit warning alongside body failure: [$ERR]"
 no_merge "body match with the flag"
+
+# Longest-wait notice is first on stderr and uses the effective CI timeout.
+setup; ship; expect 0 "default wait notice case"
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 36000 s (10 h): 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+  || fail "default longest-wait notice: [$ERR]"
+setup; ship --timeout 14; expect 0 "short wait notice case"
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 70 s (0 h): 5 CI waits x 14 s, plus the gate; run it in the background with no shell timeout" ] \
+  || fail "short longest-wait notice: [$ERR]"
+setup; CLAUDECODE=1 ship --timeout 14; expect 0 "Claude Code wait notice case"
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 36000 s (10 h): 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+  || fail "Claude Code longest-wait notice: [$ERR]"
+setup; CLAUDECODE=1 ship --timeout 599; expect 0 "one-below wait notice case"
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 36000 s (10 h): 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+  || fail "599 s uses the Claude Code timeout: [$ERR]"
+setup; CLAUDECODE=1 ship --timeout 600; expect 0 "at-boundary wait notice case"
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 3000 s (0 h): 5 CI waits x 600 s, plus the gate; run it in the background with no shell timeout" ] \
+  || fail "600 s stays unchanged: [$ERR]"
+setup; CLAUDECODE=1 ship --timeout 601; expect 0 "above-boundary wait notice case"
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 3005 s (0 h): 5 CI waits x 601 s, plus the gate; run it in the background with no shell timeout" ] \
+  || fail "601 s stays unchanged: [$ERR]"
+setup; run 7 --repo O/N --worktree "$WT"; expect 2 "usage has no longest-wait notice"
+! grep -q '^ship-pr: longest wait' <<<"$ERR" || fail "usage error has no longest-wait notice: [$ERR]"
+grep -q 'background' <<<"$ERR" && grep -q 'no shell timeout' <<<"$ERR" \
+  || fail "usage mentions background and no shell timeout: [$ERR]"
+
+# A never-started required check is a CI failure, not a rerunnable failure.
+setup
+cat >"$ST/rules" <<'RULES'
+[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"ci"},{"context":"lint"}]}}]
+RULES
+echo '[{"bucket":"fail","name":"lint","link":"https://github.com/O/N/actions/runs/111/job/1"}]' >"$ST/checks"
+echo '[{"databaseId":111,"name":"CI","workflowName":"CI","event":"pull_request","conclusion":"cancelled"}]' >"$ST/run-list.json"
+echo '[{"databaseId":1,"name":"lint","conclusion":"cancelled"}]' >"$ST/jobs-111.json"
+GH_CI_NO_JOBS_AFTER=0 ship --timeout 14
+expect 1 "never-started required check fails ship-pr"
+grep -Fq 'gh-ci: check ci has no check run after 0 min; it never started' <<<"$OUT" \
+  || fail "ship-pr prints the never-started line: [$OUT]"
+grep -Fq 'failing: lint' <<<"$OUT" || fail "ship-pr prints the failing required check: [$OUT]"
+! grep -q 'gh run rerun' "$ST/gh.log" || fail "never-started check is not rerun: [$(cat "$ST/gh.log")]"
+[ "$(grep -c 'check-runs' "$ST/gh.log")" = "1" ] || fail "never-started check waits once: [$(cat "$ST/gh.log")]"
 
 echo "ship-pr: all cases passed"

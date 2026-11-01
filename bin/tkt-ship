@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # tkt-ship: run ship-pr from state, rerun on 124, digest red CI.
+# Longest wait: four ship-pr attempts x five CI waits x 7200 s, plus the gate.
 # Usage: tkt-ship <state>
 # State key no_mutants_label: reason passed to ship-pr as --no-mutants-label.
 # State key body_ends: text passed to ship-pr as --body-ends; absent, unreadable,
 # empty or blank passes no flag and asks for no check.
 set -euo pipefail
 
-usage() { echo "usage: tkt-ship <state>" >&2; exit 2; }
+usage() {
+  echo "usage: tkt-ship <state>" >&2
+  echo "       longest wait 144000 s (40 h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" >&2
+  exit 2
+}
 [ $# -eq 1 ] || usage
 state="$1"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -145,6 +150,10 @@ if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then
   args+=(--gate "${e:+$e }$gate_cmd")
 fi
 
+longest_wait=144000
+longest_hours=$((longest_wait / 3600))
+echo "tkt-ship: longest wait ${longest_wait} s (${longest_hours} h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" >&2
+
 if mkdir "$lockdir" 2>/dev/null; then
   locked=1
   printf '%s\n' "$$" >"$lockdir/pid"
@@ -230,5 +239,18 @@ else
   printf '\n--- gh-ci failures ---\n' >>"$runlog"
   (cd "$worktree" && GH_CI_LOG_LINES=300 "$bin_dir/gh-ci" failures --pr "$pr" --repo "$repo" >>"$runlog" 2>&1) || true
   digest="$(ci_digest)"
+  never_started="$(grep -h 'never started' "$runlog" | head -n 10 || true)"
+  if [ -n "$never_started" ]; then
+    summary="$(tail -n 1 <<<"$digest")"
+    details="$(printf '%s\n' "$digest" | sed '$d' | grep -Fvx 'gh-ci reported no failed jobs' || true)"
+    if [ -n "$details" ]; then
+      digest="${details}
+${never_started}
+${summary}"
+    else
+      digest="${never_started}
+${summary}"
+    fi
+  fi
   emit "CI-FAIL $(tail -n 1 <<<"$digest" | sed 's/^SUMMARY //')" 1 "$(sed '$d' <<<"$digest")"
 fi
