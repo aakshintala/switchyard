@@ -2082,23 +2082,24 @@ grep -q "^VERDICT overbuild:" <<<"$run_out" && fail "axes standards output has n
 grep -q UNFINISHED <<<"$run_out" && fail "axes standards run is finished"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "$before" ] || fail "axes standards run removes its worktree"
 
-# --- case: default overbuild axis names its missing model for start and run
+# --- case: --axes without overbuild needs no --overbuild-model; unknown axes fail
 reset_state
-err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M 2>&1 >/dev/null)"; st=$?
-[ "$st" -eq 2 ] || fail "start without --overbuild-model exits 2 (got $st)"
-grep -Fq -- "--overbuild-model" <<<"$err" || fail "missing-model error names --overbuild-model"
-grep -Fq -- "overbuild" <<<"$err" || fail "missing-model error names the overbuild axis"
-grep -Fq -- "--axes standards,spec" <<<"$err" || fail "missing-model error names how to skip overbuild"
-[ ! -e "$T/state/runs.txt" ] || fail "start with missing overbuild model starts no job"
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M --axes standards >/dev/null 2>&1 || \
+  fail "axes standards without --overbuild-model exits 0"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "axes standards without --overbuild-model collects"
 reset_state
-err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M 2>&1 >/dev/null)"; st=$?
-[ "$st" -eq 2 ] || fail "run without --overbuild-model exits 2 (got $st)"
-grep -Fq -- "--overbuild-model" <<<"$err" || fail "missing-model run error names --overbuild-model"
-grep -Fq -- "overbuild" <<<"$err" || fail "missing-model run error names the overbuild axis"
-grep -Fq -- "--axes standards,spec" <<<"$err" || fail "missing-model run error names how to skip overbuild"
-[ ! -e "$T/state/runs.txt" ] && [ ! -e "$T/state/watch.txt" ] || fail "run with missing overbuild model starts no job"
+before="$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)"
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
+  --axes bogus 2>&1 >/dev/null)"
+[ "$?" = "2" ] || fail "unknown axis exits 2"
+[ "$err" = "review-pr: unknown axis: bogus (standards, spec, overbuild)" ] || fail "unknown axis names the axis: [$err]"
+[ ! -e "$T/state/runs.txt" ] || fail "unknown axis starts no job"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "$before" ] || fail "unknown axis makes no worktree"
 
-# --- case: --axes standards,spec does not need --overbuild-model; unknown axes fail
+# --- case: --axes standards,spec does not need --overbuild-model
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards DONE "VERDICT standards: APPROVE
@@ -2111,14 +2112,22 @@ start_review 7 --repo O/N --cwd "$T/clone" --model M --axes standards,spec >/dev
   fail "axes standards,spec starts both requested jobs"
 [ ! -e "$TMPDIR/review-pr/job-overbuild" ] || fail "axes standards,spec starts no overbuild job"
 bash "$REVIEW" collect job-standards job-spec >/dev/null 2>&1 || fail "axes standards,spec without --overbuild-model collects"
-reset_state
-before="$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)"
-err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
-  --axes bogus 2>&1 >/dev/null)"
-[ "$?" = "2" ] || fail "unknown axis exits 2"
-[ "$err" = "review-pr: unknown axis: bogus (standards, spec, overbuild)" ] || fail "unknown axis names the axis: [$err]"
-[ ! -e "$T/state/runs.txt" ] || fail "unknown axis starts no job"
-[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "$before" ] || fail "unknown axis makes no worktree"
+
+# --- case: default overbuild axis names its missing model for start and run
+for entry in start run; do
+  reset_state
+  if [ "$entry" = start ]; then
+    err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M 2>&1 >/dev/null)"; st=$?
+  else
+    err="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M 2>&1 >/dev/null)"; st=$?
+  fi
+  [ "$st" -eq 2 ] || fail "$entry without --overbuild-model exits 2 (got $st)"
+  grep -Fq -- "--overbuild-model" <<<"$err" || fail "$entry missing-model error names --overbuild-model"
+  grep -Fq -- "overbuild" <<<"$err" || fail "$entry missing-model error names the overbuild axis"
+  grep -Fq -- "--axes standards,spec" <<<"$err" || fail "$entry missing-model error names how to skip overbuild"
+  [ ! -e "$T/state/runs.txt" ] && [ ! -e "$T/state/watch.txt" ] || \
+    fail "$entry with missing overbuild model starts no job"
+done
 
 # --- case: collect --findings-out writes the file run --verify reads
 reset_state

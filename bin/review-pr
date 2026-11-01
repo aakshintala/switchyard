@@ -244,17 +244,10 @@ reap_log() {
     >>"$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
 }
 
-# trim_reap_log: keep the last 1000 reap-log lines. This is best-effort, and
-# the temporary copy stays in the log directory so the replacement is atomic.
+# trim_reap_log: keep the last 1000 reap-log lines. This is best-effort.
 trim_reap_log() {
-  local reap_file="$HOME/.cache/agents/review-pr-reap.log" reap_tmp
-  [ -f "$reap_file" ] || return 0
-  reap_tmp="$(mktemp "$(dirname "$reap_file")/.review-pr-reap.XXXXXX" 2>/dev/null)" || return 0
-  tail -n 1000 "$reap_file" >"$reap_tmp" 2>/dev/null &&
-    mv "$reap_tmp" "$reap_file" 2>/dev/null || {
-      rm -f "$reap_tmp" 2>/dev/null || true
-    }
-  return 0
+  local f="$HOME/.cache/agents/review-pr-reap.log"
+  tail -n 1000 "$f" >"$f.tmp" && mv "$f.tmp" "$f" || true
 }
 
 # prune_stale_runs: remove worktrees, run dirs and state files for runs nobody
@@ -269,10 +262,7 @@ trim_reap_log() {
 # then the guarded run dirs, then the state files.
 prune_stale_runs() {
   local sf all_list old_list stale_list done_list rd sib sib_rd sib_rec sib_status run_ok
-  if [ ! -d "$state_dir" ]; then
-    trim_reap_log
-    return 0
-  fi
+  [ -d "$state_dir" ] || return 0
   all_list="$(mktemp "${TMPDIR:-/tmp}/review-pr.prune-all.XXXXXX")"
   old_list="$(mktemp "${TMPDIR:-/tmp}/review-pr.prune-old.XXXXXX")"
   stale_list="$(mktemp "${TMPDIR:-/tmp}/review-pr.prune.XXXXXX")"
