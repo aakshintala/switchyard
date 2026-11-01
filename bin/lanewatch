@@ -1,12 +1,13 @@
 #!/bin/bash
-# lanewatch [--once] <run-dir> [ssh-target]: print each lane's first SETTLED
-# or STALL row, so a monitor need not poll. `--once` prints the state now and
-# exits; otherwise the watcher repeats every LANEWATCH_INTERVAL seconds.
-# Every ssh or lanestat failure prints WATCH-ERROR: silence means no lane
-# changed state, never that the watcher died. A queued prompt can return while
-# its tool call continues; lanestat classifies the last tool event, not that
-# trailing response. Never read a lane's fiber-<n>-pi.in: it is a FIFO.
+# lanewatch [--once] <run-dir> [ssh-target]: print dated SETTLED, STALL and
+# WEDGED lane rows once per settle minute, so a monitor need not poll.
+# `--once` prints the state now and exits; otherwise the watcher repeats every
+# LANEWATCH_INTERVAL seconds. Every ssh or lanestat failure prints WATCH-ERROR:
+# silence means no lane changed state, never that the watcher died. Never read
+# a lane's fiber-<n>-pi.in: it is a FIFO.
 set -u
+
+ts() { date "+%Y-%m-%d %H:%M:%S %Z"; }
 
 usage() {
   printf 'usage: lanewatch [--once] <run-dir> [ssh-target]\n' >&2
@@ -39,7 +40,8 @@ label=local
 seen=
 
 cycle() {
-  local out rc line n kind key quoted_run
+  local out rc line quoted_run n agev kind key at age_index state_index i state
+  local fields=()
   if [ -n "$target" ]; then
     printf -v quoted_run '%q' "$run"
     if out=$(ssh -o BatchMode=yes -o ConnectTimeout=20 "$target" bash -s -- "$quoted_run" \
@@ -47,7 +49,7 @@ cycle() {
       :
     else
       rc=$?
-      printf 'WATCH-ERROR %s lanestat exit %s\n' "$label" "$rc"
+      printf '%s WATCH-ERROR %s lanestat exit %s\n' "$(ts)" "$label" "$rc"
       return 0
     fi
   else
@@ -55,26 +57,41 @@ cycle() {
       :
     else
       rc=$?
-      printf 'WATCH-ERROR %s lanestat exit %s\n' "$label" "$rc"
+      printf '%s WATCH-ERROR %s lanestat exit %s\n' "$(ts)" "$label" "$rc"
       return 0
     fi
   fi
 
   while IFS= read -r line; do
-    case $line in
-      *SETTLED*|*STALL*) ;;
+    IFS=$' \t\n' read -r -a fields <<<"$line"
+    [ "${#fields[@]}" -gt 0 ] || continue
+    n=${fields[0]}
+    age_index=-1
+    for ((i = 0; i < ${#fields[@]}; i++)); do
+      case ${fields[$i]} in
+        age=*) age_index=$i; break ;;
+      esac
+    done
+    [ "$age_index" -ge 0 ] || continue
+    state_index=$((age_index + 1))
+    [ "$state_index" -lt "${#fields[@]}" ] || continue
+    agev=${fields[$age_index]#age=}
+    case $agev in ''|*[!0-9]*) agev=0 ;; esac
+    state=${fields[$state_index]}
+    case $state in
+      SETTLED|SETTLED-OLD) kind=settled ;;
+      STALL) kind=stall ;;
+      WEDGED) kind=wedged ;;
       *) continue ;;
     esac
-    n=${line%% *}
-    kind=stall
-    case $line in *SETTLED*) kind=settled ;; esac
-    key="$label-$n-$kind"
-    if printf '%s\n' "$seen" | grep -Fqx "$key"; then
+    at=$(( ($(date +%s) - agev) / 60 ))
+    key="$label-$n-$kind-$at"
+    if printf '%s\n' "$seen" | grep -Fqx -- "$key"; then
       continue
     fi
     seen="${seen}${key}
 "
-    printf '%s lane %s\n' "$label" "$line"
+    printf '%s %s lane %s\n' "$(ts)" "$label" "$line"
   done <<< "$out"
 }
 
