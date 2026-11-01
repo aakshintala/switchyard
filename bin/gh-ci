@@ -316,17 +316,23 @@ cmd_resample() {
   echo "no match in $max attempts"; return 1
 }
 
-# required_names <pr>: the required check names on the PR's base branch,
-# from rulesets and classic protection (a classic 404 means none), one per line.
-required_names() {
-  local base rules classic
-  base=$(gh api "repos/$REPO/pulls/$1" --jq .base.ref) && [ -n "$base" ] || return 1
+# required_names_for_base <base>: the required check names from rulesets and
+# classic protection (a classic 404 means none), one per line.
+required_names_for_base() {
+  local base="$1" rules classic
   rules=$(gh api "repos/$REPO/rules/branches/$base" \
     --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[]?.context') || return 1
   if ! classic=$(gh api "repos/$REPO/branches/$base/protection/required_status_checks" --jq '.contexts[]?' 2>&1); then
     case "$classic" in *"HTTP 404"*) classic="" ;; *) return 1 ;; esac
   fi
   printf '%s\n' "$rules" "$classic" | grep -v '^$' | sort -u || true
+}
+
+# required_names <pr>: the required check names on the PR's base branch.
+required_names() {
+  local base
+  base=$(gh api "repos/$REPO/pulls/$1" --jq .base.ref) && [ -n "$base" ] || return 1
+  required_names_for_base "$base"
 }
 
 # head_checks <sha>: the head's check runs as {name, bucket, run}, over REST: the
