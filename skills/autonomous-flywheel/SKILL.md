@@ -16,8 +16,11 @@ First run `implement` step 1 (check setup). Then, with the owner, at start (a ty
 - Merge terms: the cases that need the owner's call beyond the workflow doc's merge rule. Terms only add cases; the workflow doc's merge rule always holds. CI-boundary changes (workflows, rulesets) need the owner's call unless the terms include them. When the terms include them, these still need the owner's call (owner, 2026-10-08):
   - ruleset or branch-protection changes;
   - `secrets.*`, `permissions:`, `pull_request_target`, and release or publish workflows;
-  - adding a third-party action, or pinning one to a branch rather than a tag or SHA (a bump of a first-party `actions/*` action is a normal change);
-  - making the required check pass where the repo's CI doc says it fails, for example a gating job missing from the required aggregate job's `needs` (removed, or a new job never added), a renamed required check, or `continue-on-error`.
+  - adding a third-party action, or pinning one to a branch rather than a tag or SHA (a bump of a first-party `actions/*` action is a normal change).
+
+  Making the required check pass where the repo's CI doc says it fails (for example a gating job missing from the required aggregate job's `needs`, whether removed or never added, a renamed required check, or `continue-on-error`) needs approval from the CI contract's owner named in the merge terms (surveyor, for Fiber), not the owner's (owner, 2026-11-01). A doc edit in the same pull request is never that approval.
+
+  An owner-only item releases only on the owner's own words, quoted with where they were typed. A tracker comment's author field is never enough: every session posts with the owner's credentials, so an agent's comment shows the same login and `OWNER` association as the owner's.
 - `gh auth status` shows the `workflow` scope; without it, PRs touching `.github/workflows/*` fail to merge.
 - Whether the owner will be around for rulings (see `implement`).
 
