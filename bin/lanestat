@@ -24,8 +24,10 @@
 # waiting for the orchestrator; DONE-UNREAD names completed delegate jobs.
 # DEAD-PROVIDER means the last turn exhausted provider retries; do not re-wake.
 # With a non-`/tmp` lane TMPDIR, set DELEGATE_JOBS_DIR on the watcher to the
-# lane's delegate-jobs directory. lanewatch does not forward these variables or
-# LANESTAT_SETTLED_MAX over ssh; remote values come from the remote environment.
+# lane's delegate-jobs directory. DELEGATE_JOBS_DIR, TMPDIR,
+# JOB_RECORD_SYSTEM_DIR and LANESTAT_SETTLED_MAX are not forwarded over ssh;
+# remote values come from the remote environment. DONE-UNREAD lists finished
+# job ids from the lane's jsonl; send a message naming those jobs.
 #
 # A pid file outlives its lane and the host can reuse its number. Keep a row only
 # when `ps -o comm=` still names pi. A lane's TMPDIR is `~/.cache/tmp`, not
@@ -66,6 +68,24 @@ case $settled_max in
 esac
 
 now=$(date +%s)
+job_dirs=
+add_job_dir() {
+  job_dir=$1
+  [ -n "$job_dir" ] || return
+  if [ -n "$job_dirs" ] && printf '%s\n' "$job_dirs" | grep -Fqx -- "$job_dir"; then
+    return
+  fi
+  job_dirs="${job_dirs}${job_dirs:+
+}$job_dir"
+}
+if [ -n "${DELEGATE_JOBS_DIR:-}" ]; then
+  case $DELEGATE_JOBS_DIR in
+    /*) add_job_dir "$DELEGATE_JOBS_DIR" ;;
+    *) add_job_dir "$PWD/$DELEGATE_JOBS_DIR" ;;
+  esac
+fi
+add_job_dir "${TMPDIR:-/tmp}/delegate-jobs"
+add_job_dir "${JOB_RECORD_SYSTEM_DIR:-/tmp/delegate-jobs}"
 rows=0
 for pidfile in "$run"/fiber-*-pi.pid; do
   [ -f "$pidfile" ] || continue
@@ -93,13 +113,15 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     mtime=$(perl -e 'print ((stat $ARGV[0])[9])' "$jsonl" 2>/dev/null)
     [ -n "${mtime:-}" ] && age=$((now - mtime))
   fi
-  event_output=$(tail -c 20000000 "$jsonl" 2>/dev/null | perl -ne '
+  event_output=$(tail -c 20000000 "$jsonl" 2>/dev/null | LS_JOB_DIRS="$job_dirs" perl -ne '
     our @open;
     our $settled;
     our $after_prompt;
     our $dead_pending;
     our $dead;
     our $last_tool;
+    our @job_ids;
+    our %seen_job_ids;
     $last_tool = "none" unless defined $last_tool;
     if (/"type":"tool_execution_start","toolCallId":"([^"]*)","toolName":"([^"]*)"/) {
       push @open, [$1, $2];
@@ -170,6 +192,11 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         $after_prompt = 0;
       }
     }
+    if (/"type":"(?:tool_execution_end|message_end)"/) {
+      while (/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/g) {
+        push @job_ids, $1 unless $seen_job_ids{$1}++;
+      }
+    }
     END {
       if (@open) {
         print "STATE IN-TOOL " . $open[-1]->[1] . chr(10);
@@ -181,11 +208,90 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         print "STATE SETTLED" . chr(10);
       }
       print "LAST $last_tool" . chr(10);
+      if (@job_ids && eval { require JSON::PP; 1 }) {
+        my @dirs = split /\n/, defined $ENV{LS_JOB_DIRS} ? $ENV{LS_JOB_DIRS} : "";
+        my @finished_ids;
+        my $resolved = 0;
+        my $all_finished = 1;
+        for my $printed_id (@job_ids) {
+          my $id = $printed_id;
+          my %visited;
+          my $found_initial = 0;
+          my $invalid = 0;
+          my $finished = 0;
+          while (1) {
+            if ($visited{$id}++) {
+              $invalid = 1;
+              last;
+            }
+            my $path;
+            for my $dir (@dirs) {
+              next unless length $dir;
+              my $candidate = "$dir/$id.json";
+              if (-f $candidate) {
+                $path = $candidate;
+                last;
+              }
+            }
+            if (!defined $path) {
+              if (!$found_initial) {
+                last;
+              }
+              $invalid = 1;
+              last;
+            }
+            if (!$found_initial) {
+              $found_initial = 1;
+              $resolved++;
+            }
+            my $record_fh;
+            if (!open($record_fh, "<", $path)) {
+              $invalid = 1;
+              last;
+            }
+            local $/;
+            my $record_json = <$record_fh>;
+            close $record_fh;
+            my $record = eval { JSON::PP::decode_json($record_json) };
+            if ($@ || ref($record) ne "HASH") {
+              $invalid = 1;
+              last;
+            }
+            my $successor = $record->{supersededBy};
+            if (defined $successor && !ref($successor) && length $successor) {
+              if ($successor !~ /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/) {
+                $invalid = 1;
+                last;
+              }
+              $id = $successor;
+              next;
+            }
+            my $status;
+            if (ref($record->{result}) eq "HASH" && exists $record->{result}{status} && defined $record->{result}{status}) {
+              $status = $record->{result}{status};
+            } else {
+              $status = $record->{status};
+            }
+            $finished = 1 if defined $status && !ref($status) && ($status eq "DONE" || $status eq "DONE_WITH_CONCERNS");
+            last;
+          }
+          next unless $found_initial;
+          if ($invalid || !$finished) {
+            $all_finished = 0;
+          } else {
+            push @finished_ids, $printed_id;
+          }
+        }
+        if ($resolved && $all_finished) {
+          print "IDS " . join(" ", @finished_ids) . chr(10);
+        }
+      }
     }
   ')
   event_state=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 6) == "STATE " { print substr($0, 7); exit }')
   event_last=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 5) == "LAST " { print substr($0, 6); exit }')
   event_last=$(printf '%s' "${event_last:-none}" | perl -pe 's/\s/_/g')
+  event_ids=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 4) == "IDS " { print substr($0, 5); exit }')
   case $event_state in
     'IN-TOOL '*) state=$event_state ;;
     SETTLED|WEDGED)
@@ -208,6 +314,11 @@ for pidfile in "$run"/fiber-*-pi.pid; do
   esac
   case $state in
     WEDGED) state="$state last=$event_last" ;;
+  esac
+  case $state in
+    SETTLED|SETTLED-OLD)
+      [ -z "$event_ids" ] || state="$state DONE-UNREAD $event_ids"
+      ;;
   esac
   printf '%-6s %-8s %-18s age=%-6s %s\n' "$n" "$pid" "$info" "$age" "$state"
   rows=$((rows + 1))

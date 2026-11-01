@@ -9,7 +9,12 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-lanestat.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/run" "$T/empty" "$T/stub" "$T/ps"
+mkdir -p "$T/run" "$T/empty" "$T/stub" "$T/ps" \
+  "$T/tmp" "$T/tmp/delegate-jobs" "$T/delegate-jobs" "$T/system-jobs"
+DELEGATE_JOBS_DIR="$T/delegate-jobs"
+JOB_RECORD_SYSTEM_DIR="$T/system-jobs"
+TMPDIR="$T/tmp"
+export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR
 
 # The ordered keys are intentional: lanestat's toolName grep expects
 # "type":"tool_execution_start","toolCallId":"..","toolName":"..".
@@ -542,5 +547,158 @@ assert_row 759 'DEAD-PROVIDER unknown$' "$(<"$T/dead-provider.out")"
 expected_error="$(perl -e 'print "x" x 200')"
 assert_row 760 "DEAD-PROVIDER $expected_error\$" "$(<"$T/dead-provider.out")"
 assert_row 761 'SETTLED$' "$(<"$T/dead-provider.out")"
+
+# Delegate job records are resolved only for UUIDs printed by the lane.
+job_done=11111111-1111-4111-8111-111111111111
+job_concerns=22222222-2222-4222-8222-222222222222
+job_running=33333333-3333-4333-8333-333333333333
+job_blocked=44444444-4444-4444-8444-444444444444
+job_invalid=55555555-5555-4555-8555-555555555555
+job_unresolved=66666666-6666-4666-8666-666666666666
+job_tmp=77777777-7777-4777-8777-777777777777
+job_system=88888888-8888-4888-8888-888888888888
+job_first_wins=99999999-9999-4999-8999-999999999999
+job_sup_old=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+job_sup_finished=abababab-abab-4bab-8bab-abababababab
+job_sup_done=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+job_sup_running=dddddddd-dddd-4ddd-8ddd-dddddddddddd
+job_chain_a=eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee
+job_chain_b=ffffffff-ffff-4fff-8fff-ffffffffffff
+job_loop_a=01234567-89ab-4cde-8fab-0123456789ab
+job_loop_b=12345678-9abc-4def-8abc-123456789abc
+job_missing_link=23456789-abcd-4ef0-8abc-23456789abcd
+job_result_done=3456789a-bcde-4f01-8abc-3456789abcde
+job_result_blocked=456789ab-cdef-4012-8abc-456789abcdef
+job_result_empty=56789abc-def0-4123-8abc-56789abcdef0
+job_home=6789abcd-ef01-4234-8abc-6789abcdef01
+for job_id in "$job_done" "$job_concerns" "$job_sup_finished" "$job_sup_done" "$job_chain_b" "$job_result_done"; do
+  printf '{"status":"DONE"}\n' >"$DELEGATE_JOBS_DIR/$job_id.json"
+done
+printf '{"status":"DONE_WITH_CONCERNS"}\n' >"$DELEGATE_JOBS_DIR/$job_concerns.json"
+printf '{"status":"RUNNING"}\n' >"$DELEGATE_JOBS_DIR/$job_running.json"
+printf '{"status":"BLOCKED"}\n' >"$DELEGATE_JOBS_DIR/$job_blocked.json"
+printf 'not json\n' >"$DELEGATE_JOBS_DIR/$job_invalid.json"
+printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_sup_finished" \
+  >"$DELEGATE_JOBS_DIR/$job_sup_old.json"
+printf '{"status":"DONE","supersededBy":"%s"}\n' "$job_sup_running" \
+  >"$DELEGATE_JOBS_DIR/$job_sup_done.json"
+printf '{"status":"RUNNING"}\n' >"$DELEGATE_JOBS_DIR/$job_sup_running.json"
+printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_chain_b" \
+  >"$DELEGATE_JOBS_DIR/$job_chain_a.json"
+printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_done" \
+  >"$T/tmp/delegate-jobs/$job_chain_b.json"
+printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_loop_b" \
+  >"$DELEGATE_JOBS_DIR/$job_loop_a.json"
+printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_loop_a" \
+  >"$DELEGATE_JOBS_DIR/$job_loop_b.json"
+printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_unresolved" \
+  >"$DELEGATE_JOBS_DIR/$job_missing_link.json"
+printf '{"status":"RUNNING","result":{"status":"DONE"}}\n' \
+  >"$DELEGATE_JOBS_DIR/$job_result_done.json"
+printf '{"status":"DONE","result":{"status":"BLOCKED"}}\n' \
+  >"$DELEGATE_JOBS_DIR/$job_result_blocked.json"
+printf '{"status":"DONE","result":{"status":""}}\n' \
+  >"$DELEGATE_JOBS_DIR/$job_result_empty.json"
+printf '{"status":"DONE"}\n' >"$T/tmp/delegate-jobs/$job_tmp.json"
+printf '{"status":"DONE"}\n' >"$JOB_RECORD_SYSTEM_DIR/$job_system.json"
+printf '{"status":"RUNNING"}\n' >"$DELEGATE_JOBS_DIR/$job_first_wins.json"
+printf '{"status":"DONE"}\n' >"$T/tmp/delegate-jobs/$job_first_wins.json"
+mkdir -p "$T/home/.cache/tmp/delegate-jobs" "$T/no-tmp"
+printf '{"status":"DONE"}\n' >"$T/home/.cache/tmp/delegate-jobs/$job_home.json"
+job_run="$T/jobs-run"
+mkdir -p "$job_run"
+write_job_lane() {
+  local lane_pid=$1 job_id
+  shift
+  printf '%s\n' "$lane_pid" >"$job_run/fiber-$lane_pid-pi.pid"
+  printf 'pi\n' >"$T/ps/$lane_pid.comm"
+  printf 'S 00:01\n' >"$T/ps/$lane_pid.info"
+  : >"$job_run/fiber-$lane_pid-pi.jsonl"
+  for job_id in "$@"; do
+    printf '{"type":"tool_execution_end","toolCallId":"job","result":"%s"}\n' \
+      "$job_id" >>"$job_run/fiber-$lane_pid-pi.jsonl"
+  done
+  printf '{"type":"agent_settled"}\n' >>"$job_run/fiber-$lane_pid-pi.jsonl"
+}
+write_job_lane 800 "$job_done"
+write_job_lane 801 "$job_done" "$job_concerns"
+write_job_lane 802 "$job_done" "$job_running"
+write_job_lane 803 "$job_done" "$job_blocked"
+write_job_lane 804 "$job_done" "$job_invalid"
+write_job_lane 805
+write_job_lane 806 "$job_unresolved" "$job_done"
+write_job_lane 807 "$job_tmp"
+write_job_lane 808 "$job_system"
+write_job_lane 809 "$job_first_wins"
+write_job_lane 810 "$job_sup_old"
+write_job_lane 811 "$job_sup_done"
+write_job_lane 812 "$job_chain_a"
+write_job_lane 813 "$job_loop_a"
+write_job_lane 814 "$job_missing_link"
+write_job_lane 815 "$job_result_done"
+write_job_lane 816 "$job_result_blocked"
+write_job_lane 817 "$job_result_empty"
+write_job_lane 818
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}' \
+  "{\"type\":\"tool_execution_end\",\"toolCallId\":\"job\",\"result\":\"$job_done\"}" \
+  >"$job_run/fiber-819-pi.jsonl"
+printf '819\n' >"$job_run/fiber-819-pi.pid"
+printf 'pi\n' >"$T/ps/819.comm"
+printf 'S 00:01\n' >"$T/ps/819.info"
+printf '824\n' >"$job_run/fiber-824-pi.pid"
+printf 'pi\n' >"$T/ps/824.comm"
+printf 'S 00:01\n' >"$T/ps/824.info"
+printf '{"type":"message_end","message":{"role":"assistant","content":[],"timestamp":1700000000000},"jobId":"%s"}\n' "$job_done" \
+  >"$job_run/fiber-824-pi.jsonl"
+write_job_lane 820 "$job_home"
+write_job_lane 822 "$job_done"
+set_file_age "$job_run/fiber-822-pi.jsonl" 7201
+printf '%s\n' \
+  "{\"type\":\"tool_execution_end\",\"toolCallId\":\"job\",\"result\":\"$job_done\"}" \
+  '{"type":"auto_retry_end","success":false,"finalError":"provider exhausted"}' \
+  '{"type":"agent_settled"}' \
+  >"$job_run/fiber-823-pi.jsonl"
+printf '823\n' >"$job_run/fiber-823-pi.pid"
+printf 'pi\n' >"$T/ps/823.comm"
+printf 'S 00:01\n' >"$T/ps/823.info"
+run_stat "$job_run" >"$T/jobs.out" 2>"$T/jobs.err"; rc=$?
+[ "$rc" = 0 ] || fail "job fixture exits 0 (got $rc; $(<"$T/jobs.err"))"
+assert_row 800 "SETTLED DONE-UNREAD $job_done$" "$(<"$T/jobs.out")"
+assert_row 801 "SETTLED DONE-UNREAD $job_done $job_concerns$" "$(<"$T/jobs.out")"
+assert_row 802 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 803 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 804 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 805 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 806 "SETTLED DONE-UNREAD $job_done$" "$(<"$T/jobs.out")"
+assert_row 807 "SETTLED DONE-UNREAD $job_tmp$" "$(<"$T/jobs.out")"
+assert_row 808 "SETTLED DONE-UNREAD $job_system$" "$(<"$T/jobs.out")"
+assert_row 809 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 810 "SETTLED DONE-UNREAD $job_sup_old$" "$(<"$T/jobs.out")"
+assert_row 811 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 812 "SETTLED DONE-UNREAD $job_chain_a$" "$(<"$T/jobs.out")"
+assert_row 813 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 814 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 815 "SETTLED DONE-UNREAD $job_result_done$" "$(<"$T/jobs.out")"
+assert_row 816 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 817 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 818 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 819 'IN-TOOL bash$' "$(<"$T/jobs.out")"
+assert_row 824 'RUNNING$' "$(<"$T/jobs.out")"
+assert_row 822 "SETTLED-OLD DONE-UNREAD $job_done$" "$(LANESTAT_SETTLED_MAX=60 run_stat "$job_run")"
+env -u DELEGATE_JOBS_DIR TMPDIR="$T/no-tmp" JOB_RECORD_SYSTEM_DIR="$T/system-jobs" \
+  HOME="$T/home" PATH="$T/stub:$PATH" LANESTAT_TEST_NOW="$NOW" \
+  sh "$LANESTAT" "$job_run" >"$T/jobs-no-override.out" 2>"$T/jobs-no-override.err"
+assert_row 820 'SETTLED$' "$(<"$T/jobs-no-override.out")"
+env DELEGATE_JOBS_DIR="$T/home/.cache/tmp/delegate-jobs" TMPDIR="$T/no-tmp" \
+  JOB_RECORD_SYSTEM_DIR="$T/system-jobs" HOME="$T/home" PATH="$T/stub:$PATH" \
+  LANESTAT_TEST_NOW="$NOW" sh "$LANESTAT" "$job_run" \
+  >"$T/jobs-override.out" 2>"$T/jobs-override.err"
+assert_row 820 "SETTLED DONE-UNREAD $job_home$" "$(<"$T/jobs-override.out")"
+
+# The first directory wins; newer records and locators never override it.
+# The dead row takes precedence over finished jobs.
+# (The fixture's tool end above already carried this lane's id before death.)
+assert_row 823 'DEAD-PROVIDER provider exhausted$' "$(<"$T/jobs.out")"
 
 echo 'lanestat: all cases passed'
