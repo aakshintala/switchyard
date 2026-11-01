@@ -1505,7 +1505,7 @@ run_build
 [ "$RC" -eq 0 ] || fail "skipped verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "skipped verdict proceeds"
 
-# --- a missing verdict refuses, while --no-verifier fills only an empty pair ---
+# --- a missing verdict refuses; --no-verifier records or refreshes skipped ---
 setup_case verdict-none
 bash "$TKT_STATE" "$S" set plan_verdict "" || fail "clear plan verdict"
 bash "$TKT_STATE" "$S" set plan_verdict_base "" || fail "clear plan verdict base"
@@ -1528,6 +1528,7 @@ run_build --no-verifier
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--no-verifier preserves LINES"
 grep -q '^job|' "$T/calls.log" && fail "--no-verifier over LINES dispatches no tkt-job"
 expect_state plan_verdict lines "--no-verifier preserves stored verdict"
+expect_state plan_verdict_base "$H" "--no-verifier preserves rejection base"
 
 # --- accepted verdicts require the exact current plan base ---
 setup_case verdict-stale
@@ -1542,6 +1543,7 @@ run_build --no-verifier
 [ "$RC" -eq 1 ] || fail "--no-verifier does not replace a stale pair"
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "--no-verifier with stale verdict"
 expect_state plan_verdict ok "--no-verifier preserves stale verdict"
+expect_state plan_verdict_base 0000000000000000000000000000000000000000 "--no-verifier preserves stale verdict base"
 
 # --- verdict-ok-ancestor-unchanged: a descendant Base with no Files diff proceeds ---
 setup_case verdict-ok-ancestor-unchanged
