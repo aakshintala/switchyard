@@ -484,13 +484,26 @@ cmd_start() {
   }
 
   if [ -n "$head" ]; then
-    # Wait for the API to report the head the caller pushed; create nothing
-    # until it does.
+    if [ "${#head}" -lt 40 ]; then
+      resolved="$(git -C "$clone" rev-parse --verify --quiet "$head^{commit}" 2>/dev/null)" || true
+      if [ -z "$resolved" ]; then
+        git -C "$clone" fetch origin "pull/$pr/head" >&2 || true
+        resolved="$(git -C "$clone" rev-parse --verify --quiet "$head^{commit}" 2>/dev/null)" || true
+      fi
+      if [ -z "$resolved" ]; then
+        echo "review-pr: --head $head matches no commit, or more than one, in $clone" >&2
+        exit 2
+      fi
+      head="$resolved"
+      sha="$resolved"
+    fi
+    # Wait for the API to report the full head the caller pushed; create
+    # nothing until it does.
     sha="$head"
     waited=0
     while :; do
       api_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid 2>/dev/null | jq -r '.headRefOid // empty' 2>/dev/null)" || api_head=""
-      case "$api_head" in "$head"*) break;; esac
+      [ "$api_head" = "$head" ] && break
       if [ "$waited" -ge 30 ]; then
         echo "review-pr: PR $pr head is ${api_head:-none}, expected $head; gave up after 60s" >&2
         exit 1
@@ -535,19 +548,6 @@ cmd_start() {
   trap cleanup_on_fail EXIT
 
   git -C "$clone" fetch origin "pull/$pr/head" >&2
-
-  if [ -n "$head" ] && [ "${#head}" -lt 40 ]; then
-    if ! resolved="$(git -C "$clone" rev-parse --verify --quiet "$head^{commit}" 2>/dev/null)"; then
-      echo "review-pr: --head $head matches no commit, or more than one, in $clone" >&2
-      exit 2
-    fi
-    if [ "$resolved" != "$api_head" ]; then
-      echo "review-pr: --head $head matches no commit, or more than one, in $clone" >&2
-      exit 2
-    fi
-    head="$resolved"
-    sha="$resolved"
-  fi
 
   if [ -n "$head" ]; then
     if ! git -C "$clone" cat-file -e "$head^{commit}" 2>/dev/null; then

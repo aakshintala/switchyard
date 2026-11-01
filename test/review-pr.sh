@@ -56,6 +56,14 @@ git -C "$T/origin" update-ref refs/pull/9/head "$SYMLINK_SHA"
 EXPECTED_NEW_PID="$(git -C "$T/origin" diff "main...$NEW_SHA" | git patch-id --stable | awk '{print $1}')"
 [ -n "$EXPECTED_NEW_PID" ] || fail "fixture new patch-id computable"
 git clone -q "$T/origin" "$T/clone"
+# A second PR head is reachable only through its pull ref, not a cloned branch.
+git -C "$T/origin" checkout -q --detach "$FAKE_SHA"
+printf 'fetch-only head\n' >"$T/origin/fetch-only.txt"
+git -C "$T/origin" add fetch-only.txt
+git -C "$T/origin" commit -qm 'fetch-only head'
+FETCH_SHA="$(git -C "$T/origin" rev-parse HEAD)"
+git -C "$T/origin" update-ref refs/pull/10/head "$FETCH_SHA"
+git -C "$T/origin" checkout -q main
 EXPECTED_PID="$(git patch-id --stable <"$T/diff.txt" | awk '{print $1}')"
 [ -n "$EXPECTED_PID" ] || fail "fixture patch-id computable"
 
@@ -265,7 +273,9 @@ STATUS: DONE" 0
 
 assert_reap_line() {
   expected_run="$1"; expected_id="$2"; expected_reason="$3"; expected_path="path=$4"
-  awk -F '\t' -v host="$(hostname -s)" -v run="$expected_run" -v jid="$expected_id" \
+  tab="$(printf '\t')"
+  log="$HOME/.cache/agents/review-pr-reap.log"
+  awk -F "$tab" -v host="$(hostname -s)" -v run="$expected_run" -v jid="$expected_id" \
     -v reason="$expected_reason" -v path="$expected_path" '
     NF == 6 && length($1) == 20 && substr($1, 5, 1) == "-" && \
       substr($1, 8, 1) == "-" && substr($1, 11, 1) == "T" && \
@@ -273,7 +283,10 @@ assert_reap_line() {
       substr($1, 20, 1) == "Z" && $2 == host && $3 == run && \
       $4 == jid && $5 == reason && $6 == path { found++ }
     END { exit found != 1 }
-  ' "$HOME/.cache/agents/review-pr-reap.log" || fail "reap log line for $4"
+  ' "$log" || {
+    while IFS= read -r line; do printf 'reap log row: %s\n' "$line" >&2; done <"$log"
+    fail "reap log line for $4"
+  }
 }
 
 stale_ts_for() {
@@ -1350,7 +1363,7 @@ wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-standards")"
 [ "$(git -C "$wt" rev-parse HEAD)" = "$NEW_SHA" ] || fail "--head matching worktree head"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "--head matching collect exits 0"
 
-# --- case: --head waits for an API head that starts with the requested prefix
+# --- case: real-git short prefixes resolve before the API wait
 for prefix_length in 7 8 39; do
   reset_state
   write_record standards DONE "VERDICT standards: APPROVE
@@ -1367,90 +1380,53 @@ STATUS: DONE" 0
   bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "--head $prefix_length-character collect exits 0"
 done
 
-# --- case: a full --head bypasses short-prefix resolution
+# --- case: a short prefix fetches a PR head missing from the clone
 reset_state
 write_record standards DONE "VERDICT standards: APPROVE
 STATUS: DONE" 0
-printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
-git() {
-  if [ "$1" = "-C" ] && [ "$2" = "$T/clone" ] && [ "$3" = "rev-parse" ] && \
-    [ "$4" = "--verify" ] && [ "$5" = "--quiet" ]; then
-    printf '%s\n' "$FAKE_SHA"
-    return 0
-  fi
-  command git "$@"
-}
-export -f git
-start_review 8 --repo O/N --cwd "$T/clone" --axes standards --model M \
-  --head "$NEW_SHA" >/dev/null 2>&1 || fail "full --head skips short-prefix resolution"
-unset -f git
-[ ! -e "$T/state/sleeps.txt" ] || fail "full --head matches without waiting"
-bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "full --head collect exits 0"
+! git -C "$T/clone" cat-file -e "$FETCH_SHA^{commit}" 2>/dev/null || \
+  fail "fetch-only PR commit starts absent from the clone"
+printf '%s\n' "$FETCH_SHA" >"$T/state/heads.txt"
+fetch_prefix="${FETCH_SHA:0:7}"
+start_review 10 --repo O/N --cwd "$T/clone" --axes standards --model M \
+  --head "$fetch_prefix" >/dev/null 2>&1 || fail "short prefix fetches and starts the review"
+[ ! -e "$T/state/sleeps.txt" ] || fail "fetched short prefix matches without waiting"
+[ "$(sed -n 's/^sha=//p' "$TMPDIR/review-pr/job-standards")" = "$FETCH_SHA" ] || \
+  fail "fetched short prefix stores the full commit"
+wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-standards")"
+[ "$(git -C "$wt" rev-parse HEAD)" = "$FETCH_SHA" ] || fail "fetched short-prefix worktree commit"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "fetched short-prefix collect exits 0"
 
-# --- case: resolution must agree with the API head reported during the wait
+# --- case: a real unknown prefix exits before waiting or creating state
 reset_state
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
-head_prefix="${NEW_SHA:0:7}"
-git() {
-  if [ "$1" = "-C" ] && [ "$2" = "$T/clone" ] && [ "$3" = "rev-parse" ] && \
-    [ "$4" = "--verify" ] && [ "$5" = "--quiet" ]; then
-    printf '%s\n' "$FAKE_SHA"
-    return 0
+git -C "$T/clone" fetch origin pull/8/head >/dev/null 2>&1 || fail "unknown-prefix fixture fetch"
+unknown_n=0
+while :; do
+  unknown_prefix="$(printf '%07x' "$unknown_n")"
+  if ! git -C "$T/clone" rev-parse --verify --quiet \
+    "$unknown_prefix^{commit}" >/dev/null 2>&1; then
+    break
   fi
-  command git "$@"
-}
-export -f git
-err="$(start_review 8 --repo O/N --cwd "$T/clone" --axes standards --model M \
-  --head "$head_prefix" 2>&1 >/dev/null)"
-st=$?
-unset -f git
-[ "$st" -eq 2 ] || fail "a prefix resolving away from the API head exits 2"
-expected="review-pr: --head $head_prefix matches no commit, or more than one, in $T/clone"
-grep -Fxq "$expected" <<<"$err" || fail "mismatched --head resolution message: [$err]"
-[ ! -e "$TMPDIR/review-pr/job-standards" ] || fail "mismatched --head resolution saves no state"
-
-# --- case: a prefix that cannot be resolved in the clone exits 2
-reset_state
-write_record standards DONE "VERDICT standards: APPROVE
-STATUS: DONE" 0
-printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
-head_prefix="${NEW_SHA:0:7}"
-git() {
-  if [ "$1" = "-C" ] && [ "$2" = "$T/clone" ] && [ "$3" = "rev-parse" ] && \
-    [ "$4" = "--verify" ] && [ "$5" = "--quiet" ]; then
-    return 1
-  fi
-  command git "$@"
-}
-export -f git
-err="$(start_review 8 --repo O/N --cwd "$T/clone" --axes standards --model M \
-  --head "$head_prefix" 2>&1 >/dev/null)"
-st=$?
-unset -f git
-[ "$st" -eq 2 ] || fail "unresolvable --head prefix exits 2"
-expected="review-pr: --head $head_prefix matches no commit, or more than one, in $T/clone"
-grep -Fxq "$expected" <<<"$err" || fail "unresolvable --head prefix message: [$err]"
-[ ! -e "$TMPDIR/review-pr/job-standards" ] || fail "unresolvable --head prefix saves no state"
-
-# --- case: an unknown --head prefix waits and names the input when it gives up
-reset_state
-case "${FAKE_SHA:0:1}" in
-  0) unknown_prefix="1${FAKE_SHA:1:6}";;
-  *) unknown_prefix="0${FAKE_SHA:1:6}";;
-esac
+  unknown_n=$((unknown_n + 1))
+done
 err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --axes standards \
   --head "$unknown_prefix" 2>&1 >/dev/null)"
-[ "$?" -eq 1 ] || fail "unknown --head prefix gives up with exit 1"
-expected="review-pr: PR 8 head is $FAKE_SHA, expected $unknown_prefix; gave up after 60s"
-[ "$err" = "$expected" ] || fail "unknown --head prefix message: [$err]"
-[ "$(wc -l <"$T/state/sleeps.txt" | tr -d ' ')" = "30" ] || fail "unknown --head prefix keeps the existing wait count"
+st=$?
+[ "$st" -eq 2 ] || fail "unknown --head prefix exits 2"
+expected="review-pr: --head $unknown_prefix matches no commit, or more than one, in $T/clone"
+grep -Fxq "$expected" <<<"$err" || fail "unknown --head prefix message: [$err]"
+[ ! -e "$T/state/sleeps.txt" ] || fail "unknown --head prefix does not wait"
 [ ! -e "$T/state/runs.txt" ] || fail "unknown --head prefix launches no job"
+[ ! -e "$TMPDIR/review-pr/job-standards" ] || fail "unknown --head prefix saves no state"
 
 # --- case: --head rejects values outside 7 to 40 lowercase hex characters
 reset_state
-for bad_head in abc123 zzzzzzz "${NEW_SHA}a"; do
+err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
+  --head abc123 2>&1 >/dev/null)"
+[ "$?" -eq 2 ] || fail "--head abc123 is a usage error"
+expected='review-pr: --head needs a commit SHA of 7 to 40 hex characters, not abc123'
+[ "$err" = "$expected" ] || fail "--head abc123 message: [$err]"
+for bad_head in zzzzzzz "${NEW_SHA}a"; do
   err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
     --head "$bad_head" 2>&1 >/dev/null)"
   [ "$?" -eq 2 ] || fail "invalid --head $bad_head is a usage error"
