@@ -332,16 +332,54 @@ fn subscribe_resumed(conn: &mut FakeConn, session_id: &str) {
     ));
 }
 
-fn answer_prompt(
+struct PromptReply<'a, F> {
+    expected_prompt: Option<&'a str>,
+    text: &'a str,
+    questions: Option<Value>,
+    exit_code: i64,
+    after_prompt: F,
+}
+
+impl<'a, F> PromptReply<'a, F> {
+    fn completed(
+        expected_prompt: Option<&'a str>,
+        text: &'a str,
+        questions: Option<Value>,
+        after_prompt: F,
+    ) -> Self {
+        Self::with_exit(expected_prompt, text, questions, 0, after_prompt)
+    }
+
+    fn with_exit(
+        expected_prompt: Option<&'a str>,
+        text: &'a str,
+        questions: Option<Value>,
+        exit_code: i64,
+        after_prompt: F,
+    ) -> Self {
+        Self {
+            expected_prompt,
+            text,
+            questions,
+            exit_code,
+            after_prompt,
+        }
+    }
+}
+
+fn answer_prompt<F: FnOnce()>(
     conn: &mut FakeConn,
     session_id: &str,
     last_seq: u64,
-    expected_prompt: Option<&str>,
-    text: &str,
-    questions: Option<Value>,
-    exit_code: i64,
-    after_prompt: impl FnOnce(),
+    reply: PromptReply<'_, F>,
 ) {
+    let PromptReply {
+        expected_prompt,
+        text,
+        questions,
+        exit_code,
+        after_prompt,
+    } = reply;
     let prompt = conn.recv();
     assert_eq!(prompt["command"], "prompt", "{prompt}");
     assert_eq!(prompt["session_id"], session_id, "{prompt}");
@@ -432,7 +470,12 @@ fn fiber_run_books_subscription_cost_as_estimated() {
     let fake = e.fake_hub(1, move |_, session_id, conn| {
         accept_start(conn, session_id);
         subscribe_fresh(conn, session_id);
-        answer_prompt(conn, session_id, 0, Some(&expected), "DONE", None, 0, || {});
+        answer_prompt(
+            conn,
+            session_id,
+            0,
+            PromptReply::completed(Some(&expected), "DONE", None, || {}),
+        );
     });
 
     let id = e.run_write(prompt);
@@ -472,11 +515,7 @@ fn fiber_prompt_over_128_kib_reaches_the_hub() {
             conn,
             session_id,
             0,
-            Some(&fake_expected),
-            "DONE",
-            None,
-            0,
-            || {},
+            PromptReply::completed(Some(&fake_expected), "DONE", None, || {}),
         );
     });
 
@@ -544,11 +583,12 @@ fn fiber_needs_context_resume_continues_the_hub_session() {
                 conn,
                 session_id,
                 0,
-                Some(&first_expected),
-                "Waiting for an answer",
-                Some(json!(["Which codeword should I use?"])),
-                0,
-                || {},
+                PromptReply::completed(
+                    Some(&first_expected),
+                    "Waiting for an answer",
+                    Some(json!(["Which codeword should I use?"])),
+                    || {},
+                ),
             );
         } else {
             subscribe_resumed(conn, session_id);
@@ -556,11 +596,7 @@ fn fiber_needs_context_resume_continues_the_hub_session() {
                 conn,
                 session_id,
                 4,
-                Some(&answer_expected),
-                "DONE",
-                None,
-                0,
-                || {},
+                PromptReply::completed(Some(&answer_expected), "DONE", None, || {}),
             );
         }
     });
@@ -613,12 +649,22 @@ fn fiber_gate_failure_resume_repairs_in_the_session() {
         if index == 0 {
             accept_start(conn, session_id);
             subscribe_fresh(conn, session_id);
-            answer_prompt(conn, session_id, 0, None, "DONE", None, 0, || {});
+            answer_prompt(
+                conn,
+                session_id,
+                0,
+                PromptReply::completed(None, "DONE", None, || {}),
+            );
         } else {
             subscribe_resumed(conn, session_id);
-            answer_prompt(conn, session_id, 4, None, "DONE", None, 0, || {
-                std::fs::write(work.join("zebra-17.txt"), "ok").unwrap();
-            });
+            answer_prompt(
+                conn,
+                session_id,
+                4,
+                PromptReply::completed(None, "DONE", None, || {
+                    std::fs::write(work.join("zebra-17.txt"), "ok").unwrap();
+                }),
+            );
         }
     });
     let gate = "test -f zebra-17.txt";
@@ -666,7 +712,12 @@ fn resume_without_session_case(name: &str, session_id: Option<&str>) {
         } else {
             accept_start(conn, sid);
             subscribe_fresh(conn, sid);
-            answer_prompt(conn, sid, 0, Some(&expected), "DONE", None, 0, || {});
+            answer_prompt(
+                conn,
+                sid,
+                0,
+                PromptReply::completed(Some(&expected), "DONE", None, || {}),
+            );
         }
     });
     let id = e.run_write("Reply with the word DONE.");
@@ -735,7 +786,12 @@ fn fiber_thinking_suffix_reaches_hub_without_the_prefix() {
     let fake = e.fake_hub(1, |_, session_id, conn| {
         accept_start(conn, session_id);
         subscribe_fresh(conn, session_id);
-        answer_prompt(conn, session_id, 0, None, "DONE", None, 0, || {});
+        answer_prompt(
+            conn,
+            session_id,
+            0,
+            PromptReply::completed(None, "DONE", None, || {}),
+        );
     });
     let out = e.delegate(
         &["run", "--model", &high],
@@ -783,7 +839,12 @@ fn fiber_exited_error_maps_to_an_error_job() {
     let fake = e.fake_hub(1, |_, session_id, conn| {
         accept_start(conn, session_id);
         subscribe_fresh(conn, session_id);
-        answer_prompt(conn, session_id, 0, None, "provider failed", None, 1, || {});
+        answer_prompt(
+            conn,
+            session_id,
+            0,
+            PromptReply::with_exit(None, "provider failed", None, 1, || {}),
+        );
     });
     let id = e.run_write("Reply with DONE.");
     let done = e.wait_terminal(&id);
