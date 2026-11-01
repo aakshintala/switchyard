@@ -343,8 +343,8 @@ required_names() {
 # head_checks <sha>: the head's check runs as {name, bucket, run}, over REST: the
 # latest attempt of each check (filter=latest, so a rerun replaces its failed
 # first attempt), and the head's workflow runs for the workflow, event,
-# status and attempt of each check's run ID. Checks from a superseded run of
-# the same workflow and event are dropped; checks without an Actions run ID
+# status and attempt of each check's run ID. Checks from a run whose checks
+# duplicate a completed run's are ignored. Checks without an Actions run ID
 # are kept with run null. A check whose run is a rerun (attempt greater than
 # 1) that has not completed counts as pending, so a rerun's old failure never
 # settles the wait. A newer run with attempt 1 is a separate run: its checks
@@ -395,7 +395,7 @@ head_checks() {
                    else null end)}],
          dropped: $dropped}' ) || return 1
   printf '%s' "$payload" \
-    | jq -r '.dropped[]? | "gh-ci: dropped run \(.)"' >&2 \
+    | jq -r '.dropped[]? | "gh-ci: ignoring run \(.): its checks duplicate a completed run\u0027s"' >&2 \
     || return 1
   printf '%s' "$payload" | jq -c '.checks' || return 1
 }
@@ -509,8 +509,8 @@ cmd_verdict() {
 # A required check on the head counts whenever it ran. A required name of
 # the base branch with no check on the head counts as pending. When the
 # required names were read and there are none, the verdict is pass without
-# calling the checks API. Checks from superseded workflow runs are ignored; the newest-run
-# map comes from every check on the head, read in the same call.
+# calling the checks API. Checks from a run whose checks duplicate a completed run's are ignored;
+# the newest-run map comes from every check on the head, read in the same call.
 # --fail-fast: a failed or cancelled required check returns 1 at once, even while
 # another required check is still pending (the failing lines are the same).
 # --job <name>: wait on the newest run's job of exactly that name instead
@@ -531,7 +531,9 @@ cmd_verdict() {
 # Progress: each poll that reads the checks prints one stderr line,
 # "gh-ci: <head8> pending=<n> passed=<n> failing=<n>", when those counts differ
 # from the last line printed (the first readable poll always prints). Passed
-# counts pass and skipping; failing counts fail and cancel. Stdout is unchanged.
+# counts passing and skipped required checks only, not every check on the head,
+# and is not a merge gate (the exit code is); failing counts fail and cancel.
+# Stdout is unchanged.
 # wait_run <pr> <run> <timeout> <interval>: the --run path. With a non-empty
 # <pr> verifies the run is on the PR head, then polls the run's status to
 # completed. Prints
