@@ -149,10 +149,6 @@ assert_no_grant() {
   [ ! -d "$FW_RUN" ] || [ -z "$(find "$FW_RUN" -name 'fiber-*-fence-grant*.md' -print)" ] || fail "$1: wrote grant file"
 }
 
-assert_no_regular_grant() {
-  [ -z "$(find "$FW_RUN" -type f -name 'fiber-*-fence-grant*.md' -print)" ] || fail "$1: wrote regular grant file"
-}
-
 assert_no_probes() {
   [ ! -s "$T/gh.log" ] || fail "$1: called gh: $(cat "$T/gh.log")"
 }
@@ -220,12 +216,7 @@ assert_rc 0 'multiple brace expansion'
 assert_out "$(printf 'GRANT crates/tui/src/turn/group.rs\nGRANT crates/tui/src/turn/group_tests.rs\nGRANT')" 'multiple brace output'
 
 reset_case
-run_fg 77 --paths docs/tui.md --ranges=docs/tui.md:1-5
-assert_rc 0 'ranges equals form'
-grep -qxF 'Ranges: docs/tui.md:1-5' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'grant file records requested ranges'
-
-reset_case
-run_fg 77 --paths docs/tui.md --ranges='docs/{tui,tui}.md:1-2' --dry
+run_fg 77 --paths docs/tui.md --ranges 'docs/{tui,tui}.md:1-2' --dry
 assert_rc 0 'ranges brace expansion'
 
 reset_case
@@ -235,9 +226,14 @@ assert_out "$(printf 'GRANT crates/new/one.rs\nGRANT crates/new/two.rs\nGRANT')"
 
 reset_case
 write_blob docs/tui.md 'needle\n'
-run_fg 77 --paths docs/tui.md --expect=docs/tui.md:1:needle --dry
-assert_rc 0 'expect equals form'
-assert_out "$(printf 'GRANT docs/tui.md\nGRANT')" 'expect equals output'
+set_pr 11 fix/other docs/tui.md
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --ranges=docs/tui.md:1-5 --expect=docs/tui.md:1:needle --ignore-pr=11 --ignore-ticket=77
+assert_rc 0 'combined equals forms'
+assert_out "$(printf 'GRANT docs/tui.md\nGRANT')" 'combined equals forms output'
+grep -qxF 'Ranges: docs/tui.md:1-5' "$FW_RUN/fiber-88-fence-grant-1.md" || fail 'equals ranges recorded'
 
 reset_case
 run_fg 77 --paths docs/tui.md --reads='docs/{x}.md' --dry
@@ -385,24 +381,12 @@ run_fg 77 --paths docs/tui.md --ignore-pr 11 --dry
 assert_rc 0 'ignore PR holder'
 assert_out "$(printf 'GRANT docs/tui.md\nGRANT')" 'ignore PR output'
 reset_case
-set_pr 11 fix/other docs/tui.md
-run_fg 77 --paths docs/tui.md --ignore-pr=11 --dry
-assert_rc 0 'ignore PR equals form'
-
-reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --ignore-ticket 77 --dry
 assert_rc 0 'ignore ticket holder'
 assert_out "$(printf 'GRANT docs/tui.md\nGRANT')" 'ignore ticket output'
-reset_case
-printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
-CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
-export CLAUDE_JSON
-run_fg 88 --paths docs/tui.md --ignore-ticket=77 --dry
-assert_rc 0 'ignore ticket equals form'
-
 reset_case
 set_pr 11 x/77-slug docs/tui.md
 run_fg 77 --paths docs/tui.md --dry
@@ -596,7 +580,7 @@ assert_error 'Mac pi probe missing run directory' 'ERROR mac pi lanes: run direc
 
 reset_case
 mkdir "$FW_RUN/.fence-grant.lock"
-run_fg 77 --paths docs/tui.md
+FW_LOCK_TRIES=1 FW_LOCK_POLL=0 run_fg 77 --paths docs/tui.md
 assert_error 'grant lock timeout' "ERROR cannot lock $FW_RUN/.fence-grant.lock"
 reset_case
 mkdir "$FW_RUN/.fence-grant.lock"
@@ -611,7 +595,7 @@ ln -s "$T/missing-parent/no-such-dir/grant.md" "$FW_RUN/fiber-77-fence-grant-1.m
 run_fg 77 --paths docs/tui.md
 assert_rc 3 'grant write failure'
 assert_out "ERROR cannot write $FW_RUN/fiber-77-fence-grant-1.md" 'grant write failure output'
-assert_no_regular_grant 'grant write failure'
+[ -z "$(find "$FW_RUN" -type f -name 'fiber-*-fence-grant*.md' -print)" ] || fail 'grant write failure: wrote regular grant file'
 [ -L "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'write failure symlink fixture remains'
 
 # --- Exit 4: invalid grant meaning and suggestions ---------------------------
