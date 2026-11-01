@@ -1108,16 +1108,35 @@ fn last_seq_of(result: &serde_json::Value) -> Option<u64> {
     result.get("last_seq")?.as_u64()
 }
 
-/// One supervised turn through the hub: connect, `start` with
-/// `supervised: true`, `subscribe` at `full`, one `prompt`, read to
-/// `turn_completed`, `close`, read `fiber_exited` as the verdict. There is
-/// no `bin` field: nothing here spawns anything.
+/// A resumed run can be driven only when its replayed session start records
+/// that a program owns the session.
+fn resumed_supervised(fold: &[serde_json::Value]) -> bool {
+    fold.iter().any(|line| {
+        line.get("kind").and_then(|kind| kind.as_str()) == Some("session_started")
+            && line
+                .get("payload")
+                .and_then(|payload| payload.get("supervised"))
+                .and_then(|supervised| supervised.as_bool())
+                == Some(true)
+    })
+}
+
+fn resume_fold_end(kind: &str, value: &serde_json::Value, last_seq: u64) -> bool {
+    kind == "session_started" || value.get("seq").and_then(|seq| seq.as_u64()) == Some(last_seq)
+}
+
+/// One supervised turn through the hub: connect, start or resume, subscribe
+/// at `full`, send one `prompt`, read to `turn_completed`, `close`, then read
+/// `fiber_exited` as the verdict. There is no `bin` field: nothing here spawns
+/// anything.
 #[derive(Clone)]
 pub struct HubRequest {
     pub cwd: String,
     pub model: String,
     pub prompt: String,
     pub bounds: Bounds,
+    /// Existing session id; when set, the client skips `start`.
+    pub resume: Option<String>,
 }
 
 /// The run's handle from another thread: `kill` and `cancel` set the intent
@@ -1216,43 +1235,47 @@ fn drive_turn(
     };
     let mut rest = Rest::new(on, &req.bounds);
     let mut known = known_ids(&rest, &shared);
-    // start: no session_id, no content, supervised.
-    let start_id = new_command_id();
-    if !lock(&shared.out).send_checked(&start_command(&start_id, &req.cwd, &model)) {
-        if lock(&shared.out).intent == Intent::None {
-            return rest.crash(lost_before_start_text(&start_id));
-        }
-        // N2: the intent was set before the `start` line was written: no
-        // session to name, no `close`, and the run ends at once.
-        return rest.crash(stop_crash(&shared, None, intent_reason(&shared)));
-    }
-    rest.start_id = start_id.clone();
-    pause!(shared, Point::BeforeStartAnswer);
-    let session_id = match conn.await_ack(
-        &start_id,
-        &mut known,
-        &mut rest,
-        &shared,
-        ack_deadline(&shared, &req.bounds, "start"),
-        false,
-        |_| None,
-    ) {
-        WaitOutcome::Ack(Ack::Accepted { result }) => match start_session(&result) {
-            Ok(session_id) => session_id,
-            Err(text) => return rest.crash(text),
-        },
-        WaitOutcome::Ack(Ack::Rejected { code, message }) => {
-            return rest.crash(crash_text(format!("hub rejected start: {code}: {message}")));
-        }
-        WaitOutcome::Stopped(step) => {
-            if let Some(done) = apply_step(&mut conn, &mut rest, step) {
-                return done;
+    let session_id = if let Some(session_id) = req.resume.as_ref() {
+        session_id.clone()
+    } else {
+        // start: no session_id, no content, supervised.
+        let start_id = new_command_id();
+        if !lock(&shared.out).send_checked(&start_command(&start_id, &req.cwd, &model)) {
+            if lock(&shared.out).intent == Intent::None {
+                return rest.crash(lost_before_start_text(&start_id));
             }
-            return rest.crash(crash_text(
-                "protocol error: start wait stopped without an answer".to_string(),
-            ));
+            // N2: the intent was set before the `start` line was written: no
+            // session to name, no `close`, and the run ends at once.
+            return rest.crash(stop_crash(&shared, None, intent_reason(&shared)));
         }
-        WaitOutcome::Lost => return rest.crash(lost_before_start_text(&start_id)),
+        rest.start_id = start_id.clone();
+        pause!(shared, Point::BeforeStartAnswer);
+        match conn.await_ack(
+            &start_id,
+            &mut known,
+            &mut rest,
+            &shared,
+            ack_deadline(&shared, &req.bounds, "start"),
+            false,
+            |_| None,
+        ) {
+            WaitOutcome::Ack(Ack::Accepted { result }) => match start_session(&result) {
+                Ok(session_id) => session_id,
+                Err(text) => return rest.crash(text),
+            },
+            WaitOutcome::Ack(Ack::Rejected { code, message }) => {
+                return rest.crash(crash_text(format!("hub rejected start: {code}: {message}")));
+            }
+            WaitOutcome::Stopped(step) => {
+                if let Some(done) = apply_step(&mut conn, &mut rest, step) {
+                    return done;
+                }
+                return rest.crash(crash_text(
+                    "protocol error: start wait stopped without an answer".to_string(),
+                ));
+            }
+            WaitOutcome::Lost => return rest.crash(lost_before_start_text(&start_id)),
+        }
     };
     rest.session_id = Some(session_id.clone());
     lock(&shared.out).session_id = Some(session_id.clone());
@@ -1275,12 +1298,13 @@ fn drive_turn(
     }
     rest.sub_id = sub_id.clone();
     pause!(shared, Point::BeforeSubscribeAck);
+    let subscribe_wait = ack_deadline(&shared, &req.bounds, "subscribe");
     match conn.await_ack(
         &sub_id,
         &mut known,
         &mut rest,
         &shared,
-        ack_deadline(&shared, &req.bounds, "subscribe"),
+        subscribe_wait,
         false,
         |_| None,
     ) {
@@ -1296,13 +1320,14 @@ fn drive_turn(
             }
         }
         WaitOutcome::Ack(Ack::Rejected { code, message }) => {
-            // No subscription was ever held, so the cleanup re-subscribes.
+            // A rejected resumed subscribe did not open this client's
+            // subscription, so it must not issue cleanup commands.
+            let text = crash_text(format!("hub rejected subscribe: {code}: {message}"));
+            if req.resume.is_some() {
+                return rest.crash(text);
+            }
             lock(&shared.out).subscribed = false;
-            return fail_with_cleanup(
-                &mut conn,
-                &mut rest,
-                crash_text(format!("hub rejected subscribe: {code}: {message}")),
-            );
+            return fail_with_cleanup(&mut conn, &mut rest, text);
         }
         WaitOutcome::Stopped(step) => {
             if let Some(done) = apply_step(&mut conn, &mut rest, step) {
@@ -1321,6 +1346,60 @@ fn drive_turn(
     // prompt with the client-minted id C, unless the run is stopping: then
     // go to the read loop in the stopping state (R2).
     pause!(shared, Point::AfterSubscribeAck);
+    let mut resume_buffer = Vec::new();
+    if req.resume.is_some() {
+        let Some(last_seq) = rest.last_seq else {
+            return rest.crash(crash_text(format!(
+                "session {session_id} was not started supervised; start a new job"
+            )));
+        };
+        rest.ack = Some(subscribe_wait);
+        let mut fold = Vec::new();
+        loop {
+            pause!(shared, Point::BeforeRead);
+            match conn.next_line(rest.bounds.poll_slice) {
+                Next::Tick => {
+                    if let Some(Step::Fail(text)) = rest.check(&shared, now(&shared)) {
+                        rest.ack = None;
+                        return fail_with_cleanup(&mut conn, &mut rest, text);
+                    }
+                }
+                Next::Lost => {
+                    rest.ack = None;
+                    return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+                }
+                Next::Line(raw) => {
+                    let (kind, value) = match parse_line(&raw) {
+                        Ok(parsed) => parsed,
+                        Err(text) => {
+                            rest.ack = None;
+                            return fail_with_cleanup(&mut conn, &mut rest, text);
+                        }
+                    };
+                    if kind == "repository_code_offered" {
+                        rest.ack = None;
+                        return fail_with_cleanup(&mut conn, &mut rest, repository_offer_text());
+                    }
+                    let fold_end = resume_fold_end(&kind, &value, last_seq);
+                    fold.push(value);
+                    resume_buffer.push(raw);
+                    if fold_end {
+                        break;
+                    }
+                    if let Some(Step::Fail(text)) = rest.check(&shared, now(&shared)) {
+                        rest.ack = None;
+                        return fail_with_cleanup(&mut conn, &mut rest, text);
+                    }
+                }
+            }
+        }
+        rest.ack = None;
+        if !resumed_supervised(&fold) {
+            return rest.crash(crash_text(format!(
+                "session {session_id} was not started supervised; start a new job"
+            )));
+        }
+    }
     let prompt_id = new_command_id();
     pause!(shared, Point::BeforePromptWrite);
     // The prompt ack budget is one total (R17): a `turn_completed` read
@@ -1328,45 +1407,60 @@ fn drive_turn(
     // deadline is fixed before the loop instead of minting a fresh one per
     // pass.
     let prompt_wait = ack_deadline(&shared, &req.bounds, "prompt");
-    let prompt_acked =
+    let prompt_sent =
         if lock(&shared.out).send_checked(&prompt_command(&prompt_id, &session_id, &req.prompt)) {
             rest.prompt_id = prompt_id.clone();
-            loop {
-                match conn.await_ack(
-                    &prompt_id,
-                    &mut known,
-                    &mut rest,
-                    &shared,
-                    prompt_wait,
-                    true,
-                    |_| None,
-                ) {
-                    WaitOutcome::Ack(Ack::Accepted { .. }) => break true,
-                    WaitOutcome::Ack(Ack::Rejected { code, message }) => {
-                        return fail_with_cleanup(
-                            &mut conn,
-                            &mut rest,
-                            crash_text(format!("hub rejected prompt: {code}: {message}")),
-                        );
-                    }
-                    WaitOutcome::Stopped(step) => {
-                        if let Some(done) = apply_step(&mut conn, &mut rest, step) {
-                            return done;
-                        }
-                        // A `turn_completed` read before the ack only folds and
-                        // closes once: the wait ends at the ack line, so keep
-                        // waiting for it.
-                    }
-                    WaitOutcome::Lost => {
-                        return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
-                    }
-                }
-            }
+            true
         } else if lock(&shared.out).intent == Intent::None {
             return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
         } else {
             false
         };
+    for raw in &resume_buffer {
+        let step = rest.handle_buffered(raw, &shared);
+        let step = match step {
+            Step::Continue | Step::CloseOnce => rest.check(&shared, now(&shared)).unwrap_or(step),
+            end_or_fail => end_or_fail,
+        };
+        if let Some(done) = apply_step(&mut conn, &mut rest, step) {
+            return done;
+        }
+    }
+    let prompt_acked = if prompt_sent {
+        loop {
+            match conn.await_ack(
+                &prompt_id,
+                &mut known,
+                &mut rest,
+                &shared,
+                prompt_wait,
+                true,
+                |_| None,
+            ) {
+                WaitOutcome::Ack(Ack::Accepted { .. }) => break true,
+                WaitOutcome::Ack(Ack::Rejected { code, message }) => {
+                    return fail_with_cleanup(
+                        &mut conn,
+                        &mut rest,
+                        crash_text(format!("hub rejected prompt: {code}: {message}")),
+                    );
+                }
+                WaitOutcome::Stopped(step) => {
+                    if let Some(done) = apply_step(&mut conn, &mut rest, step) {
+                        return done;
+                    }
+                    // A `turn_completed` read before the ack only folds and
+                    // closes once: the wait ends at the ack line, so keep
+                    // waiting for it.
+                }
+                WaitOutcome::Lost => {
+                    return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+                }
+            }
+        }
+    } else {
+        false
+    };
     if prompt_acked {
         // Phase bounds run from the `prompt` ack to the verdict (R17).
         let at = now(&shared);
@@ -1579,6 +1673,22 @@ impl<'a> Rest<'a> {
             return Step::Fail(repository_offer_text());
         }
         Step::Continue
+    }
+
+    /// Fold the buffered replay prefix after the prompt is sent. The first
+    /// `session_started` line seeds state even though its sequence is at or
+    /// below the subscribe fold point; other lines keep normal live admission.
+    fn handle_buffered(&mut self, raw: &[u8], shared: &Shared) -> Step {
+        let (kind, _) = match parse_line(raw) {
+            Ok(parsed) => parsed,
+            Err(text) => return Step::Fail(text),
+        };
+        if kind == "session_started" {
+            self.fold(raw);
+            Step::Continue
+        } else {
+            self.handle_live(raw, shared)
+        }
     }
 
     /// Lines read once the fold point is known. A `stream_closed` drops the
@@ -3015,6 +3125,7 @@ mod tests {
             model: "fiber/m".to_string(),
             prompt: "go".to_string(),
             bounds: Bounds::default(),
+            resume: None,
         }
     }
 
@@ -3027,16 +3138,83 @@ mod tests {
         (res, received)
     }
 
+    fn resume_request() -> HubRequest {
+        let mut request = hub_request();
+        request.resume = Some("s_9".to_string());
+        request
+    }
+
+    fn run_resume_case(
+        script: impl FnOnce(&mut FakeSrv) + Send + 'static,
+    ) -> (BackendResult, Vec<String>) {
+        let (path, rx) = spawn_fake(script);
+        let res = run_turn(&resume_request(), &path, &|_| {});
+        let received = join_fake(&path, rx);
+        (res, received)
+    }
+
     fn ev(kind: &str, seq: u64, payload: serde_json::Value) -> String {
+        ev_for_session("s_1", kind, seq, payload)
+    }
+
+    fn ev_for_session(
+        session_id: &str,
+        kind: &str,
+        seq: u64,
+        payload: serde_json::Value,
+    ) -> String {
         serde_json::json!({
             "kind": kind,
-            "session_id": "s_1",
+            "session_id": session_id,
             "ts": 1,
             "schema_version": 1,
             "seq": seq,
             "payload": payload,
         })
         .to_string()
+    }
+
+    fn resumed_session_started_ev(seq: u64, supervised: Option<bool>) -> String {
+        let mut payload = serde_json::json!({
+            "workspace": "/w",
+            "variables": {"path": "/bin", "names": []},
+        });
+        if let Some(supervised) = supervised {
+            payload["supervised"] = serde_json::json!(supervised);
+        }
+        ev_for_session("s_9", "session_started", seq, payload)
+    }
+
+    fn resumed_turn_started_ev(prompt_id: &str, seq: u64) -> String {
+        ev_for_session(
+            "s_9",
+            "turn_started",
+            seq,
+            serde_json::json!({"input": [{
+                "command_id": prompt_id,
+                "content": [{"type": "text", "text": "go"}],
+                "source": "driver",
+                "type": "message",
+            }]}),
+        )
+    }
+
+    fn resumed_turn_completed_ev(seq: u64) -> String {
+        ev_for_session(
+            "s_9",
+            "turn_completed",
+            seq,
+            serde_json::json!({"outcome": "completed"}),
+        )
+    }
+
+    fn resumed_exited_ev(seq: u64, text: &str) -> String {
+        ev_for_session(
+            "s_9",
+            "fiber_exited",
+            seq,
+            serde_json::json!({"exit_code": 0, "text": text}),
+        )
     }
 
     fn turn_started_ev(cmd_id: &str, seq: u64) -> String {
@@ -3174,6 +3352,242 @@ mod tests {
             crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
                 == crate::types::RunStatus::Done
         );
+    }
+
+    #[test]
+    fn resumed_run_subscribes_without_start_and_uses_the_live_exit() {
+        let activities = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&activities);
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (sub_id, sub) = recv_id(srv);
+            assert_eq!(sub["command"], "subscribe");
+            assert_eq!(sub["session_id"], "s_9");
+            assert_eq!(sub["args"]["level"], "full");
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 5})));
+            srv.send(&resumed_session_started_ev(1, Some(true)));
+            srv.send(&resumed_exited_ev(4, "stale"));
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            assert_eq!(prompt["session_id"], "s_9");
+            assert_eq!(prompt["args"]["content"][0]["text"], "go");
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.send(&resumed_turn_started_ev(&prompt_id, 6));
+            srv.send(&resumed_turn_completed_ev(7));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["session_id"], "s_9");
+            srv.send(&resumed_exited_ev(8, "DONE"));
+            srv.expect_eof();
+        });
+        let request = resume_request();
+        let on = |event| {
+            if matches!(event, Event::Activity) {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+        let res = run_turn(&request, &path, &on);
+        let received = join_fake(&path, rx);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.clean_exit);
+        assert_eq!(res.session_id.as_deref(), Some("s_9"));
+        assert_eq!(activities.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            received_commands(&received),
+            ["subscribe", "prompt", "close"]
+        );
+        assert_eq!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit),
+            crate::types::RunStatus::Done
+        );
+    }
+
+    #[test]
+    fn kill_before_resumed_subscribe_write_closes_known_session() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (_, summary) = recv_id(srv);
+            assert_eq!(summary["command"], "subscribe");
+            assert_eq!(summary["session_id"], "s_9");
+            assert_eq!(summary["args"]["level"], "summary");
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["session_id"], "s_9");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let run = spawn_turn_with(
+            resume_request(),
+            path.clone(),
+            gate_hooks(Point::BeforeSubscribeWrite, gate_rx, fired_tx),
+        );
+        let control = run.control.clone();
+        let result_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("paused before subscribe");
+        control.kill();
+        gate_tx.send(()).expect("release driver");
+        let res = result_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        drop(control);
+        let received = join_fake(&path, rx);
+        assert!(res.text.contains("killed by the caller"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_9"));
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(received_commands(&received), ["subscribe", "close"]);
+    }
+
+    #[test]
+    fn rejected_resumed_subscribe_sends_nothing_else() {
+        let (res, received) = run_resume_case(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (sub_id, sub) = recv_id(srv);
+            assert_eq!(sub["command"], "subscribe");
+            assert_eq!(sub["session_id"], "s_9");
+            srv.send(&rejected(Some(&sub_id), "session_not_found", "gone"));
+            srv.expect_eof();
+        });
+        assert!(res.text.contains("session_not_found"), "{}", res.text);
+        assert_eq!(res.session_id.as_deref(), Some("s_9"));
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(received_commands(&received), ["subscribe"]);
+    }
+
+    #[test]
+    fn resumed_run_refuses_a_missing_or_false_supervised_marker() {
+        for supervised in [None, Some(false)] {
+            let (res, received) = run_resume_case(move |srv| {
+                srv.send(&hello(serde_json::json!(1), "9.9.9"));
+                let (sub_id, _) = recv_id(srv);
+                srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 5})));
+                if let Some(supervised) = supervised {
+                    srv.send(&resumed_session_started_ev(1, Some(supervised)));
+                } else {
+                    srv.send(&ev_for_session(
+                        "s_9",
+                        "assistant_message_delta",
+                        5,
+                        serde_json::json!({}),
+                    ));
+                }
+                srv.expect_eof();
+            });
+            assert!(
+                res.text
+                    .contains("session s_9 was not started supervised; start a new job"),
+                "{}",
+                res.text
+            );
+            assert_eq!(res.session_id.as_deref(), Some("s_9"));
+            assert_eq!(res.is_error, Some(true));
+            assert_eq!(received_commands(&received), ["subscribe"]);
+        }
+    }
+
+    #[test]
+    fn resumed_fold_stops_on_the_last_seq_when_session_started_is_absent() {
+        let (res, received) = run_resume_case(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 5})));
+            srv.send(&ev_for_session(
+                "s_9",
+                "assistant_message_delta",
+                4,
+                serde_json::json!({}),
+            ));
+            srv.send(&ev_for_session(
+                "s_9",
+                "assistant_message_delta",
+                5,
+                serde_json::json!({}),
+            ));
+            srv.shutdown_write();
+            srv.expect_eof();
+        });
+        assert!(
+            res.text
+                .contains("session s_9 was not started supervised; start a new job"),
+            "{}",
+            res.text
+        );
+        assert_eq!(received_commands(&received), ["subscribe"]);
+    }
+
+    #[test]
+    fn resumed_fold_end_uses_session_start_or_exact_last_seq() {
+        let value = |seq| serde_json::json!({"seq": seq});
+        assert!(!resume_fold_end("assistant_message_delta", &value(4), 5));
+        assert!(resume_fold_end("assistant_message_delta", &value(5), 5));
+        assert!(!resume_fold_end("assistant_message_delta", &value(6), 5));
+        assert!(resume_fold_end("session_started", &value(1), 5));
+    }
+
+    #[test]
+    fn resumed_fold_without_last_seq_refuses_without_reading() {
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({})));
+            srv.expect_eof();
+        });
+        let mut request = resume_request();
+        request.bounds.ack_wait = Duration::from_millis(50);
+        let res = run_turn(&request, &path, &|_| {});
+        let received = join_fake(&path, rx);
+        assert!(
+            res.text
+                .contains("session s_9 was not started supervised; start a new job"),
+            "{}",
+            res.text
+        );
+        assert_eq!(received_commands(&received), ["subscribe"]);
+    }
+
+    #[test]
+    fn resumed_fold_read_uses_the_subscribe_ack_deadline() {
+        let (fired_tx, fired_rx) = mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (release_fake_tx, release_fake_rx) = mpsc::channel::<()>();
+        let (path, rx) = spawn_fake(move |srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({"last_seq": 5})));
+            release_fake_rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("test releases fake after deadline");
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            assert_eq!(close["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let (hooks, clock) =
+            gated_clock(Instant::now(), Point::AfterSubscribeAck, gate_rx, fired_tx);
+        let run = spawn_turn_with(resume_request(), path.clone(), hooks);
+        let result_rx = drive_async(run);
+        fired_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("subscribe ack received and deadline armed");
+        clock.jump(ACK_WAIT);
+        gate_tx.send(()).expect("release driver");
+        let res = result_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("result");
+        release_fake_tx.send(()).expect("release fake");
+        let received = join_fake(&path, rx);
+        assert!(
+            res.text
+                .contains("no answer to `subscribe` within the ack bound"),
+            "{}",
+            res.text
+        );
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(received_commands(&received), ["subscribe", "close"]);
     }
 
     fn received_last(received: &[String]) -> String {
