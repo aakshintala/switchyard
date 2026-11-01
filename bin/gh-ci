@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gh-ci: quiet, low-call GitHub CI helpers for agent flywheels.
 # Usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>
-#        gh-ci resample <pr> "<job name>" --until <regex> [--max <n>]
+#        gh-ci verdict <branch-or-sha> | gh-ci resample <pr> "<job name>" --until <regex> [--max <n>]
 #        gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)
 # Exit codes: 0 ok, 1 failure, 2 usage, 3 merge conflict (snapshot and
 # watch-verified at once; wait after 30 s of DIRTY re-checks), 124 wait timeout.
@@ -12,7 +12,7 @@
 set -euo pipefail
 usage() {
   echo "usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>" >&2
-  echo "       gh-ci resample <pr> \"<job name>\" --until <regex> [--max <n>]" >&2
+  echo "       gh-ci verdict <branch-or-sha> | resample <pr> \"<job name>\" --until <regex> [--max <n>]" >&2
   echo "       gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)" >&2
   echo "       every GitHub subcommand takes --repo OWNER/NAME (overrides GH_CI_REPO and the checkout's origin)" >&2
   exit 2
@@ -316,17 +316,23 @@ cmd_resample() {
   echo "no match in $max attempts"; return 1
 }
 
-# required_names <pr>: the required check names on the PR's base branch,
-# from rulesets and classic protection (a classic 404 means none), one per line.
-required_names() {
-  local base rules classic
-  base=$(gh api "repos/$REPO/pulls/$1" --jq .base.ref) && [ -n "$base" ] || return 1
+# required_names_for_base <base>: the required check names from rulesets and
+# classic protection (a classic 404 means none), one per line.
+required_names_for_base() {
+  local base="$1" rules classic
   rules=$(gh api "repos/$REPO/rules/branches/$base" \
     --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[]?.context') || return 1
   if ! classic=$(gh api "repos/$REPO/branches/$base/protection/required_status_checks" --jq '.contexts[]?' 2>&1); then
     case "$classic" in *"HTTP 404"*) classic="" ;; *) return 1 ;; esac
   fi
   printf '%s\n' "$rules" "$classic" | grep -v '^$' | sort -u || true
+}
+
+# required_names <pr>: the required check names on the PR's base branch.
+required_names() {
+  local base
+  base=$(gh api "repos/$REPO/pulls/$1" --jq .base.ref) && [ -n "$base" ] || return 1
+  required_names_for_base "$base"
 }
 
 # head_checks <sha>: the head's check runs as {name, bucket, run}, over REST: the
@@ -387,6 +393,93 @@ head_checks() {
     | jq -r '.dropped[]? | "gh-ci: dropped run \(.)"' >&2 \
     || return 1
   printf '%s' "$payload" | jq -c '.checks' || return 1
+}
+
+# verdict <branch-or-sha>: judge this commit's checks against the default
+# branch's required names. Failed checks are tagged REQUIRED or NON-BLOCKING.
+cmd_verdict() {
+  [ "$#" -eq 1 ] || usage
+  local ref="$1" sha="" err="" errf base names req checks judged rc=0
+  case "$ref" in
+    ''|-*|/*|*/|*..*|*\?*|*\#*|*\%*) usage;;
+  esac
+  [[ ! "$ref" =~ [[:space:]] ]] || usage
+
+  errf="$(mktemp)"
+  sha=$(gh api "repos/$REPO/commits/$ref" --jq .sha 2>"$errf") || rc=$?
+  err=$(cat "$errf"); rm -f "$errf"
+  if [ "$rc" -ne 0 ]; then
+    case "$err" in
+      *"HTTP 404"*|*"HTTP 422"*|*"Not Found"*|*"No commit found"*)
+        echo "gh-ci: ref $ref not found in $REPO" >&2
+        return 2;;
+      *)
+        [ -z "$err" ] || printf '%s\n' "$err" >&2
+        echo "gh-ci: cannot resolve ref $ref in $REPO" >&2
+        return 1;;
+    esac
+  fi
+  if [[ ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "gh-ci: cannot resolve ref $ref in $REPO to a commit SHA" >&2
+    return 1
+  fi
+
+  base=$(gh api "repos/$REPO" --jq .default_branch) \
+    || { echo "gh-ci: cannot read default branch for $REPO" >&2; return 1; }
+  if [ -z "$base" ]; then
+    echo "gh-ci: cannot read default branch for $REPO" >&2
+    return 1
+  fi
+  if ! names=$(required_names_for_base "$base"); then
+    echo "gh-ci: cannot read required checks for $base in $REPO" >&2
+    return 1
+  fi
+  if ! req=$(printf '%s\n' "$names" | jq -Rsc 'split("\n") | map(select(. != ""))'); then
+    echo "gh-ci: cannot parse required checks for $base in $REPO" >&2
+    return 1
+  fi
+  if ! checks=$(head_checks "$sha"); then
+    echo "gh-ci: cannot read checks for $sha in $REPO" >&2
+    return 1
+  fi
+  if ! judged=$(jq -nr --argjson checks "$checks" --argjson req "$req" '
+    {checks: $checks, req: $req}
+    | .checks as $checks
+    | .req as $required
+    | if ($checks | type) != "array" or ($required | type) != "array" then
+        error("checks and required names must be arrays")
+      else
+        ([$checks[]
+          | select(.bucket == "fail" or .bucket == "cancel")
+          | .name as $name
+          | select(($required | index($name)) != null)
+          | $name | gsub("[\\r\\n]"; " ")] | unique | sort) as $required_failures
+        | ([$checks[]
+          | select(.bucket == "fail" or .bucket == "cancel")
+          | .name as $name
+          | select(($required | index($name)) == null)
+          | $name | gsub("[\\r\\n]"; " ")] | unique | sort) as $other_failures
+        | any($required[];
+            . as $name
+            | ([$checks[] | select(.name == $name)] as $named
+               | ($named | length) == 0
+                 or any($named[]; .bucket != "pass" and .bucket != "skipping"
+                                    and .bucket != "fail" and .bucket != "cancel"))) as $pending
+        | (if ($required_failures | length) > 0 then "RED"
+           elif $pending then "NOT YET"
+           elif ($other_failures | length) > 0 then "NOT RED"
+           else "GREEN" end) as $verdict
+        | ([$verdict]
+           + ($required_failures | map("REQUIRED: " + .))
+           + ($other_failures | map("NON-BLOCKING: " + .)))[]
+      end
+  '); then
+    echo "gh-ci: cannot judge checks for $sha in $REPO" >&2
+    return 1
+  fi
+  [ "$checks" != "[]" ] || echo "gh-ci: no checks on $sha" >&2
+  printf '%s\n' "$judged"
+  return 0
 }
 
 # wait <pr> [--timeout <s>]: block until no required check on the PR's
@@ -653,7 +746,7 @@ if [ -n "$REPO_FLAG" ]; then
 fi
 [ $# -ge 1 ] || usage
 cmd="$1"; shift
-case "$cmd" in snapshot|failures|watch-verified|resample|wait|panics) ;; *) usage ;; esac
+case "$cmd" in snapshot|failures|watch-verified|verdict|resample|wait|panics) ;; *) usage ;; esac
 if [ "$cmd" = panics ]; then
   cmd_panics "$@"
   exit 0
@@ -685,6 +778,7 @@ case "$cmd" in
   snapshot) cmd_snapshot "$@" ;;
   failures) cmd_failures "$@" ;;
   watch-verified) cmd_watch_verified "$@" ;;
+  verdict) cmd_verdict "$@" ;;
   resample) cmd_resample "$@" ;;
   wait) cmd_wait "$@" ;;
   *) usage ;;
