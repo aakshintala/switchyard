@@ -5,14 +5,13 @@
 # as SETTLED-OLD. lanewatch does not forward the variable over ssh, so remote
 # runs use the default unless it is set in the remote environment.
 #
-# State comes from the last tool event in the last 20 MB of the jsonl, never
-# from its last line. A prompt sent during a running tool call gets an immediate
-# `queued` response while the tool keeps running, so the last line can be a
-# response even when the lane is still in that call. A start event means
-# IN-TOOL; an end event leaves the run RUNNING unless it later settles; a
-# settled event means SETTLED; without a running tool or settled event, no write
-# for more than five minutes means STALL. If the start event falls outside the
-# last 20 MB, the lane reads STALL and the operator checks the tool by hand.
+# State pairs tool starts and ends by toolCallId within the last 20 MB of the
+# jsonl, never from its last line. The most recent unmatched start is IN-TOOL.
+# A matched end removes its start; an unmatched end has no effect. agent_settled
+# clears every open start, and SETTLED applies only when it is the last relevant
+# event with no later open start. Otherwise, no write for more than five minutes
+# means STALL. A start outside the 20 MB tail is ignored and the operator checks
+# the tool by hand. Zero live rows prints `lanestat: no live lanes in <run-dir>`.
 # IN-TOOL says pi has a tool call active, not that the tool is making progress.
 # `queued` means pi has an active run; a prompt is not lost. The unrecoverable
 # shape is an active flag with nothing executing: abort, then resend with
