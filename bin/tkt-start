@@ -47,13 +47,7 @@ if [ "$part_given" -eq 1 ]; then
   if [ "$part" -lt 2 ]; then echo "tkt-start: --part needs an integer of 2 or more: $part" >&2; exit 2; fi
 fi
 if [ "$spec_issue_given" -eq 1 ]; then
-  spec_issue_original="$spec_issue"
-  case "$spec_issue" in
-    ""|*[!0-9]*) echo "tkt-start: --spec-issue needs a positive integer: $spec_issue" >&2; exit 2 ;;
-  esac
-  if [ "${#spec_issue}" -gt 9 ]; then echo "tkt-start: --spec-issue needs a positive integer: $spec_issue" >&2; exit 2; fi
-  spec_issue="$((10#$spec_issue))"
-  if [ "$spec_issue" -eq 0 ]; then echo "tkt-start: --spec-issue needs a positive integer: $spec_issue_original" >&2; exit 2; fi
+  if [[ ! $spec_issue =~ ^0*[1-9][0-9]*$ ]]; then echo "tkt-start: --spec-issue needs a positive integer: $spec_issue" >&2; exit 2; fi
 fi
 for m in ${models[@]+"${models[@]}"}; do case "$m" in *=*) ;; *) echo "tkt-start: --model needs ROLE=ID: $m" >&2; exit 2 ;; esac; done
 case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # tkt-build: implement steps 4-6, first round (lane, gate, mutants, review+map, findings).
+# spec_issue, when set, is passed to every round-0 review-pr start as --spec.
 # Usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
 set -euo pipefail
 USAGE="usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]"

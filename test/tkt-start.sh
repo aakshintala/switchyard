@@ -647,7 +647,7 @@ case "$OUT" in *PREFLIGHT*) fail "recurredbadjson: must never print PREFLIGHT" ;
 # Invalid --spec-issue values are rejected before writing state.
 invalid_spec_issue_failures=()
 invalid_spec_issue_n=0
-for bad in abc 0 00 -3 4.5 ' '; do
+for bad in abc 0 00 -3 4.5 '' ' '; do
   invalid_spec_issue_n=$((invalid_spec_issue_n + 1))
   setup "specissueinvalid$invalid_spec_issue_n" ONE AGAINST
   run_start --spec-issue "$bad"
@@ -655,11 +655,11 @@ for bad in abc 0 00 -3 4.5 ' '; do
   grep -qF -- '--spec-issue' "$CDIR/stderr" || invalid_spec_issue_failures+=("[$bad] stderr misses --spec-issue")
   [ ! -e "$RUN/widget-42.state" ] || invalid_spec_issue_failures+=("[$bad] state was written")
 done
-setup specissueinvalidlong ONE AGAINST
+setup specissue10digit ONE AGAINST
 run_start --spec-issue 1000000000
-[ "$RC" -eq 2 ] || invalid_spec_issue_failures+=("[1000000000] exit=$RC")
-grep -qF -- '--spec-issue' "$CDIR/stderr" || invalid_spec_issue_failures+=("[1000000000] stderr misses --spec-issue")
-[ ! -e "$RUN/widget-42.state" ] || invalid_spec_issue_failures+=("[1000000000] state was written")
+want "CURRENT " 0 specissue10digit
+[ "$(grep -c '^spec_issue=' "$RUN/widget-42.state")" -eq 1 ] || fail "specissue10digit: wants one spec_issue line"
+grep -qFx 'spec_issue=1000000000' "$RUN/widget-42.state" || fail "specissue10digit: state misses [spec_issue=1000000000]"
 setup specissuenovalue ONE AGAINST
 run_start --spec-issue
 [ "$RC" -eq 2 ] || invalid_spec_issue_failures+=("[missing] exit=$RC")
@@ -667,7 +667,7 @@ grep -qF -- 'usage: tkt-start' "$CDIR/stderr" || invalid_spec_issue_failures+=("
 [ ! -e "$RUN/widget-42.state" ] || invalid_spec_issue_failures+=("[missing] state was written")
 [ "${#invalid_spec_issue_failures[@]}" -eq 0 ] || fail "specissueinvalid: ${invalid_spec_issue_failures[*]}"
 
-# --spec-issue stores one positive issue number, normalising leading zeros.
+# --spec-issue stores a positive issue number as given, including leading zeros.
 setup specissue ONE AGAINST
 run_start --spec-issue 445
 want "CURRENT " 0 specissue
@@ -680,7 +680,7 @@ grep -qFx 'spec_issue=445' "$RUN/widget-42.state" || fail "specissuererun: state
 setup specissueleadingzero ONE AGAINST
 run_start --spec-issue 007
 want "CURRENT " 0 specissueleadingzero
-grep -qFx 'spec_issue=7' "$RUN/widget-42.state" || fail "specissueleadingzero: state misses [spec_issue=7]"
+grep -qFx 'spec_issue=007' "$RUN/widget-42.state" || fail "specissueleadingzero: state misses [spec_issue=007]"
 setup specissuenine ONE AGAINST
 run_start --spec-issue 999999999
 want "CURRENT " 0 specissuenine
