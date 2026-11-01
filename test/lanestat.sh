@@ -465,18 +465,18 @@ for pid in 750 751 752 753 754 755 756 757 758 759; do
   printf 'pi\n' >"$T/ps/$pid.comm"
   printf 'S 00:01\n' >"$T/ps/$pid.info"
 done
-printf '%s\n' \
-  '{"type": "agent_end", "messages": [{"role": "assistant", "content": [], "api": "openai-responses", "provider": "opencode-go", "model": "muse-spark-1.3-contributor", "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "stopReason": "error", "errorMessage": "opencode-go API error (402): {\"type\":\"server_error\",\"message\":\"Upstream request failed: Insufficient account funds\"}"}]}' \
-  '{"type":"agent_settled"}' \
-  >"$dead_run/fiber-750-pi.jsonl"
-printf '%s\n' \
-  '{"type": "agent_end", "messages": [{"role": "assistant", "content": [], "api": "openai-responses", "provider": "openai", "model": "gpt-5.4", "usage": {"totalTokens": 0}, "stopReason": "error", "errorMessage": "OpenAI API error (400): model_not_found"}]}' \
-  '{"type":"agent_settled"}' \
-  >"$dead_run/fiber-751-pi.jsonl"
-printf '%s\n' \
-  '{"type": "agent_end", "messages": [{"role": "assistant", "content": [{"type": "text", "text": "A normal report."}], "api": "openai-responses", "provider": "openai", "model": "gpt-6-luna", "usage": {"totalTokens": 12}, "stopReason": "stop"}]}' \
-  '{"type":"agent_settled"}' \
-  >"$dead_run/fiber-752-pi.jsonl"
+cat >"$dead_run/fiber-750-pi.jsonl" <<'EOF'
+{"type": "agent_end", "messages": [{"role": "assistant", "content": [], "api": "openai-responses", "provider": "opencode-go", "model": "muse-spark-1.3-contributor", "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "stopReason": "error", "timestamp": 1793564600587, "errorMessage": "opencode-go API error (402): {\"type\":\"server_error\",\"message\":\"Upstream request failed: Insufficient account funds\"}", "durationMs": 699, "thinkingLevel": "high"}]}
+{"type":"agent_settled"}
+EOF
+cat >"$dead_run/fiber-751-pi.jsonl" <<'EOF'
+{"type": "agent_end", "messages": [{"role": "user", "content": [{"type": "text", "text": "Review repair round for your pull request 3915. Read run/fiber-3911-admit-4.md and do what it says: three standards findings, all three fixe ..."}], "timestamp": 1793568699893}, {"role": "assistant", "content": [], "api": "openai-responses", "provider": "openai", "model": "gpt-5.4", "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "stopReason": "error", "timestamp": 1793568699904, "errorMessage": "OpenAI API error (400): {\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"message\":\"The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account.\"}", "durationMs": 995, "thinkingLevel": "high"}]}
+{"type":"agent_settled"}
+EOF
+cat >"$dead_run/fiber-752-pi.jsonl" <<'EOF'
+{"type": "agent_end", "messages": [{"role": "user", "content": [{"type": "text", "text": "Your 3827 report is half right. PR 3830 is merged and it is that branch, so you tested the right tree. But 3830 did not fix the view, it cha ..."}], "timestamp": 1793567045100}, {"role": "assistant", "content": [{"type": "text", "text": "Ticket: #3827.\n\nInstrumented run on current `main`: after two PageUps, the first output was **036** and the end marker landed. A further Pag ...", "textSignature": "{\"v\":1,\"id\":\"msg_092ecc9e320d23a3016ae7aec2adc087d08f1fbcd35b9f491f\",\"phase\":\"final_answer\"}"}], "api": "openai-responses", "provider": "openai", "model": "gpt-6-luna", "usage": {"input": 637, "output": 194, "cacheRead": 144896, "cacheWrite": 0, "reasoning": 0, "totalTokens": 145727, "cost": {"input": 6.37e-05, "output": 9.7e-05, "cacheRead": 0.00144896, "cacheWrite": 0, "total": 0.00160966}}, "stopReason": "stop", "timestamp": 1793568447824, "responseId": "resp_092ecc9e320d23a3016ae7aec1142887d0b86472415a0fc799", "rawStopReason": "completed", "durationMs": 7335, "thinkingLevel": "high"}]}
+{"type":"agent_settled"}
+EOF
 printf '%s\n' \
   '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error","errorMessage":"old failure"}]}' \
   '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Recovered."}],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":8},"stopReason":"stop"}]}' \
@@ -508,8 +508,8 @@ printf '%s\n' \
   >"$dead_run/fiber-759-pi.jsonl"
 run_stat "$dead_run" >"$T/dead-provider.out" 2>"$T/dead-provider.err"; rc=$?
 [ "$rc" = 0 ] || fail "dead-provider fixture exits 0 (got $rc; $(<"$T/dead-provider.err"))"
-assert_row 750 'DEAD-PROVIDER opencode-go/muse-spark-1\.3-contributor: opencode-go API error \(402\): .*Insufficient account funds' "$(<"$T/dead-provider.out")"
-assert_row 751 'DEAD-PROVIDER openai/gpt-5\.4: OpenAI API error \(400\): model_not_found' "$(<"$T/dead-provider.out")"
+assert_row 750 'DEAD-PROVIDER opencode-go/muse-spark-1\.3-contributor: opencode-go API error \(402\): \{"type":"server_error","message":"Upstream request failed: Insufficient account funds"\}$' "$(<"$T/dead-provider.out")"
+assert_row 751 "DEAD-PROVIDER openai/gpt-5\\.4: OpenAI API error \\(400\\): \\{\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"message\":\"The 'gpt-5\\.4' model is not supported when using Codex with a ChatGPT account\\.\"\\}\$" "$(<"$T/dead-provider.out")"
 assert_row 752 'SETTLED$' "$(<"$T/dead-provider.out")"
 assert_row 753 'SETTLED$' "$(<"$T/dead-provider.out")"
 assert_row 754 'SETTLED$' "$(<"$T/dead-provider.out")"
