@@ -1232,7 +1232,7 @@ cmd_collect() {
   cat "$bad_f"
   cat "$unfinished_f"
   for ksf in ${kept_state[@]+"${kept_state[@]}"}; do
-    printf 'resume: delegate resume %s\n' "${ksf##*/}"
+    printf 'resume: delegate resume %s (on %s)\n' "${ksf##*/}" "$(hostname -s)"
   done
 
   # --findings-out feeds run --verify: the open findings, one per line, or
