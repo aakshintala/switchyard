@@ -161,6 +161,9 @@ impl Session {
             if predicate(&current) {
                 return current;
             }
+            if current.status == Status::Dead {
+                panic!("session went Dead while waiting for {what}: {current:?}");
+            }
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for {what}: {current:?}"
@@ -721,7 +724,26 @@ fn supervisor_interrupt_stop_keeps_session_and_idle_interrupt_is_a_noop() {
     assert_eq!(running.send("continue").unwrap()["disposition"], "started");
     assert_eq!(running.stop_and_join(), 0);
 
-    let mut idle = Session::spawn("FAST", "brief", None, Bounds::default());
+    let mut idle = Session::spawn(
+        "FAST,HOLD_START",
+        "brief",
+        None,
+        Bounds {
+            rpc_ms: 5_000,
+            ..Bounds::default()
+        },
+    );
+    let start_pending = idle.fake_dir.join("start.pending");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !start_pending.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        start_pending.exists(),
+        "timed out waiting for held session/start"
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    std::fs::write(idle.fake_dir.join("start.release"), "release").unwrap();
     idle.until("idle session", |state| {
         state.status == Status::Idle && state.last_turn.is_some()
     });
@@ -1170,6 +1192,15 @@ fn supervisor_startup_and_runtime_failures_are_recorded() {
         DeadReason::HostUnresponsive
     );
     assert_eq!(muted.wait_run(), 0);
+}
+
+#[test]
+#[should_panic(expected = "went Dead while waiting for idle session")]
+fn until_fails_fast_when_the_session_goes_dead() {
+    let session = Session::spawn("STARTFAIL", "brief", None, Bounds::default());
+    session.until("idle session", |state| {
+        state.status == Status::Idle && state.last_turn.is_some()
+    });
 }
 
 #[test]
