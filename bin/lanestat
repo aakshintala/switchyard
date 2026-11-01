@@ -1,6 +1,9 @@
 #!/bin/sh
 # lanestat [--all] <run-dir>: one row per live pi lane in this host's run dir.
 # It stays POSIX so lanewatch can send it to `ssh bash -s` without a remote copy.
+# LANESTAT_SETTLED_MAX (seconds, default 7200) marks older SETTLED lanes
+# as SETTLED-OLD. lanewatch does not forward the variable over ssh, so remote
+# runs use the default unless it is set in the remote environment.
 #
 # State comes from the last tool event in the last 20 MB of the jsonl, never
 # from its last line. A prompt sent during a running tool call gets an immediate
@@ -48,6 +51,11 @@ done
 [ -n "$run" ] || usage
 [ -d "$run" ] || { printf 'no such run dir: %s\n' "$run" >&2; exit 2; }
 
+settled_max=${LANESTAT_SETTLED_MAX:-}
+case $settled_max in
+  ''|*[!0-9]*) settled_max=7200 ;;
+esac
+
 now=$(date +%s)
 for pidfile in "$run"/fiber-*-pi.pid; do
   [ -f "$pidfile" ] || continue
@@ -84,7 +92,13 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     tail -1 | sed 's/.*"toolName":"//; s/"//')
   case $last in
     tool_execution_start) state="IN-TOOL ${tool:-?}" ;;
-    agent_settled) state=SETTLED ;;
+    agent_settled)
+      if [ "$age" -gt "$settled_max" ]; then
+        state=SETTLED-OLD
+      else
+        state=SETTLED
+      fi
+      ;;
     *)
       if [ "$age" -gt 300 ]; then
         state='STALL no tool, not settled'
