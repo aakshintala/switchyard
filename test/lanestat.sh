@@ -302,4 +302,154 @@ expected="$(printf '%-6s %-8s %s\nlanestat: no live lanes in %s' 909 909 DEAD "$
 [ "$(<"$T/case-9-all.out")" = "$expected" ] \
   || fail 'case 9: zero-live-row message for empty and dead-only run dirs'
 
+check_case_row() {
+  local pid=$1 pattern=$2 rc
+  run_stat "$case_dir" >"$T/$pid.out" 2>"$T/$pid.err"; rc=$?
+  [ "$rc" = 0 ] || fail "case $pid exits 0 (got $rc; $(<"$T/$pid.err"))"
+  assert_row "$pid" "$pattern" "$(<"$T/$pid.out")"
+}
+
+# A delivered prompt after settlement with no following activity is WEDGED.
+new_case wedged-none 710
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  >"$case_dir/fiber-710-pi.jsonl"
+check_case_row 710 'WEDGED last=none$'
+
+# The newest tool start is retained as the event's last tool across settlement.
+new_case wedged-last-tool 711
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"old","toolName":"read"}' \
+  '{"type":"tool_execution_start","toolCallId":"new","toolName":"bash"}' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  >"$case_dir/fiber-711-pi.jsonl"
+check_case_row 711 'WEDGED last=bash$'
+
+# A text response starts streaming at message_start; agent_start alone does not.
+new_case wedged-streaming 712
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  '{"type":"message_start","message":{"role":"assistant"}}' \
+  >"$case_dir/fiber-712-pi.jsonl"
+check_case_row 712 'RUNNING$'
+new_case wedged-pi-order 713
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  '{"type":"agent_start"}' \
+  '{"type":"turn_start"}' \
+  '{"type":"message_start","message":{"role":"assistant"}}' \
+  >"$case_dir/fiber-713-pi.jsonl"
+check_case_row 713 'RUNNING$'
+new_case wedged-agent-start 714
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  '{"type":"agent_start"}' \
+  >"$case_dir/fiber-714-pi.jsonl"
+check_case_row 714 'WEDGED last=none$'
+new_case wedged-turn-start 715
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  '{"type":"agent_start"}' \
+  '{"type":"turn_start"}' \
+  >"$case_dir/fiber-715-pi.jsonl"
+check_case_row 715 'WEDGED last=none$'
+new_case message-start-queued 716
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}' \
+  '{"type":"message_start","message":{"role":"assistant"}}' \
+  >"$case_dir/fiber-716-pi.jsonl"
+check_case_row 716 'SETTLED$'
+new_case message-start-no-prompt 717
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"message_start","message":{"role":"assistant"}}' \
+  >"$case_dir/fiber-717-pi.jsonl"
+check_case_row 717 'SETTLED$'
+
+# Tool activity clears the prompt flag, and a later settle starts a new run.
+new_case wedged-tool-response 718
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  '{"type":"tool_execution_start","toolCallId":"t","toolName":"bash"}' \
+  '{"type":"tool_execution_end","toolCallId":"t"}' \
+  >"$case_dir/fiber-718-pi.jsonl"
+check_case_row 718 'RUNNING$'
+new_case wedged-resettled 719
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  '{"type":"agent_settled"}' \
+  >"$case_dir/fiber-719-pi.jsonl"
+check_case_row 719 'SETTLED$'
+
+# WEDGED has no settled-age cutoff and no last tool name when toolName is empty.
+new_case wedged-old 720
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  >"$case_dir/fiber-720-pi.jsonl"
+set_file_age "$case_dir/fiber-720-pi.jsonl" 7201
+check_case_row 720 'WEDGED last=none$'
+new_case wedged-empty-tool 721
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"t","toolName":""}' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  >"$case_dir/fiber-721-pi.jsonl"
+check_case_row 721 'WEDGED last=none$'
+new_case prompt-id-first 722
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"id":"x1","type":"response","command":"prompt","success":true}' \
+  >"$case_dir/fiber-722-pi.jsonl"
+check_case_row 722 'WEDGED last=none$'
+
+# A silent un-settled lane retains RUNNING/STALL, not WEDGED.
+new_case prompt-without-settle 723
+printf '%s\n' \
+  '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+  >"$case_dir/fiber-723-pi.jsonl"
+check_case_row 723 'RUNNING$'
+set_file_age "$case_dir/fiber-723-pi.jsonl" 301
+check_case_row 723 'STALL no tool, not settled$'
+
+# Streaming text followed by a queued prompt stays running in both pi shapes.
+for queued_shape in disposition status; do
+  case $queued_shape in
+    disposition) queued='"disposition":"queued"' ;;
+    status) queued='"status":"queued"' ;;
+  esac
+  pid=$((724 + ${#queued_shape}))
+  new_case "streaming-queued-$queued_shape" "$pid"
+  printf '%s\n' \
+    '{"type":"agent_settled"}' \
+    '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}' \
+    '{"type":"message_start","message":{"role":"assistant"}}' \
+    '{"type":"message_update"}' \
+    "{\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{$queued}}" \
+    >"$case_dir/fiber-$pid-pi.jsonl"
+  check_case_row "$pid" 'RUNNING$'
+  pid=$((730 + ${#queued_shape}))
+  new_case "settled-queued-$queued_shape" "$pid"
+  printf '%s\n' \
+    '{"type":"agent_settled"}' \
+    "{\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{$queued}}" \
+    >"$case_dir/fiber-$pid-pi.jsonl"
+  check_case_row "$pid" 'SETTLED$'
+done
+new_case rejected-prompt 740
+printf '%s\n' \
+  '{"type":"agent_settled"}' \
+  '{"type":"response","command":"prompt","success":false,"error":"x"}' \
+  >"$case_dir/fiber-740-pi.jsonl"
+check_case_row 740 'SETTLED$'
+
 echo 'lanestat: all cases passed'
