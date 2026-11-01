@@ -109,6 +109,7 @@ printf '%s' "$blob" | grep -q "^a.txt	L	grant	" || fail "a.txt stored as grant"
 grep -q -- '--limit 1000' "$GH_ARGS_LOG" || fail "gh asked with --limit 1000"
 grep -q -- '--state open' "$GH_ARGS_LOG" || fail "gh asked with --state open"
 grep -q -- '--json number' "$GH_ARGS_LOG" || fail "gh asked with --json number"
+grep -q -- '--json number,changedFiles' "$GH_ARGS_LOG" || fail "gh asked with changedFiles"
 
 # --- jitter sleeps 0.2-1.0 s -----------------------------------------------------
 # Extract jitter_sleep from the script and sample it: every sleep must land in
