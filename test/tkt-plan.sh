@@ -206,6 +206,12 @@ rebase_plan() {
   } >"$CDIR/plan.md"
 }
 
+set_plan_base() {
+  local new_base="$1"
+  { printf 'Base: %s\n' "$new_base"; tail -n +2 "$CDIR/plan.md"; } >"$CDIR/plan.tmp"
+  mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+}
+
 # Run tkt-plan on the current case state; sets OUT and RC, stderr kept in file.
 run_plan() {
   OUT="$(bash "$TKT" "$S" "$@" 2>"$CDIR/stderr.txt")"; RC=$?
@@ -220,6 +226,13 @@ expect_verdict() {
     $1) ;;
     *) fail "$2: verdict [$(first_line)] rc=$RC: $(cat "$CDIR/stderr.txt")" ;;
   esac
+}
+
+state_get() { bash "$TKT_STATE" "$S" get "$1" 2>/dev/null || true; }
+
+expect_plan_verdict() {
+  [ "$(state_get plan_verdict)" = "$1" ] || fail "$3: plan_verdict is [$(state_get plan_verdict)], expected [$1]"
+  [ "$(state_get plan_verdict_base)" = "$2" ] || fail "$3: plan_verdict_base is [$(state_get plan_verdict_base)], expected [$2]"
 }
 
 : >"$T/stub.log"
@@ -650,6 +663,8 @@ printf 'ok' >"$T/mode"
 
 # --- post runs post-plan behind a real plan-gate check ---
 setup_case post
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed post verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed post verdict base"
 run_plan post
 [ "$RC" -eq 0 ] || fail "POSTED exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan POSTED urls=*issuecomment-11* log=*" "POSTED"
@@ -1294,7 +1309,8 @@ run_plan verify --extra "$CDIR/nope.md"
 grep -q "cannot read extra file: $CDIR/nope.md" "$CDIR/stderr.txt" || fail "ticket-bad-extra names the file"
 [ "$(grep -c '^gh|' "$T/gh.log" || true)" = "$gh_before" ] || fail "ticket-bad-extra reads no ticket"
 
-# A ticket read that fails: exit 2 with the ticket message, no job, no state write.
+# A ticket read that fails: exit 2 with the ticket message, no job, and only
+# the verifier verdict pair cleared.
 # $1 is the case, $2 the gh mode, $3 (optional) the seeded verifier_round.
 ticket_fail_case() {
   setup_case "$1"
@@ -1302,7 +1318,9 @@ ticket_fail_case() {
   printf 'ok' >"$T/mode"
   [ -z "${3:-}" ] || bash "$TKT_STATE" "$S" set verifier_round "$3" || fail "$1 seed round"
   bash "$TKT_STATE" "$S" set job.verifier-r1 j-keep || fail "$1 seed job"
-  cp "$S" "$CDIR/before.state"
+  bash "$TKT_STATE" "$S" set plan_verdict ok || fail "$1 seed verdict"
+  bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "$1 seed verdict base"
+  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' "$S" >"$CDIR/expected.state"
   printf '%s' "$2" >"$T/ghmode"
   jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
   run_plan verify
@@ -1310,7 +1328,8 @@ ticket_fail_case() {
   [ "$RC" -eq 2 ] || fail "$1 exits 2 (rc=$RC)"
   grep -q "tkt-plan: cannot read ticket text for switchyard#518" "$CDIR/stderr.txt" || fail "$1 names the ticket"
   [ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "$1 starts no job"
-  cmp -s "$S" "$CDIR/before.state" || fail "$1 writes no state"
+  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' "$S" >"$CDIR/actual.state"
+  cmp -s "$CDIR/actual.state" "$CDIR/expected.state" || fail "$1 clears only the verdict pair"
   [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-keep" ] || fail "$1 keeps the job slot"
 }
 
@@ -1445,5 +1464,273 @@ TKT_BIN="$T/realbin" run_plan confirm --edits "$CDIR/edits.md"
 CB="$CDIR/run/switchyard-518-confirm-1.md"
 [ -r "$CB" ] || fail "real confirm fills the confirm brief"
 grep -q 'BODY-TEXT-791' "$CB" && grep -q 'COMMENT-TEXT-791' "$CB" || fail "real confirm brief carries the ticket text"
+
+# --- a LINES verify is recorded and blocks post before post-plan ---
+setup_case verdict-lines-post
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed prior verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed prior verdict base"
+printf 'lines' >"$T/mode"
+posts_before="$(grep -c '^post|' "$T/stub.log" || true)"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "LINES verify exits 1"
+expect_verdict "TKT tkt-plan LINES n=3 out=* log=*" "LINES verify stores verdict"
+expect_plan_verdict lines "$base_now" "LINES verify"
+run_plan post
+[ "$RC" -eq 1 ] || fail "post after LINES exits 1"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=lines log=*" "post after LINES"
+grep -q "plan_verdict=lines plan_verdict_base=$base_now plan_base=$base_now" <<<"$OUT" || fail "post refusal prints the verdict digest"
+[ "$(grep -c '^post|' "$T/stub.log" || true)" = "$posts_before" ] || fail "post after LINES does not run post-plan"
+expect_plan_verdict lines "$base_now" "post keeps LINES verdict"
+
+# --- PLAN OK permits post, then a new plan path clears the recorded pair ---
+setup_case verdict-ok-post-set
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "PLAN OK verify exits 0"
+expect_plan_verdict ok "$base_now" "PLAN OK verify"
+run_plan post
+[ "$RC" -eq 0 ] || fail "post after PLAN OK exits 0"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post after PLAN OK"
+printf 'Base: %s\n\n## Files\n\n- `f.txt`\n\n## Gate\n\n`true`\n' "$base_now" >"$CDIR/other.md"
+run_plan set "$CDIR/other.md"
+[ "$RC" -eq 0 ] || fail "set of a new plan path exits 0"
+expect_plan_verdict "" "" "set of a new plan path"
+run_plan post
+[ "$RC" -eq 1 ] || fail "post after new-path set exits 1"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "post after new-path set"
+
+# --- set --no-verifier records skipped; a same-path set without it clears skipped ---
+setup_case verdict-set-skip
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+run_plan set "$CDIR/plan.md" --no-verifier
+[ "$RC" -eq 0 ] || fail "set --no-verifier exits 0"
+expect_plan_verdict skipped "$base_now" "set --no-verifier"
+run_plan post
+[ "$RC" -eq 0 ] || fail "post after skipped set exits 0"
+run_plan set "$CDIR/plan.md"
+[ "$RC" -eq 0 ] || fail "same-path set without --no-verifier exits 0"
+expect_plan_verdict "" "" "same-path set clears skipped"
+run_plan post
+[ "$RC" -eq 1 ] || fail "post after clearing skipped exits 1"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "post after clearing skipped"
+
+# --- post --no-verifier fills only an empty verdict ---
+setup_case verdict-post-skip
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+run_plan post --no-verifier
+[ "$RC" -eq 0 ] || fail "post --no-verifier with no verdict exits 0"
+expect_plan_verdict skipped "$base_now" "post --no-verifier fills empty verdict"
+posts_before="$(grep -c '^post|' "$T/stub.log" || true)"
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed stored LINES verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed stored LINES base"
+run_plan post --no-verifier
+[ "$RC" -eq 1 ] || fail "post --no-verifier cannot replace LINES"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=lines log=*" "post --no-verifier preserves LINES"
+[ "$(grep -c '^post|' "$T/stub.log" || true)" = "$posts_before" ] || fail "post --no-verifier over LINES does not post"
+expect_plan_verdict lines "$base_now" "post --no-verifier preserves stored verdict"
+
+# --- post checks the Base digest, and reports stale for an otherwise accepted word ---
+setup_case verdict-stale-base
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "stale-base setup verify exits 0"
+expect_plan_verdict ok "$base_now" "stale-base setup"
+{
+  printf 'Base: %s\n' 0000000000000000000000000000000000000000
+  tail -n +2 "$CDIR/plan.md"
+} >"$CDIR/changed.md"
+mv "$CDIR/changed.md" "$CDIR/plan.md"
+run_plan post
+[ "$RC" -eq 1 ] || fail "post after Base changes exits 1"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "post after Base changes"
+
+# --- verdict-ok-ancestor-unchanged: an unchanged Files path survives a descendant Base ---
+setup_case verdict-ok-ancestor-unchanged
+stored_base="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "ancestor-unchanged: seed ok verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$stored_base" || fail "ancestor-unchanged: seed verdict base"
+printf 'unrelated\n' >"$WT/other.txt"
+git -C "$WT" add other.txt
+git -C "$WT" -c user.email=t@t -c user.name=t commit -qm unrelated
+current_base="$(git -C "$WT" rev-parse HEAD)"
+set_plan_base "$current_base"
+run_plan post
+[ "$RC" -eq 0 ] || fail "ancestor-unchanged: descendant base with unchanged Files exits 0"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "ancestor-unchanged"
+
+# --- verdict-ok-ancestor-files-changed: changing a Files path on a descendant Base is stale ---
+setup_case verdict-ok-ancestor-files-changed
+stored_base="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "ancestor-files-changed: seed ok verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$stored_base" || fail "ancestor-files-changed: seed verdict base"
+printf 'changed\n' >"$WT/f.txt"
+git -C "$WT" add f.txt
+git -C "$WT" -c user.email=t@t -c user.name=t commit -qm changed-file
+current_base="$(git -C "$WT" rev-parse HEAD)"
+set_plan_base "$current_base"
+run_plan post
+[ "$RC" -eq 1 ] || fail "ancestor-files-changed: changed Files path exits 1"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "ancestor-files-changed"
+
+# --- verdict-ok-sibling-base: a sibling current Base is stale ---
+setup_case verdict-ok-sibling-base
+stored_base="$(git -C "$WT" rev-parse HEAD)"
+common_base="$(git -C "$WT" rev-list --max-parents=0 "$stored_base")"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "sibling-base: seed ok verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$stored_base" || fail "sibling-base: seed verdict base"
+git -C "$WT" checkout -q --detach "$common_base"
+printf 'sibling\n' >"$WT/sibling.txt"
+git -C "$WT" add sibling.txt
+git -C "$WT" -c user.email=t@t -c user.name=t commit -qm sibling
+current_base="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" checkout -q "$stored_base"
+set_plan_base "$current_base"
+run_plan post
+[ "$RC" -eq 1 ] || fail "sibling-base: non-descendant base exits 1"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "sibling-base"
+
+# --- every verify refusal after argument parsing clears the previous verdict ---
+seed_ok_verdict() {
+  current_base="$(cat "$CDIR/base")"
+  bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed verify verdict"
+  bash "$TKT_STATE" "$S" set plan_verdict_base "$current_base" || fail "seed verify verdict base"
+}
+setup_case verdict-clear-check
+rebase_plan
+seed_ok_verdict
+printf 'lines' >"$T/pcmode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "PLAN-CHECK verify exits 1"
+expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "PLAN-CHECK clears verdict"
+expect_plan_verdict "" "" "PLAN-CHECK clears pair"
+printf 'ok' >"$T/pcmode"
+setup_case verdict-clear-stale
+seed_ok_verdict
+run_plan verify
+[ "$RC" -eq 1 ] || fail "STALE verify exits 1"
+expect_verdict "TKT tkt-plan STALE n=1 base=* log=*" "STALE clears verdict"
+expect_plan_verdict "" "" "STALE clears pair"
+setup_case verdict-clear-ask
+rebase_plan
+seed_ok_verdict
+printf 'ask' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "ASK verify exits 1"
+expect_verdict "TKT tkt-plan ASK id=j1 log=*" "ASK clears verdict"
+expect_plan_verdict "" "" "ASK clears pair"
+printf 'ok' >"$T/mode"
+setup_case verdict-clear-round
+rebase_plan
+seed_ok_verdict
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round limit"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "ROUND-LIMIT verify exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "ROUND-LIMIT clears verdict"
+expect_plan_verdict "" "" "ROUND-LIMIT clears pair"
+setup_case verdict-clear-model
+rebase_plan
+seed_ok_verdict
+sed '/^model.verifier=/d' "$S" >"$CDIR/no-model.state"
+S="$CDIR/no-model.state"
+run_plan verify
+[ "$RC" -eq 2 ] || fail "missing model verify exits 2"
+expect_plan_verdict "" "" "missing model clears pair"
+setup_case verdict-clear-ticket
+rebase_plan
+seed_ok_verdict
+printf 'fail' >"$T/ghmode"
+run_plan verify --model test-model
+printf 'ok' >"$T/ghmode"
+[ "$RC" -eq 2 ] || fail "ticket read failure verify exits 2"
+expect_plan_verdict "" "" "ticket read failure clears pair"
+
+# --- replan clears verdict state ---
+setup_case verdict-replan
+rebase_plan
+seed_ok_verdict
+run_plan replan
+[ "$RC" -eq 0 ] || fail "replan with verdict exits 0"
+expect_plan_verdict "" "" "replan clears verdict"
+
+# --- an exempt drift verify still records the report verdict and current base ---
+setup_case verdict-drift
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+old_base="$(git -C "$WT" rev-list --max-parents=0 HEAD)"
+bash "$TKT_STATE" "$S" set verified_base "$old_base" || fail "seed older verified base"
+printf 'Base: %s\n\n## Files\n\n- `f.txt`\n\n## Tasks\n\n- update `f.txt`\n\n## Gate\n\n`true`\n' "$base_now" >"$CDIR/plan.md"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-exempt verify exits 0"
+expect_plan_verdict ok "$base_now" "drift-exempt verify"
+
+# --- confirm records the report verdict and keeps it on pre-report exits ---
+setup_case verdict-confirm-lines
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+printf 'round 1, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+printf 'lines' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "confirm LINES exits 1"
+expect_plan_verdict lines "$base_now" "confirm LINES"
+setup_case verdict-confirm-ok
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+printf 'round 1, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+printf 'ok' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "confirm PLAN OK exits 0"
+expect_plan_verdict ok "$base_now" "confirm PLAN OK"
+setup_case verdict-confirm-preserves
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed confirm LINES verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed confirm LINES base"
+bash "$TKT_STATE" "$S" set confirmed_for 1 || fail "seed confirm limit"
+printf 'round 1, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "limited confirm exits 1"
+expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "limited confirm keeps previous verdict"
+expect_plan_verdict lines "$base_now" "limited confirm keeps pair"
+
+# --- same-path --no-verifier does not overwrite an existing word ---
+setup_case verdict-set-preserves
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed same-path LINES verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed same-path LINES base"
+run_plan set "$CDIR/plan.md" --no-verifier
+[ "$RC" -eq 0 ] || fail "same-path set --no-verifier exits 0"
+expect_plan_verdict lines "$base_now" "same-path --no-verifier preserves LINES"
+
+# --- an accepted word with a mismatched base is stale even with the fast-path flag ---
+setup_case verdict-stale-flag
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed stale flag verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed stale flag base"
+run_plan post --no-verifier
+[ "$RC" -eq 1 ] || fail "post --no-verifier with stale pair exits 1"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "post --no-verifier with stale pair"
+expect_plan_verdict ok 0000000000000000000000000000000000000000 "post --no-verifier does not overwrite stale word"
+
+# --- verify refuses a report without a fresh report verdict ---
+setup_case verdict-clear-blocked
+rebase_plan
+seed_ok_verdict
+printf 'blocked' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "BLOCKED verify exits 1"
+expect_verdict "TKT tkt-plan BLOCKED id=j1 log=*" "BLOCKED clears verdict"
+expect_plan_verdict "" "" "BLOCKED clears pair"
+printf 'ok' >"$T/mode"
 
 echo "tkt-plan: all cases passed"

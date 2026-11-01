@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # tkt-build: implement steps 4-6, first round (lane, gate, mutants, review+map, findings).
 # spec_issue, when set, is passed to every round-0 review-pr start as --spec.
-# Usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
+# Usage: tkt-build <state> [--from lane|gate|review] [--no-verifier] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
 set -euo pipefail
-USAGE="usage: tkt-build <state> [--from lane|gate|review] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]"
+USAGE="usage: tkt-build <state> [--from lane|gate|review] [--no-verifier] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]"
 usage() { echo "$USAGE" >&2; exit 2; }
 [ $# -ge 1 ] || usage
 case "$1" in -h|--help) echo "$USAGE"; exit 0 ;; esac
 state="$1"; shift
-from=lane; lane_model=""; review_model=""; overbuild_model=""
+from=lane; no_verifier=0; lane_model=""; review_model=""; overbuild_model=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --from) [ $# -ge 2 ] || usage; from="$2"; shift 2 ;;
+    --no-verifier) no_verifier=1; shift ;;
     --lane-model) [ $# -ge 2 ] || usage; lane_model="$2"; shift 2 ;;
     --review-model) [ $# -ge 2 ] || usage; review_model="$2"; shift 2 ;;
     --overbuild-model) [ $# -ge 2 ] || usage; overbuild_model="$2"; shift 2 ;;
@@ -94,6 +95,40 @@ base="$(plan_base "$plan" 2>/dev/null || true)"
 # read every token (lib/plan-tokens.sh) because they check coverage, not staleness.
 plan_files=()
 while IFS= read -r p; do plan_files+=("$p"); done < <(plan_files_pathspecs "$plan")
+# debt: a copy of tkt-plan's plan_verdict_ok (and its write pair in do_verify and do_confirm).
+# Ceiling: two copies plus the write pair, in tkt-plan and tkt-build. Upgrade trigger: a third
+# caller of the verdict check; then move it to bin/lib/ and source it from both scripts.
+verdict="$(tkt get plan_verdict 2>/dev/null || true)"
+verdict_base="$(tkt get plan_verdict_base 2>/dev/null || true)"
+if [ -z "$verdict" ] && [ "$no_verifier" -eq 1 ]; then
+  tkt set plan_verdict skipped
+  tkt set plan_verdict_base "$base"
+  verdict=skipped
+  verdict_base="$base"
+fi
+verdict_ok=0
+if [ "$verdict" = ok ]; then
+  if [ "$verdict_base" = "$base" ]; then
+    verdict_ok=1
+  elif git -C "$worktree" merge-base --is-ancestor "$verdict_base" "$base" 2>/dev/null &&
+    { [ "${#plan_files[@]}" -eq 0 ] || git -C "$worktree" diff --quiet "$verdict_base..$base" -- "${plan_files[@]}" 2>/dev/null; }; then
+    verdict_ok=1
+  fi
+elif [ "$verdict" = skipped ] && [ "$verdict_base" = "$base" ]; then
+  verdict_ok=1
+fi
+if [ "$verdict_ok" -eq 1 ]; then
+  :
+else
+  case "$verdict" in
+    "") verdict_refusal=none ;;
+    ok|skipped) verdict_refusal=stale ;;
+    *) verdict_refusal="$verdict" ;;
+  esac
+  [ -n "$verdict" ] || verdict=none
+  [ -n "$verdict_base" ] || verdict_base=none
+  emit "VERDICT-REFUSED verdict=$verdict_refusal" 1 "plan_verdict=$verdict plan_verdict_base=$verdict_base plan_base=$base"
+fi
 if [ "${#plan_files[@]}" -gt 0 ]; then
   stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${plan_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
   if [ -n "$stat_out" ]; then
