@@ -733,6 +733,17 @@ fn supervisor_interrupt_stop_keeps_session_and_idle_interrupt_is_a_noop() {
             ..Bounds::default()
         },
     );
+    let start_pending = idle.fake_dir.join("start.pending");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !start_pending.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        start_pending.exists(),
+        "timed out waiting for held session/start"
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    std::fs::write(idle.fake_dir.join("start.release"), "release").unwrap();
     idle.until("idle session", |state| {
         state.status == Status::Idle && state.last_turn.is_some()
     });

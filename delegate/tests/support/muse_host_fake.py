@@ -3,6 +3,7 @@
 
 import os
 import sys
+import time
 
 def load_config():
     import json
@@ -28,6 +29,14 @@ STOP_READING = False
 def write_file(name, text):
     with open(os.path.join(FAKE_DIR, name), "w", encoding="utf-8") as output:
         output.write(text)
+
+
+def hold_start():
+    write_file("start.pending", "")
+    release_path = os.path.join(FAKE_DIR, "start.release")
+    deadline = time.monotonic() + 10
+    while not os.path.exists(release_path) and time.monotonic() < deadline:
+        time.sleep(0.01)
 
 
 def log_frame(frame):
@@ -133,8 +142,6 @@ def start_turn(frame):
     if "MUTE_AFTER_START" in features and TURN_NUMBER > 1:
         return
     if "SLOW_ACK" in features and TURN_NUMBER > 1:
-        import time
-
         write_file("ack.pending", "")
         while not os.path.exists(os.path.join(FAKE_DIR, "ack.release")):
             time.sleep(0.01)
@@ -206,9 +213,7 @@ def handle(frame, raw_line=None):
         return
     elif method == "session/start":
         if "HOLD_START" in SCENARIOS:
-            import time
-
-            time.sleep(0.6)
+            hold_start()
         if "STARTFAIL" in SCENARIOS:
             send_frames(error_response(request_id, "fake session start failed"))
         else:
@@ -264,8 +269,6 @@ def read_line(fd, pending):
 
 def main():
     global STOP_READING, json
-    import time
-
     os.makedirs(FAKE_DIR, exist_ok=True)
     write_file("argv.txt", "\n".join(sys.argv[1:]) + "\n")
     write_file("host.pid", str(os.getpid()) + "\n")
@@ -286,7 +289,7 @@ def main():
                 output.write(initialized.decode("utf-8"))
                 output.write(session_start.decode("utf-8"))
             if "HOLD_START" in SCENARIOS:
-                time.sleep(0.6)
+                hold_start()
             if "STARTFAIL" in SCENARIOS:
                 sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":2,"error":{"code":-32020,"message":"fake session start failed"}}\n')
             else:
