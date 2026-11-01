@@ -19,7 +19,7 @@ You are the orchestrator for one ticket. The **main orchestrator** is the sessio
 
 ## Commands
 
-When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; a lane `CONCERNS` continues per step 4; every other word is a stop.
+When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. When the ticket's spec is another issue, pass its number with `tkt-start --spec-issue <N>`. `tkt-build` passes that number to `review-pr`. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; a lane `CONCERNS` continues per step 4; every other word is a stop.
 
 | Tool | Go on | Other verdicts that stop |
 | --- | --- | --- |
@@ -90,7 +90,7 @@ Before the first dispatch, `tkt-start` searches the merged PRs for one that alre
 
 To watch a running lane, run `~/.agents/bin/lanestat <run-dir>`: a row reads `IN-TOOL <tool>` while a tool call runs, `SETTLED` when the run ended, and `STALL` after 5 minutes idle with no tool running; `~/.agents/bin/lanewatch <run-dir> [ssh-target]` prints one line per lane the first time it settles or stalls, for Monitor.
 
-A plan split into parts runs each part through steps 4–8 in order. For part `n` (2 or more), run `tkt-start ... --part <n>` once the previous part's PR has merged. It archives the previous state as `<state>.part<n-1>`, starts fresh state and refuses while that PR is open. A `DRIFT` that names a merged `pr` is the signal to add `--part`. Pass `--body-ends` and `--model` again after `--part`, since only `issue`, `repo`, `run`, `worktree` and `model.*` lines carry. Cut the next lane once the previous part has merged.
+A plan split into parts runs each part through steps 4–8 in order. For part `n` (2 or more), run `tkt-start ... --part <n>` once the previous part's PR has merged. It archives the previous state as `<state>.part<n-1>`, starts fresh state and refuses while that PR is open. A `DRIFT` that names a merged `pr` is the signal to add `--part`. Pass `--body-ends`, `--model` and `--spec-issue` again after `--part`, since only `issue`, `repo`, `run`, `worktree` and `model.*` lines carry. Cut the next lane once the previous part has merged.
 
 A lane `CONCERNS` verdict is exit 1 from `tkt-job`, but `tkt-build` consumes it, runs the gate and review itself, and passes the file in state key `concerns.lane` to every review start as `--context`. The orchestrator reads the concerns file before accepting the review verdict. A concern that questions a posted ruling, the fence or ticket scope routes as `ASK`.
 
