@@ -520,6 +520,27 @@ run_verdict feature/x
 
 # existing wait behaviour remains covered after the required-name split
 
+# --- test: wait_non_required_failure_does_not_fail
+# A failed Flywheel job has conclusion failure, but required ci passes.
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"pass","name":"ci","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/700/job/1"},{"bucket":"fail","name":"flywheel","workflow":"Flywheel","event":"pull_request","link":"https://github.com/O/N/actions/runs/701/job/2"}]'
+run_wait 7
+[ "$CODE" = "0" ] || fail "non-required failure exits 0 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$OUT" = "head: ${A:0:8} CI: pass" ] || fail "non-required failure stdout is green: [$OUT]"
+[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending=0 passed=1 failing=0" ] || fail "non-required failure stderr only counts required checks: [$(cat "$T/stderr.txt")]"
+[ ! -s "$T/state/banned.txt" ] || fail "non-required failure test makes no gh pr call: [$(cat "$T/state/banned.txt")]"
+
+# --- test: wait_required_failure_fails_and_names_check
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"fail","name":"ci","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/702/job/3"}]'
+run_wait 7
+[ "$CODE" = "1" ] || fail "required failure exits 1 (got $CODE): [$OUT] [$(cat "$T/stderr.txt")]"
+[ "$OUT" = "$(printf 'head: %s CI: fail\nfailing: ci' "${A:0:8}")" ] || fail "required failure stdout names ci: [$OUT]"
+[ "$(cat "$T/stderr.txt")" = "gh-ci: ${A:0:8} pending=0 passed=0 failing=1" ] || fail "required failure stderr counts ci: [$(cat "$T/stderr.txt")]"
+[ ! -s "$T/state/banned.txt" ] || fail "required failure test makes no gh pr call: [$(cat "$T/state/banned.txt")]"
+
 # --- case: pending then green, with a passing name containing
 # --- "failing: 0 pending: 0" (proves no substring matching)
 reset_state
