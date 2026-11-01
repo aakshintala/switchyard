@@ -968,37 +968,6 @@ cmd_collect() {
     id_list[${#id_list[@]}]="$jid"
   done
 
-  # Keep every saved sibling in the run's cleanup set, even when this call
-  # names only one already-posted unfinished job.
-  all_state_files="$tmp/state-files.txt"
-  find "$state_dir" -type f >"$all_state_files"
-  for gi in ${!group_dirs[@]}; do
-    rd="${group_dirs[$gi]}"
-    [ -n "$rd" ] || continue
-    while IFS= read -r sibling_sf; do
-      [ -n "$sibling_sf" ] || continue
-      [ "$(state_get "$sibling_sf" run_dir 2>/dev/null || true)" = "$rd" ] || continue
-      sibling_id="${sibling_sf##*/}"
-      known_id=""
-      for existing_id in ${group_state_ids[$gi]}; do
-        [ "$existing_id" = "$sibling_id" ] && known_id="1"
-      done
-      if [ -z "$known_id" ]; then
-        group_state_ids[$gi]="${group_state_ids[$gi]} $sibling_id"
-      fi
-      known_state=""
-      for existing_sf in ${state_rm[@]+"${state_rm[@]}"}; do
-        [ "$existing_sf" = "$sibling_sf" ] && known_state="1"
-      done
-      if [ -z "$known_state" ]; then
-        state_rm[${#state_rm[@]}]="$sibling_sf"
-      fi
-      if [ "$(state_get "$sibling_sf" posted 2>/dev/null || true)" = "1" ]; then
-        group_posted[$gi]="1"
-      fi
-    done <"$all_state_files"
-  done
-
   if [ "$recollect" -gt 0 ]; then
     reprint_collected "$reprint_f" "$@"
     # Nothing left to post or remove: every id was collected before.
@@ -1232,12 +1201,23 @@ cmd_collect() {
       fi
     fi
   done
-  for sf in ${state_rm[@]+"${state_rm[@]}"}; do
-    requested=""
-    for jid in ${id_list[@]+"${id_list[@]}"}; do
-      [ "$sf" = "$state_dir/$jid" ] && requested="1"
-    done
-    [ -n "$requested" ] || cleanup_keep[${#cleanup_keep[@]}]="$sf"
+  # Preserve unrequested siblings' state and worktrees while cleaning their
+  # shared run directory. They are cleanup-only: comment groups and posted
+  # markers above use requested ids only.
+  all_state_files="$tmp/state-files.txt"
+  find "$state_dir" -type f >"$all_state_files"
+  for gi in ${!group_dirs[@]}; do
+    rd="${group_dirs[$gi]}"
+    [ -n "$rd" ] || continue
+    while IFS= read -r sibling_sf; do
+      [ -n "$sibling_sf" ] || continue
+      [ "$(state_get "$sibling_sf" run_dir 2>/dev/null || true)" = "$rd" ] || continue
+      requested=""
+      for jid in ${id_list[@]+"${id_list[@]}"}; do
+        [ "$sibling_sf" = "$state_dir/$jid" ] && requested="1"
+      done
+      [ -n "$requested" ] || cleanup_keep[${#cleanup_keep[@]}]="$sibling_sf"
+    done <"$all_state_files"
   done
 
   if [ -n "$pr" ] && [ -n "$repo" ]; then

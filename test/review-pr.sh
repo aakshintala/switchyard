@@ -763,36 +763,41 @@ grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "mixed collect preserv
 [ ! -e "$TMPDIR/review-pr/job-fresh" ] || fail "mixed collect removes the finished fresh state file"
 [ ! -d "$fresh_run_dir" ] || fail "mixed collect removes the fresh run directory"
 
-# --- case: re-collecting one kept job preserves every unfinished sibling
+# --- case: partial kept re-collect preserves the unrequested sibling
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards ERROR "standards review stopped"
-write_record spec NEEDS_CONTEXT "Owner ruling needed before review can continue"
-start_review 7 --repo O/N --cwd "$T/clone" --axes standards,spec --issue 1 --spec 2 \
-  --model M >/dev/null 2>&1 || fail "two-kept fixture start exits 0"
+write_record spec NEEDS_CONTEXT "UNREQUESTED-SIBLING-MARKER"
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || \
+  fail "partial kept fixture start exits 0"
 wt_standards="$(worktree_for standards)"
-wt_spec="$(worktree_for spec)"
 run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-standards")"
-out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "two-kept fixture collect exits 1"
-[ "$(grep -Fxc 'resume: delegate resume job-standards' <<<"$out")" = "1" ] || fail "two-kept fixture prints standards resume"
-[ "$(grep -Fxc 'resume: delegate resume job-spec' <<<"$out")" = "1" ] || fail "two-kept fixture prints spec resume"
-[ -d "$wt_standards" ] && [ -d "$wt_spec" ] || fail "two-kept fixture keeps both unfinished worktrees"
-grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-standards" || fail "two-kept fixture marks standards posted"
-grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "two-kept fixture marks spec posted"
-run_entries=("$run_dir"/*)
-[ "${#run_entries[@]}" = "2" ] && [ "${run_entries[0]}" = "$run_dir/wt-spec" ] && \
-  [ "${run_entries[1]}" = "$run_dir/wt-standards" ] || fail "two-kept run contains only its unfinished worktrees"
-awk -F= '$1 != "posted" { print }' "$TMPDIR/review-pr/job-spec" >"$T/state/job-spec.tmp" && \
-  mv "$T/state/job-spec.tmp" "$TMPDIR/review-pr/job-spec"
-out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "partial kept re-collect exits 1"
+wt_spec="$run_dir/wt-spec"
+git -C "$T/clone" worktree add -q --detach "$wt_spec" "$FAKE_SHA" || fail "unrequested sibling worktree setup"
+{
+  printf 'role=spec\nrepo=O/N\npr=7\nsha=%s\npatch_id=%s\n' "$FAKE_SHA" "$EXPECTED_PID"
+  printf 'model=M\naxes=standards\nclone=%s\nworktree=%s\nrun_dir=%s\n' "$T/clone" "$wt_spec" "$run_dir"
+} >"$TMPDIR/review-pr/job-spec"
+cp "$T/canned/spec.json" "$TMPDIR/delegate-jobs/job-spec.json"
+out="$(bash "$REVIEW" collect job-standards 2>/dev/null)" && fail "partial kept fixture collect exits 1"
+grep -q '^UNFINISHED standards ERROR ' <<<"$out" || fail "partial kept fixture reports standards"
+[ -d "$wt_standards" ] && [ -d "$wt_spec" ] || fail "partial kept re-collect preserves the unrequested sibling"
+[ -f "$TMPDIR/review-pr/job-spec" ] || fail "partial kept re-collect preserves the sibling state"
+awk -F= '$1 != "posted" { print }' "$TMPDIR/review-pr/job-standards" >"$T/state/job-standards.tmp" && \
+  mv "$T/state/job-standards.tmp" "$TMPDIR/review-pr/job-standards"
+out="$(bash "$REVIEW" collect job-standards 2>/dev/null)" && fail "partial kept re-collect exits 1"
 grep -q '^UNFINISHED standards ERROR ' <<<"$out" || fail "partial kept re-collect reports standards"
 [ -d "$wt_standards" ] && [ -d "$wt_spec" ] || fail "partial kept re-collect preserves the unrequested sibling"
 [ -f "$TMPDIR/review-pr/job-spec" ] || fail "partial kept re-collect preserves the sibling state"
-grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "partial kept re-collect repairs its sibling posted marker"
+grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-standards" || fail "partial kept re-collect marks the requested job posted"
+! grep -Fxq 'posted=1' "$TMPDIR/review-pr/job-spec" || fail "partial kept re-collect does not mark the unrequested sibling posted"
+! grep -Fq 'UNREQUESTED-SIBLING-MARKER' "$T/state/comment.md" || \
+  fail "partial kept re-collect comment body names no unrequested job"
+! grep -Fq '## spec ' "$T/state/comment.md" || fail "partial kept re-collect comment has no unrequested sibling section"
 run_entries=("$run_dir"/*)
-[ "${#run_entries[@]}" = "2" ] && [ "${run_entries[0]}" = "$run_dir/wt-spec" ] && \
-  [ "${run_entries[1]}" = "$run_dir/wt-standards" ] || fail "partial kept re-collect leaves both worktrees registered"
-[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "partial kept re-collect does not repost"
+[ "${#run_entries[@]}" = "2" ] && [ "${run_entries[0]}" = "$wt_spec" ] && \
+  [ "${run_entries[1]}" = "$wt_standards" ] || fail "partial kept re-collect leaves both worktrees registered"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "partial kept re-collect posts only requested ids"
 
 # --- case: an ERROR job's UNFINISHED line names the reason from the record
 reset_state
