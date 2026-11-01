@@ -721,7 +721,15 @@ fn supervisor_interrupt_stop_keeps_session_and_idle_interrupt_is_a_noop() {
     assert_eq!(running.send("continue").unwrap()["disposition"], "started");
     assert_eq!(running.stop_and_join(), 0);
 
-    let mut idle = Session::spawn("FAST,HOLD_START", "brief", None, Bounds::default());
+    let mut idle = Session::spawn(
+        "FAST,HOLD_START",
+        "brief",
+        None,
+        Bounds {
+            rpc_ms: 5_000,
+            ..Bounds::default()
+        },
+    );
     idle.until("idle session", |state| {
         state.status == Status::Idle && state.last_turn.is_some()
     });
