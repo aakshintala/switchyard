@@ -139,12 +139,10 @@ case "\$cmd" in
     esac
     printf '%s\n' "\$id" ;;
   watch)
-    # The job stays RUNNING until its watch: the watch takes a moment, moves
-    # the record to DONE with its result, then logs its completion. A watch
-    # sent to the background would log after the next run, which the
-    # ordering check catches.
+    # The delay is 0 unless a scenario sets FAKE_WATCH_SLEEP. Task 2 sets it
+    # to 1 so the ordering check can see a backgrounded watch.
     printf 'watch %s\n' "\$*" >>"\$FAKE_LOGDIR/calls.log"
-    sleep 1
+    sleep "\${FAKE_WATCH_SLEEP:-0}"
     job="\$TMPDIR/delegate-jobs/\$1.json"
     jq '.status="DONE" | .result={status:"DONE",model:.resume.model,sessionId:.resume.sessionId,backend:"x",
           usage:{inputTokens:1000,outputTokens:100,cacheReadTokens:500,cacheWriteTokens:0},
@@ -239,7 +237,7 @@ EOF
 
 # --- Task 2: happy-path run ---
 OUT="$T/out"
-FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 223 "$T/brief.md" \
+FAKE_WATCH_SLEEP=1 FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 223 "$T/brief.md" \
   --gate 'test -f work-marker' --out "$OUT" || fail "canary run exits 0"
 
 # layout
