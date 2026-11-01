@@ -13,6 +13,8 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-review-pr.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
+export HOME="$T/home"
+mkdir -p "$HOME"
 
 export TMPDIR="$T/tmp"
 export REVIEW_PR_RUN_ROOT="$T/runs"
@@ -224,6 +226,7 @@ reset_state() {
     "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log"
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/issue-calls.txt"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
+  rm -f "$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
 }
 
@@ -258,6 +261,19 @@ STATUS: DONE" 0
 STATUS: DONE" 0
   write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
+}
+
+assert_reap_line() {
+  expected_run="$1"; expected_id="$2"; expected_reason="$3"; expected_path="path=$4"
+  awk -F '\t' -v host="$(hostname -s)" -v run="$expected_run" -v jid="$expected_id" \
+    -v reason="$expected_reason" -v path="$expected_path" '
+    NF == 6 && length($1) == 20 && substr($1, 5, 1) == "-" && \
+      substr($1, 8, 1) == "-" && substr($1, 11, 1) == "T" && \
+      substr($1, 14, 1) == ":" && substr($1, 17, 1) == ":" && \
+      substr($1, 20, 1) == "Z" && $2 == host && $3 == run && \
+      $4 == jid && $5 == reason && $6 == path { found++ }
+    END { exit found != 1 }
+  ' "$HOME/.cache/agents/review-pr-reap.log" || fail "reap log line for $4"
 }
 
 stale_ts_for() {
@@ -1547,6 +1563,11 @@ collect: review-pr collect job-standards job-spec job-overbuild" ] || fail "prun
 [ ! -e "$stale_sf" ] || fail "prune removes the stale state file"
 [ ! -e "$stale_wt" ] || fail "prune removes the stale worktree"
 [ ! -e "$stale_rd" ] || fail "prune removes the stale run dir"
+reap_log="$HOME/.cache/agents/review-pr-reap.log"
+[ "$(wc -l <"$reap_log" | tr -d ' ')" = "3" ] || fail "reap logs each stale worktree, run dir, and state path"
+assert_reap_line "$stale_rd" job-old 'stale>60m' "$stale_wt"
+assert_reap_line "$stale_rd" job-old 'stale>60m' "$stale_rd"
+assert_reap_line "$stale_rd" job-old 'stale>60m' "$stale_sf"
 stale_base="$(basename "$stale_rd")"
 [ "$(git -C "$T/clone" worktree list | grep -c "$stale_base/wt-" || true)" = "0" ] || fail "prune unregisters the stale worktree"
 [ -f "$TMPDIR/review-pr/job-standards" ] || fail "pruning start still saves the new state"
@@ -1591,6 +1612,7 @@ start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbu
 [ -f "$stale_sf" ] || fail "fresh state is kept"
 [ -d "$stale_wt" ] || fail "fresh worktree is kept"
 [ -d "$stale_rd" ] || fail "fresh run dir is kept"
+[ ! -s "$HOME/.cache/agents/review-pr-reap.log" ] || fail "a young finished run is not logged"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after fresh-stale exits 0"
 git -C "$T/clone" worktree remove --force "$stale_wt" >/dev/null 2>&1 || rm -rf "$stale_wt"
 rm -rf "$stale_rd"
@@ -1674,10 +1696,66 @@ start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbu
 [ -d "$young_rd/wt-standards" ] || fail "two-hour recordless worktree is kept"
 [ ! -e "$TMPDIR/review-pr/job-norec7" ] || fail "prune removes the seven-hour recordless state"
 [ ! -e "$old_rd" ] || fail "prune removes the seven-hour recordless run dir"
+reap_log="$HOME/.cache/agents/review-pr-reap.log"
+[ "$(wc -l <"$reap_log" | tr -d ' ')" = "3" ] || fail "reap logs each recordless stale path"
+assert_reap_line "$old_rd" job-norec7 'stale>360m' "$old_rd/wt-standards"
+assert_reap_line "$old_rd" job-norec7 'stale>360m' "$old_rd"
+assert_reap_line "$old_rd" job-norec7 'stale>360m' "$TMPDIR/review-pr/job-norec7"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after recordless ages exits 0"
 git -C "$T/clone" worktree remove --force "$young_rd/wt-standards" >/dev/null 2>&1 || rm -rf "$young_rd/wt-standards"
 rm -rf "$young_rd"
 rm -f "$TMPDIR/review-pr/job-norec2"
+
+# --- case: empty or missing worktree paths are not added to the reap log
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+reap_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
+stale_state "$reap_rd" job-empty standards 7 DONE "$T/clone"
+stale_state "$reap_rd" job-missing spec 7 DONE "$T/clone"
+git -C "$T/clone" worktree remove --force "$reap_rd/wt-standards" >/dev/null 2>&1 || fail "empty-path worktree cleanup"
+git -C "$T/clone" worktree remove --force "$reap_rd/wt-spec" >/dev/null 2>&1 || fail "missing-path worktree cleanup"
+awk -F= '$1 != "worktree" { print } END { print "worktree=" }' \
+  "$TMPDIR/review-pr/job-empty" >"$T/state/job-empty.tmp" && \
+  mv "$T/state/job-empty.tmp" "$TMPDIR/review-pr/job-empty"
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 \
+  >/dev/null 2>&1 || fail "start with empty and missing worktree paths exits 0"
+reap_log="$HOME/.cache/agents/review-pr-reap.log"
+[ "$(wc -l <"$reap_log" | tr -d ' ')" = "3" ] || fail "empty and missing worktree paths are not logged"
+assert_reap_line "$reap_rd" job-empty 'stale>60m' "$TMPDIR/review-pr/job-empty"
+assert_reap_line "$reap_rd" job-missing 'stale>60m' "$TMPDIR/review-pr/job-missing"
+assert_reap_line "$reap_rd" job-empty 'stale>60m' "$reap_rd"
+! grep -Fq "path=$reap_rd/wt-standards" "$reap_log" || fail "empty worktree path creates no reap line"
+! grep -Fq "path=$reap_rd/wt-spec" "$reap_log" || fail "missing worktree path creates no reap line"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after empty-path prune exits 0"
+
+# --- case: a reap-log failure does not stop stale-run cleanup
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+rm -rf "$HOME/.cache"
+printf 'not a directory\n' >"$HOME/.cache"
+stale_rd="$(mktemp -d "$REVIEW_PR_RUN_ROOT/review-pr.run.XXXXXX")"
+stale_state "$stale_rd" job-log-fail standards 7 DONE "$T/clone"
+stale_sf="$TMPDIR/review-pr/job-log-fail"
+stale_wt="$stale_rd/wt-standards"
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 \
+  >/dev/null 2>&1 || fail "reap-log failure does not fail start"
+[ ! -e "$stale_sf" ] && [ ! -e "$stale_wt" ] && [ ! -e "$stale_rd" ] || \
+  fail "reap-log failure still removes stale paths"
+rm -f "$HOME/.cache"
+mkdir -p "$HOME/.cache/agents"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after failed reap log exits 0"
 
 # --- case: start prunes a stale two-file run sharing one run dir when the clone is gone
 reset_state
