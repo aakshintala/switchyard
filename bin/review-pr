@@ -27,10 +27,12 @@
 #   review-pr collect <job-id>... [--findings-out PATH]
 #     posts the one PR comment with the patch-id, prints the verdict digest,
 #     writes the open findings (or "no open findings") to PATH when asked,
-#     removes the worktrees, and exits 1 when any job is unfinished or wrote a
-#     verdict outside the shared vocabulary below. Collecting an already-collected
-#     job id reprints its verdict and finding lines from the job record, writes
-#     --findings-out the same way, and posts nothing.
+#     removes finished worktrees, keeps each UNFINISHED job's worktree and
+#     state file, and prints its "resume: delegate resume <id>" command. It
+#     exits 1 when any job is unfinished or wrote a verdict outside the shared
+#     vocabulary below. An already-collected job id reprints its verdict and
+#     finding lines from the job record, writes --findings-out the same way,
+#     and posts nothing.
 #   review-pr run <same args as start>
 #     start, then delegate watch on every job id start launched, then collect on
 #     those ids. Prints start's lines, then collect's output, and exits with
@@ -574,6 +576,13 @@ cmd_start() {
       echo "review-pr: could not fetch the diff of PR $pr" >&2
       exit 1
     fi
+    if ! gh pr view "$pr" --repo "$repo" --json body -q .body >"$review_context/pr-body.md"; then
+      echo "review-pr: could not fetch the body of PR $pr" >&2
+      exit 1
+    fi
+    if ! grep -q '[^[:space:]]' "$review_context/pr-body.md"; then
+      rm -f "$review_context/pr-body.md"
+    fi
 
     ticket_numbers=()
     if [ "$issue_count" -eq 0 ]; then
@@ -690,11 +699,17 @@ cmd_start() {
           "SINCE=$since" "FINDINGS=@$verify" >"$brief"
         ;;
     esac
+    if [ "$mode" = "review" ] && [ -f "$review_context/pr-body.md" ]; then
+      printf "\nThe PR body is the lane's claim, not ground truth. Check evidence it cites; do not trust it.\nRead it at .review-context/pr-body.md.\n" >>"$brief"
+    fi
 
     if [ "$mode" = "review" ]; then
       rm -rf "$wt/.review-context"
       mkdir -p "$wt/.review-context"
       cp "$review_context/pr.diff" "$wt/.review-context/pr.diff"
+      if [ -f "$review_context/pr-body.md" ]; then
+        cp "$review_context/pr-body.md" "$wt/.review-context/pr-body.md"
+      fi
       case "$role" in
         spec|overbuild)
           for ticket_n in "${ticket_numbers[@]}"; do
@@ -828,27 +843,75 @@ cmd_collect() {
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/review-pr.collect.XXXXXX")"
   state_rm=()
+  kept_state=()
+  cleanup_keep=()
+  group_dirs=()
+  group_ids=()
+  group_state_ids=()
+  group_first_state=()
+  group_posted=()
   posted_ok=""
+  collect_complete=""
   cleanup() {
-    for sf in ${state_rm[@]+"${state_rm[@]}"}; do
-      remove_state_worktree "$sf" || true
-    done
-    for sf in ${state_rm[@]+"${state_rm[@]}"}; do
-      rd="$(state_get "$sf" run_dir 2>/dev/null || true)"
-      case "$rd" in "$run_root"/review-pr.run.*) rm -rf "$rd";; esac
-    done
-    if [ -n "$posted_ok" ]; then
+    if [ -n "$collect_complete" ]; then
       for sf in ${state_rm[@]+"${state_rm[@]}"}; do
-        rm -f "$sf"
+        keep=""
+        for ksf in ${cleanup_keep[@]+"${cleanup_keep[@]}"}; do
+          [ "$sf" = "$ksf" ] && { keep="1"; break; }
+        done
+        [ -n "$keep" ] || remove_state_worktree "$sf" || true
       done
+      for rd in ${group_dirs[@]+"${group_dirs[@]}"}; do
+        [ -n "$rd" ] || continue
+        has_kept=""
+        for ksf in ${cleanup_keep[@]+"${cleanup_keep[@]}"}; do
+          [ "$(state_get "$ksf" run_dir 2>/dev/null || true)" = "$rd" ] && has_kept="1"
+        done
+        case "$rd" in
+          "$run_root"/review-pr.run.*)
+            if [ -z "$has_kept" ]; then
+              rm -rf "$rd"
+            else
+              for entry in "$rd"/* "$rd"/.[!.]* "$rd"/..?*; do
+                [ -e "$entry" ] || [ -L "$entry" ] || continue
+                entry_kept=""
+                for ksf in ${cleanup_keep[@]+"${cleanup_keep[@]}"}; do
+                  [ "$entry" = "$(state_get "$ksf" worktree 2>/dev/null || true)" ] && entry_kept="1"
+                done
+                [ -n "$entry_kept" ] || rm -rf "$entry"
+              done
+            fi
+            ;;
+        esac
+      done
+      for sf in ${state_rm[@]+"${state_rm[@]}"}; do
+        keep=""
+        for ksf in ${cleanup_keep[@]+"${cleanup_keep[@]}"}; do
+          [ "$sf" = "$ksf" ] && { keep="1"; break; }
+        done
+        [ -n "$keep" ] || rm -f "$sf"
+      done
+    else
+      for sf in ${state_rm[@]+"${state_rm[@]}"}; do
+        remove_state_worktree "$sf" || true
+      done
+      for sf in ${state_rm[@]+"${state_rm[@]}"}; do
+        rd="$(state_get "$sf" run_dir 2>/dev/null || true)"
+        case "$rd" in "$run_root"/review-pr.run.*) rm -rf "$rd";; esac
+      done
+      if [ -n "$posted_ok" ]; then
+        for sf in ${state_rm[@]+"${state_rm[@]}"}; do
+          rm -f "$sf"
+        done
+      fi
     fi
     rm -rf "$tmp"
   }
   trap cleanup EXIT
 
-  # debt: single-run collect (repo/PR/SHA/patch-id come from the first state
-  # file found), per-run grouping when callers mix runs in one collect.
+  # Collect groups are kept separate so a mixed call posts once per run.
   repo=""; pr=""; sha=""; patch_id=""; full_rereview=""
+  group_keys=()
   id_list=()
   unknown_f="$tmp/unknown.txt"
   : >"$unknown_f"
@@ -868,12 +931,39 @@ cmd_collect() {
       continue
     fi
     state_rm[${#state_rm[@]}]="$sf"
-    if [ -z "$pr" ]; then
-      repo="$(state_get "$sf" repo)"
-      pr="$(state_get "$sf" pr)"
-      sha="$(state_get "$sf" sha)"
-      patch_id="$(state_get "$sf" patch_id)"
-      full_rereview="$(state_get "$sf" full_rereview)"
+    rd="$(state_get "$sf" run_dir)"
+    group_key="$rd"
+    [ -n "$group_key" ] || group_key="state:$jid"
+    group_index=""
+    gi=0
+    while [ "$gi" -lt "${#group_keys[@]}" ]; do
+      if [ "${group_keys[$gi]}" = "$group_key" ]; then
+        group_index="$gi"
+        break
+      fi
+      gi=$((gi + 1))
+    done
+    if [ -z "$group_index" ]; then
+      group_index="${#group_keys[@]}"
+      group_keys[$group_index]="$group_key"
+      group_dirs[$group_index]="$rd"
+      group_ids[$group_index]="$jid"
+      group_state_ids[$group_index]="$jid"
+      group_first_state[$group_index]="$sf"
+      group_posted[$group_index]=""
+      if [ -z "$pr" ]; then
+        repo="$(state_get "$sf" repo)"
+        pr="$(state_get "$sf" pr)"
+        sha="$(state_get "$sf" sha)"
+        patch_id="$(state_get "$sf" patch_id)"
+        full_rereview="$(state_get "$sf" full_rereview)"
+      fi
+    else
+      group_ids[$group_index]="${group_ids[$group_index]} $jid"
+      group_state_ids[$group_index]="${group_state_ids[$group_index]} $jid"
+    fi
+    if [ "$(state_get "$sf" posted 2>/dev/null || true)" = "1" ]; then
+      group_posted[$group_index]="1"
     fi
     id_list[${#id_list[@]}]="$jid"
   done
@@ -887,39 +977,54 @@ cmd_collect() {
     fi
   fi
 
-  have_standards=""; have_spec=""; have_overbuild=""; have_verify=""
-  for jid in ${id_list[@]+"${id_list[@]}"}; do
-    r="$(state_get "$state_dir/$jid" role)"
-    case "$r" in
-      standards) have_standards="1";;
-      spec) have_spec="1";;
-      overbuild) have_overbuild="1";;
-      verify) have_verify="1";;
-    esac
-  done
-  # A collect needs every axis the run started: the expected axes ride in
-  # the first state file found (the three-axis default when none is found).
-  expected_axes="standards,spec,overbuild"
-  if [ "${#id_list[@]}" -ge 1 ]; then
-    expected_axes="$(state_get "$state_dir/${id_list[0]}" axes)"
-    [ -n "$expected_axes" ] || expected_axes="standards,spec,overbuild"
-  fi
+  missing_axes_f="$tmp/missing-axes.txt"
+  : >"$missing_axes_f"
   roles_ok=""
-  if [ -n "$have_verify" ] && [ -z "$have_standards" ] && [ -z "$have_spec" ] && [ -z "$have_overbuild" ]; then
+  expected_axes="standards,spec,overbuild"
+  if [ "${#group_dirs[@]}" -gt 0 ]; then
     roles_ok="1"
-  elif [ -z "$have_verify" ] && { [ -n "$have_standards" ] || [ -n "$have_spec" ] || [ -n "$have_overbuild" ]; }; then
-    roles_ok="1"
-    axes_rest="$expected_axes,"
-    while [ -n "$axes_rest" ]; do
-      ax="${axes_rest%%,*}"; axes_rest="${axes_rest#*,}"
-      have=""
-      case "$ax" in
-        standards) have="$have_standards";;
-        spec) have="$have_spec";;
-        overbuild) have="$have_overbuild";;
-      esac
-      [ -n "$have" ] || roles_ok=""
+    expected_axes="$(state_get "${group_first_state[0]}" axes)"
+    [ -n "$expected_axes" ] || expected_axes="standards,spec,overbuild"
+    for gi in ${!group_dirs[@]}; do
+      g_standards=""; g_spec=""; g_overbuild=""; g_verify=""
+      for jid in ${group_ids[$gi]}; do
+        r="$(state_get "$state_dir/$jid" role)"
+        case "$r" in
+          standards) g_standards="1";;
+          spec) g_spec="1";;
+          overbuild) g_overbuild="1";;
+          verify) g_verify="1";;
+        esac
+      done
+      [ "${group_posted[$gi]}" = "1" ] && continue
+      g_expected="$(state_get "${group_first_state[$gi]}" axes)"
+      [ -n "$g_expected" ] || g_expected="standards,spec,overbuild"
+      if [ -n "$g_verify" ] && [ -z "$g_standards" ] && [ -z "$g_spec" ] && [ -z "$g_overbuild" ]; then
+        continue
+      elif [ -z "$g_verify" ] && { [ -n "$g_standards" ] || [ -n "$g_spec" ] || [ -n "$g_overbuild" ]; }; then
+        axes_rest="$g_expected,"
+        while [ -n "$axes_rest" ]; do
+          ax="${axes_rest%%,*}"; axes_rest="${axes_rest#*,}"
+          have=""
+          case "$ax" in
+            standards) have="$g_standards";;
+            spec) have="$g_spec";;
+            overbuild) have="$g_overbuild";;
+          esac
+          if [ -z "$have" ]; then
+            roles_ok=""
+            printf 'UNFINISHED %s MISSING gate=none collect needs every role job id\n' "$ax" >>"$missing_axes_f"
+          fi
+        done
+      else
+        roles_ok=""
+        printf 'UNFINISHED verify MIXED gate=none collect needs every role job id\n' >>"$missing_axes_f"
+      fi
     done
+  else
+    printf 'UNFINISHED standards MISSING gate=none collect needs every role job id\n' >>"$missing_axes_f"
+    printf 'UNFINISHED spec MISSING gate=none collect needs every role job id\n' >>"$missing_axes_f"
+    printf 'UNFINISHED overbuild MISSING gate=none collect needs every role job id\n' >>"$missing_axes_f"
   fi
   short="unknown"
   if [ -n "$sha" ]; then short="${sha:0:8}"; fi
@@ -932,21 +1037,7 @@ cmd_collect() {
     printf 'patch-id %s\n' "${patch_id:-none}"
     printf 'CI %s %s\n' "$short" "$ci"
     cat "$unknown_f"
-    if [ -n "$have_verify" ]; then
-      printf 'UNFINISHED verify MIXED gate=none collect needs every role job id\n'
-    else
-      axes_rest="$expected_axes,"
-      while [ -n "$axes_rest" ]; do
-        ax="${axes_rest%%,*}"; axes_rest="${axes_rest#*,}"
-        have=""
-        case "$ax" in
-          standards) have="$have_standards";;
-          spec) have="$have_spec";;
-          overbuild) have="$have_overbuild";;
-        esac
-        [ -n "$have" ] || printf 'UNFINISHED %s MISSING gate=none collect needs every role job id\n' "$ax"
-      done
-    fi
+    cat "$missing_axes_f"
     # Caller error, not a finished run: keep every state file, worktree and
     # run dir (a sibling worktree lives in the same run dir) for the retry
     # with the full role set; only the scratch dir is removed by the trap.
@@ -974,31 +1065,56 @@ cmd_collect() {
     exit 1
   fi
 
-  body="$tmp/comment.md"
-  {
-    if [ -n "$full_rereview" ]; then
-      printf 'review-pr: patch-id %s, head %s, full-rereview: %s\n' "${patch_id:-none}" "${sha:-unknown}" "$full_rereview"
-    else
-      printf 'review-pr: patch-id %s, head %s\n' "${patch_id:-none}" "${sha:-unknown}"
+  for gi in ${!group_dirs[@]}; do
+    if [ "${group_posted[$gi]}" = "1" ]; then
+      for jid in ${group_state_ids[$gi]}; do
+        sf="$state_dir/$jid"
+        if [ "$(state_get "$sf" posted 2>/dev/null || true)" != "1" ]; then
+          printf 'posted=1\n' >>"$sf"
+        fi
+      done
+      continue
     fi
-    for jid in ${id_list[@]+"${id_list[@]}"}; do
-      role="$(state_get "$state_dir/$jid" role)"
-      rmodel="$(state_get "$state_dir/$jid" model)"
-      rec="$(job_rec "$jid")"
-      text=""
-      if [ -f "$rec" ]; then
-        text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
+    first_state="${group_first_state[$gi]}"
+    group_repo="$(state_get "$first_state" repo)"
+    group_pr="$(state_get "$first_state" pr)"
+    group_sha="$(state_get "$first_state" sha)"
+    group_patch_id="$(state_get "$first_state" patch_id)"
+    group_full_rereview="$(state_get "$first_state" full_rereview)"
+    body="$tmp/comment-$gi.md"
+    {
+      if [ -n "$group_full_rereview" ]; then
+        printf 'review-pr: patch-id %s, head %s, full-rereview: %s\n' \
+          "${group_patch_id:-none}" "${group_sha:-unknown}" "$group_full_rereview"
+      else
+        printf 'review-pr: patch-id %s, head %s\n' "${group_patch_id:-none}" "${group_sha:-unknown}"
       fi
-      printf '\n## %s (%s)\n\n%s\n' "$role" "$rmodel" "$text"
-    done
-  } >"$body"
-  if [ -n "$pr" ] && [ -n "$repo" ]; then
-    gh pr comment "$pr" --repo "$repo" --body-file "$body" >&2
-    posted_ok="1"
-  else
-    echo "review-pr: no saved state for these jobs, no comment posted" >&2
-    posted_ok="1"
-  fi
+      for jid in ${group_state_ids[$gi]}; do
+        role="$(state_get "$state_dir/$jid" role)"
+        rmodel="$(state_get "$state_dir/$jid" model)"
+        rec="$(job_rec "$jid")"
+        text=""
+        if [ -f "$rec" ]; then
+          text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
+        fi
+        printf '\n## %s (%s)\n\n%s\n' "$role" "$rmodel" "$text"
+      done
+    } >"$body"
+    if [ -n "$group_pr" ] && [ -n "$group_repo" ]; then
+      gh pr comment "$group_pr" --repo "$group_repo" --body-file "$body" >&2
+      for jid in ${group_state_ids[$gi]}; do
+        sf="$state_dir/$jid"
+        if [ "$(state_get "$sf" posted 2>/dev/null || true)" != "1" ]; then
+          printf 'posted=1\n' >>"$sf"
+        fi
+      done
+      group_posted[$gi]="1"
+    else
+      echo "review-pr: no saved state for these jobs, no comment posted" >&2
+    fi
+  done
+  posted_ok="1"
+  collect_complete="1"
 
   head_line="patch-id ${patch_id:-none}"
 
@@ -1066,6 +1182,8 @@ cmd_collect() {
         fi
       fi
       printf 'UNFINISHED %s %s gate=%s %s%s\n' "$role" "$status" "$gate" "$rec" "$reason_suffix" >>"$unfinished_f"
+      kept_state[${#kept_state[@]}]="$sf"
+      cleanup_keep[${#cleanup_keep[@]}]="$sf"
       unfinished=$((unfinished + 1))
     else
       complete=""
@@ -1077,9 +1195,29 @@ cmd_collect() {
       esac
       if [ -z "$complete" ]; then
         printf 'UNFINISHED %s %s gate=%s %s\n' "$role" "$status" "$gate" "$rec" >>"$unfinished_f"
+        kept_state[${#kept_state[@]}]="$sf"
+        cleanup_keep[${#cleanup_keep[@]}]="$sf"
         unfinished=$((unfinished + 1))
       fi
     fi
+  done
+  # Preserve unrequested siblings' state and worktrees while cleaning their
+  # shared run directory. They are cleanup-only: comment groups and posted
+  # markers above use requested ids only.
+  all_state_files="$tmp/state-files.txt"
+  find "$state_dir" -type f >"$all_state_files"
+  for gi in ${!group_dirs[@]}; do
+    rd="${group_dirs[$gi]}"
+    [ -n "$rd" ] || continue
+    while IFS= read -r sibling_sf; do
+      [ -n "$sibling_sf" ] || continue
+      [ "$(state_get "$sibling_sf" run_dir 2>/dev/null || true)" = "$rd" ] || continue
+      requested=""
+      for jid in ${id_list[@]+"${id_list[@]}"}; do
+        [ "$sibling_sf" = "$state_dir/$jid" ] && requested="1"
+      done
+      [ -n "$requested" ] || cleanup_keep[${#cleanup_keep[@]}]="$sibling_sf"
+    done <"$all_state_files"
   done
 
   if [ -n "$pr" ] && [ -n "$repo" ]; then
@@ -1093,6 +1231,9 @@ cmd_collect() {
   printf 'CI %s %s\n' "$short" "$ci"
   cat "$bad_f"
   cat "$unfinished_f"
+  for ksf in ${kept_state[@]+"${kept_state[@]}"}; do
+    printf 'resume: delegate resume %s\n' "${ksf##*/}"
+  done
 
   # --findings-out feeds run --verify: the open findings, one per line, or
   # the no-findings line its empty-file check names.
