@@ -144,6 +144,8 @@ gh() (
             *jobs*)
               if [ -e "$ST/jobs-$rid.json" ]; then
                 json="$(jq -c '{jobs: .}' "$ST/jobs-$rid.json")"
+              elif [ -e "$ST/jobs-many-cancelled.json" ] && [ "$rid" -ge 1000 ] && [ "$rid" -lt 4000 ]; then
+                json='{"jobs":[{"conclusion":"cancelled","databaseId":1,"name":"ci"}]}'
               else
                 json='{"jobs":[]}'
               fi;;
@@ -1344,9 +1346,7 @@ ship; expect 0 "empty attempt file reads as attempt 1"
 # list, which must not die on SIGPIPE when awk exits early (pipefail)
 setup; echo '[{"bucket":"cancel","name":"ci"}]' >"$ST/checks"
 jq -n '[range(3000) | {"databaseId": (1000+.), "name": "ci", "workflowName": "CI-\(.)", "event": "push", "conclusion": "cancelled"}]' >"$ST/run-list.json"
-for i in $(seq 1 3000); do
-  echo '[{"conclusion":"cancelled","databaseId":1,"name":"ci"}]' >"$ST/jobs-$((1000 + i)).json"
-done
+touch "$ST/jobs-many-cancelled.json"
 ship; expect 0 "many cancelled runs rerun once and merge"
 [ "$(grep -c 'gh run rerun' "$ST/gh.log")" -eq 3000 ] || fail "many runs: every run rerun once: [$(grep -c 'gh run rerun' "$ST/gh.log")]"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "many reruns merge: [$OUT]"
