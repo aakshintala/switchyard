@@ -152,7 +152,7 @@ is_pin() {
 
 # outline_lines PATH: outline lines with numbers for the blob at REV:PATH
 outline_lines() {
-  git -C "$dir" show "$rev:$1" | awk '
+  git -C "$dir" show "$rev:$1" | LC_ALL=C awk '
     {
       line = $0
       c = line; sub(/^[[:blank:]]+/, "", c)
@@ -169,7 +169,7 @@ outline_lines() {
 
 # doc_section FILE HEADING: print the section verbatim; exit 1 when it misses
 doc_section() {
-  git -C "$dir" show "$rev:$1" 2>/dev/null | awk -v h="$2" '
+  git -C "$dir" show "$rev:$1" 2>/dev/null | LC_ALL=C awk -v h="$2" '
     /^[[:space:]]*```/ { if (insec) print; infence = !infence; next }
     infence { if (insec) print; next }
     /^#+[[:blank:]]/ {

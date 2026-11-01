@@ -524,4 +524,13 @@ run --cwd "$R" --base "$ADJBASE" --symbols x,xx --files src/adjacent.rs --out "$
 [ "$(grep -c '^callers: 0 lines in 0 files (shown 0)$' "$T/pack-q7.md")" = 2 ] || fail "q6: x keeps zero callers when xx exists"
 [ "$(grep -c '^src/adjacent.rs:2:' "$T/pack-q7.md")" = 1 ] || fail "q6: xx line held by xx alone"
 
+# r. awk reads malformed UTF-8 with a multibyte locale
+printf '# Locale docs\n## Rules\nRule text.\n\377\npub fn locale_case() {}\n' >"$R/docs/invalid.md"
+git -C "$R" add docs/invalid.md
+git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m invalid-utf8
+UTF8BASE="$(git -C "$R" rev-parse HEAD)"
+LC_ALL=en_US.UTF-8 run --cwd "$R" --base "$UTF8BASE" --files docs/invalid.md --docs docs/invalid.md#Rules --out "$T/pack-locale-doc.md"
+[ "$code" = 0 ] || fail "r: doc section exits 0 under UTF-8 locale, got $code [$out]"
+[ "$out" = "PACK $T/pack-locale-doc.md symbols=0 files=1 outside=0" ] || fail "r: doc PACK line, got [$out]"
+
 echo "plan-sweep: all cases passed"
