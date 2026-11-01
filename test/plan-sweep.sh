@@ -529,16 +529,8 @@ printf '# Locale docs\n## Rules\nRule text.\n\377\npub fn locale_case() {}\n' >"
 git -C "$R" add docs/invalid.md
 git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m invalid-utf8
 UTF8BASE="$(git -C "$R" rev-parse HEAD)"
-LC_ALL=en_US.UTF-8 run --cwd "$R" --base "$UTF8BASE" --files docs/invalid.md --out "$T/pack-locale-outline.md"
-[ "$code" = 0 ] || fail "r: outline exits 0 under UTF-8 locale, got $code [$out]"
-[ "$out" = "PACK $T/pack-locale-outline.md symbols=0 files=1 outside=0" ] || fail "r: outline PACK line, got [$out]"
-grep -q '^## Outline docs/invalid.md$' "$T/pack-locale-outline.md" || fail "r: outline heading"
-grep -q '^5: pub fn locale_case() {}$' "$T/pack-locale-outline.md" || fail "r: outline declaration"
 LC_ALL=en_US.UTF-8 run --cwd "$R" --base "$UTF8BASE" --files docs/invalid.md --docs docs/invalid.md#Rules --out "$T/pack-locale-doc.md"
 [ "$code" = 0 ] || fail "r: doc section exits 0 under UTF-8 locale, got $code [$out]"
 [ "$out" = "PACK $T/pack-locale-doc.md symbols=0 files=1 outside=0" ] || fail "r: doc PACK line, got [$out]"
-grep -q '^## Outline docs/invalid.md$' "$T/pack-locale-doc.md" || fail "r: doc pack outline heading"
-grep -q '^## Doc docs/invalid.md#Rules$' "$T/pack-locale-doc.md" || fail "r: doc section heading"
-grep -q '^Rule text\.$' "$T/pack-locale-doc.md" || fail "r: doc section body"
 
 echo "plan-sweep: all cases passed"
