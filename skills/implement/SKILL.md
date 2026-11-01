@@ -5,7 +5,7 @@ description: "Take one ticket from start to merge: preflight, plan, Verifier, la
 
 You are the orchestrator for one ticket. The **main orchestrator** is the session the owner started; a **sub-orchestrator** was started by another orchestrator's brief.
 
-When you were started with a brief or notes file, that file is your contract. Where it speaks to a step below, such as entering at a later step or skipping a phase, it wins and the steps are only the default path. The Rules still apply, and you say in your report where you followed the file over a step.
+When you were started with a brief or notes file, that file is your contract for where you enter and what is already done. Where it speaks to a step below, it wins and the steps are only the default path. It never drops the gate, review or CI for commits you make. Where it conflicts with the Rules or the project's workflow doc, those win. Say in your report where you followed the file over a step.
 
 ## Rules
 
