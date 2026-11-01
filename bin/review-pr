@@ -451,8 +451,8 @@ cmd_start() {
   fi
   if [ -z "$wdoc" ]; then wdoc="none"; fi
   if [ -n "$head" ]; then
-    if ! printf '%s' "$head" | grep -Eq '^[0-9a-f]{40}$'; then
-      echo 'review-pr: --head needs the full 40-character SHA (git rev-parse <sha>)' >&2
+    if ! printf '%s' "$head" | grep -Eq '^[0-9a-f]{7,40}$'; then
+      echo "review-pr: --head needs a commit SHA of 7 to 40 hex characters, not $head" >&2
       exit 2
     fi
   fi

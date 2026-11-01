@@ -1350,13 +1350,15 @@ wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-standards")"
 [ "$(git -C "$wt" rev-parse HEAD)" = "$NEW_SHA" ] || fail "--head matching worktree head"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "--head matching collect exits 0"
 
-# --- case: --head must be a full SHA
+# --- case: --head rejects values outside 7 to 40 lowercase hex characters
 reset_state
-err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
-  --head abc123 2>&1 >/dev/null)"
-[ $? -eq 2 ] || fail "--head short sha is a usage error"
-[ "$err" = "review-pr: --head needs the full 40-character SHA (git rev-parse <sha>)" ] || \
-  fail "--head short sha message: [$err]"
+for bad_head in abc123 zzzzzzz "${NEW_SHA}a"; do
+  err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 \
+    --head "$bad_head" 2>&1 >/dev/null)"
+  [ "$?" -eq 2 ] || fail "invalid --head $bad_head is a usage error"
+  expected="review-pr: --head needs a commit SHA of 7 to 40 hex characters, not $bad_head"
+  [ "$err" = "$expected" ] || fail "invalid --head message: [$err]"
+done
 
 # --- case: --head in verify mode
 reset_state
