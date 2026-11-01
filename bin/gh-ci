@@ -4,8 +4,9 @@
 #        gh-ci verdict <branch-or-sha> | gh-ci resample <pr> "<job name>" --until <regex> [--max <n>]
 #        gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)
 # verdict judges required checks against the default branch; wait <pr> reads the PR's own base.
-# Exit codes: 0 ok, 1 failure, 2 usage, 3 merge conflict (snapshot and
-# watch-verified at once; wait after 30 s of DIRTY re-checks), 124: verdict means a required
+# Exit codes: 0 ok, 1 failure (verdict prints RED on stdout; lookup errors
+# print no verdict), 2 usage, 3 merge conflict (snapshot and watch-verified
+# at once; wait after 30 s of DIRTY re-checks), 124: verdict means a required
 # check is pending now (no wait); wait means the wait timed out with checks still pending.
 # Repo: --repo OWNER/NAME (any subcommand, any position; panics needs none), then GH_CI_REPO, then
 # origin's GitHub URL (no network call), then `gh repo view`. With none, exit 2.
