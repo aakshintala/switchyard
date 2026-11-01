@@ -22,8 +22,8 @@ fail() {
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-fix.XXXXXX")"
 T="$(cd "$T" && pwd)"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
+mkdir -p "$T/home" "$T/tmp" "$T/cache" "$T/no-system-jobs" "$T/bin" "$T/cases"
+export HOME="$T/home" TMPDIR="$T/tmp" XDG_CACHE_HOME="$T/cache" JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs" TKT_BIN="$T/bin"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 
 ln -s "$REAL_BIN/tkt-gate" "$T/bin/tkt-gate" || fail "symlink tkt-gate"

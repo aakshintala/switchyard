@@ -13,9 +13,9 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-delegate-replay.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-export HOME="$T/home"
+export HOME="$T/home" TMPDIR="$T/tmp" JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
 export XDG_CACHE_HOME="$T/inherited-cache"
-mkdir -p "$HOME" "$XDG_CACHE_HOME"
+mkdir -p "$HOME" "$TMPDIR" "$XDG_CACHE_HOME" "$JOB_RECORD_SYSTEM_DIR"
 
 JOBS="$T/jobs"
 SESS="$T/sessions"

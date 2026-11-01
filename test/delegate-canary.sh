@@ -32,13 +32,10 @@ assert_clean_leaves_nothing() {
 # as blanket allowed roots, so a HOME under /tmp (mktemp's default when the
 # outer TMPDIR is unset, as on CI) would make the task-3 `$HOME/x` write
 # contained instead of needs_out. $HOME is never under /tmp in practice.
-ORIG_HOME="${HOME:-/tmp}"
-T="$(mktemp -d "$ORIG_HOME/test-delegate-canary.XXXXXX")"
+T="$(mktemp -d "$(cd -P "${TMPDIR:-/tmp}" && pwd -P)/test-delegate-canary.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-export HOME="$T/home"
-mkdir -p "$HOME"
-export TMPDIR="$T/tmp"
-mkdir -p "$TMPDIR"
+export HOME="$T/home" TMPDIR="$T/tmp" XDG_CACHE_HOME="$T/cache" JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
+mkdir -p "$HOME" "$TMPDIR" "$XDG_CACHE_HOME" "$JOB_RECORD_SYSTEM_DIR"
 # seed_extension ROOT PROVIDER EXT: ROOT/extensions/EXT holds exactly two
 # regular files, providers/PROVIDER.json and extension.json.
 seed_extension() {

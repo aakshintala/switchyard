@@ -19,8 +19,9 @@ mkdir -p "$HOME"
 export TMPDIR="$T/tmp"
 export REVIEW_PR_RUN_ROOT="$T/runs"
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
+export XDG_CACHE_HOME="$T/cache"
 unset DELEGATE_JOBS_DIR
-mkdir -p "$TMPDIR" "$T/canned" "$T/state" "$T/override"
+mkdir -p "$TMPDIR" "$T/canned" "$T/state" "$T/override" "$XDG_CACHE_HOME"
 
 # --- throwaway repos: ORIGIN carries refs/pull/7/head, CLONE is cloned from it
 git init -q -b main "$T/origin"
