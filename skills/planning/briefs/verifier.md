@@ -21,4 +21,10 @@ Max 300 words, one line each: what, where, the smallest fix, and `core` (it cont
 
 9. When the ticket cites a failure location (a file:line of a panic or assert): does the plan's repro fail there? Quote the repro and the line and report the evidence. A repro that fails elsewhere is `core`.
 
-`PLAN OK` when items 1–4 and 6–9 find nothing and every invariant held under item 5: write `PLAN OK` alone on the first line, then list the item 5 attempts below it. End with a STATUS line.
+`PLAN OK` when items 1–4 and 6–9 find nothing and every invariant held under item 5. The report's first line is then exactly this, with nothing before or after it on that line:
+
+```
+PLAN OK
+```
+
+A script reads that line; anything else on it, such as `No findings.` or `STATUS: PLAN OK`, records the plan as failed. List the item 5 attempts below it. The STATUS line is a separate line at the end of the report.

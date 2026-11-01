@@ -13,4 +13,10 @@ Read the plan at `__PLAN__` before anything else, and reread it after any compac
 
 ## Report
 
-If every edit is in the plan and correct and no `core` item exists, open the report with `PLAN OK` on its own first line. Otherwise, do not write `PLAN OK`: give one line per edit that is missing or wrong, saying what is wrong and where, plus one line for each `core` item. Raise nothing else except a `core` item: a ruling that contradicts the ticket or a doc, or invents behaviour a person sees where the doc is silent. End with a STATUS line.
+If every edit is in the plan and correct and no `core` item exists, make the report's first line exactly this, with nothing before or after it on that line:
+
+```
+PLAN OK
+```
+
+A script reads that line; anything else on it, such as `No findings.` or `STATUS: PLAN OK`, records the plan as failed. Otherwise, do not write `PLAN OK`: give one line per edit that is missing or wrong, saying what is wrong and where, plus one line for each `core` item. Raise nothing else except a `core` item: a ruling that contradicts the ticket or a doc, or invents behaviour a person sees where the doc is silent. End with a STATUS line, as a separate last line.
