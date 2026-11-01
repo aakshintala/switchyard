@@ -1350,6 +1350,35 @@ wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-standards")"
 [ "$(git -C "$wt" rev-parse HEAD)" = "$NEW_SHA" ] || fail "--head matching worktree head"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "--head matching collect exits 0"
 
+# --- case: --head waits for an API head that starts with the requested prefix
+for prefix_length in 7 8 39; do
+  reset_state
+  write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+  printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+  head_prefix="${NEW_SHA:0:$prefix_length}"
+  start_review 8 --repo O/N --cwd "$T/clone" --axes standards --model M \
+    --head "$head_prefix" >/dev/null 2>&1 || fail "--head $prefix_length-character prefix starts review"
+  [ ! -e "$T/state/sleeps.txt" ] || fail "--head $prefix_length-character prefix matches without waiting"
+  wt="$(sed -n 's/^worktree=//p' "$TMPDIR/review-pr/job-standards")"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$NEW_SHA" ] || fail "--head $prefix_length-character worktree commit"
+  bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "--head $prefix_length-character collect exits 0"
+done
+
+# --- case: an unknown --head prefix waits and names the input when it gives up
+reset_state
+case "${FAKE_SHA:0:1}" in
+  0) unknown_prefix="1${FAKE_SHA:1:6}";;
+  *) unknown_prefix="0${FAKE_SHA:1:6}";;
+esac
+err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --axes standards \
+  --head "$unknown_prefix" 2>&1 >/dev/null)"
+[ "$?" -eq 1 ] || fail "unknown --head prefix gives up with exit 1"
+expected="review-pr: PR 8 head is $FAKE_SHA, expected $unknown_prefix; gave up after 60s"
+[ "$err" = "$expected" ] || fail "unknown --head prefix message: [$err]"
+[ "$(wc -l <"$T/state/sleeps.txt" | tr -d ' ')" = "30" ] || fail "unknown --head prefix keeps the existing wait count"
+[ ! -e "$T/state/runs.txt" ] || fail "unknown --head prefix launches no job"
+
 # --- case: --head rejects values outside 7 to 40 lowercase hex characters
 reset_state
 for bad_head in abc123 zzzzzzz "${NEW_SHA}a"; do

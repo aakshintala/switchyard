@@ -490,7 +490,7 @@ cmd_start() {
     waited=0
     while :; do
       api_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid 2>/dev/null | jq -r '.headRefOid // empty' 2>/dev/null)" || api_head=""
-      [ "$api_head" = "$head" ] && break
+      case "$api_head" in "$head"*) break;; esac
       if [ "$waited" -ge 30 ]; then
         echo "review-pr: PR $pr head is ${api_head:-none}, expected $head; gave up after 60s" >&2
         exit 1
