@@ -273,15 +273,15 @@ STATUS: DONE" 0
 
 assert_reap_line() {
   expected_run="$1"; expected_id="$2"; expected_reason="$3"; expected_path="path=$4"
-  tab="$(printf '\t')"
+  alternate_id="${5:-$expected_id}"
   log="$HOME/.cache/agents/review-pr-reap.log"
-  awk -F "$tab" -v host="$(hostname -s)" -v run="$expected_run" -v jid="$expected_id" \
-    -v reason="$expected_reason" -v path="$expected_path" '
+  awk -F '\t' -v host="$(hostname -s)" -v run="$expected_run" -v jid="$expected_id" \
+    -v alternate_id="$alternate_id" -v reason="$expected_reason" -v path="$expected_path" '
     NF == 6 && length($1) == 20 && substr($1, 5, 1) == "-" && \
       substr($1, 8, 1) == "-" && substr($1, 11, 1) == "T" && \
       substr($1, 14, 1) == ":" && substr($1, 17, 1) == ":" && \
       substr($1, 20, 1) == "Z" && $2 == host && $3 == run && \
-      $4 == jid && $5 == reason && $6 == path { found++ }
+      ($4 == jid || $4 == alternate_id) && $5 == reason && $6 == path { found++ }
     END { exit found != 1 }
   ' "$log" || {
     while IFS= read -r line; do printf 'reap log row: %s\n' "$line" >&2; done <"$log"
@@ -1805,7 +1805,8 @@ reap_log="$HOME/.cache/agents/review-pr-reap.log"
 [ "$(wc -l <"$reap_log" | tr -d ' ')" = "3" ] || fail "empty and missing worktree paths are not logged"
 assert_reap_line "$reap_rd" job-empty 'stale>60m' "$TMPDIR/review-pr/job-empty"
 assert_reap_line "$reap_rd" job-missing 'stale>60m' "$TMPDIR/review-pr/job-missing"
-assert_reap_line "$reap_rd" job-empty 'stale>60m' "$reap_rd"
+# find() may visit either stale sibling first; only that one logs the shared run dir.
+assert_reap_line "$reap_rd" job-empty 'stale>60m' "$reap_rd" job-missing
 ! grep -Fq "path=$reap_rd/wt-standards" "$reap_log" || fail "empty worktree path creates no reap line"
 ! grep -Fq "path=$reap_rd/wt-spec" "$reap_log" || fail "missing worktree path creates no reap line"
 bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>&1 || fail "collect after empty-path prune exits 0"
