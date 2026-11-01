@@ -1528,7 +1528,7 @@ struct Rest<'a> {
     turn_started: bool,
     completed_ok: bool,
     bad_outcome: Option<String>,
-    questions: Option<String>,
+    questions: Option<serde_json::Value>,
     stop: Option<Stop>,
     ack: Option<AckWait>,
     turn_start_deadline: Option<Instant>,
@@ -1872,12 +1872,11 @@ impl<'a> Rest<'a> {
     /// and stays: a later completed turn never clears it.
     fn record_turn_outcome(&mut self, value: &serde_json::Value) {
         let payload = value.get("payload");
-        if let Some(questions) = payload.and_then(|p| p.get("questions"))
-            && questions.as_array().is_some_and(|q| !q.is_empty())
-            && self.questions.is_none()
+        if self.questions.is_none()
+            && payload.is_some_and(|payload| super::questions_section(payload).is_some())
+            && let Some(questions) = payload.and_then(|payload| payload.get("questions"))
         {
-            self.questions =
-                Some(serde_json::to_string(questions).unwrap_or_else(|_| "questions".to_string()));
+            self.questions = Some(questions.clone());
         }
         match payload
             .and_then(|p| p.get("outcome"))
@@ -1920,35 +1919,35 @@ impl<'a> Rest<'a> {
         Step::End(self.pre_turn_exit(value))
     }
 
-    /// Fold the verdict line, then apply the turn rule: a non-`completed`
-    /// outcome or carried questions is an error naming it, even on
-    /// `fiber_exited` exit 0; Done needs an admitted `completed` turn.
+    /// Fold the verdict line and carry renderable turn questions into the
+    /// exit payload when it has none. `finish` then selects NeedsContext (or
+    /// DoneWithConcerns for a denial). A failed outcome still wins; Done needs
+    /// an admitted `completed` turn.
     fn verdict(&mut self, raw: &[u8]) -> BackendResult {
         self.fold(raw);
-        let exited_questions = self
-            .state
-            .exited
-            .as_ref()
-            .and_then(|exited| exited.get("payload"))
-            .and_then(super::questions_section);
-        if let Some(rendered) = exited_questions {
-            let mut res = finish(std::mem::take(&mut self.state), true, "", None);
-            res.is_error = Some(true);
-            res.text = crash_text(format!(
-                "session exited with questions:\n{rendered}: the client never answers them"
-            ));
-            return res;
+        if let Some(questions) = self.questions.as_ref() {
+            let exited_has_questions = self
+                .state
+                .exited
+                .as_ref()
+                .and_then(|exited| exited.get("payload"))
+                .is_some_and(|payload| super::questions_section(payload).is_some());
+            if !exited_has_questions
+                && let Some(payload) = self
+                    .state
+                    .exited
+                    .as_mut()
+                    .and_then(|exited| exited.get_mut("payload"))
+                    .and_then(serde_json::Value::as_object_mut)
+            {
+                payload.insert("questions".to_string(), questions.clone());
+            }
         }
         let mut res = finish(std::mem::take(&mut self.state), true, "", None);
         if res.is_error == Some(false) {
             if let Some(outcome) = self.bad_outcome.as_deref() {
                 res.is_error = Some(true);
                 res.text = crash_text(format!("turn outcome {outcome}: the turn did not complete"));
-            } else if let Some(questions) = self.questions.as_deref() {
-                res.is_error = Some(true);
-                res.text = crash_text(format!(
-                    "turn carried questions {questions}: the client never answers them"
-                ));
             } else if !self.completed_ok {
                 res.is_error = Some(true);
                 res.text = crash_text("session exited without a completed turn".to_string());
@@ -4161,7 +4160,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_carrying_questions_is_an_error_naming_them() {
+    fn turn_carrying_questions_ends_with_needs_context() {
         let (res, received) = run_case(|srv| {
             handshake_to_prompt(srv, &[], serde_json::json!(1000));
             let prompt_id =
@@ -4181,15 +4180,16 @@ mod tests {
             srv.send(&exited_ev(1003, 0, "waiting", None));
             srv.expect_eof();
         });
-        assert_eq!(res.is_error, Some(true));
-        assert!(res.text.contains("Which branch?"), "{}", res.text);
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.text.contains("1. Which branch?"), "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt", "close"]
         );
-        assert!(
-            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
-                == crate::types::RunStatus::Error
+        assert_eq!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit),
+            crate::types::RunStatus::NeedsContext
         );
     }
 
@@ -4205,7 +4205,7 @@ mod tests {
     }
 
     #[test]
-    fn exited_carrying_questions_is_an_error_naming_them() {
+    fn exited_carrying_questions_ends_with_needs_context() {
         let (res, received) = run_case(|srv| {
             handshake_to_prompt(srv, &[], serde_json::json!(1000));
             let prompt_id =
@@ -4228,21 +4228,226 @@ mod tests {
             ));
             srv.expect_eof();
         });
-        assert_eq!(res.is_error, Some(true));
+        assert_eq!(res.is_error, Some(false));
         assert!(res.clean_exit);
-        assert!(res.text.contains("Which branch?"), "{}", res.text);
-        assert!(
-            !res.text.lines().last().unwrap_or("").starts_with("STATUS:"),
-            "{}",
-            res.text
-        );
-        assert!(
-            crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
-                == crate::types::RunStatus::Error
+        assert!(res.text.contains("1. Which branch?"), "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+        assert_eq!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit),
+            crate::types::RunStatus::NeedsContext
         );
         assert_eq!(
             received_commands(&received),
             ["start", "subscribe", "prompt", "close"]
+        );
+    }
+
+    #[test]
+    fn turn_and_exit_questions_choose_the_exit_payload_once() {
+        let (res, _) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(
+                1002,
+                "completed",
+                Some(serde_json::json!(["turn question"])),
+            ));
+            let (_, _) = recv_id(srv);
+            srv.send(&exited_with_questions_ev(
+                1003,
+                0,
+                "waiting",
+                serde_json::json!(["exit question"]),
+            ));
+            srv.expect_eof();
+        });
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.text.contains("1. exit question"), "{}", res.text);
+        assert!(!res.text.contains("turn question"), "{}", res.text);
+        assert_eq!(res.text.matches("Questions:").count(), 1, "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
+    #[test]
+    fn turn_questions_with_a_denial_end_with_done_with_concerns() {
+        let (res, _) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&ev(
+                "tool_call_requested",
+                1002,
+                serde_json::json!({"name": "shell", "action_id": "a_1"}),
+            ));
+            srv.send(&ev(
+                "permission_resolved",
+                1003,
+                serde_json::json!({
+                    "action_id": "a_1",
+                    "decision": "deny",
+                    "decided_by": "reviewer",
+                    "reason": "fetches a remote host",
+                }),
+            ));
+            srv.send(&ev(
+                "tool_call_completed",
+                1004,
+                serde_json::json!({"action_id": "a_1", "status": "denied"}),
+            ));
+            srv.send(&turn_completed_ev(
+                1005,
+                "completed",
+                Some(serde_json::json!(["Which branch?"])),
+            ));
+            let (_, _) = recv_id(srv);
+            srv.send(&exited_ev(1006, 0, "waiting", None));
+            srv.expect_eof();
+        });
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.text.contains("1. Which branch?"), "{}", res.text);
+        assert!(
+            res.text.ends_with("STATUS: DONE_WITH_CONCERNS"),
+            "{}",
+            res.text
+        );
+        assert_eq!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit),
+            crate::types::RunStatus::DoneWithConcerns
+        );
+    }
+
+    #[test]
+    fn blank_exit_questions_fall_back_to_turn_questions() {
+        let (res, _) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(
+                1002,
+                "completed",
+                Some(serde_json::json!(["turn question"])),
+            ));
+            let (_, _) = recv_id(srv);
+            srv.send(&exited_with_questions_ev(
+                1003,
+                0,
+                "waiting",
+                serde_json::json!(["  "]),
+            ));
+            srv.expect_eof();
+        });
+        assert_eq!(res.is_error, Some(false));
+        assert!(res.text.contains("1. turn question"), "{}", res.text);
+        assert_eq!(res.text.matches("Questions:").count(), 1, "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
+    #[test]
+    fn non_object_exit_payload_skips_turn_question_copy() {
+        let (res, _) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(
+                1002,
+                "completed",
+                Some(serde_json::json!(["Which branch?"])),
+            ));
+            let (_, _) = recv_id(srv);
+            srv.send(&ev(
+                "fiber_exited",
+                1003,
+                serde_json::json!("not an object"),
+            ));
+            srv.expect_eof();
+        });
+        assert_eq!(res.is_error, Some(true));
+        assert!(!res.text.contains("Which branch?"), "{}", res.text);
+        assert!(
+            !res.text.lines().any(|line| line.starts_with("STATUS:")),
+            "{}",
+            res.text
+        );
+    }
+
+    #[test]
+    fn cancelled_turn_questions_stay_an_error_without_needs_context_status() {
+        let (res, _) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(
+                1002,
+                "cancelled",
+                Some(serde_json::json!(["Which branch?"])),
+            ));
+            let (_, _) = recv_id(srv);
+            srv.send(&exited_ev(1003, 0, "waiting", None));
+            srv.expect_eof();
+        });
+        assert_eq!(res.is_error, Some(true));
+        assert!(!res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+        assert_eq!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit),
+            crate::types::RunStatus::Error
+        );
+    }
+
+    #[test]
+    fn nonzero_exit_with_turn_questions_has_no_status_line() {
+        let (res, _) = run_case(|srv| {
+            handshake_to_prompt(srv, &[], serde_json::json!(1000));
+            let prompt_id =
+                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                    .expect("prompt")["id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string();
+            srv.send(&turn_started_ev(&prompt_id, 1001));
+            srv.send(&turn_completed_ev(
+                1002,
+                "completed",
+                Some(serde_json::json!(["Which branch?"])),
+            ));
+            let (_, _) = recv_id(srv);
+            srv.send(&exited_ev(1003, 1, "failed", None));
+            srv.expect_eof();
+        });
+        assert_eq!(res.is_error, Some(true));
+        assert!(
+            !res.text.lines().any(|line| line.starts_with("STATUS:")),
+            "{}",
+            res.text
+        );
+        assert_eq!(
+            crate::output::derive_status(&res.text, res.is_error, res.clean_exit),
+            crate::types::RunStatus::Error
         );
     }
 
@@ -4269,27 +4474,29 @@ mod tests {
     }
 
     #[test]
-    fn empty_questions_do_not_spoil_done() {
-        let (res, _) = run_case(|srv| {
-            handshake_to_prompt(srv, &[], serde_json::json!(1000));
-            let prompt_id =
-                serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
-                    .expect("prompt")["id"]
-                    .as_str()
-                    .expect("id")
-                    .to_string();
-            srv.send(&turn_started_ev(&prompt_id, 1001));
-            srv.send(&turn_completed_ev(
-                1002,
-                "completed",
-                Some(serde_json::json!([])),
-            ));
-            let (_, _) = recv_id(srv);
-            srv.send(&exited_ev(1003, 0, "DONE", None));
-            srv.expect_eof();
-        });
-        assert_eq!(res.text, "DONE");
-        assert_eq!(res.is_error, Some(false));
+    fn empty_null_or_blank_turn_questions_do_not_spoil_done() {
+        for questions in [
+            serde_json::json!([]),
+            serde_json::json!(null),
+            serde_json::json!(["  "]),
+        ] {
+            let (res, _) = run_case(|srv| {
+                handshake_to_prompt(srv, &[], serde_json::json!(1000));
+                let prompt_id =
+                    serde_json::from_str::<serde_json::Value>(&received_last(&srv.received))
+                        .expect("prompt")["id"]
+                        .as_str()
+                        .expect("id")
+                        .to_string();
+                srv.send(&turn_started_ev(&prompt_id, 1001));
+                srv.send(&turn_completed_ev(1002, "completed", Some(questions)));
+                let (_, _) = recv_id(srv);
+                srv.send(&exited_ev(1003, 0, "DONE", None));
+                srv.expect_eof();
+            });
+            assert_eq!(res.text, "DONE");
+            assert_eq!(res.is_error, Some(false));
+        }
     }
 
     #[test]
