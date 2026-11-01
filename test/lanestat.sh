@@ -298,7 +298,7 @@ assert_row 707 'RUNNING$' "$(<"$T/case-7.out")"
 new_case case-8 708
 printf '%s\n' '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
   >"$case_dir/fiber-708-pi.jsonl"
-perl -e 'my $pad = "x" x 1000; print qq({"type":"message_update","pad":"$pad"}\\n) for 0..20000' \
+perl -e 'my $pad = "x" x 1000; print qq({"type":"message_update","pad":"$pad"}) . chr(10) for 0..20000' \
   >>"$case_dir/fiber-708-pi.jsonl" || fail "write case 8 filler"
 set_file_age "$case_dir/fiber-708-pi.jsonl" 301
 run_stat "$case_dir" >"$T/case-8.out" 2>"$T/case-8.err"; rc=$?
