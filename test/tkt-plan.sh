@@ -1519,7 +1519,7 @@ run_plan post
 [ "$RC" -eq 1 ] || fail "post after clearing skipped exits 1"
 expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "post after clearing skipped"
 
-# --- post --no-verifier fills only an empty verdict ---
+# --- post --no-verifier records or refreshes skipped and preserves other verdicts ---
 setup_case verdict-post-skip
 rebase_plan
 base_now="$(cat "$CDIR/base")"
@@ -1710,6 +1710,14 @@ bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed same-path
 run_plan set "$CDIR/plan.md" --no-verifier
 [ "$RC" -eq 0 ] || fail "same-path set --no-verifier exits 0"
 expect_plan_verdict lines "$base_now" "same-path --no-verifier preserves LINES"
+setup_case verdict-set-preserves-ok
+rebase_plan
+old_base="$(git -C "$WT" rev-parse HEAD^)"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed same-path OK verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$old_base" || fail "seed same-path OK base"
+run_plan set "$CDIR/plan.md" --no-verifier
+[ "$RC" -eq 0 ] || fail "same-path set --no-verifier preserves OK"
+expect_plan_verdict ok "$old_base" "same-path --no-verifier preserves OK pair"
 
 # --- an accepted word with a mismatched base is stale even with the fast-path flag ---
 setup_case verdict-stale-flag
