@@ -4,12 +4,14 @@
 # at most N cargo invocation trees hold a slot at once. Installed as `cargo`
 # in a directory placed first on a lane's PATH; see autonomous-flywheel.
 # With CARGO_SLOT_SHARED_CHECKOUT set to the shared checkout's path, a slot
-# subcommand run from that checkout is refused.
+# subcommand run from that checkout is refused. CARGO_SLOT_WORKTREE_ROOT adds a
+# scratch-worktree hint to that refusal.
 # `cargo mutants` is banned for lanes and refused up front; mutants run in CI.
 import errno
 import fcntl
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -267,7 +269,18 @@ def main():
     if real is None:
         fail(127, "no cargo on PATH outside cargo-slot")
     if subcommand(args) in SLOT_SUBCOMMANDS and in_shared_checkout():
-        fail(1, "cwd %s is inside the shared checkout %s; cd into your ticket worktree and rerun. This is a cwd check, not a permission denial." % (os.getcwd(), os.environ["CARGO_SLOT_SHARED_CHECKOUT"]))
+        message = "cwd %s is inside the shared checkout %s; cd into your ticket worktree and rerun" % (
+            os.getcwd(), os.environ["CARGO_SLOT_SHARED_CHECKOUT"]
+        )
+        worktree_root = os.environ.get("CARGO_SLOT_WORKTREE_ROOT", "")
+        if worktree_root:
+            worktree_root = worktree_root.rstrip("/")
+            message += "; for a scratch worktree run `git -C %s worktree add --detach %s/<name>`, where <name> describes the job (e.g. audit, bench), never a lane number" % (
+                shlex.quote(os.environ["CARGO_SLOT_SHARED_CHECKOUT"]),
+                shlex.quote(worktree_root),
+            )
+        message += ". This is a cwd check, not a permission denial."
+        fail(1, message)
     if subcommand(args) in SLOT_SUBCOMMANDS and not held():
         n = slot_count()
         if n > 0:
