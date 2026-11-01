@@ -1,7 +1,7 @@
 #!/bin/bash
 # fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>]
 #   [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>]
-#   [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]
+#   [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]
 # Decides whether flywheel may grant the paths alone: a path conflicts with an
 # open PR touching the same file (or hunk range) and with a live lane (or a
 # fresh grant file) holding it. Fail closed: any failed or unparseable probe
@@ -150,12 +150,12 @@ fw_mtime() {
   return 0
 }
 
-_usage() { echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]" >&2; }
+_usage() { echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]" >&2; }
 
 ticket="${1:-}"
 case "$ticket" in ''|*[!0-9]*) _usage; exit 2;; esac
 shift
-paths=""; ranges=""; readpaths=""; newpaths=""; expects=""; ignore=""; ignoreticket=""; dry=0
+paths=""; ranges=""; readpaths=""; newpaths=""; expects=""; ignore=""; ignoreticket=""; repo="aakshintala/fiber"; dry=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --paths) [ $# -ge 2 ] || { _usage; exit 2; }; paths="$2"; shift 2;;
@@ -168,6 +168,8 @@ while [ $# -gt 0 ]; do
     --new=*) newpaths="${1#--new=}"; shift;;
     --expect) [ $# -ge 2 ] || { _usage; exit 2; }; expects="$2"; shift 2;;
     --expect=*) expects="${1#--expect=}"; shift;;
+    --repo) [ $# -ge 2 ] || { _usage; exit 2; }; repo="$2"; shift 2;;
+    --repo=*) repo="${1#--repo=}"; shift;;
     --ignore-pr) [ $# -ge 2 ] || { _usage; exit 2; }; ignore="$2"; shift 2;;
     --ignore-pr=*) ignore="${1#--ignore-pr=}"; shift;;
     --ignore-ticket) [ $# -ge 2 ] || { _usage; exit 2; }; ignoreticket="$2"; shift 2;;
@@ -176,10 +178,18 @@ while [ $# -gt 0 ]; do
     *) _usage; exit 2;;
   esac
 done
+case "$repo" in
+  */*)
+    _repo_owner=${repo%%/*}; _repo_name=${repo#*/}
+    case "$_repo_name" in */*) _usage; exit 2;; esac
+    [ -n "$_repo_owner" ] && [ -n "$_repo_name" ] || { _usage; exit 2; }
+    ;;
+  *) _usage; exit 2;;
+esac
 [ -n "$paths" ] || { _usage; exit 2; }
 
 run=$(_fw_run)
-tmp=$(mktemp -d /tmp/fence-grant.XXXXXX) || { echo "ERROR cannot make temp dir"; exit 3; }
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"
 locked=0
 trap 'rm -rf "$tmp"; if [ "$locked" -eq 1 ]; then rmdir "$lockdir" 2>/dev/null || true; fi' EXIT
@@ -372,7 +382,7 @@ if [ -n "$newpaths" ]; then
   done < "$tmp/nitems"
 fi
 
-treejson=$("${FW_GH:-gh}" api 'repos/aakshintala/fiber/git/trees/main?recursive=1' 2>"$tmp/treeerr") || { g=$(head -c 200 "$tmp/treeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh trees main $g"; exit 3; }
+treejson=$("${FW_GH:-gh}" api "repos/$repo/git/trees/main?recursive=1" 2>"$tmp/treeerr") || { g=$(head -c 200 "$tmp/treeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh trees main $g"; exit 3; }
 printf '%s' "$treejson" | python3 -I -c 'import json,sys
 try:
   d = json.load(sys.stdin)
@@ -444,7 +454,7 @@ _fetch_blob() {
   [ -f "$_bf" ] && return 0
   # `gh` reads stdin, and these calls run inside `while read` loops fed by a
   # file: without this the first call swallows the rest of the loop's input.
-  "${FW_GH:-gh}" api "repos/aakshintala/fiber/contents/$1?ref=main" -H "Accept: application/vnd.github.raw" > "$_bf" 2>"$tmp/bloberr" < /dev/null || { g=$(head -c 200 "$tmp/bloberr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh contents $1 $g"; return 1; }
+  "${FW_GH:-gh}" api "repos/$repo/contents/$1?ref=main" -H "Accept: application/vnd.github.raw" > "$_bf" 2>"$tmp/bloberr" < /dev/null || { g=$(head -c 200 "$tmp/bloberr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh contents $1 $g"; return 1; }
   return 0
 }
 _line_has() { sed -n "${2}p" "$(_blob_path "$1")" 2>/dev/null | grep -Fq -- "$3"; }
@@ -500,7 +510,7 @@ print("\n".join(out))' "$_ef"
 fi
 
 # --- open PRs (fail closed) ---
-prjson=$("${FW_GH:-gh}" pr list -R aakshintala/fiber --state open --limit 200 --json number,headRefName 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
+prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,headRefName 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
 prs=$(printf '%s' "$prjson" | python3 -c 'import json,sys
 try:
   data = json.load(sys.stdin)
@@ -554,14 +564,14 @@ held=""
 # --- PR side: a rename holds old and new; created/binary/hunkless hold all ---
 _pr_touched() {
   # $1 = PR number. Writes touched "normbase|sectionbase" lines to $tmp/touched-$1.
-  nf=$("${FW_GH:-gh}" pr diff "$1" -R aakshintala/fiber --name-only 2>"$tmp/gderr-$1") || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+  nf=$("${FW_GH:-gh}" pr diff "$1" -R "$repo" --name-only 2>"$tmp/gderr-$1") || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
   printf '%s\n' "$nf" | grep . | while IFS= read -r f; do
     b=$(_norm_base "$f")
     [ -n "$b" ] || continue
     printf '%s|%s\n' "$b" "$b"
   done > "$tmp/touched-$1"
   if [ -s "$tmp/touched-$1" ]; then
-    "${FW_GH:-gh}" pr diff "$1" -R aakshintala/fiber --allow-escape-sequences > "$tmp/full-$1.diff" 2>"$tmp/gderr-$1" || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+    "${FW_GH:-gh}" pr diff "$1" -R "$repo" --allow-escape-sequences > "$tmp/full-$1.diff" 2>"$tmp/gderr-$1" || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
     [ -s "$tmp/full-$1.diff" ] || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
     grep '^rename from ' "$tmp/full-$1.diff" 2>/dev/null | sed 's/^rename from //' | while IFS= read -r o; do
       b=$(_norm_base "$o")
@@ -978,7 +988,7 @@ _suggest() {
   _pr_hunks "$tmp/full-$_spr.diff" "$_sfile" > "$tmp/sh" || return 0
   [ -s "$tmp/sh" ] || return 0
   grep -q '^NEWHUNK$' "$tmp/sh" && { echo "  the pull request adds this file whole, so there is no complement"; return 0; }
-  _len=$("${FW_GH:-gh}" api "repos/aakshintala/fiber/contents/$_sfile?ref=main" -H 'Accept: application/vnd.github.raw' 2>/dev/null | wc -l | tr -d ' ')
+  _len=$("${FW_GH:-gh}" api "repos/$repo/contents/$_sfile?ref=main" -H 'Accept: application/vnd.github.raw' 2>/dev/null | wc -l | tr -d ' ')
   case "$_len" in ''|0|*[!0-9]*) _len=END;; esac
   awk '{ a = $1 + 0; b = $2 + 0; e = a + b; if (e <= a) e = a + 1; print a "\t  held window " a "-" (e - 1) }' "$tmp/sh" | sort -n -u | cut -f2-
   sort -n "$tmp/sh" | awk -v len="$_len" -v f="$_sfile" '

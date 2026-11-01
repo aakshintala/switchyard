@@ -131,4 +131,21 @@ assert_rc 3 'ssh failure'
 [ "$(head -n 1 "$T/out")" = 'ERROR ssh box ssh stub failure ' ] || fail "ssh failure output: $(cat "$T/out")"
 assert_no_grant 'ssh failure'
 
-echo 'fence-grant tests passed'
+# Repo routing covers each gh seam, including both blob reads.
+reset_case
+mkdir -p "$T/blobs/docs"
+printf 'needle\n' >"$T/blobs/docs/tui.md"
+GH_PRLIST='[{"number":11,"headRefName":"bugfix"}]'
+export GH_PRLIST
+printf '%s\n' 'docs/tui.md' >"$T/pr/11.names"
+printf '%s\n' 'diff --git a/docs/tui.md b/docs/tui.md' 'index 1111111..2222222 100644' '--- a/docs/tui.md' '+++ b/docs/tui.md' '@@ -1,1 +1,1 @@' '-needle' '+changed' >"$T/pr/11.diff"
+run_fg 77 --paths docs/tui.md --expect docs/tui.md:1:needle --repo other/x
+assert_rc 1 'repo routing'
+grep -qF 'api repos/other/x/git/trees/main?recursive=1' "$T/gh.log" || fail 'tree query uses --repo'
+grep -qF 'api repos/other/x/contents/docs/tui.md?ref=main' "$T/gh.log" || fail 'blob fetch uses --repo'
+[ "$(grep -cF 'api repos/other/x/contents/docs/tui.md?ref=main' "$T/gh.log")" = 2 ] || fail 'suggestion blob fetch uses --repo'
+grep -qF 'pr list -R other/x ' "$T/gh.log" || fail 'PR list uses --repo'
+grep -qF 'pr diff 11 -R other/x --name-only' "$T/gh.log" || fail 'PR names use --repo'
+grep -qF 'pr diff 11 -R other/x --allow-escape-sequences' "$T/gh.log" || fail 'PR diff uses --repo'
+
+ echo 'fence-grant tests passed'
