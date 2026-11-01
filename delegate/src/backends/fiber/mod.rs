@@ -584,9 +584,10 @@ fn lower(staging: &[String]) -> (Vec<String>, String) {
 /// Render `payload.questions` as a `Questions:` section. `Some` only when the
 /// field is a non-empty array after skipping null and blank entries; any
 /// other shape leaves the text exactly as it was. A string renders as
-/// itself, an object with a string `question` renders that text with each
-/// option's `label` on its own indented line under it, and anything else
-/// renders as compact JSON.
+/// itself, an object with a string `question` renders that text with an
+/// optional non-blank string `header` in brackets and each option's `label`
+/// on its own indented line under it, and anything else renders as compact
+/// JSON.
 fn questions_section(payload: &serde_json::Value) -> Option<String> {
     let questions = payload.get("questions")?.as_array()?;
     let mut items: Vec<String> = Vec::new();
@@ -598,7 +599,15 @@ fn questions_section(payload: &serde_json::Value) -> Option<String> {
             items.push(s.to_string());
         } else if let Some(obj) = q.as_object() {
             if let Some(question) = obj.get("question").and_then(|v| v.as_str()) {
-                let mut item = question.to_string();
+                let mut item = if let Some(header) = obj
+                    .get("header")
+                    .and_then(|header| header.as_str())
+                    .filter(|header| !header.trim().is_empty())
+                {
+                    format!("[{header}] {question}")
+                } else {
+                    question.to_string()
+                };
                 if let Some(options) = obj.get("options").and_then(|v| v.as_array()) {
                     for opt in options {
                         if let Some(label) = opt.get("label").and_then(|v| v.as_str())
@@ -1647,6 +1656,49 @@ mod tests {
         assert!(res.text.contains("2. true"), "{}", res.text);
         assert!(res.text.contains("3. {\"note\":\"x\"}"), "{}", res.text);
         assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
+    #[test]
+    fn question_header_renders_before_text_and_keeps_options() {
+        let stream = exited_with_questions(
+            "need info",
+            serde_json::json!([
+                {"header": "Env", "question": "Which env?", "options": [{"label": "prod"}], "multiSelect": true},
+            ]),
+            1,
+        );
+        let res = parse_stdout(&stream, true, "");
+        assert!(
+            res.text.contains("1. [Env] Which env?\n  - prod"),
+            "{}",
+            res.text
+        );
+        assert!(!res.text.contains("multiSelect"), "{}", res.text);
+        assert!(res.text.ends_with("STATUS: NEEDS_CONTEXT"), "{}", res.text);
+    }
+
+    #[test]
+    fn blank_and_non_string_headers_leave_question_text_unadorned() {
+        let stream = exited_with_questions(
+            "need info",
+            serde_json::json!([
+                {"header": "  ", "question": "Which env?"},
+                {"header": 7, "question": "Which region?"},
+            ]),
+            1,
+        );
+        let res = parse_stdout(&stream, true, "");
+        assert!(res.text.contains("1. Which env?"), "{}", res.text);
+        assert!(res.text.contains("2. Which region?"), "{}", res.text);
+        assert!(!res.text.contains("[  ]"), "{}", res.text);
+        assert!(!res.text.contains("[7]"), "{}", res.text);
+    }
+
+    #[test]
+    fn header_only_question_objects_keep_the_compact_json_fallback() {
+        let stream = exited_with_questions("need info", serde_json::json!([{"header": "Env"}]), 1);
+        let res = parse_stdout(&stream, true, "");
+        assert!(res.text.contains("1. {\"header\":\"Env\"}"), "{}", res.text);
     }
 
     #[test]
