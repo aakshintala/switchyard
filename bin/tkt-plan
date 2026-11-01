@@ -59,6 +59,10 @@ load_plan() {
   base="$(base_of "$plan")"
 }
 
+# debt: the verdict gate is copied in tkt-build (its VERDICT-REFUSED block), and the
+# write pair repeats in do_verify and do_confirm. Ceiling: two copies plus the write
+# pair, in tkt-plan and tkt-build. Upgrade trigger: a third caller of the verdict
+# check; then move it to bin/lib/ and source it from both scripts.
 plan_verdict_ok() {
   local no_verifier="$1" stored stored_base
   stored="$(t get plan_verdict 2>/dev/null || true)"

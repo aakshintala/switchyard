@@ -52,7 +52,7 @@ Take it when the ticket is **determined**: it adds no new type, event, config ke
 
 Run steps 1–2. When the preflight finds no `core` item, or step 2 skipped it as current, skip step 3: write a plan file of five parts: Rung per `planning`'s rule (`standard` by default; `strong` or `frontier` where `planning` says so); Files (the preflight's file list, or the ticket's when step 2 skipped it); Tasks (the ticket's acceptance criteria, each with the test or command that shows it met, then each `non-blocking` drift item the preflight reported as a ruling line); Red commit, as `planning`'s template defines it; and `## Gate`, the workflow doc's gate as one command line, which `plan-gate` reads for the job-end gate. Fill `../planning/briefs/lane.md` yourself, with the keys `planning` step 5 lists: `PLAN` is that file's absolute path, and `GATE` is the same gate. Before step 4, reread each ruling posted on the ticket against the plan file: a ruling that changed the repro target, a file or a task changes the plan first. Then run steps 4–9 as written. When a build fails twice on the same finding, write the plan (step 3) and continue from there.
 
-When the fast path skips the plan's Verifier, run `tkt-plan <state> set <plan> --no-verifier`; it records the verdict as skipped, which `tkt-plan post` and `tkt-build` accept.
+When the fast path skips the plan's Verifier, run `tkt-plan <state> set <plan> --no-verifier`; it records the verdict as skipped, which `tkt-plan post` and `tkt-build` accept. `tkt-plan <state> post --no-verifier` and `tkt-build <state> --no-verifier` record the same skip when no verdict is stored, and never overwrite a stored one.
 
 ### 1. Check setup
 

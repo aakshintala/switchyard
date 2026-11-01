@@ -90,6 +90,9 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
 fi
 base="$(plan_base "$plan" 2>/dev/null || true)"
 [ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan"
+# debt: a copy of tkt-plan's plan_verdict_ok (and its write pair in do_verify and do_confirm).
+# Ceiling: two copies plus the write pair, in tkt-plan and tkt-build. Upgrade trigger: a third
+# caller of the verdict check; then move it to bin/lib/ and source it from both scripts.
 verdict="$(tkt get plan_verdict 2>/dev/null || true)"
 verdict_base="$(tkt get plan_verdict_base 2>/dev/null || true)"
 if [ -z "$verdict" ] && [ "$no_verifier" -eq 1 ]; then
