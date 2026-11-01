@@ -131,9 +131,15 @@ run_stat "$T/run" extra >"$T/extra.out" 2>"$T/extra.err"; rc=$?
 [ "$rc" = 2 ] || fail "extra argument exits 2 (got $rc)"
 run_stat --all --all "$T/run" >"$T/duplicate-all.out" 2>"$T/duplicate-all.err"; rc=$?
 [ "$rc" = 2 ] || fail "duplicate --all exits 2 (got $rc)"
+red_failures=
+record_failure() {
+  red_failures="${red_failures}${red_failures:+
+}$1"
+}
+case9_failed=
 run_stat "$T/empty" >"$T/empty.out" 2>"$T/empty.err"; rc=$?
 [ "$rc" = 0 ] || fail "empty run dir exits 0 (got $rc)"
-[ ! -s "$T/empty.out" ] || fail "empty run dir prints nothing"
+[ "$(<"$T/empty.out")" = "lanestat: no live lanes in $T/empty" ] || case9_failed=1
 
 # Settled rows are flagged only when their jsonl age is strictly over the
 # configured threshold. The clock and mtimes are fixed, without sleeping.
@@ -189,5 +195,133 @@ run_settled_case format-under 60 59 SETTLED
 expected="$(printf '%-6s %-8s %-18s age=%-6s %s' 610 610 'S 01:23' 59 SETTLED)"
 actual="$(grep -E '^610[[:space:]]' "$T/settled-format-under.out")"
 [ "$actual" = "$expected" ] || fail "under-threshold row keeps its exact format: [$actual]"
+
+new_case() {
+  case_name=$1
+  case_pid=$2
+  case_dir=$(mktemp -d "$T/$case_name.XXXXXX") || fail "create $case_name run dir"
+  printf '%s\n' "$case_pid" >"$case_dir/fiber-$case_pid-pi.pid"
+  printf 'pi\n' >"$T/ps/$case_pid.comm"
+  printf 'S 00:01\n' >"$T/ps/$case_pid.info"
+}
+set_file_age() {
+  perl -e 'my $t = $ARGV[1] - $ARGV[2]; utime($t, $t, $ARGV[0]) or die "utime: $!"' \
+    "$1" "$NOW" "$2" || fail "set fixture age $2"
+}
+expect_case_row() {
+  label=$1
+  field=$2
+  pattern=$3
+  rows=$4
+  line="$(printf '%s\n' "$rows" | grep -E "^${field}[[:space:]]" || true)"
+  if [ -z "$line" ] || ! printf '%s\n' "$line" | grep -Eq "$pattern"; then
+    record_failure "$label"
+  fi
+}
+
+# Pairing keeps the outer call open when an inner call ends.
+new_case case-1 701
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
+  '{"type":"tool_execution_start","toolCallId":"B","toolName":"read"}' \
+  '{"type":"tool_execution_end","toolCallId":"B"}' \
+  >"$case_dir/fiber-701-pi.jsonl"
+run_stat "$case_dir" >"$T/case-1.out" 2>"$T/case-1.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 1 exits 0 (got $rc)"
+expect_case_row 'case 1: outer tool remains open after inner end' 701 'IN-TOOL bash$' "$(<"$T/case-1.out")"
+
+# A queue update after the inner end does not hide the still-open outer call.
+new_case case-2 702
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
+  '{"type":"tool_execution_start","toolCallId":"B","toolName":"read"}' \
+  '{"type":"tool_execution_end","toolCallId":"B"}' \
+  '{"type":"queue_update"}' \
+  >"$case_dir/fiber-702-pi.jsonl"
+run_stat "$case_dir" >"$T/case-2.out" 2>"$T/case-2.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 2 exits 0 (got $rc)"
+expect_case_row 'case 2: queue update preserves outer open tool' 702 'IN-TOOL bash$' "$(<"$T/case-2.out")"
+
+# Settles, non-settling events, and events after a settle retain their order.
+new_case case-3 703
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
+  '{"type":"agent_settled"}' >"$case_dir/fiber-703-pi.jsonl"
+run_stat "$case_dir" >"$T/case-3.out" 2>"$T/case-3.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 3 exits 0 (got $rc)"
+assert_row 703 'SETTLED$' "$(<"$T/case-3.out")"
+
+new_case case-4 704
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
+  '{"type":"tool_execution_end","toolCallId":"A"}' \
+  '{"type":"agent_settled"}' >"$case_dir/fiber-704-pi.jsonl"
+run_stat "$case_dir" >"$T/case-4.out" 2>"$T/case-4.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 4 exits 0 (got $rc)"
+assert_row 704 'SETTLED$' "$(<"$T/case-4.out")"
+
+new_case case-5 705
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
+  '{"type":"tool_execution_end","toolCallId":"A"}' \
+  '{"type":"queue_update"}' >"$case_dir/fiber-705-pi.jsonl"
+set_file_age "$case_dir/fiber-705-pi.jsonl" 0
+run_stat "$case_dir" >"$T/case-5-fresh.out" 2>"$T/case-5-fresh.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 5 fresh exits 0 (got $rc)"
+assert_row 705 'RUNNING$' "$(<"$T/case-5-fresh.out")"
+set_file_age "$case_dir/fiber-705-pi.jsonl" 301
+run_stat "$case_dir" >"$T/case-5-aged.out" 2>"$T/case-5-aged.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 5 aged exits 0 (got $rc)"
+assert_row 705 'STALL no tool, not settled$' "$(<"$T/case-5-aged.out")"
+
+new_case case-6 706
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
+  '{"type":"agent_settled"}' \
+  '{"type":"tool_execution_start","toolCallId":"B","toolName":"B"}' \
+  >"$case_dir/fiber-706-pi.jsonl"
+run_stat "$case_dir" >"$T/case-6.out" 2>"$T/case-6.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 6 exits 0 (got $rc)"
+assert_row 706 'IN-TOOL B$' "$(<"$T/case-6.out")"
+
+new_case case-7 707
+printf '%s\n' \
+  '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
+  '{"type":"agent_settled"}' \
+  '{"type":"tool_execution_start","toolCallId":"B","toolName":"read"}' \
+  '{"type":"tool_execution_end","toolCallId":"B"}' \
+  >"$case_dir/fiber-707-pi.jsonl"
+run_stat "$case_dir" >"$T/case-7.out" 2>"$T/case-7.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 7 exits 0 (got $rc)"
+assert_row 707 'RUNNING$' "$(<"$T/case-7.out")"
+
+new_case case-8 708
+printf '%s\n' '{"type":"tool_execution_start","toolCallId":"A","toolName":"bash"}' \
+  >"$case_dir/fiber-708-pi.jsonl"
+perl -e 'my $pad = "x" x 1000; print qq({"type":"message_update","pad":"$pad"}) . chr(10) for 0..20000' \
+  >>"$case_dir/fiber-708-pi.jsonl" || fail "write case 8 filler"
+set_file_age "$case_dir/fiber-708-pi.jsonl" 301
+run_stat "$case_dir" >"$T/case-8.out" 2>"$T/case-8.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 8 exits 0 (got $rc)"
+assert_row 708 'STALL no tool, not settled$' "$(<"$T/case-8.out")"
+
+# Dead pid files do not count as live rows, even when --all displays them.
+case_dir=$(mktemp -d "$T/case-9.XXXXXX") || fail "create case-9 run dir"
+printf '909\n' >"$case_dir/fiber-909-pi.pid"
+run_stat "$case_dir" >"$T/case-9-default.out" 2>"$T/case-9-default.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 9 default exits 0 (got $rc)"
+[ "$(<"$T/case-9-default.out")" = "lanestat: no live lanes in $case_dir" ] || case9_failed=1
+run_stat --all "$case_dir" >"$T/case-9-all.out" 2>"$T/case-9-all.err"; rc=$?
+[ "$rc" = 0 ] || fail "case 9 --all exits 0 (got $rc)"
+expected="$(printf '%-6s %-8s %s\nlanestat: no live lanes in %s' 909 909 DEAD "$case_dir")"
+[ "$(<"$T/case-9-all.out")" = "$expected" ] || case9_failed=1
+[ -z "$case9_failed" ] || record_failure 'case 9: zero-live-row message for empty and dead-only run dirs'
+
+if [ -n "$red_failures" ]; then
+  printf '%s\n' "$red_failures" | while IFS= read -r failed; do
+    printf 'FAIL: %s\n' "$failed" >&2
+  done
+  exit 1
+fi
 
 echo 'lanestat: all cases passed'
