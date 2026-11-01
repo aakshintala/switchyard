@@ -100,7 +100,7 @@ while IFS= read -r p; do plan_files+=("$p"); done < <(plan_files_pathspecs "$pla
 # caller of the verdict check; then move it to bin/lib/ and source it from both scripts.
 verdict="$(tkt get plan_verdict 2>/dev/null || true)"
 verdict_base="$(tkt get plan_verdict_base 2>/dev/null || true)"
-if [ -z "$verdict" ] && [ "$no_verifier" -eq 1 ]; then
+if [ "$no_verifier" -eq 1 ] && { [ -z "$verdict" ] || [ "$verdict" = skipped ]; }; then
   tkt set plan_verdict skipped
   tkt set plan_verdict_base "$base"
   verdict=skipped

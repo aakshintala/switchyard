@@ -1505,7 +1505,7 @@ run_build
 [ "$RC" -eq 0 ] || fail "skipped verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "skipped verdict proceeds"
 
-# --- a missing verdict refuses, while --no-verifier fills only an empty pair ---
+# --- a missing verdict refuses; --no-verifier records or refreshes skipped ---
 setup_case verdict-none
 bash "$TKT_STATE" "$S" set plan_verdict "" || fail "clear plan verdict"
 bash "$TKT_STATE" "$S" set plan_verdict_base "" || fail "clear plan verdict base"
@@ -1528,6 +1528,7 @@ run_build --no-verifier
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--no-verifier preserves LINES"
 grep -q '^job|' "$T/calls.log" && fail "--no-verifier over LINES dispatches no tkt-job"
 expect_state plan_verdict lines "--no-verifier preserves stored verdict"
+expect_state plan_verdict_base "$H" "--no-verifier preserves rejection base"
 
 # --- accepted verdicts require the exact current plan base ---
 setup_case verdict-stale
@@ -1542,6 +1543,7 @@ run_build --no-verifier
 [ "$RC" -eq 1 ] || fail "--no-verifier does not replace a stale pair"
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "--no-verifier with stale verdict"
 expect_state plan_verdict ok "--no-verifier preserves stale verdict"
+expect_state plan_verdict_base 0000000000000000000000000000000000000000 "--no-verifier preserves stale verdict base"
 
 # --- verdict-ok-ancestor-unchanged: a descendant Base with no Files diff proceeds ---
 setup_case verdict-ok-ancestor-unchanged
@@ -1579,6 +1581,17 @@ run_build
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "sibling-base"
 grep -q '^job|' "$T/calls.log" && fail "sibling-base: stale verdict dispatches no tkt-job"
 
+# --- a skipped verdict at an old base stays stale without the flag ---
+setup_case verdict-skipped-stale-no-flag
+old_base="$(cat "$CDIR/main0")"
+bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed old skipped verdict without flag"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$old_base" || fail "seed old skipped base without flag"
+run_build
+[ "$RC" -eq 1 ] || fail "skipped verdict at an old base refuses without --no-verifier"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "old skipped verdict without flag"
+expect_state plan_verdict skipped "old skipped verdict without flag"
+expect_state plan_verdict_base "$old_base" "old skipped base without flag"
+
 # --- the verdict check runs before either --from lane split ---
 setup_case verdict-from-gate
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed --from gate LINES"
@@ -1594,5 +1607,16 @@ run_build --from review
 [ "$RC" -eq 1 ] || fail "--from review verdict refusal exits 1"
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--from review verdict refusal"
 grep -q '^job|' "$T/calls.log" && fail "--from review refusal dispatches no tkt-job"
+
+# --- --no-verifier refreshes a stored skipped verdict at the current base ---
+setup_case verdict-skipped-stale-flag
+old_base="$(cat "$CDIR/main0")"
+bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed old skipped verdict with flag"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$old_base" || fail "seed old skipped base with flag"
+run_build --no-verifier
+[ "$RC" -eq 0 ] || fail "--no-verifier refreshes an old skipped verdict (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "old skipped verdict with flag"
+expect_state plan_verdict skipped "old skipped verdict with flag"
+expect_state plan_verdict_base "$H" "old skipped base refreshes with flag"
 
 echo "tkt-build: all cases passed"

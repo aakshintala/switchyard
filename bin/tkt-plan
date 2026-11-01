@@ -67,7 +67,7 @@ plan_verdict_ok() {
   local no_verifier="$1" stored stored_base p files=()
   stored="$(t get plan_verdict 2>/dev/null || true)"
   stored_base="$(t get plan_verdict_base 2>/dev/null || true)"
-  if [ -z "$stored" ] && [ "$no_verifier" -eq 1 ]; then
+  if [ "$no_verifier" -eq 1 ] && { [ -z "$stored" ] || [ "$stored" = skipped ]; }; then
     t set plan_verdict skipped
     t set plan_verdict_base "$base"
     stored=skipped
@@ -360,7 +360,8 @@ do_set() {
   elif [ "$no_verifier" -eq 0 ] && [ "$(t get plan_verdict 2>/dev/null || true)" = skipped ]; then
     t set plan_verdict ""; t set plan_verdict_base ""
   fi
-  if [ "$no_verifier" -eq 1 ] && [ -z "$(t get plan_verdict 2>/dev/null || true)" ]; then
+  stored_verdict="$(t get plan_verdict 2>/dev/null || true)"
+  if [ "$no_verifier" -eq 1 ] && { [ -z "$stored_verdict" ] || [ "$stored_verdict" = skipped ]; }; then
     t set plan_verdict skipped; t set plan_verdict_base "$base"
   fi
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
