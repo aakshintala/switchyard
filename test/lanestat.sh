@@ -4,7 +4,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/ps-stub.sh"
-LANESTAT="$SCRIPT_DIR/../bin/lanestat"
+LANESTAT="${LANESTAT:-$SCRIPT_DIR/../bin/lanestat}"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-lanestat.XXXXXX")"
@@ -40,6 +40,16 @@ done
 printf '/usr/local/bin/pi\n' >"$T/ps/111.comm"
 printf 'node\n' >"$T/ps/333.comm"
 printf 'S 01:23\n' >"$T/ps/333.info"
+
+# Separate fixtures for settled-threshold cases.
+mkdir -p "$T/settled-run"
+for pid in 610 611; do
+  printf '%s\n' "$pid" >"$T/settled-run/fiber-$pid-pi.pid"
+  printf 'pi\n' >"$T/ps/$pid.comm"
+  printf 'S 01:23\n' >"$T/ps/$pid.info"
+done
+printf '%s\n' '{"type":"agent_settled"}' >"$T/settled-run/fiber-610-pi.jsonl"
+printf '%s\n' '{"type":"message_update"}' >"$T/settled-run/fiber-611-pi.jsonl"
 
 write_ps_stub "$T/stub" "$T/ps"
 
@@ -124,5 +134,60 @@ run_stat --all --all "$T/run" >"$T/duplicate-all.out" 2>"$T/duplicate-all.err"; 
 run_stat "$T/empty" >"$T/empty.out" 2>"$T/empty.err"; rc=$?
 [ "$rc" = 0 ] || fail "empty run dir exits 0 (got $rc)"
 [ ! -s "$T/empty.out" ] || fail "empty run dir prints nothing"
+
+# Settled rows are flagged only when their jsonl age is strictly over the
+# configured threshold. The clock and mtimes are fixed, without sleeping.
+set_settled_age() {
+  perl -e 'my $t = $ARGV[1] - $ARGV[2]; utime($t, $t, $ARGV[0]) or die "utime: $!"' \
+    "$T/settled-run/fiber-610-pi.jsonl" "$NOW" "$1" || fail "set settled fixture age $1"
+}
+run_settled_case() {
+  local label=$1 max=$2 age=$3 expected=$4 rc output
+  set_settled_age "$age"
+  if [ "$max" = unset ]; then
+    env -u LANESTAT_SETTLED_MAX PATH="$T/stub:$PATH" LANESTAT_TEST_NOW="$NOW" \
+      sh "$LANESTAT" "$T/settled-run" >"$T/settled-$label.out" 2>"$T/settled-$label.err"
+  else
+    env LANESTAT_SETTLED_MAX="$max" PATH="$T/stub:$PATH" LANESTAT_TEST_NOW="$NOW" \
+      sh "$LANESTAT" "$T/settled-run" >"$T/settled-$label.out" 2>"$T/settled-$label.err"
+  fi
+  rc=$?
+  [ "$rc" = 0 ] || fail "settled case $label exits 0 (got $rc; $(<"$T/settled-$label.err"))"
+  output="$(<"$T/settled-$label.out")"
+  assert_row 610 "age=$age[[:space:]]+$expected$" "$output"
+}
+run_settled_case default-below unset 7199 SETTLED
+run_settled_case default-at unset 7200 SETTLED
+run_settled_case default-above unset 7201 SETTLED-OLD
+run_settled_case override-below 60 59 SETTLED
+run_settled_case override-at 60 60 SETTLED
+run_settled_case override-above 60 61 SETTLED-OLD
+for invalid in empty abc negative decimal suffix; do
+  case $invalid in
+    empty) value=; label=empty ;;
+    abc) value=abc; label=abc ;;
+    negative) value=-5; label=negative ;;
+    decimal) value=1.5; label=decimal ;;
+    suffix) value=1h; label=suffix ;;
+  esac
+  run_settled_case "invalid-$label-at" "$value" 7200 SETTLED
+  run_settled_case "invalid-$label-above" "$value" 7201 SETTLED-OLD
+done
+run_settled_case zero-at 0 0 SETTLED
+run_settled_case zero-above 0 1 SETTLED-OLD
+
+# A non-settled lane keeps its age-based state and never gets the marker.
+perl -e 'my $t = $ARGV[1] - $ARGV[2]; utime($t, $t, $ARGV[0]) or die "utime: $!"' \
+  "$T/settled-run/fiber-611-pi.jsonl" "$NOW" 7201 || fail "set non-settled fixture age"
+env LANESTAT_SETTLED_MAX=60 PATH="$T/stub:$PATH" LANESTAT_TEST_NOW="$NOW" \
+  sh "$LANESTAT" "$T/settled-run" >"$T/non-settled.out" 2>"$T/non-settled.err"; rc=$?
+[ "$rc" = 0 ] || fail "non-settled case exits 0 (got $rc)"
+assert_row 611 'age=7201[[:space:]]+STALL no tool, not settled$' "$(<"$T/non-settled.out")"
+
+# The unflagged row retains the existing printf layout and exact state text.
+run_settled_case format-under 60 59 SETTLED
+expected="$(printf '%-6s %-8s %-18s age=%-6s %s' 610 610 'S 01:23' 59 SETTLED)"
+actual="$(grep -E '^610[[:space:]]' "$T/settled-format-under.out")"
+[ "$actual" = "$expected" ] || fail "under-threshold row keeps its exact format: [$actual]"
 
 echo 'lanestat: all cases passed'
