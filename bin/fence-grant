@@ -1,0 +1,1063 @@
+#!/bin/bash
+# fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>]
+#   [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>]
+#   [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]
+# Decides whether flywheel may grant the paths alone: a path conflicts with an
+# open PR touching the same file (or hunk range) and with a live lane (or a
+# fresh grant file) holding it. Fail closed: any failed or unparseable probe
+# prints ERROR, writes nothing and exits 3. Exit 0 + GRANT lines (and a grant
+# file, unless --dry) when free; exit 1 + HELD lines on conflict; exit 2 on
+# bad arguments. A whole-file hold by a pull request also prints that holder's
+# hunk windows and the complement as a --ranges argument to paste back.
+#
+# Before any hold probe it checks that the grant can mean what it says, against
+# `main`: every requested path exists unless --new declares it, and every
+# --expect <file:line:symbol> finds that symbol on that line. Either check
+# failing prints MISSING or NOSYMBOL with same-basename suggestions and exits 4,
+# writing no grant file. Three times a grant named a path that could not hold it
+# (2026-10-17 #3753: `crates/turn/src/group.rs` for `crates/tui/src/turn/group.rs`;
+# 2026-10-31 #3666: `process/tests.rs:3154` for `process_tests.rs:3154`, where
+# both files exist, so existence alone passed it and a lane lost two
+# round-trips). A clean GRANT on a path like that reads as launchable.
+#
+# A fence is about writes. --reads records the files the lane only reads: they
+# are probed for nothing, and they land under a `Reads:` label that the lane
+# hold probe stops at, so they hold nothing against the next lane. Record a read
+# under --paths and the file freezes for the lane's whole life for no reason
+# (2026-10-31 #3771: `docs/events.md` came back HELD by lane #3459, whose own
+# admit calls the file a read and whose PR #3813 does not touch it; the hold
+# would have blocked the one doc row surveyor had just ordered into #3771).
+# Only the exact line `Reads:` stops the probe: a hand-written grant file's
+# prose still parses as it always did, since over-holding is the safe direction.
+#
+# Two consequences of that, both paid for on 2026-10-31:
+#
+#   1. A grant written only into a lane's admit file holds nothing. The probe
+#      reads `run/fiber-<n>*-fence-grant*.md` files and open PRs, nothing else,
+#      so the next sweep hands the same path to a second lane. Every grant
+#      lands as both: the admit block the lane reads, and this file.
+#   2. Any path token named in prose *above* `Reads:` is a hold, including a
+#      sentence saying the path is released. To release a path, move it out of
+#      `Paths:` and write the reason *below* the `Reads:` label; a note above
+#      it re-holds the file it just released.
+set -u
+set -f
+_fw_run() { printf '%s' "${FW_RUN:-/Users/aakshintala/work/fiber-worktrees/flywheel/run}"; }
+_fw_box_host() { printf '%s' "${FW_BOX_HOST:-roundhouse-7010-plus-1.local}"; }
+
+# Read `claude agents --json` on stdin; print live lane names (fiber-*,
+# busy/idle). Exits 1 when stdin is not parseable JSON (fail closed).
+_fw_lane_names_json() {
+  python3 -c 'import json,sys
+try:
+  data = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+if not isinstance(data, list):
+  sys.exit(1)
+out = []
+for a in data:
+  try:
+    n = a.get("name", "")
+    s = a.get("status", "")
+  except Exception:
+    continue
+  if n.startswith("fiber-") and s in ("busy", "idle"):
+    out.append(n)
+print(" ".join(out))' 2>/dev/null
+}
+
+# Prints Mac lane names; exit 1 when the command fails or output is unparseable.
+# Stderr of the claude command goes to ${FW_CLAUDE_ERR:-/dev/null}.
+fw_lane_names_mac() {
+  _fw_out=$("${FW_CLAUDE:-claude}" agents --json 2>"${FW_CLAUDE_ERR:-/dev/null}") || return 1
+  printf '%s' "$_fw_out" | _fw_lane_names_json || return 1
+  return 0
+}
+
+# One ssh round trip gathering every box fact; results cached in FW_BOX_*.
+# FW_BOX_RC holds ssh's exit code; FW_BOX_OK is 1 only with intact markers.
+_fw_box_probe() {
+  if [ -n "${FW_BOX_PROBED:-}" ]; then return 0; fi
+  FW_BOX_PROBED=1
+  FW_BOX_OK=0
+  FW_BOX_RC=0
+  FW_BOX_RAW=""
+  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
+  case "$_fw_raw" in
+    *FWSEC=UPTIME*FWSEC=END*) FW_BOX_OK=1; FW_BOX_RAW="$_fw_raw" ;;
+  esac
+  return 0
+}
+
+_fw_box_section() {
+  _fw_box_probe
+  if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
+  printf '%s\n' "$FW_BOX_RAW" | awk -v s="FWSEC=$1" '$0 == s {on = 1; next} /^FWSEC=/ {on = 0} on {print}'
+  return 0
+}
+
+# Prints box lane names; exit 1 when ssh failed or output is unparseable.
+fw_box_lane_names() {
+  _fw_box_probe
+  if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
+  _fw_s=$(_fw_box_section AGENTS) || return 1
+  [ -n "$_fw_s" ] || return 1
+  printf '%s' "$_fw_s" | _fw_lane_names_json || return 1
+  return 0
+}
+
+# Prints live Mac pi-lane names, `fiber-<n>` per live `fiber-<n>-pi.pid`.
+# A pi lane is invisible to `claude agents`, so a fence probe that reads only
+# that command loses every pi lane's hold once its grant files age out of the
+# six-hour window (2026-10-31: a sweep printed "live lanes:" empty with 14 pi
+# lanes running). Exit 1 when the run directory is missing (fail closed).
+fw_pi_lane_names_mac() {
+  _fw_rd=$(_fw_run)
+  [ -d "$_fw_rd" ] || return 1
+  case "$-" in *f*) _fw_hadf=1;; *) _fw_hadf=0;; esac
+  set +f
+  _fw_names=""
+  for _fw_f in "$_fw_rd"/fiber-*-pi.pid; do
+    [ -f "$_fw_f" ] || continue
+    _fw_p=$(cat "$_fw_f" 2>/dev/null)
+    case "$_fw_p" in ''|*[!0-9]*) continue;; esac
+    kill -0 "$_fw_p" 2>/dev/null || continue
+    _fw_n=${_fw_f##*/fiber-}
+    _fw_n=${_fw_n%-pi.pid}
+    _fw_names="$_fw_names fiber-$_fw_n"
+  done
+  [ "$_fw_hadf" -eq 1 ] && set -f
+  printf '%s' "${_fw_names# }"
+  return 0
+}
+
+# Prints live box pi-lane names from the one box probe. Exit 1 when ssh failed
+# or the section's end marker is missing (fail closed).
+fw_pi_lane_names_box() {
+  _fw_box_probe
+  if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
+  _fw_s=$(_fw_box_section PILANES) || return 1
+  case "$_fw_s" in *PILANESOK*) : ;; *) return 1;; esac
+  printf '%s' "$_fw_s" | grep '^fiber-' | tr '\n' ' '
+  return 0
+}
+
+# Epoch mtime of a file; empty when unknown. Portable (macOS/Linux stat).
+fw_mtime() {
+  _fw_m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null) || _fw_m=""
+  case "$_fw_m" in *[!0-9]*|'') printf '';; *) printf '%s' "$_fw_m";; esac
+  return 0
+}
+
+_usage() { echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]" >&2; }
+
+ticket="${1:-}"
+case "$ticket" in ''|*[!0-9]*) _usage; exit 2;; esac
+shift
+paths=""; ranges=""; readpaths=""; newpaths=""; expects=""; ignore=""; ignoreticket=""; repo="aakshintala/fiber"; dry=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --paths) [ $# -ge 2 ] || { _usage; exit 2; }; paths="$2"; shift 2;;
+    --paths=*) paths="${1#--paths=}"; shift;;
+    --reads) [ $# -ge 2 ] || { _usage; exit 2; }; readpaths="$2"; shift 2;;
+    --reads=*) readpaths="${1#--reads=}"; shift;;
+    --ranges) [ $# -ge 2 ] || { _usage; exit 2; }; ranges="$2"; shift 2;;
+    --ranges=*) ranges="${1#--ranges=}"; shift;;
+    --new) [ $# -ge 2 ] || { _usage; exit 2; }; newpaths="$2"; shift 2;;
+    --new=*) newpaths="${1#--new=}"; shift;;
+    --expect) [ $# -ge 2 ] || { _usage; exit 2; }; expects="$2"; shift 2;;
+    --expect=*) expects="${1#--expect=}"; shift;;
+    --repo) [ $# -ge 2 ] || { _usage; exit 2; }; repo="$2"; shift 2;;
+    --repo=*) repo="${1#--repo=}"; shift;;
+    --ignore-pr) [ $# -ge 2 ] || { _usage; exit 2; }; ignore="$2"; shift 2;;
+    --ignore-pr=*) ignore="${1#--ignore-pr=}"; shift;;
+    --ignore-ticket) [ $# -ge 2 ] || { _usage; exit 2; }; ignoreticket="$2"; shift 2;;
+    --ignore-ticket=*) ignoreticket="${1#--ignore-ticket=}"; shift;;
+    --dry) dry=1; shift;;
+    *) _usage; exit 2;;
+  esac
+done
+case "$repo" in
+  */*/*) _usage; exit 2;;
+  [!/]*/[!/]*) ;;
+  *) _usage; exit 2;;
+esac
+[ -n "$paths" ] || { _usage; exit 2; }
+
+run=$(_fw_run)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
+lockdir="$run/.fence-grant.lock"
+locked=0
+trap 'rm -rf "$tmp"; if [ "$locked" -eq 1 ]; then rmdir "$lockdir" 2>/dev/null || true; fi' EXIT
+trap 'exit 130' INT TERM
+
+# Brace-expand whole text ({a,b}, nested, empty, spaced and slashed members).
+_expand_braces() {
+  python3 -c 'import sys
+def split_top(s):
+  parts = []
+  d = 0
+  cur = ""
+  for ch in s:
+    if ch == "{":
+      d += 1
+      cur += ch
+    elif ch == "}":
+      d -= 1
+      cur += ch
+    elif ch == "," and d == 0:
+      parts.append(cur)
+      cur = ""
+    else:
+      cur += ch
+  parts.append(cur)
+  return parts
+def ex(s):
+  i = s.find("{")
+  if i < 0:
+    return [s]
+  d = 0
+  for j in range(i, len(s)):
+    if s[j] == "{":
+      d += 1
+    elif s[j] == "}":
+      d -= 1
+      if d == 0:
+        break
+  else:
+    return [s]
+  return [r for p in split_top(s[i + 1:j]) for r in ex(s[:i] + p.strip() + s[j + 1:])]
+sys.stdout.write("\n".join(ex(sys.argv[1])))' "$1" 2>/dev/null
+}
+
+# Normalize one path token; prints "dir|base|rs|re" (rs/re empty if none).
+_norm_tok() {
+  t=$1
+  while :; do case "$t" in ./*) t=${t#./};; *) break;; esac; done
+  rs=""; re=""
+  suff=$(printf '%s' "$t" | sed -n 's/.*:\([0-9][0-9]*\)-\([0-9][0-9]*\)$/\1 \2/p')
+  if [ -n "$suff" ]; then
+    rs=${suff%% *}; re=${suff#* }
+    t=$(printf '%s' "$t" | sed 's/:[0-9][0-9]*-[0-9][0-9]*$//')
+  fi
+  t=$(printf '%s' "$t" | sed "s/[\`.,;()\"']*$//" | sed "s/^[(\[\"']*//")
+  dir=0; base=$t
+  case "$t" in
+    */\*\*) dir=1; base=${t%/\*\*};;
+    */\*) dir=1; base=${t%/\*};;
+    */) dir=1; base=${t%/};;
+  esac
+  if [ "$dir" -eq 0 ]; then
+    case "$t" in
+      *\**|*\?*|*\[*|*\{*) : ;;
+      *)
+        seg=${t##*/}
+        case "$seg" in *.*) : ;; *) dir=1; base=$t;; esac;;
+    esac
+  fi
+  printf '%s|%s|%s|%s\n' "$dir" "$base" "$rs" "$re"
+  return 0
+}
+
+_norm_base() {
+  _norm_tok "$1" | awk -F'|' '{print $2}'
+}
+
+# Overlap of inclusive [s,e] with inclusive [hs,he].
+_range_overlap() { [ "$1" -le "$4" ] && [ "$3" -le "$2" ]; }
+
+# Requested --ranges lines for normalized base $1 -> "s e" lines on stdout.
+_req_ranges() {
+  awk -F'|' -v k="$1" '$1 == k {print $2" "$3}' "$tmp/rspec"
+}
+
+# Request (pd,pb) vs entry (ed,eb[,ers-ere]): 0 on conflict.
+_conflict() {
+  pd=$1; pb=$2; ed=$3; eb=$4; ers=$5; ere=$6
+  hit=0
+  case "$eb" in *\**|*\?*|*\[*)
+    case "$pb" in $eb) hit=1;; esac;;
+  esac
+  if [ "$hit" -eq 0 ]; then
+    case "$pb" in *\**|*\?*|*\[*)
+      case "$eb" in $pb) hit=1;; esac;;
+    esac
+  fi
+  if [ "$hit" -eq 0 ]; then
+    if [ "$pd" -eq 1 ] && [ "$ed" -eq 1 ]; then
+      case "$pb" in "$eb"|"$eb"/*) hit=1;; esac
+      case "$eb" in "$pb"/*) hit=1;; esac
+    elif [ "$pd" -eq 1 ]; then
+      case "$eb" in "$pb"|"$pb"/*) hit=1;; esac
+    elif [ "$ed" -eq 1 ]; then
+      case "$pb" in "$eb"|"$eb"/*) hit=1;; esac
+    else
+      [ "$pb" = "$eb" ] && hit=1
+    fi
+  fi
+  [ "$hit" -eq 1 ] || return 1
+  # A held range narrows an exact-file hold: no overlapping request, no hold.
+  if [ -n "$ers" ] && [ "$pd" -eq 0 ] && [ "$ed" -eq 0 ] && [ "$pb" = "$eb" ]; then
+    case "$pb$eb" in *\**|*\?*|*\[*) return 0;; esac
+    prr=$(_req_ranges "$pb")
+    [ -n "$prr" ] || return 0
+    printf '%s\n' "$prr" > "$tmp/qrr"
+    while IFS= read -r line; do
+      s=${line%% *}; e=${line##* }
+      case "$s$e" in *[!0-9]*) continue;; esac
+      if _range_overlap "$s" "$e" "$ers" "$ere"; then return 0; fi
+    done < "$tmp/qrr"
+    return 1
+  fi
+  return 0
+}
+
+# --- requested paths: brace-expand first, then split on commas only ---
+_expanded=$(_expand_braces "$paths") || { echo "ERROR brace expansion"; exit 3; }
+printf '%s' "$_expanded" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep . > "$tmp/plist" || true
+[ -s "$tmp/plist" ] || { _usage; exit 2; }
+
+# --- requested ranges: lines "normfile|s|e" ---
+: > "$tmp/rspec"
+if [ -n "$ranges" ]; then
+  _expand_braces "$ranges" > "$tmp/rexp" || { echo "ERROR brace expansion"; exit 3; }
+  tr ',' '\n' < "$tmp/rexp" | grep . > "$tmp/ritems" || true
+  while IFS= read -r ri; do
+    rf=${ri%%:*}; rr=${ri#*:}
+    [ -n "$rf" ] && [ "$rr" != "$ri" ] || { _usage; exit 2; }
+    rs=${rr%-*}; re=${rr#*-}
+    case "$rs" in ''|*[!0-9]*) _usage; exit 2;; esac
+    case "$re" in ''|*[!0-9]*) _usage; exit 2;; esac
+    [ "$rs" -le "$re" ] || { _usage; exit 2; }
+    nrf=$(_norm_base "$rf")
+    [ -n "$nrf" ] || { _usage; exit 2; }
+    printf '%s|%s|%s\n' "$nrf" "$rs" "$re" >> "$tmp/rspec"
+  done < "$tmp/ritems"
+fi
+
+# --- the grant can mean what it says (fail closed, before any hold probe) ---
+# Normalized requests: "dir|base|raw" lines.
+: > "$tmp/pnorm"
+while IFS= read -r _pt; do
+  [ -n "$_pt" ] || continue
+  _nt=$(_norm_tok "$_pt") || { echo "ERROR cannot read path $_pt"; exit 3; }
+  _pd=${_nt%%|*}; _rest=${_nt#*|}; _pb=${_rest%%|*}
+  [ -n "$_pb" ] || { _usage; exit 2; }
+  printf '%s|%s|%s\n' "$_pd" "$_pb" "$_pt" >> "$tmp/pnorm"
+done < "$tmp/plist"
+
+# A --ranges entry naming a file the grant does not hold is refused. The field
+# is ignored for this grant's own hold test but IS binding when another probe
+# reads this grant file, so an unheld range silently creates a hold on a path
+# the grant never claimed (seen 2026-10-31: a GLOSSARY.md grant whose stray
+# range made crates/extensions/src read as held).
+if [ -s "$tmp/rspec" ]; then
+  while IFS='|' read -r _rf _rs _re; do
+    [ -n "$_rf" ] || continue
+    _cov=0
+    while IFS='|' read -r _pd _pb _praw; do
+      [ -n "$_pb" ] || continue
+      case "$_rf" in
+        "$_pb") _cov=1; break;;
+        "$_pb"/*) _cov=1; break;;
+      esac
+    done < "$tmp/pnorm"
+    [ "$_cov" -eq 1 ] || { echo "ERROR --ranges names $_rf which is not under --paths"; exit 2; }
+  done < "$tmp/rspec"
+fi
+
+# Paths the grant declares new, which are absent from main on purpose.
+: > "$tmp/newnorm"
+if [ -n "$newpaths" ]; then
+  _expand_braces "$newpaths" > "$tmp/nexp" || { echo "ERROR brace expansion"; exit 3; }
+  tr ',' '\n' < "$tmp/nexp" | sed 's/^ *//; s/ *$//' | grep . > "$tmp/nitems" || true
+  while IFS= read -r _ni; do
+    _nb=$(_norm_base "$_ni") || { echo "ERROR cannot read new path $_ni"; exit 3; }
+    [ -n "$_nb" ] || { _usage; exit 2; }
+    printf '%s\n' "$_nb" >> "$tmp/newnorm"
+  done < "$tmp/nitems"
+fi
+
+treejson=$("${FW_GH:-gh}" api "repos/$repo/git/trees/main?recursive=1" 2>"$tmp/treeerr") || { g=$(head -c 200 "$tmp/treeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh trees main $g"; exit 3; }
+printf '%s' "$treejson" | python3 -I -c 'import json,sys
+try:
+  d = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+if d.get("truncated"):
+  sys.exit(1)
+t = d.get("tree")
+if not isinstance(t, list):
+  sys.exit(1)
+for e in t:
+  if isinstance(e, dict) and e.get("type") == "blob" and e.get("path"):
+    print(e["path"])' > "$tmp/tree" || { echo "ERROR tree of main unreadable or truncated"; exit 3; }
+[ -s "$tmp/tree" ] || { echo "ERROR tree of main is empty"; exit 3; }
+
+python3 -I -c 'import sys
+pn, tr, nw = sys.argv[1], sys.argv[2], sys.argv[3]
+tree = [l.rstrip("\n") for l in open(tr) if l.strip()]
+tset = set(tree)
+dirs = set()
+for p in tree:
+  parts = p.split("/")
+  for i in range(1, len(parts)):
+    dirs.add("/".join(parts[:i]))
+new = set(l.strip() for l in open(nw) if l.strip())
+def suggest(b):
+  base = b.split("/")[-1]
+  out = [p for p in tree if p.split("/")[-1] == base and p != b]
+  alts = set()
+  if "/" in b:
+    i = b.rfind("/")
+    alts.add(b[:i] + "_" + b[i + 1:])
+  if "_" in base:
+    i = b.rfind("_")
+    alts.add(b[:i] + "/" + b[i + 1:])
+  out += [a for a in sorted(alts) if a in tset and a not in out]
+  return out[:5]
+bad = 0
+for line in open(pn):
+  line = line.rstrip("\n")
+  if not line:
+    continue
+  d, b, raw = line.split("|", 2)
+  if b in new:
+    continue
+  ok = (b in tset or b in dirs) if d == "1" else (b in tset)
+  if ok:
+    continue
+  bad = 1
+  print("MISSING %s" % raw)
+  s = suggest(b)
+  if s:
+    print("  did you mean: %s" % ", ".join(s))
+sys.exit(4 if bad else 0)' "$tmp/pnorm" "$tmp/tree" "$tmp/newnorm"
+_pathrc=$?
+case "$_pathrc" in
+  0) : ;;
+  4) exit 4;;
+  *) echo "ERROR path existence check"; exit 3;;
+esac
+
+# --expect <file:line:symbol>: existence is not enough when a grant names lines.
+# #3666's grant named a real file that holds no `envelope_line` at all.
+# Hash, not a slug: `tr / _` maps process/tests.rs and process_tests.rs to one
+# cache file, so the sibling check read the file it was comparing against.
+_blob_path() { printf '%s/blob-%s' "$tmp" "$(printf '%s' "$1" | shasum | cut -c1-16)"; }
+_fetch_blob() {
+  _bf=$(_blob_path "$1")
+  [ -f "$_bf" ] && return 0
+  # `gh` reads stdin, and these calls run inside `while read` loops fed by a
+  # file: without this the first call swallows the rest of the loop's input.
+  "${FW_GH:-gh}" api "repos/$repo/contents/$1?ref=main" -H "Accept: application/vnd.github.raw" > "$_bf" 2>"$tmp/bloberr" < /dev/null || { g=$(head -c 200 "$tmp/bloberr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh contents $1 $g"; return 1; }
+  return 0
+}
+_line_has() { sed -n "${2}p" "$(_blob_path "$1")" 2>/dev/null | grep -Fq -- "$3"; }
+
+if [ -n "$expects" ]; then
+  : > "$tmp/nosym"
+  _expand_braces "$expects" > "$tmp/eexp" || { echo "ERROR brace expansion"; exit 3; }
+  tr ',' '\n' < "$tmp/eexp" | sed 's/^ *//; s/ *$//' | grep . > "$tmp/eitems" || true
+  while IFS= read -r _ei; do
+    _ef=${_ei%%:*}; _erest=${_ei#*:}
+    _el=${_erest%%:*}; _esym=${_erest#*:}
+    [ "$_ef" != "$_ei" ] && [ "$_el" != "$_erest" ] && [ -n "$_esym" ] || { _usage; exit 2; }
+    case "$_el" in ''|*[!0-9]*) _usage; exit 2;; esac
+    _ef=$(_norm_base "$_ef")
+    [ -n "$_ef" ] || { _usage; exit 2; }
+    if ! grep -qxF -- "$_ef" "$tmp/tree"; then
+      echo "MISSING $_ef" >> "$tmp/nosym"
+      continue
+    fi
+    _fetch_blob "$_ef" || exit 3
+    if _line_has "$_ef" "$_el" "$_esym"; then continue; fi
+    echo "NOSYMBOL $_ef:$_el does not hold $_esym" >> "$tmp/nosym"
+    _ebase=${_ef##*/}
+    # Same-basename siblings, plus the two spellings that keep tripping this up:
+    # the last "/" written as "_" and back (process/tests.rs vs process_tests.rs).
+    # The spelling alternates come first: a basename like `tests.rs` matches
+    # dozens of files, and they would crowd out the one answer that matters.
+    { python3 -I -c 'import sys
+b = sys.argv[1]
+out = []
+if "/" in b:
+  i = b.rfind("/")
+  out.append(b[:i] + "_" + b[i + 1:])
+if "_" in b.split("/")[-1]:
+  i = b.rfind("_")
+  out.append(b[:i] + "/" + b[i + 1:])
+print("\n".join(out))' "$_ef"
+      awk -v b="$_ebase" -F/ '$NF == b' "$tmp/tree"
+    } | grep . | awk '!s[$0]++' | grep -vxF -- "$_ef" > "$tmp/cands" || true
+    awk 'NR==FNR {t[$0]=1; next} ($0 in t)' "$tmp/tree" "$tmp/cands" | head -6 > "$tmp/sibs" || true
+    while IFS= read -r _sb; do
+      [ -n "$_sb" ] || continue
+      _fetch_blob "$_sb" || exit 3
+      if _line_has "$_sb" "$_el" "$_esym"; then
+        echo "  did you mean: $_sb:$_el" >> "$tmp/nosym"
+      fi
+    done < "$tmp/sibs"
+  done < "$tmp/eitems"
+  if [ -s "$tmp/nosym" ]; then
+    cat "$tmp/nosym"
+    exit 4
+  fi
+fi
+
+# --- open PRs (fail closed) ---
+prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,headRefName 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
+prs=$(printf '%s' "$prjson" | python3 -c 'import json,sys
+try:
+  data = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+if not isinstance(data, list):
+  sys.exit(1)
+print(" ".join(str(x.get("number", "")) for x in data if isinstance(x, dict)))' 2>/dev/null) || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
+# The ticket's own open pull request holds its own paths, which reads as a hold on every path the lane asked for
+# and says nothing. The lane and grant-file sides already skip the ticket itself; the pull-request side skips it here
+# too, by branch, since Fiber names a branch `<role>/<ticket>-<slug>` (2026-10-31: lane 3695's eight paths all came
+# back HELD by #3749, its own pull request). The skip is keyed on this ticket, so the same pull request still holds
+# those paths against every other lane.
+ownprs=$(printf '%s' "$prjson" | python3 -I -c 'import json,re,sys
+want = sys.argv[1]
+try:
+  data = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+if not isinstance(data, list):
+  sys.exit(1)
+out = []
+for x in data:
+  if not isinstance(x, dict):
+    continue
+  m = re.search(r"(?:^|/)([0-9]+)(?:-|$)", str(x.get("headRefName", "")))
+  if m and m.group(1) == want:
+    out.append(str(x.get("number", "")))
+print(" ".join(out))' "$ticket" 2>/dev/null) || { echo "ERROR gh pr list branches"; exit 3; }
+# The list may be truncated at the limit: fail closed instead of granting.
+nprs=$(printf '%s' "$prs" | wc -w | tr -d ' ')
+case "$nprs" in ''|*[!0-9]*) echo "ERROR gh pr list count"; exit 3;; esac
+[ "$nprs" -ge 200 ] && { echo "ERROR gh pr list truncated at 200"; exit 3; }
+
+# --- live lanes (fail closed) ---
+FW_CLAUDE_ERR="$tmp/claudeerr"; FW_SSH_ERR="$tmp/ssherr"
+if mac_names=$(fw_lane_names_mac); then mac_ok=1; else mac_ok=0; mac_names=""; fi
+if box_names=$(fw_box_lane_names); then box_ok=1; else box_ok=0; box_names=""; fi
+if pimac_names=$(fw_pi_lane_names_mac); then pimac_ok=1; else pimac_ok=0; pimac_names=""; fi
+if pibox_names=$(fw_pi_lane_names_box); then pibox_ok=1; else pibox_ok=0; pibox_names=""; fi
+FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
+[ "$mac_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/claudeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR claude agents $g"; exit 3; }
+[ "$box_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/ssherr" 2>/dev/null | tr '\n' ' '); echo "ERROR ssh box $g"; exit 3; }
+[ "$pimac_ok" -eq 1 ] || { echo "ERROR mac pi lanes: run directory missing"; exit 3; }
+[ "$pibox_ok" -eq 1 ] || { echo "ERROR box pi lanes: no PILANESOK marker"; exit 3; }
+# A lane is a Claude session or a pi lane; both hold their fence.
+lanes="$mac_names $box_names $pimac_names $pibox_names"
+
+held=""
+
+# --- PR side: a rename holds old and new; created/binary/hunkless hold all ---
+_pr_touched() {
+  # $1 = PR number. Writes touched "normbase|sectionbase" lines to $tmp/touched-$1.
+  nf=$("${FW_GH:-gh}" pr diff "$1" -R "$repo" --name-only 2>"$tmp/gderr-$1") || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+  printf '%s\n' "$nf" | grep . | while IFS= read -r f; do
+    b=$(_norm_base "$f")
+    [ -n "$b" ] || continue
+    printf '%s|%s\n' "$b" "$b"
+  done > "$tmp/touched-$1"
+  if [ -s "$tmp/touched-$1" ]; then
+    "${FW_GH:-gh}" pr diff "$1" -R "$repo" --allow-escape-sequences > "$tmp/full-$1.diff" 2>"$tmp/gderr-$1" || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+    [ -s "$tmp/full-$1.diff" ] || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+    grep '^rename from ' "$tmp/full-$1.diff" 2>/dev/null | sed 's/^rename from //' | while IFS= read -r o; do
+      b=$(_norm_base "$o")
+      [ -n "$b" ] || continue
+      printf '%s|\n' "$b"
+    done >> "$tmp/touched-$1"
+  fi
+  return 0
+}
+
+# Whole-file hold for section of $2 in $1: created, binary, or no hunks.
+_pr_whole_hold() {
+  sec=$(awk -v f="$2" '/^diff --git /{on = ($4 == "b/" f)} on {print}' "$1")
+  [ -n "$sec" ] || return 0
+  case "$sec" in *"new file mode"*) return 0;; *"Binary files "*) return 0;; esac
+  printf '%s' "$sec" | grep -q '^@@ ' || return 0
+  printf '%s' "$sec" | grep -q '^@@ -0,0 ' && return 0
+  return 1
+}
+
+# Hunk old ranges for section of $2 in $1: "A B" lines; insertion -N,0 -> "N 2".
+_pr_hunks() {
+  awk -v f="$2" '/^diff --git /{on = ($4 == "b/" f)} on && /^\@\@ / {line = $0; sub(/^\@\@ -/, "", line); sub(/ .*/, "", line); print line}' "$1" | while IFS= read -r o; do
+    a=${o%%,*}; b=${o#*,}
+    [ "$b" = "$o" ] && b=1
+    case "$a$b" in *[!0-9]*) continue;; esac
+    if [ "$b" -eq 0 ]; then
+      if [ "$a" -eq 0 ]; then echo "NEWHUNK"; else echo "$a 2"; fi
+    else
+      echo "$a $b"
+    fi
+  done
+  return 0
+}
+
+# Overlap of requested [$3,$4] with old ranges of section $2 in $1.
+_pr_overlap() {
+  _os=$3; _oe=$4
+  _pr_hunks "$1" "$2" > "$tmp/h" || true
+  while IFS= read -r line; do
+    a=${line%% *}; b=${line##* }
+    [ "$a" = "NEWHUNK" ] && [ "$b" = "NEWHUNK" ] && return 0
+    case "$a$b" in *[!0-9]*) continue;; esac
+    he=$((a + b))
+    if [ "$_os" -lt "$he" ] && [ "$a" -le "$_oe" ]; then return 0; fi
+  done < "$tmp/h"
+  return 1
+}
+
+for pr in $prs; do
+  [ -n "$ignore" ] && [ "$pr" = "$ignore" ] && continue
+  case " $ownprs " in *" $pr "*) echo "OWN skipping PR #$pr: its branch names ticket $ticket"; continue;; esac
+  _pr_touched "$pr"
+  [ -s "$tmp/touched-$pr" ] || continue
+  while IFS= read -r p; do
+    nn=$(_norm_tok "$p")
+    pd=${nn%%|*}; rest=${nn#*|}; pb=${rest%%|*}
+    [ -n "$pb" ] || continue
+    while IFS='|' read -r fb sb; do
+      [ -n "$fb" ] || continue
+      if _conflict "$pd" "$pb" 0 "$fb" "" ""; then
+        secbase=$sb
+        [ -n "$secbase" ] || secbase=$fb
+        rr=$(_req_ranges "$pb")
+        if [ -z "$rr" ]; then
+          held="${held}${p}|PR #${pr}|${pr} ${secbase}
+"
+        else
+          if _pr_whole_hold "$tmp/full-$pr.diff" "$secbase"; then
+            held="${held}${p}|PR #${pr}
+"
+          else
+            ov=0
+            printf '%s\n' "$rr" > "$tmp/rr-$pr"
+            while IFS= read -r line; do
+              s=${line%% *}; e=${line##* }
+              case "$s$e" in *[!0-9]*) continue;; esac
+              if _pr_overlap "$tmp/full-$pr.diff" "$secbase" "$s" "$e"; then ov=1; break; fi
+            done < "$tmp/rr-$pr"
+            if [ "$ov" -eq 1 ]; then
+              held="${held}${p}|PR #${pr}
+"
+            fi
+          fi
+        fi
+        break
+      fi
+    done < "$tmp/touched-$pr"
+  done < "$tmp/plist"
+done
+
+# --- lane side helpers ---
+_lane_num() {
+  printf '%s' "$1" | sed 's/[^0-9].*//'
+}
+
+# Brace-expand each input line; held-entry text in, expanded lines out.
+_expand_braces_lines() {
+  while IFS= read -r line; do
+    case "$line" in
+      *{*) _expand_braces "$line" || printf '%s' "$line"
+        printf '\n';;
+      *) printf '%s\n' "$line";;
+    esac
+  done
+  return 0
+}
+
+# Drop only the path a reason is about: in each clause (split on
+# newlines, ";" and ". ") the token immediately before a reason phrase
+# ("X stays out", "Y stays untouched", ...) is removed, and only when it
+# is path-like (holds "/" or ".") and does not end in ":" or ",".
+# Every other path in the clause stays held. Clauses are joined with a
+# __CLAUSE__ marker so the entry collector can bound its file lists.
+_strip_reason_paths() {
+  python3 -c 'import sys, re
+pat = re.compile(r"(?i)\b(stays out|stays untouched|not touched)\b")
+def clean(cl):
+  out = []
+  pos = 0
+  for m in pat.finditer(cl):
+    pre = cl[pos:m.start()]
+    mt = re.search(r"(\S+)\s*$", pre)
+    if mt:
+      tok = mt.group(1)
+      if ("/" in tok or "." in tok) and not tok.endswith(":") and not tok.endswith(","):
+        pre = pre[:mt.start(1)] + pre[mt.end(1):]
+    out.append(pre)
+    out.append(m.group(0))
+    pos = m.end()
+  out.append(cl[pos:])
+  return "".join(out)
+text = sys.stdin.read()
+text = re.sub(r"\(\s*(?:\+|and)\s*(?:(?:their|its)\s+)?(?:\*?_tests(?:\.rs)?|tests|test files)\b", "(+tests", text)
+sys.stdout.write(" __CLAUSE__ ".join(clean(c) for c in re.split(r"(?<=\.)\s+|[\n;]+", text)))' || cat
+  return 0
+}
+
+# Free text on stdin -> candidate entries "ed|eb|ers|ere" on stdout.
+# A token with a rooted directory part (two or more "/" levels, such as
+# crates/main/src/theme_setting.rs) is a complete path from the repo root
+# and resets the relative base to its own directory. A token with one
+# relative level (host/fs.rs, case/run.rs) is read against the base as well
+# as on its own, without moving the base. Only a bare filename (no "/")
+# resolves purely against the base. "(+tests)" takes the directory of the
+# file it follows, not the stale base.
+# Tests file for every file in $1 (newline-separated full paths) on stdout.
+_emit_list_tests() {
+  printf '%s\n' "$1" | grep . | while IFS= read -r rp; do
+    rf=${rp##*/}
+    case "$rp" in */*) rd=${rp%/*};; *) rd="";; esac
+    case "$rf" in *.*) : ;; *) continue;; esac
+    rb=${rf%.*}; rx=${rf##*.}
+    [ -n "$rb" ] && [ -n "$rx" ] && [ "$rb" != "$rf" ] || continue
+    if [ -n "$rd" ]; then eb="$rd/${rb}_tests.$rx"; else eb="${rb}_tests.$rx"; fi
+    printf '0|%s||\n' "$eb"
+  done
+  return 0
+}
+
+_collect_entries() {
+  lastdir=""; lastbase=""; lastext=""; lastfiledir=""; recent=""; their=0
+  _strip_reason_paths | tr ' \t,;' '\n\n\n\n' | grep . > "$tmp/toks"
+  while IFS= read -r tok; do
+    ctok=$(printf '%s' "$tok" | tr -d '`' | sed "s/^[(\[\"']*//" | sed "s/[],;:()\"']*$//")
+    if [ "$ctok" = "__CLAUSE__" ]; then recent=""; their=0; continue; fi
+    case "$ctok" in *[A-Za-z0-9]*) ;; *) continue;; esac
+    if [ "$their" = "1" ]; then
+      their=0
+      case "$ctok" in _tests|tests)
+        if [ -n "$recent" ]; then
+          _emit_list_tests "$recent"
+        elif [ -n "$lastbase" ] && [ -n "$lastext" ]; then
+          if [ -n "$lastfiledir" ]; then eb="$lastfiledir/${lastbase}_tests.$lastext"; else eb="${lastbase}_tests.$lastext"; fi
+          printf '0|%s||\n' "$eb"
+        fi
+        continue;;
+      esac
+    fi
+    if [ "$ctok" = "+their" ]; then their=1; continue; fi
+    if [ "$ctok" = "+tests" ]; then
+      if [ -n "$recent" ]; then
+        _emit_list_tests "$recent"
+      elif [ -n "$lastbase" ] && [ -n "$lastext" ]; then
+        if [ -n "$lastfiledir" ]; then eb="$lastfiledir/${lastbase}_tests.$lastext"; else eb="${lastbase}_tests.$lastext"; fi
+        printf '0|%s||\n' "$eb"
+      fi
+      continue
+    fi
+    case "$ctok" in */*) : ;; *.*) : ;; *) continue;; esac
+    case "$ctok" in *{*) ex=$(_expand_braces "$ctok") || continue;; *) ex=$ctok;; esac
+    printf '%s\n' "$ex" > "$tmp/ex"
+    while IFS= read -r e; do
+      case "$e" in *[A-Za-z0-9]*) ;; *) continue;; esac
+      case "$e" in */*) : ;; *.*) : ;; *) continue;; esac
+      nn=$(_norm_tok "$e")
+      ed=${nn%%|*}; rest=${nn#*|}; eb=${rest%%|*}; r2=${rest#*|}; ers=${r2%%|*}; ere=${r2#*|}
+      [ -n "$eb" ] || continue
+      case "$eb" in
+        */*/*)
+          printf '%s|%s|%s|%s\n' "$ed" "$eb" "$ers" "$ere"
+          if [ "$ed" -eq 0 ]; then printf -v recent '%s%s\n' "$recent" "$eb"; fi
+          lastdir=${eb%/*}
+          if [ "$ed" -eq 0 ]; then
+            lastfiledir=$lastdir
+            fseg=${eb##*/}
+            case "$fseg" in
+              *.*) lastbase=${fseg%.*}; lastext=${fseg##*.}; [ "$lastbase" = "$fseg" ] && { lastbase=""; lastext=""; };;
+              *) lastbase=""; lastext="";;
+            esac
+          fi;;
+        */*)
+          printf '%s|%s|%s|%s\n' "$ed" "$eb" "$ers" "$ere"
+          if [ "$ed" -eq 0 ]; then printf -v recent '%s%s\n' "$recent" "$eb"; fi
+          if [ -n "$lastdir" ]; then
+            case "$lastdir/$eb" in "$eb") : ;; *) printf '%s|%s|%s|%s\n' "$ed" "$lastdir/$eb" "$ers" "$ere"
+              if [ "$ed" -eq 0 ]; then printf -v recent '%s%s\n' "$recent" "$lastdir/$eb"; fi;;
+            esac
+          fi
+          if [ "$ed" -eq 0 ]; then
+            if [ -n "$lastdir" ]; then lastfiledir="$lastdir/${eb%/*}"; else lastfiledir=${eb%/*}; fi
+            fseg=${eb##*/}
+            case "$fseg" in
+              *.*) lastbase=${fseg%.*}; lastext=${fseg##*.}; [ "$lastbase" = "$fseg" ] && { lastbase=""; lastext=""; };;
+              *) lastbase=""; lastext="";;
+            esac
+          fi;;
+        *)
+          if [ -n "$lastdir" ]; then
+            printf '%s|%s|%s|%s\n' "$ed" "$lastdir/$eb" "$ers" "$ere"
+            if [ "$ed" -eq 0 ]; then printf -v recent '%s%s\n' "$recent" "$lastdir/$eb"; fi
+          else
+            printf '%s|%s|%s|%s\n' "$ed" "$eb" "$ers" "$ere"
+            if [ "$ed" -eq 0 ]; then printf -v recent '%s%s\n' "$recent" "$eb"; fi
+          fi
+          if [ "$ed" -eq 0 ]; then
+            lastfiledir=$lastdir
+            case "$eb" in
+              *.*) lastbase=${eb%.*}; lastext=${eb##*.}; [ "$lastbase" = "$eb" ] && { lastbase=""; lastext=""; };;
+              *) lastbase=""; lastext="";;
+            esac
+          fi;;
+      esac
+    done < "$tmp/ex"
+  done < "$tmp/toks"
+  return 0
+}
+
+_ng_re='[Nn][Oo][Tt] [Gg][Rr][Aa][Nn][Tt][Ee][Dd]'
+
+_lane_notes_entries() {
+  # $1 = notes file. Prints candidate entry lines.
+  [ -f "$1" ] || return 0
+  {
+    grep -i 'files granted:' "$1" 2>/dev/null | sed -e "s/$_ng_re.*//" | sed 's/.*files granted: *//' | sed -e 's/\.$//'
+    grep -i fence "$1" 2>/dev/null | grep -vi 'files granted:' 2>/dev/null | sed -e "s/$_ng_re.*//"
+  } | _expand_braces_lines | _collect_entries | _drop_bare_dirs
+  return 0
+}
+
+# A notes entry holds a file, never a bare directory.
+#
+# A notes file's prose names whole areas constantly, and the `fence` grep above
+# takes any line carrying the word. On 2026-10-31 lane #3743's sentence "#3770,
+# #3654 and others are live in `crates/tui`. Parallel TUI lanes are the owner's
+# standing call; the fence is what keeps them apart" put `crates/tui` in as an
+# entry, and every file under the crate read HELD by #3743 -- which held no
+# TUI file at all and had no grant file. It blocked lanes #3654 and #3774.
+#
+# A real whole-directory hold is written in a grant file, which `_grant_entries`
+# builds and this does not filter.
+_drop_bare_dirs() {
+  while IFS= read -r _dbd; do
+    _dbdp=${_dbd#*|}; _dbdp=${_dbdp%%|*}
+    case "${_dbdp##*/}" in *.*) printf '%s\n' "$_dbd";; esac
+  done
+  return 0
+}
+
+# Drop sentences that describe someone ELSE's hold.
+#
+# A grant file explains its reasoning in prose, and that reasoning quotes the
+# paths of other tickets' PRs and lanes. Those quotes were coming back as
+# entries, so a path nobody held read HELD. The indent rule below catches the
+# reasoning written under a bullet; this catches it written at column zero.
+#
+# The unit is the sentence, not the line, because one line can both grant a
+# path and clear another in the next sentence:
+#   "... add `crates/config/src/layout.rs` and `crates/config/src/lib.rs` ...
+#    Neither file is held by an open PR. PR #3372 holds other config files only."
+# Dropping that whole line would lose two real grants (2026-10-31).
+#
+# A sentence that grants a path never says the path is held by someone else,
+# so these phrases are safe to cut.
+_strip_foreign_hold() {
+  python3 -I -c '
+import re, sys
+ph = re.compile(r"held by|held whole-file|reported held|does not touch|only doc changes", re.I)
+for line in sys.stdin:
+    parts = re.split(r"(?<=\.)\s+", line.rstrip("\n"))
+    sys.stdout.write(" ".join(p for p in parts if not ph.search(p)) + "\n")
+' 2>/dev/null
+  return 0
+}
+
+_grant_entries() {
+  # $1 = grant file. Prints candidate entry lines from its Grant section.
+  # `Reads:` latches the probe off for the rest of the file: a read holds
+  # nothing, and a later line carrying the word "grant" must not reopen it.
+  #
+  # An indented line is prose, not an entry. Every granted path in every grant
+  # file written so far starts at column zero, as a `- <path>` bullet or a
+  # `Ranges:` line; the indented lines under a bullet are the reasoning, and
+  # that reasoning quotes other tickets' paths. Reading them as entries froze
+  # three paths for lane #3634 that nobody held: `fiber-3771-fence-grant-B.md`
+  # explains a release by quoting PR #3813's file list, so
+  # `crates/main/tests/sandbox.rs`, `docs/permissions.md` and `docs/sandbox.md`
+  # came back HELD by lane #3771, which never asked for any of them
+  # (2026-10-31). `fiber-2413-plan-fence-grant.md` carries 700 lines of the
+  # same shape.
+  awk '/^Reads:[[:space:]]*$/ {stop = 1} stop {next} {if (tolower($0) ~ /grant/) f = 1} f && /^[[:space:]]/ {next} f {print}' "$1" 2>/dev/null | _strip_foreign_hold | sed -e "s/$_ng_re.*//" | _expand_braces_lines | _collect_entries
+  return 0
+}
+
+# Check candidate entries in $1 against the plist, attributing to lane $2.
+_check_entries() {
+  while IFS='|' read -r ed eb ers ere; do
+    [ -n "$eb" ] || continue
+    case "$ed" in 0|1) : ;; *) continue;; esac
+    while IFS= read -r p; do
+      nn=$(_norm_tok "$p")
+      pd=${nn%%|*}; r1=${nn#*|}; pb=${r1%%|*}
+      [ -n "$pb" ] || continue
+      if _conflict "$pd" "$pb" "$ed" "$eb" "$ers" "$ere"; then
+        held="${held}${p}|${3:-lane #${2}}
+"
+
+      fi
+    done < "$tmp/plist"
+  done < "$1"
+  return 0
+}
+
+# live lanes: notes + their grant files
+for ln in $lanes; do
+  case "$ln" in fiber-*) suf=${ln#fiber-};; *) continue;; esac
+  n=$(_lane_num "$suf")
+  [ -n "$n" ] || continue
+  [ "$n" = "$ticket" ] && continue
+  [ -n "$ignoreticket" ] && [ "$n" = "$ignoreticket" ] && continue
+  : > "$tmp/entries"
+  if [ -f "$run/fiber-$n-notes.md" ]; then
+    _lane_notes_entries "$run/fiber-$n-notes.md" >> "$tmp/entries"
+  fi
+  if [ "$suf" != "$n" ] && [ -f "$run/fiber-$suf-notes.md" ]; then
+    _lane_notes_entries "$run/fiber-$suf-notes.md" >> "$tmp/entries"
+  fi
+  set +f
+  for gf in "$run"/fiber-"$n"*-fence-grant*.md; do
+    [ -f "$gf" ] || continue
+    b=$(basename "$gf")
+    rest=${b#fiber-}
+    case "$rest" in "$n"-*|"$n"[a-z]*-*) : ;; *) continue;; esac
+    set -f
+    _grant_entries "$gf" >> "$tmp/entries"
+    set +f
+  done
+  set -f
+  [ -s "$tmp/entries" ] || continue
+  _check_entries "$tmp/entries" "$n"
+done
+
+# fresh grant files hold even without a live lane (skip the ticket itself)
+now=$(date +%s)
+set +f
+for gf in "$run"/fiber-*-fence-grant*.md; do
+  [ -f "$gf" ] || continue
+  b=$(basename "$gf")
+  set -f
+  x=${b#fiber-}
+  x=${x%-fence-grant*}
+  case "$x" in *fence-grant*) set +f; continue;; esac
+  n=$(_lane_num "$x")
+  [ -n "$n" ] || { set +f; continue; }
+  [ "$n" = "$ticket" ] && { set +f; continue; }
+  [ -n "$ignoreticket" ] && [ "$n" = "$ignoreticket" ] && { set +f; continue; }
+  skip=0
+  for ln in $lanes; do
+    case "$ln" in fiber-*) s2=${ln#fiber-};; *) continue;; esac
+    if [ "$(_lane_num "$s2")" = "$n" ]; then skip=1; break; fi
+  done
+  if [ "$skip" -eq 0 ]; then
+    m=$(fw_mtime "$gf")
+    case "$m" in ''|*[!0-9]*) : ;; *) [ $((now - m)) -lt 21600 ] && {
+      : > "$tmp/fentries"
+      _grant_entries "$gf" >> "$tmp/fentries"
+      _age=$(( (now - m) / 60 ))
+      _lbl="lane #${n} NO LIVE LANE: ${b} is ${_age}m old, holds until 360m; retire with  mv run/${b} run/done/"
+      [ -s "$tmp/fentries" ] && _check_entries "$tmp/fentries" "$n" "$_lbl"
+    };; esac
+  fi
+  set +f
+done
+set -f
+
+# A whole-file hold by a pull request is the pessimistic answer: the thing that
+# actually collides is a hunk. Print the holder's hunk windows and the
+# complement as a ready --ranges argument, so granting the rest of the file is a
+# choice rather than the default. Twice in one round a lane waited on a hold
+# whose holder had changed a single line in the file.
+_suggest() {
+  _spr=$1; _sfile=$2
+  [ -s "$tmp/full-$_spr.diff" ] || return 0
+  _pr_hunks "$tmp/full-$_spr.diff" "$_sfile" > "$tmp/sh" || return 0
+  [ -s "$tmp/sh" ] || return 0
+  grep -q '^NEWHUNK$' "$tmp/sh" && { echo "  the pull request adds this file whole, so there is no complement"; return 0; }
+  _len=$("${FW_GH:-gh}" api "repos/$repo/contents/$_sfile?ref=main" -H 'Accept: application/vnd.github.raw' 2>/dev/null | wc -l | tr -d ' ')
+  case "$_len" in ''|0|*[!0-9]*) _len=END;; esac
+  awk '{ a = $1 + 0; b = $2 + 0; e = a + b; if (e <= a) e = a + 1; print a "\t  held window " a "-" (e - 1) }' "$tmp/sh" | sort -n -u | cut -f2-
+  sort -n "$tmp/sh" | awk -v len="$_len" -v f="$_sfile" '
+    BEGIN { nxt = 1; sep = ""; out = "" }
+    { a = $1 + 0; e = a + $2; if (e <= a) e = a + 1
+      if (a > nxt) { out = out sep f ":" nxt "-" (a - 1); sep = "," }
+      if (e > nxt) nxt = e }
+    END { if (len == "END") { out = out sep f ":" nxt "-END" }
+          else if (len + 0 >= nxt) { out = out sep f ":" nxt "-" len }
+          if (out != "") print "  --ranges " out }'
+  [ "$_len" = "END" ] && echo "  (could not read the file length on main; replace END with it)"
+  return 0
+}
+
+if [ -n "$(printf '%s' "$held" | grep .)" ]; then
+  printf '%s' "$held" | grep . | awk -F'|' '!s[$1"|"$2]++ {print "HELD " $1 " by " $2 ($3 == "" ? "" : "\t" $3)}' > "$tmp/heldout"
+  while IFS="$(printf '\t')" read -r line sug; do
+    echo "$line"
+    [ -n "$sug" ] || continue
+    _suggest "${sug%% *}" "${sug#* }"
+  done < "$tmp/heldout"
+  exit 1
+fi
+
+# --- grant: locked numbering over existing files (unnumbered counts as 1) ---
+if [ "$dry" -eq 0 ]; then
+  lock_tries=${FW_LOCK_TRIES:-50}
+  lock_poll=${FW_LOCK_POLL:-0.2}
+  i=0
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -ge "$lock_tries" ] && { echo "ERROR cannot lock $lockdir"; exit 3; }
+    sleep "$lock_poll"
+  done
+  locked=1
+  max=0
+  set +f
+  for gf in "$run"/fiber-"$ticket"-fence-grant*.md; do
+    [ -e "$gf" ] || continue
+    b=$(basename "$gf")
+    set -f
+    rest=${b#fiber-$ticket-fence-grant}
+    case "$rest" in
+      .md) n=1;;
+      -*.md) n=${rest#-}; n=${n%.md}; case "$n" in ''|*[!0-9]*) set +f; continue;; esac;;
+      *) set +f; continue;;
+    esac
+    [ "$n" -gt "$max" ] && max=$n
+    set +f
+  done
+  set -f
+  k=$((max + 1))
+  gf="$run/fiber-$ticket-fence-grant-$k.md"
+  nowd=$(date '+%a %b %d %T %Z %Y')
+  {
+    printf 'Grant %s (fence-grant, %s)\n\nTicket: %s\nPaths:\n' "$k" "$nowd" "$ticket"
+    sed 's/^/- /' < "$tmp/plist"
+    if [ -n "$ranges" ]; then printf 'Ranges: %s\n' "$ranges"; else printf 'Ranges: none\n'; fi
+    printf '\nNo open PR or live lane holds these paths (checked open PRs:%s; live lanes:%s).\n' " $prs" " $lanes"
+    # An `&&` here would be the group's last command and would fail it when there is nothing to skip.
+    if [ -n "$ownprs" ]; then printf 'Skipped this ticket own open PRs:%s.\n' " $ownprs"; fi
+    # Last in the file, and nothing may follow: `Reads:` latches the lane hold
+    # probe off, so these paths hold nothing against the next lane.
+    if [ -n "$readpaths" ]; then
+      printf '\nReads:\n'
+      printf '%s\n' "$readpaths" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's/^/- /'
+    fi
+  } > "$gf" 2>/dev/null || { echo "ERROR cannot write $gf"; exit 3; }
+fi
+sed 's/^/GRANT /' < "$tmp/plist"
+if [ -n "$readpaths" ]; then
+  printf '%s\n' "$readpaths" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's/^/READ /'
+fi
+echo "GRANT"
+exit 0
