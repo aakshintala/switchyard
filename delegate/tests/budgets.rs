@@ -165,6 +165,7 @@ impl Env {
         cmd.args(args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
+            .env("FIBER_HOME", self.dir.join("fh"))
             .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))
             .env_remove("CLAUDECODE")
             .env("CURSOR_AGENT_BIN", self.dir.join("agent.sh"))

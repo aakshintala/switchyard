@@ -1,22 +1,21 @@
-//! Opt-in real-fiber resume tests: `delegate resume` on a Fiber job continues
-//! the same Fiber session (`fiber ask --resume <sid>`), after a NEEDS_CONTEXT
-//! answer and after a failed gate.
+//! Opt-in real-Fiber resume tests: `delegate resume` continues a supervised
+//! hub session after a NEEDS_CONTEXT answer and after a failed gate.
 //!
-//! These need a real `fiber` binary and a live Muse model, so each test skips
-//! with a printed reason when `FIBER_BIN` is unset; each test spends two live
-//! turns. Run with:
+//! These tests need a real `fiber` binary, a reachable hub, and a live Muse
+//! model. They skip with a printed reason when the binary or hub is missing.
+//! Each test spends two live turns. Run with:
 //! `FIBER_BIN=<path to fiber> cargo test --test fiber_live -- --nocapture`.
 
 use std::cell::RefCell;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
 const MODEL: &str = "fiber/opencode-go/muse-spark-1.3-contributor";
-const SKIP: &str = "skipping: FIBER_BIN is unset (set it to a real fiber binary to run)";
+const SKIP_BINARY: &str = "skipping: FIBER_BIN is unset (set it to a real fiber binary to run)";
 
 /// The real fiber binary, or `None` when the tests must skip. `FIBER_BIN` set
 /// but empty is a test failure, never a fallback to a `fiber` on PATH.
@@ -30,11 +29,34 @@ fn real_fiber() -> Option<PathBuf> {
     }
 }
 
+fn live_fiber() -> Option<PathBuf> {
+    let Some(real) = real_fiber() else {
+        eprintln!("{SKIP_BINARY}");
+        return None;
+    };
+    let socket = delegate::backends::fiber::hub::fiber_home()
+        .and_then(|home| delegate::backends::fiber::hub::hub_socket_path(&home));
+    let socket = match socket {
+        Ok(socket) => socket,
+        Err(error) => {
+            eprintln!("skipping: {error}");
+            return None;
+        }
+    };
+    if let Err(error) = UnixStream::connect(&socket) {
+        eprintln!(
+            "skipping: hub socket {} is not reachable: {error}",
+            socket.display()
+        );
+        return None;
+    }
+    Some(real)
+}
+
 struct LiveEnv {
     root: PathBuf,
     work: PathBuf,
-    wrapper: PathBuf,
-    argv_log: PathBuf,
+    fiber_bin: PathBuf,
     jobs: RefCell<Vec<String>>,
 }
 
@@ -44,28 +66,11 @@ impl LiveEnv {
             std::env::temp_dir().join(format!("delegate-fiber-live-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let work = root.join("work");
-        let bin = root.join("bin");
         std::fs::create_dir_all(&work).unwrap();
-        std::fs::create_dir_all(&bin).unwrap();
-        let argv_log = bin.join("argv.txt");
-        let wrapper = bin.join("fiber.sh");
-        // Log argv outside the model's workspace, then `exec` so cancel/kill
-        // reach the real fiber process.
-        std::fs::write(
-            &wrapper,
-            format!(
-                "#!/bin/sh\n{{\n  printf '%s\\n' \"$@\"\n  printf '%s\\n' '---'\n}} >> \"{}\"\nexec \"{}\" \"$@\"\n",
-                argv_log.display(),
-                real.display(),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         LiveEnv {
             root,
             work,
-            wrapper,
-            argv_log,
+            fiber_bin: real.to_path_buf(),
             jobs: RefCell::new(Vec::new()),
         }
     }
@@ -77,7 +82,7 @@ impl LiveEnv {
             .env("TMPDIR", &self.root)
             .env("XDG_CACHE_HOME", self.root.join("xdg-cache"))
             .env_remove("CLAUDECODE")
-            .env("FIBER_BIN", &self.wrapper)
+            .env("FIBER_BIN", &self.fiber_bin)
             .env(
                 "DELEGATE_HOST_PROFILE",
                 self.root.join("nonexistent-profile.json"),
@@ -147,21 +152,6 @@ impl LiveEnv {
         serde_json::from_str(&raw).ok()
     }
 
-    /// Split the wrapper's argv log into one invocation per leading `ask`
-    /// line (the prompt spans several lines, so `---` cannot delimit).
-    fn invocations(&self) -> Vec<Vec<String>> {
-        let mut calls: Vec<Vec<String>> = Vec::new();
-        for line in std::fs::read_to_string(&self.argv_log).unwrap().lines() {
-            if line == "ask" {
-                calls.push(Vec::new());
-            }
-            if let Some(last) = calls.last_mut() {
-                last.push(line.to_string());
-            }
-        }
-        calls
-    }
-
     /// Prints every launched job record to stderr when the test fails.
     fn dump_guard(&self) -> Dump<'_> {
         Dump { env: self }
@@ -198,7 +188,7 @@ impl Drop for LiveEnv {
                     .current_dir(&self.work)
                     .env("TMPDIR", &self.root)
                     .env("XDG_CACHE_HOME", self.root.join("xdg-cache"))
-                    .env("FIBER_BIN", &self.wrapper)
+                    .env("FIBER_BIN", &self.fiber_bin)
                     .output();
             }
         }
@@ -208,8 +198,7 @@ impl Drop for LiveEnv {
 
 #[test]
 fn live_fiber_needs_context_resume() {
-    let Some(real) = real_fiber() else {
-        eprintln!("{SKIP}");
+    let Some(real) = live_fiber() else {
         return;
     };
     let env = LiveEnv::new("needs-context", &real);
@@ -238,20 +227,11 @@ fn live_fiber_needs_context_resume() {
         "resumed turn must use the first prompt's fact: {text}"
     );
     assert_eq!(done["resume"]["sessionId"], sid.as_str(), "{done:#}");
-
-    let calls = env.invocations();
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert!(!calls[0].iter().any(|a| a == "--resume"), "{calls:?}");
-    assert!(
-        calls[1].windows(2).any(|w| w == ["--resume", sid.as_str()]),
-        "{calls:?}"
-    );
 }
 
 #[test]
 fn live_fiber_gate_failure_repair() {
-    let Some(real) = real_fiber() else {
-        eprintln!("{SKIP}");
+    let Some(real) = live_fiber() else {
         return;
     };
     let env = LiveEnv::new("gate-repair", &real);
@@ -282,11 +262,4 @@ fn live_fiber_gate_failure_repair() {
     assert_eq!(done["resume"]["sessionId"], sid.as_str(), "{done:#}");
     let body = std::fs::read_to_string(env.work.join("zebra-17.txt")).unwrap_or_default();
     assert_eq!(body, "ok", "repair must create the remembered file");
-
-    let calls = env.invocations();
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert!(
-        calls[1].windows(2).any(|w| w == ["--resume", sid.as_str()]),
-        "{calls:?}"
-    );
 }
