@@ -644,6 +644,57 @@ case "$OUT" in *CURRENT*) fail "recurredbadjson: must never print CURRENT" ;; es
 case "$OUT" in *PREFLIGHT*) fail "recurredbadjson: must never print PREFLIGHT" ;; esac
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "recurredbadjson: tkt-job must not run" # docs/agents/issue-tracker.md:31
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "recurredbadjson: plan-sweep must not run" # docs/agents/issue-tracker.md:31
+# Invalid --spec-issue values are rejected before writing state.
+invalid_spec_issue_failures=()
+invalid_spec_issue_n=0
+for bad in abc 0 00 -3 4.5 ' '; do
+  invalid_spec_issue_n=$((invalid_spec_issue_n + 1))
+  setup "specissueinvalid$invalid_spec_issue_n" ONE AGAINST
+  run_start --spec-issue "$bad"
+  [ "$RC" -eq 2 ] || invalid_spec_issue_failures+=("[$bad] exit=$RC")
+  grep -qF -- '--spec-issue' "$CDIR/stderr" || invalid_spec_issue_failures+=("[$bad] stderr misses --spec-issue")
+  [ ! -e "$RUN/widget-42.state" ] || invalid_spec_issue_failures+=("[$bad] state was written")
+done
+setup specissueinvalidlong ONE AGAINST
+run_start --spec-issue 1000000000
+[ "$RC" -eq 2 ] || invalid_spec_issue_failures+=("[1000000000] exit=$RC")
+grep -qF -- '--spec-issue' "$CDIR/stderr" || invalid_spec_issue_failures+=("[1000000000] stderr misses --spec-issue")
+[ ! -e "$RUN/widget-42.state" ] || invalid_spec_issue_failures+=("[1000000000] state was written")
+setup specissuenovalue ONE AGAINST
+run_start --spec-issue
+[ "$RC" -eq 2 ] || invalid_spec_issue_failures+=("[missing] exit=$RC")
+grep -qF -- 'usage: tkt-start' "$CDIR/stderr" || invalid_spec_issue_failures+=("[missing] stderr misses usage")
+[ ! -e "$RUN/widget-42.state" ] || invalid_spec_issue_failures+=("[missing] state was written")
+[ "${#invalid_spec_issue_failures[@]}" -eq 0 ] || fail "specissueinvalid: ${invalid_spec_issue_failures[*]}"
+
+# --spec-issue stores one positive issue number, normalising leading zeros.
+setup specissue ONE AGAINST
+run_start --spec-issue 445
+want "CURRENT " 0 specissue
+[ "$(grep -c '^spec_issue=' "$RUN/widget-42.state")" -eq 1 ] || fail "specissue: wants one spec_issue line"
+grep -qFx 'spec_issue=445' "$RUN/widget-42.state" || fail "specissue: state misses [spec_issue=445]"
+run_start
+want "CURRENT " 0 specissuererun
+[ "$(grep -c '^spec_issue=' "$RUN/widget-42.state")" -eq 1 ] || fail "specissuererun: stored value was not preserved"
+grep -qFx 'spec_issue=445' "$RUN/widget-42.state" || fail "specissuererun: state misses [spec_issue=445]"
+setup specissueleadingzero ONE AGAINST
+run_start --spec-issue 007
+want "CURRENT " 0 specissueleadingzero
+grep -qFx 'spec_issue=7' "$RUN/widget-42.state" || fail "specissueleadingzero: state misses [spec_issue=7]"
+setup specissuenine ONE AGAINST
+run_start --spec-issue 999999999
+want "CURRENT " 0 specissuenine
+grep -qFx 'spec_issue=999999999' "$RUN/widget-42.state" || fail "specissuenine: state misses [spec_issue=999999999]"
+setup specissuerepeat ONE AGAINST
+run_start --spec-issue 1 --spec-issue 2
+want "CURRENT " 0 specissuerepeat
+[ "$(grep -c '^spec_issue=' "$RUN/widget-42.state")" -eq 1 ] || fail "specissuerepeat: wants one spec_issue line"
+grep -qFx 'spec_issue=2' "$RUN/widget-42.state" || fail "specissuerepeat: state misses [spec_issue=2]"
+setup specissueabsent ONE AGAINST
+run_start
+want "CURRENT " 0 specissueabsent
+[ "$(grep -c '^spec_issue=' "$RUN/widget-42.state")" -eq 0 ] || fail "specissueabsent: unexpected spec_issue line"
+
 # --body-ends writes one body_ends line; a repeat keeps only the last value.
 setup bodyends ONE AGAINST
 run_start --body-ends 'X'
