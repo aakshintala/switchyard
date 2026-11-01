@@ -1045,6 +1045,18 @@ run_wait 7 --timeout 0
 [ "$CODE" = "124" ] || fail "rerun in flight stays pending (got $CODE): [$OUT]"
 grep -q "^pending: ci$" <<<"$OUT" || fail "rerun in flight names ci pending: [$OUT]"
 
+# Pass counts describe only required checks, not every check on the head:
+# two required passes, two non-required passes and a dropped duplicate run.
+reset_state
+set_heads "$A"; echo "$RULES_CI_LINT" >"$T/state/rules"
+touch "$T/state/keep-checks-across-runs"
+set_checks '[{"name":"ci","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51"},{"name":"lint","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52"},{"name":"unit","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/53"},{"name":"package","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/54"},{"name":"ci","bucket":"pending","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/6/job/61"}]'
+printf '%s\n' '[{"id":5,"name":"CI","event":"pull_request","status":"completed","run_attempt":1},{"id":6,"name":"CI","event":"pull_request","status":"queued","run_attempt":1}]' >"$T/state/runs.txt"
+run_wait 7
+[ "$CODE" = "0" ] || fail "required pass-count reproduction settles (got $CODE): [$OUT]"
+grep -Fxq "gh-ci: ${A:0:8} pending=0 passed=2 failing=0" "$T/stderr.txt" \
+  || fail "required passes count only ci and lint: [$(cat "$T/stderr.txt")]"
+
 # --- case: a separate queued run does not hide the completed result (#476)
 # --- two runs of the same workflow and event on the head: the older
 # --- completed green (run_attempt 1), the newer queued (run_attempt 1).
@@ -1057,7 +1069,11 @@ echo '[{"id":5,"name":"CI","event":"pull_request","status":"completed","run_atte
 run_wait 7 --timeout 0
 [ "$CODE" = "0" ] || fail "separate queued run settles on the completed result (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} CI: pass" <<<"$OUT" || fail "separate queued run pass line: [$OUT]"
-[ "$(grep -c '^gh-ci: dropped run 6$' "$T/stderr.txt")" = "1" ] || fail "separate queued run id reported once on stderr: [$(cat "$T/stderr.txt")]"
+[ "$(grep -Fxc "gh-ci: ignoring run 6: its checks duplicate a completed run's" "$T/stderr.txt")" = "1" ] || fail "separate queued run id reported once on stderr: [$(cat "$T/stderr.txt")]"
+dropped_line="$(grep -F "gh-ci: ignoring run 6:" "$T/stderr.txt")"
+if printf '%s' "$dropped_line" | tr '[:upper:]' '[:lower:]' | grep -Eq 'fail|error'; then
+  fail "dropped-run line has no failure wording: [$dropped_line]"
+fi
 
 # --- cases: REST check-run conclusions map onto the buckets the verdict reads
 # the loop never calls gh pr view or gh pr checks (refused by the stand-in)
