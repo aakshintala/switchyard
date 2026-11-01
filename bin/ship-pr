@@ -76,8 +76,9 @@
 #        After marking a draft PR ready, each later failure before `gh pr merge` says
 #        that nothing merged and the PR is still marked ready. If MERGED is not confirmed
 #        after the merge attempt, the error says the merge status could not be confirmed.
-#        Exit 0 merged, 1 gate/CI/push/merge failure (a gate run on the PR merged
-#        with current origin/main counts as a gate failure; a merge that lost the race
+#        Exit 0 merged, 1 gate/CI/push/merge failure (including `gh-ci wait` exit 4
+#        when a required check never started; a gate run on the PR merged with current
+#        origin/main counts as a gate failure; a merge that lost the race
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
@@ -115,13 +116,15 @@
 #        from the reviewed sha to the pinned head, limited to the files the repair commits
 #        touch (a merge of main adds no base files), under `Changed since review:`. A failed
 #        post exits 1 before any push. A match posts nothing. The gate and CI run as usual.
-#        --timeout bounds each CI wait, so a run can take one gate and up to 4 CI waits;
-#        the 3 retries are one budget shared with a merge that lost the race.
+#        --timeout bounds each CI wait, so a run can take one gate and up to 5 CI waits
+#        (the first, three strict-mode retries and the one rerun); the 3 retries are one
+#        budget shared with a merge that lost the race.
 #        SHIP_PR_INTERVAL: seconds between MERGED polls (default 5, at most 12 polls).
 set -euo pipefail
 
 usage() {
   echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]" >&2
+  echo "       longest wait: 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
   exit 2
 }
 say() { echo "ship-pr: $*" >&2; }
@@ -244,6 +247,14 @@ if [ -n "$unverified" ]; then
   [ -f "$unverified" ] && [ -r "$unverified" ] || die 2 "cannot read --unverified-fixes $unverified"
   grep -q '[^[:space:]]' "$unverified" || die 2 "--unverified-fixes $unverified has no findings"
 fi
+
+effective_timeout=$((10#$timeout))
+if [ -n "${CLAUDECODE:-}" ] && [ "$effective_timeout" -lt 600 ]; then
+  effective_timeout=7200
+fi
+longest_wait=$((5 * effective_timeout))
+longest_hours=$((longest_wait / 3600))
+say "longest wait ${longest_wait} s (${longest_hours} h): 5 CI waits x ${effective_timeout} s, plus the gate; run it in the background with no shell timeout"
 
 tmpdir="${TMPDIR:-/tmp}"
 find -H "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true
@@ -561,6 +572,7 @@ while :; do
       case "$rc" in
         124) exit_after_ready 124 "CI timed out" ;;
         3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
+        4) die_after_ready 1 "CI never started: a required check has no check run" ;;
         *)
           if [ -z "$ci_rerun_done" ]; then
             if reason="$(ci_outside_reason 2>/dev/null)"; then
@@ -618,6 +630,7 @@ while :; do
                   case "$rc" in
                     124) exit_after_ready 124 "CI timed out" ;;
                     3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
+                    4) die_after_ready 1 "CI never started: a required check has no check run" ;;
                     *) die_after_ready 1 "CI failed" ;;
                   esac
                 fi

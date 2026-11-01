@@ -469,4 +469,31 @@ run_ship "$T/cases"
 expect_line1 "PRECONDITION relative=" relmissing
 [ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "relmissing: ship-pr must not run"
 
+# The ship notice is first on stderr; the verdict remains stdout line 1.
+reset_stub; setup_case notice
+printf '0' >"$T/exitcodes"
+run_ship
+[ "$RC" -eq 0 ] || fail "notice: exit $RC"
+expect_line1 "MERGED sha=" notice
+[ "$(head -n 1 "$CDIR/stderr")" = "tkt-ship: longest wait 144000 s (40 h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+  || fail "notice is stderr line 1: [$(cat "$CDIR/stderr")]"
+
+# Usage errors print guidance but no wait notice.
+usage_rc=0
+bash "$TKT" >"$T/usage-out" 2>"$T/usage-err" || usage_rc=$?
+[ "$usage_rc" -eq 2 ] || fail "usage: exit $usage_rc"
+! grep -q '^tkt-ship: longest wait' "$T/usage-err" || fail "usage error has no longest-wait notice: [$(cat "$T/usage-err")]"
+grep -q 'background' "$T/usage-err" && grep -q 'no shell timeout' "$T/usage-err" \
+  || fail "usage mentions background and no shell timeout: [$(cat "$T/usage-err")]"
+
+# CI-FAIL carries never-started lines and omits the empty failed-jobs summary.
+reset_stub; setup_case neverstarted
+printf '1' >"$T/exitcodes"
+printf 'gh-ci: check ci has no check run after 10 min; it never started\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "neverstarted: exit $RC"
+expect_line1 "CI-FAIL jobs=0 inside-diff=0 mutants=0" neverstarted
+case "$OUT" in *"gh-ci: check ci has no check run after 10 min; it never started"*) ;; *) fail "digest carries never-started line: [$OUT]" ;; esac
+case "$OUT" in *"gh-ci reported no failed jobs"*) fail "digest drops empty failed-jobs line: [$OUT]" ;; esac
+
 echo "tkt-ship: all cases passed"
