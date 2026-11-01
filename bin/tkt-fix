@@ -202,13 +202,22 @@ fi
 t set fixopen "$knum" # this job's commits may land ahead of head
 jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
 if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
-if [ "$jrc" -eq 1 ]; then # an abnormal end closes the slot without a round
-  close_slot "$knum"
-  shead="$(t get head 2>/dev/null || true)"
-  whead="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
-  if [ -n "$shead" ] && [ "$shead" = "$whead" ]; then t set fixopen 0; fi
+concerns_file=""
+if [ "$jrc" -ne 0 ]; then
+  if [ "$jrc" -eq 1 ]; then # an abnormal end closes the slot without a round
+    close_slot "$knum"
+    shead="$(t get head 2>/dev/null || true)"
+    whead="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+    if [ -n "$shead" ] && [ "$shead" = "$whead" ]; then t set fixopen 0; fi
+  fi
+  # CONCERNS continues like a lane's CONCERNS in tkt-build: tkt-job saved the
+  # file as concerns.<slot>, and it goes to the verify as --context. Every
+  # other non-zero verdict stops here.
+  case "$(head -n 1 "$tmp/job.out")" in
+    "TKT tkt-job CONCERNS "*) concerns_file="$(t get "concerns.$slot" 2>/dev/null || true)" ;;
+    *) pass tkt-job "$tmp/job.out" "$jrc" ;;
+  esac
 fi
-[ "$jrc" -eq 0 ] || pass tkt-job "$tmp/job.out" "$jrc"
 
 git -C "$worktree" fetch origin >/dev/null 2>&1 || { echo "tkt-fix: fetch failed in $worktree" >&2; exit 2; }
 new_head="$(git -C "$worktree" rev-parse HEAD)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
@@ -230,23 +239,28 @@ if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
 [ "$grc" -eq 0 ] || pass tkt-gate "$tmp/gate.out" "$grc"
 round=$((round + 1)); t set round "$round"; close_slot "$knum"
 
+# Digest lines after the verdict: the CI notes, and the concerns file the
+# orchestrator reads before it accepts the verdict.
+notes=()
+if [ -n "$ci_note" ]; then notes+=("$ci_note"); fi
+if [ -n "$concerns_file" ]; then notes+=("concerns=$concerns_file"); fi
 if [ "$noverify" -eq 1 ]; then
   t set unverified "$findings"
-  if [ -n "$ci_note" ]; then emit "PUSHED unverified" 0 "head=$new_head" "round=$round" "$ci_note"; fi
-  emit "PUSHED unverified" 0 "head=$new_head" "round=$round"
+  emit "PUSHED unverified" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"}
 fi
 [ -n "$verifymodel" ] || verifymodel="$(t get model.verify 2>/dev/null)" || { echo "tkt-fix: missing key: model.verify (no --verify-model and no state model.verify)" >&2; exit 2; }
 reviewed="$(t get reviewed 2>/dev/null)" || { echo "tkt-fix: missing key: reviewed" >&2; exit 2; }
-vrc=0; "$reviewpr" run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$findings" --since "$reviewed" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
+vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$findings" --since "$reviewed")
+if [ -n "$concerns_file" ]; then vargs+=(--context "$concerns_file"); fi
+vrc=0; "$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
 if [ -s "$tmp/verify.err" ]; then cat "$tmp/verify.err" >&2; fi
 [ "$vrc" -eq 0 ] || emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")"
 fixline="$(grep -m 1 '^FIX-' "$tmp/verify.out" || true)"
 case "$fixline" in
   FIX-OK*) t set reviewed "$new_head"; write_findings "$tmp/verify.out"
-    if [ -n "$ci_note" ]; then emit "FIX-OK reviewed=$new_head" 0 "head=$new_head" "round=$round" "$ci_note"; fi
-    emit "FIX-OK reviewed=$new_head" 0 "head=$new_head" "round=$round" ;;
+    emit "FIX-OK reviewed=$new_head" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
   FIX-INCOMPLETE*) write_findings "$tmp/verify.out"; open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
-    if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" "$ci_note"; fi
-    emit "FIX-INCOMPLETE round=$round" 1 "$open" "$ci_note" ;;
+    if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
+    emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
   *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$tmp/verify.out")" ;;
 esac
