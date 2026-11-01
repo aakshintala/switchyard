@@ -37,19 +37,16 @@ default_remote() {
   printf '%s' "${FILE_CLAIM_REMOTE:-git@github.com:$1.git}"
 }
 read_pr_files() {
-  local repo="$1" pr="$2" expected="$3" file="$4" attempt=1 got reason
+  local repo="$1" pr="$2" expected="$3" file="$4" attempt=1 got
   while [ "$attempt" -le "$READ_TRIES" ]; do
     if gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" -q '.[].filename' >"$file" 2>"$W/gh.err"; then
       got="$(awk 'length($0) > 0 { n++ } END { print n+0 }' "$file")"
       if [ "$got" = "$expected" ]; then return 0; fi
-      reason="file list has $got files, changedFiles is $expected"
-    else
-      reason="$(cat "$W/gh.err")"
+      printf 'file list has %s files, changedFiles is %s\n' "$got" "$expected" >"$W/gh.err"
     fi
     if [ "$attempt" -lt "$READ_TRIES" ]; then sleep "$READ_WAIT"; fi
     attempt=$((attempt + 1))
   done
-  READ_REASON="$reason"
   return 1
 }
 jitter_sleep() {
@@ -132,7 +129,7 @@ cmd_claim() {
   while IFS="$TAB" read -r pr changed_files; do
     case "$changed_files" in ''|*[!0-9]*) die 2 "invalid changedFiles for open PR #$pr for $repo: $changed_files" ;; esac
     if ! read_pr_files "$repo" "$pr" "$changed_files" "$W/pr-files"; then
-      die 2 "cannot list files for open PR #$pr for $repo after $READ_TRIES tries: $READ_REASON"
+      die 2 "cannot list files for open PR #$pr for $repo after $READ_TRIES tries: $(cat "$W/gh.err")"
     fi
     while IFS= read -r path || [ -n "$path" ]; do
       [ -n "$path" ] || continue
