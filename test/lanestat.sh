@@ -131,15 +131,10 @@ run_stat "$T/run" extra >"$T/extra.out" 2>"$T/extra.err"; rc=$?
 [ "$rc" = 2 ] || fail "extra argument exits 2 (got $rc)"
 run_stat --all --all "$T/run" >"$T/duplicate-all.out" 2>"$T/duplicate-all.err"; rc=$?
 [ "$rc" = 2 ] || fail "duplicate --all exits 2 (got $rc)"
-red_failures=
-record_failure() {
-  red_failures="${red_failures}${red_failures:+
-}$1"
-}
-case9_failed=
 run_stat "$T/empty" >"$T/empty.out" 2>"$T/empty.err"; rc=$?
 [ "$rc" = 0 ] || fail "empty run dir exits 0 (got $rc)"
-[ "$(<"$T/empty.out")" = "lanestat: no live lanes in $T/empty" ] || case9_failed=1
+[ "$(<"$T/empty.out")" = "lanestat: no live lanes in $T/empty" ] \
+  || fail 'case 9: zero-live-row message for empty and dead-only run dirs'
 
 # Settled rows are flagged only when their jsonl age is strictly over the
 # configured threshold. The clock and mtimes are fixed, without sleeping.
@@ -208,17 +203,6 @@ set_file_age() {
   perl -e 'my $t = $ARGV[1] - $ARGV[2]; utime($t, $t, $ARGV[0]) or die "utime: $!"' \
     "$1" "$NOW" "$2" || fail "set fixture age $2"
 }
-expect_case_row() {
-  label=$1
-  field=$2
-  pattern=$3
-  rows=$4
-  line="$(printf '%s\n' "$rows" | grep -E "^${field}[[:space:]]" || true)"
-  if [ -z "$line" ] || ! printf '%s\n' "$line" | grep -Eq "$pattern"; then
-    record_failure "$label"
-  fi
-}
-
 # Pairing keeps the outer call open when an inner call ends.
 new_case case-1 701
 printf '%s\n' \
@@ -228,7 +212,7 @@ printf '%s\n' \
   >"$case_dir/fiber-701-pi.jsonl"
 run_stat "$case_dir" >"$T/case-1.out" 2>"$T/case-1.err"; rc=$?
 [ "$rc" = 0 ] || fail "case 1 exits 0 (got $rc)"
-expect_case_row 'case 1: outer tool remains open after inner end' 701 'IN-TOOL bash$' "$(<"$T/case-1.out")"
+assert_row 701 'IN-TOOL bash$' "$(<"$T/case-1.out")"
 
 # A queue update after the inner end does not hide the still-open outer call.
 new_case case-2 702
@@ -240,7 +224,7 @@ printf '%s\n' \
   >"$case_dir/fiber-702-pi.jsonl"
 run_stat "$case_dir" >"$T/case-2.out" 2>"$T/case-2.err"; rc=$?
 [ "$rc" = 0 ] || fail "case 2 exits 0 (got $rc)"
-expect_case_row 'case 2: queue update preserves outer open tool' 702 'IN-TOOL bash$' "$(<"$T/case-2.out")"
+assert_row 702 'IN-TOOL bash$' "$(<"$T/case-2.out")"
 
 # Settles, non-settling events, and events after a settle retain their order.
 new_case case-3 703
@@ -310,18 +294,12 @@ case_dir=$(mktemp -d "$T/case-9.XXXXXX") || fail "create case-9 run dir"
 printf '909\n' >"$case_dir/fiber-909-pi.pid"
 run_stat "$case_dir" >"$T/case-9-default.out" 2>"$T/case-9-default.err"; rc=$?
 [ "$rc" = 0 ] || fail "case 9 default exits 0 (got $rc)"
-[ "$(<"$T/case-9-default.out")" = "lanestat: no live lanes in $case_dir" ] || case9_failed=1
+[ "$(<"$T/case-9-default.out")" = "lanestat: no live lanes in $case_dir" ] \
+  || fail 'case 9: zero-live-row message for empty and dead-only run dirs'
 run_stat --all "$case_dir" >"$T/case-9-all.out" 2>"$T/case-9-all.err"; rc=$?
 [ "$rc" = 0 ] || fail "case 9 --all exits 0 (got $rc)"
 expected="$(printf '%-6s %-8s %s\nlanestat: no live lanes in %s' 909 909 DEAD "$case_dir")"
-[ "$(<"$T/case-9-all.out")" = "$expected" ] || case9_failed=1
-[ -z "$case9_failed" ] || record_failure 'case 9: zero-live-row message for empty and dead-only run dirs'
-
-if [ -n "$red_failures" ]; then
-  printf '%s\n' "$red_failures" | while IFS= read -r failed; do
-    printf 'FAIL: %s\n' "$failed" >&2
-  done
-  exit 1
-fi
+[ "$(<"$T/case-9-all.out")" = "$expected" ] \
+  || fail 'case 9: zero-live-row message for empty and dead-only run dirs'
 
 echo 'lanestat: all cases passed'
