@@ -69,6 +69,10 @@ case "\$(cat "$T/jobmode")" in
     exit 1;;
   partial)
     commit_as_job fix.txt "partial"
+    # Like the real tkt-job: the concerns file is saved and keyed by slot.
+    cf="\$("$TKT_STATE" "\$state" get run)/switchyard-529-concerns-\$slot.md"
+    printf 'fix job is unsure about X\n' >"\$cf"
+    "$TKT_STATE" "\$state" set "concerns.\$slot" "\$cf" >/dev/null
     echo "TKT tkt-job CONCERNS id=j1 log=x"
     exit 1;;
   unknown)
@@ -495,17 +499,42 @@ fi
 if want B; then
 setup_case b
 printf 'partial' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "B call 1 exited 0"
-[ "$?" = "1" ] || fail "B call 1 exited $?, want 1"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix CONCERNS" || fail "B bad verdict: $(head -n 1 <<<"$out")"
-git -C "$WT" push -q origin tkt-529
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B CONCERNS round exited $?"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "B bad verdict: $(head -n 1 <<<"$out")"
+grep -q "DRIFT" <<<"$out" && fail "B printed DRIFT"
+expect_slot fix1
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "B head not the worktree HEAD"
+fi
+
+# B1. A fix job CONCERNS continues to the gate and the verify, which gets the
+# concerns file as --context; the digest names the file. Nothing stops.
+if want B1; then
+setup_case concerns-fix
+printf 'partial' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B1 exited $? (want 0): $(head -n 1 <<<"$out")"
+CF="$CDIR/run/switchyard-529-concerns-fix1.md"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "B1 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(sed -n '2p' <<<"$out")" = "head=$(git -C "$WT" rev-parse HEAD)" ] || fail "B1 digest line 2 is not head="
+grep -qxF "concerns=$CF" <<<"$out" || fail "B1 digest lacks concerns=$CF: $out"
+[ "$(bash "$TKT_STATE" "$S" get concerns.fix1)" = "$CF" ] || fail "B1 concerns.fix1 not stored"
+printf 'fix job is unsure about X\n' | cmp - "$CF" || fail "B1 concerns file text"
+grep -qF -- "--context $CF" "$T/calls.log" || fail "B1 verify got no --context: $(cat "$T/calls.log")"
+grep -q "review-pr|run 7" "$T/calls.log" || fail "B1 verify did not run: $(cat "$T/calls.log")"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "B1 round not 1"
+fi
+
+# B2. A later clean round carries no stale context: the verify has no --context.
+if want B2; then
+setup_case concerns-then-clean
+printf 'partial' >"$T/jobmode"
+bash "$TKT" "$S" --verify >/dev/null 2>"$T/stderr" || fail "B2 first round exited $?"
 : >"$T/calls.log"
 printf 'done' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B call 2 exited $?"
-grep -q "DRIFT" <<<"$out" && fail "B call 2 printed DRIFT"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "B bad verdict: $(head -n 1 <<<"$out")"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B2 clean round exited $?"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "B2 bad verdict: $(head -n 1 <<<"$out")"
+grep -q -- "--context" "$T/calls.log" && fail "B2 clean round sent stale context: $(cat "$T/calls.log")"
+grep -q "concerns=" <<<"$out" && fail "B2 clean round digest names stale concerns"
 expect_slot fix2
-[ "$(bash "$TKT_STATE" "$S" get head)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "B head not the worktree HEAD"
 fi
 
 # C1. A PR head that does not descend from the state head still exits DRIFT.

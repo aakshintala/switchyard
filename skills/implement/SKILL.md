@@ -21,7 +21,7 @@ When you were started with a brief or notes file, that file is your contract for
 
 ## Commands
 
-When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. When the ticket's spec is another issue, pass its number with `tkt-start --spec-issue <N>`. `tkt-build` passes that number to `review-pr`. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; a lane `CONCERNS` continues per step 4; every other word is a stop.
+When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. When the ticket's spec is another issue, pass its number with `tkt-start --spec-issue <N>`. `tkt-build` passes that number to `review-pr`. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; a lane `CONCERNS` continues per step 4, and so does a fix round's `CONCERNS` (`tkt-fix` sends the concerns file to the verify as `--context`); every other word is a stop.
 
 | Tool | Go on | Other verdicts that stop |
 | --- | --- | --- |
