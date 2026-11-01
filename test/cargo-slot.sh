@@ -819,15 +819,24 @@ expect_no_slot_dir "$T/guard-i"
 guard_refused() {
   local name="$1" dir="$2" slots="$T/guard-$1"
   shift 2
-  local shared="" w
+  local shared="" worktree_root="" w
   for w in "$@"; do
     case "$w" in
       CARGO_SLOT_SHARED_CHECKOUT=*) shared="${w#CARGO_SLOT_SHARED_CHECKOUT=}" ;;
+      CARGO_SLOT_WORKTREE_ROOT=*) worktree_root="${w#CARGO_SLOT_WORKTREE_ROOT=}" ;;
     esac
   done
   local cwd
   cwd="$(cd "$dir" && pwd -P)" || fail "guard $name: cannot resolve $dir"
-  local want="cargo-slot: cwd $cwd is inside the shared checkout $shared; cd into your ticket worktree and rerun. This is a cwd check, not a permission denial."
+  local hint=""
+  if [ -n "$worktree_root" ]; then
+    while [[ "$worktree_root" == */ ]]; do worktree_root="${worktree_root%/}"; done
+    local quoted_shared quoted_root
+    quoted_shared="$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$shared")"
+    quoted_root="$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$worktree_root")"
+    hint="; for a scratch worktree run \`git -C $quoted_shared worktree add --detach $quoted_root/<name>\`, where <name> describes the job (e.g. audit, bench), never a lane number"
+  fi
+  local want="cargo-slot: cwd $cwd is inside the shared checkout $shared; cd into your ticket worktree and rerun$hint. This is a cwd check, not a permission denial."
   new_run "guard-$name"
   ( cd "$dir" && cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$slots" "$@" \
     -- check 2>"$R/shim.err" )
@@ -851,6 +860,12 @@ guard_refused d "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOT_HE
 guard_refused j "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOTS=abc
 # k. GIT_* variables do not change the answer: GIT_DIR points nowhere.
 guard_refused k "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" GIT_DIR="$T/nogit"
+# l. A configured root adds the quoted scratch-worktree command.
+guard_refused l "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOT_WORKTREE_ROOT="$T/fiber-worktrees"
+# m. Trailing slashes on the configured root do not appear in the command.
+guard_refused m "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOT_WORKTREE_ROOT="$T/fiber-worktrees/"
+# n. An empty root keeps the old refusal text.
+guard_refused n "$T/shared" CARGO_SLOT_SHARED_CHECKOUT="$T/shared" CARGO_SLOT_WORKTREE_ROOT=
 
 # Acceptance: a daemon child must not keep the slot after the cargo stub exits.
 D="$T/daemon"
