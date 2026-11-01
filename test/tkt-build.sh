@@ -1579,6 +1579,17 @@ run_build
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "sibling-base"
 grep -q '^job|' "$T/calls.log" && fail "sibling-base: stale verdict dispatches no tkt-job"
 
+# --- a skipped verdict at an old base stays stale without the flag ---
+setup_case verdict-skipped-stale-no-flag
+old_base="$(cat "$CDIR/main0")"
+bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed old skipped verdict without flag"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$old_base" || fail "seed old skipped base without flag"
+run_build
+[ "$RC" -eq 1 ] || fail "skipped verdict at an old base refuses without --no-verifier"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "old skipped verdict without flag"
+expect_state plan_verdict skipped "old skipped verdict without flag"
+expect_state plan_verdict_base "$old_base" "old skipped base without flag"
+
 # --- the verdict check runs before either --from lane split ---
 setup_case verdict-from-gate
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed --from gate LINES"
@@ -1594,5 +1605,16 @@ run_build --from review
 [ "$RC" -eq 1 ] || fail "--from review verdict refusal exits 1"
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=lines log=*" "--from review verdict refusal"
 grep -q '^job|' "$T/calls.log" && fail "--from review refusal dispatches no tkt-job"
+
+# --- --no-verifier refreshes a stored skipped verdict at the current base ---
+setup_case verdict-skipped-stale-flag
+old_base="$(cat "$CDIR/main0")"
+bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed old skipped verdict with flag"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$old_base" || fail "seed old skipped base with flag"
+run_build --no-verifier
+[ "$RC" -eq 0 ] || fail "--no-verifier refreshes an old skipped verdict (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "old skipped verdict with flag"
+expect_state plan_verdict skipped "old skipped verdict with flag"
+expect_state plan_verdict_base "$H" "old skipped base refreshes with flag"
 
 echo "tkt-build: all cases passed"
