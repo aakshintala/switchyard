@@ -38,6 +38,8 @@ default_remote() {
 }
 read_pr_files() {
   local repo="$1" pr="$2" expected="$3" file="$4" attempt=1 got
+  # GitHub's PR files API returns at most 3000 entries. Above that, the count
+  # never reconciles and file-claim exits 2 on every call, not as a flake.
   while [ "$attempt" -le "$READ_TRIES" ]; do
     if gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" -q '.[].filename' >"$file" 2>"$W/gh.err"; then
       got="$(awk 'length($0) > 0 { n++ } END { print n+0 }' "$file")"
