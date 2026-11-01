@@ -3,8 +3,11 @@
 # Usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>
 #        gh-ci verdict <branch-or-sha> | gh-ci resample <pr> "<job name>" --until <regex> [--max <n>]
 #        gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)
-# Exit codes: 0 ok, 1 failure, 2 usage, 3 merge conflict (snapshot and
-# watch-verified at once; wait after 30 s of DIRTY re-checks), 124 wait timeout.
+# verdict judges required checks against the default branch; wait <pr> reads the PR's own base.
+# Exit codes: 0 ok, 1 failure (verdict prints RED on stdout; lookup errors
+# print no verdict), 2 usage, 3 merge conflict (snapshot and watch-verified
+# at once; wait after 30 s of DIRTY re-checks), 124: verdict means a required
+# check is pending now (no wait); wait means the wait timed out with checks still pending.
 # Repo: --repo OWNER/NAME (any subcommand, any position; panics needs none), then GH_CI_REPO, then
 # origin's GitHub URL (no network call), then `gh repo view`. With none, exit 2.
 # GH_CI_INTERVAL the watch poll seconds (default 30). Under Claude Code
@@ -15,6 +18,8 @@ usage() {
   echo "       gh-ci verdict <branch-or-sha> | resample <pr> \"<job name>\" --until <regex> [--max <n>]" >&2
   echo "       gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)" >&2
   echo "       every GitHub subcommand takes --repo OWNER/NAME (overrides GH_CI_REPO and the checkout's origin)" >&2
+  echo "       verdict judges required checks against the default branch; wait <pr> reads the PR's own base" >&2
+  echo "       124 from verdict means a required check is pending now (nothing waited); from wait it means the wait timed out with checks still pending" >&2
   exit 2
 }
 
@@ -479,7 +484,11 @@ cmd_verdict() {
   fi
   [ "$checks" != "[]" ] || echo "gh-ci: no checks on $sha" >&2
   printf '%s\n' "$judged"
-  return 0
+  case "${judged%%$'\n'*}" in
+    RED) return 1 ;;
+    "NOT YET") return 124 ;;
+    *) return 0 ;;
+  esac
 }
 
 # wait <pr> [--timeout <s>]: block until no required check on the PR's
