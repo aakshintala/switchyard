@@ -38,6 +38,14 @@ if [ "$1" = "api" ]; then
       exit 1
     fi
   fi
+  if [ -n "${GH_EMPTY_FILES_PR:-}" ] && [ "$pr" = "$GH_EMPTY_FILES_PR" ]; then
+    count="$(cat "$GH_EMPTY_FILES_COUNT" 2>/dev/null || printf 0)"
+    if [ "$count" -lt "${GH_EMPTY_FILES_TIMES:-0}" ]; then
+      count=$((count + 1))
+      printf '%s' "$count" >"$GH_EMPTY_FILES_COUNT"
+      exit 0
+    fi
+  fi
   if [ -n "${GH_API_FILES:-}" ]; then cat "$GH_API_FILES"; exit 0; fi
   jq -r --arg n "$pr" '.[] | select((.number|tostring) == $n) | (.files // [])[] | .path' "$GH_PRS_JSON"
   exit 0
@@ -142,7 +150,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM sub 2>/dev/null)" || fail "dir c
 
 # --- PR refusal names the PR; nothing is written ------------------------------
 R="$(fresh)"
-printf '[{"number":42,"files":[{"path":"a.txt"}]}]' >"$T/prs1.json"
+printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs1.json"
 export GH_PRS_JSON="$T/prs1.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt newfile.txt 2>"$T/e2")" && fail "PR-held claim exits non-zero"
 [ "$?" = "1" ] || fail "PR-held claim exits 1"
@@ -150,7 +158,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt newfile.txt 2>"$T/e2")" &&
 [ -z "$(claim_tip "$R")" ] || fail "refused call writes nothing"
 
 # the smallest PR number wins when several touch the path; PRs with no files match nothing.
-printf '[{"number":9,"files":[{"path":"a.txt"}]},{"number":3,"files":[{"path":"a.txt"}]},{"number":5,"files":[]}]' >"$T/prs2.json"
+printf '[{"number":9,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":3,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":5,"changedFiles":0,"files":[]}]' >"$T/prs2.json"
 export GH_PRS_JSON="$T/prs2.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt 2>/dev/null)" && fail "multi-PR claim exits non-zero"
 [ "$out" = "$(printf 'REFUSE a.txt pr#3\nfile-claim: 0 granted, 1 refused')" ] || fail "smallest PR named: $out"
@@ -167,7 +175,7 @@ while [ "$i" -le 100 ]; do
   i=$((i + 1))
 done
 pr_files+=']'
-printf '[{"number":101,"files":%s}]' "$pr_files" >"$T/prs-paginated.json"
+printf '[{"number":101,"changedFiles":101,"files":%s}]' "$pr_files" >"$T/prs-paginated.json"
 printf '%b' "${api_files}collision.txt\n" >"$T/api-paginated.txt"
 export GH_PRS_JSON="$T/prs-paginated.json" GH_API_FILES="$T/api-paginated.txt"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM collision.txt 2>"$T/e-paginated")" && fail "path after 100 must be refused"
@@ -177,7 +185,7 @@ unset GH_API_FILES
 
 # --- transient PR file-list failures are retried per PR -------------------------
 R="$(fresh)"
-printf '[{"number":7,"files":[{"path":"a.txt"}]},{"number":8,"files":[{"path":"b.txt"}]}]' >"$T/prs-retry.json"
+printf '[{"number":7,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":8,"changedFiles":1,"files":[{"path":"b.txt"}]}]' >"$T/prs-retry.json"
 export GH_PRS_JSON="$T/prs-retry.json"
 GH_RETRY_COUNT="$T/gh-retry-count"
 printf 0 >"$GH_RETRY_COUNT"
@@ -201,6 +209,67 @@ grep -qF 'cannot list files for open PR #7' "$T/e-retry-exhausted" || fail "exha
 [ "$(cat "$GH_RETRY_COUNT")" = "3" ] || fail "three transient file-list failures recorded"
 [ "$(grep -cF 'pulls/7/files?per_page=100' "$GH_ARGS_LOG")" = "3" ] || fail "PR 7 file list stops after three calls"
 
+# An empty or short listing is retried and fails loudly without writing a claim.
+R="$(fresh)"
+printf '[{"number":7,"changedFiles":2,"files":[{"path":"a.txt"},{"path":"b.txt"}]}]' >"$T/prs-empty-list.json"
+export GH_PRS_JSON="$T/prs-empty-list.json"
+GH_EMPTY_COUNT="$T/gh-empty-count"
+printf 0 >"$GH_EMPTY_COUNT"
+: >"$GH_ARGS_LOG"
+FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_EMPTY_FILES_PR=7 GH_EMPTY_FILES_TIMES=99 GH_EMPTY_FILES_COUNT="$GH_EMPTY_COUNT" bash "$FC" $CLAIM c.txt >/dev/null 2>"$T/e-empty-exhausted" && fail "empty file list exits 2"
+[ "$?" = "2" ] || fail "empty file list exits 2"
+grep -qF 'cannot list files for open PR #7' "$T/e-empty-exhausted" || fail "empty file list error names PR 7"
+grep -qF 'file list has 0 files, changedFiles is 2' "$T/e-empty-exhausted" || fail "empty file list error reports counts"
+[ -z "$(claim_tip "$R")" ] || fail "empty file list writes no claim"
+[ "$(cat "$GH_EMPTY_COUNT")" = "3" ] || fail "empty file list retries three times"
+
+# One empty read is retried; the complete list blocks its paths and permits others.
+R="$(fresh)"
+printf 0 >"$GH_EMPTY_COUNT"
+: >"$GH_ARGS_LOG"
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_EMPTY_FILES_PR=7 GH_EMPTY_FILES_TIMES=1 GH_EMPTY_FILES_COUNT="$GH_EMPTY_COUNT" bash "$FC" $CLAIM a.txt 2>"$T/e-empty-once")" && fail "listed PR path exits non-zero"
+[ "$?" = "1" ] || fail "listed PR path exits 1"
+[ "$out" = "$(printf 'REFUSE a.txt pr#7\nfile-claim: 0 granted, 1 refused')" ] || fail "retried list refuses its path: $out"
+[ "$(cat "$GH_EMPTY_COUNT")" = "1" ] || fail "one empty file-list response recorded"
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_EMPTY_FILES_PR=7 GH_EMPTY_FILES_TIMES=1 GH_EMPTY_FILES_COUNT="$GH_EMPTY_COUNT" bash "$FC" $CLAIM c.txt 2>"$T/e-empty-outside")" || fail "path outside retried PR list is granted: $(cat "$T/e-empty-outside")"
+[ "$out" = "$(printf 'GRANT c.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "outside path granted after retry: $out"
+
+# Zero changed files and an empty listing are a valid complete result.
+R="$(fresh)"
+printf '[{"number":7,"changedFiles":0,"files":[]}]' >"$T/prs-zero-files.json"
+export GH_PRS_JSON="$T/prs-zero-files.json"
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 bash "$FC" $CLAIM c.txt 2>"$T/e-zero-files")" || fail "zero changed files are valid: $(cat "$T/e-zero-files")"
+[ "$out" = "$(printf 'GRANT c.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "zero-file PR permits claim: $out"
+
+# A listing longer than changedFiles is also a failed read.
+R="$(fresh)"
+printf '[{"number":7,"changedFiles":1,"files":[{"path":"a.txt"},{"path":"b.txt"}]}]' >"$T/prs-long-list.json"
+export GH_PRS_JSON="$T/prs-long-list.json"
+: >"$GH_ARGS_LOG"
+FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 bash "$FC" $CLAIM c.txt >/dev/null 2>"$T/e-long-list" && fail "overlong file list exits 2"
+[ "$?" = "2" ] || fail "overlong file list exits 2"
+grep -qF 'file list has 2 files, changedFiles is 1' "$T/e-long-list" || fail "overlong file list reports counts"
+[ "$(grep -cF 'pulls/7/files?per_page=100' "$GH_ARGS_LOG")" = "3" ] || fail "overlong file list retries three times"
+[ -z "$(claim_tip "$R")" ] || fail "overlong file list writes no claim"
+
+# Invalid changedFiles values fail before the per-PR files endpoint is read.
+for invalid in null absent nonnumeric; do
+  case "$invalid" in
+    null) printf '[{"number":7,"changedFiles":null,"files":[]}]' >"$T/prs-invalid.json" ;;
+    absent) printf '[{"number":7,"files":[]}]' >"$T/prs-invalid.json" ;;
+    nonnumeric) printf '[{"number":7,"changedFiles":"two","files":[]}]' >"$T/prs-invalid.json" ;;
+  esac
+  export GH_PRS_JSON="$T/prs-invalid.json"
+  R="$(fresh)"
+  : >"$GH_ARGS_LOG"
+  FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 bash "$FC" $CLAIM c.txt >/dev/null 2>"$T/e-invalid-changedFiles" && fail "$invalid changedFiles exits 2"
+  [ "$?" = "2" ] || fail "$invalid changedFiles exits 2"
+  grep -qF 'PR #7' "$T/e-invalid-changedFiles" || fail "$invalid changedFiles error names PR 7"
+  if grep -qF 'pulls/7/files?per_page=100' "$GH_ARGS_LOG"; then fail "$invalid changedFiles reads no files"; fi
+  [ -z "$(claim_tip "$R")" ] || fail "$invalid changedFiles writes no claim"
+done
+export GH_PRS_JSON="$T/prs-empty.json"
+
 FILE_CLAIM_READ_WAIT=x bash "$FC" list >/dev/null 2>"$T/e-retry-wait"
 [ "$?" = "2" ] || fail "non-numeric FILE_CLAIM_READ_WAIT exits 2"
 grep -qF 'FILE_CLAIM_READ_WAIT must be a whole number of seconds' "$T/e-retry-wait" || fail "invalid FILE_CLAIM_READ_WAIT is named"
@@ -212,7 +281,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 
 [ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "self-pr lines: $out"
 
 # other PRs still refuse even with --self-pr.
-printf '[{"number":42,"files":[{"path":"a.txt"}]},{"number":7,"files":[{"path":"a.txt"}]}]' >"$T/prs3.json"
+printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":7,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs3.json"
 export GH_PRS_JSON="$T/prs3.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 --repo test/repo --self-pr 42 a.txt 2>/dev/null)" && fail "other-PR claim exits non-zero"
 [ "$out" = "$(printf 'REFUSE a.txt pr#7\nfile-claim: 0 granted, 1 refused')" ] || fail "other PR still refuses: $out"

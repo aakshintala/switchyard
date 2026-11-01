@@ -37,15 +37,19 @@ default_remote() {
   printf '%s' "${FILE_CLAIM_REMOTE:-git@github.com:$1.git}"
 }
 read_pr_files() {
-  local repo="$1" pr="$2" attempt=1 out
+  local repo="$1" pr="$2" expected="$3" file="$4" attempt=1 got reason
   while [ "$attempt" -le "$READ_TRIES" ]; do
-    if out="$(gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" -q '.[].filename' 2>"$W/gh.err")"; then
-      printf '%s' "$out"
-      return 0
+    if gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" -q '.[].filename' >"$file" 2>"$W/gh.err"; then
+      got="$(awk 'length($0) > 0 { n++ } END { print n+0 }' "$file")"
+      if [ "$got" = "$expected" ]; then return 0; fi
+      reason="file list has $got files, changedFiles is $expected"
+    else
+      reason="$(cat "$W/gh.err")"
     fi
     if [ "$attempt" -lt "$READ_TRIES" ]; then sleep "$READ_WAIT"; fi
     attempt=$((attempt + 1))
   done
+  READ_REASON="$reason"
   return 1
 }
 jitter_sleep() {
@@ -110,7 +114,7 @@ filter_release() {
 }
 cmd_claim() {
   local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5"; shift 5
-  local remote now main_tip pr_json prmap_list prmap tip claims attempt paths out new_lines i p held granted refused existing new_grants cap_hit reason pr holder pr_files path changed_files
+  local remote now main_tip pr_json prmap_list prmap tip claims attempt paths out new_lines i p held granted refused existing new_grants cap_hit reason pr holder path changed_files
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [ $# -gt 0 ] || usage
   for p in "$@"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
@@ -126,11 +130,14 @@ cmd_claim() {
   printf '%s' "$pr_json" | jq -r '.[] | [.number, .changedFiles] | @tsv' >"$prmap_list" 2>"$W/jq.err" || die 2 "cannot parse open PRs for $repo: $(cat "$W/jq.err")"
   : >"$prmap"
   while IFS="$TAB" read -r pr changed_files; do
-    pr_files="$(read_pr_files "$repo" "$pr")" || die 2 "cannot list files for open PR #$pr for $repo after $READ_TRIES tries: $(cat "$W/gh.err")"
+    case "$changed_files" in ''|*[!0-9]*) die 2 "invalid changedFiles for open PR #$pr for $repo: $changed_files" ;; esac
+    if ! read_pr_files "$repo" "$pr" "$changed_files" "$W/pr-files"; then
+      die 2 "cannot list files for open PR #$pr for $repo after $READ_TRIES tries: $READ_REASON"
+    fi
     while IFS= read -r path || [ -n "$path" ]; do
       [ -n "$path" ] || continue
       printf '%s\t%s\n' "$pr" "$path" >>"$prmap"
-    done <<<"$pr_files"
+    done <"$W/pr-files"
   done <"$prmap_list"
   attempt=1
   while [ "$attempt" -le "$TRIES" ]; do
