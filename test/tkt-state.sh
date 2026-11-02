@@ -191,6 +191,20 @@ wait_for_test_file() {
   [ -e "$test_file" ]
 }
 
+wait_bounded() {
+  local wait_pid="$1" wait_count=0
+  while kill -0 "$wait_pid" 2>/dev/null && [ "$wait_count" -lt 500 ]; do
+    sleep 0.01
+    wait_count=$((wait_count + 1))
+  done
+  if kill -0 "$wait_pid" 2>/dev/null; then
+    kill "$wait_pid" 2>/dev/null || true
+    wait "$wait_pid" 2>/dev/null || true
+    return 1
+  fi
+  wait "$wait_pid"
+}
+
 # A dead lock owner on this host is reaped before writing.
 S6="$T/dead-owner.state"
 true &
@@ -206,7 +220,7 @@ bash "$TKT" "$S6" set k v 2>"$T/err-dead-owner.txt" || fail "set reaps a dead sa
 S9="$T/killed-holder.state"
 true &
 killed_dead_pid=$!
-wait "$killed_dead_pid"
+wait_bounded "$killed_dead_pid" || fail "killed-holder dead-owner setup finishes before its deadline"
 mkdir "$S9.lock"
 printf '%s %s\n' "$(hostname)" "$killed_dead_pid" >"$S9.lock/pid"
 TKT_STATE_TEST_LOCK_PAUSE="$T/killed-holder" bash "$TKT" "$S9" set a one >"$T/killed-holder.log" 2>&1 &
@@ -217,7 +231,7 @@ if ! wait_for_test_file "$T/killed-holder.ready"; then
   fail "killed-holder writer pauses before checking the owner"
 fi
 kill -9 "$killed_holder_pid" 2>/dev/null || fail "killed-holder writer is stopped"
-wait "$killed_holder_pid" 2>/dev/null || true
+wait_bounded "$killed_holder_pid" >/dev/null 2>&1 || true
 bash "$TKT" "$S9" set k v 2>"$T/err-killed-holder.txt" || fail "writer proceeds after the lock holder is killed"
 [ "$(bash "$TKT" "$S9" get k)" = "v" ] || fail "writer after killed holder stores the value"
 [ ! -e "$S9.lock" ] || fail "writer after killed holder removes the dead-owner lock"
@@ -271,19 +285,6 @@ printf '%s %s\n' "$(hostname)" "$$" >"$S10.lock/pid"
 rm -rf "$S10.lock"
 
 # Concurrent writers arbitrate dead-lock reaping and both retain their values.
-wait_bounded() {
-  local wait_pid="$1" wait_count=0
-  while kill -0 "$wait_pid" 2>/dev/null && [ "$wait_count" -lt 500 ]; do
-    sleep 0.01
-    wait_count=$((wait_count + 1))
-  done
-  if kill -0 "$wait_pid" 2>/dev/null; then
-    kill "$wait_pid" 2>/dev/null || true
-    wait "$wait_pid" 2>/dev/null || true
-    return 1
-  fi
-  wait "$wait_pid"
-}
 for race_round in {1..20}; do
   race_state="$T/reaper-race-$race_round.state"
   sleep 0 &
@@ -316,7 +317,7 @@ done
 S11="$T/paused-writer.state"
 true &
 paused_dead_pid=$!
-wait "$paused_dead_pid"
+wait_bounded "$paused_dead_pid" || fail "paused-writer dead-owner setup finishes before its deadline"
 mkdir "$S11.lock"
 printf '%s %s\n' "$(hostname)" "$paused_dead_pid" >"$S11.lock/pid"
 cp "$S11.lock/pid" "$T/lp-seeded.pid"
@@ -427,7 +428,7 @@ else
   mkdir "$S13.lock"
   true &
   stale_dead_pid=$!
-  wait "$stale_dead_pid"
+  wait_bounded "$stale_dead_pid" || fail "stale-lock dead-owner setup finishes before its deadline"
   printf '%s %s\n' "$(hostname)" "$stale_dead_pid" >"$S13.lock/pid"
   : >"$T/err-stale-lock.txt"
   stale_parent_readonly=0
