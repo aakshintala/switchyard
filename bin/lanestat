@@ -21,7 +21,9 @@
 # `pisend.sh wake` (not shipped here). A queued prompt means pi has an active
 # run and is not lost. DEAD-PROVIDER <provider>/<model>: <message> means the
 # last agent_end assistant message had stopReason=error and
-# usage.totalTokens=0; do not re-wake.
+# usage.totalTokens=0; its first-line reason falls back from errorMessage to the
+# turn's last failed auto_retry_end finalError, then no output, capped at 200
+# characters; do not re-wake.
 # `last=<tool>` accompanies WEDGED, PARK and LOOP;
 # its whitespace is replaced with underscores. PARK means the lane needs an
 # answer, LOOP leaves the decision to the orchestrator, and DONE-UNREAD <ids>
@@ -135,6 +137,7 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     our $settled;
     our $after_prompt;
     our $dead;
+    our $final_error;
     our $last_tool;
     our $question_line;
     our $settle_cut;
@@ -142,6 +145,35 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     our $ruling_ms;
     our @job_ids;
     our %seen_job_ids;
+    sub unescape_json_string {
+      my ($raw_error) = @_;
+      my $message = "";
+      while (length $raw_error) {
+        if ($raw_error =~ s/^([^\\]+)//) {
+          $message .= $1;
+        } elsif ($raw_error =~ s/^\\(?:n|r|u000a|u000d).*$//i) {
+          last;
+        } elsif ($raw_error =~ s/^\\\\//) {
+          $message .= "\\";
+        } elsif ($raw_error =~ s/^\\"//) {
+          $message .= "\"";
+        } elsif ($raw_error =~ s/^\\t//) {
+          $message .= "\t";
+        } elsif ($raw_error =~ s/^\\(?:b|f)//) {
+          $message .= " ";
+        } elsif ($raw_error =~ s/^\\u000([0-9a-f])//i) {
+          $message .= chr(hex($1));
+        } elsif ($raw_error =~ s/^\\u[0-9a-f]{4}//i) {
+          next;
+        } elsif ($raw_error =~ s/^\\.//s) {
+          next;
+        }
+      }
+      $message =~ s/[\x00-\x1f\x7f]/ /g;
+      $message =~ s/\s+$//;
+      return $message;
+    }
+    $final_error = "" unless defined $final_error;
     $last_tool = "none" unless defined $last_tool;
     $settle_cut = 0 unless defined $settle_cut;
     $settles = 0 unless defined $settles;
@@ -168,6 +200,13 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       $after_prompt = 0;
     } elsif (/"type":"agent_start"/ || /"type":"auto_retry_start"/) {
       $dead = undef;
+      $final_error = "";
+    } elsif (/(?<!\\)"type"\s*:\s*"auto_retry_end"/) {
+      my ($raw_final_error) = /(?<!\\)"finalError"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+      if (/(?<!\\)"success"\s*:\s*false/ || (defined $raw_final_error && length $raw_final_error)) {
+        $raw_final_error = "" unless defined $raw_final_error;
+        $final_error = unescape_json_string($raw_final_error);
+      }
     } elsif (/"type"\s*:\s*"agent_end"/) {
       $dead = undef;
       my $assistant_start = -1;
@@ -184,34 +223,10 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         if (defined $tokens && $tokens == 0 && defined $stop_reason && $stop_reason eq "error") {
           my ($raw_error) = $assistant =~ /(?<!\\)"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"/;
           $raw_error = "" unless defined $raw_error;
-          my $message = "";
-          while (length $raw_error) {
-            if ($raw_error =~ s/^([^\\]+)//) {
-              $message .= $1;
-            } elsif ($raw_error =~ s/^\\(?:n|r|u000a|u000d).*$//i) {
-              last;
-            } elsif ($raw_error =~ s/^\\\\//) {
-              $message .= "\\";
-            } elsif ($raw_error =~ s/^\\"//) {
-              $message .= "\"";
-            } elsif ($raw_error =~ s/^\\t//) {
-              $message .= "\t";
-            } elsif ($raw_error =~ s/^\\(?:b|f)//) {
-              $message .= " ";
-            } elsif ($raw_error =~ s/^\\u000([0-9a-f])//i) {
-              $message .= chr(hex($1));
-            } elsif ($raw_error =~ s/^\\u[0-9a-f]{4}//i) {
-              next;
-            } elsif ($raw_error =~ s/^\\.//s) {
-              next;
-            }
-          }
-          $message =~ s/[\x00-\x1f\x7f]/ /g;
-          $message =~ s/\s+$//;
+          my $message = unescape_json_string($raw_error);
           $provider = "unknown" unless defined $provider && length $provider;
           $model = "unknown" unless defined $model && length $model;
-          $message = length($message) ? $message : "no output";
-          $dead = "$provider/$model: $message";
+          $dead = [$provider, $model, $message];
         }
       }
     } elsif (/"type"\s*:\s*"response"/ && /"command"\s*:\s*"prompt"/ && /"success"\s*:\s*true/ && !/"(?:disposition|status)"\s*:\s*"queued"/) {
@@ -224,8 +239,12 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         $after_prompt = 0;
       }
     }
-    if (/"type":"message_end","message":{"role":"assistant"/ && /"type":"text"/) {
-      $question_line = $_;
+    if (/"type":"message_end","message":{"role":"assistant"/) {
+      if (/"type":"text"/) {
+        $question_line = $_;
+      } elsif (/"type":"toolCall"/) {
+        $question_line = undef;
+      }
     }
     if ($ruling_ms > 0 && /"type":"message_end"/) {
       my @timestamps = /"timestamp":(\d+)/g;
@@ -241,7 +260,12 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       if (@open) {
         print "STATE IN-TOOL " . $open[-1]->[1] . chr(10);
       } elsif ($settled && defined $dead) {
-        print "STATE DEAD $dead" . chr(10);
+        my ($provider, $model, $message) = @$dead;
+        my $reason = length($message) ? $message : length($final_error) ? $final_error : "no output";
+        utf8::decode($reason);
+        $reason = substr($reason, 0, 200);
+        utf8::encode($reason);
+        print "STATE DEAD $provider/$model: $reason" . chr(10);
       } elsif ($settled && $after_prompt) {
         print "STATE WEDGED" . chr(10);
       } elsif ($settled) {
