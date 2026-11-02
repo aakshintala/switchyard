@@ -513,6 +513,33 @@ expect_waiter_log "$S/c"
 release "$S/b"
 wait "$B" 2>/dev/null
 
+# Timed notices identify the held slot and count elapsed intervals.
+W="$T/timed"
+stage "$W/h"
+stage "$W/w"
+hold_slot "$W/h" "$W/slots" 1
+WH=$HOLD_PID
+spawn "$W/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$W/slots" CARGO_SLOT_NOTICE_SECS=0.2 -- build
+WW=$SPAWNED
+expect_err_line "cargo-slot: waiting"
+IFS= read -r -u 9 line || fail "no first timed waiting line"
+ERR_SEEN+="$line"$'\n'
+[[ "$line" =~ ^cargo-slot:\ waiting\ ([0-9]+)\ min\;\ held\ by\ pid\ ([0-9]+)$ ]] ||
+  fail "first timed line [$line] does not name its holder"
+first_n=${BASH_REMATCH[1]}
+[ "${BASH_REMATCH[2]}" = "$WH" ] || fail "first timed line names pid ${BASH_REMATCH[2]}, want $WH"
+IFS= read -r -u 9 line || fail "no second timed waiting line"
+ERR_SEEN+="$line"$'\n'
+[[ "$line" =~ ^cargo-slot:\ waiting\ ([0-9]+)\ min\;\ held\ by\ pid\ ([0-9]+)$ ]] ||
+  fail "second timed line [$line] does not name its holder"
+second_n=${BASH_REMATCH[1]}
+[ "${BASH_REMATCH[2]}" = "$WH" ] || fail "second timed line names pid ${BASH_REMATCH[2]}, want $WH"
+[ "$second_n" -gt "$first_n" ] || fail "timed interval count did not rise: $first_n then $second_n"
+kill -TERM "$WW"
+wait "$WW" 2>/dev/null
+release "$W/h"
+wait "$WH" 2>/dev/null
+
 # A killed holder frees its slot: kill -9 the fake, and the next build takes
 # the one slot.
 K="$T/killed"

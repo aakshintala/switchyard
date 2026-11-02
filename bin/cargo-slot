@@ -148,13 +148,27 @@ def acquire_slot(directory, n):
     # One LOCK_NB try per slot file per pass; a full pass that finds none
     # free prints the waiting line once, then sleeps 0.1 s and rescans.
     # Only BlockingIOError means contention; any other error fails closed.
+    notice_value = os.environ.get("CARGO_SLOT_NOTICE_SECS", "")
+    interval = 60.0
+    if re.fullmatch(r"[0-9]+(\.[0-9]+)?", notice_value):
+        try:
+            parsed_interval = float(notice_value)
+        except (OverflowError, ValueError):
+            parsed_interval = 0.0
+        if parsed_interval > 0:
+            interval = max(parsed_interval, 0.1)
     try:
         os.makedirs(directory, exist_ok=True)
     except OSError as err:
         fail(1, "cannot create slot directory %s: %s" % (directory, err.strerror))
     warned = False
+    notices_enabled = True
+    started = None
+    last_n = 0
     try:
         while True:
+            holder_pid_value = None
+            saw_held_slot = False
             for k in range(1, n + 1):
                 path = os.path.join(directory, "slot-%d.lock" % k)
                 # flock locks the inode: mv slot-k.lock slot-k.lock.aside frees a slot without touching any process.
@@ -166,6 +180,14 @@ def acquire_slot(directory, n):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     return fd
                 except BlockingIOError:
+                    if not saw_held_slot:
+                        saw_held_slot = True
+                        try:
+                            fields = os.pread(fd, 128, 0).split()
+                        except OSError:
+                            fields = []
+                        if fields and re.fullmatch(rb"[0-9]+", fields[0]):
+                            holder_pid_value = int(fields[0])
                     pid = dead_holder_pid(fd)
                     if pid is not None:
                         recheck_wait(pid)
@@ -179,7 +201,20 @@ def acquire_slot(directory, n):
                 sys.stderr.write("cargo-slot: waiting\n")
                 sys.stderr.flush()
                 warned = True
+                started = time.monotonic()
             time.sleep(0.1)
+            n_elapsed = int((time.monotonic() - started) / interval)
+            if notices_enabled and n_elapsed > last_n:
+                line = "cargo-slot: waiting %d min" % n_elapsed
+                if holder_pid_value is not None:
+                    line += "; held by pid %d" % holder_pid_value
+                try:
+                    sys.stderr.write(line + "\n")
+                    sys.stderr.flush()
+                except OSError:
+                    notices_enabled = False
+                    sys.stderr = open(os.devnull, "w")
+                last_n = n_elapsed
     except KeyboardInterrupt:
         sys.exit(130)
 
