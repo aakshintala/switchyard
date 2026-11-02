@@ -460,7 +460,7 @@ check_case_row 740 'SETTLED$'
 # DEAD-PROVIDER follows the last agent_end assistant message.
 dead_run="$T/dead-provider"
 mkdir -p "$dead_run"
-for pid in 750 751 752 753 754 755 756 757 758 759; do
+for pid in 750 751 752 753 754 755 756 757 758 759 760 761 762 763 764 765 766 767 768 769; do
   printf '%s\n' "$pid" >"$dead_run/fiber-$pid-pi.pid"
   printf 'pi\n' >"$T/ps/$pid.comm"
   printf 'S 00:01\n' >"$T/ps/$pid.info"
@@ -506,6 +506,63 @@ printf '%s\n' \
   '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error","errorMessage":""}]}' \
   '{"type":"agent_settled"}' \
   >"$dead_run/fiber-759-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_start"}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"Quota \"hit\"\nsecond line"}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-760-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"late failure"}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-761-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error","errorMessage":"from message"}]}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"from retry"}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-762-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error","errorMessage":""}]}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"from retry"}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-763-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":true,"attempt":1}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-764-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":false}' \
+  '{"type":"auto_retry_end","success":false,"finalError":""}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-765-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"stale"}' \
+  '{"type":"agent_start"}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-766-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"stale"}' \
+  '{"type":"auto_retry_start"}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-767-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_start"}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"first"}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"second"}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-768-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_start"}' \
+  '{"type":"auto_retry_end","success":false,"finalError":"kept"}' \
+  '{"type":"auto_retry_end","success":true,"attempt":1}' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
+  '{"type":"agent_settled"}' >"$dead_run/fiber-769-pi.jsonl"
 run_stat "$dead_run" >"$T/dead-provider.out" 2>"$T/dead-provider.err"; rc=$?
 [ "$rc" = 0 ] || fail "dead-provider fixture exits 0 (got $rc; $(<"$T/dead-provider.err"))"
 assert_row 750 'DEAD-PROVIDER opencode-go/muse-spark-1\.3-contributor: opencode-go API error \(402\): \{"type":"server_error","message":"Upstream request failed: Insufficient account funds"\}$' "$(<"$T/dead-provider.out")"
@@ -518,6 +575,17 @@ assert_row 756 'DEAD-PROVIDER openai/gpt-5\.4: OpenAI API error \(400\): first l
 assert_row 757 'DEAD-PROVIDER openai/gpt-5\.4: no output$' "$(<"$T/dead-provider.out")"
 assert_row 758 'DEAD-PROVIDER p/m: provider error$' "$(<"$T/dead-provider.out")"
 assert_row 759 'DEAD-PROVIDER openai/gpt-5\.4: no output$' "$(<"$T/dead-provider.out")"
+
+assert_row 760 'DEAD-PROVIDER openai/gpt-5\.4: Quota "hit"$' "$(<"$T/dead-provider.out")"
+assert_row 761 'DEAD-PROVIDER openai/gpt-5\.4: late failure$' "$(<"$T/dead-provider.out")"
+assert_row 762 'DEAD-PROVIDER openai/gpt-5\.4: from message$' "$(<"$T/dead-provider.out")"
+assert_row 763 'DEAD-PROVIDER openai/gpt-5\.4: from retry$' "$(<"$T/dead-provider.out")"
+assert_row 764 'DEAD-PROVIDER openai/gpt-5\.4: no output$' "$(<"$T/dead-provider.out")"
+assert_row 765 'DEAD-PROVIDER openai/gpt-5\.4: no output$' "$(<"$T/dead-provider.out")"
+assert_row 766 'DEAD-PROVIDER openai/gpt-5\.4: no output$' "$(<"$T/dead-provider.out")"
+assert_row 767 'DEAD-PROVIDER openai/gpt-5\.4: no output$' "$(<"$T/dead-provider.out")"
+assert_row 768 'DEAD-PROVIDER openai/gpt-5\.4: second$' "$(<"$T/dead-provider.out")"
+assert_row 769 'DEAD-PROVIDER openai/gpt-5\.4: kept$' "$(<"$T/dead-provider.out")"
 
 # Delegate job records are resolved only for UUIDs printed by the lane.
 job_done=11111111-1111-4111-8111-111111111111

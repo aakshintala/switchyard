@@ -135,6 +135,7 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     our $settled;
     our $after_prompt;
     our $dead;
+    our $final_error;
     our $last_tool;
     our $question_line;
     our $settle_cut;
@@ -170,6 +171,7 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       $message =~ s/\s+$//;
       return $message;
     }
+    $final_error = "" unless defined $final_error;
     $last_tool = "none" unless defined $last_tool;
     $settle_cut = 0 unless defined $settle_cut;
     $settles = 0 unless defined $settles;
@@ -196,6 +198,13 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       $after_prompt = 0;
     } elsif (/"type":"agent_start"/ || /"type":"auto_retry_start"/) {
       $dead = undef;
+      $final_error = "";
+    } elsif (/(?<!\\)"type"\s*:\s*"auto_retry_end"/) {
+      my ($raw_final_error) = /(?<!\\)"finalError"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+      if (/(?<!\\)"success"\s*:\s*false/ || (defined $raw_final_error && length $raw_final_error)) {
+        $raw_final_error = "" unless defined $raw_final_error;
+        $final_error = unescape_json_string($raw_final_error);
+      }
     } elsif (/"type"\s*:\s*"agent_end"/) {
       $dead = undef;
       my $assistant_start = -1;
@@ -215,8 +224,7 @@ for pidfile in "$run"/fiber-*-pi.pid; do
           my $message = unescape_json_string($raw_error);
           $provider = "unknown" unless defined $provider && length $provider;
           $model = "unknown" unless defined $model && length $model;
-          $message = length($message) ? $message : "no output";
-          $dead = "$provider/$model: $message";
+          $dead = [$provider, $model, $message];
         }
       }
     } elsif (/"type"\s*:\s*"response"/ && /"command"\s*:\s*"prompt"/ && /"success"\s*:\s*true/ && !/"(?:disposition|status)"\s*:\s*"queued"/) {
@@ -246,7 +254,9 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       if (@open) {
         print "STATE IN-TOOL " . $open[-1]->[1] . chr(10);
       } elsif ($settled && defined $dead) {
-        print "STATE DEAD $dead" . chr(10);
+        my ($provider, $model, $message) = @$dead;
+        my $reason = length($message) ? $message : length($final_error) ? $final_error : "no output";
+        print "STATE DEAD $provider/$model: $reason" . chr(10);
       } elsif ($settled && $after_prompt) {
         print "STATE WEDGED" . chr(10);
       } elsif ($settled) {
