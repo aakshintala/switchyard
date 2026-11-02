@@ -10,14 +10,23 @@
 #     are present.
 # The state file holds one key=value per line; the key ends at the first =
 # and the value is the rest of the line, so values may hold spaces and =.
-# The file is never sourced. Every write takes a mkdir lock, goes through a
-# temp file in the target's directory, then moves into place. Exit 0 when ok;
-# exit 2 on bad usage, a missing key, a value holding a newline, or a held lock.
+# The file is never sourced. Every write takes a persistent flock and a mkdir
+# lock, goes through a temp file in the target's directory, then moves into
+# place. Exit 0 when ok; exit 2 on bad usage, a missing key, a value holding
+# a newline, or a held lock.
 set -euo pipefail
 
 locked=0
+flock_open=0
 tmpfile=""
 keptfile=""
+
+close_flock() {
+  if [ "$flock_open" = "1" ]; then
+    exec 9>&-
+    flock_open=0
+  fi
+}
 
 cleanup() {
   if [ -n "$tmpfile" ] && [ -e "$tmpfile" ]; then
@@ -27,7 +36,16 @@ cleanup() {
     rm -f "$keptfile"
   fi
   if [ "$locked" = "1" ]; then
-    rm -rf "$lockdir"
+    if rm -rf "$lockdir"; then
+      locked=0
+      close_flock
+    else
+      cleanup_rc=$?
+      close_flock
+      return "$cleanup_rc"
+    fi
+  else
+    close_flock
   fi
 }
 trap cleanup EXIT
@@ -105,52 +123,70 @@ take_lock() {
   lock_sleep="${TKT_STATE_TEST_LOCK_SLEEP:-0.2}"
   host="$(hostname)"
   attempt=1
+  stale_lock_not_removed=0
+  if ! : >>"$state.flock" 2>/dev/null; then
+    echo "tkt-state: cannot lock $state" >&2
+    exit 2
+  fi
   while [ "$attempt" -le "$tries" ]; do
-    pause_file="${TKT_STATE_TEST_LOCK_PAUSE:-}"
-    if [ -n "$pause_file" ]; then
-      : >"$pause_file.ready"
-      pause_count=0
-      while [ ! -e "$pause_file.release" ] && [ "$pause_count" -lt 1000 ]; do
-        sleep 0.01
-        pause_count=$((pause_count + 1))
-      done
+    if ! { exec 9>>"$state.flock"; } 2>/dev/null; then
+      echo "tkt-state: cannot lock $state" >&2
+      exit 2
     fi
-    if mkdir "$lockdir" 2>/dev/null; then
-      locked=1
-      printf '%s %s\n' "$host" "$$" >"$lockdir/pid"
-      return
-    fi
-    signal_file="${TKT_STATE_TEST_LOCK_SIGNAL:-}"
-    if [ -n "$signal_file" ]; then
-      printf '.\n' >>"$signal_file"
-    fi
-    owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
-    if [ -n "$owner" ]; then
-      IFS=' ' read -r owner_host owner_pid owner_extra <<<"$owner"
-      if [ -n "$owner_host" ] && [ -n "$owner_pid" ] && [ -z "$owner_extra" ] && [ "$owner_host" = "$host" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
-        reap_lockdir="$lockdir.reap"
-        if mkdir "$reap_lockdir" 2>/dev/null; then
-          current_owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
-          if [ "$current_owner" = "$owner" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
-            pause_file="${TKT_STATE_TEST_REAP_PAUSE:-}"
-            if [ -n "$pause_file" ]; then
-              : >"$pause_file.ready"
-              pause_count=0
-              while [ ! -e "$pause_file.release" ] && [ "$pause_count" -lt 1000 ]; do
-                sleep 0.01
-                pause_count=$((pause_count + 1))
-              done
-            fi
-            rm -rf "$lockdir" 2>/dev/null || true
+    flock_open=1
+    if python3 -I -c $'import fcntl, sys\ntry:\n    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n    sys.exit(3)' 2>/dev/null; then
+      pause_file="${TKT_STATE_TEST_LOCK_PAUSE:-}"
+      if [ -n "$pause_file" ]; then
+        : >"$pause_file.ready"
+        pause_count=0
+        while [ ! -e "$pause_file.release" ] && [ "$pause_count" -lt 1000 ]; do
+          sleep 0.01
+          pause_count=$((pause_count + 1))
+        done
+      fi
+      if mkdir "$lockdir" 2>/dev/null; then
+        locked=1
+        printf '%s %s\n' "$host" "$$" >"$lockdir/pid"
+        return
+      fi
+      signal_file="${TKT_STATE_TEST_LOCK_SIGNAL:-}"
+      if [ -n "$signal_file" ]; then
+        printf '.\n' >>"$signal_file"
+      fi
+      owner=""
+      if [ -r "$lockdir/pid" ]; then
+        IFS= read -r owner <"$lockdir/pid" || owner=""
+      fi
+      if [ -n "$owner" ]; then
+        IFS=' ' read -r owner_host owner_pid owner_extra <<<"$owner"
+        if [ -z "$owner_pid" ]; then
+          case "$owner" in
+            *' '*) owner="" ;;
+          esac
+        fi
+        if [ -n "$owner" ] && [ -n "$owner_host" ] && [ -n "$owner_pid" ] && [ -z "$owner_extra" ] && [ "$owner_host" = "$host" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+          if ! rm -rf "$lockdir"; then
+            stale_lock_not_removed=1
           fi
-          rmdir "$reap_lockdir" 2>/dev/null || true
+          if [ -d "$lockdir" ]; then
+            stale_lock_not_removed=1
+          fi
+          close_flock
           attempt=$((attempt + 1))
           continue
         fi
-        blocked_file="${TKT_STATE_TEST_REAP_BLOCKED:-}"
-        if [ -n "$blocked_file" ]; then
-          : >"$blocked_file"
-        fi
+      fi
+      close_flock
+    else
+      flock_rc=$?
+      close_flock
+      if [ "$flock_rc" -ne 3 ]; then
+        echo "tkt-state: cannot lock $state" >&2
+        exit 2
+      fi
+      signal_file="${TKT_STATE_TEST_LOCK_SIGNAL:-}"
+      if [ -n "$signal_file" ]; then
+        printf '.\n' >>"$signal_file"
       fi
     fi
     if [ "$attempt" -lt "$tries" ]; then
@@ -158,8 +194,13 @@ take_lock() {
     fi
     attempt=$((attempt + 1))
   done
-  if [ -d "$lockdir" ]; then
-    owner="$(cat "$lockdir/pid" 2>/dev/null || true)"
+  if [ "$stale_lock_not_removed" = "1" ] && [ -d "$lockdir" ]; then
+    echo "tkt-state: stale lock not removed: $lockdir" >&2
+  elif [ -d "$lockdir" ]; then
+    owner=""
+    if [ -r "$lockdir/pid" ]; then
+      IFS= read -r owner <"$lockdir/pid" || owner=""
+    fi
     if [ -n "$owner" ]; then
       case "$owner" in
         *' '*) pid="${owner##* }" ;;
@@ -168,6 +209,7 @@ take_lock() {
       echo "tkt-state: state locked by pid $pid" >&2
     else
       echo "tkt-state: state locked" >&2
+      echo "tkt-state: lock directory $lockdir has no pid; check for a running tkt-ship, then remove it" >&2
     fi
   else
     echo "tkt-state: cannot lock $state" >&2
