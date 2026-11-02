@@ -1519,7 +1519,7 @@ run_plan post
 [ "$RC" -eq 1 ] || fail "post after clearing skipped exits 1"
 expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "post after clearing skipped"
 
-# --- post --no-verifier fills only an empty verdict ---
+# --- post --no-verifier records or refreshes skipped and preserves other verdicts ---
 setup_case verdict-post-skip
 rebase_plan
 base_now="$(cat "$CDIR/base")"
@@ -1710,6 +1710,14 @@ bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed same-path
 run_plan set "$CDIR/plan.md" --no-verifier
 [ "$RC" -eq 0 ] || fail "same-path set --no-verifier exits 0"
 expect_plan_verdict lines "$base_now" "same-path --no-verifier preserves LINES"
+setup_case verdict-set-preserves-ok
+rebase_plan
+old_base="$(git -C "$WT" rev-parse HEAD^)"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed same-path OK verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$old_base" || fail "seed same-path OK base"
+run_plan set "$CDIR/plan.md" --no-verifier
+[ "$RC" -eq 0 ] || fail "same-path set --no-verifier preserves OK"
+expect_plan_verdict ok "$old_base" "same-path --no-verifier preserves OK pair"
 
 # --- an accepted word with a mismatched base is stale even with the fast-path flag ---
 setup_case verdict-stale-flag
@@ -1732,5 +1740,32 @@ run_plan verify
 expect_verdict "TKT tkt-plan BLOCKED id=j1 log=*" "BLOCKED clears verdict"
 expect_plan_verdict "" "" "BLOCKED clears pair"
 printf 'ok' >"$T/mode"
+
+# --- set --no-verifier refreshes a stored skipped verdict at the current base ---
+setup_case verdict-set-skipped-old-base
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+old_base="$(git -C "$WT" rev-parse HEAD^)"
+bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed old skipped verdict for set"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$old_base" || fail "seed old skipped base for set"
+run_plan set "$CDIR/plan.md" --no-verifier
+[ "$RC" -eq 0 ] || fail "set --no-verifier refreshes an old skipped verdict"
+expect_plan_verdict skipped "$base_now" "set --no-verifier refreshes skipped"
+
+# --- post --no-verifier refreshes skipped; post without it keeps stale refusal ---
+setup_case verdict-post-skipped-old-base
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+old_base="$(git -C "$WT" rev-parse HEAD^)"
+bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed old skipped verdict for post"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$old_base" || fail "seed old skipped base for post"
+run_plan post
+[ "$RC" -eq 1 ] || fail "post without --no-verifier refuses old skipped verdict"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "post without flag refuses stale skipped"
+expect_plan_verdict skipped "$old_base" "post without flag preserves stale skipped pair"
+run_plan post --no-verifier
+[ "$RC" -eq 0 ] || fail "post --no-verifier refreshes an old skipped verdict"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post --no-verifier refreshes skipped"
+expect_plan_verdict skipped "$base_now" "post --no-verifier refreshes skipped"
 
 echo "tkt-plan: all cases passed"
