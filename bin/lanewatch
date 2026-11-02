@@ -57,13 +57,18 @@ deliver() {
 }
 
 cycle() {
-  local out rc line quoted_run n agev kind key at age_index state_index i state
+  local out rc line quoted_run quoted_jobs n agev kind key at age_index state_index i state
   local seen_last done_index sorted_ids dated_line has_new deliver_new token
-  local fields=() kinds=() keys=() key_kinds=() new_keys=() done_ids=()
+  local fields=() kinds=() keys=() key_kinds=() new_keys=() done_ids=() ssh_args=()
   if [ -n "$target" ]; then
     printf -v quoted_run '%q' "$run"
-    if out=$(ssh -o BatchMode=yes -o ConnectTimeout=20 "$target" bash -s -- "$quoted_run" \
-      <"$here/lanestat" 2>&1); then
+    ssh_args=(-o BatchMode=yes -o ConnectTimeout=20 "$target")
+    if [ -n "${DELEGATE_JOBS_DIR:-}" ]; then
+      printf -v quoted_jobs '%q' "$DELEGATE_JOBS_DIR"
+      ssh_args+=("DELEGATE_JOBS_DIR=$quoted_jobs")
+    fi
+    ssh_args+=(bash -s -- "$quoted_run")
+    if out=$(ssh "${ssh_args[@]}" <"$here/lanestat" 2>&1); then
       :
     else
       rc=$?

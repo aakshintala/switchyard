@@ -21,7 +21,7 @@ JOB_RECORD_SYSTEM_DIR="$T/system-jobs"
 TMPDIR="$T/tmp"
 HOME="$T/home"
 cp "$SCRIPT_DIR/../bin/inbox-send" "$HOME/.agents/bin/inbox-send"
-export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR HOME
+export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR HOME T
 set_minute_mtime() {
   perl -e 'utime($ARGV[1], $ARGV[1], $ARGV[0]) or die "utime: $!"' "$1" "$2" \
     || fail "set settled log mtime $2"
@@ -152,6 +152,19 @@ default_loop_rc=$?
 cat >"$T/stub/ssh" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$@" >"$SSH_ARGS_FILE"
+if [ "${SSH_RUN_REMOTE:-}" = 1 ]; then
+  while [ "$#" -gt 0 ]; do
+    case $1 in
+      -o) shift 2 ;;
+      -*) shift ;;
+      *) shift; break ;;
+    esac
+  done
+  cmd=
+  for arg do cmd="${cmd}${cmd:+ }$arg"; done
+  env -u DELEGATE_JOBS_DIR TMPDIR="$T/tmp" JOB_RECORD_SYSTEM_DIR="$T/system-jobs" sh -c "$cmd"
+  exit $?
+fi
 for arg do cmd=$arg; done
 case $cmd in
   *inbox-send*)
@@ -173,7 +186,7 @@ exit 0
 STUB
 chmod +x "$T/stub/ssh"
 remote_run="$T/run dir"
-PATH="$T/stub:$PATH" SSH_MODE=fail SSH_ARGS_FILE="$T/ssh.args" \
+env -u DELEGATE_JOBS_DIR PATH="$T/stub:$PATH" SSH_MODE=fail SSH_ARGS_FILE="$T/ssh.args" \
   SSH_STDIN_FILE="$T/ssh.stdin" bash "$LANEWATCH" --once "$remote_run" box.example \
   >"$T/remote-fail.out" 2>"$T/remote-fail.err"; rc=$?
 [ "$rc" = 0 ] || fail "remote failure --once exits 0 (got $rc)"
@@ -229,6 +242,58 @@ count_inbox_files() {
   [ -d "$1" ] || { printf '0\n'; return; }
   find "$1" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' '
 }
+
+# Remote lanestat receives the watcher job-record directory, but no other host setting.
+forward_id=cccccccc-cccc-4ccc-8ccc-cccccccccccc
+forward_run="$T/remote-jobs-run"
+box_jobs="$T/box jobs*"
+mkdir -p "$box_jobs"
+watch_lane "$forward_run" 2020
+printf '{"type":"tool_execution_end","toolCallId":"job","result":"%s"}\n' "$forward_id" \
+  >"$forward_run/fiber-2020-pi.jsonl"
+printf '{"type":"agent_settled"}\n' >>"$forward_run/fiber-2020-pi.jsonl"
+printf '{"status":"DONE"}\n' >"$box_jobs/$forward_id.json"
+DELEGATE_JOBS_DIR="$box_jobs" PATH="$T/stub:$PATH" SSH_RUN_REMOTE=1 \
+  SSH_ARGS_FILE="$T/ssh.args" bash "$LANEWATCH" --once "$forward_run" box.example \
+  >"$T/remote-forwarded.out" 2>"$T/remote-forwarded.err"
+grep -q "DONE-UNREAD $forward_id" "$T/remote-forwarded.out" \
+  || fail "remote lanestat reads the forwarded job record: [$(<"$T/remote-forwarded.out")]"
+remote_quoted=
+jobs_quoted=
+printf -v remote_quoted '%q' "$forward_run"
+printf -v jobs_quoted '%q' "$box_jobs"
+printf '%s\n' -o BatchMode=yes -o ConnectTimeout=20 box.example \
+  "DELEGATE_JOBS_DIR=$jobs_quoted" bash -s -- "$remote_quoted" >"$T/ssh.expected-args"
+cmp -s "$T/ssh.expected-args" "$T/ssh.args" \
+  || fail "ssh forwards one quoted job-directory argument before bash: [$(<"$T/ssh.args")]"
+
+# Unset and empty values preserve the old remote argv and cannot expose this fixture record.
+for value_case in unset empty; do
+  if [ "$value_case" = unset ]; then
+    env -u DELEGATE_JOBS_DIR PATH="$T/stub:$PATH" SSH_RUN_REMOTE=1 \
+      SSH_ARGS_FILE="$T/ssh.args" bash "$LANEWATCH" --once "$forward_run" box.example \
+      >"$T/remote-unset.out" 2>"$T/remote-unset.err"
+    output="$T/remote-unset.out"
+  else
+    DELEGATE_JOBS_DIR= PATH="$T/stub:$PATH" SSH_RUN_REMOTE=1 \
+      SSH_ARGS_FILE="$T/ssh.args" bash "$LANEWATCH" --once "$forward_run" box.example \
+      >"$T/remote-empty.out" 2>"$T/remote-empty.err"
+    output="$T/remote-empty.out"
+  fi
+  if grep -q "DONE-UNREAD $forward_id" "$output"; then
+    fail "remote $value_case job directory is not forwarded"
+  fi
+  printf '%s\n' -o BatchMode=yes -o ConnectTimeout=20 box.example bash -s -- \
+    "$remote_quoted" >"$T/ssh.expected-args"
+  cmp -s "$T/ssh.expected-args" "$T/ssh.args" \
+    || fail "ssh argv stays unchanged for $value_case job directory: [$(<"$T/ssh.args")]"
+done
+
+DELEGATE_JOBS_DIR="$box_jobs" SSH_ARGS_FILE="$T/local-no-ssh.args" \
+  bash "$LANEWATCH" --once "$forward_run" >"$T/local-forwarded.out" 2>"$T/local-forwarded.err"
+grep -q "DONE-UNREAD $forward_id" "$T/local-forwarded.out" \
+  || fail "local lanestat still reads DELEGATE_JOBS_DIR"
+[ ! -e "$T/local-no-ssh.args" ] || fail "local cycle makes no ssh call"
 
 # PARK, LOOP, WEDGED and DEAD-PROVIDER are sent to the inbox; other rows stay stdout-only.
 events="$T/events"
