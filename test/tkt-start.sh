@@ -237,8 +237,8 @@ printf 'Work for #42.\n\nWritten against deadbeefdeadbeefdeadbeefdeadbeefdeadbee
 want "PREFLIGHT core=2 out=" 1 badsha
 case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badsha: digest misses the reason" ;; esac
 # core-count table: only the job output, want rc and want line differ.
-# Contract: bin/tkt-start header: a core/non-blocking line counts with '<n>.' or '-' then spaces and optional backtick/bold marks; a bare '*' never counts.
-for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out="; do
+# Contract: the count rule in bin/tkt-start's header.
+for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out=" "nonecolon|0|PREFLIGHT core=0 nonblocking=1 out=" "naw|0|PREFLIGHT core=0 nonblocking=0 out=" "nothing|0|PREFLIGHT core=0 nonblocking=1 out=" "barecore|0|PREFLIGHT core=0 nonblocking=1 out=" "boldnone|0|PREFLIGHT core=0 nonblocking=1 out=" "noneof|1|PREFLIGHT core=1 out=" "nbnone|0|PREFLIGHT core=0 nonblocking=1 out="; do
   IFS='|' read -r name rc want_line <<<"$spec"
   setup "$name" TWO FILING
   case "$name" in
@@ -247,6 +247,13 @@ for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGH
     dashcore) printf -- '- core -- first\n- **core** -- second\n' >"$T/jobout" ;;
     dashnb) printf -- '- non-blocking -- a\n' >"$T/jobout" ;;
     starbare) printf '**core** -- x\n' >"$T/jobout" ;;
+    nonecolon) printf '%s\n' '- core: none found.' '- non-blocking -- a' >"$T/jobout" ;;
+    naw) printf '%s\n' '- core: N/A.' >"$T/jobout" ;;
+    nothing) printf '%s\n' '- core: Nothing' '- non-blocking -- a' >"$T/jobout" ;;
+    barecore) printf '%s\n' '- core:' '- non-blocking -- a' >"$T/jobout" ;;
+    boldnone) printf '%s\n' '- **core:** `None`.' '- non-blocking -- a' >"$T/jobout" ;;
+    noneof) printf '%s\n' '- core: none of the callers handle X' >"$T/jobout" ;;
+    nbnone) printf '%s\n' '- non-blocking: none.' '- non-blocking -- a' >"$T/jobout" ;;
   esac
   run_start
   want "$want_line" "$rc" "$name"
