@@ -9,8 +9,8 @@
 # or a new log write near a minute boundary can announce the same settle twice.
 # Every ssh, lanestat or inbox-send failure prints WATCH-ERROR. Set
 # DELEGATE_JOBS_DIR on the watcher when lane job records live under a non-/tmp
-# TMPDIR. Never read a lane's fiber-<n>-pi.in: it is a FIFO. Silence means no
-# new event, not failure.
+# TMPDIR; the value reaches remote targets. Never read a lane's
+# fiber-<n>-pi.in: it is a FIFO. Silence means no new event, not failure.
 set -u
 
 ts() { date "+%Y-%m-%d %H:%M:%S %Z"; }

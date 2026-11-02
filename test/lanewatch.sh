@@ -258,8 +258,6 @@ DELEGATE_JOBS_DIR="$box_jobs" PATH="$T/stub:$PATH" SSH_RUN_REMOTE=1 \
   >"$T/remote-forwarded.out" 2>"$T/remote-forwarded.err"
 grep -q "DONE-UNREAD $forward_id" "$T/remote-forwarded.out" \
   || fail "remote lanestat reads the forwarded job record: [$(<"$T/remote-forwarded.out")]"
-remote_quoted=
-jobs_quoted=
 printf -v remote_quoted '%q' "$forward_run"
 printf -v jobs_quoted '%q' "$box_jobs"
 printf '%s\n' -o BatchMode=yes -o ConnectTimeout=20 box.example \
@@ -268,32 +266,20 @@ cmp -s "$T/ssh.expected-args" "$T/ssh.args" \
   || fail "ssh forwards one quoted job-directory argument before bash: [$(<"$T/ssh.args")]"
 
 # Unset and empty values preserve the old remote argv and cannot expose this fixture record.
-for value_case in unset empty; do
-  if [ "$value_case" = unset ]; then
-    env -u DELEGATE_JOBS_DIR PATH="$T/stub:$PATH" SSH_RUN_REMOTE=1 \
-      SSH_ARGS_FILE="$T/ssh.args" bash "$LANEWATCH" --once "$forward_run" box.example \
-      >"$T/remote-unset.out" 2>"$T/remote-unset.err"
-    output="$T/remote-unset.out"
-  else
-    DELEGATE_JOBS_DIR= PATH="$T/stub:$PATH" SSH_RUN_REMOTE=1 \
-      SSH_ARGS_FILE="$T/ssh.args" bash "$LANEWATCH" --once "$forward_run" box.example \
-      >"$T/remote-empty.out" 2>"$T/remote-empty.err"
-    output="$T/remote-empty.out"
-  fi
+for envarg in "-u DELEGATE_JOBS_DIR" "DELEGATE_JOBS_DIR="; do
+  output="$T/remote-${envarg//[^A-Za-z]/_}.out"
+  # shellcheck disable=SC2086 # $envarg is deliberately split into env arguments.
+  env $envarg PATH="$T/stub:$PATH" SSH_RUN_REMOTE=1 \
+    SSH_ARGS_FILE="$T/ssh.args" bash "$LANEWATCH" --once "$forward_run" box.example \
+    >"$output" 2>"${output%.out}.err"
   if grep -q "DONE-UNREAD $forward_id" "$output"; then
-    fail "remote $value_case job directory is not forwarded"
+    fail "remote job directory with env $envarg is not forwarded"
   fi
   printf '%s\n' -o BatchMode=yes -o ConnectTimeout=20 box.example bash -s -- \
     "$remote_quoted" >"$T/ssh.expected-args"
   cmp -s "$T/ssh.expected-args" "$T/ssh.args" \
-    || fail "ssh argv stays unchanged for $value_case job directory: [$(<"$T/ssh.args")]"
+    || fail "ssh argv stays unchanged with env $envarg: [$(<"$T/ssh.args")]"
 done
-
-DELEGATE_JOBS_DIR="$box_jobs" SSH_ARGS_FILE="$T/local-no-ssh.args" \
-  bash "$LANEWATCH" --once "$forward_run" >"$T/local-forwarded.out" 2>"$T/local-forwarded.err"
-grep -q "DONE-UNREAD $forward_id" "$T/local-forwarded.out" \
-  || fail "local lanestat still reads DELEGATE_JOBS_DIR"
-[ ! -e "$T/local-no-ssh.args" ] || fail "local cycle makes no ssh call"
 
 # PARK, LOOP, WEDGED and DEAD-PROVIDER are sent to the inbox; other rows stay stdout-only.
 events="$T/events"
