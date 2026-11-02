@@ -182,6 +182,15 @@ wait "$retry_pid" || fail "set retries until the lock is released"
 [ "$(bash "$TKT" "$S5" get k)" = "v" ] || fail "retry writes the requested value"
 [ ! -e "$S5.lock" ] || fail "retry leaves no lock behind"
 
+wait_for_test_file() {
+  local test_file="$1" test_count=0
+  while [ ! -e "$test_file" ] && [ "$test_count" -lt 500 ]; do
+    sleep 0.01
+    test_count=$((test_count + 1))
+  done
+  [ -e "$test_file" ]
+}
+
 # A dead lock owner on this host is reaped before writing.
 S6="$T/dead-owner.state"
 true &
@@ -192,6 +201,38 @@ printf '%s %s\n' "$(hostname)" "$dead_pid" >"$S6.lock/pid"
 bash "$TKT" "$S6" set k v 2>"$T/err-dead-owner.txt" || fail "set reaps a dead same-host owner"
 [ "$(bash "$TKT" "$S6" get k)" = "v" ] || fail "dead-owner reaping writes the value"
 [ ! -e "$S6.lock" ] || fail "dead-owner reaping leaves no lock behind"
+
+# A killed writer releases its lock so the next writer can reap and proceed.
+S9="$T/killed-holder.state"
+true &
+killed_dead_pid=$!
+wait "$killed_dead_pid"
+mkdir "$S9.lock"
+printf '%s %s\n' "$(hostname)" "$killed_dead_pid" >"$S9.lock/pid"
+TKT_STATE_TEST_LOCK_PAUSE="$T/killed-holder" bash "$TKT" "$S9" set a one >"$T/killed-holder.log" 2>&1 &
+killed_holder_pid=$!
+if ! wait_for_test_file "$T/killed-holder.ready"; then
+  kill -9 "$killed_holder_pid" 2>/dev/null || true
+  wait "$killed_holder_pid" 2>/dev/null || true
+  fail "killed-holder writer pauses before checking the owner"
+fi
+kill -9 "$killed_holder_pid" 2>/dev/null || fail "killed-holder writer is stopped"
+wait "$killed_holder_pid" 2>/dev/null || true
+bash "$TKT" "$S9" set k v 2>"$T/err-killed-holder.txt" || fail "writer proceeds after the lock holder is killed"
+[ "$(bash "$TKT" "$S9" get k)" = "v" ] || fail "writer after killed holder stores the value"
+[ ! -e "$S9.lock" ] || fail "writer after killed holder removes the dead-owner lock"
+
+# An empty-owner directory remains held and is never reaped.
+S12="$T/empty-owner.state"
+mkdir "$S12.lock"
+if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S12" set k v 2>"$T/err-empty-owner.txt"; then
+  empty_owner_rc=0
+else
+  empty_owner_rc=$?
+fi
+[ "$empty_owner_rc" = "2" ] || fail "empty-owner lock exits 2"
+grep -q 'tkt-state: state locked' "$T/err-empty-owner.txt" || fail "empty-owner lock reports state locked"
+[ -d "$S12.lock" ] || fail "empty-owner lock is left in place"
 
 # A lock attributed to another host is never reaped.
 S7="$T/other-host.state"
@@ -272,14 +313,6 @@ for race_round in {1..20}; do
 done
 
 # A second reaper cannot take the dead owner's lock while the first reaper pauses.
-wait_for_test_file() {
-  local test_file="$1" test_count=0
-  while [ ! -e "$test_file" ] && [ "$test_count" -lt 500 ]; do
-    sleep 0.01
-    test_count=$((test_count + 1))
-  done
-  [ -e "$test_file" ]
-}
 S11="$T/reaper-exclusive.state"
 true &
 reaper_dead_pid=$!
