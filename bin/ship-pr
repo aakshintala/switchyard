@@ -77,7 +77,8 @@
 #        that nothing merged and the PR is still marked ready. If MERGED is not confirmed
 #        after the merge attempt, the error says the merge status could not be confirmed.
 #        Exit 0 merged, 1 gate/CI/push/merge failure (including `gh-ci wait` exit 4
-#        when a required check never started; a gate run on the PR merged with current
+#        when a required check never started, which needs a bound (`GH_CI_NO_JOBS_AFTER`);
+#        ship-pr sets none. A gate run on the PR merged with current
 #        origin/main counts as a gate failure; a merge that lost the race
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,

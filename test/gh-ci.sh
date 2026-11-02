@@ -1740,11 +1740,12 @@ run_wait 7 --no-jobs-after 2
 grep -Fxq 'gh-ci: check ci has no check run after 2 min; it never started' <<<"$OUT" || fail "missing check output: [$OUT]"
 ! grep -q '^gh-ci: run ' <<<"$OUT" || fail "no workflow run is named when there are none: [$OUT]"
 
-# A zero-minute bound is evaluated on the first poll, without sleeping.
+# Zero is off: missing required checks stay pending through a zero timeout.
 setup_missing_ci
-run_wait 7 --no-jobs-after 0
-[ "$CODE" = "4" ] || fail "zero-minute bound fires on the first poll (got $CODE): [$OUT]"
-[ ! -e "$T/state/sleeps.txt" ] || fail "zero-minute bound does not sleep: [$(cat "$T/state/sleeps.txt")]"
+run_wait 7 --no-jobs-after 0 --timeout 0
+[ "$CODE" = "124" ] || fail "zero-minute bound is off (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "zero-minute bound has no no-start output: [$OUT]"
+[ ! -e "$T/state/sleeps.txt" ] || fail "zero timeout does not sleep: [$(cat "$T/state/sleeps.txt")]"
 
 # Only a run with total_count exactly zero is named; a missing jobs response
 # does not name a run.
@@ -1766,7 +1767,16 @@ run_wait 7 --no-jobs-after 2
 [ "$(grep -c '^gh-ci: check ci ' <<<"$OUT")" = "1" ] || fail "jobs lookup failure leaves only the missing-check line: [$OUT]"
 ! grep -q '^gh-ci: run ' <<<"$OUT" || fail "failed jobs lookup names no run: [$OUT]"
 
-# The environment sets the bound; the flag overrides it.
+# The environment sets the bound; 0 disables it, and the flag overrides it.
+setup_missing_ci
+GH_CI_NO_JOBS_AFTER=0 run_wait 7 --timeout 60
+[ "$CODE" = "124" ] || fail "zero environment bound is off (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "zero environment bound has no no-start output: [$OUT]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "2" ] || fail "zero environment bound reaches timeout after two sleeps: [$(cat "$T/state/sleeps.txt")]"
+setup_missing_ci
+GH_CI_NO_JOBS_AFTER=2 run_wait 7 --no-jobs-after 0 --timeout 60
+[ "$CODE" = "124" ] || fail "explicit zero flag overrides environment bound (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "explicit zero flag has no no-start output: [$OUT]"
 setup_missing_ci
 GH_CI_NO_JOBS_AFTER=2 run_wait 7
 [ "$CODE" = "4" ] || fail "environment bound exits 4 (got $CODE): [$OUT]"
@@ -1780,12 +1790,20 @@ setup_missing_ci
 GH_CI_NO_JOBS_AFTER=invalid run_wait 7 --no-jobs-after 1
 [ "$CODE" = "4" ] || fail "flag overrides invalid environment bound (got $CODE): [$OUT]"
 
-# The default is ten minutes, tested with a fake 30 s poll interval.
+# The default is off, tested with a fake 30 s poll interval.
 setup_missing_ci
-run_wait 7
-[ "$CODE" = "4" ] || fail "default bound exits 4 (got $CODE): [$OUT]"
-[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "20" ] || fail "default ten-minute bound sleeps twenty times: [$(wc -l <"$T/state/sleeps.txt")]"
-grep -Fq 'after 10 min' <<<"$OUT" || fail "default bound is reported as ten minutes: [$OUT]"
+run_wait 7 --timeout 60
+[ "$CODE" = "124" ] || fail "default-off bound times out (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "default-off bound has no no-start output: [$OUT]"
+! grep -q 'after 10 min' <<<"$OUT" || fail "default does not report a ten-minute bound: [$OUT]"
+grep -Fq 'pending: ci' <<<"$OUT" || fail "default-off missing check remains pending at timeout: [$OUT]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "2" ] || fail "60-second timeout sleeps twice: [$(wc -l <"$T/state/sleeps.txt")]"
+# A timeout at the old ten-minute default distinguishes off from the former default bound.
+setup_missing_ci
+run_wait 7 --timeout 600
+[ "$CODE" = "124" ] || fail "default-off bound reaches the ten-minute timeout (got $CODE): [$OUT]"
+! grep -q 'never started' <<<"$OUT" || fail "default-off bound has no no-start output at ten minutes: [$OUT]"
+[ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "20" ] || fail "ten-minute timeout sleeps twenty times: [$(wc -l <"$T/state/sleeps.txt")]"
 
 # Polls just below the bound still time out; a poll just above it fires.
 setup_missing_ci
@@ -1800,7 +1818,7 @@ run_wait 7 --no-jobs-after 1
 [ "$(grep -c '^7$' "$T/state/sleeps.txt")" = "9" ] || fail "one-minute bound fires on the ninth 7 s poll: [$(cat "$T/state/sleeps.txt")]"
 export GH_CI_INTERVAL=30
 
-for bad_bound in abc ''; do
+for bad_bound in abc '' -1; do
   setup_missing_ci
   run_wait 7 --no-jobs-after "$bad_bound"
   [ "$CODE" = "2" ] || fail "invalid no-jobs bound [$bad_bound] exits 2 (got $CODE): [$OUT]"
@@ -1869,16 +1887,16 @@ run_wait 7 --no-jobs-after 2 --timeout 180
 setup_missing_ci
 touch "$T/state/draft"
 echo true >"$T/state/draft"
-run_wait 7 --no-jobs-after 0 --timeout 0
+run_wait 7 --no-jobs-after 1 --timeout 90
 [ "$CODE" = "124" ] || fail "draft empty checks do not trigger no-start (got $CODE): [$OUT]"
 ! grep -q 'never started' <<<"$OUT" || fail "draft has no no-start output: [$OUT]"
 setup_missing_ci
-run_wait 7 --no-jobs-after 0 --job ci --timeout 0
+run_wait 7 --no-jobs-after 1 --job ci --timeout 90
 [ "$CODE" = "124" ] || fail "job wait does not trigger no-start (got $CODE): [$OUT]"
 ! grep -q 'never started' <<<"$OUT" || fail "job wait has no no-start output: [$OUT]"
 setup_missing_ci
 set_run 9 "$A" '{"status":"in_progress"}'
-run_wait 7 --no-jobs-after 0 --run 9 --timeout 0
+run_wait 7 --no-jobs-after 1 --run 9 --timeout 90
 [ "$CODE" = "124" ] || fail "run wait does not trigger no-start (got $CODE): [$OUT]"
 ! grep -q 'never started' <<<"$OUT" || fail "run wait has no no-start output: [$OUT]"
 

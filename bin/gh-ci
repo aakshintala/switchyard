@@ -9,10 +9,11 @@
 # at once; wait after 30 s of DIRTY re-checks), 4 wait: a required name had no
 # check run on the head after --no-jobs-after; 124: verdict means a required
 # check is pending now (no wait); wait means the wait timed out with checks still pending.
-# --no-jobs-after <min> (default 10; GH_CI_NO_JOBS_AFTER): a required name with
-# no check run after this bound exits 4. A job behind needs: may not get a check
-# run until upstream jobs finish; raise the bound for such workflows. A required
-# path-filtered check that never runs also exits 4 after the bound.
+# --no-jobs-after <min> (default off; 0 or unset GH_CI_NO_JOBS_AFTER): a required
+# name with no check run after a positive bound exits 4. A job behind needs: may
+# not get a check run until upstream jobs finish; raise the bound for such
+# workflows. A required path-filtered check that never runs also exits 4 after
+# the bound.
 # Repo: --repo OWNER/NAME (any subcommand, any position; panics needs none), then GH_CI_REPO, then
 # origin's GitHub URL (no network call), then `gh repo view`. With none, exit 2.
 # GH_CI_INTERVAL the watch poll seconds (default 30). Under Claude Code
@@ -22,7 +23,7 @@ usage() {
   echo "usage: gh-ci snapshot <pr> | failures <run> | failures --pr <n> | watch-verified <run> --pr <n>" >&2
   echo "       gh-ci verdict <branch-or-sha> | resample <pr> \"<job name>\" --until <regex> [--max <n>]" >&2
   echo "       gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--no-jobs-after <min>] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)" >&2
-  echo "       --no-jobs-after defaults to 10 min (GH_CI_NO_JOBS_AFTER); exit 4 means a required check never started" >&2
+  echo "       --no-jobs-after is off by default (GH_CI_NO_JOBS_AFTER); exit 4 needs an explicit bound" >&2
   echo "       every GitHub subcommand takes --repo OWNER/NAME (overrides GH_CI_REPO and the checkout's origin)" >&2
   echo "       verdict judges required checks against the default branch; wait <pr> reads the PR's own base" >&2
   echo "       124 from verdict means a required check is pending now (nothing waited); from wait it means the wait timed out with checks still pending" >&2
@@ -615,7 +616,7 @@ wait_run() {
 }
 cmd_wait() {
   local pr="" pr_opt="" timeout=7200 req="[]" empty_ok=false names fail_fast=false last_progress="" job="" run=""
-  local no_jobs_after=10 ns_head="" ns_from=0 ns_missing='[]'
+  local no_jobs_after=0 ns_head="" ns_from=0 ns_missing='[]'
   [ "${GH_CI_NO_JOBS_AFTER+x}" != x ] || no_jobs_after="$GH_CI_NO_JOBS_AFTER"
   while [ $# -gt 0 ]; do case "$1" in
     --timeout)
@@ -745,7 +746,7 @@ cmd_wait() {
     case "$verdict" in pass|fail) ;; *) verdict="pending";; esac
     if [ "$verdict" = "pending" ]; then
       missing_count=$(printf '%s' "$ns_missing" | jq -r 'length' 2>/dev/null) || missing_count=0
-      if [ "$((slept - ns_from))" -ge "$((10#$no_jobs_after * 60))" ] && [ "$missing_count" -gt 0 ]; then
+      if [ "$((10#$no_jobs_after))" -gt 0 ] && [ "$((slept - ns_from))" -ge "$((10#$no_jobs_after * 60))" ] && [ "$missing_count" -gt 0 ]; then
         while IFS= read -r missing_name || [ -n "$missing_name" ]; do
           [ -n "$missing_name" ] || continue
           printf 'gh-ci: check %s has no check run after %s min; it never started\n' "$missing_name" "$no_jobs_after"
