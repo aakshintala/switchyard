@@ -1456,12 +1456,12 @@ RULES
 echo '[{"bucket":"fail","name":"lint","link":"https://github.com/O/N/actions/runs/111/job/1"}]' >"$ST/checks"
 echo '[{"databaseId":111,"name":"CI","workflowName":"CI","event":"pull_request","conclusion":"cancelled"}]' >"$ST/run-list.json"
 echo '[{"databaseId":1,"name":"lint","conclusion":"cancelled"}]' >"$ST/jobs-111.json"
-GH_CI_NO_JOBS_AFTER=0 ship --timeout 14
+GH_CI_NO_JOBS_AFTER=1 ship --timeout 90
 expect 1 "never-started required check fails ship-pr"
-grep -Fq 'gh-ci: check ci has no check run after 0 min; it never started' <<<"$OUT" \
+grep -Fq 'gh-ci: check ci has no check run after 1 min; it never started' <<<"$OUT" \
   || fail "ship-pr prints the never-started line: [$OUT]"
 grep -Fq 'failing: lint' <<<"$OUT" || fail "ship-pr prints the failing required check: [$OUT]"
 ! grep -q 'gh run rerun' "$ST/gh.log" || fail "never-started check is not rerun: [$(cat "$ST/gh.log")]"
-[ "$(grep -c 'check-runs' "$ST/gh.log")" = "1" ] || fail "never-started check waits once: [$(cat "$ST/gh.log")]"
+[ "$(grep -c 'check-runs' "$ST/gh.log")" = "10" ] || fail "one-minute bound is reached after ten polls at seven-second intervals: [$(cat "$ST/gh.log")]"
 
 echo "ship-pr: all cases passed"
