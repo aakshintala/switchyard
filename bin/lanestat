@@ -142,6 +142,34 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     our $ruling_ms;
     our @job_ids;
     our %seen_job_ids;
+    sub unescape_json_string {
+      my ($raw_error) = @_;
+      my $message = "";
+      while (length $raw_error) {
+        if ($raw_error =~ s/^([^\\]+)//) {
+          $message .= $1;
+        } elsif ($raw_error =~ s/^\\(?:n|r|u000a|u000d).*$//i) {
+          last;
+        } elsif ($raw_error =~ s/^\\\\//) {
+          $message .= "\\";
+        } elsif ($raw_error =~ s/^\\"//) {
+          $message .= "\"";
+        } elsif ($raw_error =~ s/^\\t//) {
+          $message .= "\t";
+        } elsif ($raw_error =~ s/^\\(?:b|f)//) {
+          $message .= " ";
+        } elsif ($raw_error =~ s/^\\u000([0-9a-f])//i) {
+          $message .= chr(hex($1));
+        } elsif ($raw_error =~ s/^\\u[0-9a-f]{4}//i) {
+          next;
+        } elsif ($raw_error =~ s/^\\.//s) {
+          next;
+        }
+      }
+      $message =~ s/[\x00-\x1f\x7f]/ /g;
+      $message =~ s/\s+$//;
+      return $message;
+    }
     $last_tool = "none" unless defined $last_tool;
     $settle_cut = 0 unless defined $settle_cut;
     $settles = 0 unless defined $settles;
@@ -184,30 +212,7 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         if (defined $tokens && $tokens == 0 && defined $stop_reason && $stop_reason eq "error") {
           my ($raw_error) = $assistant =~ /(?<!\\)"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"/;
           $raw_error = "" unless defined $raw_error;
-          my $message = "";
-          while (length $raw_error) {
-            if ($raw_error =~ s/^([^\\]+)//) {
-              $message .= $1;
-            } elsif ($raw_error =~ s/^\\(?:n|r|u000a|u000d).*$//i) {
-              last;
-            } elsif ($raw_error =~ s/^\\\\//) {
-              $message .= "\\";
-            } elsif ($raw_error =~ s/^\\"//) {
-              $message .= "\"";
-            } elsif ($raw_error =~ s/^\\t//) {
-              $message .= "\t";
-            } elsif ($raw_error =~ s/^\\(?:b|f)//) {
-              $message .= " ";
-            } elsif ($raw_error =~ s/^\\u000([0-9a-f])//i) {
-              $message .= chr(hex($1));
-            } elsif ($raw_error =~ s/^\\u[0-9a-f]{4}//i) {
-              next;
-            } elsif ($raw_error =~ s/^\\.//s) {
-              next;
-            }
-          }
-          $message =~ s/[\x00-\x1f\x7f]/ /g;
-          $message =~ s/\s+$//;
+          my $message = unescape_json_string($raw_error);
           $provider = "unknown" unless defined $provider && length $provider;
           $model = "unknown" unless defined $model && length $model;
           $message = length($message) ? $message : "no output";
