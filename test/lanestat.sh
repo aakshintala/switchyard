@@ -460,7 +460,7 @@ check_case_row 740 'SETTLED$'
 # DEAD-PROVIDER follows the last agent_end assistant message.
 dead_run="$T/dead-provider"
 mkdir -p "$dead_run"
-for pid in 750 751 752 753 754 755 756 757 758 759 760 761 762 763 764 765 766 767 768 769; do
+for pid in 750 751 752 753 754 755 756 757 758 759 760 761 762 763 764 765 766 767 768 769 770 771 772; do
   printf '%s\n' "$pid" >"$dead_run/fiber-$pid-pi.pid"
   printf 'pi\n' >"$T/ps/$pid.comm"
   printf 'S 00:01\n' >"$T/ps/$pid.info"
@@ -563,6 +563,17 @@ printf '%s\n' \
   '{"type":"auto_retry_end","success":true,"attempt":1}' \
   '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
   '{"type":"agent_settled"}' >"$dead_run/fiber-769-pi.jsonl"
+printf '%s\n' '{"type":"agent_start"}' >"$dead_run/fiber-770-pi.jsonl"
+perl -e 'print q({"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error","errorMessage":"), "x" x 300, q("}]}) . chr(10)' >>"$dead_run/fiber-770-pi.jsonl"
+printf '%s\n' '{"type":"agent_settled"}' >>"$dead_run/fiber-770-pi.jsonl"
+printf '%s\n' '{"type":"agent_start"}' >"$dead_run/fiber-771-pi.jsonl"
+perl -e 'print q({"type":"auto_retry_end","success":false,"finalError":") , "y" x 300, q("}) . chr(10)' >>"$dead_run/fiber-771-pi.jsonl"
+printf '%s\n' \
+  '{"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error"}]}' \
+  '{"type":"agent_settled"}' >>"$dead_run/fiber-771-pi.jsonl"
+printf '%s\n' '{"type":"agent_start"}' >"$dead_run/fiber-772-pi.jsonl"
+perl -Mutf8 -e 'binmode STDOUT, ":encoding(UTF-8)"; print q({"type":"agent_end","messages":[{"role":"assistant","content":[],"provider":"openai","model":"gpt-5.4","usage":{"totalTokens":0},"stopReason":"error","errorMessage":"), "é" x 250, q("}]}) . chr(10)' >>"$dead_run/fiber-772-pi.jsonl"
+printf '%s\n' '{"type":"agent_settled"}' >>"$dead_run/fiber-772-pi.jsonl"
 run_stat "$dead_run" >"$T/dead-provider.out" 2>"$T/dead-provider.err"; rc=$?
 [ "$rc" = 0 ] || fail "dead-provider fixture exits 0 (got $rc; $(<"$T/dead-provider.err"))"
 assert_row 750 'DEAD-PROVIDER opencode-go/muse-spark-1\.3-contributor: opencode-go API error \(402\): \{"type":"server_error","message":"Upstream request failed: Insufficient account funds"\}$' "$(<"$T/dead-provider.out")"
@@ -586,6 +597,19 @@ assert_row 766 'DEAD-PROVIDER openai/gpt-5\.4: no output$' "$(<"$T/dead-provider
 assert_row 767 'DEAD-PROVIDER openai/gpt-5\.4: no output$' "$(<"$T/dead-provider.out")"
 assert_row 768 'DEAD-PROVIDER openai/gpt-5\.4: second$' "$(<"$T/dead-provider.out")"
 assert_row 769 'DEAD-PROVIDER openai/gpt-5\.4: kept$' "$(<"$T/dead-provider.out")"
+
+expected_x=$(perl -e 'print "x" x 200')
+expected_y=$(perl -e 'print "y" x 200')
+expected_e=$(perl -Mutf8 -e 'binmode STDOUT, ":encoding(UTF-8)"; print "é" x 200')
+row_770=$(grep -E '^770[[:space:]]' "$T/dead-provider.out")
+row_771=$(grep -E '^771[[:space:]]' "$T/dead-provider.out")
+row_772=$(grep -E '^772[[:space:]]' "$T/dead-provider.out")
+reason_770=${row_770#*DEAD-PROVIDER openai/gpt-5.4: }
+reason_771=${row_771#*DEAD-PROVIDER openai/gpt-5.4: }
+reason_772=${row_772#*DEAD-PROVIDER openai/gpt-5.4: }
+[ "$reason_770" = "$expected_x" ] || fail "fixture 770 reason is exactly 200 x characters"
+[ "$reason_771" = "$expected_y" ] || fail "fixture 771 reason is exactly 200 y characters"
+[ "$reason_772" = "$expected_e" ] || fail "fixture 772 reason is exactly 200 UTF-8 characters"
 
 # Delegate job records are resolved only for UUIDs printed by the lane.
 job_done=11111111-1111-4111-8111-111111111111

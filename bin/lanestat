@@ -256,6 +256,9 @@ for pidfile in "$run"/fiber-*-pi.pid; do
       } elsif ($settled && defined $dead) {
         my ($provider, $model, $message) = @$dead;
         my $reason = length($message) ? $message : length($final_error) ? $final_error : "no output";
+        utf8::decode($reason);
+        $reason = substr($reason, 0, 200);
+        utf8::encode($reason);
         print "STATE DEAD $provider/$model: $reason" . chr(10);
       } elsif ($settled && $after_prompt) {
         print "STATE WEDGED" . chr(10);
