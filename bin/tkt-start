@@ -3,7 +3,7 @@
 # miss run plan-sweep plus the preflight job. Only a sweep rc 1 listing unresolved
 # tokens still preflights; any other sweep failure exits with its code. No --files
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
-# A preflight core/non-blocking line counts when it starts with '<n>.' or '-', then spaces, then optional backtick/bold marks; a bare '*' bullet never counts.
+# A preflight core line starts with '<n>.' or '-' then spaces and optional backtick/bold marks, and non-blocking with the same start and optional bold marks; either counts unless the text after the keyword is empty or only none, none found, n/a or nothing (case-insensitive) after ignoring backticks, bold marks, a colon, spaces and trailing punctuation; a bare '*' bullet never counts.
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # --part N archives the prior state after its PR merges; merged-PR head drift tells you the next --part.
 # Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
@@ -290,6 +290,19 @@ if [ "$jrc" -ne 0 ]; then
   esac
 fi
 [ -f "$out" ] || fail_step tkt-job 1 "no out file: $out"
-core="$(grep -cE '^([0-9]+\.|-) *`?\**core\b' "$out" || true)"; nb="$(grep -cE '^([0-9]+\.|-) *\**non-blocking\b' "$out" || true)"
+count_items() {
+  grep -E "$1" "$out" | awk -v keyword="$2" '
+    {
+      line = tolower($0)
+      if (keyword == "core") sub(/^([0-9]+\.|-)[[:space:]]*`?\**core/, "", line)
+      else sub(/^([0-9]+\.|-)[[:space:]]*\**non-blocking/, "", line)
+      sub(/^[[:space:]`*:]+/, "", line)
+      sub(/[[:space:][:punct:]]+$/, "", line)
+      if (line !~ /^(none([[:space:]]+found)?|n\/a|nothing)?$/) count++
+    }
+    END { print count+0 }
+  ' || true
+}
+core="$(count_items '^([0-9]+\.|-) *`?\**core\b' core)"; nb="$(count_items '^([0-9]+\.|-) *\**non-blocking\b' non-blocking)"
 tkt journal "tkt-start preflight core=$core out=$out"; dg+=("sweep=$sweep_out" "out=$out"); report="$(head -n 30 "$out")"
 [ "$core" -eq 0 ] && emit "PREFLIGHT core=0 nonblocking=$nb out=$out" 0 "${dg[@]}" "$report" || emit "PREFLIGHT core=$core out=$out" 1 "${dg[@]}" "$report"

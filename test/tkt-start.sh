@@ -237,8 +237,8 @@ printf 'Work for #42.\n\nWritten against deadbeefdeadbeefdeadbeefdeadbeefdeadbee
 want "PREFLIGHT core=2 out=" 1 badsha
 case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badsha: digest misses the reason" ;; esac
 # core-count table: only the job output, want rc and want line differ.
-# Contract: bin/tkt-start header: a core/non-blocking line counts with '<n>.' or '-' then spaces and optional backtick/bold marks; a bare '*' never counts.
-for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out="; do
+# Contract: bin/tkt-start counts core with '<n>.' or '-' then spaces and optional backtick/bold marks, and non-blocking with the same start plus optional bold marks; either count is zero when text after the keyword is empty or only none, none found, n/a or nothing (case-insensitive), after ignoring backticks, bold marks, a colon, spaces and trailing punctuation; a bare '*' never counts.
+for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out=" "nonecolon|0|PREFLIGHT core=0 nonblocking=1 out=" "naw|0|PREFLIGHT core=0 nonblocking=0 out=" "nothing|0|PREFLIGHT core=0 nonblocking=1 out=" "barecore|0|PREFLIGHT core=0 nonblocking=1 out=" "boldnone|0|PREFLIGHT core=0 nonblocking=1 out=" "noneof|1|PREFLIGHT core=1 out=" "nbnone|0|PREFLIGHT core=0 nonblocking=1 out=" "nonefoundtext|1|PREFLIGHT core=1 out=" "nawithtext|1|PREFLIGHT core=1 out=" "uppernone|0|PREFLIGHT core=0 nonblocking=0 out="; do
   IFS='|' read -r name rc want_line <<<"$spec"
   setup "$name" TWO FILING
   case "$name" in
@@ -247,6 +247,16 @@ for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGH
     dashcore) printf -- '- core -- first\n- **core** -- second\n' >"$T/jobout" ;;
     dashnb) printf -- '- non-blocking -- a\n' >"$T/jobout" ;;
     starbare) printf '**core** -- x\n' >"$T/jobout" ;;
+    nonecolon) printf '%s\n' '- core: none found.' '- non-blocking -- a' >"$T/jobout" ;;
+    naw) printf '%s\n' '- core: N/A.' >"$T/jobout" ;;
+    nothing) printf '%s\n' '- core: Nothing' '- non-blocking -- a' >"$T/jobout" ;;
+    barecore) printf '%s\n' '- core:' '- non-blocking -- a' >"$T/jobout" ;;
+    boldnone) printf '%s\n' '- **core:** `None`.' '- non-blocking -- a' >"$T/jobout" ;;
+    noneof) printf '%s\n' '- core: none of the callers handle X' >"$T/jobout" ;;
+    nbnone) printf '%s\n' '- non-blocking: none.' '- non-blocking -- a' >"$T/jobout" ;;
+    nonefoundtext) printf '%s\n' '- core: none found in the diff' >"$T/jobout" ;;
+    nawithtext) printf '%s\n' '- core: N/A and nothing else' >"$T/jobout" ;;
+    uppernone) printf '%s\n' '- core: NONE.' >"$T/jobout" ;;
   esac
   run_start
   want "$want_line" "$rc" "$name"
