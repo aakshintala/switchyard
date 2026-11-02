@@ -10,12 +10,11 @@
 # read or a wait on a pid, and the watchdog bounds a hang. The dead-holder
 # tests pause the shim between its two dead-pid reads through the test-only
 # CARGO_SLOT_RECHECK_FIFO hook in bin/cargo-slot.
-# Not shown: that the waiting line prints once across several rescans. A shim
-# that printed on every rescan passes, because the suite releases a holder
-# right after the first line. Showing it would need a timed wait across rescans,
-# which this suite does not have.
-# The suite proves only that a waiter takes a slot after a release, which needs
-# at least one rescan after the waiting line.
+# The timed-notice case reads two lines across rescans, names the held pid on
+# each, and checks that the interval count rises. The suite still does not show
+# that the bare waiting line prints only once: existing waiter cases release a
+# holder right after that line. The suite proves only that a waiter takes a slot
+# after a release, which needs at least one rescan after the waiting line.
 set -uo pipefail
 
 # The suite re-execs itself into its own process group, so the watchdog can

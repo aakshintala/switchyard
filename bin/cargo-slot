@@ -6,6 +6,7 @@
 # With CARGO_SLOT_SHARED_CHECKOUT set to the shared checkout's path, a slot
 # subcommand run from that checkout is refused. CARGO_SLOT_WORKTREE_ROOT adds a
 # scratch-worktree hint to that refusal.
+# CARGO_SLOT_NOTICE_SECS sets the waiting-notice interval in seconds (default 60).
 # `cargo mutants` is banned for lanes and refused up front; mutants run in CI.
 import errno
 import fcntl
