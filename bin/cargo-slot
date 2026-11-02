@@ -90,14 +90,20 @@ def slot_dir():
     return os.path.join(home, ".cache", "agents", "cargo-slots")
 
 
-def dead_holder_pid(fd):
+def holder_pid(fd):
     try:
         fields = os.pread(fd, 128, 0).split()
     except OSError:
         return None
     if not fields or not re.fullmatch(rb"[0-9]+", fields[0]):
         return None
-    pid = int(fields[0])
+    return int(fields[0])
+
+
+def dead_holder_pid(fd):
+    pid = holder_pid(fd)
+    if pid is None:
+        return None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -182,12 +188,7 @@ def acquire_slot(directory, n):
                 except BlockingIOError:
                     if not saw_held_slot:
                         saw_held_slot = True
-                        try:
-                            fields = os.pread(fd, 128, 0).split()
-                        except OSError:
-                            fields = []
-                        if fields and re.fullmatch(rb"[0-9]+", fields[0]):
-                            holder_pid_value = int(fields[0])
+                        holder_pid_value = holder_pid(fd)
                     pid = dead_holder_pid(fd)
                     if pid is not None:
                         recheck_wait(pid)

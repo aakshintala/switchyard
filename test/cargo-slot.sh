@@ -540,6 +540,77 @@ wait "$WW" 2>/dev/null
 release "$W/h"
 wait "$WH" 2>/dev/null
 
+# An unreadable holder record omits the holder clause from timed notices.
+U="$T/unknown-holder"
+stage "$U/w"
+mkdir -p "$U/slots"
+mkfifo "$U/helper.out" "$U/helper.in" || fail "cannot stage unknown-holder FIFOs"
+exec 3<>"$U/helper.out"
+exec 4<>"$U/helper.in"
+"$PY" -c '
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+out = open(sys.argv[2], "w")
+cmd = open(sys.argv[3])
+out.write("locked\n")
+out.flush()
+cmd.readline()
+' "$U/slots/slot-1.lock" "$U/helper.out" "$U/helper.in" &
+UH=$!
+PIDS+=("$UH")
+IFS= read -r -u 3 line
+[ "$line" = locked ] || fail "unknown-holder helper reported [$line], want locked"
+spawn "$U/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$U/slots" CARGO_SLOT_NOTICE_SECS=0.2 -- build
+UW=$SPAWNED
+expect_err_line "cargo-slot: waiting"
+expect_err_line "cargo-slot: waiting 1 min"
+kill -TERM "$UW"
+wait "$UW" 2>/dev/null
+printf 'exit\n' >&4
+wait "$UH" || fail "unknown-holder helper did not exit cleanly"
+exec 3>&-
+exec 4>&-
+
+# Invalid notice intervals are ignored so they cannot fail an otherwise free build.
+N="$T/notice-intervals"
+i=0
+for v in abc 0 -1 nan inf 2_0 " 2"; do
+  i=$((i + 1))
+  new_run "notice-invalid-$i"
+  cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$N/$i" CARGO_SLOT_NOTICE_SECS="$v" -- build 2>"$R/shim.err"
+  rc=$?
+  [ "$rc" = 0 ] || fail "CARGO_SLOT_NOTICE_SECS=[$v]: exit $rc, want 0"
+  [ ! -s "$R/shim.err" ] || fail "CARGO_SLOT_NOTICE_SECS=[$v]: shim wrote [$(cat "$R/shim.err")]"
+done
+for v in unset empty; do
+  new_run "notice-$v"
+  if [ "$v" = unset ]; then
+    cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$N/$v" -- build 2>"$R/shim.err"
+  else
+    cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$N/$v" CARGO_SLOT_NOTICE_SECS= -- build 2>"$R/shim.err"
+  fi
+  rc=$?
+  [ "$rc" = 0 ] || fail "CARGO_SLOT_NOTICE_SECS=$v: exit $rc, want 0"
+  [ ! -s "$R/shim.err" ] || fail "CARGO_SLOT_NOTICE_SECS=$v: shim wrote [$(cat "$R/shim.err")]"
+done
+
+# A closed stderr reader must not change a waiting build's exit code.
+E="$T/broken-stderr"
+stage "$E/h"
+stage "$E/w"
+hold_slot "$E/h" "$E/slots" 1
+EH=$HOLD_PID
+spawn "$E/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$E/slots" CARGO_SLOT_NOTICE_SECS=0.2 -- build
+EW=$SPAWNED
+expect_err_line "cargo-slot: waiting"
+exec 9<&-
+release "$E/h"
+wait "$EH" 2>/dev/null
+wait "$EW"
+rc=$?
+[ "$rc" = 0 ] || fail "build after stderr reader closed: exit $rc, want 0"
+
 # A killed holder frees its slot: kill -9 the fake, and the next build takes
 # the one slot.
 K="$T/killed"
