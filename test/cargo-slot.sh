@@ -9,13 +9,13 @@
 # and compare every line read. No test sleeps or polls: each wait is a blocking
 # read or a wait on a pid, and the watchdog bounds a hang. The dead-holder
 # tests pause the shim between its two dead-pid reads through the test-only
-# CARGO_SLOT_RECHECK_FIFO hook in bin/cargo-slot.
-# Not shown: that the waiting line prints once across several rescans. A shim
-# that printed on every rescan passes, because the suite releases a holder
-# right after the first line. Showing it would need a timed wait across rescans,
-# which this suite does not have.
-# The suite proves only that a waiter takes a slot after a release, which needs
-# at least one rescan after the waiting line.
+# CARGO_SLOT_RECHECK_FIFO hook in bin/cargo-slot. The timed-notice tests feed
+# each rescan its elapsed seconds through the test-only CARGO_SLOT_CLOCK_FIFO
+# hook, so the timed lines, their held pid and their interval count are shown
+# with no real-time wait. The suite still does not show that the bare waiting
+# line prints only once: existing waiter cases release a holder right after
+# that line. The suite proves only that a waiter takes a slot after a release,
+# which needs at least one rescan after the waiting line.
 set -uo pipefail
 
 # The suite re-execs itself into its own process group, so the watchdog can
@@ -512,6 +512,113 @@ expect_waiter_log "$S/c"
 [ ! -e "$S/slots/slot-3.lock" ] || fail "a slot-3.lock was created for N=2"
 release "$S/b"
 wait "$B" 2>/dev/null
+
+# Timed notices identify the held slot and count elapsed intervals. The clock
+# hook feeds each pass its elapsed seconds; fd 4 keeps the FIFO open both ways.
+W="$T/timed"
+stage "$W/h"
+stage "$W/w"
+mkfifo "$W/clock" || fail "cannot stage timed clock FIFO"
+exec 4<>"$W/clock"
+hold_slot "$W/h" "$W/slots" 1
+WH=$HOLD_PID
+spawn "$W/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$W/slots" CARGO_SLOT_NOTICE_SECS=2 CARGO_SLOT_CLOCK_FIFO="$W/clock" -- build
+WW=$SPAWNED
+expect_err_line "cargo-slot: waiting"
+printf '1.9\n' >&4
+printf '2\n' >&4
+expect_err_line "cargo-slot: waiting 1 min; held by pid $WH"
+printf '3\n' >&4
+printf '4\n' >&4
+expect_err_line "cargo-slot: waiting 2 min; held by pid $WH"
+kill -TERM "$WW"
+wait "$WW" 2>/dev/null
+[ "$(cat <&9)" = "" ] || fail "timed waiter printed a line between intervals"
+exec 4>&-
+release "$W/h"
+wait "$WH" 2>/dev/null
+
+# An unreadable holder record omits the holder clause from timed notices.
+U="$T/unknown-holder"
+stage "$U/w"
+mkdir -p "$U/slots"
+mkfifo "$U/helper.out" "$U/helper.in" || fail "cannot stage unknown-holder FIFOs"
+exec 3<>"$U/helper.out"
+exec 4<>"$U/helper.in"
+"$PY" -c '
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+out = open(sys.argv[2], "w")
+cmd = open(sys.argv[3])
+out.write("locked\n")
+out.flush()
+cmd.readline()
+' "$U/slots/slot-1.lock" "$U/helper.out" "$U/helper.in" &
+UH=$!
+PIDS+=("$UH")
+IFS= read -r -u 3 line
+[ "$line" = locked ] || fail "unknown-holder helper reported [$line], want locked"
+mkfifo "$U/clock" || fail "cannot stage unknown-holder clock FIFO"
+exec 5<>"$U/clock"
+spawn "$U/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$U/slots" CARGO_SLOT_NOTICE_SECS=1 CARGO_SLOT_CLOCK_FIFO="$U/clock" -- build
+UW=$SPAWNED
+expect_err_line "cargo-slot: waiting"
+printf '1\n' >&5
+expect_err_line "cargo-slot: waiting 1 min"
+kill -TERM "$UW"
+wait "$UW" 2>/dev/null
+printf 'exit\n' >&4
+wait "$UH" || fail "unknown-holder helper did not exit cleanly"
+exec 3>&-
+exec 4>&-
+exec 5>&-
+
+# Invalid notice intervals are ignored so they cannot fail an otherwise free build.
+N="$T/notice-intervals"
+i=0
+for v in abc 0 -1 nan inf 2_0 " 2"; do
+  i=$((i + 1))
+  new_run "notice-invalid-$i"
+  cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$N/$i" CARGO_SLOT_NOTICE_SECS="$v" -- build 2>"$R/shim.err"
+  rc=$?
+  [ "$rc" = 0 ] || fail "CARGO_SLOT_NOTICE_SECS=[$v]: exit $rc, want 0"
+  [ ! -s "$R/shim.err" ] || fail "CARGO_SLOT_NOTICE_SECS=[$v]: shim wrote [$(cat "$R/shim.err")]"
+done
+for v in unset empty; do
+  new_run "notice-$v"
+  if [ "$v" = unset ]; then
+    cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$N/$v" -- build 2>"$R/shim.err"
+  else
+    cargo_as "$R" CARGO_SLOTS=1 CARGO_SLOT_DIR="$N/$v" CARGO_SLOT_NOTICE_SECS= -- build 2>"$R/shim.err"
+  fi
+  rc=$?
+  [ "$rc" = 0 ] || fail "CARGO_SLOT_NOTICE_SECS=$v: exit $rc, want 0"
+  [ ! -s "$R/shim.err" ] || fail "CARGO_SLOT_NOTICE_SECS=$v: shim wrote [$(cat "$R/shim.err")]"
+done
+
+# A closed stderr reader must not change a waiting build's exit code. The
+# clock line after the close forces a timed write into the closed FIFO; the
+# second line lets a waiter that still sees the slot held rescan after release.
+E="$T/broken-stderr"
+stage "$E/h"
+stage "$E/w"
+mkfifo "$E/clock" || fail "cannot stage broken-stderr clock FIFO"
+exec 4<>"$E/clock"
+hold_slot "$E/h" "$E/slots" 1
+EH=$HOLD_PID
+spawn "$E/w" CARGO_SLOTS=1 CARGO_SLOT_DIR="$E/slots" CARGO_SLOT_NOTICE_SECS=1 CARGO_SLOT_CLOCK_FIFO="$E/clock" -- build
+EW=$SPAWNED
+expect_err_line "cargo-slot: waiting"
+exec 9<&-
+printf '1\n' >&4
+release "$E/h"
+wait "$EH" 2>/dev/null
+printf '2\n' >&4
+wait "$EW"
+rc=$?
+exec 4>&-
+[ "$rc" = 0 ] || fail "build after stderr reader closed: exit $rc, want 0"
 
 # A killed holder frees its slot: kill -9 the fake, and the next build takes
 # the one slot.
