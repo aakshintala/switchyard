@@ -21,7 +21,9 @@
 # `pisend.sh wake` (not shipped here). A queued prompt means pi has an active
 # run and is not lost. DEAD-PROVIDER <provider>/<model>: <message> means the
 # last agent_end assistant message had stopReason=error and
-# usage.totalTokens=0; do not re-wake.
+# usage.totalTokens=0; its first-line reason falls back from errorMessage to the
+# turn's last failed auto_retry_end finalError, then no output, capped at 200
+# characters; do not re-wake.
 # `last=<tool>` accompanies WEDGED, PARK and LOOP;
 # its whitespace is replaced with underscores. PARK means the lane needs an
 # answer, LOOP leaves the decision to the orchestrator, and DONE-UNREAD <ids>
