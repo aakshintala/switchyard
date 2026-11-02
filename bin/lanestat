@@ -16,9 +16,25 @@
 # start outside the 20 MB tail is ignored; the operator checks the tool by hand.
 # Zero live rows prints `lanestat: no live lanes in <run-dir>`.
 # IN-TOOL says pi has a tool call active, not that the tool is making progress.
-# `queued` means pi has an active run; a prompt is not lost. The unrecoverable
-# shape is an active flag with nothing executing: abort, then resend with
-# flywheel's `pisend.sh wake` (not shipped here).
+# WEDGED means a settled lane received a successful non-queued prompt and no
+# tool event or message_start followed it; abort, then resend with flywheel's
+# `pisend.sh wake` (not shipped here). A queued prompt means pi has an active
+# run and is not lost. DEAD-PROVIDER <provider>/<model>: <message> means the
+# last agent_end assistant message had stopReason=error and
+# usage.totalTokens=0; do not re-wake.
+# `last=<tool>` accompanies WEDGED, PARK and LOOP;
+# its whitespace is replaced with underscores. PARK means the lane needs an
+# answer, LOOP leaves the decision to the orchestrator, and DONE-UNREAD <ids>
+# names completed jobs the lane has not read. Answer PARK with a ruling or
+# fence-grant file. Let the orchestrator decide LOOP. Abort and resend WEDGED.
+# Do not re-wake DEAD-PROVIDER. Message the lane naming the jobs in
+# DONE-UNREAD <ids>. `lanewatch` prints dated event rows once per settle minute
+# and sends PARK, LOOP, WEDGED, DEAD-PROVIDER and DONE-UNREAD to
+# LANEWATCH_INBOX when it is set; plain SETTLED and STALL stay on stdout. The
+# watcher never stops a lane. Set DELEGATE_JOBS_DIR on the watcher when a
+# lane's jobs live under a non-`/tmp` TMPDIR, or DONE-UNREAD stays silent.
+# DELEGATE_JOBS_DIR, TMPDIR, JOB_RECORD_SYSTEM_DIR and LANESTAT_SETTLED_MAX are
+# not forwarded over ssh; remote values come from the remote environment.
 #
 # A pid file outlives its lane and the host can reuse its number. Keep a row only
 # when `ps -o comm=` still names pi. A lane's TMPDIR is `~/.cache/tmp`, not
@@ -59,6 +75,24 @@ case $settled_max in
 esac
 
 now=$(date +%s)
+job_dirs=
+add_job_dir() {
+  job_dir=$1
+  [ -n "$job_dir" ] || return
+  if [ -n "$job_dirs" ] && printf '%s\n' "$job_dirs" | grep -Fqx -- "$job_dir"; then
+    return
+  fi
+  job_dirs="${job_dirs}${job_dirs:+
+}$job_dir"
+}
+if [ -n "${DELEGATE_JOBS_DIR:-}" ]; then
+  case $DELEGATE_JOBS_DIR in
+    /*) add_job_dir "$DELEGATE_JOBS_DIR" ;;
+    *) add_job_dir "$PWD/$DELEGATE_JOBS_DIR" ;;
+  esac
+fi
+add_job_dir "${TMPDIR:-/tmp}/delegate-jobs"
+add_job_dir "${JOB_RECORD_SYSTEM_DIR:-/tmp/delegate-jobs}"
 rows=0
 for pidfile in "$run"/fiber-*-pi.pid; do
   [ -f "$pidfile" ] || continue
@@ -86,13 +120,41 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     mtime=$(perl -e 'print ((stat $ARGV[0])[9])' "$jsonl" 2>/dev/null)
     [ -n "${mtime:-}" ] && age=$((now - mtime))
   fi
-  event_state=$(tail -c 20000000 "$jsonl" 2>/dev/null | perl -ne '
+  ruling_time=0
+  for ruling_file in "$run"/*-"$n"-ruling-*.md "$run/fiber-$n-fence-grant-"*.md; do
+    [ -f "$ruling_file" ] || continue
+    ruling_mtime=$(perl -e 'my @s = stat $ARGV[0]; print $s[9] if @s' "$ruling_file" 2>/dev/null)
+    case $ruling_mtime in
+      ''|*[!0-9]*) ;;
+      *) [ "$ruling_mtime" -gt "$ruling_time" ] && ruling_time=$ruling_mtime ;;
+    esac
+  done
+  ruling_ms=$((ruling_time * 1000))
+  event_output=$(tail -c 20000000 "$jsonl" 2>/dev/null | LS_JOB_DIRS="$job_dirs" LS_RULING_MS="$ruling_ms" perl -ne '
     our @open;
     our $settled;
+    our $after_prompt;
+    our $dead;
+    our $last_tool;
+    our $question_line;
+    our $settle_cut;
+    our $settles;
+    our $ruling_ms;
+    our @job_ids;
+    our %seen_job_ids;
+    $last_tool = "none" unless defined $last_tool;
+    $settle_cut = 0 unless defined $settle_cut;
+    $settles = 0 unless defined $settles;
+    $ruling_ms = $ENV{LS_RULING_MS} unless defined $ruling_ms;
     if (/"type":"tool_execution_start","toolCallId":"([^"]*)","toolName":"([^"]*)"/) {
       push @open, [$1, $2];
+      $last_tool = $2;
       $settled = 0;
+      $after_prompt = 0;
+      $dead = undef;
     } elsif (/"type":"tool_execution_end","toolCallId":"([^"]*)"/) {
+      $after_prompt = 0;
+      $dead = undef;
       for (my $i = $#open; $i >= 0; $i--) {
         if ($open[$i]->[0] eq $1) {
           splice @open, $i, 1;
@@ -103,25 +165,222 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     } elsif (/"type":"agent_settled"/) {
       @open = ();
       $settled = 1;
+      $after_prompt = 0;
+    } elsif (/"type":"agent_start"/ || /"type":"auto_retry_start"/) {
+      $dead = undef;
+    } elsif (/"type"\s*:\s*"agent_end"/) {
+      $dead = undef;
+      my $assistant_start = -1;
+      while (/(?<!\\)"role"\s*:\s*"assistant"/g) {
+        $assistant_start = $-[0];
+      }
+      pos($_) = 0;
+      if ($assistant_start >= 0) {
+        my $assistant = substr($_, $assistant_start);
+        my ($provider) = $assistant =~ /(?<!\\)"provider"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+        my ($model) = $assistant =~ /(?<!\\)"model"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+        my ($tokens) = $assistant =~ /(?<!\\)"usage"\s*:\s*\{[^}]*?"totalTokens"\s*:\s*(\d+)/;
+        my ($stop_reason) = $assistant =~ /(?<!\\)"stopReason"\s*:\s*"([^"\\]*)"/;
+        if (defined $tokens && $tokens == 0 && defined $stop_reason && $stop_reason eq "error") {
+          my ($raw_error) = $assistant =~ /(?<!\\)"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+          $raw_error = "" unless defined $raw_error;
+          my $message = "";
+          while (length $raw_error) {
+            if ($raw_error =~ s/^([^\\]+)//) {
+              $message .= $1;
+            } elsif ($raw_error =~ s/^\\(?:n|r|u000a|u000d).*$//i) {
+              last;
+            } elsif ($raw_error =~ s/^\\\\//) {
+              $message .= "\\";
+            } elsif ($raw_error =~ s/^\\"//) {
+              $message .= "\"";
+            } elsif ($raw_error =~ s/^\\t//) {
+              $message .= "\t";
+            } elsif ($raw_error =~ s/^\\(?:b|f)//) {
+              $message .= " ";
+            } elsif ($raw_error =~ s/^\\u000([0-9a-f])//i) {
+              $message .= chr(hex($1));
+            } elsif ($raw_error =~ s/^\\u[0-9a-f]{4}//i) {
+              next;
+            } elsif ($raw_error =~ s/^\\.//s) {
+              next;
+            }
+          }
+          $message =~ s/[\x00-\x1f\x7f]/ /g;
+          $message =~ s/\s+$//;
+          $provider = "unknown" unless defined $provider && length $provider;
+          $model = "unknown" unless defined $model && length $model;
+          $message = length($message) ? $message : "no output";
+          $dead = "$provider/$model: $message";
+        }
+      }
+    } elsif (/"type"\s*:\s*"response"/ && /"command"\s*:\s*"prompt"/ && /"success"\s*:\s*true/ && !/"(?:disposition|status)"\s*:\s*"queued"/) {
+      $after_prompt = 1;
+      $dead = undef;
+    } elsif (/"type":"message_start"/) {
+      $dead = undef;
+      if ($after_prompt) {
+        $settled = 0;
+        $after_prompt = 0;
+      }
+    }
+    if (/"type":"message_end","message":{"role":"assistant"/ && /"type":"text"/) {
+      $question_line = $_;
+    }
+    if ($ruling_ms > 0 && /"type":"message_end"/) {
+      my @timestamps = /"timestamp":(\d+)/g;
+      $settle_cut = 1 if @timestamps && $timestamps[-1] > $ruling_ms;
+    }
+    $settles++ if $settle_cut && /"type":"agent_settled"/;
+    if (/"type":"(?:tool_execution_end|message_end)"/) {
+      while (/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/g) {
+        push @job_ids, $1 unless $seen_job_ids{$1}++;
+      }
     }
     END {
       if (@open) {
-        my $tool = $open[-1]->[1];
-        print "IN-TOOL $tool" . chr(10);
+        print "STATE IN-TOOL " . $open[-1]->[1] . chr(10);
+      } elsif ($settled && defined $dead) {
+        print "STATE DEAD $dead" . chr(10);
+      } elsif ($settled && $after_prompt) {
+        print "STATE WEDGED" . chr(10);
       } elsif ($settled) {
-        print "SETTLED" . chr(10);
+        print "STATE SETTLED" . chr(10);
+      }
+      print "LAST $last_tool" . chr(10);
+      print "SETTLES $settles" . chr(10);
+      if (defined $question_line && eval { require JSON::PP; 1 }) {
+        my $candidate = eval { JSON::PP::decode_json($question_line) };
+        if (!$@ && ref($candidate) eq "HASH" && ref($candidate->{message}) eq "HASH") {
+          my $message = $candidate->{message};
+          my $timestamp = $message->{timestamp};
+          if (defined $timestamp && !ref($timestamp) && $timestamp =~ /\A[0-9]+\z/) {
+            my @texts;
+            if (ref($message->{content}) eq "ARRAY") {
+              for my $block (@{$message->{content}}) {
+                if (ref($block) eq "HASH" && defined $block->{type} && $block->{type} eq "text" && defined $block->{text} && !ref($block->{text})) {
+                  push @texts, $block->{text};
+                }
+              }
+            }
+            if (@texts) {
+              my $text = join("\n", @texts);
+              my $final_line;
+              for my $line (reverse split /\n/, $text, -1) {
+                $line =~ s/\s+\z//;
+                if ($line =~ /\S/) {
+                  $final_line = $line;
+                  last;
+                }
+              }
+              if (defined $final_line && (substr($final_line, -1, 1) eq "?" || index($final_line, "BLOCKED") >= 0)) {
+                print "Q $timestamp" . chr(10);
+              }
+            }
+          }
+        }
+      }
+      if (@job_ids && eval { require JSON::PP; 1 }) {
+        my @dirs = split /\n/, defined $ENV{LS_JOB_DIRS} ? $ENV{LS_JOB_DIRS} : "";
+        my @finished_ids;
+        my $resolved = 0;
+        my $all_finished = 1;
+        for my $printed_id (@job_ids) {
+          my $id = $printed_id;
+          my %visited;
+          my $found_initial = 0;
+          my $invalid = 0;
+          my $finished = 0;
+          while (1) {
+            if ($visited{$id}++) {
+              $invalid = 1;
+              last;
+            }
+            my $path;
+            for my $dir (@dirs) {
+              next unless length $dir;
+              my $candidate = "$dir/$id.json";
+              if (-f $candidate) {
+                $path = $candidate;
+                last;
+              }
+            }
+            if (!defined $path) {
+              if (!$found_initial) {
+                last;
+              }
+              $invalid = 1;
+              last;
+            }
+            if (!$found_initial) {
+              $found_initial = 1;
+              $resolved++;
+            }
+            my $record_fh;
+            if (!open($record_fh, "<", $path)) {
+              $invalid = 1;
+              last;
+            }
+            local $/;
+            my $record_json = <$record_fh>;
+            close $record_fh;
+            my $record = eval { JSON::PP::decode_json($record_json) };
+            if ($@ || ref($record) ne "HASH") {
+              $invalid = 1;
+              last;
+            }
+            my $successor = $record->{supersededBy};
+            if (defined $successor && !ref($successor) && length $successor) {
+              if ($successor !~ /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/) {
+                $invalid = 1;
+                last;
+              }
+              $id = $successor;
+              next;
+            }
+            my $status;
+            if (ref($record->{result}) eq "HASH" && exists $record->{result}{status} && defined $record->{result}{status}) {
+              $status = $record->{result}{status};
+            } else {
+              $status = $record->{status};
+            }
+            $finished = 1 if defined $status && !ref($status) && ($status eq "DONE" || $status eq "DONE_WITH_CONCERNS");
+            last;
+          }
+          next unless $found_initial;
+          if ($invalid || !$finished) {
+            $all_finished = 0;
+          } else {
+            push @finished_ids, $printed_id;
+          }
+        }
+        if ($resolved && $all_finished) {
+          print "IDS " . join(" ", @finished_ids) . chr(10);
+        }
       }
     }
   ')
+  event_state=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 6) == "STATE " { print substr($0, 7); exit }')
+  event_last=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 5) == "LAST " { print substr($0, 6); exit }')
+  event_last=$(printf '%s' "${event_last:-none}" | perl -pe 's/\s/_/g')
+  event_ids=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 4) == "IDS " { print substr($0, 5); exit }')
+  event_question=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 2) == "Q " { print substr($0, 3); exit }')
+  event_settles=$(printf '%s\n' "$event_output" | awk 'substr($0, 1, 8) == "SETTLES " { print substr($0, 9); exit }')
+  case $event_settles in
+    ''|*[!0-9]*) event_settles=0 ;;
+  esac
   case $event_state in
     'IN-TOOL '*) state=$event_state ;;
-    SETTLED)
-      if [ "$age" -gt "$settled_max" ]; then
+    SETTLED|WEDGED)
+      if [ "$event_state" = WEDGED ]; then
+        state=WEDGED
+      elif [ "$age" -gt "$settled_max" ]; then
         state=SETTLED-OLD
       else
         state=SETTLED
       fi
       ;;
+    'DEAD '* ) state="DEAD-PROVIDER ${event_state#DEAD }" ;;
     *)
       if [ "$age" -gt 300 ]; then
         state='STALL no tool, not settled'
@@ -129,6 +388,42 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         state=RUNNING
       fi
       ;;
+  esac
+  park=no
+  loop=no
+  case $state in
+    SETTLED|SETTLED-OLD)
+      case $event_question in
+        ''|*[!0-9]*) ;;
+        *) [ "$ruling_ms" -le "$event_question" ] && park=yes ;;
+      esac
+      if [ "$ruling_time" -gt 0 ] && [ "$event_settles" -ge 2 ]; then
+        worktree=
+        for lane_state in "$run"/*-"$n.state"; do
+          [ -f "$lane_state" ] || continue
+          lane_worktree=$(awk 'index($0, "worktree=") == 1 { print substr($0, 10); exit }' "$lane_state")
+          if [ -n "$lane_worktree" ]; then
+            worktree=$lane_worktree
+            break
+          fi
+        done
+        if [ -n "$worktree" ]; then
+          if commit_time=$(git -C "$worktree" log -1 --format=%ct </dev/null 2>/dev/null); then
+            case $commit_time in
+              ''|*[!0-9]*) ;;
+              *) [ "$commit_time" -le "$ruling_time" ] && loop=yes ;;
+            esac
+          fi
+        fi
+      fi
+      [ "$park" = no ] || state="$state PARK"
+      [ "$loop" = no ] || state="$state LOOP"
+      if [ "$park" = yes ] || [ "$loop" = yes ]; then
+        state="$state last=$event_last"
+      fi
+      [ -z "$event_ids" ] || state="$state DONE-UNREAD $event_ids"
+      ;;
+    WEDGED) state="$state last=$event_last" ;;
   esac
   printf '%-6s %-8s %-18s age=%-6s %s\n' "$n" "$pid" "$info" "$age" "$state"
   rows=$((rows + 1))

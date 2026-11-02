@@ -1,12 +1,19 @@
 #!/bin/bash
-# lanewatch [--once] <run-dir> [ssh-target]: print each lane's first SETTLED
-# or STALL row, so a monitor need not poll. `--once` prints the state now and
-# exits; otherwise the watcher repeats every LANEWATCH_INTERVAL seconds.
-# Every ssh or lanestat failure prints WATCH-ERROR: silence means no lane
-# changed state, never that the watcher died. A queued prompt can return while
-# its tool call continues; lanestat classifies the last tool event, not that
-# trailing response. Never read a lane's fiber-<n>-pi.in: it is a FIFO.
+# lanewatch [--once] <run-dir> [ssh-target]: print dated lane events once per
+# settle minute. PARK means answer with a ruling/fence grant; LOOP is for the
+# orchestrator to decide; WEDGED means abort and resend; DEAD-PROVIDER means do
+# not re-wake; DONE-UNREAD <ids> means message the lane naming those jobs.
+# With LANEWATCH_INBOX set, those events are also sent to that inbox. Plain
+# SETTLED and STALL rows are stdout-only. The watcher never stops a lane.
+# The minute key mixes this clock with lanestat's age: clock skew, ssh latency,
+# or a new log write near a minute boundary can announce the same settle twice.
+# Every ssh, lanestat or inbox-send failure prints WATCH-ERROR. Set
+# DELEGATE_JOBS_DIR on the watcher when lane job records live under a non-/tmp
+# TMPDIR. Never read a lane's fiber-<n>-pi.in: it is a FIFO. Silence means no
+# new event, not failure.
 set -u
+
+ts() { date "+%Y-%m-%d %H:%M:%S %Z"; }
 
 usage() {
   printf 'usage: lanewatch [--once] <run-dir> [ssh-target]\n' >&2
@@ -38,8 +45,21 @@ label=local
 [ -z "$target" ] || label=$target
 seen=
 
+deliver() {
+  local message=$1 rc
+  if printf '%s\n' "$message" | bash "$here/inbox-send" "$LANEWATCH_INBOX" lanewatch >/dev/null 2>&1; then
+    return 0
+  else
+    rc=$?
+  fi
+  printf '%s WATCH-ERROR %s inbox-send exit %s\n' "$(ts)" "$label" "$rc"
+  return 1
+}
+
 cycle() {
-  local out rc line n kind key quoted_run
+  local out rc line quoted_run n agev kind key at age_index state_index i state
+  local seen_last done_index sorted_ids dated_line has_new deliver_new token
+  local fields=() kinds=() keys=() key_kinds=() new_keys=() done_ids=()
   if [ -n "$target" ]; then
     printf -v quoted_run '%q' "$run"
     if out=$(ssh -o BatchMode=yes -o ConnectTimeout=20 "$target" bash -s -- "$quoted_run" \
@@ -47,7 +67,7 @@ cycle() {
       :
     else
       rc=$?
-      printf 'WATCH-ERROR %s lanestat exit %s\n' "$label" "$rc"
+      printf '%s WATCH-ERROR %s lanestat exit %s\n' "$(ts)" "$label" "$rc"
       return 0
     fi
   else
@@ -55,26 +75,95 @@ cycle() {
       :
     else
       rc=$?
-      printf 'WATCH-ERROR %s lanestat exit %s\n' "$label" "$rc"
+      printf '%s WATCH-ERROR %s lanestat exit %s\n' "$(ts)" "$label" "$rc"
       return 0
     fi
   fi
 
   while IFS= read -r line; do
-    case $line in
-      *SETTLED*|*STALL*) ;;
+    IFS=$' \t\n' read -r -a fields <<<"$line"
+    [ "${#fields[@]}" -gt 0 ] || continue
+    n=${fields[0]}
+    age_index=-1
+    for ((i = 0; i < ${#fields[@]}; i++)); do
+      case ${fields[$i]} in
+        age=*) age_index=$i; break ;;
+      esac
+    done
+    [ "$age_index" -ge 0 ] || continue
+    state_index=$((age_index + 1))
+    [ "$state_index" -lt "${#fields[@]}" ] || continue
+    agev=${fields[$age_index]#age=}
+    case $agev in ''|*[!0-9]*) agev=0 ;; esac
+    state=${fields[$state_index]}
+    kinds=()
+    done_ids=()
+    done_index=-1
+    case $state in
+      SETTLED|SETTLED-OLD)
+        kinds+=(settled)
+        seen_last=no
+        for ((i = state_index + 1; i < ${#fields[@]}; i++)); do
+          token=${fields[$i]}
+          case $token in
+            DONE-UNREAD) done_index=$i; break ;;
+            last=*) seen_last=yes ;;
+            PARK) [ "$seen_last" = yes ] || kinds+=(park) ;;
+            LOOP) [ "$seen_last" = yes ] || kinds+=(loop) ;;
+          esac
+        done
+        if [ "$done_index" -ge 0 ]; then
+          for ((i = done_index + 1; i < ${#fields[@]}; i++)); do
+            done_ids+=("${fields[$i]}")
+          done
+        fi
+        ;;
+      WEDGED) kinds+=(wedged) ;;
+      DEAD-PROVIDER) kinds+=(dead) ;;
+      STALL) kinds+=(stall) ;;
       *) continue ;;
     esac
-    n=${line%% *}
-    kind=stall
-    case $line in *SETTLED*) kind=settled ;; esac
-    key="$label-$n-$kind"
-    if printf '%s\n' "$seen" | grep -Fqx "$key"; then
-      continue
+    [ "${#done_ids[@]}" -eq 0 ] || kinds+=(done)
+    at=$(( ($(date +%s) - agev) / 60 ))
+    keys=()
+    key_kinds=()
+    sorted_ids=
+    if [ "${#done_ids[@]}" -gt 0 ]; then
+      sorted_ids=$(printf '%s\n' "${done_ids[@]}" | LC_ALL=C sort -u | paste -sd, -)
     fi
-    seen="${seen}${key}
-"
-    printf '%s lane %s\n' "$label" "$line"
+    for kind in "${kinds[@]}"; do
+      if [ "$kind" = done ]; then
+        key="$label-$n-done-$sorted_ids"
+      else
+        key="$label-$n-$kind-$at"
+      fi
+      keys+=("$key")
+      key_kinds+=("$kind")
+    done
+    new_keys=()
+    has_new=no
+    deliver_new=no
+    for ((i = 0; i < ${#keys[@]}; i++)); do
+      key=${keys[$i]}
+      if printf '%s\n' "$seen" | grep -Fqx -- "$key"; then
+        continue
+      fi
+      new_keys+=("$key")
+      has_new=yes
+      case ${key_kinds[$i]} in park|loop|wedged|dead|done) deliver_new=yes ;; esac
+    done
+    [ "$has_new" = yes ] || continue
+    dated_line="$(ts) $label lane $line"
+    printf '%s\n' "$dated_line"
+    if [ "$deliver_new" = yes ] && [ -n "${LANEWATCH_INBOX:-}" ]; then
+      if deliver "$dated_line"; then
+        for key in "${new_keys[@]}"; do seen="${seen}${key}
+"; done
+      fi
+    else
+      for key in "${new_keys[@]}"; do seen="${seen}${key}
+"; done
+    fi
   done <<< "$out"
 }
 

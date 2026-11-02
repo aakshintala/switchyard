@@ -134,6 +134,7 @@ cat >"$STUB/ssh" <<'STUB'
 #!/usr/bin/env bash
 # Stub ssh for tests: log the arguments, run the remote command locally.
 printf '%s\n' "$@" >>"$SSH_LOG"
+if [ "${SSH_FAIL:-}" = yes ]; then exit 255; fi
 cmd="${@: -1}"
 exec bash -c "$cmd"
 STUB
@@ -147,6 +148,15 @@ remote_out="$(printf 'remote hello' | PATH="$STUB:$PATH" INBOX_HOST="mac-host" b
 [ "$(cat "$remote_out")" = "remote hello" ] || fail "remote file is complete: [$(cat "$remote_out")]"
 grep -q 'mac-host' "$SSH_LOG" || fail "stub ssh got the host: [$(cat "$SSH_LOG" 2>/dev/null)]"
 grep -q 'inbox-send' "$SSH_LOG" || fail "stub ssh got the command: [$(cat "$SSH_LOG" 2>/dev/null)]"
+expected_ssh_options=$(printf '%s\n' -o BatchMode=yes -o ConnectTimeout=10)
+[ "$(head -n 4 "$SSH_LOG")" = "$expected_ssh_options" ] \
+  || fail "remote ssh uses bounded non-interactive options first: [$(head -n 6 "$SSH_LOG")]"
+[ "$(sed -n '5p' "$SSH_LOG")" = mac-host ] || fail "remote ssh options precede the host"
+FAILED_REMOTE="$T/failed-remote-inbox"
+printf 'failure' | PATH="$STUB:$PATH" INBOX_HOST=mac-host SSH_FAIL=yes \
+  bash "$SEND" "$FAILED_REMOTE" lane >"$T/failed-remote.out" 2>"$T/failed-remote.err"; rc=$?
+[ "$rc" -ne 0 ] || fail "failed remote ssh makes inbox-send fail (got $rc)"
+[ ! -e "$FAILED_REMOTE" ] || fail "failed remote ssh delivers no file"
 
 # inbox-drain on an empty inbox prints INBOX n=0 and exits 0.
 EMPTYDRAIN="$T/emptydrain"
