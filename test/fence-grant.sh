@@ -83,14 +83,15 @@ cat >"$FW_SSH" <<'SSH_STUB'
 printf '%s\n' "$*" >>"$T/ssh.log"
 [ "${SSH_FAIL:-0}" != 1 ] || { echo 'ssh stub failure' >&2; exit 1; }
 if [ -n "${SSH_OUT:-}" ]; then printf '%s\n' "$SSH_OUT"; else
-  printf '%s\n' 'FWSEC=UPTIME' 'FWSEC=AGENTS' '[]' 'FWSEC=PILANES' PILANESOK 'FWSEC=END'
+  printf '%s\n' 'FWSEC=UPTIME' 'FWSEC=AGENTS' '[]' 'FWSEC=DELEGATE' DELEGATEOK \
+    'FWSEC=PILANES' PILANESOK 'FWSEC=END'
 fi
 SSH_STUB
 chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH"
 
 reset_case() {
-  rm -rf "$FW_RUN" "$T/blobs" "$T/pr"
-  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr"
+  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
+  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
   : >"$T/gh.log"
   : >"$T/claude.log"
   : >"$T/ssh.log"
@@ -114,6 +115,15 @@ TREE
   GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL=
   GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT=
   export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT
+  FW_DELEGATE_DIR="$T/delegate-jobs"
+  export FW_DELEGATE_DIR
+}
+
+# Writes one delegate registry record: name, status, supervisor pid, worktree.
+# The real registry writes one line of JSON whose first key is the status.
+write_delegate_job() {
+  printf '{"status":"%s","result":null,"supervisorPid":%s,"resume":{"cwd":"%s"}}\n' \
+    "$2" "$3" "$4" >"$T/delegate-jobs/$1.json"
 }
 
 run_fg() {
@@ -303,11 +313,59 @@ PI_PID=""
 
 reset_case
 printf 'Grant 1\n\nTicket: 88\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-88-fence-grant-1.md"
-SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=PILANES\nfiber-88\nPILANESOK\nFWSEC=END'
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=PILANES\nfiber-88\nPILANESOK\nFWSEC=END'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 1 'live box pi lane hold'
 assert_out 'HELD docs/tui.md by lane #88' 'box pi lane output'
+
+reset_case
+sleep 300 &
+DJ_PID=$!
+write_delegate_job job-a RUNNING "$DJ_PID" /w/fiber-worktrees/tests/77-grid-read-ratchet
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+run_fg 88 --paths docs/tui.md --dry
+kill "$DJ_PID" 2>/dev/null || true
+assert_rc 1 'live Mac delegate lane hold'
+assert_out 'HELD docs/tui.md by lane #77' 'Mac delegate lane output'
+
+reset_case
+sleep 300 &
+DJ_PID=$!
+write_delegate_job job-a DONE "$DJ_PID" /w/fiber-worktrees/tests/77-grid-read-ratchet
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
+run_fg 88 --paths docs/tui.md --dry
+kill "$DJ_PID" 2>/dev/null || true
+assert_rc 0 'finished delegate job holds nothing'
+assert_out "$(printf 'GRANT docs/tui.md\nGRANT')" 'finished delegate job output'
+
+reset_case
+sleep 300 &
+DJ_PID=$!
+write_delegate_job job-a RUNNING "$DJ_PID" /w/fiber-worktrees/tests/77-grid-read-ratchet
+printf '%s\n' "$DJ_PID" >"$FW_RUN/fiber-77-pi.pid"
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+run_fg 88 --paths docs/tui.md --dry
+kill "$DJ_PID" 2>/dev/null || true
+assert_rc 1 'a lane in both sources holds once'
+assert_out 'HELD docs/tui.md by lane #77' 'deduplicated lane output'
+
+reset_case
+write_delegate_job job-a RUNNING 2147483646 /w/fiber-worktrees/tests/77-grid-read-ratchet
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'dead delegate supervisor holds nothing'
+assert_out "$(printf 'GRANT docs/tui.md\nGRANT')" 'dead delegate supervisor output'
+
+reset_case
+printf 'Grant 1\n\nTicket: 88\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-88-fence-grant-1.md"
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nfiber-88\nDELEGATEOK\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
+export SSH_OUT
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 1 'live box delegate lane hold'
+assert_out 'HELD docs/tui.md by lane #88' 'box delegate lane output'
 
 reset_case
 write_blob docs/tui.md $'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n'
@@ -568,7 +626,7 @@ run_fg 77 --paths docs/tui.md
 assert_error 'ssh output missing markers' 'ERROR ssh box '
 
 reset_case
-SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=PILANES\nfiber-88\nFWSEC=END'
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=PILANES\nfiber-88\nFWSEC=END'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md
 assert_error 'box pi section missing marker' 'ERROR box pi lanes: no PILANESOK marker'
@@ -577,6 +635,17 @@ reset_case
 rm -rf "$FW_RUN"
 run_fg 77 --paths docs/tui.md
 assert_error 'Mac pi probe missing run directory' 'ERROR mac pi lanes: run directory missing'
+
+reset_case
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nfiber-88\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
+export SSH_OUT
+run_fg 77 --paths docs/tui.md
+assert_error 'box delegate section missing marker' 'ERROR box delegate lanes: no DELEGATEOK marker'
+
+reset_case
+rm -rf "$T/delegate-jobs"
+run_fg 77 --paths docs/tui.md
+assert_error 'Mac delegate probe missing registry' 'ERROR mac delegate lanes: registry directory missing'
 
 reset_case
 mkdir "$FW_RUN/.fence-grant.lock"

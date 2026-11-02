@@ -83,7 +83,7 @@ _fw_box_probe() {
   FW_BOX_OK=0
   FW_BOX_RC=0
   FW_BOX_RAW=""
-  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
+  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
   case "$_fw_raw" in
     *FWSEC=UPTIME*FWSEC=END*) FW_BOX_OK=1; FW_BOX_RAW="$_fw_raw" ;;
   esac
@@ -129,6 +129,61 @@ fw_pi_lane_names_mac() {
   done
   [ "$_fw_hadf" -eq 1 ] && set -f
   printf '%s' "${_fw_names# }"
+  return 0
+}
+
+# Prints the ticket number of one live `delegate` registry record, or exits 1.
+# The record is one line of JSON whose first key is the top-level status, so
+# reading the head is the precise test for it. The ticket number is the leading
+# digits of the worktree directory name (`<area>/<ticket>-<slug>`).
+_fw_delegate_lane_name() {
+  _fw_st=$(head -c 40 "$1" 2>/dev/null) || return 1
+  case "$_fw_st" in *'"status":"RUNNING"'*) : ;; *) return 1;; esac
+  _fw_p=$(grep -o '"supervisorPid":[0-9]*' "$1" 2>/dev/null | head -1 | tr -dc 0-9)
+  case "$_fw_p" in ''|*[!0-9]*) return 1;; esac
+  kill -0 "$_fw_p" 2>/dev/null || return 1
+  _fw_c=$(grep -o '"cwd":"[^"]*"' "$1" 2>/dev/null | head -1)
+  [ -n "$_fw_c" ] || return 1
+  _fw_c=${_fw_c#*:\"}
+  _fw_c=${_fw_c%\"}
+  _fw_b=${_fw_c##*/}
+  _fw_t=${_fw_b%%-*}
+  case "$_fw_t" in ''|*[!0-9]*) return 1;; esac
+  printf '%s' "$_fw_t"
+  return 0
+}
+
+# Prints live Mac delegate-lane names, `fiber-<n>` per RUNNING registry record
+# whose supervisor is alive. A `delegate`-run lane is neither a `claude agents`
+# session nor a `fiber-<n>-pi.pid` file, so a probe reading only those two
+# loses the lane's hold once its grant files age out of the six-hour window --
+# the same defect the pi-lane probe below was added for. Exit 1 when the
+# registry directory is missing (fail closed).
+fw_delegate_lane_names_mac() {
+  _fw_dd=${FW_DELEGATE_DIR:-/tmp/delegate-jobs}
+  [ -d "$_fw_dd" ] || return 1
+  case "$-" in *f*) _fw_hadf=1;; *) _fw_hadf=0;; esac
+  set +f
+  _fw_names=""
+  for _fw_f in "$_fw_dd"/*.json; do
+    [ -f "$_fw_f" ] || continue
+    _fw_n=$(_fw_delegate_lane_name "$_fw_f") || continue
+    [ -n "$_fw_n" ] || continue
+    _fw_names="$_fw_names fiber-$_fw_n"
+  done
+  [ "$_fw_hadf" -eq 1 ] && set -f
+  printf '%s' "${_fw_names# }"
+  return 0
+}
+
+# Prints live box delegate-lane names from the one box probe. Exit 1 when ssh
+# failed or the section's end marker is missing (fail closed).
+fw_delegate_lane_names_box() {
+  _fw_box_probe
+  if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
+  _fw_s=$(_fw_box_section DELEGATE) || return 1
+  case "$_fw_s" in *DELEGATEOK*) : ;; *) return 1;; esac
+  printf '%s' "$_fw_s" | grep '^fiber-' | tr '\n' ' '
   return 0
 }
 
@@ -548,13 +603,19 @@ if mac_names=$(fw_lane_names_mac); then mac_ok=1; else mac_ok=0; mac_names=""; f
 if box_names=$(fw_box_lane_names); then box_ok=1; else box_ok=0; box_names=""; fi
 if pimac_names=$(fw_pi_lane_names_mac); then pimac_ok=1; else pimac_ok=0; pimac_names=""; fi
 if pibox_names=$(fw_pi_lane_names_box); then pibox_ok=1; else pibox_ok=0; pibox_names=""; fi
+if dmac_names=$(fw_delegate_lane_names_mac); then dmac_ok=1; else dmac_ok=0; dmac_names=""; fi
+if dbox_names=$(fw_delegate_lane_names_box); then dbox_ok=1; else dbox_ok=0; dbox_names=""; fi
 FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$mac_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/claudeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR claude agents $g"; exit 3; }
 [ "$box_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/ssherr" 2>/dev/null | tr '\n' ' '); echo "ERROR ssh box $g"; exit 3; }
 [ "$pimac_ok" -eq 1 ] || { echo "ERROR mac pi lanes: run directory missing"; exit 3; }
 [ "$pibox_ok" -eq 1 ] || { echo "ERROR box pi lanes: no PILANESOK marker"; exit 3; }
-# A lane is a Claude session or a pi lane; both hold their fence.
-lanes="$mac_names $box_names $pimac_names $pibox_names"
+[ "$dmac_ok" -eq 1 ] || { echo "ERROR mac delegate lanes: registry directory missing"; exit 3; }
+[ "$dbox_ok" -eq 1 ] || { echo "ERROR box delegate lanes: no DELEGATEOK marker"; exit 3; }
+# A lane is a Claude session, a pi lane or a delegate job; each holds its
+# fence. A pi lane launched by delegate shows up twice, so the list is
+# deduplicated to keep one HELD line per lane.
+lanes=$(printf '%s\n' $mac_names $box_names $pimac_names $pibox_names $dmac_names $dbox_names | grep . | sort -u | tr '\n' ' ')
 
 held=""
 
