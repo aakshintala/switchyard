@@ -243,17 +243,23 @@ wait_bounded() {
   fi
   wait "$wait_pid"
 }
+diag_dir="${GITHUB_WORKSPACE:-$PWD}/diag-1007"
+race_fail() {
+  mkdir -p "$diag_dir" && cp -a "$T" "$diag_dir/T-round-$race_round"
+  fail "$1"
+}
 for race_round in {1..20}; do
   race_state="$T/reaper-race-$race_round.state"
   sleep 0 &
   race_dead_pid=$!
-  wait_bounded "$race_dead_pid" || fail "race dead-owner setup finishes before its deadline"
+  wait_bounded "$race_dead_pid" || race_fail "race dead-owner setup finishes before its deadline"
   mkdir "$race_state.lock"
   printf '%s %s\n' "$(hostname)" "$race_dead_pid" >"$race_state.lock/pid"
-  bash "$TKT" "$race_state" add a "a-$race_round" >"$T/race-a-$race_round.log" 2>&1 &
+  PS4='+${EPOCHREALTIME} pid=$$ bpid=$BASHPID L${LINENO}: ' bash -x "$TKT" "$race_state" add a "a-$race_round" >"$T/race-a-$race_round.log" 2>"$T/race-a-$race_round.trace" &
   race_a_pid=$!
-  bash "$TKT" "$race_state" add b "b-$race_round" >"$T/race-b-$race_round.log" 2>&1 &
+  PS4='+${EPOCHREALTIME} pid=$$ bpid=$BASHPID L${LINENO}: ' bash -x "$TKT" "$race_state" add b "b-$race_round" >"$T/race-b-$race_round.log" 2>"$T/race-b-$race_round.trace" &
   race_b_pid=$!
+  echo "diag round $race_round dead=$race_dead_pid a=$race_a_pid b=$race_b_pid" >>"$T/diag-rounds.txt"
   if wait_bounded "$race_a_pid"; then
     race_a_rc=0
   else
@@ -264,11 +270,11 @@ for race_round in {1..20}; do
   else
     race_b_rc=$?
   fi
-  [ "$race_a_rc" = "0" ] || fail "race writer a succeeds in round $race_round"
-  [ "$race_b_rc" = "0" ] || fail "race writer b succeeds in round $race_round"
-  [ "$(bash "$TKT" "$race_state" list a)" = "a-$race_round" ] || fail "race value a survives in round $race_round"
-  [ "$(bash "$TKT" "$race_state" list b)" = "b-$race_round" ] || fail "race value b survives in round $race_round"
-  [ ! -e "$race_state.lock" ] || fail "race leaves no lock in round $race_round"
+  [ "$race_a_rc" = "0" ] || race_fail "race writer a succeeds in round $race_round"
+  [ "$race_b_rc" = "0" ] || race_fail "race writer b succeeds in round $race_round"
+  [ "$(bash "$TKT" "$race_state" list a)" = "a-$race_round" ] || race_fail "race value a survives in round $race_round"
+  [ "$(bash "$TKT" "$race_state" list b)" = "b-$race_round" ] || race_fail "race value b survives in round $race_round"
+  [ ! -e "$race_state.lock" ] || race_fail "race leaves no lock in round $race_round"
 done
 
 # A second reaper cannot take the dead owner's lock while the first reaper pauses.
