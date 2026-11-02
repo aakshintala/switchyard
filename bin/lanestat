@@ -34,9 +34,10 @@
 # and sends PARK, LOOP, WEDGED, DEAD-PROVIDER and DONE-UNREAD to
 # LANEWATCH_INBOX when it is set; plain SETTLED and STALL stay on stdout. The
 # watcher never stops a lane. Set DELEGATE_JOBS_DIR on the watcher when a
-# lane's jobs live under a non-`/tmp` TMPDIR, or DONE-UNREAD stays silent.
-# DELEGATE_JOBS_DIR, TMPDIR, JOB_RECORD_SYSTEM_DIR and LANESTAT_SETTLED_MAX are
-# not forwarded over ssh; remote values come from the remote environment.
+# lane's jobs live under a non-`/tmp` TMPDIR, or DONE-UNREAD stays silent; the
+# value reaches remote targets.
+# TMPDIR, JOB_RECORD_SYSTEM_DIR and LANESTAT_SETTLED_MAX are not forwarded over
+# ssh; only those come from the remote environment.
 #
 # A pid file outlives its lane and the host can reuse its number. Keep a row only
 # when `ps -o comm=` still names pi. A lane's TMPDIR is `~/.cache/tmp`, not
