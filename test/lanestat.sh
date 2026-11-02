@@ -832,7 +832,7 @@ printf '%s\n' \
   '{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Which?"}],"timestamp":1700000000001}}' \
   '{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","name":"read"}],"timestamp":1700000000002}}' \
   '{"type":"agent_settled"}' >>"$case_dir/fiber-904-pi.jsonl"
-check_case_row 904 'SETTLED PARK last=none$'
+check_case_row 904 'SETTLED$'
 write_question_lane 905 1700000000000 'Question?'
 printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Final."}],"timestamp":1700000000001}}\n' \
   >>"$case_dir/fiber-905-pi.jsonl"
@@ -927,6 +927,22 @@ write_ruling "$case_dir" switchyard-928-ruling-1.md 1700000001
 write_text_message "$case_dir/fiber-928-pi.jsonl" 1700000002000 'Second question?'
 printf '{"type":"agent_settled"}\n' >>"$case_dir/fiber-928-pi.jsonl"
 check_case_row 928 'SETTLED PARK last=none$'
+write_question_lane 970 1700000000000 'Which?'
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","name":"read"}],"timestamp":1700000000001}}' \
+  '{"type":"agent_settled"}' >>"$case_dir/fiber-970-pi.jsonl"
+check_case_row 970 'SETTLED$'
+write_question_lane 971 1700000000000 'Which?'
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"still thinking"}],"timestamp":1700000000001}}' \
+  '{"type":"agent_settled"}' >>"$case_dir/fiber-971-pi.jsonl"
+check_case_row 971 'SETTLED PARK last=none$'
+write_question_lane 972 1700000000000 'First?'
+printf '%s\n' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","name":"read"}],"timestamp":1700000000001}}' \
+  '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Second?"}],"timestamp":1700000000002}}' \
+  '{"type":"agent_settled"}' >>"$case_dir/fiber-972-pi.jsonl"
+check_case_row 972 'SETTLED PARK last=none$'
 
 # PARK answer boundary: strictly newer rulings answer; equality is still open.
 for pair in '921 1699999999 park' '922 1700000000 park' '923 1700000001 plain'; do

@@ -237,8 +237,12 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         $after_prompt = 0;
       }
     }
-    if (/"type":"message_end","message":{"role":"assistant"/ && /"type":"text"/) {
-      $question_line = $_;
+    if (/"type":"message_end","message":{"role":"assistant"/) {
+      if (/"type":"text"/) {
+        $question_line = $_;
+      } elsif (/"type":"toolCall"/) {
+        $question_line = undef;
+      }
     }
     if ($ruling_ms > 0 && /"type":"message_end"/) {
       my @timestamps = /"timestamp":(\d+)/g;
