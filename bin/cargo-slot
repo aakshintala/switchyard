@@ -155,6 +155,8 @@ def acquire_slot(directory, n):
     # One LOCK_NB try per slot file per pass; a full pass that finds none
     # free prints the waiting line once, then sleeps 0.1 s and rescans.
     # Only BlockingIOError means contention; any other error fails closed.
+    # Test-only hook: with CARGO_SLOT_CLOCK_FIFO set, each pass blocks on one
+    # line from that FIFO, read as the seconds elapsed, instead of sleeping.
     notice_value = os.environ.get("CARGO_SLOT_NOTICE_SECS", "")
     interval = 60.0
     if re.fullmatch(r"[0-9]+(\.[0-9]+)?", notice_value):
@@ -168,6 +170,8 @@ def acquire_slot(directory, n):
         os.makedirs(directory, exist_ok=True)
     except OSError as err:
         fail(1, "cannot create slot directory %s: %s" % (directory, err.strerror))
+    clock_fifo = os.environ.get("CARGO_SLOT_CLOCK_FIFO", "")
+    clock = open(clock_fifo) if clock_fifo else None
     warned = False
     notices_enabled = True
     started = None
@@ -204,8 +208,12 @@ def acquire_slot(directory, n):
                 sys.stderr.flush()
                 warned = True
                 started = time.monotonic()
-            time.sleep(0.1)
-            n_elapsed = int((time.monotonic() - started) / interval)
+            if clock is None:
+                time.sleep(0.1)
+                elapsed = time.monotonic() - started
+            else:
+                elapsed = float(clock.readline())
+            n_elapsed = int(elapsed / interval)
             if notices_enabled and n_elapsed > last_n:
                 line = "cargo-slot: waiting %d min" % n_elapsed
                 if holder_pid_value is not None:
