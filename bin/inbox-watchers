@@ -1,0 +1,139 @@
+#!/bin/sh
+# inbox-watchers [--host <ssh-target>] <inbox-dir>...: report each inbox that no
+# running inbox-wait process watches.
+# Usage: inbox-watchers [--host <ssh-target>] <inbox-dir>...
+#        For each dir, in argument order: when no inbox-wait process watches it,
+#        prints `NO-WATCHER <dir as given> unread=<n>`; a watched dir prints
+#        nothing. Exits 0 when the check ran, whatever it found. Exits 2 with
+#        usage on stderr when no dir is given.
+#        Watches: a process whose argument list (`ps -eo args=`) holds the word
+#        `inbox-wait` (the script name, or a path ending in `/inbox-wait`) and
+#        then the dir as its next argument. Both sides lose trailing slashes, and
+#        a leading `~/` becomes $HOME/ on the host being checked. `/d2` and
+#        `/d/sub` do not watch `/d`.
+#        unread=<n>: regular *.md files directly in the dir, the rule
+#        inbox-wait's waiting() uses. Files in read/ and dotfiles do not count.
+#        A missing dir has unread=0 and is still reported when unwatched.
+#        --host <H>: runs the same check on H in one `ssh H sh -s` call, sending
+#        this file on stdin, so `~/` expands on H and ps lists H's processes.
+#        When ssh fails, prints `WATCH-ERROR inbox-watchers ssh <H> exit <rc>` on
+#        stdout and `inbox-watchers: ssh <H> failed (exit <rc>)` on stderr, then
+#        exits with that non-zero code. A failed check never looks clean, and a
+#        caller that reads stdout never sees silence.
+#        A failed process listing exits 1 with `inbox-watchers: process listing
+#        failed` on stderr.
+#        INBOX_WATCHERS_PS replaces the listing command (default `ps -eo args=`);
+#        tests use it. It is not forwarded over ssh.
+# POSIX so the --host path can send it to `sh -s` without a remote copy.
+set -u
+
+usage() {
+  printf 'usage: inbox-watchers [--host <ssh-target>] <inbox-dir>...\n' >&2
+  exit 2
+}
+
+# shquote: print $1 as one POSIX shell word.
+shquote() {
+  q=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+  printf "'%s'" "$q"
+}
+
+# normalise: print a dir with a leading ~/ expanded to $HOME/ and trailing
+# slashes removed.
+normalise() {
+  n=$1
+  # shellcheck disable=SC2088  # the quoted pattern is a literal ~/ to match, not a path to expand
+  case $n in
+    '~/'*) n=${HOME%/}/${n#'~/'} ;;
+  esac
+  while [ "$n" != / ]; do
+    case $n in
+      */) n=${n%/} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$n"
+}
+
+# watched <normalised-dir>: status 0 when a line of $procs holds `inbox-wait`
+# followed by that dir as the next word.
+watched() {
+  want=$1
+  while IFS= read -r line; do
+    set -f
+    prev=
+    for tok in $line; do
+      if [ -n "$prev" ] && [ "$(normalise "$tok")" = "$want" ]; then
+        set +f
+        return 0
+      fi
+      prev=
+      case $tok in
+        inbox-wait|*/inbox-wait) prev=1 ;;
+      esac
+    done
+    set +f
+  done <<INBOX_WATCHERS_PROCS
+$procs
+INBOX_WATCHERS_PROCS
+  return 1
+}
+
+# unread <normalised-dir>: print the count of regular *.md files directly in it.
+unread() {
+  n=0
+  for f in "$1"/*.md; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
+
+# check DIR...: print a NO-WATCHER line for each unwatched dir.
+check() {
+  procs=$(${INBOX_WATCHERS_PS:-ps -eo args=}) || {
+    printf 'inbox-watchers: process listing failed\n' >&2
+    exit 1
+  }
+  for d in "$@"; do
+    nd=$(normalise "$d")
+    if ! watched "$nd"; then
+      printf 'NO-WATCHER %s unread=%s\n' "$d" "$(unread "$nd")"
+    fi
+  done
+}
+
+host=
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --host)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || usage
+      host=$2
+      shift
+      ;;
+    --) shift; break ;;
+    -*) usage ;;
+    *) break ;;
+  esac
+  shift
+done
+[ "$#" -ge 1 ] || usage
+
+if [ -n "$host" ]; then
+  self=$(command -v "$0") || { printf 'inbox-watchers: cannot find own script\n' >&2; exit 1; }
+  cmd="sh -s -- --"
+  for d in "$@"; do
+    cmd="$cmd $(shquote "$d")"
+  done
+  rc=0
+  ssh -o BatchMode=yes -o ConnectTimeout=20 "$host" "$cmd" <"$self" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'WATCH-ERROR inbox-watchers ssh %s exit %s\n' "$host" "$rc"
+    printf 'inbox-watchers: ssh %s failed (exit %s)\n' "$host" "$rc" >&2
+    exit "$rc"
+  fi
+  exit 0
+fi
+
+check "$@"
+exit 0
