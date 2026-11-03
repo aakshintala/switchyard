@@ -108,6 +108,11 @@ expect_script_err "hand-expanded steps" "scripts/check" '## Gate\n\ncargo fmt --
 expect_script_err "disallowed leading assignment" "scripts/check" '## Gate\n\nFEATURES=x scripts/check\n' 'FEATURES=x scripts/check'
 expect_script_err "script name as a prefix of another word" "scripts/check" '## Gate\n\nscripts/checker --base abc\n' 'scripts/checker --base abc'
 expect_script_err "different script" "scripts/check" '## Gate\n\nscripts/other\n' 'scripts/other'
+# an operator hidden in an assignment value is rejected, so it cannot split the command
+expect_script_err "operator glued to an assignment value" "scripts/check" '## Gate\n\nCARGO_BUILD_JOBS=1|| scripts/check\n' 'CARGO_BUILD_JOBS=1|| scripts/check'
+expect_script_err "semicolon glued to an assignment value" "scripts/check" '## Gate\n\nCARGO_BUILD_JOBS=1;scripts/check\n' 'CARGO_BUILD_JOBS=1;scripts/check'
+expect_script_err "quoted assignment value" "scripts/check" "## Gate\n\nSCCACHE_DIR='/tmp/x' scripts/check\n" "SCCACHE_DIR='/tmp/x' scripts/check"
+expect_script_out "plain assignment value" "scripts/check" '## Gate\n\nSCCACHE_DIR=/tmp/x scripts/check\n' 'SCCACHE_DIR=/tmp/x scripts/check'
 
 # without --script the hand-expanded line still passes
 expect_out "no --script accepts a hand-expanded line" '## Gate\n\ncargo fmt --check && cargo nextest run\n' 'cargo fmt --check && cargo nextest run'

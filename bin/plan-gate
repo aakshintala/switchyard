@@ -17,9 +17,13 @@
 #        With --script CMD, the command must run the repo's gate script CMD as
 #        its workflow doc writes it. Leading NAME=VALUE assignments are allowed
 #        only for CARGO_BUILD_JOBS, CARGO_INCREMENTAL, NEXTEST_TEST_THREADS,
-#        RUSTC_WRAPPER, SCCACHE_* and KACHE_*. Then the command must start with
-#        CMD (or ./CMD, or bash CMD or bash ./CMD) at a word boundary. Any
-#        other command exits 1 with the same stdout and stderr rules.
+#        RUSTC_WRAPPER, SCCACHE_* and KACHE_*. Each such VALUE must be an
+#        unquoted plain word of [A-Za-z0-9_./:@%+,=-]: a quoted value or one
+#        with a shell metacharacter (such as `1||` or `1;`) is rejected, since
+#        it can hide an operator from the word check. Then the command must
+#        start with CMD (or ./CMD, or bash CMD or bash ./CMD) at a word
+#        boundary. Any other command exits 1 with the same stdout and stderr
+#        rules.
 #        Exit 2 on bad usage or an unreadable plan file.
 set -euo pipefail
 
@@ -107,6 +111,9 @@ if [ -n "$script" ]; then
     case "${first%%=*}" in
       CARGO_BUILD_JOBS|CARGO_INCREMENTAL|NEXTEST_TEST_THREADS|RUSTC_WRAPPER|SCCACHE_*|KACHE_*) ;;
       *) rest="" ; break ;;
+    esac
+    case "${first#*=}" in
+      *[!A-Za-z0-9_./:@%+,=-]*) rest="" ; break ;;
     esac
     rest="${rest#"$first"}"
     rest="${rest#"${rest%%[![:space:]]*}"}"
