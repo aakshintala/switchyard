@@ -1009,9 +1009,51 @@ printf '%s\n' \
 run_wait 7
 [ "$CODE" = "0" ] || fail "new attempt-1 check eventually passes (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} CI: pass" <<<"$OUT" || fail "new attempt-1 pass line: [$OUT]"
-grep -q 'pending=1 passed=1 failing=0' "$T/stderr.txt" \
+# the newer run replaces the draft run: the draft's CI (draft) no longer counts
+grep -Fxq "gh-ci: ${A:0:8} pending=1 passed=0 failing=0" "$T/stderr.txt" \
+  && grep -Fxq "gh-ci: ${A:0:8} pending=0 passed=1 failing=0" "$T/stderr.txt" \
   || fail "new attempt-1 check was reported pending before it passed: [$(cat "$T/stderr.txt")]"
 grep -q '^7$' "$T/state/sleeps.txt" || fail "new attempt-1 pending check was polled again"
+
+# --- cases: a draft run's completed result does not settle over the ready run
+# --- on the same head (#992). The draft run is attempt 1 and completed; marking
+# --- the PR ready starts attempt 1 of the same workflow, still in progress.
+RULES_CI_UPPER='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"CI"}]}}]'
+# draft run completed with CI passing; ready run in progress with CI pending
+reset_state
+set_heads "$A"; echo "$RULES_CI_UPPER" >"$T/state/rules"
+touch "$T/state/keep-checks-across-runs"
+set_checks '[{"name":"CI","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/1/job/11"},{"name":"CI","bucket":"pending","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/2/job/21"}]'
+printf '%s\n' '[{"id":1,"name":"CI","event":"pull_request","status":"completed","attempt":1},{"id":2,"name":"CI","event":"pull_request","status":"in_progress","attempt":1}]' >"$T/state/runs.txt"
+run_wait 7 --timeout 7
+[ "$CODE" = "124" ] || fail "draft completed, ready in progress stays pending (got $CODE): [$OUT]"
+grep -q '^pending: CI$' <<<"$OUT" || fail "ready run's CI named pending: [$OUT]"
+
+# same, then the ready run completes with CI failing: the wait names that job
+reset_state
+set_heads "$A"; echo "$RULES_CI_UPPER" >"$T/state/rules"
+touch "$T/state/keep-checks-across-runs"
+set_checks \
+  '[{"name":"CI","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/1/job/11"},{"name":"CI","bucket":"pending","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/2/job/21"}]' \
+  '[{"name":"CI","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/1/job/11"},{"name":"CI","bucket":"fail","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/2/job/21"}]'
+printf '%s\n' \
+  '[{"id":1,"name":"CI","event":"pull_request","status":"completed","attempt":1},{"id":2,"name":"CI","event":"pull_request","status":"in_progress","attempt":1}]' \
+  '[{"id":1,"name":"CI","event":"pull_request","status":"completed","attempt":1},{"id":2,"name":"CI","event":"pull_request","status":"completed","attempt":1}]' \
+  >"$T/state/runs.txt"
+run_wait 7
+[ "$CODE" = "1" ] || fail "ready run's failed CI fails the wait (got $CODE): [$OUT]"
+grep -q '^failing: CI$' <<<"$OUT" || fail "ready run's failing job named: [$OUT]"
+
+# Fiber's shape: the draft run's aggregate is CI (draft); the ready run has CI.
+# Shared non-required names (Selection) take the ready run's result, not the
+# draft run's: the ready run's failing Selection is what verdict reports.
+reset_state
+echo "$RULES_CI_UPPER" >"$T/state/rules"
+touch "$T/state/keep-checks-across-runs"
+set_checks '[{"name":"CI (draft)","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/1/job/11"},{"name":"Selection","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/1/job/12"},{"name":"CI","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/2/job/21"},{"name":"Selection","bucket":"fail","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/2/job/22"}]'
+printf '%s\n' '[{"id":1,"name":"CI","event":"pull_request","status":"completed","attempt":1},{"id":2,"name":"CI","event":"pull_request","status":"in_progress","attempt":1}]' >"$T/state/runs.txt"
+run_verdict feature/x
+[ "$OUT" = "$(printf 'NOT RED\nNON-BLOCKING: Selection')" ] || fail "shared Selection takes the ready run's failure: [$OUT] [$(cat "$T/stderr.txt")]"
 
 # required names unreadable: the newest-run map still uses every check, so a
 # cancelled required check from a superseded run is pending, not failing
@@ -1055,31 +1097,43 @@ grep -q "^pending: ci$" <<<"$OUT" || fail "rerun in flight names ci pending: [$O
 reset_state
 set_heads "$A"; echo "$RULES_CI_LINT" >"$T/state/rules"
 touch "$T/state/keep-checks-across-runs"
-set_checks '[{"name":"ci","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51"},{"name":"lint","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52"},{"name":"unit","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/53"},{"name":"package","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/54"},{"name":"ci","bucket":"pending","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/6/job/61"}]'
-printf '%s\n' '[{"id":5,"name":"CI","event":"pull_request","status":"completed","run_attempt":1},{"id":6,"name":"CI","event":"pull_request","status":"queued","run_attempt":1}]' >"$T/state/runs.txt"
+set_checks '[{"name":"ci","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51"},{"name":"lint","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/52"},{"name":"unit","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/53"},{"name":"package","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/54"},{"name":"ci","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/6/job/61"},{"name":"lint","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/6/job/62"},{"name":"unit","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/6/job/63"},{"name":"package","bucket":"pass","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/6/job/64"}]'
+printf '%s\n' '[{"id":5,"name":"CI","event":"pull_request","status":"completed","run_attempt":1},{"id":6,"name":"CI","event":"pull_request","status":"completed","run_attempt":1}]' >"$T/state/runs.txt"
 run_wait 7
 [ "$CODE" = "0" ] || fail "required pass-count reproduction settles (got $CODE): [$OUT]"
 grep -Fxq "gh-ci: ${A:0:8} pending=0 passed=2 failing=0" "$T/stderr.txt" \
   || fail "required passes count only ci and lint: [$(cat "$T/stderr.txt")]"
 ! grep -q '/actions/runs/[0-9]*/jobs?' "$T/state/gh-args.txt" || fail "normal pass does not inspect workflow jobs"
 
-# --- case: a separate queued run does not hide the completed result (#476)
-# --- two runs of the same workflow and event on the head: the older
-# --- completed green (run_attempt 1), the newer queued (run_attempt 1).
-# --- The wait settles on the completed result and names the queued run.
+# --- case: a newer queued run replaces the completed run (#476, flipped by #992):
+# --- two runs of the same workflow and event on the head: the older completed
+# --- green (run_attempt 1), the newer queued (run_attempt 1). The newest run is
+# --- authoritative whatever its status, so the older green is ignored and the
+# --- wait stays pending on the queued run's required check.
 reset_state
 set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
 touch "$T/state/keep-checks-across-runs"
 printf '%s\n' '[{"id":1,"name":"ci","status":"completed","conclusion":"success","details_url":"https://github.com/O/N/actions/runs/5/job/11"},{"id":2,"name":"ci","status":"in_progress","conclusion":null,"details_url":"https://github.com/O/N/actions/runs/6/job/21"},{"id":3,"name":"lint","status":"in_progress","conclusion":null,"details_url":"https://github.com/O/N/actions/runs/6/job/22"}]' >"$T/state/checks.txt"
 echo '[{"id":5,"name":"CI","event":"pull_request","status":"completed","run_attempt":1},{"id":6,"name":"CI","event":"pull_request","status":"queued","run_attempt":1}]' >"$T/state/runs.txt"
 run_wait 7 --timeout 0
-[ "$CODE" = "0" ] || fail "separate queued run settles on the completed result (got $CODE): [$OUT]"
-grep -q "head: ${A:0:8} CI: pass" <<<"$OUT" || fail "separate queued run pass line: [$OUT]"
-[ "$(grep -Fxc "gh-ci: ignoring run 6: its checks duplicate a completed run's" "$T/stderr.txt")" = "1" ] || fail "separate queued run id reported once on stderr: [$(cat "$T/stderr.txt")]"
-dropped_line="$(grep -F "gh-ci: ignoring run 6:" "$T/stderr.txt")"
+[ "$CODE" = "124" ] || fail "newer queued run keeps the wait pending (got $CODE): [$OUT]"
+grep -q "^pending: ci$" <<<"$OUT" || fail "queued run's required check named pending: [$OUT]"
+[ "$(grep -Fxc "gh-ci: ignoring run 5: a newer run on this head supersedes it" "$T/stderr.txt")" = "1" ] || fail "superseded run id reported once on stderr: [$(cat "$T/stderr.txt")]"
+dropped_line="$(grep -F "gh-ci: ignoring run 5:" "$T/stderr.txt")"
 if printf '%s' "$dropped_line" | tr '[:upper:]' '[:lower:]' | grep -Eq 'fail|error'; then
   fail "dropped-run line has no failure wording: [$dropped_line]"
 fi
+
+# a cancelled older run does not settle the wait while a newer run is in progress
+# (#992): the newer run's required check is pending, not the older cancel
+reset_state
+set_heads "$A"; echo "$RULES_CI_UPPER" >"$T/state/rules"
+touch "$T/state/keep-checks-across-runs"
+set_checks '[{"name":"CI","bucket":"cancel","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/1/job/11"},{"name":"CI","bucket":"pending","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/2/job/21"}]'
+printf '%s\n' '[{"id":1,"name":"CI","event":"pull_request","status":"completed","attempt":1},{"id":2,"name":"CI","event":"pull_request","status":"in_progress","attempt":1}]' >"$T/state/runs.txt"
+run_wait 7 --timeout 0
+[ "$CODE" = "124" ] || fail "cancelled older run does not settle over the newer in-progress run (got $CODE): [$OUT]"
+grep -q '^pending: CI$' <<<"$OUT" || fail "newer run's CI named pending: [$OUT]"
 
 # --- cases: REST check-run conclusions map onto the buckets the verdict reads
 # the loop never calls gh pr view or gh pr checks (refused by the stand-in)
