@@ -390,10 +390,14 @@ split_qual_hits() {
 # batch_hits PATFILE OUTDIR MODE: one full-tree `git grep -n -I -F -f` over
 # every name in PATFILE (MODE word adds -w; MODE qual does not), then one file
 # OUTDIR/N per pattern-file line holding git's hit lines for that name in
-# git's order. A failing grep leaves empty hit files, so every name then reads
-# unresolved. Never called with an empty PATFILE.
+# git's order. Grep exit 1 means no matches. Any other non-zero status,
+# including death by a signal, prints an error naming the grep and exits the
+# whole sweep with 2, so a broken grep never reads as every name unresolved.
+# Callers run it in the main shell, never in a subshell or pipeline, so the
+# exit stops the sweep. git's stderr passes through. Never called with an
+# empty PATFILE.
 batch_hits() {
-  local pat="$1" outdir="$2" mode="$3" total i
+  local pat="$1" outdir="$2" mode="$3" total i st=0 w=""
   mkdir -p "$outdir"
   total="$(nlines "$pat")"
   i=1
@@ -401,11 +405,15 @@ batch_hits() {
     : >"$outdir/$i"
     i=$((i + 1))
   done
+  if [ "$mode" = word ]; then w=-w; fi
+  git -C "$dir" grep -n -I -F ${w:+"$w"} -f "$pat" "$rev" >"$work/batch-$mode" || st=$?
+  if [ "$st" -gt 1 ]; then
+    printf 'plan-sweep: git grep (%s) failed with status %s\n' "$mode" "$st" >&2
+    exit 2
+  fi
   if [ "$mode" = word ]; then
-    git -C "$dir" grep -n -I -F -w -f "$pat" "$rev" >"$work/batch-word" 2>/dev/null || true
     split_word_hits "$pat" "$work/batch-word" "$outdir"
   else
-    git -C "$dir" grep -n -I -F -f "$pat" "$rev" >"$work/batch-qual" 2>/dev/null || true
     split_qual_hits "$pat" "$work/batch-qual" "$outdir"
   fi
   return 0
