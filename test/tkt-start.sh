@@ -41,7 +41,9 @@ case " \$* " in
   *" issue view "*"state,comments"*)
     if [ -f "$T/issue-fail" ]; then echo "gh: issue view boom" >&2; exit 5; fi
     cat "$T/issue"; exit 0 ;;
-  *) cat "$T/body"; exit 0 ;;
+  *)
+    if [ -f "$T/body-fail" ]; then echo "gh: issue body boom" >&2; exit 4; fi
+    cat "$T/body"; exit 0 ;;
 esac
 EOF
 chmod +x "$T/bin/gh"
@@ -319,6 +321,13 @@ case "$OUT" in *"files=missing.txt"*) ;; *) fail "skipstale: digest misses files
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "skipstale: plan-sweep must not run"
 : >"$T/calls.log"; run_start --files missing.txt
 case "$OUT" in *"reason=missing-file:missing.txt"*) ;; *) fail "skipstale: without the flag the ticket must be stale" ;; esac
+# --no-preflight never reads the issue body: a failing body read still ends SKIPPED.
+setup skipbody ONE AGAINST
+printf '1' >"$T/body-fail"; run_start --no-preflight
+want "SKIPPED filing=none" 0 skipbody
+run_start
+want "STEP-FAIL step=github" 4 skipbody
+rm -f "$T/body-fail"
 # usage table: each missing flag, a --model without role=, a bad gate.
 setup usage ONE AGAINST
 for flag in --run --repo --issue --spec --branch --worktree --workflow-doc --closing; do

@@ -211,6 +211,8 @@ fi; tkt journal "tkt-start worktree $worktree $wt_note"; fpaths=()
 if [ -n "$files" ]; then IFS=',' read -ra parts <<<"$files"
   for p in ${parts[@]+"${parts[@]}"}; do p="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"; [ -n "$p" ] && fpaths+=("$p"); done; fi
 stale=""; reason=""; filing=""; lognote="not run"; sincenote="no edit info"
+# --no-preflight skips the whole currency check: no issue-body read, no log.
+if [ "$no_preflight" -eq 0 ]; then
 for p in ${fpaths[@]+"${fpaths[@]}"}; do git -C "$worktree" cat-file -e "origin/main:$p" 2>/dev/null || { stale=1; reason="missing-file:$p"; break; }; done
 if [ -z "$stale" ]; then
   body="$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>&1)" || fail_step github "$?" "$body"
@@ -223,7 +225,7 @@ if [ -z "$stale" ]; then rc=0; logout=""
   elif [ -n "$logout" ]; then stale=1; reason="log:$filing..origin/main"; lognote="$(printf '%s' "$logout" | grep -c . || true) lines"
   else lognote="empty"; fi
 fi
-if [ -n "$filing" ] && [ "$no_preflight" -eq 0 ]; then
+if [ -n "$filing" ]; then
   owner="${repo%%/*}"; name="${repo##*/}"
   edited="$(gh api graphql -F owner="$owner" -F name="$name" -F number="$issue" -f query='query ($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { lastEditedAt } } }' --jq '.data.repository.issue.lastEditedAt' 2>&1)" || fail_step github "$?" "$edited"
   [ "$edited" = "null" ] && edited=""
@@ -233,6 +235,7 @@ if [ -n "$filing" ] && [ "$no_preflight" -eq 0 ]; then
     elif [ -n "$sincelog" ]; then sincenote="since=$edited non-empty"; [ -n "$stale" ] || { stale=1; reason="since:$edited"; }
     else sincenote="since=$edited empty"; fi
   elif [ -n "$edited" ]; then sincenote="edited=$edited not after filing"; fi
+fi
 fi
 dg=("state=$state" "worktree=$worktree $wt_note" "filing=${filing:-none} base=$base" "files=${files:-none}" "log ${filing:-none}..origin/main: $lognote" "$sincenote")
 # Merged PRs mentioning the issue run before the CURRENT exit, the
