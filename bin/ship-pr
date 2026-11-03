@@ -217,7 +217,8 @@ authority_scan() {
     esac
     [ "$fenced" = 0 ] || continue
     if [ -z "$trimmed" ]; then
-      auth_flush
+      # A blank line keeps an open bullet: a loose item's continuation may follow it.
+      [ "$auth_open" = 1 ] || auth_flush
       continue
     fi
     lead="${text%%[![:space:]]*}"

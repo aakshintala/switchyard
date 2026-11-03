@@ -875,6 +875,12 @@ grep -qxF 'uncited authority: - Accepted gap per the owner-side ruling;' <<<"$OU
 setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling #4069\n- Approved by the lane.\n' >"$ST/body"
 ship; nothing_ran "cited bullet then a separate uncited bullet"
 [ "$OUT" = "uncited authority: - Approved by the lane." ] || fail "only the second bullet printed: [$OUT]"
+# A blank line inside a loose bullet keeps its citation; an unindented line after it starts a new unit
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n\n  see #4069.\n' >"$ST/body"
+ship; expect 0 "loose bullet cited after a blank line"
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n\nsee #4069.\n' >"$ST/body"
+ship; nothing_ran "bullet, blank line, then an unindented citation"
+[ "$OUT" = "uncited authority: - Accepted gap per the owner-side ruling;" ] || fail "loose bullet first line printed: [$OUT]"
 
 setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" 'Review round closed on abc123 with a fix.
 Accepted gap per the owner-side ruling.'
