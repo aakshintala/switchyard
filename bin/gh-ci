@@ -355,8 +355,9 @@ required_names() {
 # (workflow, event) group is the newest run by ID, whatever its status: its
 # checks count, and every older run's checks in the group are ignored (a
 # draft run marked ready starts a newer attempt-1 run on the same SHA, and
-# that newer run replaces it). Each ignored run is reported on stderr.
-# Checks without an Actions run ID are kept with run null. A check whose run
+# that newer run replaces it, even before it has checks of its own). Prints
+# {checks, dropped}: dropped lists the superseded run IDs, which the caller
+# reports on stderr once per wait (report_dropped). Checks without an Actions run ID are kept with run null. A check whose run
 # is a rerun (attempt greater than 1) that has not completed counts as pending,
 # so a rerun's old failure never settles the wait; a rerun keeps the run ID of
 # the run it re-runs, so it stays authoritative.
@@ -383,8 +384,9 @@ head_checks() {
            app_slug: (.app.slug // "")}
         | . + {key: (if .run == null then null else "\($runs[(.run | tostring)].workflow // "")\u001f\($runs[(.run | tostring)].event // "")" end)}
       ] as $recs
-      | ($recs | map(select(.run != null)) | group_by(.key)
-         | map({key: .[0].key, value: (map(.run) | max)}) | from_entries) as $auth
+      | ([$recs[] | select(.run != null) | {k: .key, r: .run}]
+          + [$runs | to_entries[] | {k: "\(.value.workflow)\u001f\(.value.event)", r: (.key | tonumber)}]
+         | group_by(.k) | map({key: .[0].k, value: (map(.r) | max)}) | from_entries) as $auth
       | ([$recs[] | select(.run != null and .run != $auth[.key]) | .run] | unique) as $dropped
       | {checks: [$recs[] | select(.run == null or .run == $auth[.key])
           | .run as $r | .app_slug as $a
@@ -396,10 +398,21 @@ head_checks() {
                    elif ($runs | has(($r | tostring))) then $r
                    else null end)}],
          dropped: $dropped}' ) || return 1
-  printf '%s' "$payload" \
-    | jq -r '.dropped[]? | "gh-ci: ignoring run \(.): a newer run on this head supersedes it"' >&2 \
-    || return 1
-  printf '%s' "$payload" | jq -c '.checks' || return 1
+  printf '%s' "$payload"
+}
+
+# report_dropped <head_checks payload>: print one stderr line for each superseded
+# run not yet in $reported (a space-delimited list the caller declares local, with
+# " " to start), and add it. The caller decides how long a list lasts: a wait
+# keeps it for the whole wait, so each run is named once.
+report_dropped() {
+  local id
+  while IFS= read -r id || [ -n "$id" ]; do
+    [ -n "$id" ] || continue
+    case " $reported " in *" $id "*) continue;; esac
+    reported="$reported$id "
+    echo "gh-ci: ignoring run $id: a newer run on this head supersedes it" >&2
+  done < <(printf '%s' "$1" | jq -r '.dropped[]?' 2>/dev/null)
 }
 
 # jobless_runs <sha>: print head workflow run IDs with no jobs. Only the first
@@ -423,7 +436,7 @@ jobless_runs() {
 # branch's required names. Failed checks are tagged REQUIRED or NON-BLOCKING.
 cmd_verdict() {
   [ "$#" -eq 1 ] || usage
-  local ref="$1" sha="" err="" errf base names req checks judged rc=0
+  local ref="$1" sha="" err="" errf base names req checks judged payload rc=0 reported=" "
   case "$ref" in
     ''|-*|/*|*/|*..*|*\?*|*\#*|*\%*) usage;;
   esac
@@ -462,10 +475,12 @@ cmd_verdict() {
     echo "gh-ci: cannot parse required checks for $base in $REPO" >&2
     return 1
   fi
-  if ! checks=$(head_checks "$sha"); then
+  if ! payload=$(head_checks "$sha"); then
     echo "gh-ci: cannot read checks for $sha in $REPO" >&2
     return 1
   fi
+  report_dropped "$payload"
+  checks=$(printf '%s' "$payload" | jq -c '.checks') || return 1
   if ! judged=$(jq -nr --argjson checks "$checks" --argjson req "$req" '
     {checks: $checks, req: $req}
     | .checks as $checks
@@ -650,7 +665,7 @@ cmd_wait() {
     wait_run "${pr_opt:-$pr}" "$run" "$timeout" "$interval"
     return $?
   fi
-  local slept=0 head head2 state state2 checks_json max_src max_map filtered padded verdict hs hs_rc missing_count missing_name run_id
+  local slept=0 head head2 state state2 checks_json payload reported=" " max_src max_map filtered padded verdict hs hs_rc missing_count missing_name run_id
   local dirty_head="" dirty_for=0 draft=false progress p_pend p_pass p_fail
   if [ -z "$job" ]; then
     if [ "$(gh api "repos/$REPO/pulls/$pr" --jq .draft 2>/dev/null)" = "true" ]; then
@@ -697,14 +712,18 @@ cmd_wait() {
     if [ -n "$job" ]; then
       # the named job only: only an Actions job of the newest run counts;
       # a non-Actions check-run with the same name stays pending
-      checks_json=$(head_checks "$head") || checks_json='{}'
+      payload=$(head_checks "$head") || payload='{}'
+      report_dropped "$payload"
+      checks_json=$(printf '%s' "$payload" | jq -c '.checks // {}' 2>/dev/null) || checks_json='{}'
       checks_json=$(printf '%s' "$checks_json" | jq -c --arg name "$job" '
         if type != "array" then . else map(select(.name == $name and .run != null) | {name, bucket}) end' 2>/dev/null) \
         || checks_json='{}'
     elif [ "$empty_ok" = true ] && [ "$req" = "[]" ]; then
       checks_json='[]'
     else
-      checks_json=$(head_checks "$head") || checks_json='{}'
+      payload=$(head_checks "$head") || payload='{}'
+      report_dropped "$payload"
+      checks_json=$(printf '%s' "$payload" | jq -c '.checks // {}' 2>/dev/null) || checks_json='{}'
       # drop the run id: only the --job path reads it
       checks_json=$(printf '%s' "$checks_json" | jq -c 'if type != "array" then . else map({name, bucket}) end' 2>/dev/null) \
         || checks_json='{}'
