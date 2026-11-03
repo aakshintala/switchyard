@@ -710,7 +710,7 @@ grep -q "head: ${B:0:8} CI: pass" <<<"$OUT" || fail "verdict race names new head
 
 # --- cases: conflicts. Grace polls sleep 5 s (not GH_CI_INTERVAL) and count
 # --- toward --timeout; only a head that stays DIRTY is reported.
-CONFLICT_MSG="PR 7 has merge conflicts: GitHub runs no CI on it. Rebase first."
+CONFLICT_MSG="PR 7 has merge conflicts: GitHub runs no CI on it. Update the branch from origin/main first (merge or rebase, as the workflow doc says)."
 sleeps_are() { # sleeps_are <n> <secs>: sleeps.txt is exactly n lines of secs
   local want="" i
   for i in $(seq 1 "$1"); do want="${want}${2}"$'\n'; done

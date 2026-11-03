@@ -56,7 +56,7 @@ head_state() {
   fi
 }
 
-conflict_msg() { echo "PR $1 has merge conflicts: GitHub runs no CI on it. Rebase first." >&2; }
+conflict_msg() { echo "PR $1 has merge conflicts: GitHub runs no CI on it. Update the branch from origin/main first (merge or rebase, as the workflow doc says)." >&2; }
 
 # pr_head <pr>: prints the full head SHA. Returns 3 on a conflicting (DIRTY)
 # PR, because GitHub never runs CI on one and a watch would wait forever.
