@@ -150,8 +150,18 @@ gh() (
       fi
       printf '{"headRefOid":"%s","baseRefName":"main"}\n' "$h";;
     diff)
+      # As gh does: refuse a diff with terminal escapes unless the flag is passed.
+      allow=""
+      for a in "$@"; do
+        if [ "$a" = "--allow-escape-sequences" ]; then allow=1; fi
+      done
+      if [ -z "$allow" ]; then
+        echo "the diff contains terminal escape sequences; pass --allow-escape-sequences to output it anyway" >&2
+        exit 1
+      fi
       if [ -e "$T/state/fail-diff" ]; then echo "fake gh: diff failed" >&2; exit 1; fi
-      if [ ! -e "$T/state/empty-diff" ]; then cat "$T/diff.txt"; fi
+      if [ -e "$T/state/escape-diff" ]; then cat "$T/escape-diff.txt"
+      elif [ ! -e "$T/state/empty-diff" ]; then cat "$T/diff.txt"; fi
       ;;
     checks) cat "$T/checks.txt";;
     comment)
@@ -232,7 +242,7 @@ reset_state() {
   rm -rf "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true
   rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt" \
     "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log"
-  rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/issue-calls.txt"
+  rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/escape-diff" "$T/state/issue-calls.txt"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
   rm -f "$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
@@ -628,6 +638,34 @@ STATUS: DONE" 0
   [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "$failed_fetch creates no worktree"
   [ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true)" ] || fail "$failed_fetch removes its run dir"
 done
+
+# --- case: an empty diff with exit 0 stops the start before patch-id "none"
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+: >"$T/state/empty-diff"
+st=0
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M --issue 1 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 1 ] || fail "empty diff without --head exits 1 (got $st)"
+grep -q 'could not fetch the diff of PR 7' <<<"$err" || fail "empty diff without --head names the PR diff"
+[ ! -e "$T/state/runs.txt" ] || fail "empty diff without --head starts no job"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "empty diff without --head creates no worktree"
+
+# --- case: a diff with a raw ESC byte is fetched with the escape flag and kept intact
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+printf 'diff --git a/esc.txt b/esc.txt\nnew file mode 100644\n--- /dev/null\n+++ b/esc.txt\n@@ -0,0 +1 @@\n+a\033[0m\n' >"$T/escape-diff.txt"
+ESC_PID="$(git patch-id --stable <"$T/escape-diff.txt" | awk '{print $1}')"
+[ -n "$ESC_PID" ] || fail "escape fixture patch-id computable"
+: >"$T/state/escape-diff"
+start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M --issue 1 >/dev/null 2>&1 || fail "escape diff starts"
+wt_diff="$(worktree_for spec)/.review-context/pr.diff"
+cmp -s "$wt_diff" "$T/escape-diff.txt" || fail "escape diff keeps the raw ESC byte in pr.diff"
+out="$(bash "$REVIEW" collect job-spec 2>/dev/null)" || fail "escape diff collects"
+[ "$(head -1 <<<"$out")" = "patch-id $ESC_PID" ] || fail "escape diff patch-id matches the raw fixture"
 
 # --- case: --issue without --spec defaults SPEC to the first --issue, not the PR
 reset_state
@@ -2401,11 +2439,8 @@ grep -Fq -- "$OTHER_HEAD" <<<"$err" || fail "malformed newest names the older va
 
 # --- case j: patch-id none never counts as the same patch
 reset_with_approvals
-cp "$T/diff.txt" "$T/diff-saved.txt"
-: >"$T/diff.txt"
 plant_comment "2026-10-09T10:00:00Z" 101 "review-pr: patch-id none, head $OTHER_HEAD"
 err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 2>&1 >/dev/null)"; st=$?
-cp "$T/diff-saved.txt" "$T/diff.txt"
 [ "$st" -eq 2 ] || fail "none patch-ids with different heads refuse (got $st)"
 [ ! -e "$T/state/runs.txt" ] || fail "none patch-ids launch no job"
 

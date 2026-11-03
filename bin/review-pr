@@ -529,8 +529,20 @@ cmd_start() {
     fi
 
     # Patch-id of the diff the reviews will see, taken before they start.
-    patch_id="$(gh pr diff "$pr" --repo "$repo" | git patch-id --stable | awk '{print $1}')"
-    if [ -z "$patch_id" ]; then patch_id="none"; fi
+    # Fetch first, so a failed gh or an empty diff is an error, not "none".
+    patch_src="$(mktemp "${TMPDIR:-/tmp}/review-pr.patch.XXXXXX")"
+    if ! gh pr diff "$pr" --repo "$repo" --allow-escape-sequences >"$patch_src" \
+      || [ ! -s "$patch_src" ]; then
+      rm -f "$patch_src"
+      echo "review-pr: could not fetch the diff of PR $pr" >&2
+      exit 1
+    fi
+    patch_id="$(git patch-id --stable <"$patch_src" | awk '{print $1}')"
+    rm -f "$patch_src"
+    if [ -z "$patch_id" ]; then
+      echo "review-pr: could not fetch the diff of PR $pr (no patch-id)" >&2
+      exit 1
+    fi
   fi
 
   prune_stale_runs >/dev/null 2>&1 || true
@@ -611,7 +623,7 @@ cmd_start() {
   if [ "$mode" = "review" ]; then
     review_context="$run_dir/review-context"
     mkdir -p "$review_context"
-    if ! gh pr diff "$pr" --repo "$repo" >"$review_context/pr.diff"; then
+    if ! gh pr diff "$pr" --repo "$repo" --allow-escape-sequences >"$review_context/pr.diff"; then
       echo "review-pr: could not fetch the diff of PR $pr" >&2
       exit 1
     fi
