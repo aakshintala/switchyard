@@ -26,6 +26,10 @@ tokens_lib="$script_dir/lib/plan-tokens.sh"
 if [ ! -r "$tokens_lib" ]; then echo "tkt-build: cannot read shared lib: $tokens_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$tokens_lib"
+plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
+if [ ! -r "$plan_gate_lib" ]; then echo "tkt-build: cannot read shared lib: $plan_gate_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$plan_gate_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
 mverd="$bin_dir/mutant-verdicts"
@@ -140,7 +144,8 @@ context_args=(); context_file=""
 if [ "$from" = lane ]; then
   require_keys closing workflow_doc
   closing="$(tkt get closing)"
-  gate_cmd="$("$plangate" "$plan" 2>"$tmpd/pg-err")" || emit "PRECONDITION missing=gate" 2 "$(cat "$tmpd/pg-err")"
+  plan_gate_args tkt
+  gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan" 2>"$tmpd/pg-err")" || emit "PRECONDITION missing=gate" 2 "$(cat "$tmpd/pg-err")"
   # body_ends wins; a missing or blank body_ends falls through to the body_has co-author.
   attr="$(tkt get body_ends 2>/dev/null || true)"
   if [ -z "${attr//[[:space:]]/}" ]; then

@@ -60,6 +60,13 @@ if [ ! -r "$namebase_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$namebase_lib"
+plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
+if [ ! -r "$plan_gate_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $plan_gate_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$plan_gate_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 plangate="$bin_dir/plan-gate"
 
@@ -262,7 +269,8 @@ merges="$(git -C "$worktree" rev-list --count --merges "origin/main..HEAD" 2>/de
 gate_word="skipped"
 if [ "$checks_only" -eq 0 ]; then
   [ -n "$plan" ] || tkt require plan
-  gate_cmd="$("$plangate" "$plan")" || exit 2
+  plan_gate_args tkt
+  gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")" || exit 2
   env_prefix=""
   if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
     env_prefix="$e "
