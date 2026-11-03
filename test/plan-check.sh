@@ -72,33 +72,33 @@ expect_clean "clean plan" "$clean"
 
 # 2. a missing path outside Files
 expect_problems "missing path" "$(mkplan missing '## Rulings\nSee `src/nope.rs`.\n')" \
-  'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
+  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 3. a path on a line with the word new is exempt; a task line needs new too
 expect_clean "new exempts a Files path and its task line" "$(mkplan newok '## Files\n- `src/brand.rs` (New file)\n\n## Tasks\n1. Write new `src/brand.rs` with `WidgetThing`.\n')"
 
 # 3a. a new task path that is not in Files is still checked by check 2
 expect_problems "new task path outside Files" "$(mkplan newout '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Create new `bin/brand-new-check`.\n')" \
-  'outside Files: bin/brand-new-check (line 8): add it to Files, or mark the line reads'
+  'outside Files: bin/brand-new-check (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 4. new as part of a longer word does not exempt
 expect_problems "newer is not new" "$(mkplan newer '## Files\n- `src/nope.rs` (newer)\n')" \
-  'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
+  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 5. an ambiguous suffix (two files end in /x.rs) resolves but stays out of the Files check
 expect_clean "ambiguous suffix is not outside Files" "$(mkplan ambig '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `x.rs`.\n')"
 
 # 6. a task path outside Files
 expect_problems "task path outside Files" "$(mkplan outside '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `docs/guide.md` and `src/lib.rs`.\n')" \
-  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line reads'
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 7. the Red commit section is checked the same way
 expect_problems "red commit outside Files" "$(mkplan red '## Files\n- `src/lib.rs`\n\n## Red commit\n`docs/guide.md`\n')" \
-  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line reads'
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 8. the same token printed once, on its first line
 expect_problems "problem printed once per token" "$(mkplan once '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `docs/guide.md:3`.\n2. Edit `docs/guide.md`.\n')" \
-  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line reads'
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 9. fenced blocks and the Gate section are skipped
 expect_clean "fence and Gate skipped" "$(mkplan skip '## Files\n- `src/lib.rs`\n\n## Rulings\n```\nsee `src/gone.rs` and `src/gone2.rs`\n```\n\n## Gate\n`src/gone.rs`\n')"
@@ -111,7 +111,7 @@ expect_clean "symbols in prose pass" "$(mkplan syms '## Rulings\nCall `NoSuchThi
 expect_clean "example prose lines pass" "$(mkplan exampleok '## Rulings\nAn example `c_history` value.\n')"
 expect_clean "unmarked symbol passes" "$(mkplan exampleno '## Rulings\nThe `c_history` value.\n')"
 expect_problems "example does not exempt a missing path" "$(mkplan examplepath '## Rulings\nAn example `src/nope.rs`.\n')" \
-  'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
+  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 11. a plain lowercase word or a prose token is not a symbol or a path
 expect_clean "plain words are not checked" "$(mkplan words '## Rulings\nUse `cargo`, `run` and `bash test/run` as written.\n')"
@@ -121,25 +121,25 @@ expect_clean "skipped tokens" "$(mkplan skiptok '## Rulings\n`providers/<name>.l
 
 # 11b. suffix rule: a path matching nothing is reported only under a top-level entry
 expect_problems "suffix: top-level zero match is missing" "$(mkplan topzero '## Rulings\nSee `docs/nope.md` and `providers/acme.json`.\n')" \
-  'missing path: docs/nope.md (line 5): correct it, or mark the line new or removed'
+  'missing path: docs/nope.md (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 expect_clean "suffix: non-top-level zero match is skipped" "$(mkplan fixture '## Rulings\nSee `providers/acme.json`.\n')"
 expect_clean "suffix: a Files suffix resolves for a task" "$(mkplan suffixok '## Files\n- `unique.toml`\n\n## Tasks\n1. Edit `cfg/unique.toml`.\n')"
 
 # 11c. brace rule: one group expands per alternative; two groups are skipped
 expect_problems "braces: each alternative checked" "$(mkplan braces '## Files\n- `src/{lib,later}.rs`\n\n## Rulings\nSee `src/{nope,lib}.rs` and `{a,b}/{c,d}.rs`.\n')" \
-  'missing path: src/nope.rs (line 8): correct it, or mark the line new or removed'
+  'missing path: src/nope.rs (line 8): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 expect_problems "braces: an alternative outside Files" "$(mkplan bouts '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/{lib,later}.rs`.\n')" \
-  'outside Files: src/later.rs (line 8): add it to Files, or mark the line reads'
+  'outside Files: src/later.rs (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 11d. path::symbol rule: the path half is checked, the symbol half is ignored
 expect_clean "path::symbol: symbol half ignored" "$(mkplan split1 '## Rulings\n`src/lib.rs::make_widget` and `src/lib.rs::NoSuch`.\n')"
 expect_problems "path::symbol: missing path" "$(mkplan split2 '## Rulings\n`src/nope.rs::make_widget`.\n')" \
-  'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
+  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 11e. directory rule: a directory resolves by its trailing slash; Files covers it by prefix
 expect_clean "directory covered by a Files path" "$(mkplan dirok '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/`.\n')"
 expect_problems "directory not covered by Files" "$(mkplan dirout '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/` and `docs/`.\n')" \
-  'outside Files: docs/ (line 8): add it to Files, or mark the line reads'
+  'outside Files: docs/ (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 11f. symbol rule: prose symbols are never checked, in any section
 expect_clean "symbols in Tasks are not checked" "$(mkplan tasksym '## Tasks\n1. Add `NoSuchThing()`.\n')"
@@ -149,42 +149,48 @@ expect_clean "new line exempts a symbol in a backticked token" "$(mkplan newsym 
 # 11g. read mark: a task path on a line with reads/read-only/fixture stays out of check 2, but must still resolve
 expect_clean "reads mark exempts task paths from Files" "$(mkplan readsok '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Reads `docs/guide.md` for context.\n2. Uses `cfg/unique.toml` (READ-ONLY).\n3. Loads `src/lib.rs` as fixture.\n')"
 expect_problems "read mark does not exempt a missing path" "$(mkplan readmissing '## Tasks\n1. Reads `src/nope.rs` for context.\n')" \
-  'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
+  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 11h. removed mark: like new, exempts missing paths; check 2 still applies
 expect_clean "removed words exempt missing paths" "$(mkplan removedpaths '## Rulings\nRemoved `src/a.rs`.\nRemove `src/b.rs`.\nDeleted `src/c.rs`.\nDelete `src/d.rs`.\n')"
 expect_problems "removed task path outside Files" "$(mkplan removedout '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Removed `src/brand.rs`.\n')" \
-  'outside Files: src/brand.rs (line 8): add it to Files, or mark the line reads'
+  'outside Files: src/brand.rs (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 11i. problem lines name the fix they accept
 expect_problems "problem lines name the fix" "$(mkplan fixes '## Files\n- `src/lib.rs`\n\n## Rulings\nSee `src/nope.rs`.\nCall `Frob_Thing`.\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" \
-  'missing path: src/nope.rs (line 8): correct it, or mark the line new or removed\noutside Files: docs/guide.md (line 12): add it to Files, or mark the line reads'
+  'missing path: src/nope.rs (line 8): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it\noutside Files: docs/guide.md (line 12): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 10b. prose holds a camelCase token and a test name; a Files path still fails
 expect_clean "camelCase and test names in prose pass" "$(mkplan prose101 '## Files\n- `src/lib.rs`\n\n## Rulings\nCall `parseHeader` with `test_handles_empty_files` on `Shape::Round`.\n')"
 expect_problems "a bad path in Files still fails" "$(mkplan prose10b '## Files\n- `src/lib.rs`\n- `src/nope.rs`\n\n## Rulings\nCall `parseHeader` with `test_handles_empty_files` on `Shape::Round`.\n')" \
-  'missing path: src/nope.rs (line 6): correct it, or mark the line new or removed'
+  'missing path: src/nope.rs (line 6): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 11j. line lists: a comma list of numbers and ranges is lines of the file (see #462)
 expect_clean "comma list on a Files path" "$(mkplan linelist '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1,2`.\n')"
 expect_clean "mixed range and number list on a Files path" "$(mkplan linemix '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1-2,5`.\n')"
 expect_problems "comma list on a missing path names the path" "$(mkplan linemissing '## Rulings\nSee `src/nope.rs:1,2`.\n')" \
-  'missing path: src/nope.rs (line 5): correct it, or mark the line new or removed'
+  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 11k. Files directory and glob entries cover task paths (see #462)
 expect_clean "Files directory covers a task path under it" "$(mkplan dircover '## Files\n- `src/`\n\n## Tasks\n1. Edit `src/lib.rs`.\n')"
 expect_problems "Files directory does not cover a path outside it" "$(mkplan diroutside '## Files\n- `src/`\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" \
-  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line reads'
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 expect_clean "Files glob covers a matching task path" "$(mkplan globcover '## Files\n- `src/*.rs`\n\n## Tasks\n1. Edit `src/lib.rs`.\n')"
 expect_problems "Files glob does not cover a non-matching path" "$(mkplan globoutside '## Files\n- `src/*.rs`\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" \
-  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line reads'
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 12. --base overrides the Base line: src/later.rs is absent at BASE1
 later="$(mkplan later '## Files\n- `src/later.rs`\n')"
 expect_clean "Base line resolves src/later.rs" "$later"
 run "$later" --base "$BASE1" --cwd "$R"
 [ "$code" = 1 ] || fail "--base BASE1 exits 1, got $code"
-[ "$out" = 'missing path: src/later.rs (line 5): correct it, or mark the line new or removed' ] || fail "--base BASE1: got [$out]"
+[ "$out" = 'missing path: src/later.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it' ] || fail "--base BASE1: got [$out]"
+
+# 12a. each problem names the mark it needs: (new) for a missing path, (reads) for an outside Files task path
+run "$(mkplan marknew_ '## Rulings\nSee `src/nope.rs`.\n')" --cwd "$R"
+case "$out" in *"missing path: src/nope.rs"*"(new)"*) ;; *) fail "missing path names (new): got [$out]" ;; esac
+run "$(mkplan markreads_ '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `docs/guide.md`.\n')" --cwd "$R"
+case "$out" in *"(reads)"*) ;; *) fail "outside Files names (reads): got [$out]" ;; esac
 
 # 13. --cwd defaults to the current directory
 out="$(cd "$R" && bash "$CHECK" "$clean")" || fail "default cwd exits 0"
