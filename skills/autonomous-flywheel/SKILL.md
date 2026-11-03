@@ -47,7 +47,7 @@ Done when every lane is filled or its idle reason is recorded.
 
 ### 3. Rule and merge
 
-Answer each sub-orchestrator's escalations as `implement`'s rules say. Merge a PR only within the confirmed terms; a case the terms don't cover goes to the owner by `implement`'s presence rule.
+Answer each sub-orchestrator's escalations as `implement`'s rules say. Merge a PR only within the confirmed terms, through `tkt-ship` or `ship-pr`, never a bare `gh pr merge`: they refuse a worktree head that differs from the PR head and a patch changed since review. A merge they don't cover takes `implement`'s by-hand checks first. A case the terms don't cover goes to the owner by `implement`'s presence rule.
 
 Done when every reported PR is merged, or waits on the owner with the exact action posted.
 
