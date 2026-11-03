@@ -36,6 +36,12 @@
 #        or whitespace-only (after stripping a trailing CR), so trailing blank
 #        lines are ignored; a body with no non-blank line fails. It is checked
 #        in the same block and prints `body does not end with (--body-ends): <text>`.
+#        Always, the PR body and each PR comment whose first line starts with
+#        `Review round closed` (the review record; other comments are not read) are
+#        scanned for authority claims: a line with
+#        `per the ruling`, `owner ruled`, `approved by` or similar, outside code spans,
+#        fenced blocks and `>` quotes, must cite #<n>, a URL or <doc>:<line> on the same
+#        line, else it prints `uncited authority: <line>` and exits 5.
 #        When the repo defines a `mutants` label (`gh label list`), a draft PR
 #        must carry it before ship-pr marks it ready, so mutants run on the
 #        draft from the first push; a repo without the label is not checked,
@@ -83,7 +89,7 @@
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, or stray closing keywords from pr-closes), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, or stray closing keywords from pr-closes), 124 CI wait timeout.
 #        Rebase rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -162,6 +168,42 @@ exit_after_ready() {
     say "$*; nothing merged, PR $pr is still marked ready"
   fi
   exit "$code"
+}
+
+# authority_scan: read PR text on stdin and print `uncited authority: <line>` for
+# each line that claims an authority (a ruling, an owner's call, an approval)
+# with no citation on the same line. Fenced blocks, `>` quotes and code spans
+# are not scanned for claims. A record starting with 0x1e names a comment's
+# URL, which is appended to the lines below it; it resets the fence state.
+# Sets authority_bad=1 on any hit.
+authority_scan() {
+  local line text trimmed stripped lower src="" fenced=0 asserts cite tick='`'
+  cite='#[0-9]+|https?://|[A-Za-z0-9_./-]+:[0-9]+'
+  while IFS= read -r line || [ -n "$line" ]; do
+    text="${line%$'\r'}"
+    if [[ "$text" == $'\036'* ]]; then
+      src=" (comment ${text#$'\036'})"
+      fenced=0
+      continue
+    fi
+    trimmed="${text#"${text%%[![:space:]]*}"}"
+    case "$trimmed" in
+      '```'*) fenced=$((1 - fenced)); continue ;;
+      '>'*) continue ;;
+    esac
+    [ "$fenced" = 0 ] || continue
+    stripped="$(printf '%s' "$text" | sed "s/${tick}[^${tick}]*${tick}//g")"
+    lower="$(printf '%s' "$stripped" | tr '[:upper:]' '[:lower:]')"
+    asserts=0
+    case "$lower" in
+      *"per the ruling"*|*"per ruling"*|*"per the owner"*|*"owner ruled"*|*"owner-side ruling"*) asserts=1 ;;
+      *"as ruled"*|*"approved by"*|*"accepted gap per"*|*"out of scope per"*) asserts=1 ;;
+    esac
+    if [ "$asserts" = 1 ] && ! [[ "$text" =~ $cite ]]; then
+      echo "uncited authority: $text$src"
+      authority_bad=1
+    fi
+  done
 }
 
 report_flakes() {
@@ -343,6 +385,20 @@ if [ "${#body_has[@]}" -gt 0 ] || [ -n "$body_ends" ]; then
   fi
   [ "$missing" = 0 ] && [ "$bad" = 0 ] || die 5 "PR body lacks required lines; edit the PR body, then rerun"
 fi
+
+# Authority claims in the body and in the round-closed comments, checked on every
+# run. Only a comment whose first line starts with `Review round closed` is the
+# review record; other comments are not scanned. Comment records start with a
+# record separator (0x1e) and the URL.
+body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""')" \
+  || die 2 "cannot read PR $pr body"
+authority_bad=0
+authority_scan <<<"$body_text"
+comments_text="$(gh api --paginate "repos/$repo/issues/$pr/comments" \
+  --jq '.[] | select(((.body // "") | sub("^ +"; "") | split("\n") | .[0] | ascii_downcase | startswith("review round closed"))) | "\u001e" + .html_url + "\n" + (.body // "")')" \
+  || die 2 "cannot read comments on PR $pr in $repo"
+authority_scan <<<"$comments_text"
+[ "$authority_bad" = 0 ] || die 5 "PR text claims authority with no citation; cite the ruling (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun"
 
 # A draft carries the mutants label when the repo defines one, so mutants
 # run on the draft from the first push. Checked here, beside --body-has, so
