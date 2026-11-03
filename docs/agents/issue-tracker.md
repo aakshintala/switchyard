@@ -29,7 +29,7 @@ GitHub shares one number space across issues and PRs, so a bare `#42` may be eit
 
 `tkt-start` searches merged PR bodies after checking whether the ticket is current.
 A `Resolves #<n>` hit or a failed search stops before `plan-sweep` and `tkt-job`, unless the issue recurred after the merge (see below).
-With `--no-preflight`, it exits after the search without calling either command.
+With `--no-preflight`, it skips the currency check and exits `SKIPPED` after the search, calling neither command.
 Each `Part of #<n>` hit prints a `NOTE` with that PR's file list, even when many
 hits match. The run then continues.
 A recurrence is an OPEN issue holding a comment strictly newer than the

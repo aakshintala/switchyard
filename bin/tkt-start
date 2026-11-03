@@ -211,6 +211,8 @@ fi; tkt journal "tkt-start worktree $worktree $wt_note"; fpaths=()
 if [ -n "$files" ]; then IFS=',' read -ra parts <<<"$files"
   for p in ${parts[@]+"${parts[@]}"}; do p="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"; [ -n "$p" ] && fpaths+=("$p"); done; fi
 stale=""; reason=""; filing=""; lognote="not run"; sincenote="no edit info"
+# --no-preflight skips the whole currency check: no issue-body read, no log.
+if [ "$no_preflight" -eq 0 ]; then
 for p in ${fpaths[@]+"${fpaths[@]}"}; do git -C "$worktree" cat-file -e "origin/main:$p" 2>/dev/null || { stale=1; reason="missing-file:$p"; break; }; done
 if [ -z "$stale" ]; then
   body="$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>&1)" || fail_step github "$?" "$body"
@@ -234,9 +236,10 @@ if [ -n "$filing" ]; then
     else sincenote="since=$edited empty"; fi
   elif [ -n "$edited" ]; then sincenote="edited=$edited not after filing"; fi
 fi
+fi
 dg=("state=$state" "worktree=$worktree $wt_note" "filing=${filing:-none} base=$base" "files=${files:-none}" "log ${filing:-none}..origin/main: $lognote" "$sincenote")
 # Merged PRs mentioning the issue run before the CURRENT exit, the
-# --no-preflight exit and the preflight dispatch. A Resolves line stops the
+# --no-preflight SKIPPED exit and the preflight dispatch. A Resolves line stops the
 # run, unless the issue recurred: OPEN with a comment strictly newer than
 # the newest Resolves merge. A recurrence only appends a NOTE naming the
 # newest PR and the run continues. A Part-of line notes the PR and its
@@ -273,8 +276,8 @@ if [ -n "$stop_pr" ] && [ "$recur_ok" -eq 1 ]; then
 fi
 [ -n "$stop_pr" ] && deny "MERGED-STOP pr=$stop_pr" 1 "tkt-start: issue #$issue already resolved by merged PR #$stop_pr"
 part_notes=(${notes[@]+"${notes[@]}"})
+if [ "$no_preflight" -eq 1 ]; then tkt journal "tkt-start check SKIPPED filing=${filing:-none}"; emit "SKIPPED filing=${filing:-none} files=${files:-none}" 0 "${dg[@]}"; fi
 if [ -n "$stale" ]; then dg=("reason=$reason" ${dg[@]+"${dg[@]}"}); tkt journal "tkt-start check STALE reason=$reason filing=${filing:-none}"
-  [ "$no_preflight" -eq 1 ] && emit "STALE reason=$reason filing=${filing:-none}" 1 "${dg[@]}"
 else tkt journal "tkt-start check CURRENT filing=$filing"; emit "CURRENT filing=$filing files=${files:-none}" 0 "${dg[@]}"; fi
 sweep_out="none"; out="$run/$namebase-preflight-out.md"
 if [ "${#fpaths[@]}" -gt 0 ]; then sweep_out="$run/$namebase-sweep.md"; rc=0; sweep_txt=""

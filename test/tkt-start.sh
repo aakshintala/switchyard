@@ -41,7 +41,9 @@ case " \$* " in
   *" issue view "*"state,comments"*)
     if [ -f "$T/issue-fail" ]; then echo "gh: issue view boom" >&2; exit 5; fi
     cat "$T/issue"; exit 0 ;;
-  *) cat "$T/body"; exit 0 ;;
+  *)
+    if [ -f "$T/body-fail" ]; then echo "gh: issue body boom" >&2; exit 4; fi
+    cat "$T/body"; exit 0 ;;
 esac
 EOF
 chmod +x "$T/bin/gh"
@@ -214,7 +216,7 @@ reload --files; run_start --files a b c
 case "$OUT" in *"files=a,b,c"*) ;; *) fail "words: digest misses files=a,b,c" ;; esac
 setup wordsflag ONE AGAINST
 reload --files; run_start --files a b --no-preflight
-want "STALE reason=missing-file:a" 1 wordsflag
+want "SKIPPED filing=" 0 wordsflag
 printf '%s\n' "$OUT" | grep -qx -- 'files=a,b' || fail "wordsflag: digest misses the whole field files=a,b"
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "wordsflag: tkt-job must not run"
 setup repeat ONE AGAINST
@@ -302,12 +304,30 @@ want "CURRENT " 0 prmatch
 [ "$(grep -cF -- '--json state' "$T/calls.log")" -eq 0 ] || fail "prmatch: merged-state lookup must not run without drift"
 printf '1' >"$T/gh-fail"; run_start
 want "PRECONDITION pr=unreadable" 2 prunreadable
-# --no-preflight on a stale ticket: check only, no job, exit 1.
+# --no-preflight on a stale ticket: check only, SKIPPED with exit 0, no job.
 setup noflightstale TWO FILING
 run_start --no-preflight
-want "STALE reason=" 1 noflightstale
+want "SKIPPED filing=" 0 noflightstale
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "noflightstale: tkt-job must not run"
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "noflightstale: plan-sweep must not run"
+# a ticket STALE without the flag returns SKIPPED with it: the same missing-file
+# reason is named, but no STALE or CURRENT token, no sweep and no job.
+setup skipstale ONE AGAINST
+reload --files; run_start --files missing.txt --no-preflight
+want "SKIPPED filing=" 0 skipstale
+case "$OUT" in *STALE*|*CURRENT*|*reason=*) fail "skipstale: SKIPPED must carry no STALE, CURRENT or reason" ;; esac
+case "$OUT" in *"files=missing.txt"*) ;; *) fail "skipstale: digest misses files=missing.txt" ;; esac
+[ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "skipstale: tkt-job must not run"
+[ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "skipstale: plan-sweep must not run"
+: >"$T/calls.log"; run_start --files missing.txt
+case "$OUT" in *"reason=missing-file:missing.txt"*) ;; *) fail "skipstale: without the flag the ticket must be stale" ;; esac
+# --no-preflight never reads the issue body: a failing body read still ends SKIPPED.
+setup skipbody ONE AGAINST
+printf '1' >"$T/body-fail"; run_start --no-preflight
+want "SKIPPED filing=none" 0 skipbody
+run_start
+want "STEP-FAIL step=github" 4 skipbody
+rm -f "$T/body-fail"
 # usage table: each missing flag, a --model without role=, a bad gate.
 setup usage ONE AGAINST
 for flag in --run --repo --issue --spec --branch --worktree --workflow-doc --closing; do
@@ -498,11 +518,11 @@ setup mergednoflight TWO FILING
 printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[]}]' >"$T/prlist"
 run_start --no-preflight
 want "MERGED-STOP pr=7" 1 mergednoflight
-case "$OUT" in *"STALE reason="*) fail "mergednoflight: must stop, not print STALE" ;; esac
+case "$OUT" in *"SKIPPED"*|*"STALE reason="*) fail "mergednoflight: must stop, not print SKIPPED or STALE" ;; esac
 setup mergednoflightpart TWO FILING
 printf '%s\n' '[{"number":8,"body":"Part of #42","files":[{"path":"f.txt"}]}]' >"$T/prlist"
 run_start --no-preflight
-want "STALE reason=" 1 mergednoflightpart
+want "SKIPPED filing=" 0 mergednoflightpart
 case "$OUT" in *"NOTE merged Part-of PR #8"*) ;; *) fail "mergednoflightpart: digest misses the NOTE" ;; esac
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "mergednoflightpart: tkt-job must not run" # docs/agents/issue-tracker.md:32
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "mergednoflightpart: plan-sweep must not run" # docs/agents/issue-tracker.md:32
@@ -622,14 +642,14 @@ case "$OUT" in *"NOTE recurred after merged PR #7"*) ;; *) fail "recurredstale: 
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 1 ] || fail "recurredstale: tkt-job must run once"
 recurredstale_log="$(printf '%s\n' "$OUT" | head -n 1)"; recurredstale_log="${recurredstale_log##* log=}"
 grep -qF -- "NOTE recurred after merged PR #7" "$recurredstale_log" || fail "recurredstale: log misses the NOTE"
-# a recurrence under --no-preflight exits STALE with the NOTE, calling neither job.
+# a recurrence under --no-preflight exits SKIPPED with the NOTE, calling neither job.
 setup recurredstalenoflight TWO FILING
 printf '%s\n' '[{"number":7,"body":"Resolves #42","files":[],"mergedAt":"2026-10-28T01:00:00Z"}]' >"$T/prlist"
 printf '%s\n' '{"state":"OPEN","comments":[{"createdAt":"2026-10-28T02:00:00Z"}]}' >"$T/issue"
 run_start --no-preflight
-want "STALE reason=" 1 recurredstalenoflight
+want "SKIPPED filing=" 0 recurredstalenoflight
 case "$OUT" in *"NOTE recurred after merged PR #7"*) ;; *) fail "recurredstalenoflight: digest misses the NOTE" ;; esac
-case "$OUT" in *MERGED-STOP*) fail "recurredstalenoflight: must not stop, must print STALE" ;; esac
+case "$OUT" in *MERGED-STOP*) fail "recurredstalenoflight: must not stop, must print SKIPPED" ;; esac
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "recurredstalenoflight: tkt-job must not run" # docs/agents/issue-tracker.md:32
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "recurredstalenoflight: plan-sweep must not run" # docs/agents/issue-tracker.md:32
 # a failed issue lookup fails the github step and never reports CURRENT or PREFLIGHT.
