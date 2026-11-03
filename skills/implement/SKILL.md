@@ -38,7 +38,13 @@ Read a stop once, then route it by the step that owns it. State and the journal 
 
 ## Fast paths
 
-Planning is spent where the ticket leaves something to decide. Two kinds of ticket skip the plan; every other ticket takes the full path. Both skip the plan's Files sweep too, so before the first gate grep tests, benches and snapshots for each assertion on a value the change alters, and update the hits.
+Planning is spent where the ticket leaves something to decide. Three kinds of ticket skip the plan; every other ticket takes the full path. All three skip the plan's Files sweep too, so before the first gate grep tests, benches and snapshots for each assertion on a value the change alters, and update the hits.
+
+### Small tool change
+
+Take it in a repo of agent tooling (scripts and skills, not a shipped product) for a new standalone script, a read-only report, or a change confined to one script and its test. It is not for code that takes a lock, deletes or rewrites shared state, merges or ships, or is in `delegate/`: those take the full path. The owner prefers fixing forward here over up-front process.
+
+Skip `tkt-*`, steps 2–3 and any sub-orchestrator. Cut a worktree from `origin/main`. A trivial edit (see **Fix by churn**) you make inline. Otherwise, one worker writes the change and its test and commits, with the ticket's done-when list as its contract. A bug fix still puts its red test in its own commit first. Run the gate yourself and paste its output. Push, then open the PR with the ticket's `Resolves` line. Get one review from a different model family than the worker's (`review-pr --axes standards,spec`): a Claude worker's change is reviewed on a Codex or GPT model. Fix any P1 or P2 it raises with the worker, then run the gate again. Then run steps 7–9. A change that turns out to touch the excluded code above leaves this path for step 2.
 
 ### Confirmed bug
 
