@@ -188,19 +188,21 @@ write_findings() {
   t set findings "$fr"
 }
 
-if [ -n "$resume" ]; then args=(--slot "$slot" --resume "$resume" --prompt "$prompt")
+# A resume checks the plan's Gate line too, and passes --gate-from-plan so the
+# resumed job runs the current plan's gate, not the one it was created with.
+plan="$(t get plan 2>/dev/null || true)"
+if [ -z "$plan" ]; then
+  echo "tkt-fix: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
+  exit 2
+fi
+plan_gate_args t
+gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")" || {
+  echo "tkt-fix: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
+  exit 2
+}
+if [ -n "$resume" ]; then args=(--slot "$slot" --resume "$resume" --prompt "$prompt" --gate-from-plan)
 else
   [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
-  plan="$(t get plan 2>/dev/null || true)"
-  if [ -z "$plan" ]; then
-    echo "tkt-fix: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
-    exit 2
-  fi
-  plan_gate_args t
-  gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")" || {
-    echo "tkt-fix: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
-    exit 2
-  }
   args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$gate_cmd" --gate-from-plan --expect-commits)
   if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
 fi

@@ -398,6 +398,17 @@ run_ship
 expect_line1 "PRECONDITION gate=failed" gate-script-hand
 [ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gate-script-hand: ship-pr must not run"
 
+# --- the same Gate line stops a CI-gated ship too (no merge_gate key) ---
+reset_stub; setup_case gate-script-ci
+printf '0' >"$T/exitcodes"
+printf 'gate.script=%s\n' test/gate.sh >>"$S"
+printf '# Plan\n\n## Gate\n\n`cargo test`\n' >"$CDIR/plan.md"
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+run_ship
+[ "$RC" -eq 2 ] || fail "gate-script-ci: exit $RC"
+expect_line1 "PRECONDITION gate=failed" gate-script-ci
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gate-script-ci: ship-pr must not run"
+
 # --- no_mutants_label set: reason reaches ship-pr as one argument ---
 reset_stub; setup_case nomutants
 printf '0' >"$T/exitcodes"

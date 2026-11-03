@@ -281,7 +281,14 @@ grep -q "gh-ci|" "$T/calls.log" && fail "push ran after ASK"
 setup_case resume
 printf 'resume brief\n' >"$CDIR/prompt.md"
 out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "resume exited $?"
-grep -q "job|.*--resume j9.*--prompt $CDIR/prompt.md" "$T/calls.log" || fail "resume args not forwarded"
+grep -q "job|.*--resume j9.*--prompt $CDIR/prompt.md.*--gate-from-plan" "$T/calls.log" || fail "resume args not forwarded with --gate-from-plan"
+
+# 7b. With gate.script set, a resume whose plan Gate line skips the script stops before dispatch.
+setup_case resume-gate-script
+printf 'gate.script=%s\n' scripts/check >>"$S"
+printf 'resume brief\n' >"$CDIR/prompt.md"
+bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" >/dev/null 2>"$T/stderr" && fail "resume-gate-script exited 0"
+grep -q "job|" "$T/calls.log" && fail "resume-gate-script dispatched a job"
 bash "$TKT" "$S" 2>/dev/null && fail "bare flags exited 0"
 [ "$?" = "2" ] || fail "bare flags exited $?, want 2"
 # 7a. Round 2 refuses a fresh fix before any slot or dispatch; --resume still runs.

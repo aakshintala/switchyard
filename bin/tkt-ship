@@ -153,6 +153,13 @@ if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then
   gate_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$(tkt get plan)")" || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $(tkt get plan)"
   e="$(tkt get env 2>/dev/null || true)"
   args+=(--gate "${e:+$e }$gate_cmd")
+else
+  # A CI-gated ship runs no local gate, but a Gate line that skips gate.script
+  # still stops it: the plan's Gate line is checked on every read.
+  plan_gate_args tkt
+  if [ -n "${plan_gate_argv[*]+x}" ] && plan="$(tkt get plan 2>/dev/null)" && [ -n "$plan" ]; then
+    "$bin_dir/plan-gate" "${plan_gate_argv[@]}" "$plan" >/dev/null || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $plan"
+  fi
 fi
 
 longest_wait=144000
