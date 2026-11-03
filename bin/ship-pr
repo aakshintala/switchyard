@@ -177,7 +177,7 @@ exit_after_ready() {
 # URL, which is appended to the lines below it; it resets the fence state.
 # Sets authority_bad=1 on any hit.
 authority_scan() {
-  local line text trimmed stripped lower src="" fenced=0 asserts cite tick='`'
+  local line text trimmed stripped lower cited src="" fenced=0 asserts cite tick='`'
   cite='#[0-9]+|https?://|[A-Za-z0-9_./-]+:[0-9]+'
   while IFS= read -r line || [ -n "$line" ]; do
     text="${line%$'\r'}"
@@ -199,7 +199,9 @@ authority_scan() {
       *"per the ruling"*|*"per ruling"*|*"per the owner"*|*"owner ruled"*|*"owner-side ruling"*) asserts=1 ;;
       *"as ruled"*|*"approved by"*|*"accepted gap per"*|*"out of scope per"*) asserts=1 ;;
     esac
-    if [ "$asserts" = 1 ] && ! [[ "$text" =~ $cite ]]; then
+    # A review finding number (P2 #2) is not an issue: drop it before the citation test.
+    cited="$(printf '%s' "$text" | sed -E 's/[Pp][0-9] ?#[0-9]+//g')"
+    if [ "$asserts" = 1 ] && ! [[ "$cited" =~ $cite ]]; then
       echo "uncited authority: $text$src"
       authority_bad=1
     fi

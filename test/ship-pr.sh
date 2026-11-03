@@ -854,6 +854,18 @@ ship; expect 0 "cited authority in the body"
 setup; printf 'Resolves #97\nWe cite `approved by` as a term.\n> per the ruling, quoted\n' >"$ST/body"
 ship; expect 0 "code span and quote in the body"
 
+# A review finding number is not an issue: P2 #2 does not cite, a real #N still does
+FINDING='P2 #2 (no nextest run at 2754 terms in CI): accepted gap per the owner-side ruling'
+setup; printf 'Resolves #97\n%s\n' "$FINDING" >"$ST/body"
+ship; nothing_ran "finding number in the body"
+grep -qxF "uncited authority: $FINDING" <<<"$OUT" || fail "finding number line printed: [$OUT]"
+setup; printf 'Resolves #97\nP2 #2: accepted gap per #4069 Not established\n' >"$ST/body"
+ship; expect 0 "finding number with a real citation"
+setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" "Review round closed on abc123.
+$FINDING"
+ship; nothing_ran "finding number in a round-closed comment"
+grep -qxF "uncited authority: $FINDING (comment $U7)" <<<"$OUT" || fail "finding number comment line: [$OUT]"
+
 setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" 'Review round closed on abc123 with a fix.
 Accepted gap per the owner-side ruling.'
 ship; nothing_ran "uncited authority in a round-closed comment"
