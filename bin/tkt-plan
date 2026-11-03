@@ -101,13 +101,25 @@ gate_args=()
 
 ronum() { n="$(t get verifier_round 2>/dev/null || printf '0')"; case "$n" in ''|*[!0-9]*) n=0;; esac; printf '%s\n' "$n"; }
 
+# report_passed REPORT: true when REPORT is a clean pass. Line 1 that is exactly
+# `PLAN OK` passes as it always has. Otherwise the verdict may sit on any line:
+# it passes when at least one line is exactly `PLAN OK` and no line carries
+# `PLAN OK` with other text (the brief says that records a fail).
+report_passed() {
+  local rep="$1" any exact
+  [ "$(head -n 1 "$rep")" = "PLAN OK" ] && return 0
+  any="$(grep -Fc 'PLAN OK' "$rep" || true)"
+  exact="$(grep -c '^PLAN OK$' "$rep" || true)"
+  [ "$exact" -ge 1 ] && [ "$any" -eq "$exact" ]
+}
+
 open_lines() {
   local report round
   report="$(t get last_report 2>/dev/null || true)"
   round="$(ronum)"
   if [ -z "$report" ] || [ ! -f "$report" ]; then
     printf 'none (no report: round %s ended without one)\n' "$round"
-  elif [ ! -s "$report" ] || [ "$(head -n 1 "$report")" = "PLAN OK" ]; then
+  elif [ ! -s "$report" ] || report_passed "$report"; then
     printf 'none\n'
   else
     head -n "$REPORT_LINES" "$report"
@@ -168,7 +180,7 @@ runjob() {
     fi
   }
   [ -r "$rep" ] || { echo "tkt-plan: tkt-job wrote no report: $rep" >&2; exit 3; }
-  [ "$(head -n 1 "$rep")" = "PLAN OK" ] && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES n=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
+  report_passed "$rep" && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES n=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
 }
 
 # task_pathspec KIND VALUE: expand_token's callback for task records. Resolve
