@@ -102,6 +102,18 @@ case "\$(cat "$T/mode")" in
     echo "reviewer is uneasy about one edge"
     exit 1
     ;;
+  silent)
+    echo "TKT tkt-job DONE id=j1 head=h commits=0 gate=none report=x log=x"
+    exit 0
+    ;;
+  nested)
+    # Controlled interleave: a second verify on the same state runs while this
+    # job holds its report path. It runs in ok mode, so it cannot nest again.
+    printf 'ok' >"$T/mode"
+    bash "$REAL_BIN/tkt-plan" "\$state" verify >"$T/nested.out" 2>&1
+    printf 'PLAN OK\nouter\n' >"\$out"
+    echo "TKT tkt-job DONE id=j1 head=h commits=0 gate=none report=PLAN OK log=x"
+    ;;
   blocked)
     echo "TKT tkt-job BLOCKED id=j1 log=x"
     exit 1
@@ -1879,5 +1891,60 @@ run_plan confirm --edits "$CDIR/edits.md"
 grep -q "out=$CDIR/run/switchyard-518-confirm-out-2.md|" "$T/stub.log" || fail "confirm-no-overwrite writes confirm-out-2.md"
 [ "$(state_get last_report)" = "$CDIR/run/switchyard-518-confirm-out-2.md" ] || fail "confirm-no-overwrite records the new report as last_report"
 expect_verdict "TKT tkt-plan PLAN-OK out=$CDIR/run/switchyard-518-confirm-out-2.md log=*" "confirm-no-overwrite"
+
+# --- a verify reserves its report path before the job runs ---
+# An empty file is a reservation another round holds: the round takes the next
+# suffix and leaves the reservation alone.
+setup_case verify-empty-reservation
+rebase_plan
+: >"$CDIR/run/switchyard-518-verifier-out-r1.md"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "verify-empty-reservation exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ -e "$CDIR/run/switchyard-518-verifier-out-r1.md" ] && [ ! -s "$CDIR/run/switchyard-518-verifier-out-r1.md" ] || fail "verify-empty-reservation leaves the reservation empty"
+grep -q "out=$CDIR/run/switchyard-518-verifier-out-r1-2.md|" "$T/stub.log" || fail "verify-empty-reservation writes r1-2"
+[ "$(state_get last_report)" = "$CDIR/run/switchyard-518-verifier-out-r1-2.md" ] || fail "verify-empty-reservation records r1-2"
+
+# Controlled interleave: the job for round 1 holds r1, and a second verify on
+# the same state runs before that job writes. The second must take r1-2, and
+# the first must still write its own report to r1.
+setup_case verify-interleave
+rebase_plan
+printf 'nested' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "verify-interleave outer exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+r1="$CDIR/run/switchyard-518-verifier-out-r1.md"
+r2="$CDIR/run/switchyard-518-verifier-out-r1-2.md"
+grep -qx 'outer' "$r1" || fail "verify-interleave keeps the outer report in r1"
+grep -qx 'outer' "$r2" && fail "verify-interleave keeps the nested verify out of r1-2's outer text"
+grep -q 'PLAN OK' "$r2" || fail "verify-interleave writes the nested report to r1-2"
+[ "$(state_get last_report)" = "$r1" ] || fail "verify-interleave records the outer report as last_report"
+printf 'ok' >"$T/mode"
+
+# A job that exits 0 without writing its report is "wrote no report", not
+# LINES n=0, and leaves its reservation empty.
+setup_case job-silent-no-report
+rebase_plan
+printf 'silent' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 3 ] || fail "job-silent-no-report exits 3 (rc=$RC)"
+grep -q 'wrote no report' "$CDIR/stderr.txt" || fail "job-silent-no-report says it wrote no report"
+grep -q '^LINES' <<<"$OUT" && fail "job-silent-no-report is not LINES n=0"
+r1="$CDIR/run/switchyard-518-verifier-out-r1.md"
+[ -e "$r1" ] && [ ! -s "$r1" ] || fail "job-silent-no-report leaves the reservation empty"
+printf 'ok' >"$T/mode"
+
+# A blocked job leaves its empty reservation, and the next round does not reuse it.
+setup_case job-blocked-reservation
+rebase_plan
+printf 'blocked' >"$T/mode"
+run_plan verify
+case "$(first_line)" in *BLOCKED*) ;; *) fail "job-blocked-reservation verdict is BLOCKED: [$(first_line)]" ;; esac
+r1="$CDIR/run/switchyard-518-verifier-out-r1.md"
+[ -e "$r1" ] && [ ! -s "$r1" ] || fail "job-blocked-reservation leaves the reservation empty"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "job-blocked-reservation retry exits 0 (rc=$RC)"
+grep -q "out=$CDIR/run/switchyard-518-verifier-out-r1-2.md|" "$T/stub.log" || fail "job-blocked-reservation retry writes r1-2"
 
 echo "tkt-plan: all cases passed"
