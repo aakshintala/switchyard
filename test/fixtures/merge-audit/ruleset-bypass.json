@@ -1,0 +1,3 @@
+{"id":24219615,"name":"main","bypass_actors":[
+ {"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"},
+ {"actor_id":null,"actor_type":"OrganizationAdmin","bypass_mode":"pull_request"}]}

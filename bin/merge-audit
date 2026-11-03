@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+# merge-audit --repo owner/name [--since ISO|--state FILE] [--ruleset ID]
+#
+# Read-only audit of merges past CI, for the nightly report. Fiber:
+#   merge-audit --repo aakshintala/fiber --ruleset 24219615 --state ~/.cache/switchyard/merge-audit.json
+#
+# Lists each PR merged into the default branch since the cutoff whose head SHA
+# has no check run named `CI` (any attempt) that succeeded at or before the
+# merge, one line per PR (a success after the merge reads ci=success-after-merge):
+#   merge-without-green-ci: #<n> merger=<login> head=<sha> ci=<conclusion|none> break-glass=<yes|no>
+# break-glass is yes when the PR body starts with `Break-glass:`. With no such
+# merge it prints `merges-without-green-ci: none`. With --ruleset it prints one
+# line for the ruleset's bypass_actors: `empty`, or a WARNING naming each
+# actor and its bypass mode.
+#
+# Cutoff: --since, else the last run time in --state, else 24h before now.
+# --state FILE holds {"last_run": ISO}; it is the only file written, and only
+# when every read succeeded, so a failed run is covered again next time.
+# Any failed read prints an `error:` line (never "none" or "empty").
+# Exit codes: 0 all reads ok, 1 a read failed, 2 usage. Uses `gh api` only.
+# MERGE_AUDIT_NOW (ISO UTC) pins "now"; it exists for tests only.
+import json, os, subprocess, sys
+from datetime import datetime, timedelta, timezone
+
+USAGE = "usage: merge-audit --repo owner/name [--since ISO|--state FILE] [--ruleset ID]"
+
+
+def parse_ts(s):
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def iso(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class ReadError(Exception):
+    pass
+
+
+def api(path):
+    p = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    if p.returncode != 0:
+        err = (p.stderr or "").strip().splitlines()
+        raise ReadError("gh api %s: %s" % (path, err[-1] if err else "exit %d" % p.returncode))
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        raise ReadError("gh api %s: bad JSON" % path)
+
+
+def usage(msg):
+    print("merge-audit: %s\n%s" % (msg, USAGE), file=sys.stderr)
+    sys.exit(2)
+
+
+def merged_since(repo, base, since):
+    """PRs merged into base at or after since. Sorted by updated desc, and
+    merged_at <= updated_at, so stop at the first page entry updated before since."""
+    out = []
+    for page in range(1, 51):
+        prs = api("repos/%s/pulls?state=closed&base=%s&sort=updated&direction=desc"
+                  "&per_page=100&page=%d" % (repo, base, page))
+        if not isinstance(prs, list):
+            raise ReadError("pulls page %d: not a list" % page)
+        for pr in prs:
+            m = parse_ts(pr.get("merged_at"))
+            if m and m >= since:
+                out.append(pr)
+        if len(prs) < 100 or (parse_ts(prs[-1].get("updated_at")) or since) < since:
+            return out
+    raise ReadError("pulls: more than 50 pages since %s" % iso(since))
+
+
+def ci_conclusion(repo, sha, merged_at):
+    """'success' if a CI run on sha (any attempt, filter=all) succeeded at or
+    before merged_at; else the newest run's conclusion (or status while
+    unfinished), with a success that finished after the merge reported as
+    'success-after-merge'; else None."""
+    runs, page = [], 1
+    while True:
+        data = api("repos/%s/commits/%s/check-runs?check_name=CI&filter=all&per_page=100&page=%d"
+                   % (repo, sha, page))
+        batch = data.get("check_runs") if isinstance(data, dict) else None
+        if not isinstance(batch, list):
+            raise ReadError("check-runs %s page %d: no check_runs list" % (sha, page))
+        runs.extend(batch)
+        if len(batch) < 100 or len(runs) >= (data.get("total_count") or 0):
+            break
+        if page == 10:
+            raise ReadError("check-runs %s: more than 10 pages" % sha)
+        page += 1
+    runs = [r for r in runs if r.get("name") == "CI"]
+    merged = parse_ts(merged_at)
+    done = [parse_ts(r.get("completed_at")) for r in runs if r.get("conclusion") == "success"]
+    if merged and any(d and d <= merged for d in done):
+        return "success"
+    if not runs:
+        return None
+    newest = max(runs, key=lambda r: r.get("started_at") or "")
+    c = newest.get("conclusion") or newest.get("status") or "unknown"
+    return "success-after-merge" if c == "success" else c
+
+
+def audit_merges(repo, since):
+    """Print the merge section; return True when every read succeeded."""
+    try:
+        base = api("repos/%s" % repo).get("default_branch")
+        if not base:
+            raise ReadError("repos/%s: no default_branch" % repo)
+        prs = merged_since(repo, base, since)
+    except ReadError as e:
+        print("error: merges unread: %s" % e)
+        return False
+    ok, listed = True, 0
+    for pr in sorted(prs, key=lambda p: p["merged_at"]):
+        n, sha = pr["number"], pr["head"]["sha"]
+        try:
+            ci = ci_conclusion(repo, sha, pr["merged_at"])
+            if ci == "success":
+                continue
+            merger = (api("repos/%s/pulls/%d" % (repo, n)).get("merged_by") or {}).get("login") or "unknown"
+        except ReadError as e:
+            print("error: #%d unread: %s" % (n, e))
+            ok = False
+            continue
+        bg = "yes" if (pr.get("body") or "").lstrip().startswith("Break-glass:") else "no"
+        print("merge-without-green-ci: #%d merger=%s head=%s ci=%s break-glass=%s"
+              % (n, merger, sha, ci or "none", bg))
+        listed += 1
+    if ok and not listed:
+        print("merges-without-green-ci: none")
+    return ok
+
+
+def audit_ruleset(repo, rid):
+    try:
+        rs = api("repos/%s/rulesets/%s" % (repo, rid))
+        actors = rs.get("bypass_actors")
+        if not isinstance(actors, list):
+            raise ReadError("ruleset %s: no bypass_actors list" % rid)
+    except (ReadError, AttributeError) as e:
+        print("error: ruleset %s unread: %s" % (rid, e))
+        return False
+    if not actors:
+        print("ruleset %s bypass: empty" % rid)
+    else:
+        print("WARNING: ruleset %s bypass: %s" % (rid, ", ".join(
+            " ".join(str(x) for x in (a.get("actor_type"), a.get("actor_id")) if x is not None)
+            + " mode=%s" % a.get("bypass_mode") for a in actors)))
+    return True
+
+
+def main(argv):
+    opts = {}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--repo", "--since", "--state", "--ruleset") and i + 1 < len(argv):
+            opts[a] = argv[i + 1]
+            i += 2
+        else:
+            usage("unknown or incomplete flag %r" % a)
+    repo = opts.get("--repo", "")
+    if repo.count("/") != 1 or not all(repo.split("/")):
+        usage("missing --repo owner/name")
+    if "--since" in opts and "--state" in opts:
+        usage("--since and --state are exclusive")
+    now = parse_ts(os.environ.get("MERGE_AUDIT_NOW") or "") or datetime.now(timezone.utc)
+    state = opts.get("--state")
+    if "--since" in opts:
+        since = parse_ts(opts["--since"])
+        if not since:
+            usage("bad --since %r" % opts["--since"])
+    else:
+        since = None
+        if state and os.path.exists(state):
+            try:
+                with open(state) as fh:
+                    since = parse_ts(json.load(fh).get("last_run"))
+            except (OSError, ValueError, AttributeError) as e:
+                print("merge-audit: state unreadable (%s), using 24h" % e, file=sys.stderr)
+        since = since or now - timedelta(hours=24)
+
+    print("merge-audit %s since %s" % (repo, iso(since)))
+    ok = audit_merges(repo, since)
+    if "--ruleset" in opts:
+        ok = audit_ruleset(repo, opts["--ruleset"]) and ok
+    if ok and state:
+        d = os.path.dirname(state)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = state + ".tmp-%d" % os.getpid()
+        with open(tmp, "w") as fh:
+            json.dump({"last_run": iso(now)}, fh)
+        os.replace(tmp, state)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

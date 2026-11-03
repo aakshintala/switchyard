@@ -1,0 +1,74 @@
+[
+ {
+  "number": 10,
+  "merged_at": "2026-11-01T12:00:00Z",
+  "updated_at": "2026-11-01T12:00:05Z",
+  "body": "Break-glass: CI runner outage, owner merge",
+  "head": {
+   "sha": "aaaa000000000000000000000000000000000010"
+  }
+ },
+ {
+  "number": 11,
+  "merged_at": "2026-11-01T11:00:00Z",
+  "updated_at": "2026-11-01T11:00:05Z",
+  "body": "Normal change",
+  "head": {
+   "sha": "bbbb000000000000000000000000000000000011"
+  }
+ },
+ {
+  "number": 13,
+  "merged_at": null,
+  "updated_at": "2026-11-01T10:00:00Z",
+  "body": "closed unmerged",
+  "head": {
+   "sha": "dddd000000000000000000000000000000000013"
+  }
+ },
+ {
+  "number": 14,
+  "merged_at": "2026-11-01T09:00:00Z",
+  "updated_at": "2026-11-01T09:00:05Z",
+  "body": "no CI ran",
+  "head": {
+   "sha": "eeee000000000000000000000000000000000014"
+  }
+ },
+ {
+  "number": 15,
+  "merged_at": "2026-11-01T08:30:00Z",
+  "updated_at": "2026-11-01T08:30:05Z",
+  "body": "re-run failed after an earlier green attempt",
+  "head": {
+   "sha": "ffff000000000000000000000000000000000015"
+  }
+ },
+ {
+  "number": 16,
+  "merged_at": "2026-11-01T08:00:00Z",
+  "updated_at": "2026-11-01T08:00:05Z",
+  "body": "Break-glass: merged before CI finished",
+  "head": {
+   "sha": "1616000000000000000000000000000000000016"
+  }
+ },
+ {
+  "number": 17,
+  "merged_at": "2026-11-01T07:30:00Z",
+  "updated_at": "2026-11-01T07:30:05Z",
+  "body": "green run on page 2",
+  "head": {
+   "sha": "1717000000000000000000000000000000000017"
+  }
+ },
+ {
+  "number": 12,
+  "merged_at": "2026-10-30T09:00:00Z",
+  "updated_at": "2026-10-30T09:00:05Z",
+  "body": "Break-glass: before the cutoff",
+  "head": {
+   "sha": "cccc000000000000000000000000000000000012"
+  }
+ }
+]
