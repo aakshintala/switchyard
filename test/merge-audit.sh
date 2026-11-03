@@ -34,7 +34,11 @@ case "$path" in
   repos/o/r) serve repo.json;;
   repos/o/r/pulls\?*) case "$path" in *page=1) serve "${FAKE_PULLS:-pulls.json}";; *) echo '[]';; esac;;
   repos/o/r/pulls/*) serve "pr-${path##*/}.json";;
-  repos/o/r/commits/*/check-runs\?*) sha="${path#repos/o/r/commits/}"; serve "checks-${sha%%/*}.json";;
+  repos/o/r/commits/*/check-runs\?*)
+    # Only filter=all is served: the default (latest) would hide older attempts.
+    [[ "$path" == *"&filter=all&"* ]] || { echo "fake gh: check-runs without filter=all: $path" >&2; exit 2; }
+    sha="${path#repos/o/r/commits/}"; sha="${sha%%/*}"; page="${path##*page=}"
+    if [ "$page" = 1 ]; then serve "checks-$sha.json"; else serve "checks-$sha-p$page.json"; fi;;
   repos/o/r/rulesets/24219615) serve "${FAKE_RULESET:-ruleset-empty.json}";;
   *) echo "fake gh: unknown path $path" >&2; exit 2;;
 esac
@@ -62,6 +66,17 @@ hasnt "#13" "unmerged PR"
 hasnt "merges-without-green-ci: none" "listed merges"
 has "ruleset 24219615 bypass: empty" "empty bypass list"
 grep -v '^gh api [^ ]*$' "$FAKE_GH_LOG" && fail "gh called other than 'gh api <path>'"
+
+# 1b. A success that completed an hour after the merge does not count: listed.
+has "merge-without-green-ci: #16 merger=aakshintala head=1616000000000000000000000000000000000016 ci=success-after-merge break-glass=yes" "success after merge"
+# 1c. Green before the merge on an older attempt (newest re-run failed), or
+#     only on page 2 of the check runs: not listed.
+hasnt "#15" "older green attempt"
+hasnt "#17" "green on page 2"
+grep -qF "1717000000000000000000000000000000000017/check-runs?check_name=CI&filter=all&per_page=100&page=2" "$FAKE_GH_LOG" \
+  || fail "page 2 of check runs not read"
+grep -q "aaaa000000000000000000000000000000000010/check-runs.*page=2" "$FAKE_GH_LOG" \
+  && fail "read page 2 after a short page 1"
 
 # 2. Only a green merge: one explicit none line.
 FAKE_PULLS=pulls-green.json run --repo o/r "${SINCE[@]}"

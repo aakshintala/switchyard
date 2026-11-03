@@ -5,7 +5,8 @@
 #   merge-audit --repo aakshintala/fiber --ruleset 24219615 --state ~/.cache/switchyard/merge-audit.json
 #
 # Lists each PR merged into the default branch since the cutoff whose head SHA
-# has no check run named `CI` with conclusion `success`, one line per PR:
+# has no check run named `CI` (any attempt) that succeeded at or before the
+# merge, one line per PR (a success after the merge reads ci=success-after-merge):
 #   merge-without-green-ci: #<n> merger=<login> head=<sha> ci=<conclusion|none> break-glass=<yes|no>
 # break-glass is yes when the PR body starts with `Break-glass:`. With no such
 # merge it prints `merges-without-green-ci: none`. With --ruleset it prints one
@@ -74,17 +75,34 @@ def merged_since(repo, base, since):
     raise ReadError("pulls: more than 50 pages since %s" % iso(since))
 
 
-def ci_conclusion(repo, sha):
-    """'success' if any CI run on sha succeeded, else the newest run's
-    conclusion (or status while unfinished), else None."""
-    data = api("repos/%s/commits/%s/check-runs?check_name=CI&per_page=100" % (repo, sha))
-    runs = [r for r in data.get("check_runs", []) if r.get("name") == "CI"]
-    if any(r.get("conclusion") == "success" for r in runs):
+def ci_conclusion(repo, sha, merged_at):
+    """'success' if a CI run on sha (any attempt, filter=all) succeeded at or
+    before merged_at; else the newest run's conclusion (or status while
+    unfinished), with a success that finished after the merge reported as
+    'success-after-merge'; else None."""
+    runs, page = [], 1
+    while True:
+        data = api("repos/%s/commits/%s/check-runs?check_name=CI&filter=all&per_page=100&page=%d"
+                   % (repo, sha, page))
+        batch = data.get("check_runs") if isinstance(data, dict) else None
+        if not isinstance(batch, list):
+            raise ReadError("check-runs %s page %d: no check_runs list" % (sha, page))
+        runs.extend(batch)
+        if len(batch) < 100 or len(runs) >= (data.get("total_count") or 0):
+            break
+        if page == 10:
+            raise ReadError("check-runs %s: more than 10 pages" % sha)
+        page += 1
+    runs = [r for r in runs if r.get("name") == "CI"]
+    merged = parse_ts(merged_at)
+    done = [parse_ts(r.get("completed_at")) for r in runs if r.get("conclusion") == "success"]
+    if merged and any(d and d <= merged for d in done):
         return "success"
     if not runs:
         return None
     newest = max(runs, key=lambda r: r.get("started_at") or "")
-    return newest.get("conclusion") or newest.get("status") or "unknown"
+    c = newest.get("conclusion") or newest.get("status") or "unknown"
+    return "success-after-merge" if c == "success" else c
 
 
 def audit_merges(repo, since):
@@ -101,7 +119,7 @@ def audit_merges(repo, since):
     for pr in sorted(prs, key=lambda p: p["merged_at"]):
         n, sha = pr["number"], pr["head"]["sha"]
         try:
-            ci = ci_conclusion(repo, sha)
+            ci = ci_conclusion(repo, sha, pr["merged_at"])
             if ci == "success":
                 continue
             merger = (api("repos/%s/pulls/%d" % (repo, n)).get("merged_by") or {}).get("login") or "unknown"
