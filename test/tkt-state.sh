@@ -246,6 +246,7 @@ else
 fi
 [ "$empty_owner_rc" = "2" ] || fail "empty-owner lock exits 2"
 grep -q 'tkt-state: state locked' "$T/err-empty-owner.txt" || fail "empty-owner lock reports state locked"
+grep -Fq "$S12.lock" "$T/err-empty-owner.txt" || fail "empty-owner message names the lock directory"
 [ -d "$S12.lock" ] || fail "empty-owner lock is left in place"
 
 # A lock attributed to another host is never reaped.
@@ -331,10 +332,13 @@ cp "$S11.lock/pid" "$T/lp-seeded.pid"
   printf '%s\n' "$lp_a_rc" >"$T/lp-a.result"
 ) &
 lp_a_pid=$!
-if ! wait_for_test_file "$T/lp-a.ready"; then
+abort_lp() {
   touch "$T/lp-a.release"
   wait_bounded "$lp_a_pid" || true
-  fail "first writer pauses while holding the flock"
+  fail "$1"
+}
+if ! wait_for_test_file "$T/lp-a.ready"; then
+  abort_lp "first writer pauses while holding the flock"
 fi
 if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 TKT_STATE_TEST_LOCK_SIGNAL="$T/lp-b.sig" bash "$TKT" "$S11" set b two >"$T/lp-b.log" 2>&1; then
   lp_b_rc=0
@@ -342,32 +346,20 @@ else
   lp_b_rc=$?
 fi
 if [ "$lp_b_rc" != "2" ]; then
-  touch "$T/lp-a.release"
-  wait_bounded "$lp_a_pid" || true
-  fail "second writer exits 2 while the first holds the flock"
+  abort_lp "second writer exits 2 while the first holds the flock"
 fi
 if [ ! -s "$T/lp-b.sig" ]; then
-  touch "$T/lp-a.release"
-  wait_bounded "$lp_a_pid" || true
-  fail "second writer signals its failed flock attempts"
+  abort_lp "second writer signals its failed flock attempts"
 fi
 if ! cmp -s "$T/lp-seeded.pid" "$S11.lock/pid"; then
-  touch "$T/lp-a.release"
-  wait_bounded "$lp_a_pid" || true
-  fail "second writer does not reap the seeded owner outside the flock"
+  abort_lp "second writer does not reap the seeded owner outside the flock"
 fi
 if bash "$TKT" "$S11" get b >/dev/null 2>&1; then
-  touch "$T/lp-a.release"
-  wait_bounded "$lp_a_pid" || true
-  fail "second writer does not write while the first holds the flock"
+  abort_lp "second writer does not write while the first holds the flock"
 else
   lp_b_missing_rc=$?
 fi
-[ "$lp_b_missing_rc" = "2" ] || {
-  touch "$T/lp-a.release"
-  wait_bounded "$lp_a_pid" || true
-  fail "second writer's missing value exits 2"
-}
+[ "$lp_b_missing_rc" = "2" ] || abort_lp "second writer's missing value exits 2"
 touch "$T/lp-a.release"
 wait_bounded "$lp_a_pid" || fail "first writer finishes after release"
 [ "$(cat "$T/lp-a.result")" = "0" ] || fail "first writer succeeds after release"
@@ -375,8 +367,7 @@ wait_bounded "$lp_a_pid" || fail "first writer finishes after release"
 [ ! -e "$S11.lock" ] || fail "first writer leaves no state lock"
 bash "$TKT" "$S11" set b two || fail "a fresh writer succeeds after the first releases the flock"
 [ "$(bash "$TKT" "$S11" get b)" = "two" ] || fail "fresh writer stores its value"
-[ -f "$S.flock" ] || fail "a successful write leaves the persistent flock file"
-grep -Fq "$S12.lock" "$T/err-empty-owner.txt" || fail "empty-owner message names the lock directory"
+[ -f "$S11.flock" ] || fail "a successful write leaves the persistent flock file"
 
 # A partly written owner record is treated like an empty pid file.
 S14="$T/partial-owner.state"
