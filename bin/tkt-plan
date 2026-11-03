@@ -101,6 +101,17 @@ gate_args=()
 
 ronum() { n="$(t get verifier_round 2>/dev/null || printf '0')"; case "$n" in ''|*[!0-9]*) n=0;; esac; printf '%s\n' "$n"; }
 
+# free_path PATH: print PATH when no file exists there, else the first
+# <stem>-2.md, <stem>-3.md, ... that is free. A report is evidence, so a round
+# never writes over one. The round counter can reset, so names can repeat.
+free_path() {
+  local p="$1" stem n=2
+  [ -e "$p" ] || { printf '%s\n' "$p"; return; }
+  stem="${p%.md}"
+  while [ -e "$stem-$n.md" ]; do n=$((n + 1)); done
+  printf '%s\n' "$stem-$n.md"
+}
+
 # report_passed REPORT: true when REPORT is a clean pass. Line 1 that is exactly
 # `PLAN OK` passes as it always has. Otherwise the verdict may sit on any line:
 # it passes when at least one line is exactly `PLAN OK` and no line carries
@@ -254,11 +265,11 @@ do_verify() {
   args=(PLAN="$plan" BASE="$base" --model "$model")
   if [ "$drift" -eq 1 ]; then
     slot="verifier-r$((round + 1))-drift"
-    rep="$run/$namebase-verifier-out-r$((round + 1))-drift.md"
+    rep="$(free_path "$run/$namebase-verifier-out-r$((round + 1))-drift.md")"
     xfile="$run/$namebase-verifier-extra-r$((round + 1))-drift.md"
   else
     slot="verifier-r$((round + 1))"
-    rep="$run/$namebase-verifier-out-r$((round + 1)).md"
+    rep="$(free_path "$run/$namebase-verifier-out-r$((round + 1)).md")"
     xfile="$run/$namebase-verifier-extra-r$((round + 1)).md"
   fi
   # --extra wins over state extra; the ticket text goes before either.
@@ -298,7 +309,7 @@ do_confirm() {
   fi
   load_plan
   cmodel="$(vmodel)" || exit 2
-  rep="$run/$namebase-confirm-out.md"
+  rep="$(free_path "$run/$namebase-confirm-out.md")"
   xfile="$run/$namebase-confirm-extra.md"
   # Confirm has no --extra flag: the state extra, if any, follows the ticket text.
   ticket_extra "$xfile" "$(t get extra 2>/dev/null || true)"

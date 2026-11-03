@@ -1836,4 +1836,48 @@ run_plan post --no-verifier
 expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post --no-verifier refreshes skipped"
 expect_plan_verdict skipped "$base_now" "post --no-verifier refreshes skipped"
 
+# --- a verify never overwrites an earlier Verifier report ---
+# A new plan path resets the round counter, so round 1 would name a report
+# that already exists. The round takes the next free suffix instead.
+setup_case verify-no-overwrite
+rebase_plan
+seeded="$CDIR/run/switchyard-518-verifier-out-r1.md"
+printf 'known verifier finding\n' >"$seeded"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "verify-no-overwrite exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$seeded")" = "known verifier finding" ] || fail "verify-no-overwrite leaves the seeded report unchanged"
+grep -q "out=$CDIR/run/switchyard-518-verifier-out-r1-2.md|" "$T/stub.log" || fail "verify-no-overwrite writes verifier-out-r1-2.md"
+[ "$(state_get last_report)" = "$CDIR/run/switchyard-518-verifier-out-r1-2.md" ] || fail "verify-no-overwrite records the new report as last_report"
+expect_verdict "TKT tkt-plan PLAN-OK out=$CDIR/run/switchyard-518-verifier-out-r1-2.md log=*" "verify-no-overwrite"
+
+# The next free suffix skips every report that exists.
+setup_case verify-free-suffix
+rebase_plan
+printf 'first\n' >"$CDIR/run/switchyard-518-verifier-out-r1.md"
+printf 'second\n' >"$CDIR/run/switchyard-518-verifier-out-r1-2.md"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "verify-free-suffix exits 0 (rc=$RC)"
+[ "$(cat "$CDIR/run/switchyard-518-verifier-out-r1-2.md")" = "second" ] || fail "verify-free-suffix leaves the -2 report unchanged"
+grep -q "out=$CDIR/run/switchyard-518-verifier-out-r1-3.md|" "$T/stub.log" || fail "verify-free-suffix writes verifier-out-r1-3.md"
+
+# A confirm round never overwrites an earlier confirm report. Reach the confirm
+# round as confirm-lines does: two LINES verifies, then confirm.
+setup_case confirm-no-overwrite
+rebase_plan
+printf 'lines' >"$T/mode"
+run_plan verify
+run_plan verify
+printf 'ok' >"$T/mode"
+seeded="$CDIR/run/switchyard-518-confirm-out.md"
+printf 'known confirm finding\n' >"$seeded"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "confirm-no-overwrite exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$seeded")" = "known confirm finding" ] || fail "confirm-no-overwrite leaves the seeded report unchanged"
+grep -q "out=$CDIR/run/switchyard-518-confirm-out-2.md|" "$T/stub.log" || fail "confirm-no-overwrite writes confirm-out-2.md"
+[ "$(state_get last_report)" = "$CDIR/run/switchyard-518-confirm-out-2.md" ] || fail "confirm-no-overwrite records the new report as last_report"
+expect_verdict "TKT tkt-plan PLAN-OK out=$CDIR/run/switchyard-518-confirm-out-2.md log=*" "confirm-no-overwrite"
+
 echo "tkt-plan: all cases passed"
