@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # file-claim: lanes self-grant files via a claims ref in the claim repo.
-# Usage: file-claim claim --lane ID (--plan | --grant) [--self-pr N] [--worktree HOST:DIR] [--repo R] PATH...
+# Usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
 # FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5); N must be a positive integer.
@@ -15,7 +15,7 @@ TRIES=8
 TAB=$'\t'
 NL=$'\n'
 usage() {
-  echo "usage: file-claim claim --lane ID (--plan | --grant) [--self-pr N] [--worktree HOST:DIR] [--repo R] PATH..." >&2
+  echo "usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
   echo "       file-claim list [--lane ID] [--repo R]" >&2
   exit 2
@@ -24,12 +24,23 @@ die() { local c="$1"; shift; echo "file-claim: $*" >&2; exit "$c"; }
 case "$MAX_GRANT" in ''|*[!0-9]*) die 2 "FILE_CLAIM_MAX_GRANT must be a positive integer" ;; esac
 [ "$MAX_GRANT" -gt 0 ] || die 2 "FILE_CLAIM_MAX_GRANT must be a positive integer"
 case "$READ_WAIT" in ''|*[!0-9]*) die 2 "FILE_CLAIM_READ_WAIT must be a whole number of seconds" ;; esac
+# plan_files_pathspecs: the plan's Files entries, the same reader tkt-gate uses.
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "$0")" && pwd)/lib/plan-tokens.sh"
 W=""
 cleanup() { if [ -n "$W" ] && [ -d "$W" ]; then rm -rf "$W"; fi; }
 trap cleanup EXIT
 new_workdir() { W="$(mktemp -d "${TMPDIR:-/tmp}/file-claim.XXXXXX")"; git init -q --bare "$W" || die 2 "cannot init temp dir"; }
 valid_path() { case "$1" in ""|*"$TAB"*|*"$NL"*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;; esac; }
 valid_field() { case "$1" in ""|*"$TAB"*|*"$NL"*) return 1;; esac; }
+# is_plan_file PATH: a readable regular file with Files entries that git does not
+# track. Outside a repo, git fails, so the file counts as untracked.
+is_plan_file() {
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  [ -n "$(plan_files_pathspecs "$1")" ] || return 1
+  git --literal-pathspecs ls-files --error-unmatch -- "$1" >/dev/null 2>&1 && return 1
+  return 0
+}
 at_epoch() {
   date -u -d "$1" +%s 2>/dev/null || date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null
 }
@@ -200,12 +211,13 @@ main() {
   [ $# -ge 1 ] || usage
   local cmd="$1"; shift
   case "$cmd" in claim|release|list) ;; *) usage;; esac
-  local lane="" mode="" self_pr="" worktree="" repo="$REPO_DEFAULT"
-  local paths; paths=()
+  local lane="" mode="" self_pr="" worktree="" repo="$REPO_DEFAULT" plan_file=""
+  local paths line p; paths=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --lane) [ $# -ge 2 ] || usage; lane="$2"; shift 2;;
       --plan) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; mode="plan"; shift;;
+      --plan-file) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; [ $# -ge 2 ] || usage; valid_field "$2" || usage; mode="plan"; plan_file="$2"; shift 2;;
       --grant) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; mode="grant"; shift;;
       --self-pr) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; self_pr="$2"; shift 2;;
       --worktree) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; worktree="$2"; shift 2;;
@@ -220,7 +232,22 @@ main() {
   case "$cmd" in
     claim) [ -n "$lane" ] || usage; valid_field "$lane" || usage; [ -n "$mode" ] || usage
       if [ -z "$worktree" ]; then worktree="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'unknown'):$(pwd)"; fi
-      valid_field "$worktree" || usage; [ "${#paths[@]}" -gt 0 ] || usage; cmd_claim "$lane" "$mode" "$self_pr" "$worktree" "$repo" "${paths[@]}";;
+      valid_field "$worktree" || usage
+      if [ -n "$plan_file" ]; then
+        # --plan-file takes exactly one plan; its Files entries are the paths to claim.
+        [ "${#paths[@]}" -eq 0 ] || usage
+        [ -f "$plan_file" ] && [ -r "$plan_file" ] || die 2 "cannot read plan file: $plan_file"
+        while IFS= read -r line || [ -n "$line" ]; do paths+=("$line"); done < <(plan_files_pathspecs "$plan_file")
+        [ "${#paths[@]}" -gt 0 ] || die 2 "no paths in the Files section of $plan_file"
+      else
+        [ "${#paths[@]}" -gt 0 ] || usage
+        if [ "$mode" = plan ]; then
+          for p in "${paths[@]}"; do
+            if is_plan_file "$p"; then die 2 "$p is a plan file, not a path to claim; pass its Files paths after --plan, or the plan with --plan-file $p"; fi
+          done
+        fi
+      fi
+      cmd_claim "$lane" "$mode" "$self_pr" "$worktree" "$repo" "${paths[@]}";;
     release) [ -n "$lane" ] || usage; valid_field "$lane" || usage; if [ "${#paths[@]}" -gt 0 ]; then cmd_release "$lane" "$repo" "${paths[@]}"; else cmd_release "$lane" "$repo"; fi;;
     list) if [ -n "$lane" ]; then valid_field "$lane" || usage; fi; cmd_list "$lane" "$repo";;
   esac
