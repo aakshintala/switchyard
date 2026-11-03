@@ -533,4 +533,41 @@ LC_ALL=en_US.UTF-8 run --cwd "$R" --base "$UTF8BASE" --files docs/invalid.md --d
 [ "$code" = 0 ] || fail "r: doc section exits 0 under UTF-8 locale, got $code [$out]"
 [ "$out" = "PACK $T/pack-locale-doc.md symbols=0 files=1 outside=0" ] || fail "r: doc PACK line, got [$out]"
 
+# s. a failing git grep is an error, never every name unresolved (#1017).
+# The stub fails `git grep` per STUB_GREP (word: every grep exits 128; qual:
+# only the grep without -w exits 128; kill: grep dies by SIGKILL) and passes
+# everything else to the real git.
+REALGIT="$(command -v git)"
+mkdir -p "$T/stubbin"
+cat >"$T/stubbin/git" <<EOF
+#!/usr/bin/env bash
+isgrep=0; word=0
+for a in "\$@"; do
+  case "\$a" in grep) isgrep=1 ;; -w) word=1 ;; esac
+done
+if [ "\$isgrep" = 1 ]; then
+  case "\$STUB_GREP" in
+    word) echo "stub: grep broke" >&2; exit 128 ;;
+    qual) if [ "\$word" = 0 ]; then echo "stub: grep broke" >&2; exit 128; fi ;;
+    kill) kill -KILL \$\$ ;;
+  esac
+fi
+exec "$REALGIT" "\$@"
+EOF
+chmod +x "$T/stubbin/git"
+STUB_GREP=word PATH="$T/stubbin:$PATH" run --cwd "$R" --base "$BASE" --symbols make_widget --files src/lib.rs --out "$T/pack-s.md"
+[ "$code" != 0 ] || fail "s: failed grep exits non-zero, got $code [$out]"
+case "$out" in *unresolved*) fail "s: no unresolved line, got [$out]" ;; esac
+grep -q 'plan-sweep: git grep (word) failed with status 128' "$T/err.txt" || fail "s: error names the grep, got [$(cat "$T/err.txt")]"
+grep -q 'stub: grep broke' "$T/err.txt" || fail "s: git's stderr kept, got [$(cat "$T/err.txt")]"
+[ ! -e "$T/pack-s.md" ] || fail "s: no pack file written"
+STUB_GREP=kill PATH="$T/stubbin:$PATH" run --cwd "$R" --base "$BASE" --symbols make_widget --files src/lib.rs --out "$T/pack-s2.md"
+[ "$code" != 0 ] || fail "s: grep killed by a signal exits non-zero, got $code [$out]"
+case "$out" in *unresolved*) fail "s: no unresolved line after a signal, got [$out]" ;; esac
+grep -q 'plan-sweep: git grep (word) failed with status 137' "$T/err.txt" || fail "s: signal error names the grep, got [$(cat "$T/err.txt")]"
+STUB_GREP=qual PATH="$T/stubbin:$PATH" run --cwd "$R" --base "$BASE" --symbols Shape --files src/lib.rs --lang rust --out "$T/pack-s3.md"
+[ "$code" != 0 ] || fail "s: failed qual grep exits non-zero, got $code [$out]"
+grep -q 'plan-sweep: git grep (qual) failed with status 128' "$T/err.txt" || fail "s: error names the qual grep, got [$(cat "$T/err.txt")]"
+[ ! -e "$T/pack-s3.md" ] || fail "s: no pack file after a qual failure"
+
 echo "plan-sweep: all cases passed"
