@@ -319,6 +319,17 @@ git -C "$TREPO" -c user.email=t@t.t -c user.name=t commit -qm doc || fail "commi
 out="$(cd "$TREPO" && FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane P --plan --worktree t:dP --repo test/repo doc.md 2>/dev/null)" || fail "tracked file with Files section claims as a path"
 [ "$out" = "$(printf 'GRANT doc.md new\nfile-claim: 1 granted, 0 refused')" ] || fail "tracked doc lines: $out"
 
+# An untracked plan whose name is a glob matching a tracked file is still a plan file.
+R="$(fresh)"
+cp "$TREPO/doc.md" "$TREPO/plan1.md"
+git -C "$TREPO" add plan1.md || fail "add tracked plan1"
+git -C "$TREPO" -c user.email=t@t.t -c user.name=t commit -qm plan1 || fail "commit tracked plan1"
+cp "$TREPO/doc.md" "$TREPO/plan[1].md"
+rc=0
+(cd "$TREPO" && FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane P --plan --worktree t:dP --repo test/repo 'plan[1].md') >/dev/null 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "untracked glob-named plan as --plan path exits 2, got $rc"
+[ -z "$(claim_tip "$R")" ] || fail "glob-named plan records no claim"
+
 # --- --plan-file takes one plan; bad input claims nothing ------------------------
 R="$(fresh)"
 rc=0
