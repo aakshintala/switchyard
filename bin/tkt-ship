@@ -18,6 +18,10 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 tkt_state="$script_dir/tkt-state"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tkt() { "$tkt_state" "$state" "$@"; }
+plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
+if [ ! -r "$plan_gate_lib" ]; then echo "tkt-ship: cannot read shared lib: $plan_gate_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$plan_gate_lib"
 
 # Command lock: <state>.lock, the same path tkt-state takes for every write.
 # Held only around the ship-pr run and its log work; released (pid file
@@ -145,7 +149,8 @@ if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then
     printf '%s\n' "$plan_err" >&2
     emit "PRECONDITION missing=plan" 2 "$plan_err"
   fi
-  gate_cmd="$("$bin_dir/plan-gate" "$(tkt get plan)")" || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $(tkt get plan)"
+  plan_gate_args tkt
+  gate_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$(tkt get plan)")" || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $(tkt get plan)"
   e="$(tkt get env 2>/dev/null || true)"
   args+=(--gate "${e:+$e }$gate_cmd")
 fi

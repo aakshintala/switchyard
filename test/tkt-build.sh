@@ -820,6 +820,34 @@ run_build
 expect_verdict "TKT tkt-build PRECONDITION missing=gate log=*" "gateless"
 grep -q "^run|" "$T/calls.log" && fail "gateless: the lane never dispatches"
 
+# --- a resumed lane's Gate line must run gate.script, not expand it by hand ---
+setup_case gate-script-hand
+bash "$TKT_STATE" "$S" set gate.script scripts/check || fail "gate-script-hand: seed gate.script"
+{
+  printf 'Base: %s\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`cargo fmt --check && cargo test`\n'
+} >"$CDIR/plan.md"
+run_build
+[ "$RC" -eq 2 ] || fail "gate-script-hand exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION missing=gate log=*" "gate-script-hand"
+grep -q "gate script scripts/check" <<<"$OUT" || fail "gate-script-hand: the digest names gate.script"
+grep -q "^run|" "$T/calls.log" && fail "gate-script-hand: the lane never dispatches"
+
+# --- the same state with a Gate line that runs gate.script proceeds ---
+setup_case gate-script-run
+bash "$TKT_STATE" "$S" set gate.script scripts/check || fail "gate-script-run: seed gate.script"
+mkdir -p "$WT/scripts"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$WT/scripts/check"
+chmod +x "$WT/scripts/check"
+{
+  printf 'Base: %s\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`scripts/check`\n'
+} >"$CDIR/plan.md"
+run_build
+[ "$RC" -eq 0 ] || fail "gate-script-run exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "gate-script-run"
+grep -q "GATE=scripts/check" "$T/calls.log" || fail "gate-script-run: the lane gets the gate script"
+
 # --- usage arms ---
 setup_case usage
 run_build --from bogus

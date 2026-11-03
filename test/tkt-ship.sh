@@ -386,6 +386,18 @@ got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
 grep -F -q -- "--unverified-fixes $CDIR/unverified.md" "$T/calls.log" || fail "flags: unverified missing"
 grep -F -q -- '--gate FOO=1 BAR=2 bash test/gate.sh' "$T/calls.log" || fail "flags: gate missing"
 
+# --- gate.script set: a Gate line that hand-expands it stops ship before ship-pr ---
+reset_stub; setup_case gate-script-hand
+printf '0' >"$T/exitcodes"
+printf 'merge_gate=%s\n' gate >>"$S"
+printf 'gate.script=%s\n' test/gate.sh >>"$S"
+printf '# Plan\n\n## Gate\n\n`cargo test`\n' >"$CDIR/plan.md"
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+run_ship
+[ "$RC" -eq 2 ] || fail "gate-script-hand: exit $RC"
+expect_line1 "PRECONDITION gate=failed" gate-script-hand
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gate-script-hand: ship-pr must not run"
+
 # --- no_mutants_label set: reason reaches ship-pr as one argument ---
 reset_stub; setup_case nomutants
 printf '0' >"$T/exitcodes"

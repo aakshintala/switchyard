@@ -80,6 +80,13 @@ if [ ! -r "$namebase_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$namebase_lib"
+plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
+if [ ! -r "$plan_gate_lib" ]; then
+  echo "tkt-job: cannot read shared lib: $plan_gate_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$plan_gate_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
 fillbrief="$bin_dir/fill-brief"
@@ -142,7 +149,8 @@ build_gate_from_plan() {
     echo "tkt-job: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
     exit 2
   fi
-  gate_cmd="$("$plangate" "$plan" 2>&1)" || {
+  plan_gate_args tkt
+  gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan" 2>&1)" || {
     echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>: $gate_cmd" >&2
     exit 2
   }
