@@ -74,6 +74,9 @@ gh() (
         [ ! -e "$ST/label-list-fail" ] || { echo "gh: forbidden (HTTP 403)" >&2; exit 1; }
         json="$(rd labels '[]')"
         [ "$paginate" = 1 ] || json="$(jq -c '.[0:100]' <<<"$json")";;
+      */issues/*/comments)
+        # the PR's issue comments: a JSON array in $ST/comments, none by default
+        json="$(rd comments '[]')";;
       */actions/runs*)
         json='{"workflow_runs":[]}';;
       */commits/*/check-runs*)
@@ -835,7 +838,69 @@ ship --body-ends 'Co-authored with Claude Code.'; expect 2 "body-ends read failu
 grep -q 'cannot read PR 7 body' <<<"$ERR" || fail "body-ends read message: [$ERR]"
 
 setup; ship; expect 0 "no --body-has"
-! grep -q -- '--json body' "$ST/gh.log" || fail "no --body-has: no body read before pr-closes"
+[ "$(grep -c -- '--json body ' "$ST/gh.log")" -eq 1 ] || fail "no --body-has: one body read, for the authority check: [$(cat "$ST/gh.log")]"
+
+# ===== authority claims: a body or round-closed comment line that claims an
+# authority needs a citation on the same line, else exit 5 before any push
+comments_json() { jq -nc --arg u "$1" --arg b "$2" '[{html_url: $u, body: $b}]' >"$ST/comments"; }
+U7="https://github.com/O/N/pull/7#issuecomment-5"
+
+setup; printf 'Resolves #97\nApproved by the lane.\n' >"$ST/body"
+ship; nothing_ran "uncited authority in the body"
+grep -qxF 'uncited authority: Approved by the lane.' <<<"$OUT" || fail "uncited body line printed: [$OUT]"
+grep -q 'PR text claims authority with no citation; cite the ruling' <<<"$ERR" || fail "authority message: [$ERR]"
+setup; printf 'Resolves #97\nAccepted gap per the owner-side ruling #4069.\n' >"$ST/body"
+ship; expect 0 "cited authority in the body"
+setup; printf 'Resolves #97\nWe cite `approved by` as a term.\n> per the ruling, quoted\n' >"$ST/body"
+ship; expect 0 "code span and quote in the body"
+
+# A review finding number is not an issue: P2 #2 does not cite, a real #N still does
+FINDING='P2 #2 (no nextest run at 2754 terms in CI): accepted gap per the owner-side ruling'
+setup; printf 'Resolves #97\n%s\n' "$FINDING" >"$ST/body"
+ship; nothing_ran "finding number in the body"
+grep -qxF "uncited authority: $FINDING" <<<"$OUT" || fail "finding number line printed: [$OUT]"
+setup; printf 'Resolves #97\nP2 #2: accepted gap per #4069 Not established\n' >"$ST/body"
+ship; expect 0 "finding number with a real citation"
+setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" "Review round closed on abc123.
+$FINDING"
+ship; nothing_ran "finding number in a round-closed comment"
+grep -qxF "uncited authority: $FINDING (comment $U7)" <<<"$OUT" || fail "finding number comment line: [$OUT]"
+
+# A bullet is one unit with its more indented continuation lines
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n  see #4069.\n' >"$ST/body"
+ship; expect 0 "bullet cited on a continuation line"
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n  no citation here.\n' >"$ST/body"
+ship; nothing_ran "bullet with no citation on either line"
+grep -qxF 'uncited authority: - Accepted gap per the owner-side ruling;' <<<"$OUT" || fail "bullet first line printed: [$OUT]"
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling #4069\n- Approved by the lane.\n' >"$ST/body"
+ship; nothing_ran "cited bullet then a separate uncited bullet"
+[ "$OUT" = "uncited authority: - Approved by the lane." ] || fail "only the second bullet printed: [$OUT]"
+# A blank line inside a loose bullet keeps its citation; an unindented line after it starts a new unit
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n\n  see #4069.\n' >"$ST/body"
+ship; expect 0 "loose bullet cited after a blank line"
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n\nsee #4069.\n' >"$ST/body"
+ship; nothing_ran "bullet, blank line, then an unindented citation"
+[ "$OUT" = "uncited authority: - Accepted gap per the owner-side ruling;" ] || fail "loose bullet first line printed: [$OUT]"
+
+setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" 'Review round closed on abc123 with a fix.
+Accepted gap per the owner-side ruling.'
+ship; nothing_ran "uncited authority in a round-closed comment"
+grep -qxF "uncited authority: Accepted gap per the owner-side ruling. (comment $U7)" <<<"$OUT" || fail "uncited comment line names its URL: [$OUT]"
+
+setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" 'Review round closed on abc123 with a fix.
+Accepted gap per the owner-side ruling #4069.'
+ship; expect 0 "cited round-closed comment"
+
+# Exempt lines inside a round-closed comment: a quote, a fenced block, a code span
+for b in '> per the ruling, quoted' $'\n```\nper the ruling\n```' 'Wording: `approved by` only'; do
+  setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" "Review round closed on abc123.
+$b"
+  ship; expect 0 "exempt line in a round-closed comment [$b]"
+done
+
+# A plain discussion comment is not scanned at all
+setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" 'approved, go ahead. Per the ruling, fine.'
+ship; expect 0 "plain discussion comment not scanned"
 
 # ===== merge and cleanup
 setup; echo true >"$ST/draft"
