@@ -103,6 +103,16 @@ fresh() {
 
 CLAIM="claim --lane L --grant --worktree t:d1 --repo test/repo"
 
+# make_plan NAME PATH...: write a plan under $T/plans whose Files section lists
+# each PATH as a backticked list item; prints the plan path.
+PLANS="$T/plans"
+mkdir -p "$PLANS"
+make_plan() {
+  local f="$PLANS/$1"; shift
+  { printf '## Files\n'; for p in "$@"; do printf -- "- \`%s\`\n" "$p"; done; } >"$f"
+  printf '%s' "$f"
+}
+
 # --- ref absent on first use; new vs exists -----------------------------------
 R="$(fresh)"
 [ -z "$(claim_tip "$R")" ] || fail "claims ref absent before first claim"
@@ -274,7 +284,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA 
 [ "$(claims_blob "$R")" = "$before" ] || fail "re-claim stores no second line"
 
 # re-claim with the other kind keeps the recorded line: a no-op, not an upgrade.
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --plan --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "plan claim exits 0"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --plan --worktree t:dA --repo test/repo "$(make_plan y.md y.txt)" 2>/dev/null)" || fail "plan claim exits 0"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "cross-kind re-claim exits 0"
 printf '%s' "$(claims_blob "$R")" | grep -q "^y.txt	A	plan	" || fail "cross-kind re-claim keeps plan"
 
@@ -291,6 +301,43 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB 
 [ "$out" = "$(printf 'REFUSE x.txt lane:A\nGRANT y.txt new\nfile-claim: 1 granted, 1 refused')" ] || fail "mixed lines: $out"
 [ "$(claims_blob "$R" | grep -c '^')" = "1" ] || fail "mixed refusal stores y.txt too"
 
+# --- --plan reads the plan's Files section; bad input claims nothing ------------
+R="$(fresh)"
+rc=0
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane P --plan --worktree t:dP --repo test/repo "$PLANS/missing.md" >/dev/null 2>"$T/e-missing" || rc=$?
+[ "$rc" = "2" ] || fail "missing plan exits 2, got $rc"
+[ "$(cat "$T/e-missing")" = "file-claim: cannot read plan file: $PLANS/missing.md" ] || fail "missing plan message: $(cat "$T/e-missing")"
+[ -z "$(claim_tip "$R")" ] || fail "missing plan records no claim"
+
+rc=0
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane P --plan --worktree t:dP --repo test/repo "$PLANS" >/dev/null 2>"$T/e-dir" || rc=$?
+[ "$rc" = "2" ] || fail "plan that is a directory exits 2, got $rc"
+[ "$(cat "$T/e-dir")" = "file-claim: cannot read plan file: $PLANS" ] || fail "directory plan message: $(cat "$T/e-dir")"
+[ -z "$(claim_tip "$R")" ] || fail "directory plan records no claim"
+
+printf "## Tasks\n- \`a.txt\` edit\n" >"$PLANS/nofiles.md"
+printf '## Files\nNo paths yet.\n' >"$PLANS/emptyfiles.md"
+for plan in "$PLANS/nofiles.md" "$PLANS/emptyfiles.md"; do
+  rc=0
+  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane P --plan --worktree t:dP --repo test/repo "$plan" >/dev/null 2>"$T/e-nopaths" || rc=$?
+  [ "$rc" = "2" ] || fail "no-path plan $plan exits 2, got $rc"
+  [ "$(cat "$T/e-nopaths")" = "file-claim: no paths in the Files section of $plan" ] || fail "no-path plan message: $(cat "$T/e-nopaths")"
+  [ -z "$(claim_tip "$R")" ] || fail "no-path plan records no claim"
+done
+
+rc=0
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane P --plan --worktree t:dP --repo test/repo "$PLANS/nofiles.md" a.txt >/dev/null 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "--plan with two arguments exits 2, got $rc"
+[ -z "$(claim_tip "$R")" ] || fail "--plan with two arguments records no claim"
+
+R="$(fresh)"
+VALID="$(make_plan valid.md y2.txt sub/b.txt)"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane P --plan --worktree t:dP --repo test/repo "$VALID" 2>/dev/null)" || fail "valid plan exits 0"
+[ "$out" = "$(printf 'GRANT y2.txt new\nGRANT sub/b.txt exists\nfile-claim: 2 granted, 0 refused')" ] || fail "valid plan lines: $out"
+blob="$(claims_blob "$R")"
+[ "$(cut -f1-3 <<<"$blob")" = "$(printf 'y2.txt\tP\tplan\nsub/b.txt\tP\tplan')" ] || fail "valid plan stores its Files paths as plan claims: $blob"
+printf '%s' "$blob" | grep -q "valid.md" && fail "valid plan file itself is not claimed"
+
 # --- cap of 5 grants; plan claims do not count ----------------------------------
 R="$(fresh)"
 i=1
@@ -302,7 +349,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG 
 [ "$?" = "1" ] || fail "6th grant exits 1"
 [ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: 0 granted, 1 refused')" ] || fail "cap refusal: $out"
 [ "$(claims_blob "$R" | grep -c '^')" = "5" ] || fail "cap refusal writes nothing"
-FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --plan --worktree t:dG --repo test/repo p1 p2 p3 >/dev/null 2>&1 || fail "plan claims exit 0 past the grant cap"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --plan --worktree t:dG --repo test/repo "$(make_plan cap.md p1 p2 p3)" >/dev/null 2>&1 || fail "plan claims exit 0 past the grant cap"
 [ "$(claims_blob "$R" | grep -c '^')" = "8" ] || fail "plan claims stored past the cap"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g6 2>/dev/null)" && fail "grant past cap still refused"
 [ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: 0 granted, 1 refused')" ] || fail "cap holds with plans: $out"
@@ -444,7 +491,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane NOBODY 2>/dev/null)" || 
 # --- list -------------------------------------------------------------------------------
 R="$(fresh)"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:wtA --repo test/repo f2.txt >/dev/null 2>&1 || fail "list setup 1"
-FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --plan --worktree t:wtA --repo test/repo f1.txt >/dev/null 2>&1 || fail "list setup 2"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --plan --worktree t:wtA --repo test/repo "$(make_plan list.md f1.txt)" >/dev/null 2>&1 || fail "list setup 2"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:wtB --repo test/repo --self-pr 7 f3.txt >/dev/null 2>&1 || fail "list setup 3"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>/dev/null)" || fail "list exits 0"
 [ "$(printf '%s\n' "$out" | grep -c '^')" = "3" ] || fail "list has 3 lines: $out"
