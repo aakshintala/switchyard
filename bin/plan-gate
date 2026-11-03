@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # plan-gate: print a plan's gate command, the content under its `## Gate` heading.
-# Usage: plan-gate PLAN_FILE
+# Usage: plan-gate [--script CMD] PLAN_FILE
 #        plan-gate -h | --help
 #        The gate is the text under the first line starting `## Gate` (whatever
 #        follows on that heading line), up to the next `# ` or `## ` heading
@@ -14,14 +14,26 @@
 #        it as command substitution. A gate that needs substitution uses $(...).
 #        Exit 1 (nothing on stdout, one line on stderr) when the heading is
 #        missing, holds no command, or holds more than one command line.
+#        With --script CMD, the command must run the repo's gate script CMD as
+#        its workflow doc writes it. Leading NAME=VALUE assignments are allowed
+#        only for CARGO_BUILD_JOBS, CARGO_INCREMENTAL, NEXTEST_TEST_THREADS,
+#        RUSTC_WRAPPER, SCCACHE_* and KACHE_*. Then the command must start with
+#        CMD (or ./CMD, or bash CMD or bash ./CMD) at a word boundary. Any
+#        other command exits 1 with the same stdout and stderr rules.
 #        Exit 2 on bad usage or an unreadable plan file.
 set -euo pipefail
 
 usage() {
-  echo "usage: plan-gate PLAN_FILE" >&2
+  echo "usage: plan-gate [--script CMD] PLAN_FILE" >&2
   exit 2
 }
 
+script=""
+if [ "${1:-}" = --script ]; then
+  [ $# -ge 2 ] && [ -n "$2" ] || usage
+  script="$2"
+  shift 2
+fi
 [ $# -eq 1 ] || usage
 case "$1" in -h|--help) usage ;; esac
 plan="$1"
@@ -76,5 +88,44 @@ case "$cmd" in
     echo "plan-gate: the '## Gate' command holds a backtick: $plan: $cmd" >&2
     exit 1 ;;
 esac
+
+if [ -n "$script" ]; then
+  # starts_with_cmd STR: STR begins with CMD or ./CMD at a word boundary.
+  starts_with_cmd() {
+    case "$1" in
+      "$script"|"$script"[[:space:]]*|"./$script"|"./$script"[[:space:]]*) return 0 ;;
+    esac
+    return 1
+  }
+  rest="$cmd"
+  while :; do
+    first="${rest%%[[:space:]]*}"
+    case "$first" in
+      [A-Za-z_]*=*) ;;
+      *) break ;;
+    esac
+    case "${first%%=*}" in
+      CARGO_BUILD_JOBS|CARGO_INCREMENTAL|NEXTEST_TEST_THREADS|RUSTC_WRAPPER|SCCACHE_*|KACHE_*) ;;
+      *) rest="" ; break ;;
+    esac
+    rest="${rest#"$first"}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+  done
+  ok=0
+  if starts_with_cmd "$rest"; then
+    ok=1
+  else
+    case "$rest" in
+      bash[[:space:]]*)
+        b="${rest#bash}"
+        b="${b#"${b%%[![:space:]]*}"}"
+        starts_with_cmd "$b" && ok=1 ;;
+    esac
+  fi
+  if [ "$ok" -eq 0 ]; then
+    echo "plan-gate: the Gate line must run the gate script $script as the workflow doc writes it, not its steps by hand: $cmd" >&2
+    exit 1
+  fi
+fi
 
 printf '%s\n' "$cmd"
