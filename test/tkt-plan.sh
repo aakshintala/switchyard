@@ -759,6 +759,26 @@ run_plan set "$CDIR/other.md"
 [ "$(grep -c '^plan-sweep: stub progress$' "$CDIR/stderr.txt")" = 1 ] || fail "failing SET prints the progress line once: $(cat "$CDIR/stderr.txt")"
 printf 'ok' >"$T/sweepmode"
 
+# --- with gate.script set, set rejects a hand-expanded Gate line before any write ---
+setup_case set-gate
+bash "$TKT_STATE" "$S" set gate.script scripts/check || fail "gate seed script"
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/base")"
+  printf '\n## Files\n\n- `f.txt`\n\n## Gate\n\ncargo fmt --check && cargo nextest run\n'
+} >"$CDIR/hand.md"
+run_plan set "$CDIR/hand.md"
+[ "$RC" -eq 1 ] || fail "hand-expanded Gate line: SET exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-plan SET-FAIL reason=gate log=*" "hand-expanded Gate line"
+grep -q 'must run the gate script scripts/check' <<<"$OUT" || fail "SET-FAIL log names the gate script: $OUT"
+[ "$(state_get plan)" = "$CDIR/plan.md" ] || fail "rejected SET leaves the plan path unchanged"
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/base")"
+  printf '\n## Files\n\n- `f.txt`\n\n## Gate\n\nscripts/check --base %s\n' "$(cat "$CDIR/base")"
+} >"$CDIR/scripted.md"
+run_plan set "$CDIR/scripted.md"
+[ "$RC" -eq 0 ] || fail "scripts/check Gate line: SET exits 0 (rc=$RC: $(cat "$CDIR/stderr.txt"))"
+expect_verdict "TKT tkt-plan SET plan=$CDIR/scripted.md log=*" "scripts/check Gate line"
+
 # --- a backticked Base line is read as the bare SHA ---
 setup_case basetick
 printf 'Base: `%s`\n\n## Files\n\n- `f.txt`\n' "$(cat "$CDIR/base")" >"$CDIR/tick.md"

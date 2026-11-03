@@ -94,6 +94,11 @@ plan_verdict_ok() {
   return 1
 }
 
+# gate.script, when set, is the gate script every Gate line must run; plan-gate gets it as --script.
+gate_script="$(t get gate.script 2>/dev/null || true)"
+gate_args=()
+[ -z "$gate_script" ] || gate_args=(--script "$gate_script")
+
 ronum() { n="$(t get verifier_round 2>/dev/null || printf '0')"; case "$n" in ''|*[!0-9]*) n=0;; esac; printf '%s\n' "$n"; }
 
 open_lines() {
@@ -333,7 +338,7 @@ do_post() {
     *) usage;; esac; done
   load_plan
   if ! plan_verdict_ok "$no_verifier"; then emit "POST-FAIL reason=verdict verdict=$verdict_refusal" 1 "$verdict_digest"; fi
-  "$plangate" "$plan" >"$tmp" 2>&1 || emit "POST-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
+  "$plangate" ${gate_args[@]+"${gate_args[@]}"} "$plan" >"$tmp" 2>&1 || emit "POST-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
   pargs=(); [ -z "$part" ] || pargs=(--part "$part")
   urls="$("$postplan" "$issue" "$plan" --repo "$repo" ${pargs[@]+"${pargs[@]}"} 2>"$tmp")" || emit "POST-FAIL reason=post" "$?" "$(head -n 10 "$tmp")"
   emit "POSTED urls=$(tr '\n' ',' <<<"$urls" | sed 's/,$//')" 0 "$urls"
@@ -346,6 +351,10 @@ do_set() {
   case "$plan_arg" in /*) plan="$plan_arg" ;; *) plan="$PWD/$plan_arg" ;; esac
   [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
   base="$(base_of "$plan")"
+  # A set with gate.script checks the Gate line before any state write.
+  if [ -n "$gate_script" ]; then
+    "$plangate" ${gate_args[@]+"${gate_args[@]}"} "$plan" >"$tmp" 2>&1 || emit "SET-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
+  fi
   pack_out="$run/$namebase-pack.md"
   sweep_out="$("$plansweep" --cwd "$worktree" --base "$base" --plan "$plan" --out "$pack_out")" || { printf '%s\n' "$sweep_out" >&2; exit 2; }
   pack="$(awk '/^PACK /{print $2; exit}' <<<"$sweep_out")"; [ -n "$pack" ] || { echo "tkt-plan: plan-sweep printed no PACK line" >&2; exit 2; }

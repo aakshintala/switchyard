@@ -77,5 +77,44 @@ bash "$GATE" "$T/plan.md" "$T/plan.md" >/dev/null 2>&1; [ "$?" = "2" ] || fail "
 bash "$GATE" -h >/dev/null 2>&1; [ "$?" = "2" ] || fail "-h exits 2"
 bash "$GATE" --help >/dev/null 2>&1; [ "$?" = "2" ] || fail "--help exits 2"
 bash "$GATE" "$T/does-not-exist.md" >/dev/null 2>&1; [ "$?" = "2" ] || fail "missing plan file exits 2"
+bash "$GATE" --script >/dev/null 2>&1; [ "$?" = "2" ] || fail "--script with no value exits 2"
+bash "$GATE" --script scripts/check >/dev/null 2>&1; [ "$?" = "2" ] || fail "--script with no plan file exits 2"
+
+# --script CMD: the Gate line must run the gate script as the workflow doc writes it
+# expect_script_out NAME SCRIPT CONTENT WANT: with --script SCRIPT the gate prints WANT and exits 0
+expect_script_out() {
+  printf '%b' "$3" >"$T/plan.md"
+  out="$(bash "$GATE" --script "$2" "$T/plan.md" 2>"$T/err.txt")" || fail "$1: exits 0"
+  [ "$out" = "$4" ] || fail "$1: got [$out], want [$4]"
+  [ ! -s "$T/err.txt" ] || fail "$1: nothing on stderr"
+}
+
+# expect_script_err NAME SCRIPT CONTENT LINE: with --script SCRIPT the gate exits 1, prints
+# nothing on stdout, and writes exactly the rejection message naming LINE on stderr
+expect_script_err() {
+  printf '%b' "$3" >"$T/plan.md"
+  stdout="$(bash "$GATE" --script "$2" "$T/plan.md" 2>"$T/err.txt")" && fail "$1: exits 1"
+  [ -z "$stdout" ] || fail "$1: prints nothing on stdout"
+  want="plan-gate: the Gate line must run the gate script $2 as the workflow doc writes it, not its steps by hand: $4"
+  [ "$(cat "$T/err.txt")" = "$want" ] || fail "$1: got [$(cat "$T/err.txt")], want [$want]"
+}
+
+expect_script_out "script with an argument" "scripts/check" '## Gate\n\nscripts/check --base abc\n' 'scripts/check --base abc'
+expect_script_out "script with a leading CARGO_BUILD_JOBS" "scripts/check" '## Gate\n\nCARGO_BUILD_JOBS=3 scripts/check\n' 'CARGO_BUILD_JOBS=3 scripts/check'
+expect_script_out "script with ./ prefix" "scripts/check" '## Gate\n\n./scripts/check\n' './scripts/check'
+expect_script_out "script run by bash" "scripts/check" '## Gate\n\nbash scripts/check --base abc\n' 'bash scripts/check --base abc'
+expect_script_out "script with several allowed assignments" "scripts/check" '## Gate\n\nRUSTC_WRAPPER=sccache SCCACHE_DIR=/tmp/x NEXTEST_TEST_THREADS=4 scripts/check\n' 'RUSTC_WRAPPER=sccache SCCACHE_DIR=/tmp/x NEXTEST_TEST_THREADS=4 scripts/check'
+expect_script_err "hand-expanded steps" "scripts/check" '## Gate\n\ncargo fmt --check && cargo nextest run\n' 'cargo fmt --check && cargo nextest run'
+expect_script_err "disallowed leading assignment" "scripts/check" '## Gate\n\nFEATURES=x scripts/check\n' 'FEATURES=x scripts/check'
+expect_script_err "script name as a prefix of another word" "scripts/check" '## Gate\n\nscripts/checker --base abc\n' 'scripts/checker --base abc'
+expect_script_err "different script" "scripts/check" '## Gate\n\nscripts/other\n' 'scripts/other'
+# an operator hidden in an assignment value is rejected, so it cannot split the command
+expect_script_err "operator glued to an assignment value" "scripts/check" '## Gate\n\nCARGO_BUILD_JOBS=1|| scripts/check\n' 'CARGO_BUILD_JOBS=1|| scripts/check'
+expect_script_err "semicolon glued to an assignment value" "scripts/check" '## Gate\n\nCARGO_BUILD_JOBS=1;scripts/check\n' 'CARGO_BUILD_JOBS=1;scripts/check'
+expect_script_err "quoted assignment value" "scripts/check" "## Gate\n\nSCCACHE_DIR='/tmp/x' scripts/check\n" "SCCACHE_DIR='/tmp/x' scripts/check"
+expect_script_out "plain assignment value" "scripts/check" '## Gate\n\nSCCACHE_DIR=/tmp/x scripts/check\n' 'SCCACHE_DIR=/tmp/x scripts/check'
+
+# without --script the hand-expanded line still passes
+expect_out "no --script accepts a hand-expanded line" '## Gate\n\ncargo fmt --check && cargo nextest run\n' 'cargo fmt --check && cargo nextest run'
 
 echo "plan-gate: all cases passed"

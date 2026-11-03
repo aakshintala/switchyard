@@ -21,13 +21,13 @@ When you were started with a brief or notes file, that file is your contract for
 
 ## Commands
 
-When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. When the ticket's spec is another issue, pass its number with `tkt-start --spec-issue <N>`. `tkt-build` passes that number to `review-pr`. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; a lane `CONCERNS` continues per step 4, and so does a fix round's `CONCERNS` (`tkt-fix` sends the concerns file to the verify as `--context`); every other word is a stop.
+When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. When the ticket's spec is another issue, pass its number with `tkt-start --spec-issue <N>`. `tkt-build` passes that number to `review-pr`. When the repo's workflow doc names a gate script (e.g. `scripts/check`), run `tkt-state <state> set gate.script <script>` right after `tkt-start`; `tkt-plan set` and `tkt-plan post` then reject a Gate line that does not run that script. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; a lane `CONCERNS` continues per step 4, and so does a fix round's `CONCERNS` (`tkt-fix` sends the concerns file to the verify as `--context`); every other word is a stop.
 
 | Tool | Go on | Other verdicts that stop |
 | --- | --- | --- |
 | `tkt-start` | `CURRENT`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
 | `tkt-state` | exit 0 | exit 2 |
-| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `POST-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
+| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `POST-FAIL`, `SET-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-job` | `DONE`, `CONCERNS` | `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-build` | `APPROVE` | `CHANGES`, `STALE`, `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `VERDICT-REFUSED`, `<step>-ERROR` |
 | `tkt-gate` | `PASS` | `TIP`, `FENCE`, `FAIL` |
