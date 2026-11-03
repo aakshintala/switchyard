@@ -68,6 +68,16 @@ case "\$(cat "$T/mode")" in
     printf '1. Rulings miss a contradiction in bin/x\n2. Files leaves out test/x\n3. Gate skips package y\n' >"\$out"
     echo "TKT tkt-job DONE id=j1 head=h commits=0 gate=none report=1. Rulings log=x"
     ;;
+  last)
+    for n in \$(seq 1 18); do printf 'finding %s\n' "\$n"; done >"\$out"
+    printf 'PLAN OK\n' >>"\$out"
+    echo "TKT tkt-job DONE id=j1 head=h commits=0 gate=none report=finding 1 log=x"
+    ;;
+  conflict)
+    for n in \$(seq 1 18); do printf 'finding %s\n' "\$n"; done >"\$out"
+    printf 'STATUS: PLAN OK\nPLAN OK\n' >>"\$out"
+    echo "TKT tkt-job DONE id=j1 head=h commits=0 gate=none report=finding 1 log=x"
+    ;;
   ask)
     echo "TKT tkt-job ASK id=j1 log=x"
     echo "which design rules the retry?"
@@ -370,6 +380,44 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "round-plan-ok-prefix limit exits 1"
 grep -qx 'PLAN OK with trailing text' <<<"$OUT" || fail "PLAN OK with trailing text is not treated as success"
 grep -qx 'open finding' <<<"$OUT" || fail "trailing-text report keeps its open lines"
+
+# A verdict on the last line passes; line 1 stays the fast path.
+setup_case verdict-last
+rebase_plan
+printf 'last' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "verdict-last verify exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "verdict-last"
+expect_plan_verdict ok "$(cat "$CDIR/base")" "verdict-last"
+printf 'ok' >"$T/mode"
+
+setup_case verdict-last-confirm
+rebase_plan
+printf 'last' >"$T/mode"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "verdict-last confirm exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "verdict-last confirm"
+printf 'ok' >"$T/mode"
+
+setup_case verdict-last-round-limit
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "verdict-last-round-limit seed round"
+{ for n in $(seq 1 18); do printf 'finding %s\n' "$n"; done; printf 'PLAN OK\n'; } >"$CDIR/report.md"
+bash "$TKT_STATE" "$S" set last_report "$CDIR/report.md" || fail "verdict-last-round-limit seed report"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "verdict-last-round-limit exits 1"
+grep -qx 'none' <<<"$OUT" || fail "ROUND-LIMIT shows no open lines for a verdict-last pass"
+
+# Two verdict lines that disagree (one carries text beside PLAN OK) are not a pass.
+setup_case verdict-conflict
+rebase_plan
+printf 'conflict' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "verdict-conflict verify exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-plan LINES n=20 out=* log=*" "verdict-conflict"
+expect_plan_verdict lines "$(cat "$CDIR/base")" "verdict-conflict"
+printf 'ok' >"$T/mode"
 
 setup_case round-stale-confirm-report
 rebase_plan
