@@ -182,6 +182,29 @@ wait "$retry_pid" || fail "set retries until the lock is released"
 [ "$(bash "$TKT" "$S5" get k)" = "v" ] || fail "retry writes the requested value"
 [ ! -e "$S5.lock" ] || fail "retry leaves no lock behind"
 
+wait_for_test_file() {
+  local test_file="$1" test_count=0
+  while [ ! -e "$test_file" ] && [ "$test_count" -lt 500 ]; do
+    sleep 0.01
+    test_count=$((test_count + 1))
+  done
+  [ -e "$test_file" ]
+}
+
+wait_bounded() {
+  local wait_pid="$1" wait_count=0
+  while kill -0 "$wait_pid" 2>/dev/null && [ "$wait_count" -lt 500 ]; do
+    sleep 0.01
+    wait_count=$((wait_count + 1))
+  done
+  if kill -0 "$wait_pid" 2>/dev/null; then
+    kill "$wait_pid" 2>/dev/null || true
+    wait "$wait_pid" 2>/dev/null || true
+    return 1
+  fi
+  wait "$wait_pid"
+}
+
 # A dead lock owner on this host is reaped before writing.
 S6="$T/dead-owner.state"
 true &
@@ -192,6 +215,39 @@ printf '%s %s\n' "$(hostname)" "$dead_pid" >"$S6.lock/pid"
 bash "$TKT" "$S6" set k v 2>"$T/err-dead-owner.txt" || fail "set reaps a dead same-host owner"
 [ "$(bash "$TKT" "$S6" get k)" = "v" ] || fail "dead-owner reaping writes the value"
 [ ! -e "$S6.lock" ] || fail "dead-owner reaping leaves no lock behind"
+
+# A killed writer releases its lock so the next writer can reap and proceed.
+S9="$T/killed-holder.state"
+true &
+killed_dead_pid=$!
+wait_bounded "$killed_dead_pid" || fail "killed-holder dead-owner setup finishes before its deadline"
+mkdir "$S9.lock"
+printf '%s %s\n' "$(hostname)" "$killed_dead_pid" >"$S9.lock/pid"
+TKT_STATE_TEST_LOCK_PAUSE="$T/killed-holder" bash "$TKT" "$S9" set a one >"$T/killed-holder.log" 2>&1 &
+killed_holder_pid=$!
+if ! wait_for_test_file "$T/killed-holder.ready"; then
+  kill -9 "$killed_holder_pid" 2>/dev/null || true
+  wait "$killed_holder_pid" 2>/dev/null || true
+  fail "killed-holder writer pauses before checking the owner"
+fi
+kill -9 "$killed_holder_pid" 2>/dev/null || fail "killed-holder writer is stopped"
+wait_bounded "$killed_holder_pid" >/dev/null 2>&1 || true
+bash "$TKT" "$S9" set k v 2>"$T/err-killed-holder.txt" || fail "writer proceeds after the lock holder is killed"
+[ "$(bash "$TKT" "$S9" get k)" = "v" ] || fail "writer after killed holder stores the value"
+[ ! -e "$S9.lock" ] || fail "writer after killed holder removes the dead-owner lock"
+
+# An empty-owner directory remains held and is never reaped.
+S12="$T/empty-owner.state"
+mkdir "$S12.lock"
+if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S12" set k v 2>"$T/err-empty-owner.txt"; then
+  empty_owner_rc=0
+else
+  empty_owner_rc=$?
+fi
+[ "$empty_owner_rc" = "2" ] || fail "empty-owner lock exits 2"
+grep -q 'tkt-state: state locked' "$T/err-empty-owner.txt" || fail "empty-owner lock reports state locked"
+grep -Fq "$S12.lock" "$T/err-empty-owner.txt" || fail "empty-owner message names the lock directory"
+[ -d "$S12.lock" ] || fail "empty-owner lock is left in place"
 
 # A lock attributed to another host is never reaped.
 S7="$T/other-host.state"
@@ -230,19 +286,6 @@ printf '%s %s\n' "$(hostname)" "$$" >"$S10.lock/pid"
 rm -rf "$S10.lock"
 
 # Concurrent writers arbitrate dead-lock reaping and both retain their values.
-wait_bounded() {
-  local wait_pid="$1" wait_count=0
-  while kill -0 "$wait_pid" 2>/dev/null && [ "$wait_count" -lt 500 ]; do
-    sleep 0.01
-    wait_count=$((wait_count + 1))
-  done
-  if kill -0 "$wait_pid" 2>/dev/null; then
-    kill "$wait_pid" 2>/dev/null || true
-    wait "$wait_pid" 2>/dev/null || true
-    return 1
-  fi
-  wait "$wait_pid"
-}
 for race_round in {1..20}; do
   race_state="$T/reaper-race-$race_round.state"
   sleep 0 &
@@ -271,59 +314,134 @@ for race_round in {1..20}; do
   [ ! -e "$race_state.lock" ] || fail "race leaves no lock in round $race_round"
 done
 
-# A second reaper cannot take the dead owner's lock while the first reaper pauses.
-wait_for_test_file() {
-  local test_file="$1" test_count=0
-  while [ ! -e "$test_file" ] && [ "$test_count" -lt 500 ]; do
-    sleep 0.01
-    test_count=$((test_count + 1))
-  done
-  [ -e "$test_file" ]
-}
-S11="$T/reaper-exclusive.state"
+# A paused writer holds the flock while the dead-owner directory remains untouched.
+S11="$T/paused-writer.state"
 true &
-reaper_dead_pid=$!
-wait "$reaper_dead_pid"
+paused_dead_pid=$!
+wait_bounded "$paused_dead_pid" || fail "paused-writer dead-owner setup finishes before its deadline"
 mkdir "$S11.lock"
-printf '%s %s\n' "$(hostname)" "$reaper_dead_pid" >"$S11.lock/pid"
+printf '%s %s\n' "$(hostname)" "$paused_dead_pid" >"$S11.lock/pid"
+cp "$S11.lock/pid" "$T/lp-seeded.pid"
+: >"$T/lp-b.sig"
 (
-  if TKT_STATE_TEST_REAP_PAUSE="$T/reap-a" bash "$TKT" "$S11" set a one >"$T/reap-a.log" 2>&1; then
-    reaper_a_rc=0
+  if TKT_STATE_TEST_LOCK_PAUSE="$T/lp-a" bash "$TKT" "$S11" set a one >"$T/lp-a.log" 2>&1; then
+    lp_a_rc=0
   else
-    reaper_a_rc=$?
+    lp_a_rc=$?
   fi
-  printf '%s\n' "$reaper_a_rc" >"$T/reap-a.result"
+  printf '%s\n' "$lp_a_rc" >"$T/lp-a.result"
 ) &
-reaper_a_pid=$!
-if ! wait_for_test_file "$T/reap-a.ready"; then
-  wait_bounded "$reaper_a_pid" || true
-  fail "first reaper pauses inside the protected reaping section"
+lp_a_pid=$!
+abort_lp() {
+  touch "$T/lp-a.release"
+  wait_bounded "$lp_a_pid" || true
+  fail "$1"
+}
+if ! wait_for_test_file "$T/lp-a.ready"; then
+  abort_lp "first writer pauses while holding the flock"
 fi
-(
-  if TKT_STATE_TEST_REAP_BLOCKED="$T/reap-b.blocked" bash "$TKT" "$S11" set b two >"$T/reap-b.log" 2>&1; then
-    reaper_b_rc=0
+if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 TKT_STATE_TEST_LOCK_SIGNAL="$T/lp-b.sig" bash "$TKT" "$S11" set b two >"$T/lp-b.log" 2>&1; then
+  lp_b_rc=0
+else
+  lp_b_rc=$?
+fi
+if [ "$lp_b_rc" != "2" ]; then
+  abort_lp "second writer exits 2 while the first holds the flock"
+fi
+if [ ! -s "$T/lp-b.sig" ]; then
+  abort_lp "second writer signals its failed flock attempts"
+fi
+if ! cmp -s "$T/lp-seeded.pid" "$S11.lock/pid"; then
+  abort_lp "second writer does not reap the seeded owner outside the flock"
+fi
+if bash "$TKT" "$S11" get b >/dev/null 2>&1; then
+  abort_lp "second writer does not write while the first holds the flock"
+else
+  lp_b_missing_rc=$?
+fi
+[ "$lp_b_missing_rc" = "2" ] || abort_lp "second writer's missing value exits 2"
+touch "$T/lp-a.release"
+wait_bounded "$lp_a_pid" || fail "first writer finishes after release"
+[ "$(cat "$T/lp-a.result")" = "0" ] || fail "first writer succeeds after release"
+[ "$(bash "$TKT" "$S11" get a)" = "one" ] || fail "first writer value is retained"
+[ ! -e "$S11.lock" ] || fail "first writer leaves no state lock"
+bash "$TKT" "$S11" set b two || fail "a fresh writer succeeds after the first releases the flock"
+[ "$(bash "$TKT" "$S11" get b)" = "two" ] || fail "fresh writer stores its value"
+[ -f "$S11.flock" ] || fail "a successful write leaves the persistent flock file"
+
+# A partly written owner record is treated like an empty pid file.
+S14="$T/partial-owner.state"
+mkdir "$S14.lock"
+printf '%s ' "$(hostname)" >"$S14.lock/pid"
+if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S14" set k v 2>"$T/err-partial-owner.txt"; then
+  partial_owner_rc=0
+else
+  partial_owner_rc=$?
+fi
+[ "$partial_owner_rc" = "2" ] || fail "partial-owner lock exits 2"
+grep -q 'tkt-state: state locked$' "$T/err-partial-owner.txt" || fail "partial-owner lock uses the empty-owner message"
+grep -Fq "$S14.lock" "$T/err-partial-owner.txt" || fail "partial-owner message names the lock directory"
+[ -d "$S14.lock" ] || fail "partial-owner lock is left in place"
+
+# Only flock's contention status is retried; neighboring statuses fail closed.
+mkdir "$T/python-bin"
+cat >"$T/python-bin/python3" <<'EOF'
+#!/bin/sh
+exit "$TKT_STATE_TEST_PYTHON_EXIT"
+EOF
+chmod 755 "$T/python-bin/python3"
+for python_exit in 2 3 4 127; do
+  python_state="$T/python-exit-$python_exit.state"
+  python_signal="$T/python-exit-$python_exit.signal"
+  python_error="$T/python-exit-$python_exit.err"
+  : >"$python_signal"
+  if PATH="$T/python-bin:$PATH" TKT_STATE_TEST_PYTHON_EXIT="$python_exit" TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 TKT_STATE_TEST_LOCK_SIGNAL="$python_signal" bash "$TKT" "$python_state" set k v 2>"$python_error"; then
+    python_probe_rc=0
   else
-    reaper_b_rc=$?
+    python_probe_rc=$?
   fi
-  printf '%s\n' "$reaper_b_rc" >"$T/reap-b.result"
-) &
-reaper_b_pid=$!
-if ! wait_for_test_file "$T/reap-b.blocked"; then
-  touch "$T/reap-a.release"
-  wait_bounded "$reaper_a_pid" || true
-  wait_bounded "$reaper_b_pid" || true
-  fail "second reaper is blocked on the reap mutex"
+  [ "$python_probe_rc" = "2" ] || fail "python probe status $python_exit exits 2"
+  grep -Fq "tkt-state: cannot lock $python_state" "$python_error" || fail "python probe status $python_exit reports cannot lock"
+  if [ "$python_exit" = "3" ]; then
+    [ "$(wc -l <"$python_signal" | tr -d ' ')" = "3" ] || fail "flock status 3 uses the full retry budget"
+  else
+    [ ! -s "$python_signal" ] || fail "python probe status $python_exit is not retried"
+  fi
+  [ ! -e "$python_state.lock" ] || fail "python probe status $python_exit does not create a state lock"
+done
+
+# A stale lock that cannot be removed reports the lock path instead of retrying forever.
+if [ "$(id -u)" = "0" ]; then
+  echo "SKIP: stale-lock removal case cannot run as root"
+else
+  S13="$T/stale-lock.state"
+  : >"$S13.flock"
+  mkdir "$S13.lock"
+  true &
+  stale_dead_pid=$!
+  wait_bounded "$stale_dead_pid" || fail "stale-lock dead-owner setup finishes before its deadline"
+  printf '%s %s\n' "$(hostname)" "$stale_dead_pid" >"$S13.lock/pid"
+  : >"$T/err-stale-lock.txt"
+  stale_parent_readonly=0
+  restore_test_tmp() {
+    if [ "$stale_parent_readonly" = "1" ]; then
+      chmod u+w "$T"
+    fi
+    rm -rf "$T"
+  }
+  trap restore_test_tmp EXIT
+  stale_parent_readonly=1
+  chmod a-w "$T"
+  if TKT_STATE_TEST_LOCK_TRIES=3 TKT_STATE_TEST_LOCK_SLEEP=0.01 bash "$TKT" "$S13" set k v 2>"$T/err-stale-lock.txt"; then
+    stale_lock_rc=0
+  else
+    stale_lock_rc=$?
+  fi
+  chmod u+w "$T"
+  stale_parent_readonly=0
+  [ "$stale_lock_rc" = "2" ] || fail "unremovable stale lock exits 2"
+  grep -q 'stale lock not removed' "$T/err-stale-lock.txt" || fail "unremovable stale lock reports the stale-lock error"
+  grep -Fq "$S13.lock" "$T/err-stale-lock.txt" || fail "unremovable stale-lock message names the lock directory"
 fi
-[ -d "$S11.lock.reap" ] || fail "first reaper holds the reap mutex"
-[ ! -e "$T/reap-b.result" ] || fail "second reaper has not taken the state lock"
-touch "$T/reap-a.release"
-wait_bounded "$reaper_a_pid" || fail "first reaper writer exits 0"
-wait_bounded "$reaper_b_pid" || fail "second reaper writer exits 0"
-[ "$(cat "$T/reap-a.result")" = "0" ] || fail "first reaper writer succeeds"
-[ "$(cat "$T/reap-b.result")" = "0" ] || fail "second reaper writer succeeds"
-[ "$(bash "$TKT" "$S11" get a)" = "one" ] || fail "first reaper value is retained"
-[ "$(bash "$TKT" "$S11" get b)" = "two" ] || fail "second reaper value is retained"
-[ ! -e "$S11.lock" ] || fail "reapers leave no state lock"
-[ ! -e "$S11.lock.reap" ] || fail "reapers leave no reap mutex"
 
 echo "tkt-state: all cases passed"
