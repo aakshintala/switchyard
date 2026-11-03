@@ -85,7 +85,7 @@ check_path() {
   seg="${p%%/*}"
   case "$TOPLIST" in *"|$seg|"*) ;; *) return 0 ;; esac
   if ! seen "m:$p"; then
-    problem "missing path: $p (line $CUR_LN): correct it, or mark the line new or removed"
+    problem "missing path: $p (line $CUR_LN): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it"
   fi
   return 0
 }
@@ -151,7 +151,7 @@ while IFS=$'\t' read -r p ln; do
   [ -n "$p" ] || continue
   if covered "$p"; then continue; fi
   if ! seen "o:$p"; then
-    problem "outside Files: $p (line $ln): add it to Files, or mark the line reads"
+    problem "outside Files: $p (line $ln): add it to Files, or mark the line (reads) if the task only reads it"
   fi
 done <<<"$TASKS"
 
