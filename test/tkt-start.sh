@@ -240,7 +240,7 @@ want "PREFLIGHT core=2 out=" 1 badsha
 case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badsha: digest misses the reason" ;; esac
 # core-count table: only the job output, want rc and want line differ.
 # Contract: the count rule in bin/tkt-start's header.
-for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out=" "nonecolon|0|PREFLIGHT core=0 nonblocking=1 out=" "naw|0|PREFLIGHT core=0 nonblocking=0 out=" "nothing|0|PREFLIGHT core=0 nonblocking=1 out=" "barecore|0|PREFLIGHT core=0 nonblocking=1 out=" "boldnone|0|PREFLIGHT core=0 nonblocking=1 out=" "noneof|1|PREFLIGHT core=1 out=" "nbnone|0|PREFLIGHT core=0 nonblocking=1 out="; do
+for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out=" "nonecolon|0|PREFLIGHT core=0 nonblocking=1 out=" "naw|0|PREFLIGHT core=0 nonblocking=0 out=" "nothing|0|PREFLIGHT core=0 nonblocking=1 out=" "barecore|0|PREFLIGHT core=0 nonblocking=1 out=" "boldnone|0|PREFLIGHT core=0 nonblocking=1 out=" "noneof|1|PREFLIGHT core=1 out=" "nbnone|0|PREFLIGHT core=0 nonblocking=1 out=" "midtick|1|PREFLIGHT core=1 out=" "midbold|1|PREFLIGHT core=1 out=" "twotags|1|PREFLIGHT core=1 out=" "trailtick|1|PREFLIGHT core=1 out=" "trailbold|1|PREFLIGHT core=1 out=" "coreoutcome|0|PREFLIGHT core=0 nonblocking=1 out="; do
   IFS='|' read -r name rc want_line <<<"$spec"
   setup "$name" TWO FILING
   case "$name" in
@@ -256,6 +256,12 @@ for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGH
     boldnone) printf '%s\n' '- **core:** `None`.' '- non-blocking -- a' >"$T/jobout" ;;
     noneof) printf '%s\n' '- core: none of the callers handle X' >"$T/jobout" ;;
     nbnone) printf '%s\n' '- non-blocking: none.' '- non-blocking -- a' >"$T/jobout" ;;
+    midtick) printf '%s\n' '- hold.rs:15-20 says the handle must close before the guard kills, but `Drop` reaps (hold.rs:139) before the handle closes. `core`. The answer must say whether the early kill is intended.' >"$T/jobout" ;;
+    midbold) printf '%s\n' '2. the guard reaps early (hold.rs:139). **core** -- the early kill.' >"$T/jobout" ;;
+    twotags) printf '%s\n' '- `core` here, and `core` again.' >"$T/jobout" ;;
+    trailtick) printf '%s\n' '- The answer must say whether the early kill is intended. `core`.' >"$T/jobout" ;;
+    trailbold) printf '%s\n' '2. The guard reaps early (hold.rs:139). **core**' >"$T/jobout" ;;
+    coreoutcome) printf '%s\n' '- non-blocking -- the core outcome is unchanged.' >"$T/jobout" ;;
   esac
   run_start
   want "$want_line" "$rc" "$name"
