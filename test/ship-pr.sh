@@ -866,6 +866,16 @@ $FINDING"
 ship; nothing_ran "finding number in a round-closed comment"
 grep -qxF "uncited authority: $FINDING (comment $U7)" <<<"$OUT" || fail "finding number comment line: [$OUT]"
 
+# A bullet is one unit with its more indented continuation lines
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n  see #4069.\n' >"$ST/body"
+ship; expect 0 "bullet cited on a continuation line"
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling;\n  no citation here.\n' >"$ST/body"
+ship; nothing_ran "bullet with no citation on either line"
+grep -qxF 'uncited authority: - Accepted gap per the owner-side ruling;' <<<"$OUT" || fail "bullet first line printed: [$OUT]"
+setup; printf 'Resolves #97\n- Accepted gap per the owner-side ruling #4069\n- Approved by the lane.\n' >"$ST/body"
+ship; nothing_ran "cited bullet then a separate uncited bullet"
+[ "$OUT" = "uncited authority: - Approved by the lane." ] || fail "only the second bullet printed: [$OUT]"
+
 setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" 'Review round closed on abc123 with a fix.
 Accepted gap per the owner-side ruling.'
 ship; nothing_ran "uncited authority in a round-closed comment"

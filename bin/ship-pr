@@ -172,40 +172,70 @@ exit_after_ready() {
 
 # authority_scan: read PR text on stdin and print `uncited authority: <line>` for
 # each line that claims an authority (a ruling, an owner's call, an approval)
-# with no citation on the same line. Fenced blocks, `>` quotes and code spans
-# are not scanned for claims. A record starting with 0x1e names a comment's
-# URL, which is appended to the lines below it; it resets the fence state.
-# Sets authority_bad=1 on any hit.
+# with no citation in its unit. A unit is one line, or a bullet (`-`, `*`, `+`,
+# `N.`) with the more indented non-bullet lines after it. Fenced blocks, `>`
+# quotes and code spans are not scanned for claims. A record starting with 0x1e
+# names a comment's URL, which is appended to the units below it; it resets the
+# fence state. Sets authority_bad=1 on any hit.
+auth_add() {
+  local tick='`' s c
+  s="$(printf '%s' "$1" | sed "s/${tick}[^${tick}]*${tick}//g")"
+  c="$(printf '%s' "$1" | sed -E 's/[Pp][0-9] ?#[0-9]+//g')"
+  auth_claim="$auth_claim $s"
+  auth_cite="$auth_cite $c"
+}
+# auth_flush: judge the open unit, then clear it.
+auth_flush() {
+  local lower asserts=0 cite='#[0-9]+|https?://|[A-Za-z0-9_./-]+:[0-9]+'
+  [ -n "$auth_first" ] || return 0
+  lower="$(printf '%s' "$auth_claim" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    *"per the ruling"*|*"per ruling"*|*"per the owner"*|*"owner ruled"*|*"owner-side ruling"*) asserts=1 ;;
+    *"as ruled"*|*"approved by"*|*"accepted gap per"*|*"out of scope per"*) asserts=1 ;;
+  esac
+  if [ "$asserts" = 1 ] && ! [[ "$auth_cite" =~ $cite ]]; then
+    echo "uncited authority: $auth_first$auth_src"
+    authority_bad=1
+  fi
+  auth_first="" auth_claim="" auth_cite="" auth_open=0
+}
 authority_scan() {
-  local line text trimmed stripped lower cited src="" fenced=0 asserts cite tick='`'
-  cite='#[0-9]+|https?://|[A-Za-z0-9_./-]+:[0-9]+'
+  local line text trimmed lead fenced=0 bullet='^[[:space:]]*([-*+]|[0-9]+\.)[[:space:]]'
+  auth_first="" auth_claim="" auth_cite="" auth_open=0 auth_indent=0 auth_src=""
   while IFS= read -r line || [ -n "$line" ]; do
     text="${line%$'\r'}"
     if [[ "$text" == $'\036'* ]]; then
-      src=" (comment ${text#$'\036'})"
+      auth_flush
+      auth_src=" (comment ${text#$'\036'})"
       fenced=0
       continue
     fi
     trimmed="${text#"${text%%[![:space:]]*}"}"
     case "$trimmed" in
-      '```'*) fenced=$((1 - fenced)); continue ;;
-      '>'*) continue ;;
+      '```'*) auth_flush; fenced=$((1 - fenced)); continue ;;
+      '>'*) auth_flush; continue ;;
     esac
     [ "$fenced" = 0 ] || continue
-    stripped="$(printf '%s' "$text" | sed "s/${tick}[^${tick}]*${tick}//g")"
-    lower="$(printf '%s' "$stripped" | tr '[:upper:]' '[:lower:]')"
-    asserts=0
-    case "$lower" in
-      *"per the ruling"*|*"per ruling"*|*"per the owner"*|*"owner ruled"*|*"owner-side ruling"*) asserts=1 ;;
-      *"as ruled"*|*"approved by"*|*"accepted gap per"*|*"out of scope per"*) asserts=1 ;;
-    esac
-    # A review finding number (P2 #2) is not an issue: drop it before the citation test.
-    cited="$(printf '%s' "$text" | sed -E 's/[Pp][0-9] ?#[0-9]+//g')"
-    if [ "$asserts" = 1 ] && ! [[ "$cited" =~ $cite ]]; then
-      echo "uncited authority: $text$src"
-      authority_bad=1
+    if [ -z "$trimmed" ]; then
+      auth_flush
+      continue
+    fi
+    lead="${text%%[![:space:]]*}"
+    if [ "$auth_open" = 1 ] && [ "${#lead}" -gt "$auth_indent" ] && ! [[ "$text" =~ $bullet ]]; then
+      auth_add "$text"
+      continue
+    fi
+    auth_flush
+    auth_first="$text"
+    auth_add "$text"
+    if [[ "$text" =~ $bullet ]]; then
+      auth_open=1
+      auth_indent="${#lead}"
+    else
+      auth_flush
     fi
   done
+  auth_flush
 }
 
 report_flakes() {
