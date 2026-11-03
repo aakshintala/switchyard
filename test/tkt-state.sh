@@ -125,11 +125,24 @@ bash "$TKT" "$S3" journal "$(printf 'x\ny')" 2>/dev/null && fail "a journal line
 # usage errors exit 2 with usage on stderr
 bash "$TKT" >/dev/null 2>"$T/err-u1.txt"; [ "$?" = "2" ] || fail "no args exits 2"
 grep -q 'usage' "$T/err-u1.txt" || fail "no args prints usage"
+for sub in get list set add journal require; do
+  grep -q "^  $sub " "$T/err-u1.txt" || fail "no args usage lists the $sub subcommand"
+done
+bash "$TKT" "$S" >/dev/null 2>"$T/err-u4.txt"; [ "$?" = "2" ] || fail "a state file without a command exits 2"
+for sub in get list set add journal require; do
+  grep -q "^  $sub " "$T/err-u4.txt" || fail "a state file without a command lists the $sub subcommand"
+done
+for sub in get list set add journal require; do
+  grep -q "^#   $sub " "$TKT" || fail "header usage block names the $sub subcommand"
+done
 # the header help text says set replaces every line and names add the append form
 grep -q 'replace every line' "$TKT" || fail "help says set replaces every line"
 grep -q 'the append form of set' "$TKT" || fail "help names add as the append form of set"
 bash "$TKT" "$S" bogus >/dev/null 2>"$T/err-u2.txt"; [ "$?" = "2" ] || fail "an unknown command exits 2"
 grep -q 'usage' "$T/err-u2.txt" || fail "an unknown command prints usage"
+for sub in get list set add journal require; do
+  grep -q "^  $sub " "$T/err-u2.txt" || fail "an unknown command usage lists the $sub subcommand"
+done
 bash "$TKT" "$S" get >/dev/null 2>&1; [ "$?" = "2" ] || fail "get without a key exits 2"
 bash "$TKT" "$S" set onlykey >/dev/null 2>&1; [ "$?" = "2" ] || fail "set without a value exits 2"
 bash "$TKT" "$S" require >/dev/null 2>&1; [ "$?" = "2" ] || fail "require without a key exits 2"
