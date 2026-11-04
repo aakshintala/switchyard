@@ -36,6 +36,21 @@ tier strong: muse (healthy)
 tier frontier: codex (warning)" ] || fail "tier winners output was:
 $OUT"
 
+# opencode-go (muse at $0.20) carries standard and strong and ranks ahead of
+# codex ($0.50) on a tie, even when the feed lists codex first.
+cat >"$T/opencode-tie.json" <<'FIXTURE'
+{"providers":[
+  {"id":"codex","status":"healthy","quotas":[{"key":"session","label":"Session","percentRemaining":40,"resetText":"Resets in 6d"}]},
+  {"id":"opencode-go","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":90,"resetText":"Resets in 4d"}]}
+]}
+FIXTURE
+route "$T/opencode-tie.json"
+[ "$RC" = 0 ] || fail "opencode tie: exit $RC, want 0"
+[ "$OUT" = "tier standard: opencode-go (healthy)
+tier strong: opencode-go (healthy)
+tier frontier: codex (healthy)" ] || fail "opencode tie output was:
+$OUT"
+
 # Tie: codex is healthy but listed after muse, so the tier list wins over
 # feed order; cursor leads the frontier list. Permuting the feed must not
 # change the output.

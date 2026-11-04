@@ -25,8 +25,8 @@ if [[ "${1:-}" == "--route" ]]; then
   # skills/delegate/SKILL.md, cheapest `$OUT/1M` first (`openai/*` models
   # count as `codex`), and must change with them.
   TIERS="standard strong frontier"
-  STANDARD="muse claude codex opencode-go cursor"
-  STRONG="muse claude codex cursor"
+  STANDARD="muse opencode-go claude codex cursor"
+  STRONG="muse opencode-go claude codex cursor"
   FRONTIER="cursor codex claude"
   FAILED=0
   for tier in $TIERS; do
