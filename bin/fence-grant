@@ -1147,6 +1147,17 @@ if [ "$dry" -eq 0 ]; then
     fi
   } > "$gf" 2>/dev/null || { echo "ERROR cannot write $gf"; exit 3; }
 fi
+# A path granted with no --ranges entry is a whole-file hold by definition:
+# warn, non-blocking, before the GRANT lines. Exit status, GRANT lines and
+# the written grant file are unchanged.
+while IFS= read -r _wp; do
+  [ -n "$_wp" ] || continue
+  _wb=$(_norm_base "$_wp") || continue
+  [ -n "$_wb" ] || continue
+  if ! cut -d'|' -f1 < "$tmp/rspec" | grep -qxF "$_wb"; then
+    echo "WIDE $_wp is granted whole (no --ranges): a lane needing one line of it is refused."
+  fi
+done < "$tmp/plist"
 sed 's/^/GRANT /' < "$tmp/plist"
 if [ -n "$readpaths" ]; then
   printf '%s\n' "$readpaths" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's/^/READ /'
