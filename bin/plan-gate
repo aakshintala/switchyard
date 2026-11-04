@@ -16,8 +16,9 @@
 #        missing, holds no command, or holds more than one command line.
 #        With --script CMD, the command must run the repo's gate script CMD as
 #        its workflow doc writes it. Leading NAME=VALUE assignments are allowed
-#        only for CARGO_BUILD_JOBS, CARGO_INCREMENTAL, NEXTEST_TEST_THREADS,
-#        RUSTC_WRAPPER, SCCACHE_* and KACHE_*. Each such VALUE must be an
+#        only for CARGO_BUILD_JOBS, CARGO_INCREMENTAL, CARGO_TARGET_DIR,
+#        NEXTEST_TEST_THREADS, RUSTC_WRAPPER, SCCACHE_*, KACHE_* and TMPDIR.
+#        Each such VALUE must be an
 #        unquoted plain word of [A-Za-z0-9_./:@%+,=-]: a quoted value or one
 #        with a shell metacharacter (such as `1||` or `1;`) is rejected, since
 #        it can hide an operator from the word check. Then the command must
@@ -109,8 +110,10 @@ if [ -n "$script" ]; then
       *) break ;;
     esac
     case "${first%%=*}" in
-      CARGO_BUILD_JOBS|CARGO_INCREMENTAL|NEXTEST_TEST_THREADS|RUSTC_WRAPPER|SCCACHE_*|KACHE_*) ;;
-      *) rest="" ; break ;;
+      CARGO_BUILD_JOBS|CARGO_INCREMENTAL|CARGO_TARGET_DIR|NEXTEST_TEST_THREADS|RUSTC_WRAPPER|SCCACHE_*|KACHE_*|TMPDIR) ;;
+      *)
+        echo "plan-gate: the Gate line sets ${first%%=*}, which is not in the allowed variable list (CARGO_BUILD_JOBS, CARGO_INCREMENTAL, CARGO_TARGET_DIR, NEXTEST_TEST_THREADS, RUSTC_WRAPPER, SCCACHE_*, KACHE_*, TMPDIR): $cmd" >&2
+        exit 1 ;;
     esac
     case "${first#*=}" in
       *[!A-Za-z0-9_./:@%+,=-]*) rest="" ; break ;;
