@@ -932,6 +932,15 @@ expect_state head "$H" review-head-only
 grep -q "pr list" "$T/calls.log" || fail "review-head-only: the branch PR is looked up"
 grep -q "^review-start|" "$T/calls.log" || fail "review-head-only: review still starts"
 
+# --- --from review with pr unset and a stale stored head reports DRIFT ---
+setup_case review-stale-head
+bash "$TKT_STATE" "$S" set head 0000000000000000000000000000000000000000 || fail "set stale head"
+run_build --from review
+[ "$RC" -eq 3 ] || fail "review-stale-head exits 3 (rc=$RC)"
+expect_verdict "TKT tkt-build DRIFT state=0000000000000000000000000000000000000000 worktree=$H pr=$H log=*" "review-stale-head"
+expect_state head 0000000000000000000000000000000000000000 review-stale-head
+grep -q "^review-start|" "$T/calls.log" && fail "review-stale-head: review never starts"
+
 # --- --from review without pr and head and no PR names the missing key ---
 setup_case review-missing-pr
 touch "$T/empty-pr"

@@ -65,12 +65,15 @@ require_keys() {
     emit "PRECONDITION missing=${key:-unknown}" 2 "$req_err"
   }
 }
-fetch_branch_pr() {
+lookup_branch_pr() {
   local pr_json
   pr_json="$(gh pr list --head "$branch" --repo "$repo" --json number,headRefOid 2>/dev/null || true)"
   pr="$(jq -r '.[0].number // empty' <<<"$pr_json" 2>/dev/null || true)"
   head="$(jq -r '.[0].headRefOid // empty' <<<"$pr_json" 2>/dev/null || true)"
   [ -n "${pr:-}" ] && [ -n "${head:-}" ] || emit "PRECONDITION missing=pr" 2 "tkt-build: no PR for branch $branch (gh pr list --head $branch --json number,headRefOid)"
+}
+fetch_branch_pr() {
+  lookup_branch_pr
   tkt set pr "$pr"; tkt set head "$head"
 }
 forward() {
@@ -93,12 +96,15 @@ slug="${repo//\//-}"; mkdir -p "$run"
 # plan without the line ends in a PR; Outcome: measurement ends in the gate.
 outcome="$(plan_outcome "$plan" 2>/dev/null || true)"
 [ -n "$outcome" ] || outcome=pr
-# A review with a missing pr or head derives both from the branch PR before
-# the drift check below, so that check never views an empty pr. The derived
-# head is still compared against the PR head exactly as a stored one.
+# A review with a missing pr or head derives only the missing key from the
+# branch PR before the drift check below, so that check never views an
+# empty pr. A stored head is left exactly as stored, so the drift check
+# below compares it against the PR head and reports DRIFT when they differ.
 if [ "$from" = review ] && [ "$outcome" != measurement ]; then
   if [ -z "$(tkt get pr 2>/dev/null || true)" ] || [ -z "$(tkt get head 2>/dev/null || true)" ]; then
-    fetch_branch_pr
+    lookup_branch_pr
+    [ -n "$(tkt get pr 2>/dev/null || true)" ] || tkt set pr "$pr"
+    [ -n "$(tkt get head 2>/dev/null || true)" ] || tkt set head "$head"
   fi
 fi
 rnd="$(tkt get round 2>/dev/null || true)"
@@ -211,7 +217,10 @@ elif [ "$from" != review ]; then
 else
   pr="$(tkt get pr 2>/dev/null || true)"; head="$(tkt get head 2>/dev/null || true)"
   if [ -z "${pr:-}" ] || [ -z "${head:-}" ]; then
-    fetch_branch_pr
+    lookup_branch_pr
+    [ -n "$(tkt get pr 2>/dev/null || true)" ] || tkt set pr "$pr"
+    [ -n "$(tkt get head 2>/dev/null || true)" ] || tkt set head "$head"
+    pr="$(tkt get pr 2>/dev/null || true)"; head="$(tkt get head 2>/dev/null || true)"
   fi
   pr_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
   if [ "$pr_head" != "$head" ]; then
