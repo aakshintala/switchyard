@@ -130,7 +130,8 @@ gh() (
         if [ -n "$want_failed_log" ]; then
           [ -e "$ST/log-$rid-$job.log" ] && cat "$ST/log-$rid-$job.log" || true
         elif [ -n "$want_log" ]; then
-          [ -e "$ST/log-$rid.log" ] && cat "$ST/log-$rid.log" || true
+          if [ -e "$ST/log-$rid-$job.log" ]; then cat "$ST/log-$rid-$job.log"
+          elif [ -e "$ST/log-$rid.log" ]; then cat "$ST/log-$rid.log"; fi
         else
           case "$json_fields" in
             *attempt*)
@@ -1247,6 +1248,7 @@ setup; echo true >"$ST/draft"
 ship; expect 0 "repo without the mutants label passes unchecked"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "unchecked repo merged line: [$OUT]"
 ! grep -q -- '--json labels' "$ST/gh.log" || fail "unchecked repo: no PR label read"
+! grep -q '^gh run list' "$ST/gh.log" || fail "no mutants-gate flag: no run lookup"
 
 # a repo with other labels only is not checked either
 setup; echo true >"$ST/draft"; repo_labels '[{"name":"docs"}]'
@@ -1256,6 +1258,38 @@ ship; expect 0 "repo with other labels passes unchecked"
 setup; repo_labels "$MUTANTS_LABEL"
 ship; expect 0 "non-draft skips the mutants check"
 ! grep -q -- '--json labels' "$ST/gh.log" || fail "non-draft: no PR label read"
+
+# ===== --mutants-gate: before ready, require a label or zero-mutant proof
+setup; echo true >"$ST/draft"; on_pr_labels "$MUTANTS_LABEL"
+ship --mutants-gate; expect 0 "mutants gate accepts the PR label"
+! grep -q '^gh run list' "$ST/gh.log" || fail "mutants label: no run lookup needed"
+grep -q -- '--json labels' "$ST/gh.log" || fail "mutants label: PR labels read"
+
+setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:417,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-417.json"
+echo 'mutants in the diff: 0' >"$ST/log-417-901.log"
+ship --mutants-gate; expect 0 "mutants gate accepts completed zero-mutant proof"
+grep -q 'gh run list.*--commit' "$ST/gh.log" || fail "zero-mutant proof: run list is pinned to the head"
+grep -q 'gh run view 417.*--job 901 --log' "$ST/gh.log" || fail "zero-mutant proof: Selection job log read"
+
+setup; echo true >"$ST/draft"
+ship --mutants-gate; expect 5 "mutants gate rejects no label and no proof"
+no_merge "mutants gate without proof"
+grep -q 'mutants gate failed' <<<"$ERR" || fail "mutants gate failure names the check: [$ERR]"
+! grep -q 'gh label create\|gh label edit' "$ST/gh.log" || fail "mutants gate never adds a label"
+
+setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:416,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:00:00Z"},{databaseId:417,status:"in_progress",conclusion:null,headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-416.json"
+echo 'mutants in the diff: 0' >"$ST/log-416-901.log"
+ship --mutants-gate; expect 5 "mutants gate rejects an in-progress current-head run"
+no_merge "mutants gate with in-progress run"
+grep -q 'mutants gate failed' <<<"$ERR" || fail "in-progress gate failure names the check: [$ERR]"
+
+setup; ship --mutants-gate; expect 0 "mutants gate leaves an already-ready PR alone"
+! grep -q -- '--json labels' "$ST/gh.log" || fail "already-ready PR: no label read"
+! grep -q '^gh run list' "$ST/gh.log" || fail "already-ready PR: no run lookup"
 
 # (d) --no-mutants-label skips the check and prints the reason
 setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"
