@@ -81,8 +81,17 @@ gh() (
         json="$(rd labels '[]')"
         [ "$paginate" = 1 ] || json="$(jq -c '.[0:100]' <<<"$json")";;
       */issues/*/comments)
-        # the PR's issue comments: a JSON array in $ST/comments, none by default
-        json="$(rd comments '[]')";;
+        # Preserve test comments and add the implicit approved review used by
+        # existing cases unless a test supplies explicit review-pr comments.
+        base_comments="$(rd comments '[]')"
+        if [ -e "$ST/review-comments" ]; then
+          review_comments="$(cat "$ST/review-comments")"
+        elif [ -n "${SHIP_TEST_REVIEW_PID:-}" ] && [ -n "${SHIP_TEST_REVIEW_HEAD:-}" ]; then
+          review_comments="$(jq -nc --arg pid "$SHIP_TEST_REVIEW_PID" --arg head "$SHIP_TEST_REVIEW_HEAD" '[{id:1,created_at:"2026-11-04T00:00:00Z",body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE")}]')"
+        else
+          review_comments='[]'
+        fi
+        json="$(jq -nc --argjson base "$base_comments" --argjson reviews "$review_comments" '$base + $reviews')";;
       */actions/runs*)
         json='{"workflow_runs":[]}';;
       */commits/*/check-runs*)
@@ -285,6 +294,19 @@ BUMP_MAIN='git --git-dir="$ORIGIN" update-ref refs/heads/main "$(git --git-dir="
 
 OUT=""; ERR=""; CODE=0
 run() {
+  local reviewed="" reviewed_pid="" reviewed_head="" i
+  local -a ship_args=("$@")
+  for ((i = 0; i < ${#ship_args[@]}; i++)); do
+    if [ "${ship_args[$i]}" = "--reviewed" ]; then
+      reviewed="${ship_args[$((i + 1))]}"
+      break
+    fi
+  done
+  if [ -n "$reviewed" ]; then
+    reviewed_pid="$(git -C "$WT" diff -U0 "origin/main...$reviewed" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}' || true)"
+    [ -n "$reviewed_pid" ] || reviewed_pid=none
+    reviewed_head="$(git -C "$WT" rev-parse "$reviewed" 2>/dev/null || true)"
+  fi
   O0="$(origin_head)"; W0="$(git -C "$WT" rev-parse HEAD 2>/dev/null)"
   # git wrapper: with $ST/delete-fails, `push origin --delete` fails the way
   # GitHub's does after it auto-deletes the branch on merge. Defined and
@@ -311,7 +333,7 @@ run() {
       command git "$@"
     )
     export -f git
-    bash "$SHIP" "$@" 2>"$S/stderr.txt"
+    SHIP_TEST_REVIEW_PID="$reviewed_pid" SHIP_TEST_REVIEW_HEAD="$reviewed_head" bash "$SHIP" "$@" 2>"$S/stderr.txt"
   )"; CODE=$?
   ERR="$(cat "$S/stderr.txt")"
 }
@@ -429,6 +451,37 @@ echo changed >"$WT/feature.txt"; git -C "$WT" commit -q --amend --no-edit -a
 git -C "$WT" push -q --force-with-lease origin HEAD:refs/heads/feature
 ship; expect 4 "pushed head whose patch-id differs from --reviewed exits 4"
 no_merge "pushed head with a changed patch"
+
+# ===== the last review-pr verdict for --reviewed must approve before merge
+setup
+REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T12:00:00Z",id:103,body:("review-pr: patch-id ffffffffffffffffffffffffffffffffffffffff, head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE")},
+  {created_at:"2026-11-04T11:00:00Z",id:102,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: CHANGES\n\nP1 finding remains open")},
+  {created_at:"2026-11-04T10:00:00Z",id:101,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: APPROVE")}
+]' >"$ST/review-comments"
+ship; expect 5 "last CHANGES verdict refuses merge"; no_merge "last CHANGES verdict"
+grep -q 'review' <<<"$ERR" || fail "review refusal explains the missing approval: [$ERR]"
+
+setup
+REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:104,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK all findings repaired")}
+]' >"$ST/review-comments"
+ship; expect 0 "scoped FIX-OK verdict permits merge"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "scoped FIX-OK still merges: [$OUT]"
+
+setup
+REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:105,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## spec (test)\n\nVERDICT spec: CHANGES")}
+]' >"$ST/review-comments"
+echo 'P2: no real bug; keep the test finding' >"$T/no-real-bug.txt"
+echo changed >>"$WT/feature.txt"; git -C "$WT" commit -qam "address review nit"; git -C "$WT" push -q origin feature
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$T/no-real-bug.txt"
+expect 0 "--unverified-fixes still ships a no-real-bug CHANGES round"
+grep -q '^gh pr merge' "$ST/gh.log" || fail "no-real-bug CHANGES round merged"
+grep -q '^Fixes since .* shipped without re-review' "$ST/comment.txt" || fail "no-real-bug CHANGES round records the fix"
 
 # ===== patch-id ignores context lines: a rebase over a main commit that
 # ===== touched only the neighbouring line still matches, while a changed
@@ -713,7 +766,8 @@ grep -q '^gh pr ready 7 --repo O/N$' "$ST/gh.log" || fail "draft marked ready be
 # SIGTERM during the merged-tree gate restores the pinned head and exits 143
 setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
 O0="$(origin_head)"
-bash "$SHIP" 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" \
+SHIP_TEST_REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')" \
+SHIP_TEST_REVIEW_HEAD="$HEAD0" bash "$SHIP" 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" \
   --gate 'if [ -e other.txt ]; then /bin/sleep 30 & echo $! >"$ST/gate-sleep.pid"; wait $!; fi' >"$S/kill-out.txt" 2>"$S/kill-err.txt" &
 kill_pid=$!
 for i in $(seq 1 100); do

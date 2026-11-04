@@ -3,7 +3,10 @@
 # Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
-#        60 s for GitHub's head to match the local HEAD; require each --body-has
+#        60 s for GitHub's head to match the local HEAD; require a matching
+#        review-pr verdict for --reviewed (APPROVE on every axis, or FIX-OK from
+#        a scoped verify; --unverified-fixes permits its no-real-bug fix round);
+#        require each --body-has
 #        line and run pr-closes (see below); run --gate in the worktree on that head,
 #        once, before any rebase or push; rebase onto
 #        origin/main (see below); compare the PR diff's `git patch-id --stable` with
@@ -92,7 +95,7 @@
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, or stray closing keywords from pr-closes), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 PR text or review state needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, stray closing keywords from pr-closes, or no approved review verdict), 124 CI wait timeout.
 #        Rebase rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -518,6 +521,76 @@ patch_id() {
   id="$(git -C "$worktree" diff -U0 "origin/main...$1" | git patch-id --stable | awk '{print $1}')"
   echo "${id:-none}"
 }
+
+# review_verdict REPO PR PATCH_ID: print approved, unverified, changes,
+# incomplete, missing or invalid for the newest review-pr comment on PATCH_ID.
+review_verdict() {
+  local repo="$1" pr="$2" reviewed_pid="$3" rows tab last created id header verdicts axes axis
+  local -a axis_list=()
+  rows="$(gh api --paginate "repos/$repo/issues/$pr/comments" --jq '
+    .[] | select((.body // "") | startswith("review-pr: patch-id")) |
+    . as $comment |
+    ($comment.body | split("\n")) as $lines |
+    ($lines[1:] | reduce .[] as $raw (
+      {section:"", axes:[], verdicts:[]};
+      ($raw | gsub("[*`]"; "") | gsub("^\\s+|\\s+$"; "")) as $line |
+      if ($line | test("^## (standards|spec|overbuild|verify)([[:space:]]|$)")) then
+        ($line | capture("^## (?<section>standards|spec|overbuild|verify)").section) as $section |
+        .section = $section |
+        if ($section == "standards" or $section == "spec" or $section == "overbuild") then .axes += [$section] else . end
+      elif $line == "VERDICT standards: APPROVE" then .verdicts += ["standards:APPROVE"]
+      elif $line == "VERDICT standards: CHANGES" then .verdicts += ["standards:CHANGES"]
+      elif $line == "VERDICT spec: APPROVE" then .verdicts += ["spec:APPROVE"]
+      elif $line == "VERDICT spec: CHANGES" then .verdicts += ["spec:CHANGES"]
+      elif $line == "VERDICT overbuild: APPROVE" then .verdicts += ["overbuild:APPROVE"]
+      elif $line == "VERDICT overbuild: CHANGES" then .verdicts += ["overbuild:CHANGES"]
+      elif .section == "overbuild" and $line == "VERDICT: APPROVE" then .verdicts += ["overbuild:APPROVE"]
+      elif .section == "overbuild" and $line == "VERDICT: CHANGES" then .verdicts += ["overbuild:CHANGES"]
+      elif .section == "verify" and ($line | test("^FIX-OK($|\\s)")) then .verdicts += ["verify:FIX-OK"]
+      elif .section == "verify" and ($line | test("^FIX-INCOMPLETE($|\\s)")) then .verdicts += ["verify:FIX-INCOMPLETE"]
+      elif ($line | test("^(VERDICT|FIX-)")) then .verdicts += ["INVALID"]
+      else . end
+    )) as $parsed |
+    [$comment.created_at, ($comment.id | tostring), $lines[0],
+      ($parsed.verdicts | if length == 0 then "-" else join(",") end),
+      ($parsed.axes | unique | if length == 0 then "-" else join(",") end)] | @tsv
+  ' )" || return 1
+  tab="$(printf '\t')"
+  last="$(printf '%s\n' "$rows" | sort -t "$tab" -k1,1 -k2,2n \
+    | { grep -E "^.*${tab}review-pr: patch-id ${reviewed_pid}, head [0-9a-f]{40}(,.*)?${tab}" || true; } | tail -n 1)"
+  [ -n "$last" ] || { printf 'missing'; return 0; }
+  IFS=$'\t' read -r created id header verdicts axes <<<"$last"
+  case ",$verdicts," in *,INVALID,*) printf 'invalid'; return 0 ;; esac
+  if [[ ",$verdicts," == *,verify:FIX-OK,* ]]; then
+    [ "$verdicts" = "verify:FIX-OK" ] && printf 'approved' || printf 'invalid'
+    return 0
+  fi
+  case ",$verdicts," in *,verify:FIX-INCOMPLETE,*) printf 'incomplete'; return 0 ;; esac
+  [ "$axes" != "-" ] || { printf 'missing'; return 0; }
+  IFS=',' read -r -a axis_list <<<"$axes"
+  for axis in "${axis_list[@]}"; do
+    case ",$verdicts," in *",$axis:APPROVE,"*|*",$axis:CHANGES,"*) ;; *) printf 'invalid'; return 0 ;; esac
+  done
+  case ",$verdicts," in
+    *":CHANGES,"*)
+      # The documented no-real-bug path ships a reviewed CHANGES round without
+      # re-review, but only when the caller supplies --unverified-fixes.
+      [ -n "$unverified" ] && printf 'unverified' || printf 'changes';;
+    *":APPROVE,"*) printf 'approved';;
+    *) printf 'missing';;
+  esac
+}
+
+reviewed_patch_id="$(patch_id "$reviewed")"
+review_state="$(review_verdict "$repo" "$pr" "$reviewed_patch_id")" \
+  || die 1 "cannot read review-pr comments on PR $pr in $repo"
+case "$review_state" in
+  approved|unverified) ;;
+  missing) die 5 "no review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
+  changes) die 5 "last review-pr verdict for --reviewed patch-id $reviewed_patch_id is CHANGES; complete a scoped verify or use --unverified-fixes only for a no-real-bug fix round" ;;
+  incomplete) die 5 "last scoped verify for --reviewed patch-id $reviewed_patch_id is FIX-INCOMPLETE" ;;
+  *) die 5 "invalid or incomplete review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
+esac
 
 # Whether main's required checks are strict. Any lookup error other than a classic
 # rule's 404 (no classic rule) counts as strict: the old behaviour, costing only CI time.
