@@ -10,11 +10,13 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-lanestat.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/run" "$T/empty" "$T/stub" "$T/ps" \
-  "$T/tmp" "$T/tmp/delegate-jobs" "$T/delegate-jobs" "$T/system-jobs"
+  "$T/tmp" "$T/tmp/delegate-jobs" "$T/delegate-jobs" "$T/system-jobs" \
+  "$T/cache/delegate/locators" "$T/cache/delegate/read"
 DELEGATE_JOBS_DIR="$T/delegate-jobs"
 JOB_RECORD_SYSTEM_DIR="$T/system-jobs"
 TMPDIR="$T/tmp"
-export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR
+XDG_CACHE_HOME="$T/cache"
+export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR XDG_CACHE_HOME
 
 # The ordered keys are intentional: lanestat's toolName grep expects
 # "type":"tool_execution_start","toolCallId":"..","toolName":"..".
@@ -1132,5 +1134,69 @@ cmp -s "$T/ssh-local.out" "$T/ssh-script.out" || fail "bash -s preserves all lan
 assert_row 960 'SETTLED PARK last=none$' "$(<"$T/ssh-script.out")"
 assert_row 961 'SETTLED LOOP last=none$' "$(<"$T/ssh-script.out")"
 assert_row 962 "SETTLED DONE-UNREAD $job_done$" "$(<"$T/ssh-script.out")"
+
+# delegate run jobs are enumerated from locators, without a pi lane JSONL.
+delegate_records="$T/delegate-records"
+mkdir -p "$delegate_records"
+delegate_done=10101010-1010-4010-8010-101010101010
+delegate_read=20202020-2020-4020-8020-202020202020
+delegate_error=30303030-3030-4030-8030-303030303030
+delegate_old=40404040-4040-4040-8040-404040404040
+delegate_running=50505050-5050-4050-8050-505050505050
+write_delegate_record() {
+  local id=$1 status=$2 model=$3 backend=$4 cwd=$5 stderr_tail=$6 record
+  record="$delegate_records/$id.json"
+  printf '{"status":"%s","resume":{"model":"%s","backend":"%s","cwd":"%s"},"result":{"status":"%s","model":"%s","backend":"%s","stderrTail":"%s"}}\n' \
+    "$status" "$model" "$backend" "$cwd" "$status" "$model" "$backend" "$stderr_tail" >"$record"
+  printf '%s\n' "$record" >"$XDG_CACHE_HOME/delegate/locators/$id"
+}
+write_delegate_record "$delegate_done" DONE 'codex/model' openai-codex '/work/trees/done' ''
+write_delegate_record "$delegate_read" DONE_WITH_CONCERNS 'muse/model' muse '/work/trees/read' ''
+write_delegate_record "$delegate_error" ERROR 'muse/model' muse '/work/trees/error' 'provider refused\nsecond line'
+write_delegate_record "$delegate_old" STALLED 'codex/model' openai-codex '/work/trees/old' ''
+write_delegate_record "$delegate_running" RUNNING 'claude/model' claude '/work/trees/running' ''
+set_file_age "$delegate_records/$delegate_done.json" 60
+set_file_age "$delegate_records/$delegate_read.json" 60
+set_file_age "$delegate_records/$delegate_error.json" 60
+set_file_age "$delegate_records/$delegate_old.json" 90000
+set_file_age "$delegate_records/$delegate_running.json" 90000
+: >"$XDG_CACHE_HOME/delegate/read/$delegate_read"
+run_stat "$T/empty" >"$T/delegate-run.out" 2>"$T/delegate-run.err"; rc=$?
+[ "$rc" = 0 ] || fail "delegate run records exit 0 (got $rc; $(<"$T/delegate-run.err"))"
+[ ! -s "$T/delegate-run.err" ] || fail "delegate run records have no stderr: $(<"$T/delegate-run.err")"
+assert_delegate_row() {
+  local id=$1 pattern=$2 rows=$3 line
+  line="$(printf '%s\n' "$rows" | grep -F "id=$id" || true)"
+  [ -n "$line" ] || fail "delegate row $id is present: [$rows]"
+  printf '%s\n' "$line" | grep -Eq "$pattern" || fail "delegate row $id matches $pattern: [$line]"
+}
+assert_delegate_row "$delegate_done" "id=$delegate_done model=codex/model cwd=/work/trees/done status=DONE DONE-UNREAD$" "$(<"$T/delegate-run.out")"
+assert_delegate_row "$delegate_read" "id=$delegate_read model=muse/model cwd=/work/trees/read status=DONE_WITH_CONCERNS READ$" "$(<"$T/delegate-run.out")"
+assert_delegate_row "$delegate_running" "id=$delegate_running model=claude/model cwd=/work/trees/running status=RUNNING$" "$(<"$T/delegate-run.out")"
+assert_delegate_row "$delegate_error" "id=$delegate_error model=muse/model cwd=/work/trees/error status=ERROR DEAD-PROVIDER muse/muse/model: provider refused DONE-UNREAD$" "$(<"$T/delegate-run.out")"
+if grep -Fq "$delegate_old" "$T/delegate-run.out"; then
+  fail "old terminal delegate job is outside the default window"
+fi
+if grep -Fq 'lanestat: no live lanes' "$T/delegate-run.out"; then
+  fail "delegate records count as lanes"
+fi
+LANESTAT_DELEGATE_MAX_AGE=172800 run_stat "$T/empty" >"$T/delegate-run-window.out" 2>"$T/delegate-run-window.err"
+assert_delegate_row "$delegate_old" "id=$delegate_old model=codex/model cwd=/work/trees/old status=STALLED DONE-UNREAD$" \
+  "$(<"$T/delegate-run-window.out")"
+
+# Without XDG_CACHE_HOME, the per-user locator and read marker use HOME/.cache.
+home_cache="$T/home/.cache"
+mkdir -p "$home_cache/delegate/locators" "$home_cache/delegate/read"
+delegate_home=60606060-6060-4060-8060-606060606060
+home_record="$delegate_records/$delegate_home.json"
+printf '{"status":"DONE","resume":{"model":"home/model","cwd":"/work/home"},"result":{"status":"DONE","model":"home/model","backend":"home"}}\n' \
+  >"$home_record"
+set_file_age "$home_record" 0
+printf '%s\n' "$home_record" >"$home_cache/delegate/locators/$delegate_home"
+env -u XDG_CACHE_HOME HOME="$T/home" PATH="$T/stub:$PATH" LANESTAT_TEST_NOW="$NOW" \
+  DELEGATE_JOBS_DIR="$DELEGATE_JOBS_DIR" JOB_RECORD_SYSTEM_DIR="$JOB_RECORD_SYSTEM_DIR" TMPDIR="$TMPDIR" \
+  sh "$LANESTAT" "$T/empty" >"$T/delegate-home.out" 2>"$T/delegate-home.err"
+assert_delegate_row "$delegate_home" "id=$delegate_home model=home/model cwd=/work/home status=DONE DONE-UNREAD$" \
+  "$(<"$T/delegate-home.out")"
 
 echo 'lanestat: all cases passed'

@@ -1,9 +1,11 @@
 #!/bin/sh
-# lanestat [--all] <run-dir>: one row per live pi lane in this host's run dir.
+# lanestat [--all] <run-dir>: live pi lanes and recent delegate run jobs.
 # It stays POSIX so lanewatch can send it to `ssh bash -s` without a remote copy.
 # LANESTAT_SETTLED_MAX (seconds, default 7200) marks older SETTLED lanes
 # as SETTLED-OLD. lanewatch does not forward the variable over ssh, so remote
 # runs use the default unless it is set in the remote environment.
+# LANESTAT_DELEGATE_MAX_AGE (seconds, default 86400) limits terminal delegate
+# jobs to that age; RUNNING jobs are always shown.
 #
 # State pairs tool starts and ends by toolCallId within the last 20 MB of the
 # jsonl, never from its last line. A prompt sent during a running tool call gets
@@ -97,6 +99,91 @@ fi
 add_job_dir "${TMPDIR:-/tmp}/delegate-jobs"
 add_job_dir "${JOB_RECORD_SYSTEM_DIR:-/tmp/delegate-jobs}"
 rows=0
+
+delegate_max_age=${LANESTAT_DELEGATE_MAX_AGE:-}
+case $delegate_max_age in
+  ''|*[!0-9]*) delegate_max_age=86400 ;;
+esac
+cache_root=
+case ${XDG_CACHE_HOME:-} in
+  /*) cache_root=$XDG_CACHE_HOME ;;
+esac
+if [ -z "$cache_root" ]; then
+  case ${HOME:-} in
+    /*) cache_root=$HOME/.cache ;;
+  esac
+fi
+if [ -n "$cache_root" ] && [ -d "$cache_root/delegate/locators" ]; then
+  delegate_output=$(LS_LOCATORS="$cache_root/delegate/locators" \
+    LS_READ="$cache_root/delegate/read" LS_NOW="$now" \
+    LS_MAX_AGE="$delegate_max_age" perl -e '
+      eval { require JSON::PP; 1 } or exit 0;
+      sub read_file {
+        my ($path) = @_;
+        open my $fh, "<", $path or return;
+        local $/;
+        return <$fh>;
+      }
+      sub one_line {
+        my ($text) = @_;
+        $text = "" unless defined $text && !ref $text;
+        $text =~ s/[\x00-\x1f\x7f]/ /g;
+        $text =~ s/\s+/ /g;
+        $text =~ s/^\s+|\s+$//g;
+        return $text;
+      }
+      my $locator_dir = $ENV{LS_LOCATORS};
+      my $read_dir = $ENV{LS_READ};
+      my $now = $ENV{LS_NOW};
+      my $max_age = $ENV{LS_MAX_AGE};
+      opendir my $dir, $locator_dir or exit 0;
+      my @ids = sort grep { /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/ }
+        readdir $dir;
+      closedir $dir;
+      for my $id (@ids) {
+        my $record_path = read_file("$locator_dir/$id");
+        next unless defined $record_path;
+        $record_path =~ s/\n\z//;
+        next if $record_path !~ m{\A/} || $record_path =~ /[\r\n]/ || !-f $record_path;
+        my @stat = stat $record_path;
+        next unless @stat;
+        my $record_json = read_file($record_path);
+        next unless defined $record_json;
+        my $record = eval { JSON::PP::decode_json($record_json) };
+        next if $@ || ref($record) ne "HASH";
+        my $status = $record->{status};
+        next unless defined $status && !ref $status && length $status;
+        if ($status ne "RUNNING") {
+          my $age = $now - $stat[9];
+          next if $age < 0 || $age > $max_age;
+        }
+        my $result = ref($record->{result}) eq "HASH" ? $record->{result} : {};
+        my $resume = ref($record->{resume}) eq "HASH" ? $record->{resume} : {};
+        my $model = one_line($result->{model} || $resume->{model} || "unknown");
+        my $backend = one_line($result->{backend} || $resume->{backend} || "unknown");
+        my $cwd = one_line($resume->{cwd} || $record->{cwd} || "");
+        my $line = "DELEGATE id=$id model=$model cwd=$cwd status=" . one_line($status);
+        if ($status eq "ERROR") {
+          my $message = $result->{stderrTail};
+          $message = "" unless defined $message && !ref $message;
+          ($message) = split /\r\n|\n|\r/, $message, 2;
+          $message = one_line($message);
+          $message = "no output" unless length $message;
+          $message = substr($message, 0, 200);
+          $line .= " DEAD-PROVIDER $backend/$model: $message";
+        }
+        if ($status ne "RUNNING") {
+          $line .= -f "$read_dir/$id" ? " READ" : " DONE-UNREAD";
+        }
+        print "$line\n";
+      }
+    ')
+  if [ -n "$delegate_output" ]; then
+    printf '%s\n' "$delegate_output"
+    rows=$(printf '%s\n' "$delegate_output" | wc -l | tr -d ' ')
+  fi
+fi
+
 for pidfile in "$run"/fiber-*-pi.pid; do
   [ -f "$pidfile" ] || continue
   n=${pidfile##*/}
