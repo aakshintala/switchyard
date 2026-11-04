@@ -227,4 +227,13 @@ out="$(bash "$T/nolib/plan-check" "$clean" --cwd "$R" 2>"$T/err.txt")"; code=$?
 [ -z "$out" ] || fail "missing lib: nothing on stdout"
 grep -q "lib/plan-tokens.sh" "$T/err.txt" || fail "missing lib: stderr names lib/plan-tokens.sh"
 
+# 16. Outcome: measurement and Outcome: pr pass; any other value fails
+printf '# Plan: #1 test\nBase: %s\nOutcome: measurement\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-measure.md"
+expect_clean "Outcome measurement passes" "$T/outcome-measure.md"
+printf '# Plan: #1 test\nBase: %s\nOutcome: pr\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-pr.md"
+expect_clean "Outcome pr passes" "$T/outcome-pr.md"
+printf '# Plan: #1 test\nBase: %s\nOutcome: other\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-other.md"
+expect_problems "Outcome other fails" "$T/outcome-other.md" \
+  'bad Outcome: other (line 3): write Outcome: pr or Outcome: measurement'
+
 echo "plan-check: all cases passed"

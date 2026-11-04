@@ -94,6 +94,10 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
 fi
 base="$(plan_base "$plan" 2>/dev/null || true)"
 [ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan"
+# The Outcome line names the ticket's end state, read the same way as Base. A
+# plan without the line ends in a PR; Outcome: measurement ends in the gate.
+outcome="$(plan_outcome "$plan" 2>/dev/null || true)"
+[ -n "$outcome" ] || outcome=pr
 # Only the first backticked token of a Files line is its path column; later ones are
 # prose (`reads`, `/reload`) that git would take as pathspecs. plan-check and plan-sweep
 # read every token (lib/plan-tokens.sh) because they check coverage, not staleness.
@@ -174,7 +178,10 @@ if [ "$from" != lane ]; then
   context_file="$(tkt get concerns.lane 2>/dev/null || true)"
   if [ -n "$context_file" ]; then context_args=(--context "$context_file"); fi
 fi
-if [ "$from" != review ]; then
+if [ "$outcome" = measurement ]; then
+  # A measurement ends in the gate: no PR to list, so the head is the worktree.
+  head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+elif [ "$from" != review ]; then
   pr_json="$(gh pr list --head "$branch" --repo "$repo" --json number,headRefOid 2>/dev/null || true)"
   pr="$(jq -r '.[0].number // empty' <<<"$pr_json" 2>/dev/null || true)"
   head="$(jq -r '.[0].headRefOid // empty' <<<"$pr_json" 2>/dev/null || true)"
@@ -191,6 +198,12 @@ fi
 if [ "$from" != review ]; then
   rc=0; gate_out="$("$tktgate" "$state" --expect-head "$head" 2>"$tmpd/gate-err")" || rc=$?
   [ "$rc" -eq 0 ] || forward GATE "$gate_out" "$rc" "$tmpd/gate-err"
+fi
+if [ "$outcome" = measurement ]; then
+  # The gate passed: no PR, review or CI follows. Record the terminal outcome
+  # the way APPROVE and CHANGES are recorded, and stop.
+  tkt set reviewed "$head"; tkt set round 0
+  emit "MEASURED head=$head" 0
 fi
 mutants_file=""; mutant_count=0; mutant_run=""; listing_note=""
 if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then

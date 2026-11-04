@@ -43,6 +43,8 @@ Base: <full SHA of the base the plan was read against>
 ## Size                 estimated lines of code and lines of tests, separately; the split, if any
 ```
 
+A plan whose ticket ends in measurements rather than a PR declares `Outcome: measurement` on the line after `Base:`; without that line the outcome is `pr`.
+
 The quoted rules are what the Verifier, the reviews and any finding are judged against: a finding that contradicts a quoted rule is refuted by quoting it. A rule you can't quote from its doc is dropped, or asked of triage. A field or shape on an external wire cites its research file or probe output under Interfaces; one with neither is a `core` ruling. Check each ruling before the Verifier does: a ruling on behaviour a doc governs names the quoted rule it follows, and one that promises runtime behaviour cites the code at the base that runs it.
 
 A hazard you know of is settled in the plan: a ruling (what the code does about it), or an invariant under Interfaces, which the Verifier attacks and the lane keeps. Review Focus holds only places to look. A hazard you can't rule on is a `core` ruling, and parks the ticket. So is a ruling that contradicts a ticket criterion or a doc sentence, or that invents behaviour a person or a calling model sees (a tool result, a message field) where the doc is silent: the ticket and the docs belong to whoever triages them, so such a ruling parks the ticket before the Verifier runs and never ships in a plan. A choice between two readings of a doc sentence is a `core` ruling too, never a `non-blocking` default. The plan carries every behaviour the ticket states: none is deferred to another ticket or part, and a ticket too big for one plan is split.

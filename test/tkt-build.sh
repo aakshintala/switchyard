@@ -1647,4 +1647,32 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "old skippe
 expect_state plan_verdict skipped "old skipped verdict with flag"
 expect_state plan_verdict_base "$H" "old skipped base refreshes with flag"
 
+# --- a plan with Outcome: measurement runs the gate, skips the PR, review
+# and CI steps, and ends MEASURED with exit 0 and no gh pr list call ---
+setup_case measured
+{
+  printf 'Base: %s\nOutcome: measurement\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+run_build
+[ "$RC" -eq 0 ] || fail "measured exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build MEASURED* log=*" "measured"
+grep -q "pr list" "$T/calls.log" && fail "measured: no gh pr list call"
+grep -q "^gate|" "$T/calls.log" || fail "measured: the gate still runs"
+grep -q "^review-start|" "$T/calls.log" && fail "measured: review never starts"
+grep -q "^review-collect|" "$T/calls.log" && fail "measured: reviews never collect"
+grep -q "prompt=.*-map-" "$T/calls.log" && fail "measured: no map job dispatches"
+grep -q "^ghci|" "$T/calls.log" && fail "measured: no CI wait runs"
+expect_state reviewed "$H" measured
+expect_state round 0 measured
+grep -q "tkt-build MEASURED" "$CDIR/tkt.journal" || fail "measured: the verdict is journaled"
+
+# --- a plan without the Outcome line still needs a PR when none exists ---
+setup_case outcome-default
+touch "$T/empty-pr"
+run_build
+[ "$RC" -eq 2 ] || fail "outcome-default exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "outcome-default"
+grep -q "^gate|" "$T/calls.log" && fail "outcome-default: the gate never runs"
+
 echo "tkt-build: all cases passed"
