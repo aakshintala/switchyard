@@ -28,6 +28,7 @@ usage() {
 # Markdown code is stripped before the actual-match scan below, so a keyword
 # inside a fenced block or inline code span never counts as a closure. The
 # Resolves-list capture stays line-anchored and untouched.
+# Inline spans match per line only, so a span crossing lines stays visible and never hides a closure.
 # shellcheck disable=SC2016  # $vars below are jq's, not the shell's
 SCAN='
   def clean: (. // "") | gsub("\r"; "");
@@ -49,7 +50,6 @@ SCAN='
           end
       end;
     go(.; ([match("`+"; "g")] | map({off: .offset, len: .length})); 0; 0; "");
-  def flush: if length == 0 then [] else join("\n") | strip_inline | split("\n") end;
   def strip_code:
     (split("\n")
      | (reduce .[] as $line ({in: false, fence: "", len: 0, out: []};
@@ -72,14 +72,8 @@ SCAN='
                  out: (.out + [""])}
               end
           end
-        ) | .out))
-    | (reduce .[] as $line ({out: [], cur: []};
-         if ($line | test("^[ \t]*$")) then
-           {out: (.out + (.cur | flush) + [$line]), cur: []}
-         else
-           {out: .out, cur: (.cur + [$line])}
-         end)
-       | .out + (.cur | flush))
+        ) | .out)
+     | map(strip_inline))
     | join("\n");
   if type != "object" or (.title | type) != "string" or (.body | type) != "string"
      or (.commits | type) != "array"
