@@ -1004,6 +1004,26 @@ run_build
 expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "mapfail"
 grep -q "map failed" <<<"$OUT" || fail "mapfail: the digest notes the map stop"
 
+# --- a map-only tooling note leaves the build state re-runnable ---
+setup_case map-note-only
+printf 'mutant_job=%s\n' Selection >>"$S"
+grep -v '^model\.map=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+run_build
+[ "$RC" -eq 1 ] || fail "map-note-only exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "map-note-only"
+grep -q "map failed: missing model.map" <<<"$OUT" || fail "map-note-only: the digest notes the map stop"
+for key in reviewed findings round; do
+  if bash "$TKT_STATE" "$S" get "$key" >/dev/null 2>&1; then
+    fail "map-note-only: state $key should remain unset"
+  fi
+done
+bash "$TKT_STATE" "$S" set model.map mm || fail "map-note-only: restore map model"
+run_build
+[ "$RC" -eq 1 ] || fail "map-note-only retry exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "map-note-only retry"
+expect_state reviewed "$H" "map-note-only retry"
+expect_state round 0 "map-note-only retry with findings"
+
 # --- a mutant job with no such job name lists no mutants and skips the map ---
 setup_case mutants-nojob
 printf 'mutant_job=%s\n' Other >>"$S"

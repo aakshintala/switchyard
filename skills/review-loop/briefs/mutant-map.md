@@ -4,6 +4,8 @@ The list comes from the mutation-testing job's log on the PR head, not from a re
 
 __MUTANTS__
 
+Map keys are matched byte-exactly against this mutants list, which uses repo-relative paths. Copy each key verbatim; never shorten or otherwise edit a path.
+
 ## Rules
 
 - Give each listed mutant a verdict line, in list order. The line repeats the list entry, then ` => ` and one verdict:
