@@ -118,13 +118,15 @@ run="$(tkt get run)"
 worktree="$(tkt get worktree)"
 mkdir -p "$run"
 
-# A stored head the worktree left behind stops the run before it acts.
+# Descendant commits can be the previous turn's work, including a BLOCKED
+# lane's commits. Only a head outside that history stops the run.
 if stored_head="$(tkt get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
     echo "tkt-job: cannot read worktree HEAD: $worktree" >&2
     exit 2
   }
-  if [ "$stored_head" != "$actual" ]; then
+  if [ "$stored_head" != "$actual" ] \
+    && ! git -C "$worktree" merge-base --is-ancestor "$stored_head" "$actual" 2>/dev/null; then
     echo "tkt-job: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual" >&2
     exit 3
   fi
