@@ -99,32 +99,20 @@ case "$1" in
     exit 0
     ;;
   claim)
-    original=("$@"); lane=""; kind="plan"; ranges=""; after=0
+    original=("$@"); lane=""; kind="plan"; after=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --lane) lane="$2"; shift 2;;
         --grant) kind="grant"; shift;;
         --plan) kind="plan"; shift;;
-        --ranges) ranges="$2"; shift 2;;
+        --ranges) echo 'usage: file-claim claim' >&2; exit 2;;
         --) after=1; shift; break;;
         *) shift;;
       esac
     done
     if [ "$after" = 1 ]; then
       for p in "$@"; do
-        pranges="*"; rest="$ranges"
-        while [ -n "$rest" ]; do
-          ri=${rest%%,*}; case "$rest" in *,*) rest=${rest#*,};; *) rest="";; esac
-          rf=${ri%%:*}; rr=${ri#*:}
-          if [ "$rf" = "$p" ]; then
-            if [ "$pranges" = "*" ]; then pranges="$rr"; else pranges="$pranges,$rr"; fi
-          fi
-        done
-        if [ "$pranges" = "*" ]; then
-          printf '%s\t%s\t%s\t0\tt:stub\t\n' "$p" "$lane" "$kind" >>"$T/file-claim-claims"
-        else
-          printf '%s\t%s\t%s\t0\tt:stub\t\t%s\n' "$p" "$lane" "$kind" "$pranges" >>"$T/file-claim-claims"
-        fi
+        printf '%s\t%s\t%s\t0\tt:stub\t\n' "$p" "$lane" "$kind" >>"$T/file-claim-claims"
       done
     fi
     ;;
@@ -907,7 +895,7 @@ assert_contains 'OWN skipping PR #11' 'own PR skip printed'
 grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'claim exempts the own PR'
 [ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'own-PR grant file exists'
 
-# --- A ranged grant records its range in file-claim (#1008) ------------------
+# --- A live claim holds the whole path, including ranged requests ------------
 reset_case
 set_pr 11 fix/other docs/tui.md
 cat >"$T/pr/11.diff" <<'DIFF'
@@ -922,14 +910,14 @@ DIFF
 run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-2
 assert_rc 0 'ranged grant survives the ledger despite the open PR'
 assert_line 'GRANT docs/tui.md' 'ranged grant line'
-grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 --ranges docs/tui.md:1-2 -- docs/tui.md' "$T/file-claim.log" || fail 'ranged path is recorded with its range'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'whole-file claim uses the file-claim contract'
 grep -qxF 'Ranges: docs/tui.md:1-2' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'ranged grant file records the range'
 rm "$FW_RUN/fiber-77-fence-grant-1.md"
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
-run_fg 88 --paths docs/tui.md --ranges docs/tui.md:1-2 --dry
-assert_rc 1 'second lane is held on the claimed range'
-assert_line 'HELD docs/tui.md by lane #77' 'ranged claim blocks the overlapping range'
+run_fg 88 --paths docs/tui.md --ranges docs/tui.md:5-6 --dry
+assert_rc 1 'second lane is held on the claimed path'
+assert_line 'HELD docs/tui.md by lane #77' 'whole-file claim blocks a disjoint ranged request'
 
 # --- Live plan and grant claims are holders ---------------------------------
 reset_case

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # file-claim: lanes self-grant files via a claims ref in the claim repo.
-# Usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--ranges FILE:start-end,...] [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
+# Usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
 # FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5); N must be a positive integer.
@@ -15,7 +15,7 @@ TRIES=8
 TAB=$'\t'
 NL=$'\n'
 usage() {
-  echo "usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--ranges FILE:start-end,...] [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
+  echo "usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
   echo "       file-claim list [--lane ID] [--repo R]" >&2
   exit 2
@@ -33,35 +33,6 @@ trap cleanup EXIT
 new_workdir() { W="$(mktemp -d "${TMPDIR:-/tmp}/file-claim.XXXXXX")"; git init -q --bare "$W" || die 2 "cannot init temp dir"; }
 valid_path() { case "$1" in ""|*"$TAB"*|*"$NL"*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;; esac; }
 valid_field() { case "$1" in ""|*"$TAB"*|*"$NL"*) return 1;; esac; }
-valid_intervals() {
-  local ranges="$1" item start end rest
-  [ -n "$ranges" ] || return 1
-  [ "$ranges" = "*" ] && return 0
-  while [ -n "$ranges" ]; do
-    item=${ranges%%,*}
-    case "$ranges" in *,*) ranges=${ranges#*,};; *) ranges="";; esac
-    [ -n "$item" ] || return 1
-    case "$item" in *-*) start=${item%-*}; end=${item#*-};; *) return 1;; esac
-    case "$start$end" in ''|*[!0-9]*) return 1;; esac
-    [ "$start" -le "$end" ] || return 1
-  done
-  return 0
-}
-range_overlaps() {
-  local left="$1" right="$2" a b c d rest
-  [ "$left" = "*" ] || [ "$right" = "*" ] && return 0
-  while [ -n "$left" ]; do
-    a=${left%%,*}; case "$left" in *,*) left=${left#*,};; *) left="";; esac
-    b=${a#*-}; a=${a%-*}
-    rest="$right"
-    while [ -n "$rest" ]; do
-      c=${rest%%,*}; case "$rest" in *,*) rest=${rest#*,};; *) rest="";; esac
-      d=${c#*-}; c=${c%-*}
-      if [ "$a" -le "$d" ] && [ "$c" -le "$b" ]; then return 0; fi
-    done
-  done
-  return 1
-}
 # is_plan_file PATH: a readable regular file with Files entries that git does not
 # track. Outside a repo, git fails, so the file counts as untracked.
 is_plan_file() {
@@ -115,21 +86,16 @@ fetch_claim_tip() {
   return 0
 }
 load_claims() {
-  local tip="$1" file="$2" line tabs n p l k at wt pr ranges
+  local tip="$1" file="$2" line tabs n p l k at wt pr
   n=0
   if [ -z "$tip" ]; then : >"$file"; return 0; fi
   git -C "$W" cat-file -p "$tip:claims" >"$file" 2>/dev/null || die 2 "claims ref holds no claims blob"
   while IFS= read -r line || [ -n "$line" ]; do
-    n=$((n + 1)); tabs="${line//[!$TAB]/}"
-    case "${#tabs}" in
-      5) IFS="$TAB" read -r p l k at wt pr <<<"$line"; ranges="*";;
-      6) IFS="$TAB" read -r p l k at wt ranges pr <<<"$line";;
-      *) die 2 "claims line $n is corrupt";;
-    esac
+    n=$((n + 1)); tabs="${line//[!$TAB]/}"; [ "${#tabs}" = "5" ] || die 2 "claims line $n is corrupt"
+    IFS="$TAB" read -r p l k at wt pr <<<"$line"
     case "$k" in plan|grant) ;; *) die 2 "claims line $n is corrupt";; esac
     valid_at "$at" || die 2 "claims line $n is corrupt"
-    valid_intervals "$ranges" || die 2 "claims line $n is corrupt"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$l" "$k" "$at" "$wt" "$ranges" "$pr"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$l" "$k" "$at" "$wt" "$pr"
   done <"$file" >"$file.canonical"
   mv "$file.canonical" "$file"
 }
@@ -146,19 +112,19 @@ store_claims() {
 }
 filter_release() {
   local claims="$1" lane="$2" kept="$3" dropped="$4"; shift 4
-  local line c_path c_lane c_kind c_at c_wt c_ranges c_pr p drop
+  local line c_path c_lane c_kind c_at c_wt c_pr p drop
   : >"$kept"; : >"$dropped"
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
-    IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_ranges c_pr <<<"$line"
+    IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr <<<"$line"
     drop=0
     if [ "$c_lane" = "$lane" ]; then if [ $# -eq 0 ]; then drop=1; else for p in "$@"; do if [ "$p" = "$c_path" ]; then drop=1; break; fi; done; fi; fi
     if [ "$drop" = "1" ]; then printf '%s\n' "$c_path" >>"$dropped"; else printf '%s\n' "$line" >>"$kept"; fi
   done <"$claims"
 }
 cmd_claim() {
-  local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5" ranges="$6"; shift 6
-  local remote now main_tip pr_json prmap_list prmap tip claims attempt paths out new_lines i p held granted refused existing new_grants cap_hit reason pr holder path changed_files request_ranges remaining_ranges range_item range_path range_bounds existing_path existing_lane existing_kind existing_at existing_wt existing_ranges existing_pr covered
+  local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5"; shift 5
+  local remote now main_tip pr_json prmap_list prmap tip claims attempt paths out new_lines i p held granted refused existing new_grants cap_hit reason pr holder path changed_files
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [ $# -gt 0 ] || usage
   for p in "$@"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
@@ -187,42 +153,18 @@ cmd_claim() {
   while [ "$attempt" -le "$TRIES" ]; do
     main_tip="$(fetch_main_tip "$remote")"; tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; load_claims "$tip" "$claims"
     out=(); new_lines=(); granted=0; refused=0
-    existing="$(awk -F'\t' -v l="$lane" '$2==l&&$3=="grant"&&!seen[$1]++{n++}END{print n+0}' "$claims")"; new_grants=0
-    for p in "${paths[@]}"; do
-      if [ "$kind" = grant ] && awk -F'\t' -v q="$p" -v l="$lane" '$1==q&&$2==l{found=1}END{exit found?1:0}' "$claims"; then
-        new_grants=$((new_grants + 1))
-      fi
-    done
+    existing="$(awk -F'\t' -v l="$lane" '$2==l&&$3=="grant"{n++}END{print n+0}' "$claims")"; new_grants=0
+    for p in "${paths[@]}"; do if [ "$kind" = grant ] && [ -z "$(awk -F'\t' -v q="$p" '$1==q{print $2;exit}' "$claims")" ]; then new_grants=$((new_grants + 1)); fi; done
     if [ "$((existing + new_grants))" -gt "$MAX_GRANT" ]; then cap_hit=1; else cap_hit=0; fi
     for p in "${paths[@]}"; do
       reason="new"
       if [ "$(git -C "$W" cat-file -t "$main_tip:$p" 2>/dev/null)" = blob ]; then reason="exists"; fi
-      request_ranges="*"; remaining_ranges="$ranges"
-      if [ -n "$remaining_ranges" ]; then
-        request_ranges=""
-        while [ -n "$remaining_ranges" ]; do
-          range_item=${remaining_ranges%%,*}
-          case "$remaining_ranges" in *,*) remaining_ranges=${remaining_ranges#*,};; *) remaining_ranges="";; esac
-          range_path=${range_item%%:*}; range_bounds=${range_item#*:}
-          if [ "$range_path" = "$p" ]; then
-            request_ranges="${request_ranges:+$request_ranges,}$range_bounds"
-          fi
-        done
-        [ -n "$request_ranges" ] || request_ranges="*"
-      fi
       pr="$(awk -F'\t' -v q="$p" -v s="$self_pr" '$2==q&&index(","s",", ","$1",")==0{print $1}' "$prmap" | sort -n | head -1)"
       if [ -n "$pr" ]; then out+=("REFUSE $p pr#$pr"); refused=$((refused + 1)); continue; fi
-      holder=""; covered=0
-      while IFS="$TAB" read -r existing_path existing_lane existing_kind existing_at existing_wt existing_ranges existing_pr; do
-        [ "$existing_path" = "$p" ] || continue
-        range_overlaps "$request_ranges" "$existing_ranges" || continue
-        if [ "$existing_lane" != "$lane" ]; then holder="$existing_lane"; break; fi
-        if [ "$existing_ranges" = "*" ] || [ "$existing_ranges" = "$request_ranges" ]; then covered=1; fi
-      done <"$claims"
-      if [ -n "$holder" ]; then out+=("REFUSE $p lane:$holder"); refused=$((refused + 1)); continue; fi
-      if [ "$covered" = "1" ]; then out+=("GRANT $p $reason"); granted=$((granted + 1)); continue; fi
+      holder="$(awk -F'\t' -v q="$p" '$1==q{print $2;exit}' "$claims")"
+      if [ -n "$holder" ]; then if [ "$holder" = "$lane" ]; then out+=("GRANT $p $reason"); granted=$((granted + 1)); else out+=("REFUSE $p lane:$holder"); refused=$((refused + 1)); fi; continue; fi
       if [ "$kind" = grant ] && [ "$cap_hit" = "1" ]; then out+=("REFUSE $p cap"); refused=$((refused + 1)); continue; fi
-      out+=("GRANT $p $reason"); granted=$((granted + 1)); new_lines+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$p" "$lane" "$kind" "$now" "$worktree" "$request_ranges" "$self_pr")")
+      out+=("GRANT $p $reason"); granted=$((granted + 1)); new_lines+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$p" "$lane" "$kind" "$now" "$worktree" "$self_pr")")
     done
     if [ "$refused" -gt 0 ]; then report 1; fi
     if [ "${#new_lines[@]}" -eq 0 ]; then report 0; fi
@@ -254,26 +196,22 @@ cmd_release() {
 }
 cmd_list() {
   local lane="$1" repo="$2"
-  local remote tip claims now line c_path c_lane c_kind c_at c_wt c_ranges c_pr age
+  local remote tip claims now line c_path c_lane c_kind c_at c_wt c_pr age
   remote="$(default_remote "$repo")"
   new_workdir; fetch_main_tip "$remote" >/dev/null; tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; load_claims "$tip" "$claims"; now="$(date -u +%s)"
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
-    IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_ranges c_pr <<<"$line"
+    IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr <<<"$line"
     if [ -n "$lane" ] && [ "$c_lane" != "$lane" ]; then continue; fi
     age=$((now - $(at_epoch "$c_at"))); if [ "$age" -lt 0 ]; then age=0; fi
-    if [ "$c_ranges" = "*" ]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$age" "$c_wt" "$c_pr"
-    else
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$age" "$c_wt" "$c_pr" "$c_ranges"
-    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$age" "$c_wt" "$c_pr"
   done <"$claims" | LC_ALL=C sort -t "$TAB" -k1,1
 }
 main() {
   [ $# -ge 1 ] || usage
   local cmd="$1"; shift
   case "$cmd" in claim|release|list) ;; *) usage;; esac
-  local lane="" mode="" self_pr="" worktree="" repo="$REPO_DEFAULT" plan_file="" ranges="" range_item range_path range_bounds range_found
+  local lane="" mode="" self_pr="" worktree="" repo="$REPO_DEFAULT" plan_file=""
   local paths line p; paths=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -281,7 +219,6 @@ main() {
       --plan) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; mode="plan"; shift;;
       --plan-file) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; [ $# -ge 2 ] || usage; valid_field "$2" || usage; mode="plan"; plan_file="$2"; shift 2;;
       --grant) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; mode="grant"; shift;;
-      --ranges) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; ranges="${ranges:+$ranges,}$2"; shift 2;;
       --self-pr) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; self_pr="${self_pr:+$self_pr,}$2"; shift 2;;
       --worktree) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; worktree="$2"; shift 2;;
       --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2;;
@@ -310,21 +247,7 @@ main() {
           done
         fi
       fi
-      if [ -n "$ranges" ]; then
-        local remaining_ranges="$ranges"
-        while [ -n "$remaining_ranges" ]; do
-          range_item=${remaining_ranges%%,*}
-          case "$remaining_ranges" in *,*) remaining_ranges=${remaining_ranges#*,};; *) remaining_ranges="";; esac
-          range_path=${range_item%%:*}; range_bounds=${range_item#*:}
-          valid_path "$range_path" || usage
-          [ "$range_bounds" != "$range_item" ] || usage
-          valid_intervals "$range_bounds" || usage
-          range_found=0
-          for p in "${paths[@]}"; do [ "$p" = "$range_path" ] && range_found=1; done
-          [ "$range_found" = 1 ] || die 2 "range path is not among claim paths: $range_path"
-        done
-      fi
-      cmd_claim "$lane" "$mode" "$self_pr" "$worktree" "$repo" "$ranges" "${paths[@]}";;
+      cmd_claim "$lane" "$mode" "$self_pr" "$worktree" "$repo" "${paths[@]}";;
     release) [ -n "$lane" ] || usage; valid_field "$lane" || usage; if [ "${#paths[@]}" -gt 0 ]; then cmd_release "$lane" "$repo" "${paths[@]}"; else cmd_release "$lane" "$repo"; fi;;
     list) if [ -n "$lane" ]; then valid_field "$lane" || usage; fi; cmd_list "$lane" "$repo";;
   esac

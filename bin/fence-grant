@@ -641,26 +641,17 @@ held=""
 claims_out="$tmp/claims.out"
 claims_err="$tmp/claims.err"
 if "$file_claim" list --repo "$repo" >"$claims_out" 2>"$claims_err"; then
-  python3 -c 'import re,sys
+  python3 -c 'import sys
 for line in sys.stdin:
   fields = line.rstrip("\n").split("\t")
-  if len(fields) == 6:
-    path, lane, kind, age, worktree, pr = fields
-    ranges = "*"
-  elif len(fields) == 7:
-    path, lane, kind, age, worktree, pr, ranges = fields
-  else:
+  if len(fields) != 6:
     sys.exit(1)
+  path, lane, kind, age, worktree, pr = fields
   if not path or not lane or kind not in ("plan", "grant") or not age.isdigit() or not worktree:
     sys.exit(1)
   if pr and any(not item.isdigit() for item in pr.split(",")):
     sys.exit(1)
-  if ranges != "*":
-    for interval in ranges.split(","):
-      match = re.fullmatch(r"([0-9]+)-([0-9]+)", interval)
-      if not match or int(match.group(1)) > int(match.group(2)):
-        sys.exit(1)
-  print(path + "\t" + lane + "\t" + ranges)' <"$claims_out" >"$tmp/claims.tsv" 2>/dev/null || {
+  print(path + "\t" + lane)' <"$claims_out" >"$tmp/claims.tsv" 2>/dev/null || {
     echo "ERROR file-claim list unparseable claims"
     exit 3
   }
@@ -671,7 +662,7 @@ else
 fi
 
 _claim_holders() {
-  while IFS="$(printf '\t')" read -r claim_path claim_lane claim_ranges; do
+  while IFS="$(printf '\t')" read -r claim_path claim_lane; do
     [ -n "$claim_path" ] || continue
     claim_num=""
     case "$claim_lane" in fiber-*) claim_num=$(_lane_num "${claim_lane#fiber-}");; esac
@@ -684,19 +675,8 @@ _claim_holders() {
       continue
     fi
     normalized=$(_norm_tok "$claim_path")
-    ed=${normalized%%|*}; rest=${normalized#*|}; eb=${rest%%|*}
     : >"$tmp/claim-entries"
-    if [ "$claim_ranges" = "*" ]; then
-      printf '%s\n' "$normalized" >"$tmp/claim-entries"
-    else
-      remaining_ranges="$claim_ranges"
-      while [ -n "$remaining_ranges" ]; do
-        interval=${remaining_ranges%%,*}
-        case "$remaining_ranges" in *,*) remaining_ranges=${remaining_ranges#*,};; *) remaining_ranges="";; esac
-        s=${interval%-*}; e=${interval#*-}
-        printf '%s|%s|%s|%s\n' "$ed" "$eb" "$s" "$e" >>"$tmp/claim-entries"
-      done
-    fi
+    printf '%s\n' "$normalized" >"$tmp/claim-entries"
     if [ -n "$claim_num" ]; then claim_label="lane #$claim_num"; else claim_label="lane $claim_lane"; fi
     _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label"
   done <"$tmp/claims.tsv"
@@ -1173,11 +1153,10 @@ if [ -n "$(printf '%s' "$held" | grep .)" ]; then
 fi
 
 # --- the grant records itself in the claims ledger ---
-# Claim exactly the paths and ranges this check granted. file-claim keeps
-# range windows so both fence readers see the same holder scope. --plan, not
-# --grant: the grant cap counts grants, and a lane's whole path set must claim
-# as one; re-claiming the same lane and kind is an idempotent no-op. Reads hold
-# nothing and are never claimed. A dry run probes only and claims nothing.
+# A file claim holds each granted path whole. --plan, not --grant: the grant cap
+# counts grants, and a lane's whole path set must claim as one; re-claiming the
+# same lane and kind is an idempotent no-op. Reads hold nothing and are never
+# claimed. A dry run probes only and claims nothing.
 if [ "$dry" -eq 0 ]; then
   fc_args=(); fc_ranges=""
   while IFS='|' read -r _rf _rs _re; do
@@ -1205,15 +1184,14 @@ if [ "$dry" -eq 0 ]; then
       fc_cmd+=(--self-pr "$_op")
     done
     if [ -n "$fc_ranges" ]; then
-      # The fence probe already rejected any open PR that overlaps these
-      # ranges; file-claim's PR check is file-level, so exempt that probed set.
+      # The fence probe checked these PRs by hunk; exempt them from the
+      # file-level PR check before recording the whole-file claim.
       for _op in $prs; do
         [ -n "$_op" ] || continue
         case " $_seen_self " in *" $_op "*) continue;; esac
         _seen_self="$_seen_self $_op"
         fc_cmd+=(--self-pr "$_op")
       done
-      fc_cmd+=(--ranges "$fc_ranges")
     fi
     fc_cmd+=(-- "${fc_args[@]}")
     if "${fc_cmd[@]}" >"$tmp/fc-out" 2>"$tmp/fc-err"; then
