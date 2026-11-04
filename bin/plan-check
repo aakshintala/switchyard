@@ -157,8 +157,9 @@ done <<<"$TASKS"
 
 # The Outcome line names the ticket's end state: pr (the default when the line
 # is absent) or measurement. Any other value is a problem on its own line.
-outcome="$(plan_outcome "$plan")"
-if [ -n "$outcome" ]; then
+# An empty declaration is rejected: only an absent line defaults to pr.
+if grep -q '^Outcome:[[:space:]]' "$plan"; then
+  outcome="$(plan_outcome "$plan")"
   case "$outcome" in
     pr|measurement) ;;
     *)

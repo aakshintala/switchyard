@@ -81,23 +81,32 @@ repo="$(tkt get repo)"; issue="$(tkt get issue)"; branch="$(tkt get branch)"
 worktree="$(tkt get worktree)"; run="$(tkt get run)"; plan="$(tkt get plan)"
 slug="${repo//\//-}"; mkdir -p "$run"
 # First-round tool: a state with a round already counted continues with tkt-fix or tkt-ship.
-rnd="$(tkt get round 2>/dev/null || true)"
-[ -z "$rnd" ] || emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the first round; continue with tkt-fix or tkt-ship"
-if stored_head="$(tkt get head 2>/dev/null)"; then
-  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
-  if [ "$from" = review ]; then pr0="$(tkt get pr 2>/dev/null || true)"; early_pr="$(gh pr view "$pr0" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
-  else early_pr="$(gh pr list --head "$branch" --repo "$repo" --json headRefOid 2>/dev/null | jq -r '.[0].headRefOid // empty' 2>/dev/null || true)"; fi
-  if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$early_pr" ]; then
-    msg="tkt-build: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr ${early_pr:-unreadable}"
-    printf '%s\n' "$msg" >&2; emit "DRIFT state=$stored_head worktree=$actual pr=${early_pr:-unreadable}" 3 "$msg"
-  fi
-fi
-base="$(plan_base "$plan" 2>/dev/null || true)"
-[ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan"
 # The Outcome line names the ticket's end state, read the same way as Base. A
 # plan without the line ends in a PR; Outcome: measurement ends in the gate.
 outcome="$(plan_outcome "$plan" 2>/dev/null || true)"
 [ -n "$outcome" ] || outcome=pr
+rnd="$(tkt get round 2>/dev/null || true)"
+[ -z "$rnd" ] || emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the first round; continue with tkt-fix or tkt-ship"
+if stored_head="$(tkt get head 2>/dev/null)"; then
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$outcome" = measurement ]; then
+    # A measurement ends in the gate: no PR exists, so only the worktree
+    # head is checked and no PR is listed or viewed.
+    if [ "$stored_head" != "$actual" ]; then
+      msg="tkt-build: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual"
+      printf '%s\n' "$msg" >&2; emit "DRIFT state=$stored_head worktree=$actual pr=unreadable" 3 "$msg"
+    fi
+  else
+    if [ "$from" = review ]; then pr0="$(tkt get pr 2>/dev/null || true)"; early_pr="$(gh pr view "$pr0" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+    else early_pr="$(gh pr list --head "$branch" --repo "$repo" --json headRefOid 2>/dev/null | jq -r '.[0].headRefOid // empty' 2>/dev/null || true)"; fi
+    if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$early_pr" ]; then
+      msg="tkt-build: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr ${early_pr:-unreadable}"
+      printf '%s\n' "$msg" >&2; emit "DRIFT state=$stored_head worktree=$actual pr=${early_pr:-unreadable}" 3 "$msg"
+    fi
+  fi
+fi
+base="$(plan_base "$plan" 2>/dev/null || true)"
+[ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan"
 # Only the first backticked token of a Files line is its path column; later ones are
 # prose (`reads`, `/reload`) that git would take as pathspecs. plan-check and plan-sweep
 # read every token (lib/plan-tokens.sh) because they check coverage, not staleness.
@@ -195,7 +204,9 @@ else
     printf '%s\n' "$msg" >&2; emit "DRIFT state=$head worktree=$head pr=${pr_head:-unreadable}" 3 "$msg"
   fi
 fi
-if [ "$from" != review ]; then
+# A measurement always runs the gate, whatever --from says: the MEASURED
+# line below is only reached past a passing gate.
+if [ "$outcome" = measurement ] || [ "$from" != review ]; then
   rc=0; gate_out="$("$tktgate" "$state" --expect-head "$head" 2>"$tmpd/gate-err")" || rc=$?
   [ "$rc" -eq 0 ] || forward GATE "$gate_out" "$rc" "$tmpd/gate-err"
 fi

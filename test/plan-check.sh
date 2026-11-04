@@ -235,5 +235,8 @@ expect_clean "Outcome pr passes" "$T/outcome-pr.md"
 printf '# Plan: #1 test\nBase: %s\nOutcome: other\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-other.md"
 expect_problems "Outcome other fails" "$T/outcome-other.md" \
   'bad Outcome: other (line 3): write Outcome: pr or Outcome: measurement'
+printf '# Plan: #1 test\nBase: %s\nOutcome: \n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-blank.md"
+expect_problems "blank Outcome fails" "$T/outcome-blank.md" \
+  'bad Outcome:  (line 3): write Outcome: pr or Outcome: measurement'
 
 echo "plan-check: all cases passed"

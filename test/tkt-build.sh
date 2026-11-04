@@ -1675,4 +1675,29 @@ run_build
 expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "outcome-default"
 grep -q "^gate|" "$T/calls.log" && fail "outcome-default: the gate never runs"
 
+# --- a measurement plan with a stored head and no PR still ends MEASURED ---
+setup_case measured-stored-head
+{
+  printf 'Base: %s\nOutcome: measurement\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set head "$H" || fail "seed stored head"
+touch "$T/empty-pr"
+run_build
+[ "$RC" -eq 0 ] || fail "measured stored head exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build MEASURED* log=*" "measured stored head"
+grep -q "pr list" "$T/calls.log" && fail "measured stored head: no gh pr list call"
+grep -q "^gate|" "$T/calls.log" || fail "measured stored head: the gate still runs"
+
+# --- a measurement plan with --from review still runs the gate ---
+setup_case measured-from-review
+{
+  printf 'Base: %s\nOutcome: measurement\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`false`\n'
+} >"$CDIR/plan.md"
+run_build --from review
+[ "$RC" -eq 1 ] || fail "measured from-review with a failing gate exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build FAIL rc=1 log=*" "measured from-review gate"
+grep -q "^gate|" "$T/calls.log" || fail "measured from-review: the gate still runs"
+
 echo "tkt-build: all cases passed"
