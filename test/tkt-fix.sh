@@ -612,6 +612,31 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "C2 bad verdict: $(hea
 grep -q "job|" "$T/calls.log" && fail "C2 dispatched a job"
 fi
 
+# E. A worktree ahead of the PR head by the open fix job's own unpushed
+# commits is not drift: the state and PR heads agree at the old head, the
+# worktree descends from it, and the next call carries on to RECOVER for
+# that slot instead of stopping at DRIFT.
+if want E; then
+setup_case e
+printf 'fix work\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "E exited 0"
+[ "$?" = "3" ] || fail "E exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "E bad verdict: $(head -n 1 <<<"$out")"
+grep -q "job=j1" <<<"$out" || fail "E job id missing from RECOVER digest"
+grep -q "slot=fix1" <<<"$out" || fail "E slot missing from RECOVER digest"
+grep -q "job|" "$T/calls.log" && fail "E dispatched a job"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "E pushed"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "E head moved"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "1" ] || fail "E fixopen changed"
+grep -q "tkt-fix: worktree is ahead of the PR head by open fix job fix1's unpushed commits" "$T/stderr" || fail "E stderr line missing: $(cat "$T/stderr")"
+fi
+
 # 10a. Missing PR and head are filled from the branch's open PR before dispatch.
 setup_case fill-both-ask
 drop_state_key pr
