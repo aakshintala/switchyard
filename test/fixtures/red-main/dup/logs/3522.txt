@@ -1,0 +1,5 @@
+2026-10-09T17:20:10Z running fiber-core suite
+2026-10-09T17:23:10Z FAIL [   9.100s] fiber-core doors::open
+2026-10-09T17:23:11Z thread 'doors::open' panicked at src/doors.rs:12: assertion failed: left == right
+2026-10-09T17:24:00Z suite failed: 1 failed
+DUP-TAIL-3522

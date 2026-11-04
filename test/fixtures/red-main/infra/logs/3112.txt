@@ -1,0 +1,5 @@
+2026-10-09T17:00:10Z downloading toolchain nightly-2026-10-01
+2026-10-09T17:01:10Z curl: (6) Could not resolve host: static.rust-lang.org
+2026-10-09T17:01:11Z Failed to install toolchain: network unreachable
+2026-10-09T17:04:00Z setup step failed, no tests ran
+INFRA-TAIL-3112

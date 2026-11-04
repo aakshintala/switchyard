@@ -1,0 +1,5 @@
+2026-10-09T17:20:10Z running widgets suite
+2026-10-09T17:23:10Z FAIL [   5.100s] widgets wobble
+2026-10-09T17:23:11Z thread 'wobble' panicked at src/widgets.rs:7
+2026-10-09T17:24:00Z suite failed: 1 failed
+WOBBLE-TAIL-3722
