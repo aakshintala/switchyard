@@ -99,13 +99,28 @@ expect_script_err() {
   [ "$(cat "$T/err.txt")" = "$want" ] || fail "$1: got [$(cat "$T/err.txt")], want [$want]"
 }
 
+# expect_allowlist_err NAME SCRIPT CONTENT VAR: with --script SCRIPT the gate exits 1,
+# prints nothing on stdout, and names VAR as not in the allowed variable list
+expect_allowlist_err() {
+  printf '%b' "$3" >"$T/plan.md"
+  stdout="$(bash "$GATE" --script "$2" "$T/plan.md" 2>"$T/err.txt")" && fail "$1: exits 1"
+  [ -z "$stdout" ] || fail "$1: prints nothing on stdout"
+  [ "$(wc -l <"$T/err.txt" | tr -d ' ')" = "1" ] || fail "$1: one stderr line"
+  grep -q "sets $4," "$T/err.txt" || fail "$1: names $4: [$(cat "$T/err.txt")]"
+  grep -q 'allowed variable list' "$T/err.txt" || fail "$1: says allowlist: [$(cat "$T/err.txt")]"
+  ! grep -q 'by hand' "$T/err.txt" || fail "$1: does not say by hand: [$(cat "$T/err.txt")]"
+}
+
 expect_script_out "script with an argument" "scripts/check" '## Gate\n\nscripts/check --base abc\n' 'scripts/check --base abc'
 expect_script_out "script with a leading CARGO_BUILD_JOBS" "scripts/check" '## Gate\n\nCARGO_BUILD_JOBS=3 scripts/check\n' 'CARGO_BUILD_JOBS=3 scripts/check'
 expect_script_out "script with ./ prefix" "scripts/check" '## Gate\n\n./scripts/check\n' './scripts/check'
 expect_script_out "script run by bash" "scripts/check" '## Gate\n\nbash scripts/check --base abc\n' 'bash scripts/check --base abc'
 expect_script_out "script with several allowed assignments" "scripts/check" '## Gate\n\nRUSTC_WRAPPER=sccache SCCACHE_DIR=/tmp/x NEXTEST_TEST_THREADS=4 scripts/check\n' 'RUSTC_WRAPPER=sccache SCCACHE_DIR=/tmp/x NEXTEST_TEST_THREADS=4 scripts/check'
+expect_script_out "script with a leading CARGO_TARGET_DIR" "scripts/check" '## Gate\n\nCARGO_TARGET_DIR=/tmp/x scripts/check\n' 'CARGO_TARGET_DIR=/tmp/x scripts/check'
+expect_script_out "script with a leading TMPDIR" "scripts/check" '## Gate\n\nTMPDIR=/tmp/x scripts/check\n' 'TMPDIR=/tmp/x scripts/check'
 expect_script_err "hand-expanded steps" "scripts/check" '## Gate\n\ncargo fmt --check && cargo nextest run\n' 'cargo fmt --check && cargo nextest run'
-expect_script_err "disallowed leading assignment" "scripts/check" '## Gate\n\nFEATURES=x scripts/check\n' 'FEATURES=x scripts/check'
+expect_script_err "hand-written steps keep the old message" "scripts/check" '## Gate\n\nmake check\n' 'make check'
+expect_allowlist_err "unlisted leading variable" "scripts/check" '## Gate\n\nFOO=1 scripts/check\n' 'FOO'
 expect_script_err "script name as a prefix of another word" "scripts/check" '## Gate\n\nscripts/checker --base abc\n' 'scripts/checker --base abc'
 expect_script_err "different script" "scripts/check" '## Gate\n\nscripts/other\n' 'scripts/other'
 # an operator hidden in an assignment value is rejected, so it cannot split the command
