@@ -238,5 +238,8 @@ expect_problems "Outcome other fails" "$T/outcome-other.md" \
 printf '# Plan: #1 test\nBase: %s\nOutcome: \n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-blank.md"
 expect_problems "blank Outcome fails" "$T/outcome-blank.md" \
   'bad Outcome:  (line 3): write Outcome: pr or Outcome: measurement'
+printf '# Plan: #1 test\nBase: %s\nOutcome:\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-bare.md"
+expect_problems "bare Outcome fails" "$T/outcome-bare.md" \
+  'bad Outcome:  (line 3): write Outcome: pr or Outcome: measurement'
 
 echo "plan-check: all cases passed"

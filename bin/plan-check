@@ -158,12 +158,12 @@ done <<<"$TASKS"
 # The Outcome line names the ticket's end state: pr (the default when the line
 # is absent) or measurement. Any other value is a problem on its own line.
 # An empty declaration is rejected: only an absent line defaults to pr.
-if grep -q '^Outcome:[[:space:]]' "$plan"; then
+if grep -Eq '^Outcome:($|[[:space:]])' "$plan"; then
   outcome="$(plan_outcome "$plan")"
   case "$outcome" in
     pr|measurement) ;;
     *)
-      outcome_line="$(awk '/^Outcome:[[:space:]]/ { print NR; exit }' "$plan")"
+      outcome_line="$(awk '/^Outcome:($|[[:space:]])/ { print NR; exit }' "$plan")"
       problem "bad Outcome: $outcome (line $outcome_line): write Outcome: pr or Outcome: measurement" ;;
   esac
 fi
