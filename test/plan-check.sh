@@ -205,6 +205,19 @@ case "$out" in *"(reads)"*) ;; *) fail "outside Files names (reads): got [$out]"
 out="$(cd "$R" && bash "$CHECK" "$clean")" || fail "default cwd exits 0"
 [ -z "$out" ] || fail "default cwd prints nothing"
 
+# 13b. without --cwd, a plan file inside a checkout uses that checkout,
+# even when run from a directory that is not a git checkout (issue #1083)
+cp "$clean" "$R/plan-in-repo.md"
+out="$(cd "$T/empty" && bash "$CHECK" "$R/plan-in-repo.md" 2>"$T/err-13b.txt")"; code=$?
+[ "$code" = 0 ] || fail "plan in a checkout without --cwd exits 0, got $code [$out]"
+[ -z "$out" ] || fail "plan in a checkout without --cwd prints nothing"
+[ ! -s "$T/err-13b.txt" ] || fail "plan in a checkout without --cwd: nothing on stderr"
+# a plan file outside any checkout still fails naming --cwd
+printf '# Plan: #1 test\nBase: %s\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/empty-plan.md"
+out="$(cd "$T/empty" && bash "$CHECK" "$T/empty-plan.md" 2>"$T/err-13c.txt")"; code=$?
+[ "$code" = 2 ] || fail "plan outside a checkout exits 2, got $code"
+grep -q -- "--cwd" "$T/err-13c.txt" || fail "plan outside a checkout names --cwd"
+
 # 14. exit 2: bad usage, unreadable plan, no Base line, bad REV, not a repo
 expect_code "no args" 2
 expect_code "-h" 2 -h
