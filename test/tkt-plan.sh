@@ -574,6 +574,8 @@ grant_usage_case 'space in --comment' --by switchyard --comment 'x y'
 grant_usage_case 'tab in --comment' --by switchyard --comment $'x\ty'
 grant_usage_case 'empty --owner-approved' --by switchyard --comment 1234 --owner-approved ''
 grant_usage_case 'missing --owner-approved value' --by switchyard --comment 1234 --owner-approved
+grant_usage_case 'empty --ruling' --by switchyard --comment 1234 --ruling ''
+grant_usage_case 'missing --ruling value' --by switchyard --comment 1234 --ruling
 grant_usage_case 'unknown flag' --by switchyard --comment 1234 --other
 grant_usage_case 'stray argument' --by switchyard --comment 1234 extra
 
@@ -597,8 +599,8 @@ bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-second-used seed used"
 run_plan grant-round --by switchyard --comment 5678
 [ "$RC" -eq 2 ] || fail "second used grant exits 2 (rc=$RC)"
 grep -q 'old-grant:99' "$CDIR/stderr.txt" || fail "used grant refusal names the existing grant"
-grep -q 'needs the owner' "$CDIR/stderr.txt" || fail "used grant refusal requires the owner"
-grep -q -- '--owner-approved' "$CDIR/stderr.txt" || fail "used grant refusal names --owner-approved"
+grep -q -- '--ruling' "$CDIR/stderr.txt" || fail "used grant refusal names --ruling"
+grep -qi 'owner' "$CDIR/stderr.txt" && fail "used grant refusal has no owner wording: $(cat "$CDIR/stderr.txt")"
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "old-grant" ] || fail "used grant refusal keeps the first author"
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "99" ] || fail "used grant refusal keeps the first comment"
 [ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "used grant refusal keeps used state"
@@ -615,20 +617,76 @@ run_plan grant-round --by 'switchyard:bot' --comment 'abc:def' --owner-approved 
 expect_verdict "TKT tkt-plan SET grant=switchyard:bot:abc:def log=*" "owner-approved grant"
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard:bot" ] || fail "owner-approved grant records the author"
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "abc:def" ] || fail "owner-approved grant records the comment"
-[ "$(bash "$TKT_STATE" "$S" get granted_owner)" = "own:1" ] || fail "owner-approved grant records the approval"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "owner-approved grant writes no granted_owner"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "owner-approved grant starts unused"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=switchyard:bot.*comment=abc:def.*ruling=own:1' || fail "owner-approved grant records round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'via=owner-approved' || fail "owner-approved grant records the owner-approved flag"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "owner-approved consume the grant"
 run_plan grant-round --by later --comment later
-[ "$RC" -eq 2 ] || fail "third grant without approval exits 2"
+[ "$RC" -eq 2 ] || fail "third grant without a ruling exits 2"
 grep -q 'switchyard:bot' "$CDIR/stderr.txt" || fail "third grant refusal names the latest author"
 grep -q 'abc:def' "$CDIR/stderr.txt" || fail "third grant refusal names the latest comment"
-[ "$(bash "$TKT_STATE" "$S" get granted_owner)" = "own:1" ] || fail "third grant refusal keeps owner approval"
+grep -q -- '--ruling' "$CDIR/stderr.txt" || fail "third grant refusal names --ruling"
+grep -qi 'owner' "$CDIR/stderr.txt" && fail "third grant refusal has no owner wording: $(cat "$CDIR/stderr.txt")"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "third grant refusal writes no granted_owner"
 
 setup_case grant-first-owner-approved
 rebase_plan
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-first-owner-approved seed confirm"
 run_plan grant-round --by switchyard --comment first --owner-approved 'own:2'
 [ "$RC" -eq 0 ] || fail "first owner-approved grant exits 0 (rc=$RC)"
-[ "$(bash "$TKT_STATE" "$S" get granted_owner)" = "own:2" ] || fail "first grant records owner approval"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "first grant writes no granted_owner"
+bash "$TKT_STATE" "$S" list grant | grep -q 'via=owner-approved.*ruling=own:2' || fail "first grant records the owner-approved flag"
+
+# --- a second and a third grant with --ruling each re-arm the pending grant ---
+setup_case grant-ruling-repeat
+rebase_plan
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "grant-ruling-repeat verify 1 exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "grant-ruling-repeat verify 2 exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "grant-ruling-repeat initial confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+run_plan grant-round --by fly --comment c1
+[ "$RC" -eq 0 ] || fail "grant-ruling-repeat first grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | grep -c .)" = "1" ] || fail "grant-ruling-repeat first grant leaves one record"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=fly.*comment=c1' || fail "grant-ruling-repeat first record carries round, grantor and comment"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "grant-ruling-repeat first granted confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+run_plan grant-round --by fly --comment c2 --ruling r2
+[ "$RC" -eq 0 ] || fail "grant-ruling-repeat second grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan SET grant=fly:c2 log=*" "grant-ruling-repeat second grant"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "grant-ruling-repeat second grant re-arms the pending grant"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "grant-ruling-repeat second grant writes no granted_owner"
+[ "$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | grep -c .)" = "2" ] || fail "grant-ruling-repeat second grant leaves two records"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=4 by=fly.*comment=c2.*ruling=r2' || fail "grant-ruling-repeat second record carries round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'via=ruling' || fail "grant-ruling-repeat second record names the ruling flag"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "grant-ruling-repeat second granted confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+run_plan grant-round --by fly --comment c3 --ruling r3
+[ "$RC" -eq 0 ] || fail "grant-ruling-repeat third grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "grant-ruling-repeat third grant re-arms the pending grant"
+[ "$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | grep -c .)" = "3" ] || fail "grant-ruling-repeat three grants leave three records"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=5 by=fly.*comment=c3.*ruling=r3' || fail "grant-ruling-repeat third record carries round, grantor and comment"
+rounds="$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | sed -n 's/^round=\([0-9]*\).*/\1/p')"
+[ "$rounds" = "$(printf '3\n4\n5')" ] || fail "grant-ruling-repeat records three distinct, increasing round numbers: [$rounds]"
+
+# --- --owner-approved on a second grant works and records the same way ---
+setup_case grant-owner-alias
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-owner-alias seed confirm"
+bash "$TKT_STATE" "$S" set granted_by fly || fail "grant-owner-alias seed grant author"
+bash "$TKT_STATE" "$S" set granted_comment c1 || fail "grant-owner-alias seed grant comment"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-owner-alias seed used"
+run_plan grant-round --by fly --comment c2 --owner-approved o2
+[ "$RC" -eq 0 ] || fail "grant-owner-alias exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan SET grant=fly:c2 log=*" "grant-owner-alias"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "grant-owner-alias re-arms the pending grant"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "grant-owner-alias writes no granted_owner"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=fly.*comment=c2.*ruling=o2' || fail "grant-owner-alias record carries round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'via=owner-approved' || fail "grant-owner-alias record names the owner-approved flag"
 
 setup_case grant-before-confirm
 rebase_plan
@@ -910,7 +968,8 @@ run_plan set
 [ "$RC" -eq 2 ] || fail "set without a file exits 2"
 OUT="$(bash "$TKT" 2>"$T/err-u.txt")"; [ "$?" = "2" ] || fail "no args exits 2"
 grep -q "usage" "$T/err-u.txt" || fail "no args prints usage"
-grep -q 'tkt-plan <state> grant-round --by <who> --comment <id> \[--owner-approved <id>\]' "$T/err-u.txt" || fail "usage names grant-round and owner approval"
+grep -q 'tkt-plan <state> grant-round --by <who> --comment <id> \[--ruling <id>\]' "$T/err-u.txt" || fail "usage names grant-round and --ruling"
+grep -q -- '--owner-approved.*alias.*--ruling' "$T/err-u.txt" || fail "usage names --owner-approved as a --ruling alias"
 
 # --- a held lock exits 2 naming the pid, and runs nothing ---
 setup_case locked
