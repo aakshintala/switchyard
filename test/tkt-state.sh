@@ -125,6 +125,25 @@ bash "$TKT" "$HS" set head "${FULL%?}z" 2>/dev/null && fail "set head with non-h
 bash "$TKT" "$HS" add head abc1234 2>/dev/null && fail "add head with a short SHA exits non-zero"
 [ "$?" = "2" ] || fail "add head with a short SHA exits 2"
 
+# every other commit-valued key rejects a non-SHA on both write paths, while
+# an empty reset still succeeds where callers clear the key
+for basekey in plan_verdict_base verified_base review_head; do
+  BKS="$T/base-$basekey.state"
+  bash "$TKT" "$BKS" set "$basekey" abc1234 2>"$T/err-short-$basekey.txt" && fail "set $basekey with a short SHA exits non-zero"
+  [ "$?" = "2" ] || fail "set $basekey with a short SHA exits 2"
+  grep -q "$basekey" "$T/err-short-$basekey.txt" || fail "a short $basekey names the key"
+  [ ! -e "$BKS" ] || fail "a rejected short $basekey writes nothing"
+  bash "$TKT" "$BKS" add "$basekey" garbage 2>/dev/null && fail "add $basekey with garbage exits non-zero"
+  [ "$?" = "2" ] || fail "add $basekey with garbage exits 2"
+  [ ! -e "$BKS" ] || fail "a rejected $basekey add writes nothing"
+  bash "$TKT" "$BKS" set "$basekey" "$FULL" || fail "set $basekey with a full SHA exits 0"
+  [ "$(bash "$TKT" "$BKS" get "$basekey")" = "$FULL" ] || fail "get returns the stored full $basekey"
+done
+# callers clear these keys by writing empty, so an empty write still resets them
+for basekey in plan_verdict_base verified_base; do
+  bash "$TKT" "$T/base-$basekey.state" set "$basekey" "" || fail "set $basekey to empty exits 0"
+done
+
 # journal appends a timestamped line to the sibling .journal file
 S3="$T/j.state"
 bash "$TKT" "$S3" journal "hello world" || fail "journal exits 0"
