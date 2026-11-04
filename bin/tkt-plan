@@ -196,7 +196,11 @@ runjob() {
     fi
   }
   [ -s "$rep" ] || { echo "tkt-plan: tkt-job wrote no report: $rep" >&2; exit 3; }
-  report_passed "$rep" && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES n=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
+  # `report_lines`, not `n`: this is `wc -l` of the report, and a lane that
+  # reads it as a finding count is misled. fiber #3696's confirm report held two
+  # findings separated by blank lines plus a STATUS line, so `n=4` sent its lane
+  # hunting for four. The findings themselves are in the file `out=` names.
+  report_passed "$rep" && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES report_lines=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
 }
 
 # task_pathspec KIND VALUE: expand_token's callback for task records. Resolve
@@ -243,7 +247,10 @@ do_verify() {
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
-  [ "$prc" -ne 1 ] || emit "PLAN-CHECK n=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"
+  # Also lines, not problems: `grep -c .` is plan-check's non-empty output
+  # lines. Named like LINES above so the two verdicts mean the same kind of
+  # thing; the digest that follows is what to read.
+  [ "$prc" -ne 1 ] || emit "PLAN-CHECK output_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"
   round="$(ronum)"
   # The drift exemption is derived from recorded state, not a caller flag: a
   # verify is exempt only when a previous round recorded a base and main
