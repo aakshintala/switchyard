@@ -86,6 +86,21 @@ check "$(pr_json 'Thing' $'Resolves #12\n\nDocs mention `Closes #13` in passing'
 grep -q '#13' <<<"$out" && fail "code-span Closes #13 is not flagged: [$out]"
 grep -q 'all 1 closing reference' <<<"$out" || fail "bare Resolves #12 still counts: [$out]"
 
+# a code span may cross line endings within a paragraph: no closure here.
+check "$(pr_json 'Thing' $'Part 2 says `later\nCloses #4078` and the issue stays open.')"
+[ "$rc" = "0" ] || fail "multiline code-span Closes exits 0 (got $rc: $out)"
+grep -q '#4078' <<<"$out" && fail "multiline code-span Closes #4078 is not flagged: [$out]"
+
+# a backtick fence opener whose info string holds backticks is inline code, not a fence.
+check "$(pr_json 'Thing' $'```example```\n\nFixes #13')"
+[ "$rc" = "1" ] || fail "Fixes #13 after inline triple-backtick span exits 1 (got $rc: $out)"
+grep -q '#13.*body' <<<"$out" || fail "Fixes #13 after inline span flagged in body: [$out]"
+
+# an unmatched backtick cannot swallow a real closure past a blank line.
+check "$(pr_json 'Thing' $'a stray ` tick\n\nFixes #14 here')"
+[ "$rc" = "1" ] || fail "Fixes #14 after unmatched backtick exits 1 (got $rc: $out)"
+grep -q '#14.*body' <<<"$out" || fail "Fixes #14 after unmatched backtick flagged in body: [$out]"
+
 # an unfenced stray keyword in prose is still reported.
 check "$(pr_json 'Thing' $'Resolves #12\nThis Fixes #13 too')"
 [ "$rc" = "1" ] || fail "unfenced Fixes #13 exits 1 (got $rc)"

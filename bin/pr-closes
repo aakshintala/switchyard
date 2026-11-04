@@ -49,6 +49,7 @@ SCAN='
           end
       end;
     go(.; ([match("`+"; "g")] | map({off: .offset, len: .length})); 0; 0; "");
+  def flush: if length == 0 then [] else join("\n") | strip_inline | split("\n") end;
   def strip_code:
     (split("\n")
      | (reduce .[] as $line ({in: false, fence: "", len: 0, out: []};
@@ -61,8 +62,10 @@ SCAN='
                  {in: .in, fence: .fence, len: .len, out: (.out + [""])}
                end)
           else
-            (($line | capture("^ {0,3}(?<f>`{3,}|~{3,})")) // null) as $m
+            (($line | capture("^ {0,3}(?<f>`{3,}|~{3,})(?<rest>.*)$")) // null) as $m
             | if $m == null then
+                {in: false, fence: "", len: 0, out: (.out + [$line])}
+              elif ($m.f | startswith("`")) and ($m.rest | contains("`")) then
                 {in: false, fence: "", len: 0, out: (.out + [$line])}
               else
                 {in: true, fence: ($m.f[0:1]), len: ($m.f | length),
@@ -70,7 +73,14 @@ SCAN='
               end
           end
         ) | .out))
-    | map(strip_inline) | join("\n");
+    | (reduce .[] as $line ({out: [], cur: []};
+         if ($line | test("^[ \t]*$")) then
+           {out: (.out + (.cur | flush) + [$line]), cur: []}
+         else
+           {out: .out, cur: (.cur + [$line])}
+         end)
+       | .out + (.cur | flush))
+    | join("\n");
   if type != "object" or (.title | type) != "string" or (.body | type) != "string"
      or (.commits | type) != "array"
      or any(.commits[]; type != "object" or ([.oid, .messageHeadline, .messageBody]
