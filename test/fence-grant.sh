@@ -498,6 +498,13 @@ assert_stderr '' 'range outside paths stderr'
 assert_no_grant 'range outside paths'
 
 reset_case
+run_fg 77 --paths docs/tui.md:310-372 --dry
+assert_rc 2 'paths with line range'
+assert_out '' 'paths with line range stdout'
+assert_stderr 'ERROR a line range belongs in --ranges, not --paths: docs/tui.md:310-372' 'paths with line range stderr'
+assert_no_probes 'paths with line range'
+assert_no_grant 'paths with line range'
+reset_case
 run_fg 77 --paths docs/tui.md --ranges docs/tui.md:one-3
 assert_usage 'non-numeric range'
 reset_case
