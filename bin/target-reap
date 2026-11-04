@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+# Report (or --apply: remove) exact target/ directories in merged, clean,
+# idle worktrees beneath the supplied roots. Never remove worktrees/branches.
+import argparse
+import json
+import os
+import shutil
+import subprocess
+
+
+def run(args, cwd=None):
+    # Git context inherited from a caller must not redirect worktree checks.
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    return subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, env=env)
+
+
+def slot_names(worktree):
+    directory = os.environ.get('CARGO_SLOT_DIR') or os.path.expanduser(
+        '~/.cache/agents/cargo-slots')
+    if not os.path.exists(directory):
+        return False
+    for entry in os.scandir(directory):
+        if not (entry.name.startswith('slot-') and entry.name.endswith('.lock')):
+            continue
+        with open(entry.path) as label:
+            text = label.read()
+        if worktree in text:
+            return True
+        fields = text.split()
+        if not fields:
+            continue
+        if not fields[0].isdigit():
+            return True
+        pid = int(fields[0])
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except (PermissionError, OverflowError):
+            return True
+        # cargo-slot labels normally contain only PID and argv, not cwd.
+        cwd = run(['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'])
+        if cwd.returncode or cwd.stderr:
+            return True
+        paths = [line[1:] for line in cwd.stdout.splitlines() if line.startswith('n')]
+        if not paths:
+            return True
+        if any(os.path.commonpath([worktree, os.path.realpath(path)]) == worktree
+               for path in paths):
+            return True
+    return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--apply', action='store_true')
+    parser.add_argument('roots', nargs='+')
+    args = parser.parse_args()
+    roots = [os.path.realpath(root) for root in args.roots]
+    for root in roots:
+        if not os.path.isdir(root):
+            parser.error('not a directory: %s' % root)
+    worktrees = set()
+    for root in roots:
+        for directory, dirs, files in os.walk(root):
+            if '.git' not in dirs and '.git' not in files:
+                continue
+            dirs[:] = []
+            listed = run(['git', 'worktree', 'list', '--porcelain', '-z'], directory)
+            if listed.returncode:
+                continue
+            for field in listed.stdout.split('\0'):
+                if field.startswith('worktree '):
+                    path = os.path.realpath(field[len('worktree '):])
+                    if any(os.path.commonpath([root, path]) == root for root in roots):
+                        worktrees.add(path)
+    total = 0
+    for worktree in sorted(worktrees):
+        target = os.path.join(worktree, 'target')
+        if not os.path.isdir(target) or os.path.islink(target):
+            continue
+        branch = run(['git', 'symbolic-ref', '--short', 'HEAD'], worktree)
+        if branch.returncode:
+            continue
+        default = run(['git', 'symbolic-ref', 'refs/remotes/origin/HEAD'], worktree)
+        merged = default.returncode == 0 and run(
+            ['git', 'merge-base', '--is-ancestor', 'HEAD', default.stdout.strip()],
+            worktree).returncode == 0
+        if not merged:
+            prs = run(['gh', 'pr', 'list', '--head', branch.stdout.strip(),
+                       '--state', 'all', '--json', 'state,headRefOid'], worktree)
+            head = run(['git', 'rev-parse', 'HEAD'], worktree)
+            if prs.returncode or head.returncode:
+                continue
+            if not any(pr.get('state') in ('CLOSED', 'MERGED') and
+                       pr.get('headRefOid') == head.stdout.strip()
+                       for pr in json.loads(prs.stdout)):
+                continue
+        clean = run(['git', 'status', '--porcelain'], worktree)
+        if clean.returncode or clean.stdout:
+            continue
+        idle = run(['lsof', '+D', worktree])
+        if idle.returncode != 1 or idle.stdout or idle.stderr:
+            continue
+        if slot_names(worktree):
+            continue
+        # du reports allocated KiB on both macOS and Linux.
+        size = run(['du', '-sk', target])
+        if size.returncode:
+            continue
+        size = int(size.stdout.split()[0]) * 1024
+        if args.apply:
+            shutil.rmtree(target)
+        total += size
+        print('%s: %d bytes %s' % (worktree, size,
+              'freed' if args.apply else 'reclaimable'))
+    print('total: %d bytes %s' % (total, 'freed' if args.apply else 'reclaimable'))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError) as err:
+        raise SystemExit('target-reap: %s' % err)
