@@ -106,8 +106,10 @@ if ! mkdir "$phasedir" 2>/dev/null; then
   exit 2
 fi
 printf '%s\n' "$$" >"$phasedir/pid"
+cargo_slot_dir=""
 release_phase() {
   rm -rf "$phasedir"
+  [ -z "$cargo_slot_dir" ] || rm -rf "$cargo_slot_dir"
 }
 trap release_phase EXIT
 
@@ -275,6 +277,10 @@ if [ "$checks_only" -eq 0 ]; then
   if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
     env_prefix="$e "
   fi
+  # Session gates do not inherit a lane's cargo shim PATH.
+  cargo_slot_dir="$(mktemp -d "$run/$namebase-tkt-gate-cargo.XXXXXX")"
+  ln -s "$script_dir/cargo-slot" "$cargo_slot_dir/cargo"
+  env_prefix="${env_prefix}PATH=$(printf '%q' "$cargo_slot_dir"):\$PATH "
   script="$(mktemp "$run/$namebase-tkt-gate-XXXXXX")"
   mv "$script" "$script.sh"
   script="$script.sh"

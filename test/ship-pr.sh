@@ -36,6 +36,12 @@ LSOF
 chmod 755 "$T/bin/lsof"
 BASE_PATH="$T/bin:$PATH"; export PATH="$BASE_PATH"
 [ "$(command -v df)" = "$T/bin/df" ] || fail "df resolves to the suite's stub, not the host's"
+cat >"$T/bin/cargo" <<'CARGO'
+#!/usr/bin/env bash
+printf 'held=%s\n' "${CARGO_SLOT_HELD-unset}" >"$ST/cargo-held"
+printf 'threads=%s\n' "${NEXTEST_TEST_THREADS-unset}" >"$ST/cargo-threads"
+CARGO
+chmod 755 "$T/bin/cargo"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -506,6 +512,13 @@ ship; expect 4 "changed added line exits 4"
 no_merge "changed added line"
 
 # ===== exit 1: gate
+setup
+export CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/cargo-slots" CARGO_SLOT_TEST_CORES=12
+ship --gate 'cargo nextest run'; expect 0 "nextest gate takes a cargo slot"
+unset CARGO_SLOTS CARGO_SLOT_DIR CARGO_SLOT_TEST_CORES
+[ "$(cat "$ST/cargo-held")" = "held=1" ] || fail "ship-pr gate cargo did not hold a slot"
+[ "$(cat "$ST/cargo-threads")" = "threads=12" ] || fail "ship-pr gate nextest did not get the per-slot thread cap"
+
 setup
 ship --gate "$GATE_PANIC"
 expect 1 "failing gate"; untouched "failing gate"

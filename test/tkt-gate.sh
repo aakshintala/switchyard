@@ -63,6 +63,13 @@ echo "error: no tests to run"
 EOF
 chmod +x "$T/bin/gate-ok" "$T/bin/gate-bad" "$T/bin/gate-quiet" "$T/bin/gate-empty"
 
+cat >"$T/bin/cargo" <<EOF
+#!/usr/bin/env bash
+printf 'held=%s\n' "\${CARGO_SLOT_HELD-unset}" >"$T/cargo-held"
+printf 'threads=%s\n' "\${NEXTEST_TEST_THREADS-unset}" >"$T/cargo-threads"
+EOF
+chmod +x "$T/bin/cargo"
+
 # New case: a bare origin, a seed main pushed to it, and a clone worktree on
 # branch tkt-517 with a base state file. Sets CDIR, WT, S.
 setup_case() {
@@ -157,6 +164,20 @@ grep -q "tkt-gate PASS" "$CDIR/tkt.journal" || fail "PASS journals the verdict"
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "PASS writes its log file"
 grep -q "PASS head=$H" "$logpath" || fail "PASS log holds the verdict"
+
+# A tkt-gate command resolves cargo through cargo-slot and holds one slot.
+setup_case cargo-slot
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+printf 'cargo nextest run\n' >"$T/gate-cmd"
+export CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/cargo-slots" CARGO_SLOT_TEST_CORES=12
+run_gate --expect-head "$H"
+unset CARGO_SLOTS CARGO_SLOT_DIR CARGO_SLOT_TEST_CORES
+[ "$RC" -eq 0 ] || fail "cargo-slot PASS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$T/cargo-held")" = "held=1" ] || fail "tkt-gate cargo did not hold a slot"
+[ "$(cat "$T/cargo-threads")" = "threads=12" ] || fail "tkt-gate nextest did not get the per-slot thread cap"
 
 # --- PASS with no new commits: an empty diff and an empty history ---
 setup_case pass-empty

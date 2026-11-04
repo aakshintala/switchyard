@@ -3,6 +3,7 @@
 # Caps concurrent cargo build and test runs on one host. With CARGO_SLOTS=N,
 # at most N cargo invocation trees hold a slot at once. Installed as `cargo`
 # in a directory placed first on a lane's PATH; see autonomous-flywheel.
+# Test and nextest runs default to max(2, online CPUs / CARGO_SLOTS) threads.
 # With CARGO_SLOT_SHARED_CHECKOUT set to the shared checkout's path, a slot
 # subcommand run from that checkout is refused. CARGO_SLOT_WORKTREE_ROOT adds a
 # scratch-worktree hint to that refusal.
@@ -79,6 +80,18 @@ def slot_count():
     if not re.fullmatch(r"[0-9]+", value):
         fail(2, "CARGO_SLOTS must be a positive integer, got '%s'" % value)
     return int(value)
+
+
+def test_threads(n):
+    # Test-only hook keeps the per-slot thread calculation deterministic.
+    cores = os.environ.get("CARGO_SLOT_TEST_CORES")
+    if cores is not None:
+        if not re.fullmatch(r"[0-9]+", cores):
+            fail(2, "CARGO_SLOT_TEST_CORES must be a non-negative integer, got '%s'" % cores)
+        cores = int(cores)
+    else:
+        cores = os.cpu_count() or 1
+    return max(2, cores // n)
 
 
 def slot_dir():
@@ -326,18 +339,25 @@ def main():
             )
         message += ". This is a cwd check, not a permission denial."
         fail(1, message)
-    if subcommand(args) in SLOT_SUBCOMMANDS and not held():
+    if subcommand(args) in SLOT_SUBCOMMANDS:
         n = slot_count()
         if n > 0:
-            # Python opens fds close-on-exec; the shim holds this lock across cargo.
-            fd = acquire_slot(slot_dir(), n)
-            write_holder(fd, args)
-            os.environ["CARGO_SLOT_HELD"] = "1"
-            try:
-                status = run_slot_child(real, args)
-            finally:
-                os.close(fd)
-            sys.exit(status)
+            thread_var = {
+                "test": "RUST_TEST_THREADS",
+                "nextest": "NEXTEST_TEST_THREADS",
+            }.get(subcommand(args))
+            if thread_var and thread_var not in os.environ:
+                os.environ[thread_var] = str(test_threads(n))
+            if not held():
+                # Python opens fds close-on-exec; the shim holds this lock across cargo.
+                fd = acquire_slot(slot_dir(), n)
+                write_holder(fd, args)
+                os.environ["CARGO_SLOT_HELD"] = "1"
+                try:
+                    status = run_slot_child(real, args)
+                finally:
+                    os.close(fd)
+                sys.exit(status)
     exec_real(real, args)
 
 
