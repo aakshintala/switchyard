@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require each --body-has
@@ -16,9 +16,12 @@
 #        pinned to the checked head, retrying once on a base race or GraphQL error
 #        and re-entering the rebase once after the merge lost the race to
 #        origin/main in strict mode (no extra sleep, sharing the 3 retries);
-#        polling MERGED even after a failed retry; wait for MERGED; remove the worktree and the
-#        local and remote branch (the worktree and local branch stay when the
-#        caller's directory is inside it).
+#        polling MERGED even after a failed retry; wait for MERGED; by default
+#        remove the worktree and local branch by default after a merge when
+#        clean and no process has its cwd inside. Keep them when --keep-branch
+#        is set, the body says Refs #N without a closing line, the caller's cwd
+#        is inside the worktree, it is dirty, or lsof is unavailable, errors,
+#        or finds a process inside. The remote branch is still deleted.
 #        The CI wait trusts the repo's required checks: one green on the exact
 #        head counts whenever it ran, so marking ready need not start a new run,
 #        and a run that starts after the wait passed does not hold the merge. An
@@ -130,7 +133,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]" >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>]" >&2
   echo "       longest wait: 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
   exit 2
 }
@@ -297,10 +300,11 @@ run_gate() {
 ship_args=("$@")
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" no_mutants_label=""
+repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" keep_branch="" no_mutants_label=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow-commit-closes) allow_commit_closes=1; shift; continue ;;
+    --keep-branch) keep_branch="requested by --keep-branch"; shift; continue ;;
   esac
   [ $# -ge 2 ] || usage
   case "$1" in
@@ -425,6 +429,10 @@ fi
 # record separator (0x1e) and the URL.
 body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""')" \
   || die 2 "cannot read PR $pr body"
+if grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?refs[[:space:]]+#[0-9]+([[:space:]]|$)' <<<"$body_text" \
+  && ! grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+([[:alnum:]_.-]+/)?#[0-9]+([[:space:]]|$)' <<<"$body_text"; then
+  [ -n "$keep_branch" ] || keep_branch="PR body references an issue without a closing line"
+fi
 authority_bad=0
 authority_scan <<<"$body_text"
 comments_text="$(gh api --paginate "repos/$repo/issues/$pr/comments" \
@@ -856,16 +864,35 @@ done
 # Step 9: clean up from the common git dir, never from inside the worktree being removed.
 common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"
 cd "$common"
-# When the caller's shell started inside the worktree, removing it would break
-# that shell (getcwd fails), so keep the worktree and its branch and say how
-# to remove them by hand. The remote branch is still deleted.
-case "$start_dir/" in
-  "$worktree"/*)
-    say "worktree kept: your shell is inside it; remove it with: $(printf 'git -C %q worktree remove %q && git -C %q branch -D %q' "$common" "$worktree" "$common" "$branch")" ;;
-  *)
-    git --git-dir="$common" worktree remove "$worktree" >&2 || say "cleanup: worktree remove failed for $worktree"
-    git --git-dir="$common" branch -D "$branch" >&2 || say "cleanup: branch -D $branch failed" ;;
-esac
+if [ -n "$keep_branch" ]; then
+  say "worktree kept: $keep_branch"
+else
+  case "$start_dir/" in
+    "$worktree"/*)
+      say "worktree kept: your shell is inside it; remove it with: $(printf 'git -C %q worktree remove %q && git -C %q branch -D %q' "$common" "$worktree" "$common" "$branch")" ;;
+    *)
+      if ! worktree_clean; then
+        say "worktree kept: it is not clean after merge"
+      elif ! command -v lsof >/dev/null 2>&1; then
+        say "worktree kept: cannot check for active processes because lsof is unavailable"
+      else
+        lsof_output=""
+        if lsof_output="$(lsof -t -a -d cwd +D "$worktree" 2>&1)"; then
+          say "worktree kept: a process has its cwd inside it"
+        elif [ -n "$lsof_output" ]; then
+          say "worktree kept: could not check for a process inside it: $lsof_output"
+        elif git --git-dir="$common" worktree remove "$worktree" >&2; then
+          if git --git-dir="$common" branch -D "$branch" >&2; then
+            say "worktree removed: $worktree; local branch deleted: $branch"
+          else
+            say "worktree removed: $worktree; local branch cleanup failed: $branch"
+          fi
+        else
+          say "worktree kept: removal failed for $worktree"
+        fi
+      fi ;;
+  esac
+fi
 # A missing remote ref counts as done, whatever the push error says: GitHub's
 # auto-delete on merge makes the push fail with "cannot lock ref".
 if ! del_out="$(git --git-dir="$common" push origin --delete "$branch" 2>&1)"; then

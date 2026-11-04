@@ -28,6 +28,12 @@ fake_df() {
 }
 export HOME="$T/home"; mkdir -p "$HOME"
 fake_df "$T/bin" 104857600 /fake-ample
+cat >"$T/bin/lsof" <<'LSOF'
+#!/bin/sh
+[ ! -e "$ST/worktree-busy" ] || { echo 12345; exit 0; }
+exit 1
+LSOF
+chmod 755 "$T/bin/lsof"
 BASE_PATH="$T/bin:$PATH"; export PATH="$BASE_PATH"
 [ "$(command -v df)" = "$T/bin/df" ] || fail "df resolves to the suite's stub, not the host's"
 
@@ -950,6 +956,46 @@ expect 0 "inside happy path"
 git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "inside: local branch kept"
 origin_head >/dev/null && fail "inside: origin branch deleted"
 grep -q 'worktree kept' <<<"$ERR" || fail "inside: worktree kept message: [$ERR]"
+
+# ===== diagnostic PRs keep the local worktree and branch even when ship-pr
+# ===== runs outside them
+setup; printf 'Diagnostic PR: the ticket stays open\nRefs #97\n' >"$ST/body"
+cd "$T" || fail "cd out for diagnostic ship"
+ship; expect 0 "diagnostic PR happy path"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "diagnostic PR merged line: [$OUT]"
+[ -d "$WT" ] || fail "diagnostic PR worktree kept outside"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "diagnostic PR local branch kept outside"
+origin_head >/dev/null && fail "diagnostic PR remote branch is still deleted"
+grep -q 'worktree kept' <<<"$ERR" || fail "diagnostic PR keep message: [$ERR]"
+
+setup; printf 'Refs #97\nResolves #97\n' >"$ST/body"
+ship; expect 0 "a closing line prevents diagnostic keep inference"
+[ ! -e "$WT" ] || fail "a closing line permits default worktree removal"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "a closing line permits default local branch deletion"
+
+setup; printf 'Resolves #97\n' >"$ST/body"
+ship --keep-branch; expect 0 "explicit --keep-branch"
+[ -d "$WT" ] || fail "explicit --keep-branch keeps worktree"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "explicit --keep-branch keeps local branch"
+grep -q 'worktree kept' <<<"$ERR" || fail "explicit --keep-branch log: [$ERR]"
+
+setup; printf 'Resolves #97\n' >"$ST/body"; cd "$T" || fail "cd out for default cleanup"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT"; expect 0 "outside clean Resolves ship removes worktree by default"
+[ ! -e "$WT" ] || fail "outside clean Resolves ship removes worktree by default"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "outside clean Resolves ship deletes local branch by default"
+grep -Fq 'worktree removed: ' <<<"$ERR" && grep -Fq '; local branch deleted: feature' <<<"$ERR" || fail "outside default cleanup log: [$ERR]"
+
+setup; touch "$ST/worktree-busy"; cd "$T" || fail "cd out for busy cleanup"
+ship; expect 0 "active worktree is kept"
+[ -d "$WT" ] || fail "active worktree remains"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "active worktree branch remains"
+grep -q 'worktree kept: a process has its cwd inside it' <<<"$ERR" || fail "active worktree keep log: [$ERR]"
+
+setup; printf 'echo late > %q\n' "$WT/late.txt" >"$ST/merge-each"; cd "$T" || fail "cd out for dirty cleanup"
+ship; expect 0 "dirty worktree is kept"
+[ -d "$WT" ] || fail "dirty worktree remains"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "dirty worktree branch remains"
+grep -q 'worktree kept: it is not clean after merge' <<<"$ERR" || fail "dirty worktree keep log: [$ERR]"
 
 setup; ship; expect 0 "non-draft happy path"
 ! grep -q '^gh pr ready' "$ST/gh.log" || fail "non-draft never marked ready"
