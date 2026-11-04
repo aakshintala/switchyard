@@ -62,6 +62,7 @@ Done when, after each update, the file alone would let a fresh session continue.
 ### 5. Close the round
 
 1. Run `retro` on the round.
-2. Write the round report: merged / open / parked, items needing the owner with exact actions, and leftover threads with issue links. Short.
+2. If pages in the wiki at `~/work/wiki` were added or changed this round, run its lint pass: `delegate run --model muse/muse-spark-1.3-contributor --cwd ~/work/wiki --prompt-file ~/work/wiki/lint-brief.md`.
+3. Write the round report: merged / open / parked, items needing the owner with exact actions, leftover threads with issue links, and the lint pass's merges and supersessions. Short.
 
-Done when the report lists every ticket's or PR's end state and every owner action.
+Done when the report lists every ticket's or PR's end state and every owner action, and any lint pass the round needed has run.
