@@ -306,7 +306,7 @@ do_confirm() {
   [ -n "$edits" ] || usage; [ -r "$edits" ] || { echo "tkt-plan: cannot read edits file: $edits" >&2; exit 2; }
   load_plan
   latest_edits=""
-  for candidate in "$run"/*-confirm-edits*.md; do
+  for candidate in "$run/$namebase"-confirm-edits*.md; do
     [ -f "$candidate" ] || continue
     if [ -z "$latest_edits" ] || [ "$candidate" -nt "$latest_edits" ]; then latest_edits="$candidate"; fi
   done

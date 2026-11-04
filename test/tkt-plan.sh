@@ -414,6 +414,10 @@ grep -Fq "then rerun: tkt-plan $S confirm --edits $edits" <<<"$OUT" || fail "sta
 [ -z "$(state_get confirmed_for)" ] || fail "stale confirm edits leaves the confirm round open"
 printf '\n<!-- applied -->\n' >>"$CDIR/plan.md"
 touch -t 202001010003 "$CDIR/plan.md"
+# Another ticket's newer edits file in the shared run dir does not block this one.
+other="$CDIR/run/switchyard-5180-confirm-edits-p2.md"
+printf 'other ticket\n' >"$other"
+touch -t 202001010004 "$other"
 run_plan confirm --edits "$edits"
 [ "$RC" -eq 0 ] || fail "confirm after applying edits exits 0 (rc=$RC)"
 expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm after applying edits"
