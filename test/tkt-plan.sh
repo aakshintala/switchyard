@@ -619,7 +619,7 @@ expect_verdict "TKT tkt-plan SET grant=switchyard:bot:abc:def log=*" "owner-appr
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "abc:def" ] || fail "owner-approved grant records the comment"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "owner-approved grant writes no granted_owner"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "owner-approved grant starts unused"
-bash "$TKT_STATE" "$S" list grant | grep -q 'round=2 by=switchyard:bot.*comment=abc:def.*ruling=own:1' || fail "owner-approved grant records round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=switchyard:bot.*comment=abc:def.*ruling=own:1' || fail "owner-approved grant records round, grantor and comment"
 bash "$TKT_STATE" "$S" list grant | grep -q 'via=owner-approved' || fail "owner-approved grant records the owner-approved flag"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "owner-approved consume the grant"
 run_plan grant-round --by later --comment later
@@ -652,7 +652,7 @@ run_plan confirm --edits "$CDIR/edits.md"
 run_plan grant-round --by fly --comment c1
 [ "$RC" -eq 0 ] || fail "grant-ruling-repeat first grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 [ "$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | grep -c .)" = "1" ] || fail "grant-ruling-repeat first grant leaves one record"
-bash "$TKT_STATE" "$S" list grant | grep -q 'round=2 by=fly.*comment=c1' || fail "grant-ruling-repeat first record carries round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=fly.*comment=c1' || fail "grant-ruling-repeat first record carries round, grantor and comment"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "grant-ruling-repeat first granted confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 run_plan grant-round --by fly --comment c2 --ruling r2
@@ -661,7 +661,7 @@ expect_verdict "TKT tkt-plan SET grant=fly:c2 log=*" "grant-ruling-repeat second
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "grant-ruling-repeat second grant re-arms the pending grant"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "grant-ruling-repeat second grant writes no granted_owner"
 [ "$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | grep -c .)" = "2" ] || fail "grant-ruling-repeat second grant leaves two records"
-bash "$TKT_STATE" "$S" list grant | grep -q 'round=2 by=fly.*comment=c2.*ruling=r2' || fail "grant-ruling-repeat second record carries round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=4 by=fly.*comment=c2.*ruling=r2' || fail "grant-ruling-repeat second record carries round, grantor and comment"
 bash "$TKT_STATE" "$S" list grant | grep -q 'via=ruling' || fail "grant-ruling-repeat second record names the ruling flag"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "grant-ruling-repeat second granted confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -669,6 +669,9 @@ run_plan grant-round --by fly --comment c3 --ruling r3
 [ "$RC" -eq 0 ] || fail "grant-ruling-repeat third grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "grant-ruling-repeat third grant re-arms the pending grant"
 [ "$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | grep -c .)" = "3" ] || fail "grant-ruling-repeat three grants leave three records"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=5 by=fly.*comment=c3.*ruling=r3' || fail "grant-ruling-repeat third record carries round, grantor and comment"
+rounds="$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | sed -n 's/^round=\([0-9]*\).*/\1/p')"
+[ "$rounds" = "$(printf '3\n4\n5')" ] || fail "grant-ruling-repeat records three distinct, increasing round numbers: [$rounds]"
 
 # --- --owner-approved on a second grant works and records the same way ---
 setup_case grant-owner-alias
@@ -682,7 +685,7 @@ run_plan grant-round --by fly --comment c2 --owner-approved o2
 expect_verdict "TKT tkt-plan SET grant=fly:c2 log=*" "grant-owner-alias"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "grant-owner-alias re-arms the pending grant"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "grant-owner-alias writes no granted_owner"
-bash "$TKT_STATE" "$S" list grant | grep -q 'round=2 by=fly.*comment=c2.*ruling=o2' || fail "grant-owner-alias record carries round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=fly.*comment=c2.*ruling=o2' || fail "grant-owner-alias record carries round, grantor and comment"
 bash "$TKT_STATE" "$S" list grant | grep -q 'via=owner-approved' || fail "grant-owner-alias record names the owner-approved flag"
 
 setup_case grant-before-confirm

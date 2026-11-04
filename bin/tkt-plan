@@ -356,10 +356,14 @@ do_grant() {
     echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a later grant needs a ruling: use --ruling <comment id>" >&2
     exit 2
   fi
+  grant_count="$(t list grant 2>/dev/null | grep -c . || true)"
+  case "$grant_count" in ''|*[!0-9]*) grant_count=0;; esac
+  case "$confirmed_for" in ''|*[!0-9]*) confirmed_for=0;; esac
+  grant_round=$((confirmed_for + grant_count + 1))
   t set granted_by "$who"
   t set granted_comment "$comment"
   t set granted_used ""
-  t add grant "round=$confirmed_for by=$who via=$via comment=$comment ruling=$ruling"
+  t add grant "round=$grant_round by=$who via=$via comment=$comment ruling=$ruling"
   emit "SET grant=$who:$comment" 0
 }
 
