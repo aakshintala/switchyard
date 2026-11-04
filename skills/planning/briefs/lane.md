@@ -6,6 +6,10 @@ The project's workflow doc is __WORKFLOW_DOC__; it wins where it speaks.
 
 Read the plan at `__PLAN__` before anything else, and reread it after any compaction. If it can't be read, stop with `STATUS: NEEDS_CONTEXT`; work only from the file, never from memory of it.
 
+## Before the first edit
+
+1. Before editing any file, run `file-claim claim --lane <id> --grant <paths>` with this lane's identifier and fenced paths.
+
 ## Rules
 
 - The plan's Files section is your fence. The fence covers writes; reading any file needs no ask. When you need to rewrite code in a file outside it, stop and report, listing only the paths you will write; name a file you only read under a separate `Reads:` heading, since a read listed as a write holds that file against other lanes. An additive edit to an existing file outside it (a new enum variant, match arm, struct field, `mod` line, slash-table entry, test function or docs section) is allowed: add lines only, delete none, and list each such file in your report; the second PR to merge takes main and resolves. Before pushing, check the branch's whole diff against it: `git diff --name-only --no-renames origin/main...HEAD`, which lists a renamed file under its old path as well. A file outside Files must already exist on main and show zero deleted lines in `git diff --numstat origin/main...HEAD -- <path>`.

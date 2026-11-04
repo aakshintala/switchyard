@@ -550,6 +550,29 @@ FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane W --grant --repo test/repo w.txt 
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane W --repo test/repo 2>/dev/null)" || fail "default worktree list exits 0"
 printf '%s' "$out" | grep -Eq "^w.txt	W	grant	[0-9]+	$(hostname -s):$(pwd)	$" || fail "default worktree: $out"
 
+# --- ranged grants stay narrow in the claims ledger -------------------------------
+R="$(fresh)"
+printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs-range.json"
+export GH_PRS_JSON="$T/prs-range.json"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane RANGE_A --grant --ranges a.txt:1-5 --self-pr 42 --worktree t:range --repo test/repo a.txt 2>"$T/e-range")" || fail "ranged claim exits 0: $(cat "$T/e-range")"
+[ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "ranged claim output: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>/dev/null)" || fail "ranged claim lists"
+printf '%s' "$out" | grep -Eq '^a.txt\tRANGE_A\tgrant\t[0-9]+\tt:range\t42\t1-5$' || fail "list keeps ranged grant: $out"
+printf '[]' >"$T/prs-empty.json"
+export GH_PRS_JSON="$T/prs-empty.json"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane RANGE_B --grant --ranges a.txt:5-8 --worktree t:range-b --repo test/repo a.txt >"$T/range-overlap" 2>/dev/null && fail "overlapping ranged claim exits non-zero"
+[ "$?" = "1" ] || fail "overlapping ranged claim exits 1"
+grep -q '^REFUSE a.txt lane:RANGE_A$' "$T/range-overlap" || fail "overlapping range names its holder: $(cat "$T/range-overlap")"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane RANGE_C --grant --ranges a.txt:6-8 --worktree t:range-c --repo test/repo a.txt 2>"$T/e-range-disjoint")" || fail "disjoint ranged claim exits 0: $(cat "$T/e-range-disjoint")"
+[ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "disjoint ranged claim output: $out"
+
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane RANGE_HOLDER --grant --ranges a.txt:1-5 --worktree t:holder --repo test/repo a.txt >/dev/null 2>&1 || fail "range cap holder setup"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane RANGE_CAP --grant --worktree t:cap --repo test/repo sub/b.txt >/dev/null 2>&1 || fail "range cap lane setup"
+FILE_CLAIM_REMOTE="$R" FILE_CLAIM_MAX_GRANT=1 bash "$FC" claim --lane RANGE_CAP --grant --ranges a.txt:6-8 --worktree t:cap --repo test/repo a.txt >"$T/range-cap" 2>/dev/null && fail "disjoint range counts toward grant cap"
+[ "$?" = "1" ] || fail "range cap refusal exits 1"
+grep -q '^REFUSE a.txt cap$' "$T/range-cap" || fail "range cap refusal: $(cat "$T/range-cap")"
+
 # --- forced non-fast-forward retries and succeeds -----------------------------------------
 R="$(fresh)"
 : >"$T/push.log"
