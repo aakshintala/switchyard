@@ -15,12 +15,13 @@ trap 'rm -rf "$T"' EXIT
 
 # Fixture repo: two commits. BASE1 has no src/later.rs; BASE2 (HEAD) has it.
 R="$T/repo"
-mkdir -p "$R/src" "$R/docs" "$R/crates/a" "$R/crates/b" "$R/cfg" "$T/empty"
+mkdir -p "$R/src" "$R/docs" "$R/crates/a" "$R/crates/b" "$R/cfg" "$R/xtask/tests/class_data" "$T/empty"
 printf 'pub fn make_widget() {}\npub struct WidgetThing;\n' >"$R/src/lib.rs"
 printf '# guide\n' >"$R/docs/guide.md"
 printf 'a\n' >"$R/crates/a/x.rs"
 printf 'b\n' >"$R/crates/b/x.rs"
 printf 'x = 1\n' >"$R/cfg/unique.toml"
+printf '{}\n' >"$R/xtask/tests/class_data/9v45-session-list.json"
 git -C "$R" init -q
 git -C "$R" add -A
 git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m one
@@ -76,6 +77,14 @@ expect_problems "missing path" "$(mkplan missing '## Rulings\nSee `src/nope.rs`.
 
 # 3. a path on a line with the word new is exempt; a task line needs new too
 expect_clean "new exempts a Files path and its task line" "$(mkplan newok '## Files\n- `src/brand.rs` (New file)\n\n## Tasks\n1. Write new `src/brand.rs` with `WidgetThing`.\n')"
+
+# 3b. new paths close to a base filename need confirmation; new-confirmed bypasses it
+expect_problems "new path close to a base filename" "$(mkplan nearnew '## Files\n- `xtask/tests/class_data/9v45-sessions-list.json` (new)\n')" \
+  'new path xtask/tests/class_data/9v45-sessions-list.json is close to existing xtask/tests/class_data/9v45-session-list.json: confirm new, or correct it'
+expect_clean "new-confirmed path close to a base filename" "$(mkplan nearconfirmed '## Files\n- `xtask/tests/class_data/9v45-sessions-list.json` (new-confirmed)\n')"
+expect_clean "new path without a close base filename" "$(mkplan farnew '## Files\n- `src/brand.rs` (new)\n')"
+expect_problems "new path already exists at base" "$(mkplan existingnew '## Files\n- `src/lib.rs` (new)\n')" \
+  'new path src/lib.rs already exists at base: drop the new mark'
 
 # 3a. a new task path that is not in Files is still checked by check 2
 expect_problems "new task path outside Files" "$(mkplan newout '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Create new `bin/brand-new-check`.\n')" \

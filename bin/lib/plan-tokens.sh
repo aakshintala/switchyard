@@ -68,7 +68,8 @@ plan_outcome() {
 }
 
 # plan_records PLAN: one record per backticked token outside fenced blocks and
-# outside `## Gate`: section, line number, new mark, read mark, the token.
+# outside `## Gate`: section, line number, new mark (0 none, 1 new, 2
+# new-confirmed, 3 removed), read mark, the token.
 plan_records() {
   awk '
     /^[[:space:]]*```/ { infence = !infence; next }
@@ -84,11 +85,15 @@ plan_records() {
     }
     cur == "gate" { next }
     {
-      isnew = (tolower($0) ~ /(^|[^a-z0-9_])(new|removed|remove|deleted|delete)([^a-z0-9_]|$)/)
+      lower = tolower($0)
+      if (lower ~ /(^|[^a-z0-9_])new-confirmed([^a-z0-9_]|$)/) newmark = 2
+      else if (lower ~ /(^|[^a-z0-9_])new([^a-z0-9_]|$)/) newmark = 1
+      else if (lower ~ /(^|[^a-z0-9_])(removed|remove|deleted|delete)([^a-z0-9_]|$)/) newmark = 3
+      else newmark = 0
       isread = (tolower($0) ~ /(^|[^a-z0-9_])(reads|read-only|fixture)([^a-z0-9_]|$)/)
       n = split($0, parts, "`")
       for (i = 2; i <= n; i += 2)
-        if (parts[i] != "") printf "%s\t%d\t%d\t%d\t%s\n", cur, NR, isnew, isread, parts[i]
+        if (parts[i] != "") printf "%s\t%d\t%d\t%d\t%s\n", cur, NR, newmark, isread, parts[i]
     }
   ' "$1"
 }
