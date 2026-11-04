@@ -16,6 +16,7 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-inbox.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
+T="$(cd "$T" && pwd -P)"
 
 # A bare directory is ambiguous: refuse it without creating an inbox, and
 # explain the explicit local and remote forms. ./ makes local intent clear.
@@ -31,7 +32,13 @@ for dir in 4075 inbox; do
 done
 (cd "$T" && printf 'local message' | INBOX_HOST= bash "$SEND" ./4075 lane) \
   >"$T/local.out" || fail "explicit relative inbox is accepted"
-[ "$(cat "$T/$(cat "$T/local.out")")" = 'local message' ] \
+local_path="$(cat "$T/local.out")"
+case "$local_path" in
+  /*) ;;
+  *) fail "explicit relative inbox prints an absolute path: [$local_path]" ;;
+esac
+[ -f "$local_path" ] || fail "explicit relative inbox prints an existing file"
+[ "$(cat "$local_path")" = 'local message' ] \
   || fail "explicit relative inbox receives the message"
 
 # Stub sleep first on PATH, in a PATH that holds no inotifywait, so
