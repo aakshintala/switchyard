@@ -7,6 +7,7 @@
 #   is_path: none. is_symbol: none.
 #   in_files: reads FILES (|a|b| form), GLOBS (newline list).
 #   plan_base: reads PLAN from its argument only.
+#   plan_outcome: reads PLAN from its argument only.
 #   plan_records: reads PLAN from its argument only.
 #   expand_token: reads CUR_SEC, GLOBS, portre; appends to GLOBS; calls FN in
 #     the current shell (FN must run in the caller's shell: no subshell here).
@@ -57,6 +58,13 @@ in_files() {
 # `Base: `abc`` reads as abc. Prints nothing when there is no Base line.
 plan_base() {
   awk '/^Base:[[:space:]]/ { gsub(/`/, "", $2); print $2; exit }' "$1"
+}
+
+# plan_outcome PLAN: the first token of the Outcome line with backticks
+# stripped, read the same way as plan_base. Prints nothing when there is no
+# Outcome line.
+plan_outcome() {
+  awk '/^Outcome:[[:space:]]/ { gsub(/`/, "", $2); print $2; exit }' "$1"
 }
 
 # plan_records PLAN: one record per backticked token outside fenced blocks and
