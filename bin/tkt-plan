@@ -365,6 +365,20 @@ do_post() {
     --no-verifier) no_verifier=1; shift;;
     *) usage;; esac; done
   load_plan
+  # Default the label from the state. An unlabelled post reuses this script's
+  # own unlabelled comments oldest-first and deletes each leftover, so running
+  # `post` on a part-2 state without --part overwrites part 1's posted plan in
+  # place — and deletes a comment if part 1 was longer. fiber #4078 hit exactly
+  # that: part=2 in the state, post without the flag, and comment 6605844496
+  # stopped holding the Part 1 plan. The state knows the part; use it.
+  if [ -z "$part" ]; then
+    sp="$(t get part 2>/dev/null || true)"
+    case "$sp" in
+      ''|1) ;;
+      *[!0-9]*) echo "tkt-plan: state part='$sp' is not a number; pass --part <label> explicitly" >&2; exit 2 ;;
+      *) part="P$sp"; echo "tkt-plan: --part not given; using P$sp from the state's part=$sp" >&2 ;;
+    esac
+  fi
   if ! plan_verdict_ok "$no_verifier"; then emit "POST-FAIL reason=verdict verdict=$verdict_refusal" 1 "$verdict_digest"; fi
   "$plangate" ${gate_args[@]+"${gate_args[@]}"} "$plan" >"$tmp" 2>&1 || emit "POST-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
   pargs=(); [ -z "$part" ] || pargs=(--part "$part")
