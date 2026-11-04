@@ -7,7 +7,7 @@
 #        line and run pr-closes (see below); run --gate in the worktree on that head,
 #        once, before any rebase or push; rebase onto
 #        origin/main (see below); compare the PR diff's `git patch-id --stable` with
-#        <sha>'s (with --unverified-fixes, a mismatch posts a comment and goes on, see
+#        <sha>'s, ignoring context lines (with --unverified-fixes, a mismatch posts a comment and goes on, see
 #        below); push a rebased branch with --force-with-lease; mark a draft
 #        ready (once, before the first CI wait); `gh-ci wait` (--timeout, default
 #        7200), rerunning failed jobs once when the failure is outside the diff
@@ -507,7 +507,7 @@ post_unverified() {
 
 patch_id() {
   local id
-  id="$(git -C "$worktree" diff "origin/main...$1" | git patch-id --stable | awk '{print $1}')"
+  id="$(git -C "$worktree" diff -U0 "origin/main...$1" | git patch-id --stable | awk '{print $1}')"
   echo "${id:-none}"
 }
 
