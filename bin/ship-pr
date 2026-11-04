@@ -533,6 +533,12 @@ patch_id() {
   echo "${id:-none}"
 }
 
+review_patch_id() {
+  local id
+  id="$(git -C "$worktree" diff "origin/main...$1" | git patch-id --stable | awk '{print $1}')"
+  echo "${id:-none}"
+}
+
 # review_verdict REPO PR PATCH_ID: print approved, unverified, changes,
 # incomplete, missing or invalid for the newest review-pr comment on PATCH_ID.
 review_verdict() {
@@ -592,7 +598,7 @@ review_verdict() {
   esac
 }
 
-reviewed_patch_id="$(patch_id "$reviewed")"
+reviewed_patch_id="$(review_patch_id "$reviewed")"
 review_state="$(review_verdict "$repo" "$pr" "$reviewed_patch_id")" \
   || die 1 "cannot read review-pr comments on PR $pr in $repo"
 case "$review_state" in
