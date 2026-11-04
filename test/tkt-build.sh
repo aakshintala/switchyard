@@ -675,7 +675,7 @@ run_build
 expect_verdict "TKT tkt-build GATE-ERROR log=*" "gate-unpushed"
 grep -q "drift" <<<"$OUT" || fail "gate-unpushed: the digest names the drift"
 
-# --- a stale plan stops the build before the lane ---
+# --- an unmarked Files entry is a write and stales when main moves it ---
 setup_case stale
 mkdir -p "$CDIR/seed/src"
 printf 'main change\n' >"$CDIR/seed/src/a.txt"
@@ -693,6 +693,22 @@ run_build
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "stale"
 grep -q "src/a.txt" <<<"$OUT" || fail "stale: the digest names the changed file"
 grep -q "^run|" "$T/calls.log" && fail "stale: the lane never dispatches"
+
+# --- a read-marked Files entry can move on main without staling the build ---
+setup_case stale-read
+printf 'main change\n' >"$CDIR/seed/base.txt"
+git -C "$CDIR/seed" add base.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves read path"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n- `base.txt` (read)\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "stale-read: seed matching verdict base"
+run_build
+[ "$RC" -eq 0 ] || fail "stale-read exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "stale-read"
 
 # --- only a Files line's first backticked token is a pathspec: a later
 # non-path token (/reload) must not fail git, and the changed path still counts ---

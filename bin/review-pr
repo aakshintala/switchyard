@@ -569,6 +569,13 @@ cmd_start() {
   }
   trap cleanup_on_fail EXIT
 
+  cargo_slot_dir=""
+  if [ "$mode" = "verify" ]; then
+    cargo_slot_dir="$run_dir/cargo-slot"
+    mkdir -p "$cargo_slot_dir"
+    ln -s "$script_dir/cargo-slot" "$cargo_slot_dir/cargo"
+  fi
+
   git -C "$clone" fetch origin "pull/$pr/head" >&2
 
   if [ -n "$head" ]; then
@@ -794,7 +801,11 @@ cmd_start() {
     fi
 
     echo "review-pr: starting $role job ($(model_for "$role"))" >&2
-    jid="$(delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
+    if [ -n "$cargo_slot_dir" ]; then
+      jid="$(PATH="$cargo_slot_dir:$PATH" delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
+    else
+      jid="$(delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
+    fi
     jid="${jid%%$'\n'*}"
 
     {

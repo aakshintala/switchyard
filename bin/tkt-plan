@@ -304,6 +304,15 @@ do_confirm() {
   while [ $# -gt 0 ]; do case "$1" in
     --edits) [ $# -ge 2 ] || usage; edits="$2"; shift 2;; *) usage;; esac; done
   [ -n "$edits" ] || usage; [ -r "$edits" ] || { echo "tkt-plan: cannot read edits file: $edits" >&2; exit 2; }
+  load_plan
+  latest_edits=""
+  for candidate in "$run/$namebase"-confirm-edits*.md; do
+    [ -f "$candidate" ] || continue
+    if [ -z "$latest_edits" ] || [ "$candidate" -nt "$latest_edits" ]; then latest_edits="$candidate"; fi
+  done
+  if [ -n "$latest_edits" ] && [ "$latest_edits" -nt "$plan" ]; then
+    emit "STALE-CONFIRM edits=$latest_edits plan=$plan" 1 "apply edits from $latest_edits to $plan, then rerun: tkt-plan $state confirm --edits $latest_edits"
+  fi
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   granted=0
   if [ -n "$confirmed_for" ]; then
@@ -313,7 +322,6 @@ do_confirm() {
       emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage" "$(open_lines)"
     fi
   fi
-  load_plan
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
   [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"

@@ -386,6 +386,14 @@ got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
 grep -F -q -- "--unverified-fixes $CDIR/unverified.md" "$T/calls.log" || fail "flags: unverified missing"
 grep -F -q -- '--gate FOO=1 BAR=2 bash test/gate.sh' "$T/calls.log" || fail "flags: gate missing"
 
+# --- mutant_job opts the ticket into the mutants gate
+reset_stub; setup_case mutantjob
+printf '0' >"$T/exitcodes"
+printf 'mutant_job=%s\n' Selection >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "mutantjob: exit $RC"
+[ "$(grep -c -x -F 'arg|--mutants-gate' "$T/calls.log")" -eq 1 ] || fail "mutantjob: mutants gate flag missing: $(cat "$T/calls.log")"
+
 # --- gate.script set: a Gate line that hand-expands it stops ship before ship-pr ---
 reset_stub; setup_case gate-script-hand
 printf '0' >"$T/exitcodes"
@@ -426,6 +434,7 @@ printf '0' >"$T/exitcodes"
 run_ship
 [ "$RC" -eq 0 ] || fail "nomutantsunset: exit $RC"
 [ "$(grep -c -F 'no-mutants-label' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: flag present: $(cat "$T/calls.log")"
+[ "$(grep -c -F 'mutants-gate' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: mutants gate without mutant_job: $(cat "$T/calls.log")"
 [ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: body-ends without a body_ends line: $(cat "$T/calls.log")"
 
 # --- body_ends from state reaches ship-pr as one argument ---
