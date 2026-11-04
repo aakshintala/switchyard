@@ -90,11 +90,38 @@ SSH_STUB
 cat >"$T/stubs/file-claim" <<'FC_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/file-claim.log"
+case "$1" in
+  list)
+    [ "${FILE_CLAIM_LIST_FAIL:-0}" != 1 ] || { echo 'stub file-claim list: boom' >&2; exit 2; }
+    [ "${FILE_CLAIM_LIST_BAD:-0}" != 1 ] || { echo 'not a claims row'; exit 0; }
+    [ ! -f "$T/file-claim-claims" ] || { cat "$T/file-claim-claims"; exit 0; }
+    printf '%s' "${FILE_CLAIM_LIST:-}"
+    exit 0
+    ;;
+  claim)
+    original=("$@"); lane=""; kind="plan"; after=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --lane) lane="$2"; shift 2;;
+        --grant) kind="grant"; shift;;
+        --plan) kind="plan"; shift;;
+        --ranges) echo 'usage: file-claim claim' >&2; exit 2;;
+        --) after=1; shift; break;;
+        *) shift;;
+      esac
+    done
+    if [ "$after" = 1 ]; then
+      for p in "$@"; do
+        printf '%s\t%s\t%s\t0\tt:stub\t\n' "$p" "$lane" "$kind" >>"$T/file-claim-claims"
+      done
+    fi
+    ;;
+esac
 case "${FILE_CLAIM_MODE:-ok}" in
   ok) exit 0;;
   refuse)
     n=0; after=0
-    for a in "$@"; do
+    for a in "${original[@]}"; do
       if [ "$after" = "1" ]; then echo "REFUSE $a lane:fiber-77"; n=$((n + 1)); fi
       case "$a" in --) after=1;; esac
     done
@@ -113,6 +140,7 @@ reset_case() {
   : >"$T/gh.log"
   : >"$T/claude.log"
   : >"$T/ssh.log"
+  rm -f "$T/file-claim-claims"
   cat >"$GH_TREE" <<'TREE'
 {"truncated":false,"tree":[
 {"type":"blob","path":"docs/tui.md"},
@@ -135,8 +163,8 @@ TREE
   export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT
   FW_DELEGATE_DIR="$T/delegate-jobs"
   export FW_DELEGATE_DIR
-  FILE_CLAIM_MODE=ok
-  export FILE_CLAIM_MODE
+  FILE_CLAIM_MODE=ok FILE_CLAIM_LIST_FAIL=0 FILE_CLAIM_LIST_BAD=0 FILE_CLAIM_LIST=
+  export FILE_CLAIM_MODE FILE_CLAIM_LIST_FAIL FILE_CLAIM_LIST_BAD FILE_CLAIM_LIST
   FW_FILE_CLAIM="$T/stubs/file-claim"
   export FW_FILE_CLAIM
   : >"$T/file-claim.log"
@@ -831,7 +859,8 @@ grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 --
 reset_case
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'dry run probes only'
-[ ! -s "$T/file-claim.log" ] || fail 'dry run claims nothing'
+grep -qxF 'list --repo aakshintala/fiber' "$T/file-claim.log" || fail 'dry run reads claims'
+! grep -q '^claim ' "$T/file-claim.log" || fail 'dry run claims nothing'
 
 reset_case
 FILE_CLAIM_MODE=refuse
@@ -866,7 +895,7 @@ assert_contains 'OWN skipping PR #11' 'own PR skip printed'
 grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'claim exempts the own PR'
 [ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'own-PR grant file exists'
 
-# --- A ranged grant is never whole-claimed (#1101 P2) ------------------------
+# --- A live claim holds the whole path, including ranged requests ------------
 reset_case
 set_pr 11 fix/other docs/tui.md
 cat >"$T/pr/11.diff" <<'DIFF'
@@ -881,7 +910,58 @@ DIFF
 run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-2
 assert_rc 0 'ranged grant survives the ledger despite the open PR'
 assert_line 'GRANT docs/tui.md' 'ranged grant line'
-! grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber -- docs/tui.md' "$T/file-claim.log" || fail 'ranged path is not claimed whole'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'whole-file claim uses the file-claim contract'
 grep -qxF 'Ranges: docs/tui.md:1-2' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'ranged grant file records the range'
+rm "$FW_RUN/fiber-77-fence-grant-1.md"
+CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --ranges docs/tui.md:5-6 --dry
+assert_rc 1 'second lane is held on the claimed path'
+assert_line 'HELD docs/tui.md by lane #77' 'whole-file claim blocks a disjoint ranged request'
+
+# --- Live plan and grant claims are holders ---------------------------------
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tplan\t0\tt:stub\t\ndocs/events.md\tfiber-67\tgrant\t0\tt:stub\t\n')"
+CLAUDE_JSON='[{"name":"fiber-66","status":"busy"},{"name":"fiber-67","status":"idle"}]'
+export FILE_CLAIM_LIST CLAUDE_JSON
+run_fg 88 --paths docs/tui.md,docs/events.md --dry
+assert_rc 1 'live plan and grant claims are holders'
+assert_out "$(printf 'HELD docs/tui.md by lane #66\nHELD docs/events.md by lane #67')" 'live claim holds'
+
+# --- A requester's own claim is not a holder or stale ------------------------
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-77\tgrant\t0\tt:stub\t\n')"
+export FILE_CLAIM_LIST
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 0 'requester own claim is ignored'
+assert_not_contains 'STALE' 'own claim is not stale'
+assert_line 'GRANT docs/tui.md' 'own claim does not hold requester'
+
+# --- Claims from a gone lane are logged and released -------------------------
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
+export FILE_CLAIM_LIST
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'stale claim does not hold'
+assert_line 'STALE docs/tui.md by fiber-66' 'stale claim logged'
+[ "$(grep -c '^STALE docs/tui.md by fiber-66$' "$T/out")" = 1 ] || fail 'stale claim logs once'
+assert_line 'GRANT docs/tui.md' 'stale claim releases path'
+
+# --- A failed or malformed claims read fails closed -------------------------
+reset_case
+FILE_CLAIM_LIST_FAIL=1
+export FILE_CLAIM_LIST_FAIL
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 3 'failed claims read fails closed'
+assert_out 'ERROR file-claim list stub file-claim list: boom ' 'failed claims read output'
+assert_no_grant 'failed claims read'
+
+reset_case
+FILE_CLAIM_LIST_BAD=1
+export FILE_CLAIM_LIST_BAD
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 3 'malformed claims read fails closed'
+assert_out 'ERROR file-claim list unparseable claims' 'malformed claims read output'
+assert_no_grant 'malformed claims read'
 
 echo 'fence-grant tests passed'
