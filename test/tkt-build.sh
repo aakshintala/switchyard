@@ -125,6 +125,13 @@ printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 case " \$* " in
   *" pr view "*)
     if [ -f "$T/noview" ]; then exit 1; fi
+    # Real gh cannot view an empty pr number: fail like it does, so a
+    # missing pr never views as the caller's branch.
+    prev=""
+    for a in "\$@"; do
+      if [ "\$prev" = "view" ] && [ -z "\$a" ]; then exit 1; fi
+      prev="\$a"
+    done
     ;;
 esac
 case " \$* " in
@@ -913,6 +920,17 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-der
 expect_state pr 7 review-derives-pr
 expect_state head "$H" review-derives-pr
 grep -q "^review-start|" "$T/calls.log" || fail "review-derives-pr: review still starts"
+
+# --- --from review with head set but pr unset derives pr and proceeds ---
+setup_case review-head-only
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
+run_build --from review
+[ "$RC" -eq 0 ] || fail "review-head-only exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-head-only"
+expect_state pr 7 review-head-only
+expect_state head "$H" review-head-only
+grep -q "pr list" "$T/calls.log" || fail "review-head-only: the branch PR is looked up"
+grep -q "^review-start|" "$T/calls.log" || fail "review-head-only: review still starts"
 
 # --- --from review without pr and head and no PR names the missing key ---
 setup_case review-missing-pr
