@@ -424,6 +424,27 @@ git -C "$WT" push -q --force-with-lease origin HEAD:refs/heads/feature
 ship; expect 4 "pushed head whose patch-id differs from --reviewed exits 4"
 no_merge "pushed head with a changed patch"
 
+# ===== patch-id ignores context lines: a rebase over a main commit that
+# ===== touched only the neighbouring line still matches, while a changed
+# ===== added line still mismatches
+setup
+printf 'A\nb\nc\n' >"$WT/file.txt"
+git -C "$WT" commit -qam "PR changes line 1"; git -C "$WT" push -q origin feature
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+advance_main file.txt "$(printf 'a\nb\nC')"
+ship; expect 0 "rebase over a context-only change passes the patch-id check"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "context-only change still merges: [$OUT]"
+
+setup
+printf 'A\nb\nc\n' >"$WT/file.txt"
+git -C "$WT" commit -qam "PR changes line 1"; git -C "$WT" push -q origin feature
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+printf 'A2\nb\nc\n' >"$WT/file.txt"
+git -C "$WT" commit -q --amend --no-edit -a
+git -C "$WT" push -q --force-with-lease origin HEAD:refs/heads/feature
+ship; expect 4 "changed added line exits 4"
+no_merge "changed added line"
+
 # ===== exit 1: gate
 setup
 ship --gate "$GATE_PANIC"
@@ -563,7 +584,8 @@ sed -i.bak 1s/a/x/ "$WT/file.txt"; rm "$WT/file.txt.bak"
 git -C "$WT" commit -qam "edit line 1"; git -C "$WT" push -q origin feature
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
 checks_hook 'sed -i.bak 3s/c/z/ "$C/file.txt"; rm "$C/file.txt.bak"; git -C "$C" commit -qam m; git -C "$C" push -q origin main'
-ship; expect 4 "main moves during CI with a clean rebase that changes the patch"; no_merge "patch-id on retry"
+ship; expect 0 "main moves during CI with a clean rebase that changes only context"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "context-only rebase on retry still merges: [$OUT]"
 
 setup; checks_hook 'echo n >"$C/newfile.txt"; git -C "$C" add .; git -C "$C" commit -qm m; git -C "$C" push -q origin main'
 ship --gate 'test ! -e newfile.txt && echo x >>"$ST/gates"'; expect 0 "gate runs once, not again after a rebase"
