@@ -213,6 +213,20 @@ stdout="$(bash "$FILL" --out "$T/should-not-exist.md" "$T/ou.md" 2>"$T/err-ou.tx
 grep -q '^unfilled: __NAME__$' "$T/err-ou.txt" || fail "unfilled --out names __NAME__"
 [ ! -e "$T/should-not-exist.md" ] || fail "unfilled --out writes nothing"
 
+# --out refuses a filled brief that tells a lane to bypass a hook
+printf 'push with --no-verify\n' >"$T/bypass.md"
+stdout="$(bash "$FILL" --out "$T/bypass-out.md" "$T/bypass.md" 2>"$T/err-bypass.txt")"; rc=$?
+[ "$rc" = "1" ] || fail "bypass --out exits 1"
+[ -z "$stdout" ] || fail "bypass --out prints nothing on stdout"
+[ "$(cat "$T/err-bypass.txt")" = "$T/bypass-out.md:1: push with --no-verify" ] || fail "bypass --out prints lint hit on stderr"
+[ "$(cat "$T/bypass-out.md")" = "push with --no-verify" ] || fail "bypass --out wrote the filled brief before linting"
+mkdir -p "$T/fill-bin"
+ln -s "$FILL" "$T/fill-bin/fill-brief" || fail "symlink fill-brief"
+stdout="$(bash "$T/fill-bin/fill-brief" --out "$T/bypass-symlink-out.md" "$T/bypass.md" 2>"$T/err-bypass-symlink.txt")"; rc=$?
+[ "$rc" = "1" ] || fail "symlinked bypass --out exits 1"
+[ -z "$stdout" ] || fail "symlinked bypass --out prints nothing on stdout"
+[ "$(cat "$T/err-bypass-symlink.txt")" = "$T/bypass-symlink-out.md:1: push with --no-verify" ] || fail "symlinked bypass --out finds brief-lint"
+
 # --out with a newline in the path exits 2, nothing on stdout, writes nothing
 nl_path="$T/bad
 name.md"

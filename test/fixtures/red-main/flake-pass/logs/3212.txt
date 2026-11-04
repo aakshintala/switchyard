@@ -1,0 +1,5 @@
+2026-10-09T17:00:10Z running fiber-core suite
+2026-10-09T17:03:10Z FAIL [   8.500s] fiber-core doors::watch
+2026-10-09T17:03:11Z thread 'doors::watch' panicked at src/doors.rs:44
+2026-10-09T17:04:00Z suite failed: 1 failed
+FLAKE-TAIL-3212

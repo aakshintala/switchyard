@@ -445,6 +445,17 @@ grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is j
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
 
+# --- the real lane brief fills and carries the second-patch stop rule (#982) ---
+setup_case real-lane-brief
+cp "$T/home/.agents/skills/planning/briefs/lane.md" "$T/lane-stub.md" || fail "real-lane-brief: keep the stub lane brief"
+cp "$SCRIPT_DIR/../skills/planning/briefs/lane.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: install the real lane brief"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "real-lane-brief exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+brief="$(grep '^run|id=stub-1|' "$T/calls.log" | sed 's/.*prompt=//')"
+cp "$T/lane-stub.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: restore the stub lane brief"
+grep -q 'second patch' "$brief" || fail "real-lane-brief: the filled brief carries the second-patch stop rule"
+grep -q 'STATUS: BLOCKED' "$brief" || fail "real-lane-brief: the filled brief names the BLOCKED stop"
+
 # --- body_ends wins over body_has for the lane ATTRIBUTION ---
 setup_case attr-ends
 bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-ends: set body_has"
@@ -675,7 +686,7 @@ run_build
 expect_verdict "TKT tkt-build GATE-ERROR log=*" "gate-unpushed"
 grep -q "drift" <<<"$OUT" || fail "gate-unpushed: the digest names the drift"
 
-# --- a stale plan stops the build before the lane ---
+# --- an unmarked Files entry is a write and stales when main moves it ---
 setup_case stale
 mkdir -p "$CDIR/seed/src"
 printf 'main change\n' >"$CDIR/seed/src/a.txt"
@@ -693,6 +704,22 @@ run_build
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "stale"
 grep -q "src/a.txt" <<<"$OUT" || fail "stale: the digest names the changed file"
 grep -q "^run|" "$T/calls.log" && fail "stale: the lane never dispatches"
+
+# --- a read-marked Files entry can move on main without staling the build ---
+setup_case stale-read
+printf 'main change\n' >"$CDIR/seed/base.txt"
+git -C "$CDIR/seed" add base.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves read path"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n- `base.txt` (read)\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "stale-read: seed matching verdict base"
+run_build
+[ "$RC" -eq 0 ] || fail "stale-read exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "stale-read"
 
 # --- only a Files line's first backticked token is a pathspec: a later
 # non-path token (/reload) must not fail git, and the changed path still counts ---

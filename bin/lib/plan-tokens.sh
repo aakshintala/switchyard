@@ -13,7 +13,7 @@
 #     the current shell (FN must run in the caller's shell: no subshell here).
 #   resolve_path: reads dir, rev, tree; sets RES, RES_KIND (found|ambiguous|none).
 #   covered: reads FILES, GLOBS.
-#   plan_files_pathspecs: reads PLAN from its argument only.
+#   plan_files_pathspecs: reads PLAN and an optional mode from its arguments.
 #   portre: a variable (not a function); expand_token reads it.
 
 portre=':[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$'
@@ -193,19 +193,24 @@ covered() {
 # _plan_files_awk MODE: the `## Files` entry reader. A Files entry is a list item
 # or table row whose first backticked token follows its marker directly; prose
 # lines and prose before the token contribute nothing. MODE "lines" prints
-# "N<TAB>token" (N the plan line), any other MODE prints the token.
+# "N<TAB>token" (N the plan line), "entries" prints "token<TAB>read|write",
+# "writes" skips read-marked entries, and other modes print every token.
 _plan_files_awk='
   /^## Files([[:space:]]|$)/ { f = 1; next }
   f && /^## / { exit }
   f && match($0, /^[[:space:]]*([-*]|\|)[[:space:]]+`[^`]*`/) {
     t = substr($0, RSTART, RLENGTH); sub(/^[^`]*`/, "", t); sub(/`$/, "", t)
     if (t == "") next
-    if (mode == "lines") print NR "\t" t; else print t
+    read = ($0 ~ /\(read\)[[:space:]]*([|][[:space:]]*)?$/)
+    if (mode == "entries") print t "\t" (read ? "read" : "write")
+    else if (mode == "lines") print NR "\t" t
+    else if (mode == "writes" && read) next
+    else print t
   }'
 
-# plan_files_pathspecs PLAN: one path per line from the `## Files` entries. Blank
-# tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
-plan_files_pathspecs() { awk -v mode=paths "$_plan_files_awk" "$1"; }
+# plan_files_pathspecs PLAN [all|writes]: one path per line from the `## Files`
+# entries. Blank tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
+plan_files_pathspecs() { awk -v mode="${2:-all}" "$_plan_files_awk" "$1"; }
 
 # plan_bare_dirs PLAN WORKTREE: one "Files line N: ..." line per entry whose path
 # has no slash and is a directory in WORKTREE: a git pathspec that covers the

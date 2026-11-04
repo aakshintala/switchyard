@@ -1,0 +1,5 @@
+2026-10-09T17:40:10Z running fiber-core suite
+2026-10-09T17:43:10Z FAIL [   9.100s] fiber-core doors::open
+2026-10-09T17:43:11Z thread 'doors::open' panicked at src/doors.rs:12
+2026-10-09T17:44:00Z suite failed: 1 failed
+REOPEN-TAIL-3822
