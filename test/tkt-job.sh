@@ -824,6 +824,33 @@ grep -q "424242" "$CDIR/stderr.txt" || fail "a held lock names the pid"
 grep -q "^run|" "$T/stub.log" && fail "a held lock dispatches nothing"
 rm -rf "$S.lock"
 
+# --- a BLOCKED lane's descendant commits do not prevent resuming ---
+setup_case blocked-commits-resume
+reset_stub
+make_record stub-1 BLOCKED none 2 2 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "lane stops BLOCKED"
+expect_verdict "TKT tkt-job BLOCKED id=stub-1 log=*" "lane before resume"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m partial || fail "commit partial work"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m blocked || fail "commit blocked work"
+make_record stub-2 DONE 0 1 2 0
+run_job --slot lane --resume stub-1 --prompt "$T/resume-prompt.md"
+[ "$RC" -eq 0 ] || fail "resume accepts descendant commits (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS log=*" "resumed lane"
+grep -q "^resume|id=stub-1|prompt=$T/resume-prompt.md|new=stub-2$" "$T/stub.log" || fail "descendant commits reach delegate resume"
+
+# --- a divergent worktree HEAD still refuses before dispatch ---
+setup_case divergent-head
+reset_stub
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m stored || fail "commit stored work"
+bash "$TKT_STATE" "$S" set head "$(git -C "$WT" rev-parse HEAD)" || fail "store head"
+git -C "$WT" checkout -q --detach "$H" || fail "checkout common ancestor"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m divergent || fail "commit divergent work"
+run_job --slot lane --resume stub-1 --prompt "$T/resume-prompt.md"
+[ "$RC" -eq 3 ] || fail "divergent head exits 3"
+grep -q 'head drift' "$CDIR/stderr.txt" || fail "divergence reports head drift"
+[ ! -s "$T/stub.log" ] || fail "divergence never calls delegate"
+
 # --- head drift exits 3 naming the stored head and the worktree HEAD ---
 setup_case drift
 reset_stub
