@@ -245,6 +245,7 @@ case "$paths" in
 esac
 
 run=$(_fw_run)
+file_claim="${FW_FILE_CLAIM:-$(dirname "$0")/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"
 locked=0
@@ -1100,6 +1101,59 @@ if [ -n "$(printf '%s' "$held" | grep .)" ]; then
     _suggest "${sug%% *}" "${sug#* }"
   done < "$tmp/heldout"
   exit 1
+fi
+
+# --- the grant performs its claim: one ledger both fences read ---
+# `file-claim` is the fence lanes consult, and it answers from its own
+# ledger alone, while this probe answers from grant files and open PRs: two
+# fences, two populations (#1101: seven paths granted here, then a REFUSE on
+# one this probe could not see). Claiming what the grant grants makes the
+# grant the single source of truth by construction: a granted path is a
+# claimed path, so the two cannot diverge, and the ledger gains the
+# population every lane already grants through. --plan, not --grant: the
+# grant cap counts grants, and a lane's whole path set must claim as one;
+# re-claiming the same lane and kind is an idempotent no-op. Reads hold
+# nothing and are never claimed. A dry run probes only and claims nothing.
+if [ "$dry" -eq 0 ]; then
+  fc_args=()
+  while IFS= read -r _cp; do
+    [ -n "$_cp" ] || continue
+    _cp=${_cp#./}
+    _cp=${_cp%/}
+    [ -n "$_cp" ] || continue
+    fc_args+=("$_cp")
+  done < "$tmp/plist"
+  if [ "${#fc_args[@]}" -gt 0 ]; then
+    fc_cmd=("$file_claim" claim --lane "fiber-$ticket" --plan --repo "$repo")
+    if [ -n "$ignore" ]; then fc_cmd+=(--self-pr "$ignore"); fi
+    fc_cmd+=(-- "${fc_args[@]}")
+    if "${fc_cmd[@]}" >"$tmp/fc-out" 2>"$tmp/fc-err"; then
+      :
+    else
+      fc_rc=$?
+      if [ "$fc_rc" -eq 1 ]; then
+        awk '
+$1 == "REFUSE" && NF >= 3 {
+  p = $2; h = $3; line = ""
+  if (h ~ /^pr#[0-9][0-9]*$/) line = "HELD " p " by PR #" substr(h, 4)
+  else if (h ~ /^lane:fiber-[0-9][0-9]*$/) { n = h; sub(/^lane:fiber-/, "", n); line = "HELD " p " by lane #" n }
+  else if (h ~ /^lane:/) line = "HELD " p " by lane " substr(h, 6)
+  else if (h == "cap") line = "HELD " p " by file-claim grant cap"
+  else line = "HELD " p " by file-claim " h
+  if (!seen[line]++) print line
+  next
+}
+$1 == "GRANT" || $1 == "file-claim:" || NF == 0 { next }
+{ if (!seen[$0]++) print }' "$tmp/fc-out" > "$tmp/fc-held"
+        if [ -s "$tmp/fc-held" ]; then cat "$tmp/fc-held"; else cat "$tmp/fc-out"; fi
+        exit 1
+      else
+        g=$(head -c 200 "$tmp/fc-err" 2>/dev/null | tr '\n' ' ')
+        echo "ERROR file-claim claim $g"
+        exit 3
+      fi
+    fi
+  fi
 fi
 
 # --- grant: locked numbering over existing files (unnumbered counts as 1) ---
