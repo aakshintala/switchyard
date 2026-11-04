@@ -310,6 +310,49 @@ grep -q "outside Files: test/ghost" <<<"$OUT" || fail "PLAN-CHECK lists the seco
 grep -q "^job|" "$T/stub.log" && fail "PLAN-CHECK starts no job"
 printf 'ok' >"$T/pcmode"
 
+# --- plan-check lines block confirm without consuming its round or grant ---
+setup_case confirm-plan-check
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-plan-check seed round"
+printf 'ok' >"$T/mode"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+printf 'lines' >"$T/pcmode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "confirm-plan-check exits 1"
+expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "confirm PLAN-CHECK"
+grep -q "missing path: bin/ghost" <<<"$OUT" || fail "confirm PLAN-CHECK lists the first line"
+grep -q "outside Files: test/ghost" <<<"$OUT" || fail "confirm PLAN-CHECK lists the second line"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "confirm PLAN-CHECK starts no job"
+[ -z "$(bash "$TKT_STATE" "$S" get confirmed_for 2>/dev/null || true)" ] || fail "confirm PLAN-CHECK leaves the confirm round open"
+printf 'ok' >"$T/pcmode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "confirm after PLAN-CHECK exits 0 (rc=$RC)"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" -eq "$((jobs_before + 1))" ] || fail "confirm after PLAN-CHECK runs a job"
+[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "confirm after PLAN-CHECK records the round"
+
+setup_case confirm-plan-check-grant
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-plan-check-grant seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "confirm-plan-check-grant seed confirm"
+bash "$TKT_STATE" "$S" set granted_by switchyard || fail "confirm-plan-check-grant seed author"
+bash "$TKT_STATE" "$S" set granted_comment 1234 || fail "confirm-plan-check-grant seed comment"
+printf 'ok' >"$T/mode"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+printf 'lines' >"$T/pcmode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "granted confirm PLAN-CHECK exits 1"
+expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "granted confirm PLAN-CHECK"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "granted confirm PLAN-CHECK starts no job"
+[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "granted confirm PLAN-CHECK preserves the prior confirm"
+[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "granted confirm PLAN-CHECK leaves the grant pending"
+printf 'ok' >"$T/pcmode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "granted confirm after PLAN-CHECK exits 0 (rc=$RC)"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "granted confirm after PLAN-CHECK uses the grant"
+: >"$T/stub.log"
+
 # --- LINES, then PLAN-OK, then the round limit ---
 setup_case rounds
 rebase_plan
