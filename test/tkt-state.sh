@@ -109,6 +109,22 @@ bash "$TKT" "$S" set bad "$(printf 'x\ny')" 2>"$T/err-nl.txt" && fail "a value w
 bash "$TKT" "$S" get bad >/dev/null 2>&1 && fail "a rejected value is not stored"
 [ "$?" = "2" ] || fail "a rejected value stays missing"
 
+# set head only stores a full 40-hex commit SHA; a short SHA would compare
+# unequal to the worktree HEAD and report bogus drift on the next command
+HS="$T/head.state"
+bash "$TKT" "$HS" set head abc1234 2>"$T/err-short-head.txt" && fail "set head with a short SHA exits non-zero"
+[ "$?" = "2" ] || fail "set head with a short SHA exits 2"
+grep -q 'head' "$T/err-short-head.txt" || fail "a short head names the key"
+[ ! -e "$HS" ] || fail "a rejected short head writes nothing"
+FULL=0123456789abcdef0123456789abcdef01234567
+bash "$TKT" "$HS" set head "$FULL" || fail "set head with a full SHA exits 0"
+[ "$(bash "$TKT" "$HS" get head)" = "$FULL" ] || fail "get returns the stored full head"
+bash "$TKT" "$HS" set head "${FULL%?}z" 2>/dev/null && fail "set head with non-hex exits non-zero"
+[ "$?" = "2" ] || fail "set head with non-hex exits 2"
+[ "$(bash "$TKT" "$HS" get head)" = "$FULL" ] || fail "a rejected non-hex head keeps the old value"
+bash "$TKT" "$HS" add head abc1234 2>/dev/null && fail "add head with a short SHA exits non-zero"
+[ "$?" = "2" ] || fail "add head with a short SHA exits 2"
+
 # journal appends a timestamped line to the sibling .journal file
 S3="$T/j.state"
 bash "$TKT" "$S3" journal "hello world" || fail "journal exits 0"
