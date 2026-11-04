@@ -25,10 +25,56 @@ usage() {
 # One TSV row per keyword match: in-Resolves flag, issue ref (lowercased),
 # source label, matched text. jq's regex works on whole strings, so no text
 # is ever framed with a delimiter it could itself contain.
+# Markdown code is stripped before the actual-match scan below, so a keyword
+# inside a fenced block or inline code span never counts as a closure. The
+# Resolves-list capture stays line-anchored and untouched.
+# Inline spans match per line only, so a span crossing lines stays visible and never hides a closure.
 # shellcheck disable=SC2016  # $vars below are jq's, not the shell's
 SCAN='
   def clean: (. // "") | gsub("\r"; "");
   def ref: "(?<ref>(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+)";
+  def strip_inline:
+    def go($s; $runs; $pos; $i; $out):
+      if $i >= ($runs | length) then $out + $s[$pos:]
+      else
+        ($runs[$i]) as $open
+        | ([range($i + 1; ($runs | length))
+             | select($runs[.].len == $open.len)][0]) as $j
+        | if $j == null then
+            go($s; $runs; $open.off + $open.len; $i + 1;
+               $out + $s[$pos : $open.off + $open.len])
+          else
+            ($runs[$j]) as $close
+            | go($s; $runs; $close.off + $close.len; $j + 1;
+                 $out + $s[$pos : $open.off])
+          end
+      end;
+    go(.; ([match("`+"; "g")] | map({off: .offset, len: .length})); 0; 0; "");
+  def strip_code:
+    (split("\n")
+     | (reduce .[] as $line ({in: false, fence: "", len: 0, out: []};
+          if .in then
+            (.fence as $f | .len as $l
+             | if ($line | test("^ {0,3}" + $f
+                                + "{" + ($l | tostring) + ",} *$")) then
+                 {in: false, fence: "", len: 0, out: (.out + [""])}
+               else
+                 {in: .in, fence: .fence, len: .len, out: (.out + [""])}
+               end)
+          else
+            (($line | capture("^ {0,3}(?<f>`{3,}|~{3,})(?<rest>.*)$")) // null) as $m
+            | if $m == null then
+                {in: false, fence: "", len: 0, out: (.out + [$line])}
+              elif ($m.f | startswith("`")) and ($m.rest | contains("`")) then
+                {in: false, fence: "", len: 0, out: (.out + [$line])}
+              else
+                {in: true, fence: ($m.f[0:1]), len: ($m.f | length),
+                 out: (.out + [""])}
+              end
+          end
+        ) | .out)
+     | map(strip_inline))
+    | join("\n");
   if type != "object" or (.title | type) != "string" or (.body | type) != "string"
      or (.commits | type) != "array"
      or any(.commits[]; type != "object" or ([.oid, .messageHeadline, .messageBody]
@@ -41,7 +87,7 @@ SCAN='
      (.commits[] | ["commit " + .oid[0:7],
                     ((.messageHeadline | clean) + "\n\n" + (.messageBody | clean))]))
   | .[0] as $label
-  | .[1] | clean
+  | .[1] | clean | strip_code
   | match("(?<![A-Za-z0-9_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\\s*" + ref; "gi")
   | (.captures[] | select(.name == "ref") | .string | ascii_downcase) as $ref
   | select($ref != "#" + $num and $ref != ($repo | ascii_downcase) + "#" + $num)
