@@ -51,6 +51,20 @@ tier strong: opencode-go (healthy)
 tier frontier: codex (healthy)" ] || fail "opencode tie output was:
 $OUT"
 
+# The same tie under every rotation of opencode-go, claude and codex.
+og='{"id":"opencode-go","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":90,"resetText":"Resets in 4d"}]}'
+cl='{"id":"claude","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":70,"resetText":"Resets in 3d"}]}'
+cx='{"id":"codex","status":"healthy","quotas":[{"key":"session","label":"Session","percentRemaining":40,"resetText":"Resets in 6d"}]}'
+for order in "$og,$cl,$cx" "$cl,$cx,$og" "$cx,$og,$cl" "$cx,$cl,$og"; do
+  printf '{"providers":[%s]}\n' "$order" >"$T/perm.json"
+  route "$T/perm.json"
+  [ "$RC" = 0 ] || fail "permutation: exit $RC, want 0"
+  [ "$OUT" = "tier standard: opencode-go (healthy)
+tier strong: opencode-go (healthy)
+tier frontier: codex (healthy)" ] || fail "permutation [$order] output was:
+$OUT"
+done
+
 # Tie: codex is healthy but listed after muse, so the tier list wins over
 # feed order; cursor leads the frontier list. Permuting the feed must not
 # change the output.
