@@ -28,6 +28,7 @@ export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 
 ln -s "$REAL_BIN/tkt-gate" "$T/bin/tkt-gate" || fail "symlink tkt-gate"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
+ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 
@@ -614,8 +615,9 @@ fi
 
 # E. A worktree ahead of the PR head by the open fix job's own unpushed
 # commits is not drift: the state and PR heads agree at the old head, the
-# worktree descends from it, and the next call carries on to RECOVER for
-# that slot instead of stopping at DRIFT.
+# worktree descends from it, the job's delegate record owns the worktree
+# HEAD, and the next call carries the state head forward to it and then
+# stops at RECOVER for that slot instead of stopping at DRIFT.
 if want E; then
 setup_case e
 printf 'fix work\n' >"$WT/fix.txt"
@@ -624,6 +626,8 @@ git -C "$WT" commit -qm "fix: fix.txt"
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+mkdir -p "$TMPDIR/delegate-jobs"
+jq -n --arg ha "$NEW" '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"which design rules the retry?",changeSet:{headBefore:"x",headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' >"$TMPDIR/delegate-jobs/j1.json" || fail "E record write"
 printf '%s' "$OLD" >"$T/prhead"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "E exited 0"
 [ "$?" = "3" ] || fail "E exited $?, want 3"
@@ -632,7 +636,7 @@ grep -q "job=j1" <<<"$out" || fail "E job id missing from RECOVER digest"
 grep -q "slot=fix1" <<<"$out" || fail "E slot missing from RECOVER digest"
 grep -q "job|" "$T/calls.log" && fail "E dispatched a job"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "E pushed"
-[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "E head moved"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "E head not carried to the worktree HEAD"
 [ "$(bash "$TKT_STATE" "$S" get fixopen)" = "1" ] || fail "E fixopen changed"
 grep -q "tkt-fix: worktree is ahead of the PR head by open fix job fix1's unpushed commits" "$T/stderr" || fail "E stderr line missing: $(cat "$T/stderr")"
 fi
@@ -744,5 +748,170 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "empty PR head exited 0
 [ "$?" = "2" ] || fail "empty PR head exited $?, want 2"
 grep -q 'PRECONDITION missing=head:' "$T/stderr" || fail "empty PR head error missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "empty PR head dispatched a job"
+
+# F1/F2/F3 run the real bin/tkt-job behind a logging wrapper, with a stub
+# delegate that really commits in the worktree and mints delegate records,
+# so the ahead-recovery path dispatches through tkt-job's head-drift guard
+# instead of stopping at RECOVER. The PR head tracks origin/tkt-529 (stale
+# until the push lands), and the fix brief comes from a temp-HOME copy of
+# the real fix.md. These blocks sit last so the wrapper cannot leak into
+# the stub-based cases above.
+setup_ahead_dispatch() {
+  setup_case "$1"
+  printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+  mkdir -p "$T/home/.agents/skills/review-loop/briefs"
+  cp "$SCRIPT_DIR/../skills/review-loop/briefs/fix.md" "$T/home/.agents/skills/review-loop/briefs/fix.md" || fail "copy fix brief"
+  bash "$TKT_STATE" "$S" set workflow_doc "docs/workflow.md" >/dev/null || fail "set workflow_doc"
+  mkdir -p "$T/no-system-jobs"
+  export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
+  cat >"$T/bin/tkt-job" <<EOF
+#!/usr/bin/env bash
+printf 'job|%s\n' "\$*" >>"$T/calls.log"
+exec "$REAL_BIN/tkt-job" "\$@"
+EOF
+  chmod +x "$T/bin/tkt-job"
+  printf 'ask' >"$T/delegate-mode"
+  printf '0' >"$T/dcounter"
+  cat >"$T/bin/delegate" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+jobsdir="\${DELEGATE_JOBS_DIR:-\${TMPDIR:-/tmp}/delegate-jobs}"
+mode="\$(cat "$T/delegate-mode")"
+cmd="\${1:-}"; shift || true
+mint_record() {
+  if [ "\$4" = "1" ]; then comms="[\"\$3\"]"; else comms="[]"; fi
+  jq -n --arg status "\$1" --arg text "\$2" --arg ha "\$3" --argjson comms "\$comms" \
+    '{status: \$status, result: {status: \$status, text: \$text, gateResult: {passed: true, command: "true", exitCode: 0, outputTail: "ok", outputPath: "/tmp/g.log"}, changeSet: {headBefore: "0", headAfter: \$ha, newCommits: \$comms, uncommittedFiles: [], filesChanged: [], diffstat: "", dirtyAfter: false}, concerns: null}, supervisorPid: 1}' \
+    >"\$jobsdir/\$5.json" || exit 1
+}
+commit_fix() {
+  printf 'fixed-%s\n' "\$2" >"\$1/fix.txt"
+  git -C "\$1" add fix.txt
+  git -C "\$1" -c user.email=t@t -c user.name=t commit -qm "fix: fix.txt"
+  git -C "\$1" rev-parse HEAD
+}
+case "\$cmd" in
+  run)
+    cwd=""; prompt=""
+    while [ \$# -gt 0 ]; do
+      case "\$1" in
+        --cwd) cwd="\$2"; shift 2 ;;
+        --prompt-file) prompt="\$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    n="\$((\$(cat "$T/dcounter") + 1))"
+    printf '%s' "\$n" >"$T/dcounter"
+    id="stub-\$n"
+    printf 'delegate|run|new=%s|cwd=%s|prompt=%s\n' "\$id" "\$cwd" "\$prompt" >>"$T/calls.log"
+    printf '%s' "\$cwd" >"$T/dcwd"
+    mkdir -p "\$jobsdir"
+    head="\$(commit_fix "\$cwd" "\$n")"
+    if [ "\$mode" = "ask" ]; then mint_record NEEDS_CONTEXT "which design rules the retry?" "\$head" 1 "\$id"
+    else mint_record DONE "\$(printf 'done\nSTATUS: DONE')" "\$head" 1 "\$id"; fi
+    printf '%s\n' "\$id"
+    ;;
+  resume)
+    from="\${1:-}"; shift || true
+    prompt=""
+    while [ \$# -gt 0 ]; do
+      case "\$1" in
+        --prompt-file) prompt="\$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    n="\$((\$(cat "$T/dcounter") + 1))"
+    printf '%s' "\$n" >"$T/dcounter"
+    id="stub-\$n"
+    printf 'delegate|resume|from=%s|new=%s|prompt=%s\n' "\$from" "\$id" "\$prompt" >>"$T/calls.log"
+    mkdir -p "\$jobsdir"
+    cwd="\$(cat "$T/dcwd")"
+    head="\$(git -C "\$cwd" rev-parse HEAD)"
+    if [ "\$mode" = "ask" ]; then mint_record NEEDS_CONTEXT "which design rules the retry?" "\$head" 0 "\$id"
+    else mint_record DONE "\$(printf 'done\nSTATUS: DONE')" "\$head" 0 "\$id"; fi
+    printf '%s\n' "\$id"
+    ;;
+  watch)
+    printf 'watch|%s\n' "\$*" >>"$T/calls.log"
+    ;;
+  *)
+    echo "stub delegate: unknown \$cmd" >&2
+    exit 2
+    ;;
+esac
+EOF
+  chmod +x "$T/bin/delegate"
+}
+
+# F1 (P1). A fix job commits, then ends on ASK. The next
+# tkt-fix --resume <id> --prompt <file> dispatches through the real tkt-job:
+# the fake delegate sees the resume, and the run reaches push/verify with
+# no head drift; the push carries the recovered commit.
+if want F1; then
+setup_ahead_dispatch f1
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F1 call 1 exited 0"
+[ "$?" = "1" ] || fail "F1 call 1 exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=stub-1" || fail "F1 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "1" ] || fail "F1 fixopen not 1 after ASK"
+RECHEAD="$(git -C "$WT" rev-parse HEAD)"
+printf 'done' >"$T/delegate-mode"
+printf 'resume brief\n' >"$CDIR/prompt.md"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --resume stub-1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "F1 resume exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$RECHEAD" || fail "F1 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "delegate|resume|from=stub-1" "$T/calls.log" || fail "F1 delegate saw no resume of stub-1: $(cat "$T/calls.log")"
+grep -qi "head drift" <<<"$out" && fail "F1 verdict names head drift"
+grep -qi "head drift" "$T/stderr" && fail "F1 stderr names head drift: $(cat "$T/stderr")"
+grep -q "UNKNOWN" <<<"$out" && fail "F1 verdict is UNKNOWN"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$RECHEAD" ] || fail "F1 push did not carry the recovered commit"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$RECHEAD" ] || fail "F1 head not the worktree HEAD"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "F1 round not 1"
+fi
+
+# F2 (P1). The same recovery, but a fresh call (no --resume) after the ASK
+# closed fix1 dispatches fix2 through the real tkt-job and verifies.
+if want F2; then
+setup_ahead_dispatch f2
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F2 call 1 exited 0"
+[ "$?" = "1" ] || fail "F2 call 1 exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=stub-1" || fail "F2 bad verdict: $(head -n 1 <<<"$out")"
+printf 'done' >"$T/delegate-mode"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "F2 call 2 exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "F2 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "job|.*--slot fix2" "$T/calls.log" || fail "F2 call 2 did not dispatch fix2: $(cat "$T/calls.log")"
+grep -q "delegate|run|" "$T/calls.log" || fail "F2 delegate saw no run"
+grep -q "delegate|resume|" "$T/calls.log" && fail "F2 call 2 resumed"
+grep -qi "head drift" <<<"$out" && fail "F2 verdict names head drift"
+grep -qi "head drift" "$T/stderr" && fail "F2 stderr names head drift: $(cat "$T/stderr")"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "F2 push did not land"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "F2 head not the worktree HEAD"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "F2 round not 1"
+fi
+
+# F3 (P2). A fix job commits and ends on ASK, then an extra outside commit
+# lands on top. The next call exits DRIFT and dispatches nothing: the
+# worktree HEAD no longer equals the job record's headAfter.
+if want F3; then
+setup_ahead_dispatch f3
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F3 call 1 exited 0"
+[ "$?" = "1" ] || fail "F3 call 1 exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=stub-1" || fail "F3 bad verdict: $(head -n 1 <<<"$out")"
+printf 'outside\n' >"$WT/evil.txt"
+git -C "$WT" add evil.txt
+git -C "$WT" commit -qm "outside: evil.txt"
+OUTHEAD="$(git -C "$WT" rev-parse HEAD)"
+printf 'done' >"$T/delegate-mode"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F3 call 2 exited 0"
+[ "$?" = "3" ] || fail "F3 call 2 exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "F3 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "worktree HEAD=$OUTHEAD" <<<"$out" || fail "F3 worktree sha missing from DRIFT digest"
+grep -q "delegate|" "$T/calls.log" && fail "F3 dispatched a job"
+grep -q "job|" "$T/calls.log" && fail "F3 dispatched a job"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "F3 head moved"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "1" ] || fail "F3 fixopen changed"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "F3 pushed"
+fi
 
 echo "tkt-fix assertions passed"
