@@ -444,14 +444,11 @@ p1="$(grep -c '^P1 ' "$findings_file" || true)"; p2="$(grep -c '^P2 ' "$findings
 n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect_out" || true)"
 # One bad-count sum: a P3 alone never blocks.
 bad=$((3 - n_approve + p1 + p2 + merged))
-[ -n "$map_note" ] && bad=$((bad + 1))
-map_only_bad=0
-if [ -n "$map_note" ] && [ "$n_approve" -eq 3 ] && [ "$p1" -eq 0 ] && [ "$p2" -eq 0 ] && [ "$p3" -eq 0 ] && [ "$merged" -eq 0 ]; then
-  map_only_bad=1
-fi
-if [ "$map_only_bad" -eq 0 ]; then
+# A map note alone leaves the review state unwritten, so the review can re-run.
+if [ "$bad" -gt 0 ] || [ -z "$map_note" ]; then
   tkt set reviewed "$head"; tkt set findings "$findings_file"; tkt set round 0
 fi
+[ -n "$map_note" ] && bad=$((bad + 1))
 approve_digest="$collect_out"; digest="$(cat "$findings_file")"
 if [ -n "$map_note" ]; then approve_digest="$map_note
 $approve_digest"; digest="$map_note
