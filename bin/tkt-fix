@@ -165,7 +165,8 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         t set head "$prhead"
         t set fixopen 0
         keep=1
-      elif [ -n "$fjob" ] && [ "$stored" = "$prhead" ] && [ "$prhead" != "$actual" ] \
+      elif [ -n "$fjob" ] && [ "$prhead" != "$actual" ] \
+        && { [ "$stored" = "$prhead" ] || [ "$stored" = "$actual" ]; } \
         && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
         # Ownership: the ahead commits must be the open job's own. Its
         # delegate record carries changeSet.headAfter, located the same way

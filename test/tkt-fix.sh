@@ -914,4 +914,40 @@ grep -q "job|" "$T/calls.log" && fail "F3 dispatched a job"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "F3 pushed"
 fi
 
+# F4 (P1). RECOVER followed by the instructed resume dispatches through the
+# real tkt-job: the first call carries the state head to the worktree HEAD
+# and stops at RECOVER; the resume then reaches FIX-OK with no DRIFT and
+# no head drift, and the push carries the recovered commit.
+if want F4; then
+setup_ahead_dispatch f4
+printf 'fix work\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+mkdir -p "$TMPDIR/delegate-jobs"
+jq -n --arg ha "$NEW" '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"which design rules the retry?",changeSet:{headBefore:"x",headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' >"$TMPDIR/delegate-jobs/j1.json" || fail "F4 record write"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F4 call 1 exited 0"
+[ "$?" = "3" ] || fail "F4 call 1 exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "F4 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "job=j1" <<<"$out" || fail "F4 job id missing from RECOVER digest"
+grep -q "slot=fix1" <<<"$out" || fail "F4 slot missing from RECOVER digest"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "F4 head not carried to the worktree HEAD"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "1" ] || fail "F4 fixopen changed"
+printf 'done' >"$T/delegate-mode"
+printf 'resume brief\n' >"$CDIR/prompt.md"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "F4 resume exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "F4 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "DRIFT" <<<"$out" && fail "F4 verdict names DRIFT"
+grep -qi "head drift" <<<"$out" && fail "F4 verdict names head drift"
+grep -qi "head drift" "$T/stderr" && fail "F4 stderr names head drift: $(cat "$T/stderr")"
+grep -q "job|.*--slot fix1.*--resume j1" "$T/calls.log" || fail "F4 resume did not dispatch fix1 through tkt-job: $(cat "$T/calls.log")"
+grep -q "delegate|resume|from=j1" "$T/calls.log" || fail "F4 delegate saw no resume of j1: $(cat "$T/calls.log")"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "F4 push did not carry the recovered commit"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "F4 head not the worktree HEAD"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "F4 round not 1"
+fi
+
 echo "tkt-fix assertions passed"
