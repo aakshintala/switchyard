@@ -655,6 +655,15 @@ run_job --slot lane --template "$T/tmpl-missing.md"
 grep -q "NOPE" "$CDIR/stderr.txt" || fail "missing key names NOPE"
 grep -q "^run|" "$T/stub.log" && fail "missing key dispatches nothing"
 
+# --- two missing template keys exit 2 naming both on one line ---
+setup_case missing-keys
+reset_stub
+printf 'Base __BASE__ pack __PACK__\n' >"$T/tmpl-two-missing.md"
+run_job --slot lane --template "$T/tmpl-two-missing.md"
+[ "$RC" -eq 2 ] || fail "two missing keys exit 2"
+grep -q "template needs BASE, PACK:" "$CDIR/stderr.txt" || fail "two missing keys names both keys: $(cat "$CDIR/stderr.txt")"
+grep -q "^run|" "$T/stub.log" && fail "two missing keys dispatch nothing"
+
 # --- flags fill first, and only keys the template has are passed ---
 setup_case flag-wins
 reset_stub
