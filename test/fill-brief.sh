@@ -24,6 +24,8 @@ case "$out" in *"o/r"*) ;; *) fail "bare template name fills the planner brief, 
 [ ! -s "$T/err-bare.txt" ] || fail "bare template name: nothing on stderr"
 bash "$FILL" nosuchbrief 'A=1' >/dev/null 2>"$T/err-bare2.txt"; [ "$?" = "2" ] || fail "unknown bare name exits 2"
 grep -q 'no such template: nosuchbrief' "$T/err-bare2.txt" || fail "unknown bare name is named"
+out="$(cd "$T" && bash "$FILL" t.md 'A=1' 'B=2')" || fail "relative path with no / exits 0"
+[ "$out" = "a 1 b 2 c" ] || fail "relative path with no / fills the file, got [$out]"
 
 # unfilled placeholder: exit 1, nothing on stdout, named on stderr
 printf 'hello __NAME__, __NAME__ again, __OTHER__\n' >"$T/u.md"

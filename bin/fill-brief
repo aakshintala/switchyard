@@ -57,7 +57,8 @@ if [ "$have_out" = 1 ]; then
   esac
 fi
 template="${args[0]}"
-case "$template" in
+# An existing file wins, so a relative path with no / (t.md) keeps working.
+[ -f "$template" ] || case "$template" in
   */*) ;;
   *)
     tname="$template"
