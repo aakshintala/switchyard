@@ -310,7 +310,7 @@ run() {
     fi
   done
   if [ -n "$reviewed" ]; then
-    reviewed_pid="$(git -C "$WT" diff -U0 "origin/main...$reviewed" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}' || true)"
+    reviewed_pid="$(git -C "$WT" diff "origin/main...$reviewed" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}' || true)"
     [ -n "$reviewed_pid" ] || reviewed_pid=none
     reviewed_head="$(git -C "$WT" rev-parse "$reviewed" 2>/dev/null || true)"
   fi
@@ -461,7 +461,7 @@ no_merge "pushed head with a changed patch"
 
 # ===== the last review-pr verdict for --reviewed must approve before merge
 setup
-REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
   {created_at:"2026-11-04T12:00:00Z",id:103,body:("review-pr: patch-id ffffffffffffffffffffffffffffffffffffffff, head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE")},
   {created_at:"2026-11-04T11:00:00Z",id:102,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: CHANGES\n\nP1 finding remains open")},
@@ -471,7 +471,7 @@ ship; expect 5 "last CHANGES verdict refuses merge"; no_merge "last CHANGES verd
 grep -q 'review' <<<"$ERR" || fail "review refusal explains the missing approval: [$ERR]"
 
 setup
-REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
   {created_at:"2026-11-04T11:00:00Z",id:104,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK all findings repaired")}
 ]' >"$ST/review-comments"
@@ -479,7 +479,7 @@ ship; expect 0 "scoped FIX-OK verdict permits merge"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "scoped FIX-OK still merges: [$OUT]"
 
 setup
-REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
   {created_at:"2026-11-04T11:00:00Z",id:105,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## spec (test)\n\nVERDICT spec: CHANGES")}
 ]' >"$ST/review-comments"
@@ -780,7 +780,7 @@ grep -q '^gh pr ready 7 --repo O/N$' "$ST/gh.log" || fail "draft marked ready be
 # SIGTERM during the merged-tree gate restores the pinned head and exits 143
 setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
 O0="$(origin_head)"
-SHIP_TEST_REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')" \
+SHIP_TEST_REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')" \
 SHIP_TEST_REVIEW_HEAD="$HEAD0" bash "$SHIP" 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" \
   --gate 'if [ -e other.txt ]; then /bin/sleep 30 & echo $! >"$ST/gate-sleep.pid"; wait $!; fi' >"$S/kill-out.txt" 2>"$S/kill-err.txt" &
 kill_pid=$!
