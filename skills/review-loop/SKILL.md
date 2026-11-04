@@ -55,7 +55,7 @@ Judge the repair by its diff (`git range-diff origin/main <reviewed head> <new h
 
 - `FIX-OK reviewed=<sha>`: it set `reviewed`; the loop is done.
 - `FIX-INCOMPLETE round=<n>`: the open findings are the next round's findings file (state `findings`); back to step 2. With `STOP-AT-TWO` on the line, go to step 4.
-- `DRIFT`: state, PR and worktree heads differ; reconcile and rerun. `RECOVER job=<id>`: a fix job for this round already exists; rerun with `--resume <id> --prompt <file>`. `CI-WAIT`, `PUSH-FAIL`, `VERIFY-FAIL`: read the digest and the log it names.
+- `DRIFT`: state, PR and worktree heads differ; reconcile and rerun. A worktree ahead of the PR head by the open fix job's own unpushed commits is not drift: the state head moves to the worktree HEAD and the run carries on. `RECOVER job=<id>`: a fix job for this round already exists; rerun with `--resume <id> --prompt <file>`. `CI-WAIT`, `PUSH-FAIL`, `VERIFY-FAIL`: read the digest and the log it names.
 
 The verify prints `review-pr: repair base <sha> (<since> replayed onto <base>)`: it replays the reviewed head onto the current base so the diff holds only the fix round, and needs no action. A line above it saying the head "does not replay cleanly" means the diff also holds the rebase's conflict resolution: judge that part as part of the repair.
 

@@ -165,6 +165,27 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         t set head "$prhead"
         t set fixopen 0
         keep=1
+      elif [ -n "$fjob" ] && [ "$prhead" != "$actual" ] \
+        && { [ "$stored" = "$prhead" ] || [ "$stored" = "$actual" ]; } \
+        && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
+        # Ownership: the ahead commits must be the open job's own. Its
+        # delegate record carries changeSet.headAfter, located the same way
+        # tkt-job locates it; only an exact match with the worktree HEAD
+        # proves no outside commit landed on top.
+        rec="$(bash "$script_dir/job-record" "$fjob" 2>/dev/null || true)"
+        owned=""
+        if [ -n "$rec" ] && [ -f "$rec" ]; then
+          owned="$(jq -r '.result.changeSet.headAfter // ""' "$rec" 2>/dev/null || true)"
+        fi
+        if [ -n "$owned" ] && [ "$owned" = "$actual" ]; then
+          # Carry the validated recovery through tkt-job's head-drift guard
+          # the same way a normal job end does. fixopen stays on the open
+          # slot: its commits are still unpushed, and the dispatch below
+          # re-marks it to the slot that runs next.
+          t set head "$actual"
+          echo "tkt-fix: worktree is ahead of the PR head by open fix job fix$openk's unpushed commits" >&2
+          keep=1
+        fi
       fi
     fi
     [ "$keep" -eq 1 ] || emit "DRIFT" 3 "state head=$stored" "PR head=$prhead" "worktree HEAD=$actual"
