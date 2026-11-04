@@ -1,0 +1,5 @@
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:00:10Z running fiber-core suite
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:03:10Z FAIL [   9.300s] fiber-core doors::open
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:03:11Z thread 'doors::open' panicked at src/doors.rs:12: assertion failed: left == right
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:04:00Z suite failed: 1 failed
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:04:01Z PREFIX-TAIL-4012

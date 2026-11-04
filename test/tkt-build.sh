@@ -445,6 +445,17 @@ grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is j
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
 
+# --- the real lane brief fills and carries the second-patch stop rule (#982) ---
+setup_case real-lane-brief
+cp "$T/home/.agents/skills/planning/briefs/lane.md" "$T/lane-stub.md" || fail "real-lane-brief: keep the stub lane brief"
+cp "$SCRIPT_DIR/../skills/planning/briefs/lane.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: install the real lane brief"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "real-lane-brief exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+brief="$(grep '^run|id=stub-1|' "$T/calls.log" | sed 's/.*prompt=//')"
+cp "$T/lane-stub.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: restore the stub lane brief"
+grep -q 'second patch' "$brief" || fail "real-lane-brief: the filled brief carries the second-patch stop rule"
+grep -q 'STATUS: BLOCKED' "$brief" || fail "real-lane-brief: the filled brief names the BLOCKED stop"
+
 # --- body_ends wins over body_has for the lane ATTRIBUTION ---
 setup_case attr-ends
 bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-ends: set body_has"
@@ -675,7 +686,7 @@ run_build
 expect_verdict "TKT tkt-build GATE-ERROR log=*" "gate-unpushed"
 grep -q "drift" <<<"$OUT" || fail "gate-unpushed: the digest names the drift"
 
-# --- a stale plan stops the build before the lane ---
+# --- an unmarked Files entry is a write and stales when main moves it ---
 setup_case stale
 mkdir -p "$CDIR/seed/src"
 printf 'main change\n' >"$CDIR/seed/src/a.txt"
@@ -693,6 +704,22 @@ run_build
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "stale"
 grep -q "src/a.txt" <<<"$OUT" || fail "stale: the digest names the changed file"
 grep -q "^run|" "$T/calls.log" && fail "stale: the lane never dispatches"
+
+# --- a read-marked Files entry can move on main without staling the build ---
+setup_case stale-read
+printf 'main change\n' >"$CDIR/seed/base.txt"
+git -C "$CDIR/seed" add base.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves read path"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n- `base.txt` (read)\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "stale-read: seed matching verdict base"
+run_build
+[ "$RC" -eq 0 ] || fail "stale-read exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "stale-read"
 
 # --- only a Files line's first backticked token is a pathspec: a later
 # non-path token (/reload) must not fail git, and the changed path still counts ---
@@ -1004,6 +1031,26 @@ run_build
 expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "mapfail"
 grep -q "map failed" <<<"$OUT" || fail "mapfail: the digest notes the map stop"
 
+# --- a map-only tooling note leaves the build state re-runnable ---
+setup_case map-note-only
+printf 'mutant_job=%s\n' Selection >>"$S"
+grep -v '^model\.map=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+run_build
+[ "$RC" -eq 1 ] || fail "map-note-only exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "map-note-only"
+grep -q "map failed: missing model.map" <<<"$OUT" || fail "map-note-only: the digest notes the map stop"
+for key in reviewed findings round; do
+  if bash "$TKT_STATE" "$S" get "$key" >/dev/null 2>&1; then
+    fail "map-note-only: state $key should remain unset"
+  fi
+done
+bash "$TKT_STATE" "$S" set model.map mm || fail "map-note-only: restore map model"
+run_build
+[ "$RC" -eq 1 ] || fail "map-note-only retry exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "map-note-only retry"
+expect_state reviewed "$H" "map-note-only retry"
+expect_state round 0 "map-note-only retry with findings"
+
 # --- a mutant job with no such job name lists no mutants and skips the map ---
 setup_case mutants-nojob
 printf 'mutant_job=%s\n' Other >>"$S"
@@ -1147,6 +1194,54 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-par
 [ "$(grep -c -- ' --axes standards' "$T/calls.log")" -eq 1 ] || fail "review-partial: standards launched once across both runs"
 rv2="$(bash "$TKT_STATE" "$S" get review_ids)"; case " $rv2 " in " r1 "*|" r1"|*" r1"*) ;; *) fail "review-partial: first id reused, got [$rv2]";; esac
 [ "$(printf '%s' "$rv2" | wc -w | tr -d ' ')" -eq 3 ] || fail "review-partial: three ids after recovery, got [$rv2]"
+
+# --- a BAD-VERDICT axis restarts on the rerun; valid axes keep their ids ---
+setup_case bad-verdict-rerun
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+BAD-VERDICT spec VERDICT spec: PASS
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+printf '1' >"$T/collect-rc"
+run_build
+[ "$RC" -eq 1 ] || fail "bad-verdict-rerun first exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "bad-verdict-rerun first"
+rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$rv" = "r1 RESTART r3" ] || fail "bad-verdict-rerun: the spec id restarts, the others stay, got [$rv]"
+[ "$(bash "$TKT_STATE" "$S" get review_head)" = "$H" ] || fail "bad-verdict-rerun: review_head stays on the head"
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+VERDICT spec: APPROVE
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+printf '0' >"$T/collect-rc"
+run_build
+[ "$RC" -eq 0 ] || fail "bad-verdict-rerun second exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "bad-verdict-rerun second"
+[ "$(grep -c -- '--axes standards' "$T/calls.log")" -eq 1 ] || fail "bad-verdict-rerun: standards starts once across both runs"
+[ "$(grep -c -- '--axes spec' "$T/calls.log")" -eq 2 ] || fail "bad-verdict-rerun: spec starts again on the rerun"
+[ "$(grep -c -- '--axes overbuild' "$T/calls.log")" -eq 1 ] || fail "bad-verdict-rerun: overbuild starts once across both runs"
+rv2="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$rv2" = "r1 r4 r3" ] || fail "bad-verdict-rerun: valid ids kept, spec renewed, got [$rv2]"
+
+# --- a collect without one axis's verdict is REVIEW-INCOMPLETE, not CHANGES ---
+setup_case missing-axis-verdict
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+printf '0' >"$T/collect-rc"
+run_build
+[ "$RC" -eq 1 ] || fail "missing-axis-verdict exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "missing-axis-verdict"
+grep -q "spec" <<<"$OUT" || fail "missing-axis-verdict: the digest names spec"
+case "$(first_line)" in "TKT tkt-build CHANGES"*|"TKT tkt-build APPROVE"*) fail "missing-axis-verdict: no CHANGES or APPROVE without every verdict";; esac
+rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$rv" = "r1 RESTART r3" ] || fail "missing-axis-verdict: the spec id restarts, got [$rv]"
+if bash "$TKT_STATE" "$S" get round >/dev/null 2>&1; then fail "missing-axis-verdict: round stays unset so the rerun can proceed"; fi
 
 # --- a moved PR head is rejected before state writes ---
 setup_case moved-head

@@ -36,6 +36,12 @@ LSOF
 chmod 755 "$T/bin/lsof"
 BASE_PATH="$T/bin:$PATH"; export PATH="$BASE_PATH"
 [ "$(command -v df)" = "$T/bin/df" ] || fail "df resolves to the suite's stub, not the host's"
+cat >"$T/bin/cargo" <<'CARGO'
+#!/usr/bin/env bash
+printf 'held=%s\n' "${CARGO_SLOT_HELD-unset}" >"$ST/cargo-held"
+printf 'threads=%s\n' "${NEXTEST_TEST_THREADS-unset}" >"$ST/cargo-threads"
+CARGO
+chmod 755 "$T/bin/cargo"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -130,7 +136,8 @@ gh() (
         if [ -n "$want_failed_log" ]; then
           [ -e "$ST/log-$rid-$job.log" ] && cat "$ST/log-$rid-$job.log" || true
         elif [ -n "$want_log" ]; then
-          [ -e "$ST/log-$rid.log" ] && cat "$ST/log-$rid.log" || true
+          if [ -e "$ST/log-$rid-$job.log" ]; then cat "$ST/log-$rid-$job.log"
+          elif [ -e "$ST/log-$rid.log" ]; then cat "$ST/log-$rid.log"; fi
         else
           case "$json_fields" in
             *attempt*)
@@ -303,7 +310,7 @@ run() {
     fi
   done
   if [ -n "$reviewed" ]; then
-    reviewed_pid="$(git -C "$WT" diff -U0 "origin/main...$reviewed" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}' || true)"
+    reviewed_pid="$(git -C "$WT" diff "origin/main...$reviewed" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}' || true)"
     [ -n "$reviewed_pid" ] || reviewed_pid=none
     reviewed_head="$(git -C "$WT" rev-parse "$reviewed" 2>/dev/null || true)"
   fi
@@ -454,7 +461,7 @@ no_merge "pushed head with a changed patch"
 
 # ===== the last review-pr verdict for --reviewed must approve before merge
 setup
-REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
   {created_at:"2026-11-04T12:00:00Z",id:103,body:("review-pr: patch-id ffffffffffffffffffffffffffffffffffffffff, head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE")},
   {created_at:"2026-11-04T11:00:00Z",id:102,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: CHANGES\n\nP1 finding remains open")},
@@ -464,7 +471,7 @@ ship; expect 5 "last CHANGES verdict refuses merge"; no_merge "last CHANGES verd
 grep -q 'review' <<<"$ERR" || fail "review refusal explains the missing approval: [$ERR]"
 
 setup
-REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
   {created_at:"2026-11-04T11:00:00Z",id:104,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK all findings repaired")}
 ]' >"$ST/review-comments"
@@ -472,7 +479,7 @@ ship; expect 0 "scoped FIX-OK verdict permits merge"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "scoped FIX-OK still merges: [$OUT]"
 
 setup
-REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
   {created_at:"2026-11-04T11:00:00Z",id:105,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## spec (test)\n\nVERDICT spec: CHANGES")}
 ]' >"$ST/review-comments"
@@ -505,6 +512,13 @@ ship; expect 4 "changed added line exits 4"
 no_merge "changed added line"
 
 # ===== exit 1: gate
+setup
+export CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/cargo-slots" CARGO_SLOT_TEST_CORES=12
+ship --gate 'cargo nextest run'; expect 0 "nextest gate takes a cargo slot"
+unset CARGO_SLOTS CARGO_SLOT_DIR CARGO_SLOT_TEST_CORES
+[ "$(cat "$ST/cargo-held")" = "held=1" ] || fail "ship-pr gate cargo did not hold a slot"
+[ "$(cat "$ST/cargo-threads")" = "threads=12" ] || fail "ship-pr gate nextest did not get the per-slot thread cap"
+
 setup
 ship --gate "$GATE_PANIC"
 expect 1 "failing gate"; untouched "failing gate"
@@ -766,7 +780,7 @@ grep -q '^gh pr ready 7 --repo O/N$' "$ST/gh.log" || fail "draft marked ready be
 # SIGTERM during the merged-tree gate restores the pinned head and exits 143
 setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
 O0="$(origin_head)"
-SHIP_TEST_REVIEW_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')" \
+SHIP_TEST_REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')" \
 SHIP_TEST_REVIEW_HEAD="$HEAD0" bash "$SHIP" 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" \
   --gate 'if [ -e other.txt ]; then /bin/sleep 30 & echo $! >"$ST/gate-sleep.pid"; wait $!; fi' >"$S/kill-out.txt" 2>"$S/kill-err.txt" &
 kill_pid=$!
@@ -1247,6 +1261,7 @@ setup; echo true >"$ST/draft"
 ship; expect 0 "repo without the mutants label passes unchecked"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "unchecked repo merged line: [$OUT]"
 ! grep -q -- '--json labels' "$ST/gh.log" || fail "unchecked repo: no PR label read"
+! grep -q '^gh run list' "$ST/gh.log" || fail "no mutants-gate flag: no run lookup"
 
 # a repo with other labels only is not checked either
 setup; echo true >"$ST/draft"; repo_labels '[{"name":"docs"}]'
@@ -1256,6 +1271,38 @@ ship; expect 0 "repo with other labels passes unchecked"
 setup; repo_labels "$MUTANTS_LABEL"
 ship; expect 0 "non-draft skips the mutants check"
 ! grep -q -- '--json labels' "$ST/gh.log" || fail "non-draft: no PR label read"
+
+# ===== --mutants-gate: before ready, require a label or zero-mutant proof
+setup; echo true >"$ST/draft"; on_pr_labels "$MUTANTS_LABEL"
+ship --mutants-gate; expect 0 "mutants gate accepts the PR label"
+! grep -q '^gh run list' "$ST/gh.log" || fail "mutants label: no run lookup needed"
+grep -q -- '--json labels' "$ST/gh.log" || fail "mutants label: PR labels read"
+
+setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:417,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-417.json"
+echo 'mutants in the diff: 0' >"$ST/log-417-901.log"
+ship --mutants-gate; expect 0 "mutants gate accepts completed zero-mutant proof"
+grep -q 'gh run list.*--commit' "$ST/gh.log" || fail "zero-mutant proof: run list is pinned to the head"
+grep -q 'gh run view 417.*--job 901 --log' "$ST/gh.log" || fail "zero-mutant proof: Selection job log read"
+
+setup; echo true >"$ST/draft"
+ship --mutants-gate; expect 5 "mutants gate rejects no label and no proof"
+no_merge "mutants gate without proof"
+grep -q 'mutants gate failed' <<<"$ERR" || fail "mutants gate failure names the check: [$ERR]"
+! grep -q 'gh label create\|gh label edit' "$ST/gh.log" || fail "mutants gate never adds a label"
+
+setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:416,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:00:00Z"},{databaseId:417,status:"in_progress",conclusion:null,headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-416.json"
+echo 'mutants in the diff: 0' >"$ST/log-416-901.log"
+ship --mutants-gate; expect 5 "mutants gate rejects an in-progress current-head run"
+no_merge "mutants gate with in-progress run"
+grep -q 'mutants gate failed' <<<"$ERR" || fail "in-progress gate failure names the check: [$ERR]"
+
+setup; ship --mutants-gate; expect 0 "mutants gate leaves an already-ready PR alone"
+! grep -q -- '--json labels' "$ST/gh.log" || fail "already-ready PR: no label read"
+! grep -q '^gh run list' "$ST/gh.log" || fail "already-ready PR: no run lookup"
 
 # (d) --no-mutants-label skips the check and prints the reason
 setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"

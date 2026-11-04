@@ -1,0 +1,35 @@
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:00:10Z running fiber-core suite
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:03:10Z FAIL [   9.300s] fiber-core doors::open
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:03:11Z thread 'doors::open' panicked at src/doors.rs:12
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:04:00Z suite failed: 1 failed
+Tests (ubuntu-24.04)	Run tests	2026-10-09T17:04:01Z STEP-TAIL-4112
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:01Z cleanup line 1 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:02Z cleanup line 2 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:03Z cleanup line 3 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:04Z cleanup line 4 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:05Z cleanup line 5 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:06Z cleanup line 6 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:07Z cleanup line 7 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:08Z cleanup line 8 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:09Z cleanup line 9 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:10Z cleanup line 10 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:11Z cleanup line 11 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:12Z cleanup line 12 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:13Z cleanup line 13 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:14Z cleanup line 14 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:15Z cleanup line 15 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:16Z cleanup line 16 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:17Z cleanup line 17 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:18Z cleanup line 18 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:19Z cleanup line 19 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:20Z cleanup line 20 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:21Z cleanup line 21 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:22Z cleanup line 22 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:23Z cleanup line 23 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:24Z cleanup line 24 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:25Z cleanup line 25 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:26Z cleanup line 26 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:27Z cleanup line 27 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:28Z cleanup line 28 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:29Z cleanup line 29 archiving artifacts
+Tests (ubuntu-24.04)	Cleanup	2026-10-09T17:05:30Z CLEANUP-4112

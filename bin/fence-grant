@@ -3,8 +3,9 @@
 #   [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>]
 #   [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]
 # Decides whether flywheel may grant the paths alone: a path conflicts with an
-# open PR touching the same file (or hunk range) and with a live lane (or a
-# fresh grant file) holding it. Fail closed: any failed or unparseable probe
+# open PR touching the same file (or hunk range), a live lane (or a fresh grant
+# file), and a live file-claim entry holding it. Stale claims are logged and
+# ignored. Fail closed: any failed or unparseable probe
 # prints ERROR, writes nothing and exits 3. Exit 0 + GRANT lines (and a grant
 # file, unless --dry) when free; exit 1 + HELD lines on conflict; exit 2 on
 # bad arguments. A whole-file hold by a pull request also prints that holder's
@@ -245,6 +246,7 @@ case "$paths" in
 esac
 
 run=$(_fw_run)
+file_claim="${FW_FILE_CLAIM:-$(dirname "$0")/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"
 locked=0
@@ -634,6 +636,52 @@ lanes=$(printf '%s\n' $mac_names $box_names $pimac_names $pibox_names $dmac_name
 
 held=""
 
+# file-claim is a holder source too. Validate the complete list before using
+# any row; a failed or partial read must never turn into an empty fence.
+claims_out="$tmp/claims.out"
+claims_err="$tmp/claims.err"
+if "$file_claim" list --repo "$repo" >"$claims_out" 2>"$claims_err"; then
+  python3 -c 'import sys
+for line in sys.stdin:
+  fields = line.rstrip("\n").split("\t")
+  if len(fields) != 6:
+    sys.exit(1)
+  path, lane, kind, age, worktree, pr = fields
+  if not path or not lane or kind not in ("plan", "grant") or not age.isdigit() or not worktree:
+    sys.exit(1)
+  if pr and any(not item.isdigit() for item in pr.split(",")):
+    sys.exit(1)
+  print(path + "\t" + lane)' <"$claims_out" >"$tmp/claims.tsv" 2>/dev/null || {
+    echo "ERROR file-claim list unparseable claims"
+    exit 3
+  }
+else
+  g=$(head -c 200 "$claims_err" 2>/dev/null | tr '\n' ' ')
+  echo "ERROR file-claim list $g"
+  exit 3
+fi
+
+_claim_holders() {
+  while IFS="$(printf '\t')" read -r claim_path claim_lane; do
+    [ -n "$claim_path" ] || continue
+    claim_num=""
+    case "$claim_lane" in fiber-*) claim_num=$(_lane_num "${claim_lane#fiber-}");; esac
+    [ "$claim_num" != "$ticket" ] || continue
+    [ -z "$ignoreticket" ] || [ "$claim_num" != "$ignoreticket" ] || continue
+    live=0
+    for ln in $lanes; do [ "$ln" = "$claim_lane" ] && { live=1; break; }; done
+    if [ "$live" -eq 0 ]; then
+      echo "STALE $claim_path by $claim_lane"
+      continue
+    fi
+    normalized=$(_norm_tok "$claim_path")
+    : >"$tmp/claim-entries"
+    printf '%s\n' "$normalized" >"$tmp/claim-entries"
+    if [ -n "$claim_num" ]; then claim_label="lane #$claim_num"; else claim_label="lane $claim_lane"; fi
+    _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label"
+  done <"$tmp/claims.tsv"
+}
+
 # --- PR side: a rename holds old and new; created/binary/hunkless hold all ---
 _pr_touched() {
   # $1 = PR number. Writes touched "normbase|sectionbase" lines to $tmp/touched-$1.
@@ -1004,6 +1052,8 @@ _check_entries() {
   return 0
 }
 
+_claim_holders
+
 # live lanes: notes + their grant files
 for ln in $lanes; do
   case "$ln" in fiber-*) suf=${ln#fiber-};; *) continue;; esac
@@ -1102,6 +1152,77 @@ if [ -n "$(printf '%s' "$held" | grep .)" ]; then
   exit 1
 fi
 
+# --- the grant records itself in the claims ledger ---
+# A file claim holds each granted path whole. --plan, not --grant: the grant cap
+# counts grants, and a lane's whole path set must claim as one; re-claiming the
+# same lane and kind is an idempotent no-op. Reads hold nothing and are never
+# claimed. A dry run probes only and claims nothing.
+if [ "$dry" -eq 0 ]; then
+  fc_args=(); fc_ranges=""
+  while IFS='|' read -r _rf _rs _re; do
+    [ -n "$_rf" ] || continue
+    fc_ranges="${fc_ranges:+$fc_ranges,}$_rf:$_rs-$_re"
+  done <"$tmp/rspec"
+  while IFS= read -r _cp; do
+    [ -n "$_cp" ] || continue
+    _cp=${_cp#./}
+    _cp=${_cp%/}
+    [ -n "$_cp" ] || continue
+    fc_args+=("$_cp")
+  done < "$tmp/plist"
+  if [ "${#fc_args[@]}" -gt 0 ]; then
+    fc_cmd=("$file_claim" claim --lane "fiber-$ticket" --plan --repo "$repo")
+    # Every PR skipped above as this ticket's own, plus --ignore-pr, must
+    # exempt the claim too, or the ledger refuses a path the own PR holds.
+    # file-claim takes one --self-pr per flag; each exempt PR gets its own.
+    _seen_self=""
+    # shellcheck disable=SC2086
+    for _op in $ownprs $ignore; do
+      [ -n "$_op" ] || continue
+      case " $_seen_self " in *" $_op "*) continue;; esac
+      _seen_self="$_seen_self $_op"
+      fc_cmd+=(--self-pr "$_op")
+    done
+    if [ -n "$fc_ranges" ]; then
+      # The fence probe checked these PRs by hunk; exempt them from the
+      # file-level PR check before recording the whole-file claim.
+      for _op in $prs; do
+        [ -n "$_op" ] || continue
+        case " $_seen_self " in *" $_op "*) continue;; esac
+        _seen_self="$_seen_self $_op"
+        fc_cmd+=(--self-pr "$_op")
+      done
+    fi
+    fc_cmd+=(-- "${fc_args[@]}")
+    if "${fc_cmd[@]}" >"$tmp/fc-out" 2>"$tmp/fc-err"; then
+      :
+    else
+      fc_rc=$?
+      if [ "$fc_rc" -eq 1 ]; then
+        awk '
+$1 == "REFUSE" && NF >= 3 {
+  p = $2; h = $3; line = ""
+  if (h ~ /^pr#[0-9][0-9]*$/) line = "HELD " p " by PR #" substr(h, 4)
+  else if (h ~ /^lane:fiber-[0-9][0-9]*$/) { n = h; sub(/^lane:fiber-/, "", n); line = "HELD " p " by lane #" n }
+  else if (h ~ /^lane:/) line = "HELD " p " by lane " substr(h, 6)
+  else if (h == "cap") line = "HELD " p " by file-claim grant cap"
+  else line = "HELD " p " by file-claim " h
+  if (!seen[line]++) print line
+  next
+}
+$1 == "GRANT" || $1 == "file-claim:" || NF == 0 { next }
+{ if (!seen[$0]++) print }' "$tmp/fc-out" > "$tmp/fc-held"
+        if [ -s "$tmp/fc-held" ]; then cat "$tmp/fc-held"; else cat "$tmp/fc-out"; fi
+        exit 1
+      else
+        g=$(head -c 200 "$tmp/fc-err" 2>/dev/null | tr '\n' ' ')
+        echo "ERROR file-claim claim $g"
+        exit 3
+      fi
+    fi
+  fi
+fi
+
 # --- grant: locked numbering over existing files (unnumbered counts as 1) ---
 if [ "$dry" -eq 0 ]; then
   lock_tries=${FW_LOCK_TRIES:-50}
@@ -1136,7 +1257,7 @@ if [ "$dry" -eq 0 ]; then
     printf 'Grant %s (fence-grant, %s)\n\nTicket: %s\nPaths:\n' "$k" "$nowd" "$ticket"
     sed 's/^/- /' < "$tmp/plist"
     if [ -n "$ranges" ]; then printf 'Ranges: %s\n' "$ranges"; else printf 'Ranges: none\n'; fi
-    printf '\nNo open PR or live lane holds these paths (checked open PRs:%s; live lanes:%s).\n' " $prs" " $lanes"
+    printf '\nNo open PR, live lane or live claim holds these paths (checked open PRs:%s; live lanes:%s; claims).\n' " $prs" " $lanes"
     # An `&&` here would be the group's last command and would fail it when there is nothing to skip.
     if [ -n "$ownprs" ]; then printf 'Skipped this ticket own open PRs:%s.\n' " $ownprs"; fi
     # Last in the file, and nothing may follow: `Reads:` latches the lane hold

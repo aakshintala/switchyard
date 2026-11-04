@@ -3,6 +3,7 @@
 # Longest wait: four ship-pr attempts x five CI waits x 7200 s, plus the gate.
 # Usage: tkt-ship <state>
 # State key no_mutants_label: reason passed to ship-pr as --no-mutants-label.
+# State key mutant_job opts ship-pr into its --mutants-gate check.
 # State key body_ends: text passed to ship-pr as --body-ends; absent, unreadable,
 # empty or blank passes no flag and asks for no check.
 set -euo pipefail
@@ -133,6 +134,9 @@ while IFS= read -r b; do
   [ -n "$b" ] || continue
   args+=(--body-has "$b")
 done <<<"$(tkt list body_has 2>/dev/null || true)"
+if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
+  args+=(--mutants-gate)
+fi
 if u="$(tkt get unverified 2>/dev/null)" && [ -n "$u" ]; then
   u="$(abspath "$u")" || {
     msg="tkt-ship: relative path does not exist as given: $u"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>]
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require a matching
@@ -52,7 +52,11 @@
 #        must carry it before ship-pr marks it ready, so mutants run on the
 #        draft from the first push; a repo without the label is not checked,
 #        and neither is a PR that is already ready. A draft without the label
-#        exits 5. --no-mutants-label <reason> skips the check and prints the reason.
+#        exits 5. --no-mutants-label <reason> skips this legacy check and prints
+#        the reason; --mutants-gate still requires its label or completed-run proof.
+#        --mutants-gate opts in to requiring a draft's `mutants` label or a
+#        completed run on the pinned head whose Selection job log contains
+#        `mutants in the diff: 0`; an in-progress or absent run fails before ready.
 #        Step 2 runs pr-closes just after the --body-has check, before any gate,
 #        rebase, push or CI wait. With --allow-commit-closes, a stray match whose
 #        report's second field is `commit <sha>` is printed to stderr as a warning
@@ -136,7 +140,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>]" >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
   echo "       longest wait: 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
   exit 2
 }
@@ -283,15 +287,19 @@ gate_preflight() {
 }
 
 run_gate() {
-  local output_file
+  local output_file cargo_slot_dir
   output_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-gate.XXXXXX")"
-  if (cd "$worktree" && NEXTEST_RETRIES=1 bash -c "$gate" </dev/null) >"$output_file" 2>&1; then
+  cargo_slot_dir="$(mktemp -d "${TMPDIR:-/tmp}/ship-pr-cargo-slot.XXXXXX")"
+  ln -s "$here/cargo-slot" "$cargo_slot_dir/cargo"
+  if (cd "$worktree" && PATH="$cargo_slot_dir:$PATH" NEXTEST_RETRIES=1 bash -c "$gate" </dev/null) >"$output_file" 2>&1; then
+    rm -rf "$cargo_slot_dir"
     if report_flakes "$output_file"; then
       GH_CI_LOG_LINES=0 bash "$here/gh-ci" panics <"$output_file" >&2
     fi
     rm -f "$output_file"
     return 0
   fi
+  rm -rf "$cargo_slot_dir"
   report_flakes "$output_file" || true
   tail -n 20 "$output_file" || true
   GH_CI_LOG_LINES=20 bash "$here/gh-ci" panics <"$output_file"
@@ -303,11 +311,12 @@ run_gate() {
 ship_args=("$@")
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" keep_branch="" no_mutants_label=""
+repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" keep_branch="" no_mutants_label="" mutants_gate=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow-commit-closes) allow_commit_closes=1; shift; continue ;;
     --keep-branch) keep_branch="requested by --keep-branch"; shift; continue ;;
+    --mutants-gate) mutants_gate=1; shift; continue ;;
   esac
   [ $# -ge 2 ] || usage
   case "$1" in
@@ -448,16 +457,18 @@ authority_scan <<<"$comments_text"
 # run on the draft from the first push. Checked here, beside --body-has, so
 # a draft with no map costs no push and no CI wait. A repo without the label
 # is not checked.
-if [ -n "$no_mutants_label" ]; then
-  say "skipping the mutants-label check: $no_mutants_label"
-elif [ "$draft" = "true" ]; then
-  repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name')" \
-    || die 2 "cannot read labels in $repo"
-  if grep -qx 'mutants' <<<"$repo_labels"; then
-    pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name')" \
-      || die 2 "cannot read PR $pr labels"
-    grep -qx 'mutants' <<<"$pr_labels" \
-      || die 5 "PR lacks the mutants label; open it with --label mutants or pass --no-mutants-label <reason>"
+if [ -z "$mutants_gate" ]; then
+  if [ -n "$no_mutants_label" ]; then
+    say "skipping the mutants-label check: $no_mutants_label"
+  elif [ "$draft" = "true" ]; then
+    repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name')" \
+      || die 2 "cannot read labels in $repo"
+    if grep -qx 'mutants' <<<"$repo_labels"; then
+      pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name')" \
+        || die 2 "cannot read PR $pr labels"
+      grep -qx 'mutants' <<<"$pr_labels" \
+        || die 5 "PR lacks the mutants label; open it with --label mutants or pass --no-mutants-label <reason>"
+    fi
   fi
 fi
 
@@ -522,6 +533,12 @@ patch_id() {
   echo "${id:-none}"
 }
 
+review_patch_id() {
+  local id
+  id="$(git -C "$worktree" diff "origin/main...$1" | git patch-id --stable | awk '{print $1}')"
+  echo "${id:-none}"
+}
+
 # review_verdict REPO PR PATCH_ID: print approved, unverified, changes,
 # incomplete, missing or invalid for the newest review-pr comment on PATCH_ID.
 review_verdict() {
@@ -581,7 +598,7 @@ review_verdict() {
   esac
 }
 
-reviewed_patch_id="$(patch_id "$reviewed")"
+reviewed_patch_id="$(review_patch_id "$reviewed")"
 review_state="$(review_verdict "$repo" "$pr" "$reviewed_patch_id")" \
   || die 1 "cannot read review-pr comments on PR $pr in $repo"
 case "$review_state" in
@@ -671,6 +688,32 @@ ci_failed_run_ids() {
   printf '%s\n' "$ids"
 }
 
+check_mutants_gate() {
+  local pr_labels run_list latest run_id run_status job_id
+  pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null)" \
+    || die 5 "mutants gate failed: cannot read PR labels"
+  grep -qx 'mutants' <<<"$pr_labels" && return 0
+
+  run_list="$(gh run list --repo "$repo" --commit "$pin" --limit 100 --json databaseId,status,conclusion,headSha,createdAt 2>/dev/null)" \
+    || die 5 "mutants gate failed: cannot read runs on PR head $pin"
+  latest="$(jq -r --arg head "$pin" '[.[] | select(.headSha == $head)] | sort_by([.createdAt // "", .databaseId]) | last // empty | [.databaseId // "", .status // ""] | @tsv' <<<"$run_list" 2>/dev/null)" \
+    || die 5 "mutants gate failed: cannot read runs on PR head $pin"
+  [ -n "$latest" ] || die 5 "mutants gate failed: no completed Selection log on PR head $pin proves mutants in the diff: 0"
+  IFS=$'\t' read -r run_id run_status <<<"$latest"
+  [ "$run_status" = "completed" ] \
+    || die 5 "mutants gate failed: latest run on PR head $pin is not completed"
+
+  job_id="$(gh run view "$run_id" --repo "$repo" --json jobs --jq '[.jobs[] | select(.name == "Selection") | .databaseId] | last // empty' 2>/dev/null)" \
+    || die 5 "mutants gate failed: cannot read Selection job from run $run_id"
+  [ -n "$job_id" ] \
+    || die 5 "mutants gate failed: run $run_id has no Selection job"
+  if gh run view "$run_id" --repo "$repo" --job "$job_id" --log 2>/dev/null \
+    | grep -Fqx 'mutants in the diff: 0'; then
+    return 0
+  fi
+  die 5 "mutants gate failed: Selection log on run $run_id does not prove mutants in the diff: 0"
+}
+
 # Step 3: the gate runs once, on the PR head, before any rebase or push. It checks
 # code; it never changes what was reviewed. CI covers the rebased head.
 if [ -n "$gate" ]; then
@@ -730,6 +773,7 @@ while :; do
       lease="$pin"
     fi
     if [ "$draft" = "true" ]; then
+      [ -z "$mutants_gate" ] || check_mutants_gate
       say "marking PR $pr ready"
       gh pr ready "$pr" --repo "$repo" >&2 || die 1 "gh pr ready failed"
       draft=false

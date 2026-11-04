@@ -269,6 +269,9 @@ printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":7,"
 export GH_PRS_JSON="$T/prs3.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 --repo test/repo --self-pr 42 a.txt 2>/dev/null)" && fail "other-PR claim exits non-zero"
 [ "$out" = "$(printf 'REFUSE a.txt pr#7\nfile-claim: 0 granted, 1 refused')" ] || fail "other PR still refuses: $out"
+# a repeated --self-pr exempts every own PR, not only the last.
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 --repo test/repo --self-pr 7 --self-pr 42 a.txt 2>&1)" || fail "two self-prs exit 0: $out"
+[ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "two self-prs exempt both: $out"
 export GH_PRS_JSON="$T/prs-empty.json"
 
 # --- other-lane refusal; own re-claim is an idempotent no-op -------------------

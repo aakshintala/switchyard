@@ -136,6 +136,14 @@ expect_state() {
     grep -q "tkt-start $step" "$j" || fail "$1: journal misses ${step}step"
   done
 }
+# A missing worktree needs a repository checkout as its starting point.
+setup norepo ONE AGAINST
+mkdir -p "$T/nonrepo"
+[ ! -e "$WT" ] || fail "norepo: worktree unexpectedly exists"
+RC=0; OUT="$(cd "$T/nonrepo" && bash "$TKT" "${ARGS[@]}" 2>"$CDIR/stderr")" || RC=$?
+want "STEP-FAIL step=repo rc=128" 128 norepo
+case "$OUT" in *"run from inside acme/widget's checkout"*) ;; *) fail "norepo: failure misses checkout guidance" ;; esac
+[ ! -e "$RUN/widget-42.state" ] || fail "norepo: state was written"
 # current, plus the resume path: a rerun reuses the worktree with no dup lines.
 setup current ONE AGAINST; run_start
 want "CURRENT " 0 current
@@ -786,7 +794,7 @@ want "CURRENT " 0 bodyendse2e
 grep -qF 'body_ends=X' "$RUN/widget-42.state" || fail "bodyendse2e: state misses [body_ends=X]"
 S2E_STATE="$RUN/widget-42.state"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set pr 7
-bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set reviewed rev123
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set reviewed "$(git -C "$WT" rev-parse HEAD)"
 S2E_HEAD="$(git -C "$WT" rev-parse HEAD)"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set head "$S2E_HEAD"
 printf '%s' "$S2E_HEAD" >"$T/prhead"
@@ -807,7 +815,7 @@ part_seed_pr() {
 # identity and any model role not overridden by the new invocation.
 setup partmerged ONE AGAINST; part_seed_pr partmerged
 S="$RUN/widget-42.state"; ARCHIVE="$S.part1"
-bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set reviewed r1
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set reviewed "$part_actual"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan /x
 journal_before="$(cat "$RUN/widget-42.journal")"
 printf 'MERGED\n' >"$T/prstate"
@@ -893,6 +901,20 @@ want "CURRENT " 0 partmodel
 grep -qF -- 'model.lane=new' "$S" || fail "partmodel: state misses [model.lane=new]"
 grep -qE '^model\.lane=old$' "$S" && fail "partmodel: stale model.lane value remains"
 [ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "partmodel: state wants 1 model.lane"
+
+# A part split carries the plan verdict: the plan is shared across parts, so
+# the new part keeps plan_verdict and plan_verdict_base and the build does
+# not refuse with verdict=none.
+setup partverdict ONE AGAINST; part_seed_pr partverdict
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict ok
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict_base "$FILING"
+printf 'MERGED\n' >"$T/prstate"
+reload --model; run_start --part 2
+want "CURRENT " 0 partverdict
+grep -qF -- 'plan_verdict=ok' "$S" || fail "partverdict: state misses [plan_verdict=ok]"
+grep -qF -- "plan_verdict_base=$FILING" "$S" || fail "partverdict: state misses [plan_verdict_base=$FILING]"
+grep -qF -- 'plan_verdict=ok' "$S.part1" || fail "partverdict: archive misses [plan_verdict=ok]"
 
 # An invalid stored part is reported, and a missing part above part 1 is not inferred.
 setup partnonnumeric ONE AGAINST; part_seed_pr partnonnumeric

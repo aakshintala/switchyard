@@ -1,0 +1,5 @@
+2026-10-09T17:00:10Z starting journey suite
+2026-10-09T17:02:10Z FAIL [   3.200s] journey basic::flow
+2026-10-09T17:02:11Z thread 'basic::flow' panicked at src/journey.rs:9
+2026-10-09T17:04:30Z journey suite failed: 1 failed
+JOURNEY-TAIL-3011

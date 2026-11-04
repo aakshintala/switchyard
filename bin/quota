@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # quota: AI subscription quota from the QuotaBar feed, one line per provider.
-# Usage: quota [--json]   (--json prints the raw feed)
+# Usage: quota [--json | --route]   (--json prints the raw feed; --route prints
+# the healthiest backend per ladder tier, e.g. "tier strong: codex (healthy)")
 # QUOTA_FEED overrides the feed URL (default http://127.0.0.1:8787/quotas).
 set -euo pipefail
 FEED="${QUOTA_FEED:-http://127.0.0.1:8787/quotas}"
@@ -14,6 +15,48 @@ fi
 if [[ "${1:-}" == "--json" ]]; then
   printf '%s\n' "$json"
   exit 0
+fi
+
+if [[ "${1:-}" == "--route" ]]; then
+  # One line per ladder tier: the healthiest provider eligible for that tier.
+  # Depleted and unavailable providers are excluded, and ties keep the tier
+  # list's order (the earliest provider with the best status wins).
+  # The per-tier provider lists mirror the `delegate models` TIERS column and
+  # skills/delegate/SKILL.md, cheapest `$OUT/1M` first (`openai/*` models
+  # count as `codex`), and must change with them.
+  TIERS="standard strong frontier"
+  STANDARD="muse opencode-go claude codex cursor"
+  STRONG="muse opencode-go claude codex cursor"
+  FRONTIER="cursor codex claude"
+  FAILED=0
+  for tier in $TIERS; do
+    case "$tier" in
+      standard) ORDER="$STANDARD" ;;
+      strong) ORDER="$STRONG" ;;
+      frontier) ORDER="$FRONTIER" ;;
+    esac
+    pick="$(jq -r --arg order "$ORDER" '
+      def rank: {"healthy":0,"warning":1,"critical":2}[.] // 3;
+      ($order | split(" ")) as $ids
+      | ([$ids[]] | to_entries | map({(.value): .key}) | add) as $pos
+      | [ .providers[]
+          | select(.id as $id | $ids | index($id))
+          | select(.unavailable == null and .status != "depleted")
+          | {id: .id, status: .status, r: (.status | rank), p: $pos[.id]}
+        ]
+      | if length == 0 then empty
+        else (map(.r) | min) as $best
+        | ([.[] | select(.r == $best)] | sort_by(.p) | .[0]
+           | "\(.id) (\(.status))")
+        end' <<<"$json")"
+    if [ -z "$pick" ]; then
+      echo "tier $tier: none"
+      FAILED=1
+    else
+      echo "tier $tier: $pick"
+    fi
+  done
+  exit "$FAILED"
 fi
 
 jq -r '.providers[] | if .unavailable then "\(.id) [\(.status), unavailable]: \(.unavailable)" else "\(.id) [\(.status)]: \([.quotas[] | "\(.label) \(if .percentRemaining then "\(.percentRemaining|floor)%" else "\(.balanceRemaining) \(.balanceUnit // "")" end) (\(.resetText // "no reset"))"] | join(", "))" end' <<<"$json"

@@ -95,6 +95,9 @@ fail_step() {
   [ $# -ge 3 ] && [ -n "$3" ] && msg="$msg: $(printf '%s' "$3" | tail -n 20)"
   printf '%s\n' "$msg" >&2; emit "STEP-FAIL step=$1 rc=$2" "$2" "$msg"
 }
+if [ ! -e "$worktree" ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
+  fail_step repo 128 "run from inside $repo's checkout"
+fi
 deny() { printf '%s\n' "$3" >&2; emit "$1" "$2" "$3"; }
 lockdir="$state.lock"; lock_owned=0
 lock_or_busy() {
@@ -145,8 +148,15 @@ if [ "$part_given" -eq 1 ]; then
           deny "PRECONDITION part=$part archive=$archive" 2 "tkt-start: archive already exists: $archive"
         fi
         carried_models=()
+        carried_verdict=""; carried_verdict_base=""; verdict_seen=0; verdict_base_seen=0
         while IFS= read -r state_line || [ -n "$state_line" ]; do
           case "$state_line" in
+            plan_verdict_base=*)
+              carried_verdict_base="${state_line#plan_verdict_base=}"; verdict_base_seen=1
+              ;;
+            plan_verdict=*)
+              carried_verdict="${state_line#plan_verdict=}"; verdict_seen=1
+              ;;
             model.*=*)
               model_key="${state_line%%=*}"; model_role="${model_key#model.}"; model_replaced=0
               for m in ${models[@]+"${models[@]}"}; do
@@ -164,6 +174,8 @@ if [ "$part_given" -eq 1 ]; then
         for model_line in ${carried_models[@]+"${carried_models[@]}"}; do
           tkt add "${model_line%%=*}" "${model_line#*=}"
         done
+        if [ "$verdict_seen" -eq 1 ]; then tkt set plan_verdict "$carried_verdict"; fi
+        if [ "$verdict_base_seen" -eq 1 ]; then tkt set plan_verdict_base "$carried_verdict_base"; fi
         tkt journal "tkt-start archived state part$locked_part pr=$pr -> $archive"
       fi
     fi

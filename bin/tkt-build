@@ -134,6 +134,9 @@ base="$(plan_base "$plan" 2>/dev/null || true)"
 # read every token (lib/plan-tokens.sh) because they check coverage, not staleness.
 plan_files=()
 while IFS= read -r p; do plan_files+=("$p"); done < <(plan_files_pathspecs "$plan")
+# Verdict-base validation considers all entries; only writes can stale against main.
+stale_files=()
+while IFS= read -r p; do stale_files+=("$p"); done < <(plan_files_pathspecs "$plan" writes)
 # debt: a copy of tkt-plan's plan_verdict_ok (and its write pair in do_verify and do_confirm).
 # Ceiling: two copies plus the write pair, in tkt-plan and tkt-build. Upgrade trigger: a third
 # caller of the verdict check; then move it to bin/lib/ and source it from both scripts.
@@ -168,10 +171,10 @@ else
   [ -n "$verdict_base" ] || verdict_base=none
   emit "VERDICT-REFUSED verdict=$verdict_refusal" 1 "plan_verdict=$verdict plan_verdict_base=$verdict_base plan_base=$base"
 fi
-if [ "${#plan_files[@]}" -gt 0 ]; then
-  stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${plan_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+if [ "${#stale_files[@]}" -gt 0 ]; then
+  stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${stale_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
   if [ -n "$stat_out" ]; then
-    n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${plan_files[@]}" 2>/dev/null | wc -l | tr -d ' ')"
+    n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${stale_files[@]}" 2>/dev/null | wc -l | tr -d ' ')"
     emit "STALE n=$n base=$base" 1 "$stat_out"
   fi
 fi
@@ -293,14 +296,24 @@ if [ "$mutant_count" -gt 0 ]; then
 fi
 r0="$(tkt get review_ids 2>/dev/null || true)"; rh="$(tkt get review_head 2>/dev/null || true)"; rids=""; [ "$rh" = "$head" ] && rids="$r0"
 spec_issue="$(tkt get spec_issue 2>/dev/null || true)"
-n=0; for ax in standards spec overbuild; do n=$((n+1)); [ "$(printf '%s' "$rids" | wc -w | tr -d ' ')" -ge "$n" ] && continue
+# A RESTART slot holds no reusable job: a collect that reported
+# BAD-VERDICT or unrestorable UNFINISHED for that axis replaced its id,
+# so this run starts the axis again and keeps the other ids.
+n=0; for ax in standards spec overbuild; do n=$((n+1))
+  slot="$(printf '%s' "$rids" | awk -v n="$n" '{print $n}')"
+  case "$slot" in ''|RESTART) ;; *) continue;; esac
   start_args=(start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review")
   if [ -n "$spec_issue" ]; then start_args+=(--spec "$spec_issue"); fi
   if [ "${#context_args[@]}" -gt 0 ]; then start_args+=("${context_args[@]}"); fi
   rc=0; one="$("$reviewpr" "${start_args[@]}" 2>"$tmpd/start-$ax-err")" || rc=$?
   [ "$rc" -eq 0 ] || { [ -n "$rids" ] && { tkt set review_ids "$rids"; tkt set review_head "$head"; }; emit "REVIEW-INCOMPLETE" "$rc" "$(tail -n 20 "$tmpd/start-$ax-err")"; }
   id="$(awk -v a="$ax" '$1==a{print $2; exit}' <<<"$one")"; [ -n "$id" ] || emit "REVIEW-INCOMPLETE" 1 "missing $ax id"
-  rids="${rids:+$rids }$id"; tkt set review_ids "$rids"; tkt set review_head "$head"; done
+  if [ "$(printf '%s' "$rids" | wc -w | tr -d ' ')" -ge "$n" ]; then
+    rids="$(printf '%s' "$rids" | awk -v n="$n" -v v="$id" '{ $n=v; print }')"
+  else
+    rids="${rids:+$rids }$id"
+  fi
+  tkt set review_ids "$rids"; tkt set review_head "$head"; done
 # The shard verdicts wait overlaps review: it starts once the review pair is
 # dispatched and ends before the watch, so slow shards never serialize round 1.
 # The 2400 s bound counts from the start of the wait, beside the review pair.
@@ -398,8 +411,53 @@ if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
 fi
 findings_file="$run/$slug-$issue-findings-r0.md"
 rc=0; collect_out="$("$reviewpr" collect $rids --findings-out "$findings_file" 2>"$tmpd/collect-err")" || rc=$?
+# drop_bad_axes: print rids with the ids of axes that left no reusable
+# state replaced by RESTART, so the next run on this head starts those
+# axes again and keeps the ids of the axes that gave valid verdicts. A
+# BAD-VERDICT job is finished and its worktree is gone, so it can never
+# be resumed; an UNFINISHED axis without a resume line for its id is
+# likewise unrestorable. A RUNNING axis and an UNFINISHED axis with a
+# resume line keep their ids.
+drop_bad_axes() {
+  local kept="$rids" n ax slot
+  n=0
+  for ax in standards spec overbuild; do
+    n=$((n + 1))
+    slot="$(printf '%s' "$kept" | awk -v n="$n" '{print $n}')"
+    [ -n "$slot" ] || continue
+    if grep -qE "^BAD-VERDICT $ax([[:space:]]|$)" <<<"$collect_out"; then
+      :
+    elif grep -qE "^RUNNING $ax([[:space:]]|$)" <<<"$collect_out"; then
+      continue
+    elif { grep -qE "^UNFINISHED $ax([[:space:]]|$)" <<<"$collect_out" || grep -qF "UNFINISHED $slot " <<<"$collect_out"; } &&
+         ! grep -qF "resume: delegate resume $slot " <<<"$collect_out"; then
+      :
+    else
+      continue
+    fi
+    kept="$(printf '%s' "$kept" | awk -v n="$n" '{ $n="RESTART"; print }')"
+  done
+  printf '%s' "$kept"
+}
 # shellcheck disable=SC2086
-[ "$rc" -eq 0 ] || emit "REVIEW-INCOMPLETE" "$rc" "$collect_out" "$(tail -n 5 "$tmpd/collect-err")"
+if [ "$rc" -ne 0 ]; then
+  rids="$(drop_bad_axes)"; tkt set review_ids "$rids"; tkt set review_head "$head"
+  emit "REVIEW-INCOMPLETE" "$rc" "$collect_out" "$(tail -n 5 "$tmpd/collect-err")"
+fi
+# A missing verdict is never approval: without a valid verdict line for
+# every axis this round routes nowhere, whatever the counts say.
+missing=""
+for ax in standards spec overbuild; do
+  grep -qE "^VERDICT $ax: (APPROVE|CHANGES)$" <<<"$collect_out" || missing="${missing:+$missing }$ax"
+done
+if [ -n "$missing" ]; then
+  n=0; for ax in standards spec overbuild; do
+    n=$((n + 1))
+    case " $missing " in *" $ax "*) rids="$(printf '%s' "$rids" | awk -v n="$n" '{ $n="RESTART"; print }')";; esac
+  done
+  tkt set review_ids "$rids"; tkt set review_head "$head"
+  emit "REVIEW-INCOMPLETE" 1 "missing verdict for axis: $missing" "$collect_out"
+fi
 merged=0
 if [ -z "$map_note" ] && [ "$mutant_count" -gt 0 ] && [ -f "$map_out" ]; then
   if awk -v MF="$mutants_file" 'NR==FNR{p=index($0," => ");if(p>0){k=substr($0,1,p-1);c[k]++;if(c[k]==1){R[k]=substr($0,p+4);L[k]=$0}}next}length($0)==0{next}/^mutants in the diff:/{next}{k=$0;if(!(k in c)){print "map failed: no verdict for "k>"/dev/stderr";exit 1}if(c[k]!=1){print "map failed: duplicate verdict for "k>"/dev/stderr";exit 1}r=R[k];if(!(r=="unviable"||substr(r,1,10)=="caught by "||substr(r,1,12)=="needs-test: "||substr(r,1,9)=="removed: "||substr(r,1,10)=="exempted: ")){print "map failed: bad verdict for "k>"/dev/stderr";exit 1}if(substr(r,1,12)=="needs-test: "||substr(r,1,9)=="removed: ")print "P2 "L[k]" [mutants "MF"]"}' "$map_out" "$mutants_file" >"$tmpd/map-hits" 2>"$tmpd/map-err"; then merged=$(grep -c . "$tmpd/map-hits" || true); cat "$tmpd/map-hits" >>"$findings_file"; else map_note=$(cat "$tmpd/map-err"); merged=0; fi
@@ -442,9 +500,12 @@ fi
 merged=$((merged + shard_merged))
 p1="$(grep -c '^P1 ' "$findings_file" || true)"; p2="$(grep -c '^P2 ' "$findings_file" || true)"; p3="$(grep -c '^P3 ' "$findings_file" || true)"
 n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect_out" || true)"
-tkt set reviewed "$head"; tkt set findings "$findings_file"; tkt set round 0
 # One bad-count sum: a P3 alone never blocks.
 bad=$((3 - n_approve + p1 + p2 + merged))
+# A map note alone leaves the review state unwritten, so the review can re-run.
+if [ "$bad" -gt 0 ] || [ -z "$map_note" ]; then
+  tkt set reviewed "$head"; tkt set findings "$findings_file"; tkt set round 0
+fi
 [ -n "$map_note" ] && bad=$((bad + 1))
 approve_digest="$collect_out"; digest="$(cat "$findings_file")"
 if [ -n "$map_note" ]; then approve_digest="$map_note
