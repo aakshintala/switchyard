@@ -1195,6 +1195,54 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-par
 rv2="$(bash "$TKT_STATE" "$S" get review_ids)"; case " $rv2 " in " r1 "*|" r1"|*" r1"*) ;; *) fail "review-partial: first id reused, got [$rv2]";; esac
 [ "$(printf '%s' "$rv2" | wc -w | tr -d ' ')" -eq 3 ] || fail "review-partial: three ids after recovery, got [$rv2]"
 
+# --- a BAD-VERDICT axis restarts on the rerun; valid axes keep their ids ---
+setup_case bad-verdict-rerun
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+BAD-VERDICT spec VERDICT spec: PASS
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+printf '1' >"$T/collect-rc"
+run_build
+[ "$RC" -eq 1 ] || fail "bad-verdict-rerun first exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "bad-verdict-rerun first"
+rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$rv" = "r1 RESTART r3" ] || fail "bad-verdict-rerun: the spec id restarts, the others stay, got [$rv]"
+[ "$(bash "$TKT_STATE" "$S" get review_head)" = "$H" ] || fail "bad-verdict-rerun: review_head stays on the head"
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+VERDICT spec: APPROVE
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+printf '0' >"$T/collect-rc"
+run_build
+[ "$RC" -eq 0 ] || fail "bad-verdict-rerun second exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "bad-verdict-rerun second"
+[ "$(grep -c -- '--axes standards' "$T/calls.log")" -eq 1 ] || fail "bad-verdict-rerun: standards starts once across both runs"
+[ "$(grep -c -- '--axes spec' "$T/calls.log")" -eq 2 ] || fail "bad-verdict-rerun: spec starts again on the rerun"
+[ "$(grep -c -- '--axes overbuild' "$T/calls.log")" -eq 1 ] || fail "bad-verdict-rerun: overbuild starts once across both runs"
+rv2="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$rv2" = "r1 r4 r3" ] || fail "bad-verdict-rerun: valid ids kept, spec renewed, got [$rv2]"
+
+# --- a collect without one axis's verdict is REVIEW-INCOMPLETE, not CHANGES ---
+setup_case missing-axis-verdict
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+printf '0' >"$T/collect-rc"
+run_build
+[ "$RC" -eq 1 ] || fail "missing-axis-verdict exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "missing-axis-verdict"
+grep -q "spec" <<<"$OUT" || fail "missing-axis-verdict: the digest names spec"
+case "$(first_line)" in "TKT tkt-build CHANGES"*|"TKT tkt-build APPROVE"*) fail "missing-axis-verdict: no CHANGES or APPROVE without every verdict";; esac
+rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$rv" = "r1 RESTART r3" ] || fail "missing-axis-verdict: the spec id restarts, got [$rv]"
+if bash "$TKT_STATE" "$S" get round >/dev/null 2>&1; then fail "missing-axis-verdict: round stays unset so the rerun can proceed"; fi
+
 # --- a moved PR head is rejected before state writes ---
 setup_case moved-head
 bash "$TKT_STATE" "$S" set pr 7 || fail "set pr"

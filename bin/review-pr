@@ -126,6 +126,18 @@ is_verdict() {
   return 1
 }
 
+# label_verdict ROLE NORMALISED_LINE: print a recognised verdict line in
+# collect's output form. The overbuild job writes the bare form; collect
+# labels it. Shared by collect's fresh path and its reprint of
+# already-collected jobs.
+label_verdict() {
+  if [ "$1" = "overbuild" ]; then
+    printf 'VERDICT overbuild:%s\n' "${2#VERDICT:}"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
 # looks_like_verdict NORMALISED_LINE: the line starts with a verdict shape
 # that does not match a recognised form. Shape is VERDICT with an optional
 # single word, then a colon and a value (VERDICT: X, VERDICT spec: X), or
@@ -877,11 +889,22 @@ reprint_collected() {
       continue
     fi
     printf 'COLLECTED %s %s: already posted to the PR; findings reprinted from the job record, nothing posted\n' "$jid" "$rec"
+    # The state file is gone, so the role comes from the record's worktree
+    # (wt-<role>); without one, the bare verdict form belongs to overbuild
+    # alone, and any other role's bare line stays a loud raw line as on the
+    # fresh path.
+    rrole="$(jq -r '.resume.cwd // .cwd // empty' "$rec" 2>/dev/null | sed -n 's/^.*wt-\([^/]*\)$/\1/p')"
+    case "$rrole" in standards|spec|overbuild|verify) ;; *) rrole="";; esac
     text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
     while IFS= read -r line; do
       norm="$(norm_line "$line")"
       case "$norm" in
-        VERDICT*|FIX-*) printf '%s\n' "$line";;
+        VERDICT*|FIX-*)
+          if is_verdict overbuild "$norm" && { [ -z "$rrole" ] || [ "$rrole" = "overbuild" ]; }; then
+            label_verdict overbuild "$norm"
+          else
+            printf '%s\n' "$line"
+          fi;;
       esac
       case "$line" in
         P1\ *|P2\ *|P3\ *) printf '%s\n' "$line"; printf '%s\n' "$line" >>"$src_f";;
@@ -1211,11 +1234,7 @@ cmd_collect() {
         if is_verdict "$role" "$norm"; then
           # Collect labels the overbuild verdict; the job still writes the
           # bare form above, and the PR comment keeps the job's full text.
-          if [ "$role" = "overbuild" ]; then
-            printf 'VERDICT overbuild:%s\n' "${norm#VERDICT:}" >>"$verdicts_f"
-          else
-            printf '%s\n' "$norm" >>"$verdicts_f"
-          fi
+          label_verdict "$role" "$norm" >>"$verdicts_f"
           case "$role:$norm" in
             standards:"VERDICT standards: "*) std_ok="1";;
             spec:"VERDICT spec: "*) spec_ok="1";;
