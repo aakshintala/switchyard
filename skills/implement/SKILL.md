@@ -27,7 +27,7 @@ When the brief names a state file, run each phase through its `tkt-*` command: s
 | --- | --- | --- |
 | `tkt-start` | `CURRENT`; `SKIPPED` with `--no-preflight`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
 | `tkt-state` | exit 0 | exit 2 |
-| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `POST-FAIL`, `SET-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
+| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `POST-FAIL`, `SET-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-job` | `DONE`, `CONCERNS` | `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-build` | `APPROVE`; `MEASURED` for an `Outcome: measurement` plan, which ends the ticket with no PR | `CHANGES`, `STALE`, `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `VERDICT-REFUSED`, `<step>-ERROR` |
 | `tkt-gate` | `PASS` | `TIP`, `FENCE`, `FAIL` |
@@ -130,7 +130,7 @@ Done when CI is green on the head a verdict covers.
 
 Before either path runs, the PR body names `Implemented by: <model ids>` (the ids the jobs ran on, as `delegate` records them, never display names), and, where CI runs mutation testing only on a ready PR, every viable mutant in the draft run's list has a catching test or exemption on the pushed head (step 5): the ready mark starts the shards. After a failed merge or MERGED wait, check `gh pr view <pr> --json state` before rerunning: if it reads `MERGED`, finish the by-hand cleanup below instead.
 
-With a state file, `tkt-ship <state>` runs `ship-pr` from the state keys (`reviewed`, `unverified`, `body_has`, `body_ends`, `merge_gate`, `head`), reruns it while CI is pending and digests a red CI run. Keep `head` and `reviewed` current with `tkt-state set` after every push. Pass the session's attribution line to `tkt-start` as `--body-ends` (Claude Code: `Co-authored with Claude Code.`), or set it late with `tkt-state <state> set body_ends TEXT` once the ticket has already started; a session whose instructions require no attribution line passes no `--body-ends`. Route its verdict:
+With a state file, `tkt-ship <state>` runs `ship-pr` from the state keys (`reviewed`, `unverified`, `body_has`, `body_ends`, `merge_gate`, `head`), reruns it while CI is pending and digests a red CI run. Keep `head` and `reviewed` current with `tkt-state <state> set` after every push. Pass the session's attribution line to `tkt-start` as `--body-ends` (Claude Code: `Co-authored with Claude Code.`), or set it late with `tkt-state <state> set body_ends TEXT` once the ticket has already started; a session whose instructions require no attribution line passes no `--body-ends`. Route its verdict:
 
 - `MERGED`: done. `FLAKE-NOTE` on it means file the flake as `ci-triage`'s flake rule says.
 - `PENDING`: CI is still running; rerun.

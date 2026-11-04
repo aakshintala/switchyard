@@ -9,6 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TKT="$SCRIPT_DIR/../bin/tkt-plan"
 TKT_STATE="$SCRIPT_DIR/../bin/tkt-state"
 REAL_BIN="$SCRIPT_DIR/../bin"
+# shellcheck source=../bin/lib/plan-tokens.sh
+. "$REAL_BIN/lib/plan-tokens.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -19,6 +21,16 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-plan.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
+
+# Files entries expose their read/write mark as a second parser field. A
+# missing marker is a write, and the default pathspec mode still includes all.
+parser_plan="$T/files-parser.md"
+printf '## Files\n- `read.txt` (read)\n| `table.txt` | (read) |\n- `write.txt`\n' >"$parser_plan"
+parser_entries="$(awk -v mode=entries "$_plan_files_awk" "$parser_plan")"
+[ "$parser_entries" = "$(printf 'read.txt\tread\ntable.txt\tread\nwrite.txt\twrite')" ] || fail "Files parser fields: [$parser_entries]"
+[ "$(plan_files_pathspecs "$parser_plan")" = "$(printf 'read.txt\ntable.txt\nwrite.txt')" ] || fail "all Files paths include reads and writes"
+[ "$(plan_files_pathspecs "$parser_plan" all)" = "$(printf 'read.txt\ntable.txt\nwrite.txt')" ] || fail "explicit all Files paths include reads and writes"
+[ "$(plan_files_pathspecs "$parser_plan" writes)" = "write.txt" ] || fail "write Files paths omit reads, table rows included"
 
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
@@ -393,6 +405,36 @@ run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "a second confirm exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "second confirm"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "a second confirm starts no job"
+
+# --- stale confirm edits do not spend the confirm round ---
+setup_case confirm-stale-edits
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-stale-edits seed round"
+edits="$CDIR/run/switchyard-518-confirm-edits-p2.md"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$edits"
+touch -t 202001010001 "$CDIR/plan.md"
+touch -t 202001010002 "$edits"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan confirm --edits "$edits"
+[ "$RC" -eq 1 ] || fail "stale confirm edits exits 1"
+expect_verdict "TKT tkt-plan STALE-CONFIRM edits=* plan=* log=*" "stale confirm edits"
+grep -Fq "$edits" <<<"$OUT" || fail "stale confirm edits names the edits file"
+grep -Fq "apply edits from $edits to $CDIR/plan.md" <<<"$OUT" || fail "stale confirm edits prints the apply instruction"
+grep -Fq "then rerun: tkt-plan $S confirm --edits $edits" <<<"$OUT" || fail "stale confirm edits prints the confirm command"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "stale confirm edits starts no job"
+[ -z "$(state_get confirmed_for)" ] || fail "stale confirm edits leaves the confirm round open"
+printf '\n<!-- applied -->\n' >>"$CDIR/plan.md"
+touch -t 202001010003 "$CDIR/plan.md"
+# Another ticket's newer edits file in the shared run dir does not block this one.
+other="$CDIR/run/switchyard-5180-confirm-edits-p2.md"
+printf 'other ticket\n' >"$other"
+touch -t 202001010004 "$other"
+run_plan confirm --edits "$edits"
+[ "$RC" -eq 0 ] || fail "confirm after applying edits exits 0 (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm after applying edits"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" -eq "$((jobs_before + 1))" ] || fail "confirm after applying edits runs a job"
+[ "$(state_get confirmed_for)" = "2" ] || fail "confirm after applying edits records the round"
 
 # --- every ROUND-LIMIT prints open lines from the latest report ---
 setup_case round-open-lines

@@ -4,6 +4,7 @@
 #        When INBOX_HOST is set, the message is sent over ssh to
 #        `bash ~/.agents/bin/inbox-send <dir> <sender>` on that host instead.
 #        The sender must match ^[A-Za-z0-9._-]+$, anything else exits 2.
+#        Bare inbox names are rejected; use ./name for a local inbox.
 set -euo pipefail
 
 usage() {
@@ -21,6 +22,14 @@ case "$sender" in
     ;;
 esac
 
+case "$dir" in
+  */*) ;;
+  *)
+    echo "inbox-send: ambiguous inbox '$dir': use './$dir' locally or INBOX_HOST=<host> inbox-send '~/lane-inbox/$dir' '$sender' remotely" >&2
+    exit 2
+    ;;
+esac
+
 if [ -n "${INBOX_HOST:-}" ]; then
   host="$INBOX_HOST"
   qdir="$(printf '%q' "$dir")"
@@ -32,6 +41,7 @@ if [ -n "${INBOX_HOST:-}" ]; then
 fi
 
 mkdir -p -- "$dir"
+dir="$(cd "$dir" && pwd -P)"
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 tmp="$(mktemp "$dir/.tmp.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT

@@ -33,5 +33,5 @@ __FINDINGS__
 
 ## Report
 
-The pushed head SHA (or the committed SHA and `ready, not pushed`), the failed jobs of the run you waited on (or `CI: pass`), then one line per finding: `fixed` or `refuted: <evidence>`. Then **Friction**: up to 3 bullets ("none" is fine). End with a STATUS line.
+The pushed head SHA (or the committed SHA and `ready, not pushed`), the failed jobs of the run you waited on (or `CI: pass`), then one line per finding: `fixed` or `refuted: <evidence>`. Name each delegate job you started that has not reached a terminal status by its full id, as `delegate run` printed it, and the `TMPDIR` it ran under: every `delegate` verb refuses a shortened id. Then **Friction**: up to 3 bullets ("none" is fine). End with a STATUS line.
 __EXTRA__

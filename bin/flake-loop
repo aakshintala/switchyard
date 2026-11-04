@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# flake-loop: run one test N times under fresh TMPDIRs and keep failing output.
+# Usage: flake-loop [-n N] [--until-fail] -- <command>
+# Runs <command> N times (default 20), each run under a fresh TMPDIR created
+# inside the loop's own temp dir, then prints pass/fail counts plus the path
+# to the first failing run's output. Only failing runs keep their output, and
+# only the temp dirs the loop created are ever deleted. Exits 0 when every run
+# passes and 1 when any fails. flake-loop is a diagnostic for measuring a
+# flake rate, never a way to get green.
+set -uo pipefail
+
+usage() {
+  {
+    echo "usage: flake-loop [-n N] [--until-fail] -- <command>"
+    echo "       run <command> N times (default 20), each under a fresh TMPDIR,"
+    echo "       and report pass/fail counts with the first failing run's output."
+    echo "       flake-loop is a diagnostic for measuring a flake rate, never a way to get green."
+  } >&2
+  exit 2
+}
+
+n=20
+until_fail=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n)
+      [ $# -ge 2 ] || usage
+      n="$2"
+      shift 2
+      ;;
+    --until-fail)
+      until_fail=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+[ $# -ge 1 ] || usage
+case "$n" in
+  ""|*[!0-9]*) usage ;;
+esac
+[ "$n" -ge 1 ] || usage
+
+base="$(mktemp -d "${TMPDIR:-/tmp}/flake-loop.XXXXXX")" || exit 1
+keep=0
+cleanup() {
+  if [ "$keep" = 0 ]; then
+    rm -rf "$base"
+  fi
+}
+trap cleanup EXIT
+
+passes=0
+fails=0
+first=""
+i=0
+while [ "$i" -lt "$n" ]; do
+  i=$((i + 1))
+  run="$base/run-$i"
+  mkdir -p "$run" || { echo "flake-loop: cannot create $run" >&2; exit 1; }
+  if TMPDIR="$run" "$@" >"$base/out-$i.log" 2>&1; then
+    passes=$((passes + 1))
+    rm -f "$base/out-$i.log"
+  else
+    fails=$((fails + 1))
+    mv "$base/out-$i.log" "$base/fail-$i.log"
+    [ -n "$first" ] || first="$base/fail-$i.log"
+  fi
+  rm -rf "$run"
+  if [ "$until_fail" = 1 ] && [ "$fails" -gt 0 ]; then
+    break
+  fi
+done
+
+runs=$((passes + fails))
+echo "runs: $runs passed: $passes failed: $fails"
+if [ "$fails" -gt 0 ]; then
+  echo "first failure: $first"
+  keep=1
+fi
+[ "$fails" -eq 0 ]

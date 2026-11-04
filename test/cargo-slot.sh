@@ -82,6 +82,8 @@ printf 'started\n' >"$FAKE_DIR/started"
   for a in "$@"; do printf '<%s>\n' "$a"; done
 } >"$FAKE_DIR/args"
 printf 'held=%s\n' "${CARGO_SLOT_HELD-unset}" >"$FAKE_DIR/held"
+printf 'nextest-threads=%s\n' "${NEXTEST_TEST_THREADS-unset}" >"$FAKE_DIR/nextest-threads"
+printf 'rust-threads=%s\n' "${RUST_TEST_THREADS-unset}" >"$FAKE_DIR/rust-threads"
 if [ "${FAKE_READ_STDIN:-0}" = 1 ]; then
   IFS= read -r line || true
   printf 'stdin=%s\n' "${line-}" >"$FAKE_DIR/stdin"
@@ -235,6 +237,27 @@ for v in "CARGO_SLOTS=" "CARGO_SLOTS=0"; do
   expect_build_args "$R"
   expect_no_slot_dir
 done
+
+# Test processes get a per-slot thread count; explicit caller values win.
+new_run nextest-thread-cap
+cargo_as "$R" CARGO_SLOTS=4 CARGO_SLOT_TEST_CORES=12 CARGO_SLOT_DIR="$T/threads/nextest" -- nextest run
+[ "$(cat "$R/nextest-threads")" = "nextest-threads=3" ] || fail "nextest: thread count not capped at 3"
+
+new_run nextest-thread-floor
+cargo_as "$R" CARGO_SLOTS=4 CARGO_SLOT_TEST_CORES=4 CARGO_SLOT_DIR="$T/threads/nextest-floor" -- nextest run
+[ "$(cat "$R/nextest-threads")" = "nextest-threads=2" ] || fail "nextest: thread count fell below 2"
+
+new_run test-thread-cap
+cargo_as "$R" CARGO_SLOTS=4 CARGO_SLOT_TEST_CORES=12 CARGO_SLOT_DIR="$T/threads/test" -- test
+[ "$(cat "$R/rust-threads")" = "rust-threads=3" ] || fail "test: thread count not capped at 3"
+
+new_run nextest-thread-override
+cargo_as "$R" CARGO_SLOTS=4 CARGO_SLOT_TEST_CORES=12 NEXTEST_TEST_THREADS=7 CARGO_SLOT_DIR="$T/threads/nextest-override" -- nextest run
+[ "$(cat "$R/nextest-threads")" = "nextest-threads=7" ] || fail "nextest: caller thread count was changed"
+
+new_run test-thread-override
+cargo_as "$R" CARGO_SLOTS=4 CARGO_SLOT_TEST_CORES=12 RUST_TEST_THREADS=7 CARGO_SLOT_DIR="$T/threads/test-override" -- test
+[ "$(cat "$R/rust-threads")" = "rust-threads=7" ] || fail "test: caller thread count was changed"
 
 # Planted cargo files in the working directory and in tools/. Each one records
 # its own name in FAKE_DIR and exits 0, so a test shows which one ran.
