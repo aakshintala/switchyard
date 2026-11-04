@@ -304,7 +304,7 @@ rebase_plan
 printf 'lines' >"$T/pcmode"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "PLAN-CHECK exits 1"
-expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "PLAN-CHECK"
+expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "PLAN-CHECK"
 grep -q "missing path: bin/ghost" <<<"$OUT" || fail "PLAN-CHECK lists the first line"
 grep -q "outside Files: test/ghost" <<<"$OUT" || fail "PLAN-CHECK lists the second line"
 grep -q "^job|" "$T/stub.log" && fail "PLAN-CHECK starts no job"
@@ -320,7 +320,7 @@ printf 'lines' >"$T/pcmode"
 jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "confirm-plan-check exits 1"
-expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "confirm PLAN-CHECK"
+expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "confirm PLAN-CHECK"
 grep -q "missing path: bin/ghost" <<<"$OUT" || fail "confirm PLAN-CHECK lists the first line"
 grep -q "outside Files: test/ghost" <<<"$OUT" || fail "confirm PLAN-CHECK lists the second line"
 [ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "confirm PLAN-CHECK starts no job"
@@ -343,7 +343,7 @@ printf 'lines' >"$T/pcmode"
 jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "granted confirm PLAN-CHECK exits 1"
-expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "granted confirm PLAN-CHECK"
+expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "granted confirm PLAN-CHECK"
 [ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "granted confirm PLAN-CHECK starts no job"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "granted confirm PLAN-CHECK preserves the prior confirm"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "granted confirm PLAN-CHECK leaves the grant pending"
@@ -359,7 +359,7 @@ rebase_plan
 printf 'lines' >"$T/mode"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "LINES exits 1"
-expect_verdict "TKT tkt-plan LINES n=3 out=* log=*" "LINES"
+expect_verdict "TKT tkt-plan LINES report_lines=3 out=* log=*" "LINES"
 grep -q "Files leaves out test/x" <<<"$OUT" || fail "LINES digest carries the report"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "LINES counts the round"
 grep -q "verifier-out-r1.md" "$T/stub.log" || fail "round 1 writes verifier-out-r1.md"
@@ -470,7 +470,7 @@ rebase_plan
 printf 'conflict' >"$T/mode"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "verdict-conflict verify exits 1 (rc=$RC)"
-expect_verdict "TKT tkt-plan LINES n=20 out=* log=*" "verdict-conflict"
+expect_verdict "TKT tkt-plan LINES report_lines=20 out=* log=*" "verdict-conflict"
 expect_plan_verdict lines "$(cat "$CDIR/base")" "verdict-conflict"
 printf 'ok' >"$T/mode"
 
@@ -760,7 +760,7 @@ run_plan grant-round --by switchyard --comment lines
 printf 'lines' >"$T/mode"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "LINES granted confirm exits 1"
-expect_verdict "TKT tkt-plan LINES n=3 out=*confirm-out.md log=*" "LINES granted confirm"
+expect_verdict "TKT tkt-plan LINES report_lines=3 out=*confirm-out.md log=*" "LINES granted confirm"
 [ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "LINES granted confirm consumes the grant"
 
 setup_case grant-reset-job
@@ -789,7 +789,7 @@ run_plan verify
 printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "confirm LINES exits 1"
-expect_verdict "TKT tkt-plan LINES n=* out=*confirm-out.md log=*" "confirm LINES"
+expect_verdict "TKT tkt-plan LINES report_lines=* out=*confirm-out.md log=*" "confirm LINES"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "verify after a LINES confirm exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify after LINES confirm"
@@ -1557,7 +1557,7 @@ gh_before="$(gh_count)"
 run_plan verify
 printf 'ok' >"$T/pcmode"
 [ "$RC" -eq 1 ] || fail "order plan-check exits 1"
-expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "order plan-check"
+expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "order plan-check"
 [ "$(gh_count)" = "$gh_before" ] || fail "PLAN-CHECK reads no ticket"
 
 # --- confirm passes the ticket text, then the state extra, in its run file ---
@@ -1657,7 +1657,7 @@ printf 'lines' >"$T/mode"
 posts_before="$(grep -c '^post|' "$T/stub.log" || true)"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "LINES verify exits 1"
-expect_verdict "TKT tkt-plan LINES n=3 out=* log=*" "LINES verify stores verdict"
+expect_verdict "TKT tkt-plan LINES report_lines=3 out=* log=*" "LINES verify stores verdict"
 expect_plan_verdict lines "$base_now" "LINES verify"
 run_plan post
 [ "$RC" -eq 1 ] || fail "post after LINES exits 1"
@@ -1791,7 +1791,7 @@ seed_ok_verdict
 printf 'lines' >"$T/pcmode"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "PLAN-CHECK verify exits 1"
-expect_verdict "TKT tkt-plan PLAN-CHECK n=2 log=*" "PLAN-CHECK clears verdict"
+expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "PLAN-CHECK clears verdict"
 expect_plan_verdict "" "" "PLAN-CHECK clears pair"
 printf 'ok' >"$T/pcmode"
 setup_case verdict-clear-stale
@@ -2024,14 +2024,14 @@ grep -q 'PLAN OK' "$r2" || fail "verify-interleave writes the nested report to r
 printf 'ok' >"$T/mode"
 
 # A job that exits 0 without writing its report is "wrote no report", not
-# LINES n=0, and leaves its reservation empty.
+# LINES report_lines=0, and leaves its reservation empty.
 setup_case job-silent-no-report
 rebase_plan
 printf 'silent' >"$T/mode"
 run_plan verify
 [ "$RC" -eq 3 ] || fail "job-silent-no-report exits 3 (rc=$RC)"
 grep -q 'wrote no report' "$CDIR/stderr.txt" || fail "job-silent-no-report says it wrote no report"
-grep -q '^LINES' <<<"$OUT" && fail "job-silent-no-report is not LINES n=0"
+grep -q '^LINES' <<<"$OUT" && fail "job-silent-no-report is not LINES report_lines=0"
 r1="$CDIR/run/switchyard-518-verifier-out-r1.md"
 [ -e "$r1" ] && [ ! -s "$r1" ] || fail "job-silent-no-report leaves the reservation empty"
 printf 'ok' >"$T/mode"
@@ -2048,5 +2048,25 @@ printf 'ok' >"$T/mode"
 run_plan verify
 [ "$RC" -eq 0 ] || fail "job-blocked-reservation retry exits 0 (rc=$RC)"
 grep -q "out=$CDIR/run/switchyard-518-verifier-out-r1-2.md|" "$T/stub.log" || fail "job-blocked-reservation retry writes r1-2"
+
+# --- LINES and PLAN-CHECK name the line count, not a finding count (#1109) ---
+# `n=` reads as a finding count; `report_lines=` says what the number is.
+setup_case verdict-line-count
+rebase_plan
+printf 'lines' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "verdict-line-count LINES exits 1"
+expect_verdict "TKT tkt-plan LINES report_lines=3 out=* log=*" "verdict-line-count LINES names report_lines"
+case "$(first_line)" in *" n="*) fail "verdict-line-count LINES carries no bare n=: [$(first_line)]";; esac
+printf 'ok' >"$T/mode"
+
+setup_case verdict-plan-check-line-count
+rebase_plan
+printf 'lines' >"$T/pcmode"
+run_plan verify
+printf 'ok' >"$T/pcmode"
+[ "$RC" -eq 1 ] || fail "verdict-plan-check-line-count exits 1"
+expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "verdict-plan-check-line-count names report_lines"
+case "$(first_line)" in *" n="*) fail "verdict-plan-check-line-count carries no bare n=: [$(first_line)]";; esac
 
 echo "tkt-plan: all cases passed"
