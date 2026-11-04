@@ -287,15 +287,19 @@ gate_preflight() {
 }
 
 run_gate() {
-  local output_file
+  local output_file cargo_slot_dir
   output_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-gate.XXXXXX")"
-  if (cd "$worktree" && NEXTEST_RETRIES=1 bash -c "$gate" </dev/null) >"$output_file" 2>&1; then
+  cargo_slot_dir="$(mktemp -d "${TMPDIR:-/tmp}/ship-pr-cargo-slot.XXXXXX")"
+  ln -s "$here/cargo-slot" "$cargo_slot_dir/cargo"
+  if (cd "$worktree" && PATH="$cargo_slot_dir:$PATH" NEXTEST_RETRIES=1 bash -c "$gate" </dev/null) >"$output_file" 2>&1; then
+    rm -rf "$cargo_slot_dir"
     if report_flakes "$output_file"; then
       GH_CI_LOG_LINES=0 bash "$here/gh-ci" panics <"$output_file" >&2
     fi
     rm -f "$output_file"
     return 0
   fi
+  rm -rf "$cargo_slot_dir"
   report_flakes "$output_file" || true
   tail -n 20 "$output_file" || true
   GH_CI_LOG_LINES=20 bash "$here/gh-ci" panics <"$output_file"

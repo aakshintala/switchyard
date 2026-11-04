@@ -198,6 +198,7 @@ delegate() (
       esac; done
       role="${cwd##*-}"
       if [ -e "$T/state/fail-$role" ]; then echo "fake delegate: run failed for $role" >&2; exit 1; fi
+      printf '%s\n' "$PATH" >"$T/state/path-$role"
       printf '%s %s\n' "$role" "$model" >>"$T/state/runs.txt"
       cp "$prompt" "$T/state/prompt-$role.md"
       id="job-$role"
@@ -706,6 +707,9 @@ collect: review-pr collect job-verify" ] || fail "verify with $flag prints the v
   grep -Fxq "review-pr: $flag is not used with --verify; ignored" "$T/stderr-ignored.txt" || \
     fail "verify with $flag prints its ignored note"
   [ "$(wc -l <"$T/state/runs.txt" | tr -d ' ')" = "1" ] || fail "verify with $flag launches its job"
+  run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-verify")"
+  case ":$(cat "$T/state/path-verify"):" in *":$run_dir/cargo-slot:"*) ;; *) fail "verify delegate PATH includes cargo-slot" ;; esac
+  [ -x "$run_dir/cargo-slot/cargo" ] || fail "verify run keeps its cargo-slot shim"
   [ ! -e "$T/state/body-calls.txt" ] || fail "verify with $flag does not fetch the PR body"
   bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with $flag collects"
 done
