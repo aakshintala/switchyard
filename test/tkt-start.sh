@@ -136,6 +136,14 @@ expect_state() {
     grep -q "tkt-start $step" "$j" || fail "$1: journal misses ${step}step"
   done
 }
+# A missing worktree needs a repository checkout as its starting point.
+setup norepo ONE AGAINST
+mkdir -p "$T/nonrepo"
+[ ! -e "$WT" ] || fail "norepo: worktree unexpectedly exists"
+RC=0; OUT="$(cd "$T/nonrepo" && bash "$TKT" "${ARGS[@]}" 2>"$CDIR/stderr")" || RC=$?
+want "STEP-FAIL step=repo rc=128" 128 norepo
+case "$OUT" in *"run from inside acme/widget's checkout"*) ;; *) fail "norepo: failure misses checkout guidance" ;; esac
+[ ! -e "$RUN/widget-42.state" ] || fail "norepo: state was written"
 # current, plus the resume path: a rerun reuses the worktree with no dup lines.
 setup current ONE AGAINST; run_start
 want "CURRENT " 0 current
