@@ -55,7 +55,7 @@ Each smell reads *what it is* → *how to fix*; match it against the diff:
 
 Read the diff once per axis, and follow each hunk into the code around it as far as the finding needs.
 
-- **Standards**: every place the diff breaks a documented standard (cite the file and rule), and any baseline smell (name it, quote the hunk). Skip anything tooling enforces.
+- **Standards**: every place the diff breaks a documented standard (cite the file and rule), and any baseline smell the diff shows at named sites (name it, quote each site, such as both copies of duplicated code). A smell that rests on taste alone, such as a name, is written only when a documented standard covers it. Skip anything tooling enforces.
 - **Spec**: requirements missing or partial; requirements that look implemented but wrong (quote the spec line). A criterion that asks for evidence the code can no longer produce, such as a repro of a path this diff or a merged fix deleted, is met by a construction argument in the PR body, quoted from the code, that shows every candidate path is gone: judge whether it holds, and raise a finding only when it doesn't.
 - **Scope check** (Spec axis): every file or hunk the diff modified that the ticket didn't ask for. An unrequested edit is a finding even when it looks like an improvement.
 - When the change touches security, permission, authentication or persistence, add the adversarial branch: try spelling tricks, fail-open inputs, weaker fallback identities, unresolvable indirection and TOCTOU gaps, plus one bypass family beyond the list.
@@ -72,6 +72,8 @@ P1 src/order.ts:88 — refund skips the ledger entry the spec requires — write
 ```
 
 Each finding is `P1|P2|P3 file:line — defect — fix`, under its axis's verdict, most severe first. P1 is wrong behaviour or a security hole, P2 a missed acceptance criterion, an unrequested edit or a hard standards breach, P3 anything smaller, baseline smells included. An axis with any P1 or P2 is `CHANGES`. A merge needs both axes `APPROVE`.
+
+Every finding names its evidence: a concrete input or state that goes wrong, or the doc line or ruling it breaks (for a standard, the doc's rule and the code line; for a baseline smell, every site that shows it, such as both copies of duplicated code). A finding with neither is not written, whatever its severity. That drops a hypothetical input nothing in the code or ticket produces, a request to cite the ticket line that asks for the code, a name or shape that no doc rule covers and no second site shows, and remarks on process.
 
 When the defect is a pattern that can recur, the finding names its class and a search shaped like the defect itself, so every instance is a hit and every hit an instance, bounded to the lines the PR adds or changes: `P2 src/order.ts:41 — catches and drops the write error (class: empty catch blocks; find: rg -nU 'catch \(\w*\) \{\s*\}' on the PR's changed hunks) — rethrow`. Code the PR didn't touch is outside the class.
 
