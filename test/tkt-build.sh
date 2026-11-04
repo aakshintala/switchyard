@@ -1214,7 +1214,7 @@ cat >"$T/collect-out" <<'EOF'
 patch-id deadbeef
 VERDICT standards: APPROVE
 VERDICT spec: APPROVE
-VERDICT overbuild: APPROVE
+VERDICT: APPROVE
 CI deadbeef pass
 EOF
 printf '0' >"$T/collect-rc"
