@@ -95,6 +95,9 @@ fail_step() {
   [ $# -ge 3 ] && [ -n "$3" ] && msg="$msg: $(printf '%s' "$3" | tail -n 20)"
   printf '%s\n' "$msg" >&2; emit "STEP-FAIL step=$1 rc=$2" "$2" "$msg"
 }
+if [ ! -e "$worktree" ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
+  fail_step repo 128 "run from inside $repo's checkout"
+fi
 deny() { printf '%s\n' "$3" >&2; emit "$1" "$2" "$3"; }
 lockdir="$state.lock"; lock_owned=0
 lock_or_busy() {
