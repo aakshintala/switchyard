@@ -857,4 +857,31 @@ assert_rc 3 'broken claim probe fails closed'
 assert_out 'ERROR file-claim claim stub file-claim: boom ' 'broken claim output'
 assert_no_grant 'broken claim'
 
+# --- Own-PR exemption reaches the claim (#1101 P2) ---------------------------
+reset_case
+set_pr 11 x/77-slug docs/tui.md
+run_fg 77 --paths docs/tui.md
+assert_rc 0 'own PR hold does not refuse the own lane claim'
+assert_contains 'OWN skipping PR #11' 'own PR skip printed'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'claim exempts the own PR'
+[ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'own-PR grant file exists'
+
+# --- A ranged grant is never whole-claimed (#1101 P2) ------------------------
+reset_case
+set_pr 11 fix/other docs/tui.md
+cat >"$T/pr/11.diff" <<'DIFF'
+diff --git a/docs/tui.md b/docs/tui.md
+index 1111111..2222222 100644
+--- a/docs/tui.md
++++ b/docs/tui.md
+@@ -3,2 +3,2 @@
+-three
++THREE
+DIFF
+run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-2
+assert_rc 0 'ranged grant survives the ledger despite the open PR'
+assert_line 'GRANT docs/tui.md' 'ranged grant line'
+! grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber -- docs/tui.md' "$T/file-claim.log" || fail 'ranged path is not claimed whole'
+grep -qxF 'Ranges: docs/tui.md:1-2' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'ranged grant file records the range'
+
 echo 'fence-grant tests passed'

@@ -1121,11 +1121,29 @@ if [ "$dry" -eq 0 ]; then
     _cp=${_cp#./}
     _cp=${_cp%/}
     [ -n "$_cp" ] || continue
+    # A ranged path is never claimed whole: file-claim holds whole paths
+    # only (#1081), so claiming the file whole would refuse a range this
+    # probe approved. Ranged paths stay unclaimed; the grant file and its
+    # Ranges hold them instead, and the grant still lands.
+    _cb=$(_norm_base "$_cp") || _cb=""
+    if [ -n "$_cb" ] && cut -d'|' -f1 < "$tmp/rspec" 2>/dev/null | grep -qxF "$_cb"; then
+      continue
+    fi
     fc_args+=("$_cp")
   done < "$tmp/plist"
   if [ "${#fc_args[@]}" -gt 0 ]; then
     fc_cmd=("$file_claim" claim --lane "fiber-$ticket" --plan --repo "$repo")
-    if [ -n "$ignore" ]; then fc_cmd+=(--self-pr "$ignore"); fi
+    # Every PR skipped above as this ticket's own, plus --ignore-pr, must
+    # exempt the claim too, or the ledger refuses a path the own PR holds.
+    # file-claim takes one --self-pr per flag; each exempt PR gets its own.
+    _seen_self=""
+    # shellcheck disable=SC2086
+    for _op in $ownprs $ignore; do
+      [ -n "$_op" ] || continue
+      case " $_seen_self " in *" $_op "*) continue;; esac
+      _seen_self="$_seen_self $_op"
+      fc_cmd+=(--self-pr "$_op")
+    done
     fc_cmd+=(-- "${fc_args[@]}")
     if "${fc_cmd[@]}" >"$tmp/fc-out" 2>"$tmp/fc-err"; then
       :
