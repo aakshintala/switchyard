@@ -485,7 +485,7 @@ sweep_plan_token() {
           case "$CUR_SEC" in files) FILES="$FILES$RES|" ;; esac
           return 0 ;;
       esac
-      if [ "$CUR_NEW" = 1 ]; then
+      if [ "$CUR_NEW" -gt 0 ]; then
         case "$CUR_SEC" in files) FILES="$FILES$val|" ;; esac
         return 0
       fi

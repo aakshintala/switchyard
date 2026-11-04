@@ -61,9 +61,57 @@ problem() {
   FOUND=1
 }
 
+# near_name NEW EXISTING: true when one name differs by a single run of at most
+# two inserted, deleted or substituted characters.
+near_name() {
+  local a="$1" b="$2" prefix=0 suffix=0 a_len b_len ai bi a_mid b_mid
+  a_len=${#a}
+  b_len=${#b}
+  while [ "$prefix" -lt "$a_len" ] && [ "$prefix" -lt "$b_len" ]; do
+    [ "${a:$prefix:1}" = "${b:$prefix:1}" ] || break
+    prefix=$((prefix + 1))
+  done
+  while [ "$suffix" -lt "$((a_len - prefix))" ] && [ "$suffix" -lt "$((b_len - prefix))" ]; do
+    ai=$((a_len - suffix - 1))
+    bi=$((b_len - suffix - 1))
+    [ "${a:$ai:1}" = "${b:$bi:1}" ] || break
+    suffix=$((suffix + 1))
+  done
+  a_mid=$((a_len - prefix - suffix))
+  b_mid=$((b_len - prefix - suffix))
+  [ "$a_mid" -le 2 ] && [ "$b_mid" -le 2 ] && { [ "$a_mid" -gt 0 ] || [ "$b_mid" -gt 0 ]; }
+}
+
+# check_new_file PATH MARK: report an existing path and close sibling names.
+check_new_file() {
+  local p="$1" mark="$2" base_path="$1" new_dir new_name q q_dir q_name
+  case "$base_path" in */) base_path="${base_path%/}" ;; esac
+  if git -C "$dir" cat-file -e "$rev:$base_path" 2>/dev/null; then
+    if ! seen "e:$p"; then
+      problem "new path $p already exists at base: drop the new mark"
+    fi
+  fi
+  [ "$mark" = 2 ] && return 0
+  case "$p" in */) return 0 ;; esac
+  case "$p" in */*) new_dir="${p%/*}" ;; *) new_dir="" ;; esac
+  new_name="${p##*/}"
+  while IFS= read -r q; do
+    case "$q" in */*) q_dir="${q%/*}"; q_name="${q##*/}" ;; *) q_dir=""; q_name="$q" ;; esac
+    [ "$q_dir" = "$new_dir" ] || continue
+    if near_name "$new_name" "$q_name" && ! seen "c:$p:$q"; then
+      problem "new path $p is close to existing $q: confirm new, or correct it"
+    fi
+  done <<<"$tree"
+}
+
 # check_path PATH: resolve PATH at REV (resolve_path), then apply checks 1 and 2 to it
 check_path() {
   local p="$1" seg
+  case "$CUR_NEW" in
+    1|2)
+      if [ "$CUR_SEC" = files ]; then check_new_file "$p" "$CUR_NEW"; fi
+      ;;
+  esac
   resolve_path "$p"
   case "$RES_KIND" in
     ambiguous) return 0 ;;
@@ -74,7 +122,7 @@ check_path() {
       esac
       return 0 ;;
   esac
-  if [ "$CUR_NEW" = 1 ]; then
+  if [ "$CUR_NEW" -gt 0 ]; then
     # A new or removed path is exempt from the missing report only; check 2 still applies unless the line also marks it read-only.
     case "$CUR_SEC" in
       files) FILES="$FILES$p|" ;;
