@@ -125,6 +125,13 @@ printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 case " \$* " in
   *" pr view "*)
     if [ -f "$T/noview" ]; then exit 1; fi
+    # Real gh cannot view an empty pr number: fail like it does, so a
+    # missing pr never views as the caller's branch.
+    prev=""
+    for a in "\$@"; do
+      if [ "\$prev" = "view" ] && [ -z "\$a" ]; then exit 1; fi
+      prev="\$a"
+    done
     ;;
 esac
 case " \$* " in
@@ -905,11 +912,42 @@ grep -q "^gate|" "$T/calls.log" && fail "from-review: the gate never runs"
 grep -q "pr list" "$T/calls.log" && fail "from-review: the PR list is never read"
 grep -q "^review-start|" "$T/calls.log" || fail "from-review: review still starts"
 
-# --- --from review without pr and head names the missing key ---
+# --- --from review without pr and head derives them from the branch PR ---
+setup_case review-derives-pr
+run_build --from review
+[ "$RC" -eq 0 ] || fail "review-derives-pr exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-derives-pr"
+expect_state pr 7 review-derives-pr
+expect_state head "$H" review-derives-pr
+grep -q "^review-start|" "$T/calls.log" || fail "review-derives-pr: review still starts"
+
+# --- --from review with head set but pr unset derives pr and proceeds ---
+setup_case review-head-only
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
+run_build --from review
+[ "$RC" -eq 0 ] || fail "review-head-only exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-head-only"
+expect_state pr 7 review-head-only
+expect_state head "$H" review-head-only
+grep -q "pr list" "$T/calls.log" || fail "review-head-only: the branch PR is looked up"
+grep -q "^review-start|" "$T/calls.log" || fail "review-head-only: review still starts"
+
+# --- --from review with pr unset and a stale stored head reports DRIFT ---
+setup_case review-stale-head
+bash "$TKT_STATE" "$S" set head 0000000000000000000000000000000000000000 || fail "set stale head"
+run_build --from review
+[ "$RC" -eq 3 ] || fail "review-stale-head exits 3 (rc=$RC)"
+expect_verdict "TKT tkt-build DRIFT state=0000000000000000000000000000000000000000 worktree=$H pr=$H log=*" "review-stale-head"
+expect_state head 0000000000000000000000000000000000000000 review-stale-head
+grep -q "^review-start|" "$T/calls.log" && fail "review-stale-head: review never starts"
+
+# --- --from review without pr and head and no PR names the missing key ---
 setup_case review-missing-pr
+touch "$T/empty-pr"
 run_build --from review
 [ "$RC" -eq 2 ] || fail "review-missing-pr exits 2 (rc=$RC)"
 expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "review-missing-pr"
+grep -q "^gate|" "$T/calls.log" && fail "review-missing-pr: the gate never runs"
 
 # --- --from review with a moved PR head reports the drift ---
 setup_case review-drift
