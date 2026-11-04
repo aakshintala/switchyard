@@ -671,7 +671,7 @@ assert_out "ERROR cannot write $FW_RUN/fiber-77-fence-grant-1.md" 'grant write f
 reset_case
 run_fg 77 --paths crates/turn/src/group.rs,crates/turn/src/group_tests.rs --dry
 assert_rc 4 'missing paths suggestions'
-assert_out "$(printf 'MISSING crates/turn/src/group.rs\n  did you mean: crates/tui/src/turn/group.rs\nMISSING crates/turn/src/group_tests.rs\n  did you mean: crates/tui/src/turn/group_tests.rs')" 'missing path suggestion output'
+assert_out "$(printf 'MISSING crates/turn/src/group.rs\n  did you mean: crates/tui/src/turn/group.rs\nMISSING crates/turn/src/group_tests.rs\n  did you mean: crates/tui/src/turn/group_tests.rs\nNO PROBE: 2 paths missing, no hold check ran; move them to --new')" 'missing path suggestion output'
 assert_no_grant 'missing paths suggestions'
 
 reset_case
@@ -688,7 +688,7 @@ write_blob crates/extensions/src/process/tests.rs "$(python3 -c 'print("quiet\n"
 write_blob crates/extensions/src/process_tests.rs "$(python3 -c 'print("quiet\n" * 3153 + "envelope_line\n", end="")')"
 run_fg 77 --paths crates/extensions/src/process/tests.rs --expect crates/extensions/src/process/tests.rs:3154:envelope_line --dry
 assert_rc 4 'expected symbol absent'
-assert_out "$(printf 'NOSYMBOL crates/extensions/src/process/tests.rs:3154 does not hold envelope_line\n  did you mean: crates/extensions/src/process_tests.rs:3154')" 'NOSYMBOL suggestion output'
+assert_out "$(printf 'NOSYMBOL crates/extensions/src/process/tests.rs:3154 does not hold envelope_line\n  did you mean: crates/extensions/src/process_tests.rs:3154\nNO PROBE: 1 path or symbol missing, no hold check ran; correct missing --paths/--expect entries')" 'NOSYMBOL suggestion output'
 grep -qF 'contents/crates/extensions/src/process/tests.rs?ref=main' "$T/gh.log" || fail 'original blob fetched'
 grep -qF 'contents/crates/extensions/src/process_tests.rs?ref=main' "$T/gh.log" || fail 'alternate blob fetched'
 ! cmp -s "$T/blobs/crates/extensions/src/process/tests.rs" "$T/blobs/crates/extensions/src/process_tests.rs" || fail 'same-basename fixture contents differ'
@@ -705,7 +705,7 @@ assert_rc 4 'alternate suggestion sorts first'
 reset_case
 run_fg 77 --paths docs/tui.md --expect docs/missing.md:1:needle --dry
 assert_rc 4 'expect file absent from tree'
-assert_out 'MISSING docs/missing.md' 'missing expect file output'
+assert_out "$(printf 'MISSING docs/missing.md\nNO PROBE: 1 path or symbol missing, no hold check ran; correct missing --paths/--expect entries')" 'missing expect file output'
 
 reset_case
 write_blob docs/tui.md 'needle\n'

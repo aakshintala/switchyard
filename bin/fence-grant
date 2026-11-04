@@ -13,7 +13,8 @@
 # Before any hold probe it checks that the grant can mean what it says, against
 # `main`: every requested path exists unless --new declares it, and every
 # --expect <file:line:symbol> finds that symbol on that line. Either check
-# failing prints MISSING or NOSYMBOL with same-basename suggestions and exits 4,
+# failing prints MISSING or NOSYMBOL with same-basename suggestions plus a NO
+# PROBE line, and exits 4,
 # writing no grant file. Three times a grant named a path that could not hold it
 # (2026-10-17 #3753: `crates/turn/src/group.rs` for `crates/tui/src/turn/group.rs`;
 # 2026-10-31 #3666: `process/tests.rs:3154` for `process_tests.rs:3154`, where
@@ -488,11 +489,18 @@ for line in open(pn):
   s = suggest(b)
   if s:
     print("  did you mean: %s" % ", ".join(s))
-sys.exit(4 if bad else 0)' "$tmp/pnorm" "$tmp/tree" "$tmp/newnorm"
+sys.exit(4 if bad else 0)' "$tmp/pnorm" "$tmp/tree" "$tmp/newnorm" > "$tmp/pathcheck"
 _pathrc=$?
+cat "$tmp/pathcheck"
 case "$_pathrc" in
   0) : ;;
-  4) exit 4;;
+  4)
+    _missing_count=$(grep -c '^MISSING ' "$tmp/pathcheck")
+    _path_plural=s
+    [ "$_missing_count" -eq 1 ] && _path_plural=
+    echo "NO PROBE: $_missing_count path$_path_plural missing, no hold check ran; move them to --new"
+    exit 4
+    ;;
   *) echo "ERROR path existence check"; exit 3;;
 esac
 
@@ -557,6 +565,10 @@ print("\n".join(out))' "$_ef"
   done < "$tmp/eitems"
   if [ -s "$tmp/nosym" ]; then
     cat "$tmp/nosym"
+    _missing_count=$(grep -cE '^(MISSING|NOSYMBOL) ' "$tmp/nosym")
+    _missing_plural=s
+    [ "$_missing_count" -eq 1 ] && _missing_plural=
+    echo "NO PROBE: $_missing_count path$_missing_plural or symbol$_missing_plural missing, no hold check ran; correct missing --paths/--expect entries"
     exit 4
   fi
 fi
