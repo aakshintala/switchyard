@@ -13,7 +13,7 @@
 # The file is never sourced. Every write takes a persistent flock and a mkdir
 # lock, goes through a temp file in the target's directory, then moves into
 # place. Exit 0 when ok; exit 2 on bad usage, a missing key, a value holding
-# a newline, or a held lock.
+# a newline, a commit SHA that is not 40 hex characters, or a held lock.
 set -euo pipefail
 
 locked=0
@@ -69,6 +69,33 @@ reject_newline() {
       exit 2
       ;;
   esac
+}
+
+# The one list of keys holding a commit SHA. A stored commit is compared
+# verbatim against the worktree HEAD or a recorded base, so it must be a
+# full 40-hex SHA; anything else would surface later as bogus drift instead
+# of naming the bad write. Keys in reset_keys may also be cleared to empty,
+# which is how callers reset them.
+commit_keys="head plan_verdict_base verified_base review_head reviewed"
+reset_keys="plan_verdict_base verified_base"
+
+# A stored commit must be a full 40-hex SHA; an empty value is accepted only
+# for keys whose callers write empty to reset them.
+check_commit() {
+  for commit_key in $commit_keys; do
+    [ "$commit_key" = "$1" ] || continue
+    for reset_key in $reset_keys; do
+      [ "$reset_key" = "$1" ] && [ -z "$2" ] && return 0
+    done
+    if [ "${#2}" = "40" ]; then
+      case "$2" in
+        *[!0-9a-fA-F]*) ;;
+        *) return 0 ;;
+      esac
+    fi
+    echo "tkt-state: invalid $1: expected 40 hex characters" >&2
+    exit 2
+  done
 }
 
 # Split a state line into prefix/rest at the first =; a line without = holds
@@ -231,6 +258,7 @@ case "$cmd" in
     [ $# -eq 2 ] || usage
     check_key "$1"
     reject_newline "$2"
+    check_commit "$1" "$2"
     take_lock
     stage "$state"
     keptfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
@@ -250,6 +278,7 @@ case "$cmd" in
     [ $# -eq 2 ] || usage
     check_key "$1"
     reject_newline "$2"
+    check_commit "$1" "$2"
     take_lock
     stage "$state"
     printf '%s=%s\n' "$1" "$2" >>"$tmpfile"
