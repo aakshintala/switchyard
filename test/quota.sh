@@ -20,43 +20,75 @@ route() {
   [ ! -s "$T/err" ] || fail "stderr not empty: [$(cat "$T/err")]"
 }
 
-# Depleted first choice: claude is depleted, so every tier routes to codex.
+# Different tier winners: muse is healthy so standard and strong route to
+# muse, but muse carries no frontier rung, so frontier falls to codex.
+cat >"$T/tier-winners.json" <<'FIXTURE'
+{"providers":[
+  {"id":"muse","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":80,"resetText":"Resets in 4d"}]},
+  {"id":"codex","status":"warning","quotas":[{"key":"session","label":"Session","percentRemaining":40,"resetText":"Resets in 6d"}]},
+  {"id":"cursor","status":"critical","quotas":[{"key":"time:Monthly","label":"Monthly","percentRemaining":2,"resetText":"Resets in 25d"}]}
+]}
+FIXTURE
+route "$T/tier-winners.json"
+[ "$RC" = 0 ] || fail "tier winners: exit $RC, want 0"
+[ "$OUT" = "tier standard: muse (healthy)
+tier strong: muse (healthy)
+tier frontier: codex (warning)" ] || fail "tier winners output was:
+$OUT"
+
+# Tie: codex is healthy but listed after muse, so the tier list wins over
+# feed order; cursor leads the frontier list. Permuting the feed must not
+# change the output.
+cat >"$T/tie-codex-first.json" <<'FIXTURE'
+{"providers":[
+  {"id":"codex","status":"healthy","quotas":[{"key":"session","label":"Session","percentRemaining":40,"resetText":"Resets in 6d"}]},
+  {"id":"muse","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":80,"resetText":"Resets in 4d"}]},
+  {"id":"cursor","status":"healthy","quotas":[{"key":"time:Monthly","label":"Monthly","percentRemaining":90,"resetText":"Resets in 25d"}]}
+]}
+FIXTURE
+route "$T/tie-codex-first.json"
+[ "$RC" = 0 ] || fail "tie: exit $RC, want 0"
+[ "$OUT" = "tier standard: muse (healthy)
+tier strong: muse (healthy)
+tier frontier: cursor (healthy)" ] || fail "tie output was:
+$OUT"
+cat >"$T/tie-muse-first.json" <<'FIXTURE'
+{"providers":[
+  {"id":"muse","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":80,"resetText":"Resets in 4d"}]},
+  {"id":"codex","status":"healthy","quotas":[{"key":"session","label":"Session","percentRemaining":40,"resetText":"Resets in 6d"}]},
+  {"id":"cursor","status":"healthy","quotas":[{"key":"time:Monthly","label":"Monthly","percentRemaining":90,"resetText":"Resets in 25d"}]}
+]}
+FIXTURE
+route "$T/tie-muse-first.json"
+[ "$RC" = 0 ] || fail "tie permuted: exit $RC, want 0"
+[ "$OUT" = "tier standard: muse (healthy)
+tier strong: muse (healthy)
+tier frontier: cursor (healthy)" ] || fail "tie permuted output was:
+$OUT"
+
+# Depleted first choice: muse is depleted, so standard and strong fall to
+# claude (healthy, next in their lists); frontier skips muse either way.
 cat >"$T/depleted-first.json" <<'FIXTURE'
 {"providers":[
-  {"id":"claude","status":"depleted","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":0,"resetText":"Resets in 14h"}]},
-  {"id":"codex","status":"healthy","quotas":[{"key":"session","label":"Session","percentRemaining":93,"resetText":"Resets in 6d"}]},
-  {"id":"cursor","status":"warning","quotas":[{"key":"time:Monthly","label":"Monthly","percentRemaining":20,"resetText":"Resets in 25d"}]}
+  {"id":"muse","status":"depleted","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":0,"resetText":"Resets in 14h"}]},
+  {"id":"claude","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":70,"resetText":"Resets in 4d"}]},
+  {"id":"codex","status":"healthy","quotas":[{"key":"session","label":"Session","percentRemaining":93,"resetText":"Resets in 6d"}]}
 ]}
 FIXTURE
 route "$T/depleted-first.json"
 [ "$RC" = 0 ] || fail "depleted first choice: exit $RC, want 0"
-[ "$OUT" = "tier standard: codex (healthy)
-tier strong: codex (healthy)
+[ "$OUT" = "tier standard: claude (healthy)
+tier strong: claude (healthy)
 tier frontier: codex (healthy)" ] || fail "depleted first choice output was:
-$OUT"
-
-# Tie: cursor and codex are both warning, so feed order wins; critical loses.
-# An unavailable claude with a healthy status must not win.
-cat >"$T/tie.json" <<'FIXTURE'
-{"providers":[
-  {"id":"claude","status":"healthy","unavailable":"no oauth token","quotas":[]},
-  {"id":"cursor","status":"warning","quotas":[{"key":"time:Monthly","label":"Monthly","percentRemaining":20,"resetText":"Resets in 25d"}]},
-  {"id":"codex","status":"warning","quotas":[{"key":"session","label":"Session","percentRemaining":40,"resetText":"Resets in 6d"}]},
-  {"id":"muse","status":"critical","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":2,"resetText":"Resets in 4d"}]}
-]}
-FIXTURE
-route "$T/tie.json"
-[ "$RC" = 0 ] || fail "tie: exit $RC, want 0"
-[ "$OUT" = "tier standard: cursor (warning)
-tier strong: cursor (warning)
-tier frontier: cursor (warning)" ] || fail "tie output was:
 $OUT"
 
 # Every provider depleted: every tier is none, exit 1.
 cat >"$T/all-depleted.json" <<'FIXTURE'
 {"providers":[
+  {"id":"muse","status":"depleted","quotas":[]},
   {"id":"claude","status":"depleted","quotas":[]},
-  {"id":"codex","status":"depleted","quotas":[]}
+  {"id":"codex","status":"depleted","quotas":[]},
+  {"id":"cursor","status":"depleted","quotas":[]}
 ]}
 FIXTURE
 route "$T/all-depleted.json"
@@ -66,11 +98,19 @@ tier strong: none
 tier frontier: none" ] || fail "all depleted output was:
 $OUT"
 
-# The script's tier list stays in step with the ladder in skills/delegate.
+# The script's tiers stay in step with the ladder in skills/delegate: each
+# tier name is a rung there, and muse is absent from the frontier list,
+# matching the muse backend note (standard and strong only).
 TIERS="$(grep -E '^[[:space:]]*TIERS=' "$BIN" | sed -E 's/^[[:space:]]*TIERS="//; s/"$//')" || fail "no TIERS list in $BIN"
 [ -n "$TIERS" ] || fail "empty TIERS list in $BIN"
-LADDER="$(awk '/^## Model ladder/{f=1;next} /^## /{f=0} f' "$SCRIPT_DIR/../skills/delegate/SKILL.md" \
-  | grep -E '^- `[a-z]+`:' | sed -E 's/^- `([a-z]+)`.*/\1/' | tr '\n' ' ')"
-[ "$TIERS " = "$LADDER" ] || fail "TIERS [$TIERS] is not the ladder [$LADDER]"
+for tier in $TIERS; do
+  grep -qF '`'"$tier"'`:' "$SCRIPT_DIR/../skills/delegate/SKILL.md" \
+    || fail "tier $tier is not a rung in skills/delegate/SKILL.md"
+done
+FRONTIER="$(grep -E '^[[:space:]]*FRONTIER=' "$BIN" | sed -E 's/^[[:space:]]*FRONTIER="//; s/"$//')" || fail "no FRONTIER list in $BIN"
+[ -n "$FRONTIER" ] || fail "empty FRONTIER list in $BIN"
+case " $FRONTIER " in
+  *" muse "*) fail "muse must not be in the FRONTIER list (skills/delegate/SKILL.md: muse carries only standard and strong)" ;;
+esac
 
 echo "quota: ok"
