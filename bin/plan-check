@@ -3,7 +3,8 @@
 # Usage: plan-check PLAN_FILE [--base REV] [--cwd DIR]
 #        plan-check -h | --help
 #        REV is --base, else the plan's `Base: <sha>` line. DIR is a git clone of
-#        the plan's repo (default: the current directory). Callers pass --base
+#        the plan's repo (default: the checkout holding the plan file, else the
+#        current directory). Callers pass --base
 #        origin/main to check against the fresh base.
 #        Reads the single-backtick tokens outside fenced blocks and the `## Gate`
 #        section. Skipped: a token with `<`, `>` or a space, a token with `*`
@@ -151,18 +152,26 @@ handle_token() {
 
 plan=""
 rev=""
-dir="."
+dir=""
+have_cwd=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage ;;
     --base) [ $# -ge 2 ] && [ -n "$2" ] || usage; rev="$2"; shift 2 ;;
-    --cwd) [ $# -ge 2 ] || usage; dir="$2"; shift 2 ;;
+    --cwd) [ $# -ge 2 ] || usage; dir="$2"; have_cwd=1; shift 2 ;;
     -*) usage ;;
     *) [ -z "$plan" ] || usage; plan="$1"; shift ;;
   esac
 done
 [ -n "$plan" ] || usage
 [ -r "$plan" ] || { echo "plan-check: cannot read plan file: $plan" >&2; exit 2; }
+if [ "$have_cwd" = 0 ]; then
+  if top="$(git -C "$(dirname "$plan")" rev-parse --show-toplevel 2>/dev/null)"; then
+    dir="$top"
+  else
+    dir="."
+  fi
+fi
 
 if [ -z "$rev" ]; then
   rev="$(plan_base "$plan")"

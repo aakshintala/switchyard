@@ -18,6 +18,13 @@ printf 'a __A__ b __B__ c\n' >"$T/t.md"
 out="$(bash "$FILL" "$T/t.md" 'A=1' 'B=2')" || fail "basic fill exits 0"
 [ "$out" = "a 1 b 2 c" ] || fail "basic fill content: got [$out]"
 
+# a bare template name resolves to the pack's brief (issue #1083); a path keeps working
+out="$(bash "$FILL" planner BASE=x ISSUE=1 PACK=none PLAN=/p PREFLIGHT=/pf REPO=o/r WORKFLOW_DOC=/w 2>"$T/err-bare.txt")" || fail "bare template name exits 0"
+case "$out" in *"o/r"*) ;; *) fail "bare template name fills the planner brief, got [$out]" ;; esac
+[ ! -s "$T/err-bare.txt" ] || fail "bare template name: nothing on stderr"
+bash "$FILL" nosuchbrief 'A=1' >/dev/null 2>"$T/err-bare2.txt"; [ "$?" = "2" ] || fail "unknown bare name exits 2"
+grep -q 'no such template: nosuchbrief' "$T/err-bare2.txt" || fail "unknown bare name is named"
+
 # unfilled placeholder: exit 1, nothing on stdout, named on stderr
 printf 'hello __NAME__, __NAME__ again, __OTHER__\n' >"$T/u.md"
 stdout="$(bash "$FILL" "$T/u.md" 2>"$T/err.txt")" && fail "unfilled exits 1"
