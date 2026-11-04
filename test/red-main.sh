@@ -247,6 +247,61 @@ grep -q "fiber-core doors::open" "$f" || fail "handoff names the first failing t
 grep -q "STEP-TAIL-3912" "$f" || fail "handoff holds the failed-step tail"
 grep -q "CLEANUP-3912" "$f" && fail "handoff holds cleanup output after the failed step"
 
+# --- matrix: `${{ }}` names match API names as patterns; bare ids match `<id> (...)` ---
+setup matrix
+run_red
+expect 1
+[ "$(inbox_count)" = "3" ] || fail "matrix children each hand off (got $(inbox_count))"
+grep -q "Tests (ubuntu-24.04)" "$INBOX"/*.md || fail "matrix ubuntu job handed off"
+grep -q "Tests (macos-15)" "$INBOX"/*.md || fail "matrix macos job handed off"
+grep -q "lint (ubuntu-24.04)" "$INBOX"/*.md || fail "bare-id matrix job handed off"
+grep -q "MATRIX-TAIL" "$INBOX"/*.md || fail "matrix handoff holds the tail"
+
+# --- flake tickets must say flake/flaky: a coverage issue does not suppress ---
+setup flake-coverage
+run_red
+expect 1
+f="$(inbox_file)"
+grep -q "fiber-core doors::open" "$f" || fail "coverage-only issue does not suppress the handoff"
+
+# --- gh job/step prefixes and timestamps are stripped before parsing ---
+setup prefixed
+run_red
+expect 1
+f="$(inbox_file)"
+grep -q "test: fiber-core doors::open" "$f" || fail "prefixed log names the first failing test"
+grep -q "PREFIX-TAIL-4012" "$f" || fail "prefixed handoff holds the tail"
+
+# --- tail is cut at failed-step boundaries, whatever gh returned ---
+setup step-whole
+run_red
+expect 1
+f="$(inbox_file)"
+grep -q "test: fiber-core doors::open" "$f" || fail "step-filtered handoff names the test"
+grep -q "STEP-TAIL-4112" "$f" || fail "handoff holds the failed-step tail"
+grep -q "CLEANUP-4112" "$f" && fail "handoff holds cleanup output past the failed step"
+
+# --- no failed-step lines: placeholder, never the whole job log ---
+setup step-empty
+run_red
+expect 1
+f="$(inbox_file)"
+grep -q "(no failed-step log)" "$f" || fail "empty failed-step log uses the placeholder"
+grep -q "CLEANUP-4212" "$f" && fail "placeholder handoff leaks the whole job log"
+grep -q "test: none" "$f" || fail "placeholder handoff records test none"
+
+# --- handled IDs survive only inside the listing window (no fixed cap) ---
+setup window-501
+run_red
+expect 0
+[ "$(state_py "len(d['handled_ids'])")" = "501" ] || fail "all 501 listed runs stay handled: [$(state_py "len(d['handled_ids'])")]"
+export FAKE_SCEN="$FIX/real"
+export FAKE_GH_LOG="$T/gh-args-window-prune.txt"
+: >"$FAKE_GH_LOG"
+run_red
+expect 1
+[ "$(state_py "len(d['handled_ids'])")" = "1" ] || fail "handled IDs pruned to the listing window: [$(state_py "len(d['handled_ids'])")]"
+
 # --- exits: 2 on a missing inbox ---
 OUT="$(python3 "$RED" --repo O/N 2>"$T/stderr.txt")"; CODE=$?
 [ "$CODE" = "2" ] || fail "missing inbox exits 2 (got $CODE)"

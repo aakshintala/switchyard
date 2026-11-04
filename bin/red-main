@@ -50,7 +50,7 @@ INFRA = re.compile(r"could not resolve host|failed to connect|connection reset|"
                    r"i/o timeout|exceeded the maximum execution time|out of memory|"
                    r"\bkilled\b", re.I)
 TAILS = 30
-HANDLED_CAP = 500
+FLAKE_WORD = re.compile(r"flake|flaky", re.I)
 USAGE = "usage: red-main --repo owner/name --inbox DIR [--state PATH] [--json]"
 
 
@@ -78,8 +78,17 @@ def is_ci(name):
     return n == "ci" or n.startswith("ci ") or n.startswith("ci-")
 
 
+def strip_line(line):
+    """Drop gh's `job<TAB>step<TAB>` prefix, then ANSI and the timestamp."""
+    line = ANSI.sub("", line)
+    if "\t" in line:
+        parts = line.split("\t", 2)
+        line = parts[2] if len(parts) == 3 else parts[-1]
+    return TS.sub("", line)
+
+
 def clean_lines(text):
-    return [TS.sub("", ANSI.sub("", l)) for l in text.splitlines()]
+    return [strip_line(l) for l in text.splitlines()]
 
 
 def first_test(text):
@@ -92,6 +101,30 @@ def log_tail(text):
     while lines and not lines[-1].strip():
         lines.pop()
     return "\n".join(lines[-TAILS:])
+
+
+def failed_step_names(job):
+    """Names of the job's steps whose conclusion is failure."""
+    names = set()
+    for s in job.get("steps") or []:
+        if (isinstance(s, dict) and (s.get("conclusion") or "") == "failure"
+                and s.get("name")):
+            names.add(s.get("name"))
+    return names
+
+
+def failed_step_text(raw, failed_names):
+    """Keep only lines from the failed steps, whatever gh returned."""
+    if not failed_names:
+        return raw
+    kept = []
+    for line in raw.splitlines():
+        if "\t" not in line:
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) >= 2 and parts[1] in failed_names:
+            kept.append(line)
+    return "\n".join(kept)
 
 
 def norm_test(s):
@@ -155,6 +188,27 @@ def workflow_blocking(text):
     if ci is None or ci not in needs_by_job:
         return None
     return {(names.get(n) or n) for n in needs_by_job[ci] if n}
+
+
+def blocking_hit(api_name, blocking):
+    """True when an API job name falls under a blocking workflow need.
+
+    A need whose `name:` holds `${{ ... }}` matches as a pattern: the
+    literal parts escaped, each expression `.+`, anchored at both ends.
+    A plain need matches its name exactly, or GitHub's default matrix
+    name `<id> (<anything>)` for a job with no `name:`.
+    """
+    name = api_name or ""
+    for b in blocking:
+        if "${{" in b:
+            parts = re.split(r"\$\{\{.*?\}\}", b)
+            if re.fullmatch(".+".join(re.escape(p) for p in parts), name):
+                return True
+        elif name == b:
+            return True
+        elif re.fullmatch(re.escape(b) + r" \(.+\)", name):
+            return True
+    return False
 
 
 def read_workflow(gh, repo, wf_path, ref):
@@ -249,7 +303,7 @@ def save_state(path, st):
 
 
 def flake_issue_match(test, issues):
-    """True when an open test-only issue names the full failing test."""
+    """True when an open test-only issue names the full test and says flake."""
     want = norm_test(test)
     if not want or want == "none":
         return None
@@ -264,8 +318,10 @@ def flake_issue_match(test, issues):
             tagged.add((lb.get("name") if isinstance(lb, dict) else lb) or "")
         if "test-only" not in {str(t).lower() for t in tagged}:
             continue
-        text = norm_test("%s %s" % (iss.get("title") or "", iss.get("body") or ""))
-        if want in text:
+        combined = "%s %s" % (iss.get("title") or "", iss.get("body") or "")
+        if not FLAKE_WORD.search(combined):
+            continue
+        if want in norm_test(combined):
             return iss.get("number")
     return None
 
@@ -417,7 +473,7 @@ def main(argv):
                       file=sys.stderr)
                 errored.append(rid)
                 continue
-            failed = [j for j in cands if j.get("name") in blocking]
+            failed = [j for j in cands if blocking_hit(j.get("name"), blocking)]
         else:
             failed = []
         ts = parse_ts(r.get("created_at") or "")
@@ -425,9 +481,13 @@ def main(argv):
             closed += close_due(ts)
         for j in failed:
             job = j.get("name")
-            text = failed_step_log(j.get("id"))
-            test = first_test(text)
-            tail = log_tail(text)
+            text = failed_step_text(failed_step_log(j.get("id")),
+                                    failed_step_names(j))
+            if text.strip():
+                test = first_test(text)
+                tail = log_tail(text)
+            else:
+                test, tail = "none", "(no failed-step log)"
             if test == "none" and INFRA.search(text):
                 if rid in reran or str(r.get("id")) in reran:
                     print("red-main: infra %s in run %s already reran" % (job, rid))
@@ -494,7 +554,9 @@ def main(argv):
                 merged.append(i)
         st.pop("last_handled_created_at", None)
         st.pop("last_handled_id", None)
-        st.update({"handled_ids": merged[-HANDLED_CAP:], "reran": reran,
+        window = {str(r.get("id")) for r in runs if isinstance(r, dict)}
+        kept = [i for i in merged if str(i) in window]
+        st.update({"handled_ids": kept, "reran": reran,
                    "open": open_h, "sightings": sightings})
         save_state(state_path, st)
 
