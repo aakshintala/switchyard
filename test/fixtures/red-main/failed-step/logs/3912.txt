@@ -1,0 +1,45 @@
+2026-10-09T17:00:10Z running fiber-core suite
+2026-10-09T17:03:10Z FAIL [   9.300s] fiber-core doors::open
+2026-10-09T17:03:11Z thread 'doors::open' panicked at src/doors.rs:12
+2026-10-09T17:04:00Z suite failed: 1 failed
+2026-10-09T17:04:01Z cleanup line 1 archiving artifacts
+2026-10-09T17:04:02Z cleanup line 2 archiving artifacts
+2026-10-09T17:04:03Z cleanup line 3 archiving artifacts
+2026-10-09T17:04:04Z cleanup line 4 archiving artifacts
+2026-10-09T17:04:05Z cleanup line 5 archiving artifacts
+2026-10-09T17:04:06Z cleanup line 6 archiving artifacts
+2026-10-09T17:04:07Z cleanup line 7 archiving artifacts
+2026-10-09T17:04:08Z cleanup line 8 archiving artifacts
+2026-10-09T17:04:09Z cleanup line 9 archiving artifacts
+2026-10-09T17:04:10Z cleanup line 10 archiving artifacts
+2026-10-09T17:04:11Z cleanup line 11 archiving artifacts
+2026-10-09T17:04:12Z cleanup line 12 archiving artifacts
+2026-10-09T17:04:13Z cleanup line 13 archiving artifacts
+2026-10-09T17:04:14Z cleanup line 14 archiving artifacts
+2026-10-09T17:04:15Z cleanup line 15 archiving artifacts
+2026-10-09T17:04:16Z cleanup line 16 archiving artifacts
+2026-10-09T17:04:17Z cleanup line 17 archiving artifacts
+2026-10-09T17:04:18Z cleanup line 18 archiving artifacts
+2026-10-09T17:04:19Z cleanup line 19 archiving artifacts
+2026-10-09T17:04:20Z cleanup line 20 archiving artifacts
+2026-10-09T17:04:21Z cleanup line 21 archiving artifacts
+2026-10-09T17:04:22Z cleanup line 22 archiving artifacts
+2026-10-09T17:04:23Z cleanup line 23 archiving artifacts
+2026-10-09T17:04:24Z cleanup line 24 archiving artifacts
+2026-10-09T17:04:25Z cleanup line 25 archiving artifacts
+2026-10-09T17:04:26Z cleanup line 26 archiving artifacts
+2026-10-09T17:04:27Z cleanup line 27 archiving artifacts
+2026-10-09T17:04:28Z cleanup line 28 archiving artifacts
+2026-10-09T17:04:29Z cleanup line 29 archiving artifacts
+2026-10-09T17:04:30Z cleanup line 30 archiving artifacts
+2026-10-09T17:04:31Z cleanup line 31 archiving artifacts
+2026-10-09T17:04:32Z cleanup line 32 archiving artifacts
+2026-10-09T17:04:33Z cleanup line 33 archiving artifacts
+2026-10-09T17:04:34Z cleanup line 34 archiving artifacts
+2026-10-09T17:04:35Z cleanup line 35 archiving artifacts
+2026-10-09T17:04:36Z cleanup line 36 archiving artifacts
+2026-10-09T17:04:37Z cleanup line 37 archiving artifacts
+2026-10-09T17:04:38Z cleanup line 38 archiving artifacts
+2026-10-09T17:04:39Z cleanup line 39 archiving artifacts
+2026-10-09T17:04:40Z cleanup line 40 archiving artifacts
+2026-10-09T17:05:00Z cleanup done CLEANUP-3912
