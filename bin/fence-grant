@@ -965,7 +965,23 @@ _grant_entries() {
   # came back HELD by lane #3771, which never asked for any of them
   # (2026-10-31). `fiber-2413-plan-fence-grant.md` carries 700 lines of the
   # same shape.
-  awk '/^Reads:[[:space:]]*$/ {stop = 1} stop {next} {if (tolower($0) ~ /grant/) f = 1} f && /^[[:space:]]/ {next} f {print}' "$1" 2>/dev/null | _strip_foreign_hold | sed -e "s/$_ng_re.*//" | _expand_braces_lines | _collect_entries
+  awk '/^Reads:[[:space:]]*$/ {stop = 1} stop {next} {if (tolower($0) ~ /grant/) f = 1} f && /^[[:space:]]/ {next} f {print}' "$1" 2>/dev/null | _strip_foreign_hold | sed -e "s/$_ng_re.*//" | _expand_braces_lines | _collect_entries | _narrow_grant_entries
+  return 0
+}
+
+# A grant file carrying both a bullet for a path and ranges for the same path
+# holds only the ranges; the bullet is their label (#1107: every ranged grant
+# read as a whole-file hold, so a window its holder had excluded still refused).
+# A path with no ranges stays a whole-file hold. Per-file: the caller feeds one
+# grant file at a time, so ranges in one file never narrow another file.
+_narrow_grant_entries() {
+  awk -F'|' '
+    { n++; line[n] = $0; ed[n] = $1; eb[n] = $2; ers[n] = $3
+      if ($1 == "0" && $3 != "") ranged[$2] = 1 }
+    END { for (i = 1; i <= n; i++) {
+      if (ed[i] == "0" && ers[i] == "" && (eb[i] in ranged)) continue
+      print line[i] } }
+  ' 2>/dev/null
   return 0
 }
 
@@ -1131,6 +1147,17 @@ if [ "$dry" -eq 0 ]; then
     fi
   } > "$gf" 2>/dev/null || { echo "ERROR cannot write $gf"; exit 3; }
 fi
+# A path granted with no --ranges entry is a whole-file hold by definition:
+# warn, non-blocking, before the GRANT lines. Exit status, GRANT lines and
+# the written grant file are unchanged.
+while IFS= read -r _wp; do
+  [ -n "$_wp" ] || continue
+  _wb=$(_norm_base "$_wp") || continue
+  [ -n "$_wb" ] || continue
+  if ! cut -d'|' -f1 < "$tmp/rspec" | grep -qxF "$_wb"; then
+    echo "WIDE $_wp is granted whole (no --ranges): a lane needing one line of it is refused."
+  fi
+done < "$tmp/plist"
 sed 's/^/GRANT /' < "$tmp/plist"
 if [ -n "$readpaths" ]; then
   printf '%s\n' "$readpaths" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's/^/READ /'
