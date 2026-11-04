@@ -197,7 +197,7 @@ runjob() {
     fi
   }
   [ -s "$rep" ] || { echo "tkt-plan: tkt-job wrote no report: $rep" >&2; exit 3; }
-  report_passed "$rep" && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES n=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
+  report_passed "$rep" && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES report_lines=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
 }
 
 # task_pathspec KIND VALUE: expand_token's callback for task records. Resolve
@@ -244,7 +244,7 @@ do_verify() {
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
-  [ "$prc" -ne 1 ] || emit "PLAN-CHECK n=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"
+  [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"
   round="$(ronum)"
   # The drift exemption is derived from recorded state, not a caller flag: a
   # verify is exempt only when a previous round recorded a base and main
@@ -316,7 +316,7 @@ do_confirm() {
   load_plan
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
-  [ "$prc" -ne 1 ] || emit "PLAN-CHECK n=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"
+  [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"
   cmodel="$(vmodel)" || exit 2
   rep="$(free_path "$run/$namebase-confirm-out.md")" || exit 3
   xfile="$run/$namebase-confirm-extra.md"
