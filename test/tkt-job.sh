@@ -294,7 +294,7 @@ grep -q "DONE id=stub-1" "$CDIR/tkt.journal" || fail "DONE journals the verdict"
 # A second call re-prints the same verdict without a new dispatch.
 run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 0 ] || fail "re-print exits 0"
-expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS reused=stub-1 log=*" "re-print"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS reused=stub-1 stale-head=bbbb now=* log=*" "re-print"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "re-print dispatches nothing new"
 
 # --- DONE with no gate and no commits, without --expect-commits ---
@@ -387,7 +387,7 @@ expect_verdict "TKT tkt-job ASK id=stub-1 report=result\\ line\\ 1 log=*" "ASK"
 grep -q "result line 2" <<<"$OUT" || fail "ASK digest carries the question"
 # A rerun re-watches the finished job; the digest says how to answer it.
 run_job --slot lane --template "$T/tmpl-basic.md"
-expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 log=*" "ASK rerun"
+expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 stale-head=bbbb now=* log=*" "ASK rerun"
 grep -q -- "--resume stub-1" <<<"$OUT" || fail "reused ASK digest names --resume"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "ASK rerun dispatches nothing new"
 cmp "$CDIR/report.md" <(jq -j -r '.result.text' "$T/tmp/delegate-jobs/stub-1.json") || fail "--out-file writes result.text in full"
@@ -399,6 +399,47 @@ make_record stub-1 BLOCKED none 0 2 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 1 ] || fail "BLOCKED exits 1"
 expect_verdict "TKT tkt-job BLOCKED id=stub-1 log=*" "BLOCKED"
+jq --arg h "$H" '.result.changeSet.headAfter = $h' "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp"
+mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json"
+run_job --slot lane
+[ "$RC" -eq 1 ] || fail "same-head BLOCKED exits 1"
+expect_verdict "TKT tkt-job BLOCKED id=stub-1 reused=stub-1 log=*" "same-head BLOCKED"
+grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "same-head BLOCKED explains slot reset"
+
+# --- reused non-zero verdicts name stale heads and explain the next step ---
+for kind in ASK BLOCKED WALL-CAP JOB-ERROR GATE-FAIL CONCERNS NO-COMMITS; do
+  setup_case "reused-$kind"
+  reset_stub
+  case "$kind" in
+    ASK) make_record stub-1 NEEDS_CONTEXT none 0 2 0 ;;
+    BLOCKED) make_record stub-1 BLOCKED none 0 2 0 ;;
+    WALL-CAP)
+      make_record stub-1 CANCELLED none 0 2 0
+      set_text stub-1 'Cancelled: wall budget of 10800000 ms exceeded' ;;
+    JOB-ERROR) make_record stub-1 ERROR none 0 2 0 ;;
+    GATE-FAIL) make_record stub-1 DONE 1 1 2 0 ;;
+    CONCERNS) make_record stub-1 DONE_WITH_CONCERNS 0 1 2 0 ;;
+    NO-COMMITS) make_record stub-1 DONE 0 0 2 0 ;;
+  esac
+  jq --arg h "$H" '.result.changeSet.headAfter = $h' "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp"
+  mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json"
+  bash "$TKT_STATE" "$S" set job.lane stub-1 || fail "seed $kind slot"
+  git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m advance
+  now="$(git -C "$WT" rev-parse --short=12 HEAD)"
+  run_job --slot lane --expect-commits
+  [ "$RC" -eq 1 ] || fail "reused $kind exits 1"
+  expect_verdict "TKT tkt-job $kind* reused=stub-1 stale-head=$H now=$now log=*" "stale $kind"
+  if [ "$kind" = ASK ]; then
+    grep -q -- '--resume stub-1' <<<"$OUT" || fail "stale ASK keeps resume hint"
+    grep -q 'clear the slot' <<<"$OUT" && fail "ASK does not suggest clearing the slot"
+  else
+    grep -Fq "This verdict is about $H, you are on $now" <<<"$OUT" || fail "$kind hint names both heads"
+    grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "$kind hint names slot reset"
+    grep -q 'journal the reason.*re-dispatch' <<<"$OUT" || fail "$kind hint explains redispatch"
+  fi
+  [ "$(bash "$TKT_STATE" "$S" get job.lane)" = stub-1 ] || fail "$kind keeps stored slot"
+  grep -q '^run|' "$T/stub.log" && fail "$kind rerun dispatches nothing new"
+done
 
 # --- DONE with no commits under --expect-commits ---
 setup_case no-commits
@@ -593,7 +634,7 @@ make_record seeded-9 DONE 0 1 2 0
 printf 'job.lane=%s\n' seeded-9 >>"$S"
 run_job --slot lane
 [ "$RC" -eq 0 ] || fail "rerun exits 0"
-expect_verdict "TKT tkt-job DONE id=seeded-9 head=bbbb commits=1 gate=PASS reused=seeded-9 log=*" "rerun"
+expect_verdict "TKT tkt-job DONE id=seeded-9 head=bbbb commits=1 gate=PASS reused=seeded-9 stale-head=bbbb now=* log=*" "rerun"
 grep -q "^watch|seeded-9$" "$T/stub.log" || fail "rerun watches the stored id"
 grep -q "^run|" "$T/stub.log" && fail "rerun starts no second run"
 
