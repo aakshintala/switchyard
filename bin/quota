@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # quota: AI subscription quota from the QuotaBar feed, one line per provider.
-# Usage: quota [--json]   (--json prints the raw feed)
+# Usage: quota [--json | --route]   (--json prints the raw feed; --route prints
+# the healthiest backend per ladder tier, e.g. "tier strong: codex (healthy)")
 # QUOTA_FEED overrides the feed URL (default http://127.0.0.1:8787/quotas).
 set -euo pipefail
 FEED="${QUOTA_FEED:-http://127.0.0.1:8787/quotas}"
@@ -13,6 +14,29 @@ fi
 
 if [[ "${1:-}" == "--json" ]]; then
   printf '%s\n' "$json"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--route" ]]; then
+  # One line per ladder tier: the backend with the best pace-aware status that
+  # still has quota left. Depleted and unavailable providers are excluded, and
+  # ties keep feed order (the first provider with the best status wins).
+  TIERS="standard strong frontier"
+  pick="$(jq -r '
+    def rank: {"healthy":0,"warning":1,"critical":2}[.] // 3;
+    [ .providers[]
+      | select(.unavailable == null and .status != "depleted")
+      | {id: .id, status: .status, r: (.status | rank)}
+    ]
+    | if length == 0 then empty
+      else (map(.r) | min) as $best
+      | ([.[] | select(.r == $best)][0] | "\(.id) (\(.status))")
+      end' <<<"$json")"
+  if [ -z "$pick" ]; then
+    for tier in $TIERS; do echo "tier $tier: none"; done
+    exit 1
+  fi
+  for tier in $TIERS; do echo "tier $tier: $pick"; done
   exit 0
 fi
 
