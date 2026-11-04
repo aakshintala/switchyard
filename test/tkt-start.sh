@@ -794,7 +794,7 @@ want "CURRENT " 0 bodyendse2e
 grep -qF 'body_ends=X' "$RUN/widget-42.state" || fail "bodyendse2e: state misses [body_ends=X]"
 S2E_STATE="$RUN/widget-42.state"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set pr 7
-bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set reviewed rev123
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set reviewed "$(git -C "$WT" rev-parse HEAD)"
 S2E_HEAD="$(git -C "$WT" rev-parse HEAD)"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set head "$S2E_HEAD"
 printf '%s' "$S2E_HEAD" >"$T/prhead"
@@ -815,7 +815,7 @@ part_seed_pr() {
 # identity and any model role not overridden by the new invocation.
 setup partmerged ONE AGAINST; part_seed_pr partmerged
 S="$RUN/widget-42.state"; ARCHIVE="$S.part1"
-bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set reviewed r1
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set reviewed "$part_actual"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan /x
 journal_before="$(cat "$RUN/widget-42.journal")"
 printf 'MERGED\n' >"$T/prstate"
