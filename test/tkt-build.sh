@@ -445,6 +445,17 @@ grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is j
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
 
+# --- the real lane brief fills and carries the second-patch stop rule (#982) ---
+setup_case real-lane-brief
+cp "$T/home/.agents/skills/planning/briefs/lane.md" "$T/lane-stub.md" || fail "real-lane-brief: keep the stub lane brief"
+cp "$SCRIPT_DIR/../skills/planning/briefs/lane.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: install the real lane brief"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "real-lane-brief exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+brief="$(grep '^run|id=stub-1|' "$T/calls.log" | sed 's/.*prompt=//')"
+cp "$T/lane-stub.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: restore the stub lane brief"
+grep -q 'second patch' "$brief" || fail "real-lane-brief: the filled brief carries the second-patch stop rule"
+grep -q 'STATUS: BLOCKED' "$brief" || fail "real-lane-brief: the filled brief names the BLOCKED stop"
+
 # --- body_ends wins over body_has for the lane ATTRIBUTION ---
 setup_case attr-ends
 bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-ends: set body_has"
