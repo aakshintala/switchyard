@@ -127,7 +127,7 @@ bash "$TKT" "$HS" add head abc1234 2>/dev/null && fail "add head with a short SH
 
 # every other commit-valued key rejects a non-SHA on both write paths, while
 # an empty reset still succeeds where callers clear the key
-for basekey in plan_verdict_base verified_base review_head; do
+for basekey in plan_verdict_base verified_base review_head reviewed; do
   BKS="$T/base-$basekey.state"
   bash "$TKT" "$BKS" set "$basekey" abc1234 2>"$T/err-short-$basekey.txt" && fail "set $basekey with a short SHA exits non-zero"
   [ "$?" = "2" ] || fail "set $basekey with a short SHA exits 2"

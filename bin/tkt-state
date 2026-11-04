@@ -76,7 +76,7 @@ reject_newline() {
 # full 40-hex SHA; anything else would surface later as bogus drift instead
 # of naming the bad write. Keys in reset_keys may also be cleared to empty,
 # which is how callers reset them.
-commit_keys="head plan_verdict_base verified_base review_head"
+commit_keys="head plan_verdict_base verified_base review_head reviewed"
 reset_keys="plan_verdict_base verified_base"
 
 # A stored commit must be a full 40-hex SHA; an empty value is accepted only
