@@ -134,6 +134,9 @@ base="$(plan_base "$plan" 2>/dev/null || true)"
 # read every token (lib/plan-tokens.sh) because they check coverage, not staleness.
 plan_files=()
 while IFS= read -r p; do plan_files+=("$p"); done < <(plan_files_pathspecs "$plan")
+# Verdict-base validation considers all entries; only writes can stale against main.
+stale_files=()
+while IFS= read -r p; do stale_files+=("$p"); done < <(plan_files_pathspecs "$plan" writes)
 # debt: a copy of tkt-plan's plan_verdict_ok (and its write pair in do_verify and do_confirm).
 # Ceiling: two copies plus the write pair, in tkt-plan and tkt-build. Upgrade trigger: a third
 # caller of the verdict check; then move it to bin/lib/ and source it from both scripts.
@@ -168,10 +171,10 @@ else
   [ -n "$verdict_base" ] || verdict_base=none
   emit "VERDICT-REFUSED verdict=$verdict_refusal" 1 "plan_verdict=$verdict plan_verdict_base=$verdict_base plan_base=$base"
 fi
-if [ "${#plan_files[@]}" -gt 0 ]; then
-  stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${plan_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+if [ "${#stale_files[@]}" -gt 0 ]; then
+  stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${stale_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
   if [ -n "$stat_out" ]; then
-    n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${plan_files[@]}" 2>/dev/null | wc -l | tr -d ' ')"
+    n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${stale_files[@]}" 2>/dev/null | wc -l | tr -d ' ')"
     emit "STALE n=$n base=$base" 1 "$stat_out"
   fi
 fi

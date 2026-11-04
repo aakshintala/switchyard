@@ -9,6 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TKT="$SCRIPT_DIR/../bin/tkt-plan"
 TKT_STATE="$SCRIPT_DIR/../bin/tkt-state"
 REAL_BIN="$SCRIPT_DIR/../bin"
+# shellcheck source=../bin/lib/plan-tokens.sh
+. "$REAL_BIN/lib/plan-tokens.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -19,6 +21,16 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-plan.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
+
+# Files entries expose their read/write mark as a second parser field. A
+# missing marker is a write, and the default pathspec mode still includes all.
+parser_plan="$T/files-parser.md"
+printf '## Files\n- `read.txt` (read)\n| `table.txt` | (read) |\n- `write.txt`\n' >"$parser_plan"
+parser_entries="$(awk -v mode=entries "$_plan_files_awk" "$parser_plan")"
+[ "$parser_entries" = "$(printf 'read.txt\tread\ntable.txt\tread\nwrite.txt\twrite')" ] || fail "Files parser fields: [$parser_entries]"
+[ "$(plan_files_pathspecs "$parser_plan")" = "$(printf 'read.txt\ntable.txt\nwrite.txt')" ] || fail "all Files paths include reads and writes"
+[ "$(plan_files_pathspecs "$parser_plan" all)" = "$(printf 'read.txt\ntable.txt\nwrite.txt')" ] || fail "explicit all Files paths include reads and writes"
+[ "$(plan_files_pathspecs "$parser_plan" writes)" = "write.txt" ] || fail "write Files paths omit reads, table rows included"
 
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
