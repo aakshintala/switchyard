@@ -209,6 +209,7 @@ else
     }
     keys="$(grep -oE '__[A-Z][A-Z0-9_]*__' "$template" | sort -u | sed -e 's/^__//' -e 's/__$//' || true)"
     args=()
+    missing=""
     for k in $keys; do
       v=""
       found=0
@@ -250,11 +251,15 @@ else
         fi
       fi
       if [ "$found" -eq 0 ]; then
-        echo "tkt-job: template needs $k: no flag and no state value" >&2
-        exit 2
+        if [ -z "$missing" ]; then missing="$k"; else missing="$missing, $k"; fi
+        continue
       fi
       args+=("$k=$v")
     done
+    if [ -n "$missing" ]; then
+      echo "tkt-job: template needs $missing: no flag and no state value" >&2
+      exit 2
+    fi
     # Only keys the template names reach fill-brief; stray flags stay out.
     k=1
     while [ -e "$run/$namebase-$slot-$k.md" ]; do
