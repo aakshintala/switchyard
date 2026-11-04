@@ -803,6 +803,23 @@ grep -Fxq 'VERDICT spec: APPROVE' <<<"$out" || fail "re-collect prints the resum
 [ ! -d "$run_dir" ] || fail "finished resumed run directory is removed"
 [ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "re-collect never duplicates the comment"
 
+# --- case: re-collect labels the reprinted overbuild verdict
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec NEEDS_CONTEXT "Owner ruling needed before review can continue"
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "overbuild reprint start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" && fail "overbuild reprint first collect exits 1"
+grep -q "^VERDICT overbuild: APPROVE$" <<<"$out" || fail "first collect labels the overbuild verdict"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" && fail "overbuild reprint re-collect exits 1"
+grep -q '^COLLECTED job-overbuild ' <<<"$out" || fail "re-collect reprints the finished overbuild job"
+grep -q "^VERDICT overbuild: APPROVE$" <<<"$out" || fail "re-collect labels the reprinted overbuild verdict"
+grep -q "^VERDICT: APPROVE$" <<<"$out" && fail "re-collect never reprints a bare overbuild verdict"
+
 # --- case: mixed collect posts only for the fresh run
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"

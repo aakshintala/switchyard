@@ -445,20 +445,10 @@ if [ "$rc" -ne 0 ]; then
   emit "REVIEW-INCOMPLETE" "$rc" "$collect_out" "$(tail -n 5 "$tmpd/collect-err")"
 fi
 # A missing verdict is never approval: without a valid verdict line for
-# every axis this round routes nowhere, whatever the counts say. A reprinted
-# overbuild verdict keeps the job's bare form (VERDICT: X); a fresh collect
-# labels it (VERDICT overbuild: X). Only overbuild ever writes the bare
-# form, so attribute it to overbuild.
+# every axis this round routes nowhere, whatever the counts say.
 missing=""
 for ax in standards spec overbuild; do
-  case "$ax" in
-    overbuild)
-      { grep -qE "^VERDICT overbuild: (APPROVE|CHANGES)$" <<<"$collect_out" || grep -qE "^VERDICT: (APPROVE|CHANGES)$" <<<"$collect_out"; } || missing="${missing:+$missing }$ax"
-      ;;
-    *)
-      grep -qE "^VERDICT $ax: (APPROVE|CHANGES)$" <<<"$collect_out" || missing="${missing:+$missing }$ax"
-      ;;
-  esac
+  grep -qE "^VERDICT $ax: (APPROVE|CHANGES)$" <<<"$collect_out" || missing="${missing:+$missing }$ax"
 done
 if [ -n "$missing" ]; then
   n=0; for ax in standards spec overbuild; do
@@ -510,8 +500,6 @@ fi
 merged=$((merged + shard_merged))
 p1="$(grep -c '^P1 ' "$findings_file" || true)"; p2="$(grep -c '^P2 ' "$findings_file" || true)"; p3="$(grep -c '^P3 ' "$findings_file" || true)"
 n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect_out" || true)"
-n_approve_bare="$(grep -cE '^VERDICT: APPROVE$' <<<"$collect_out" || true)"
-n_approve="$((n_approve + n_approve_bare))"
 # One bad-count sum: a P3 alone never blocks.
 bad=$((3 - n_approve + p1 + p2 + merged))
 # A map note alone leaves the review state unwritten, so the review can re-run.
