@@ -197,7 +197,14 @@ elif [ "$from" != review ]; then
   [ -n "${pr:-}" ] && [ -n "${head:-}" ] || emit "PRECONDITION missing=pr" 2 "tkt-build: no PR for branch $branch (gh pr list --head $branch --json number,headRefOid)"
   tkt set pr "$pr"; tkt set head "$head"
 else
-  require_keys pr head; pr="$(tkt get pr)"; head="$(tkt get head)"
+  pr="$(tkt get pr 2>/dev/null || true)"; head="$(tkt get head 2>/dev/null || true)"
+  if [ -z "${pr:-}" ] || [ -z "${head:-}" ]; then
+    pr_json="$(gh pr list --head "$branch" --repo "$repo" --json number,headRefOid 2>/dev/null || true)"
+    pr="$(jq -r '.[0].number // empty' <<<"$pr_json" 2>/dev/null || true)"
+    head="$(jq -r '.[0].headRefOid // empty' <<<"$pr_json" 2>/dev/null || true)"
+    [ -n "${pr:-}" ] && [ -n "${head:-}" ] || emit "PRECONDITION missing=pr" 2 "tkt-build: no PR for branch $branch (gh pr list --head $branch --json number,headRefOid)"
+    tkt set pr "$pr"; tkt set head "$head"
+  fi
   pr_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
   if [ "$pr_head" != "$head" ]; then
     msg="tkt-build: head drift: state head=$head worktree $worktree HEAD=$head pr $pr head=${pr_head:-unreadable}"

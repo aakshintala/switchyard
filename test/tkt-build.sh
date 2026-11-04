@@ -905,11 +905,22 @@ grep -q "^gate|" "$T/calls.log" && fail "from-review: the gate never runs"
 grep -q "pr list" "$T/calls.log" && fail "from-review: the PR list is never read"
 grep -q "^review-start|" "$T/calls.log" || fail "from-review: review still starts"
 
-# --- --from review without pr and head names the missing key ---
+# --- --from review without pr and head derives them from the branch PR ---
+setup_case review-derives-pr
+run_build --from review
+[ "$RC" -eq 0 ] || fail "review-derives-pr exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-derives-pr"
+expect_state pr 7 review-derives-pr
+expect_state head "$H" review-derives-pr
+grep -q "^review-start|" "$T/calls.log" || fail "review-derives-pr: review still starts"
+
+# --- --from review without pr and head and no PR names the missing key ---
 setup_case review-missing-pr
+touch "$T/empty-pr"
 run_build --from review
 [ "$RC" -eq 2 ] || fail "review-missing-pr exits 2 (rc=$RC)"
 expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "review-missing-pr"
+grep -q "^gate|" "$T/calls.log" && fail "review-missing-pr: the gate never runs"
 
 # --- --from review with a moved PR head reports the drift ---
 setup_case review-drift
