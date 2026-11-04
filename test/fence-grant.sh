@@ -288,6 +288,22 @@ assert_rc 1 'live lane hold'
 assert_out 'HELD docs/tui.md by lane #77' 'live lane output'
 
 reset_case
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\nRanges: docs/tui.md:3700-3710\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --ranges docs/tui.md:192-200 --dry
+assert_rc 0 'ranged grant frees outside window'
+assert_out "$(printf 'GRANT docs/tui.md\nGRANT')" 'outside window output'
+
+reset_case
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\nRanges: docs/tui.md:3700-3710\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --ranges docs/tui.md:3705-3706 --dry
+assert_rc 1 'ranged grant holds overlapping window'
+assert_line 'HELD docs/tui.md by lane #77' 'overlapping window output'
+
+reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 1 'fresh orphan grant hold'
