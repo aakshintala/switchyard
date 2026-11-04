@@ -87,7 +87,25 @@ if [ -n "${SSH_OUT:-}" ]; then printf '%s\n' "$SSH_OUT"; else
     'FWSEC=PILANES' PILANESOK 'FWSEC=END'
 fi
 SSH_STUB
-chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH"
+cat >"$T/stubs/file-claim" <<'FC_STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$T/file-claim.log"
+case "${FILE_CLAIM_MODE:-ok}" in
+  ok) exit 0;;
+  refuse)
+    n=0; after=0
+    for a in "$@"; do
+      if [ "$after" = "1" ]; then echo "REFUSE $a lane:fiber-77"; n=$((n + 1)); fi
+      case "$a" in --) after=1;; esac
+    done
+    echo "file-claim: 0 granted, $n refused"
+    exit 1;;
+  error)
+    echo 'stub file-claim: boom' >&2
+    exit 2;;
+esac
+FC_STUB
+chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$T/stubs/file-claim"
 
 reset_case() {
   rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
@@ -117,6 +135,11 @@ TREE
   export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT
   FW_DELEGATE_DIR="$T/delegate-jobs"
   export FW_DELEGATE_DIR
+  FILE_CLAIM_MODE=ok
+  export FILE_CLAIM_MODE
+  FW_FILE_CLAIM="$T/stubs/file-claim"
+  export FW_FILE_CLAIM
+  : >"$T/file-claim.log"
 }
 
 # Writes one delegate registry record: name, status, supervisor pid, worktree.
@@ -785,5 +808,80 @@ run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-5 --dry
 assert_rc 0 'ranged grant is quiet'
 assert_not_contains 'WIDE' 'ranged grant prints no WIDE'
 assert_line 'GRANT docs/tui.md' 'ranged grant line'
+
+# --- The grant performs its claim: one ledger both fences read (#1101) ------
+reset_case
+run_fg 77 --paths docs/tui.md
+assert_rc 0 'grant performs the claim'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber -- docs/tui.md' "$T/file-claim.log" || fail 'claim args hold the granted path'
+[ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'grant file still written'
+
+reset_case
+run_fg 77 --paths docs/tui.md --reads docs/x.md
+assert_rc 0 'reads ride along unclaimed'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber -- docs/tui.md' "$T/file-claim.log" || fail 'claim args hold only the granted path'
+! grep -qF 'docs/x.md' "$T/file-claim.log" || fail 'a read is never claimed'
+
+reset_case
+set_pr 11 fix/other docs/tui.md
+run_fg 77 --paths docs/tui.md --ignore-pr 11
+assert_rc 0 'ignored PR stays ignored in the claim'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'claim skips the ignored PR'
+
+reset_case
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 0 'dry run probes only'
+[ ! -s "$T/file-claim.log" ] || fail 'dry run claims nothing'
+
+reset_case
+FILE_CLAIM_MODE=refuse
+export FILE_CLAIM_MODE
+run_fg 88 --paths docs/tui.md
+assert_rc 1 'ledger refusal is a hold'
+assert_out 'HELD docs/tui.md by lane #77' 'ledger refusal output'
+assert_no_grant 'ledger refusal'
+
+reset_case
+FILE_CLAIM_MODE=refuse
+export FILE_CLAIM_MODE
+run_fg 88 --paths docs/tui.md,docs/events.md
+assert_rc 1 'a refused set grants nothing'
+assert_out "$(printf 'HELD docs/tui.md by lane #77\nHELD docs/events.md by lane #77')" 'refused set output'
+assert_no_grant 'refused set'
+
+reset_case
+FILE_CLAIM_MODE=error
+export FILE_CLAIM_MODE
+run_fg 88 --paths docs/tui.md
+assert_rc 3 'broken claim probe fails closed'
+assert_out 'ERROR file-claim claim stub file-claim: boom ' 'broken claim output'
+assert_no_grant 'broken claim'
+
+# --- Own-PR exemption reaches the claim (#1101 P2) ---------------------------
+reset_case
+set_pr 11 x/77-slug docs/tui.md
+run_fg 77 --paths docs/tui.md
+assert_rc 0 'own PR hold does not refuse the own lane claim'
+assert_contains 'OWN skipping PR #11' 'own PR skip printed'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'claim exempts the own PR'
+[ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'own-PR grant file exists'
+
+# --- A ranged grant is never whole-claimed (#1101 P2) ------------------------
+reset_case
+set_pr 11 fix/other docs/tui.md
+cat >"$T/pr/11.diff" <<'DIFF'
+diff --git a/docs/tui.md b/docs/tui.md
+index 1111111..2222222 100644
+--- a/docs/tui.md
++++ b/docs/tui.md
+@@ -3,2 +3,2 @@
+-three
++THREE
+DIFF
+run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-2
+assert_rc 0 'ranged grant survives the ledger despite the open PR'
+assert_line 'GRANT docs/tui.md' 'ranged grant line'
+! grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber -- docs/tui.md' "$T/file-claim.log" || fail 'ranged path is not claimed whole'
+grep -qxF 'Ranges: docs/tui.md:1-2' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'ranged grant file records the range'
 
 echo 'fence-grant tests passed'
