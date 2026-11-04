@@ -902,6 +902,20 @@ grep -qF -- 'model.lane=new' "$S" || fail "partmodel: state misses [model.lane=n
 grep -qE '^model\.lane=old$' "$S" && fail "partmodel: stale model.lane value remains"
 [ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "partmodel: state wants 1 model.lane"
 
+# A part split carries the plan verdict: the plan is shared across parts, so
+# the new part keeps plan_verdict and plan_verdict_base and the build does
+# not refuse with verdict=none.
+setup partverdict ONE AGAINST; part_seed_pr partverdict
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict ok
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict_base "$FILING"
+printf 'MERGED\n' >"$T/prstate"
+reload --model; run_start --part 2
+want "CURRENT " 0 partverdict
+grep -qF -- 'plan_verdict=ok' "$S" || fail "partverdict: state misses [plan_verdict=ok]"
+grep -qF -- "plan_verdict_base=$FILING" "$S" || fail "partverdict: state misses [plan_verdict_base=$FILING]"
+grep -qF -- 'plan_verdict=ok' "$S.part1" || fail "partverdict: archive misses [plan_verdict=ok]"
+
 # An invalid stored part is reported, and a missing part above part 1 is not inferred.
 setup partnonnumeric ONE AGAINST; part_seed_pr partnonnumeric
 S="$RUN/widget-42.state"
