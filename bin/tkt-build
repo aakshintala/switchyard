@@ -442,9 +442,12 @@ fi
 merged=$((merged + shard_merged))
 p1="$(grep -c '^P1 ' "$findings_file" || true)"; p2="$(grep -c '^P2 ' "$findings_file" || true)"; p3="$(grep -c '^P3 ' "$findings_file" || true)"
 n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect_out" || true)"
-tkt set reviewed "$head"; tkt set findings "$findings_file"; tkt set round 0
 # One bad-count sum: a P3 alone never blocks.
 bad=$((3 - n_approve + p1 + p2 + merged))
+# A map note alone leaves the review state unwritten, so the review can re-run.
+if [ "$bad" -gt 0 ] || [ -z "$map_note" ]; then
+  tkt set reviewed "$head"; tkt set findings "$findings_file"; tkt set round 0
+fi
 [ -n "$map_note" ] && bad=$((bad + 1))
 approve_digest="$collect_out"; digest="$(cat "$findings_file")"
 if [ -n "$map_note" ]; then approve_digest="$map_note
