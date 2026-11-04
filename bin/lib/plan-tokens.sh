@@ -201,7 +201,7 @@ _plan_files_awk='
   f && match($0, /^[[:space:]]*([-*]|\|)[[:space:]]+`[^`]*`/) {
     t = substr($0, RSTART, RLENGTH); sub(/^[^`]*`/, "", t); sub(/`$/, "", t)
     if (t == "") next
-    read = ($0 ~ /\(read\)[[:space:]]*$/)
+    read = ($0 ~ /\(read\)[[:space:]]*([|][[:space:]]*)?$/)
     if (mode == "entries") print t "\t" (read ? "read" : "write")
     else if (mode == "lines") print NR "\t" t
     else if (mode == "writes" && read) next
