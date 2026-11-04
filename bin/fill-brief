@@ -5,8 +5,9 @@
 #        --out may appear anywhere among the arguments, at most once.
 #        A VALUE starting with @ is read from that file. All values are literal:
 #        multi-line text and & \ / $ pass through unchanged. Without --out, prints
-#        the filled template on stdout. With --out, creates <path>'s directory, writes it there and prints
-#        exactly one line on stdout: Read <path> and follow it.
+#        the filled template on stdout. With --out, creates <path>'s directory,
+#        writes it, lints the filled brief, then prints exactly one line on stdout:
+#        Read <path> and follow it.
 #        A template containing __PARENT__ needs a non-empty PARENT value (the
 #        parent's session name); there is no fallback. A template containing
 #        __GATE__ needs a non-blank GATE value (not empty, not only whitespace)
@@ -14,7 +15,8 @@
 #        string when no EXTRA= argument is given; no other key has a default.
 #        Exit 1 (nothing on stdout, one problem per line on stderr) when a
 #        placeholder is left unfilled, a key matches nothing, PARENT or GATE is blank,
-#        the output cannot be written, or reading it back differs. Exit 2 on bad usage, including a
+#        the output cannot be written, reading it back differs, or brief-lint
+#        rejects the output. Exit 2 on bad usage, including a
 #        relative --out path. A TEMPLATE with no / is a bare brief name
 #        (planner): it resolves to skills/*/briefs/<name>.md beside the
 #        script, else under $HOME/.agents/skills. A path keeps working.
@@ -204,6 +206,17 @@ if [ -n "$out_path" ]; then
   back="${back%x}"
   if [ "$back" != "$out" ]; then
     echo "fill-brief: output file does not match filled text: $out_path" >&2
+    exit 1
+  fi
+  script_path="$0"
+  case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+  while [ -L "$script_path" ]; do
+    link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+    link="$(readlink "$script_path")"
+    case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+  done
+  script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  if ! "$script_dir/brief-lint" "$out_path" >&2; then
     exit 1
   fi
   printf 'Read %s and follow it.\n' "$out_path"

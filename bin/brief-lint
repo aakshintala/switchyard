@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Refuse briefs that tell a lane to bypass a hook, guard or check."""
+import sys
+
+BYPASS = (
+    "--no-verify",
+    "core.hookspath",
+    "husky=0",
+    "git_config_key_",
+    "git commit -n",
+)
+NEGATIONS = ("never", "don't", "do not", "may not", "must not", "forbid")
+
+
+def lint(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        sys.stderr.write("brief-lint: no such file: %s\n" % path)
+        return None
+    hits = []
+    for number, line in enumerate(lines, start=1):
+        lowered = line.lower()
+        if not any(token in lowered for token in BYPASS):
+            continue
+        if any(negation in lowered for negation in NEGATIONS):
+            continue
+        hits.append((number, line.strip()))
+    return hits
+
+
+def main(argv):
+    if not argv:
+        sys.stderr.write("usage: brief-lint <file>...\n")
+        return 2
+    missing = False
+    total = 0
+    for path in argv:
+        hits = lint(path)
+        if hits is None:
+            missing = True
+            continue
+        for number, text in hits:
+            print("%s:%d: %s" % (path, number, text))
+            total += 1
+    if missing:
+        return 2
+    return 1 if total else 0
+
+
+sys.exit(main(sys.argv[1:]))
