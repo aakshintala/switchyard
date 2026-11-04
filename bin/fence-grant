@@ -240,6 +240,9 @@ case "$repo" in
   *) _usage; exit 2;;
 esac
 [ -n "$paths" ] || { _usage; exit 2; }
+case "$paths" in
+  *:[0-9]*) echo "ERROR a line range belongs in --ranges, not --paths: $paths" >&2; exit 2;;
+esac
 
 run=$(_fw_run)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
