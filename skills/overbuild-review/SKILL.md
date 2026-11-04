@@ -29,6 +29,8 @@ First line: `VERDICT: APPROVE` when there is nothing to cut, else `VERDICT: CHAN
 - ✅ `P3 repo.py:88 — yagni — cut AbstractRepository with one implementation — replace with the implementation, inlined`
 - ❌ "This class might be more complex than necessary; have you considered whether all these rules are needed?"
 
+A finding names a concrete cut: duplication at named sites, code with no caller, or the shorter form shown. "Could be shorter" with no named cut is not written. A concrete finding blocks like any other.
+
 End with `net: -<N> lines possible.`
 
 ## Scope
