@@ -5,7 +5,8 @@ set -euo pipefail
 # limit; the exemption is derived from recorded state below.
 
 usage() {
-  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--owner-approved <id>]\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
+  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <id>]
+         (--owner-approved <id> is an alias for --ruling <id>)\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
   exit 2
 }
 
@@ -332,14 +333,15 @@ do_confirm() {
 }
 
 do_grant() {
-  who=""; comment=""; owner=""
+  who=""; comment=""; ruling=""; via=""
   while [ $# -gt 0 ]; do case "$1" in
     --by) [ $# -ge 2 ] || usage; who="$2"; shift 2;;
     --comment) [ $# -ge 2 ] || usage; comment="$2"; shift 2;;
-    --owner-approved) [ $# -ge 2 ] && [ -n "$2" ] || usage; owner="$2"; shift 2;;
+    --ruling) [ $# -ge 2 ] && [ -n "$2" ] || usage; ruling="$2"; via="ruling"; shift 2;;
+    --owner-approved) [ $# -ge 2 ] && [ -n "$2" ] || usage; ruling="$2"; via="owner-approved"; shift 2;;
     *) usage;; esac; done
   [ -n "$who" ] && [ -n "$comment" ] || usage
-  case "$who$comment$owner" in *[[:space:]]*) usage;; esac
+  case "$who$comment$ruling" in *[[:space:]]*) usage;; esac
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   [ -n "$confirmed_for" ] || { echo "tkt-plan: no limit reached: the confirm round is still open" >&2; exit 2; }
   granted_by="$(t get granted_by 2>/dev/null || true)"
@@ -349,15 +351,15 @@ do_grant() {
     echo "tkt-plan: grant already pending: $granted_by:$pending_comment" >&2
     exit 2
   fi
-  if [ -n "$granted_by" ] && [ -z "$owner" ]; then
+  if [ -n "$granted_by" ] && [ -z "$ruling" ]; then
     recorded_comment="$(t get granted_comment 2>/dev/null || true)"
-    echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a second grant needs the owner: use --owner-approved <comment id>" >&2
+    echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a later grant needs a ruling: use --ruling <comment id>" >&2
     exit 2
   fi
   t set granted_by "$who"
   t set granted_comment "$comment"
   t set granted_used ""
-  t set granted_owner "$owner"
+  t add grant "round=$confirmed_for by=$who via=$via comment=$comment ruling=$ruling"
   emit "SET grant=$who:$comment" 0
 }
 
