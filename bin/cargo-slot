@@ -348,7 +348,7 @@ def main():
                 "test": "RUST_TEST_THREADS",
                 "nextest": "NEXTEST_TEST_THREADS",
             }.get(subcommand(args))
-            if thread_var and thread_var not in os.environ:
+            if thread_var and not os.environ.get(thread_var):
                 os.environ[thread_var] = str(test_threads(n))
             if not held():
                 # Python opens fds close-on-exec; the shim holds this lock across cargo.

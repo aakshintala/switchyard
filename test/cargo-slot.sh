@@ -262,6 +262,14 @@ new_run test-thread-cap
 cargo_as "$R" CARGO_SLOTS=4 CARGO_SLOT_TEST_CORES=12 CARGO_SLOT_DIR="$T/threads/test" -- test
 [ "$(cat "$R/rust-threads")" = "rust-threads=3" ] || fail "test: thread count not capped at 3"
 
+new_run nextest-thread-empty
+cargo_as "$R" CARGO_SLOTS=4 CARGO_SLOT_TEST_CORES=12 NEXTEST_TEST_THREADS= CARGO_SLOT_DIR="$T/threads/nextest-empty" -- nextest run
+[ "$(cat "$R/nextest-threads")" = "nextest-threads=3" ] || fail "nextest: empty caller thread count was not computed"
+
+new_run test-thread-empty
+cargo_as "$R" CARGO_SLOTS=4 CARGO_SLOT_TEST_CORES=12 RUST_TEST_THREADS= CARGO_SLOT_DIR="$T/threads/test-empty" -- test
+[ "$(cat "$R/rust-threads")" = "rust-threads=3" ] || fail "test: empty caller thread count was not computed"
+
 new_run nextest-thread-override
 cargo_as "$R" CARGO_SLOTS=4 CARGO_SLOT_TEST_CORES=12 NEXTEST_TEST_THREADS=7 CARGO_SLOT_DIR="$T/threads/nextest-override" -- nextest run
 [ "$(cat "$R/nextest-threads")" = "nextest-threads=7" ] || fail "nextest: caller thread count was changed"
