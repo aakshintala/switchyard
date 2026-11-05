@@ -351,7 +351,14 @@ say "longest wait ${longest_wait} s (${longest_hours} h): 5 CI waits x ${effecti
 tmpdir="${TMPDIR:-/tmp}"
 find -H "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true
 
-here="$(cd "$(dirname "$0")" && pwd)"
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+here="$(cd "$(dirname "$script_path")" && pwd)"
 # rerun_cmd rebuilds this invocation against this file for the lost-race diagnostic.
 rerun_cmd="$(printf '%q ' bash "$here/$(basename "$0")" ${ship_args[@]+"${ship_args[@]}"})"
 rerun_cmd="${rerun_cmd% }"

@@ -15,7 +15,14 @@ usage() {
 }
 [ $# -eq 1 ] || usage
 state="$1"
-script_dir="$(cd "$(dirname "$0")" && pwd)"
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 tkt_state="$script_dir/tkt-state"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tkt() { "$tkt_state" "$state" "$@"; }

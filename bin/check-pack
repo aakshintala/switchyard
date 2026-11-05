@@ -13,7 +13,14 @@ usage() {
   exit 2
 }
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 default_root="$(dirname "$script_dir")"
 [ $# -le 1 ] || usage
 root="${1:-$default_root}"
@@ -165,6 +172,19 @@ while IFS= read -r f; do
       ;;
   esac
 done <<<"$files"
+
+# Script sibling paths must use the resolved script path, not a symlink's directory.
+bin_files="$(find "$root/bin" -type f 2>/dev/null | sort || true)"
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  rel="${f#$root/}"
+  hits="$(grep -nE '^[[:space:]]*(here|lib|root|[A-Za-z_][A-Za-z0-9_]*_(dir|lib|root))=.*dirname.*\$0|^[[:space:]]*(here|lib|root|[A-Za-z_][A-Za-z0-9_]*_(dir|lib|root))=.*dirname.*BASH_SOURCE|^[[:space:]]*(\.|source)[[:space:]].*dirname.*(\$0|BASH_SOURCE)' "$f" 2>/dev/null || true)"
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    line="${hit%%:*}"
+    fail "$rel" "$line" "resolve symlinks before setting a script directory"
+  done <<<"$hits"
+done <<<"$bin_files"
 
 if [ "$failures" -gt 0 ]; then exit 1; fi
 exit 0
