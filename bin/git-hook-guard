@@ -23,6 +23,9 @@ MARKER = b"# git-hook-guard shim"
 REFUSAL = ("git-hook-guard: refused: a lane may not skip or redirect git "
            "hooks; a hook that refuses is not yours to get round, so stop "
            "with STATUS: BLOCKED and report the refusal")
+STASH_REFUSAL = ("git-hook-guard: refused: use git stash push -u -m "
+                 "<unique-tag>, then git stash apply <sha>, then drop the "
+                 "entry by tag")
 
 
 def fail(code, msg):
@@ -374,24 +377,98 @@ def test_run_passes(args):
     return under_temp_root(effective_dir(args))
 
 
-def refused_command(args):
-    if husky_disabled():
+def stash_split(rest):
+    # Split argv after the stash subcommand into (sub, after), where sub is
+    # the stash subcommand word or None for a bare `git stash`. Leading
+    # option tokens are skipped, with a -m/--message value skipped too so
+    # it is never read as the subcommand; `--` ends option parsing.
+    i = 0
+    n = len(rest)
+    while i < n:
+        token = rest[i]
+        if token == "--":
+            i += 1
+            break
+        if not token.startswith("-") or len(token) == 1:
+            break
+        if token in ("-m", "--message"):
+            i += 2
+            continue
+        i += 1
+    if i < n:
+        return rest[i], rest[i + 1:]
+    return None, []
+
+
+def push_has_message(args):
+    # True when the argv after `stash push` carries -m/--message with a
+    # value. A `-xyz` cluster's m takes the rest of the token or the next
+    # token; a -- token ends option parsing, so a pathspec -m does not
+    # count, and neither does the value of --pathspec-from-file.
+    options_done = False
+    i = 0
+    n = len(args)
+    while i < n:
+        token = args[i]
+        if options_done:
+            pass
+        elif token == "--":
+            options_done = True
+        elif token in ("-m", "--message"):
+            if i + 1 < n:
+                return True
+        elif token.startswith("--message="):
+            return True
+        elif token == "--pathspec-from-file":
+            i += 1
+        elif token.startswith("--"):
+            pass
+        elif token.startswith("-") and len(token) > 1:
+            j = 1
+            while j < len(token):
+                if token[j] == "m":
+                    return True
+                j += 1
+        i += 1
+    return False
+
+
+def stash_refused(rest):
+    # A bare `git stash` and `git stash pop` take whatever is on top of the
+    # shared stash stack, which can be another lane's work; a push without
+    # -m cannot be dropped by tag. Every other stash form passes through.
+    sub, after = stash_split(rest)
+    if sub is None:
         return True
+    if sub == "pop":
+        return True
+    if sub == "push":
+        return not push_has_message(after)
+    return False
+
+
+def refusal_for(args):
+    if husky_disabled():
+        return REFUSAL
     denied, sub, rest = parse_globals(args, [])
     if sub == "config":
-        return bypass_in_config(rest)
+        return REFUSAL if bypass_in_config(rest) else None
     if sub in HOOK_SUBCOMMANDS and (denied or hooks_path_in_env()):
-        return True
-    if sub is not None:
-        return bypass_in_command(sub, rest)
-    return False
+        return REFUSAL
+    if sub == "stash":
+        return STASH_REFUSAL if stash_refused(rest) else None
+    if sub is not None and bypass_in_command(sub, rest):
+        return REFUSAL
+    return None
 
 
 def main():
     args = sys.argv[1:]
-    if not test_run_passes(args) and refused_command(args):
-        sys.stderr.write(REFUSAL + "\n")
-        sys.exit(1)
+    if not test_run_passes(args):
+        message = refusal_for(args)
+        if message is not None:
+            sys.stderr.write(message + "\n")
+            sys.exit(1)
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     real = find_real_git(os.environ.get("PATH"), shim_dir)
     if real is None:

@@ -414,4 +414,40 @@ refused status
 unset LANE_ENV
 unset LANE_DIR
 
+# Task 4: bare stash forms pop whatever is on top of the shared stack,
+# which can be another lane's work.
+
+STASH_REFUSED='git-hook-guard: refused: use git stash push -u -m <unique-tag>, then git stash apply <sha>, then drop the entry by tag'
+
+expect_stash_refused() {
+  [ "$RC" = 1 ] || fail "stash-refused [$*]: exit $RC, want 1"
+  [ -z "$OUT" ] || fail "stash-refused [$*]: stdout [$OUT], want empty"
+  [ "$ERR" = "$STASH_REFUSED" ] || fail "stash-refused [$*]: stderr [$ERR]"
+  [ ! -e "$T/calls" ] || fail "stash-refused [$*]: the stub ran"
+}
+
+srefused() {
+  lane "$@"
+  expect_stash_refused "$@"
+}
+
+srefused stash
+srefused stash push
+srefused stash push -u
+srefused stash push -m
+srefused stash pop
+srefused stash pop 'stash@{0}'
+srefused stash push -- -m x
+srefused stash push --pathspec-from-file -m -q
+
+passed stash list
+passed stash apply abc123
+passed stash push -m tag
+passed stash push -u -m tag
+
+# A stash refusal does not need a real git either.
+LANE_PATH="$T/shims:$T/py"
+srefused stash pop
+unset LANE_PATH
+
 echo "git-hook-guard: all cases passed"
