@@ -80,7 +80,21 @@ template="${args[0]}"
     if [ -n "$resolved" ]; then
       template="$resolved"
     else
-      echo "fill-brief: no such template: $template" >&2
+      available=""
+      seen="|"
+      for bdir in "$script_dir"/../skills/*/briefs "${HOME:-}"/.agents/skills/*/briefs; do
+        for tfile in "$bdir"/*.md; do
+          [ -f "$tfile" ] || continue
+          tname="${tfile##*/}"
+          tname="${tname%.md}"
+          case "$seen" in *"|$tname|"*) continue ;; esac
+          seen="$seen$tname|"
+          if [ -n "$available" ]; then available="$available, "; fi
+          available="$available$tname"
+        done
+      done
+      [ -n "$available" ] || available="none found"
+      echo "fill-brief: no such template: $template (available templates: $available)" >&2
       exit 2
     fi
     ;;

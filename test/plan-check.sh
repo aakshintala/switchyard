@@ -248,6 +248,7 @@ printf '# Plan: #1 test\nBase: %s\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/e
 out="$(cd "$T/empty" && bash "$CHECK" "$T/empty-plan.md" 2>"$T/err-13c.txt")"; code=$?
 [ "$code" = 2 ] || fail "plan outside a checkout exits 2, got $code"
 grep -q -- "--cwd" "$T/err-13c.txt" || fail "plan outside a checkout names --cwd"
+grep -Fq 'is not a git repository; pass --cwd <worktree>' "$T/err-13c.txt" || fail "plan outside a checkout identifies the missing --cwd"
 
 # 14. exit 2: bad usage, unreadable plan, no Base line, bad REV, not a repo
 expect_code "no args" 2

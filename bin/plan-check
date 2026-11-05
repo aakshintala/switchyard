@@ -243,6 +243,10 @@ if [ "$have_cwd" = 0 ]; then
     dir="."
   fi
 fi
+if [ "$have_cwd" = 0 ] && ! git -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1; then
+  echo "plan-check: $dir is not a git repository; pass --cwd <worktree>" >&2
+  exit 2
+fi
 
 if [ -z "$rev" ]; then
   rev="$(plan_base "$plan")"
