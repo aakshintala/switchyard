@@ -208,7 +208,7 @@ fw_delegate_session_lane_names() {
   # The end marker is the transport's proof, not part of the JSON: feeding it
   # to the mapper makes json.load choke on trailing content, which reads as a
   # refusal and fails the whole sweep closed.
-  _fw_out=$(printf '%s\n' "$_fw_s" | grep -v '^DSESSJSONOK$' | python3 -I "$(cd "$(dirname "$0")" && pwd)/fw-sess-lanes" "$_fw_roster") || return 1
+  _fw_out=$(printf '%s\n' "$_fw_s" | grep -v '^DSESSJSONOK$' | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
   printf '%s' "$_fw_out" | tr '\n' ' '
   return 0
 }

@@ -289,12 +289,14 @@ assert_rc 0 'free dry run'
 assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'free dry output'
 assert_no_grant 'free dry run'
 
-# Called through a relative symlink from a directory with no file-claim (as
-# flywheel's bin/fence-grant is), it finds file-claim beside its real path.
+# Called through a relative symlink from a directory with no siblings (as
+# flywheel's bin/fence-grant is), it finds file-claim and fw-sess-lanes beside
+# its real path.
 reset_case
 mkdir -p "$T/realbin" "$T/linkbin"
 cp "$FG" "$T/realbin/fence-grant"
 cp "$T/stubs/file-claim" "$T/realbin/file-claim"
+cp "$(dirname "$FG")/fw-sess-lanes" "$T/realbin/fw-sess-lanes"
 ln -sf ../realbin/fence-grant "$T/linkbin/fence-grant"
 (unset FW_FILE_CLAIM; bash "$T/linkbin/fence-grant" 77 --paths docs/tui.md --dry >"$T/out" 2>"$T/err"); RC=$?
 assert_rc 0 'symlinked caller finds file-claim'
