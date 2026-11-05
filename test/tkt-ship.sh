@@ -561,4 +561,39 @@ expect_line1 "MERGED sha=" gateship-noline
 grep -q "Local gate" "$CDIR/stderr" && fail "gateship-noline: unexpected Local gate warning: [$(cat "$CDIR/stderr")]"
 grep -q "Local gate" <<<"$OUT" && fail "gateship-noline: unexpected Local gate line in output"
 
+# --- a gate PASS in state but no Local gate line warns and still merges ---
+reset_stub; setup_case gateship-missing
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "gateship-missing: journal the gate PASS"
+printf 'Title\n\nSome text.\n' >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-missing: exit $RC"
+expect_line1 "MERGED sha=" gateship-missing
+grep -q "no Local gate line" "$CDIR/stderr" || fail "gateship-missing: stderr misses the missing-line warning: [$(cat "$CDIR/stderr")]"
+grep -q "$H" "$CDIR/stderr" || fail "gateship-missing: stderr misses the gate sha"
+grep -q "bash test/gate.sh" "$CDIR/stderr" || fail "gateship-missing: stderr misses the gate command"
+
+# --- a write-failed gate PASS (head set, no body line) warns on the next ship ---
+reset_stub; setup_case gateship-writefail
+printf '0' >"$T/exitcodes"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "gateship-writefail: journal the gate PASS"
+printf 'Title\n' >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-writefail: exit $RC"
+expect_line1 "MERGED sha=" gateship-writefail
+grep -q "no Local gate line" "$CDIR/stderr" || fail "gateship-writefail: stderr misses the missing-line warning: [$(cat "$CDIR/stderr")]"
+grep -q "$H" "$CDIR/stderr" || fail "gateship-writefail: stderr misses the gate sha"
+
 echo "tkt-ship: all cases passed"
