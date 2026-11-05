@@ -312,6 +312,25 @@ if [ -n "$stop_pr" ] && [ "$recur_ok" -eq 1 ]; then
 fi
 [ -n "$stop_pr" ] && deny "MERGED-STOP pr=$stop_pr" 1 "tkt-start: issue #$issue already resolved by merged PR #$stop_pr"
 part_notes=(${notes[@]+"${notes[@]}"})
+# With --mutant-job, the branch PR must carry the mutants label, or ship-pr
+# later refuses the draft for lacking it. When the repo defines the label
+# (the same labels read ship-pr checks), add it to the branch's open PR when
+# missing. Lookups are best-effort: no PR yet, or an unreadable list, simply
+# skips. A refused edit fails loud instead of surfacing later as a refusal.
+if [ -n "$mutant_job" ]; then
+  branch_pr="$(gh pr list --head "$branch" --repo "$repo" --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+  if [ -n "$branch_pr" ]; then
+    repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name' 2>/dev/null || true)"
+    if grep -qx 'mutants' <<<"$repo_labels"; then
+      pr_labels="$(gh pr view "$branch_pr" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null || true)"
+      if ! grep -qx 'mutants' <<<"$pr_labels"; then
+        edit_err="$(gh pr edit "$branch_pr" --repo "$repo" --add-label mutants 2>&1)" \
+          || fail_step github "$?" "$edit_err"
+        tkt journal "tkt-start mutants label pr=$branch_pr"
+      fi
+    fi
+  fi
+fi
 if [ "$no_preflight" -eq 1 ]; then tkt journal "tkt-start check SKIPPED filing=${filing:-none}"; emit "SKIPPED filing=${filing:-none} files=${files:-none}" 0 "${dg[@]}"; fi
 if [ -n "$stale" ]; then dg=("reason=$reason" ${dg[@]+"${dg[@]}"}); tkt journal "tkt-start check STALE reason=$reason filing=${filing:-none}"
 else tkt journal "tkt-start check CURRENT filing=$filing"; emit "CURRENT filing=$filing files=${files:-none}" 0 "${dg[@]}"; fi

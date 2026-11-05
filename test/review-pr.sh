@@ -690,6 +690,24 @@ for bad_issue in '#3' '3x'; do
   [ "$?" -eq 2 ] || fail "malformed --issue $bad_issue exits 2"
   [ ! -e "$T/state/runs.txt" ] || fail "malformed --issue $bad_issue starts no job"
 done
+# --- case: a --spec value that is not a number exits 2 naming --spec and the spec axis
+for bad_spec in '2x' '#2' ''; do
+  reset_state
+  st=0
+  err="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec "$bad_spec" \
+    --model M --overbuild-model M2 2>&1 >/dev/null)" || st=$?
+  [ "$st" -eq 2 ] || fail "malformed --spec [$bad_spec] exits 2 (got $st)"
+  case "$err" in *--spec*spec*) ;; *) fail "malformed --spec [$bad_spec] names --spec and the spec axis: [$err]" ;; esac
+  [ ! -e "$T/state/runs.txt" ] || fail "malformed --spec [$bad_spec] starts no job"
+done
+# --- case: --spec with no value exits 2 naming --spec and the spec axis that needs it
+reset_state
+st=0
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --model M --overbuild-model M2 \
+  --spec 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "--spec without a value exits 2 (got $st)"
+case "$err" in *--spec*spec*) ;; *) fail "--spec without a value names --spec and the spec axis: [$err]" ;; esac
+[ ! -e "$T/state/runs.txt" ] || fail "--spec without a value starts no job"
 # --- case: verify ignores start-only flags, one stderr note per flag, and launches
 printf 'P1 findings text\n' >"$T/findings.txt"
 write_record verify DONE "rechecked

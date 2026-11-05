@@ -956,4 +956,44 @@ case "$OUT" in *'part is missing'*) ;; *) fail "partmissingn: message misses [pa
 cmp -s "$S" "$CDIR/state.before" || fail "partmissingn: state changed"
 [ ! -e "$S.lock" ] || fail "partmissingn: lock was not released"
 
+# --mutant-job adds the mutants label to the branch PR when the repo defines
+# the label; otherwise, or when the PR already carries it, nothing is edited.
+setup mutantlabel ONE AGAINST
+cp "$T/bin/gh" "$T/bin/gh.shared"
+cat >"$T/bin/gh" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" pr list --head "*)
+    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+    printf '7\\n'; exit 0 ;;
+  *"labels?per_page=100"*)
+    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+    if [ -f "$T/labels-nomutants" ]; then printf 'bug\\n'; else printf 'bug\\nmutants\\n'; fi
+    exit 0 ;;
+  *" --json labels "*)
+    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+    if [ -f "$T/pr-labeled" ]; then printf 'mutants\\n'; else printf 'bug\\n'; fi
+    exit 0 ;;
+  *" pr edit "*" --add-label mutants "*)
+    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+    if [ -f "$T/edit-fail" ]; then echo "gh: edit boom" >&2; exit 5; fi
+    exit 0 ;;
+  *) exec "$T/bin/gh.shared" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/gh"
+run_start
+want "CURRENT " 0 mutantlabel
+grep -qF -- 'gh|pr edit 7 --repo acme/widget --add-label mutants' "$T/calls.log" || fail "mutantlabel: no mutants label edit"
+: >"$T/calls.log"; printf '1' >"$T/labels-nomutants"; run_start
+want "CURRENT " 0 mutantlabelnolabel
+grep -qF -- 'pr edit' "$T/calls.log" && fail "mutantlabelnolabel: no edit without a repo mutants label"
+: >"$T/calls.log"; rm -f "$T/labels-nomutants"; printf '1' >"$T/pr-labeled"; run_start
+want "CURRENT " 0 mutantlabellabeled
+grep -qF -- 'pr edit' "$T/calls.log" && fail "mutantlabellabeled: no edit when the PR already carries mutants"
+: >"$T/calls.log"; rm -f "$T/pr-labeled"; printf '1' >"$T/edit-fail"; run_start
+want "STEP-FAIL step=github rc=5" 5 mutantlabeleditfail
+rm -f "$T/edit-fail"
+mv "$T/bin/gh.shared" "$T/bin/gh"
+
 echo "tkt-start: all cases passed"

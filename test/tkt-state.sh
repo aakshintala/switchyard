@@ -76,10 +76,11 @@ bash "$TKT" "$S" require fruit absent-key 2>"$T/err-req.txt" && fail "require wi
 grep -q 'absent-key' "$T/err-req.txt" || fail "require names the missing key"
 
 # a held lock makes set exit 2 and names the pid in the lock
+# (TKT_STATE_LOCK_WAIT=1 keeps the wait-bound default of 30 s out of the suite)
 S2="$T/l.state"
 mkdir "$S2.lock"
 echo "424242" >"$S2.lock/pid"
-bash "$TKT" "$S2" set k v 2>"$T/err-lock.txt" && fail "set under a held lock exits non-zero"
+TKT_STATE_LOCK_WAIT=1 bash "$TKT" "$S2" set k v 2>"$T/err-lock.txt" && fail "set under a held lock exits non-zero"
 [ "$?" = "2" ] || fail "set under a held lock exits 2"
 grep -q '424242' "$T/err-lock.txt" || fail "a held lock names the pid in the lock"
 [ ! -e "$S2" ] || fail "a held lock writes nothing"
@@ -87,9 +88,10 @@ grep -q '424242' "$T/err-lock.txt" || fail "a held lock names the pid in the loc
 rm -rf "$S2.lock"
 
 # a lock without a pid file still blocks with exit 2
+# (TKT_STATE_LOCK_WAIT=1 keeps the wait-bound default of 30 s out of the suite)
 S4="$T/nl.state"
 mkdir "$S4.lock"
-bash "$TKT" "$S4" set k v 2>"$T/err-nl-lock.txt" && fail "set under a pid-less lock exits non-zero"
+TKT_STATE_LOCK_WAIT=1 bash "$TKT" "$S4" set k v 2>"$T/err-nl-lock.txt" && fail "set under a pid-less lock exits non-zero"
 [ "$?" = "2" ] || fail "set under a pid-less lock exits 2"
 grep -q 'tkt-state: state locked$' "$T/err-nl-lock.txt" || fail "a pid-less lock uses the generic message"
 [ -d "$S4.lock" ] || fail "a pid-less lock is left in place"
@@ -322,6 +324,37 @@ fi
 [ "$live_owner_rc" = "2" ] || fail "live-owner lock exits 2 after the budget"
 grep -q "state locked by pid $$" "$T/err-live-owner.txt" || fail "live-owner lock names the holder"
 [ -d "$S8.lock" ] || fail "live-owner lock is left in place"
+
+# A live holder that outlives TKT_STATE_LOCK_WAIT exits 2 naming its pid,
+# and the live lock is left in place.
+SWB="$T/wait-bound.state"
+mkdir "$SWB.lock"
+sleep 30 &
+bound_holder=$!
+printf '%s %s\n' "$(hostname)" "$bound_holder" >"$SWB.lock/pid"
+if TKT_STATE_LOCK_WAIT=1 bash "$TKT" "$SWB" set k v 2>"$T/err-wait-bound.txt"; then
+  bound_rc=0
+else
+  bound_rc=$?
+fi
+kill "$bound_holder" 2>/dev/null || true
+wait "$bound_holder" 2>/dev/null || true
+[ "$bound_rc" = "2" ] || fail "live-held lock exits 2 after the wait bound"
+grep -q "$bound_holder" "$T/err-wait-bound.txt" || fail "wait-bound timeout names the holder pid"
+[ -d "$SWB.lock" ] || fail "wait-bound timeout leaves the live lock in place"
+rm -rf "$SWB.lock"
+
+# A holder that releases within the bound lets the write succeed, even past
+# the old fixed retry budget of about two seconds.
+SWR="$T/wait-release.state"
+mkdir "$SWR.lock"
+sleep 3 &
+release_holder=$!
+printf '%s %s\n' "$(hostname)" "$release_holder" >"$SWR.lock/pid"
+bash "$TKT" "$SWR" set k v 2>"$T/err-wait-release.txt" || fail "set succeeds once the holder releases within the bound"
+wait "$release_holder" 2>/dev/null || true
+[ "$(bash "$TKT" "$SWR" get k)" = "v" ] || fail "wait-then-write stores the value"
+[ ! -e "$SWR.lock" ] || fail "wait-then-write removes the reaped lock"
 
 # Reads ignore a held write lock.
 S10="$T/read-under-lock.state"

@@ -134,11 +134,18 @@ state_list() {
   return 0
 }
 
-# Writes retry held locks up to 10 times by default and reap dead owners on
-# this host only. A held lock exits 2 naming its pid; only our lock is removed.
+# Writes wait up to TKT_STATE_LOCK_WAIT seconds (default 30) for a live
+# holder and reap dead owners on this host only. A lock held past the bound
+# exits 2 naming its pid; only our lock is removed.
 take_lock() {
-  tries="${TKT_STATE_TEST_LOCK_TRIES:-10}"
   lock_sleep="${TKT_STATE_TEST_LOCK_SLEEP:-0.2}"
+  tries="${TKT_STATE_TEST_LOCK_TRIES:-}"
+  if [ -z "$tries" ]; then
+    # The retry count covers the wait bound at the retry sleep interval.
+    wait_bound="${TKT_STATE_LOCK_WAIT:-30}"
+    case "$wait_bound" in ""|*[!0-9]*) wait_bound=30 ;; esac
+    tries="$(awk -v w="$wait_bound" -v s="$lock_sleep" 'BEGIN { if (s <= 0) s = 0.2; t = w / s; n = int(t); if (t > n) n++; if (n < 1) n = 1; print n }')"
+  fi
   host="$(hostname)"
   attempt=1
   stale_lock_not_removed=0
