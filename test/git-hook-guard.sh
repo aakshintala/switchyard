@@ -33,12 +33,76 @@ PY="$(command -v python3)" || fail "python3 not on PATH"
 ln -s "$PY" "$T/py/python3"
 ln -s "$SHIM" "$T/shims/git"
 
-# Stub real git. Bash builtins only. It appends one record per call to $CALLS
+# Stub real git. Bash builtins plus printenv (alias names like rev-parse are
+# not valid shell identifiers, so STUB_ALIAS_<name> is read from the
+# environment directly). It appends one record per call to $CALLS
 # (argc, then each argv element on its own <...> line), copies stdin to
 # $STDIN_FILE when STUB_READ_STDIN=1, prints stub-out on stdout and stub-err
-# on stderr, and exits ${STUB_EXIT:-0}.
+# on stderr, and exits ${STUB_EXIT:-0}. Guard lookups (`config --get
+# alias.<name>` with any leading globals, and the builtin list) are answered
+# here instead: recorded in $LOOKUPS, never in $CALLS, so expect_passed
+# stays exact and expect_refused still proves no exec ran. STUB_ALIAS_<name>
+# defines the expansion the lookup prints; an unset one exits 1 like git.
+# A leading `-c alias.<name>=<value>` overrides STUB_ALIAS_<name> like the
+# real git, so an alias expansion that sets config is visible to later
+# lookups.
 cat >"$T/real/git" <<'STUB'
 #!/usr/bin/env bash
+if [ "$#" -eq 1 ] && [ "$1" = "--list-cmds=builtins,nohelpers" ]; then
+  printf '<list-cmds>\n' >>"${LOOKUPS:-/dev/null}"
+  printf '%s\n' status commit push merge rebase am cherry-pick revert pull \
+    config stash hook log rev-parse ls-remote
+  exit 0
+fi
+restored=("$@")
+while [ "$#" -gt 3 ]; do shift; done
+if [ "$#" -eq 3 ] && [ "$1" = config ] && [ "$2" = --get ]; then
+  case "$3" in
+  alias.*)
+    printf '<lookup %s>\n' "$3" >>"${LOOKUPS:-/dev/null}"
+    name="${3#alias.}"
+    override_set=0
+    override=""
+    nlead=$((${#restored[@]} - 3))
+    i=0
+    while [ "$i" -lt "$nlead" ]; do
+      a="${restored[$i]}"
+      kv=""
+      if [ "$a" = "-c" ]; then
+        i=$((i + 1))
+        if [ "$i" -lt "$nlead" ]; then
+          kv="${restored[$i]}"
+        fi
+      elif [ "${a#-c}" != "$a" ]; then
+        kv="${a#-c}"
+      fi
+      if [ -n "$kv" ]; then
+        case "$kv" in
+        *=*)
+          k="${kv%%=*}"
+          v="${kv#*=}"
+          if [ "$k" = "alias.$name" ]; then
+            override="$v"
+            override_set=1
+          fi
+          ;;
+        esac
+      fi
+      i=$((i + 1))
+    done
+    if [ "$override_set" = 1 ]; then
+      printf '%s\n' "$override"
+      exit 0
+    fi
+    if val=$(printenv "STUB_ALIAS_$name" 2>/dev/null); then
+      printf '%s\n' "$val"
+      exit 0
+    fi
+    exit 1
+    ;;
+  esac
+fi
+set -- "${restored[@]}"
 {
   printf 'argc=%s\n' "$#"
   for a in "$@"; do printf '<%s>\n' "$a"; done
@@ -61,9 +125,10 @@ BASEPATH="$T/shims:$T/real:$T/py:/usr/bin:/bin"
 # stub. $T/calls is reset first, so its absence after a run proves the stub
 # never ran.
 lane() {
-  rm -f "$T/calls" "$T/stdin"
+  rm -f "$T/calls" "$T/stdin" "$T/lookups"
   local out rc
   out="$(cd "${LANE_DIR:-$T/home}" && env -i CALLS="$T/calls" STDIN_FILE="$T/stdin" \
+    LOOKUPS="$T/lookups" \
     PATH="${LANE_PATH:-$BASEPATH}" HOME="$T/home" TMPDIR="$T/tmproot" \
     STUB_EXIT="${STUB_EXIT:-0}" STUB_READ_STDIN="${STUB_READ_STDIN:-0}" \
     ${LANE_ENV[@]+"${LANE_ENV[@]}"} \
@@ -197,6 +262,14 @@ refused commit -an
 refused commit -nm x
 refused commit -m x -n
 refused push origin --no-verify
+refused merge --no-verify
+refused merge --no-verif
+refused rebase --no-verify
+refused rebase --no-veri
+refused am --no-verify
+refused am -n
+refused hook run
+refused hook run pre-commit
 refused -C dir commit --no-verify
 refused -c user.name=x commit --no-verify
 refused -c core.hooksPath=/x commit
@@ -207,6 +280,11 @@ passed -c core.hooksPath= status
 passed -ccore.hooksPath=/x status
 refused -c core.hooksPath=/x push
 refused -c core.hooksPath=/x merge
+refused -c core.hooksPath=/dev/null pull
+refused --config-env=core.hooksPath=FOO commit
+refused --config-env core.hooksPath=FOO commit
+refused --config-env=core.hooksPath=FOO push
+refused --config-env=core.hooksPath=FOO pull
 refused -c user.name=x -c core.hooksPath=/x commit
 refused config core.hooksPath /x
 refused config --local core.hooksPath /x
@@ -264,6 +342,18 @@ unset LANE_ENV
 
 passed push -n
 passed push --dry-run
+passed merge --no-ff
+passed merge -n
+passed merge -m --no-verify
+passed merge --message --no-verify
+passed merge --no-ver
+passed rebase origin/main
+passed rebase -n
+passed rebase -x --no-verify
+passed am --signoff
+passed am -p --no-verify
+passed hook
+passed --config-env=user.name=FOO commit -m x
 passed commit -m "--no-verify"
 passed commit -m "-n"
 passed commit --message=--no-verify
@@ -338,6 +428,117 @@ passed status
 unset LANE_ENV
 LANE_ENV=(GIT_CONFIG_COUNT=99999999999999999999 GIT_CONFIG_KEY_0=user.name)
 passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath)
+refused pull
+unset LANE_ENV
+
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath=/x'")
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath=/x'")
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'user.name=bob' 'core.hooksPath=/x'")
+refused push
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'CORE.HOOKSPATH=/x'")
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath'")
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'user.name=bob'")
+passed commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="bogus")
+passed commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath'='/dev/null'")
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath'='/dev/null'")
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'user.name'='bob' 'core.hooksPath'='/x'")
+refused push
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath'=")
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath'='/x'extra")
+refused commit -m x
+unset LANE_ENV
+
+LANE_ENV=(SKIP=flake8)
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(SKIP=flake8)
+refused pull
+unset LANE_ENV
+LANE_ENV=(SKIP=flake8)
+passed status
+unset LANE_ENV
+LANE_ENV=(SKIP=flake8)
+passed
+unset LANE_ENV
+LANE_ENV=(SKIP=)
+passed commit -m x
+unset LANE_ENV
+
+# Aliases: the guard asks the real git for alias.<name> and checks the
+# expansion as if typed. A refused expansion never reaches the stub as an
+# exec (no $T/calls record); the lookups that resolved it are in $T/lookups.
+LANE_ENV=(STUB_ALIAS_ci='commit --no-verify')
+refused ci -m x
+grep -q '<lookup alias.ci>' "$T/lookups" || fail "alias ci: no lookup ran"
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_cm='commit')
+refused cm --no-verify
+grep -q '<lookup alias.cm>' "$T/lookups" || fail "alias cm: no lookup ran"
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_hr='hook run')
+refused hr
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_aa='bb -m x' STUB_ALIAS_bb='commit --no-verify')
+refused aa
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_ci='commit')
+refused -c core.hooksPath=/x ci
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_probe='-c core.hooksPath=/dev/null commit --no-verify')
+refused probe
+grep -q '<lookup alias.probe>' "$T/lookups" || fail "alias probe: no lookup ran"
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_outer='-c alias.inner="commit --no-verify" inner')
+refused outer --dry-run
+grep -q '<lookup alias.outer>' "$T/lookups" || fail "alias outer: no lookup ran"
+grep -q '<lookup alias.inner>' "$T/lookups" || fail "alias inner: no lookup ran"
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_lg='log --oneline')
+passed lg
+grep -q '<lookup alias.lg>' "$T/lookups" || fail "alias lg: no lookup ran"
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_status='commit --no-verify')
+passed status
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_sh='!git commit --no-verify')
+passed sh
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_qm='commit -m "a b"')
+passed qm
+unset LANE_ENV
+# A dash in the alias name is not a valid shell identifier, so the stub must
+# read STUB_ALIAS_<name> from the environment directly: bash 5 rejects the
+# indirect expansion for alias.rev-parse and friends (CI), while bash 3.2
+# silently treats it as unset.
+LANE_ENV=(STUB_ALIAS_my-alias='commit --no-verify')
+refused my-alias -m x
+grep -q '<lookup alias.my-alias>' "$T/lookups" || fail "alias my-alias: no lookup ran"
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_my-alias='log --oneline')
+passed my-alias
+grep -q '<lookup alias.my-alias>' "$T/lookups" || fail "alias my-alias: no lookup ran"
 unset LANE_ENV
 
 # No subcommand: a core.hooksPath -c option or environment entry runs no hook.
