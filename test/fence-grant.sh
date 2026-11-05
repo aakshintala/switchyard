@@ -84,6 +84,7 @@ printf '%s\n' "$*" >>"$T/ssh.log"
 [ "${SSH_FAIL:-0}" != 1 ] || { echo 'ssh stub failure' >&2; exit 1; }
 if [ -n "${SSH_OUT:-}" ]; then printf '%s\n' "$SSH_OUT"; else
   printf '%s\n' 'FWSEC=UPTIME' 'FWSEC=AGENTS' '[]' 'FWSEC=DELEGATE' DELEGATEOK \
+    'FWSEC=DSESS' '{"ok":true,"sessions":[]}' DSESSJSONOK \
     'FWSEC=PILANES' PILANESOK 'FWSEC=END'
 fi
 SSH_STUB
@@ -137,6 +138,7 @@ chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$T/stubs/file-claim"
 reset_case() {
   rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
   mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
+  : >"$FW_RUN/roster"
   : >"$T/gh.log"
   : >"$T/claude.log"
   : >"$T/ssh.log"
@@ -155,6 +157,7 @@ reset_case() {
 {"type":"blob","path":"crates/d/tests.rs"},
 {"type":"blob","path":"crates/e/tests.rs"},
 {"type":"blob","path":"crates/f/tests.rs"},
+{"type":"blob","path":"bin/job-record"},
 {"type":"blob","path":"src/new_dir/keep.rs"}
 ]}
 TREE
@@ -217,7 +220,7 @@ assert_no_probes() {
 assert_usage() {
   assert_rc 2 "$1"
   assert_out '' "$1 stdout"
-  assert_stderr 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]' "$1 usage"
+  assert_stderr 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]' "$1 usage"
   assert_no_probes "$1"
   assert_no_grant "$1"
 }
@@ -260,6 +263,51 @@ grep -qxF 'Ranges: none' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'grant file
 run_fg 77 --paths docs/tui.md
 assert_rc 0 'second grant file'
 [ -f "$FW_RUN/fiber-77-fence-grant-2.md" ] || fail 'grant numbering increments'
+
+reset_case
+run_fg 77 --paths docs/tui.md --swept-to 123456
+assert_rc 0 'grant records swept-to comment'
+grep -qxF 'Swept to comment 123456' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'grant records swept-to comment id'
+grep -qxF '# The script owns grant numbering; hand-written grants take a letter suffix.' "$FG" || fail 'header explains grant numbering ownership'
+
+reset_case
+run_fg 77 --paths bin/job-record --dry
+assert_rc 0 'matching docs are printed for a granted path'
+assert_line 'DOC bin/job-record' 'DOC heading'
+assert_contains 'docs/delegate-jobs.md:3:' 'DOC match includes doc location'
+
+reset_case
+run_fg 77 --paths docs/tui.md --removes assert_line --dry
+assert_rc 0 'removed symbol test pin is a warning'
+assert_line 'TEST assert_line' 'test-pin heading'
+assert_contains 'suggested --paths test/fence-grant.sh' 'test-pin suggested path'
+
+reset_case
+set_pr 11 fix/docs docs/events.md
+cat >"$T/pr/11.diff" <<'DIFF'
+diff --git a/docs/events.md b/docs/events.md
+index 1111111..2222222 100644
+--- a/docs/events.md
++++ b/docs/events.md
+@@ -1,2 +1,2 @@ ## Delivery
+-old body
++new body
+DIFF
+run_fg 77 --paths docs/tui.md --doc-heading 'docs/events.md#Delivery' --dry
+assert_rc 0 'cited doc heading warning does not hold grant'
+assert_line 'WARN PR #11 touches cited doc heading docs/events.md#Delivery' 'cited heading warning'
+assert_line 'GRANT docs/tui.md' 'heading warning keeps unrelated grant free'
+
+reset_case
+GH_PRLIST='[{"number":11,"headRefName":"fix/one"},{"number":12,"headRefName":"fix/two"}]'
+export GH_PRLIST
+printf '%s\n' crates/main/src/a.rs crates/main/src/b.rs docs/tui.md >"$T/pr/11.names"
+printf '%s\n' crates/tui/src/a.rs >"$T/pr/12.names"
+run_fg 77 --pre-plan 'crates/main/**'
+assert_rc 0 'pre-plan reports open PR path counts'
+assert_line 'WARN PRE-PLAN PR #11: 2 files under crates/main/**' 'pre-plan matching PR count'
+assert_line 'WARN PRE-PLAN PR #12: 0 files under crates/main/**' 'pre-plan zero count'
+! grep -q 'git/trees/main' "$T/gh.log" || fail 'pre-plan skips path existence probes'
 
 reset_case
 run_fg 77 --paths=docs/tui.md --dry
@@ -380,7 +428,7 @@ PI_PID=""
 
 reset_case
 printf 'Grant 1\n\nTicket: 88\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-88-fence-grant-1.md"
-SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=PILANES\nfiber-88\nPILANESOK\nFWSEC=END'
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nDSESSJSONOK\nFWSEC=PILANES\nfiber-88\nPILANESOK\nFWSEC=END'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 1 'live box pi lane hold'
@@ -428,11 +476,21 @@ assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane ne
 
 reset_case
 printf 'Grant 1\n\nTicket: 88\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-88-fence-grant-1.md"
-SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nfiber-88\nDELEGATEOK\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nfiber-88\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nDSESSJSONOK\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 1 'live box delegate lane hold'
 assert_out 'HELD docs/tui.md by lane #88' 'box delegate lane output'
+
+reset_case
+printf 'Grant 1\n\nTicket: 89\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-89-fence-grant-1.md"
+touch -t 202001010000 "$FW_RUN/fiber-89-fence-grant-1.md"
+printf '2026-11-05T00:00:00Z launch\t89\tstub-box\tfiber-89-demo\t12345678abcdef\n' >"$FW_RUN/roster"
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[{"status":"running","id":"12345678abcdef"}]}\nDSESSJSONOK\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
+export SSH_OUT
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 1 'live box delegate session holds an old grant'
+assert_out 'HELD docs/tui.md by lane #89' 'live box delegate session output'
 
 reset_case
 write_blob docs/tui.md $'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n'
@@ -540,7 +598,7 @@ assert_not_contains 'NOSYMBOL' 'valid expect accepted'
 assert_line 'HELD docs/tui.md by PR #11' 'valid expect holder'
 
 # --- Exit 2: bad arguments -----------------------------------------------------
-USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]'
+USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]'
 reset_case
 run_fg
 assert_usage 'missing ticket'
@@ -700,7 +758,7 @@ run_fg 77 --paths docs/tui.md
 assert_error 'ssh output missing markers' 'ERROR ssh box '
 
 reset_case
-SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=PILANES\nfiber-88\nFWSEC=END'
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nDSESSJSONOK\nFWSEC=PILANES\nfiber-88\nFWSEC=END'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md
 assert_error 'box pi section missing marker' 'ERROR box pi lanes: no PILANESOK marker'
@@ -711,7 +769,7 @@ run_fg 77 --paths docs/tui.md
 assert_error 'Mac pi probe missing run directory' 'ERROR mac pi lanes: run directory missing'
 
 reset_case
-SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nfiber-88\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nfiber-88\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nDSESSJSONOK\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md
 assert_error 'box delegate section missing marker' 'ERROR box delegate lanes: no DELEGATEOK marker'
