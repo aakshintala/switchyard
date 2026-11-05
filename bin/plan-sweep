@@ -808,22 +808,37 @@ done <<<"$DOC_SPECS"
 
 # Outside Files: every Symbol-section path the Files do not cover
 sort -u "$work/outside-raw" >"$work/outside-pairs" 2>/dev/null || : >"$work/outside-pairs"
-cut -f1 "$work/outside-pairs" 2>/dev/null | sort -u >"$work/outside-paths" || : >"$work/outside-paths"
+LC_ALL=C awk -F '\t' '
+  BEGIN {
+    order[1] = "definition"
+    order[2] = "caller"
+    order[3] = "re-export"
+    order[4] = "match"
+    order[5] = "pin"
+  }
+  function emit( i, reason, result ) {
+    for (i = 1; i <= 5; i++) {
+      reason = order[i]
+      if (seen[reason]) result = result (result ? "," : "") reason
+    }
+    if (result != "") print path "\t" result
+  }
+  $1 != path {
+    if (path != "") emit()
+    for (reason in seen) delete seen[reason]
+    path = $1
+  }
+  { seen[$2] = 1 }
+  END { if (path != "") emit() }
+' "$work/outside-pairs" >"$work/outside-paths"
 ob="$work/outside.md"
 {
   printf '## Outside Files\n'
-  while IFS= read -r p; do
+  while IFS=$'\t' read -r p reasons; do
     [ -n "$p" ] || continue
     if covered "$p"; then continue; fi
     case "$OUTLINED" in *"|$p|"*) continue ;; esac
     case "$DOC_PATHS" in *"|$p|"*) continue ;; esac
-    reasons=""
-    for r in definition caller re-export match pin; do
-      pair="$(printf '%s\t%s' "$p" "$r")"
-      if grep -qxF -- "$pair" "$work/outside-pairs" 2>/dev/null; then
-        [ -n "$reasons" ] && reasons="$reasons,$r" || reasons="$r"
-      fi
-    done
     [ -n "$reasons" ] || continue
     printf '%s %s\n' "$p" "$reasons"
   done <"$work/outside-paths"
