@@ -239,6 +239,7 @@ t set fixopen "$knum" # this job's commits may land ahead of head
 jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
 if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
 concerns_file=""
+no_commits=0
 if [ "$jrc" -ne 0 ]; then
   if [ "$jrc" -eq 1 ]; then # an abnormal end closes the slot without a round
     close_slot "$knum"
@@ -246,11 +247,14 @@ if [ "$jrc" -ne 0 ]; then
     whead="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
     if [ -n "$shead" ] && [ "$shead" = "$whead" ]; then t set fixopen 0; fi
   fi
-  # CONCERNS continues like a lane's CONCERNS in tkt-build: tkt-job saved the
-  # file as concerns.<slot>, and it goes to the verify as --context. Every
-  # other non-zero verdict stops here.
+  # CONCERNS continues like a lane's CONCERNS in tkt-build. NO-COMMITS also
+  # continues because its gate passed and the scoped verify checks the head.
+  # Every other non-zero verdict stops here.
   case "$(head -n 1 "$tmp/job.out")" in
     "TKT tkt-job CONCERNS "*) concerns_file="$(t get "concerns.$slot" 2>/dev/null || true)" ;;
+    "TKT tkt-job NO-COMMITS "*)
+      no_commits=1
+      t journal "tkt-fix round=$((round + 1)) no commits" ;;
     *) pass tkt-job "$tmp/job.out" "$jrc" ;;
   esac
 fi
@@ -272,7 +276,10 @@ grc=0
 "$tktgate" "$state" --checks-only --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
 [ "$grc" -eq 1 ] && { round=$((round + 1)); t set round "$round"; close_slot "$knum"; } # a gate-failed round counts
-[ "$grc" -eq 0 ] || pass tkt-gate "$tmp/gate.out" "$grc"
+if [ "$grc" -ne 0 ]; then
+  if [ "$no_commits" -eq 1 ]; then printf 'no commits\n' >>"$tmp/gate.out"; fi
+  pass tkt-gate "$tmp/gate.out" "$grc"
+fi
 round=$((round + 1)); t set round "$round"; close_slot "$knum"
 
 # Digest lines after the verdict: the CI notes, and the concerns file the
@@ -280,6 +287,7 @@ round=$((round + 1)); t set round "$round"; close_slot "$knum"
 notes=()
 if [ -n "$ci_note" ]; then notes+=("$ci_note"); fi
 if [ -n "$concerns_file" ]; then notes+=("concerns=$concerns_file"); fi
+if [ "$no_commits" -eq 1 ]; then notes+=("no commits"); fi
 if [ "$noverify" -eq 1 ]; then
   t set unverified "$findings"
   emit "PUSHED unverified" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"}
@@ -290,7 +298,7 @@ vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$v
 if [ -n "$concerns_file" ]; then vargs+=(--context "$concerns_file"); fi
 vrc=0; "$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
 if [ -s "$tmp/verify.err" ]; then cat "$tmp/verify.err" >&2; fi
-[ "$vrc" -eq 0 ] || emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")"
+[ "$vrc" -eq 0 ] || emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")" ${notes[@]+"${notes[@]}"}
 fixline="$(grep -m 1 '^FIX-' "$tmp/verify.out" || true)"
 case "$fixline" in
   FIX-OK*) t set reviewed "$new_head"; write_findings "$tmp/verify.out"
