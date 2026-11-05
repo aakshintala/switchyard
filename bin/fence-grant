@@ -9,8 +9,8 @@
 # open PR touching the same file (or hunk range), a live lane (or a fresh grant
 # file), and a live file-claim entry holding it. Stale claims are logged and
 # ignored. Fail closed: any failed or unparseable probe
-# prints ERROR, writes nothing and exits 3. Exit 0 + GRANT lines (and a grant
-# file, unless --dry) when free; exit 1 + HELD lines on conflict; exit 2 on
+# prints ERROR, writes nothing and exits 3. Exit 0 + GRANT lines (WOULD-GRANT
+# with --dry; a grant file otherwise) when free; exit 1 + HELD lines on conflict; exit 2 on
 # bad arguments. A whole-file hold by a pull request also prints that holder's
 # hunk windows and the complement as a --ranges argument to paste back.
 #
@@ -32,8 +32,9 @@
 # (2026-10-31 #3771: `docs/events.md` came back HELD by lane #3459, whose own
 # admit calls the file a read and whose PR #3813 does not touch it; the hold
 # would have blocked the one doc row surveyor had just ordered into #3771).
-# Only the exact line `Reads:` stops the probe: a hand-written grant file's
-# prose still parses as it always did, since over-holding is the safe direction.
+# When a grant has `Paths:`, only that block through the first `##` heading is
+# probed, with `Reads:` still ending it. A hand-written grant without `Paths:`
+# keeps the older scrape through `Reads:` for compatibility.
 #
 # Two consequences of that, both paid for on 2026-10-31:
 #
@@ -41,10 +42,9 @@
 #      reads `run/fiber-<n>*-fence-grant*.md` files and open PRs, nothing else,
 #      so the next sweep hands the same path to a second lane. Every grant
 #      lands as both: the admit block the lane reads, and this file.
-#   2. Any path token named in prose *above* `Reads:` is a hold, including a
-#      sentence saying the path is released. To release a path, move it out of
-#      `Paths:` and write the reason *below* the `Reads:` label; a note above
-#      it re-holds the file it just released.
+#   2. A hand-written grant without `Paths:` still scrapes prose through
+#      `Reads:`. Put granted paths in `Paths:` and explanatory prose below a
+#      `##` heading so it cannot add another hold.
 set -u
 set -f
 _fw_run() { printf '%s' "${FW_RUN:-/Users/aakshintala/work/fiber-worktrees/flywheel/run}"; }
@@ -256,10 +256,10 @@ while [ $# -gt 0 ]; do
     --repo=*) repo="${1#--repo=}"; shift;;
     --part) [ $# -ge 2 ] || { _usage; exit 2; }; part="$2"; shift 2;;
     --part=*) part="${1#--part=}"; shift;;
-    --ignore-pr) [ $# -ge 2 ] || { _usage; exit 2; }; ignore="$2"; shift 2;;
-    --ignore-pr=*) ignore="${1#--ignore-pr=}"; shift;;
-    --ignore-ticket) [ $# -ge 2 ] || { _usage; exit 2; }; ignoreticket="$2"; shift 2;;
-    --ignore-ticket=*) ignoreticket="${1#--ignore-ticket=}"; shift;;
+    --ignore-pr) [ $# -ge 2 ] || { _usage; exit 2; }; case "$2" in ''|*[!0-9]*) _usage; exit 2;; esac; ignore="${ignore}${ignore:+ }$2"; shift 2;;
+    --ignore-pr=*) _ignored_pr="${1#--ignore-pr=}"; case "$_ignored_pr" in ''|*[!0-9]*) _usage; exit 2;; esac; ignore="${ignore}${ignore:+ }$_ignored_pr"; shift;;
+    --ignore-ticket) [ $# -ge 2 ] || { _usage; exit 2; }; case "$2" in ''|*[!0-9]*) _usage; exit 2;; esac; ignoreticket="${ignoreticket}${ignoreticket:+ }$2"; shift 2;;
+    --ignore-ticket=*) _ignored_ticket="${1#--ignore-ticket=}"; case "$_ignored_ticket" in ''|*[!0-9]*) _usage; exit 2;; esac; ignoreticket="${ignoreticket}${ignoreticket:+ }$_ignored_ticket"; shift;;
     --swept-to) [ $# -ge 2 ] || { _usage; exit 2; }; sweptto="$2"; shift 2;;
     --swept-to=*) sweptto="${1#--swept-to=}"; shift;;
     --removes) [ $# -ge 2 ] || { _usage; exit 2; }; removes="$2"; shift 2;;
@@ -767,7 +767,7 @@ _claim_holders() {
     claim_num=""
     case "$claim_lane" in fiber-*) claim_num=$(_lane_num "${claim_lane#fiber-}");; esac
     [ "$claim_num" != "$ticket" ] || continue
-    [ -z "$ignoreticket" ] || [ "$claim_num" != "$ignoreticket" ] || continue
+    case " $ignoreticket " in *" $claim_num "*) continue;; esac
     live=0
     for ln in $lanes; do [ "$ln" = "$claim_lane" ] && { live=1; break; }; done
     if [ "$live" -eq 0 ]; then
@@ -885,7 +885,7 @@ _pr_touches_doc_heading() {
 }
 
 for pr in $prs; do
-  [ -n "$ignore" ] && [ "$pr" = "$ignore" ] && continue
+  case " $ignore " in *" $pr "*) continue;; esac
   case " $ownprs " in *" $pr "*) echo "OWN skipping PR #$pr: its branch names ticket $ticket"; continue;; esac
   _pr_touched "$pr"
   [ -s "$tmp/touched-$pr" ] || continue
@@ -934,7 +934,7 @@ if [ -n "$docheadings" ]; then
     _doc=${_cited%%#*}; _heading=${_cited#*#}
     [ -n "$_heading" ] || continue
     for pr in $prs; do
-      [ -n "$ignore" ] && [ "$pr" = "$ignore" ] && continue
+      case " $ignore " in *" $pr "*) continue;; esac
       [ -s "$tmp/full-$pr.diff" ] || _pr_touched "$pr"
       [ -s "$tmp/full-$pr.diff" ] || continue
       if _pr_touches_doc_heading "$tmp/full-$pr.diff" "$_doc" "$_heading"; then
@@ -1159,9 +1159,9 @@ for line in sys.stdin:
 }
 
 _grant_entries() {
-  # $1 = grant file. Prints candidate entry lines from its Grant section.
-  # `Reads:` latches the probe off for the rest of the file: a read holds
-  # nothing, and a later line carrying the word "grant" must not reopen it.
+  # $1 = grant file. Prints candidate entry lines from its Paths block, or
+  # scrapes a hand-written grant without Paths for compatibility. `Reads:`
+  # latches the probe off for the rest of the file.
   #
   # An indented line is prose, not an entry. Every granted path in every grant
   # file written so far starts at column zero, as a `- <path>` bullet or a
@@ -1173,7 +1173,11 @@ _grant_entries() {
   # came back HELD by lane #3771, which never asked for any of them
   # (2026-10-31). `fiber-2413-plan-fence-grant.md` carries 700 lines of the
   # same shape.
-  awk '/^Reads:[[:space:]]*$/ {stop = 1} stop {next} {if (tolower($0) ~ /grant/) f = 1} f && /^[[:space:]]/ {next} f {print}' "$1" 2>/dev/null | _strip_foreign_hold | sed -e "s/$_ng_re.*//" | _expand_braces_lines | _collect_entries | _narrow_grant_entries
+  if grep -q '^Paths:[[:space:]]*$' "$1" 2>/dev/null; then
+    awk '/^Reads:[[:space:]]*$/ {stop = 1} /^##([[:space:]]|$)/ {stop = 1} stop {next} /^Paths:[[:space:]]*$/ {paths = 1; next} paths {print}' "$1" 2>/dev/null
+  else
+    awk '/^Reads:[[:space:]]*$/ {stop = 1} stop {next} {if (tolower($0) ~ /grant/) f = 1} f && /^[[:space:]]/ {next} f {print}' "$1" 2>/dev/null
+  fi | _strip_foreign_hold | sed -e "s/$_ng_re.*//" | _expand_braces_lines | _collect_entries | _narrow_grant_entries
   return 0
 }
 
@@ -1241,7 +1245,7 @@ for ln in $lanes; do
   n=$(_lane_num "$suf")
   [ -n "$n" ] || continue
   [ "$n" = "$ticket" ] && continue
-  [ -n "$ignoreticket" ] && [ "$n" = "$ignoreticket" ] && continue
+  case " $ignoreticket " in *" $n "*) continue;; esac
   : > "$tmp/notes-entries"
   if [ -f "$run/fiber-$n-notes.md" ]; then
     _lane_notes_entries "$run/fiber-$n-notes.md" >> "$tmp/notes-entries"
@@ -1281,7 +1285,7 @@ for gf in "$run"/fiber-*-fence-grant*.md; do
   n=$(_lane_num "$x")
   [ -n "$n" ] || { set +f; continue; }
   [ "$n" = "$ticket" ] && { set +f; continue; }
-  [ -n "$ignoreticket" ] && [ "$n" = "$ignoreticket" ] && { set +f; continue; }
+  case " $ignoreticket " in *" $n "*) set +f; continue;; esac
   skip=0
   for ln in $lanes; do
     case "$ln" in fiber-*) s2=${ln#fiber-};; *) continue;; esac
@@ -1476,8 +1480,8 @@ if [ "$dry" -eq 0 ]; then
   } > "$gf" 2>/dev/null || { echo "ERROR cannot write $gf"; exit 3; }
 fi
 # A path granted with no --ranges entry is a whole-file hold by definition:
-# warn, non-blocking, before the GRANT lines. Exit status, GRANT lines and
-# the written grant file are unchanged.
+# warn, non-blocking, before the grant lines. A dry run prefixes each with
+# WOULD-GRANT so its output cannot be mistaken for an applied grant.
 while IFS= read -r _wp; do
   [ -n "$_wp" ] || continue
   _wb=$(_norm_base "$_wp") || continue
@@ -1505,9 +1509,9 @@ if [ -d "$docs_dir" ]; then
     printf 'DOC %s\n%s\n' "$_wp" "$_matches"
   done < "$tmp/plist"
 fi
-sed 's/^/GRANT /' < "$tmp/plist"
+if [ "$dry" -eq 1 ]; then sed 's/^/WOULD-GRANT /' < "$tmp/plist"; else sed 's/^/GRANT /' < "$tmp/plist"; fi
 if [ -n "$readpaths" ]; then
   printf '%s\n' "$readpaths" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's/^/READ /'
 fi
-echo "GRANT"
+if [ "$dry" -eq 1 ]; then echo "WOULD-GRANT"; else echo "GRANT"; fi
 exit 0

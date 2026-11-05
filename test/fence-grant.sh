@@ -303,13 +303,13 @@ assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'lon
 printf '2026-11-05 launch\t77\tbox\tprep-77\tabcdef12\n' >"$FW_RUN/roster"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'prep session holds nothing'
-assert_line 'GRANT' 'prep session grant'
+assert_line 'WOULD-GRANT' 'prep session grant'
 
 printf '2026-11-05 launch\t77\tbox\tfiber-77\tabcdef12\n' >"$FW_RUN/roster"
 DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"stopped"}]}'
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'stopped session holds nothing'
-assert_line 'GRANT' 'stopped session grant'
+assert_line 'WOULD-GRANT' 'stopped session grant'
 
 reset_case
 SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
@@ -325,7 +325,10 @@ assert_error 'session mapper refuses JSON' 'ERROR box delegate sessions: no DSES
 reset_case
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'free dry run'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'free dry output'
+! grep -q '^GRANT' "$T/out" || fail 'dry output has no actionable GRANT lines'
+assert_line 'WOULD-GRANT docs/tui.md' 'dry path output'
+assert_line 'WOULD-GRANT' 'dry closing output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'free dry output'
 assert_no_grant 'free dry run'
 
 # Called through a relative symlink from a directory with no siblings (as
@@ -386,7 +389,7 @@ DIFF
 run_fg 77 --paths docs/tui.md --doc-heading 'docs/events.md#Delivery' --dry
 assert_rc 0 'cited doc heading warning does not hold grant'
 assert_line 'WARN PR #11 touches cited doc heading docs/events.md#Delivery' 'cited heading warning'
-assert_line 'GRANT docs/tui.md' 'heading warning keeps unrelated grant free'
+assert_line 'WOULD-GRANT docs/tui.md' 'heading warning keeps unrelated grant free'
 
 reset_case
 GH_PRLIST='[{"number":11,"headRefName":"fix/one"},{"number":12,"headRefName":"fix/two"}]'
@@ -402,17 +405,17 @@ assert_line 'WARN PRE-PLAN PR #12: 0 files under crates/main/**' 'pre-plan zero 
 reset_case
 run_fg 77 --paths=docs/tui.md --dry
 assert_rc 0 'paths equals form'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'paths equals output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'paths equals output'
 
 reset_case
 run_fg 77 --paths='docs/{tui,tui}.md' --dry
 assert_rc 0 'duplicate brace expansion'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT docs/tui.md\nGRANT')" 'duplicate brace output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'duplicate brace output'
 
 reset_case
 run_fg 77 --paths='crates/tui/src/turn/{group,group_tests}.rs' --dry
 assert_rc 0 'multiple brace expansion'
-assert_out "$(printf 'WIDE crates/tui/src/turn/group.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWIDE crates/tui/src/turn/group_tests.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT crates/tui/src/turn/group.rs\nGRANT crates/tui/src/turn/group_tests.rs\nGRANT')" 'multiple brace output'
+assert_out "$(printf 'WIDE crates/tui/src/turn/group.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWIDE crates/tui/src/turn/group_tests.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT crates/tui/src/turn/group.rs\nWOULD-GRANT crates/tui/src/turn/group_tests.rs\nWOULD-GRANT')" 'multiple brace output'
 
 reset_case
 run_fg 77 --paths docs/tui.md --ranges 'docs/{tui,tui}.md:1-2' --dry
@@ -421,7 +424,7 @@ assert_rc 0 'ranges brace expansion'
 reset_case
 run_fg 77 --paths='crates/new/{one,two}.rs' '--new=crates/new/{one,two}.rs' --dry
 assert_rc 0 'new paths brace expansion'
-assert_out "$(printf 'WIDE crates/new/one.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWIDE crates/new/two.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT crates/new/one.rs\nGRANT crates/new/two.rs\nGRANT')" 'new path output'
+assert_out "$(printf 'WIDE crates/new/one.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWIDE crates/new/two.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT crates/new/one.rs\nWOULD-GRANT crates/new/two.rs\nWOULD-GRANT')" 'new path output'
 
 reset_case
 write_blob docs/tui.md 'needle\n'
@@ -437,7 +440,7 @@ grep -qxF 'Ranges: docs/tui.md:1-5' "$FW_RUN/fiber-88-fence-grant-1.md" || fail 
 reset_case
 run_fg 77 --paths docs/tui.md --reads='docs/{x}.md' --dry
 assert_rc 0 'reads equals form and literal braces'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nREAD docs/{x}.md\nGRANT')" 'reads brace stays literal'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nREAD docs/{x}.md\nWOULD-GRANT')" 'reads brace stays literal'
 
 reset_case
 run_fg 77 --paths docs/tui.md --reads=docs/x.md
@@ -453,12 +456,12 @@ CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/events.md --dry
 assert_rc 0 'read path does not hold'
-assert_out "$(printf 'WIDE docs/events.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/events.md\nGRANT')" 'read path output'
+assert_out "$(printf 'WIDE docs/events.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/events.md\nWOULD-GRANT')" 'read path output'
 
 reset_case
 run_fg 77 --paths crates/tui/ --dry
 assert_rc 0 'existing directory path'
-assert_out "$(printf 'WIDE crates/tui/ is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT crates/tui/\nGRANT')" 'directory path output'
+assert_out "$(printf 'WIDE crates/tui/ is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT crates/tui/\nWOULD-GRANT')" 'directory path output'
 
 # --- Exit 1: held paths --------------------------------------------------------
 reset_case
@@ -495,13 +498,40 @@ assert_contains 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)'
 assert_not_contains '(notes, no grant file names it)' 'duplicate hold keeps grant source'
 
 reset_case
+cat >"$FW_RUN/fiber-77-fence-grant-1.md" <<'GRANT'
+Grant 1
+
+Ticket: 77
+Paths:
+- crates/a/tests.rs
+- crates/b/tests.rs
+- crates/c/tests.rs
+Ranges: none
+
+## Ruling
+The refused `crates/d/tests.rs` sits in `crates/`.
+GRANT
+CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths crates/d/tests.rs --dry
+assert_rc 0 'headed grant prose does not hold a refused file'
+
+reset_case
+printf 'Grant 1\n\nTicket: 77\nThis hand-written fence grants docs/tui.md.\n\nReads:\n- docs/events.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 1 'hand-written grant without Paths still holds by scrape'
+assert_line 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'legacy grant scrape'
+
+reset_case
 printf 'Grant 1\n\nTicket: 77\nPart: 1\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 printf 'Grant 2\n\nTicket: 77\nPart: 2\nPaths:\n- docs/events.md\n' >"$FW_RUN/fiber-77-fence-grant-2.md"
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'part-1 grant does not hold part-2 lane'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'part-specific grant output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'part-specific grant output'
 
 reset_case
 run_fg 77 --paths docs/tui.md --part 2
@@ -514,7 +544,7 @@ CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --ranges docs/tui.md:192-200 --dry
 assert_rc 0 'ranged grant frees outside window'
-assert_out "$(printf 'GRANT docs/tui.md\nGRANT')" 'outside window output'
+assert_out "$(printf 'WOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'outside window output'
 
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\nRanges: docs/tui.md:3700-3710\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
@@ -548,7 +578,7 @@ printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence
 touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'old orphan grant expires'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'old orphan output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'old orphan output'
 
 reset_case
 sleep 300 &
@@ -588,7 +618,7 @@ touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 kill "$DJ_PID" 2>/dev/null || true
 assert_rc 0 'finished delegate job holds nothing'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'finished delegate job output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'finished delegate job output'
 
 reset_case
 sleep 300 &
@@ -607,7 +637,7 @@ printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence
 touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'dead delegate supervisor holds nothing'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'dead delegate supervisor output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'dead delegate supervisor output'
 
 reset_case
 printf 'Grant 1\n\nTicket: 88\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-88-fence-grant-1.md"
@@ -667,7 +697,7 @@ index 1111111..2222222 100644
 DIFF
 run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-2 --dry
 assert_rc 0 'requested range outside PR hunk'
-assert_out "$(printf 'GRANT docs/tui.md\nGRANT')" 'non-overlap range output'
+assert_out "$(printf 'WOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'non-overlap range output'
 reset_case
 set_pr 11 fix/other docs/tui.md
 cat >"$T/pr/11.diff" <<'DIFF'
@@ -687,19 +717,38 @@ reset_case
 set_pr 11 fix/other docs/tui.md
 run_fg 77 --paths docs/tui.md --ignore-pr 11 --dry
 assert_rc 0 'ignore PR holder'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'ignore PR output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'ignore PR output'
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --ignore-ticket 77 --dry
 assert_rc 0 'ignore ticket holder'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'ignore ticket output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'ignore ticket output'
+reset_case
+printf 'Grant 1\n\nTicket: 66\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-66-fence-grant-1.md"
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+CLAUDE_JSON='[{"name":"fiber-66","status":"busy"},{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --ignore-ticket 66 --ignore-ticket 77 --dry
+assert_rc 0 'multiple ignored tickets'
+assert_line 'WOULD-GRANT docs/tui.md' 'multiple ignored tickets output'
+
+reset_case
+set_pr 11 fix/other docs/tui.md
+GH_PRLIST='[{"number":11,"headRefName":"fix/other"},{"number":12,"headRefName":"fix/another"}]'
+export GH_PRLIST
+printf '%s\n' docs/tui.md >"$T/pr/12.names"
+printf 'diff --git a/docs/tui.md b/docs/tui.md\nindex 1111111..2222222 100644\n' >"$T/pr/12.diff"
+run_fg 77 --paths docs/tui.md --ignore-pr 11 --ignore-pr 12 --dry
+assert_rc 0 'multiple ignored PRs'
+assert_line 'WOULD-GRANT docs/tui.md' 'multiple ignored PRs output'
+
 reset_case
 set_pr 11 x/77-slug docs/tui.md
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'own ticket PR skipped'
-assert_out "$(printf 'OWN skipping PR #11: its branch names ticket 77\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'own PR output'
+assert_out "$(printf 'OWN skipping PR #11: its branch names ticket 77\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'own PR output'
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 1 'same PR holds for another ticket'
 assert_line 'HELD docs/tui.md by PR #11' 'other ticket sees PR hold'
@@ -742,6 +791,12 @@ assert_usage 'unknown flag'
 reset_case
 run_fg 77 --paths docs/tui.md --part two
 assert_usage 'non-numeric part'
+reset_case
+run_fg 77 --paths docs/tui.md --ignore-ticket nope
+assert_usage 'non-numeric ignored ticket'
+reset_case
+run_fg 77 --paths docs/tui.md --ignore-pr nope
+assert_usage 'non-numeric ignored PR'
 
 reset_case
 run_fg 77 --paths docs/tui.md --ranges docs/events.md:1-3
@@ -934,7 +989,7 @@ reset_case
 mkdir "$FW_RUN/.fence-grant.lock"
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'dry run ignores held lock'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'dry run with held lock output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'dry run with held lock output'
 assert_no_grant 'dry run with held lock'
 
 reset_case
@@ -990,7 +1045,7 @@ reset_case
 write_blob docs/tui.md 'needle\n'
 run_fg 77 --paths docs/tui.md --expect docs/tui.md:1:needle --dry
 assert_rc 0 'expected symbol present'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'expected symbol present output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'expected symbol present output'
 
 # --repo routes every gh call, including the suggestion content read.
 reset_case
@@ -1024,7 +1079,7 @@ reset_case
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'whole-file grant warns'
 assert_line 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.' 'whole-file WIDE line'
-assert_line 'GRANT docs/tui.md' 'whole-file grant line'
+assert_line 'WOULD-GRANT docs/tui.md' 'whole-file grant line'
 
 reset_case
 run_fg 77 --paths docs/tui.md
@@ -1040,7 +1095,7 @@ reset_case
 run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-5 --dry
 assert_rc 0 'ranged grant is quiet'
 assert_not_contains 'WIDE' 'ranged grant prints no WIDE'
-assert_line 'GRANT docs/tui.md' 'ranged grant line'
+assert_line 'WOULD-GRANT docs/tui.md' 'ranged grant line'
 
 # --- The grant performs its claim: one ledger both fences read (#1101) ------
 reset_case
@@ -1140,7 +1195,7 @@ export FILE_CLAIM_LIST
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'requester own claim is ignored'
 assert_not_contains 'STALE' 'own claim is not stale'
-assert_line 'GRANT docs/tui.md' 'own claim does not hold requester'
+assert_line 'WOULD-GRANT docs/tui.md' 'own claim does not hold requester'
 
 # --- Claims from a gone lane are logged and released -------------------------
 reset_case
@@ -1150,7 +1205,7 @@ run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'stale claim does not hold'
 assert_line 'STALE docs/tui.md by fiber-66' 'stale claim logged'
 [ "$(grep -c '^STALE docs/tui.md by fiber-66$' "$T/out")" = 1 ] || fail 'stale claim logs once'
-assert_line 'GRANT docs/tui.md' 'stale claim releases path'
+assert_line 'WOULD-GRANT docs/tui.md' 'stale claim releases path'
 
 # --- A failed or malformed claims read fails closed -------------------------
 reset_case
