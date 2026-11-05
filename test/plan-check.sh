@@ -27,6 +27,7 @@ git -C "$R" add -A
 git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m one
 BASE1="$(git -C "$R" rev-parse HEAD)"
 printf 'later\n' >"$R/src/later.rs"
+printf 'make_widget();\nWidgetThing;\n' >"$R/src/caller.rs"
 git -C "$R" add -A
 git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m two
 BASE2="$(git -C "$R" rev-parse HEAD)"
@@ -70,6 +71,34 @@ expect_code() {
 # 1. a clean plan: resolved paths, a line range, a basename, symbols, a path in Rulings
 clean="$(mkplan clean '## Files\n- `src/lib.rs`\n- `cfg/unique.toml`\n\n## Rulings\nKeep `docs/guide.md` and call `make_widget()` on `WidgetThing`.\n\n## Tasks\n1. Edit `src/lib.rs:1-2` and `unique.toml`.\n')"
 expect_clean "clean plan" "$clean"
+
+# Citations check the symbol at the base, including a single line and a range.
+expect_clean "symbol at cited line" "$(mkplan citeok '## Files\n- `src/lib.rs`\n\n## Rulings\n`make_widget()` at `src/lib.rs:1`.\n`src/lib.rs:1-2` holds `WidgetThing`.\n')"
+expect_problems "symbol absent from cited line" "$(mkplan citebad '## Rulings\n`make_widget()` at `src/lib.rs:2`.\n')" \
+  'missing symbol: src/lib.rs:2 does not contain make_widget(): correct the citation'
+expect_problems "symbol absent from cited range" "$(mkplan rangebad '## Rulings\n`src/lib.rs:1-2` holds `MissingThing`.\n')" \
+  'missing symbol: src/lib.rs:1-2 does not contain MissingThing: correct the citation'
+
+expect_clean "two adjacent citation pairs" "$(mkplan citepairs '## Rulings\n`make_widget()` at `src/lib.rs:1` and `WidgetThing` at `src/lib.rs:2`.\n')"
+printf 'changed working tree\n' >"$R/src/lib.rs"
+expect_clean "citations read the base" "$(mkplan citebase '## Rulings\n`make_widget()` at `src/lib.rs:1`.\n')"
+git -C "$R" checkout -q -- src/lib.rs
+
+# Quoted doc sections must be actual headings, not just text in the file.
+expect_clean "doc heading exists" "$(mkplan headingok '## Rulings\nSee `docs/guide.md`, "guide".\n')"
+expect_problems "doc heading missing" "$(mkplan headingbad '## Rulings\nSee `docs/guide.md`, "Order".\n')" \
+  'missing heading: docs/guide.md, "Order": correct the citation'
+
+# Changed symbols expose sites outside Files as warnings, never errors.
+run "$(mkplan sweep '## Files\n- `src/lib.rs::make_widget`\n\n## Tasks\nChange `WidgetThing` in `src/lib.rs`.\n')" --cwd "$R"
+[ "$code" = 0 ] || fail "completeness warning exits 0, got $code"
+[ -z "$out" ] || fail "completeness warning is not an error"
+grep -Fq 'warning: make_widget occurs outside Files: src/caller.rs' "$T/err.txt" || fail "warning names call site"
+grep -Fq 'warning: WidgetThing occurs outside Files: src/caller.rs' "$T/err.txt" || fail "warning names construction site"
+expect_clean "Files cover suppresses warning" "$(mkplan sweeppass '## Files\n- `src/`\n\n## Tasks\nChange `WidgetThing` in `src/lib.rs`.\n')"
+run "$(mkplan sweepfail '## Files\n- `src/lib.rs::make_widget`\n\n## Rulings\nSee `src/nope.rs`.\n')" --cwd "$R"
+[ "$code" = 1 ] || fail "completeness warning preserves error exit"
+grep -Fq 'warning: make_widget occurs outside Files: src/caller.rs' "$T/err.txt" || fail "warning accompanies error"
 
 # 2. a missing path outside Files
 expect_problems "missing path" "$(mkplan missing '## Rulings\nSee `src/nope.rs`.\n')" \
@@ -140,8 +169,10 @@ expect_problems "braces: each alternative checked" "$(mkplan braces '## Files\n-
 expect_problems "braces: an alternative outside Files" "$(mkplan bouts '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/{lib,later}.rs`.\n')" \
   'outside Files: src/later.rs (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
-# 11d. path::symbol rule: the path half is checked, the symbol half is ignored
-expect_clean "path::symbol: symbol half ignored" "$(mkplan split1 '## Rulings\n`src/lib.rs::make_widget` and `src/lib.rs::NoSuch`.\n')"
+# 11d. path::symbol checks both halves.
+expect_clean "path::symbol exists" "$(mkplan splitok '## Rulings\n`src/lib.rs::make_widget`.\n')"
+expect_problems "path::symbol missing" "$(mkplan split1 '## Rulings\n`src/lib.rs::NoSuch`.\n')" \
+  'missing symbol: src/lib.rs::NoSuch does not contain NoSuch: correct the citation'
 expect_problems "path::symbol: missing path" "$(mkplan split2 '## Rulings\n`src/nope.rs::make_widget`.\n')" \
   'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 

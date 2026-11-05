@@ -1065,13 +1065,16 @@ case "\$cmd" in
 esac
 EOF
 chmod +x "$T/realbin/delegate"
-printf 'Verify the plan.\n\nPlan: __PLAN__\nBase: __BASE__\n' >"$T/home/.agents/skills/planning/briefs/verifier.md"
+printf 'Verify the plan.\n\nPlan: __PLAN__\nBase: __BASE__\n__EXTRA__\n' >"$T/home/.agents/skills/planning/briefs/verifier.md"
 
 setup_case realmodel
 rebase_plan
 TKT_BIN="$T/realbin" run_plan verify
 [ "$RC" -eq 0 ] || fail "real tkt-job PLAN-OK exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "real tkt-job"
+grep -Fxq 'When the plan passes, the report must start with this exact first line, with nothing before or after it on that line:' "$CDIR/run/switchyard-518-verifier-r1-1.md" || fail "Verifier brief contains verdict-line instruction"
+grep -Fxq 'PLAN OK' "$CDIR/run/switchyard-518-verifier-r1-1.md" || fail "Verifier brief contains verbatim verdict line"
+
 grep -q "run|model=test-model" "$T/stub.log" || fail "real tkt-job dispatches with model.verifier"
 [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "rmodel1" ] || fail "real tkt-job stores the round 1 job id"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "real tkt-job counts the round"
