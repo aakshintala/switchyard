@@ -1894,4 +1894,59 @@ run_build
 grep -F -q "tkt-build: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-528-findings-r0.md" "$CDIR/stderr.txt" || fail "findings-failed-collect rerun stderr missing refusal: $(cat "$CDIR/stderr.txt")"
 cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-failed-collect-copy.md" || fail "findings-failed-collect rerun: existing file changed"
 
+# --- --from gate with main moved on a planned file but a clean merge continues ---
+setup_case gate-clean-merge
+printf 'main change\n' >"$CDIR/seed/base.txt"
+git -C "$CDIR/seed" add base.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves base"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n- `base.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "gate-clean-merge: seed matching verdict base"
+run_build --from gate
+[ "$RC" -eq 0 ] || fail "gate-clean-merge exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "gate-clean-merge"
+grep -F -q "tkt-build: plan Base $(cat "$CDIR/main0") is behind origin/main on 1 planned files; the branch merges cleanly, continuing" "$CDIR/stderr.txt" || fail "gate-clean-merge: clean-merge stderr line missing: $(cat "$CDIR/stderr.txt")"
+
+# --- --from gate with a conflicting move still exits STALE with the rerun line ---
+setup_case gate-conflict
+mkdir -p "$CDIR/seed/src"
+printf 'main change\n' >"$CDIR/seed/src/a.txt"
+git -C "$CDIR/seed" add src/a.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "gate-conflict: seed matching verdict base"
+run_build --from gate
+[ "$RC" -eq 1 ] || fail "gate-conflict exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "gate-conflict"
+grep -F -q "rebase the branch onto origin/main, set the plan's Base to the new origin/main sha, and rerun tkt-build $S --from gate" <<<"$OUT" || fail "gate-conflict: rerun line missing from digest: $OUT"
+grep -q "^gate|" "$T/calls.log" && fail "gate-conflict: the gate never runs"
+
+# --- --from lane with the same clean move still exits STALE ---
+setup_case lane-clean-stale
+printf 'main change\n' >"$CDIR/seed/base.txt"
+git -C "$CDIR/seed" add base.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves base"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n- `base.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "lane-clean-stale: seed matching verdict base"
+run_build
+[ "$RC" -eq 1 ] || fail "lane-clean-stale exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "lane-clean-stale"
+grep -q "merges cleanly" "$CDIR/stderr.txt" && fail "lane-clean-stale: lane must not continue cleanly"
+grep -q "merges cleanly" <<<"$OUT" && fail "lane-clean-stale: lane must not continue cleanly"
+grep -q "^run|" "$T/calls.log" && fail "lane-clean-stale: the lane never dispatches"
+
 echo "tkt-build: all cases passed"

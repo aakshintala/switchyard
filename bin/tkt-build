@@ -187,7 +187,16 @@ if [ "${#stale_files[@]}" -gt 0 ]; then
   stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${stale_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
   if [ -n "$stat_out" ]; then
     n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${stale_files[@]}" 2>/dev/null | wc -l | tr -d ' ')"
-    emit "STALE n=$n base=$base" 1 "$stat_out"
+    if [ "$from" = gate ] || [ "$from" = review ]; then
+      rerun="rebase the branch onto origin/main, set the plan's Base to the new origin/main sha, and rerun tkt-build $state --from $from"
+      if git -C "$worktree" merge-tree --write-tree origin/main HEAD >/dev/null 2>"$tmpd/merge-tree-err"; then
+        printf '%s\n' "tkt-build: plan Base $base is behind origin/main on $n planned files; the branch merges cleanly, continuing" >&2
+      else
+        emit "STALE n=$n base=$base" 1 "$stat_out" "$rerun"
+      fi
+    else
+      emit "STALE n=$n base=$base" 1 "$stat_out"
+    fi
   fi
 fi
 context_args=(); context_file=""
