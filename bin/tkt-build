@@ -215,7 +215,7 @@ $step. tkt-plan $state verify"
         step=$((step + 1))
         recover="$recover
 $step. tkt-build $state --from $from
-Resolve any step-1 conflicts, then run git rebase --continue before step 2."
+Resolve any step-1 conflicts, then run git -C $worktree rebase --continue before step 2."
         emit "STALE n=$n base=$base" 1 "$stat_out" "$recover"
       fi
     else
