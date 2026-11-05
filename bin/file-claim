@@ -7,12 +7,15 @@
 # Without --lane, list adds one row per open-PR path: <path> pr#N pr - - N.
 # FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5); N must be a positive integer.
 # FILE_CLAIM_READ_WAIT=N sets the retry wait in whole seconds (default 1).
+# FILE_CLAIM_PUSH_WAIT=N sets the commit_refs retry wait in whole seconds (default 1).
 set -euo pipefail
 REPO_DEFAULT="aakshintala/fiber"
 REF="refs/claims/live"
 MAX_GRANT="${FILE_CLAIM_MAX_GRANT:-5}"
 READ_TRIES=3
 READ_WAIT="${FILE_CLAIM_READ_WAIT:-1}"
+PUSH_TRIES=3
+PUSH_WAIT="${FILE_CLAIM_PUSH_WAIT:-1}"
 TRIES=8
 TAB=$'\t'
 NL=$'\n'
@@ -27,6 +30,7 @@ die() { local c="$1"; shift; echo "file-claim: $*" >&2; exit "$c"; }
 case "$MAX_GRANT" in ''|*[!0-9]*) die 2 "FILE_CLAIM_MAX_GRANT must be a positive integer" ;; esac
 [ "$MAX_GRANT" -gt 0 ] || die 2 "FILE_CLAIM_MAX_GRANT must be a positive integer"
 case "$READ_WAIT" in ''|*[!0-9]*) die 2 "FILE_CLAIM_READ_WAIT must be a whole number of seconds" ;; esac
+case "$PUSH_WAIT" in ''|*[!0-9]*) die 2 "FILE_CLAIM_PUSH_WAIT must be a whole number of seconds" ;; esac
 # plan_files_pathspecs: the plan's Files entries, the same reader tkt-gate uses.
 # shellcheck disable=SC1091
 script_path="$0"
@@ -111,15 +115,20 @@ load_claims() {
   mv "$file.canonical" "$file"
 }
 store_claims() {
-  local remote="$1" file="$2" tip="$3" err blob tree commit
+  local remote="$1" file="$2" tip="$3" err blob tree commit attempt=1
   blob="$(git -C "$W" hash-object -w "$file")" || die 2 "cannot hash claims"
   tree="$(printf '100644 blob %s\tclaims\n' "$blob" | git -C "$W" mktree)" || die 2 "cannot build claims tree"
   commit="$(printf 'file-claim: update claims\n' | GIT_AUTHOR_NAME=file-claim GIT_AUTHOR_EMAIL=file-claim@localhost GIT_COMMITTER_NAME=file-claim GIT_COMMITTER_EMAIL=file-claim@localhost git -C "$W" commit-tree "$tree" ${tip:+-p "$tip"})" || die 2 "cannot commit claims"
   err="$W/push.err"
-  if git -C "$W" push -q "$remote" "$commit:$REF" 2>"$err"; then return 0; fi
-  # A moved ref means a raced write: the caller refetches and retries.
-  if grep -qi 'non-fast-forward\|fetch first\|cannot lock ref' "$err"; then return 3; fi
-  die 2 "cannot push $REF to $remote: $(cat "$err")"
+  while [ "$attempt" -le "$PUSH_TRIES" ]; do
+    if git -C "$W" push -q "$remote" "$commit:$REF" 2>"$err"; then return 0; fi
+    # A moved ref means a raced write: the caller refetches and retries.
+    if grep -qi 'non-fast-forward\|fetch first\|cannot lock ref' "$err"; then return 3; fi
+    if ! grep -qi 'fatal error in commit_refs' "$err"; then die 2 "cannot push $REF to $remote: $(cat "$err")"; fi
+    if [ "$attempt" -ge "$PUSH_TRIES" ]; then die 2 "cannot push $REF to $remote: $(cat "$err")"; fi
+    sleep "$PUSH_WAIT"
+    attempt=$((attempt + 1))
+  done
 }
 filter_release() {
   local claims="$1" lane="$2" kept="$3" dropped="$4"; shift 4
