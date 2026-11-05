@@ -513,6 +513,26 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "A6 bad verdict: $(he
 [ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "A6 round not 2"
 fi
 
+# B. Drift the fix job's own push caused is accepted: the job commits, ends
+# abnormally, and pushes; the next call proceeds on fix2 instead of DRIFT.
+if want B; then
+setup_case b
+printf 'stalled' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "B call 1 exited 0"
+[ "$?" = "1" ] || fail "B call 1 exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix NEEDS_CONTEXT id=j1" || fail "B bad verdict: $(head -n 1 <<<"$out")"
+git -C "$WT" push -q origin tkt-529
+: >"$T/calls.log"
+printf 'done' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B call 2 exited $?"
+grep -q "DRIFT" <<<"$out" && fail "B call 2 printed DRIFT"
+grep -q "RECOVER" <<<"$out" && fail "B call 2 printed RECOVER"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "B bad verdict: $(head -n 1 <<<"$out")"
+expect_slot fix2
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "B head not the worktree HEAD"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "B round not 1"
+fi
+
 # B1. A fix job CONCERNS continues to the gate and the verify, which gets the
 # concerns file as --context; the digest names the file. Nothing stops, no drift.
 if want B1; then
