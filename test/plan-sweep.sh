@@ -570,4 +570,42 @@ STUB_GREP=qual PATH="$T/stubbin:$PATH" run --cwd "$R" --base "$BASE" --symbols S
 grep -q 'plan-sweep: git grep (qual) failed with status 128' "$T/err.txt" || fail "s: error names the qual grep, got [$(cat "$T/err.txt")]"
 [ ! -e "$T/pack-s3.md" ] || fail "s: no pack file after a qual failure"
 
+# t. Outside Files checks reason membership without rescanning all pairs per path.
+cat >"$R/src/outside_api.rs" <<'EOF'
+pub fn outside_fn() {}
+EOF
+i=1
+while [ "$i" -le 10 ]; do
+  cat >"$R/src/outside_$i.rs" <<'EOF'
+pub fn caller() {
+    crate::outside_fn();
+}
+EOF
+  i=$((i + 1))
+done
+git -C "$R" add src/outside_api.rs src/outside_*.rs
+git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m outside-files
+OUTSIDEBASE="$(git -C "$R" rev-parse HEAD)"
+REAL_GREP_1043="$(command -v grep)"
+export REAL_GREP_1043
+export OUTSIDE_SCAN_LOG="$T/outside-pairs-grep.log"
+mkdir -p "$T/outside-bin"
+cat >"$T/outside-bin/grep" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */outside-pairs) printf '.\n' >>"$OUTSIDE_SCAN_LOG" ;; esac
+done
+exec "$REAL_GREP_1043" "$@"
+EOF
+chmod +x "$T/outside-bin/grep"
+OLD_PATH3="$PATH"
+PATH="$T/outside-bin:$PATH"
+: >"$OUTSIDE_SCAN_LOG"
+run --cwd "$R" --base "$OUTSIDEBASE" --symbols outside_fn --files src/outside_api.rs --out "$T/pack-outside.md"
+PATH="$OLD_PATH3"
+[ "$code" = 0 ] || fail "t: exits 0, got $code [$out]"
+[ "$out" = "PACK $T/pack-outside.md symbols=1 files=1 outside=10" ] || fail "t: PACK line, got [$out]"
+outside_scan_calls="$(wc -l <"$OUTSIDE_SCAN_LOG" | tr -d '[:space:]')"
+[ "$outside_scan_calls" -le 1 ] || fail "t: outside-pairs scanned $outside_scan_calls times for 10 paths"
+
 echo "plan-sweep: all cases passed"
