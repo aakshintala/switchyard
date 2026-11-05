@@ -98,10 +98,17 @@ cat >"$T/stubs/file-claim" <<'FC_STUB'
 printf '%s\n' "$*" >>"$T/file-claim.log"
 case "$1" in
   list)
+    lane=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --lane) lane="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
     [ "${FILE_CLAIM_LIST_FAIL:-0}" != 1 ] || { echo 'stub file-claim list: boom' >&2; exit 2; }
     [ "${FILE_CLAIM_LIST_BAD:-0}" != 1 ] || { echo 'not a claims row'; exit 0; }
-    [ ! -f "$T/file-claim-claims" ] || { cat "$T/file-claim-claims"; exit 0; }
-    printf '%s' "${FILE_CLAIM_LIST:-}"
+    if [ -f "$T/file-claim-claims" ]; then rows=$(cat "$T/file-claim-claims"); else rows=${FILE_CLAIM_LIST:-}; fi
+    if [ -n "$lane" ]; then printf '%s' "$rows" | awk -F '\t' -v lane="$lane" '$2 == lane'; else printf '%s' "$rows"; fi
     exit 0
     ;;
   claim)
@@ -232,7 +239,7 @@ assert_no_probes() {
 assert_usage() {
   assert_rc 2 "$1"
   assert_out '' "$1 stdout"
-  assert_stderr 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]' "$1 usage"
+  assert_stderr 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]' "$1 usage"
   assert_no_probes "$1"
   assert_no_grant "$1"
 }
@@ -285,13 +292,13 @@ touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
 DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"running"}]}'
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 1 'live roster session holds even an old grant'
-assert_out 'HELD docs/tui.md by lane #77' 'live roster session output'
+assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'live roster session output'
 
 # Prefix matching also works when the roster has the longer id.
 printf '2026-11-05 launch\t77\tbox\tfiber-77\tabcdef1234567890\n' >"$FW_RUN/roster"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 1 'live session matches a longer roster id'
-assert_out 'HELD docs/tui.md by lane #77' 'longer roster id output'
+assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'longer roster id output'
 
 printf '2026-11-05 launch\t77\tbox\tprep-77\tabcdef12\n' >"$FW_RUN/roster"
 run_fg 88 --paths docs/tui.md --dry
@@ -467,7 +474,39 @@ CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 1 'live lane hold'
-assert_out 'HELD docs/tui.md by lane #77' 'live lane output'
+assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'live lane output'
+
+reset_case
+printf 'Files granted: docs/tui.md\n' >"$FW_RUN/fiber-77-notes.md"
+CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 1 'notes-only hold'
+assert_contains 'HELD docs/tui.md by lane #77 (notes, no grant file names it)' 'notes hold source'
+
+reset_case
+printf 'Files granted: docs/tui.md\n' >"$FW_RUN/fiber-77-notes.md"
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 1 'matching note and grant hold'
+assert_contains 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'grant wins duplicate hold label'
+assert_not_contains '(notes, no grant file names it)' 'duplicate hold keeps grant source'
+
+reset_case
+printf 'Grant 1\n\nTicket: 77\nPart: 1\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+printf 'Grant 2\n\nTicket: 77\nPart: 2\nPaths:\n- docs/events.md\n' >"$FW_RUN/fiber-77-fence-grant-2.md"
+CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'part-1 grant does not hold part-2 lane'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'part-specific grant output'
+
+reset_case
+run_fg 77 --paths docs/tui.md --part 2
+assert_rc 0 'part-2 grant write'
+grep -qxF 'Part: 2' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'grant file records its part'
 
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\nRanges: docs/tui.md:3700-3710\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
@@ -483,13 +522,26 @@ CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --ranges docs/tui.md:3705-3706 --dry
 assert_rc 1 'ranged grant holds overlapping window'
-assert_line 'HELD docs/tui.md by lane #77' 'overlapping window output'
+assert_line 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'overlapping window output'
 
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 1 'fresh orphan grant hold'
 assert_contains 'HELD docs/tui.md by lane #77 NO LIVE LANE:' 'fresh orphan label'
+assert_not_contains 'mv ' 'fresh orphan has no destructive remedy'
+grep -qxF 'list --lane fiber-77 --repo aakshintala/fiber' "$T/file-claim.log" || fail 'orphan liveness checks lane claims'
+
+reset_case
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+FILE_CLAIM_LIST=$(printf 'docs/events.md\tfiber-77\tplan\t0\tt:stub\t\n')
+export FILE_CLAIM_LIST
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 1 'orphan grant with file claims'
+assert_contains 'no running session seen, holds 1 claims' 'orphan grant claims state'
+assert_contains 'check file-claim before treating this grant as dead' 'orphan grant claims next step'
+assert_not_contains 'NO LIVE LANE' 'orphan grant with claims is not dead'
+assert_contains '(grant fiber-77-fence-grant-1.md)' 'orphan claim source label'
 
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
@@ -505,7 +557,7 @@ printf '%s\n' "$PI_PID" >"$FW_RUN/fiber-77-pi.pid"
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 1 'live Mac pi lane hold'
-assert_out 'HELD docs/tui.md by lane #77' 'Mac pi lane output'
+assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'Mac pi lane output'
 kill "$PI_PID" 2>/dev/null || true
 PI_PID=""
 
@@ -515,7 +567,7 @@ SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSES
 export SSH_OUT
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 1 'live box pi lane hold'
-assert_out 'HELD docs/tui.md by lane #88' 'box pi lane output'
+assert_out 'HELD docs/tui.md by lane #88 (grant fiber-88-fence-grant-1.md)' 'box pi lane output'
 
 reset_case
 sleep 300 &
@@ -525,7 +577,7 @@ printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence
 run_fg 88 --paths docs/tui.md --dry
 kill "$DJ_PID" 2>/dev/null || true
 assert_rc 1 'live Mac delegate lane hold'
-assert_out 'HELD docs/tui.md by lane #77' 'Mac delegate lane output'
+assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'Mac delegate lane output'
 
 reset_case
 sleep 300 &
@@ -547,7 +599,7 @@ printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence
 run_fg 88 --paths docs/tui.md --dry
 kill "$DJ_PID" 2>/dev/null || true
 assert_rc 1 'a lane in both sources holds once'
-assert_out 'HELD docs/tui.md by lane #77' 'deduplicated lane output'
+assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'deduplicated lane output'
 
 reset_case
 write_delegate_job job-a RUNNING 2147483646 /w/fiber-worktrees/tests/77-grid-read-ratchet
@@ -563,7 +615,7 @@ SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nfiber-88\nDELEGATEOK\n
 export SSH_OUT
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 1 'live box delegate lane hold'
-assert_out 'HELD docs/tui.md by lane #88' 'box delegate lane output'
+assert_out 'HELD docs/tui.md by lane #88 (grant fiber-88-fence-grant-1.md)' 'box delegate lane output'
 
 reset_case
 write_blob docs/tui.md $'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n'
@@ -671,7 +723,7 @@ assert_not_contains 'NOSYMBOL' 'valid expect accepted'
 assert_line 'HELD docs/tui.md by PR #11' 'valid expect holder'
 
 # --- Exit 2: bad arguments -----------------------------------------------------
-USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]'
+USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]'
 reset_case
 run_fg
 assert_usage 'missing ticket'
@@ -687,6 +739,9 @@ assert_usage 'missing paths value'
 reset_case
 run_fg 77 --paths docs/tui.md --unknown
 assert_usage 'unknown flag'
+reset_case
+run_fg 77 --paths docs/tui.md --part two
+assert_usage 'non-numeric part'
 
 reset_case
 run_fg 77 --paths docs/tui.md --ranges docs/events.md:1-3
