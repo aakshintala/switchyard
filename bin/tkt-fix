@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tkt-fix: one review-loop fix round; slot fix<max(round,fixslot)+1> keeps
 # rounds apart: tkt-job re-prints a terminal slot's digest.
+# A lane blocked before its PR resumes with tkt-job --resume <job.lane> followed by tkt-build --from gate, or with tkt-build --from lane when no lane ran.
 # Usage: tkt-fix <state> (--verify | --no-verify) [--findings <file>]
 #   [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]
 set -euo pipefail
@@ -125,6 +126,15 @@ emit() {
 # Two rounds have run: only a --resume of an open slot may continue.
 [ "$round" -lt 2 ] || [ -n "$resume" ] || emit "ROUND-LIMIT round=$round" 1 "send the open findings to triage"
 # Fill missing PR identity before checking entry drift or dispatching a fix.
+# pre_pr_resume_hint names the pre-PR resume on the no-PR refusals below.
+pre_pr_resume_hint() {
+  lane="$(t get job.lane 2>/dev/null || true)"
+  if [ -n "$lane" ]; then
+    echo "tkt-fix: a lane blocked before its PR resumes with: tkt-job $state --slot lane --resume $lane --prompt <answer file> --gate-from-plan --expect-commits; then tkt-build $state --from gate" >&2
+  else
+    echo "tkt-fix: a lane blocked before its PR resumes with: tkt-build $state --from lane" >&2
+  fi
+}
 pr="$(t get pr 2>/dev/null || true)"
 stored="$(t get head 2>/dev/null || true)"
 if [ -z "$pr" ] || [ -z "$stored" ]; then
@@ -143,12 +153,14 @@ if [ -z "$pr" ] || [ -z "$stored" ]; then
   fi
   if [ -z "$entry" ]; then
     echo "tkt-fix: PRECONDITION missing=pr: no open PR for branch $branch in $repo" >&2
+    pre_pr_resume_hint
     exit 2
   fi
   if [ -z "$pr" ]; then
     pr="$(jq -r 'if .number == null then "" else (.number | tostring) end' <<<"$entry" 2>/dev/null || true)"
     if [ -z "$pr" ]; then
       echo "tkt-fix: PRECONDITION missing=pr: no open PR for branch $branch in $repo" >&2
+      pre_pr_resume_hint
       exit 2
     fi
   fi

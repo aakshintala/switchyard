@@ -1132,5 +1132,27 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "G4 bad verdict: $(hea
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$PRHEAD" ] || fail "G4 pushed a non-fast-forward worktree"
 grep -q "job|" "$T/calls.log" && fail "G4 dispatched a new fix job"
 fi
+# 10k. No open PR with job.lane set names the lane resume command.
+setup_case prepr-lane
+drop_state_key pr
+drop_state_key head
+bash "$TKT_STATE" "$S" set job.lane lane-job-1 >/dev/null || fail "prepr-lane: set job.lane"
+printf '[]' >"$T/prlist"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "prepr-lane exited 0"
+[ "$?" = "2" ] || fail "prepr-lane exited $?, want 2"
+grep -q 'PRECONDITION missing=pr: no open PR for branch tkt-529 in switchyard' "$T/stderr" || fail "prepr-lane first line missing: $(cat "$T/stderr")"
+grep -F -q "tkt-fix: a lane blocked before its PR resumes with: tkt-job $S --slot lane --resume lane-job-1 --prompt <answer file> --gate-from-plan --expect-commits; then tkt-build $S --from gate" "$T/stderr" || fail "prepr-lane resume line missing: $(cat "$T/stderr")"
+grep -q '^job|' "$T/calls.log" && fail "prepr-lane dispatched a job"
+
+# 10l. No open PR without job.lane names --from lane.
+setup_case prepr-nolane
+drop_state_key pr
+drop_state_key head
+printf '[]' >"$T/prlist"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "prepr-nolane exited 0"
+[ "$?" = "2" ] || fail "prepr-nolane exited $?, want 2"
+grep -q 'PRECONDITION missing=pr: no open PR for branch tkt-529 in switchyard' "$T/stderr" || fail "prepr-nolane first line missing: $(cat "$T/stderr")"
+grep -F -q "tkt-build $S --from lane" "$T/stderr" || fail "prepr-nolane lane line missing: $(cat "$T/stderr")"
+grep -q '^job|' "$T/calls.log" && fail "prepr-nolane dispatched a job"
 
 echo "tkt-fix assertions passed"
