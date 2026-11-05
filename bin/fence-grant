@@ -1405,7 +1405,7 @@ while IFS= read -r _wp; do
     echo "WIDE $_wp is granted whole (no --ranges): a lane needing one line of it is refused."
   fi
 done < "$tmp/plist"
-repo_root="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+repo_root="$(cd "$self_dir/.." 2>/dev/null && pwd)"
 docs_dir="$repo_root/docs"
 if [ -n "$removes" ] && [ -d "$repo_root/test" ]; then
   printf '%s\n' "$removes" | tr ',' '\n' | while IFS= read -r _symbol; do

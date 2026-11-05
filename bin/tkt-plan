@@ -13,7 +13,15 @@ usage() {
 [ $# -ge 2 ] || usage
 state="$1" sub="$2"; shift 2
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"; tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-plan: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090

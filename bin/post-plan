@@ -87,7 +87,14 @@ done
 
 # A plan without a valid ## Gate would fail later in tkt-build, so check it
 # before any gh call. plan-gate's stdout (the command) is not needed here.
-script_dir="$(cd "$(dirname "$0")" && pwd)"
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 if ! gate_err="$("$script_dir/plan-gate" "$plan" 2>&1 >/dev/null)"; then
   printf '%s\n' "$gate_err" >&2
   echo "post-plan: plan-gate failed; nothing posted" >&2

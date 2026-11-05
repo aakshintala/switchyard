@@ -22,6 +22,21 @@ out="$(bash "$FILL" "$T/t.md" 'A=1' 'B=2')" || fail "basic fill exits 0"
 out="$(bash "$FILL" planner BASE=x ISSUE=1 PACK=none PLAN=/p PREFLIGHT=/pf REPO=o/r WORKFLOW_DOC=/w 2>"$T/err-bare.txt")" || fail "bare template name exits 0"
 case "$out" in *"o/r"*) ;; *) fail "bare template name fills the planner brief, got [$out]" ;; esac
 [ ! -s "$T/err-bare.txt" ] || fail "bare template name: nothing on stderr"
+
+# a relative symlink from an empty directory still finds the pack's sibling brief
+relative_symlink_case() (
+  link_temp="$(mktemp -d "${TMPDIR:-/tmp}/test-fill-brief-link.XXXXXX")"
+  trap 'rm -rf "$link_temp"' EXIT
+  mkdir "$link_temp/empty"
+  link_target="$(python3 -c 'import os,sys; print(os.path.relpath(os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])))' "$FILL" "$link_temp/empty")"
+  ln -s "$link_target" "$link_temp/empty/fill-brief"
+  cd "$link_temp/empty" || exit 1
+  HOME="$T/no-installed-skills" ./fill-brief planner BASE=x ISSUE=1 PACK=none PLAN=/p PREFLIGHT=/pf REPO=o/r WORKFLOW_DOC=/w
+)
+out="$(relative_symlink_case 2>"$T/err-symlink.txt")" || fail "relative symlink finds the pack's brief"
+case "$out" in *"o/r"*) ;; *) fail "relative symlink fills the planner brief, got [$out]" ;; esac
+[ ! -s "$T/err-symlink.txt" ] || fail "relative symlink is silent on stderr"
+
 bash "$FILL" nosuchbrief 'A=1' >/dev/null 2>"$T/err-bare2.txt"; [ "$?" = "2" ] || fail "unknown bare name exits 2"
 grep -q 'no such template: nosuchbrief' "$T/err-bare2.txt" || fail "unknown bare name is named"
 out="$(cd "$T" && bash "$FILL" t.md 'A=1' 'B=2')" || fail "relative path with no / exits 0"

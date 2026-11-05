@@ -1,6 +1,7 @@
 # gate-script: shared gate-script writer, sourced by bin/tkt-job and bin/tkt-gate.
-# Source it from beside the calling script:
-#   gate_lib="$(cd "$(dirname "$0")" && pwd)/lib/gate-script.sh"
+# Source it from beside the calling script, with script_dir resolved through
+# symlinks as bin/fill-brief does (check-pack refuses a bare dirname "$0"):
+#   gate_lib="$script_dir/lib/gate-script.sh"
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.
 
 # gate_block_awk: the awk program that prints each failing nextest test's block
