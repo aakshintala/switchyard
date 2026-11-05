@@ -438,6 +438,7 @@ srefused stash push -m
 srefused stash pop
 srefused stash pop 'stash@{0}'
 srefused stash push -- -m x
+srefused stash push --pathspec-from-file -m -q
 
 passed stash list
 passed stash apply abc123

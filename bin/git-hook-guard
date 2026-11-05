@@ -404,7 +404,7 @@ def push_has_message(args):
     # True when the argv after `stash push` carries -m/--message with a
     # value. A `-xyz` cluster's m takes the rest of the token or the next
     # token; a -- token ends option parsing, so a pathspec -m does not
-    # count.
+    # count, and neither does the value of --pathspec-from-file.
     options_done = False
     i = 0
     n = len(args)
@@ -419,6 +419,8 @@ def push_has_message(args):
                 return True
         elif token.startswith("--message="):
             return True
+        elif token == "--pathspec-from-file":
+            i += 1
         elif token.startswith("--"):
             pass
         elif token.startswith("-") and len(token) > 1:
