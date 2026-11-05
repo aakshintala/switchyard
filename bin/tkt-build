@@ -37,6 +37,10 @@ plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
 if [ ! -r "$plan_gate_lib" ]; then echo "tkt-build: cannot read shared lib: $plan_gate_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$plan_gate_lib"
+namebase_lib="$script_dir/lib/namebase.sh"
+if [ ! -r "$namebase_lib" ]; then echo "tkt-build: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$namebase_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
 mverd="$bin_dir/mutant-verdicts"
@@ -98,6 +102,7 @@ require_keys repo issue branch worktree run plan
 repo="$(tkt get repo)"; issue="$(tkt get issue)"; branch="$(tkt get branch)"
 worktree="$(tkt get worktree)"; run="$(tkt get run)"; plan="$(tkt get plan)"
 slug="${repo//\//-}"; mkdir -p "$run"
+part_suffix="$(part_findings_suffix "$(tkt get part 2>/dev/null || true)")"
 # First-round tool: a state with a round already counted continues with tkt-fix or tkt-ship.
 # The Outcome line names the ticket's end state, read the same way as Base. A
 # plan without the line ends in a PR; Outcome: measurement ends in the gate.
@@ -416,7 +421,7 @@ if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
   if [ -n "$mtext" ]; then printf '%s' "$mtext" >"$map_out"; fi
   [ "$mstatus" = "DONE" ] && [ -s "$map_out" ] || map_note="map failed status=${mstatus:-unknown}: ${mtext%%$'\n'*}"
 fi
-findings_file="$run/$slug-$issue-findings-r0.md"
+findings_file="$run/$slug-$issue$part_suffix-findings-r0.md"
 rc=0; collect_out="$("$reviewpr" collect $rids --findings-out "$findings_file" 2>"$tmpd/collect-err")" || rc=$?
 # drop_bad_axes: print rids with the ids of axes that left no reusable
 # state replaced by RESTART, so the next run on this head starts those

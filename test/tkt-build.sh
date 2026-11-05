@@ -1833,4 +1833,17 @@ run_build --from review
 expect_verdict "TKT tkt-build FAIL rc=1 log=*" "measured from-review gate"
 grep -q "^gate|" "$T/calls.log" || fail "measured from-review: the gate still runs"
 
+# --- part 2 writes -part2- findings and leaves the part-1 file byte-identical ---
+setup_case part2-findings
+bash "$TKT_STATE" "$S" set part 2 || fail "part2-findings: set part"
+printf 'PART1-FINDINGS\n' >"$CDIR/run/switchyard-528-findings-r0.md"
+cp "$CDIR/run/switchyard-528-findings-r0.md" "$T/part1-copy.md"
+run_build
+[ "$RC" -eq 0 ] || fail "part2-findings exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "part2-findings"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+[ "$ffile" = "$CDIR/run/switchyard-528-part2-findings-r0.md" ] || fail "part2-findings: findings key is [$ffile]"
+[ -f "$ffile" ] || fail "part2-findings: part2 findings file missing"
+cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/part1-copy.md" || fail "part2-findings: part-1 findings file changed"
+
 echo "tkt-build: all cases passed"

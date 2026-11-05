@@ -9,3 +9,11 @@
 set_namebase() {
   namebase="${1##*/}-$2"
 }
+
+# part_findings_suffix PART: print "-part<N>" when PART is an integer of 2
+# or more, else print nothing. Keeps single-part (no part key, or part 1)
+# findings paths exactly as before.
+part_findings_suffix() {
+  case "$1" in ''|*[!0-9]*) return 0;; esac
+  if [ "$1" -ge 2 ] 2>/dev/null; then printf '%s' "-part$1"; fi
+}
