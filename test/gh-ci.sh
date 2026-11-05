@@ -71,6 +71,7 @@ gh() (
     while [ $# -gt 0 ]; do case "$1" in
       --jq) jq="$2"; shift 2;;
       --paginate|--allow-escape-sequences) shift;;
+      -H) shift 2;;
       *) [ -n "$path" ] || path="$1"; shift;;
     esac; done
     case "$path" in
@@ -113,6 +114,14 @@ gh() (
         [ -e "$T/state/run-jobs-$run_id.txt" ] || { echo "fake gh: cannot read jobs for run $run_id" >&2; exit 1; }
         count="$(cat "$T/state/run-jobs-$run_id.txt")"
         if [ "$count" = missing ]; then echo '{}'; else jq -n --arg count "$count" '{total_count: ($count | tonumber)}'; fi;;
+      repos/O/N/actions/runs/[0-9]*)
+        run_id="${path#repos/O/N/actions/runs/}"; run_id="${run_id%%\?*}"
+        [ -e "$T/state/run-info-$run_id.json" ] || { echo "fake gh: cannot read run $run_id" >&2; exit 1; }
+        jq -r "$jq" <"$T/state/run-info-$run_id.json";;
+      repos/O/N/contents/*)
+        [ ! -e "$T/state/contents-fail" ] || { echo "fake gh: cannot read workflow file" >&2; exit 1; }
+        [ -e "$T/state/contents.txt" ] || { echo "fake gh: no workflow fixture" >&2; exit 1; }
+        cat "$T/state/contents.txt";;
       repos/O/N/actions/runs*)
         jq -c '{total_count: length, workflow_runs: .}' <<<"$(head -1 "$T/state/runs.txt")";;
       repos/O/N/commits/*/check-runs*)
@@ -208,6 +217,7 @@ reset_state() {
   rm -f "$T/state"/jobs-*.json "$T/state"/run-name-*.txt "$T/state"/log-*.txt
   rm -f "$T/state"/run-jobs-*.txt "$T/state"/run-*-head.txt "$T/state"/run-*-poll.txt "$T/state"/run-*-poll-fail
   rm -f "$T/state"/issue-*-labels.txt "$T/state"/runlog-*.txt
+  rm -f "$T/state"/run-info-*.json "$T/state/contents.txt" "$T/state/contents-fail"
   rm -f "$T/state/pr-checks.txt" "$T/state/pr-checks-rc" "$T/state/pr-view.json" "$T/state/pr-view-fail"
   : >"$T/state/gh-args.txt"
 }
@@ -2008,6 +2018,102 @@ run_wait 7 --no-jobs-after 2
 [ "$CODE" = "0" ] || fail "check appearing before bound passes (got $CODE): [$OUT]"
 grep -q 'CI: pass' <<<"$OUT" || fail "appearing check settles normally: [$OUT]"
 [ "$(grep -c '^30$' "$T/state/sleeps.txt")" = "2" ] || fail "appearing check is read after two sleeps: [$(cat "$T/state/sleeps.txt")]"
+
+# --- cases: cancelled jobs print elapsed time beside timeout-minutes (#1224)
+# A cancelled job whose elapsed time reaches its timeout-minutes is labelled
+# TIMEOUT with both numbers; one well under its bound is CANCELLED
+# (external); when no bound matches, the elapsed time prints with no label.
+set_timeout_fixtures() { # <run>: run info plus a 35-minute matrix workflow
+  printf '%s' '{"head_sha":"abc123","path":".github/workflows/ci.yml"}' >"$T/state/run-info-$1.json"
+  printf '%s\n' 'jobs:' '  test_linux:' '    name: Tests (${{ matrix.os }})' '    timeout-minutes: 35' >"$T/state/contents.txt"
+}
+
+# elapsed 40:00 against a 35-minute bound: TIMEOUT with both numbers
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"Tests (ubuntu-24.04)","conclusion":"cancelled","startedAt":"2026-11-05T12:40:00Z","completedAt":"2026-11-05T13:20:00Z"}]}'
+set_timeout_fixtures 123
+run_failures 123
+[ "$CODE" = "0" ] || fail "cancel timeout digest exits 0 (got $CODE): [$OUT]"
+grep -Fq "=== wf-123 / Tests (ubuntu-24.04): cancelled (elapsed 40:00, timeout-minutes 35: TIMEOUT)" <<<"$OUT" \
+  || fail "timeout label with both numbers: [$OUT]"
+
+# elapsed 3:00 against the same bound: CANCELLED (external)
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"Tests (ubuntu-24.04)","conclusion":"cancelled","startedAt":"2026-11-05T12:40:00Z","completedAt":"2026-11-05T12:43:00Z"}]}'
+set_timeout_fixtures 123
+run_failures 123
+[ "$CODE" = "0" ] || fail "cancel external digest exits 0 (got $CODE): [$OUT]"
+grep -Fq "=== wf-123 / Tests (ubuntu-24.04): cancelled (elapsed 3:00, timeout-minutes 35: CANCELLED (external))" <<<"$OUT" \
+  || fail "external-cancel label with both numbers: [$OUT]"
+
+# no bound matches the job: the elapsed time prints with no label
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"Tests (ubuntu-24.04)","conclusion":"cancelled","startedAt":"2026-11-05T12:40:00Z","completedAt":"2026-11-05T12:43:00Z"}]}'
+printf '%s' '{"head_sha":"abc123","path":".github/workflows/ci.yml"}' >"$T/state/run-info-123.json"
+printf '%s\n' 'jobs:' '  other_job:' '    timeout-minutes: 10' >"$T/state/contents.txt"
+run_failures 123
+[ "$CODE" = "0" ] || fail "cancel unknown-bound digest exits 0 (got $CODE): [$OUT]"
+grep -Fq "=== wf-123 / Tests (ubuntu-24.04): cancelled (elapsed 3:00)" <<<"$OUT" \
+  || fail "elapsed time with no bound: [$OUT]"
+grep -q "TIMEOUT\|CANCELLED" <<<"$OUT" && fail "no label without a bound: [$OUT]"
+
+# wait --run annotates its cancelled job the same way
+reset_state
+set_heads "$A"
+set_run 570 "$A" '{"status":"completed","conclusion":"cancelled"}'
+set_jobs 570 '{"jobs":[{"databaseId":111,"name":"Tests (ubuntu-24.04)","conclusion":"cancelled","startedAt":"2026-11-05T12:40:00Z","completedAt":"2026-11-05T13:20:00Z"}]}'
+set_timeout_fixtures 570
+run_wait 7 --run 570
+[ "$CODE" = "1" ] || fail "run cancelled exits 1 (got $CODE): [$OUT]"
+grep -Fq "failing: Tests (ubuntu-24.04) (elapsed 40:00, timeout-minutes 35: TIMEOUT)" <<<"$OUT" \
+  || fail "run wait timeout label: [$OUT]"
+
+# wait on the head annotates a cancelled required check from its run's jobs
+reset_state
+set_heads "$A"
+echo '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"Tests (ubuntu-24.04)"}]}}]' >"$T/state/rules"
+set_checks '[{"bucket":"cancel","name":"Tests (ubuntu-24.04)","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/571/job/11"}]'
+set_jobs 571 '{"jobs":[{"databaseId":11,"name":"Tests (ubuntu-24.04)","conclusion":"cancelled","startedAt":"2026-11-05T12:40:00Z","completedAt":"2026-11-05T13:20:00Z"}]}'
+set_timeout_fixtures 571
+run_wait 7
+[ "$CODE" = "1" ] || fail "wait cancelled exits 1 (got $CODE): [$OUT]"
+grep -Fq "failing: Tests (ubuntu-24.04) (elapsed 40:00, timeout-minutes 35: TIMEOUT)" <<<"$OUT" \
+  || fail "wait timeout label: [$OUT]"
+
+# --- fix round 1 (#1224, PR #1238): unknown and ambiguous bounds print the elapsed time only
+# An expression timeout-minutes is an unknown bound: a cancel past 35 minutes
+# prints the elapsed time with no label, not CANCELLED (external) off the 360 default.
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"Tests (ubuntu-24.04)","conclusion":"cancelled","startedAt":"2026-11-05T12:40:00Z","completedAt":"2026-11-05T13:20:00Z"}]}'
+printf '%s' '{"head_sha":"abc123","path":".github/workflows/ci.yml"}' >"$T/state/run-info-123.json"
+printf '%s\n' 'jobs:' '  test_linux:' '    name: Tests (${{ matrix.runner }})' "    timeout-minutes: \${{ matrix.runner == 'macos-26' && 62 || 30 }}" >"$T/state/contents.txt"
+run_failures 123
+[ "$CODE" = "0" ] || fail "expression timeout digest exits 0 (got $CODE): [$OUT]"
+grep -Fq "=== wf-123 / Tests (ubuntu-24.04): cancelled (elapsed 40:00)" <<<"$OUT" \
+  || fail "expression timeout prints the elapsed time: [$OUT]"
+grep -q "TIMEOUT\|CANCELLED" <<<"$OUT" && fail "expression timeout prints no label: [$OUT]"
+
+# Two jobs sharing one name template with different bounds disagree: the
+# cancelled job prints the elapsed time with no label.
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"Tests (ubuntu-24.04)","conclusion":"cancelled","startedAt":"2026-11-05T12:40:00Z","completedAt":"2026-11-05T13:20:00Z"}]}'
+printf '%s' '{"head_sha":"abc123","path":".github/workflows/ci.yml"}' >"$T/state/run-info-123.json"
+printf '%s\n' 'jobs:' '  test_linux:' '    name: Tests (${{ matrix.runner }})' '    timeout-minutes: 35' '  test:' '    name: Tests (${{ matrix.runner }})' '    timeout-minutes: 30' >"$T/state/contents.txt"
+run_failures 123
+[ "$CODE" = "0" ] || fail "disagreeing bounds digest exits 0 (got $CODE): [$OUT]"
+grep -Fq "=== wf-123 / Tests (ubuntu-24.04): cancelled (elapsed 40:00)" <<<"$OUT" \
+  || fail "disagreeing bounds print the elapsed time: [$OUT]"
+grep -q "TIMEOUT\|CANCELLED" <<<"$OUT" && fail "disagreeing bounds print no label: [$OUT]"
+
+# Two jobs sharing one name template with the same bound still print the label.
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"Tests (ubuntu-24.04)","conclusion":"cancelled","startedAt":"2026-11-05T12:40:00Z","completedAt":"2026-11-05T13:20:00Z"}]}'
+printf '%s' '{"head_sha":"abc123","path":".github/workflows/ci.yml"}' >"$T/state/run-info-123.json"
+printf '%s\n' 'jobs:' '  test_linux:' '    name: Tests (${{ matrix.runner }})' '    timeout-minutes: 35' '  test_macos:' '    name: Tests (${{ matrix.runner }})' '    timeout-minutes: 35' >"$T/state/contents.txt"
+run_failures 123
+[ "$CODE" = "0" ] || fail "agreeing bounds digest exits 0 (got $CODE): [$OUT]"
+grep -Fq "=== wf-123 / Tests (ubuntu-24.04): cancelled (elapsed 40:00, timeout-minutes 35: TIMEOUT)" <<<"$OUT" \
+  || fail "agreeing bounds keep the timeout label: [$OUT]"
 
 export GH_CI_INTERVAL=7
 unset GH_CI_NO_JOBS_AFTER

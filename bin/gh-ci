@@ -140,9 +140,137 @@ cmd_panics() {
     }'
 }
 
+# workflow_bounds: stdin is a workflow file; stdout is one
+# "job-id\tname\ttimeout-minutes" line per job (timeout-minutes defaults to
+# GitHub's 360 when the job sets none; a job whose timeout-minutes: value is
+# anything other than an integer literal has an unknown bound, printed as an
+# empty field). Reads only the jobs: mapping's two-space ids with their
+# four-space timeout-minutes: and name: lines.
+workflow_bounds() {
+  awk '
+    /^jobs:[[:space:]]*(#.*)?$/ { in_jobs = 1; job = ""; next }
+    /^[^[:space:]#]/ { in_jobs = 0 }
+    in_jobs && /^  [A-Za-z0-9_.\/-]+:[[:space:]]*(#.*)?$/ {
+      job = $0; sub(/^  /, "", job); sub(/:[[:space:]]*(#.*)?$/, "", job)
+      mins[job] = 360; nm[job] = job; next
+    }
+    in_jobs && job != "" && /^    timeout-minutes:/ {
+      v = $0; sub(/^    timeout-minutes:[[:space:]]*/, "", v); sub(/[[:space:]#].*$/, "", v)
+      if (v ~ /^[0-9]+$/) mins[job] = v + 0; else mins[job] = ""; next
+    }
+    in_jobs && job != "" && /^    name:[[:space:]]*[^[:space:]]/ {
+      v = $0; sub(/^    name:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+      sub(/^'"'"'/, "", v); sub(/'"'"'$/, "", v); sub(/^"/, "", v); sub(/"$/, "", v)
+      gsub(/\t/, " ", v); nm[job] = v; next
+    }
+    END { for (j in mins) printf "%s\t%s\t%s\n", j, nm[j], mins[j] }
+  '
+}
+
+# run_bounds <run>: the run's workflow file at its head SHA as a
+# workflow_bounds table. Fails when the run, the file, or the parse fails.
+run_bounds() {
+  local run="$1" info head_sha path raw
+  info=$(gh api "repos/$REPO/actions/runs/$run" --jq '"\(.head_sha) \(.path)"' 2>/dev/null) || return 1
+  read -r head_sha path <<<"$info"
+  [ -n "${head_sha:-}" ] && [ -n "${path:-}" ] || return 1
+  raw=$(gh api -H "Accept: application/vnd.github.raw" "repos/$REPO/contents/$path?ref=$head_sha" 2>/dev/null) || return 1
+  [ -n "$raw" ] || return 1
+  printf '%s' "$raw" | workflow_bounds
+}
+
+# job_bound <bounds-table> <display-name>: print the job's timeout-minutes.
+# An exact match on the job id or the literal name: wins. Otherwise every
+# name: template with each ${{ ... }} expression as a wildcard is collected
+# (a matrix name such as "Tests (${{ matrix.os }})" matches
+# "Tests (ubuntu-24.04)"): the bound prints when exactly one job matches, or
+# when all matches share one known bound. Fails when nothing matches, when
+# the matches disagree, or when any match has an unknown bound.
+job_bound() {
+  local table="$1" jname="$2" id template minutes glob tab
+  local matched=0 bound="" disagree=0
+  tab=$(printf '\t')
+  while IFS="$tab" read -r id template minutes || [ -n "${id:-}" ]; do
+    [ -n "${id:-}" ] || continue
+    if [ "$jname" = "$id" ] || [ "$jname" = "$template" ]; then
+      case "$minutes" in ''|*[!0-9]*) return 1;; esac
+      printf '%s\n' "$minutes"; return 0
+    fi
+  done <<<"$table"
+  while IFS="$tab" read -r id template minutes || [ -n "${id:-}" ]; do
+    [ -n "${id:-}" ] || continue
+    case "$template" in
+      *'${{'*)
+        glob=$(printf '%s' "$template" | sed 's/\${{[^}]*}}/*/g')
+        case "$jname" in
+          $glob)
+            case "$minutes" in ''|*[!0-9]*) return 1;; esac
+            if [ "$matched" -eq 0 ]; then bound="$minutes"
+            elif [ "$minutes" != "$bound" ]; then disagree=1; fi
+            matched=$((matched + 1));;
+        esac;;
+    esac
+  done <<<"$table"
+  [ "$matched" -gt 0 ] && [ "$disagree" -eq 0 ] || return 1
+  printf '%s\n' "$bound"
+}
+
+# cancel_suffix <bounds-table> <job-name> <startedAt> <completedAt>: print the
+# cancelled-job detail: " (elapsed M:SS, timeout-minutes N: TIMEOUT)" when the
+# elapsed time reaches the bound (the same elapsed-within-grace rule
+# ci-friction uses), " (elapsed M:SS, timeout-minutes N: CANCELLED
+# (external))" when it does not, and " (elapsed M:SS)" when no bound matches.
+# Fails when the elapsed time is unreadable.
+cancel_suffix() {
+  local table="$1" jname="$2" started="$3" completed="$4"
+  local elapsed_s elapsed bound label
+  [ -n "$started" ] && [ -n "$completed" ] || return 1
+  elapsed_s=$(jq -n --arg s "$started" --arg e "$completed" '
+    def norm: sub("\\.[0-9]+(Z|[+-][0-9:]+)$"; "\\1");
+    try ((($e | norm) | fromdateiso8601) - (($s | norm) | fromdateiso8601)) catch empty') || return 1
+  case "$elapsed_s" in ''|-*) return 1;; esac
+  elapsed_s=${elapsed_s%%.*}
+  case "$elapsed_s" in ''|-*) return 1;; esac
+  elapsed=$(printf '%d:%02d' $((elapsed_s / 60)) $((elapsed_s % 60)))
+  if [ -n "$table" ] && bound=$(job_bound "$table" "$jname"); then
+    if [ "$elapsed_s" -ge "$((bound * 60 - 30))" ]; then label="TIMEOUT"; else label="CANCELLED (external)"; fi
+    printf ' (elapsed %s, timeout-minutes %s: %s)' "$elapsed" "$bound" "$label"
+  else
+    printf ' (elapsed %s)' "$elapsed"
+  fi
+}
+
+# print_failing <checks_json>: one "failing: <name>" line per failed or
+# cancelled check. A cancelled check from an Actions run gains its elapsed
+# time beside its timeout-minutes; where the lookup fails it prints the
+# elapsed time only, and with no timestamps the plain name.
+print_failing() {
+  local checks="$1" lines tab jname bucket run table jobs_json line started completed suffix
+  tab=$(printf '\t')
+  lines=$(printf '%s' "$checks" | jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | "\(.name | gsub("[\r\n]"; " "))\t\(.bucket)\t\(.run // "")"' 2>/dev/null) || lines=""
+  while IFS="$tab" read -r jname bucket run || [ -n "${jname:-}" ]; do
+    [ -n "${jname:-}" ] || continue
+    suffix=""
+    if [ "$bucket" = "cancel" ] && [ -n "$run" ]; then
+      table=$(run_bounds "$run" 2>/dev/null) || table=""
+      jobs_json=$(gh run view "$run" --repo "$REPO" --json jobs 2>/dev/null) || jobs_json=""
+      if [ -n "$jobs_json" ]; then
+        line=$(printf '%s' "$jobs_json" | jq -r --arg name "$jname" '.jobs[]? | select(.name == $name and .conclusion == "cancelled") | "\(.startedAt // .started_at // "")\t\(.completedAt // .completed_at // "")"' 2>/dev/null | head -n 1)
+        if [ -n "$line" ]; then
+          started="${line%%"$tab"*}"; completed="${line#*"$tab"}"
+          suffix=$(cancel_suffix "$table" "$jname" "$started" "$completed") || suffix=""
+        fi
+      fi
+    fi
+    printf 'failing: %s%s\n' "$jname" "$suffix"
+  done <<<"$lines"
+}
+
 # failures <run> | failures --pr <n>: cleaned digest of the failed and
 # cancelled jobs. With --pr, every failure/cancelled run on the PR head, ignoring superseded runs
-# (named on one line at the end); with <run>, that run only. A cancelled job prints one line and no log;
+# (named on one line at the end); with <run>, that run only. A cancelled job prints one line and no log:
+# its elapsed time beside its timeout-minutes, labelled TIMEOUT when the
+# elapsed time reaches the bound, else CANCELLED (external);
 # a failed job prints its header then the last GH_CI_LOG_LINES cleaned
 # log lines (job/step columns, ISO timestamps, ANSI colours, real or
 # printed as literal ^[ text, and blank lines removed). A report, so exit 0 after printing; exit 1 when gh
@@ -202,15 +330,18 @@ cmd_failures() {
       || { echo "could not read jobs for run $run_id" >&2
            [ -n "$pr" ] || echo "if $run_id is a PR number, use: gh-ci failures --pr $run_id" >&2
            return 1; }
-    jobs=$(printf '%s' "$jobs_json" | jq -r '.jobs[] | select(.conclusion=="failure" or .conclusion=="cancelled") | "\(.conclusion)\t\(.databaseId)\t\(.name)"') \
+    jobs=$(printf '%s' "$jobs_json" | jq -r '.jobs[] | select(.conclusion=="failure" or .conclusion=="cancelled") | "\(.conclusion)\t\(.databaseId)\t\(.name)\t\(.startedAt // .started_at // "")\t\(.completedAt // .completed_at // "")"') \
       || { echo "could not parse jobs for run $run_id" >&2; return 1; }
     [ -n "$jobs" ] || continue
-    local concl jid jname
-    while IFS="$tab" read -r concl jid jname || [ -n "${concl:-}" ]; do
+    local concl jid jname started completed table suffix
+    table=""
+    if grep -q "^cancelled$tab" <<<"$jobs"; then table=$(run_bounds "$run_id" 2>/dev/null) || table=""; fi
+    while IFS="$tab" read -r concl jid jname started completed || [ -n "${concl:-}" ]; do
       [ -n "${concl:-}" ] || continue
       case "$concl" in
         cancelled)
-          printf '=== %s / %s: cancelled\n' "$run_name" "$jname"
+          suffix=$(cancel_suffix "$table" "$jname" "$started" "$completed") || suffix=""
+          printf '=== %s / %s: cancelled%s\n' "$run_name" "$jname" "$suffix"
           found=1;;
         failure)
           printf '=== %s / %s (%s): failure\n' "$run_name" "$jname" "$jid"
@@ -363,9 +494,9 @@ required_names() {
 # the run it re-runs, so it stays authoritative.
 # run counts as an Actions job only for a github-actions check whose run ID is
 # one of the head's own workflow runs; anything else is kept with run null, so
-# the --job caller never trusts the URL alone. Only the --job caller reads run;
-# the other caller drops it again so its output is unchanged. Fails when a
-# call fails.
+# the --job caller never trusts the URL alone. The failing printers read run to
+# annotate a cancelled check with its elapsed time beside its
+# timeout-minutes. Fails when a call fails.
 head_checks() {
   local sha="$1" runs payload
   runs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$sha&per_page=100" \
@@ -559,7 +690,8 @@ cmd_verdict() {
 # Polls the run's status to completed with the same
 # sleep/timeout accounting as the other waits (timeout exit 124). Prints
 # "head: <head8> run: <id> pass" or "head: <head8> run: <id> fail" plus
-# one "failing: <job>" line per failed job of that run. --fail-fast is
+# one "failing: <job>" line per failed job of that run, and per cancelled job
+# with its elapsed time beside its timeout-minutes. --fail-fast is
 # accepted but ignored (one run has nothing else to outrun). Combines with
 # --timeout. Never reads required names, head checks, or the draft state.
 # Progress: each poll that reads the checks prints one stderr line,
@@ -578,7 +710,9 @@ cmd_verdict() {
 # with the usual header.
 wait_run() {
   local pr="$1" run="$2" timeout="$3" interval="$4"
-  local head="" run_sha slept=0 run_json status concl jobs_json
+  local head="" run_sha slept=0 run_json status concl jobs_json jobs_lines
+  local table jname jconcl started completed suffix tab
+  tab=$(printf '\t')
   if [ -n "$pr" ]; then
     head=$(pr_head "$pr") || return $?
     run_sha=$(gh run view "$run" --repo "$REPO" --json headSha --jq .headSha) \
@@ -619,7 +753,15 @@ wait_run() {
       echo "run: $run fail"
     fi
     jobs_json=$(gh run view "$run" --repo "$REPO" --json jobs 2>/dev/null) || jobs_json=""
-    printf '%s' "$jobs_json" | jq -r '.jobs[]? | select(.conclusion=="failure" or .conclusion=="cancelled") | "failing: \(.name)"' 2>/dev/null || true
+    jobs_lines=$(printf '%s' "$jobs_json" | jq -r '.jobs[]? | select(.conclusion=="failure" or .conclusion=="cancelled") | "\(.name)\t\(.conclusion)\t\(.startedAt // .started_at // "")\t\(.completedAt // .completed_at // "")"' 2>/dev/null) || jobs_lines=""
+    table=""
+    if grep -q "${tab}cancelled$tab" <<<"$jobs_lines"; then table=$(run_bounds "$run" 2>/dev/null) || table=""; fi
+    while IFS="$tab" read -r jname jconcl started completed || [ -n "${jname:-}" ]; do
+      [ -n "${jname:-}" ] || continue
+      suffix=""
+      if [ "$jconcl" = "cancelled" ]; then suffix=$(cancel_suffix "$table" "$jname" "$started" "$completed") || suffix=""; fi
+      printf 'failing: %s%s\n' "$jname" "$suffix"
+    done <<<"$jobs_lines"
     return 1
   done
 }
@@ -716,7 +858,7 @@ cmd_wait() {
       report_dropped "$payload"
       checks_json=$(printf '%s' "$payload" | jq -c '.checks // {}' 2>/dev/null) || checks_json='{}'
       checks_json=$(printf '%s' "$checks_json" | jq -c --arg name "$job" '
-        if type != "array" then . else map(select(.name == $name and .run != null) | {name, bucket}) end' 2>/dev/null) \
+        if type != "array" then . else map(select(.name == $name and .run != null) | {name, bucket, run}) end' 2>/dev/null) \
         || checks_json='{}'
     elif [ "$empty_ok" = true ] && [ "$req" = "[]" ]; then
       checks_json='[]'
@@ -724,8 +866,9 @@ cmd_wait() {
       payload=$(head_checks "$head") || payload='{}'
       report_dropped "$payload"
       checks_json=$(printf '%s' "$payload" | jq -c '.checks // {}' 2>/dev/null) || checks_json='{}'
-      # drop the run id: only the --job path reads it
-      checks_json=$(printf '%s' "$checks_json" | jq -c 'if type != "array" then . else map({name, bucket}) end' 2>/dev/null) \
+      # keep the run id: a failing cancelled check annotates its elapsed
+      # time beside its timeout-minutes from its run's jobs
+      checks_json=$(printf '%s' "$checks_json" | jq -c 'if type != "array" then . else map({name, bucket, run}) end' 2>/dev/null) \
         || checks_json='{}'
       if [ "$draft" != true ] && [ "$empty_ok" = true ] && [ "$req" != "[]" ]; then
         ns_missing=$(printf '%s' "$checks_json" | jq -c --argjson req "$req" '
@@ -768,7 +911,7 @@ cmd_wait() {
           [ -n "$run_id" ] || continue
           printf 'gh-ci: run %s has no jobs after %s min; it never started\n' "$run_id" "$no_jobs_after"
         done < <(jobless_runs "$head")
-        printf '%s' "$checks_json" | jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | "failing: \(.name | gsub("[\\r\\n]"; " "))"' 2>/dev/null || true
+        print_failing "$checks_json"
         return "$NO_START_RC"
       fi
       if [ "$slept" -ge "$timeout" ]; then
@@ -798,7 +941,7 @@ cmd_wait() {
       else
         echo "head: ${head:0:8} CI: fail"
       fi
-      printf '%s' "$checks_json" | jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | "failing: \(.name)"' 2>/dev/null || true
+      print_failing "$checks_json"
       return 1
     fi
     if [ -n "$job" ]; then
