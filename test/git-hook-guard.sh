@@ -33,7 +33,9 @@ PY="$(command -v python3)" || fail "python3 not on PATH"
 ln -s "$PY" "$T/py/python3"
 ln -s "$SHIM" "$T/shims/git"
 
-# Stub real git. Bash builtins only. It appends one record per call to $CALLS
+# Stub real git. Bash builtins plus printenv (alias names like rev-parse are
+# not valid shell identifiers, so STUB_ALIAS_<name> is read from the
+# environment directly). It appends one record per call to $CALLS
 # (argc, then each argv element on its own <...> line), copies stdin to
 # $STDIN_FILE when STUB_READ_STDIN=1, prints stub-out on stdout and stub-err
 # on stderr, and exits ${STUB_EXIT:-0}. Guard lookups (`config --get
@@ -92,9 +94,8 @@ if [ "$#" -eq 3 ] && [ "$1" = config ] && [ "$2" = --get ]; then
       printf '%s\n' "$override"
       exit 0
     fi
-    var="STUB_ALIAS_$name"
-    if [ "${!var+x}" = x ]; then
-      printf '%s\n' "${!var}"
+    if val=$(printenv "STUB_ALIAS_$name" 2>/dev/null); then
+      printf '%s\n' "$val"
       exit 0
     fi
     exit 1
@@ -526,6 +527,18 @@ passed sh
 unset LANE_ENV
 LANE_ENV=(STUB_ALIAS_qm='commit -m "a b"')
 passed qm
+unset LANE_ENV
+# A dash in the alias name is not a valid shell identifier, so the stub must
+# read STUB_ALIAS_<name> from the environment directly: bash 5 rejects the
+# indirect expansion for alias.rev-parse and friends (CI), while bash 3.2
+# silently treats it as unset.
+LANE_ENV=(STUB_ALIAS_my-alias='commit --no-verify')
+refused my-alias -m x
+grep -q '<lookup alias.my-alias>' "$T/lookups" || fail "alias my-alias: no lookup ran"
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_my-alias='log --oneline')
+passed my-alias
+grep -q '<lookup alias.my-alias>' "$T/lookups" || fail "alias my-alias: no lookup ran"
 unset LANE_ENV
 
 # No subcommand: a core.hooksPath -c option or environment entry runs no hook.
