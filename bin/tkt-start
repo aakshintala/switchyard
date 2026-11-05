@@ -41,6 +41,10 @@ done
 while [[ $files == *,,* ]]; do files="${files//,,/,}"; done
 files="${files#,}"; files="${files%,}"
 for v in run repo issue spec branch worktree workflow_doc closing; do [ -n "${!v}" ] || { echo "tkt-start: missing required flag: --${v//_/-}" >&2; exit 2; }; done
+if [[ $env =~ (^|[[:space:]])([^[:space:]=]+)=([[:space:]]|$) ]]; then
+  echo "tkt-start: --env sets ${BASH_REMATCH[2]} to an empty value; drop it or give it a value" >&2
+  exit 2
+fi
 case "$issue" in *[!0-9]*) echo "tkt-start: --issue needs a number: $issue" >&2; exit 2 ;; esac
 if [ "$part_given" -eq 1 ]; then
   case "$part" in ""|*[!0-9]*) echo "tkt-start: --part needs an integer of 2 or more: $part" >&2; exit 2 ;; esac

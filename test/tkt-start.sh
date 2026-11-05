@@ -875,6 +875,19 @@ cmp -s "$S" "$CDIR/state.before" || fail "partexists: state changed"
 grep -qF -- 'old archive' "$S.part1" || fail "partexists: previous archive changed"
 [ ! -e "$S.lock" ] || fail "partexists: lock was not released"
 
+# --env rejects empty assignment values before writing state, while non-empty
+# values remain accepted.
+setup envempty ONE AGAINST
+run_start --env 'CARGO_BUILD_JOBS=3 NEXTEST_TEST_THREADS= CARGO_INCREMENTAL=0'
+[ "$RC" -eq 2 ] || fail "envempty: exit $RC, want 2"
+grep -qF -- 'tkt-start: --env sets NEXTEST_TEST_THREADS to an empty value; drop it or give it a value' "$CDIR/stderr" || fail "envempty: stderr misses the variable-specific error"
+[ ! -e "$RUN/widget-42.state" ] || fail "envempty: state was written"
+
+setup envset ONE AGAINST
+run_start --env 'CARGO_BUILD_JOBS=3 NEXTEST_TEST_THREADS=2 CARGO_INCREMENTAL=0'
+want "CURRENT " 0 envset
+grep -qF -- 'env=CARGO_BUILD_JOBS=3 NEXTEST_TEST_THREADS=2 CARGO_INCREMENTAL=0' "$RUN/widget-42.state" || fail "envset: state misses the non-empty env prefix"
+
 # Invalid values fail before the first state write.
 setup partbad ONE AGAINST
 for bad in one x missing; do
