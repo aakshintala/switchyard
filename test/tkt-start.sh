@@ -89,7 +89,7 @@ setup() {
   : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"; : >"$T/prstate"; printf '[]\n' >"$T/prlist"
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
-  printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
+  printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
   ORIGIN="$CDIR/origin.git"; SEED="$CDIR/seed"
   git init -q --bare "$ORIGIN"; git init -q "$SEED"; git -C "$SEED" remote add origin "$ORIGIN"
@@ -252,31 +252,47 @@ for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGH
   IFS='|' read -r name rc want_line <<<"$spec"
   setup "$name" TWO FILING
   case "$name" in
-    zerocore) printf '1. non-blocking -- one\n2. non-blocking -- two\n3. non-blocking -- three\n' >"$T/jobout" ;;
-    backtick) printf '1. `core` — first\n2. plain note\n' >"$T/jobout" ;;
-    dashcore) printf -- '- core -- first\n- **core** -- second\n' >"$T/jobout" ;;
-    dashnb) printf -- '- non-blocking -- a\n' >"$T/jobout" ;;
-    starbare) printf '**core** -- x\n' >"$T/jobout" ;;
-    nonecolon) printf '%s\n' '- core: none found.' '- non-blocking -- a' >"$T/jobout" ;;
-    naw) printf '%s\n' '- core: N/A.' >"$T/jobout" ;;
-    nothing) printf '%s\n' '- core: Nothing' '- non-blocking -- a' >"$T/jobout" ;;
-    barecore) printf '%s\n' '- core:' '- non-blocking -- a' >"$T/jobout" ;;
-    boldnone) printf '%s\n' '- **core:** `None`.' '- non-blocking -- a' >"$T/jobout" ;;
-    noneof) printf '%s\n' '- core: none of the callers handle X' >"$T/jobout" ;;
-    nbnone) printf '%s\n' '- non-blocking: none.' '- non-blocking -- a' >"$T/jobout" ;;
-    midtick) printf '%s\n' '- hold.rs:15-20 says the handle must close before the guard kills, but `Drop` reaps (hold.rs:139) before the handle closes. `core`. The answer must say whether the early kill is intended.' >"$T/jobout" ;;
-    midbold) printf '%s\n' '2. the guard reaps early (hold.rs:139). **core** -- the early kill.' >"$T/jobout" ;;
-    twotags) printf '%s\n' '- `core` here, and `core` again.' >"$T/jobout" ;;
-    trailtick) printf '%s\n' '- The answer must say whether the early kill is intended. `core`.' >"$T/jobout" ;;
-    trailbold) printf '%s\n' '2. The guard reaps early (hold.rs:139). **core**' >"$T/jobout" ;;
-    coreoutcome) printf '%s\n' '- non-blocking -- the core outcome is unchanged.' >"$T/jobout" ;;
-    nilsentence) printf '%s\n' '- core: none. Each choice above is settled by a ruling, the goal, or code.' >"$T/jobout" ;;
-    nbnilsentence) printf '%s\n' '- non-blocking: nothing. The sweep is clean.' >"$T/jobout" ;;
+    zerocore) printf '1. non-blocking -- one\n2. non-blocking -- two\n3. non-blocking -- three\nCore items: 0\nNon-blocking items: 3\n' >"$T/jobout" ;;
+    backtick) printf '1. `core` — first\n2. plain note\nCore items: 1\nNon-blocking items: 0\n' >"$T/jobout" ;;
+    dashcore) printf -- '- core -- first\n- **core** -- second\nCore items: 2\nNon-blocking items: 0\n' >"$T/jobout" ;;
+    dashnb) printf -- '- non-blocking -- a\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout" ;;
+    starbare) printf '**core** -- x\nCore items: 0\nNon-blocking items: 0\n' >"$T/jobout" ;;
+    nonecolon) printf '%s\n' '- core: none found.' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    naw) printf '%s\n' '- core: N/A.' 'Core items: 0' 'Non-blocking items: 0' >"$T/jobout" ;;
+    nothing) printf '%s\n' '- core: Nothing' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    barecore) printf '%s\n' '- core:' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    boldnone) printf '%s\n' '- **core:** `None`.' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    noneof) printf '%s\n' '- core: none of the callers handle X' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    nbnone) printf '%s\n' '- non-blocking: none.' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    midtick) printf '%s\n' '- hold.rs:15-20 says the handle must close before the guard kills, but `Drop` reaps (hold.rs:139) before the handle closes. `core`. The answer must say whether the early kill is intended.' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    midbold) printf '%s\n' '2. the guard reaps early (hold.rs:139). **core** -- the early kill.' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    twotags) printf '%s\n' '- `core` here, and `core` again.' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    trailtick) printf '%s\n' '- The answer must say whether the early kill is intended. `core`.' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    trailbold) printf '%s\n' '2. The guard reaps early (hold.rs:139). **core**' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    coreoutcome) printf '%s\n' '- non-blocking -- the core outcome is unchanged.' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    nilsentence) printf '%s\n' '- core: none. Each choice above is settled by a ruling, the goal, or code.' 'Core items: 0' 'Non-blocking items: 0' >"$T/jobout" ;;
+    nbnilsentence) printf '%s\n' '- non-blocking: nothing. The sweep is clean.' 'Core items: 0' 'Non-blocking items: 0' >"$T/jobout" ;;
   esac
   run_start
   want "$want_line" "$rc" "$name"
   if [ "$name" = twocore ] || [ "$name" = dashcore ]; then case "$OUT" in *"nonblocking="*) fail "$name: nonzero core must not carry nonblocking" ;; esac; fi
 done
+# field-count cases: tkt-start reads the trailing Core/Non-blocking field
+# lines, not the bullet shapes above them.
+setup fieldunbulleted TWO FILING
+printf 'The guard reaps early and the answer must say why.\nCore items: 1\nNon-blocking items: 0\n' >"$T/jobout"
+run_start
+want "PREFLIGHT core=1 out=" 1 fieldunbulleted
+case "$OUT" in *"nonblocking="*) fail "fieldunbulleted: nonzero core must not carry nonblocking" ;; esac
+setup fieldruled TWO FILING
+printf '1. core -- first, settled by a ruling in the issue comments.\n1. non-blocking -- other\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"
+run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 fieldruled
+setup fieldmissing TWO FILING
+printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
+run_start
+want "PREFLIGHT core=unknown out=" 1 fieldmissing
+case "$OUT" in *"no 'Core items:' line"*) ;; *) fail "fieldmissing: digest misses the missing-field message" ;; esac
 # stale with no --files: the sweep is skipped, the preflight still runs.
 setup nofiles TWO FILING
 reload --files; run_start
@@ -390,12 +406,12 @@ case "$sweep_real_out" in *unresolved\ *) fail "sweepreal: operational failure m
 # DONE_WITH_CONCERNS: the preflight report is the product, so a clean
 # preflight (core=0) still passes; BLOCKED still fails the step.
 setup concerns TWO FILING
-printf '1. non-blocking -- only a note\n' >"$T/jobout"; touch "$T/job-concerns"; run_start
+printf '1. non-blocking -- only a note\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"; touch "$T/job-concerns"; run_start
 want "PREFLIGHT core=0 nonblocking=1 out=" 0 concerns
 [ -s "$RUN/widget-42-preflight-out.md" ] || fail "concerns: report file missing"
 # Stray stderr lines before the verdict (watch output, a blank line) are not the verdict.
 setup concerns-noise TWO FILING
-printf '1. non-blocking -- only a note\n' >"$T/jobout"; touch "$T/job-concerns" "$T/job-noise"; run_start
+printf '1. non-blocking -- only a note\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"; touch "$T/job-concerns" "$T/job-noise"; run_start
 want "PREFLIGHT core=0 nonblocking=1 out=" 0 concerns-noise
 [ -s "$RUN/widget-42-preflight-out.md" ] || fail "concerns-noise: report file missing"
 setup blocked TWO FILING
