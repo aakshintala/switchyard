@@ -1702,6 +1702,17 @@ grep -q '^job|' "$T/calls.log" && fail "--no-verifier over LINES dispatches no t
 expect_state plan_verdict lines "--no-verifier preserves stored verdict"
 expect_state plan_verdict_base "$H" "--no-verifier preserves rejection base"
 
+# --- changing the plan text invalidates LINES; --no-verifier can then build ---
+setup_case verdict-no-verifier-edited-lines
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed edited-plan LINES verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_hash "$(git hash-object "$CDIR/plan.md")" || fail "seed edited-plan verdict hash"
+awk '/^## Gate$/ { print "All plan lines are closed."; print "" } { print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+run_build --no-verifier
+[ "$RC" -eq 0 ] || fail "--no-verifier replaces an edited-plan LINES verdict (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "edited-plan --no-verifier build"
+expect_state plan_verdict skipped "edited-plan --no-verifier stores skipped"
+expect_state plan_verdict_hash "$(git hash-object "$CDIR/plan.md")" "edited-plan --no-verifier stores current hash"
+
 # --- accepted verdicts require the exact current plan base ---
 setup_case verdict-stale
 bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed mismatched verdict base"

@@ -283,6 +283,14 @@ state_get() { bash "$TKT_STATE" "$S" get "$1" 2>/dev/null || true; }
 expect_plan_verdict() {
   [ "$(state_get plan_verdict)" = "$1" ] || fail "$3: plan_verdict is [$(state_get plan_verdict)], expected [$1]"
   [ "$(state_get plan_verdict_base)" = "$2" ] || fail "$3: plan_verdict_base is [$(state_get plan_verdict_base)], expected [$2]"
+  if [ -z "$1" ]; then
+    [ -z "$(state_get plan_verdict_hash)" ] || fail "$3: cleared verdict leaves plan_verdict_hash [$(state_get plan_verdict_hash)]"
+  fi
+}
+
+expect_current_plan_verdict_hash() {
+  expected_hash="$(git hash-object "$(state_get plan)")"
+  [ "$(state_get plan_verdict_hash)" = "$expected_hash" ] || fail "$1: plan_verdict_hash is [$(state_get plan_verdict_hash)], expected [$expected_hash]"
 }
 
 : >"$T/stub.log"
@@ -839,6 +847,20 @@ run_plan triaged --comment 123456
 expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=rounds-open log=*" "triaged before round limit"
 [ -z "$(state_get plan_triage_comment)" ] || fail "triaged refusal does not record a comment"
 
+# A ruling may close the findings already judged on the unchanged plan text.
+setup_case triaged-lines-before-round-limit
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+bash "$TKT_STATE" "$S" set verifier_round 1 || fail "triaged-lines-before-round-limit seed round"
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "triaged-lines-before-round-limit seed LINES"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "triaged-lines-before-round-limit seed base"
+bash "$TKT_STATE" "$S" set plan_verdict_hash "$(git hash-object "$CDIR/plan.md")" || fail "triaged-lines-before-round-limit seed hash"
+run_plan triaged --comment 123457
+[ "$RC" -eq 0 ] || fail "triaged current LINES verdict before round limit exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_plan_verdict triaged "$base_now" "triaged current LINES verdict before round limit"
+[ "$(state_get plan_verdict_hash)" = "$(git hash-object "$CDIR/plan.md")" ] || fail "triaged stores current plan hash"
+[ "$(state_get plan_triage_comment)" = 123457 ] || fail "triaged current LINES verdict records the comment id"
+
 # A used confirm round is an alternate eligibility path, even before round 2.
 setup_case triaged-after-confirm
 rebase_plan
@@ -868,7 +890,7 @@ run_plan triaged --comment 12x
 [ "$RC" -eq 2 ] || fail "triaged rejects a non-numeric comment id"
 grep -Fq 'tkt-plan: comment id must contain only digits' "$CDIR/stderr.txt" || fail "triaged invalid comment explains the numeric requirement"
 
-# The accepted triaged verdict is stale when the plan's Base changes.
+# Editing the plan's Base invalidates the accepted triaged verdict.
 setup_case triaged-stale
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-stale seed rounds"
@@ -877,7 +899,7 @@ run_plan triaged --comment 456789
 set_plan_base 0000000000000000000000000000000000000000
 run_plan post
 [ "$RC" -eq 1 ] || fail "triaged verdict with changed Base is refused"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "triaged verdict with changed Base"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "edited triaged plan reads as absent"
 
 setup_case grant-ask
 rebase_plan
@@ -1650,7 +1672,7 @@ ticket_fail_case() {
   bash "$TKT_STATE" "$S" set job.verifier-r1 j-keep || fail "$1 seed job"
   bash "$TKT_STATE" "$S" set plan_verdict ok || fail "$1 seed verdict"
   bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "$1 seed verdict base"
-  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_triage_comment=' "$S" >"$CDIR/expected.state"
+  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_verdict_hash=' -e '^plan_triage_comment=' "$S" >"$CDIR/expected.state"
   printf '%s' "$2" >"$T/ghmode"
   jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
   run_plan verify
@@ -1658,7 +1680,7 @@ ticket_fail_case() {
   [ "$RC" -eq 2 ] || fail "$1 exits 2 (rc=$RC)"
   grep -q "tkt-plan: cannot read ticket text for switchyard#518" "$CDIR/stderr.txt" || fail "$1 names the ticket"
   [ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "$1 starts no job"
-  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_triage_comment=' "$S" >"$CDIR/actual.state"
+  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_verdict_hash=' -e '^plan_triage_comment=' "$S" >"$CDIR/actual.state"
   cmp -s "$CDIR/actual.state" "$CDIR/expected.state" || fail "$1 clears only the verdict metadata"
   [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-keep" ] || fail "$1 keeps the job slot"
 }
@@ -1807,6 +1829,7 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "LINES verify exits 1"
 expect_verdict "TKT tkt-plan LINES report_lines=3 out=* log=*" "LINES verify stores verdict"
 expect_plan_verdict lines "$base_now" "LINES verify"
+expect_current_plan_verdict_hash "LINES verify stores current plan hash"
 run_plan post
 [ "$RC" -eq 1 ] || fail "post after LINES exits 1"
 expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=lines log=*" "post after LINES"
@@ -1840,6 +1863,7 @@ base_now="$(cat "$CDIR/base")"
 run_plan set "$CDIR/plan.md" --no-verifier
 [ "$RC" -eq 0 ] || fail "set --no-verifier exits 0"
 expect_plan_verdict skipped "$base_now" "set --no-verifier"
+expect_current_plan_verdict_hash "set --no-verifier stores current plan hash"
 run_plan post
 [ "$RC" -eq 0 ] || fail "post after skipped set exits 0"
 run_plan set "$CDIR/plan.md"
@@ -1856,6 +1880,7 @@ base_now="$(cat "$CDIR/base")"
 run_plan post --no-verifier
 [ "$RC" -eq 0 ] || fail "post --no-verifier with no verdict exits 0"
 expect_plan_verdict skipped "$base_now" "post --no-verifier fills empty verdict"
+expect_current_plan_verdict_hash "post --no-verifier stores current plan hash"
 posts_before="$(grep -c '^post|' "$T/stub.log" || true)"
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed stored LINES verdict"
 bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "seed stored LINES base"
@@ -1865,7 +1890,7 @@ expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=lines log=*" "post
 [ "$(grep -c '^post|' "$T/stub.log" || true)" = "$posts_before" ] || fail "post --no-verifier over LINES does not post"
 expect_plan_verdict lines "$base_now" "post --no-verifier preserves stored verdict"
 
-# --- post checks the Base digest, and reports stale for an otherwise accepted word ---
+# --- editing the Base invalidates the accepted verdict text ---
 setup_case verdict-stale-base
 rebase_plan
 base_now="$(cat "$CDIR/base")"
@@ -1880,7 +1905,7 @@ expect_plan_verdict ok "$base_now" "stale-base setup"
 mv "$CDIR/changed.md" "$CDIR/plan.md"
 run_plan post
 [ "$RC" -eq 1 ] || fail "post after Base changes exits 1"
-expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "post after Base changes"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=none log=*" "edited plan reads as no verdict"
 
 # --- verdict-ok-ancestor-unchanged: an unchanged Files path survives a descendant Base ---
 setup_case verdict-ok-ancestor-unchanged
@@ -2011,6 +2036,7 @@ printf 'lines' >"$T/mode"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "confirm LINES exits 1"
 expect_plan_verdict lines "$base_now" "confirm LINES"
+expect_current_plan_verdict_hash "confirm LINES stores current plan hash"
 setup_case verdict-confirm-ok
 rebase_plan
 base_now="$(cat "$CDIR/base")"
@@ -2019,6 +2045,7 @@ printf 'ok' >"$T/mode"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "confirm PLAN OK exits 0"
 expect_plan_verdict ok "$base_now" "confirm PLAN OK"
+expect_current_plan_verdict_hash "confirm PLAN OK stores current plan hash"
 setup_case verdict-confirm-preserves
 rebase_plan
 base_now="$(cat "$CDIR/base")"

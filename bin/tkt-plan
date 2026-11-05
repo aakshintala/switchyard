@@ -31,6 +31,10 @@ tokens_lib="$script_dir/lib/plan-tokens.sh"
 if [ ! -r "$tokens_lib" ]; then echo "tkt-plan: cannot read shared lib: $tokens_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$tokens_lib"
+verdict_lib="$script_dir/lib/plan-verdict.sh"
+if [ ! -r "$verdict_lib" ]; then echo "tkt-plan: cannot read shared lib: $verdict_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$verdict_lib"
 tktjob="$bin_dir/tkt-job"; plancheck="$bin_dir/plan-check"; plangate="$bin_dir/plan-gate"
 postplan="$bin_dir/post-plan"; plansweep="$bin_dir/plan-sweep"
 vbrief="$HOME/.agents/skills/planning/briefs/verifier.md"; cbrief="$HOME/.agents/skills/planning/briefs/confirm.md"
@@ -67,41 +71,6 @@ load_plan() {
   t require plan; plan="$(t get plan)"
   [ -r "$plan" ] || { echo "tkt-plan: cannot read plan file: $plan" >&2; exit 2; }
   base="$(base_of "$plan")"
-}
-
-# debt: the verdict gate is copied in tkt-build (its VERDICT-REFUSED block), and the
-# write pair repeats in do_verify and do_confirm. Ceiling: two copies plus the write
-# pair, in tkt-plan and tkt-build. Upgrade trigger: a third caller of the verdict
-# check; then move it to bin/lib/ and source it from both scripts.
-plan_verdict_ok() {
-  local no_verifier="$1" stored stored_base p files=()
-  stored="$(t get plan_verdict 2>/dev/null || true)"
-  stored_base="$(t get plan_verdict_base 2>/dev/null || true)"
-  if [ "$no_verifier" -eq 1 ] && { [ -z "$stored" ] || [ "$stored" = skipped ]; }; then
-    t set plan_verdict skipped
-    t set plan_verdict_base "$base"
-    stored=skipped
-    stored_base="$base"
-  fi
-  if [ "$stored" = ok ] || [ "$stored" = triaged ]; then
-    [ "$stored_base" = "$base" ] && return 0
-    while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
-    if git -C "$worktree" merge-base --is-ancestor "$stored_base" "$base" 2>/dev/null &&
-      { [ "${#files[@]}" -eq 0 ] || git -C "$worktree" diff --quiet "$stored_base..$base" -- "${files[@]}" 2>/dev/null; }; then
-      return 0
-    fi
-  elif [ "$stored" = skipped ] && [ "$stored_base" = "$base" ]; then
-    return 0
-  fi
-  case "$stored" in
-    "") verdict_refusal=none ;;
-    ok|triaged|skipped) verdict_refusal=stale ;;
-    *) verdict_refusal="$stored" ;;
-  esac
-  [ -n "$stored" ] || stored=none
-  [ -n "$stored_base" ] || stored_base=none
-  verdict_digest="plan_verdict=$stored plan_verdict_base=$stored_base plan_base=$base"
-  return 1
 }
 
 # gate.script, when set, is the gate script every Gate line must run; plan-gate gets it as --script.
@@ -244,6 +213,7 @@ do_verify() {
     --model) [ $# -ge 2 ] || usage; model="$2"; shift 2;; *) usage;; esac; done
   t set plan_verdict ""
   t set plan_verdict_base ""
+  t set plan_verdict_hash ""
   t set plan_triage_comment ""
   load_plan
   files=()
@@ -297,8 +267,8 @@ do_verify() {
   # put; without this reset the next verify would only re-watch the old job.
   t set "job.$slot" ""
   runjob "$slot" "$vbrief" "$rep" "${args[@]}"
-  if [ "$REC" -eq 0 ]; then t set plan_verdict ok; else t set plan_verdict lines; fi
-  t set plan_verdict_base "$base"
+  if [ "$REC" -eq 0 ]; then verdict=ok; else verdict=lines; fi
+  plan_verdict_write "$tkt_state" "$state" "$verdict" "$base" "$plan" "$worktree"
   # A verify that reaches a report records its base; a failed or asking job
   # leaves the old base so the retry stays exempt. An exempt run never writes
   # the round counters.
@@ -356,8 +326,8 @@ do_confirm() {
     fi
   fi
   runjob confirm "$cbrief" "$rep" PLAN="$plan" BASE="$base" EDITS="@$edits" EXTRA="@$xfile" --model "$cmodel"
-  if [ "$REC" -eq 0 ]; then t set plan_verdict ok; else t set plan_verdict lines; fi
-  t set plan_verdict_base "$base"
+  if [ "$REC" -eq 0 ]; then verdict=ok; else verdict=lines; fi
+  plan_verdict_write "$tkt_state" "$state" "$verdict" "$base" "$plan" "$worktree"
   t set plan_triage_comment ""
   if [ "$granted" -eq 1 ]; then t set granted_used 1; fi
   t set last_report "$rep"
@@ -408,14 +378,14 @@ do_triaged() {
   case "$comment" in
     ""|*[!0-9]*) echo "tkt-plan: comment id must contain only digits" >&2; exit 2;;
   esac
+  load_plan
   round="$(ronum)"
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   if [ -z "$confirmed_for" ] && [ "$round" -lt 2 ]; then
-    emit "TRIAGED-REFUSED reason=rounds-open" 1
+    plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
+    [ "$plan_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
   fi
-  load_plan
-  t set plan_verdict triaged
-  t set plan_verdict_base "$base"
+  plan_verdict_write "$tkt_state" "$state" triaged "$base" "$plan" "$worktree"
   t set plan_triage_comment "$comment"
   emit "SET triaged=$comment" 0
 }
@@ -427,7 +397,9 @@ do_post() {
     --no-verifier) no_verifier=1; shift;;
     *) usage;; esac; done
   load_plan
-  if ! plan_verdict_ok "$no_verifier"; then emit "POST-FAIL reason=verdict verdict=$verdict_refusal" 1 "$verdict_digest"; fi
+  files=()
+  while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
+  if ! plan_verdict_check build "$tkt_state" "$state" "$no_verifier" "$plan" "$base" "$worktree" ${files[@]+"${files[@]}"}; then emit "POST-FAIL reason=verdict verdict=$verdict_refusal" 1 "$verdict_digest"; fi
   "$plangate" ${gate_args[@]+"${gate_args[@]}"} "$plan" >"$tmp" 2>&1 || emit "POST-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
   pargs=(); [ -z "$part" ] || pargs=(--part "$part")
   urls="$("$postplan" "$issue" "$plan" --repo "$repo" ${pargs[@]+"${pargs[@]}"} 2>"$tmp")" || emit "POST-FAIL reason=post" "$?" "$(head -n 10 "$tmp")"
@@ -452,16 +424,17 @@ do_set() {
   t set plan "$plan"; t set pack "$pack"
   # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
   if [ "$old_plan" != "$plan" ]; then
-    t set plan_verdict ""; t set plan_verdict_base ""; t set plan_triage_comment ""
+    t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
     t set verifier_round 0; t set confirmed_for ""; t set verified_base ""
     t set granted_by ""; t set granted_comment ""; t set granted_used ""; t set granted_owner ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
-  elif [ "$no_verifier" -eq 0 ] && [ "$(t get plan_verdict 2>/dev/null || true)" = skipped ]; then
-    t set plan_verdict ""; t set plan_verdict_base ""; t set plan_triage_comment ""
   fi
-  stored_verdict="$(t get plan_verdict 2>/dev/null || true)"
-  if [ "$no_verifier" -eq 1 ] && { [ -z "$stored_verdict" ] || [ "$stored_verdict" = skipped ]; }; then
-    t set plan_verdict skipped; t set plan_verdict_base "$base"
+  plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
+  if [ "$old_plan" = "$plan" ] && [ "$no_verifier" -eq 0 ] && [ "$plan_verdict" = skipped ]; then
+    t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
+  fi
+  if [ "$no_verifier" -eq 1 ] && { [ -z "$plan_verdict" ] || [ "$plan_verdict" = skipped ]; }; then
+    plan_verdict_write "$tkt_state" "$state" skipped "$base" "$plan" "$worktree"
   fi
   emit "SET plan=$plan" 0 "plan=$plan" "pack=$pack"
 }
@@ -475,6 +448,7 @@ do_replan() {
   # round non-empty and tkt-build refuses loudly instead of reusing a stale slot.
   t set plan_verdict ""
   t set plan_verdict_base ""
+  t set plan_verdict_hash ""
   t set plan_triage_comment ""
   t set job.lane ""
   t set job.fix1 ""
