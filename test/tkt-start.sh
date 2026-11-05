@@ -884,6 +884,17 @@ for bad in one x missing; do
   [ ! -e "$RUN/widget-42.state" ] || fail "partbad $bad: state was written"
 done
 
+setup modelrole ONE AGAINST; run_start --model bogus=x
+[ "$RC" -eq 2 ] || fail "modelrole: unknown --model role exits $RC, want 2"
+grep -qF 'known roles: lane, fix, map, verifier, verify, review, overbuild, preflight' "$CDIR/stderr" \
+  || fail "modelrole: stderr does not print the known roles"
+model_roles="$(sed -n 's/^model_roles=(\(.*\))$/\1/p' "$TKT")"
+[ -n "$model_roles" ] || fail "modelrole: tkt-start has no known model roles"
+for role in $model_roles; do
+  grep -qF -- "\`$role\`" "$SCRIPT_DIR/../skills/implement/SKILL.md" \
+    || fail "modelrole: skills/implement/SKILL.md does not name role [$role]"
+done
+
 # A new ticket can start at any part without an older state to archive.
 setup partnostate ONE AGAINST
 run_start --part 2
