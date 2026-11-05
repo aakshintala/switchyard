@@ -40,7 +40,7 @@ The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `ver
 | --- | --- | --- |
 | `tkt-start` | `CURRENT`; `SKIPPED` with `--no-preflight`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
 | `tkt-state` | exit 0 | exit 2 |
-| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `POST-FAIL`, `SET-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
+| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `TRIAGED-REFUSED`, `POST-FAIL`, `SET-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-job` | `DONE`, `CONCERNS` | `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-build` | `APPROVE`; `MEASURED` for an `Outcome: measurement` plan, which ends the ticket with no PR | `CHANGES`, `STALE`, `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `VERDICT-REFUSED`, `<step>-ERROR` |
 | `tkt-gate` | `PASS` | `TIP`, `FENCE`, `FAIL` |
