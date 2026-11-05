@@ -385,7 +385,23 @@ AGENTS_MAIN="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
 [ "$(git -C "$HOME/.agents" rev-parse HEAD)" != "$AGENTS_HEAD0" ] || fail "agents clean: HEAD advanced"
 [ -f "$HOME/.agents/untracked-note" ] || fail "agents clean: untracked file is preserved"
 ! grep -q 'not fast-forwarded' <<<"$ERR" || fail "agents clean: no warning: [$ERR]"
+OLD_SHORT="$(git -C "$HOME/.agents" rev-parse --short "$AGENTS_HEAD0")"
+NEW_SHORT="$(git -C "$HOME/.agents" rev-parse --short "$AGENTS_MAIN")"
+grep -Fq "$HOME/.agents: fast-forwarded $OLD_SHORT -> $NEW_SHORT" <<<"$ERR" || fail "agents clean: fast-forward line with SHAs: [$ERR]"
+grep -Fq "(1 commits)" <<<"$ERR" || fail "agents clean: fast-forward line with count: [$ERR]"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "agents clean: switchyard merge still succeeds: [$OUT]"
+
+setup
+rm -rf "$HOME/.agents"
+git clone -q "$ORIGIN" "$HOME/.agents"
+git -C "$HOME/.agents" merge -q --ff-only origin/feature
+AGENTS_HEAD0="$(git -C "$HOME/.agents" rev-parse HEAD)"
+merge_once 'git --git-dir="$ORIGIN" update-ref refs/heads/main refs/heads/feature'
+run 7 --repo aakshintala/switchyard --reviewed "$HEAD0" --worktree "$WT" --keep-branch
+expect 0 "switchyard merge leaves current ~/.agents quiet"
+[ "$(git -C "$HOME/.agents" rev-parse HEAD)" = "$AGENTS_HEAD0" ] || fail "agents current: HEAD stays put"
+! grep -q 'fast-forwarded' <<<"$ERR" || fail "agents current: no fast-forward line: [$ERR]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "agents current: switchyard merge still succeeds: [$OUT]"
 
 setup
 rm -rf "$HOME/.agents"
@@ -399,6 +415,7 @@ expect 0 "switchyard merge leaves dirty ~/.agents alone"
 [ "$(cat "$HOME/.agents/file.txt")" = dirty ] || fail "agents dirty: tracked change stays put"
 grep -Fq "$HOME/.agents" <<<"$ERR" && grep -q 'behind 1 commit' <<<"$ERR" \
   || fail "agents dirty: warning names checkout and lag: [$ERR]"
+! grep -q ': fast-forwarded ' <<<"$ERR" || fail "agents dirty: no success line: [$ERR]"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "agents dirty: switchyard merge still succeeds: [$OUT]"
 
 setup
@@ -413,6 +430,7 @@ expect 0 "switchyard merge leaves another ~/.agents branch alone"
 [ "$(git -C "$HOME/.agents" rev-parse HEAD)" = "$AGENTS_HEAD0" ] || fail "agents branch: HEAD stays put"
 grep -Fq "$HOME/.agents" <<<"$ERR" && grep -q 'behind 1 commit' <<<"$ERR" \
   || fail "agents branch: warning names checkout and lag: [$ERR]"
+! grep -q ': fast-forwarded ' <<<"$ERR" || fail "agents branch: no success line: [$ERR]"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "agents branch: switchyard merge still succeeds: [$OUT]"
 
 # ===== exit 2: usage and preconditions

@@ -156,7 +156,7 @@ worktree_clean() {
   [ -z "$(git -C "$worktree" status --porcelain | grep -v '^?? .*proptest-regressions/')" ]
 }
 fast_forward_agents() {
-  local checkout="${HOME:-~}/.agents" branch behind reason
+  local checkout="${HOME:-~}/.agents" branch behind reason old new
   if [ "$(git -C "$checkout" rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
     say "$checkout: not fast-forwarded (behind unknown; not a git checkout)"
     return 0
@@ -167,6 +167,7 @@ fast_forward_agents() {
   fi
   behind="$(git -C "$checkout" rev-list --count HEAD..origin/main 2>/dev/null)" || behind=unknown
   branch="$(git -C "$checkout" branch --show-current 2>/dev/null)" || branch=""
+  old="$(git -C "$checkout" rev-parse --short HEAD 2>/dev/null)" || old=unknown
   if [ "$branch" != main ]; then
     reason="branch=${branch:-detached}"
   elif [ -n "$(git -C "$checkout" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
@@ -176,6 +177,10 @@ fast_forward_agents() {
   elif ! git -C "$checkout" merge --ff-only origin/main >/dev/null 2>&1; then
     reason="fast-forward failed"
   else
+    new="$(git -C "$checkout" rev-parse --short HEAD 2>/dev/null)" || new=unknown
+    if [ "$new" != "$old" ]; then
+      say "$checkout: fast-forwarded $old -> $new ($behind commits)"
+    fi
     return 0
   fi
   case "$behind" in
