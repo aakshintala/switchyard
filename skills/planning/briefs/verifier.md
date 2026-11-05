@@ -21,6 +21,10 @@ Max 300 words, one line each: what, where, the smallest fix, and `core` (it cont
 
 9. When the ticket cites a failure location (a file:line of a panic or assert): does the plan's repro fail there? Quote the repro and the line and report the evidence. A repro that fails elsewhere is `core`.
 
+A line asking for a mechanism without naming the test helpers it rejected is not a finding. Read the helper's body, not only its doc comment.
+
+Cause first: when the plan's cause is unproven, report it as a probe to run, with the command, not as a plan edit to make.
+
 `PLAN OK` when items 1–4 and 6–9 find nothing and every invariant held under item 5. The report's first line is then exactly this, with nothing before or after it on that line:
 
 ```
