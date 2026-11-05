@@ -1337,7 +1337,7 @@ $1 == "REFUSE" && NF >= 3 {
   if (!seen[line]++) print line
   next
 }
-$1 == "GRANT" || $1 == "file-claim:" || NF == 0 { next }
+$1 == "GRANT" || $1 == "UNCLAIMED" || $1 == "file-claim:" || NF == 0 { next }
 { if (!seen[$0]++) print }' "$tmp/fc-out" > "$tmp/fc-held"
         if [ -s "$tmp/fc-held" ]; then cat "$tmp/fc-held"; else cat "$tmp/fc-out"; fi
         exit 1

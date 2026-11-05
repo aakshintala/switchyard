@@ -116,7 +116,7 @@ case "$1" in
         *) shift;;
       esac
     done
-    if [ "$after" = 1 ]; then
+    if [ "$after" = 1 ] && [ "${FILE_CLAIM_MODE:-ok}" = ok ]; then
       for p in "$@"; do
         printf '%s\t%s\t%s\t0\tt:stub\t\n' "$p" "$lane" "$kind" >>"$T/file-claim-claims"
       done
@@ -126,12 +126,15 @@ esac
 case "${FILE_CLAIM_MODE:-ok}" in
   ok) exit 0;;
   refuse)
-    n=0; after=0
+    n=0; u=0; after=0
     for a in "${original[@]}"; do
-      if [ "$after" = "1" ]; then echo "REFUSE $a lane:fiber-77"; n=$((n + 1)); fi
+      if [ "$after" = "1" ]; then
+        if [ "$n" = 0 ]; then echo "REFUSE $a lane:fiber-77"; n=$((n + 1))
+        else echo "UNCLAIMED $a batch-refused"; u=$((u + 1)); fi
+      fi
       case "$a" in --) after=1;; esac
     done
-    echo "file-claim: 0 granted, $n refused"
+    echo "file-claim: no claims recorded; $n refused, $u unclaimed because the batch was refused"
     exit 1;;
   error)
     echo 'stub file-claim: boom' >&2
@@ -1022,7 +1025,7 @@ FILE_CLAIM_MODE=refuse
 export FILE_CLAIM_MODE
 run_fg 88 --paths docs/tui.md,docs/events.md
 assert_rc 1 'a refused set grants nothing'
-assert_out "$(printf 'HELD docs/tui.md by lane #77\nHELD docs/events.md by lane #77')" 'refused set output'
+assert_out 'HELD docs/tui.md by lane #77' 'refused set output'
 assert_no_grant 'refused set'
 
 reset_case

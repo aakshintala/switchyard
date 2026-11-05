@@ -178,14 +178,14 @@ printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs1.j
 export GH_PRS_JSON="$T/prs1.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt newfile.txt 2>"$T/e2")" && fail "PR-held claim exits non-zero"
 [ "$?" = "1" ] || fail "PR-held claim exits 1"
-[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nGRANT newfile.txt new\nfile-claim: 1 granted, 1 refused')" ] || fail "PR refusal lines: $out"
+[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nUNCLAIMED newfile.txt batch-refused\nfile-claim: no claims recorded; 1 refused, 1 unclaimed because the batch was refused')" ] || fail "PR refusal lines: $out"
 [ -z "$(claim_tip "$R")" ] || fail "refused call writes nothing"
 
 # the smallest PR number wins when several touch the path; PRs with no files match nothing.
 printf '[{"number":9,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":3,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":5,"changedFiles":0,"files":[]}]' >"$T/prs2.json"
 export GH_PRS_JSON="$T/prs2.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt 2>/dev/null)" && fail "multi-PR claim exits non-zero"
-[ "$out" = "$(printf 'REFUSE a.txt pr#3 hunks=unknown\nfile-claim: 0 granted, 1 refused')" ] || fail "smallest PR named: $out"
+[ "$out" = "$(printf 'REFUSE a.txt pr#3 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "smallest PR named: $out"
 
 # --- PR refusals name the holder's hunks ---------------------------------------
 R="$(fresh)"
@@ -221,14 +221,14 @@ DIFF_EOF
 : >"$GH_ARGS_LOG"
 out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" bash "$FC" $CLAIM two.txt ins.txt new.txt other.txt 2>/dev/null)" && fail "hunk claim exits non-zero"
 [ "$?" = "1" ] || fail "hunk claim exits 1"
-[ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=10-14,100-102\nREFUSE ins.txt pr#21 hunks=5-6\nREFUSE new.txt pr#21 hunks=whole\nGRANT other.txt new\nfile-claim: 1 granted, 3 refused')" ] || fail "hunk ranges: $out"
+[ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=10-14,100-102\nREFUSE ins.txt pr#21 hunks=5-6\nREFUSE new.txt pr#21 hunks=whole\nUNCLAIMED other.txt batch-refused\nfile-claim: no claims recorded; 3 refused, 1 unclaimed because the batch was refused')" ] || fail "hunk ranges: $out"
 [ "$(grep -cF 'pr diff 21' "$GH_ARGS_LOG")" = "1" ] || fail "holder diff fetched once per PR"
 # A failed diff fetch, even a partial one, gives hunks=unknown for every path
 # that PR holds, from one fetch, and the refusals stand.
 : >"$GH_ARGS_LOG"
 out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" GH_DIFF_FAIL_PR=21 bash "$FC" $CLAIM two.txt ins.txt new.txt 2>/dev/null)" && fail "diff-fail claim exits non-zero"
 [ "$?" = "1" ] || fail "diff-fail claim exits 1"
-[ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=unknown\nREFUSE ins.txt pr#21 hunks=unknown\nREFUSE new.txt pr#21 hunks=unknown\nfile-claim: 0 granted, 3 refused')" ] || fail "unknown hunks: $out"
+[ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=unknown\nREFUSE ins.txt pr#21 hunks=unknown\nREFUSE new.txt pr#21 hunks=unknown\nfile-claim: no claims recorded; 3 refused, 0 unclaimed because the batch was refused')" ] || fail "unknown hunks: $out"
 [ "$(grep -cF 'pr diff 21' "$GH_ARGS_LOG")" = "1" ] || fail "failed diff fetched once per PR"
 
 # A colliding path after the first 100 is returned by the paginated REST read.
@@ -247,7 +247,7 @@ printf '[{"number":101,"changedFiles":101,"files":%s}]' "$pr_files" >"$T/prs-pag
 printf '%b' "${api_files}collision.txt\n" >"$T/api-paginated.txt"
 export GH_PRS_JSON="$T/prs-paginated.json" GH_API_FILES="$T/api-paginated.txt"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM collision.txt 2>"$T/e-paginated")" && fail "path after 100 must be refused"
-[ "$out" = "$(printf 'REFUSE collision.txt pr#101 hunks=unknown\nfile-claim: 0 granted, 1 refused')" ] || fail "paginated PR refusal: $out"
+[ "$out" = "$(printf 'REFUSE collision.txt pr#101 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "paginated PR refusal: $out"
 grep -qF 'api --paginate repos/test/repo/pulls/101/files?per_page=100 -q .[].filename' "$GH_ARGS_LOG" || fail "PR file read did not paginate"
 unset GH_API_FILES
 
@@ -264,7 +264,7 @@ out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_
 [ "$(grep -cF 'pulls/7/files?per_page=100' "$GH_ARGS_LOG")" = "2" ] || fail "PR 7 file list retried once"
 out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_FILES_TIMES=1 GH_FAIL_FILES_COUNT="$GH_RETRY_COUNT" bash "$FC" $CLAIM a.txt 2>"$T/e-retry-refusal")" && fail "claim for a PR-held path exits non-zero"
 [ "$?" = "1" ] || fail "PR-held claim after retry exits 1"
-[ "$out" = "$(printf 'REFUSE a.txt pr#7 hunks=unknown\nfile-claim: 0 granted, 1 refused')" ] || fail "PR-held path after retry: $out"
+[ "$out" = "$(printf 'REFUSE a.txt pr#7 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "PR-held path after retry: $out"
 
 R="$(fresh)"
 GH_RETRY_COUNT="$T/gh-retry-exhausted-count"
@@ -297,7 +297,7 @@ printf 0 >"$GH_EMPTY_COUNT"
 : >"$GH_ARGS_LOG"
 out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_EMPTY_FILES_PR=7 GH_EMPTY_FILES_TIMES=1 GH_EMPTY_FILES_COUNT="$GH_EMPTY_COUNT" bash "$FC" $CLAIM a.txt 2>"$T/e-empty-once")" && fail "listed PR path exits non-zero"
 [ "$?" = "1" ] || fail "listed PR path exits 1"
-[ "$out" = "$(printf 'REFUSE a.txt pr#7 hunks=unknown\nfile-claim: 0 granted, 1 refused')" ] || fail "retried list refuses its path: $out"
+[ "$out" = "$(printf 'REFUSE a.txt pr#7 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "retried list refuses its path: $out"
 [ "$(cat "$GH_EMPTY_COUNT")" = "1" ] || fail "one empty file-list response recorded"
 : >"$GH_ARGS_LOG"
 printf 0 >"$GH_EMPTY_COUNT"
@@ -327,7 +327,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 
 printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":7,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs3.json"
 export GH_PRS_JSON="$T/prs3.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 --repo test/repo --self-pr 42 a.txt 2>/dev/null)" && fail "other-PR claim exits non-zero"
-[ "$out" = "$(printf 'REFUSE a.txt pr#7 hunks=unknown\nfile-claim: 0 granted, 1 refused')" ] || fail "other PR still refuses: $out"
+[ "$out" = "$(printf 'REFUSE a.txt pr#7 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "other PR still refuses: $out"
 # a repeated --self-pr exempts every own PR, not only the last.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 --repo test/repo --self-pr 7 --self-pr 42 a.txt 2>&1)" || fail "two self-prs exit 0: $out"
 [ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "two self-prs exempt both: $out"
@@ -339,7 +339,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA 
 before="$(claims_blob "$R")"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt 2>/dev/null)" && fail "other-lane claim exits non-zero"
 [ "$?" = "1" ] || fail "other-lane claim exits 1"
-[ "$out" = "$(printf 'REFUSE x.txt lane:A\nfile-claim: 0 granted, 1 refused')" ] || fail "other-lane refusal: $out"
+[ "$out" = "$(printf 'REFUSE x.txt lane:A\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "other-lane refusal: $out"
 [ "$(claims_blob "$R")" = "$before" ] || fail "other-lane refusal writes nothing"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA --repo test/repo x.txt 2>/dev/null)" || fail "re-claim exits 0"
 [ "$out" = "$(printf 'GRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "re-claim lines: $out"
@@ -358,10 +358,11 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA 
 # --- mixed set is all-or-nothing ------------------------------------------------
 R="$(fresh)"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA --repo test/repo x.txt 2>/dev/null)" || fail "setup claim exits 0"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt y.txt 2>/dev/null)" && fail "mixed claim exits non-zero"
+before="$(claims_blob "$R")"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt y.txt z.txt 2>/dev/null)" && fail "mixed claim exits non-zero"
 [ "$?" = "1" ] || fail "mixed claim exits 1"
-[ "$out" = "$(printf 'REFUSE x.txt lane:A\nGRANT y.txt new\nfile-claim: 1 granted, 1 refused')" ] || fail "mixed lines: $out"
-[ "$(claims_blob "$R" | grep -c '^')" = "1" ] || fail "mixed refusal stores y.txt too"
+[ "$out" = "$(printf 'REFUSE x.txt lane:A\nUNCLAIMED y.txt batch-refused\nUNCLAIMED z.txt batch-refused\nfile-claim: no claims recorded; 1 refused, 2 unclaimed because the batch was refused')" ] || fail "mixed lines: $out"
+[ "$(claims_blob "$R")" = "$before" ] || fail "mixed refusal changes the registry"
 
 # --- --plan takes paths; a plan file passed there is refused, nothing claimed ----
 R="$(fresh)"
@@ -446,12 +447,12 @@ while [ "$i" -le 5 ]; do
 done
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g6 2>/dev/null)" && fail "6th grant exits non-zero"
 [ "$?" = "1" ] || fail "6th grant exits 1"
-[ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: 0 granted, 1 refused')" ] || fail "cap refusal: $out"
+[ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "cap refusal: $out"
 [ "$(claims_blob "$R" | grep -c '^')" = "5" ] || fail "cap refusal writes nothing"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --plan --worktree t:dG --repo test/repo p1 p2 p3 >/dev/null 2>&1 || fail "plan claims exit 0 past the grant cap"
 [ "$(claims_blob "$R" | grep -c '^')" = "8" ] || fail "plan claims stored past the cap"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g6 2>/dev/null)" && fail "grant past cap still refused"
-[ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: 0 granted, 1 refused')" ] || fail "cap holds with plans: $out"
+[ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "cap holds with plans: $out"
 
 # FILE_CLAIM_MAX_GRANT raises the cap; a non-numeric value exits 2.
 R="$(fresh)"
@@ -468,7 +469,7 @@ FILE_CLAIM_MAX_GRANT=abc FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --gran
 R="$(fresh)"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g1 g2 g3 >/dev/null 2>&1 || fail "setup 3 grants"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g4 g5 g6 2>/dev/null)" && fail "over-cap call exits non-zero"
-[ "$out" = "$(printf 'REFUSE g4 cap\nREFUSE g5 cap\nREFUSE g6 cap\nfile-claim: 0 granted, 3 refused')" ] || fail "over-cap lines: $out"
+[ "$out" = "$(printf 'REFUSE g4 cap\nREFUSE g5 cap\nREFUSE g6 cap\nfile-claim: no claims recorded; 3 refused, 0 unclaimed because the batch was refused')" ] || fail "over-cap lines: $out"
 [ "$(claims_blob "$R" | grep -c '^')" = "3" ] || fail "over-cap call writes nothing"
 
 # --- --plan and --grant are exclusive --------------------------------------------
