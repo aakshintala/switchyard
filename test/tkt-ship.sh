@@ -596,4 +596,15 @@ expect_line1 "MERGED sha=" gateship-writefail
 grep -q "no Local gate line" "$CDIR/stderr" || fail "gateship-writefail: stderr misses the missing-line warning: [$(cat "$CDIR/stderr")]"
 grep -q "$H" "$CDIR/stderr" || fail "gateship-writefail: stderr misses the gate sha"
 
+# --- a gate PASS at an earlier commit, head moved on, no body line: warns with the old sha ---
+reset_stub; setup_case gateship-earlier
+printf '0' >"$T/exitcodes"
+OLD=1111111111111111111111111111111111111111
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$OLD" || fail "gateship-earlier: journal the gate PASS"
+printf 'Title\n' >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-earlier: exit $RC"
+expect_line1 "MERGED sha=" gateship-earlier
+grep -q "no Local gate line, but tkt-gate passed at $OLD" "$CDIR/stderr" || fail "gateship-earlier: stderr misses the earlier-gate warning: [$(cat "$CDIR/stderr")]"
+
 echo "tkt-ship: all cases passed"

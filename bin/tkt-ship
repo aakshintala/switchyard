@@ -130,7 +130,8 @@ if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
 fi
 
 # Warn when the body's Local gate sha is not the PR head, or when the line
-# is missing but the tkt state shows tkt-gate passed at this head: a PASS
+# is missing but the tkt state shows tkt-gate passed at any head (the
+# warning names the latest): a PASS
 # sets state head and journals "tkt-gate PASS head=<sha>", while a failed
 # body write only warns, so the journal tells a gated PR without a line
 # apart from a PR with no tkt gate record, which stays silent. This only
@@ -144,13 +145,15 @@ if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""
       *) gate_line_cmd="" ;;
     esac
     printf 'tkt-ship: warning: Local gate sha %s is not PR head %s (gate: %s); the gate did not run on the head\n' "$gate_line_sha" "$pr_head" "$gate_line_cmd" >&2
-  elif ! printf '%s\n' "$pr_body_text" | grep -q '^Local gate:' && grep -qF "tkt-gate PASS head=$stored_head" "${state%.state}.journal" 2>/dev/null; then
+  elif ! printf '%s\n' "$pr_body_text" | grep -q '^Local gate:' \
+    && last_pass="$(grep -o 'tkt-gate PASS head=[0-9a-fA-F]*' "${state%.state}.journal" 2>/dev/null | tail -n 1)" \
+    && [ -n "$last_pass" ]; then
     missing_cmd=""
     plan_gate_args tkt
     if plan_path="$(tkt get plan 2>/dev/null)" && [ -n "$plan_path" ]; then
       missing_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan_path" 2>/dev/null || true)"
     fi
-    printf 'tkt-ship: warning: no Local gate line, but tkt-gate passed at %s (gate: %s)\n' "$stored_head" "$missing_cmd" >&2
+    printf 'tkt-ship: warning: no Local gate line, but tkt-gate passed at %s (gate: %s)\n' "${last_pass#tkt-gate PASS head=}" "$missing_cmd" >&2
   fi
 else
   printf 'tkt-ship: warning: cannot read PR %s body; skipping the Local gate check\n' "$pr" >&2
