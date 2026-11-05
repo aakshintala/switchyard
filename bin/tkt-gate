@@ -289,6 +289,17 @@ if [ "$checks_only" -eq 0 ]; then
   if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
     env_prefix="$e "
   fi
+  cargo_slot_real="$(command -v cargo || true)"
+  if [ -n "$cargo_slot_real" ]; then
+    case "$cargo_slot_real" in
+      /*) ;;
+      *) cargo_slot_real="$(cd "$(dirname "$cargo_slot_real")" && pwd)/$(basename "$cargo_slot_real")" ;;
+    esac
+    env_prefix="${env_prefix}CARGO_SLOT_REAL=$(printf '%q' "$cargo_slot_real") "
+  else
+    # Before the ticket env: an assignment ahead of `unset` would apply to it alone.
+    env_prefix="unset CARGO_SLOT_REAL; ${env_prefix}"
+  fi
   # Session gates do not inherit a lane's cargo shim PATH.
   cargo_slot_dir="$(mktemp -d "$run/$namebase-tkt-gate-cargo.XXXXXX")"
   ln -s "$script_dir/cargo-slot" "$cargo_slot_dir/cargo"
