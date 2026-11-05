@@ -246,7 +246,16 @@ case "$paths" in
 esac
 
 run=$(_fw_run)
-file_claim="${FW_FILE_CLAIM:-$(dirname "$0")/file-claim}"
+# Siblings resolve from the script's real path: callers such as flywheel's
+# bin/fence-grant reach it through a symlink in a directory with no file-claim.
+self="$0"
+case "$self" in */*) ;; *) self="$(command -v "$self")" ;; esac
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in /*) self="$link" ;; *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;; esac
+done
+self_dir="$(cd "$(dirname "$self")" && pwd)"
+file_claim="${FW_FILE_CLAIM:-$self_dir/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"
 locked=0
