@@ -34,10 +34,10 @@ ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 
 # Stub tkt-job: $T/jobmode holds done (commit fix.txt with "fixed-<n>", a
 # per-call counter, exit 0), pushed (exit 0, no commit: the job pushed
-# itself), evil (commit evil.txt, exit 0), ask (exit 1), partial (commit
-# fix.txt with "partial", exit 1) or unknown (exit 3). Records job.<slot>=j1
-# in state at dispatch, like the real tkt-job. Logs its full argument list
-# for slot assertions.
+# itself), no-commits (exit 1), evil (commit evil.txt, exit 0), ask (exit 1),
+# partial (commit fix.txt with "partial", exit 1) or unknown (exit 3).
+# Records job.<slot>=j1 in state at dispatch, like the real tkt-job. Logs its
+# full argument list for slot assertions.
 printf 'done' >"$T/jobmode"
 printf '0' >"$T/jobcount"
 cat >"$T/bin/tkt-job" <<EOF
@@ -63,6 +63,9 @@ case "\$(cat "$T/jobmode")" in
     commit_as_job fix.txt "fixed-\$n"
     echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   pushed) echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
+  no-commits)
+    echo "TKT tkt-job NO-COMMITS id=j1 gate=PASS log=x"
+    exit 1;;
   evil) commit_as_job evil.txt "outside"; echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   ask)
     echo "TKT tkt-job ASK id=j1 log=x"
@@ -546,6 +549,31 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "B3 incomplete exited 0
 [ "$?" = "1" ] || fail "B3 incomplete exited $?, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "B3 bad verdict: $(head -n 1 <<<"$out")"
 grep -qxF "concerns=$CDIR/run/switchyard-529-concerns-fix1.md" <<<"$out" || fail "B3 digest lacks concerns line"
+fi
+
+# B4. NO-COMMITS checks the pushed head and verifies the findings.
+if want B4; then
+setup_case no-commits
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `fix.txt`
+
+## Gate
+
+`false`
+EOF
+printf 'no-commits' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B4 exited $? (want gate/verify verdict 0): $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$OLD" || fail "B4 bad verdict: $(head -n 1 <<<"$out")"
+grep -q "tkt-gate PASS" "$CDIR/tkt.journal" || fail "B4 checks-only gate did not run"
+grep -q "review-pr|run 7" "$T/calls.log" || fail "B4 scoped verify did not run"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "B4 round not 1"
+grep -q '^.*tkt-fix round=1 no commits$' "$CDIR/tkt.journal" || fail "B4 no-commits round was not journaled"
+grep -qxF "no commits" <<<"$(tail -n +2 <<<"$out")" || fail "B4 digest lacks no-commits line: $out"
 fi
 
 # C1. A PR head that does not descend from the state head still exits DRIFT.
