@@ -39,6 +39,7 @@ case "$out" in *"o/r"*) ;; *) fail "relative symlink fills the planner brief, go
 
 bash "$FILL" nosuchbrief 'A=1' >/dev/null 2>"$T/err-bare2.txt"; [ "$?" = "2" ] || fail "unknown bare name exits 2"
 grep -q 'no such template: nosuchbrief' "$T/err-bare2.txt" || fail "unknown bare name is named"
+grep -q 'available templates:.*planner' "$T/err-bare2.txt" || fail "unknown bare name lists available templates"
 out="$(cd "$T" && bash "$FILL" t.md 'A=1' 'B=2')" || fail "relative path with no / exits 0"
 [ "$out" = "a 1 b 2 c" ] || fail "relative path with no / fills the file, got [$out]"
 
