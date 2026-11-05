@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # file-claim: lanes self-grant files via a claims ref in the claim repo.
+# Claim batches are all-or-nothing; drop refused paths and rerun to grant the rest.
 # Usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
@@ -17,6 +18,7 @@ TAB=$'\t'
 NL=$'\n'
 usage() {
   echo "usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
+  echo "       claims are all-or-nothing; drop refused paths and rerun to grant the rest" >&2
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
   echo "       file-claim list [--lane ID] [--repo R]  (no --lane adds one row per open-PR path)" >&2
   exit 2
@@ -187,7 +189,7 @@ pr_hunks() {
 }
 cmd_claim() {
   local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5"; shift 5
-  local remote now main_tip prmap tip claims attempt paths out new_lines i p held granted refused existing new_grants cap_hit reason pr holder path changed_files
+  local remote now main_tip prmap tip claims attempt paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [ $# -gt 0 ] || usage
   for p in "$@"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
@@ -214,12 +216,32 @@ cmd_claim() {
       holder="$(awk -F'\t' -v q="$p" '$1==q{print $2;exit}' "$claims")"
       if [ -n "$holder" ]; then if [ "$holder" = "$lane" ]; then out+=("GRANT $p $reason"); granted=$((granted + 1)); else out+=("REFUSE $p lane:$holder"); refused=$((refused + 1)); fi; continue; fi
       if [ "$kind" = grant ] && [ "$cap_hit" = "1" ]; then out+=("REFUSE $p cap"); refused=$((refused + 1)); continue; fi
-      out+=("GRANT $p $reason"); granted=$((granted + 1)); new_lines+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$p" "$lane" "$kind" "$now" "$worktree" "$self_pr")")
+      out+=("PENDING $p $reason"); granted=$((granted + 1)); new_lines+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$p" "$lane" "$kind" "$now" "$worktree" "$self_pr")")
     done
-    if [ "$refused" -gt 0 ]; then report 1; fi
+    if [ "$refused" -gt 0 ]; then
+      final_out=(); unclaimed=0
+      for line in "${out[@]}"; do
+        case "$line" in
+          PENDING\ *) path=${line#PENDING }; path=${path%% *}; final_out+=("UNCLAIMED $path batch-refused"); unclaimed=$((unclaimed + 1));;
+          *) final_out+=("$line");;
+        esac
+      done
+      printf '%s\n' "${final_out[@]}" "file-claim: no claims recorded; $refused refused, $unclaimed unclaimed because the batch was refused"
+      exit 1
+    fi
     if [ "${#new_lines[@]}" -eq 0 ]; then report 0; fi
     { cat "$claims"; printf '%s\n' "${new_lines[@]}"; } >"$claims.new"
-    if store_claims "$remote" "$claims.new" "$tip"; then report 0; fi
+    if store_claims "$remote" "$claims.new" "$tip"; then
+      final_out=()
+      for line in "${out[@]}"; do
+        case "$line" in
+          PENDING\ *) final_out+=("GRANT ${line#PENDING }");;
+          *) final_out+=("$line");;
+        esac
+      done
+      out=("${final_out[@]}")
+      report 0
+    fi
     attempt=$((attempt + 1)); jitter_sleep
   done
   die 2 "cannot push $REF: still rejected after $TRIES tries"
