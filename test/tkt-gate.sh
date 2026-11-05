@@ -585,6 +585,68 @@ grep -q "$H" "$CDIR/stderr.txt" || fail "pr drift names the worktree HEAD"
 grep -q "0000000000000000000000000000000000000000" "$CDIR/stderr.txt" || fail "pr drift names the PR head"
 [ ! -f "$T/gate-ran" ] || fail "pr drift runs no gate"
 
+# --- a pushed worktree head descended from state and matching the PR is accepted ---
+setup_case pr-pushed-head
+write_plan
+commit_file base.txt "state head"
+push_branch
+OLD_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$OLD_HEAD" || fail "set old head"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+printf 'stray\n' >"$WT/stray.txt"
+git -C "$WT" add stray.txt
+git -C "$WT" commit -qm "pushed head"
+push_branch
+NEW_HEAD="$(git -C "$WT" rev-parse HEAD)"
+printf '%s\n' "$NEW_HEAD" >"$T/pr-head"
+run_gate
+[ "$RC" -eq 1 ] || fail "pushed head drift continues to the fence (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "pushed head drift"
+drift_line="$(grep 'accepted pushed head drift' "$CDIR/stderr.txt")"
+case "$drift_line" in
+  *"$OLD_HEAD"*"$NEW_HEAD"*) ;;
+  *) fail "pushed head acceptance names the old and new heads: [$drift_line]" ;;
+esac
+[ "$(grep -c 'accepted pushed head drift' "$CDIR/stderr.txt")" -eq 1 ] || fail "pushed head acceptance prints one line"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW_HEAD" ] || fail "pushed head acceptance updates state head before later checks"
+
+# --- a non-ancestor state head remains drift ---
+setup_case pr-non-ancestor
+write_plan
+BASE_HEAD="$(git -C "$WT" rev-parse HEAD)"
+commit_file base.txt "state sibling"
+OLD_HEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" reset -q --hard "$BASE_HEAD"
+commit_file base.txt "PR sibling"
+push_branch
+NEW_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$OLD_HEAD" || fail "set sibling state head"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+printf '%s\n' "$NEW_HEAD" >"$T/pr-head"
+run_gate
+[ "$RC" -eq 3 ] || fail "non-ancestor head drift exits 3"
+grep -q "$OLD_HEAD" "$CDIR/stderr.txt" || fail "non-ancestor drift names the stored head"
+grep -q "$NEW_HEAD" "$CDIR/stderr.txt" || fail "non-ancestor drift names the PR/worktree head"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD_HEAD" ] || fail "non-ancestor drift leaves state head unchanged"
+[ ! -f "$T/gate-ran" ] || fail "non-ancestor drift runs no gate"
+
+# --- a worktree ahead of the PR head remains drift ---
+setup_case pr-worktree-ahead
+write_plan
+commit_file base.txt "PR head"
+push_branch
+OLD_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$OLD_HEAD" || fail "set PR head"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+printf '%s\n' "$OLD_HEAD" >"$T/pr-head"
+commit_file base.txt "worktree ahead"
+run_gate
+[ "$RC" -eq 3 ] || fail "worktree ahead of PR drift exits 3"
+grep -q "$OLD_HEAD" "$CDIR/stderr.txt" || fail "worktree-ahead drift names the stored/PR head"
+grep -q "$(git -C "$WT" rev-parse HEAD)" "$CDIR/stderr.txt" || fail "worktree-ahead drift names the worktree HEAD"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD_HEAD" ] || fail "worktree-ahead drift leaves state head unchanged"
+[ ! -f "$T/gate-ran" ] || fail "worktree-ahead drift runs no gate"
+
 # --- the PR lookup names the worktree's repo even from another directory ---
 setup_case pr-repo
 write_plan
