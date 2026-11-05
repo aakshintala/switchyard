@@ -29,6 +29,10 @@ VALUE_FLAGS = {
 }
 # Value shorthands in those four tables (union): a b B F H l m p r R t T.
 VALUE_SHORTHANDS = set("abBFHlmprRtT")
+# Verbs of gh issue|pr whose --body/-b value reaches a posted comment.
+BODY_VERBS = ("comment", "create", "edit")
+BODY_REFUSAL = ("refused: use --body-file; backticks in --body are lost "
+                "to the shell")
 
 
 def fail(code, msg):
@@ -157,11 +161,68 @@ def guarded_labels(args):
     return False
 
 
+def body_has_backtick(args):
+    # One pass over argv, mirroring pflag like guarded_labels, collecting
+    # only --body/-b values; --body-file is never read. A token `--` ends
+    # option parsing, `--body=VAL` carries its value, `--body VAL` takes
+    # the next token unconditionally, and a `-xyz` cluster's first value
+    # shorthand takes the rest of the token or the next token.
+    positionals = []
+    bodies = []
+    options_done = False
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if options_done:
+            positionals.append(token)
+        elif token == "--":
+            options_done = True
+        elif token.startswith("--"):
+            name, sep, inline = token[2:].partition("=")
+            if sep:
+                if name == "body":
+                    bodies.append(inline)
+            elif name in VALUE_FLAGS and i + 1 < len(args):
+                if name == "body":
+                    bodies.append(args[i + 1])
+                i += 1
+        elif token.startswith("-") and len(token) > 1:
+            j = 1
+            while j < len(token):
+                letter = token[j]
+                if letter in VALUE_SHORTHANDS:
+                    if j + 1 < len(token):
+                        rest = token[j + 1:]
+                        if rest.startswith("="):
+                            rest = rest[1:]
+                        if letter == "b":
+                            bodies.append(rest)
+                    elif i + 1 < len(args):
+                        if letter == "b":
+                            bodies.append(args[i + 1])
+                        i += 1
+                    break
+                j += 1
+        else:
+            positionals.append(token)
+        i += 1
+    if len(positionals) < 2:
+        return False
+    group, verb = positionals[0], positionals[1]
+    if group not in ("issue", "pr"):
+        return False
+    if verb not in BODY_VERBS:
+        return False
+    return any("`" in value for value in bodies)
+
+
 def main():
     args = sys.argv[1:]
     if guarded_labels(args):
         sys.stderr.write(REFUSAL + "\n")
         sys.exit(1)
+    if body_has_backtick(args):
+        fail(1, BODY_REFUSAL)
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     real = find_real_gh(os.environ.get("PATH"), shim_dir)
     if real is None:
