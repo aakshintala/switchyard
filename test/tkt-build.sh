@@ -1846,4 +1846,25 @@ ffile="$(bash "$TKT_STATE" "$S" get findings)"
 [ -f "$ffile" ] || fail "part2-findings: part2 findings file missing"
 cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/part1-copy.md" || fail "part2-findings: part-1 findings file changed"
 
+# --- findings-overwrite guard: an existing destination the state did not
+# write is refused with exit 2 and left byte-identical, before collect runs ---
+setup_case findings-refuse
+printf 'UNRELATED-CONTENT\n' >"$CDIR/run/switchyard-528-findings-r0.md"
+cp "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-refuse-copy.md"
+run_build
+[ "$RC" -eq 2 ] || fail "findings-refuse exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -F -q "tkt-build: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-528-findings-r0.md" "$CDIR/stderr.txt" || fail "findings-refuse stderr missing refusal: $(cat "$CDIR/stderr.txt")"
+cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-refuse-copy.md" || fail "findings-refuse: existing file changed"
+grep -q "^review-collect|" "$T/calls.log" && fail "findings-refuse: collect ran despite refusal"
+
+# --- findings-rerun: a destination the state recorded is rewritten ---
+setup_case findings-rerun
+printf 'STALE\n' >"$CDIR/run/switchyard-528-findings-r0.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/run/switchyard-528-findings-r0.md" || fail "findings-rerun: set findings"
+bash "$TKT_STATE" "$S" journal "findings write $CDIR/run/switchyard-528-findings-r0.md" || fail "findings-rerun: journal"
+run_build
+[ "$RC" -eq 0 ] || fail "findings-rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "STALE" "$CDIR/run/switchyard-528-findings-r0.md" && fail "findings-rerun: stale content remains"
+grep -q "no open findings" "$CDIR/run/switchyard-528-findings-r0.md" || fail "findings-rerun: file not rewritten"
+
 echo "tkt-build: all cases passed"

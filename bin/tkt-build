@@ -422,6 +422,11 @@ if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
   [ "$mstatus" = "DONE" ] && [ -s "$map_out" ] || map_note="map failed status=${mstatus:-unknown}: ${mtext%%$'\n'*}"
 fi
 findings_file="$run/$slug-$issue$part_suffix-findings-r0.md"
+if ! findings_write_allowed "$state" "$findings_file"; then
+  echo "tkt-build: refusing to overwrite findings file not written by this ticket: $findings_file" >&2
+  exit 2
+fi
+tkt journal "findings write $findings_file"
 rc=0; collect_out="$("$reviewpr" collect $rids --findings-out "$findings_file" 2>"$tmpd/collect-err")" || rc=$?
 # drop_bad_axes: print rids with the ids of axes that left no reusable
 # state replaced by RESTART, so the next run on this head starts those
