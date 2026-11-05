@@ -85,7 +85,7 @@ _fw_box_probe() {
   FW_BOX_OK=0
   FW_BOX_RC=0
   FW_BOX_RAW=""
-  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
+  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null; echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
   case "$_fw_raw" in
     *FWSEC=UPTIME*FWSEC=END*) FW_BOX_OK=1; FW_BOX_RAW="$_fw_raw" ;;
   esac
@@ -186,6 +186,30 @@ fw_delegate_lane_names_box() {
   _fw_s=$(_fw_box_section DELEGATE) || return 1
   case "$_fw_s" in *DELEGATEOK*) : ;; *) return 1;; esac
   printf '%s' "$_fw_s" | grep '^fiber-' | tr '\n' ' '
+  return 0
+}
+
+# Prints live muse session-lane names, `fiber-<n>` per live `delegate session`
+# the roster maps to a ticket. Exit 1 when ssh failed, the section's end marker
+# is missing, or the mapper refused the JSON (fail closed).
+#
+# Without this a muse lane held nothing: fw_delegate_lane_names_box reads
+# /tmp/delegate-jobs, which holds `delegate run` jobs and not sessions, and a
+# session's cwd is the shared checkout so its ticket cannot be read off the
+# path. 2026-11-04: a sweep for #3635 printed NO LIVE LANE for #4026 and #4029
+# with both lanes running. See bin/fw-sess-lanes.
+fw_delegate_session_lane_names() {
+  _fw_box_probe
+  if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
+  _fw_s=$(_fw_box_section DSESS) || return 1
+  case "$_fw_s" in *DSESSJSONOK*) : ;; *) return 1;; esac
+  _fw_roster=$(_fw_run)/roster
+  [ -f "$_fw_roster" ] || return 1
+  # The end marker is the transport's proof, not part of the JSON: feeding it
+  # to the mapper makes json.load choke on trailing content, which reads as a
+  # refusal and fails the whole sweep closed.
+  _fw_out=$(printf '%s\n' "$_fw_s" | grep -v '^DSESSJSONOK$' | python3 -I "$(cd "$(dirname "$0")" && pwd)/fw-sess-lanes" "$_fw_roster") || return 1
+  printf '%s' "$_fw_out" | tr '\n' ' '
   return 0
 }
 
@@ -622,6 +646,7 @@ if pimac_names=$(fw_pi_lane_names_mac); then pimac_ok=1; else pimac_ok=0; pimac_
 if pibox_names=$(fw_pi_lane_names_box); then pibox_ok=1; else pibox_ok=0; pibox_names=""; fi
 if dmac_names=$(fw_delegate_lane_names_mac); then dmac_ok=1; else dmac_ok=0; dmac_names=""; fi
 if dbox_names=$(fw_delegate_lane_names_box); then dbox_ok=1; else dbox_ok=0; dbox_names=""; fi
+if dsess_names=$(fw_delegate_session_lane_names); then dsess_ok=1; else dsess_ok=0; dsess_names=""; fi
 FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$mac_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/claudeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR claude agents $g"; exit 3; }
 [ "$box_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/ssherr" 2>/dev/null | tr '\n' ' '); echo "ERROR ssh box $g"; exit 3; }
@@ -629,10 +654,11 @@ FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$pibox_ok" -eq 1 ] || { echo "ERROR box pi lanes: no PILANESOK marker"; exit 3; }
 [ "$dmac_ok" -eq 1 ] || { echo "ERROR mac delegate lanes: registry directory missing"; exit 3; }
 [ "$dbox_ok" -eq 1 ] || { echo "ERROR box delegate lanes: no DELEGATEOK marker"; exit 3; }
+[ "$dsess_ok" -eq 1 ] || { echo "ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON"; exit 3; }
 # A lane is a Claude session, a pi lane or a delegate job; each holds its
 # fence. A pi lane launched by delegate shows up twice, so the list is
 # deduplicated to keep one HELD line per lane.
-lanes=$(printf '%s\n' $mac_names $box_names $pimac_names $pibox_names $dmac_names $dbox_names | grep . | sort -u | tr '\n' ' ')
+lanes=$(printf '%s\n' $mac_names $box_names $pimac_names $pibox_names $dmac_names $dbox_names $dsess_names | grep . | sort -u | tr '\n' ' ')
 
 held=""
 
