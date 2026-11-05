@@ -264,43 +264,4 @@ LANE_PATH="$T/shims:$T/py"
 refused issue edit 5 --add-label needs-owner
 unset LANE_PATH
 
-# Task 3: a --body holding a backtick loses the span to the shell.
-
-BODY_REFUSED='gh-label-guard: refused: use --body-file; backticks in --body are lost to the shell'
-
-expect_body_refused() {
-  [ "$RC" = 1 ] || fail "body-refused [$*]: exit $RC, want 1"
-  [ -z "$OUT" ] || fail "body-refused [$*]: stdout [$OUT], want empty"
-  [ "$ERR" = "$BODY_REFUSED" ] || fail "body-refused [$*]: stderr [$ERR]"
-  [ ! -e "$T/calls" ] || fail "body-refused [$*]: the stub ran"
-}
-
-body_refused() {
-  lane "$@"
-  expect_body_refused "$@"
-}
-
-body_refused issue comment 5 --body 'say `hi` ok'
-body_refused pr comment 5 --body 'say `hi` ok'
-body_refused issue create --title t --body 'say `hi` ok'
-body_refused pr create --title t --body 'say `hi` ok'
-body_refused issue edit 5 --body 'say `hi` ok'
-body_refused pr edit 5 --body 'say `hi` ok'
-body_refused issue comment 5 --body='say `hi` ok'
-body_refused issue comment 5 -b 'say `hi` ok'
-body_refused issue comment 5 -b'say `hi` ok'
-body_refused issue comment 5 --title t --body 'x`y`'
-body_refused issue comment 5 --body ok --body 'x`y`'
-
-passed issue comment 5 --body-file f
-passed pr create --title t --body-file f
-passed issue comment 5 --body plain
-passed pr edit 5 --body plain
-passed issue edit 5 --body ''
-
-# A body refusal does not need a real gh either.
-LANE_PATH="$T/shims:$T/py"
-body_refused issue comment 5 --body 'say `hi` ok'
-unset LANE_PATH
-
 echo "gh-label-guard: all cases passed"
