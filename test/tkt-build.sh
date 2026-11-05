@@ -1671,6 +1671,11 @@ bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed skipped verdict"
 run_build
 [ "$RC" -eq 0 ] || fail "skipped verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "skipped verdict proceeds"
+setup_case verdict-triaged
+bash "$TKT_STATE" "$S" set plan_verdict triaged || fail "seed triaged verdict"
+run_build
+[ "$RC" -eq 0 ] || fail "triaged verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "triaged verdict proceeds"
 
 # --- a missing verdict refuses; --no-verifier records or refreshes skipped ---
 setup_case verdict-none
@@ -1704,6 +1709,13 @@ run_build
 [ "$RC" -eq 1 ] || fail "mismatched verdict base exits 1"
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "mismatched verdict base"
 grep -q '^job|' "$T/calls.log" && fail "stale verdict dispatches no tkt-job"
+setup_case verdict-triaged-stale
+bash "$TKT_STATE" "$S" set plan_verdict triaged || fail "seed triaged stale verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed mismatched triaged base"
+run_build
+[ "$RC" -eq 1 ] || fail "triaged verdict at a changed Base exits 1"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "triaged verdict at a changed Base"
+grep -q '^job|' "$T/calls.log" && fail "stale triaged verdict dispatches no tkt-job"
 setup_case verdict-stale-flag
 bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed flagged mismatched verdict base"
 run_build --no-verifier

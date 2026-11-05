@@ -161,7 +161,7 @@ if [ "$no_verifier" -eq 1 ] && { [ -z "$verdict" ] || [ "$verdict" = skipped ]; 
   verdict_base="$base"
 fi
 verdict_ok=0
-if [ "$verdict" = ok ]; then
+if [ "$verdict" = ok ] || [ "$verdict" = triaged ]; then
   if [ "$verdict_base" = "$base" ]; then
     verdict_ok=1
   elif git -C "$worktree" merge-base --is-ancestor "$verdict_base" "$base" 2>/dev/null &&
@@ -176,7 +176,7 @@ if [ "$verdict_ok" -eq 1 ]; then
 else
   case "$verdict" in
     "") verdict_refusal=none ;;
-    ok|skipped) verdict_refusal=stale ;;
+    ok|triaged|skipped) verdict_refusal=stale ;;
     *) verdict_refusal="$verdict" ;;
   esac
   [ -n "$verdict" ] || verdict=none

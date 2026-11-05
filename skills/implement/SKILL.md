@@ -40,7 +40,7 @@ The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `ver
 | --- | --- | --- |
 | `tkt-start` | `CURRENT`; `SKIPPED` with `--no-preflight`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
 | `tkt-state` | exit 0 | exit 2 |
-| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `POST-FAIL`, `SET-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
+| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `TRIAGED-REFUSED`, `POST-FAIL`, `SET-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-job` | `DONE`, `CONCERNS` | `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-build` | `APPROVE`; `MEASURED` for an `Outcome: measurement` plan, which ends the ticket with no PR | `CHANGES`, `STALE`, `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `VERDICT-REFUSED`, `<step>-ERROR` |
 | `tkt-gate` | `PASS` | `TIP`, `FENCE`, `FAIL` |
@@ -104,6 +104,8 @@ Done when the preflight has returned and no `core` item is open, or the ticket i
 Follow `planning` steps 1–5. When a worker writes the plan, fill `../planning/briefs/planner.md` for it, with the keys `ISSUE`, `REPO`, `BASE`, `WORKFLOW_DOC`, `PREFLIGHT`, `PACK`, `PLAN` (the plan file's absolute path) and `EXTRA` (empty by default). It covers `planning` steps 1–2 and ends with the plan file; you run steps 3–5 yourself, since a worker's brief forbids delegating and the Verifier is a job of its own. The brief's `Blocked` rule tells the worker where to stop. You post a `Blocked` section as the question and park as Rules says: the whole ticket when the item touches its core outcome, otherwise only what depends on the answer.
 
 Done when the lane brief is filled.
+
+When triage answers every open planning line, record it with `tkt-plan <state> triaged --comment <id>` using the numeric ticket comment id. `confirm --edits <file>`, not `verify`, consumes a grant-round.
 
 ### 4. Lane
 
