@@ -25,6 +25,9 @@
 #        is set, the body says Refs #N without a closing line, the caller's cwd
 #        is inside the worktree, it is dirty, or lsof is unavailable, errors,
 #        or finds a process inside. The remote branch is still deleted.
+#        After a confirmed merge of aakshintala/switchyard, fast-forward ~/.agents
+#        only when it is on main with no tracked changes or local commits; untracked
+#        files are allowed. If skipped, print its lag and leave the merge successful.
 #        The CI wait trusts the repo's required checks: one green on the exact
 #        head counts whenever it ran, so marking ready need not start a new run,
 #        and a run that starts after the wait passed does not hold the merge. An
@@ -151,6 +154,36 @@ pr_ready=0 merge_attempted=0
 # proptest-regressions/ seeds a gate run wrote (untracked, but not dirt).
 worktree_clean() {
   [ -z "$(git -C "$worktree" status --porcelain | grep -v '^?? .*proptest-regressions/')" ]
+}
+fast_forward_agents() {
+  local checkout="${HOME:-~}/.agents" branch behind reason
+  if [ "$(git -C "$checkout" rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
+    say "$checkout: not fast-forwarded (behind unknown; not a git checkout)"
+    return 0
+  fi
+  if ! git -C "$checkout" fetch -q origin refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1; then
+    say "$checkout: not fast-forwarded (behind unknown; fetch failed)"
+    return 0
+  fi
+  behind="$(git -C "$checkout" rev-list --count HEAD..origin/main 2>/dev/null)" || behind=unknown
+  branch="$(git -C "$checkout" branch --show-current 2>/dev/null)" || branch=""
+  if [ "$branch" != main ]; then
+    reason="branch=${branch:-detached}"
+  elif [ -n "$(git -C "$checkout" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    reason="tracked changes"
+  elif ! git -C "$checkout" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    reason="local commits"
+  elif ! git -C "$checkout" merge --ff-only origin/main >/dev/null 2>&1; then
+    reason="fast-forward failed"
+  else
+    return 0
+  fi
+  case "$behind" in
+    1) behind="1 commit" ;;
+    unknown) ;;
+    *) behind="$behind commits" ;;
+  esac
+  say "$checkout: not fast-forwarded (behind $behind; $reason)"
 }
 # fetch_retry: one bounded retry for a `git fetch` lost to a transient ref
 # lock (another session pushing at the same time). 3 tries, 1 s apart.
@@ -984,6 +1017,8 @@ for i in $(seq 1 12); do
   [ "$i" -lt 12 ] && sleep "${SHIP_PR_INTERVAL:-5}"
 done
 [ -n "$merged" ] || { [ -n "$merge_failed" ] && die 1 "gh pr merge failed"; die 1 "merge status could not be confirmed after 12 polls; worktree left in place"; }
+
+if [ "$repo" = "aakshintala/switchyard" ]; then fast_forward_agents; fi
 
 # Step 9: clean up from the common git dir, never from inside the worktree being removed.
 common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"
