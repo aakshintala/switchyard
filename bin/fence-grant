@@ -192,51 +192,26 @@ fw_delegate_lane_names_box() {
   return 0
 }
 
-# Prints live box delegate-session lane names by matching session ids to the
-# run roster. Session ids may be prefixes; prep sessions hold no fence.
+# Prints live muse session-lane names, `fiber-<n>` per live `delegate session`
+# the roster maps to a ticket. Exit 1 when ssh failed, the section's end marker
+# is missing, or the mapper refused the JSON (fail closed).
+#
+# Without this a muse lane held nothing: fw_delegate_lane_names_box reads
+# /tmp/delegate-jobs, which holds `delegate run` jobs and not sessions, and a
+# session's cwd is the shared checkout so its ticket cannot be read off the
+# path. 2026-11-04: a sweep for #3635 printed NO LIVE LANE for #4026 and #4029
+# with both lanes running. See bin/fw-sess-lanes.
 fw_delegate_session_lane_names() {
   _fw_box_probe
   if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
   _fw_s=$(_fw_box_section DSESS) || return 1
   case "$_fw_s" in *DSESSJSONOK*) : ;; *) return 1;; esac
-  _fw_roster="$(_fw_run)/roster"
+  _fw_roster=$(_fw_run)/roster
   [ -f "$_fw_roster" ] || return 1
-  _fw_out=$(printf '%s\n' "$_fw_s" | grep -v '^DSESSJSONOK$' | python3 -I -c 'import json,sys
-LIVE = ("running", "idle", "working")
-try:
-  data = json.load(sys.stdin)
-except Exception:
-  sys.exit(1)
-if not isinstance(data, dict) or not data.get("ok"):
-  sys.exit(1)
-sessions = data.get("sessions")
-if not isinstance(sessions, list):
-  sys.exit(1)
-live = set()
-for session in sessions:
-  if isinstance(session, dict) and str(session.get("status", "")).lower() in LIVE:
-    sid = str(session.get("id", ""))
-    if sid:
-      live.add(sid)
-if not live:
-  sys.exit(0)
-try:
-  with open(sys.argv[1], encoding="utf-8") as fh:
-    rows = fh.readlines()
-except OSError:
-  sys.exit(1)
-out = set()
-for row in rows:
-  fields = row.rstrip("\n").split("\t")
-  if len(fields) < 5:
-    continue
-  ticket, name, rid = fields[1].strip(), fields[3].strip(), fields[4].strip()
-  if not ticket.isdigit() or not rid or not name.startswith("fiber-"):
-    continue
-  if any(sid == rid or sid.startswith(rid) or rid.startswith(sid) for sid in live):
-    out.add("fiber-" + ticket)
-for name in sorted(out):
-  print(name)' "$_fw_roster") || return 1
+  # The end marker is the transport's proof, not part of the JSON: feeding it
+  # to the mapper makes json.load choke on trailing content, which reads as a
+  # refusal and fails the whole sweep closed.
+  _fw_out=$(printf '%s\n' "$_fw_s" | grep -v '^DSESSJSONOK$' | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
   printf '%s' "$_fw_out" | tr '\n' ' '
   return 0
 }
@@ -339,7 +314,16 @@ case "$paths" in
 esac
 
 run=$(_fw_run)
-file_claim="${FW_FILE_CLAIM:-$(dirname "$0")/file-claim}"
+# Siblings resolve from the script's real path: callers such as flywheel's
+# bin/fence-grant reach it through a symlink in a directory with no file-claim.
+self="$0"
+case "$self" in */*) ;; *) self="$(command -v "$self")" ;; esac
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in /*) self="$link" ;; *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;; esac
+done
+self_dir="$(cd "$(dirname "$self")" && pwd)"
+file_claim="${FW_FILE_CLAIM:-$self_dir/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"
 locked=0
@@ -723,7 +707,7 @@ FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$pibox_ok" -eq 1 ] || { echo "ERROR box pi lanes: no PILANESOK marker"; exit 3; }
 [ "$dmac_ok" -eq 1 ] || { echo "ERROR mac delegate lanes: registry directory missing"; exit 3; }
 [ "$dbox_ok" -eq 1 ] || { echo "ERROR box delegate lanes: no DELEGATEOK marker"; exit 3; }
-[ "$dsess_ok" -eq 1 ] || { echo "ERROR box delegate sessions: no DSESSJSONOK marker, or roster mapper refused the JSON"; exit 3; }
+[ "$dsess_ok" -eq 1 ] || { echo "ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON"; exit 3; }
 # A lane is a Claude session, a pi lane or a delegate job; each holds its
 # fence. A pi lane launched by delegate shows up twice, so the list is
 # deduplicated to keep one HELD line per lane.

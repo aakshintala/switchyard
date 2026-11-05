@@ -84,7 +84,7 @@ printf '%s\n' "$*" >>"$T/ssh.log"
 [ "${SSH_FAIL:-0}" != 1 ] || { echo 'ssh stub failure' >&2; exit 1; }
 if [ -n "${SSH_OUT:-}" ]; then printf '%s\n' "$SSH_OUT"; else
   printf '%s\n' 'FWSEC=UPTIME' 'FWSEC=AGENTS' '[]' 'FWSEC=DELEGATE' DELEGATEOK \
-    'FWSEC=DSESS' '{"ok":true,"sessions":[]}' DSESSJSONOK \
+    'FWSEC=DSESS' "$DSESS_JSON" DSESSJSONOK \
     'FWSEC=PILANES' PILANESOK 'FWSEC=END'
 fi
 SSH_STUB
@@ -139,6 +139,8 @@ reset_case() {
   rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
   mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
   : >"$FW_RUN/roster"
+  DSESS_JSON='{"ok":true,"sessions":[]}'
+  export DSESS_JSON
   : >"$T/gh.log"
   : >"$T/claude.log"
   : >"$T/ssh.log"
@@ -244,12 +246,62 @@ set_pr() {
   printf 'diff --git a/%s b/%s\nindex 1111111..2222222 100644\n' "$path" "$path" >"$T/pr/$number.diff"
 }
 
+# A session's shared cwd carries no ticket: map its id through the roster.
+reset_case
+printf '2026-11-05 launch\t77\tbox\tfiber-77\tabcdef12\n' >"$FW_RUN/roster"
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
+DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"running"}]}'
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 1 'live roster session holds even an old grant'
+assert_out 'HELD docs/tui.md by lane #77' 'live roster session output'
+
+# Prefix matching also works when the roster has the longer id.
+printf '2026-11-05 launch\t77\tbox\tfiber-77\tabcdef1234567890\n' >"$FW_RUN/roster"
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 1 'live session matches a longer roster id'
+assert_out 'HELD docs/tui.md by lane #77' 'longer roster id output'
+
+printf '2026-11-05 launch\t77\tbox\tprep-77\tabcdef12\n' >"$FW_RUN/roster"
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'prep session holds nothing'
+assert_line 'GRANT' 'prep session grant'
+
+printf '2026-11-05 launch\t77\tbox\tfiber-77\tabcdef12\n' >"$FW_RUN/roster"
+DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"stopped"}]}'
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'stopped session holds nothing'
+assert_line 'GRANT' 'stopped session grant'
+
+reset_case
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
+run_fg 77 --paths docs/tui.md
+assert_error 'session section missing marker' 'ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON'
+
+reset_case
+DSESS_JSON='not-json'
+run_fg 77 --paths docs/tui.md
+assert_error 'session mapper refuses JSON' 'ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON'
+
 # --- Exit 0: free paths and grant-file writing --------------------------------
 reset_case
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'free dry run'
 assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'free dry output'
 assert_no_grant 'free dry run'
+
+# Called through a relative symlink from a directory with no siblings (as
+# flywheel's bin/fence-grant is), it finds file-claim and fw-sess-lanes beside
+# its real path.
+reset_case
+mkdir -p "$T/realbin" "$T/linkbin"
+cp "$FG" "$T/realbin/fence-grant"
+cp "$T/stubs/file-claim" "$T/realbin/file-claim"
+cp "$(dirname "$FG")/fw-sess-lanes" "$T/realbin/fw-sess-lanes"
+ln -sf ../realbin/fence-grant "$T/linkbin/fence-grant"
+(unset FW_FILE_CLAIM; bash "$T/linkbin/fence-grant" 77 --paths docs/tui.md --dry >"$T/out" 2>"$T/err"); RC=$?
+assert_rc 0 'symlinked caller finds file-claim'
+grep -q '^list' "$T/file-claim.log" || fail "symlinked caller: file-claim not called; log=$(cat "$T/file-claim.log")"
 
 reset_case
 run_fg 77 --paths docs/tui.md
@@ -481,16 +533,6 @@ export SSH_OUT
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 1 'live box delegate lane hold'
 assert_out 'HELD docs/tui.md by lane #88' 'box delegate lane output'
-
-reset_case
-printf 'Grant 1\n\nTicket: 89\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-89-fence-grant-1.md"
-touch -t 202001010000 "$FW_RUN/fiber-89-fence-grant-1.md"
-printf '2026-11-05T00:00:00Z launch\t89\tstub-box\tfiber-89-demo\t12345678abcdef\n' >"$FW_RUN/roster"
-SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[{"status":"running","id":"12345678abcdef"}]}\nDSESSJSONOK\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
-export SSH_OUT
-run_fg 77 --paths docs/tui.md --dry
-assert_rc 1 'live box delegate session holds an old grant'
-assert_out 'HELD docs/tui.md by lane #89' 'live box delegate session output'
 
 reset_case
 write_blob docs/tui.md $'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n'
