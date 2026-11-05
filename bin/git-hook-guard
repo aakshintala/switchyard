@@ -492,10 +492,10 @@ def run_real(real, argv):
 
 
 def read_alias(real, prefix, name):
-    # The value of alias.<name> as the real git reads it: same -C dirs and -c
-    # options the call itself carries, same environment. None when there is
-    # no such alias, when it is a `!` shell alias (uncovered, left to the real
-    # git), or when the lookup itself fails.
+    # The value of alias.<name> as the real git reads it: the given global
+    # options (-C dirs, -c options and the rest) plus the same environment.
+    # None when there is no such alias, when it is a `!` shell alias
+    # (uncovered, left to the real git), or when the lookup itself fails.
     proc = run_real(real, prefix + ["config", "--get", "alias." + name])
     if proc is None or proc.returncode != 0:
         return None
@@ -544,7 +544,9 @@ def expand_alias(args, real):
     for _ in range(ALIAS_ROUNDS):
         # An expansion may start with global options, which git applies
         # before the subcommand; find it the same way the call's own
-        # globals are parsed.
+        # globals are parsed. Every leading global (from the call and from
+        # each expansion so far) is part of the config git itself would
+        # see, so later lookups carry the accumulated set.
         _, first, _, firstidx = parse_globals(current, [])
         if first is None:
             # Globals only: check the whole expansion as if typed.
@@ -554,7 +556,7 @@ def expand_alias(args, real):
         seen.add(first)
         if first in builtins:
             return prefix + current
-        value = read_alias(real, prefix, first)
+        value = read_alias(real, prefix + current[:firstidx], first)
         if value is None:
             return None
         try:

@@ -41,6 +41,9 @@ ln -s "$SHIM" "$T/shims/git"
 # here instead: recorded in $LOOKUPS, never in $CALLS, so expect_passed
 # stays exact and expect_refused still proves no exec ran. STUB_ALIAS_<name>
 # defines the expansion the lookup prints; an unset one exits 1 like git.
+# A leading `-c alias.<name>=<value>` overrides STUB_ALIAS_<name> like the
+# real git, so an alias expansion that sets config is visible to later
+# lookups.
 cat >"$T/real/git" <<'STUB'
 #!/usr/bin/env bash
 if [ "$#" -eq 1 ] && [ "$1" = "--list-cmds=builtins,nohelpers" ]; then
@@ -56,6 +59,39 @@ if [ "$#" -eq 3 ] && [ "$1" = config ] && [ "$2" = --get ]; then
   alias.*)
     printf '<lookup %s>\n' "$3" >>"${LOOKUPS:-/dev/null}"
     name="${3#alias.}"
+    override_set=0
+    override=""
+    nlead=$((${#restored[@]} - 3))
+    i=0
+    while [ "$i" -lt "$nlead" ]; do
+      a="${restored[$i]}"
+      kv=""
+      if [ "$a" = "-c" ]; then
+        i=$((i + 1))
+        if [ "$i" -lt "$nlead" ]; then
+          kv="${restored[$i]}"
+        fi
+      elif [ "${a#-c}" != "$a" ]; then
+        kv="${a#-c}"
+      fi
+      if [ -n "$kv" ]; then
+        case "$kv" in
+        *=*)
+          k="${kv%%=*}"
+          v="${kv#*=}"
+          if [ "$k" = "alias.$name" ]; then
+            override="$v"
+            override_set=1
+          fi
+          ;;
+        esac
+      fi
+      i=$((i + 1))
+    done
+    if [ "$override_set" = 1 ]; then
+      printf '%s\n' "$override"
+      exit 0
+    fi
     var="STUB_ALIAS_$name"
     if [ "${!var+x}" = x ]; then
       printf '%s\n' "${!var}"
@@ -472,6 +508,11 @@ unset LANE_ENV
 LANE_ENV=(STUB_ALIAS_probe='-c core.hooksPath=/dev/null commit --no-verify')
 refused probe
 grep -q '<lookup alias.probe>' "$T/lookups" || fail "alias probe: no lookup ran"
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_outer='-c alias.inner="commit --no-verify" inner')
+refused outer --dry-run
+grep -q '<lookup alias.outer>' "$T/lookups" || fail "alias outer: no lookup ran"
+grep -q '<lookup alias.inner>' "$T/lookups" || fail "alias inner: no lookup ran"
 unset LANE_ENV
 LANE_ENV=(STUB_ALIAS_lg='log --oneline')
 passed lg
