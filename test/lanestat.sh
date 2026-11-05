@@ -7,8 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LANESTAT="${LANESTAT:-$SCRIPT_DIR/../bin/lanestat}"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+TEST_TMPDIR="${TMPDIR:-/tmp}"
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-lanestat.XXXXXX")"
-trap 'rm -rf "$T"' EXIT
+trap 'rm -rf "$T" "${LS_INBOX:-}"' EXIT
 mkdir -p "$T/run" "$T/empty" "$T/stub" "$T/ps" \
   "$T/tmp" "$T/tmp/delegate-jobs" "$T/delegate-jobs" "$T/system-jobs"
 DELEGATE_JOBS_DIR="$T/delegate-jobs"
@@ -1132,5 +1133,21 @@ cmp -s "$T/ssh-local.out" "$T/ssh-script.out" || fail "bash -s preserves all lan
 assert_row 960 'SETTLED PARK last=none$' "$(<"$T/ssh-script.out")"
 assert_row 961 'SETTLED LOOP last=none$' "$(<"$T/ssh-script.out")"
 assert_row 962 "SETTLED DONE-UNREAD $job_done$" "$(<"$T/ssh-script.out")"
+
+# An explicitly supplied fixture inbox contributes an open-ruling count.
+LS_INBOX="$(mktemp -d "$TEST_TMPDIR/test-lanestat-inbox.XXXXXX")"
+mkdir -p "$LS_INBOX/open"
+printf 'RULING? RULING-974-1\nNeeds a decision.\n' \
+  >"$LS_INBOX/open/RULING-974-1.md"
+run_stat --inbox "$LS_INBOX" "$T/empty" >"$T/inbox-open.out" 2>"$T/inbox-open.err"; rc=$?
+[ "$rc" = 0 ] || fail "lanestat with an inbox exits 0 (got $rc; $(<"$T/inbox-open.err"))"
+grep -Fxq 'open rulings: 1' "$T/inbox-open.out" \
+  || fail "lanestat counts an open ruling: [$(<"$T/inbox-open.out")]"
+rm "$LS_INBOX/open/RULING-974-1.md"
+run_stat --inbox "$LS_INBOX" "$T/empty" >"$T/inbox-empty.out" 2>"$T/inbox-empty.err"; rc=$?
+[ "$rc" = 0 ] || fail "lanestat with an empty inbox exits 0 (got $rc)"
+if grep -Fq 'open rulings:' "$T/inbox-empty.out"; then
+  fail "lanestat omits the ruling count when none are open: [$(<"$T/inbox-empty.out")]"
+fi
 
 echo 'lanestat: all cases passed'
