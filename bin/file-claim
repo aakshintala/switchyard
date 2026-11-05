@@ -3,6 +3,7 @@
 # Usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
+# Without --lane, list adds one row per open-PR path: <path> pr#N pr - - N.
 # FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5); N must be a positive integer.
 # FILE_CLAIM_READ_WAIT=N sets the retry wait in whole seconds (default 1).
 set -euo pipefail
@@ -17,7 +18,7 @@ NL=$'\n'
 usage() {
   echo "usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
-  echo "       file-claim list [--lane ID] [--repo R]" >&2
+  echo "       file-claim list [--lane ID] [--repo R]  (no --lane adds one row per open-PR path)" >&2
   exit 2
 }
 die() { local c="$1"; shift; echo "file-claim: $*" >&2; exit "$c"; }
@@ -130,19 +131,10 @@ filter_release() {
     if [ "$drop" = "1" ]; then printf '%s\n' "$c_path" >>"$dropped"; else printf '%s\n' "$line" >>"$kept"; fi
   done <"$claims"
 }
-cmd_claim() {
-  local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5"; shift 5
-  local remote now main_tip pr_json prmap_list prmap tip claims attempt paths out new_lines i p held granted refused existing new_grants cap_hit reason pr holder path changed_files
-  remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  [ $# -gt 0 ] || usage
-  for p in "$@"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
-  paths=()
-  for p in "$@"; do
-    held=0
-    if [ "${#paths[@]}" -gt 0 ]; then for i in "${paths[@]}"; do if [ "$i" = "$p" ]; then held=1; break; fi; done; fi
-    if [ "$held" = "0" ]; then paths+=("$p"); fi
-  done
-  new_workdir
+build_prmap() {
+  # The open-PR path table both claim and list read. Writes "$W/prmap" lines
+  # "PR<TAB>path". Fail-closed: any unreadable list exits 2, as claim always did.
+  local repo="$1" pr_json prmap_list pr changed_files
   pr_json="$(gh pr list --repo "$repo" --state open --limit 1000 --json number,changedFiles 2>"$W/gh.err")" || die 2 "cannot list open PRs for $repo: $(cat "$W/gh.err")"
   prmap_list="$W/prmap-list"; prmap="$W/prmap"
   printf '%s' "$pr_json" | jq -r '.[] | [.number, .changedFiles] | @tsv' >"$prmap_list" 2>"$W/jq.err" || die 2 "cannot parse open PRs for $repo: $(cat "$W/jq.err")"
@@ -157,6 +149,56 @@ cmd_claim() {
       printf '%s\t%s\n' "$pr" "$path" >>"$prmap"
     done <"$W/pr-files"
   done <"$prmap_list"
+}
+pr_hunks() {
+  # Old-side (main-side) line ranges of PR's hunks in PATH, comma-separated.
+  # Same hunk reading as _pr_hunks in bin/fence-grant: hunk -a,b with b>0 is
+  # a-(a+b-1); an insertion -a,0 is a-(a+1). A new file, a binary file or a
+  # section with no hunks holds the whole file. The holder's diff is fetched
+  # once per PR per run; a failed fetch, partial output included, prints
+  # unknown for every path that PR holds. The refusal stands either way, so
+  # this always succeeds.
+  local repo="$1" pr="$2" path="$3" diff="$W/diff-$pr" sec hunks r a b ranges
+  [ -f "$diff.failed" ] && { printf 'unknown'; return 0; }
+  if [ ! -f "$diff" ]; then
+    if ! gh pr diff "$pr" -R "$repo" >"$diff.part" 2>"$W/gh-diff.err"; then : >"$diff.failed"; printf 'unknown'; return 0; fi
+    mv "$diff.part" "$diff"
+  fi
+  sec="$(awk -v f="$path" '/^diff --git /{on = ($4 == "b/" f)} on {print}' "$diff")"
+  case "$sec" in ""|*"new file mode"*|*"Binary files "*) printf 'whole'; return 0;; esac
+  hunks="$(printf '%s\n' "$sec" | awk '/^@@ /{line=$0; sub(/^@@ -/, "", line); sub(/ .*/, "", line); print line}' || true)"
+  [ -n "$hunks" ] || { printf 'whole'; return 0; }
+  ranges=""
+  while IFS= read -r r || [ -n "$r" ]; do
+    [ -n "$r" ] || continue
+    a="${r%%,*}"
+    case "$r" in *,*) b="${r#*,}";; *) b=1;; esac
+    case "$a$b" in ''|*[!0-9]*) continue;; esac
+    if [ "$b" = "0" ]; then
+      if [ "$a" = "0" ]; then printf 'whole'; return 0; fi
+      r="$a-$((a + 1))"
+    else
+      r="$a-$((a + b - 1))"
+    fi
+    ranges="${ranges:+$ranges,}$r"
+  done <<<"$hunks"
+  [ -n "$ranges" ] || { printf 'whole'; return 0; }
+  printf '%s' "$ranges"
+}
+cmd_claim() {
+  local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5"; shift 5
+  local remote now main_tip prmap tip claims attempt paths out new_lines i p held granted refused existing new_grants cap_hit reason pr holder path changed_files
+  remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  [ $# -gt 0 ] || usage
+  for p in "$@"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
+  paths=()
+  for p in "$@"; do
+    held=0
+    if [ "${#paths[@]}" -gt 0 ]; then for i in "${paths[@]}"; do if [ "$i" = "$p" ]; then held=1; break; fi; done; fi
+    if [ "$held" = "0" ]; then paths+=("$p"); fi
+  done
+  new_workdir
+  build_prmap "$repo"
   attempt=1
   while [ "$attempt" -le "$TRIES" ]; do
     main_tip="$(fetch_main_tip "$remote")"; tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; load_claims "$tip" "$claims"
@@ -168,7 +210,7 @@ cmd_claim() {
       reason="new"
       if [ "$(git -C "$W" cat-file -t "$main_tip:$p" 2>/dev/null)" = blob ]; then reason="exists"; fi
       pr="$(awk -F'\t' -v q="$p" -v s="$self_pr" '$2==q&&index(","s",", ","$1",")==0{print $1}' "$prmap" | sort -n | head -1)"
-      if [ -n "$pr" ]; then out+=("REFUSE $p pr#$pr"); refused=$((refused + 1)); continue; fi
+      if [ -n "$pr" ]; then out+=("REFUSE $p pr#$pr hunks=$(pr_hunks "$repo" "$pr" "$p")"); refused=$((refused + 1)); continue; fi
       holder="$(awk -F'\t' -v q="$p" '$1==q{print $2;exit}' "$claims")"
       if [ -n "$holder" ]; then if [ "$holder" = "$lane" ]; then out+=("GRANT $p $reason"); granted=$((granted + 1)); else out+=("REFUSE $p lane:$holder"); refused=$((refused + 1)); fi; continue; fi
       if [ "$kind" = grant ] && [ "$cap_hit" = "1" ]; then out+=("REFUSE $p cap"); refused=$((refused + 1)); continue; fi
@@ -204,16 +246,25 @@ cmd_release() {
 }
 cmd_list() {
   local lane="$1" repo="$2"
-  local remote tip claims now line c_path c_lane c_kind c_at c_wt c_pr age
+  local remote tip claims now line c_path c_lane c_kind c_at c_wt c_pr age pr path
   remote="$(default_remote "$repo")"
   new_workdir; fetch_main_tip "$remote" >/dev/null; tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; load_claims "$tip" "$claims"; now="$(date -u +%s)"
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "$line" ] || continue
-    IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr <<<"$line"
-    if [ -n "$lane" ] && [ "$c_lane" != "$lane" ]; then continue; fi
-    age=$((now - $(at_epoch "$c_at"))); if [ "$age" -lt 0 ]; then age=0; fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$age" "$c_wt" "$c_pr"
-  done <"$claims" | LC_ALL=C sort -t "$TAB" -k1,1
+  if [ -z "$lane" ]; then build_prmap "$repo"; fi
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr <<<"$line"
+      if [ -n "$lane" ] && [ "$c_lane" != "$lane" ]; then continue; fi
+      age=$((now - $(at_epoch "$c_at"))); if [ "$age" -lt 0 ]; then age=0; fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$age" "$c_wt" "$c_pr"
+    done <"$claims"
+    if [ -z "$lane" ]; then
+      while IFS="$TAB" read -r pr path || [ -n "$pr" ]; do
+        [ -n "$pr" ] && [ -n "$path" ] || continue
+        printf '%s\tpr#%s\tpr\t-\t-\t%s\n' "$path" "$pr" "$pr"
+      done <"$prmap"
+    fi
+  } | LC_ALL=C sort -t "$TAB" -k1,1
 }
 main() {
   [ $# -ge 1 ] || usage

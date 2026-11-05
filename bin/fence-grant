@@ -739,6 +739,9 @@ for line in sys.stdin:
   if len(fields) != 6:
     sys.exit(1)
   path, lane, kind, age, worktree, pr = fields
+  # file-claim list also reports open-PR paths; the PR side below holds those.
+  if kind == "pr":
+    continue
   if not path or not lane or kind not in ("plan", "grant") or not age.isdigit() or not worktree:
     sys.exit(1)
   if pr and any(not item.isdigit() for item in pr.split(",")):
