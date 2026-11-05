@@ -55,6 +55,7 @@ cat >"$T/bin/gh" <<EOF
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 case " \$* " in
   *" headRefOid "*) cat "$T/prhead"; exit 0 ;;
+  *"--json body"*) { cat "$T/prbody" 2>/dev/null || printf ''; }; exit 0 ;;
 esac
 if [ "\${1:-}" = "pr" ]; then cat "$T/ghstate"; fi
 exit 0
@@ -69,6 +70,7 @@ reset_stub() {
   printf '7' >"$T/exitcodes"
   printf 'OPEN' >"$T/ghstate"
   : >"$T/prhead"
+  : >"$T/prbody"
 }
 
 # New case dir with run dir, git worktree and base state (head set, PR head
@@ -527,5 +529,36 @@ run_ship
 expect_line1 "CI-FAIL jobs=0 inside-diff=0 mutants=0" neverstarted
 case "$OUT" in *"gh-ci: check ci has no check run after 10 min; it never started"*) ;; *) fail "digest carries never-started line: [$OUT]" ;; esac
 case "$OUT" in *"gh-ci reported no failed jobs"*) fail "digest drops empty failed-jobs line: [$OUT]" ;; esac
+
+# --- a stale Local gate sha warns but still merges ---
+reset_stub; setup_case gateship-stale
+printf '0' >"$T/exitcodes"
+stale="0000000000000000000000000000000000000000"
+printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$stale" >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-stale: exit $RC"
+expect_line1 "MERGED sha=" gateship-stale
+grep -q "$stale" "$CDIR/stderr" || fail "gateship-stale: stderr misses the line sha"
+grep -q "$H" "$CDIR/stderr" || fail "gateship-stale: stderr misses the PR head"
+grep -q "bash test/gate.sh" "$CDIR/stderr" || fail "gateship-stale: stderr misses the gate command"
+
+# --- a fresh Local gate sha says nothing ---
+reset_stub; setup_case gateship-fresh
+printf '0' >"$T/exitcodes"
+printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$H" >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-fresh: exit $RC"
+expect_line1 "MERGED sha=" gateship-fresh
+grep -q "Local gate" "$CDIR/stderr" && fail "gateship-fresh: unexpected Local gate warning: [$(cat "$CDIR/stderr")]"
+
+# --- no Local gate line (a PR with no tkt gate record) says nothing ---
+reset_stub; setup_case gateship-noline
+printf '0' >"$T/exitcodes"
+printf 'Title\n\nImplemented by: m/a\n' >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-noline: exit $RC"
+expect_line1 "MERGED sha=" gateship-noline
+grep -q "Local gate" "$CDIR/stderr" && fail "gateship-noline: unexpected Local gate warning: [$(cat "$CDIR/stderr")]"
+grep -q "Local gate" <<<"$OUT" && fail "gateship-noline: unexpected Local gate line in output"
 
 echo "tkt-ship: all cases passed"
