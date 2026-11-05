@@ -748,7 +748,7 @@ check_mutants_gate() {
   [ -n "$job_id" ] \
     || die 5 "mutants gate failed: run $run_id has no Selection job"
   if gh run view "$run_id" --repo "$repo" --job "$job_id" --log 2>/dev/null \
-    | grep -Fqx 'mutants in the diff: 0'; then
+    | grep -Eq '(^|[[:space:]])mutants in the diff: 0'$'\r''?$'; then
     return 0
   fi
   die 5 "mutants gate failed: Selection log on run $run_id does not prove mutants in the diff: 0"
