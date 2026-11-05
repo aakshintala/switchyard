@@ -155,11 +155,14 @@ pr_hunks() {
   # Same hunk reading as _pr_hunks in bin/fence-grant: hunk -a,b with b>0 is
   # a-(a+b-1); an insertion -a,0 is a-(a+1). A new file, a binary file or a
   # section with no hunks holds the whole file. The holder's diff is fetched
-  # once per PR per run; a failed fetch prints unknown. The refusal stands
-  # either way, so this always succeeds.
+  # once per PR per run; a failed fetch, partial output included, prints
+  # unknown for every path that PR holds. The refusal stands either way, so
+  # this always succeeds.
   local repo="$1" pr="$2" path="$3" diff="$W/diff-$pr" sec hunks r a b ranges
+  [ -f "$diff.failed" ] && { printf 'unknown'; return 0; }
   if [ ! -f "$diff" ]; then
-    if ! gh pr diff "$pr" -R "$repo" >"$diff" 2>"$W/gh-diff.err"; then printf 'unknown'; return 0; fi
+    if ! gh pr diff "$pr" -R "$repo" >"$diff.part" 2>"$W/gh-diff.err"; then : >"$diff.failed"; printf 'unknown'; return 0; fi
+    mv "$diff.part" "$diff"
   fi
   sec="$(awk -v f="$path" '/^diff --git /{on = ($4 == "b/" f)} on {print}' "$diff")"
   case "$sec" in ""|*"new file mode"*|*"Binary files "*) printf 'whole'; return 0;; esac

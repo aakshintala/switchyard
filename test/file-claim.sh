@@ -28,6 +28,8 @@ fi
 if [ "$1" = "pr" ] && [ "$2" = "diff" ]; then
   n="$3"
   if [ -n "${GH_DIFF_FAIL_PR:-}" ] && [ "$n" = "$GH_DIFF_FAIL_PR" ]; then
+    # A partial download: some of the diff, then a failure.
+    [ -n "${GH_DIFF_DIR:-}" ] && [ -f "$GH_DIFF_DIR/$n.diff" ] && head -n 9 "$GH_DIFF_DIR/$n.diff"
     echo "stub gh: diff failure" >&2
     exit 1
   fi
@@ -221,10 +223,13 @@ out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" bash "$FC" $CLAIM two.txt i
 [ "$?" = "1" ] || fail "hunk claim exits 1"
 [ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=10-14,100-102\nREFUSE ins.txt pr#21 hunks=5-6\nREFUSE new.txt pr#21 hunks=whole\nGRANT other.txt new\nfile-claim: 1 granted, 3 refused')" ] || fail "hunk ranges: $out"
 [ "$(grep -cF 'pr diff 21' "$GH_ARGS_LOG")" = "1" ] || fail "holder diff fetched once per PR"
-# A failed diff fetch leaves the refusal standing with hunks=unknown.
-out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" GH_DIFF_FAIL_PR=21 bash "$FC" $CLAIM two.txt 2>/dev/null)" && fail "diff-fail claim exits non-zero"
+# A failed diff fetch, even a partial one, gives hunks=unknown for every path
+# that PR holds, from one fetch, and the refusals stand.
+: >"$GH_ARGS_LOG"
+out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" GH_DIFF_FAIL_PR=21 bash "$FC" $CLAIM two.txt ins.txt new.txt 2>/dev/null)" && fail "diff-fail claim exits non-zero"
 [ "$?" = "1" ] || fail "diff-fail claim exits 1"
-[ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=unknown\nfile-claim: 0 granted, 1 refused')" ] || fail "unknown hunks: $out"
+[ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=unknown\nREFUSE ins.txt pr#21 hunks=unknown\nREFUSE new.txt pr#21 hunks=unknown\nfile-claim: 0 granted, 3 refused')" ] || fail "unknown hunks: $out"
+[ "$(grep -cF 'pr diff 21' "$GH_ARGS_LOG")" = "1" ] || fail "failed diff fetched once per PR"
 
 # A colliding path after the first 100 is returned by the paginated REST read.
 R="$(fresh)"
