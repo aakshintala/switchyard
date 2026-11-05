@@ -7,6 +7,7 @@ set -euo pipefail
 usage() {
   printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <id>]
          (--owner-approved <id> is an alias for --ruling <id>)\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
+  printf '       tkt-plan <state> triaged --comment <id>\n' >&2
   exit 2
 }
 
@@ -82,7 +83,7 @@ plan_verdict_ok() {
     stored=skipped
     stored_base="$base"
   fi
-  if [ "$stored" = ok ]; then
+  if [ "$stored" = ok ] || [ "$stored" = triaged ]; then
     [ "$stored_base" = "$base" ] && return 0
     while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
     if git -C "$worktree" merge-base --is-ancestor "$stored_base" "$base" 2>/dev/null &&
@@ -94,7 +95,7 @@ plan_verdict_ok() {
   fi
   case "$stored" in
     "") verdict_refusal=none ;;
-    ok|skipped) verdict_refusal=stale ;;
+    ok|triaged|skipped) verdict_refusal=stale ;;
     *) verdict_refusal="$stored" ;;
   esac
   [ -n "$stored" ] || stored=none
@@ -243,6 +244,7 @@ do_verify() {
     --model) [ $# -ge 2 ] || usage; model="$2"; shift 2;; *) usage;; esac; done
   t set plan_verdict ""
   t set plan_verdict_base ""
+  t set plan_triage_comment ""
   load_plan
   files=()
   while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
@@ -272,8 +274,8 @@ do_verify() {
     fi
   fi
   if [ "$drift" -eq 0 ]; then
-    [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT round=$round confirm=done" 1 "the confirm round is used; send the open lines to triage" "$(open_lines)"
-    [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan confirm --edits <file>, or send the open lines to triage" "$(open_lines)"
+    [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT round=$round confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+    [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan $state confirm --edits <file>, or after triage answers every open line run tkt-plan $state triaged --comment <id>" "$(open_lines)"
   fi
   model="$(vmodel "$model")" || exit 2
   args=(PLAN="$plan" BASE="$base" --model "$model")
@@ -328,7 +330,7 @@ do_confirm() {
     if grant_pending; then
       granted=1
     else
-      emit "ROUND-LIMIT confirm=done" 1 "the confirm round is used; send the open lines to triage" "$(open_lines)"
+      emit "ROUND-LIMIT confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
     fi
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
@@ -356,6 +358,7 @@ do_confirm() {
   runjob confirm "$cbrief" "$rep" PLAN="$plan" BASE="$base" EDITS="@$edits" EXTRA="@$xfile" --model "$cmodel"
   if [ "$REC" -eq 0 ]; then t set plan_verdict ok; else t set plan_verdict lines; fi
   t set plan_verdict_base "$base"
+  t set plan_triage_comment ""
   if [ "$granted" -eq 1 ]; then t set granted_used 1; fi
   t set last_report "$rep"
   t set confirmed_for "$(ronum)"
@@ -394,7 +397,27 @@ do_grant() {
   t set granted_comment "$comment"
   t set granted_used ""
   t add grant "round=$grant_round by=$who via=$via comment=$comment ruling=$ruling"
-  emit "SET grant=$who:$comment" 0
+  emit "SET grant=$who:$comment" 0 "next: tkt-plan $state confirm --edits <file>"
+}
+
+do_triaged() {
+  comment=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --comment) [ $# -ge 2 ] || usage; comment="$2"; shift 2;;
+    *) usage;; esac; done
+  case "$comment" in
+    ""|*[!0-9]*) echo "tkt-plan: comment id must contain only digits" >&2; exit 2;;
+  esac
+  round="$(ronum)"
+  confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
+  if [ -z "$confirmed_for" ] && [ "$round" -lt 2 ]; then
+    emit "TRIAGED-REFUSED reason=rounds-open" 1
+  fi
+  load_plan
+  t set plan_verdict triaged
+  t set plan_verdict_base "$base"
+  t set plan_triage_comment "$comment"
+  emit "SET triaged=$comment" 0
 }
 
 do_post() {
@@ -429,12 +452,12 @@ do_set() {
   t set plan "$plan"; t set pack "$pack"
   # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
   if [ "$old_plan" != "$plan" ]; then
-    t set plan_verdict ""; t set plan_verdict_base ""
+    t set plan_verdict ""; t set plan_verdict_base ""; t set plan_triage_comment ""
     t set verifier_round 0; t set confirmed_for ""; t set verified_base ""
     t set granted_by ""; t set granted_comment ""; t set granted_used ""; t set granted_owner ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
   elif [ "$no_verifier" -eq 0 ] && [ "$(t get plan_verdict 2>/dev/null || true)" = skipped ]; then
-    t set plan_verdict ""; t set plan_verdict_base ""
+    t set plan_verdict ""; t set plan_verdict_base ""; t set plan_triage_comment ""
   fi
   stored_verdict="$(t get plan_verdict 2>/dev/null || true)"
   if [ "$no_verifier" -eq 1 ] && { [ -z "$stored_verdict" ] || [ "$stored_verdict" = skipped ]; }; then
@@ -452,6 +475,7 @@ do_replan() {
   # round non-empty and tkt-build refuses loudly instead of reusing a stale slot.
   t set plan_verdict ""
   t set plan_verdict_base ""
+  t set plan_triage_comment ""
   t set job.lane ""
   t set job.fix1 ""
   t set job.fix2 ""
@@ -463,4 +487,4 @@ do_replan() {
 }
 
 case "$sub" in
-  verify) do_verify "$@";; confirm) do_confirm "$@";; grant-round) do_grant "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac
+  verify) do_verify "$@";; confirm) do_confirm "$@";; grant-round) do_grant "$@";; triaged) do_triaged "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac

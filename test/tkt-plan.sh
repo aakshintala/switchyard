@@ -794,12 +794,15 @@ jobs_before="$(grep -c '^job|' "$T/stub.log")"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "grant-extra verify before grant exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify before grant"
+grep -Fq "if no grant is recorded, run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits <file>; after triage answers every open line, run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "verify ROUND-LIMIT names the grant and triaged paths"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "grant-extra confirm before grant exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm before grant"
+grep -Fq "if no grant is recorded, run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits <file>; after triage answers every open line, run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "confirm ROUND-LIMIT names the grant and triaged paths"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "limits before grant start no job"
 run_plan grant-round --by switchyard --comment 1234
 [ "$RC" -eq 0 ] || fail "grant-extra grant exits 0"
+grep -Fq "next: tkt-plan $S confirm --edits <file>" <<<"$OUT" || fail "grant success names confirm as the next command"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "pending grant does not unlock verify"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify with pending grant"
@@ -817,6 +820,55 @@ run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "confirm after granted confirm exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm after granted confirm"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 1))" ] || fail "limits after granted confirm start no job"
+
+# --- triaged records a plan verdict only after confirm or exhausted rounds ---
+setup_case triaged-before-round-limit
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 1 || fail "triaged-before-round-limit seed round"
+run_plan triaged --comment 123456
+[ "$RC" -eq 1 ] || fail "triaged before the confirm round or round limit exits 1"
+expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=rounds-open log=*" "triaged before round limit"
+[ -z "$(state_get plan_triage_comment)" ] || fail "triaged refusal does not record a comment"
+
+# A used confirm round is an alternate eligibility path, even before round 2.
+setup_case triaged-after-confirm
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 1 || fail "triaged-after-confirm seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 1 || fail "triaged-after-confirm seed confirm"
+run_plan triaged --comment 234567
+[ "$RC" -eq 0 ] || fail "triaged after confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_plan_verdict triaged "$(cat "$CDIR/base")" "triaged after confirm"
+[ "$(state_get plan_triage_comment)" = 234567 ] || fail "triaged after confirm records the comment id"
+
+# Exhausting both Verifier rounds lets triage answer open lines without another round.
+setup_case triaged-post
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-post seed rounds"
+run_plan triaged --comment 345678
+[ "$RC" -eq 0 ] || fail "triaged after round limit exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_plan_verdict triaged "$(cat "$CDIR/base")" "triaged after round limit"
+[ "$(state_get plan_triage_comment)" = 345678 ] || fail "triaged records the numeric comment id"
+run_plan post
+[ "$RC" -eq 0 ] || fail "triaged verdict permits post (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "triaged verdict permits post"
+
+setup_case triaged-invalid-comment
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-invalid-comment seed rounds"
+run_plan triaged --comment 12x
+[ "$RC" -eq 2 ] || fail "triaged rejects a non-numeric comment id"
+grep -Fq 'tkt-plan: comment id must contain only digits' "$CDIR/stderr.txt" || fail "triaged invalid comment explains the numeric requirement"
+
+# The accepted triaged verdict is stale when the plan's Base changes.
+setup_case triaged-stale
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-stale seed rounds"
+run_plan triaged --comment 456789
+[ "$RC" -eq 0 ] || fail "triaged-stale records its verdict"
+set_plan_base 0000000000000000000000000000000000000000
+run_plan post
+[ "$RC" -eq 1 ] || fail "triaged verdict with changed Base is refused"
+expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "triaged verdict with changed Base"
 
 setup_case grant-ask
 rebase_plan
@@ -901,6 +953,7 @@ grep -q "slot=verifier-r2" "$T/stub.log" || fail "second ASK uses slot verifier-
 run_plan verify
 [ "$RC" -eq 1 ] || fail "ROUND-LIMIT after two ASKs exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "ROUND-LIMIT after two ASKs"
+grep -Fq "run tkt-plan $S confirm --edits <file>, or after triage answers every open line run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "round limit names confirm and triaged paths"
 # Contract: docs/agents/workflow.md:7: ROUND-LIMIT dispatches no additional job.
 [ "$(grep -c '^job|' "$T/stub.log")" = "$((jobs_before + 2))" ] || fail "ROUND-LIMIT after two ASKs starts no third job"
 printf 'ok' >"$T/mode"
@@ -1578,7 +1631,7 @@ grep -q "cannot read extra file: $CDIR/nope.md" "$CDIR/stderr.txt" || fail "tick
 [ "$(grep -c '^gh|' "$T/gh.log" || true)" = "$gh_before" ] || fail "ticket-bad-extra reads no ticket"
 
 # A ticket read that fails: exit 2 with the ticket message, no job, and only
-# the verifier verdict pair cleared.
+# the verifier verdict metadata cleared.
 # $1 is the case, $2 the gh mode, $3 (optional) the seeded verifier_round.
 ticket_fail_case() {
   setup_case "$1"
@@ -1588,7 +1641,7 @@ ticket_fail_case() {
   bash "$TKT_STATE" "$S" set job.verifier-r1 j-keep || fail "$1 seed job"
   bash "$TKT_STATE" "$S" set plan_verdict ok || fail "$1 seed verdict"
   bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "$1 seed verdict base"
-  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' "$S" >"$CDIR/expected.state"
+  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_triage_comment=' "$S" >"$CDIR/expected.state"
   printf '%s' "$2" >"$T/ghmode"
   jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
   run_plan verify
@@ -1596,8 +1649,8 @@ ticket_fail_case() {
   [ "$RC" -eq 2 ] || fail "$1 exits 2 (rc=$RC)"
   grep -q "tkt-plan: cannot read ticket text for switchyard#518" "$CDIR/stderr.txt" || fail "$1 names the ticket"
   [ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "$1 starts no job"
-  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' "$S" >"$CDIR/actual.state"
-  cmp -s "$CDIR/actual.state" "$CDIR/expected.state" || fail "$1 clears only the verdict pair"
+  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_triage_comment=' "$S" >"$CDIR/actual.state"
+  cmp -s "$CDIR/actual.state" "$CDIR/expected.state" || fail "$1 clears only the verdict metadata"
   [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-keep" ] || fail "$1 keeps the job slot"
 }
 

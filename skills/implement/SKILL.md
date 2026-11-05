@@ -105,6 +105,8 @@ Follow `planning` steps 1–5. When a worker writes the plan, fill `../planning/
 
 Done when the lane brief is filled.
 
+When triage answers every open planning line, record it with `tkt-plan <state> triaged --comment <id>` using the numeric ticket comment id. `confirm --edits <file>`, not `verify`, consumes a grant-round.
+
 ### 4. Lane
 
 **Stale-plan check.** A plan goes stale when `origin/main` changes a file it names. Before each Verifier round and before dispatching a lane, run `git diff --stat <the plan's Base line>...origin/main -- <every path under Files>` (three dots: only what `main` changed since the base, never a re-plan's own commits). Empty output means the plan is current, even when the SHAs differ: go on. Otherwise revise the tasks that touch the changed files against the current base, update the Base line, and send the plan through `planning` step 3; dispatch once the Verifier passes. A plan with no Base line takes its newest plan comment's `updatedAt`: `git log --oneline origin/main --since=<updatedAt> -- <every path under Files>`. After a stale-base revision with the Verifier budget spent, save the revised plan to a new path and run `tkt-plan <state> set` on it, which resets the Verifier counters (`planning` step 3); a ruling-only revision takes no new round.
