@@ -140,7 +140,7 @@ shim_cmd() {
     shift
   done
   shift
-  CMD=(env -i PATH="$BASEPATH" HOME="$T/home" FAKE_DIR="$r"
+  CMD=(env -i PATH="$BASEPATH" HOME="$T/home" TMPDIR=/tmp FAKE_DIR="$r"
     ${envs[@]+"${envs[@]}"} "$T/shims/cargo" "$@")
 }
 
@@ -191,7 +191,13 @@ expect_no_slot_dir() {
 # deadline: the watchdog bounds a hang, and a waiter that exits first gives EOF.
 expect_err_line() {
   local line
-  IFS= read -r -u 9 line || fail "no stderr line, want [$1]"
+  while IFS= read -r -u 9 line; do
+    case "$line" in
+      "python3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead") continue ;;
+    esac
+    break
+  done
+  [ -n "${line:-}" ] || fail "no stderr line, want [$1]"
   ERR_SEEN+="$line"$'\n'
   [ "$line" = "$1" ] || fail "stderr line [$line], want [$1]"
 }
@@ -200,9 +206,14 @@ expect_err_line() {
 # collects any line not yet read; the collected lines must be exactly one
 # waiting line. R is named for the callers' readability; the lines come from fd 9.
 expect_waiter_log() {
-  local rest
-  rest="$(cat <&9)"
-  [ -z "$rest" ] || ERR_SEEN+="$rest"$'\n'
+  local rest="" line
+  while IFS= read -r -u 9 line; do
+    case "$line" in
+      "python3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead") continue ;;
+    esac
+    rest+="$line"$'\n'
+  done
+  [ -z "$rest" ] || ERR_SEEN+="$rest"
   [ "$ERR_SEEN" = $'cargo-slot: waiting\n' ] ||
     fail "waiter stderr is [$ERR_SEEN], want one waiting line"
 }
@@ -265,6 +276,33 @@ mkdir -p "$T/cwd/tools"
 printf '#!/bin/sh\n: >"$FAKE_DIR/cwd-ran"\n' >"$T/cwd/cargo"
 printf '#!/bin/sh\n: >"$FAKE_DIR/tools-ran"\n' >"$T/cwd/tools/cargo"
 chmod 755 "$T/cwd/cargo" "$T/cwd/tools/cargo"
+
+# CARGO_SLOT_REAL, when valid, wins over markerless wrappers added later to
+# PATH. Invalid values leave the existing PATH search in place.
+mkdir -p "$T/wrapper"
+cat >"$T/wrapper/cargo" <<'WRAPPER'
+#!/usr/bin/env bash
+: >"$FAKE_DIR/wrapper-ran"
+exit 88
+WRAPPER
+chmod 755 "$T/wrapper/cargo"
+
+new_run cargo-slot-real
+cargo_as "$R" PATH="$T/shims:$T/wrapper:$T/real:$T/py:/usr/bin:/bin" \
+  CARGO_SLOT_REAL="$T/real/cargo" -- build "a b" ""
+rc=$?
+[ "$rc" = 0 ] || fail "CARGO_SLOT_REAL: exit $rc, want 0 from the configured real cargo"
+[ ! -e "$R/wrapper-ran" ] || fail "CARGO_SLOT_REAL ran a markerless PATH wrapper"
+expect_build_args "$R"
+
+for value in "$T/missing/cargo" "$T/shims/cargo"; do
+  new_run "cargo-slot-real-fallback-${value##*/}-$(basename "$(dirname "$value")")"
+  cargo_as "$R" PATH="$T/shims:$T/wrapper:$T/real:$T/py:/usr/bin:/bin" \
+    CARGO_SLOT_REAL="$value" -- build "a b" ""
+  rc=$?
+  [ "$rc" = 88 ] || fail "invalid CARGO_SLOT_REAL [$value]: exit $rc, want PATH wrapper status 88"
+  [ -e "$R/wrapper-ran" ] || fail "invalid CARGO_SLOT_REAL [$value] did not fall back to PATH"
+done
 
 new_run nocargo
 env -i PATH="$T/shims:$T/py" HOME="$T/home" FAKE_DIR="$R" \

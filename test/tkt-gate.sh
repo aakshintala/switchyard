@@ -22,6 +22,7 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null T
+unset CARGO_SLOT_REAL
 
 # Stub plan-gate: print the canned gate command for the case.
 cat >"$T/bin/plan-gate" <<EOF
@@ -67,6 +68,7 @@ cat >"$T/bin/cargo" <<EOF
 #!/usr/bin/env bash
 printf 'held=%s\n' "\${CARGO_SLOT_HELD-unset}" >"$T/cargo-held"
 printf 'threads=%s\n' "\${NEXTEST_TEST_THREADS-unset}" >"$T/cargo-threads"
+printf 'args=%s\n' "\$*" >"$T/cargo-args"
 EOF
 chmod +x "$T/bin/cargo"
 
@@ -178,6 +180,38 @@ unset CARGO_SLOTS CARGO_SLOT_DIR CARGO_SLOT_TEST_CORES
 [ "$RC" -eq 0 ] || fail "cargo-slot PASS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 [ "$(cat "$T/cargo-held")" = "held=1" ] || fail "tkt-gate cargo did not hold a slot"
 [ "$(cat "$T/cargo-threads")" = "threads=12" ] || fail "tkt-gate nextest did not get the per-slot thread cap"
+
+# The gate exports the cargo found before installing its shim. A gate command
+# that adds a markerless cargo wrapper later on PATH still reaches that cargo.
+cat >"$T/cargo-slot-gate.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${CARGO_SLOT_REAL-unset}" >"$T/cargo-slot-real"
+shim="$(command -v cargo)"
+mkdir -p "$T/markerless"
+cat >"$T/markerless/cargo" <<'STUB'
+#!/usr/bin/env bash
+: >"$T/markerless-ran"
+exit 88
+STUB
+chmod +x "$T/markerless/cargo"
+PATH="$T/markerless:$PATH" "$shim" build
+EOF
+chmod +x "$T/cargo-slot-gate.sh"
+setup_case cargo-slot-real
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+printf 'bash %s\n' "$T/cargo-slot-gate.sh" >"$T/gate-cmd"
+export CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/cargo-slots"
+run_gate --expect-head "$H"
+unset CARGO_SLOTS CARGO_SLOT_DIR
+[ "$RC" -eq 0 ] || fail "CARGO_SLOT_REAL integration exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$T/cargo-slot-real")" = "$T/bin/cargo" ] ||
+  fail "tkt-gate exported [$(cat "$T/cargo-slot-real")], want pre-shim cargo $T/bin/cargo"
+[ "$(cat "$T/cargo-args")" = "args=build" ] || fail "configured real cargo did not receive the build"
+[ ! -e "$T/markerless-ran" ] || fail "markerless cargo wrapper ran before CARGO_SLOT_REAL"
 
 # --- PASS with no new commits: an empty diff and an empty history ---
 setup_case pass-empty
