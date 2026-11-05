@@ -12,7 +12,8 @@
 #        pattern, never reported), and `/`, `.`,
 #        `..` or a bare extension. A token with one `{a,b}` group is checked once
 #        per alternative; with more than one group it is skipped. A `path::symbol`
-#        token is split and only the path half is checked.
+#        token checks its path and symbol at REV. A file:N or file:A-B beside
+#        a backticked symbol must hold it; `path`, "heading" must name a heading.
 #        1. A path (a `/` or a source or doc extension) resolves at REV: by full
 #           path, a directory by its trailing `/`, or by a suffix that names exactly
 #           one file. A suffix naming two or more files resolves but is left out of
@@ -27,9 +28,9 @@
 #           A directory counts as in Files when a Files path starts with it.
 #           A Files entry ending in `/` covers every path under it, and a Files
 #           entry holding `*` covers every path it matches.
-#        A backticked token outside the `## Files` list is never checked for
-#        naming a code symbol: prose may cite any name. The Verifier still
-#        reads the plan for wrong names.
+#        Uncited prose symbols are not checked for existence. Symbols in Files,
+#        Tasks and Red commit (except new or read-only lines) get a completeness
+#        sweep: sites outside Files are warnings on stderr, with no exit change.
 #        Exit 0, nothing printed: clean. Exit 1: one line per problem on stdout,
 #        each ending with the fix it accepts.
 #        Exit 2 on bad usage, an unreadable plan, no Base line and no --base, or a
@@ -139,13 +140,75 @@ check_path() {
   return 0
 }
 
+# check_citation TOKEN: verify an adjacent quoted symbol at the cited base lines.
+check_citation() {
+  local citation="$1" lines symbol content heading
+  [ "$RES_KIND" = found ] || return 0
+  heading="$(awk -v ln="$CUR_LN" -v token="$citation" '
+    NR == ln {
+      n = split($0, a, "`")
+      for (i = 2; i <= n; i += 2) if (a[i] == token) {
+        text = a[i+1]
+        if (text ~ /^[[:space:]]*,[[:space:]]*"[^"]+"/) {
+          sub(/^[[:space:]]*,[[:space:]]*"/, "", text)
+          sub(/".*/, "", text)
+          print text
+        }
+        exit
+      }
+    }' "$plan")"
+  if [ -n "$heading" ]; then
+    content="$(git -C "$dir" show "$rev:$RES")"
+    if ! awk -v heading="$heading" '
+      /^#{1,6}[[:space:]]/ {
+        sub(/^#+[[:space:]]+/, ""); sub(/[[:space:]]+#+[[:space:]]*$/, "")
+        if ($0 == heading) found = 1
+      }
+      END { exit !found }' <<<"$content" && ! seen "h:$RES:$heading"; then
+      problem "missing heading: $RES, \"$heading\": correct the citation"
+    fi
+  fi
+  case "$citation" in
+    *::*)
+      symbol="${citation#*::}"
+      content="$(git -C "$dir" show "$rev:$RES")"
+      if ! grep -Fq -- "${symbol%()}" <<<"$content" && ! seen "s:$citation:$symbol"; then
+        problem "missing symbol: $citation does not contain $symbol: correct the citation"
+      fi
+      return 0 ;;
+  esac
+  [[ $citation =~ :([0-9]+)(-([0-9]+))?$ ]] || return 0
+  lines="${BASH_REMATCH[1]},${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}"
+  symbol="$(awk -v ln="$CUR_LN" -v token="$citation" '
+    NR == ln {
+      n = split($0, a, "`")
+      for (i = 2; i <= n; i += 2) if (a[i] == token) {
+        before = (i > 2 && a[i-2] ~ /^[A-Za-z_][A-Za-z0-9_:]*(\(\))?$/)
+        after = (i + 2 <= n && a[i+2] ~ /^[A-Za-z_][A-Za-z0-9_:]*(\(\))?$/)
+        if (before && (!after || length(a[i-1]) <= length(a[i+1]))) print a[i-2]
+        else if (after) print a[i+2]
+        exit
+      }
+    }' "$plan")"
+  [ -n "$symbol" ] || return 0
+  handle_token symbol "$symbol"
+  content="$(git -C "$dir" show "$rev:$RES" | sed -n "${lines}p")"
+  if ! grep -Fq -- "${symbol%()}" <<<"$content" && ! seen "s:$citation:$symbol"; then
+    problem "missing symbol: $citation does not contain $symbol: correct the citation"
+  fi
+}
+
 # handle_token KIND VALUE: the expand_token callback replacing check_token's dispatch.
 # A glob is already recorded as a cover pattern by expand_token itself.
-# A symbol half of a token is never checked: prose may cite any name.
+# Standalone symbols are collected only for the advisory completeness sweep.
 handle_token() {
   case "$1" in
-    glob|symbol) return 0 ;;
-    path) check_path "$2" ;;
+    glob) return 0 ;;
+    symbol)
+      case "$CUR_SEC:$CUR_READ:$CUR_NEW" in
+        files:0:0|tasks:0:0|red:0:0|files:0:3|tasks:0:3|red:0:3) SYMBOLS="$SYMBOLS${2%()}"$'\n' ;;
+      esac ;;
+    path) check_path "$2"; check_citation "$tok" ;;
   esac
   return 0
 }
@@ -197,6 +260,7 @@ SEEN="|"
 FILES="|"
 GLOBS=""
 TASKS=""
+SYMBOLS=""
 
 while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW CUR_READ tok; do
   [ -n "$tok" ] || continue
@@ -211,6 +275,19 @@ while IFS=$'\t' read -r p ln; do
     problem "outside Files: $p (line $ln): add it to Files, or mark the line (reads) if the task only reads it"
   fi
 done <<<"$TASKS"
+
+# Search the base for changed symbols; missing Files coverage is advisory only.
+while IFS= read -r symbol; do
+  [ -n "$symbol" ] || continue
+  if seen "scan:$symbol"; then continue; fi
+  while IFS= read -r site; do
+    [ -n "$site" ] || continue
+    site="${site#"$rev:"}"
+    if ! covered "$site" && ! seen "w:$symbol:$site"; then
+      printf 'warning: %s occurs outside Files: %s\n' "$symbol" "$site" >&2
+    fi
+  done <<<"$(git -C "$dir" grep -l -F -w -e "$symbol" "$rev" -- || true)"
+done <<<"$SYMBOLS"
 
 # The Outcome line names the ticket's end state: pr (the default when the line
 # is absent) or measurement. Any other value is a problem on its own line.

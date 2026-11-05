@@ -281,6 +281,7 @@ do_verify() {
   # --extra wins over state extra; the ticket text goes before either.
   [ -n "$extra" ] || extra="$(t get extra 2>/dev/null || true)"
   ticket_extra "$xfile" "$extra"
+  printf '\nWhen the plan passes, the report must start with this exact first line, with nothing before or after it on that line:\n\nPLAN OK\n' >>"$xfile"
   args+=(EXTRA="@$xfile")
   # A failed round leaves its job id behind while the round counter stays
   # put; without this reset the next verify would only re-watch the old job.
