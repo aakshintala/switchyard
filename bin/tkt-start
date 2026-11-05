@@ -3,7 +3,7 @@
 # miss run plan-sweep plus the preflight job. Only a sweep rc 1 listing unresolved
 # tokens still preflights; any other sweep failure exits with its code. No --files
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
-# The preflight report ends with `Core items: <n>` and `Non-blocking items: <n>` field lines; tkt-start reads the last such lines. A core item a ruling already settles is not counted in the fields.
+# The preflight report carries `Core items: <n>` and `Non-blocking items: <n>` field lines just before its STATUS line; tkt-start reads the last such lines. A core item a ruling already settles is not counted in the fields.
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # --part N archives the prior state after its PR merges; merged-PR head drift tells you the next --part.
 # Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]

@@ -89,7 +89,7 @@ setup() {
   : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"; : >"$T/prstate"; printf '[]\n' >"$T/prlist"
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
-  printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\n' >"$T/jobout"
+  printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
   ORIGIN="$CDIR/origin.git"; SEED="$CDIR/seed"
   git init -q --bare "$ORIGIN"; git init -q "$SEED"; git -C "$SEED" remote add origin "$ORIGIN"
