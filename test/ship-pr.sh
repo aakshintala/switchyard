@@ -1332,6 +1332,20 @@ grep -q 'gh run list.*--commit' "$ST/gh.log" || fail "zero-mutant proof: run lis
 grep -q 'gh run view 417.*--job 901 --log' "$ST/gh.log" || fail "zero-mutant proof: Selection job log read"
 
 setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:417,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-417.json"
+printf 'Selection\tPlan\t2026-11-05T10:47:00.0000000Z mutants in the diff: 0\n' >"$ST/log-417-901.log"
+ship --mutants-gate; expect 0 "mutants gate accepts a prefixed zero-mutant proof"
+
+setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:417,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-417.json"
+printf 'Selection\tPlan\t2026-11-05T10:47:00.0000000Z mutants in the diff: 05\n' >"$ST/log-417-901.log"
+ship --mutants-gate; expect 5 "mutants gate rejects a prefixed 05 count"
+no_merge "mutants gate with prefixed 05"
+grep -q 'mutants gate failed' <<<"$ERR" || fail "prefixed 05 failure names the check: [$ERR]"
+
+setup; echo true >"$ST/draft"
 ship --mutants-gate; expect 5 "mutants gate rejects no label and no proof"
 no_merge "mutants gate without proof"
 grep -q 'mutants gate failed' <<<"$ERR" || fail "mutants gate failure names the check: [$ERR]"
