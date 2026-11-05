@@ -20,6 +20,7 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
 export TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_BOX_HOST=stub-box
+export FW_TREE_CACHE="$T/tree-cache"
 export GH_TREE="$T/tree.json" GH_PRLIST='[]' CLAUDE_JSON='[]' SSH_OUT
 
 cat >"$FW_GH" <<'GH_STUB'
@@ -28,8 +29,12 @@ printf '%s\n' "$*" >>"$T/gh.log"
 case "$1" in
   api)
     case "$2" in
-      repos/*/git/trees/main\?recursive=1)
-        [ "${GH_TREE_FAIL:-0}" = 1 ] && { echo 'tree stub failure' >&2; exit 1; }
+      repos/*/commits/main)
+        [ "${GH_SHA_FAIL:-0}" = 1 ] && { echo "${GH_SHA_ERROR:-sha stub failure}" >&2; exit 1; }
+        printf '%s\n' "$GH_TREE_SHA"
+        ;;
+      repos/*/git/trees/*\?recursive=1)
+        [ "${GH_TREE_FAIL:-0}" = 1 ] && { printf 'partial tree'; echo "${GH_TREE_ERROR:-tree stub failure}" >&2; exit 1; }
         [ -n "${GH_TREE_JSON:-}" ] && { printf '%s' "$GH_TREE_JSON"; exit 0; }
         cat "$GH_TREE"
         ;;
@@ -136,7 +141,7 @@ FC_STUB
 chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$T/stubs/file-claim"
 
 reset_case() {
-  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
+  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$FW_TREE_CACHE"
   mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
   : >"$FW_RUN/roster"
   DSESS_JSON='{"ok":true,"sessions":[]}'
@@ -163,6 +168,8 @@ reset_case() {
 {"type":"blob","path":"src/new_dir/keep.rs"}
 ]}
 TREE
+  GH_TREE_SHA=aaaaaaaa GH_SHA_FAIL=0 GH_SHA_ERROR= GH_TREE_ERROR=
+  export GH_TREE_SHA GH_SHA_FAIL GH_SHA_ERROR GH_TREE_ERROR
   GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL=
   GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT=
   export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT
@@ -245,6 +252,27 @@ set_pr() {
   printf '%s\n' "$path" >"$T/pr/$number.names"
   printf 'diff --git a/%s b/%s\nindex 1111111..2222222 100644\n' "$path" "$path" >"$T/pr/$number.diff"
 }
+
+# Recursive trees are cached by immutable tree SHA across sweeps.
+reset_case
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'tree cache miss'
+[ "$(grep -c 'git/trees/' "$T/gh.log")" = 1 ] || fail 'cache miss fetches once'
+[ -s "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'cache miss writes entry'
+: >"$T/gh.log"
+GH_TREE_FAIL=1
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'tree cache hit'
+! grep -q 'git/trees/' "$T/gh.log" || fail 'cache hit fetches no tree'
+GH_TREE_FAIL=0 GH_TREE_SHA=bbbbbbbb
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'new tree SHA'
+grep -qF 'git/trees/bbbbbbbb?recursive=1' "$T/gh.log" || fail 'new SHA fetches its tree'
+[ -s "$FW_TREE_CACHE/bbbbbbbb.tree" ] || fail 'new SHA writes entry'
+GH_TREE_FAIL=1 GH_TREE_SHA=cccccccc
+run_fg 88 --paths docs/tui.md --dry
+assert_error 'failed fetch' 'ERROR gh trees main tree stub failure '
+[ ! -e "$FW_TREE_CACHE/cccccccc.tree" ] || fail 'failed fetch leaves cache entry'
 
 # A session's shared cwd carries no ticket: map its id through the roster.
 reset_case
@@ -359,7 +387,7 @@ run_fg 77 --pre-plan 'crates/main/**'
 assert_rc 0 'pre-plan reports open PR path counts'
 assert_line 'WARN PRE-PLAN PR #11: 2 files under crates/main/**' 'pre-plan matching PR count'
 assert_line 'WARN PRE-PLAN PR #12: 0 files under crates/main/**' 'pre-plan zero count'
-! grep -q 'git/trees/main' "$T/gh.log" || fail 'pre-plan skips path existence probes'
+! grep -q 'git/trees/' "$T/gh.log" || fail 'pre-plan skips path existence probes'
 
 reset_case
 run_fg 77 --paths=docs/tui.md --dry
@@ -695,6 +723,23 @@ assert_usage 'missing repo value'
 
 # --- Exit 3: each failed or unparseable probe fails closed --------------------
 reset_case
+GH_SHA_FAIL=1
+run_fg 77 --paths docs/tui.md
+assert_error 'tree SHA lookup failure' 'ERROR gh tree SHA main sha stub failure '
+! grep -q 'git/trees/' "$T/gh.log" || fail 'failed SHA lookup fetches no tree'
+
+reset_case
+GH_SHA_FAIL=1 GH_SHA_ERROR='API rate limit exceeded'
+run_fg 77 --paths docs/tui.md
+assert_error 'tree SHA rate limit' 'ERROR gh tree SHA main API rate limit exceeded '
+
+reset_case
+GH_TREE_FAIL=1 GH_TREE_ERROR='API rate limit exceeded'
+run_fg 77 --paths docs/tui.md
+assert_error 'tree fetch rate limit' 'ERROR gh trees main API rate limit exceeded '
+[ ! -e "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'rate limited fetch leaves cache entry'
+
+reset_case
 GH_TREE_FAIL=1
 export GH_TREE_FAIL
 run_fg 77 --paths docs/tui.md
@@ -705,12 +750,14 @@ GH_TREE_JSON='not-json'
 export GH_TREE_JSON
 run_fg 77 --paths docs/tui.md
 assert_error 'unparseable tree' 'ERROR tree of main unreadable or truncated'
+[ ! -e "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'unparseable tree leaves cache entry'
 
 reset_case
 GH_TREE_JSON='{"truncated":true,"tree":[{"type":"blob","path":"docs/tui.md"}]}'
 export GH_TREE_JSON
 run_fg 77 --paths docs/tui.md
 assert_error 'truncated tree' 'ERROR tree of main unreadable or truncated'
+[ ! -e "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'truncated tree leaves cache entry'
 
 reset_case
 GH_TREE_JSON='{"truncated":false,"tree":[]}'
@@ -902,7 +949,7 @@ index 1111111..2222222 100644
 DIFF
 run_fg 77 --paths docs/tui.md --expect docs/tui.md:1:needle --repo other/x --dry
 assert_rc 1 'repo routing'
-grep -qF 'api repos/other/x/git/trees/main?recursive=1' "$T/gh.log" || fail 'tree query uses --repo'
+grep -qF 'api repos/other/x/git/trees/aaaaaaaa?recursive=1' "$T/gh.log" || fail 'tree query uses --repo'
 grep -qF 'api repos/other/x/contents/docs/tui.md?ref=main' "$T/gh.log" || fail 'blob fetch uses --repo'
 [ "$(grep -cF 'api repos/other/x/contents/docs/tui.md?ref=main' "$T/gh.log")" = 2 ] || fail 'suggestion content fetch uses --repo'
 grep -qF 'pr list -R other/x ' "$T/gh.log" || fail 'PR list uses --repo'
@@ -912,7 +959,7 @@ grep -qF 'pr diff 11 -R other/x --allow-escape-sequences' "$T/gh.log" || fail 'P
 reset_case
 run_fg 77 --paths=docs/tui.md --repo=other/x --dry
 assert_rc 0 '--repo equals form'
-grep -qF 'api repos/other/x/git/trees/main?recursive=1' "$T/gh.log" || fail 'repo equals form uses requested repo'
+grep -qF 'api repos/other/x/git/trees/aaaaaaaa?recursive=1' "$T/gh.log" || fail 'repo equals form uses requested repo'
 
 # --- WIDE: a path granted whole without ranges warns, non-blocking ---
 reset_case

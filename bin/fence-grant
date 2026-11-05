@@ -327,7 +327,8 @@ file_claim="${FW_FILE_CLAIM:-$self_dir/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"
 locked=0
-trap 'rm -rf "$tmp"; if [ "$locked" -eq 1 ]; then rmdir "$lockdir" 2>/dev/null || true; fi' EXIT
+cachetmp=""
+trap '[ -z "$cachetmp" ] || rm -f "$cachetmp"; rm -rf "$tmp"; if [ "$locked" -eq 1 ]; then rmdir "$lockdir" 2>/dev/null || true; fi' EXIT
 trap 'exit 130' INT TERM
 
 # Brace-expand whole text ({a,b}, nested, empty, spaced and slashed members).
@@ -517,8 +518,15 @@ if [ -n "$newpaths" ]; then
   done < "$tmp/nitems"
 fi
 
-treejson=$("${FW_GH:-gh}" api "repos/$repo/git/trees/main?recursive=1" 2>"$tmp/treeerr") || { g=$(head -c 200 "$tmp/treeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh trees main $g"; exit 3; }
-printf '%s' "$treejson" | python3 -I -c 'import json,sys
+# Cache the validated path list by immutable tree SHA, never by moving main.
+treesha=$("${FW_GH:-gh}" api "repos/$repo/commits/main" --jq .commit.tree.sha 2>"$tmp/treeerr") || { g=$(head -c 200 "$tmp/treeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh tree SHA main $g"; exit 3; }
+case "$treesha" in ''|*[!0-9a-fA-F]*) echo "ERROR tree SHA of main unreadable"; exit 3;; esac
+cache="${FW_TREE_CACHE:-$HOME/.cache/fence-grant/${repo//\//_}}"
+if [ -f "$cache/$treesha.tree" ]; then
+  cp "$cache/$treesha.tree" "$tmp/tree" || { echo "ERROR cannot read tree cache"; exit 3; }
+else
+  treejson=$("${FW_GH:-gh}" api "repos/$repo/git/trees/$treesha?recursive=1" 2>"$tmp/treeerr") || { g=$(head -c 200 "$tmp/treeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh trees main $g"; exit 3; }
+  printf '%s' "$treejson" | python3 -I -c 'import json,sys
 try:
   d = json.load(sys.stdin)
 except Exception:
@@ -531,7 +539,12 @@ if not isinstance(t, list):
 for e in t:
   if isinstance(e, dict) and e.get("type") == "blob" and e.get("path"):
     print(e["path"])' > "$tmp/tree" || { echo "ERROR tree of main unreadable or truncated"; exit 3; }
-[ -s "$tmp/tree" ] || { echo "ERROR tree of main is empty"; exit 3; }
+  [ -s "$tmp/tree" ] || { echo "ERROR tree of main is empty"; exit 3; }
+  mkdir -p "$cache" || { echo "ERROR cannot create tree cache"; exit 3; }
+  cachetmp=$(mktemp "$cache/.tree.XXXXXX") || { echo "ERROR cannot make tree cache temp file"; exit 3; }
+  cp "$tmp/tree" "$cachetmp" && mv "$cachetmp" "$cache/$treesha.tree" || { echo "ERROR cannot write tree cache"; exit 3; }
+  cachetmp=""
+fi
 
 python3 -I -c 'import sys
 pn, tr, nw = sys.argv[1], sys.argv[2], sys.argv[3]
