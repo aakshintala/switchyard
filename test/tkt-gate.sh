@@ -530,11 +530,26 @@ grep -q "$H" "$CDIR/stderr.txt" || fail "drift names the worktree HEAD"
 gh() {
   echo "gh $*" >>"$T/gh.log"
   if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+    case "$*" in
+      *"--json body"*) cat "$T/pr-body" 2>/dev/null || printf ''; return 0 ;;
+    esac
     h="$(cat "$T/pr-head")"
     case "$*" in
       *--jq*) printf '%s\n' "$h" ;;
       *) printf '{"headRefOid":"%s"}\n' "$h" ;;
     esac
+    return 0
+  fi
+  if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+    if [ -f "$T/gh-edit-fail" ]; then
+      echo "fake gh: edit failed" >&2
+      return 1
+    fi
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--body-file" ]; then cat "$a" >"$T/pr-body"; fi
+      prev="$a"
+    done
     return 0
   fi
   echo "fake gh: unsupported: gh $*" >&2
@@ -735,5 +750,87 @@ run_gate
 expect_verdict "TKT tkt-gate FENCE n=1 log=*" "new-marked"
 grep -qx "stray.txt" <<<"$OUT" || fail "new-marked digest lists stray.txt"
 grep -qx "made.txt" <<<"$OUT" && fail "new-marked digest drops made.txt"
+
+# --- PASS writes a Local gate line directly above Implemented by: ---
+setup_case gate-body
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+printf '%s\n' "$H" >"$T/pr-head"
+printf 'Title\n\nSome text.\nImplemented by: m/a\nCo-authored with Claude Code.\n' >"$T/pr-body"
+: >"$T/gh.log"
+run_gate
+[ "$RC" -eq 0 ] || fail "gate body exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "gate body"
+grep -qx "Local gate: pass at $H (gate-ok)" "$T/pr-body" || fail "gate body writes the Local gate line: [$(cat "$T/pr-body")]"
+[ "$(grep -c '^Local gate:' "$T/pr-body")" -eq 1 ] || fail "gate body writes one Local gate line"
+impl_line="$(grep -n '^Implemented by:' "$T/pr-body" | head -n 1 | cut -d: -f1)"
+gate_line="$(grep -n '^Local gate:' "$T/pr-body" | head -n 1 | cut -d: -f1)"
+[ "$gate_line" -eq "$((impl_line - 1))" ] || fail "gate body puts the line above Implemented by (gate=$gate_line impl=$impl_line)"
+
+# --- a second PASS replaces the earlier Local gate line ---
+{ printf 'Local gate: pass at 0000000000000000000000000000000000000000 (old-cmd)\n'; cat "$T/pr-body"; } >"$T/pr-body.tmp" && mv "$T/pr-body.tmp" "$T/pr-body"
+run_gate
+[ "$RC" -eq 0 ] || fail "gate body replace exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(grep -c '^Local gate:' "$T/pr-body")" -eq 1 ] || fail "second PASS keeps one Local gate line: [$(cat "$T/pr-body")]"
+grep -qx "Local gate: pass at $H (gate-ok)" "$T/pr-body" || fail "second PASS replaces the sha"
+grep -q "0000000000000000000000000000000000000000" "$T/pr-body" && fail "second PASS drops the old sha"
+
+# --- PASS with only body_has set lands above the attribution, which stays last ---
+setup_case gate-body-has
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+bash "$TKT_STATE" "$S" add body_has "Co-authored-by: Claude" || fail "add body_has"
+printf '%s\n' "$H" >"$T/pr-head"
+printf 'Title\n\nSome text.\nCo-authored-by: Claude <noreply@example.com>\n' >"$T/pr-body"
+run_gate
+[ "$RC" -eq 0 ] || fail "gate body-has exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "gate body-has"
+grep -qx "Local gate: pass at $H (gate-ok)" "$T/pr-body" || fail "gate body-has writes the Local gate line: [$(cat "$T/pr-body")]"
+[ "$(grep -c '^Local gate:' "$T/pr-body")" -eq 1 ] || fail "gate body-has writes one Local gate line"
+[ "$(tail -n 1 "$T/pr-body")" = "Co-authored-by: Claude <noreply@example.com>" ] || fail "gate body-has keeps the attribution last: [$(cat "$T/pr-body")]"
+gate_line="$(grep -n '^Local gate:' "$T/pr-body" | head -n 1 | cut -d: -f1)"
+attr_line="$(grep -n '^Co-authored' "$T/pr-body" | head -n 1 | cut -d: -f1)"
+[ "$gate_line" -eq "$((attr_line - 1))" ] || fail "gate body-has puts the line above the attribution (gate=$gate_line attr=$attr_line)"
+
+# --- FAIL leaves the PR body alone ---
+setup_case gate-body-fail
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+printf '%s\n' "$H" >"$T/pr-head"
+printf 'Title\n\nImplemented by: m/a\n' >"$T/pr-body"
+cp "$T/pr-body" "$T/pr-body.before"
+printf 'gate-bad\n' >"$T/gate-cmd"
+run_gate
+[ "$RC" -eq 1 ] || fail "gate body FAIL exits 1"
+expect_verdict "TKT tkt-gate FAIL rc=3 log=*" "gate body FAIL"
+cmp "$T/pr-body.before" "$T/pr-body" || fail "FAIL leaves the body alone"
+
+# --- a body-write failure only warns: PASS still exits 0 ---
+setup_case gate-body-writefail
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set pr"
+printf '%s\n' "$H" >"$T/pr-head"
+printf 'Title\n' >"$T/pr-body"
+: >"$T/gh-edit-fail"
+run_gate
+[ "$RC" -eq 0 ] || fail "write-fail exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "write-fail"
+grep -qi "warning" "$CDIR/stderr.txt" || fail "write-fail warns: [$(cat "$CDIR/stderr.txt")]"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$H" ] || fail "write-fail still sets state head"
+rm -f "$T/gh-edit-fail"
 
 echo "tkt-gate: all cases passed"
