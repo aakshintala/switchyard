@@ -159,8 +159,13 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
       exit 2
     }
     if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
-      echo "tkt-gate: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr $pr head=$pr_head" >&2
-      exit 3
+      if [ "$actual" = "$pr_head" ] && git -C "$worktree" merge-base --is-ancestor "$stored_head" "$actual" >/dev/null 2>&1; then
+        echo "tkt-gate: accepted pushed head drift: state head=$stored_head worktree $worktree HEAD=$actual PR head=$pr_head" >&2
+        tkt set head "$pr_head"
+      else
+        echo "tkt-gate: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr $pr head=$pr_head" >&2
+        exit 3
+      fi
     fi
   elif [ "$stored_head" != "$actual" ]; then
     echo "tkt-gate: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual" >&2
