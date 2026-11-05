@@ -375,37 +375,63 @@ def skip_disabled():
 
 def split_parameters(text):
     # The entries of GIT_CONFIG_PARAMETERS: a blank-separated list of
-    # sq-quoted key=VALUE pairs or bare keys, as git_parse_environment_config
-    # reads them. Returns the dequoted entries, or None when git itself
-    # rejects the value (then the guard inspects nothing, and git dies).
+    # old-style sq-quoted 'key=value' pairs, new-style 'key'='value' pairs
+    # and 'key'= bools, and bare 'key' entries, as parse_config_env_list
+    # reads them. Returns the dequoted entries as key=value or key strings,
+    # or None when git itself rejects the value (then the guard inspects
+    # nothing, and git dies).
     if text == "":
         return []
     entries = []
     i = 0
     n = len(text)
+
+    def read_sq(j):
+        # Dequote one sq-quoted string starting at the opening quote at j;
+        # returns (value, next) or (None, j) when unterminated.
+        j += 1
+        buf = []
+        while True:
+            if j >= n:
+                return None, j
+            char = text[j]
+            if char == "'":
+                if text.startswith("'\\''", j):
+                    buf.append("'")
+                    j += 4
+                    continue
+                j += 1
+                return "".join(buf), j
+            buf.append(char)
+            j += 1
+
     while True:
         if i >= n or text[i] != "'":
             return None
-        i += 1
-        buf = []
-        while True:
-            if i >= n:
-                return None
-            char = text[i]
-            if char == "'":
-                if text.startswith("'\\''", i):
-                    buf.append("'")
-                    i += 4
-                    continue
-                i += 1
-                break
-            buf.append(char)
+        key, i = read_sq(i)
+        if key is None:
+            return None
+        if i < n and text[i] == "=":
+            # New-style 'key'='value' or bool 'key'=.
             i += 1
-        entries.append("".join(buf))
+            if i < n and text[i] == "'":
+                value, i = read_sq(i)
+                if value is None:
+                    return None
+                if i < n and text[i] not in " \t\n\v\f\r":
+                    return None
+                entries.append(key + "=" + value)
+            elif i >= n or text[i] in " \t\n\v\f\r":
+                entries.append(key)
+            else:
+                return None
+        else:
+            # Old-style 'key=value' or bare 'key'.
+            entries.append(key)
+            if i < n and text[i] not in " \t\n\v\f\r":
+                return None
         if i >= n:
             return entries
-        if text[i] not in " \t\n\v\f\r":
-            return None
         while i < n and text[i] in " \t\n\v\f\r":
             i += 1
         if i >= n:
@@ -442,7 +468,10 @@ def hooks_path_in_parameters():
         return False
     entries = split_parameters(raw)
     if entries is None:
-        return False
+        # Unparseable: git dies, unless the guard cannot even read the
+        # value. Refuse when it names a hooks key rather than let an
+        # unreadable bypass through.
+        return "hookspath" in raw.lower()
     for entry in entries:
         if entry.split("=", 1)[0].strip().lower() == "core.hookspath":
             return True
@@ -491,7 +520,7 @@ def expand_alias(args, real):
     # caller's words after the expansion), or None when no alias applies: no
     # alias is defined, a builtin wins over one as git itself resolves them,
     # or the chain leaves git's own hands (a shell alias, an external
-    # command, a flag first word, a cycle, or a value that will not split).
+    # command, a cycle, or a value that will not split).
     _, sub, rest, subidx = parse_globals(args, [])
     if sub is None:
         return None
@@ -513,8 +542,14 @@ def expand_alias(args, real):
     current = words + list(rest)
     seen = {sub}
     for _ in range(ALIAS_ROUNDS):
-        first = current[0]
-        if first in seen or first.startswith("-"):
+        # An expansion may start with global options, which git applies
+        # before the subcommand; find it the same way the call's own
+        # globals are parsed.
+        _, first, _, firstidx = parse_globals(current, [])
+        if first is None:
+            # Globals only: check the whole expansion as if typed.
+            return prefix + current
+        if first in seen:
             return None
         seen.add(first)
         if first in builtins:
@@ -528,7 +563,7 @@ def expand_alias(args, real):
             return None
         if not words:
             return None
-        current = words + current[1:]
+        current = current[:firstidx] + words + current[firstidx + 1:]
     return None
 
 

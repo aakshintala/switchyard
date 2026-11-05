@@ -417,6 +417,21 @@ unset LANE_ENV
 LANE_ENV=(GIT_CONFIG_PARAMETERS="bogus")
 passed commit -m x
 unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath'='/dev/null'")
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath'='/dev/null'")
+passed status
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'user.name'='bob' 'core.hooksPath'='/x'")
+refused push
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath'=")
+refused commit -m x
+unset LANE_ENV
+LANE_ENV=(GIT_CONFIG_PARAMETERS="'core.hooksPath'='/x'extra")
+refused commit -m x
+unset LANE_ENV
 
 LANE_ENV=(SKIP=flake8)
 refused commit -m x
@@ -453,6 +468,10 @@ refused aa
 unset LANE_ENV
 LANE_ENV=(STUB_ALIAS_ci='commit')
 refused -c core.hooksPath=/x ci
+unset LANE_ENV
+LANE_ENV=(STUB_ALIAS_probe='-c core.hooksPath=/dev/null commit --no-verify')
+refused probe
+grep -q '<lookup alias.probe>' "$T/lookups" || fail "alias probe: no lookup ran"
 unset LANE_ENV
 LANE_ENV=(STUB_ALIAS_lg='log --oneline')
 passed lg
