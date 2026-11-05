@@ -68,6 +68,13 @@ plan_outcome() {
   awk '/^Outcome:[[:space:]]/ { gsub(/`/, "", $2); print $2; exit }' "$1"
 }
 
+# _plan_read_mark: awk regex source for the "(read)" mark, shared by
+# plan_records and the Files entry reader so both spot the same mark in any
+# case. plan_records also honours the whole words reads, read-only and
+# fixture, which stay line-level task marks, not Files entry marks: prose
+# after a Files token (such as "reads `other`") never flips the entry.
+_plan_read_mark='\(read\)'
+
 # plan_records PLAN: one record per backticked token outside fenced blocks and
 # outside `## Gate`: section, line number, new mark (0 none, 1 new, 2
 # new-confirmed, 3 removed), read mark, the token.
@@ -91,7 +98,7 @@ plan_records() {
       else if (lower ~ /(^|[^a-z0-9_])new([^a-z0-9_]|$)/) newmark = 1
       else if (lower ~ /(^|[^a-z0-9_])(removed|remove|deleted|delete)([^a-z0-9_]|$)/) newmark = 3
       else newmark = 0
-      isread = (tolower($0) ~ /(^|[^a-z0-9_])(reads|read-only|fixture)([^a-z0-9_]|$)/)
+      isread = (tolower($0) ~ /(^|[^a-z0-9_])(reads|read-only|fixture)([^a-z0-9_]|$)/ || tolower($0) ~ /'"$_plan_read_mark"'/)
       n = split($0, parts, "`")
       for (i = 2; i <= n; i += 2)
         if (parts[i] != "") printf "%s\t%d\t%d\t%d\t%s\n", cur, NR, newmark, isread, parts[i]
@@ -193,16 +200,22 @@ covered() {
 
 # _plan_files_awk MODE: the `## Files` entry reader. A Files entry is a list item
 # or table row whose first backticked token follows its marker directly; prose
-# lines and prose before the token contribute nothing. MODE "lines" prints
+# lines and prose before the token contribute nothing. An entry is a read when
+# its line holds the shared "(read)" mark after the token, or when it sits
+# under a Reads sub-heading of Files; anything else is a write, so a line
+# that cannot be classified is claimed. MODE "lines" prints
 # "N<TAB>token" (N the plan line), "entries" prints "token<TAB>read|write",
 # "writes" skips read-marked entries, and other modes print every token.
 _plan_files_awk='
-  /^## Files([[:space:]]|$)/ { f = 1; next }
+  /^## Files([[:space:]]|$)/ { f = 1; readsec = 0; next }
   f && /^## / { exit }
+  f && tolower($0) ~ /^#+[[:space:]]*reads?([-[:space:]:()]|$)/ { readsec = 1; next }
+  f && /^#+[[:space:]]/ { readsec = 0; next }
   f && match($0, /^[[:space:]]*([-*]|\|)[[:space:]]+`[^`]*`/) {
     t = substr($0, RSTART, RLENGTH); sub(/^[^`]*`/, "", t); sub(/`$/, "", t)
     if (t == "") next
-    read = ($0 ~ /\(read\)[[:space:]]*([|][[:space:]]*)?$/)
+    rest = substr($0, RSTART + RLENGTH)
+    read = (readsec || tolower(rest) ~ /'"$_plan_read_mark"'/)
     if (mode == "entries") print t "\t" (read ? "read" : "write")
     else if (mode == "lines") print NR "\t" t
     else if (mode == "writes" && read) next

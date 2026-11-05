@@ -438,6 +438,14 @@ blob="$(claims_blob "$R")"
 [ "$(cut -f1-3 <<<"$blob")" = "$(printf 'y2.txt\tP\tplan\nsub/b.txt\tP\tplan')" ] || fail "valid plan stores its Files paths as plan claims: $blob"
 printf '%s' "$blob" | grep -q "valid.md" && fail "valid plan file itself is not claimed"
 
+# --- --plan-file claims writes only: reads and Reads-section entries stay out ---
+R="$(fresh)"
+{ printf '## Files\n- `w1.txt`\n- `r1.rs` (read) -- reason\n| `r2.rs` | (read) |\n- `u1.txt` does more things\n### Reads (context)\n- `r3.rs`\n'; } >"$PLANS/reads.md"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane P --plan-file "$PLANS/reads.md" --worktree t:dP --repo test/repo 2>/dev/null)" || fail "reads plan exits 0"
+[ "$out" = "$(printf 'GRANT w1.txt new\nGRANT u1.txt new\nfile-claim: 2 granted, 0 refused')" ] || fail "reads plan claims writes only: $out"
+blob="$(claims_blob "$R")"
+[ "$(cut -f1 <<<"$blob" | tr '\n' ' ')" = "w1.txt u1.txt " ] || fail "reads plan stores writes only: $blob"
+
 # --- a claim path holding whitespace is refused, but still releasable ----------
 R="$(fresh)"
 rc=0

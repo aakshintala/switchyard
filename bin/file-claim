@@ -328,10 +328,10 @@ main() {
       if [ -z "$worktree" ]; then worktree="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'unknown'):$(pwd)"; fi
       valid_field "$worktree" || usage
       if [ -n "$plan_file" ]; then
-        # --plan-file takes exactly one plan; its Files entries are the paths to claim.
+        # --plan-file takes exactly one plan; only its Files writes are claimed.
         [ "${#paths[@]}" -eq 0 ] || usage
         [ -f "$plan_file" ] && [ -r "$plan_file" ] || die 2 "cannot read plan file: $plan_file"
-        while IFS= read -r line || [ -n "$line" ]; do paths+=("$line"); done < <(plan_files_pathspecs "$plan_file")
+        while IFS= read -r line || [ -n "$line" ]; do paths+=("$line"); done < <(plan_files_pathspecs "$plan_file" writes)
         [ "${#paths[@]}" -gt 0 ] || die 2 "no paths in the Files section of $plan_file"
       else
         [ "${#paths[@]}" -gt 0 ] || usage
