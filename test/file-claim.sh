@@ -663,6 +663,71 @@ mkdir -p "$D"
 FILE_CLAIM_REMOTE="$D" bash "$FC" $CLAIM a.txt >/dev/null 2>&1 && fail "bad-remote claim exits non-zero"
 [ "$?" = "2" ] || fail "bad-remote claim exits 2"
 
+# --- server-side 'fatal error in commit_refs' is retried, then succeeds -------------------
+R="$(fresh)"
+COMMIT_COUNT="$T/commit-refs-count"
+printf 0 >"$COMMIT_COUNT"
+cat >"$R/hooks/update" <<'HOOK_EOF'
+#!/usr/bin/env bash
+count="$(cat "$COMMIT_HOOK_COUNT")"
+count=$((count + 1))
+printf '%s' "$count" >"$COMMIT_HOOK_COUNT"
+if [ "$count" -le 2 ]; then
+  echo "fatal error in commit_refs" >&2
+  exit 1
+fi
+exit 0
+HOOK_EOF
+chmod +x "$R/hooks/update"
+out="$(COMMIT_HOOK_COUNT="$COMMIT_COUNT" FILE_CLAIM_PUSH_WAIT=0 FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM retry.txt 2>"$T/e-commit-refs")" || fail "commit_refs retry claim exits 0: $(cat "$T/e-commit-refs")"
+[ "$out" = "$(printf 'GRANT retry.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "commit_refs retry lines: $out"
+[ "$(cat "$COMMIT_COUNT")" = "3" ] || fail "commit_refs retried twice then pushed: $(cat "$COMMIT_COUNT")"
+printf '%s' "$(claims_blob "$R")" | grep -q "^retry.txt	L	grant	" || fail "commit_refs retry recorded"
+
+# persistent commit_refs failure exits 2 with the server message after 3 tries.
+R="$(fresh)"
+COMMIT_COUNT2="$T/commit-refs-count2"
+printf 0 >"$COMMIT_COUNT2"
+cat >"$R/hooks/update" <<'HOOK_EOF'
+#!/usr/bin/env bash
+count="$(cat "$COMMIT_HOOK_COUNT")"
+count=$((count + 1))
+printf '%s' "$count" >"$COMMIT_HOOK_COUNT"
+echo "fatal error in commit_refs" >&2
+exit 1
+HOOK_EOF
+chmod +x "$R/hooks/update"
+rc=0
+COMMIT_HOOK_COUNT="$COMMIT_COUNT2" FILE_CLAIM_PUSH_WAIT=0 FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM retry.txt >/dev/null 2>"$T/e-commit-refs-fail" || rc=$?
+[ "$rc" = "2" ] || fail "persistent commit_refs exits 2, got $rc"
+grep -qF 'fatal error in commit_refs' "$T/e-commit-refs-fail" || fail "persistent commit_refs names server message: $(cat "$T/e-commit-refs-fail")"
+[ "$(cat "$COMMIT_COUNT2")" = "3" ] || fail "persistent commit_refs tried 3 times: $(cat "$COMMIT_COUNT2")"
+[ -z "$(claim_tip "$R")" ] || fail "persistent commit_refs writes nothing"
+
+# a permission-style rejection exits 2 after one try.
+R="$(fresh)"
+PERM_COUNT="$T/perm-count"
+printf 0 >"$PERM_COUNT"
+cat >"$R/hooks/update" <<'HOOK_EOF'
+#!/usr/bin/env bash
+count="$(cat "$COMMIT_HOOK_COUNT")"
+count=$((count + 1))
+printf '%s' "$count" >"$COMMIT_HOOK_COUNT"
+echo "permission denied: cannot push to refs/claims/live" >&2
+exit 1
+HOOK_EOF
+chmod +x "$R/hooks/update"
+rc=0
+COMMIT_HOOK_COUNT="$PERM_COUNT" FILE_CLAIM_PUSH_WAIT=0 FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM retry.txt >/dev/null 2>"$T/e-perm" || rc=$?
+[ "$rc" = "2" ] || fail "permission rejection exits 2, got $rc"
+[ "$(cat "$PERM_COUNT")" = "1" ] || fail "permission rejection tried once: $(cat "$PERM_COUNT")"
+[ -z "$(claim_tip "$R")" ] || fail "permission rejection writes nothing"
+
+# invalid push-wait exits 2 like the read wait.
+FILE_CLAIM_PUSH_WAIT=x FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt >/dev/null 2>"$T/e-push-wait"
+[ "$?" = "2" ] || fail "non-numeric FILE_CLAIM_PUSH_WAIT exits 2"
+grep -qF 'FILE_CLAIM_PUSH_WAIT must be a whole number of seconds' "$T/e-push-wait" || fail "invalid FILE_CLAIM_PUSH_WAIT is named"
+
 # --- concurrency: exactly one winner, twenty rounds -----------------------------------------
 # One round of the race: both lanes start in the background before a single
 # wait, exactly as the loop always ran them; only failures gain a dump.
