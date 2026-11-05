@@ -315,14 +315,14 @@ part_notes=(${notes[@]+"${notes[@]}"})
 # With --mutant-job, the branch PR must carry the mutants label, or ship-pr
 # later refuses the draft for lacking it. When the repo defines the label
 # (the same labels read ship-pr checks), add it to the branch's open PR when
-# missing. Lookups are best-effort: no PR yet, or an unreadable list, simply
-# skips. A refused edit fails loud instead of surfacing later as a refusal.
+# missing. No PR yet still skips, but a failed lookup fails loud like a
+# refused edit instead of leaving the PR unlabelled.
 if [ -n "$mutant_job" ]; then
-  branch_pr="$(gh pr list --head "$branch" --repo "$repo" --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+  branch_pr="$(gh pr list --head "$branch" --repo "$repo" --json number --jq '.[0].number // empty' 2>&1)" || fail_step github "$?" "$branch_pr"
   if [ -n "$branch_pr" ]; then
-    repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name' 2>/dev/null || true)"
+    repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name' 2>&1)" || fail_step github "$?" "$repo_labels"
     if grep -qx 'mutants' <<<"$repo_labels"; then
-      pr_labels="$(gh pr view "$branch_pr" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null || true)"
+      pr_labels="$(gh pr view "$branch_pr" --repo "$repo" --json labels --jq '.labels[].name' 2>&1)" || fail_step github "$?" "$pr_labels"
       if ! grep -qx 'mutants' <<<"$pr_labels"; then
         edit_err="$(gh pr edit "$branch_pr" --repo "$repo" --add-label mutants 2>&1)" \
           || fail_step github "$?" "$edit_err"

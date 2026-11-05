@@ -326,11 +326,15 @@ grep -q "state locked by pid $$" "$T/err-live-owner.txt" || fail "live-owner loc
 [ -d "$S8.lock" ] || fail "live-owner lock is left in place"
 
 # A live holder that outlives TKT_STATE_LOCK_WAIT exits 2 naming its pid,
-# and the live lock is left in place.
+# and the live lock is left in place. The holder blocks reading a fifo the
+# test never feeds, so it stays alive for the whole bound by construction
+# instead of racing a sleep.
 SWB="$T/wait-bound.state"
 mkdir "$SWB.lock"
-sleep 30 &
+mkfifo "$SWB.fifo"
+( read -r _ <>"$SWB.fifo" ) &
 bound_holder=$!
+kill -0 "$bound_holder" 2>/dev/null || fail "wait-bound holder starts before its deadline"
 printf '%s %s\n' "$(hostname)" "$bound_holder" >"$SWB.lock/pid"
 if TKT_STATE_LOCK_WAIT=1 bash "$TKT" "$SWB" set k v 2>"$T/err-wait-bound.txt"; then
   bound_rc=0
@@ -342,19 +346,46 @@ wait "$bound_holder" 2>/dev/null || true
 [ "$bound_rc" = "2" ] || fail "live-held lock exits 2 after the wait bound"
 grep -q "$bound_holder" "$T/err-wait-bound.txt" || fail "wait-bound timeout names the holder pid"
 [ -d "$SWB.lock" ] || fail "wait-bound timeout leaves the live lock in place"
-rm -rf "$SWB.lock"
+rm -rf "$SWB.lock" "$SWB.fifo"
 
 # A holder that releases within the bound lets the write succeed, even past
-# the old fixed retry budget of about two seconds.
+# the old fixed retry budget of about two seconds. The holder blocks reading
+# a fifo and is released only after the writer signals it hit the held lock,
+# so the write provably waited on contention rather than on a timer.
 SWR="$T/wait-release.state"
 mkdir "$SWR.lock"
-sleep 3 &
+mkfifo "$SWR.fifo"
+( read -r _ <>"$SWR.fifo" ) &
 release_holder=$!
+kill -0 "$release_holder" 2>/dev/null || fail "wait-release holder starts before its deadline"
 printf '%s %s\n' "$(hostname)" "$release_holder" >"$SWR.lock/pid"
-bash "$TKT" "$SWR" set k v 2>"$T/err-wait-release.txt" || fail "set succeeds once the holder releases within the bound"
+: >"$T/wait-release.sig"
+TKT_STATE_TEST_LOCK_SIGNAL="$T/wait-release.sig" bash "$TKT" "$SWR" set k v 2>"$T/err-wait-release.txt" &
+release_writer=$!
+release_wait=0
+while [ ! -s "$T/wait-release.sig" ] && kill -0 "$release_writer" 2>/dev/null && [ "$release_wait" -lt 500 ]; do
+  sleep 0.01
+  release_wait=$((release_wait + 1))
+done
+if [ ! -s "$T/wait-release.sig" ]; then
+  kill "$release_writer" 2>/dev/null || true
+  wait "$release_writer" 2>/dev/null || true
+  kill "$release_holder" 2>/dev/null || true
+  wait "$release_holder" 2>/dev/null || true
+  fail "wait-release writer signals its held-lock attempt before its deadline"
+fi
+kill -0 "$release_holder" 2>/dev/null || fail "wait-release holder stays alive until the writer signals"
+printf '\n' >"$SWR.fifo"
 wait "$release_holder" 2>/dev/null || true
+if wait_bounded "$release_writer"; then
+  release_writer_rc=0
+else
+  release_writer_rc=$?
+fi
+[ "$release_writer_rc" = "0" ] || fail "set succeeds once the holder releases within the bound"
 [ "$(bash "$TKT" "$SWR" get k)" = "v" ] || fail "wait-then-write stores the value"
 [ ! -e "$SWR.lock" ] || fail "wait-then-write removes the reaped lock"
+rm -f "$SWR.fifo"
 
 # Reads ignore a held write lock.
 S10="$T/read-under-lock.state"

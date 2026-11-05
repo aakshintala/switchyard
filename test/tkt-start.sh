@@ -968,6 +968,7 @@ case " \$* " in
     printf '7\\n'; exit 0 ;;
   *"labels?per_page=100"*)
     printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+    if [ -f "$T/labels-fail" ]; then echo "gh: labels boom" >&2; exit 5; fi
     if [ -f "$T/labels-nomutants" ]; then printf 'bug\\n'; else printf 'bug\\nmutants\\n'; fi
     exit 0 ;;
   *" --json labels "*)
@@ -994,6 +995,9 @@ grep -qF -- 'pr edit' "$T/calls.log" && fail "mutantlabellabeled: no edit when t
 : >"$T/calls.log"; rm -f "$T/pr-labeled"; printf '1' >"$T/edit-fail"; run_start
 want "STEP-FAIL step=github rc=5" 5 mutantlabeleditfail
 rm -f "$T/edit-fail"
+: >"$T/calls.log"; printf '1' >"$T/labels-fail"; run_start
+want "STEP-FAIL step=github rc=5" 5 mutantlabellistfail
+rm -f "$T/labels-fail"
 mv "$T/bin/gh.shared" "$T/bin/gh"
 
 echo "tkt-start: all cases passed"
