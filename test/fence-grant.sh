@@ -1207,6 +1207,13 @@ assert_line 'STALE docs/tui.md by fiber-66' 'stale claim logged'
 [ "$(grep -c '^STALE docs/tui.md by fiber-66$' "$T/out")" = 1 ] || fail 'stale claim logs once'
 assert_line 'WOULD-GRANT docs/tui.md' 'stale claim releases path'
 
+# --- A non-fiber lane's claim is checked with no --ignore-ticket --------------
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tother-lane\tgrant\t0\tt:stub\t\n')"
+export FILE_CLAIM_LIST
+run_fg 88 --paths docs/tui.md --dry
+assert_line 'STALE docs/tui.md by other-lane' 'non-fiber claim is not skipped'
+
 # --- A failed or malformed claims read fails closed -------------------------
 reset_case
 FILE_CLAIM_LIST_FAIL=1

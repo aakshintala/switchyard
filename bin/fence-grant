@@ -767,7 +767,7 @@ _claim_holders() {
     claim_num=""
     case "$claim_lane" in fiber-*) claim_num=$(_lane_num "${claim_lane#fiber-}");; esac
     [ "$claim_num" != "$ticket" ] || continue
-    case " $ignoreticket " in *" $claim_num "*) continue;; esac
+    [ -n "$claim_num" ] && case " $ignoreticket " in *" $claim_num "*) continue;; esac
     live=0
     for ln in $lanes; do [ "$ln" = "$claim_lane" ] && { live=1; break; }; done
     if [ "$live" -eq 0 ]; then
