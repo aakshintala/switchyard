@@ -339,7 +339,20 @@ do_confirm() {
   xfile="$run/$namebase-confirm-extra.md"
   # Confirm has no --extra flag: the state extra, if any, follows the ticket text.
   ticket_extra "$xfile" "$(t get extra 2>/dev/null || true)"
-  if [ "$granted" -eq 1 ]; then t set job.confirm ""; fi
+  if [ "$granted" -eq 1 ]; then
+    t set job.confirm ""
+  else
+    confirm_job="$(t get job.confirm 2>/dev/null || true)"
+    if [ -n "$confirm_job" ]; then
+      confirm_record="$(bash "$script_dir/job-record" "$confirm_job" 2>/dev/null || true)"
+      if [ -n "$confirm_record" ]; then
+        confirm_status="$(jq -r '.result.status // .status // ""' "$confirm_record" 2>/dev/null || true)"
+        if [ -n "$confirm_status" ] && [ "$confirm_status" != RUNNING ]; then
+          t set job.confirm ""
+        fi
+      fi
+    fi
+  fi
   runjob confirm "$cbrief" "$rep" PLAN="$plan" BASE="$base" EDITS="@$edits" EXTRA="@$xfile" --model "$cmodel"
   if [ "$REC" -eq 0 ]; then t set plan_verdict ok; else t set plan_verdict lines; fi
   t set plan_verdict_base "$base"
@@ -360,7 +373,7 @@ do_grant() {
   [ -n "$who" ] && [ -n "$comment" ] || usage
   case "$who$comment$ruling" in *[[:space:]]*) usage;; esac
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
-  [ -n "$confirmed_for" ] || { echo "tkt-plan: no limit reached: the confirm round is still open" >&2; exit 2; }
+  [ -n "$confirmed_for" ] || { echo "tkt-plan: no limit reached: the confirm round is still open; rerun: tkt-plan $state confirm --edits <file>" >&2; exit 2; }
   granted_by="$(t get granted_by 2>/dev/null || true)"
   granted_used="$(t get granted_used 2>/dev/null || true)"
   if [ -n "$granted_by" ] && [ -z "$granted_used" ]; then

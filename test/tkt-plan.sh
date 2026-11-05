@@ -21,6 +21,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-plan.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
+unset DELEGATE_JOBS_DIR
 
 # Files entries expose their read/write mark as a second parser field. A
 # missing marker is a write, and the default pathspec mode still includes all.
@@ -70,6 +71,12 @@ printf 'job|slot=%s|tmpl=%s|out=%s|rest=%s\n' "\$slot" "\$tmpl" "\$out" "\$rest"
 if [ "\$slot" = confirm ]; then
   confirm_job="\$(bash "$REAL_BIN/tkt-state" "\$state" get job.confirm 2>/dev/null || true)"
   printf 'confirm-job|%s\n' "\$confirm_job" >>"$T/stub.log"
+  if [ -n "\$confirm_job" ]; then
+    printf 'confirm-watch|%s\n' "\$confirm_job" >>"$T/stub.log"
+  else
+    printf 'confirm-dispatch\n' >>"$T/stub.log"
+    bash "$REAL_BIN/tkt-state" "\$state" set job.confirm j1 || exit 2
+  fi
 fi
 case "\$(cat "$T/mode")" in
   ok)
@@ -735,8 +742,42 @@ rebase_plan
 bash "$TKT_STATE" "$S" set granted_by "" || fail "grant-before-confirm seed empty grant"
 run_plan grant-round --by switchyard --comment 1234
 [ "$RC" -eq 2 ] || fail "grant before confirm exits 2"
-grep -q 'tkt-plan: no limit reached: the confirm round is still open' "$CDIR/stderr.txt" || fail "grant before confirm explains the open confirm round"
+grep -Fq "tkt-plan: no limit reached: the confirm round is still open; rerun: tkt-plan $S confirm --edits <file>" "$CDIR/stderr.txt" || fail "grant before confirm explains how to rerun confirm"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_by 2>/dev/null || true)" ] || fail "grant before confirm leaves grant state unchanged"
+
+# --- a terminal BLOCKED confirm is dispatched again; a live one is watched ---
+setup_case confirm-blocked-rerun
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-blocked-rerun seed round"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+printf 'blocked' >"$T/mode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "confirm-blocked-rerun first confirm exits 1"
+[ "$(state_get job.confirm)" = "j1" ] || fail "confirm-blocked-rerun stores the blocked job"
+[ -z "$(state_get confirmed_for)" ] || fail "confirm-blocked-rerun leaves the round open"
+mkdir -p "$TMPDIR/delegate-jobs"
+printf '{"status":"BLOCKED"}\n' >"$TMPDIR/delegate-jobs/j1.json"
+printf 'ok' >"$T/mode"
+dispatches_before="$(grep -c '^confirm-dispatch$' "$T/stub.log" || true)"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "confirm-blocked-rerun retry exits 0 (rc=$RC)"
+[ "$(grep -c '^confirm-dispatch$' "$T/stub.log" || true)" -eq "$((dispatches_before + 1))" ] || fail "confirm-blocked-rerun dispatches a second job"
+[ "$(grep -c '^confirm-watch|' "$T/stub.log" || true)" -eq 0 ] || fail "confirm-blocked-rerun does not replay the blocked job"
+[ "$(state_get confirmed_for)" = "2" ] || fail "confirm-blocked-rerun records the round after its report"
+
+setup_case confirm-running-job
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-running-job seed round"
+bash "$TKT_STATE" "$S" set job.confirm j-running || fail "confirm-running-job seed job"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+printf '{"status":"RUNNING"}\n' >"$TMPDIR/delegate-jobs/j-running.json"
+printf 'ok' >"$T/mode"
+dispatches_before="$(grep -c '^confirm-dispatch$' "$T/stub.log" || true)"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "confirm-running-job exits 0 (rc=$RC)"
+[ "$(grep -c '^confirm-dispatch$' "$T/stub.log" || true)" = "$dispatches_before" ] || fail "confirm-running-job does not dispatch again"
+[ "$(grep -c '^confirm-watch|j-running$' "$T/stub.log" || true)" -eq 1 ] || fail "confirm-running-job watches the stored job"
+[ "$(state_get job.confirm)" = "j-running" ] || fail "confirm-running-job retains the stored job"
 
 # --- a granted confirm bypasses only the confirm block, once ---
 setup_case grant-extra
