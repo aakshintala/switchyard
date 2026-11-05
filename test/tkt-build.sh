@@ -206,7 +206,9 @@ chmod +x "$T/bin/mutant-verdicts"
 
 # Stub review-pr: start launches one id per requested axis (--axes, default all
 # three); tkt-build persists each id as it launches. collect copies $T/findings-src
-# to --findings-out, prints $T/collect-out and exits $T/collect-rc.
+# to --findings-out, prints $T/collect-out and exits $T/collect-rc. With a
+# $T/collect-nowrite flag file present, collect prints and exits without
+# writing --findings-out, like an early RUNNING exit.
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
 sub="\${1:-}"; shift || true
@@ -246,7 +248,7 @@ if [ "\$sub" = "collect" ]; then
       *) shift ;;
     esac
   done
-  cp "$T/findings-src" "\$out"
+  if [ ! -f "$T/collect-nowrite" ]; then cp "$T/findings-src" "\$out"; fi
   cat "$T/collect-out"
   exit "\$(cat "$T/collect-rc")"
 fi
@@ -347,7 +349,7 @@ EOF
   printf '0' >"$T/verdicts-rc"
   printf 'src/c.rs:5:6: MISSED\tcaught\n' >"$T/verdicts"
   printf '{"artifacts":[]}\n' >"$T/artifacts-json"
-  rm -f "$T/empty-pr" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err"
+  rm -f "$T/empty-pr" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err" "$T/collect-nowrite"
   printf '0' >"$T/dcounter"
   printf '0' >"$T/rcounter"
   : >"$T/calls.log"
@@ -1866,5 +1868,30 @@ run_build
 [ "$RC" -eq 0 ] || fail "findings-rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "STALE" "$CDIR/run/switchyard-528-findings-r0.md" && fail "findings-rerun: stale content remains"
 grep -q "no open findings" "$CDIR/run/switchyard-528-findings-r0.md" || fail "findings-rerun: file not rewritten"
+
+# --- findings-failed-collect: a collect that exits early without writing
+# journals no ownership, so unrelated content later at the destination is refused ---
+setup_case findings-failed-collect
+touch "$T/collect-nowrite"
+printf '1' >"$T/collect-rc"
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+RUNNING standards r1: wait with delegate watch r1 r2 r3
+RUNNING spec r2: wait with delegate watch r1 r2 r3
+RUNNING overbuild r3: wait with delegate watch r1 r2 r3
+CI deadbeef pending
+EOF
+run_build
+[ "$RC" -eq 1 ] || fail "findings-failed-collect exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "findings-failed-collect"
+[ ! -e "$CDIR/run/switchyard-528-findings-r0.md" ] || fail "findings-failed-collect: no findings file after a collect that wrote nothing"
+[ -f "$CDIR/tkt.journal" ] && grep -q "findings write" "$CDIR/tkt.journal" && fail "findings-failed-collect: no findings write journal after a collect that wrote nothing"
+rm -f "$T/collect-nowrite"
+printf 'UNRELATED-CONTENT\n' >"$CDIR/run/switchyard-528-findings-r0.md"
+cp "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-failed-collect-copy.md"
+run_build
+[ "$RC" -eq 2 ] || fail "findings-failed-collect rerun exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -F -q "tkt-build: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-528-findings-r0.md" "$CDIR/stderr.txt" || fail "findings-failed-collect rerun stderr missing refusal: $(cat "$CDIR/stderr.txt")"
+cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-failed-collect-copy.md" || fail "findings-failed-collect rerun: existing file changed"
 
 echo "tkt-build: all cases passed"

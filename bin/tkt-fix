@@ -217,9 +217,9 @@ write_findings() {
     echo "tkt-fix: refusing to overwrite findings file not written by this ticket: $fr" >&2
     exit 2
   fi
-  t journal "findings write $fr"
   if grep -q '^P[123] ' "$1" 2>/dev/null; then grep '^P[123] ' "$1" >"$fr"
   else printf 'no open findings\n' >"$fr"; fi
+  t journal "findings write $fr"
   t set findings "$fr"
 }
 
