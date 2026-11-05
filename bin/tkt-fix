@@ -86,6 +86,7 @@ worktree="$(t get worktree)"; run="$(t get run)"
 mkdir -p "$run"
 round="$(t get round 2>/dev/null || printf '0')"; case "$round" in ''|*[!0-9]*) round=0;; esac
 fixslot="$(t get fixslot 2>/dev/null || printf '0')"; case "$fixslot" in ''|*[!0-9]*) fixslot=0;; esac
+part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
 if [ "$round" -gt "$fixslot" ]; then n=$((round + 1)); else n=$((fixslot + 1)); fi
 slot="fix$n"
 if [ -n "$resume" ]; then
@@ -211,9 +212,14 @@ pass() {
 }
 
 write_findings() {
-  fr="$run/$namebase-findings-r$round.md"
+  fr="$run/$namebase$part_suffix-findings-r$round.md"
+  if ! findings_write_allowed "$state" "$fr"; then
+    echo "tkt-fix: refusing to overwrite findings file not written by this ticket: $fr" >&2
+    exit 2
+  fi
   if grep -q '^P[123] ' "$1" 2>/dev/null; then grep '^P[123] ' "$1" >"$fr"
   else printf 'no open findings\n' >"$fr"; fi
+  t journal "findings write $fr"
   t set findings "$fr"
 }
 

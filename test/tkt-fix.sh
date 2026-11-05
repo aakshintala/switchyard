@@ -777,6 +777,59 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "empty PR head exited 0
 grep -q 'PRECONDITION missing=head:' "$T/stderr" || fail "empty PR head error missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "empty PR head dispatched a job"
 
+# part-2 findings name: a part-2 state writes the -part2- file and leaves
+# the part-1 file of the old name byte-identical.
+setup_case part2-findings
+printf 'fixed\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+git -C "$WT" push -q origin tkt-529
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+bash "$TKT_STATE" "$S" set part 2 >/dev/null
+printf 'PART1-FINDINGS\n' >"$CDIR/run/switchyard-529-findings-r1.md"
+cp "$CDIR/run/switchyard-529-findings-r1.md" "$T/part1-copy.md"
+printf 'pushed' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "part2-findings exited $?"
+fr="$CDIR/run/switchyard-529-part2-findings-r1.md"
+[ -f "$fr" ] || fail "part2-findings: part2 findings file missing"
+[ "$(bash "$TKT_STATE" "$S" get findings)" = "$fr" ] || fail "part2-findings: findings key is [$(bash "$TKT_STATE" "$S" get findings)]"
+cmp -s "$CDIR/run/switchyard-529-findings-r1.md" "$T/part1-copy.md" || fail "part2-findings: part-1 findings file changed"
+grep -q "no open findings" "$fr" || fail "part2-findings: part2 file should hold the no-findings line"
+
+# findings-overwrite guard: an existing destination the state did not write
+# is refused with exit 2 and left byte-identical.
+setup_case findings-refuse
+printf 'fixed\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+git -C "$WT" push -q origin tkt-529
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+printf 'UNRELATED-CONTENT\n' >"$CDIR/run/switchyard-529-findings-r1.md"
+cp "$CDIR/run/switchyard-529-findings-r1.md" "$T/findings-refuse-copy.md"
+printf 'pushed' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "findings-refuse exited 0"
+[ "$?" = "2" ] || fail "findings-refuse exited $?, want 2"
+grep -F -q "tkt-fix: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-529-findings-r1.md" "$T/stderr" || fail "findings-refuse stderr missing refusal: $(cat "$T/stderr")"
+cmp -s "$CDIR/run/switchyard-529-findings-r1.md" "$T/findings-refuse-copy.md" || fail "findings-refuse: existing file changed"
+
+# findings-rerun: a destination the state recorded is rewritten.
+setup_case findings-rerun
+printf 'fixed\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm "fix: fix.txt"
+git -C "$WT" push -q origin tkt-529
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+printf 'STALE\n' >"$CDIR/run/switchyard-529-findings-r1.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/run/switchyard-529-findings-r1.md" >/dev/null
+bash "$TKT_STATE" "$S" journal "findings write $CDIR/run/switchyard-529-findings-r1.md" >/dev/null
+printf 'pushed' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "findings-rerun exited $?: $(cat "$T/stderr")"
+grep -q "no open findings" "$CDIR/run/switchyard-529-findings-r1.md" || fail "findings-rerun: file not rewritten"
+grep -q "STALE" "$CDIR/run/switchyard-529-findings-r1.md" && fail "findings-rerun: stale content remains"
+
 # F1/F2/F3 run the real bin/tkt-job behind a logging wrapper, with a stub
 # delegate that really commits in the worktree and mints delegate records,
 # so the ahead-recovery path dispatches through tkt-job's head-drift guard
