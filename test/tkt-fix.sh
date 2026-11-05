@@ -62,6 +62,10 @@ case "\$(cat "$T/jobmode")" in
     printf '%s' "\$n" >"$T/jobcount"
     commit_as_job fix.txt "fixed-\$n"
     echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
+  stalled)
+    commit_as_job fix.txt "stalled"
+    echo "TKT tkt-job NEEDS_CONTEXT id=j1 log=x"
+    exit 1;;
   pushed) echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   no-commits)
     echo "TKT tkt-job NO-COMMITS id=j1 gate=PASS log=x"
@@ -86,6 +90,7 @@ esac
 exit 0
 EOF
 chmod +x "$T/bin/tkt-job"
+cp "$T/bin/tkt-job" "$T/tkt-job-stub"
 
 # Stub gh-ci: $T/cimode holds the wait exit (0 or 1); $T/ciout holds stdout.
 printf '0' >"$T/cimode"
@@ -148,6 +153,8 @@ reset_stubs() {
 # tkt-529 pushed to the origin, with plan, findings and base state. Sets
 # CDIR, WT, S. $1 is the case name.
 setup_case() {
+  cp "$T/tkt-job-stub" "$T/bin/tkt-job"
+  unset JOB_RECORD_SYSTEM_DIR DELEGATE_JOBS_DIR
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR/run"
   git init -q --bare "$CDIR/origin.git"
@@ -1029,6 +1036,101 @@ grep -q "delegate|resume|from=j1" "$T/calls.log" || fail "F4 delegate saw no res
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "F4 push did not carry the recovered commit"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "F4 head not the worktree HEAD"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "F4 round not 1"
+fi
+
+# G. A closed fix job's clean, unpublished commit is gated before it is pushed,
+# then the same call continues through the scoped verify without dispatching a
+# new fix job.
+if want G; then
+setup_case g
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+printf 'stalled' >"$T/jobmode"
+first_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || first_rc=$?
+[ "$first_rc" = "1" ] || fail "G first call exited $first_rc, want 1: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix NEEDS_CONTEXT id=j1" || fail "G first call bad verdict: $(head -n 1 <<<"$out")"
+bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
+NEW="$(git -C "$WT" rev-parse HEAD)"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "G recovery exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "G recovery bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "G recovery did not push the stalled commit"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "G recovery did not store the pushed head"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "0" ] || fail "G recovery left fixopen set"
+grep -q "job|" "$T/calls.log" && fail "G recovery dispatched a new fix job"
+grep -q "review-pr|run 7" "$T/calls.log" || fail "G recovery did not verify"
+grep -q "tkt-fix: pushed unpushed fix job head $OLD -> $NEW" "$T/stderr" || fail "G recovery stderr missing old and new heads: $(cat "$T/stderr")"
+fi
+
+# G2. A failed gate on a closed job's unpublished commit exits with the gate
+# verdict and leaves the remote branch untouched.
+if want G2; then
+setup_case g2
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+printf 'stalled' >"$T/jobmode"
+first_rc=0; bash "$TKT" "$S" --verify >/dev/null 2>"$T/stderr" || first_rc=$?
+[ "$first_rc" = "1" ] || fail "G2 first call exited $first_rc, want 1"
+bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
+NEW="$(git -C "$WT" rev-parse HEAD)"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `fix.txt`
+
+## Gate
+
+`false`
+EOF
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "G2 recovery exited 0"
+[ "$?" = "1" ] || fail "G2 recovery exited $?, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FAIL rc=1" || fail "G2 bad gate verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "G2 pushed after a failed gate"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "G2 moved state head after a failed gate"
+[ "$(git -C "$WT" rev-parse HEAD)" = "$NEW" ] || fail "G2 moved the worktree head"
+grep -q "job|" "$T/calls.log" && fail "G2 dispatched a new fix job"
+grep -q "review-pr|" "$T/calls.log" && fail "G2 verified after the failed gate"
+fi
+
+# G3. An unpublished commit with a dirty worktree still exits DRIFT.
+if want G3; then
+setup_case g3
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+printf 'stalled' >"$T/jobmode"
+first_rc=0; bash "$TKT" "$S" --verify >/dev/null 2>"$T/stderr" || first_rc=$?
+[ "$first_rc" = "1" ] || fail "G3 first call exited $first_rc, want 1"
+bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
+printf 'untracked\n' >"$WT/untracked.txt"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "G3 recovery exited 0"
+[ "$?" = "3" ] || fail "G3 recovery exited $?, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "G3 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "G3 pushed a dirty worktree"
+grep -q "job|" "$T/calls.log" && fail "G3 dispatched a new fix job"
+fi
+
+# G4. An unpublished commit that does not descend from the PR head still exits DRIFT.
+if want G4; then
+setup_case g4
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+printf 'stalled' >"$T/jobmode"
+first_rc=0; bash "$TKT" "$S" --verify >/dev/null 2>"$T/stderr" || first_rc=$?
+[ "$first_rc" = "1" ] || fail "G4 first call exited $first_rc, want 1"
+bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
+git -C "$WT" push -q origin tkt-529
+PRHEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" reset -q --hard "$OLD"
+printf 'sibling\n' >"$WT/sibling.txt"
+git -C "$WT" add sibling.txt
+git -C "$WT" commit -qm "outside: sibling"
+: >"$T/calls.log"
+recovery_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || recovery_rc=$?
+[ "$recovery_rc" = "3" ] || fail "G4 recovery exited $recovery_rc, want 3: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "G4 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$PRHEAD" ] || fail "G4 pushed a non-fast-forward worktree"
+grep -q "job|" "$T/calls.log" && fail "G4 dispatched a new fix job"
 fi
 
 echo "tkt-fix assertions passed"
