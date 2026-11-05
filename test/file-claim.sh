@@ -438,6 +438,14 @@ blob="$(claims_blob "$R")"
 [ "$(cut -f1-3 <<<"$blob")" = "$(printf 'y2.txt\tP\tplan\nsub/b.txt\tP\tplan')" ] || fail "valid plan stores its Files paths as plan claims: $blob"
 printf '%s' "$blob" | grep -q "valid.md" && fail "valid plan file itself is not claimed"
 
+# --- a claim path holding whitespace is refused, but still releasable ----------
+R="$(fresh)"
+rc=0
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --plan --worktree t:d1 --repo test/repo -- "a.txt b.txt" >/dev/null 2>"$T/e-space" || rc=$?
+[ "$rc" = "2" ] || fail "space path exits 2, got $rc"
+grep -qF "a.txt b.txt" "$T/e-space" || fail "space-path refusal names the argument: $(cat "$T/e-space")"
+[ -z "$(claim_tip "$R")" ] || fail "space path records no claim"
+
 # --- cap of 5 grants; plan claims do not count ----------------------------------
 R="$(fresh)"
 i=1
@@ -563,6 +571,16 @@ FILE_CLAIM_REMOTE="$CR" bash "$FC" claim --lane L --grant --worktree t:d --repo 
 CR="$(corrupt_remote 3 "$(printf 'a.txt\tL\tgrant\tnot-a-date\tt:d\t')")"
 FILE_CLAIM_REMOTE="$CR" bash "$FC" claim --lane L --grant --worktree t:d --repo test/repo a.txt >/dev/null 2>&1 && fail "bad-date claim exits non-zero"
 [ "$?" = "2" ] || fail "bad-date claim exits 2"
+
+# A hand-built claims blob holding a composite row: list prints the row and a
+# warning naming it, and release removes it.
+CR="$(corrupt_remote ws "$(printf 'a.txt b.txt\tL\tplan\t2026-01-01T00:00:00Z\tt:d\t')")"
+out="$(FILE_CLAIM_REMOTE="$CR" bash "$FC" list --lane L --repo test/repo 2>"$T/e-ws")" || fail "list with composite row exits 0: $(cat "$T/e-ws")"
+printf '%s' "$out" | grep -qF "a.txt b.txt" || fail "list prints the composite row: $out"
+grep -qF "a.txt b.txt" "$T/e-ws" || fail "list warns about the composite row: $(cat "$T/e-ws")"
+out="$(FILE_CLAIM_REMOTE="$CR" bash "$FC" release --lane L "a.txt b.txt" 2>"$T/e-rel")" || fail "release of composite row exits 0: $(cat "$T/e-rel")"
+[ "$out" = "RELEASE a.txt b.txt" ] || fail "release prints the composite path: $out"
+[ -z "$(claims_blob "$CR")" ] || fail "composite row removed"
 
 # --- release -------------------------------------------------------------------------
 R="$(fresh)"

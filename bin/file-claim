@@ -46,7 +46,10 @@ W=""
 cleanup() { if [ -n "$W" ] && [ -d "$W" ]; then rm -rf "$W"; fi; }
 trap cleanup EXIT
 new_workdir() { W="$(mktemp -d "${TMPDIR:-/tmp}/file-claim.XXXXXX")"; git init -q --bare "$W" || die 2 "cannot init temp dir"; }
-valid_path() { case "$1" in ""|*"$TAB"*|*"$NL"*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;; esac; }
+valid_path() { case "$1" in ""|*[[:space:]]*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;; esac; }
+# valid_release_path: the pre-whitespace rule (tabs and newlines only) so rows
+# already stored with a composite path stay removable.
+valid_release_path() { case "$1" in ""|*"$TAB"*|*"$NL"*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;; esac; }
 valid_field() { case "$1" in ""|*"$TAB"*|*"$NL"*) return 1;; esac; }
 # is_plan_file PATH: a readable regular file with Files entries that git does not
 # track. Outside a repo, git fails, so the file counts as untracked.
@@ -259,7 +262,7 @@ cmd_release() {
   local lane="$1" repo="$2"; shift 2
   local remote tip claims kept dropped p line attempt
   remote="$(default_remote "$repo")"
-  for p in "$@"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
+  for p in "$@"; do valid_release_path "$p" || die 2 "not a repo-relative path: $p"; done
   new_workdir
   kept="$W/kept.tsv"; dropped="$W/dropped.txt"
   attempt=1
@@ -285,6 +288,7 @@ cmd_list() {
     while IFS= read -r line || [ -n "$line" ]; do
       [ -n "$line" ] || continue
       IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr <<<"$line"
+      case "$c_path" in *[[:space:]]*) printf 'file-claim: warning: claimed path contains whitespace: %s\n' "$c_path" >&2;; esac
       if [ -n "$lane" ] && [ "$c_lane" != "$lane" ]; then continue; fi
       age=$((now - $(at_epoch "$c_at"))); if [ "$age" -lt 0 ]; then age=0; fi
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$age" "$c_wt" "$c_pr"
