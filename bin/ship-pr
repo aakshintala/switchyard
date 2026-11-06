@@ -402,7 +402,7 @@ if [ -n "${CLAUDECODE:-}" ] && [ "$effective_timeout" -lt 600 ]; then
 fi
 longest_wait=$((5 * effective_timeout))
 longest_hours=$((longest_wait / 3600))
-say "longest wait ${longest_wait} s (${longest_hours} h): 5 CI waits x ${effective_timeout} s, plus the gate; run it in the background with no shell timeout"
+say "no shell timeout: waits are bounded at ${longest_wait} s (${longest_hours} h), worst case; a clean run takes minutes"
 
 tmpdir="${TMPDIR:-/tmp}"
 find -H "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true

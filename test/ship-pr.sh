@@ -1832,25 +1832,25 @@ no_merge "body match with the flag"
 
 # Longest-wait notice is first on stderr and uses the effective CI timeout.
 setup; ship; expect 0 "default wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 36000 s (10 h): 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 36000 s (10 h), worst case; a clean run takes minutes" ] \
   || fail "default longest-wait notice: [$ERR]"
 setup; ship --timeout 14; expect 0 "short wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 70 s (0 h): 5 CI waits x 14 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 70 s (0 h), worst case; a clean run takes minutes" ] \
   || fail "short longest-wait notice: [$ERR]"
 setup; CLAUDECODE=1 ship --timeout 14; expect 0 "Claude Code wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 36000 s (10 h): 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 36000 s (10 h), worst case; a clean run takes minutes" ] \
   || fail "Claude Code longest-wait notice: [$ERR]"
 setup; CLAUDECODE=1 ship --timeout 599; expect 0 "one-below wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 36000 s (10 h): 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 36000 s (10 h), worst case; a clean run takes minutes" ] \
   || fail "599 s uses the Claude Code timeout: [$ERR]"
 setup; CLAUDECODE=1 ship --timeout 600; expect 0 "at-boundary wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 3000 s (0 h): 5 CI waits x 600 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 3000 s (0 h), worst case; a clean run takes minutes" ] \
   || fail "600 s stays unchanged: [$ERR]"
 setup; CLAUDECODE=1 ship --timeout 601; expect 0 "above-boundary wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 3005 s (0 h): 5 CI waits x 601 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 3005 s (0 h), worst case; a clean run takes minutes" ] \
   || fail "601 s stays unchanged: [$ERR]"
 setup; run 7 --repo O/N --worktree "$WT"; expect 2 "usage has no longest-wait notice"
-! grep -q '^ship-pr: longest wait' <<<"$ERR" || fail "usage error has no longest-wait notice: [$ERR]"
+! grep -q '^ship-pr: no shell timeout' <<<"$ERR" || fail "usage error has no longest-wait notice: [$ERR]"
 grep -q 'background' <<<"$ERR" && grep -q 'no shell timeout' <<<"$ERR" \
   || fail "usage mentions background and no shell timeout: [$ERR]"
 
