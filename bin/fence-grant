@@ -1116,7 +1116,7 @@ fi
 
 # --- lane side helpers ---
 _lane_num() {
-  lane_ticket_num "fiber-$1"
+  lane_ticket_num "$(claim_holder "$1")"
 }
 
 # Brace-expand each input line; held-entry text in, expanded lines out.
