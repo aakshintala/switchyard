@@ -131,11 +131,12 @@ phase=plan
 case "$slot" in
   lane|fix[0-9]*)
     phase=build
-    FW_RUN="$run" "$bin_dir/fence-grant" --require "$issue" --phase "$phase"
+    FW_RUN="$run" "$bin_dir/fence-grant" --require "$issue" --phase "$phase" >&2
     ;;
 esac
+# Guard output goes to stderr: tkt-job's stdout is the job's output.
 if [ -n "${TKT_LAUNCH_GUARD:-}" ]; then
-  "$TKT_LAUNCH_GUARD" "$issue" "$phase"
+  "$TKT_LAUNCH_GUARD" "$issue" "$phase" >&2
 fi
 
 # Descendant commits can be the previous turn's work, including a BLOCKED
