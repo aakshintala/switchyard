@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # file-claim: lanes self-grant files via a claims ref in the claim repo.
-# Claim batches are all-or-nothing; drop refused paths and rerun to grant the rest.
+# Ordinary lane and PR overlaps are advisory; sweep-* lanes hold paths exclusively.
+# Claim batches are all-or-nothing only when a sweep or the grant cap refuses a path.
 # Usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
@@ -21,7 +22,8 @@ TAB=$'\t'
 NL=$'\n'
 usage() {
   echo "usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
-  echo "       claims are all-or-nothing; drop refused paths and rerun to grant the rest" >&2
+  echo "       ordinary lane and PR holds are advisory; sweep-* lane ids hold exclusively" >&2
+  echo "       sweep and grant-cap refusals are all-or-nothing; drop refused paths and rerun" >&2
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
   echo "       file-claim list [--lane ID] [--repo R]  (no --lane adds one row per open-PR path)" >&2
   echo "       FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5)" >&2
@@ -171,7 +173,7 @@ pr_hunks() {
   # a-(a+b-1); an insertion -a,0 is a-(a+1). A new file, a binary file or a
   # section with no hunks holds the whole file. The holder's diff is fetched
   # once per PR per run; a failed fetch, partial output included, prints
-  # unknown for every path that PR holds. The refusal stands either way, so
+  # unknown for every path that PR holds. A sweep refusal stands either way, so
   # this always succeeds.
   local repo="$1" pr="$2" path="$3" diff="$W/diff-$pr" sec hunks r a b ranges
   [ -f "$diff.failed" ] && { printf 'unknown'; return 0; }
@@ -202,7 +204,7 @@ pr_hunks() {
 }
 cmd_claim() {
   local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5"; shift 5
-  local remote now main_tip prmap tip claims attempt paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr
+  local remote now main_tip prmap tip claims attempt paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr prs_for_path holders own_hold blocked
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [ $# -gt 0 ] || usage
   for p in "$@"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
@@ -224,10 +226,38 @@ cmd_claim() {
     for p in "${paths[@]}"; do
       reason="new"
       if [ "$(git -C "$W" cat-file -t "$main_tip:$p" 2>/dev/null)" = blob ]; then reason="exists"; fi
-      pr="$(awk -F'\t' -v q="$p" -v s="$self_pr" '$2==q&&index(","s",", ","$1",")==0{print $1}' "$prmap" | sort -n | head -1)"
-      if [ -n "$pr" ]; then out+=("REFUSE $p pr#$pr hunks=$(pr_hunks "$repo" "$pr" "$p")"); refused=$((refused + 1)); case " $saw_prs " in *" $pr "*) ;; *) saw_prs="$saw_prs $pr";; esac; continue; fi
-      holder="$(awk -F'\t' -v q="$p" '$1==q{print $2;exit}' "$claims")"
-      if [ -n "$holder" ]; then if [ "$holder" = "$lane" ]; then out+=("GRANT $p $reason"); granted=$((granted + 1)); else out+=("REFUSE $p lane:$holder"); refused=$((refused + 1)); fi; continue; fi
+      prs_for_path="$(awk -F'\t' -v q="$p" -v s="$self_pr" '$2==q&&index(","s",", ","$1",")==0{print $1}' "$prmap" | sort -n)"
+      blocked=0; own_hold=0
+      if [ -n "$prs_for_path" ]; then
+        if [[ "$lane" == sweep-* ]]; then
+          pr="$(printf '%s\n' "$prs_for_path" | head -1)"
+          out+=("REFUSE $p pr#$pr hunks=$(pr_hunks "$repo" "$pr" "$p")")
+          case " $saw_prs " in *" $pr "*) ;; *) saw_prs="$saw_prs $pr";; esac
+          blocked=1
+        else
+          while IFS= read -r pr || [ -n "$pr" ]; do
+            [ -n "$pr" ] || continue
+            out+=("OVERLAP $p pr#$pr")
+          done <<< "$prs_for_path"
+        fi
+      fi
+      holders="$(awk -F'\t' -v q="$p" '$1==q{print $2}' "$claims" | sort -u)"
+      while IFS= read -r holder || [ -n "$holder" ]; do
+        [ -n "$holder" ] || continue
+        if [ "$holder" = "$lane" ]; then
+          own_hold=1
+        elif [[ "$holder" == sweep-* ]]; then
+          out+=("REFUSE $p exclusive lane:$holder")
+          blocked=1
+        elif [[ "$lane" == sweep-* ]]; then
+          out+=("REFUSE $p lane:$holder")
+          blocked=1
+        else
+          out+=("OVERLAP $p lane:$holder")
+        fi
+      done <<< "$holders"
+      if [ "$blocked" = "1" ]; then refused=$((refused + 1)); continue; fi
+      if [ "$own_hold" = "1" ]; then out+=("GRANT $p $reason"); granted=$((granted + 1)); continue; fi
       if [ "$kind" = grant ] && [ "$cap_hit" = "1" ]; then out+=("REFUSE $p cap"); refused=$((refused + 1)); saw_cap=1; continue; fi
       out+=("PENDING $p $reason"); granted=$((granted + 1)); new_lines+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$p" "$lane" "$kind" "$now" "$worktree" "$self_pr")")
     done

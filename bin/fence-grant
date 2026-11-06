@@ -5,14 +5,8 @@
 #   [--swept-to <comment id>] [--removes <symbol,...>]
 #   [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]
 # The script owns grant numbering; hand-written grants take a letter suffix.
-# Decides whether flywheel may grant the paths alone: a path conflicts with an
-# open PR touching the same file (or hunk range), a live lane (or a fresh grant
-# file), and a live file-claim entry holding it. Stale claims are logged and
-# ignored. Fail closed: any failed or unparseable probe
-# prints ERROR, writes nothing and exits 3. Exit 0 + GRANT lines (WOULD-GRANT
-# with --dry; a grant file otherwise) when free; exit 1 + HELD lines on conflict; exit 2 on
-# bad arguments. A whole-file hold by a pull request also prints that holder's
-# hunk windows and the complement as a --ranges argument to paste back.
+# Grants requested paths despite overlaps with open PRs and ordinary lanes.
+# A sweep-* file claim or grant cap still blocks; unreadable probes fail closed.
 #
 # Before any hold probe it checks that the grant can mean what it says, against
 # `main`: every requested path exists unless --new declares it, and every
@@ -234,7 +228,10 @@ fw_mtime() {
   return 0
 }
 
-_usage() { echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship" >&2; }
+_usage() {
+  echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship" >&2
+  echo "       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive" >&2
+}
 
 if [ "${1:-}" = --require ]; then
   [ "$#" -eq 4 ] || { _usage; exit 2; }
@@ -752,6 +749,7 @@ FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 lanes=$(printf '%s\n' $mac_names $box_names $pimac_names $pibox_names $dmac_names $dbox_names $dsess_names | grep . | sort -u | tr '\n' ' ')
 
 held=""
+overlaps=""
 
 # file-claim is a holder source too. Validate the complete list before using
 # any row; a failed or partial read must never turn into an empty fence.
@@ -790,6 +788,7 @@ _claim_holders() {
     [ -n "$claim_num" ] && case " $ignoreticket " in *" $claim_num "*) continue;; esac
     live=0
     for ln in $lanes; do [ "$ln" = "$claim_lane" ] && { live=1; break; }; done
+    [[ "$claim_lane" == sweep-* ]] && live=1
     if [ "$live" -eq 0 ]; then
       echo "STALE $claim_path by $claim_lane"
       continue
@@ -798,7 +797,11 @@ _claim_holders() {
     : >"$tmp/claim-entries"
     printf '%s\n' "$normalized" >"$tmp/claim-entries"
     if [ -n "$claim_num" ]; then claim_label="lane #$claim_num"; else claim_label="lane $claim_lane"; fi
-    _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label"
+    if [[ "$claim_lane" == sweep-* ]]; then
+      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label" exclusive
+    else
+      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label"
+    fi
   done <"$tmp/claims.tsv"
 }
 
@@ -920,11 +923,11 @@ for pr in $prs; do
         [ -n "$secbase" ] || secbase=$fb
         rr=$(_req_ranges "$pb")
         if [ -z "$rr" ]; then
-          held="${held}${p}|PR #${pr}|${pr} ${secbase}
+          overlaps="${overlaps}${p}|PR #${pr}
 "
         else
           if _pr_whole_hold "$tmp/full-$pr.diff" "$secbase"; then
-            held="${held}${p}|PR #${pr}
+            overlaps="${overlaps}${p}|PR #${pr}
 "
           else
             ov=0
@@ -935,7 +938,7 @@ for pr in $prs; do
               if _pr_overlap "$tmp/full-$pr.diff" "$secbase" "$s" "$e"; then ov=1; break; fi
             done < "$tmp/rr-$pr"
             if [ "$ov" -eq 1 ]; then
-              held="${held}${p}|PR #${pr}
+              overlaps="${overlaps}${p}|PR #${pr}
 "
             fi
           fi
@@ -1248,9 +1251,13 @@ _check_entries() {
       pd=${nn%%|*}; r1=${nn#*|}; pb=${r1%%|*}
       [ -n "$pb" ] || continue
       if _conflict "$pd" "$pb" "$ed" "$eb" "$ers" "$ere"; then
-        held="${held}${p}|${3:-lane #${2}}
+        if [ "${4:-}" = exclusive ]; then
+          held="${held}${p}|${3:-lane #${2}}
 "
-
+        else
+          overlaps="${overlaps}${p}|${3:-lane #${2}}
+"
+        fi
       fi
     done < "$tmp/plist"
   done < "$1"
@@ -1400,6 +1407,7 @@ if [ "$dry" -eq 0 ]; then
     fc_args+=("$_cp")
   done < "$tmp/plist"
   if [ "${#fc_args[@]}" -gt 0 ]; then
+    : > "$tmp/fc-overlaps"
     fc_cmd=("$file_claim" claim --lane "fiber-$ticket" --plan --repo "$repo")
     # Every PR skipped above as this ticket's own, plus --ignore-pr, must
     # exempt the claim too, or the ledger refuses a path the own PR holds.
@@ -1424,11 +1432,46 @@ if [ "$dry" -eq 0 ]; then
     fi
     fc_cmd+=(-- "${fc_args[@]}")
     if "${fc_cmd[@]}" >"$tmp/fc-out" 2>"$tmp/fc-err"; then
-      :
+      awk '$1 == "OVERLAP" && NF >= 3 { print $2 "|" $3 }' "$tmp/fc-out" >> "$tmp/fc-overlaps"
+      while IFS='|' read -r _ofp _ofh; do
+        [ -n "$_ofp" ] || continue
+        case "$_ofh" in
+          pr\#*) overlaps="${overlaps}${_ofp}|PR #${_ofh#pr#}
+";;
+          lane:fiber-*)
+            _ofn=${_ofh#lane:fiber-}
+            case " $ignoreticket " in *" $_ofn "*) continue;; esac
+            overlaps="${overlaps}${_ofp}|lane #${_ofn}
+";;
+          lane:*) overlaps="${overlaps}${_ofp}|lane ${_ofh#lane:}
+";;
+          *) overlaps="${overlaps}${_ofp}|${_ofh}
+";;
+        esac
+      done < "$tmp/fc-overlaps"
     else
       fc_rc=$?
       if [ "$fc_rc" -eq 1 ]; then
-        awk '
+        awk -v ignored="$ignoreticket" '
+$1 == "OVERLAP" && NF >= 3 {
+  p = $2; h = $3; line = ""
+  if (h ~ /^pr#[0-9][0-9]*$/) line = "OVERLAP " p " PR #" substr(h, 4)
+  else if (h ~ /^lane:fiber-[0-9][0-9]*$/) {
+    n = h; sub(/^lane:fiber-/, "", n)
+    if (index(" " ignored " ", " " n " ")) next
+    line = "OVERLAP " p " lane #" n
+  }
+  else if (h ~ /^lane:/) line = "OVERLAP " p " lane " substr(h, 6)
+  else line = "OVERLAP " p " " h
+  if (!seen[line]++) print line
+  next
+}
+$1 == "REFUSE" && NF >= 4 && $3 == "exclusive" && $4 ~ /^lane:/ {
+  p = $2; lane = $4; sub(/^lane:/, "", lane)
+  line = "HELD " p " by lane " lane
+  if (!seen[line]++) print line
+  next
+}
 $1 == "REFUSE" && NF >= 3 {
   p = $2; h = $3; line = ""
   if (h ~ /^pr#[0-9][0-9]*$/) line = "HELD " p " by PR #" substr(h, 4)
@@ -1453,6 +1496,23 @@ $1 == "GRANT" || $1 == "UNCLAIMED" || $1 == "file-claim:" || NF == 0 { next }
 fi
 
 # --- grant: locked numbering over existing files (unnumbered counts as 1) ---
+if [ -n "$(printf '%s' "$overlaps" | grep .)" ]; then
+  printf '%s' "$overlaps" | awk -F'|' '
+    {
+      path = $1; holder = $2
+      if (holder ~ /^lane #[0-9]+/) {
+        number = holder
+        sub(/^lane #/, "", number)
+        sub(/[^0-9].*$/, "", number)
+        holder = "lane #" number
+      }
+      key = path "|" holder
+      if (!seen[key]++) printf "%s\t%s\n", path, holder
+    }
+  ' > "$tmp/overlapout"
+else
+  : > "$tmp/overlapout"
+fi
 if [ "$dry" -eq 0 ]; then
   lock_tries=${FW_LOCK_TRIES:-50}
   lock_poll=${FW_LOCK_POLL:-0.2}
@@ -1487,8 +1547,12 @@ if [ "$dry" -eq 0 ]; then
     [ -z "$sweptto" ] || printf 'Swept to comment %s\n' "$sweptto"
     printf 'Paths:\n'
     sed 's/^/- /' < "$tmp/plist"
+    while IFS="$(printf '\t')" read -r _ovp _ovh; do
+      [ -n "$_ovp" ] || continue
+      printf 'overlap: %s %s\n' "$_ovp" "$_ovh"
+    done < "$tmp/overlapout"
     if [ -n "$ranges" ]; then printf 'Ranges: %s\n' "$ranges"; else printf 'Ranges: none\n'; fi
-    printf '\nNo open PR, live lane or live claim holds these paths (checked open PRs:%s; live lanes:%s; claims).\n' " $prs" " $lanes"
+    printf '\nNo exclusive hold blocks these paths (checked open PRs:%s; live lanes:%s; claims).\n' " $prs" " $lanes"
     # An `&&` here would be the group's last command and would fail it when there is nothing to skip.
     if [ -n "$ownprs" ]; then printf 'Skipped this ticket own open PRs:%s.\n' " $ownprs"; fi
     # Last in the file, and nothing may follow: `Reads:` latches the lane hold
@@ -1499,6 +1563,10 @@ if [ "$dry" -eq 0 ]; then
     fi
   } > "$gf" 2>/dev/null || { echo "ERROR cannot write $gf"; exit 3; }
 fi
+while IFS="$(printf '\t')" read -r _ovp _ovh; do
+  [ -n "$_ovp" ] || continue
+  printf 'OVERLAP %s %s\n' "$_ovp" "$_ovh"
+done < "$tmp/overlapout"
 # A path granted with no --ranges entry is a whole-file hold by definition:
 # warn, non-blocking, before the grant lines. A dry run prefixes each with
 # WOULD-GRANT so its output cannot be mistaken for an applied grant.
@@ -1507,7 +1575,7 @@ while IFS= read -r _wp; do
   _wb=$(_norm_base "$_wp") || continue
   [ -n "$_wb" ] || continue
   if ! cut -d'|' -f1 < "$tmp/rspec" | grep -qxF "$_wb"; then
-    echo "WIDE $_wp is granted whole (no --ranges): a lane needing one line of it is refused."
+    echo "WIDE $_wp is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP."
   fi
 done < "$tmp/plist"
 repo_root="$(cd "$self_dir/.." 2>/dev/null && pwd)"
