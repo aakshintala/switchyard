@@ -8,7 +8,7 @@ Read the plan at `__PLAN__` before anything else, and reread it after any compac
 
 ## Before the first edit
 
-1. Before editing any file, run `file-claim claim --lane <id> --grant <paths>` with this lane's ticket-bearing identifier (`fiber-<n>`, `<prefix>/<n>-<slug>`, or `sweep-<n>`) and fenced paths, not a model ID.
+1. Before editing any file, run `file-claim claim --lane __CLAIM_HOLDER__ --grant <paths>` with this lane's claim holder and fenced paths, not a model ID.
 
 ## Rules
 

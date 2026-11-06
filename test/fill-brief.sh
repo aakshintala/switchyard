@@ -18,6 +18,14 @@ printf 'a __A__ b __B__ c\n' >"$T/t.md"
 out="$(bash "$FILL" "$T/t.md" 'A=1' 'B=2')" || fail "basic fill exits 0"
 [ "$out" = "a 1 b 2 c" ] || fail "basic fill content: got [$out]"
 
+# The lane brief requires its canonical file-claim holder.
+lane_out="$(bash "$FILL" "$SCRIPT_DIR/../skills/planning/briefs/lane.md" \
+  ISSUE=4271 REPO=aakshintala/switchyard WORKTREE=/tmp/claim-holder \
+  BRANCH=claim-holder-1324 BASE=origin/main WORKFLOW_DOC=/dev/null \
+  PLAN=/tmp/plan GATE=true ATTRIBUTION=none LANE_MODEL=test \
+  CLOSING='Resolves #4271' CLAIM_HOLDER=fiber-4271 2>"$T/err-lane-brief")" || fail "lane brief fills its holder placeholder: $(cat "$T/err-lane-brief")"
+grep -qF -- 'file-claim claim --lane fiber-4271' <<<"$lane_out" || fail "lane brief uses the filled claim holder"
+
 # a bare template name resolves to the pack's brief (issue #1083); a path keeps working
 out="$(bash "$FILL" planner BASE=x ISSUE=1 PACK=none PLAN=/p PREFLIGHT=/pf REPO=o/r WORKFLOW_DOC=/w 2>"$T/err-bare.txt")" || fail "bare template name exits 0"
 case "$out" in *"o/r"*) ;; *) fail "bare template name fills the planner brief, got [$out]" ;; esac
