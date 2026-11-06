@@ -51,8 +51,8 @@
 #        `Review round closed` (the review record; other comments are not read) are
 #        scanned for authority claims: a line with
 #        `per the ruling`, `owner ruled`, `approved by` or similar, outside code spans,
-#        fenced blocks and `>` quotes, must cite #<n>, a URL or <doc>:<line> on the same
-#        line, else it prints `uncited authority: <line>` and exits 5.
+#        fenced blocks and `>` quotes, must cite #<n>, a URL or <doc>:<line> on the same line,
+#        or in the same bullet, as the claim, else it prints `uncited authority: <line>` and exits 5.
 #        When the repo defines a `mutants` label (`gh label list`), a draft PR
 #        must carry it before ship-pr marks it ready, so mutants run on the
 #        draft from the first push; a repo without the label is not checked,
@@ -502,7 +502,7 @@ comments_text="$(gh api --paginate "repos/$repo/issues/$pr/comments" \
   --jq '.[] | select(((.body // "") | sub("^ +"; "") | split("\n") | .[0] | ascii_downcase | startswith("review round closed"))) | "\u001e" + .html_url + "\n" + (.body // "")')" \
   || die 2 "cannot read comments on PR $pr in $repo"
 authority_scan <<<"$comments_text"
-[ "$authority_bad" = 0 ] || die 5 "PR text claims authority with no citation; cite the ruling (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun"
+[ "$authority_bad" = 0 ] || die 5 "PR text claims authority without a citation on the same line or in the same bullet; cite it there (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun"
 
 # A draft carries the mutants label when the repo defines one, so mutants
 # run on the draft from the first push. Checked here, beside --body-has, so
