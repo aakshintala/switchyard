@@ -407,7 +407,7 @@ mod tests {
         for (id, expected) in [
             ("composer-2.5", vec!["standard"]),
             ("opencode-go/glm-5.3-flash", vec!["standard"]),
-            ("openai/gpt-6-luna:xhigh", vec!["standard", "strong"]),
+            ("fiber/codex/gpt-6-luna:xhigh", vec!["standard", "strong"]),
             (
                 "opencode-go/muse-spark-1.3-contributor",
                 vec!["standard", "strong"],
@@ -421,20 +421,14 @@ mod tests {
             ("grok-4.7-high", vec!["strong"]),
             ("grok-4.7-xhigh", vec!["frontier"]),
             ("claude-opus-5-5", vec!["frontier"]),
-            ("openai/gpt-6.1-sol", vec!["frontier"]),
+            ("fiber/codex/gpt-6.1-sol", vec!["frontier"]),
         ] {
             assert_eq!(models[id].tiers, expected, "{id}");
         }
         assert!(models["openai/gpt-6-astra"].tiers.is_empty());
+        assert!(models["openai/gpt-6-luna:xhigh"].tiers.is_empty());
+        assert!(models["openai/gpt-6.1-sol"].tiers.is_empty());
         assert!(models["claude-fable-5-1"].tiers.is_empty());
-        for id in [
-            "fiber/anthropic/claude-opus-5-5",
-            "fiber/anthropic/claude-sonnet-5-5",
-            "fiber/anthropic/claude-haiku-5-5",
-        ] {
-            assert!(models[id].tiers.is_empty(), "{id}");
-            assert_eq!(models[id].backend, "fiber", "{id}");
-        }
         assert_eq!(models["muse/muse-wonder-1.0"].backend, "muse");
         assert!(models["muse/muse-wonder-1.0"].tiers.is_empty());
     }
