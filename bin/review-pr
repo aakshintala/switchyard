@@ -17,6 +17,8 @@
 #     --full-rereview is review mode only; it skips the comment check.
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]
 #     --since is the reviewed head; verify diffs from its repair base on current base.
+#     Posted review-pr rounds from --since onward are appended; FINDINGS_FILE
+#     carries what was never posted: CI and mutant findings, rulings and refutations.
 #     An empty repair diff refuses findings without a refuted: line; push the
 #     repair or mark each finding answered by a ruling as refuted before starting.
 #     launches one job per review role, prints "<role> <job-id>" per job, then
@@ -197,29 +199,87 @@ ci_state() {
     }'
 }
 
+review_comments_sorted() {
+  # review_comments_sorted REPO PR: print review-pr comments as sorted TSV rows:
+  # created_at, numeric id, header, and base64-encoded full body. The shared
+  # fetch and ordering keep verify scope aligned with the bare-review guard.
+  local repo="$1" pr="$2" rows tab
+  rows="$(gh api --paginate --jq '.[] | select((.body // "") | startswith("review-pr: patch-id")) | [.created_at, (.id | tostring), (.body | split("\n")[0]), (.body | @base64)] | @tsv' "repos/$repo/issues/$pr/comments")" || return 1
+  [ -n "$rows" ] || return 0
+  tab="$(printf '\t')"
+  printf '%s\n' "$rows" | sort -t "$tab" -k1,1 -k2,2n
+}
+
 last_review_header() {
   # last_review_header REPO PR: print "<head> <patch-id>" for the newest
-  # review-pr comment header, or nothing when no comment matches. Newest is by
-  # created_at, then numeric id, never by output order. A first line that does
-  # not match the review-pr header shape is skipped, so a malformed newest
-  # falls back to the next valid one. Non-zero only when gh api itself fails,
-  # so an empty history or a history with no valid header is not an error.
-  local repo="$1" pr="$2"
-  local rows api_rc=0
-  rows="$(gh api --paginate --jq '.[] | select(.body | startswith("review-pr: patch-id")) | [.created_at, (.id | tostring), (.body | split("\n")[0])] | @tsv' "repos/$repo/issues/$pr/comments")" || api_rc=$?
+  # valid review-pr comment header, or nothing when no comment matches.
+  local repo="$1" pr="$2" rows api_rc=0 last pid headv
+  rows="$(review_comments_sorted "$repo" "$pr")" || api_rc=$?
   if [ "$api_rc" -ne 0 ]; then return 1; fi
   [ -n "$rows" ] || return 0
-  local last
-  last="$(printf '%s\n' "$rows" | sort -t "$(printf '\t')" -k1,1 -k2,2n | { grep -E 'review-pr: patch-id ([0-9a-f]+|none), head [0-9a-f]{40}(,.*)?$' || true; } | tail -n 1)"
+  last="$(printf '%s\n' "$rows" | cut -f3 | { grep -E '^review-pr: patch-id ([0-9a-f]+|none), head [0-9a-f]{40}(,.*)?$' || true; } | tail -n 1)"
   [ -n "$last" ] || return 0
-  local header
-  header="$(printf '%s' "$last" | cut -f3-)"
-  [ -n "$header" ] || return 0
-  local pid headv
-  pid="$(printf '%s' "$header" | sed -n 's/^review-pr: patch-id \([^,]*\), head .*/\1/p')"
-  headv="$(printf '%s' "$header" | sed -n 's/^review-pr: patch-id [^,]*, head \([0-9a-f]\{40\}\).*/\1/p')"
+  pid="$(printf '%s' "$last" | sed -n 's/^review-pr: patch-id \([^,]*\), head .*/\1/p')"
+  headv="$(printf '%s' "$last" | sed -n 's/^review-pr: patch-id [^,]*, head \([0-9a-f]\{40\}\).*/\1/p')"
   [ -n "$pid" ] && [ -n "$headv" ] || return 0
   printf '%s %s' "$headv" "$pid"
+}
+
+verify_comment_has_fix_ok() {
+  # Match ship-pr's normalised verdict-line rule, but only in a verify section.
+  local body="$1" line norm in_verify=""
+  while IFS= read -r line; do
+    norm="$(norm_line "$line")"
+    case "$norm" in
+      "## verify"|"## verify "*) in_verify="1"; continue;;
+      "## "*) in_verify=""; continue;;
+    esac
+    if [ "$in_verify" = "1" ] && is_verdict verify "$norm"; then
+      case "$norm" in FIX-OK|FIX-OK[[:space:]]*) return 0;; esac
+    fi
+  done <<<"$body"
+  return 1
+}
+
+verify_posted_rounds() {
+  # verify_posted_rounds REPO PR SINCE: print sorted comments from the newest
+  # matching --since comment onward, and refuse a stale base behind FIX-OK.
+  local repo="$1" pr="$2" since="$3" rows row created id header body64 comment_head
+  local since_index=-1 start_index i body
+  local -a comment_rows=()
+  rows="$(review_comments_sorted "$repo" "$pr")" || return 1
+  while IFS= read -r row; do
+    [ -n "$row" ] && comment_rows[${#comment_rows[@]}]="$row"
+  done <<<"$rows"
+  for i in ${!comment_rows[@]}; do
+    IFS=$'\t' read -r created id header body64 <<<"${comment_rows[$i]}"
+    comment_head="$(printf '%s' "$header" | sed -n 's/^review-pr: patch-id [^,]*, head \([0-9a-f]\{40\}\).*/\1/p')"
+    if [ "$comment_head" = "$since" ]; then since_index="$i"; fi
+  done
+  if [ "$since_index" -lt 0 ]; then
+    echo "review-pr: no posted review-pr comment has header head $since; appending all posted rounds" >&2
+    start_index=0
+  else
+    start_index="$since_index"
+  fi
+  if [ "$since_index" -ge 0 ]; then
+    i=$((since_index + 1))
+    while [ "$i" -lt "${#comment_rows[@]}" ]; do
+      IFS=$'\t' read -r created id header body64 <<<"${comment_rows[$i]}"
+      comment_head="$(printf '%s' "$header" | sed -n 's/^review-pr: patch-id [^,]*, head \([0-9a-f]\{40\}\).*/\1/p')"
+      body="$(printf '%s' "$body64" | jq -Rr '@base64d')"
+      if [ -n "$comment_head" ] && verify_comment_has_fix_ok "$body"; then
+        echo "review-pr: --since $since is behind FIX-OK verify at head $comment_head; pass --since $comment_head instead" >&2
+        return 2
+      fi
+      i=$((i + 1))
+    done
+  fi
+  i="$start_index"
+  while [ "$i" -lt "${#comment_rows[@]}" ]; do
+    printf '%s\n' "${comment_rows[$i]}"
+    i=$((i + 1))
+  done
 }
 
 ci_display() {
@@ -723,6 +783,26 @@ cmd_start() {
       exit 1
     fi
     since_full="$(git -C "$clone" rev-parse --verify "$since^{commit}")"
+    verify_round_records=""
+    verify_round_rc=0
+    verify_round_records="$(verify_posted_rounds "$repo" "$pr" "$since_full")" || verify_round_rc=$?
+    if [ "$verify_round_rc" -eq 2 ]; then exit 2; fi
+    if [ "$verify_round_rc" -ne 0 ]; then
+      echo "review-pr: could not read PR comments (gh api failed); not starting a verify. Rerun once the API is reachable." >&2
+      exit 1
+    fi
+    verify_round_file="$run_dir/posted-rounds.md"
+    : >"$verify_round_file"
+    if [ -n "$verify_round_records" ]; then
+      while IFS= read -r round_row; do
+        [ -n "$round_row" ] || continue
+        IFS=$'\t' read -r round_created round_id round_header round_body <<<"$round_row"
+        printf '%s' "$round_body" | jq -Rj '@base64d' >>"$verify_round_file"
+        printf '\n\n' >>"$verify_round_file"
+      done <<<"$verify_round_records"
+    else
+      printf 'No posted review-pr rounds were found.\n' >>"$verify_round_file"
+    fi
     if ! old_mb="$(git -C "$clone" merge-base "$since_full" "$base_tip")"; then
       echo "review-pr: cannot find the old merge-base for --since $since_full and $base_tip" >&2
       exit 1
@@ -813,7 +893,7 @@ cmd_start() {
         ;;
       verify)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" "SKILLS=$skills_dir" \
-          "SINCE=$since" "FINDINGS=@$verify" >"$brief"
+          "SINCE=$since" "FINDINGS=@$verify" "POSTED_ROUNDS=@$verify_round_file" >"$brief"
         ;;
     esac
     if [ "$mode" = "review" ] && [ -f "$review_context/pr-body.md" ]; then
