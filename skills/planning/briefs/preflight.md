@@ -3,7 +3,7 @@ Doc preflight for issue #__ISSUE__ in __REPO__. Do not edit anything. Do not del
 Read #__ISSUE__ and spec #__SPEC__, each body and then its comments (`gh issue view <n> --repo __REPO__`, then the same with `--comments`, which prints no body). Read the project's workflow doc (__WORKFLOW_DOC__). Then read the code at __BASE__, in your working directory, that #__ISSUE__ touches: the files it names, their callers, and their tests. You check by reading and searching; the lane builds and runs the tests, so your list needs no build or test output. Gather in batches: put every grep, `git show` range and `sed` slice one question needs into a single Bash call, and read the pack (`__PACK__`) before any of them.
 
 List, max 250 words, one line each:
-1. Contradictions between #__ISSUE__, #__SPEC__, the workflow doc and the code, including a site, flag, command or field #__ISSUE__ names that the code at __BASE__ lacks or has changed: ticket bodies go stale.
+1. Contradictions between #__ISSUE__, #__SPEC__, the workflow doc and the code, including a site, flag, command or field #__ISSUE__ names that the code at __BASE__ lacks or has changed: ticket bodies go stale. When a named site moved or changed, re-check the rule or reason the criterion cites against the site as it is now. If it no longer holds, report it as a `core` contradiction for a ruling, not a re-anchor.
 2. Defaults or formats #__ISSUE__ leaves unstated that the implementer must pick.
 3. Failure cases with no stated behaviour.
 4. Acceptance criteria that fight the spec or the code.
