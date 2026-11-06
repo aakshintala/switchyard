@@ -641,7 +641,7 @@ _normalize_doc_heading() {
 }
 _doc_has_heading() {
   _dh_want=$(printf '%s\n' "$2" | _normalize_doc_heading)
-  awk '/^\#/ { print }' "$(_blob_path "$1")" | _normalize_doc_heading | grep -qxF -- "$_dh_want"
+  grep '^#' "$(_blob_path "$1")" | _normalize_doc_heading | grep -qxF -- "$_dh_want"
 }
 
 if [ -n "$docheadings" ]; then
