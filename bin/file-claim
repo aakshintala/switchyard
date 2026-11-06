@@ -3,8 +3,10 @@
 # Ordinary lane and PR overlaps are advisory; sweep-* lanes hold paths exclusively.
 # Claim batches are all-or-nothing only when a sweep or the grant cap refuses a path.
 # Usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
+# Claim IDs must contain a ticket number: fiber-<n>, <prefix>/<n>-<slug>, or sweep-<n>.
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
+# Claim lanes need a ticket number; release and list accept any lane ID.
 # Without --lane, list adds one row per open-PR path: <path> pr#N pr - - N.
 # FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5); N must be a positive integer.
 # FILE_CLAIM_READ_WAIT=N sets the retry wait in whole seconds (default 1).
@@ -22,6 +24,8 @@ TAB=$'\t'
 NL=$'\n'
 usage() {
   echo "usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
+  echo "       claim IDs must contain a ticket number: fiber-<n>, <prefix>/<n>-<slug>, or sweep-<n>" >&2
+  echo "       release and list accept any lane ID" >&2
   echo "       ordinary lane and PR holds are advisory; sweep-* lane ids hold exclusively" >&2
   echo "       sweep and grant-cap refusals are all-or-nothing; drop refused paths and rerun" >&2
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
@@ -44,6 +48,8 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+# shellcheck disable=SC1091
+. "$script_dir/lib/lane-ticket.sh"
 . "$script_dir/lib/plan-tokens.sh"
 W=""
 cleanup() { if [ -n "$W" ] && [ -d "$W" ]; then rm -rf "$W"; fi; }
@@ -357,7 +363,12 @@ main() {
   case "$self_pr" in "") ;; *[!0-9,]*|,*|*,|*,,*) usage;; esac
   [ -n "$repo" ] || usage; valid_field "$repo" || usage
   case "$cmd" in
-    claim) [ -n "$lane" ] || usage; valid_field "$lane" || usage; [ -n "$mode" ] || usage
+    claim) [ -n "$lane" ] || usage; valid_field "$lane" || usage
+      if [ -z "$(lane_ticket_num "$lane")" ]; then
+        echo "ERROR lane has no ticket number: $lane (expected fiber-<n> or <prefix>/<n>-<slug>)" >&2
+        exit 2
+      fi
+      [ -n "$mode" ] || usage
       if [ -z "$worktree" ]; then worktree="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf 'unknown'):$(pwd)"; fi
       valid_field "$worktree" || usage
       if [ -n "$plan_file" ]; then
