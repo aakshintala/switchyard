@@ -1178,4 +1178,53 @@ grep -q 'PRECONDITION missing=pr: no open PR for branch tkt-529 in switchyard' "
 grep -F -q "tkt-build $S --from lane" "$T/stderr" || fail "prepr-nolane lane line missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "prepr-nolane dispatched a job"
 
+# --since supplies the reviewed head when reviews ran outside tkt-build.
+setup_case since-missing-reviewed
+drop_state_key reviewed
+out="$(bash "$TKT" "$S" --verify --since "${OLD:0:8}" 2>"$T/stderr")" || fail "since-missing-reviewed exited $?: $(cat "$T/stderr")"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "since-missing-reviewed bad verdict: $(head -n 1 <<<"$out")"
+grep -F -q "review-pr|run 7 --repo switchyard --cwd $WT --head $NEW --model verify-model --verify $CDIR/findings.md --since $OLD" "$T/calls.log" || fail "since-missing-reviewed did not pass the full since sha: $(cat "$T/calls.log")"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$NEW" ] || fail "since-missing-reviewed did not update reviewed after FIX-OK"
+
+# Without either source for the reviewed head, fail with a useful instruction.
+setup_case since-missing
+drop_state_key reviewed
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "since-missing exited 0"
+rc=$?; [ "$rc" = "2" ] || fail "since-missing exited $rc, want 2"
+grep -F -q 'tkt-fix: missing key: reviewed; pass --since <sha of the head the reviews covered>' "$T/stderr" || fail "since-missing message missing: $(cat "$T/stderr")"
+grep -q '^job|' "$T/calls.log" && fail "since-missing dispatched a job"
+
+# An explicit since must agree with an existing reviewed commit.
+setup_case since-mismatch
+printf 'other\n' >"$WT/other.txt"
+git -C "$WT" add other.txt
+git -C "$WT" commit -qm 'outside: another commit'
+OTHER="$(git -C "$WT" rev-parse HEAD)"
+out="$(bash "$TKT" "$S" --verify --since "$OTHER" 2>"$T/stderr")" && fail "since-mismatch exited 0"
+rc=$?; [ "$rc" = "2" ] || fail "since-mismatch exited $rc, want 2"
+grep -F -q "$OLD" "$T/stderr" || fail "since-mismatch message omitted reviewed sha $OLD: $(cat "$T/stderr")"
+grep -F -q "$OTHER" "$T/stderr" || fail "since-mismatch message omitted --since sha $OTHER: $(cat "$T/stderr")"
+grep -q '^job|' "$T/calls.log" && fail "since-mismatch dispatched a job"
+
+# The matching explicit since proceeds and scopes the verify to that commit.
+setup_case since-matching
+out="$(bash "$TKT" "$S" --verify --since "$OLD" 2>"$T/stderr")" || fail "since-matching exited $?: $(cat "$T/stderr")"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "since-matching bad verdict: $(head -n 1 <<<"$out")"
+grep -F -q -- "--since $OLD" "$T/calls.log" || fail "since-matching did not pass --since $OLD: $(cat "$T/calls.log")"
+
+# --since is only valid for a verifying fix round.
+setup_case since-noverify
+out="$(bash "$TKT" "$S" --no-verify --since "$OLD" 2>"$T/stderr")" && fail "since-noverify exited 0"
+rc=$?; [ "$rc" = "2" ] || fail "since-noverify exited $rc, want 2"
+grep -F -q 'usage: tkt-fix ' "$T/stderr" || fail "since-noverify did not report usage: $(cat "$T/stderr")"
+
+# Reject an unresolvable commit before dispatching a fix job.
+setup_case since-invalid
+out="$(bash "$TKT" "$S" --verify --since not-a-commit 2>"$T/stderr")" && fail "since-invalid exited 0"
+rc=$?; [ "$rc" = "2" ] || fail "since-invalid exited $rc, want 2"
+grep -F -q 'tkt-fix: --since does not resolve to a commit in worktree: not-a-commit' "$T/stderr" || fail "since-invalid message missing: $(cat "$T/stderr")"
+grep -q '^job|' "$T/calls.log" && fail "since-invalid dispatched a job"
+
 echo "tkt-fix assertions passed"

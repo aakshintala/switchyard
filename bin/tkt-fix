@@ -2,23 +2,24 @@
 # tkt-fix: one review-loop fix round; slot fix<max(round,fixslot)+1> keeps
 # rounds apart: tkt-job re-prints a terminal slot's digest.
 # A lane blocked before its PR resumes with tkt-job --resume <job.lane> followed by tkt-build --from gate, or with tkt-build --from lane when no lane ran.
-# Usage: tkt-fix <state> (--verify | --no-verify) [--findings <file>]
+# Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>]
 #   [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-fix <state> (--verify | --no-verify) [--findings <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
+  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
   exit 2
 }
 
 [ $# -ge 2 ] || usage
 state="$1"; shift
-verify=0; noverify=0; findings=""; resume=""; prompt=""; fixmodel=""; verifymodel=""
+verify=0; noverify=0; findings=""; since=""; resume=""; prompt=""; fixmodel=""; verifymodel=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --verify) verify=1; shift ;;
     --no-verify) noverify=1; shift ;;
     --findings) [ $# -ge 2 ] && [ -n "$2" ] || usage; findings="$2"; shift 2 ;;
+    --since) [ $# -ge 2 ] && [ -n "$2" ] || usage; since="$2"; shift 2 ;;
     --resume) [ $# -ge 2 ] && [ -n "$2" ] || usage; resume="$2"; shift 2 ;;
     --prompt) [ $# -ge 2 ] && [ -n "$2" ] || usage; prompt="$2"; shift 2 ;;
     --fix-model) [ $# -ge 2 ] && [ -n "$2" ] || usage; fixmodel="$2"; shift 2 ;;
@@ -27,6 +28,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ "$verify" -ne "$noverify" ] || usage
+[ -z "$since" ] || [ "$verify" -eq 1 ] || usage
 [ -z "$resume$prompt" ] || { [ -n "$resume" ] && [ -n "$prompt" ]; } || usage
 
 script_path="$0"
@@ -99,6 +101,27 @@ else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-fix: state locke
 t require repo issue branch worktree run
 repo="$(t get repo)"; issue="$(t get issue)"; set_namebase "$repo" "$issue"; branch="$(t get branch)"
 worktree="$(t get worktree)"; run="$(t get run)"
+reviewed="$(t get reviewed 2>/dev/null || true)"
+verify_since="$reviewed"
+if [ -n "$since" ]; then
+  since_full="$(git -C "$worktree" rev-parse --verify "${since}^{commit}" 2>/dev/null)" || {
+    echo "tkt-fix: --since does not resolve to a commit in worktree: $since" >&2
+    exit 2
+  }
+  if [ -n "$reviewed" ]; then
+    reviewed_commit="$(git -C "$worktree" rev-parse --verify "${reviewed}^{commit}" 2>/dev/null || true)"
+    [ -n "$reviewed_commit" ] || reviewed_commit="$reviewed"
+    if [ "$reviewed_commit" != "$since_full" ]; then
+      echo "tkt-fix: --since $since_full conflicts with reviewed $reviewed_commit" >&2
+      exit 2
+    fi
+  fi
+  verify_since="$since_full"
+fi
+if [ "$verify" -eq 1 ] && [ -z "$verify_since" ]; then
+  echo "tkt-fix: missing key: reviewed; pass --since <sha of the head the reviews covered>" >&2
+  exit 2
+fi
 mkdir -p "$run"
 round="$(t get round 2>/dev/null || printf '0')"; case "$round" in ''|*[!0-9]*) round=0;; esac
 fixslot="$(t get fixslot 2>/dev/null || printf '0')"; case "$fixslot" in ''|*[!0-9]*) fixslot=0;; esac
@@ -367,8 +390,7 @@ if [ "$noverify" -eq 1 ]; then
   emit "PUSHED unverified" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"}
 fi
 [ -n "$verifymodel" ] || verifymodel="$(t get model.verify 2>/dev/null)" || { echo "tkt-fix: missing key: model.verify (no --verify-model and no state model.verify)" >&2; exit 2; }
-reviewed="$(t get reviewed 2>/dev/null)" || { echo "tkt-fix: missing key: reviewed" >&2; exit 2; }
-vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$findings" --since "$reviewed")
+vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$findings" --since "$verify_since")
 if [ -n "$concerns_file" ]; then vargs+=(--context "$concerns_file"); fi
 vrc=0; "$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
 if [ -s "$tmp/verify.err" ]; then cat "$tmp/verify.err" >&2; fi
