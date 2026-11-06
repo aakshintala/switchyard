@@ -78,7 +78,7 @@ reload() {
   for a in --run "$RUN" --repo acme/widget --issue 42 --spec 42 --branch tkt-start \
     --worktree "$WT" --workflow-doc "$CDIR/wf.md" --closing "Resolves #42" --env "FOO=1" \
     --body-has "Resolves #42" --body-has "Co-authored with Claude Code." --extra "$CDIR/extra.md" \
-    --merge-gate ci --mutant-job Selection --model lane=sol --model preflight=luna --files f.txt; do
+    --merge-gate ci --merge-check 'cargo check --all-targets' --mutant-job Selection --model lane=sol --model preflight=luna --files f.txt; do
     if [ "$skip" -eq 1 ]; then skip=0; elif [ "$a" = "${1:-}" ]; then skip=1; else ARGS+=("$a"); fi
   done
 }
@@ -124,7 +124,7 @@ expect_state() {
   [ -f "$S" ] || fail "$1: no state file [$S]"
   for kv in "repo=acme/widget" "issue=42" "spec=42" "branch=tkt-start" "worktree=$WT" "run=$RUN" \
     "workflow_doc=$CDIR/wf.md" "closing=Resolves #42" "env=FOO=1" "extra=$CDIR/extra.md" \
-    "merge_gate=ci" "mutant_job=Selection"; do
+    "merge_gate=ci" "merge_check=cargo check --all-targets" "mutant_job=Selection"; do
     grep -qF "$kv" "$S" || fail "$1: state misses [$kv]"
   done
   [ "$(grep -c '^body_has=' "$S")" -eq 2 ] || fail "$1: state wants 2 body_has lines"
@@ -367,7 +367,7 @@ for flag in --run --repo --issue --spec --branch --worktree --workflow-doc --clo
   [ "$RC" -eq 2 ] || fail "usage $flag: exit $RC"
   grep -qF -- "$flag" "$CDIR/stderr" || fail "usage $flag: stderr does not name it"
 done
-for spec in "--model --model solorole" "--merge-gate --merge-gate someday"; do
+for spec in "--model --model solorole" "--merge-gate --merge-gate someday" "--merge-check --merge-check"; do
   reload; run_start ${spec#* }
   [ "$RC" -eq 2 ] || fail "usage ${spec#* }: exit $RC"
   grep -qF -- "${spec%% *}" "$CDIR/stderr" || fail "usage ${spec#* }: stderr does not name ${spec%% *}"

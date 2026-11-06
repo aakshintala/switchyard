@@ -409,6 +409,7 @@ printf 'body_ends=%s\n' 'Co-authored with Claude Code.' >>"$S"
 printf 'unverified text\n' >"$CDIR/unverified.md"
 printf 'unverified=%s\n' "$CDIR/unverified.md" >>"$S"
 printf 'merge_gate=%s\n' gate >>"$S"
+printf 'merge_check=%s\n' 'cargo check --all-targets' >>"$S"
 printf 'env=%s\n' 'FOO=1 BAR=2' >>"$S"
 printf '# Plan\n\n## Gate\n\n`bash test/gate.sh`\n' >"$CDIR/plan.md"
 printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
@@ -421,6 +422,19 @@ got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
 [ "$got" = 'arg|Co-authored with Claude Code.' ] || fail "flags: body-ends value, got [$got]"
 grep -F -q -- "--unverified-fixes $CDIR/unverified.md" "$T/calls.log" || fail "flags: unverified missing"
 grep -F -q -- '--gate FOO=1 BAR=2 bash test/gate.sh' "$T/calls.log" || fail "flags: gate missing"
+[ "$(grep -c -x -F 'arg|--merge-check' "$T/calls.log")" -eq 0 ] || fail "flags: merge-check omitted when merge_gate=gate"
+
+# --- merge_check reaches ship-pr for a CI merge gate ---
+reset_stub; setup_case mergecheck-ci
+printf '0' >"$T/exitcodes"
+printf 'merge_gate=%s\n' ci >>"$S"
+printf 'merge_check=%s\n' 'cargo check --all-targets' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "mergecheck-ci: exit $RC"
+[ "$(grep -c -x -F 'arg|--merge-check' "$T/calls.log")" -eq 1 ] || fail "mergecheck-ci: merge-check flag missing: $(cat "$T/calls.log")"
+got="$(grep -A1 -x -F 'arg|--merge-check' "$T/calls.log" | sed -n 2p)"
+[ "$got" = 'arg|cargo check --all-targets' ] || fail "mergecheck-ci: value not one argument, got [$got]"
+[ "$(grep -c -x -F 'arg|--gate' "$T/calls.log")" -eq 0 ] || fail "mergecheck-ci: no local gate"
 
 # --- mutant_job opts the ticket into the mutants gate
 reset_stub; setup_case mutantjob
@@ -557,6 +571,8 @@ grep -q 'unverified' "$T/usage-err" \
   || fail "usage names the unverified state key: [$(cat "$T/usage-err")]"
 grep -q -F -- '--unverified-fixes' "$T/usage-err" \
   || fail "usage names --unverified-fixes: [$(cat "$T/usage-err")]"
+grep -q -F -- 'merge_check' "$T/usage-err" && grep -q -F -- '--merge-check' "$T/usage-err" \
+  || fail "usage names the merge_check state key and --merge-check: [$(cat "$T/usage-err")]"
 
 # CI-FAIL carries never-started lines and omits the empty failed-jobs summary.
 reset_stub; setup_case neverstarted
