@@ -155,6 +155,11 @@ expect_clean "new-confirmed path close to a base filename" "$(mkplan nearconfirm
 expect_clean "new path without a close base filename" "$(mkplan farnew '## Files\n- `src/brand.rs` (new)\n')"
 expect_problems "new path already exists at base" "$(mkplan existingnew '## Files\n- `src/lib.rs` (new)\n')" \
   'new path src/lib.rs already exists at base: drop the new mark'
+expect_clean "backticked new does not mark an existing Files path" "$(mkplan backtickednew '## Files\n- `src/lib.rs`: set in `fn new`\n')"
+expect_problems "bare new still marks an existing Files path" "$(mkplan bareexistingnew '## Files\n- `src/lib.rs`: set in `fn new` (new)\n')" \
+  'new path src/lib.rs already exists at base: drop the new mark'
+expect_problems "backticked delete does not exempt a missing Files path" "$(mkplan backtickeddelete '## Files\n- `src/nope.rs`: call `delete`\n')" \
+  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 3a. a new task path that is not in Files is still checked by check 2
 expect_problems "new task path outside Files" "$(mkplan newout '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Create new `bin/brand-new-check`.\n')" \

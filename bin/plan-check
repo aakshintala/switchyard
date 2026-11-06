@@ -27,7 +27,8 @@
 #           entry must also have a parent directory at REV; `(new-confirmed)`
 #           bypasses only the parent check.
 #           A path on a line with the word `reads`, `read-only` or `fixture` must
-#           still resolve but is left out of check 2. Marks match whole words.
+#           still resolve but is left out of check 2. Marks match whole words;
+#           words inside backticks do not count as marks.
 #        2. Every resolved path in `## Tasks` or `## Red commit` is in `## Files`,
 #           unless its line holds `reads`, `read-only` or `fixture`.
 #           A directory counts as in Files when a Files path starts with it.
