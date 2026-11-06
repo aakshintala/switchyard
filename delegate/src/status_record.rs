@@ -200,7 +200,10 @@ pub struct FileStatusRecordWriter;
 
 impl StatusRecordWriter for FileStatusRecordWriter {
     fn write(&self, job_id: &str, record: &PollResult) {
-        let _ = write_atomic(&job_record_path(job_id), &json_compact(record));
+        let path = job_record_path(job_id);
+        if let Err(e) = write_atomic(&path, &json_compact(record)) {
+            eprintln!("cannot write status record {}: {e}", path.display());
+        }
     }
 }
 
@@ -250,9 +253,8 @@ pub struct CliRecord {
     pub resumed_from: Option<String>,
 }
 
-/// Writes the CLI record for the one job this supervisor runs. A failed write exits the
-/// supervisor: the file is the only truth, so a job that cannot report is not worth running.
-/// ponytail: the agent child is orphaned on that exit; `watch` reports the dead supervisor.
+/// Writes the CLI record for the one job this supervisor runs. A failed write leaves the
+/// bookkeeping unavailable but does not interrupt the job doing the actual work.
 pub struct CliRecordWriter {
     pub job_id: String,
     pub model: String,
@@ -306,7 +308,6 @@ impl StatusRecordWriter for CliRecordWriter {
         let res = write_atomic(&path, &json_compact(&rec));
         if let Err(e) = res {
             eprintln!("cannot write status record {}: {e}", path.display());
-            std::process::exit(1);
         }
     }
 }

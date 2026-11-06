@@ -3,7 +3,7 @@
 use super::*;
 use crate::backends::types::{BackendResult, Event, ProgressSnapshotRaw, Runner, Spawned};
 use crate::output::derive_status;
-use crate::status_record::{FileStatusRecordWriter, job_record_path};
+use crate::status_record::{CliRecordWriter, FileStatusRecordWriter, job_record_path};
 use crate::types::{Allowance, PollResult, ResumeContext};
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -298,6 +298,46 @@ fn heartbeat_refreshes_running_record_and_stops_at_retirement() {
     assert_eq!(status_of(&s.spy.last().1), "DONE");
     sleep(Duration::from_millis(300));
     assert_eq!(s.spy.len(), after);
+}
+
+#[test]
+fn failed_status_record_write_does_not_stop_job() {
+    use crate::test_env::{EnvGuard, lock};
+
+    let _env = lock();
+    let root = std::env::temp_dir().join(format!("delegate-record-failure-{}", random_uuid()));
+    let jobs = root.join("jobs");
+    std::fs::create_dir_all(&jobs).unwrap();
+    let _jobs = EnvGuard::set("DELEGATE_JOBS_DIR", jobs.to_str().unwrap());
+    let writer_job_id = "record-write-failure";
+    let s = setup_with(|d| {
+        d.status_writer = Arc::new(CliRecordWriter {
+            job_id: writer_job_id.into(),
+            model: "composer-2.5".into(),
+            backend: Some("cursor".into()),
+            cwd: "/tmp".into(),
+            gate: String::new(),
+            tool_idle_ms: None,
+            idle_ms: None,
+            wall_ms: None,
+            resumed_from: None,
+            last_session_id: Mutex::new(None),
+        });
+    });
+
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    assert!(job_record_path(writer_job_id).is_file());
+
+    let moved_jobs = root.join("jobs-before-failure");
+    std::fs::rename(&jobs, &moved_jobs).unwrap();
+    std::fs::write(&jobs, "not a directory").unwrap();
+    s.fake.handle(0).finish(done_ok());
+
+    assert_eq!(settle(&s.reg, &id), "DONE");
+    assert_eq!(terminal_text(&s.reg, &id), "ok\nSTATUS: DONE");
+    std::fs::remove_file(&jobs).unwrap();
+    std::fs::remove_dir_all(moved_jobs).unwrap();
+    std::fs::remove_dir(root).unwrap();
 }
 
 #[test]
