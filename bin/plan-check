@@ -206,12 +206,20 @@ check_citation() {
       symbol="${citation#*::}"
       content="$(git -C "$dir" show "$rev:$RES")"
       if ! grep -Fq -- "${symbol%()}" <<<"$content" && ! seen "s:$citation:$symbol"; then
-        problem "missing symbol: $citation does not contain $symbol: correct the citation"
+        problem "missing symbol: $citation does not contain $symbol: correct the citation (the symbol must appear somewhere in ${citation%%::*} at the base)"
       fi
       return 0 ;;
   esac
   [[ $citation =~ :([0-9]+)(-([0-9]+))?$ ]] || return 0
-  lines="${BASH_REMATCH[1]},${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}"
+  local start_line end_line expected_lines
+  start_line="${BASH_REMATCH[1]}"
+  end_line="${BASH_REMATCH[3]:-$start_line}"
+  lines="$start_line,$end_line"
+  if [ "$start_line" = "$end_line" ]; then
+    expected_lines="line $start_line"
+  else
+    expected_lines="lines $start_line-$end_line"
+  fi
   symbol="$(awk -v ln="$CUR_LN" -v token="$citation" '
     NR == ln {
       n = split($0, a, "`")
@@ -227,7 +235,7 @@ check_citation() {
   handle_token symbol "$symbol"
   content="$(git -C "$dir" show "$rev:$RES" | sed -n "${lines}p")"
   if ! grep -Fq -- "${symbol%()}" <<<"$content" && ! seen "s:$citation:$symbol"; then
-    problem "missing symbol: $citation does not contain $symbol: correct the citation"
+    problem "missing symbol: $citation does not contain $symbol: correct the citation (plan line $CUR_LN pairs it with the nearest backticked name, $symbol, which must appear in $expected_lines at the base; fix the line range, put the intended symbol next to the citation, or cite ${citation%%:*}::$symbol to check the whole file)"
   fi
 }
 

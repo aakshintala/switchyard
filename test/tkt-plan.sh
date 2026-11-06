@@ -45,12 +45,16 @@ prose_entries="$(awk -v mode=entries "$_plan_files_awk" "$prose_plan")"
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 
-# Stub plan-check: mode file holds "ok" (exit 0) or "lines" (exit 1, two lines).
+# Stub plan-check: mode file holds "ok" (exit 0), "lines" (exit 1, two lines), or "real" (runs bin/plan-check).
 printf 'ok' >"$T/pcmode"
 cat >"$T/bin/plan-check" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
 printf 'check|%s\n' "\$*" >>"$T/stub.log"
+if [ "\$(cat "$T/pcmode")" = real ]; then
+  "$REAL_BIN/plan-check" "\$@"
+  exit \$?
+fi
 if [ "\$(cat "$T/pcmode")" = lines ]; then
   printf 'missing path: bin/ghost (line 9): correct it, or mark the line new or removed\noutside Files: test/ghost (line 12): add it to Files, or mark the line reads\n'
   exit 1
@@ -345,6 +349,22 @@ expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "PLAN-CHECK"
 grep -q "missing path: bin/ghost" <<<"$OUT" || fail "PLAN-CHECK lists the first line"
 grep -q "outside Files: test/ghost" <<<"$OUT" || fail "PLAN-CHECK lists the second line"
 grep -q "^job|" "$T/stub.log" && fail "PLAN-CHECK starts no job"
+printf 'ok' >"$T/pcmode"
+
+# --- real plan-check citation hints reach the PLAN-CHECK output ---
+setup_case citation-hint
+mkdir -p "$WT/src"
+wcommit "$WT" src/lib.rs $'pub fn existing() {}\n'
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+git -C "$WT" rev-parse HEAD >"$CDIR/base"
+printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n\n## Rulings\n\n`missing_widget()` at `src/lib.rs:1`.\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+printf 'real' >"$T/pcmode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "citation-hint PLAN-CHECK exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=1 log=*" "citation-hint PLAN-CHECK"
+grep -Fq "missing symbol:" <<<"$OUT" || fail "citation-hint output has missing symbol prefix"
+grep -Fq "pairs it with the nearest backticked name" <<<"$OUT" || fail "citation-hint output explains symbol pairing"
+grep -Fq "cite src/lib.rs::missing_widget() to check the whole file" <<<"$OUT" || fail "citation-hint output suggests a path::symbol citation"
 printf 'ok' >"$T/pcmode"
 
 # --- plan-check lines block confirm without consuming its round or grant ---
