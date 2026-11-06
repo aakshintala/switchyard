@@ -221,7 +221,8 @@ else
     "$bin_dir/plan-gate" "${plan_gate_argv[@]}" "$plan" >/dev/null || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $plan"
   fi
   if merge_check="$(tkt get merge_check 2>/dev/null)" && [ -n "$merge_check" ]; then
-    args+=(--merge-check "$merge_check")
+    e="$(tkt get env 2>/dev/null || true)"
+    args+=(--merge-check "${e:+$e }$merge_check")
   fi
 fi
 
