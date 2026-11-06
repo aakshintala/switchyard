@@ -177,6 +177,7 @@ if [ "\$(cat "$T/sweepmode" 2>/dev/null || printf 'ok')" = fail ]; then
   printf 'unresolved symbol: x (line 3)\n'
   exit 1
 fi
+printf 'stub pack for %s\n' "\$out" >"\$out" || exit 1
 printf 'PACK %s symbols=0 files=0 outside=0\n' "\$out"
 EOF
 chmod +x "$T/bin/plan-sweep"
@@ -1124,12 +1125,40 @@ expect_verdict "TKT tkt-plan SET plan=$CDIR/plan.md log=*" "same-path SET"
 [ "$(bash "$TKT_STATE" "$S" get granted_owner)" = "owner-keep" ] || fail "same-path SET keeps grant owner"
 [ "$(bash "$TKT_STATE" "$S" get last_report)" = "$CDIR/kept-report.md" ] || fail "same-path SET keeps the last report"
 grep -q "sweep|.*--plan $CDIR/plan.md" "$T/stub.log" || fail "same-path SET still refreshes the pack"
+# An unchanged re-set reuses the successful sweep result.
+: >"$T/stub.log"
+run_plan set "$CDIR/plan.md"
+[ "$RC" -eq 0 ] || fail "unchanged same-path SET exits 0"
+[ "$(grep -c '^sweep|' "$T/stub.log" || true)" -eq 0 ] || fail "unchanged same-path SET skips plan-sweep"
+# Editing a plan in place changes the content key and sweeps again.
+printf '\nPlan note: changed.\n' >>"$CDIR/plan.md"
+: >"$T/stub.log"
+run_plan set "$CDIR/plan.md"
+[ "$RC" -eq 0 ] || fail "edited same-path SET exits 0"
+[ "$(grep -c '^sweep|' "$T/stub.log" || true)" -eq 1 ] || fail "edited same-path SET runs plan-sweep again"
+# A missing pack artifact invalidates an otherwise matching cache entry.
+rm -f "$(bash "$TKT_STATE" "$S" get pack)"
+: >"$T/stub.log"
+run_plan set "$CDIR/plan.md"
+[ "$RC" -eq 0 ] || fail "SET after pack deletion exits 0"
+[ "$(grep -c '^sweep|' "$T/stub.log" || true)" -eq 1 ] || fail "SET after pack deletion runs plan-sweep"
 # A verify after two counted rounds, with no confirm, stops before any job.
 jobs_before="$(grep -c '^job|' "$T/stub.log")"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "verify at round 2 exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "verify at round 2"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify at round 2 starts no job"
+
+# --- a new plan path resets the pack cache, even with identical content ---
+setup_case reset-new-path
+run_plan set "$CDIR/plan.md"
+[ "$RC" -eq 0 ] || fail "initial cache SET exits 0"
+cp "$CDIR/plan.md" "$CDIR/plan-copy.md"
+: >"$T/stub.log"
+run_plan set "$CDIR/plan-copy.md"
+[ "$RC" -eq 0 ] || fail "new-path cache SET exits 0"
+[ "$(grep -c '^sweep|' "$T/stub.log" || true)" -eq 1 ] || fail "new plan path runs plan-sweep despite identical content"
+[ "$(state_get pack_plan_hash)" = "$(git -C "$WT" hash-object "$CDIR/plan-copy.md")" ] || fail "new-path SET stores the swept plan hash"
 
 # --- a failing sweep prints its stdout once and its progress once ---
 setup_case set-fail
@@ -1326,6 +1355,7 @@ bash "$TKT_STATE" "$S" set granted_by switchyard || fail "seed replan grant auth
 bash "$TKT_STATE" "$S" set granted_comment replan || fail "seed replan grant comment"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "seed replan grant usage"
 bash "$TKT_STATE" "$S" set last_report "$CDIR/replan-report.md" || fail "seed replan report"
+bash "$TKT_STATE" "$S" set pack_plan_hash old-plan-hash || fail "seed replan pack hash"
 bash "$TKT_STATE" "$S" set job.verifier-r1 j-v1 || fail "seed verifier job"
 run_plan replan
 [ "$RC" -eq 0 ] || fail "replan exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -1337,6 +1367,7 @@ expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job
 [ -z "$(bash "$TKT_STATE" "$S" get job.fix3 2>/dev/null || true)" ] || fail "replan clears job.fix3"
 [ -z "$(bash "$TKT_STATE" "$S" get job.preflight 2>/dev/null || true)" ] || fail "replan clears job.preflight"
 [ -z "$(bash "$TKT_STATE" "$S" get findings 2>/dev/null || true)" ] || fail "replan clears findings"
+[ -z "$(bash "$TKT_STATE" "$S" get pack_plan_hash 2>/dev/null || true)" ] || fail "replan clears pack plan hash"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "replan keeps verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "replan keeps confirmed_for"
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "replan keeps grant author"
