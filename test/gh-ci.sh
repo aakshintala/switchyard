@@ -1447,6 +1447,16 @@ grep -q '^usage: gh-ci' "$T/stderr.txt" || fail "unknown subcommand prints usage
 
 # --- cases: failures prints a cleaned digest of the failed and cancelled jobs ---
 run_failures() {
+  local ids id
+  if [ "${1:-}" = "--pr" ]; then
+    ids=$(jq -r '.[].databaseId // empty' "$T/state/runs.json" 2>/dev/null || true)
+  else
+    ids="${1:-}"
+  fi
+  while IFS= read -r id; do
+    case "$id" in ''|*[!0-9]*) continue;; esac
+    [ -e "$T/state/run-$id-poll.txt" ] || printf '{"status":"completed"}\n' >"$T/state/run-$id-poll.txt"
+  done <<<"$ids"
   OUT="$(bash "$GHCI" failures "$@" 2>"$T/stderr.txt")"; CODE=$?
 }
 set_runs() { printf '%s' "$1" >"$T/state/runs.json"; }
@@ -1465,6 +1475,24 @@ make_rust_log() { # 100 ANSI/timestamp/prefixed lines with Rust failures inside
   } >"$T/state/log-$jid.txt"
 }
 ESC_BYTES="$(printf '\033')"
+
+# An in-progress run reports the failures collected so far and exits non-zero.
+reset_state
+set_jobs 123 '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}'
+set_run 123 "$A" '{"status":"in_progress"}'
+run_failures 123
+[ "$CODE" = "1" ] || fail "in-progress run exits 1 (got $CODE): [$OUT]"
+[ "$OUT" = 'run 123 still in progress; failures so far: 1' ] || fail "in-progress run reports failure count: [$OUT]"
+
+# --pr reaches the same in-progress guard, even when the run has no conclusion.
+reset_state
+set_heads "$A"
+set_runs '[{"databaseId":111,"name":"ci","workflowName":"ci","event":"pull_request","status":"in_progress","conclusion":null}]'
+set_jobs 111 '{"jobs":[{"databaseId":222,"name":"build","conclusion":"failure"}]}'
+set_run 111 "$A" '{"status":"in_progress"}'
+run_failures --pr 7
+[ "$CODE" = "1" ] || fail "--pr in-progress run exits 1 (got $CODE): [$OUT]"
+[ "$OUT" = 'run 111 still in progress; failures so far: 1' ] || fail "--pr in-progress reports failure count: [$OUT]"
 
 # a 100-line coloured, timestamped, prefixed log digests to its last 60
 # cleaned lines, Rust failure lines included
@@ -1523,7 +1551,7 @@ run_failures --pr 7
 [ "$CODE" = "0" ] || fail "superseded cancel exits 0 (got $CODE): [$OUT]"
 grep -q "no failed jobs on ${A:0:8}" <<<"$OUT" || fail "superseded cancel line: [$OUT]"
 grep -qx "skipped 1 superseded runs: 1" <<<"$OUT" || fail "superseded cancel names run 1: [$OUT]"
-grep -q -- "run list .*databaseId,name,event,conclusion,workflowName" "$T/state/gh-args.txt" \
+grep -q -- "run list .*databaseId,name,event,conclusion,workflowName,status" "$T/state/gh-args.txt" \
   || fail "run list asks for event,workflowName: [$(cat "$T/state/gh-args.txt")]"
 
 # --pr names every superseded failed or cancelled run, after the digest; a
@@ -1590,6 +1618,7 @@ grep -q "${A:0:8}" <<<"$OUT" || fail "--pr no-failures names the short SHA: [$OU
 # GH_CI_LOG_LINES=5 keeps 5 lines
 reset_state
 set_jobs 123 '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}'
+set_run 123 "$A" '{"status":"completed"}'
 make_rust_log 111
 OUT="$(GH_CI_LOG_LINES=5 bash "$GHCI" failures 123 2>"$T/stderr.txt")"; CODE=$?
 [ "$CODE" = "0" ] || fail "log-lines=5 exits 0 (got $CODE): [$OUT]"
@@ -1599,6 +1628,7 @@ LINES="$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')"
 # A panic above the tail keeps its assertion context alongside the same tail.
 reset_state
 set_jobs 123 '{"jobs":[{"databaseId":111,"name":"build","conclusion":"failure"}]}'
+set_run 123 "$A" '{"status":"completed"}'
 {
   echo "thread 'prune::young_fork' panicked at src/prune.rs:42:5:"
   echo 'assertion `left == right` failed'
