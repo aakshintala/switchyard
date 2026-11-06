@@ -31,6 +31,9 @@ ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
+ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
+# Lane and fix slots need a fence grant (test/tkt-job.sh covers that); these cases test the fix flow.
+export FW_NO_FENCE="test/tkt-fix.sh exercises the fix flow, not the fence"
 
 # Stub tkt-job: $T/jobmode holds done (commit fix.txt with "fixed-<n>", a
 # per-call counter, exit 0), pushed (exit 0, no commit: the job pushed
