@@ -24,6 +24,7 @@ usage() {
   echo "       claims are all-or-nothing; drop refused paths and rerun to grant the rest" >&2
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
   echo "       file-claim list [--lane ID] [--repo R]  (no --lane adds one row per open-PR path)" >&2
+  echo "       FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5)" >&2
   exit 2
 }
 die() { local c="$1"; shift; echo "file-claim: $*" >&2; exit "$c"; }
@@ -201,7 +202,7 @@ pr_hunks() {
 }
 cmd_claim() {
   local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5"; shift 5
-  local remote now main_tip prmap tip claims attempt paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line
+  local remote now main_tip prmap tip claims attempt paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [ $# -gt 0 ] || usage
   for p in "$@"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
@@ -216,7 +217,7 @@ cmd_claim() {
   attempt=1
   while [ "$attempt" -le "$TRIES" ]; do
     main_tip="$(fetch_main_tip "$remote")"; tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; load_claims "$tip" "$claims"
-    out=(); new_lines=(); granted=0; refused=0
+    out=(); new_lines=(); granted=0; refused=0; saw_cap=0; saw_prs=""
     existing="$(awk -F'\t' -v l="$lane" '$2==l&&$3=="grant"{n++}END{print n+0}' "$claims")"; new_grants=0
     for p in "${paths[@]}"; do if [ "$kind" = grant ] && [ -z "$(awk -F'\t' -v q="$p" '$1==q{print $2;exit}' "$claims")" ]; then new_grants=$((new_grants + 1)); fi; done
     if [ "$((existing + new_grants))" -gt "$MAX_GRANT" ]; then cap_hit=1; else cap_hit=0; fi
@@ -224,10 +225,10 @@ cmd_claim() {
       reason="new"
       if [ "$(git -C "$W" cat-file -t "$main_tip:$p" 2>/dev/null)" = blob ]; then reason="exists"; fi
       pr="$(awk -F'\t' -v q="$p" -v s="$self_pr" '$2==q&&index(","s",", ","$1",")==0{print $1}' "$prmap" | sort -n | head -1)"
-      if [ -n "$pr" ]; then out+=("REFUSE $p pr#$pr hunks=$(pr_hunks "$repo" "$pr" "$p")"); refused=$((refused + 1)); continue; fi
+      if [ -n "$pr" ]; then out+=("REFUSE $p pr#$pr hunks=$(pr_hunks "$repo" "$pr" "$p")"); refused=$((refused + 1)); case " $saw_prs " in *" $pr "*) ;; *) saw_prs="$saw_prs $pr";; esac; continue; fi
       holder="$(awk -F'\t' -v q="$p" '$1==q{print $2;exit}' "$claims")"
       if [ -n "$holder" ]; then if [ "$holder" = "$lane" ]; then out+=("GRANT $p $reason"); granted=$((granted + 1)); else out+=("REFUSE $p lane:$holder"); refused=$((refused + 1)); fi; continue; fi
-      if [ "$kind" = grant ] && [ "$cap_hit" = "1" ]; then out+=("REFUSE $p cap"); refused=$((refused + 1)); continue; fi
+      if [ "$kind" = grant ] && [ "$cap_hit" = "1" ]; then out+=("REFUSE $p cap"); refused=$((refused + 1)); saw_cap=1; continue; fi
       out+=("PENDING $p $reason"); granted=$((granted + 1)); new_lines+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$p" "$lane" "$kind" "$now" "$worktree" "$self_pr")")
     done
     if [ "$refused" -gt 0 ]; then
@@ -239,6 +240,8 @@ cmd_claim() {
         esac
       done
       printf '%s\n' "${final_out[@]}" "file-claim: no claims recorded; $refused refused, $unclaimed unclaimed because the batch was refused"
+      if [ "$saw_cap" = "1" ]; then printf 'hint: grant cap of %s reached (FILE_CLAIM_MAX_GRANT=%s); this is a cap, not a collision with another holder\n' "$MAX_GRANT" "$MAX_GRANT" >&2; fi
+      for hpr in $saw_prs; do printf "hint: if PR %s is this lane's own PR, rerun with --self-pr %s\n" "$hpr" "$hpr" >&2; done
       exit 1
     fi
     if [ "${#new_lines[@]}" -eq 0 ]; then report 0; fi

@@ -488,6 +488,50 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG 
 [ "$out" = "$(printf 'REFUSE g4 cap\nREFUSE g5 cap\nREFUSE g6 cap\nfile-claim: no claims recorded; 3 refused, 0 unclaimed because the batch was refused')" ] || fail "over-cap lines: $out"
 [ "$(claims_blob "$R" | grep -c '^')" = "3" ] || fail "over-cap call writes nothing"
 
+# --- refusal hints: stderr names the remedy; stdout REFUSE lines are unchanged --
+# A cap refusal hints at FILE_CLAIM_MAX_GRANT on stderr.
+R="$(fresh)"
+i=1
+while [ "$i" -le 5 ]; do
+  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane H --grant --worktree t:dH --repo test/repo "h$i" >/dev/null 2>&1 || fail "hint setup grant $i of 5 exits 0"
+  i=$((i + 1))
+done
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane H --grant --worktree t:dH --repo test/repo h6 2>"$T/e-cap-hint")" && fail "cap-hint claim exits non-zero"
+[ "$?" = "1" ] || fail "cap-hint claim exits 1"
+[ "$out" = "$(printf 'REFUSE h6 cap\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "cap-hint stdout unchanged: $out"
+grep -qF 'FILE_CLAIM_MAX_GRANT' "$T/e-cap-hint" || fail "cap hint names FILE_CLAIM_MAX_GRANT: $(cat "$T/e-cap-hint")"
+
+# A pr#<n> refusal hints at --self-pr <n> on stderr.
+R="$(fresh)"
+printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs-hint.json"
+export GH_PRS_JSON="$T/prs-hint.json"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt 2>"$T/e-pr-hint")" && fail "pr-hint claim exits non-zero"
+[ "$?" = "1" ] || fail "pr-hint claim exits 1"
+[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "pr-hint stdout unchanged: $out"
+grep -qF -- '--self-pr 42' "$T/e-pr-hint" || fail "pr hint names --self-pr 42: $(cat "$T/e-pr-hint")"
+
+# One hint line per distinct PR: two PRs give two lines, one PR twice gives one.
+R="$(fresh)"
+printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":7,"changedFiles":1,"files":[{"path":"b.txt"}]}]' >"$T/prs-hint2.json"
+export GH_PRS_JSON="$T/prs-hint2.json"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt b.txt 2>"$T/e-pr-hint2")" && fail "two-pr claim exits non-zero"
+[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nREFUSE b.txt pr#7 hunks=unknown\nfile-claim: no claims recorded; 2 refused, 0 unclaimed because the batch was refused')" ] || fail "two-pr stdout unchanged: $out"
+grep -qF -- '--self-pr 42' "$T/e-pr-hint2" || fail "two-pr hint names --self-pr 42: $(cat "$T/e-pr-hint2")"
+grep -qF -- '--self-pr 7' "$T/e-pr-hint2" || fail "two-pr hint names --self-pr 7: $(cat "$T/e-pr-hint2")"
+[ "$(grep -cF -- '--self-pr' "$T/e-pr-hint2")" = "2" ] || fail "two-pr hint prints one line per distinct PR: $(cat "$T/e-pr-hint2")"
+R="$(fresh)"
+printf '[{"number":42,"changedFiles":2,"files":[{"path":"a.txt"},{"path":"c.txt"}]}]' >"$T/prs-hint3.json"
+export GH_PRS_JSON="$T/prs-hint3.json"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt c.txt 2>"$T/e-pr-hint3")" && fail "same-pr claim exits non-zero"
+[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nREFUSE c.txt pr#42 hunks=unknown\nfile-claim: no claims recorded; 2 refused, 0 unclaimed because the batch was refused')" ] || fail "same-pr stdout unchanged: $out"
+[ "$(grep -cF -- '--self-pr 42' "$T/e-pr-hint3")" = "1" ] || fail "same-pr hint prints one line: $(cat "$T/e-pr-hint3")"
+export GH_PRS_JSON="$T/prs-empty.json"
+
+# usage names the grant-cap variable.
+bash "$FC" claim --lane L --repo test/repo >/dev/null 2>"$T/e-usage-hint" && fail "usage exits non-zero"
+[ "$?" = "2" ] || fail "usage exits 2"
+grep -qF 'FILE_CLAIM_MAX_GRANT' "$T/e-usage-hint" || fail "usage names FILE_CLAIM_MAX_GRANT: $(cat "$T/e-usage-hint")"
+
 # --- --plan and --grant are exclusive --------------------------------------------
 R="$(fresh)"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --plan --grant --repo test/repo a.txt >/dev/null 2>&1 && fail "plan+grant exits non-zero"
