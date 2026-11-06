@@ -817,7 +817,7 @@ for line in sys.stdin:
     sys.exit(1)
   if pr and any(not item.isdigit() for item in pr.split(",")):
     sys.exit(1)
-  print(path + "\t" + lane)' <"$claims_out" >"$tmp/claims.tsv" 2>/dev/null || {
+  print(path + "\t" + lane + "\t" + age)' <"$claims_out" >"$tmp/claims.tsv" 2>/dev/null || {
     echo "ERROR file-claim list unparseable claims"
     exit 3
   }
@@ -837,7 +837,29 @@ _refusal_age() {
     'lane '*) _ra_lane=${_ra_holder#lane } ;;
     *) printf '%s' '-'; return 0;;
   esac
-  _ra_age=$(awk -F '\t' -v path="$_ra_path" -v lane="$_ra_lane" '$1 == path && $2 == lane { print $4; exit }' "$claims_out" 2>/dev/null) || _ra_age=""
+  _ra_age=$(awk -F '\t' -v requested="$_ra_path" -v lane="$_ra_lane" '
+function norm(path) {
+  sub(/^\.\//, "", path)
+  sub(/\/+$/, "", path)
+  return path
+}
+BEGIN { requested = norm(requested) }
+{
+  claim = norm($1)
+  if ($2 != lane || claim == "") next
+  if (requested == claim) {
+    if (!exact) { exact = 1; exact_age = $3 }
+    next
+  }
+  if (index(requested, claim "/") == 1 && length(claim) > parent_len) {
+    parent_len = length(claim)
+    parent_age = $3
+  }
+}
+END {
+  if (exact) print exact_age
+  else if (parent_len) print parent_age
+}' "$tmp/claims.tsv" 2>/dev/null) || _ra_age=""
   case "$_ra_age" in ''|*[!0-9]*) printf '%s' '-';; *) printf '%s' "$_ra_age";; esac
   return 0
 }
@@ -859,7 +881,7 @@ _log_refusal() {
 # liveness checks, and sweep claims remain exclusive without a state lookup.
 : >"$tmp/ticket-numbers.tsv"
 : >"$tmp/ticket-states.tsv"
-while IFS="$(printf '\t')" read -r claim_path claim_lane; do
+while IFS="$(printf '\t')" read -r claim_path claim_lane claim_age; do
   [ -n "$claim_path" ] || continue
   [[ "$claim_lane" == sweep-* ]] && continue
   claim_num=$(lane_ticket_num "$claim_lane")
@@ -932,7 +954,7 @@ with open(sys.argv[3], "w") as output:
 fi
 
 _claim_holders() {
-  while IFS="$(printf '\t')" read -r claim_path claim_lane; do
+  while IFS="$(printf '\t')" read -r claim_path claim_lane claim_age; do
     [ -n "$claim_path" ] || continue
     claim_num=$(lane_ticket_num "$claim_lane")
     if [ -n "$claim_num" ] && [ "$claim_num" = "$ticket" ] && [[ "$claim_lane" != sweep-* ]]; then continue; fi
@@ -972,9 +994,9 @@ _claim_holders() {
       claim_label="lane $claim_lane"
     fi
     if [[ "$claim_lane" == sweep-* ]]; then
-      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label" exclusive
+      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label" exclusive "$claim_age"
     else
-      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label"
+      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label" "" "$claim_age"
     fi
   done <"$tmp/claims.tsv"
 }
@@ -1426,7 +1448,7 @@ _check_entries() {
       [ -n "$pb" ] || continue
       if _conflict "$pd" "$pb" "$ed" "$eb" "$ers" "$ere"; then
         if [ "${4:-}" = exclusive ]; then
-          held="${held}${p}|${3:-lane #${2}}
+          held="${held}${p}|${3:-lane #${2}}|${5:--}
 "
         else
           overlaps="${overlaps}${p}|${3:-lane #${2}}
@@ -1549,18 +1571,18 @@ if [ -n "$(printf '%s' "$held" | grep .)" ]; then
       holder = $2
       sub(/ \((grant [^)]*|notes, no grant file names it)\)$/, "", holder)
       key = $1 "|" holder
-      if (!(key in slot)) { slot[key] = ++n; keys[n] = key }
-      if (rank($2) > ranks[key]) { ranks[key] = rank($2); paths[key] = $1; labels[key] = $2; suggestions[key] = $3 }
+      if (!(key in slot)) { slot[key] = ++n; keys[n] = key; ages[key] = $3; suggestions[key] = $4 }
+      if (rank($2) > ranks[key]) { ranks[key] = rank($2); paths[key] = $1; labels[key] = $2; ages[key] = $3; suggestions[key] = $4 }
     }
-    END { for (i = 1; i <= n; i++) { key = keys[i]; line = "HELD " paths[key] " by " labels[key]; if (suggestions[key] != "") line = line "\t" suggestions[key]; print line } }
+    END { for (i = 1; i <= n; i++) { key = keys[i]; line = "HELD " paths[key] " by " labels[key]; if (suggestions[key] != "") line = line "\t" suggestions[key]; print line "\034" suggestions[key] "\034" ages[key] } }
   ' > "$tmp/heldout"
-  while IFS="$(printf '\t')" read -r line sug; do
+  while IFS=$'\034' read -r line sug _ref_age; do
     case "$line" in
       HELD\ *\ by\ *)
         _ref_path=${line#HELD }
         _ref_holder=${_ref_path#* by }
         _ref_path=${_ref_path%% by *}
-        _ref_age=$(_refusal_age "$_ref_path" "$_ref_holder")
+        [ -n "$_ref_age" ] || _ref_age="-"
         _log_refusal "$_ref_path" "$_ref_holder" "$_ref_age" ;;
     esac
     echo "$line"

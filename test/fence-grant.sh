@@ -615,6 +615,23 @@ IFS="$(printf '\t')" read -r logged_at logged_ticket logged_kind logged_path log
 assert_no_grant 'sweep claim'
 
 reset_case
+FILE_CLAIM_MODE=refuse
+FILE_CLAIM_LIST=$(printf 'docs\tfiber-77\tplan\t17\tt:stub\t\n')
+export FILE_CLAIM_MODE FILE_CLAIM_LIST
+run_fg 77 --paths docs/tui.md
+assert_rc 1 'file-claim refusal remains a refusal for child path'
+assert_line 'HELD docs/tui.md by lane #77' 'file-claim refusal output'
+[ "$(cut -f2- "$FW_RUN/fence-grant-refusals.tsv")" = "$(printf '77\tREFUSE\tdocs/tui.md\tlane #77\t17')" ] || fail 'directory claim age is logged for file-claim refusal'
+
+reset_case
+FILE_CLAIM_LIST=$(printf 'docs\tsweep-4226\tplan\t17\tt:stub\t\n')
+export FILE_CLAIM_LIST
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 1 'directory sweep claim remains exclusive for child path'
+assert_out 'HELD docs/tui.md by lane sweep-4226' 'directory sweep claim output'
+[ "$(cut -f2- "$FW_RUN/fence-grant-refusals.tsv")" = "$(printf '77\tDRY-REFUSE\tdocs/tui.md\tlane sweep-4226\t17')" ] || fail 'directory claim age is logged for held child path'
+
+reset_case
 FILE_CLAIM_LIST=$(printf 'docs/tui.md\tsweep-4226\tplan\t17\tt:stub\t\n')
 export FILE_CLAIM_LIST
 run_fg 77 --paths docs/tui.md
