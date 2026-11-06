@@ -41,6 +41,10 @@ namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-build: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$namebase_lib"
+verdict_lib="$script_dir/lib/plan-verdict.sh"
+if [ ! -r "$verdict_lib" ]; then echo "tkt-build: cannot read shared lib: $verdict_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$verdict_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
 mverd="$bin_dir/mutant-verdicts"
@@ -149,39 +153,8 @@ while IFS= read -r p; do plan_files+=("$p"); done < <(plan_files_pathspecs "$pla
 # Verdict-base validation considers all entries; only writes can stale against main.
 stale_files=()
 while IFS= read -r p; do stale_files+=("$p"); done < <(plan_files_pathspecs "$plan" writes)
-# debt: a copy of tkt-plan's plan_verdict_ok (and its write pair in do_verify and do_confirm).
-# Ceiling: two copies plus the write pair, in tkt-plan and tkt-build. Upgrade trigger: a third
-# caller of the verdict check; then move it to bin/lib/ and source it from both scripts.
-verdict="$(tkt get plan_verdict 2>/dev/null || true)"
-verdict_base="$(tkt get plan_verdict_base 2>/dev/null || true)"
-if [ "$no_verifier" -eq 1 ] && { [ -z "$verdict" ] || [ "$verdict" = skipped ]; }; then
-  tkt set plan_verdict skipped
-  tkt set plan_verdict_base "$base"
-  verdict=skipped
-  verdict_base="$base"
-fi
-verdict_ok=0
-if [ "$verdict" = ok ] || [ "$verdict" = triaged ]; then
-  if [ "$verdict_base" = "$base" ]; then
-    verdict_ok=1
-  elif git -C "$worktree" merge-base --is-ancestor "$verdict_base" "$base" 2>/dev/null &&
-    { [ "${#plan_files[@]}" -eq 0 ] || git -C "$worktree" diff --quiet "$verdict_base..$base" -- "${plan_files[@]}" 2>/dev/null; }; then
-    verdict_ok=1
-  fi
-elif [ "$verdict" = skipped ] && [ "$verdict_base" = "$base" ]; then
-  verdict_ok=1
-fi
-if [ "$verdict_ok" -eq 1 ]; then
-  :
-else
-  case "$verdict" in
-    "") verdict_refusal=none ;;
-    ok|triaged|skipped) verdict_refusal=stale ;;
-    *) verdict_refusal="$verdict" ;;
-  esac
-  [ -n "$verdict" ] || verdict=none
-  [ -n "$verdict_base" ] || verdict_base=none
-  emit "VERDICT-REFUSED verdict=$verdict_refusal" 1 "plan_verdict=$verdict plan_verdict_base=$verdict_base plan_base=$base"
+if ! plan_verdict_check build "$tkt_state" "$state" "$no_verifier" "$plan" "$base" "$worktree" ${plan_files[@]+"${plan_files[@]}"}; then
+  emit "VERDICT-REFUSED verdict=$verdict_refusal" 1 "$verdict_digest"
 fi
 if [ "${#stale_files[@]}" -gt 0 ]; then
   stat_out="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${stale_files[@]}" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"

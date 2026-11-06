@@ -150,6 +150,40 @@ expect_logfile merged
 [ ! -e "$S.lock" ] || fail "merged: lock not released"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 41 ] || fail "merged: over 40 digest lines"
 
+# --- a current LINES plan verdict refuses ship with both sanctioned exits ---
+reset_stub; setup_case verdict-lines
+printf '0' >"$T/exitcodes"
+printf 'Base: %s\n\n## Files\n\n- `src/a.go`\n\n## Gate\n\n`true`\n' "$H" >"$CDIR/plan.md"
+printf 'plan=%s\nplan_verdict=lines\nplan_verdict_base=%s\nplan_verdict_hash=%s\n' \
+  "$CDIR/plan.md" "$H" "$(git hash-object "$CDIR/plan.md")" >>"$S"
+run_ship
+[ "$RC" -eq 1 ] || fail "LINES verdict refuses ship (rc=$RC)"
+expect_line1 "VERDICT-REFUSED verdict=lines" "LINES verdict refusal"
+case "$OUT" in *"plan_verdict=lines plan_verdict_base=$H plan_base=$H"*) ;; *) fail "LINES refusal has the build verdict digest: [$OUT]" ;; esac
+case "$OUT" in *"tkt-plan $S triaged --comment <id>"*) ;; *) fail "LINES refusal names triaged exit: [$OUT]" ;; esac
+case "$OUT" in *"edit the plan and use --no-verifier"*) ;; *) fail "LINES refusal names edit and --no-verifier exit: [$OUT]" ;; esac
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "LINES verdict does not invoke ship-pr"
+
+# --- accepted plan verdicts and a missing verdict key preserve ship behavior ---
+for accepted in ok triaged; do
+  reset_stub; setup_case "verdict-$accepted"
+  printf '0' >"$T/exitcodes"
+  printf 'Base: %s\n\n## Files\n\n- `src/a.go`\n\n## Gate\n\n`true`\n' "$H" >"$CDIR/plan.md"
+  printf 'plan=%s\nplan_verdict=%s\nplan_verdict_hash=%s\n' \
+    "$CDIR/plan.md" "$accepted" "$(git hash-object "$CDIR/plan.md")" >>"$S"
+  run_ship
+  [ "$RC" -eq 0 ] || fail "$accepted verdict permits ship (rc=$RC)"
+  expect_line1 "MERGED sha=" "$accepted verdict permits ship"
+done
+
+reset_stub; setup_case verdict-absent
+printf '0' >"$T/exitcodes"
+printf 'Base: %s\n\n## Files\n\n- `src/a.go`\n\n## Gate\n\n`true`\n' "$H" >"$CDIR/plan.md"
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "missing plan verdict key permits ship (rc=$RC)"
+expect_line1 "MERGED sha=" "missing plan verdict key permits ship"
+
 # --- flake note on stderr text ---
 reset_stub; setup_case flake
 printf '0' >"$T/exitcodes"

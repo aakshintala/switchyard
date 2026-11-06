@@ -949,11 +949,14 @@ setup partverdict ONE AGAINST; part_seed_pr partverdict
 S="$RUN/widget-42.state"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict ok
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict_base "$FILING"
+VERDICT_HASH="$(printf 'shared plan text\n' | git hash-object --stdin)"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict_hash "$VERDICT_HASH"
 printf 'MERGED\n' >"$T/prstate"
 reload --model; run_start --part 2
 want "CURRENT " 0 partverdict
 grep -qF -- 'plan_verdict=ok' "$S" || fail "partverdict: state misses [plan_verdict=ok]"
 grep -qF -- "plan_verdict_base=$FILING" "$S" || fail "partverdict: state misses [plan_verdict_base=$FILING]"
+grep -qF -- "plan_verdict_hash=$VERDICT_HASH" "$S" || fail "partverdict: state misses [plan_verdict_hash=$VERDICT_HASH]"
 grep -qF -- 'plan_verdict=ok' "$S.part1" || fail "partverdict: archive misses [plan_verdict=ok]"
 
 # An invalid stored part is reported, and a missing part above part 1 is not inferred.
