@@ -300,10 +300,11 @@ else
       exit 2
     }
   fi
-  # Muse's tool-idle limit is also its whole-run wall cap (30 min by default), and it bounds the job-end gate.
-  # Muse reports no running_tool phase, so a silent bash call gets the 30 min --idle-ms window instead.
-  tool_idle=()
-  case "$model" in muse/*) tool_idle=(--tool-idle-ms 7200000 --idle-ms 1800000) ;; esac
+  # The tool-idle window (30 min by default) bounds one silent tool call and the job-end gate, on every
+  # model: a full gate on a loaded box can run past 30 min, so every job gets 2 h. For muse it is also
+  # the whole-run wall cap. Muse reports no running_tool phase, so a silent bash call gets --idle-ms instead.
+  tool_idle=(--tool-idle-ms 7200000)
+  case "$model" in muse/*) tool_idle+=(--idle-ms 1800000) ;; esac
   # Only a Verifier gets a wall cap: a lane legitimately runs for hours.
   wall=()
   case "$slot" in verifier-r*) wall=(--wall-ms 10800000) ;; esac
