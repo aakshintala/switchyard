@@ -156,10 +156,11 @@ _fw_delegate_lane_name() {
 # whose supervisor is alive. A `delegate`-run lane is neither a `claude agents`
 # session nor a `fiber-<n>-pi.pid` file, so a probe reading only those two
 # loses the lane's hold once its grant files age out of the six-hour window --
-# the same defect the pi-lane probe below was added for. Exit 1 when the
-# registry directory is missing (fail closed).
+# the same defect the pi-lane probe below was added for. Defaults to
+# `${TMPDIR:-/tmp}/delegate-jobs`; `FW_DELEGATE_DIR` overrides it. Exit 1 when
+# that directory is missing (fail closed).
 fw_delegate_lane_names_mac() {
-  _fw_dd=${FW_DELEGATE_DIR:-/tmp/delegate-jobs}
+  _fw_dd=${FW_DELEGATE_DIR:-${TMPDIR:-/tmp}/delegate-jobs}
   [ -d "$_fw_dd" ] || return 1
   case "$-" in *f*) _fw_hadf=1;; *) _fw_hadf=0;; esac
   set +f
@@ -783,11 +784,22 @@ _claim_holders() {
   while IFS="$(printf '\t')" read -r claim_path claim_lane; do
     [ -n "$claim_path" ] || continue
     claim_num=""
-    case "$claim_lane" in fiber-*) claim_num=$(_lane_num "${claim_lane#fiber-}");; esac
+    case "$claim_lane" in
+      fiber-*) claim_num=$(_lane_num "${claim_lane#fiber-}");;
+      *) claim_num=$(python3 -c 'import re,sys
+m = re.search(r"(?:^|/)([0-9]+)(?:-|$)", sys.argv[1])
+print(m.group(1) if m else "")' "$claim_lane");;
+    esac
     [ "$claim_num" != "$ticket" ] || continue
     [ -n "$claim_num" ] && case " $ignoreticket " in *" $claim_num "*) continue;; esac
     live=0
-    for ln in $lanes; do [ "$ln" = "$claim_lane" ] && { live=1; break; }; done
+    for ln in $lanes; do
+      if [ -n "$claim_num" ]; then
+        [ "$(_lane_num "${ln#fiber-}")" = "$claim_num" ] && { live=1; break; }
+      else
+        [ "$ln" = "$claim_lane" ] && { live=1; break; }
+      fi
+    done
     [[ "$claim_lane" == sweep-* ]] && live=1
     if [ "$live" -eq 0 ]; then
       echo "STALE $claim_path by $claim_lane"

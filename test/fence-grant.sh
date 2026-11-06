@@ -182,8 +182,8 @@ FC_STUB
 chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$T/stubs/file-claim"
 
 reset_case() {
-  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$FW_TREE_CACHE"
-  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs"
+  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE"
+  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs"
   : >"$FW_RUN/roster"
   DSESS_JSON='{"ok":true,"sessions":[]}'
   export DSESS_JSON
@@ -227,8 +227,10 @@ TREE
 # Writes one delegate registry record: name, status, supervisor pid, worktree.
 # The real registry writes one line of JSON whose first key is the status.
 write_delegate_job() {
+  _delegate_dir=${FW_DELEGATE_DIR:-${TMPDIR:-/tmp}/delegate-jobs}
+  mkdir -p "$_delegate_dir"
   printf '{"status":"%s","result":null,"supervisorPid":%s,"resume":{"cwd":"%s"}}\n' \
-    "$2" "$3" "$4" >"$T/delegate-jobs/$1.json"
+    "$2" "$3" "$4" >"$_delegate_dir/$1.json"
 }
 
 run_fg() {
@@ -659,6 +661,19 @@ kill "$DJ_PID" 2>/dev/null || true
 assert_rc 0 'live Mac delegate lane overlap is advisory'
 assert_line 'OVERLAP docs/tui.md lane #77' 'Mac delegate lane overlap output'
 assert_line 'WOULD-GRANT docs/tui.md' 'Mac delegate lane overlap grants'
+
+reset_case
+unset FW_DELEGATE_DIR
+sleep 300 &
+DJ_PID=$!
+write_delegate_job job-a RUNNING "$DJ_PID" /w/fiber-worktrees/tests/77-grid-read-ratchet
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-77\tgrant\t0\tt:stub\t\n')"
+export FILE_CLAIM_LIST
+run_fg 88 --paths docs/tui.md --dry
+kill "$DJ_PID" 2>/dev/null || true
+assert_rc 0 'Mac delegate probe reads under TMPDIR by default'
+assert_line 'OVERLAP docs/tui.md lane #77' 'TMPDIR delegate lane overlap output'
+assert_not_contains 'STALE' 'TMPDIR delegate claim is not stale'
 
 reset_case
 sleep 300 &
@@ -1286,6 +1301,44 @@ export FILE_CLAIM_LIST CLAUDE_JSON
 run_fg 88 --paths docs/tui.md,docs/events.md --dry
 assert_rc 0 'live plan and grant claim overlaps are advisory'
 assert_out "$(printf 'OVERLAP docs/tui.md lane #66\nOVERLAP docs/events.md lane #67\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWIDE docs/events.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT docs/events.md\nWOULD-GRANT')" 'live claim overlaps and grants'
+
+# --- Claims match phase-suffixed live lane names -----------------------------
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
+CLAUDE_JSON='[{"name":"fiber-66-plan","status":"busy"}]'
+export FILE_CLAIM_LIST CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'phase-suffixed lane claim does not go stale'
+assert_line 'OVERLAP docs/tui.md lane #66' 'phase-suffixed live claim overlap output'
+assert_not_contains 'STALE' 'phase-suffixed live claim is not stale'
+
+# --- Branch-named claims match their live ticket lane ------------------------
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tarch/66-some-slug\tgrant\t0\tt:stub\t\n')"
+CLAUDE_JSON='[{"name":"fiber-66-plan","status":"busy"}]'
+export FILE_CLAIM_LIST CLAUDE_JSON
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'branch-named claim does not go stale'
+assert_line 'OVERLAP docs/tui.md lane #66' 'branch-named live claim overlap output'
+assert_not_contains 'STALE' 'branch-named live claim is not stale'
+
+# --- Branch-named claims still need a matching live lane ---------------------
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tarch/66-some-slug\tgrant\t0\tt:stub\t\n')"
+export FILE_CLAIM_LIST
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'branch-named claim without a live lane does not hold'
+assert_line 'STALE docs/tui.md by arch/66-some-slug' 'stale branch-named claim logged'
+
+# --- Branch names use ticket numbers for own and ignored claim skips ---------
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tarch/77-own-claim\tgrant\t0\tt:stub\t\ndocs/events.md\ttests/66-ignored-claim\tgrant\t0\tt:stub\t\n')"
+export FILE_CLAIM_LIST
+run_fg 77 --paths docs/tui.md,docs/events.md --ignore-ticket 66 --dry
+assert_rc 0 'branch-named own and ignored claims are skipped'
+assert_not_contains 'STALE' 'branch-named own and ignored claims do not go stale'
+assert_line 'WOULD-GRANT docs/tui.md' 'branch-named own claim does not hold requester'
+assert_line 'WOULD-GRANT docs/events.md' 'branch-named ignored claim does not hold requester'
 
 # --- A requester's own claim is not a holder or stale ------------------------
 reset_case
