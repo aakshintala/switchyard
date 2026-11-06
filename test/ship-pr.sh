@@ -499,6 +499,27 @@ done
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail "conflict leaves a clean tree"
 no_merge "conflict"
 
+# A merge commit preserves a conflict resolution until main moves again. Strict
+# mode must replay that resolved tree without retrying the original conflicting commit.
+setup
+echo feature >"$WT/file.txt"; git -C "$WT" commit -qam "touch file"; git -C "$WT" push -q origin feature
+advance_main file.txt conflicting
+git -C "$WT" fetch -q origin main
+if git -C "$WT" merge --no-edit origin/main >/dev/null 2>&1; then
+  fail "conflict-resolution fixture creates a conflict"
+fi
+echo resolved >"$WT/file.txt"; git -C "$WT" add file.txt
+git -C "$WT" commit -qm "merge main and resolve conflict"
+git -C "$WT" push -q origin feature
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" rev-parse --verify "$HEAD0^2" >/dev/null || fail "conflict resolution is a merge commit"
+advance_main other.txt unrelated
+ship; expect 0 "strict rebase preserves a merge conflict resolution"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "resolved merge still merges: [$OUT]"
+PIN="$(sed -n 's/.*--match-head-commit //p' "$ST/gh.log")"
+git --git-dir="$ORIGIN" merge-base --is-ancestor refs/heads/main "$PIN" \
+  || fail "resolved merge rebases onto the latest main"
+
 # ===== exit 4: a different patch than the reviewed one
 setup
 git -C "$C" checkout -q -b other

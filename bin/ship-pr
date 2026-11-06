@@ -8,8 +8,9 @@
 #        a scoped verify; --unverified-fixes permits its no-real-bug fix round);
 #        require each --body-has
 #        line and run pr-closes (see below); run --gate in the worktree on that head,
-#        once, before any rebase or push; rebase onto
-#        origin/main (see below); compare the PR diff's `git patch-id --stable` with
+#        once, before any rebase or push; flatten commits since the merge base when
+#        the branch has merge commits, then rebase onto origin/main (see below);
+#        compare the PR diff's `git patch-id --stable` with
 #        <sha>'s, ignoring context lines (with --unverified-fixes, a mismatch posts a comment and goes on, see
 #        below); push a rebased branch with --force-with-lease; mark a draft
 #        ready (once, before the first CI wait); `gh-ci wait` (--timeout, default
@@ -676,7 +677,19 @@ else
 fi
 
 rebase_main() {
+  local merges head merge_base
   say "rebasing $branch onto origin/main"
+  merges="$(git -C "$worktree" rev-list --merges origin/main..HEAD)" \
+    || die_after_ready 1 "cannot inspect merge commits before rebasing"
+  if [ -n "$merges" ]; then
+    head="$(git -C "$worktree" rev-parse HEAD)"
+    merge_base="$(git -C "$worktree" merge-base origin/main HEAD)" \
+      || die_after_ready 1 "cannot find merge base with origin/main"
+    say "flattening merged changes before rebasing"
+    git -C "$worktree" reset --soft "$merge_base" >&2 \
+      && git -C "$worktree" commit -C "$head" >&2 \
+      || die_after_ready 1 "cannot flatten merged changes before rebasing"
+  fi
   if ! git -C "$worktree" rebase origin/main >&2; then
     git -C "$worktree" rebase --abort >&2 || true
     die_after_ready 3 "rebase onto origin/main conflicts; resolve it, then rerun"
