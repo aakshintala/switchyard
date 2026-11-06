@@ -78,7 +78,7 @@ reload() {
   for a in --run "$RUN" --repo acme/widget --issue 42 --spec 42 --branch tkt-start \
     --worktree "$WT" --workflow-doc "$CDIR/wf.md" --closing "Resolves #42" --env "FOO=1" \
     --body-has "Resolves #42" --body-has "Co-authored with Claude Code." --extra "$CDIR/extra.md" \
-    --merge-gate ci --mutant-job Selection --model lane=sol --model preflight=luna --files f.txt; do
+    --merge-gate ci --merge-check 'cargo check --all-targets' --mutant-job Selection --model lane=sol --model preflight=luna --files f.txt; do
     if [ "$skip" -eq 1 ]; then skip=0; elif [ "$a" = "${1:-}" ]; then skip=1; else ARGS+=("$a"); fi
   done
 }
@@ -89,7 +89,7 @@ setup() {
   : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"; : >"$T/prstate"; printf '[]\n' >"$T/prlist"
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
-  printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\n' >"$T/jobout"
+  printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
   ORIGIN="$CDIR/origin.git"; SEED="$CDIR/seed"
   git init -q --bare "$ORIGIN"; git init -q "$SEED"; git -C "$SEED" remote add origin "$ORIGIN"
@@ -124,7 +124,7 @@ expect_state() {
   [ -f "$S" ] || fail "$1: no state file [$S]"
   for kv in "repo=acme/widget" "issue=42" "spec=42" "branch=tkt-start" "worktree=$WT" "run=$RUN" \
     "workflow_doc=$CDIR/wf.md" "closing=Resolves #42" "env=FOO=1" "extra=$CDIR/extra.md" \
-    "merge_gate=ci" "mutant_job=Selection"; do
+    "merge_gate=ci" "merge_check=cargo check --all-targets" "mutant_job=Selection"; do
     grep -qF "$kv" "$S" || fail "$1: state misses [$kv]"
   done
   [ "$(grep -c '^body_has=' "$S")" -eq 2 ] || fail "$1: state wants 2 body_has lines"
@@ -136,6 +136,14 @@ expect_state() {
     grep -q "tkt-start $step" "$j" || fail "$1: journal misses ${step}step"
   done
 }
+# A missing worktree needs a repository checkout as its starting point.
+setup norepo ONE AGAINST
+mkdir -p "$T/nonrepo"
+[ ! -e "$WT" ] || fail "norepo: worktree unexpectedly exists"
+RC=0; OUT="$(cd "$T/nonrepo" && bash "$TKT" "${ARGS[@]}" 2>"$CDIR/stderr")" || RC=$?
+want "STEP-FAIL step=repo rc=128" 128 norepo
+case "$OUT" in *"run from inside acme/widget's checkout"*) ;; *) fail "norepo: failure misses checkout guidance" ;; esac
+[ ! -e "$RUN/widget-42.state" ] || fail "norepo: state was written"
 # current, plus the resume path: a rerun reuses the worktree with no dup lines.
 setup current ONE AGAINST; run_start
 want "CURRENT " 0 current
@@ -240,33 +248,51 @@ want "PREFLIGHT core=2 out=" 1 badsha
 case "$OUT" in *"reason=filing-commit:unreadable"*) ;; *) fail "badsha: digest misses the reason" ;; esac
 # core-count table: only the job output, want rc and want line differ.
 # Contract: the count rule in bin/tkt-start's header.
-for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out=" "nonecolon|0|PREFLIGHT core=0 nonblocking=1 out=" "naw|0|PREFLIGHT core=0 nonblocking=0 out=" "nothing|0|PREFLIGHT core=0 nonblocking=1 out=" "barecore|0|PREFLIGHT core=0 nonblocking=1 out=" "boldnone|0|PREFLIGHT core=0 nonblocking=1 out=" "noneof|1|PREFLIGHT core=1 out=" "nbnone|0|PREFLIGHT core=0 nonblocking=1 out=" "midtick|1|PREFLIGHT core=1 out=" "midbold|1|PREFLIGHT core=1 out=" "twotags|1|PREFLIGHT core=1 out=" "trailtick|1|PREFLIGHT core=1 out=" "trailbold|1|PREFLIGHT core=1 out=" "coreoutcome|0|PREFLIGHT core=0 nonblocking=1 out="; do
+for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGHT core=2 out=" "backtick|1|PREFLIGHT core=1 out=" "dashcore|1|PREFLIGHT core=2 out=" "dashnb|0|PREFLIGHT core=0 nonblocking=1 out=" "starbare|0|PREFLIGHT core=0 nonblocking=0 out=" "nonecolon|0|PREFLIGHT core=0 nonblocking=1 out=" "naw|0|PREFLIGHT core=0 nonblocking=0 out=" "nothing|0|PREFLIGHT core=0 nonblocking=1 out=" "barecore|0|PREFLIGHT core=0 nonblocking=1 out=" "boldnone|0|PREFLIGHT core=0 nonblocking=1 out=" "noneof|1|PREFLIGHT core=1 out=" "nbnone|0|PREFLIGHT core=0 nonblocking=1 out=" "midtick|1|PREFLIGHT core=1 out=" "midbold|1|PREFLIGHT core=1 out=" "twotags|1|PREFLIGHT core=1 out=" "trailtick|1|PREFLIGHT core=1 out=" "trailbold|1|PREFLIGHT core=1 out=" "coreoutcome|0|PREFLIGHT core=0 nonblocking=1 out=" "nilsentence|0|PREFLIGHT core=0 nonblocking=0 out=" "nbnilsentence|0|PREFLIGHT core=0 nonblocking=0 out="; do
   IFS='|' read -r name rc want_line <<<"$spec"
   setup "$name" TWO FILING
   case "$name" in
-    zerocore) printf '1. non-blocking -- one\n2. non-blocking -- two\n3. non-blocking -- three\n' >"$T/jobout" ;;
-    backtick) printf '1. `core` — first\n2. plain note\n' >"$T/jobout" ;;
-    dashcore) printf -- '- core -- first\n- **core** -- second\n' >"$T/jobout" ;;
-    dashnb) printf -- '- non-blocking -- a\n' >"$T/jobout" ;;
-    starbare) printf '**core** -- x\n' >"$T/jobout" ;;
-    nonecolon) printf '%s\n' '- core: none found.' '- non-blocking -- a' >"$T/jobout" ;;
-    naw) printf '%s\n' '- core: N/A.' >"$T/jobout" ;;
-    nothing) printf '%s\n' '- core: Nothing' '- non-blocking -- a' >"$T/jobout" ;;
-    barecore) printf '%s\n' '- core:' '- non-blocking -- a' >"$T/jobout" ;;
-    boldnone) printf '%s\n' '- **core:** `None`.' '- non-blocking -- a' >"$T/jobout" ;;
-    noneof) printf '%s\n' '- core: none of the callers handle X' >"$T/jobout" ;;
-    nbnone) printf '%s\n' '- non-blocking: none.' '- non-blocking -- a' >"$T/jobout" ;;
-    midtick) printf '%s\n' '- hold.rs:15-20 says the handle must close before the guard kills, but `Drop` reaps (hold.rs:139) before the handle closes. `core`. The answer must say whether the early kill is intended.' >"$T/jobout" ;;
-    midbold) printf '%s\n' '2. the guard reaps early (hold.rs:139). **core** -- the early kill.' >"$T/jobout" ;;
-    twotags) printf '%s\n' '- `core` here, and `core` again.' >"$T/jobout" ;;
-    trailtick) printf '%s\n' '- The answer must say whether the early kill is intended. `core`.' >"$T/jobout" ;;
-    trailbold) printf '%s\n' '2. The guard reaps early (hold.rs:139). **core**' >"$T/jobout" ;;
-    coreoutcome) printf '%s\n' '- non-blocking -- the core outcome is unchanged.' >"$T/jobout" ;;
+    zerocore) printf '1. non-blocking -- one\n2. non-blocking -- two\n3. non-blocking -- three\nCore items: 0\nNon-blocking items: 3\n' >"$T/jobout" ;;
+    backtick) printf '1. `core` — first\n2. plain note\nCore items: 1\nNon-blocking items: 0\n' >"$T/jobout" ;;
+    dashcore) printf -- '- core -- first\n- **core** -- second\nCore items: 2\nNon-blocking items: 0\n' >"$T/jobout" ;;
+    dashnb) printf -- '- non-blocking -- a\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout" ;;
+    starbare) printf '**core** -- x\nCore items: 0\nNon-blocking items: 0\n' >"$T/jobout" ;;
+    nonecolon) printf '%s\n' '- core: none found.' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    naw) printf '%s\n' '- core: N/A.' 'Core items: 0' 'Non-blocking items: 0' >"$T/jobout" ;;
+    nothing) printf '%s\n' '- core: Nothing' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    barecore) printf '%s\n' '- core:' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    boldnone) printf '%s\n' '- **core:** `None`.' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    noneof) printf '%s\n' '- core: none of the callers handle X' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    nbnone) printf '%s\n' '- non-blocking: none.' '- non-blocking -- a' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    midtick) printf '%s\n' '- hold.rs:15-20 says the handle must close before the guard kills, but `Drop` reaps (hold.rs:139) before the handle closes. `core`. The answer must say whether the early kill is intended.' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    midbold) printf '%s\n' '2. the guard reaps early (hold.rs:139). **core** -- the early kill.' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    twotags) printf '%s\n' '- `core` here, and `core` again.' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    trailtick) printf '%s\n' '- The answer must say whether the early kill is intended. `core`.' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    trailbold) printf '%s\n' '2. The guard reaps early (hold.rs:139). **core**' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout" ;;
+    coreoutcome) printf '%s\n' '- non-blocking -- the core outcome is unchanged.' 'Core items: 0' 'Non-blocking items: 1' >"$T/jobout" ;;
+    nilsentence) printf '%s\n' '- core: none. Each choice above is settled by a ruling, the goal, or code.' 'Core items: 0' 'Non-blocking items: 0' >"$T/jobout" ;;
+    nbnilsentence) printf '%s\n' '- non-blocking: nothing. The sweep is clean.' 'Core items: 0' 'Non-blocking items: 0' >"$T/jobout" ;;
   esac
   run_start
   want "$want_line" "$rc" "$name"
   if [ "$name" = twocore ] || [ "$name" = dashcore ]; then case "$OUT" in *"nonblocking="*) fail "$name: nonzero core must not carry nonblocking" ;; esac; fi
 done
+# field-count cases: tkt-start reads the trailing Core/Non-blocking field
+# lines, not the bullet shapes above them.
+setup fieldunbulleted TWO FILING
+printf 'The guard reaps early and the answer must say why.\nCore items: 1\nNon-blocking items: 0\n' >"$T/jobout"
+run_start
+want "PREFLIGHT core=1 out=" 1 fieldunbulleted
+case "$OUT" in *"nonblocking="*) fail "fieldunbulleted: nonzero core must not carry nonblocking" ;; esac
+setup fieldruled TWO FILING
+printf '1. core -- first, settled by a ruling in the issue comments.\n1. non-blocking -- other\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"
+run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 fieldruled
+setup fieldmissing TWO FILING
+printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
+run_start
+want "PREFLIGHT core=unknown out=" 1 fieldmissing
+case "$OUT" in *"no 'Core items:' line"*) ;; *) fail "fieldmissing: digest misses the missing-field message" ;; esac
 # stale with no --files: the sweep is skipped, the preflight still runs.
 setup nofiles TWO FILING
 reload --files; run_start
@@ -341,7 +367,7 @@ for flag in --run --repo --issue --spec --branch --worktree --workflow-doc --clo
   [ "$RC" -eq 2 ] || fail "usage $flag: exit $RC"
   grep -qF -- "$flag" "$CDIR/stderr" || fail "usage $flag: stderr does not name it"
 done
-for spec in "--model --model solorole" "--merge-gate --merge-gate someday"; do
+for spec in "--model --model solorole" "--merge-gate --merge-gate someday" "--merge-check --merge-check"; do
   reload; run_start ${spec#* }
   [ "$RC" -eq 2 ] || fail "usage ${spec#* }: exit $RC"
   grep -qF -- "${spec%% *}" "$CDIR/stderr" || fail "usage ${spec#* }: stderr does not name ${spec%% *}"
@@ -380,12 +406,12 @@ case "$sweep_real_out" in *unresolved\ *) fail "sweepreal: operational failure m
 # DONE_WITH_CONCERNS: the preflight report is the product, so a clean
 # preflight (core=0) still passes; BLOCKED still fails the step.
 setup concerns TWO FILING
-printf '1. non-blocking -- only a note\n' >"$T/jobout"; touch "$T/job-concerns"; run_start
+printf '1. non-blocking -- only a note\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"; touch "$T/job-concerns"; run_start
 want "PREFLIGHT core=0 nonblocking=1 out=" 0 concerns
 [ -s "$RUN/widget-42-preflight-out.md" ] || fail "concerns: report file missing"
 # Stray stderr lines before the verdict (watch output, a blank line) are not the verdict.
 setup concerns-noise TWO FILING
-printf '1. non-blocking -- only a note\n' >"$T/jobout"; touch "$T/job-concerns" "$T/job-noise"; run_start
+printf '1. non-blocking -- only a note\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"; touch "$T/job-concerns" "$T/job-noise"; run_start
 want "PREFLIGHT core=0 nonblocking=1 out=" 0 concerns-noise
 [ -s "$RUN/widget-42-preflight-out.md" ] || fail "concerns-noise: report file missing"
 setup blocked TWO FILING
@@ -784,7 +810,7 @@ want "CURRENT " 0 bodyendse2e
 grep -qF 'body_ends=X' "$RUN/widget-42.state" || fail "bodyendse2e: state misses [body_ends=X]"
 S2E_STATE="$RUN/widget-42.state"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set pr 7
-bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set reviewed rev123
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set reviewed "$(git -C "$WT" rev-parse HEAD)"
 S2E_HEAD="$(git -C "$WT" rev-parse HEAD)"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set head "$S2E_HEAD"
 printf '%s' "$S2E_HEAD" >"$T/prhead"
@@ -805,7 +831,7 @@ part_seed_pr() {
 # identity and any model role not overridden by the new invocation.
 setup partmerged ONE AGAINST; part_seed_pr partmerged
 S="$RUN/widget-42.state"; ARCHIVE="$S.part1"
-bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set reviewed r1
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set reviewed "$part_actual"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan /x
 journal_before="$(cat "$RUN/widget-42.journal")"
 printf 'MERGED\n' >"$T/prstate"
@@ -865,6 +891,19 @@ cmp -s "$S" "$CDIR/state.before" || fail "partexists: state changed"
 grep -qF -- 'old archive' "$S.part1" || fail "partexists: previous archive changed"
 [ ! -e "$S.lock" ] || fail "partexists: lock was not released"
 
+# --env rejects empty assignment values before writing state, while non-empty
+# values remain accepted.
+setup envempty ONE AGAINST
+run_start --env 'CARGO_BUILD_JOBS=3 NEXTEST_TEST_THREADS= CARGO_INCREMENTAL=0'
+[ "$RC" -eq 2 ] || fail "envempty: exit $RC, want 2"
+grep -qF -- 'tkt-start: --env sets NEXTEST_TEST_THREADS to an empty value; drop it or give it a value' "$CDIR/stderr" || fail "envempty: stderr misses the variable-specific error"
+[ ! -e "$RUN/widget-42.state" ] || fail "envempty: state was written"
+
+setup envset ONE AGAINST
+run_start --env 'CARGO_BUILD_JOBS=3 NEXTEST_TEST_THREADS=2 CARGO_INCREMENTAL=0'
+want "CURRENT " 0 envset
+grep -qF -- 'env=CARGO_BUILD_JOBS=3 NEXTEST_TEST_THREADS=2 CARGO_INCREMENTAL=0' "$RUN/widget-42.state" || fail "envset: state misses the non-empty env prefix"
+
 # Invalid values fail before the first state write.
 setup partbad ONE AGAINST
 for bad in one x missing; do
@@ -872,6 +911,17 @@ for bad in one x missing; do
   [ "$RC" -eq 2 ] || fail "partbad $bad: exit $RC, want 2"
   grep -qF -- '--part' "$CDIR/stderr" || fail "partbad $bad: stderr does not name --part"
   [ ! -e "$RUN/widget-42.state" ] || fail "partbad $bad: state was written"
+done
+
+setup modelrole ONE AGAINST; run_start --model bogus=x
+[ "$RC" -eq 2 ] || fail "modelrole: unknown --model role exits $RC, want 2"
+grep -qF 'known roles: lane, fix, map, verifier, verify, review, overbuild, preflight' "$CDIR/stderr" \
+  || fail "modelrole: stderr does not print the known roles"
+model_roles="$(sed -n 's/^model_roles=(\(.*\))$/\1/p' "$TKT")"
+[ -n "$model_roles" ] || fail "modelrole: tkt-start has no known model roles"
+for role in $model_roles; do
+  grep -qF -- "\`$role\`" "$SCRIPT_DIR/../skills/implement/SKILL.md" \
+    || fail "modelrole: skills/implement/SKILL.md does not name role [$role]"
 done
 
 # A new ticket can start at any part without an older state to archive.
@@ -892,6 +942,23 @@ grep -qF -- 'model.lane=new' "$S" || fail "partmodel: state misses [model.lane=n
 grep -qE '^model\.lane=old$' "$S" && fail "partmodel: stale model.lane value remains"
 [ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "partmodel: state wants 1 model.lane"
 
+# A part split carries the plan verdict: the plan is shared across parts, so
+# the new part keeps plan_verdict and plan_verdict_base and the build does
+# not refuse with verdict=none.
+setup partverdict ONE AGAINST; part_seed_pr partverdict
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict ok
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict_base "$FILING"
+VERDICT_HASH="$(printf 'shared plan text\n' | git hash-object --stdin)"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict_hash "$VERDICT_HASH"
+printf 'MERGED\n' >"$T/prstate"
+reload --model; run_start --part 2
+want "CURRENT " 0 partverdict
+grep -qF -- 'plan_verdict=ok' "$S" || fail "partverdict: state misses [plan_verdict=ok]"
+grep -qF -- "plan_verdict_base=$FILING" "$S" || fail "partverdict: state misses [plan_verdict_base=$FILING]"
+grep -qF -- "plan_verdict_hash=$VERDICT_HASH" "$S" || fail "partverdict: state misses [plan_verdict_hash=$VERDICT_HASH]"
+grep -qF -- 'plan_verdict=ok' "$S.part1" || fail "partverdict: archive misses [plan_verdict=ok]"
+
 # An invalid stored part is reported, and a missing part above part 1 is not inferred.
 setup partnonnumeric ONE AGAINST; part_seed_pr partnonnumeric
 S="$RUN/widget-42.state"
@@ -907,5 +974,49 @@ want "PRECONDITION part=3" 2 partmissingn
 case "$OUT" in *'part is missing'*) ;; *) fail "partmissingn: message misses [part is missing]" ;; esac
 cmp -s "$S" "$CDIR/state.before" || fail "partmissingn: state changed"
 [ ! -e "$S.lock" ] || fail "partmissingn: lock was not released"
+
+# --mutant-job adds the mutants label to the branch PR when the repo defines
+# the label; otherwise, or when the PR already carries it, nothing is edited.
+setup mutantlabel ONE AGAINST
+cp "$T/bin/gh" "$T/bin/gh.shared"
+cat >"$T/bin/gh" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" pr list --head "*)
+    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+    printf '7\\n'; exit 0 ;;
+  *"labels?per_page=100"*)
+    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+    if [ -f "$T/labels-fail" ]; then echo "gh: labels boom" >&2; exit 5; fi
+    if [ -f "$T/labels-nomutants" ]; then printf 'bug\\n'; else printf 'bug\\nmutants\\n'; fi
+    exit 0 ;;
+  *" --json labels "*)
+    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+    if [ -f "$T/pr-labeled" ]; then printf 'mutants\\n'; else printf 'bug\\n'; fi
+    exit 0 ;;
+  *" pr edit "*" --add-label mutants "*)
+    printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+    if [ -f "$T/edit-fail" ]; then echo "gh: edit boom" >&2; exit 5; fi
+    exit 0 ;;
+  *) exec "$T/bin/gh.shared" "\$@" ;;
+esac
+EOF
+chmod +x "$T/bin/gh"
+run_start
+want "CURRENT " 0 mutantlabel
+grep -qF -- 'gh|pr edit 7 --repo acme/widget --add-label mutants' "$T/calls.log" || fail "mutantlabel: no mutants label edit"
+: >"$T/calls.log"; printf '1' >"$T/labels-nomutants"; run_start
+want "CURRENT " 0 mutantlabelnolabel
+grep -qF -- 'pr edit' "$T/calls.log" && fail "mutantlabelnolabel: no edit without a repo mutants label"
+: >"$T/calls.log"; rm -f "$T/labels-nomutants"; printf '1' >"$T/pr-labeled"; run_start
+want "CURRENT " 0 mutantlabellabeled
+grep -qF -- 'pr edit' "$T/calls.log" && fail "mutantlabellabeled: no edit when the PR already carries mutants"
+: >"$T/calls.log"; rm -f "$T/pr-labeled"; printf '1' >"$T/edit-fail"; run_start
+want "STEP-FAIL step=github rc=5" 5 mutantlabeleditfail
+rm -f "$T/edit-fail"
+: >"$T/calls.log"; printf '1' >"$T/labels-fail"; run_start
+want "STEP-FAIL step=github rc=5" 5 mutantlabellistfail
+rm -f "$T/labels-fail"
+mv "$T/bin/gh.shared" "$T/bin/gh"
 
 echo "tkt-start: all cases passed"

@@ -1,0 +1,5 @@
+2026-10-09T17:00:10Z running lint
+2026-10-09T17:03:10Z FAIL [   1.200s] lint rules::order
+2026-10-09T17:03:11Z rule order violated in src/lint.rs:3
+2026-10-09T17:04:00Z lint failed: 1 failed
+MATRIX-TAIL-3814

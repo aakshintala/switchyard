@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Print `fiber-<n>` for every live muse session lane, one per line.
+
+fence-grant's live-lane probe knew two kinds of delegate work: a `delegate run`
+job (a RUNNING file in /tmp/delegate-jobs) and a pi lane (a pid file). A lane
+started by `delegate session start` -- which is every muse lane since
+muselaunch.sh landed -- is neither. Its cwd is the shared checkout, so the
+job probe's "ticket number is the cwd basename prefix" rule yields `fiber`
+and drops it.
+
+The result was a fence probe that printed NO LIVE LANE for ten running lanes
+(2026-11-04: #4026 and #4029 both reported NO LIVE LANE while both sessions
+were running). Their grant files still held on age alone, so no bad grant went
+out, but the printed advice was "retire with mv run/<grant> run/done/" on a
+live lane's fence, and after six hours the hold would have vanished with the
+lane still building.
+
+A session carries no ticket of its own, so the roster is the map: it records
+`<ts> <event>\\t<ticket>\\t<host>\\t<session-name>\\t<id>` per launch, and the
+id is sometimes an 8-char prefix, so matching is by prefix either way.
+
+Usage: delegate session list --json | fw-sess-lanes.py <roster path>
+Exit 1 and print nothing when the JSON is unusable; the caller fails closed.
+No live lane prints nothing and exits 0, so the caller reads the exit code,
+not the emptiness of the output.
+"""
+
+import json
+import sys
+
+LIVE = ("running", "idle", "working")
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        return 1
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        return 1
+    if not isinstance(data, dict) or not data.get("ok"):
+        return 1
+    sessions = data.get("sessions")
+    if not isinstance(sessions, list):
+        return 1
+    live = set()
+    for s in sessions:
+        if not isinstance(s, dict):
+            continue
+        if str(s.get("status", "")).lower() not in LIVE:
+            continue
+        sid = str(s.get("id", ""))
+        if sid:
+            live.add(sid)
+    if not live:
+        return 0
+    out = []
+    try:
+        with open(sys.argv[1], encoding="utf-8") as fh:
+            rows = fh.readlines()
+    except OSError:
+        return 1
+    for row in rows:
+        f = row.rstrip("\n").split("\t")
+        if len(f) < 5:
+            continue
+        ticket, name, rid = f[1].strip(), f[3].strip(), f[4].strip()
+        if not ticket.isdigit() or not rid:
+            continue
+        # A `prep-<n>` session reads the ticket and writes notes; it holds no
+        # fence, so counting it as a holder would block the very lane its prep
+        # exists to start. Only a `fiber-*` lane session holds paths.
+        if not name.startswith("fiber-"):
+            continue
+        for sid in live:
+            if sid == rid or sid.startswith(rid) or rid.startswith(sid):
+                out.append("fiber-" + ticket)
+                break
+    for name in sorted(set(out)):
+        print(name)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

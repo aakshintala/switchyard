@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 # git-hook-guard shim
 # Refuses a lane's attempt to skip or redirect git hooks: --no-verify (-n on
-# commit) with commit or push, a config write to core.hooksPath, and HUSKY=0.
-# A -c core.hooksPath=... global option or GIT_CONFIG_COUNT / GIT_CONFIG_KEY_*
-# setting core.hooksPath refuses only for the hook-running subcommands in
-# HOOK_SUBCOMMANDS, and passes through on any other. Installed as `git` in a
-# directory placed first on a lane's PATH; see autonomous-flywheel.
-# Runs the real git for everything else, with argv unchanged. A call from a
-# test run (NEXTEST_RUN_ID set, or effective cwd under the temp dir) runs
-# unchecked.
+# commit and am) with commit, push, merge, rebase or am, a config write to
+# core.hooksPath, a core.hooksPath set by -c, --config-env, GIT_CONFIG_COUNT
+# / GIT_CONFIG_KEY_* or GIT_CONFIG_PARAMETERS on a hook-running subcommand,
+# an alias expanding to a refused form, git hook run, and SKIP or HUSKY=0 in
+# the environment. Installed as `git` in a directory placed first on a lane's
+# PATH; see autonomous-flywheel.
+# HUSKY=0 refuses on every subcommand, including bare git. SKIP set
+# non-empty refuses only on the hook-running subcommands in HOOK_SUBCOMMANDS.
+# An alias is resolved through the real git (`git config --get alias.<name>`,
+# builtins winning over aliases as git itself resolves them) and its
+# expansion is checked as if typed. Runs the real git for everything else,
+# with argv unchanged. A call from a test run (NEXTEST_RUN_ID set, or
+# effective cwd under the temp dir) runs unchecked.
 #
-# Not covered here (flagged for a follow-up ticket rather than invented
-# here): --config-env=core.hooksPath=VAR, GIT_CONFIG_PARAMETERS, git aliases
-# from config, --no-verify on other subcommands (merge, rebase, am), and
-# git hook run.
+# Not covered here: a `!`-prefixed shell alias that runs git with a refused
+# form.
 import errno
 import os
+import shlex
 import signal
+import subprocess
 import sys
 
 MARKER = b"# git-hook-guard shim"
 REFUSAL = ("git-hook-guard: refused: a lane may not skip or redirect git "
            "hooks; a hook that refuses is not yours to get round, so stop "
            "with STATUS: BLOCKED and report the refusal")
+STASH_REFUSAL = ("git-hook-guard: refused: use git stash push -u -m "
+                 "<unique-tag>, then git stash apply <sha>, then drop the "
+                 "entry by tag")
 
 
 def fail(code, msg):
@@ -60,10 +68,10 @@ def find_real_git(path_env, shim_dir):
 
 
 # Global options that take the next token as their value (unless written
-# --name=VAL); every other leading -... token is boolean.
+# --name=VAL); every other leading -... token is boolean. --config-env is
+# handled separately in parse_globals, which inspects its value.
 GLOBAL_VALUE_FLAGS = (
-    "git-dir", "work-tree", "namespace", "super-prefix", "config-env",
-    "attr-source",
+    "git-dir", "work-tree", "namespace", "super-prefix", "attr-source",
 )
 # Value options of commit and push. A --name token is a value flag when name
 # matches exactly or is the unique proper prefix of one entry, as git's
@@ -101,10 +109,33 @@ NO_VERIFY_MIN = "--no-veri"
 NO_VERIFY_FULL = "--no-verify"
 INT_MAX = 2 ** 31 - 1
 # Subcommands that run hooks. Only these refuse a core.hooksPath set by the
-# -c global option or by GIT_CONFIG_COUNT / GIT_CONFIG_KEY_*: any other
-# subcommand, or none, runs no hook to skip.
+# -c or --config-env global option, by GIT_CONFIG_COUNT / GIT_CONFIG_KEY_*
+# or GIT_CONFIG_PARAMETERS, or a non-empty SKIP in the environment: any other
+# subcommand, or none, runs no hook to skip. pull can create a merge commit,
+# which runs hooks, so it is in the set.
 HOOK_SUBCOMMANDS = ("commit", "push", "merge", "rebase", "am", "cherry-pick",
-                    "revert")
+                    "revert", "pull")
+# Value options of merge, rebase and am, short and long; the same unique-
+# prefix rule holds, and the attached sets take only a value attached to the
+# token itself. merge and rebase take -n as --no-stat (never a bypass); am
+# takes -n as --no-verify, like commit.
+MERGE_LONG_VALUE = (
+    "message", "file", "strategy", "strategy-option", "into-name",
+    "cleanup",
+)
+MERGE_SHORT_VALUE = set("mFsX")
+MERGE_SHORT_ATTACHED = set("S")
+REBASE_LONG_VALUE = (
+    "onto", "empty", "strategy", "strategy-option", "whitespace", "exec",
+)
+REBASE_SHORT_VALUE = set("sXxC")
+REBASE_SHORT_ATTACHED = set("Sr")
+AM_LONG_VALUE = (
+    "quoted-cr", "empty", "whitespace", "directory", "exclude", "include",
+    "patch-format", "resolvemsg",
+)
+AM_SHORT_VALUE = set("Cp")
+AM_SHORT_ATTACHED = set("S")
 
 
 def hooks_key(text):
@@ -122,9 +153,11 @@ def long_is_value(name, known):
 
 def parse_globals(args, dirs):
     # One walk over argv with git's own grammar; argv is never rewritten.
-    # Returns (refused, subcommand, rest) and appends each -C value to dirs,
-    # in order. Text inside a consumed value is never read as a flag. The
-    # walk runs to the subcommand even after a hooks option, so dirs is whole.
+    # Returns (refused, subcommand, rest, index) where index is the position
+    # of the subcommand in args (None when there is none), and appends each
+    # -C value to dirs, in order. Text inside a consumed value is never read
+    # as a flag. The walk runs to the subcommand even after a hooks option,
+    # so dirs is whole.
     denied = False
     i = 0
     while i < len(args):
@@ -135,7 +168,21 @@ def parse_globals(args, dirs):
         if not token.startswith("-") or len(token) == 1:
             break
         if token.startswith("--"):
-            name, sep, _ = token[2:].partition("=")
+            name, sep, value = token[2:].partition("=")
+            if name == "config-env":
+                # --config-env=KEY=VAR or --config-env KEY=VAR: the key is
+                # the text before the first =, matched case-insensitively.
+                if sep:
+                    if hooks_key(value):
+                        denied = True
+                    i += 1
+                elif i + 1 < len(args):
+                    if hooks_key(args[i + 1]):
+                        denied = True
+                    i += 2
+                else:
+                    i += 1
+                continue
             if not sep and name in GLOBAL_VALUE_FLAGS and i + 1 < len(args):
                 i += 2
                 continue
@@ -164,8 +211,8 @@ def parse_globals(args, dirs):
             continue
         i += 1
     if i < len(args):
-        return denied, args[i], args[i + 1:]
-    return denied, None, []
+        return denied, args[i], args[i + 1:], i
+    return denied, None, [], None
 
 
 def no_verify_token(token):
@@ -175,9 +222,10 @@ def no_verify_token(token):
 
 
 def bypass_in_command(sub, rest):
-    # --no-verify on commit and push; -n only on commit, where -n never
-    # means --dry-run. A value flag's value is never read as a flag, and a
-    # -- token ends option parsing.
+    # --no-verify on commit, push, merge, rebase and am; -n on commit and am
+    # only, where -n never means --dry-run (on merge and rebase -n is
+    # --no-stat). A value flag's value is never read as a flag, and a --
+    # token ends option parsing.
     if sub == "commit":
         long_value = COMMIT_LONG_VALUE
         short_value = COMMIT_SHORT_VALUE
@@ -188,6 +236,21 @@ def bypass_in_command(sub, rest):
         short_value = PUSH_SHORT_VALUE
         short_attached = set()
         want_n = False
+    elif sub == "merge":
+        long_value = MERGE_LONG_VALUE
+        short_value = MERGE_SHORT_VALUE
+        short_attached = MERGE_SHORT_ATTACHED
+        want_n = False
+    elif sub == "rebase":
+        long_value = REBASE_LONG_VALUE
+        short_value = REBASE_SHORT_VALUE
+        short_attached = REBASE_SHORT_ATTACHED
+        want_n = False
+    elif sub == "am":
+        long_value = AM_LONG_VALUE
+        short_value = AM_SHORT_VALUE
+        short_attached = AM_SHORT_ATTACHED
+        want_n = True
     else:
         return False
     options_done = False
@@ -303,6 +366,78 @@ def husky_disabled():
     return os.environ.get("HUSKY") == "0"
 
 
+def skip_disabled():
+    # SKIP set non-empty (the pre-commit framework's switch for skipping
+    # hooks) refuses only on hook-running subcommands; read-only commands
+    # pass. The caller gates this on the subcommand.
+    return bool(os.environ.get("SKIP"))
+
+
+def split_parameters(text):
+    # The entries of GIT_CONFIG_PARAMETERS: a blank-separated list of
+    # old-style sq-quoted 'key=value' pairs, new-style 'key'='value' pairs
+    # and 'key'= bools, and bare 'key' entries, as parse_config_env_list
+    # reads them. Returns the dequoted entries as key=value or key strings,
+    # or None when git itself rejects the value (then the guard inspects
+    # nothing, and git dies).
+    if text == "":
+        return []
+    entries = []
+    i = 0
+    n = len(text)
+
+    def read_sq(j):
+        # Dequote one sq-quoted string starting at the opening quote at j;
+        # returns (value, next) or (None, j) when unterminated.
+        j += 1
+        buf = []
+        while True:
+            if j >= n:
+                return None, j
+            char = text[j]
+            if char == "'":
+                if text.startswith("'\\''", j):
+                    buf.append("'")
+                    j += 4
+                    continue
+                j += 1
+                return "".join(buf), j
+            buf.append(char)
+            j += 1
+
+    while True:
+        if i >= n or text[i] != "'":
+            return None
+        key, i = read_sq(i)
+        if key is None:
+            return None
+        if i < n and text[i] == "=":
+            # New-style 'key'='value' or bool 'key'=.
+            i += 1
+            if i < n and text[i] == "'":
+                value, i = read_sq(i)
+                if value is None:
+                    return None
+                if i < n and text[i] not in " \t\n\v\f\r":
+                    return None
+                entries.append(key + "=" + value)
+            elif i >= n or text[i] in " \t\n\v\f\r":
+                entries.append(key)
+            else:
+                return None
+        else:
+            # Old-style 'key=value' or bare 'key'.
+            entries.append(key)
+            if i < n and text[i] not in " \t\n\v\f\r":
+                return None
+        if i >= n:
+            return entries
+        while i < n and text[i] in " \t\n\v\f\r":
+            i += 1
+        if i >= n:
+            return entries
+
+
 def hooks_path_in_env():
     # GIT_CONFIG_COUNT / GIT_CONFIG_KEY_* setting core.hooksPath. The
     # environment keys are iterated directly, so a huge count costs nothing,
@@ -322,6 +457,124 @@ def hooks_path_in_env():
         if value.lower() == "core.hookspath":
             return True
     return False
+
+
+def hooks_path_in_parameters():
+    # GIT_CONFIG_PARAMETERS setting core.hooksPath. Git trims whitespace
+    # around the key, so the check does too. The caller gates this on the
+    # subcommand.
+    raw = os.environ.get("GIT_CONFIG_PARAMETERS")
+    if not raw:
+        return False
+    entries = split_parameters(raw)
+    if entries is None:
+        # Unparseable: git dies, unless the guard cannot even read the
+        # value. Refuse when it names a hooks key rather than let an
+        # unreadable bypass through.
+        return "hookspath" in raw.lower()
+    for entry in entries:
+        if entry.split("=", 1)[0].strip().lower() == "core.hookspath":
+            return True
+    return False
+
+
+# An alias lookup expands at most this many times; a longer chain is a cycle
+# (real git loops there too), so the guard leaves the call to the real git.
+ALIAS_ROUNDS = 16
+
+
+def run_real(real, argv):
+    try:
+        return subprocess.run([real] + argv, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
+def read_alias(real, prefix, name):
+    # The value of alias.<name> as the real git reads it: the given global
+    # options (-C dirs, -c options and the rest) plus the same environment.
+    # None when there is no such alias, when it is a `!` shell alias
+    # (uncovered, left to the real git), or when the lookup itself fails.
+    proc = run_real(real, prefix + ["config", "--get", "alias." + name])
+    if proc is None or proc.returncode != 0:
+        return None
+    text = proc.stdout.decode("utf-8", "replace")
+    if text.endswith("\n"):
+        text = text[:-1]
+    if text.startswith("!"):
+        return None
+    return text
+
+
+def list_builtins(real):
+    # Every builtin command, or None when the real git cannot list them.
+    proc = run_real(real, ["--list-cmds=builtins,nohelpers"])
+    if proc is None or proc.returncode != 0:
+        return None
+    return set(proc.stdout.decode("utf-8", "replace").split())
+
+
+def expand_alias(args, real):
+    # The argv with the subcommand's alias chain expanded (globals kept, the
+    # caller's words after the expansion), or None when no alias applies: no
+    # alias is defined, a builtin wins over one as git itself resolves them,
+    # or the chain leaves git's own hands (a shell alias, an external
+    # command, a cycle, or a value that will not split).
+    _, sub, rest, subidx = parse_globals(args, [])
+    if sub is None:
+        return None
+    prefix = args[:subidx]
+    value = read_alias(real, prefix, sub)
+    if value is None:
+        return None
+    builtins = list_builtins(real)
+    if builtins is None:
+        builtins = set()
+    if sub in builtins:
+        return None
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    current = words + list(rest)
+    seen = {sub}
+    for _ in range(ALIAS_ROUNDS):
+        # An expansion may start with global options, which git applies
+        # before the subcommand; find it the same way the call's own
+        # globals are parsed. Every leading global (from the call and from
+        # each expansion so far) is part of the config git itself would
+        # see, so later lookups carry the accumulated set.
+        _, first, _, firstidx = parse_globals(current, [])
+        if first is None:
+            # Globals only: check the whole expansion as if typed.
+            return prefix + current
+        if first in seen:
+            return None
+        seen.add(first)
+        if first in builtins:
+            return prefix + current
+        value = read_alias(real, prefix + current[:firstidx], first)
+        if value is None:
+            return None
+        try:
+            words = shlex.split(value)
+        except ValueError:
+            return None
+        if not words:
+            return None
+        current = current[:firstidx] + words + current[firstidx + 1:]
+    return None
+
+
+def alias_refusal(args, real):
+    # The refusal for the alias expansion checked as if typed, or None.
+    expanded = expand_alias(args, real)
+    if expanded is None:
+        return None
+    return refusal_for(expanded)
 
 
 def exec_real(real, args):
@@ -374,25 +627,111 @@ def test_run_passes(args):
     return under_temp_root(effective_dir(args))
 
 
-def refused_command(args):
-    if husky_disabled():
-        return True
-    denied, sub, rest = parse_globals(args, [])
-    if sub == "config":
-        return bypass_in_config(rest)
-    if sub in HOOK_SUBCOMMANDS and (denied or hooks_path_in_env()):
-        return True
-    if sub is not None:
-        return bypass_in_command(sub, rest)
+def stash_split(rest):
+    # Split argv after the stash subcommand into (sub, after), where sub is
+    # the stash subcommand word or None for a bare `git stash`. Leading
+    # option tokens are skipped, with a -m/--message value skipped too so
+    # it is never read as the subcommand; `--` ends option parsing.
+    i = 0
+    n = len(rest)
+    while i < n:
+        token = rest[i]
+        if token == "--":
+            i += 1
+            break
+        if not token.startswith("-") or len(token) == 1:
+            break
+        if token in ("-m", "--message"):
+            i += 2
+            continue
+        i += 1
+    if i < n:
+        return rest[i], rest[i + 1:]
+    return None, []
+
+
+def push_has_message(args):
+    # True when the argv after `stash push` carries -m/--message with a
+    # value. A `-xyz` cluster's m takes the rest of the token or the next
+    # token; a -- token ends option parsing, so a pathspec -m does not
+    # count, and neither does the value of --pathspec-from-file.
+    options_done = False
+    i = 0
+    n = len(args)
+    while i < n:
+        token = args[i]
+        if options_done:
+            pass
+        elif token == "--":
+            options_done = True
+        elif token in ("-m", "--message"):
+            if i + 1 < n:
+                return True
+        elif token.startswith("--message="):
+            return True
+        elif token == "--pathspec-from-file":
+            i += 1
+        elif token.startswith("--"):
+            pass
+        elif token.startswith("-") and len(token) > 1:
+            j = 1
+            while j < len(token):
+                if token[j] == "m":
+                    return True
+                j += 1
+        i += 1
     return False
+
+
+def stash_refused(rest):
+    # A bare `git stash` and `git stash pop` take whatever is on top of the
+    # shared stash stack, which can be another lane's work; a push without
+    # -m cannot be dropped by tag. Every other stash form passes through.
+    sub, after = stash_split(rest)
+    if sub is None:
+        return True
+    if sub == "pop":
+        return True
+    if sub == "push":
+        return not push_has_message(after)
+    return False
+
+
+def refusal_for(args):
+    if husky_disabled():
+        return REFUSAL
+    denied, sub, rest, _ = parse_globals(args, [])
+    if sub == "config":
+        return REFUSAL if bypass_in_config(rest) else None
+    if sub == "hook":
+        # Only `hook run` runs a hook; bare `hook` is a usage error.
+        return REFUSAL if rest and rest[0] == "run" else None
+    if sub in HOOK_SUBCOMMANDS and (denied or hooks_path_in_env()
+                                    or hooks_path_in_parameters()
+                                    or skip_disabled()):
+        return REFUSAL
+    if sub == "stash":
+        return STASH_REFUSAL if stash_refused(rest) else None
+    if sub is not None and bypass_in_command(sub, rest):
+        return REFUSAL
+    return None
 
 
 def main():
     args = sys.argv[1:]
-    if not test_run_passes(args) and refused_command(args):
-        sys.stderr.write(REFUSAL + "\n")
-        sys.exit(1)
     shim_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    if not test_run_passes(args):
+        message = refusal_for(args)
+        if message is None:
+            real = find_real_git(os.environ.get("PATH"), shim_dir)
+            if real is None:
+                fail(127, "no git on PATH outside git-hook-guard")
+            message = alias_refusal(args, real)
+        if message is not None:
+            sys.stderr.write(message + "\n")
+            sys.exit(1)
+        exec_real(real, args)
+        return
     real = find_real_git(os.environ.get("PATH"), shim_dir)
     if real is None:
         fail(127, "no git on PATH outside git-hook-guard")

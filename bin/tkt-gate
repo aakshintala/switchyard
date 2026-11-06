@@ -37,7 +37,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 tkt_state="$script_dir/tkt-state"
 tokens_lib="$script_dir/lib/plan-tokens.sh"
 if [ ! -r "$tokens_lib" ]; then
@@ -67,6 +74,13 @@ if [ ! -r "$plan_gate_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$plan_gate_lib"
+local_gate_body_lib="$script_dir/lib/local-gate-body.sh"
+if [ ! -r "$local_gate_body_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $local_gate_body_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$local_gate_body_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 plangate="$bin_dir/plan-gate"
 
@@ -77,7 +91,7 @@ tkt() {
 # emit VERDICT EXIT: write the verdict plus the digest (and the history, when
 # read) to the per-run log, print verdict plus digest, journal, and exit.
 emit() {
-  local verdict="$1" code="$2" twelve logpath output
+  local verdict="$1" code="$2" twelve logpath output journal_line
   twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
   logpath="$(mktemp "$run/$namebase-tkt-gate-$twelve-XXXXXX")"
   mv "$logpath" "$logpath.log"
@@ -89,7 +103,9 @@ $digest"
     printf '%s\n' "$hist" >>"$logpath"
   fi
   printf '%s\n' "$output"
-  tkt journal "tkt-gate $verdict"
+  journal_line="tkt-gate $verdict"
+  if [ -n "${3:-}" ]; then journal_line="$journal_line $3"; fi
+  tkt journal "$journal_line"
   exit "$code"
 }
 
@@ -106,8 +122,10 @@ if ! mkdir "$phasedir" 2>/dev/null; then
   exit 2
 fi
 printf '%s\n' "$$" >"$phasedir/pid"
+cargo_slot_dir=""
 release_phase() {
   rm -rf "$phasedir"
+  [ -z "$cargo_slot_dir" ] || rm -rf "$cargo_slot_dir"
 }
 trap release_phase EXIT
 
@@ -150,8 +168,13 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
       exit 2
     }
     if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
-      echo "tkt-gate: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr $pr head=$pr_head" >&2
-      exit 3
+      if [ "$actual" = "$pr_head" ] && git -C "$worktree" merge-base --is-ancestor "$stored_head" "$actual" >/dev/null 2>&1; then
+        echo "tkt-gate: accepted pushed head drift: state head=$stored_head worktree $worktree HEAD=$actual PR head=$pr_head" >&2
+        tkt set head "$pr_head"
+      else
+        echo "tkt-gate: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr $pr head=$pr_head" >&2
+        exit 3
+      fi
     fi
   elif [ "$stored_head" != "$actual" ]; then
     echo "tkt-gate: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual" >&2
@@ -275,6 +298,21 @@ if [ "$checks_only" -eq 0 ]; then
   if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
     env_prefix="$e "
   fi
+  cargo_slot_real="$(command -v cargo || true)"
+  if [ -n "$cargo_slot_real" ]; then
+    case "$cargo_slot_real" in
+      /*) ;;
+      *) cargo_slot_real="$(cd "$(dirname "$cargo_slot_real")" && pwd)/$(basename "$cargo_slot_real")" ;;
+    esac
+    env_prefix="${env_prefix}CARGO_SLOT_REAL=$(printf '%q' "$cargo_slot_real") "
+  else
+    # Before the ticket env: an assignment ahead of `unset` would apply to it alone.
+    env_prefix="unset CARGO_SLOT_REAL; ${env_prefix}"
+  fi
+  # Session gates do not inherit a lane's cargo shim PATH.
+  cargo_slot_dir="$(mktemp -d "$run/$namebase-tkt-gate-cargo.XXXXXX")"
+  ln -s "$script_dir/cargo-slot" "$cargo_slot_dir/cargo"
+  env_prefix="${env_prefix}PATH=$(printf '%q' "$cargo_slot_dir"):\$PATH "
   script="$(mktemp "$run/$namebase-tkt-gate-XXXXXX")"
   mv "$script" "$script.sh"
   script="$script.sh"
@@ -303,4 +341,41 @@ fi
 digest="commits=$commits merges=$merges
 gate=$gate_word"
 tkt set head "$local_head"
+# On PASS the gate records `Local gate: pass at <sha> (<command>)` in the
+# PR body, replacing any earlier Local gate line. The line goes directly
+# above the first Implemented by line, else above the attribution line
+# (state body_ends, else the body_has co-author line), else at the end. A
+# --checks-only PASS ran no gate, so it writes nothing. A failed read or
+# write only warns.
+if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
+  gate_pr_repo="$(git -C "$worktree" config --get remote.origin.url 2>/dev/null || true)"
+  if [ -z "$gate_pr_repo" ]; then
+    echo "tkt-gate: warning: cannot read origin URL in $worktree; leaving the PR body unchanged" >&2
+  elif pr_body="$(gh pr view "$gate_pr" --repo "$gate_pr_repo" --json body --jq '.body // ""' 2>/dev/null)"; then
+    gate_line="Local gate: pass at $local_head ($gate_cmd)"
+    if [ -z "$pr_body" ]; then
+      new_body="$gate_line"
+    else
+      # body_ends wins; a missing or blank body_ends falls through to the body_has co-author.
+      attr="$(tkt get body_ends 2>/dev/null || true)"
+      attr_mode="exact"
+      if [ -z "${attr//[[:space:]]/}" ]; then
+        attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
+        attr_mode="prefix"
+      fi
+      new_body="$(tkt_local_gate_body_insert "$pr_body" "$gate_line" "$attr" "$attr_mode")"
+    fi
+    tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-gate-body.XXXXXX")"
+    printf '%s\n' "$new_body" >"$tmp_body"
+    if ! gh pr edit "$gate_pr" --repo "$gate_pr_repo" --body-file "$tmp_body" 2>/dev/null; then
+      echo "tkt-gate: warning: cannot update PR $gate_pr body; leaving it unchanged" >&2
+    fi
+    rm -f "$tmp_body"
+  else
+    echo "tkt-gate: warning: cannot read PR $gate_pr body; leaving it unchanged" >&2
+  fi
+fi
+if [ "$checks_only" -eq 1 ]; then
+  emit "PASS head=$local_head" 0 checks-only
+fi
 emit "PASS head=$local_head" 0

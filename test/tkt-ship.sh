@@ -53,8 +53,18 @@ chmod +x "$T/bin/gh-ci"
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
+if [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "edit" ]; then
+  [ ! -f "$T/body-write-fail" ] || exit 1
+  previous=""
+  for arg in "\$@"; do
+    if [ "\$previous" = "--body-file" ]; then cat "\$arg" >"$T/prbody"; fi
+    previous="\$arg"
+  done
+  exit 0
+fi
 case " \$* " in
   *" headRefOid "*) cat "$T/prhead"; exit 0 ;;
+  *"--json body"*) [ ! -f "$T/body-read-fail" ] || exit 1; { cat "$T/prbody" 2>/dev/null || printf ''; }; exit 0 ;;
 esac
 if [ "\${1:-}" = "pr" ]; then cat "$T/ghstate"; fi
 exit 0
@@ -65,10 +75,11 @@ chmod +x "$T/bin/gh"
 reset_stub() {
   printf '0' >"$T/count"
   : >"$T/calls.log"
-  rm -f "$T/shiplog" "$T/failures-log" "$T/ghci-fail" "$T/sha" "$T/ghstate" "$T/exitcodes"
+  rm -f "$T/shiplog" "$T/failures-log" "$T/ghci-fail" "$T/sha" "$T/ghstate" "$T/exitcodes" "$T/body-read-fail" "$T/body-write-fail"
   printf '7' >"$T/exitcodes"
   printf 'OPEN' >"$T/ghstate"
   : >"$T/prhead"
+  : >"$T/prbody"
 }
 
 # New case dir with run dir, git worktree and base state (head set, PR head
@@ -147,6 +158,40 @@ expect_journal merged MERGED
 expect_logfile merged
 [ ! -e "$S.lock" ] || fail "merged: lock not released"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 41 ] || fail "merged: over 40 digest lines"
+
+# --- a current LINES plan verdict refuses ship with both sanctioned exits ---
+reset_stub; setup_case verdict-lines
+printf '0' >"$T/exitcodes"
+printf 'Base: %s\n\n## Files\n\n- `src/a.go`\n\n## Gate\n\n`true`\n' "$H" >"$CDIR/plan.md"
+printf 'plan=%s\nplan_verdict=lines\nplan_verdict_base=%s\nplan_verdict_hash=%s\n' \
+  "$CDIR/plan.md" "$H" "$(git hash-object "$CDIR/plan.md")" >>"$S"
+run_ship
+[ "$RC" -eq 1 ] || fail "LINES verdict refuses ship (rc=$RC)"
+expect_line1 "VERDICT-REFUSED verdict=lines" "LINES verdict refusal"
+case "$OUT" in *"plan_verdict=lines plan_verdict_base=$H plan_base=$H"*) ;; *) fail "LINES refusal has the build verdict digest: [$OUT]" ;; esac
+case "$OUT" in *"tkt-plan $S triaged --comment <id>"*) ;; *) fail "LINES refusal names triaged exit: [$OUT]" ;; esac
+case "$OUT" in *"edit the plan and use --no-verifier"*) ;; *) fail "LINES refusal names edit and --no-verifier exit: [$OUT]" ;; esac
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "LINES verdict does not invoke ship-pr"
+
+# --- accepted plan verdicts and a missing verdict key preserve ship behavior ---
+for accepted in ok triaged; do
+  reset_stub; setup_case "verdict-$accepted"
+  printf '0' >"$T/exitcodes"
+  printf 'Base: %s\n\n## Files\n\n- `src/a.go`\n\n## Gate\n\n`true`\n' "$H" >"$CDIR/plan.md"
+  printf 'plan=%s\nplan_verdict=%s\nplan_verdict_hash=%s\n' \
+    "$CDIR/plan.md" "$accepted" "$(git hash-object "$CDIR/plan.md")" >>"$S"
+  run_ship
+  [ "$RC" -eq 0 ] || fail "$accepted verdict permits ship (rc=$RC)"
+  expect_line1 "MERGED sha=" "$accepted verdict permits ship"
+done
+
+reset_stub; setup_case verdict-absent
+printf '0' >"$T/exitcodes"
+printf 'Base: %s\n\n## Files\n\n- `src/a.go`\n\n## Gate\n\n`true`\n' "$H" >"$CDIR/plan.md"
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "missing plan verdict key permits ship (rc=$RC)"
+expect_line1 "MERGED sha=" "missing plan verdict key permits ship"
 
 # --- flake note on stderr text ---
 reset_stub; setup_case flake
@@ -285,11 +330,38 @@ expect_line1 "PATCH-CHANGED head=$H" patch
 # --- body lines missing ---
 reset_stub; setup_case body
 printf '5' >"$T/exitcodes"
-printf 'missing body line: Resolves #515\n' >"$T/shiplog"
+printf 'missing body line: Resolves #515\nship-pr: BODY text needs a required line\nship-pr: refused BODY\n' >"$T/shiplog"
 run_ship
 [ "$RC" -eq 1 ] || fail "body: exit $RC"
 expect_line1 "BODY" body
 case "$OUT" in *"missing body line: Resolves #515"*) ;; *) fail "body: digest misses the line" ;; esac
+
+# --- a mutants refusal reports the family named by ship-pr ---
+reset_stub; setup_case mutants-refusal
+printf '5' >"$T/exitcodes"
+printf 'ship-pr: refused MUTANTS\nmutants gate needs zero-proof evidence\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "mutants-refusal: exit $RC"
+expect_line1 "MUTANTS" mutants-refusal
+case "$OUT" in *"mutants gate needs zero-proof evidence"*) ;; *) fail "mutants-refusal: digest misses ship-pr log tail" ;; esac
+
+# --- a review refusal reports the family named by ship-pr ---
+reset_stub; setup_case review-refusal
+printf '5' >"$T/exitcodes"
+printf 'ship-pr: refused REVIEW\nreview state needs a scoped verify\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "review-refusal: exit $RC"
+expect_line1 "REVIEW" review-refusal
+case "$OUT" in *"review state needs a scoped verify"*) ;; *) fail "review-refusal: digest misses ship-pr log tail" ;; esac
+
+# --- an unclassified exit 5 is an honest SHIP outcome, not a guessed family ---
+reset_stub; setup_case unclassified
+printf '5' >"$T/exitcodes"
+printf 'ship-pr: refusal wording changed\ninspect this ship-pr failure\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "unclassified: exit $RC"
+expect_line1 "SHIP" unclassified
+case "$OUT" in *"inspect this ship-pr failure"*) ;; *) fail "unclassified: digest misses ship-pr log tail" ;; esac
 
 # --- precondition ---
 reset_stub; setup_case precond
@@ -373,6 +445,7 @@ printf 'body_ends=%s\n' 'Co-authored with Claude Code.' >>"$S"
 printf 'unverified text\n' >"$CDIR/unverified.md"
 printf 'unverified=%s\n' "$CDIR/unverified.md" >>"$S"
 printf 'merge_gate=%s\n' gate >>"$S"
+printf 'merge_check=%s\n' 'cargo check --all-targets' >>"$S"
 printf 'env=%s\n' 'FOO=1 BAR=2' >>"$S"
 printf '# Plan\n\n## Gate\n\n`bash test/gate.sh`\n' >"$CDIR/plan.md"
 printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
@@ -385,6 +458,39 @@ got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
 [ "$got" = 'arg|Co-authored with Claude Code.' ] || fail "flags: body-ends value, got [$got]"
 grep -F -q -- "--unverified-fixes $CDIR/unverified.md" "$T/calls.log" || fail "flags: unverified missing"
 grep -F -q -- '--gate FOO=1 BAR=2 bash test/gate.sh' "$T/calls.log" || fail "flags: gate missing"
+[ "$(grep -c -x -F 'arg|--merge-check' "$T/calls.log")" -eq 0 ] || fail "flags: merge-check omitted when merge_gate=gate"
+
+# --- merge_check reaches ship-pr for a CI merge gate ---
+reset_stub; setup_case mergecheck-ci
+printf '0' >"$T/exitcodes"
+printf 'merge_gate=%s\n' ci >>"$S"
+printf 'merge_check=%s\n' 'cargo check --all-targets' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "mergecheck-ci: exit $RC"
+[ "$(grep -c -x -F 'arg|--merge-check' "$T/calls.log")" -eq 1 ] || fail "mergecheck-ci: merge-check flag missing: $(cat "$T/calls.log")"
+got="$(grep -A1 -x -F 'arg|--merge-check' "$T/calls.log" | sed -n 2p)"
+[ "$got" = 'arg|cargo check --all-targets' ] || fail "mergecheck-ci: value not one argument, got [$got]"
+[ "$(grep -c -x -F 'arg|--gate' "$T/calls.log")" -eq 0 ] || fail "mergecheck-ci: no local gate"
+
+# --- merge_check applies the env prefix for a CI merge gate ---
+reset_stub; setup_case mergecheck-env
+printf '0' >"$T/exitcodes"
+printf 'merge_gate=%s\n' ci >>"$S"
+printf 'merge_check=%s\n' 'cargo check --all-targets' >>"$S"
+printf 'env=%s\n' 'FOO=1 BAR=2' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "mergecheck-env: exit $RC"
+[ "$(grep -c -x -F 'arg|--merge-check' "$T/calls.log")" -eq 1 ] || fail "mergecheck-env: merge-check flag missing: $(cat "$T/calls.log")"
+got="$(grep -A1 -x -F 'arg|--merge-check' "$T/calls.log" | sed -n 2p)"
+[ "$got" = 'arg|FOO=1 BAR=2 cargo check --all-targets' ] || fail "mergecheck-env: value misses env prefix, got [$got]"
+
+# --- mutant_job opts the ticket into the mutants gate
+reset_stub; setup_case mutantjob
+printf '0' >"$T/exitcodes"
+printf 'mutant_job=%s\n' Selection >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "mutantjob: exit $RC"
+[ "$(grep -c -x -F 'arg|--mutants-gate' "$T/calls.log")" -eq 1 ] || fail "mutantjob: mutants gate flag missing: $(cat "$T/calls.log")"
 
 # --- gate.script set: a Gate line that hand-expands it stops ship before ship-pr ---
 reset_stub; setup_case gate-script-hand
@@ -426,6 +532,7 @@ printf '0' >"$T/exitcodes"
 run_ship
 [ "$RC" -eq 0 ] || fail "nomutantsunset: exit $RC"
 [ "$(grep -c -F 'no-mutants-label' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: flag present: $(cat "$T/calls.log")"
+[ "$(grep -c -F 'mutants-gate' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: mutants gate without mutant_job: $(cat "$T/calls.log")"
 [ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 0 ] || fail "nomutantsunset: body-ends without a body_ends line: $(cat "$T/calls.log")"
 
 # --- body_ends from state reaches ship-pr as one argument ---
@@ -498,16 +605,22 @@ printf '0' >"$T/exitcodes"
 run_ship
 [ "$RC" -eq 0 ] || fail "notice: exit $RC"
 expect_line1 "MERGED sha=" notice
-[ "$(head -n 1 "$CDIR/stderr")" = "tkt-ship: longest wait 144000 s (40 h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 "$CDIR/stderr")" = "tkt-ship: no shell timeout: waits are bounded at 144000 s (40 h), worst case; a clean run takes minutes" ] \
   || fail "notice is stderr line 1: [$(cat "$CDIR/stderr")]"
 
 # Usage errors print guidance but no wait notice.
 usage_rc=0
 bash "$TKT" >"$T/usage-out" 2>"$T/usage-err" || usage_rc=$?
 [ "$usage_rc" -eq 2 ] || fail "usage: exit $usage_rc"
-! grep -q '^tkt-ship: longest wait' "$T/usage-err" || fail "usage error has no longest-wait notice: [$(cat "$T/usage-err")]"
+! grep -q '^tkt-ship: no shell timeout' "$T/usage-err" || fail "usage error has no longest-wait notice: [$(cat "$T/usage-err")]"
 grep -q 'background' "$T/usage-err" && grep -q 'no shell timeout' "$T/usage-err" \
   || fail "usage mentions background and no shell timeout: [$(cat "$T/usage-err")]"
+grep -q 'unverified' "$T/usage-err" \
+  || fail "usage names the unverified state key: [$(cat "$T/usage-err")]"
+grep -q -F -- '--unverified-fixes' "$T/usage-err" \
+  || fail "usage names --unverified-fixes: [$(cat "$T/usage-err")]"
+grep -q -F -- 'merge_check' "$T/usage-err" && grep -q -F -- '--merge-check' "$T/usage-err" \
+  || fail "usage names the merge_check state key and --merge-check: [$(cat "$T/usage-err")]"
 
 # CI-FAIL carries never-started lines and omits the empty failed-jobs summary.
 reset_stub; setup_case neverstarted
@@ -518,5 +631,239 @@ run_ship
 expect_line1 "CI-FAIL jobs=0 inside-diff=0 mutants=0" neverstarted
 case "$OUT" in *"gh-ci: check ci has no check run after 10 min; it never started"*) ;; *) fail "digest carries never-started line: [$OUT]" ;; esac
 case "$OUT" in *"gh-ci reported no failed jobs"*) fail "digest drops empty failed-jobs line: [$OUT]" ;; esac
+
+# --- a stale Local gate sha warns but still merges ---
+reset_stub; setup_case gateship-stale
+printf '0' >"$T/exitcodes"
+stale="0000000000000000000000000000000000000000"
+printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$stale" >"$T/prbody"
+cp "$T/prbody" "$CDIR/body-before"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-stale: exit $RC"
+expect_line1 "MERGED sha=" gateship-stale
+grep -Fq "tkt-ship: warning: Local gate sha $stale is not PR head $H (gate: bash test/gate.sh); the gate did not run on the head" "$CDIR/stderr" \
+  || fail "gateship-stale: stderr misses the existing stale-line warning: [$(cat "$CDIR/stderr")]"
+cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-stale: stale body remains unchanged without a journal PASS"
+! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-stale: no body edit without a journal PASS"
+
+# --- a fresh Local gate sha says nothing ---
+reset_stub; setup_case gateship-fresh
+printf '0' >"$T/exitcodes"
+printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$H" >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-fresh: exit $RC"
+expect_line1 "MERGED sha=" gateship-fresh
+grep -q "Local gate" "$CDIR/stderr" && fail "gateship-fresh: unexpected Local gate warning: [$(cat "$CDIR/stderr")]"
+
+# --- no journal PASS and no Local gate body line says nothing and leaves the body alone ---
+reset_stub; setup_case gateship-noline
+printf '0' >"$T/exitcodes"
+printf 'Title\n\nImplemented by: m/a\n' >"$T/prbody"
+cp "$T/prbody" "$CDIR/body-before"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-noline: exit $RC"
+expect_line1 "MERGED sha=" gateship-noline
+grep -q "Local gate" "$CDIR/stderr" && fail "gateship-noline: unexpected Local gate warning: [$(cat "$CDIR/stderr")]"
+grep -q "Local gate" <<<"$OUT" && fail "gateship-noline: unexpected Local gate line in output"
+cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-noline: body changed without a journal PASS"
+! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-noline: no body edit without a journal PASS"
+
+# --- a PASS at the PR head restores the missing line in gate placement, silently ---
+reset_stub; setup_case gateship-fill
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=1111111111111111111111111111111111111111" || fail "gateship-fill: journal an earlier gate PASS"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "gateship-fill: journal the latest gate PASS"
+printf 'Title\n\nSome text.\nImplemented by: m/a\n' >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-fill: exit $RC"
+expect_line1 "MERGED sha=" gateship-fill
+grep -q "Local gate" "$CDIR/stderr" && fail "gateship-fill: unexpected Local gate output: [$(cat "$CDIR/stderr")]"
+cat >"$CDIR/body-expected" <<EOF
+Title
+
+Some text.
+Local gate: pass at $H (bash test/gate.sh)
+Implemented by: m/a
+EOF
+cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-fill: body line is not in gate placement: [$(cat "$T/prbody")]"
+grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-fill: edited body after a current PASS"
+
+# --- a PASS at an older head warns with both shas and the gate command ---
+reset_stub; setup_case gateship-earlier
+printf '0' >"$T/exitcodes"
+OLD=1111111111111111111111111111111111111111
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$OLD" || fail "gateship-earlier: journal the gate PASS"
+printf 'Title\n' >"$T/prbody"
+cp "$T/prbody" "$CDIR/body-before"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-earlier: exit $RC"
+expect_line1 "MERGED sha=" gateship-earlier
+grep -Fq "tkt-gate last passed at $OLD but PR head is $H; the gate did not run on the head (gate: bash test/gate.sh)" "$CDIR/stderr" \
+  || fail "gateship-earlier: stderr misses the head-drift warning: [$(cat "$CDIR/stderr")]"
+[ "$(grep -c 'tkt-gate last passed at' "$CDIR/stderr")" = "1" ] || fail "gateship-earlier: head-drift warning is not printed exactly once"
+cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-earlier: body changed after an older PASS"
+! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-earlier: no body edit after an older PASS"
+
+# A full PASS at B overrides an older Local gate body line without warning.
+reset_stub; setup_case gateship-pass-current-stale-body
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$OLD" >"$T/prbody"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "gateship-pass-current-stale-body: journal the current gate PASS"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-pass-current-stale-body: exit $RC"
+expect_line1 "MERGED sha=" gateship-pass-current-stale-body
+grep -q 'Local gate' "$CDIR/stderr" && fail "gateship-pass-current-stale-body: unexpected Local gate warning: [$(cat "$CDIR/stderr")]"
+cat >"$CDIR/body-expected" <<EOF
+Title
+
+Local gate: pass at $H (bash test/gate.sh)
+Implemented by: m/a
+EOF
+cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-pass-current-stale-body: stale body line was not rewritten: [$(cat "$T/prbody")]"
+grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-pass-current-stale-body: edited body after a current PASS"
+
+# A checks-only PASS at B cannot replace a full PASS at A for ship coverage.
+reset_stub; setup_case gateship-checks-only-at-new-head
+printf '0' >"$T/exitcodes"
+A="$H"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$A" || fail "gateship-checks-only-at-new-head: journal the earlier full PASS"
+printf 'new commit\n' >"$WT/src/b.go"
+git -C "$WT" -c user.email=t@t -c user.name=t add src/b.go
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q -m second
+B="$(git -C "$WT" rev-parse HEAD)"
+bash "$REAL_BIN/tkt-state" "$S" set head "$B" || fail "gateship-checks-only-at-new-head: update state head"
+printf '%s' "$B" >"$T/prhead"
+H="$B"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$B checks-only" || fail "gateship-checks-only-at-new-head: journal the checks-only PASS"
+printf 'Title\n\nImplemented by: m/a\n' >"$T/prbody"
+cp "$T/prbody" "$CDIR/body-before"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-checks-only-at-new-head: exit $RC"
+expect_line1 "MERGED sha=" gateship-checks-only-at-new-head
+grep -Fq "tkt-gate last passed at $A but PR head is $B; the gate did not run on the head" "$CDIR/stderr" \
+  || fail "gateship-checks-only-at-new-head: stderr misses the full-PASS drift warning: [$(cat "$CDIR/stderr")]"
+! grep -q 'Local gate: pass at' "$T/prbody" || fail "gateship-checks-only-at-new-head: checks-only PASS inserted a body line"
+cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-checks-only-at-new-head: body changed after an older full PASS"
+
+# A body line cannot hide a stale journal PASS.
+reset_stub; setup_case gateship-pass-with-body
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$OLD" || fail "gateship-pass-with-body: journal the old gate PASS"
+printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$H" >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-pass-with-body: exit $RC"
+grep -Fq "tkt-gate last passed at $OLD but PR head is $H; the gate did not run on the head (gate: bash test/gate.sh)" "$CDIR/stderr" \
+  || fail "gateship-pass-with-body: body line hid the stale PASS: [$(cat "$CDIR/stderr")]"
+[ "$(grep -c 'tkt-gate last passed at' "$CDIR/stderr")" = "1" ] || fail "gateship-pass-with-body: head-drift warning is not printed exactly once"
+! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-pass-with-body: no body edit after an older PASS"
+
+# --- body read failure only warns, and body write failure only warns ---
+reset_stub; setup_case gateship-readfail
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+READ_OLD=2222222222222222222222222222222222222222
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$READ_OLD" || fail "gateship-readfail: journal the old gate PASS"
+: >"$T/body-read-fail"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-readfail: exit $RC"
+grep -q 'cannot read PR 7 body; skipping the Local gate check' "$CDIR/stderr" || fail "gateship-readfail: missing read warning: [$(cat "$CDIR/stderr")]"
+grep -Fq "tkt-gate last passed at $READ_OLD but PR head is $H; the gate did not run on the head (gate: bash test/gate.sh)" "$CDIR/stderr" \
+  || fail "gateship-readfail: body read failure hid the journal PASS warning: [$(cat "$CDIR/stderr")]"
+[ "$(grep -c 'tkt-gate last passed at' "$CDIR/stderr")" = "1" ] || fail "gateship-readfail: head-drift warning is not printed exactly once"
+! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-readfail: no edit after a failed body read"
+
+reset_stub; setup_case gateship-writefail
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "gateship-writefail: journal the gate PASS"
+printf 'Title\n' >"$T/prbody"
+cp "$T/prbody" "$CDIR/body-before"
+: >"$T/body-write-fail"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-writefail: exit $RC"
+grep -q 'cannot update PR 7 body; leaving it unchanged' "$CDIR/stderr" || fail "gateship-writefail: missing write warning: [$(cat "$CDIR/stderr")]"
+cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-writefail: body changed despite edit failure"
 
 echo "tkt-ship: all cases passed"

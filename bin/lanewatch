@@ -40,7 +40,14 @@ case $interval in
     exit 2
     ;;
 esac
-here=$(cd "$(dirname "$0")" && pwd)
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+here="$(cd "$(dirname "$script_path")" && pwd)"
 label=local
 [ -z "$target" ] || label=$target
 seen=

@@ -15,17 +15,23 @@ trap 'rm -rf "$T"' EXIT
 
 # Fixture repo: two commits. BASE1 has no src/later.rs; BASE2 (HEAD) has it.
 R="$T/repo"
-mkdir -p "$R/src" "$R/docs" "$R/crates/a" "$R/crates/b" "$R/cfg" "$T/empty"
+mkdir -p "$R/src" "$R/docs" "$R/crates/a" "$R/crates/b" "$R/cfg" "$R/xtask/tests/class_data" "$T/empty"
 printf 'pub fn make_widget() {}\npub struct WidgetThing;\n' >"$R/src/lib.rs"
+mkdir -p "$R/crates/tui/src"
+printf 'pub fn tui_marker() {}\n' >"$R/crates/tui/src/marker.rs"
 printf '# guide\n' >"$R/docs/guide.md"
+printf 'license\n' >"$R/LICENSE"
 printf 'a\n' >"$R/crates/a/x.rs"
 printf 'b\n' >"$R/crates/b/x.rs"
 printf 'x = 1\n' >"$R/cfg/unique.toml"
+printf '{}\n' >"$R/xtask/tests/class_data/9v45-session-list.json"
 git -C "$R" init -q
 git -C "$R" add -A
 git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m one
 BASE1="$(git -C "$R" rev-parse HEAD)"
 printf 'later\n' >"$R/src/later.rs"
+printf 'make_widget();\nWidgetThing;\n' >"$R/src/caller.rs"
+printf 'all:\n\t@true\n' >"$R/Makefile"
 git -C "$R" add -A
 git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m two
 BASE2="$(git -C "$R" rev-parse HEAD)"
@@ -70,12 +76,90 @@ expect_code() {
 clean="$(mkplan clean '## Files\n- `src/lib.rs`\n- `cfg/unique.toml`\n\n## Rulings\nKeep `docs/guide.md` and call `make_widget()` on `WidgetThing`.\n\n## Tasks\n1. Edit `src/lib.rs:1-2` and `unique.toml`.\n')"
 expect_clean "clean plan" "$clean"
 
+# Citations check the symbol at the base, including a single line and a range.
+expect_clean "symbol at cited line" "$(mkplan citeok '## Files\n- `src/lib.rs`\n\n## Rulings\n`make_widget()` at `src/lib.rs:1`.\n`src/lib.rs:1-2` holds `WidgetThing`.\n')"
+expect_problems "symbol absent from cited line" "$(mkplan citebad '## Rulings\n`make_widget()` at `src/lib.rs:2`.\n')" \
+  'missing symbol: src/lib.rs:2 does not contain make_widget(): correct the citation'
+expect_problems "symbol absent from cited range" "$(mkplan rangebad '## Rulings\n`src/lib.rs:1-2` holds `MissingThing`.\n')" \
+  'missing symbol: src/lib.rs:1-2 does not contain MissingThing: correct the citation'
+
+expect_clean "two adjacent citation pairs" "$(mkplan citepairs '## Rulings\n`make_widget()` at `src/lib.rs:1` and `WidgetThing` at `src/lib.rs:2`.\n')"
+printf 'changed working tree\n' >"$R/src/lib.rs"
+expect_clean "citations read the base" "$(mkplan citebase '## Rulings\n`make_widget()` at `src/lib.rs:1`.\n')"
+git -C "$R" checkout -q -- src/lib.rs
+
+# Quoted doc sections must be actual headings, not just text in the file.
+expect_clean "doc heading exists" "$(mkplan headingok '## Rulings\nSee `docs/guide.md`, "guide".\n')"
+expect_problems "doc heading missing" "$(mkplan headingbad '## Rulings\nSee `docs/guide.md`, "Order".\n')" \
+  'missing heading: docs/guide.md, "Order": correct the citation'
+
+# Changed symbols expose sites outside Files as warnings, never errors.
+run "$(mkplan sweep '## Files\n- `src/lib.rs::make_widget`\n\n## Tasks\nChange `WidgetThing` in `src/lib.rs`.\n')" --cwd "$R"
+[ "$code" = 0 ] || fail "completeness warning exits 0, got $code"
+[ -z "$out" ] || fail "completeness warning is not an error"
+grep -Fq 'warning: make_widget occurs outside Files: src/caller.rs' "$T/err.txt" || fail "warning names call site"
+grep -Fq 'warning: WidgetThing occurs outside Files: src/caller.rs' "$T/err.txt" || fail "warning names construction site"
+run "$(mkplan fileentrysym '## Files\n- `src/lib.rs` `WidgetThing`\n')" --cwd "$R"
+[ "$code" = 0 ] || fail "later symbol-shaped Files token exits 0, got $code [$out]"
+[ -z "$out" ] || fail "later symbol-shaped Files token is not a missing path"
+grep -Fq 'warning: WidgetThing occurs outside Files: src/caller.rs' "$T/err.txt" || fail "later Files symbol still feeds the symbol sweep"
+expect_clean "Files cover suppresses warning" "$(mkplan sweeppass '## Files\n- `src/`\n\n## Tasks\nChange `WidgetThing` in `src/lib.rs`.\n')"
+run "$(mkplan sweepfail '## Files\n- `src/lib.rs::make_widget`\n\n## Rulings\nSee `src/nope.rs`.\n')" --cwd "$R"
+[ "$code" = 1 ] || fail "completeness warning preserves error exit"
+grep -Fq 'warning: make_widget occurs outside Files: src/caller.rs' "$T/err.txt" || fail "warning accompanies error"
+
 # 2. a missing path outside Files
 expect_problems "missing path" "$(mkplan missing '## Rulings\nSee `src/nope.rs`.\n')" \
   'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 3. a path on a line with the word new is exempt; a task line needs new too
+expect_problems "symbol-shaped Files entry is missing" "$(mkplan filesym '## Files\n- `feed_row`\n')" 'missing path: feed_row (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
+expect_clean "LICENSE Files entry resolves" "$(mkplan license '## Files\n- `LICENSE`\n')"
+expect_clean "Makefile Files entry resolves" "$(mkplan makefile '## Files\n- `Makefile`\n')"
+make_absent="$T/make-absent.md"
+printf '# Plan: #1 test\nBase: %s\n\n## Files\n- `Makefile`\n' "$BASE1" >"$make_absent"
+expect_problems "missing Makefile Files entry" "$make_absent" 'missing path: Makefile (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
+expect_problems "new symbol-shaped Files entry needs a path" "$(mkplan newfeed '## Files\n- `feed_row` (new)\n')" 'new Files entry feed_row must contain a slash or dot and cannot start with ./: give the full path'
+expect_problems "new Files entry rejects a dot-slash path" "$(mkplan newdot '## Files\n- `./feed_row.rs` (new)\n')" 'new Files entry ./feed_row.rs must contain a slash or dot and cannot start with ./: give the full path'
+expect_clean "new root Files path with extension passes" "$(mkplan newroot '## Files\n- `foo.rs` (new)\n')"
+expect_clean "new Files path with a base parent resolves" "$(mkplan newpath '## Files\n- `crates/tui/src/feed_row.rs` (new)\n')"
+expect_problems "new Files path needs a parent on the base" "$(mkplan newparent '## Files\n- `crates/tui/src/nosuchdir/x.rs` (new)\n')" 'new Files entry crates/tui/src/nosuchdir/x.rs needs a parent directory on the base: give the full path, or, for a file in a new directory, mark it (new-confirmed)'
+make_confirmed="$T/make-confirmed.md"
+printf '# Plan: #1 test\nBase: %s\n\n## Files\n- `Makefile` (new-confirmed)\n' "$BASE1" >"$make_confirmed"
+newcrate_confirmed="$(mkplan newcrateconfirmed '## Files\n- `crates/newcrate/src/lib.rs` (new-confirmed)\n')"
+expect_clean "new-confirmed path under a new directory passes" "$newcrate_confirmed"
+expect_problems "new-confirmed feed_row needs a path" "$(mkplan feedconfirmed '## Files\n- `feed_row` (new-confirmed)\n')" 'new Files entry feed_row must contain a slash or dot and cannot start with ./: give the full path'
+expect_problems "new-confirmed Makefile needs a path" "$make_confirmed" 'new Files entry Makefile must contain a slash or dot and cannot start with ./: give the full path'
+expect_problems "symbol-shaped Files table entry is missing" "$(mkplan tablefeed '## Files\n| `feed_row` | write |\n')" 'missing path: feed_row (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
+claim_remote="$T/file-claim.git"
+git init --bare -q "$claim_remote"
+git -C "$R" push -q "$claim_remote" "$BASE2:refs/heads/main"
+mkdir -p "$T/stubbin"
+cat >"$T/stubbin/gh" <<'STUB_EOF'
+#!/usr/bin/env bash
+[ "$1" = "pr" ] && [ "$2" = "list" ] && { printf '[]'; exit 0; }
+exit 1
+STUB_EOF
+chmod +x "$T/stubbin/gh"
+claim_out="$(PATH="$T/stubbin:$PATH" FILE_CLAIM_REMOTE="$claim_remote" bash "$SCRIPT_DIR/../bin/file-claim" claim --lane fiber-1243 --plan-file "$newcrate_confirmed" --repo test/repo --worktree test:plan-check 2>"$T/claim.err")"; claim_code=$?
+[ "$claim_code" = 0 ] || fail "file-claim --plan-file accepts newcrate path, got $claim_code [$(cat "$T/claim.err")]"
+case "$claim_out" in *"GRANT crates/newcrate/src/lib.rs new"*) ;; *) fail "file-claim --plan-file claims newcrate path: $claim_out" ;; esac
+claim_blob="$(git --git-dir="$claim_remote" show refs/claims/live:claims)"
+case "$claim_blob" in *$'crates/newcrate/src/lib.rs\tfiber-1243\tplan\t'*) ;; *) fail "claims ref contains newcrate path" ;; esac
 expect_clean "new exempts a Files path and its task line" "$(mkplan newok '## Files\n- `src/brand.rs` (New file)\n\n## Tasks\n1. Write new `src/brand.rs` with `WidgetThing`.\n')"
+
+# 3b. new paths close to a base filename need confirmation; new-confirmed bypasses it
+expect_problems "new path close to a base filename" "$(mkplan nearnew '## Files\n- `xtask/tests/class_data/9v45-sessions-list.json` (new)\n')" \
+  'new path xtask/tests/class_data/9v45-sessions-list.json is close to existing xtask/tests/class_data/9v45-session-list.json: confirm new, or correct it'
+expect_clean "new-confirmed path close to a base filename" "$(mkplan nearconfirmed '## Files\n- `xtask/tests/class_data/9v45-sessions-list.json` (new-confirmed)\n')"
+expect_clean "new path without a close base filename" "$(mkplan farnew '## Files\n- `src/brand.rs` (new)\n')"
+expect_problems "new path already exists at base" "$(mkplan existingnew '## Files\n- `src/lib.rs` (new)\n')" \
+  'new path src/lib.rs already exists at base: drop the new mark'
+expect_clean "backticked new does not mark an existing Files path" "$(mkplan backtickednew '## Files\n- `src/lib.rs`: set in `fn new`\n')"
+expect_problems "bare new still marks an existing Files path" "$(mkplan bareexistingnew '## Files\n- `src/lib.rs`: set in `fn new` (new)\n')" \
+  'new path src/lib.rs already exists at base: drop the new mark'
+expect_problems "backticked delete does not exempt a missing Files path" "$(mkplan backtickeddelete '## Files\n- `src/nope.rs`: call `delete`\n')" \
+  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 3a. a new task path that is not in Files is still checked by check 2
 expect_problems "new task path outside Files" "$(mkplan newout '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Create new `bin/brand-new-check`.\n')" \
@@ -131,8 +215,10 @@ expect_problems "braces: each alternative checked" "$(mkplan braces '## Files\n-
 expect_problems "braces: an alternative outside Files" "$(mkplan bouts '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/{lib,later}.rs`.\n')" \
   'outside Files: src/later.rs (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
-# 11d. path::symbol rule: the path half is checked, the symbol half is ignored
-expect_clean "path::symbol: symbol half ignored" "$(mkplan split1 '## Rulings\n`src/lib.rs::make_widget` and `src/lib.rs::NoSuch`.\n')"
+# 11d. path::symbol checks both halves.
+expect_clean "path::symbol exists" "$(mkplan splitok '## Rulings\n`src/lib.rs::make_widget`.\n')"
+expect_problems "path::symbol missing" "$(mkplan split1 '## Rulings\n`src/lib.rs::NoSuch`.\n')" \
+  'missing symbol: src/lib.rs::NoSuch does not contain NoSuch: correct the citation'
 expect_problems "path::symbol: missing path" "$(mkplan split2 '## Rulings\n`src/nope.rs::make_widget`.\n')" \
   'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
@@ -196,6 +282,20 @@ case "$out" in *"(reads)"*) ;; *) fail "outside Files names (reads): got [$out]"
 out="$(cd "$R" && bash "$CHECK" "$clean")" || fail "default cwd exits 0"
 [ -z "$out" ] || fail "default cwd prints nothing"
 
+# 13b. without --cwd, a plan file inside a checkout uses that checkout,
+# even when run from a directory that is not a git checkout (issue #1083)
+cp "$clean" "$R/plan-in-repo.md"
+out="$(cd "$T/empty" && bash "$CHECK" "$R/plan-in-repo.md" 2>"$T/err-13b.txt")"; code=$?
+[ "$code" = 0 ] || fail "plan in a checkout without --cwd exits 0, got $code [$out]"
+[ -z "$out" ] || fail "plan in a checkout without --cwd prints nothing"
+[ ! -s "$T/err-13b.txt" ] || fail "plan in a checkout without --cwd: nothing on stderr"
+# a plan file outside any checkout still fails naming --cwd
+printf '# Plan: #1 test\nBase: %s\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/empty-plan.md"
+out="$(cd "$T/empty" && bash "$CHECK" "$T/empty-plan.md" 2>"$T/err-13c.txt")"; code=$?
+[ "$code" = 2 ] || fail "plan outside a checkout exits 2, got $code"
+grep -q -- "--cwd" "$T/err-13c.txt" || fail "plan outside a checkout names --cwd"
+grep -Fq 'is not a git repository; pass --cwd <worktree>' "$T/err-13c.txt" || fail "plan outside a checkout identifies the missing --cwd"
+
 # 14. exit 2: bad usage, unreadable plan, no Base line, bad REV, not a repo
 expect_code "no args" 2
 expect_code "-h" 2 -h
@@ -226,5 +326,20 @@ out="$(bash "$T/nolib/plan-check" "$clean" --cwd "$R" 2>"$T/err.txt")"; code=$?
 [ "$code" = 2 ] || fail "missing lib exits 2, got $code"
 [ -z "$out" ] || fail "missing lib: nothing on stdout"
 grep -q "lib/plan-tokens.sh" "$T/err.txt" || fail "missing lib: stderr names lib/plan-tokens.sh"
+
+# 16. Outcome: measurement and Outcome: pr pass; any other value fails
+printf '# Plan: #1 test\nBase: %s\nOutcome: measurement\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-measure.md"
+expect_clean "Outcome measurement passes" "$T/outcome-measure.md"
+printf '# Plan: #1 test\nBase: %s\nOutcome: pr\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-pr.md"
+expect_clean "Outcome pr passes" "$T/outcome-pr.md"
+printf '# Plan: #1 test\nBase: %s\nOutcome: other\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-other.md"
+expect_problems "Outcome other fails" "$T/outcome-other.md" \
+  'bad Outcome: other (line 3): write Outcome: pr or Outcome: measurement'
+printf '# Plan: #1 test\nBase: %s\nOutcome: \n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-blank.md"
+expect_problems "blank Outcome fails" "$T/outcome-blank.md" \
+  'bad Outcome:  (line 3): write Outcome: pr or Outcome: measurement'
+printf '# Plan: #1 test\nBase: %s\nOutcome:\n\n## Files\n- `src/lib.rs`\n' "$BASE2" >"$T/outcome-bare.md"
+expect_problems "bare Outcome fails" "$T/outcome-bare.md" \
+  'bad Outcome:  (line 3): write Outcome: pr or Outcome: measurement'
 
 echo "plan-check: all cases passed"

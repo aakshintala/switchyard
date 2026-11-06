@@ -20,6 +20,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] | --brief <file> | --resume <job id> --prompt <file>) [--model <id>] [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]" >&2
+  echo "If a slot has a prompt hash, a different supplied prompt requires clearing the slot or using a new one." >&2
   exit 2
 }
 
@@ -64,7 +65,14 @@ done
 { [ -z "$resume" ] || { [ -z "$template" ] && [ -z "$brief" ]; }; } || usage
 { [ "$gate_from_plan" -eq 0 ] || [ -z "$gate" ]; } || usage
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 tkt_state="$script_dir/tkt-state"
 gate_lib="$script_dir/lib/gate-script.sh"
 if [ ! -r "$gate_lib" ]; then
@@ -118,13 +126,29 @@ run="$(tkt get run)"
 worktree="$(tkt get worktree)"
 mkdir -p "$run"
 
-# A stored head the worktree left behind stops the run before it acts.
+# Writing slots build the ticket and therefore need a fence. Other slots are
+# plan work. A configured launch guard runs for either phase before dispatch.
+phase=plan
+case "$slot" in
+  lane|fix[0-9]*)
+    phase=build
+    FW_RUN="$run" "$bin_dir/fence-grant" --require "$issue" --phase "$phase" >&2
+    ;;
+esac
+# Guard output goes to stderr: tkt-job's stdout is the job's output.
+if [ -n "${TKT_LAUNCH_GUARD:-}" ]; then
+  "$TKT_LAUNCH_GUARD" "$issue" "$phase" >&2
+fi
+
+# Descendant commits can be the previous turn's work, including a BLOCKED
+# lane's commits. Only a head outside that history stops the run.
 if stored_head="$(tkt get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || {
     echo "tkt-job: cannot read worktree HEAD: $worktree" >&2
     exit 2
   }
-  if [ "$stored_head" != "$actual" ]; then
+  if [ "$stored_head" != "$actual" ] \
+    && ! git -C "$worktree" merge-base --is-ancestor "$stored_head" "$actual" 2>/dev/null; then
     echo "tkt-job: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual" >&2
     exit 3
   fi
@@ -168,38 +192,12 @@ build_gate_from_plan() {
   gate="bash $script"
 }
 
-stored="$(tkt get "job.$slot" 2>/dev/null || true)"
-fresh=0
-reused=0
-jobid=""
-
-if [ -n "$resume" ]; then
-  [ -r "$prompt" ] || {
-    echo "tkt-job: cannot read prompt: $prompt" >&2
-    exit 2
-  }
-  if [ "$gate_from_plan" -eq 1 ]; then
-    build_gate_from_plan
-  fi
-  # An empty --gate is the same as no flag: the resume inherits the stored gate.
-  gate_args=()
-  if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
-  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
-  tkt set "job.$slot" "$jobid"
-  tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"
-  fresh=1
-elif [ -n "$stored" ]; then
-  # A stored id never dispatches again: crash-reruns only watch.
-  jobid="$stored"
-  reused=1
-else
+# Prepare the current prompt only when a dispatch needs it (or when comparing a
+# supplied prompt with a stored job). Stored ids without prompt metadata retain
+# the legacy watch-only path without needing a brief.
+prepare_brief() {
   { [ -n "$template" ] || [ -n "$brief" ]; } || usage
   { [ -z "$template" ] || [ -z "$brief" ]; } || usage
-  # The gate comes from the plan before any brief is filled, so a missing
-  # plan or gateless plan reports in one line without a brief on disk.
-  if [ "$gate_from_plan" -eq 1 ]; then
-    build_gate_from_plan
-  fi
   if [ -n "$template" ]; then
     [ -r "$template" ] || {
       echo "tkt-job: cannot read template: $template" >&2
@@ -207,6 +205,7 @@ else
     }
     keys="$(grep -oE '__[A-Z][A-Z0-9_]*__' "$template" | sort -u | sed -e 's/^__//' -e 's/__$//' || true)"
     args=()
+    missing=""
     for k in $keys; do
       v=""
       found=0
@@ -248,11 +247,15 @@ else
         fi
       fi
       if [ "$found" -eq 0 ]; then
-        echo "tkt-job: template needs $k: no flag and no state value" >&2
-        exit 2
+        if [ -z "$missing" ]; then missing="$k"; else missing="$missing, $k"; fi
+        continue
       fi
       args+=("$k=$v")
     done
+    if [ -n "$missing" ]; then
+      echo "tkt-job: template needs $missing: no flag and no state value" >&2
+      exit 2
+    fi
     # Only keys the template names reach fill-brief; stray flags stay out.
     k=1
     while [ -e "$run/$namebase-$slot-$k.md" ]; do
@@ -266,16 +269,65 @@ else
       exit 2
     }
   fi
+}
+
+stored="$(tkt get "job.$slot" 2>/dev/null || true)"
+stored_prompt_hash=""
+if [ -n "$stored" ] && [ -z "$resume" ]; then
+  stored_prompt_hash="$(tkt get "job.$slot.prompt" 2>/dev/null || true)"
+  if [ -n "$stored_prompt_hash" ] && { [ -n "$template" ] || [ -n "$brief" ]; }; then
+    prepare_brief
+    prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
+    if [ "$prompt_hash" != "$stored_prompt_hash" ]; then
+      echo "ERROR slot $slot holds job $stored from a different prompt; clear it (tkt-state $state set job.$slot '') or use a new slot" >&2
+      exit 2
+    fi
+  fi
+fi
+fresh=0
+reused=0
+jobid=""
+
+if [ -n "$resume" ]; then
+  [ -r "$prompt" ] || {
+    echo "tkt-job: cannot read prompt: $prompt" >&2
+    exit 2
+  }
+  if [ "$gate_from_plan" -eq 1 ]; then
+    build_gate_from_plan
+  fi
+  # An empty --gate is the same as no flag: the resume inherits the stored gate.
+  gate_args=()
+  if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
+  prompt_hash="$(shasum -a 256 <"$prompt" | awk '{print $1}')"
+  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
+  tkt set "job.$slot" "$jobid"
+  tkt set "job.$slot.prompt" "$prompt_hash"
+  tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"
+  fresh=1
+elif [ -n "$stored" ]; then
+  # A stored id never dispatches again: a matching or legacy prompt only watches.
+  jobid="$stored"
+  reused=1
+else
+  # The gate comes from the plan before any brief is filled, so a missing
+  # plan or gateless plan reports in one line without a brief on disk.
+  if [ "$gate_from_plan" -eq 1 ]; then
+    build_gate_from_plan
+  fi
+  prepare_brief
+  prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
   if [ -z "$model" ]; then
     model="$(tkt get "model.$slot" 2>/dev/null)" || {
       echo "tkt-job: missing key: model.$slot (no --model and no state model.$slot)" >&2
       exit 2
     }
   fi
-  # Muse's tool-idle limit is also its whole-run wall cap (30 min by default), and it bounds the job-end gate.
-  # Muse reports no running_tool phase, so a silent bash call gets the 30 min --idle-ms window instead.
-  tool_idle=()
-  case "$model" in muse/*) tool_idle=(--tool-idle-ms 7200000 --idle-ms 1800000) ;; esac
+  # The tool-idle window (30 min by default) bounds one silent tool call and the job-end gate, on every
+  # model: a full gate on a loaded box can run past 30 min, so every job gets 2 h. For muse it is also
+  # the whole-run wall cap. Muse reports no running_tool phase, so a silent bash call gets --idle-ms instead.
+  tool_idle=(--tool-idle-ms 7200000)
+  case "$model" in muse/*) tool_idle+=(--idle-ms 1800000) ;; esac
   # Only a Verifier gets a wall cap: a lane legitimately runs for hours.
   wall=()
   case "$slot" in verifier-r*) wall=(--wall-ms 10800000) ;; esac
@@ -283,6 +335,7 @@ else
   if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
   jobid="$("$delegate" run --model "$model" --cwd "$worktree" ${gate_args[@]+"${gate_args[@]}"} ${tool_idle[@]+"${tool_idle[@]}"} ${wall[@]+"${wall[@]}"} --prompt-file "$brief" | head -n 1)"
   tkt set "job.$slot" "$jobid"
+  tkt set "job.$slot.prompt" "$prompt_hash"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid"
   fresh=1
 fi
@@ -445,15 +498,25 @@ $(tail -n "$take" <<<"$text")"
   fi
 fi
 
+twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
 if [ "$reused" -eq 1 ]; then
   verdict="$verdict reused=$jobid"
+  current_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || printf 'nohead')"
+  if [ -n "${head_after:-}" ] && [ "$head_after" != "$current_head" ]; then
+    verdict="$verdict stale-head=$head_after now=$twelve"
+  fi
   case "$verdict" in
     ASK*) digest="hint: this job asked and has finished; a rerun only re-watches it. Answer with: tkt-job $state --slot $slot --resume $jobid --prompt <file>
 $digest" ;;
+    *)
+      if [ "$ec" -ne 0 ]; then
+        digest="hint: this job has finished; a rerun only re-watches it. This verdict is about ${head_after:-unknown}, you are on $twelve; clear the slot with: tkt-state $state set job.$slot ''; journal the reason and re-dispatch.
+$digest"
+      fi
+      ;;
   esac
 fi
 
-twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
 logpath="$run/$namebase-tkt-job-$twelve-$(date +%H%M%S).log"
 output="TKT tkt-job $verdict log=$logpath
 $digest"

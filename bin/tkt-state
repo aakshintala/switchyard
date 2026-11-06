@@ -13,7 +13,7 @@
 # The file is never sourced. Every write takes a persistent flock and a mkdir
 # lock, goes through a temp file in the target's directory, then moves into
 # place. Exit 0 when ok; exit 2 on bad usage, a missing key, a value holding
-# a newline, or a held lock.
+# a newline, a commit SHA that is not 40 hex characters, or a held lock.
 set -euo pipefail
 
 locked=0
@@ -71,6 +71,33 @@ reject_newline() {
   esac
 }
 
+# The one list of keys holding a commit SHA. A stored commit is compared
+# verbatim against the worktree HEAD or a recorded base, so it must be a
+# full 40-hex SHA; anything else would surface later as bogus drift instead
+# of naming the bad write. Keys in reset_keys may also be cleared to empty,
+# which is how callers reset them.
+commit_keys="head plan_verdict_base verified_base review_head reviewed"
+reset_keys="plan_verdict_base verified_base"
+
+# A stored commit must be a full 40-hex SHA; an empty value is accepted only
+# for keys whose callers write empty to reset them.
+check_commit() {
+  for commit_key in $commit_keys; do
+    [ "$commit_key" = "$1" ] || continue
+    for reset_key in $reset_keys; do
+      [ "$reset_key" = "$1" ] && [ -z "$2" ] && return 0
+    done
+    if [ "${#2}" = "40" ]; then
+      case "$2" in
+        *[!0-9a-fA-F]*) ;;
+        *) return 0 ;;
+      esac
+    fi
+    echo "tkt-state: invalid $1: expected 40 hex characters" >&2
+    exit 2
+  done
+}
+
 # Split a state line into prefix/rest at the first =; a line without = holds
 # no value. Globals: prefix, rest.
 split_line() {
@@ -107,11 +134,18 @@ state_list() {
   return 0
 }
 
-# Writes retry held locks up to 10 times by default and reap dead owners on
-# this host only. A held lock exits 2 naming its pid; only our lock is removed.
+# Writes wait up to TKT_STATE_LOCK_WAIT seconds (default 30) for a live
+# holder and reap dead owners on this host only. A lock held past the bound
+# exits 2 naming its pid; only our lock is removed.
 take_lock() {
-  tries="${TKT_STATE_TEST_LOCK_TRIES:-10}"
   lock_sleep="${TKT_STATE_TEST_LOCK_SLEEP:-0.2}"
+  tries="${TKT_STATE_TEST_LOCK_TRIES:-}"
+  if [ -z "$tries" ]; then
+    # The retry count covers the wait bound at the retry sleep interval.
+    wait_bound="${TKT_STATE_LOCK_WAIT:-30}"
+    case "$wait_bound" in ""|*[!0-9]*) wait_bound=30 ;; esac
+    tries="$(awk -v w="$wait_bound" -v s="$lock_sleep" 'BEGIN { if (s <= 0) s = 0.2; t = w / s; n = int(t); if (t > n) n++; if (n < 1) n = 1; print n }')"
+  fi
   host="$(hostname)"
   attempt=1
   stale_lock_not_removed=0
@@ -211,6 +245,17 @@ stage() {
   fi
 }
 
+# Append one timestamped line to the sibling journal. Globals: tmpfile.
+append_journal_line() {
+  local line="$1" journal_path stamp
+  journal_path="${state%.state}.journal"
+  stage "$journal_path"
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s %s\n' "$stamp" "$line" >>"$tmpfile"
+  mv "$tmpfile" "$journal_path"
+  tmpfile=""
+}
+
 case "$cmd" in
   get)
     [ $# -eq 1 ] || usage
@@ -231,7 +276,12 @@ case "$cmd" in
     [ $# -eq 2 ] || usage
     check_key "$1"
     reject_newline "$2"
+    check_commit "$1" "$2"
     take_lock
+    old_head="<none>"
+    if [ "$1" = "head" ]; then
+      if old_head="$(state_get head 2>/dev/null)"; then :; else old_head="<none>"; fi
+    fi
     stage "$state"
     keptfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
     while IFS= read -r line || [ -n "$line" ]; do
@@ -245,11 +295,15 @@ case "$cmd" in
     keptfile=""
     rm -f "$tmpfile"
     tmpfile=""
+    if [ "$1" = "head" ] && [ "$old_head" != "$2" ]; then
+      append_journal_line "head $old_head -> $2"
+    fi
     ;;
   add)
     [ $# -eq 2 ] || usage
     check_key "$1"
     reject_newline "$2"
+    check_commit "$1" "$2"
     take_lock
     stage "$state"
     printf '%s=%s\n' "$1" "$2" >>"$tmpfile"
@@ -260,12 +314,7 @@ case "$cmd" in
     [ $# -eq 1 ] || usage
     reject_newline "$1"
     take_lock
-    journal="${state%.state}.journal"
-    stage "$journal"
-    stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf '%s %s\n' "$stamp" "$1" >>"$tmpfile"
-    mv "$tmpfile" "$journal"
-    tmpfile=""
+    append_journal_line "$1"
     ;;
   require)
     [ $# -ge 1 ] || usage

@@ -15,7 +15,31 @@ fail() {
 }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-inbox.XXXXXX")"
-trap 'rm -rf "$T"' EXIT
+trap 'rm -rf "$T" "${RULINGBOX:-}"' EXIT
+T="$(cd "$T" && pwd -P)"
+
+# A bare directory is ambiguous: refuse it without creating an inbox, and
+# explain the explicit local and remote forms. ./ makes local intent clear.
+for dir in 4075 inbox; do
+  (cd "$T" && printf 'misdelivery' | INBOX_HOST= bash "$SEND" "$dir" lane) \
+    >"$T/bare.out" 2>"$T/bare.err"; rc=$?
+  [ "$rc" = "2" ] || fail "bare dir [$dir] exits 2 (got $rc)"
+  [ ! -e "$T/$dir" ] || fail "bare dir [$dir] creates no inbox"
+  [ ! -s "$T/bare.out" ] || fail "bare dir [$dir] prints no delivered path"
+  grep -Fq "./$dir" "$T/bare.err" || fail "bare dir error names the explicit local form"
+  grep -Fq 'INBOX_HOST=' "$T/bare.err" || fail "bare dir error names the remote host"
+  grep -Fq "~/lane-inbox/$dir" "$T/bare.err" || fail "bare dir error names the remote inbox"
+done
+(cd "$T" && printf 'local message' | INBOX_HOST= bash "$SEND" ./4075 lane) \
+  >"$T/local.out" || fail "explicit relative inbox is accepted"
+local_path="$(cat "$T/local.out")"
+case "$local_path" in
+  /*) ;;
+  *) fail "explicit relative inbox prints an absolute path: [$local_path]" ;;
+esac
+[ -f "$local_path" ] || fail "explicit relative inbox prints an existing file"
+[ "$(cat "$local_path")" = 'local message' ] \
+  || fail "explicit relative inbox receives the message"
 
 # Stub sleep first on PATH, in a PATH that holds no inotifywait, so
 # inbox-wait always takes its sleep branch and every pause is
@@ -266,6 +290,60 @@ printf '%s\n' "$dout2" | grep -q 'late arrival' \
   || fail "next drain prints the late message: [$dout2]"
 [ "$(find "$LBOX" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "0" ] \
   || fail "next drain moves the late file"
+
+# A ruling request is copied into open/ and counted while its original is
+# archived; a later message with the same id closes the copy into done/.
+RULINGBOX="$(mktemp -d "${TMPDIR:-/tmp}/test-inbox-rulings.XXXXXX")"
+request_path="$(printf 'RULING? RULING-974-1\nPlease rule on this.\n' | bash "$SEND" "$RULINGBOX" lane)"
+request_name="$(basename "$request_path")"
+dout="$(bash "$DRAIN" "$RULINGBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "drain with a ruling request exits 0 (got $rc)"
+printf '%s\n' "$dout" | grep -Fq 'open rulings: 1' \
+  || fail "drain counts the opened ruling: [$dout]"
+[ -f "$RULINGBOX/open/RULING-974-1.md" ] \
+  || fail "ruling request is copied to open/"
+[ -f "$RULINGBOX/read/$request_name" ] \
+  || fail "ruling request original is archived in read/"
+cmp -s "$RULINGBOX/read/$request_name" "$RULINGBOX/open/RULING-974-1.md" \
+  || fail "open ruling copy preserves the original message"
+
+printf 'RULING? RULING-974-2\nSecond question.\n' | bash "$SEND" "$RULINGBOX" lane >/dev/null
+cout="$(bash "$DRAIN" "$RULINGBOX" --count)"; rc=$?
+[ "$rc" = "0" ] || fail "drain --count with an open ruling exits 0 (got $rc)"
+printf '%s\n' "$cout" | grep -Fq 'open rulings: 1' \
+  || fail "drain --count reports existing open rulings: [$cout]"
+[ "$(find "$RULINGBOX" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')" = "1" ] \
+  || fail "drain --count leaves its request unread"
+
+closing_path="$(printf 'RULING-974-1 The decision is approved.\n' | bash "$SEND" "$RULINGBOX" lane)"
+closing_name="$(basename "$closing_path")"
+dout="$(bash "$DRAIN" "$RULINGBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "drain with a closing ruling exits 0 (got $rc)"
+[ -f "$RULINGBOX/open/done/RULING-974-1.md" ] \
+  || fail "closing message moves the open copy to done/"
+[ ! -e "$RULINGBOX/open/RULING-974-1.md" ] \
+  || fail "closed ruling leaves no open copy"
+[ -f "$RULINGBOX/read/$closing_name" ] \
+  || fail "closing message original is archived in read/"
+printf '%s\n' "$dout" | grep -Fq 'open rulings: 1' \
+  || fail "drain counts the second request left open: [$dout]"
+[ -f "$RULINGBOX/open/RULING-974-2.md" ] \
+  || fail "the unread second request opens on the next drain"
+
+printf 'RULING-974-2 The second decision is approved.\n' | bash "$SEND" "$RULINGBOX" lane >/dev/null
+dout="$(bash "$DRAIN" "$RULINGBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "drain with the final closing ruling exits 0 (got $rc)"
+printf '%s\n' "$dout" | grep -Fq 'open rulings:' \
+  && fail "drain omits the count after the last open ruling closes: [$dout]"
+[ -f "$RULINGBOX/open/done/RULING-974-2.md" ] \
+  || fail "the final closing message moves its open copy to done/"
+
+# A closing id with no open copy is harmless.
+printf 'RULING-974-3 No request exists for this.\n' | bash "$SEND" "$RULINGBOX" lane >/dev/null
+dout="$(bash "$DRAIN" "$RULINGBOX")"; rc=$?
+[ "$rc" = "0" ] || fail "drain ignores a close without an open ruling (got $rc)"
+[ ! -e "$RULINGBOX/open/done/RULING-974-3.md" ] \
+  || fail "missing open ruling creates no done copy"
 
 # read/ is never listed: a drain with only archived files prints INBOX n=0.
 dout="$(bash "$DRAIN" "$LBOX")"; rc=$?

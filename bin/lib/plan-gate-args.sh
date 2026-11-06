@@ -1,8 +1,9 @@
 # plan-gate-args: the --script argument every tkt tool passes to plan-gate, so a
 # Gate line is checked against the repo's gate.script on every read, not only
 # at tkt-plan set. Sourced by bin/tkt-build, tkt-fix, tkt-gate, tkt-job and tkt-ship.
-# Source it from beside the calling script:
-#   plan_gate_lib="$(cd "$(dirname "$0")" && pwd)/lib/plan-gate-args.sh"
+# Source it from beside the calling script, with script_dir resolved through
+# symlinks as bin/fill-brief does (check-pack refuses a bare dirname "$0"):
+#   plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
 # Safe under `set -euo pipefail`.
 
 # plan_gate_args READER: set the array plan_gate_argv to (--script SCRIPT) when

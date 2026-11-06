@@ -17,7 +17,7 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-job.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/records" "$T/cases"
+mkdir -p "$T/home/.agents/bin" "$T/tmp" "$T/bin" "$T/records" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export STUB_JOBSDIR="$T/tmp/delegate-jobs"
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
@@ -27,6 +27,9 @@ unset DELEGATE_JOBS_DIR
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
 ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
+ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
+ln -s "$REAL_BIN/fence-grant" "$T/home/.agents/bin/fence-grant" || fail "symlink default fence-grant"
+unset FW_NO_FENCE TKT_LAUNCH_GUARD
 
 # Stub delegate: run/resume print a fresh job id and log the call; watch copies
 # each canned record into the jobs dir. The id counter resets per case.
@@ -127,6 +130,7 @@ setup_case() {
     printf 'head=%s\n' "$H"
     printf 'model.lane=%s\n' test-model
   } >"$S"
+  printf 'grant\n' >"$CDIR/run/fiber-502-fence-grant-test.md"
 }
 
 # Reset the stub between cases: fresh ids, an empty call log, no job records.
@@ -243,6 +247,58 @@ printf 'extra words here\n' >"$T/extra.md"
 printf 'do the thing\n' >"$T/brief.md"
 printf 'resume prompt\n' >"$T/resume-prompt.md"
 
+# --- build slots require a fence grant; non-writing slots do not ------------
+setup_case fence-required
+rm "$CDIR/run/fiber-502-fence-grant-test.md"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 2 ] || fail "lane without a fence grant exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q 'needs a fence grant' "$CDIR/stderr.txt" || fail "missing grant names the fence fix: $(cat "$CDIR/stderr.txt")"
+[ -z "$(cat "$T/stub.log")" ] || fail "lane without a fence grant never dispatches"
+
+setup_case fence-granted
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "lane with a fence grant starts (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^run|' "$T/stub.log" || fail "lane with a fence grant dispatches"
+
+setup_case plan-slot-no-fence
+rm "$CDIR/run/fiber-502-fence-grant-test.md"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 0 ] || fail "non-writing slot without a fence starts (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^run|' "$T/stub.log" || fail "non-writing slot without a fence dispatches"
+
+# --- TKT_LAUNCH_GUARD gets the issue and phase and preserves refusal stderr --
+cat >"$T/launch-guard.sh" <<'HOOK'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "$2" >"$HOOK_ARGS_FILE"
+if [ "${GUARD_EXIT:-0}" -ne 0 ]; then printf 'hook says no\n' >&2; fi
+exit "${GUARD_EXIT:-0}"
+HOOK
+chmod +x "$T/launch-guard.sh"
+
+setup_case launch-hook-refuses
+reset_stub
+HOOK_ARGS_FILE="$T/guard.args" GUARD_EXIT=1 TKT_LAUNCH_GUARD="$T/launch-guard.sh" \
+  run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 1 ] || fail "refusing launch hook exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$CDIR/stderr.txt")" = 'hook says no' ] || fail "refusing hook stderr is unchanged: $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$T/guard.args")" = '502 plan' ] || fail "non-writing hook receives issue and plan phase"
+[ -z "$(cat "$T/stub.log")" ] || fail "refusing launch hook prevents dispatch"
+
+setup_case launch-hook-allows
+reset_stub
+make_record stub-1 DONE none 0 1 0
+HOOK_ARGS_FILE="$T/guard.args" GUARD_EXIT=0 TKT_LAUNCH_GUARD="$T/launch-guard.sh" \
+  run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "passing launch hook starts the lane (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$T/guard.args")" = '502 build' ] || fail "writing hook receives issue and build phase"
+grep -q '^run|' "$T/stub.log" || fail "passing launch hook allows dispatch"
+
 # --- a failed concerns-file write stops after watch and exposes the error ---
 setup_case concerns-write-fail
 reset_stub
@@ -294,7 +350,7 @@ grep -q "DONE id=stub-1" "$CDIR/tkt.journal" || fail "DONE journals the verdict"
 # A second call re-prints the same verdict without a new dispatch.
 run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 0 ] || fail "re-print exits 0"
-expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS reused=stub-1 log=*" "re-print"
+expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS reused=stub-1 stale-head=bbbb now=* log=*" "re-print"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "re-print dispatches nothing new"
 
 # --- DONE with no gate and no commits, without --expect-commits ---
@@ -387,7 +443,7 @@ expect_verdict "TKT tkt-job ASK id=stub-1 report=result\\ line\\ 1 log=*" "ASK"
 grep -q "result line 2" <<<"$OUT" || fail "ASK digest carries the question"
 # A rerun re-watches the finished job; the digest says how to answer it.
 run_job --slot lane --template "$T/tmpl-basic.md"
-expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 log=*" "ASK rerun"
+expect_verdict "TKT tkt-job ASK id=stub-1 reused=stub-1 stale-head=bbbb now=* log=*" "ASK rerun"
 grep -q -- "--resume stub-1" <<<"$OUT" || fail "reused ASK digest names --resume"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "ASK rerun dispatches nothing new"
 cmp "$CDIR/report.md" <(jq -j -r '.result.text' "$T/tmp/delegate-jobs/stub-1.json") || fail "--out-file writes result.text in full"
@@ -399,6 +455,47 @@ make_record stub-1 BLOCKED none 0 2 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 1 ] || fail "BLOCKED exits 1"
 expect_verdict "TKT tkt-job BLOCKED id=stub-1 log=*" "BLOCKED"
+jq --arg h "$H" '.result.changeSet.headAfter = $h' "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp"
+mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json"
+run_job --slot lane
+[ "$RC" -eq 1 ] || fail "same-head BLOCKED exits 1"
+expect_verdict "TKT tkt-job BLOCKED id=stub-1 reused=stub-1 log=*" "same-head BLOCKED"
+grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "same-head BLOCKED explains slot reset"
+
+# --- reused non-zero verdicts name stale heads and explain the next step ---
+for kind in ASK BLOCKED WALL-CAP JOB-ERROR GATE-FAIL CONCERNS NO-COMMITS; do
+  setup_case "reused-$kind"
+  reset_stub
+  case "$kind" in
+    ASK) make_record stub-1 NEEDS_CONTEXT none 0 2 0 ;;
+    BLOCKED) make_record stub-1 BLOCKED none 0 2 0 ;;
+    WALL-CAP)
+      make_record stub-1 CANCELLED none 0 2 0
+      set_text stub-1 'Cancelled: wall budget of 10800000 ms exceeded' ;;
+    JOB-ERROR) make_record stub-1 ERROR none 0 2 0 ;;
+    GATE-FAIL) make_record stub-1 DONE 1 1 2 0 ;;
+    CONCERNS) make_record stub-1 DONE_WITH_CONCERNS 0 1 2 0 ;;
+    NO-COMMITS) make_record stub-1 DONE 0 0 2 0 ;;
+  esac
+  jq --arg h "$H" '.result.changeSet.headAfter = $h' "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp"
+  mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json"
+  bash "$TKT_STATE" "$S" set job.lane stub-1 || fail "seed $kind slot"
+  git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m advance
+  now="$(git -C "$WT" rev-parse --short=12 HEAD)"
+  run_job --slot lane --expect-commits
+  [ "$RC" -eq 1 ] || fail "reused $kind exits 1"
+  expect_verdict "TKT tkt-job $kind* reused=stub-1 stale-head=$H now=$now log=*" "stale $kind"
+  if [ "$kind" = ASK ]; then
+    grep -q -- '--resume stub-1' <<<"$OUT" || fail "stale ASK keeps resume hint"
+    grep -q 'clear the slot' <<<"$OUT" && fail "ASK does not suggest clearing the slot"
+  else
+    grep -Fq "This verdict is about $H, you are on $now" <<<"$OUT" || fail "$kind hint names both heads"
+    grep -Fq "tkt-state $S set job.lane ''" <<<"$OUT" || fail "$kind hint names slot reset"
+    grep -q 'journal the reason.*re-dispatch' <<<"$OUT" || fail "$kind hint explains redispatch"
+  fi
+  [ "$(bash "$TKT_STATE" "$S" get job.lane)" = stub-1 ] || fail "$kind keeps stored slot"
+  grep -q '^run|' "$T/stub.log" && fail "$kind rerun dispatches nothing new"
+done
 
 # --- DONE with no commits under --expect-commits ---
 setup_case no-commits
@@ -580,22 +677,52 @@ setup_case resume
 reset_stub
 make_record old-9 BLOCKED none 0 2 0 none stub-1
 make_record stub-1 DONE 0 1 2 0
+printf 'job.lane=%s\njob.lane.prompt=old-prompt-hash\n' old-8 >>"$S"
 run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md"
 [ "$RC" -eq 0 ] || fail "resume exits 0"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=1 gate=PASS log=*" "resume"
 grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" || fail "resume calls delegate resume"
 [ "$(bash "$TKT_STATE" "$S" get job.lane)" = "stub-1" ] || fail "resume stores the new id"
+expected_resume_hash="$(shasum -a 256 <"$T/resume-prompt.md" | awk '{print $1}')"
+[ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$expected_resume_hash" ] || fail "resume stores the new prompt hash"
 
-# --- crash-rerun: a stored live id watches only ---
+# --- a stored job refuses a prompt that differs from its dispatch -------------
+setup_case prompt-changed
+reset_stub
+make_record stub-1 DONE 0 0 1 0
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "initial prompt dispatch exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+printf 'a different prompt\n' >"$T/brief-changed.md"
+run_job --slot lane --brief "$T/brief-changed.md"
+[ "$RC" -eq 2 ] || fail "different prompt exits 2 (rc=$RC)"
+grep -Fq "ERROR slot lane holds job stub-1 from a different prompt; clear it (tkt-state $S set job.lane '') or use a new slot" "$CDIR/stderr.txt" || fail "different prompt explains how to clear or replace the slot: $(cat "$CDIR/stderr.txt")"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "different prompt dispatches no new job"
+[ "$(grep -c '^watch|' "$T/stub.log")" -eq 1 ] || fail "different prompt does not watch the old job"
+
+# --- crash-rerun: same prompt watches the stored id and does not redispatch ---
+setup_case prompt-same
+reset_stub
+make_record stub-1 DONE 0 0 1 0
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "initial same-prompt dispatch exits 0 (rc=$RC)"
+expected_prompt_hash="$(shasum -a 256 <"$T/brief.md" | awk '{print $1}')"
+[ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$expected_prompt_hash" ] || fail "fresh dispatch stores the prompt hash"
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "same-prompt rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-job DONE id=stub-1* reused=stub-1*" "same-prompt rerun"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "same-prompt rerun dispatches no new job"
+[ "$(grep -c '^watch|stub-1$' "$T/stub.log")" -eq 2 ] || fail "same-prompt rerun watches the stored id"
+
+# --- a legacy stored id without a hash keeps the old watch-only behavior ------
 setup_case rerun
 reset_stub
 make_record seeded-9 DONE 0 1 2 0
 printf 'job.lane=%s\n' seeded-9 >>"$S"
-run_job --slot lane
-[ "$RC" -eq 0 ] || fail "rerun exits 0"
-expect_verdict "TKT tkt-job DONE id=seeded-9 head=bbbb commits=1 gate=PASS reused=seeded-9 log=*" "rerun"
-grep -q "^watch|seeded-9$" "$T/stub.log" || fail "rerun watches the stored id"
-grep -q "^run|" "$T/stub.log" && fail "rerun starts no second run"
+run_job --slot lane --brief "$T/brief-changed.md"
+[ "$RC" -eq 0 ] || fail "legacy rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-job DONE id=seeded-9 head=bbbb commits=1 gate=PASS reused=seeded-9 stale-head=bbbb now=* log=*" "legacy rerun"
+grep -q "^watch|seeded-9$" "$T/stub.log" || fail "legacy rerun watches the stored id"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 0 ] || fail "legacy rerun starts no second run"
 
 # --- a supersededBy self-loop is unrecognised, never a hang ---
 setup_case cycle
@@ -613,6 +740,15 @@ run_job --slot lane --template "$T/tmpl-missing.md"
 [ "$RC" -eq 2 ] || fail "missing key exits 2"
 grep -q "NOPE" "$CDIR/stderr.txt" || fail "missing key names NOPE"
 grep -q "^run|" "$T/stub.log" && fail "missing key dispatches nothing"
+
+# --- two missing template keys exit 2 naming both on one line ---
+setup_case missing-keys
+reset_stub
+printf 'Base __BASE__ pack __PACK__\n' >"$T/tmpl-two-missing.md"
+run_job --slot lane --template "$T/tmpl-two-missing.md"
+[ "$RC" -eq 2 ] || fail "two missing keys exit 2"
+grep -q "template needs BASE, PACK:" "$CDIR/stderr.txt" || fail "two missing keys names both keys: $(cat "$CDIR/stderr.txt")"
+grep -q "^run|" "$T/stub.log" && fail "two missing keys dispatch nothing"
 
 # --- flags fill first, and only keys the template has are passed ---
 setup_case flag-wins
@@ -824,6 +960,33 @@ grep -q "424242" "$CDIR/stderr.txt" || fail "a held lock names the pid"
 grep -q "^run|" "$T/stub.log" && fail "a held lock dispatches nothing"
 rm -rf "$S.lock"
 
+# --- a BLOCKED lane's descendant commits do not prevent resuming ---
+setup_case blocked-commits-resume
+reset_stub
+make_record stub-1 BLOCKED none 2 2 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "lane stops BLOCKED"
+expect_verdict "TKT tkt-job BLOCKED id=stub-1 log=*" "lane before resume"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m partial || fail "commit partial work"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m blocked || fail "commit blocked work"
+make_record stub-2 DONE 0 1 2 0
+run_job --slot lane --resume stub-1 --prompt "$T/resume-prompt.md"
+[ "$RC" -eq 0 ] || fail "resume accepts descendant commits (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS log=*" "resumed lane"
+grep -q "^resume|id=stub-1|prompt=$T/resume-prompt.md|new=stub-2$" "$T/stub.log" || fail "descendant commits reach delegate resume"
+
+# --- a divergent worktree HEAD still refuses before dispatch ---
+setup_case divergent-head
+reset_stub
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m stored || fail "commit stored work"
+bash "$TKT_STATE" "$S" set head "$(git -C "$WT" rev-parse HEAD)" || fail "store head"
+git -C "$WT" checkout -q --detach "$H" || fail "checkout common ancestor"
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m divergent || fail "commit divergent work"
+run_job --slot lane --resume stub-1 --prompt "$T/resume-prompt.md"
+[ "$RC" -eq 3 ] || fail "divergent head exits 3"
+grep -q 'head drift' "$CDIR/stderr.txt" || fail "divergence reports head drift"
+[ ! -s "$T/stub.log" ] || fail "divergence never calls delegate"
+
 # --- head drift exits 3 naming the stored head and the worktree HEAD ---
 setup_case drift
 reset_stub
@@ -966,14 +1129,15 @@ grep -q "^run|model=muse/muse-spark-1.3-contributor|.*|gate=bash " "$T/stub.log"
 grep -qx "idle=7200000" "$T/stub.log" || fail "muse with gate passes --tool-idle-ms 7200000"
 grep -qx "idleMs=1800000" "$T/stub.log" || fail "muse with gate passes --idle-ms 1800000"
 
-# --- a non-muse model gets no tool-idle flag, gated and ungated ---
+# --- a non-muse model gets the 2-hour tool-idle limit but no idle flag, gated and ungated ---
+# The tool-idle window also bounds the job-end gate, and a full gate on a loaded box can run past 30 min.
 setup_case plain-idle-nogate
 reset_stub
 make_record stub-1 DONE none 0 1 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "non-muse without gate exits 0"
 grep -q "^run|" "$T/stub.log" || fail "non-muse without gate dispatches"
-grep -q "^idle=" "$T/stub.log" && fail "non-muse without gate passes no tool-idle flag"
+grep -qx "idle=7200000" "$T/stub.log" || fail "non-muse without gate passes --tool-idle-ms 7200000"
 grep -q "^idleMs=" "$T/stub.log" && fail "non-muse without gate passes no idle flag"
 
 setup_case plain-idle-gate
@@ -983,7 +1147,7 @@ printf 'plan=%s\n' "$T/plan-fail.md" >>"$S"
 run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
 [ "$RC" -eq 0 ] || fail "non-muse with gate exits 0"
 grep -q "gate=bash " "$T/stub.log" || fail "non-muse with gate dispatches the gate"
-grep -q "^idle=" "$T/stub.log" && fail "non-muse with gate passes no tool-idle flag"
+grep -qx "idle=7200000" "$T/stub.log" || fail "non-muse with gate passes --tool-idle-ms 7200000"
 grep -q "^idleMs=" "$T/stub.log" && fail "non-muse with gate passes no idle flag"
 
 # --- verifier-r* slots pass --wall-ms 10800000, gated and ungated ---

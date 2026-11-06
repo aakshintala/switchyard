@@ -1,5 +1,6 @@
 #!/bin/sh
-# lanestat [--all] <run-dir>: one row per live pi lane in this host's run dir.
+# lanestat [--all] [--inbox <dir>] <run-dir>: one row per live pi lane in
+# this host's run dir. With --inbox, print the open-ruling count when nonzero.
 # It stays POSIX so lanewatch can send it to `ssh bash -s` without a remote copy.
 # LANESTAT_SETTLED_MAX (seconds, default 7200) marks older SETTLED lanes
 # as SETTLED-OLD. lanewatch does not forward the variable over ssh, so remote
@@ -50,17 +51,23 @@
 set -u
 
 usage() {
-  printf 'usage: lanestat [--all] <run-dir>\n' >&2
+  printf 'usage: lanestat [--all] [--inbox <dir>] <run-dir>\n' >&2
   exit 2
 }
 
 all=
+inbox=
 run=
 while [ "$#" -gt 0 ]; do
   case $1 in
     --all)
       [ -z "$all" ] || usage
       all=--all
+      ;;
+    --inbox)
+      [ -z "$inbox" ] && [ "$#" -ge 2 ] || usage
+      inbox=$2
+      shift
       ;;
     *)
       [ -z "$run" ] || usage
@@ -454,3 +461,13 @@ for pidfile in "$run"/fiber-*-pi.pid; do
   rows=$((rows + 1))
 done
 [ "$rows" -gt 0 ] || printf 'lanestat: no live lanes in %s\n' "$run"
+if [ -n "$inbox" ]; then
+  open_ruling_count=0
+  for ruling_file in "$inbox"/open/*.md; do
+    [ -f "$ruling_file" ] || continue
+    open_ruling_count=$((open_ruling_count + 1))
+  done
+  if [ "$open_ruling_count" -gt 0 ]; then
+    printf 'open rulings: %s\n' "$open_ruling_count"
+  fi
+fi

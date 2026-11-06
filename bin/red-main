@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+# red-main --repo owner/name --inbox DIR [--state PATH] [--json]
+#
+# Detect a red main and hand real failures to flywheel. Run every 30 min
+# from cron; the detection lag is at most the cron period (30 min).
+# ci-health stays read-only: this script acts where ci-health only reports.
+#
+# Each pass handles every completed main push run of the repo since the
+# last pass that handled it (the state file records handled run IDs,
+# the reruns it did, the open handoffs and the flake sightings):
+#
+# Blocking jobs only. A run whose failed jobs are all non-blocking is
+# ignored. The blocking set is the `needs` of the run's aggregate CI job
+# read from the workflow file at the run's head SHA, never a hard-coded
+# list (the journey suite stays non-blocking until it joins the CI
+# job's needs).
+#
+# Each failed blocking job is classified the ci-triage way:
+# - infrastructure: no failing test and the failed-step log shows a
+#   runner, network or quota outage or a failed setup step. The workflow
+#   is rerun once (`gh run rerun <id> --failed`); no fix is dispatched.
+# - flake: the test passes on another main run at a later head, or it
+#   matches an open test-only flake ticket naming the full test name.
+#   A flake sighting is recorded; no fix.
+# - real: anything else. One handoff per job plus first failing test is
+#   written to flywheel's inbox (via inbox-send in this script's own
+#   directory). The handoff holds the run link, the full 40-character
+#   head SHA, the job, the first failing test (`none` when the job
+#   failed outside a test) and the failed-step log tail. An open
+#   handoff for the same key is not sent again.
+#
+# A later main run that passes a handoff's job closes that handoff.
+# Passes apply closures chronologically: a passing run closes handoffs
+# before the next run's failures are handled, so a failure observed
+# after a pass reopens a handoff instead of being lost as a duplicate.
+#
+# Exit codes: 0 no new handoff, 1 at least one handoff written,
+# 2 usage, listing error, or a run whose workflow file could not be read
+# (that run stays unhandled so a later pass retries it).
+import base64, json, os, re, subprocess, sys
+from datetime import datetime, timezone
+
+ANSI = re.compile(r"(\x1b|\^\[)\[[0-9;]*[A-Za-z]")
+TS = re.compile(r"^\S+Z ")
+NX = re.compile(r"^\s*(FAIL|TIMEOUT) \[\s*[\d.]+s\]\s+(?:\(\s*\d+/\d+\s+)?(\S+)\s+(\S+)", re.M)
+INFRA = re.compile(r"could not resolve host|failed to connect|connection reset|"
+                   r"connection refused|network (is )?unreachable|econnreset|etimedout|"
+                   r"dial tcp|socket hang up|no space left on device|quota|rate limit|"
+                   r"http 5\d\d|service unavailable|\bcurl\b|toolchain|failed to install|"
+                   r"i/o timeout|exceeded the maximum execution time|out of memory|"
+                   r"\bkilled\b", re.I)
+TAILS = 30
+FLAKE_WORD = re.compile(r"flake|flaky", re.I)
+USAGE = "usage: red-main --repo owner/name --inbox DIR [--state PATH] [--json]"
+
+
+class Fatal(Exception):
+    pass  # exit 2: usage, or gh could not list runs/jobs/issues
+
+
+class WorkflowError(Exception):
+    pass  # per-run: the workflow file could not be read; skip the run
+
+
+def fail(msg):
+    raise Fatal(msg)
+
+
+def parse_ts(s):
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def is_ci(name):
+    n = (name or "").strip().lower()
+    return n == "ci" or n.startswith("ci ") or n.startswith("ci-")
+
+
+def strip_line(line):
+    """Drop gh's `job<TAB>step<TAB>` prefix, then ANSI and the timestamp."""
+    line = ANSI.sub("", line)
+    if "\t" in line:
+        parts = line.split("\t", 2)
+        line = parts[2] if len(parts) == 3 else parts[-1]
+    return TS.sub("", line)
+
+
+def clean_lines(text):
+    return [strip_line(l) for l in text.splitlines()]
+
+
+def first_test(text):
+    m = NX.search("\n".join(clean_lines(text)))
+    return "%s %s" % (m.group(2), m.group(3)) if m else "none"
+
+
+def log_tail(text):
+    lines = [l for l in clean_lines(text)]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines[-TAILS:])
+
+
+def failed_step_names(job):
+    """Names of the job's steps whose conclusion is failure."""
+    names = set()
+    for s in job.get("steps") or []:
+        if (isinstance(s, dict) and (s.get("conclusion") or "") == "failure"
+                and s.get("name")):
+            names.add(s.get("name"))
+    return names
+
+
+def failed_step_text(raw, failed_names):
+    """Keep only lines from the failed steps, whatever gh returned."""
+    if not failed_names:
+        return raw
+    kept = []
+    for line in raw.splitlines():
+        if "\t" not in line:
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) >= 2 and parts[1] in failed_names:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def norm_test(s):
+    return re.sub(r"\s+", " ", (s or "").lower().replace("::", " ")).strip()
+
+
+def workflow_blocking(text):
+    """Blocking display names from the aggregate CI job's `needs`.
+
+    Narrow reader for that one job: find the `ci` job under `jobs:`,
+    read its `needs:` (inline `[a, b]` or a `-` block list), and map
+    need ids to display names via each job's `name:` key (else the id).
+    Return None when the file has no such job.
+    """
+    names = {}
+    needs_by_job = {}
+    in_jobs = False
+    cur = None
+    in_list = False
+    for raw in text.splitlines():
+        if re.match(r"^jobs:\s*$", raw):
+            in_jobs = True
+            continue
+        if not in_jobs:
+            continue
+        if re.match(r"^\S", raw):
+            break
+        m = re.match(r"^  ([A-Za-z0-9_.-]+):\s*$", raw)
+        if m:
+            cur = m.group(1)
+            names.setdefault(cur, None)
+            in_list = False
+            continue
+        if cur is None:
+            continue
+        m = re.match(r"^    name:\s*(.+?)\s*$", raw)
+        if m:
+            names[cur] = m.group(1).strip().strip("\"'")
+            in_list = False
+            continue
+        m = re.match(r"^    needs:\s*\[(.*)\]\s*$", raw)
+        if m:
+            needs_by_job[cur] = [n.strip().strip("\"'")
+                                 for n in m.group(1).split(",") if n.strip()]
+            in_list = False
+            continue
+        if re.match(r"^    needs:\s*$", raw):
+            needs_by_job[cur] = []
+            in_list = True
+            continue
+        m = re.match(r"^      -\s*(\S+?)\s*$", raw)
+        if m and in_list:
+            needs_by_job[cur].append(m.group(1).strip("\"'"))
+            continue
+        if re.match(r"^    \S", raw):
+            in_list = False
+    if "ci" in names:
+        ci = "ci"
+    else:
+        ci = next((j for j, n in names.items() if is_ci(n or j)), None)
+    if ci is None or ci not in needs_by_job:
+        return None
+    return {(names.get(n) or n) for n in needs_by_job[ci] if n}
+
+
+def blocking_hit(api_name, blocking):
+    """True when an API job name falls under a blocking workflow need.
+
+    A need whose `name:` holds `${{ ... }}` matches as a pattern: the
+    literal parts escaped, each expression `.+`, anchored at both ends.
+    A plain need matches its name exactly, or GitHub's default matrix
+    name `<id> (<anything>)` for a job with no `name:`.
+    """
+    name = api_name or ""
+    for b in blocking:
+        if "${{" in b:
+            parts = re.split(r"\$\{\{.*?\}\}", b)
+            if re.fullmatch(".+".join(re.escape(p) for p in parts), name):
+                return True
+        elif name == b:
+            return True
+        elif re.fullmatch(re.escape(b) + r" \(.+\)", name):
+            return True
+    return False
+
+
+def read_workflow(gh, repo, wf_path, ref):
+    """Return the workflow YAML at ref, or raise WorkflowError."""
+    path = wf_path[2:] if wf_path.startswith("./") else wf_path.lstrip("/")
+    try:
+        out = gh.api("repos/%s/contents/%s?ref=%s" % (repo, path, ref))
+    except subprocess.CalledProcessError as e:
+        raise WorkflowError("could not read %s at %s: %s" % (wf_path, ref, e))
+    try:
+        text = base64.b64decode(json.loads(out).get("content") or "").decode(
+            "utf-8", "replace")
+    except (ValueError, TypeError, AttributeError):
+        raise WorkflowError("could not decode %s at %s" % (wf_path, ref))
+    if not text.strip():
+        raise WorkflowError("empty workflow %s at %s" % (wf_path, ref))
+    return text
+
+
+class GH:
+    def api(self, path, escape=False):
+        cmd = ["gh", "api"]
+        if escape:
+            cmd.append("--allow-escape-sequences")
+        cmd.append(path)
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        if p.returncode != 0:
+            err = (p.stderr or "").strip().splitlines()
+            raise subprocess.CalledProcessError(p.returncode, cmd, p.stdout,
+                                                "\n".join(err[-3:]))
+        return p.stdout
+
+    def paged_dict(self, base, key):
+        """GET pages of {key: [...]} until short; cap 10."""
+        items = []
+        for page in range(1, 11):
+            sep = "&" if "?" in base else "?"
+            try:
+                out = self.api("%s%sper_page=100&page=%d" % (base, sep, page))
+            except subprocess.CalledProcessError as e:
+                raise e
+            try:
+                batch = json.loads(out).get(key, [])
+            except ValueError:
+                batch = None
+            if batch is None:
+                fail("could not parse %s page %d" % (base, page))
+            items.extend(batch)
+            if len(batch) < 100:
+                return items
+        return items
+
+    def issues(self, repo):
+        """Open issues as a list (the endpoint returns an array)."""
+        found = []
+        for page in range(1, 11):
+            try:
+                out = self.api("repos/%s/issues?state=open&per_page=100&page=%d"
+                               % (repo, page))
+                batch = json.loads(out)
+            except subprocess.CalledProcessError as e:
+                fail("could not list issues: %s" % e)
+            except ValueError:
+                fail("could not parse issues page %d" % page)
+            if not isinstance(batch, list):
+                fail("could not parse issues page %d" % page)
+            found.extend(batch)
+            if len(batch) < 100:
+                return found
+        return found
+
+
+def load_state(path):
+    try:
+        with open(path) as fh:
+            st = json.load(fh)
+        assert isinstance(st, dict)
+        return st
+    except (OSError, ValueError, AssertionError) as e:
+        print("red-main: state unreadable (%s), starting empty" % e, file=sys.stderr)
+        return {}
+
+
+def save_state(path, st):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp-%d" % os.getpid()
+    with open(tmp, "w") as fh:
+        json.dump(st, fh)
+    os.replace(tmp, path)
+
+
+def flake_issue_match(test, issues):
+    """True when an open test-only issue names the full test and says flake."""
+    want = norm_test(test)
+    if not want or want == "none":
+        return None
+    for iss in issues:
+        if not isinstance(iss, dict):
+            continue
+        if iss.get("state") not in (None, "open") or iss.get("closed_at"):
+            continue
+        labels = iss.get("labels") or []
+        tagged = set()
+        for lb in labels:
+            tagged.add((lb.get("name") if isinstance(lb, dict) else lb) or "")
+        if "test-only" not in {str(t).lower() for t in tagged}:
+            continue
+        combined = "%s %s" % (iss.get("title") or "", iss.get("body") or "")
+        if not FLAKE_WORD.search(combined):
+            continue
+        if want in norm_test(combined):
+            return iss.get("number")
+    return None
+
+
+def main(argv):
+    repo = "aakshintala/fiber"
+    state_path = None
+    inbox = None
+    want_json = False
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--json":
+            want_json = True
+            i += 1
+        elif a in ("--repo", "--state", "--inbox") and i + 1 < len(argv):
+            i += 1
+            if a == "--repo":
+                repo = argv[i]
+            elif a == "--state":
+                state_path = argv[i]
+            else:
+                inbox = argv[i]
+            i += 1
+        else:
+            fail("unknown or incomplete flag %r\n%s" % (a, USAGE))
+    if not re.fullmatch(r"[^/\s]+/[^/\s]+", repo):
+        fail("bad --repo %r\n%s" % (repo, USAGE))
+    if not inbox:
+        fail("missing --inbox DIR\n%s" % USAGE)
+    if not state_path:
+        state_path = os.path.join(os.path.expanduser("~"), ".cache",
+                                  "switchyard", "red-main.json")
+
+    st = load_state(state_path)
+    handled = st.get("handled_ids") if isinstance(st.get("handled_ids"), list) else []
+    handled_set = set(map(str, handled))
+    reran = st.get("reran") if isinstance(st.get("reran"), list) else []
+    open_h = st.get("open") if isinstance(st.get("open"), dict) else {}
+    sightings = st.get("sightings") if isinstance(st.get("sightings"), list) else []
+
+    gh = GH()
+    try:
+        runs = gh.paged_dict("repos/%s/actions/runs?branch=main&event=push" % repo,
+                             "workflow_runs")
+    except subprocess.CalledProcessError as e:
+        fail("could not list main runs: %s" % e)
+    runs = [r for r in runs
+            if isinstance(r, dict)
+            and (r.get("path") or "").endswith("/ci.yml")
+            and r.get("event") == "push"
+            and (r.get("head_branch") or "main") == "main"
+            and r.get("status") == "completed"]
+    runs.sort(key=lambda r: (r.get("created_at") or "", str(r.get("id"))))
+
+    new_runs = [r for r in runs if str(r.get("id")) not in handled_set]
+
+    jobs_by_run = {}
+    for r in runs:
+        rid = str(r.get("id"))
+        if rid in jobs_by_run:
+            continue
+        try:
+            jobs_by_run[rid] = gh.paged_dict(
+                "repos/%s/actions/runs/%s/jobs" % (repo, rid), "jobs")
+        except subprocess.CalledProcessError as e:
+            fail("could not list jobs for run %s: %s" % (rid, e))
+
+    wf_cache = {}
+
+    def blocking_for(r):
+        key = (r.get("path") or "", r.get("head_sha") or "")
+        if key not in wf_cache:
+            try:
+                text = read_workflow(gh, repo, r.get("path") or "",
+                                     r.get("head_sha") or "")
+            except WorkflowError as e:
+                wf_cache[key] = e
+            else:
+                blocking = workflow_blocking(text)
+                wf_cache[key] = (blocking if blocking is not None
+                                 else WorkflowError(
+                                     "no CI job with needs in %s" % key[0]))
+        v = wf_cache[key]
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    issues_cache = None
+
+    def open_issues():
+        nonlocal issues_cache
+        if issues_cache is None:
+            issues_cache = gh.issues(repo)
+        return issues_cache
+
+    def later_pass(job, created):
+        for r in runs:
+            if (r.get("status") == "completed"
+                    and parse_ts(r.get("created_at") or "")
+                    and parse_ts(created or "") and parse_ts(r.get("created_at")) > parse_ts(created)):
+                for j in jobs_by_run.get(str(r.get("id")), []):
+                    if (isinstance(j, dict) and j.get("name") == job
+                            and (j.get("conclusion") or "") == "success"):
+                        return r
+        return None
+
+    def failed_step_log(job_id):
+        try:
+            p = subprocess.run(["gh", "run", "view", "--job", str(job_id),
+                                "--log-failed", "--repo", repo],
+                               capture_output=True, text=True)
+        except OSError:
+            return ""
+        if p.returncode != 0:
+            return ""
+        return p.stdout or ""
+
+    def close_due(upto=None):
+        n = 0
+        for key in list(open_h.keys()):
+            job, at = open_h[key].get("job"), open_h[key].get("at")
+            lp = later_pass(job, at)
+            if lp is None:
+                continue
+            if upto is None or (parse_ts(lp.get("created_at") or "")
+                                and parse_ts(at or "")
+                                and parse_ts(lp.get("created_at")) <= upto):
+                del open_h[key]
+                n += 1
+                print("red-main: closed %s" % key.replace("\x1f", " "))
+        return n
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    handoffs = reruns = flakes = closed = 0
+    handled_now = []
+    errored = []
+    for r in new_runs:
+        rid, sha = str(r.get("id")), r.get("head_sha") or ""
+        jobs = [j for j in jobs_by_run.get(rid, []) if isinstance(j, dict)]
+        cands = [j for j in jobs
+                 if (j.get("conclusion") or "") == "failure"
+                 and not is_ci(j.get("name"))]
+        if cands:
+            try:
+                blocking = blocking_for(r)
+            except WorkflowError as e:
+                print("red-main: %s; leaving run %s unhandled" % (e, rid),
+                      file=sys.stderr)
+                errored.append(rid)
+                continue
+            failed = [j for j in cands if blocking_hit(j.get("name"), blocking)]
+        else:
+            failed = []
+        ts = parse_ts(r.get("created_at") or "")
+        if ts is not None:
+            closed += close_due(ts)
+        for j in failed:
+            job = j.get("name")
+            text = failed_step_text(failed_step_log(j.get("id")),
+                                    failed_step_names(j))
+            if text.strip():
+                test = first_test(text)
+                tail = log_tail(text)
+            else:
+                test, tail = "none", "(no failed-step log)"
+            if test == "none" and INFRA.search(text):
+                if rid in reran or str(r.get("id")) in reran:
+                    print("red-main: infra %s in run %s already reran" % (job, rid))
+                    continue
+                rr = subprocess.run(["gh", "run", "rerun", rid, "--failed",
+                                     "--repo", repo], capture_output=True, text=True)
+                if rr.returncode != 0:
+                    print("red-main: rerun of %s failed: %s"
+                          % (rid, (rr.stderr or "").strip().splitlines()[:1]),
+                          file=sys.stderr)
+                    continue
+                if rid not in reran:
+                    reran.append(rid)
+                reruns += 1
+                print("red-main: infra %s in run %s reran" % (job, rid))
+                continue
+            if later_pass(job, r.get("created_at")):
+                sightings.append({"job": job, "test": test, "run": rid,
+                                  "sha": sha, "kind": "retry-passed"})
+                flakes += 1
+                print("red-main: flake %s %s (passes later)" % (job, test))
+                continue
+            if test != "none":
+                match = flake_issue_match(test, open_issues())
+                if match:
+                    sightings.append({"job": job, "test": test, "run": rid,
+                                      "sha": sha, "kind": "ticket",
+                                      "issue": match})
+                    flakes += 1
+                    print("red-main: flake %s %s (issue #%s)" % (job, test, match))
+                    continue
+            key = "%s\x1f%s" % (job, test)
+            if key in open_h:
+                print("red-main: duplicate %s %s already open" % (job, test))
+                continue
+            msg = ("# red-main handoff: %s failing on main\n\n"
+                   "repo: %s\nrun: https://github.com/%s/actions/runs/%s\n"
+                   "sha: %s\njob: %s\ntest: %s\n\n"
+                   "## failed-step log tail\n%s\n"
+                   % (job, repo, repo, rid, sha, job, test, tail))
+            try:
+                p = subprocess.run([os.path.join(script_dir, "inbox-send"),
+                                    inbox, "red-main"],
+                                   input=msg, capture_output=True, text=True)
+            except OSError as e:
+                fail("could not write handoff: %s" % e)
+            if p.returncode != 0:
+                fail("could not write handoff: %s"
+                     % ((p.stderr or "").strip().splitlines()[:1]))
+            open_h[key] = {"job": job, "test": test, "run": rid,
+                           "sha": sha, "at": r.get("created_at")}
+            handoffs += 1
+            print("red-main: handoff %s %s" % (job, test))
+        handled_now.append(r.get("id"))
+
+    closed += close_due()
+
+    if handled_now:
+        seen = set(map(str, handled))
+        merged = list(handled)
+        for i in handled_now:
+            if str(i) not in seen:
+                seen.add(str(i))
+                merged.append(i)
+        st.pop("last_handled_created_at", None)
+        st.pop("last_handled_id", None)
+        window = {str(r.get("id")) for r in runs if isinstance(r, dict)}
+        kept = [i for i in merged if str(i) in window]
+        st.update({"handled_ids": kept, "reran": reran,
+                   "open": open_h, "sightings": sightings})
+        save_state(state_path, st)
+
+    out = {"handled": len(handled_now), "handoffs": handoffs, "reruns": reruns,
+           "flakes": flakes, "closed": closed, "open": len(open_h)}
+    if want_json:
+        print(json.dumps(out))
+    else:
+        print("red-main %s: %s | handled %d handoffs %d reruns %d flakes %d closed %d open %d"
+              % (repo, "HANDED OFF %d" % handoffs if handoffs else "OK",
+                 len(handled_now), handoffs, reruns, flakes, closed, len(open_h)))
+    if errored:
+        return 2
+    return 1 if handoffs else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Fatal as e:
+        print("red-main: %s" % e, file=sys.stderr)
+        sys.exit(2)

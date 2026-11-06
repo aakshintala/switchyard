@@ -69,6 +69,19 @@ out="$(bash "$CHECK" "$GOOD" 2>"$T/gooderr.txt")" || fail "good pack exits 0"
 [ -z "$out" ] || fail "good pack prints nothing: [$out]"
 [ -s "$T/gooderr.txt" ] && fail "good pack is silent on stderr"
 
+# --- bin scripts may not find their own directory through a bare dirname
+UNRESOLVED="$T/unresolved"
+mkdir -p "$UNRESOLVED/skills" "$UNRESOLVED/bin/lib"
+cat >"$UNRESOLVED/bin/lib/unresolved.sh" <<'EOF'
+#!/usr/bin/env bash
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+EOF
+out="$(bash "$CHECK" "$UNRESOLVED" 2>"$T/unresolved.err")" && fail "unresolved script directory exits 1"
+grep -q '^bin/lib/unresolved.sh:[0-9]*: .*symlink' <<<"$out" || fail "check-pack flags unresolved script directory"
+grep -q '^bin/lib/unresolved.sh:3: .*symlink' <<<"$out" || fail "check-pack flags unresolved BASH_SOURCE directory"
+[ -s "$T/unresolved.err" ] && fail "unresolved script directory is silent on stderr"
+
 # --- bad usage exits 2
 bash "$CHECK" "$T/does-not-exist" >/dev/null 2>&1; [ "$?" = "2" ] || fail "missing ROOT exits 2"
 

@@ -1,24 +1,35 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
-#        60 s for GitHub's head to match the local HEAD; require each --body-has
+#        60 s for GitHub's head to match the local HEAD; require a matching
+#        review-pr verdict for --reviewed (APPROVE on every axis, or FIX-OK from
+#        a scoped verify; --unverified-fixes permits a no-real-bug fix round after
+#        either CHANGES or FIX-INCOMPLETE); require each --body-has
 #        line and run pr-closes (see below); run --gate in the worktree on that head,
-#        once, before any rebase or push; rebase onto
-#        origin/main (see below); compare the PR diff's `git patch-id --stable` with
-#        <sha>'s (with --unverified-fixes, a mismatch posts a comment and goes on, see
+#        once, before any rebase or push; flatten commits since the merge base when
+#        the branch has merge commits, then rebase onto origin/main (see below);
+#        compare the PR diff's `git patch-id --stable` with
+#        <sha>'s, ignoring context lines (with --unverified-fixes, a mismatch posts a comment and goes on, see
 #        below); push a rebased branch with --force-with-lease; mark a draft
 #        ready (once, before the first CI wait); `gh-ci wait` (--timeout, default
 #        7200), rerunning failed jobs once when the failure is outside the diff
-#        (see below); on a non-strict base with --gate, gate the PR merged
-#        with current origin/main in a throwaway merge commit (step 7); squash-merge
+#        (see below); on a non-strict base with --gate, or --merge-check when
+#        --gate is absent, check the PR merged with current origin/main in a
+#        throwaway merge commit (step 7); squash-merge
 #        pinned to the checked head, retrying once on a base race or GraphQL error
 #        and re-entering the rebase once after the merge lost the race to
 #        origin/main in strict mode (no extra sleep, sharing the 3 retries);
-#        polling MERGED even after a failed retry; wait for MERGED; remove the worktree and the
-#        local and remote branch (the worktree and local branch stay when the
-#        caller's directory is inside it).
+#        polling MERGED even after a failed retry; wait for MERGED; by default
+#        remove the worktree and local branch by default after a merge when
+#        clean and no process has its cwd inside. Keep them when --keep-branch
+#        is set, the body says Refs #N without a closing line, the caller's cwd
+#        is inside the worktree, it is dirty, or lsof is unavailable, errors,
+#        or finds a process inside. The remote branch is still deleted.
+#        After a confirmed merge of aakshintala/switchyard, fast-forward ~/.agents
+#        only when it is on main with no tracked changes or local commits; untracked
+#        files are allowed. If skipped, print its lag and leave the merge successful.
 #        The CI wait trusts the repo's required checks: one green on the exact
 #        head counts whenever it ran, so marking ready need not start a new run,
 #        and a run that starts after the wait passed does not hold the merge. An
@@ -40,13 +51,17 @@
 #        `Review round closed` (the review record; other comments are not read) are
 #        scanned for authority claims: a line with
 #        `per the ruling`, `owner ruled`, `approved by` or similar, outside code spans,
-#        fenced blocks and `>` quotes, must cite #<n>, a URL or <doc>:<line> on the same
-#        line, else it prints `uncited authority: <line>` and exits 5.
+#        fenced blocks and `>` quotes, must cite #<n>, a URL or <doc>:<line> on the same line,
+#        or in the same bullet, as the claim, else it prints `uncited authority: <line>` and exits 5.
 #        When the repo defines a `mutants` label (`gh label list`), a draft PR
 #        must carry it before ship-pr marks it ready, so mutants run on the
 #        draft from the first push; a repo without the label is not checked,
 #        and neither is a PR that is already ready. A draft without the label
-#        exits 5. --no-mutants-label <reason> skips the check and prints the reason.
+#        exits 5. --no-mutants-label <reason> skips this legacy check and prints
+#        the reason; --mutants-gate still requires its label or completed-run proof.
+#        --mutants-gate opts in to requiring a draft's `mutants` label or a
+#        completed run on the pinned head whose Selection job log contains
+#        `mutants in the diff: 0`; an in-progress or absent run fails before ready.
 #        Step 2 runs pr-closes just after the --body-has check, before any gate,
 #        rebase, push or CI wait. With --allow-commit-closes, a stray match whose
 #        report's second field is `commit <sha>` is printed to stderr as a warning
@@ -89,7 +104,7 @@
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict; with --unverified-fixes, no exit 4), 5 PR text needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, or stray closing keywords from pr-closes), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 PR text or review state needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, stray closing keywords from pr-closes, or no approved review verdict: CHANGES and FIX-INCOMPLETE need a scoped verify unless --unverified-fixes is given for a no-real-bug fix round), 124 CI wait timeout.
 #        Rebase rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -108,15 +123,17 @@
 #        Both gate runs set NEXTEST_RETRIES=1, retrying failed nextest tests once.
 #        Report each FLAKY result and its failed-attempt panic text; retries do not
 #        change the gate's exit status.
-#        With --gate, step 7 refetches origin/main after step 2: when it is not
+#        With --gate or --merge-check, step 7 refetches origin/main after step 2: when it is not
 #        an ancestor of the pinned head, merge it into the pinned head in a throwaway
-#        commit in --worktree, run the gate there, and restore the pinned head whatever
-#        happens (nothing is pushed). A merge conflict exits 3; a failing gate exits 1
+#        commit in --worktree, run the selected check there, and restore the pinned head
+#        whatever happens (nothing is pushed). A merge conflict exits 3; a failing check exits 1
 #        after printing its last 20 lines, panic context outside that tail, and the path
-#        to the full output saved under ${TMPDIR:-/tmp}/ship-pr-<pr>-gate.*. Passing gates
-#        leave no log file. Without --gate the check is skipped.
+#        to the full output saved under ${TMPDIR:-/tmp}/ship-pr-<pr>-gate.*. Passing checks
+#        leave no log file. If origin/main moves during a passing --merge-check, rerun it
+#        on the new tip up to three times; the fourth move exits 1. With --gate,
+#        --merge-check is ignored. Without either flag the check is skipped.
 #        --unverified-fixes <file> is for a fix round that answers no real bug (review-loop
-#        step 3), so it ships with no re-review. The file must be readable and hold a
+#        step 3), so CHANGES or FIX-INCOMPLETE ships without a re-review. The file must be readable and hold a
 #        non-blank line, else exit 2 before anything else. On a patch-id mismatch, once per
 #        run and before the first push or CI wait, ship-pr posts a PR comment: a first line
 #        naming the reviewed short sha, the file under `Findings:`, and `git diff --stat`
@@ -130,17 +147,64 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--no-mutants-label <reason>]" >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
   echo "       longest wait: 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
   exit 2
 }
 say() { echo "ship-pr: $*" >&2; }
 die() { local code="$1"; shift; say "$*"; exit "$code"; }
+refuse() {
+  local family="$1" message="$2" mode="${3:-always}"
+  if [ "$mode" = "ready-only" ]; then
+    if [ "$pr_ready" = 1 ] && [ "$merge_attempted" = 0 ]; then
+      say "$message; nothing merged, PR $pr is still marked ready"
+    fi
+  else
+    say "$message"
+  fi
+  say "refused $family"
+  exit 5
+}
 pr_ready=0 merge_attempted=0
 # worktree_clean: no tracked changes and no untracked files except the
 # proptest-regressions/ seeds a gate run wrote (untracked, but not dirt).
 worktree_clean() {
   [ -z "$(git -C "$worktree" status --porcelain | grep -v '^?? .*proptest-regressions/')" ]
+}
+fast_forward_agents() {
+  local checkout="${HOME:-~}/.agents" branch behind reason old new
+  if [ "$(git -C "$checkout" rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
+    say "$checkout: not fast-forwarded (behind unknown; not a git checkout)"
+    return 0
+  fi
+  if ! git -C "$checkout" fetch -q origin refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1; then
+    say "$checkout: not fast-forwarded (behind unknown; fetch failed)"
+    return 0
+  fi
+  behind="$(git -C "$checkout" rev-list --count HEAD..origin/main 2>/dev/null)" || behind=unknown
+  branch="$(git -C "$checkout" branch --show-current 2>/dev/null)" || branch=""
+  old="$(git -C "$checkout" rev-parse --short HEAD 2>/dev/null)" || old=unknown
+  if [ "$branch" != main ]; then
+    reason="branch=${branch:-detached}"
+  elif [ -n "$(git -C "$checkout" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    reason="tracked changes"
+  elif ! git -C "$checkout" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    reason="local commits"
+  elif ! git -C "$checkout" merge --ff-only origin/main >/dev/null 2>&1; then
+    reason="fast-forward failed"
+  else
+    new="$(git -C "$checkout" rev-parse --short HEAD 2>/dev/null)" || new=unknown
+    if [ "$new" != "$old" ]; then
+      say "$checkout: fast-forwarded $old -> $new ($behind commits)"
+    fi
+    return 0
+  fi
+  case "$behind" in
+    1) behind="1 commit" ;;
+    unknown) ;;
+    *) behind="$behind commits" ;;
+  esac
+  say "$checkout: not fast-forwarded (behind $behind; $reason)"
 }
 # fetch_retry: one bounded retry for a `git fetch` lost to a transient ref
 # lock (another session pushing at the same time). 3 tries, 1 s apart.
@@ -277,19 +341,24 @@ gate_preflight() {
 }
 
 run_gate() {
-  local output_file
-  output_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-gate.XXXXXX")"
-  if (cd "$worktree" && NEXTEST_RETRIES=1 bash -c "$gate" </dev/null) >"$output_file" 2>&1; then
+  local output_file cargo_slot_dir check_cmd="${1:-$gate}" check_label="${2:-gate}" check_file_label
+  check_file_label="${check_label// /-}"
+  output_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-${check_file_label}.XXXXXX")"
+  cargo_slot_dir="$(mktemp -d "${TMPDIR:-/tmp}/ship-pr-cargo-slot.XXXXXX")"
+  ln -s "$here/cargo-slot" "$cargo_slot_dir/cargo"
+  if (cd "$worktree" && PATH="$cargo_slot_dir:$PATH" NEXTEST_RETRIES=1 bash -c "$check_cmd" </dev/null) >"$output_file" 2>&1; then
+    rm -rf "$cargo_slot_dir"
     if report_flakes "$output_file"; then
       GH_CI_LOG_LINES=0 bash "$here/gh-ci" panics <"$output_file" >&2
     fi
     rm -f "$output_file"
     return 0
   fi
+  rm -rf "$cargo_slot_dir"
   report_flakes "$output_file" || true
   tail -n 20 "$output_file" || true
   GH_CI_LOG_LINES=20 bash "$here/gh-ci" panics <"$output_file"
-  printf 'full gate output: %s\n' "$output_file"
+  printf 'full %s output: %s\n' "$check_label" "$output_file"
   return 1
 }
 
@@ -297,10 +366,12 @@ run_gate() {
 ship_args=("$@")
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" no_mutants_label=""
+repo="" reviewed="" worktree="" gate="" merge_check="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" keep_branch="" no_mutants_label="" mutants_gate=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow-commit-closes) allow_commit_closes=1; shift; continue ;;
+    --keep-branch) keep_branch="requested by --keep-branch"; shift; continue ;;
+    --mutants-gate) mutants_gate=1; shift; continue ;;
   esac
   [ $# -ge 2 ] || usage
   case "$1" in
@@ -308,6 +379,7 @@ while [ $# -gt 0 ]; do
     --reviewed) reviewed="$2" ;;
     --worktree) worktree="$2" ;;
     --gate) gate="$2" ;;
+    --merge-check) merge_check="$2" ;;
     --timeout) timeout="$2" ;;
     --body-has) case "$2" in ''|*$'\n'*) usage ;; esac; body_has+=("$2") ;;
     --body-ends) case "$2" in ''|*$'\n'*) usage ;; esac; body_ends="$2" ;;
@@ -330,12 +402,19 @@ if [ -n "${CLAUDECODE:-}" ] && [ "$effective_timeout" -lt 600 ]; then
 fi
 longest_wait=$((5 * effective_timeout))
 longest_hours=$((longest_wait / 3600))
-say "longest wait ${longest_wait} s (${longest_hours} h): 5 CI waits x ${effective_timeout} s, plus the gate; run it in the background with no shell timeout"
+say "no shell timeout: waits are bounded at ${longest_wait} s (${longest_hours} h), worst case; a clean run takes minutes"
 
 tmpdir="${TMPDIR:-/tmp}"
 find -H "$tmpdir" -maxdepth 1 -type f -name 'xcrun_db-*' -mmin +1440 -delete >/dev/null 2>&1 || true
 
-here="$(cd "$(dirname "$0")" && pwd)"
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+here="$(cd "$(dirname "$script_path")" && pwd)"
 # rerun_cmd rebuilds this invocation against this file for the lost-race diagnostic.
 rerun_cmd="$(printf '%q ' bash "$here/$(basename "$0")" ${ship_args[@]+"${ship_args[@]}"})"
 rerun_cmd="${rerun_cmd% }"
@@ -416,7 +495,7 @@ if [ "${#body_has[@]}" -gt 0 ] || [ -n "$body_ends" ]; then
     done <<<"$body"
     [ "$last" = "$body_ends" ] || { echo "body does not end with (--body-ends): $body_ends"; missing=1; }
   fi
-  [ "$missing" = 0 ] && [ "$bad" = 0 ] || die 5 "PR body lacks required lines; edit the PR body, then rerun"
+  [ "$missing" = 0 ] && [ "$bad" = 0 ] || refuse BODY "PR body lacks required lines; edit the PR body, then rerun"
 fi
 
 # Authority claims in the body and in the round-closed comments, checked on every
@@ -425,28 +504,34 @@ fi
 # record separator (0x1e) and the URL.
 body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""')" \
   || die 2 "cannot read PR $pr body"
+if grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?refs[[:space:]]+#[0-9]+([[:space:]]|$)' <<<"$body_text" \
+  && ! grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+([[:alnum:]_.-]+/)?#[0-9]+([[:space:]]|$)' <<<"$body_text"; then
+  [ -n "$keep_branch" ] || keep_branch="PR body references an issue without a closing line"
+fi
 authority_bad=0
 authority_scan <<<"$body_text"
 comments_text="$(gh api --paginate "repos/$repo/issues/$pr/comments" \
   --jq '.[] | select(((.body // "") | sub("^ +"; "") | split("\n") | .[0] | ascii_downcase | startswith("review round closed"))) | "\u001e" + .html_url + "\n" + (.body // "")')" \
   || die 2 "cannot read comments on PR $pr in $repo"
 authority_scan <<<"$comments_text"
-[ "$authority_bad" = 0 ] || die 5 "PR text claims authority with no citation; cite the ruling (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun"
+[ "$authority_bad" = 0 ] || refuse BODY "PR text claims authority without a citation on the same line or in the same bullet; cite it there (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun"
 
 # A draft carries the mutants label when the repo defines one, so mutants
 # run on the draft from the first push. Checked here, beside --body-has, so
 # a draft with no map costs no push and no CI wait. A repo without the label
 # is not checked.
-if [ -n "$no_mutants_label" ]; then
-  say "skipping the mutants-label check: $no_mutants_label"
-elif [ "$draft" = "true" ]; then
-  repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name')" \
-    || die 2 "cannot read labels in $repo"
-  if grep -qx 'mutants' <<<"$repo_labels"; then
-    pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name')" \
-      || die 2 "cannot read PR $pr labels"
-    grep -qx 'mutants' <<<"$pr_labels" \
-      || die 5 "PR lacks the mutants label; open it with --label mutants or pass --no-mutants-label <reason>"
+if [ -z "$mutants_gate" ]; then
+  if [ -n "$no_mutants_label" ]; then
+    say "skipping the mutants-label check: $no_mutants_label"
+  elif [ "$draft" = "true" ]; then
+    repo_labels="$(gh api --paginate "repos/$repo/labels?per_page=100" --jq '.[].name')" \
+      || die 2 "cannot read labels in $repo"
+    if grep -qx 'mutants' <<<"$repo_labels"; then
+      pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name')" \
+        || die 2 "cannot read PR $pr labels"
+      grep -qx 'mutants' <<<"$pr_labels" \
+        || refuse LABEL "PR lacks the mutants label; open it with --label mutants or pass --no-mutants-label <reason>"
+    fi
   fi
 fi
 
@@ -468,11 +553,11 @@ case "$rc" in
       done <<<"$closes_out"
       if [ -n "$stray_text" ]; then
         printf '%s' "$stray_text"
-        exit_after_ready 5 "pr-closes found stray closing keywords"
+        refuse BODY "pr-closes found stray closing keywords" ready-only
       fi
     else
       printf '%s\n' "$closes_out"
-      exit_after_ready 5 "pr-closes found stray closing keywords"
+      refuse BODY "pr-closes found stray closing keywords" ready-only
     fi
     ;;
   *) die_after_ready 1 "pr-closes failed (exit $rc)" ;;
@@ -507,9 +592,88 @@ post_unverified() {
 
 patch_id() {
   local id
+  id="$(git -C "$worktree" diff -U0 "origin/main...$1" | git patch-id --stable | awk '{print $1}')"
+  echo "${id:-none}"
+}
+
+review_patch_id() {
+  local id
   id="$(git -C "$worktree" diff "origin/main...$1" | git patch-id --stable | awk '{print $1}')"
   echo "${id:-none}"
 }
+
+# review_verdict REPO PR PATCH_ID: print approved, unverified, changes,
+# incomplete, missing or invalid for the newest review-pr comment on PATCH_ID.
+review_verdict() {
+  local repo="$1" pr="$2" reviewed_pid="$3" rows tab last created id header verdicts axes axis
+  local -a axis_list=()
+  rows="$(gh api --paginate "repos/$repo/issues/$pr/comments" --jq '
+    .[] | select((.body // "") | startswith("review-pr: patch-id")) |
+    . as $comment |
+    ($comment.body | split("\n")) as $lines |
+    ($lines[1:] | reduce .[] as $raw (
+      {section:"", axes:[], verdicts:[]};
+      ($raw | gsub("[*`]"; "") | gsub("^\\s+|\\s+$"; "")) as $line |
+      if ($line | test("^## (standards|spec|overbuild|verify)([[:space:]]|$)")) then
+        ($line | capture("^## (?<section>standards|spec|overbuild|verify)").section) as $section |
+        .section = $section |
+        if ($section == "standards" or $section == "spec" or $section == "overbuild") then .axes += [$section] else . end
+      elif $line == "VERDICT standards: APPROVE" then .verdicts += ["standards:APPROVE"]
+      elif $line == "VERDICT standards: CHANGES" then .verdicts += ["standards:CHANGES"]
+      elif $line == "VERDICT spec: APPROVE" then .verdicts += ["spec:APPROVE"]
+      elif $line == "VERDICT spec: CHANGES" then .verdicts += ["spec:CHANGES"]
+      elif $line == "VERDICT overbuild: APPROVE" then .verdicts += ["overbuild:APPROVE"]
+      elif $line == "VERDICT overbuild: CHANGES" then .verdicts += ["overbuild:CHANGES"]
+      elif .section == "overbuild" and $line == "VERDICT: APPROVE" then .verdicts += ["overbuild:APPROVE"]
+      elif .section == "overbuild" and $line == "VERDICT: CHANGES" then .verdicts += ["overbuild:CHANGES"]
+      elif .section == "verify" and ($line | test("^FIX-OK($|\\s)")) then .verdicts += ["verify:FIX-OK"]
+      elif .section == "verify" and ($line | test("^FIX-INCOMPLETE($|\\s)")) then .verdicts += ["verify:FIX-INCOMPLETE"]
+      elif ($line | test("^(VERDICT|FIX-)")) then .verdicts += ["INVALID"]
+      else . end
+    )) as $parsed |
+    [$comment.created_at, ($comment.id | tostring), $lines[0],
+      ($parsed.verdicts | if length == 0 then "-" else join(",") end),
+      ($parsed.axes | unique | if length == 0 then "-" else join(",") end)] | @tsv
+  ' )" || return 1
+  tab="$(printf '\t')"
+  last="$(printf '%s\n' "$rows" | sort -t "$tab" -k1,1 -k2,2n \
+    | { grep -E "^.*${tab}review-pr: patch-id ${reviewed_pid}, head [0-9a-f]{40}(,.*)?${tab}" || true; } | tail -n 1)"
+  [ -n "$last" ] || { printf 'missing'; return 0; }
+  IFS=$'\t' read -r created id header verdicts axes <<<"$last"
+  case ",$verdicts," in *,INVALID,*) printf 'invalid'; return 0 ;; esac
+  if [[ ",$verdicts," == *,verify:FIX-OK,* ]]; then
+    [ "$verdicts" = "verify:FIX-OK" ] && printf 'approved' || printf 'invalid'
+    return 0
+  fi
+  case ",$verdicts," in *,verify:FIX-INCOMPLETE,*)
+    [ -n "$unverified" ] && printf 'unverified' || printf 'incomplete'
+    return 0 ;;
+  esac
+  [ "$axes" != "-" ] || { printf 'missing'; return 0; }
+  IFS=',' read -r -a axis_list <<<"$axes"
+  for axis in "${axis_list[@]}"; do
+    case ",$verdicts," in *",$axis:APPROVE,"*|*",$axis:CHANGES,"*) ;; *) printf 'invalid'; return 0 ;; esac
+  done
+  case ",$verdicts," in
+    *":CHANGES,"*)
+      # The documented no-real-bug path ships a reviewed CHANGES round without
+      # re-review, but only when the caller supplies --unverified-fixes.
+      [ -n "$unverified" ] && printf 'unverified' || printf 'changes';;
+    *":APPROVE,"*) printf 'approved';;
+    *) printf 'missing';;
+  esac
+}
+
+reviewed_patch_id="$(review_patch_id "$reviewed")"
+review_state="$(review_verdict "$repo" "$pr" "$reviewed_patch_id")" \
+  || die 1 "cannot read review-pr comments on PR $pr in $repo"
+case "$review_state" in
+  approved|unverified) ;;
+  missing) refuse REVIEW "no review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
+  changes) refuse REVIEW "last review-pr verdict for --reviewed patch-id $reviewed_patch_id is CHANGES; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
+  incomplete) refuse REVIEW "last scoped verify for --reviewed patch-id $reviewed_patch_id is FIX-INCOMPLETE; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
+  *) refuse REVIEW "invalid or incomplete review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
+esac
 
 # Whether main's required checks are strict. Any lookup error other than a classic
 # rule's 404 (no classic rule) counts as strict: the old behaviour, costing only CI time.
@@ -533,7 +697,19 @@ else
 fi
 
 rebase_main() {
+  local merges head merge_base
   say "rebasing $branch onto origin/main"
+  merges="$(git -C "$worktree" rev-list --merges origin/main..HEAD)" \
+    || die_after_ready 1 "cannot inspect merge commits before rebasing"
+  if [ -n "$merges" ]; then
+    head="$(git -C "$worktree" rev-parse HEAD)"
+    merge_base="$(git -C "$worktree" merge-base origin/main HEAD)" \
+      || die_after_ready 1 "cannot find merge base with origin/main"
+    say "flattening merged changes before rebasing"
+    git -C "$worktree" reset --soft "$merge_base" >&2 \
+      && git -C "$worktree" commit -C "$head" >&2 \
+      || die_after_ready 1 "cannot flatten merged changes before rebasing"
+  fi
   if ! git -C "$worktree" rebase origin/main >&2; then
     git -C "$worktree" rebase --abort >&2 || true
     die_after_ready 3 "rebase onto origin/main conflicts; resolve it, then rerun"
@@ -588,6 +764,32 @@ ci_failed_run_ids() {
   ids="$(printf '%s' "$list" | jq -r '. as $all | ([.[] | {k: "\(.workflowName // .name // "")\u001f\(.event // "")" , id: .databaseId}] | group_by(.k) | map(max_by(.id).id)) as $newest | $all[] | select(.conclusion=="failure" or .conclusion=="cancelled") | select(.databaseId as $id | $newest | index($id)) | "\(.databaseId)"' 2>/dev/null)" || return 1
   [ -n "$ids" ] || return 1
   printf '%s\n' "$ids"
+}
+
+check_mutants_gate() {
+  local pr_labels run_list latest run_id run_status job_id
+  pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null)" \
+    || refuse MUTANTS "mutants gate failed: cannot read PR labels"
+  grep -qx 'mutants' <<<"$pr_labels" && return 0
+
+  run_list="$(gh run list --repo "$repo" --commit "$pin" --limit 100 --json databaseId,status,conclusion,headSha,createdAt 2>/dev/null)" \
+    || refuse MUTANTS "mutants gate failed: cannot read runs on PR head $pin"
+  latest="$(jq -r --arg head "$pin" '[.[] | select(.headSha == $head)] | sort_by([.createdAt // "", .databaseId]) | last // empty | [.databaseId // "", .status // ""] | @tsv' <<<"$run_list" 2>/dev/null)" \
+    || refuse MUTANTS "mutants gate failed: cannot read runs on PR head $pin"
+  [ -n "$latest" ] || refuse MUTANTS "mutants gate failed: no completed Selection log on PR head $pin proves mutants in the diff: 0"
+  IFS=$'\t' read -r run_id run_status <<<"$latest"
+  [ "$run_status" = "completed" ] \
+    || refuse MUTANTS "mutants gate failed: latest run on PR head $pin is not completed"
+
+  job_id="$(gh run view "$run_id" --repo "$repo" --json jobs --jq '[.jobs[] | select(.name == "Selection") | .databaseId] | last // empty' 2>/dev/null)" \
+    || refuse MUTANTS "mutants gate failed: cannot read Selection job from run $run_id"
+  [ -n "$job_id" ] \
+    || refuse MUTANTS "mutants gate failed: run $run_id has no Selection job"
+  if gh run view "$run_id" --repo "$repo" --job "$job_id" --log 2>/dev/null \
+    | grep -Eq '(^|[[:space:]])mutants in the diff: 0'$'\r''?$'; then
+    return 0
+  fi
+  refuse MUTANTS "mutants gate failed: Selection log on run $run_id does not prove mutants in the diff: 0"
 }
 
 # Step 3: the gate runs once, on the PR head, before any rebase or push. It checks
@@ -649,6 +851,7 @@ while :; do
       lease="$pin"
     fi
     if [ "$draft" = "true" ]; then
+      [ -z "$mutants_gate" ] || check_mutants_gate
       say "marking PR $pr ready"
       gh pr ready "$pr" --repo "$repo" >&2 || die 1 "gh pr ready failed"
       draft=false
@@ -743,32 +946,58 @@ while :; do
     say "origin/main moved during CI; rebasing again (retry $retries of 3)"
   done
   
-  # Step 7: on a non-strict base with --gate, gate the PR merged with current
-  # origin/main. The merge is a throwaway commit in --worktree; nothing is pushed,
-  # and the worktree goes back to the pinned head on every path.
-  if [ "$strict" = 0 ] && [ -n "$gate" ]; then
+  # Step 7: on a non-strict base, check the PR merged with current origin/main.
+  # The merge is a throwaway commit in --worktree; nothing is pushed, and the
+  # worktree goes back to the pinned head on every path.
+  if [ "$strict" = 0 ] && { [ -n "$gate" ] || [ -n "$merge_check" ]; }; then
+    step7_check="gate" step7_cmd="$gate"
+    if [ -z "$gate" ]; then
+      step7_cmd="$merge_check"
+      step7_check="merge check"
+    fi
     git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
     if ! git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
-      say "gating the PR merged with current origin/main"
+      say "$step7_check the PR merged with current origin/main"
       guard_restore() {
         git -C "$worktree" reset -q --hard "$pin" >&2 || die_after_ready 1 "failed to restore pinned head ${pin:0:8}"
       }
       trap 'guard_rc=$?; trap - EXIT INT TERM; guard_restore; if [ "$guard_rc" -ne 0 ]; then exit_after_ready "$guard_rc" "gate aborted"; else exit "$guard_rc"; fi' EXIT
       trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 143 "gate interrupted"' TERM
       trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 130 "gate interrupted"' INT
-      if ! git -C "$worktree" -c user.name=ship-pr -c user.email=ship-pr@localhost merge --no-ff --no-edit origin/main >&2; then
+      merge_check_moves=0
+      while :; do
+        checked_main="$(git -C "$worktree" rev-parse origin/main)"
+        if ! git -C "$worktree" -c user.name=ship-pr -c user.email=ship-pr@localhost merge --no-ff --no-edit origin/main >&2; then
+          guard_restore
+          trap - EXIT INT TERM
+          die_after_ready 3 "PR conflicts with current origin/main; rebase, then rerun"
+        fi
+        if ! run_gate "$step7_cmd" "$step7_check"; then
+          guard_restore
+          trap - EXIT INT TERM
+          die_after_ready 1 "the PR merged with current origin/main fails the $step7_check"
+        fi
+        if [ "$step7_check" = gate ]; then
+          guard_restore
+          trap - EXIT INT TERM
+          say "gate passes on the PR merged with current origin/main"
+          break
+        fi
+        git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
+        if [ "$(git -C "$worktree" rev-parse origin/main)" = "$checked_main" ]; then
+          guard_restore
+          trap - EXIT INT TERM
+          say "$step7_check passes on the PR merged with current origin/main"
+          break
+        fi
         guard_restore
-        trap - EXIT INT TERM
-        die_after_ready 3 "PR conflicts with current origin/main; rebase, then rerun"
-      fi
-      if ! run_gate; then
-        guard_restore
-        trap - EXIT INT TERM
-        die_after_ready 1 "the PR merged with current origin/main fails the gate"
-      fi
-      guard_restore
-      trap - EXIT INT TERM
-      say "gate passes on the PR merged with current origin/main"
+        merge_check_moves=$((merge_check_moves + 1))
+        if [ "$merge_check_moves" -gt 3 ]; then
+          trap - EXIT INT TERM
+          die_after_ready 1 "origin/main moved during the merge check; rerun ship-pr"
+        fi
+        say "origin/main moved during the merge check; rerunning on the new tip (retry $merge_check_moves of 3)"
+      done
     fi
   fi
   
@@ -853,19 +1082,40 @@ for i in $(seq 1 12); do
 done
 [ -n "$merged" ] || { [ -n "$merge_failed" ] && die 1 "gh pr merge failed"; die 1 "merge status could not be confirmed after 12 polls; worktree left in place"; }
 
+if [ "$repo" = "aakshintala/switchyard" ]; then fast_forward_agents; fi
+
 # Step 9: clean up from the common git dir, never from inside the worktree being removed.
 common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"
 cd "$common"
-# When the caller's shell started inside the worktree, removing it would break
-# that shell (getcwd fails), so keep the worktree and its branch and say how
-# to remove them by hand. The remote branch is still deleted.
-case "$start_dir/" in
-  "$worktree"/*)
-    say "worktree kept: your shell is inside it; remove it with: $(printf 'git -C %q worktree remove %q && git -C %q branch -D %q' "$common" "$worktree" "$common" "$branch")" ;;
-  *)
-    git --git-dir="$common" worktree remove "$worktree" >&2 || say "cleanup: worktree remove failed for $worktree"
-    git --git-dir="$common" branch -D "$branch" >&2 || say "cleanup: branch -D $branch failed" ;;
-esac
+if [ -n "$keep_branch" ]; then
+  say "worktree kept: $keep_branch"
+else
+  case "$start_dir/" in
+    "$worktree"/*)
+      say "worktree kept: your shell is inside it; remove it with: $(printf 'git -C %q worktree remove %q && git -C %q branch -D %q' "$common" "$worktree" "$common" "$branch")" ;;
+    *)
+      if ! worktree_clean; then
+        say "worktree kept: it is not clean after merge"
+      elif ! command -v lsof >/dev/null 2>&1; then
+        say "worktree kept: cannot check for active processes because lsof is unavailable"
+      else
+        lsof_output=""
+        if lsof_output="$(lsof -t -a -d cwd +D "$worktree" 2>&1)"; then
+          say "worktree kept: a process has its cwd inside it"
+        elif [ -n "$lsof_output" ]; then
+          say "worktree kept: could not check for a process inside it: $lsof_output"
+        elif git --git-dir="$common" worktree remove "$worktree" >&2; then
+          if git --git-dir="$common" branch -D "$branch" >&2; then
+            say "worktree removed: $worktree; local branch deleted: $branch"
+          else
+            say "worktree removed: $worktree; local branch cleanup failed: $branch"
+          fi
+        else
+          say "worktree kept: removal failed for $worktree"
+        fi
+      fi ;;
+  esac
+fi
 # A missing remote ref counts as done, whatever the push error says: GitHub's
 # auto-delete on merge makes the push fail with "cannot lock ref".
 if ! del_out="$(git --git-dir="$common" push origin --delete "$branch" 2>&1)"; then

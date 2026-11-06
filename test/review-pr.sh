@@ -198,6 +198,7 @@ delegate() (
       esac; done
       role="${cwd##*-}"
       if [ -e "$T/state/fail-$role" ]; then echo "fake delegate: run failed for $role" >&2; exit 1; fi
+      printf '%s\n' "$PATH" >"$T/state/path-$role"
       printf '%s %s\n' "$role" "$model" >>"$T/state/runs.txt"
       cp "$prompt" "$T/state/prompt-$role.md"
       id="job-$role"
@@ -245,6 +246,7 @@ reset_state() {
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/escape-diff" "$T/state/issue-calls.txt"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
   rm -f "$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
+  rm -rf "$TMPDIR/review-pr/posted"
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
 }
 
@@ -689,8 +691,26 @@ for bad_issue in '#3' '3x'; do
   [ "$?" -eq 2 ] || fail "malformed --issue $bad_issue exits 2"
   [ ! -e "$T/state/runs.txt" ] || fail "malformed --issue $bad_issue starts no job"
 done
+# --- case: a --spec value that is not a number exits 2 naming --spec and the spec axis
+for bad_spec in '2x' '#2' ''; do
+  reset_state
+  st=0
+  err="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec "$bad_spec" \
+    --model M --overbuild-model M2 2>&1 >/dev/null)" || st=$?
+  [ "$st" -eq 2 ] || fail "malformed --spec [$bad_spec] exits 2 (got $st)"
+  case "$err" in *--spec*spec*) ;; *) fail "malformed --spec [$bad_spec] names --spec and the spec axis: [$err]" ;; esac
+  [ ! -e "$T/state/runs.txt" ] || fail "malformed --spec [$bad_spec] starts no job"
+done
+# --- case: --spec with no value exits 2 naming --spec and the spec axis that needs it
+reset_state
+st=0
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --model M --overbuild-model M2 \
+  --spec 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "--spec without a value exits 2 (got $st)"
+case "$err" in *--spec*spec*) ;; *) fail "--spec without a value names --spec and the spec axis: [$err]" ;; esac
+[ ! -e "$T/state/runs.txt" ] || fail "--spec without a value starts no job"
 # --- case: verify ignores start-only flags, one stderr note per flag, and launches
-printf 'P1 findings text\n' >"$T/findings.txt"
+printf 'P1 findings text\n- Evidence: refuted: this fixture exercises verify launch options\n' >"$T/findings.txt"
 write_record verify DONE "rechecked
 FIX-OK all repaired
 STATUS: DONE" 0
@@ -706,6 +726,9 @@ collect: review-pr collect job-verify" ] || fail "verify with $flag prints the v
   grep -Fxq "review-pr: $flag is not used with --verify; ignored" "$T/stderr-ignored.txt" || \
     fail "verify with $flag prints its ignored note"
   [ "$(wc -l <"$T/state/runs.txt" | tr -d ' ')" = "1" ] || fail "verify with $flag launches its job"
+  run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-verify")"
+  case ":$(cat "$T/state/path-verify"):" in *":$run_dir/cargo-slot:"*) ;; *) fail "verify delegate PATH includes cargo-slot" ;; esac
+  [ -x "$run_dir/cargo-slot/cargo" ] || fail "verify run keeps its cargo-slot shim"
   [ ! -e "$T/state/body-calls.txt" ] || fail "verify with $flag does not fetch the PR body"
   bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with $flag collects"
 done
@@ -742,7 +765,7 @@ grep -q "^CI $SHORT fail$" <<<"$out" || fail "failing CI line"
 [ ! -d "$wt_spec" ] || fail "finished spec worktree is removed"
 [ ! -d "$wt_overbuild" ] || fail "finished overbuild worktree is removed"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "1" ] || fail "unfinished keeps only its worktree"
-grep -Fxq "resume: delegate resume job-standards (on $(hostname -s))" <<<"$out" || fail "unfinished prints its host-qualified resume command"
+grep -Fxq "resume: delegate resume job-standards (on $(hostname -s)); then run review-pr collect job-standards" <<<"$out" || fail "unfinished prints its host-qualified resume and collect command"
 [ -f "$TMPDIR/review-pr/job-standards" ] || fail "unfinished state file is kept"
 [ ! -e "$TMPDIR/review-pr/job-spec" ] || fail "finished spec state file is removed"
 [ ! -e "$TMPDIR/review-pr/job-overbuild" ] || fail "finished overbuild state file is removed"
@@ -764,7 +787,7 @@ run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-spec")"
 out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "mixed completion collect exits 1"
 rec="$TMPDIR/delegate-jobs/job-spec.json"
 grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "mixed completion reports unfinished spec"
-[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s))" <<<"$out")" = "1" ] || fail "mixed completion prints one host-qualified spec resume command"
+[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s)); then run review-pr collect job-spec" <<<"$out")" = "1" ] || fail "mixed completion prints one host-qualified spec resume and collect command"
 ! grep -q '^resume:.*job-standards ' <<<"$out" || fail "mixed completion prints no standards resume command"
 [ -d "$wt_spec" ] || fail "mixed completion keeps the unfinished worktree"
 [ ! -d "$wt_standards" ] || fail "mixed completion removes the finished worktree"
@@ -776,13 +799,13 @@ run_entries=("$run_dir"/*)
 [ "${#run_entries[@]}" = "1" ] && [ "${run_entries[0]}" = "$wt_spec" ] || fail "mixed completion run keeps only the unfinished worktree"
 [ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "mixed completion posts one comment"
 
-# --- case: re-collecting a kept id reads its state and never posts twice
+# --- case: re-collecting a kept id posts its changed result
 rm -f "$T/state/comment-pr.txt" "$T/state/comment.md"
 out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "re-collecting unfinished spec exits 1"
 grep -q '^COLLECTED job-standards ' <<<"$out" || fail "re-collect reprints the finished standards job"
 grep -Fxq "patch-id $EXPECTED_PID" <<<"$out" || fail "re-collect reads the kept run header"
 grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "re-collect reads the kept spec record"
-[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s))" <<<"$out")" = "1" ] || fail "re-collect prints one host-qualified resume command"
+[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s)); then run review-pr collect job-spec" <<<"$out")" = "1" ] || fail "re-collect prints one host-qualified resume and collect command"
 ! grep -q '^UNFINISHED standards MISSING' <<<"$out" || fail "re-collect does not mark the finished job missing"
 [ ! -e "$T/state/comment-pr.txt" ] || fail "re-collect does not post another comment"
 [ -d "$wt_spec" ] || fail "re-collect keeps the unfinished worktree"
@@ -792,12 +815,29 @@ STATUS: DONE" 0
 cp "$T/canned/spec.json" "$TMPDIR/delegate-jobs/job-spec.json"
 out="$(bash "$REVIEW" collect job-spec 2>/dev/null)" || fail "collecting the resumed finished spec exits 0"
 grep -Fxq 'VERDICT spec: APPROVE' <<<"$out" || fail "re-collect prints the resumed verdict"
-[ ! -e "$T/state/comment-pr.txt" ] || fail "collecting a posted kept job does not post again"
-[ ! -e "$T/state/comment.md" ] || fail "collecting a posted kept job creates no new comment body"
+[ "$(cat "$T/state/comment-pr.txt")" = "7" ] || fail "collecting a changed posted job creates a new PR comment"
+grep -q '^VERDICT spec: APPROVE$' "$T/state/comment.md" || fail "new comment body carries the resumed verdict"
 [ ! -d "$wt_spec" ] || fail "finished resumed worktree is removed"
 [ ! -e "$TMPDIR/review-pr/job-spec" ] || fail "finished resumed state file is removed"
 [ ! -d "$run_dir" ] || fail "finished resumed run directory is removed"
-[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "re-collect never duplicates the comment"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "changed result is posted in a second comment"
+
+# --- case: re-collect labels the reprinted overbuild verdict
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec NEEDS_CONTEXT "Owner ruling needed before review can continue"
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "overbuild reprint start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" && fail "overbuild reprint first collect exits 1"
+grep -q "^VERDICT overbuild: APPROVE$" <<<"$out" || fail "first collect labels the overbuild verdict"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" && fail "overbuild reprint re-collect exits 1"
+grep -q '^COLLECTED job-overbuild ' <<<"$out" || fail "re-collect reprints the finished overbuild job"
+grep -q "^VERDICT overbuild: APPROVE$" <<<"$out" || fail "re-collect labels the reprinted overbuild verdict"
+grep -q "^VERDICT: APPROVE$" <<<"$out" && fail "re-collect never reprints a bare overbuild verdict"
 
 # --- case: mixed collect posts only for the fresh run
 reset_state
@@ -1071,10 +1111,96 @@ grep -q UNFINISHED <<<"$out" && fail "re-collect is not UNFINISHED"
 out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild job-nope 2>/dev/null)" && fail "re-collect with an unknown id exits 1"
 grep -q "^UNFINISHED job-nope MISSING" <<<"$out" || fail "unknown id beside collected ids is UNFINISHED"
 
+# --- case: a resumed result with no state file is reported as unposted
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+P1 original finding
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || \
+  fail "resumed-result fixture starts"
+bash "$REVIEW" collect job-standards --findings-out "$T/resumed-first.txt" >/dev/null 2>&1 || \
+  fail "resumed-result fixture first collect exits 0"
+cp "$T/state/comments.log" "$T/resumed-comment-first.log"
+rec="$TMPDIR/delegate-jobs/job-standards.json"
+jq --arg text $'VERDICT standards: APPROVE\nP1 resumed finding\nSTATUS: DONE' \
+  '.result.text = $text' "$rec" >"$T/resumed-record.json" || fail "resumed-result record edit"
+mv "$T/resumed-record.json" "$rec" || fail "resumed-result record replace"
+st=0
+out="$(bash "$REVIEW" collect job-standards --findings-out "$T/resumed-second.txt" 2>&1)" || st=$?
+[ "$st" -eq 1 ] || fail "changed result after collect exits 1 (got $st): [$out]"
+grep -q '^UNPOSTED job-standards: this verdict was never posted to the PR; ship-pr cannot see it\.' <<<"$out" || \
+  fail "changed result is reported as unposted: [$out]"
+grep -q 'review-pr run 7 --repo O/N --cwd <clone> --model <model> --verify <findings file> --since <head>' <<<"$out" || \
+  fail "unposted result prints a fresh scoped verify command: [$out]"
+grep -q '^VERDICT standards: APPROVE$' <<<"$out" || fail "unposted result still reprints its verdict"
+grep -q '^P1 resumed finding$' <<<"$out" || fail "unposted result still reprints its finding"
+[ "$(cat "$T/resumed-second.txt")" = "P1 resumed finding" ] || fail "unposted result writes --findings-out"
+cmp -s "$T/resumed-comment-first.log" "$T/state/comments.log" || fail "unposted result posts nothing"
+
+# --- case: a finished record with no state or posted record is unposted
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: CHANGES
+P1 unposted orphan finding
+STATUS: DONE" 0
+mkdir -p "$TMPDIR/delegate-jobs"
+cp "$T/canned/standards.json" "$TMPDIR/delegate-jobs/job-orphan.json"
+st=0
+out="$(bash "$REVIEW" collect job-orphan --findings-out "$T/orphan-findings.txt" 2>&1)" || st=$?
+[ "$st" -eq 1 ] || fail "record without a posted record exits 1 (got $st): [$out]"
+grep -q '^UNPOSTED job-orphan: this verdict was never posted to the PR; ship-pr cannot see it\.' <<<"$out" || \
+  fail "record without a posted record is reported unposted: [$out]"
+grep -q '^VERDICT standards: CHANGES$' <<<"$out" || fail "orphan result still reprints its verdict"
+grep -q '^P1 unposted orphan finding$' <<<"$out" || fail "orphan result still reprints its finding"
+[ "$(cat "$T/orphan-findings.txt")" = "P1 unposted orphan finding" ] || fail "orphan writes --findings-out"
+[ ! -e "$T/state/comment-pr.txt" ] || fail "orphan unposted collect posts nothing"
+
+# --- case: empty verify diff refuses an unrefuted finding before starting a job
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 file.txt:1 — wrong value — repair it\n- Evidence: reviewed code has the wrong value\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+if err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" 2>&1 >/dev/null)"; then
+  fail "empty verify diff with an unrefuted finding refuses to start"
+fi
+grep -q 'empty repair diff' <<<"$err" || fail "empty-diff refusal names the missing repair"
+grep -q 'push the repair' <<<"$err" || fail "empty-diff refusal says to push the repair"
+grep -q 'refuted:' <<<"$err" || fail "empty-diff refusal says to mark answered findings refuted"
+grep -q 'ship-pr --unverified-fixes' <<<"$err" || fail "empty-diff refusal names the recorded-ruling route"
+[ ! -e "$T/state/runs.txt" ] || fail "empty-diff refusal starts no job"
+[ ! -e "$TMPDIR/review-pr/job-verify" ] || fail "empty-diff refusal saves no job state"
+[ ! -e "$T/state/comment.md" ] || fail "empty-diff refusal posts no comment"
+
+# --- case: empty verify diff starts when every finding is refuted
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 file.txt:1 — wrong value — repair it\n- Evidence: refuted: the reviewed value is correct\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "empty diff with a refuted finding starts"
+[ -f "$TMPDIR/review-pr/job-verify" ] || fail "refuted empty-diff verify saves state"
+out="$(bash "$REVIEW" collect job-verify 2>&1)" || fail "refuted empty-diff verify collects: [$out]"
+
+# --- case: non-empty verify diff still starts with an unrefuted finding
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 file.txt:1 — wrong value — repair it\n' >"$T/findings.txt"
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "non-empty diff with an unrefuted finding starts"
+grep -q "git diff $FAKE_SHA..HEAD" "$T/state/prompt-verify.md" || fail "non-empty verify brief keeps the same repair range"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "non-empty verify collects"
+
 # --- case: verify mode runs one job with SINCE and FINDINGS filled
 reset_state
 printf 'ci\tpending\n' >"$T/checks.txt"
-printf 'P2 findings text & more\n' >"$T/findings.txt"
+printf 'P2 findings text & more\n- Evidence: refuted: this fixture exercises verify launch\n' >"$T/findings.txt"
 write_record verify DONE "rechecked
 FIX-OK all repaired
 STATUS: DONE" 0
@@ -1091,6 +1217,32 @@ grep -q '^verify M$' "$T/state/runs.txt" || fail "verify job role and model"
 grep -q "git diff $FAKE_SHA..HEAD" "$T/state/prompt-verify.md" || fail "verify brief SINCE filled"
 grep -q 'P2 findings text & more' "$T/state/prompt-verify.md" || fail "verify brief FINDINGS filled"
 grep -q '^## verify (M)$' "$T/state/comment.md" || fail "comment verify heading"
+
+# --- case: collecting a resumed verify posts its changed FIX-OK verdict once
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 fixture finding\n- Evidence: refuted: this fixture exercises resumed verify posting\n' >"$T/findings.txt"
+write_record verify NEEDS_CONTEXT "Owner ruling needed before review can continue"
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "resumed verify start exits 0"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" && fail "NEEDS_CONTEXT verify collect exits 1"
+grep -q '^UNFINISHED verify NEEDS_CONTEXT ' <<<"$out" || fail "first verify collect keeps the unfinished job"
+[ -f "$TMPDIR/review-pr/job-verify" ] || fail "first verify collect keeps its state file"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "first verify collect posts its initial comment"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+cp "$T/canned/verify.json" "$TMPDIR/delegate-jobs/job-verify.json"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "resumed FIX-OK verify collect exits 0"
+grep -Fxq 'FIX-OK' <<<"$out" || fail "resumed verify collect prints FIX-OK"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "resumed verify posts a second PR comment"
+grep -q '^FIX-OK$' "$T/state/comment.md" || fail "resumed verify comment carries FIX-OK"
+expected_hash="$(printf '%s' $'FIX-OK\nSTATUS: DONE' | shasum -a 256 | awk '{print $1}')"
+[ "$(jq -r '.result_hash' "$TMPDIR/review-pr/posted/job-verify")" = "$expected_hash" ] || \
+  fail "resumed verify posted-record stores the new result hash"
+cp "$T/state/comments.log" "$T/resumed-verify-comments.log"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "unchanged resumed verify re-collect exits 0"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "unchanged resumed verify posts no third comment"
+cmp -s "$T/resumed-verify-comments.log" "$T/state/comments.log" || fail "unchanged resumed verify adds nothing to the PR comments"
 
 # --- case: run starts, waits on the started ids, collects; exits 0 on all APPROVE
 reset_state
@@ -1192,7 +1344,7 @@ grep -q '^VERDICT overbuild: APPROVE$' <<<"$out" && fail "glued line is not a ve
 # --- case: verify with a finding line that mentions VERDICT and a real FIX-OK line
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P2 findings text\n' >"$T/findings.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises verdict parsing\n' >"$T/findings.txt"
 write_record verify DONE "- P2 fixture/test: fixed. Fixture's final assistant message (line 30) begins \`VERDICT: APPROVE\`, and the test's exact \`assert_eq!\` pins \`\nVERDICT: APPROVE\n\`, asserting the verdict starts a line.
 FIX-OK
 STATUS: DONE" 0
@@ -1206,7 +1358,7 @@ grep -q UNFINISHED <<<"$out" && fail "mention plus FIX-OK is finished"
 # --- case: prose that merely contains FIX-OK is not a verify verdict
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P2 findings text\n' >"$T/findings.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises unfinished parsing\n' >"$T/findings.txt"
 write_record verify DONE "this is not FIX-OK yet
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --model M \
@@ -1219,7 +1371,7 @@ grep -q BAD-VERDICT <<<"$out" && fail "not FIX-OK prose is not bad"
 # --- case: a bare FIX-OK line is a verdict
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P2 findings text\n' >"$T/findings.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises a bare verdict\n' >"$T/findings.txt"
 write_record verify DONE "FIX-OK" 0
 start_review 7 --repo O/N --cwd "$T/clone" --model M \
   --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "verify start exits 0"
@@ -1583,7 +1735,7 @@ grep -q -- "--since $MISSING_SINCE is not fetchable" <<<"$err" || fail "missing 
 
 # --- case: a short --since the clone holds is accepted
 reset_state
-printf 'P1 findings text\n' >"$T/findings.txt"
+printf 'P1 findings text\n- Evidence: refuted: this fixture exercises short since handling\n' >"$T/findings.txt"
 write_record verify DONE "rechecked
 FIX-OK all repaired
 STATUS: DONE" 0
@@ -2188,6 +2340,7 @@ grep -qx 'P1 slow.ts:3 — wrong total — sum the parts' "$T/findings-out.txt" 
 grep -q VERDICT "$T/findings-out.txt" && fail "findings file holds findings, not verdicts"
 write_record verify DONE "FIX-OK all repaired
 STATUS: DONE" 0
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
 run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
   --verify "$T/findings-out.txt" --since "$FAKE_SHA" 2>/dev/null)" || \
   fail "run --verify accepts the findings file"
@@ -2241,7 +2394,7 @@ cmp -s "$T/reprint-a.saved" "$T/reprint-b.txt" || fail "reprint findings file ma
 # --- case: --context copies outside-checkout files into the verify worktree
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P2 findings text\n' >"$T/findings.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises context copying\n' >"$T/findings.txt"
 mkdir -p "$T/ctx-a" "$T/ctx-b"
 printf 'plan text\n' >"$T/ctx-a/plan.md"
 printf 'mutant list\n' >"$T/ctx-b/plan.md"
@@ -2534,7 +2687,7 @@ grep -q "^usage:" <<<"$err" || fail "flag-looking full-rereview prints usage"
 # --- case n: verify mode with a prior comment is not refused
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P1 findings text\n' >"$T/findings.txt"
+printf 'P1 findings text\n- Evidence: refuted: this fixture checks prior comments do not block verify\n' >"$T/findings.txt"
 write_record verify DONE "rechecked
 FIX-OK all repaired
 STATUS: DONE" 0
@@ -2566,5 +2719,119 @@ err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2
 grep -Fq -- "--since $OTHER_HEAD" <<<"$err" || fail "reason-prefix bypass refusal names the reviewed head"
 grep -Fq -- "already has a review for head $OTHER_HEAD" <<<"$err" || fail "reason-prefix bypass refusal prints the reviewed head"
 [ ! -e "$T/state/runs.txt" ] || fail "reason-prefix bypass refusal launches no job"
+
+# --- case #1089: verify includes findings from the round posted at --since
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+printf 'P2 finding Y: repair the current issue\n- Evidence: kept in the file\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+plant_comment "2026-10-09T10:00:00Z" 201 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P1 finding X: earlier reviewed behavior
+P2 finding Y: current issue
+VERDICT standards: CHANGES"
+start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$OLD_SHA" --head "$NEW_SHA" >/dev/null 2>"$T/verify-stderr.txt" || { cat "$T/verify-stderr.txt" >&2; fail "verify with earlier findings starts"; }
+grep -Fq 'P1 finding X: earlier reviewed behavior' "$T/state/prompt-verify.md" || \
+  fail "verify brief includes findings from the posted round at --since"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with earlier findings collects"
+
+# --- case #1184: verify includes earlier rounds when the findings file has only the latest
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+printf 'P2 finding Z: latest verify finding\n- Evidence: kept in the file\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+plant_comment "2026-10-09T12:00:00Z" 212 "review-pr: patch-id $EXPECTED_NEW_PID, head $NEW_SHA
+
+## verify (M)
+
+P2 finding Z: latest verify finding
+FIX-INCOMPLETE finding remains
+STATUS: DONE"
+plant_comment "2026-10-09T10:00:00Z" 211 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P1 finding X: earlier reviewed behavior
+VERDICT standards: CHANGES"
+start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$OLD_SHA" --head "$NEW_SHA" >/dev/null 2>"$T/verify-stderr.txt" || { cat "$T/verify-stderr.txt" >&2; fail "verify with the latest-only findings file starts"; }
+grep -Fq 'P1 finding X: earlier reviewed behavior' "$T/state/prompt-verify.md" || \
+  fail "verify brief includes the earlier finding omitted from the latest-only file"
+grep -Fq 'P2 finding Z: latest verify finding' "$T/state/prompt-verify.md" || \
+  fail "verify brief retains the latest finding from the file"
+line_x="$(grep -nF 'P1 finding X: earlier reviewed behavior' "$T/state/prompt-verify.md" | cut -d: -f1)"
+line_z="$(grep -nF 'P2 finding Z: latest verify finding' "$T/state/prompt-verify.md" | tail -n 1 | cut -d: -f1)"
+[ "$line_x" -lt "$line_z" ] || fail "verify brief keeps posted rounds in comment order"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with the latest-only findings file collects"
+
+# --- case #1183: a later FIX-OK verify refuses an older --since before dispatch
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+git -C "$T/clone" config user.email t@t
+git -C "$T/clone" config user.name t
+git -C "$T/clone" checkout -q -b verify-scope-c "$NEW_SHA"
+printf 'later repair\n' >"$T/clone/later.txt"
+git -C "$T/clone" add later.txt
+git -C "$T/clone" commit -qm 'later repair'
+VERIFY_C_SHA="$(git -C "$T/clone" rev-parse HEAD)"
+git -C "$T/clone" checkout -q main
+printf '%s\n' "$VERIFY_C_SHA" >"$T/state/heads.txt"
+printf 'P1 finding X: earlier reviewed behavior\n' >"$T/findings.txt"
+plant_comment "2026-10-09T12:00:00Z" 222 "review-pr: patch-id $EXPECTED_NEW_PID, head $VERIFY_C_SHA
+
+## verify (M)
+
+FIX-OK all findings repaired
+STATUS: DONE"
+plant_comment "2026-10-09T10:00:00Z" 221 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P1 finding X: earlier reviewed behavior
+VERDICT standards: CHANGES"
+err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$OLD_SHA" --head "$VERIFY_C_SHA" 2>&1 >/dev/null)"; st=$?
+[ "$st" -eq 2 ] || fail "verify behind a posted FIX-OK exits 2 (got $st)"
+grep -Fq -- "pass --since $VERIFY_C_SHA instead" <<<"$err" || \
+  fail "stale verify refusal names the FIX-OK head: [$err]"
+[ ! -e "$T/state/runs.txt" ] || fail "stale verify refusal starts no job"
+[ ! -e "$TMPDIR/review-pr/job-verify" ] || fail "stale verify refusal saves no job state"
+
+# --- case: an unmatched --since warns and includes every posted round
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf '%s\n' "$VERIFY_C_SHA" >"$T/state/heads.txt"
+printf 'P1 finding current: repair the latest commit\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+plant_comment "2026-10-09T10:00:00Z" 231 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P1 finding X: first posted round
+VERDICT standards: CHANGES"
+plant_comment "2026-10-09T12:00:00Z" 232 "review-pr: patch-id $EXPECTED_NEW_PID, head $VERIFY_C_SHA
+
+## spec (M)
+
+P2 finding Y: last posted round
+VERDICT spec: CHANGES"
+start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$NEW_SHA" --head "$VERIFY_C_SHA" >/dev/null 2>"$T/unmatched-stderr.txt" || \
+  { cat "$T/unmatched-stderr.txt" >&2; fail "verify with an unmatched --since starts"; }
+grep -Fq "no posted review-pr comment has header head $NEW_SHA" "$T/unmatched-stderr.txt" || \
+  fail "unmatched --since warns on stderr"
+grep -Fq 'P1 finding X: first posted round' "$T/state/prompt-verify.md" || \
+  fail "unmatched --since includes the first posted comment"
+grep -Fq 'P2 finding Y: last posted round' "$T/state/prompt-verify.md" || \
+  fail "unmatched --since includes the last posted comment"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "unmatched --since verify collects"
 
 echo "review-pr: all cases passed"

@@ -1,18 +1,20 @@
 # plan-tokens: shared token reader, path resolver and Files cover rules,
 # sourced by bin/plan-check, bin/plan-sweep, bin/tkt-build, bin/tkt-plan and bin/tkt-gate.
-# Source it from beside the calling script:
-#   lib="$(cd "$(dirname "$0")" && pwd)/lib/plan-tokens.sh"
+# Source it from beside the calling script, with script_dir resolved through
+# symlinks as bin/fill-brief does (check-pack refuses a bare dirname "$0"):
+#   lib="$script_dir/lib/plan-tokens.sh"
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.
 # Globals, per function:
 #   is_path: none. is_symbol: none.
 #   in_files: reads FILES (|a|b| form), GLOBS (newline list).
 #   plan_base: reads PLAN from its argument only.
-#   plan_records: reads PLAN from its argument only.
+#   plan_outcome: reads PLAN from its argument only.
+#   plan_records: reads PLAN and an optional Files-entry flag from its arguments.
 #   expand_token: reads CUR_SEC, GLOBS, portre; appends to GLOBS; calls FN in
 #     the current shell (FN must run in the caller's shell: no subshell here).
 #   resolve_path: reads dir, rev, tree; sets RES, RES_KIND (found|ambiguous|none).
 #   covered: reads FILES, GLOBS.
-#   plan_files_pathspecs: reads PLAN from its argument only.
+#   plan_files_pathspecs: reads PLAN and an optional mode from its arguments.
 #   portre: a variable (not a function); expand_token reads it.
 
 portre=':[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$'
@@ -59,10 +61,25 @@ plan_base() {
   awk '/^Base:[[:space:]]/ { gsub(/`/, "", $2); print $2; exit }' "$1"
 }
 
-# plan_records PLAN: one record per backticked token outside fenced blocks and
-# outside `## Gate`: section, line number, new mark, read mark, the token.
+# plan_outcome PLAN: the first token of the Outcome line with backticks
+# stripped, read the same way as plan_base. Prints nothing when there is no
+# Outcome line.
+plan_outcome() {
+  awk '/^Outcome:[[:space:]]/ { gsub(/`/, "", $2); print $2; exit }' "$1"
+}
+
+# _plan_read_mark: awk regex source for the "(read)" mark, shared by
+# plan_records and the Files entry reader so both spot the same mark in any
+# case. plan_records also honours the whole words reads, read-only and
+# fixture, which stay line-level task marks, not Files entry marks: prose
+# after a Files token (such as "reads `other`") never flips the entry.
+_plan_read_mark='\(read\)'
+
+# plan_records PLAN [files-entry-flag]: one record per backticked token outside
+# fenced blocks and `## Gate`: section, line, new mark, read mark, token. The
+# optional flag adds a Files-entry flag before the token.
 plan_records() {
-  awk '
+  awk -v mark_files_entry="${2:-0}" '
     /^[[:space:]]*```/ { infence = !infence; next }
     infence { next }
     /^## / {
@@ -76,11 +93,22 @@ plan_records() {
     }
     cur == "gate" { next }
     {
-      isnew = (tolower($0) ~ /(^|[^a-z0-9_])(new|removed|remove|deleted|delete)([^a-z0-9_]|$)/)
-      isread = (tolower($0) ~ /(^|[^a-z0-9_])(reads|read-only|fixture)([^a-z0-9_]|$)/)
+      lower = tolower($0)
+      gsub(/`[^`]*`/, "", lower)
+      if (lower ~ /(^|[^a-z0-9_])new-confirmed([^a-z0-9_]|$)/) newmark = 2
+      else if (lower ~ /(^|[^a-z0-9_])new([^a-z0-9_]|$)/) newmark = 1
+      else if (lower ~ /(^|[^a-z0-9_])(removed|remove|deleted|delete)([^a-z0-9_]|$)/) newmark = 3
+      else newmark = 0
+      isread = (tolower($0) ~ /(^|[^a-z0-9_])(reads|read-only|fixture)([^a-z0-9_]|$)/ || tolower($0) ~ /'"$_plan_read_mark"'/)
+      file_entry_line = (cur == "files" && $0 ~ /^[[:space:]]*[-*|][[:space:]]+`[^`]*`/)
       n = split($0, parts, "`")
       for (i = 2; i <= n; i += 2)
-        if (parts[i] != "") printf "%s\t%d\t%d\t%d\t%s\n", cur, NR, isnew, isread, parts[i]
+        if (parts[i] != "") {
+          if (mark_files_entry == "1")
+            printf "%s\t%d\t%d\t%d\t%d\t%s\n", cur, NR, newmark, isread, (file_entry_line && i == 2), parts[i]
+          else
+            printf "%s\t%d\t%d\t%d\t%s\n", cur, NR, newmark, isread, parts[i]
+        }
     }
   ' "$1"
 }
@@ -95,6 +123,10 @@ _plan_plain() {
       "$fn" symbol "${p#*::}"
       return 0 ;;
   esac
+  if [ "$CUR_SEC" = files ] && [ "${CUR_FILES_ENTRY:-0}" = 1 ]; then
+    "$fn" path "$p"
+    return 0
+  fi
   if is_path "$p"; then
     "$fn" path "$p"
   elif is_symbol "$p"; then
@@ -179,20 +211,31 @@ covered() {
 
 # _plan_files_awk MODE: the `## Files` entry reader. A Files entry is a list item
 # or table row whose first backticked token follows its marker directly; prose
-# lines and prose before the token contribute nothing. MODE "lines" prints
-# "N<TAB>token" (N the plan line), any other MODE prints the token.
+# lines and prose before the token contribute nothing. An entry is a read when
+# its line holds the shared "(read)" mark after the token, or when it sits
+# under a Reads sub-heading of Files; anything else is a write, so a line
+# that cannot be classified is claimed. MODE "lines" prints
+# "N<TAB>token" (N the plan line), "entries" prints "token<TAB>read|write",
+# "writes" skips read-marked entries, and other modes print every token.
 _plan_files_awk='
-  /^## Files([[:space:]]|$)/ { f = 1; next }
+  /^## Files([[:space:]]|$)/ { f = 1; readsec = 0; next }
   f && /^## / { exit }
+  f && tolower($0) ~ /^#+[[:space:]]*reads?([-[:space:]:()]|$)/ { readsec = 1; next }
+  f && /^#+[[:space:]]/ { readsec = 0; next }
   f && match($0, /^[[:space:]]*([-*]|\|)[[:space:]]+`[^`]*`/) {
     t = substr($0, RSTART, RLENGTH); sub(/^[^`]*`/, "", t); sub(/`$/, "", t)
     if (t == "") next
-    if (mode == "lines") print NR "\t" t; else print t
+    rest = substr($0, RSTART + RLENGTH)
+    read = (readsec || tolower(rest) ~ /'"$_plan_read_mark"'/)
+    if (mode == "entries") print t "\t" (read ? "read" : "write")
+    else if (mode == "lines") print NR "\t" t
+    else if (mode == "writes" && read) next
+    else print t
   }'
 
-# plan_files_pathspecs PLAN: one path per line from the `## Files` entries. Blank
-# tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
-plan_files_pathspecs() { awk -v mode=paths "$_plan_files_awk" "$1"; }
+# plan_files_pathspecs PLAN [all|writes]: one path per line from the `## Files`
+# entries. Blank tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
+plan_files_pathspecs() { awk -v mode="${2:-all}" "$_plan_files_awk" "$1"; }
 
 # plan_bare_dirs PLAN WORKTREE: one "Files line N: ..." line per entry whose path
 # has no slash and is a directory in WORKTREE: a git pathspec that covers the

@@ -76,10 +76,11 @@ bash "$TKT" "$S" require fruit absent-key 2>"$T/err-req.txt" && fail "require wi
 grep -q 'absent-key' "$T/err-req.txt" || fail "require names the missing key"
 
 # a held lock makes set exit 2 and names the pid in the lock
+# (TKT_STATE_LOCK_WAIT=1 keeps the wait-bound default of 30 s out of the suite)
 S2="$T/l.state"
 mkdir "$S2.lock"
 echo "424242" >"$S2.lock/pid"
-bash "$TKT" "$S2" set k v 2>"$T/err-lock.txt" && fail "set under a held lock exits non-zero"
+TKT_STATE_LOCK_WAIT=1 bash "$TKT" "$S2" set k v 2>"$T/err-lock.txt" && fail "set under a held lock exits non-zero"
 [ "$?" = "2" ] || fail "set under a held lock exits 2"
 grep -q '424242' "$T/err-lock.txt" || fail "a held lock names the pid in the lock"
 [ ! -e "$S2" ] || fail "a held lock writes nothing"
@@ -87,9 +88,10 @@ grep -q '424242' "$T/err-lock.txt" || fail "a held lock names the pid in the loc
 rm -rf "$S2.lock"
 
 # a lock without a pid file still blocks with exit 2
+# (TKT_STATE_LOCK_WAIT=1 keeps the wait-bound default of 30 s out of the suite)
 S4="$T/nl.state"
 mkdir "$S4.lock"
-bash "$TKT" "$S4" set k v 2>"$T/err-nl-lock.txt" && fail "set under a pid-less lock exits non-zero"
+TKT_STATE_LOCK_WAIT=1 bash "$TKT" "$S4" set k v 2>"$T/err-nl-lock.txt" && fail "set under a pid-less lock exits non-zero"
 [ "$?" = "2" ] || fail "set under a pid-less lock exits 2"
 grep -q 'tkt-state: state locked$' "$T/err-nl-lock.txt" || fail "a pid-less lock uses the generic message"
 [ -d "$S4.lock" ] || fail "a pid-less lock is left in place"
@@ -108,6 +110,54 @@ bash "$TKT" "$S" set bad "$(printf 'x\ny')" 2>"$T/err-nl.txt" && fail "a value w
 [ "$?" = "2" ] || fail "a value with a newline exits 2"
 bash "$TKT" "$S" get bad >/dev/null 2>&1 && fail "a rejected value is not stored"
 [ "$?" = "2" ] || fail "a rejected value stays missing"
+
+# set head only stores a full 40-hex commit SHA; a short SHA would compare
+# unequal to the worktree HEAD and report bogus drift on the next command
+HS="$T/head.state"
+bash "$TKT" "$HS" set head abc1234 2>"$T/err-short-head.txt" && fail "set head with a short SHA exits non-zero"
+[ "$?" = "2" ] || fail "set head with a short SHA exits 2"
+grep -q 'head' "$T/err-short-head.txt" || fail "a short head names the key"
+[ ! -e "$HS" ] || fail "a rejected short head writes nothing"
+FULL=0123456789abcdef0123456789abcdef01234567
+bash "$TKT" "$HS" set head "$FULL" || fail "set head with a full SHA exits 0"
+[ "$(bash "$TKT" "$HS" get head)" = "$FULL" ] || fail "get returns the stored full head"
+JH="${HS%.state}.journal"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z head <none> -> '"$FULL"'$' "$JH" \
+  || fail "setting an unset head journals the move from <none>"
+HEAD_MOVES="$(wc -l <"$JH" | tr -d ' ')"
+bash "$TKT" "$HS" set head "$FULL" || fail "setting the same head exits 0"
+[ "$(wc -l <"$JH" | tr -d ' ')" = "$HEAD_MOVES" ] || fail "setting the same head writes no journal line"
+NEXT=1123456789abcdef0123456789abcdef01234567
+bash "$TKT" "$HS" set head "$NEXT" || fail "changing head exits 0"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z head '"$FULL"' -> '"$NEXT"'$' "$JH" \
+  || fail "changing head journals the previous and new values"
+HEAD_MOVES="$(wc -l <"$JH" | tr -d ' ')"
+bash "$TKT" "$HS" set note unchanged || fail "setting another key exits 0"
+[ "$(wc -l <"$JH" | tr -d ' ')" = "$HEAD_MOVES" ] || fail "setting another key writes no head journal line"
+bash "$TKT" "$HS" set head "${FULL%?}z" 2>/dev/null && fail "set head with non-hex exits non-zero"
+[ "$?" = "2" ] || fail "set head with non-hex exits 2"
+[ "$(bash "$TKT" "$HS" get head)" = "$NEXT" ] || fail "a rejected non-hex head keeps the old value"
+bash "$TKT" "$HS" add head abc1234 2>/dev/null && fail "add head with a short SHA exits non-zero"
+[ "$?" = "2" ] || fail "add head with a short SHA exits 2"
+
+# every other commit-valued key rejects a non-SHA on both write paths, while
+# an empty reset still succeeds where callers clear the key
+for basekey in plan_verdict_base verified_base review_head reviewed; do
+  BKS="$T/base-$basekey.state"
+  bash "$TKT" "$BKS" set "$basekey" abc1234 2>"$T/err-short-$basekey.txt" && fail "set $basekey with a short SHA exits non-zero"
+  [ "$?" = "2" ] || fail "set $basekey with a short SHA exits 2"
+  grep -q "$basekey" "$T/err-short-$basekey.txt" || fail "a short $basekey names the key"
+  [ ! -e "$BKS" ] || fail "a rejected short $basekey writes nothing"
+  bash "$TKT" "$BKS" add "$basekey" garbage 2>/dev/null && fail "add $basekey with garbage exits non-zero"
+  [ "$?" = "2" ] || fail "add $basekey with garbage exits 2"
+  [ ! -e "$BKS" ] || fail "a rejected $basekey add writes nothing"
+  bash "$TKT" "$BKS" set "$basekey" "$FULL" || fail "set $basekey with a full SHA exits 0"
+  [ "$(bash "$TKT" "$BKS" get "$basekey")" = "$FULL" ] || fail "get returns the stored full $basekey"
+done
+# callers clear these keys by writing empty, so an empty write still resets them
+for basekey in plan_verdict_base verified_base; do
+  bash "$TKT" "$T/base-$basekey.state" set "$basekey" "" || fail "set $basekey to empty exits 0"
+done
 
 # journal appends a timestamped line to the sibling .journal file
 S3="$T/j.state"
@@ -287,6 +337,68 @@ fi
 [ "$live_owner_rc" = "2" ] || fail "live-owner lock exits 2 after the budget"
 grep -q "state locked by pid $$" "$T/err-live-owner.txt" || fail "live-owner lock names the holder"
 [ -d "$S8.lock" ] || fail "live-owner lock is left in place"
+
+# A live holder that outlives TKT_STATE_LOCK_WAIT exits 2 naming its pid,
+# and the live lock is left in place. The holder blocks reading a fifo the
+# test never feeds, so it stays alive for the whole bound by construction
+# instead of racing a sleep.
+SWB="$T/wait-bound.state"
+mkdir "$SWB.lock"
+mkfifo "$SWB.fifo"
+( read -r _ <>"$SWB.fifo" ) &
+bound_holder=$!
+kill -0 "$bound_holder" 2>/dev/null || fail "wait-bound holder starts before its deadline"
+printf '%s %s\n' "$(hostname)" "$bound_holder" >"$SWB.lock/pid"
+if TKT_STATE_LOCK_WAIT=1 bash "$TKT" "$SWB" set k v 2>"$T/err-wait-bound.txt"; then
+  bound_rc=0
+else
+  bound_rc=$?
+fi
+kill "$bound_holder" 2>/dev/null || true
+wait "$bound_holder" 2>/dev/null || true
+[ "$bound_rc" = "2" ] || fail "live-held lock exits 2 after the wait bound"
+grep -q "$bound_holder" "$T/err-wait-bound.txt" || fail "wait-bound timeout names the holder pid"
+[ -d "$SWB.lock" ] || fail "wait-bound timeout leaves the live lock in place"
+rm -rf "$SWB.lock" "$SWB.fifo"
+
+# A holder that releases within the bound lets the write succeed, even past
+# the old fixed retry budget of about two seconds. The holder blocks reading
+# a fifo and is released only after the writer signals it hit the held lock,
+# so the write provably waited on contention rather than on a timer.
+SWR="$T/wait-release.state"
+mkdir "$SWR.lock"
+mkfifo "$SWR.fifo"
+( read -r _ <>"$SWR.fifo" ) &
+release_holder=$!
+kill -0 "$release_holder" 2>/dev/null || fail "wait-release holder starts before its deadline"
+printf '%s %s\n' "$(hostname)" "$release_holder" >"$SWR.lock/pid"
+: >"$T/wait-release.sig"
+TKT_STATE_TEST_LOCK_SIGNAL="$T/wait-release.sig" bash "$TKT" "$SWR" set k v 2>"$T/err-wait-release.txt" &
+release_writer=$!
+release_wait=0
+while [ ! -s "$T/wait-release.sig" ] && kill -0 "$release_writer" 2>/dev/null && [ "$release_wait" -lt 500 ]; do
+  sleep 0.01
+  release_wait=$((release_wait + 1))
+done
+if [ ! -s "$T/wait-release.sig" ]; then
+  kill "$release_writer" 2>/dev/null || true
+  wait "$release_writer" 2>/dev/null || true
+  kill "$release_holder" 2>/dev/null || true
+  wait "$release_holder" 2>/dev/null || true
+  fail "wait-release writer signals its held-lock attempt before its deadline"
+fi
+kill -0 "$release_holder" 2>/dev/null || fail "wait-release holder stays alive until the writer signals"
+printf '\n' >"$SWR.fifo"
+wait "$release_holder" 2>/dev/null || true
+if wait_bounded "$release_writer"; then
+  release_writer_rc=0
+else
+  release_writer_rc=$?
+fi
+[ "$release_writer_rc" = "0" ] || fail "set succeeds once the holder releases within the bound"
+[ "$(bash "$TKT" "$SWR" get k)" = "v" ] || fail "wait-then-write stores the value"
+[ ! -e "$SWR.lock" ] || fail "wait-then-write removes the reaped lock"
+rm -f "$SWR.fifo"
 
 # Reads ignore a held write lock.
 S10="$T/read-under-lock.state"

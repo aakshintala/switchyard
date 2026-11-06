@@ -18,6 +18,31 @@ printf 'a __A__ b __B__ c\n' >"$T/t.md"
 out="$(bash "$FILL" "$T/t.md" 'A=1' 'B=2')" || fail "basic fill exits 0"
 [ "$out" = "a 1 b 2 c" ] || fail "basic fill content: got [$out]"
 
+# a bare template name resolves to the pack's brief (issue #1083); a path keeps working
+out="$(bash "$FILL" planner BASE=x ISSUE=1 PACK=none PLAN=/p PREFLIGHT=/pf REPO=o/r WORKFLOW_DOC=/w 2>"$T/err-bare.txt")" || fail "bare template name exits 0"
+case "$out" in *"o/r"*) ;; *) fail "bare template name fills the planner brief, got [$out]" ;; esac
+[ ! -s "$T/err-bare.txt" ] || fail "bare template name: nothing on stderr"
+
+# a relative symlink from an empty directory still finds the pack's sibling brief
+relative_symlink_case() (
+  link_temp="$(mktemp -d "${TMPDIR:-/tmp}/test-fill-brief-link.XXXXXX")"
+  trap 'rm -rf "$link_temp"' EXIT
+  mkdir "$link_temp/empty"
+  link_target="$(python3 -c 'import os,sys; print(os.path.relpath(os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])))' "$FILL" "$link_temp/empty")"
+  ln -s "$link_target" "$link_temp/empty/fill-brief"
+  cd "$link_temp/empty" || exit 1
+  HOME="$T/no-installed-skills" ./fill-brief planner BASE=x ISSUE=1 PACK=none PLAN=/p PREFLIGHT=/pf REPO=o/r WORKFLOW_DOC=/w
+)
+out="$(relative_symlink_case 2>"$T/err-symlink.txt")" || fail "relative symlink finds the pack's brief"
+case "$out" in *"o/r"*) ;; *) fail "relative symlink fills the planner brief, got [$out]" ;; esac
+[ ! -s "$T/err-symlink.txt" ] || fail "relative symlink is silent on stderr"
+
+bash "$FILL" nosuchbrief 'A=1' >/dev/null 2>"$T/err-bare2.txt"; [ "$?" = "2" ] || fail "unknown bare name exits 2"
+grep -q 'no such template: nosuchbrief' "$T/err-bare2.txt" || fail "unknown bare name is named"
+grep -q 'available templates:.*planner' "$T/err-bare2.txt" || fail "unknown bare name lists available templates"
+out="$(cd "$T" && bash "$FILL" t.md 'A=1' 'B=2')" || fail "relative path with no / exits 0"
+[ "$out" = "a 1 b 2 c" ] || fail "relative path with no / fills the file, got [$out]"
+
 # unfilled placeholder: exit 1, nothing on stdout, named on stderr
 printf 'hello __NAME__, __NAME__ again, __OTHER__\n' >"$T/u.md"
 stdout="$(bash "$FILL" "$T/u.md" 2>"$T/err.txt")" && fail "unfilled exits 1"
@@ -203,6 +228,20 @@ stdout="$(bash "$FILL" --out "$T/should-not-exist.md" "$T/ou.md" 2>"$T/err-ou.tx
 [ -z "$stdout" ] || fail "unfilled --out prints nothing on stdout"
 grep -q '^unfilled: __NAME__$' "$T/err-ou.txt" || fail "unfilled --out names __NAME__"
 [ ! -e "$T/should-not-exist.md" ] || fail "unfilled --out writes nothing"
+
+# --out refuses a filled brief that tells a lane to bypass a hook
+printf 'push with --no-verify\n' >"$T/bypass.md"
+stdout="$(bash "$FILL" --out "$T/bypass-out.md" "$T/bypass.md" 2>"$T/err-bypass.txt")"; rc=$?
+[ "$rc" = "1" ] || fail "bypass --out exits 1"
+[ -z "$stdout" ] || fail "bypass --out prints nothing on stdout"
+[ "$(cat "$T/err-bypass.txt")" = "$T/bypass-out.md:1: push with --no-verify" ] || fail "bypass --out prints lint hit on stderr"
+[ "$(cat "$T/bypass-out.md")" = "push with --no-verify" ] || fail "bypass --out wrote the filled brief before linting"
+mkdir -p "$T/fill-bin"
+ln -s "$FILL" "$T/fill-bin/fill-brief" || fail "symlink fill-brief"
+stdout="$(bash "$T/fill-bin/fill-brief" --out "$T/bypass-symlink-out.md" "$T/bypass.md" 2>"$T/err-bypass-symlink.txt")"; rc=$?
+[ "$rc" = "1" ] || fail "symlinked bypass --out exits 1"
+[ -z "$stdout" ] || fail "symlinked bypass --out prints nothing on stdout"
+[ "$(cat "$T/err-bypass-symlink.txt")" = "$T/bypass-symlink-out.md:1: push with --no-verify" ] || fail "symlinked bypass --out finds brief-lint"
 
 # --out with a newline in the path exits 2, nothing on stdout, writes nothing
 nl_path="$T/bad

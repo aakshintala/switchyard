@@ -4,6 +4,12 @@ Follow the scoped-verify mode of `__SKILLS__/code-review/SKILL.md`. Your working
 
 __FINDINGS__
 
+## Earlier posted review rounds
+
+The posted review-pr rounds from `--since` onward are appended automatically; changes answering findings in those rounds are in scope. The findings file carries what was never posted: CI and mutant findings, rulings, and refutations.
+
+__POSTED_ROUNDS__
+
 Read the code at HEAD before calling any finding open: a finding whose fix is in the repair diff is fixed, whatever the findings file's wording or its line numbers say (they point at the reviewed head).
 
 A finding carrying `refuted: <evidence>` is judged as the skill says, and stays open only when that evidence or its reasoning fails at HEAD: quote the line that fails, and do not re-raise the finding on other grounds. A new finding is a P1 or P2 defect on a line the repair diff added or changed, or an edit beyond the findings and their classes; a style or size remark on code the reviewed head already had is not one.

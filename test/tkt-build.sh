@@ -49,6 +49,9 @@ ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 ln -s "$REAL_BIN/job-record" "$T/bin/job-record" || fail "symlink job-record"
+ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
+# Lane and fix slots need a fence grant (test/tkt-job.sh covers that); these cases test the build flow.
+export FW_NO_FENCE="test/tkt-build.sh exercises the build flow, not the fence"
 
 # Stub delegate: run mints a DONE record at once (lane carries one commit for
 # --expect-commits; map carries $T/map-text); ask modes mint NEEDS_CONTEXT.
@@ -91,6 +94,10 @@ STATUS: DONE"
       status="DONE_WITH_CONCERNS"
       concerns='"lane is unsure about X"'
     fi
+    if [ "\$mode" = "verify-ok" ] && [ "\$slot" = "other" ]; then
+      text="PLAN OK
+held: every invariant survived its breaking input"
+    fi
     if { [ "\$mode" = "ask-lane" ] && [ "\$slot" = "lane" ]; } || { [ "\$mode" = "ask-map" ] && [ "\$slot" = "map" ]; }; then
       status="NEEDS_CONTEXT"
       text="\$(cat "$T/ask-text")"
@@ -125,6 +132,13 @@ printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 case " \$* " in
   *" pr view "*)
     if [ -f "$T/noview" ]; then exit 1; fi
+    # Real gh cannot view an empty pr number: fail like it does, so a
+    # missing pr never views as the caller's branch.
+    prev=""
+    for a in "\$@"; do
+      if [ "\$prev" = "view" ] && [ -z "\$a" ]; then exit 1; fi
+      prev="\$a"
+    done
     ;;
 esac
 case " \$* " in
@@ -199,7 +213,9 @@ chmod +x "$T/bin/mutant-verdicts"
 
 # Stub review-pr: start launches one id per requested axis (--axes, default all
 # three); tkt-build persists each id as it launches. collect copies $T/findings-src
-# to --findings-out, prints $T/collect-out and exits $T/collect-rc.
+# to --findings-out, prints $T/collect-out and exits $T/collect-rc. With a
+# $T/collect-nowrite flag file present, collect prints and exits without
+# writing --findings-out, like an early RUNNING exit.
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
 sub="\${1:-}"; shift || true
@@ -239,7 +255,7 @@ if [ "\$sub" = "collect" ]; then
       *) shift ;;
     esac
   done
-  cp "$T/findings-src" "\$out"
+  if [ ! -f "$T/collect-nowrite" ]; then cp "$T/findings-src" "\$out"; fi
   cat "$T/collect-out"
   exit "\$(cat "$T/collect-rc")"
 fi
@@ -340,7 +356,7 @@ EOF
   printf '0' >"$T/verdicts-rc"
   printf 'src/c.rs:5:6: MISSED\tcaught\n' >"$T/verdicts"
   printf '{"artifacts":[]}\n' >"$T/artifacts-json"
-  rm -f "$T/empty-pr" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err"
+  rm -f "$T/empty-pr" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err" "$T/collect-nowrite"
   printf '0' >"$T/dcounter"
   printf '0' >"$T/rcounter"
   : >"$T/calls.log"
@@ -437,6 +453,17 @@ expect_state round 0 happy
 grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is journaled"
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
+
+# --- the real lane brief fills and carries the second-patch stop rule (#982) ---
+setup_case real-lane-brief
+cp "$T/home/.agents/skills/planning/briefs/lane.md" "$T/lane-stub.md" || fail "real-lane-brief: keep the stub lane brief"
+cp "$SCRIPT_DIR/../skills/planning/briefs/lane.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: install the real lane brief"
+run_build --lane-model lm --review-model rrm --overbuild-model oom
+[ "$RC" -eq 0 ] || fail "real-lane-brief exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+brief="$(grep '^run|id=stub-1|' "$T/calls.log" | sed 's/.*prompt=//')"
+cp "$T/lane-stub.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: restore the stub lane brief"
+grep -q 'second patch' "$brief" || fail "real-lane-brief: the filled brief carries the second-patch stop rule"
+grep -q 'STATUS: BLOCKED' "$brief" || fail "real-lane-brief: the filled brief names the BLOCKED stop"
 
 # --- body_ends wins over body_has for the lane ATTRIBUTION ---
 setup_case attr-ends
@@ -668,7 +695,7 @@ run_build
 expect_verdict "TKT tkt-build GATE-ERROR log=*" "gate-unpushed"
 grep -q "drift" <<<"$OUT" || fail "gate-unpushed: the digest names the drift"
 
-# --- a stale plan stops the build before the lane ---
+# --- an unmarked Files entry is a write and stales when main moves it ---
 setup_case stale
 mkdir -p "$CDIR/seed/src"
 printf 'main change\n' >"$CDIR/seed/src/a.txt"
@@ -686,6 +713,22 @@ run_build
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "stale"
 grep -q "src/a.txt" <<<"$OUT" || fail "stale: the digest names the changed file"
 grep -q "^run|" "$T/calls.log" && fail "stale: the lane never dispatches"
+
+# --- a read-marked Files entry can move on main without staling the build ---
+setup_case stale-read
+printf 'main change\n' >"$CDIR/seed/base.txt"
+git -C "$CDIR/seed" add base.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves read path"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n- `base.txt` (read)\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "stale-read: seed matching verdict base"
+run_build
+[ "$RC" -eq 0 ] || fail "stale-read exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "stale-read"
 
 # --- only a Files line's first backticked token is a pathspec: a later
 # non-path token (/reload) must not fail git, and the changed path still counts ---
@@ -905,11 +948,42 @@ grep -q "^gate|" "$T/calls.log" && fail "from-review: the gate never runs"
 grep -q "pr list" "$T/calls.log" && fail "from-review: the PR list is never read"
 grep -q "^review-start|" "$T/calls.log" || fail "from-review: review still starts"
 
-# --- --from review without pr and head names the missing key ---
+# --- --from review without pr and head derives them from the branch PR ---
+setup_case review-derives-pr
+run_build --from review
+[ "$RC" -eq 0 ] || fail "review-derives-pr exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-derives-pr"
+expect_state pr 7 review-derives-pr
+expect_state head "$H" review-derives-pr
+grep -q "^review-start|" "$T/calls.log" || fail "review-derives-pr: review still starts"
+
+# --- --from review with head set but pr unset derives pr and proceeds ---
+setup_case review-head-only
+bash "$TKT_STATE" "$S" set head "$H" || fail "set head"
+run_build --from review
+[ "$RC" -eq 0 ] || fail "review-head-only exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-head-only"
+expect_state pr 7 review-head-only
+expect_state head "$H" review-head-only
+grep -q "pr list" "$T/calls.log" || fail "review-head-only: the branch PR is looked up"
+grep -q "^review-start|" "$T/calls.log" || fail "review-head-only: review still starts"
+
+# --- --from review with pr unset and a stale stored head reports DRIFT ---
+setup_case review-stale-head
+bash "$TKT_STATE" "$S" set head 0000000000000000000000000000000000000000 || fail "set stale head"
+run_build --from review
+[ "$RC" -eq 3 ] || fail "review-stale-head exits 3 (rc=$RC)"
+expect_verdict "TKT tkt-build DRIFT state=0000000000000000000000000000000000000000 worktree=$H pr=$H log=*" "review-stale-head"
+expect_state head 0000000000000000000000000000000000000000 review-stale-head
+grep -q "^review-start|" "$T/calls.log" && fail "review-stale-head: review never starts"
+
+# --- --from review without pr and head and no PR names the missing key ---
 setup_case review-missing-pr
+touch "$T/empty-pr"
 run_build --from review
 [ "$RC" -eq 2 ] || fail "review-missing-pr exits 2 (rc=$RC)"
 expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "review-missing-pr"
+grep -q "^gate|" "$T/calls.log" && fail "review-missing-pr: the gate never runs"
 
 # --- --from review with a moved PR head reports the drift ---
 setup_case review-drift
@@ -965,6 +1039,26 @@ run_build
 [ "$RC" -eq 1 ] || fail "mapfail exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "mapfail"
 grep -q "map failed" <<<"$OUT" || fail "mapfail: the digest notes the map stop"
+
+# --- a map-only tooling note leaves the build state re-runnable ---
+setup_case map-note-only
+printf 'mutant_job=%s\n' Selection >>"$S"
+grep -v '^model\.map=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+run_build
+[ "$RC" -eq 1 ] || fail "map-note-only exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=0 p3=0 mutants=0 findings=* log=*" "map-note-only"
+grep -q "map failed: missing model.map" <<<"$OUT" || fail "map-note-only: the digest notes the map stop"
+for key in reviewed findings round; do
+  if bash "$TKT_STATE" "$S" get "$key" >/dev/null 2>&1; then
+    fail "map-note-only: state $key should remain unset"
+  fi
+done
+bash "$TKT_STATE" "$S" set model.map mm || fail "map-note-only: restore map model"
+run_build
+[ "$RC" -eq 1 ] || fail "map-note-only retry exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build CHANGES p1=0 p2=2 p3=0 mutants=2 findings=* log=*" "map-note-only retry"
+expect_state reviewed "$H" "map-note-only retry"
+expect_state round 0 "map-note-only retry with findings"
 
 # --- a mutant job with no such job name lists no mutants and skips the map ---
 setup_case mutants-nojob
@@ -1109,6 +1203,54 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-par
 [ "$(grep -c -- ' --axes standards' "$T/calls.log")" -eq 1 ] || fail "review-partial: standards launched once across both runs"
 rv2="$(bash "$TKT_STATE" "$S" get review_ids)"; case " $rv2 " in " r1 "*|" r1"|*" r1"*) ;; *) fail "review-partial: first id reused, got [$rv2]";; esac
 [ "$(printf '%s' "$rv2" | wc -w | tr -d ' ')" -eq 3 ] || fail "review-partial: three ids after recovery, got [$rv2]"
+
+# --- a BAD-VERDICT axis restarts on the rerun; valid axes keep their ids ---
+setup_case bad-verdict-rerun
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+BAD-VERDICT spec VERDICT spec: PASS
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+printf '1' >"$T/collect-rc"
+run_build
+[ "$RC" -eq 1 ] || fail "bad-verdict-rerun first exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "bad-verdict-rerun first"
+rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$rv" = "r1 RESTART r3" ] || fail "bad-verdict-rerun: the spec id restarts, the others stay, got [$rv]"
+[ "$(bash "$TKT_STATE" "$S" get review_head)" = "$H" ] || fail "bad-verdict-rerun: review_head stays on the head"
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+VERDICT spec: APPROVE
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+printf '0' >"$T/collect-rc"
+run_build
+[ "$RC" -eq 0 ] || fail "bad-verdict-rerun second exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "bad-verdict-rerun second"
+[ "$(grep -c -- '--axes standards' "$T/calls.log")" -eq 1 ] || fail "bad-verdict-rerun: standards starts once across both runs"
+[ "$(grep -c -- '--axes spec' "$T/calls.log")" -eq 2 ] || fail "bad-verdict-rerun: spec starts again on the rerun"
+[ "$(grep -c -- '--axes overbuild' "$T/calls.log")" -eq 1 ] || fail "bad-verdict-rerun: overbuild starts once across both runs"
+rv2="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$rv2" = "r1 r4 r3" ] || fail "bad-verdict-rerun: valid ids kept, spec renewed, got [$rv2]"
+
+# --- a collect without one axis's verdict is REVIEW-INCOMPLETE, not CHANGES ---
+setup_case missing-axis-verdict
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+VERDICT standards: APPROVE
+VERDICT overbuild: APPROVE
+CI deadbeef pass
+EOF
+printf '0' >"$T/collect-rc"
+run_build
+[ "$RC" -eq 1 ] || fail "missing-axis-verdict exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "missing-axis-verdict"
+grep -q "spec" <<<"$OUT" || fail "missing-axis-verdict: the digest names spec"
+case "$(first_line)" in "TKT tkt-build CHANGES"*|"TKT tkt-build APPROVE"*) fail "missing-axis-verdict: no CHANGES or APPROVE without every verdict";; esac
+rv="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$rv" = "r1 RESTART r3" ] || fail "missing-axis-verdict: the spec id restarts, got [$rv]"
+if bash "$TKT_STATE" "$S" get round >/dev/null 2>&1; then fail "missing-axis-verdict: round stays unset so the rerun can proceed"; fi
 
 # --- a moved PR head is rejected before state writes ---
 setup_case moved-head
@@ -1532,6 +1674,11 @@ bash "$TKT_STATE" "$S" set plan_verdict skipped || fail "seed skipped verdict"
 run_build
 [ "$RC" -eq 0 ] || fail "skipped verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "skipped verdict proceeds"
+setup_case verdict-triaged
+bash "$TKT_STATE" "$S" set plan_verdict triaged || fail "seed triaged verdict"
+run_build
+[ "$RC" -eq 0 ] || fail "triaged verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "triaged verdict proceeds"
 
 # --- a missing verdict refuses; --no-verifier records or refreshes skipped ---
 setup_case verdict-none
@@ -1558,6 +1705,17 @@ grep -q '^job|' "$T/calls.log" && fail "--no-verifier over LINES dispatches no t
 expect_state plan_verdict lines "--no-verifier preserves stored verdict"
 expect_state plan_verdict_base "$H" "--no-verifier preserves rejection base"
 
+# --- changing the plan text invalidates LINES; --no-verifier can then build ---
+setup_case verdict-no-verifier-edited-lines
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "seed edited-plan LINES verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_hash "$(git hash-object "$CDIR/plan.md")" || fail "seed edited-plan verdict hash"
+awk '/^## Gate$/ { print "All plan lines are closed."; print "" } { print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+run_build --no-verifier
+[ "$RC" -eq 0 ] || fail "--no-verifier replaces an edited-plan LINES verdict (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "edited-plan --no-verifier build"
+expect_state plan_verdict skipped "edited-plan --no-verifier stores skipped"
+expect_state plan_verdict_hash "$(git hash-object "$CDIR/plan.md")" "edited-plan --no-verifier stores current hash"
+
 # --- accepted verdicts require the exact current plan base ---
 setup_case verdict-stale
 bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed mismatched verdict base"
@@ -1565,6 +1723,13 @@ run_build
 [ "$RC" -eq 1 ] || fail "mismatched verdict base exits 1"
 expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "mismatched verdict base"
 grep -q '^job|' "$T/calls.log" && fail "stale verdict dispatches no tkt-job"
+setup_case verdict-triaged-stale
+bash "$TKT_STATE" "$S" set plan_verdict triaged || fail "seed triaged stale verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed mismatched triaged base"
+run_build
+[ "$RC" -eq 1 ] || fail "triaged verdict at a changed Base exits 1"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=stale log=*" "triaged verdict at a changed Base"
+grep -q '^job|' "$T/calls.log" && fail "stale triaged verdict dispatches no tkt-job"
 setup_case verdict-stale-flag
 bash "$TKT_STATE" "$S" set plan_verdict_base 0000000000000000000000000000000000000000 || fail "seed flagged mismatched verdict base"
 run_build --no-verifier
@@ -1646,5 +1811,231 @@ run_build --no-verifier
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "old skipped verdict with flag"
 expect_state plan_verdict skipped "old skipped verdict with flag"
 expect_state plan_verdict_base "$H" "old skipped base refreshes with flag"
+
+# --- a plan with Outcome: measurement runs the gate, skips the PR, review
+# and CI steps, and ends MEASURED with exit 0 and no gh pr list call ---
+setup_case measured
+{
+  printf 'Base: %s\nOutcome: measurement\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+run_build
+[ "$RC" -eq 0 ] || fail "measured exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build MEASURED* log=*" "measured"
+grep -q "pr list" "$T/calls.log" && fail "measured: no gh pr list call"
+grep -q "^gate|" "$T/calls.log" || fail "measured: the gate still runs"
+grep -q "^review-start|" "$T/calls.log" && fail "measured: review never starts"
+grep -q "^review-collect|" "$T/calls.log" && fail "measured: reviews never collect"
+grep -q "prompt=.*-map-" "$T/calls.log" && fail "measured: no map job dispatches"
+grep -q "^ghci|" "$T/calls.log" && fail "measured: no CI wait runs"
+expect_state reviewed "$H" measured
+expect_state round 0 measured
+grep -q "tkt-build MEASURED" "$CDIR/tkt.journal" || fail "measured: the verdict is journaled"
+
+# --- a plan without the Outcome line still needs a PR when none exists ---
+setup_case outcome-default
+touch "$T/empty-pr"
+run_build
+[ "$RC" -eq 2 ] || fail "outcome-default exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "outcome-default"
+grep -q "^gate|" "$T/calls.log" && fail "outcome-default: the gate never runs"
+
+# --- a measurement plan with a stored head and no PR still ends MEASURED ---
+setup_case measured-stored-head
+{
+  printf 'Base: %s\nOutcome: measurement\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set head "$H" || fail "seed stored head"
+touch "$T/empty-pr"
+run_build
+[ "$RC" -eq 0 ] || fail "measured stored head exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build MEASURED* log=*" "measured stored head"
+grep -q "pr list" "$T/calls.log" && fail "measured stored head: no gh pr list call"
+grep -q "^gate|" "$T/calls.log" || fail "measured stored head: the gate still runs"
+
+# --- a measurement plan with --from review still runs the gate ---
+setup_case measured-from-review
+{
+  printf 'Base: %s\nOutcome: measurement\n' "$H"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`false`\n'
+} >"$CDIR/plan.md"
+run_build --from review
+[ "$RC" -eq 1 ] || fail "measured from-review with a failing gate exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build FAIL rc=1 log=*" "measured from-review gate"
+grep -q "^gate|" "$T/calls.log" || fail "measured from-review: the gate still runs"
+
+# --- part 2 writes -part2- findings and leaves the part-1 file byte-identical ---
+setup_case part2-findings
+bash "$TKT_STATE" "$S" set part 2 || fail "part2-findings: set part"
+printf 'PART1-FINDINGS\n' >"$CDIR/run/switchyard-528-findings-r0.md"
+cp "$CDIR/run/switchyard-528-findings-r0.md" "$T/part1-copy.md"
+run_build
+[ "$RC" -eq 0 ] || fail "part2-findings exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "part2-findings"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+[ "$ffile" = "$CDIR/run/switchyard-528-part2-findings-r0.md" ] || fail "part2-findings: findings key is [$ffile]"
+[ -f "$ffile" ] || fail "part2-findings: part2 findings file missing"
+cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/part1-copy.md" || fail "part2-findings: part-1 findings file changed"
+
+# --- findings-overwrite guard: an existing destination the state did not
+# write is refused with exit 2 and left byte-identical, before collect runs ---
+setup_case findings-refuse
+printf 'UNRELATED-CONTENT\n' >"$CDIR/run/switchyard-528-findings-r0.md"
+cp "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-refuse-copy.md"
+run_build
+[ "$RC" -eq 2 ] || fail "findings-refuse exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -F -q "tkt-build: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-528-findings-r0.md" "$CDIR/stderr.txt" || fail "findings-refuse stderr missing refusal: $(cat "$CDIR/stderr.txt")"
+cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-refuse-copy.md" || fail "findings-refuse: existing file changed"
+grep -q "^review-collect|" "$T/calls.log" && fail "findings-refuse: collect ran despite refusal"
+
+# --- findings-rerun: a destination the state recorded is rewritten ---
+setup_case findings-rerun
+printf 'STALE\n' >"$CDIR/run/switchyard-528-findings-r0.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/run/switchyard-528-findings-r0.md" || fail "findings-rerun: set findings"
+bash "$TKT_STATE" "$S" journal "findings write $CDIR/run/switchyard-528-findings-r0.md" || fail "findings-rerun: journal"
+run_build
+[ "$RC" -eq 0 ] || fail "findings-rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "STALE" "$CDIR/run/switchyard-528-findings-r0.md" && fail "findings-rerun: stale content remains"
+grep -q "no open findings" "$CDIR/run/switchyard-528-findings-r0.md" || fail "findings-rerun: file not rewritten"
+
+# --- findings-failed-collect: a collect that exits early without writing
+# journals no ownership, so unrelated content later at the destination is refused ---
+setup_case findings-failed-collect
+touch "$T/collect-nowrite"
+printf '1' >"$T/collect-rc"
+cat >"$T/collect-out" <<'EOF'
+patch-id deadbeef
+RUNNING standards r1: wait with delegate watch r1 r2 r3
+RUNNING spec r2: wait with delegate watch r1 r2 r3
+RUNNING overbuild r3: wait with delegate watch r1 r2 r3
+CI deadbeef pending
+EOF
+run_build
+[ "$RC" -eq 1 ] || fail "findings-failed-collect exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build REVIEW-INCOMPLETE log=*" "findings-failed-collect"
+[ ! -e "$CDIR/run/switchyard-528-findings-r0.md" ] || fail "findings-failed-collect: no findings file after a collect that wrote nothing"
+[ -f "$CDIR/tkt.journal" ] && grep -q "findings write" "$CDIR/tkt.journal" && fail "findings-failed-collect: no findings write journal after a collect that wrote nothing"
+rm -f "$T/collect-nowrite"
+printf 'UNRELATED-CONTENT\n' >"$CDIR/run/switchyard-528-findings-r0.md"
+cp "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-failed-collect-copy.md"
+run_build
+[ "$RC" -eq 2 ] || fail "findings-failed-collect rerun exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -F -q "tkt-build: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-528-findings-r0.md" "$CDIR/stderr.txt" || fail "findings-failed-collect rerun stderr missing refusal: $(cat "$CDIR/stderr.txt")"
+cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-failed-collect-copy.md" || fail "findings-failed-collect rerun: existing file changed"
+
+# --- --from gate with main moved on a planned file but a clean merge continues ---
+setup_case gate-clean-merge
+printf 'main change\n' >"$CDIR/seed/base.txt"
+git -C "$CDIR/seed" add base.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves base"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n- `base.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "gate-clean-merge: seed matching verdict base"
+run_build --from gate
+[ "$RC" -eq 0 ] || fail "gate-clean-merge exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "gate-clean-merge"
+grep -F -q "tkt-build: plan Base $(cat "$CDIR/main0") is behind origin/main on 1 planned files; the branch merges cleanly, continuing" "$CDIR/stderr.txt" || fail "gate-clean-merge: clean-merge stderr line missing: $(cat "$CDIR/stderr.txt")"
+
+# --- --from gate with a conflicting move still exits STALE with the rerun line ---
+setup_case gate-conflict
+mkdir -p "$CDIR/seed/src"
+printf 'main change\n' >"$CDIR/seed/src/a.txt"
+git -C "$CDIR/seed" add src/a.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "gate-conflict: seed matching verdict base"
+run_build --from gate
+[ "$RC" -eq 1 ] || fail "gate-conflict exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "gate-conflict"
+grep -F -q "1. git -C $WT rebase origin/main" <<<"$OUT" || fail "gate-conflict: step 1 rebases the worktree: $OUT"
+grep -F -q "2. git -C $WT push --force-with-lease origin tkt-528" <<<"$OUT" || fail "gate-conflict: step 2 pushes the rebased branch: $OUT"
+grep -F -q "3. set the Base: line in $CDIR/plan.md to Base: $(git -C "$WT" rev-parse origin/main)" <<<"$OUT" || fail "gate-conflict: step 3 names the plan Base edit with the new sha: $OUT"
+grep -F -q "4. tkt-plan $S verify" <<<"$OUT" || fail "gate-conflict: step 4 re-verifies the plan: $OUT"
+grep -F -q "5. tkt-build $S --from gate" <<<"$OUT" || fail "gate-conflict: step 5 reruns the build: $OUT"
+grep -F -q "tkt-state $S set head" <<<"$OUT" && fail "gate-conflict: no stored head, so no head step: $OUT"
+grep -q "^gate|" "$T/calls.log" && fail "gate-conflict: the gate never runs"
+
+# --- a conflicting STALE prints numbered recovery steps that reach APPROVE ---
+# The digest's numbered commands run in order with the harness stubs (the
+# Verifier returns PLAN OK): rebase, the Base edit it names, the stored-head
+# refresh, a fresh verify, and the rerun. Step 2 is the file edit the digest
+# names, applied here the way a follower of the hint applies it.
+setup_case gate-conflict-recover
+mkdir -p "$CDIR/seed/src"
+printf 'main change\n' >"$CDIR/seed/src/a.txt"
+git -C "$CDIR/seed" add src/a.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "gate-conflict-recover: seed matching verdict base"
+bash "$TKT_STATE" "$S" set pr 7 || fail "gate-conflict-recover: set pr"
+bash "$TKT_STATE" "$S" set head "$H" || fail "gate-conflict-recover: set head"
+run_build --from gate
+[ "$RC" -eq 1 ] || fail "gate-conflict-recover exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "gate-conflict-recover"
+grep -F -q "1. git -C $WT rebase origin/main" <<<"$OUT" || fail "gate-conflict-recover: step 1 rebases the worktree: $OUT"
+grep -F -q "2. git -C $WT push --force-with-lease origin tkt-528" <<<"$OUT" || fail "gate-conflict-recover: step 2 pushes the rebased branch: $OUT"
+grep -F -q "3. set the Base: line in $CDIR/plan.md to Base: " <<<"$OUT" || fail "gate-conflict-recover: step 3 names the plan Base edit: $OUT"
+grep -F -q "4. tkt-state $S set head <new-head-sha>" <<<"$OUT" || fail "gate-conflict-recover: step 4 refreshes the stored head: $OUT"
+grep -F -q "5. tkt-plan $S verify" <<<"$OUT" || fail "gate-conflict-recover: step 5 re-verifies the plan: $OUT"
+grep -F -q "then run git -C $WT rebase --continue before step 2" <<<"$OUT" || fail "gate-conflict-recover: the continue step targets the worktree: $OUT"
+grep -F -q "6. tkt-build $S --from gate" <<<"$OUT" || fail "gate-conflict-recover: step 6 reruns the build: $OUT"
+git -C "$WT" rebase origin/main >/dev/null 2>&1 || true
+printf 'resolved\n' >"$WT/src/a.txt"
+git -C "$WT" add src/a.txt
+GIT_EDITOR=true git -C "$WT" rebase --continue || fail "gate-conflict-recover: rebase --continue"
+H2="$(git -C "$WT" rev-parse HEAD)"
+printf '%s' "$H2" >"$T/prhead"
+git -C "$WT" push -q --force-with-lease origin tkt-528 || fail "gate-conflict-recover: step 2 pushes the rebased branch"
+newbase="$(git -C "$WT" rev-parse origin/main)"
+grep -F -q "3. set the Base: line in $CDIR/plan.md to Base: $newbase" <<<"$OUT" || fail "gate-conflict-recover: step 3 fills in the new origin/main sha: $OUT"
+{ printf 'Base: %s\n' "$newbase"; tail -n +2 "$CDIR/plan.md"; } >"$CDIR/plan.tmp"
+mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set head "$H2" || fail "gate-conflict-recover: step 4 sets the rebased head"
+cp "$SCRIPT_DIR/../skills/planning/briefs/verifier.md" "$T/home/.agents/skills/planning/briefs/verifier.md" || fail "gate-conflict-recover: install the verifier brief"
+printf 'pack\n' >"$CDIR/pack.md"
+bash "$TKT_STATE" "$S" set pack "$CDIR/pack.md" || fail "gate-conflict-recover: set pack"
+bash "$TKT_STATE" "$S" set model.verifier vm || fail "gate-conflict-recover: set model.verifier"
+ln -sf "$REAL_BIN/plan-check" "$T/bin/plan-check" || fail "gate-conflict-recover: link plan-check"
+printf 'verify-ok' >"$T/delegate-mode"
+bash "$SCRIPT_DIR/../bin/tkt-plan" "$S" verify >"$CDIR/verify-out.txt" 2>"$CDIR/verify-stderr.txt" || fail "gate-conflict-recover: step 4 verify: $(cat "$CDIR/verify-stderr.txt")"
+printf 'done' >"$T/delegate-mode"
+grep -q "^TKT tkt-plan PLAN-OK " "$CDIR/verify-out.txt" || fail "gate-conflict-recover: verify records PLAN-OK: $(cat "$CDIR/verify-out.txt")"
+run_build --from gate
+[ "$RC" -eq 0 ] || fail "gate-conflict-recover rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H2 findings=* log=*" "gate-conflict-recover rerun"
+
+# --- --from lane with the same clean move still exits STALE ---
+setup_case lane-clean-stale
+printf 'main change\n' >"$CDIR/seed/base.txt"
+git -C "$CDIR/seed" add base.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves base"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n- `base.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "lane-clean-stale: seed matching verdict base"
+run_build
+[ "$RC" -eq 1 ] || fail "lane-clean-stale exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "lane-clean-stale"
+grep -q "merges cleanly" "$CDIR/stderr.txt" && fail "lane-clean-stale: lane must not continue cleanly"
+grep -q "merges cleanly" <<<"$OUT" && fail "lane-clean-stale: lane must not continue cleanly"
+grep -q "^run|" "$T/calls.log" && fail "lane-clean-stale: the lane never dispatches"
 
 echo "tkt-build: all cases passed"

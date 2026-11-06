@@ -1,19 +1,23 @@
 #!/bin/bash
 # fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>]
 #   [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>]
-#   [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]
-# Decides whether flywheel may grant the paths alone: a path conflicts with an
-# open PR touching the same file (or hunk range) and with a live lane (or a
-# fresh grant file) holding it. Fail closed: any failed or unparseable probe
-# prints ERROR, writes nothing and exits 3. Exit 0 + GRANT lines (and a grant
-# file, unless --dry) when free; exit 1 + HELD lines on conflict; exit 2 on
-# bad arguments. A whole-file hold by a pull request also prints that holder's
-# hunk windows and the complement as a --ranges argument to paste back.
+#   [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>]
+#   [--swept-to <comment id>] [--removes <symbol,...>]
+#   [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--dry]
+# The script owns grant numbering; hand-written grants take a letter suffix.
+# Grants requested paths despite overlaps with open PRs and ordinary lanes.
+# A sweep-* file claim or grant cap still blocks; unreadable probes fail closed.
+#
+# The claim's ticket state, not a process or holder name, decides whether a
+# non-sweep claim is stale: a retired lane's session can stay alive (#1313,
+# inverse of #1272). A failed or incomplete lookup leaves the state unknown, so
+# the claim is held by the live-lane check instead of refusing the grant.
 #
 # Before any hold probe it checks that the grant can mean what it says, against
 # `main`: every requested path exists unless --new declares it, and every
 # --expect <file:line:symbol> finds that symbol on that line. Either check
-# failing prints MISSING or NOSYMBOL with same-basename suggestions and exits 4,
+# failing prints MISSING or NOSYMBOL with same-basename suggestions plus a NO
+# PROBE line, and exits 4,
 # writing no grant file. Three times a grant named a path that could not hold it
 # (2026-10-17 #3753: `crates/turn/src/group.rs` for `crates/tui/src/turn/group.rs`;
 # 2026-10-31 #3666: `process/tests.rs:3154` for `process_tests.rs:3154`, where
@@ -27,8 +31,9 @@
 # (2026-10-31 #3771: `docs/events.md` came back HELD by lane #3459, whose own
 # admit calls the file a read and whose PR #3813 does not touch it; the hold
 # would have blocked the one doc row surveyor had just ordered into #3771).
-# Only the exact line `Reads:` stops the probe: a hand-written grant file's
-# prose still parses as it always did, since over-holding is the safe direction.
+# When a grant has `Paths:`, only that block through the first `##` heading is
+# probed, with `Reads:` still ending it. A hand-written grant without `Paths:`
+# keeps the older scrape through `Reads:` for compatibility.
 #
 # Two consequences of that, both paid for on 2026-10-31:
 #
@@ -36,10 +41,9 @@
 #      reads `run/fiber-<n>*-fence-grant*.md` files and open PRs, nothing else,
 #      so the next sweep hands the same path to a second lane. Every grant
 #      lands as both: the admit block the lane reads, and this file.
-#   2. Any path token named in prose *above* `Reads:` is a hold, including a
-#      sentence saying the path is released. To release a path, move it out of
-#      `Paths:` and write the reason *below* the `Reads:` label; a note above
-#      it re-holds the file it just released.
+#   2. A hand-written grant without `Paths:` still scrapes prose through
+#      `Reads:`. Put granted paths in `Paths:` and explanatory prose below a
+#      `##` heading so it cannot add another hold.
 set -u
 set -f
 _fw_run() { printf '%s' "${FW_RUN:-/Users/aakshintala/work/fiber-worktrees/flywheel/run}"; }
@@ -83,7 +87,7 @@ _fw_box_probe() {
   FW_BOX_OK=0
   FW_BOX_RC=0
   FW_BOX_RAW=""
-  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
+  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null; echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
   case "$_fw_raw" in
     *FWSEC=UPTIME*FWSEC=END*) FW_BOX_OK=1; FW_BOX_RAW="$_fw_raw" ;;
   esac
@@ -104,6 +108,19 @@ fw_box_lane_names() {
   _fw_s=$(_fw_box_section AGENTS) || return 1
   [ -n "$_fw_s" ] || return 1
   printf '%s' "$_fw_s" | _fw_lane_names_json || return 1
+  return 0
+}
+
+# Prints live Mac delegate session-lane names, `fiber-<n>` per live `delegate session`
+# the roster maps to a ticket. The Mac's sessions are local, not present in the
+# box probe's DSESS section, so probe them directly. Exit 1 when the command
+# fails, the roster is missing, or the mapper refuses the JSON (fail closed).
+fw_mac_delegate_session_lane_names() {
+  _fw_out=$("${FW_DELEGATE:-delegate}" session list --json 2>/dev/null) || return 1
+  _fw_roster=$(_fw_run)/roster
+  [ -f "$_fw_roster" ] || return 1
+  _fw_names=$(printf '%s' "$_fw_out" | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
+  printf '%s' "$_fw_names" | tr '\n' ' '
   return 0
 }
 
@@ -157,10 +174,11 @@ _fw_delegate_lane_name() {
 # whose supervisor is alive. A `delegate`-run lane is neither a `claude agents`
 # session nor a `fiber-<n>-pi.pid` file, so a probe reading only those two
 # loses the lane's hold once its grant files age out of the six-hour window --
-# the same defect the pi-lane probe below was added for. Exit 1 when the
-# registry directory is missing (fail closed).
+# the same defect the pi-lane probe below was added for. Defaults to
+# `${TMPDIR:-/tmp}/delegate-jobs`; `FW_DELEGATE_DIR` overrides it. Exit 1 when
+# that directory is missing (fail closed).
 fw_delegate_lane_names_mac() {
-  _fw_dd=${FW_DELEGATE_DIR:-/tmp/delegate-jobs}
+  _fw_dd=${FW_DELEGATE_DIR:-${TMPDIR:-/tmp}/delegate-jobs}
   [ -d "$_fw_dd" ] || return 1
   case "$-" in *f*) _fw_hadf=1;; *) _fw_hadf=0;; esac
   set +f
@@ -187,6 +205,30 @@ fw_delegate_lane_names_box() {
   return 0
 }
 
+# Prints live muse session-lane names, `fiber-<n>` per live `delegate session`
+# the roster maps to a ticket. Exit 1 when ssh failed, the section's end marker
+# is missing, or the mapper refused the JSON (fail closed).
+#
+# Without this a muse lane held nothing: fw_delegate_lane_names_box reads
+# /tmp/delegate-jobs, which holds `delegate run` jobs and not sessions, and a
+# session's cwd is the shared checkout so its ticket cannot be read off the
+# path. 2026-11-04: a sweep for #3635 printed NO LIVE LANE for #4026 and #4029
+# with both lanes running. See bin/fw-sess-lanes.
+fw_delegate_session_lane_names() {
+  _fw_box_probe
+  if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
+  _fw_s=$(_fw_box_section DSESS) || return 1
+  case "$_fw_s" in *DSESSJSONOK*) : ;; *) return 1;; esac
+  _fw_roster=$(_fw_run)/roster
+  [ -f "$_fw_roster" ] || return 1
+  # The end marker is the transport's proof, not part of the JSON: feeding it
+  # to the mapper makes json.load choke on trailing content, which reads as a
+  # refusal and fails the whole sweep closed.
+  _fw_out=$(printf '%s\n' "$_fw_s" | grep -v '^DSESSJSONOK$' | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
+  printf '%s' "$_fw_out" | tr '\n' ' '
+  return 0
+}
+
 # Prints live box pi-lane names from the one box probe. Exit 1 when ssh failed
 # or the section's end marker is missing (fail closed).
 fw_pi_lane_names_box() {
@@ -205,12 +247,35 @@ fw_mtime() {
   return 0
 }
 
-_usage() { echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--ignore-pr <n>] [--ignore-ticket <n>] [--dry]" >&2; }
+_usage() {
+  echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship" >&2
+  echo "       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive" >&2
+}
+
+if [ "${1:-}" = --require ]; then
+  [ "$#" -eq 4 ] || { _usage; exit 2; }
+  ticket="$2"
+  phase="$4"
+  case "$ticket" in ''|*[!0-9]*) _usage; exit 2;; esac
+  [ "$3" = --phase ] || { _usage; exit 2; }
+  case "$phase" in plan|build|ship) ;; *) _usage; exit 2;; esac
+  if [ -n "${FW_NO_FENCE:-}" ]; then
+    printf 'FW_NO_FENCE: %s\n' "$FW_NO_FENCE"
+    exit 0
+  fi
+  run=$(_fw_run)
+  set +f
+  for grant in "$run"/fiber-"$ticket"*-fence-grant*.md; do
+    [ -f "$grant" ] && exit 0
+  done
+  echo "fence-grant: issue $ticket needs a fence grant in $run; create one or set FW_NO_FENCE=<reason>" >&2
+  exit 2
+fi
 
 ticket="${1:-}"
 case "$ticket" in ''|*[!0-9]*) _usage; exit 2;; esac
 shift
-paths=""; ranges=""; readpaths=""; newpaths=""; expects=""; ignore=""; ignoreticket=""; repo="aakshintala/fiber"; dry=0
+paths=""; ranges=""; readpaths=""; newpaths=""; expects=""; ignore=""; ignoreticket=""; sweptto=""; removes=""; docheadings=""; preplan=""; repo="aakshintala/fiber"; part=1; dry=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --paths) [ $# -ge 2 ] || { _usage; exit 2; }; paths="$2"; shift 2;;
@@ -225,26 +290,88 @@ while [ $# -gt 0 ]; do
     --expect=*) expects="${1#--expect=}"; shift;;
     --repo) [ $# -ge 2 ] || { _usage; exit 2; }; repo="$2"; shift 2;;
     --repo=*) repo="${1#--repo=}"; shift;;
-    --ignore-pr) [ $# -ge 2 ] || { _usage; exit 2; }; ignore="$2"; shift 2;;
-    --ignore-pr=*) ignore="${1#--ignore-pr=}"; shift;;
-    --ignore-ticket) [ $# -ge 2 ] || { _usage; exit 2; }; ignoreticket="$2"; shift 2;;
-    --ignore-ticket=*) ignoreticket="${1#--ignore-ticket=}"; shift;;
+    --part) [ $# -ge 2 ] || { _usage; exit 2; }; part="$2"; shift 2;;
+    --part=*) part="${1#--part=}"; shift;;
+    --ignore-pr) [ $# -ge 2 ] || { _usage; exit 2; }; case "$2" in ''|*[!0-9]*) _usage; exit 2;; esac; ignore="${ignore}${ignore:+ }$2"; shift 2;;
+    --ignore-pr=*) _ignored_pr="${1#--ignore-pr=}"; case "$_ignored_pr" in ''|*[!0-9]*) _usage; exit 2;; esac; ignore="${ignore}${ignore:+ }$_ignored_pr"; shift;;
+    --ignore-ticket) [ $# -ge 2 ] || { _usage; exit 2; }; case "$2" in ''|*[!0-9]*) _usage; exit 2;; esac; ignoreticket="${ignoreticket}${ignoreticket:+ }$2"; shift 2;;
+    --ignore-ticket=*) _ignored_ticket="${1#--ignore-ticket=}"; case "$_ignored_ticket" in ''|*[!0-9]*) _usage; exit 2;; esac; ignoreticket="${ignoreticket}${ignoreticket:+ }$_ignored_ticket"; shift;;
+    --swept-to) [ $# -ge 2 ] || { _usage; exit 2; }; sweptto="$2"; shift 2;;
+    --swept-to=*) sweptto="${1#--swept-to=}"; shift;;
+    --removes) [ $# -ge 2 ] || { _usage; exit 2; }; removes="$2"; shift 2;;
+    --removes=*) removes="${1#--removes=}"; shift;;
+    --doc-heading) [ $# -ge 2 ] || { _usage; exit 2; }; docheadings="${docheadings}${docheadings:+$'\n'}$2"; shift 2;;
+    --pre-plan) [ $# -ge 2 ] || { _usage; exit 2; }; preplan="$2"; shift 2;;
+    --pre-plan=*) preplan="${1#--pre-plan=}"; shift;;
     --dry) dry=1; shift;;
     *) _usage; exit 2;;
   esac
 done
+case "$part" in ''|*[!0-9]*) _usage; exit 2;; esac
+part=$((10#$part))
+[ "$part" -gt 0 ] || { _usage; exit 2; }
+case "$sweptto" in *[!0-9]*) _usage; exit 2;; esac
 case "$repo" in
   */*/*) _usage; exit 2;;
   [!/]*/[!/]*) ;;
   *) _usage; exit 2;;
 esac
+if [ -n "$preplan" ]; then
+  prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
+  preplan_prs=$(printf '%s' "$prjson" | python3 -I -c 'import json,sys
+try:
+  data = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+if not isinstance(data, list):
+  sys.exit(1)
+for row in data:
+  if not isinstance(row, dict) or not isinstance(row.get("number"), int) or row["number"] < 1:
+    sys.exit(1)
+  print(row["number"])' 2>/dev/null) || { echo "ERROR gh pr list unreadable"; exit 3; }
+  preplan_n=$(printf '%s\n' "$preplan_prs" | grep -c .)
+  case "$preplan_n" in ''|*[!0-9]*) echo "ERROR gh pr list count"; exit 3;; esac
+  [ "$preplan_n" -lt 200 ] || { echo "ERROR gh pr list truncated at 200"; exit 3; }
+  preplan_rows=""
+  for _pr in $preplan_prs; do
+    _files=$("${FW_GH:-gh}" pr diff "$_pr" -R "$repo" --name-only 2>/dev/null) || { echo "ERROR gh pr diff $_pr"; exit 3; }
+    _count=0
+    while IFS= read -r _file; do
+      [ -n "$_file" ] || continue
+      case "$_file" in $preplan) _count=$((_count + 1));; esac
+    done <<< "$_files"
+    preplan_rows="${preplan_rows}${preplan_rows:+$'\n'}$_count $_pr"
+  done
+  if [ -n "$preplan_rows" ]; then
+    printf '%s\n' "$preplan_rows" | sort -k1,1nr -k2,2n | while read -r _count _pr; do
+      printf 'WARN PRE-PLAN PR #%s: %s files under %s\n' "$_pr" "$_count" "$preplan"
+    done
+  fi
+  exit 0
+fi
 [ -n "$paths" ] || { _usage; exit 2; }
+case "$paths" in
+  *:[0-9]*) echo "ERROR a line range belongs in --ranges, not --paths: $paths" >&2; exit 2;;
+esac
 
 run=$(_fw_run)
+# Siblings resolve from the script's real path: callers such as flywheel's
+# bin/fence-grant reach it through a symlink in a directory with no file-claim.
+self="$0"
+case "$self" in */*) ;; *) self="$(command -v "$self")" ;; esac
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in /*) self="$link" ;; *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;; esac
+done
+self_dir="$(cd "$(dirname "$self")" && pwd)"
+# shellcheck disable=SC1091
+. "$self_dir/lib/lane-ticket.sh"
+file_claim="${FW_FILE_CLAIM:-$self_dir/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"
 locked=0
-trap 'rm -rf "$tmp"; if [ "$locked" -eq 1 ]; then rmdir "$lockdir" 2>/dev/null || true; fi' EXIT
+cachetmp=""
+trap '[ -z "$cachetmp" ] || rm -f "$cachetmp"; rm -rf "$tmp"; if [ "$locked" -eq 1 ]; then rmdir "$lockdir" 2>/dev/null || true; fi' EXIT
 trap 'exit 130' INT TERM
 
 # Brace-expand whole text ({a,b}, nested, empty, spaced and slashed members).
@@ -434,8 +561,15 @@ if [ -n "$newpaths" ]; then
   done < "$tmp/nitems"
 fi
 
-treejson=$("${FW_GH:-gh}" api "repos/$repo/git/trees/main?recursive=1" 2>"$tmp/treeerr") || { g=$(head -c 200 "$tmp/treeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh trees main $g"; exit 3; }
-printf '%s' "$treejson" | python3 -I -c 'import json,sys
+# Cache the validated path list by immutable tree SHA, never by moving main.
+treesha=$("${FW_GH:-gh}" api "repos/$repo/commits/main" --jq .commit.tree.sha 2>"$tmp/treeerr") || { g=$(head -c 200 "$tmp/treeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh tree SHA main $g"; exit 3; }
+case "$treesha" in ''|*[!0-9a-fA-F]*) echo "ERROR tree SHA of main unreadable"; exit 3;; esac
+cache="${FW_TREE_CACHE:-$HOME/.cache/fence-grant/${repo//\//_}}"
+if [ -f "$cache/$treesha.tree" ]; then
+  cp "$cache/$treesha.tree" "$tmp/tree" || { echo "ERROR cannot read tree cache"; exit 3; }
+else
+  treejson=$("${FW_GH:-gh}" api "repos/$repo/git/trees/$treesha?recursive=1" 2>"$tmp/treeerr") || { g=$(head -c 200 "$tmp/treeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh trees main $g"; exit 3; }
+  printf '%s' "$treejson" | python3 -I -c 'import json,sys
 try:
   d = json.load(sys.stdin)
 except Exception:
@@ -448,7 +582,12 @@ if not isinstance(t, list):
 for e in t:
   if isinstance(e, dict) and e.get("type") == "blob" and e.get("path"):
     print(e["path"])' > "$tmp/tree" || { echo "ERROR tree of main unreadable or truncated"; exit 3; }
-[ -s "$tmp/tree" ] || { echo "ERROR tree of main is empty"; exit 3; }
+  [ -s "$tmp/tree" ] || { echo "ERROR tree of main is empty"; exit 3; }
+  mkdir -p "$cache" || { echo "ERROR cannot create tree cache"; exit 3; }
+  cachetmp=$(mktemp "$cache/.tree.XXXXXX") || { echo "ERROR cannot make tree cache temp file"; exit 3; }
+  cp "$tmp/tree" "$cachetmp" && mv "$cachetmp" "$cache/$treesha.tree" || { echo "ERROR cannot write tree cache"; exit 3; }
+  cachetmp=""
+fi
 
 python3 -I -c 'import sys
 pn, tr, nw = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -488,11 +627,18 @@ for line in open(pn):
   s = suggest(b)
   if s:
     print("  did you mean: %s" % ", ".join(s))
-sys.exit(4 if bad else 0)' "$tmp/pnorm" "$tmp/tree" "$tmp/newnorm"
+sys.exit(4 if bad else 0)' "$tmp/pnorm" "$tmp/tree" "$tmp/newnorm" > "$tmp/pathcheck"
 _pathrc=$?
+cat "$tmp/pathcheck"
 case "$_pathrc" in
   0) : ;;
-  4) exit 4;;
+  4)
+    _missing_count=$(grep -c '^MISSING ' "$tmp/pathcheck")
+    _path_plural=s
+    [ "$_missing_count" -eq 1 ] && _path_plural=
+    echo "NO PROBE: $_missing_count path$_path_plural missing, no hold check ran; move them to --new"
+    exit 4
+    ;;
   *) echo "ERROR path existence check"; exit 3;;
 esac
 
@@ -510,6 +656,31 @@ _fetch_blob() {
   return 0
 }
 _line_has() { sed -n "${2}p" "$(_blob_path "$1")" 2>/dev/null | grep -Fq -- "$3"; }
+_normalize_doc_heading() {
+  sed -E 's/^#+[[:space:]]*//; s/[[:space:]]*#+[[:space:]]*$//; s/`//g'
+}
+_doc_has_heading() {
+  _dh_want=$(printf '%s\n' "$2" | _normalize_doc_heading)
+  grep '^#' "$(_blob_path "$1")" | _normalize_doc_heading | grep -qxF -- "$_dh_want"
+}
+
+if [ -n "$docheadings" ]; then
+  while IFS= read -r _cited; do
+    [ -n "$_cited" ] || continue
+    case "$_cited" in docs/*\#*) ;; *) echo "ERROR doc heading not found: $_cited"; exit 2;; esac
+    _doc=${_cited%%#*}; _heading=${_cited#*#}
+    [ -n "$_heading" ] || { echo "ERROR doc heading not found: $_cited"; exit 2; }
+    if ! grep -qxF -- "$_doc" "$tmp/tree"; then
+      echo "ERROR doc heading not found: $_cited"
+      exit 2
+    fi
+    _fetch_blob "$_doc" || exit 3
+    if ! _doc_has_heading "$_doc" "$_heading"; then
+      echo "ERROR doc heading not found: $_cited"
+      exit 2
+    fi
+  done <<< "$docheadings"
+fi
 
 if [ -n "$expects" ]; then
   : > "$tmp/nosym"
@@ -557,6 +728,10 @@ print("\n".join(out))' "$_ef"
   done < "$tmp/eitems"
   if [ -s "$tmp/nosym" ]; then
     cat "$tmp/nosym"
+    _missing_count=$(grep -cE '^(MISSING|NOSYMBOL) ' "$tmp/nosym")
+    _missing_plural=s
+    [ "$_missing_count" -eq 1 ] && _missing_plural=
+    echo "NO PROBE: $_missing_count path$_missing_plural or symbol$_missing_plural missing, no hold check ran; correct missing --paths/--expect entries"
     exit 4
   fi
 fi
@@ -605,6 +780,8 @@ if pimac_names=$(fw_pi_lane_names_mac); then pimac_ok=1; else pimac_ok=0; pimac_
 if pibox_names=$(fw_pi_lane_names_box); then pibox_ok=1; else pibox_ok=0; pibox_names=""; fi
 if dmac_names=$(fw_delegate_lane_names_mac); then dmac_ok=1; else dmac_ok=0; dmac_names=""; fi
 if dbox_names=$(fw_delegate_lane_names_box); then dbox_ok=1; else dbox_ok=0; dbox_names=""; fi
+if dsess_names=$(fw_delegate_session_lane_names); then dsess_ok=1; else dsess_ok=0; dsess_names=""; fi
+if msess_names=$(fw_mac_delegate_session_lane_names); then msess_ok=1; else msess_ok=0; msess_names=""; fi
 FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$mac_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/claudeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR claude agents $g"; exit 3; }
 [ "$box_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/ssherr" 2>/dev/null | tr '\n' ' '); echo "ERROR ssh box $g"; exit 3; }
@@ -612,12 +789,196 @@ FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$pibox_ok" -eq 1 ] || { echo "ERROR box pi lanes: no PILANESOK marker"; exit 3; }
 [ "$dmac_ok" -eq 1 ] || { echo "ERROR mac delegate lanes: registry directory missing"; exit 3; }
 [ "$dbox_ok" -eq 1 ] || { echo "ERROR box delegate lanes: no DELEGATEOK marker"; exit 3; }
+[ "$dsess_ok" -eq 1 ] || { echo "ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON"; exit 3; }
+[ "$msess_ok" -eq 1 ] || { echo "ERROR mac delegate sessions: delegate session list failed, or the roster mapper refused the JSON"; exit 3; }
 # A lane is a Claude session, a pi lane or a delegate job; each holds its
 # fence. A pi lane launched by delegate shows up twice, so the list is
 # deduplicated to keep one HELD line per lane.
-lanes=$(printf '%s\n' $mac_names $box_names $pimac_names $pibox_names $dmac_names $dbox_names | grep . | sort -u | tr '\n' ' ')
+lanes=$(printf '%s\n' $mac_names $box_names $pimac_names $pibox_names $dmac_names $dbox_names $dsess_names $msess_names | grep . | sort -u | tr '\n' ' ')
 
 held=""
+overlaps=""
+
+# file-claim is a holder source too. Validate the complete list before using
+# any row; a failed or partial read must never turn into an empty fence.
+claims_out="$tmp/claims.out"
+claims_err="$tmp/claims.err"
+if "$file_claim" list --repo "$repo" >"$claims_out" 2>"$claims_err"; then
+  python3 -c 'import sys
+for line in sys.stdin:
+  fields = line.rstrip("\n").split("\t")
+  if len(fields) != 6:
+    sys.exit(1)
+  path, lane, kind, age, worktree, pr = fields
+  # file-claim list also reports open-PR paths; the PR side below holds those.
+  if kind == "pr":
+    continue
+  if not path or not lane or kind not in ("plan", "grant") or not age.isdigit() or not worktree:
+    sys.exit(1)
+  if pr and any(not item.isdigit() for item in pr.split(",")):
+    sys.exit(1)
+  print(path + "\t" + lane)' <"$claims_out" >"$tmp/claims.tsv" 2>/dev/null || {
+    echo "ERROR file-claim list unparseable claims"
+    exit 3
+  }
+else
+  g=$(head -c 200 "$claims_err" 2>/dev/null | tr '\n' ' ')
+  echo "ERROR file-claim list $g"
+  exit 3
+fi
+
+# Collect every relevant claim ticket once. Closed-ticket claims are stale
+# regardless of live lane names; open or unknown tickets continue through
+# liveness checks, and sweep claims remain exclusive without a state lookup.
+: >"$tmp/ticket-numbers.tsv"
+: >"$tmp/ticket-states.tsv"
+while IFS="$(printf '\t')" read -r claim_path claim_lane; do
+  [ -n "$claim_path" ] || continue
+  [[ "$claim_lane" == sweep-* ]] && continue
+  claim_num=$(lane_ticket_num "$claim_lane")
+  [ -n "$claim_num" ] || continue
+  [ "$claim_num" = "$ticket" ] && continue
+  case " $ignoreticket " in *" $claim_num "*) continue;; esac
+  printf '%s\n' "$claim_num" >>"$tmp/ticket-numbers.tsv"
+done <"$tmp/claims.tsv"
+if ! sort -un "$tmp/ticket-numbers.tsv" -o "$tmp/ticket-numbers.tsv" 2>"$tmp/ticket-sort.err"; then
+  g=$(head -c 200 "$tmp/ticket-sort.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  [ -n "$g" ] || g="ticket list sort failed"
+  echo "WARN ticket state lookup $g; claims held by lane liveness"
+elif [ -s "$tmp/ticket-numbers.tsv" ]; then
+  if ticket_state_query=$(python3 -c 'import sys
+numbers = [line.strip() for line in sys.stdin if line.strip()]
+fields = " ".join("ticket_%s: issueOrPullRequest(number: %s) { ... on Issue { state } ... on PullRequest { state } }" % (number, number) for number in numbers)
+print("query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { " + fields + " } }")' <"$tmp/ticket-numbers.tsv" 2>"$tmp/ticket-query.err"); then
+    ticket_owner=${repo%%/*}
+    ticket_repo=${repo#*/}
+    if "${FW_GH:-gh}" api graphql -F "owner=$ticket_owner" -F "name=$ticket_repo" -f "query=$ticket_state_query" >"$tmp/ticket-state.json" 2>"$tmp/ticket-state.err"; then
+      : >"$tmp/ticket-state-warnings.tsv"
+      if ! python3 -c 'import json,sys
+try:
+  numbers = [line.strip() for line in open(sys.argv[1]) if line.strip()]
+  response = json.load(open(sys.argv[2]))
+  repository = response["data"]["repository"]
+  if not isinstance(repository, dict):
+    sys.exit(1)
+  rows = []
+  warnings = []
+  for number in numbers:
+    alias = "ticket_" + number
+    if alias not in repository or repository[alias] is None:
+      warnings.append("ticket #" + number + " missing from response")
+      continue
+    item = repository[alias]
+    if not isinstance(item, dict):
+      sys.exit(1)
+    state = item.get("state")
+    if state in ("OPEN", "CLOSED", "MERGED"):
+      rows.append((number, state))
+    else:
+      if isinstance(state, str):
+        reason = state.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+      else:
+        reason = json.dumps(state, separators=(",", ":"))
+      warnings.append("ticket #" + number + " unknown state " + reason)
+except Exception:
+  sys.exit(1)
+for number, state in rows:
+  print(number + "\t" + state)
+with open(sys.argv[3], "w") as output:
+  for warning in warnings:
+    output.write(warning + "\n")' "$tmp/ticket-numbers.tsv" "$tmp/ticket-state.json" "$tmp/ticket-state-warnings.tsv" >"$tmp/ticket-states.tsv" 2>/dev/null; then
+        : >"$tmp/ticket-states.tsv"
+        echo "WARN ticket state lookup unreadable response; claims held by lane liveness"
+      else
+        while IFS= read -r warning; do
+          echo "WARN ticket state lookup $warning; claims held by lane liveness"
+        done <"$tmp/ticket-state-warnings.tsv"
+      fi
+    else
+      g=$(head -c 200 "$tmp/ticket-state.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+      [ -n "$g" ] || g="gh api graphql failed"
+      echo "WARN ticket state lookup $g; claims held by lane liveness"
+    fi
+  else
+    echo "WARN ticket state lookup query build failed; claims held by lane liveness"
+  fi
+fi
+
+_claim_holders() {
+  while IFS="$(printf '\t')" read -r claim_path claim_lane; do
+    [ -n "$claim_path" ] || continue
+    claim_num=$(lane_ticket_num "$claim_lane")
+    if [ -n "$claim_num" ] && [ "$claim_num" = "$ticket" ] && [[ "$claim_lane" != sweep-* ]]; then continue; fi
+    if [[ "$claim_lane" != sweep-* ]] && [ -n "$claim_num" ]; then
+      case " $ignoreticket " in *" $claim_num "*) continue;; esac
+    fi
+    if [[ "$claim_lane" != sweep-* ]] && [ -n "$claim_num" ]; then
+      claim_state=$(awk -F '\t' -v number="$claim_num" '$1 == number { print $2; exit }' "$tmp/ticket-states.tsv")
+      case "$claim_state" in
+        CLOSED|MERGED)
+          echo "STALE $claim_path by $claim_lane (ticket #$claim_num closed)"
+          continue
+          ;;
+      esac
+    fi
+    live=0
+    for ln in $lanes; do
+      if [ -n "$claim_num" ]; then
+        [ "$(_lane_num "${ln#fiber-}")" = "$claim_num" ] && { live=1; break; }
+      else
+        [ "$ln" = "$claim_lane" ] && { live=1; break; }
+      fi
+    done
+    [[ "$claim_lane" == sweep-* ]] && live=1
+    if [ "$live" -eq 0 ]; then
+      echo "STALE $claim_path by $claim_lane"
+      continue
+    fi
+    normalized=$(_norm_tok "$claim_path")
+    : >"$tmp/claim-entries"
+    printf '%s\n' "$normalized" >"$tmp/claim-entries"
+    if [[ "$claim_lane" == sweep-* ]]; then
+      claim_label="lane $claim_lane"
+    elif [ -n "$claim_num" ]; then
+      claim_label="lane #$claim_num"
+    else
+      claim_label="lane $claim_lane"
+    fi
+    if [[ "$claim_lane" == sweep-* ]]; then
+      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label" exclusive
+    else
+      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label"
+    fi
+  done <"$tmp/claims.tsv"
+}
+
+_lane_claim_count() {
+  _lc_lane="fiber-$1"
+  _lc_out="$tmp/claims-$_lc_lane.out"
+  _lc_err="$tmp/claims-$_lc_lane.err"
+  if ! "$file_claim" list --lane "$_lc_lane" --repo "$repo" >"$_lc_out" 2>"$_lc_err"; then
+    g=$(head -c 200 "$_lc_err" 2>/dev/null | tr '\n' ' ')
+    echo "ERROR file-claim list $g"
+    return 3
+  fi
+  _lc_count=$(python3 -c 'import sys
+lane = sys.argv[1]
+n = 0
+for line in sys.stdin:
+  fields = line.rstrip("\n").split("\t")
+  if len(fields) != 6:
+    sys.exit(1)
+  path, holder, kind, age, worktree, pr = fields
+  if not path or holder != lane or kind not in ("plan", "grant") or not age.isdigit() or not worktree:
+    sys.exit(1)
+  if pr and any(not item.isdigit() for item in pr.split(",")):
+    sys.exit(1)
+  n += 1
+print(n)' "$_lc_lane" <"$_lc_out" 2>/dev/null) || {
+    echo "ERROR file-claim list unparseable claims"
+    return 3
+  }
+}
 
 # --- PR side: a rename holds old and new; created/binary/hunkless hold all ---
 _pr_touched() {
@@ -679,8 +1040,22 @@ _pr_overlap() {
   return 1
 }
 
+_pr_touches_doc_heading() {
+  _pth_want=$(printf '%s\n' "$3" | _normalize_doc_heading)
+  awk -v f="$2" '
+    /^diff --git / { on = ($4 == "b/" f); in_hunk = 0 }
+    on && /^@@ / {
+      in_hunk = 1
+      line = $0
+      sub(/^@@[^@]*@@[[:space:]]*/, "", line)
+      if (line != "") print line
+    }
+    on && in_hunk && /^[ +-]/ { print substr($0, 2) }
+  ' "$1" | _normalize_doc_heading | grep -qxF -- "$_pth_want"
+}
+
 for pr in $prs; do
-  [ -n "$ignore" ] && [ "$pr" = "$ignore" ] && continue
+  case " $ignore " in *" $pr "*) continue;; esac
   case " $ownprs " in *" $pr "*) echo "OWN skipping PR #$pr: its branch names ticket $ticket"; continue;; esac
   _pr_touched "$pr"
   [ -s "$tmp/touched-$pr" ] || continue
@@ -695,11 +1070,11 @@ for pr in $prs; do
         [ -n "$secbase" ] || secbase=$fb
         rr=$(_req_ranges "$pb")
         if [ -z "$rr" ]; then
-          held="${held}${p}|PR #${pr}|${pr} ${secbase}
+          overlaps="${overlaps}${p}|PR #${pr}
 "
         else
           if _pr_whole_hold "$tmp/full-$pr.diff" "$secbase"; then
-            held="${held}${p}|PR #${pr}
+            overlaps="${overlaps}${p}|PR #${pr}
 "
           else
             ov=0
@@ -710,7 +1085,7 @@ for pr in $prs; do
               if _pr_overlap "$tmp/full-$pr.diff" "$secbase" "$s" "$e"; then ov=1; break; fi
             done < "$tmp/rr-$pr"
             if [ "$ov" -eq 1 ]; then
-              held="${held}${p}|PR #${pr}
+              overlaps="${overlaps}${p}|PR #${pr}
 "
             fi
           fi
@@ -721,9 +1096,27 @@ for pr in $prs; do
   done < "$tmp/plist"
 done
 
+# Doc heading citations are a review warning only; they never enter `held`.
+if [ -n "$docheadings" ]; then
+  while IFS= read -r _cited; do
+    [ -n "$_cited" ] || continue
+    case "$_cited" in docs/*\#*) :;; *) continue;; esac
+    _doc=${_cited%%#*}; _heading=${_cited#*#}
+    [ -n "$_heading" ] || continue
+    for pr in $prs; do
+      case " $ignore " in *" $pr "*) continue;; esac
+      [ -s "$tmp/full-$pr.diff" ] || _pr_touched "$pr"
+      [ -s "$tmp/full-$pr.diff" ] || continue
+      if _pr_touches_doc_heading "$tmp/full-$pr.diff" "$_doc" "$_heading"; then
+        echo "WARN PR #$pr touches cited doc heading $_cited"
+      fi
+    done
+  done <<< "$docheadings"
+fi
+
 # --- lane side helpers ---
 _lane_num() {
-  printf '%s' "$1" | sed 's/[^0-9].*//'
+  lane_ticket_num "fiber-$1"
 }
 
 # Brace-expand each input line; held-entry text in, expanded lines out.
@@ -936,9 +1329,9 @@ for line in sys.stdin:
 }
 
 _grant_entries() {
-  # $1 = grant file. Prints candidate entry lines from its Grant section.
-  # `Reads:` latches the probe off for the rest of the file: a read holds
-  # nothing, and a later line carrying the word "grant" must not reopen it.
+  # $1 = grant file. Prints candidate entry lines from its Paths block, or
+  # scrapes a hand-written grant without Paths for compatibility. `Reads:`
+  # latches the probe off for the rest of the file.
   #
   # An indented line is prose, not an entry. Every granted path in every grant
   # file written so far starts at column zero, as a `- <path>` bullet or a
@@ -950,7 +1343,48 @@ _grant_entries() {
   # came back HELD by lane #3771, which never asked for any of them
   # (2026-10-31). `fiber-2413-plan-fence-grant.md` carries 700 lines of the
   # same shape.
-  awk '/^Reads:[[:space:]]*$/ {stop = 1} stop {next} {if (tolower($0) ~ /grant/) f = 1} f && /^[[:space:]]/ {next} f {print}' "$1" 2>/dev/null | _strip_foreign_hold | sed -e "s/$_ng_re.*//" | _expand_braces_lines | _collect_entries
+  if grep -q '^Paths:[[:space:]]*$' "$1" 2>/dev/null; then
+    awk '/^Reads:[[:space:]]*$/ {stop = 1} /^##([[:space:]]|$)/ {stop = 1} stop {next} /^Paths:[[:space:]]*$/ {paths = 1; next} paths {print}' "$1" 2>/dev/null
+  else
+    awk '/^Reads:[[:space:]]*$/ {stop = 1} stop {next} {if (tolower($0) ~ /grant/) f = 1} f && /^[[:space:]]/ {next} f {print}' "$1" 2>/dev/null
+  fi | _strip_foreign_hold | sed -e "s/$_ng_re.*//" | _expand_braces_lines | _collect_entries | _narrow_grant_entries
+  return 0
+}
+
+_grant_part() {
+  awk '/^Paths:[[:space:]]*$/ { exit } /^Part: [0-9][0-9]*$/ { sub(/^Part: /, ""); print; exit }' "$1" 2>/dev/null
+}
+
+# Parts advance monotonically; the highest tagged grant identifies the lane's
+# current part. A legacy grant without a part stays conservative and holds.
+_lane_current_part() {
+  _lcp=""
+  for _lcp_file in "$run"/fiber-"$1"*-fence-grant*.md; do
+    [ -f "$_lcp_file" ] || continue
+    _lcp_base=$(basename "$_lcp_file")
+    _lcp_rest=${_lcp_base#fiber-}
+    case "$_lcp_rest" in "$1"-*|"$1"[a-z]*-*) : ;; *) continue;; esac
+    _lcp_part=$(_grant_part "$_lcp_file")
+    case "$_lcp_part" in ''|*[!0-9]*) continue;; esac
+    [ "$_lcp_part" -gt 0 ] || continue
+    if [ -z "$_lcp" ] || [ "$_lcp_part" -gt "$_lcp" ]; then _lcp=$_lcp_part; fi
+  done
+  printf '%s' "$_lcp"
+}
+
+# A grant file carrying both a bullet for a path and ranges for the same path
+# holds only the ranges; the bullet is their label (#1107: every ranged grant
+# read as a whole-file hold, so a window its holder had excluded still refused).
+# A path with no ranges stays a whole-file hold. Per-file: the caller feeds one
+# grant file at a time, so ranges in one file never narrow another file.
+_narrow_grant_entries() {
+  awk -F'|' '
+    { n++; line[n] = $0; ed[n] = $1; eb[n] = $2; ers[n] = $3
+      if ($1 == "0" && $3 != "") ranged[$2] = 1 }
+    END { for (i = 1; i <= n; i++) {
+      if (ed[i] == "0" && ers[i] == "" && (eb[i] in ranged)) continue
+      print line[i] } }
+  ' 2>/dev/null
   return 0
 }
 
@@ -964,14 +1398,20 @@ _check_entries() {
       pd=${nn%%|*}; r1=${nn#*|}; pb=${r1%%|*}
       [ -n "$pb" ] || continue
       if _conflict "$pd" "$pb" "$ed" "$eb" "$ers" "$ere"; then
-        held="${held}${p}|${3:-lane #${2}}
+        if [ "${4:-}" = exclusive ]; then
+          held="${held}${p}|${3:-lane #${2}}
 "
-
+        else
+          overlaps="${overlaps}${p}|${3:-lane #${2}}
+"
+        fi
       fi
     done < "$tmp/plist"
   done < "$1"
   return 0
 }
+
+_claim_holders
 
 # live lanes: notes + their grant files
 for ln in $lanes; do
@@ -979,27 +1419,31 @@ for ln in $lanes; do
   n=$(_lane_num "$suf")
   [ -n "$n" ] || continue
   [ "$n" = "$ticket" ] && continue
-  [ -n "$ignoreticket" ] && [ "$n" = "$ignoreticket" ] && continue
-  : > "$tmp/entries"
+  case " $ignoreticket " in *" $n "*) continue;; esac
+  : > "$tmp/notes-entries"
   if [ -f "$run/fiber-$n-notes.md" ]; then
-    _lane_notes_entries "$run/fiber-$n-notes.md" >> "$tmp/entries"
+    _lane_notes_entries "$run/fiber-$n-notes.md" >> "$tmp/notes-entries"
   fi
   if [ "$suf" != "$n" ] && [ -f "$run/fiber-$suf-notes.md" ]; then
-    _lane_notes_entries "$run/fiber-$suf-notes.md" >> "$tmp/entries"
+    _lane_notes_entries "$run/fiber-$suf-notes.md" >> "$tmp/notes-entries"
   fi
   set +f
+  lane_part=$(_lane_current_part "$n")
   for gf in "$run"/fiber-"$n"*-fence-grant*.md; do
     [ -f "$gf" ] || continue
     b=$(basename "$gf")
     rest=${b#fiber-}
     case "$rest" in "$n"-*|"$n"[a-z]*-*) : ;; *) continue;; esac
+    grant_part=$(_grant_part "$gf")
+    if [ -n "$grant_part" ] && [ -n "$lane_part" ] && [ "$grant_part" != "$lane_part" ]; then continue; fi
     set -f
-    _grant_entries "$gf" >> "$tmp/entries"
+    : > "$tmp/grant-entries"
+    _grant_entries "$gf" >> "$tmp/grant-entries"
+    [ -s "$tmp/grant-entries" ] && _check_entries "$tmp/grant-entries" "$n" "lane #${n} (grant ${b})"
     set +f
   done
   set -f
-  [ -s "$tmp/entries" ] || continue
-  _check_entries "$tmp/entries" "$n"
+  [ -s "$tmp/notes-entries" ] && _check_entries "$tmp/notes-entries" "$n" "lane #${n} (notes, no grant file names it)"
 done
 
 # fresh grant files hold even without a live lane (skip the ticket itself)
@@ -1015,7 +1459,7 @@ for gf in "$run"/fiber-*-fence-grant*.md; do
   n=$(_lane_num "$x")
   [ -n "$n" ] || { set +f; continue; }
   [ "$n" = "$ticket" ] && { set +f; continue; }
-  [ -n "$ignoreticket" ] && [ "$n" = "$ignoreticket" ] && { set +f; continue; }
+  case " $ignoreticket " in *" $n "*) set +f; continue;; esac
   skip=0
   for ln in $lanes; do
     case "$ln" in fiber-*) s2=${ln#fiber-};; *) continue;; esac
@@ -1027,7 +1471,13 @@ for gf in "$run"/fiber-*-fence-grant*.md; do
       : > "$tmp/fentries"
       _grant_entries "$gf" >> "$tmp/fentries"
       _age=$(( (now - m) / 60 ))
-      _lbl="lane #${n} NO LIVE LANE: ${b} is ${_age}m old, holds until 360m; retire with  mv run/${b} run/done/"
+      if ! _lane_claim_count "$n"; then exit 3; fi
+      _claim_count=$_lc_count
+      if [ "$_claim_count" -gt 0 ]; then
+        _lbl="lane #${n} no running session seen, holds ${_claim_count} claims; check file-claim before treating this grant as dead (grant ${b})"
+      else
+        _lbl="lane #${n} NO LIVE LANE: ${b} is ${_age}m old, holds until 360m (grant ${b})"
+      fi
       [ -s "$tmp/fentries" ] && _check_entries "$tmp/fentries" "$n" "$_lbl"
     };; esac
   fi
@@ -1062,7 +1512,21 @@ _suggest() {
 }
 
 if [ -n "$(printf '%s' "$held" | grep .)" ]; then
-  printf '%s' "$held" | grep . | awk -F'|' '!s[$1"|"$2]++ {print "HELD " $1 " by " $2 ($3 == "" ? "" : "\t" $3)}' > "$tmp/heldout"
+  printf '%s' "$held" | grep . | awk -F'|' '
+    function rank(label) {
+      if (label ~ / \(grant [^)]*\)$/) return 3
+      if (label ~ / \(notes, no grant file names it\)$/) return 2
+      return 1
+    }
+    {
+      holder = $2
+      sub(/ \((grant [^)]*|notes, no grant file names it)\)$/, "", holder)
+      key = $1 "|" holder
+      if (!(key in slot)) { slot[key] = ++n; keys[n] = key }
+      if (rank($2) > ranks[key]) { ranks[key] = rank($2); paths[key] = $1; labels[key] = $2; suggestions[key] = $3 }
+    }
+    END { for (i = 1; i <= n; i++) { key = keys[i]; line = "HELD " paths[key] " by " labels[key]; if (suggestions[key] != "") line = line "\t" suggestions[key]; print line } }
+  ' > "$tmp/heldout"
   while IFS="$(printf '\t')" read -r line sug; do
     echo "$line"
     [ -n "$sug" ] || continue
@@ -1071,7 +1535,131 @@ if [ -n "$(printf '%s' "$held" | grep .)" ]; then
   exit 1
 fi
 
+# --- the grant records itself in the claims ledger ---
+# A file claim holds each granted path whole. --plan, not --grant: the grant cap
+# counts grants, and a lane's whole path set must claim as one; re-claiming the
+# same lane and kind is an idempotent no-op. Reads hold nothing and are never
+# claimed. A dry run probes only and claims nothing.
+if [ "$dry" -eq 0 ]; then
+  fc_args=(); fc_ranges=""
+  while IFS='|' read -r _rf _rs _re; do
+    [ -n "$_rf" ] || continue
+    fc_ranges="${fc_ranges:+$fc_ranges,}$_rf:$_rs-$_re"
+  done <"$tmp/rspec"
+  while IFS= read -r _cp; do
+    [ -n "$_cp" ] || continue
+    _cp=${_cp#./}
+    _cp=${_cp%/}
+    [ -n "$_cp" ] || continue
+    fc_args+=("$_cp")
+  done < "$tmp/plist"
+  if [ "${#fc_args[@]}" -gt 0 ]; then
+    : > "$tmp/fc-overlaps"
+    fc_cmd=("$file_claim" claim --lane "fiber-$ticket" --plan --repo "$repo")
+    # Every PR skipped above as this ticket's own, plus --ignore-pr, must
+    # exempt the claim too, or the ledger refuses a path the own PR holds.
+    # file-claim takes one --self-pr per flag; each exempt PR gets its own.
+    _seen_self=""
+    # shellcheck disable=SC2086
+    for _op in $ownprs $ignore; do
+      [ -n "$_op" ] || continue
+      case " $_seen_self " in *" $_op "*) continue;; esac
+      _seen_self="$_seen_self $_op"
+      fc_cmd+=(--self-pr "$_op")
+    done
+    if [ -n "$fc_ranges" ]; then
+      # The fence probe checked these PRs by hunk; exempt them from the
+      # file-level PR check before recording the whole-file claim.
+      for _op in $prs; do
+        [ -n "$_op" ] || continue
+        case " $_seen_self " in *" $_op "*) continue;; esac
+        _seen_self="$_seen_self $_op"
+        fc_cmd+=(--self-pr "$_op")
+      done
+    fi
+    fc_cmd+=(-- "${fc_args[@]}")
+    if "${fc_cmd[@]}" >"$tmp/fc-out" 2>"$tmp/fc-err"; then
+      awk '$1 == "OVERLAP" && NF >= 3 { print $2 "|" $3 }' "$tmp/fc-out" >> "$tmp/fc-overlaps"
+      while IFS='|' read -r _ofp _ofh; do
+        [ -n "$_ofp" ] || continue
+        case "$_ofh" in
+          pr\#*) overlaps="${overlaps}${_ofp}|PR #${_ofh#pr#}
+";;
+          lane:fiber-*)
+            _ofn=${_ofh#lane:fiber-}
+            case " $ignoreticket " in *" $_ofn "*) continue;; esac
+            overlaps="${overlaps}${_ofp}|lane #${_ofn}
+";;
+          lane:*) overlaps="${overlaps}${_ofp}|lane ${_ofh#lane:}
+";;
+          *) overlaps="${overlaps}${_ofp}|${_ofh}
+";;
+        esac
+      done < "$tmp/fc-overlaps"
+    else
+      fc_rc=$?
+      if [ "$fc_rc" -eq 1 ]; then
+        awk -v ignored="$ignoreticket" '
+$1 == "OVERLAP" && NF >= 3 {
+  p = $2; h = $3; line = ""
+  if (h ~ /^pr#[0-9][0-9]*$/) line = "OVERLAP " p " PR #" substr(h, 4)
+  else if (h ~ /^lane:fiber-[0-9][0-9]*$/) {
+    n = h; sub(/^lane:fiber-/, "", n)
+    if (index(" " ignored " ", " " n " ")) next
+    line = "OVERLAP " p " lane #" n
+  }
+  else if (h ~ /^lane:/) line = "OVERLAP " p " lane " substr(h, 6)
+  else line = "OVERLAP " p " " h
+  if (!seen[line]++) print line
+  next
+}
+$1 == "REFUSE" && NF >= 4 && $3 == "exclusive" && $4 ~ /^lane:/ {
+  p = $2; lane = $4; sub(/^lane:/, "", lane)
+  line = "HELD " p " by lane " lane
+  if (!seen[line]++) print line
+  next
+}
+$1 == "REFUSE" && NF >= 3 {
+  p = $2; h = $3; line = ""
+  if (h ~ /^pr#[0-9][0-9]*$/) line = "HELD " p " by PR #" substr(h, 4)
+  else if (h ~ /^lane:fiber-[0-9][0-9]*$/) { n = h; sub(/^lane:fiber-/, "", n); line = "HELD " p " by lane #" n }
+  else if (h ~ /^lane:/) line = "HELD " p " by lane " substr(h, 6)
+  else if (h == "cap") line = "HELD " p " by file-claim grant cap"
+  else line = "HELD " p " by file-claim " h
+  if (!seen[line]++) print line
+  next
+}
+$1 == "GRANT" || $1 == "UNCLAIMED" || $1 == "file-claim:" || NF == 0 { next }
+{ if (!seen[$0]++) print }' "$tmp/fc-out" > "$tmp/fc-held"
+        if [ -s "$tmp/fc-held" ]; then cat "$tmp/fc-held"; else cat "$tmp/fc-out"; fi
+        exit 1
+      else
+        g=$(head -c 200 "$tmp/fc-err" 2>/dev/null | tr '\n' ' ')
+        echo "ERROR file-claim claim $g"
+        exit 3
+      fi
+    fi
+  fi
+fi
+
 # --- grant: locked numbering over existing files (unnumbered counts as 1) ---
+if [ -n "$(printf '%s' "$overlaps" | grep .)" ]; then
+  printf '%s' "$overlaps" | awk -F'|' '
+    {
+      path = $1; holder = $2
+      if (holder ~ /^lane #[0-9]+/) {
+        number = holder
+        sub(/^lane #/, "", number)
+        sub(/[^0-9].*$/, "", number)
+        holder = "lane #" number
+      }
+      key = path "|" holder
+      if (!seen[key]++) printf "%s\t%s\n", path, holder
+    }
+  ' > "$tmp/overlapout"
+else
+  : > "$tmp/overlapout"
+fi
 if [ "$dry" -eq 0 ]; then
   lock_tries=${FW_LOCK_TRIES:-50}
   lock_poll=${FW_LOCK_POLL:-0.2}
@@ -1102,10 +1690,16 @@ if [ "$dry" -eq 0 ]; then
   gf="$run/fiber-$ticket-fence-grant-$k.md"
   nowd=$(date '+%a %b %d %T %Z %Y')
   {
-    printf 'Grant %s (fence-grant, %s)\n\nTicket: %s\nPaths:\n' "$k" "$nowd" "$ticket"
+    printf 'Grant %s (fence-grant, %s)\n\nTicket: %s\nPart: %s\n' "$k" "$nowd" "$ticket" "$part"
+    [ -z "$sweptto" ] || printf 'Swept to comment %s\n' "$sweptto"
+    printf 'Paths:\n'
     sed 's/^/- /' < "$tmp/plist"
+    while IFS="$(printf '\t')" read -r _ovp _ovh; do
+      [ -n "$_ovp" ] || continue
+      printf 'overlap: %s %s\n' "$_ovp" "$_ovh"
+    done < "$tmp/overlapout"
     if [ -n "$ranges" ]; then printf 'Ranges: %s\n' "$ranges"; else printf 'Ranges: none\n'; fi
-    printf '\nNo open PR or live lane holds these paths (checked open PRs:%s; live lanes:%s).\n' " $prs" " $lanes"
+    printf '\nNo exclusive hold blocks these paths (checked open PRs:%s; live lanes:%s; claims).\n' " $prs" " $lanes"
     # An `&&` here would be the group's last command and would fail it when there is nothing to skip.
     if [ -n "$ownprs" ]; then printf 'Skipped this ticket own open PRs:%s.\n' " $ownprs"; fi
     # Last in the file, and nothing may follow: `Reads:` latches the lane hold
@@ -1116,9 +1710,43 @@ if [ "$dry" -eq 0 ]; then
     fi
   } > "$gf" 2>/dev/null || { echo "ERROR cannot write $gf"; exit 3; }
 fi
-sed 's/^/GRANT /' < "$tmp/plist"
+while IFS="$(printf '\t')" read -r _ovp _ovh; do
+  [ -n "$_ovp" ] || continue
+  printf 'OVERLAP %s %s\n' "$_ovp" "$_ovh"
+done < "$tmp/overlapout"
+# A path granted with no --ranges entry is a whole-file hold by definition:
+# warn, non-blocking, before the grant lines. A dry run prefixes each with
+# WOULD-GRANT so its output cannot be mistaken for an applied grant.
+while IFS= read -r _wp; do
+  [ -n "$_wp" ] || continue
+  _wb=$(_norm_base "$_wp") || continue
+  [ -n "$_wb" ] || continue
+  if ! cut -d'|' -f1 < "$tmp/rspec" | grep -qxF "$_wb"; then
+    echo "WIDE $_wp is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP."
+  fi
+done < "$tmp/plist"
+repo_root="$(cd "$self_dir/.." 2>/dev/null && pwd)"
+docs_dir="$repo_root/docs"
+if [ -n "$removes" ] && [ -d "$repo_root/test" ]; then
+  printf '%s\n' "$removes" | tr ',' '\n' | while IFS= read -r _symbol; do
+    _symbol=$(printf '%s' "$_symbol" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -n "$_symbol" ] || continue
+    _testpaths=$(grep -RIlF -- "$_symbol" "$repo_root/test" 2>/dev/null | sed "s#^$repo_root/##" | sort | paste -sd, -)
+    [ -n "$_testpaths" ] || continue
+    printf 'TEST %s\n  suggested --paths %s\n' "$_symbol" "$_testpaths"
+  done
+fi
+if [ -d "$docs_dir" ]; then
+  while IFS= read -r _wp; do
+    [ -n "$_wp" ] || continue
+    _matches=$(grep -RInF -- "$_wp" "$docs_dir" 2>/dev/null | sed "s#^$repo_root/##")
+    [ -n "$_matches" ] || continue
+    printf 'DOC %s\n%s\n' "$_wp" "$_matches"
+  done < "$tmp/plist"
+fi
+if [ "$dry" -eq 1 ]; then sed 's/^/WOULD-GRANT /' < "$tmp/plist"; else sed 's/^/GRANT /' < "$tmp/plist"; fi
 if [ -n "$readpaths" ]; then
   printf '%s\n' "$readpaths" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's/^/READ /'
 fi
-echo "GRANT"
+if [ "$dry" -eq 1 ]; then echo "WOULD-GRANT"; else echo "GRANT"; fi
 exit 0

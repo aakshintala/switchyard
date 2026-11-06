@@ -28,8 +28,20 @@ fake_df() {
 }
 export HOME="$T/home"; mkdir -p "$HOME"
 fake_df "$T/bin" 104857600 /fake-ample
+cat >"$T/bin/lsof" <<'LSOF'
+#!/bin/sh
+[ ! -e "$ST/worktree-busy" ] || { echo 12345; exit 0; }
+exit 1
+LSOF
+chmod 755 "$T/bin/lsof"
 BASE_PATH="$T/bin:$PATH"; export PATH="$BASE_PATH"
 [ "$(command -v df)" = "$T/bin/df" ] || fail "df resolves to the suite's stub, not the host's"
+cat >"$T/bin/cargo" <<'CARGO'
+#!/usr/bin/env bash
+printf 'held=%s\n' "${CARGO_SLOT_HELD-unset}" >"$ST/cargo-held"
+printf 'threads=%s\n' "${NEXTEST_TEST_THREADS-unset}" >"$ST/cargo-threads"
+CARGO
+chmod 755 "$T/bin/cargo"
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -75,8 +87,17 @@ gh() (
         json="$(rd labels '[]')"
         [ "$paginate" = 1 ] || json="$(jq -c '.[0:100]' <<<"$json")";;
       */issues/*/comments)
-        # the PR's issue comments: a JSON array in $ST/comments, none by default
-        json="$(rd comments '[]')";;
+        # Preserve test comments and add the implicit approved review used by
+        # existing cases unless a test supplies explicit review-pr comments.
+        base_comments="$(rd comments '[]')"
+        if [ -e "$ST/review-comments" ]; then
+          review_comments="$(cat "$ST/review-comments")"
+        elif [ -n "${SHIP_TEST_REVIEW_PID:-}" ] && [ -n "${SHIP_TEST_REVIEW_HEAD:-}" ]; then
+          review_comments="$(jq -nc --arg pid "$SHIP_TEST_REVIEW_PID" --arg head "$SHIP_TEST_REVIEW_HEAD" '[{id:1,created_at:"2026-11-04T00:00:00Z",body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE")}]')"
+        else
+          review_comments='[]'
+        fi
+        json="$(jq -nc --argjson base "$base_comments" --argjson reviews "$review_comments" '$base + $reviews')";;
       */actions/runs*)
         json='{"workflow_runs":[]}';;
       */commits/*/check-runs*)
@@ -115,7 +136,8 @@ gh() (
         if [ -n "$want_failed_log" ]; then
           [ -e "$ST/log-$rid-$job.log" ] && cat "$ST/log-$rid-$job.log" || true
         elif [ -n "$want_log" ]; then
-          [ -e "$ST/log-$rid.log" ] && cat "$ST/log-$rid.log" || true
+          if [ -e "$ST/log-$rid-$job.log" ]; then cat "$ST/log-$rid-$job.log"
+          elif [ -e "$ST/log-$rid.log" ]; then cat "$ST/log-$rid.log"; fi
         else
           case "$json_fields" in
             *attempt*)
@@ -279,6 +301,19 @@ BUMP_MAIN='git --git-dir="$ORIGIN" update-ref refs/heads/main "$(git --git-dir="
 
 OUT=""; ERR=""; CODE=0
 run() {
+  local reviewed="" reviewed_pid="" reviewed_head="" i
+  local -a ship_args=("$@")
+  for ((i = 0; i < ${#ship_args[@]}; i++)); do
+    if [ "${ship_args[$i]}" = "--reviewed" ]; then
+      reviewed="${ship_args[$((i + 1))]}"
+      break
+    fi
+  done
+  if [ -n "$reviewed" ]; then
+    reviewed_pid="$(git -C "$WT" diff "origin/main...$reviewed" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1}' || true)"
+    [ -n "$reviewed_pid" ] || reviewed_pid=none
+    reviewed_head="$(git -C "$WT" rev-parse "$reviewed" 2>/dev/null || true)"
+  fi
   O0="$(origin_head)"; W0="$(git -C "$WT" rev-parse HEAD 2>/dev/null)"
   # git wrapper: with $ST/delete-fails, `push origin --delete` fails the way
   # GitHub's does after it auto-deletes the branch on merge. Defined and
@@ -305,7 +340,7 @@ run() {
       command git "$@"
     )
     export -f git
-    bash "$SHIP" "$@" 2>"$S/stderr.txt"
+    SHIP_TEST_REVIEW_PID="$reviewed_pid" SHIP_TEST_REVIEW_HEAD="$reviewed_head" bash "$SHIP" "$@" 2>"$S/stderr.txt"
   )"; CODE=$?
   ERR="$(cat "$S/stderr.txt")"
 }
@@ -315,6 +350,11 @@ untouched() {
   [ "$(git -C "$WT" rev-parse HEAD)" = "$W0" ] || fail "$1: worktree HEAD unchanged"
 }
 expect() { [ "$CODE" = "$1" ] || fail "$2: exit $1 (got $CODE): out=[$OUT] err=[$ERR]"; }
+expect_refused() {
+  [ "$CODE" = 5 ] || fail "$1: exit $CODE, wants 5"
+  [ "$(tail -n 1 <<<"$ERR")" = "ship-pr: refused $1" ] \
+    || fail "$1: last stderr line [$(tail -n 1 <<<"$ERR")] wants [ship-pr: refused $1]"
+}
 no_merge() { ! grep -q '^gh pr \(merge\|ready\)' "$ST/gh.log" 2>/dev/null || fail "$1: no ready or merge call"; }
 GATE_PANIC='echo gate-start; echo "thread prune::young_fork panicked at src/prune.rs:42:5:"; echo "assertion left == right failed"; echo "  left: 1"; echo " right: 2"; for i in $(seq 1 25); do echo "gate-tail-$i"; done; exit 1'
 assert_gate_panic_failure() {
@@ -334,6 +374,69 @@ assert_gate_panic_failure() {
   for i in $(seq 1 25); do grep -qx "gate-tail-$i" "$gate_file" || fail "$label: file is missing gate-tail-$i err=[$ERR]"; done
   rm -f "$gate_file"
 }
+
+# ===== a switchyard merge fast-forwards only a clean ~/.agents checkout
+setup
+rm -rf "$HOME/.agents"
+git clone -q "$ORIGIN" "$HOME/.agents"
+AGENTS_HEAD0="$(git -C "$HOME/.agents" rev-parse HEAD)"
+echo keep >"$HOME/.agents/untracked-note"
+merge_once 'git --git-dir="$ORIGIN" update-ref refs/heads/main refs/heads/feature'
+run 7 --repo aakshintala/switchyard --reviewed "$HEAD0" --worktree "$WT" --keep-branch
+expect 0 "switchyard merge fast-forwards clean ~/.agents"
+[ "$(git -C "$HOME/.agents" branch --show-current)" = main ] || fail "agents clean: remains on main"
+AGENTS_MAIN="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+[ "$(git -C "$HOME/.agents" rev-parse HEAD)" = "$AGENTS_MAIN" ] || fail "agents clean: fast-forwarded to main"
+[ "$(git -C "$HOME/.agents" rev-parse HEAD)" != "$AGENTS_HEAD0" ] || fail "agents clean: HEAD advanced"
+[ -f "$HOME/.agents/untracked-note" ] || fail "agents clean: untracked file is preserved"
+! grep -q 'not fast-forwarded' <<<"$ERR" || fail "agents clean: no warning: [$ERR]"
+OLD_SHORT="$(git -C "$HOME/.agents" rev-parse --short "$AGENTS_HEAD0")"
+NEW_SHORT="$(git -C "$HOME/.agents" rev-parse --short "$AGENTS_MAIN")"
+grep -Fq "$HOME/.agents: fast-forwarded $OLD_SHORT -> $NEW_SHORT" <<<"$ERR" || fail "agents clean: fast-forward line with SHAs: [$ERR]"
+grep -Fq "(1 commits)" <<<"$ERR" || fail "agents clean: fast-forward line with count: [$ERR]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "agents clean: switchyard merge still succeeds: [$OUT]"
+
+setup
+rm -rf "$HOME/.agents"
+git clone -q "$ORIGIN" "$HOME/.agents"
+git -C "$HOME/.agents" merge -q --ff-only origin/feature
+AGENTS_HEAD0="$(git -C "$HOME/.agents" rev-parse HEAD)"
+merge_once 'git --git-dir="$ORIGIN" update-ref refs/heads/main refs/heads/feature'
+run 7 --repo aakshintala/switchyard --reviewed "$HEAD0" --worktree "$WT" --keep-branch
+expect 0 "switchyard merge leaves current ~/.agents quiet"
+[ "$(git -C "$HOME/.agents" rev-parse HEAD)" = "$AGENTS_HEAD0" ] || fail "agents current: HEAD stays put"
+! grep -q 'fast-forwarded' <<<"$ERR" || fail "agents current: no fast-forward line: [$ERR]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "agents current: switchyard merge still succeeds: [$OUT]"
+
+setup
+rm -rf "$HOME/.agents"
+git clone -q "$ORIGIN" "$HOME/.agents"
+AGENTS_HEAD0="$(git -C "$HOME/.agents" rev-parse HEAD)"
+echo dirty >"$HOME/.agents/file.txt"
+merge_once 'git --git-dir="$ORIGIN" update-ref refs/heads/main refs/heads/feature'
+run 7 --repo aakshintala/switchyard --reviewed "$HEAD0" --worktree "$WT" --keep-branch
+expect 0 "switchyard merge leaves dirty ~/.agents alone"
+[ "$(git -C "$HOME/.agents" rev-parse HEAD)" = "$AGENTS_HEAD0" ] || fail "agents dirty: HEAD stays put"
+[ "$(cat "$HOME/.agents/file.txt")" = dirty ] || fail "agents dirty: tracked change stays put"
+grep -Fq "$HOME/.agents" <<<"$ERR" && grep -q 'behind 1 commit' <<<"$ERR" \
+  || fail "agents dirty: warning names checkout and lag: [$ERR]"
+! grep -q ': fast-forwarded ' <<<"$ERR" || fail "agents dirty: no success line: [$ERR]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "agents dirty: switchyard merge still succeeds: [$OUT]"
+
+setup
+rm -rf "$HOME/.agents"
+git clone -q "$ORIGIN" "$HOME/.agents"
+AGENTS_HEAD0="$(git -C "$HOME/.agents" rev-parse HEAD)"
+git -C "$HOME/.agents" checkout -q -b other
+merge_once 'git --git-dir="$ORIGIN" update-ref refs/heads/main refs/heads/feature'
+run 7 --repo aakshintala/switchyard --reviewed "$HEAD0" --worktree "$WT" --keep-branch
+expect 0 "switchyard merge leaves another ~/.agents branch alone"
+[ "$(git -C "$HOME/.agents" branch --show-current)" = other ] || fail "agents branch: remains on other"
+[ "$(git -C "$HOME/.agents" rev-parse HEAD)" = "$AGENTS_HEAD0" ] || fail "agents branch: HEAD stays put"
+grep -Fq "$HOME/.agents" <<<"$ERR" && grep -q 'behind 1 commit' <<<"$ERR" \
+  || fail "agents branch: warning names checkout and lag: [$ERR]"
+! grep -q ': fast-forwarded ' <<<"$ERR" || fail "agents branch: no success line: [$ERR]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "agents branch: switchyard merge still succeeds: [$OUT]"
 
 # ===== exit 2: usage and preconditions
 setup
@@ -401,6 +504,27 @@ done
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail "conflict leaves a clean tree"
 no_merge "conflict"
 
+# A merge commit preserves a conflict resolution until main moves again. Strict
+# mode must replay that resolved tree without retrying the original conflicting commit.
+setup
+echo feature >"$WT/file.txt"; git -C "$WT" commit -qam "touch file"; git -C "$WT" push -q origin feature
+advance_main file.txt conflicting
+git -C "$WT" fetch -q origin main
+if git -C "$WT" merge --no-edit origin/main >/dev/null 2>&1; then
+  fail "conflict-resolution fixture creates a conflict"
+fi
+echo resolved >"$WT/file.txt"; git -C "$WT" add file.txt
+git -C "$WT" commit -qm "merge main and resolve conflict"
+git -C "$WT" push -q origin feature
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" rev-parse --verify "$HEAD0^2" >/dev/null || fail "conflict resolution is a merge commit"
+advance_main other.txt unrelated
+ship; expect 0 "strict rebase preserves a merge conflict resolution"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "resolved merge still merges: [$OUT]"
+PIN="$(sed -n 's/.*--match-head-commit //p' "$ST/gh.log")"
+git --git-dir="$ORIGIN" merge-base --is-ancestor refs/heads/main "$PIN" \
+  || fail "resolved merge rebases onto the latest main"
+
 # ===== exit 4: a different patch than the reviewed one
 setup
 git -C "$C" checkout -q -b other
@@ -424,7 +548,85 @@ git -C "$WT" push -q --force-with-lease origin HEAD:refs/heads/feature
 ship; expect 4 "pushed head whose patch-id differs from --reviewed exits 4"
 no_merge "pushed head with a changed patch"
 
+# ===== the last review-pr verdict for --reviewed must approve before merge
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T12:00:00Z",id:103,body:("review-pr: patch-id ffffffffffffffffffffffffffffffffffffffff, head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE")},
+  {created_at:"2026-11-04T11:00:00Z",id:102,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: CHANGES\n\nP1 finding remains open")},
+  {created_at:"2026-11-04T10:00:00Z",id:101,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: APPROVE")}
+]' >"$ST/review-comments"
+ship; expect 5 "last CHANGES verdict refuses merge"; expect_refused REVIEW; no_merge "last CHANGES verdict"
+grep -q 'review' <<<"$ERR" || fail "review refusal explains the missing approval: [$ERR]"
+
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:104,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK all findings repaired")}
+]' >"$ST/review-comments"
+ship; expect 0 "scoped FIX-OK verdict permits merge"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "scoped FIX-OK still merges: [$OUT]"
+
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:105,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## spec (test)\n\nVERDICT spec: CHANGES")}
+]' >"$ST/review-comments"
+echo 'P2: no real bug; keep the test finding' >"$T/no-real-bug.txt"
+echo changed >>"$WT/feature.txt"; git -C "$WT" commit -qam "address review nit"; git -C "$WT" push -q origin feature
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$T/no-real-bug.txt"
+expect 0 "--unverified-fixes still ships a no-real-bug CHANGES round"
+grep -q '^gh pr merge' "$ST/gh.log" || fail "no-real-bug CHANGES round merged"
+grep -q '^Fixes since .* shipped without re-review' "$ST/comment.txt" || fail "no-real-bug CHANGES round records the fix"
+
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:106,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE repair not present")}
+]' >"$ST/review-comments"
+echo changed >>"$WT/feature.txt"; git -C "$WT" commit -qam "address ruled finding"; git -C "$WT" push -q origin feature
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT"
+expect 5 "FIX-INCOMPLETE without --unverified-fixes refuses merge"; expect_refused REVIEW; no_merge "FIX-INCOMPLETE without the option"
+
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:107,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE repair not present")}
+]' >"$ST/review-comments"
+echo changed >>"$WT/feature.txt"; git -C "$WT" commit -qam "address ruled finding"; git -C "$WT" push -q origin feature
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$T/no-real-bug.txt"
+expect 0 "FIX-INCOMPLETE with --unverified-fixes ships the unverified path"
+grep -q '^gh pr merge' "$ST/gh.log" || fail "FIX-INCOMPLETE unverified path merged"
+
+# ===== patch-id ignores context lines: a rebase over a main commit that
+# ===== touched only the neighbouring line still matches, while a changed
+# ===== added line still mismatches
+setup
+printf 'A\nb\nc\n' >"$WT/file.txt"
+git -C "$WT" commit -qam "PR changes line 1"; git -C "$WT" push -q origin feature
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+advance_main file.txt "$(printf 'a\nb\nC')"
+ship; expect 0 "rebase over a context-only change passes the patch-id check"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "context-only change still merges: [$OUT]"
+
+setup
+printf 'A\nb\nc\n' >"$WT/file.txt"
+git -C "$WT" commit -qam "PR changes line 1"; git -C "$WT" push -q origin feature
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+printf 'A2\nb\nc\n' >"$WT/file.txt"
+git -C "$WT" commit -q --amend --no-edit -a
+git -C "$WT" push -q --force-with-lease origin HEAD:refs/heads/feature
+ship; expect 4 "changed added line exits 4"
+no_merge "changed added line"
+
 # ===== exit 1: gate
+setup
+export CARGO_SLOTS=1 CARGO_SLOT_DIR="$T/cargo-slots" CARGO_SLOT_TEST_CORES=12
+ship --gate 'cargo nextest run'; expect 0 "nextest gate takes a cargo slot"
+unset CARGO_SLOTS CARGO_SLOT_DIR CARGO_SLOT_TEST_CORES
+[ "$(cat "$ST/cargo-held")" = "held=1" ] || fail "ship-pr gate cargo did not hold a slot"
+[ "$(cat "$ST/cargo-threads")" = "threads=12" ] || fail "ship-pr gate nextest did not get the per-slot thread cap"
+
 setup
 ship --gate "$GATE_PANIC"
 expect 1 "failing gate"; untouched "failing gate"
@@ -563,7 +765,8 @@ sed -i.bak 1s/a/x/ "$WT/file.txt"; rm "$WT/file.txt.bak"
 git -C "$WT" commit -qam "edit line 1"; git -C "$WT" push -q origin feature
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
 checks_hook 'sed -i.bak 3s/c/z/ "$C/file.txt"; rm "$C/file.txt.bak"; git -C "$C" commit -qam m; git -C "$C" push -q origin main'
-ship; expect 4 "main moves during CI with a clean rebase that changes the patch"; no_merge "patch-id on retry"
+ship; expect 0 "main moves during CI with a clean rebase that changes only context"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "context-only rebase on retry still merges: [$OUT]"
 
 setup; checks_hook 'echo n >"$C/newfile.txt"; git -C "$C" add .; git -C "$C" commit -qm m; git -C "$C" push -q origin main'
 ship --gate 'test ! -e newfile.txt && echo x >>"$ST/gates"'; expect 0 "gate runs once, not again after a rebase"
@@ -668,6 +871,49 @@ grep -q "^gh pr merge 7 --repo O/N --squash --match-head-commit $HEAD0\$" "$ST/g
 [ ! -e "$WT" ] || fail "guard passes: worktree removed"
 origin_head >/dev/null && fail "guard passes: no local merge commit leaks to origin"
 
+# A merge check on a non-strict base sees main's new file and fails before merge.
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
+ship --merge-check 'if [ -e other.txt ]; then for i in $(seq 1 25); do echo gate-tail-$i; done; exit 1; fi'
+expect 1 "not strict merge check fails on moved main"
+! grep -q '^gh pr merge' "$ST/gh.log" || fail "merge check failure: no merge call"
+grep -q '^gate-tail-25$' <<<"$OUT" || fail "merge check failure: last 20 lines printed"
+grep -q '^gate-tail-5$' <<<"$OUT" && fail "merge check failure: output before last 20 lines omitted"
+grep -q '^full merge check output: ' <<<"$OUT" || fail "merge check failure: saved log path printed"
+merge_check_log="$(sed -n 's/^full merge check output: //p' <<<"$OUT")"
+case "$merge_check_log" in "$TMPDIR"/ship-pr-7-merge-check.*) ;; *) fail "merge check failure: path identifies the check: [$merge_check_log]" ;; esac
+[ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD0" ] || fail "merge check failure: worktree back on pinned head"
+[ -z "$(git -C "$WT" status --porcelain)" ] || fail "merge check failure: worktree clean"
+[ -d "$WT" ] || fail "merge check failure: worktree kept"
+
+# A passing merge check runs on current main and allows the pinned head to merge.
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
+MAIN1="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+ship --merge-check 'test -e other.txt; git rev-parse HEAD >>"$ST/merge-check-heads"'
+expect 0 "not strict merge check passes on moved main"
+[ "$(wc -l <"$ST/merge-check-heads")" -eq 1 ] || fail "merge check runs once on a moved main"
+git -C "$C" merge-base --is-ancestor "$MAIN1" "$(cat "$ST/merge-check-heads")" \
+  || fail "merge check passes on the tree with current origin/main"
+grep -q "merge check passes on the PR merged with current origin/main" <<<"$ERR" || fail "merge check pass message: [$ERR]"
+[ ! -e "$WT" ] || fail "merge check pass: worktree removed"
+origin_head >/dev/null && fail "merge check pass: no local merge commit leaks to origin"
+
+# If main moves during a passing check, the check reruns on the new tip.
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main initial.txt before
+ship --merge-check 'if [ ! -e "$ST/merge-check-once" ]; then touch "$ST/merge-check-once"; echo moved >"$C/other.txt"; git -C "$C" add .; git -C "$C" commit -qm moved; git -C "$C" push -q origin main; else test -e other.txt; fi; git rev-parse HEAD >>"$ST/merge-check-heads"'
+expect 0 "merge check retries after main moves"
+[ "$(wc -l <"$ST/merge-check-heads")" -eq 2 ] || fail "merge check reruns once after main moves"
+MAIN2="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+git -C "$C" merge-base --is-ancestor "$MAIN2" "$(sed -n 2p "$ST/merge-check-heads")" \
+  || fail "merge check retry runs on the new tip"
+[ ! -e "$WT" ] || fail "merge check retry pass: worktree removed"
+
+# With both flags, only --gate runs on the merged tree.
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
+ship --gate 'if [ -e other.txt ] && [ ! -e "$ST/gate-main-moved" ]; then touch "$ST/gate-main-moved"; echo later >"$C/later.txt"; git -C "$C" add .; git -C "$C" commit -qm later; git -C "$C" push -q origin main; fi; git rev-parse HEAD >>"$ST/gate-heads"' --merge-check 'touch "$ST/merge-check-ran"'
+expect 0 "merge check is ignored when gate is set"
+[ "$(wc -l <"$ST/gate-heads")" -eq 2 ] || fail "gate runs initially and on merged main without merge-check retries"
+[ ! -e "$ST/merge-check-ran" ] || fail "merge check is ignored when gate is set"
+
 # gate fails only on the merged tree: print panic context and restore the pinned head
 GATE_PANIC_ON_MERGED="if [ ! -e bad ]; then echo gate-step-2-pass; exit 0; fi; $GATE_PANIC"
 setup; echo "$NOSTRICT" >"$ST/rules"; advance_main bad x; echo true >"$ST/draft"
@@ -685,7 +931,8 @@ grep -q '^gh pr ready 7 --repo O/N$' "$ST/gh.log" || fail "draft marked ready be
 # SIGTERM during the merged-tree gate restores the pinned head and exits 143
 setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
 O0="$(origin_head)"
-bash "$SHIP" 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" \
+SHIP_TEST_REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')" \
+SHIP_TEST_REVIEW_HEAD="$HEAD0" bash "$SHIP" 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" \
   --gate 'if [ -e other.txt ]; then /bin/sleep 30 & echo $! >"$ST/gate-sleep.pid"; wait $!; fi' >"$S/kill-out.txt" 2>"$S/kill-err.txt" &
 kill_pid=$!
 for i in $(seq 1 100); do
@@ -759,6 +1006,7 @@ nothing_ran() {
 }
 setup; advance_main other.txt o; printf 'Resolves #97\n' >"$ST/body"
 ship --body-has 'Resolves #' --body-has 'Doc friction:'; nothing_ran "one line missing"
+expect_refused BODY
 [ "$OUT" = "missing body line: Doc friction:" ] || fail "one missing line printed: [$OUT]"
 grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "miss message: [$ERR]"
 
@@ -848,9 +1096,13 @@ U7="https://github.com/O/N/pull/7#issuecomment-5"
 setup; printf 'Resolves #97\nApproved by the lane.\n' >"$ST/body"
 ship; nothing_ran "uncited authority in the body"
 grep -qxF 'uncited authority: Approved by the lane.' <<<"$OUT" || fail "uncited body line printed: [$OUT]"
-grep -q 'PR text claims authority with no citation; cite the ruling' <<<"$ERR" || fail "authority message: [$ERR]"
+grep -q 'PR text claims authority without a citation on the same line or in the same bullet' <<<"$ERR" || fail "authority message: [$ERR]"
 setup; printf 'Resolves #97\nAccepted gap per the owner-side ruling #4069.\n' >"$ST/body"
 ship; expect 0 "cited authority in the body"
+setup; printf 'Resolves #97\nApproved by the lane.\nSee #4069.\n' >"$ST/body"
+ship; nothing_ran "authority citation on the next line"
+grep -qxF 'uncited authority: Approved by the lane.' <<<"$OUT" || fail "next-line citation did not leave the claim uncited: [$OUT]"
+grep -qF 'PR text claims authority without a citation on the same line or in the same bullet; cite it there (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun' <<<"$ERR" || fail "same-line refusal message: [$ERR]"
 setup; printf 'Resolves #97\nWe cite `approved by` as a term.\n> per the ruling, quoted\n' >"$ST/body"
 ship; expect 0 "code span and quote in the body"
 
@@ -928,6 +1180,46 @@ expect 0 "inside happy path"
 git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "inside: local branch kept"
 origin_head >/dev/null && fail "inside: origin branch deleted"
 grep -q 'worktree kept' <<<"$ERR" || fail "inside: worktree kept message: [$ERR]"
+
+# ===== diagnostic PRs keep the local worktree and branch even when ship-pr
+# ===== runs outside them
+setup; printf 'Diagnostic PR: the ticket stays open\nRefs #97\n' >"$ST/body"
+cd "$T" || fail "cd out for diagnostic ship"
+ship; expect 0 "diagnostic PR happy path"
+[ "$OUT" = "merged $MERGE_SHA" ] || fail "diagnostic PR merged line: [$OUT]"
+[ -d "$WT" ] || fail "diagnostic PR worktree kept outside"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "diagnostic PR local branch kept outside"
+origin_head >/dev/null && fail "diagnostic PR remote branch is still deleted"
+grep -q 'worktree kept' <<<"$ERR" || fail "diagnostic PR keep message: [$ERR]"
+
+setup; printf 'Refs #97\nResolves #97\n' >"$ST/body"
+ship; expect 0 "a closing line prevents diagnostic keep inference"
+[ ! -e "$WT" ] || fail "a closing line permits default worktree removal"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "a closing line permits default local branch deletion"
+
+setup; printf 'Resolves #97\n' >"$ST/body"
+ship --keep-branch; expect 0 "explicit --keep-branch"
+[ -d "$WT" ] || fail "explicit --keep-branch keeps worktree"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "explicit --keep-branch keeps local branch"
+grep -q 'worktree kept' <<<"$ERR" || fail "explicit --keep-branch log: [$ERR]"
+
+setup; printf 'Resolves #97\n' >"$ST/body"; cd "$T" || fail "cd out for default cleanup"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT"; expect 0 "outside clean Resolves ship removes worktree by default"
+[ ! -e "$WT" ] || fail "outside clean Resolves ship removes worktree by default"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "outside clean Resolves ship deletes local branch by default"
+grep -Fq 'worktree removed: ' <<<"$ERR" && grep -Fq '; local branch deleted: feature' <<<"$ERR" || fail "outside default cleanup log: [$ERR]"
+
+setup; touch "$ST/worktree-busy"; cd "$T" || fail "cd out for busy cleanup"
+ship; expect 0 "active worktree is kept"
+[ -d "$WT" ] || fail "active worktree remains"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "active worktree branch remains"
+grep -q 'worktree kept: a process has its cwd inside it' <<<"$ERR" || fail "active worktree keep log: [$ERR]"
+
+setup; printf 'echo late > %q\n' "$WT/late.txt" >"$ST/merge-each"; cd "$T" || fail "cd out for dirty cleanup"
+ship; expect 0 "dirty worktree is kept"
+[ -d "$WT" ] || fail "dirty worktree remains"
+git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null || fail "dirty worktree branch remains"
+grep -q 'worktree kept: it is not clean after merge' <<<"$ERR" || fail "dirty worktree keep log: [$ERR]"
 
 setup; ship; expect 0 "non-draft happy path"
 ! grep -q '^gh pr ready' "$ST/gh.log" || fail "non-draft never marked ready"
@@ -1097,6 +1389,7 @@ MUTANTS_LABEL='[{"name":"mutants"}]'
 # (a) repo defines mutants, draft PR without the label: exit 5, no ready call
 setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"
 ship; expect 5 "draft without the mutants label"
+expect_refused LABEL
 untouched "draft without the mutants label"; no_merge "draft without the mutants label"
 grep -q 'PR lacks the mutants label' <<<"$ERR" || fail "missing-label message: [$ERR]"
 grep -q -- '--no-mutants-label' <<<"$ERR" || fail "missing-label names the flag: [$ERR]"
@@ -1125,6 +1418,7 @@ setup; echo true >"$ST/draft"
 ship; expect 0 "repo without the mutants label passes unchecked"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "unchecked repo merged line: [$OUT]"
 ! grep -q -- '--json labels' "$ST/gh.log" || fail "unchecked repo: no PR label read"
+! grep -q '^gh run list' "$ST/gh.log" || fail "no mutants-gate flag: no run lookup"
 
 # a repo with other labels only is not checked either
 setup; echo true >"$ST/draft"; repo_labels '[{"name":"docs"}]'
@@ -1134,6 +1428,53 @@ ship; expect 0 "repo with other labels passes unchecked"
 setup; repo_labels "$MUTANTS_LABEL"
 ship; expect 0 "non-draft skips the mutants check"
 ! grep -q -- '--json labels' "$ST/gh.log" || fail "non-draft: no PR label read"
+
+# ===== --mutants-gate: before ready, require a label or zero-mutant proof
+setup; echo true >"$ST/draft"; on_pr_labels "$MUTANTS_LABEL"
+ship --mutants-gate; expect 0 "mutants gate accepts the PR label"
+! grep -q '^gh run list' "$ST/gh.log" || fail "mutants label: no run lookup needed"
+grep -q -- '--json labels' "$ST/gh.log" || fail "mutants label: PR labels read"
+
+setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:417,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-417.json"
+echo 'mutants in the diff: 0' >"$ST/log-417-901.log"
+ship --mutants-gate; expect 0 "mutants gate accepts completed zero-mutant proof"
+grep -q 'gh run list.*--commit' "$ST/gh.log" || fail "zero-mutant proof: run list is pinned to the head"
+grep -q 'gh run view 417.*--job 901 --log' "$ST/gh.log" || fail "zero-mutant proof: Selection job log read"
+
+setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:417,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-417.json"
+printf 'Selection\tPlan\t2026-11-05T10:47:00.0000000Z mutants in the diff: 0\n' >"$ST/log-417-901.log"
+ship --mutants-gate; expect 0 "mutants gate accepts a prefixed zero-mutant proof"
+
+setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:417,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-417.json"
+printf 'Selection\tPlan\t2026-11-05T10:47:00.0000000Z mutants in the diff: 05\n' >"$ST/log-417-901.log"
+ship --mutants-gate; expect 5 "mutants gate rejects a prefixed 05 count"
+no_merge "mutants gate with prefixed 05"
+grep -q 'mutants gate failed' <<<"$ERR" || fail "prefixed 05 failure names the check: [$ERR]"
+
+setup; echo true >"$ST/draft"
+ship --mutants-gate; expect 5 "mutants gate rejects no label and no proof"
+expect_refused MUTANTS
+no_merge "mutants gate without proof"
+grep -q 'mutants gate failed' <<<"$ERR" || fail "mutants gate failure names the check: [$ERR]"
+! grep -q 'gh label create\|gh label edit' "$ST/gh.log" || fail "mutants gate never adds a label"
+
+setup; echo true >"$ST/draft"
+jq -nc --arg h "$HEAD0" '[{databaseId:416,status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-04T08:00:00Z"},{databaseId:417,status:"in_progress",conclusion:null,headSha:$h,createdAt:"2026-11-04T08:16:00Z"}]' >"$ST/run-list.json"
+echo '[{"databaseId":901,"name":"Selection","status":"completed","conclusion":"success"}]' >"$ST/jobs-416.json"
+echo 'mutants in the diff: 0' >"$ST/log-416-901.log"
+ship --mutants-gate; expect 5 "mutants gate rejects an in-progress current-head run"
+no_merge "mutants gate with in-progress run"
+grep -q 'mutants gate failed' <<<"$ERR" || fail "in-progress gate failure names the check: [$ERR]"
+
+setup; ship --mutants-gate; expect 0 "mutants gate leaves an already-ready PR alone"
+! grep -q -- '--json labels' "$ST/gh.log" || fail "already-ready PR: no label read"
+! grep -q '^gh run list' "$ST/gh.log" || fail "already-ready PR: no run lookup"
 
 # (d) --no-mutants-label skips the check and prints the reason
 setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"
@@ -1491,25 +1832,25 @@ no_merge "body match with the flag"
 
 # Longest-wait notice is first on stderr and uses the effective CI timeout.
 setup; ship; expect 0 "default wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 36000 s (10 h): 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 36000 s (10 h), worst case; a clean run takes minutes" ] \
   || fail "default longest-wait notice: [$ERR]"
 setup; ship --timeout 14; expect 0 "short wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 70 s (0 h): 5 CI waits x 14 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 70 s (0 h), worst case; a clean run takes minutes" ] \
   || fail "short longest-wait notice: [$ERR]"
 setup; CLAUDECODE=1 ship --timeout 14; expect 0 "Claude Code wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 36000 s (10 h): 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 36000 s (10 h), worst case; a clean run takes minutes" ] \
   || fail "Claude Code longest-wait notice: [$ERR]"
 setup; CLAUDECODE=1 ship --timeout 599; expect 0 "one-below wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 36000 s (10 h): 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 36000 s (10 h), worst case; a clean run takes minutes" ] \
   || fail "599 s uses the Claude Code timeout: [$ERR]"
 setup; CLAUDECODE=1 ship --timeout 600; expect 0 "at-boundary wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 3000 s (0 h): 5 CI waits x 600 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 3000 s (0 h), worst case; a clean run takes minutes" ] \
   || fail "600 s stays unchanged: [$ERR]"
 setup; CLAUDECODE=1 ship --timeout 601; expect 0 "above-boundary wait notice case"
-[ "$(head -n 1 <<<"$ERR")" = "ship-pr: longest wait 3005 s (0 h): 5 CI waits x 601 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 <<<"$ERR")" = "ship-pr: no shell timeout: waits are bounded at 3005 s (0 h), worst case; a clean run takes minutes" ] \
   || fail "601 s stays unchanged: [$ERR]"
 setup; run 7 --repo O/N --worktree "$WT"; expect 2 "usage has no longest-wait notice"
-! grep -q '^ship-pr: longest wait' <<<"$ERR" || fail "usage error has no longest-wait notice: [$ERR]"
+! grep -q '^ship-pr: no shell timeout' <<<"$ERR" || fail "usage error has no longest-wait notice: [$ERR]"
 grep -q 'background' <<<"$ERR" && grep -q 'no shell timeout' <<<"$ERR" \
   || fail "usage mentions background and no shell timeout: [$ERR]"
 
