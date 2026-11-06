@@ -110,7 +110,7 @@ Tool preference:
 
 **Tag every debug log** with a unique prefix, e.g. `[DEBUG-a4f2]`. Cleanup at the end becomes a single grep. Untagged logs survive; tagged logs die.
 
-**Process lifecycle.** To see processes start and exit, trace the kernel's own events: `strace -f -e trace=%process` on Linux, `dtruss` or `ktrace` on macOS. A sampler of `/proc` or `ps` cannot see a process shorter than its interval, and reports lifetimes that are artefacts of its own grid, phantom processes included. Use a sampler only for state that outlives its interval by a wide margin, never to establish that a process did or did not exist.
+**Process lifecycle.** To see processes start and exit, trace the kernel's own events: `strace -f -e trace=%process` on Linux, `dtruss` or `ktrace` on macOS. A sampler of procfs or `ps` cannot see a process shorter than its interval, and reports lifetimes that are artefacts of its own grid, phantom processes included. Use a sampler only for state that outlives its interval by a wide margin, never to establish that a process did or did not exist.
 
 **Perf branch.** For performance regressions, logs are usually wrong. Instead: establish a baseline measurement (timing harness, `performance.now()`, profiler, query plan), then bisect. Measure first, fix second.
 
