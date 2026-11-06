@@ -1422,6 +1422,18 @@ assert_rc 0 'closed branch claim does not hold'
 assert_line 'STALE docs/tui.md by arch/66-log-diag-leaf (ticket #66 closed)' 'closed branch claim is stale'
 assert_not_contains 'OVERLAP docs/tui.md lane #66' 'closed branch claim does not overlap'
 
+# A phase-suffixed holder is keyed to its ticket too.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66-plan\tgrant\t0\tt:stub\t\n')"
+CLAUDE_JSON='[{"name":"fiber-66-plan","status":"idle"}]'
+GH_TICKET_STATES='66:CLOSED'
+export FILE_CLAIM_LIST CLAUDE_JSON GH_TICKET_STATES
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'closed phase claim does not hold'
+assert_line 'STALE docs/tui.md by fiber-66-plan (ticket #66 closed)' 'closed phase claim is stale'
+assert_not_contains 'OVERLAP docs/tui.md lane #66' 'closed phase claim does not overlap'
+grep -qF 'ticket_66: issueOrPullRequest(number: 66)' "$T/gh.log" || fail 'closed phase claim queries ticket #66'
+
 # Merged pull requests are terminal in the same way as closed issues.
 reset_case
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
