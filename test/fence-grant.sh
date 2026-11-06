@@ -239,7 +239,7 @@ assert_no_probes() {
 assert_usage() {
   assert_rc 2 "$1"
   assert_out '' "$1 stdout"
-  assert_stderr 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]' "$1 usage"
+  assert_stderr 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship' "$1 usage"
   assert_no_probes "$1"
   assert_no_grant "$1"
 }
@@ -772,7 +772,7 @@ assert_not_contains 'NOSYMBOL' 'valid expect accepted'
 assert_line 'HELD docs/tui.md by PR #11' 'valid expect holder'
 
 # --- Exit 2: bad arguments -----------------------------------------------------
-USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]'
+USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship'
 reset_case
 run_fg
 assert_usage 'missing ticket'
@@ -1230,5 +1230,35 @@ run_fg 88 --paths docs/tui.md --dry
 assert_rc 3 'malformed claims read fails closed'
 assert_out 'ERROR file-claim list unparseable claims' 'malformed claims read output'
 assert_no_grant 'malformed claims read'
+
+# --- Launch requirements are phase-aware -----------------------------------
+reset_case
+run_fg --require 77 --phase plan
+assert_rc 0 'plan phase needs no fence grant'
+assert_out '' 'plan requirement is silent'
+assert_stderr '' 'plan requirement has no override reason'
+
+run_fg --require 77 --phase build
+assert_rc 2 'build phase without a grant is refused'
+assert_stderr "fence-grant: issue 77 needs a fence grant in $FW_RUN; create one or set FW_NO_FENCE=<reason>" 'build requirement explains the fix'
+
+printf 'grant\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+run_fg --require 77 --phase build
+assert_rc 0 'build phase accepts a grant'
+assert_out '' 'existing grant check is silent'
+assert_stderr '' 'existing grant check has no error'
+
+rm "$FW_RUN/fiber-77-fence-grant-1.md"
+run_fg --require 77 --phase build
+assert_rc 2 'build phase remains guarded after grant removal'
+FW_NO_FENCE='approved by flywheel'
+export FW_NO_FENCE
+run_fg --require 77 --phase ship
+assert_rc 0 'ship phase accepts a reasoned override'
+assert_out 'FW_NO_FENCE: approved by flywheel' 'override prints its reason'
+unset FW_NO_FENCE
+
+run_fg --require 77 --phase ship
+assert_rc 2 'ship phase without a grant is refused'
 
 echo 'fence-grant tests passed'

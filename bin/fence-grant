@@ -234,7 +234,28 @@ fw_mtime() {
   return 0
 }
 
-_usage() { echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]" >&2; }
+_usage() { echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship" >&2; }
+
+if [ "${1:-}" = --require ]; then
+  [ "$#" -eq 4 ] || { _usage; exit 2; }
+  ticket="$2"
+  phase="$4"
+  case "$ticket" in ''|*[!0-9]*) _usage; exit 2;; esac
+  [ "$3" = --phase ] || { _usage; exit 2; }
+  case "$phase" in plan|build|ship) ;; *) _usage; exit 2;; esac
+  [ "$phase" != plan ] || exit 0
+  if [ -n "${FW_NO_FENCE:-}" ]; then
+    printf 'FW_NO_FENCE: %s\n' "$FW_NO_FENCE"
+    exit 0
+  fi
+  run=$(_fw_run)
+  set +f
+  for grant in "$run"/fiber-"$ticket"*-fence-grant*.md; do
+    [ -f "$grant" ] && exit 0
+  done
+  echo "fence-grant: issue $ticket needs a fence grant in $run; create one or set FW_NO_FENCE=<reason>" >&2
+  exit 2
+fi
 
 ticket="${1:-}"
 case "$ticket" in ''|*[!0-9]*) _usage; exit 2;; esac

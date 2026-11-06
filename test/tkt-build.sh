@@ -49,6 +49,9 @@ ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 ln -s "$REAL_BIN/job-record" "$T/bin/job-record" || fail "symlink job-record"
+ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
+# Lane and fix slots need a fence grant (test/tkt-job.sh covers that); these cases test the build flow.
+export FW_NO_FENCE="test/tkt-build.sh exercises the build flow, not the fence"
 
 # Stub delegate: run mints a DONE record at once (lane carries one commit for
 # --expect-commits; map carries $T/map-text); ask modes mint NEEDS_CONTEXT.

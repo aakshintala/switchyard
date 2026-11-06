@@ -17,7 +17,7 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-job.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/records" "$T/cases"
+mkdir -p "$T/home/.agents/bin" "$T/tmp" "$T/bin" "$T/records" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export STUB_JOBSDIR="$T/tmp/delegate-jobs"
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
@@ -27,6 +27,9 @@ unset DELEGATE_JOBS_DIR
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
 ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
+ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
+ln -s "$REAL_BIN/fence-grant" "$T/home/.agents/bin/fence-grant" || fail "symlink default fence-grant"
+unset FW_NO_FENCE TKT_LAUNCH_GUARD
 
 # Stub delegate: run/resume print a fresh job id and log the call; watch copies
 # each canned record into the jobs dir. The id counter resets per case.
@@ -127,6 +130,7 @@ setup_case() {
     printf 'head=%s\n' "$H"
     printf 'model.lane=%s\n' test-model
   } >"$S"
+  printf 'grant\n' >"$CDIR/run/fiber-502-fence-grant-test.md"
 }
 
 # Reset the stub between cases: fresh ids, an empty call log, no job records.
@@ -242,6 +246,58 @@ EOF
 printf 'extra words here\n' >"$T/extra.md"
 printf 'do the thing\n' >"$T/brief.md"
 printf 'resume prompt\n' >"$T/resume-prompt.md"
+
+# --- build slots require a fence grant; non-writing slots do not ------------
+setup_case fence-required
+rm "$CDIR/run/fiber-502-fence-grant-test.md"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 2 ] || fail "lane without a fence grant exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q 'needs a fence grant' "$CDIR/stderr.txt" || fail "missing grant names the fence fix: $(cat "$CDIR/stderr.txt")"
+[ -z "$(cat "$T/stub.log")" ] || fail "lane without a fence grant never dispatches"
+
+setup_case fence-granted
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "lane with a fence grant starts (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^run|' "$T/stub.log" || fail "lane with a fence grant dispatches"
+
+setup_case plan-slot-no-fence
+rm "$CDIR/run/fiber-502-fence-grant-test.md"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 0 ] || fail "non-writing slot without a fence starts (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^run|' "$T/stub.log" || fail "non-writing slot without a fence dispatches"
+
+# --- TKT_LAUNCH_GUARD gets the issue and phase and preserves refusal stderr --
+cat >"$T/launch-guard.sh" <<'HOOK'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "$2" >"$HOOK_ARGS_FILE"
+if [ "${GUARD_EXIT:-0}" -ne 0 ]; then printf 'hook says no\n' >&2; fi
+exit "${GUARD_EXIT:-0}"
+HOOK
+chmod +x "$T/launch-guard.sh"
+
+setup_case launch-hook-refuses
+reset_stub
+HOOK_ARGS_FILE="$T/guard.args" GUARD_EXIT=1 TKT_LAUNCH_GUARD="$T/launch-guard.sh" \
+  run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
+[ "$RC" -eq 1 ] || fail "refusing launch hook exits 1 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$CDIR/stderr.txt")" = 'hook says no' ] || fail "refusing hook stderr is unchanged: $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$T/guard.args")" = '502 plan' ] || fail "non-writing hook receives issue and plan phase"
+[ -z "$(cat "$T/stub.log")" ] || fail "refusing launch hook prevents dispatch"
+
+setup_case launch-hook-allows
+reset_stub
+make_record stub-1 DONE none 0 1 0
+HOOK_ARGS_FILE="$T/guard.args" GUARD_EXIT=0 TKT_LAUNCH_GUARD="$T/launch-guard.sh" \
+  run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "passing launch hook starts the lane (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$T/guard.args")" = '502 build' ] || fail "writing hook receives issue and build phase"
+grep -q '^run|' "$T/stub.log" || fail "passing launch hook allows dispatch"
 
 # --- a failed concerns-file write stops after watch and exposes the error ---
 setup_case concerns-write-fail
