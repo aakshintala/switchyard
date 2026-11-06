@@ -177,8 +177,8 @@ if [ "\$(cat "$T/sweepmode" 2>/dev/null || printf 'ok')" = fail ]; then
   printf 'unresolved symbol: x (line 3)\n'
   exit 1
 fi
+printf 'stub pack for %s\n' "\$out" >"\$out" || exit 1
 printf 'PACK %s symbols=0 files=0 outside=0\n' "\$out"
-printf 'stub pack for %s\n' "\$out" >"\$out"
 EOF
 chmod +x "$T/bin/plan-sweep"
 
