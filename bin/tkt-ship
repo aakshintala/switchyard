@@ -41,6 +41,10 @@ plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
 if [ ! -r "$plan_gate_lib" ]; then echo "tkt-ship: cannot read shared lib: $plan_gate_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$plan_gate_lib"
+local_gate_body_lib="$script_dir/lib/local-gate-body.sh"
+if [ ! -r "$local_gate_body_lib" ]; then echo "tkt-ship: cannot read shared lib: $local_gate_body_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$local_gate_body_lib"
 
 # Command lock: <state>.lock, the same path tkt-state takes for every write.
 # Held only around the ship-pr run and its log work; released (pid file
@@ -148,31 +152,55 @@ if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
   emit "DRIFT state=$stored_head worktree=$actual pr=$pr_head" 3 "$msg"
 fi
 
-# Warn when the body's Local gate sha is not the PR head, or when the line
-# is missing but the tkt state shows tkt-gate passed at any head (the
-# warning names the latest): a PASS
-# sets state head and journals "tkt-gate PASS head=<sha>", while a failed
-# body write only warns, so the journal tells a gated PR without a line
-# apart from a PR with no tkt gate record, which stays silent. This only
-# warns: the ship below runs unchanged.
+# The journal is the source of truth for the last full gate PASS. A body line
+# remains useful as a visible record, but may have been replaced independently.
+# A stale body line keeps its warning; a stale journal PASS warns even if that
+# line is absent. A current PASS fills in a missing line using tkt-gate's shared
+# placement rule. These warnings and best-effort body writes never block ship.
+last_pass="$(grep -o 'tkt-gate PASS head=[0-9a-fA-F]\{40\}' "${state%.state}.journal" 2>/dev/null | tail -n 1 || true)"
+last_pass_head="${last_pass#tkt-gate PASS head=}"
+local_gate_cmd=""
+if [ -n "$last_pass" ]; then
+  plan_gate_args tkt
+  if plan_path="$(tkt get plan 2>/dev/null)" && [ -n "$plan_path" ]; then
+    local_gate_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan_path" 2>/dev/null || true)"
+  fi
+fi
+if [ -n "$last_pass" ] && [ "$last_pass_head" != "$pr_head" ]; then
+  printf 'tkt-ship: warning: tkt-gate last passed at %s but PR head is %s; the gate did not run on the head (gate: %s)\n' "$last_pass_head" "$pr_head" "$local_gate_cmd" >&2
+fi
 if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""' 2>/dev/null)"; then
   gate_line_sha="$(printf '%s\n' "$pr_body_text" | sed -n 's/^Local gate: pass at \([0-9a-fA-F]\{40\}\).*/\1/p' | head -n 1)"
-  if [ -n "$gate_line_sha" ] && [ "$gate_line_sha" != "$pr_head" ]; then
+  if [ -n "$last_pass" ] && [ "$last_pass_head" != "$pr_head" ]; then
+    :
+  elif [ -n "$gate_line_sha" ] && [ "$gate_line_sha" != "$pr_head" ]; then
     gate_line_full="$(printf '%s\n' "$pr_body_text" | grep -m1 '^Local gate:' || true)"
     case "$gate_line_full" in
       *\(*\)) gate_line_cmd="${gate_line_full#*\(}"; gate_line_cmd="${gate_line_cmd%\)*}" ;;
       *) gate_line_cmd="" ;;
     esac
     printf 'tkt-ship: warning: Local gate sha %s is not PR head %s (gate: %s); the gate did not run on the head\n' "$gate_line_sha" "$pr_head" "$gate_line_cmd" >&2
-  elif ! printf '%s\n' "$pr_body_text" | grep -q '^Local gate:' \
-    && last_pass="$(grep -o 'tkt-gate PASS head=[0-9a-fA-F]*' "${state%.state}.journal" 2>/dev/null | tail -n 1)" \
-    && [ -n "$last_pass" ]; then
-    missing_cmd=""
-    plan_gate_args tkt
-    if plan_path="$(tkt get plan 2>/dev/null)" && [ -n "$plan_path" ]; then
-      missing_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan_path" 2>/dev/null || true)"
+  elif [ -n "$last_pass" ] && [ "$last_pass_head" = "$pr_head" ] \
+    && ! printf '%s\n' "$pr_body_text" | grep -q '^Local gate:'; then
+    gate_line="Local gate: pass at $last_pass_head ($local_gate_cmd)"
+    attr="$(tkt get body_ends 2>/dev/null || true)"
+    attr_mode="exact"
+    if [ -z "${attr//[[:space:]]/}" ]; then
+      attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
+      attr_mode="prefix"
     fi
-    printf 'tkt-ship: warning: no Local gate line, but tkt-gate passed at %s (gate: %s)\n' "${last_pass#tkt-gate PASS head=}" "$missing_cmd" >&2
+    new_body="$(tkt_local_gate_body_insert "$pr_body_text" "$gate_line" "$attr" "$attr_mode")"
+    if tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-ship-body.XXXXXX" 2>/dev/null)"; then
+      if printf '%s\n' "$new_body" >"$tmp_body" \
+        && gh pr edit "$pr" --repo "$repo" --body-file "$tmp_body" 2>/dev/null; then
+        :
+      else
+        printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
+      fi
+      rm -f "$tmp_body"
+    else
+      printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
+    fi
   fi
 else
   printf 'tkt-ship: warning: cannot read PR %s body; skipping the Local gate check\n' "$pr" >&2
