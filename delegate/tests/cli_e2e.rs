@@ -572,6 +572,36 @@ fn status_prints_running_without_waiting() {
 }
 
 #[test]
+fn status_settles_a_dead_supervisor_before_printing() {
+    let e = Env::new("status-dead-supervisor");
+    let id = "status-dead-supervisor";
+    let mut supervisor = Command::new("sleep").arg("30").spawn().unwrap();
+    e.write_record(
+        id,
+        &serde_json::json!({
+            "status": "RUNNING",
+            "supervisorPid": supervisor.id(),
+            "resume": {
+                "model": "composer-2.5",
+                "backend": "cursor",
+                "sessionId": "session-1"
+            }
+        }),
+    );
+    supervisor.kill().unwrap();
+    supervisor.wait().unwrap();
+
+    let out = e.status_output(id);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("{id}: ERROR (supervisor died)\n")
+    );
+    assert_eq!(e.record(id)["status"], "ERROR");
+    assert_eq!(e.record(id)["result"]["text"], "supervisor died");
+}
+
+#[test]
 fn status_prints_done_for_a_finished_job() {
     let e = Env::new("status-done");
     let id = e.run("quick");

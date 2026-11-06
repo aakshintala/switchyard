@@ -901,6 +901,7 @@ fn status(args: &[String]) -> Result<i32, Usage> {
     let [id] = pos.as_slice() else {
         return usage(USAGE);
     };
+    settle_dead_supervisor(id);
     let Some(raw) = read_record(id) else {
         return Err(missing_record(id));
     };
