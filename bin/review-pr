@@ -17,6 +17,8 @@
 #     --full-rereview is review mode only; it skips the comment check.
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]
 #     --since is the reviewed head; verify diffs from its repair base on current base.
+#     An empty repair diff refuses findings without a refuted: line; push the
+#     repair or mark each finding answered by a ruling as refuted before starting.
 #     launches one job per review role, prints "<role> <job-id>" per job, then
 #     "watch: delegate watch <id>..." and "collect: review-pr collect <id>..."
 #     with every id spelled out, and returns at once. Wait for the ids with the
@@ -27,12 +29,16 @@
 #   review-pr collect <job-id>... [--findings-out PATH]
 #     posts the one PR comment with the patch-id, prints the verdict digest,
 #     writes the open findings (or "no open findings") to PATH when asked,
-#     removes finished worktrees, keeps each UNFINISHED job's worktree and
-#     state file, and prints its "resume: delegate resume <id>" command. It
-#     exits 1 when any job is unfinished or wrote a verdict outside the shared
-#     vocabulary below. An already-collected job id reprints its verdict and
-#     finding lines from the job record, writes --findings-out the same way,
-#     and posts nothing.
+#     removes finished worktrees and keeps each UNFINISHED job's worktree and
+#     state file. An UNFINISHED job's `resume:` line ends with `then run
+#     review-pr collect <id>`; resume on the named host, then collect again
+#     while the state file still exists; the resumed job's new verdict is
+#     posted if it changed. It exits 1 for an unfinished job, a bad verdict,
+#     or an UNPOSTED result.
+#     An already-collected job id reprints its verdict and finding lines from
+#     the job record, writes --findings-out the same way, and posts nothing. It
+#     is COLLECTED only if its current result matches the posted-record hash;
+#     otherwise it reports UNPOSTED and exits 1.
 #   review-pr run <same args as start>
 #     start, then delegate watch on every job id start launched, then collect on
 #     those ids. Prints start's lines, then collect's output, and exits with
@@ -80,6 +86,8 @@ job_rec() {
   bash "$script_dir/job-record" "$1" 2>/dev/null || true
 }
 state_dir="${TMPDIR:-/tmp}/review-pr"
+# debt: unbounded posted-records, prune when state_dir growth is reported
+posted_dir="$state_dir/posted"
 run_root="${REVIEW_PR_RUN_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/review-pr-runs}"
 
 # A finished run nobody collected is pruned an hour after its jobs end; a run
@@ -286,8 +294,8 @@ prune_stale_runs() {
   old_list="$(mktemp "${TMPDIR:-/tmp}/review-pr.prune-old.XXXXXX")"
   stale_list="$(mktemp "${TMPDIR:-/tmp}/review-pr.prune.XXXXXX")"
   done_list="$(mktemp "${TMPDIR:-/tmp}/review-pr.prune-done.XXXXXX")"
-  find "$state_dir" -type f >"$all_list"
-  find "$state_dir" -type f -mmin "+$stale_run_mins" >"$old_list"
+  find "$state_dir" -type f ! -path "$posted_dir/*" >"$all_list"
+  find "$state_dir" -type f ! -path "$posted_dir/*" -mmin "+$stale_run_mins" >"$old_list"
   # sib_stale SIB: the sibling meets one prunable arm (its winning record has
   # a non-RUNNING status and is older than $finished_run_mins, or no record
   # and a state file older than $stale_run_mins).
@@ -751,6 +759,24 @@ cmd_start() {
     fi
     echo "review-pr: repair base $repair_base ($since_full replayed onto $new_mb)" >&2
     since="$repair_base"
+    if git -C "$clone" diff --quiet "$since..$sha"; then
+      if awk '
+        /^P[123] / {
+          if (in_finding && !refuted) unrefuted = 1
+          in_finding = 1
+          refuted = 0
+          next
+        }
+        in_finding && /refuted: [^[:space:]]/ { refuted = 1 }
+        END {
+          if (in_finding && !refuted) unrefuted = 1
+          exit unrefuted ? 0 : 1
+        }
+      ' "$verify"; then
+        echo "review-pr: verify has an empty repair diff and an unrefuted finding; push the repair, add a refuted: <evidence> line to each finding the ruling answered, or for a recorded ruling with no code change run ship-pr --unverified-fixes <findings file>" >&2
+        exit 1
+      fi
+    fi
   fi
 
   jids=""
@@ -894,10 +920,10 @@ write_findings() {
   fi
 }
 
-# reprint_collected SRC JOB_ID...: an id with no state file but a job record was
-# collected before. Reprint its verdict and finding lines from the record, in
-# argument order, and append its P1-P3 lines to SRC for write_findings. Posts
-# and removes nothing.
+# reprint_collected SRC JOB_ID...: an id with no state file but a job record is
+# reprinted from the record. It is COLLECTED only when the result matches its
+# posted-record hash; otherwise it is UNPOSTED. Append P1-P3 lines to SRC for
+# write_findings. Posts and removes nothing.
 reprint_collected() {
   src_f="$1"; shift
   for jid in "$@"; do
@@ -905,14 +931,29 @@ reprint_collected() {
     if [ -f "$state_dir/$jid" ] || [ ! -f "$rec" ]; then
       continue
     fi
-    printf 'COLLECTED %s %s: already posted to the PR; findings reprinted from the job record, nothing posted\n' "$jid" "$rec"
+    text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
+    result_hash="$(printf '%s' "$text" | shasum -a 256 | awk '{print $1}')"
+    posted_file="$posted_dir/$jid"
+    posted_id=""; posted_hash=""; posted_repo=""; posted_pr=""
+    if [ -f "$posted_file" ]; then
+      posted_id="$(jq -r '.job_id // empty' "$posted_file" 2>/dev/null || true)"
+      posted_hash="$(jq -r '.result_hash // empty' "$posted_file" 2>/dev/null || true)"
+      posted_repo="$(jq -r '.repo // empty' "$posted_file" 2>/dev/null || true)"
+      posted_pr="$(jq -r '.pr // empty' "$posted_file" 2>/dev/null || true)"
+    fi
+    if [ "$posted_id" = "$jid" ] && [ -n "$posted_hash" ] && [ "$posted_hash" = "$result_hash" ]; then
+      printf 'COLLECTED %s %s: already posted to the PR; findings reprinted from the job record, nothing posted\n' "$jid" "$rec"
+    else
+      unposted=1
+      printf 'UNPOSTED %s: this verdict was never posted to the PR; ship-pr cannot see it. Run a fresh scoped verify: review-pr run %s --repo %s --cwd <clone> --model <model> --verify <findings file> --since <head>\n' \
+        "$jid" "${posted_pr:-<pr>}" "${posted_repo:-<repo>}"
+    fi
     # The state file is gone, so the role comes from the record's worktree
     # (wt-<role>); without one, the bare verdict form belongs to overbuild
     # alone, and any other role's bare line stays a loud raw line as on the
     # fresh path.
     rrole="$(jq -r '.resume.cwd // .cwd // empty' "$rec" 2>/dev/null | sed -n 's/^.*wt-\([^/]*\)$/\1/p')"
     case "$rrole" in standards|spec|overbuild|verify) ;; *) rrole="";; esac
-    text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
     while IFS= read -r line; do
       norm="$(norm_line "$line")"
       case "$norm" in
@@ -1022,6 +1063,7 @@ cmd_collect() {
   unknown_f="$tmp/unknown.txt"
   : >"$unknown_f"
   recollect=0
+  unposted=0
   reprint_f="$tmp/reprint.txt"
   : >"$reprint_f"
   for jid in "$@"; do
@@ -1057,6 +1099,7 @@ cmd_collect() {
       group_state_ids[$group_index]="$jid"
       group_first_state[$group_index]="$sf"
       group_posted[$group_index]=""
+      group_current[$group_index]="1"
       if [ -z "$pr" ]; then
         repo="$(state_get "$sf" repo)"
         pr="$(state_get "$sf" pr)"
@@ -1070,6 +1113,20 @@ cmd_collect() {
     fi
     if [ "$(state_get "$sf" posted 2>/dev/null || true)" = "1" ]; then
       group_posted[$group_index]="1"
+      rec="$(job_rec "$jid")"
+      text=""
+      if [ -f "$rec" ]; then
+        text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
+      fi
+      result_hash="$(printf '%s' "$text" | shasum -a 256 | awk '{print $1}')"
+      posted_file="$posted_dir/$jid"
+      posted_id="$(jq -r '.job_id // empty' "$posted_file" 2>/dev/null || true)"
+      posted_hash="$(jq -r '.result_hash // empty' "$posted_file" 2>/dev/null || true)"
+      if [ "$posted_id" != "$jid" ] || [ -z "$posted_hash" ] || [ "$posted_hash" != "$result_hash" ]; then
+        group_current[$group_index]=""
+      fi
+    else
+      group_current[$group_index]=""
     fi
     id_list[${#id_list[@]}]="$jid"
   done
@@ -1079,6 +1136,7 @@ cmd_collect() {
     # Nothing left to post or remove: every id was collected before.
     if [ "${#id_list[@]}" -eq 0 ] && [ ! -s "$unknown_f" ]; then
       if [ -n "$findings_out" ]; then write_findings "$findings_out" "$reprint_f"; fi
+      [ "$unposted" -eq 0 ] || exit 1
       exit 0
     fi
   fi
@@ -1172,7 +1230,7 @@ cmd_collect() {
   fi
 
   for gi in ${!group_dirs[@]}; do
-    if [ "${group_posted[$gi]}" = "1" ]; then
+    if [ "${group_current[$gi]}" = "1" ]; then
       for jid in ${group_state_ids[$gi]}; do
         sf="$state_dir/$jid"
         if [ "$(state_get "$sf" posted 2>/dev/null || true)" != "1" ]; then
@@ -1203,12 +1261,19 @@ cmd_collect() {
         if [ -f "$rec" ]; then
           text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
         fi
+        result_hash="$(printf '%s' "$text" | shasum -a 256 | awk '{print $1}')"
+        jq -n --arg job_id "$jid" --arg repo "$group_repo" --arg pr "$group_pr" \
+          --arg result_hash "$result_hash" \
+          '{job_id: $job_id, repo: $repo, pr: $pr, result_hash: $result_hash}' \
+          >"$tmp/posted-$jid"
         printf '\n## %s (%s)\n\n%s\n' "$role" "$rmodel" "$text"
       done
     } >"$body"
     if [ -n "$group_pr" ] && [ -n "$group_repo" ]; then
       gh pr comment "$group_pr" --repo "$group_repo" --body-file "$body" >&2
+      mkdir -p "$posted_dir"
       for jid in ${group_state_ids[$gi]}; do
+        mv "$tmp/posted-$jid" "$posted_dir/$jid"
         sf="$state_dir/$jid"
         if [ "$(state_get "$sf" posted 2>/dev/null || true)" != "1" ]; then
           printf 'posted=1\n' >>"$sf"
@@ -1307,7 +1372,7 @@ cmd_collect() {
   # shared run directory. They are cleanup-only: comment groups and posted
   # markers above use requested ids only.
   all_state_files="$tmp/state-files.txt"
-  find "$state_dir" -type f >"$all_state_files"
+  find "$state_dir" -type f ! -path "$posted_dir/*" >"$all_state_files"
   for gi in ${!group_dirs[@]}; do
     rd="${group_dirs[$gi]}"
     [ -n "$rd" ] || continue
@@ -1334,7 +1399,8 @@ cmd_collect() {
   cat "$bad_f"
   cat "$unfinished_f"
   for ksf in ${kept_state[@]+"${kept_state[@]}"}; do
-    printf 'resume: delegate resume %s (on %s)\n' "${ksf##*/}" "$(hostname -s)"
+    printf 'resume: delegate resume %s (on %s); then run review-pr collect %s\n' \
+      "${ksf##*/}" "$(hostname -s)" "${ksf##*/}"
   done
 
   # --findings-out feeds run --verify: the open findings, one per line, or
@@ -1344,7 +1410,7 @@ cmd_collect() {
     write_findings "$findings_out" "$tmp/findings-src.txt"
   fi
 
-  if [ "$unfinished" -gt 0 ] || [ "$bad" -gt 0 ]; then exit 1; fi
+  if [ "$unfinished" -gt 0 ] || [ "$bad" -gt 0 ] || [ "$unposted" -gt 0 ]; then exit 1; fi
   exit 0
 }
 
