@@ -246,6 +246,7 @@ reset_state() {
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/escape-diff" "$T/state/issue-calls.txt"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
   rm -f "$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
+  rm -rf "$TMPDIR/review-pr/posted"
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
 }
 
@@ -764,7 +765,7 @@ grep -q "^CI $SHORT fail$" <<<"$out" || fail "failing CI line"
 [ ! -d "$wt_spec" ] || fail "finished spec worktree is removed"
 [ ! -d "$wt_overbuild" ] || fail "finished overbuild worktree is removed"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "1" ] || fail "unfinished keeps only its worktree"
-grep -Fxq "resume: delegate resume job-standards (on $(hostname -s))" <<<"$out" || fail "unfinished prints its host-qualified resume command"
+grep -Fxq "resume: delegate resume job-standards (on $(hostname -s)); then run review-pr collect job-standards" <<<"$out" || fail "unfinished prints its host-qualified resume and collect command"
 [ -f "$TMPDIR/review-pr/job-standards" ] || fail "unfinished state file is kept"
 [ ! -e "$TMPDIR/review-pr/job-spec" ] || fail "finished spec state file is removed"
 [ ! -e "$TMPDIR/review-pr/job-overbuild" ] || fail "finished overbuild state file is removed"
@@ -786,7 +787,7 @@ run_dir="$(sed -n 's/^run_dir=//p' "$TMPDIR/review-pr/job-spec")"
 out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "mixed completion collect exits 1"
 rec="$TMPDIR/delegate-jobs/job-spec.json"
 grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "mixed completion reports unfinished spec"
-[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s))" <<<"$out")" = "1" ] || fail "mixed completion prints one host-qualified spec resume command"
+[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s)); then run review-pr collect job-spec" <<<"$out")" = "1" ] || fail "mixed completion prints one host-qualified spec resume and collect command"
 ! grep -q '^resume:.*job-standards ' <<<"$out" || fail "mixed completion prints no standards resume command"
 [ -d "$wt_spec" ] || fail "mixed completion keeps the unfinished worktree"
 [ ! -d "$wt_standards" ] || fail "mixed completion removes the finished worktree"
@@ -804,7 +805,7 @@ out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "re-c
 grep -q '^COLLECTED job-standards ' <<<"$out" || fail "re-collect reprints the finished standards job"
 grep -Fxq "patch-id $EXPECTED_PID" <<<"$out" || fail "re-collect reads the kept run header"
 grep -q "^UNFINISHED spec NEEDS_CONTEXT gate=none $rec$" <<<"$out" || fail "re-collect reads the kept spec record"
-[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s))" <<<"$out")" = "1" ] || fail "re-collect prints one host-qualified resume command"
+[ "$(grep -Fxc "resume: delegate resume job-spec (on $(hostname -s)); then run review-pr collect job-spec" <<<"$out")" = "1" ] || fail "re-collect prints one host-qualified resume and collect command"
 ! grep -q '^UNFINISHED standards MISSING' <<<"$out" || fail "re-collect does not mark the finished job missing"
 [ ! -e "$T/state/comment-pr.txt" ] || fail "re-collect does not post another comment"
 [ -d "$wt_spec" ] || fail "re-collect keeps the unfinished worktree"
@@ -1109,6 +1110,51 @@ grep -q UNFINISHED <<<"$out" && fail "re-collect is not UNFINISHED"
 [ ! -e "$T/state/comment-pr.txt" ] || fail "re-collect makes no gh pr comment call"
 out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild job-nope 2>/dev/null)" && fail "re-collect with an unknown id exits 1"
 grep -q "^UNFINISHED job-nope MISSING" <<<"$out" || fail "unknown id beside collected ids is UNFINISHED"
+
+# --- case: a resumed result with no state file is reported as unposted
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+P1 original finding
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || \
+  fail "resumed-result fixture starts"
+bash "$REVIEW" collect job-standards --findings-out "$T/resumed-first.txt" >/dev/null 2>&1 || \
+  fail "resumed-result fixture first collect exits 0"
+cp "$T/state/comments.log" "$T/resumed-comment-first.log"
+rec="$TMPDIR/delegate-jobs/job-standards.json"
+jq --arg text $'VERDICT standards: APPROVE\nP1 resumed finding\nSTATUS: DONE' \
+  '.result.text = $text' "$rec" >"$T/resumed-record.json" || fail "resumed-result record edit"
+mv "$T/resumed-record.json" "$rec" || fail "resumed-result record replace"
+st=0
+out="$(bash "$REVIEW" collect job-standards --findings-out "$T/resumed-second.txt" 2>&1)" || st=$?
+[ "$st" -eq 1 ] || fail "changed result after collect exits 1 (got $st): [$out]"
+grep -q '^UNPOSTED job-standards: this verdict was never posted to the PR; ship-pr cannot see it\.' <<<"$out" || \
+  fail "changed result is reported as unposted: [$out]"
+grep -q 'review-pr run 7 --repo O/N --cwd <clone> --model <model> --verify <findings file> --since <head>' <<<"$out" || \
+  fail "unposted result prints a fresh scoped verify command: [$out]"
+grep -q '^VERDICT standards: APPROVE$' <<<"$out" || fail "unposted result still reprints its verdict"
+grep -q '^P1 resumed finding$' <<<"$out" || fail "unposted result still reprints its finding"
+[ "$(cat "$T/resumed-second.txt")" = "P1 resumed finding" ] || fail "unposted result writes --findings-out"
+cmp -s "$T/resumed-comment-first.log" "$T/state/comments.log" || fail "unposted result posts nothing"
+
+# --- case: a finished record with no state or posted record is unposted
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: CHANGES
+P1 unposted orphan finding
+STATUS: DONE" 0
+mkdir -p "$TMPDIR/delegate-jobs"
+cp "$T/canned/standards.json" "$TMPDIR/delegate-jobs/job-orphan.json"
+st=0
+out="$(bash "$REVIEW" collect job-orphan --findings-out "$T/orphan-findings.txt" 2>&1)" || st=$?
+[ "$st" -eq 1 ] || fail "record without a posted record exits 1 (got $st): [$out]"
+grep -q '^UNPOSTED job-orphan: this verdict was never posted to the PR; ship-pr cannot see it\.' <<<"$out" || \
+  fail "record without a posted record is reported unposted: [$out]"
+grep -q '^VERDICT standards: CHANGES$' <<<"$out" || fail "orphan result still reprints its verdict"
+grep -q '^P1 unposted orphan finding$' <<<"$out" || fail "orphan result still reprints its finding"
+[ "$(cat "$T/orphan-findings.txt")" = "P1 unposted orphan finding" ] || fail "orphan writes --findings-out"
+[ ! -e "$T/state/comment-pr.txt" ] || fail "orphan unposted collect posts nothing"
 
 # --- case: empty verify diff refuses an unrefuted finding before starting a job
 reset_state
