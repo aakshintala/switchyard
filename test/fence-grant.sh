@@ -607,7 +607,30 @@ export FILE_CLAIM_LIST
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 1 'sweep claim remains exclusive'
 assert_out 'HELD docs/tui.md by lane sweep-4226' 'sweep claim output'
+log="$FW_RUN/fence-grant-refusals.tsv"
+[ "$(wc -l <"$log" | tr -d ' ')" = 1 ] || fail 'dry refusal writes one log row'
+IFS="$(printf '\t')" read -r logged_at logged_ticket logged_kind logged_path logged_holder logged_age <"$log"
+[[ "$logged_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || fail "refusal timestamp is UTC ISO 8601: $logged_at"
+[ "$logged_ticket|$logged_kind|$logged_path|$logged_holder|$logged_age" = '77|DRY-REFUSE|docs/tui.md|lane sweep-4226|0' ] || fail 'dry refusal row fields'
 assert_no_grant 'sweep claim'
+
+reset_case
+FILE_CLAIM_LIST=$(printf 'docs/tui.md\tsweep-4226\tplan\t17\tt:stub\t\n')
+export FILE_CLAIM_LIST
+run_fg 77 --paths docs/tui.md
+assert_rc 1 'non-dry sweep refusal stays held'
+assert_out 'HELD docs/tui.md by lane sweep-4226' 'non-dry sweep refusal output'
+[ "$(cut -f2- "$FW_RUN/fence-grant-refusals.tsv")" = "$(printf '77\tREFUSE\tdocs/tui.md\tlane sweep-4226\t17')" ] || fail 'non-dry refusal row and holder age'
+assert_no_grant 'non-dry sweep refusal'
+
+reset_case
+FILE_CLAIM_LIST=$(printf 'docs/tui.md\tsweep-4226\tplan\t17\tt:stub\t\n')
+export FILE_CLAIM_LIST
+mkdir "$FW_RUN/fence-grant-refusals.tsv"
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 1 'refusal log failure stays held'
+assert_out 'HELD docs/tui.md by lane sweep-4226' 'refusal log failure output'
+assert_no_grant 'refusal log failure'
 
 reset_case
 FILE_CLAIM_LIST=$(printf 'docs/tui.md\tsweep-4226\tplan\t0\tt:stub\t\n')
@@ -1344,6 +1367,7 @@ export FILE_CLAIM_MODE
 run_fg 88 --paths docs/tui.md
 assert_rc 1 'file-claim grant cap stays held'
 assert_out 'HELD docs/tui.md by file-claim grant cap' 'grant cap refusal output'
+[ "$(cut -f2- "$FW_RUN/fence-grant-refusals.tsv")" = "$(printf '88\tREFUSE\tdocs/tui.md\t-\t-')" ] || fail 'file-claim cap refusal uses explicit unknown holder and age placeholders'
 assert_no_grant 'grant cap refusal'
 
 reset_case

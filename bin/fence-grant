@@ -827,6 +827,33 @@ else
   exit 3
 fi
 
+# Refusal logs are evidence only: an append failure must never change the
+# grant decision or its output. Claim ages are already expressed in minutes;
+# holders without an age source are recorded with a literal `-`.
+_refusal_age() {
+  _ra_path=$1; _ra_holder=$2; _ra_lane=""
+  case "$_ra_holder" in
+    'lane #'*) _ra_lane="fiber-${_ra_holder#lane #}" ;;
+    'lane '*) _ra_lane=${_ra_holder#lane } ;;
+    *) printf '%s' '-'; return 0;;
+  esac
+  _ra_age=$(awk -F '\t' -v path="$_ra_path" -v lane="$_ra_lane" '$1 == path && $2 == lane { print $4; exit }' "$claims_out" 2>/dev/null) || _ra_age=""
+  case "$_ra_age" in ''|*[!0-9]*) printf '%s' '-';; *) printf '%s' "$_ra_age";; esac
+  return 0
+}
+
+_log_refusal() {
+  _lr_path=$1; _lr_holder=$2; _lr_age=$3
+  _lr_action=REFUSE
+  [ "$dry" -eq 0 ] || _lr_action=DRY-REFUSE
+  _lr_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || return 0
+  case "$_lr_time" in ????-??-??T??:??:??Z) :;; *) return 0;; esac
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$_lr_time" "$ticket" "$_lr_action" "$_lr_path" "$_lr_holder" "$_lr_age" \
+    2>/dev/null >>"$run/fence-grant-refusals.tsv" || :
+  return 0
+}
+
 # Collect every relevant claim ticket once. Closed-ticket claims are stale
 # regardless of live lane names; open or unknown tickets continue through
 # liveness checks, and sweep claims remain exclusive without a state lookup.
@@ -1528,6 +1555,14 @@ if [ -n "$(printf '%s' "$held" | grep .)" ]; then
     END { for (i = 1; i <= n; i++) { key = keys[i]; line = "HELD " paths[key] " by " labels[key]; if (suggestions[key] != "") line = line "\t" suggestions[key]; print line } }
   ' > "$tmp/heldout"
   while IFS="$(printf '\t')" read -r line sug; do
+    case "$line" in
+      HELD\ *\ by\ *)
+        _ref_path=${line#HELD }
+        _ref_holder=${_ref_path#* by }
+        _ref_path=${_ref_path%% by *}
+        _ref_age=$(_refusal_age "$_ref_path" "$_ref_holder")
+        _log_refusal "$_ref_path" "$_ref_holder" "$_ref_age" ;;
+    esac
     echo "$line"
     [ -n "$sug" ] || continue
     _suggest "${sug%% *}" "${sug#* }"
@@ -1631,6 +1666,22 @@ $1 == "REFUSE" && NF >= 3 {
 }
 $1 == "GRANT" || $1 == "UNCLAIMED" || $1 == "file-claim:" || NF == 0 { next }
 { if (!seen[$0]++) print }' "$tmp/fc-out" > "$tmp/fc-held"
+        awk '
+$1 == "REFUSE" && NF >= 3 {
+  path = $2; holder = $3
+  if (holder == "exclusive" && $4 ~ /^lane:/) holder = $4
+  if (holder ~ /^pr#[0-9][0-9]*$/) holder = "PR #" substr(holder, 4)
+  else if (holder ~ /^lane:fiber-[0-9][0-9]*$/) { sub(/^lane:fiber-/, "lane #", holder) }
+  else if (holder ~ /^lane:/) { sub(/^lane:/, "lane ", holder) }
+  else holder = "-"
+  key = path SUBSEP holder
+  if (!seen[key]++) print path "\t" holder
+}' "$tmp/fc-out" > "$tmp/fc-refusals"
+        while IFS="$(printf '\t')" read -r _ref_path _ref_holder; do
+          [ -n "$_ref_path" ] || continue
+          _ref_age=$(_refusal_age "$_ref_path" "$_ref_holder")
+          _log_refusal "$_ref_path" "$_ref_holder" "$_ref_age"
+        done < "$tmp/fc-refusals"
         if [ -s "$tmp/fc-held" ]; then cat "$tmp/fc-held"; else cat "$tmp/fc-out"; fi
         exit 1
       else
