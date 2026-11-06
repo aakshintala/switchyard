@@ -156,6 +156,21 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "$branch_lane" --grant --w
 [ "$(cat "$T/e-lane-branch")" = "RENAME-LANE $branch_lane: no file is held or refused; rerun with --lane fiber-4271 (one holder name per ticket, so retirement releases every claim)" ] || fail "branch-shaped lane diagnostic: $(cat "$T/e-lane-branch")"
 [ -z "$(claim_tip "$R")" ] || fail "branch-shaped lane writes no claim ref"
 
+suffixed_fiber_lane="fiber-4271-build"
+rc=0
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "$suffixed_fiber_lane" --grant --worktree t:bad --repo test/repo a.txt 2>"$T/e-lane-suffixed-fiber")" || rc=$?
+[ "$rc" = 2 ] || fail "claim with suffixed fiber lane exits 2, got $rc: $out"
+[ -z "$out" ] || fail "refused suffixed fiber lane writes no claim output: $out"
+[ "$(cat "$T/e-lane-suffixed-fiber")" = "RENAME-LANE $suffixed_fiber_lane: no file is held or refused; rerun with --lane fiber-4271 (one holder name per ticket, so retirement releases every claim)" ] || fail "suffixed fiber lane diagnostic: $(cat "$T/e-lane-suffixed-fiber")"
+[ -z "$(claim_tip "$R")" ] || fail "suffixed fiber lane writes no claim ref"
+
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4271 --grant --worktree t:4271 --repo test/repo ticket-4271.txt 2>"$T/e-claim-4271")" || fail "claim under canonical holder exits 0: $(cat "$T/e-claim-4271")"
+[ "$out" = "$(printf 'GRANT ticket-4271.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "canonical holder claim output: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane fiber-4271 --repo test/repo 2>"$T/e-release-4271")" || fail "release under canonical holder exits 0: $(cat "$T/e-release-4271")"
+[ "$out" = "RELEASE ticket-4271.txt" ] || fail "canonical holder release output: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>"$T/e-list-4271")" || fail "list after canonical holder release exits 0: $(cat "$T/e-list-4271")"
+[ -z "$out" ] || fail "release leaves no ticket 4271 claim: $out"
+
 valid_lanes=(fiber-4222 fiber-4271 fiber-4276 fiber-4226 sweep-12)
 i=0
 for lane in "${valid_lanes[@]}"; do
@@ -893,12 +908,16 @@ grep -qF 'FILE_CLAIM_PUSH_WAIT must be a whole number of seconds' "$T/e-push-wai
 # --- concurrency: both ordinary claimants record their overlap ----------------------
 # One round of the race: both lanes start before a single wait. Both claims are
 # advisory, so each lane records its claim even when the other gets there first.
+RACE_TICKET=7000
 race_round() {
-  local label="$1" remote="$2" path="$3" c1 c2 n c f
-  # Fresh lanes each round so the 5-grant cap never binds: the race alone
-  # decides the single winner.
-  (FILE_CLAIM_REMOTE="$remote" bash "$FC" claim --lane "fiber-7000-A$label" --grant --worktree t:dA --repo test/repo "$path" >/dev/null 2>"$T/err1-$label"; echo "$?" >"$T/c1-$label") &
-  (FILE_CLAIM_REMOTE="$remote" bash "$FC" claim --lane "fiber-8000-B$label" --grant --worktree t:dB --repo test/repo "$path" >/dev/null 2>"$T/err2-$label"; echo "$?" >"$T/c2-$label") &
+  local label="$1" remote="$2" path="$3" c1 c2 n c f lane_a lane_b
+  # Each round gets two fresh ticket numbers so the 5-grant cap never binds,
+  # while each racing lane holds under a distinct canonical holder.
+  lane_a="fiber-$RACE_TICKET"
+  lane_b="fiber-$((RACE_TICKET + 1))"
+  RACE_TICKET=$((RACE_TICKET + 2))
+  (FILE_CLAIM_REMOTE="$remote" bash "$FC" claim --lane "$lane_a" --grant --worktree t:dA --repo test/repo "$path" >/dev/null 2>"$T/err1-$label"; echo "$?" >"$T/c1-$label") &
+  (FILE_CLAIM_REMOTE="$remote" bash "$FC" claim --lane "$lane_b" --grant --worktree t:dB --repo test/repo "$path" >/dev/null 2>"$T/err2-$label"; echo "$?" >"$T/c2-$label") &
   wait
   c1="$(cat "$T/c1-$label")"
   c2="$(cat "$T/c2-$label")"

@@ -3,7 +3,7 @@
 # Ordinary lane and PR overlaps are advisory; sweep-* lanes hold paths exclusively.
 # Claim batches are all-or-nothing only when a sweep or the grant cap refuses a path.
 # Usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
-# Claim IDs must be fiber-<n>... or sweep-<n>...
+# Claim IDs must be exactly fiber-<n> or sweep-<n>...
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
 # Claim lanes need a ticket number; release and list accept any lane ID.
@@ -24,7 +24,7 @@ TAB=$'\t'
 NL=$'\n'
 usage() {
   echo "usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
-  echo "       claim IDs must be fiber-<n>... or sweep-<n>..." >&2
+  echo "       claim IDs must be exactly fiber-<n> or sweep-<n>..." >&2
   echo "       release and list accept any lane ID" >&2
   echo "       ordinary lane and PR holds are advisory; sweep-* lane ids hold exclusively" >&2
   echo "       sweep and grant-cap refusals are all-or-nothing; drop refused paths and rerun" >&2
@@ -370,11 +370,13 @@ main() {
         exit 2
       fi
       case "$lane" in
-        fiber-*|sweep-*) ;;
+        sweep-*) ;;
         *)
           holder="$(claim_holder "$ticket_num")"
-          echo "RENAME-LANE $lane: no file is held or refused; rerun with --lane $holder (one holder name per ticket, so retirement releases every claim)" >&2
-          exit 2
+          if [ "$lane" != "$holder" ]; then
+            echo "RENAME-LANE $lane: no file is held or refused; rerun with --lane $holder (one holder name per ticket, so retirement releases every claim)" >&2
+            exit 2
+          fi
           ;;
       esac
       [ -n "$mode" ] || usage
