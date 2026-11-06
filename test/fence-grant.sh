@@ -41,16 +41,18 @@ case "$1" in
           esac
         done
         python3 -c 'import json,re,sys
-query, configured = sys.argv[1:]
+query, configured, omitted = sys.argv[1:]
 states = {}
 for item in configured.split(","):
   if ":" in item:
     number, state = item.split(":", 1)
     states[number] = state
+omit = set(omitted.split(","))
 result = {}
 for alias, number in re.findall(r"(\w+):\s*issueOrPullRequest\(number:\s*(\d+)\)", query):
-  result[alias] = {"state": states.get(number, "OPEN")}
-print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATES:-}"
+  if number not in omit:
+    result[alias] = {"state": states.get(number, "OPEN")}
+print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATES:-}" "${GH_TICKET_OMIT:-}"
         ;;
       repos/*/commits/main)
         [ "${GH_SHA_FAIL:-0}" = 1 ] && { echo "${GH_SHA_ERROR:-sha stub failure}" >&2; exit 1; }
@@ -247,8 +249,8 @@ TREE
   GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL=
   GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT=
   export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT
-  GH_TICKET_STATES= GH_TICKET_FAIL=0 GH_TICKET_BAD=0 GH_TICKET_MISSING=0
-  export GH_TICKET_STATES GH_TICKET_FAIL GH_TICKET_BAD GH_TICKET_MISSING
+  GH_TICKET_STATES= GH_TICKET_FAIL=0 GH_TICKET_BAD=0 GH_TICKET_MISSING=0 GH_TICKET_OMIT=
+  export GH_TICKET_STATES GH_TICKET_FAIL GH_TICKET_BAD GH_TICKET_MISSING GH_TICKET_OMIT
   FW_DELEGATE_DIR="$T/delegate-jobs"
   export FW_DELEGATE_DIR
   FILE_CLAIM_MODE=ok FILE_CLAIM_LIST_FAIL=0 FILE_CLAIM_LIST_BAD=0 FILE_CLAIM_LIST=
@@ -1476,14 +1478,16 @@ assert_line 'OVERLAP docs/tui.md lane #66' 'batched open claim remains held'
 assert_line 'STALE docs/events.md by arch/67-log-diag-leaf (ticket #67 closed)' 'batched closed claim is stale'
 [ "$(grep -c '^api graphql ' "$T/gh.log")" = 1 ] || fail 'claim tickets use exactly one batched lookup'
 
-# A ticket-state lookup failure fails closed.
+# A ticket-state lookup failure holds claims for the live-lane check.
 reset_case
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
 GH_TICKET_FAIL=1
-export FILE_CLAIM_LIST GH_TICKET_FAIL
+CLAUDE_JSON='[{"name":"fiber-66","status":"busy"}]'
+export FILE_CLAIM_LIST GH_TICKET_FAIL CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 3 'ticket-state lookup failure fails closed'
-assert_contains 'ERROR ticket state lookup' 'ticket-state lookup failure output'
+assert_rc 0 'ticket-state lookup failure defers to lane liveness'
+assert_line 'WARN ticket state lookup ticket state stub failure; claims held by lane liveness' 'ticket-state lookup failure warning'
+assert_line 'OVERLAP docs/tui.md lane #66' 'ticket-state lookup failure keeps live claim held'
 assert_no_grant 'ticket-state lookup failure'
 
 # No non-sweep claims means no ticket-state API call.
@@ -1492,30 +1496,51 @@ run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'no-claim dry run succeeds'
 assert_no_ticket_state_probe 'no claims'
 
-# A malformed or incomplete response must not release a claim.
+# An unreadable whole response leaves all claim states unknown.
 reset_case
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
 GH_TICKET_BAD=1
-export FILE_CLAIM_LIST GH_TICKET_BAD
+CLAUDE_JSON='[{"name":"fiber-66","status":"idle"}]'
+export FILE_CLAIM_LIST GH_TICKET_BAD CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 3 'unreadable ticket-state response fails closed'
-assert_contains 'ERROR ticket state lookup' 'unreadable ticket-state response output'
+assert_rc 0 'unreadable ticket-state response defers to lane liveness'
+assert_line 'WARN ticket state lookup unreadable response; claims held by lane liveness' 'unreadable whole-response warning'
+assert_line 'OVERLAP docs/tui.md lane #66' 'unreadable response keeps live claim held'
 
+# A missing ticket in a readable response is unknown only for that ticket.
 reset_case
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
 GH_TICKET_MISSING=1
-export FILE_CLAIM_LIST GH_TICKET_MISSING
+CLAUDE_JSON='[{"name":"fiber-66","status":"busy"}]'
+export FILE_CLAIM_LIST GH_TICKET_MISSING CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 3 'missing ticket-state entry fails closed'
-assert_contains 'ERROR ticket state lookup' 'missing ticket-state entry output'
+assert_rc 0 'missing ticket-state entry defers to lane liveness'
+assert_line 'WARN ticket state lookup ticket #66 missing from response; claims held by lane liveness' 'missing ticket-state warning'
+assert_line 'OVERLAP docs/tui.md lane #66' 'missing ticket-state entry keeps live claim held'
 
 reset_case
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
 GH_TICKET_STATES='66:UNKNOWN'
-export FILE_CLAIM_LIST GH_TICKET_STATES
+CLAUDE_JSON='[{"name":"fiber-66","status":"busy"}]'
+export FILE_CLAIM_LIST GH_TICKET_STATES CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 3 'unknown ticket state fails closed'
-assert_contains 'ERROR ticket state lookup' 'unknown ticket-state output'
+assert_rc 0 'unknown ticket state defers to lane liveness'
+assert_line 'WARN ticket state lookup ticket #66 unknown state UNKNOWN; claims held by lane liveness' 'unknown ticket-state warning'
+assert_line 'OVERLAP docs/tui.md lane #66' 'unknown ticket state keeps live claim held'
+
+# A missing ticket is held while a closed ticket in the same batch stays stale.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\ndocs/events.md\tfiber-67\tplan\t0\tt:stub\t\n')"
+GH_TICKET_OMIT=66
+GH_TICKET_STATES='67:CLOSED'
+CLAUDE_JSON='[{"name":"fiber-66","status":"idle"},{"name":"fiber-67","status":"busy"}]'
+export FILE_CLAIM_LIST GH_TICKET_OMIT GH_TICKET_STATES CLAUDE_JSON
+run_fg 88 --paths docs/tui.md,docs/events.md --dry
+assert_rc 0 'missing and closed tickets have independent state handling'
+assert_line 'WARN ticket state lookup ticket #66 missing from response; claims held by lane liveness' 'partial response warns for missing ticket'
+assert_line 'OVERLAP docs/tui.md lane #66' 'missing ticket remains held by live lane'
+assert_line 'STALE docs/events.md by fiber-67 (ticket #67 closed)' 'closed ticket remains stale in partial response'
+assert_not_contains 'OVERLAP docs/events.md lane #67' 'closed ticket does not overlap'
 
 # --- Live plan and grant claims are holders ---------------------------------
 reset_case
