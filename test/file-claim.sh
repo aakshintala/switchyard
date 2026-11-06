@@ -436,9 +436,15 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane sweep-4231 --grant --workt
 [ "$?" = "1" ] || fail "sweep claimant exits 1"
 [ "$out" = "$(printf 'REFUSE x.txt lane:fiber-4232\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "sweep claimant output: $out"
 
-# a repeated path in one call is claimed once.
-# re-claim with the other kind keeps the recorded line: a no-op, not an upgrade.
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --plan --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "plan claim exits 0"
+# --paths claims the following paths.
+R="$(fresh)"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --paths --worktree t:dA --repo test/repo y-paths.txt 2>/dev/null)" || fail "--paths claim exits 0"
+[ "$out" = "$(printf 'GRANT y-paths.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "--paths claim output: $out"
+printf '%s' "$(claims_blob "$R")" | grep -q "^y-paths.txt\tfiber-4223\tplan\t" || fail "--paths records the path claim"
+
+# A plan-kind claim using the legacy --plan alias is still accepted.
+# Re-claiming with the other kind keeps the recorded line: a no-op, not an upgrade.
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --plan --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "legacy --plan alias claim exits 0"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "cross-kind re-claim exits 0"
 printf '%s' "$(claims_blob "$R")" | grep -q "^y.txt	fiber-4223	plan	" || fail "cross-kind re-claim keeps plan"
 
@@ -460,7 +466,7 @@ UNTRACKED="$(make_plan untracked.md y3.txt)"
 rc=0
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4229 --plan --worktree t:dP --repo test/repo "$UNTRACKED" >/dev/null 2>"$T/e-planpath" || rc=$?
 [ "$rc" = "2" ] || fail "untracked plan file as --plan path exits 2, got $rc"
-[ "$(cat "$T/e-planpath")" = "file-claim: $UNTRACKED is a plan file, not a path to claim; pass its Files paths after --plan, or the plan with --plan-file $UNTRACKED" ] || fail "plan-as-path message: $(cat "$T/e-planpath")"
+[ "$(cat "$T/e-planpath")" = "file-claim: $UNTRACKED is a plan file, not a path to claim; pass its Files paths after --paths, or the plan with --plan-file $UNTRACKED" ] || fail "plan-as-path message: $(cat "$T/e-planpath")"
 [ -z "$(claim_tip "$R")" ] || fail "plan-as-path records no claim"
 
 # A tracked repo file with a Files section is claimed as a path like any other.
