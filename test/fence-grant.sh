@@ -273,7 +273,7 @@ assert_no_probes() {
 assert_usage() {
   assert_rc 2 "$1"
   assert_out '' "$1 stdout"
-  assert_stderr "$(printf 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship\n       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive')" "$1 usage"
+  assert_stderr "$(printf 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship\n       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive')" "$1 usage"
   assert_no_probes "$1"
   assert_no_grant "$1"
 }
@@ -412,6 +412,7 @@ assert_line 'TEST assert_line' 'test-pin heading'
 assert_contains 'suggested --paths test/fence-grant.sh' 'test-pin suggested path'
 
 reset_case
+write_blob docs/events.md $'## Delivery\n'
 set_pr 11 fix/docs docs/events.md
 cat >"$T/pr/11.diff" <<'DIFF'
 diff --git a/docs/events.md b/docs/events.md
@@ -426,6 +427,32 @@ run_fg 77 --paths docs/tui.md --doc-heading 'docs/events.md#Delivery' --dry
 assert_rc 0 'cited doc heading warning does not hold grant'
 assert_line 'WARN PR #11 touches cited doc heading docs/events.md#Delivery' 'cited heading warning'
 assert_line 'WOULD-GRANT docs/tui.md' 'heading warning keeps unrelated grant free'
+
+reset_case
+write_blob docs/events.md $'## `unsafe`\n'
+set_pr 11 fix/docs docs/events.md
+cat >"$T/pr/11.diff" <<'DIFF'
+diff --git a/docs/events.md b/docs/events.md
+index 1111111..2222222 100644
+@@ -1,2 +1,2 @@
+-## `unsafe`
++## `unsafe`
+DIFF
+run_fg 77 --paths docs/tui.md --doc-heading 'docs/events.md#unsafe' --dry
+assert_rc 0 'backticked cited doc heading matches its anchor'
+assert_line 'WARN PR #11 touches cited doc heading docs/events.md#unsafe' 'backticked heading warning'
+
+reset_case
+write_blob docs/events.md $'## intro\n'
+run_fg 77 --paths docs/tui.md --doc-heading 'docs/events.md#unsafe' --dry
+assert_rc 2 'missing cited doc heading'
+assert_out 'ERROR doc heading not found: docs/events.md#unsafe' 'missing cited doc heading output'
+assert_stderr '' 'missing cited doc heading stderr'
+assert_no_grant 'missing cited doc heading'
+! grep -q 'pr list' "$T/gh.log" || fail 'missing cited doc heading runs no PR or claim probes'
+[ ! -s "$T/file-claim.log" ] || fail 'missing cited doc heading skips file-claim'
+[ ! -s "$T/claude.log" ] || fail 'missing cited doc heading skips lane probes'
+[ ! -s "$T/ssh.log" ] || fail 'missing cited doc heading skips box probes'
 
 reset_case
 GH_PRLIST='[{"number":11,"headRefName":"fix/one"},{"number":12,"headRefName":"fix/two"}]'
@@ -842,7 +869,7 @@ assert_not_contains 'NOSYMBOL' 'valid expect accepted'
 assert_line 'OVERLAP docs/tui.md PR #11' 'valid expect overlap'
 
 # --- Exit 2: bad arguments -----------------------------------------------------
-USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship
+USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship
        non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive'
 reset_case
 run_fg

@@ -3,7 +3,7 @@
 #   [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>]
 #   [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>]
 #   [--swept-to <comment id>] [--removes <symbol,...>]
-#   [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry]
+#   [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--dry]
 # The script owns grant numbering; hand-written grants take a letter suffix.
 # Grants requested paths despite overlaps with open PRs and ordinary lanes.
 # A sweep-* file claim or grant cap still blocks; unreadable probes fail closed.
@@ -230,7 +230,7 @@ fw_mtime() {
 }
 
 _usage() {
-  echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship" >&2
+  echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship" >&2
   echo "       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive" >&2
 }
 
@@ -636,6 +636,31 @@ _fetch_blob() {
   return 0
 }
 _line_has() { sed -n "${2}p" "$(_blob_path "$1")" 2>/dev/null | grep -Fq -- "$3"; }
+_normalize_doc_heading() {
+  sed -E 's/^#+[[:space:]]*//; s/[[:space:]]*#+[[:space:]]*$//; s/`//g'
+}
+_doc_has_heading() {
+  _dh_want=$(printf '%s\n' "$2" | _normalize_doc_heading)
+  grep '^#' "$(_blob_path "$1")" | _normalize_doc_heading | grep -qxF -- "$_dh_want"
+}
+
+if [ -n "$docheadings" ]; then
+  while IFS= read -r _cited; do
+    [ -n "$_cited" ] || continue
+    case "$_cited" in docs/*\#*) ;; *) echo "ERROR doc heading not found: $_cited"; exit 2;; esac
+    _doc=${_cited%%#*}; _heading=${_cited#*#}
+    [ -n "$_heading" ] || { echo "ERROR doc heading not found: $_cited"; exit 2; }
+    if ! grep -qxF -- "$_doc" "$tmp/tree"; then
+      echo "ERROR doc heading not found: $_cited"
+      exit 2
+    fi
+    _fetch_blob "$_doc" || exit 3
+    if ! _doc_has_heading "$_doc" "$_heading"; then
+      echo "ERROR doc heading not found: $_cited"
+      exit 2
+    fi
+  done <<< "$docheadings"
+fi
 
 if [ -n "$expects" ]; then
   : > "$tmp/nosym"
@@ -906,17 +931,17 @@ _pr_overlap() {
 }
 
 _pr_touches_doc_heading() {
-  awk -v f="$2" -v h="$3" '
+  _pth_want=$(printf '%s\n' "$3" | _normalize_doc_heading)
+  awk -v f="$2" '
     /^diff --git / { on = ($4 == "b/" f); in_hunk = 0 }
-    on && /^@@ / { in_hunk = 1; if (index($0, h)) found = 1 }
-    on && in_hunk && /^[ +-]/ {
-      line = substr($0, 2)
-      sub(/^#+[[:space:]]*/, "", line)
-      sub(/[[:space:]]*#+[[:space:]]*$/, "", line)
-      if (line == h) found = 1
+    on && /^@@ / {
+      in_hunk = 1
+      line = $0
+      sub(/^@@[^@]*@@[[:space:]]*/, "", line)
+      if (line != "") print line
     }
-    END { exit !found }
-  ' "$1"
+    on && in_hunk && /^[ +-]/ { print substr($0, 2) }
+  ' "$1" | _normalize_doc_heading | grep -qxF -- "$_pth_want"
 }
 
 for pr in $prs; do
