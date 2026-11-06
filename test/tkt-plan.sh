@@ -33,6 +33,15 @@ parser_entries="$(awk -v mode=entries "$_plan_files_awk" "$parser_plan")"
 [ "$(plan_files_pathspecs "$parser_plan" all)" = "$(printf 'read.txt\ntable.txt\nwrite.txt')" ] || fail "explicit all Files paths include reads and writes"
 [ "$(plan_files_pathspecs "$parser_plan" writes)" = "write.txt" ] || fail "write Files paths omit reads, table rows included"
 
+# A prose-suffixed (read) mark is a read in the shared reader.
+prose_plan="$T/files-prose-read.md"
+printf '## Files\n- `w2.txt`\n- `r9.rs` (read) -- reason\n' >"$prose_plan"
+prose_entries="$(awk -v mode=entries "$_plan_files_awk" "$prose_plan")"
+[ "$prose_entries" = "$(printf 'w2.txt\twrite\nr9.rs\tread')" ] || fail "prose-suffixed (read) is a read: [$prose_entries]"
+[ "$(plan_files_pathspecs "$prose_plan" writes)" = "w2.txt" ] || fail "writes omit prose-suffixed reads"
+[ "$(plan_records "$prose_plan" | awk -F '\t' '$5 == "r9.rs" { print $4 }')" = "1" ] || fail "plan_records marks the prose-suffixed form as a read"
+[ "$(plan_records "$prose_plan" | awk -F '\t' '$5 == "w2.txt" { print $4 }')" = "0" ] || fail "plan_records leaves the plain write unread"
+
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 
