@@ -405,8 +405,9 @@ assert_no_grant 'free dry run'
 # flywheel's bin/fence-grant is), it finds file-claim and fw-sess-lanes beside
 # its real path.
 reset_case
-mkdir -p "$T/realbin" "$T/linkbin"
+mkdir -p "$T/realbin" "$T/realbin/lib" "$T/linkbin"
 cp "$FG" "$T/realbin/fence-grant"
+cp "$(dirname "$FG")/lib/lane-ticket.sh" "$T/realbin/lib/lane-ticket.sh"
 cp "$T/stubs/file-claim" "$T/realbin/file-claim"
 cp "$(dirname "$FG")/fw-sess-lanes" "$T/realbin/fw-sess-lanes"
 ln -sf ../realbin/fence-grant "$T/linkbin/fence-grant"
@@ -576,6 +577,20 @@ run_fg 77 --paths docs/tui.md --dry
 assert_rc 1 'sweep claim remains exclusive'
 assert_out 'HELD docs/tui.md by lane sweep-4226' 'sweep claim output'
 assert_no_grant 'sweep claim'
+
+reset_case
+FILE_CLAIM_LIST=$(printf 'docs/tui.md\tsweep-4226\tplan\t0\tt:stub\t\n')
+export FILE_CLAIM_LIST
+run_fg 4226 --paths docs/tui.md --dry
+assert_rc 1 'same-ticket sweep claim remains exclusive'
+assert_out 'HELD docs/tui.md by lane sweep-4226' 'same-ticket sweep claim output'
+
+reset_case
+FILE_CLAIM_LIST=$(printf 'docs/tui.md\tsweep-4226\tplan\t0\tt:stub\t\n')
+export FILE_CLAIM_LIST
+run_fg 77 --paths docs/tui.md --ignore-ticket 4226 --dry
+assert_rc 1 'ignored-ticket sweep claim remains exclusive'
+assert_out 'HELD docs/tui.md by lane sweep-4226' 'ignored-ticket sweep claim output'
 
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\nRanges: none\n' >"$FW_RUN/fiber-77-fence-grant-1.md"

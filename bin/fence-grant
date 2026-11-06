@@ -359,6 +359,8 @@ while [ -L "$self" ]; do
   case "$link" in /*) self="$link" ;; *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;; esac
 done
 self_dir="$(cd "$(dirname "$self")" && pwd)"
+# shellcheck disable=SC1091
+. "$self_dir/lib/lane-ticket.sh"
 file_claim="${FW_FILE_CLAIM:-$self_dir/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"
@@ -823,15 +825,11 @@ fi
 _claim_holders() {
   while IFS="$(printf '\t')" read -r claim_path claim_lane; do
     [ -n "$claim_path" ] || continue
-    claim_num=""
-    case "$claim_lane" in
-      fiber-*) claim_num=$(_lane_num "${claim_lane#fiber-}");;
-      *) claim_num=$(python3 -c 'import re,sys
-m = re.search(r"(?:^|/)([0-9]+)(?:-|$)", sys.argv[1])
-print(m.group(1) if m else "")' "$claim_lane");;
-    esac
-    [ "$claim_num" != "$ticket" ] || continue
-    [ -n "$claim_num" ] && case " $ignoreticket " in *" $claim_num "*) continue;; esac
+    claim_num=$(lane_ticket_num "$claim_lane")
+    if [ -n "$claim_num" ] && [ "$claim_num" = "$ticket" ] && [[ "$claim_lane" != sweep-* ]]; then continue; fi
+    if [[ "$claim_lane" != sweep-* ]] && [ -n "$claim_num" ]; then
+      case " $ignoreticket " in *" $claim_num "*) continue;; esac
+    fi
     live=0
     for ln in $lanes; do
       if [ -n "$claim_num" ]; then
@@ -848,7 +846,13 @@ print(m.group(1) if m else "")' "$claim_lane");;
     normalized=$(_norm_tok "$claim_path")
     : >"$tmp/claim-entries"
     printf '%s\n' "$normalized" >"$tmp/claim-entries"
-    if [ -n "$claim_num" ]; then claim_label="lane #$claim_num"; else claim_label="lane $claim_lane"; fi
+    if [[ "$claim_lane" == sweep-* ]]; then
+      claim_label="lane $claim_lane"
+    elif [ -n "$claim_num" ]; then
+      claim_label="lane #$claim_num"
+    else
+      claim_label="lane $claim_lane"
+    fi
     if [[ "$claim_lane" == sweep-* ]]; then
       _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label" exclusive
     else
@@ -1021,7 +1025,7 @@ fi
 
 # --- lane side helpers ---
 _lane_num() {
-  printf '%s' "$1" | sed 's/[^0-9].*//'
+  lane_ticket_num "fiber-$1"
 }
 
 # Brace-expand each input line; held-entry text in, expanded lines out.
