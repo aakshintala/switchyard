@@ -106,6 +106,19 @@ fw_box_lane_names() {
   return 0
 }
 
+# Prints live Mac delegate session-lane names, `fiber-<n>` per live `delegate session`
+# the roster maps to a ticket. The Mac's sessions are local, not present in the
+# box probe's DSESS section, so probe them directly. Exit 1 when the command
+# fails, the roster is missing, or the mapper refuses the JSON (fail closed).
+fw_mac_delegate_session_lane_names() {
+  _fw_out=$("${FW_DELEGATE:-delegate}" session list --json 2>/dev/null) || return 1
+  _fw_roster=$(_fw_run)/roster
+  [ -f "$_fw_roster" ] || return 1
+  _fw_names=$(printf '%s' "$_fw_out" | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
+  printf '%s' "$_fw_names" | tr '\n' ' '
+  return 0
+}
+
 # Prints live Mac pi-lane names, `fiber-<n>` per live `fiber-<n>-pi.pid`.
 # A pi lane is invisible to `claude agents`, so a fence probe that reads only
 # that command loses every pi lane's hold once its grant files age out of the
@@ -761,6 +774,7 @@ if pibox_names=$(fw_pi_lane_names_box); then pibox_ok=1; else pibox_ok=0; pibox_
 if dmac_names=$(fw_delegate_lane_names_mac); then dmac_ok=1; else dmac_ok=0; dmac_names=""; fi
 if dbox_names=$(fw_delegate_lane_names_box); then dbox_ok=1; else dbox_ok=0; dbox_names=""; fi
 if dsess_names=$(fw_delegate_session_lane_names); then dsess_ok=1; else dsess_ok=0; dsess_names=""; fi
+if msess_names=$(fw_mac_delegate_session_lane_names); then msess_ok=1; else msess_ok=0; msess_names=""; fi
 FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$mac_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/claudeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR claude agents $g"; exit 3; }
 [ "$box_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/ssherr" 2>/dev/null | tr '\n' ' '); echo "ERROR ssh box $g"; exit 3; }
@@ -769,10 +783,11 @@ FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$dmac_ok" -eq 1 ] || { echo "ERROR mac delegate lanes: registry directory missing"; exit 3; }
 [ "$dbox_ok" -eq 1 ] || { echo "ERROR box delegate lanes: no DELEGATEOK marker"; exit 3; }
 [ "$dsess_ok" -eq 1 ] || { echo "ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON"; exit 3; }
+[ "$msess_ok" -eq 1 ] || { echo "ERROR mac delegate sessions: delegate session list failed, or the roster mapper refused the JSON"; exit 3; }
 # A lane is a Claude session, a pi lane or a delegate job; each holds its
 # fence. A pi lane launched by delegate shows up twice, so the list is
 # deduplicated to keep one HELD line per lane.
-lanes=$(printf '%s\n' $mac_names $box_names $pimac_names $pibox_names $dmac_names $dbox_names $dsess_names | grep . | sort -u | tr '\n' ' ')
+lanes=$(printf '%s\n' $mac_names $box_names $pimac_names $pibox_names $dmac_names $dbox_names $dsess_names $msess_names | grep . | sort -u | tr '\n' ' ')
 
 held=""
 overlaps=""

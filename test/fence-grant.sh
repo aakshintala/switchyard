@@ -19,7 +19,7 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
-export TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_BOX_HOST=stub-box
+export TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_DELEGATE="$T/stubs/delegate" FW_BOX_HOST=stub-box
 export FW_TREE_CACHE="$T/tree-cache"
 export GH_TREE="$T/tree.json" GH_PRLIST='[]' CLAUDE_JSON='[]' SSH_OUT
 
@@ -83,6 +83,13 @@ printf '%s\n' "$*" >>"$T/claude.log"
 printf '%s' "${CLAUDE_JSON:-[]}"
 CLAUDE_STUB
 
+cat >"$FW_DELEGATE" <<'DELEGATE_STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$T/delegate.log"
+[ "$*" = 'session list --json' ] || { echo "stub delegate: unexpected: $*" >&2; exit 99; }
+[ "${MAC_DELEGATE_FAIL:-0}" != 1 ] || { echo 'delegate stub failure' >&2; exit 1; }
+printf '%s' "${MAC_DSESS_JSON:-}"
+DELEGATE_STUB
 cat >"$FW_SSH" <<'SSH_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/ssh.log"
@@ -179,17 +186,19 @@ case "${FILE_CLAIM_MODE:-ok}" in
     exit 2;;
 esac
 FC_STUB
-chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$T/stubs/file-claim"
+chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$FW_DELEGATE" "$T/stubs/file-claim"
 
 reset_case() {
   rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE"
   mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs"
   : >"$FW_RUN/roster"
   DSESS_JSON='{"ok":true,"sessions":[]}'
-  export DSESS_JSON
+  MAC_DSESS_JSON='{"ok":true,"sessions":[]}' MAC_DELEGATE_FAIL=0
+  export DSESS_JSON MAC_DSESS_JSON MAC_DELEGATE_FAIL
   : >"$T/gh.log"
   : >"$T/claude.log"
   : >"$T/ssh.log"
+  : >"$T/delegate.log"
   rm -f "$T/file-claim-claims"
   cat >"$GH_TREE" <<'TREE'
 {"truncated":false,"tree":[
@@ -317,6 +326,31 @@ GH_TREE_FAIL=1 GH_TREE_SHA=cccccccc
 run_fg 88 --paths docs/tui.md --dry
 assert_error 'failed fetch' 'ERROR gh trees main tree stub failure '
 [ ! -e "$FW_TREE_CACHE/cccccccc.tree" ] || fail 'failed fetch leaves cache entry'
+
+# Failed Mac delegate probes and refused JSON fail closed.
+reset_case
+MAC_DELEGATE_FAIL=1
+export MAC_DELEGATE_FAIL
+run_fg 77 --paths docs/tui.md
+assert_error 'failed Mac delegate session command' 'ERROR mac delegate sessions: delegate session list failed, or the roster mapper refused the JSON'
+
+reset_case
+MAC_DSESS_JSON='not-json'
+export MAC_DSESS_JSON
+run_fg 77 --paths docs/tui.md
+assert_error 'Mac delegate session mapper refuses JSON' 'ERROR mac delegate sessions: delegate session list failed, or the roster mapper refused the JSON'
+
+# A live Mac delegate session maps to its ticket through the roster.
+reset_case
+printf '2026-11-06 launch\t1284\tmac\tfiber-1284-build\tabcdef12\n' >"$FW_RUN/roster"
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-1284\tgrant\t0\tt:stub\t\n')"
+MAC_DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"running"}]}'
+export FILE_CLAIM_LIST MAC_DSESS_JSON
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'live Mac session claim overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #1284' 'live Mac session claim overlap output'
+assert_not_contains 'STALE docs/tui.md by fiber-1284' 'live Mac session claim is not stale'
+assert_line 'WOULD-GRANT docs/tui.md' 'live Mac session overlap allows grant'
 
 # A session's shared cwd carries no ticket: map its id through the roster.
 reset_case
