@@ -228,7 +228,7 @@ fi
 
 longest_wait=144000
 longest_hours=$((longest_wait / 3600))
-echo "tkt-ship: longest wait ${longest_wait} s (${longest_hours} h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" >&2
+echo "tkt-ship: no shell timeout: waits are bounded at ${longest_wait} s (${longest_hours} h), worst case; a clean run takes minutes" >&2
 
 if mkdir "$lockdir" 2>/dev/null; then
   locked=1

@@ -596,14 +596,14 @@ printf '0' >"$T/exitcodes"
 run_ship
 [ "$RC" -eq 0 ] || fail "notice: exit $RC"
 expect_line1 "MERGED sha=" notice
-[ "$(head -n 1 "$CDIR/stderr")" = "tkt-ship: longest wait 144000 s (40 h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" ] \
+[ "$(head -n 1 "$CDIR/stderr")" = "tkt-ship: no shell timeout: waits are bounded at 144000 s (40 h), worst case; a clean run takes minutes" ] \
   || fail "notice is stderr line 1: [$(cat "$CDIR/stderr")]"
 
 # Usage errors print guidance but no wait notice.
 usage_rc=0
 bash "$TKT" >"$T/usage-out" 2>"$T/usage-err" || usage_rc=$?
 [ "$usage_rc" -eq 2 ] || fail "usage: exit $usage_rc"
-! grep -q '^tkt-ship: longest wait' "$T/usage-err" || fail "usage error has no longest-wait notice: [$(cat "$T/usage-err")]"
+! grep -q '^tkt-ship: no shell timeout' "$T/usage-err" || fail "usage error has no longest-wait notice: [$(cat "$T/usage-err")]"
 grep -q 'background' "$T/usage-err" && grep -q 'no shell timeout' "$T/usage-err" \
   || fail "usage mentions background and no shell timeout: [$(cat "$T/usage-err")]"
 grep -q 'unverified' "$T/usage-err" \
