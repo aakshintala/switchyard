@@ -553,6 +553,10 @@ bash "$TKT" >"$T/usage-out" 2>"$T/usage-err" || usage_rc=$?
 ! grep -q '^tkt-ship: longest wait' "$T/usage-err" || fail "usage error has no longest-wait notice: [$(cat "$T/usage-err")]"
 grep -q 'background' "$T/usage-err" && grep -q 'no shell timeout' "$T/usage-err" \
   || fail "usage mentions background and no shell timeout: [$(cat "$T/usage-err")]"
+grep -q 'unverified' "$T/usage-err" \
+  || fail "usage names the unverified state key: [$(cat "$T/usage-err")]"
+grep -q -F -- '--unverified-fixes' "$T/usage-err" \
+  || fail "usage names --unverified-fixes: [$(cat "$T/usage-err")]"
 
 # CI-FAIL carries never-started lines and omits the empty failed-jobs summary.
 reset_stub; setup_case neverstarted
