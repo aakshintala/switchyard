@@ -168,7 +168,7 @@ Without state, run `ship-pr` by hand. When the workflow doc's merge rule allows 
 - 5: handle the printed matches as the next paragraph says; when only commit-message matches remain, rerun with `--allow-commit-closes`. For printed `missing body line:` lines, add each to the PR body.
 - 2: a precondition failed; stderr names it.
 
-The rest of this step is the by-hand merge, for the cases `ship-pr` doesn't cover. Green CI is no reason to merge: it covers one commit, and a fix round's commit is by construction a later one. Before a by-hand merge, check in this order and stop at the first that fails:
+The rest of this step is the by-hand merge, for the cases `ship-pr` doesn't cover. Green CI is no reason to merge: it covers one commit, and a fix round's commit is by construction a later one. A green reported without the head SHA it covers is no green: the lane's head may already have moved past it. Before a by-hand merge, check in this order and stop at the first that fails:
 
 1. The required checks are green on the PR's current head (`gh-ci wait`).
 2. The review loop closed on that same head: its last verdict is APPROVE on every axis, or `FIX-OK`. A round with open findings blocks the merge, however green CI is.
