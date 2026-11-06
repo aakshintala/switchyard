@@ -248,7 +248,7 @@ setup_case round2
 bash "$TKT_STATE" "$S" set round 1 >/dev/null
 printf 'incomplete' >"$T/vermode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "incomplete at round 2 exited 0"
-[ "$?" = "1" ] || fail "incomplete at round 2 exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "incomplete at round 2 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=2 STOP-AT-TWO" || fail "bad verdict: $(head -n 1 <<<"$out")"
 expect_slot fix2
 grep -q "P1 open finding" <<<"$out" || fail "finding headlines missing from digest"
@@ -271,7 +271,7 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head 
 setup_case fence
 printf 'evil' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "fence breach exited 0"
-[ "$?" = "1" ] || fail "fence breach exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "fence breach exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FENCE n=1" || fail "bad verdict: $(head -n 1 <<<"$out")"
 
 # 5. No-verify closes the round and records the findings file.
@@ -285,7 +285,7 @@ grep -q "review-pr|" "$T/calls.log" && fail "review-pr ran under --no-verify"
 setup_case ask
 printf 'ask' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "ASK exited 0"
-[ "$?" = "1" ] || fail "ASK exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "ASK exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=j1" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "which design rules the retry?" <<<"$out" || fail "ASK question missing from digest"
 grep -q "gh-ci|" "$T/calls.log" && fail "push ran after ASK"
@@ -304,12 +304,12 @@ printf 'resume brief\n' >"$CDIR/prompt.md"
 bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" >/dev/null 2>"$T/stderr" && fail "resume-gate-script exited 0"
 grep -q "job|" "$T/calls.log" && fail "resume-gate-script dispatched a job"
 bash "$TKT" "$S" 2>/dev/null && fail "bare flags exited 0"
-[ "$?" = "2" ] || fail "bare flags exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "bare flags exited $rc, want 2"
 # 7a. Round 2 refuses a fresh fix before any slot or dispatch; --resume still runs.
 setup_case round-limit
 bash "$TKT_STATE" "$S" set round 2 >/dev/null
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "round 2 fix exited 0"
-[ "$?" = "1" ] || fail "round 2 fix exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "round 2 fix exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "send the open findings to triage" <<<"$out" || fail "ROUND-LIMIT digest names triage"
 grep -q "job|" "$T/calls.log" && fail "round 2 fix dispatched a job"
@@ -321,7 +321,7 @@ out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/st
 head -n 1 <<<"$out" | grep -q "ROUND-LIMIT" && fail "resume at round 2 is refused"
 grep -q "job|.*--slot fix3.*--resume j9" "$T/calls.log" || fail "resume at round 2 does not dispatch on fix3"
 bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
-[ "$?" = "2" ] || fail "resume without prompt exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "resume without prompt exited $rc, want 2"
 
 # 7b. The fix brief gets the plan gate as GATE (fix.md fills __GATE__).
 setup_case gatefill
@@ -334,7 +334,7 @@ grep -F -q "GATE=true" "$T/calls.log" || fail "gatefill: GATE=true not passed to
 setup_case gatefail
 printf 'evil' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "gatefail exited 0"
-[ "$?" = "1" ] || fail "gatefail exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "gatefail exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FENCE n=1" || fail "gatefail bad verdict: $(head -n 1 <<<"$out")"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "gatefail round not 1"
 printf 'done' >"$T/jobmode"
@@ -349,7 +349,7 @@ git -C "$WT" add evil.txt
 git -C "$WT" commit -qm "outside: evil.txt"
 NEW="$(git -C "$WT" rev-parse HEAD)"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "drift-a exited 0"
-[ "$?" = "3" ] || fail "drift-a exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "drift-a exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "state head=$OLD" <<<"$out" || fail "state head missing from DRIFT digest"
 grep -q "PR head=$NEW" <<<"$out" || fail "PR head missing from DRIFT digest"
@@ -360,7 +360,7 @@ grep -q "job|" "$T/calls.log" && fail "fix job dispatched on DRIFT A"
 setup_case recover
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "recover exited 0"
-[ "$?" = "3" ] || fail "recover exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "recover exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "job=j1" <<<"$out" || fail "job id missing from RECOVER digest"
 grep -q "slot=fix1" <<<"$out" || fail "slot missing from RECOVER digest"
@@ -377,7 +377,7 @@ NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
 printf '%s' "$OLD" >"$T/prhead"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "drift-b exited 0"
-[ "$?" = "3" ] || fail "drift-b exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "drift-b exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "bad verdict: $(head -n 1 <<<"$out")"
 grep -q "state head=$NEW" <<<"$out" || fail "state head missing from DRIFT digest"
 grep -q "PR head=$OLD" <<<"$out" || fail "PR head missing from DRIFT digest"
@@ -390,7 +390,7 @@ if want A; then
 setup_case a
 printf 'ask' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A call 1 exited 0"
-[ "$?" = "1" ] || fail "A call 1 exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "A call 1 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=j1" || fail "A bad verdict: $(head -n 1 <<<"$out")"
 grep -q "job|.*--slot fix1" "$T/calls.log" || fail "A call 1 did not dispatch fix1"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "0" ] || fail "A round moved after ASK"
@@ -450,7 +450,7 @@ rm -f "$TMPDIR/delegate-jobs"/j1.json "$TMPDIR/delegate-jobs"/j2.json
 printf 'resume brief\n' >"$CDIR/prompt.md"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify --resume zz --prompt "$CDIR/prompt.md" 2>"$T/stderr")" && fail "A3 zz exited 0"
-[ "$?" = "2" ] || fail "A3 zz exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "A3 zz exited $rc, want 2"
 grep -q "zz" "$T/stderr" || fail "A3 zz: stderr does not name zz"
 grep -q "job|" "$T/calls.log" && fail "A3 zz dispatched a job"
 fi
@@ -460,11 +460,11 @@ if want A4; then
 setup_case a4
 printf 'unknown' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A4 call 1 exited 0"
-[ "$?" = "3" ] || fail "A4 call 1 exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "A4 call 1 exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix UNKNOWN" || fail "A4 bad verdict: $(head -n 1 <<<"$out")"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A4 call 2 exited 0"
-[ "$?" = "3" ] || fail "A4 call 2 exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "A4 call 2 exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "A4 bad verdict: $(head -n 1 <<<"$out")"
 grep -q "slot=fix1" <<<"$out" || fail "A4 slot missing from RECOVER digest"
 grep -q "job|" "$T/calls.log" && fail "A4 call 2 dispatched a job"
@@ -480,20 +480,20 @@ printf 'done' >"$T/jobmode"
 printf 'incomplete' >"$T/vermode"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A5 call 2 exited 0"
-[ "$?" = "1" ] || fail "A5 call 2 exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "A5 call 2 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "A5 bad verdict: $(head -n 1 <<<"$out")"
 grep -q "STOP-AT-TWO" <<<"$out" && fail "A5 call 2 printed STOP-AT-TWO"
 expect_slot fix2
 [ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "A5 round not 1"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A5 call 3 exited 0"
-[ "$?" = "1" ] || fail "A5 call 3 exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "A5 call 3 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=2 STOP-AT-TWO" || fail "A5 bad verdict: $(head -n 1 <<<"$out")"
 expect_slot fix3
 [ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "A5 round not 2"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "A5 call 4 exited 0"
-[ "$?" = "1" ] || fail "A5 call 4 exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "A5 call 4 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "A5 bad verdict: $(head -n 1 <<<"$out")"
 grep -q "job|" "$T/calls.log" && fail "A5 call 4 dispatched a job"
 fi
@@ -522,7 +522,7 @@ if want B; then
 setup_case b
 printf 'stalled' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "B call 1 exited 0"
-[ "$?" = "1" ] || fail "B call 1 exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "B call 1 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix NEEDS_CONTEXT id=j1" || fail "B bad verdict: $(head -n 1 <<<"$out")"
 git -C "$WT" push -q origin tkt-529
 : >"$T/calls.log"
@@ -576,7 +576,7 @@ setup_case concerns-incomplete
 printf 'partial' >"$T/jobmode"
 printf 'incomplete' >"$T/vermode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "B3 incomplete exited 0"
-[ "$?" = "1" ] || fail "B3 incomplete exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "B3 incomplete exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-INCOMPLETE round=1" || fail "B3 bad verdict: $(head -n 1 <<<"$out")"
 grep -qxF "concerns=$CDIR/run/switchyard-529-concerns-fix1.md" <<<"$out" || fail "B3 digest lacks concerns line"
 fi
@@ -623,7 +623,7 @@ bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
 printf '%s' "$OTHER" >"$T/prhead"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "C1 exited 0"
-[ "$?" = "3" ] || fail "C1 exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "C1 exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "C1 bad verdict: $(head -n 1 <<<"$out")"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$SIB" ] || fail "C1 head moved"
 grep -q "job|" "$T/calls.log" && fail "C1 dispatched a job"
@@ -642,7 +642,7 @@ NEW="$(git -C "$WT" rev-parse HEAD)"
 : >"$T/calls.log"
 printf 'done' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "D call 2 exited 0"
-[ "$?" = "3" ] || fail "D call 2 exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "D call 2 exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "D bad verdict: $(head -n 1 <<<"$out")"
 grep -q "PR head=$NEW" <<<"$out" || fail "D PR head missing from DRIFT digest"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "D head moved"
@@ -665,7 +665,7 @@ bash "$TKT_STATE" "$S" set fixopen 1 >/dev/null
 bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
 printf '%s' "$TWO" >"$T/prhead"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "C2 exited 0"
-[ "$?" = "3" ] || fail "C2 exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "C2 exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "C2 bad verdict: $(head -n 1 <<<"$out")"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "C2 head moved"
 grep -q "job|" "$T/calls.log" && fail "C2 dispatched a job"
@@ -688,7 +688,7 @@ mkdir -p "$TMPDIR/delegate-jobs"
 jq -n --arg ha "$NEW" '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"which design rules the retry?",changeSet:{headBefore:"x",headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' >"$TMPDIR/delegate-jobs/j1.json" || fail "E record write"
 printf '%s' "$OLD" >"$T/prhead"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "E exited 0"
-[ "$?" = "3" ] || fail "E exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "E exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "E bad verdict: $(head -n 1 <<<"$out")"
 grep -q "job=j1" <<<"$out" || fail "E job id missing from RECOVER digest"
 grep -q "slot=fix1" <<<"$out" || fail "E slot missing from RECOVER digest"
@@ -706,7 +706,7 @@ drop_state_key head
 printf '[{"number":7,"headRefOid":"%s"}]' "$OLD" >"$T/prlist"
 printf 'ask' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "fill-both ASK exited 0"
-[ "$?" = "1" ] || fail "fill-both ASK exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "fill-both ASK exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=j1" || fail "fill-both bad verdict: $(head -n 1 <<<"$out")"
 [ "$(bash "$TKT_STATE" "$S" get pr)" = "7" ] || fail "fill-both did not store PR number"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "fill-both did not store PR head"
@@ -733,7 +733,7 @@ setup_case fill-both-stored
 printf '[{"number":99,"headRefOid":"different"}]' >"$T/prlist"
 printf 'ask' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "stored-values ASK exited 0"
-[ "$?" = "1" ] || fail "stored-values ASK exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "stored-values ASK exited $rc, want 1"
 [ "$(bash "$TKT_STATE" "$S" get pr)" = "7" ] || fail "stored-values PR changed"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "stored-values head changed"
 grep -q '^gh|pr list ' "$T/calls.log" && fail "stored values still triggered PR lookup"
@@ -744,7 +744,7 @@ drop_state_key head
 printf '[{"number":99,"headRefOid":"other"},{"number":7,"headRefOid":"%s"}]' "$OLD" >"$T/prlist"
 printf 'ask' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "head-by-PR ASK exited 0"
-[ "$?" = "1" ] || fail "head-by-PR ASK exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "head-by-PR ASK exited $rc, want 1"
 [ "$(bash "$TKT_STATE" "$S" get pr)" = "7" ] || fail "head-by-PR changed stored PR"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "head-by-PR selected the wrong PR"
 
@@ -754,7 +754,7 @@ drop_state_key pr
 printf '[{"number":11,"headRefOid":"%s"},{"number":7,"headRefOid":"other"}]' "$OLD" >"$T/prlist"
 printf 'ask' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "PR-by-head ASK exited 0"
-[ "$?" = "1" ] || fail "PR-by-head ASK exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "PR-by-head ASK exited $rc, want 1"
 [ "$(bash "$TKT_STATE" "$S" get pr)" = "11" ] || fail "PR-by-head did not select first PR"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "PR-by-head replaced stored head"
 
@@ -764,7 +764,7 @@ drop_state_key pr
 drop_state_key head
 printf '[]' >"$T/prlist"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "empty PR list exited 0"
-[ "$?" = "2" ] || fail "empty PR list exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "empty PR list exited $rc, want 2"
 grep -q 'PRECONDITION missing=pr: no open PR for branch tkt-529 in switchyard' "$T/stderr" || fail "empty PR list error missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "empty PR list dispatched a job"
 if bash "$TKT_STATE" "$S" get fixopen >/dev/null 2>&1; then fail "empty PR list wrote fixopen"; fi
@@ -776,7 +776,7 @@ drop_state_key head
 printf '[{"number":7,"headRefOid":"%s"}]' "$OLD" >"$T/prlist"
 printf '1' >"$T/prlistrc"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "failed PR lookup exited 0"
-[ "$?" = "2" ] || fail "failed PR lookup exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "failed PR lookup exited $rc, want 2"
 grep -q 'PRECONDITION missing=pr: cannot list PRs for branch tkt-529' "$T/stderr" || fail "failed PR lookup error missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "failed PR lookup dispatched a job"
 
@@ -786,7 +786,7 @@ drop_state_key pr
 drop_state_key head
 printf 'not-json' >"$T/prlist"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "invalid PR JSON exited 0"
-[ "$?" = "2" ] || fail "invalid PR JSON exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "invalid PR JSON exited $rc, want 2"
 grep -q 'PRECONDITION missing=pr: cannot list PRs for branch tkt-529' "$T/stderr" || fail "invalid PR JSON error missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "invalid PR JSON dispatched a job"
 
@@ -795,7 +795,7 @@ setup_case fill-no-match
 drop_state_key head
 printf '[{"number":99,"headRefOid":"other"}]' >"$T/prlist"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "non-matching PR list exited 0"
-[ "$?" = "2" ] || fail "non-matching PR list exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "non-matching PR list exited $rc, want 2"
 grep -q '^job|' "$T/calls.log" && fail "non-matching PR list dispatched a job"
 
 # 10j. A matching entry with no head fails before dispatch.
@@ -803,7 +803,7 @@ setup_case fill-empty-head
 drop_state_key head
 printf '[{"number":7,"headRefOid":""}]' >"$T/prlist"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "empty PR head exited 0"
-[ "$?" = "2" ] || fail "empty PR head exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "empty PR head exited $rc, want 2"
 grep -q 'PRECONDITION missing=head:' "$T/stderr" || fail "empty PR head error missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "empty PR head dispatched a job"
 
@@ -840,7 +840,7 @@ printf 'UNRELATED-CONTENT\n' >"$CDIR/run/switchyard-529-findings-r1.md"
 cp "$CDIR/run/switchyard-529-findings-r1.md" "$T/findings-refuse-copy.md"
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "findings-refuse exited 0"
-[ "$?" = "2" ] || fail "findings-refuse exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "findings-refuse exited $rc, want 2"
 grep -F -q "tkt-fix: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-529-findings-r1.md" "$T/stderr" || fail "findings-refuse stderr missing refusal: $(cat "$T/stderr")"
 cmp -s "$CDIR/run/switchyard-529-findings-r1.md" "$T/findings-refuse-copy.md" || fail "findings-refuse: existing file changed"
 
@@ -961,7 +961,7 @@ EOF
 if want F1; then
 setup_ahead_dispatch f1
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F1 call 1 exited 0"
-[ "$?" = "1" ] || fail "F1 call 1 exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "F1 call 1 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=stub-1" || fail "F1 bad verdict: $(head -n 1 <<<"$out")"
 [ "$(bash "$TKT_STATE" "$S" get fixopen)" = "1" ] || fail "F1 fixopen not 1 after ASK"
 RECHEAD="$(git -C "$WT" rev-parse HEAD)"
@@ -984,7 +984,7 @@ fi
 if want F2; then
 setup_ahead_dispatch f2
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F2 call 1 exited 0"
-[ "$?" = "1" ] || fail "F2 call 1 exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "F2 call 1 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=stub-1" || fail "F2 bad verdict: $(head -n 1 <<<"$out")"
 printf 'done' >"$T/delegate-mode"
 : >"$T/calls.log"
@@ -1006,7 +1006,7 @@ fi
 if want F3; then
 setup_ahead_dispatch f3
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F3 call 1 exited 0"
-[ "$?" = "1" ] || fail "F3 call 1 exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "F3 call 1 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=stub-1" || fail "F3 bad verdict: $(head -n 1 <<<"$out")"
 printf 'outside\n' >"$WT/evil.txt"
 git -C "$WT" add evil.txt
@@ -1015,7 +1015,7 @@ OUTHEAD="$(git -C "$WT" rev-parse HEAD)"
 printf 'done' >"$T/delegate-mode"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F3 call 2 exited 0"
-[ "$?" = "3" ] || fail "F3 call 2 exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "F3 call 2 exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "F3 bad verdict: $(head -n 1 <<<"$out")"
 grep -q "worktree HEAD=$OUTHEAD" <<<"$out" || fail "F3 worktree sha missing from DRIFT digest"
 grep -q "delegate|" "$T/calls.log" && fail "F3 dispatched a job"
@@ -1040,7 +1040,7 @@ bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
 mkdir -p "$TMPDIR/delegate-jobs"
 jq -n --arg ha "$NEW" '{status:"NEEDS_CONTEXT",result:{status:"NEEDS_CONTEXT",text:"which design rules the retry?",changeSet:{headBefore:"x",headAfter:$ha,newCommits:[$ha],uncommittedFiles:[],filesChanged:[],diffstat:"",dirtyAfter:false}},supervisorPid:1}' >"$TMPDIR/delegate-jobs/j1.json" || fail "F4 record write"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "F4 call 1 exited 0"
-[ "$?" = "3" ] || fail "F4 call 1 exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "F4 call 1 exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "F4 bad verdict: $(head -n 1 <<<"$out")"
 grep -q "job=j1" <<<"$out" || fail "F4 job id missing from RECOVER digest"
 grep -q "slot=fix1" <<<"$out" || fail "F4 slot missing from RECOVER digest"
@@ -1108,7 +1108,7 @@ cat >"$CDIR/plan.md" <<'EOF'
 EOF
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "G2 recovery exited 0"
-[ "$?" = "1" ] || fail "G2 recovery exited $?, want 1"
+rc=$?; [ "$rc" = "1" ] || fail "G2 recovery exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FAIL rc=1" || fail "G2 bad gate verdict: $(head -n 1 <<<"$out")"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "G2 pushed after a failed gate"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "G2 moved state head after a failed gate"
@@ -1128,7 +1128,7 @@ bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
 printf 'untracked\n' >"$WT/untracked.txt"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "G3 recovery exited 0"
-[ "$?" = "3" ] || fail "G3 recovery exited $?, want 3"
+rc=$?; [ "$rc" = "3" ] || fail "G3 recovery exited $rc, want 3"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "G3 bad verdict: $(head -n 1 <<<"$out")"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "G3 pushed a dirty worktree"
 grep -q "job|" "$T/calls.log" && fail "G3 dispatched a new fix job"
@@ -1162,7 +1162,7 @@ drop_state_key head
 bash "$TKT_STATE" "$S" set job.lane lane-job-1 >/dev/null || fail "prepr-lane: set job.lane"
 printf '[]' >"$T/prlist"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "prepr-lane exited 0"
-[ "$?" = "2" ] || fail "prepr-lane exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "prepr-lane exited $rc, want 2"
 grep -q 'PRECONDITION missing=pr: no open PR for branch tkt-529 in switchyard' "$T/stderr" || fail "prepr-lane first line missing: $(cat "$T/stderr")"
 grep -F -q "tkt-fix: a lane blocked before its PR resumes with: tkt-job $S --slot lane --resume lane-job-1 --prompt <answer file> --gate-from-plan --expect-commits; then tkt-build $S --from gate" "$T/stderr" || fail "prepr-lane resume line missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "prepr-lane dispatched a job"
@@ -1173,7 +1173,7 @@ drop_state_key pr
 drop_state_key head
 printf '[]' >"$T/prlist"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "prepr-nolane exited 0"
-[ "$?" = "2" ] || fail "prepr-nolane exited $?, want 2"
+rc=$?; [ "$rc" = "2" ] || fail "prepr-nolane exited $rc, want 2"
 grep -q 'PRECONDITION missing=pr: no open PR for branch tkt-529 in switchyard' "$T/stderr" || fail "prepr-nolane first line missing: $(cat "$T/stderr")"
 grep -F -q "tkt-build $S --from lane" "$T/stderr" || fail "prepr-nolane lane line missing: $(cat "$T/stderr")"
 grep -q '^job|' "$T/calls.log" && fail "prepr-nolane dispatched a job"
