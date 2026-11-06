@@ -2720,4 +2720,118 @@ grep -Fq -- "--since $OTHER_HEAD" <<<"$err" || fail "reason-prefix bypass refusa
 grep -Fq -- "already has a review for head $OTHER_HEAD" <<<"$err" || fail "reason-prefix bypass refusal prints the reviewed head"
 [ ! -e "$T/state/runs.txt" ] || fail "reason-prefix bypass refusal launches no job"
 
+# --- case #1089: verify includes findings from the round posted at --since
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+printf 'P2 finding Y: repair the current issue\n- Evidence: kept in the file\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+plant_comment "2026-10-09T10:00:00Z" 201 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P1 finding X: earlier reviewed behavior
+P2 finding Y: current issue
+VERDICT standards: CHANGES"
+start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$OLD_SHA" --head "$NEW_SHA" >/dev/null 2>"$T/verify-stderr.txt" || { cat "$T/verify-stderr.txt" >&2; fail "verify with earlier findings starts"; }
+grep -Fq 'P1 finding X: earlier reviewed behavior' "$T/state/prompt-verify.md" || \
+  fail "verify brief includes findings from the posted round at --since"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with earlier findings collects"
+
+# --- case #1184: verify includes earlier rounds when the findings file has only the latest
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+printf 'P2 finding Z: latest verify finding\n- Evidence: kept in the file\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+plant_comment "2026-10-09T12:00:00Z" 212 "review-pr: patch-id $EXPECTED_NEW_PID, head $NEW_SHA
+
+## verify (M)
+
+P2 finding Z: latest verify finding
+FIX-INCOMPLETE finding remains
+STATUS: DONE"
+plant_comment "2026-10-09T10:00:00Z" 211 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P1 finding X: earlier reviewed behavior
+VERDICT standards: CHANGES"
+start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$OLD_SHA" --head "$NEW_SHA" >/dev/null 2>"$T/verify-stderr.txt" || { cat "$T/verify-stderr.txt" >&2; fail "verify with the latest-only findings file starts"; }
+grep -Fq 'P1 finding X: earlier reviewed behavior' "$T/state/prompt-verify.md" || \
+  fail "verify brief includes the earlier finding omitted from the latest-only file"
+grep -Fq 'P2 finding Z: latest verify finding' "$T/state/prompt-verify.md" || \
+  fail "verify brief retains the latest finding from the file"
+line_x="$(grep -nF 'P1 finding X: earlier reviewed behavior' "$T/state/prompt-verify.md" | cut -d: -f1)"
+line_z="$(grep -nF 'P2 finding Z: latest verify finding' "$T/state/prompt-verify.md" | tail -n 1 | cut -d: -f1)"
+[ "$line_x" -lt "$line_z" ] || fail "verify brief keeps posted rounds in comment order"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with the latest-only findings file collects"
+
+# --- case #1183: a later FIX-OK verify refuses an older --since before dispatch
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+git -C "$T/clone" config user.email t@t
+git -C "$T/clone" config user.name t
+git -C "$T/clone" checkout -q -b verify-scope-c "$NEW_SHA"
+printf 'later repair\n' >"$T/clone/later.txt"
+git -C "$T/clone" add later.txt
+git -C "$T/clone" commit -qm 'later repair'
+VERIFY_C_SHA="$(git -C "$T/clone" rev-parse HEAD)"
+git -C "$T/clone" checkout -q main
+printf '%s\n' "$VERIFY_C_SHA" >"$T/state/heads.txt"
+printf 'P1 finding X: earlier reviewed behavior\n' >"$T/findings.txt"
+plant_comment "2026-10-09T12:00:00Z" 222 "review-pr: patch-id $EXPECTED_NEW_PID, head $VERIFY_C_SHA
+
+## verify (M)
+
+FIX-OK all findings repaired
+STATUS: DONE"
+plant_comment "2026-10-09T10:00:00Z" 221 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P1 finding X: earlier reviewed behavior
+VERDICT standards: CHANGES"
+err="$(start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$OLD_SHA" --head "$VERIFY_C_SHA" 2>&1 >/dev/null)"; st=$?
+[ "$st" -eq 2 ] || fail "verify behind a posted FIX-OK exits 2 (got $st)"
+grep -Fq -- "pass --since $VERIFY_C_SHA instead" <<<"$err" || \
+  fail "stale verify refusal names the FIX-OK head: [$err]"
+[ ! -e "$T/state/runs.txt" ] || fail "stale verify refusal starts no job"
+[ ! -e "$TMPDIR/review-pr/job-verify" ] || fail "stale verify refusal saves no job state"
+
+# --- case: an unmatched --since warns and includes every posted round
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf '%s\n' "$VERIFY_C_SHA" >"$T/state/heads.txt"
+printf 'P1 finding current: repair the latest commit\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK all repaired
+STATUS: DONE" 0
+plant_comment "2026-10-09T10:00:00Z" 231 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P1 finding X: first posted round
+VERDICT standards: CHANGES"
+plant_comment "2026-10-09T12:00:00Z" 232 "review-pr: patch-id $EXPECTED_NEW_PID, head $VERIFY_C_SHA
+
+## spec (M)
+
+P2 finding Y: last posted round
+VERDICT spec: CHANGES"
+start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$NEW_SHA" --head "$VERIFY_C_SHA" >/dev/null 2>"$T/unmatched-stderr.txt" || \
+  { cat "$T/unmatched-stderr.txt" >&2; fail "verify with an unmatched --since starts"; }
+grep -Fq "no posted review-pr comment has header head $NEW_SHA" "$T/unmatched-stderr.txt" || \
+  fail "unmatched --since warns on stderr"
+grep -Fq 'P1 finding X: first posted round' "$T/state/prompt-verify.md" || \
+  fail "unmatched --since includes the first posted comment"
+grep -Fq 'P2 finding Y: last posted round' "$T/state/prompt-verify.md" || \
+  fail "unmatched --since includes the last posted comment"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "unmatched --since verify collects"
+
 echo "review-pr: all cases passed"
