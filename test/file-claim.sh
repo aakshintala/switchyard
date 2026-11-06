@@ -4,6 +4,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FC="$SCRIPT_DIR/../bin/file-claim"
+TAB="$(printf '\t')" # GNU grep reads \t in a pattern as a literal t
 
 fail() {
   echo "FAIL: $1" >&2
@@ -172,22 +173,23 @@ grep -Eq '^(1|1\.0)$' "$T/sleeps" || fail "jitter never reaches 1.0"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM sub 2>/dev/null)" || fail "dir claim exits 0"
 [ "$out" = "$(printf 'GRANT sub new\nfile-claim: 1 granted, 0 refused')" ] || fail "dir reports new: $out"
 
-# --- PR refusal names the PR; nothing is written ------------------------------
+# --- PR overlap is advisory, including draft PRs -----------------------------
 R="$(fresh)"
-printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs1.json"
+printf '[{"number":42,"changedFiles":1,"isDraft":true,"files":[{"path":"a.txt"}] }]' >"$T/prs1.json"
 export GH_PRS_JSON="$T/prs1.json"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt newfile.txt 2>"$T/e2")" && fail "PR-held claim exits non-zero"
-[ "$?" = "1" ] || fail "PR-held claim exits 1"
-[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nUNCLAIMED newfile.txt batch-refused\nfile-claim: no claims recorded; 1 refused, 1 unclaimed because the batch was refused')" ] || fail "PR refusal lines: $out"
-[ -z "$(claim_tip "$R")" ] || fail "refused call writes nothing"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt newfile.txt 2>"$T/e2")" || fail "draft-PR overlap claim exits 0: $(cat "$T/e2")"
+[ "$out" = "$(printf 'OVERLAP a.txt pr#42\nGRANT a.txt exists\nGRANT newfile.txt new\nfile-claim: 2 granted, 0 refused')" ] || fail "draft-PR overlap lines: $out"
+blob="$(claims_blob "$R")"
+[ "$(printf '%s\n' "$blob" | grep -c '^')" = "2" ] || fail "draft-PR overlap records both claims"
+printf '%s' "$blob" | grep -q "^a.txt${TAB}L${TAB}grant${TAB}" || fail "draft-PR-held path is recorded"
 
-# the smallest PR number wins when several touch the path; PRs with no files match nothing.
+# Every PR is reported when several PRs touch one path.
 printf '[{"number":9,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":3,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":5,"changedFiles":0,"files":[]}]' >"$T/prs2.json"
 export GH_PRS_JSON="$T/prs2.json"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt 2>/dev/null)" && fail "multi-PR claim exits non-zero"
-[ "$out" = "$(printf 'REFUSE a.txt pr#3 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "smallest PR named: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt 2>/dev/null)" || fail "multi-PR overlap claim exits 0"
+[ "$out" = "$(printf 'OVERLAP a.txt pr#3\nOVERLAP a.txt pr#9\nGRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "all PR overlaps named: $out"
 
-# --- PR refusals name the holder's hunks ---------------------------------------
+# --- sweep PR refusals name the holder's hunks --------------------------------
 R="$(fresh)"
 printf '[{"number":21,"changedFiles":3,"files":[{"path":"two.txt"},{"path":"ins.txt"},{"path":"new.txt"}]}]' >"$T/prs-hunks.json"
 export GH_PRS_JSON="$T/prs-hunks.json"
@@ -219,14 +221,15 @@ index 0000000..3333333
 +three
 DIFF_EOF
 : >"$GH_ARGS_LOG"
-out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" bash "$FC" $CLAIM two.txt ins.txt new.txt other.txt 2>/dev/null)" && fail "hunk claim exits non-zero"
+SWEEP_CLAIM="claim --lane sweep-L --grant --worktree t:d1 --repo test/repo"
+out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" bash "$FC" $SWEEP_CLAIM two.txt ins.txt new.txt other.txt 2>/dev/null)" && fail "sweep hunk claim exits non-zero"
 [ "$?" = "1" ] || fail "hunk claim exits 1"
 [ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=10-14,100-102\nREFUSE ins.txt pr#21 hunks=5-6\nREFUSE new.txt pr#21 hunks=whole\nUNCLAIMED other.txt batch-refused\nfile-claim: no claims recorded; 3 refused, 1 unclaimed because the batch was refused')" ] || fail "hunk ranges: $out"
 [ "$(grep -cF 'pr diff 21' "$GH_ARGS_LOG")" = "1" ] || fail "holder diff fetched once per PR"
 # A failed diff fetch, even a partial one, gives hunks=unknown for every path
-# that PR holds, from one fetch, and the refusals stand.
+# that PR holds, from one fetch, and the sweep refusals stand.
 : >"$GH_ARGS_LOG"
-out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" GH_DIFF_FAIL_PR=21 bash "$FC" $CLAIM two.txt ins.txt new.txt 2>/dev/null)" && fail "diff-fail claim exits non-zero"
+out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" GH_DIFF_FAIL_PR=21 bash "$FC" $SWEEP_CLAIM two.txt ins.txt new.txt 2>/dev/null)" && fail "sweep diff-fail claim exits non-zero"
 [ "$?" = "1" ] || fail "diff-fail claim exits 1"
 [ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=unknown\nREFUSE ins.txt pr#21 hunks=unknown\nREFUSE new.txt pr#21 hunks=unknown\nfile-claim: no claims recorded; 3 refused, 0 unclaimed because the batch was refused')" ] || fail "unknown hunks: $out"
 [ "$(grep -cF 'pr diff 21' "$GH_ARGS_LOG")" = "1" ] || fail "failed diff fetched once per PR"
@@ -246,8 +249,8 @@ pr_files+=']'
 printf '[{"number":101,"changedFiles":101,"files":%s}]' "$pr_files" >"$T/prs-paginated.json"
 printf '%b' "${api_files}collision.txt\n" >"$T/api-paginated.txt"
 export GH_PRS_JSON="$T/prs-paginated.json" GH_API_FILES="$T/api-paginated.txt"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM collision.txt 2>"$T/e-paginated")" && fail "path after 100 must be refused"
-[ "$out" = "$(printf 'REFUSE collision.txt pr#101 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "paginated PR refusal: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM collision.txt 2>"$T/e-paginated")" || fail "path after 100 overlaps a PR and exits 0"
+[ "$out" = "$(printf 'OVERLAP collision.txt pr#101\nGRANT collision.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "paginated PR overlap: $out"
 grep -qF 'api --paginate repos/test/repo/pulls/101/files?per_page=100 -q .[].filename' "$GH_ARGS_LOG" || fail "PR file read did not paginate"
 unset GH_API_FILES
 
@@ -262,9 +265,8 @@ out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_
 [ "$out" = "$(printf 'GRANT c.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "claim after transient failure: $out"
 [ "$(cat "$GH_RETRY_COUNT")" = "1" ] || fail "one transient file-list failure recorded"
 [ "$(grep -cF 'pulls/7/files?per_page=100' "$GH_ARGS_LOG")" = "2" ] || fail "PR 7 file list retried once"
-out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_FILES_TIMES=1 GH_FAIL_FILES_COUNT="$GH_RETRY_COUNT" bash "$FC" $CLAIM a.txt 2>"$T/e-retry-refusal")" && fail "claim for a PR-held path exits non-zero"
-[ "$?" = "1" ] || fail "PR-held claim after retry exits 1"
-[ "$out" = "$(printf 'REFUSE a.txt pr#7 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "PR-held path after retry: $out"
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_FILES_TIMES=1 GH_FAIL_FILES_COUNT="$GH_RETRY_COUNT" bash "$FC" $CLAIM a.txt 2>"$T/e-retry-refusal")" || fail "claim records a PR overlap after retry: $(cat "$T/e-retry-refusal")"
+[ "$out" = "$(printf 'OVERLAP a.txt pr#7\nGRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "PR overlap after retry: $out"
 
 R="$(fresh)"
 GH_RETRY_COUNT="$T/gh-retry-exhausted-count"
@@ -295,9 +297,8 @@ grep -qF 'file list has 0 files, changedFiles is 2' "$T/e-empty-exhausted" || fa
 R="$(fresh)"
 printf 0 >"$GH_EMPTY_COUNT"
 : >"$GH_ARGS_LOG"
-out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_EMPTY_FILES_PR=7 GH_EMPTY_FILES_TIMES=1 GH_EMPTY_FILES_COUNT="$GH_EMPTY_COUNT" bash "$FC" $CLAIM a.txt 2>"$T/e-empty-once")" && fail "listed PR path exits non-zero"
-[ "$?" = "1" ] || fail "listed PR path exits 1"
-[ "$out" = "$(printf 'REFUSE a.txt pr#7 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "retried list refuses its path: $out"
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_EMPTY_FILES_PR=7 GH_EMPTY_FILES_TIMES=1 GH_EMPTY_FILES_COUNT="$GH_EMPTY_COUNT" bash "$FC" $CLAIM a.txt 2>"$T/e-empty-once")" || fail "listed PR overlap exits 0: $(cat "$T/e-empty-once")"
+[ "$out" = "$(printf 'OVERLAP a.txt pr#7\nGRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "retried list reports overlap: $out"
 [ "$(cat "$GH_EMPTY_COUNT")" = "1" ] || fail "one empty file-list response recorded"
 : >"$GH_ARGS_LOG"
 printf 0 >"$GH_EMPTY_COUNT"
@@ -323,28 +324,40 @@ export GH_PRS_JSON="$T/prs1.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 --repo test/repo --self-pr 42 a.txt 2>"$T/e3")" || fail "self-pr claim exits 0: $(cat "$T/e3")"
 [ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "self-pr lines: $out"
 
-# other PRs still refuse even with --self-pr.
+# Other PRs overlap, but do not refuse, even with --self-pr.
 printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":7,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs3.json"
 export GH_PRS_JSON="$T/prs3.json"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 --repo test/repo --self-pr 42 a.txt 2>/dev/null)" && fail "other-PR claim exits non-zero"
-[ "$out" = "$(printf 'REFUSE a.txt pr#7 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "other PR still refuses: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 --repo test/repo --self-pr 42 a.txt 2>/dev/null)" || fail "other-PR overlap exits 0"
+[ "$out" = "$(printf 'OVERLAP a.txt pr#7\nGRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "other PR overlap with --self-pr: $out"
 # a repeated --self-pr exempts every own PR, not only the last.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane L --grant --worktree t:d1 --repo test/repo --self-pr 7 --self-pr 42 a.txt 2>&1)" || fail "two self-prs exit 0: $out"
 [ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "two self-prs exempt both: $out"
 export GH_PRS_JSON="$T/prs-empty.json"
 
-# --- other-lane refusal; own re-claim is an idempotent no-op -------------------
+# --- ordinary lane overlap; own re-claim is an idempotent no-op --------------
 R="$(fresh)"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA --repo test/repo x.txt 2>/dev/null)" || fail "lane A claim exits 0"
 before="$(claims_blob "$R")"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt 2>/dev/null)" && fail "other-lane claim exits non-zero"
-[ "$?" = "1" ] || fail "other-lane claim exits 1"
-[ "$out" = "$(printf 'REFUSE x.txt lane:A\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "other-lane refusal: $out"
-[ "$(claims_blob "$R")" = "$before" ] || fail "other-lane refusal writes nothing"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt 2>/dev/null)" || fail "ordinary overlap claim exits 0"
+[ "$out" = "$(printf 'OVERLAP x.txt lane:A\nGRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "ordinary lane overlap: $out"
+[ "$(claims_blob "$R" | grep -c "^x.txt${TAB}")" = "2" ] || fail "overlapping claim is recorded beside its holder"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA --repo test/repo x.txt 2>/dev/null)" || fail "re-claim exits 0"
-[ "$out" = "$(printf 'GRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "re-claim lines: $out"
-[ "$(claims_blob "$R")" = "$before" ] || fail "re-claim stores no second line"
+[ "$out" = "$(printf 'OVERLAP x.txt lane:B\nGRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "re-claim overlap lines: $out"
+[ "$(claims_blob "$R" | grep -c "^x.txt${TAB}")" = "2" ] || fail "re-claim stores no second line"
 
+# A sweep holder keeps an exclusive path; a sweep claimant also refuses an ordinary hold.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane sweep-round --grant --worktree t:dS --repo test/repo x.txt >/dev/null 2>&1 || fail "sweep holder setup exits 0"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt 2>/dev/null)" && fail "ordinary claim cannot take a sweep-held path"
+[ "$?" = "1" ] || fail "sweep-holder overlap exits 1"
+[ "$out" = "$(printf 'REFUSE x.txt exclusive lane:sweep-round\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "exclusive sweep holder output: $out"
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane ordinary --grant --worktree t:dO --repo test/repo x.txt >/dev/null 2>&1 || fail "ordinary holder setup exits 0"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane sweep-round --grant --worktree t:dS --repo test/repo x.txt 2>/dev/null)" && fail "sweep claimant refuses an ordinary-held path"
+[ "$?" = "1" ] || fail "sweep claimant exits 1"
+[ "$out" = "$(printf 'REFUSE x.txt lane:ordinary\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "sweep claimant output: $out"
+
+# a repeated path in one call is claimed once.
 # re-claim with the other kind keeps the recorded line: a no-op, not an upgrade.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --plan --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "plan claim exits 0"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "cross-kind re-claim exits 0"
@@ -355,14 +368,12 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA 
 [ "$out" = "$(printf 'GRANT d.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "dup path one line: $out"
 [ "$(claims_blob "$R" | grep -c '^d.txt	')" = "1" ] || fail "dup path one stored line"
 
-# --- mixed set is all-or-nothing ------------------------------------------------
+# --- mixed ordinary set records its overlaps and grants all paths -------------
 R="$(fresh)"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA --repo test/repo x.txt 2>/dev/null)" || fail "setup claim exits 0"
-before="$(claims_blob "$R")"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt y.txt z.txt 2>/dev/null)" && fail "mixed claim exits non-zero"
-[ "$?" = "1" ] || fail "mixed claim exits 1"
-[ "$out" = "$(printf 'REFUSE x.txt lane:A\nUNCLAIMED y.txt batch-refused\nUNCLAIMED z.txt batch-refused\nfile-claim: no claims recorded; 1 refused, 2 unclaimed because the batch was refused')" ] || fail "mixed lines: $out"
-[ "$(claims_blob "$R")" = "$before" ] || fail "mixed refusal changes the registry"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt y.txt z.txt 2>/dev/null)" || fail "mixed ordinary overlap claim exits 0"
+[ "$out" = "$(printf 'OVERLAP x.txt lane:A\nGRANT x.txt new\nGRANT y.txt new\nGRANT z.txt new\nfile-claim: 3 granted, 0 refused')" ] || fail "mixed overlap lines: $out"
+[ "$(claims_blob "$R" | grep -c '^')" = "4" ] || fail "mixed overlap records every claim"
 
 # --- --plan takes paths; a plan file passed there is refused, nothing claimed ----
 R="$(fresh)"
@@ -470,6 +481,33 @@ FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --plan --worktree t:dG --repo t
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g6 2>/dev/null)" && fail "grant past cap still refused"
 [ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "cap holds with plans: $out"
 
+# Other lanes' advisory claims do not exempt paths from the grant cap.
+R="$(fresh)"
+i=1
+while [ "$i" -le 6 ]; do
+  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "holder-$i" --grant --worktree "t:h$i" --repo test/repo "shared-$i.txt" >/dev/null 2>&1 || fail "holder $i claim exits 0"
+  i=$((i + 1))
+done
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane claimant --grant --worktree t:claimant --repo test/repo shared-1.txt shared-2.txt shared-3.txt shared-4.txt shared-5.txt shared-6.txt 2>/dev/null)" && fail "six overlapping grants exceed the default cap"
+[ "$?" = "1" ] || fail "six overlapping grants exit 1"
+[ "$(printf '%s\n' "$out" | grep -c '^REFUSE .* cap$')" = "6" ] || fail "all six overlapping grants refused by cap: $out"
+[ "$(claims_blob "$R" | grep -c '^')" = "6" ] || fail "over-cap overlap batch writes no claimant rows"
+[ "$(claims_blob "$R" | awk -F '\t' '$2=="claimant" {n++} END {print n+0}')" = "0" ] || fail "over-cap overlap batch records no claimant rows"
+
+# The grant cap admits exactly five new overlapping paths and refuses the sixth.
+R="$(fresh)"
+i=1
+while [ "$i" -le 6 ]; do
+  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "edge-holder-$i" --grant --worktree "t:eh$i" --repo test/repo "edge-$i.txt" >/dev/null 2>&1 || fail "edge holder $i claim exits 0"
+  i=$((i + 1))
+done
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane edge-claimant --grant --worktree t:ec --repo test/repo edge-1.txt edge-2.txt edge-3.txt edge-4.txt edge-5.txt 2>/dev/null)" || fail "five overlapping grants at cap exit 0"
+[ "$(printf '%s\n' "$out" | grep -c '^GRANT edge-[1-5]\.txt new$')" = "5" ] || fail "five overlapping grants at cap are granted: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane edge-claimant --grant --worktree t:ec --repo test/repo edge-6.txt 2>/dev/null)" && fail "one overlapping grant over the cap exits non-zero"
+[ "$?" = "1" ] || fail "one overlapping grant over the cap exits 1"
+[ "$out" = "$(printf 'OVERLAP edge-6.txt lane:edge-holder-6\nREFUSE edge-6.txt cap\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "one overlapping grant over cap: $out"
+[ "$(claims_blob "$R" | awk -F '\t' '$2=="edge-claimant" {n++} END {print n+0}')" = "5" ] || fail "one-over-cap claim writes no extra row"
+
 # FILE_CLAIM_MAX_GRANT raises the cap; a non-numeric value exits 2.
 R="$(fresh)"
 i=1
@@ -501,30 +539,20 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane H --grant --worktree t:dH 
 [ "$out" = "$(printf 'REFUSE h6 cap\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "cap-hint stdout unchanged: $out"
 grep -qF 'FILE_CLAIM_MAX_GRANT' "$T/e-cap-hint" || fail "cap hint names FILE_CLAIM_MAX_GRANT: $(cat "$T/e-cap-hint")"
 
-# A pr#<n> refusal hints at --self-pr <n> on stderr.
+# Ordinary PR overlaps are reported but carry no self-PR refusal hint.
 R="$(fresh)"
 printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs-hint.json"
 export GH_PRS_JSON="$T/prs-hint.json"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt 2>"$T/e-pr-hint")" && fail "pr-hint claim exits non-zero"
-[ "$?" = "1" ] || fail "pr-hint claim exits 1"
-[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "pr-hint stdout unchanged: $out"
-grep -qF -- '--self-pr 42' "$T/e-pr-hint" || fail "pr hint names --self-pr 42: $(cat "$T/e-pr-hint")"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt 2>"$T/e-pr-hint")" || fail "PR overlap claim exits 0"
+[ "$out" = "$(printf 'OVERLAP a.txt pr#42\nGRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "PR overlap output: $out"
+[ ! -s "$T/e-pr-hint" ] || fail "ordinary PR overlap has no refusal hint: $(cat "$T/e-pr-hint")"
 
-# One hint line per distinct PR: two PRs give two lines, one PR twice gives one.
+# A sweep claimant still receives the --self-pr hint when the PR blocks it.
 R="$(fresh)"
-printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":7,"changedFiles":1,"files":[{"path":"b.txt"}]}]' >"$T/prs-hint2.json"
-export GH_PRS_JSON="$T/prs-hint2.json"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt b.txt 2>"$T/e-pr-hint2")" && fail "two-pr claim exits non-zero"
-[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nREFUSE b.txt pr#7 hunks=unknown\nfile-claim: no claims recorded; 2 refused, 0 unclaimed because the batch was refused')" ] || fail "two-pr stdout unchanged: $out"
-grep -qF -- '--self-pr 42' "$T/e-pr-hint2" || fail "two-pr hint names --self-pr 42: $(cat "$T/e-pr-hint2")"
-grep -qF -- '--self-pr 7' "$T/e-pr-hint2" || fail "two-pr hint names --self-pr 7: $(cat "$T/e-pr-hint2")"
-[ "$(grep -cF -- '--self-pr' "$T/e-pr-hint2")" = "2" ] || fail "two-pr hint prints one line per distinct PR: $(cat "$T/e-pr-hint2")"
-R="$(fresh)"
-printf '[{"number":42,"changedFiles":2,"files":[{"path":"a.txt"},{"path":"c.txt"}]}]' >"$T/prs-hint3.json"
-export GH_PRS_JSON="$T/prs-hint3.json"
-out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt c.txt 2>"$T/e-pr-hint3")" && fail "same-pr claim exits non-zero"
-[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nREFUSE c.txt pr#42 hunks=unknown\nfile-claim: no claims recorded; 2 refused, 0 unclaimed because the batch was refused')" ] || fail "same-pr stdout unchanged: $out"
-[ "$(grep -cF -- '--self-pr 42' "$T/e-pr-hint3")" = "1" ] || fail "same-pr hint prints one line: $(cat "$T/e-pr-hint3")"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane sweep-hints --grant --worktree t:dS --repo test/repo a.txt 2>"$T/e-sweep-pr-hint")" && fail "sweep PR claim exits non-zero"
+[ "$?" = "1" ] || fail "sweep PR refusal exits 1"
+[ "$out" = "$(printf 'REFUSE a.txt pr#42 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "sweep PR refusal output: $out"
+grep -qF -- '--self-pr 42' "$T/e-sweep-pr-hint" || fail "sweep PR refusal hints at --self-pr 42"
 export GH_PRS_JSON="$T/prs-empty.json"
 
 # usage names the grant-cap variable.
@@ -798,9 +826,9 @@ FILE_CLAIM_PUSH_WAIT=x FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt >/dev/null
 [ "$?" = "2" ] || fail "non-numeric FILE_CLAIM_PUSH_WAIT exits 2"
 grep -qF 'FILE_CLAIM_PUSH_WAIT must be a whole number of seconds' "$T/e-push-wait" || fail "invalid FILE_CLAIM_PUSH_WAIT is named"
 
-# --- concurrency: exactly one winner, twenty rounds -----------------------------------------
-# One round of the race: both lanes start in the background before a single
-# wait, exactly as the loop always ran them; only failures gain a dump.
+# --- concurrency: both ordinary claimants record their overlap ----------------------
+# One round of the race: both lanes start before a single wait. Both claims are
+# advisory, so each lane records its claim even when the other gets there first.
 race_round() {
   local label="$1" remote="$2" path="$3" c1 c2 n c f
   # Fresh lanes each round so the 5-grant cap never binds: the race alone
@@ -811,7 +839,7 @@ race_round() {
   c1="$(cat "$T/c1-$label")"
   c2="$(cat "$T/c2-$label")"
   case "$c1$c2" in
-    01|10) ;;
+    00) ;;
     *)
       for n in 1 2; do
         if [ "$n" = "1" ]; then c="$c1"; else c="$c2"; fi
@@ -826,7 +854,7 @@ race_round() {
           echo "  (empty)" >&2
         fi
       done
-      fail "round $label: exits $c1 and $c2, want one 0 and one 1"
+      fail "round $label: exits $c1 and $c2, want both 0"
       ;;
   esac
 }
@@ -836,7 +864,12 @@ while [ "$i" -le 20 ]; do
   race_round "$i" "$R" "race-$i.txt"
   i=$((i + 1))
 done
-[ "$(claims_blob "$R" | grep -c '^')" = "20" ] || fail "one claim per race recorded"
+[ "$(claims_blob "$R" | grep -c '^')" = "40" ] || fail "both claims in each race are recorded"
+i=1
+while [ "$i" -le 20 ]; do
+  [ "$(claims_blob "$R" | grep -c "^race-$i.txt${TAB}")" = "2" ] || fail "race-$i overlap has both claim rows"
+  i=$((i + 1))
+done
 
 # --- failing rounds dump each lane's stderr --------------------------------------
 # A bad remote fails both lanes at once, driving the diagnostic path without a race.
@@ -846,6 +879,6 @@ diag_rc=$?
 printf '%s\n' "$diag_out" | grep -qxF 'round diag: lane 1 (exit 2) stderr:' || fail "lane 1 dump label: $diag_out"
 printf '%s\n' "$diag_out" | grep -qxF 'round diag: lane 2 (exit 2) stderr:' || fail "lane 2 dump label: $diag_out"
 printf '%s\n' "$diag_out" | grep -qF "  file-claim: cannot fetch main from $D" || fail "lane stderr dumped: $diag_out"
-printf '%s\n' "$diag_out" | grep -qxF 'FAIL: round diag: exits 2 and 2, want one 0 and one 1' || fail "failure line kept: $diag_out"
+printf '%s\n' "$diag_out" | grep -qxF 'FAIL: round diag: exits 2 and 2, want both 0' || fail "failure line kept: $diag_out"
 
 echo "file-claim tests passed"

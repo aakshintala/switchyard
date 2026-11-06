@@ -123,7 +123,7 @@ case "$1" in
         *) shift;;
       esac
     done
-    if [ "$after" = 1 ] && [ "${FILE_CLAIM_MODE:-ok}" = ok ]; then
+    if [ "$after" = 1 ] && { [ "${FILE_CLAIM_MODE:-ok}" = ok ] || [ "${FILE_CLAIM_MODE:-ok}" = overlap ]; }; then
       for p in "$@"; do
         printf '%s\t%s\t%s\t0\tt:stub\t\n' "$p" "$lane" "$kind" >>"$T/file-claim-claims"
       done
@@ -132,6 +132,37 @@ case "$1" in
 esac
 case "${FILE_CLAIM_MODE:-ok}" in
   ok) exit 0;;
+  overlap)
+    after=0
+    for a in "${original[@]}"; do
+      case "$a" in --) after=1; continue;; esac
+      if [ "$after" = 1 ]; then
+        echo "OVERLAP $a lane:fiber-66"
+        echo "GRANT $a new"
+      fi
+    done
+    echo 'file-claim: 1 granted, 0 refused'
+    exit 0;;
+  cap)
+    [ "${#original[@]}" -gt 0 ] || exit 0
+    after=0
+    for a in "${original[@]}"; do
+      case "$a" in --) after=1; continue;; esac
+      if [ "$after" = 1 ]; then echo "REFUSE $a cap"; fi
+    done
+    echo 'file-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused'
+    exit 1;;
+  overlap-cap)
+    after=0
+    for a in "${original[@]}"; do
+      case "$a" in --) after=1; continue;; esac
+      if [ "$after" = 1 ]; then
+        echo "OVERLAP $a lane:fiber-66"
+        echo "REFUSE $a cap"
+      fi
+    done
+    echo 'file-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused'
+    exit 1;;
   refuse)
     n=0; u=0; after=0
     for a in "${original[@]}"; do
@@ -164,6 +195,7 @@ reset_case() {
 {"truncated":false,"tree":[
 {"type":"blob","path":"docs/tui.md"},
 {"type":"blob","path":"docs/events.md"},
+{"type":"blob","path":"main_journeys.rs"},
 {"type":"blob","path":"crates/tui/src/turn/group.rs"},
 {"type":"blob","path":"crates/tui/src/turn/group_tests.rs"},
 {"type":"blob","path":"crates/extensions/src/process/tests.rs"},
@@ -239,7 +271,7 @@ assert_no_probes() {
 assert_usage() {
   assert_rc 2 "$1"
   assert_out '' "$1 stdout"
-  assert_stderr 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship' "$1 usage"
+  assert_stderr "$(printf 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship\n       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive')" "$1 usage"
   assert_no_probes "$1"
   assert_no_grant "$1"
 }
@@ -291,14 +323,16 @@ printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence
 touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
 DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"running"}]}'
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'live roster session holds even an old grant'
-assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'live roster session output'
+assert_rc 0 'live roster grant overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'live roster overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'live roster overlap grants'
 
 # Prefix matching also works when the roster has the longer id.
 printf '2026-11-05 launch\t77\tbox\tfiber-77\tabcdef1234567890\n' >"$FW_RUN/roster"
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'live session matches a longer roster id'
-assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'longer roster id output'
+assert_rc 0 'longer roster lane overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'longer roster overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'longer roster overlap grants'
 
 printf '2026-11-05 launch\t77\tbox\tprep-77\tabcdef12\n' >"$FW_RUN/roster"
 run_fg 88 --paths docs/tui.md --dry
@@ -328,7 +362,7 @@ assert_rc 0 'free dry run'
 ! grep -q '^GRANT' "$T/out" || fail 'dry output has no actionable GRANT lines'
 assert_line 'WOULD-GRANT docs/tui.md' 'dry path output'
 assert_line 'WOULD-GRANT' 'dry closing output'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'free dry output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'free dry output'
 assert_no_grant 'free dry run'
 
 # Called through a relative symlink from a directory with no siblings (as
@@ -347,7 +381,7 @@ grep -q '^list' "$T/file-claim.log" || fail "symlinked caller: file-claim not ca
 reset_case
 run_fg 77 --paths docs/tui.md
 assert_rc 0 'free grant file'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nGRANT')" 'free grant output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nGRANT docs/tui.md\nGRANT')" 'free grant output'
 [ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'first grant file exists'
 grep -qxF 'Paths:' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'grant file has Paths section'
 grep -qxF -- '- docs/tui.md' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'grant file records the path'
@@ -405,17 +439,17 @@ assert_line 'WARN PRE-PLAN PR #12: 0 files under crates/main/**' 'pre-plan zero 
 reset_case
 run_fg 77 --paths=docs/tui.md --dry
 assert_rc 0 'paths equals form'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'paths equals output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'paths equals output'
 
 reset_case
 run_fg 77 --paths='docs/{tui,tui}.md' --dry
 assert_rc 0 'duplicate brace expansion'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'duplicate brace output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'duplicate brace output'
 
 reset_case
 run_fg 77 --paths='crates/tui/src/turn/{group,group_tests}.rs' --dry
 assert_rc 0 'multiple brace expansion'
-assert_out "$(printf 'WIDE crates/tui/src/turn/group.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWIDE crates/tui/src/turn/group_tests.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT crates/tui/src/turn/group.rs\nWOULD-GRANT crates/tui/src/turn/group_tests.rs\nWOULD-GRANT')" 'multiple brace output'
+assert_out "$(printf 'WIDE crates/tui/src/turn/group.rs is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWIDE crates/tui/src/turn/group_tests.rs is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT crates/tui/src/turn/group.rs\nWOULD-GRANT crates/tui/src/turn/group_tests.rs\nWOULD-GRANT')" 'multiple brace output'
 
 reset_case
 run_fg 77 --paths docs/tui.md --ranges 'docs/{tui,tui}.md:1-2' --dry
@@ -424,7 +458,7 @@ assert_rc 0 'ranges brace expansion'
 reset_case
 run_fg 77 --paths='crates/new/{one,two}.rs' '--new=crates/new/{one,two}.rs' --dry
 assert_rc 0 'new paths brace expansion'
-assert_out "$(printf 'WIDE crates/new/one.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWIDE crates/new/two.rs is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT crates/new/one.rs\nWOULD-GRANT crates/new/two.rs\nWOULD-GRANT')" 'new path output'
+assert_out "$(printf 'WIDE crates/new/one.rs is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWIDE crates/new/two.rs is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT crates/new/one.rs\nWOULD-GRANT crates/new/two.rs\nWOULD-GRANT')" 'new path output'
 
 reset_case
 write_blob docs/tui.md 'needle\n'
@@ -440,12 +474,12 @@ grep -qxF 'Ranges: docs/tui.md:1-5' "$FW_RUN/fiber-88-fence-grant-1.md" || fail 
 reset_case
 run_fg 77 --paths docs/tui.md --reads='docs/{x}.md' --dry
 assert_rc 0 'reads equals form and literal braces'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nREAD docs/{x}.md\nWOULD-GRANT')" 'reads brace stays literal'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nREAD docs/{x}.md\nWOULD-GRANT')" 'reads brace stays literal'
 
 reset_case
 run_fg 77 --paths docs/tui.md --reads=docs/x.md
 assert_rc 0 'reads writes grant file'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nGRANT docs/tui.md\nREAD docs/x.md\nGRANT')" 'reads output order'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nGRANT docs/tui.md\nREAD docs/x.md\nGRANT')" 'reads output order'
 tail -n 2 "$FW_RUN/fiber-77-fence-grant-1.md" >"$T/reads-tail"
 [ "$(cat "$T/reads-tail")" = "$(printf 'Reads:\n- docs/x.md')" ] || fail 'Reads is the final grant-file section'
 
@@ -456,36 +490,47 @@ CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/events.md --dry
 assert_rc 0 'read path does not hold'
-assert_out "$(printf 'WIDE docs/events.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/events.md\nWOULD-GRANT')" 'read path output'
+assert_out "$(printf 'WIDE docs/events.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/events.md\nWOULD-GRANT')" 'read path output'
 
 reset_case
 run_fg 77 --paths crates/tui/ --dry
 assert_rc 0 'existing directory path'
-assert_out "$(printf 'WIDE crates/tui/ is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT crates/tui/\nWOULD-GRANT')" 'directory path output'
+assert_out "$(printf 'WIDE crates/tui/ is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT crates/tui/\nWOULD-GRANT')" 'directory path output'
 
-# --- Exit 1: held paths --------------------------------------------------------
+# --- Exit 0: ordinary open-PR overlaps are advisory --------------------------
 reset_case
 set_pr 11 fix/other docs/tui.md
 run_fg 77 --paths docs/tui.md --dry
-assert_rc 1 'open PR hold'
-assert_line 'HELD docs/tui.md by PR #11' 'open PR output'
-assert_no_grant 'open PR hold'
+assert_rc 0 'open PR overlap is advisory'
+assert_out "$(printf 'OVERLAP docs/tui.md PR #11\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'open PR overlap output'
+assert_no_grant 'open PR overlap dry run'
+
+# --- Exit 1: exclusive sweep claim remains held -------------------------------
+reset_case
+FILE_CLAIM_LIST=$(printf 'docs/tui.md\tsweep-4226\tplan\t0\tt:stub\t\n')
+export FILE_CLAIM_LIST
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 1 'sweep claim remains exclusive'
+assert_out 'HELD docs/tui.md by lane sweep-4226' 'sweep claim output'
+assert_no_grant 'sweep claim'
 
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\nRanges: none\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'live lane hold'
-assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'live lane output'
+assert_rc 0 'live lane overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'live lane overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'live lane overlap grants'
 
 reset_case
 printf 'Files granted: docs/tui.md\n' >"$FW_RUN/fiber-77-notes.md"
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'notes-only hold'
-assert_contains 'HELD docs/tui.md by lane #77 (notes, no grant file names it)' 'notes hold source'
+assert_rc 0 'notes-only lane overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'notes overlap source'
+assert_line 'WOULD-GRANT docs/tui.md' 'notes overlap grants'
 
 reset_case
 printf 'Files granted: docs/tui.md\n' >"$FW_RUN/fiber-77-notes.md"
@@ -493,9 +538,10 @@ printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'matching note and grant hold'
-assert_contains 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'grant wins duplicate hold label'
-assert_not_contains '(notes, no grant file names it)' 'duplicate hold keeps grant source'
+assert_rc 0 'matching note and grant overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'deduplicated ordinary lane overlap'
+[ "$(grep -c '^OVERLAP docs/tui.md lane #77$' "$T/out")" = 1 ] || fail 'matching note and grant overlap prints once'
+assert_line 'WOULD-GRANT docs/tui.md' 'matching note and grant grants'
 
 reset_case
 cat >"$FW_RUN/fiber-77-fence-grant-1.md" <<'GRANT'
@@ -521,8 +567,9 @@ printf 'Grant 1\n\nTicket: 77\nThis hand-written fence grants docs/tui.md.\n\nRe
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'hand-written grant without Paths still holds by scrape'
-assert_line 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'legacy grant scrape'
+assert_rc 0 'hand-written grant overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'legacy grant overlap'
+assert_line 'WOULD-GRANT docs/tui.md' 'legacy grant overlap grants'
 
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPart: 1\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
@@ -531,7 +578,7 @@ CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'part-1 grant does not hold part-2 lane'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'part-specific grant output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'part-specific grant output'
 
 reset_case
 run_fg 77 --paths docs/tui.md --part 2
@@ -551,14 +598,16 @@ printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\nRanges: docs/tui.md:3700-3
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --ranges docs/tui.md:3705-3706 --dry
-assert_rc 1 'ranged grant holds overlapping window'
-assert_line 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'overlapping window output'
+assert_rc 0 'ranged grant overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'overlapping window output'
+assert_line 'WOULD-GRANT docs/tui.md' 'overlapping ranged grant grants'
 
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'fresh orphan grant hold'
-assert_contains 'HELD docs/tui.md by lane #77 NO LIVE LANE:' 'fresh orphan label'
+assert_rc 0 'fresh orphan grant overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'fresh orphan overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'fresh orphan overlap grants'
 assert_not_contains 'mv ' 'fresh orphan has no destructive remedy'
 grep -qxF 'list --lane fiber-77 --repo aakshintala/fiber' "$T/file-claim.log" || fail 'orphan liveness checks lane claims'
 
@@ -567,18 +616,17 @@ printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence
 FILE_CLAIM_LIST=$(printf 'docs/events.md\tfiber-77\tplan\t0\tt:stub\t\n')
 export FILE_CLAIM_LIST
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'orphan grant with file claims'
-assert_contains 'no running session seen, holds 1 claims' 'orphan grant claims state'
-assert_contains 'check file-claim before treating this grant as dead' 'orphan grant claims next step'
+assert_rc 0 'orphan grant with claims is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'orphan grant overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'orphan grant overlap grants'
 assert_not_contains 'NO LIVE LANE' 'orphan grant with claims is not dead'
-assert_contains '(grant fiber-77-fence-grant-1.md)' 'orphan claim source label'
 
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'old orphan grant expires'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'old orphan output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'old orphan output'
 
 reset_case
 sleep 300 &
@@ -586,8 +634,9 @@ PI_PID=$!
 printf '%s\n' "$PI_PID" >"$FW_RUN/fiber-77-pi.pid"
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'live Mac pi lane hold'
-assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'Mac pi lane output'
+assert_rc 0 'live Mac pi lane overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'Mac pi lane overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'Mac pi lane overlap grants'
 kill "$PI_PID" 2>/dev/null || true
 PI_PID=""
 
@@ -596,8 +645,9 @@ printf 'Grant 1\n\nTicket: 88\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-88-fence
 SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nDSESSJSONOK\nFWSEC=PILANES\nfiber-88\nPILANESOK\nFWSEC=END'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md --dry
-assert_rc 1 'live box pi lane hold'
-assert_out 'HELD docs/tui.md by lane #88 (grant fiber-88-fence-grant-1.md)' 'box pi lane output'
+assert_rc 0 'live box pi lane overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #88' 'box pi lane overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'box pi lane overlap grants'
 
 reset_case
 sleep 300 &
@@ -606,8 +656,9 @@ write_delegate_job job-a RUNNING "$DJ_PID" /w/fiber-worktrees/tests/77-grid-read
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 kill "$DJ_PID" 2>/dev/null || true
-assert_rc 1 'live Mac delegate lane hold'
-assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'Mac delegate lane output'
+assert_rc 0 'live Mac delegate lane overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'Mac delegate lane overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'Mac delegate lane overlap grants'
 
 reset_case
 sleep 300 &
@@ -618,7 +669,7 @@ touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 kill "$DJ_PID" 2>/dev/null || true
 assert_rc 0 'finished delegate job holds nothing'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'finished delegate job output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'finished delegate job output'
 
 reset_case
 sleep 300 &
@@ -628,8 +679,10 @@ printf '%s\n' "$DJ_PID" >"$FW_RUN/fiber-77-pi.pid"
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 kill "$DJ_PID" 2>/dev/null || true
-assert_rc 1 'a lane in both sources holds once'
-assert_out 'HELD docs/tui.md by lane #77 (grant fiber-77-fence-grant-1.md)' 'deduplicated lane output'
+assert_rc 0 'lane in both sources overlaps once'
+assert_line 'OVERLAP docs/tui.md lane #77' 'deduplicated overlap output'
+[ "$(grep -c '^OVERLAP docs/tui.md lane #77$' "$T/out")" = 1 ] || fail 'a lane in both sources prints one overlap'
+assert_line 'WOULD-GRANT docs/tui.md' 'deduplicated overlap grants'
 
 reset_case
 write_delegate_job job-a RUNNING 2147483646 /w/fiber-worktrees/tests/77-grid-read-ratchet
@@ -637,15 +690,16 @@ printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence
 touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'dead delegate supervisor holds nothing'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'dead delegate supervisor output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'dead delegate supervisor output'
 
 reset_case
 printf 'Grant 1\n\nTicket: 88\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-88-fence-grant-1.md"
 SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nfiber-88\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nDSESSJSONOK\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md --dry
-assert_rc 1 'live box delegate lane hold'
-assert_out 'HELD docs/tui.md by lane #88 (grant fiber-88-fence-grant-1.md)' 'box delegate lane output'
+assert_rc 0 'live box delegate lane overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #88' 'box delegate lane overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'box delegate lane overlap grants'
 
 reset_case
 write_blob docs/tui.md $'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n'
@@ -663,11 +717,9 @@ index 1111111..2222222 100644
 +EIGHT
 DIFF
 run_fg 77 --paths docs/tui.md --dry
-assert_rc 1 'whole-file PR hold with hunk windows'
-assert_line 'HELD docs/tui.md by PR #11' 'whole-file hold line'
-assert_line '  held window 3-4' 'first held window'
-assert_line '  held window 8-8' 'second held window'
-assert_line '  --ranges docs/tui.md:1-2,docs/tui.md:5-7,docs/tui.md:9-10' 'range complement'
+assert_rc 0 'whole-file PR overlap is advisory'
+assert_line 'OVERLAP docs/tui.md PR #11' 'whole-file PR overlap line'
+assert_line 'WOULD-GRANT docs/tui.md' 'whole-file PR overlap grants'
 
 reset_case
 set_pr 11 fix/other docs/tui.md
@@ -681,8 +733,9 @@ index 0000000..1111111
 +new
 DIFF
 run_fg 77 --paths docs/tui.md --dry
-assert_rc 1 'PR adds file whole'
-assert_line '  the pull request adds this file whole, so there is no complement' 'new file whole message'
+assert_rc 0 'PR-added file overlap is advisory'
+assert_line 'OVERLAP docs/tui.md PR #11' 'PR-added file overlap line'
+assert_line 'WOULD-GRANT docs/tui.md' 'PR-added file overlap grants'
 
 reset_case
 set_pr 11 fix/other docs/tui.md
@@ -710,21 +763,22 @@ index 1111111..2222222 100644
 +THREE
 DIFF
 run_fg 77 --paths docs/tui.md --ranges docs/tui.md:3-4 --dry
-assert_rc 1 'requested range overlaps PR hunk'
-assert_line 'HELD docs/tui.md by PR #11' 'overlapping range hold'
+assert_rc 0 'requested range may overlap PR hunk'
+assert_line 'OVERLAP docs/tui.md PR #11' 'overlapping range overlap line'
+assert_line 'WOULD-GRANT docs/tui.md' 'overlapping range grants'
 
 reset_case
 set_pr 11 fix/other docs/tui.md
 run_fg 77 --paths docs/tui.md --ignore-pr 11 --dry
 assert_rc 0 'ignore PR holder'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'ignore PR output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'ignore PR output'
 reset_case
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --ignore-ticket 77 --dry
 assert_rc 0 'ignore ticket holder'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'ignore ticket output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'ignore ticket output'
 reset_case
 printf 'Grant 1\n\nTicket: 66\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-66-fence-grant-1.md"
 printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
@@ -748,10 +802,11 @@ reset_case
 set_pr 11 x/77-slug docs/tui.md
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'own ticket PR skipped'
-assert_out "$(printf 'OWN skipping PR #11: its branch names ticket 77\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'own PR output'
+assert_out "$(printf 'OWN skipping PR #11: its branch names ticket 77\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'own PR output'
 run_fg 88 --paths docs/tui.md --dry
-assert_rc 1 'same PR holds for another ticket'
-assert_line 'HELD docs/tui.md by PR #11' 'other ticket sees PR hold'
+assert_rc 0 'same PR overlap is advisory for another ticket'
+assert_line 'OVERLAP docs/tui.md PR #11' 'other ticket sees PR overlap'
+assert_line 'WOULD-GRANT docs/tui.md' 'other ticket gets grant'
 
 reset_case
 GH_PRLIST='[{"number":11}]'
@@ -759,20 +814,21 @@ export GH_PRLIST
 printf '%s\n' docs/tui.md >"$T/pr/11.names"
 printf 'diff --git a/docs/tui.md b/docs/tui.md\n' >"$T/pr/11.diff"
 run_fg 77 --paths docs/tui.md --dry
-assert_rc 1 'PR without branch name is not own'
-assert_line 'HELD docs/tui.md by PR #11' 'missing branch name hold'
+assert_rc 0 'PR without branch name overlaps but is not own'
+assert_line 'OVERLAP docs/tui.md PR #11' 'missing branch name overlap'
 
 # A correct existing path and symbol still goes through the holder sweep.
 reset_case
 write_blob docs/tui.md 'needle\n'
 set_pr 11 fix/other docs/tui.md
 run_fg 77 --paths docs/tui.md --expect docs/tui.md:1:needle --dry
-assert_rc 1 'valid expect still checks holds'
+assert_rc 0 'valid expect still checks then grants an overlap'
 assert_not_contains 'NOSYMBOL' 'valid expect accepted'
-assert_line 'HELD docs/tui.md by PR #11' 'valid expect holder'
+assert_line 'OVERLAP docs/tui.md PR #11' 'valid expect overlap'
 
 # --- Exit 2: bad arguments -----------------------------------------------------
-USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship'
+USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading>] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship
+       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive'
 reset_case
 run_fg
 assert_usage 'missing ticket'
@@ -989,7 +1045,7 @@ reset_case
 mkdir "$FW_RUN/.fence-grant.lock"
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'dry run ignores held lock'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'dry run with held lock output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'dry run with held lock output'
 assert_no_grant 'dry run with held lock'
 
 reset_case
@@ -1011,9 +1067,10 @@ assert_no_grant 'missing paths suggestions'
 reset_case
 set_pr 11 fix/other docs/tui.md
 run_fg 77 --paths crates/turn/src/new.rs,docs/tui.md --new crates/turn/src/new.rs --dry
-assert_rc 1 'new path accepted before hold probe'
+assert_rc 0 'new path accepted before advisory PR overlap'
 assert_not_contains 'MISSING' 'new path is not missing'
-assert_line 'HELD docs/tui.md by PR #11' 'other path still held'
+assert_line 'OVERLAP docs/tui.md PR #11' 'other path overlaps PR'
+assert_line 'WOULD-GRANT docs/tui.md' 'other path is granted'
 
 reset_case
 GH_TREE_JSON='{"truncated":false,"tree":[{"type":"blob","path":"crates/extensions/src/process/tests.rs"},{"type":"blob","path":"crates/extensions/src/process_tests.rs"}]}'
@@ -1045,9 +1102,9 @@ reset_case
 write_blob docs/tui.md 'needle\n'
 run_fg 77 --paths docs/tui.md --expect docs/tui.md:1:needle --dry
 assert_rc 0 'expected symbol present'
-assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'expected symbol present output'
+assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'expected symbol present output'
 
-# --repo routes every gh call, including the suggestion content read.
+# --repo routes every gh call, including the expected-symbol content read.
 reset_case
 write_blob docs/tui.md 'needle\n'
 set_pr 11 fix/other docs/tui.md
@@ -1061,10 +1118,9 @@ index 1111111..2222222 100644
 +changed
 DIFF
 run_fg 77 --paths docs/tui.md --expect docs/tui.md:1:needle --repo other/x --dry
-assert_rc 1 'repo routing'
+assert_rc 0 'repo routing through an overlapping PR'
 grep -qF 'api repos/other/x/git/trees/aaaaaaaa?recursive=1' "$T/gh.log" || fail 'tree query uses --repo'
-grep -qF 'api repos/other/x/contents/docs/tui.md?ref=main' "$T/gh.log" || fail 'blob fetch uses --repo'
-[ "$(grep -cF 'api repos/other/x/contents/docs/tui.md?ref=main' "$T/gh.log")" = 2 ] || fail 'suggestion content fetch uses --repo'
+[ "$(grep -cF 'api repos/other/x/contents/docs/tui.md?ref=main' "$T/gh.log")" = 1 ] || fail 'expected-symbol content fetch uses --repo'
 grep -qF 'pr list -R other/x ' "$T/gh.log" || fail 'PR list uses --repo'
 grep -qF 'pr diff 11 -R other/x --name-only' "$T/gh.log" || fail 'PR names use --repo'
 grep -qF 'pr diff 11 -R other/x --allow-escape-sequences' "$T/gh.log" || fail 'PR diff uses --repo'
@@ -1078,13 +1134,13 @@ grep -qF 'api repos/other/x/git/trees/aaaaaaaa?recursive=1' "$T/gh.log" || fail 
 reset_case
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'whole-file grant warns'
-assert_line 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.' 'whole-file WIDE line'
+assert_line 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.' 'whole-file WIDE line'
 assert_line 'WOULD-GRANT docs/tui.md' 'whole-file grant line'
 
 reset_case
 run_fg 77 --paths docs/tui.md
 assert_rc 0 'whole-file grant writes file'
-assert_line 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it is refused.' 'whole-file WIDE line with file'
+assert_line 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.' 'whole-file WIDE line with file'
 assert_line 'GRANT docs/tui.md' 'whole-file grant line with file'
 [ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'whole-file grant file exists'
 grep -qxF 'Ranges: none' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'whole-file grant file records no ranges'
@@ -1123,20 +1179,50 @@ grep -qxF 'list --repo aakshintala/fiber' "$T/file-claim.log" || fail 'dry run r
 ! grep -q '^claim ' "$T/file-claim.log" || fail 'dry run claims nothing'
 
 reset_case
-FILE_CLAIM_MODE=refuse
+FILE_CLAIM_MODE=overlap
 export FILE_CLAIM_MODE
 run_fg 88 --paths docs/tui.md
-assert_rc 1 'ledger refusal is a hold'
-assert_out 'HELD docs/tui.md by lane #77' 'ledger refusal output'
-assert_no_grant 'ledger refusal'
+assert_rc 0 'ledger overlap still grants'
+assert_line 'OVERLAP docs/tui.md lane #66' 'ledger overlap output'
+assert_line 'GRANT docs/tui.md' 'ledger overlap grant'
+grep -qxF 'overlap: docs/tui.md lane #66' "$FW_RUN/fiber-88-fence-grant-1.md" || fail 'ledger overlap is recorded in grant'
+[ -f "$FW_RUN/fiber-88-fence-grant-1.md" ] || fail 'ledger overlap grant file exists'
 
 reset_case
-FILE_CLAIM_MODE=refuse
+FILE_CLAIM_MODE=overlap
 export FILE_CLAIM_MODE
 run_fg 88 --paths docs/tui.md,docs/events.md
-assert_rc 1 'a refused set grants nothing'
-assert_out 'HELD docs/tui.md by lane #77' 'refused set output'
-assert_no_grant 'refused set'
+assert_rc 0 'file-claim overlap still grants the full set'
+assert_line 'OVERLAP docs/tui.md lane #66' 'file-claim overlap first path'
+assert_line 'OVERLAP docs/events.md lane #66' 'file-claim overlap second path'
+[ "$(grep -c '^overlap:' "$FW_RUN/fiber-88-fence-grant-1.md")" = 2 ] || fail 'file-claim overlap set is recorded in grant'
+assert_line 'GRANT docs/tui.md' 'first file-claim overlap grant'
+assert_line 'GRANT docs/events.md' 'second file-claim overlap grant'
+
+reset_case
+FILE_CLAIM_MODE=overlap
+export FILE_CLAIM_MODE
+run_fg 88 --paths docs/tui.md --ignore-ticket 66
+assert_rc 0 'ignored ticket overlap from final claim still grants'
+assert_not_contains 'OVERLAP docs/tui.md lane #66' 'ignored ticket is suppressed in final claim output'
+! grep -q '^overlap: docs/tui.md lane #66$' "$FW_RUN/fiber-88-fence-grant-1.md" || fail 'ignored ticket is not recorded as an overlap'
+
+reset_case
+FILE_CLAIM_MODE=overlap-cap
+export FILE_CLAIM_MODE
+run_fg 88 --paths docs/tui.md --ignore-ticket 66
+assert_rc 1 'grant cap remains held with an ignored overlap'
+assert_not_contains 'OVERLAP docs/tui.md lane #66' 'ignored ticket is suppressed beside a cap refusal'
+assert_line 'HELD docs/tui.md by file-claim grant cap' 'cap refusal remains visible beside ignored overlap'
+assert_no_grant 'ignored overlap with cap refusal'
+
+reset_case
+FILE_CLAIM_MODE=cap
+export FILE_CLAIM_MODE
+run_fg 88 --paths docs/tui.md
+assert_rc 1 'file-claim grant cap stays held'
+assert_out 'HELD docs/tui.md by file-claim grant cap' 'grant cap refusal output'
+assert_no_grant 'grant cap refusal'
 
 reset_case
 FILE_CLAIM_MODE=error
@@ -1176,8 +1262,21 @@ rm "$FW_RUN/fiber-77-fence-grant-1.md"
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
 export CLAUDE_JSON
 run_fg 88 --paths docs/tui.md --ranges docs/tui.md:5-6 --dry
-assert_rc 1 'second lane is held on the claimed path'
-assert_line 'HELD docs/tui.md by lane #77' 'whole-file claim blocks a disjoint ranged request'
+assert_rc 0 'live whole-file claim overlap is advisory'
+assert_line 'OVERLAP docs/tui.md lane #77' 'whole-file claim overlap output'
+assert_line 'WOULD-GRANT docs/tui.md' 'whole-file claim allows ranged request'
+
+reset_case
+FILE_CLAIM_LIST=$(printf 'main_journeys.rs\tfiber-4226\tgrant\t0\tt:stub\t\n')
+export FILE_CLAIM_LIST
+CLAUDE_JSON='[{"name":"fiber-4226","status":"busy"}]'
+export CLAUDE_JSON
+run_fg 4278 --paths main_journeys.rs --ranges main_journeys.rs:539-539
+assert_rc 0 'ranged grant overlaps #4226 whole-file claim'
+assert_line 'OVERLAP main_journeys.rs lane #4226' 'whole-file claim overlap output'
+assert_line 'GRANT main_journeys.rs' 'ranged overlap is granted'
+grep -qxF 'overlap: main_journeys.rs lane #4226' "$FW_RUN/fiber-4278-fence-grant-1.md" || fail '#4226 overlap is recorded in the grant file'
+grep -qxF 'Ranges: main_journeys.rs:539-539' "$FW_RUN/fiber-4278-fence-grant-1.md" || fail 'fiber#4278 range is recorded'
 
 # --- Live plan and grant claims are holders ---------------------------------
 reset_case
@@ -1185,8 +1284,8 @@ FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tplan\t0\tt:stub\t\ndocs/events
 CLAUDE_JSON='[{"name":"fiber-66","status":"busy"},{"name":"fiber-67","status":"idle"}]'
 export FILE_CLAIM_LIST CLAUDE_JSON
 run_fg 88 --paths docs/tui.md,docs/events.md --dry
-assert_rc 1 'live plan and grant claims are holders'
-assert_out "$(printf 'HELD docs/tui.md by lane #66\nHELD docs/events.md by lane #67')" 'live claim holds'
+assert_rc 0 'live plan and grant claim overlaps are advisory'
+assert_out "$(printf 'OVERLAP docs/tui.md lane #66\nOVERLAP docs/events.md lane #67\nWIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWIDE docs/events.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT docs/events.md\nWOULD-GRANT')" 'live claim overlaps and grants'
 
 # --- A requester's own claim is not a holder or stale ------------------------
 reset_case
