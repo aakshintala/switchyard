@@ -17,7 +17,10 @@ trap 'rm -rf "$T"' EXIT
 R="$T/repo"
 mkdir -p "$R/src" "$R/docs" "$R/crates/a" "$R/crates/b" "$R/cfg" "$R/xtask/tests/class_data" "$T/empty"
 printf 'pub fn make_widget() {}\npub struct WidgetThing;\n' >"$R/src/lib.rs"
+mkdir -p "$R/crates/tui/src"
+printf 'pub fn tui_marker() {}\n' >"$R/crates/tui/src/marker.rs"
 printf '# guide\n' >"$R/docs/guide.md"
+printf 'license\n' >"$R/LICENSE"
 printf 'a\n' >"$R/crates/a/x.rs"
 printf 'b\n' >"$R/crates/b/x.rs"
 printf 'x = 1\n' >"$R/cfg/unique.toml"
@@ -28,6 +31,7 @@ git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m one
 BASE1="$(git -C "$R" rev-parse HEAD)"
 printf 'later\n' >"$R/src/later.rs"
 printf 'make_widget();\nWidgetThing;\n' >"$R/src/caller.rs"
+printf 'all:\n\t@true\n' >"$R/Makefile"
 git -C "$R" add -A
 git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m two
 BASE2="$(git -C "$R" rev-parse HEAD)"
@@ -95,6 +99,10 @@ run "$(mkplan sweep '## Files\n- `src/lib.rs::make_widget`\n\n## Tasks\nChange `
 [ -z "$out" ] || fail "completeness warning is not an error"
 grep -Fq 'warning: make_widget occurs outside Files: src/caller.rs' "$T/err.txt" || fail "warning names call site"
 grep -Fq 'warning: WidgetThing occurs outside Files: src/caller.rs' "$T/err.txt" || fail "warning names construction site"
+run "$(mkplan fileentrysym '## Files\n- `src/lib.rs` `WidgetThing`\n')" --cwd "$R"
+[ "$code" = 0 ] || fail "later symbol-shaped Files token exits 0, got $code [$out]"
+[ -z "$out" ] || fail "later symbol-shaped Files token is not a missing path"
+grep -Fq 'warning: WidgetThing occurs outside Files: src/caller.rs' "$T/err.txt" || fail "later Files symbol still feeds the symbol sweep"
 expect_clean "Files cover suppresses warning" "$(mkplan sweeppass '## Files\n- `src/`\n\n## Tasks\nChange `WidgetThing` in `src/lib.rs`.\n')"
 run "$(mkplan sweepfail '## Files\n- `src/lib.rs::make_widget`\n\n## Rulings\nSee `src/nope.rs`.\n')" --cwd "$R"
 [ "$code" = 1 ] || fail "completeness warning preserves error exit"
@@ -105,6 +113,39 @@ expect_problems "missing path" "$(mkplan missing '## Rulings\nSee `src/nope.rs`.
   'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 3. a path on a line with the word new is exempt; a task line needs new too
+expect_problems "symbol-shaped Files entry is missing" "$(mkplan filesym '## Files\n- `feed_row`\n')" 'missing path: feed_row (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
+expect_clean "LICENSE Files entry resolves" "$(mkplan license '## Files\n- `LICENSE`\n')"
+expect_clean "Makefile Files entry resolves" "$(mkplan makefile '## Files\n- `Makefile`\n')"
+make_absent="$T/make-absent.md"
+printf '# Plan: #1 test\nBase: %s\n\n## Files\n- `Makefile`\n' "$BASE1" >"$make_absent"
+expect_problems "missing Makefile Files entry" "$make_absent" 'missing path: Makefile (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
+expect_problems "new symbol-shaped Files entry needs a path" "$(mkplan newfeed '## Files\n- `feed_row` (new)\n')" 'new Files entry feed_row must contain a slash or dot and cannot start with ./: give the full path'
+expect_problems "new Files entry rejects a dot-slash path" "$(mkplan newdot '## Files\n- `./feed_row.rs` (new)\n')" 'new Files entry ./feed_row.rs must contain a slash or dot and cannot start with ./: give the full path'
+expect_clean "new root Files path with extension passes" "$(mkplan newroot '## Files\n- `foo.rs` (new)\n')"
+expect_clean "new Files path with a base parent resolves" "$(mkplan newpath '## Files\n- `crates/tui/src/feed_row.rs` (new)\n')"
+expect_problems "new Files path needs a parent on the base" "$(mkplan newparent '## Files\n- `crates/tui/src/nosuchdir/x.rs` (new)\n')" 'new Files entry crates/tui/src/nosuchdir/x.rs needs a parent directory on the base: give the full path, or, for a file in a new directory, mark it (new-confirmed)'
+make_confirmed="$T/make-confirmed.md"
+printf '# Plan: #1 test\nBase: %s\n\n## Files\n- `Makefile` (new-confirmed)\n' "$BASE1" >"$make_confirmed"
+newcrate_confirmed="$(mkplan newcrateconfirmed '## Files\n- `crates/newcrate/src/lib.rs` (new-confirmed)\n')"
+expect_clean "new-confirmed path under a new directory passes" "$newcrate_confirmed"
+expect_problems "new-confirmed feed_row needs a path" "$(mkplan feedconfirmed '## Files\n- `feed_row` (new-confirmed)\n')" 'new Files entry feed_row must contain a slash or dot and cannot start with ./: give the full path'
+expect_problems "new-confirmed Makefile needs a path" "$make_confirmed" 'new Files entry Makefile must contain a slash or dot and cannot start with ./: give the full path'
+expect_problems "symbol-shaped Files table entry is missing" "$(mkplan tablefeed '## Files\n| `feed_row` | write |\n')" 'missing path: feed_row (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
+claim_remote="$T/file-claim.git"
+git init --bare -q "$claim_remote"
+git -C "$R" push -q "$claim_remote" "$BASE2:refs/heads/main"
+mkdir -p "$T/stubbin"
+cat >"$T/stubbin/gh" <<'STUB_EOF'
+#!/usr/bin/env bash
+[ "$1" = "pr" ] && [ "$2" = "list" ] && { printf '[]'; exit 0; }
+exit 1
+STUB_EOF
+chmod +x "$T/stubbin/gh"
+claim_out="$(PATH="$T/stubbin:$PATH" FILE_CLAIM_REMOTE="$claim_remote" bash "$SCRIPT_DIR/../bin/file-claim" claim --lane plan1243 --plan-file "$newcrate_confirmed" --repo test/repo --worktree test:plan-check 2>"$T/claim.err")"; claim_code=$?
+[ "$claim_code" = 0 ] || fail "file-claim --plan-file accepts newcrate path, got $claim_code [$(cat "$T/claim.err")]"
+case "$claim_out" in *"GRANT crates/newcrate/src/lib.rs new"*) ;; *) fail "file-claim --plan-file claims newcrate path: $claim_out" ;; esac
+claim_blob="$(git --git-dir="$claim_remote" show refs/claims/live:claims)"
+case "$claim_blob" in *$'crates/newcrate/src/lib.rs\tplan1243\tplan\t'*) ;; *) fail "claims ref contains newcrate path" ;; esac
 expect_clean "new exempts a Files path and its task line" "$(mkplan newok '## Files\n- `src/brand.rs` (New file)\n\n## Tasks\n1. Write new `src/brand.rs` with `WidgetThing`.\n')"
 
 # 3b. new paths close to a base filename need confirmation; new-confirmed bypasses it

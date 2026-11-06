@@ -9,7 +9,7 @@
 #   in_files: reads FILES (|a|b| form), GLOBS (newline list).
 #   plan_base: reads PLAN from its argument only.
 #   plan_outcome: reads PLAN from its argument only.
-#   plan_records: reads PLAN from its argument only.
+#   plan_records: reads PLAN and an optional Files-entry flag from its arguments.
 #   expand_token: reads CUR_SEC, GLOBS, portre; appends to GLOBS; calls FN in
 #     the current shell (FN must run in the caller's shell: no subshell here).
 #   resolve_path: reads dir, rev, tree; sets RES, RES_KIND (found|ambiguous|none).
@@ -75,11 +75,11 @@ plan_outcome() {
 # after a Files token (such as "reads `other`") never flips the entry.
 _plan_read_mark='\(read\)'
 
-# plan_records PLAN: one record per backticked token outside fenced blocks and
-# outside `## Gate`: section, line number, new mark (0 none, 1 new, 2
-# new-confirmed, 3 removed), read mark, the token.
+# plan_records PLAN [files-entry-flag]: one record per backticked token outside
+# fenced blocks and `## Gate`: section, line, new mark, read mark, token. The
+# optional flag adds a Files-entry flag before the token.
 plan_records() {
-  awk '
+  awk -v mark_files_entry="${2:-0}" '
     /^[[:space:]]*```/ { infence = !infence; next }
     infence { next }
     /^## / {
@@ -99,9 +99,15 @@ plan_records() {
       else if (lower ~ /(^|[^a-z0-9_])(removed|remove|deleted|delete)([^a-z0-9_]|$)/) newmark = 3
       else newmark = 0
       isread = (tolower($0) ~ /(^|[^a-z0-9_])(reads|read-only|fixture)([^a-z0-9_]|$)/ || tolower($0) ~ /'"$_plan_read_mark"'/)
+      file_entry_line = (cur == "files" && $0 ~ /^[[:space:]]*[-*|][[:space:]]+`[^`]*`/)
       n = split($0, parts, "`")
       for (i = 2; i <= n; i += 2)
-        if (parts[i] != "") printf "%s\t%d\t%d\t%d\t%s\n", cur, NR, newmark, isread, parts[i]
+        if (parts[i] != "") {
+          if (mark_files_entry == "1")
+            printf "%s\t%d\t%d\t%d\t%d\t%s\n", cur, NR, newmark, isread, (file_entry_line && i == 2), parts[i]
+          else
+            printf "%s\t%d\t%d\t%d\t%s\n", cur, NR, newmark, isread, parts[i]
+        }
     }
   ' "$1"
 }
@@ -116,6 +122,10 @@ _plan_plain() {
       "$fn" symbol "${p#*::}"
       return 0 ;;
   esac
+  if [ "$CUR_SEC" = files ] && [ "${CUR_FILES_ENTRY:-0}" = 1 ]; then
+    "$fn" path "$p"
+    return 0
+  fi
   if is_path "$p"; then
     "$fn" path "$p"
   elif is_symbol "$p"; then
