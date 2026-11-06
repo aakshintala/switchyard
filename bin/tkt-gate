@@ -91,7 +91,7 @@ tkt() {
 # emit VERDICT EXIT: write the verdict plus the digest (and the history, when
 # read) to the per-run log, print verdict plus digest, journal, and exit.
 emit() {
-  local verdict="$1" code="$2" twelve logpath output
+  local verdict="$1" code="$2" twelve logpath output journal_line
   twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
   logpath="$(mktemp "$run/$namebase-tkt-gate-$twelve-XXXXXX")"
   mv "$logpath" "$logpath.log"
@@ -103,7 +103,9 @@ $digest"
     printf '%s\n' "$hist" >>"$logpath"
   fi
   printf '%s\n' "$output"
-  tkt journal "tkt-gate $verdict"
+  journal_line="tkt-gate $verdict"
+  if [ -n "${3:-}" ]; then journal_line="$journal_line $3"; fi
+  tkt journal "$journal_line"
   exit "$code"
 }
 
@@ -372,5 +374,8 @@ if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
   else
     echo "tkt-gate: warning: cannot read PR $gate_pr body; leaving it unchanged" >&2
   fi
+fi
+if [ "$checks_only" -eq 1 ]; then
+  emit "PASS head=$local_head" 0 checks-only
 fi
 emit "PASS head=$local_head" 0

@@ -637,11 +637,14 @@ reset_stub; setup_case gateship-stale
 printf '0' >"$T/exitcodes"
 stale="0000000000000000000000000000000000000000"
 printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$stale" >"$T/prbody"
+cp "$T/prbody" "$CDIR/body-before"
 run_ship
 [ "$RC" -eq 0 ] || fail "gateship-stale: exit $RC"
 expect_line1 "MERGED sha=" gateship-stale
 grep -Fq "tkt-ship: warning: Local gate sha $stale is not PR head $H (gate: bash test/gate.sh); the gate did not run on the head" "$CDIR/stderr" \
   || fail "gateship-stale: stderr misses the existing stale-line warning: [$(cat "$CDIR/stderr")]"
+cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-stale: stale body remains unchanged without a journal PASS"
+! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-stale: no body edit without a journal PASS"
 
 # --- a fresh Local gate sha says nothing ---
 reset_stub; setup_case gateship-fresh
@@ -724,6 +727,71 @@ grep -Fq "tkt-gate last passed at $OLD but PR head is $H; the gate did not run o
 [ "$(grep -c 'tkt-gate last passed at' "$CDIR/stderr")" = "1" ] || fail "gateship-earlier: head-drift warning is not printed exactly once"
 cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-earlier: body changed after an older PASS"
 ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-earlier: no body edit after an older PASS"
+
+# A full PASS at B overrides an older Local gate body line without warning.
+reset_stub; setup_case gateship-pass-current-stale-body
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$OLD" >"$T/prbody"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "gateship-pass-current-stale-body: journal the current gate PASS"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-pass-current-stale-body: exit $RC"
+expect_line1 "MERGED sha=" gateship-pass-current-stale-body
+grep -q 'Local gate' "$CDIR/stderr" && fail "gateship-pass-current-stale-body: unexpected Local gate warning: [$(cat "$CDIR/stderr")]"
+cat >"$CDIR/body-expected" <<EOF
+Title
+
+Local gate: pass at $H (bash test/gate.sh)
+Implemented by: m/a
+EOF
+cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-pass-current-stale-body: stale body line was not rewritten: [$(cat "$T/prbody")]"
+grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-pass-current-stale-body: edited body after a current PASS"
+
+# A checks-only PASS at B cannot replace a full PASS at A for ship coverage.
+reset_stub; setup_case gateship-checks-only-at-new-head
+printf '0' >"$T/exitcodes"
+A="$H"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$A" || fail "gateship-checks-only-at-new-head: journal the earlier full PASS"
+printf 'new commit\n' >"$WT/src/b.go"
+git -C "$WT" -c user.email=t@t -c user.name=t add src/b.go
+git -C "$WT" -c user.email=t@t -c user.name=t commit -q -m second
+B="$(git -C "$WT" rev-parse HEAD)"
+bash "$REAL_BIN/tkt-state" "$S" set head "$B" || fail "gateship-checks-only-at-new-head: update state head"
+printf '%s' "$B" >"$T/prhead"
+H="$B"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$B checks-only" || fail "gateship-checks-only-at-new-head: journal the checks-only PASS"
+printf 'Title\n\nImplemented by: m/a\n' >"$T/prbody"
+cp "$T/prbody" "$CDIR/body-before"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-checks-only-at-new-head: exit $RC"
+expect_line1 "MERGED sha=" gateship-checks-only-at-new-head
+grep -Fq "tkt-gate last passed at $A but PR head is $B; the gate did not run on the head" "$CDIR/stderr" \
+  || fail "gateship-checks-only-at-new-head: stderr misses the full-PASS drift warning: [$(cat "$CDIR/stderr")]"
+! grep -q 'Local gate: pass at' "$T/prbody" || fail "gateship-checks-only-at-new-head: checks-only PASS inserted a body line"
+cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-checks-only-at-new-head: body changed after an older full PASS"
 
 # A body line cannot hide a stale journal PASS.
 reset_stub; setup_case gateship-pass-with-body
