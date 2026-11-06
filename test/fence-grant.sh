@@ -29,6 +29,29 @@ printf '%s\n' "$*" >>"$T/gh.log"
 case "$1" in
   api)
     case "$2" in
+      graphql)
+        [ "${GH_TICKET_FAIL:-0}" != 1 ] || { echo 'ticket state stub failure' >&2; exit 1; }
+        [ "${GH_TICKET_BAD:-0}" != 1 ] || { printf 'not graphql json'; exit 0; }
+        [ "${GH_TICKET_MISSING:-0}" != 1 ] || { printf '{"data":{"repository":{}}}'; exit 0; }
+        query=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            -f|-F) case "${2:-}" in query=*) query="${2#query=}";; esac; shift 2;;
+            *) shift;;
+          esac
+        done
+        python3 -c 'import json,re,sys
+query, configured = sys.argv[1:]
+states = {}
+for item in configured.split(","):
+  if ":" in item:
+    number, state = item.split(":", 1)
+    states[number] = state
+result = {}
+for alias, number in re.findall(r"(\w+):\s*issueOrPullRequest\(number:\s*(\d+)\)", query):
+  result[alias] = {"state": states.get(number, "OPEN")}
+print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATES:-}"
+        ;;
       repos/*/commits/main)
         [ "${GH_SHA_FAIL:-0}" = 1 ] && { echo "${GH_SHA_ERROR:-sha stub failure}" >&2; exit 1; }
         printf '%s\n' "$GH_TREE_SHA"
@@ -224,6 +247,8 @@ TREE
   GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL=
   GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT=
   export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT
+  GH_TICKET_STATES= GH_TICKET_FAIL=0 GH_TICKET_BAD=0 GH_TICKET_MISSING=0
+  export GH_TICKET_STATES GH_TICKET_FAIL GH_TICKET_BAD GH_TICKET_MISSING
   FW_DELEGATE_DIR="$T/delegate-jobs"
   export FW_DELEGATE_DIR
   FILE_CLAIM_MODE=ok FILE_CLAIM_LIST_FAIL=0 FILE_CLAIM_LIST_BAD=0 FILE_CLAIM_LIST=
@@ -277,6 +302,10 @@ assert_no_grant() {
 
 assert_no_probes() {
   [ ! -s "$T/gh.log" ] || fail "$1: called gh: $(cat "$T/gh.log")"
+}
+
+assert_no_ticket_state_probe() {
+  ! grep -q '^api graphql ' "$T/gh.log" || fail "$1: made ticket-state lookup: $(grep '^api graphql ' "$T/gh.log")"
 }
 
 assert_usage() {
@@ -1369,6 +1398,125 @@ assert_line 'GRANT main_journeys.rs' 'ranged overlap is granted'
 grep -qxF 'overlap: main_journeys.rs lane #4226' "$FW_RUN/fiber-4278-fence-grant-1.md" || fail '#4226 overlap is recorded in the grant file'
 grep -qxF 'Ranges: main_journeys.rs:539-539' "$FW_RUN/fiber-4278-fence-grant-1.md" || fail 'fiber#4278 range is recorded'
 
+# --- Closed-ticket claims are stale even when their lane is live (#1313) -----
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
+CLAUDE_JSON='[{"name":"fiber-66","status":"busy"}]'
+GH_TICKET_STATES='66:CLOSED'
+export FILE_CLAIM_LIST CLAUDE_JSON GH_TICKET_STATES
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'closed fiber claim does not hold'
+assert_line 'STALE docs/tui.md by fiber-66 (ticket #66 closed)' 'closed fiber claim is stale'
+assert_not_contains 'OVERLAP docs/tui.md lane #66' 'closed fiber claim does not overlap'
+assert_line 'WOULD-GRANT docs/tui.md' 'closed fiber claim releases path'
+[ "$(grep -c '^api graphql ' "$T/gh.log")" = 1 ] || fail 'closed fiber claim uses one ticket-state lookup'
+
+# A branch-shaped claim is keyed to its ticket, not its holder name.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tarch/66-log-diag-leaf\tgrant\t0\tt:stub\t\n')"
+CLAUDE_JSON='[{"name":"fiber-66","status":"idle"}]'
+GH_TICKET_STATES='66:CLOSED'
+export FILE_CLAIM_LIST CLAUDE_JSON GH_TICKET_STATES
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'closed branch claim does not hold'
+assert_line 'STALE docs/tui.md by arch/66-log-diag-leaf (ticket #66 closed)' 'closed branch claim is stale'
+assert_not_contains 'OVERLAP docs/tui.md lane #66' 'closed branch claim does not overlap'
+
+# A phase-suffixed holder is keyed to its ticket too.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66-plan\tgrant\t0\tt:stub\t\n')"
+CLAUDE_JSON='[{"name":"fiber-66-plan","status":"idle"}]'
+GH_TICKET_STATES='66:CLOSED'
+export FILE_CLAIM_LIST CLAUDE_JSON GH_TICKET_STATES
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'closed phase claim does not hold'
+assert_line 'STALE docs/tui.md by fiber-66-plan (ticket #66 closed)' 'closed phase claim is stale'
+assert_not_contains 'OVERLAP docs/tui.md lane #66' 'closed phase claim does not overlap'
+grep -qF 'ticket_66: issueOrPullRequest(number: 66)' "$T/gh.log" || fail 'closed phase claim queries ticket #66'
+
+# Merged pull requests are terminal in the same way as closed issues.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
+GH_TICKET_STATES='66:MERGED'
+export FILE_CLAIM_LIST GH_TICKET_STATES
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'merged ticket claim does not hold'
+assert_line 'STALE docs/tui.md by fiber-66 (ticket #66 closed)' 'merged ticket claim is stale'
+
+# Open tickets still hold when their lane is live between phases.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
+CLAUDE_JSON='[{"name":"fiber-66","status":"idle"}]'
+GH_TICKET_STATES='66:OPEN'
+export FILE_CLAIM_LIST CLAUDE_JSON GH_TICKET_STATES
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'open ticket claim remains held'
+assert_line 'OVERLAP docs/tui.md lane #66' 'open ticket live claim overlaps'
+assert_not_contains 'STALE' 'open ticket claim is not stale'
+
+# Sweep claims remain exclusive and do not need ticket-state lookups.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tsweep-66\tplan\t0\tt:stub\t\n')"
+GH_TICKET_STATES='66:CLOSED'
+export FILE_CLAIM_LIST GH_TICKET_STATES
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 1 'closed-ticket sweep claim remains held'
+assert_out 'HELD docs/tui.md by lane sweep-66' 'closed-ticket sweep hold output'
+assert_no_ticket_state_probe 'sweep-only claims'
+
+# All non-sweep claim ticket states are fetched in one batched request.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\ndocs/events.md\tarch/67-log-diag-leaf\tplan\t0\tt:stub\t\n')"
+CLAUDE_JSON='[{"name":"fiber-66","status":"idle"},{"name":"fiber-67","status":"busy"}]'
+GH_TICKET_STATES='66:OPEN,67:CLOSED'
+export FILE_CLAIM_LIST CLAUDE_JSON GH_TICKET_STATES
+run_fg 88 --paths docs/tui.md,docs/events.md --dry
+assert_rc 0 'batched claim states keep open and close closed ticket claims'
+assert_line 'OVERLAP docs/tui.md lane #66' 'batched open claim remains held'
+assert_line 'STALE docs/events.md by arch/67-log-diag-leaf (ticket #67 closed)' 'batched closed claim is stale'
+[ "$(grep -c '^api graphql ' "$T/gh.log")" = 1 ] || fail 'claim tickets use exactly one batched lookup'
+
+# A ticket-state lookup failure fails closed.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
+GH_TICKET_FAIL=1
+export FILE_CLAIM_LIST GH_TICKET_FAIL
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 3 'ticket-state lookup failure fails closed'
+assert_contains 'ERROR ticket state lookup' 'ticket-state lookup failure output'
+assert_no_grant 'ticket-state lookup failure'
+
+# No non-sweep claims means no ticket-state API call.
+reset_case
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'no-claim dry run succeeds'
+assert_no_ticket_state_probe 'no claims'
+
+# A malformed or incomplete response must not release a claim.
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
+GH_TICKET_BAD=1
+export FILE_CLAIM_LIST GH_TICKET_BAD
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 3 'unreadable ticket-state response fails closed'
+assert_contains 'ERROR ticket state lookup' 'unreadable ticket-state response output'
+
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
+GH_TICKET_MISSING=1
+export FILE_CLAIM_LIST GH_TICKET_MISSING
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 3 'missing ticket-state entry fails closed'
+assert_contains 'ERROR ticket state lookup' 'missing ticket-state entry output'
+
+reset_case
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tgrant\t0\tt:stub\t\n')"
+GH_TICKET_STATES='66:UNKNOWN'
+export FILE_CLAIM_LIST GH_TICKET_STATES
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 3 'unknown ticket state fails closed'
+assert_contains 'ERROR ticket state lookup' 'unknown ticket-state output'
+
 # --- Live plan and grant claims are holders ---------------------------------
 reset_case
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-66\tplan\t0\tt:stub\t\ndocs/events.md\tfiber-67\tgrant\t0\tt:stub\t\n')"
@@ -1415,6 +1563,7 @@ assert_rc 0 'branch-named own and ignored claims are skipped'
 assert_not_contains 'STALE' 'branch-named own and ignored claims do not go stale'
 assert_line 'WOULD-GRANT docs/tui.md' 'branch-named own claim does not hold requester'
 assert_line 'WOULD-GRANT docs/events.md' 'branch-named ignored claim does not hold requester'
+assert_no_ticket_state_probe 'own and ignored branch claims'
 
 # --- A requester's own claim is not a holder or stale ------------------------
 reset_case
@@ -1424,6 +1573,7 @@ run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'requester own claim is ignored'
 assert_not_contains 'STALE' 'own claim is not stale'
 assert_line 'WOULD-GRANT docs/tui.md' 'own claim does not hold requester'
+assert_no_ticket_state_probe 'requester own claim'
 
 # --- Claims from a gone lane are logged and released -------------------------
 reset_case
