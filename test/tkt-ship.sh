@@ -436,6 +436,18 @@ got="$(grep -A1 -x -F 'arg|--merge-check' "$T/calls.log" | sed -n 2p)"
 [ "$got" = 'arg|cargo check --all-targets' ] || fail "mergecheck-ci: value not one argument, got [$got]"
 [ "$(grep -c -x -F 'arg|--gate' "$T/calls.log")" -eq 0 ] || fail "mergecheck-ci: no local gate"
 
+# --- merge_check applies the env prefix for a CI merge gate ---
+reset_stub; setup_case mergecheck-env
+printf '0' >"$T/exitcodes"
+printf 'merge_gate=%s\n' ci >>"$S"
+printf 'merge_check=%s\n' 'cargo check --all-targets' >>"$S"
+printf 'env=%s\n' 'FOO=1 BAR=2' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "mergecheck-env: exit $RC"
+[ "$(grep -c -x -F 'arg|--merge-check' "$T/calls.log")" -eq 1 ] || fail "mergecheck-env: merge-check flag missing: $(cat "$T/calls.log")"
+got="$(grep -A1 -x -F 'arg|--merge-check' "$T/calls.log" | sed -n 2p)"
+[ "$got" = 'arg|FOO=1 BAR=2 cargo check --all-targets' ] || fail "mergecheck-env: value misses env prefix, got [$got]"
+
 # --- mutant_job opts the ticket into the mutants gate
 reset_stub; setup_case mutantjob
 printf '0' >"$T/exitcodes"

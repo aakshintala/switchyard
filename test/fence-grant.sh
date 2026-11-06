@@ -1234,9 +1234,15 @@ assert_no_grant 'malformed claims read'
 # --- Launch requirements are phase-aware -----------------------------------
 reset_case
 run_fg --require 77 --phase plan
-assert_rc 0 'plan phase needs no fence grant'
-assert_out '' 'plan requirement is silent'
-assert_stderr '' 'plan requirement has no override reason'
+assert_rc 2 'plan phase without a grant is refused'
+assert_stderr "fence-grant: issue 77 needs a fence grant in $FW_RUN; create one or set FW_NO_FENCE=<reason>" 'plan requirement explains the fix'
+
+printf 'grant\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+run_fg --require 77 --phase plan
+assert_rc 0 'plan phase accepts a grant'
+assert_out '' 'plan grant check is silent'
+assert_stderr '' 'plan grant check has no error'
+rm "$FW_RUN/fiber-77-fence-grant-1.md"
 
 run_fg --require 77 --phase build
 assert_rc 2 'build phase without a grant is refused'
