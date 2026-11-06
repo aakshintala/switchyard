@@ -4,6 +4,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FC="$SCRIPT_DIR/../bin/file-claim"
+TAB="$(printf '\t')" # GNU grep reads \t in a pattern as a literal t
 
 fail() {
   echo "FAIL: $1" >&2
@@ -180,7 +181,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt newfile.txt 2>"$T/e2")" ||
 [ "$out" = "$(printf 'OVERLAP a.txt pr#42\nGRANT a.txt exists\nGRANT newfile.txt new\nfile-claim: 2 granted, 0 refused')" ] || fail "draft-PR overlap lines: $out"
 blob="$(claims_blob "$R")"
 [ "$(printf '%s\n' "$blob" | grep -c '^')" = "2" ] || fail "draft-PR overlap records both claims"
-printf '%s' "$blob" | grep -q "^a.txt\tL\tgrant\t" || fail "draft-PR-held path is recorded"
+printf '%s' "$blob" | grep -q "^a.txt${TAB}L${TAB}grant${TAB}" || fail "draft-PR-held path is recorded"
 
 # Every PR is reported when several PRs touch one path.
 printf '[{"number":9,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":3,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":5,"changedFiles":0,"files":[]}]' >"$T/prs2.json"
@@ -339,10 +340,10 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA 
 before="$(claims_blob "$R")"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane B --grant --worktree t:dB --repo test/repo x.txt 2>/dev/null)" || fail "ordinary overlap claim exits 0"
 [ "$out" = "$(printf 'OVERLAP x.txt lane:A\nGRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "ordinary lane overlap: $out"
-[ "$(claims_blob "$R" | grep -c '^x.txt\t')" = "2" ] || fail "overlapping claim is recorded beside its holder"
+[ "$(claims_blob "$R" | grep -c "^x.txt${TAB}")" = "2" ] || fail "overlapping claim is recorded beside its holder"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane A --grant --worktree t:dA --repo test/repo x.txt 2>/dev/null)" || fail "re-claim exits 0"
 [ "$out" = "$(printf 'OVERLAP x.txt lane:B\nGRANT x.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "re-claim overlap lines: $out"
-[ "$(claims_blob "$R" | grep -c '^x.txt\t')" = "2" ] || fail "re-claim stores no second line"
+[ "$(claims_blob "$R" | grep -c "^x.txt${TAB}")" = "2" ] || fail "re-claim stores no second line"
 
 # A sweep holder keeps an exclusive path; a sweep claimant also refuses an ordinary hold.
 R="$(fresh)"
@@ -866,7 +867,7 @@ done
 [ "$(claims_blob "$R" | grep -c '^')" = "40" ] || fail "both claims in each race are recorded"
 i=1
 while [ "$i" -le 20 ]; do
-  [ "$(claims_blob "$R" | grep -c "^race-$i.txt\\t")" = "2" ] || fail "race-$i overlap has both claim rows"
+  [ "$(claims_blob "$R" | grep -c "^race-$i.txt${TAB}")" = "2" ] || fail "race-$i overlap has both claim rows"
   i=$((i + 1))
 done
 
