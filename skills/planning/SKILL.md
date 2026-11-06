@@ -19,7 +19,9 @@ Start from the pack and read further code only where it points. Read every file 
 
 Read the ticket's body and then its comments (`gh issue view <n>`, then the same with `--comments`, which prints no body); a plan or scope comment outranks the body where they differ. Read every ruling posted on the ticket. A plan that touches a mechanism a posted ruling governs, a re-base re-plan included, quotes that ruling under Rulings and follows its words.
 
-Done when you have read every file the preflight listed, every file the plan will cite and every ruling posted on the ticket.
+Search open issues for each identifier or path the acceptance or the plan's Files names (`gh issue list --state open --search '<construct>'`), and list each hit under Rulings in one line saying why it does or does not bear on this ticket: another ticket about the same construct is a dependency only its body reveals.
+
+Done when you have read every file the preflight listed, every file the plan will cite and every ruling posted on the ticket, and searched open issues for each named construct.
 
 ### 2. Write the plan
 
