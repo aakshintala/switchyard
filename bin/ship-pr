@@ -935,9 +935,9 @@ while :; do
   # The merge is a throwaway commit in --worktree; nothing is pushed, and the
   # worktree goes back to the pinned head on every path.
   if [ "$strict" = 0 ] && { [ -n "$gate" ] || [ -n "$merge_check" ]; }; then
-    step7_check="gate"
+    step7_check="gate" step7_cmd="$gate"
     if [ -z "$gate" ]; then
-      gate="$merge_check"
+      step7_cmd="$merge_check"
       step7_check="merge check"
     fi
     git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
@@ -957,7 +957,7 @@ while :; do
           trap - EXIT INT TERM
           die_after_ready 3 "PR conflicts with current origin/main; rebase, then rerun"
         fi
-        if ! run_gate "$gate" "$step7_check"; then
+        if ! run_gate "$step7_cmd" "$step7_check"; then
           guard_restore
           trap - EXIT INT TERM
           die_after_ready 1 "the PR merged with current origin/main fails the $step7_check"
