@@ -17,12 +17,17 @@
 #        1. A path (a `/` or a source or doc extension) resolves at REV: by full
 #           path, a directory by its trailing `/`, or by a suffix that names exactly
 #           one file. A suffix naming two or more files resolves but is left out of
-#           check 2. A path that matches nothing is reported only when its first
-#           segment is a top-level entry at REV. A path on a line with the word
-#           `new`, `removed`, `remove`, `deleted` or `delete` is exempt from that
-#           missing report; check 2 still applies to it. A path on a line with the
-#           word `reads`, `read-only` or `fixture` must still resolve but is left
-#           out of check 2. Marks match whole words in any case.
+#           check 2. The first token in a Files list or table entry is a path
+#           regardless of its shape; if it matches nothing, it is reported even
+#           when its first segment is not a top-level entry. Other missing paths
+#           are reported only under a top-level entry. A path on a line with the
+#           word `new`, `removed`, `remove`, `deleted` or `delete` is exempt from
+#           that missing report; check 2 still applies to it. A marked Files
+#           entry must contain `/` or `.` and must not start with `./`. A `(new)`
+#           entry must also have a parent directory at REV; `(new-confirmed)`
+#           bypasses only the parent check.
+#           A path on a line with the word `reads`, `read-only` or `fixture` must
+#           still resolve but is left out of check 2. Marks match whole words.
 #        2. Every resolved path in `## Tasks` or `## Red commit` is in `## Files`,
 #           unless its line holds `reads`, `read-only` or `fixture`.
 #           A directory counts as in Files when a Files path starts with it.
@@ -116,7 +121,24 @@ check_new_file() {
 
 # check_path PATH: resolve PATH at REV (resolve_path), then apply checks 1 and 2 to it
 check_path() {
-  local p="$1" seg
+  local p="$1" seg parent bad_new_shape=0
+  if [ "$CUR_SEC" = files ] && [ "$CUR_FILES_ENTRY" = 1 ] && { [ "$CUR_NEW" = 1 ] || [ "$CUR_NEW" = 2 ]; }; then
+    case "$p" in
+      ./*) bad_new_shape=1 ;;
+      */*|*.*) ;;
+      *) bad_new_shape=1 ;;
+    esac
+    if [ "$bad_new_shape" = 1 ] && ! seen "n:$p"; then
+      problem "new Files entry $p must contain a slash or dot and cannot start with ./: give the full path"
+    elif [ "$CUR_NEW" = 1 ]; then
+      case "$p" in */*) parent="${p%/*}" ;; *) parent="" ;; esac
+      if [ -n "$parent" ] && [ "$(git -C "$dir" cat-file -t "$rev:$parent" 2>/dev/null || true)" != tree ]; then
+        if ! seen "n:$p"; then
+          problem "new Files entry $p needs a parent directory on the base: give the full path, or, for a file in a new directory, mark it (new-confirmed)"
+        fi
+      fi
+    fi
+  fi
   case "$CUR_NEW" in
     1|2)
       if [ "$CUR_SEC" = files ]; then check_new_file "$p" "$CUR_NEW"; fi
@@ -141,7 +163,9 @@ check_path() {
     return 0
   fi
   seg="${p%%/*}"
-  case "$TOPLIST" in *"|$seg|"*) ;; *) return 0 ;; esac
+  if [ "$CUR_SEC" != files ] || [ "$CUR_FILES_ENTRY" != 1 ]; then
+    case "$TOPLIST" in *"|$seg|"*) ;; *) return 0 ;; esac
+  fi
   if ! seen "m:$p"; then
     problem "missing path: $p (line $CUR_LN): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it"
   fi
@@ -265,7 +289,7 @@ TOPLIST="|$(git -C "$dir" ls-tree --name-only "$rev" | tr '\n' '|')"
 
 # One record per token: section, line number, whether the line says `new` etc, whether it says `reads` etc, the token.
 # Fenced blocks and the Gate section are skipped.
-records="$(plan_records "$plan")"
+records="$(plan_records "$plan" 1)"
 
 FOUND=0
 SEEN="|"
@@ -274,7 +298,7 @@ GLOBS=""
 TASKS=""
 SYMBOLS=""
 
-while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW CUR_READ tok; do
+while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW CUR_READ CUR_FILES_ENTRY tok; do
   [ -n "$tok" ] || continue
   expand_token "$tok" handle_token
 done <<<"$records"
