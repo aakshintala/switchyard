@@ -32,8 +32,9 @@
 #     removes finished worktrees and keeps each UNFINISHED job's worktree and
 #     state file. An UNFINISHED job's `resume:` line ends with `then run
 #     review-pr collect <id>`; resume on the named host, then collect again
-#     while the state file still exists. It exits 1 for an unfinished job, a bad
-#     verdict, or an UNPOSTED result.
+#     while the state file still exists; the resumed job's new verdict is
+#     posted if it changed. It exits 1 for an unfinished job, a bad verdict,
+#     or an UNPOSTED result.
 #     An already-collected job id reprints its verdict and finding lines from
 #     the job record, writes --findings-out the same way, and posts nothing. It
 #     is COLLECTED only if its current result matches the posted-record hash;
@@ -1098,6 +1099,7 @@ cmd_collect() {
       group_state_ids[$group_index]="$jid"
       group_first_state[$group_index]="$sf"
       group_posted[$group_index]=""
+      group_current[$group_index]="1"
       if [ -z "$pr" ]; then
         repo="$(state_get "$sf" repo)"
         pr="$(state_get "$sf" pr)"
@@ -1111,6 +1113,20 @@ cmd_collect() {
     fi
     if [ "$(state_get "$sf" posted 2>/dev/null || true)" = "1" ]; then
       group_posted[$group_index]="1"
+      rec="$(job_rec "$jid")"
+      text=""
+      if [ -f "$rec" ]; then
+        text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
+      fi
+      result_hash="$(printf '%s' "$text" | shasum -a 256 | awk '{print $1}')"
+      posted_file="$posted_dir/$jid"
+      posted_id="$(jq -r '.job_id // empty' "$posted_file" 2>/dev/null || true)"
+      posted_hash="$(jq -r '.result_hash // empty' "$posted_file" 2>/dev/null || true)"
+      if [ "$posted_id" != "$jid" ] || [ -z "$posted_hash" ] || [ "$posted_hash" != "$result_hash" ]; then
+        group_current[$group_index]=""
+      fi
+    else
+      group_current[$group_index]=""
     fi
     id_list[${#id_list[@]}]="$jid"
   done
@@ -1214,7 +1230,7 @@ cmd_collect() {
   fi
 
   for gi in ${!group_dirs[@]}; do
-    if [ "${group_posted[$gi]}" = "1" ]; then
+    if [ "${group_current[$gi]}" = "1" ]; then
       for jid in ${group_state_ids[$gi]}; do
         sf="$state_dir/$jid"
         if [ "$(state_get "$sf" posted 2>/dev/null || true)" != "1" ]; then

@@ -799,7 +799,7 @@ run_entries=("$run_dir"/*)
 [ "${#run_entries[@]}" = "1" ] && [ "${run_entries[0]}" = "$wt_spec" ] || fail "mixed completion run keeps only the unfinished worktree"
 [ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "mixed completion posts one comment"
 
-# --- case: re-collecting a kept id reads its state and never posts twice
+# --- case: re-collecting a kept id posts its changed result
 rm -f "$T/state/comment-pr.txt" "$T/state/comment.md"
 out="$(bash "$REVIEW" collect job-standards job-spec 2>/dev/null)" && fail "re-collecting unfinished spec exits 1"
 grep -q '^COLLECTED job-standards ' <<<"$out" || fail "re-collect reprints the finished standards job"
@@ -815,12 +815,12 @@ STATUS: DONE" 0
 cp "$T/canned/spec.json" "$TMPDIR/delegate-jobs/job-spec.json"
 out="$(bash "$REVIEW" collect job-spec 2>/dev/null)" || fail "collecting the resumed finished spec exits 0"
 grep -Fxq 'VERDICT spec: APPROVE' <<<"$out" || fail "re-collect prints the resumed verdict"
-[ ! -e "$T/state/comment-pr.txt" ] || fail "collecting a posted kept job does not post again"
-[ ! -e "$T/state/comment.md" ] || fail "collecting a posted kept job creates no new comment body"
+[ "$(cat "$T/state/comment-pr.txt")" = "7" ] || fail "collecting a changed posted job creates a new PR comment"
+grep -q '^VERDICT spec: APPROVE$' "$T/state/comment.md" || fail "new comment body carries the resumed verdict"
 [ ! -d "$wt_spec" ] || fail "finished resumed worktree is removed"
 [ ! -e "$TMPDIR/review-pr/job-spec" ] || fail "finished resumed state file is removed"
 [ ! -d "$run_dir" ] || fail "finished resumed run directory is removed"
-[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "re-collect never duplicates the comment"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "changed result is posted in a second comment"
 
 # --- case: re-collect labels the reprinted overbuild verdict
 reset_state
@@ -1217,6 +1217,32 @@ grep -q '^verify M$' "$T/state/runs.txt" || fail "verify job role and model"
 grep -q "git diff $FAKE_SHA..HEAD" "$T/state/prompt-verify.md" || fail "verify brief SINCE filled"
 grep -q 'P2 findings text & more' "$T/state/prompt-verify.md" || fail "verify brief FINDINGS filled"
 grep -q '^## verify (M)$' "$T/state/comment.md" || fail "comment verify heading"
+
+# --- case: collecting a resumed verify posts its changed FIX-OK verdict once
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 fixture finding\n- Evidence: refuted: this fixture exercises resumed verify posting\n' >"$T/findings.txt"
+write_record verify NEEDS_CONTEXT "Owner ruling needed before review can continue"
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "resumed verify start exits 0"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" && fail "NEEDS_CONTEXT verify collect exits 1"
+grep -q '^UNFINISHED verify NEEDS_CONTEXT ' <<<"$out" || fail "first verify collect keeps the unfinished job"
+[ -f "$TMPDIR/review-pr/job-verify" ] || fail "first verify collect keeps its state file"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "first verify collect posts its initial comment"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+cp "$T/canned/verify.json" "$TMPDIR/delegate-jobs/job-verify.json"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "resumed FIX-OK verify collect exits 0"
+grep -Fxq 'FIX-OK' <<<"$out" || fail "resumed verify collect prints FIX-OK"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "resumed verify posts a second PR comment"
+grep -q '^FIX-OK$' "$T/state/comment.md" || fail "resumed verify comment carries FIX-OK"
+expected_hash="$(printf '%s' $'FIX-OK\nSTATUS: DONE' | shasum -a 256 | awk '{print $1}')"
+[ "$(jq -r '.result_hash' "$TMPDIR/review-pr/posted/job-verify")" = "$expected_hash" ] || \
+  fail "resumed verify posted-record stores the new result hash"
+cp "$T/state/comments.log" "$T/resumed-verify-comments.log"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "unchanged resumed verify re-collect exits 0"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "unchanged resumed verify posts no third comment"
+cmp -s "$T/resumed-verify-comments.log" "$T/state/comments.log" || fail "unchanged resumed verify adds nothing to the PR comments"
 
 # --- case: run starts, waits on the started ids, collects; exits 0 on all APPROVE
 reset_state
