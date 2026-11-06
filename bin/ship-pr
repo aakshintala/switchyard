@@ -153,6 +153,18 @@ usage() {
 }
 say() { echo "ship-pr: $*" >&2; }
 die() { local code="$1"; shift; say "$*"; exit "$code"; }
+refuse() {
+  local family="$1" message="$2" mode="${3:-always}"
+  if [ "$mode" = "ready-only" ]; then
+    if [ "$pr_ready" = 1 ] && [ "$merge_attempted" = 0 ]; then
+      say "$message; nothing merged, PR $pr is still marked ready"
+    fi
+  else
+    say "$message"
+  fi
+  say "refused $family"
+  exit 5
+}
 pr_ready=0 merge_attempted=0
 # worktree_clean: no tracked changes and no untracked files except the
 # proptest-regressions/ seeds a gate run wrote (untracked, but not dirt).
@@ -483,7 +495,7 @@ if [ "${#body_has[@]}" -gt 0 ] || [ -n "$body_ends" ]; then
     done <<<"$body"
     [ "$last" = "$body_ends" ] || { echo "body does not end with (--body-ends): $body_ends"; missing=1; }
   fi
-  [ "$missing" = 0 ] && [ "$bad" = 0 ] || die 5 "PR body lacks required lines; edit the PR body, then rerun"
+  [ "$missing" = 0 ] && [ "$bad" = 0 ] || refuse BODY "PR body lacks required lines; edit the PR body, then rerun"
 fi
 
 # Authority claims in the body and in the round-closed comments, checked on every
@@ -502,7 +514,7 @@ comments_text="$(gh api --paginate "repos/$repo/issues/$pr/comments" \
   --jq '.[] | select(((.body // "") | sub("^ +"; "") | split("\n") | .[0] | ascii_downcase | startswith("review round closed"))) | "\u001e" + .html_url + "\n" + (.body // "")')" \
   || die 2 "cannot read comments on PR $pr in $repo"
 authority_scan <<<"$comments_text"
-[ "$authority_bad" = 0 ] || die 5 "PR text claims authority without a citation on the same line or in the same bullet; cite it there (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun"
+[ "$authority_bad" = 0 ] || refuse BODY "PR text claims authority without a citation on the same line or in the same bullet; cite it there (#<n>, comment URL or <doc>:<line>) or drop the claim, then rerun"
 
 # A draft carries the mutants label when the repo defines one, so mutants
 # run on the draft from the first push. Checked here, beside --body-has, so
@@ -518,7 +530,7 @@ if [ -z "$mutants_gate" ]; then
       pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name')" \
         || die 2 "cannot read PR $pr labels"
       grep -qx 'mutants' <<<"$pr_labels" \
-        || die 5 "PR lacks the mutants label; open it with --label mutants or pass --no-mutants-label <reason>"
+        || refuse LABEL "PR lacks the mutants label; open it with --label mutants or pass --no-mutants-label <reason>"
     fi
   fi
 fi
@@ -541,11 +553,11 @@ case "$rc" in
       done <<<"$closes_out"
       if [ -n "$stray_text" ]; then
         printf '%s' "$stray_text"
-        exit_after_ready 5 "pr-closes found stray closing keywords"
+        refuse BODY "pr-closes found stray closing keywords" ready-only
       fi
     else
       printf '%s\n' "$closes_out"
-      exit_after_ready 5 "pr-closes found stray closing keywords"
+      refuse BODY "pr-closes found stray closing keywords" ready-only
     fi
     ;;
   *) die_after_ready 1 "pr-closes failed (exit $rc)" ;;
@@ -657,10 +669,10 @@ review_state="$(review_verdict "$repo" "$pr" "$reviewed_patch_id")" \
   || die 1 "cannot read review-pr comments on PR $pr in $repo"
 case "$review_state" in
   approved|unverified) ;;
-  missing) die 5 "no review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
-  changes) die 5 "last review-pr verdict for --reviewed patch-id $reviewed_patch_id is CHANGES; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
-  incomplete) die 5 "last scoped verify for --reviewed patch-id $reviewed_patch_id is FIX-INCOMPLETE; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
-  *) die 5 "invalid or incomplete review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
+  missing) refuse REVIEW "no review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
+  changes) refuse REVIEW "last review-pr verdict for --reviewed patch-id $reviewed_patch_id is CHANGES; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
+  incomplete) refuse REVIEW "last scoped verify for --reviewed patch-id $reviewed_patch_id is FIX-INCOMPLETE; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
+  *) refuse REVIEW "invalid or incomplete review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
 esac
 
 # Whether main's required checks are strict. Any lookup error other than a classic
@@ -757,27 +769,27 @@ ci_failed_run_ids() {
 check_mutants_gate() {
   local pr_labels run_list latest run_id run_status job_id
   pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null)" \
-    || die 5 "mutants gate failed: cannot read PR labels"
+    || refuse MUTANTS "mutants gate failed: cannot read PR labels"
   grep -qx 'mutants' <<<"$pr_labels" && return 0
 
   run_list="$(gh run list --repo "$repo" --commit "$pin" --limit 100 --json databaseId,status,conclusion,headSha,createdAt 2>/dev/null)" \
-    || die 5 "mutants gate failed: cannot read runs on PR head $pin"
+    || refuse MUTANTS "mutants gate failed: cannot read runs on PR head $pin"
   latest="$(jq -r --arg head "$pin" '[.[] | select(.headSha == $head)] | sort_by([.createdAt // "", .databaseId]) | last // empty | [.databaseId // "", .status // ""] | @tsv' <<<"$run_list" 2>/dev/null)" \
-    || die 5 "mutants gate failed: cannot read runs on PR head $pin"
-  [ -n "$latest" ] || die 5 "mutants gate failed: no completed Selection log on PR head $pin proves mutants in the diff: 0"
+    || refuse MUTANTS "mutants gate failed: cannot read runs on PR head $pin"
+  [ -n "$latest" ] || refuse MUTANTS "mutants gate failed: no completed Selection log on PR head $pin proves mutants in the diff: 0"
   IFS=$'\t' read -r run_id run_status <<<"$latest"
   [ "$run_status" = "completed" ] \
-    || die 5 "mutants gate failed: latest run on PR head $pin is not completed"
+    || refuse MUTANTS "mutants gate failed: latest run on PR head $pin is not completed"
 
   job_id="$(gh run view "$run_id" --repo "$repo" --json jobs --jq '[.jobs[] | select(.name == "Selection") | .databaseId] | last // empty' 2>/dev/null)" \
-    || die 5 "mutants gate failed: cannot read Selection job from run $run_id"
+    || refuse MUTANTS "mutants gate failed: cannot read Selection job from run $run_id"
   [ -n "$job_id" ] \
-    || die 5 "mutants gate failed: run $run_id has no Selection job"
+    || refuse MUTANTS "mutants gate failed: run $run_id has no Selection job"
   if gh run view "$run_id" --repo "$repo" --job "$job_id" --log 2>/dev/null \
     | grep -Eq '(^|[[:space:]])mutants in the diff: 0'$'\r''?$'; then
     return 0
   fi
-  die 5 "mutants gate failed: Selection log on run $run_id does not prove mutants in the diff: 0"
+  refuse MUTANTS "mutants gate failed: Selection log on run $run_id does not prove mutants in the diff: 0"
 }
 
 # Step 3: the gate runs once, on the PR head, before any rebase or push. It checks

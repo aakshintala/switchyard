@@ -321,11 +321,38 @@ expect_line1 "PATCH-CHANGED head=$H" patch
 # --- body lines missing ---
 reset_stub; setup_case body
 printf '5' >"$T/exitcodes"
-printf 'missing body line: Resolves #515\n' >"$T/shiplog"
+printf 'missing body line: Resolves #515\nship-pr: BODY text needs a required line\nship-pr: refused BODY\n' >"$T/shiplog"
 run_ship
 [ "$RC" -eq 1 ] || fail "body: exit $RC"
 expect_line1 "BODY" body
 case "$OUT" in *"missing body line: Resolves #515"*) ;; *) fail "body: digest misses the line" ;; esac
+
+# --- a mutants refusal reports the family named by ship-pr ---
+reset_stub; setup_case mutants-refusal
+printf '5' >"$T/exitcodes"
+printf 'ship-pr: refused MUTANTS\nmutants gate needs zero-proof evidence\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "mutants-refusal: exit $RC"
+expect_line1 "MUTANTS" mutants-refusal
+case "$OUT" in *"mutants gate needs zero-proof evidence"*) ;; *) fail "mutants-refusal: digest misses ship-pr log tail" ;; esac
+
+# --- a review refusal reports the family named by ship-pr ---
+reset_stub; setup_case review-refusal
+printf '5' >"$T/exitcodes"
+printf 'ship-pr: refused REVIEW\nreview state needs a scoped verify\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "review-refusal: exit $RC"
+expect_line1 "REVIEW" review-refusal
+case "$OUT" in *"review state needs a scoped verify"*) ;; *) fail "review-refusal: digest misses ship-pr log tail" ;; esac
+
+# --- an unclassified exit 5 is an honest SHIP outcome, not a guessed family ---
+reset_stub; setup_case unclassified
+printf '5' >"$T/exitcodes"
+printf 'ship-pr: refusal wording changed\ninspect this ship-pr failure\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "unclassified: exit $RC"
+expect_line1 "SHIP" unclassified
+case "$OUT" in *"inspect this ship-pr failure"*) ;; *) fail "unclassified: digest misses ship-pr log tail" ;; esac
 
 # --- precondition ---
 reset_stub; setup_case precond

@@ -350,6 +350,11 @@ untouched() {
   [ "$(git -C "$WT" rev-parse HEAD)" = "$W0" ] || fail "$1: worktree HEAD unchanged"
 }
 expect() { [ "$CODE" = "$1" ] || fail "$2: exit $1 (got $CODE): out=[$OUT] err=[$ERR]"; }
+expect_refused() {
+  [ "$CODE" = 5 ] || fail "$1: exit $CODE, wants 5"
+  [ "$(tail -n 1 <<<"$ERR")" = "ship-pr: refused $1" ] \
+    || fail "$1: last stderr line [$(tail -n 1 <<<"$ERR")] wants [ship-pr: refused $1]"
+}
 no_merge() { ! grep -q '^gh pr \(merge\|ready\)' "$ST/gh.log" 2>/dev/null || fail "$1: no ready or merge call"; }
 GATE_PANIC='echo gate-start; echo "thread prune::young_fork panicked at src/prune.rs:42:5:"; echo "assertion left == right failed"; echo "  left: 1"; echo " right: 2"; for i in $(seq 1 25); do echo "gate-tail-$i"; done; exit 1'
 assert_gate_panic_failure() {
@@ -551,7 +556,7 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
   {created_at:"2026-11-04T11:00:00Z",id:102,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: CHANGES\n\nP1 finding remains open")},
   {created_at:"2026-11-04T10:00:00Z",id:101,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE\n\n## spec (test)\n\nVERDICT spec: APPROVE")}
 ]' >"$ST/review-comments"
-ship; expect 5 "last CHANGES verdict refuses merge"; no_merge "last CHANGES verdict"
+ship; expect 5 "last CHANGES verdict refuses merge"; expect_refused REVIEW; no_merge "last CHANGES verdict"
 grep -q 'review' <<<"$ERR" || fail "review refusal explains the missing approval: [$ERR]"
 
 setup
@@ -581,7 +586,7 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 ]' >"$ST/review-comments"
 echo changed >>"$WT/feature.txt"; git -C "$WT" commit -qam "address ruled finding"; git -C "$WT" push -q origin feature
 run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT"
-expect 5 "FIX-INCOMPLETE without --unverified-fixes refuses merge"; no_merge "FIX-INCOMPLETE without the option"
+expect 5 "FIX-INCOMPLETE without --unverified-fixes refuses merge"; expect_refused REVIEW; no_merge "FIX-INCOMPLETE without the option"
 
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
@@ -1001,6 +1006,7 @@ nothing_ran() {
 }
 setup; advance_main other.txt o; printf 'Resolves #97\n' >"$ST/body"
 ship --body-has 'Resolves #' --body-has 'Doc friction:'; nothing_ran "one line missing"
+expect_refused BODY
 [ "$OUT" = "missing body line: Doc friction:" ] || fail "one missing line printed: [$OUT]"
 grep -q 'PR body lacks required lines; edit the PR body, then rerun' <<<"$ERR" || fail "miss message: [$ERR]"
 
@@ -1383,6 +1389,7 @@ MUTANTS_LABEL='[{"name":"mutants"}]'
 # (a) repo defines mutants, draft PR without the label: exit 5, no ready call
 setup; echo true >"$ST/draft"; repo_labels "$MUTANTS_LABEL"
 ship; expect 5 "draft without the mutants label"
+expect_refused LABEL
 untouched "draft without the mutants label"; no_merge "draft without the mutants label"
 grep -q 'PR lacks the mutants label' <<<"$ERR" || fail "missing-label message: [$ERR]"
 grep -q -- '--no-mutants-label' <<<"$ERR" || fail "missing-label names the flag: [$ERR]"
@@ -1452,6 +1459,7 @@ grep -q 'mutants gate failed' <<<"$ERR" || fail "prefixed 05 failure names the c
 
 setup; echo true >"$ST/draft"
 ship --mutants-gate; expect 5 "mutants gate rejects no label and no proof"
+expect_refused MUTANTS
 no_merge "mutants gate without proof"
 grep -q 'mutants gate failed' <<<"$ERR" || fail "mutants gate failure names the check: [$ERR]"
 ! grep -q 'gh label create\|gh label edit' "$ST/gh.log" || fail "mutants gate never adds a label"
