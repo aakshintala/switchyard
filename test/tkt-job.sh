@@ -217,6 +217,7 @@ Extra words: __EXTRA__
 Fence:
 __FENCE__
 EOF
+printf 'Claim holder __CLAIM_HOLDER__\n' >"$T/tmpl-claim-holder.md"
 cat >"$T/tmpl-missing.md" <<'EOF'
 This template needs __NOPE__.
 EOF
@@ -781,6 +782,15 @@ run_job --slot lane --template "$T/tmpl-full.md" FENCE=custom
 [ "$RC" -eq 0 ] || fail "FENCE flag exits 0"
 brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|prompt=//')"
 grep -q "custom" "$brief" || fail "a FENCE flag beats the plan"
+
+# --- the lane brief's claim holder is derived from its ticket ---------------
+setup_case claim-holder
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-claim-holder.md"
+[ "$RC" -eq 0 ] || fail "claim holder fills from the ticket (rc=$RC): $(cat "$CDIR/stderr.txt")"
+brief="$(grep '^run|' "$T/stub.log" | sed 's/.*|prompt=//')"
+grep -q '^Claim holder fiber-502$' "$brief" || fail "claim holder is the canonical fiber-<ticket> name: $(cat "$brief")"
 
 # --- EXTRA with no flag and no state value fills with the empty string ---
 setup_case extra-default

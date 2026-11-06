@@ -953,7 +953,7 @@ _claim_holders() {
 }
 
 _lane_claim_count() {
-  _lc_lane="fiber-$1"
+  _lc_lane="$(claim_holder "$1")"
   _lc_out="$tmp/claims-$_lc_lane.out"
   _lc_err="$tmp/claims-$_lc_lane.err"
   if ! "$file_claim" list --lane "$_lc_lane" --repo "$repo" >"$_lc_out" 2>"$_lc_err"; then
@@ -1116,7 +1116,7 @@ fi
 
 # --- lane side helpers ---
 _lane_num() {
-  lane_ticket_num "fiber-$1"
+  lane_ticket_num "$(claim_holder "$1")"
 }
 
 # Brace-expand each input line; held-entry text in, expanded lines out.
@@ -1555,7 +1555,7 @@ if [ "$dry" -eq 0 ]; then
   done < "$tmp/plist"
   if [ "${#fc_args[@]}" -gt 0 ]; then
     : > "$tmp/fc-overlaps"
-    fc_cmd=("$file_claim" claim --lane "fiber-$ticket" --plan --repo "$repo")
+    fc_cmd=("$file_claim" claim --lane "$(claim_holder "$ticket")" --plan --repo "$repo")
     # Every PR skipped above as this ticket's own, plus --ignore-pr, must
     # exempt the claim too, or the ledger refuses a path the own PR holds.
     # file-claim takes one --self-pr per flag; each exempt PR gets its own.

@@ -95,6 +95,13 @@ if [ ! -r "$plan_gate_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$plan_gate_lib"
+lane_ticket_lib="$script_dir/lib/lane-ticket.sh"
+if [ ! -r "$lane_ticket_lib" ]; then
+  echo "tkt-job: cannot read shared lib: $lane_ticket_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$lane_ticket_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
 fillbrief="$bin_dir/fill-brief"
@@ -209,6 +216,11 @@ prepare_brief() {
     for k in $keys; do
       v=""
       found=0
+      if [ "$k" = "CLAIM_HOLDER" ]; then
+        v="$(claim_holder "$issue")"
+        args+=("$k=$v")
+        continue
+      fi
       for f in ${fills[@]+"${fills[@]}"}; do
         if [ "${f%%=*}" = "$k" ]; then
           v="${f#*=}"
