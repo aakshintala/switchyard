@@ -1099,14 +1099,15 @@ grep -q "^run|model=muse/muse-spark-1.3-contributor|.*|gate=bash " "$T/stub.log"
 grep -qx "idle=7200000" "$T/stub.log" || fail "muse with gate passes --tool-idle-ms 7200000"
 grep -qx "idleMs=1800000" "$T/stub.log" || fail "muse with gate passes --idle-ms 1800000"
 
-# --- a non-muse model gets no tool-idle flag, gated and ungated ---
+# --- a non-muse model gets the 2-hour tool-idle limit but no idle flag, gated and ungated ---
+# The tool-idle window also bounds the job-end gate, and a full gate on a loaded box can run past 30 min.
 setup_case plain-idle-nogate
 reset_stub
 make_record stub-1 DONE none 0 1 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "non-muse without gate exits 0"
 grep -q "^run|" "$T/stub.log" || fail "non-muse without gate dispatches"
-grep -q "^idle=" "$T/stub.log" && fail "non-muse without gate passes no tool-idle flag"
+grep -qx "idle=7200000" "$T/stub.log" || fail "non-muse without gate passes --tool-idle-ms 7200000"
 grep -q "^idleMs=" "$T/stub.log" && fail "non-muse without gate passes no idle flag"
 
 setup_case plain-idle-gate
@@ -1116,7 +1117,7 @@ printf 'plan=%s\n' "$T/plan-fail.md" >>"$S"
 run_job --slot lane --template "$T/tmpl-basic.md" --gate-from-plan
 [ "$RC" -eq 0 ] || fail "non-muse with gate exits 0"
 grep -q "gate=bash " "$T/stub.log" || fail "non-muse with gate dispatches the gate"
-grep -q "^idle=" "$T/stub.log" && fail "non-muse with gate passes no tool-idle flag"
+grep -qx "idle=7200000" "$T/stub.log" || fail "non-muse with gate passes --tool-idle-ms 7200000"
 grep -q "^idleMs=" "$T/stub.log" && fail "non-muse with gate passes no idle flag"
 
 # --- verifier-r* slots pass --wall-ms 10800000, gated and ungated ---
