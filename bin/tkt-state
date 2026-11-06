@@ -245,6 +245,17 @@ stage() {
   fi
 }
 
+# Append one timestamped line to the sibling journal. Globals: tmpfile.
+append_journal_line() {
+  local line="$1" journal_path stamp
+  journal_path="${state%.state}.journal"
+  stage "$journal_path"
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s %s\n' "$stamp" "$line" >>"$tmpfile"
+  mv "$tmpfile" "$journal_path"
+  tmpfile=""
+}
+
 case "$cmd" in
   get)
     [ $# -eq 1 ] || usage
@@ -267,6 +278,10 @@ case "$cmd" in
     reject_newline "$2"
     check_commit "$1" "$2"
     take_lock
+    old_head="<none>"
+    if [ "$1" = "head" ]; then
+      if old_head="$(state_get head 2>/dev/null)"; then :; else old_head="<none>"; fi
+    fi
     stage "$state"
     keptfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
     while IFS= read -r line || [ -n "$line" ]; do
@@ -280,6 +295,9 @@ case "$cmd" in
     keptfile=""
     rm -f "$tmpfile"
     tmpfile=""
+    if [ "$1" = "head" ] && [ "$old_head" != "$2" ]; then
+      append_journal_line "head $old_head -> $2"
+    fi
     ;;
   add)
     [ $# -eq 2 ] || usage
@@ -296,12 +314,7 @@ case "$cmd" in
     [ $# -eq 1 ] || usage
     reject_newline "$1"
     take_lock
-    journal="${state%.state}.journal"
-    stage "$journal"
-    stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf '%s %s\n' "$stamp" "$1" >>"$tmpfile"
-    mv "$tmpfile" "$journal"
-    tmpfile=""
+    append_journal_line "$1"
     ;;
   require)
     [ $# -ge 1 ] || usage

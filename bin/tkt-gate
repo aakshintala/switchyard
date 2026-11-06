@@ -74,6 +74,13 @@ if [ ! -r "$plan_gate_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$plan_gate_lib"
+local_gate_body_lib="$script_dir/lib/local-gate-body.sh"
+if [ ! -r "$local_gate_body_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $local_gate_body_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$local_gate_body_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 plangate="$bin_dir/plan-gate"
 
@@ -84,7 +91,7 @@ tkt() {
 # emit VERDICT EXIT: write the verdict plus the digest (and the history, when
 # read) to the per-run log, print verdict plus digest, journal, and exit.
 emit() {
-  local verdict="$1" code="$2" twelve logpath output
+  local verdict="$1" code="$2" twelve logpath output journal_line
   twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
   logpath="$(mktemp "$run/$namebase-tkt-gate-$twelve-XXXXXX")"
   mv "$logpath" "$logpath.log"
@@ -96,7 +103,9 @@ $digest"
     printf '%s\n' "$hist" >>"$logpath"
   fi
   printf '%s\n' "$output"
-  tkt journal "tkt-gate $verdict"
+  journal_line="tkt-gate $verdict"
+  if [ -n "${3:-}" ]; then journal_line="$journal_line $3"; fi
+  tkt journal "$journal_line"
   exit "$code"
 }
 
@@ -354,23 +363,7 @@ if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
         attr="$(tkt list body_has 2>/dev/null | grep -i 'co-author' | head -n 1 || true)"
         attr_mode="prefix"
       fi
-      new_body="$(TKT_GATE_LINE="$gate_line" TKT_GATE_ATTR="$attr" TKT_GATE_ATTR_MODE="$attr_mode" awk '
-        /^Local gate:/ { next }
-        { l[++n] = $0 }
-        END {
-          anchor = 0
-          for (i = 1; i <= n; i++) if (l[i] ~ /^Implemented by:/) { anchor = i; break }
-          if (!anchor && ENVIRON["TKT_GATE_ATTR"] != "") {
-            if (ENVIRON["TKT_GATE_ATTR_MODE"] == "prefix") {
-              for (i = 1; i <= n; i++) if (index(l[i], ENVIRON["TKT_GATE_ATTR"]) == 1) { anchor = i; break }
-            } else {
-              for (i = 1; i <= n; i++) if (l[i] == ENVIRON["TKT_GATE_ATTR"]) { anchor = i; break }
-            }
-          }
-          if (!anchor) anchor = n + 1
-          for (i = 1; i <= n; i++) { if (i == anchor) print ENVIRON["TKT_GATE_LINE"]; print l[i] }
-          if (anchor == n + 1) print ENVIRON["TKT_GATE_LINE"]
-        }' <<<"$pr_body")"
+      new_body="$(tkt_local_gate_body_insert "$pr_body" "$gate_line" "$attr" "$attr_mode")"
     fi
     tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-gate-body.XXXXXX")"
     printf '%s\n' "$new_body" >"$tmp_body"
@@ -381,5 +374,8 @@ if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
   else
     echo "tkt-gate: warning: cannot read PR $gate_pr body; leaving it unchanged" >&2
   fi
+fi
+if [ "$checks_only" -eq 1 ]; then
+  emit "PASS head=$local_head" 0 checks-only
 fi
 emit "PASS head=$local_head" 0

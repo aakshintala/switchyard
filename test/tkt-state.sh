@@ -121,9 +121,22 @@ grep -q 'head' "$T/err-short-head.txt" || fail "a short head names the key"
 FULL=0123456789abcdef0123456789abcdef01234567
 bash "$TKT" "$HS" set head "$FULL" || fail "set head with a full SHA exits 0"
 [ "$(bash "$TKT" "$HS" get head)" = "$FULL" ] || fail "get returns the stored full head"
+JH="${HS%.state}.journal"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z head <none> -> '"$FULL"'$' "$JH" \
+  || fail "setting an unset head journals the move from <none>"
+HEAD_MOVES="$(wc -l <"$JH" | tr -d ' ')"
+bash "$TKT" "$HS" set head "$FULL" || fail "setting the same head exits 0"
+[ "$(wc -l <"$JH" | tr -d ' ')" = "$HEAD_MOVES" ] || fail "setting the same head writes no journal line"
+NEXT=1123456789abcdef0123456789abcdef01234567
+bash "$TKT" "$HS" set head "$NEXT" || fail "changing head exits 0"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z head '"$FULL"' -> '"$NEXT"'$' "$JH" \
+  || fail "changing head journals the previous and new values"
+HEAD_MOVES="$(wc -l <"$JH" | tr -d ' ')"
+bash "$TKT" "$HS" set note unchanged || fail "setting another key exits 0"
+[ "$(wc -l <"$JH" | tr -d ' ')" = "$HEAD_MOVES" ] || fail "setting another key writes no head journal line"
 bash "$TKT" "$HS" set head "${FULL%?}z" 2>/dev/null && fail "set head with non-hex exits non-zero"
 [ "$?" = "2" ] || fail "set head with non-hex exits 2"
-[ "$(bash "$TKT" "$HS" get head)" = "$FULL" ] || fail "a rejected non-hex head keeps the old value"
+[ "$(bash "$TKT" "$HS" get head)" = "$NEXT" ] || fail "a rejected non-hex head keeps the old value"
 bash "$TKT" "$HS" add head abc1234 2>/dev/null && fail "add head with a short SHA exits non-zero"
 [ "$?" = "2" ] || fail "add head with a short SHA exits 2"
 
