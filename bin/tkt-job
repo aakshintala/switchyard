@@ -20,6 +20,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] | --brief <file> | --resume <job id> --prompt <file>) [--model <id>] [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]" >&2
+  echo "If a slot has a prompt hash, a different supplied prompt requires clearing the slot or using a new one." >&2
   exit 2
 }
 
@@ -191,38 +192,12 @@ build_gate_from_plan() {
   gate="bash $script"
 }
 
-stored="$(tkt get "job.$slot" 2>/dev/null || true)"
-fresh=0
-reused=0
-jobid=""
-
-if [ -n "$resume" ]; then
-  [ -r "$prompt" ] || {
-    echo "tkt-job: cannot read prompt: $prompt" >&2
-    exit 2
-  }
-  if [ "$gate_from_plan" -eq 1 ]; then
-    build_gate_from_plan
-  fi
-  # An empty --gate is the same as no flag: the resume inherits the stored gate.
-  gate_args=()
-  if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
-  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
-  tkt set "job.$slot" "$jobid"
-  tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"
-  fresh=1
-elif [ -n "$stored" ]; then
-  # A stored id never dispatches again: crash-reruns only watch.
-  jobid="$stored"
-  reused=1
-else
+# Prepare the current prompt only when a dispatch needs it (or when comparing a
+# supplied prompt with a stored job). Stored ids without prompt metadata retain
+# the legacy watch-only path without needing a brief.
+prepare_brief() {
   { [ -n "$template" ] || [ -n "$brief" ]; } || usage
   { [ -z "$template" ] || [ -z "$brief" ]; } || usage
-  # The gate comes from the plan before any brief is filled, so a missing
-  # plan or gateless plan reports in one line without a brief on disk.
-  if [ "$gate_from_plan" -eq 1 ]; then
-    build_gate_from_plan
-  fi
   if [ -n "$template" ]; then
     [ -r "$template" ] || {
       echo "tkt-job: cannot read template: $template" >&2
@@ -294,6 +269,54 @@ else
       exit 2
     }
   fi
+}
+
+stored="$(tkt get "job.$slot" 2>/dev/null || true)"
+stored_prompt_hash=""
+if [ -n "$stored" ] && [ -z "$resume" ]; then
+  stored_prompt_hash="$(tkt get "job.$slot.prompt" 2>/dev/null || true)"
+  if [ -n "$stored_prompt_hash" ] && { [ -n "$template" ] || [ -n "$brief" ]; }; then
+    prepare_brief
+    prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
+    if [ "$prompt_hash" != "$stored_prompt_hash" ]; then
+      echo "ERROR slot $slot holds job $stored from a different prompt; clear it (tkt-state $state set job.$slot '') or use a new slot" >&2
+      exit 2
+    fi
+  fi
+fi
+fresh=0
+reused=0
+jobid=""
+
+if [ -n "$resume" ]; then
+  [ -r "$prompt" ] || {
+    echo "tkt-job: cannot read prompt: $prompt" >&2
+    exit 2
+  }
+  if [ "$gate_from_plan" -eq 1 ]; then
+    build_gate_from_plan
+  fi
+  # An empty --gate is the same as no flag: the resume inherits the stored gate.
+  gate_args=()
+  if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
+  prompt_hash="$(shasum -a 256 <"$prompt" | awk '{print $1}')"
+  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
+  tkt set "job.$slot" "$jobid"
+  tkt set "job.$slot.prompt" "$prompt_hash"
+  tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"
+  fresh=1
+elif [ -n "$stored" ]; then
+  # A stored id never dispatches again: a matching or legacy prompt only watches.
+  jobid="$stored"
+  reused=1
+else
+  # The gate comes from the plan before any brief is filled, so a missing
+  # plan or gateless plan reports in one line without a brief on disk.
+  if [ "$gate_from_plan" -eq 1 ]; then
+    build_gate_from_plan
+  fi
+  prepare_brief
+  prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
   if [ -z "$model" ]; then
     model="$(tkt get "model.$slot" 2>/dev/null)" || {
       echo "tkt-job: missing key: model.$slot (no --model and no state model.$slot)" >&2
@@ -312,6 +335,7 @@ else
   if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
   jobid="$("$delegate" run --model "$model" --cwd "$worktree" ${gate_args[@]+"${gate_args[@]}"} ${tool_idle[@]+"${tool_idle[@]}"} ${wall[@]+"${wall[@]}"} --prompt-file "$brief" | head -n 1)"
   tkt set "job.$slot" "$jobid"
+  tkt set "job.$slot.prompt" "$prompt_hash"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid"
   fresh=1
 fi
