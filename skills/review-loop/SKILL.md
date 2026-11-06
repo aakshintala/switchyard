@@ -37,6 +37,8 @@ A finding that waits on an owner ruling leaves the loop: post it as a decision p
 
 A **reversal** is a finding that asks to undo a change an earlier round made (a split merged back, a helper cut, a type swapped back) and names no behaviour defect. Answer it on the PR with the earlier round's reason, and keep it out of the findings file and out of the round count: fixing it only invites the reverse finding next round. A reversal that shows a real bug is an ordinary finding.
 
+A **conflict** is two findings that ask for opposite changes to the same lines. Fix the higher-severity one, and answer the other on the PR as resolved by it, with the reason. Keep the answered finding out of the findings file, so the round has one end state for those lines and the next round has nothing to undo. A conflict between findings of the same severity is a ruling: it leaves the loop like any finding that waits on an owner ruling (above).
+
 Done when the fix round covers every open finding: dispatched as a gated job, or fixed inline with the gate's output stated. A finding parked for a ruling is not open here.
 
 ### 3. Verify
