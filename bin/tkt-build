@@ -105,7 +105,7 @@ forward() {
 require_keys repo issue branch worktree run plan
 repo="$(tkt get repo)"; issue="$(tkt get issue)"; branch="$(tkt get branch)"
 worktree="$(tkt get worktree)"; run="$(tkt get run)"; plan="$(tkt get plan)"
-slug="${repo//\//-}"; mkdir -p "$run"
+slug="${repo//\//-}"; set_namebase "$repo" "$issue"; mkdir -p "$run"
 part_suffix="$(part_findings_suffix "$(tkt get part 2>/dev/null || true)")"
 # First-round tool: a state with a round already counted continues with tkt-fix or tkt-ship.
 # The Outcome line names the ticket's end state, read the same way as Base. A
@@ -427,16 +427,16 @@ if [ -n "$map_id" ] && [ "$mutant_count" -gt 0 ]; then
   if [ -n "$mtext" ]; then printf '%s' "$mtext" >"$map_out"; fi
   [ "$mstatus" = "DONE" ] && [ -s "$map_out" ] || map_note="map failed status=${mstatus:-unknown}: ${mtext%%$'\n'*}"
 fi
-findings_file="$run/$slug-$issue$part_suffix-findings-r0.md"
+findings_file="$run/$namebase$part_suffix-findings-r0.md"
 if ! findings_write_allowed "$state" "$findings_file"; then
-  echo "tkt-build: refusing to overwrite findings file not written by this ticket: $findings_file" >&2
+  echo "tkt-build: refusing to overwrite $findings_file: $namebase$part_suffix-findings-r0.md names are reserved for this ticket's own findings output; write hand-kept notes to $namebase$part_suffix-dispositions-r0.md instead" >&2
   exit 2
 fi
 findings_tmp="$tmpd/findings-r0.md"
 rc=0; collect_out="$("$reviewpr" collect $rids --findings-out "$findings_tmp" 2>"$tmpd/collect-err")" || rc=$?
 if [ -e "$findings_tmp" ]; then
   if ! findings_write_allowed "$state" "$findings_file"; then
-    echo "tkt-build: refusing to overwrite findings file not written by this ticket: $findings_file" >&2
+    echo "tkt-build: refusing to overwrite $findings_file: $namebase$part_suffix-findings-r0.md names are reserved for this ticket's own findings output; write hand-kept notes to $namebase$part_suffix-dispositions-r0.md instead" >&2
     exit 2
   fi
   mv "$findings_tmp" "$findings_file"
