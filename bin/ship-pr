@@ -5,8 +5,8 @@
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require a matching
 #        review-pr verdict for --reviewed (APPROVE on every axis, or FIX-OK from
-#        a scoped verify; --unverified-fixes permits its no-real-bug fix round);
-#        require each --body-has
+#        a scoped verify; --unverified-fixes permits a no-real-bug fix round after
+#        either CHANGES or FIX-INCOMPLETE); require each --body-has
 #        line and run pr-closes (see below); run --gate in the worktree on that head,
 #        once, before any rebase or push; flatten commits since the merge base when
 #        the branch has merge commits, then rebase onto origin/main (see below);
@@ -104,7 +104,7 @@
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict; with --unverified-fixes, no exit 4), 5 PR text or review state needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, stray closing keywords from pr-closes, or no approved review verdict), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 PR text or review state needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, stray closing keywords from pr-closes, or no approved review verdict: CHANGES and FIX-INCOMPLETE need a scoped verify unless --unverified-fixes is given for a no-real-bug fix round), 124 CI wait timeout.
 #        Rebase rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -133,7 +133,7 @@
 #        on the new tip up to three times; the fourth move exits 1. With --gate,
 #        --merge-check is ignored. Without either flag the check is skipped.
 #        --unverified-fixes <file> is for a fix round that answers no real bug (review-loop
-#        step 3), so it ships with no re-review. The file must be readable and hold a
+#        step 3), so CHANGES or FIX-INCOMPLETE ships without a re-review. The file must be readable and hold a
 #        non-blank line, else exit 2 before anything else. On a patch-id mismatch, once per
 #        run and before the first push or CI wait, ship-pr posts a PR comment: a first line
 #        naming the reviewed short sha, the file under `Findings:`, and `git diff --stat`
@@ -633,7 +633,10 @@ review_verdict() {
     [ "$verdicts" = "verify:FIX-OK" ] && printf 'approved' || printf 'invalid'
     return 0
   fi
-  case ",$verdicts," in *,verify:FIX-INCOMPLETE,*) printf 'incomplete'; return 0 ;; esac
+  case ",$verdicts," in *,verify:FIX-INCOMPLETE,*)
+    [ -n "$unverified" ] && printf 'unverified' || printf 'incomplete'
+    return 0 ;;
+  esac
   [ "$axes" != "-" ] || { printf 'missing'; return 0; }
   IFS=',' read -r -a axis_list <<<"$axes"
   for axis in "${axis_list[@]}"; do
@@ -655,8 +658,8 @@ review_state="$(review_verdict "$repo" "$pr" "$reviewed_patch_id")" \
 case "$review_state" in
   approved|unverified) ;;
   missing) die 5 "no review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
-  changes) die 5 "last review-pr verdict for --reviewed patch-id $reviewed_patch_id is CHANGES; complete a scoped verify or use --unverified-fixes only for a no-real-bug fix round" ;;
-  incomplete) die 5 "last scoped verify for --reviewed patch-id $reviewed_patch_id is FIX-INCOMPLETE" ;;
+  changes) die 5 "last review-pr verdict for --reviewed patch-id $reviewed_patch_id is CHANGES; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
+  incomplete) die 5 "last scoped verify for --reviewed patch-id $reviewed_patch_id is FIX-INCOMPLETE; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
   *) die 5 "invalid or incomplete review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
 esac
 

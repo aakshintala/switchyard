@@ -574,6 +574,25 @@ expect 0 "--unverified-fixes still ships a no-real-bug CHANGES round"
 grep -q '^gh pr merge' "$ST/gh.log" || fail "no-real-bug CHANGES round merged"
 grep -q '^Fixes since .* shipped without re-review' "$ST/comment.txt" || fail "no-real-bug CHANGES round records the fix"
 
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:106,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE repair not present")}
+]' >"$ST/review-comments"
+echo changed >>"$WT/feature.txt"; git -C "$WT" commit -qam "address ruled finding"; git -C "$WT" push -q origin feature
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT"
+expect 5 "FIX-INCOMPLETE without --unverified-fixes refuses merge"; no_merge "FIX-INCOMPLETE without the option"
+
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:107,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE repair not present")}
+]' >"$ST/review-comments"
+echo changed >>"$WT/feature.txt"; git -C "$WT" commit -qam "address ruled finding"; git -C "$WT" push -q origin feature
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$T/no-real-bug.txt"
+expect 0 "FIX-INCOMPLETE with --unverified-fixes ships the unverified path"
+grep -q '^gh pr merge' "$ST/gh.log" || fail "FIX-INCOMPLETE unverified path merged"
+
 # ===== patch-id ignores context lines: a rebase over a main commit that
 # ===== touched only the neighbouring line still matches, while a changed
 # ===== added line still mismatches

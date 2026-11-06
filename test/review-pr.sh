@@ -709,7 +709,7 @@ err="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --model M --overbuil
 case "$err" in *--spec*spec*) ;; *) fail "--spec without a value names --spec and the spec axis: [$err]" ;; esac
 [ ! -e "$T/state/runs.txt" ] || fail "--spec without a value starts no job"
 # --- case: verify ignores start-only flags, one stderr note per flag, and launches
-printf 'P1 findings text\n' >"$T/findings.txt"
+printf 'P1 findings text\n- Evidence: refuted: this fixture exercises verify launch options\n' >"$T/findings.txt"
 write_record verify DONE "rechecked
 FIX-OK all repaired
 STATUS: DONE" 0
@@ -1110,10 +1110,51 @@ grep -q UNFINISHED <<<"$out" && fail "re-collect is not UNFINISHED"
 out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild job-nope 2>/dev/null)" && fail "re-collect with an unknown id exits 1"
 grep -q "^UNFINISHED job-nope MISSING" <<<"$out" || fail "unknown id beside collected ids is UNFINISHED"
 
+# --- case: empty verify diff refuses an unrefuted finding before starting a job
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 file.txt:1 — wrong value — repair it\n- Evidence: reviewed code has the wrong value\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+if err="$(start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" 2>&1 >/dev/null)"; then
+  fail "empty verify diff with an unrefuted finding refuses to start"
+fi
+grep -q 'empty repair diff' <<<"$err" || fail "empty-diff refusal names the missing repair"
+grep -q 'push the repair' <<<"$err" || fail "empty-diff refusal says to push the repair"
+grep -q 'refuted:' <<<"$err" || fail "empty-diff refusal says to mark answered findings refuted"
+grep -q 'ship-pr --unverified-fixes' <<<"$err" || fail "empty-diff refusal names the recorded-ruling route"
+[ ! -e "$T/state/runs.txt" ] || fail "empty-diff refusal starts no job"
+[ ! -e "$TMPDIR/review-pr/job-verify" ] || fail "empty-diff refusal saves no job state"
+[ ! -e "$T/state/comment.md" ] || fail "empty-diff refusal posts no comment"
+
+# --- case: empty verify diff starts when every finding is refuted
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 file.txt:1 — wrong value — repair it\n- Evidence: refuted: the reviewed value is correct\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "empty diff with a refuted finding starts"
+[ -f "$TMPDIR/review-pr/job-verify" ] || fail "refuted empty-diff verify saves state"
+out="$(bash "$REVIEW" collect job-verify 2>&1)" || fail "refuted empty-diff verify collects: [$out]"
+
+# --- case: non-empty verify diff still starts with an unrefuted finding
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 file.txt:1 — wrong value — repair it\n' >"$T/findings.txt"
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "non-empty diff with an unrefuted finding starts"
+grep -q "git diff $FAKE_SHA..HEAD" "$T/state/prompt-verify.md" || fail "non-empty verify brief keeps the same repair range"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "non-empty verify collects"
+
 # --- case: verify mode runs one job with SINCE and FINDINGS filled
 reset_state
 printf 'ci\tpending\n' >"$T/checks.txt"
-printf 'P2 findings text & more\n' >"$T/findings.txt"
+printf 'P2 findings text & more\n- Evidence: refuted: this fixture exercises verify launch\n' >"$T/findings.txt"
 write_record verify DONE "rechecked
 FIX-OK all repaired
 STATUS: DONE" 0
@@ -1231,7 +1272,7 @@ grep -q '^VERDICT overbuild: APPROVE$' <<<"$out" && fail "glued line is not a ve
 # --- case: verify with a finding line that mentions VERDICT and a real FIX-OK line
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P2 findings text\n' >"$T/findings.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises verdict parsing\n' >"$T/findings.txt"
 write_record verify DONE "- P2 fixture/test: fixed. Fixture's final assistant message (line 30) begins \`VERDICT: APPROVE\`, and the test's exact \`assert_eq!\` pins \`\nVERDICT: APPROVE\n\`, asserting the verdict starts a line.
 FIX-OK
 STATUS: DONE" 0
@@ -1245,7 +1286,7 @@ grep -q UNFINISHED <<<"$out" && fail "mention plus FIX-OK is finished"
 # --- case: prose that merely contains FIX-OK is not a verify verdict
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P2 findings text\n' >"$T/findings.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises unfinished parsing\n' >"$T/findings.txt"
 write_record verify DONE "this is not FIX-OK yet
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --model M \
@@ -1258,7 +1299,7 @@ grep -q BAD-VERDICT <<<"$out" && fail "not FIX-OK prose is not bad"
 # --- case: a bare FIX-OK line is a verdict
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P2 findings text\n' >"$T/findings.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises a bare verdict\n' >"$T/findings.txt"
 write_record verify DONE "FIX-OK" 0
 start_review 7 --repo O/N --cwd "$T/clone" --model M \
   --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "verify start exits 0"
@@ -1622,7 +1663,7 @@ grep -q -- "--since $MISSING_SINCE is not fetchable" <<<"$err" || fail "missing 
 
 # --- case: a short --since the clone holds is accepted
 reset_state
-printf 'P1 findings text\n' >"$T/findings.txt"
+printf 'P1 findings text\n- Evidence: refuted: this fixture exercises short since handling\n' >"$T/findings.txt"
 write_record verify DONE "rechecked
 FIX-OK all repaired
 STATUS: DONE" 0
@@ -2227,6 +2268,7 @@ grep -qx 'P1 slow.ts:3 — wrong total — sum the parts' "$T/findings-out.txt" 
 grep -q VERDICT "$T/findings-out.txt" && fail "findings file holds findings, not verdicts"
 write_record verify DONE "FIX-OK all repaired
 STATUS: DONE" 0
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
 run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
   --verify "$T/findings-out.txt" --since "$FAKE_SHA" 2>/dev/null)" || \
   fail "run --verify accepts the findings file"
@@ -2280,7 +2322,7 @@ cmp -s "$T/reprint-a.saved" "$T/reprint-b.txt" || fail "reprint findings file ma
 # --- case: --context copies outside-checkout files into the verify worktree
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P2 findings text\n' >"$T/findings.txt"
+printf 'P2 findings text\n- Evidence: refuted: this fixture exercises context copying\n' >"$T/findings.txt"
 mkdir -p "$T/ctx-a" "$T/ctx-b"
 printf 'plan text\n' >"$T/ctx-a/plan.md"
 printf 'mutant list\n' >"$T/ctx-b/plan.md"
@@ -2573,7 +2615,7 @@ grep -q "^usage:" <<<"$err" || fail "flag-looking full-rereview prints usage"
 # --- case n: verify mode with a prior comment is not refused
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
-printf 'P1 findings text\n' >"$T/findings.txt"
+printf 'P1 findings text\n- Evidence: refuted: this fixture checks prior comments do not block verify\n' >"$T/findings.txt"
 write_record verify DONE "rechecked
 FIX-OK all repaired
 STATUS: DONE" 0

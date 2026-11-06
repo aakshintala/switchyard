@@ -17,6 +17,8 @@
 #     --full-rereview is review mode only; it skips the comment check.
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]
 #     --since is the reviewed head; verify diffs from its repair base on current base.
+#     An empty repair diff refuses findings without a refuted: line; push the
+#     repair or mark each finding answered by a ruling as refuted before starting.
 #     launches one job per review role, prints "<role> <job-id>" per job, then
 #     "watch: delegate watch <id>..." and "collect: review-pr collect <id>..."
 #     with every id spelled out, and returns at once. Wait for the ids with the
@@ -751,6 +753,24 @@ cmd_start() {
     fi
     echo "review-pr: repair base $repair_base ($since_full replayed onto $new_mb)" >&2
     since="$repair_base"
+    if git -C "$clone" diff --quiet "$since..$sha"; then
+      if awk '
+        /^P[123] / {
+          if (in_finding && !refuted) unrefuted = 1
+          in_finding = 1
+          refuted = 0
+          next
+        }
+        in_finding && /refuted: [^[:space:]]/ { refuted = 1 }
+        END {
+          if (in_finding && !refuted) unrefuted = 1
+          exit unrefuted ? 0 : 1
+        }
+      ' "$verify"; then
+        echo "review-pr: verify has an empty repair diff and an unrefuted finding; push the repair, add a refuted: <evidence> line to each finding the ruling answered, or for a recorded ruling with no code change run ship-pr --unverified-fixes <findings file>" >&2
+        exit 1
+      fi
+    fi
   fi
 
   jids=""
