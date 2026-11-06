@@ -4,6 +4,7 @@
 # Usage: tkt-ship <state>
 # State key no_mutants_label: reason passed to ship-pr as --no-mutants-label.
 # State key mutant_job opts ship-pr into its --mutants-gate check.
+# State key merge_check: command passed to ship-pr as --merge-check unless merge_gate is gate.
 # State key body_ends: text passed to ship-pr as --body-ends; absent, unreadable,
 # empty or blank passes no flag and asks for no check.
 # State key unverified: path passed to ship-pr as --unverified-fixes.
@@ -12,7 +13,7 @@ set -euo pipefail
 usage() {
   echo "usage: tkt-ship <state>" >&2
   echo "       longest wait 144000 s (40 h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" >&2
-  echo "       state keys: no_mutants_label passes --no-mutants-label, mutant_job passes --mutants-gate, body_ends passes --body-ends, unverified passes --unverified-fixes" >&2
+  echo "       state keys: no_mutants_label passes --no-mutants-label, mutant_job passes --mutants-gate, body_ends passes --body-ends, unverified passes --unverified-fixes, merge_check passes --merge-check unless merge_gate is gate" >&2
   exit 2
 }
 [ $# -eq 1 ] || usage
@@ -218,6 +219,9 @@ else
   plan_gate_args tkt
   if [ -n "${plan_gate_argv[*]+x}" ] && plan="$(tkt get plan 2>/dev/null)" && [ -n "$plan" ]; then
     "$bin_dir/plan-gate" "${plan_gate_argv[@]}" "$plan" >/dev/null || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $plan"
+  fi
+  if merge_check="$(tkt get merge_check 2>/dev/null)" && [ -n "$merge_check" ]; then
+    args+=(--merge-check "$merge_check")
   fi
 fi
 

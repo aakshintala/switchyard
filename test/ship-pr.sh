@@ -847,6 +847,49 @@ grep -q "^gh pr merge 7 --repo O/N --squash --match-head-commit $HEAD0\$" "$ST/g
 [ ! -e "$WT" ] || fail "guard passes: worktree removed"
 origin_head >/dev/null && fail "guard passes: no local merge commit leaks to origin"
 
+# A merge check on a non-strict base sees main's new file and fails before merge.
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
+ship --merge-check 'if [ -e other.txt ]; then for i in $(seq 1 25); do echo gate-tail-$i; done; exit 1; fi'
+expect 1 "not strict merge check fails on moved main"
+! grep -q '^gh pr merge' "$ST/gh.log" || fail "merge check failure: no merge call"
+grep -q '^gate-tail-25$' <<<"$OUT" || fail "merge check failure: last 20 lines printed"
+grep -q '^gate-tail-5$' <<<"$OUT" && fail "merge check failure: output before last 20 lines omitted"
+grep -q '^full merge check output: ' <<<"$OUT" || fail "merge check failure: saved log path printed"
+merge_check_log="$(sed -n 's/^full merge check output: //p' <<<"$OUT")"
+case "$merge_check_log" in "$TMPDIR"/ship-pr-7-merge-check.*) ;; *) fail "merge check failure: path identifies the check: [$merge_check_log]" ;; esac
+[ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD0" ] || fail "merge check failure: worktree back on pinned head"
+[ -z "$(git -C "$WT" status --porcelain)" ] || fail "merge check failure: worktree clean"
+[ -d "$WT" ] || fail "merge check failure: worktree kept"
+
+# A passing merge check runs on current main and allows the pinned head to merge.
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
+MAIN1="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+ship --merge-check 'test -e other.txt; git rev-parse HEAD >>"$ST/merge-check-heads"'
+expect 0 "not strict merge check passes on moved main"
+[ "$(wc -l <"$ST/merge-check-heads")" -eq 1 ] || fail "merge check runs once on a moved main"
+git -C "$C" merge-base --is-ancestor "$MAIN1" "$(cat "$ST/merge-check-heads")" \
+  || fail "merge check passes on the tree with current origin/main"
+grep -q "merge check passes on the PR merged with current origin/main" <<<"$ERR" || fail "merge check pass message: [$ERR]"
+[ ! -e "$WT" ] || fail "merge check pass: worktree removed"
+origin_head >/dev/null && fail "merge check pass: no local merge commit leaks to origin"
+
+# If main moves during a passing check, the check reruns on the new tip.
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main initial.txt before
+ship --merge-check 'if [ ! -e "$ST/merge-check-once" ]; then touch "$ST/merge-check-once"; echo moved >"$C/other.txt"; git -C "$C" add .; git -C "$C" commit -qm moved; git -C "$C" push -q origin main; else test -e other.txt; fi; git rev-parse HEAD >>"$ST/merge-check-heads"'
+expect 0 "merge check retries after main moves"
+[ "$(wc -l <"$ST/merge-check-heads")" -eq 2 ] || fail "merge check reruns once after main moves"
+MAIN2="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+git -C "$C" merge-base --is-ancestor "$MAIN2" "$(sed -n 2p "$ST/merge-check-heads")" \
+  || fail "merge check retry runs on the new tip"
+[ ! -e "$WT" ] || fail "merge check retry pass: worktree removed"
+
+# With both flags, only --gate runs on the merged tree.
+setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
+ship --gate 'if [ -e other.txt ] && [ ! -e "$ST/gate-main-moved" ]; then touch "$ST/gate-main-moved"; echo later >"$C/later.txt"; git -C "$C" add .; git -C "$C" commit -qm later; git -C "$C" push -q origin main; fi; git rev-parse HEAD >>"$ST/gate-heads"' --merge-check 'touch "$ST/merge-check-ran"'
+expect 0 "merge check is ignored when gate is set"
+[ "$(wc -l <"$ST/gate-heads")" -eq 2 ] || fail "gate runs initially and on merged main without merge-check retries"
+[ ! -e "$ST/merge-check-ran" ] || fail "merge check is ignored when gate is set"
+
 # gate fails only on the merged tree: print panic context and restore the pinned head
 GATE_PANIC_ON_MERGED="if [ ! -e bad ]; then echo gate-step-2-pass; exit 0; fi; $GATE_PANIC"
 setup; echo "$NOSTRICT" >"$ST/rules"; advance_main bad x; echo true >"$ST/draft"

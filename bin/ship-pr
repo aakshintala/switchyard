@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require a matching
@@ -15,8 +15,9 @@
 #        below); push a rebased branch with --force-with-lease; mark a draft
 #        ready (once, before the first CI wait); `gh-ci wait` (--timeout, default
 #        7200), rerunning failed jobs once when the failure is outside the diff
-#        (see below); on a non-strict base with --gate, gate the PR merged
-#        with current origin/main in a throwaway merge commit (step 7); squash-merge
+#        (see below); on a non-strict base with --gate, or --merge-check when
+#        --gate is absent, check the PR merged with current origin/main in a
+#        throwaway merge commit (step 7); squash-merge
 #        pinned to the checked head, retrying once on a base race or GraphQL error
 #        and re-entering the rebase once after the merge lost the race to
 #        origin/main in strict mode (no extra sleep, sharing the 3 retries);
@@ -122,13 +123,15 @@
 #        Both gate runs set NEXTEST_RETRIES=1, retrying failed nextest tests once.
 #        Report each FLAKY result and its failed-attempt panic text; retries do not
 #        change the gate's exit status.
-#        With --gate, step 7 refetches origin/main after step 2: when it is not
+#        With --gate or --merge-check, step 7 refetches origin/main after step 2: when it is not
 #        an ancestor of the pinned head, merge it into the pinned head in a throwaway
-#        commit in --worktree, run the gate there, and restore the pinned head whatever
-#        happens (nothing is pushed). A merge conflict exits 3; a failing gate exits 1
+#        commit in --worktree, run the selected check there, and restore the pinned head
+#        whatever happens (nothing is pushed). A merge conflict exits 3; a failing check exits 1
 #        after printing its last 20 lines, panic context outside that tail, and the path
-#        to the full output saved under ${TMPDIR:-/tmp}/ship-pr-<pr>-gate.*. Passing gates
-#        leave no log file. Without --gate the check is skipped.
+#        to the full output saved under ${TMPDIR:-/tmp}/ship-pr-<pr>-gate.*. Passing checks
+#        leave no log file. If origin/main moves during a passing --merge-check, rerun it
+#        on the new tip up to three times; the fourth move exits 1. With --gate,
+#        --merge-check is ignored. Without either flag the check is skipped.
 #        --unverified-fixes <file> is for a fix round that answers no real bug (review-loop
 #        step 3), so it ships with no re-review. The file must be readable and hold a
 #        non-blank line, else exit 2 before anything else. On a patch-id mismatch, once per
@@ -144,7 +147,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
   echo "       longest wait: 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
   exit 2
 }
@@ -326,11 +329,12 @@ gate_preflight() {
 }
 
 run_gate() {
-  local output_file cargo_slot_dir
-  output_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-gate.XXXXXX")"
+  local output_file cargo_slot_dir check_cmd="${1:-$gate}" check_label="${2:-gate}" check_file_label
+  check_file_label="${check_label// /-}"
+  output_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-${check_file_label}.XXXXXX")"
   cargo_slot_dir="$(mktemp -d "${TMPDIR:-/tmp}/ship-pr-cargo-slot.XXXXXX")"
   ln -s "$here/cargo-slot" "$cargo_slot_dir/cargo"
-  if (cd "$worktree" && PATH="$cargo_slot_dir:$PATH" NEXTEST_RETRIES=1 bash -c "$gate" </dev/null) >"$output_file" 2>&1; then
+  if (cd "$worktree" && PATH="$cargo_slot_dir:$PATH" NEXTEST_RETRIES=1 bash -c "$check_cmd" </dev/null) >"$output_file" 2>&1; then
     rm -rf "$cargo_slot_dir"
     if report_flakes "$output_file"; then
       GH_CI_LOG_LINES=0 bash "$here/gh-ci" panics <"$output_file" >&2
@@ -342,7 +346,7 @@ run_gate() {
   report_flakes "$output_file" || true
   tail -n 20 "$output_file" || true
   GH_CI_LOG_LINES=20 bash "$here/gh-ci" panics <"$output_file"
-  printf 'full gate output: %s\n' "$output_file"
+  printf 'full %s output: %s\n' "$check_label" "$output_file"
   return 1
 }
 
@@ -350,7 +354,7 @@ run_gate() {
 ship_args=("$@")
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" keep_branch="" no_mutants_label="" mutants_gate=""
+repo="" reviewed="" worktree="" gate="" merge_check="" timeout=7200 body_has=() body_ends="" unverified="" allow_commit_closes="" keep_branch="" no_mutants_label="" mutants_gate=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow-commit-closes) allow_commit_closes=1; shift; continue ;;
@@ -363,6 +367,7 @@ while [ $# -gt 0 ]; do
     --reviewed) reviewed="$2" ;;
     --worktree) worktree="$2" ;;
     --gate) gate="$2" ;;
+    --merge-check) merge_check="$2" ;;
     --timeout) timeout="$2" ;;
     --body-has) case "$2" in ''|*$'\n'*) usage ;; esac; body_has+=("$2") ;;
     --body-ends) case "$2" in ''|*$'\n'*) usage ;; esac; body_ends="$2" ;;
@@ -926,32 +931,58 @@ while :; do
     say "origin/main moved during CI; rebasing again (retry $retries of 3)"
   done
   
-  # Step 7: on a non-strict base with --gate, gate the PR merged with current
-  # origin/main. The merge is a throwaway commit in --worktree; nothing is pushed,
-  # and the worktree goes back to the pinned head on every path.
-  if [ "$strict" = 0 ] && [ -n "$gate" ]; then
+  # Step 7: on a non-strict base, check the PR merged with current origin/main.
+  # The merge is a throwaway commit in --worktree; nothing is pushed, and the
+  # worktree goes back to the pinned head on every path.
+  if [ "$strict" = 0 ] && { [ -n "$gate" ] || [ -n "$merge_check" ]; }; then
+    step7_check="gate"
+    if [ -z "$gate" ]; then
+      gate="$merge_check"
+      step7_check="merge check"
+    fi
     git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
     if ! git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
-      say "gating the PR merged with current origin/main"
+      say "$step7_check the PR merged with current origin/main"
       guard_restore() {
         git -C "$worktree" reset -q --hard "$pin" >&2 || die_after_ready 1 "failed to restore pinned head ${pin:0:8}"
       }
       trap 'guard_rc=$?; trap - EXIT INT TERM; guard_restore; if [ "$guard_rc" -ne 0 ]; then exit_after_ready "$guard_rc" "gate aborted"; else exit "$guard_rc"; fi' EXIT
       trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 143 "gate interrupted"' TERM
       trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 130 "gate interrupted"' INT
-      if ! git -C "$worktree" -c user.name=ship-pr -c user.email=ship-pr@localhost merge --no-ff --no-edit origin/main >&2; then
+      merge_check_moves=0
+      while :; do
+        checked_main="$(git -C "$worktree" rev-parse origin/main)"
+        if ! git -C "$worktree" -c user.name=ship-pr -c user.email=ship-pr@localhost merge --no-ff --no-edit origin/main >&2; then
+          guard_restore
+          trap - EXIT INT TERM
+          die_after_ready 3 "PR conflicts with current origin/main; rebase, then rerun"
+        fi
+        if ! run_gate "$gate" "$step7_check"; then
+          guard_restore
+          trap - EXIT INT TERM
+          die_after_ready 1 "the PR merged with current origin/main fails the $step7_check"
+        fi
+        if [ "$step7_check" = gate ]; then
+          guard_restore
+          trap - EXIT INT TERM
+          say "gate passes on the PR merged with current origin/main"
+          break
+        fi
+        git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
+        if [ "$(git -C "$worktree" rev-parse origin/main)" = "$checked_main" ]; then
+          guard_restore
+          trap - EXIT INT TERM
+          say "$step7_check passes on the PR merged with current origin/main"
+          break
+        fi
         guard_restore
-        trap - EXIT INT TERM
-        die_after_ready 3 "PR conflicts with current origin/main; rebase, then rerun"
-      fi
-      if ! run_gate; then
-        guard_restore
-        trap - EXIT INT TERM
-        die_after_ready 1 "the PR merged with current origin/main fails the gate"
-      fi
-      guard_restore
-      trap - EXIT INT TERM
-      say "gate passes on the PR merged with current origin/main"
+        merge_check_moves=$((merge_check_moves + 1))
+        if [ "$merge_check_moves" -gt 3 ]; then
+          trap - EXIT INT TERM
+          die_after_ready 1 "origin/main moved during the merge check; rerun ship-pr"
+        fi
+        say "origin/main moved during the merge check; rerunning on the new tip (retry $merge_check_moves of 3)"
+      done
     fi
   fi
   
