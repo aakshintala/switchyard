@@ -430,7 +430,37 @@ run_plan confirm --edits "$CDIR/edits.md"
 expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "second confirm"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "a second confirm starts no job"
 
-# --- stale confirm edits do not spend the confirm round ---
+# --- confirm compares the plan with the verify snapshot, not edit mtimes ---
+setup_case confirm-applied-plan-newer-edits
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 1 || fail "confirm-applied-plan-newer-edits seed round"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "confirm-applied-plan-newer-edits verify exits 0 (rc=$RC)"
+expected_verified_hash="$(git -C "$WT" hash-object "$CDIR/plan.md")"
+edits="$CDIR/run/switchyard-518-confirm-edits-p2.md"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$edits"
+cat "$edits" >>"$CDIR/plan.md"
+touch -t 202001010001 "$CDIR/plan.md"
+touch -t 202001010002 "$edits"
+run_plan confirm --edits "$edits"
+[ "$RC" -eq 0 ] || fail "confirm accepts applied edits even when the edits file is newer (rc=$RC)"
+[ "$(state_get verified_plan_hash)" = "$expected_verified_hash" ] || fail "verify records the plan content hash"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm applied edits with newer mtime"
+
+setup_case confirm-unchanged-since-verify
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 1 || fail "confirm-unchanged-since-verify seed round"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "confirm-unchanged-since-verify verify exits 0 (rc=$RC)"
+edits="$CDIR/run/switchyard-518-confirm-edits-p2.md"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$edits"
+touch -t 202001010001 "$CDIR/plan.md"
+touch -t 202001010002 "$edits"
+run_plan confirm --edits "$edits"
+[ "$RC" -eq 1 ] || fail "confirm rejects unchanged plan since verify (rc=$RC)"
+expect_verdict "TKT tkt-plan STALE-CONFIRM edits=* plan=* log=*" "confirm unchanged plan since verify"
+
+# --- stale confirm edits with no recorded plan hash keep the mtime fallback ---
 setup_case confirm-stale-edits
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-stale-edits seed round"
@@ -438,6 +468,7 @@ edits="$CDIR/run/switchyard-518-confirm-edits-p2.md"
 printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$edits"
 touch -t 202001010001 "$CDIR/plan.md"
 touch -t 202001010002 "$edits"
+[ -z "$(state_get verified_plan_hash)" ] || fail "confirm-stale-edits has no recorded plan hash"
 printf 'ok' >"$T/mode"
 jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan confirm --edits "$edits"

@@ -269,10 +269,11 @@ do_verify() {
   runjob "$slot" "$vbrief" "$rep" "${args[@]}"
   if [ "$REC" -eq 0 ]; then verdict=ok; else verdict=lines; fi
   plan_verdict_write "$tkt_state" "$state" "$verdict" "$base" "$plan" "$worktree"
-  # A verify that reaches a report records its base; a failed or asking job
-  # leaves the old base so the retry stays exempt. An exempt run never writes
-  # the round counters.
+  verified_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+  # A verify that reaches a report records its base and plan snapshot; a failed
+  # or asking job leaves the prior state so the retry stays exempt.
   t set verified_base "$base"
+  t set verified_plan_hash "$verified_plan_hash"
   if [ "$drift" -eq 0 ]; then
     t set verifier_round "$((round + 1))"
   fi
@@ -291,8 +292,18 @@ do_confirm() {
     [ -f "$candidate" ] || continue
     if [ -z "$latest_edits" ] || [ "$candidate" -nt "$latest_edits" ]; then latest_edits="$candidate"; fi
   done
-  if [ -n "$latest_edits" ] && [ "$latest_edits" -nt "$plan" ]; then
-    emit "STALE-CONFIRM edits=$latest_edits plan=$plan" 1 "apply edits from $latest_edits to $plan, then rerun: tkt-plan $state confirm --edits $latest_edits"
+  if [ -n "$latest_edits" ]; then
+    verified_plan_hash="$(t get verified_plan_hash 2>/dev/null || true)"
+    stale_confirm=0
+    if [ -n "$verified_plan_hash" ]; then
+      plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+      [ "$plan_hash" = "$verified_plan_hash" ] && stale_confirm=1
+    elif [ "$latest_edits" -nt "$plan" ]; then
+      stale_confirm=1
+    fi
+    if [ "$stale_confirm" -eq 1 ]; then
+      emit "STALE-CONFIRM edits=$latest_edits plan=$plan" 1 "apply edits from $latest_edits to $plan, then rerun: tkt-plan $state confirm --edits $latest_edits"
+    fi
   fi
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   granted=0
@@ -425,7 +436,7 @@ do_set() {
   # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
   if [ "$old_plan" != "$plan" ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
-    t set verifier_round 0; t set confirmed_for ""; t set verified_base ""
+    t set verifier_round 0; t set confirmed_for ""; t set verified_base ""; t set verified_plan_hash ""
     t set granted_by ""; t set granted_comment ""; t set granted_used ""; t set granted_owner ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
   fi
@@ -449,6 +460,7 @@ do_replan() {
   t set plan_verdict ""
   t set plan_verdict_base ""
   t set plan_verdict_hash ""
+  t set verified_plan_hash ""
   t set plan_triage_comment ""
   t set job.lane ""
   t set job.fix1 ""
