@@ -13,8 +13,10 @@ printf '%s\n' "$@" > "$(dirname "$0")/argv.txt"
 printf '%s %s\n' "${FORCE_COLOR-unset}" "${CLICOLOR_FORCE-unset}" > "$(dirname "$0")/color.env"
 rel="$(dirname "$0")/go"
 d="$(dirname "$0")"
-cat > "$d/stdin.txt"
-pt="$(cat "$d/stdin.txt")"
+# Concurrent jobs share $d: read this run's own copy, then publish it with an atomic mv.
+cat > "$d/stdin.$$"
+pt="$(cat "$d/stdin.$$")"
+mv "$d/stdin.$$" "$d/stdin.txt"
 # One loop turn: when FAKE_TICK names a fifo, the test releases each turn by
 # writing a line, and the fake acknowledges it; otherwise the turn is a short
 # sleep. The hold below ends only on `go`, a removed directory, or a dead
@@ -572,6 +574,36 @@ fn status_prints_running_without_waiting() {
 }
 
 #[test]
+fn status_settles_a_dead_supervisor_before_printing() {
+    let e = Env::new("status-dead-supervisor");
+    let id = "status-dead-supervisor";
+    let mut supervisor = Command::new("sleep").arg("30").spawn().unwrap();
+    e.write_record(
+        id,
+        &serde_json::json!({
+            "status": "RUNNING",
+            "supervisorPid": supervisor.id(),
+            "resume": {
+                "model": "composer-2.5",
+                "backend": "cursor",
+                "sessionId": "session-1"
+            }
+        }),
+    );
+    supervisor.kill().unwrap();
+    supervisor.wait().unwrap();
+
+    let out = e.status_output(id);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("{id}: ERROR (supervisor died)\n")
+    );
+    assert_eq!(e.record(id)["status"], "ERROR");
+    assert_eq!(e.record(id)["result"]["text"], "supervisor died");
+}
+
+#[test]
 fn status_prints_done_for_a_finished_job() {
     let e = Env::new("status-done");
     let id = e.run("quick");
@@ -615,9 +647,62 @@ fn status_shows_error_text_and_uncommitted_changes() {
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
         format!(
-            "{id}: ERROR (muse: wall timeout (7200000 ms); 2 files changed, uncommitted, 0 commits)\n"
+            "uncommitted complete tree: commit and run the gate; do not resume\n{id}: ERROR (muse: wall timeout (7200000 ms); 2 files changed, uncommitted, 0 commits)\n"
         )
     );
+}
+
+#[test]
+fn status_recommends_committing_complete_uncommitted_trees_only() {
+    let e = Env::new("status-uncommitted-complete-tree");
+    let cases = [
+        (
+            "uncommitted-complete",
+            serde_json::json!({"filesChanged":["one.rs"],"newCommits":[]}),
+            true,
+        ),
+        (
+            "committed-complete",
+            serde_json::json!({"filesChanged":["one.rs"],"newCommits":["abc123"]}),
+            false,
+        ),
+        (
+            "no-changes",
+            serde_json::json!({"filesChanged":[],"newCommits":[]}),
+            false,
+        ),
+    ];
+    for (id, change_set, should_recommend) in cases {
+        e.write_record(
+            id,
+            &serde_json::json!({
+                "status": "ERROR",
+                "result": {"changeSet": change_set}
+            }),
+        );
+        let out = e.status_output(id);
+        assert_eq!(out.status.code(), Some(0), "{id}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        if should_recommend {
+            assert_eq!(
+                stdout.lines().next(),
+                Some("uncommitted complete tree: commit and run the gate; do not resume"),
+                "{id}: {stdout:?}"
+            );
+            assert!(
+                stdout
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .starts_with(&format!("{id}: ERROR"))
+            );
+        } else {
+            assert!(
+                !stdout.starts_with("uncommitted complete tree:"),
+                "{id}: {stdout:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -634,11 +719,11 @@ fn status_summary_forms() {
         ),
         (
             serde_json::json!({"status":"ERROR","result":{"changeSet":{"filesChanged":["one.rs"],"uncommittedFiles":[],"dirtyAfter":true,"newCommits":[]}}}),
-            "ERROR (1 file changed, uncommitted, 0 commits)",
+            "uncommitted complete tree: commit and run the gate; do not resume\nERROR (1 file changed, uncommitted, 0 commits)",
         ),
         (
             serde_json::json!({"status":"ERROR","result":{"changeSet":{"filesChanged":["one.rs"],"uncommittedFiles":["one.rs"],"dirtyAfter":false,"newCommits":[]}}}),
-            "ERROR (1 file changed, uncommitted, 0 commits)",
+            "uncommitted complete tree: commit and run the gate; do not resume\nERROR (1 file changed, uncommitted, 0 commits)",
         ),
         (
             serde_json::json!({"status":"ERROR","result":{"text":"boom"}}),
@@ -646,7 +731,7 @@ fn status_summary_forms() {
         ),
         (
             serde_json::json!({"status":"ERROR","result":{"text":"","changeSet":{"filesChanged":["one.rs","two.rs"],"newCommits":[]}}}),
-            "ERROR (2 files changed, 0 commits)",
+            "uncommitted complete tree: commit and run the gate; do not resume\nERROR (2 files changed, 0 commits)",
         ),
         (
             serde_json::json!({"status":"DONE","result":{"text":"do not show","changeSet":{"filesChanged":["one.rs"],"newCommits":[]}}}),
@@ -714,7 +799,17 @@ fn status_summary_forms() {
         assert_eq!(out.status.code(), Some(0), "case {index}");
         assert_eq!(
             String::from_utf8(out.stdout).unwrap(),
-            format!("{id}: {expected}\n"),
+            if let Some(summary) =
+                expected.strip_prefix(
+                    "uncommitted complete tree: commit and run the gate; do not resume\n",
+                )
+            {
+                format!(
+                    "uncommitted complete tree: commit and run the gate; do not resume\n{id}: {summary}\n"
+                )
+            } else {
+                format!("{id}: {expected}\n")
+            },
             "case {index}"
         );
     }
@@ -1276,6 +1371,75 @@ fn resume_overrides_replace_stored_values() {
     assert_eq!(done["resume"]["gate"], "true");
     assert_eq!(done["result"]["gateResult"]["command"], "true");
     assert_eq!(done["result"]["gateResult"]["passed"], true);
+}
+
+#[test]
+fn resume_timeout_flags_override_and_persist_values() {
+    let e = Env::new("resume-timeout-flags");
+    let a = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--tool-idle-ms",
+            "1200000",
+            "--idle-ms",
+            "900000",
+            "--wall-ms",
+            "10800000",
+        ],
+        "first",
+        &[],
+    );
+    let original = e.wait_terminal(&a);
+    assert_eq!(original["resume"]["toolIdleMs"], 1_200_000);
+    assert_eq!(original["resume"]["idleMs"], 900_000);
+    assert_eq!(original["resume"]["wallMs"], 10_800_000);
+
+    for (flag, value, field, expected) in [
+        ("--tool-idle-ms", "2400000", "toolIdleMs", 2_400_000),
+        ("--idle-ms", "1800000", "idleMs", 1_800_000),
+        ("--wall-ms", "21600000", "wallMs", 21_600_000),
+    ] {
+        let b = e.resume_ok(&a, &[flag, value], "continue");
+        let resumed = e.wait_terminal(&b);
+        assert_eq!(resumed["resume"][field], expected, "{flag}");
+        for (unchanged, stored) in [
+            ("toolIdleMs", 1_200_000),
+            ("idleMs", 900_000),
+            ("wallMs", 10_800_000),
+        ] {
+            if unchanged != field {
+                assert_eq!(resumed["resume"][unchanged], stored, "{flag}");
+            }
+        }
+    }
+
+    let b = e.resume_ok(&a, &[], "continue without overrides");
+    let resumed = e.wait_terminal(&b);
+    assert_eq!(resumed["resume"]["toolIdleMs"], 1_200_000);
+    assert_eq!(resumed["resume"]["idleMs"], 900_000);
+    assert_eq!(resumed["resume"]["wallMs"], 10_800_000);
+}
+
+#[test]
+fn resume_timeout_flags_reject_zero_and_non_numeric_values() {
+    let e = Env::new("resume-invalid-timeout-flags");
+    let a = e.run("first");
+    e.wait_terminal(&a);
+
+    for flag in ["--tool-idle-ms", "--idle-ms", "--wall-ms"] {
+        for bad in ["0", "not-a-number"] {
+            let out = e.resume(&a, &[flag, bad], Some("continue"));
+            assert_eq!(out.status.code(), Some(2), "{flag} {bad}");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains(&format!("invalid {flag} {bad}")),
+                "{stderr}"
+            );
+            assert!(out.stdout.is_empty(), "{flag} {bad}");
+        }
+    }
 }
 
 #[test]

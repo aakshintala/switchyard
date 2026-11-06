@@ -72,6 +72,8 @@ A Muse model id is `muse/` plus the Muse model name (for example, `muse/muse-spa
 
 ## Status records
 
+A raw record's `status` is settled only when a delegate command reads it. Tools that read records directly should call `delegate status <id>` instead of trusting the field.
+
 Each job writes `DELEGATE_JOBS_DIR/<jobId>.json` when that override is set, resolved as below. Otherwise it writes to `$TMPDIR/delegate-jobs/<jobId>.json` (the OS temp directory when `TMPDIR` is unset). Prompt text is stored alongside as `<jobId>.prompt` until the supervisor starts.
 
 `cancel`, `status`, `watch` and `resume` search `DELEGATE_JOBS_DIR`, the caller's `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`, then the per-user locator at `${XDG_CACHE_HOME:-$HOME/.cache}/delegate/locators/<jobId>`. `bin/job-record` uses the same order. The locator fills misses only, so old records need no migration.

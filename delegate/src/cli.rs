@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 pub(crate) const USAGE: &str =
     "usage: delegate run --model M [--cwd D] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
-       delegate resume <jobId> [--model M] [--gate CMD] [--prompt-file F | stdin]
+       delegate resume <jobId> [--model M] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
        delegate status <jobId>  (print state and a finished job's result summary without waiting)
@@ -116,6 +116,14 @@ fn positive_ms_flag(kv: &[(String, String)], name: &str) -> Result<Option<f64>, 
             _ => Err(format!("invalid {name} {s}")),
         },
     }
+}
+
+fn resume_ms_flag(
+    kv: &[(String, String)],
+    name: &str,
+    stored: Option<f64>,
+) -> Result<Option<f64>, String> {
+    Ok(positive_ms_flag(kv, name)?.or(stored))
 }
 
 /// `run`'s unknown-id message, reused wherever a model flag is resolved.
@@ -322,7 +330,17 @@ fn run(args: &[String]) -> Result<i32, Usage> {
 }
 
 fn resume(args: &[String]) -> Result<i32, Usage> {
-    let (kv, pos) = parse(args, &["--model", "--gate", "--prompt-file"])?;
+    let (kv, pos) = parse(
+        args,
+        &[
+            "--model",
+            "--gate",
+            "--tool-idle-ms",
+            "--idle-ms",
+            "--wall-ms",
+            "--prompt-file",
+        ],
+    )?;
     let [old_id] = pos.as_slice() else {
         return usage(USAGE);
     };
@@ -359,9 +377,12 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
     }
     let stored_cwd = old["resume"]["cwd"].as_str().unwrap_or("").to_string();
     let stored_gate = old["resume"]["gate"].as_str().unwrap_or("").to_string();
-    let tool_idle_ms = old["resume"]["toolIdleMs"].as_f64();
-    let idle_ms = old["resume"]["idleMs"].as_f64();
-    let wall_ms = old["resume"]["wallMs"].as_f64();
+    let tool_idle_ms = resume_ms_flag(&kv, "--tool-idle-ms", old["resume"]["toolIdleMs"].as_f64())
+        .or_else(usage)?;
+    let idle_ms =
+        resume_ms_flag(&kv, "--idle-ms", old["resume"]["idleMs"].as_f64()).or_else(usage)?;
+    let wall_ms =
+        resume_ms_flag(&kv, "--wall-ms", old["resume"]["wallMs"].as_f64()).or_else(usage)?;
 
     let deps = match build_deps() {
         Ok(d) => d,
@@ -823,13 +844,24 @@ fn watch_now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Build the one-line status output, including the terminal result's text and change summary.
+/// Build the status output, including a commit-and-gate recommendation for an ERROR record
+/// with changed files but no commits.
 fn status_line(id: &str, rec: &serde_json::Value) -> String {
     let state = rec
         .get("status")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("UNKNOWN");
     let result = rec.get("result").filter(|value| value.is_object());
+    let change_set = result.and_then(|value| value.get("changeSet"));
+    let complete_uncommitted_tree = state == "ERROR"
+        && change_set
+            .and_then(|value| value.get("filesChanged"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|files| !files.is_empty())
+        && change_set
+            .and_then(|value| value.get("newCommits"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty);
     let mut parts = Vec::new();
 
     if state != "DONE"
@@ -886,10 +918,15 @@ fn status_line(id: &str, rec: &serde_json::Value) -> String {
         parts.push(changes);
     }
 
-    if parts.is_empty() {
+    let status = if parts.is_empty() {
         format!("{id}: {state}")
     } else {
         format!("{id}: {state} ({})", parts.join("; "))
+    };
+    if complete_uncommitted_tree {
+        format!("uncommitted complete tree: commit and run the gate; do not resume\n{status}")
+    } else {
+        status
     }
 }
 
@@ -901,6 +938,7 @@ fn status(args: &[String]) -> Result<i32, Usage> {
     let [id] = pos.as_slice() else {
         return usage(USAGE);
     };
+    settle_dead_supervisor(id);
     let Some(raw) = read_record(id) else {
         return Err(missing_record(id));
     };
@@ -1110,6 +1148,47 @@ mod tests {
             let got = positive_ms_flag(&parsed, "--wall-ms");
             assert!(matches!(got, Ok(Some(_))), "{good}: {got:?}");
             assert_eq!(positive_ms_flag(&[], "--wall-ms"), Ok(None));
+        }
+    }
+
+    #[test]
+    fn resume_timing_flags_override_stored_values() {
+        for (name, stored, passed) in [
+            ("--tool-idle-ms", 1_200_000.0, "2400000"),
+            ("--idle-ms", 900_000.0, "1800000"),
+            ("--wall-ms", 10_800_000.0, "21600000"),
+        ] {
+            let parsed = kv(&[(name, passed)]);
+            let expected = passed.parse::<f64>().unwrap();
+            assert_eq!(
+                resume_ms_flag(&parsed, name, Some(stored)),
+                Ok(Some(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn resume_timing_flags_keep_stored_values_when_omitted() {
+        for (name, stored) in [
+            ("--tool-idle-ms", 1_200_000.0),
+            ("--idle-ms", 900_000.0),
+            ("--wall-ms", 10_800_000.0),
+        ] {
+            assert_eq!(resume_ms_flag(&[], name, Some(stored)), Ok(Some(stored)));
+            assert_eq!(resume_ms_flag(&[], name, None), Ok(None));
+        }
+    }
+
+    #[test]
+    fn resume_timing_flags_reject_zero_and_non_numeric_values() {
+        for name in ["--tool-idle-ms", "--idle-ms", "--wall-ms"] {
+            for bad in ["0", "not-a-number"] {
+                let parsed = kv(&[(name, bad)]);
+                assert_eq!(
+                    resume_ms_flag(&parsed, name, Some(123.0)),
+                    Err(format!("invalid {name} {bad}"))
+                );
+            }
         }
     }
 

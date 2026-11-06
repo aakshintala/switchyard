@@ -26,7 +26,10 @@ fn cargo_mutants_shim_refuses_through_the_job_seam() {
         assert!(
             result
                 .output_tail
-                .contains("cargo mutants is CI-only; read the CI mutants log instead"),
+                .contains("cargo mutants is CI-only; read the CI mutants log instead")
+                || result
+                    .output_tail
+                    .contains("cargo-slot: cargo mutants is banned for lanes"),
             "{command}: {result:?}"
         );
     }
