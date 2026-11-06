@@ -13,8 +13,10 @@ printf '%s\n' "$@" > "$(dirname "$0")/argv.txt"
 printf '%s %s\n' "${FORCE_COLOR-unset}" "${CLICOLOR_FORCE-unset}" > "$(dirname "$0")/color.env"
 rel="$(dirname "$0")/go"
 d="$(dirname "$0")"
-cat > "$d/stdin.txt"
-pt="$(cat "$d/stdin.txt")"
+# Concurrent jobs share $d: read this run's own copy, then publish it with an atomic mv.
+cat > "$d/stdin.$$"
+pt="$(cat "$d/stdin.$$")"
+mv "$d/stdin.$$" "$d/stdin.txt"
 # One loop turn: when FAKE_TICK names a fifo, the test releases each turn by
 # writing a line, and the fake acknowledges it; otherwise the turn is a short
 # sleep. The hold below ends only on `go`, a removed directory, or a dead

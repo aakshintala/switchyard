@@ -10,8 +10,10 @@ use std::time::{Duration, Instant};
 
 const FAKE_AGENT: &str = r#"#!/bin/sh
 d="$(dirname "$0")"
-cat > "$d/stdin.txt"
-pt="$(cat "$d/stdin.txt")"
+# Concurrent jobs share $d: read this run's own copy, then publish it with an atomic mv.
+cat > "$d/stdin.$$"
+pt="$(cat "$d/stdin.$$")"
+mv "$d/stdin.$$" "$d/stdin.txt"
 printf '%s\n' "$@" > "$d/argv.txt"
 rel="$(dirname "$0")/go"
 case "$* $pt" in
