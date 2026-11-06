@@ -677,22 +677,52 @@ setup_case resume
 reset_stub
 make_record old-9 BLOCKED none 0 2 0 none stub-1
 make_record stub-1 DONE 0 1 2 0
+printf 'job.lane=%s\njob.lane.prompt=old-prompt-hash\n' old-8 >>"$S"
 run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md"
 [ "$RC" -eq 0 ] || fail "resume exits 0"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=1 gate=PASS log=*" "resume"
 grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" || fail "resume calls delegate resume"
 [ "$(bash "$TKT_STATE" "$S" get job.lane)" = "stub-1" ] || fail "resume stores the new id"
+expected_resume_hash="$(shasum -a 256 <"$T/resume-prompt.md" | awk '{print $1}')"
+[ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$expected_resume_hash" ] || fail "resume stores the new prompt hash"
 
-# --- crash-rerun: a stored live id watches only ---
+# --- a stored job refuses a prompt that differs from its dispatch -------------
+setup_case prompt-changed
+reset_stub
+make_record stub-1 DONE 0 0 1 0
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "initial prompt dispatch exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+printf 'a different prompt\n' >"$T/brief-changed.md"
+run_job --slot lane --brief "$T/brief-changed.md"
+[ "$RC" -eq 2 ] || fail "different prompt exits 2 (rc=$RC)"
+grep -Fq "ERROR slot lane holds job stub-1 from a different prompt; clear it (tkt-state $S set job.lane '') or use a new slot" "$CDIR/stderr.txt" || fail "different prompt explains how to clear or replace the slot: $(cat "$CDIR/stderr.txt")"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "different prompt dispatches no new job"
+[ "$(grep -c '^watch|' "$T/stub.log")" -eq 1 ] || fail "different prompt does not watch the old job"
+
+# --- crash-rerun: same prompt watches the stored id and does not redispatch ---
+setup_case prompt-same
+reset_stub
+make_record stub-1 DONE 0 0 1 0
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "initial same-prompt dispatch exits 0 (rc=$RC)"
+expected_prompt_hash="$(shasum -a 256 <"$T/brief.md" | awk '{print $1}')"
+[ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$expected_prompt_hash" ] || fail "fresh dispatch stores the prompt hash"
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "same-prompt rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-job DONE id=stub-1* reused=stub-1*" "same-prompt rerun"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "same-prompt rerun dispatches no new job"
+[ "$(grep -c '^watch|stub-1$' "$T/stub.log")" -eq 2 ] || fail "same-prompt rerun watches the stored id"
+
+# --- a legacy stored id without a hash keeps the old watch-only behavior ------
 setup_case rerun
 reset_stub
 make_record seeded-9 DONE 0 1 2 0
 printf 'job.lane=%s\n' seeded-9 >>"$S"
-run_job --slot lane
-[ "$RC" -eq 0 ] || fail "rerun exits 0"
-expect_verdict "TKT tkt-job DONE id=seeded-9 head=bbbb commits=1 gate=PASS reused=seeded-9 stale-head=bbbb now=* log=*" "rerun"
-grep -q "^watch|seeded-9$" "$T/stub.log" || fail "rerun watches the stored id"
-grep -q "^run|" "$T/stub.log" && fail "rerun starts no second run"
+run_job --slot lane --brief "$T/brief-changed.md"
+[ "$RC" -eq 0 ] || fail "legacy rerun exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-job DONE id=seeded-9 head=bbbb commits=1 gate=PASS reused=seeded-9 stale-head=bbbb now=* log=*" "legacy rerun"
+grep -q "^watch|seeded-9$" "$T/stub.log" || fail "legacy rerun watches the stored id"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 0 ] || fail "legacy rerun starts no second run"
 
 # --- a supersededBy self-loop is unrecognised, never a hang ---
 setup_case cycle
