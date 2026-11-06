@@ -94,6 +94,7 @@ plan_records() {
     cur == "gate" { next }
     {
       lower = tolower($0)
+      gsub(/`[^`]*`/, "", lower)
       if (lower ~ /(^|[^a-z0-9_])new-confirmed([^a-z0-9_]|$)/) newmark = 2
       else if (lower ~ /(^|[^a-z0-9_])new([^a-z0-9_]|$)/) newmark = 1
       else if (lower ~ /(^|[^a-z0-9_])(removed|remove|deleted|delete)([^a-z0-9_]|$)/) newmark = 3
