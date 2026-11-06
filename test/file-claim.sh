@@ -139,13 +139,13 @@ rc=0
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "$invalid_lane" --grant --worktree t:bad --repo test/repo a.txt 2>"$T/e-lane-invalid")" || rc=$?
 [ "$rc" = 2 ] || fail "claim with unnumbered lane exits 2, got $rc: $out"
 [ -z "$out" ] || fail "refused lane writes no claim output: $out"
-[ "$(cat "$T/e-lane-invalid")" = "ERROR lane has no ticket number: $invalid_lane (expected fiber-<n> or <prefix>/<n>-<slug>)" ] || fail "unnumbered lane diagnostic: $(cat "$T/e-lane-invalid")"
+[ "$(cat "$T/e-lane-invalid")" = "ERROR lane has no ticket number: $invalid_lane (expected fiber-<n> or sweep-<n>)" ] || fail "unnumbered lane diagnostic: $(cat "$T/e-lane-invalid")"
 [ -z "$(claim_tip "$R")" ] || fail "unnumbered lane writes no claim ref"
 malformed_sweep_lane="sweep-4226bad"
 rc=0
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "$malformed_sweep_lane" --grant --worktree t:bad --repo test/repo a.txt 2>"$T/e-sweep-invalid")" || rc=$?
 [ "$rc" = 2 ] || fail "claim with malformed sweep lane exits 2, got $rc: $out"
-[ "$(cat "$T/e-sweep-invalid")" = "ERROR lane has no ticket number: $malformed_sweep_lane (expected fiber-<n> or <prefix>/<n>-<slug>)" ] || fail "malformed sweep diagnostic: $(cat "$T/e-sweep-invalid")"
+[ "$(cat "$T/e-sweep-invalid")" = "ERROR lane has no ticket number: $malformed_sweep_lane (expected fiber-<n> or sweep-<n>)" ] || fail "malformed sweep diagnostic: $(cat "$T/e-sweep-invalid")"
 [ -z "$(claim_tip "$R")" ] || fail "malformed sweep lane writes no claim ref"
 
 branch_lane="docs/4271-x"

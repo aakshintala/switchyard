@@ -366,7 +366,7 @@ main() {
     claim) [ -n "$lane" ] || usage; valid_field "$lane" || usage
       ticket_num="$(lane_ticket_num "$lane")"
       if [ -z "$ticket_num" ]; then
-        echo "ERROR lane has no ticket number: $lane (expected fiber-<n> or <prefix>/<n>-<slug>)" >&2
+        echo "ERROR lane has no ticket number: $lane (expected fiber-<n> or sweep-<n>)" >&2
         exit 2
       fi
       case "$lane" in
