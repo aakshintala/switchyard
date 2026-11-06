@@ -480,6 +480,33 @@ FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --plan --worktree t:dG --repo t
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane G --grant --worktree t:dG --repo test/repo g6 2>/dev/null)" && fail "grant past cap still refused"
 [ "$out" = "$(printf 'REFUSE g6 cap\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "cap holds with plans: $out"
 
+# Other lanes' advisory claims do not exempt paths from the grant cap.
+R="$(fresh)"
+i=1
+while [ "$i" -le 6 ]; do
+  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "holder-$i" --grant --worktree "t:h$i" --repo test/repo "shared-$i.txt" >/dev/null 2>&1 || fail "holder $i claim exits 0"
+  i=$((i + 1))
+done
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane claimant --grant --worktree t:claimant --repo test/repo shared-1.txt shared-2.txt shared-3.txt shared-4.txt shared-5.txt shared-6.txt 2>/dev/null)" && fail "six overlapping grants exceed the default cap"
+[ "$?" = "1" ] || fail "six overlapping grants exit 1"
+[ "$(printf '%s\n' "$out" | grep -c '^REFUSE .* cap$')" = "6" ] || fail "all six overlapping grants refused by cap: $out"
+[ "$(claims_blob "$R" | grep -c '^')" = "6" ] || fail "over-cap overlap batch writes no claimant rows"
+[ "$(claims_blob "$R" | awk -F '\t' '$2=="claimant" {n++} END {print n+0}')" = "0" ] || fail "over-cap overlap batch records no claimant rows"
+
+# The grant cap admits exactly five new overlapping paths and refuses the sixth.
+R="$(fresh)"
+i=1
+while [ "$i" -le 6 ]; do
+  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "edge-holder-$i" --grant --worktree "t:eh$i" --repo test/repo "edge-$i.txt" >/dev/null 2>&1 || fail "edge holder $i claim exits 0"
+  i=$((i + 1))
+done
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane edge-claimant --grant --worktree t:ec --repo test/repo edge-1.txt edge-2.txt edge-3.txt edge-4.txt edge-5.txt 2>/dev/null)" || fail "five overlapping grants at cap exit 0"
+[ "$(printf '%s\n' "$out" | grep -c '^GRANT edge-[1-5]\.txt new$')" = "5" ] || fail "five overlapping grants at cap are granted: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane edge-claimant --grant --worktree t:ec --repo test/repo edge-6.txt 2>/dev/null)" && fail "one overlapping grant over the cap exits non-zero"
+[ "$?" = "1" ] || fail "one overlapping grant over the cap exits 1"
+[ "$out" = "$(printf 'OVERLAP edge-6.txt lane:edge-holder-6\nREFUSE edge-6.txt cap\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "one overlapping grant over cap: $out"
+[ "$(claims_blob "$R" | awk -F '\t' '$2=="edge-claimant" {n++} END {print n+0}')" = "5" ] || fail "one-over-cap claim writes no extra row"
+
 # FILE_CLAIM_MAX_GRANT raises the cap; a non-numeric value exits 2.
 R="$(fresh)"
 i=1

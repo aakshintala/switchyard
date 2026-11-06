@@ -221,7 +221,7 @@ cmd_claim() {
     main_tip="$(fetch_main_tip "$remote")"; tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; load_claims "$tip" "$claims"
     out=(); new_lines=(); granted=0; refused=0; saw_cap=0; saw_prs=""
     existing="$(awk -F'\t' -v l="$lane" '$2==l&&$3=="grant"{n++}END{print n+0}' "$claims")"; new_grants=0
-    for p in "${paths[@]}"; do if [ "$kind" = grant ] && [ -z "$(awk -F'\t' -v q="$p" '$1==q{print $2;exit}' "$claims")" ]; then new_grants=$((new_grants + 1)); fi; done
+    for p in "${paths[@]}"; do if [ "$kind" = grant ] && [ -z "$(awk -F'\t' -v q="$p" -v l="$lane" '$1==q&&$2==l{print $2;exit}' "$claims")" ]; then new_grants=$((new_grants + 1)); fi; done
     if [ "$((existing + new_grants))" -gt "$MAX_GRANT" ]; then cap_hit=1; else cap_hit=0; fi
     for p in "${paths[@]}"; do
       reason="new"
