@@ -125,6 +125,19 @@ run="$(tkt get run)"
 worktree="$(tkt get worktree)"
 mkdir -p "$run"
 
+# Writing slots build the ticket and therefore need a fence. Other slots are
+# plan work. A configured launch guard runs for either phase before dispatch.
+phase=plan
+case "$slot" in
+  lane|fix[0-9]*)
+    phase=build
+    FW_RUN="$run" "$bin_dir/fence-grant" --require "$issue" --phase "$phase"
+    ;;
+esac
+if [ -n "${TKT_LAUNCH_GUARD:-}" ]; then
+  "$TKT_LAUNCH_GUARD" "$issue" "$phase"
+fi
+
 # Descendant commits can be the previous turn's work, including a BLOCKED
 # lane's commits. Only a head outside that history stops the run.
 if stored_head="$(tkt get head 2>/dev/null)"; then
