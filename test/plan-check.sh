@@ -78,10 +78,12 @@ expect_clean "clean plan" "$clean"
 
 # Citations check the symbol at the base, including a single line and a range.
 expect_clean "symbol at cited line" "$(mkplan citeok '## Files\n- `src/lib.rs`\n\n## Rulings\n`make_widget()` at `src/lib.rs:1`.\n`src/lib.rs:1-2` holds `WidgetThing`.\n')"
+expect_problems "citation refusal names the nearer paired symbol" "$(mkplan nearestbad '## Rulings\n`make_widget()` at `src/lib.rs:2` then `WidgetThing`.\n')" \
+  'missing symbol: src/lib.rs:2 does not contain make_widget(): correct the citation (plan line 5 pairs it with the nearest backticked name, make_widget(), which must appear in line 2 at the base; fix the line range, put the intended symbol next to the citation, or cite src/lib.rs::make_widget() to check the whole file)'
 expect_problems "symbol absent from cited line" "$(mkplan citebad '## Rulings\n`make_widget()` at `src/lib.rs:2`.\n')" \
-  'missing symbol: src/lib.rs:2 does not contain make_widget(): correct the citation'
+  'missing symbol: src/lib.rs:2 does not contain make_widget(): correct the citation (plan line 5 pairs it with the nearest backticked name, make_widget(), which must appear in line 2 at the base; fix the line range, put the intended symbol next to the citation, or cite src/lib.rs::make_widget() to check the whole file)'
 expect_problems "symbol absent from cited range" "$(mkplan rangebad '## Rulings\n`src/lib.rs:1-2` holds `MissingThing`.\n')" \
-  'missing symbol: src/lib.rs:1-2 does not contain MissingThing: correct the citation'
+  'missing symbol: src/lib.rs:1-2 does not contain MissingThing: correct the citation (plan line 5 pairs it with the nearest backticked name, MissingThing, which must appear in lines 1-2 at the base; fix the line range, put the intended symbol next to the citation, or cite src/lib.rs::MissingThing to check the whole file)'
 
 expect_clean "two adjacent citation pairs" "$(mkplan citepairs '## Rulings\n`make_widget()` at `src/lib.rs:1` and `WidgetThing` at `src/lib.rs:2`.\n')"
 printf 'changed working tree\n' >"$R/src/lib.rs"
@@ -218,7 +220,7 @@ expect_problems "braces: an alternative outside Files" "$(mkplan bouts '## Files
 # 11d. path::symbol checks both halves.
 expect_clean "path::symbol exists" "$(mkplan splitok '## Rulings\n`src/lib.rs::make_widget`.\n')"
 expect_problems "path::symbol missing" "$(mkplan split1 '## Rulings\n`src/lib.rs::NoSuch`.\n')" \
-  'missing symbol: src/lib.rs::NoSuch does not contain NoSuch: correct the citation'
+  'missing symbol: src/lib.rs::NoSuch does not contain NoSuch: correct the citation (the symbol must appear somewhere in src/lib.rs at the base)'
 expect_problems "path::symbol: missing path" "$(mkplan split2 '## Rulings\n`src/nope.rs::make_widget`.\n')" \
   'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
