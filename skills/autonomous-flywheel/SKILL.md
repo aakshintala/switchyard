@@ -47,7 +47,7 @@ Done when every lane is filled or its idle reason is recorded.
 
 ### 3. Rule and merge
 
-Answer each sub-orchestrator's escalations as `implement`'s rules say. Merge a PR only within the confirmed terms, through `tkt-ship` or `ship-pr`, never a bare `gh pr merge`: they refuse a worktree head that differs from the PR head and a patch changed since review. A merge neither tool covers, like a case the terms don't cover, goes to the owner by `implement`'s presence rule.
+Answer each sub-orchestrator's escalations as `implement`'s rules say. Merge a PR only within the confirmed terms, through `tkt-ship` or `ship-pr`, never a bare `gh pr merge`: they refuse a worktree head that differs from the PR head and a patch changed since review. Watch a PR's CI with `~/.agents/bin/gh-ci wait <pr>`, never a hand-rolled `gh pr checks` loop: it prints the head each verdict covers and discards a verdict when the head moves. Report a CI verdict with the head SHA it covers. A merge neither tool covers, like a case the terms don't cover, goes to the owner by `implement`'s presence rule.
 
 A merge the permission system denies ends merging for the session, even when an earlier merge in the same session succeeded. Record the denial in the state file. Attempt no merge by any route after it, `ship-pr` and `tkt-ship` included: a second route to a denied action is scored as a bypass. Hand no merge to a lane or peer either: a merge run elsewhere launders the denial. The round's goal becomes green and reported: drive each remaining PR to green with its review loop closed, then list them in the round report as one owner action, with each PR number and its exact merge command.
 
