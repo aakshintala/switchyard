@@ -440,7 +440,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane sweep-4231 --grant --workt
 R="$(fresh)"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --paths --worktree t:dA --repo test/repo y-paths.txt 2>/dev/null)" || fail "--paths claim exits 0"
 [ "$out" = "$(printf 'GRANT y-paths.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "--paths claim output: $out"
-printf '%s' "$(claims_blob "$R")" | grep -q "^y-paths.txt\tfiber-4223\tplan\t" || fail "--paths records the path claim"
+printf '%s' "$(claims_blob "$R")" | grep -q "^y-paths.txt${TAB}fiber-4223${TAB}plan${TAB}" || fail "--paths records the path claim"
 
 # A plan-kind claim using the legacy --plan alias is still accepted.
 # Re-claiming with the other kind keeps the recorded line: a no-op, not an upgrade.
