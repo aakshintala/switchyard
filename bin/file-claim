@@ -2,7 +2,7 @@
 # file-claim: lanes self-grant files via a claims ref in the claim repo.
 # Ordinary lane and PR overlaps are advisory; sweep-* lanes hold paths exclusively.
 # Claim batches are all-or-nothing only when a sweep or the grant cap refuses a path.
-# Usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
+# Usage: file-claim claim --lane ID (--paths PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
 # Claim IDs must be exactly fiber-<n> or sweep-<n>...
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim list [--lane ID] [--repo R]
@@ -23,7 +23,7 @@ TRIES=8
 TAB=$'\t'
 NL=$'\n'
 usage() {
-  echo "usage: file-claim claim --lane ID (--plan PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
+  echo "usage: file-claim claim --lane ID (--paths PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
   echo "       claim IDs must be exactly fiber-<n> or sweep-<n>..." >&2
   echo "       release and list accept any lane ID" >&2
   echo "       ordinary lane and PR holds are advisory; sweep-* lane ids hold exclusively" >&2
@@ -349,7 +349,7 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --lane) [ $# -ge 2 ] || usage; lane="$2"; shift 2;;
-      --plan) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; mode="plan"; shift;;
+      --paths|--plan) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; mode="plan"; shift;;
       --plan-file) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; [ $# -ge 2 ] || usage; valid_field "$2" || usage; mode="plan"; plan_file="$2"; shift 2;;
       --grant) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; mode="grant"; shift;;
       --self-pr) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; self_pr="${self_pr:+$self_pr,}$2"; shift 2;;
@@ -392,7 +392,7 @@ main() {
         [ "${#paths[@]}" -gt 0 ] || usage
         if [ "$mode" = plan ]; then
           for p in "${paths[@]}"; do
-            if is_plan_file "$p"; then die 2 "$p is a plan file, not a path to claim; pass its Files paths after --plan, or the plan with --plan-file $p"; fi
+            if is_plan_file "$p"; then die 2 "$p is a plan file, not a path to claim; pass its Files paths after --paths, or the plan with --plan-file $p"; fi
           done
         fi
       fi
