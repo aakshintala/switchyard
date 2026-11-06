@@ -841,7 +841,7 @@ cp "$CDIR/run/switchyard-529-findings-r1.md" "$T/findings-refuse-copy.md"
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "findings-refuse exited 0"
 rc=$?; [ "$rc" = "2" ] || fail "findings-refuse exited $rc, want 2"
-grep -F -q "tkt-fix: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-529-findings-r1.md" "$T/stderr" || fail "findings-refuse stderr missing refusal: $(cat "$T/stderr")"
+grep -F -q "tkt-fix: refusing to overwrite $CDIR/run/switchyard-529-findings-r1.md: switchyard-529-findings-r1.md names are reserved for this ticket's own findings output; write hand-kept notes to switchyard-529-dispositions-r1.md instead" "$T/stderr" || fail "findings-refuse stderr missing refusal: $(cat "$T/stderr")"
 cmp -s "$CDIR/run/switchyard-529-findings-r1.md" "$T/findings-refuse-copy.md" || fail "findings-refuse: existing file changed"
 
 # findings-rerun: a destination the state recorded is rewritten.

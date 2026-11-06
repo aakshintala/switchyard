@@ -1865,6 +1865,15 @@ run_build --from review
 expect_verdict "TKT tkt-build FAIL rc=1 log=*" "measured from-review gate"
 grep -q "^gate|" "$T/calls.log" || fail "measured from-review: the gate still runs"
 
+# --- round-0 findings use the repo tail as the ticket stem ---
+setup_case owner-qualified-findings
+bash "$TKT_STATE" "$S" set repo owner/name || fail "owner-qualified-findings: set repo"
+run_build
+[ "$RC" -eq 0 ] || fail "owner-qualified-findings exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+ffile="$(bash "$TKT_STATE" "$S" get findings)"
+[ "$ffile" = "$CDIR/run/name-528-findings-r0.md" ] || fail "owner-qualified-findings: findings key is [$ffile]"
+[ -f "$ffile" ] || fail "owner-qualified-findings: findings file missing"
+
 # --- part 2 writes -part2- findings and leaves the part-1 file byte-identical ---
 setup_case part2-findings
 bash "$TKT_STATE" "$S" set part 2 || fail "part2-findings: set part"
@@ -1885,7 +1894,7 @@ printf 'UNRELATED-CONTENT\n' >"$CDIR/run/switchyard-528-findings-r0.md"
 cp "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-refuse-copy.md"
 run_build
 [ "$RC" -eq 2 ] || fail "findings-refuse exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -F -q "tkt-build: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-528-findings-r0.md" "$CDIR/stderr.txt" || fail "findings-refuse stderr missing refusal: $(cat "$CDIR/stderr.txt")"
+grep -F -q "tkt-build: refusing to overwrite $CDIR/run/switchyard-528-findings-r0.md: switchyard-528-findings-r0.md names are reserved for this ticket's own findings output; write hand-kept notes to switchyard-528-dispositions-r0.md instead" "$CDIR/stderr.txt" || fail "findings-refuse stderr missing refusal: $(cat "$CDIR/stderr.txt")"
 cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-refuse-copy.md" || fail "findings-refuse: existing file changed"
 grep -q "^review-collect|" "$T/calls.log" && fail "findings-refuse: collect ran despite refusal"
 
@@ -1921,7 +1930,7 @@ printf 'UNRELATED-CONTENT\n' >"$CDIR/run/switchyard-528-findings-r0.md"
 cp "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-failed-collect-copy.md"
 run_build
 [ "$RC" -eq 2 ] || fail "findings-failed-collect rerun exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -F -q "tkt-build: refusing to overwrite findings file not written by this ticket: $CDIR/run/switchyard-528-findings-r0.md" "$CDIR/stderr.txt" || fail "findings-failed-collect rerun stderr missing refusal: $(cat "$CDIR/stderr.txt")"
+grep -F -q "tkt-build: refusing to overwrite $CDIR/run/switchyard-528-findings-r0.md: switchyard-528-findings-r0.md names are reserved for this ticket's own findings output; write hand-kept notes to switchyard-528-dispositions-r0.md instead" "$CDIR/stderr.txt" || fail "findings-failed-collect rerun stderr missing refusal: $(cat "$CDIR/stderr.txt")"
 cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-failed-collect-copy.md" || fail "findings-failed-collect rerun: existing file changed"
 
 # --- --from gate with main moved on a planned file but a clean merge continues ---

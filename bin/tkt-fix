@@ -274,7 +274,7 @@ pass() {
 write_findings() {
   fr="$run/$namebase$part_suffix-findings-r$round.md"
   if ! findings_write_allowed "$state" "$fr"; then
-    echo "tkt-fix: refusing to overwrite findings file not written by this ticket: $fr" >&2
+    echo "tkt-fix: refusing to overwrite $fr: $namebase$part_suffix-findings-r$round.md names are reserved for this ticket's own findings output; write hand-kept notes to $namebase$part_suffix-dispositions-r$round.md instead" >&2
     exit 2
   fi
   if grep -q '^P[123] ' "$1" 2>/dev/null; then grep '^P[123] ' "$1" >"$fr"
