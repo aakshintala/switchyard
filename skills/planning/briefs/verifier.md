@@ -25,6 +25,8 @@ A line asking for a mechanism without naming the test helpers it rejected is not
 
 Cause first: when the plan's cause is unproven, report it as a probe to run, with the command, not as a plan edit to make.
 
+Settled lines: where the extra lines list a plan line as settled by a ruling and you disagree with it against the code, report a `non-blocking` line that opens with `flag <ruling id>`, never a `core` fix on the plan: only the ruling's author can retire it.
+
 `PLAN OK` when items 1–4 and 6–9 find nothing and every invariant held under item 5. The report's first line is then exactly this, with nothing before or after it on that line:
 
 ```
