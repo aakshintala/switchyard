@@ -70,8 +70,10 @@ feeds a runner, the gate runs the runner. A gate that greps for a file is not a 
 `result.gateResult` in the record, never the job's own report of its gate, and rerun the check yourself when `passed` is false.
 An `ERROR` record (a provider 429 ends a job so) whose `gateResult.passed` is true and whose `changeSet.headAfter` differs from `headBefore` means the work is in place: check the diff and run the gate yourself, and do not rerun the job.
 
-`delegate resume <id>` takes the new prompt on stdin and prints the new job id. `--model` must
-stay on the same backend. It adds `supersededBy` to the old record. A `CANCELLED`, `STALLED` or
+`delegate resume <id>` reads a new prompt from stdin and prints the new job id. `--model` must
+use the same backend. Resume sets `supersededBy` on the old record. The `--tool-idle-ms N`,
+`--idle-ms N` and `--wall-ms N` flags override the stored limits. Omit a flag to keep its stored
+value. The new record saves the limits used by the resumed job. A `CANCELLED`, `STALLED` or
 `ERROR` record with a session id can be resumed; it exits 2 for a `RUNNING` job or a record with
 no session id, except a Fiber record with no session id resumes as a fresh run on an explicit
 resume. A cancelled record with no session id is still refused (exit 2), and a cancelled job
@@ -79,18 +81,19 @@ never restarts by itself. Cursor, pi and claude were verified (2026-10-04) to re
 mid-turn. Answer `NEEDS_CONTEXT` with it. A resumed lane whose `result.changeSet.newCommits` comes back empty committed nothing: start a fresh job.
 
 `--tool-idle-ms` widens how long a running tool may stay silent before the idle watchdog
-kills the job (default 1800000, 30 min; a model silent between tools gets 300000). It also
-bounds the gate.
+kills the job (default 1800000, 30 min; a model silent between tools gets 300000). On resume,
+it overrides the stored limit for the resumed job. This flag also bounds the gate.
 
-`--idle-ms` sets the model-idle window for that one run, overriding the host-profile `idleMs`
-(default 300000); `muse/*` runs get 1800000 from `bin/tkt-job`.
+`--idle-ms` sets the model-idle window for one run, overriding the host-profile `idleMs`
+(default 300000); `muse/*` runs get 1800000 from `bin/tkt-job`. On resume, it overrides the
+stored value for the resumed job.
 
 `--wall-ms N` caps the whole run in milliseconds: agent, retry backoff and job-end gate.
 It is off by default; `bin/tkt-job` passes 10800000 (3 h) for `verifier-r*` slots. Expiry
 is `CANCELLED` with `Cancelled: wall budget of ...`; a resume gets a fresh full budget.
-The first kill is SIGTERM; a wall-expired child that ignores it gets SIGKILL after the
-grace, while an idle stall sends a single SIGTERM. A user cancel after a watchdog kill
-sends SIGKILL at once and reads the cancel wording, and a wall expiry during retry
+`--wall-ms` overrides the stored cap when you resume. The first kill is SIGTERM; a wall-expired child that ignores
+it gets SIGKILL after the grace, while an idle stall sends a single SIGTERM. A user cancel after
+a watchdog kill sends SIGKILL at once and reads the cancel wording, and a wall expiry during retry
 backoff performs no respawn.
 
 ## Waiting

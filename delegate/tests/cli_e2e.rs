@@ -1309,6 +1309,75 @@ fn resume_overrides_replace_stored_values() {
 }
 
 #[test]
+fn resume_timeout_flags_override_and_persist_values() {
+    let e = Env::new("resume-timeout-flags");
+    let a = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--tool-idle-ms",
+            "1200000",
+            "--idle-ms",
+            "900000",
+            "--wall-ms",
+            "10800000",
+        ],
+        "first",
+        &[],
+    );
+    let original = e.wait_terminal(&a);
+    assert_eq!(original["resume"]["toolIdleMs"], 1_200_000);
+    assert_eq!(original["resume"]["idleMs"], 900_000);
+    assert_eq!(original["resume"]["wallMs"], 10_800_000);
+
+    for (flag, value, field, expected) in [
+        ("--tool-idle-ms", "2400000", "toolIdleMs", 2_400_000),
+        ("--idle-ms", "1800000", "idleMs", 1_800_000),
+        ("--wall-ms", "21600000", "wallMs", 21_600_000),
+    ] {
+        let b = e.resume_ok(&a, &[flag, value], "continue");
+        let resumed = e.wait_terminal(&b);
+        assert_eq!(resumed["resume"][field], expected, "{flag}");
+        for (unchanged, stored) in [
+            ("toolIdleMs", 1_200_000),
+            ("idleMs", 900_000),
+            ("wallMs", 10_800_000),
+        ] {
+            if unchanged != field {
+                assert_eq!(resumed["resume"][unchanged], stored, "{flag}");
+            }
+        }
+    }
+
+    let b = e.resume_ok(&a, &[], "continue without overrides");
+    let resumed = e.wait_terminal(&b);
+    assert_eq!(resumed["resume"]["toolIdleMs"], 1_200_000);
+    assert_eq!(resumed["resume"]["idleMs"], 900_000);
+    assert_eq!(resumed["resume"]["wallMs"], 10_800_000);
+}
+
+#[test]
+fn resume_timeout_flags_reject_zero_and_non_numeric_values() {
+    let e = Env::new("resume-invalid-timeout-flags");
+    let a = e.run("first");
+    e.wait_terminal(&a);
+
+    for flag in ["--tool-idle-ms", "--idle-ms", "--wall-ms"] {
+        for bad in ["0", "not-a-number"] {
+            let out = e.resume(&a, &[flag, bad], Some("continue"));
+            assert_eq!(out.status.code(), Some(2), "{flag} {bad}");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains(&format!("invalid {flag} {bad}")),
+                "{stderr}"
+            );
+            assert!(out.stdout.is_empty(), "{flag} {bad}");
+        }
+    }
+}
+
+#[test]
 fn resume_cross_backend_and_unknown_models_exit_2() {
     let e = Env::new("resume-xb");
     let a = e.run("first");
