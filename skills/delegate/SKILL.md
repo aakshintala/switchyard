@@ -138,6 +138,8 @@ job reads `CANCELLED`, and `tkt-job` prints it as `WALL-CAP`. `text` is the agen
   gate's `exitCode`, `outputTail` and `outputPath`, the file with the gate's full output.
 - `result.changeSet`: git delta for the cwd (`newCommits`, `filesChanged`, `diffstat`,
   `uncommittedFiles`).
+- If `delegate status` prints `uncommitted complete tree: commit and run the gate; do not resume`,
+  commit the work and run the gate instead of resuming.
 - `result.concerns`: warnings from the CLI, e.g. commits landed but the tree is still dirty.
 - `result.retries`: present when delegate resumed the session after a transient provider error
   (a 5xx, or one 401), at most twice: one entry per failed attempt, and usage, cost and

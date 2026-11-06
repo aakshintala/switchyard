@@ -645,9 +645,62 @@ fn status_shows_error_text_and_uncommitted_changes() {
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
         format!(
-            "{id}: ERROR (muse: wall timeout (7200000 ms); 2 files changed, uncommitted, 0 commits)\n"
+            "uncommitted complete tree: commit and run the gate; do not resume\n{id}: ERROR (muse: wall timeout (7200000 ms); 2 files changed, uncommitted, 0 commits)\n"
         )
     );
+}
+
+#[test]
+fn status_recommends_committing_complete_uncommitted_trees_only() {
+    let e = Env::new("status-uncommitted-complete-tree");
+    let cases = [
+        (
+            "uncommitted-complete",
+            serde_json::json!({"filesChanged":["one.rs"],"newCommits":[]}),
+            true,
+        ),
+        (
+            "committed-complete",
+            serde_json::json!({"filesChanged":["one.rs"],"newCommits":["abc123"]}),
+            false,
+        ),
+        (
+            "no-changes",
+            serde_json::json!({"filesChanged":[],"newCommits":[]}),
+            false,
+        ),
+    ];
+    for (id, change_set, should_recommend) in cases {
+        e.write_record(
+            id,
+            &serde_json::json!({
+                "status": "ERROR",
+                "result": {"changeSet": change_set}
+            }),
+        );
+        let out = e.status_output(id);
+        assert_eq!(out.status.code(), Some(0), "{id}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        if should_recommend {
+            assert_eq!(
+                stdout.lines().next(),
+                Some("uncommitted complete tree: commit and run the gate; do not resume"),
+                "{id}: {stdout:?}"
+            );
+            assert!(
+                stdout
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .starts_with(&format!("{id}: ERROR"))
+            );
+        } else {
+            assert!(
+                !stdout.starts_with("uncommitted complete tree:"),
+                "{id}: {stdout:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -664,11 +717,11 @@ fn status_summary_forms() {
         ),
         (
             serde_json::json!({"status":"ERROR","result":{"changeSet":{"filesChanged":["one.rs"],"uncommittedFiles":[],"dirtyAfter":true,"newCommits":[]}}}),
-            "ERROR (1 file changed, uncommitted, 0 commits)",
+            "uncommitted complete tree: commit and run the gate; do not resume\nERROR (1 file changed, uncommitted, 0 commits)",
         ),
         (
             serde_json::json!({"status":"ERROR","result":{"changeSet":{"filesChanged":["one.rs"],"uncommittedFiles":["one.rs"],"dirtyAfter":false,"newCommits":[]}}}),
-            "ERROR (1 file changed, uncommitted, 0 commits)",
+            "uncommitted complete tree: commit and run the gate; do not resume\nERROR (1 file changed, uncommitted, 0 commits)",
         ),
         (
             serde_json::json!({"status":"ERROR","result":{"text":"boom"}}),
@@ -676,7 +729,7 @@ fn status_summary_forms() {
         ),
         (
             serde_json::json!({"status":"ERROR","result":{"text":"","changeSet":{"filesChanged":["one.rs","two.rs"],"newCommits":[]}}}),
-            "ERROR (2 files changed, 0 commits)",
+            "uncommitted complete tree: commit and run the gate; do not resume\nERROR (2 files changed, 0 commits)",
         ),
         (
             serde_json::json!({"status":"DONE","result":{"text":"do not show","changeSet":{"filesChanged":["one.rs"],"newCommits":[]}}}),
@@ -744,7 +797,17 @@ fn status_summary_forms() {
         assert_eq!(out.status.code(), Some(0), "case {index}");
         assert_eq!(
             String::from_utf8(out.stdout).unwrap(),
-            format!("{id}: {expected}\n"),
+            if let Some(summary) =
+                expected.strip_prefix(
+                    "uncommitted complete tree: commit and run the gate; do not resume\n",
+                )
+            {
+                format!(
+                    "uncommitted complete tree: commit and run the gate; do not resume\n{id}: {summary}\n"
+                )
+            } else {
+                format!("{id}: {expected}\n")
+            },
             "case {index}"
         );
     }

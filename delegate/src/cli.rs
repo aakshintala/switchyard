@@ -844,13 +844,24 @@ fn watch_now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Build the one-line status output, including the terminal result's text and change summary.
+/// Build the status output, including a commit-and-gate recommendation for an ERROR record
+/// with changed files but no commits.
 fn status_line(id: &str, rec: &serde_json::Value) -> String {
     let state = rec
         .get("status")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("UNKNOWN");
     let result = rec.get("result").filter(|value| value.is_object());
+    let change_set = result.and_then(|value| value.get("changeSet"));
+    let complete_uncommitted_tree = state == "ERROR"
+        && change_set
+            .and_then(|value| value.get("filesChanged"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|files| !files.is_empty())
+        && change_set
+            .and_then(|value| value.get("newCommits"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty);
     let mut parts = Vec::new();
 
     if state != "DONE"
@@ -907,10 +918,15 @@ fn status_line(id: &str, rec: &serde_json::Value) -> String {
         parts.push(changes);
     }
 
-    if parts.is_empty() {
+    let status = if parts.is_empty() {
         format!("{id}: {state}")
     } else {
         format!("{id}: {state} ({})", parts.join("; "))
+    };
+    if complete_uncommitted_tree {
+        format!("uncommitted complete tree: commit and run the gate; do not resume\n{status}")
+    } else {
+        status
     }
 }
 
