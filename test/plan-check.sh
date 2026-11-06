@@ -141,11 +141,11 @@ cat >"$T/stubbin/gh" <<'STUB_EOF'
 exit 1
 STUB_EOF
 chmod +x "$T/stubbin/gh"
-claim_out="$(PATH="$T/stubbin:$PATH" FILE_CLAIM_REMOTE="$claim_remote" bash "$SCRIPT_DIR/../bin/file-claim" claim --lane plan1243 --plan-file "$newcrate_confirmed" --repo test/repo --worktree test:plan-check 2>"$T/claim.err")"; claim_code=$?
+claim_out="$(PATH="$T/stubbin:$PATH" FILE_CLAIM_REMOTE="$claim_remote" bash "$SCRIPT_DIR/../bin/file-claim" claim --lane fiber-1243 --plan-file "$newcrate_confirmed" --repo test/repo --worktree test:plan-check 2>"$T/claim.err")"; claim_code=$?
 [ "$claim_code" = 0 ] || fail "file-claim --plan-file accepts newcrate path, got $claim_code [$(cat "$T/claim.err")]"
 case "$claim_out" in *"GRANT crates/newcrate/src/lib.rs new"*) ;; *) fail "file-claim --plan-file claims newcrate path: $claim_out" ;; esac
 claim_blob="$(git --git-dir="$claim_remote" show refs/claims/live:claims)"
-case "$claim_blob" in *$'crates/newcrate/src/lib.rs\tplan1243\tplan\t'*) ;; *) fail "claims ref contains newcrate path" ;; esac
+case "$claim_blob" in *$'crates/newcrate/src/lib.rs\tfiber-1243\tplan\t'*) ;; *) fail "claims ref contains newcrate path" ;; esac
 expect_clean "new exempts a Files path and its task line" "$(mkplan newok '## Files\n- `src/brand.rs` (New file)\n\n## Tasks\n1. Write new `src/brand.rs` with `WidgetThing`.\n')"
 
 # 3b. new paths close to a base filename need confirmation; new-confirmed bypasses it
