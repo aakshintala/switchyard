@@ -1033,6 +1033,32 @@ run_plan post --part P3
 [ "$RC" -eq 0 ] || fail "--part post exits 0"
 grep -q "post|.*--part P3" "$T/stub.log" || fail "--part reaches post-plan"
 
+# --- post with no --part takes the label from the state's part ---
+# An unlabelled post reuses post-plan's own unlabelled comments and deletes the
+# leftovers, so on a part-2 state it overwrites part 1's posted plan. fiber
+# #4078 hit that. The state knows the part, so post must use it.
+setup_case post-part-from-state
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed part-state verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed part-state base"
+bash "$TKT_STATE" "$S" set part 2 || fail "seed part"
+: >"$T/stub.log"
+run_plan post
+[ "$RC" -eq 0 ] || fail "post on a part-2 state exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q "post|.*--part P2" "$T/stub.log" || fail "state part=2 defaults the label to P2"
+grep -q 'using P2 from the state' "$CDIR/stderr.txt" || fail "post says which label it chose"
+# An explicit --part still wins over the state.
+: >"$T/stub.log"
+run_plan post --part P9
+[ "$RC" -eq 0 ] || fail "explicit --part over a part-2 state exits 0"
+grep -q "post|.*--part P9" "$T/stub.log" || fail "explicit --part wins over the state"
+# part=1 stays unlabelled: part 1's comment was posted that way, and labelling
+# it now would orphan that comment instead of editing it.
+bash "$TKT_STATE" "$S" set part 1 || fail "seed part one"
+: >"$T/stub.log"
+run_plan post
+[ "$RC" -eq 0 ] || fail "post on a part-1 state exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q -- "--part" "$T/stub.log" && fail "part=1 posts unlabelled"
+
 # --- set stores the plan path and resets the rounds ---
 setup_case set
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
