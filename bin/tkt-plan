@@ -443,17 +443,25 @@ do_set() {
     "$plangate" ${gate_args[@]+"${gate_args[@]}"} "$plan" >"$tmp" 2>&1 || emit "SET-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
   fi
   pack_out="$run/$namebase-pack.md"
-  sweep_out="$("$plansweep" --cwd "$worktree" --base "$base" --plan "$plan" --out "$pack_out")" || { printf '%s\n' "$sweep_out" >&2; exit 2; }
-  pack="$(awk '/^PACK /{print $2; exit}' <<<"$sweep_out")"; [ -n "$pack" ] || { echo "tkt-plan: plan-sweep printed no PACK line" >&2; exit 2; }
   old_plan="$(t get plan 2>/dev/null || true)"
+  plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+  stored_pack_plan_hash="$(t get pack_plan_hash 2>/dev/null || true)"
+  stored_pack="$(t get pack 2>/dev/null || true)"
+  if [ "$old_plan" = "$plan" ] && [ "$stored_pack_plan_hash" = "$plan_hash" ] && [ "$stored_pack" = "$pack_out" ] && [ -f "$stored_pack" ] && [ -s "$stored_pack" ]; then
+    pack="$stored_pack"
+  else
+    sweep_out="$("$plansweep" --cwd "$worktree" --base "$base" --plan "$plan" --out "$pack_out")" || { printf '%s\n' "$sweep_out" >&2; exit 2; }
+    pack="$(awk '/^PACK /{print $2; exit}' <<<"$sweep_out")"; [ -n "$pack" ] || { echo "tkt-plan: plan-sweep printed no PACK line" >&2; exit 2; }
+  fi
   t set plan "$plan"; t set pack "$pack"
   # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
   if [ "$old_plan" != "$plan" ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
     t set verifier_round 0; t set confirmed_for ""; t set verified_base ""; t set verified_plan_hash ""
-    t set granted_by ""; t set granted_comment ""; t set granted_used ""; t set granted_owner ""; t set last_report ""
+    t set pack_plan_hash ""; t set granted_by ""; t set granted_comment ""; t set granted_used ""; t set granted_owner ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
   fi
+  t set pack_plan_hash "$plan_hash"
   plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
   if [ "$old_plan" = "$plan" ] && [ "$no_verifier" -eq 0 ] && [ "$plan_verdict" = skipped ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
@@ -475,6 +483,7 @@ do_replan() {
   t set plan_verdict_base ""
   t set plan_verdict_hash ""
   t set verified_plan_hash ""
+  t set pack_plan_hash ""
   t set plan_triage_comment ""
   t set job.lane ""
   t set job.fix1 ""
