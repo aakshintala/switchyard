@@ -137,6 +137,7 @@ if [ -n "$resume" ]; then
   fi
 fi
 knum="${slot#fix}"
+history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -283,6 +284,106 @@ write_findings() {
   t set findings "$fr"
 }
 
+# Store every finding supplied to a scoped verify, with its origin and later
+# closure, separately from the open-only file the next fix job consumes.
+write_findings_history() {
+  local action="$1" verify_output="${2:-}" history_source row base meta raised status unverified
+  local rounds_csv="" rounds_seen="" earlier=$((knum - 1)) label
+  local i found new_raised
+  local -a history_base=() history_raised=() history_status=() history_unverified=() verify_open=()
+  history_source="$(t get findings_history 2>/dev/null || true)"
+  if [ -n "$history_source" ] && [ -r "$history_source" ]; then
+    while IFS= read -r row; do
+      case "$row" in P1\ *|P2\ *|P3\ *)
+        base="$row"; meta=""
+        case "$row" in
+          *" [tkt-history:"*)
+            base="${row%% [tkt-history:*}"
+            meta="${row#* [tkt-history: }"; meta="${meta%]}" ;;
+        esac
+        raised="$(sed -n 's/.*raised=\([^;]*\).*/\1/p' <<<"$meta")"
+        status="$(sed -n 's/.*status=\([^;]*\).*/\1/p' <<<"$meta")"
+        unverified="$(sed -n 's/.*unverified=\([^;]*\).*/\1/p' <<<"$meta")"
+        [ -n "$raised" ] || raised=unknown
+        [ -n "$status" ] || status=open
+        [ -n "$unverified" ] || unverified=""
+        found=0
+        for i in "${!history_base[@]}"; do [ "${history_base[$i]}" = "$base" ] && found=1 && break; done
+        if [ "$found" -eq 0 ]; then
+          history_base+=("$base"); history_raised+=("$raised"); history_status+=("$status"); history_unverified+=("$unverified")
+        fi
+        ;;
+      esac
+    done <"$history_source"
+  fi
+  # The first findings file is round 0's posted review. Later untracked input
+  # is labelled unknown rather than being assigned a round without evidence.
+  if [ "${#history_base[@]}" -eq 0 ] && { [ -z "$history_source" ] || [ ! -r "$history_source" ]; }; then new_raised="raised in review round 0"; else new_raised="raised in unknown round"; fi
+  while IFS= read -r row; do
+    case "$row" in P1\ *|P2\ *|P3\ *)
+      base="$row"
+      case "$base" in *" [tkt-history:"*) base="${base%% [tkt-history:*}";; esac
+      found=0
+      for i in "${!history_base[@]}"; do [ "${history_base[$i]}" = "$base" ] && found=1 && break; done
+      if [ "$found" -eq 0 ]; then
+        raised="$new_raised"; status=open; unverified=""
+        history_base+=("$base"); history_raised+=("$raised"); history_status+=("$status"); history_unverified+=("$unverified")
+      fi
+      ;;
+    esac
+  done <"$findings"
+  if [ -n "$verify_output" ] && [ -r "$verify_output" ]; then
+    while IFS= read -r row; do
+      case "$row" in P1\ *|P2\ *|P3\ *) verify_open+=("$row");; esac
+    done <"$verify_output"
+  fi
+  for i in "${!history_base[@]}"; do
+    base="${history_base[$i]}"; status="${history_status[$i]}"; unverified="${history_unverified[$i]}"
+    if [ "$action" = verified ] && [ "$status" = open ]; then
+      found=0
+      for row in "${verify_open[@]+${verify_open[@]}}"; do [ "$row" = "$base" ] && found=1 && break; done
+      [ "$found" -eq 1 ] || history_status[$i]="closed in fix round $knum"
+    elif [ "$action" = unverified ] && [ "$status" = open ]; then
+      case ",$unverified," in *",fix round $knum,"*) ;; *) unverified="${unverified:+$unverified,}fix round $knum";; esac
+      history_unverified[$i]="$unverified"
+    fi
+  done
+  if [ "$action" = verified ]; then
+    for row in "${verify_open[@]+${verify_open[@]}}"; do
+      found=0
+      for base in "${history_base[@]+${history_base[@]}}"; do [ "$base" = "$row" ] && found=1 && break; done
+      if [ "$found" -eq 0 ]; then
+        history_base+=("$row"); history_raised+=("raised in fix round $knum"); history_status+=(open); history_unverified+=("")
+      fi
+    done
+  fi
+  for raised in "${history_raised[@]+${history_raised[@]}}"; do
+    case "$raised" in "raised in review round "*|"raised in fix round "*)
+      label="${raised#raised in }"
+      case ";$rounds_seen;" in *";$label;"*) ;; *) rounds_seen="${rounds_seen:+$rounds_seen; }$label";; esac ;;
+    esac
+  done
+  if [ -n "$rounds_seen" ]; then rounds_csv="$rounds_seen"; else rounds_csv=unknown; fi
+  if ! findings_write_allowed "$state" "$history_file"; then
+    echo "tkt-fix: refusing to overwrite $history_file: history path is not owned by this ticket state" >&2
+    exit 2
+  fi
+  {
+    printf '# Findings history for scoped verification\n'
+    printf 'Finding rounds held: %s.\n' "$rounds_csv"
+    printf 'Earlier fix rounds in this diff: %s.\n' "$earlier"
+    printf 'Current fix round: %s.\n\n' "$knum"
+    if [ "${#history_base[@]}" -eq 0 ]; then printf 'no open findings\n'; fi
+    for i in "${!history_base[@]}"; do
+      printf '%s [tkt-history: raised=%s; status=%s; unverified=%s]\n' \
+        "${history_base[$i]}" "${history_raised[$i]}" "${history_status[$i]}" "${history_unverified[$i]:-none}"
+    done
+  } >"$history_file"
+  t journal "findings history write $history_file"
+  t set findings_history "$history_file"
+  t set "fix_round.$knum.history" "$history_file"
+}
+
 # A resume checks the plan's Gate line too, and passes --gate-from-plan so the
 # resumed job runs the current plan's gate, not the one it was created with.
 plan="$(t get plan 2>/dev/null || true)"
@@ -386,20 +487,22 @@ if [ -n "$ci_note" ]; then notes+=("$ci_note"); fi
 if [ -n "$concerns_file" ]; then notes+=("concerns=$concerns_file"); fi
 if [ "$no_commits" -eq 1 ]; then notes+=("no commits"); fi
 if [ "$noverify" -eq 1 ]; then
+  write_findings_history unverified
   t set unverified "$findings"
   emit "PUSHED unverified" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"}
 fi
 [ -n "$verifymodel" ] || verifymodel="$(t get model.verify 2>/dev/null)" || { echo "tkt-fix: missing key: model.verify (no --verify-model and no state model.verify)" >&2; exit 2; }
-vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$findings" --since "$verify_since")
+write_findings_history prepare
+vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$history_file" --since "$verify_since")
 if [ -n "$concerns_file" ]; then vargs+=(--context "$concerns_file"); fi
 vrc=0; "$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
 if [ -s "$tmp/verify.err" ]; then cat "$tmp/verify.err" >&2; fi
 [ "$vrc" -eq 0 ] || emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")" ${notes[@]+"${notes[@]}"}
 fixline="$(grep -m 1 '^FIX-' "$tmp/verify.out" || true)"
 case "$fixline" in
-  FIX-OK*) t set reviewed "$new_head"; write_findings "$tmp/verify.out"
+  FIX-OK*) t set reviewed "$new_head"; write_findings_history verified "$tmp/verify.out"; write_findings "$tmp/verify.out"
     emit "FIX-OK reviewed=$new_head" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
-  FIX-INCOMPLETE*) write_findings "$tmp/verify.out"; open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
+  FIX-INCOMPLETE*) write_findings_history verified "$tmp/verify.out"; write_findings "$tmp/verify.out"; open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
     if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
     emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
   *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$tmp/verify.out")" ;;

@@ -106,15 +106,28 @@ exit 0
 EOF
 chmod +x "$T/bin/gh-ci"
 
-# Stub review-pr: $T/vermode holds ok (FIX-OK) or incomplete (FIX-INCOMPLETE).
+# Stub review-pr: $T/vermode holds ok (FIX-OK), incomplete or history outputs.
 printf 'ok' >"$T/vermode"
+printf '0' >"$T/verify-count"
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
 printf 'review-pr|%s\n' "\$*" >>"$T/calls.log"
+verify_file=""; previous=""
+for arg in "\$@"; do
+  if [ "\$previous" = "--verify" ]; then verify_file="\$arg"; fi
+  previous="\$arg"
+done
+if [ -n "\$verify_file" ]; then
+  n="\$((\$(cat "$T/verify-count") + 1))"
+  printf '%s' "\$n" >"$T/verify-count"
+  cp "\$verify_file" "$T/verify-input-\$n.md"
+fi
 case "\$(cat "$T/vermode")" in
-  ok) printf 'FIX-OK\n';;
+  ok|history-two) printf 'FIX-OK\n';;
   incomplete)
     printf 'FIX-INCOMPLETE round=2\nP1 open finding in fix.txt\nP2 second finding\n';;
+  history-one)
+    printf 'FIX-INCOMPLETE round=1\nP1 finding raised in round 1\n';;
 esac
 exit 0
 EOF
@@ -147,6 +160,7 @@ reset_stubs() {
   printf '0' >"$T/cimode"
   : >"$T/ciout"
   printf 'ok' >"$T/vermode"
+  printf '0' >"$T/verify-count"
   printf '[]' >"$T/prlist"
   printf '0' >"$T/prlistrc"
   : >"$T/calls.log"
@@ -221,6 +235,35 @@ drop_state_key() {
 
 # Selector for the new cases below: empty or unset runs all of them.
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
+
+# History: a later verify receives round 0's finding with its original round
+# label, alongside findings raised by the first verify round.
+if want history; then
+setup_case history
+printf 'P1 round 0 original finding\n' >"$CDIR/findings.md"
+printf 'history-one' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "history round 1 incomplete exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "history round 1 exited $rc, want 1"
+grep -q 'FIX-INCOMPLETE round=1' <<<"$out" || fail "history round 1 verdict missing"
+printf 'history-two' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "history round 2 exited $?"
+grep -q 'FIX-OK' <<<"$out" || fail "history round 2 did not verify"
+input="$T/verify-input-2.md"
+grep -Fq 'P1 round 0 original finding' "$input" || fail "round 2 verify input lost round 0's finding"
+grep -Fq 'raised in review round 0' "$input" || fail "round 2 verify input does not label round 0"
+grep -Fq 'P1 finding raised in round 1' "$input" || fail "round 2 verify input lost round 1's finding"
+grep -Fq 'status=closed in fix round 1' "$input" || fail "round 2 verify input lost round 0's closure round"
+grep -Fq 'Earlier fix rounds in this diff: 1' "$input" || fail "round 2 verify input does not state earlier-round coverage"
+
+setup_case history-unverified
+out="$(bash "$TKT" "$S" --no-verify 2>"$T/stderr")" || fail "history no-verify exited $?"
+history="$(bash "$TKT_STATE" "$S" get findings_history)"
+grep -Fq 'raised=raised in review round 0' "$history" || fail "no-verify history lost round 0 finding label"
+grep -Fq 'unverified=fix round 1' "$history" || fail "no-verify history did not label its round"
+printf 'history-two' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "verify after no-verify exited $?"
+grep -Fq 'unverified=fix round 1' "$T/verify-input-1.md" || fail "verify after no-verify lost the unverified round label"
+fi
 
 # 1. Verify OK on an already-pushed head: no CI wait, slot fix1, reviewed set.
 setup_case ok
@@ -1184,7 +1227,7 @@ drop_state_key reviewed
 out="$(bash "$TKT" "$S" --verify --since "${OLD:0:8}" 2>"$T/stderr")" || fail "since-missing-reviewed exited $?: $(cat "$T/stderr")"
 NEW="$(git -C "$WT" rev-parse HEAD)"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "since-missing-reviewed bad verdict: $(head -n 1 <<<"$out")"
-grep -F -q "review-pr|run 7 --repo switchyard --cwd $WT --head $NEW --model verify-model --verify $CDIR/findings.md --since $OLD" "$T/calls.log" || fail "since-missing-reviewed did not pass the full since sha: $(cat "$T/calls.log")"
+grep -F -q "review-pr|run 7 --repo switchyard --cwd $WT --head $NEW --model verify-model --verify $CDIR/run/switchyard-529-findings-history-r1.md --since $OLD" "$T/calls.log" || fail "since-missing-reviewed did not pass the full since sha: $(cat "$T/calls.log")"
 [ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$NEW" ] || fail "since-missing-reviewed did not update reviewed after FIX-OK"
 
 # Without either source for the reviewed head, fail with a useful instruction.
