@@ -537,51 +537,48 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
             break 0;
         }
         match host.try_wait() {
-            Ok(Some(status)) if !current.stopping => {
-                mark_dead(
+            Ok(Some(status)) => {
+                if mark_unexpected_host_exit(
                     &store,
                     &config.paths,
                     id,
-                    DeadReason::HostExited,
                     status.code(),
                     &format!("{} host exited", shared.kind.label()),
-                    false,
                     &fatal_write,
-                );
-                thread::sleep(dead_reply_grace(&shared));
-                break 0;
+                ) {
+                    thread::sleep(dead_reply_grace(&shared));
+                    break 0;
+                }
             }
-            Err(error) if !current.stopping => {
-                mark_dead(
+            Err(error)
+                if mark_unexpected_host_exit(
                     &store,
                     &config.paths,
                     id,
-                    DeadReason::HostExited,
                     None,
                     &error.to_string(),
-                    false,
                     &fatal_write,
-                );
+                ) =>
+            {
                 thread::sleep(dead_reply_grace(&shared));
                 break 0;
             }
             _ => {}
         }
-        if shared.host_eof.load(Ordering::SeqCst) && !current.stopping {
+        if shared.host_eof.load(Ordering::SeqCst) {
             host.signal_group(libc::SIGKILL);
             let status = host.wait_for_exit(KILL_REAP_WAIT);
-            mark_dead(
+            if mark_unexpected_host_exit(
                 &store,
                 &config.paths,
                 id,
-                DeadReason::HostExited,
                 status.and_then(|status| status.code()),
                 &format!("{} host closed stdout", shared.kind.label()),
-                false,
                 &fatal_write,
-            );
-            thread::sleep(dead_reply_grace(&shared));
-            break 0;
+            ) {
+                thread::sleep(dead_reply_grace(&shared));
+                break 0;
+            }
         }
         let _ = store.wait_until(|state| state.status == Status::Dead, ACCEPT_POLL);
     };
@@ -1504,6 +1501,37 @@ fn terminate_host(host: &HostControl, term_wait: Duration) {
     }
 }
 
+fn mark_unexpected_host_exit(
+    store: &Store,
+    paths: &Paths,
+    id: &str,
+    exit_code: Option<i32>,
+    message: &str,
+    fatal_write: &AtomicBool,
+) -> bool {
+    // The monitor's earlier snapshot can go stale while stop publishes
+    // `stopping`; decide and publish the host-exit transition under one lock.
+    let mut changed = false;
+    if store
+        .update(|state| {
+            if state.status == Status::Dead || state.stopping {
+                return Vec::new();
+            }
+            state::mark_dead(state, DeadReason::HostExited, exit_code, message, now_ms());
+            changed = true;
+            vec![json!({"kind":"session.dead"})]
+        })
+        .is_err()
+    {
+        fatal_write.store(true, Ordering::SeqCst);
+        return true;
+    }
+    if changed && let Ok(state) = state::read_state(paths, id) {
+        write_note_or_log(store, id, &state.inbox, Note::Dead, fatal_write);
+    }
+    changed
+}
+
 #[allow(clippy::too_many_arguments)]
 fn mark_dead(
     store: &Store,
@@ -1781,6 +1809,47 @@ fn error_reply(code: &str, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_exit_does_not_win_after_stop_is_published() {
+        let root = std::env::temp_dir().join(format!(
+            "delegate-host-exit-race-{}-{}",
+            std::process::id(),
+            crate::util::random_uuid()
+        ));
+        let paths = Paths::new(root.clone());
+        let id = crate::util::random_uuid();
+        let mut initial = state::new_state(&id, "muse/test", "/work", "", 1);
+        initial.status = Status::Running;
+        initial.active_turn_id = Some("turn-1".into());
+        let store = Store::open(paths.clone(), initial).unwrap();
+        let monitor_snapshot = store.snapshot();
+        assert!(!monitor_snapshot.stopping);
+        store
+            .update(|state| {
+                state.stopping = true;
+                Vec::new()
+            })
+            .unwrap();
+
+        // Inject the bad interleaving: the monitor sampled stopping=false,
+        // then stop published stopping=true before the host-exit write.
+        let fatal_write = AtomicBool::new(false);
+        let marked = mark_unexpected_host_exit(
+            &store,
+            &paths,
+            &id,
+            Some(3),
+            "muse host exited",
+            &fatal_write,
+        );
+
+        let after = store.snapshot();
+        assert!(!marked, "stop must own the terminal transition");
+        assert_eq!(after.status, Status::Running);
+        assert!(after.stopping);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn pi_broken_pipe_reads_as_the_eof_text() {
