@@ -144,6 +144,196 @@ DIFF
 expect_output 'full persisted/wire-format signal=serde derive file=src/saved.rs' \
   "$T/serialized-context.diff" --repo-root "$T/outside"
 
+# Enclosing-type lookup covers multiline attrs, stacked attrs, docs, and generics.
+cat >"$T/repo/crate-a/src/multiline_derive.rs" <<'RUST'
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+)]
+struct MultiDerived {
+    value: String,
+}
+RUST
+cat >"$T/multiline-derive.diff" <<'DIFF'
+diff --git a/crate-a/src/multiline_derive.rs b/crate-a/src/multiline_derive.rs
+--- a/crate-a/src/multiline_derive.rs
++++ b/crate-a/src/multiline_derive.rs
+@@ -7 +7 @@
+-    value: u32,
++    value: String,
+DIFF
+expect_output 'full persisted/wire-format signal=serde derive file=crate-a/src/multiline_derive.rs' \
+  "$T/multiline-derive.diff" --repo-root "$T/repo"
+
+cat >"$T/repo/crate-a/src/multiline_serde.rs" <<'RUST'
+#[serde(
+    rename_all = "snake_case",
+)]
+struct SerdeConfig {
+    value: String,
+}
+RUST
+cat >"$T/multiline-serde.diff" <<'DIFF'
+diff --git a/crate-a/src/multiline_serde.rs b/crate-a/src/multiline_serde.rs
+--- a/crate-a/src/multiline_serde.rs
++++ b/crate-a/src/multiline_serde.rs
+@@ -5 +5 @@
+-    value: u32,
++    value: String,
+DIFF
+expect_output 'full persisted/wire-format signal=serde attribute file=crate-a/src/multiline_serde.rs' \
+  "$T/multiline-serde.diff" --repo-root "$T/repo"
+
+cat >"$T/repo/crate-a/src/cfg_attr.rs" <<'RUST'
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize),
+)]
+struct Conditional {
+    value: String,
+}
+RUST
+cat >"$T/cfg-attr.diff" <<'DIFF'
+diff --git a/crate-a/src/cfg_attr.rs b/crate-a/src/cfg_attr.rs
+--- a/crate-a/src/cfg_attr.rs
++++ b/crate-a/src/cfg_attr.rs
+@@ -6 +6 @@
+-    value: u32,
++    value: String,
+DIFF
+expect_output 'full persisted/wire-format signal=serde type file=crate-a/src/cfg_attr.rs' \
+  "$T/cfg-attr.diff" --repo-root "$T/repo"
+
+cat >"$T/repo/crate-a/src/generic_state.rs" <<'RUST'
+#[allow(dead_code)]
+#[serde(
+    rename_all = "snake_case",
+)]
+/// Persisted generic state.
+struct GenericState<T>
+where
+    T: Clone,
+{
+    value: T,
+}
+RUST
+cat >"$T/generic-where-doc-stack.diff" <<'DIFF'
+diff --git a/crate-a/src/generic_state.rs b/crate-a/src/generic_state.rs
+--- a/crate-a/src/generic_state.rs
++++ b/crate-a/src/generic_state.rs
+@@ -10 +10 @@
+-    value: T,
++    value: String,
+DIFF
+expect_output 'full persisted/wire-format signal=serde attribute file=crate-a/src/generic_state.rs' \
+  "$T/generic-where-doc-stack.diff" --repo-root "$T/repo"
+
+# Tuple structs and inline item bodies use the same serialization and API checks.
+cat >"$T/repo/crate-a/src/inline_id.rs" <<'RUST'
+#[derive(Serialize)]
+struct InlineId(String);
+RUST
+cat >"$T/single-tuple.diff" <<'DIFF'
+diff --git a/crate-a/src/inline_id.rs b/crate-a/src/inline_id.rs
+--- a/crate-a/src/inline_id.rs
++++ b/crate-a/src/inline_id.rs
+@@ -2 +2 @@
+-struct InlineId(u32);
++struct InlineId(String);
+DIFF
+expect_output 'full persisted/wire-format signal=serde derive file=crate-a/src/inline_id.rs' \
+  "$T/single-tuple.diff" --repo-root "$T/repo"
+
+cat >"$T/repo/crate-a/src/id.rs" <<'RUST'
+pub struct Id<T>(
+    pub String,
+) where T: Clone;
+RUST
+printf 'use crate_a::Id;\nfn uses_id(id: Id<String>) {}\n' >"$T/repo/crate-b/src/lib.rs"
+cat >"$T/multiline-tuple-public.diff" <<'DIFF'
+diff --git a/crate-a/src/id.rs b/crate-a/src/id.rs
+--- a/crate-a/src/id.rs
++++ b/crate-a/src/id.rs
+@@ -2 +2 @@
+-    pub u32,
++    pub String,
+DIFF
+expect_output 'full pub signature Id used by another crate' \
+  "$T/multiline-tuple-public.diff" --repo-root "$T/repo"
+
+cat >"$T/repo/crate-a/src/inline_state.rs" <<'RUST'
+#[derive(Serialize)]
+struct InlineState { value: String }
+RUST
+cat >"$T/single-struct.diff" <<'DIFF'
+diff --git a/crate-a/src/inline_state.rs b/crate-a/src/inline_state.rs
+--- a/crate-a/src/inline_state.rs
++++ b/crate-a/src/inline_state.rs
+@@ -2 +2 @@
+-struct InlineState { value: u32 }
++struct InlineState { value: String }
+DIFF
+expect_output 'full persisted/wire-format signal=serde derive file=crate-a/src/inline_state.rs' \
+  "$T/single-struct.diff" --repo-root "$T/repo"
+
+cat >"$T/repo/crate-a/src/inline_mode.rs" <<'RUST'
+#[derive(Serialize)]
+enum InlineMode { New, }
+RUST
+cat >"$T/single-enum.diff" <<'DIFF'
+diff --git a/crate-a/src/inline_mode.rs b/crate-a/src/inline_mode.rs
+--- a/crate-a/src/inline_mode.rs
++++ b/crate-a/src/inline_mode.rs
+@@ -2 +2 @@
+-enum InlineMode { Old, }
++enum InlineMode { New, }
+DIFF
+expect_output 'full persisted/wire-format signal=serde derive file=crate-a/src/inline_mode.rs' \
+  "$T/single-enum.diff" --repo-root "$T/repo"
+
+cat >"$T/repo/crate-a/src/packet-tuple.rs" <<'RUST'
+#[derive(
+    Serialize,
+)]
+enum PacketTuple {
+    Data(
+        String,
+    ),
+}
+RUST
+cat >"$T/enum-tuple-payload.diff" <<'DIFF'
+diff --git a/crate-a/src/packet-tuple.rs b/crate-a/src/packet-tuple.rs
+--- a/crate-a/src/packet-tuple.rs
++++ b/crate-a/src/packet-tuple.rs
+@@ -6 +6 @@
+-        u32,
++        String,
+DIFF
+expect_output 'full persisted/wire-format signal=serde derive file=crate-a/src/packet-tuple.rs' \
+  "$T/enum-tuple-payload.diff" --repo-root "$T/repo"
+
+cat >"$T/repo/crate-a/src/packet-struct.rs" <<'RUST'
+#[derive(
+    Serialize,
+)]
+enum PacketStruct {
+    Data {
+        value: String,
+    },
+}
+RUST
+cat >"$T/enum-struct-payload.diff" <<'DIFF'
+diff --git a/crate-a/src/packet-struct.rs b/crate-a/src/packet-struct.rs
+--- a/crate-a/src/packet-struct.rs
++++ b/crate-a/src/packet-struct.rs
+@@ -6 +6 @@
+-        value: u32,
++        value: String,
+DIFF
+expect_output 'full persisted/wire-format signal=serde derive file=crate-a/src/packet-struct.rs' \
+  "$T/enum-struct-payload.diff" --repo-root "$T/repo"
+
 printf 'pub struct PrivateUse;\n' >"$T/repo/crate-a/src/lib.rs"
 cat >"$T/unreferenced.diff" <<'DIFF'
 diff --git a/crate-a/src/lib.rs b/crate-a/src/lib.rs

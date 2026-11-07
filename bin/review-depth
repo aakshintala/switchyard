@@ -46,7 +46,7 @@ PUB_FIELD = re.compile(r"\bpub\s+([A-Za-z_][A-Za-z_0-9]*)\s*:")
 HUNK_HEADER = re.compile(r"^@@")
 HUNK_NEW_START = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 RUST_TYPE_ITEM = re.compile(
-    r"^\s*(?P<visibility>pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum)\s+([A-Za-z_][A-Za-z_0-9]*)\b"
+    r"^\s*(?P<visibility>pub(?:\s*\([^)]*\))?\s+)?(?P<kind>struct|enum)\s+(?P<name>[A-Za-z_][A-Za-z_0-9]*)\b"
 )
 RUST_TEST_CFG = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 TEST_NAME = re.compile(r"(?:^|/)test[^/]*\.py$|(?:^|/)[^/]*_test\.[^/]+$|(?:^|/)[^/]*\.test\.[^/]+$")
@@ -117,39 +117,123 @@ def changed_locations(hunk: Hunk):
             new_line += 1
 
 
-def rust_line_content(line: str) -> str:
-    if line.startswith(("+", "-", " ")):
-        return line[1:]
-    return line
+def hunk_current_lines(hunk: Hunk):
+    lines = []
+    positions = {}
+    for index, line in enumerate(hunk.lines):
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("-"):
+            positions[index] = len(lines)
+        elif line.startswith("+"):
+            positions[index] = len(lines)
+            lines.append(line[1:])
+        elif line.startswith(" "):
+            positions[index] = len(lines)
+            lines.append(line[1:])
+    return lines, positions
+
+
+def find_type_body(lines: list[str], start: int, match):
+    angle_depth = 0
+    where_clause = False
+    kind = match.group("kind")
+    for line_index in range(start, len(lines)):
+        line = lines[line_index]
+        offset = match.end() if line_index == start else 0
+        for position in range(offset, len(line)):
+            char = line[position]
+            if angle_depth:
+                if char == "<":
+                    angle_depth += 1
+                elif char == ">":
+                    angle_depth -= 1
+                continue
+            if line.startswith("where", position) and (
+                position == 0 or not (line[position - 1].isalnum() or line[position - 1] == "_")
+            ) and (position + 5 == len(line) or not (line[position + 5].isalnum() or line[position + 5] == "_")):
+                where_clause = True
+            if char == "<":
+                angle_depth = 1
+            elif kind == "enum" and char == "{":
+                return line_index, position, "{"
+            elif kind == "struct":
+                if char == "{":
+                    return line_index, position, "{"
+                if char == "(" and not where_clause:
+                    return line_index, position, "("
+    return None
+
+
+def type_contains_line(lines: list[str], start: int, target: int, match) -> bool:
+    if start == target:
+        return True
+    opening = find_type_body(lines, start, match)
+    if not opening:
+        return False
+    open_line, open_column, delimiter = opening
+    if target < open_line or target == open_line:
+        return True
+    close = "}" if delimiter == "{" else ")"
+    depth = 0
+    for line_index in range(open_line, target):
+        text = lines[line_index][open_column:] if line_index == open_line else lines[line_index]
+        for char in text:
+            if char == delimiter:
+                depth += 1
+            elif char == close:
+                depth -= 1
+                if depth == 0:
+                    return False
+    return depth > 0
 
 
 def enclosing_rust_type(lines: list[str], target_index: int):
     if target_index < 0 or target_index > len(lines):
         return None
-    for start in range(target_index - 1, -1, -1):
-        match = RUST_TYPE_ITEM.match(rust_line_content(lines[start]))
-        if not match:
-            continue
-        depth = sum(
-            rust_line_content(line).count("{") - rust_line_content(line).count("}")
-            for line in lines[start:target_index]
-        )
-        if depth > 0:
-            return match.group(2), bool(match.group("visibility")), start
+    for start in range(min(target_index, len(lines) - 1), -1, -1):
+        match = RUST_TYPE_ITEM.match(lines[start])
+        if match and type_contains_line(lines, start, target_index, match):
+            return match.group("name"), bool(match.group("visibility")), start
     return None
 
 
+def attribute_start(lines: list[str], end: int) -> int | None:
+    depth = 0
+    for index in range(end, -1, -1):
+        line = re.sub(r'"(?:\\.|[^"\\])*"', '""', lines[index])
+        for char in reversed(line):
+            if char == "]":
+                depth += 1
+            elif char == "[":
+                depth -= 1
+                if depth == 0 and re.match(r"^\s*#\s*!?\s*\[", lines[index]):
+                    return index
+            if depth < 0:
+                return None
+    return None
+
+
+def doc_comment_line(line: str) -> bool:
+    text = line.strip()
+    return text.startswith(("///", "//!", "/**", "/*!", "*", "*/"))
+
+
 def serde_marker_in_type(lines: list[str], declaration: int, target: int) -> str | None:
-    start = declaration
+    prefix = []
     prior = declaration - 1
     while prior >= 0:
-        text = rust_line_content(lines[prior]).strip()
-        if not text or text.startswith(("#[", "///", "//!")):
-            start = prior
+        text = lines[prior].strip()
+        if not text or doc_comment_line(text):
+            prefix.insert(0, lines[prior])
             prior -= 1
-        else:
+            continue
+        start = attribute_start(lines, prior)
+        if start is None:
             break
-    context = "\n".join(rust_line_content(line) for line in lines[start:target + 1])
+        prefix = lines[start:prior + 1] + prefix
+        prior = start - 1
+    context = "\n".join(prefix + lines[declaration:target + 1])
     for pattern, label in PERSISTED_PATTERNS[:3]:
         if pattern.search(context):
             return label
@@ -165,22 +249,32 @@ def source_lines_for(root: Path, file_diff: FileDiff) -> list[str]:
         return []
 
 
+def type_context_for_change(file_diff: FileDiff, hunk: Hunk, index: int, new_line: int, root: Path | None, source_lines: list[str], hunk_lines: list[str], hunk_positions: dict[int, int]):
+    if source_lines:
+        context = enclosing_rust_type(source_lines, new_line - 1)
+        if context:
+            return source_lines, context, new_line - 1
+    target = hunk_positions.get(index, len(hunk_lines))
+    context = enclosing_rust_type(hunk_lines, target)
+    if context:
+        return hunk_lines, context, target
+    return None
+
+
 def enclosing_serde_signal(files: list[FileDiff], root: Path | None) -> str | None:
     for file_diff in files:
         source_lines = source_lines_for(root, file_diff) if root else []
         for hunk in file_diff.hunks:
+            hunk_lines, hunk_positions = hunk_current_lines(hunk)
             for index, _, new_line in changed_locations(hunk):
-                context = enclosing_rust_type(hunk.lines, index)
-                if context:
-                    marker = serde_marker_in_type(hunk.lines, context[2], index)
+                found = type_context_for_change(
+                    file_diff, hunk, index, new_line, root, source_lines, hunk_lines, hunk_positions
+                )
+                if found:
+                    lines, context, target = found
+                    marker = serde_marker_in_type(lines, context[2], target)
                     if marker:
                         return f"persisted/wire-format signal={marker} file={file_diff.path}"
-                if source_lines:
-                    context = enclosing_rust_type(source_lines, new_line - 1)
-                    if context:
-                        marker = serde_marker_in_type(source_lines, context[2], new_line - 1)
-                        if marker:
-                            return f"persisted/wire-format signal={marker} file={file_diff.path}"
     return None
 
 
@@ -192,12 +286,17 @@ def rust_public_names(file_diff: FileDiff, root: Path | None) -> list[str]:
     for hunk in file_diff.hunks:
         if is_test_hunk(file_diff.path, hunk):
             continue
-        for index, _, new_line in changed_locations(hunk):
-            context = enclosing_rust_type(hunk.lines, index)
-            if not context and source_lines:
-                context = enclosing_rust_type(source_lines, new_line - 1)
-            if context and context[1]:
-                names.append(context[0])
+        hunk_lines, hunk_positions = hunk_current_lines(hunk)
+        for index, changed_text, new_line in changed_locations(hunk):
+            if PUB_FIELD.search(changed_text) or PUB_ITEM.match(changed_text):
+                continue
+            found = type_context_for_change(
+                file_diff, hunk, index, new_line, root, source_lines, hunk_lines, hunk_positions
+            )
+            if found:
+                _, context, _ = found
+                if context[1]:
+                    names.append(context[0])
         in_signature: str | None = None
         for line in hunk.lines:
             changed = line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
