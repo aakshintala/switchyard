@@ -395,6 +395,24 @@ run_ship
 expect_line1 "PRECONDITION missing=head" nohead
 grep -q 'missing key: head' "$CDIR/stderr" || fail "nohead: stderr does not name head"
 
+# --- missing reviewed distinguishes a gate-blocked review and names its repair ---
+reset_stub; setup_case missingreviewed-gatefailed
+grep -v '^reviewed=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+printf 'review_status=gate-failed\n' >>"$S"
+run_ship
+[ "$RC" -eq 2 ] || fail "missingreviewed-gatefailed: exit $RC"
+expect_line1 "PRECONDITION missing=reviewed" missingreviewed-gatefailed
+case "$OUT" in *"tkt-build $S --from gate"*) ;; *) fail "missingreviewed-gatefailed: refusal names the gate repair command: [$OUT]" ;; esac
+
+# A deliberately skipped review is distinct from work blocked by the gate.
+reset_stub; setup_case missingreviewed-skipped
+grep -v '^reviewed=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+printf 'review_status=skipped\n' >>"$S"
+run_ship
+[ "$RC" -eq 2 ] || fail "missingreviewed-skipped: exit $RC"
+expect_line1 "PRECONDITION missing=reviewed" missingreviewed-skipped
+case "$OUT" in *"review_status=skipped"*"tkt-build $S --from review"*) ;; *) fail "missingreviewed-skipped: refusal distinguishes deliberate skip and names review repair: [$OUT]" ;; esac
+
 # --- head drift exits 3 naming all three SHAs on stdout and stderr ---
 reset_stub; setup_case drift
 grep -v '^head=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"

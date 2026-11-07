@@ -73,11 +73,30 @@ $(printf '%s\n' "$@" | head -n 40)"
   tkt journal "tkt-build $verdict" 2>/dev/null || true
   exit "$ec"
 }
+repair_hint() {
+  case "$1" in
+    repo|issue|branch|worktree|run|closing|workflow_doc)
+      printf 'Repair command: rerun tkt-start --run <run-dir> --repo <owner/name> --issue <number> --spec <ticket-body> --branch <branch> --worktree <path> --workflow-doc <path> --closing '\''Resolves #<number>'\''\n' ;;
+    plan)
+      printf 'Repair command: tkt-plan %s set <plan-path>, then run tkt-plan %s verify when the Verifier applies; use --no-verifier only on an approved bypass path\n' "$state" "$state" ;;
+    base)
+      printf 'Repair command: correct Base: in <plan-path>, run tkt-plan %s set <plan-path>, then tkt-plan %s verify when the Verifier applies\n' "$state" "$state" ;;
+    gate)
+      printf 'Repair command: correct the plan Gate: line to run gate.script, run tkt-plan %s set <plan-path>, then tkt-plan %s verify when the Verifier applies\n' "$state" "$state" ;;
+    pr)
+      printf 'Repair command: tkt-build %s --from lane (create the branch PR, then resume with --from review)\n' "$state" ;;
+    model.lane)
+      printf 'Repair command: tkt-build %s --lane-model <model-id>\n' "$state" ;;
+    model.review|model.overbuild)
+      printf 'Repair command: tkt-build %s --review-model <review-model-id> --overbuild-model <overbuild-model-id>\n' "$state" ;;
+    *) printf 'Repair command: rerun tkt-start with the missing ticket metadata, or tkt-plan %s set <plan-path> as appropriate\n' "$state" ;;
+  esac
+}
 require_keys() {
   req_err="$(tkt require "$@" 2>&1)" || {
     printf '%s\n' "$req_err" >&2
     key="$(sed -n 's/.*missing key: //p' <<<"$req_err" | head -n 1)"
-    emit "PRECONDITION missing=${key:-unknown}" 2 "$req_err"
+    emit "PRECONDITION missing=${key:-unknown}" 2 "$req_err" "$(repair_hint "${key:-unknown}")"
   }
 }
 lookup_branch_pr() {
@@ -85,7 +104,7 @@ lookup_branch_pr() {
   pr_json="$(gh pr list --head "$branch" --repo "$repo" --json number,headRefOid 2>/dev/null || true)"
   pr="$(jq -r '.[0].number // empty' <<<"$pr_json" 2>/dev/null || true)"
   head="$(jq -r '.[0].headRefOid // empty' <<<"$pr_json" 2>/dev/null || true)"
-  [ -n "${pr:-}" ] && [ -n "${head:-}" ] || emit "PRECONDITION missing=pr" 2 "tkt-build: no PR for branch $branch (gh pr list --head $branch --json number,headRefOid)"
+  [ -n "${pr:-}" ] && [ -n "${head:-}" ] || emit "PRECONDITION missing=pr" 2 "tkt-build: no PR for branch $branch (gh pr list --head $branch --json number,headRefOid)" "$(repair_hint pr)"
 }
 fetch_branch_pr() {
   lookup_branch_pr
@@ -94,6 +113,7 @@ fetch_branch_pr() {
 forward() {
   local step="$1" inner="$2" rc="$3" err="$4" first words rest
   first="$(head -n 1 <<<"$inner")"
+  if [ "$step" = GATE ]; then tkt set review_status gate-failed; fi
   case "$first" in
     "TKT tkt-"*)
       words="$(sed -e 's/^TKT tkt-[^ ]* //' -e 's/ log=[^ ]*$//' <<<"$first")"
@@ -112,6 +132,11 @@ part_suffix="$(part_findings_suffix "$(tkt get part 2>/dev/null || true)")"
 # plan without the line ends in a PR; Outcome: measurement ends in the gate.
 outcome="$(plan_outcome "$plan" 2>/dev/null || true)"
 [ -n "$outcome" ] || outcome=pr
+if [ "$outcome" = measurement ]; then
+  tkt set review_status skipped
+elif [ "$(tkt get review_status 2>/dev/null || true)" != done ]; then
+  tkt set review_status pending
+fi
 # A review with a missing pr or head derives only the missing key from the
 # branch PR before the drift check below, so that check never views an
 # empty pr. A stored head is left exactly as stored, so the drift check
@@ -157,7 +182,7 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
   fi
 fi
 base="$(plan_base "$plan" 2>/dev/null || true)"
-[ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan"
+[ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan" "$(repair_hint base)"
 # Only the first backticked token of a Files line is its path column; later ones are
 # prose (`reads`, `/reload`) that git would take as pathspecs. plan-check and plan-sweep
 # read every token (lib/plan-tokens.sh) because they check coverage, not staleness.
@@ -214,7 +239,7 @@ if [ "$from" = lane ]; then
   require_keys closing workflow_doc
   closing="$(tkt get closing)"
   plan_gate_args tkt
-  gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan" 2>"$tmpd/pg-err")" || emit "PRECONDITION missing=gate" 2 "$(cat "$tmpd/pg-err")"
+  gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan" 2>"$tmpd/pg-err")" || emit "PRECONDITION missing=gate" 2 "$(cat "$tmpd/pg-err")" "$(repair_hint gate)"
   # body_ends wins; a missing or blank body_ends falls through to the body_has co-author.
   attr="$(tkt get body_ends 2>/dev/null || true)"
   if [ -z "${attr//[[:space:]]/}" ]; then
@@ -224,7 +249,7 @@ if [ "$from" = lane ]; then
   # A lane with no model names the missing key on stderr and stops before dispatch.
   if [ -z "$lane_model" ]; then
     printf '%s\n' "tkt-build: missing key: model.lane (no --lane-model and no state model.lane)" >&2
-    emit "PRECONDITION missing=model.lane" 2 "tkt-build: no lane model: the lane slot has no id (pass --lane-model or set model.lane)"
+    emit "PRECONDITION missing=model.lane" 2 "tkt-build: no lane model: the lane slot has no id (pass --lane-model or set model.lane)" "$(repair_hint model.lane)"
   fi
   lane_args=(--slot lane --template "$lane_brief" --gate-from-plan --expect-commits "BASE=$base" "GATE=$gate_cmd" "CLOSING=$closing" "ATTRIBUTION=$attr" "LANE_MODEL=$lane_model")
   lane_args+=(--model "$lane_model")
@@ -270,10 +295,11 @@ if [ "$outcome" = measurement ] || [ "$from" != review ]; then
 fi
 if [ "$outcome" = measurement ]; then
   # The gate passed: no PR, review or CI follows. Record the terminal outcome
-  # the way APPROVE and CHANGES are recorded, and stop.
-  tkt set reviewed "$head"; tkt set round 0
+  # and the intentional review skip.
+  tkt set reviewed "$head"; tkt set round 0; tkt set review_status skipped
   emit "MEASURED head=$head" 0
 fi
+tkt set review_status ready
 mutants_file=""; mutant_count=0; mutant_run=""; listing_note=""
 if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
   mutants_file="$run/$slug-$issue-mutants-${head:0:12}.txt"; : >"$mutants_file"
@@ -307,8 +333,8 @@ if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
 fi
 rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
 om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
-[ -n "$rm" ] || emit "PRECONDITION missing=model.review" 2 "tkt-state: missing key: model.review"
-[ -n "$om" ] || emit "PRECONDITION missing=model.overbuild" 2 "tkt-state: missing key: model.overbuild"
+[ -n "$rm" ] || emit "PRECONDITION missing=model.review" 2 "tkt-state: missing key: model.review" "$(repair_hint model.review)"
+[ -n "$om" ] || emit "PRECONDITION missing=model.overbuild" 2 "tkt-state: missing key: model.overbuild" "$(repair_hint model.overbuild)"
 map_note=""; map_id=""; map_out="$run/$slug-$issue-map-r0.md"
 if [ "$mutant_count" -gt 0 ]; then
   if sm="$(tkt get job.map 2>/dev/null)" && [ -n "$sm" ]; then map_id="$sm"
@@ -548,7 +574,7 @@ n_approve="$(grep -cE 'VERDICT (standards|spec|overbuild): APPROVE' <<<"$collect
 bad=$((3 - n_approve + p1 + p2 + merged))
 # A map note alone leaves the review state unwritten, so the review can re-run.
 if [ "$bad" -gt 0 ] || [ -z "$map_note" ]; then
-  tkt set reviewed "$head"; tkt set findings "$findings_file"; tkt set round 0
+  tkt set reviewed "$head"; tkt set review_status done; tkt set findings "$findings_file"; tkt set round 0
 fi
 [ -n "$map_note" ] && bad=$((bad + 1))
 approve_digest="$collect_out"; digest="$(cat "$findings_file")"
