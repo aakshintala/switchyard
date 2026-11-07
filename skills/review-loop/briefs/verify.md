@@ -4,7 +4,7 @@ Follow the scoped-verify mode of `__SKILLS__/code-review/SKILL.md`. Your working
 
 __FINDINGS__
 
-The `--verify` findings file may contain a cumulative history rather than only the latest open findings. It labels each finding with the review or fix round that raised it, its current status, and any `--no-verify` fix rounds. The header lists the finding rounds held and earlier fix rounds in this diff. Treat the complete history as the scoped findings; use the labels as context, then judge each finding against the repair diff at HEAD.
+The `--verify` findings file may contain a cumulative history rather than only the latest open findings. It labels each finding with the review or fix round that raised it, its current status, and rounds deliberately run without verification. The header lists the finding rounds held and earlier fix rounds in this diff. Treat the complete history as the scoped findings; use the labels as context, then judge each finding against the repair diff at HEAD.
 
 ## Earlier posted review rounds
 
