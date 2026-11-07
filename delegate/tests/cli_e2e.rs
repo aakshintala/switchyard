@@ -980,6 +980,31 @@ fn gate_pass_keeps_done() {
 }
 
 #[test]
+fn gate_exit_75_is_refused_and_status_says_nothing_was_tested() {
+    let e = Env::new("gate-refused");
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--gate",
+            "echo 'nothing tested'; exit 75",
+        ],
+        "ship it",
+        &[],
+    );
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["result"]["gateResult"]["refused"], true);
+    assert_eq!(done["result"]["gateResult"]["passed"], false);
+    assert_eq!(done["result"]["gateResult"]["exitCode"], 75);
+
+    let status = e.delegate(&["status", &id], None);
+    assert!(status.status.success());
+    let status = String::from_utf8(status.stdout).unwrap();
+    assert!(status.contains("gate refused, nothing tested"), "{status}");
+}
+
+#[test]
 fn gate_fail_downgrades_and_records_output() {
     let e = Env::new("gate-bad");
     let id = e.ok(

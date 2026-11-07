@@ -395,6 +395,17 @@ expect_verdict "TKT tkt-job GATE-FAIL rc=1 gatelog=/tmp/gate-test.log log=*" "DO
 if ! bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "DONE failed gate keeps concerns.lane as an empty key"; fi
 [ -z "$(bash "$TKT_STATE" "$S" get concerns.lane)" ] || fail "DONE failed gate clears stale concerns before routing"
 
+# --- DONE with a refused gate is distinct from a failing gate ---
+setup_case gate-refused
+reset_stub
+make_record stub-1 DONE 75 1 2 1
+jq '.result.gateResult.refused = true' "$T/records/stub-1.json" \
+  >"$T/records/stub-1.json.tmp" && mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json" || fail "mark gate refused"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "refused gate is not accepted as a pass"
+expect_verdict "TKT tkt-job GATE-REFUSED rc=75 gatelog=/tmp/gate-test.log log=*" "refused gate"
+grep -q 'gate=refused (nothing tested)' <<<"$OUT" || fail "refused gate digest says nothing was tested"
+
 # --- DONE_WITH_CONCERNS with a passed gate, commits, and --expect-commits ---
 setup_case concerns
 reset_stub

@@ -385,6 +385,7 @@ else
   status="$(jq -r '.result.status // .status // ""' "$record" 2>/dev/null || true)"
   text="$(jq -j -r '.result.text // ""' "$record" 2>/dev/null || true)"
   gate_exit="$(jq -r '.result.gateResult | if . == null then "none" elif .exitCode != null then (.exitCode | tostring) elif .passed == true then "0" else "1" end' "$record" 2>/dev/null || true)"
+  gate_refused="$(jq -r '.result.gateResult.refused == true' "$record" 2>/dev/null || true)"
   [ -n "$gate_exit" ] || gate_exit="none"
   gate_path="$(jq -r '.result.gateResult.outputPath // ""' "$record" 2>/dev/null || true)"
   gate_tail="$(jq -r '.result.gateResult.outputTail // ""' "$record" 2>/dev/null || true)"
@@ -397,7 +398,9 @@ else
   gate_word="none"
   [ "$gate_exit" = "none" ] || gate_word="PASS"
   gate_failed=0
-  if [ "$gate_exit" != "none" ] && [ "$gate_exit" != "0" ]; then
+  if [ "$gate_refused" = "true" ]; then
+    gate_word="REFUSED"
+  elif [ "$gate_exit" != "none" ] && [ "$gate_exit" != "0" ]; then
     gate_failed=1
     gate_word="FAIL"
   fi
@@ -420,8 +423,11 @@ else
       if [ "$status" = "DONE" ] && [ "$slot" = lane ]; then
         tkt set concerns.lane ""
       fi
-      # A failed gate script rules over the status word.
-      if [ "$gate_failed" -eq 1 ]; then
+      # A refused or failed gate script rules over the status word.
+      if [ "$gate_refused" = "true" ]; then
+        verdict="GATE-REFUSED rc=$gate_exit gatelog=${gate_path:--}"
+        ec=1
+      elif [ "$gate_failed" -eq 1 ]; then
         verdict="GATE-FAIL rc=$gate_exit gatelog=${gate_path:--}"
         ec=1
       elif [ "$status" = "DONE_WITH_CONCERNS" ]; then
@@ -476,8 +482,13 @@ newCommits: $shas"
 uncommittedFiles: $dirty"
   fi
   if [ "$gate_exit" != "none" ]; then
-    digest="$digest
+    if [ "$gate_refused" = "true" ]; then
+      digest="$digest
+gate=refused (nothing tested) exit=$gate_exit log=${gate_path:- -}"
+    else
+      digest="$digest
 gate=exit=$gate_exit log=${gate_path:- -}"
+    fi
     if [ -n "$gate_tail" ]; then
       digest="$digest
 $(tail -n 10 <<<"$gate_tail")"

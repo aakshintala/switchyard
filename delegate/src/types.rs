@@ -109,12 +109,18 @@ pub struct ChangeSet {
     pub dirty_after: bool,
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GateResult {
     pub command: String,
     pub exit_code: i32,
     pub passed: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub refused: bool,
     pub output_tail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,

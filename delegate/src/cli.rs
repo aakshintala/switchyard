@@ -863,6 +863,14 @@ fn status_line(id: &str, rec: &serde_json::Value) -> String {
             .and_then(serde_json::Value::as_array)
             .is_some_and(Vec::is_empty);
     let mut parts = Vec::new();
+    if result
+        .and_then(|value| value.get("gateResult"))
+        .and_then(|gate| gate.get("refused"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        parts.push("gate refused, nothing tested".to_string());
+    }
 
     if state != "DONE"
         && state != "RUNNING"
