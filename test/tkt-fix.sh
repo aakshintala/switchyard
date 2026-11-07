@@ -238,7 +238,7 @@ drop_state_key() {
 }
 
 record_test_round() {
-  local n="$1" head="$2" part suffix="" source path start
+  local n="$1" head="$2" part suffix="" source path start=""
   part="$(bash "$TKT_STATE" "$S" get part 2>/dev/null || true)"
   case "$part" in ''|*[!0-9]*) ;; *) [ "$part" -ge 2 ] && suffix="-part$part";; esac
   source="$(bash "$TKT_STATE" "$S" get findings)"
