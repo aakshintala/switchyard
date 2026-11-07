@@ -248,6 +248,12 @@ pub struct CliRecord {
     #[serde(flatten)]
     pub poll: PollResult,
     pub supervisor_pid: u32,
+    pub caller: String,
+    pub caller_pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_cwd: Option<String>,
     pub resume: CliResume,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<String>,
@@ -260,6 +266,10 @@ pub struct CliRecordWriter {
     pub model: String,
     pub backend: Option<String>,
     pub cwd: String,
+    pub caller: String,
+    pub caller_pid: u32,
+    pub caller_command: Option<String>,
+    pub caller_cwd: Option<String>,
     pub gate: String,
     pub tool_idle_ms: Option<f64>,
     pub idle_ms: Option<f64>,
@@ -292,6 +302,10 @@ impl StatusRecordWriter for CliRecordWriter {
         let rec = CliRecord {
             poll,
             supervisor_pid: std::process::id(),
+            caller: self.caller.clone(),
+            caller_pid: self.caller_pid,
+            caller_command: self.caller_command.clone(),
+            caller_cwd: self.caller_cwd.clone(),
             resume: CliResume {
                 model: self.model.clone(),
                 backend: self.backend.clone(),

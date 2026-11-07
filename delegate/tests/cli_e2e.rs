@@ -622,6 +622,83 @@ fn status_prints_done_for_a_finished_job() {
 }
 
 #[test]
+fn status_shows_explicit_caller_and_record_keeps_parent_metadata() {
+    let e = Env::new("caller-label");
+    let worker_dir = e.dir.join("worker");
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--cwd",
+            worker_dir.to_str().unwrap(),
+        ],
+        "quick",
+        &[("DELEGATE_CALLER", "lane-3561")],
+    );
+    let record = e.wait_terminal(&id);
+    assert_eq!(record["caller"], "lane-3561");
+    assert_eq!(record["callerPid"], std::process::id());
+    assert_eq!(
+        record["callerCwd"],
+        std::fs::canonicalize(&e.dir)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let status = e.delegate(&["status", &id], None);
+    assert!(status.status.success());
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("caller=lane-3561"),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[test]
+fn run_without_caller_label_records_parent_command() {
+    let e = Env::new("caller-command");
+    let id = e.run("quick");
+    let record = e.wait_terminal(&id);
+    let command = record["callerCommand"].as_str().unwrap_or("");
+    assert!(!command.is_empty(), "{record}");
+    assert_eq!(record["caller"], command);
+    assert_eq!(record["callerPid"], std::process::id());
+}
+
+#[test]
+fn caller_cwd_is_not_the_worker_run_directory() {
+    let e = Env::new("caller-cwd");
+    let worker_dir = e.dir.join("worker");
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--cwd",
+            worker_dir.to_str().unwrap(),
+        ],
+        "quick",
+        &[],
+    );
+    let record = e.wait_terminal(&id);
+    assert_eq!(
+        record["resume"]["cwd"],
+        worker_dir.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        record["callerCwd"],
+        std::fs::canonicalize(&e.dir)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+}
+
+#[test]
 fn status_shows_error_text_and_uncommitted_changes() {
     let e = Env::new("status-error-summary");
     let id = "status-error";
