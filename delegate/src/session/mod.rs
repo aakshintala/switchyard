@@ -671,9 +671,20 @@ fn logs(args: &[String], json_mode: bool) -> Result<i32> {
     let paths = default_paths();
     let mut offset = 0usize;
     loop {
-        let current = load_and_settle(&paths, id)?;
-        let bytes = fs::read(paths.events_file(id))
-            .map_err(|error| failed(format!("could not read session logs: {error}")))?;
+        let current = match load_and_settle(&paths, id) {
+            Ok(current) => current,
+            Err(error) if error.code == "noSession" => {
+                return Err(failure("noSession", format!("no log record for {id}")));
+            }
+            Err(error) => return Err(error),
+        };
+        let bytes = fs::read(paths.events_file(id)).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                failure("noSession", format!("no log record for {id}"))
+            } else {
+                failed(format!("could not read session logs: {error}"))
+            }
+        })?;
         let end = bytes
             .iter()
             .rposition(|byte| *byte == b'\n')
