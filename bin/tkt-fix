@@ -146,8 +146,8 @@ emit() {
   { printf 'TKT tkt-fix %s log=%s\n' "$verdict" "$logpath"; [ $# -eq 0 ] || printf '%s\n' "$@" | head -n 40; } >"$logpath"
   cat "$logpath"; t journal "tkt-fix $verdict"; exit "$ec"
 }
-# Two rounds have run: only a --resume of an open slot may continue.
-[ "$round" -lt 2 ] || [ -n "$resume" ] || emit "ROUND-LIMIT round=$round" 1 "send the open findings to triage"
+# Two rounds have run: a --resume may continue without an open slot.
+[ "$round" -lt 2 ] || [ -n "$resume" ] || emit "ROUND-LIMIT round=$round" 1 "resume a job with: tkt-fix $state --verify --resume <job id> --prompt <file> (works with no open slot); otherwise send the open findings to triage"
 # Fill missing PR identity before checking entry drift or dispatching a fix.
 # pre_pr_resume_hint names the pre-PR resume on the no-PR refusals below.
 pre_pr_resume_hint() {

@@ -1809,6 +1809,8 @@ gh_before="$(gh_count)"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "order round-limit exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "order round-limit"
+grep -q "tkt-plan .* confirm --edits <file>" <<<"$OUT" || fail "order round-limit names the confirm command"
+grep -q "triaged --comment <id>" <<<"$OUT" || fail "order round-limit names the triage escape"
 [ "$(gh_count)" = "$gh_before" ] || fail "ROUND-LIMIT reads no ticket"
 
 setup_case order-confirmed
@@ -1819,6 +1821,9 @@ gh_before="$(gh_count)"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "order confirmed exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "order confirmed"
+grep -q "grant-round --by <who> --comment <id>" <<<"$OUT" || fail "confirm=done names the grant command"
+grep -q "confirm --edits <file>" <<<"$OUT" || fail "confirm=done names the confirm command"
+grep -q "triaged --comment <id>" <<<"$OUT" || fail "confirm=done names the triage escape"
 [ "$(gh_count)" = "$gh_before" ] || fail "confirm=done reads no ticket"
 
 setup_case order-stale
@@ -1905,6 +1910,8 @@ gh_before="$(gh_count)"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "confirm-order exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm-order"
+grep -q "grant-round --by <who> --comment <id>" <<<"$OUT" || fail "confirm-order names the grant command"
+grep -q "confirm --edits <file>" <<<"$OUT" || fail "confirm-order names the confirm command"
 [ "$(gh_count)" = "$gh_before" ] || fail "a used confirm reads no ticket"
 
 # --- real templates: the filled verify and confirm briefs carry the ticket text ---
@@ -2331,6 +2338,29 @@ printf 'ok' >"$T/mode"
 run_plan verify
 [ "$RC" -eq 0 ] || fail "job-blocked-reservation retry exits 0 (rc=$RC)"
 grep -q "out=$CDIR/run/switchyard-518-verifier-out-r1-2.md|" "$T/stub.log" || fail "job-blocked-reservation retry writes r1-2"
+
+# --- one edited-plan re-confirm is free, the next one is refused ---
+setup_case confirm-free-reconfirm
+rebase_plan
+prior_confirm="$CDIR/run/switchyard-518-confirm-out.md"
+printf 'prior confirmation\n' >"$prior_confirm"
+printf 'line 1 was edited\n' >"$CDIR/run/switchyard-518-confirm-edits-1.md"
+printf 'line 1 was edited\n' >"$CDIR/edits.md"
+touch -t 202001010000 "$prior_confirm"
+touch -t 202101010000 "$CDIR/run/switchyard-518-confirm-edits-1.md"
+touch -t 204001010000 "$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed prior confirm"
+bash "$TKT_STATE" "$S" set last_report "$prior_confirm" || fail "seed prior report"
+bash "$TKT_STATE" "$S" set last_confirm_report "$prior_confirm" || fail "seed last confirm report"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed confirm verifier round"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "free re-confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(state_get confirm_reconfirm_used)" = "1" ] || fail "free re-confirm records that it was used"
+printf 'line 2 was edited\n' >"$CDIR/run/switchyard-518-confirm-edits-2.md"
+touch -t 203001010000 "$CDIR/run/switchyard-518-confirm-edits-2.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "second re-confirm exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "second re-confirm"
 
 # --- LINES and PLAN-CHECK name the line count, not a finding count (#1109) ---
 # `n=` reads as a finding count; `report_lines=` says what the number is.

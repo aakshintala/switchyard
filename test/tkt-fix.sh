@@ -315,7 +315,8 @@ bash "$TKT_STATE" "$S" set round 2 >/dev/null
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "round 2 fix exited 0"
 rc=$?; [ "$rc" = "1" ] || fail "round 2 fix exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "bad verdict: $(head -n 1 <<<"$out")"
-grep -q "send the open findings to triage" <<<"$out" || fail "ROUND-LIMIT digest names triage"
+grep -q "tkt-fix .*--resume <job id> --prompt <file>" <<<"$out" || fail "ROUND-LIMIT names the resume command and prompt"
+grep -q "works with no open slot" <<<"$out" || fail "ROUND-LIMIT says resume needs no open slot"
 grep -q "job|" "$T/calls.log" && fail "round 2 fix dispatched a job"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "round moved on ROUND-LIMIT"
 setup_case round-resume
