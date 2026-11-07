@@ -153,7 +153,56 @@ diff --git a/src/thing.rs b/src/thing.rs
 +    pub fn review_depth_test_helper(value: u8) {}
  }
 DIFF
-expect_output 'single non-test lines=0 threshold=700' "$T/rust-test.diff"
+expect_output 'full rust pub line file=src/thing.rs' "$T/rust-test.diff"
+
+cat >"$T/rust-test-serde.diff" <<'DIFF'
+diff --git a/src/thing.rs b/src/thing.rs
+--- a/src/thing.rs
++++ b/src/thing.rs
+@@ -1,5 +1,5 @@
+ #[cfg(test)]
+ mod tests {
+-    #[derive(Serialize)]
++    #[derive(Serialize, Deserialize)]
+     struct Saved;
+ }
+DIFF
+expect_output 'full persisted/wire-format signal=serde derive file=src/thing.rs' "$T/rust-test-serde.diff"
+
+cat >"$T/rust-test-braces-then-production.diff" <<'DIFF'
+diff --git a/src/thing.rs b/src/thing.rs
+--- a/src/thing.rs
++++ b/src/thing.rs
+@@ -1,8 +1,8 @@
+ #[cfg(test)]
+ mod tests {
+     #[test]
+     fn helper() {
+         let text = "{";
+         // {
+     }
+ }
+-pub fn value() -> u8 { 0 }
++pub fn value() -> u16 { 0 }
+DIFF
+expect_output 'full rust pub line file=src/thing.rs' "$T/rust-test-braces-then-production.diff"
+
+cat >"$T/rust-test-large-edit.diff" <<'DIFF'
+diff --git a/src/thing.rs b/src/thing.rs
+--- a/src/thing.rs
++++ b/src/thing.rs
+@@ -1,4 +1,8 @@
+ #[cfg(test)]
+ mod tests {
+-    fn old() {}
++    fn helper() {
++        private_one();
++        private_two();
++        private_three();
++    }
+ }
+DIFF
+expect_output 'single non-test lines=0 threshold=2' "$T/rust-test-large-edit.diff" --threshold 2
 
 cat >"$T/rust-test-then-production.diff" <<'DIFF'
 diff --git a/src/thing.rs b/src/thing.rs
@@ -207,6 +256,16 @@ diff --git a/tests/review_depth.rs b/tests/review_depth.rs
 +private_test_line();
 DIFF
 expect_output 'single non-test lines=0 threshold=700' "$T/test-path.diff"
+
+cat >"$T/test-path-serde.diff" <<'DIFF'
+diff --git a/tests/serde_model.rs b/tests/serde_model.rs
+--- a/tests/serde_model.rs
++++ b/tests/serde_model.rs
+@@ -1 +1 @@
+-#[derive(Serialize)]
++#[derive(Serialize, Deserialize)]
+DIFF
+expect_output 'single non-test lines=0 threshold=700' "$T/test-path-serde.diff"
 
 out="$(cat "$T/private.diff" | "$BIN" 2>"$T/stderr")" || fail "stdin diff classification failed"
 [ "$out" = 'single non-test lines=1 threshold=700' ] || fail "stdin returned [$out]"

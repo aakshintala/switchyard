@@ -56,36 +56,6 @@ class FileDiff:
     hunks: list[Hunk] = field(default_factory=list)
 
 
-@dataclass
-class RustTestScope:
-    active: bool = False
-    brace_depth: int | None = None
-
-    def classify(self, line: str) -> bool:
-        if not self.active and RUST_TEST_CFG.search(line.lstrip()):
-            self.active = True
-            self.brace_depth = None
-        is_test = self.active
-        if not self.active:
-            return False
-
-        if self.brace_depth is None:
-            opening = line.find("{")
-            if opening >= 0:
-                self.brace_depth = line[opening:].count("{") - line[opening:].count("}")
-                if self.brace_depth <= 0:
-                    self.active = False
-                    self.brace_depth = None
-            elif ";" in line:
-                self.active = False
-        else:
-            self.brace_depth += line.count("{") - line.count("}")
-            if self.brace_depth <= 0:
-                self.active = False
-                self.brace_depth = None
-        return is_test
-
-
 def parse_diff(text: str) -> list[FileDiff]:
     files: list[FileDiff] = []
     current: FileDiff | None = None
@@ -119,33 +89,17 @@ def parse_diff(text: str) -> list[FileDiff]:
 
 def changed_lines(file_diff: FileDiff):
     for hunk in file_diff.hunks:
-        old_test_scope = RustTestScope()
-        new_test_scope = RustTestScope()
         for line in hunk.lines:
-            content = line[1:] if line.startswith(("+", "-", " ")) else line
-            if file_diff.path.endswith(".rs"):
-                if line.startswith("+") and not line.startswith("+++"):
-                    is_test = new_test_scope.classify(content)
-                elif line.startswith("-") and not line.startswith("---"):
-                    is_test = old_test_scope.classify(content)
-                elif line.startswith(" "):
-                    old_test_scope.classify(content)
-                    new_test_scope.classify(content)
-                else:
-                    continue
-            else:
-                is_test = False
-
             if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
-                yield hunk, line[1:], is_test
+                yield line[1:]
 
 
 def rust_public_signal(files: list[FileDiff]) -> str | None:
     for file_diff in files:
         if not file_diff.path.endswith(".rs") or is_test_path(file_diff.path):
             continue
-        for _, line, is_test in changed_lines(file_diff):
-            if not is_test and RUST_PUBLIC_LINE.search(line):
+        for line in changed_lines(file_diff):
+            if RUST_PUBLIC_LINE.search(line):
                 return f"rust pub line file={file_diff.path}"
     return None
 
@@ -159,6 +113,12 @@ def is_test_path(path: str) -> bool:
 
 def content_signal(files: list[FileDiff], patterns, category: str) -> str | None:
     for file_diff in files:
+        if (
+            category == "persisted/wire-format"
+            and file_diff.path.endswith(".rs")
+            and is_test_path(file_diff.path)
+        ):
+            continue
         for hunk in file_diff.hunks:
             changed = [
                 line[1:] for line in hunk.lines
@@ -180,13 +140,24 @@ def content_signal(files: list[FileDiff], patterns, category: str) -> str | None
 
 
 def non_test_line_count(files: list[FileDiff]) -> int:
-    return sum(
-        1
-        for file_diff in files
-        if not is_test_path(file_diff.path)
-        for _, _, is_test in changed_lines(file_diff)
-        if not is_test
-    )
+    count = 0
+    for file_diff in files:
+        if is_test_path(file_diff.path):
+            continue
+        for hunk in file_diff.hunks:
+            in_test_scope = False
+            for diff_line in hunk.lines:
+                content = diff_line[1:] if diff_line.startswith(("+", "-", " ")) else diff_line
+                if file_diff.path.endswith(".rs") and diff_line.startswith(("+", "-", " ")):
+                    if RUST_TEST_CFG.search(content):
+                        in_test_scope = True
+                if (
+                    diff_line.startswith(("+", "-"))
+                    and not diff_line.startswith(("+++", "---"))
+                    and not in_test_scope
+                ):
+                    count += 1
+    return count
 
 
 def choose_depth(text: str, threshold: int) -> tuple[str, str]:
