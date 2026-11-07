@@ -1228,6 +1228,16 @@ ship; expect 0 'a test in a changed path with spaces cites a negative claim'
 
 setup
 mkdir -p "$C/test"
+printf 'test_split_path_citation() { :; }\n' >"$C/test/untouched-citation.sh"
+publish_main_test_fixture
+mkdir -p "$WT/test/split"$'\036'"test"
+printf 'marker\n' >"$WT/test/split"$'\036'"test/untouched-citation.sh"
+push_test_change "test/split"$'\036'"test/untouched-citation.sh" add-control-char-path
+printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope; see `test_split_path_citation`.\n' >"$ST/body"
+ship; nothing_ran 'a control character in a changed path does not widen the citation scope'
+
+setup
+mkdir -p "$C/test"
 cat >"$C/test/untouched-citation.sh" <<'TEST'
 test_in_untouched_file() { :; }
 TEST

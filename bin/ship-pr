@@ -529,12 +529,14 @@ if grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?refs[[:space:]]+#[0-9]+([[:space:]
   && ! grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+([[:alnum:]_.-]+/)?#[0-9]+([[:space:]]|$)' <<<"$body_text"; then
   [ -n "$keep_branch" ] || keep_branch="PR body references an issue without a closing line"
 fi
-pr_test_list="$(git -C "$worktree" diff --name-only -z --diff-filter=ACMRT "origin/main...$head0" -- 'test/**' 'tests/**' '**/test/**' '**/tests/**' '*.test.*' '*.spec.*' '*_test.*' | tr '\0' '\036')" \
-  || die 1 "cannot inspect test paths on PR head $head0"
-# One literal pathspec per changed test file, so a path with spaces or glob
-# characters names exactly that file.
+pr_test_list="$(mktemp)" || die 1 "cannot create a temp file"
+git -C "$worktree" diff --name-only -z --diff-filter=ACMRT "origin/main...$head0" -- 'test/**' 'tests/**' '**/test/**' '**/tests/**' '*.test.*' '*.spec.*' '*_test.*' >"$pr_test_list" \
+  || { rm -f "$pr_test_list"; die 1 "cannot inspect test paths on PR head $head0"; }
+# One literal pathspec per changed test file, NUL-delimited end to end, so a
+# path with spaces, glob or control characters names exactly that file.
 pr_test_paths=()
-while IFS= read -r -d $'\036' p; do pr_test_paths+=(":(literal)$p"); done <<<"$pr_test_list"
+while IFS= read -r -d '' p; do pr_test_paths+=(":(literal)$p"); done <"$pr_test_list"
+rm -f "$pr_test_list"
 authority_bad=0
 authority_scan <<<"$body_text"
 comments_text="$(gh api --paginate "repos/$repo/issues/$pr/comments" \
