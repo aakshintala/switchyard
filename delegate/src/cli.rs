@@ -33,10 +33,10 @@ pub(crate) const USAGE: &str =
        delegate doctor
        delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)
        delegate session start --model muse/MODEL|PROVIDER/MODEL[:LEVEL] --brief FILE --inbox DIR [--json]
-       delegate session send <id> TEXT|- [--json]
-       delegate session logs <id> [--follow] [--json]
-       delegate session watch <id> [--json]
-       delegate session stop <id> [--interrupt] [--json]
+       delegate session send <id-or-prefix> TEXT|- [--json]
+       delegate session logs <id-or-prefix> [--follow] [--json]
+       delegate session watch <id-or-prefix> [--json]
+       delegate session stop <id-or-prefix> [--interrupt] [--json]
        delegate session list [--json]
        Session exit codes: 0 ok, 1 failed, 2 usage, 3 no session, 4 dead, 5 busy";
 

@@ -1518,6 +1518,80 @@ fn list_sorts_by_started_time_then_id_and_marks_unreadable() {
 }
 
 #[test]
+fn session_verbs_resolve_unique_id_prefixes_and_report_ambiguous_or_missing_prefixes() {
+    let h = Harness::new();
+    let id = id_from(&h.start(b"FAST", false, "", &[]));
+    h.wait_state(&id, "initial turn idle", |state| state["status"] == "idle");
+    let prefix = &id[..8];
+
+    let sent = h.invoke(&["send", prefix, "prefix send"]);
+    assert!(
+        sent.status.success(),
+        "send rejected a unique prefix: {}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    h.wait_state(&id, "prefix send idle", |state| state["status"] == "idle");
+
+    let logs = h.invoke(&["logs", prefix, "--json"]);
+    assert!(
+        logs.status.success(),
+        "logs rejected a unique prefix: {}",
+        String::from_utf8_lossy(&logs.stderr)
+    );
+    assert!(serde_json::from_slice::<Value>(&logs.stdout).is_ok());
+
+    let watched = h.invoke(&["watch", prefix, "--json"]);
+    assert!(
+        watched.status.success(),
+        "watch rejected a unique prefix: {}",
+        String::from_utf8_lossy(&watched.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&watched.stdout).unwrap()["session"]["id"],
+        id
+    );
+
+    let stopped = h.invoke(&["stop", prefix]);
+    assert!(
+        stopped.status.success(),
+        "stop rejected a unique prefix: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+
+    let paths = delegate::session::state::Paths::new(h.root());
+    let ambiguous = [
+        "abcdef12-0000-7000-8000-000000000001",
+        "abcdef12-0000-7000-8000-000000000002",
+    ];
+    for (index, id) in ambiguous.iter().enumerate() {
+        let state = delegate::session::state::new_state(
+            id,
+            "muse/muse-spark-1.3-contributor",
+            "/tmp",
+            "/tmp/inbox",
+            index as u64,
+        );
+        delegate::session::state::write_state(&paths, &state).unwrap();
+    }
+    let result = h.invoke(&["stop", "abcdef12"]);
+    assert_eq!(result.status.code(), Some(2));
+    let message = String::from_utf8_lossy(&result.stderr);
+    for id in ambiguous {
+        assert!(
+            message.contains(id),
+            "ambiguous prefix did not list {id}: {message}"
+        );
+    }
+
+    let missing = h.invoke(&["stop", "deadbeef"]);
+    assert_eq!(missing.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&missing.stderr),
+        "no such session deadbeef\n"
+    );
+}
+
+#[test]
 fn dead_supervisor_is_settled_once_and_racing_sends_are_started_then_steered() {
     let h = Harness::new();
     let id = id_from(&h.start(b"HOLD", false, "", &[]));
