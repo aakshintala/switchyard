@@ -11,6 +11,8 @@ The loop for one PR. Reviews run on models from a different family than the one 
 
 ### 1. Review
 
+`review-depth` sets the review scope before the first review. Run `~/.agents/bin/review-depth --pr <pr> --repo <owner/name>` before the first review: `full` uses this loop as written; `single` means one review round and no later full review pair. Fix P1/P2 findings as usual, and run a scoped verify when step 2 requires one.
+
 ```
 ~/.agents/bin/review-pr run <pr> --repo <owner/name> --cwd <clone> --head <pushed sha> [--issue <n>]... [--spec <n>] --model <correctness> [--overbuild-model <over-engineering>] [--axes <list>] [--workflow-doc <path>]
 ```
