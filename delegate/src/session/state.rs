@@ -1661,13 +1661,23 @@ mod tests {
     fn reduced_tick_workload_stays_inside_the_guard_at_controlled_update_latency() {
         let scratch = Scratch::new();
         let store = Arc::new(scratch.store());
-        // The sleep runs inside the update closure under the store lock, so
-        // the 80 sleeps serialise: at least 800 ms, far inside the 5 s guard.
-        let hook: Arc<dyn Fn() + Send + Sync> =
-            Arc::new(|| std::thread::sleep(SLOW_UPDATE_LATENCY));
+        // A fake clock stands in for the slow update: the hook runs inside the
+        // update closure under the store lock, so each update advances the
+        // clock by SLOW_UPDATE_LATENCY and the ticks serialise exactly as real
+        // sleeps would, without depending on host scheduling.
+        let clock = Arc::new(Mutex::new(Duration::ZERO));
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new({
+            let clock = Arc::clone(&clock);
+            move || {
+                *clock.lock().unwrap_or_else(|error| error.into_inner()) += SLOW_UPDATE_LATENCY;
+            }
+        });
         let handles = run_tick_workers(&store, TICKS_PER_WORKER, hook);
         wait_threads(handles);
         assert_tick_log(&scratch, &store, 2 * TICKS_PER_WORKER);
+        let elapsed = *clock.lock().unwrap();
+        assert_eq!(elapsed, SLOW_UPDATE_LATENCY * (2 * TICKS_PER_WORKER) as u32);
+        assert!(elapsed < WORKER_DEADLINE, "{elapsed:?} reached the guard");
     }
 
     #[test]
