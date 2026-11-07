@@ -82,6 +82,7 @@ case "\$cmd" in
     ;;
   watch)
     printf 'watch|%s\n' "\$*" >>"\$log"
+    if [ -n "\${STUB_WATCH_FAIL:-}" ]; then exit "\$STUB_WATCH_FAIL"; fi
     mkdir -p "\${DELEGATE_JOBS_DIR:-\$TMPDIR/delegate-jobs}"
     for wid in "\$@"; do
       if [ -f "\$recs/\$wid.json" ]; then
@@ -379,6 +380,28 @@ jq -e -s '
   and .[1].startedAtMs == 2000 and .[1].endedAtMs == 2400
   and .[1].usage == "none" and .[1].costUsd == "none"
 ' "$CDIR/jobs.log" >/dev/null || fail "jobs.log preserves rounds with times and usage or explicit none"
+
+# --- a failed watch still logs the dispatched id when its record is unavailable
+setup_case jobs-log-watch-fail
+reset_stub
+make_record stub-1 DONE none 0 1 0
+STUB_WATCH_FAIL=7 run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 3 ] || fail "watch failure without a record reaches the unknown verdict (rc=$RC)"
+[ "$(wc -l <"$CDIR/jobs.log" | tr -d ' ')" -eq 1 ] || fail "watch failure still writes one jobs.log entry"
+jq -e -s 'length == 1 and .[0].jobId == "stub-1" and .[0].usage == "none" and .[0].costUsd == "none"' "$CDIR/jobs.log" >/dev/null || fail "watch failure writes a fallback entry for the dispatched id"
+grep -q 'delegate watch failed (exit 7)' "$CDIR/stderr.txt" || fail "watch failure is reported on stderr"
+
+# --- a stored-id rerun recreates its log line if the original line is missing
+setup_case jobs-log-rerun-recovery
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "initial logged dispatch exits 0"
+rm "$CDIR/jobs.log"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "stored-id rerun exits 0"
+[ "$(wc -l <"$CDIR/jobs.log" | tr -d ' ')" -eq 1 ] || fail "stored-id rerun writes the missing log line once"
+jq -e -s 'length == 1 and .[0].jobId == "stub-1"' "$CDIR/jobs.log" >/dev/null || fail "stored-id rerun restores the matching job id"
 
 # --- DONE with no gate and no commits, without --expect-commits ---
 setup_case done-plain

@@ -5,7 +5,8 @@
 # id, fill the brief from flags then state, write the gate script, dispatch
 # through delegate, watch with no timeout, follow supersededBy to the newest
 # record, and print one verdict line plus a digest of at most 40 lines. A
-# fresh dispatch appends one JSON line per job to jobs.log beside the state file.
+# dispatched job gets one JSON line per id in jobs.log beside the state file;
+# reruns recover a missing line without duplicating an existing entry.
 # A verifier-r* slot's wall cap travels on the run call (--wall-ms); watch
 # only reads the record.
 # Every state read and write goes through tkt-state; the model comes from
@@ -353,10 +354,11 @@ else
   fresh=1
 fi
 
-launched_jobid=""
-if [ "$fresh" -eq 1 ]; then launched_jobid="$jobid"; fi
-
-"$delegate" watch "$jobid" >&2
+watch_rc=0
+"$delegate" watch "$jobid" >&2 || watch_rc=$?
+if [ "$watch_rc" -ne 0 ]; then
+  echo "tkt-job: delegate watch failed (exit $watch_rc); checking the job record" >&2
+fi
 # rec_of ID: print the winning job-record path, or nothing; it never fails,
 # so a missing record reads as "no record" under set -e.
 rec_of() {
@@ -364,24 +366,24 @@ rec_of() {
 }
 record="$(rec_of "$jobid")"
 
-# A fresh dispatch gets one append-only jobs.log entry, even if its record has
-# no usage or could not be read. Reused jobs are watches, not new jobs.
-if [ -n "$launched_jobid" ]; then
-  launched_record="$(rec_of "$launched_jobid")"
+# Keep one jobs.log line per job id. If watch failed or a rerun finds a missing
+# entry, write it from the record when available, otherwise preserve the id.
+jobs_log="$(dirname "$state")/jobs.log"
+if [ ! -f "$jobs_log" ] || ! jq -e -s --arg jobId "$jobid" 'any(.[]; .jobId == $jobId)' "$jobs_log" >/dev/null 2>&1; then
   log_entry=""
-  if [ -n "$launched_record" ] && [ -f "$launched_record" ]; then
-    log_entry="$(jq -c --arg phase "$phase" --arg jobId "$launched_jobid" '
+  if [ -n "$record" ] && [ -f "$record" ]; then
+    log_entry="$(jq -c --arg phase "$phase" --arg jobId "$jobid" '
       {phase: $phase, jobId: $jobId,
        startedAtMs: (.startedAtMs // null), endedAtMs: (.endedAtMs // null),
        usage: (if .result.usage == null then "none" else .result.usage end),
        costUsd: (if .result.costUsd == null then "none" else .result.costUsd end)}' \
-      "$launched_record" 2>/dev/null || true)"
+      "$record" 2>/dev/null || true)"
   fi
   if [ -z "$log_entry" ]; then
-    log_entry="$(jq -cn --arg phase "$phase" --arg jobId "$launched_jobid" \
+    log_entry="$(jq -cn --arg phase "$phase" --arg jobId "$jobid" \
       '{phase: $phase, jobId: $jobId, startedAtMs: null, endedAtMs: null, usage: "none", costUsd: "none"}')"
   fi
-  printf '%s\n' "$log_entry" >>"$(dirname "$state")/jobs.log"
+  printf '%s\n' "$log_entry" >>"$jobs_log"
 fi
 
 # Follow supersededBy to the newest record; a loop is unrecognised, not a hang.
