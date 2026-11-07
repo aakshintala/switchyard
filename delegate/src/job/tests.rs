@@ -3,7 +3,7 @@
 use super::*;
 use crate::backends::types::{BackendResult, Event, ProgressSnapshotRaw, Runner, Spawned};
 use crate::output::derive_status;
-use crate::status_record::{FileStatusRecordWriter, job_record_path};
+use crate::status_record::{CliRecordWriter, FileStatusRecordWriter, job_record_path};
 use crate::types::{Allowance, PollResult, ResumeContext};
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -17,6 +17,7 @@ pub(crate) fn spec_of(over: impl FnOnce(&mut JobSpec)) -> JobSpec {
         cwd: "/tmp".into(),
         model: "composer-2.5".into(),
         backend: "cursor".into(),
+        reviewer: None,
         path: None,
         head_before: None,
         gate: String::new(),
@@ -301,6 +302,52 @@ fn heartbeat_refreshes_running_record_and_stops_at_retirement() {
 }
 
 #[test]
+fn failed_status_record_write_does_not_stop_job() {
+    use crate::test_env::{EnvGuard, lock};
+
+    let _env = lock();
+    let root = std::env::temp_dir().join(format!("delegate-record-failure-{}", random_uuid()));
+    let jobs = root.join("jobs");
+    std::fs::create_dir_all(&jobs).unwrap();
+    let _jobs = EnvGuard::set("DELEGATE_JOBS_DIR", jobs.to_str().unwrap());
+    let writer_job_id = "record-write-failure";
+    let s = setup_with(|d| {
+        d.status_writer = Arc::new(CliRecordWriter {
+            job_id: writer_job_id.into(),
+            model: "composer-2.5".into(),
+            backend: Some("cursor".into()),
+            cwd: "/tmp".into(),
+            caller: "test-caller".into(),
+            caller_pid: std::process::id(),
+            caller_command: None,
+            caller_cwd: None,
+            gate: String::new(),
+            tool_idle_ms: None,
+            idle_ms: None,
+            wall_ms: None,
+            resumed_from: None,
+            started_at_ms: Mutex::new(None),
+            ended_at_ms: Mutex::new(None),
+            last_session_id: Mutex::new(None),
+        });
+    });
+
+    let id = s.reg.dispatch(spec_of(|_| {}));
+    assert!(job_record_path(writer_job_id).is_file());
+
+    let moved_jobs = root.join("jobs-before-failure");
+    std::fs::rename(&jobs, &moved_jobs).unwrap();
+    std::fs::write(&jobs, "not a directory").unwrap();
+    s.fake.handle(0).finish(done_ok());
+
+    assert_eq!(settle(&s.reg, &id), "DONE");
+    assert_eq!(terminal_text(&s.reg, &id), "ok\nSTATUS: DONE");
+    std::fs::remove_file(&jobs).unwrap();
+    std::fs::remove_dir_all(moved_jobs).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
 fn dispatch_persists_start_and_terminal_records() {
     let s = setup();
     let id = s.reg.dispatch(spec_of(|_| {}));
@@ -463,6 +510,8 @@ fn a_stalled_jobs_text_summarizes_last_known_progress() {
     assert_eq!(settle(&s.reg, &id), "STALLED");
     let text = terminal_text(&s.reg, &id);
     for needle in [
+        "idle ",
+        "(window 0.1s), running ",
         "shell",
         "42 tokens",
         "src/foo.rs",
@@ -657,6 +706,39 @@ fn a_503_resumes_the_session_and_the_record_lists_the_retry() {
     );
     assert_eq!(out.usage.unwrap().input_tokens, 15.0);
     assert_eq!(out.cost_usd, Some(3.75));
+}
+
+#[test]
+fn a_fiber_retry_keeps_the_catalogue_reviewer_override() {
+    let s = retry_setup(
+        &[0],
+        vec![failed(Some(503)), done_ok()],
+    );
+    let id = s.reg.dispatch(spec_of(|spec| {
+        spec.backend = "fiber".into();
+        spec.model = "fiber/opencode-go/muse-spark-1.3-contributor".into();
+        spec.reviewer = Some("opencode-go/glm-5.3-flash".into());
+        spec.argv = crate::backends::fiber::with_reviewer(
+            vec![
+                "ask".into(),
+                "--model".into(),
+                "opencode-go/muse-spark-1.3-contributor".into(),
+                "--".into(),
+                "initial prompt".into(),
+            ],
+            "opencode-go/glm-5.3-flash",
+        );
+    }));
+    assert_eq!(settle(&s.reg, &id), "DONE");
+    let argvs = argvs(&s);
+    assert_eq!(argvs.len(), 2);
+    for argv in &argvs {
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["-c", "reviewer.model=opencode-go/glm-5.3-flash"]),
+            "reviewer override missing from argv: {argv:?}"
+        );
+    }
 }
 
 #[test]

@@ -63,6 +63,7 @@ fn models_config() -> Config {
                 cache_write: 0.0,
             },
             tiers: vec![],
+            reviewer: None,
         },
     );
     models.insert(
@@ -77,6 +78,7 @@ fn models_config() -> Config {
                 cache_write: 0.0,
             },
             tiers: vec![],
+            reviewer: None,
         },
     );
     models.insert(
@@ -91,6 +93,7 @@ fn models_config() -> Config {
                 cache_write: 0.125,
             },
             tiers: vec![],
+            reviewer: None,
         },
     );
     models.insert(
@@ -105,6 +108,7 @@ fn models_config() -> Config {
                 cache_write: 2.5,
             },
             tiers: vec![],
+            reviewer: None,
         },
     );
     Config {

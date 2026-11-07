@@ -174,11 +174,28 @@ fn decode_model_entry(raw: &Value, id: &str, where_: &str) -> Result<ModelEntry,
         .as_object()
         .ok_or_else(|| format!("invalid config: {where_}[\"{id}\"] must be an object"))?;
     let loc = format!("{where_}[\"{id}\"]");
+    let reviewer = opt_str(obj, "reviewer", &loc)?;
+    if let Some(value) = &reviewer {
+        let valid_reference = value.split_once('/').is_some_and(|(provider, model)| {
+            !provider.is_empty()
+                && !model.is_empty()
+                && !model.contains('/')
+                && !value
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || c == '=')
+        });
+        if !valid_reference {
+            return Err(format!(
+                "invalid config: {loc}.reviewer must be a provider/model reference"
+            ));
+        }
+    }
     Ok(ModelEntry {
         label: str_field(obj, "label", &loc)?,
         backend: str_field(obj, "backend", &loc)?,
         price: decode_price(obj.get("price").unwrap_or(&Value::Null), &loc)?,
         tiers: decode_tiers(obj, &loc)?,
+        reviewer,
     })
 }
 
@@ -401,6 +418,55 @@ mod tests {
     }
 
     #[test]
+    fn decodes_optional_reviewer_and_leaves_it_absent_by_default() {
+        let mut raw = serde_json::json!({
+            "label": "M",
+            "backend": "fiber",
+            "price": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0 }
+        });
+        assert_eq!(
+            decode_model_entry(&raw, "m", "models.json.models")
+                .unwrap()
+                .reviewer,
+            None
+        );
+        raw["reviewer"] = serde_json::json!("opencode-go/glm-5.3-flash");
+        assert_eq!(
+            decode_model_entry(&raw, "m", "models.json.models")
+                .unwrap()
+                .reviewer
+                .as_deref(),
+            Some("opencode-go/glm-5.3-flash")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_reviewer_model_references() {
+        for reviewer in [
+            serde_json::json!(""),
+            serde_json::json!("not-qualified"),
+            serde_json::json!("/model"),
+            serde_json::json!("provider/"),
+            serde_json::json!("provider/model/extra"),
+            serde_json::json!("provider /model"),
+            serde_json::json!(42),
+        ] {
+            let mut raw = serde_json::json!({
+                "label": "M",
+                "backend": "fiber",
+                "price": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0 }
+            });
+            raw.as_object_mut()
+                .unwrap()
+                .insert("reviewer".into(), reviewer.clone());
+            assert!(
+                decode_model_entry(&raw, "m", "models.json.models").is_err(),
+                "accepted reviewer {reviewer}"
+            );
+        }
+    }
+
+    #[test]
     fn bundled_catalogue_has_the_model_ladder() {
         let raw: Value = serde_json::from_str(BUNDLED_MODELS_JSON).unwrap();
         let models = decode_models(&raw["models"], "models.json.models").unwrap();
@@ -431,6 +497,20 @@ mod tests {
         assert!(models["claude-fable-5-1"].tiers.is_empty());
         assert_eq!(models["muse/muse-wonder-1.0"].backend, "muse");
         assert!(models["muse/muse-wonder-1.0"].tiers.is_empty());
+        let fiber_opencode: Vec<_> = models
+            .iter()
+            .filter(|(id, _)| id.starts_with("fiber/opencode-go/"))
+            .collect();
+        assert_eq!(fiber_opencode.len(), 2);
+        assert!(
+            fiber_opencode.iter().all(|(_, entry)| {
+                entry.reviewer.as_deref() == Some("opencode-go/glm-5.3-flash")
+            })
+        );
+        assert_eq!(
+            models["fiber/opencode-go/glm-5.3-flash"].price,
+            models["opencode-go/glm-5.3-flash"].price
+        );
     }
 
     #[test]

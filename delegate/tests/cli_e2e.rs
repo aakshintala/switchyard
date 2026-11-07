@@ -538,6 +538,8 @@ fn status_prints_running_without_waiting() {
     let e = Env::new("status-running");
     let id = e.run("SLOW do it");
     assert_eq!(e.record(&id)["status"], "RUNNING");
+    let record = e.record(&id);
+    let caller = record["caller"].as_str().unwrap();
     // Timeout guard: `status` must return at once; a wait would hang here and
     // fail the test instead of the gate.
     let mut child = Command::new(env!("CARGO_BIN_EXE_delegate"))
@@ -567,7 +569,7 @@ fn status_prints_running_without_waiting() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        format!("{id}: RUNNING\n")
+        format!("{id}: RUNNING (caller={caller})\n")
     );
     e.release();
     e.wait_terminal(&id);
@@ -607,7 +609,7 @@ fn status_settles_a_dead_supervisor_before_printing() {
 fn status_prints_done_for_a_finished_job() {
     let e = Env::new("status-done");
     let id = e.run("quick");
-    e.wait_terminal(&id);
+    let record = e.wait_terminal(&id);
     let out = e.delegate(&["status", &id], None);
     assert_eq!(
         out.status.code(),
@@ -617,7 +619,87 @@ fn status_prints_done_for_a_finished_job() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        format!("{id}: DONE\n")
+        format!(
+            "{id}: DONE (caller={})\n",
+            record["caller"].as_str().unwrap()
+        )
+    );
+}
+
+#[test]
+fn status_shows_explicit_caller_and_record_keeps_parent_metadata() {
+    let e = Env::new("caller-label");
+    let worker_dir = e.dir.join("worker");
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--cwd",
+            worker_dir.to_str().unwrap(),
+        ],
+        "quick",
+        &[("DELEGATE_CALLER", "lane-3561")],
+    );
+    let record = e.wait_terminal(&id);
+    assert_eq!(record["caller"], "lane-3561");
+    assert_eq!(record["callerPid"], std::process::id());
+    assert_eq!(
+        record["callerCwd"],
+        std::fs::canonicalize(&e.dir)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let status = e.delegate(&["status", &id], None);
+    assert!(status.status.success());
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("caller=lane-3561"),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[test]
+fn run_without_caller_label_records_parent_command() {
+    let e = Env::new("caller-command");
+    let id = e.run("quick");
+    let record = e.wait_terminal(&id);
+    let command = record["callerCommand"].as_str().unwrap_or("");
+    assert!(!command.is_empty(), "{record}");
+    assert_eq!(record["caller"], command);
+    assert_eq!(record["callerPid"], std::process::id());
+}
+
+#[test]
+fn caller_cwd_is_not_the_worker_run_directory() {
+    let e = Env::new("caller-cwd");
+    let worker_dir = e.dir.join("worker");
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--cwd",
+            worker_dir.to_str().unwrap(),
+        ],
+        "quick",
+        &[],
+    );
+    let record = e.wait_terminal(&id);
+    assert_eq!(
+        record["resume"]["cwd"],
+        worker_dir.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        record["callerCwd"],
+        std::fs::canonicalize(&e.dir)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
     );
 }
 
@@ -977,6 +1059,31 @@ fn gate_pass_keeps_done() {
     assert_eq!(done["result"]["gateResult"]["command"], "true");
     assert_eq!(done["resume"]["gate"], "true");
     assert!(done["resume"]["toolIdleMs"].is_null());
+}
+
+#[test]
+fn gate_exit_75_is_refused_and_status_says_nothing_was_tested() {
+    let e = Env::new("gate-refused");
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--gate",
+            "echo 'nothing tested'; exit 75",
+        ],
+        "ship it",
+        &[],
+    );
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["result"]["gateResult"]["refused"], true);
+    assert_eq!(done["result"]["gateResult"]["passed"], false);
+    assert_eq!(done["result"]["gateResult"]["exitCode"], 75);
+
+    let status = e.delegate(&["status", &id], None);
+    assert!(status.status.success());
+    let status = String::from_utf8(status.stdout).unwrap();
+    assert!(status.contains("gate refused, nothing tested"), "{status}");
 }
 
 #[test]
@@ -1643,6 +1750,8 @@ fn cancel_finds_a_record_under_another_tmpdir() {
     let id = e.ok_output(&out);
     let _release = ReleaseOnDrop(e.dir.clone());
     assert_eq!(e.record(&id)["status"], "RUNNING");
+    let record = e.record(&id);
+    let caller = record["caller"].as_str().unwrap();
 
     let other = e.dir.join("caller-b");
     std::fs::create_dir_all(&other).unwrap();
@@ -1659,7 +1768,7 @@ fn cancel_finds_a_record_under_another_tmpdir() {
     );
     assert_eq!(
         String::from_utf8_lossy(&status.stdout),
-        format!("{id}: RUNNING\n")
+        format!("{id}: RUNNING (caller={caller})\n")
     );
 
     let watch = e.delegate_env(
@@ -2038,6 +2147,17 @@ fn muse_run_applies_the_host_sandbox_switch() {
         let id = e.ok_output(&out);
         let done = e.wait_terminal(&id);
         assert_eq!(done["status"], "DONE", "{name}");
+        let started_at = done["startedAtMs"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{name}: missing startedAtMs in {done}"));
+        let ended_at = done["endedAtMs"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{name}: missing endedAtMs in {done}"));
+        assert!(ended_at >= started_at, "{name}: {done}");
+        assert_eq!(
+            done["result"]["durationMs"].as_f64(),
+            Some(ended_at - started_at)
+        );
         let argv: Vec<String> = std::fs::read_to_string(e.dir.join("argv.txt"))
             .unwrap()
             .lines()

@@ -4,7 +4,9 @@
 # shared lock, drift-check state head against the worktree, reuse a stored job
 # id, fill the brief from flags then state, write the gate script, dispatch
 # through delegate, watch with no timeout, follow supersededBy to the newest
-# record, and print one verdict line plus a digest of at most 40 lines.
+# record, and print one verdict line plus a digest of at most 40 lines. A
+# dispatched job gets one JSON line per id in jobs.log beside the state file;
+# reruns recover a missing line without duplicating an existing entry.
 # A verifier-r* slot's wall cap travels on the run call (--wall-ms); watch
 # only reads the record.
 # Every state read and write goes through tkt-state; the model comes from
@@ -352,13 +354,37 @@ else
   fresh=1
 fi
 
-"$delegate" watch "$jobid" >&2
+watch_rc=0
+"$delegate" watch "$jobid" >&2 || watch_rc=$?
+if [ "$watch_rc" -ne 0 ]; then
+  echo "tkt-job: delegate watch failed (exit $watch_rc); checking the job record" >&2
+fi
 # rec_of ID: print the winning job-record path, or nothing; it never fails,
 # so a missing record reads as "no record" under set -e.
 rec_of() {
   bash "$script_dir/job-record" "$1" 2>/dev/null || true
 }
 record="$(rec_of "$jobid")"
+
+# Keep one jobs.log line per job id. If watch failed or a rerun finds a missing
+# entry, write it from the record when available, otherwise preserve the id.
+jobs_log="$(dirname "$state")/jobs.log"
+if [ ! -f "$jobs_log" ] || ! jq -e -s --arg jobId "$jobid" 'any(.[]; .jobId == $jobId)' "$jobs_log" >/dev/null 2>&1; then
+  log_entry=""
+  if [ -n "$record" ] && [ -f "$record" ]; then
+    log_entry="$(jq -c --arg phase "$phase" --arg jobId "$jobid" '
+      {phase: $phase, jobId: $jobId,
+       startedAtMs: (.startedAtMs // null), endedAtMs: (.endedAtMs // null),
+       usage: (if .result.usage == null then "none" else .result.usage end),
+       costUsd: (if .result.costUsd == null then "none" else .result.costUsd end)}' \
+      "$record" 2>/dev/null || true)"
+  fi
+  if [ -z "$log_entry" ]; then
+    log_entry="$(jq -cn --arg phase "$phase" --arg jobId "$jobid" \
+      '{phase: $phase, jobId: $jobId, startedAtMs: null, endedAtMs: null, usage: "none", costUsd: "none"}')"
+  fi
+  printf '%s\n' "$log_entry" >>"$jobs_log"
+fi
 
 # Follow supersededBy to the newest record; a loop is unrecognised, not a hang.
 # Each link resolves through the lookup, so a chain may span directories.
@@ -385,6 +411,7 @@ else
   status="$(jq -r '.result.status // .status // ""' "$record" 2>/dev/null || true)"
   text="$(jq -j -r '.result.text // ""' "$record" 2>/dev/null || true)"
   gate_exit="$(jq -r '.result.gateResult | if . == null then "none" elif .exitCode != null then (.exitCode | tostring) elif .passed == true then "0" else "1" end' "$record" 2>/dev/null || true)"
+  gate_refused="$(jq -r '.result.gateResult.refused == true' "$record" 2>/dev/null || true)"
   [ -n "$gate_exit" ] || gate_exit="none"
   gate_path="$(jq -r '.result.gateResult.outputPath // ""' "$record" 2>/dev/null || true)"
   gate_tail="$(jq -r '.result.gateResult.outputTail // ""' "$record" 2>/dev/null || true)"
@@ -397,7 +424,9 @@ else
   gate_word="none"
   [ "$gate_exit" = "none" ] || gate_word="PASS"
   gate_failed=0
-  if [ "$gate_exit" != "none" ] && [ "$gate_exit" != "0" ]; then
+  if [ "$gate_refused" = "true" ]; then
+    gate_word="REFUSED"
+  elif [ "$gate_exit" != "none" ] && [ "$gate_exit" != "0" ]; then
     gate_failed=1
     gate_word="FAIL"
   fi
@@ -420,8 +449,11 @@ else
       if [ "$status" = "DONE" ] && [ "$slot" = lane ]; then
         tkt set concerns.lane ""
       fi
-      # A failed gate script rules over the status word.
-      if [ "$gate_failed" -eq 1 ]; then
+      # A refused or failed gate script rules over the status word.
+      if [ "$gate_refused" = "true" ]; then
+        verdict="GATE-REFUSED rc=$gate_exit gatelog=${gate_path:--}"
+        ec=1
+      elif [ "$gate_failed" -eq 1 ]; then
         verdict="GATE-FAIL rc=$gate_exit gatelog=${gate_path:--}"
         ec=1
       elif [ "$status" = "DONE_WITH_CONCERNS" ]; then
@@ -476,8 +508,13 @@ newCommits: $shas"
 uncommittedFiles: $dirty"
   fi
   if [ "$gate_exit" != "none" ]; then
-    digest="$digest
+    if [ "$gate_refused" = "true" ]; then
+      digest="$digest
+gate=refused (nothing tested) exit=$gate_exit log=${gate_path:- -}"
+    else
+      digest="$digest
 gate=exit=$gate_exit log=${gate_path:- -}"
+    fi
     if [ -n "$gate_tail" ]; then
       digest="$digest
 $(tail -n 10 <<<"$gate_tail")"

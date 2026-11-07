@@ -158,9 +158,9 @@ fn gate_error(killed: bool, exit_code: i32, output_error: Option<String>) -> Opt
 }
 
 /// Run the postcondition `command` via `/bin/sh -c` in `cwd`. Never fails — always returns a
-/// GateResult, `passed = exitCode == 0`. Bounded: the gate's whole process group is
-/// SIGTERMed after `timeout_ms` or when `signal` is set, so a test runner the shell started
-/// can't keep the pipes open.
+/// GateResult, `passed = exitCode == 0`. Exit 75 is recorded as a refusal (nothing tested).
+/// Bounded: the gate's whole process group is SIGTERMed after `timeout_ms` or when `signal` is set,
+/// so a test runner the shell started can't keep the pipes open.
 pub fn run_gate(command: &str, cwd: &str, opts: GateOpts<'_>) -> GateResult {
     run_gate_inner(command, cwd, None, opts)
 }
@@ -198,6 +198,7 @@ fn run_gate_inner(
                 command: command.to_string(),
                 exit_code: 1,
                 passed: false,
+                refused: false,
                 output_tail: output,
                 output_path: output_path.map(|p| p.to_string_lossy().into_owned()),
                 error: output_error,
@@ -222,6 +223,7 @@ fn run_gate_inner(
                 command: command.to_string(),
                 exit_code: 1,
                 passed: false,
+                refused: false,
                 output_tail: output,
                 output_path: output_path.map(|p| p.to_string_lossy().into_owned()),
                 error: output_error,
@@ -295,6 +297,7 @@ fn run_gate_inner(
         command: command.to_string(),
         exit_code,
         passed: exit_code == 0 && !killed,
+        refused: exit_code == 75 && !killed,
         output_tail: tail(&strip_ansi(&combined_tail), KEEP),
         output_path: output_path.map(|p| p.to_string_lossy().into_owned()),
         error: gate_error(killed, exit_code, output_error),
@@ -343,6 +346,21 @@ mod tests {
         assert!(!r.passed);
         assert_eq!(r.exit_code, 5);
         assert!(r.output_tail.contains("boom"));
+    }
+
+    #[test]
+    fn exit_75_is_refused_not_passed() {
+        let r = run_gate(
+            "printf 'nothing tested\\n'; exit 75",
+            &std::env::current_dir().unwrap().to_string_lossy(),
+            gate_opts(),
+        );
+        assert_eq!(r.exit_code, 75);
+        assert!(!r.passed);
+        assert!(r.refused);
+        let value = serde_json::to_value(r).unwrap();
+        assert_eq!(value["refused"], true);
+        assert_eq!(value["passed"], false);
     }
 
     #[test]

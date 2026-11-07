@@ -936,10 +936,14 @@ cmd_start() {
     fi
 
     echo "review-pr: starting $role job ($(model_for "$role"))" >&2
+    job_caller="review-pr"
+    if [ -n "${DELEGATE_CALLER:-}" ]; then
+      job_caller="${DELEGATE_CALLER}/review-pr"
+    fi
     if [ -n "$cargo_slot_dir" ]; then
-      jid="$(PATH="$cargo_slot_dir:$PATH" delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
+      jid="$(DELEGATE_CALLER="$job_caller" DELEGATE_CALLER_CWD="$clone" PATH="$cargo_slot_dir:$PATH" delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
     else
-      jid="$(delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
+      jid="$(DELEGATE_CALLER="$job_caller" DELEGATE_CALLER_CWD="$clone" delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
     fi
     jid="${jid%%$'\n'*}"
 

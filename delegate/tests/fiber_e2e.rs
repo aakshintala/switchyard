@@ -88,7 +88,11 @@ impl Env {
     }
 
     fn run_write(&self, prompt: &str) -> String {
-        let out = self.delegate(&["run", "--model", MODEL], Some(prompt));
+        self.run_write_with_model(MODEL, prompt)
+    }
+
+    fn run_write_with_model(&self, model: &str, prompt: &str) -> String {
+        let out = self.delegate(&["run", "--model", model], Some(prompt));
         assert!(
             out.status.success(),
             "exit {:?}\nstderr: {}\nstdout: {}",
@@ -497,8 +501,40 @@ fn fiber_run_books_subscription_cost_as_estimated() {
     assert_eq!(commands[0][0]["args"]["model"], REFERENCE);
     assert_eq!(commands[0][0]["args"]["supervised"], true);
     assert_eq!(
+        commands[0][0]["args"]["overrides"],
+        json!(["reviewer.model=opencode-go/glm-5.3-flash"])
+    );
+    assert_eq!(
         commands[0][2]["args"]["content"][0]["text"],
         expected_prompt(prompt)
+    );
+}
+
+#[test]
+fn fiber_run_without_a_catalogue_reviewer_keeps_fiber_defaults() {
+    let e = Env::new("default-reviewer");
+    let model = "fiber/codex/gpt-6-luna";
+    let prompt = "Reply with the word DONE.";
+    let expected = expected_prompt(prompt);
+    let fake = e.fake_hub(1, move |_, session_id, conn| {
+        accept_start(conn, session_id);
+        subscribe_fresh(conn, session_id);
+        answer_prompt(
+            conn,
+            session_id,
+            0,
+            PromptReply::completed(Some(&expected), "DONE", None, || {}),
+        );
+    });
+
+    let id = e.run_write_with_model(model, prompt);
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let commands = fake.finish();
+    assert_eq!(commands[0][0]["args"]["model"], "codex/gpt-6-luna");
+    assert!(
+        commands[0][0]["args"].get("overrides").is_none(),
+        "a row without reviewer must keep Fiber defaults: {}",
+        commands[0][0]
     );
 }
 

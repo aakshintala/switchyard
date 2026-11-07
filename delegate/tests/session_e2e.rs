@@ -1357,16 +1357,30 @@ fn watch_logs_inbox_and_dead_session_codes_follow_state() {
     );
     assert_eq!(h.invoke(&["send", &id, "dead"]).status.code(), Some(4));
     assert_eq!(h.invoke(&["watch", &id]).status.code(), Some(4));
-    assert_json_error(
-        &h.invoke(&["watch", "00000000-0000-7000-8000-000000000099", "--json"]),
-        3,
-        "noSession",
-    );
+    let missing_id = "00000000-0000-7000-8000-000000000099";
+    assert_json_error(&h.invoke(&["watch", missing_id, "--json"]), 3, "noSession");
+    let missing_logs = h.invoke(&["logs", missing_id]);
+    assert_eq!(missing_logs.status.code(), Some(3));
     assert_eq!(
-        h.invoke(&["logs", "00000000-0000-7000-8000-000000000099"])
-            .status
-            .code(),
-        Some(3)
+        String::from_utf8_lossy(&missing_logs.stderr),
+        format!("no log record for {missing_id}\n")
+    );
+}
+
+#[test]
+fn logs_without_an_events_file_reports_no_log_record() {
+    let h = Harness::new();
+    let id = id_from(&h.start(b"HOLD", false, "", &[]));
+    let stopped = h.invoke(&["stop", &id]);
+    assert!(stopped.status.success());
+    h.wait_state(&id, "dead", |value| value["status"] == "dead");
+
+    std::fs::remove_file(h.root().join(&id).join("events.jsonl")).unwrap();
+    let missing_logs = h.invoke(&["logs", &id]);
+    assert_eq!(missing_logs.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&missing_logs.stderr),
+        format!("no log record for {id}\n")
     );
 }
 

@@ -101,6 +101,7 @@ pub fn resolve_model(
         model,
         backend: entry.backend.clone(),
         price: entry.price,
+        reviewer: entry.reviewer.clone(),
     })
 }
 
@@ -156,6 +157,7 @@ mod tests {
                 backend: "cursor".into(),
                 price: price(0.5, 2.5, 0.2, 0.0),
                 tiers: vec![],
+                reviewer: None,
             },
         );
         models.insert(
@@ -165,6 +167,7 @@ mod tests {
                 backend: "cursor".into(),
                 price: price(2.0, 6.0, 0.5, 0.0),
                 tiers: vec![],
+                reviewer: None,
             },
         );
         models.insert(
@@ -174,6 +177,7 @@ mod tests {
                 backend: "pi".into(),
                 price: price(0.1, 0.5, 0.01, 0.125),
                 tiers: vec![],
+                reviewer: None,
             },
         );
         models.insert(
@@ -183,6 +187,7 @@ mod tests {
                 backend: "claude".into(),
                 price: price(10.0, 50.0, 0.25, 12.5),
                 tiers: vec![],
+                reviewer: None,
             },
         );
         models.insert(
@@ -192,6 +197,7 @@ mod tests {
                 backend: "claude".into(),
                 price: price(2.0, 10.0, 0.2, 2.5),
                 tiers: vec![],
+                reviewer: None,
             },
         );
         ("composer-2.5".into(), models)
@@ -253,6 +259,7 @@ mod tests {
             backend: "muse".into(),
             price: price(0.1, 0.2, 0.002, 0.0),
             tiers: vec![],
+            reviewer: None,
         };
         m.insert("muse/muse-spark-1.3-contributor".into(), entry);
         for id in [
@@ -323,6 +330,7 @@ mod tests {
                 backend: "pi".into(),
                 price: price(0.1, 0.2, 0.002, 0.0),
                 tiers: vec![],
+                reviewer: None,
             },
         );
         m.insert(
@@ -332,6 +340,7 @@ mod tests {
                 backend: "fiber".into(),
                 price: price(0.1, 0.2, 0.002, 0.0),
                 tiers: vec![],
+                reviewer: None,
             },
         );
         // A catalogue row whose key already ends in a level keeps its own
@@ -343,6 +352,7 @@ mod tests {
                 backend: "pi".into(),
                 price: price(0.9, 0.9, 0.09, 0.9),
                 tiers: vec![],
+                reviewer: None,
             },
         );
         (d, m)
@@ -428,6 +438,7 @@ mod tests {
                 backend: "fiber".into(),
                 price: price(0.1, 0.5, 0.01, 0.125),
                 tiers: vec![],
+                reviewer: None,
             },
         );
         for id in [

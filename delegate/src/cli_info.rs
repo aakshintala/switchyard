@@ -162,6 +162,7 @@ mod tests {
                     } else {
                         vec![]
                     },
+                    reviewer: None,
                 },
             );
         }

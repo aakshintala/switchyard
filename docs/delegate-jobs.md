@@ -29,7 +29,9 @@ Each job has one locator at `${XDG_CACHE_HOME:-$HOME/.cache}/delegate/locators/<
 
 The locator contains one absolute record path as plain text, followed by a newline. Spaces are preserved. Readers also accept the path without its final newline. Empty, relative or multiline values are invalid.
 
-The supervisor publishes the locator atomically before dispatching the agent or writing the first `RUNNING` record. This does not move the record or change its JSON format. A cache write failure stops startup. A record path containing a newline cannot be represented, so the supervisor skips its locator and keeps the existing record placement.
+The supervisor publishes the locator atomically before dispatching the agent or writing the first `RUNNING` record. This does not move the record or affect record lookup. A cache write failure stops startup. A record path containing a newline cannot be represented, so the supervisor skips its locator and keeps the existing record placement.
+
+Each CLI job record has `startedAtMs`; a RUNNING record has `endedAtMs: null`. Terminal records set `endedAtMs` and `result.durationMs` to the elapsed milliseconds between the start and end timestamps. Dead-supervisor and cancellation fallback records use the same terminal fields.
 
 Missing, unreadable or malformed locators are lookup misses. A valid locator whose target is missing or not a regular file is also a miss. Old records without locators remain readable through the legacy directories; there is no migration. The tool does not expire locators or run a global cleanup sweep.
 

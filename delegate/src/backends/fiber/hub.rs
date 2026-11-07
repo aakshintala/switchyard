@@ -853,19 +853,32 @@ fn new_command_id() -> String {
 /// Exact driver-command bytes. `start` carries no `session_id` and no
 /// content; `subscribe`, `prompt` and `close` name the session. No `cancel`
 /// or `reply` builder exists: the client never sends them.
-fn start_command(id: &str, workspace: &str, model: &str) -> String {
+fn start_command_with_overrides(
+    id: &str,
+    workspace: &str,
+    model: &str,
+    overrides: &[String],
+) -> String {
     let mut args = serde_json::Map::new();
     args.insert("workspace".to_string(), workspace.into());
     if !model.is_empty() {
         args.insert("model".to_string(), model.into());
     }
     args.insert("supervised".to_string(), true.into());
+    if !overrides.is_empty() {
+        args.insert("overrides".to_string(), serde_json::json!(overrides));
+    }
     serde_json::json!({
         "id": id,
         "command": "start",
         "args": args,
     })
     .to_string()
+}
+
+#[cfg(test)]
+fn start_command(id: &str, workspace: &str, model: &str) -> String {
+    start_command_with_overrides(id, workspace, model, &[])
 }
 
 fn subscribe_command(id: &str, session_id: &str) -> String {
@@ -1135,6 +1148,8 @@ pub struct HubRequest {
     pub model: String,
     pub prompt: String,
     pub bounds: Bounds,
+    /// Values passed to Fiber's `start` command as CLI configuration overrides.
+    pub overrides: Vec<String>,
     /// Existing session id; when set, the client skips `start`.
     pub resume: Option<String>,
 }
@@ -1240,7 +1255,12 @@ fn drive_turn(
     } else {
         // start: no session_id, no content, supervised.
         let start_id = new_command_id();
-        if !lock(&shared.out).send_checked(&start_command(&start_id, &req.cwd, &model)) {
+        if !lock(&shared.out).send_checked(&start_command_with_overrides(
+            &start_id,
+            &req.cwd,
+            &model,
+            &req.overrides,
+        )) {
             if lock(&shared.out).intent == Intent::None {
                 return rest.crash(lost_before_start_text(&start_id));
             }
@@ -2808,11 +2828,27 @@ mod tests {
         let line: serde_json::Value =
             serde_json::from_str(&start_command("c_1", "/w", "")).expect("json");
         assert!(line["args"].get("model").is_none(), "{line}");
+        assert!(line["args"].get("overrides").is_none(), "{line}");
         assert_eq!(line["args"]["workspace"], "/w");
         assert_eq!(line["args"]["supervised"], true);
         let kept: serde_json::Value =
             serde_json::from_str(&start_command("c_1", "/w", "m")).expect("json");
         assert_eq!(kept["args"]["model"], "m");
+    }
+
+    #[test]
+    fn start_command_passes_config_overrides() {
+        let line: serde_json::Value = serde_json::from_str(&start_command_with_overrides(
+            "c_1",
+            "/w",
+            "m",
+            &["reviewer.model=opencode-go/glm-5.3-flash".into()],
+        ))
+        .expect("json");
+        assert_eq!(
+            line["args"]["overrides"],
+            serde_json::json!(["reviewer.model=opencode-go/glm-5.3-flash"])
+        );
     }
 
     fn accepted(id: &str, result: serde_json::Value) -> String {
@@ -3124,6 +3160,7 @@ mod tests {
             model: "fiber/m".to_string(),
             prompt: "go".to_string(),
             bounds: Bounds::default(),
+            overrides: Vec::new(),
             resume: None,
         }
     }

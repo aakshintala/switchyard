@@ -16,11 +16,8 @@ use super::types::{BackendResult, Event, ProgressSnapshotRaw, Spawned};
 use crate::models::MUSE_EFFORT_LEVELS;
 use crate::types::{Allowance, AllowanceWindow, JobSpec, Usage};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
-
-// Hard per-job wall cap when the job carries no tool-idle limit: the same
-// 1_800_000 ms default `cli.rs` gives `tool_idle_ms`.
-const DEFAULT_WALL_TIMEOUT_MS: u64 = 1_800_000;
 
 #[derive(Debug, Default)]
 struct MuseState {
@@ -31,6 +28,8 @@ struct MuseState {
     last_tool: Option<String>,
     last_assistant: Option<String>,
     phase: Option<String>,
+    task_kinds: HashMap<String, String>,
+    running_tool_tasks: HashSet<String>,
     wall_exceeded: bool,
     wall_timeout_ms: Option<u64>,
 }
@@ -182,13 +181,9 @@ pub(crate) fn with_sandbox(mut argv: Vec<String>, sandbox_on: bool) -> Vec<Strin
     argv
 }
 
-/// Wall cap for a run in milliseconds: the job spec's tool-idle limit, or
-/// the default when the job carries none. `Some(None)` disables the cap.
-fn wall_cap_ms(tool_idle_ms: Option<Option<f64>>) -> Option<u64> {
-    match tool_idle_ms {
-        None => Some(DEFAULT_WALL_TIMEOUT_MS),
-        Some(inner) => inner.map(|ms| ms as u64),
-    }
+/// Explicit wall budget in milliseconds. Without `--wall-ms`, Muse has no backend-specific cap.
+fn wall_cap_ms(spec: &JobSpec) -> Option<u64> {
+    spec.wall_ms.map(|ms| ms.max(0.0) as u64)
 }
 
 pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
@@ -196,8 +191,8 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     // doesn't (a crash before the first line), the result still carries it.
     let launched_session = session_from_argv(&spec.argv);
     let base = base_and_effort(&spec.model).0.to_string();
-    let tool_idle_ms = spec.tool_idle_ms;
     let wall_started_at = std::time::Instant::now();
+    let cap = wall_cap_ms(spec);
     let prompt = spec.argv.last().cloned().unwrap_or_default();
     let prompt_file = match PromptFile::create(&prompt) {
         Ok(file) => file,
@@ -224,7 +219,6 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
         drive: Box::new(move |on| {
             let _prompt_file = prompt_file;
             let mut state = MuseState::default();
-            let cap = wall_cap_ms(tool_idle_ms);
             let wall_exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let wall_watchdog = cap.map(|cap| {
                 let (stop_tx, stop_rx) = std::sync::mpsc::channel();
@@ -339,6 +333,55 @@ fn handle_line(line: &[u8], state: &mut MuseState) -> bool {
             state.usage_payload = Some(payload.clone());
             false
         }
+        "task.lifecycle.proposed" => {
+            let event = payload.get("event");
+            let task_kind = event
+                .and_then(|event| event.get("task_kind"))
+                .and_then(Value::as_str);
+            if let (Some(task_id), Some(task_kind)) = (
+                payload
+                    .get("task_id")
+                    .or_else(|| event.and_then(|event| event.get("task_id")))
+                    .and_then(Value::as_str),
+                task_kind,
+            ) {
+                state
+                    .task_kinds
+                    .insert(task_id.to_string(), task_kind.to_string());
+            }
+            false
+        }
+        "task.lifecycle.started" => {
+            let task_id = payload.get("task_id").and_then(Value::as_str);
+            if let Some(task_id) = task_id
+                && state
+                    .task_kinds
+                    .get(task_id)
+                    .is_some_and(|kind| kind.starts_with("tool."))
+            {
+                state.running_tool_tasks.insert(task_id.to_string());
+                state.phase = Some("running_tool".into());
+                true
+            } else {
+                false
+            }
+        }
+        "task.lifecycle.completed" | "task.lifecycle.failed" => {
+            let task_id = payload.get("task_id").and_then(Value::as_str);
+            let completed_tool = task_id.is_some_and(|task_id| {
+                state.task_kinds.remove(task_id).is_some_and(|kind| {
+                    kind.starts_with("tool.") && state.running_tool_tasks.remove(task_id)
+                })
+            });
+            if completed_tool {
+                if state.running_tool_tasks.is_empty() {
+                    state.phase = Some("responding".into());
+                }
+                true
+            } else {
+                false
+            }
+        }
         _ if payload_type.starts_with("run.terminal.") => {
             if state.terminal.is_none() {
                 state.terminal = Some(payload.clone());
@@ -446,7 +489,7 @@ fn finish(
     let diagnostic = if state.wall_exceeded {
         Some(format!(
             "muse: wall timeout ({} ms)",
-            state.wall_timeout_ms.unwrap_or(DEFAULT_WALL_TIMEOUT_MS)
+            state.wall_timeout_ms.unwrap_or(0)
         ))
     } else if state.terminal.is_none() {
         Some("muse: no terminal record".to_string())
@@ -1011,9 +1054,7 @@ mod tests {
             let payload = if payload_type == "task.stream.linked" {
                 json!({"task_id":"not-yet-seen"})
             } else if payload_type == "task.lifecycle.proposed" {
-                json!({"event":{"task_kind":"model.meta.response"}})
-            } else if payload_type == "task.lifecycle.started" {
-                json!({"event":{"task_kind":"tool.bash"}})
+                json!({"task_id":"model-task","event":{"kind":"proposed","task_id":"model-task","task_kind":"model.meta.response"}})
             } else {
                 json!({})
             };
@@ -1028,11 +1069,125 @@ mod tests {
         let mut state = MuseState::default();
         assert!(!handle_line(
             &line(
-                "task.lifecycle.started",
-                json!({"event":{"task_kind":"tool.bash"}})
+                "task.lifecycle.proposed",
+                json!({"task_id":"tool-1","event":{"kind":"proposed","task_id":"tool-1","task_kind":"tool.bash"}})
             ),
             &mut state
         ));
+        assert!(handle_line(
+            &line(
+                "task.lifecycle.started",
+                json!({"task_id":"tool-1","event":{"kind":"started","task_id":"tool-1","span_id":"span-1"}})
+            ),
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("running_tool"));
+        assert!(handle_line(
+            &line(
+                "task.lifecycle.completed",
+                json!({"task_id":"tool-1","event":{"kind":"completed","task_id":"tool-1"}})
+            ),
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("responding"));
+
+        let mut state = MuseState::default();
+        assert!(!handle_line(
+            &line(
+                "task.lifecycle.proposed",
+                json!({"task_id":"tool-2","event":{"kind":"proposed","task_id":"tool-2","task_kind":"tool.bash"}})
+            ),
+            &mut state
+        ));
+        assert!(handle_line(
+            &line(
+                "task.lifecycle.started",
+                json!({"task_id":"tool-2","event":{"kind":"started","task_id":"tool-2","span_id":"span-2"}})
+            ),
+            &mut state
+        ));
+        assert!(handle_line(
+            &line(
+                "task.lifecycle.failed",
+                json!({"task_id":"tool-2","event":{"kind":"failed","task_id":"tool-2"}})
+            ),
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("responding"));
+
+        let mut state = MuseState::default();
+        assert!(!handle_line(
+            &line(
+                "task.lifecycle.proposed",
+                json!({"task_id":"model-1","event":{"kind":"proposed","task_id":"model-1","task_kind":"model.meta.response"}})
+            ),
+            &mut state
+        ));
+        assert!(!handle_line(
+            &line(
+                "task.lifecycle.started",
+                json!({"task_id":"model-1","event":{"kind":"started","task_id":"model-1"}})
+            ),
+            &mut state
+        ));
+        assert_ne!(state.phase.as_deref(), Some("running_tool"));
+    }
+
+    #[test]
+    fn recorded_tool_task_transitions_follow_its_proposal_and_lifecycle() {
+        let records = json_records(TOOL_CALLS_FIX);
+        let tool_task_id = records
+            .iter()
+            .find(|record| {
+                record["payload_type"] == "task.lifecycle.proposed"
+                    && record["payload"]["event"]["task_kind"]
+                        .as_str()
+                        .is_some_and(|kind| kind.starts_with("tool."))
+            })
+            .and_then(|record| record["payload"]["task_id"].as_str())
+            .expect("fixture has a proposed tool task")
+            .to_string();
+        let mut state = MuseState::default();
+        let transitions: Vec<_> = records
+            .iter()
+            .filter(|record| {
+                record["payload"]["task_id"].as_str() == Some(&tool_task_id)
+                    && matches!(
+                        record["payload_type"].as_str(),
+                        Some(
+                            "task.lifecycle.proposed"
+                                | "task.lifecycle.started"
+                                | "task.lifecycle.completed"
+                                | "task.lifecycle.failed"
+                        )
+                    )
+            })
+            .map(|record| {
+                let payload_type = record["payload_type"].as_str().unwrap();
+                let handled = handle_line(
+                    serde_json::to_string(record).unwrap().as_bytes(),
+                    &mut state,
+                );
+                (payload_type.to_string(), handled, state.phase.clone())
+            })
+            .collect();
+
+        assert_eq!(
+            transitions,
+            vec![
+                ("task.lifecycle.proposed".into(), false, None),
+                (
+                    "task.lifecycle.started".into(),
+                    true,
+                    Some("running_tool".into())
+                ),
+                (
+                    "task.lifecycle.completed".into(),
+                    true,
+                    Some("responding".into())
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -1194,6 +1349,7 @@ cat "{}"
             cwd: cwd.to_string(),
             model: "muse/muse-spark-1.3-contributor".to_string(),
             backend: "muse".to_string(),
+            reviewer: None,
             path: None,
             head_before: None,
             gate: String::new(),
@@ -1547,9 +1703,21 @@ touch "$dir/released"
 
     #[test]
     fn prompt_file_creation_does_not_reuse_a_preexisting_path() {
+        let _lock = crate::test_env::lock();
         let dir = scratch_dir("prompt-existing");
         let path = dir.join("already-there");
         std::fs::write(&path, b"keep this file").unwrap();
+
+        // Force another env-serialised test's cleanup into the window between
+        // writing the path and attempting the exclusive open.
+        let cleanup_root = dir.to_path_buf();
+        std::thread::spawn(move || {
+            crate::test_env::try_with_lock(|| {
+                std::fs::remove_dir_all(cleanup_root).unwrap();
+            })
+        })
+        .join()
+        .unwrap();
 
         let error = PromptFile::create_at(&path, "new prompt").unwrap_err();
 
@@ -1654,10 +1822,11 @@ touch "$dir/released"
     }
 
     #[test]
-    fn wall_cap_comes_from_the_spec_or_the_default_and_disables_on_null() {
-        assert_eq!(wall_cap_ms(None), Some(1_800_000));
-        assert_eq!(wall_cap_ms(Some(None)), None);
-        assert_eq!(wall_cap_ms(Some(Some(300.0))), Some(300));
+    fn wall_cap_uses_only_the_explicit_wall_budget() {
+        let mut spec = job_spec("muse", Vec::new(), "/tmp");
+        assert_eq!(wall_cap_ms(&spec), None);
+        spec.wall_ms = Some(300.0);
+        assert_eq!(wall_cap_ms(&spec), Some(300));
     }
 
     /// Drive a finished stream on a thread and return its events with the
@@ -1754,6 +1923,19 @@ touch "$dir/released"
     }
 
     #[test]
+    fn idle_limits_do_not_become_muse_wall_caps() {
+        for (idle_ms, tool_idle_ms) in [(Some(Some(100.0)), None), (None, Some(Some(100.0)))] {
+            let mut spec = job_spec("muse", Vec::new(), "/tmp");
+            spec.idle_ms = idle_ms;
+            spec.tool_idle_ms = tool_idle_ms;
+            assert_eq!(wall_cap_ms(&spec), None);
+
+            spec.wall_ms = Some(300.0);
+            assert_eq!(wall_cap_ms(&spec), Some(300));
+        }
+    }
+
+    #[test]
     fn stderr_only_child_hits_the_wall_cap_without_stdout() {
         let _lock = crate::test_env::lock();
         let dir = scratch_dir("wall-drive");
@@ -1766,7 +1948,7 @@ touch "$dir/released"
         let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
         let cwd = dir.join("repo").to_string_lossy().into_owned();
         let mut spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
-        spec.tool_idle_ms = Some(Some(300.0));
+        spec.wall_ms = Some(300.0);
         let spawned = spawn(&spec);
         let (events, result) = drive_with_timeout(spawned, std::time::Duration::from_secs(10));
         assert!(events.is_empty(), "{events:?}");
