@@ -250,10 +250,11 @@ auth_add() {
 }
 auth_has_pr_test_cite() {
   local raw="$1" candidate
+  [ -n "$pr_test_paths" ] || return 1
   while IFS= read -r candidate; do
     candidate="${candidate:1:${#candidate}-2}"
     [ -n "$candidate" ] || continue
-    grep -Fq -- "$candidate" <<<"$pr_test_diff" && return 0
+    git -C "$worktree" grep -Fq -e "$candidate" "$head0" -- $pr_test_paths && return 0
   done < <(printf '%s\n' "$raw" | grep -oE '`[^`]+`' || true)
   return 1
 }
@@ -270,7 +271,7 @@ auth_flush() {
     *"accepted gap per"*|*"out of scope per"*|*"ruled out"*|*"ruled-out"*|*"not in scope"*|*"not supported"*|*"excluded"*|*"rejected"*) negative=1 ;;
   esac
   if [ "$asserts" = 1 ] && ! [[ "$auth_cite" =~ $cite ]]; then
-    if [ "$negative" = 1 ] && auth_has_pr_test_cite "$auth_first_raw"; then
+    if [ "$negative" = 1 ] && auth_has_pr_test_cite "$auth_unit_raw"; then
       test_cite=1
     fi
     if [ "$test_cite" = 0 ]; then
@@ -278,11 +279,11 @@ auth_flush() {
       authority_bad=1
     fi
   fi
-  auth_first="" auth_first_raw="" auth_claim="" auth_cite="" auth_open=0
+  auth_first="" auth_first_raw="" auth_unit_raw="" auth_claim="" auth_cite="" auth_open=0
 }
 authority_scan() {
   local line text trimmed lead fenced=0 bullet='^[[:space:]]*([-*+]|[0-9]+\.)[[:space:]]'
-  auth_first="" auth_first_raw="" auth_claim="" auth_cite="" auth_open=0 auth_indent=0 auth_src=""
+  auth_first="" auth_first_raw="" auth_unit_raw="" auth_claim="" auth_cite="" auth_open=0 auth_indent=0 auth_src=""
   while IFS= read -r line || [ -n "$line" ]; do
     text="${line%$'\r'}"
     if [[ "$text" == $'\036'* ]]; then
@@ -305,11 +306,13 @@ authority_scan() {
     lead="${text%%[![:space:]]*}"
     if [ "$auth_open" = 1 ] && [ "${#lead}" -gt "$auth_indent" ] && ! [[ "$text" =~ $bullet ]]; then
       auth_add "$text"
+      auth_unit_raw+=$'\n'$text
       continue
     fi
     auth_flush
     auth_first="$text"
     auth_first_raw="$text"
+    auth_unit_raw="$text"
     auth_add "$text"
     if [[ "$text" =~ $bullet ]]; then
       auth_open=1
@@ -526,8 +529,8 @@ if grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?refs[[:space:]]+#[0-9]+([[:space:]
   && ! grep -Eiq '^[[:space:]]*([-*][[:space:]]*)?(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+([[:alnum:]_.-]+/)?#[0-9]+([[:space:]]|$)' <<<"$body_text"; then
   [ -n "$keep_branch" ] || keep_branch="PR body references an issue without a closing line"
 fi
-pr_test_diff="$(git -C "$worktree" diff --unified=0 "origin/main...$head0" -- 'test/**' 'tests/**' '**/test/**' '**/tests/**' '*.test.*' '*.spec.*' '*_test.*')" \
-  || die 1 "cannot inspect test changes on PR head $head0"
+pr_test_paths="$(git -C "$worktree" diff --name-only --diff-filter=ACMRT "origin/main...$head0" -- 'test/**' 'tests/**' '**/test/**' '**/tests/**' '*.test.*' '*.spec.*' '*_test.*')" \
+  || die 1 "cannot inspect test paths on PR head $head0"
 authority_bad=0
 authority_scan <<<"$body_text"
 comments_text="$(gh api --paginate "repos/$repo/issues/$pr/comments" \

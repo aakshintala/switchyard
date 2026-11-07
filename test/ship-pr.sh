@@ -273,6 +273,26 @@ setup() {
   HEAD0="$(git -C "$WT" rev-parse HEAD)"
   echo '[{"bucket":"pass","name":"ci"}]' >"$ST/checks"
 }
+publish_main_test_fixture() {
+  git -C "$C" add -- test || fail "stage baseline test fixtures"
+  git -C "$C" commit -qm 'seed test citation fixtures' || fail "commit baseline test fixtures"
+  git -C "$C" push -q origin main || fail "push baseline test fixtures"
+  git -C "$WT" fetch -q origin || fail "fetch baseline test fixtures"
+  git -C "$WT" rebase -q origin/main || fail "rebase feature over baseline test fixtures"
+  git -C "$WT" push -q --force-with-lease origin feature || fail "push rebased feature"
+  HEAD0="$(git -C "$WT" rev-parse HEAD)"
+}
+push_test_change() {
+  local path="$1" message="$2"
+  if [ -e "$WT/$path" ]; then
+    git -C "$WT" add -- "$path" || fail "stage test change $path"
+  elif git -C "$WT" diff --cached --quiet -- "$path"; then
+    fail "deleted test is not staged: $path"
+  fi
+  git -C "$WT" commit -qm "$message" || fail "commit test change $path"
+  git -C "$WT" push -q origin feature || fail "push test change $path"
+  HEAD0="$(git -C "$WT" rev-parse HEAD)"
+}
 
 origin_head() { git --git-dir="$ORIGIN" rev-parse --verify -q refs/heads/feature; }
 # bump_ref <ref> in origin: a new commit on top, without a checkout.
@@ -1169,6 +1189,82 @@ done
 # A plain discussion comment is not scanned at all
 setup; printf 'Resolves #97\n' >"$ST/body"; comments_json "$U7" 'approved, go ahead. Per the ruling, fine.'
 ship; expect 0 "plain discussion comment not scanned"
+
+# ===== PR-head test citation scope =========================================
+setup
+mkdir -p "$C/test"
+cat >"$C/test/deleted-citation.sh" <<'TEST'
+test_deleted_test_citation() { :; }
+TEST
+publish_main_test_fixture
+git -C "$WT" rm -q -- test/deleted-citation.sh || fail 'remove deleted citation test'
+push_test_change test/deleted-citation.sh delete-test-citation
+printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope; see `test_deleted_test_citation`.\n' >"$ST/body"
+ship; nothing_ran 'deleted test cannot cite a negative claim'
+grep -qxF 'uncited authority: Accepted gap per the owner-side ruling: out of scope; see `test_deleted_test_citation`.' <<<"$OUT" \
+  || fail "deleted test citation remains uncited: [$OUT]"
+
+setup
+mkdir -p "$C/test"
+cat >"$C/test/changed-citation.sh" <<'TEST'
+test_unchanged_test_in_changed_file() { :; }
+marker: before
+TEST
+publish_main_test_fixture
+cat >"$WT/test/changed-citation.sh" <<'TEST'
+test_unchanged_test_in_changed_file() { :; }
+marker: after
+TEST
+push_test_change test/changed-citation.sh change-marker
+printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope; see `test_unchanged_test_in_changed_file`.\n' >"$ST/body"
+ship; expect 0 'unchanged test in a changed file cites a negative claim'
+
+setup
+mkdir -p "$C/test"
+cat >"$C/test/untouched-citation.sh" <<'TEST'
+test_in_untouched_file() { :; }
+TEST
+cat >"$C/test/changed-marker.sh" <<'TEST'
+marker: before
+TEST
+publish_main_test_fixture
+printf 'marker: after\n' >"$WT/test/changed-marker.sh"
+push_test_change test/changed-marker.sh change-marker
+printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope; see `test_in_untouched_file`.\n' >"$ST/body"
+ship; nothing_ran 'test in an untouched file cannot cite a negative claim'
+grep -qxF 'uncited authority: Accepted gap per the owner-side ruling: out of scope; see `test_in_untouched_file`.' <<<"$OUT" \
+  || fail "untouched test citation remains uncited: [$OUT]"
+
+setup
+mkdir -p "$WT/test"
+printf 'test_bullet_continuation_citation() { :; }\n' >"$WT/test/bullet-citation.sh"
+git -C "$WT" add -- test/bullet-citation.sh && git -C "$WT" commit -qm add-bullet-citation-test \
+  && git -C "$WT" push -q origin feature || fail 'add bullet continuation test'
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+printf 'Resolves #97\n- Accepted gap per the owner-side ruling: out of scope.\n  See `test_bullet_continuation_citation`.\n' >"$ST/body"
+ship; expect 0 'test citation on the same bullet continuation line'
+
+setup
+mkdir -p "$WT/test"
+printf 'test_citation_in_next_bullet() { :; }\n' >"$WT/test/next-bullet-citation.sh"
+git -C "$WT" add -- test/next-bullet-citation.sh && git -C "$WT" commit -qm add-next-bullet-test \
+  && git -C "$WT" push -q origin feature || fail 'add next-bullet citation test'
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+printf 'Resolves #97\n- Accepted gap per the owner-side ruling: out of scope.\n- See `test_citation_in_next_bullet`.\n' >"$ST/body"
+ship; nothing_ran 'test citation in the next bullet is separate'
+grep -qxF 'uncited authority: - Accepted gap per the owner-side ruling: out of scope.' <<<"$OUT" \
+  || fail "next-bullet citation leaves claim uncited: [$OUT]"
+
+setup
+mkdir -p "$WT/test"
+printf 'test_citation_in_next_paragraph() { :; }\n' >"$WT/test/next-paragraph-citation.sh"
+git -C "$WT" add -- test/next-paragraph-citation.sh && git -C "$WT" commit -qm add-next-paragraph-test \
+  && git -C "$WT" push -q origin feature || fail 'add next-paragraph citation test'
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope.\nSee `test_citation_in_next_paragraph`.\n' >"$ST/body"
+ship; nothing_ran 'test citation in the next paragraph is separate'
+grep -qxF 'uncited authority: Accepted gap per the owner-side ruling: out of scope.' <<<"$OUT" \
+  || fail "next-paragraph citation leaves claim uncited: [$OUT]"
 
 # ===== merge and cleanup
 setup; echo true >"$ST/draft"
