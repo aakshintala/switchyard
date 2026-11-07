@@ -723,7 +723,13 @@ fn supervise(args: &[String]) -> i32 {
     };
     let caller_command = flag(&kv, "--caller-command").map(str::to_string);
     let caller_cwd = flag(&kv, "--caller-cwd").map(str::to_string);
-    let argv = backend.argv(model, session.as_deref(), &prompt);
+    let mut argv = backend.argv(model, session.as_deref(), &prompt);
+    // The catalogue selects this reviewer; rows without one leave Fiber's own defaults intact.
+    if backend == Backend::Fiber
+        && let Some(reviewer) = resolved.reviewer.as_deref()
+    {
+        argv = crate::backends::fiber::with_reviewer(argv, reviewer);
+    }
     // The muse sandbox flag comes from the per-host config, default off:
     // with the sandbox off the worktree is the only containment.
     let argv = if backend == Backend::Muse {
@@ -740,6 +746,7 @@ fn supervise(args: &[String]) -> i32 {
         cwd: cwd.clone(),
         model: model.clone(),
         backend: backend.name().into(),
+        reviewer: resolved.reviewer.clone(),
         path: Some(resolve_path(cwd)),
         head_before: capture_head(cwd, None),
         gate: gate.clone(),

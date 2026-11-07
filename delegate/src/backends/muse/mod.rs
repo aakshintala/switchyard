@@ -1235,6 +1235,7 @@ cat "{}"
             cwd: cwd.to_string(),
             model: "muse/muse-spark-1.3-contributor".to_string(),
             backend: "muse".to_string(),
+            reviewer: None,
             path: None,
             head_before: None,
             gate: String::new(),

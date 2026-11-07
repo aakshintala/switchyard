@@ -17,6 +17,7 @@ pub(crate) fn spec_of(over: impl FnOnce(&mut JobSpec)) -> JobSpec {
         cwd: "/tmp".into(),
         model: "composer-2.5".into(),
         backend: "cursor".into(),
+        reviewer: None,
         path: None,
         head_before: None,
         gate: String::new(),
@@ -705,6 +706,39 @@ fn a_503_resumes_the_session_and_the_record_lists_the_retry() {
     );
     assert_eq!(out.usage.unwrap().input_tokens, 15.0);
     assert_eq!(out.cost_usd, Some(3.75));
+}
+
+#[test]
+fn a_fiber_retry_keeps_the_catalogue_reviewer_override() {
+    let s = retry_setup(
+        &[0],
+        vec![failed(Some(503)), done_ok()],
+    );
+    let id = s.reg.dispatch(spec_of(|spec| {
+        spec.backend = "fiber".into();
+        spec.model = "fiber/opencode-go/muse-spark-1.3-contributor".into();
+        spec.reviewer = Some("opencode-go/glm-5.3-flash".into());
+        spec.argv = crate::backends::fiber::with_reviewer(
+            vec![
+                "ask".into(),
+                "--model".into(),
+                "opencode-go/muse-spark-1.3-contributor".into(),
+                "--".into(),
+                "initial prompt".into(),
+            ],
+            "opencode-go/glm-5.3-flash",
+        );
+    }));
+    assert_eq!(settle(&s.reg, &id), "DONE");
+    let argvs = argvs(&s);
+    assert_eq!(argvs.len(), 2);
+    for argv in &argvs {
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["-c", "reviewer.model=opencode-go/glm-5.3-flash"]),
+            "reviewer override missing from argv: {argv:?}"
+        );
+    }
 }
 
 #[test]

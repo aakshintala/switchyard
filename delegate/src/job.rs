@@ -366,10 +366,16 @@ impl JobHandle {
                 continue;
             }
             let mut spec = (*job.spec).clone();
-            spec.argv =
+            let mut argv =
                 self.deps
                     .backend
                     .resume_argv(&spec.model, &session, &continue_prompt(status));
+            if spec.backend == "fiber"
+                && let Some(reviewer) = spec.reviewer.as_deref()
+            {
+                argv = crate::backends::fiber::with_reviewer(argv, reviewer);
+            }
+            spec.argv = argv;
             let mut spawned = self.deps.backend.run(&spec);
             job.kill = Arc::from(std::mem::replace(&mut spawned.kill, Box::new(|| {})));
             job.stage = Stage::Running;

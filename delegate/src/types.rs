@@ -191,6 +191,8 @@ pub struct ModelEntry {
     pub price: Price,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tiers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +200,7 @@ pub struct ResolvedModel {
     pub model: String,
     pub backend: String,
     pub price: Price,
+    pub reviewer: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -309,6 +312,8 @@ pub struct JobSpec {
     pub cwd: String,
     pub model: String,
     pub backend: String,
+    /// Catalogue-selected Fiber reviewer model, if any.
+    pub reviewer: Option<String>,
     pub path: Option<String>,
     pub head_before: Option<String>,
     pub gate: String,

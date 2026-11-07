@@ -56,17 +56,33 @@ pub(crate) fn argv(model: &str, session: Option<&str>, prompt: &str) -> Vec<Stri
     args
 }
 
+pub(crate) fn with_reviewer(mut args: Vec<String>, reviewer: &str) -> Vec<String> {
+    let config = format!("reviewer.model={reviewer}");
+    let before_prompt = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    args.splice(before_prompt..before_prompt, ["-c".into(), config]);
+    args
+}
+
 fn hub_request(spec: &JobSpec) -> hub::HubRequest {
     let (staged_argv, prompt) = super::split_staged_prompt(&spec.argv);
     let resume = staged_argv
         .windows(2)
         .find_map(|pair| (pair[0] == "--resume").then(|| pair[1].clone()));
+    let overrides = spec
+        .reviewer
+        .as_ref()
+        .map(|reviewer| vec![format!("reviewer.model={reviewer}")])
+        .unwrap_or_default();
     hub::HubRequest {
         cwd: spec.cwd.clone(),
         model: spec.model.clone(),
         prompt,
         bounds: hub::Bounds::default(),
         resume,
+        overrides,
     }
 }
 
