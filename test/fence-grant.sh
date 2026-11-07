@@ -492,6 +492,9 @@ grep -q '^list' "$T/file-claim.log" || fail "symlinked caller: file-claim not ca
 reset_case
 run_fg 77 --paths docs/tui.md
 assert_rc 0 'free grant file'
+assert_line 'GRANT docs/tui.md' 'grant path output'
+grep -qF "GRANT FILE host=$(hostname) path=$FW_RUN/fiber-77-fence-grant-1.md" "$T/err" \
+  || fail "grant location identifies host and absolute file path: $(cat "$T/err")"
 assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nGRANT docs/tui.md\nGRANT')" 'free grant output'
 [ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'first grant file exists'
 grep -qxF 'Paths:' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'grant file has Paths section'
@@ -1722,7 +1725,12 @@ assert_no_grant 'malformed claims read'
 reset_case
 run_fg --require 77 --phase plan
 assert_rc 2 'plan phase without a grant is refused'
-assert_stderr "fence-grant: issue 77 needs a fence grant in $FW_RUN; create one or set FW_NO_FENCE=<reason>" 'plan requirement explains the fix'
+expected_refusal="fence-grant: issue 77 needs a fence grant matching $FW_RUN/fiber-77*-fence-grant*.md on host $(hostname); a grant written on another machine is invisible here; create one or set FW_NO_FENCE=<reason>"
+assert_stderr "$expected_refusal" 'plan requirement explains the searched host and path'
+grep -qF "matching $FW_RUN/fiber-77*-fence-grant*.md on host $(hostname)" "$T/err" \
+  || fail 'require refusal shows searched glob and host'
+grep -qF 'a grant written on another machine is invisible here' "$T/err" \
+  || fail 'require refusal explains host-local visibility'
 
 printf 'grant\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg --require 77 --phase plan
@@ -1733,7 +1741,7 @@ rm "$FW_RUN/fiber-77-fence-grant-1.md"
 
 run_fg --require 77 --phase build
 assert_rc 2 'build phase without a grant is refused'
-assert_stderr "fence-grant: issue 77 needs a fence grant in $FW_RUN; create one or set FW_NO_FENCE=<reason>" 'build requirement explains the fix'
+assert_stderr "$expected_refusal" 'build requirement explains the searched host and path'
 
 printf 'grant\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg --require 77 --phase build

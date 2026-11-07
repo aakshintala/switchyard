@@ -48,6 +48,13 @@ set -u
 set -f
 _fw_run() { printf '%s' "${FW_RUN:-/Users/aakshintala/work/fiber-worktrees/flywheel/run}"; }
 _fw_box_host() { printf '%s' "${FW_BOX_HOST:-roundhouse-7010-plus-1.local}"; }
+_fw_abs_path() {
+  local path="$1"
+  case "$path" in
+    /*) printf '%s' "$path" ;;
+    *) printf '%s/%s' "$PWD" "$path" ;;
+  esac
+}
 
 # Read `claude agents --json` on stdin; print live lane names (fiber-*,
 # busy/idle). Exits 1 when stdin is not parseable JSON (fail closed).
@@ -280,11 +287,13 @@ if [ "${1:-}" = --require ]; then
     exit 0
   fi
   run=$(_fw_run)
+  run_abs=$(_fw_abs_path "$run")
   set +f
   for grant in "$run"/fiber-"$ticket"*-fence-grant*.md; do
     [ -f "$grant" ] && exit 0
   done
-  echo "fence-grant: issue $ticket needs a fence grant in $run; create one or set FW_NO_FENCE=<reason>" >&2
+  host=$(hostname) || { echo 'fence-grant: cannot determine host name' >&2; exit 3; }
+  echo "fence-grant: issue $ticket needs a fence grant matching $run_abs/fiber-$ticket*-fence-grant*.md on host $host; a grant written on another machine is invisible here; create one or set FW_NO_FENCE=<reason>" >&2
   exit 2
 fi
 
@@ -1801,6 +1810,9 @@ if [ "$dry" -eq 0 ]; then
       printf '%s\n' "$readpaths" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's/^/- /'
     fi
   } > "$gf" 2>/dev/null || { echo "ERROR cannot write $gf"; exit 3; }
+  host=$(hostname) || { echo 'ERROR cannot determine host name'; exit 3; }
+  grant_path="$(_fw_abs_path "$run")/${gf##*/}"
+  printf 'GRANT FILE host=%s path=%s\n' "$host" "$grant_path" >&2
 fi
 while IFS="$(printf '\t')" read -r _ovp _ovh; do
   [ -n "$_ovp" ] || continue
