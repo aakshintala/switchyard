@@ -23,6 +23,7 @@ You need Rust (`cargo`), and `cursor-agent` on PATH with `cursor-agent login` be
 | `delegate cancel <jobId>` | Stop a running job and print its terminal record. |
 | `delegate watch <jobId>...` | Block until each job is terminal (optional `--timeout` seconds). |
 | `delegate status <jobId>` | Print the job's state without waiting; show its caller and add a short same-line summary of available result text and changes for finished jobs. |
+| `delegate ack <jobId>...` | Mark one or more job reports as read. |
 | `delegate models` | List configured model ids, labels, backends, prices, and tiers. Rows are sorted by backend, then by id; `*` marks the default. |
 | `delegate doctor` | Check configured backend binaries, login state, the Fiber hub socket, and model menu drift. |
 | `delegate session start` | Start a detached Muse or pi session from a brief. |
@@ -76,7 +77,7 @@ A raw record's `status` is settled only when a delegate command reads it. Tools 
 
 Each job writes `DELEGATE_JOBS_DIR/<jobId>.json` when that override is set, resolved as below. Otherwise it writes to `$TMPDIR/delegate-jobs/<jobId>.json` (the OS temp directory when `TMPDIR` is unset). Prompt text is stored alongside as `<jobId>.prompt` until the supervisor starts.
 
-`cancel`, `status`, `watch` and `resume` search `DELEGATE_JOBS_DIR`, the caller's `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`, then the per-user locator at `${XDG_CACHE_HOME:-$HOME/.cache}/delegate/locators/<jobId>`. `bin/job-record` uses the same order. The locator fills misses only, so old records need no migration.
+`cancel`, `status`, `watch`, `resume` and `ack` search `DELEGATE_JOBS_DIR`, the caller's `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`, then the per-user locator at `${XDG_CACHE_HOME:-$HOME/.cache}/delegate/locators/<jobId>`. `bin/job-record` uses the same order. The locator fills misses only, so old records need no migration.
 
 A new job publishes its locator atomically before dispatch. Readers under another `TMPDIR` find it automatically. They write updates to the record they found, and resume links the new record to the old one. Every record has `startedAtMs`; terminal records set `endedAtMs` and set `result.durationMs` to the elapsed milliseconds between those timestamps. Set `DELEGATE_JOBS_DIR` when an older record has no locator and is outside the three legacy directories. Also set it when processes use different cache roots. `unknown job` lists the search directories, including the parent of a stale locator target.
 

@@ -1,6 +1,6 @@
 //! The `delegate` CLI: `run` starts a detached supervisor, `watch` reads job records.
-//! The record file is the only link between them. `cancel`, `status`, `watch` and
-//! `resume` search `DELEGATE_JOBS_DIR`, `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`,
+//! The record file is the only link between them. `cancel`, `status`, `watch`, `resume` and
+//! `ack` search `DELEGATE_JOBS_DIR`, `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`,
 //! then the job's per-user locator. See `docs/delegate-jobs.md`.
 
 use crate::backends::Backend;
@@ -11,7 +11,8 @@ use crate::models::{base_model_id, resolve_model};
 use crate::prompt::status_block;
 use crate::status_record::{
     CliRecordWriter, find_record_path, job_record_path, locator_path, locator_record_path,
-    record_path, search_dirs, write_atomic, write_cancelled, write_locator, write_supervisor_died,
+    read_marker_path, record_path, search_dirs, valid_job_id, write_atomic, write_cancelled,
+    write_locator, write_supervisor_died,
 };
 use crate::types::{Config, JobSpec, ResumeContext};
 use crate::util::{captured_command, json_compact, random_uuid, resolve_path};
@@ -28,7 +29,8 @@ pub(crate) const USAGE: &str =
        delegate resume <jobId> [--model M] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
-       delegate status <jobId>  (print state and a finished job's result summary without waiting)
+       delegate status <jobId>  (print state and finished job result summary without waiting)
+       delegate ack <jobId>...  (mark one or more job reports as read)
        delegate models
        delegate doctor
        delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)
@@ -66,6 +68,7 @@ pub fn main() -> i32 {
         Some("cancel") => cancel(&args[1..]),
         Some("watch") => watch(&args[1..]),
         Some("status") => status(&args[1..]),
+        Some("ack") => ack(&args[1..]),
         Some("models") => crate::cli_info::models().map_err(Usage),
         Some("doctor") => crate::cli_info::doctor().map_err(Usage),
         Some("__supervise") => return supervise(&args[1..]),
@@ -1036,6 +1039,50 @@ fn status(args: &[String]) -> Result<i32, Usage> {
     let rec: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| Usage(format!("cannot read job {id}: {e}")))?;
     println!("{}", status_line(id, &rec));
+    Ok(0)
+}
+
+fn ack(args: &[String]) -> Result<i32, Usage> {
+    if args.is_empty() {
+        return usage(USAGE);
+    }
+
+    let mut valid_ids = Vec::with_capacity(args.len());
+    let mut errors = Vec::new();
+    for id in args {
+        if !valid_job_id(id) {
+            errors.push(format!("invalid job id {id}"));
+        } else if read_record(id).is_none() {
+            errors.push(missing_record(id).0);
+        } else {
+            valid_ids.push(id);
+        }
+    }
+    if !errors.is_empty() {
+        return Err(Usage(errors.join("\n")));
+    }
+
+    let paths: Vec<_> = valid_ids
+        .iter()
+        .map(|id| read_marker_path(id))
+        .collect::<Option<_>>()
+        .ok_or_else(|| Usage("no absolute cache root for read markers".to_string()))?;
+    for path in paths {
+        let result = (|| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+        })();
+        if let Err(error) = result {
+            eprintln!("cannot write read marker {}: {error}", path.display());
+            return Ok(1);
+        }
+    }
     Ok(0)
 }
 
