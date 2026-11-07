@@ -1589,9 +1589,21 @@ touch "$dir/released"
 
     #[test]
     fn prompt_file_creation_does_not_reuse_a_preexisting_path() {
+        let _lock = crate::test_env::lock();
         let dir = scratch_dir("prompt-existing");
         let path = dir.join("already-there");
         std::fs::write(&path, b"keep this file").unwrap();
+
+        // Force another env-serialised test's cleanup into the window between
+        // writing the path and attempting the exclusive open.
+        let cleanup_root = dir.to_path_buf();
+        std::thread::spawn(move || {
+            crate::test_env::try_with_lock(|| {
+                std::fs::remove_dir_all(cleanup_root).unwrap();
+            })
+        })
+        .join()
+        .unwrap();
 
         let error = PromptFile::create_at(&path, "new prompt").unwrap_err();
 
