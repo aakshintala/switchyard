@@ -9,6 +9,7 @@
 # at once; wait after 30 s of DIRTY re-checks), 4 wait: a required name had no
 # check run on the head after --no-jobs-after; 124: verdict means a required
 # check is pending now (no wait); wait means the wait timed out with checks still pending.
+# A wait with --job exits 5 when the named job was skipped: it is no answer.
 # --no-jobs-after <min> (default off; 0 or unset GH_CI_NO_JOBS_AFTER): a required
 # name with no check run after a positive bound exits 4. A job behind needs: may
 # not get a check run until upstream jobs finish; raise the bound for such
@@ -24,6 +25,7 @@ usage() {
   echo "       gh-ci verdict <branch-or-sha> | resample <pr> \"<job name>\" --until <regex> [--max <n>]" >&2
   echo "       gh-ci wait <pr> [--timeout <s>] [--fail-fast] [--no-jobs-after <min>] [--job <name> | --run <id>] | panics [<tail-lines>] (reads log from stdin)" >&2
   echo "       --no-jobs-after is off by default (GH_CI_NO_JOBS_AFTER); exit 4 needs an explicit bound" >&2
+  echo "       wait --job exits 5 when the named job was skipped (no answer)" >&2
   echo "       every GitHub subcommand takes --repo OWNER/NAME (overrides GH_CI_REPO and the checkout's origin)" >&2
   echo "       verdict judges required checks against the default branch; wait <pr> reads the PR's own base" >&2
   echo "       124 from verdict means a required check is pending now (nothing waited); from wait it means the wait timed out with checks still pending" >&2
@@ -32,6 +34,7 @@ usage() {
 
 CONFLICT_RC=3
 NO_START_RC=4
+SKIPPED_JOB_RC=5
 
 # head_state <pr>: prints "<full head SHA> <merge state>", the merge state in
 # the upper case of the GraphQL mergeStateStatus (REST mergeable_state, upper-cased).
@@ -899,21 +902,22 @@ cmd_wait() {
           || checks_json='{}'
       fi
     fi
-    progress=$(printf '%s' "$checks_json" | jq -r 'if type != "array" then empty else
-      "\([.[] | select(.bucket != "pass" and .bucket != "skipping" and .bucket != "fail" and .bucket != "cancel")] | length) \([.[] | select(.bucket == "pass" or .bucket == "skipping")] | length) \([.[] | select(.bucket == "fail" or .bucket == "cancel")] | length)" end' 2>/dev/null) || progress=""
+    progress=$(printf '%s' "$checks_json" | jq -r --arg job "$job" 'if type != "array" then empty else
+      "\([.[] | select(.bucket != "pass" and .bucket != "skipping" and .bucket != "fail" and .bucket != "cancel")] | length) \([.[] | select(.bucket == "pass" or (.bucket == "skipping" and $job == ""))] | length) \([.[] | select(.bucket == "fail" or .bucket == "cancel")] | length)" end' 2>/dev/null) || progress=""
     if [ -n "$progress" ] && [ "$progress" != "$last_progress" ]; then
       read -r p_pend p_pass p_fail <<<"$progress"
       echo "gh-ci: ${head:0:8} pending=$p_pend passed=$p_pass failing=$p_fail" >&2
       last_progress="$progress"
     fi
-    verdict=$(printf '%s' "$checks_json" | jq -r --argjson empty_ok "$empty_ok" --argjson fail_fast "$fail_fast" '
+    verdict=$(printf '%s' "$checks_json" | jq -r --arg job "$job" --argjson empty_ok "$empty_ok" --argjson fail_fast "$fail_fast" '
       if type == "array" and length == 0 and $empty_ok then "pass"
       elif type != "array" or length == 0 then "pending"
       elif $fail_fast and any(.[]; .bucket == "fail" or .bucket == "cancel") then "fail"
       elif any(.[]; .bucket != "pass" and .bucket != "skipping" and .bucket != "fail" and .bucket != "cancel") then "pending"
+      elif $job != "" and any(.[]; .bucket == "skipping") then "skipped"
       elif any(.[]; .bucket == "fail" or .bucket == "cancel") then "fail"
       else "pass" end' 2>/dev/null) || verdict=pending
-    case "$verdict" in pass|fail) ;; *) verdict="pending";; esac
+    case "$verdict" in pass|fail|skipped) ;; *) verdict="pending";; esac
     if [ "$verdict" = "pending" ]; then
       missing_count=$(printf '%s' "$ns_missing" | jq -r 'length' 2>/dev/null) || missing_count=0
       if [ "$((10#$no_jobs_after))" -gt 0 ] && [ "$((slept - ns_from))" -ge "$((10#$no_jobs_after * 60))" ] && [ "$missing_count" -gt 0 ]; then
@@ -948,6 +952,10 @@ cmd_wait() {
     read -r head2 state2 <<<"$hs"
     if [ "$head2" != "$head" ] || [ "$state2" = "DIRTY" ]; then
       continue
+    fi
+    if [ "$verdict" = "skipped" ]; then
+      echo "head: ${head:0:8} job: $job skipped"
+      return "$SKIPPED_JOB_RC"
     fi
     if [ "$verdict" = "fail" ]; then
       if [ -n "$job" ]; then

@@ -1258,6 +1258,14 @@ grep -q "head: ${A:0:8} job: e2e fail" <<<"$OUT" || fail "job fail line: [$OUT]"
 grep -q "^failing: e2e$" <<<"$OUT" || fail "failing job named: [$OUT]"
 grep -q "failing: lint" <<<"$OUT" && fail "other checks not listed: [$OUT]"
 
+# a skipped named job is no answer, not a pass or failure
+reset_state
+set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
+set_checks '[{"bucket":"skipping","name":"e2e","workflow":"CI","event":"pull_request","link":"https://github.com/O/N/actions/runs/5/job/51","app":{"slug":"github-actions"}}]'
+run_wait 7 --job e2e
+[ "$CODE" = "5" ] || fail "skipped named job exits 5 (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} job: e2e skipped" <<<"$OUT" || fail "skipped named job line: [$OUT]"
+
 # the job never appears: 124 at the timeout
 reset_state
 set_heads "$A"; echo "$RULES_CI" >"$T/state/rules"
@@ -1329,6 +1337,14 @@ set_run 556 "$A" '{"status":"in_progress","conclusion":null}' '{"status":"comple
 run_wait 7 --run 556
 [ "$CODE" = "0" ] || fail "run pass exits 0 (got $CODE): [$OUT]"
 grep -q "head: ${A:0:8} run: 556 pass" <<<"$OUT" || fail "run pass line: [$OUT]"
+
+# the run's own skipped conclusion stays a pass when the caller names the run, not a job
+reset_state
+set_heads "$A"
+set_run 566 "$A" '{"status":"completed","conclusion":"skipped"}'
+run_wait 7 --run 566
+[ "$CODE" = "0" ] || fail "skipped run remains a pass (got $CODE): [$OUT]"
+grep -q "head: ${A:0:8} run: 566 pass" <<<"$OUT" || fail "skipped run pass line: [$OUT]"
 
 # the run is on another sha: stale, exit 1 with no waiting
 reset_state
