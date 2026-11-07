@@ -119,10 +119,18 @@ cat >"$FW_SSH" <<'SSH_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/ssh.log"
 [ "${SSH_FAIL:-0}" != 1 ] || { echo 'ssh stub failure' >&2; exit 1; }
-if [ -n "${SSH_OUT:-}" ]; then printf '%s\n' "$SSH_OUT"; else
+if [ -n "${SSH_OUT:-}" ]; then printf '%s\n' "$SSH_OUT"; elif [[ "${2:-}" == *'echo FWSEC=UPTIME'* ]]; then
   printf '%s\n' 'FWSEC=UPTIME' 'FWSEC=AGENTS' '[]' 'FWSEC=DELEGATE' DELEGATEOK \
-    'FWSEC=DSESS' "$DSESS_JSON" DSESSJSONOK \
-    'FWSEC=PILANES' PILANESOK 'FWSEC=END'
+    'FWSEC=DSESS' "$DSESS_JSON"
+  case "${2:-}" in
+    *'&& echo DSESSJSONOK'*) [ "${DSESS_FULL_FAIL:-0}" != 1 ] && printf '%s\n' DSESSJSONOK;;
+    *) printf '%s\n' DSESSJSONOK;;
+  esac
+  printf '%s\n' 'FWSEC=PILANES' PILANESOK 'FWSEC=END'
+else
+  printf '%s\n' "${DSESS_RETRY_JSON:-$DSESS_JSON}"
+  [ "${DSESS_RETRY_FAIL:-0}" != 1 ] || exit 1
+  printf '%s\n' DSESSJSONOK
 fi
 SSH_STUB
 cat >"$T/stubs/file-claim" <<'FC_STUB'
@@ -218,8 +226,9 @@ reset_case() {
   mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs"
   : >"$FW_RUN/roster"
   DSESS_JSON='{"ok":true,"sessions":[]}'
+  DSESS_RETRY_JSON='' DSESS_RETRY_FAIL=0 DSESS_FULL_FAIL=0
   MAC_DSESS_JSON='{"ok":true,"sessions":[]}' MAC_DELEGATE_FAIL=0
-  export DSESS_JSON MAC_DSESS_JSON MAC_DELEGATE_FAIL
+  export DSESS_JSON DSESS_RETRY_JSON DSESS_RETRY_FAIL DSESS_FULL_FAIL MAC_DSESS_JSON MAC_DELEGATE_FAIL
   : >"$T/gh.log"
   : >"$T/claude.log"
   : >"$T/ssh.log"
@@ -411,6 +420,40 @@ DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"stopped"}]}'
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'stopped session holds nothing'
 assert_line 'WOULD-GRANT' 'stopped session grant'
+
+reset_case
+run_fg 77 --paths docs/tui.md
+assert_rc 0 'valid box sessions need one probe'
+[ "$(grep -cF 'echo FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "valid box sessions use one full probe: $(cat "$T/ssh.log")"
+[ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 1 ] || fail "valid box sessions have no retry: $(cat "$T/ssh.log")"
+grep -qF 'delegate session list --json 2>/dev/null && echo DSESSJSONOK' "$T/ssh.log" || fail "box marker is conditional on delegate success: $(cat "$T/ssh.log")"
+
+reset_case
+DSESS_FULL_FAIL=1
+export DSESS_FULL_FAIL
+run_fg 77 --paths docs/tui.md
+assert_error 'failed box delegate command has no marker' 'ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON'
+[ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 1 ] || fail "failed box delegate command is not retried: $(cat "$T/ssh.log")"
+
+reset_case
+DSESS_JSON='{"ok":true,"sessions":[{"terminal":"'
+DSESS_RETRY_JSON='{"ok":true,"sessions":[]}'
+export DSESS_JSON DSESS_RETRY_JSON
+run_fg 77 --paths docs/tui.md
+assert_rc 0 'truncated box sessions recover on retry'
+[ "$(grep -cF 'echo FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "truncated box sessions use one full probe: $(cat "$T/ssh.log")"
+[ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 2 ] || fail "truncated box sessions use one retry: $(cat "$T/ssh.log")"
+[ "$(grep -cF 'stub-box ~/.local/bin/delegate session list --json' "$T/ssh.log")" = 1 ] || fail "truncated box sessions retry only the session list: $(cat "$T/ssh.log")"
+
+reset_case
+DSESS_JSON='{"ok":true,"sessions":[{"terminal":"'
+DSESS_RETRY_JSON="$DSESS_JSON"
+export DSESS_JSON DSESS_RETRY_JSON
+run_fg 77 --paths docs/tui.md
+assert_error 'always-truncated box sessions fail closed' 'ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON'
+[ "$(grep -cF 'echo FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "always-truncated box sessions use one full probe: $(cat "$T/ssh.log")"
+[ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 3 ] || fail "always-truncated box sessions use two retries: $(cat "$T/ssh.log")"
+[ "$(grep -cF 'stub-box ~/.local/bin/delegate session list --json' "$T/ssh.log")" = 2 ] || fail "always-truncated box sessions retry only the session list: $(cat "$T/ssh.log")"
 
 reset_case
 SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nFWSEC=PILANES\nPILANESOK\nFWSEC=END'

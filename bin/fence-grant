@@ -87,7 +87,7 @@ _fw_box_probe() {
   FW_BOX_OK=0
   FW_BOX_RC=0
   FW_BOX_RAW=""
-  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null; echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
+  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
   case "$_fw_raw" in
     *FWSEC=UPTIME*FWSEC=END*) FW_BOX_OK=1; FW_BOX_RAW="$_fw_raw" ;;
   esac
@@ -218,15 +218,31 @@ fw_delegate_session_lane_names() {
   _fw_box_probe
   if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
   _fw_s=$(_fw_box_section DSESS) || return 1
+  # The marker is proof the remote delegate command exited successfully; only
+  # a marked response reaches the roster mapper and can trigger a parse retry.
   case "$_fw_s" in *DSESSJSONOK*) : ;; *) return 1;; esac
   _fw_roster=$(_fw_run)/roster
   [ -f "$_fw_roster" ] || return 1
-  # The end marker is the transport's proof, not part of the JSON: feeding it
-  # to the mapper makes json.load choke on trailing content, which reads as a
-  # refusal and fails the whole sweep closed.
-  _fw_out=$(printf '%s\n' "$_fw_s" | grep -v '^DSESSJSONOK$' | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
-  printf '%s' "$_fw_out" | tr '\n' ' '
-  return 0
+  _fw_parse_dsess() {
+    _fw_out=$(printf '%s\n' "$1" | grep -v '^DSESSJSONOK$' | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
+    printf '%s' "$_fw_out"
+    return 0
+  }
+  if _fw_names=$(_fw_parse_dsess "$_fw_s"); then
+    printf '%s' "$_fw_names" | tr '\n' ' '
+    return 0
+  fi
+  _fw_attempt=0
+  while [ "$_fw_attempt" -lt 2 ]; do
+    _fw_attempt=$((_fw_attempt + 1))
+    _fw_s=$("${FW_SSH:-ssh}" "$(_fw_box_host)" '~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK' 2>"${FW_SSH_ERR:-/dev/null}") || continue
+    case "$_fw_s" in *DSESSJSONOK*) : ;; *) continue;; esac
+    if _fw_names=$(_fw_parse_dsess "$_fw_s"); then
+      printf '%s' "$_fw_names" | tr '\n' ' '
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Prints live box pi-lane names from the one box probe. Exit 1 when ssh failed
@@ -774,6 +790,9 @@ case "$nprs" in ''|*[!0-9]*) echo "ERROR gh pr list count"; exit 3;; esac
 
 # --- live lanes (fail closed) ---
 FW_CLAUDE_ERR="$tmp/claudeerr"; FW_SSH_ERR="$tmp/ssherr"
+# Capture the box once in the parent shell. The lane readers below run in
+# command substitutions, whose variable changes would not be shared.
+_fw_box_probe
 if mac_names=$(fw_lane_names_mac); then mac_ok=1; else mac_ok=0; mac_names=""; fi
 if box_names=$(fw_box_lane_names); then box_ok=1; else box_ok=0; box_names=""; fi
 if pimac_names=$(fw_pi_lane_names_mac); then pimac_ok=1; else pimac_ok=0; pimac_names=""; fi
