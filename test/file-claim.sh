@@ -644,6 +644,7 @@ export GH_PRS_JSON="$T/prs-empty.json"
 bash "$FC" claim --lane fiber-4222 --repo test/repo >/dev/null 2>"$T/e-usage-hint" && fail "usage exits non-zero"
 [ "$?" = "2" ] || fail "usage exits 2"
 grep -qF 'FILE_CLAIM_MAX_GRANT' "$T/e-usage-hint" || fail "usage names FILE_CLAIM_MAX_GRANT: $(cat "$T/e-usage-hint")"
+grep -qF 'file-claim prune --lane ID [--repo R]' "$T/e-usage-hint" || fail "usage documents prune --lane: $(cat "$T/e-usage-hint")"
 
 # --- --plan and --grant are exclusive --------------------------------------------
 R="$(fresh)"
@@ -770,6 +771,16 @@ before="$(claims_blob "$R")"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane NOBODY 2>/dev/null)" || fail "missing-lane release exits 0"
 [ -z "$out" ] || fail "missing-lane release prints nothing"
 [ "$(claims_blob "$R")" = "$before" ] || fail "missing-lane release writes nothing"
+
+# prune removes every row for its lane and preserves every other lane's rows.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:wtA --repo test/repo prune-a.txt prune-b.txt >/dev/null 2>&1 || fail "prune setup A"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4224 --grant --worktree t:wtB --repo test/repo prune-keep.txt >/dev/null 2>&1 || fail "prune setup B"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" prune --lane fiber-4223 --repo test/repo 2>/dev/null)" || fail "prune exits 0"
+[ "$out" = "$(printf 'RELEASE prune-a.txt\nRELEASE prune-b.txt')" ] || fail "prune releases lane rows: $out"
+blob="$(claims_blob "$R")"
+[ "$(printf '%s\n' "$blob" | grep -c '^')" = "1" ] || fail "prune leaves one other-lane row"
+printf '%s' "$blob" | grep -q "^prune-keep.txt${TAB}fiber-4224${TAB}grant${TAB}" || fail "prune preserves other lane's claim"
 
 # --- list -------------------------------------------------------------------------------
 R="$(fresh)"

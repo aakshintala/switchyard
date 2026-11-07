@@ -316,7 +316,8 @@ bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set pr 7
 printf 'baadf00dbaadf00dbaadf00dbaadf00dbaadf00d\n' >"$T/prhead"; run_start
 want "DRIFT state=$ACTUAL" 3 prdrift
 case "$OUT" in *"pr=baadf00d"*) ;; *) fail "prdrift: digest misses the pr head" ;; esac
-case "$OUT" in *--part*) fail "prdrift: an unmerged or unreadable PR must keep the old message" ;; esac
+case "$OUT" in *"reconcile the state, worktree, and PR heads before rerunning tkt-start"*) ;; *) fail "prdrift: refusal names the repair" ;; esac
+case "$OUT" in *--part*) fail "prdrift: an unmerged or unreadable PR must not suggest a next part" ;; esac
 setup driftmerged ONE AGAINST; run_start
 [ "$RC" -eq 0 ] || fail "driftmerged setup: exit $RC"
 ACTUAL="$(git -C "$WT" rev-parse HEAD)"
@@ -327,6 +328,12 @@ printf 'MERGED\n' >"$T/prstate"; run_start
 want "DRIFT state=$ACTUAL" 3 driftmerged
 case "$OUT" in *--part*) ;; *) fail "driftmerged: message must name --part" ;; esac
 case "$OUT" in *"pr 7"*|*"pr=7"*) ;; *) fail "driftmerged: message must name PR 7" ;; esac
+# An invalid part key cannot suggest a numeric --part, so it still names the
+# general head-reconciliation remedy.
+bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set part not-a-number
+run_start
+want "DRIFT state=$ACTUAL" 3 driftmerged-invalid-part
+case "$OUT" in *"reconcile the state, worktree, and PR heads before rerunning tkt-start"*) ;; *) fail "driftmerged-invalid-part: refusal names the repair" ;; esac
 setup prmatch ONE AGAINST; run_start
 ACTUAL="$(git -C "$WT" rev-parse HEAD)"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set head "$ACTUAL"

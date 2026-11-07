@@ -124,7 +124,7 @@ if [ "$from" = review ] && [ "$outcome" != measurement ]; then
   fi
 fi
 rnd="$(tkt get round 2>/dev/null || true)"
-[ -z "$rnd" ] || emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the first round; continue with tkt-fix or tkt-ship"
+[ -z "$rnd" ] || emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the wrong phase after the first round; continue with tkt-fix $state --verify [--resume <job id> --prompt <file>] or tkt-ship $state; this is not the round limit"
 if stored_head="$(tkt get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
   if [ "$outcome" = measurement ]; then

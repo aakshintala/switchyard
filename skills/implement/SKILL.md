@@ -145,7 +145,7 @@ Done when CI is green on the head a verdict covers.
 
 ### 8. Merge
 
-Before either path runs, the PR body names `Implemented by: <model ids>` (the ids the jobs ran on, as `delegate` records them, never display names), and every viable mutant in the first run's list has a catching test or exemption on the pushed head (step 5). After a failed merge or MERGED wait, check `gh pr view <pr> --json state` before rerunning: if it reads `MERGED`, finish the by-hand cleanup below instead.
+Before either path runs, the PR body names `Implemented by: <model ids>` (the ids the jobs ran on, as `delegate` records them, never display names), and every viable mutant in the first run's list has a catching test or exemption on the pushed head (step 5). When acceptance cites a CI job's output, use that job's log as evidence: the run's conclusion is not a substitute, and a skipped job is no evidence. After a failed merge or MERGED wait, check `gh pr view <pr> --json state` before rerunning: if it reads `MERGED`, finish the by-hand cleanup below instead.
 
 With a state file, `tkt-ship <state>` runs `ship-pr` from the state keys (`reviewed`, `unverified`, `body_has`, `body_ends`, `merge_gate`, `head`), reruns it while CI is pending and digests a red CI run. Keep `head` and `reviewed` current with `tkt-state <state> set` after every push. Pass the session's attribution line to `tkt-start` as `--body-ends` (Claude Code: `Co-authored with Claude Code.`), or set it late with `tkt-state <state> set body_ends TEXT` once the ticket has already started; a session whose instructions require no attribution line passes no `--body-ends`. Route its verdict:
 
