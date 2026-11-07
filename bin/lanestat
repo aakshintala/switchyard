@@ -1,10 +1,15 @@
 #!/bin/sh
-# lanestat [--all] [--inbox <dir>] <run-dir>: one row per live pi lane in
-# this host's run dir. With --inbox, print the open-ruling count when nonzero.
+# lanestat [--all] [--inbox <dir>] <run-dir>: live pi lanes and recent delegate run jobs.
+# With --inbox, print the open-ruling count when nonzero.
 # It stays POSIX so lanewatch can send it to `ssh bash -s` without a remote copy.
 # LANESTAT_SETTLED_MAX (seconds, default 7200) marks older SETTLED lanes
 # as SETTLED-OLD. lanewatch does not forward the variable over ssh, so remote
 # runs use the default unless it is set in the remote environment.
+# LANESTAT_DELEGATE_MAX_AGE (seconds, default 86400) limits terminal delegate
+# jobs by endedAtMs (record mtime for older records); RUNNING jobs always show.
+# Delegate rows resolve through per-user locators; only an explicit
+# DELEGATE_JOBS_DIR supplies locator-less records. A resumed predecessor is
+# suppressed, leaving the current successor as the row for the chain.
 #
 # State pairs tool starts and ends by toolCallId within the last 20 MB of the
 # jsonl, never from its last line. A prompt sent during a running tool call gets
@@ -33,18 +38,19 @@
 # Do not re-wake DEAD-PROVIDER. Message the lane naming the jobs in
 # DONE-UNREAD <ids>. `lanewatch` prints dated event rows once per settle minute
 # and sends PARK, LOOP, WEDGED, DEAD-PROVIDER and DONE-UNREAD to
-# LANEWATCH_INBOX when it is set; plain SETTLED and STALL stay on stdout. The
-# watcher never stops a lane. Set DELEGATE_JOBS_DIR on the watcher when a
-# lane's jobs live under a non-`/tmp` TMPDIR, or DONE-UNREAD stays silent; the
-# value reaches remote targets.
-# TMPDIR, JOB_RECORD_SYSTEM_DIR and LANESTAT_SETTLED_MAX are not forwarded over
-# ssh; only those come from the remote environment.
+# LANEWATCH_INBOX when it is set; plain SETTLED and STALL stay on stdout.
+# The watcher never stops a lane. Set DELEGATE_JOBS_DIR on the watcher only for
+# locator-less delegate records; lanewatch forwards that fallback to remote
+# targets. TMPDIR, JOB_RECORD_SYSTEM_DIR and LANESTAT_SETTLED_MAX are not
+# forwarded over ssh; only DELEGATE_JOBS_DIR is.
+#
+# A pi lane's TMPDIR may be `~/.cache/tmp`, not `/tmp`; this does not affect
+# delegate rows, which resolve records through per-user locators. Use
+# DELEGATE_JOBS_DIR only when a delegate record has no locator.
 #
 # A pid file outlives its lane and the host can reuse its number. Keep a row only
-# when `ps -o comm=` still names pi. A lane's TMPDIR is `~/.cache/tmp`, not
-# `/tmp`: `jobs wait` records live there, and `DELEGATE_JOBS_DIR` must point to
-# that same directory when checking a delegate job. Use `ps -g` on the saved
-# pgid for a `jobs wait` process.
+# when `ps -o comm=` still names pi. Use `ps -g` on the saved pgid for a
+# `jobs wait` process.
 #
 # Dead pid files accumulate; --all includes them. Never `cat` a lane's
 # fiber-<n>-pi.in: it is a FIFO and reading it blocks the lane.
@@ -85,25 +91,148 @@ case $settled_max in
 esac
 
 now=$(date +%s)
-job_dirs=
-add_job_dir() {
-  job_dir=$1
-  [ -n "$job_dir" ] || return
-  if [ -n "$job_dirs" ] && printf '%s\n' "$job_dirs" | grep -Fqx -- "$job_dir"; then
-    return
-  fi
-  job_dirs="${job_dirs}${job_dirs:+
-}$job_dir"
-}
+fallback_dir=
 if [ -n "${DELEGATE_JOBS_DIR:-}" ]; then
   case $DELEGATE_JOBS_DIR in
-    /*) add_job_dir "$DELEGATE_JOBS_DIR" ;;
-    *) add_job_dir "$PWD/$DELEGATE_JOBS_DIR" ;;
+    /*) fallback_dir=$DELEGATE_JOBS_DIR ;;
+    *) fallback_dir=$PWD/$DELEGATE_JOBS_DIR ;;
   esac
 fi
-add_job_dir "${TMPDIR:-/tmp}/delegate-jobs"
-add_job_dir "${JOB_RECORD_SYSTEM_DIR:-/tmp/delegate-jobs}"
 rows=0
+
+delegate_max_age=${LANESTAT_DELEGATE_MAX_AGE:-}
+case $delegate_max_age in
+  ''|*[!0-9]*) delegate_max_age=86400 ;;
+esac
+cache_root=
+case ${XDG_CACHE_HOME:-} in
+  /*) cache_root=$XDG_CACHE_HOME ;;
+esac
+if [ -z "$cache_root" ]; then
+  case ${HOME:-} in
+    /*) cache_root=$HOME/.cache ;;
+  esac
+fi
+locator_dir=
+read_dir=
+if [ -n "$cache_root" ]; then
+  locator_dir=$cache_root/delegate/locators
+  read_dir=$cache_root/delegate/read
+fi
+if { [ -n "$locator_dir" ] && [ -d "$locator_dir" ]; } || \
+   { [ -n "$fallback_dir" ] && [ -d "$fallback_dir" ]; }; then
+  delegate_output=$(LS_LOCATORS="$locator_dir" LS_FALLBACK="$fallback_dir" \
+    LS_READ="$read_dir" LS_NOW="$now" \
+    LS_MAX_AGE="$delegate_max_age" perl -e '
+      eval { require JSON::PP; 1 } or exit 0;
+      require Scalar::Util;
+      sub read_file {
+        my ($path) = @_;
+        open my $fh, "<", $path or return;
+        local $/;
+        return <$fh>;
+      }
+      sub one_line {
+        my ($text) = @_;
+        $text = "" unless defined $text && !ref $text;
+        $text =~ s/[\x00-\x1f\x7f]/ /g;
+        $text =~ s/\s+/ /g;
+        $text =~ s/^\s+|\s+$//g;
+        return $text;
+      }
+      sub valid_id {
+        return defined $_[0] && $_[0] =~ /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/;
+      }
+      sub load_record {
+        my ($id, $path, $records) = @_;
+        return unless -f $path;
+        my @stat = stat $path;
+        return unless @stat;
+        my $json = read_file($path);
+        return unless defined $json;
+        my $record = eval { JSON::PP::decode_json($json) };
+        return if $@ || ref($record) ne "HASH";
+        $records->{$id} = { record => $record, mtime => $stat[9] };
+      }
+      my $locator_dir = $ENV{LS_LOCATORS} || "";
+      my $fallback_dir = $ENV{LS_FALLBACK} || "";
+      my $read_dir = $ENV{LS_READ} || "";
+      my $now = $ENV{LS_NOW};
+      my $max_age = $ENV{LS_MAX_AGE};
+      my %records;
+      if (length $locator_dir && opendir my $dir, $locator_dir) {
+        my @ids = grep { valid_id($_) } readdir $dir;
+        closedir $dir;
+        for my $id (@ids) {
+          my $locator = read_file("$locator_dir/$id");
+          next unless defined $locator;
+          $locator =~ s/\n\z//;
+          next if $locator !~ m{\A/} || $locator =~ /[\r\n]/;
+          load_record($id, $locator, \%records);
+        }
+      }
+      if (length $fallback_dir && opendir my $dir, $fallback_dir) {
+        my @names = readdir $dir;
+        closedir $dir;
+        for my $name (@names) {
+          next unless $name =~ /\A([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json\z/;
+          my $id = $1;
+          next if exists $records{$id};
+          next if length($locator_dir) && -e "$locator_dir/$id";
+          load_record($id, "$fallback_dir/$name", \%records);
+        }
+      }
+      my %superseded;
+      for my $id (keys %records) {
+        my $record = $records{$id}{record};
+        my $next = $record->{supersededBy};
+        my $previous = $record->{resumedFrom};
+        $superseded{$id} = 1 if valid_id($next);
+        $superseded{$previous} = 1 if valid_id($previous);
+      }
+      for my $id (sort keys %records) {
+        next if $superseded{$id};
+        my $entry = $records{$id};
+        my $record = $entry->{record};
+        my $status = $record->{status};
+        next unless defined $status && !ref $status && length $status;
+        if ($status ne "RUNNING") {
+          my $ended_at = $record->{endedAtMs};
+          my $finished_at = defined $ended_at && !ref($ended_at) && Scalar::Util::looks_like_number($ended_at)
+            ? $ended_at / 1000
+            : $entry->{mtime};
+          my $age = $now - $finished_at;
+          next if $age < 0 || $age > $max_age;
+        }
+        my $result = ref($record->{result}) eq "HASH" ? $record->{result} : {};
+        my $resume = ref($record->{resume}) eq "HASH" ? $record->{resume} : {};
+        my $model = one_line($result->{model} || $resume->{model} || "unknown");
+        my $cwd = one_line($resume->{cwd} || $record->{cwd} || "");
+        my $line = "DELEGATE id=$id model=$model cwd=$cwd status=" . one_line($status);
+        if ($status eq "ERROR") {
+          my $backend = one_line($result->{backend} || "unknown");
+          my $provider_model = one_line($result->{model} || "unknown");
+          my $message = $result->{stderrTail};
+          $message = "" unless defined $message && !ref $message;
+          ($message) = split /\r\n|\n|\r/, $message, 2;
+          $message = one_line($message);
+          $message = "no output" unless length $message;
+          $message = substr($message, 0, 200);
+          $line .= " DEAD-PROVIDER $backend/$provider_model: $message";
+        }
+        if ($status ne "RUNNING") {
+          my $read_marker = length($read_dir) && -f "$read_dir/$id";
+          $line .= $read_marker ? " READ" : " DONE-UNREAD";
+        }
+        print "$line\n";
+      }
+    ')
+  if [ -n "$delegate_output" ]; then
+    printf '%s\n' "$delegate_output"
+    rows=$(printf '%s\n' "$delegate_output" | wc -l | tr -d ' ')
+  fi
+fi
+
 for pidfile in "$run"/fiber-*-pi.pid; do
   [ -f "$pidfile" ] || continue
   n=${pidfile##*/}
@@ -140,7 +269,9 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     esac
   done
   ruling_ms=$((ruling_time * 1000))
-  event_output=$(tail -c 20000000 "$jsonl" 2>/dev/null | LS_JOB_DIRS="$job_dirs" LS_RULING_MS="$ruling_ms" perl -ne '
+  event_output=$(tail -c 20000000 "$jsonl" 2>/dev/null | \
+    LS_LOCATORS="$locator_dir" LS_FALLBACK="$fallback_dir" LS_READ="$read_dir" \
+    LS_RULING_MS="$ruling_ms" perl -ne '
     our @open;
     our $settled;
     our $after_prompt;
@@ -153,6 +284,12 @@ for pidfile in "$run"/fiber-*-pi.pid; do
     our $ruling_ms;
     our @job_ids;
     our %seen_job_ids;
+    sub read_file {
+      my ($path) = @_;
+      open my $fh, "<", $path or return;
+      local $/;
+      return <$fh>;
+    }
     sub unescape_json_string {
       my ($raw_error) = @_;
       my $message = "";
@@ -313,7 +450,9 @@ for pidfile in "$run"/fiber-*-pi.pid; do
         }
       }
       if (@job_ids && eval { require JSON::PP; 1 }) {
-        my @dirs = split /\n/, defined $ENV{LS_JOB_DIRS} ? $ENV{LS_JOB_DIRS} : "";
+        my $locator_dir = $ENV{LS_LOCATORS} || "";
+        my $fallback_dir = $ENV{LS_FALLBACK} || "";
+        my $read_dir = $ENV{LS_READ} || "";
         my @finished_ids;
         my $resolved = 0;
         my $all_finished = 1;
@@ -321,6 +460,7 @@ for pidfile in "$run"/fiber-*-pi.pid; do
           my $id = $printed_id;
           my %visited;
           my $found_initial = 0;
+          my $latest_id = $id;
           my $invalid = 0;
           my $finished = 0;
           while (1) {
@@ -329,13 +469,17 @@ for pidfile in "$run"/fiber-*-pi.pid; do
               last;
             }
             my $path;
-            for my $dir (@dirs) {
-              next unless length $dir;
-              my $candidate = "$dir/$id.json";
-              if (-f $candidate) {
-                $path = $candidate;
-                last;
+            my $locator_file = length($locator_dir) ? "$locator_dir/$id" : "";
+            if (length($locator_file) && -e $locator_file) {
+              my $locator = read_file($locator_file);
+              if (defined $locator) {
+                $locator =~ s/\n\z//;
+                $path = $locator
+                  if $locator =~ m{\A/} && $locator !~ /[\r\n]/ && -f $locator;
               }
+            } elsif (length($fallback_dir)) {
+              my $candidate = "$fallback_dir/$id.json";
+              $path = $candidate if -f $candidate;
             }
             if (!defined $path) {
               if (!$found_initial) {
@@ -368,22 +512,18 @@ for pidfile in "$run"/fiber-*-pi.pid; do
                 last;
               }
               $id = $successor;
+              $latest_id = $id;
               next;
             }
-            my $status;
-            if (ref($record->{result}) eq "HASH" && exists $record->{result}{status} && defined $record->{result}{status}) {
-              $status = $record->{result}{status};
-            } else {
-              $status = $record->{status};
-            }
-            $finished = 1 if defined $status && !ref($status) && ($status eq "DONE" || $status eq "DONE_WITH_CONCERNS");
+            my $status = $record->{status};
+            $finished = 1 if defined $status && !ref($status) && length($status) && $status ne "RUNNING";
             last;
           }
           next unless $found_initial;
           if ($invalid || !$finished) {
             $all_finished = 0;
-          } else {
-            push @finished_ids, $printed_id;
+          } elsif (!length($read_dir) || !-f "$read_dir/$latest_id") {
+            push @finished_ids, $latest_id;
           }
         }
         if ($resolved && $all_finished) {

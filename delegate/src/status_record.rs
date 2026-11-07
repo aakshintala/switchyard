@@ -76,7 +76,7 @@ pub fn find_record_path(job_id: &str) -> Option<PathBuf> {
     find_record_path_with_locator(job_id, &search_dirs(), || locator_record_path(job_id))
 }
 
-fn valid_job_id(job_id: &str) -> bool {
+pub(crate) fn valid_job_id(job_id: &str) -> bool {
     !job_id.is_empty() && !job_id.contains('/')
 }
 
@@ -135,6 +135,20 @@ pub(crate) fn locator_path(job_id: &str) -> Option<PathBuf> {
     let xdg = std::env::var_os("XDG_CACHE_HOME");
     let home = std::env::var_os("HOME");
     locator_path_from(job_id, xdg.as_deref(), home.as_deref())
+}
+
+/// The per-user path where an orchestrator acknowledges reading one job's report.
+pub(crate) fn read_marker_path(job_id: &str) -> Option<PathBuf> {
+    if !valid_job_id(job_id) {
+        return None;
+    }
+    let xdg = std::env::var_os("XDG_CACHE_HOME");
+    let home = std::env::var_os("HOME");
+    Some(
+        locator_cache_root_from(xdg.as_deref(), home.as_deref())?
+            .join("delegate/read")
+            .join(job_id),
+    )
 }
 
 fn parse_locator_target(contents: &str) -> Option<PathBuf> {
@@ -574,6 +588,37 @@ mod tests {
 
     fn written_record(id: &str) -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(job_record_path(id)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn read_marker_path_uses_absolute_xdg_then_home_cache() {
+        use crate::test_env::EnvGuard;
+        let _env = crate::test_env::lock();
+        let root = std::env::temp_dir().join(format!("delegate-read-marker-{}", random_uuid()));
+        let home = root.join("home");
+        let xdg = root.join("xdg cache");
+        let _home = EnvGuard::set("HOME", home.to_str().unwrap());
+        let _unset = EnvGuard::remove("XDG_CACHE_HOME");
+
+        assert_eq!(
+            read_marker_path("job-id"),
+            Some(home.join(".cache/delegate/read/job-id"))
+        );
+        {
+            let _xdg = EnvGuard::set("XDG_CACHE_HOME", xdg.to_str().unwrap());
+            assert_eq!(
+                read_marker_path("job-id"),
+                Some(xdg.join("delegate/read/job-id"))
+            );
+        }
+        assert_eq!(read_marker_path(""), None);
+        assert_eq!(read_marker_path("bad/id"), None);
+        {
+            let _relative = EnvGuard::set("XDG_CACHE_HOME", "relative/cache");
+            let _no_home = EnvGuard::remove("HOME");
+            assert_eq!(read_marker_path("job-id"), None);
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -907,6 +907,116 @@ fn status_unknown_job_exits_2() {
 }
 
 #[test]
+fn ack_writes_empty_read_markers_for_known_jobs_and_is_idempotent() {
+    let e = Env::new("ack-valid");
+    let first = e.run("first report");
+    assert_eq!(e.wait_terminal(&first)["status"], "DONE");
+    let second = e.run("second report");
+    assert_eq!(e.wait_terminal(&second)["status"], "DONE");
+
+    let out = e.delegate(&["ack", &first, &second], None);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+    assert!(out.stderr.is_empty());
+    let read_dir = e.dir.join("xdg-cache/delegate/read");
+    for id in [&first, &second] {
+        assert_eq!(std::fs::read(read_dir.join(id)).unwrap(), b"");
+    }
+
+    let out = e.delegate(&["ack", &first], None);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(std::fs::read(read_dir.join(&first)).unwrap(), b"");
+}
+
+#[test]
+fn ack_validates_every_job_before_writing_any_marker() {
+    let e = Env::new("ack-validation");
+    let valid = e.run("known report");
+    assert_eq!(e.wait_terminal(&valid)["status"], "DONE");
+    let unknown = "71717171-7171-4171-8171-717171717171";
+    let out = e.delegate(&["ack", &valid, unknown, "bad/id"], None);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("unknown job {unknown}")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("invalid job id bad/id"), "{stderr}");
+    assert_eq!(stderr.lines().count(), 2, "{stderr}");
+    assert!(
+        !e.dir.join("xdg-cache/delegate/read").join(&valid).exists(),
+        "validation failure writes no valid job marker"
+    );
+}
+
+#[test]
+fn ack_without_job_ids_exits_2() {
+    let e = Env::new("ack-no-ids");
+    let out = e.delegate(&["ack"], None);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("usage: delegate run "));
+}
+
+#[test]
+fn ack_without_absolute_cache_root_exits_2_without_writing() {
+    let e = Env::new("ack-no-cache-root");
+    let id = e.run("known report");
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[("XDG_CACHE_HOME", "relative/cache"), ("HOME", "")],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no absolute cache root"));
+    assert!(!e.dir.join("xdg-cache/delegate/read").join(&id).exists());
+}
+
+#[test]
+fn ack_marker_write_failure_exits_1() {
+    let e = Env::new("ack-write-failure");
+    let id = e.run("known report");
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let cache_file = e.dir.join("cache-is-a-file");
+    std::fs::write(&cache_file, "not a directory").unwrap();
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[("XDG_CACHE_HOME", cache_file.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot write read marker"));
+}
+
+#[test]
+fn status_and_watch_never_write_read_markers() {
+    let e = Env::new("read-only-status-watch");
+    let id = e.run("SLOW report");
+    let status = e.delegate(&["status", &id], None);
+    assert_eq!(status.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains(&format!("{id}: RUNNING")),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+
+    let watch = e.delegate(&["watch", &id, "--timeout", "0"], None);
+    assert_eq!(watch.status.code(), Some(1));
+    assert!(!e.dir.join("xdg-cache/delegate/read").exists());
+
+    e.release();
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let status = e.delegate(&["status", &id], None);
+    assert_eq!(status.status.code(), Some(0));
+    let watch = e.delegate(&["watch", &id, "--timeout", "10"], None);
+    assert_eq!(watch.status.code(), Some(0));
+    assert!(!e.dir.join("xdg-cache/delegate/read").exists());
+}
+
+#[test]
 fn unknown_subcommands_explain_watch_and_exit_2() {
     let e = Env::new("unknown-subcommand");
     let name = "result";

@@ -11,11 +11,13 @@ TEST_TMPDIR="${TMPDIR:-/tmp}"
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-lanestat.XXXXXX")"
 trap 'rm -rf "$T" "${LS_INBOX:-}"' EXIT
 mkdir -p "$T/run" "$T/empty" "$T/stub" "$T/ps" \
-  "$T/tmp" "$T/tmp/delegate-jobs" "$T/delegate-jobs" "$T/system-jobs"
+  "$T/tmp" "$T/tmp/delegate-jobs" "$T/delegate-jobs" "$T/system-jobs" \
+  "$T/cache/delegate/locators" "$T/cache/delegate/read"
 DELEGATE_JOBS_DIR="$T/delegate-jobs"
 JOB_RECORD_SYSTEM_DIR="$T/system-jobs"
 TMPDIR="$T/tmp"
-export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR
+XDG_CACHE_HOME="$T/cache"
+export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR XDG_CACHE_HOME
 
 # The ordered keys are intentional: lanestat's toolName grep expects
 # "type":"tool_execution_start","toolCallId":"..","toolName":"..".
@@ -650,7 +652,7 @@ printf '{"status":"RUNNING"}\n' >"$DELEGATE_JOBS_DIR/$job_sup_running.json"
 printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_chain_b" \
   >"$DELEGATE_JOBS_DIR/$job_chain_a.json"
 printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_done" \
-  >"$T/tmp/delegate-jobs/$job_chain_b.json"
+  >"$DELEGATE_JOBS_DIR/$job_chain_b.json"
 printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_loop_b" \
   >"$DELEGATE_JOBS_DIR/$job_loop_a.json"
 printf '{"status":"RUNNING","supersededBy":"%s"}\n' "$job_loop_a" \
@@ -667,6 +669,7 @@ printf '{"status":"DONE"}\n' >"$T/tmp/delegate-jobs/$job_tmp.json"
 printf '{"status":"DONE"}\n' >"$JOB_RECORD_SYSTEM_DIR/$job_system.json"
 printf '{"status":"RUNNING"}\n' >"$DELEGATE_JOBS_DIR/$job_first_wins.json"
 printf '{"status":"DONE"}\n' >"$T/tmp/delegate-jobs/$job_first_wins.json"
+: >"$XDG_CACHE_HOME/delegate/read/$job_concerns"
 mkdir -p "$T/home/.cache/tmp/delegate-jobs" "$T/no-tmp"
 printf '{"status":"DONE"}\n' >"$T/home/.cache/tmp/delegate-jobs/$job_home.json"
 job_run="$T/jobs-run"
@@ -729,23 +732,23 @@ printf 'S 00:01\n' >"$T/ps/823.info"
 run_stat "$job_run" >"$T/jobs.out" 2>"$T/jobs.err"; rc=$?
 [ "$rc" = 0 ] || fail "job fixture exits 0 (got $rc; $(<"$T/jobs.err"))"
 assert_row 800 "SETTLED DONE-UNREAD $job_done$" "$(<"$T/jobs.out")"
-assert_row 801 "SETTLED DONE-UNREAD $job_done $job_concerns$" "$(<"$T/jobs.out")"
+assert_row 801 "SETTLED DONE-UNREAD $job_done$" "$(<"$T/jobs.out")"
 assert_row 802 'SETTLED$' "$(<"$T/jobs.out")"
-assert_row 803 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 803 "SETTLED DONE-UNREAD $job_done $job_blocked$" "$(<"$T/jobs.out")"
 assert_row 804 'SETTLED$' "$(<"$T/jobs.out")"
 assert_row 805 'SETTLED$' "$(<"$T/jobs.out")"
 assert_row 806 "SETTLED DONE-UNREAD $job_done$" "$(<"$T/jobs.out")"
-assert_row 807 "SETTLED DONE-UNREAD $job_tmp$" "$(<"$T/jobs.out")"
-assert_row 808 "SETTLED DONE-UNREAD $job_system$" "$(<"$T/jobs.out")"
+assert_row 807 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 808 'SETTLED$' "$(<"$T/jobs.out")"
 assert_row 809 'SETTLED$' "$(<"$T/jobs.out")"
-assert_row 810 "SETTLED DONE-UNREAD $job_sup_old$" "$(<"$T/jobs.out")"
+assert_row 810 "SETTLED DONE-UNREAD $job_sup_finished$" "$(<"$T/jobs.out")"
 assert_row 811 'SETTLED$' "$(<"$T/jobs.out")"
-assert_row 812 "SETTLED DONE-UNREAD $job_chain_a$" "$(<"$T/jobs.out")"
+assert_row 812 "SETTLED DONE-UNREAD $job_done$" "$(<"$T/jobs.out")"
 assert_row 813 'SETTLED$' "$(<"$T/jobs.out")"
 assert_row 814 'SETTLED$' "$(<"$T/jobs.out")"
-assert_row 815 "SETTLED DONE-UNREAD $job_result_done$" "$(<"$T/jobs.out")"
-assert_row 816 'SETTLED$' "$(<"$T/jobs.out")"
-assert_row 817 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 815 'SETTLED$' "$(<"$T/jobs.out")"
+assert_row 816 "SETTLED DONE-UNREAD $job_result_blocked$" "$(<"$T/jobs.out")"
+assert_row 817 "SETTLED DONE-UNREAD $job_result_empty$" "$(<"$T/jobs.out")"
 assert_row 818 'SETTLED$' "$(<"$T/jobs.out")"
 assert_row 819 'IN-TOOL bash$' "$(<"$T/jobs.out")"
 assert_row 824 'RUNNING$' "$(<"$T/jobs.out")"
@@ -1149,5 +1152,125 @@ run_stat --inbox "$LS_INBOX" "$T/empty" >"$T/inbox-empty.out" 2>"$T/inbox-empty.
 if grep -Fq 'open rulings:' "$T/inbox-empty.out"; then
   fail "lanestat omits the ruling count when none are open: [$(<"$T/inbox-empty.out")]"
 fi
+# delegate run jobs come from locators; only the explicit DELEGATE_JOBS_DIR is
+# scanned for records that have no locator. No pi lane JSONL is needed here.
+delegate_records="$T/delegate-records"
+mkdir -p "$delegate_records"
+delegate_done=10101010-1010-4010-8010-101010101010
+delegate_read=20202020-2020-4020-8020-202020202020
+delegate_error=30303030-3030-4030-8030-303030303030
+delegate_old=40404040-4040-4040-8040-404040404040
+delegate_running=50505050-5050-4050-8050-505050505050
+delegate_error_empty=60606060-6060-4060-8060-606060606060
+delegate_error_long=70707070-7070-4070-8070-707070707070
+delegate_fallback=80808080-8080-4080-8080-808080808080
+delegate_prior=90909090-9090-4090-8090-909090909090
+delegate_resumed=a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0
+delegate_guessed=b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0
+write_delegate_record() {
+  local id=$1 status=$2 model=$3 backend=$4 cwd=$5 stderr_tail=$6 age=${7:-60} record ended_at_ms
+  record="$delegate_records/$id.json"
+  ended_at_ms=$(((NOW - age) * 1000))
+  printf '{"status":"%s","endedAtMs":%s,"resume":{"model":"%s","backend":"%s","cwd":"%s"},"result":{"status":"%s","model":"%s","backend":"%s","stderrTail":"%s"}}\n' \
+    "$status" "$ended_at_ms" "$model" "$backend" "$cwd" "$status" "$model" "$backend" "$stderr_tail" >"$record"
+  printf '%s\n' "$record" >"$XDG_CACHE_HOME/delegate/locators/$id"
+}
+write_delegate_record "$delegate_done" DONE 'codex/model' openai-codex '/work/trees/done' '' 60
+write_delegate_record "$delegate_read" DONE 'muse/model' muse '/work/trees/read' '' 60
+write_delegate_record "$delegate_error" ERROR 'muse/model' muse '/work/trees/error' 'provider refused\nsecond line' 60
+write_delegate_record "$delegate_old" STALLED 'codex/model' openai-codex '/work/trees/old' '' 90000
+write_delegate_record "$delegate_running" RUNNING 'claude/model' claude '/work/trees/running' '' 90000
+write_delegate_record "$delegate_error_long" ERROR 'long/model' long-backend '/work/trees/long' \
+  "$(printf '%0250d' 0 | tr '0' x)" 60
+set_file_age "$delegate_records/$delegate_done.json" 60
+set_file_age "$delegate_records/$delegate_read.json" 60
+set_file_age "$delegate_records/$delegate_error.json" 60
+set_file_age "$delegate_records/$delegate_old.json" 0
+set_file_age "$delegate_records/$delegate_running.json" 90000
+set_file_age "$delegate_records/$delegate_error_long.json" 60
+
+# Missing stderrTail must still produce the standard no-output dead-provider row.
+ended_at_ms=$((NOW * 1000))
+error_empty_record="$delegate_records/$delegate_error_empty.json"
+printf '{"status":"ERROR","endedAtMs":%s,"resume":{"model":"empty/model","cwd":"/work/empty"},"result":{"status":"ERROR","model":"empty/model","backend":"empty-backend"}}\n' \
+  "$ended_at_ms" >"$error_empty_record"
+printf '%s\n' "$error_empty_record" >"$XDG_CACHE_HOME/delegate/locators/$delegate_error_empty"
+
+# A resumed report supersedes its predecessor; display only the latest job row.
+chain_previous_record="$delegate_records/$delegate_prior.json"
+chain_resumed_record="$delegate_records/$delegate_resumed.json"
+printf '{"status":"DONE","endedAtMs":%s,"supersededBy":"%s","resume":{"model":"chain/old","cwd":"/work/chain-old"},"result":{"status":"DONE","model":"chain/old","backend":"chain"}}\n' \
+  "$ended_at_ms" "$delegate_resumed" >"$chain_previous_record"
+printf '%s\n' "$chain_previous_record" >"$XDG_CACHE_HOME/delegate/locators/$delegate_prior"
+printf '{"status":"DONE","endedAtMs":%s,"resumedFrom":"%s","resume":{"model":"chain/new","cwd":"/work/chain-new"},"result":{"status":"DONE","model":"chain/new","backend":"chain"}}\n' \
+  "$ended_at_ms" "$delegate_prior" >"$chain_resumed_record"
+printf '%s\n' "$chain_resumed_record" >"$XDG_CACHE_HOME/delegate/locators/$delegate_resumed"
+
+# A record in an implicit TMPDIR jobs directory is intentionally not discovered.
+mkdir -p "$TMPDIR/delegate-jobs"
+printf '{"status":"DONE","endedAtMs":%s,"resume":{"model":"guessed/model","cwd":"/work/guessed"},"result":{"status":"DONE","model":"guessed/model"}}\n' \
+  "$ended_at_ms" >"$TMPDIR/delegate-jobs/$delegate_guessed.json"
+
+: >"$XDG_CACHE_HOME/delegate/read/$delegate_read"
+run_stat "$T/empty" >"$T/delegate-run.out" 2>"$T/delegate-run.err"; rc=$?
+[ "$rc" = 0 ] || fail "delegate run records exit 0 (got $rc; $(<"$T/delegate-run.err"))"
+[ ! -s "$T/delegate-run.err" ] || fail "delegate run records have no stderr: $(<"$T/delegate-run.err")"
+assert_delegate_row() {
+  local id=$1 pattern=$2 rows=$3 line
+  line="$(printf '%s\n' "$rows" | grep -F "id=$id" || true)"
+  [ -n "$line" ] || fail "delegate row $id is present: [$rows]"
+  printf '%s\n' "$line" | grep -Eq "$pattern" || fail "delegate row $id matches $pattern: [$line]"
+}
+assert_delegate_row "$delegate_done" "id=$delegate_done model=codex/model cwd=/work/trees/done status=DONE DONE-UNREAD$" "$(<"$T/delegate-run.out")"
+assert_delegate_row "$delegate_read" "id=$delegate_read model=muse/model cwd=/work/trees/read status=DONE READ$" "$(<"$T/delegate-run.out")"
+assert_delegate_row "$delegate_running" "id=$delegate_running model=claude/model cwd=/work/trees/running status=RUNNING$" "$(<"$T/delegate-run.out")"
+assert_delegate_row "$delegate_error" "id=$delegate_error model=muse/model cwd=/work/trees/error status=ERROR DEAD-PROVIDER muse/muse/model: provider refused DONE-UNREAD$" "$(<"$T/delegate-run.out")"
+assert_delegate_row "$delegate_error_empty" "id=$delegate_error_empty model=empty/model cwd=/work/empty status=ERROR DEAD-PROVIDER empty-backend/empty/model: no output DONE-UNREAD$" "$(<"$T/delegate-run.out")"
+assert_delegate_row "$delegate_error_long" "id=$delegate_error_long model=long/model cwd=/work/trees/long status=ERROR DEAD-PROVIDER long-backend/long/model:" "$(<"$T/delegate-run.out")"
+long_line="$(printf '%s\n' "$(<"$T/delegate-run.out")" | grep -F "id=$delegate_error_long")"
+long_message=${long_line#*DEAD-PROVIDER long-backend/long/model: }
+long_message=${long_message% DONE-UNREAD}
+[ "${#long_message}" -eq 200 ] || fail "DEAD-PROVIDER message caps at 200 chars (got ${#long_message})"
+assert_delegate_row "$delegate_resumed" "id=$delegate_resumed model=chain/new cwd=/work/chain-new status=DONE DONE-UNREAD$" "$(<"$T/delegate-run.out")"
+if grep -Fq "$delegate_prior" "$T/delegate-run.out"; then
+  fail "a resumed chain's superseded predecessor is omitted"
+fi
+if grep -Fq "$delegate_guessed" "$T/delegate-run.out"; then
+  fail "lanestat does not guess a TMPDIR jobs directory"
+fi
+if grep -Fq "$delegate_old" "$T/delegate-run.out"; then
+  fail "terminal delegate job outside the age window is omitted by endedAtMs"
+fi
+if grep -Fq 'lanestat: no live lanes' "$T/delegate-run.out"; then
+  fail "delegate records count as lanes"
+fi
+LANESTAT_DELEGATE_MAX_AGE=172800 run_stat "$T/empty" >"$T/delegate-run-window.out" 2>"$T/delegate-run-window.err"
+assert_delegate_row "$delegate_old" "id=$delegate_old model=codex/model cwd=/work/trees/old status=STALLED DONE-UNREAD$" \
+  "$(<"$T/delegate-run-window.out")"
+
+# The explicit DELEGATE_JOBS_DIR is the fallback for a record with no locator.
+ended_at_ms=$((NOW * 1000))
+fallback_record="$DELEGATE_JOBS_DIR/$delegate_fallback.json"
+printf '{"status":"DONE","endedAtMs":%s,"resume":{"model":"fallback/model","cwd":"/work/fallback"},"result":{"status":"DONE","model":"fallback/model"}}\n' \
+  "$ended_at_ms" >"$fallback_record"
+run_stat "$T/empty" >"$T/delegate-fallback.out" 2>"$T/delegate-fallback.err"; rc=$?
+[ "$rc" = 0 ] || fail "locator-less fallback exits 0 (got $rc; $(<"$T/delegate-fallback.err"))"
+assert_delegate_row "$delegate_fallback" "id=$delegate_fallback model=fallback/model cwd=/work/fallback status=DONE DONE-UNREAD$" \
+  "$(<"$T/delegate-fallback.out")"
+
+# Without XDG_CACHE_HOME, the per-user locator and read marker use HOME/.cache.
+home_cache="$T/home/.cache"
+mkdir -p "$home_cache/delegate/locators" "$home_cache/delegate/read"
+delegate_home=c0c0c0c0-c0c0-40c0-80c0-c0c0c0c0c0c0
+home_record="$delegate_records/$delegate_home.json"
+printf '{"status":"DONE","endedAtMs":%s,"resume":{"model":"home/model","cwd":"/work/home"},"result":{"status":"DONE","model":"home/model","backend":"home"}}\n' \
+  "$ended_at_ms" >"$home_record"
+set_file_age "$home_record" 0
+printf '%s\n' "$home_record" >"$home_cache/delegate/locators/$delegate_home"
+env -u XDG_CACHE_HOME HOME="$T/home" PATH="$T/stub:$PATH" LANESTAT_TEST_NOW="$NOW" \
+  DELEGATE_JOBS_DIR="$DELEGATE_JOBS_DIR" JOB_RECORD_SYSTEM_DIR="$JOB_RECORD_SYSTEM_DIR" TMPDIR="$TMPDIR" \
+  sh "$LANESTAT" "$T/empty" >"$T/delegate-home.out" 2>"$T/delegate-home.err"
+assert_delegate_row "$delegate_home" "id=$delegate_home model=home/model cwd=/work/home status=DONE DONE-UNREAD$" \
+  "$(<"$T/delegate-home.out")"
 
 echo 'lanestat: all cases passed'

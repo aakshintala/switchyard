@@ -137,6 +137,10 @@ cat >"$T/stubs/file-claim" <<'FC_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/file-claim.log"
 case "$1" in
+  reap)
+    [ "${FILE_CLAIM_REAP_FAIL:-0}" != 1 ] || { echo 'stub file-claim reap: boom' >&2; exit 2; }
+    exit 0
+    ;;
   list)
     lane=""
     while [ "$#" -gt 0 ]; do
@@ -345,6 +349,12 @@ set_pr() {
   printf '%s\n' "$path" >"$T/pr/$number.names"
   printf 'diff --git a/%s b/%s\nindex 1111111..2222222 100644\n' "$path" "$path" >"$T/pr/$number.diff"
 }
+
+# A real guard reaps before reading holders; dry runs remain read-only.
+reset_case
+run_fg 77 --paths docs/tui.md
+assert_rc 0 'guard calls file-claim reap before checking holders'
+[ "$(head -n 2 "$T/file-claim.log")" = "$(printf 'reap --repo aakshintala/fiber\nlist --repo aakshintala/fiber')" ] || fail 'reap precedes the guard holder list'
 
 # Recursive trees are cached by immutable tree SHA across sweeps.
 reset_case
