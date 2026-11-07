@@ -6,6 +6,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHIM="$SCRIPT_DIR/../bin/git-hook-guard"
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-git-hook-guard.XXXXXX")"
+export HOME="$T/home" TMPDIR="$T/tmproot"
 
 cleanup() {
   local st=$?

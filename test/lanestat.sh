@@ -9,15 +9,17 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 TEST_TMPDIR="${TMPDIR:-/tmp}"
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-lanestat.XXXXXX")"
+TEST_TMPDIR="$T/tmp"
 trap 'rm -rf "$T" "${LS_INBOX:-}"' EXIT
-mkdir -p "$T/run" "$T/empty" "$T/stub" "$T/ps" \
+mkdir -p "$T/home" "$T/run" "$T/empty" "$T/stub" "$T/ps" \
   "$T/tmp" "$T/tmp/delegate-jobs" "$T/delegate-jobs" "$T/system-jobs" \
   "$T/cache/delegate/locators" "$T/cache/delegate/read"
 DELEGATE_JOBS_DIR="$T/delegate-jobs"
 JOB_RECORD_SYSTEM_DIR="$T/system-jobs"
+HOME="$T/home"
 TMPDIR="$T/tmp"
 XDG_CACHE_HOME="$T/cache"
-export DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR XDG_CACHE_HOME
+export HOME DELEGATE_JOBS_DIR JOB_RECORD_SYSTEM_DIR TMPDIR XDG_CACHE_HOME
 
 # The ordered keys are intentional: lanestat's toolName grep expects
 # "type":"tool_execution_start","toolCallId":"..","toolName":"..".

@@ -18,8 +18,8 @@ cleanup() {
   rm -rf "$T"
 }
 trap cleanup EXIT
-mkdir -p "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
-export TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_DELEGATE="$T/stubs/delegate" FW_BOX_HOST=stub-box
+mkdir -p "$T/home" "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
+export HOME="$T/home" TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_DELEGATE="$T/stubs/delegate" FW_BOX_HOST=stub-box
 export FW_TREE_CACHE="$T/tree-cache"
 export GH_TREE="$T/tree.json" GH_PRLIST='[]' CLAUDE_JSON='[]' SSH_OUT
 

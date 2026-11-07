@@ -51,6 +51,16 @@ export GH_CI_INTERVAL=7 SHIP_PR_INTERVAL=1
 unset CLAUDECODE GH_CI_NO_JOBS_AFTER
 MERGE_SHA="1f2e3d4c5b6a79881726354433221100ffeeddcc"
 
+# Build the immutable base once. Each case clones its own refs and worktree,
+# sharing only these read-only Git objects.
+TEMPLATE="$T/template.git"
+git init -q --bare -b main "$TEMPLATE"
+git init -q -b main "$T/template-seed"
+printf 'a\nb\nc\n' >"$T/template-seed/file.txt"
+git -C "$T/template-seed" add .
+git -C "$T/template-seed" commit -qm init
+git -C "$T/template-seed" push -q "$TEMPLATE" main
+
 # --- fake gh. Reads $ST (state dir) and $ORIGIN. The PR head is origin's
 # --- feature branch, so a push is visible to gh-ci. --jq runs through jq.
 gh() (
@@ -260,12 +270,8 @@ setup() {
   S="$T/case"; rm -rf "$S"; mkdir -p "$S/st"
   WT="$S/wt"; C="$S/clone"
   export ST="$S/st" ORIGIN="$S/origin.git" MERGE_SHA C
-  git init -q --bare -b main "$ORIGIN"
-  git init -q -b main "$C"
-  git -C "$C" remote add origin "$ORIGIN"
-  printf 'a\nb\nc\n' >"$C/file.txt"
-  git -C "$C" add . && git -C "$C" commit -qm init
-  git -C "$C" push -q origin main
+  git clone -q --bare --shared "$TEMPLATE" "$ORIGIN"
+  git clone -q --shared "$ORIGIN" "$C"
   git -C "$C" worktree add -q -b feature "$WT"
   echo feature >"$WT/feature.txt"
   git -C "$WT" add . && git -C "$WT" commit -qm feature

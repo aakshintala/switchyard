@@ -97,7 +97,7 @@ if [ "${1:-}" = "--self-test-parallel-failure" ]; then
 fi
 
 failed=0
-for t in "$D"/tkt-state.sh "$D"/tkt-job.sh "$D"/job-record.sh "$D"/tkt-gate.sh "$D"/fill-brief.sh "$D"/review-pr.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/gh-ci.sh "$D"/ci-health.sh "$D"/ci-friction.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/plan-sweep.sh "$D"/delegate-replay.sh "$D"/delegate-canary.sh "$D"/inbox.sh "$D"/inbox-watchers.sh "$D"/lanestat.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/tkt-ship.sh "$D"/tkt-fix.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/git-hook-guard.sh "$D"/fence-grant.sh "$D"/merge-audit.sh "$D"/target-reap.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh; do
+for t in "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/inbox.sh "$D"/inbox-watchers.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh "$D"/target-reap.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh; do
   if bash "$t"; then
     echo "PASS: $(basename "$t")"
   else
@@ -105,11 +105,18 @@ for t in "$D"/tkt-state.sh "$D"/tkt-job.sh "$D"/job-record.sh "$D"/tkt-gate.sh "
     failed=1
   fi
 done
-# Allowlist (exactly these five run parallel, at most 3 at once):
-# ship-pr.sh, tkt-build.sh, tkt-start.sh, file-claim.sh, tkt-plan.sh.
+# Allowlist (exactly these 18 isolated suites run in parallel, at most 3):
+# ship-pr.sh, tkt-build.sh, tkt-start.sh, file-claim.sh, tkt-plan.sh,
+# tkt-fix.sh, tkt-job.sh, tkt-gate.sh, review-pr.sh, delegate-canary.sh,
+# tkt-ship.sh, gh-ci.sh, ci-health.sh, ci-friction.sh, plan-sweep.sh,
+# fence-grant.sh, lanestat.sh, git-hook-guard.sh.
 PAR_T="$(mktemp -d "${TMPDIR:-/tmp}/test-run-parallel.XXXXXX")"
 trap 'rm -rf "$PAR_T"' EXIT
-run_parallel "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/file-claim.sh "$D"/tkt-plan.sh
+run_parallel "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/file-claim.sh "$D"/tkt-plan.sh \
+  "$D"/tkt-fix.sh "$D"/tkt-job.sh "$D"/tkt-gate.sh "$D"/review-pr.sh \
+  "$D"/delegate-canary.sh "$D"/tkt-ship.sh "$D"/gh-ci.sh \
+  "$D"/ci-health.sh "$D"/ci-friction.sh "$D"/plan-sweep.sh \
+  "$D"/fence-grant.sh "$D"/lanestat.sh "$D"/git-hook-guard.sh
 if bash "$D"/cargo-slot.sh; then
   echo "PASS: cargo-slot.sh"
 else
