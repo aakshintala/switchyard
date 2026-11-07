@@ -301,6 +301,24 @@ record_round_findings() {
   t set "fix_round.$knum.findings" "$path"
 }
 
+record_round_start() {
+  local key="fix_round.$knum.start" path="$1" recorded
+  recorded="$(t get "$key" 2>/dev/null || true)"
+  if [ -n "$recorded" ]; then
+    git -C "$worktree" rev-parse --verify "${recorded}^{commit}" >/dev/null 2>&1 || {
+      echo "tkt-fix: recorded round start is not a commit: $key=$recorded" >&2
+      exit 2
+    }
+    return 0
+  fi
+  path="$(git -C "$worktree" rev-parse --verify "${path}^{commit}" 2>/dev/null)" || {
+    echo "tkt-fix: cannot record round start: $path" >&2
+    exit 2
+  }
+  t set "$key" "$path"
+  t journal "fix round start write fix$knum $path"
+}
+
 record_round_head() {
   local path="$1"
   t set "fix_round.$knum.head" "$path"
@@ -308,7 +326,7 @@ record_round_head() {
 }
 
 verify_round_coverage() {
-  local round_list_file="$1" unaccounted_file="$2" commits commit owner limit n round_head round_findings
+  local round_list_file="$1" unaccounted_file="$2" commits commit owner limit n round_start round_head round_findings
   local sha_list missing_rounds repair_command state_arg since_arg path_arg
   : >"$round_list_file"; : >"$unaccounted_file"
   commits="$(git -C "$worktree" rev-list --reverse "$verify_since..$new_head")" || emit "FINDINGS-SCOPE-ERROR" 1 "cannot enumerate commits in $verify_since..$new_head"
@@ -317,8 +335,11 @@ verify_round_coverage() {
     owner=""
     n=1
     while [ "$n" -le "$limit" ]; do
+      round_start="$(t get "fix_round.$n.start" 2>/dev/null || true)"
       round_head="$(t get "fix_round.$n.head" 2>/dev/null || true)"
-      if [ -n "$round_head" ] && git -C "$worktree" merge-base --is-ancestor "$commit" "$round_head" 2>/dev/null; then owner="$n"; break; fi
+      if [ -n "$round_start" ] && [ -n "$round_head" ] && [ "$commit" != "$round_start" ] \
+        && git -C "$worktree" merge-base --is-ancestor "$round_start" "$commit" 2>/dev/null \
+        && git -C "$worktree" merge-base --is-ancestor "$commit" "$round_head" 2>/dev/null; then owner="$n"; break; fi
       n=$((n + 1))
     done
     if [ -n "$owner" ]; then
@@ -353,7 +374,7 @@ verify_round_coverage() {
       done
       repair_command="restore the named round findings file(s), then run: $repair_command && tkt-fix $state_arg --verify --since $since_arg"
     else
-      repair_command="record the owning round with tkt-state $state_arg set fix_round.<n>.head <round head> && tkt-state $state_arg set fix_round.<n>.findings <round findings file>, then run tkt-fix $state_arg --verify --since $since_arg"
+      repair_command="record the owning round with tkt-state $state_arg set fix_round.<n>.start <round start> && tkt-state $state_arg set fix_round.<n>.head <round head> && tkt-state $state_arg set fix_round.<n>.findings <round findings file>, then run tkt-fix $state_arg --verify --since $since_arg"
     fi
     emit "FINDINGS-UNACCOUNTED commits=$sha_list" 1 \
       "rounds missing findings=${missing_rounds:-unknown}" \
@@ -504,6 +525,19 @@ gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")" ||
 }
 concerns_file=""
 no_commits=0
+round_start="$(git -C "$worktree" rev-parse HEAD)"
+if [ "$recover_unpushed" -eq 1 ]; then
+  round_start="$recover_old_head"
+elif [ -n "$resume" ]; then
+  previous_round=$((knum - 1))
+  previous_head="$(t get "fix_round.$previous_round.head" 2>/dev/null || true)"
+  if [ -n "$previous_head" ]; then
+    round_start="$previous_head"
+  elif [ "$knum" -eq 1 ] && [ -n "$reviewed" ]; then
+    round_start="$reviewed"
+  fi
+fi
+record_round_start "$round_start"
 record_round_findings
 if [ "$recover_unpushed" -eq 1 ]; then
   # Re-run the plan gate before publishing a commit left by a closed job.
