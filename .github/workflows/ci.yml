@@ -21,6 +21,7 @@ jobs:
         with:
           persist-credentials: false
       - run: test/run
+      - run: bin/check-pack
       - run: delegate/scripts/leak-scan.sh
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
