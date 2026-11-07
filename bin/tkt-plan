@@ -171,7 +171,8 @@ runjob() {
           fi
           ;;
       esac
-      w="${line#TKT tkt-job }"; emit "${w% log=*}" "$jrc" "$(head -n "$REPORT_LINES" <<<"$job_out")"
+      extra=(); [ "$slot" != confirm ] || extra=("staleness-check: $staleness_check")
+      w="${line#TKT tkt-job }"; emit "${w% log=*}" "$jrc" ${extra[@]+"${extra[@]}"} "$(head -n "$REPORT_LINES" <<<"$job_out")"
     fi
   }
   [ -s "$rep" ] || { echo "tkt-plan: tkt-job wrote no report: $rep" >&2; exit 3; }
