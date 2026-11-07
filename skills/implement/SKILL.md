@@ -123,6 +123,8 @@ A lane `CONCERNS` verdict is exit 1 from `tkt-job`, but `tkt-build` consumes it,
 
 Done when the lane reports a PR URL and head SHA, or a failure triage.
 
+After acting on a job's report, run `delegate ack <id>` so lanestat stops showing it as DONE-UNREAD.
+
 ### 5. Gate
 
 Confirm the remote tip equals the lane's reported SHA (`git log origin/<branch> -1`), read the diff, and run the gate yourself. A file outside the fence with a deleted line, a new file outside it, or a failing check goes back to the lane, or you take the work back.
