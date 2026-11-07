@@ -335,7 +335,7 @@ ticket_state_is_terminal() {
 cmd_reap() {
   local repo="$1" remote run_dir attempt=1 tip claims numbers prefix lookup_rc expected actual
   local line c_path c_lane c_kind c_at c_wt c_pr ticket pr_number reason path
-  local kept dropped dropped_files grant_file base grant_ticket
+  local kept dropped dropped_files grant_prs grant_file base grant_ticket
   remote="$(default_remote "$repo")"
   run_dir="$(ticket_states_run_dir)"
   new_workdir
@@ -393,8 +393,8 @@ cmd_reap() {
       return 0
     fi
 
-    kept="$W/kept.tsv"; dropped="$W/dropped.tsv"; dropped_files="$W/dropped-files.tsv"
-    : >"$kept"; : >"$dropped"; : >"$dropped_files"
+    kept="$W/kept.tsv"; dropped="$W/dropped.tsv"; dropped_files="$W/dropped-files.tsv"; grant_prs="$W/grant-prs.tsv"
+    : >"$kept"; : >"$dropped"; : >"$dropped_files"; : >"$grant_prs"
     while IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr || [ -n "$c_path" ]; do
       [ -n "$c_path" ] || continue
       reason=""
@@ -410,6 +410,7 @@ cmd_reap() {
               case "$pr_number" in ''|*[!0-9]*) continue;; esac
               if ticket_state_is_terminal "$pr_number" "$prefix.states"; then
                 reason="PR #$pr_number closed"
+                [ -z "$ticket" ] || printf '%s\t%s\n' "$ticket" "$pr_number" >>"$grant_prs"
                 break
               fi
             done
@@ -429,7 +430,7 @@ cmd_reap() {
       base="${base%-fence-grant*}"
       grant_ticket="$(lane_ticket_num "$base")"
       [ -n "$grant_ticket" ] || continue
-      if ticket_state_is_terminal "$grant_ticket" "$prefix.states"; then
+      if ticket_state_is_terminal "$grant_ticket" "$prefix.states" || grep -q "^${grant_ticket}${TAB}" "$grant_prs"; then
         printf '%s\t%s\n' "$grant_file" "$grant_ticket" >>"$dropped_files"
       fi
     done
@@ -448,7 +449,7 @@ cmd_reap() {
     while IFS="$TAB" read -r grant_file grant_ticket || [ -n "$grant_file" ]; do
       [ -n "$grant_file" ] || continue
       rm -f "$grant_file" || die 2 "cannot remove stale fence grant $grant_file"
-      printf 'REAP grant %s (ticket #%s closed)\n' "${grant_file##*/}" "$grant_ticket"
+      printf 'REAP grant %s (ticket #%s or associated PR closed)\n' "${grant_file##*/}" "$grant_ticket"
     done <"$dropped_files"
     return 0
   done
