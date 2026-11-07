@@ -506,6 +506,25 @@ assert_rc 0 'second grant file'
 [ -f "$FW_RUN/fiber-77-fence-grant-2.md" ] || fail 'grant numbering increments'
 
 reset_case
+run_fg 77 --paths docs/tui.md,crates/new/file.rs --new crates/new/file.rs
+assert_rc 0 'grant records declared new paths'
+grant_file="$FW_RUN/fiber-77-fence-grant-1.md"
+grep -qxF -- '- docs/tui.md' "$grant_file" || fail 'Paths section retains existing paths'
+grep -qxF -- '- crates/new/file.rs' "$grant_file" || fail 'Paths section retains the new file as a held path'
+grep -qxF '## New (do not exist on origin/main):' "$grant_file" || fail 'grant has a separate new-path section'
+awk '
+  $0 == "## New (do not exist on origin/main):" { in_new = 1; next }
+  in_new && /^##([[:space:]]|$)/ { exit }
+  in_new && $0 == "- crates/new/file.rs" { found = 1 }
+  END { exit !found }
+' "$grant_file" || fail 'new-path section lists the new file'
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'grant reader accepts new-path section'
+assert_line 'OVERLAP docs/tui.md lane #77' 'Paths reader still sees existing paths'
+run_fg --require 77 --phase build
+assert_rc 0 '--require accepts a grant with a new-path section'
+
+reset_case
 run_fg 77 --paths docs/tui.md --swept-to 123456
 assert_rc 0 'grant records swept-to comment'
 grep -qxF 'Swept to comment 123456' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'grant records swept-to comment id'

@@ -1795,6 +1795,10 @@ if [ "$dry" -eq 0 ]; then
     [ -z "$sweptto" ] || printf 'Swept to comment %s\n' "$sweptto"
     printf 'Paths:\n'
     sed 's/^/- /' < "$tmp/plist"
+    if [ -s "$tmp/newnorm" ]; then
+      printf '\n## New (do not exist on origin/main):\n'
+      sed 's/^/- /' < "$tmp/newnorm"
+    fi
     while IFS="$(printf '\t')" read -r _ovp _ovh; do
       [ -n "$_ovp" ] || continue
       printf 'overlap: %s %s\n' "$_ovp" "$_ovh"
