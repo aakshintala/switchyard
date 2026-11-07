@@ -6,6 +6,8 @@ This page records the ordering and cardinality guarantees that session tests rel
 
 `Store::update` writes the new state before it appends the update's event lines. The transition to `dead` appends exactly one `session.dead` event in that same update. A later call that sees an already-dead state appends no second dead event. `logs --follow` reads state before draining complete event lines, so it drains `session.dead` before exiting after the session dies.
 
+`send`, `logs`, `watch`, and `stop` accept a full session id or a unique prefix. If a prefix matches multiple sessions, the command exits with code 2 and lists their ids. If it matches none, the command exits with code 3 and reports `no such session`.
+
 `list` includes each valid session directory, marks a directory with unreadable state as `unreadable`, and sorts readable sessions by `startedAt`, then by session id. Human-readable entries use `<id> <status> <model> turns=<n> <cwd>`.
 
 When `send` reaches an idle session, the host reply is `started`. When it reaches a running session, the host reply is `steered`; that means the host accepted the message for its next model continuation.

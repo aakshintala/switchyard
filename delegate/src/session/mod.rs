@@ -513,9 +513,8 @@ fn send(args: &[String], json_mode: bool) -> Result<i32> {
         return Err(usage("send requires a session id and TEXT"));
     }
     let id = &args[0];
-    if !state::valid_id(id) {
-        return Err(usage("invalid session id"));
-    }
+    let id = resolve_session_id(id)?;
+    let id = id.as_str();
     let paths = default_paths();
     let current = load_and_settle(&paths, id)?;
     let (argument, parsed_json) = parse_send_args(&args[1..]).map_err(usage)?;
@@ -561,10 +560,9 @@ fn stop(args: &[String], json_mode: bool) -> Result<i32> {
     if positional.len() != 1 {
         return Err(usage("stop requires one session id"));
     }
-    let id = &positional[0];
-    if !state::valid_id(id) {
-        return Err(usage("invalid session id"));
-    }
+    let id = positional[0].as_str();
+    let id = resolve_session_id(id)?;
+    let id = id.as_str();
     let paths = default_paths();
     let current = load_and_settle(&paths, id)?;
     let interrupt = has_flag(&values, "--interrupt");
@@ -632,10 +630,9 @@ fn watch(args: &[String], json_mode: bool) -> Result<i32> {
     if positional.len() != 1 {
         return Err(usage("watch requires one session id"));
     }
-    let id = &positional[0];
-    if !state::valid_id(id) {
-        return Err(usage("invalid session id"));
-    }
+    let id = positional[0].as_str();
+    let id = resolve_session_id(id)?;
+    let id = id.as_str();
     let json_mode = json_mode || has_flag(&values, "--json");
     let paths = default_paths();
     loop {
@@ -662,10 +659,9 @@ fn logs(args: &[String], json_mode: bool) -> Result<i32> {
     if positional.len() != 1 {
         return Err(usage("logs requires one session id"));
     }
-    let id = &positional[0];
-    if !state::valid_id(id) {
-        return Err(usage("invalid session id"));
-    }
+    let id = positional[0].as_str();
+    let id = resolve_session_id(id)?;
+    let id = id.as_str();
     let follow = has_flag(&values, "--follow");
     let json_mode = json_mode || has_flag(&values, "--json");
     let paths = default_paths();
@@ -823,6 +819,54 @@ fn list_sessions(args: &[String], json_mode: bool) -> Result<i32> {
         }
     }
     Ok(EXIT_OK)
+}
+
+fn resolve_session_id(prefix: &str) -> Result<String> {
+    if prefix.is_empty()
+        || prefix.len() > 36
+        || !prefix.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+    {
+        return Err(usage("invalid session id"));
+    }
+
+    let root = state::Paths::default_root();
+    let directories = match fs::read_dir(&root) {
+        Ok(directories) => directories,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && state::valid_id(prefix) => {
+            return Ok(prefix.to_string());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(failure("noSession", format!("no such session {prefix}")));
+        }
+        Err(error) => return Err(failed(format!("could not list sessions: {error}"))),
+    };
+    let mut matches = directories
+        .flatten()
+        .filter_map(|entry| {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            (entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && state::valid_id(&id)
+                && id.starts_with(prefix))
+            .then_some(id)
+        })
+        .collect::<Vec<_>>();
+    matches.sort_unstable();
+
+    match matches.len() {
+        0 if state::valid_id(prefix) => Ok(prefix.to_string()),
+        0 => Err(failure("noSession", format!("no such session {prefix}"))),
+        1 => Ok(matches.pop().unwrap()),
+        _ => Err(usage(format!(
+            "ambiguous session id prefix {prefix}: {}",
+            matches.join(", ")
+        ))),
+    }
 }
 
 fn default_paths() -> state::Paths {
