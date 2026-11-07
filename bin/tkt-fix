@@ -137,6 +137,7 @@ if [ -n "$resume" ]; then
   fi
 fi
 knum="${slot#fix}"
+history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -293,6 +294,208 @@ write_findings() {
   t set findings "$fr"
 }
 
+record_round_findings() {
+  local key="fix_round.$knum.findings" path
+  path="$(t get "$key" 2>/dev/null || true)"
+  if [ -n "$path" ]; then
+    [ -r "$path" ] || { echo "tkt-fix: recorded round findings are missing: $key=$path" >&2; exit 2; }
+    return 0
+  fi
+  path="$run/$namebase$part_suffix-fix-round-$knum-findings.md"
+  if [ -e "$path" ]; then
+    echo "tkt-fix: refusing to overwrite unrecorded round findings: $path" >&2
+    exit 2
+  fi
+  cp "$findings" "$path" || { echo "tkt-fix: cannot record round findings: $path" >&2; exit 2; }
+  t journal "fix round findings write $path"
+  t set "fix_round.$knum.findings" "$path"
+}
+
+record_round_start() {
+  local key="fix_round.$knum.start" path="$1" recorded
+  recorded="$(t get "$key" 2>/dev/null || true)"
+  if [ -n "$recorded" ]; then
+    git -C "$worktree" rev-parse --verify "${recorded}^{commit}" >/dev/null 2>&1 || {
+      echo "tkt-fix: recorded round start is not a commit: $key=$recorded" >&2
+      exit 2
+    }
+    return 0
+  fi
+  path="$(git -C "$worktree" rev-parse --verify "${path}^{commit}" 2>/dev/null)" || {
+    echo "tkt-fix: cannot record round start: $path" >&2
+    exit 2
+  }
+  t set "$key" "$path"
+  t journal "fix round start write fix$knum $path"
+}
+
+record_round_head() {
+  local path="$1"
+  t set "fix_round.$knum.head" "$path"
+  t journal "fix round head write fix$knum $path"
+}
+
+verify_round_coverage() {
+  local round_list_file="$1" unaccounted_file="$2" commits commit owner limit n round_start round_head round_findings
+  local sha_list missing_rounds repair_command state_arg since_arg path_arg
+  : >"$round_list_file"; : >"$unaccounted_file"
+  commits="$(git -C "$worktree" rev-list --reverse "$verify_since..$new_head")" || emit "FINDINGS-SCOPE-ERROR" 1 "cannot enumerate commits in $verify_since..$new_head"
+  limit="$fixslot"; [ "$knum" -le "$limit" ] || limit="$knum"
+  for commit in $commits; do
+    owner=""
+    n=1
+    while [ "$n" -le "$limit" ]; do
+      round_start="$(t get "fix_round.$n.start" 2>/dev/null || true)"
+      round_head="$(t get "fix_round.$n.head" 2>/dev/null || true)"
+      if [ -n "$round_start" ] && [ -n "$round_head" ] && [ "$commit" != "$round_start" ] \
+        && git -C "$worktree" merge-base --is-ancestor "$round_start" "$commit" 2>/dev/null \
+        && git -C "$worktree" merge-base --is-ancestor "$commit" "$round_head" 2>/dev/null; then owner="$n"; break; fi
+      n=$((n + 1))
+    done
+    if [ -n "$owner" ]; then
+      round_findings="$(t get "fix_round.$owner.findings" 2>/dev/null || true)"
+      if [ -z "$round_findings" ]; then
+        round_findings="$run/$namebase$part_suffix-fix-round-$owner-findings.md"
+        if [ -r "$round_findings" ]; then
+          t journal "fix round findings write $round_findings"
+          t set "fix_round.$owner.findings" "$round_findings"
+        fi
+      fi
+      if [ -n "$round_findings" ] && [ -r "$round_findings" ] && grep -q '^P[123] ' "$round_findings"; then
+        grep -qx "$owner" "$round_list_file" || printf '%s\n' "$owner" >>"$round_list_file"
+      else
+        printf '%s %s\n' "$commit" "$owner" >>"$unaccounted_file"
+      fi
+    else
+      printf '%s unknown\n' "$commit" >>"$unaccounted_file"
+    fi
+  done
+  if [ -s "$unaccounted_file" ]; then
+    sha_list="$(awk '{print $1}' "$unaccounted_file" | paste -sd, -)"
+    missing_rounds="$(awk '$2 != "unknown" {print $2}' "$unaccounted_file" | sort -nu | paste -sd, -)"
+    state_arg="$(printf '%q' "$state")"; since_arg="$(printf '%q' "$verify_since")"
+    if [ -n "$missing_rounds" ]; then
+      repair_command=""
+      for n in $(tr ',' ' ' <<<"$missing_rounds"); do
+        round_findings="$(t get "fix_round.$n.findings" 2>/dev/null || true)"
+        [ -n "$round_findings" ] || round_findings="$run/$namebase$part_suffix-fix-round-$n-findings.md"
+        path_arg="$(printf '%q' "$round_findings")"
+        repair_command="${repair_command}${repair_command:+ && }tkt-state $state_arg set fix_round.$n.findings $path_arg"
+      done
+      repair_command="restore the named round findings file(s), then run: $repair_command && tkt-fix $state_arg --verify --since $since_arg"
+    else
+      repair_command="record the owning round with tkt-state $state_arg set fix_round.<n>.start <round start> && tkt-state $state_arg set fix_round.<n>.head <round head> && tkt-state $state_arg set fix_round.<n>.findings <round findings file>, then run tkt-fix $state_arg --verify --since $since_arg"
+    fi
+    emit "FINDINGS-UNACCOUNTED commits=$sha_list" 1 \
+      "rounds missing findings=${missing_rounds:-unknown}" \
+      "repair command: $repair_command"
+  fi
+}
+
+# Store every finding supplied to a scoped verify, with its origin and later
+# closure, separately from the open-only file the next fix job consumes.
+write_findings_history() {
+  local action="$1" verify_output="${2:-}" round_list_file="${3:-}" history_source row base meta raised status unverified round_path round_no
+  local rounds_csv="" rounds_seen="" earlier=0 label
+  local i found new_raised
+  local -a history_base=() history_raised=() history_status=() history_unverified=() verify_open=()
+  history_add_row() {
+    local mode="$1" default_raised="$2" row="$3" base meta parsed_raised parsed_status parsed_unverified raised status unverified i
+    case "$row" in P1\ *|P2\ *|P3\ *) ;; *) return 0;; esac
+    base="$row"; meta=""
+    case "$row" in
+      *" [tkt-history:"*)
+        base="${row%% [tkt-history:*}"
+        meta="${row#* [tkt-history: }"; meta="${meta%]}" ;;
+    esac
+    parsed_raised="$(sed -n 's/.*raised=\([^;]*\).*/\1/p' <<<"$meta")"
+    parsed_status="$(sed -n 's/.*status=\([^;]*\).*/\1/p' <<<"$meta")"
+    parsed_unverified="$(sed -n 's/.*unverified=\([^;]*\).*/\1/p' <<<"$meta")"
+    case "$mode" in
+      history)
+        raised="${parsed_raised:-$default_raised}"
+        status="${parsed_status:-open}"
+        unverified="$parsed_unverified" ;;
+      current)
+        raised="$default_raised"; status=open; unverified="" ;;
+      round)
+        raised="$default_raised"
+        status="${parsed_status:-open}"
+        unverified="$parsed_unverified" ;;
+    esac
+    for i in "${!history_base[@]}"; do [ "${history_base[$i]}" = "$base" ] && return 0; done
+    history_base+=("$base"); history_raised+=("$raised"); history_status+=("$status"); history_unverified+=("$unverified")
+  }
+  history_source="$(t get findings_history 2>/dev/null || true)"
+  if [ -n "$history_source" ] && [ -r "$history_source" ]; then
+    while IFS= read -r row; do history_add_row history unknown "$row"; done <"$history_source"
+  fi
+  # The first findings file is round 0's posted review. Later untracked input
+  # is labelled unknown rather than being assigned a round without evidence.
+  if [ "${#history_base[@]}" -eq 0 ] && { [ -z "$history_source" ] || [ ! -r "$history_source" ]; }; then new_raised="raised in review round 0"; else new_raised="raised in unknown round"; fi
+  while IFS= read -r row; do history_add_row current "$new_raised" "$row"; done <"$findings"
+  if [ -n "$round_list_file" ] && [ -r "$round_list_file" ]; then
+    while IFS= read -r round_no; do
+      case "$round_no" in ''|*[!0-9]*) continue;; esac
+      if [ "$round_no" -lt "$knum" ]; then earlier=$((earlier + 1)); fi
+      round_path="$(t get "fix_round.$round_no.findings" 2>/dev/null || true)"
+      [ -n "$round_path" ] && [ -r "$round_path" ] || continue
+      if [ "$round_no" -eq 1 ]; then raised="raised in review round 0"; else raised="raised in fix round $((round_no - 1))"; fi
+      while IFS= read -r row; do history_add_row round "$raised" "$row"; done <"$round_path"
+    done <"$round_list_file"
+  fi
+  if [ -n "$verify_output" ] && [ -r "$verify_output" ]; then
+    while IFS= read -r row; do
+      case "$row" in P1\ *|P2\ *|P3\ *) verify_open+=("$row");; esac
+    done <"$verify_output"
+  fi
+  for i in "${!history_base[@]}"; do
+    base="${history_base[$i]}"; status="${history_status[$i]}"; unverified="${history_unverified[$i]}"
+    if [ "$action" = verified ] && [ "$status" = open ]; then
+      found=0
+      for row in "${verify_open[@]+${verify_open[@]}}"; do [ "$row" = "$base" ] && found=1 && break; done
+      [ "$found" -eq 1 ] || history_status[$i]="closed in fix round $knum"
+    elif [ "$action" = unverified ] && [ "$status" = open ]; then
+      case ",$unverified," in *",fix round $knum,"*) ;; *) unverified="${unverified:+$unverified,}fix round $knum";; esac
+      history_unverified[$i]="$unverified"
+    fi
+  done
+  if [ "$action" = verified ]; then
+    for row in "${verify_open[@]+${verify_open[@]}}"; do
+      found=0
+      for base in "${history_base[@]+${history_base[@]}}"; do [ "$base" = "$row" ] && found=1 && break; done
+      if [ "$found" -eq 0 ]; then
+        history_base+=("$row"); history_raised+=("raised in fix round $knum"); history_status+=(open); history_unverified+=("")
+      fi
+    done
+  fi
+  for raised in "${history_raised[@]+${history_raised[@]}}"; do
+    case "$raised" in "raised in review round "*|"raised in fix round "*)
+      label="${raised#raised in }"
+      case ";$rounds_seen;" in *";$label;"*) ;; *) rounds_seen="${rounds_seen:+$rounds_seen; }$label";; esac ;;
+    esac
+  done
+  if [ -n "$rounds_seen" ]; then rounds_csv="$rounds_seen"; else rounds_csv=unknown; fi
+  if ! findings_write_allowed "$state" "$history_file"; then
+    echo "tkt-fix: refusing to overwrite $history_file: history path is not owned by this ticket state" >&2
+    exit 2
+  fi
+  {
+    printf '# Findings history for scoped verification\n'
+    printf 'Finding rounds held: %s.\n' "$rounds_csv"
+    printf 'Earlier fix rounds in this diff: %s.\n' "$earlier"
+    printf 'Current fix round: %s.\n\n' "$knum"
+    if [ "${#history_base[@]}" -eq 0 ]; then printf 'no open findings\n'; fi
+    for i in "${!history_base[@]}"; do
+      printf '%s [tkt-history: raised=%s; status=%s; unverified=%s]\n' \
+        "${history_base[$i]}" "${history_raised[$i]}" "${history_status[$i]}" "${history_unverified[$i]:-none}"
+    done
+  } >"$history_file"
+  t journal "findings history write $history_file"
+  t set findings_history "$history_file"
+  t set "fix_round.$knum.history" "$history_file"
+}
+
 # A resume checks the plan's Gate line too, and passes --gate-from-plan so the
 # resumed job runs the current plan's gate, not the one it was created with.
 plan="$(t get plan 2>/dev/null || true)"
@@ -307,6 +510,20 @@ gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")" ||
 }
 concerns_file=""
 no_commits=0
+round_start="$(git -C "$worktree" rev-parse HEAD)"
+if [ "$recover_unpushed" -eq 1 ]; then
+  round_start="$recover_old_head"
+elif [ -n "$resume" ]; then
+  previous_round=$((knum - 1))
+  previous_head="$(t get "fix_round.$previous_round.head" 2>/dev/null || true)"
+  if [ -n "$previous_head" ]; then
+    round_start="$previous_head"
+  elif [ "$knum" -eq 1 ] && [ -n "$reviewed" ]; then
+    round_start="$reviewed"
+  fi
+fi
+record_round_start "$round_start"
+record_round_findings
 if [ "$recover_unpushed" -eq 1 ]; then
   # Re-run the plan gate before publishing a commit left by a closed job.
   env_prefix=""
@@ -321,6 +538,7 @@ if [ "$recover_unpushed" -eq 1 ]; then
   write_gate_script "$recovery_script" "$recovery_log" "$env_prefix" "$gate_cmd" "tkt-fix: gate before pushing a closed fix job"
   gate_rc=0; (cd "$worktree" && bash "$recovery_script") >"$tmp/recovery-gate.out" 2>"$tmp/recovery-gate.err" || gate_rc=$?
   if [ "$gate_rc" -ne 0 ]; then
+    record_round_head "$recover_new_head"
     commits="$(git -C "$worktree" rev-list --count "origin/main..HEAD" 2>/dev/null || echo 0)"
     merges="$(git -C "$worktree" rev-list --count --merges "origin/main..HEAD" 2>/dev/null || echo 0)"
     gate_digest="commits=$commits merges=$merges"$'\n'"gatelog=$recovery_log"
@@ -347,6 +565,8 @@ else
   jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
   if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
   if [ "$jrc" -ne 0 ]; then
+    aborted_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+    [ -z "$aborted_head" ] || record_round_head "$aborted_head"
     if [ "$jrc" -eq 1 ]; then # an abnormal end closes the slot without a round
       close_slot "$knum"
       shead="$(t get head 2>/dev/null || true)"
@@ -368,6 +588,7 @@ fi
 
 git -C "$worktree" fetch origin >/dev/null 2>&1 || { echo "tkt-fix: fetch failed in $worktree" >&2; exit 2; }
 new_head="$(git -C "$worktree" rev-parse HEAD)" || { echo "tkt-fix: cannot read worktree HEAD: $worktree" >&2; exit 2; }
+record_round_head "$new_head"
 t set head "$new_head" # persisted before the wait and push
 t set fixopen 0 # head now covers the open job's commits
 remote_head="$(git -C "$worktree" rev-parse --verify "origin/$branch" 2>/dev/null || true)"
@@ -396,20 +617,23 @@ if [ -n "$ci_note" ]; then notes+=("$ci_note"); fi
 if [ -n "$concerns_file" ]; then notes+=("concerns=$concerns_file"); fi
 if [ "$no_commits" -eq 1 ]; then notes+=("no commits"); fi
 if [ "$noverify" -eq 1 ]; then
+  write_findings_history unverified
   t set unverified "$findings"
   emit "PUSHED unverified" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"}
 fi
 [ -n "$verifymodel" ] || verifymodel="$(t get model.verify 2>/dev/null)" || { echo "tkt-fix: missing key: model.verify (no --verify-model and no state model.verify)" >&2; exit 2; }
-vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$findings" --since "$verify_since")
+verify_round_coverage "$tmp/verify-rounds" "$tmp/unaccounted"
+write_findings_history prepare "" "$tmp/verify-rounds"
+vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$history_file" --since "$verify_since")
 if [ -n "$concerns_file" ]; then vargs+=(--context "$concerns_file"); fi
 vrc=0; "$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
 if [ -s "$tmp/verify.err" ]; then cat "$tmp/verify.err" >&2; fi
 [ "$vrc" -eq 0 ] || emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")" ${notes[@]+"${notes[@]}"}
 fixline="$(grep -m 1 '^FIX-' "$tmp/verify.out" || true)"
 case "$fixline" in
-  FIX-OK*) t set reviewed "$new_head"; write_findings "$tmp/verify.out"
+  FIX-OK*) t set reviewed "$new_head"; write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"; write_findings "$tmp/verify.out"
     emit "FIX-OK reviewed=$new_head" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
-  FIX-INCOMPLETE*) write_findings "$tmp/verify.out"; open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
+  FIX-INCOMPLETE*) write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"; write_findings "$tmp/verify.out"; open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
     if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
     emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
   *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$tmp/verify.out")" ;;

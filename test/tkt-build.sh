@@ -448,6 +448,7 @@ grep -q "^ghci|" "$T/calls.log" && fail "happy: no mutant wait without mutant_jo
 grep -q "prompt=.*-map-" "$T/calls.log" && fail "happy: no map job without mutants"
 [ -e "$CDIR/run/switchyard-528-mutants-${H:0:12}.txt" ] && fail "happy: no mutants file without mutant_job"
 expect_state reviewed "$H" happy
+expect_state review_status done happy
 [ -f "$(bash "$TKT_STATE" "$S" get findings)" ] || fail "happy: findings file exists"
 expect_state round 0 happy
 grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is journaled"
@@ -833,6 +834,7 @@ run_build
 [ "$RC" -eq 2 ] || fail "missingkey exits 2 (rc=$RC)"
 expect_verdict "TKT tkt-build PRECONDITION missing=plan log=*" "missingkey"
 grep -q 'missing key: plan' "$CDIR/stderr.txt" || fail "missingkey: stderr names plan"
+grep -Fq "tkt-plan $S set <plan-path>" <<<"$OUT" || fail "missingkey: refusal names the plan repair command"
 
 # --- a plan without a Base line stops the build ---
 setup_case basemissing
@@ -948,13 +950,25 @@ grep -q "^gate|" "$T/calls.log" && fail "from-review: the gate never runs"
 grep -q "pr list" "$T/calls.log" && fail "from-review: the PR list is never read"
 grep -q "^review-start|" "$T/calls.log" || fail "from-review: review still starts"
 
+# --- a gate-stopped no-verifier build records that review is still blocked ---
+setup_case gate-stopped-no-verifier
+bash "$TKT_STATE" "$S" set plan_verdict skipped >/dev/null || fail "gate-stopped: seed no-verifier skip"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$H" >/dev/null || fail "gate-stopped: seed no-verifier base"
+sed 's/`true`/`false`/' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+run_build --from gate --no-verifier
+[ "$RC" -ne 0 ] || fail "gate-stopped: failing gate must stop build"
+expect_state review_status gate-failed "gate-stopped"
+
 # --- --from review without pr and head derives them from the branch PR ---
 setup_case review-derives-pr
+[ -z "$(bash "$TKT_STATE" "$S" get pr 2>/dev/null || true)" ] || fail "review-derives-pr: PR key starts absent"
+[ -z "$(bash "$TKT_STATE" "$S" get head 2>/dev/null || true)" ] || fail "review-derives-pr: head key starts absent"
 run_build --from review
 [ "$RC" -eq 0 ] || fail "review-derives-pr exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "review-derives-pr"
 expect_state pr 7 review-derives-pr
 expect_state head "$H" review-derives-pr
+grep -Fq "gh|pr list --head tkt-528 --repo switchyard --json number,headRefOid" "$T/calls.log" || fail "review-derives-pr: missing PR keys are recovered by branch lookup"
 grep -q "^review-start|" "$T/calls.log" || fail "review-derives-pr: review still starts"
 
 # --- --from review with head set but pr unset derives pr and proceeds ---
@@ -1020,6 +1034,15 @@ run_build
 expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "rerun second"
 [ "$(grep -c '^run|' "$T/calls.log")" -eq 1 ] || fail "rerun: one lane dispatch across both runs"
 [ "$(grep -c '^watch|' "$T/calls.log")" -eq 2 ] || fail "rerun: the first build watches twice, the second watches nothing"
+
+# --- a zero fix-round count without a completed first review does not block build ---
+setup_case round-zero-unreviewed
+bash "$TKT_STATE" "$S" set round 0 >/dev/null || fail "round-zero-unreviewed: seed zero counter"
+run_build --from gate
+[ "$RC" -eq 0 ] || fail "round-zero-unreviewed build proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "round-zero-unreviewed build"
+expect_state round 0 "round-zero-unreviewed retains zero as the spent fix count"
+expect_state reviewed "$H" "round-zero-unreviewed completes the first review"
 
 # --- a state with round already set is refused before any job or gate ---
 setup_case round-set

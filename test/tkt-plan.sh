@@ -1080,7 +1080,7 @@ run_plan post
 [ "$RC" -eq 0 ] || fail "post on a part-1 state exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q -- "--part" "$T/stub.log" && fail "part=1 posts unlabelled"
 
-# --- set stores the plan path and resets the rounds ---
+# --- set stores the plan path and invalidates plan-specific state, but keeps completed round counts ---
 setup_case set
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm"
@@ -1109,12 +1109,12 @@ grep -q '^plan-sweep: stub progress$' "$CDIR/stderr.txt" || fail "SET replays th
 [ "$(bash "$TKT_STATE" "$S" get pack)" = "$CDIR/run/switchyard-518-pack.md" ] || fail "SET stores the pack path"
 grep -q "sweep|.*--plan $CDIR/other.md" "$T/stub.log" || fail "SET refreshes the pack for the plan"
 grep -q "sweep|.*--cwd $WT" "$T/stub.log" || fail "SET sweeps the worktree"
-[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "0" ] || fail "SET resets the round counter"
-[ -z "$(bash "$TKT_STATE" "$S" get confirmed_for)" ] || fail "SET clears the confirm record"
-[ -z "$(bash "$TKT_STATE" "$S" get granted_by 2>/dev/null || true)" ] || fail "SET clears the grant author"
-[ -z "$(bash "$TKT_STATE" "$S" get granted_comment 2>/dev/null || true)" ] || fail "SET clears the grant comment"
-[ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "SET clears grant usage"
-[ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "SET clears grant owner"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "SET preserves the round counter"
+[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "SET preserves the confirm-round count"
+[ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "SET preserves the grant author"
+[ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "5555" ] || fail "SET preserves the grant comment"
+[ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "SET preserves grant usage"
+[ "$(bash "$TKT_STATE" "$S" get granted_owner)" = "old-owner" ] || fail "SET preserves grant owner"
 [ -z "$(bash "$TKT_STATE" "$S" get last_report 2>/dev/null || true)" ] || fail "SET clears the last report"
 [ -z "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" ] || fail "SET retires the round 1 job"
 [ -z "$(bash "$TKT_STATE" "$S" get job.verifier-r2)" ] || fail "SET retires the round 2 job"
@@ -1660,6 +1660,7 @@ expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-err 
 
 setup_case drift-g
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "seed confirm round"
 VBASE="$(cat "$CDIR/base")"
 bash "$TKT_STATE" "$S" set verified_base "$VBASE" || fail "seed verified_base"
 run_plan set "$CDIR/plan.md"
@@ -1673,6 +1674,8 @@ printf '# another plan\n' >"$CDIR/other2.md"
 run_plan set "$CDIR/other2.md"
 [ "$RC" -eq 0 ] || fail "drift-g new-path set exits 0"
 [ -z "$(bash "$TKT_STATE" "$S" get verified_base 2>/dev/null || true)" ] || fail "drift-g new-path clears verified_base"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-g new-path preserves verifier_round"
+[ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "drift-g new-path preserves the confirm-round count"
 
 # --- verify passes the ticket text, body then comments, in its run file ---
 setup_case ticket-ok
@@ -2241,8 +2244,7 @@ expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post --no-verifier refreshes 
 expect_plan_verdict skipped "$base_now" "post --no-verifier refreshes skipped"
 
 # --- a verify never overwrites an earlier Verifier report ---
-# A new plan path resets the round counter, so round 1 would name a report
-# that already exists. The round takes the next free suffix instead.
+# A Verifier report already on disk still reserves its name; SET no longer resets the count to make it look like round 1.
 setup_case verify-no-overwrite
 rebase_plan
 seeded="$CDIR/run/switchyard-518-verifier-out-r1.md"

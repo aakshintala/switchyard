@@ -91,16 +91,38 @@ rdir="$(tkt get run 2>/dev/null || true)"
 mkdir -p "$rdir" 2>/dev/null || true
 runlog="$rdir/tkt-ship-early-$(date +%H%M%S)-$$.log"
 
-if ! req_err="$(tkt require repo issue pr reviewed worktree run head 2>&1)"; then
+ship_repair_hint() {
+  case "$1" in
+    repo|issue|worktree|run)
+      printf 'Repair command: rerun tkt-start --run <run-dir> --repo <owner/name> --issue <number> --spec <ticket-body> --branch <branch> --worktree <path> --workflow-doc <path> --closing '\''Resolves #<number>'\''\n' ;;
+    pr|head)
+      printf 'Repair command: tkt-build %s --from review (recover PR identity from the branch PR)\n' "$state" ;;
+    plan)
+      printf 'Repair command: tkt-plan %s set <plan-path>, then run tkt-plan %s verify when the Verifier applies; use --no-verifier only on an approved bypass path\n' "$state" "$state" ;;
+    reviewed)
+      status="$(tkt get review_status 2>/dev/null || true)"
+      case "$status" in
+        gate-failed) printf 'review_status=gate-failed\nRepair command: tkt-build %s --from gate\n' "$state" ;;
+        ready|done|skipped) printf 'review_status=%s\nRepair command: tkt-build %s --from review (run or reconstruct the PR review before shipping)\n' "$status" "$state" ;;
+        *) printf 'review_status=%s\nRepair command: tkt-build %s --from gate (finish the gate and PR review before shipping)\n' "${status:-missing}" "$state" ;;
+      esac ;;
+    *) printf 'Repair command: rerun tkt-start with the missing ticket metadata, or tkt-build %s --from review as appropriate\n' "$state" ;;
+  esac
+}
+
+if ! req_err="$(tkt require repo issue pr worktree run head 2>&1)"; then
   printf '%s\n' "$req_err" >&2
   key="$(printf '%s\n' "$req_err" | sed -n 's/.*missing key: //p' | head -n 1)"
   [ -n "$key" ] || key="unknown"
-  emit "PRECONDITION missing=$key" 2 "$req_err"
+  emit "PRECONDITION missing=$key" 2 "$req_err" "$(ship_repair_hint "$key")"
 fi
 repo="$(tkt get repo)"
 issue="$(tkt get issue)"
 pr="$(tkt get pr)"
-reviewed="$(tkt get reviewed)"
+reviewed="$(tkt get reviewed 2>/dev/null || true)"
+if [ -z "$reviewed" ]; then
+  emit "PRECONDITION missing=reviewed" 2 "tkt-state: missing key: reviewed" "$(ship_repair_hint reviewed)"
+fi
 worktree="$(tkt get worktree)"
 run="$(tkt get run)"
 
@@ -234,7 +256,7 @@ fi
 if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then
   if ! plan_err="$(tkt require plan 2>&1)"; then
     printf '%s\n' "$plan_err" >&2
-    emit "PRECONDITION missing=plan" 2 "$plan_err"
+    emit "PRECONDITION missing=plan" 2 "$plan_err" "$(ship_repair_hint plan)"
   fi
   plan_gate_args tkt
   gate_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$(tkt get plan)")" || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $(tkt get plan)"

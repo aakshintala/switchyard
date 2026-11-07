@@ -110,15 +110,28 @@ exit 0
 EOF
 chmod +x "$T/bin/gh-ci"
 
-# Stub review-pr: $T/vermode holds ok (FIX-OK) or incomplete (FIX-INCOMPLETE).
+# Stub review-pr: $T/vermode holds ok (FIX-OK), incomplete or history outputs.
 printf 'ok' >"$T/vermode"
+printf '0' >"$T/verify-count"
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
 printf 'review-pr|%s\n' "\$*" >>"$T/calls.log"
+verify_file=""; previous=""
+for arg in "\$@"; do
+  if [ "\$previous" = "--verify" ]; then verify_file="\$arg"; fi
+  previous="\$arg"
+done
+if [ -n "\$verify_file" ]; then
+  n="\$((\$(cat "$T/verify-count") + 1))"
+  printf '%s' "\$n" >"$T/verify-count"
+  cp "\$verify_file" "$T/verify-input-\$n.md"
+fi
 case "\$(cat "$T/vermode")" in
-  ok) printf 'FIX-OK\n';;
+  ok|history-two) printf 'FIX-OK\n';;
   incomplete)
     printf 'FIX-INCOMPLETE round=2\nP1 open finding in fix.txt\nP2 second finding\n';;
+  history-one)
+    printf 'FIX-INCOMPLETE round=1\nP1 finding raised in round 1\n';;
 esac
 exit 0
 EOF
@@ -151,6 +164,7 @@ reset_stubs() {
   printf '0' >"$T/cimode"
   : >"$T/ciout"
   printf 'ok' >"$T/vermode"
+  printf '0' >"$T/verify-count"
   printf '[]' >"$T/prlist"
   printf '0' >"$T/prlistrc"
   : >"$T/calls.log"
@@ -223,8 +237,95 @@ drop_state_key() {
   grep -v "^$1=" "$S" >"$S.tmp" && mv "$S.tmp" "$S"
 }
 
+record_test_round() {
+  local n="$1" head="$2" part suffix="" source path start=""
+  part="$(bash "$TKT_STATE" "$S" get part 2>/dev/null || true)"
+  case "$part" in ''|*[!0-9]*) ;; *) [ "$part" -ge 2 ] && suffix="-part$part";; esac
+  source="$(bash "$TKT_STATE" "$S" get findings)"
+  path="$CDIR/run/switchyard-529$suffix-fix-round-$n-findings.md"
+  cp "$source" "$path" || fail "record test round findings"
+  if [ "$n" -gt 1 ]; then start="$(bash "$TKT_STATE" "$S" get "fix_round.$((n - 1)).head" 2>/dev/null || true)"; fi
+  [ -n "$start" ] || start="$OLD"
+  bash "$TKT_STATE" "$S" set "fix_round.$n.start" "$start" >/dev/null
+  bash "$TKT_STATE" "$S" set "fix_round.$n.findings" "$path" >/dev/null
+  bash "$TKT_STATE" "$S" set "fix_round.$n.head" "$head" >/dev/null
+}
+
 # Selector for the new cases below: empty or unset runs all of them.
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
+
+# History: a later verify receives round 0's finding with its original round
+# label, alongside findings raised by the first verify round.
+if want history; then
+setup_case history
+printf 'P1 round 0 original finding\n' >"$CDIR/findings.md"
+printf 'history-one' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "history round 1 incomplete exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "history round 1 exited $rc, want 1"
+grep -q 'FIX-INCOMPLETE round=1' <<<"$out" || fail "history round 1 verdict missing"
+printf 'history-two' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "history round 2 exited $?"
+grep -q 'FIX-OK' <<<"$out" || fail "history round 2 did not verify"
+input="$T/verify-input-2.md"
+grep -Fq 'P1 round 0 original finding' "$input" || fail "round 2 verify input lost round 0's finding"
+grep -Fq 'raised in review round 0' "$input" || fail "round 2 verify input does not label round 0"
+grep -Fq 'P1 finding raised in round 1' "$input" || fail "round 2 verify input lost round 1's finding"
+grep -Fq 'status=closed in fix round 1' "$input" || fail "round 2 verify input lost round 0's closure round"
+grep -Fq 'Earlier fix rounds in this diff: 1' "$input" || fail "round 2 verify input does not state earlier-round coverage"
+
+setup_case history-unverified
+out="$(bash "$TKT" "$S" --no-verify 2>"$T/stderr")" || fail "history no-verify exited $?"
+history="$(bash "$TKT_STATE" "$S" get findings_history)"
+round_findings="$(bash "$TKT_STATE" "$S" get fix_round.1.findings)"
+round_head="$(bash "$TKT_STATE" "$S" get fix_round.1.head)"
+round_start="$(bash "$TKT_STATE" "$S" get fix_round.1.start)"
+[ "$round_start" = "$OLD" ] || fail "no-verify round start was not recorded"
+[ -r "$round_findings" ] || fail "no-verify round findings were not recorded"
+[ "$round_head" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "no-verify round head was not recorded"
+grep -Fq 'raised=raised in review round 0' "$history" || fail "no-verify history lost round 0 finding label"
+grep -Fq 'unverified=fix round 1' "$history" || fail "no-verify history did not label its round"
+printf 'history-two' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "verify after no-verify exited $?"
+grep -Fq 'unverified=fix round 1' "$T/verify-input-1.md" || fail "verify after no-verify lost the unverified round label"
+
+setup_case missing-round-findings
+printf 'round one fix\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+  git -C "$WT" commit -qm 'fix: round one'
+git -C "$WT" push -q origin tkt-529
+ROUND1_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$ROUND1_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.1.start "$OLD" >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.1.head "$ROUND1_HEAD" >/dev/null
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "missing-round-findings exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "missing-round-findings exited $rc, want 1"
+grep -Fq "FINDINGS-UNACCOUNTED commits=$ROUND1_HEAD" <<<"$out" || fail "missing-round-findings did not list its commit: $(head -n 1 <<<"$out")"
+grep -Fq "tkt-state $S set fix_round.1.findings $CDIR/run/switchyard-529-fix-round-1-findings.md && tkt-fix $S --verify --since $OLD" <<<"$out" || fail "missing-round-findings omitted repair command: $(tail -n +2 <<<"$out")"
+grep -q '^review-pr|' "$T/calls.log" && fail "missing-round-findings ran review-pr"
+fi
+
+if want round-ownership; then
+setup_case round-ownership
+# A prior commit is in the verify range, but round 1 has no ownership record.
+# The round-2 head must not make that earlier commit look like round 2's work.
+printf 'earlier round fix\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'fix: unrecorded earlier round'
+git -C "$WT" push -q origin tkt-529
+EARLIER_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$EARLIER_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.1.head 2>/dev/null || true)" ] || fail "round-ownership: round 1 unexpectedly has a head record"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.1.findings 2>/dev/null || true)" ] || fail "round-ownership: round 1 unexpectedly has findings"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" -ne 0 ] || fail "round-ownership accepted an earlier commit with no round-1 record: $out"
+[ "$run_rc" = "1" ] || fail "round-ownership exited $run_rc, want 1"
+grep -Fq "FINDINGS-UNACCOUNTED commits=$EARLIER_HEAD" <<<"$out" || fail "round-ownership did not refuse the earlier commit: $out"
+grep -q '^review-pr|' "$T/calls.log" && fail "round-ownership ran review-pr on uncovered commits"
+fi
 
 # 1. Verify OK on an already-pushed head: no CI wait, slot fix1, reviewed set.
 setup_case ok
@@ -234,6 +335,7 @@ git -C "$WT" commit -qm "fix: fix.txt"
 git -C "$WT" push -q origin tkt-529
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+record_test_round 1 "$NEW"
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "verify OK exited $?"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "bad verdict: $(head -n 1 <<<"$out")"
@@ -585,8 +687,10 @@ setup_case concerns-then-clean
 printf 'partial' >"$T/jobmode"
 bash "$TKT" "$S" --verify >/dev/null 2>"$T/stderr" || fail "B2 first round exited $?"
 : >"$T/calls.log"
+printf 'P1 later round finding\n' >"$CDIR/round2-findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/round2-findings.md" >/dev/null
 printf 'done' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B2 clean round exited $?"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "B2 clean round exited $?: $(cat "$T/stderr")"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "B2 bad verdict: $(head -n 1 <<<"$out")"
 grep -q -- "--context" "$T/calls.log" && fail "B2 clean round sent stale context: $(cat "$T/calls.log")"
 grep -q "concerns=" <<<"$out" && fail "B2 clean round digest names stale concerns"
@@ -744,6 +848,7 @@ git -C "$WT" push -q origin tkt-529
 NEW="$(git -C "$WT" rev-parse HEAD)"
 drop_state_key pr
 drop_state_key head
+record_test_round 1 "$NEW"
 printf '[{"number":7,"headRefOid":"%s"}]' "$NEW" >"$T/prlist"
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "fill-both pushed round exited $?"
@@ -840,6 +945,7 @@ git -C "$WT" push -q origin tkt-529
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
 bash "$TKT_STATE" "$S" set part 2 >/dev/null
+record_test_round 1 "$NEW"
 printf 'PART1-FINDINGS\n' >"$CDIR/run/switchyard-529-findings-r1.md"
 cp "$CDIR/run/switchyard-529-findings-r1.md" "$T/part1-copy.md"
 printf 'pushed' >"$T/jobmode"
@@ -859,6 +965,7 @@ git -C "$WT" commit -qm "fix: fix.txt"
 git -C "$WT" push -q origin tkt-529
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+record_test_round 1 "$NEW"
 printf 'UNRELATED-CONTENT\n' >"$CDIR/run/switchyard-529-findings-r1.md"
 cp "$CDIR/run/switchyard-529-findings-r1.md" "$T/findings-refuse-copy.md"
 printf 'pushed' >"$T/jobmode"
@@ -875,9 +982,10 @@ git -C "$WT" commit -qm "fix: fix.txt"
 git -C "$WT" push -q origin tkt-529
 NEW="$(git -C "$WT" rev-parse HEAD)"
 bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
-printf 'STALE\n' >"$CDIR/run/switchyard-529-findings-r1.md"
+printf 'P1 STALE\n' >"$CDIR/run/switchyard-529-findings-r1.md"
 bash "$TKT_STATE" "$S" set findings "$CDIR/run/switchyard-529-findings-r1.md" >/dev/null
 bash "$TKT_STATE" "$S" journal "findings write $CDIR/run/switchyard-529-findings-r1.md" >/dev/null
+record_test_round 1 "$NEW"
 printf 'pushed' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "findings-rerun exited $?: $(cat "$T/stderr")"
 grep -q "no open findings" "$CDIR/run/switchyard-529-findings-r1.md" || fail "findings-rerun: file not rewritten"
@@ -988,12 +1096,20 @@ rc=$?; [ "$rc" = "1" ] || fail "F1 call 1 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ASK id=stub-1" || fail "F1 bad verdict: $(head -n 1 <<<"$out")"
 [ "$(bash "$TKT_STATE" "$S" get fixopen)" = "1" ] || fail "F1 fixopen not 1 after ASK"
 RECHEAD="$(git -C "$WT" rev-parse HEAD)"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.head)" = "$RECHEAD" ] || fail "F1 aborted round head was not recorded"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.start)" = "$OLD" ] || fail "F1 aborted round start was not recorded"
+[ -r "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" ] || fail "F1 aborted round findings were not recorded"
+printf 'P1 replacement input\n' >"$CDIR/replacement-findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/replacement-findings.md" >/dev/null
 printf 'done' >"$T/delegate-mode"
 printf 'resume brief\n' >"$CDIR/prompt.md"
 : >"$T/calls.log"
 out="$(bash "$TKT" "$S" --verify --resume stub-1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "F1 resume exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$RECHEAD" || fail "F1 bad verdict: $(head -n 1 <<<"$out")"
 grep -q "delegate|resume|from=stub-1" "$T/calls.log" || fail "F1 delegate saw no resume of stub-1: $(cat "$T/calls.log")"
+grep -Fq 'P1 heading from review' "$T/verify-input-1.md" || fail "F1 verify lost aborted round findings"
+grep -Fq 'P1 replacement input' "$T/verify-input-1.md" || fail "F1 verify lost current findings input"
+grep -Fq 'raised in review round 0' "$T/verify-input-1.md" || fail "F1 verify did not label the aborted round findings"
 grep -qi "head drift" <<<"$out" && fail "F1 verdict names head drift"
 grep -qi "head drift" "$T/stderr" && fail "F1 stderr names head drift: $(cat "$T/stderr")"
 grep -q "UNKNOWN" <<<"$out" && fail "F1 verdict is UNKNOWN"
@@ -1207,7 +1323,7 @@ drop_state_key reviewed
 out="$(bash "$TKT" "$S" --verify --since "${OLD:0:8}" 2>"$T/stderr")" || fail "since-missing-reviewed exited $?: $(cat "$T/stderr")"
 NEW="$(git -C "$WT" rev-parse HEAD)"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "since-missing-reviewed bad verdict: $(head -n 1 <<<"$out")"
-grep -F -q "review-pr|run 7 --repo switchyard --cwd $WT --head $NEW --model verify-model --verify $CDIR/findings.md --since $OLD" "$T/calls.log" || fail "since-missing-reviewed did not pass the full since sha: $(cat "$T/calls.log")"
+grep -F -q "review-pr|run 7 --repo switchyard --cwd $WT --head $NEW --model verify-model --verify $CDIR/run/switchyard-529-findings-history-r1.md --since $OLD" "$T/calls.log" || fail "since-missing-reviewed did not pass the full since sha: $(cat "$T/calls.log")"
 [ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$NEW" ] || fail "since-missing-reviewed did not update reviewed after FIX-OK"
 
 # Without either source for the reviewed head, fail with a useful instruction.

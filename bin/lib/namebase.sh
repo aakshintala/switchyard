@@ -19,8 +19,8 @@ part_findings_suffix() {
 }
 
 # findings_write_allowed STATE DEST: return 0 when DEST may be written as
-# this ticket's findings file: it does not exist, the state has findings
-# set to it, or the journal holds a `findings write <path>` line for it.
+# this ticket's findings or findings_history file: it does not exist, the state
+# points to it, or the journal holds the corresponding `findings write` line.
 # Return 1 otherwise.
 findings_write_allowed() {
   local st="$1" dest="$2" line journal rest
@@ -28,8 +28,8 @@ findings_write_allowed() {
   if [ -f "$st" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
-        findings=*)
-          [ "${line#findings=}" = "$dest" ] && return 0
+        findings=*|findings_history=*)
+          [ "${line#*=}" = "$dest" ] && return 0
           ;;
       esac
     done <"$st"
@@ -38,7 +38,7 @@ findings_write_allowed() {
   [ -f "$journal" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     rest="${line#* }"
-    [ "$rest" = "findings write $dest" ] && return 0
+    [ "$rest" = "findings write $dest" ] || [ "$rest" = "findings history write $dest" ] && return 0
   done <"$journal"
   return 1
 }
