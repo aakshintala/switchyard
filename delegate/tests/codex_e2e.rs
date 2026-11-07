@@ -339,9 +339,11 @@ fn codex_open_tool_survives_waiting_message_past_idle_window() {
     let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
     e.wait_header("Codex command and waiting message started");
 
-    // The command item remains open while Codex reports that it is waiting.
-    // Silence exceeds the 5 s idle window but stays inside the 20 s tool window.
-    std::thread::sleep(Duration::from_millis(7500));
+    // The status record is written by the supervisor, so this proves it consumed
+    // the waiting message and retained the open command's tool phase.
+    until("running_tool status record", || {
+        e.record(&id)["progress"]["phase"] == "running_tool"
+    });
     let waiting = e.record(&id);
     let _ = std::fs::write(e.dir.join("go"), "release");
     let done = e.wait_terminal(&id);

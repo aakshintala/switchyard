@@ -362,16 +362,7 @@ fn tool_name(item: &serde_json::Value) -> Option<String> {
             .and_then(|command| command.as_str())
             .filter(|command| !command.is_empty())
             .map(str::to_string),
-        Some("mcp_tool_call") => {
-            let server = item.get("server").and_then(|s| s.as_str()).unwrap_or("");
-            let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("");
-            let name = match (server, tool) {
-                (s, t) if !s.is_empty() && !t.is_empty() => format!("{s}/{t}"),
-                (s, _) if !s.is_empty() => s.to_string(),
-                (_, t) => t.to_string(),
-            };
-            (!name.is_empty()).then_some(name)
-        }
+        Some("mcp_tool_call") => mcp_tool_name(item),
         Some("collab_tool_call") => item
             .get("tool")
             .and_then(|tool| tool.as_str())
@@ -380,6 +371,17 @@ fn tool_name(item: &serde_json::Value) -> Option<String> {
         Some("web_search") => Some("web_search".into()),
         _ => None,
     }
+}
+
+fn mcp_tool_name(item: &serde_json::Value) -> Option<String> {
+    let server = item.get("server").and_then(|s| s.as_str()).unwrap_or("");
+    let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("");
+    let name = match (server, tool) {
+        (s, t) if !s.is_empty() && !t.is_empty() => format!("{s}/{t}"),
+        (s, _) if !s.is_empty() => s.to_string(),
+        (_, t) => t.to_string(),
+    };
+    (!name.is_empty()).then_some(name)
 }
 
 /// Apply legacy handling to non-tool items and tool items without ids.
@@ -421,16 +423,9 @@ fn item_progress_for_untracked_item(
             true
         }
         Some("mcp_tool_call") => {
-            let server = item.get("server").and_then(|s| s.as_str()).unwrap_or("");
-            let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("");
-            let name = match (server, tool) {
-                (s, t) if !s.is_empty() && !t.is_empty() => format!("{s}/{t}"),
-                (s, _) if !s.is_empty() => s.to_string(),
-                (_, t) => t.to_string(),
-            };
-            if name.is_empty() {
+            let Some(name) = mcp_tool_name(item) else {
                 return false;
-            }
+            };
             state.last_tool = Some(name);
             state.phase = Some(phase.into());
             true
@@ -992,6 +987,18 @@ mod tests {
             &mut state
         ));
         assert_eq!(state.phase.as_deref(), Some("running_tool"));
+        assert!(!crate::job::idle_window_expired(
+            state.phase.as_deref(),
+            Some(5_000.0),
+            Some(20_000.0),
+            7_500.0,
+        ));
+        assert!(crate::job::idle_window_expired(
+            state.phase.as_deref(),
+            Some(5_000.0),
+            Some(20_000.0),
+            20_000.0,
+        ));
         assert!(!handle_line(
             br#"{"type":"item.completed","item":{"id":"reasoning","type":"reasoning","text":"Poll again shortly"}}"#,
             &mut state
@@ -1002,6 +1009,12 @@ mod tests {
             &mut state
         ));
         assert_eq!(state.phase.as_deref(), Some("responding"));
+        assert!(crate::job::idle_window_expired(
+            state.phase.as_deref(),
+            Some(5_000.0),
+            Some(20_000.0),
+            7_500.0,
+        ));
     }
 
     #[test]

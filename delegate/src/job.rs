@@ -161,6 +161,20 @@ fn epoch_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
+pub(crate) fn idle_window_expired(
+    phase: Option<&str>,
+    idle_ms: Option<f64>,
+    tool_idle_ms: Option<f64>,
+    elapsed_ms: f64,
+) -> bool {
+    let window = if phase == Some("running_tool") {
+        tool_idle_ms
+    } else {
+        idle_ms
+    };
+    window.is_some_and(|window| elapsed_ms >= window.max(0.0))
+}
+
 fn idle_window_ms(job: &JobState, deps: &JobDeps) -> Option<f64> {
     if job.progress.phase.as_deref() == Some("running_tool") {
         job.spec.tool_idle_ms.unwrap_or(deps.tool_idle_ms)
@@ -482,19 +496,17 @@ impl JobHandle {
                 }
             }
             if job.stage == Stage::Running && job.termination.is_none() {
-                let spec = &job.spec;
-                let window = if job.progress.phase.as_deref() == Some("running_tool") {
-                    spec.tool_idle_ms.unwrap_or(self.deps.tool_idle_ms)
-                } else {
-                    spec.idle_ms.unwrap_or(self.deps.idle_ms)
-                };
-                if let Some(w) = window {
+                let elapsed_ms = now.duration_since(job.last_event).as_millis() as f64;
+                if idle_window_expired(
+                    job.progress.phase.as_deref(),
+                    job.spec.idle_ms.unwrap_or(self.deps.idle_ms),
+                    job.spec.tool_idle_ms.unwrap_or(self.deps.tool_idle_ms),
+                    elapsed_ms,
+                ) {
+                    self.terminate_watchdog_kill(job, false, now);
+                } else if let Some(w) = idle_window_ms(job, &self.deps) {
                     let due = job.last_event + ms(w);
-                    if now >= due {
-                        self.terminate_watchdog_kill(job, false, now);
-                    } else {
-                        wake_at = wake_at.min(due);
-                    }
+                    wake_at = wake_at.min(due);
                 }
             }
             if now >= next_heartbeat {
