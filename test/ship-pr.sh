@@ -1220,6 +1220,13 @@ printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope; see 
 ship; expect 0 'unchanged test in a changed file cites a negative claim'
 
 setup
+mkdir -p "$WT/test"
+printf 'test_space_path_citation() { :; }\n' >"$WT/test/citation with spaces.sh"
+push_test_change 'test/citation with spaces.sh' add-space-path-test
+printf 'Resolves #97\nAccepted gap per the owner-side ruling: out of scope; see `test_space_path_citation`.\n' >"$ST/body"
+ship; expect 0 'a test in a changed path with spaces cites a negative claim'
+
+setup
 mkdir -p "$C/test"
 cat >"$C/test/untouched-citation.sh" <<'TEST'
 test_in_untouched_file() { :; }
