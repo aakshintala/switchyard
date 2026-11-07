@@ -120,6 +120,8 @@ delegate watch <id-a> <id-b> --timeout 1800
 
 ## Reading the result
 
+Every terminal job appends one cost record to `$XDG_CACHE_HOME/agents/delegate-cost.jsonl`, or `~/.cache/agents/delegate-cost.jsonl` when XDG is unset; set `DELEGATE_COST_LEDGER` to override the path.
+
 The record is `DELEGATE_JOBS_DIR/<id>.json` when that override is set, else `$TMPDIR/delegate-jobs/<id>.json` (a terminal record has no `lastHeartbeatAt`). `cancel`, `status`, `watch`, `resume` and `bin/job-record` search that directory, your `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`, then the per-user locator at `${XDG_CACHE_HOME:-$HOME/.cache}/delegate/locators/<id>`.
 
 The locator finds jobs started under another `TMPDIR` when both processes use the same cache root. For older records without a locator that are outside the legacy directories, set `DELEGATE_JOBS_DIR=<that dir>/delegate-jobs`. The unknown-job error lists the searched directories, including the locator directory and a stale target's parent. See [delegate job records](../../docs/delegate-jobs.md) for the locator format and lookup details. The record shape is unchanged:
