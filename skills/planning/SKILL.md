@@ -88,7 +88,7 @@ The round-limit exits name their next command:
 | `tkt-plan verify ROUND-LIMIT` | two Verifier rounds ran without a confirm | run `tkt-plan <state> confirm --edits <file>`, or triage open lines and record answers with `tkt-plan <state> triaged --comment <id>` |
 | `tkt-plan confirm ROUND-LIMIT` | the confirm was used and no grant is pending | run `tkt-plan <state> grant-round --by <who> --comment <id>`, then confirm; or triage and record answers |
 
-After a confirm, the first confirm following a newer `*-confirm-edits*.md` is free once per plan. The next re-confirm reaches `ROUND-LIMIT confirm=done` unless a grant is pending.
+After a confirm, the first confirm following a newer `*-confirm-edits*.md` is free once per plan; this is a re-confirm-budget rule, not stale-check logic. `confirm --edits` compares the plan hash for `STALE-CONFIRM` only when `verified_plan_hash` is recorded. Without that hash, it skips the staleness check regardless of edit-file mtime; the emitted status is `staleness-check: skipped (no verified_plan_hash)`. The other statuses are `staleness-check: hash` when a hash is compared, and `staleness-check: none (no confirm-edits file)` when no matching edits file exists. The next re-confirm reaches `ROUND-LIMIT confirm=done` unless a grant is pending.
 
 Done when round 1, round 2 or the confirm round says `PLAN OK` on the plan as it will be posted, or, once the rounds run out, triage has answered every open line.
 

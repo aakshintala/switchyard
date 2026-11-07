@@ -292,17 +292,19 @@ do_confirm() {
     [ -f "$candidate" ] || continue
     if [ -z "$latest_edits" ] || [ "$candidate" -nt "$latest_edits" ]; then latest_edits="$candidate"; fi
   done
+  staleness_check="none (no confirm-edits file)"
   if [ -n "$latest_edits" ]; then
     verified_plan_hash="$(t get verified_plan_hash 2>/dev/null || true)"
     stale_confirm=0
     if [ -n "$verified_plan_hash" ]; then
+      staleness_check=hash
       plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
       [ "$plan_hash" = "$verified_plan_hash" ] && stale_confirm=1
-    elif [ "$latest_edits" -nt "$plan" ]; then
-      stale_confirm=1
+    else
+      staleness_check="skipped (no verified_plan_hash)"
     fi
     if [ "$stale_confirm" -eq 1 ]; then
-      emit "STALE-CONFIRM edits=$latest_edits plan=$plan" 1 "apply edits from $latest_edits to $plan, then rerun: tkt-plan $state confirm --edits $latest_edits"
+      emit "STALE-CONFIRM edits=$latest_edits plan=$plan" 1 "staleness-check: $staleness_check" "apply edits from $latest_edits to $plan, then rerun: tkt-plan $state confirm --edits $latest_edits"
     fi
   fi
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
@@ -321,13 +323,13 @@ do_confirm() {
       if [ "$reconfirm_used" != 1 ] && [ -n "$latest_edits" ] && [ -n "$last_confirm_report" ] && [ -f "$last_confirm_report" ] && [ "$latest_edits" -nt "$last_confirm_report" ]; then
         reconfirm_free=1
       else
-        emit "ROUND-LIMIT confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+        emit "ROUND-LIMIT confirm=done" 1 "staleness-check: $staleness_check" "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
       fi
     fi
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
-  [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"
+  [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "staleness-check: $staleness_check" "$(head -n "$REPORT_LINES" <<<"$pc_out")"
   cmodel="$(vmodel)" || exit 2
   rep="$(free_path "$run/$namebase-confirm-out.md")" || exit 3
   xfile="$run/$namebase-confirm-extra.md"
@@ -356,7 +358,7 @@ do_confirm() {
   t set last_report "$rep"
   t set last_confirm_report "$rep"
   t set confirmed_for "$(ronum)"
-  emit "$RV" "$REC" "$(head -n "$REPORT_LINES" "$rep")"
+  emit "$RV" "$REC" "staleness-check: $staleness_check" "$(head -n "$REPORT_LINES" "$rep")"
 }
 
 do_grant() {

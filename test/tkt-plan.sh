@@ -438,6 +438,7 @@ printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "confirm PLAN-OK exits 0"
 expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm"
+grep -qx 'staleness-check: none (no confirm-edits file)' <<<"$OUT" || fail "confirm reports no edits file for the staleness check"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "confirm records the round it covers"
 grep -q "slot=confirm" "$T/stub.log" || fail "confirm runs the confirm slot"
 grep -q "confirm.md" "$T/stub.log" || fail "confirm fills the confirm brief"
@@ -467,6 +468,7 @@ run_plan confirm --edits "$edits"
 [ "$RC" -eq 0 ] || fail "confirm accepts applied edits even when the edits file is newer (rc=$RC)"
 [ "$(state_get verified_plan_hash)" = "$expected_verified_hash" ] || fail "verify records the plan content hash"
 expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm applied edits with newer mtime"
+grep -qx 'staleness-check: hash' <<<"$OUT" || fail "confirm reports the hash staleness check"
 
 setup_case confirm-unchanged-since-verify
 rebase_plan
@@ -480,8 +482,9 @@ touch -t 202001010002 "$edits"
 run_plan confirm --edits "$edits"
 [ "$RC" -eq 1 ] || fail "confirm rejects unchanged plan since verify (rc=$RC)"
 expect_verdict "TKT tkt-plan STALE-CONFIRM edits=* plan=* log=*" "confirm unchanged plan since verify"
+grep -qx 'staleness-check: hash' <<<"$OUT" || fail "stale confirm reports the hash staleness check"
 
-# --- stale confirm edits with no recorded plan hash keep the mtime fallback ---
+# --- confirm with no recorded plan hash skips the stale-confirm check ---
 setup_case confirm-stale-edits
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-stale-edits seed round"
@@ -490,27 +493,18 @@ printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$edits"
 touch -t 202001010001 "$CDIR/plan.md"
 touch -t 202001010002 "$edits"
 [ -z "$(state_get verified_plan_hash)" ] || fail "confirm-stale-edits has no recorded plan hash"
-printf 'ok' >"$T/mode"
-jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
-run_plan confirm --edits "$edits"
-[ "$RC" -eq 1 ] || fail "stale confirm edits exits 1"
-expect_verdict "TKT tkt-plan STALE-CONFIRM edits=* plan=* log=*" "stale confirm edits"
-grep -Fq "$edits" <<<"$OUT" || fail "stale confirm edits names the edits file"
-grep -Fq "apply edits from $edits to $CDIR/plan.md" <<<"$OUT" || fail "stale confirm edits prints the apply instruction"
-grep -Fq "then rerun: tkt-plan $S confirm --edits $edits" <<<"$OUT" || fail "stale confirm edits prints the confirm command"
-[ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "stale confirm edits starts no job"
-[ -z "$(state_get confirmed_for)" ] || fail "stale confirm edits leaves the confirm round open"
-printf '\n<!-- applied -->\n' >>"$CDIR/plan.md"
-touch -t 202001010003 "$CDIR/plan.md"
 # Another ticket's newer edits file in the shared run dir does not block this one.
 other="$CDIR/run/switchyard-5180-confirm-edits-p2.md"
 printf 'other ticket\n' >"$other"
-touch -t 202001010004 "$other"
+touch -t 202001010003 "$other"
+printf 'ok' >"$T/mode"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
 run_plan confirm --edits "$edits"
-[ "$RC" -eq 0 ] || fail "confirm after applying edits exits 0 (rc=$RC)"
-expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm after applying edits"
-[ "$(grep -c '^job|' "$T/stub.log" || true)" -eq "$((jobs_before + 1))" ] || fail "confirm after applying edits runs a job"
-[ "$(state_get confirmed_for)" = "2" ] || fail "confirm after applying edits records the round"
+[ "$RC" -eq 0 ] || fail "confirm with no recorded hash accepts newer edits (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=*confirm-out.md log=*" "confirm with no recorded plan hash"
+grep -qx 'staleness-check: skipped (no verified_plan_hash)' <<<"$OUT" || fail "confirm reports the missing-hash staleness check was skipped"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" -eq "$((jobs_before + 1))" ] || fail "confirm with no recorded hash runs a job"
+[ "$(state_get confirmed_for)" = "2" ] || fail "confirm with no recorded hash records the round"
 
 # --- every ROUND-LIMIT prints open lines from the latest report ---
 setup_case round-open-lines
