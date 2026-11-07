@@ -940,10 +940,10 @@ fn status_line(id: &str, rec: &serde_json::Value) -> String {
             .and_then(serde_json::Value::as_array)
             .is_some_and(Vec::is_empty);
     let mut parts = Vec::new();
-    if let Some(caller) = rec.get("caller").and_then(serde_json::Value::as_str) {
-        if !caller.is_empty() {
-            parts.push(format!("caller={caller}"));
-        }
+    if let Some(caller) = rec.get("caller").and_then(serde_json::Value::as_str)
+        && !caller.is_empty()
+    {
+        parts.push(format!("caller={caller}"));
     }
 
     if result

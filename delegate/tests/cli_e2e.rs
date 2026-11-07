@@ -538,6 +538,8 @@ fn status_prints_running_without_waiting() {
     let e = Env::new("status-running");
     let id = e.run("SLOW do it");
     assert_eq!(e.record(&id)["status"], "RUNNING");
+    let record = e.record(&id);
+    let caller = record["caller"].as_str().unwrap();
     // Timeout guard: `status` must return at once; a wait would hang here and
     // fail the test instead of the gate.
     let mut child = Command::new(env!("CARGO_BIN_EXE_delegate"))
@@ -567,7 +569,7 @@ fn status_prints_running_without_waiting() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        format!("{id}: RUNNING\n")
+        format!("{id}: RUNNING (caller={caller})\n")
     );
     e.release();
     e.wait_terminal(&id);
@@ -607,7 +609,7 @@ fn status_settles_a_dead_supervisor_before_printing() {
 fn status_prints_done_for_a_finished_job() {
     let e = Env::new("status-done");
     let id = e.run("quick");
-    e.wait_terminal(&id);
+    let record = e.wait_terminal(&id);
     let out = e.delegate(&["status", &id], None);
     assert_eq!(
         out.status.code(),
@@ -617,7 +619,10 @@ fn status_prints_done_for_a_finished_job() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        format!("{id}: DONE\n")
+        format!(
+            "{id}: DONE (caller={})\n",
+            record["caller"].as_str().unwrap()
+        )
     );
 }
 
@@ -1745,6 +1750,8 @@ fn cancel_finds_a_record_under_another_tmpdir() {
     let id = e.ok_output(&out);
     let _release = ReleaseOnDrop(e.dir.clone());
     assert_eq!(e.record(&id)["status"], "RUNNING");
+    let record = e.record(&id);
+    let caller = record["caller"].as_str().unwrap();
 
     let other = e.dir.join("caller-b");
     std::fs::create_dir_all(&other).unwrap();
@@ -1761,7 +1768,7 @@ fn cancel_finds_a_record_under_another_tmpdir() {
     );
     assert_eq!(
         String::from_utf8_lossy(&status.stdout),
-        format!("{id}: RUNNING\n")
+        format!("{id}: RUNNING (caller={caller})\n")
     );
 
     let watch = e.delegate_env(
