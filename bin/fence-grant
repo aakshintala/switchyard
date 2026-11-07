@@ -48,6 +48,13 @@ set -u
 set -f
 _fw_run() { printf '%s' "${FW_RUN:-/Users/aakshintala/work/fiber-worktrees/flywheel/run}"; }
 _fw_box_host() { printf '%s' "${FW_BOX_HOST:-roundhouse-7010-plus-1.local}"; }
+_fw_abs_path() {
+  local path="$1"
+  case "$path" in
+    /*) printf '%s' "$path" ;;
+    *) printf '%s/%s' "$PWD" "$path" ;;
+  esac
+}
 
 # Read `claude agents --json` on stdin; print live lane names (fiber-*,
 # busy/idle). Exits 1 when stdin is not parseable JSON (fail closed).
@@ -87,7 +94,7 @@ _fw_box_probe() {
   FW_BOX_OK=0
   FW_BOX_RC=0
   FW_BOX_RAW=""
-  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null; echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
+  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
   case "$_fw_raw" in
     *FWSEC=UPTIME*FWSEC=END*) FW_BOX_OK=1; FW_BOX_RAW="$_fw_raw" ;;
   esac
@@ -218,15 +225,31 @@ fw_delegate_session_lane_names() {
   _fw_box_probe
   if [ "${FW_BOX_OK:-0}" != 1 ]; then return 1; fi
   _fw_s=$(_fw_box_section DSESS) || return 1
+  # The marker is proof the remote delegate command exited successfully; only
+  # a marked response reaches the roster mapper and can trigger a parse retry.
   case "$_fw_s" in *DSESSJSONOK*) : ;; *) return 1;; esac
   _fw_roster=$(_fw_run)/roster
   [ -f "$_fw_roster" ] || return 1
-  # The end marker is the transport's proof, not part of the JSON: feeding it
-  # to the mapper makes json.load choke on trailing content, which reads as a
-  # refusal and fails the whole sweep closed.
-  _fw_out=$(printf '%s\n' "$_fw_s" | grep -v '^DSESSJSONOK$' | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
-  printf '%s' "$_fw_out" | tr '\n' ' '
-  return 0
+  _fw_parse_dsess() {
+    _fw_out=$(printf '%s\n' "$1" | grep -v '^DSESSJSONOK$' | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
+    printf '%s' "$_fw_out"
+    return 0
+  }
+  if _fw_names=$(_fw_parse_dsess "$_fw_s"); then
+    printf '%s' "$_fw_names" | tr '\n' ' '
+    return 0
+  fi
+  _fw_attempt=0
+  while [ "$_fw_attempt" -lt 2 ]; do
+    _fw_attempt=$((_fw_attempt + 1))
+    _fw_s=$("${FW_SSH:-ssh}" "$(_fw_box_host)" '~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK' 2>"${FW_SSH_ERR:-/dev/null}") || continue
+    case "$_fw_s" in *DSESSJSONOK*) : ;; *) continue;; esac
+    if _fw_names=$(_fw_parse_dsess "$_fw_s"); then
+      printf '%s' "$_fw_names" | tr '\n' ' '
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Prints live box pi-lane names from the one box probe. Exit 1 when ssh failed
@@ -264,11 +287,13 @@ if [ "${1:-}" = --require ]; then
     exit 0
   fi
   run=$(_fw_run)
+  run_abs=$(_fw_abs_path "$run")
   set +f
   for grant in "$run"/fiber-"$ticket"*-fence-grant*.md; do
     [ -f "$grant" ] && exit 0
   done
-  echo "fence-grant: issue $ticket needs a fence grant in $run; create one or set FW_NO_FENCE=<reason>" >&2
+  host=$(hostname) || { echo 'fence-grant: cannot determine host name' >&2; exit 3; }
+  echo "fence-grant: issue $ticket needs a fence grant matching $run_abs/fiber-$ticket*-fence-grant*.md on host $host; a grant written on another machine is invisible here; create one or set FW_NO_FENCE=<reason>" >&2
   exit 2
 fi
 
@@ -774,6 +799,9 @@ case "$nprs" in ''|*[!0-9]*) echo "ERROR gh pr list count"; exit 3;; esac
 
 # --- live lanes (fail closed) ---
 FW_CLAUDE_ERR="$tmp/claudeerr"; FW_SSH_ERR="$tmp/ssherr"
+# Capture the box once in the parent shell. The lane readers below run in
+# command substitutions, whose variable changes would not be shared.
+_fw_box_probe
 if mac_names=$(fw_lane_names_mac); then mac_ok=1; else mac_ok=0; mac_names=""; fi
 if box_names=$(fw_box_lane_names); then box_ok=1; else box_ok=0; box_names=""; fi
 if pimac_names=$(fw_pi_lane_names_mac); then pimac_ok=1; else pimac_ok=0; pimac_names=""; fi
@@ -817,7 +845,7 @@ for line in sys.stdin:
     sys.exit(1)
   if pr and any(not item.isdigit() for item in pr.split(",")):
     sys.exit(1)
-  print(path + "\t" + lane)' <"$claims_out" >"$tmp/claims.tsv" 2>/dev/null || {
+  print(path + "\t" + lane + "\t" + age)' <"$claims_out" >"$tmp/claims.tsv" 2>/dev/null || {
     echo "ERROR file-claim list unparseable claims"
     exit 3
   }
@@ -827,12 +855,61 @@ else
   exit 3
 fi
 
+# Refusal logs are evidence only: an append failure must never change the
+# grant decision or its output. Claim ages are already expressed in minutes;
+# holders without an age source are recorded with a literal `-`.
+_refusal_age() {
+  _ra_path=$1; _ra_holder=$2; _ra_lane=""
+  case "$_ra_holder" in
+    'lane #'*) _ra_lane="fiber-${_ra_holder#lane #}" ;;
+    'lane '*) _ra_lane=${_ra_holder#lane } ;;
+    *) printf '%s' '-'; return 0;;
+  esac
+  _ra_age=$(awk -F '\t' -v requested="$_ra_path" -v lane="$_ra_lane" '
+function norm(path) {
+  sub(/^\.\//, "", path)
+  sub(/\/+$/, "", path)
+  return path
+}
+BEGIN { requested = norm(requested) }
+{
+  claim = norm($1)
+  if ($2 != lane || claim == "") next
+  if (requested == claim) {
+    if (!exact) { exact = 1; exact_age = $3 }
+    next
+  }
+  if (index(requested, claim "/") == 1 && length(claim) > parent_len) {
+    parent_len = length(claim)
+    parent_age = $3
+  }
+}
+END {
+  if (exact) print exact_age
+  else if (parent_len) print parent_age
+}' "$tmp/claims.tsv" 2>/dev/null) || _ra_age=""
+  case "$_ra_age" in ''|*[!0-9]*) printf '%s' '-';; *) printf '%s' "$_ra_age";; esac
+  return 0
+}
+
+_log_refusal() {
+  _lr_path=$1; _lr_holder=$2; _lr_age=$3
+  _lr_action=REFUSE
+  [ "$dry" -eq 0 ] || _lr_action=DRY-REFUSE
+  _lr_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || return 0
+  case "$_lr_time" in ????-??-??T??:??:??Z) :;; *) return 0;; esac
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$_lr_time" "$ticket" "$_lr_action" "$_lr_path" "$_lr_holder" "$_lr_age" \
+    2>/dev/null >>"$run/fence-grant-refusals.tsv" || :
+  return 0
+}
+
 # Collect every relevant claim ticket once. Closed-ticket claims are stale
 # regardless of live lane names; open or unknown tickets continue through
 # liveness checks, and sweep claims remain exclusive without a state lookup.
 : >"$tmp/ticket-numbers.tsv"
 : >"$tmp/ticket-states.tsv"
-while IFS="$(printf '\t')" read -r claim_path claim_lane; do
+while IFS="$(printf '\t')" read -r claim_path claim_lane claim_age; do
   [ -n "$claim_path" ] || continue
   [[ "$claim_lane" == sweep-* ]] && continue
   claim_num=$(lane_ticket_num "$claim_lane")
@@ -905,7 +982,7 @@ with open(sys.argv[3], "w") as output:
 fi
 
 _claim_holders() {
-  while IFS="$(printf '\t')" read -r claim_path claim_lane; do
+  while IFS="$(printf '\t')" read -r claim_path claim_lane claim_age; do
     [ -n "$claim_path" ] || continue
     claim_num=$(lane_ticket_num "$claim_lane")
     if [ -n "$claim_num" ] && [ "$claim_num" = "$ticket" ] && [[ "$claim_lane" != sweep-* ]]; then continue; fi
@@ -945,9 +1022,9 @@ _claim_holders() {
       claim_label="lane $claim_lane"
     fi
     if [[ "$claim_lane" == sweep-* ]]; then
-      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label" exclusive
+      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label" exclusive "$claim_age"
     else
-      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label"
+      _check_entries "$tmp/claim-entries" "$claim_num" "$claim_label" "" "$claim_age"
     fi
   done <"$tmp/claims.tsv"
 }
@@ -1399,7 +1476,7 @@ _check_entries() {
       [ -n "$pb" ] || continue
       if _conflict "$pd" "$pb" "$ed" "$eb" "$ers" "$ere"; then
         if [ "${4:-}" = exclusive ]; then
-          held="${held}${p}|${3:-lane #${2}}
+          held="${held}${p}|${3:-lane #${2}}|${5:--}
 "
         else
           overlaps="${overlaps}${p}|${3:-lane #${2}}
@@ -1522,12 +1599,20 @@ if [ -n "$(printf '%s' "$held" | grep .)" ]; then
       holder = $2
       sub(/ \((grant [^)]*|notes, no grant file names it)\)$/, "", holder)
       key = $1 "|" holder
-      if (!(key in slot)) { slot[key] = ++n; keys[n] = key }
-      if (rank($2) > ranks[key]) { ranks[key] = rank($2); paths[key] = $1; labels[key] = $2; suggestions[key] = $3 }
+      if (!(key in slot)) { slot[key] = ++n; keys[n] = key; ages[key] = $3; suggestions[key] = $4 }
+      if (rank($2) > ranks[key]) { ranks[key] = rank($2); paths[key] = $1; labels[key] = $2; ages[key] = $3; suggestions[key] = $4 }
     }
-    END { for (i = 1; i <= n; i++) { key = keys[i]; line = "HELD " paths[key] " by " labels[key]; if (suggestions[key] != "") line = line "\t" suggestions[key]; print line } }
+    END { for (i = 1; i <= n; i++) { key = keys[i]; line = "HELD " paths[key] " by " labels[key]; if (suggestions[key] != "") line = line "\t" suggestions[key]; print line "\034" suggestions[key] "\034" ages[key] } }
   ' > "$tmp/heldout"
-  while IFS="$(printf '\t')" read -r line sug; do
+  while IFS=$'\034' read -r line sug _ref_age; do
+    case "$line" in
+      HELD\ *\ by\ *)
+        _ref_path=${line#HELD }
+        _ref_holder=${_ref_path#* by }
+        _ref_path=${_ref_path%% by *}
+        [ -n "$_ref_age" ] || _ref_age="-"
+        _log_refusal "$_ref_path" "$_ref_holder" "$_ref_age" ;;
+    esac
     echo "$line"
     [ -n "$sug" ] || continue
     _suggest "${sug%% *}" "${sug#* }"
@@ -1631,6 +1716,22 @@ $1 == "REFUSE" && NF >= 3 {
 }
 $1 == "GRANT" || $1 == "UNCLAIMED" || $1 == "file-claim:" || NF == 0 { next }
 { if (!seen[$0]++) print }' "$tmp/fc-out" > "$tmp/fc-held"
+        awk '
+$1 == "REFUSE" && NF >= 3 {
+  path = $2; holder = $3
+  if (holder == "exclusive" && $4 ~ /^lane:/) holder = $4
+  if (holder ~ /^pr#[0-9][0-9]*$/) holder = "PR #" substr(holder, 4)
+  else if (holder ~ /^lane:fiber-[0-9][0-9]*$/) { sub(/^lane:fiber-/, "lane #", holder) }
+  else if (holder ~ /^lane:/) { sub(/^lane:/, "lane ", holder) }
+  else holder = "-"
+  key = path SUBSEP holder
+  if (!seen[key]++) print path "\t" holder
+}' "$tmp/fc-out" > "$tmp/fc-refusals"
+        while IFS="$(printf '\t')" read -r _ref_path _ref_holder; do
+          [ -n "$_ref_path" ] || continue
+          _ref_age=$(_refusal_age "$_ref_path" "$_ref_holder")
+          _log_refusal "$_ref_path" "$_ref_holder" "$_ref_age"
+        done < "$tmp/fc-refusals"
         if [ -s "$tmp/fc-held" ]; then cat "$tmp/fc-held"; else cat "$tmp/fc-out"; fi
         exit 1
       else
@@ -1694,6 +1795,10 @@ if [ "$dry" -eq 0 ]; then
     [ -z "$sweptto" ] || printf 'Swept to comment %s\n' "$sweptto"
     printf 'Paths:\n'
     sed 's/^/- /' < "$tmp/plist"
+    if [ -s "$tmp/newnorm" ]; then
+      printf '\n## New (do not exist on origin/main):\n'
+      sed 's/^/- /' < "$tmp/newnorm"
+    fi
     while IFS="$(printf '\t')" read -r _ovp _ovh; do
       [ -n "$_ovp" ] || continue
       printf 'overlap: %s %s\n' "$_ovp" "$_ovh"
@@ -1709,6 +1814,9 @@ if [ "$dry" -eq 0 ]; then
       printf '%s\n' "$readpaths" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's/^/- /'
     fi
   } > "$gf" 2>/dev/null || { echo "ERROR cannot write $gf"; exit 3; }
+  host=$(hostname) || { echo 'ERROR cannot determine host name'; exit 3; }
+  grant_path="$(_fw_abs_path "$run")/${gf##*/}"
+  printf 'GRANT FILE host=%s path=%s\n' "$host" "$grant_path" >&2
 fi
 while IFS="$(printf '\t')" read -r _ovp _ovh; do
   [ -n "$_ovp" ] || continue

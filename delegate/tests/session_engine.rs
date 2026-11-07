@@ -172,6 +172,34 @@ impl Session {
         }
     }
 
+    fn until_after_dead(
+        &self,
+        what: &str,
+        predicate: impl Fn(&State) -> bool,
+        after_dead: impl FnOnce(),
+    ) -> State {
+        // Dead state is durable before its inbox note is written; keep waiting
+        // for the full predicate when that note is the requested condition.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut after_dead = Some(after_dead);
+        loop {
+            let current = self.state();
+            if predicate(&current) {
+                return current;
+            }
+            if current.status == Status::Dead
+                && let Some(after_dead) = after_dead.take()
+            {
+                after_dead();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}: {current:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn requests(&self) -> Vec<Value> {
         let path = self.fake_dir.join("requests.jsonl");
         let Ok(contents) = std::fs::read_to_string(path) else {
@@ -1305,6 +1333,79 @@ fn supervisor_accepts_escaped_max_text_and_rejects_a_line_over_max_line() {
 }
 
 #[test]
+fn supervisor_dead_note_waiter_handles_dead_state_before_note() {
+    let root = temp_root("ds-dead-note-gap");
+    let inbox_path = root.join("inbox");
+    let id = format!(
+        "00000000-0000-7000-8000-{:012x}",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let paths = Paths::new(root.clone());
+    let mut initial = state::new_state(
+        &id,
+        "muse/muse-spark-1.3-contributor",
+        &root.to_string_lossy(),
+        &inbox_path.to_string_lossy(),
+        1,
+    );
+    initial.status = Status::Running;
+    initial.active_turn_id = Some("fake-turn-1".into());
+    let store = std::sync::Arc::new(state::Store::open(paths.clone(), initial).unwrap());
+    let fake_dir = root.join("fake");
+    std::fs::create_dir_all(&fake_dir).unwrap();
+    let (_done_tx, done) = mpsc::channel();
+    let session = Session {
+        paths,
+        id: id.clone(),
+        root,
+        fake_dir,
+        done,
+        thread: None,
+    };
+
+    let (dead_tx, dead_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer_store = std::sync::Arc::clone(&store);
+    let writer_inbox = inbox_path.clone();
+    let writer_id = id.clone();
+    let writer = std::thread::spawn(move || {
+        writer_store
+            .update(|state| {
+                state::mark_dead(
+                    state,
+                    DeadReason::HostExited,
+                    Some(3),
+                    "muse host exited",
+                    2,
+                );
+                Vec::new()
+            })
+            .unwrap();
+        dead_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+        inbox::notify(&writer_inbox, &writer_id, inbox::Note::Dead, 2).unwrap();
+    });
+    dead_rx.recv().unwrap();
+    assert!(session.inbox_notes(&inbox_path).is_empty());
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session.until_after_dead(
+            "dead host with note",
+            |state| {
+                state.status == Status::Dead
+                    && session
+                        .inbox_notes(&inbox_path)
+                        .contains(&format!("[session {id} dead]\n"))
+            },
+            || release_tx.send(()).unwrap(),
+        )
+    }));
+    let _ = release_tx.send(());
+    writer.join().unwrap();
+    result.expect("waiter must allow the dead note to follow the dead state");
+}
+
+#[test]
 fn supervisor_notifies_only_after_completed_turn_and_keeps_inbox_failures_nonfatal() {
     let inbox_path = temp_root("ds-idle-early");
     let mut early = Session::spawn("IDLE_EARLY", "brief", Some(&inbox_path), Bounds::default());
@@ -1327,12 +1428,16 @@ fn supervisor_notifies_only_after_completed_turn_and_keeps_inbox_failures_nonfat
 
     let dead_inbox = temp_root("ds-dead-inbox");
     let mut died = Session::spawn("DIE", "brief", Some(&dead_inbox), Bounds::default());
-    died.until("dead host with note", |state| {
-        state.status == Status::Dead
-            && died
-                .inbox_notes(&dead_inbox)
-                .contains(&format!("[session {} dead]\n", died.id))
-    });
+    died.until_after_dead(
+        "dead host with note",
+        |state| {
+            state.status == Status::Dead
+                && died
+                    .inbox_notes(&dead_inbox)
+                    .contains(&format!("[session {} dead]\n", died.id))
+        },
+        || {},
+    );
     assert!(
         died.inbox_notes(&dead_inbox)
             .contains(&format!("[session {} dead]\n", died.id))

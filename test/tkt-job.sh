@@ -82,6 +82,7 @@ case "\$cmd" in
     ;;
   watch)
     printf 'watch|%s\n' "\$*" >>"\$log"
+    if [ -n "\${STUB_WATCH_FAIL:-}" ]; then exit "\$STUB_WATCH_FAIL"; fi
     mkdir -p "\${DELEGATE_JOBS_DIR:-\$TMPDIR/delegate-jobs}"
     for wid in "\$@"; do
       if [ -f "\$recs/\$wid.json" ]; then
@@ -353,6 +354,54 @@ run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 0 ] || fail "re-print exits 0"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS reused=stub-1 stale-head=bbbb now=* log=*" "re-print"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "re-print dispatches nothing new"
+[ "$(wc -l <"$CDIR/jobs.log" | tr -d ' ')" -eq 1 ] || fail "re-print does not append a duplicate jobs.log entry"
+
+# --- each fresh round appends its own job and includes missing usage explicitly
+setup_case jobs-log-rounds
+reset_stub
+make_record stub-1 DONE none 0 1 0
+jq '. + {startedAtMs: 1000, endedAtMs: 1200}
+    | .result += {usage: {inputTokens: 123, outputTokens: 45}, costUsd: 0.0123}' \
+  "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp" && mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json" || fail "timestamp first round"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "first logged round exits 0"
+bash "$TKT_STATE" "$S" set job.lane "" || fail "clear first round slot"
+make_record stub-2 DONE none 0 1 0
+jq '. + {startedAtMs: 2000, endedAtMs: 2400}' "$T/records/stub-2.json" >"$T/records/stub-2.json.tmp" && mv "$T/records/stub-2.json.tmp" "$T/records/stub-2.json" || fail "timestamp second round"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "second logged round exits 0"
+[ "$(wc -l <"$CDIR/jobs.log" | tr -d ' ')" -eq 2 ] || fail "each fresh round appends one jobs.log entry"
+jq -e -s '
+  length == 2
+  and .[0].phase == "build" and .[0].jobId == "stub-1"
+  and .[0].startedAtMs == 1000 and .[0].endedAtMs == 1200
+  and .[0].usage.inputTokens == 123 and .[0].costUsd == 0.0123
+  and .[1].phase == "build" and .[1].jobId == "stub-2"
+  and .[1].startedAtMs == 2000 and .[1].endedAtMs == 2400
+  and .[1].usage == "none" and .[1].costUsd == "none"
+' "$CDIR/jobs.log" >/dev/null || fail "jobs.log preserves rounds with times and usage or explicit none"
+
+# --- a failed watch still logs the dispatched id when its record is unavailable
+setup_case jobs-log-watch-fail
+reset_stub
+make_record stub-1 DONE none 0 1 0
+STUB_WATCH_FAIL=7 run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 3 ] || fail "watch failure without a record reaches the unknown verdict (rc=$RC)"
+[ "$(wc -l <"$CDIR/jobs.log" | tr -d ' ')" -eq 1 ] || fail "watch failure still writes one jobs.log entry"
+jq -e -s 'length == 1 and .[0].jobId == "stub-1" and .[0].usage == "none" and .[0].costUsd == "none"' "$CDIR/jobs.log" >/dev/null || fail "watch failure writes a fallback entry for the dispatched id"
+grep -q 'delegate watch failed (exit 7)' "$CDIR/stderr.txt" || fail "watch failure is reported on stderr"
+
+# --- a stored-id rerun recreates its log line if the original line is missing
+setup_case jobs-log-rerun-recovery
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "initial logged dispatch exits 0"
+rm "$CDIR/jobs.log"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "stored-id rerun exits 0"
+[ "$(wc -l <"$CDIR/jobs.log" | tr -d ' ')" -eq 1 ] || fail "stored-id rerun writes the missing log line once"
+jq -e -s 'length == 1 and .[0].jobId == "stub-1"' "$CDIR/jobs.log" >/dev/null || fail "stored-id rerun restores the matching job id"
 
 # --- DONE with no gate and no commits, without --expect-commits ---
 setup_case done-plain
@@ -394,6 +443,17 @@ run_job --slot lane --template "$T/tmpl-basic.md"
 expect_verdict "TKT tkt-job GATE-FAIL rc=1 gatelog=/tmp/gate-test.log log=*" "DONE failed gate"
 if ! bash "$TKT_STATE" "$S" get concerns.lane >/dev/null 2>&1; then fail "DONE failed gate keeps concerns.lane as an empty key"; fi
 [ -z "$(bash "$TKT_STATE" "$S" get concerns.lane)" ] || fail "DONE failed gate clears stale concerns before routing"
+
+# --- DONE with a refused gate is distinct from a failing gate ---
+setup_case gate-refused
+reset_stub
+make_record stub-1 DONE 75 1 2 1
+jq '.result.gateResult.refused = true' "$T/records/stub-1.json" \
+  >"$T/records/stub-1.json.tmp" && mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json" || fail "mark gate refused"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 1 ] || fail "refused gate is not accepted as a pass"
+expect_verdict "TKT tkt-job GATE-REFUSED rc=75 gatelog=/tmp/gate-test.log log=*" "refused gate"
+grep -q 'gate=refused (nothing tested)' <<<"$OUT" || fail "refused gate digest says nothing was tested"
 
 # --- DONE_WITH_CONCERNS with a passed gate, commits, and --expect-commits ---
 setup_case concerns

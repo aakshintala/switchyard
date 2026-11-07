@@ -214,6 +214,7 @@ mod tests {
                         cache_write: 0.0,
                     },
                     tiers: vec![],
+                    reviewer: None,
                 },
             );
         }

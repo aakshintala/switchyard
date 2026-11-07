@@ -1050,7 +1050,10 @@ bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "seed round"
 run_build
 [ "$RC" -eq 1 ] || fail "round-set build exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-build ROUND-LIMIT round=1 log=*" "round-set build"
-grep -q "continue with tkt-fix or tkt-ship" <<<"$OUT" || fail "round-set build names tkt-fix and tkt-ship"
+grep -q "wrong phase after the first round" <<<"$OUT" || fail "round-set build says this is the wrong phase"
+grep -q "tkt-fix .*--verify" <<<"$OUT" || fail "round-set build names tkt-fix"
+grep -q "tkt-ship" <<<"$OUT" || fail "round-set build names tkt-ship"
+grep -q "not the round limit" <<<"$OUT" || fail "round-set build distinguishes the round limit"
 [ ! -s "$T/calls.log" ] || fail "round-set build dispatches nothing: $(cat "$T/calls.log")"
 
 # --- an incomplete map never approves, but stays in the digest ---

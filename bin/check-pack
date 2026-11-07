@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # Backticked /names that look like slash commands but are in-tree paths/routes.
-SLASH_DENY="tmp settings"
+SLASH_DENY="tmp settings bin boot dev etc home lib mnt opt proc root run sbin srv sys usr var"
 
 usage() {
   echo "usage: check-pack [ROOT]" >&2

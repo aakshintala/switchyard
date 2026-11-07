@@ -16,6 +16,23 @@ pub(crate) fn lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Run a test action only if it can enter the process-global env critical section.
+#[cfg(test)]
+pub(crate) fn try_with_lock(action: impl FnOnce()) -> bool {
+    match ENV_LOCK.try_lock() {
+        Ok(_guard) => {
+            action();
+            true
+        }
+        Err(std::sync::TryLockError::WouldBlock) => false,
+        Err(std::sync::TryLockError::Poisoned(error)) => {
+            let _guard = error.into_inner();
+            action();
+            true
+        }
+    }
+}
+
 /// A process-global env var that restores its previous value (or absence) on
 /// drop. The guard alone does not serialise: hold [`lock`] alongside it.
 pub(crate) struct EnvGuard {

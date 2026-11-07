@@ -19,7 +19,7 @@ mkdir -p "$HOME"
 export TMPDIR="$T/tmp"
 export REVIEW_PR_RUN_ROOT="$T/runs"
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
-unset DELEGATE_JOBS_DIR
+unset DELEGATE_JOBS_DIR DELEGATE_CALLER DELEGATE_CALLER_CWD
 mkdir -p "$TMPDIR" "$T/canned" "$T/state" "$T/override"
 
 # --- throwaway repos: ORIGIN carries refs/pull/7/head, CLONE is cloned from it
@@ -199,6 +199,8 @@ delegate() (
       role="${cwd##*-}"
       if [ -e "$T/state/fail-$role" ]; then echo "fake delegate: run failed for $role" >&2; exit 1; fi
       printf '%s\n' "$PATH" >"$T/state/path-$role"
+      printf '%s\n' "${DELEGATE_CALLER-unset}" >"$T/state/caller-$role"
+      printf '%s\n' "${DELEGATE_CALLER_CWD-unset}" >"$T/state/caller-cwd-$role"
       printf '%s %s\n' "$role" "$model" >>"$T/state/runs.txt"
       cp "$prompt" "$T/state/prompt-$role.md"
       id="job-$role"
@@ -242,7 +244,8 @@ reset_state() {
   git -C "$T/clone" worktree prune >/dev/null 2>&1 || true
   rm -rf "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true
   rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt" \
-    "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log"
+    "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log" \
+    "$T/state"/caller-* "$T/state"/caller-cwd-*
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/escape-diff" "$T/state/issue-calls.txt"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
   rm -f "$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
@@ -372,6 +375,8 @@ collect: review-pr collect job-standards job-spec job-overbuild" ] || fail "star
 [ -f "$TMPDIR/review-pr/job-overbuild" ] || fail "start saves state for every job"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "3" ] || fail "start leaves the worktrees for the jobs"
 [ ! -e "$T/state/watch.txt" ] || fail "start does not wait"
+[ "$(cat "$T/state/caller-standards")" = "review-pr" ] || fail "review-pr labels its jobs without an inherited caller"
+[ "$(cat "$T/state/caller-cwd-standards")" = "$T/clone" ] || fail "review-pr passes its --cwd as the caller cwd"
 out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>"$T/stderr.txt")" || fail "collect exits 0"
 [ "$(printf '%s' "$out" | head -1)" = "patch-id $EXPECTED_PID" ] || fail "collect patch-id line"
 grep -q "^VERDICT standards: APPROVE$" <<<"$out" || fail "collect carries the standards VERDICT"
@@ -398,6 +403,15 @@ grep -q 'workflow doc is none' "$T/state/prompt-spec.md" || fail "workflow doc d
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "0" ] || fail "collect removes the worktrees"
 [ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null)" ] || fail "collect removes the run dir"
 [ ! -e "$T/state/watch.txt" ] || fail "collect does not wait"
+
+# --- case: inherited caller labels jobs as nested review-pr work
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+start_out="$(DELEGATE_CALLER=lane-3561 start_review 7 --repo O/N --cwd "$T/clone" \
+  --axes standards --model M 2>"$T/stderr.txt")" || fail "nested caller start exits 0"
+[ "$(cat "$T/state/caller-standards")" = "lane-3561/review-pr" ] || fail "review-pr appends its name to the inherited caller"
 
 # --- case: repeated --issue values fill the spec brief together
 reset_state

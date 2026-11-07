@@ -307,11 +307,22 @@ do_confirm() {
   fi
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   granted=0
+  reconfirm_free=0
   if [ -n "$confirmed_for" ]; then
     if grant_pending; then
       granted=1
     else
-      emit "ROUND-LIMIT confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+      reconfirm_used="$(t get confirm_reconfirm_used 2>/dev/null || true)"
+      last_confirm_report="$(t get last_confirm_report 2>/dev/null || true)"
+      if [ -z "$last_confirm_report" ]; then
+        last_confirm_report="$(t get last_report 2>/dev/null || true)"
+        case "$last_confirm_report" in *-confirm-out*.md) ;; *) last_confirm_report="";; esac
+      fi
+      if [ "$reconfirm_used" != 1 ] && [ -n "$latest_edits" ] && [ -n "$last_confirm_report" ] && [ -f "$last_confirm_report" ] && [ "$latest_edits" -nt "$last_confirm_report" ]; then
+        reconfirm_free=1
+      else
+        emit "ROUND-LIMIT confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+      fi
     fi
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
@@ -341,7 +352,9 @@ do_confirm() {
   plan_verdict_write "$tkt_state" "$state" "$verdict" "$base" "$plan" "$worktree"
   t set plan_triage_comment ""
   if [ "$granted" -eq 1 ]; then t set granted_used 1; fi
+  if [ "$reconfirm_free" -eq 1 ]; then t set confirm_reconfirm_used 1; fi
   t set last_report "$rep"
+  t set last_confirm_report "$rep"
   t set confirmed_for "$(ronum)"
   emit "$RV" "$REC" "$(head -n "$REPORT_LINES" "$rep")"
 }

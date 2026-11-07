@@ -161,22 +161,37 @@ fn epoch_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn describe_stall_progress(job: &JobState) -> String {
-    let verb = if job.kill_at.is_some() {
-        format!(
-            "Cancelled: wall budget of {} ms exceeded",
-            job.spec.wall_ms.unwrap_or(0.0)
-        )
-    } else if job.termination == Some(JobStatus::Cancelled) {
-        "Cancelled".to_string()
+fn idle_window_ms(job: &JobState, deps: &JobDeps) -> Option<f64> {
+    if job.progress.phase.as_deref() == Some("running_tool") {
+        job.spec.tool_idle_ms.unwrap_or(deps.tool_idle_ms)
     } else {
-        "Idle watchdog killed this job".to_string()
+        job.spec.idle_ms.unwrap_or(deps.idle_ms)
+    }
+}
+
+fn describe_stall_progress(job: &JobState, deps: &JobDeps) -> String {
+    let running = job.started.elapsed();
+    let mut parts = if job.kill_at.is_some() {
+        vec![format!(
+            "Cancelled: wall budget of {} ms exceeded after {}s.",
+            job.spec.wall_ms.unwrap_or(0.0),
+            running.as_secs_f64().round()
+        )]
+    } else if job.termination == Some(JobStatus::Cancelled) {
+        vec![format!(
+            "Cancelled after {}s.",
+            running.as_secs_f64().round()
+        )]
+    } else {
+        let idle = job.last_event.elapsed();
+        let window = idle_window_ms(job, deps).unwrap_or_default() / 1000.0;
+        vec![format!(
+            "Idle watchdog killed this job: idle {:.1}s (window {window:.1}s), running {:.1}s.",
+            idle.as_secs_f64(),
+            running.as_secs_f64()
+        )]
     };
     let p = &job.progress;
-    let mut parts = vec![format!(
-        "{verb} after {}s.",
-        (job.started.elapsed().as_millis() as f64 / 1000.0).round()
-    )];
     if let Some(phase) = &p.phase {
         parts.push(format!("Last phase: {phase}."));
     }
@@ -351,10 +366,16 @@ impl JobHandle {
                 continue;
             }
             let mut spec = (*job.spec).clone();
-            spec.argv =
+            let mut argv =
                 self.deps
                     .backend
                     .resume_argv(&spec.model, &session, &continue_prompt(status));
+            if spec.backend == "fiber"
+                && let Some(reviewer) = spec.reviewer.as_deref()
+            {
+                argv = crate::backends::fiber::with_reviewer(argv, reviewer);
+            }
+            spec.argv = argv;
             let mut spawned = self.deps.backend.run(&spec);
             job.kill = Arc::from(std::mem::replace(&mut spawned.kill, Box::new(|| {})));
             job.stage = Stage::Running;
@@ -554,7 +575,7 @@ impl JobHandle {
         if let Some((_, job)) = st.job.as_ref()
             && let Some(term) = job.termination
         {
-            out.text = describe_stall_progress(job);
+            out.text = describe_stall_progress(job, &self.deps);
             out.status = match term {
                 JobStatus::Cancelled => RunStatus::Cancelled,
                 JobStatus::Stalled => RunStatus::Stalled,

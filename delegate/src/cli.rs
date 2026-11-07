@@ -33,10 +33,10 @@ pub(crate) const USAGE: &str =
        delegate doctor
        delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)
        delegate session start --model muse/MODEL|PROVIDER/MODEL[:LEVEL] --brief FILE --inbox DIR [--json]
-       delegate session send <id> TEXT|- [--json]
-       delegate session logs <id> [--follow] [--json]
-       delegate session watch <id> [--json]
-       delegate session stop <id> [--interrupt] [--json]
+       delegate session send <id-or-prefix> TEXT|- [--json]
+       delegate session logs <id-or-prefix> [--follow] [--json]
+       delegate session watch <id-or-prefix> [--json]
+       delegate session stop <id-or-prefix> [--interrupt] [--json]
        delegate session list [--json]
        Session exit codes: 0 ok, 1 failed, 2 usage, 3 no session, 4 dead, 5 busy";
 
@@ -153,7 +153,47 @@ struct LaunchParams<'a> {
     resumed_from: Option<&'a str>,
 }
 
+struct CallerInfo {
+    caller: String,
+    pid: u32,
+    command: Option<String>,
+    cwd: Option<String>,
+}
+
+/// Capture attribution in the invoking CLI, before it detaches the supervisor.
+/// Scripts may provide a more meaningful label and source cwd explicitly.
+fn caller_info() -> CallerInfo {
+    let pid = unsafe { libc::getppid() } as u32;
+    let command = std::process::Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|command| !command.is_empty());
+    let cwd = std::env::var_os("DELEGATE_CALLER_CWD")
+        .filter(|cwd| !cwd.is_empty())
+        .map(|cwd| cwd.to_string_lossy().into_owned())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.to_string_lossy().into_owned())
+        });
+    let caller = std::env::var("DELEGATE_CALLER")
+        .ok()
+        .filter(|caller| !caller.is_empty())
+        .or_else(|| command.clone())
+        .unwrap_or_else(|| format!("pid:{pid}"));
+    CallerInfo {
+        caller,
+        pid,
+        command,
+        cwd,
+    }
+}
+
 fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
+    let caller = caller_info();
     let id = random_uuid();
     let record = job_record_path(&id);
     let dir = record.parent().expect("record has a parent");
@@ -202,6 +242,18 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
     if let Some(r) = p.resumed_from {
         supervise_args.push("--resumed-from".into());
         supervise_args.push(r.to_string());
+    }
+    supervise_args.push("--caller".into());
+    supervise_args.push(caller.caller.clone());
+    supervise_args.push("--caller-pid".into());
+    supervise_args.push(caller.pid.to_string());
+    if let Some(command) = &caller.command {
+        supervise_args.push("--caller-command".into());
+        supervise_args.push(command.clone());
+    }
+    if let Some(cwd) = &caller.cwd {
+        supervise_args.push("--caller-cwd".into());
+        supervise_args.push(cwd.clone());
     }
     // Own session and process group, stdio closed: the supervisor outlives this process.
     let exe = std::env::current_exe().map_err(|e| LaunchErr::Usage(e.to_string()))?;
@@ -619,6 +671,10 @@ fn supervise(args: &[String]) -> i32 {
             "--wall-ms",
             "--session",
             "--resumed-from",
+            "--caller",
+            "--caller-pid",
+            "--caller-command",
+            "--caller-cwd",
         ],
     ) {
         Ok(v) => v,
@@ -659,7 +715,21 @@ fn supervise(args: &[String]) -> i32 {
     };
     let session = flag(&kv, "--session").map(str::to_string);
     let resumed_from = flag(&kv, "--resumed-from").map(str::to_string);
-    let argv = backend.argv(model, session.as_deref(), &prompt);
+    let Some(caller) = flag(&kv, "--caller").map(str::to_string) else {
+        return fail("missing caller metadata".into());
+    };
+    let Some(caller_pid) = flag(&kv, "--caller-pid").and_then(|pid| pid.parse::<u32>().ok()) else {
+        return fail("invalid caller pid metadata".into());
+    };
+    let caller_command = flag(&kv, "--caller-command").map(str::to_string);
+    let caller_cwd = flag(&kv, "--caller-cwd").map(str::to_string);
+    let mut argv = backend.argv(model, session.as_deref(), &prompt);
+    // The catalogue selects this reviewer; rows without one leave Fiber's own defaults intact.
+    if backend == Backend::Fiber
+        && let Some(reviewer) = resolved.reviewer.as_deref()
+    {
+        argv = crate::backends::fiber::with_reviewer(argv, reviewer);
+    }
     // The muse sandbox flag comes from the per-host config, default off:
     // with the sandbox off the worktree is the only containment.
     let argv = if backend == Backend::Muse {
@@ -676,6 +746,7 @@ fn supervise(args: &[String]) -> i32 {
         cwd: cwd.clone(),
         model: model.clone(),
         backend: backend.name().into(),
+        reviewer: resolved.reviewer.clone(),
         path: Some(resolve_path(cwd)),
         head_before: capture_head(cwd, None),
         gate: gate.clone(),
@@ -721,6 +792,12 @@ fn supervise(args: &[String]) -> i32 {
         model: model.clone(),
         backend: Some(resolved.backend.clone()),
         cwd: cwd.clone(),
+        caller,
+        caller_pid,
+        caller_command,
+        caller_cwd,
+        started_at_ms: std::sync::Mutex::new(None),
+        ended_at_ms: std::sync::Mutex::new(None),
         last_session_id: std::sync::Mutex::new(None),
         gate: gate.clone(),
         tool_idle_ms,
@@ -863,6 +940,20 @@ fn status_line(id: &str, rec: &serde_json::Value) -> String {
             .and_then(serde_json::Value::as_array)
             .is_some_and(Vec::is_empty);
     let mut parts = Vec::new();
+    if let Some(caller) = rec.get("caller").and_then(serde_json::Value::as_str)
+        && !caller.is_empty()
+    {
+        parts.push(format!("caller={caller}"));
+    }
+
+    if result
+        .and_then(|value| value.get("gateResult"))
+        .and_then(|gate| gate.get("refused"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        parts.push("gate refused, nothing tested".to_string());
+    }
 
     if state != "DONE"
         && state != "RUNNING"
