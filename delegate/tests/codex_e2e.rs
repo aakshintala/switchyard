@@ -322,9 +322,9 @@ fn codex_open_tool_survives_waiting_message_past_idle_window() {
             "--model",
             "codex/gpt-6-luna",
             "--idle-ms",
-            "5000",
+            "1500",
             "--tool-idle-ms",
-            "20000",
+            "5000",
         ],
         Some(b"TOOL_WAIT"),
         false,
@@ -339,10 +339,20 @@ fn codex_open_tool_survives_waiting_message_past_idle_window() {
     let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
     e.wait_header("Codex command and waiting message started");
 
-    // The status record is written by the supervisor, so this proves it consumed
-    // the waiting message and retained the open command's tool phase.
-    until("running_tool status record", || {
-        e.record(&id)["progress"]["phase"] == "running_tool"
+    until("waiting message consumed by supervisor", || {
+        let record = e.record(&id);
+        record["progress"]["lastAssistant"] == "Waiting on CI"
+            && record["progress"]["phase"] == "running_tool"
+    });
+    until("watchdog heartbeat past the idle window", || {
+        let record = e.record(&id);
+        record["status"] == "RUNNING"
+            && record["progress"]["phase"] == "running_tool"
+            && record["progress"]["lastAssistant"] == "Waiting on CI"
+            && record["progress"]["lastEventAgeMs"]
+                .as_f64()
+                .unwrap_or_default()
+                >= 1_500.0
     });
     let waiting = e.record(&id);
     let _ = std::fs::write(e.dir.join("go"), "release");

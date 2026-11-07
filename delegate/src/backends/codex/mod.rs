@@ -987,18 +987,6 @@ mod tests {
             &mut state
         ));
         assert_eq!(state.phase.as_deref(), Some("running_tool"));
-        assert!(!crate::job::idle_window_expired(
-            state.phase.as_deref(),
-            Some(5_000.0),
-            Some(20_000.0),
-            7_500.0,
-        ));
-        assert!(crate::job::idle_window_expired(
-            state.phase.as_deref(),
-            Some(5_000.0),
-            Some(20_000.0),
-            20_000.0,
-        ));
         assert!(!handle_line(
             br#"{"type":"item.completed","item":{"id":"reasoning","type":"reasoning","text":"Poll again shortly"}}"#,
             &mut state
@@ -1009,12 +997,6 @@ mod tests {
             &mut state
         ));
         assert_eq!(state.phase.as_deref(), Some("responding"));
-        assert!(crate::job::idle_window_expired(
-            state.phase.as_deref(),
-            Some(5_000.0),
-            Some(20_000.0),
-            7_500.0,
-        ));
     }
 
     #[test]
