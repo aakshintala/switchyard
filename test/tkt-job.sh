@@ -21,6 +21,9 @@ mkdir -p "$T/home/.agents/bin" "$T/tmp" "$T/bin" "$T/records" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export STUB_JOBSDIR="$T/tmp/delegate-jobs"
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
+mkdir -p "$T/home/.agents/bin"
+printf '{"providers":[]}\n' >"$T/quota.json"
+export QUOTA_FEED="file://$T/quota.json"
 unset DELEGATE_JOBS_DIR
 
 [ -x "$REAL_BIN/fill-brief" ] || fail "real fill-brief missing"

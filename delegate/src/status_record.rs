@@ -1,6 +1,7 @@
 use crate::types::PollResult;
 use crate::util::{json_compact, random_uuid};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -308,13 +309,14 @@ impl StatusRecordWriter for CliRecordWriter {
             *started.get_or_insert_with(epoch_ms)
         };
         let terminal = matches!(&poll, PollResult::Terminal { .. });
-        let ended_at_ms = {
+        let (ended_at_ms, first_terminal) = {
             let mut ended = self.ended_at_ms.lock().unwrap_or_else(|e| e.into_inner());
-            if terminal {
-                Some(*ended.get_or_insert_with(epoch_ms))
-            } else {
-                *ended
+            let mut first_terminal = false;
+            if terminal && ended.is_none() {
+                *ended = Some(epoch_ms());
+                first_terminal = true;
             }
+            (*ended, first_terminal)
         };
         if let (PollResult::Terminal { result, .. }, Some(ended_at_ms)) = (&mut poll, ended_at_ms) {
             result.duration_ms = Some((ended_at_ms - started_at_ms).max(0.0));
@@ -333,6 +335,22 @@ impl StatusRecordWriter for CliRecordWriter {
                 *last = current_session_id;
             }
             last.clone()
+        };
+        let ledger_entry = if first_terminal {
+            match &poll {
+                PollResult::Terminal { status, result, .. } => Some(serde_json::json!({
+                    "jobId": self.job_id,
+                    "finishedAtMs": ended_at_ms,
+                    "model": self.model,
+                    "status": status.as_str(),
+                    "cwd": self.cwd,
+                    "costUsd": result.cost_usd,
+                    "usage": result.usage,
+                })),
+                _ => None,
+            }
+        } else {
+            None
         };
         let rec = CliRecord {
             poll,
@@ -360,7 +378,37 @@ impl StatusRecordWriter for CliRecordWriter {
         if let Err(e) = res {
             eprintln!("cannot write status record {}: {e}", path.display());
         }
+        if let Some(ledger_entry) = ledger_entry
+            && let Err(e) = append_cost_ledger(&ledger_entry)
+        {
+            eprintln!("warning: cannot append delegate cost ledger: {e}");
+        }
     }
+}
+
+fn cost_ledger_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("DELEGATE_COST_LEDGER").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+    let cache_root = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|path| Path::new(path).is_absolute())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::util::homedir().join(".cache"));
+    cache_root.join("agents/delegate-cost.jsonl")
+}
+
+/// Append one compact terminal-cost record outside the pruned job directory.
+fn append_cost_ledger(entry: &serde_json::Value) -> std::io::Result<()> {
+    let path = cost_ledger_path();
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(json_compact(entry).as_bytes())?;
+    file.write_all(b"\n")
 }
 
 fn epoch_ms() -> f64 {
@@ -466,6 +514,77 @@ pub fn write_cancelled(job_id: &str, prior: &serde_json::Value) -> std::io::Resu
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn terminal_cli_record_appends_one_durable_cost_line() {
+        use crate::test_env::{EnvGuard, lock};
+        use crate::types::{JobStatus, PollResult};
+
+        let _env = lock();
+        let root = std::env::temp_dir().join(format!("delegate-cost-ledger-{}", random_uuid()));
+        let jobs = root.join("tmp/delegate-jobs");
+        let ledger = root.join("cache/agents/delegate-cost.jsonl");
+        let _jobs = EnvGuard::set("DELEGATE_JOBS_DIR", jobs.to_str().unwrap());
+        let _ledger = EnvGuard::set("DELEGATE_COST_LEDGER", ledger.to_str().unwrap());
+        let job_id = "ledger-job";
+        let writer = CliRecordWriter {
+            job_id: job_id.into(),
+            model: "codex/gpt-6-luna".into(),
+            backend: Some("codex".into()),
+            cwd: "/work/project".into(),
+            caller: "test".into(),
+            caller_pid: std::process::id(),
+            caller_command: None,
+            caller_cwd: None,
+            gate: String::new(),
+            tool_idle_ms: None,
+            idle_ms: None,
+            wall_ms: None,
+            resumed_from: None,
+            started_at_ms: Mutex::new(None),
+            ended_at_ms: Mutex::new(None),
+            last_session_id: Mutex::new(None),
+        };
+        let result = serde_json::from_value(json!({
+            "status": "DONE",
+            "text": "finished",
+            "sessionId": "session-id",
+            "backend": "codex",
+            "model": "codex/gpt-6-luna",
+            "usage": {"inputTokens": 600, "cacheReadTokens": 400, "cacheWriteTokens": 20, "outputTokens": 10},
+            "costUsd": 0.0000715,
+            "costEstimated": true,
+            "durationMs": 123,
+            "jobId": job_id
+        })).unwrap();
+        let terminal = PollResult::Terminal {
+            status: JobStatus::Done,
+            result,
+            superseded_by: None,
+        };
+
+        writer.write(job_id, &terminal);
+        writer.write(job_id, &terminal);
+
+        let lines: Vec<_> = fs::read_to_string(&ledger)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 1, "one ledger line per job");
+        let entry: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(entry["jobId"], job_id);
+        assert!(entry["finishedAtMs"].as_f64().is_some());
+        assert_eq!(entry["model"], "codex/gpt-6-luna");
+        assert_eq!(entry["status"], "DONE");
+        assert_eq!(entry["cwd"], "/work/project");
+        assert_eq!(entry["costUsd"], 0.0000715);
+        assert_eq!(entry["usage"]["inputTokens"], 600);
+        assert_eq!(entry["usage"]["cacheReadTokens"], 400);
+        assert_eq!(entry["usage"]["cacheWriteTokens"], 20);
+        assert_eq!(entry["usage"]["outputTokens"], 10);
+        let _ = fs::remove_dir_all(root);
+    }
 
     fn written_record(id: &str) -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(job_record_path(id)).unwrap()).unwrap()

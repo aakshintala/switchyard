@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # tkt-build: implement steps 4-6, first round (lane, gate, mutants, review+map, findings).
+# Lane dispatch checks the selected model's QuotaBar provider before tkt-job starts.
 # spec_issue, when set, is passed to every round-0 review-pr start as --spec.
 # Usage: tkt-build <state> [--from lane|gate|review] [--no-verifier] [--lane-model <id>] [--review-model <id>] [--overbuild-model <id>]
 set -euo pipefail
@@ -47,6 +48,7 @@ if [ ! -r "$verdict_lib" ]; then echo "tkt-build: cannot read shared lib: $verdi
 . "$verdict_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
+quota_bin="$bin_dir/quota"; models_file="$script_dir/../delegate/config/models.json"
 mverd="$bin_dir/mutant-verdicts"
 reviewpr="$bin_dir/review-pr"; plangate="$bin_dir/plan-gate"
 delegate="${TKT_BIN:+$TKT_BIN/}delegate"
@@ -60,6 +62,7 @@ elif pid="$(cat "$lockdir/pid" 2>/dev/null)" && [ -n "${pid:-}" ]; then
 else echo "tkt-build: state locked" >&2; exit 2; fi
 tmpd="$(mktemp -d "${TMPDIR:-/tmp}/tkt-build.XXXXXX")"
 trap 'rm -rf "$tmpd"' EXIT
+quota_line=""
 emit() {
   local verdict="$1" ec="$2"; shift 2
   local rdir="${run:-$(dirname "$state")}"; mkdir -p "$rdir" 2>/dev/null || true
@@ -67,8 +70,12 @@ emit() {
   [ -z "${worktree:-}" ] || twelve="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')"
   local logpath="$rdir/${slug:-build}-${issue:-0}-tkt-build-$twelve-$(date +%H%M%S).log"
   local out="TKT tkt-build $verdict log=$logpath"
+  local max_lines=40
+  [ -z "${quota_line:-}" ] || max_lines=39
   [ $# -eq 0 ] || out="$out
-$(printf '%s\n' "$@" | head -n 40)"
+$(printf '%s\n' "$@" | head -n "$max_lines")"
+  if [ -n "${quota_line:-}" ]; then out="$out
+$quota_line"; fi
   printf '%s\n' "$out" | tee -a "$logpath"
   tkt journal "tkt-build $verdict" 2>/dev/null || true
   exit "$ec"
@@ -109,6 +116,62 @@ lookup_branch_pr() {
 fetch_branch_pr() {
   lookup_branch_pr
   tkt set pr "$pr"; tkt set head "$head"
+}
+map_lane_provider() {
+  local id="$1" backend=""
+  case "$id" in
+    fiber/*)
+      backend="${id#fiber/}"; backend="${backend%%/*}"
+      ;;
+    codex/*|openai/*) printf 'codex\n'; return 0 ;;
+    claude/*|claude-*) printf 'claude\n'; return 0 ;;
+    cursor/*|cursor-*) printf 'cursor\n'; return 0 ;;
+    muse/*|muse-*) printf 'muse\n'; return 0 ;;
+    opencode-go/*) printf 'opencode-go\n'; return 0 ;;
+    *)
+      backend="$(jq -r --arg id "$id" '.models[$id].backend // empty' "$models_file" 2>/dev/null || true)"
+      ;;
+  esac
+  case "$backend" in
+    claude|codex|cursor|muse|opencode-go) printf '%s\n' "$backend" ;;
+    *) return 1 ;;
+  esac
+}
+check_lane_quota() {
+  local provider row status feed weekly weekly_text
+  provider="$(map_lane_provider "$lane_model" 2>/dev/null || true)"
+  if [ -z "$provider" ]; then
+    emit "PRECONDITION quota=unmapped" 2 "tkt-build: quota refusal: model=$lane_model provider=unknown status=unmapped; cannot map the lane model id to a QuotaBar provider"
+  fi
+  if [ ! -x "$quota_bin" ] || ! feed="$("$quota_bin" --json 2>"$tmpd/quota-err")"; then
+    emit "PRECONDITION quota=unavailable" 2 "tkt-build: quota refusal: provider=$provider status=unavailable; QuotaBar feed did not answer"
+  fi
+  if ! jq -e '.providers | type == "array"' >/dev/null 2>&1 <<<"$feed"; then
+    emit "PRECONDITION quota=unavailable" 2 "tkt-build: quota refusal: provider=$provider status=unavailable; QuotaBar feed was not valid provider JSON"
+  fi
+  row="$(jq -c --arg id "$provider" '[.providers[] | select(.id == $id)][0] // empty' <<<"$feed")"
+  if [ -z "$row" ]; then
+    emit "PRECONDITION quota=missing" 2 "tkt-build: quota refusal: provider=$provider status=missing; provider is absent from the QuotaBar feed"
+  fi
+  status="$(jq -r '.status // "unknown"' <<<"$row")"
+  if [ "$status" != healthy ]; then
+    emit "PRECONDITION quota=refused" 2 "tkt-build: quota refusal: provider=$provider status=$status; provider status must be healthy"
+  fi
+  if [ "$provider" = claude ]; then
+    weekly="$(jq -r '[.quotas[]? | select((.key // "" | ascii_downcase) == "weekly" or (.label // "" | ascii_downcase) == "weekly")][0].percentRemaining // empty' <<<"$row")"
+    if [ -n "$weekly" ] && jq -e --argjson weekly "$weekly" '$weekly < 40' >/dev/null 2>&1 <<<"$row"; then
+      weekly_text="$(jq -r --argjson weekly "$weekly" 'if $weekly == ($weekly | floor) then "\($weekly | floor)%" else "\($weekly)%" end' <<<"null")"
+      emit "PRECONDITION quota=refused" 2 "tkt-build: quota refusal: provider=claude status=$status weekly=$weekly_text floor=40%; weekly quota is below the launch floor"
+    fi
+    if [ -n "$weekly" ] && jq -e --argjson weekly "$weekly" '($weekly | type) == "number"' >/dev/null 2>&1 <<<"$row"; then
+      weekly_text="$(jq -r --argjson weekly "$weekly" 'if $weekly == ($weekly | floor) then "\($weekly | floor)%" else "\($weekly)%" end' <<<"null")"
+    else
+      weekly_text=unknown
+    fi
+    quota_line="quota: provider=claude status=$status weekly=$weekly_text floor=40%"
+  else
+    quota_line="quota: provider=$provider status=$status"
+  fi
 }
 forward() {
   local step="$1" inner="$2" rc="$3" err="$4" first words rest
@@ -243,6 +306,7 @@ if [ "$from" = lane ]; then
     printf '%s\n' "tkt-build: missing key: model.lane (no --lane-model and no state model.lane)" >&2
     emit "PRECONDITION missing=model.lane" 2 "tkt-build: no lane model: the lane slot has no id (pass --lane-model or set model.lane)" "$(repair_hint model.lane)"
   fi
+  check_lane_quota
   lane_args=(--slot lane --template "$lane_brief" --gate-from-plan --expect-commits "BASE=$base" "GATE=$gate_cmd" "CLOSING=$closing" "ATTRIBUTION=$attr" "LANE_MODEL=$lane_model")
   lane_args+=(--model "$lane_model")
   rc=0; lane_out="$("$tktjob" "$state" "${lane_args[@]}" 2>"$tmpd/lane-err")" || rc=$?
