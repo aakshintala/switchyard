@@ -56,6 +56,36 @@ class FileDiff:
     hunks: list[Hunk] = field(default_factory=list)
 
 
+@dataclass
+class RustTestScope:
+    active: bool = False
+    brace_depth: int | None = None
+
+    def classify(self, line: str) -> bool:
+        if not self.active and RUST_TEST_CFG.search(line.lstrip()):
+            self.active = True
+            self.brace_depth = None
+        is_test = self.active
+        if not self.active:
+            return False
+
+        if self.brace_depth is None:
+            opening = line.find("{")
+            if opening >= 0:
+                self.brace_depth = line[opening:].count("{") - line[opening:].count("}")
+                if self.brace_depth <= 0:
+                    self.active = False
+                    self.brace_depth = None
+            elif ";" in line:
+                self.active = False
+        else:
+            self.brace_depth += line.count("{") - line.count("}")
+            if self.brace_depth <= 0:
+                self.active = False
+                self.brace_depth = None
+        return is_test
+
+
 def parse_diff(text: str) -> list[FileDiff]:
     files: list[FileDiff] = []
     current: FileDiff | None = None
@@ -89,13 +119,25 @@ def parse_diff(text: str) -> list[FileDiff]:
 
 def changed_lines(file_diff: FileDiff):
     for hunk in file_diff.hunks:
-        in_test_scope = False
+        old_test_scope = RustTestScope()
+        new_test_scope = RustTestScope()
         for line in hunk.lines:
             content = line[1:] if line.startswith(("+", "-", " ")) else line
-            if file_diff.path.endswith(".rs") and RUST_TEST_CFG.search(content.lstrip()):
-                in_test_scope = True
+            if file_diff.path.endswith(".rs"):
+                if line.startswith("+") and not line.startswith("+++"):
+                    is_test = new_test_scope.classify(content)
+                elif line.startswith("-") and not line.startswith("---"):
+                    is_test = old_test_scope.classify(content)
+                elif line.startswith(" "):
+                    old_test_scope.classify(content)
+                    new_test_scope.classify(content)
+                else:
+                    continue
+            else:
+                is_test = False
+
             if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
-                yield hunk, line[1:], in_test_scope
+                yield hunk, line[1:], is_test
 
 
 def rust_public_signal(files: list[FileDiff]) -> str | None:

@@ -155,6 +155,20 @@ diff --git a/src/thing.rs b/src/thing.rs
 DIFF
 expect_output 'single non-test lines=0 threshold=700' "$T/rust-test.diff"
 
+cat >"$T/rust-test-then-production.diff" <<'DIFF'
+diff --git a/src/thing.rs b/src/thing.rs
+--- a/src/thing.rs
++++ b/src/thing.rs
+@@ -1,5 +1,5 @@
+ #[cfg(test)]
+ mod tests {
+     fn helper() {}
+ }
+-pub fn value() -> u8 { 0 }
++pub fn value() -> u16 { 0 }
+DIFF
+expect_output 'full rust pub line file=src/thing.rs' "$T/rust-test-then-production.diff"
+
 cat >"$T/rust-production-before-test.diff" <<'DIFF'
 diff --git a/src/thing.rs b/src/thing.rs
 --- a/src/thing.rs
