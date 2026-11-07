@@ -25,6 +25,7 @@ Run `/beta` to start.
 See [the guide](./guide.md) and [missing](./nope.md).
 Follow `__SKILLS__/beta/SKILL.md` and `__SKILLS__/ghost/SKILL.md`.
 The binary lives at `~/.agents/bin/alpha`.
+The nonexistent path is `/nosuchskill`.
 EOF
 printf '# Guide\n' >"$BAD/skills/alpha/guide.md"
 printf '# Beta\n' >"$BAD/skills/beta/SKILL.md"
@@ -38,6 +39,7 @@ EOF
 out="$(bash "$CHECK" "$BAD" 2>"$T/baderr.txt")" && fail "bad pack exits 1"
 grep -q '^skills/alpha/SKILL.md:[0-9]*: .*nosuch' <<<"$out" || fail "bad pack flags missing skill"
 grep -q '^skills/alpha/SKILL.md:[0-9]*: .*missing skill `delegate`' <<<"$out" || fail "bad pack flags delegate when not in tree"
+grep -q '^skills/alpha/SKILL.md:[0-9]*: .*missing skill `nosuchskill`' <<<"$out" || fail "bad pack flags missing slash skill"
 grep -q '^skills/alpha/SKILL.md:[0-9]*: .*nope.md' <<<"$out" || fail "bad pack flags broken link"
 grep -q '^skills/alpha/SKILL.md:[0-9]*: .*ghost' <<<"$out" || fail "bad pack flags missing __SKILLS__ file"
 grep -q '^skills/alpha/briefs/job.md:[0-9]*: .*[Pp]laceholder.*__work__' <<<"$out" || fail "bad pack flags bad placeholder"
@@ -56,6 +58,7 @@ Run `/beta` or `/beta now` to start.
 See [the guide](./guide.md) and [beta](../beta/SKILL.md).
 Follow `__SKILLS__/beta/SKILL.md`.
 The binary lives at `~/.agents/bin/alpha`.
+The process directory is `/proc`.
 EOF
 printf '# Guide\n' >"$GOOD/skills/alpha/guide.md"
 printf '# Beta\n' >"$GOOD/skills/beta/SKILL.md"
