@@ -54,33 +54,6 @@ diff --git a/crate-a/src/lib.rs b/crate-a/src/lib.rs
 DIFF
 expect_output 'full pub signature PublicThing used by another crate' \
   "$T/cross-crate.diff" --repo-root "$T/repo"
-
-# A changed enum variant inherits the public API of its enclosing enum.
-printf 'pub enum Mode {\n    Existing,\n    New,\n}\n' >"$T/repo/crate-a/src/mode.rs"
-printf 'use crate_a::Mode;\nfn matches(mode: Mode) { match mode { Mode::Existing => (), Mode::New => () } }\n' >"$T/repo/crate-b/src/lib.rs"
-cat >"$T/enum-variant.diff" <<'DIFF'
-diff --git a/crate-a/src/mode.rs b/crate-a/src/mode.rs
---- a/crate-a/src/mode.rs
-+++ b/crate-a/src/mode.rs
-@@ -1,3 +1,4 @@
- pub enum Mode {
-     Existing,
-+    New,
- }
-DIFF
-expect_output 'full pub signature Mode used by another crate' \
-  "$T/enum-variant.diff" --repo-root "$T/repo"
-cat >"$T/enum-variant-file-context.diff" <<'DIFF'
-diff --git a/crate-a/src/mode.rs b/crate-a/src/mode.rs
---- a/crate-a/src/mode.rs
-+++ b/crate-a/src/mode.rs
-@@ -3 +3 @@
--    Old,
-+    New,
-DIFF
-expect_output 'full pub signature Mode used by another crate' \
-  "$T/enum-variant-file-context.diff" --repo-root "$T/repo"
-
 cat >"$T/multiline-signature.diff" <<'DIFF'
 diff --git a/crate-a/src/lib.rs b/crate-a/src/lib.rs
 --- a/crate-a/src/lib.rs
@@ -105,45 +78,6 @@ DIFF
 printf 'let value = thing.field;\n' >"$T/repo/crate-b/src/lib.rs"
 expect_output 'full pub signature field used by another crate' \
   "$T/pub-field.diff" --repo-root "$T/repo"
-
-# A changed field inherits serialization markers from its enclosing type.
-printf '#[derive(Serialize, Deserialize)]\nstruct SavedState {\n    value: String,\n}\n' >"$T/repo/crate-a/src/saved_state.rs"
-cat >"$T/serialized-field.diff" <<'DIFF'
-diff --git a/crate-a/src/saved_state.rs b/crate-a/src/saved_state.rs
---- a/crate-a/src/saved_state.rs
-+++ b/crate-a/src/saved_state.rs
-@@ -2,3 +2,3 @@
- struct SavedState {
--    value: u32,
-+    value: String,
- }
-DIFF
-expect_output 'full persisted/wire-format signal=serde derive file=crate-a/src/saved_state.rs' \
-  "$T/serialized-field.diff" --repo-root "$T/repo"
-cat >"$T/serialized-file-context.diff" <<'DIFF'
-diff --git a/crate-a/src/saved_state.rs b/crate-a/src/saved_state.rs
---- a/crate-a/src/saved_state.rs
-+++ b/crate-a/src/saved_state.rs
-@@ -3 +3 @@
--    value: u32,
-+    value: String,
-DIFF
-expect_output 'full persisted/wire-format signal=serde derive file=crate-a/src/saved_state.rs' \
-  "$T/serialized-file-context.diff" --repo-root "$T/repo"
-cat >"$T/serialized-context.diff" <<'DIFF'
-diff --git a/src/saved.rs b/src/saved.rs
---- a/src/saved.rs
-+++ b/src/saved.rs
-@@ -1,4 +1,4 @@
- #[derive(Serialize, Deserialize)]
- struct SavedState {
--    value: u32,
-+    value: String,
- }
-DIFF
-expect_output 'full persisted/wire-format signal=serde derive file=src/saved.rs' \
-  "$T/serialized-context.diff" --repo-root "$T/outside"
-
 printf 'pub struct PrivateUse;\n' >"$T/repo/crate-a/src/lib.rs"
 cat >"$T/unreferenced.diff" <<'DIFF'
 diff --git a/crate-a/src/lib.rs b/crate-a/src/lib.rs

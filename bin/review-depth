@@ -44,10 +44,6 @@ PUB_ITEM = re.compile(
 )
 PUB_FIELD = re.compile(r"\bpub\s+([A-Za-z_][A-Za-z_0-9]*)\s*:")
 HUNK_HEADER = re.compile(r"^@@")
-HUNK_NEW_START = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-RUST_TYPE_ITEM = re.compile(
-    r"^\s*(?P<visibility>pub(?:\s*\([^)]*\))?\s+)?(?:struct|enum)\s+([A-Za-z_][A-Za-z_0-9]*)\b"
-)
 RUST_TEST_CFG = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 TEST_NAME = re.compile(r"(?:^|/)test[^/]*\.py$|(?:^|/)[^/]*_test\.[^/]+$|(?:^|/)[^/]*\.test\.[^/]+$")
 
@@ -55,7 +51,6 @@ TEST_NAME = re.compile(r"(?:^|/)test[^/]*\.py$|(?:^|/)[^/]*_test\.[^/]+$|(?:^|/)
 @dataclass
 class Hunk:
     lines: list[str] = field(default_factory=list)
-    new_start: int = 1
 
 
 @dataclass
@@ -85,8 +80,7 @@ def parse_diff(text: str) -> list[FileDiff]:
             continue
         if HUNK_HEADER.match(line):
             if current is not None:
-                match = HUNK_NEW_START.match(line)
-                hunk = Hunk(new_start=int(match.group(1)) if match else 1)
+                hunk = Hunk()
                 current.hunks.append(hunk)
             else:
                 hunk = None
@@ -103,101 +97,13 @@ def changed_lines(file_diff: FileDiff):
                 yield hunk, line[1:]
 
 
-def changed_locations(hunk: Hunk):
-    new_line = hunk.new_start
-    for index, line in enumerate(hunk.lines):
-        if line.startswith(("+++", "---")):
-            continue
-        if line.startswith("+"):
-            yield index, line[1:], new_line
-            new_line += 1
-        elif line.startswith("-"):
-            yield index, line[1:], new_line
-        elif line.startswith(" "):
-            new_line += 1
-
-
-def rust_line_content(line: str) -> str:
-    if line.startswith(("+", "-", " ")):
-        return line[1:]
-    return line
-
-
-def enclosing_rust_type(lines: list[str], target_index: int):
-    if target_index < 0 or target_index > len(lines):
-        return None
-    for start in range(target_index - 1, -1, -1):
-        match = RUST_TYPE_ITEM.match(rust_line_content(lines[start]))
-        if not match:
-            continue
-        depth = sum(
-            rust_line_content(line).count("{") - rust_line_content(line).count("}")
-            for line in lines[start:target_index]
-        )
-        if depth > 0:
-            return match.group(2), bool(match.group("visibility")), start
-    return None
-
-
-def serde_marker_in_type(lines: list[str], declaration: int, target: int) -> str | None:
-    start = declaration
-    prior = declaration - 1
-    while prior >= 0:
-        text = rust_line_content(lines[prior]).strip()
-        if not text or text.startswith(("#[", "///", "//!")):
-            start = prior
-            prior -= 1
-        else:
-            break
-    context = "\n".join(rust_line_content(line) for line in lines[start:target + 1])
-    for pattern, label in PERSISTED_PATTERNS[:3]:
-        if pattern.search(context):
-            return label
-    return None
-
-
-def source_lines_for(root: Path, file_diff: FileDiff) -> list[str]:
-    path = (root / file_diff.path).resolve()
-    try:
-        path.relative_to(root)
-        return path.read_text(errors="replace").splitlines()
-    except (OSError, ValueError):
-        return []
-
-
-def enclosing_serde_signal(files: list[FileDiff], root: Path | None) -> str | None:
-    for file_diff in files:
-        source_lines = source_lines_for(root, file_diff) if root else []
-        for hunk in file_diff.hunks:
-            for index, _, new_line in changed_locations(hunk):
-                context = enclosing_rust_type(hunk.lines, index)
-                if context:
-                    marker = serde_marker_in_type(hunk.lines, context[2], index)
-                    if marker:
-                        return f"persisted/wire-format signal={marker} file={file_diff.path}"
-                if source_lines:
-                    context = enclosing_rust_type(source_lines, new_line - 1)
-                    if context:
-                        marker = serde_marker_in_type(source_lines, context[2], new_line - 1)
-                        if marker:
-                            return f"persisted/wire-format signal={marker} file={file_diff.path}"
-    return None
-
-
-def rust_public_names(file_diff: FileDiff, root: Path | None) -> list[str]:
+def rust_public_names(file_diff: FileDiff) -> list[str]:
     if not file_diff.path.endswith(".rs") or is_test_path(file_diff.path):
         return []
     names = []
-    source_lines = source_lines_for(root, file_diff) if root else []
     for hunk in file_diff.hunks:
         if is_test_hunk(file_diff.path, hunk):
             continue
-        for index, _, new_line in changed_locations(hunk):
-            context = enclosing_rust_type(hunk.lines, index)
-            if not context and source_lines:
-                context = enclosing_rust_type(source_lines, new_line - 1)
-            if context and context[1]:
-                names.append(context[0])
         in_signature: str | None = None
         for line in hunk.lines:
             changed = line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
@@ -287,7 +193,7 @@ def name_used_in_other_crate(name: str, file_path: str, root: Path) -> bool:
 
 def rust_signature_signal(files: list[FileDiff], root: Path | None) -> str | None:
     for file_diff in files:
-        for name in rust_public_names(file_diff, root):
+        for name in rust_public_names(file_diff):
             if root is None:
                 return f"pub signature {name} (diff-only; no repo root)"
             if name_used_in_other_crate(name, file_diff.path, root):
@@ -323,9 +229,6 @@ def choose_depth(text: str, root: Path | None, threshold: int) -> tuple[str, str
     if signal:
         return "full", signal
     signal = content_signal(files, PERSISTED_PATTERNS, "persisted/wire-format")
-    if signal:
-        return "full", signal
-    signal = enclosing_serde_signal(files, root)
     if signal:
         return "full", signal
     signal = content_signal(files, LOCKING_PATTERNS, "locking/process-lifetime")
