@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
 # agent-cost [days]: token and cache cost of recent agents, by kind.
+# agent-cost --usd --since YYYY-MM-DD: API-equivalent cost by model and project.
+#
+# USD mode reads Claude Code transcripts, pi session logs, Codex CLI logs, and
+# the durable delegate ledger. Ledger totals are separate because they can
+# overlap transcript rows from the same delegate job.
+# Claude defaults to ~/.claude/projects, pi to ~/.pi/agent/sessions, Codex to
+# ~/.codex/sessions, and the delegate ledger to $XDG_CACHE_HOME/agents/ or
+# ~/.cache/agents/delegate-cost.jsonl when XDG_CACHE_HOME is unset.
+# Override these paths with AGENT_COST_ROOT, AGENT_COST_PI_ROOT,
+# AGENT_COST_CODEX_ROOT and DELEGATE_COST_LEDGER.
 #
 # Reads Claude Code transcripts (*.jsonl) under $AGENT_COST_ROOT (default
 # ~/.claude/projects). A transcript is selected whole when its mtime is within
@@ -23,8 +33,10 @@
 #              rewrites); in parentheses their written tokens, millions
 #   polls      Bash calls that look like waiting (sleep, until, gh-ci wait, delegate watch, ...)
 #   bigres     tool results over 20000 characters
-import collections, glob, json, os, re, sys, time
-from datetime import datetime
+import argparse
+import collections, glob, json, math, os, re, sys, time
+from datetime import date, datetime, time as datetime_time, timezone
+from pathlib import Path
 
 POLL = re.compile(r'\bsleep \d|until |while .*sleep|tail -[fn]? ?\d* .*\.output|gh-ci wait|delegate watch')
 
@@ -69,7 +81,400 @@ def parse(f):
     return agent, msgs, len(polls), bigres
 
 
+def since_epoch(value):
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError("--since must be YYYY-MM-DD") from exc
+    if parsed.isoformat() != value:
+        raise ValueError("--since must be YYYY-MM-DD")
+    return datetime.combine(parsed, datetime_time.min, tzinfo=timezone.utc).timestamp()
+
+
+def timestamp_epoch(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        stamp = float(value)
+        if not math.isfinite(stamp):
+            return None
+        return stamp / 1000 if stamp > 100_000_000_000 else stamp
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def token_count(value):
+    if isinstance(value, bool):
+        return 0
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(amount) or amount < 0:
+        return 0
+    return int(amount)
+
+
+def normalized_usage(input_tokens=0, cache_read=0, cache_write=0, output_tokens=0, cache_write_1h=0):
+    return {
+        "input": token_count(input_tokens),
+        "cacheRead": token_count(cache_read),
+        "cacheWrite": token_count(cache_write),
+        "output": token_count(output_tokens),
+        "cacheWrite1h": token_count(cache_write_1h),
+    }
+
+
+def model_and_price(raw, source, models, provider=None):
+    raw = raw.strip() if isinstance(raw, str) else ""
+    display = raw or "(unknown)"
+    candidates = [raw] if raw else []
+    if source == "codex" and raw:
+        if raw.startswith("codex/"):
+            candidates.insert(0, raw)
+            display = raw
+        else:
+            candidates = ["codex/" + raw, "openai/" + raw, raw]
+            display = "codex/" + raw
+    elif source == "pi" and raw and provider in ("openai", "codex") and not raw.startswith(("openai/", "codex/")):
+        candidates.insert(0, provider + "/" + raw)
+        display = provider + "/" + raw
+    for candidate in candidates:
+        if candidate in models:
+            return display, candidate
+        matching = sorted(
+            (key for key in models if candidate.startswith(key + "-") or candidate.startswith(key + ":") or key.startswith(candidate + ":")),
+            key=len,
+            reverse=True,
+        )
+        if matching:
+            return display, matching[0]
+    return display, None
+
+
+def price_usage(price_key, usage, models, source):
+    if price_key is None:
+        return None
+    price = models[price_key].get("price")
+    if not isinstance(price, dict):
+        return None
+    try:
+        input_price = float(price["input"])
+        output_price = float(price["output"])
+        read_price = float(price["cacheRead"])
+        write_price = float(price["cacheWrite"])
+        write_1h_price = float(price.get("cacheWrite1h", input_price * 2))
+    except (KeyError, TypeError, ValueError):
+        return None
+    writes_1h = usage.get("cacheWrite1h", 0) if source == "claude" else 0
+    writes_5m = max(0, usage.get("cacheWrite", 0) - writes_1h)
+    return (
+        usage.get("input", 0) * input_price
+        + usage.get("cacheRead", 0) * read_price
+        + writes_5m * write_price
+        + writes_1h * write_1h_price
+        + usage.get("output", 0) * output_price
+    ) / 1_000_000
+
+
+def read_jsonl(path):
+    try:
+        with open(path, errors="replace") as fh:
+            for n, line in enumerate(fh):
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(record, dict):
+                    yield n, record
+    except OSError:
+        return
+
+
+def files_below(root):
+    try:
+        return sorted(Path(root).rglob("*.jsonl"))
+    except OSError:
+        return []
+
+
+def claude_usage(usage):
+    creation = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
+    one_hour = token_count(creation.get("ephemeral_1h_input_tokens"))
+    five_minute = token_count(creation.get("ephemeral_5m_input_tokens"))
+    total_write = token_count(usage.get("cache_creation_input_tokens"))
+    if total_write:
+        five_minute = max(five_minute, total_write - one_hour)
+    else:
+        total_write = one_hour + five_minute
+    return normalized_usage(
+        usage.get("input_tokens"), usage.get("cache_read_input_tokens"),
+        total_write, usage.get("output_tokens"), one_hour,
+    )
+
+
+def simple_usage(usage, input_key, output_key, read_key, write_key, cached_key=None):
+    raw_input = token_count(usage.get(input_key))
+    cached = token_count(usage.get(cached_key)) if cached_key else 0
+    return normalized_usage(
+        max(0, raw_input - cached), cached if cached_key else usage.get(read_key),
+        usage.get(write_key), usage.get(output_key),
+    )
+
+
+def add_totals(bucket, usage, cost, model):
+    bucket.setdefault("tokens", {key: 0 for key in ("input", "cacheRead", "cacheWrite", "output")})
+    bucket["records"] = bucket.get("records", 0) + 1
+    for key in bucket["tokens"]:
+        bucket["tokens"][key] += usage.get(key, 0)
+    if cost is None:
+        bucket["unpricedRecords"] = bucket.get("unpricedRecords", 0) + 1
+        bucket.setdefault("unpricedModels", set()).add(model)
+    else:
+        bucket["pricedRecords"] = bucket.get("pricedRecords", 0) + 1
+        bucket["usd"] = bucket.get("usd", 0.0) + cost
+
+
+def add_log_record(by_model, by_project, model, project, usage, cost):
+    add_totals(by_model.setdefault(model, {}), usage, cost, model)
+    project_bucket = by_project.setdefault(project, {})
+    add_totals(project_bucket, usage, cost, model)
+    if cost is None:
+        unknown = project_bucket.setdefault("unknownTokens", {})
+        tokens = unknown.setdefault(model, {key: 0 for key in ("input", "cacheRead", "cacheWrite", "output")})
+        for key in tokens:
+            tokens[key] += usage.get(key, 0)
+
+
+def usage_from_json(value):
+    if not isinstance(value, dict):
+        return normalized_usage()
+    return normalized_usage(
+        value.get("inputTokens", value.get("input_tokens")),
+        value.get("cacheReadTokens", value.get("cache_read_input_tokens")),
+        value.get("cacheWriteTokens", value.get("cache_creation_input_tokens")),
+        value.get("outputTokens", value.get("output_tokens")),
+    )
+
+
+def collect_claude(root, cutoff, models, by_model, by_project):
+    messages = {}
+    root_path = Path(root)
+    for path in files_below(root_path):
+        try:
+            relative = path.relative_to(root_path)
+            project = relative.parts[0] if len(relative.parts) > 1 else path.parent.name
+        except ValueError:
+            project = path.parent.name
+        for n, record in read_jsonl(path):
+            message = record.get("message")
+            usage = message.get("usage") if isinstance(message, dict) else None
+            stamp = timestamp_epoch(record.get("timestamp"))
+            if not isinstance(usage, dict) or stamp is None:
+                continue
+            model, price_key = model_and_price(
+                (message.get("model") or record.get("model")) if isinstance(message, dict) else record.get("model"),
+                "claude", models,
+            )
+            message_id = message.get("id") if isinstance(message, dict) else None
+            key = ("id", message_id) if message_id else ("line", str(path), n)
+            previous = messages.get(key)
+            if previous is None or stamp >= previous[0]:
+                messages[key] = (stamp, project, model, price_key, claude_usage(usage))
+    for stamp, project, model, price_key, usage in messages.values():
+        if stamp < cutoff:
+            continue
+        add_log_record(by_model, by_project, model, project, usage, price_usage(price_key, usage, models, "claude"))
+
+
+def collect_pi(root, cutoff, models, by_model, by_project):
+    root_path = Path(root)
+    for path in files_below(root_path):
+        records = list(read_jsonl(path))
+        cwd = ""
+        for _, record in records:
+            if record.get("cwd"):
+                cwd = record["cwd"]
+                break
+            if isinstance(record.get("session"), dict) and record["session"].get("cwd"):
+                cwd = record["session"]["cwd"]
+                break
+        project = cwd or (path.relative_to(root_path).parts[0] if path != root_path else "unknown")
+        for _, record in records:
+            message = record.get("message")
+            if record.get("type") not in ("message", "message_end", "assistant") or not isinstance(message, dict):
+                continue
+            if message.get("role") not in (None, "assistant"):
+                continue
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            stamp = timestamp_epoch(record.get("timestamp") or message.get("timestamp"))
+            if stamp is None or stamp < cutoff:
+                continue
+            raw_model = message.get("model") or record.get("model")
+            provider = message.get("provider") or record.get("provider")
+            model, price_key = model_and_price(raw_model, "pi", models, provider)
+            tokens = simple_usage(usage, "input", "output", "cacheRead", "cacheWrite")
+            add_log_record(by_model, by_project, model, project, tokens, price_usage(price_key, tokens, models, "pi"))
+
+
+def collect_codex(root, cutoff, models, by_model, by_project):
+    root_path = Path(root)
+    for path in files_below(root_path):
+        cwd = ""
+        current_model = ""
+        provider = ""
+        for _, record in read_jsonl(path):
+            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+            for obj in (payload, payload.get("info", {}), record):
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("cwd"):
+                    cwd = obj["cwd"]
+                if obj.get("model") or obj.get("model_id"):
+                    current_model = obj.get("model") or obj.get("model_id")
+                if obj.get("model_provider"):
+                    provider = obj["model_provider"]
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            payload_type = payload.get("type")
+            if record.get("type") != "token_count" and payload_type != "token_count":
+                continue
+            token_record = info.get("last_token_usage") or payload.get("last_token_usage")
+            if not isinstance(token_record, dict):
+                continue
+            stamp = timestamp_epoch(record.get("timestamp") or payload.get("timestamp"))
+            if stamp is None or stamp < cutoff:
+                continue
+            raw_model = token_record.get("model") or current_model
+            model, price_key = model_and_price(raw_model, "codex", models, provider)
+            tokens = simple_usage(
+                token_record, "input_tokens", "output_tokens", "cached_input_tokens",
+                "cache_write_input_tokens", "cached_input_tokens",
+            )
+            add_log_record(by_model, by_project, model, cwd or "unknown", tokens, price_usage(price_key, tokens, models, "codex"))
+
+
+def collect_ledger(path, cutoff, by_model, by_project):
+    ledger_model = collections.defaultdict(dict)
+    ledger_project = collections.defaultdict(dict)
+    total_usd = 0.0
+    entries = unpriced = 0
+    for _, record in read_jsonl(path):
+        stamp = timestamp_epoch(record.get("finishedAtMs", record.get("finishedAt")))
+        if stamp is None or stamp < cutoff:
+            continue
+        model = record.get("model") or "(unknown)"
+        project = record.get("cwd") or "unknown"
+        usage = usage_from_json(record.get("usage"))
+        cost_value = record.get("costUsd")
+        try:
+            cost = float(cost_value) if cost_value is not None else None
+            if cost is not None and not math.isfinite(cost):
+                cost = None
+        except (TypeError, ValueError):
+            cost = None
+        add_totals(ledger_model[model], usage, cost, model)
+        project_bucket = ledger_project[project]
+        add_totals(project_bucket, usage, cost, model)
+        if cost is None:
+            unknown = project_bucket.setdefault("unknownTokens", {})
+            tokens = unknown.setdefault(model, {key: 0 for key in ("input", "cacheRead", "cacheWrite", "output")})
+            for key in tokens:
+                tokens[key] += usage.get(key, 0)
+            unpriced += 1
+        else:
+            total_usd += cost
+        entries += 1
+    return ledger_model, ledger_project, total_usd, entries, unpriced
+
+
+def token_summary(tokens):
+    return " ".join(f"{name}={tokens.get(key, 0)}" for key, name in (("input", "input"), ("cacheRead", "cacheRead"), ("cacheWrite", "cacheWrite"), ("output", "output")))
+
+
+def cost_summary(bucket):
+    if not bucket.get("pricedRecords"):
+        return "unpriced"
+    value = f"usd={bucket.get('usd', 0.0):.9f}"
+    if bucket.get("unpricedRecords"):
+        value += f" unpricedRecords={bucket['unpricedRecords']}"
+    return value
+
+
+def render_groups(by_model, by_project):
+    print("by model:")
+    if not by_model:
+        print("  (none)")
+    for model, bucket in sorted(by_model.items()):
+        print(f"  model={model} {cost_summary(bucket)} {token_summary(bucket.get('tokens', {}))}")
+    print("by project:")
+    if not by_project:
+        print("  (none)")
+    for project, bucket in sorted(by_project.items()):
+        suffix = ""
+        unknown = bucket.get("unknownTokens", {})
+        if unknown:
+            details = []
+            for model, tokens in sorted(unknown.items()):
+                details.append(f"{model}({token_summary(tokens).replace(' ', ',')})")
+            suffix = " unpriced=" + ";".join(details)
+        print(f"  project={project} {cost_summary(bucket)}{suffix}")
+
+
+def usd_report(argv):
+    parser = argparse.ArgumentParser(prog="agent-cost", usage="agent-cost --usd --since YYYY-MM-DD")
+    parser.add_argument("--usd", action="store_true")
+    parser.add_argument("--since", required=True)
+    args = parser.parse_args(argv)
+    if not args.usd:
+        parser.error("--usd is required with --since")
+    try:
+        cutoff = since_epoch(args.since)
+    except ValueError as exc:
+        parser.error(str(exc))
+    config = Path(__file__).resolve().parent.parent / "delegate/config/models.json"
+    try:
+        models = json.loads(config.read_text())["models"]
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"agent-cost: cannot read model prices from {config}: {exc}", file=sys.stderr)
+        return 2
+
+    by_model, by_project = {}, {}
+    home = os.path.expanduser("~")
+    claude_root = os.environ.get("AGENT_COST_ROOT") or os.path.join(home, ".claude/projects")
+    pi_root = os.environ.get("AGENT_COST_PI_ROOT") or os.path.join(home, ".pi/agent/sessions")
+    codex_root = os.environ.get("AGENT_COST_CODEX_ROOT") or os.path.join(home, ".codex/sessions")
+    collect_claude(claude_root, cutoff, models, by_model, by_project)
+    collect_pi(pi_root, cutoff, models, by_model, by_project)
+    collect_codex(codex_root, cutoff, models, by_model, by_project)
+    print(f"API-equivalent spend since {args.since} (USD)")
+    print("logs:")
+    render_groups(by_model, by_project)
+    log_total = sum(bucket.get("usd", 0.0) for bucket in by_model.values())
+    log_unpriced = sum(bucket.get("unpricedRecords", 0) for bucket in by_model.values())
+    print(f"logs total pricedUsd={log_total:.9f} unpricedRecords={log_unpriced}")
+
+    ledger_path = os.environ.get("DELEGATE_COST_LEDGER")
+    if not ledger_path:
+        xdg_cache = os.environ.get("XDG_CACHE_HOME")
+        cache_root = xdg_cache if xdg_cache and os.path.isabs(xdg_cache) else os.path.join(home, ".cache")
+        ledger_path = os.path.join(cache_root, "agents/delegate-cost.jsonl")
+    ledger_models, ledger_projects, ledger_total, entries, unpriced = collect_ledger(ledger_path, cutoff, {}, {})
+    print("delegate ledger (separate total; may overlap log rows from the same jobs):")
+    render_groups(ledger_models, ledger_projects)
+    print(f"delegate ledger total recordedUsd={ledger_total:.9f} entries={entries} unpricedRecords={unpriced}")
+    return 0
+
+
 def main(argv):
+    if "--usd" in argv or "--since" in argv:
+        return usd_report(argv)
     try:
         if len(argv) > 1:
             raise ValueError

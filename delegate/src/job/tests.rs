@@ -308,8 +308,10 @@ fn failed_status_record_write_does_not_stop_job() {
     let _env = lock();
     let root = std::env::temp_dir().join(format!("delegate-record-failure-{}", random_uuid()));
     let jobs = root.join("jobs");
+    let ledger = root.join("cache/agents/delegate-cost.jsonl");
     std::fs::create_dir_all(&jobs).unwrap();
     let _jobs = EnvGuard::set("DELEGATE_JOBS_DIR", jobs.to_str().unwrap());
+    let _ledger = EnvGuard::set("DELEGATE_COST_LEDGER", ledger.to_str().unwrap());
     let writer_job_id = "record-write-failure";
     let s = setup_with(|d| {
         d.status_writer = Arc::new(CliRecordWriter {
@@ -344,7 +346,7 @@ fn failed_status_record_write_does_not_stop_job() {
     assert_eq!(terminal_text(&s.reg, &id), "ok\nSTATUS: DONE");
     std::fs::remove_file(&jobs).unwrap();
     std::fs::remove_dir_all(moved_jobs).unwrap();
-    std::fs::remove_dir(root).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -99,4 +99,94 @@ check_bad -1
 check_bad 1 2
 check_bad -h
 
+# USD mode reads record timestamps from all sources and never the user's real roots.
+USD_CLAUDE="$T/usd-claude"
+USD_PI="$T/usd-pi"
+USD_CODEX="$T/usd-codex"
+USD_LEDGER="$T/usd-delegate-cost.jsonl"
+mkdir -p "$USD_CLAUDE/encoded-project" "$USD_CLAUDE/opus5" "$USD_CLAUDE/opus48" "$USD_PI/workspace" "$USD_CODEX/2026/11/06"
+cat >"$USD_CLAUDE/encoded-project/main.jsonl" <<'FIXTURE'
+{"type":"assistant","timestamp":"2026-11-05T08:00:00Z","message":{"id":"dup-1","model":"claude-sonnet-5","usage":{"input_tokens":500,"output_tokens":10}}}
+{"type":"assistant","timestamp":"2026-11-05T08:00:01Z","message":{"id":"dup-1","model":"claude-sonnet-5","usage":{"input_tokens":1000,"output_tokens":100,"cache_read_input_tokens":200,"cache_creation_input_tokens":400,"cache_creation":{"ephemeral_1h_input_tokens":100}}}}
+{"type":"assistant","timestamp":"2026-11-06T08:00:00Z","message":{"id":"unknown-1","model":"experimental-model","usage":{"input_tokens":50,"output_tokens":2}}}
+{"type":"assistant","timestamp":"2026-10-31T23:59:59Z","message":{"id":"old-1","model":"claude-sonnet-5","usage":{"input_tokens":2000000,"output_tokens":0}}}
+FIXTURE
+cat >"$USD_CLAUDE/opus5/session.jsonl" <<'FIXTURE'
+{"type":"assistant","timestamp":"2026-11-05T09:00:00Z","message":{"id":"opus-5","model":"claude-opus-5","usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}}
+FIXTURE
+cat >"$USD_CLAUDE/opus48/session.jsonl" <<'FIXTURE'
+{"type":"assistant","timestamp":"2026-11-05T09:00:00Z","message":{"id":"opus-48","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1,"cache_read_input_tokens":4,"cache_creation_input_tokens":1}}}
+FIXTURE
+cat >"$USD_PI/workspace/session.jsonl" <<'FIXTURE'
+{"type":"session","cwd":"/work/pi-app"}
+{"type":"message","timestamp":"2026-11-05T09:00:00Z","message":{"role":"assistant","model":"claude-haiku-4-5","usage":{"input":100,"output":20,"cacheRead":50,"cacheWrite":10,"cost":{"total":99}}}}
+{"type":"message","timestamp":"2026-10-30T09:00:00Z","message":{"role":"assistant","model":"claude-haiku-4-5","usage":{"input":1000000,"output":0,"cacheRead":0,"cacheWrite":0}}}
+FIXTURE
+python3 -I - "$USD_CODEX/2026/11/06/rollout.jsonl" "$USD_LEDGER" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+codex_path, ledger_path = sys.argv[1:]
+codex = [
+    {"timestamp": "2026-11-06T10:00:00Z", "type": "session_meta", "payload": {"cwd": "/work/codex-app", "model_provider": "openai"}},
+    {"timestamp": "2026-11-06T10:01:00Z", "type": "turn_context", "payload": {"model": "gpt-6-luna"}},
+    {"timestamp": "2026-11-06T10:02:00Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1000, "cached_input_tokens": 400, "cache_write_input_tokens": 20, "output_tokens": 10}}}},
+    {"timestamp": "2026-10-30T10:02:00Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 10000000, "cached_input_tokens": 0, "output_tokens": 0}}}},
+]
+with open(codex_path, "w") as f:
+    for record in codex:
+        f.write(json.dumps(record) + "\n")
+finished_at = datetime(2026, 11, 6, 12, tzinfo=timezone.utc).timestamp() * 1000
+ledger = {
+    "jobId": "job-codex-1", "finishedAtMs": finished_at,
+    "model": "codex/gpt-6-luna", "status": "DONE", "cwd": "/work/codex-app",
+    "costUsd": 0.0000715,
+    "usage": {"inputTokens": 600, "cacheReadTokens": 400, "cacheWriteTokens": 20, "outputTokens": 10},
+}
+with open(ledger_path, "w") as f:
+    f.write(json.dumps(ledger) + "\n")
+PY
+python3 -I - "$USD_PI/workspace/session.jsonl" <<'PY'
+import os
+import sys
+import time
+path = sys.argv[1]
+old = time.time() - 30 * 86400
+os.utime(path, (old, old))
+PY
+OUT="$(AGENT_COST_ROOT="$USD_CLAUDE" AGENT_COST_PI_ROOT="$USD_PI" AGENT_COST_CODEX_ROOT="$USD_CODEX" DELEGATE_COST_LEDGER="$USD_LEDGER" python3 -I "$BIN" --usd --since 2026-11-01)" || fail "USD report exited non-zero"
+contains() { grep -Fqx "$1" <<<"$OUT" || fail "USD report lacks [$1]:\n$OUT"; }
+contains '  model=claude-opus-5 usd=0.000081500 input=1 cacheRead=3 cacheWrite=4 output=2'
+contains '  model=claude-opus-4-8 usd=0.000043250 input=2 cacheRead=4 cacheWrite=1 output=1'
+contains '  model=claude-sonnet-5 usd=0.004190000 input=1000 cacheRead=200 cacheWrite=400 output=100'
+contains '  model=claude-haiku-4-5 usd=0.000217500 input=100 cacheRead=50 cacheWrite=10 output=20'
+contains '  model=codex/gpt-6-luna usd=0.000071500 input=600 cacheRead=400 cacheWrite=20 output=10'
+contains '  model=experimental-model unpriced input=50 cacheRead=0 cacheWrite=0 output=2'
+contains '  project=encoded-project usd=0.004190000 unpricedRecords=1 unpriced=experimental-model(input=50,cacheRead=0,cacheWrite=0,output=2)'
+contains '  project=/work/pi-app usd=0.000217500'
+contains '  project=/work/codex-app usd=0.000071500'
+contains 'logs total pricedUsd=0.004603750 unpricedRecords=1'
+contains '  model=codex/gpt-6-luna usd=0.000071500 input=600 cacheRead=400 cacheWrite=20 output=10'
+contains 'delegate ledger (separate total; may overlap log rows from the same jobs):'
+contains 'delegate ledger total recordedUsd=0.000071500 entries=1 unpricedRecords=0'
+case "$OUT" in *2000000*|*10000000*|*1000000*) fail "USD report used records before --since" ;; esac
+
+# XDG_CACHE_HOME isolates the default delegate ledger location too.
+mkdir -p "$T/xdg-cache/agents"
+cp "$USD_LEDGER" "$T/xdg-cache/agents/delegate-cost.jsonl"
+OUT="$(AGENT_COST_ROOT="$USD_CLAUDE" AGENT_COST_PI_ROOT="$USD_PI" AGENT_COST_CODEX_ROOT="$USD_CODEX" XDG_CACHE_HOME="$T/xdg-cache" DELEGATE_COST_LEDGER= python3 -I "$BIN" --usd --since 2026-11-01)" || fail "USD report with XDG ledger path exited non-zero"
+contains 'delegate ledger total recordedUsd=0.000071500 entries=1 unpricedRecords=0'
+
+# A file argument or stdin remain legacy mode unless --usd is selected.
+EXPECT="$SUBLINE
+$BGLINE"
+OUT="$(AGENT_COST_ROOT="$T/p1" python3 -I "$BIN")" || fail "legacy output changed after USD mode"
+[ "$OUT" = "$EXPECT" ] || fail "legacy output changed after USD mode"
+
+# bad USD invocations fail clearly.
+check_bad --usd
+check_bad --since 2026-11-01
+check_bad --usd --since not-a-date
+
 echo "agent-cost: ok"
