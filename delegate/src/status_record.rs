@@ -3,6 +3,7 @@ use crate::util::{json_compact, random_uuid};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub trait StatusRecordWriter: Send + Sync {
     fn write(&self, job_id: &str, record: &PollResult);
@@ -248,6 +249,8 @@ pub struct CliRecord {
     #[serde(flatten)]
     pub poll: PollResult,
     pub supervisor_pid: u32,
+    pub started_at_ms: f64,
+    pub ended_at_ms: Option<f64>,
     pub caller: String,
     pub caller_pid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,6 +278,8 @@ pub struct CliRecordWriter {
     pub idle_ms: Option<f64>,
     pub wall_ms: Option<f64>,
     pub resumed_from: Option<String>,
+    pub started_at_ms: Mutex<Option<f64>>,
+    pub ended_at_ms: Mutex<Option<f64>>,
     pub last_session_id: Mutex<Option<String>>,
 }
 
@@ -283,6 +288,22 @@ impl StatusRecordWriter for CliRecordWriter {
         let mut poll = record.clone();
         if let PollResult::Terminal { result, .. } = &mut poll {
             result.job_id = Some(self.job_id.clone());
+        }
+        let started_at_ms = {
+            let mut started = self.started_at_ms.lock().unwrap_or_else(|e| e.into_inner());
+            *started.get_or_insert_with(epoch_ms)
+        };
+        let terminal = matches!(&poll, PollResult::Terminal { .. });
+        let ended_at_ms = {
+            let mut ended = self.ended_at_ms.lock().unwrap_or_else(|e| e.into_inner());
+            if terminal {
+                Some(*ended.get_or_insert_with(epoch_ms))
+            } else {
+                *ended
+            }
+        };
+        if let (PollResult::Terminal { result, .. }, Some(ended_at_ms)) = (&mut poll, ended_at_ms) {
+            result.duration_ms = Some((ended_at_ms - started_at_ms).max(0.0));
         }
         let current_session_id = match &poll {
             PollResult::Running { progress, .. } => progress.session_id.clone(),
@@ -302,6 +323,8 @@ impl StatusRecordWriter for CliRecordWriter {
         let rec = CliRecord {
             poll,
             supervisor_pid: std::process::id(),
+            started_at_ms,
+            ended_at_ms,
             caller: self.caller.clone(),
             caller_pid: self.caller_pid,
             caller_command: self.caller_command.clone(),
@@ -323,6 +346,38 @@ impl StatusRecordWriter for CliRecordWriter {
         if let Err(e) = res {
             eprintln!("cannot write status record {}: {e}", path.display());
         }
+    }
+}
+
+fn epoch_ms() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+
+fn set_terminal_timestamps(record: &mut serde_json::Map<String, serde_json::Value>) {
+    let ended_at_ms = epoch_ms();
+    let started_at_ms = record
+        .get("startedAtMs")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(ended_at_ms);
+    if record
+        .get("startedAtMs")
+        .and_then(serde_json::Value::as_f64)
+        .is_none()
+    {
+        record.insert("startedAtMs".into(), serde_json::json!(started_at_ms));
+    }
+    record.insert("endedAtMs".into(), serde_json::json!(ended_at_ms));
+    if let Some(result) = record
+        .get_mut("result")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        result.insert(
+            "durationMs".into(),
+            serde_json::json!((ended_at_ms - started_at_ms).max(0.0)),
+        );
     }
 }
 
@@ -352,6 +407,7 @@ pub fn write_supervisor_died(job_id: &str, prior: &serde_json::Value) -> std::io
             "jobId": job_id,
         }),
     );
+    set_terminal_timestamps(obj);
     write_atomic(&record_path(job_id), &json_compact(&rec))
 }
 
@@ -388,6 +444,7 @@ pub fn write_cancelled(job_id: &str, prior: &serde_json::Value) -> std::io::Resu
             "jobId": job_id,
         }),
     );
+    set_terminal_timestamps(obj);
     write_atomic(&record_path(job_id), &json_compact(&rec))
 }
 
@@ -645,6 +702,15 @@ mod tests {
         assert_eq!(cancelled["resume"]["sessionId"], "s-init");
         assert_eq!(cancelled["result"]["sessionId"], "s-init");
         assert_eq!(cancelled["result"]["backend"], "pi");
+        assert!(cancelled["startedAtMs"].is_number());
+        assert!(cancelled["endedAtMs"].is_number());
+        assert_eq!(
+            cancelled["result"]["durationMs"].as_f64(),
+            Some(
+                cancelled["endedAtMs"].as_f64().unwrap()
+                    - cancelled["startedAtMs"].as_f64().unwrap()
+            )
+        );
         let _ = fs::remove_file(job_record_path(&cancelled_id));
 
         let dead_id = random_uuid();
@@ -653,6 +719,12 @@ mod tests {
         assert_eq!(dead["resume"]["sessionId"], "s-init");
         assert_eq!(dead["result"]["sessionId"], "s-init");
         assert_eq!(dead["result"]["backend"], "pi");
+        assert!(dead["startedAtMs"].is_number());
+        assert!(dead["endedAtMs"].is_number());
+        assert_eq!(
+            dead["result"]["durationMs"].as_f64(),
+            Some(dead["endedAtMs"].as_f64().unwrap() - dead["startedAtMs"].as_f64().unwrap())
+        );
         let _ = fs::remove_file(job_record_path(&dead_id));
     }
 

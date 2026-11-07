@@ -353,6 +353,32 @@ run_job --slot lane --template "$T/tmpl-basic.md" --expect-commits
 [ "$RC" -eq 0 ] || fail "re-print exits 0"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=2 gate=PASS reused=stub-1 stale-head=bbbb now=* log=*" "re-print"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "re-print dispatches nothing new"
+[ "$(wc -l <"$CDIR/jobs.log" | tr -d ' ')" -eq 1 ] || fail "re-print does not append a duplicate jobs.log entry"
+
+# --- each fresh round appends its own job and includes missing usage explicitly
+setup_case jobs-log-rounds
+reset_stub
+make_record stub-1 DONE none 0 1 0
+jq '. + {startedAtMs: 1000, endedAtMs: 1200}
+    | .result += {usage: {inputTokens: 123, outputTokens: 45}, costUsd: 0.0123}' \
+  "$T/records/stub-1.json" >"$T/records/stub-1.json.tmp" && mv "$T/records/stub-1.json.tmp" "$T/records/stub-1.json" || fail "timestamp first round"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "first logged round exits 0"
+bash "$TKT_STATE" "$S" set job.lane "" || fail "clear first round slot"
+make_record stub-2 DONE none 0 1 0
+jq '. + {startedAtMs: 2000, endedAtMs: 2400}' "$T/records/stub-2.json" >"$T/records/stub-2.json.tmp" && mv "$T/records/stub-2.json.tmp" "$T/records/stub-2.json" || fail "timestamp second round"
+run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "second logged round exits 0"
+[ "$(wc -l <"$CDIR/jobs.log" | tr -d ' ')" -eq 2 ] || fail "each fresh round appends one jobs.log entry"
+jq -e -s '
+  length == 2
+  and .[0].phase == "build" and .[0].jobId == "stub-1"
+  and .[0].startedAtMs == 1000 and .[0].endedAtMs == 1200
+  and .[0].usage.inputTokens == 123 and .[0].costUsd == 0.0123
+  and .[1].phase == "build" and .[1].jobId == "stub-2"
+  and .[1].startedAtMs == 2000 and .[1].endedAtMs == 2400
+  and .[1].usage == "none" and .[1].costUsd == "none"
+' "$CDIR/jobs.log" >/dev/null || fail "jobs.log preserves rounds with times and usage or explicit none"
 
 # --- DONE with no gate and no commits, without --expect-commits ---
 setup_case done-plain

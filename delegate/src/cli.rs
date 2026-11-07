@@ -789,6 +789,8 @@ fn supervise(args: &[String]) -> i32 {
         caller_pid,
         caller_command,
         caller_cwd,
+        started_at_ms: std::sync::Mutex::new(None),
+        ended_at_ms: std::sync::Mutex::new(None),
         last_session_id: std::sync::Mutex::new(None),
         gate: gate.clone(),
         tool_idle_ms,

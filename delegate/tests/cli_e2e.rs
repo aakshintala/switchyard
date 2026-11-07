@@ -2140,6 +2140,17 @@ fn muse_run_applies_the_host_sandbox_switch() {
         let id = e.ok_output(&out);
         let done = e.wait_terminal(&id);
         assert_eq!(done["status"], "DONE", "{name}");
+        let started_at = done["startedAtMs"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{name}: missing startedAtMs in {done}"));
+        let ended_at = done["endedAtMs"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{name}: missing endedAtMs in {done}"));
+        assert!(ended_at >= started_at, "{name}: {done}");
+        assert_eq!(
+            done["result"]["durationMs"].as_f64(),
+            Some(ended_at - started_at)
+        );
         let argv: Vec<String> = std::fs::read_to_string(e.dir.join("argv.txt"))
             .unwrap()
             .lines()

@@ -325,6 +325,8 @@ fn failed_status_record_write_does_not_stop_job() {
             idle_ms: None,
             wall_ms: None,
             resumed_from: None,
+            started_at_ms: Mutex::new(None),
+            ended_at_ms: Mutex::new(None),
             last_session_id: Mutex::new(None),
         });
     });
