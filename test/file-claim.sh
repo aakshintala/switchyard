@@ -2,6 +2,13 @@
 # Tests for bin/file-claim. Exits non-zero on the first failed case.
 set -uo pipefail
 
+# grep -q may close a producer's pipe early; under pipefail that can fail a
+# passing assertion. Assert against captured output or a file instead.
+if grep -nE '[|][[:space:]]*grep[[:space:]]+-[[:alnum:]]*q[[:alnum:]]*([[:space:]]|$)|[|][[:space:]]*grep[[:space:]]+--quiet([[:space:]]|$)' "$0"; then
+  echo 'FAIL: grep -q assertions must not read producer pipelines under pipefail' >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FC="$SCRIPT_DIR/../bin/file-claim"
 . "$SCRIPT_DIR/../bin/lib/lane-ticket.sh"
@@ -181,7 +188,7 @@ for lane in "${valid_lanes[@]}"; do
 done
 blob="$(claims_blob "$R")"
 for lane in "${valid_lanes[@]}"; do
-  printf '%s\n' "$blob" | grep -q "^[^[:space:]]*${TAB}${lane}${TAB}grant${TAB}" || fail "claim with $lane is stored"
+  grep -q "^[^[:space:]]*${TAB}${lane}${TAB}grant${TAB}" <<<"$blob" || fail "claim with $lane is stored"
 done
 
 # Seed a historical malformed holder: these rows must remain visible and removable.
@@ -201,12 +208,12 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane "$invalid_lane" --repo test
 [ "$(printf '%s\n' "$out" | cut -f1-3)" = "$(printf 'a.txt\t%s\tgrant' "$invalid_lane")" ] || fail "list finds legacy claim for unnumbered lane: $out"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane "$invalid_lane" --repo test/repo a.txt 2>"$T/e-release-invalid")" || fail "release accepts an unnumbered lane: $(cat "$T/e-release-invalid")"
 [ "$out" = 'RELEASE a.txt' ] || fail "release removes legacy claim: $out"
-claims_blob "$R" | grep -q "^[^[:space:]]*${TAB}${invalid_lane}${TAB}grant${TAB}" && fail "release removes legacy claim row"
+grep -q "^[^[:space:]]*${TAB}${invalid_lane}${TAB}grant${TAB}" <<<"$(claims_blob "$R")" && fail "release removes legacy claim row"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane "$branch_lane" --repo test/repo 2>"$T/e-list-branch")" || fail "list accepts a branch-shaped legacy lane: $(cat "$T/e-list-branch")"
 [ "$(printf '%s\n' "$out" | cut -f1-3)" = "$(printf 'docs/workflow.md\t%s\tgrant' "$branch_lane")" ] || fail "list finds branch-shaped legacy claim: $out"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane "$branch_lane" --repo test/repo docs/workflow.md 2>"$T/e-release-branch")" || fail "release accepts a branch-shaped lane: $(cat "$T/e-release-branch")"
 [ "$out" = 'RELEASE docs/workflow.md' ] || fail "release removes branch-shaped legacy claim: $out"
-claims_blob "$R" | grep -q "^[^[:space:]]*${TAB}${branch_lane}${TAB}grant${TAB}" && fail "release removes branch-shaped legacy claim row"
+grep -q "^[^[:space:]]*${TAB}${branch_lane}${TAB}grant${TAB}" <<<"$(claims_blob "$R")" && fail "release removes branch-shaped legacy claim row"
 
 # --- ref absent on first use; new vs exists -----------------------------------
 R="$(fresh)"
@@ -215,7 +222,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt newfile.txt 2>"$T/e1")" ||
 [ "$out" = "$(printf 'GRANT a.txt exists\nGRANT newfile.txt new\nfile-claim: 2 granted, 0 refused')" ] || fail "new vs exists lines: $out"
 blob="$(claims_blob "$R")"
 [ "$(printf '%s\n' "$blob" | grep -c '^')" = "2" ] || fail "two claim lines stored"
-printf '%s' "$blob" | grep -q "^a.txt	fiber-4222	grant	" || fail "a.txt stored as grant"
+grep -q "^a.txt	fiber-4222	grant	" <<<"$blob" || fail "a.txt stored as grant"
 [ -n "$(claim_tip "$R")" ] || fail "claims ref created by first claim"
 
 # gh was asked for the full open-PR list, not the 30-PR default.
@@ -260,7 +267,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM a.txt newfile.txt 2>"$T/e2")" ||
 [ "$out" = "$(printf 'OVERLAP a.txt pr#42\nGRANT a.txt exists\nGRANT newfile.txt new\nfile-claim: 2 granted, 0 refused')" ] || fail "draft-PR overlap lines: $out"
 blob="$(claims_blob "$R")"
 [ "$(printf '%s\n' "$blob" | grep -c '^')" = "2" ] || fail "draft-PR overlap records both claims"
-printf '%s' "$blob" | grep -q "^a.txt${TAB}fiber-4222${TAB}grant${TAB}" || fail "draft-PR-held path is recorded"
+grep -q "^a.txt${TAB}fiber-4222${TAB}grant${TAB}" <<<"$blob" || fail "draft-PR-held path is recorded"
 
 # Every PR is reported when several PRs touch one path.
 printf '[{"number":9,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":3,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":5,"changedFiles":0,"files":[]}]' >"$T/prs2.json"
@@ -440,13 +447,13 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane sweep-4231 --grant --workt
 R="$(fresh)"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --paths --worktree t:dA --repo test/repo y-paths.txt 2>/dev/null)" || fail "--paths claim exits 0"
 [ "$out" = "$(printf 'GRANT y-paths.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "--paths claim output: $out"
-printf '%s' "$(claims_blob "$R")" | grep -q "^y-paths.txt${TAB}fiber-4223${TAB}plan${TAB}" || fail "--paths records the path claim"
+grep -q "^y-paths.txt${TAB}fiber-4223${TAB}plan${TAB}" <<<"$(claims_blob "$R")" || fail "--paths records the path claim"
 
 # A plan-kind claim using the legacy --plan alias is still accepted.
 # Re-claiming with the other kind keeps the recorded line: a no-op, not an upgrade.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --plan --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "legacy --plan alias claim exits 0"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo y.txt 2>/dev/null)" || fail "cross-kind re-claim exits 0"
-printf '%s' "$(claims_blob "$R")" | grep -q "^y.txt	fiber-4223	plan	" || fail "cross-kind re-claim keeps plan"
+grep -q "^y.txt	fiber-4223	plan	" <<<"$(claims_blob "$R")" || fail "cross-kind re-claim keeps plan"
 
 # a repeated path in one call is claimed once.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:dA --repo test/repo d.txt d.txt 2>/dev/null)" || fail "dup-path claim exits 0"
@@ -532,7 +539,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4229 --plan-file "$V
 [ "$out" = "$(printf 'GRANT y2.txt new\nGRANT sub/b.txt exists\nfile-claim: 2 granted, 0 refused')" ] || fail "valid plan lines: $out"
 blob="$(claims_blob "$R")"
 [ "$(cut -f1-3 <<<"$blob")" = "$(printf 'y2.txt\tfiber-4229\tplan\nsub/b.txt\tfiber-4229\tplan')" ] || fail "valid plan stores its Files paths as plan claims: $blob"
-printf '%s' "$blob" | grep -q "valid.md" && fail "valid plan file itself is not claimed"
+grep -q "valid.md" <<<"$blob" && fail "valid plan file itself is not claimed"
 
 # --- --plan-file claims writes only: reads and Reads-section entries stay out ---
 R="$(fresh)"
@@ -742,7 +749,7 @@ FILE_CLAIM_REMOTE="$CR" bash "$FC" claim --lane fiber-4222 --grant --worktree t:
 # warning naming it, and release removes it.
 CR="$(corrupt_remote ws "$(printf 'a.txt b.txt\tL\tplan\t2026-01-01T00:00:00Z\tt:d\t')")"
 out="$(FILE_CLAIM_REMOTE="$CR" bash "$FC" list --lane L --repo test/repo 2>"$T/e-ws")" || fail "list with composite row exits 0: $(cat "$T/e-ws")"
-printf '%s' "$out" | grep -qF "a.txt b.txt" || fail "list prints the composite row: $out"
+grep -qF "a.txt b.txt" <<<"$out" || fail "list prints the composite row: $out"
 grep -qF "a.txt b.txt" "$T/e-ws" || fail "list warns about the composite row: $(cat "$T/e-ws")"
 out="$(FILE_CLAIM_REMOTE="$CR" bash "$FC" release --lane L "a.txt b.txt" 2>"$T/e-rel")" || fail "release of composite row exits 0: $(cat "$T/e-rel")"
 [ "$out" = "RELEASE a.txt b.txt" ] || fail "release prints the composite path: $out"
@@ -756,8 +763,8 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane fiber-4223 x.txt 2>/dev/
 [ "$out" = "RELEASE x.txt" ] || fail "release named line: $out"
 blob="$(claims_blob "$R")"
 [ "$(printf '%s\n' "$blob" | grep -c '^')" = "2" ] || fail "one line released"
-printf '%s' "$blob" | grep -q "^y.txt	fiber-4223	grant	" || fail "y's claim kept"
-printf '%s' "$blob" | grep -q "^z.txt	fiber-4224	grant	" || fail "B's claim kept"
+grep -q "^y.txt	fiber-4223	grant	" <<<"$blob" || fail "y's claim kept"
+grep -q "^z.txt	fiber-4224	grant	" <<<"$blob" || fail "B's claim kept"
 # releasing a path another lane holds drops nothing.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" release --lane fiber-4223 z.txt 2>/dev/null)" || fail "foreign release exits 0"
 [ -z "$out" ] || fail "foreign release prints nothing"
@@ -780,7 +787,7 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" prune --lane fiber-4223 --repo test/rep
 [ "$out" = "$(printf 'RELEASE prune-a.txt\nRELEASE prune-b.txt')" ] || fail "prune releases lane rows: $out"
 blob="$(claims_blob "$R")"
 [ "$(printf '%s\n' "$blob" | grep -c '^')" = "1" ] || fail "prune leaves one other-lane row"
-printf '%s' "$blob" | grep -q "^prune-keep.txt${TAB}fiber-4224${TAB}grant${TAB}" || fail "prune preserves other lane's claim"
+grep -q "^prune-keep.txt${TAB}fiber-4224${TAB}grant${TAB}" <<<"$blob" || fail "prune preserves other lane's claim"
 
 # --- list -------------------------------------------------------------------------------
 R="$(fresh)"
@@ -790,9 +797,9 @@ FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4224 --grant --worktree t:w
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>/dev/null)" || fail "list exits 0"
 [ "$(printf '%s\n' "$out" | grep -c '^')" = "3" ] || fail "list has 3 lines: $out"
 [ "$(printf '%s' "$out" | cut -f1 | tr '\n' ' ')" = "f1.txt f2.txt f3.txt " ] || fail "list sorted by path: $out"
-printf '%s' "$out" | grep -Eq "^f1.txt	fiber-4223	plan	[0-9]+	t:wtA	$" || fail "list plan line: $out"
-printf '%s' "$out" | grep -Eq "^f2.txt	fiber-4223	grant	[0-9]+	t:wtA	$" || fail "list grant line: $out"
-printf '%s' "$out" | grep -Eq "^f3.txt	fiber-4224	grant	[0-9]+	t:wtB	7$" || fail "list pr passthrough: $out"
+grep -Eq "^f1.txt	fiber-4223	plan	[0-9]+	t:wtA	$" <<<"$out" || fail "list plan line: $out"
+grep -Eq "^f2.txt	fiber-4223	grant	[0-9]+	t:wtA	$" <<<"$out" || fail "list grant line: $out"
+grep -Eq "^f3.txt	fiber-4224	grant	[0-9]+	t:wtB	7$" <<<"$out" || fail "list pr passthrough: $out"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane fiber-4223 --repo test/repo 2>/dev/null)" || fail "list --lane exits 0"
 [ "$(printf '%s\n' "$out" | grep -c '^')" = "2" ] || fail "list --lane filters: $out"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane NOBODY --repo test/repo 2>/dev/null)" || fail "list empty lane exits 0"
@@ -805,11 +812,11 @@ export GH_PRS_JSON="$T/prs-list-pr.json"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4223 --grant --worktree t:wtA --repo test/repo f1.txt >/dev/null 2>&1 || fail "list-pr setup"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>/dev/null)" || fail "list with PR rows exits 0"
 [ "$(printf '%s\n' "$out" | grep -c '^')" = "2" ] || fail "list has claim plus PR rows: $out"
-printf '%s' "$out" | grep -Eq "^p.txt	pr#11	pr	-	-	11$" || fail "list PR row: $out"
-printf '%s' "$out" | grep -Eq "^f1.txt	fiber-4223	grant	[0-9]+	t:wtA	$" || fail "list keeps claim rows: $out"
+grep -Eq "^p.txt	pr#11	pr	-	-	11$" <<<"$out" || fail "list PR row: $out"
+grep -Eq "^f1.txt	fiber-4223	grant	[0-9]+	t:wtA	$" <<<"$out" || fail "list keeps claim rows: $out"
 [ "$(printf '%s' "$out" | cut -f1 | tr '\n' ' ')" = "f1.txt p.txt " ] || fail "list sorts PR rows with claims: $out"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane fiber-4223 --repo test/repo 2>/dev/null)" || fail "list --lane exits 0"
-printf '%s' "$out" | grep -q "pr#" && fail "list --lane omits PR rows: $out"
+grep -q "pr#" <<<"$out" && fail "list --lane omits PR rows: $out"
 [ "$(printf '%s\n' "$out" | grep -c '^')" = "1" ] || fail "list --lane has claim rows only: $out"
 # A failed PR-file read fails list closed.
 GH_LIST_FAIL_COUNT="$T/gh-list-fail-count"
@@ -823,7 +830,7 @@ export GH_PRS_JSON="$T/prs-empty.json"
 R="$(fresh)"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4230 --grant --repo test/repo w.txt >/dev/null 2>&1 || fail "default worktree claim exits 0"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane fiber-4230 --repo test/repo 2>/dev/null)" || fail "default worktree list exits 0"
-printf '%s' "$out" | grep -Eq "^w.txt	fiber-4230	grant	[0-9]+	$(hostname -s):$(pwd)	$" || fail "default worktree: $out"
+grep -Eq "^w.txt	fiber-4230	grant	[0-9]+	$(hostname -s):$(pwd)	$" <<<"$out" || fail "default worktree: $out"
 
 # --- forced non-fast-forward retries and succeeds -----------------------------------------
 R="$(fresh)"
@@ -847,8 +854,8 @@ out="$(PATH="$T/gitwrap:$PATH" FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fi
 [ "$out" = "$(printf 'GRANT outer.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "NFF lines: $out"
 [ "$(wc -l <"$T/push.log")" -ge 3 ] || fail "push retried after NFF"
 blob="$(claims_blob "$R")"
-printf '%s' "$blob" | grep -q "^outer.txt	fiber-4227	grant	" || fail "outer claim recorded after retry"
-printf '%s' "$blob" | grep -q "^rival.txt	fiber-4235	grant	" || fail "rival claim kept after retry"
+grep -q "^outer.txt	fiber-4227	grant	" <<<"$blob" || fail "outer claim recorded after retry"
+grep -q "^rival.txt	fiber-4235	grant	" <<<"$blob" || fail "rival claim kept after retry"
 PATH="$T/stubbin:$PATH"
 
 # a push failure that is not a non-fast-forward exits 2 at once.
@@ -876,7 +883,7 @@ chmod +x "$R/hooks/update"
 out="$(COMMIT_HOOK_COUNT="$COMMIT_COUNT" FILE_CLAIM_PUSH_WAIT=0 FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM retry.txt 2>"$T/e-commit-refs")" || fail "commit_refs retry claim exits 0: $(cat "$T/e-commit-refs")"
 [ "$out" = "$(printf 'GRANT retry.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "commit_refs retry lines: $out"
 [ "$(cat "$COMMIT_COUNT")" = "3" ] || fail "commit_refs retried twice then pushed: $(cat "$COMMIT_COUNT")"
-printf '%s' "$(claims_blob "$R")" | grep -q "^retry.txt	fiber-4222	grant	" || fail "commit_refs retry recorded"
+grep -q "^retry.txt	fiber-4222	grant	" <<<"$(claims_blob "$R")" || fail "commit_refs retry recorded"
 
 # persistent commit_refs failure exits 2 with the server message after 3 tries.
 R="$(fresh)"
@@ -976,9 +983,9 @@ done
 diag_out="$( (race_round diag "$D" diag.txt) 2>&1 )"
 diag_rc=$?
 [ "$diag_rc" = "1" ] || fail "diagnostic round exits 1, got $diag_rc: $diag_out"
-printf '%s\n' "$diag_out" | grep -qxF 'round diag: lane 1 (exit 2) stderr:' || fail "lane 1 dump label: $diag_out"
-printf '%s\n' "$diag_out" | grep -qxF 'round diag: lane 2 (exit 2) stderr:' || fail "lane 2 dump label: $diag_out"
-printf '%s\n' "$diag_out" | grep -qF "  file-claim: cannot fetch main from $D" || fail "lane stderr dumped: $diag_out"
-printf '%s\n' "$diag_out" | grep -qxF 'FAIL: round diag: exits 2 and 2, want both 0' || fail "failure line kept: $diag_out"
+grep -qxF 'round diag: lane 1 (exit 2) stderr:' <<<"$diag_out" || fail "lane 1 dump label: $diag_out"
+grep -qxF 'round diag: lane 2 (exit 2) stderr:' <<<"$diag_out" || fail "lane 2 dump label: $diag_out"
+grep -qF "  file-claim: cannot fetch main from $D" <<<"$diag_out" || fail "lane stderr dumped: $diag_out"
+grep -qxF 'FAIL: round diag: exits 2 and 2, want both 0' <<<"$diag_out" || fail "failure line kept: $diag_out"
 
 echo "file-claim tests passed"
