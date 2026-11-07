@@ -389,47 +389,41 @@ write_findings_history() {
   local rounds_csv="" rounds_seen="" earlier=0 label
   local i found new_raised
   local -a history_base=() history_raised=() history_status=() history_unverified=() verify_open=()
+  history_add_row() {
+    local mode="$1" default_raised="$2" row="$3" base meta parsed_raised parsed_status parsed_unverified raised status unverified i
+    case "$row" in P1\ *|P2\ *|P3\ *) ;; *) return 0;; esac
+    base="$row"; meta=""
+    case "$row" in
+      *" [tkt-history:"*)
+        base="${row%% [tkt-history:*}"
+        meta="${row#* [tkt-history: }"; meta="${meta%]}" ;;
+    esac
+    parsed_raised="$(sed -n 's/.*raised=\([^;]*\).*/\1/p' <<<"$meta")"
+    parsed_status="$(sed -n 's/.*status=\([^;]*\).*/\1/p' <<<"$meta")"
+    parsed_unverified="$(sed -n 's/.*unverified=\([^;]*\).*/\1/p' <<<"$meta")"
+    case "$mode" in
+      history)
+        raised="${parsed_raised:-$default_raised}"
+        status="${parsed_status:-open}"
+        unverified="$parsed_unverified" ;;
+      current)
+        raised="$default_raised"; status=open; unverified="" ;;
+      round)
+        raised="$default_raised"
+        status="${parsed_status:-open}"
+        unverified="$parsed_unverified" ;;
+    esac
+    for i in "${!history_base[@]}"; do [ "${history_base[$i]}" = "$base" ] && return 0; done
+    history_base+=("$base"); history_raised+=("$raised"); history_status+=("$status"); history_unverified+=("$unverified")
+  }
   history_source="$(t get findings_history 2>/dev/null || true)"
   if [ -n "$history_source" ] && [ -r "$history_source" ]; then
-    while IFS= read -r row; do
-      case "$row" in P1\ *|P2\ *|P3\ *)
-        base="$row"; meta=""
-        case "$row" in
-          *" [tkt-history:"*)
-            base="${row%% [tkt-history:*}"
-            meta="${row#* [tkt-history: }"; meta="${meta%]}" ;;
-        esac
-        raised="$(sed -n 's/.*raised=\([^;]*\).*/\1/p' <<<"$meta")"
-        status="$(sed -n 's/.*status=\([^;]*\).*/\1/p' <<<"$meta")"
-        unverified="$(sed -n 's/.*unverified=\([^;]*\).*/\1/p' <<<"$meta")"
-        [ -n "$raised" ] || raised=unknown
-        [ -n "$status" ] || status=open
-        [ -n "$unverified" ] || unverified=""
-        found=0
-        for i in "${!history_base[@]}"; do [ "${history_base[$i]}" = "$base" ] && found=1 && break; done
-        if [ "$found" -eq 0 ]; then
-          history_base+=("$base"); history_raised+=("$raised"); history_status+=("$status"); history_unverified+=("$unverified")
-        fi
-        ;;
-      esac
-    done <"$history_source"
+    while IFS= read -r row; do history_add_row history unknown "$row"; done <"$history_source"
   fi
   # The first findings file is round 0's posted review. Later untracked input
   # is labelled unknown rather than being assigned a round without evidence.
   if [ "${#history_base[@]}" -eq 0 ] && { [ -z "$history_source" ] || [ ! -r "$history_source" ]; }; then new_raised="raised in review round 0"; else new_raised="raised in unknown round"; fi
-  while IFS= read -r row; do
-    case "$row" in P1\ *|P2\ *|P3\ *)
-      base="$row"
-      case "$base" in *" [tkt-history:"*) base="${base%% [tkt-history:*}";; esac
-      found=0
-      for i in "${!history_base[@]}"; do [ "${history_base[$i]}" = "$base" ] && found=1 && break; done
-      if [ "$found" -eq 0 ]; then
-        raised="$new_raised"; status=open; unverified=""
-        history_base+=("$base"); history_raised+=("$raised"); history_status+=("$status"); history_unverified+=("$unverified")
-      fi
-      ;;
-    esac
-  done <"$findings"
+  while IFS= read -r row; do history_add_row current "$new_raised" "$row"; done <"$findings"
   if [ -n "$round_list_file" ] && [ -r "$round_list_file" ]; then
     while IFS= read -r round_no; do
       case "$round_no" in ''|*[!0-9]*) continue;; esac
@@ -437,26 +431,7 @@ write_findings_history() {
       round_path="$(t get "fix_round.$round_no.findings" 2>/dev/null || true)"
       [ -n "$round_path" ] && [ -r "$round_path" ] || continue
       if [ "$round_no" -eq 1 ]; then raised="raised in review round 0"; else raised="raised in fix round $((round_no - 1))"; fi
-      while IFS= read -r row; do
-        case "$row" in P1\ *|P2\ *|P3\ *)
-          base="$row"; meta=""
-          case "$row" in
-            *" [tkt-history:"*)
-              base="${row%% [tkt-history:*}"
-              meta="${row#* [tkt-history: }"; meta="${meta%]}" ;;
-          esac
-          found=0
-          for i in "${!history_base[@]}"; do [ "${history_base[$i]}" = "$base" ] && found=1 && break; done
-          if [ "$found" -eq 0 ]; then
-            status="$(sed -n 's/.*status=\([^;]*\).*/\1/p' <<<"$meta")"
-            unverified="$(sed -n 's/.*unverified=\([^;]*\).*/\1/p' <<<"$meta")"
-            [ -n "$status" ] || status=open
-            [ -n "$unverified" ] || unverified=""
-            history_base+=("$base"); history_raised+=("$raised"); history_status+=("$status"); history_unverified+=("$unverified")
-          fi
-          ;;
-        esac
-      done <"$round_path"
+      while IFS= read -r row; do history_add_row round "$raised" "$row"; done <"$round_path"
     done <"$round_list_file"
   fi
   if [ -n "$verify_output" ] && [ -r "$verify_output" ]; then
