@@ -23,8 +23,8 @@ fail() {
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-file-claim.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/home" "$T/tmp"
-export HOME="$T/home" TMPDIR="$T/tmp"
+mkdir -p "$T/home" "$T/tmp" "$T/run"
+export HOME="$T/home" TMPDIR="$T/tmp" FW_RUN="$T/run"
 
 # --- stub gh: serves a fixture PR list, or fails on demand ------------------
 mkdir -p "$T/stubbin"
@@ -52,6 +52,26 @@ if [ "$1" = "pr" ] && [ "$2" = "diff" ]; then
   exit 1
 fi
 if [ "$1" = "api" ]; then
+  if [ "${2:-}" = graphql ]; then
+    [ "${GH_TICKET_FAIL:-0}" != 1 ] || { echo 'ticket state stub failure' >&2; exit 1; }
+    [ "${GH_TICKET_BAD:-0}" != 1 ] || { printf 'not graphql json'; exit 0; }
+    query=""
+    for arg in "$@"; do case "$arg" in query=*) query="${arg#query=}";; esac; done
+    python3 -c 'import json,re,sys
+query, configured, omitted = sys.argv[1:]
+states = {}
+for item in configured.split(","):
+  if ":" in item:
+    number, state = item.split(":", 1)
+    states[number] = state
+omit = set(omitted.split(","))
+result = {}
+for alias, number in re.findall(r"(\w+):\s*issueOrPullRequest\(number:\s*(\d+)\)", query):
+  if number not in omit:
+    result[alias] = {"state": states.get(number, "OPEN")}
+print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATES:-}" "${GH_TICKET_OMIT:-}"
+    exit 0
+  fi
   url=""
   for arg in "$@"; do case "$arg" in repos/*/pulls/*/files\?*) url="$arg";; esac; done
   pr="${url#*/pulls/}"; pr="${pr%%/*}"
@@ -80,7 +100,7 @@ cat "$GH_PRS_JSON"
 STUB_EOF
 chmod +x "$T/stubbin/gh"
 PATH="$T/stubbin:$PATH"
-export PATH
+export PATH FW_GH="$T/stubbin/gh"
 export GH_ARGS_LOG="$T/gh-args.log"
 : >"$GH_ARGS_LOG"
 export GH_PRS_JSON="$T/prs-empty.json"
@@ -987,5 +1007,53 @@ grep -qxF 'round diag: lane 1 (exit 2) stderr:' <<<"$diag_out" || fail "lane 1 d
 grep -qxF 'round diag: lane 2 (exit 2) stderr:' <<<"$diag_out" || fail "lane 2 dump label: $diag_out"
 grep -qF "  file-claim: cannot fetch main from $D" <<<"$diag_out" || fail "lane stderr dumped: $diag_out"
 grep -qxF 'FAIL: round diag: exits 2 and 2, want both 0' <<<"$diag_out" || fail "failure line kept: $diag_out"
+
+# --- closed ticket and PR holds are reaped safely -------------------------------
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6001 --grant --worktree t:closed --repo test/repo closed.txt >/dev/null 2>&1 || fail "closed-ticket claim setup"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6002 --grant --worktree t:open --repo test/repo open.txt >/dev/null 2>&1 || fail "open-ticket claim setup"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6003 --grant --worktree t:pr --repo test/repo --self-pr 92 pr-closed.txt >/dev/null 2>&1 || fail "closed-PR claim setup"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane sweep-6004 --grant --worktree t:sweep --repo test/repo sweep.txt >/dev/null 2>&1 || fail "sweep claim setup"
+printf 'Grant 1\n\nTicket: 6001\nPaths:\n- closed.txt\n' >"$FW_RUN/fiber-6001-fence-grant-1.md"
+printf 'Grant 1\n\nTicket: 6002\nPaths:\n- open.txt\n' >"$FW_RUN/fiber-6002-fence-grant-1.md"
+printf 'Grant 1\n\nTicket: 92\nPaths:\n- pr-closed.txt\n' >"$FW_RUN/fiber-92-fence-grant-1.md"
+out="$(GH_TICKET_STATES='6001:CLOSED,6002:OPEN,6003:OPEN,92:MERGED,6004:CLOSED' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap")" || fail "reap succeeds: $(cat "$T/e-reap")"
+[ "$(grep -c '^REAP ' <<<"$out")" = 4 ] || fail "reap reports each dropped claim and grant: $out"
+grep -qF 'REAP claim closed.txt by fiber-6001' <<<"$out" || fail "closed-ticket claim reported: $out"
+grep -qF 'REAP claim pr-closed.txt by fiber-6003' <<<"$out" || fail "closed-PR claim reported: $out"
+grep -qF 'REAP grant fiber-6001-fence-grant-1.md' <<<"$out" || fail "closed-ticket grant reported: $out"
+grep -qF 'REAP grant fiber-92-fence-grant-1.md' <<<"$out" || fail "merged-PR grant reported: $out"
+[ ! -e "$FW_RUN/fiber-6001-fence-grant-1.md" ] || fail "closed-ticket grant removed"
+[ ! -e "$FW_RUN/fiber-92-fence-grant-1.md" ] || fail "merged-PR grant removed"
+[ -e "$FW_RUN/fiber-6002-fence-grant-1.md" ] || fail "open-ticket grant kept"
+[ "$(claims_blob "$R" | grep -c '^')" = 2 ] || fail "open and sweep claims remain after reap"
+list="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>/dev/null)" || fail "list after reap succeeds"
+grep -qF 'open.txt' <<<"$list" || fail "open-ticket claim remains on next check: $list"
+grep -qF 'sweep.txt' <<<"$list" || fail "sweep claim remains after closed ticket: $list"
+! grep -qF 'closed.txt' <<<"$list" || fail "closed-ticket claim is gone on next check: $list"
+
+# A stale-only holder is removed before a sweep claimant decides whether it can grant.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6010 --grant --worktree t:old --repo test/repo p.txt >/dev/null 2>&1 || fail "stale-only holder setup"
+out="$(GH_TICKET_STATES='6010:CLOSED' FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane sweep-6011 --grant --worktree t:new --repo test/repo p.txt 2>"$T/e-reap-guard")" || fail "stale-only holder no longer refuses: $(cat "$T/e-reap-guard")"
+grep -qF 'REAP claim p.txt by fiber-6010' <<<"$out" || fail "guard reports automatic stale reap: $out"
+grep -qF 'GRANT p.txt new' <<<"$out" || fail "guard grants after stale holder is removed: $out"
+[ "$(claims_blob "$R" | grep -c '^')" = 1 ] || fail "stale-only holder was replaced by claimant"
+
+# A failed or partial ticket-state response keeps every hold in the batch.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6020 --grant --worktree t:one --repo test/repo fail-closed.txt >/dev/null 2>&1 || fail "lookup-failure setup 1"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6021 --grant --worktree t:two --repo test/repo fail-open.txt >/dev/null 2>&1 || fail "lookup-failure setup 2"
+printf 'Grant 1\n\nTicket: 6020\nPaths:\n- fail-closed.txt\n' >"$FW_RUN/fiber-6020-fence-grant-1.md"
+printf 'Grant 1\n\nTicket: 6021\nPaths:\n- fail-open.txt\n' >"$FW_RUN/fiber-6021-fence-grant-1.md"
+before="$(claims_blob "$R")"
+out="$(GH_TICKET_FAIL=1 GH_TICKET_STATES='6020:CLOSED,6021:OPEN' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-fail")" || fail "failed lookup is a safe no-op: $(cat "$T/e-reap-fail")"
+[ -z "$out" ] || fail "failed lookup reports no drops: $out"
+[ "$(claims_blob "$R")" = "$before" ] || fail "failed lookup keeps every claim"
+[ -e "$FW_RUN/fiber-6020-fence-grant-1.md" ] && [ -e "$FW_RUN/fiber-6021-fence-grant-1.md" ] || fail "failed lookup keeps every fence grant"
+out="$(GH_TICKET_OMIT=6021 GH_TICKET_STATES='6020:CLOSED' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-partial")" || fail "partial lookup is a safe no-op: $(cat "$T/e-reap-partial")"
+[ -z "$out" ] || fail "partial lookup reports no drops: $out"
+[ "$(claims_blob "$R")" = "$before" ] || fail "partial lookup keeps every claim"
+[ -e "$FW_RUN/fiber-6020-fence-grant-1.md" ] && [ -e "$FW_RUN/fiber-6021-fence-grant-1.md" ] || fail "partial lookup keeps every fence grant"
 
 echo "file-claim tests passed"

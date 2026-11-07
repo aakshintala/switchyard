@@ -391,6 +391,7 @@ done
 self_dir="$(cd "$(dirname "$self")" && pwd)"
 # shellcheck disable=SC1091
 . "$self_dir/lib/lane-ticket.sh"
+. "$self_dir/lib/ticket-state.sh"
 file_claim="${FW_FILE_CLAIM:-$self_dir/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"
@@ -829,6 +830,11 @@ overlaps=""
 
 # file-claim is a holder source too. Validate the complete list before using
 # any row; a failed or partial read must never turn into an empty fence.
+# Before a real grant, remove closed-ticket claims and fence-grant files so
+# they cannot survive into this guard's holder checks.
+if [ "$dry" -eq 0 ]; then
+  "$file_claim" reap --repo "$repo" || { echo "ERROR file-claim reap failed"; exit 3; }
+fi
 claims_out="$tmp/claims.out"
 claims_err="$tmp/claims.err"
 if "$file_claim" list --repo "$repo" >"$claims_out" 2>"$claims_err"; then
@@ -904,80 +910,40 @@ _log_refusal() {
   return 0
 }
 
-# Collect every relevant claim ticket once. Closed-ticket claims are stale
-# regardless of live lane names; open or unknown tickets continue through
-# liveness checks, and sweep claims remain exclusive without a state lookup.
+# A dry run does not reap persisted state. It still uses the shared lookup so
+# its report labels closed-ticket claims as STALE. Real grants already reaped
+# before reading claims above, so they need no second GraphQL lookup.
 : >"$tmp/ticket-numbers.tsv"
-: >"$tmp/ticket-states.tsv"
-while IFS="$(printf '\t')" read -r claim_path claim_lane claim_age; do
-  [ -n "$claim_path" ] || continue
-  [[ "$claim_lane" == sweep-* ]] && continue
-  claim_num=$(lane_ticket_num "$claim_lane")
-  [ -n "$claim_num" ] || continue
-  [ "$claim_num" = "$ticket" ] && continue
-  case " $ignoreticket " in *" $claim_num "*) continue;; esac
-  printf '%s\n' "$claim_num" >>"$tmp/ticket-numbers.tsv"
-done <"$tmp/claims.tsv"
-if ! sort -un "$tmp/ticket-numbers.tsv" -o "$tmp/ticket-numbers.tsv" 2>"$tmp/ticket-sort.err"; then
-  g=$(head -c 200 "$tmp/ticket-sort.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
-  [ -n "$g" ] || g="ticket list sort failed"
-  echo "WARN ticket state lookup $g; claims held by lane liveness"
-elif [ -s "$tmp/ticket-numbers.tsv" ]; then
-  if ticket_state_query=$(python3 -c 'import sys
-numbers = [line.strip() for line in sys.stdin if line.strip()]
-fields = " ".join("ticket_%s: issueOrPullRequest(number: %s) { ... on Issue { state } ... on PullRequest { state } }" % (number, number) for number in numbers)
-print("query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { " + fields + " } }")' <"$tmp/ticket-numbers.tsv" 2>"$tmp/ticket-query.err"); then
-    ticket_owner=${repo%%/*}
-    ticket_repo=${repo#*/}
-    if "${FW_GH:-gh}" api graphql -F "owner=$ticket_owner" -F "name=$ticket_repo" -f "query=$ticket_state_query" >"$tmp/ticket-state.json" 2>"$tmp/ticket-state.err"; then
-      : >"$tmp/ticket-state-warnings.tsv"
-      if ! python3 -c 'import json,sys
-try:
-  numbers = [line.strip() for line in open(sys.argv[1]) if line.strip()]
-  response = json.load(open(sys.argv[2]))
-  repository = response["data"]["repository"]
-  if not isinstance(repository, dict):
-    sys.exit(1)
-  rows = []
-  warnings = []
-  for number in numbers:
-    alias = "ticket_" + number
-    if alias not in repository or repository[alias] is None:
-      warnings.append("ticket #" + number + " missing from response")
-      continue
-    item = repository[alias]
-    if not isinstance(item, dict):
-      sys.exit(1)
-    state = item.get("state")
-    if state in ("OPEN", "CLOSED", "MERGED"):
-      rows.append((number, state))
-    else:
-      if isinstance(state, str):
-        reason = state.replace("\n", " ").replace("\r", " ").replace("\t", " ")
-      else:
-        reason = json.dumps(state, separators=(",", ":"))
-      warnings.append("ticket #" + number + " unknown state " + reason)
-except Exception:
-  sys.exit(1)
-for number, state in rows:
-  print(number + "\t" + state)
-with open(sys.argv[3], "w") as output:
-  for warning in warnings:
-    output.write(warning + "\n")' "$tmp/ticket-numbers.tsv" "$tmp/ticket-state.json" "$tmp/ticket-state-warnings.tsv" >"$tmp/ticket-states.tsv" 2>/dev/null; then
-        : >"$tmp/ticket-states.tsv"
-        echo "WARN ticket state lookup unreadable response; claims held by lane liveness"
-      else
-        while IFS= read -r warning; do
-          echo "WARN ticket state lookup $warning; claims held by lane liveness"
-        done <"$tmp/ticket-state-warnings.tsv"
-      fi
-    else
-      g=$(head -c 200 "$tmp/ticket-state.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+: >"$tmp/ticket-states.states"
+if [ "$dry" -eq 1 ]; then
+  while IFS="$(printf '\t')" read -r claim_path claim_lane claim_age; do
+    [ -n "$claim_path" ] || continue
+    [[ "$claim_lane" == sweep-* ]] && continue
+    claim_num=$(lane_ticket_num "$claim_lane")
+    [ -n "$claim_num" ] || continue
+    [ "$claim_num" = "$ticket" ] && continue
+    case " $ignoreticket " in *" $claim_num "*) continue;; esac
+    printf '%s\n' "$claim_num" >>"$tmp/ticket-numbers.tsv"
+  done <"$tmp/claims.tsv"
+  if ! sort -un "$tmp/ticket-numbers.tsv" -o "$tmp/ticket-numbers.tsv" 2>"$tmp/ticket-sort.err"; then
+    g=$(head -c 200 "$tmp/ticket-sort.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+    [ -n "$g" ] || g="ticket list sort failed"
+    echo "WARN ticket state lookup $g; claims held by lane liveness"
+  elif [ -s "$tmp/ticket-numbers.tsv" ]; then
+    ticket_state_prefix="$tmp/ticket-states"
+    ticket_lookup_rc=0
+    ticket_states_lookup "$repo" "$tmp/ticket-numbers.tsv" "$ticket_state_prefix" || ticket_lookup_rc=$?
+    if [ "$ticket_lookup_rc" -eq 1 ]; then
+      g=$(head -c 200 "$ticket_state_prefix.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
       [ -n "$g" ] || g="gh api graphql failed"
       echo "WARN ticket state lookup $g; claims held by lane liveness"
+    elif [ "$ticket_lookup_rc" -eq 2 ]; then
+      echo "WARN ticket state lookup unreadable response; claims held by lane liveness"
+    else
+      while IFS= read -r warning; do
+        echo "WARN ticket state lookup $warning; claims held by lane liveness"
+      done <"$ticket_state_prefix.warnings"
     fi
-  else
-    echo "WARN ticket state lookup query build failed; claims held by lane liveness"
   fi
 fi
 
@@ -990,7 +956,7 @@ _claim_holders() {
       case " $ignoreticket " in *" $claim_num "*) continue;; esac
     fi
     if [[ "$claim_lane" != sweep-* ]] && [ -n "$claim_num" ]; then
-      claim_state=$(awk -F '\t' -v number="$claim_num" '$1 == number { print $2; exit }' "$tmp/ticket-states.tsv")
+      claim_state=$(awk -F '\t' -v number="$claim_num" '$1 == number { print $2; exit }' "$tmp/ticket-states.states")
       case "$claim_state" in
         CLOSED|MERGED)
           echo "STALE $claim_path by $claim_lane (ticket #$claim_num closed)"

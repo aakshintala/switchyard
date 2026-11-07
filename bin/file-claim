@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # file-claim: lanes self-grant files via a claims ref in the claim repo.
+# Claim IDs must be exactly fiber-<n> or sweep-<n>...
+# Claim lanes need a ticket number; release and list accept any lane ID.
+# Usage: file-claim claim --lane ID (--paths PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
+#        file-claim release --lane ID [--repo R] [PATH...]
+#        file-claim prune --lane ID [--repo R]
+#        file-claim list [--lane ID] [--repo R]
+#        file-claim reap [--repo R]
 # Ordinary lane and PR overlaps are advisory; sweep-* lanes hold paths exclusively.
 # Claim batches are all-or-nothing only when a sweep or the grant cap refuses a path.
-# Usage: file-claim claim --lane ID (--paths PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
-# Claim IDs must be exactly fiber-<n> or sweep-<n>...
-#        file-claim release --lane ID [--repo R] [PATH...]
-#        file-claim list [--lane ID] [--repo R]
-# Claim lanes need a ticket number; release and list accept any lane ID.
+# Reap drops closed-ticket or closed/merged-PR claims and fence-grant files; sweep-* claims stay held.
 # Without --lane, list adds one row per open-PR path: <path> pr#N pr - - N.
 # FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5); N must be a positive integer.
 # FILE_CLAIM_READ_WAIT=N sets the retry wait in whole seconds (default 1).
@@ -31,6 +34,7 @@ usage() {
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
   echo "       file-claim prune --lane ID [--repo R]  (release all rows for the lane)" >&2
   echo "       file-claim list [--lane ID] [--repo R]  (no --lane adds one row per open-PR path)" >&2
+  echo "       file-claim reap [--repo R]  (drop closed-ticket and closed/merged-PR claims and fence-grant files)" >&2
   echo "       FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5)" >&2
   exit 2
 }
@@ -52,6 +56,7 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 # shellcheck disable=SC1091
 . "$script_dir/lib/lane-ticket.sh"
 . "$script_dir/lib/plan-tokens.sh"
+. "$script_dir/lib/ticket-state.sh"
 W=""
 cleanup() { if [ -n "$W" ] && [ -d "$W" ]; then rm -rf "$W"; fi; }
 trap cleanup EXIT
@@ -215,6 +220,8 @@ cmd_claim() {
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [ $# -gt 0 ] || usage
   for p in "$@"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
+  # Reap terminal ticket/PR holds before deciding whether this claim can run.
+  "$script_dir/file-claim" reap --repo "$repo" || die 2 "cannot reap claims before claim"
   paths=()
   for p in "$@"; do
     held=0
@@ -318,6 +325,136 @@ cmd_release() {
   done
   die 2 "cannot push $REF: still rejected after $TRIES tries"
 }
+ticket_state_is_terminal() {
+  local number="$1" states="$2" state
+  state="$(awk -F '\t' -v n="$number" '$1 == n { print $2; exit }' "$states")"
+  case "$state" in CLOSED|MERGED) return 0;; esac
+  return 1
+}
+
+cmd_reap() {
+  local repo="$1" remote run_dir attempt=1 tip claims numbers prefix lookup_rc expected actual
+  local line c_path c_lane c_kind c_at c_wt c_pr ticket pr_number reason path
+  local kept dropped dropped_files grant_file base grant_ticket
+  remote="$(default_remote "$repo")"
+  run_dir="$(ticket_states_run_dir)"
+  new_workdir
+  while [ "$attempt" -le "$TRIES" ]; do
+    fetch_main_tip "$remote" >/dev/null
+    tip="$(fetch_claim_tip "$remote")"
+    claims="$W/claims.tsv"
+    load_claims "$tip" "$claims"
+    numbers="$W/ticket-numbers.tsv"
+    : >"$numbers"
+    while IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr || [ -n "$c_path" ]; do
+      [ -n "$c_path" ] || continue
+      case "$c_lane" in sweep-*) continue;; esac
+      ticket="$(lane_ticket_num "$c_lane")"
+      [ -z "$ticket" ] || printf '%s\n' "$ticket" >>"$numbers"
+      if [ -n "$c_pr" ]; then
+        IFS=',' read -r -a pr_numbers <<<"$c_pr"
+        for pr_number in "${pr_numbers[@]}"; do
+          case "$pr_number" in ''|*[!0-9]*) continue;; esac
+          printf '%s\n' "$pr_number" >>"$numbers"
+        done
+      fi
+    done <"$claims"
+    for grant_file in "$run_dir"/fiber-*-fence-grant*.md; do
+      [ -f "$grant_file" ] || continue
+      base="${grant_file##*/}"
+      base="${base%-fence-grant*}"
+      grant_ticket="$(lane_ticket_num "$base")"
+      [ -z "$grant_ticket" ] || printf '%s\n' "$grant_ticket" >>"$numbers"
+    done
+    if ! sort -un "$numbers" -o "$numbers" 2>"$W/ticket-sort.err"; then
+      echo "file-claim: reap skipped: cannot sort ticket numbers; all holds kept" >&2
+      return 0
+    fi
+    [ -s "$numbers" ] || return 0
+    prefix="$W/ticket-state"
+    lookup_rc=0
+    ticket_states_lookup "$repo" "$numbers" "$prefix" || lookup_rc=$?
+    if [ "$lookup_rc" -ne 0 ] || [ -s "$prefix.warnings" ]; then
+      if [ "$lookup_rc" -eq 1 ]; then
+        reason="$(head -c 200 "$prefix.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+        [ -n "$reason" ] || reason="GitHub lookup failed"
+      elif [ "$lookup_rc" -eq 2 ]; then
+        reason="unreadable response"
+      else
+        reason="partial or unknown response"
+      fi
+      echo "file-claim: reap skipped: ticket state lookup $reason; all holds kept" >&2
+      return 0
+    fi
+    expected="$(awk 'NF { n++ } END { print n+0 }' "$numbers")"
+    actual="$(awk 'NF { n++ } END { print n+0 }' "$prefix.states")"
+    if [ "$expected" != "$actual" ]; then
+      echo "file-claim: reap skipped: ticket state lookup incomplete; all holds kept" >&2
+      return 0
+    fi
+
+    kept="$W/kept.tsv"; dropped="$W/dropped.tsv"; dropped_files="$W/dropped-files.tsv"
+    : >"$kept"; : >"$dropped"; : >"$dropped_files"
+    while IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr || [ -n "$c_path" ]; do
+      [ -n "$c_path" ] || continue
+      reason=""
+      case "$c_lane" in
+        sweep-*) ;;
+        *)
+          ticket="$(lane_ticket_num "$c_lane")"
+          if [ -n "$ticket" ] && ticket_state_is_terminal "$ticket" "$prefix.states"; then
+            reason="ticket #$ticket closed"
+          elif [ -n "$c_pr" ]; then
+            IFS=',' read -r -a pr_numbers <<<"$c_pr"
+            for pr_number in "${pr_numbers[@]}"; do
+              case "$pr_number" in ''|*[!0-9]*) continue;; esac
+              if ticket_state_is_terminal "$pr_number" "$prefix.states"; then
+                reason="PR #$pr_number closed"
+                break
+              fi
+            done
+          fi
+          ;;
+      esac
+      if [ -n "$reason" ]; then
+        printf '%s\t%s\t%s\n' "$c_path" "$c_lane" "$reason" >>"$dropped"
+      else
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$c_at" "$c_wt" "$c_pr"
+      fi
+    done <"$claims" >"$kept"
+
+    for grant_file in "$run_dir"/fiber-*-fence-grant*.md; do
+      [ -f "$grant_file" ] || continue
+      base="${grant_file##*/}"
+      base="${base%-fence-grant*}"
+      grant_ticket="$(lane_ticket_num "$base")"
+      [ -n "$grant_ticket" ] || continue
+      if ticket_state_is_terminal "$grant_ticket" "$prefix.states"; then
+        printf '%s\t%s\n' "$grant_file" "$grant_ticket" >>"$dropped_files"
+      fi
+    done
+
+    if [ -s "$dropped" ]; then
+      if ! store_claims "$remote" "$kept" "$tip"; then
+        attempt=$((attempt + 1))
+        jitter_sleep
+        continue
+      fi
+    fi
+    while IFS="$TAB" read -r path ticket reason || [ -n "$path" ]; do
+      [ -n "$path" ] || continue
+      printf 'REAP claim %s by %s (%s)\n' "$path" "$ticket" "$reason"
+    done <"$dropped"
+    while IFS="$TAB" read -r grant_file grant_ticket || [ -n "$grant_file" ]; do
+      [ -n "$grant_file" ] || continue
+      rm -f "$grant_file" || die 2 "cannot remove stale fence grant $grant_file"
+      printf 'REAP grant %s (ticket #%s closed)\n' "${grant_file##*/}" "$grant_ticket"
+    done <"$dropped_files"
+    return 0
+  done
+  die 2 "cannot reap claims: still rejected after $TRIES tries"
+}
+
 cmd_list() {
   local lane="$1" repo="$2"
   local remote tip claims now line c_path c_lane c_kind c_at c_wt c_pr age pr path
@@ -344,7 +481,7 @@ cmd_list() {
 main() {
   [ $# -ge 1 ] || usage
   local cmd="$1"; shift
-  case "$cmd" in claim|release|prune|list) ;; *) usage;; esac
+  case "$cmd" in claim|release|prune|list|reap) ;; *) usage;; esac
   local lane="" mode="" self_pr="" worktree="" repo="$REPO_DEFAULT" plan_file="" ticket_num="" holder=""
   local paths line p; paths=()
   while [ $# -gt 0 ]; do
@@ -401,6 +538,7 @@ main() {
     release) [ -n "$lane" ] || usage; valid_field "$lane" || usage; if [ "${#paths[@]}" -gt 0 ]; then cmd_release "$lane" "$repo" "${paths[@]}"; else cmd_release "$lane" "$repo"; fi;;
     prune) [ -n "$lane" ] || usage; valid_field "$lane" || usage; [ "${#paths[@]}" -eq 0 ] || usage; cmd_release "$lane" "$repo";;
     list) if [ -n "$lane" ]; then valid_field "$lane" || usage; fi; cmd_list "$lane" "$repo";;
+    reap) [ -z "$lane" ] && [ -z "$mode" ] && [ "${#paths[@]}" -eq 0 ] || usage; cmd_reap "$repo";;
   esac
 }
 main "$@"
