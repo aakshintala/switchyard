@@ -18,10 +18,6 @@ use crate::types::{Allowance, AllowanceWindow, JobSpec, Usage};
 use serde_json::Value;
 use std::sync::atomic::Ordering;
 
-// Hard per-job wall cap when the job carries no tool-idle limit: the same
-// 1_800_000 ms default `cli.rs` gives `tool_idle_ms`.
-const DEFAULT_WALL_TIMEOUT_MS: u64 = 1_800_000;
-
 #[derive(Debug, Default)]
 struct MuseState {
     session_id: Option<String>,
@@ -182,13 +178,9 @@ pub(crate) fn with_sandbox(mut argv: Vec<String>, sandbox_on: bool) -> Vec<Strin
     argv
 }
 
-/// Wall cap for a run in milliseconds: the job spec's tool-idle limit, or
-/// the default when the job carries none. `Some(None)` disables the cap.
-fn wall_cap_ms(tool_idle_ms: Option<Option<f64>>) -> Option<u64> {
-    match tool_idle_ms {
-        None => Some(DEFAULT_WALL_TIMEOUT_MS),
-        Some(inner) => inner.map(|ms| ms as u64),
-    }
+/// Explicit wall budget in milliseconds. Without `--wall-ms`, Muse has no backend-specific cap.
+fn wall_cap_ms(wall_ms: Option<f64>) -> Option<u64> {
+    wall_ms.map(|ms| ms.max(0.0) as u64)
 }
 
 pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
@@ -196,7 +188,7 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     // doesn't (a crash before the first line), the result still carries it.
     let launched_session = session_from_argv(&spec.argv);
     let base = base_and_effort(&spec.model).0.to_string();
-    let tool_idle_ms = spec.tool_idle_ms;
+    let wall_ms = spec.wall_ms;
     let wall_started_at = std::time::Instant::now();
     let prompt = spec.argv.last().cloned().unwrap_or_default();
     let prompt_file = match PromptFile::create(&prompt) {
@@ -224,7 +216,7 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
         drive: Box::new(move |on| {
             let _prompt_file = prompt_file;
             let mut state = MuseState::default();
-            let cap = wall_cap_ms(tool_idle_ms);
+            let cap = wall_cap_ms(wall_ms);
             let wall_exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let wall_watchdog = cap.map(|cap| {
                 let (stop_tx, stop_rx) = std::sync::mpsc::channel();
@@ -339,6 +331,24 @@ fn handle_line(line: &[u8], state: &mut MuseState) -> bool {
             state.usage_payload = Some(payload.clone());
             false
         }
+        "task.lifecycle.started" => {
+            let task_kind = payload
+                .get("event")
+                .and_then(|event| event.get("task_kind"))
+                .and_then(Value::as_str);
+            if task_kind.is_some_and(|kind| kind.starts_with("tool.")) {
+                state.phase = Some("running_tool".into());
+                true
+            } else {
+                false
+            }
+        }
+        "task.lifecycle.completed" | "task.lifecycle.failed"
+            if state.phase.as_deref() == Some("running_tool") =>
+        {
+            state.phase = Some("responding".into());
+            true
+        }
         _ if payload_type.starts_with("run.terminal.") => {
             if state.terminal.is_none() {
                 state.terminal = Some(payload.clone());
@@ -446,7 +456,7 @@ fn finish(
     let diagnostic = if state.wall_exceeded {
         Some(format!(
             "muse: wall timeout ({} ms)",
-            state.wall_timeout_ms.unwrap_or(DEFAULT_WALL_TIMEOUT_MS)
+            state.wall_timeout_ms.unwrap_or(0)
         ))
     } else if state.terminal.is_none() {
         Some("muse: no terminal record".to_string())
@@ -1012,8 +1022,6 @@ mod tests {
                 json!({"task_id":"not-yet-seen"})
             } else if payload_type == "task.lifecycle.proposed" {
                 json!({"event":{"task_kind":"model.meta.response"}})
-            } else if payload_type == "task.lifecycle.started" {
-                json!({"event":{"task_kind":"tool.bash"}})
             } else {
                 json!({})
             };
@@ -1026,13 +1034,46 @@ mod tests {
         }
 
         let mut state = MuseState::default();
-        assert!(!handle_line(
+        assert!(handle_line(
             &line(
                 "task.lifecycle.started",
                 json!({"event":{"task_kind":"tool.bash"}})
             ),
             &mut state
         ));
+        assert_eq!(state.phase.as_deref(), Some("running_tool"));
+        assert!(handle_line(
+            &line(
+                "task.lifecycle.completed",
+                json!({"event":{"kind":"completed"}})
+            ),
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("responding"));
+
+        let mut state = MuseState::default();
+        assert!(handle_line(
+            &line(
+                "task.lifecycle.started",
+                json!({"event":{"task_kind":"tool.bash"}})
+            ),
+            &mut state
+        ));
+        assert!(handle_line(
+            &line("task.lifecycle.failed", json!({"event":{"kind":"failed"}})),
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("responding"));
+
+        let mut state = MuseState::default();
+        assert!(!handle_line(
+            &line(
+                "task.lifecycle.started",
+                json!({"event":{"task_kind":"model.meta.response"}})
+            ),
+            &mut state
+        ));
+        assert_ne!(state.phase.as_deref(), Some("running_tool"));
     }
 
     #[test]
@@ -1654,10 +1695,9 @@ touch "$dir/released"
     }
 
     #[test]
-    fn wall_cap_comes_from_the_spec_or_the_default_and_disables_on_null() {
-        assert_eq!(wall_cap_ms(None), Some(1_800_000));
-        assert_eq!(wall_cap_ms(Some(None)), None);
-        assert_eq!(wall_cap_ms(Some(Some(300.0))), Some(300));
+    fn wall_cap_uses_only_the_explicit_wall_budget() {
+        assert_eq!(wall_cap_ms(None), None);
+        assert_eq!(wall_cap_ms(Some(300.0)), Some(300));
     }
 
     /// Drive a finished stream on a thread and return its events with the
@@ -1754,6 +1794,33 @@ touch "$dir/released"
     }
 
     #[test]
+    fn idle_limits_do_not_become_muse_wall_caps() {
+        let _lock = crate::test_env::lock();
+        let dir = scratch_dir("idle-not-wall");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        std::fs::write(dir.join("fixture.stdout"), TOOL_CALLS_FIX).unwrap();
+        let fake = fake_muse_script(
+            &dir,
+            &format!(
+                "#!/bin/sh\nsleep 0.4\ncat {}\n",
+                dir.join("fixture.stdout").display()
+            ),
+        );
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        for (idle_ms, tool_idle_ms) in [(Some(100.0), None), (None, Some(Some(100.0)))] {
+            let mut spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
+            spec.idle_ms = idle_ms.map(Some);
+            spec.tool_idle_ms = tool_idle_ms;
+            let spawned = spawn(&spec);
+            let (_, result) = drive_with_timeout(spawned, std::time::Duration::from_secs(3));
+            assert_eq!(result.text, "done");
+            assert_eq!(result.is_error, Some(false));
+        }
+    }
+
+    #[test]
     fn stderr_only_child_hits_the_wall_cap_without_stdout() {
         let _lock = crate::test_env::lock();
         let dir = scratch_dir("wall-drive");
@@ -1766,7 +1833,7 @@ touch "$dir/released"
         let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
         let cwd = dir.join("repo").to_string_lossy().into_owned();
         let mut spec = job_spec(&resolve_bin(None), argv("muse/m", None, "hi"), &cwd);
-        spec.tool_idle_ms = Some(Some(300.0));
+        spec.wall_ms = Some(300.0);
         let spawned = spawn(&spec);
         let (events, result) = drive_with_timeout(spawned, std::time::Duration::from_secs(10));
         assert!(events.is_empty(), "{events:?}");

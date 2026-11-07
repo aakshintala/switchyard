@@ -507,6 +507,8 @@ fn a_stalled_jobs_text_summarizes_last_known_progress() {
     assert_eq!(settle(&s.reg, &id), "STALLED");
     let text = terminal_text(&s.reg, &id);
     for needle in [
+        "idle ",
+        "(window 0.1s), running ",
         "shell",
         "42 tokens",
         "src/foo.rs",
