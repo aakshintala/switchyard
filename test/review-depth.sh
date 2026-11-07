@@ -89,6 +89,19 @@ diff --git a/src/record.rs b/src/record.rs
 DIFF
 expect_output 'full persisted/wire-format signal=serde derive file=src/record.rs' "$T/persisted.diff"
 
+cat >"$T/persisted-context.diff" <<'DIFF'
+diff --git a/src/model.rs b/src/model.rs
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -1,5 +1,5 @@
+ #[derive(Serialize, Deserialize)]
+ struct Saved {
+-    value: u8,
++    value: u16,
+ }
+DIFF
+expect_output 'full persisted/wire-format signal=serde derive file=src/model.rs' "$T/persisted-context.diff"
+
 cat >"$T/spawn.diff" <<'DIFF'
 diff --git a/src/worker.rs b/src/worker.rs
 --- a/src/worker.rs
@@ -141,6 +154,34 @@ diff --git a/src/thing.rs b/src/thing.rs
  }
 DIFF
 expect_output 'single non-test lines=0 threshold=700' "$T/rust-test.diff"
+
+cat >"$T/rust-production-before-test.diff" <<'DIFF'
+diff --git a/src/thing.rs b/src/thing.rs
+--- a/src/thing.rs
++++ b/src/thing.rs
+@@ -1,5 +1,5 @@
+-pub fn value() -> u8 { 0 }
++pub fn value() -> u16 { 0 }
+ #[cfg(test)]
+ mod tests {
+     fn helper() {}
+ }
+DIFF
+expect_output 'full rust pub line file=src/thing.rs' "$T/rust-production-before-test.diff"
+
+cat >"$T/rust-private-before-test.diff" <<'DIFF'
+diff --git a/src/thing.rs b/src/thing.rs
+--- a/src/thing.rs
++++ b/src/thing.rs
+@@ -1,5 +1,5 @@
+-fn value() -> u8 { 0 }
++fn value() -> u16 { 0 }
+ #[cfg(test)]
+ mod tests {
+     fn helper() {}
+ }
+DIFF
+expect_output 'full non-test lines=2 threshold=1' "$T/rust-private-before-test.diff" --threshold 1
 
 cat >"$T/test-path.diff" <<'DIFF'
 diff --git a/tests/review_depth.rs b/tests/review_depth.rs

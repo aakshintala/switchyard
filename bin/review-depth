@@ -22,6 +22,7 @@ PERSISTED_PATTERNS = [
     (re.compile(r"\.(?:proto|sql)$", re.I), "wire or schema file"),
     (re.compile(r"\b(?:serde_json|json\.(?:dump|dumps)|JSON\.stringify|jsonl|JSONL|to_json|write_json)\b", re.I), "JSON record writer"),
 ]
+SERDE_CONTEXT_PATTERNS = PERSISTED_PATTERNS[:2]
 LOCKING_PATTERNS = [
     (re.compile(r"\bMutex\b"), "Mutex"),
     (re.compile(r"\bRwLock\b"), "RwLock"),
@@ -88,19 +89,21 @@ def parse_diff(text: str) -> list[FileDiff]:
 
 def changed_lines(file_diff: FileDiff):
     for hunk in file_diff.hunks:
+        in_test_scope = False
         for line in hunk.lines:
+            content = line[1:] if line.startswith(("+", "-", " ")) else line
+            if file_diff.path.endswith(".rs") and RUST_TEST_CFG.search(content.lstrip()):
+                in_test_scope = True
             if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
-                yield hunk, line[1:]
+                yield hunk, line[1:], in_test_scope
 
 
 def rust_public_signal(files: list[FileDiff]) -> str | None:
     for file_diff in files:
         if not file_diff.path.endswith(".rs") or is_test_path(file_diff.path):
             continue
-        for hunk, line in changed_lines(file_diff):
-            if is_test_hunk(file_diff.path, hunk):
-                continue
-            if RUST_PUBLIC_LINE.search(line):
+        for _, line, is_test in changed_lines(file_diff):
+            if not is_test and RUST_PUBLIC_LINE.search(line):
                 return f"rust pub line file={file_diff.path}"
     return None
 
@@ -112,30 +115,36 @@ def is_test_path(path: str) -> bool:
     return bool(TEST_NAME.search(path))
 
 
-def is_test_hunk(path: str, hunk: Hunk) -> bool:
-    return path.endswith(".rs") and any(RUST_TEST_CFG.search(line.lstrip(" +-")) for line in hunk.lines)
-
-
 def content_signal(files: list[FileDiff], patterns, category: str) -> str | None:
     for file_diff in files:
-        for _, line in changed_lines(file_diff):
-            for pattern, label in patterns:
-                if pattern.search(file_diff.path) or pattern.search(line):
-                    return f"{category} signal={label} file={file_diff.path}"
+        for hunk in file_diff.hunks:
+            changed = [
+                line[1:] for line in hunk.lines
+                if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+            ]
+            if not changed:
+                continue
+            if category == "persisted/wire-format":
+                for diff_line in hunk.lines:
+                    line = diff_line[1:] if diff_line.startswith(("+", "-", " ")) else diff_line
+                    for pattern, label in SERDE_CONTEXT_PATTERNS:
+                        if pattern.search(line):
+                            return f"{category} signal={label} file={file_diff.path}"
+            for line in changed:
+                for pattern, label in patterns:
+                    if pattern.search(file_diff.path) or pattern.search(line):
+                        return f"{category} signal={label} file={file_diff.path}"
     return None
 
 
 def non_test_line_count(files: list[FileDiff]) -> int:
-    count = 0
-    for file_diff in files:
-        for hunk in file_diff.hunks:
-            if is_test_path(file_diff.path) or is_test_hunk(file_diff.path, hunk):
-                continue
-            count += sum(
-                1 for line in hunk.lines
-                if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-            )
-    return count
+    return sum(
+        1
+        for file_diff in files
+        if not is_test_path(file_diff.path)
+        for _, _, is_test in changed_lines(file_diff)
+        if not is_test
+    )
 
 
 def choose_depth(text: str, threshold: int) -> tuple[str, str]:
