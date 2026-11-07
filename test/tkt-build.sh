@@ -30,7 +30,19 @@ unset DELEGATE_JOBS_DIR
 [ -x "$REAL_BIN/tkt-job" ] || fail "real tkt-job missing"
 [ -x "$REAL_BIN/tkt-gate" ] || fail "real tkt-gate missing"
 [ -x "$REAL_BIN/fill-brief" ] || fail "real fill-brief missing"
-[ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
+# Tooling calls use local fixtures only; no QuotaBar request reaches the host feed.
+ln -s "$REAL_BIN/quota" "$T/bin/quota" || fail "symlink quota"
+cat >"$T/quota.json" <<'EOF'
+{"providers":[
+  {"id":"claude","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":69}]},
+  {"id":"codex","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":80}]},
+  {"id":"cursor","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":80}]},
+  {"id":"opencode-go","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":80}]},
+  {"id":"muse","status":"healthy","quotas":[{"key":"weekly","label":"Weekly","percentRemaining":80}]}
+]}
+EOF
+cp "$T/quota.json" "$T/quota-healthy.json"
+export QUOTA_FEED="file://$T/quota.json"
 
 # Logging wrappers: record the call, then run the real command.
 cat >"$T/bin/tkt-job" <<EOF
@@ -338,7 +350,7 @@ EOF
     printf 'plan=%s\n' "$CDIR/plan.md"
     printf 'closing=%s\n' 'Resolves #528'
     printf 'workflow_doc=%s\n' docs/agents/workflow.md
-    printf 'model.lane=%s\n' lane-m
+    printf 'model.lane=%s\n' codex/test-model
     printf 'model.review=%s\n' rm
     printf 'model.overbuild=%s\n' om
     printf 'model.map=%s\n' mm
@@ -421,7 +433,7 @@ expect_state() {
 
 # --- happy path: no mutants, every axis APPROVE ---
 setup_case happy
-run_build --lane-model lm --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
 [ "$RC" -eq 0 ] || fail "happy exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "happy"
 [ "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')" -le 41 ] || fail "happy: over 40 digest lines"
@@ -431,7 +443,8 @@ grep -q "BASE=$H" "$T/calls.log" || fail "happy: BASE reaches the lane"
 grep -q "GATE=true" "$T/calls.log" || fail "happy: GATE reaches the lane"
 grep -q "CLOSING=Resolves #528" "$T/calls.log" || fail "happy: CLOSING reaches the lane"
 grep -q "ATTRIBUTION=Co-authored with Test" "$T/calls.log" || fail "happy: ATTRIBUTION reaches the lane"
-grep -q "^run|id=stub-1|model=lm|prompt=.*-lane-1.md$" "$T/calls.log" || fail "happy: --lane-model wins"
+grep -q "^run|id=stub-1|model=codex/test-model|prompt=.*-lane-1.md$" "$T/calls.log" || fail "happy: --lane-model wins"
+grep -q '^quota: provider=codex status=healthy$' <<<"$OUT" || fail "happy: quota pick is reported"
 brief="$(grep '^run|' "$T/calls.log" | sed 's/.*prompt=//')"
 grep -q "$H" "$brief" || fail "happy: the filled brief holds the base"
 grep -q "Resolves #528" "$brief" || fail "happy: the filled brief holds CLOSING"
@@ -459,7 +472,7 @@ logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 setup_case real-lane-brief
 cp "$T/home/.agents/skills/planning/briefs/lane.md" "$T/lane-stub.md" || fail "real-lane-brief: keep the stub lane brief"
 cp "$SCRIPT_DIR/../skills/planning/briefs/lane.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: install the real lane brief"
-run_build --lane-model lm --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
 [ "$RC" -eq 0 ] || fail "real-lane-brief exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 brief="$(grep '^run|id=stub-1|' "$T/calls.log" | sed 's/.*prompt=//')"
 cp "$T/lane-stub.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: restore the stub lane brief"
@@ -470,14 +483,14 @@ grep -q 'STATUS: BLOCKED' "$brief" || fail "real-lane-brief: the filled brief na
 setup_case attr-ends
 bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-ends: set body_has"
 bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-ends: set body_ends"
-run_build --lane-model lm --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
 [ "$RC" -eq 0 ] || fail "attr-ends exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-ends: ATTRIBUTION reaches the lane"
 
 # --- with no body_ends, a body_has co-author reaches the lane ---
 setup_case attr-body
 bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-body: set body_has"
-run_build --lane-model lm --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
 [ "$RC" -eq 0 ] || fail "attr-body exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "ATTRIBUTION=Co-authored with Body" "$T/calls.log" || fail "attr-body: ATTRIBUTION reaches the lane"
 
@@ -485,14 +498,14 @@ grep -q "ATTRIBUTION=Co-authored with Body" "$T/calls.log" || fail "attr-body: A
 setup_case attr-both
 bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-both: set body_has"
 bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-both: set body_ends"
-run_build --lane-model lm --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
 [ "$RC" -eq 0 ] || fail "attr-both exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-both: ATTRIBUTION reaches the lane"
 
 # --- with neither key, the ATTRIBUTION slot stays empty ---
 setup_case attr-empty
 bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-empty: set body_has"
-run_build --lane-model lm --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
 [ "$RC" -eq 0 ] || fail "attr-empty exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "ATTRIBUTION= LANE_MODEL=" "$T/calls.log" || fail "attr-empty: ATTRIBUTION stays empty"
 
@@ -510,7 +523,7 @@ expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "mutants rerun"
 grep -Fxq "ghci|wait 7 --job Selection --timeout 600 --repo switchyard" "$T/calls.log" || fail "mutants: gh-ci waits on the mutant job with the 600 s bound"
 mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
 [ "$(grep -c . "$mfile")" -eq 3 ] || fail "mutants: three log lines match"
-grep -q "^run|id=stub-1|model=lane-m|" "$T/calls.log" || fail "mutants: the lane defaults to model.lane"
+grep -q "^run|id=stub-1|model=codex/test-model|" "$T/calls.log" || fail "mutants: the lane defaults to model.lane"
 grep -q "^run|id=stub-2|model=mm|prompt=.*-map-1.md$" "$T/calls.log" || fail "mutants: the map job dispatches once"
 grep -q "^review-start|.*--model rm --overbuild-model om" "$T/calls.log" || fail "mutants: review defaults to state models"
 grep -q "^watch|r1 r2 r3 stub-2$" "$T/calls.log" || fail "mutants: one watch covers review and map ids"
@@ -662,12 +675,74 @@ setup_case lane-model
 run_build
 [ "$RC" -eq 0 ] || fail "lane-model exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "lane-model"
-grep -q "^run|id=stub-1|model=lane-m|" "$T/calls.log" || fail "lane-model: the lane runs on model.lane"
+grep -q "^run|id=stub-1|model=codex/test-model|" "$T/calls.log" || fail "lane-model: the lane runs on model.lane"
 brief="$(grep '^run|' "$T/calls.log" | sed 's/.*prompt=//')"
 case "$brief" in "$CDIR/run/"*) ;; *) fail "lane-model: the brief is written under \$CDIR/run";; esac
 impl="$(grep '^Implemented by:' "$brief")"
-[ "$impl" = "Implemented by: lane-m" ] || fail "lane-model: the brief holds [$impl]"
+[ "$impl" = "Implemented by: codex/test-model" ] || fail "lane-model: the brief holds [$impl]"
 case "$impl" in *unknown*) fail "lane-model: the Implemented by line never holds unknown";; esac
+
+# --- mapped provider refusals name their provider and stop before dispatch ---
+quota_refusal_case() {
+  local case_name="$1" model="$2" provider="$3"
+  setup_case "$case_name"
+  jq --arg provider "$provider" '.providers |= map(if .id == $provider then .status = "warning" else . end)' \
+    "$T/quota-healthy.json" >"$T/quota.json" || fail "$case_name: build warning feed"
+  run_build --lane-model "$model"
+  [ "$RC" -eq 2 ] || fail "$case_name exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_verdict "TKT tkt-build PRECONDITION quota=refused log=*" "$case_name"
+  grep -q "provider=$provider status=warning" <<<"$OUT" || fail "$case_name: refusal names provider and status"
+  ! grep -q '^run|id=stub-' "$T/calls.log" || fail "$case_name: refused lane was dispatched"
+}
+quota_refusal_case quota-codex codex/test-model codex
+quota_refusal_case quota-openai openai/test-model codex
+quota_refusal_case quota-cursor fiber/cursor/test-model cursor
+quota_refusal_case quota-opencode fiber/opencode-go/test-model opencode-go
+quota_refusal_case quota-muse fiber/muse/test-model muse
+quota_refusal_case quota-claude-prefix fiber/claude/test-model claude
+quota_refusal_case quota-bare-config composer-2.5 cursor
+
+# --- provider missing from the feed and a non-answer both refuse pre-dispatch ---
+setup_case quota-missing-provider
+jq '.providers |= map(select(.id != "opencode-go"))' "$T/quota-healthy.json" >"$T/quota.json"
+run_build --lane-model opencode-go/test-model
+[ "$RC" -eq 2 ] || fail "quota-missing-provider exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION quota=missing log=*" "quota-missing-provider"
+grep -q 'provider=opencode-go status=missing' <<<"$OUT" || fail "quota-missing-provider: provider and missing status are named"
+! grep -q '^run|id=stub-' "$T/calls.log" || fail "quota-missing-provider: lane was dispatched"
+
+setup_case quota-no-answer
+export QUOTA_FEED="file://$T/no-quota-feed.json"
+run_build --lane-model codex/test-model
+[ "$RC" -eq 2 ] || fail "quota-no-answer exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION quota=unavailable log=*" "quota-no-answer"
+grep -q 'provider=codex status=unavailable' <<<"$OUT" || fail "quota-no-answer: provider and unavailable status are named"
+! grep -q '^run|id=stub-' "$T/calls.log" || fail "quota-no-answer: lane was dispatched"
+export QUOTA_FEED="file://$T/quota.json"
+
+# --- Claude's 40% weekly floor refuses 39%, while a healthy pick is reported ---
+setup_case quota-claude-low
+jq '.providers |= map(if .id == "claude" then .quotas[0].percentRemaining = 39 else . end)' \
+  "$T/quota-healthy.json" >"$T/quota.json"
+run_build --lane-model claude-sonnet-5
+[ "$RC" -eq 2 ] || fail "quota-claude-low exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION quota=refused log=*" "quota-claude-low"
+grep -q 'provider=claude status=healthy weekly=39% floor=40%' <<<"$OUT" || fail "quota-claude-low: refusal reports weekly percent and floor"
+! grep -q '^run|id=stub-' "$T/calls.log" || fail "quota-claude-low: lane was dispatched"
+
+setup_case quota-claude-healthy
+cp "$T/quota-healthy.json" "$T/quota.json"
+run_build --lane-model claude-sonnet-5
+[ "$RC" -eq 0 ] || fail "quota-claude-healthy exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^quota: provider=claude status=healthy weekly=69% floor=40%$' <<<"$OUT" || fail "quota-claude-healthy: launch report shows the pick and floor"
+
+# --- an unmappable model id is refused with the id before dispatch ---
+setup_case quota-unmapped
+run_build --lane-model unregistered/model-x
+[ "$RC" -eq 2 ] || fail "quota-unmapped exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION quota=unmapped log=*" "quota-unmapped"
+grep -q 'model=unregistered/model-x provider=unknown status=unmapped' <<<"$OUT" || fail "quota-unmapped: refusal names the unmapped id"
+! grep -q '^run|id=stub-' "$T/calls.log" || fail "quota-unmapped: lane was dispatched"
 
 # --- no PR for the branch stops the build before the gate ---
 setup_case prempty
@@ -799,7 +874,7 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "basetick"
 setup_case spec-path
 printf 'ticket body\n' >"$CDIR/spec.md"
 bash "$TKT_STATE" "$S" set spec "$CDIR/spec.md" || fail "spec-path: set spec"
-run_build --lane-model lm --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
 [ "$RC" -eq 0 ] || fail "spec-path exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "spec-path"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "spec-path: one start per axis"
@@ -812,7 +887,7 @@ setup_case spec-issue
 printf 'ticket body\n' >"$CDIR/spec.md"
 bash "$TKT_STATE" "$S" set spec "$CDIR/spec.md" || fail "spec-issue: set spec path"
 bash "$TKT_STATE" "$S" set spec_issue 445 || fail "spec-issue: set spec issue"
-run_build --lane-model lm --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
 [ "$RC" -eq 0 ] || fail "spec-issue exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "spec-issue"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "spec-issue: one start per axis"
@@ -821,7 +896,7 @@ grep -qF -- "$CDIR/spec.md" "$T/calls.log" && fail "spec-issue: spec path reache
 
 # --- an unset spec_issue and spec key add no --spec argument ---
 setup_case no-spec-issue
-run_build --lane-model lm --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
 [ "$RC" -eq 0 ] || fail "no-spec-issue exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "no-spec-issue"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "no-spec-issue: one start per axis"
