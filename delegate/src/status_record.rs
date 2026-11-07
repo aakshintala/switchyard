@@ -814,6 +814,7 @@ mod tests {
 
     #[test]
     fn lookup_returns_the_first_directory_holding_the_record() {
+        let _lock = crate::test_env::lock();
         // docs/delegate-jobs.md#lookup-order
         let root = std::env::temp_dir().join(format!("delegate-search-{}", random_uuid()));
         let first = root.join("a");
@@ -822,6 +823,17 @@ mod tests {
         fs::create_dir_all(&second).unwrap();
         let id = random_uuid();
         assert_eq!(find_in_dirs(&id, &[first.clone(), second.clone()]), None);
+
+        // Force a TMPDIR-scoped cleanup after setup but before the first write.
+        let cleanup_root = root.clone();
+        std::thread::spawn(move || {
+            crate::test_env::try_with_lock(|| {
+                fs::remove_dir_all(cleanup_root).unwrap();
+            })
+        })
+        .join()
+        .unwrap();
+
         fs::write(second.join(format!("{id}.json")), "{}").unwrap();
         assert_eq!(
             find_in_dirs(&id, &[first.clone(), second.clone()]),
