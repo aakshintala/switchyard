@@ -1021,6 +1021,15 @@ expect_verdict "TKT tkt-build ROUND-LIMIT round=0 log=*" "rerun second"
 [ "$(grep -c '^run|' "$T/calls.log")" -eq 1 ] || fail "rerun: one lane dispatch across both runs"
 [ "$(grep -c '^watch|' "$T/calls.log")" -eq 2 ] || fail "rerun: the first build watches twice, the second watches nothing"
 
+# --- a zero fix-round count without a completed first review does not block build ---
+setup_case round-zero-unreviewed
+bash "$TKT_STATE" "$S" set round 0 >/dev/null || fail "round-zero-unreviewed: seed zero counter"
+run_build --from gate
+[ "$RC" -eq 0 ] || fail "round-zero-unreviewed build proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "round-zero-unreviewed build"
+expect_state round 0 "round-zero-unreviewed retains zero as the spent fix count"
+expect_state reviewed "$H" "round-zero-unreviewed completes the first review"
+
 # --- a state with round already set is refused before any job or gate ---
 setup_case round-set
 bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "seed round"

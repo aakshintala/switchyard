@@ -7,7 +7,7 @@ The loop for one PR. Reviews run on models from a different family than the one 
 
 **Identity.** A verdict covers the `git patch-id --stable` of the PR's diff: a rebase that keeps the patch keeps its verdict, and any other change needs a new one. CI covers the head SHA: a green run on an older SHA never satisfies merge.
 
-**Counter.** Each PR has one counter. A fix round is one fix dispatch plus its scoped verify, and adds one. With a state file it is the key `round`, which `tkt-fix` keeps.
+**Counter.** Each PR has one fix counter. A fix round is one fix dispatch plus its scoped verify, and adds one. With a state file it is the key `round`, which `tkt-fix` keeps. Read the planning and fix budgets with `tkt-state <state> get verifier_round` and `tkt-state <state> get round`; an absent key is zero.
 
 ### 1. Review
 

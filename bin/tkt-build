@@ -124,7 +124,20 @@ if [ "$from" = review ] && [ "$outcome" != measurement ]; then
   fi
 fi
 rnd="$(tkt get round 2>/dev/null || true)"
-[ -z "$rnd" ] || emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the first round; continue with tkt-fix or tkt-ship"
+if [ -n "$rnd" ]; then
+  case "$rnd" in
+    0)
+      # Zero is the initial fix-round count, not proof that review completed.
+      # A first build that stopped at its gate can therefore resume; a build
+      # that completed round 0 has a reviewed head and must not be replayed.
+      if [ -n "$(tkt get reviewed 2>/dev/null || true)" ]; then
+        emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the first round; continue with tkt-fix or tkt-ship"
+      fi
+      ;;
+    *[!0-9]*) emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the first round; continue with tkt-fix or tkt-ship" ;;
+    *) emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the first round; continue with tkt-fix or tkt-ship" ;;
+  esac
+fi
 if stored_head="$(tkt get head 2>/dev/null)"; then
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
   if [ "$outcome" = measurement ]; then
