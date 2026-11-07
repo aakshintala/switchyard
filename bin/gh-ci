@@ -267,14 +267,12 @@ print_failing() {
 }
 
 # failures <run> | failures --pr <n>: cleaned digest of the failed and
-# cancelled jobs. With --pr, every failure/cancelled run on the PR head, ignoring superseded runs
+# cancelled jobs. With --pr, every failure/cancelled/in-progress run on the PR head, ignoring superseded runs
 # (named on one line at the end); with <run>, that run only. A cancelled job prints one line and no log:
 # its elapsed time beside its timeout-minutes, labelled TIMEOUT when the
 # elapsed time reaches the bound, else CANCELLED (external);
-# a failed job prints its header then the last GH_CI_LOG_LINES cleaned
-# log lines (job/step columns, ISO timestamps, ANSI colours, real or
-# printed as literal ^[ text, and blank lines removed). A report, so exit 0 after printing; exit 1 when gh
-# cannot read the PR, runs or jobs.
+# a failed job prints its cleaned log digest. In-progress runs report failures
+# so far and exit 1; completed runs are reports and exit 0.
 # red_commit_hint <run id> <job name>: a failed "red commit" job reruns from
 # the cached selection under --failed, so when the run's ticket has lost its
 # bug label, say a whole-run rerun is needed. Any failed lookup prints nothing.
@@ -305,9 +303,9 @@ cmd_failures() {
     head=$(pr_head "$pr") || return 1
     short="${head:0:8}"
     local runs_json runs
-    runs_json=$(gh run list --repo "$REPO" --commit "$head" --limit 100 --json databaseId,name,event,conclusion,workflowName) \
+    runs_json=$(gh run list --repo "$REPO" --commit "$head" --limit 100 --json databaseId,name,event,conclusion,workflowName,status) \
       || { echo "could not list runs for PR $pr head $short" >&2; return 1; }
-    runs=$(printf '%s' "$runs_json" | jq -r '([.[] | {k: "\(.workflowName // .name // "")\u001f\(.event // "")", id: .databaseId}] | group_by(.k) | map(max_by(.id).id)) as $newest | .[] | select(.conclusion=="failure" or .conclusion=="cancelled") | select(.databaseId as $id | $newest | index($id)) | "\(.databaseId)\t\(.name)"') \
+    runs=$(printf '%s' "$runs_json" | jq -r '([.[] | {k: "\(.workflowName // .name // "")\u001f\(.event // "")", id: .databaseId}] | group_by(.k) | map(max_by(.id).id)) as $newest | .[] | select((.status != null and .status != "completed") or .conclusion=="failure" or .conclusion=="cancelled") | select(.databaseId as $id | $newest | index($id)) | "\(.databaseId)\t\(.name)"') \
       || { echo "could not parse runs for PR $pr head $short" >&2; return 1; }
     superseded=$(printf '%s' "$runs_json" | jq -r '([.[] | {k: "\(.workflowName // .name // "")\u001f\(.event // "")", id: .databaseId}] | group_by(.k) | map(max_by(.id).id)) as $newest | [.[] | select(.conclusion=="failure" or .conclusion=="cancelled") | .databaseId | select(. as $id | $newest | index($id) | not)] | sort | join(" ")') \
       || { echo "could not parse runs for PR $pr head $short" >&2; return 1; }
@@ -322,10 +320,26 @@ cmd_failures() {
     runs_list=$(printf '%s\t%s' "$run" "$run_name")
     label="in run $run"
   fi
-  local found=0 run_id run_name jobs_json jobs
+  local found=0 still_running=0 run_id run_name jobs_json jobs
   while IFS="$tab" read -r run_id run_name || [ -n "${run_id:-}" ]; do
     [ -n "${run_id:-}" ] || continue
     case "$run_name" in ''|null) run_name="$run_id";; esac
+    local run_json run_status failures_so_far
+    run_json=$(gh run view "$run_id" --repo "$REPO" --json status 2>/dev/null) \
+      || { echo "could not read status for run $run_id" >&2; return 1; }
+    run_status=$(printf '%s' "$run_json" | jq -r '.status // ""' 2>/dev/null) \
+      || { echo "could not parse status for run $run_id" >&2; return 1; }
+    [ -n "$run_status" ] || { echo "could not read status for run $run_id" >&2; return 1; }
+    if [ "$run_status" != "completed" ]; then
+      jobs_json=$(gh run view "$run_id" --repo "$REPO" --json jobs) \
+        || { echo "could not read jobs for run $run_id" >&2; return 1; }
+      failures_so_far=$(printf '%s' "$jobs_json" | jq -r '[.jobs[]? | select(.conclusion=="failure" or .conclusion=="cancelled")] | length') \
+        || { echo "could not parse jobs for run $run_id" >&2; return 1; }
+      printf 'run %s still in progress; failures so far: %s\n' "$run_id" "$failures_so_far"
+      found=1
+      still_running=1
+      continue
+    fi
     jobs_json=$(gh run view "$run_id" --repo "$REPO" --json jobs) \
       || { echo "could not read jobs for run $run_id" >&2
            [ -n "$pr" ] || echo "if $run_id is a PR number, use: gh-ci failures --pr $run_id" >&2
@@ -393,7 +407,7 @@ cmd_failures() {
   done <<<"$runs_list"
   if [ "$found" -eq 0 ]; then echo "no failed jobs $label"; fi
   superseded_note "$superseded"
-  return 0
+  return "$still_running"
 }
 
 # watch-verified <run> --pr <n>: watch, then verify via pr checks.

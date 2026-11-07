@@ -89,6 +89,10 @@ case "\$(cat "$T/jobmode")" in
   unknown)
     echo "TKT tkt-job UNKNOWN id=j1 log=x"
     exit 3;;
+  stderr-only)
+    echo 'tkt-job refused: missing required context' >&2
+    exit 3;;
+  no-output) exit 3;;
 esac
 exit 0
 EOF
@@ -453,6 +457,24 @@ out="$(bash "$TKT" "$S" --verify --resume zz --prompt "$CDIR/prompt.md" 2>"$T/st
 rc=$?; [ "$rc" = "2" ] || fail "A3 zz exited $rc, want 2"
 grep -q "zz" "$T/stderr" || fail "A3 zz: stderr does not name zz"
 grep -q "job|" "$T/calls.log" && fail "A3 zz dispatched a job"
+fi
+
+# UNKNOWN verdicts preserve stderr from a sub-tool that writes no TKT line;
+# completely silent tools get an explicit detail instead of blank lines.
+if want STDERR; then
+setup_case stderr-only
+printf 'stderr-only' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "stderr-only sub-tool exited 0"
+rc=$?; [ "$rc" = "3" ] || fail "stderr-only sub-tool exited $rc, want 3"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix UNKNOWN tool=tkt-job' || fail "stderr-only UNKNOWN verdict: $(head -n 1 <<<"$out")"
+grep -qx 'tkt-job refused: missing required context' <<<"$out" || fail "sub-tool stderr did not reach lane output: [$out]"
+
+setup_case no-output
+printf 'no-output' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "silent sub-tool exited 0"
+rc=$?; [ "$rc" = "3" ] || fail "silent sub-tool exited $rc, want 3"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix UNKNOWN tool=tkt-job' || fail "silent UNKNOWN verdict: $(head -n 1 <<<"$out")"
+grep -qx 'tkt-job wrote no output' <<<"$out" || fail "silent sub-tool detail missing: [$out]"
 fi
 
 # A4. An UNKNOWN (exit 3) close keeps RECOVER: the slot does not advance.
