@@ -29,6 +29,7 @@ usage() {
   echo "       ordinary lane and PR holds are advisory; sweep-* lane ids hold exclusively" >&2
   echo "       sweep and grant-cap refusals are all-or-nothing; drop refused paths and rerun" >&2
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
+  echo "       file-claim prune --lane ID [--repo R]  (release all rows for the lane)" >&2
   echo "       file-claim list [--lane ID] [--repo R]  (no --lane adds one row per open-PR path)" >&2
   echo "       FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5)" >&2
   exit 2
@@ -343,7 +344,7 @@ cmd_list() {
 main() {
   [ $# -ge 1 ] || usage
   local cmd="$1"; shift
-  case "$cmd" in claim|release|list) ;; *) usage;; esac
+  case "$cmd" in claim|release|prune|list) ;; *) usage;; esac
   local lane="" mode="" self_pr="" worktree="" repo="$REPO_DEFAULT" plan_file="" ticket_num="" holder=""
   local paths line p; paths=()
   while [ $# -gt 0 ]; do
@@ -398,6 +399,7 @@ main() {
       fi
       cmd_claim "$lane" "$mode" "$self_pr" "$worktree" "$repo" "${paths[@]}";;
     release) [ -n "$lane" ] || usage; valid_field "$lane" || usage; if [ "${#paths[@]}" -gt 0 ]; then cmd_release "$lane" "$repo" "${paths[@]}"; else cmd_release "$lane" "$repo"; fi;;
+    prune) [ -n "$lane" ] || usage; valid_field "$lane" || usage; [ "${#paths[@]}" -eq 0 ] || usage; cmd_release "$lane" "$repo";;
     list) if [ -n "$lane" ]; then valid_field "$lane" || usage; fi; cmd_list "$lane" "$repo";;
   esac
 }
