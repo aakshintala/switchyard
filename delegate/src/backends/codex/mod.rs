@@ -11,6 +11,7 @@ pub(crate) mod doctor;
 
 use super::types::{BackendResult, Event, ProgressSnapshotRaw, Spawned};
 use crate::types::{JobSpec, Usage};
+use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::atomic::Ordering;
 
@@ -234,6 +235,7 @@ struct CodexState {
     last_tool: Option<String>,
     last_assistant: Option<String>,
     files_touched: Vec<String>,
+    running_tool_items: HashSet<String>,
     phase: Option<String>,
 }
 
@@ -308,16 +310,84 @@ fn handle_line(line: &[u8], state: &mut CodexState) -> bool {
     }
 }
 
-/// Progress updates from thread items. Started and updated commands, tool
-/// calls and web searches move the phase to running_tool; a completed
-/// item moves it back to responding, and the final completed assistant
-/// message is the row's final text. Reasoning, error and to-do items
-/// never are.
+/// Tool items stay active until their own terminal event arrives. Other
+/// completed items cannot clear the tool phase while any tracked item remains
+/// open. Items without an id retain the legacy phase handling.
 fn item_progress(ev: &serde_json::Value, state: &mut CodexState, terminal: bool) -> bool {
     let item = match ev.get("item") {
         Some(i) => i,
         None => return false,
     };
+    let item_type = item.get("type").and_then(|t| t.as_str());
+    let is_tool_item = matches!(
+        item_type,
+        Some("command_execution" | "mcp_tool_call" | "collab_tool_call" | "web_search")
+    );
+    if is_tool_item
+        && let Some(id) = item
+            .get("id")
+            .and_then(|id| id.as_str())
+            .filter(|id| !id.is_empty())
+    {
+        if terminal {
+            state.running_tool_items.remove(id);
+        } else {
+            state.running_tool_items.insert(id.to_string());
+        }
+        if let Some(name) = tool_name(item) {
+            state.last_tool = Some(name);
+        }
+        state.phase = Some(
+            if state.running_tool_items.is_empty() {
+                "responding"
+            } else {
+                "running_tool"
+            }
+            .into(),
+        );
+        return true;
+    }
+
+    let handled = item_progress_for_untracked_item(item, state, terminal);
+    if !state.running_tool_items.is_empty() {
+        state.phase = Some("running_tool".into());
+    }
+    handled
+}
+
+fn tool_name(item: &serde_json::Value) -> Option<String> {
+    match item.get("type").and_then(|t| t.as_str()) {
+        Some("command_execution") => item
+            .get("command")
+            .and_then(|command| command.as_str())
+            .filter(|command| !command.is_empty())
+            .map(str::to_string),
+        Some("mcp_tool_call") => {
+            let server = item.get("server").and_then(|s| s.as_str()).unwrap_or("");
+            let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("");
+            let name = match (server, tool) {
+                (s, t) if !s.is_empty() && !t.is_empty() => format!("{s}/{t}"),
+                (s, _) if !s.is_empty() => s.to_string(),
+                (_, t) => t.to_string(),
+            };
+            (!name.is_empty()).then_some(name)
+        }
+        Some("collab_tool_call") => item
+            .get("tool")
+            .and_then(|tool| tool.as_str())
+            .filter(|tool| !tool.is_empty())
+            .map(str::to_string),
+        Some("web_search") => Some("web_search".into()),
+        _ => None,
+    }
+}
+
+/// Apply legacy handling to non-tool items and tool items without ids.
+fn item_progress_for_untracked_item(
+    item: &serde_json::Value,
+    state: &mut CodexState,
+    terminal: bool,
+) -> bool {
     let phase = if terminal {
         "responding"
     } else {
@@ -338,11 +408,15 @@ fn item_progress(ev: &serde_json::Value, state: &mut CodexState, terminal: bool)
             true
         }
         Some("command_execution") => {
-            let command = match item.get("command").and_then(|c| c.as_str()) {
-                Some(c) if !c.is_empty() => c,
-                _ => return false,
-            };
-            state.last_tool = Some(command.to_string());
+            if let Some(command) = item
+                .get("command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+            {
+                state.last_tool = Some(command.to_string());
+            }
+            // Codex can send the command item before its command text is
+            // available. The item type alone proves a tool is in flight.
             state.phase = Some(phase.into());
             true
         }
@@ -826,15 +900,19 @@ mod tests {
         ));
         assert_eq!(state.phase.as_deref(), Some("responding"));
         assert!(state.final_text.is_none());
-        // Empty and missing commands record nothing.
-        assert!(!handle_line(
+        // Missing command metadata does not make a command-execution event
+        // cease to be a tool call; it still selects the tool idle window.
+        assert!(handle_line(
             br#"{"type":"item.started","item":{"id":"c","type":"command_execution","command":""}}"#,
             &mut state
         ));
-        assert!(!handle_line(
+        assert_eq!(state.phase.as_deref(), Some("running_tool"));
+        assert!(handle_line(
             br#"{"type":"item.started","item":{"id":"c","type":"command_execution"}}"#,
             &mut state
         ));
+        assert_eq!(state.phase.as_deref(), Some("running_tool"));
+        assert_eq!(state.last_tool.as_deref(), Some("cargo test"));
         // MCP tool calls compose server and tool names.
         assert!(handle_line(
             br#"{"type":"item.started","item":{"id":"m","type":"mcp_tool_call","server":"gh","tool":"issue_read"}}"#,
@@ -853,7 +931,7 @@ mod tests {
             &mut bare
         ));
         assert_eq!(bare.last_tool.as_deref(), Some("t"));
-        assert!(!handle_line(
+        assert!(handle_line(
             br#"{"type":"item.updated","item":{"id":"m","type":"mcp_tool_call"}}"#,
             &mut bare
         ));
@@ -863,7 +941,7 @@ mod tests {
             &mut state
         ));
         assert_eq!(state.last_tool.as_deref(), Some("spawn_agent"));
-        assert!(!handle_line(
+        assert!(handle_line(
             br#"{"type":"item.started","item":{"id":"k","type":"collab_tool_call"}}"#,
             &mut state
         ));
@@ -900,6 +978,68 @@ mod tests {
             br#"{"type":"item.started","item":{"id":"x","type":"future_item"}}"#,
             &mut state
         ));
+    }
+
+    #[test]
+    fn an_open_command_stays_running_during_waiting_and_reasoning_items() {
+        let mut state = CodexState::default();
+        assert!(handle_line(
+            br#"{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"gh-ci wait","status":"in_progress"}}"#,
+            &mut state
+        ));
+        assert!(handle_line(
+            br#"{"type":"item.completed","item":{"id":"message","type":"agent_message","text":"Waiting for CI"}}"#,
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("running_tool"));
+        assert!(!handle_line(
+            br#"{"type":"item.completed","item":{"id":"reasoning","type":"reasoning","text":"Poll again shortly"}}"#,
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("running_tool"));
+        assert!(handle_line(
+            br#"{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"gh-ci wait","status":"completed"}}"#,
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("responding"));
+    }
+
+    #[test]
+    fn overlapping_tools_keep_the_phase_running_until_both_complete() {
+        let mut state = CodexState::default();
+        assert!(handle_line(
+            br#"{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"gh-ci wait"}}"#,
+            &mut state
+        ));
+        assert!(handle_line(
+            br#"{"type":"item.started","item":{"id":"m1","type":"mcp_tool_call","server":"gh","tool":"issue_read"}}"#,
+            &mut state
+        ));
+        assert!(handle_line(
+            br#"{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"gh-ci wait"}}"#,
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("running_tool"));
+        assert!(handle_line(
+            br#"{"type":"item.completed","item":{"id":"m1","type":"mcp_tool_call","server":"gh","tool":"issue_read"}}"#,
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("responding"));
+    }
+
+    #[test]
+    fn tool_items_without_ids_keep_legacy_phase_behavior() {
+        let mut state = CodexState::default();
+        assert!(handle_line(
+            br#"{"type":"item.started","item":{"type":"command_execution","command":"cargo test"}}"#,
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("running_tool"));
+        assert!(handle_line(
+            br#"{"type":"item.completed","item":{"id":"message","type":"agent_message","text":"Waiting"}}"#,
+            &mut state
+        ));
+        assert_eq!(state.phase.as_deref(), Some("responding"));
     }
 
     #[test]
