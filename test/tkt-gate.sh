@@ -295,6 +295,9 @@ run_gate
 [ "$RC" -eq 1 ] || fail "FENCE exits 1"
 expect_verdict "TKT tkt-gate FENCE n=1 log=*" "FENCE"
 grep -qx "evil.txt" <<<"$OUT" || fail "FENCE digest lists the path"
+grep -qF "tkt-state $S add fence <path>" <<<"$OUT" || fail "FENCE names the tkt-state add fence route"
+grep -qF "fence-grant is not read" <<<"$OUT" || fail "FENCE says fence-grant is not read"
+grep -qF "re-confirm with tkt-plan" <<<"$OUT" || fail "FENCE names the plan route"
 [ ! -f "$T/gate-ran" ] || fail "FENCE runs no gate"
 
 # --- FENCE lists 30 paths fully, then counts the rest ---
