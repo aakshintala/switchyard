@@ -8,6 +8,7 @@ fail() {
 }
 
 is_bash5() {
+  # shellcheck disable=SC2016
   [ -x "$1" ] && "$1" -c 'test "${BASH_VERSINFO[0]}" -ge 5' >/dev/null 2>&1
 }
 
@@ -39,6 +40,7 @@ find_bash5() {
 }
 
 old_bash=/bin/bash
+# shellcheck disable=SC2016
 if [ ! -x "$old_bash" ] || ! "$old_bash" -c 'test "${BASH_VERSINFO[0]}" -lt 5' >/dev/null 2>&1; then
   echo 'SKIP: no Bash older than 5 at /bin/bash to compare'
   exit 0
@@ -111,7 +113,7 @@ expect_bash5_unbound_error path-candidate '' "$tmp/old-bin:$system_path:$tmp/new
 
 # With Bash 5 unavailable, the runner must say so once and still run the suite.
 output="$tmp/no-bash5.out"
-if TEST_RUN_HOMEBREW_BASH= PATH="$system_path" "$old_bash" "$runner" \
+if TEST_RUN_HOMEBREW_BASH='' PATH="$system_path" "$old_bash" "$runner" \
     --run-parallel "$tmp/bare-local-start.sh" >"$output" 2>&1; then
   :
 else
