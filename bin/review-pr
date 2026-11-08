@@ -90,25 +90,32 @@ fill_brief="$script_dir/fill-brief"
 job_rec() {
   bash "$script_dir/job-record" "$1" 2>/dev/null || true
 }
-# job_latest_rec ID: follow delegate resume links to the newest available record.
-# Keep the review-pr state keyed by the original ID; a resumed delegate job has
-# a new ID and points back to its parent through resumedFrom.
-job_latest_rec() {
-  local id rec next next_rec seen
-  id="$1"; rec=""; seen="|"
+# job_walk ID FIELD: print "id<TAB>record-path" for ID and then each id that
+# the record's FIELD links to, with an empty path where no record exists. Stops
+# at a missing record, an empty or unsafe link, or a cycle.
+job_walk() {
+  local id field rec next seen
+  id="$1"; field="$2"; seen="|"
   while [ -n "$id" ]; do
     case "$seen" in *"|$id|"*) break;; esac
     seen="$seen$id|"
     rec="$(job_rec "$id")"
+    printf '%s\t%s\n' "$id" "$rec"
     [ -f "$rec" ] || break
-    next="$(jq -r '.supersededBy // empty' "$rec" 2>/dev/null || true)"
-    [ -n "$next" ] || break
-    case "$next" in */*|.|..) break;; esac
-    next_rec="$(job_rec "$next")"
-    [ -f "$next_rec" ] || break
+    next="$(jq -r --arg f "$field" '.[$f] // empty' "$rec" 2>/dev/null || true)"
+    case "$next" in ''|*/*|.|..) break;; esac
     id="$next"
   done
-  [ -f "$rec" ] && printf '%s\n' "$rec"
+}
+# job_latest_rec ID: follow supersededBy links to the newest available record.
+# Keep the review-pr state keyed by the original ID; a resumed delegate job has
+# a new ID and points back to its parent through resumedFrom.
+job_latest_rec() {
+  local id rec latest=""
+  while IFS=$'\t' read -r id rec; do
+    [ -f "$rec" ] && latest="$rec"
+  done < <(job_walk "$1" supersededBy)
+  [ -n "$latest" ] && printf '%s\n' "$latest"
   return 0
 }
 state_dir="${TMPDIR:-/tmp}/review-pr"
@@ -118,23 +125,14 @@ posted_dir="$state_dir/posted"
 # or posted-record id. A delegate record alone is not enough: without review-pr
 # ancestry with saved state, keep the id unchanged so collect reports UNPOSTED.
 job_review_state_id() {
-  local original id rec parent seen
-  original="$1"; id="$1"; seen="|"
-  while [ -n "$id" ]; do
-    case "$seen" in *"|$id|"*) break;; esac
-    seen="$seen$id|"
+  local id rec
+  while IFS=$'\t' read -r id rec; do
     if [ -f "$state_dir/$id" ] || [ -f "$posted_dir/$id" ]; then
       printf '%s\n' "$id"
       return 0
     fi
-    rec="$(job_rec "$id")"
-    [ -f "$rec" ] || break
-    parent="$(jq -r '.resumedFrom // empty' "$rec" 2>/dev/null || true)"
-    [ -n "$parent" ] || break
-    case "$parent" in */*|.|..) break;; esac
-    id="$parent"
-  done
-  printf '%s\n' "$original"
+  done < <(job_walk "$1" resumedFrom)
+  printf '%s\n' "$1"
 }
 run_root="${REVIEW_PR_RUN_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/review-pr-runs}"
 
