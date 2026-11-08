@@ -164,7 +164,9 @@ fn child_process_check_interval(window: Duration) -> Duration {
 /// Check for live commands in the backend's isolated process group, excluding the backend itself.
 fn process_group_has_live_child(group: libc::pid_t) -> bool {
     let Ok(output) = Command::new("ps")
-        .args(["-A", "-o", "pid=", "-o", "pgid=", "-o", "stat="])
+        .args([
+            "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=",
+        ])
         .output()
     else {
         return false;
@@ -172,17 +174,22 @@ fn process_group_has_live_child(group: libc::pid_t) -> bool {
     if !output.status.success() {
         return false;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
+    process_group_has_live_child_in_ps(&String::from_utf8_lossy(&output.stdout), group)
+}
+
+/// Parse `ps` output and check for a live process in the backend's group.
+fn process_group_has_live_child_in_ps(ps: &str, group: libc::pid_t) -> bool {
+    ps.lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             Some((
                 fields.next()?.parse::<libc::pid_t>().ok()?,
                 fields.next()?.parse::<libc::pid_t>().ok()?,
+                fields.next()?.parse::<libc::pid_t>().ok()?,
                 fields.next()?,
             ))
         })
-        .any(|(pid, pgid, state)| {
+        .any(|(pid, _ppid, pgid, state)| {
             pgid == group && pid != group && !state.starts_with('Z') && !state.starts_with('z')
         })
 }

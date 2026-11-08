@@ -279,6 +279,21 @@ fn status_of(v: &serde_json::Value) -> &str {
 }
 
 #[test]
+fn ps_child_check_handles_claude_sessions_and_zombies() {
+    let claude_background = "2906253 1 2906253 Ssl\n2906261 2906253 2906261 Sl\n2911236 2906261 2911236 Ss\n2911247 2911236 2911247 S\n";
+    assert!(process_group_has_live_child_in_ps(
+        claude_background,
+        2906261
+    ));
+
+    let backend_and_zombie = "2906261 2906253 2906261 Sl\n2911236 2906261 2911236 Zs\n";
+    assert!(!process_group_has_live_child_in_ps(
+        backend_and_zombie,
+        2906261
+    ));
+}
+
+#[test]
 fn heartbeat_refreshes_running_record_and_stops_at_retirement() {
     let s = setup_with(|d| d.heartbeat_ms = 100);
     let id = s.reg.dispatch(spec_of(|_| {}));
@@ -522,6 +537,32 @@ fn a_stalled_jobs_text_summarizes_last_known_progress() {
     ] {
         assert!(text.contains(needle), "{needle:?} missing from {:?}", text);
     }
+}
+
+#[test]
+fn post_sigterm_event_does_not_reset_reported_idle_duration() {
+    let s = setup_with(|d| d.idle_ms = Some(200.0));
+    *s.fake.ignore_first_kill.lock().unwrap() = true;
+    let id = s.reg.dispatch(spec_of(|_| {}));
+
+    wait_killed(&s, &["SIGTERM"]);
+    s.fake
+        .handle(0)
+        .progress("shell", 1.0, None, &[], Some("responding"));
+    s.fake.handle(0).finish(done_ok());
+
+    assert_eq!(settle(&s.reg, &id), "STALLED");
+    let text = terminal_text(&s.reg, &id);
+    let idle = text
+        .split("idle ")
+        .nth(1)
+        .unwrap()
+        .split('s')
+        .next()
+        .unwrap()
+        .parse::<f64>()
+        .unwrap();
+    assert!(idle >= 0.2, "reported idle time was below the window: {text}");
 }
 
 #[test]

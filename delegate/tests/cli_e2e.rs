@@ -37,7 +37,7 @@ case "$* $pt" in
     ;;
 esac
 case "$* $pt" in
-  *BACKGROUND*)
+  *BACKGROUND_FIFO*)
     # The background command blocks on a fifo the test writes to release it.
     ( read -r _ < "$d/background.fifo" ) &
     bg=$!
@@ -48,6 +48,20 @@ case "$* $pt" in
     wait "$bg"
     # `wait` has reaped the command, so it has exited.
     : > "$d/background-exited"
+    while :; do :; done
+    ;;
+esac
+case "$* $pt" in
+  *BACKGROUND_SESSION*)
+    # Match Claude Code's background Bash: a direct backend child that starts
+    # a new session before running a long-lived command.
+    perl -MPOSIX -e 'POSIX::setsid() or die; exec @ARGV' /bin/bash -c 'sleep 30 & child=$!; read -r _ < "$1"; kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; : > "$2"' background "$d/background.fifo" "$d/background-exited" </dev/null >/dev/null 2>&1 &
+    bg=$!
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-background-session"}'
+    printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"turn ended","session_id":"s-background-session"}'
+    echo "$bg" > "$d/background.pid"
+    echo "$$" > "$d/agent.pid"
+    wait "$bg"
     while :; do :; done
     ;;
 esac
@@ -1471,7 +1485,7 @@ fn live_background_child_suppresses_idle_until_it_exits() {
     }
 
     let e = Env::new("background-child-idle");
-    let idle_ms: u64 = 2_000;
+    let idle_ms: u64 = 500;
     // The supervisor checks a live child every quarter window (job.rs
     // child_process_check_interval), so the idle clock is at most this stale.
     let check_ms = (idle_ms / 4) as f64;
@@ -1493,7 +1507,7 @@ fn live_background_child_suppresses_idle_until_it_exits() {
             "--idle-ms",
             &idle_ms.to_string(),
         ],
-        "BACKGROUND",
+        "BACKGROUND_FIFO",
         &[],
     );
     let pid_file = e.dir.join("background.pid");
@@ -1587,6 +1601,151 @@ fn live_background_child_suppresses_idle_until_it_exits() {
         "idle clock last reset {}ms before the release: {rec}",
         released_at - (heartbeat - age)
     );
+
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "STALLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(text.contains("Idle watchdog killed this job"), "{text}");
+}
+
+#[test]
+fn live_claude_style_background_command_suppresses_idle_until_it_exits() {
+    struct FifoRelease(PathBuf);
+    impl FifoRelease {
+        fn release(&self) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.0)
+            {
+                let _ = f.write_all(b"\n");
+            }
+        }
+    }
+    impl Drop for FifoRelease {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    let e = Env::new("background-session-idle");
+    let fifo = e.dir.join("background.fifo");
+    let fifo_name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+    let release = FifoRelease(fifo);
+    let idle_ms: u64 = 500;
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--idle-ms",
+            &idle_ms.to_string(),
+        ],
+        "BACKGROUND_SESSION",
+        &[],
+    );
+    let pid_file = e.dir.join("background.pid");
+    let mut bg_pid = 0_i64;
+    until("Claude-style background process starts", || {
+        bg_pid = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        bg_pid > 0 || {
+            let record = e.record(&id);
+            assert_eq!(
+                record["status"], "RUNNING",
+                "job ended before the detached-child fixture started: {record}"
+            );
+            false
+        }
+    });
+    let agent_pid: i64 = std::fs::read_to_string(e.dir.join("agent.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    // Assert the fixture really has Claude Code's process relationship: the
+    // command is the backend's child, but leads a new process group and session.
+    let ps = Command::new("ps")
+        .args([
+            "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=",
+        ])
+        .output()
+        .expect("run ps");
+    assert!(ps.status.success());
+    let ps_text = String::from_utf8_lossy(&ps.stdout);
+    let row = ps_text
+        .lines()
+        .find(|line| {
+            line.split_whitespace()
+                .next()
+                .and_then(|pid| pid.parse::<i64>().ok())
+                == Some(bg_pid)
+        })
+        .unwrap_or_else(|| panic!("background process {bg_pid} missing from ps"));
+    let backend_row = ps_text
+        .lines()
+        .find(|line| {
+            line.split_whitespace()
+                .next()
+                .and_then(|pid| pid.parse::<i64>().ok())
+                == Some(agent_pid)
+        })
+        .unwrap_or_else(|| panic!("backend process {agent_pid} missing from ps"));
+    assert_eq!(
+        backend_row
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .parse::<i64>()
+            .unwrap(),
+        agent_pid,
+        "backend must lead its isolated process group: {backend_row}"
+    );
+    let fields = row.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(
+        fields[1].parse::<i64>().unwrap(),
+        agent_pid,
+        "background command must be a direct child: {row}"
+    );
+    assert_eq!(
+        fields[2].parse::<i64>().unwrap(),
+        bg_pid,
+        "background command must lead a new process group after setsid: {row}"
+    );
+
+    let read_record = || -> Option<Value> {
+        let p = e.jobs_dir().join(format!("{id}.json"));
+        serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+    };
+    let window_ms = idle_ms as f64;
+    until(
+        "job stays alive past two idle windows with a detached child",
+        || {
+            assert!(
+                alive(bg_pid),
+                "detached background command exited too early"
+            );
+            let Some(rec) = read_record() else {
+                return false;
+            };
+            assert_eq!(
+                rec["status"], "RUNNING",
+                "job ended while its detached child was alive: {rec}"
+            );
+            rec["progress"]["elapsedMs"]
+                .as_f64()
+                .is_some_and(|ms| ms > 2.0 * window_ms)
+        },
+    );
+
+    release.release();
+    until("detached child exits", || {
+        e.dir.join("background-exited").is_file()
+    });
 
     let done = e.wait_terminal(&id);
     assert_eq!(done["status"], "STALLED");
