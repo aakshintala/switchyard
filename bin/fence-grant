@@ -46,8 +46,27 @@
 #      `##` heading so it cannot add another hold.
 set -u
 set -f
-_fw_run() { printf '%s' "${FW_RUN:-/Users/aakshintala/work/fiber-worktrees/flywheel/run}"; }
+_fw_run() { printf '%s' "${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"; }
 _fw_box_host() { printf '%s' "${FW_BOX_HOST:-roundhouse-7010-plus-1.local}"; }
+_fw_is_box() {
+  local box_host box_short host_full host_short
+  box_host=$(_fw_box_host)
+  box_short=${box_host%%.*}
+  host_full=$(hostname 2>/dev/null) || host_full=""
+  host_short=$(hostname -s 2>/dev/null) || host_short=${host_full%%.*}
+  [ "$host_full" = "$box_host" ] || [ "$host_full" = "$box_short" ] ||
+    [ "$host_short" = "$box_host" ] || [ "$host_short" = "$box_short" ]
+}
+_fw_box_exec() {
+  local cmd="$1"
+  if [ -n "${FW_SSH:-}" ]; then
+    "$FW_SSH" "$(_fw_box_host)" "$cmd" 2>"${FW_SSH_ERR:-/dev/null}"
+  elif _fw_is_box; then
+    sh -c "$cmd" 2>"${FW_SSH_ERR:-/dev/null}"
+  else
+    ssh "$(_fw_box_host)" "$cmd" 2>"${FW_SSH_ERR:-/dev/null}"
+  fi
+}
 _fw_abs_path() {
   local path="$1"
   case "$path" in
@@ -86,15 +105,16 @@ fw_lane_names_mac() {
   return 0
 }
 
-# One ssh round trip gathering every box fact; results cached in FW_BOX_*.
-# FW_BOX_RC holds ssh's exit code; FW_BOX_OK is 1 only with intact markers.
+# One box round trip gathering every box fact, cached in FW_BOX_*.
+# Runs locally when already on the box.
+# FW_BOX_RC holds the command's exit code; FW_BOX_OK is 1 only with intact markers.
 _fw_box_probe() {
   if [ -n "${FW_BOX_PROBED:-}" ]; then return 0; fi
   FW_BOX_PROBED=1
   FW_BOX_OK=0
   FW_BOX_RC=0
   FW_BOX_RAW=""
-  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
+  _fw_raw=$(_fw_box_exec 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END') || FW_BOX_RC=$?
   case "$_fw_raw" in
     *FWSEC=UPTIME*FWSEC=END*) FW_BOX_OK=1; FW_BOX_RAW="$_fw_raw" ;;
   esac
@@ -242,7 +262,7 @@ fw_delegate_session_lane_names() {
   _fw_attempt=0
   while [ "$_fw_attempt" -lt 2 ]; do
     _fw_attempt=$((_fw_attempt + 1))
-    _fw_s=$("${FW_SSH:-ssh}" "$(_fw_box_host)" '~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK' 2>"${FW_SSH_ERR:-/dev/null}") || continue
+    _fw_s=$(_fw_box_exec '~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK') || continue
     case "$_fw_s" in *DSESSJSONOK*) : ;; *) continue;; esac
     if _fw_names=$(_fw_parse_dsess "$_fw_s"); then
       printf '%s' "$_fw_names" | tr '\n' ' '
