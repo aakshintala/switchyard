@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for bin/job-record: print the winning <id>.json path across the four
+# Tests for bin/job-record: print the winning <id>.json path across the five
 # sources in docs/delegate-jobs.md#lookup-order. Fixtures live under a temp
 # dir; the real /tmp/delegate-jobs and user cache are never read or written.
 set -uo pipefail
@@ -90,7 +90,25 @@ plant "$T/sys/tmp-sys.json"
 run_rec tmp-sys "DELEGATE_JOBS_DIR=$T/override"
 [ "$GOT" = "$T/tmp/delegate-jobs/tmp-sys.json" ] || fail "tmp beats system: $GOT"
 
-# --- locator fallback, parsing and four-source precedence ---
+# --- default durable cache directory and legacy TMPDIR fallback ---
+CACHE_JOBS="$T/cache/delegate/jobs"
+mkdir -p "$CACHE_JOBS"
+plant "$CACHE_JOBS/cache-only.json"
+run_rec cache-only
+[ "$RC" -eq 0 ] || fail "cache-only exits 0 (rc=$RC)"
+[ "$GOT" = "$CACHE_JOBS/cache-only.json" ] || fail "cache-only path: $GOT"
+
+plant "$CACHE_JOBS/cache-first.json"
+plant "$T/tmp/delegate-jobs/cache-first.json"
+run_rec cache-first
+[ "$GOT" = "$CACHE_JOBS/cache-first.json" ] || fail "cache beats legacy TMPDIR: $GOT"
+
+plant "$T/tmp/delegate-jobs/only-tmp-no-override.json"
+run_rec only-tmp-no-override
+[ "$RC" -eq 0 ] || fail "legacy TMPDIR fallback exits 0 (rc=$RC)"
+[ "$GOT" = "$T/tmp/delegate-jobs/only-tmp-no-override.json" ] || fail "legacy TMPDIR fallback path: $GOT"
+
+# --- locator fallback, parsing and legacy-source precedence ---
 LOCATORS="$T/cache/delegate/locators"
 OUTSIDE="$T/outside jobs"
 mkdir -p "$LOCATORS" "$OUTSIDE"

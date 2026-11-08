@@ -89,6 +89,7 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     let stderr = started.stderr;
     let mut child = started.child;
     Spawned {
+        process_group: Some(pid),
         kill: super::killer(pid, reaped_k),
         session_id: launched_session.clone(),
         drive: Box::new(move |on| {

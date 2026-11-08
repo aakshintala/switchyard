@@ -39,6 +39,9 @@ export HOME="$T/home"
 mkdir -p "$HOME"
 export TMPDIR="$T/tmp"
 mkdir -p "$TMPDIR"
+# Records go to delegate's writer dir under the fake HOME's cache.
+unset DELEGATE_JOBS_DIR XDG_CACHE_HOME
+JOBS="$HOME/.cache/delegate/jobs"
 # seed_extension ROOT PROVIDER EXT: ROOT/extensions/EXT holds exactly two
 # regular files, providers/PROVIDER.json and extension.json.
 seed_extension() {
@@ -118,7 +121,7 @@ case "\$cmd" in
     "\$REAL_GIT" -C "\$cwd" -c user.email=t@t -c user.name=t add -A >/dev/null 2>&1
     "\$REAL_GIT" -C "\$cwd" -c user.email=t@t -c user.name=t commit -qm "fake \$id" >/dev/null 2>&1
     sid="sid-\$id"
-    mkdir -p "\$TMPDIR/delegate-jobs"
+    mkdir -p "\$HOME/.cache/delegate/jobs"
     case "\$model" in
       fiber/*) cost="\${FAKE_FIBER_COST:-0.04}" ;;
       *) cost="0.05" ;;
@@ -129,7 +132,7 @@ case "\$cmd" in
       '{status:"RUNNING", result:null, fakeCost:\$cost,
         supervisorPid:1,
         resume:{model:\$model,backend:"x",cwd:\$cwd,sessionId:\$sid,gate:"g"}}' \
-      >"\$TMPDIR/delegate-jobs/\$id.json"
+      >"\$HOME/.cache/delegate/jobs/\$id.json"
     case "\$model" in
       fiber/*)
         if [ -n "\${FAKE_EVENTS:-}" ]; then
@@ -143,7 +146,7 @@ case "\$cmd" in
     # to 1 so the ordering check can see a backgrounded watch.
     printf 'watch %s\n' "\$*" >>"\$FAKE_LOGDIR/calls.log"
     sleep "\${FAKE_WATCH_SLEEP:-0}"
-    job="\$TMPDIR/delegate-jobs/\$1.json"
+    job="\$HOME/.cache/delegate/jobs/\$1.json"
     jq '.status="DONE" | .result={status:"DONE",model:.resume.model,sessionId:.resume.sessionId,backend:"x",
           usage:{inputTokens:1000,outputTokens:100,cacheReadTokens:500,cacheWriteTokens:0},
           costUsd:(.fakeCost|tonumber),durationMs:null,
@@ -296,8 +299,8 @@ done
 [ "$(jq -r .model "$OUT/fiber/metrics.json")" = "fiber/opencode-go/muse-spark-1.3-contributor" ] || fail "fiber model"
 PI_ID="$(jq -r .job_id "$OUT/pi/metrics.json")"
 FIBER_ID="$(jq -r .job_id "$OUT/fiber/metrics.json")"
-[ -n "$PI_ID" ] && [ -f "$TMPDIR/delegate-jobs/$PI_ID.json" ] || fail "pi record exists"
-[ -n "$FIBER_ID" ] && [ -f "$TMPDIR/delegate-jobs/$FIBER_ID.json" ] || fail "fiber record exists"
+[ -n "$PI_ID" ] && [ -f "$JOBS/$PI_ID.json" ] || fail "pi record exists"
+[ -n "$FIBER_ID" ] && [ -f "$JOBS/$FIBER_ID.json" ] || fail "fiber record exists"
 jq -e '(.wall_ms | type) == "number"' "$OUT/pi/metrics.json" >/dev/null || fail "pi wall is a number"
 jq -e '(.wall_ms | type) == "number"' "$OUT/fiber/metrics.json" >/dev/null || fail "fiber wall is a number"
 
@@ -851,14 +854,14 @@ REPM="$T/rep-missing"
 cp -R "$OUT" "$REPM"
 rm -f "$REPM/pi/job.json" "$REPM/fiber/job.json"
 mkdir -p "$T/aside"
-mv "$TMPDIR/delegate-jobs/$PI_ID.json" "$T/aside/pi.json"
-mv "$TMPDIR/delegate-jobs/$FIBER_ID.json" "$T/aside/fiber.json"
+mv "$JOBS/$PI_ID.json" "$T/aside/pi.json"
+mv "$JOBS/$FIBER_ID.json" "$T/aside/fiber.json"
 SNAPM="$T/snap-missing"
 cp -R "$REPM" "$SNAPM"
 bash "$CANARY" report 223 --out "$REPM" >/dev/null 2>"$T/rep-missing.err"
 RC_MISS=$?
-mv "$T/aside/pi.json" "$TMPDIR/delegate-jobs/$PI_ID.json"
-mv "$T/aside/fiber.json" "$TMPDIR/delegate-jobs/$FIBER_ID.json"
+mv "$T/aside/pi.json" "$JOBS/$PI_ID.json"
+mv "$T/aside/fiber.json" "$JOBS/$FIBER_ID.json"
 [ "$RC_MISS" -eq 1 ] || fail "report with no job record exits 1 (got $RC_MISS)"
 grep -q 'job record' "$T/rep-missing.err" || fail "report names the missing job record"
 cmp -s "$SNAPM/pi/metrics.json" "$REPM/pi/metrics.json" || fail "report leaves pi metrics.json unchanged"
@@ -871,13 +874,27 @@ REPG="$T/rep-saved"
 cp -R "$OUT" "$REPG"
 [ -f "$REPG/pi/job.json" ] && [ -f "$REPG/fiber/job.json" ] || fail "run saves a job record copy per side"
 [ -f "$REPG/fiber/events.jsonl" ] || fail "run saves the Fiber event log"
-mv "$TMPDIR/delegate-jobs/$PI_ID.json" "$T/aside/pi.json"
-mv "$TMPDIR/delegate-jobs/$FIBER_ID.json" "$T/aside/fiber.json"
+mv "$JOBS/$PI_ID.json" "$T/aside/pi.json"
+mv "$JOBS/$FIBER_ID.json" "$T/aside/fiber.json"
 FIBER_HOME="$T/no-fiber" bash "$CANARY" report 223 --out "$REPG" \
   || fail "report succeeds from saved copies alone"
-mv "$T/aside/pi.json" "$TMPDIR/delegate-jobs/$PI_ID.json"
-mv "$T/aside/fiber.json" "$TMPDIR/delegate-jobs/$FIBER_ID.json"
+mv "$T/aside/pi.json" "$JOBS/$PI_ID.json"
+mv "$T/aside/fiber.json" "$JOBS/$FIBER_ID.json"
 [ "$(jq -r .cost.main "$REPG/fiber/metrics.json")" = "0.875" ] || fail "saved-copy report rebuilds fiber main cost"
+
+# Legacy: records a delegate from before #1374 left in $TMPDIR/delegate-jobs
+# are still found when the writer dir and the saved copies lack them.
+REPL="$T/rep-legacy"
+cp -R "$OUT" "$REPL"
+rm -f "$REPL/pi/job.json" "$REPL/fiber/job.json"
+mkdir -p "$TMPDIR/delegate-jobs"
+mv "$JOBS/$PI_ID.json" "$TMPDIR/delegate-jobs/$PI_ID.json"
+mv "$JOBS/$FIBER_ID.json" "$TMPDIR/delegate-jobs/$FIBER_ID.json"
+bash "$CANARY" report 223 --out "$REPL" >/dev/null 2>"$T/rep-legacy.err"
+RC_LEG=$?
+mv "$TMPDIR/delegate-jobs/$PI_ID.json" "$JOBS/$PI_ID.json"
+mv "$TMPDIR/delegate-jobs/$FIBER_ID.json" "$JOBS/$FIBER_ID.json"
+[ "$RC_LEG" -eq 0 ] || fail "report reads legacy TMPDIR records (got $RC_LEG: $(cat "$T/rep-legacy.err"))"
 [ "$(jq -r .reviewed_calls "$REPG/fiber/metrics.json")" = "2" ] || fail "saved-copy report rebuilds reviewed calls"
 
 # --- report never replaces saved files with a bad rebuild (#240 round 3).

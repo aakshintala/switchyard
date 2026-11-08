@@ -4,7 +4,9 @@
 # One script reruns finished pi jobs through `delegate run --model fiber/<model>`
 # in sealed scratch clones and writes a Markdown comparison with the pass bar
 # applied. Fixture-driven: inputs come from REPLAY_JOBS_DIR (default
-# $TMPDIR/delegate-jobs) and REPLAY_PI_SESSIONS (default ~/.pi/agent/sessions).
+# delegate's writer dir, ${XDG_CACHE_HOME:-~/.cache}/delegate/jobs or
+# DELEGATE_JOBS_DIR, when it exists, else the legacy $TMPDIR/delegate-jobs)
+# and REPLAY_PI_SESSIONS (default ~/.pi/agent/sessions).
 # Usage:
 #   replay.sh select [--out DIR] [--total 30] [--force]
 #   replay.sh run [--out DIR] [--share muse|codex|all] [--batch 3 | --job ID...] [--fresh]
@@ -32,6 +34,18 @@ default_out() {
 
 err() {
   printf 'replay: %s\n' "$*" >&2
+}
+
+# replay_jobs_dir: REPLAY_JOBS_DIR when set, else delegate's writer dir when
+# it exists, else the legacy $TMPDIR/delegate-jobs (records from before #1374).
+replay_jobs_dir() {
+  if [ -n "${REPLAY_JOBS_DIR:-}" ]; then
+    printf '%s' "$REPLAY_JOBS_DIR"
+    return 0
+  fi
+  local d
+  d="$(delegate_jobs_dir)"
+  if [ -d "$d" ]; then printf '%s' "$d"; else printf '%s/delegate-jobs' "${TMPDIR:-/tmp}"; fi
 }
 
 # iso_epoch TS: ISO-8601 UTC (millis optional) to epoch seconds.
@@ -306,7 +320,8 @@ cmd_select() {
   case "$total" in
     ''|*[!0-9]*|0*) err "--total must be a positive number"; return 2 ;;
   esac
-  local jobs_dir="${REPLAY_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}"
+  local jobs_dir
+  jobs_dir="$(replay_jobs_dir)"
   [ -d "$jobs_dir" ] || { err "jobs dir $jobs_dir missing"; return 2; }
   SEL_OUT="$out"
   mkdir -p "$out" || return 1
@@ -627,6 +642,7 @@ run_in_seal() {
     GIT_SSH_COMMAND=false \
     "TMPDIR=$(run_tmp "$rundir")" \
     "XDG_CACHE_HOME=$(run_tmp "$rundir")/cache" \
+    "DELEGATE_JOBS_DIR=$(run_tmp "$rundir")/cache/delegate/jobs" \
     "FIBER_HOME=$RUN_OUT/fiber-home" \
     "FIBER_BIN=$FIBER_BIN" \
     "CARGO_TARGET_DIR=$RUN_OUT/target/$suffix" \
@@ -798,9 +814,12 @@ launch_job() {
   fi
   run_in_seal "$rundir" "$DELEGATE_BIN" watch "$newid" >>"$rundir/delegate.err" 2>&1 \
     || { err "$id: delegate watch failed"; return 1; }
-  [ -f "$(run_tmp "$rundir")/delegate-jobs/$newid.json" ] \
-    || { err "$id: replay record missing"; return 1; }
-  cp "$(run_tmp "$rundir")/delegate-jobs/$newid.json" "$rundir/record.json"
+  # run_in_seal pins DELEGATE_JOBS_DIR here, so an inherited override cannot
+  # send the record elsewhere.
+  local rec
+  rec="$(run_tmp "$rundir")/cache/delegate/jobs/$newid.json"
+  [ -f "$rec" ] || { err "$id: replay record missing"; return 1; }
+  cp "$rec" "$rundir/record.json"
   collect_notes "$id" "$rundir" "$rundir/scratch"
   return 0
 }
@@ -1008,7 +1027,8 @@ cmd_report() {
   RUN_OUT="$out"
   FIBER_EVENTS_ROOT="$RUN_OUT/fiber-home"
   VERDICTS_FILE="$verdicts"
-  local jobs_dir="${REPLAY_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}"
+  local jobs_dir
+  jobs_dir="$(replay_jobs_dir)"
   local res="$out/results.md"
   local line id share pimodel fibermodel repo sha session cwd sts
   local compared=0 pi_pass=0 fiber_pass=0

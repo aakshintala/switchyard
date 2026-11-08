@@ -127,7 +127,10 @@ impl Env {
     }
 
     fn record(&self, id: &str) -> Value {
-        let path = self.dir.join("delegate-jobs").join(format!("{id}.json"));
+        let path = self
+            .dir
+            .join("xdg-cache/delegate/jobs")
+            .join(format!("{id}.json"));
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 }
@@ -460,7 +463,10 @@ fn expected_prompt(prompt: &str) -> String {
 }
 
 fn rewrite_record(e: &Env, id: &str, f: impl FnOnce(&mut Value)) {
-    let path = e.dir.join("delegate-jobs").join(format!("{id}.json"));
+    let path = e
+        .dir
+        .join("xdg-cache/delegate/jobs")
+        .join(format!("{id}.json"));
     let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     f(&mut record);
     std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();

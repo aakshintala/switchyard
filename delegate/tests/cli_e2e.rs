@@ -21,7 +21,7 @@ mv "$d/stdin.$$" "$d/stdin.txt"
 # writing a line, and the fake acknowledges it; otherwise the turn is a short
 # sleep. The hold below ends only on `go`, a removed directory, or a dead
 # parent, so a held job stays RUNNING until the test releases it.
-pause() { if [ -n "$FAKE_TICK" ]; then read -r _ < "$FAKE_TICK" && echo >> "$d/acks"; else sleep 0.05; fi; }
+pause() { if [ -n "$FAKE_TICK" ]; then read -r _ < "$FAKE_TICK" && echo >> "$d/acks"; elif [ -n "$FAKE_NO_CHILD" ]; then :; else sleep 0.05; fi; }
 hold() { while [ ! -e "$rel" ] && [ -d "$d" ]; do kill -0 "$p" 2>/dev/null || exit 0; pause; done; }
 # Stays RUNNING behind a grandchild: `sleep` inherits the agent's process group, so
 # killing only the agent would leave it behind.
@@ -36,10 +36,25 @@ case "$* $pt" in
     exit 0
     ;;
 esac
+case "$* $pt" in
+  *BACKGROUND*)
+    # The background command blocks on a fifo the test writes to release it.
+    ( read -r _ < "$d/background.fifo" ) &
+    bg=$!
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-background"}'
+    printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"turn ended","session_id":"s-background"}'
+    # The pid is published only after the turn-ending result is out.
+    echo "$bg" > "$d/background.pid"
+    wait "$bg"
+    # `wait` has reaped the command, so it has exited.
+    : > "$d/background-exited"
+    while :; do :; done
+    ;;
+esac
 # Silent jobs emit nothing, so the model-idle window is what kills them.
 case "$* $pt" in
   *SILENT*)
-    hold
+    while [ ! -e "$rel" ] && [ -d "$d" ]; do :; done
     exit 0
     ;;
 esac
@@ -189,13 +204,17 @@ impl Env {
             .to_string()
     }
 
+    fn jobs_dir(&self) -> PathBuf {
+        self.dir.join("xdg-cache/delegate/jobs")
+    }
+
     fn record(&self, id: &str) -> Value {
-        let p: PathBuf = self.dir.join("delegate-jobs").join(format!("{id}.json"));
+        let p = self.jobs_dir().join(format!("{id}.json"));
         serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
     }
 
     fn write_record(&self, id: &str, record: &Value) {
-        let path = self.dir.join("delegate-jobs").join(format!("{id}.json"));
+        let path = self.jobs_dir().join(format!("{id}.json"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_vec(record).unwrap()).unwrap();
     }
@@ -263,8 +282,7 @@ fn run_returns_id_while_job_runs_then_it_finishes() {
     let locator = e.dir.join("xdg-cache/delegate/locators").join(&id);
     assert_eq!(
         std::fs::read_to_string(&locator).unwrap(),
-        e.dir
-            .join("delegate-jobs")
+        e.jobs_dir()
             .join(format!("{id}.json"))
             .display()
             .to_string()
@@ -295,8 +313,7 @@ fn run_returns_id_while_job_runs_then_it_finishes() {
     assert_eq!(done["resume"]["sessionId"], "s-1");
     assert_eq!(
         std::fs::read_to_string(&locator).unwrap(),
-        e.dir
-            .join("delegate-jobs")
+        e.jobs_dir()
             .join(format!("{id}.json"))
             .display()
             .to_string()
@@ -961,13 +978,28 @@ fn ack_without_job_ids_exits_2() {
 #[test]
 fn ack_without_absolute_cache_root_exits_2_without_writing() {
     let e = Env::new("ack-no-cache-root");
-    let id = e.run("known report");
-    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let jobs_dir = e.dir.join("ack-jobs");
+    let jobs_dir = jobs_dir.to_str().unwrap();
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "known report",
+        &[("DELEGATE_JOBS_DIR", jobs_dir)],
+    );
+    let wait = e.delegate_env(
+        &["watch", &id, "--timeout", "10"],
+        None,
+        &[("DELEGATE_JOBS_DIR", jobs_dir)],
+    );
+    assert_eq!(wait.status.code(), Some(0));
 
     let out = e.delegate_env(
         &["ack", &id],
         None,
-        &[("XDG_CACHE_HOME", "relative/cache"), ("HOME", "")],
+        &[
+            ("DELEGATE_JOBS_DIR", jobs_dir),
+            ("XDG_CACHE_HOME", "relative/cache"),
+            ("HOME", ""),
+        ],
     );
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no absolute cache root"));
@@ -977,15 +1009,29 @@ fn ack_without_absolute_cache_root_exits_2_without_writing() {
 #[test]
 fn ack_marker_write_failure_exits_1() {
     let e = Env::new("ack-write-failure");
-    let id = e.run("known report");
-    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let jobs_dir = e.dir.join("ack-jobs");
+    let jobs_dir = jobs_dir.to_str().unwrap();
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "known report",
+        &[("DELEGATE_JOBS_DIR", jobs_dir)],
+    );
+    let wait = e.delegate_env(
+        &["watch", &id, "--timeout", "10"],
+        None,
+        &[("DELEGATE_JOBS_DIR", jobs_dir)],
+    );
+    assert_eq!(wait.status.code(), Some(0));
     let cache_file = e.dir.join("cache-is-a-file");
     std::fs::write(&cache_file, "not a directory").unwrap();
 
     let out = e.delegate_env(
         &["ack", &id],
         None,
-        &[("XDG_CACHE_HOME", cache_file.to_str().unwrap())],
+        &[
+            ("DELEGATE_JOBS_DIR", jobs_dir),
+            ("XDG_CACHE_HOME", cache_file.to_str().unwrap()),
+        ],
     );
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot write read marker"));
@@ -1387,8 +1433,161 @@ fn tool_idle_stalls_a_quiet_tool_call() {
     let id = e.ok(
         &["run", "--model", "composer-2.5", "--tool-idle-ms", "300"],
         "SLOW",
+        &[("FAKE_NO_CHILD", "1")],
+    );
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "STALLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(text.contains("Idle watchdog killed this job"), "{text}");
+}
+
+#[test]
+fn live_background_child_suppresses_idle_until_it_exits() {
+    /// Releases the fake's background command, so a failed assertion never
+    /// leaves it blocked on the fifo.
+    struct FifoRelease(PathBuf);
+    impl FifoRelease {
+        fn release(&self) {
+            // Read+write never blocks on open, even before the reader is there.
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.0)
+            {
+                let _ = f.write_all(b"\n");
+            }
+        }
+    }
+    impl Drop for FifoRelease {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+    fn epoch_ms() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as f64
+    }
+
+    let e = Env::new("background-child-idle");
+    let idle_ms: u64 = 2_000;
+    // The supervisor checks a live child every quarter window (job.rs
+    // child_process_check_interval), so the idle clock is at most this stale.
+    let check_ms = (idle_ms / 4) as f64;
+    let fifo = e.dir.join("background.fifo");
+    let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let gate = FifoRelease(fifo);
+    // A record is rewritten every heartbeat by tmp-and-rename; read whatever
+    // is there now.
+    let read_record = |id: &str| -> Option<Value> {
+        let p = e.jobs_dir().join(format!("{id}.json"));
+        serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+    };
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--idle-ms",
+            &idle_ms.to_string(),
+        ],
+        "BACKGROUND",
         &[],
     );
+    let pid_file = e.dir.join("background.pid");
+    let mut bg_pid: i64 = 0;
+    until(
+        "background command starts",
+        || match std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+        {
+            Some(pid) => {
+                bg_pid = pid;
+                true
+            }
+            None => false,
+        },
+    );
+    // The ticket's check: the job outlives idle_ms while the child is alive.
+    // The fake published the pid after the turn-ending result, and the child
+    // is blocked on the fifo, so only the watchdog could end the job. Each
+    // record must be RUNNING with an idle clock the live-child check keeps
+    // below the window; the wait ends once the record shows the job has run
+    // for two windows.
+    let window = idle_ms as f64;
+    until("the job runs for two idle windows", || {
+        assert!(alive(bg_pid), "background command ended before its release");
+        let Some(rec) = read_record(&id) else {
+            return false;
+        };
+        assert_eq!(
+            rec["status"], "RUNNING",
+            "job ended while its child was alive: {rec}"
+        );
+        let age = rec["progress"]["lastEventAgeMs"]
+            .as_f64()
+            .expect("progress carries lastEventAgeMs");
+        assert!(
+            age < window,
+            "live child did not refresh the idle clock: {rec}"
+        );
+        rec["progress"]["elapsedMs"]
+            .as_f64()
+            .is_some_and(|ms| ms > 2.0 * window)
+    });
+    let held = e.delegate(&["status", &id], None);
+    assert_eq!(held.status.code(), Some(0));
+    let held_text = String::from_utf8_lossy(&held.stdout);
+    assert!(
+        held_text.starts_with(&format!("{id}: RUNNING")),
+        "{held_text}"
+    );
+
+    let released_at = epoch_ms();
+    gate.release();
+    until("background command exits", || {
+        e.dir.join("background-exited").is_file()
+    });
+    assert!(!alive(bg_pid), "background command still alive after wait");
+    let exited_at = epoch_ms();
+
+    // A record written after the exit is still RUNNING, and its idle clock
+    // runs from the child's last check, not from the turn's end more than
+    // two windows ago: the child's exit started a fresh window.
+    // A terminal record (no heartbeat) is taken too, so an early kill fails
+    // on the status below rather than on a timeout.
+    let mut after_exit = None;
+    until("a record written after the child exited", || {
+        after_exit = read_record(&id).filter(|r| {
+            r["status"] != "RUNNING"
+                || r["lastHeartbeatAt"]
+                    .as_f64()
+                    .is_some_and(|h| h >= exited_at)
+        });
+        after_exit.is_some()
+    });
+    let rec = after_exit.unwrap();
+    assert_eq!(
+        rec["status"], "RUNNING",
+        "idle kill fired at child exit: {rec}"
+    );
+    let age = rec["progress"]["lastEventAgeMs"]
+        .as_f64()
+        .expect("progress carries lastEventAgeMs");
+    let heartbeat = rec["lastHeartbeatAt"].as_f64().unwrap();
+    assert!(
+        age < idle_ms as f64,
+        "idle clock not reset by the child: {rec}"
+    );
+    assert!(
+        heartbeat - age >= released_at - check_ms - 100.0,
+        "idle clock last reset {}ms before the release: {rec}",
+        released_at - (heartbeat - age)
+    );
+
     let done = e.wait_terminal(&id);
     assert_eq!(done["status"], "STALLED");
     let text = done["result"]["text"].as_str().unwrap();
@@ -1847,7 +2046,7 @@ fn cancel_unknown_job_exits_2() {
 }
 
 #[test]
-fn cancel_finds_a_record_under_another_tmpdir() {
+fn status_finds_a_record_written_by_another_process_with_a_different_tmpdir() {
     let e = Env::new("x-cancel");
     let inherited_cache = e.dir.join("inherited-cache-is-a-file");
     std::fs::write(&inherited_cache, "obstructed inherited cache root").unwrap();
@@ -1914,8 +2113,7 @@ fn cancel_finds_a_record_under_another_tmpdir() {
     let locator = e.dir.join("xdg-cache/delegate/locators").join(&id);
     assert_eq!(
         std::fs::read_to_string(locator).unwrap(),
-        e.dir
-            .join("delegate-jobs")
+        e.jobs_dir()
             .join(format!("{id}.json"))
             .display()
             .to_string()
@@ -2010,8 +2208,11 @@ fn watch_and_resume_find_a_record_under_another_tmpdir() {
         String::from_utf8_lossy(&out.stdout)
     );
     let b = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    let b_path = other.join("delegate-jobs").join(format!("{b}.json"));
-    assert!(b_path.is_file(), "resume creates its record under caller B");
+    let b_path = e.jobs_dir().join(format!("{b}.json"));
+    assert!(
+        b_path.is_file(),
+        "resume writes its record to the durable cache"
+    );
     assert_eq!(
         std::fs::read_to_string(e.dir.join("xdg-cache/delegate/locators").join(&b)).unwrap(),
         b_path.display().to_string() + "\n"
@@ -2021,6 +2222,13 @@ fn watch_and_resume_find_a_record_under_another_tmpdir() {
     let done: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(done["status"], "DONE");
     assert_eq!(e.record(&a)["supersededBy"], b.as_str());
+    assert!(
+        !other
+            .join("delegate-jobs")
+            .join(format!("{b}.json"))
+            .exists(),
+        "resume does not create a legacy temp copy"
+    );
     assert!(
         !other
             .join("delegate-jobs")
@@ -2168,7 +2376,7 @@ fn unknown_job_names_the_searched_dirs() {
 fn legacy_record_without_locator_is_read_without_migration() {
     let e = Env::new("legacy-record");
     let id = "legacy-no-locator";
-    let record = e.dir.join("delegate-jobs").join(format!("{id}.json"));
+    let record = e.jobs_dir().join(format!("{id}.json"));
     std::fs::create_dir_all(record.parent().unwrap()).unwrap();
     std::fs::write(&record, r#"{"status":"DONE"}"#).unwrap();
 

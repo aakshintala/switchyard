@@ -12,30 +12,27 @@ pub trait StatusRecordWriter: Send + Sync {
 
 /// Delegate's state directory: job records, gate logs, and the `cargo-mutants`
 /// shim (`shim/`) every job's `PATH` starts with (#435). An explicit
-/// `DELEGATE_JOBS_DIR` override wins, so the switchyard operator's setting on
-/// the box reaches the records supervisors write (#386); otherwise the
-/// supervisor's `$TMPDIR/delegate-jobs`.
+/// `DELEGATE_JOBS_DIR` override wins; otherwise records live under the active
+/// per-user cache root at `delegate/jobs`.
 pub fn jobs_dir() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
-    writer_dir_from(
-        &std::env::var_os("DELEGATE_JOBS_DIR"),
-        &std::env::temp_dir(),
-        &cwd,
-    )
+    let default_jobs = default_jobs_dir_from(
+        std::env::var_os("XDG_CACHE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    );
+    writer_dir_from(&std::env::var_os("DELEGATE_JOBS_DIR"), &cwd, &default_jobs)
 }
 
-/// The writer side of the lookup rule: the resolved `DELEGATE_JOBS_DIR` when
-/// set and non-empty, else `tmp/delegate-jobs`. A relative override resolves
-/// against the caller's current directory, exactly like the lookup's first
-/// entry, so writers and readers agree on one rule.
-fn writer_dir_from(over: &Option<std::ffi::OsString>, tmp: &Path, cwd: &Path) -> PathBuf {
+/// Resolve the writer directory from its override and the persistent default.
+/// A relative override resolves against the caller's current directory.
+fn writer_dir_from(over: &Option<std::ffi::OsString>, cwd: &Path, default_jobs: &Path) -> PathBuf {
     if let Some(o) = over
         && !o.is_empty()
     {
-        let p = PathBuf::from(&o);
+        let p = PathBuf::from(o);
         return if p.is_absolute() { p } else { cwd.join(p) };
     }
-    tmp.join("delegate-jobs")
+    default_jobs.to_path_buf()
 }
 
 /// Status JSON for one job in the writer directory (`jobs_dir`).
@@ -44,32 +41,41 @@ pub fn job_record_path(job_id: &str) -> PathBuf {
     jobs_dir().join(format!("{job_id}.json"))
 }
 
-/// Every directory a job record could live in: an explicit `DELEGATE_JOBS_DIR`
-/// override first, then the caller's `$TMPDIR/delegate-jobs`, then the
-/// system `/tmp/delegate-jobs`. The override is dropped when empty; a
-/// relative override resolves against the caller's current directory.
-/// Duplicates are removed, keeping the first position. Never empty.
+/// Every directory a job record could live in: the writer directory, the
+/// caller's legacy `$TMPDIR/delegate-jobs`, then `/tmp/delegate-jobs`. The
+/// override is dropped when empty; a relative override resolves against the
+/// current directory. Duplicates are removed, keeping the first position.
+/// Never empty.
 pub fn search_dirs() -> Vec<PathBuf> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let tmp = std::env::temp_dir();
+    let default_jobs = default_jobs_dir_from(
+        std::env::var_os("XDG_CACHE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    );
     dirs_from(
         std::env::var_os("DELEGATE_JOBS_DIR"),
-        &std::env::temp_dir(),
+        &tmp,
         &cwd,
+        &default_jobs,
     )
 }
 
-fn dirs_from(over: Option<std::ffi::OsString>, tmp: &Path, cwd: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![writer_dir_from(&over, tmp, cwd)];
-    if over.as_ref().is_some_and(|o| !o.is_empty()) {
-        dirs.push(tmp.join("delegate-jobs"));
-    }
+fn dirs_from(
+    over: Option<std::ffi::OsString>,
+    tmp: &Path,
+    cwd: &Path,
+    default_jobs: &Path,
+) -> Vec<PathBuf> {
+    let mut dirs = vec![writer_dir_from(&over, cwd, default_jobs)];
+    dirs.push(tmp.join("delegate-jobs"));
     dirs.push(PathBuf::from("/tmp/delegate-jobs"));
     let mut seen = std::collections::HashSet::new();
     dirs.retain(|d| seen.insert(d.clone()));
     dirs
 }
 
-/// The first regular-file hit in the legacy directories, then the job's locator.
+/// The first regular-file hit in the writer and legacy directories, then the job's locator.
 /// `None` for an empty id or one holding a path separator, which must never
 /// reach a path join.
 pub fn find_record_path(job_id: &str) -> Option<PathBuf> {
@@ -112,6 +118,12 @@ fn locator_cache_root_from(
     }
     let home = PathBuf::from(home?);
     home.is_absolute().then(|| home.join(".cache"))
+}
+
+fn default_jobs_dir_from(xdg: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>) -> PathBuf {
+    locator_cache_root_from(xdg, home)
+        .unwrap_or_else(|| crate::util::homedir().join(".cache"))
+        .join("delegate/jobs")
 }
 
 fn locator_path_from(
@@ -622,6 +634,34 @@ mod tests {
     }
 
     #[test]
+    fn default_jobs_directory_uses_absolute_xdg_or_home_cache_and_keeps_override() {
+        use crate::test_env::EnvGuard;
+        let _env = crate::test_env::lock();
+        let root = std::env::temp_dir().join(format!("delegate-jobs-dir-{}", random_uuid()));
+        let home = root.join("home");
+        let tmp = root.join("tmp");
+        let xdg = root.join("xdg cache");
+        let _home = EnvGuard::set("HOME", home.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", tmp.to_str().unwrap());
+        let _no_override = EnvGuard::remove("DELEGATE_JOBS_DIR");
+        let _no_xdg = EnvGuard::remove("XDG_CACHE_HOME");
+
+        assert_eq!(jobs_dir(), home.join(".cache/delegate/jobs"));
+        {
+            let _xdg = EnvGuard::set("XDG_CACHE_HOME", xdg.to_str().unwrap());
+            assert_eq!(jobs_dir(), xdg.join("delegate/jobs"));
+        }
+        {
+            let _override = EnvGuard::set("DELEGATE_JOBS_DIR", "relative/jobs");
+            assert_eq!(
+                jobs_dir(),
+                std::env::current_dir().unwrap().join("relative/jobs")
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn locator_cache_selection_uses_absolute_xdg_or_home_fallback() {
         use crate::test_env::EnvGuard;
         let _env = crate::test_env::lock();
@@ -895,10 +935,12 @@ mod tests {
     #[test]
     fn search_order_is_override_then_tmp_then_system_tmp() {
         // docs/delegate-jobs.md#lookup-order
+        let default_jobs = Path::new("/users/alice/.cache/delegate/jobs");
         let dirs = dirs_from(
             Some("/jobs/ship-tmp/delegate-jobs".into()),
             Path::new("/jobs/caller-tmp"),
             Path::new("/jobs/cwd"),
+            default_jobs,
         );
         assert_eq!(
             dirs,
@@ -914,45 +956,58 @@ mod tests {
     fn search_resolves_a_relative_override_against_cwd_and_drops_empty() {
         // docs/delegate-jobs.md#empty-and-relative-override
         let cwd = Path::new("/jobs/cwd");
-        let no_over = dirs_from(None, Path::new("/jobs/caller-tmp"), cwd);
+        let tmp = Path::new("/jobs/caller-tmp");
+        let cache = Path::new("/users/alice/.cache/delegate/jobs");
+        let no_over = dirs_from(None, tmp, cwd, cache);
+        assert_eq!(dirs_from(Some("".into()), tmp, cwd, cache), no_over);
         assert_eq!(
-            dirs_from(Some("".into()), Path::new("/jobs/caller-tmp"), cwd),
-            no_over
-        );
-        assert_eq!(
-            dirs_from(
-                Some("relative/dir".into()),
-                Path::new("/jobs/caller-tmp"),
-                cwd
-            )[0],
+            dirs_from(Some("relative/dir".into()), tmp, cwd, cache)[0],
             PathBuf::from("/jobs/cwd/relative/dir")
         );
         assert_eq!(
-            dirs_from(Some("/abs/dir".into()), Path::new("/jobs/caller-tmp"), cwd)[0],
+            dirs_from(Some("/abs/dir".into()), tmp, cwd, cache)[0],
             PathBuf::from("/abs/dir")
         );
     }
 
     #[test]
-    fn writer_dir_prefers_the_override_else_tmp_jobs() {
+    fn writer_dir_prefers_the_override_else_durable_cache() {
         // docs/delegate-jobs.md#writers
         let cwd = Path::new("/jobs/cwd");
-        let tmp = Path::new("/jobs/caller-tmp");
+        let cache = Path::new("/users/alice/.cache/delegate/jobs");
         assert_eq!(
-            writer_dir_from(&Some("/jobs/ship/jobs".into()), tmp, cwd),
+            writer_dir_from(&Some("/jobs/ship/jobs".into()), cwd, cache),
             PathBuf::from("/jobs/ship/jobs")
         );
         assert_eq!(
-            writer_dir_from(&Some("relative/dir".into()), tmp, cwd),
+            writer_dir_from(&Some("relative/dir".into()), cwd, cache),
             PathBuf::from("/jobs/cwd/relative/dir")
         );
         assert_eq!(
-            writer_dir_from(&Some("".into()), tmp, cwd),
-            PathBuf::from("/jobs/caller-tmp/delegate-jobs")
+            writer_dir_from(&Some("".into()), cwd, cache),
+            cache.to_path_buf()
+        );
+        assert_eq!(writer_dir_from(&None, cwd, cache), cache.to_path_buf());
+    }
+
+    #[test]
+    fn search_default_cache_precedes_legacy_temp_and_deduplicates() {
+        let cache = Path::new("/home/test/.cache/delegate/jobs");
+        assert_eq!(
+            dirs_from(None, Path::new("/tmp"), Path::new("/work"), cache),
+            vec![cache.to_path_buf(), PathBuf::from("/tmp/delegate-jobs"),]
         );
         assert_eq!(
-            writer_dir_from(&None, tmp, cwd),
-            PathBuf::from("/jobs/caller-tmp/delegate-jobs")
+            dirs_from(
+                Some("/jobs/caller-tmp/delegate-jobs".into()),
+                Path::new("/jobs/caller-tmp"),
+                Path::new("/jobs/cwd"),
+                cache,
+            ),
+            vec![
+                PathBuf::from("/jobs/caller-tmp/delegate-jobs"),
+                PathBuf::from("/tmp/delegate-jobs"),
+            ]
         );
     }
 
@@ -964,6 +1019,7 @@ mod tests {
                 Some("/jobs/caller-tmp/delegate-jobs".into()),
                 Path::new("/jobs/caller-tmp"),
                 Path::new("/jobs/cwd"),
+                Path::new("/home/test/.cache/delegate/jobs"),
             ),
             vec![
                 PathBuf::from("/jobs/caller-tmp/delegate-jobs"),
@@ -971,8 +1027,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            dirs_from(None, Path::new("/tmp"), Path::new("/jobs/cwd")),
-            vec![PathBuf::from("/tmp/delegate-jobs")]
+            dirs_from(
+                None,
+                Path::new("/tmp"),
+                Path::new("/jobs/cwd"),
+                Path::new("/home/test/.cache/delegate/jobs"),
+            ),
+            vec![
+                PathBuf::from("/home/test/.cache/delegate/jobs"),
+                PathBuf::from("/tmp/delegate-jobs"),
+            ]
         );
     }
 

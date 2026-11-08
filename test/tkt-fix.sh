@@ -23,7 +23,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-fix.XXXXXX")"
 T="$(cd "$T" && pwd)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
+export HOME="$T/home" TMPDIR="$T/tmp" XDG_CACHE_HOME="$T/cache" TKT_BIN="$T/bin"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 
 ln -s "$REAL_BIN/tkt-gate" "$T/bin/tkt-gate" || fail "symlink tkt-gate"
@@ -89,6 +89,9 @@ case "\$(cat "$T/jobmode")" in
   unknown)
     echo "TKT tkt-job UNKNOWN id=j1 log=x"
     exit 3;;
+  stale-resume)
+    echo "delegate resume j1: unknown job j1 (record missing)" >&2
+    exit 2;;
   stderr-only)
     echo 'tkt-job refused: missing required context' >&2
     exit 3;;
@@ -568,6 +571,25 @@ out="$(bash "$TKT" "$S" --verify --resume zz --prompt "$CDIR/prompt.md" 2>"$T/st
 rc=$?; [ "$rc" = "2" ] || fail "A3 zz exited $rc, want 2"
 grep -q "zz" "$T/stderr" || fail "A3 zz: stderr does not name zz"
 grep -q "job|" "$T/calls.log" && fail "A3 zz dispatched a job"
+fi
+
+if want STALE-RESUME; then
+# STALE-RESUME: when delegate cannot find a resumed record and its locator
+# points at a deleted target, tkt-fix refuses with triage guidance. It does not
+# turn the owned slot into permission to start a fresh job.
+setup_case stale-resume
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+mkdir -p "$XDG_CACHE_HOME/delegate/locators"
+printf '%s\n' "$CDIR/deleted-jobs/j1.json" >"$XDG_CACHE_HOME/delegate/locators/j1"
+printf 'resume brief\n' >"$CDIR/prompt.md"
+printf 'stale-resume' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" && fail "stale resume exited 0"
+rc=$?; [ "$rc" = "3" ] || fail "stale resume exited $rc, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix UNKNOWN" || fail "stale resume verdict: $(head -n 1 <<<"$out")"
+grep -qi "triage" <<<"$out" || fail "stale resume does not name triage recovery: $out"
+grep -q "slot fix1" <<<"$out" || fail "stale resume does not preserve owned slot: $out"
+grep -q "job|.*--slot fix1.*--resume j1" "$T/calls.log" || fail "stale resume did not stay on the owned slot"
+grep -q "unknown job j1 (record missing)" <<<"$out" && fail "stale resume exposed the bare delegate error"
 fi
 
 # UNKNOWN verdicts preserve stderr from a sub-tool that writes no TKT line;

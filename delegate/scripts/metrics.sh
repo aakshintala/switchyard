@@ -1,9 +1,43 @@
-# metrics.sh: shared cost/token/denial extraction for replay.sh and canary.sh.
+# metrics.sh: shared cost/token/denial extraction and job record paths for
+# replay.sh and canary.sh.
 #
 # Factored out of replay.sh (see #223). Sourced, never executed: it has no
 # `set` lines and no top-level side effects (function definitions only).
 # The Fiber events root defaults to ${FIBER_HOME:-$HOME/.fiber}; replay.sh
 # sets FIBER_EVENTS_ROOT to $RUN_OUT/fiber-home before calling in.
+
+# ---------- job records ----------
+
+# delegate_jobs_dir: the directory delegate writes job records to, resolved
+# as in delegate/src/status_record.rs: DELEGATE_JOBS_DIR when non-empty (a
+# relative value against the current directory), else
+# $XDG_CACHE_HOME/delegate/jobs when XDG_CACHE_HOME is absolute, else
+# $HOME/.cache/delegate/jobs.
+delegate_jobs_dir() {
+  if [ -n "${DELEGATE_JOBS_DIR:-}" ]; then
+    case "$DELEGATE_JOBS_DIR" in
+      /*) printf '%s' "$DELEGATE_JOBS_DIR" ;;
+      *) printf '%s/%s' "$PWD" "$DELEGATE_JOBS_DIR" ;;
+    esac
+    return 0
+  fi
+  case "${XDG_CACHE_HOME:-}" in
+    /*) printf '%s/delegate/jobs' "$XDG_CACHE_HOME" ;;
+    *) printf '%s/.cache/delegate/jobs' "${HOME:-}" ;;
+  esac
+}
+
+# job_record_file JOBS_DIR ID: JOBS_DIR/ID.json, else the legacy
+# $TMPDIR/delegate-jobs/ID.json a delegate from before #1374 wrote, else
+# JOBS_DIR/ID.json (missing, for the caller's error).
+job_record_file() {
+  local legacy="${TMPDIR:-/tmp}/delegate-jobs/$2.json"
+  if [ ! -f "$1/$2.json" ] && [ -f "$legacy" ]; then
+    printf '%s' "$legacy"
+  else
+    printf '%s' "$1/$2.json"
+  fi
+}
 
 # ---------- report ----------
 

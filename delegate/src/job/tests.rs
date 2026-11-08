@@ -134,6 +134,7 @@ impl Runner for FakeBackend {
         let tx = Mutex::new(tx);
         let ignore_first = Arc::clone(&self.ignore_first_kill);
         Spawned {
+            process_group: None,
             session_id,
             kill: Box::new(move || {
                 let first = killed.lock().unwrap().is_empty();

@@ -44,9 +44,12 @@ pub enum Event {
 
 pub type EventFn<'a> = &'a (dyn Fn(Event) + Sync);
 
-/// A spawned run. `kill` sends SIGTERM and may be called from any thread, any number of
-/// times. `drive` blocks the calling thread until the child exits, reporting events.
+/// A spawned run. `process_group` is the isolated backend child's process-group ID, when it has
+/// one; it lets the idle watchdog distinguish the backend from commands it started.
+/// `kill` sends SIGTERM and may be called from any thread, any number of times. `drive`
+/// blocks the calling thread until the child exits, reporting events.
 pub struct Spawned {
+    pub process_group: Option<libc::pid_t>,
     pub kill: Box<dyn Fn() + Send + Sync>,
     pub session_id: Option<String>,
     pub drive: Box<dyn FnOnce(EventFn<'_>) -> BackendResult + Send>,

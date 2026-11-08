@@ -122,7 +122,7 @@ delegate watch <id-a> <id-b> --timeout 1800
 
 Every terminal job appends one cost record to `$XDG_CACHE_HOME/agents/delegate-cost.jsonl`, or `~/.cache/agents/delegate-cost.jsonl` when XDG is unset; set `DELEGATE_COST_LEDGER` to override the path.
 
-The record is `DELEGATE_JOBS_DIR/<id>.json` when that override is set, else `$TMPDIR/delegate-jobs/<id>.json` (a terminal record has no `lastHeartbeatAt`). `cancel`, `status`, `watch`, `resume`, `ack` and `bin/job-record` search that directory, your `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`, then the per-user locator at `${XDG_CACHE_HOME:-$HOME/.cache}/delegate/locators/<id>`.
+The record is `DELEGATE_JOBS_DIR/<id>.json` when that override is set, else `<cache-root>/delegate/jobs/<id>.json`, where `<cache-root>` is absolute `XDG_CACHE_HOME` or `$HOME/.cache` (a terminal record has no `lastHeartbeatAt`). `cancel`, `status`, `watch`, `resume`, `ack` and `bin/job-record` search the override or cache directory, your legacy `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`, then the per-user locator at `<cache-root>/delegate/locators/<id>`.
 
 After acting on a job's report, run `delegate ack <id>` so lanestat stops showing it as DONE-UNREAD.
 

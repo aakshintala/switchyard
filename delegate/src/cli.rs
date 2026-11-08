@@ -1,7 +1,8 @@
 //! The `delegate` CLI: `run` starts a detached supervisor, `watch` reads job records.
 //! The record file is the only link between them. `cancel`, `status`, `watch`, `resume` and
-//! `ack` search `DELEGATE_JOBS_DIR`, `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`,
-//! then the job's per-user locator. See `docs/delegate-jobs.md`.
+//! `ack` search `DELEGATE_JOBS_DIR`, the active cache's `delegate/jobs`,
+//! `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`, then the job's per-user locator.
+//! See `docs/delegate-jobs.md`.
 
 use crate::backends::Backend;
 use crate::config::build_deps;
@@ -198,9 +199,21 @@ fn caller_info() -> CallerInfo {
 fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
     let caller = caller_info();
     let id = random_uuid();
+    // Publish before creating the cache-backed job directory so a blocked
+    // cache root fails as a locator error, not as a partial job launch.
+    if let Err(e) = write_locator(&id) {
+        eprintln!("cannot write job locator for {id}: {e}");
+        return Err(LaunchErr::Done(1));
+    }
+    let discard_locator = || {
+        if let Some(locator) = locator_path(&id) {
+            let _ = std::fs::remove_file(locator);
+        }
+    };
     let record = job_record_path(&id);
     let dir = record.parent().expect("record has a parent");
     if let Err(e) = std::fs::create_dir_all(dir) {
+        discard_locator();
         return Err(LaunchErr::Usage(format!("{}: {e}", dir.display())));
     }
     let prompt_file = dir.join(format!("{id}.prompt"));
@@ -212,6 +225,7 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
         .and_then(|mut f| f.write_all(p.prompt.as_bytes()));
     if let Err(e) = written {
         let _ = std::fs::remove_file(&prompt_file);
+        discard_locator();
         return Err(LaunchErr::Usage(format!("{}: {e}", prompt_file.display())));
     }
 
@@ -259,9 +273,14 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
         supervise_args.push(cwd.clone());
     }
     // Own session and process group, stdio closed: the supervisor outlives this process.
-    let exe = std::env::current_exe().map_err(|e| LaunchErr::Usage(e.to_string()))?;
+    let exe = std::env::current_exe().map_err(|e| {
+        let _ = std::fs::remove_file(&prompt_file);
+        discard_locator();
+        LaunchErr::Usage(e.to_string())
+    })?;
     let mut cmd = captured_command(&exe).map_err(|e| {
         let _ = std::fs::remove_file(&prompt_file);
+        discard_locator();
         LaunchErr::Usage(format!("cannot write cargo-mutants shim: {e}"))
     })?;
     let mut child = unsafe {
@@ -277,13 +296,18 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
     }
     .map_err(|e| {
         let _ = std::fs::remove_file(&prompt_file);
+        discard_locator();
         LaunchErr::Usage(format!("cannot start supervisor: {e}"))
     })?;
     // The supervisor writes the first RUNNING record before the agent starts; wait for it.
     let t = Instant::now();
     while !record.exists() {
-        if child.try_wait().ok().flatten().is_some() || t.elapsed() > Duration::from_secs(10) {
+        let exited = child.try_wait().ok().flatten().is_some();
+        if exited || t.elapsed() > Duration::from_secs(10) {
             let _ = std::fs::remove_file(&prompt_file);
+            if exited {
+                discard_locator();
+            }
             eprintln!("supervisor failed to write {}", record.display());
             return Err(LaunchErr::Done(1));
         }
@@ -808,9 +832,6 @@ fn supervise(args: &[String]) -> i32 {
         wall_ms,
         resumed_from: resumed_from.clone(),
     });
-    if let Err(e) = write_locator(id) {
-        return fail(format!("cannot write job locator for {id}: {e}"));
-    }
     let registry = JobHandle::new(rd);
     let cancel_fd = install_cancel_handler();
     let job = registry.dispatch(spec);

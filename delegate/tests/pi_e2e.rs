@@ -138,7 +138,10 @@ impl Env {
     }
 
     fn record(&self, id: &str) -> Value {
-        let p: PathBuf = self.dir.join("delegate-jobs").join(format!("{id}.json"));
+        let p: PathBuf = self
+            .dir
+            .join("xdg-cache/delegate/jobs")
+            .join(format!("{id}.json"));
         serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
     }
 

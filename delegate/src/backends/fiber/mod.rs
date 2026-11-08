@@ -95,6 +95,7 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     };
     let hub::HubRun { control, drive } = hub::spawn_turn(request, socket);
     Spawned {
+        process_group: None,
         kill: Box::new(move || control.kill()),
         session_id,
         drive,
