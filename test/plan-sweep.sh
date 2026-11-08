@@ -65,6 +65,9 @@ pub fn name(s: Shape) -> u32 {
     }
 }
 EOF
+cat >"$R/src/token_shapes.rs" <<'EOF'
+// Bare Interface tokens that are not identifier-shaped: &mut #[cfg(test)] tui-models
+EOF
 cat >"$R/src/label.rs" <<'EOF'
 pub const LABEL: &str = "WidgetThing";
 EOF
@@ -295,6 +298,24 @@ run --cwd "$R" --base "$BASE" --plan "$T/plan-m-b.md" --out "$T/pack-m-b.md"
 case "$out" in PACK*) ;; *) fail "m-b: PACK line, got [$out]" ;; esac
 case "$out" in *unresolved*) fail "m-b: no unresolved text, got [$out]" ;; esac
 ! grep -q 'Unmarked_Name' "$T/pack-m-b.md" || fail "m-b: omitted token left out of the pack"
+
+# m-c. non-identifiers in Interfaces do not become symbols or fail resolution
+cat >"$T/plan-m-c.md" <<EOF
+# Plan
+Base: $BASE
+
+## Files
+- \`src/lib.rs\`
+
+## Interfaces
+Mentions \`&mut\`, \`#[cfg(test)]\` and \`tui-models\`.
+EOF
+run --cwd "$R" --base "$BASE" --plan "$T/plan-m-c.md" --out "$T/pack-m-c.md"
+[ "$code" = 0 ] || fail "m-c: non-identifiers exit 0, got $code [$out]"
+case "$out" in PACK*) ;; *) fail "m-c: expected PACK output, got [$out]" ;; esac
+for token in '&mut' '#[cfg(test)]' 'tui-models'; do
+  ! grep -Fq "## Symbol $token" "$T/pack-m-c.md" || fail "m-c: non-identifier swept as a symbol: $token"
+done
 
 # k. usage: exit 2 with nothing on stdout
 usage_cases=0

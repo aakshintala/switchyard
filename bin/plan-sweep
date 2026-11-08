@@ -276,6 +276,7 @@ bare_last() {
   esac
   case "$t" in .*) case "$t" in */*) ;; *) return 0 ;; esac ;; esac
   if is_path "$t"; then return 0; fi
+  is_symbol_shape "$t" || return 0
   s="$t"
   case "$s" in *"()") s="${s%??}" ;; esac
   last="${s##*::}"
