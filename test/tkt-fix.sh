@@ -547,6 +547,8 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "bad verdict: $(head -
 grep -q "state head=$OLD" <<<"$out" || fail "state head missing from DRIFT digest"
 grep -q "PR head=$NEW" <<<"$out" || fail "PR head missing from DRIFT digest"
 grep -q "worktree HEAD=$NEW" <<<"$out" || fail "worktree sha missing from DRIFT digest"
+grep -qF "after a rebase or main merge, run: tkt-state $S set head $NEW" <<<"$out" || fail "set-head route missing from DRIFT A digest"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "head moved on DRIFT A"
 grep -q "job|" "$T/calls.log" && fail "fix job dispatched on DRIFT A"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$OLD" ] || fail "drift-a commit was pushed"
 # 9. RECOVER: a stored job for this round's slot exits 3, no dispatch, no push.
@@ -575,6 +577,7 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "bad verdict: $(head -
 grep -q "state head=$NEW" <<<"$out" || fail "state head missing from DRIFT digest"
 grep -q "PR head=$OLD" <<<"$out" || fail "PR head missing from DRIFT digest"
 grep -q "worktree HEAD=$NEW" <<<"$out" || fail "worktree sha missing from DRIFT digest"
+grep -q "set head" <<<"$out" && fail "set-head route printed on DRIFT B"
 grep -q "job|" "$T/calls.log" && fail "fix job dispatched on DRIFT B"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "drift-b moved origin"
 
