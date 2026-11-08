@@ -10,6 +10,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/copy-fixture.sh"
 BUILD="$SCRIPT_DIR/../bin/tkt-build"
 TKT_STATE="$SCRIPT_DIR/../bin/tkt-state"
 REAL_BIN="$SCRIPT_DIR/../bin"
@@ -330,7 +331,7 @@ git -C "$CASE_TEMPLATE/wt" remote set-url origin ../origin.git
 setup_case() {
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR"
-  cp -R "$CASE_TEMPLATE/." "$CDIR/"
+  copy_fixture_tree "$CASE_TEMPLATE" "$CDIR"
   mkdir -p "$CDIR/run"
   WT="$CDIR/wt"
   H="$(git -C "$WT" rev-parse HEAD)"

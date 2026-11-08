@@ -5,6 +5,7 @@
 # point inside a temp dir; nothing touches the network or $HOME/.agents.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/copy-fixture.sh"
 TKT="$SCRIPT_DIR/../bin/tkt-start"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-start.XXXXXX")"
@@ -120,7 +121,7 @@ setup() {
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
   CASE_TEMPLATE="$TEMPLATES/$2"
-  cp -R "$CASE_TEMPLATE/." "$CDIR/"
+  copy_fixture_tree "$CASE_TEMPLATE" "$CDIR"
   ORIGIN="$CDIR/origin.git"; SEED="$CDIR/seed"; CLONE="$CDIR/clone"
   git -C "$SEED" remote set-url origin "$ORIGIN"
   git -C "$CLONE" remote set-url origin "$ORIGIN"

@@ -10,6 +10,7 @@ if grep -nE '[|][[:space:]]*grep[[:space:]]+-[[:alnum:]]*q[[:alnum:]]*([[:space:
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/copy-fixture.sh"
 FC="$SCRIPT_DIR/../bin/file-claim"
 . "$SCRIPT_DIR/../bin/lib/lane-ticket.sh"
 TAB="$(printf '\t')" # GNU grep reads \t in a pattern as a literal t
@@ -110,18 +111,8 @@ export GH_STUB_FAIL=0
 # --- remotes -----------------------------------------------------------------
 # Each case gets a fresh bare repo holding main with a.txt and sub/b.txt.
 new_remote() {
-  local r="$T/remote-$1.git" w="$T/seed-$1"
-  git init -q --bare "$r" || fail "init bare $1"
-  git -c init.defaultBranch=main init -q "$w" || fail "init seed $1"
-  git -C "$w" config user.email "t@t.t" || fail "seed config $1"
-  git -C "$w" config user.name "t" || fail "seed config $1"
-  mkdir -p "$w/sub"
-  printf 'a\n' >"$w/a.txt" || fail "seed file $1"
-  printf 'b\n' >"$w/sub/b.txt" || fail "seed file $1"
-  git -C "$w" add -A || fail "seed add $1"
-  git -C "$w" commit -qm seed || fail "seed commit $1"
-  git -C "$w" remote add origin "$r" || fail "seed remote $1"
-  git -C "$w" push -q origin main || fail "seed push $1"
+  local r="$T/remote-$1.git"
+  copy_fixture_tree "$REMOTE_TEMPLATE" "$r" || fail "copy bare remote $1"
   printf '%s' "$r"
 }
 
@@ -137,6 +128,22 @@ claims_blob() {
   [ -n "$tip" ] || return 0
   git -C "$1" cat-file -p "$tip:claims" || fail "read claims blob"
 }
+
+# Prepare one immutable bare repository; each case copies it before changing
+# its claims refs, so all cases start with the same main tree and no shared refs.
+REMOTE_TEMPLATE="$T/remote-template.git"
+REMOTE_SEED="$T/remote-template-seed"
+git init -q --bare "$REMOTE_TEMPLATE" || fail "init bare remote template"
+git -c init.defaultBranch=main init -q "$REMOTE_SEED" || fail "init remote seed template"
+git -C "$REMOTE_SEED" config user.email "t@t.t" || fail "remote seed template email"
+git -C "$REMOTE_SEED" config user.name "t" || fail "remote seed template name"
+mkdir -p "$REMOTE_SEED/sub"
+printf 'a\n' >"$REMOTE_SEED/a.txt" || fail "remote seed template file"
+printf 'b\n' >"$REMOTE_SEED/sub/b.txt" || fail "remote seed template file"
+git -C "$REMOTE_SEED" add -A || fail "remote seed template add"
+git -C "$REMOTE_SEED" commit -qm seed || fail "remote seed template commit"
+git -C "$REMOTE_SEED" remote add origin "$REMOTE_TEMPLATE" || fail "remote seed template remote"
+git -C "$REMOTE_SEED" push -q origin main || fail "remote seed template push"
 
 NFILE="$T/n"
 printf 0 >"$NFILE"

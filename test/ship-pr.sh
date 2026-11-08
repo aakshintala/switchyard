@@ -5,6 +5,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/copy-fixture.sh"
 SHIP="$SCRIPT_DIR/../bin/ship-pr"
 
 fail() {
@@ -51,8 +52,8 @@ export GH_CI_INTERVAL=7 SHIP_PR_INTERVAL=1
 unset CLAUDECODE GH_CI_NO_JOBS_AFTER
 MERGE_SHA="1f2e3d4c5b6a79881726354433221100ffeeddcc"
 
-# Build the immutable base once. Each case clones its own refs and worktree,
-# sharing only these read-only Git objects.
+# Build the immutable base once; the complete isolated case fixture is
+# assembled once below and copied for each case.
 TEMPLATE="$T/template.git"
 git init -q --bare -b main "$TEMPLATE"
 git init -q -b main "$T/template-seed"
@@ -60,6 +61,18 @@ printf 'a\nb\nc\n' >"$T/template-seed/file.txt"
 git -C "$T/template-seed" add .
 git -C "$T/template-seed" commit -qm init
 git -C "$T/template-seed" push -q "$TEMPLATE" main
+
+# Prepare the exact per-case Git layout once. Each case gets an isolated
+# copy-on-write clone of the bare origin, clone, and linked feature worktree.
+SHIP_CASE_TEMPLATE="$T/ship-case-template"
+mkdir -p "$SHIP_CASE_TEMPLATE"
+copy_fixture_tree "$TEMPLATE" "$SHIP_CASE_TEMPLATE/origin.git"
+git clone -q "$SHIP_CASE_TEMPLATE/origin.git" "$SHIP_CASE_TEMPLATE/clone"
+git -C "$SHIP_CASE_TEMPLATE/clone" worktree add -q -b feature "$SHIP_CASE_TEMPLATE/wt"
+printf 'feature\n' >"$SHIP_CASE_TEMPLATE/wt/feature.txt"
+git -C "$SHIP_CASE_TEMPLATE/wt" add .
+git -C "$SHIP_CASE_TEMPLATE/wt" commit -qm feature
+git -C "$SHIP_CASE_TEMPLATE/wt" push -q -u origin feature
 
 # --- fake gh. Reads $ST (state dir) and $ORIGIN. The PR head is origin's
 # --- feature branch, so a push is visible to gh-ci. --jq runs through jq.
@@ -328,14 +341,11 @@ export -f gh sleep
 # --- fixture: main with file.txt, feature (one commit) pushed and checked out in $WT.
 setup() {
   S="$T/case"; rm -rf "$S"; mkdir -p "$S/st"
-  WT="$S/wt"; C="$S/clone"
-  export ST="$S/st" ORIGIN="$S/origin.git" MERGE_SHA C
-  git clone -q --bare --shared "$TEMPLATE" "$ORIGIN"
-  git clone -q --shared "$ORIGIN" "$C"
-  git -C "$C" worktree add -q -b feature "$WT"
-  echo feature >"$WT/feature.txt"
-  git -C "$WT" add . && git -C "$WT" commit -qm feature
-  git -C "$WT" push -q -u origin feature
+  copy_fixture_tree "$SHIP_CASE_TEMPLATE" "$S"
+  WT="$S/wt"; C="$S/clone"; ORIGIN="$S/origin.git"
+  git -C "$C" remote set-url origin "$ORIGIN" || fail "set case origin URL"
+  git -C "$C" worktree repair "$WT" >/dev/null 2>&1 || fail "repair copied worktree"
+  export ST="$S/st" ORIGIN MERGE_SHA C
   HEAD0="$(git -C "$WT" rev-parse HEAD)"
   echo '[{"bucket":"pass","name":"ci"}]' >"$ST/checks"
 }

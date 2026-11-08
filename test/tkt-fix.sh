@@ -10,6 +10,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/copy-fixture.sh"
 TKT="$SCRIPT_DIR/../bin/tkt-fix"
 REAL_BIN="$SCRIPT_DIR/../bin"
 TKT_STATE="$REAL_BIN/tkt-state"
@@ -203,7 +204,7 @@ setup_case() {
   unset JOB_RECORD_SYSTEM_DIR DELEGATE_JOBS_DIR
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR"
-  cp -R "$TEMPLATE/." "$CDIR/"
+  copy_fixture_tree "$TEMPLATE" "$CDIR"
   mkdir -p "$CDIR/run"
   WT="$CDIR/wt"
   cat >"$CDIR/plan.md" <<'EOF'

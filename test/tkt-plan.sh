@@ -6,6 +6,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/copy-fixture.sh"
 TKT="$SCRIPT_DIR/../bin/tkt-plan"
 TKT_STATE="$SCRIPT_DIR/../bin/tkt-state"
 REAL_BIN="$SCRIPT_DIR/../bin"
@@ -224,17 +225,24 @@ wcommit() {
   git -C "$1" -c user.email=t@t -c user.name=t commit -qm "$2"
 }
 
+# Build one immutable repository: f.txt changed from v1 to v2, with the
+# remote-tracking main ref at v2. Every case gets a private copy of this exact
+# history and mutates only its own refs and worktree.
+CASE_TEMPLATE="$T/case-template"
+mkdir -p "$CASE_TEMPLATE"
+git init -q "$CASE_TEMPLATE/wt"
+wcommit "$CASE_TEMPLATE/wt" f.txt "v1"
+git -C "$CASE_TEMPLATE/wt" rev-parse HEAD >"$CASE_TEMPLATE/base"
+wcommit "$CASE_TEMPLATE/wt" f.txt "v2"
+git -C "$CASE_TEMPLATE/wt" update-ref refs/remotes/origin/main HEAD
+
 # New case: a repo whose file f.txt changed since BASE_TAG, plan at that base,
 # and a base state file. Sets CDIR, WT, S. $1 is the case name.
 setup_case() {
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR/run"
   printf 'ok' >"$T/ghmode"
-  git init -q "$CDIR/wt"
-  wcommit "$CDIR/wt" f.txt "v1"
-  git -C "$CDIR/wt" rev-parse HEAD >"$CDIR/base"
-  wcommit "$CDIR/wt" f.txt "v2"
-  git -C "$CDIR/wt" update-ref refs/remotes/origin/main HEAD
+  copy_fixture_tree "$CASE_TEMPLATE" "$CDIR"
   WT="$CDIR/wt"
   {
     printf 'Base: %s\n' "$(cat "$CDIR/base")"
