@@ -33,10 +33,13 @@
 #     writes the open findings (or "no open findings") to PATH when asked,
 #     removes finished worktrees and keeps each UNFINISHED job's worktree and
 #     state file. An UNFINISHED job's `resume:` line ends with `then run
-#     review-pr collect <id>`; resume on the named host, then collect again
-#     while the state file still exists; the resumed job's new verdict is
-#     posted if it changed. It exits 1 for an unfinished job, a bad verdict,
-#     or an UNPOSTED result.
+#     review-pr collect <id>`. Run resume on the named host. `delegate resume
+#     <id>` creates a new delegate job id and links it from the original record
+#     with `supersededBy`; collect accepts either id and follows the resumed
+#     result while keeping posting state keyed by the original id. The review-pr
+#     state file must still exist to post a resumed result; the `resume:` line
+#     uses the original id. It exits 1 for an unfinished job, a bad verdict, or
+#     an UNPOSTED result.
 #     An already-collected job id reprints its verdict and finding lines from
 #     the job record, writes --findings-out the same way, and posts nothing. It
 #     is COLLECTED only if its current result matches the posted-record hash;
@@ -87,9 +90,52 @@ fill_brief="$script_dir/fill-brief"
 job_rec() {
   bash "$script_dir/job-record" "$1" 2>/dev/null || true
 }
+# job_latest_rec ID: follow delegate resume links to the newest available record.
+# Keep the review-pr state keyed by the original ID; a resumed delegate job has
+# a new ID and points back to its parent through resumedFrom.
+job_latest_rec() {
+  local id rec next next_rec seen
+  id="$1"; rec=""; seen="|"
+  while [ -n "$id" ]; do
+    case "$seen" in *"|$id|"*) break;; esac
+    seen="$seen$id|"
+    rec="$(job_rec "$id")"
+    [ -f "$rec" ] || break
+    next="$(jq -r '.supersededBy // empty' "$rec" 2>/dev/null || true)"
+    [ -n "$next" ] || break
+    case "$next" in */*|.|..) break;; esac
+    next_rec="$(job_rec "$next")"
+    [ -f "$next_rec" ] || break
+    id="$next"
+  done
+  [ -f "$rec" ] && printf '%s\n' "$rec"
+  return 0
+}
 state_dir="${TMPDIR:-/tmp}/review-pr"
 # debt: unbounded posted-records, prune when state_dir growth is reported
 posted_dir="$state_dir/posted"
+# job_review_state_id ID: resolve a resumed delegate id to its review-pr state
+# or posted-record id. A delegate record alone is not enough: without review-pr
+# ancestry with saved state, keep the id unchanged so collect reports UNPOSTED.
+job_review_state_id() {
+  local original id rec parent seen
+  original="$1"; id="$1"; seen="|"
+  while [ -n "$id" ]; do
+    case "$seen" in *"|$id|"*) break;; esac
+    seen="$seen$id|"
+    if [ -f "$state_dir/$id" ] || [ -f "$posted_dir/$id" ]; then
+      printf '%s\n' "$id"
+      return 0
+    fi
+    rec="$(job_rec "$id")"
+    [ -f "$rec" ] || break
+    parent="$(jq -r '.resumedFrom // empty' "$rec" 2>/dev/null || true)"
+    [ -n "$parent" ] || break
+    case "$parent" in */*|.|..) break;; esac
+    id="$parent"
+  done
+  printf '%s\n' "$original"
+}
 run_root="${REVIEW_PR_RUN_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/review-pr-runs}"
 
 # A finished run nobody collected is pruned an hour after its jobs end; a run
@@ -360,7 +406,7 @@ prune_stale_runs() {
   # a non-RUNNING status and is older than $finished_run_mins, or no record
   # and a state file older than $stale_run_mins).
   sib_stale() {
-    sib_rec="$(job_rec "${1##*/}")"
+    sib_rec="$(job_latest_rec "${1##*/}")"
     if [ -n "$sib_rec" ]; then
       sib_status="$(jq -r '.status // "MISSING"' "$sib_rec" || echo MISSING)"
       [ "$sib_status" = "RUNNING" ] && return 1
@@ -1013,13 +1059,13 @@ write_findings() {
 }
 
 # reprint_collected SRC JOB_ID...: an id with no state file but a job record is
-# reprinted from the record. It is COLLECTED only when the result matches its
-# posted-record hash; otherwise it is UNPOSTED. Append P1-P3 lines to SRC for
-# write_findings. Posts and removes nothing.
+# reprinted from the record. Follow resume links so the latest result is used.
+# It is COLLECTED only when the result matches its posted-record hash. Append
+# P1-P3 lines to SRC for write_findings. Posts and removes nothing.
 reprint_collected() {
   src_f="$1"; shift
   for jid in "$@"; do
-    rec="$(job_rec "$jid")"
+    rec="$(job_latest_rec "$jid")"
     if [ -f "$state_dir/$jid" ] || [ ! -f "$rec" ]; then
       continue
     fi
@@ -1078,7 +1124,12 @@ cmd_collect() {
     esac
   done
   [ "${#ids[@]}" -ge 1 ] || usage
-  set -- "${ids[@]}"
+  canonical_ids=()
+  for requested_id in "${ids[@]}"; do
+    case "$requested_id" in ""|-*) usage;; esac
+    canonical_ids[${#canonical_ids[@]}]="$(job_review_state_id "$requested_id")"
+  done
+  set -- "${canonical_ids[@]}"
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/review-pr.collect.XXXXXX")"
   state_rm=()
@@ -1159,10 +1210,9 @@ cmd_collect() {
   reprint_f="$tmp/reprint.txt"
   : >"$reprint_f"
   for jid in "$@"; do
-    case "$jid" in ""|-*) usage;; esac
     sf="$state_dir/$jid"
     if [ ! -f "$sf" ]; then
-      rec="$(job_rec "$jid")"
+      rec="$(job_latest_rec "$jid")"
       if [ -f "$rec" ]; then
         recollect=$((recollect + 1))
         continue
@@ -1205,7 +1255,7 @@ cmd_collect() {
     fi
     if [ "$(state_get "$sf" posted 2>/dev/null || true)" = "1" ]; then
       group_posted[$group_index]="1"
-      rec="$(job_rec "$jid")"
+      rec="$(job_latest_rec "$jid")"
       text=""
       if [ -f "$rec" ]; then
         text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
@@ -1305,7 +1355,7 @@ cmd_collect() {
   # and remove nothing, so a later collect sees the finished verdicts.
   running=""
   for jid in ${id_list[@]+"${id_list[@]}"}; do
-    rec="$(job_rec "$jid")"
+    rec="$(job_latest_rec "$jid")"
     [ -f "$rec" ] || continue
     status="$(jq -r '.status // "MISSING"' "$rec" 2>/dev/null || echo MISSING)"
     if [ "$status" = "RUNNING" ]; then
@@ -1348,7 +1398,7 @@ cmd_collect() {
       for jid in ${group_state_ids[$gi]}; do
         role="$(state_get "$state_dir/$jid" role)"
         rmodel="$(state_get "$state_dir/$jid" model)"
-        rec="$(job_rec "$jid")"
+        rec="$(job_latest_rec "$jid")"
         text=""
         if [ -f "$rec" ]; then
           text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
@@ -1393,7 +1443,7 @@ cmd_collect() {
   for jid in ${id_list[@]+"${id_list[@]}"}; do
     sf="$state_dir/$jid"
     role="$(state_get "$sf" role)"
-    rec="$(job_rec "$jid")"
+    rec="$(job_latest_rec "$jid")"
     status="MISSING"; gate="none"; text=""
     if [ -f "$rec" ]; then
       status="$(jq -r '.status // "MISSING"' "$rec" 2>/dev/null || echo MISSING)"

@@ -214,6 +214,17 @@ delegate() (
       cp "$T/canned/$role.json" "${DELEGATE_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}/$id.json"
       printf '%s\n' "$id"
       ;;
+    resume)
+      old_id="${1:?}"
+      new_id="$old_id-resumed"
+      jobs_dir="${DELEGATE_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}"
+      old_record="$jobs_dir/$old_id.json"
+      [ -f "$old_record" ] || { echo "fake delegate: missing resume source $old_id" >&2; exit 1; }
+      jq --arg id "$new_id" '. + {supersededBy: $id}' "$old_record" >"$old_record.tmp"
+      mv "$old_record.tmp" "$old_record"
+      jq --arg id "$old_id" '. + {resumedFrom: $id}' "$T/canned/resumed.json" >"$jobs_dir/$new_id.json"
+      printf '%s\n' "$new_id"
+      ;;
     watch)
       printf 'watch %s\n' "$*" >>"$T/state/watch.txt"
       while [ $# -gt 0 ]; do case "$1" in --timeout) shift 2;; *) break;; esac; done
@@ -1261,21 +1272,26 @@ grep -q "git diff $FAKE_SHA..HEAD" "$T/state/prompt-verify.md" || fail "verify b
 grep -q 'P2 findings text & more' "$T/state/prompt-verify.md" || fail "verify brief FINDINGS filled"
 grep -q '^## verify (M)$' "$T/state/comment.md" || fail "comment verify heading"
 
-# --- case: collecting a resumed verify posts its changed FIX-OK verdict once
+# --- case: collecting a resumed verify follows delegate's new job id
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 printf 'P1 fixture finding\n- Evidence: refuted: this fixture exercises resumed verify posting\n' >"$T/findings.txt"
-write_record verify NEEDS_CONTEXT "Owner ruling needed before review can continue"
+write_record verify STALLED "delegate idle watchdog stalled"
 start_review 7 --repo O/N --cwd "$T/clone" --model M \
   --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "resumed verify start exits 0"
-out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" && fail "NEEDS_CONTEXT verify collect exits 1"
-grep -q '^UNFINISHED verify NEEDS_CONTEXT ' <<<"$out" || fail "first verify collect keeps the unfinished job"
-[ -f "$TMPDIR/review-pr/job-verify" ] || fail "first verify collect keeps its state file"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" && fail "STALLED verify collect exits 1"
+grep -q '^UNFINISHED verify STALLED ' <<<"$out" || fail "first verify collect keeps the stalled job"
+[ -f "$TMPDIR/review-pr/job-verify" ] || fail "first verify collect keeps its original state file"
 [ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || fail "first verify collect posts its initial comment"
-write_record verify DONE "FIX-OK
-STATUS: DONE" 0
-cp "$T/canned/verify.json" "$TMPDIR/delegate-jobs/job-verify.json"
-out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "resumed FIX-OK verify collect exits 0"
+write_record verify DONE $'FIX-OK\nSTATUS: DONE' 0
+cp "$T/canned/verify.json" "$T/canned/resumed.json"
+resumed_id="$(delegate resume job-verify)" || fail "delegate resumes the verify"
+[ "$resumed_id" = "job-verify-resumed" ] || fail "delegate resume returns a new job id"
+[ "$(jq -r '.supersededBy' "$TMPDIR/delegate-jobs/job-verify.json")" = "$resumed_id" ] || \
+  fail "original delegate record links to its resumed job"
+[ "$(jq -r '.resumedFrom' "$TMPDIR/delegate-jobs/$resumed_id.json")" = "job-verify" ] || \
+  fail "resumed delegate record links to the original job"
+out="$(bash "$REVIEW" collect "$resumed_id" 2>/dev/null)" || fail "resumed FIX-OK verify collect by the resumed id exits 0"
 grep -Fxq 'FIX-OK' <<<"$out" || fail "resumed verify collect prints FIX-OK"
 [ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "resumed verify posts a second PR comment"
 grep -q '^FIX-OK$' "$T/state/comment.md" || fail "resumed verify comment carries FIX-OK"
@@ -1283,7 +1299,7 @@ expected_hash="$(printf '%s' $'FIX-OK\nSTATUS: DONE' | shasum -a 256 | awk '{pri
 [ "$(jq -r '.result_hash' "$TMPDIR/review-pr/posted/job-verify")" = "$expected_hash" ] || \
   fail "resumed verify posted-record stores the new result hash"
 cp "$T/state/comments.log" "$T/resumed-verify-comments.log"
-out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "unchanged resumed verify re-collect exits 0"
+out="$(bash "$REVIEW" collect "$resumed_id" 2>/dev/null)" || fail "unchanged resumed verify re-collect by the resumed id exits 0"
 [ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "unchanged resumed verify posts no third comment"
 cmp -s "$T/resumed-verify-comments.log" "$T/state/comments.log" || fail "unchanged resumed verify adds nothing to the PR comments"
 
