@@ -42,10 +42,22 @@ is_integer() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+dedup() {
+  local item existing seen
+  deduped=()
+  for item in "$@"; do
+    seen=0
+    for existing in "${deduped[@]-}"; do
+      [ "$existing" != "$item" ] || seen=1
+    done
+    [ "$seen" -eq 1 ] || deduped+=("$item")
+  done
+}
+
 run_daily() {
   local full=0 cap=10 today rotation host daily_log rows_file failed=0 pair_index=0
   local harness task rc stderr_file stdout_file tmp_dir
-  local -a harnesses=() tasks=() selected_tasks=() statuses=()
+  local -a harnesses=() tasks=() selected_tasks=() statuses=() deduped=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --full) full=1; shift ;;
@@ -74,32 +86,18 @@ run_daily() {
   if [ "${#harnesses[@]}" -eq 0 ]; then
     harnesses=(codex fiber pi)
   else
-    local -a unique_harnesses=()
-    for harness in "${harnesses[@]}"; do
-      local seen=0 existing
-      for existing in "${unique_harnesses[@]-}"; do
-        [ "$existing" != "$harness" ] || seen=1
-      done
-      [ "$seen" -eq 1 ] || unique_harnesses+=("$harness")
-    done
-    harnesses=("${unique_harnesses[@]}")
+    dedup "${harnesses[@]}"
+    harnesses=("${deduped[@]}")
   fi
 
+  today="${CANARY_TODAY:-$(date -u +%F)}"
+  rotation="$(python3 -I "$helper" rotation "$today")"
   if [ "$full" -eq 1 ]; then
     selected_tasks=(json-unescape float-print utf16-transcode)
   elif [ "${#tasks[@]}" -gt 0 ]; then
-    local -a unique_tasks=()
-    for task in "${tasks[@]}"; do
-      local seen=0 existing
-      for existing in "${unique_tasks[@]-}"; do
-        [ "$existing" != "$task" ] || seen=1
-      done
-      [ "$seen" -eq 1 ] || unique_tasks+=("$task")
-    done
-    selected_tasks=("${unique_tasks[@]}")
+    dedup "${tasks[@]}"
+    selected_tasks=("${deduped[@]}")
   else
-    today="${CANARY_TODAY:-$(date -u +%F)}"
-    rotation="$(python3 -I "$helper" rotation "$today")"
     case "$rotation" in
       0) selected_tasks=(json-unescape) ;;
       1) selected_tasks=(float-print) ;;
@@ -107,10 +105,6 @@ run_daily() {
       *) echo "canary-daily: invalid rotation result" >&2; return 1 ;;
     esac
   fi
-
-  today="${CANARY_TODAY:-$(date -u +%F)}"
-  # Validate injected dates as well as dates obtained from the system clock.
-  python3 -I "$helper" rotation "$today" >/dev/null
   local root
   root="$(canary_dir)"
   mkdir -p "$root/daily"
@@ -179,13 +173,12 @@ run_daily() {
   return "$failed"
 }
 
-print_install() {
-  local at="$1" unit_dir="$2" exec_path="$3" quoted_path
+render_units() {
+  local at="$1" exec_path="$2" quoted_path
   quoted_path="${exec_path//\\/\\\\}"
   quoted_path="${quoted_path//\"/\\\"}"
   quoted_path="${quoted_path//%/%%}"
-  printf '# %s/canary-daily.service\n' "$unit_dir"
-  cat <<UNIT
+  service_unit="$(cat <<UNIT
 [Unit]
 Description=Daily jcode-bench parity canary
 
@@ -194,8 +187,8 @@ Type=oneshot
 ExecStart="$quoted_path" run
 TimeoutStartSec=4h
 UNIT
-  printf '\n# %s/canary-daily.timer\n' "$unit_dir"
-  cat <<UNIT
+)"
+  timer_unit="$(cat <<UNIT
 [Unit]
 Description=Daily jcode-bench parity canary timer
 
@@ -206,6 +199,16 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 UNIT
+)"
+}
+
+print_install() {
+  local at="$1" unit_dir="$2" exec_path="$3" service_unit timer_unit
+  render_units "$at" "$exec_path"
+  printf '# %s/canary-daily.service\n' "$unit_dir"
+  printf '%s\n' "$service_unit"
+  printf '\n# %s/canary-daily.timer\n' "$unit_dir"
+  printf '%s\n' "$timer_unit"
   printf '\n# Commands (not run):\n'
   printf 'mkdir -p %q\n' "$unit_dir"
   echo 'systemctl --user daemon-reload'
@@ -214,7 +217,7 @@ UNIT
 }
 
 install_daily() {
-  local print_only=0 at=09:00 unit_dir config_home user linger
+  local print_only=0 at=09:00 unit_dir config_home user linger service_unit timer_unit
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --print) print_only=1; shift ;;
@@ -235,30 +238,9 @@ install_daily() {
   fi
 
   mkdir -p "$unit_dir"
-  local quoted_path
-  quoted_path="${script_path//\\/\\\\}"
-  quoted_path="${quoted_path//\"/\\\"}"
-  quoted_path="${quoted_path//%/%%}"
-  cat >"$unit_dir/canary-daily.service" <<UNIT
-[Unit]
-Description=Daily jcode-bench parity canary
-
-[Service]
-Type=oneshot
-ExecStart="$quoted_path" run
-TimeoutStartSec=4h
-UNIT
-  cat >"$unit_dir/canary-daily.timer" <<UNIT
-[Unit]
-Description=Daily jcode-bench parity canary timer
-
-[Timer]
-OnCalendar=*-*-* $at:00 UTC
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-UNIT
+  render_units "$at" "$script_path"
+  printf '%s\n' "$service_unit" >"$unit_dir/canary-daily.service"
+  printf '%s\n' "$timer_unit" >"$unit_dir/canary-daily.timer"
   systemctl --user daemon-reload
   systemctl --user enable --now canary-daily.timer
   user="${USER:-$(id -un)}"
