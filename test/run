@@ -17,7 +17,8 @@ run_parallel() {
   _count=0
   for _t in "$@"; do
     _base="$(basename "$_t")"
-    bash "$_t" >"$PAR_T/$_base.log" 2>&1 &
+    (_s=$SECONDS; bash "$_t" >"$PAR_T/$_base.log" 2>&1; _r=$?
+      echo $((SECONDS - _s)) >"$PAR_T/$_base.secs"; exit "$_r") &
     _batch="$_batch $!:$_base"
     _count=$((_count + 1))
     if [ "$_count" -ge 3 ]; then
@@ -25,10 +26,11 @@ run_parallel() {
         _pid="${_item%%:*}"; _name="${_item##*:}"
         wait "$_pid"; _rc=$?
         cat "$PAR_T/$_name.log"
+        _secs="$(cat "$PAR_T/$_name.secs" 2>/dev/null || echo '?')"
         if [ "$_rc" -eq 0 ]; then
-          echo "PASS: $_name"
+          echo "PASS: $_name (${_secs}s)"
         else
-          echo "FAIL: $_name (exit $_rc)" >&2
+          echo "FAIL: $_name (exit $_rc, ${_secs}s)" >&2
           failed=1
         fi
       done
@@ -40,10 +42,11 @@ run_parallel() {
     _pid="${_item%%:*}"; _name="${_item##*:}"
     wait "$_pid"; _rc=$?
     cat "$PAR_T/$_name.log"
+    _secs="$(cat "$PAR_T/$_name.secs" 2>/dev/null || echo '?')"
     if [ "$_rc" -eq 0 ]; then
-      echo "PASS: $_name"
+      echo "PASS: $_name (${_secs}s)"
     else
-      echo "FAIL: $_name (exit $_rc)" >&2
+      echo "FAIL: $_name (exit $_rc, ${_secs}s)" >&2
       failed=1
     fi
   done
@@ -98,10 +101,11 @@ fi
 
 failed=0
 for t in "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/inbox.sh "$D"/inbox-watchers.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh "$D"/target-reap.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh; do
+  _s=$SECONDS
   if bash "$t"; then
-    echo "PASS: $(basename "$t")"
+    echo "PASS: $(basename "$t") ($((SECONDS - _s))s)"
   else
-    echo "FAIL: $(basename "$t") (exit $?)" >&2
+    echo "FAIL: $(basename "$t") (exit $?, $((SECONDS - _s))s)" >&2
     failed=1
   fi
 done
@@ -117,10 +121,11 @@ run_parallel "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/file-claim
   "$D"/delegate-canary.sh "$D"/tkt-ship.sh "$D"/gh-ci.sh \
   "$D"/ci-health.sh "$D"/ci-friction.sh "$D"/plan-sweep.sh \
   "$D"/fence-grant.sh "$D"/lanestat.sh "$D"/git-hook-guard.sh
+_s=$SECONDS
 if bash "$D"/cargo-slot.sh; then
-  echo "PASS: cargo-slot.sh"
+  echo "PASS: cargo-slot.sh ($((SECONDS - _s))s)"
 else
-  echo "FAIL: cargo-slot.sh (exit $?)" >&2
+  echo "FAIL: cargo-slot.sh (exit $?, $((SECONDS - _s))s)" >&2
   failed=1
 fi
 if deterministic_parallel_failure_case; then
@@ -129,5 +134,6 @@ else
   echo "FAIL: deterministic-parallel-failure (expected parallel failure not proven)" >&2
   failed=1
 fi
+echo "test/run wall time: ${SECONDS}s"
 [ "$failed" = "0" ] || exit 1
 echo "all suites passed"
