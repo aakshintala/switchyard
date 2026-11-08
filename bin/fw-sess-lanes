@@ -2,7 +2,7 @@
 """Print `fiber-<n>` for every live muse session lane, one per line.
 
 fence-grant's live-lane probe knew two kinds of delegate work: a `delegate run`
-job (a RUNNING file in /tmp/delegate-jobs) and a pi lane (a pid file). A lane
+job (a RUNNING record in a delegate job directory) and a pi lane (a pid file). A lane
 started by `delegate session start` -- which is every muse lane since
 muselaunch.sh landed -- is neither. Its cwd is the shared checkout, so the
 job probe's "ticket number is the cwd basename prefix" rule yields `fiber`

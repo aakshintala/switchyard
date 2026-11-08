@@ -97,7 +97,8 @@ snapshots); `run` replays each in a scratch clone at its base commit under
 `sandbox-exec`, driving `delegate run --model fiber/<model>`; `report` writes
 the Markdown comparison with the pass bar; `all` advances one batch of three.
 
-Inputs: `REPLAY_JOBS_DIR` (default `$TMPDIR/delegate-jobs`),
+Inputs: `REPLAY_JOBS_DIR` (default: the delegate job record directory when it
+exists, else the legacy `$TMPDIR/delegate-jobs`),
 `REPLAY_PI_SESSIONS` (default `~/.pi/agent/sessions`), `REPLAY_REPO_MAP`
 (prefix TAB owner/name), `REPLAY_REMOTE_BASE`, `REPLAY_FIBER_SRC` (a dedicated
 fiber clone, never `~/work/fiber`), `DELEGATE_BIN`, `REPLAY_SANDBOX_EXEC`

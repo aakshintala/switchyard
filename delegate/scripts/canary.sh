@@ -661,7 +661,8 @@ cmd_run() {
 
   local delegate_bin="${DELEGATE_BIN:-delegate}"
   FIBER_EVENTS_ROOT="${FIBER_HOME:-$HOME/.fiber}"
-  local jobs_dir="${TMPDIR:-/tmp}/delegate-jobs"
+  local jobs_dir
+  jobs_dir="$(delegate_jobs_dir)"
   local tmp_root="${TMPDIR:-/tmp}"
   : >"$out/pi/delegate.log"
   : >"$out/fiber/delegate.log"
@@ -745,9 +746,11 @@ run_side_metrics() {
   fi
   if [ "$run_ok" -eq 0 ]; then harness=1; fi
   # The job record is saved into the side's dir, so report still has it
-  # after $TMPDIR is cleaned; a saved copy is preferred.
-  if [ -n "$id" ] && [ ! -f "$dir/job.json" ] && [ -f "$jobs_dir/$id.json" ]; then
-    cp "$jobs_dir/$id.json" "$dir/job.json"
+  # after the jobs directory is cleaned; a saved copy is preferred.
+  local job_src=""
+  [ -n "$id" ] && job_src="$(job_record_file "$jobs_dir" "$id")"
+  if [ -n "$id" ] && [ ! -f "$dir/job.json" ] && [ -f "$job_src" ]; then
+    cp "$job_src" "$dir/job.json"
   fi
   if [ -n "$id" ] && [ -f "$dir/job.json" ]; then
     rec="$dir/job.json"
@@ -976,24 +979,26 @@ cmd_report() {
   [ -f "$out/pi/metrics.json" ] && [ -f "$out/fiber/metrics.json" ] \
     || { err "no finished run for $ticket in $out"; return 2; }
   local base side wt id model wall run_ok note tmp
-  local jobs_dir="${TMPDIR:-/tmp}/delegate-jobs" tmp_root="${TMPDIR:-/tmp}"
+  local jobs_dir tmp_root="${TMPDIR:-/tmp}"
+  jobs_dir="$(delegate_jobs_dir)"
   export FIBER_EVENTS_ROOT="${FIBER_HOME:-$HOME/.fiber}"
   # Check that every source exists before any write. The saved copies (a
-  # run's job records and Fiber event log) come first; $TMPDIR and the Fiber
-  # home are the fallback. Contents are checked after the rebuild.
+  # run's job records and Fiber event log) come first; the delegate jobs
+  # directory (then the legacy $TMPDIR one) and the Fiber home are the
+  # fallback. Contents are checked after the rebuild.
   local missing="" chk_side chk_id
   for chk_side in pi fiber; do
     chk_id="$(jq -r '.job_id // ""' "$out/$chk_side/metrics.json" 2>/dev/null)"
     if [ -z "$chk_id" ] || [ "$chk_id" = "null" ]; then
       missing="$missing $chk_side job id;"
-    elif [ ! -f "$out/$chk_side/job.json" ] && [ ! -f "$jobs_dir/$chk_id.json" ]; then
+    elif [ ! -f "$out/$chk_side/job.json" ] && [ ! -f "$(job_record_file "$jobs_dir" "$chk_id")" ]; then
       missing="$missing $chk_side job record;"
     fi
     [ -f "$out/$chk_side/gate.exit" ] || missing="$missing $chk_side gate.exit;"
   done
   local fiber_rec="$out/fiber/job.json" fiber_sid="" fiber_ev=""
   if [ ! -f "$fiber_rec" ]; then
-    fiber_rec="$jobs_dir/$(jq -r '.job_id // ""' "$out/fiber/metrics.json" 2>/dev/null).json"
+    fiber_rec="$(job_record_file "$jobs_dir" "$(jq -r '.job_id // ""' "$out/fiber/metrics.json" 2>/dev/null)")"
   fi
   if [ -f "$out/fiber/events.jsonl" ]; then
     fiber_ev="$out/fiber/events.jsonl"

@@ -283,6 +283,7 @@ case "$cmd" in
       printf 'prompt=%s\n' "$prompt"
       printf 'TMPDIR=%s\n' "${TMPDIR:-}"
       printf 'XDG_CACHE_HOME=%s\n' "${XDG_CACHE_HOME:-}"
+      printf 'DELEGATE_JOBS_DIR=%s\n' "${DELEGATE_JOBS_DIR:-}"
       printf 'FIBER_BIN=%s\n' "${FIBER_BIN:-}"
       printf 'FIBER_HOME=%s\n' "${FIBER_HOME:-}"
       printf 'GH_TOKEN=%s\n' "${GH_TOKEN:-}"
@@ -293,8 +294,9 @@ case "$cmd" in
       printf 'PATH0=%s\n' "${PATH%%:*}"
     } >"$FAKE_LOGDIR/run-$id.env"
     sid="fsid-$$"
-    mkdir -p "$TMPDIR/delegate-jobs" "$XDG_CACHE_HOME/delegate/locators" || exit 1
-    record="$TMPDIR/delegate-jobs/$id.json"
+    jobs="${DELEGATE_JOBS_DIR:-$XDG_CACHE_HOME/delegate/jobs}"
+    mkdir -p "$jobs" "$XDG_CACHE_HOME/delegate/locators" || exit 1
+    record="$jobs/$id.json"
     jq -n --arg sid "$sid" --arg model "$model" --arg cwd "$cwd" --arg gate "$gate" \
       '{status:"DONE",
         result:{status:"DONE",model:$model,sessionId:$sid,backend:"fiber",
@@ -418,6 +420,7 @@ grep -qF "gate=true" "$HRENV" || fail "delegate got the gate"
 HRTMP="$(grep '^TMPDIR=' "$HRENV" | cut -d= -f2)"
 [ "${HRTMP#/tmp/frp-}" != "$HRTMP" ] && [ "${#HRTMP}" -lt 20 ] || fail "replay TMPDIR is a short /tmp/frp- dir (got $HRTMP)"
 grep -qF "XDG_CACHE_HOME=$HRTMP/cache" "$HRENV" || fail "locator cache is inside the sealed run TMPDIR"
+grep -qxF "DELEGATE_JOBS_DIR=$HRTMP/cache/delegate/jobs" "$HRENV" || fail "record dir is pinned inside the sealed run TMPDIR"
 [ ! -e "$HOME/.cache/delegate/locators" ] || fail "replay did not write locators under HOME"
 [ ! -e "$T/inherited-cache/delegate/locators" ] || fail "replay did not write locators under inherited XDG cache"
 [ "$(cat "$OUT2/runs/job-hr/tmpdir")" = "$HRTMP" ] || fail "run tmpdir file matches TMPDIR"
@@ -479,20 +482,23 @@ grep -qF "PATH0=$OUT2/runs/job-hr/shim" "$HRENV" || fail "shim first on PATH"
 [ -f "$OUT2/runs/job-hr/record.json" ] || fail "record copied out of sealed tmp"
 HRMATCH=0
 HR_SOURCE=""
-for f in "$HRTMP/delegate-jobs/"*.json; do
+for f in "$HRTMP/cache/delegate/jobs/"*.json; do
   [ -e "$f" ] || continue
   HR_SOURCE="$f"
   cmp -s "$f" "$OUT2/runs/job-hr/record.json" && HRMATCH=1
 done
-[ "$HRMATCH" -eq 1 ] || fail "record copied from TMPDIR/delegate-jobs"
+[ "$HRMATCH" -eq 1 ] || fail "record copied from the sealed cache jobs dir"
 [ -n "$HR_SOURCE" ] || fail "fake delegate record source was found"
 HR_ID="${HR_SOURCE##*/}"
 HR_ID="${HR_ID%.json}"
 HRLOC="$HRTMP/cache/delegate/locators/$HR_ID"
 [ -f "$HRLOC" ] || fail "fake locator is in the current sealed run cache"
-[ "$(cat "$HRLOC")" = "$HR_SOURCE" ] || fail "fake locator targets TMPDIR/delegate-jobs"
+[ "$(cat "$HRLOC")" = "$HR_SOURCE" ] || fail "fake locator targets the sealed cache jobs dir"
 grep -qF '"backend": "fiber"' "$OUT2/runs/job-hr/record.json" || fail "record is the replay record"
 if ls "${TMPDIR:-/tmp}/delegate-jobs/fake-"* >/dev/null 2>&1; then fail "replay record leaked to real jobs dir"; fi
+for leak in "$T/inherited-cache/delegate/jobs" "$HOME/.cache/delegate/jobs"; do
+  if ls "$leak/fake-"* >/dev/null 2>&1; then fail "replay record leaked to $leak"; fi
+done
 [ "$(head -n 1 "$OUT2/runs/job-hr/seal.sb")" = "(version 1)" ] || fail "seal profile starts with (version 1)"
 grep -qF "$OUT2" "$OUT2/runs/job-hr/seal.sb" || fail "seal profile names OUT"
 grep -qF "${TMPDIR:-/tmp}/delegate-jobs" "$OUT2/runs/job-hr/seal.sb" || fail "seal denies real jobs dir"

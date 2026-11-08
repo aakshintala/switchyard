@@ -38,15 +38,16 @@ case "$* $pt" in
 esac
 case "$* $pt" in
   *BACKGROUND*)
-    (
-      while [ ! -e "$d/background-done" ]; do sleep 0.02; done
-      : > "$d/background-exited"
-    ) &
+    # The background command blocks on a fifo the test writes to release it.
+    ( read -r _ < "$d/background.fifo" ) &
     bg=$!
-    echo "$bg" > "$d/background.pid"
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-background"}'
     printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"turn ended","session_id":"s-background"}'
+    # The pid is published only after the turn-ending result is out.
+    echo "$bg" > "$d/background.pid"
     wait "$bg"
+    # `wait` has reaped the command, so it has exited.
+    : > "$d/background-exited"
     while :; do :; done
     ;;
 esac
@@ -1442,8 +1443,48 @@ fn tool_idle_stalls_a_quiet_tool_call() {
 
 #[test]
 fn live_background_child_suppresses_idle_until_it_exits() {
+    /// Releases the fake's background command, so a failed assertion never
+    /// leaves it blocked on the fifo.
+    struct FifoRelease(PathBuf);
+    impl FifoRelease {
+        fn release(&self) {
+            // Read+write never blocks on open, even before the reader is there.
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.0)
+            {
+                let _ = f.write_all(b"\n");
+            }
+        }
+    }
+    impl Drop for FifoRelease {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+    fn epoch_ms() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as f64
+    }
+
     let e = Env::new("background-child-idle");
-    let idle_ms = 2_000;
+    let idle_ms: u64 = 2_000;
+    // The supervisor checks a live child every quarter window (job.rs
+    // child_process_check_interval), so the idle clock is at most this stale.
+    let check_ms = (idle_ms / 4) as f64;
+    let fifo = e.dir.join("background.fifo");
+    let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let gate = FifoRelease(fifo);
+    // A record is rewritten every heartbeat by tmp-and-rename; read whatever
+    // is there now.
+    let read_record = |id: &str| -> Option<Value> {
+        let p = e.jobs_dir().join(format!("{id}.json"));
+        serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+    };
     let id = e.ok(
         &[
             "run",
@@ -1456,42 +1497,91 @@ fn live_background_child_suppresses_idle_until_it_exits() {
         &[],
     );
     let pid_file = e.dir.join("background.pid");
-    until("background command starts", || pid_file.is_file());
-    let bg_pid: i64 = std::fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let mut bg_pid: i64 = 0;
+    until(
+        "background command starts",
+        || match std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+        {
+            Some(pid) => {
+                bg_pid = pid;
+                true
+            }
+            None => false,
+        },
+    );
+    // The fake wrote the pid after the result that ended the turn, so the
+    // last model event is at least this old from here on.
+    let turn_ended = Instant::now();
 
-    // The child stays alive for more than twice the idle window.
-    let held_until = Instant::now() + Duration::from_millis(idle_ms * 2 + 100);
+    // The ticket's check: the job outlives idle_ms while the child is alive.
+    // The child is blocked on the fifo, so only the watchdog could end the job.
+    let held_until = turn_ended + Duration::from_millis(idle_ms * 2 + 100);
     while Instant::now() < held_until {
         assert!(alive(bg_pid), "background command ended before its release");
+        if let Some(rec) = read_record(&id) {
+            assert_eq!(
+                rec["status"], "RUNNING",
+                "job ended while its child was alive: {rec}"
+            );
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let running = e.delegate(&["status", &id], None);
-    assert_eq!(running.status.code(), Some(0));
-    let running_text = String::from_utf8_lossy(&running.stdout);
+    let held = e.delegate(&["status", &id], None);
+    assert_eq!(held.status.code(), Some(0));
+    let held_text = String::from_utf8_lossy(&held.stdout);
     assert!(
-        running_text.starts_with(&format!("{id}: RUNNING")),
-        "{running_text}"
+        held_text.starts_with(&format!("{id}: RUNNING")),
+        "{held_text}"
     );
 
-    std::fs::write(e.dir.join("background-done"), "").unwrap();
+    let released_at = epoch_ms();
+    gate.release();
     until("background command exits", || {
-        e.dir.join("background-exited").is_file() && !alive(bg_pid)
+        e.dir.join("background-exited").is_file()
     });
-    std::thread::sleep(Duration::from_millis(idle_ms - 100));
-    let still_waiting = e.delegate(&["status", &id], None);
-    assert_eq!(still_waiting.status.code(), Some(0));
-    let still_waiting_text = String::from_utf8_lossy(&still_waiting.stdout);
+    assert!(!alive(bg_pid), "background command still alive after wait");
+    let exited_at = epoch_ms();
+
+    // A record written after the exit is still RUNNING, and its idle clock
+    // runs from the child's last check, not from the turn's end more than
+    // two windows ago: the child's exit started a fresh window.
+    // A terminal record (no heartbeat) is taken too, so an early kill fails
+    // on the status below rather than on a timeout.
+    let mut after_exit = None;
+    until("a record written after the child exited", || {
+        after_exit = read_record(&id).filter(|r| {
+            r["status"] != "RUNNING"
+                || r["lastHeartbeatAt"]
+                    .as_f64()
+                    .is_some_and(|h| h >= exited_at)
+        });
+        after_exit.is_some()
+    });
+    let rec = after_exit.unwrap();
+    assert_eq!(
+        rec["status"], "RUNNING",
+        "idle kill fired at child exit: {rec}"
+    );
+    let age = rec["progress"]["lastEventAgeMs"]
+        .as_f64()
+        .expect("progress carries lastEventAgeMs");
+    let heartbeat = rec["lastHeartbeatAt"].as_f64().unwrap();
     assert!(
-        still_waiting_text.starts_with(&format!("{id}: RUNNING")),
-        "{still_waiting_text}"
+        age < idle_ms as f64,
+        "idle clock not reset by the child: {rec}"
+    );
+    assert!(
+        heartbeat - age >= released_at - check_ms - 100.0,
+        "idle clock last reset {}ms before the release: {rec}",
+        released_at - (heartbeat - age)
     );
 
     let done = e.wait_terminal(&id);
     assert_eq!(done["status"], "STALLED");
+    let text = done["result"]["text"].as_str().unwrap();
+    assert!(text.contains("Idle watchdog killed this job"), "{text}");
 }
 
 #[test]

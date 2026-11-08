@@ -94,7 +94,7 @@ _fw_box_probe() {
   FW_BOX_OK=0
   FW_BOX_RC=0
   FW_BOX_RAW=""
-  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (cd /tmp/delegate-jobs && for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
+  _fw_raw=$("${FW_SSH:-ssh}" "$(_fw_box_host)" 'echo FWSEC=UPTIME; uptime; echo FWSEC=FREE; free -g; echo FWSEC=DF; df -BG /; echo FWSEC=AGENTS; claude agents --json; echo FWSEC=DELEGATE; (case "${XDG_CACHE_HOME:-}" in /*) r=$XDG_CACHE_HOME;; *) r=$HOME/.cache;; esac; ok=0; for d in "${DELEGATE_JOBS_DIR:-$r/delegate/jobs}" /tmp/delegate-jobs; do cd "$d" 2>/dev/null || continue; ok=1; for f in *.json; do [ -f "$f" ] || continue; case "$(head -c 40 "$f")" in *RUNNING*) : ;; *) continue;; esac; p=$(grep -o "\"supervisorPid\":[0-9]*" "$f" | head -1 | tr -dc 0-9); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; c=$(grep -o "\"cwd\":\"[^\"]*\"" "$f" | head -1); c=${c#*:\"}; c=${c%\"}; b=${c##*/}; n=${b%%-*}; case "$n" in ""|*[!0-9]*) continue;; esac; echo "fiber-$n"; done; done; [ "$ok" = 1 ] && echo DELEGATEOK); echo FWSEC=DSESS; (~/.local/bin/delegate session list --json 2>/dev/null && echo DSESSJSONOK); echo FWSEC=PILANES; (cd ~/work/fiber-worktrees/flywheel/run && for f in fiber-*-pi.pid; do [ -f "$f" ] || continue; p=$(cat "$f" 2>/dev/null); case "$p" in ""|*[!0-9]*) continue;; esac; kill -0 "$p" 2>/dev/null || continue; n=${f#fiber-}; n=${n%-pi.pid}; echo "fiber-$n"; done; echo PILANESOK); echo FWSEC=END' 2>"${FW_SSH_ERR:-/dev/null}") || FW_BOX_RC=$?
   case "$_fw_raw" in
     *FWSEC=UPTIME*FWSEC=END*) FW_BOX_OK=1; FW_BOX_RAW="$_fw_raw" ;;
   esac
@@ -181,22 +181,44 @@ _fw_delegate_lane_name() {
 # whose supervisor is alive. A `delegate`-run lane is neither a `claude agents`
 # session nor a `fiber-<n>-pi.pid` file, so a probe reading only those two
 # loses the lane's hold once its grant files age out of the six-hour window --
-# the same defect the pi-lane probe below was added for. Defaults to
-# `${TMPDIR:-/tmp}/delegate-jobs`; `FW_DELEGATE_DIR` overrides it. Exit 1 when
-# that directory is missing (fail closed).
+# the same defect the pi-lane probe below was added for. Reads delegate's
+# writer directory (`DELEGATE_JOBS_DIR` when non-empty, else
+# `${XDG_CACHE_HOME:-$HOME/.cache}/delegate/jobs`, as in
+# delegate/src/status_record.rs) and the legacy `${TMPDIR:-/tmp}/delegate-jobs`,
+# where jobs started before #1374 still run. `FW_DELEGATE_DIR` replaces both
+# with one directory. Exit 1 when none of them exists (fail closed). A lane
+# found in both is listed twice; the caller deduplicates.
 fw_delegate_lane_names_mac() {
-  _fw_dd=${FW_DELEGATE_DIR:-${TMPDIR:-/tmp}/delegate-jobs}
-  [ -d "$_fw_dd" ] || return 1
+  if [ -n "${FW_DELEGATE_DIR:-}" ]; then
+    _fw_dds=$FW_DELEGATE_DIR
+  else
+    case "${XDG_CACHE_HOME:-}" in
+      /*) _fw_cr=$XDG_CACHE_HOME ;;
+      *) _fw_cr=${HOME:-}/.cache ;;
+    esac
+    _fw_wd=${DELEGATE_JOBS_DIR:-$_fw_cr/delegate/jobs}
+    case "$_fw_wd" in /*) ;; *) _fw_wd=$PWD/$_fw_wd ;; esac
+    _fw_dds="$_fw_wd
+${TMPDIR:-/tmp}/delegate-jobs"
+  fi
   case "$-" in *f*) _fw_hadf=1;; *) _fw_hadf=0;; esac
   set +f
   _fw_names=""
-  for _fw_f in "$_fw_dd"/*.json; do
-    [ -f "$_fw_f" ] || continue
-    _fw_n=$(_fw_delegate_lane_name "$_fw_f") || continue
-    [ -n "$_fw_n" ] || continue
-    _fw_names="$_fw_names fiber-$_fw_n"
-  done
+  _fw_any=0
+  while IFS= read -r _fw_dd; do
+    [ -d "$_fw_dd" ] || continue
+    _fw_any=1
+    for _fw_f in "$_fw_dd"/*.json; do
+      [ -f "$_fw_f" ] || continue
+      _fw_n=$(_fw_delegate_lane_name "$_fw_f") || continue
+      [ -n "$_fw_n" ] || continue
+      _fw_names="$_fw_names fiber-$_fw_n"
+    done
+  done <<EOF_DDS
+$_fw_dds
+EOF_DDS
   [ "$_fw_hadf" -eq 1 ] && set -f
+  [ "$_fw_any" -eq 1 ] || return 1
   printf '%s' "${_fw_names# }"
   return 0
 }
@@ -217,7 +239,7 @@ fw_delegate_lane_names_box() {
 # is missing, or the mapper refused the JSON (fail closed).
 #
 # Without this a muse lane held nothing: fw_delegate_lane_names_box reads
-# /tmp/delegate-jobs, which holds `delegate run` jobs and not sessions, and a
+# the delegate job directories, which hold `delegate run` jobs and not sessions, and a
 # session's cwd is the shared checkout so its ticket cannot be read off the
 # path. 2026-11-04: a sweep for #3635 printed NO LIVE LANE for #4026 and #4029
 # with both lanes running. See bin/fw-sess-lanes.

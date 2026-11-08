@@ -21,6 +21,10 @@ trap cleanup EXIT
 mkdir -p "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
 export TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_DELEGATE="$T/stubs/delegate" FW_BOX_HOST=stub-box
 export FW_TREE_CACHE="$T/tree-cache"
+# The Mac delegate probe reads the writer dir under the cache root; keep it
+# off the real user cache and any inherited override.
+export XDG_CACHE_HOME="$T/cache"
+unset DELEGATE_JOBS_DIR
 export GH_TREE="$T/tree.json" GH_PRLIST='[]' CLAUDE_JSON='[]' SSH_OUT
 
 cat >"$FW_GH" <<'GH_STUB'
@@ -226,7 +230,7 @@ FC_STUB
 chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$FW_DELEGATE" "$T/stubs/file-claim"
 
 reset_case() {
-  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE"
+  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE" "$XDG_CACHE_HOME"
   mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs"
   : >"$FW_RUN/roster"
   DSESS_JSON='{"ok":true,"sessions":[]}'
@@ -896,6 +900,28 @@ kill "$DJ_PID" 2>/dev/null || true
 assert_rc 0 'Mac delegate probe reads under TMPDIR by default'
 assert_line 'OVERLAP docs/tui.md lane #77' 'TMPDIR delegate lane overlap output'
 assert_not_contains 'STALE' 'TMPDIR delegate claim is not stale'
+
+reset_case
+unset FW_DELEGATE_DIR
+sleep 300 &
+DJ_PID=$!
+FW_DELEGATE_DIR="$XDG_CACHE_HOME/delegate/jobs"
+write_delegate_job job-a RUNNING "$DJ_PID" /w/fiber-worktrees/tests/77-grid-read-ratchet
+unset FW_DELEGATE_DIR
+rmdir "$TMPDIR/delegate-jobs"
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-77\tgrant\t0\tt:stub\t\n')"
+export FILE_CLAIM_LIST
+run_fg 88 --paths docs/tui.md --dry
+kill "$DJ_PID" 2>/dev/null || true
+assert_rc 0 'Mac delegate probe reads the cache writer dir by default'
+assert_line 'OVERLAP docs/tui.md lane #77' 'cache delegate lane overlap output'
+assert_not_contains 'STALE' 'cache delegate claim is not stale'
+
+reset_case
+unset FW_DELEGATE_DIR
+rmdir "$TMPDIR/delegate-jobs"
+run_fg 77 --paths docs/tui.md
+assert_error 'Mac delegate probe with no default job directory' 'ERROR mac delegate lanes: registry directory missing'
 
 reset_case
 sleep 300 &
