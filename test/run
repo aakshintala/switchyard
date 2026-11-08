@@ -2,6 +2,54 @@
 # test/run: run every test file in this directory.
 # Usage: test/run [--self-test-parallel-failure]; internal: test/run --run-parallel <paths...>
 set -uo pipefail
+
+# Keep the local gate on the same Bash major version as CI. Prefer the
+# Homebrew installation on macOS, then search PATH for any Bash 5 executable.
+# The override and re-exec marker keep this discovery testable and loop-safe.
+_test_run_bash5_is_valid() {
+  # shellcheck disable=SC2016
+  [ -x "$1" ] && "$1" -c 'test "${BASH_VERSINFO[0]}" -ge 5' >/dev/null 2>&1
+}
+
+if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  _test_run_bash5=""
+  if [ "${SWITCHYARD_TEST_RUN_BASH5_REEXEC:-0}" != 1 ]; then
+    _test_run_homebrew_bash="${TEST_RUN_HOMEBREW_BASH-/opt/homebrew/bin/bash}"
+    if [ -n "$_test_run_homebrew_bash" ] && _test_run_bash5_is_valid "$_test_run_homebrew_bash"; then
+      _test_run_bash5="$_test_run_homebrew_bash"
+    fi
+    if [ -z "$_test_run_bash5" ]; then
+      _test_run_search_path="${PATH:-}:"
+      while [ -n "$_test_run_search_path" ]; do
+        _test_run_dir="${_test_run_search_path%%:*}"
+        _test_run_search_path="${_test_run_search_path#*:}"
+        [ -n "$_test_run_dir" ] || _test_run_dir=.
+        _test_run_candidate="$_test_run_dir/bash"
+        if _test_run_bash5_is_valid "$_test_run_candidate"; then
+          _test_run_bash5="$_test_run_candidate"
+          break
+        fi
+      done
+    fi
+    if [ -n "$_test_run_bash5" ]; then
+      case "$_test_run_bash5" in
+        */*) _test_run_bash5_dir="${_test_run_bash5%/*}" ;;
+        *) _test_run_bash5_dir=. ;;
+      esac
+      [ -n "$_test_run_bash5_dir" ] || _test_run_bash5_dir=/
+      PATH="$_test_run_bash5_dir${PATH:+:$PATH}"
+      export PATH
+      SWITCHYARD_TEST_RUN_BASH5_REEXEC=1
+      export SWITCHYARD_TEST_RUN_BASH5_REEXEC
+      exec "$_test_run_bash5" "$0" "$@"
+    fi
+  fi
+  printf 'test/run: Bash 5 unavailable; continuing with Bash %s\n' "$BASH_VERSION" >&2
+fi
+# The marker guards only this process's re-exec; a nested test/run (as in
+# bash5-runner.sh) must do its own discovery.
+unset SWITCHYARD_TEST_RUN_BASH5_REEXEC
+
 # CLAUDECODE must not change gh-ci wait timeouts under test: suites that need
 # it set it per case, so start unset however the gate is invoked.
 unset CLAUDECODE
@@ -15,6 +63,7 @@ D="$(cd "$(dirname "$0")" && pwd)"
 # each log is printed without interleaving in allowlist order. Put the
 # longest suites first. Any failure sets failed=1.
 run_parallel() {
+  # shellcheck disable=SC2016
   printf '%s\n' "$@" | xargs -P 3 -I{} bash -c '
     _b="$(basename "$1")"; _s=$SECONDS
     bash "$1" >"$2/$_b.log" 2>&1; _r=$?
@@ -81,7 +130,7 @@ if [ "${1:-}" = "--self-test-parallel-failure" ]; then
 fi
 
 failed=0
-for t in "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/inbox.sh "$D"/inbox-watchers.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh "$D"/target-reap.sh "$D"/canary-daily.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh; do
+for t in "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/inbox.sh "$D"/inbox-watchers.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh "$D"/target-reap.sh "$D"/canary-daily.sh "$D"/bash5-runner.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh; do
   _s=$SECONDS
   if bash "$t"; then
     echo "PASS: $(basename "$t") ($((SECONDS - _s))s)"
