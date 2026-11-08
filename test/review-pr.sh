@@ -238,7 +238,9 @@ reset_state() {
     [ -d "$old_run" ] || continue
     for old_wt in "$old_run"/wt-*; do
       [ -d "$old_wt" ] || continue
-      git -C "$T/clone" worktree remove --force "$old_wt" >/dev/null 2>&1 || rm -rf "$old_wt"
+      # Removing every worktree first lets one prune replace a subprocess per
+      # worktree, while preserving the same unregistered, absent fixture state.
+      rm -rf "$old_wt"
     done
   done
   git -C "$T/clone" worktree prune >/dev/null 2>&1 || true

@@ -18,8 +18,8 @@ cleanup() {
   rm -rf "$T"
 }
 trap cleanup EXIT
-mkdir -p "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
-export TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_DELEGATE="$T/stubs/delegate" FW_BOX_HOST=stub-box
+mkdir -p "$T/home" "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
+export HOME="$T/home" TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_DELEGATE="$T/stubs/delegate" FW_BOX_HOST=stub-box
 export FW_TREE_CACHE="$T/tree-cache"
 export GH_TREE="$T/tree.json" GH_PRLIST='[]' CLAUDE_JSON='[]' SSH_OUT
 
@@ -226,8 +226,8 @@ FC_STUB
 chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$FW_DELEGATE" "$T/stubs/file-claim"
 
 reset_case() {
-  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE"
-  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs"
+  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs"
+  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE"
   : >"$FW_RUN/roster"
   DSESS_JSON='{"ok":true,"sessions":[]}'
   DSESS_RETRY_JSON='' DSESS_RETRY_FAIL=0 DSESS_FULL_FAIL=0
@@ -358,6 +358,7 @@ assert_rc 0 'guard calls file-claim reap before checking holders'
 
 # Recursive trees are cached by immutable tree SHA across sweeps.
 reset_case
+rm -rf "$FW_TREE_CACHE"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'tree cache miss'
 [ "$(grep -c 'git/trees/' "$T/gh.log")" = 1 ] || fail 'cache miss fetches once'
@@ -1141,6 +1142,7 @@ assert_error 'tree SHA rate limit' 'ERROR gh tree SHA main API rate limit exceed
 
 reset_case
 GH_TREE_FAIL=1 GH_TREE_ERROR='API rate limit exceeded'
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'tree fetch rate limit' 'ERROR gh trees main API rate limit exceeded '
 [ ! -e "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'rate limited fetch leaves cache entry'
@@ -1148,12 +1150,14 @@ assert_error 'tree fetch rate limit' 'ERROR gh trees main API rate limit exceede
 reset_case
 GH_TREE_FAIL=1
 export GH_TREE_FAIL
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'tree fetch failure' 'ERROR gh trees main tree stub failure '
 
 reset_case
 GH_TREE_JSON='not-json'
 export GH_TREE_JSON
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'unparseable tree' 'ERROR tree of main unreadable or truncated'
 [ ! -e "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'unparseable tree leaves cache entry'
@@ -1161,6 +1165,7 @@ assert_error 'unparseable tree' 'ERROR tree of main unreadable or truncated'
 reset_case
 GH_TREE_JSON='{"truncated":true,"tree":[{"type":"blob","path":"docs/tui.md"}]}'
 export GH_TREE_JSON
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'truncated tree' 'ERROR tree of main unreadable or truncated'
 [ ! -e "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'truncated tree leaves cache entry'
@@ -1168,6 +1173,7 @@ assert_error 'truncated tree' 'ERROR tree of main unreadable or truncated'
 reset_case
 GH_TREE_JSON='{"truncated":false,"tree":[]}'
 export GH_TREE_JSON
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'empty tree' 'ERROR tree of main is empty'
 
@@ -1312,6 +1318,7 @@ assert_line 'WOULD-GRANT docs/tui.md' 'other path is granted'
 reset_case
 GH_TREE_JSON='{"truncated":false,"tree":[{"type":"blob","path":"crates/extensions/src/process/tests.rs"},{"type":"blob","path":"crates/extensions/src/process_tests.rs"}]}'
 export GH_TREE_JSON
+rm -rf "$FW_TREE_CACHE"
 write_blob crates/extensions/src/process/tests.rs "$(python3 -c 'print("quiet\n" * 3153 + "other\n", end="")')"
 write_blob crates/extensions/src/process_tests.rs "$(python3 -c 'print("quiet\n" * 3153 + "envelope_line\n", end="")')"
 run_fg 77 --paths crates/extensions/src/process/tests.rs --expect crates/extensions/src/process/tests.rs:3154:envelope_line --dry
@@ -1321,6 +1328,7 @@ grep -qF 'contents/crates/extensions/src/process/tests.rs?ref=main' "$T/gh.log" 
 grep -qF 'contents/crates/extensions/src/process_tests.rs?ref=main' "$T/gh.log" || fail 'alternate blob fetched'
 ! cmp -s "$T/blobs/crates/extensions/src/process/tests.rs" "$T/blobs/crates/extensions/src/process_tests.rs" || fail 'same-basename fixture contents differ'
 assert_no_grant 'expected symbol absent'
+rm -rf "$FW_TREE_CACHE"
 
 reset_case
 write_blob crates/extensions/src/process/tests.rs "$(python3 -c 'print("quiet\n" * 3153 + "other\n", end="")')"
@@ -1343,6 +1351,7 @@ assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane ne
 
 # --repo routes every gh call, including the expected-symbol content read.
 reset_case
+rm -rf "$FW_TREE_CACHE"
 write_blob docs/tui.md 'needle\n'
 set_pr 11 fix/other docs/tui.md
 cat >"$T/pr/11.diff" <<'DIFF'
@@ -1363,6 +1372,7 @@ grep -qF 'pr diff 11 -R other/x --name-only' "$T/gh.log" || fail 'PR names use -
 grep -qF 'pr diff 11 -R other/x --allow-escape-sequences' "$T/gh.log" || fail 'PR diff uses --repo'
 
 reset_case
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths=docs/tui.md --repo=other/x --dry
 assert_rc 0 '--repo equals form'
 grep -qF 'api repos/other/x/git/trees/aaaaaaaa?recursive=1' "$T/gh.log" || fail 'repo equals form uses requested repo'

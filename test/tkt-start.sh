@@ -82,25 +82,49 @@ reload() {
     if [ "$skip" -eq 1 ]; then skip=0; elif [ "$a" = "${1:-}" ]; then skip=1; else ARGS+=("$a"); fi
   done
 }
-# setup NAME ONE|TWO AGAINST|FILING|SKIP: fresh stubs, a seed repo (a filing
-# commit, plus a touching commit for TWO) pushed to origin/main, a clone, the
-# issue body and docs, ARGS loaded. Sets CDIR CLONE WT RUN FILING.
+build_case_template() {
+  local dir="$1" add_change="$2" filing
+  mkdir -p "$dir"
+  git init -q --bare "$dir/origin.git"
+  git --git-dir="$dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git init -q "$dir/seed"
+  git -C "$dir/seed" symbolic-ref HEAD refs/heads/main
+  git -C "$dir/seed" remote add origin "$dir/origin.git"
+  git -C "$dir/seed" commit -q --allow-empty -m init
+  printf '%s\n' one >"$dir/seed/f.txt"
+  git -C "$dir/seed" add -A
+  GIT_AUTHOR_DATE=2026-01-01T00:00:00+00:00 GIT_COMMITTER_DATE=2026-01-01T00:00:00+00:00 \
+    git -C "$dir/seed" commit -q -m filing
+  filing="$(git -C "$dir/seed" rev-parse HEAD)"
+  printf '%s\n' "$filing" >"$dir/filing"
+  if [ "$add_change" = yes ]; then
+    printf '%s\n' two >"$dir/seed/f.txt"
+    git -C "$dir/seed" add -A
+    GIT_AUTHOR_DATE=2026-02-01T00:00:00+00:00 GIT_COMMITTER_DATE=2026-02-01T00:00:00+00:00 \
+      git -C "$dir/seed" commit -q -m change
+  fi
+  git -C "$dir/seed" push -q origin HEAD:main
+  git clone -q "$dir/origin.git" "$dir/clone" 2>/dev/null
+}
+TEMPLATES="$T/templates"
+mkdir -p "$TEMPLATES"
+build_case_template "$TEMPLATES/ONE" no
+build_case_template "$TEMPLATES/TWO" yes
+
+# setup NAME ONE|TWO AGAINST|FILING|SKIP: copy a private seed, origin and
+# clone from the matching common fixture. Sets CDIR CLONE WT RUN FILING.
 setup() {
   : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"; : >"$T/prstate"; printf '[]\n' >"$T/prlist"
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
-  ORIGIN="$CDIR/origin.git"; SEED="$CDIR/seed"
-  git init -q --bare "$ORIGIN"; git init -q "$SEED"; git -C "$SEED" remote add origin "$ORIGIN"
-  git -C "$SEED" commit -q --allow-empty -m init
-  printf '%s\n' one >"$SEED/f.txt"; git -C "$SEED" add -A
-  GIT_AUTHOR_DATE=2026-01-01T00:00:00+00:00 GIT_COMMITTER_DATE=2026-01-01T00:00:00+00:00 git -C "$SEED" commit -q -m filing
-  FILING="$(git -C "$SEED" rev-parse HEAD)"
-  if [ "$2" = TWO ]; then printf '%s\n' two >"$SEED/f.txt"; git -C "$SEED" add -A
-    GIT_AUTHOR_DATE=2026-02-01T00:00:00+00:00 GIT_COMMITTER_DATE=2026-02-01T00:00:00+00:00 git -C "$SEED" commit -q -m change; fi
-  git -C "$SEED" push -q origin HEAD:main
-  CLONE="$CDIR/clone"; git clone -q "$ORIGIN" "$CLONE" 2>/dev/null
+  CASE_TEMPLATE="$TEMPLATES/$2"
+  cp -R "$CASE_TEMPLATE/." "$CDIR/"
+  ORIGIN="$CDIR/origin.git"; SEED="$CDIR/seed"; CLONE="$CDIR/clone"
+  git -C "$SEED" remote set-url origin "$ORIGIN"
+  git -C "$CLONE" remote set-url origin "$ORIGIN"
+  FILING="$(cat "$CASE_TEMPLATE/filing")"
   WT="$CDIR/wt"; RUN="$CDIR/run"; mkdir -p "$RUN"
   printf 'touch\n' >"$CDIR/wf.md"; printf 'extra\n' >"$CDIR/extra.md"
   [ "$3" = AGAINST ] && printf 'Work for #42.\n\nWritten against %s\n' "$FILING" >"$T/body"
