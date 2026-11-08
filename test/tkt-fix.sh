@@ -338,6 +338,81 @@ grep -Fq "FINDINGS-UNACCOUNTED commits=$EARLIER_HEAD" <<<"$out" || fail "round-o
 grep -q '^review-pr|' "$T/calls.log" && fail "round-ownership ran review-pr on uncovered commits"
 fi
 
+# Merging main into the branch brings main's own commits into since..head.
+# Coverage walks the branch's first-parent chain: main's commits need no
+# round, the merge commit does.
+
+# Advance main by one commit, push it, and merge main into the branch.
+# Sets MAIN_COMMIT and MERGE.
+merge_main() {
+  git -C "$WT" checkout -q main
+  printf 'main moved\n' >>"$WT/main.txt"
+  git -C "$WT" add main.txt
+  git -C "$WT" commit -qm 'main: unrelated commit'
+  MAIN_COMMIT="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" push -q origin main
+  git -C "$WT" checkout -q tkt-529
+  git -C "$WT" merge -q --no-edit main
+  MERGE="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" push -q origin tkt-529
+}
+
+# $1 is the case name; $2 is "in" (round 1 ends at the merge) or "after"
+# (round 1 ends before it). Sets ROUND1_FIX, MAIN_COMMIT, MERGE.
+setup_main_merge() {
+  setup_case "$1"
+  # A lane commit, so the reviewed head (and round 1's start) is on the
+  # branch and main's later commit does not descend from it.
+  printf 'lane\n' >>"$WT/base.txt"
+  git -C "$WT" add base.txt
+  git -C "$WT" commit -qm 'lane: work'
+  OLD="$(git -C "$WT" rev-parse HEAD)"
+  bash "$TKT_STATE" "$S" set reviewed "$OLD" >/dev/null
+  printf 'round one fix\n' >"$WT/fix.txt"
+  git -C "$WT" add fix.txt
+  git -C "$WT" commit -qm 'fix: round one'
+  ROUND1_FIX="$(git -C "$WT" rev-parse HEAD)"
+  merge_main
+  bash "$TKT_STATE" "$S" set head "$MERGE" >/dev/null
+  bash "$TKT_STATE" "$S" set round 1 >/dev/null
+  bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+  if [ "$2" = in ]; then record_test_round 1 "$MERGE"; else record_test_round 1 "$ROUND1_FIX"; fi
+}
+
+if want main-merge; then
+setup_main_merge main-merge in
+out="$(bash "$TKT" "$S" --verify --since "$OLD" 2>"$T/stderr")" || fail "main-merge exited $?: $(head -n 3 <<<"$out") $(cat "$T/stderr")"
+grep -Fq "$MAIN_COMMIT" <<<"$out" && fail "main-merge reported main's commit: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "main-merge bad verdict: $(head -n 1 <<<"$out")"
+
+setup_main_merge main-merge-unowned after
+run_rc=0; out="$(bash "$TKT" "$S" --verify --since "$OLD" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "main-merge-unowned exited $run_rc, want 1: $out"
+grep -Fq "FINDINGS-UNACCOUNTED commits=$MERGE" <<<"$out" || fail "main-merge-unowned did not report only the merge: $(head -n 1 <<<"$out")"
+grep -Fq "$MAIN_COMMIT" <<<"$out" && fail "main-merge-unowned reported main's commit: $(head -n 1 <<<"$out")"
+grep -q '^review-pr|' "$T/calls.log" && fail "main-merge-unowned ran review-pr on uncovered commits"
+fi
+
+if want main-merge-multi; then
+# Two main merges with a fix commit between them, across two rounds:
+# round 1 is fix, merge; round 2 is fix, merge.
+setup_main_merge main-merge-multi in
+MAIN1="$MAIN_COMMIT"
+printf 'round two fix\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'fix: round two'
+merge_main
+MAIN2="$MAIN_COMMIT"
+bash "$TKT_STATE" "$S" set head "$MERGE" >/dev/null
+# round counts verify rounds; 1 keeps this run under the two-round limit.
+bash "$TKT_STATE" "$S" set fixslot 2 >/dev/null
+record_test_round 2 "$MERGE"
+out="$(bash "$TKT" "$S" --verify --since "$OLD" 2>"$T/stderr")" || fail "main-merge-multi exited $?: $(head -n 3 <<<"$out") $(cat "$T/stderr")"
+grep -Fq "$MAIN1" <<<"$out" && fail "main-merge-multi reported main's first commit: $(head -n 1 <<<"$out")"
+grep -Fq "$MAIN2" <<<"$out" && fail "main-merge-multi reported main's second commit: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "main-merge-multi bad verdict: $(head -n 1 <<<"$out")"
+fi
+
 # 1. Verify OK on an already-pushed head: no CI wait, slot fix1, reviewed set.
 setup_case ok
 printf 'fixed\n' >"$WT/fix.txt"

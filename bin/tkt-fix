@@ -367,7 +367,9 @@ verify_round_coverage() {
   local round_list_file="$1" unaccounted_file="$2" commits commit owner limit n round_start round_head round_findings
   local sha_list missing_rounds repair_command state_arg since_arg path_arg
   : >"$round_list_file"; : >"$unaccounted_file"
-  commits="$(git -C "$worktree" rev-list --reverse "$verify_since..$new_head")" || emit "FINDINGS-SCOPE-ERROR" 1 "cannot enumerate commits in $verify_since..$new_head"
+  # First parent only: a merge of main into the branch needs an owning round,
+  # but the main commits it brings in were never this branch's fix work.
+  commits="$(git -C "$worktree" rev-list --first-parent --reverse "$verify_since..$new_head")" || emit "FINDINGS-SCOPE-ERROR" 1 "cannot enumerate commits in $verify_since..$new_head"
   limit="$fixslot"; [ "$knum" -le "$limit" ] || limit="$knum"
   for commit in $commits; do
     owner=""
