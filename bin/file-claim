@@ -58,7 +58,14 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 . "$script_dir/lib/plan-tokens.sh"
 . "$script_dir/lib/ticket-state.sh"
 W=""
-cleanup() { if [ -n "$W" ] && [ -d "$W" ]; then rm -rf "$W"; fi; }
+LIST_PRMAP_PID=""
+cleanup() {
+  if [ -n "$LIST_PRMAP_PID" ]; then
+    wait "$LIST_PRMAP_PID" 2>/dev/null || true
+    LIST_PRMAP_PID=""
+  fi
+  if [ -n "$W" ] && [ -d "$W" ]; then rm -rf "$W"; fi
+}
 trap cleanup EXIT
 new_workdir() { W="$(mktemp -d "${TMPDIR:-/tmp}/file-claim.XXXXXX")"; git init -q --bare "$W" || die 2 "cannot init temp dir"; }
 valid_path() { case "$1" in ""|*[[:space:]]*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;; esac; }
@@ -208,7 +215,7 @@ build_prmap() {
   # The open-PR path table both claim and list read. Writes "$W/prmap" lines
   # "PR<TAB>path". File reads are bounded and each PR has isolated output/errors.
   # Fail-closed: any unreadable list exits 2, as claim always did.
-  local repo="$1" pr_json prmap_list pr changed_files index=0 batch=0 wait_i max_parallel=6
+  local repo="$1" pr_json prmap_list pr changed_files index=0 batch=0 wait_i max_parallel=10
   local -a job_pids=() job_indexes=()
   pr_json="$(gh pr list --repo "$repo" --state open --limit 1000 --json number,changedFiles 2>"$W/gh.err")" || die 2 "cannot list open PRs for $repo: $(cat "$W/gh.err")"
   prmap_list="$W/prmap-list"; prmap="$W/prmap"
@@ -525,10 +532,23 @@ cmd_reap() {
 
 cmd_list() {
   local lane="$1" repo="$2"
-  local remote tip claims epochs now line c_path c_lane c_kind c_at c_wt c_pr c_epoch age pr path
+  local remote tip claims epochs now line c_path c_lane c_kind c_at c_wt c_pr c_epoch age pr path prmap
   remote="$(default_remote "$repo")"
-  new_workdir; tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; epochs="$W/claims-epochs"; load_claims "$tip" "$claims" "$epochs"; now="$(date -u +%s)"
-  if [ -z "$lane" ]; then build_prmap "$repo"; fi
+  new_workdir
+  if [ -z "$lane" ]; then
+    prmap="$W/prmap"
+    build_prmap "$repo" &
+    LIST_PRMAP_PID=$!
+  fi
+  tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; epochs="$W/claims-epochs"; load_claims "$tip" "$claims" "$epochs"; now="$(date -u +%s)"
+  if [ -n "$LIST_PRMAP_PID" ]; then
+    if wait "$LIST_PRMAP_PID"; then
+      LIST_PRMAP_PID=""
+    else
+      LIST_PRMAP_PID=""
+      exit 2
+    fi
+  fi
   {
     exec 3<"$epochs"
     while IFS= read -r line || [ -n "$line" ]; do

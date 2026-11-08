@@ -386,6 +386,19 @@ grep -qF 'cannot list files for open PR #7' "$T/e-retry-exhausted" || fail "exha
 [ "$(cat "$GH_RETRY_COUNT")" = "3" ] || fail "three transient file-list failures recorded"
 [ "$(grep -cF 'pulls/7/files?per_page=100' "$GH_ARGS_LOG")" = "3" ] || fail "PR 7 file list stops after three calls"
 
+# Unfiltered list fails closed when even one open PR's file list is unreadable.
+R="$(fresh)"
+printf '[{"number":7,"changedFiles":1,"files":[{"path":"pr-file.txt"}]}]' >"$T/prs-list-failure.json"
+export GH_PRS_JSON="$T/prs-list-failure.json"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM held.txt 2>"$T/e-list-failure-setup")" || fail "list failure setup claim exits 0: $(cat "$T/e-list-failure-setup")"
+GH_RETRY_COUNT="$T/gh-list-failure-count"
+printf 0 >"$GH_RETRY_COUNT"
+rc=0
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_FILES_TIMES=99 GH_FAIL_FILES_COUNT="$GH_RETRY_COUNT" bash "$FC" list --repo test/repo 2>"$T/e-list-failure")" || rc=$?
+[ "$rc" = "2" ] || fail "list with an unreadable PR file list exits 2, got $rc: $out"
+[ -z "$out" ] || fail "list with an unreadable PR file list prints no rows: $out"
+grep -qF 'cannot list files for open PR #7' "$T/e-list-failure" || fail "list unreadable-file diagnostic names PR 7: $(cat "$T/e-list-failure")"
+
 # An empty or short listing is retried and fails loudly without writing a claim.
 R="$(fresh)"
 printf '[{"number":7,"changedFiles":2,"files":[{"path":"a.txt"},{"path":"b.txt"}]}]' >"$T/prs-empty-list.json"
