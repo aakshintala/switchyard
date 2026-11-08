@@ -1110,6 +1110,12 @@ reset_case
 run_fg 77 --paths docs/tui.md --unknown
 assert_usage 'unknown flag'
 reset_case
+run_fg 77 --paths docs/tui.md --ignore-pr 0
+assert_usage 'zero ignore-pr'
+reset_case
+run_fg 77 --paths docs/tui.md --ignore-pr=011
+assert_usage 'leading-zero ignore-pr'
+reset_case
 run_fg 77 --paths docs/tui.md --part two
 assert_usage 'non-numeric part'
 reset_case

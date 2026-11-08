@@ -443,6 +443,16 @@ export GH_PRS_JSON="$T/prs-empty.json"
 export GH_PRS_JSON="$T/prs1.json"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4222 --grant --worktree t:d1 --repo test/repo --self-pr 42 a.txt 2>"$T/e3")" || fail "self-pr claim exits 0: $(cat "$T/e3")"
 [ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "self-pr lines: $out"
+# --self-pr takes positive integers only: 0 and leading zeros exit with usage.
+for bad_pr in "0" "042" "42 --self-pr 0"; do
+  tip_before="$(claim_tip "$R")"
+  # shellcheck disable=SC2086
+  FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM --self-pr $bad_pr b.txt >/dev/null 2>"$T/e-bad-self-pr"
+  rc=$?
+  [ "$rc" = 2 ] || fail "--self-pr $bad_pr exits 2, got $rc"
+  grep -q '^usage: file-claim' "$T/e-bad-self-pr" || fail "--self-pr $bad_pr prints usage: $(cat "$T/e-bad-self-pr")"
+  [ "$(claim_tip "$R")" = "$tip_before" ] || fail "--self-pr $bad_pr stores nothing"
+done
 
 # Other PRs overlap, but do not refuse, even with --self-pr.
 printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":7,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs3.json"
@@ -1110,5 +1120,28 @@ out="$(GH_TICKET_OMIT=6021 GH_TICKET_STATES='6020:CLOSED' FILE_CLAIM_REMOTE="$R"
 [ -z "$out" ] || fail "partial lookup reports no drops: $out"
 [ "$(claims_blob "$R")" = "$before" ] || fail "partial lookup keeps every claim"
 [ -e "$FW_RUN/fiber-6020-fence-grant-1.md" ] && [ -e "$FW_RUN/fiber-6021-fence-grant-1.md" ] || fail "partial lookup keeps every fence grant"
+
+# A stored PR field of 0 (written before --self-pr rejected it) is skipped, so
+# the batch lookup never asks gh for PR 0 and a closed ticket is still reaped.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6030 --grant --worktree t:z --repo test/repo zero-a.txt >/dev/null 2>&1 || fail "pr-0 setup claim"
+pr0="$T/pr0-claims"
+git -c init.defaultBranch=main init -q "$pr0" || fail "init pr-0 fixture"
+git -C "$pr0" config user.email t@t.t || fail "pr-0 fixture email"
+git -C "$pr0" config user.name t || fail "pr-0 fixture name"
+git -C "$pr0" remote add origin "$R" || fail "pr-0 fixture remote"
+git -C "$pr0" fetch -q origin refs/claims/live || fail "fetch claims for pr-0 fixture"
+git -C "$pr0" checkout -q -b pr0-claim FETCH_HEAD || fail "checkout claims for pr-0 fixture"
+printf 'zero-b.txt\tfiber-6031\tgrant\t2026-01-02T03:04:05Z\tt:z\t0\n' >>"$pr0/claims"
+printf 'zero-c.txt\tfiber-6032\tgrant\t2026-01-02T03:04:05Z\tt:z\t0,94\n' >>"$pr0/claims"
+git -C "$pr0" add claims || fail "stage pr-0 claim"
+git -C "$pr0" commit -qm 'pr-0 claim' || fail "commit pr-0 claim"
+git -C "$pr0" push -q origin HEAD:refs/claims/live || fail "publish pr-0 claim"
+out="$(GH_TICKET_OMIT=0 GH_TICKET_STATES='6030:CLOSED,6031:CLOSED,6032:OPEN,94:MERGED' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-pr0")" || fail "reap with a PR-0 record succeeds: $(cat "$T/e-reap-pr0")"
+! grep -q 'reap skipped' "$T/e-reap-pr0" || fail "PR-0 record does not skip the reap: $(cat "$T/e-reap-pr0")"
+grep -qF 'REAP claim zero-a.txt by fiber-6030' <<<"$out" || fail "closed ticket reaped beside a PR-0 record: $out"
+grep -qF 'REAP claim zero-b.txt by fiber-6031' <<<"$out" || fail "closed ticket with PR 0 reaped: $out"
+grep -qF 'REAP claim zero-c.txt by fiber-6032' <<<"$out" || fail "merged PR beside PR 0 reaped: $out"
+[ -z "$(claims_blob "$R")" ] || fail "every PR-0 batch claim reaped: $(claims_blob "$R")"
 
 echo "file-claim tests passed"

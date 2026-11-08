@@ -361,8 +361,8 @@ while [ $# -gt 0 ]; do
     --repo=*) repo="${1#--repo=}"; shift;;
     --part) [ $# -ge 2 ] || { _usage; exit 2; }; part="$2"; shift 2;;
     --part=*) part="${1#--part=}"; shift;;
-    --ignore-pr) [ $# -ge 2 ] || { _usage; exit 2; }; case "$2" in ''|*[!0-9]*) _usage; exit 2;; esac; ignore="${ignore}${ignore:+ }$2"; shift 2;;
-    --ignore-pr=*) _ignored_pr="${1#--ignore-pr=}"; case "$_ignored_pr" in ''|*[!0-9]*) _usage; exit 2;; esac; ignore="${ignore}${ignore:+ }$_ignored_pr"; shift;;
+    --ignore-pr) [ $# -ge 2 ] || { _usage; exit 2; }; case "$2" in ''|*[!0-9]*|0*) _usage; exit 2;; esac; ignore="${ignore}${ignore:+ }$2"; shift 2;;
+    --ignore-pr=*) _ignored_pr="${1#--ignore-pr=}"; case "$_ignored_pr" in ''|*[!0-9]*|0*) _usage; exit 2;; esac; ignore="${ignore}${ignore:+ }$_ignored_pr"; shift;;
     --ignore-ticket) [ $# -ge 2 ] || { _usage; exit 2; }; case "$2" in ''|*[!0-9]*) _usage; exit 2;; esac; ignoreticket="${ignoreticket}${ignoreticket:+ }$2"; shift 2;;
     --ignore-ticket=*) _ignored_ticket="${1#--ignore-ticket=}"; case "$_ignored_ticket" in ''|*[!0-9]*) _usage; exit 2;; esac; ignoreticket="${ignoreticket}${ignoreticket:+ }$_ignored_ticket"; shift;;
     --swept-to) [ $# -ge 2 ] || { _usage; exit 2; }; sweptto="$2"; shift 2;;

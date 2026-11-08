@@ -428,7 +428,7 @@ cmd_reap() {
       if [ -n "$c_pr" ]; then
         IFS=',' read -r -a pr_numbers <<<"$c_pr"
         for pr_number in "${pr_numbers[@]}"; do
-          case "$pr_number" in ''|*[!0-9]*) continue;; esac
+          case "$pr_number" in ''|*[!0-9]*|0*) continue;; esac
           printf '%s\n' "$pr_number" >>"$numbers"
         done
       fi
@@ -481,7 +481,7 @@ cmd_reap() {
           elif [ -n "$c_pr" ]; then
             IFS=',' read -r -a pr_numbers <<<"$c_pr"
             for pr_number in "${pr_numbers[@]}"; do
-              case "$pr_number" in ''|*[!0-9]*) continue;; esac
+              case "$pr_number" in ''|*[!0-9]*|0*) continue;; esac
               if ticket_state_is_terminal "$pr_number" "$prefix.states"; then
                 reason="PR #$pr_number closed"
                 [ -z "$ticket" ] || printf '%s\t%s\n' "$ticket" "$pr_number" >>"$grant_prs"
@@ -589,7 +589,7 @@ main() {
       *) paths+=("$1"); shift;;
     esac
   done
-  case "$self_pr" in "") ;; *[!0-9,]*|,*|*,|*,,*) usage;; esac
+  case "$self_pr" in "") ;; *[!0-9,]*|,*|*,|*,,*|0*|*,0*) usage;; esac
   [ -n "$repo" ] || usage; valid_field "$repo" || usage
   case "$cmd" in
     claim) [ -n "$lane" ] || usage; valid_field "$lane" || usage
