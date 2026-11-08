@@ -36,7 +36,7 @@ Delegated work runs through the `delegate` CLI in `delegate/`, a Rust binary tha
 Branch, open a PR, squash merge. CI (`ci`) runs `test/run` and delegate's format, lint and tests, and must pass on a head up to date with `main`.
 
 - **Gate:** `bash test/run && bash bin/check-pack` (through `bash`: a fresh worktree's first direct exec of a script can stall for minutes on macOS), plus `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` in `delegate/` when it changes. `test/run` takes over 10 minutes, longer than the 600 s foreground tool limit: run it inside `delegate run --gate` or with `run_in_background`, never as a foreground call.
-- **Merge:** squash, once a reviewer from a family other than the author's has approved the head's patch-id, CI is green and `pr-closes` prints OK. Use `bin/ship-pr`. When the PR changes `bin/ship-pr` or `bin/gh-ci`, run the reviewed copies from the PR's worktree (`bash <worktree>/bin/ship-pr ...`): `~/.agents` is fast-forwarded only after the merge. Several skills are adapted from other MIT-licensed projects; each says so in a comment at the top and carries its upstream licence beside it.
+- **Merge:** squash, once a reviewer from a family other than the author's has approved the head's patch-id (or a scoped verify returned `FIX-INCOMPLETE` with only P3 findings), CI is green and `pr-closes` prints OK. Use `bin/ship-pr`. When the PR changes `bin/ship-pr` or `bin/gh-ci`, run the reviewed copies from the PR's worktree (`bash <worktree>/bin/ship-pr ...`): `~/.agents` is fast-forwarded only after the merge. Several skills are adapted from other MIT-licensed projects; each says so in a comment at the top and carries its upstream licence beside it.
 
 ## Licence
 

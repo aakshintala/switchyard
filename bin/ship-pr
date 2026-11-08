@@ -709,7 +709,7 @@ review_verdict() {
 }
 
 parse_p3_verify_findings() {
-  local encoded="$1" output="$2" decoded="${2}.comment" line in_verify=0 saw_verify=0 count=0 priority detail
+  local encoded="$1" output="$2" decoded="${2}.comment" line in_verify=0 saw_verify=0 count=0
   if ! printf '%s' "$encoded" | base64 -D >"$decoded" 2>/dev/null; then
     printf '%s' "$encoded" | base64 -d >"$decoded" 2>/dev/null || { rm -f "$decoded"; return 1; }
   fi
@@ -725,17 +725,15 @@ parse_p3_verify_findings() {
       continue
     fi
     [ "$in_verify" = 1 ] || continue
-    if [[ "$line" == P[0-9]* ]]; then
-      [[ "$line" =~ ^(P[0-9]+)\ (.*)$ ]] || { rm -f "$decoded"; return 1; }
-      priority="${BASH_REMATCH[1]}"
-      detail="${BASH_REMATCH[2]}"
-      [ "$priority" = "P3" ] || { rm -f "$decoded"; return 1; }
-      grep -q '[^[:space:]]' <<<"$detail" || { rm -f "$decoded"; return 1; }
-      printf '%s\n' "$line" >>"$output"
-      count=$((count + 1))
-    elif [[ "$line" =~ ^[[:space:]]*([-*+][[:space:]]+)?P[0-9] ]]; then
-      rm -f "$decoded"
-      return 1
+    line="$(printf '%s' "$line" | tr -d '*`' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [[ "$line" =~ (^|[^[:alnum:]_])P[0-9]([^[:alnum:]_]|$) ]]; then
+      if [[ "$line" =~ ^P3[[:space:]]+[^[:space:]] ]]; then
+        printf '%s\n' "$line" >>"$output"
+        count=$((count + 1))
+      else
+        rm -f "$decoded"
+        return 1
+      fi
     fi
   done <"$decoded"
   rm -f "$decoded"
