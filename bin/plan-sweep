@@ -92,69 +92,138 @@ add_symbol() {
   SYMS="$SYMS$1"$'\t'"$2"$'\n'
 }
 
-# strip_quals LINE: trim, then drop leading pub, pub(...), async, unsafe, extern words
-strip_quals() {
-  local c="$1" rest
-  c="${c#"${c%%[![:blank:]]*}"}"
-  while :; do
-    case "$c" in
-      pub" "*|pub"	"*) c="${c#pub}" ;;
-      pub\(*)
-        rest="${c#pub\(}"
-        case "$rest" in *\)*) rest="${rest#*\)}" ;; *) break ;; esac
-        c="$rest" ;;
-      async" "*|async"	"*|unsafe" "*|unsafe"	"*|extern" "*|extern"	"*) c="${c#*[[:blank:]]}" ;;
-      *) break ;;
-    esac
-    c="${c#"${c%%[![:blank:]]*}"}"
-  done
-  printf '%s' "$c"
-}
-
-# is_reexport LINE: the code starts with `pub use` or `pub(...) use`
-is_reexport() {
-  local c="$1" rest
-  c="${c#"${c%%[![:blank:]]*}"}"
-  case "$c" in
-    "pub use"*)
-      rest="${c#pub use}"
-      case "$rest" in ""|[[:blank:]]*) return 0 ;; esac
-      return 1 ;;
-    pub\(*)
-      rest="${c#pub\(}"
-      case "$rest" in *\)*) rest="${rest#*\)}" ;; *) return 1 ;; esac
-      rest="${rest#"${rest%%[![:blank:]]*}"}"
-      case "$rest" in use|use[[:blank:]]*) return 0 ;; esac
-      return 1 ;;
-  esac
-  return 1
-}
-
-# def_keyword LINE NAME: print the declaring keyword when LINE declares NAME, else nothing
-def_keyword() {
-  local c="$1" name="$2" first rest decl
-  c="$(strip_quals "$c")"
-  case "$c" in [A-Za-z_]*) ;; *) return 0 ;; esac
-  first="${c%%[^A-Za-z0-9_]*}"
-  case "$first" in fn|struct|enum|trait|type|const|mod) ;; *) return 0 ;; esac
-  rest="${c#$first}"
-  rest="${rest#"${rest%%[![:blank:]]*}"}"
-  if [ "$first" = const ]; then
-    case "$rest" in fn[[:blank:]]*|fn) rest="${rest#fn}"; rest="${rest#"${rest%%[![:blank:]]*}"}" ;; esac
-  fi
-  decl="${rest%%[^A-Za-z0-9_]*}"
-  [ -n "$decl" ] || return 0
-  [ "$decl" = "$name" ] || return 0
-  printf '%s' "$first"
-}
-
-# is_pin PATH: print the pin kind (snap or test) when PATH is a pin file, else nothing
-is_pin() {
-  local p="$1" b
-  case "$p" in *.snap) printf 'snap'; return 0 ;; esac
-  case "/$p/" in */test/*|*/tests/*) printf 'test'; return 0 ;; esac
-  b="${p##*/}"
-  case "$b" in test_*|*_test.*) printf 'test'; return 0 ;; esac
+# classify_symbol_hits MAP: classify all matched symbol lines in one AWK process.
+# batch-sorted groups the rows by pattern index, keeping per-symbol records in
+# git order so AWK can close each output set before opening the next.
+classify_symbol_hits() {
+  local map="$1"
+  [ -s "$map" ] || return 0
+  REV="$rev" WORK="$work" SYMMAP="$map" OUTSIDE="$work/outside-raw" \
+    LC_ALL=C awk '
+    BEGIN {
+      while ((getline row < ENVIRON["SYMMAP"]) > 0) {
+        sep = index(row, "\t")
+        idx = substr(row, 1, sep - 1)
+        rest = substr(row, sep + 1)
+        sep = index(rest, "\t")
+        symnum = substr(rest, 1, sep - 1)
+        name[idx] = substr(rest, sep + 1)
+        defs[idx] = ENVIRON["WORK"] "/defs-" symnum
+        callers[idx] = ENVIRON["WORK"] "/callers-" symnum
+        reex[idx] = ENVIRON["WORK"] "/reex-" symnum
+        pins[idx] = ENVIRON["WORK"] "/pins-" symnum
+        enums[idx] = ENVIRON["WORK"] "/enum-" symnum
+      }
+    }
+    function close_symbol(idx) {
+      if (!(idx in name)) return
+      close(defs[idx]); close(callers[idx]); close(reex[idx]); close(pins[idx]); close(enums[idx])
+    }
+    function pin_kind(path, base, padded) {
+      if (path ~ /\.snap$/) return "snap"
+      padded = "/" path "/"
+      if (index(padded, "/test/") || index(padded, "/tests/")) return "test"
+      base = path
+      sub(/^.*\//, "", base)
+      if (base ~ /^test_/ || base ~ /_test\./) return "test"
+      return ""
+    }
+    function is_reexport(line, text, rest, pos) {
+      text = line
+      sub(/^[[:blank:]]+/, "", text)
+      if (substr(text, 1, 7) == "pub use") {
+        rest = substr(text, 8)
+        return (rest == "" || rest ~ /^[[:blank:]]/)
+      }
+      if (substr(text, 1, 4) == "pub(") {
+        rest = substr(text, 5)
+        pos = index(rest, ")")
+        if (pos == 0) return 0
+        rest = substr(rest, pos + 1)
+        sub(/^[[:blank:]]+/, "", rest)
+        return (rest == "use" || rest ~ /^use[[:blank:]]/)
+      }
+      return 0
+    }
+    function strip_quals(line, text, old, rest, pos) {
+      text = line
+      sub(/^[[:blank:]]+/, "", text)
+      do {
+        old = text
+        if (text ~ /^pub[[:blank:]]/) {
+          sub(/^pub/, "", text)
+        } else if (text ~ /^pub\(/) {
+          rest = substr(text, 5)
+          pos = index(rest, ")")
+          if (pos == 0) break
+          text = substr(rest, pos + 1)
+        } else if (text ~ /^(async|unsafe|extern)[[:blank:]]/) {
+          sub(/^[^[:blank:]]+[[:blank:]]+/, "", text)
+        } else {
+          break
+        }
+        sub(/^[[:blank:]]+/, "", text)
+      } while (text != old)
+      return text
+    }
+    function def_keyword(line, name, text, first, rest, decl) {
+      text = strip_quals(line)
+      if (text !~ /^[A-Za-z_]/) return ""
+      first = text
+      sub(/[^A-Za-z0-9_].*$/, "", first)
+      if (first !~ /^(fn|struct|enum|trait|type|const|mod)$/) return ""
+      rest = substr(text, length(first) + 1)
+      sub(/^[[:blank:]]+/, "", rest)
+      if (first == "const" && (rest == "fn" || rest ~ /^fn[[:blank:]]/)) {
+        rest = substr(rest, 3)
+        sub(/^[[:blank:]]+/, "", rest)
+      }
+      decl = rest
+      sub(/[^A-Za-z0-9_].*$/, "", decl)
+      if (decl == "" || decl != name) return ""
+      return first
+    }
+    {
+      sep = index($0, "\t")
+      if (sep == 0) next
+      idx = substr($0, 1, sep - 1)
+      if (idx != active) {
+        close_symbol(active)
+        active = idx
+      }
+      if (!(idx in name)) next
+      hit = substr($0, sep + 1)
+      rest = substr(hit, length(ENVIRON["REV"]) + 2)
+      sep = index(rest, ":")
+      if (sep == 0) next
+      path = substr(rest, 1, sep - 1)
+      tail = substr(rest, sep + 1)
+      sep = index(tail, ":")
+      if (sep == 0) next
+      lineno = substr(tail, 1, sep - 1)
+      text = substr(tail, sep + 1)
+      kind = pin_kind(path)
+      if (kind != "") {
+        printf "%s %s\n", path, kind >> pins[idx]
+        printf "%s\tpin\n", path >> ENVIRON["OUTSIDE"]
+        next
+      }
+      if (is_reexport(text)) {
+        printf "%s:%s: %s\n", path, lineno, text >> reex[idx]
+        printf "%s\tre-export\n", path >> ENVIRON["OUTSIDE"]
+        next
+      }
+      kw = def_keyword(text, name[idx])
+      if (kw != "") {
+        printf "%s:%s: %s\n", path, lineno, text >> defs[idx]
+        printf "%s\tdefinition\n", path >> ENVIRON["OUTSIDE"]
+        if (kw == "enum") printf "1\n" >> enums[idx]
+        next
+      }
+      printf "%s:%s: %s\n", path, lineno, text >> callers[idx]
+      printf "%s\tcaller\n", path >> ENVIRON["OUTSIDE"]
+    }
+    END { close_symbol(active) }' "$work/batch-sorted"
   return 0
 }
 
@@ -396,17 +465,29 @@ split_qual_hits() {
   flush_batch_idx "$3"
 }
 
-# batch_hits PATFILE OUTDIR MODE: one full-tree `git grep -n -I -F -f` over
-# every name in PATFILE (MODE word adds -w; MODE qual does not), then one file
-# OUTDIR/N per pattern-file line holding git's hit lines for that name in
-# git's order. Grep exit 1 means no matches. Any other non-zero status,
-# including death by a signal, prints an error naming the grep and exits the
-# whole sweep with 2, so a broken grep never reads as every name unresolved.
-# Callers run it in the main shell, never in a subshell or pipeline, so the
-# exit stops the sweep. git's stderr passes through. Never called with an
-# empty PATFILE.
+# ere_alternation PATFILE: build one escaped ERE alternation from fixed strings.
+# ERE metacharacters are escaped even though symbol tokens are identifier-shaped.
+ere_alternation() {
+  LC_ALL=C awk '
+    {
+      escaped = ""
+      for (i = 1; i <= length($0); i++) {
+        char = substr($0, i, 1)
+        if (index("[]\\.^$*+?(){}|", char)) escaped = escaped "\\"
+        escaped = escaped char
+      }
+      if (NR > 1) printf "|"
+      printf "%s", escaped
+    }
+  ' "$1"
+}
+
+# batch_hits PATFILE OUTDIR MODE: one full-tree git grep ERE alternation over
+# every name in PATFILE, then post-filter and attribute each output line.
+# Word mode applies the same word-boundary predicate in split_word_hits;
+# qual mode applies the :: predicate in split_qual_hits.
 batch_hits() {
-  local pat="$1" outdir="$2" mode="$3" total i st=0 w=""
+  local pat="$1" outdir="$2" mode="$3" total i st=0 alternation
   mkdir -p "$outdir"
   total="$(nlines "$pat")"
   i=1
@@ -414,16 +495,16 @@ batch_hits() {
     : >"$outdir/$i"
     i=$((i + 1))
   done
-  if [ "$mode" = word ]; then w=-w; fi
-  git -C "$dir" grep -n -I -F ${w:+"$w"} -f "$pat" "$rev" >"$work/batch-$mode" || st=$?
+  alternation="$(ere_alternation "$pat")"
+  git -C "$dir" grep -n -I -E -e "$alternation" "$rev" >"$work/batch-$mode" || st=$?
   if [ "$st" -gt 1 ]; then
     printf 'plan-sweep: git grep (%s) failed with status %s\n' "$mode" "$st" >&2
     exit 2
   fi
   if [ "$mode" = word ]; then
-    split_word_hits "$pat" "$work/batch-word" "$outdir"
+    split_word_hits "$pat" "$work/batch-$mode" "$outdir"
   else
-    split_qual_hits "$pat" "$work/batch-qual" "$outdir"
+    split_qual_hits "$pat" "$work/batch-$mode" "$outdir"
   fi
   return 0
 }
@@ -627,6 +708,7 @@ docblocks=""
 sym_n=0
 file_n=0
 : >"$work/outside-raw"
+: >"$work/symbol-map"
 
 sym_total="$(printf '%s' "$SYMS" | grep -c . || true)"
 while IFS=$'\t' read -r name title; do
@@ -639,41 +721,11 @@ while IFS=$'\t' read -r name title; do
   : >"$work/matches-raw-$sym_n"
   idx="$(pat_idx "$name" || true)"
   : >"$work/defs-$sym_n"; : >"$work/callers-$sym_n"; : >"$work/reex-$sym_n"; : >"$work/pins-$sym_n"
-  has_enum=0
   if [ -n "$idx" ]; then
-    while IFS= read -r g; do
-      [ -n "$g" ] || continue
-      rest="${g:${#rev}+1}"
-      path="${rest%%:*}"
-      tail="${rest#*:}"
-      lineno="${tail%%:*}"
-      text="${tail#*:}"
-      kind="$(is_pin "$path")"
-      if [ -n "$kind" ]; then
-        printf '%s %s\n' "$path" "$kind" >>"$work/pins-$sym_n"
-        printf '%s\tpin\n' "$path" >>"$work/outside-raw"
-        continue
-      fi
-      if is_reexport "$text"; then
-        printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/reex-$sym_n"
-        printf '%s\tre-export\n' "$path" >>"$work/outside-raw"
-        continue
-      fi
-      kw="$(def_keyword "$text" "$name")"
-      if [ -n "$kw" ]; then
-        printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/defs-$sym_n"
-        printf '%s\tdefinition\n' "$path" >>"$work/outside-raw"
-        if [ "$kw" = enum ]; then has_enum=1; fi
-        continue
-      fi
-      printf '%s:%s: %s\n' "$path" "$lineno" "$text" >>"$work/callers-$sym_n"
-      printf '%s\tcaller\n' "$path" >>"$work/outside-raw"
-    done <"$work/whits/$idx"
-  fi
-  if [ "$has_enum" = 1 ]; then
-    : >"$work/enum-$sym_n"
+    printf '%s\t%s\t%s\n' "$idx" "$sym_n" "$name" >>"$work/symbol-map"
   fi
 done <<<"$SYMS"
+classify_symbol_hits "$work/symbol-map"
 
 if [ "$lang" = rust ]; then
   : >"$work/qualpatterns"

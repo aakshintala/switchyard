@@ -123,6 +123,24 @@ want="$(printf 'src/a.rs caller\nsrc/b.rs caller')"
 [ "$(outside_of "$T/pack-a.md")" = "$want" ] || fail "a: Outside Files exactly two caller lines"
 [ "$(grep -c '^## Symbol make_widget$' "$T/pack-a.md")" = 1 ] || fail "a: one Symbol heading in the full pack"
 
+# a2. Batched attribution matches independent per-symbol grep for overlapping
+# names and a line containing both names.
+cat >"$R/src/overlap.rs" <<'EOF'
+pub fn overlap() {}
+pub fn overlap_long() { overlap(); }
+pub fn both() { overlap(); overlap_long(); }
+EOF
+git -C "$R" add src/overlap.rs
+git -C "$R" -c user.name=test -c user.email=test@example.com commit -q -m overlap
+overlap_base="$(git -C "$R" rev-parse HEAD)"
+run --cwd "$R" --base "$overlap_base" --symbols overlap,overlap_long --files src/overlap.rs --out "$T/pack-a2.md"
+[ "$code" = 0 ] || fail "a2: exits 0, got $code [$out]"
+[ "$(grep -c '^definitions: 1$' "$T/pack-a2.md")" = 2 ] || fail "a2: both definitions retained"
+grep -q '^callers: 2 lines in 1 files (shown 2)$' "$T/pack-a2.md" || fail "a2: overlap callers attributed to both symbols"
+grep -q '^callers: 1 lines in 1 files (shown 1)$' "$T/pack-a2.md" || fail "a2: long-name caller attributed independently"
+grep -q '^src/overlap.rs:2: pub fn overlap_long() { overlap(); }$' "$T/pack-a2.md" || fail "a2: substring occurrence is boundary-filtered for overlap"
+grep -q '^src/overlap.rs:3: pub fn both() { overlap(); overlap_long(); }$' "$T/pack-a2.md" || fail "a2: shared hit line retained"
+
 # b. re-export, and no matches: line without --lang rust
 run --cwd "$R" --base "$BASE" --symbols Shape --files src/shapes.rs --out "$T/pack-b.md"
 [ "$code" = 0 ] || fail "b: exits 0, got $code [$out]"
@@ -562,14 +580,14 @@ REALGIT="$(command -v git)"
 mkdir -p "$T/stubbin"
 cat >"$T/stubbin/git" <<EOF
 #!/usr/bin/env bash
-isgrep=0; word=0
+isgrep=0; qual=0
 for a in "\$@"; do
-  case "\$a" in grep) isgrep=1 ;; -w) word=1 ;; esac
+  case "\$a" in grep) isgrep=1 ;; *'::'*) qual=1 ;; esac
 done
 if [ "\$isgrep" = 1 ]; then
   case "\$STUB_GREP" in
-    word) echo "stub: grep broke" >&2; exit 128 ;;
-    qual) if [ "\$word" = 0 ]; then echo "stub: grep broke" >&2; exit 128; fi ;;
+    word) if [ "\$qual" = 0 ]; then echo "stub: grep broke" >&2; exit 128; fi ;;
+    qual) if [ "\$qual" = 1 ]; then echo "stub: grep broke" >&2; exit 128; fi ;;
     kill) kill -KILL \$\$ ;;
   esac
 fi
