@@ -122,7 +122,8 @@ DELEGATE_STUB
 cat >"$FW_SSH" <<'SSH_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/ssh.log"
-[ "${SSH_FAIL:-0}" != 1 ] || { echo 'ssh stub failure' >&2; exit 1; }
+[ "${SSH_FAIL:-0}" != 1 ] || { echo 'ssh stub failure' >&2; exit 255; }
+[ -z "${SSH_STDERR:-}" ] || printf '%s\n' "$SSH_STDERR" >&2
 if [ -n "${SSH_OUT:-}" ]; then printf '%s\n' "$SSH_OUT"; elif [[ "${2:-}" == *'echo FWSEC=UPTIME'* ]]; then
   printf '%s\n' 'FWSEC=UPTIME' 'FWSEC=AGENTS' '[]' 'FWSEC=DELEGATE' DELEGATEOK \
     'FWSEC=DSESS' "$DSESS_JSON"
@@ -264,8 +265,8 @@ TREE
   GH_TREE_SHA=aaaaaaaa GH_SHA_FAIL=0 GH_SHA_ERROR= GH_TREE_ERROR=
   export GH_TREE_SHA GH_SHA_FAIL GH_SHA_ERROR GH_TREE_ERROR
   GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL=
-  GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT=
-  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT
+  GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT= SSH_STDERR=
+  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
   GH_TICKET_STATES= GH_TICKET_FAIL=0 GH_TICKET_BAD=0 GH_TICKET_MISSING=0 GH_TICKET_OMIT=
   export GH_TICKET_STATES GH_TICKET_FAIL GH_TICKET_BAD GH_TICKET_MISSING GH_TICKET_OMIT
   FW_DELEGATE_DIR="$T/delegate-jobs"
@@ -1276,19 +1277,28 @@ reset_case
 SSH_FAIL=1
 export SSH_FAIL
 run_fg 77 --paths docs/tui.md
-assert_error 'ssh command failure' 'ERROR ssh box ssh stub failure '
+assert_error 'ssh command failure' 'ERROR ssh box exit 255: ssh stub failure '
+[ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 1 ] || fail "failed probe runs ssh once: $(cat "$T/ssh.log")"
 
 reset_case
 SSH_OUT='broken markers'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md
-assert_error 'ssh output missing markers' 'ERROR ssh box '
+assert_error 'ssh output missing markers' 'ERROR ssh box exit 0: no stderr; output lacks the FWSEC markers'
+[ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 1 ] || fail "markerless probe runs ssh once: $(cat "$T/ssh.log")"
 
 reset_case
 SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nDSESSJSONOK\nFWSEC=PILANES\nfiber-88\nFWSEC=END'
 export SSH_OUT
 run_fg 77 --paths docs/tui.md
 assert_error 'box pi section missing marker' 'ERROR box pi lanes: no PILANESOK marker'
+
+reset_case
+SSH_OUT=$'FWSEC=UPTIME\nFWSEC=AGENTS\n[]\nFWSEC=DELEGATE\nDELEGATEOK\nFWSEC=DSESS\n{"ok":true,"sessions":[]}\nDSESSJSONOK\nFWSEC=PILANES\nFWSEC=END'
+SSH_STDERR='cd: no such file or directory'
+export SSH_OUT SSH_STDERR
+run_fg 77 --paths docs/tui.md
+assert_error 'box pi section shows probe stderr' 'ERROR box pi lanes: no PILANESOK marker; box stderr: cd: no such file or directory '
 
 reset_case
 rm -rf "$FW_RUN"
