@@ -29,6 +29,7 @@ export HOME="$T/home" TMPDIR="$T/tmp" FW_RUN="$T/run"
 # --- stub gh: serves a fixture PR list, or fails on demand ------------------
 mkdir -p "$T/stubbin"
 REAL_GIT="$(command -v git)"
+REAL_DATE="$(command -v date)"
 cat >"$T/stubbin/gh" <<'STUB_EOF'
 #!/usr/bin/env bash
 echo "$*" >>"$GH_ARGS_LOG"
@@ -385,6 +386,19 @@ grep -qF 'cannot list files for open PR #7' "$T/e-retry-exhausted" || fail "exha
 [ "$(cat "$GH_RETRY_COUNT")" = "3" ] || fail "three transient file-list failures recorded"
 [ "$(grep -cF 'pulls/7/files?per_page=100' "$GH_ARGS_LOG")" = "3" ] || fail "PR 7 file list stops after three calls"
 
+# Unfiltered list fails closed when even one open PR's file list is unreadable.
+R="$(fresh)"
+printf '[{"number":7,"changedFiles":1,"files":[{"path":"pr-file.txt"}]}]' >"$T/prs-list-failure.json"
+export GH_PRS_JSON="$T/prs-list-failure.json"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM held.txt 2>"$T/e-list-failure-setup")" || fail "list failure setup claim exits 0: $(cat "$T/e-list-failure-setup")"
+GH_RETRY_COUNT="$T/gh-list-failure-count"
+printf 0 >"$GH_RETRY_COUNT"
+rc=0
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_READ_WAIT=0 GH_FAIL_FILES_PR=7 GH_FAIL_FILES_TIMES=99 GH_FAIL_FILES_COUNT="$GH_RETRY_COUNT" bash "$FC" list --repo test/repo 2>"$T/e-list-failure")" || rc=$?
+[ "$rc" = "2" ] || fail "list with an unreadable PR file list exits 2, got $rc: $out"
+[ -z "$out" ] || fail "list with an unreadable PR file list prints no rows: $out"
+grep -qF 'cannot list files for open PR #7' "$T/e-list-failure" || fail "list unreadable-file diagnostic names PR 7: $(cat "$T/e-list-failure")"
+
 # An empty or short listing is retried and fails loudly without writing a claim.
 R="$(fresh)"
 printf '[{"number":7,"changedFiles":2,"files":[{"path":"a.txt"},{"path":"b.txt"}]}]' >"$T/prs-empty-list.json"
@@ -713,8 +727,9 @@ git init -q --bare "$E" || fail "init empty remote"
 FILE_CLAIM_REMOTE="$E" bash "$FC" $CLAIM a.txt >/dev/null 2>"$T/e4" && fail "missing main exits non-zero"
 [ "$?" = "2" ] || fail "missing main exits 2"
 [ -z "$(git -C "$E" for-each-ref)" ] || fail "missing main writes nothing"
-FILE_CLAIM_REMOTE="$E" bash "$FC" list >/dev/null 2>&1 && fail "list with missing main exits non-zero"
-[ "$?" = "2" ] || fail "list with missing main exits 2"
+out="$(FILE_CLAIM_REMOTE="$E" bash "$FC" list --repo test/repo 2>"$T/e-list-no-main")" || fail "list without main or claims ref exits 0: $(cat "$T/e-list-no-main")"
+[ -z "$out" ] || fail "list without main or claims ref has no claim rows: $out"
+[ -z "$(git -C "$E" for-each-ref)" ] || fail "list without main or claims ref writes nothing"
 FILE_CLAIM_REMOTE="$E" bash "$FC" release --lane L >/dev/null 2>&1 && fail "release with missing main exits non-zero"
 [ "$?" = "2" ] || fail "release with missing main exits 2"
 
@@ -764,6 +779,12 @@ FILE_CLAIM_REMOTE="$CR" bash "$FC" claim --lane fiber-4222 --grant --worktree t:
 CR="$(corrupt_remote 3 "$(printf 'a.txt\tL\tgrant\tnot-a-date\tt:d\t')")"
 FILE_CLAIM_REMOTE="$CR" bash "$FC" claim --lane fiber-4222 --grant --worktree t:d --repo test/repo a.txt >/dev/null 2>&1 && fail "bad-date claim exits non-zero"
 [ "$?" = "2" ] || fail "bad-date claim exits 2"
+
+CR="$(corrupt_remote 4 "$(printf 'a.txt\tL\tgrant\t2026-02-30T00:00:00Z\tt:d\t')")"
+rc=0
+FILE_CLAIM_REMOTE="$CR" bash "$FC" list --lane L --repo test/repo >/dev/null 2>"$T/e-impossible-date" || rc=$?
+[ "$rc" = "2" ] || fail "impossible calendar date exits 2, got $rc"
+[ "$(cat "$T/e-impossible-date")" = 'file-claim: claims line 1 is corrupt' ] || fail "impossible calendar date diagnostic: $(cat "$T/e-impossible-date")"
 
 # A hand-built claims blob holding a composite row: list prints the row and a
 # warning naming it, and release removes it.
@@ -820,10 +841,41 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>/dev/null)" || 
 grep -Eq "^f1.txt	fiber-4223	plan	[0-9]+	t:wtA	$" <<<"$out" || fail "list plan line: $out"
 grep -Eq "^f2.txt	fiber-4223	grant	[0-9]+	t:wtA	$" <<<"$out" || fail "list grant line: $out"
 grep -Eq "^f3.txt	fiber-4224	grant	[0-9]+	t:wtB	7$" <<<"$out" || fail "list pr passthrough: $out"
+: >"$GH_ARGS_LOG"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane fiber-4223 --repo test/repo 2>/dev/null)" || fail "list --lane exits 0"
 [ "$(printf '%s\n' "$out" | grep -c '^')" = "2" ] || fail "list --lane filters: $out"
+[ ! -s "$GH_ARGS_LOG" ] || fail "list --lane skips open-PR API reads: $(cat "$GH_ARGS_LOG")"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --lane NOBODY --repo test/repo 2>/dev/null)" || fail "list empty lane exits 0"
 [ -z "$out" ] || fail "list empty lane prints nothing"
+
+# Full list output includes all six columns, sorted claim and open-PR rows, and
+# ages for a leap day, an older timestamp, a future timestamp, and another date.
+expected_age() {
+  local timestamp="$1" epoch age
+  epoch="$(date -u -d "$timestamp" +%s 2>/dev/null || date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$timestamp" +%s 2>/dev/null)" || fail "test date conversion failed: $timestamp"
+  age=$((LIST_NOW - epoch))
+  [ "$age" -ge 0 ] || age=0
+  printf '%s' "$age"
+}
+CR="$(corrupt_remote list-full "$(printf 'a-leap.txt\tfiber-4235\tplan\t2024-02-29T12:00:00Z\tt:leap\t\nb-old.txt\tfiber-4236\tgrant\t2025-01-15T00:00:00Z\tt:old\t9\nc-future.txt\tfiber-4237\tgrant\t2099-12-31T23:59:59Z\tt:future\t\nd-march.txt\tfiber-4238\tgrant\t2026-03-01T01:02:03Z\tt:march\t42')")"
+printf '[{"number":22,"changedFiles":1,"files":[{"path":"e-pr22.txt"}]},{"number":5,"changedFiles":1,"files":[{"path":"f-pr5.txt"}]}]' >"$T/prs-list-full.json"
+export GH_PRS_JSON="$T/prs-list-full.json"
+LIST_NOW="$("$REAL_DATE" -u +%s)"
+mkdir -p "$T/fixed-date-bin"
+cat >"$T/fixed-date-bin/date" <<'DATE_STUB_EOF'
+#!/bin/sh
+if [ "$#" -eq 2 ] && [ "$1" = "-u" ] && [ "$2" = "+%s" ]; then
+  printf '%s\n' "$*" >>"$FILE_CLAIM_DATE_LOG"
+  printf '%s\n' "$FILE_CLAIM_TEST_NOW"
+else
+  exec "$FILE_CLAIM_REAL_DATE" "$@"
+fi
+DATE_STUB_EOF
+chmod +x "$T/fixed-date-bin/date"
+out="$(PATH="$T/fixed-date-bin:$PATH" FILE_CLAIM_TEST_NOW="$LIST_NOW" FILE_CLAIM_REAL_DATE="$REAL_DATE" FILE_CLAIM_DATE_LOG="$T/list-date-calls" FILE_CLAIM_REMOTE="$CR" bash "$FC" list --repo test/repo 2>"$T/e-list-full")" || fail "full list fixture exits 0: $(cat "$T/e-list-full")"
+[ "$(cat "$T/list-date-calls")" = '-u +%s' ] || fail "list calls date once for all claim ages: $(cat "$T/list-date-calls")"
+expected="$(printf 'a-leap.txt\tfiber-4235\tplan\t%s\tt:leap\t\nb-old.txt\tfiber-4236\tgrant\t%s\tt:old\t9\nc-future.txt\tfiber-4237\tgrant\t0\tt:future\t\nd-march.txt\tfiber-4238\tgrant\t%s\tt:march\t42\ne-pr22.txt\tpr#22\tpr\t-\t-\t22\nf-pr5.txt\tpr#5\tpr\t-\t-\t5' "$(expected_age 2024-02-29T12:00:00Z)" "$(expected_age 2025-01-15T00:00:00Z)" "$(expected_age 2026-03-01T01:02:03Z)")"
+[ "$out" = "$expected" ] || fail "full list output and ages; expected: $(printf '\n%s' "$expected")\nactual: $(printf '\n%s' "$out")"
 
 # --- list without --lane adds one row per open-PR path --------------------------
 R="$(fresh)"
