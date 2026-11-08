@@ -128,6 +128,15 @@ fn until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
+/// The `[pid, ppid, pgid]` row for `pid` in a `ps -o pid=,ppid=,pgid=,stat=` snapshot.
+fn ps_row(ps: &str, pid: i64) -> Option<[i64; 3]> {
+    ps.lines().find_map(|line| {
+        let mut fields = line.split_whitespace().map(|f| f.parse::<i64>().ok());
+        let row = [fields.next()??, fields.next()??, fields.next()??];
+        (row[0] == pid).then_some(row)
+    })
+}
+
 fn alive(pid: i64) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
@@ -189,55 +198,27 @@ fn live_new_session_background_command_holds_claude_job_until_exit() {
                 .expect("run ps");
             assert!(ps.status.success());
             ps_text = String::from_utf8_lossy(&ps.stdout).into_owned();
-            let row = |wanted: i64| {
-                ps_text.lines().find_map(|line| {
-                    let fields = line
-                        .split_whitespace()
-                        .take(3)
-                        .map(|f| f.parse::<i64>().ok())
-                        .collect::<Option<Vec<_>>>()?;
-                    (fields.first() == Some(&wanted)).then_some(fields)
-                })
-            };
             // The pid file can land before perl's setsid() runs, so wait for
             // the background row to lead its own group, not just to appear.
-            row(backend_pid).is_some()
-                && row(background_pid).is_some_and(|f| f.get(2) == Some(&background_pid))
+            ps_row(&ps_text, backend_pid).is_some()
+                && ps_row(&ps_text, background_pid)
+                    .is_some_and(|[_, _, pgid]| pgid == background_pid)
         },
     );
-    let row_for = |pid: i64| {
-        ps_text
-            .lines()
-            .find(|line| {
-                line.split_whitespace()
-                    .next()
-                    .and_then(|pid| pid.parse::<i64>().ok())
-                    == Some(pid)
-            })
-            .unwrap_or_else(|| panic!("process {pid} missing from ps"))
-    };
-    let backend_row = row_for(backend_pid);
+    let [_, _, backend_pgid] = ps_row(&ps_text, backend_pid).expect("backend in ps");
     assert_eq!(
-        backend_row
-            .split_whitespace()
-            .nth(2)
-            .unwrap()
-            .parse::<i64>()
-            .unwrap(),
-        backend_pid,
-        "backend must lead its isolated group: {backend_row}"
+        backend_pgid, backend_pid,
+        "backend must lead its isolated group:\n{ps_text}"
     );
-    let command_row = row_for(background_pid);
-    let fields = command_row.split_whitespace().collect::<Vec<_>>();
+    let [_, command_ppid, command_pgid] =
+        ps_row(&ps_text, background_pid).expect("Bash command in ps");
     assert_eq!(
-        fields[1].parse::<i64>().unwrap(),
-        backend_pid,
-        "Bash command must be a direct backend child: {command_row}"
+        command_ppid, backend_pid,
+        "Bash command must be a direct backend child:\n{ps_text}"
     );
     assert_eq!(
-        fields[2].parse::<i64>().unwrap(),
-        background_pid,
-        "Bash command must lead its process group after setsid: {command_row}"
+        command_pgid, background_pid,
+        "Bash command must lead its process group after setsid:\n{ps_text}"
     );
 
     // As in the #1372 sibling (cli_e2e.rs): every record stays RUNNING with an
