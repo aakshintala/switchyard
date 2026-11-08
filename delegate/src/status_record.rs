@@ -999,6 +999,19 @@ mod tests {
         );
         assert_eq!(
             dirs_from(
+                None,
+                Path::new("/var/folders/x/T"),
+                Path::new("/work"),
+                cache
+            ),
+            vec![
+                cache.to_path_buf(),
+                PathBuf::from("/var/folders/x/T/delegate-jobs"),
+                PathBuf::from("/tmp/delegate-jobs"),
+            ]
+        );
+        assert_eq!(
+            dirs_from(
                 Some("/jobs/caller-tmp/delegate-jobs".into()),
                 Path::new("/jobs/caller-tmp"),
                 Path::new("/jobs/cwd"),
