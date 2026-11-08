@@ -144,8 +144,14 @@ ledger = {
     "costUsd": 0.0000715,
     "usage": {"inputTokens": 600, "cacheReadTokens": 400, "cacheWriteTokens": 20, "outputTokens": 10},
 }
+unpriced_ledger = {
+    "jobId": "job-unpriced-1", "finishedAtMs": finished_at,
+    "model": "experimental-ledger-model", "status": "DONE", "cwd": "/work/codex-app",
+    "usage": {"inputTokens": 3, "cacheReadTokens": 4, "cacheWriteTokens": 5, "outputTokens": 6},
+}
 with open(ledger_path, "w") as f:
     f.write(json.dumps(ledger) + "\n")
+    f.write(json.dumps(unpriced_ledger) + "\n")
 PY
 python3 -I - "$USD_PI/workspace/session.jsonl" <<'PY'
 import os
@@ -168,15 +174,17 @@ contains '  project=/work/pi-app usd=0.000217500'
 contains '  project=/work/codex-app usd=0.000071500'
 contains 'logs total pricedUsd=0.004603750 unpricedRecords=1'
 contains '  model=codex/gpt-6-luna usd=0.000071500 input=600 cacheRead=400 cacheWrite=20 output=10'
+contains '  model=experimental-ledger-model unpriced input=3 cacheRead=4 cacheWrite=5 output=6'
+contains '  project=/work/codex-app usd=0.000071500 unpricedRecords=1 unpriced=experimental-ledger-model(input=3,cacheRead=4,cacheWrite=5,output=6)'
 contains 'delegate ledger (separate total; may overlap log rows from the same jobs):'
-contains 'delegate ledger total recordedUsd=0.000071500 entries=1 unpricedRecords=0'
+contains 'delegate ledger total recordedUsd=0.000071500 entries=2 unpricedRecords=1'
 case "$OUT" in *2000000*|*10000000*|*1000000*) fail "USD report used records before --since" ;; esac
 
 # XDG_CACHE_HOME isolates the default delegate ledger location too.
 mkdir -p "$T/xdg-cache/agents"
 cp "$USD_LEDGER" "$T/xdg-cache/agents/delegate-cost.jsonl"
 OUT="$(AGENT_COST_ROOT="$USD_CLAUDE" AGENT_COST_PI_ROOT="$USD_PI" AGENT_COST_CODEX_ROOT="$USD_CODEX" XDG_CACHE_HOME="$T/xdg-cache" DELEGATE_COST_LEDGER= python3 -I "$BIN" --usd --since 2026-11-01)" || fail "USD report with XDG ledger path exited non-zero"
-contains 'delegate ledger total recordedUsd=0.000071500 entries=1 unpricedRecords=0'
+contains 'delegate ledger total recordedUsd=0.000071500 entries=2 unpricedRecords=1'
 
 # A file argument or stdin remain legacy mode unless --usd is selected.
 EXPECT="$SUBLINE

@@ -121,7 +121,11 @@ GH_STUB
 cat >"$FW_CLAUDE" <<'CLAUDE_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/claude.log"
-[ "${CLAUDE_FAIL:-0}" != 1 ] || { echo 'claude stub failure' >&2; exit 1; }
+if [ "${CLAUDE_FAIL:-0}" = 1 ]; then
+  [ "${CLAUDE_FAIL_WITH_OUTPUT:-0}" != 1 ] || printf '%s' "${CLAUDE_JSON:-[]}"
+  echo 'claude stub failure' >&2
+  exit 1
+fi
 if [ "${CLAUDE_NONBLOCKING:-0}" = 1 ]; then
   python3 -c 'import fcntl,os
 flags = fcntl.fcntl(1, fcntl.F_GETFL)
@@ -303,8 +307,8 @@ TREE
   GH_TREE_SHA=aaaaaaaa GH_SHA_FAIL=0 GH_SHA_ERROR= GH_TREE_ERROR=
   export GH_TREE_SHA GH_SHA_FAIL GH_SHA_ERROR GH_TREE_ERROR
   GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL= GH_DIFF_406_PR=
-  GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT= SSH_STDERR=
-  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_DIFF_406_PR GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
+  GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_FAIL_WITH_OUTPUT=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT= SSH_STDERR=
+  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_DIFF_406_PR GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_FAIL_WITH_OUTPUT CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
   GH_TICKET_STATES= GH_TICKET_FAIL=0 GH_TICKET_BAD=0 GH_TICKET_MISSING=0 GH_TICKET_OMIT=
   export GH_TICKET_STATES GH_TICKET_FAIL GH_TICKET_BAD GH_TICKET_MISSING GH_TICKET_OMIT
   FW_DELEGATE_DIR="$T/delegate-jobs"
@@ -480,7 +484,7 @@ run_fg 77 --paths docs/tui.md
 assert_rc 0 'valid box sessions need one probe'
 [ "$(grep -cF 'FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "valid box sessions use one full probe: $(cat "$T/ssh.log")"
 [ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 1 ] || fail "valid box sessions have no retry: $(cat "$T/ssh.log")"
-grep -qF 'delegate session list --json 2>/dev/null' "$T/ssh.log" || fail "box delegate command is present: $(cat "$T/ssh.log")"
+grep -qF '| cat" && echo DSESSJSONOK' "$T/ssh.log" || fail "box delegate success marker depends on command success: $(cat "$T/ssh.log")"
 
 # Reproduce a command that makes its inherited stdout pipe nonblocking, then
 # make a large delegate response contend with a throttled reader.
@@ -1445,6 +1449,23 @@ run_fg 77 --paths docs/tui.md
 assert_error 'ssh command failure' 'ERROR ssh box exit 255: ssh stub failure '
 [ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 1 ] || fail "failed probe runs ssh once: $(cat "$T/ssh.log")"
 
+# Keep the Mac probe healthy so this exercises the box command failure path.
+reset_case
+cat >"$T/claude-ok" <<'CLAUDE_OK'
+#!/usr/bin/env bash
+printf '[]'
+CLAUDE_OK
+chmod +x "$T/claude-ok"
+FW_CLAUDE="$T/claude-ok"
+PATH="$T/stubs:$ORIGINAL_PATH"
+SSH_EXEC=1 CLAUDE_FAIL=1 CLAUDE_FAIL_WITH_OUTPUT=1
+export FW_CLAUDE PATH SSH_EXEC CLAUDE_FAIL CLAUDE_FAIL_WITH_OUTPUT
+run_fg 77 --paths docs/tui.md
+assert_rc 3 'box Claude command failure'
+assert_contains 'ERROR box claude agents' 'box Claude command failure output'
+assert_no_grant 'box Claude command failure'
+FW_CLAUDE="$T/stubs/claude"
+export FW_CLAUDE
 reset_case
 SSH_OUT='broken markers'
 export SSH_OUT
