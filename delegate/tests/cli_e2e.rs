@@ -1471,7 +1471,7 @@ fn live_background_child_suppresses_idle_until_it_exits() {
     }
 
     let e = Env::new("background-child-idle");
-    let idle_ms: u64 = 800;
+    let idle_ms: u64 = 2_000;
     // The supervisor checks a live child every quarter window (job.rs
     // child_process_check_interval), so the idle clock is at most this stale.
     let check_ms = (idle_ms / 4) as f64;
@@ -1511,32 +1511,33 @@ fn live_background_child_suppresses_idle_until_it_exits() {
             None => false,
         },
     );
-    // The ticket's check: the live child keeps the job running for a full idle
-    // window after its PID is published. The backend then stays quiet until the
-    // child is released, so only the watchdog may end the job.
+    // The ticket's check: the job outlives idle_ms while the child is alive.
+    // The fake published the pid after the turn-ending result, and the child
+    // is blocked on the fifo, so only the watchdog could end the job. Each
+    // record must be RUNNING with an idle clock the live-child check keeps
+    // below the window; the wait ends once the record shows the job has run
+    // for two windows.
     let window = idle_ms as f64;
-    let held_since = Instant::now();
-    until(
-        "the job remains live for an idle window after child start",
-        || {
-            assert!(alive(bg_pid), "background command ended before its release");
-            let Some(rec) = read_record(&id) else {
-                return false;
-            };
-            assert_eq!(
-                rec["status"], "RUNNING",
-                "job ended while its child was alive: {rec}"
-            );
-            let age = rec["progress"]["lastEventAgeMs"]
-                .as_f64()
-                .expect("progress carries lastEventAgeMs");
-            assert!(
-                age < window,
-                "live child did not refresh the idle clock: {rec}"
-            );
-            held_since.elapsed() >= Duration::from_millis(idle_ms)
-        },
-    );
+    until("the job runs for two idle windows", || {
+        assert!(alive(bg_pid), "background command ended before its release");
+        let Some(rec) = read_record(&id) else {
+            return false;
+        };
+        assert_eq!(
+            rec["status"], "RUNNING",
+            "job ended while its child was alive: {rec}"
+        );
+        let age = rec["progress"]["lastEventAgeMs"]
+            .as_f64()
+            .expect("progress carries lastEventAgeMs");
+        assert!(
+            age < window,
+            "live child did not refresh the idle clock: {rec}"
+        );
+        rec["progress"]["elapsedMs"]
+            .as_f64()
+            .is_some_and(|ms| ms > 2.0 * window)
+    });
     let held = e.delegate(&["status", &id], None);
     assert_eq!(held.status.code(), Some(0));
     let held_text = String::from_utf8_lossy(&held.stdout);
