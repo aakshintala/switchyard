@@ -9,6 +9,7 @@ use crate::types::{
     Usage,
 };
 use crate::util::{clamp_wait, random_uuid};
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -77,6 +78,8 @@ struct JobState {
     /// When the wall budget killed the child; arms the SIGKILL escalation and
     /// marks the wall wording. Set only on wall expiry; cleared by a user cancel.
     kill_at: Option<Instant>,
+    /// The idle duration when the watchdog decided to stall-kill the job.
+    idle_at_kill: Option<Duration>,
     /// The escalation already ran; it fires at most once per job.
     escalated: bool,
     output: Option<RunOutput>,
@@ -161,7 +164,7 @@ fn child_process_check_interval(window: Duration) -> Duration {
     )
 }
 
-/// Check for live commands in the backend's isolated process group, excluding the backend itself.
+/// Check for live commands in the backend's process tree or isolated process group.
 fn process_group_has_live_child(group: libc::pid_t) -> bool {
     let Ok(output) = Command::new("ps")
         .args([
@@ -177,21 +180,48 @@ fn process_group_has_live_child(group: libc::pid_t) -> bool {
     process_group_has_live_child_in_ps(&String::from_utf8_lossy(&output.stdout), group)
 }
 
-/// Parse `ps` output and check for a live process in the backend's group.
+/// Parse one `ps` snapshot and find live descendants or reparented members of the group.
 fn process_group_has_live_child_in_ps(ps: &str, group: libc::pid_t) -> bool {
-    ps.lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
+    let mut children = HashMap::<libc::pid_t, Vec<(libc::pid_t, &str)>>::new();
+    let mut same_group_has_live_child = false;
+    for line in ps.lines() {
+        let mut fields = line.split_whitespace();
+        let Some((pid, ppid, pgid, state)) = fields.next().and_then(|pid| {
             Some((
-                fields.next()?.parse::<libc::pid_t>().ok()?,
+                pid.parse::<libc::pid_t>().ok()?,
                 fields.next()?.parse::<libc::pid_t>().ok()?,
                 fields.next()?.parse::<libc::pid_t>().ok()?,
                 fields.next()?,
             ))
-        })
-        .any(|(pid, _ppid, pgid, state)| {
-            pgid == group && pid != group && !state.starts_with('Z') && !state.starts_with('z')
-        })
+        }) else {
+            continue;
+        };
+        if pgid == group && pid != group && !is_zombie(state) {
+            same_group_has_live_child = true;
+        }
+        children.entry(ppid).or_default().push((pid, state));
+    }
+
+    let mut pending = vec![group];
+    let mut visited = HashSet::from([group]);
+    while let Some(parent) = pending.pop() {
+        let Some(descendants) = children.get(&parent) else {
+            continue;
+        };
+        for &(pid, state) in descendants {
+            if pid != group && !is_zombie(state) {
+                return true;
+            }
+            if visited.insert(pid) {
+                pending.push(pid);
+            }
+        }
+    }
+    same_group_has_live_child
+}
+
+fn is_zombie(state: &str) -> bool {
+    state.starts_with('Z') || state.starts_with('z')
 }
 
 fn ms(v: f64) -> Duration {
@@ -227,7 +257,7 @@ fn describe_stall_progress(job: &JobState, deps: &JobDeps) -> String {
             running.as_secs_f64().round()
         )]
     } else {
-        let idle = job.last_event.elapsed();
+        let idle = job.idle_at_kill.unwrap_or_else(|| job.last_event.elapsed());
         let window = idle_window_ms(job, deps).unwrap_or_default() / 1000.0;
         vec![format!(
             "Idle watchdog killed this job: idle {:.1}s (window {window:.1}s), running {:.1}s.",
@@ -337,6 +367,7 @@ impl JobHandle {
                     last_event: now,
                     termination: None,
                     kill_at: None,
+                    idle_at_kill: None,
                     escalated: false,
                     output: None,
                 },
@@ -474,6 +505,8 @@ impl JobHandle {
         if wall {
             job.kill_at = Some(now);
             job.finalize_abort.store(true, Ordering::SeqCst);
+        } else {
+            job.idle_at_kill = Some(now.saturating_duration_since(job.last_event));
         }
         (job.kill)();
         self.cv.notify_all();
