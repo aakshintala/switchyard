@@ -1136,6 +1136,8 @@ run_build --from review
 [ "$RC" -eq 0 ] || fail "round-one-unreviewed-review proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "round-one-unreviewed-review"
 grep -q "^review-start|" "$T/calls.log" || fail "round-one-unreviewed-review starts review"
+# The completed first review resets the count, so the gate fix spends no review round (tkt-fix ROUND-LIMIT).
+expect_state round 0 "round-one-unreviewed-review resets the fix-round count"
 
 setup_case round-one-unreviewed-gate
 bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "round-one-unreviewed-gate: seed round"

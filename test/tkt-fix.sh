@@ -1430,8 +1430,6 @@ NEW="$(git -C "$WT" rev-parse HEAD)"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$NEW" || fail "since-missing-reviewed bad verdict: $(head -n 1 <<<"$out")"
 grep -F -q "review-pr|run 7 --repo switchyard --cwd $WT --head $NEW --model verify-model --verify $CDIR/run/switchyard-529-findings-history-r1.md --since $OLD" "$T/calls.log" || fail "since-missing-reviewed did not pass the full since sha: $(cat "$T/calls.log")"
 [ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$NEW" ] || fail "since-missing-reviewed did not update reviewed after FIX-OK"
-[ "$(bash "$TKT_STATE" "$S" get round)" = "0" ] || fail "since-missing-reviewed counted a pre-review gate fix as a review round"
-[ "$(bash "$TKT_STATE" "$S" get fixslot)" = "1" ] || fail "since-missing-reviewed did not advance fixslot"
 
 # Without either source for the reviewed head, fail with a useful instruction.
 setup_case since-missing

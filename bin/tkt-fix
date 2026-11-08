@@ -130,8 +130,6 @@ t require repo issue branch worktree run
 repo="$(t get repo)"; issue="$(t get issue)"; set_namebase "$repo" "$issue"; branch="$(t get branch)"
 worktree="$(t get worktree)"; run="$(t get run)"
 reviewed="$(t get reviewed 2>/dev/null || true)"
-reviewed_empty_at_start=0
-[ -n "$reviewed" ] || reviewed_empty_at_start=1
 verify_since="$reviewed"
 if [ -n "$since" ]; then
   since_full="$(git -C "$worktree" rev-parse --verify "${since}^{commit}" 2>/dev/null)" || {
@@ -579,10 +577,7 @@ if [ "$recover_unpushed" -eq 1 ]; then
     gerr="$(grep -i -m 5 -E 'error|panick' "$recovery_log" || true)"
     if [ -n "$gerr" ]; then gate_digest="$gate_digest"$'\n'"$gerr"; fi
     printf 'TKT tkt-gate FAIL rc=%s log=%s\n%s\n' "$gate_rc" "$recovery_log" "$gate_digest" >"$tmp/gate.out"
-    if [ "$reviewed_empty_at_start" -eq 0 ]; then
-      round=$((round + 1)); t set round "$round"
-    fi
-    close_slot "$knum"
+    round=$((round + 1)); t set round "$round"; close_slot "$knum"
     pass tkt-gate "$tmp/gate.out" 1 "$tmp/recovery-gate.err"
   fi
   if ! push_out="$(git -C "$worktree" push origin "$branch" 2>&1)"; then emit "PUSH-FAIL" 1 "$push_out"; fi
@@ -645,16 +640,12 @@ fi
 grc=0
 "$tktgate" "$state" --checks-only --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
-if [ "$grc" -eq 1 ]; then
-  if [ "$reviewed_empty_at_start" -eq 0 ]; then round=$((round + 1)); t set round "$round"; fi
-  close_slot "$knum"
-fi # only a fix after a reviewed head spends a review round
+[ "$grc" -eq 1 ] && { round=$((round + 1)); t set round "$round"; close_slot "$knum"; } # a gate-failed round counts
 if [ "$grc" -ne 0 ]; then
   if [ "$no_commits" -eq 1 ]; then printf 'no commits\n' >>"$tmp/gate.out"; fi
   pass tkt-gate "$tmp/gate.out" "$grc" "$tmp/gate.err"
 fi
-if [ "$reviewed_empty_at_start" -eq 0 ]; then round=$((round + 1)); t set round "$round"; fi
-close_slot "$knum"
+round=$((round + 1)); t set round "$round"; close_slot "$knum"
 
 # Digest lines after the verdict: the CI notes, and the concerns file the
 # orchestrator reads before it accepts the verdict.
