@@ -9,6 +9,7 @@ use crate::types::{
     Usage,
 };
 use crate::util::{clamp_wait, random_uuid};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -67,6 +68,7 @@ struct JobState {
     stage: Stage,
     spec: Arc<JobSpec>,
     kill: Arc<dyn Fn() + Send + Sync>,
+    process_group: Option<libc::pid_t>,
     finalize_abort: Arc<AtomicBool>,
     started: Instant,
     progress: ProgressSnapshotRaw,
@@ -148,6 +150,41 @@ fn continue_prompt(status: u16) -> String {
 
 fn non_empty(s: Option<&String>) -> Option<&String> {
     s.filter(|s| !s.is_empty())
+}
+
+const CHILD_PROCESS_CHECK_MAX_MS: u64 = 1_000;
+
+fn child_process_check_interval(window: Duration) -> Duration {
+    (window / 4).clamp(
+        Duration::from_millis(1),
+        Duration::from_millis(CHILD_PROCESS_CHECK_MAX_MS),
+    )
+}
+
+/// Check for live commands in the backend's isolated process group, excluding the backend itself.
+fn process_group_has_live_child(group: libc::pid_t) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-A", "-o", "pid=", "-o", "pgid=", "-o", "stat="])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((
+                fields.next()?.parse::<libc::pid_t>().ok()?,
+                fields.next()?.parse::<libc::pid_t>().ok()?,
+                fields.next()?,
+            ))
+        })
+        .any(|(pid, pgid, state)| {
+            pgid == group && pid != group && !state.starts_with('Z') && !state.starts_with('z')
+        })
 }
 
 fn ms(v: f64) -> Duration {
@@ -272,6 +309,7 @@ impl JobHandle {
         {
             let mut st = self.lock();
             let spawned = self.deps.backend.run(&spec);
+            let process_group = spawned.process_group;
             drive = spawned.drive;
             let session_id = spawned.session_id;
             let now = Instant::now();
@@ -282,6 +320,7 @@ impl JobHandle {
                     stage: Stage::Running,
                     spec: Arc::clone(&spec),
                     kill: Arc::from(spawned.kill),
+                    process_group,
                     finalize_abort: Arc::new(AtomicBool::new(false)),
                     started: now,
                     progress: ProgressSnapshotRaw {
@@ -378,6 +417,7 @@ impl JobHandle {
             spec.argv = argv;
             let mut spawned = self.deps.backend.run(&spec);
             job.kill = Arc::from(std::mem::replace(&mut spawned.kill, Box::new(|| {})));
+            job.process_group = spawned.process_group;
             job.stage = Stage::Running;
             job.last_event = Instant::now();
             job.progress.phase = None;
@@ -435,6 +475,9 @@ impl JobHandle {
     fn watchdog(&self, job_id: &str) {
         let heartbeat = Duration::from_millis(self.deps.heartbeat_ms);
         let kill_grace = Duration::from_millis(self.deps.kill_grace_ms);
+        let mut checked_process_group = None;
+        let mut child_is_live = false;
+        let mut next_child_check = Instant::now();
         let mut next_heartbeat = Instant::now() + heartbeat;
         let mut st = self.lock();
         loop {
@@ -489,8 +532,46 @@ impl JobHandle {
                     spec.idle_ms.unwrap_or(self.deps.idle_ms)
                 };
                 if let Some(w) = window {
-                    let due = job.last_event + ms(w);
-                    if now >= due {
+                    let window = ms(w);
+                    let group = if job.progress.phase.as_deref() == Some("running_tool") {
+                        None
+                    } else {
+                        job.process_group
+                    };
+                    if checked_process_group != group {
+                        checked_process_group = group;
+                        child_is_live = false;
+                    }
+                    let mut checked_child_now = false;
+                    if let Some(group) = group {
+                        let check_interval = child_process_check_interval(window);
+                        if child_is_live && now >= next_child_check {
+                            child_is_live = process_group_has_live_child(group);
+                            checked_child_now = true;
+                            // A live child keeps the job active; its exit starts a fresh idle window.
+                            job.last_event = now;
+                            if child_is_live {
+                                next_child_check = now + check_interval;
+                            }
+                        }
+                        let due = job.last_event + window;
+                        if !child_is_live && !checked_child_now {
+                            let check_at = due.checked_sub(check_interval).unwrap_or(now);
+                            if now >= check_at {
+                                child_is_live = process_group_has_live_child(group);
+                                if child_is_live {
+                                    job.last_event = now;
+                                    next_child_check = now + check_interval;
+                                }
+                            } else {
+                                wake_at = wake_at.min(check_at);
+                            }
+                        }
+                    }
+                    let due = job.last_event + window;
+                    if child_is_live {
+                        wake_at = wake_at.min(next_child_check);
+                    } else if now >= due {
                         self.terminate_watchdog_kill(job, false, now);
                     } else {
                         wake_at = wake_at.min(due);

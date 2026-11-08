@@ -21,7 +21,7 @@ mv "$d/stdin.$$" "$d/stdin.txt"
 # writing a line, and the fake acknowledges it; otherwise the turn is a short
 # sleep. The hold below ends only on `go`, a removed directory, or a dead
 # parent, so a held job stays RUNNING until the test releases it.
-pause() { if [ -n "$FAKE_TICK" ]; then read -r _ < "$FAKE_TICK" && echo >> "$d/acks"; else sleep 0.05; fi; }
+pause() { if [ -n "$FAKE_TICK" ]; then read -r _ < "$FAKE_TICK" && echo >> "$d/acks"; elif [ -n "$FAKE_NO_CHILD" ]; then :; else sleep 0.05; fi; }
 hold() { while [ ! -e "$rel" ] && [ -d "$d" ]; do kill -0 "$p" 2>/dev/null || exit 0; pause; done; }
 # Stays RUNNING behind a grandchild: `sleep` inherits the agent's process group, so
 # killing only the agent would leave it behind.
@@ -36,10 +36,24 @@ case "$* $pt" in
     exit 0
     ;;
 esac
+case "$* $pt" in
+  *BACKGROUND*)
+    (
+      while [ ! -e "$d/background-done" ]; do sleep 0.02; done
+      : > "$d/background-exited"
+    ) &
+    bg=$!
+    echo "$bg" > "$d/background.pid"
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-background"}'
+    printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"turn ended","session_id":"s-background"}'
+    wait "$bg"
+    while :; do :; done
+    ;;
+esac
 # Silent jobs emit nothing, so the model-idle window is what kills them.
 case "$* $pt" in
   *SILENT*)
-    hold
+    while [ ! -e "$rel" ] && [ -d "$d" ]; do :; done
     exit 0
     ;;
 esac
@@ -1418,12 +1432,66 @@ fn tool_idle_stalls_a_quiet_tool_call() {
     let id = e.ok(
         &["run", "--model", "composer-2.5", "--tool-idle-ms", "300"],
         "SLOW",
-        &[],
+        &[("FAKE_NO_CHILD", "1")],
     );
     let done = e.wait_terminal(&id);
     assert_eq!(done["status"], "STALLED");
     let text = done["result"]["text"].as_str().unwrap();
     assert!(text.contains("Idle watchdog killed this job"), "{text}");
+}
+
+#[test]
+fn live_background_child_suppresses_idle_until_it_exits() {
+    let e = Env::new("background-child-idle");
+    let idle_ms = 2_000;
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--idle-ms",
+            &idle_ms.to_string(),
+        ],
+        "BACKGROUND",
+        &[],
+    );
+    let pid_file = e.dir.join("background.pid");
+    until("background command starts", || pid_file.is_file());
+    let bg_pid: i64 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    // The child stays alive for more than twice the idle window.
+    let held_until = Instant::now() + Duration::from_millis(idle_ms * 2 + 100);
+    while Instant::now() < held_until {
+        assert!(alive(bg_pid), "background command ended before its release");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let running = e.delegate(&["status", &id], None);
+    assert_eq!(running.status.code(), Some(0));
+    let running_text = String::from_utf8_lossy(&running.stdout);
+    assert!(
+        running_text.starts_with(&format!("{id}: RUNNING")),
+        "{running_text}"
+    );
+
+    std::fs::write(e.dir.join("background-done"), "").unwrap();
+    until("background command exits", || {
+        e.dir.join("background-exited").is_file() && !alive(bg_pid)
+    });
+    std::thread::sleep(Duration::from_millis(idle_ms - 100));
+    let still_waiting = e.delegate(&["status", &id], None);
+    assert_eq!(still_waiting.status.code(), Some(0));
+    let still_waiting_text = String::from_utf8_lossy(&still_waiting.stdout);
+    assert!(
+        still_waiting_text.starts_with(&format!("{id}: RUNNING")),
+        "{still_waiting_text}"
+    );
+
+    let done = e.wait_terminal(&id);
+    assert_eq!(done["status"], "STALLED");
 }
 
 #[test]

@@ -306,6 +306,7 @@ pub(crate) fn killer_with(
 pub(crate) fn spawn_failed(msg: &str) -> Spawned {
     let msg = msg.to_string();
     Spawned {
+        process_group: None,
         kill: Box::new(|| {}),
         session_id: None,
         drive: Box::new(move |_| BackendResult {

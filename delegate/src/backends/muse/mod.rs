@@ -214,6 +214,7 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     let mut child = started.child;
     let reaped_wall = std::sync::Arc::clone(&reaped);
     Spawned {
+        process_group: Some(pid),
         kill: super::killer(pid, reaped_k),
         session_id: launched_session.clone(),
         drive: Box::new(move |on| {
