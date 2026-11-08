@@ -189,13 +189,17 @@ impl Env {
             .to_string()
     }
 
+    fn jobs_dir(&self) -> PathBuf {
+        self.dir.join("xdg-cache/delegate/jobs")
+    }
+
     fn record(&self, id: &str) -> Value {
-        let p: PathBuf = self.dir.join("delegate-jobs").join(format!("{id}.json"));
+        let p = self.jobs_dir().join(format!("{id}.json"));
         serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
     }
 
     fn write_record(&self, id: &str, record: &Value) {
-        let path = self.dir.join("delegate-jobs").join(format!("{id}.json"));
+        let path = self.jobs_dir().join(format!("{id}.json"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_vec(record).unwrap()).unwrap();
     }
@@ -263,8 +267,7 @@ fn run_returns_id_while_job_runs_then_it_finishes() {
     let locator = e.dir.join("xdg-cache/delegate/locators").join(&id);
     assert_eq!(
         std::fs::read_to_string(&locator).unwrap(),
-        e.dir
-            .join("delegate-jobs")
+        e.jobs_dir()
             .join(format!("{id}.json"))
             .display()
             .to_string()
@@ -295,8 +298,7 @@ fn run_returns_id_while_job_runs_then_it_finishes() {
     assert_eq!(done["resume"]["sessionId"], "s-1");
     assert_eq!(
         std::fs::read_to_string(&locator).unwrap(),
-        e.dir
-            .join("delegate-jobs")
+        e.jobs_dir()
             .join(format!("{id}.json"))
             .display()
             .to_string()
@@ -961,13 +963,28 @@ fn ack_without_job_ids_exits_2() {
 #[test]
 fn ack_without_absolute_cache_root_exits_2_without_writing() {
     let e = Env::new("ack-no-cache-root");
-    let id = e.run("known report");
-    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let jobs_dir = e.dir.join("ack-jobs");
+    let jobs_dir = jobs_dir.to_str().unwrap();
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "known report",
+        &[("DELEGATE_JOBS_DIR", jobs_dir)],
+    );
+    let wait = e.delegate_env(
+        &["watch", &id, "--timeout", "10"],
+        None,
+        &[("DELEGATE_JOBS_DIR", jobs_dir)],
+    );
+    assert_eq!(wait.status.code(), Some(0));
 
     let out = e.delegate_env(
         &["ack", &id],
         None,
-        &[("XDG_CACHE_HOME", "relative/cache"), ("HOME", "")],
+        &[
+            ("DELEGATE_JOBS_DIR", jobs_dir),
+            ("XDG_CACHE_HOME", "relative/cache"),
+            ("HOME", ""),
+        ],
     );
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no absolute cache root"));
@@ -977,15 +994,29 @@ fn ack_without_absolute_cache_root_exits_2_without_writing() {
 #[test]
 fn ack_marker_write_failure_exits_1() {
     let e = Env::new("ack-write-failure");
-    let id = e.run("known report");
-    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let jobs_dir = e.dir.join("ack-jobs");
+    let jobs_dir = jobs_dir.to_str().unwrap();
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "known report",
+        &[("DELEGATE_JOBS_DIR", jobs_dir)],
+    );
+    let wait = e.delegate_env(
+        &["watch", &id, "--timeout", "10"],
+        None,
+        &[("DELEGATE_JOBS_DIR", jobs_dir)],
+    );
+    assert_eq!(wait.status.code(), Some(0));
     let cache_file = e.dir.join("cache-is-a-file");
     std::fs::write(&cache_file, "not a directory").unwrap();
 
     let out = e.delegate_env(
         &["ack", &id],
         None,
-        &[("XDG_CACHE_HOME", cache_file.to_str().unwrap())],
+        &[
+            ("DELEGATE_JOBS_DIR", jobs_dir),
+            ("XDG_CACHE_HOME", cache_file.to_str().unwrap()),
+        ],
     );
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot write read marker"));
@@ -1847,7 +1878,7 @@ fn cancel_unknown_job_exits_2() {
 }
 
 #[test]
-fn cancel_finds_a_record_under_another_tmpdir() {
+fn status_finds_a_record_written_by_another_process_with_a_different_tmpdir() {
     let e = Env::new("x-cancel");
     let inherited_cache = e.dir.join("inherited-cache-is-a-file");
     std::fs::write(&inherited_cache, "obstructed inherited cache root").unwrap();
@@ -1914,8 +1945,7 @@ fn cancel_finds_a_record_under_another_tmpdir() {
     let locator = e.dir.join("xdg-cache/delegate/locators").join(&id);
     assert_eq!(
         std::fs::read_to_string(locator).unwrap(),
-        e.dir
-            .join("delegate-jobs")
+        e.jobs_dir()
             .join(format!("{id}.json"))
             .display()
             .to_string()
@@ -2010,8 +2040,11 @@ fn watch_and_resume_find_a_record_under_another_tmpdir() {
         String::from_utf8_lossy(&out.stdout)
     );
     let b = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    let b_path = other.join("delegate-jobs").join(format!("{b}.json"));
-    assert!(b_path.is_file(), "resume creates its record under caller B");
+    let b_path = e.jobs_dir().join(format!("{b}.json"));
+    assert!(
+        b_path.is_file(),
+        "resume writes its record to the durable cache"
+    );
     assert_eq!(
         std::fs::read_to_string(e.dir.join("xdg-cache/delegate/locators").join(&b)).unwrap(),
         b_path.display().to_string() + "\n"
@@ -2021,6 +2054,13 @@ fn watch_and_resume_find_a_record_under_another_tmpdir() {
     let done: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(done["status"], "DONE");
     assert_eq!(e.record(&a)["supersededBy"], b.as_str());
+    assert!(
+        !other
+            .join("delegate-jobs")
+            .join(format!("{b}.json"))
+            .exists(),
+        "resume does not create a legacy temp copy"
+    );
     assert!(
         !other
             .join("delegate-jobs")
@@ -2168,7 +2208,7 @@ fn unknown_job_names_the_searched_dirs() {
 fn legacy_record_without_locator_is_read_without_migration() {
     let e = Env::new("legacy-record");
     let id = "legacy-no-locator";
-    let record = e.dir.join("delegate-jobs").join(format!("{id}.json"));
+    let record = e.jobs_dir().join(format!("{id}.json"));
     std::fs::create_dir_all(record.parent().unwrap()).unwrap();
     std::fs::write(&record, r#"{"status":"DONE"}"#).unwrap();
 

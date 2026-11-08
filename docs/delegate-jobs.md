@@ -7,9 +7,10 @@
 Readers check these sources in order:
 
 1. `DELEGATE_JOBS_DIR`, when it is set and non-empty.
-2. The caller's `$TMPDIR/delegate-jobs` (the OS temp directory when `TMPDIR` is unset).
-3. `/tmp/delegate-jobs`.
-4. The per-user locator for the job ID.
+2. Otherwise, the active per-user cache's `delegate/jobs` directory: `${XDG_CACHE_HOME}/delegate/jobs` when `XDG_CACHE_HOME` is absolute, else `$HOME/.cache/delegate/jobs`.
+3. The caller's legacy `$TMPDIR/delegate-jobs` (the OS temp directory when `TMPDIR` is unset).
+4. `/tmp/delegate-jobs`.
+5. The per-user locator for the job ID.
 
 The locator fills misses only. An earlier regular file stays the winner, even if later reading or parsing fails.
 
@@ -21,7 +22,7 @@ An empty `DELEGATE_JOBS_DIR` is ignored. A relative value resolves against the c
 
 ## Duplicate directories
 
-The three legacy directories are searched once when two sources name the same directory. The first position wins. If `DELEGATE_JOBS_DIR` equals the caller's `$TMPDIR/delegate-jobs`, the list is that directory, then `/tmp/delegate-jobs`, then the locator.
+The writer directory, the caller's legacy `$TMPDIR/delegate-jobs`, and `/tmp/delegate-jobs` are searched once when two sources name the same directory. The first position wins. If `DELEGATE_JOBS_DIR` equals the caller's `$TMPDIR/delegate-jobs`, the list is that directory, then `/tmp/delegate-jobs`, then the locator. Without an override, the cache directory is first, followed by the legacy temp directories.
 
 ## Locator format and lifecycle
 
@@ -37,7 +38,7 @@ Missing, unreadable or malformed locators are lookup misses. A valid locator who
 
 ## Writers
 
-New records stay in the writer directory (`jobs_dir` / `job_record_path`): `DELEGATE_JOBS_DIR` when set, resolved as above, else the supervisor's `$TMPDIR/delegate-jobs`. The locator does not change new-record placement.
+New records stay in the writer directory (`jobs_dir` / `job_record_path`): `DELEGATE_JOBS_DIR` when set, resolved as above, else `${XDG_CACHE_HOME}/delegate/jobs` when `XDG_CACHE_HOME` is absolute, or `$HOME/.cache/delegate/jobs` otherwise. The legacy `$TMPDIR/delegate-jobs` remains searchable so records written by older versions can still be found. The locator does not change new-record placement.
 
 Updates, including cancel and dead-supervisor fallbacks, write to the path where the reader found the record (`record_path`). They fall back to `job_record_path` when no record exists. Resume reads the old record through the same lookup and links the new record to it.
 

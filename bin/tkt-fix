@@ -94,6 +94,34 @@ slot_owner() {
   return 0
 }
 
+# stale_locator_target ID: success only when a well-formed per-user locator
+# names a record file that no longer exists. Used to distinguish a lost resume
+# record from other delegate failures without changing the owning-slot guard.
+stale_locator_target() {
+  local id="$1" cache_root locator target
+  case "$id" in ""|*/*) return 1 ;; esac
+  cache_root="${XDG_CACHE_HOME:-}"
+  case "$cache_root" in
+    /*) ;;
+    *)
+      case "${HOME:-}" in
+        /*) cache_root="$HOME/.cache" ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  locator="$cache_root/delegate/locators/$id"
+  [ -f "$locator" ] || return 1
+  target=""
+  IFS= read -r target <"$locator" || [ -n "$target" ] || return 1
+  case "$target" in /*) ;; *) return 1 ;; esac
+  local extra=""
+  if IFS= read -r extra < <(tail -n +2 "$locator") || [ -n "$extra" ]; then
+    return 1
+  fi
+  [ ! -f "$target" ]
+}
+
 lockdir="$state.lock"
 if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-fix: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
@@ -563,6 +591,13 @@ else
   fi
   t set fixopen "$knum" # this job's commits may land ahead of head
   jrc=0; "$tktjob" "$state" "${args[@]}" >"$tmp/job.out" 2>"$tmp/job.err" || jrc=$?
+  if [ "$jrc" -ne 0 ] && [ -n "$resume" ] \
+    && grep -Fq -- "unknown job $resume" "$tmp/job.err" \
+    && stale_locator_target "$resume"; then
+    emit "UNKNOWN tool=tkt-job" 3 \
+      "delegate reports that resumed job $resume has no record and its locator target is gone." \
+      "Recovery: triage owning slot $slot before deciding whether it may start a fresh job; the slot remains owned by $resume."
+  fi
   if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
   if [ "$jrc" -ne 0 ]; then
     aborted_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"

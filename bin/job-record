@@ -2,8 +2,9 @@
 # job-record: print the path of one job record <id>.json.
 # The record is the first regular file found in the documented lookup order:
 # DELEGATE_JOBS_DIR (when non-empty; a relative value resolves against the
-# current directory), then $TMPDIR/delegate-jobs, the system directory, and
-# finally the per-user locator.
+# current directory), else the active per-user cache's delegate/jobs, then
+# the legacy $TMPDIR/delegate-jobs and system directory, and finally the
+# per-user locator.
 # Duplicate directories are searched once, at the first position. Prints the
 # winning path, newline-terminated, exit 0; exit 1 with no output when no
 # source holds the record, when the id is empty, or when it holds a slash.
@@ -21,6 +22,17 @@ case "$id" in
   ""|*/*) exit 1 ;;
 esac
 
+cache_root="${XDG_CACHE_HOME:-}"
+case "$cache_root" in
+  /*) ;;
+  *)
+    case "${HOME:-}" in
+      /*) cache_root="$HOME/.cache" ;;
+      *) cache_root="" ;;
+    esac
+    ;;
+esac
+
 sysdir="${JOB_RECORD_SYSTEM_DIR:-/tmp/delegate-jobs}"
 
 tmp="${TMPDIR:-/tmp}"
@@ -31,6 +43,8 @@ if [ -n "${DELEGATE_JOBS_DIR:-}" ]; then
     /*) dirs="$DELEGATE_JOBS_DIR" ;;
     *) dirs="$PWD/$DELEGATE_JOBS_DIR" ;;
   esac
+elif [ -n "$cache_root" ]; then
+  dirs="$cache_root/delegate/jobs"
 fi
 dirs="$dirs
 $tmp/delegate-jobs
@@ -57,16 +71,10 @@ while IFS= read -r dir; do
   fi
 done <<<"$dirs"
 
-cache_root="${XDG_CACHE_HOME:-}"
-case "$cache_root" in
-  /*) locator_dir="$cache_root/delegate/locators" ;;
-  *)
-    case "${HOME:-}" in
-      /*) locator_dir="$HOME/.cache/delegate/locators" ;;
-      *) locator_dir="" ;;
-    esac
-    ;;
-esac
+locator_dir=""
+if [ -n "$cache_root" ]; then
+  locator_dir="$cache_root/delegate/locators"
+fi
 if [ -n "$locator_dir" ]; then
   locator="$locator_dir/$id"
   if [ -f "$locator" ]; then

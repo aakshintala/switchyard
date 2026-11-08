@@ -146,9 +146,12 @@ impl LiveEnv {
     }
 
     fn try_record(&self, id: &str) -> Option<Value> {
-        let raw =
-            std::fs::read_to_string(self.root.join("delegate-jobs").join(format!("{id}.json")))
-                .ok()?;
+        let raw = std::fs::read_to_string(
+            self.root
+                .join("xdg-cache/delegate/jobs")
+                .join(format!("{id}.json")),
+        )
+        .ok()?;
         serde_json::from_str(&raw).ok()
     }
 
