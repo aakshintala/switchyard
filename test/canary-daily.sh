@@ -41,8 +41,8 @@ score=+0.1250
 [ "$harness" != fiber ] || score=fail
 printf '{"harness":"%s","version":"test-version","task":"%s","bench":"2a169abadf188b95f263cb28eae3937da3e576b2","cap_min":%s,"rc":0,"wall_s":12,"wrapup_rc":"0","restored":"none","final_score":"%s","run":"%s"}\n' \
   "$harness" "$task" "$cap" "$score" "$run_dir" >"$run_dir/meta.json"
-printf '{"event":"verify 0.125s FAIL"}\n{"event":"verify 0.250s FAIL"}\n' >"$run_dir/agent.jsonl"
-printf '{"event":"verify 0.500s FAIL"}\n' >"$run_dir/wrapup.jsonl"
+printf '{"output_tail":"MISMATCH on 5 units\\ngrade: FAIL (verification)\\n"}\n{"text":"grade: FAIL (build)"}\n{"source":"print(\\"grade: FAIL (verification)\\")"}\n' >"$run_dir/agent.jsonl"
+printf '{"output_tail":"grade: FAIL (verification)\\n"}\n' >"$run_dir/wrapup.jsonl"
 printf '{"seed":0}\n{"seed":1}\n{"seed":2}\n' >"$run_dir/tasks/$task/scores.jsonl"
 printf '== baseline grade\n'
 printf '== %s: test-version (%s), cap %sm, deadline 00:00:00 UTC\n' "$harness" "$stub_root/bin/$harness" "$cap"

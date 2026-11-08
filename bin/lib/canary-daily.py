@@ -93,8 +93,10 @@ def passing_grades(stdout_path, run_dir, task):
 
 
 def failed_attempt_count(run_dir):
+    # ./grade prints "grade: FAIL (<reason>)" on a failed attempt. Skip the
+    # JSON-escaped quote before it, which is the agent reading grade's source.
     # This may overcount when a harness echoes tool output twice.
-    pattern = re.compile(r"verify +[0-9.]+s +FAIL")
+    pattern = re.compile(r'(?<!\\")grade: FAIL \(')
     count = 0
     for name in ("agent.jsonl", "wrapup.jsonl"):
         path = Path(run_dir) / name
