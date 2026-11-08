@@ -530,6 +530,16 @@ for bad_pr in "0" "042" "42 --self-pr 0"; do
   grep -q '^usage: file-claim' "$T/e-bad-self-pr" || fail "--self-pr $bad_pr prints usage: $(cat "$T/e-bad-self-pr")"
   [ "$(claim_tip "$R")" = "$tip_before" ] || fail "--self-pr $bad_pr stores nothing"
 done
+# --exempt-pr has the same positive-integer validation.
+for bad_pr in "0" "042" "42 --exempt-pr 0"; do
+  tip_before="$(claim_tip "$R")"
+  # shellcheck disable=SC2086
+  FILE_CLAIM_REMOTE="$R" bash "$FC" $CLAIM --exempt-pr $bad_pr b.txt >/dev/null 2>"$T/e-bad-exempt-pr"
+  rc=$?
+  [ "$rc" = 2 ] || fail "--exempt-pr $bad_pr exits 2, got $rc"
+  grep -q '^usage: file-claim' "$T/e-bad-exempt-pr" || fail "--exempt-pr $bad_pr prints usage: $(cat "$T/e-bad-exempt-pr")"
+  [ "$(claim_tip "$R")" = "$tip_before" ] || fail "--exempt-pr $bad_pr stores nothing"
+done
 
 # Other PRs overlap, but do not refuse, even with --self-pr.
 printf '[{"number":42,"changedFiles":1,"files":[{"path":"a.txt"}]},{"number":7,"changedFiles":1,"files":[{"path":"a.txt"}]}]' >"$T/prs3.json"
@@ -539,6 +549,14 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4222 --grant --workt
 # a repeated --self-pr exempts every own PR, not only the last.
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4222 --grant --worktree t:d1 --repo test/repo --self-pr 7 --self-pr 42 a.txt 2>&1)" || fail "two self-prs exit 0: $out"
 [ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "two self-prs exempt both: $out"
+
+# --exempt-pr suppresses the file-level check without recording PR ownership.
+R="$(fresh)"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4222 --grant --worktree t:d1 --repo test/repo --exempt-pr 42 a.txt 2>/dev/null)" || fail "exempt-pr claim exits 0"
+[ "$out" = "$(printf 'OVERLAP a.txt pr#7\nGRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "exempt-pr leaves other PR overlap visible: $out"
+out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4222 --grant --worktree t:d1 --repo test/repo --exempt-pr 7 --exempt-pr 42 a.txt 2>/dev/null)" || fail "repeated exempt-pr flags exit 0"
+[ "$out" = "$(printf 'GRANT a.txt exists\nfile-claim: 1 granted, 0 refused')" ] || fail "repeated exempt-pr flags exempt both PRs: $out"
+awk -F '\t' '$1 == "a.txt" && $2 == "fiber-4222" && $6 == "" { found = 1 } END { exit !found }' <<<"$(claims_blob "$R")" || fail "exempt-pr is not stored in the claim PR column"
 export GH_PRS_JSON="$T/prs-empty.json"
 
 # --- ordinary lane overlap; own re-claim is an idempotent no-op --------------

@@ -40,7 +40,9 @@ case "$1" in
             api_pr="${3#*/pulls/}"
             api_pr="${api_pr%%/*}"
             [ -f "$T/pr/$api_pr.files.json" ] || { echo "missing PR files fixture for $api_pr" >&2; exit 1; }
-            cat "$T/pr/$api_pr.files.json"
+            has_query=0
+            for arg in "$@"; do [ "$arg" != "-q" ] || has_query=1; done
+            if [ "$has_query" = 1 ]; then jq -r '.[].filename' "$T/pr/$api_pr.files.json"; else cat "$T/pr/$api_pr.files.json"; fi
             ;;
           *) echo "stub gh: unexpected: $*" >&2; exit 99;;
         esac
@@ -396,6 +398,70 @@ set_pr() {
   printf '%s\n' "$path" >"$T/pr/$number.names"
   printf 'diff --git a/%s b/%s\nindex 1111111..2222222 100644\n' "$path" "$path" >"$T/pr/$number.diff"
 }
+
+# A hunk-disjoint grant must not reap when the other lane's PR merges.
+reset_case
+mkdir -p "$T/claim-seed/docs" "$T/claim-gh-bin"
+R="$T/claim-remote.git"
+git init -q --bare "$R" || fail 'init claim remote'
+git -c init.defaultBranch=main init -q "$T/claim-seed" || fail 'init claim seed'
+git -C "$T/claim-seed" config user.email t@t.t || fail 'configure claim seed email'
+git -C "$T/claim-seed" config user.name t || fail 'configure claim seed name'
+printf 'one\ntwo\nthree\nfour\n' >"$T/claim-seed/docs/tui.md"
+git -C "$T/claim-seed" add docs/tui.md || fail 'stage claim seed path'
+git -C "$T/claim-seed" commit -qm seed || fail 'commit claim seed'
+git -C "$T/claim-seed" remote add origin "$R" || fail 'add claim seed remote'
+git -C "$T/claim-seed" push -q origin main || fail 'push claim seed'
+ln -s "$FW_GH" "$T/claim-gh-bin/gh"
+PATH="$T/claim-gh-bin:$ORIGINAL_PATH"
+export PATH
+REAL_FILE_CLAIM="$SCRIPT_DIR/../bin/file-claim"
+cat >"$T/real-file-claim" <<'FC_WRAP'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$T/file-claim.log"
+exec bash "$REAL_FILE_CLAIM" "$@"
+FC_WRAP
+chmod +x "$T/real-file-claim"
+FW_FILE_CLAIM="$T/real-file-claim"
+FILE_CLAIM_REMOTE="$R"
+export REAL_FILE_CLAIM FW_FILE_CLAIM FILE_CLAIM_REMOTE
+set_pr 11 fix/other docs/tui.md
+GH_PRLIST_JSON='[{"number":11,"headRefName":"fix/other","changedFiles":1}]'
+printf '[{"filename":"docs/tui.md"}]' >"$T/pr/11.files.json"
+cat >"$T/pr/11.diff" <<'DIFF'
+diff --git a/docs/tui.md b/docs/tui.md
+index 1111111..2222222 100644
+--- a/docs/tui.md
++++ b/docs/tui.md
+@@ -3,2 +3,2 @@
+-three
++THREE
+-four
++FOUR
+DIFF
+GH_TICKET_STATES='11:OPEN,77:OPEN'
+export GH_PRLIST_JSON GH_TICKET_STATES
+run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-2
+assert_rc 0 'real file-claim accepts the path after a disjoint hunk probe'
+assert_line 'GRANT docs/tui.md' 'hunk-disjoint path granted'
+[ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'real hunk grant file exists'
+GH_TICKET_STATES='11:OPEN,12:OPEN,77:OPEN,78:OPEN'
+export GH_TICKET_STATES
+FILE_CLAIM_REMOTE="$R" bash "$REAL_FILE_CLAIM" claim --lane fiber-78 --grant --worktree t:own --repo aakshintala/fiber --self-pr 12 docs/tui.md >/dev/null 2>"$T/own-claim.err" || fail "own-PR claim setup: $(cat "$T/own-claim.err")"
+GH_TICKET_STATES='11:MERGED,12:MERGED,77:OPEN,78:OPEN'
+export GH_TICKET_STATES
+out="$(bash "$REAL_FILE_CLAIM" reap --repo aakshintala/fiber 2>"$T/real-reap.err")" || fail "real file-claim reap succeeds after PRs close: $(cat "$T/real-reap.err")"
+grep -qF 'REAP claim docs/tui.md by fiber-78 (PR #12 closed)' <<<"$out" || fail "reap still drops the lane's own closed PR claim: $out"
+claim_rows="$(git -C "$R" show refs/claims/live:claims)"
+grep -q '^docs/tui.md' <<<"$claim_rows" || fail 'foreign-PR claim survives reap'
+awk -F '\t' '$2 == "fiber-77" { found = 1 } END { exit !found }' <<<"$claim_rows" || fail 'foreign-PR lane claim survives reap'
+! awk -F '\t' '$2 == "fiber-78" { found = 1 } END { exit !found }' <<<"$claim_rows" || fail 'own-PR claim is removed by reap'
+[ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'foreign-PR fence-grant file survives reap'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --exempt-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'real hunk-probed PR uses --exempt-pr'
+! grep -qF -- '--self-pr 11' "$T/file-claim.log" || fail 'foreign PR is not passed as --self-pr'
+awk -F '\t' '$1 == "docs/tui.md" && $2 == "fiber-77" && $6 == "" { found = 1 } END { exit !found }' <<<"$claim_rows" || fail 'foreign PR is absent from stored claim ownership'
+
+reset_case
 
 # A real guard reaps before reading holders; dry runs remain read-only.
 reset_case
@@ -1639,7 +1705,7 @@ reset_case
 set_pr 11 fix/other docs/tui.md
 run_fg 77 --paths docs/tui.md --ignore-pr 11
 assert_rc 0 'ignored PR stays ignored in the claim'
-grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'claim skips the ignored PR'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --exempt-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'claim exempts the ignored PR without recording it'
 
 reset_case
 run_fg 77 --paths docs/tui.md --dry
@@ -1726,7 +1792,7 @@ DIFF
 run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-2
 assert_rc 0 'ranged grant survives the ledger despite the open PR'
 assert_line 'GRANT docs/tui.md' 'ranged grant line'
-grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --self-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'whole-file claim uses the file-claim contract'
+grep -qxF 'claim --lane fiber-77 --plan --repo aakshintala/fiber --exempt-pr 11 -- docs/tui.md' "$T/file-claim.log" || fail 'hunk-probed PR is exempted without recording it'
 grep -qxF 'Ranges: docs/tui.md:1-2' "$FW_RUN/fiber-77-fence-grant-1.md" || fail 'ranged grant file records the range'
 rm "$FW_RUN/fiber-77-fence-grant-1.md"
 CLAUDE_JSON='[{"name":"fiber-77","status":"busy"}]'
