@@ -4,9 +4,11 @@
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require a matching
-#        review-pr verdict for --reviewed (APPROVE on every axis, or FIX-OK from
-#        a scoped verify; --unverified-fixes permits a no-real-bug fix round after
-#        either CHANGES or FIX-INCOMPLETE); require each --body-has
+#        review-pr verdict for --reviewed (APPROVE on every axis, FIX-OK from
+#        a scoped verify, or FIX-INCOMPLETE with readable, non-empty P3-only
+#        findings; each P3 is filed or matched to an open issue and linked from
+#        the PR immediately before merge; --unverified-fixes permits a no-real-bug
+#        fix round after either CHANGES or FIX-INCOMPLETE); require each --body-has
 #        line and run pr-closes (see below); run --gate in the worktree on that head,
 #        once, before any rebase or push; flatten commits since the merge base when
 #        the branch has merge commits, then rebase onto origin/main (see below);
@@ -104,7 +106,7 @@
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
-#        verdict; with --unverified-fixes, no exit 4), 5 PR text or review state needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, stray closing keywords from pr-closes, or no approved review verdict: CHANGES and FIX-INCOMPLETE need a scoped verify unless --unverified-fixes is given for a no-real-bug fix round), 124 CI wait timeout.
+#        verdict; with --unverified-fixes, no exit 4), 5 PR text or review state needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, stray closing keywords from pr-closes, or no approved review verdict: CHANGES needs a scoped verify; FIX-INCOMPLETE needs readable, non-empty P3-only findings or --unverified-fixes for a no-real-bug fix round), 124 CI wait timeout.
 #        Rebase rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
@@ -632,9 +634,10 @@ review_patch_id() {
 }
 
 # review_verdict REPO PR PATCH_ID: print approved, unverified, changes,
-# incomplete, missing or invalid for the newest review-pr comment on PATCH_ID.
+# incomplete, incomplete-p3, missing or invalid for the newest review-pr comment.
+# On FIX-INCOMPLETE, return the readable P3 findings from that posted verify comment.
 review_verdict() {
-  local repo="$1" pr="$2" reviewed_pid="$3" rows tab last created id header verdicts axes axis
+  local repo="$1" pr="$2" reviewed_pid="$3" rows tab last created id header verdicts axes axis body64 findings_file
   local -a axis_list=()
   rows="$(gh api --paginate "repos/$repo/issues/$pr/comments" --jq '
     .[] | select((.body // "") | startswith("review-pr: patch-id")) |
@@ -662,20 +665,32 @@ review_verdict() {
     )) as $parsed |
     [$comment.created_at, ($comment.id | tostring), $lines[0],
       ($parsed.verdicts | if length == 0 then "-" else join(",") end),
-      ($parsed.axes | unique | if length == 0 then "-" else join(",") end)] | @tsv
+      ($parsed.axes | unique | if length == 0 then "-" else join(",") end),
+      ($comment.body | @base64)] | @tsv
   ' )" || return 1
   tab="$(printf '\t')"
   last="$(printf '%s\n' "$rows" | sort -t "$tab" -k1,1 -k2,2n \
     | { grep -E "^.*${tab}review-pr: patch-id ${reviewed_pid}, head [0-9a-f]{40}(,.*)?${tab}" || true; } | tail -n 1)"
   [ -n "$last" ] || { printf 'missing'; return 0; }
-  IFS=$'\t' read -r created id header verdicts axes <<<"$last"
+  IFS=$'\t' read -r created id header verdicts axes body64 <<<"$last"
   case ",$verdicts," in *,INVALID,*) printf 'invalid'; return 0 ;; esac
   if [[ ",$verdicts," == *,verify:FIX-OK,* ]]; then
     [ "$verdicts" = "verify:FIX-OK" ] && printf 'approved' || printf 'invalid'
     return 0
   fi
   case ",$verdicts," in *,verify:FIX-INCOMPLETE,*)
-    [ -n "$unverified" ] && printf 'unverified' || printf 'incomplete'
+    if [ -n "$unverified" ]; then
+      printf 'unverified'
+    else
+      findings_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-findings.XXXXXX")" || { printf 'incomplete'; return 0; }
+      if parse_p3_verify_findings "$body64" "$findings_file"; then
+        printf 'incomplete-p3\n'
+        cat "$findings_file"
+      else
+        printf 'incomplete'
+      fi
+      rm -f "$findings_file"
+    fi
     return 0 ;;
   esac
   [ "$axes" != "-" ] || { printf 'missing'; return 0; }
@@ -693,16 +708,107 @@ review_verdict() {
   esac
 }
 
+parse_p3_verify_findings() {
+  local encoded="$1" output="$2" decoded="${2}.comment" line in_verify=0 saw_verify=0 count=0
+  if ! printf '%s' "$encoded" | base64 -D >"$decoded" 2>/dev/null; then
+    printf '%s' "$encoded" | base64 -d >"$decoded" 2>/dev/null || { rm -f "$decoded"; return 1; }
+  fi
+  : >"$output"
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" == "## verify" || "$line" == "## verify "* ]]; then
+      in_verify=1
+      saw_verify=1
+      continue
+    fi
+    if [[ "$line" == "## "* ]]; then
+      in_verify=0
+      continue
+    fi
+    [ "$in_verify" = 1 ] || continue
+    # A finding is a line that starts with a priority token once markup and any
+    # list marker are gone; prose that mentions a fixed P1 or P2 is not one.
+    line="$(printf '%s' "$line" | tr -d '*`' | sed -E -e 's/^[[:space:]]*//' -e 's/^([-+]|[0-9]+[.)])[[:space:]]+//' -e 's/[[:space:]]*$//')"
+    if [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
+      if [[ "$line" =~ ^P3[[:space:]]+[^[:space:]] ]]; then
+        printf '%s\n' "$line" >>"$output"
+        count=$((count + 1))
+      else
+        rm -f "$decoded"
+        return 1
+      fi
+    fi
+  done <"$decoded"
+  rm -f "$decoded"
+  [ "$saw_verify" = 1 ] && [ "$count" -gt 0 ]
+}
+
 reviewed_patch_id="$(review_patch_id "$reviewed")"
-review_state="$(review_verdict "$repo" "$pr" "$reviewed_patch_id")" \
+review_result="$(review_verdict "$repo" "$pr" "$reviewed_patch_id")" \
   || die 1 "cannot read review-pr comments on PR $pr in $repo"
+review_state="${review_result%%$'\n'*}"
+review_findings=""
+[ "$review_state" != "incomplete-p3" ] || review_findings="${review_result#*$'\n'}"
 case "$review_state" in
   approved|unverified) ;;
   missing) refuse REVIEW "no review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
   changes) refuse REVIEW "last review-pr verdict for --reviewed patch-id $reviewed_patch_id is CHANGES; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
-  incomplete) refuse REVIEW "last scoped verify for --reviewed patch-id $reviewed_patch_id is FIX-INCOMPLETE; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
+  incomplete) refuse REVIEW "last scoped verify for --reviewed patch-id $reviewed_patch_id is FIX-INCOMPLETE with unreadable, empty, or non-P3-only findings; complete a scoped verify, or use --unverified-fixes <findings file> only for a no-real-bug fix round" ;;
+  incomplete-p3) ;;
   *) refuse REVIEW "invalid or incomplete review-pr verdict for --reviewed patch-id $reviewed_patch_id" ;;
 esac
+
+file_p3_findings() {
+  local body_file links_file finding detail issue_json issue_number issue_url title i
+  local -a seen_findings=() seen_issues=()
+  body_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-issue.XXXXXX")" \
+    || die_after_ready 1 "cannot create an issue body for P3 findings"
+  links_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-links.XXXXXX")" \
+    || die_after_ready 1 "cannot create a PR comment for P3 findings"
+  : >"$links_file"
+  while IFS= read -r finding || [ -n "$finding" ]; do
+    [ -n "$finding" ] || continue
+    detail="${finding#P3 }"
+    title="$detail"
+    if [ "${#title}" -gt 220 ]; then title="${title:0:217}..."; fi
+    title="P3: $title"
+    issue_number=""
+    for i in "${!seen_findings[@]}"; do
+      if [ "${seen_findings[$i]}" = "$finding" ]; then
+        issue_number="${seen_issues[$i]}"
+        break
+      fi
+    done
+    if [ -z "$issue_number" ]; then
+      issue_json="$(gh issue list --repo "$repo" --state open --search "$finding" --json number,title,body --limit 100)" \
+        || die_after_ready 1 "cannot search open issues for P3 finding: $finding"
+      issue_number="$(jq -r --arg finding "$finding" --arg title "$title" '[.[] | select(((.body // "" | split("\n") | index($finding)) != null) or .title == $finding or .title == $title) | .number] | first // empty' <<<"$issue_json")" \
+        || die_after_ready 1 "cannot read open issues matching P3 finding: $finding"
+      if [ -z "$issue_number" ]; then
+        {
+          printf 'Open P3 finding from scoped verify for PR #%s.\n\n' "$pr"
+          printf '%s\n' "$finding"
+        } >"$body_file"
+        issue_url="$(gh issue create --repo "$repo" --title "$title" --body-file "$body_file")" \
+          || die_after_ready 1 "cannot file P3 finding as an issue: $finding"
+        issue_number="${issue_url##*/}"
+      fi
+      case "$issue_number" in ''|*[!0-9]*) die_after_ready 1 "no valid issue number for P3 finding: $finding" ;; esac
+      seen_findings+=("$finding")
+      seen_issues+=("$issue_number")
+    fi
+    issue_url="https://github.com/$repo/issues/$issue_number"
+    printf -- '- [#%s](%s): %s\n' "$issue_number" "$issue_url" "$finding" >>"$links_file"
+  done <<<"$review_findings"
+  {
+    printf 'Open P3 findings from the scoped verify are tracked as issues:\n\n'
+    cat "$links_file"
+  } >"$body_file"
+  gh pr comment "$pr" --repo "$repo" --body-file "$body_file" >&2 \
+    || die_after_ready 1 "cannot link P3 finding issues from PR $pr"
+  rm -f "$body_file" "$links_file"
+}
+
+p3_issues_filed=0
 
 # Whether main's required checks are strict. Any lookup error other than a classic
 # rule's 404 (no classic rule) counts as strict: the old behaviour, costing only CI time.
@@ -1030,6 +1136,13 @@ while :; do
     fi
   fi
   
+  # File non-blocking P3s only after every refusal check has passed, immediately
+  # before the merge attempt. A retry after a base race reuses these issue links.
+  if [ "$review_state" = "incomplete-p3" ] && [ "$p3_issues_filed" = 0 ]; then
+    file_p3_findings
+    p3_issues_filed=1
+  fi
+
   # Step 8: merge pinned to the checked head, then wait for GitHub to say MERGED.
   say "merging PR $pr at ${pin:0:8}"
   merge_attempted=1

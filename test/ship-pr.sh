@@ -126,6 +126,37 @@ gh() {
   set -euo pipefail
   echo "gh $*" >>"$ST/gh.log"
   rd() { [ -e "$ST/$1" ] && cat "$ST/$1" || echo "$2"; }
+  if [ "$1" = "issue" ]; then
+    shift
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        [ ! -e "$ST/issue-list-fail" ] || { echo 'gh: issue list failed' >&2; exit 1; }
+        rd issues '[]';;
+      create)
+        title=""; body_file=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --title) title="$2"; shift 2;;
+            --body-file) body_file="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        number="$(rd next-issue 200)"
+        body="$(cat "$body_file")"
+        url="https://github.com/O/N/issues/$number"
+        issue="$(jq -nc --argjson n "$number" --arg title "$title" --arg body "$body" --arg url "$url" \
+          '{number:$n,title:$title,body:$body,url:$url}')"
+        jq --argjson issue "$issue" '. + [$issue]' < <(rd issues '[]') >"$ST/issues.tmp"
+        mv "$ST/issues.tmp" "$ST/issues"
+        jq --argjson issue "$issue" '. + [$issue]' < <(rd created-issues '[]') >"$ST/created-issues.tmp"
+        mv "$ST/created-issues.tmp" "$ST/created-issues"
+        echo "$url"
+        echo "$((number + 1))" >"$ST/next-issue";;
+      *) echo "fake gh: unknown issue $sub" >&2; exit 2;;
+    esac
+    exit 0
+  fi
   if [ "$1" = "api" ]; then
     shift
     paginate=0
@@ -673,6 +704,88 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 echo changed >>"$WT/feature.txt"; git -C "$WT" commit -qam "address ruled finding"; git -C "$WT" push -q origin feature
 run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT"
 expect 5 "FIX-INCOMPLETE without --unverified-fixes refuses merge"; expect_refused REVIEW; no_merge "FIX-INCOMPLETE without the option"
+
+# A scoped FIX-INCOMPLETE passes only when the posted verify findings are readable,
+# non-empty and exclusively P3; ship-pr files/reuses each issue and links it from PR.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:108,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE findings remain\n**P3** first open finding\nP3 second open finding")}
+]' >"$ST/review-comments"
+ship; expect 0 "FIX-INCOMPLETE with only P3 findings merges"
+[ "$(jq 'length' "$ST/created-issues")" = 2 ] || fail "one issue filed per P3: [$(cat "$ST/created-issues")]"
+jq -e '.[0].body | contains("P3 first open finding")' "$ST/created-issues" >/dev/null \
+  || fail "first P3 is in its issue body: [$(cat "$ST/created-issues")]"
+! jq -e '.[0].body | contains("**P3**")' "$ST/created-issues" >/dev/null \
+  || fail "bold P3 finding is stored normalized: [$(cat "$ST/created-issues")]"
+jq -e '.[1].body | contains("P3 second open finding")' "$ST/created-issues" >/dev/null \
+  || fail "second P3 is in its issue body: [$(cat "$ST/created-issues")]"
+grep -qF 'issues/200' "$ST/comment.txt" && grep -qF 'issues/201' "$ST/comment.txt" \
+  || fail "both P3 issues are linked from the PR: [$(cat "$ST/comment.txt")]"
+grep -qF 'P3 first open finding' "$ST/comment.txt" && grep -qF 'P3 second open finding' "$ST/comment.txt" \
+  || fail "PR comment names both P3 findings: [$(cat "$ST/comment.txt")]"
+[ "$(grep -n '^gh issue create' "$ST/gh.log" | head -n 1 | cut -d: -f1)" -lt \
+  "$(grep -n '^gh pr comment' "$ST/gh.log" | tail -n 1 | cut -d: -f1)" ] \
+  || fail "issues are created before the linking comment"
+[ "$(grep -n '^gh pr comment' "$ST/gh.log" | tail -n 1 | cut -d: -f1)" -lt \
+  "$(grep -n '^gh pr merge' "$ST/gh.log" | head -n 1 | cut -d: -f1)" ] \
+  || fail "P3 issues are linked before the merge"
+
+# The P3 issue side effect is deferred until CI and every other refusal check pass.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:112,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE one finding remains\nP3 non-blocking finding")}
+]' >"$ST/review-comments"
+echo '[{"bucket":"fail","name":"ci"}]' >"$ST/checks"
+ship; expect 1 "P3 findings still wait for passing CI"; no_merge "P3 CI failure"
+! grep -q '^gh issue \(list\|create\)' "$ST/gh.log" || fail "CI refusal files no P3 issue"
+! grep -q '^gh pr comment' "$ST/gh.log" || fail "CI refusal posts no P3 issue link"
+
+# An open issue with the exact finding line is reused instead of duplicated.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc '{number:432,title:"existing P3",body:"P3 existing open finding",url:"https://github.com/O/N/issues/432"}' >"$ST/existing-issue.json"
+jq -nc --slurpfile existing "$ST/existing-issue.json" '$existing' >"$ST/issues"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:109,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE finding remains\nP3 existing open finding")}
+]' >"$ST/review-comments"
+ship; expect 0 "matching open P3 issue is reused"
+[ "$(jq 'length' "$ST/created-issues" 2>/dev/null || echo 0)" = 0 ] || fail "no duplicate P3 issue filed"
+grep -qF 'issues/432' "$ST/comment.txt" || fail "existing P3 issue linked from PR: [$(cat "$ST/comment.txt")]"
+
+# The shape of PR #1353's verify: prose naming a fixed P2 is not an open finding.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:113,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nThe P2 ownership finding is fixed. No new findings.\n\nFIX-INCOMPLETE\n\nP3 bin/x:1 duplicated code remains\n\nSTATUS: DONE_WITH_CONCERNS")}
+]' >"$ST/review-comments"
+ship; expect 0 "prose naming a fixed P2 does not block a P3-only verify"
+jq -e '.[0].body | contains("P3 bin/x:1 duplicated code remains")' "$ST/created-issues" >/dev/null \
+  || fail "P3 from #1353-shaped verify is filed: [$(cat "$ST/created-issues")]"
+
+# Any P1 or P2 in readable findings keeps the refusal and files no issues.
+for priority in P1 P2; do
+  setup
+  REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+  jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg priority "$priority" '[
+    {created_at:"2026-11-04T11:00:00Z",id:110,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE mixed findings\nP3 non-blocking finding\n" + $priority + " blocking finding")}
+  ]' >"$ST/review-comments"
+  ship; expect 5 "FIX-INCOMPLETE with $priority still refuses"; expect_refused REVIEW; no_merge "FIX-INCOMPLETE with $priority"
+  ! grep -q '^gh issue \(list\|create\)' "$ST/gh.log" || fail "$priority refusal files no issue"
+  ! grep -q '^gh pr comment' "$ST/gh.log" || fail "$priority refusal posts no issue links"
+done
+
+# Markup and numbering must not hide P0-P2 findings from the fail-closed parser.
+for finding in '**P2** bold finding' '`P1` backticked finding' '1. P2 numbered finding' '- P2 bulleted finding'; do
+  setup
+  REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+  jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg finding "$finding" '[
+    {created_at:"2026-11-04T11:00:00Z",id:111,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE unreadable findings\nP3 visible finding\n" + $finding)}
+  ]' >"$ST/review-comments"
+  ship; expect 5 "FIX-INCOMPLETE with $finding refuses"; expect_refused REVIEW; no_merge "marked-up FIX-INCOMPLETE finding"
+  ! grep -q '^gh issue \(list\|create\)' "$ST/gh.log" || fail "unreadable findings file no issue"
+done
 
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
