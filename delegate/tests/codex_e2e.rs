@@ -15,6 +15,16 @@ const FIXTURE: &str = concat!(
     "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":21804,\"cached_input_tokens\":13184,\"cache_write_input_tokens\":0,\"output_tokens\":5,\"reasoning_output_tokens\":128}}\n",
 );
 
+const TOOL_STREAM: &str = concat!(
+    "{\"type\":\"thread.started\",\"thread_id\":\"THREAD_ID\"}\n",
+    "{\"type\":\"turn.started\"}\n",
+    "{\"type\":\"item.started\",\"item\":{\"id\":\"cmd\",\"type\":\"command_execution\",\"command\":\"gh-ci wait 4368\",\"status\":\"in_progress\"}}\n",
+    "{\"type\":\"item.completed\",\"item\":{\"id\":\"message\",\"type\":\"agent_message\",\"text\":\"Waiting on CI\"}}\n",
+    "{\"type\":\"item.completed\",\"item\":{\"id\":\"cmd\",\"type\":\"command_execution\",\"command\":\"gh-ci wait 4368\",\"status\":\"completed\"}}\n",
+    "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":\"done\\nSTATUS: DONE\"}}\n",
+    "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1}}\n",
+);
+
 const FAKE_CODEX: &str = r#"#!/bin/sh
 # Replays a synthetic `codex exec --json` stream. Every invocation appends its
 # argv and captures its stdin bytes exactly, so run + resume assertions can
@@ -44,14 +54,27 @@ for a in "$@"; do
   if [ "$prev" = "resume" ]; then tid="$a"; fi
   prev="$a"
 done
-# SLOW prompts emit the thread header promptly, then wait for the release
-# file before the rest of the stream, so the test can assert RUNNING first
-# while the supervisor already holds the thread id.
+# A command item stays open while the model reports that it is waiting.
+# This mirrors Codex's command_execution item spanning exec_command and polls.
 rel="$dir/go"
 stream="${DELEGATE_TEST_CODEX_STREAM:-$DELEGATE_TEST_CODEX_FIXTURE}"
 tmp="$dir/stream-$n.jsonl"
 sed "s/THREAD_ID/$tid/g" "$stream" > "$tmp"
 case "$(cat "$dir/stdin-$n.bin")" in
+  *TOOL_WAIT*)
+    head -n 4 "$tmp"
+    : > "$dir/header-sent"
+    while [ ! -e "$rel" ]; do sleep 0.05; done
+    tail -n +5 "$tmp"
+    emitted=1
+    ;;
+  *TOOL_SILENT*)
+    head -n 3 "$tmp"
+    : > "$dir/header-sent"
+    while [ ! -e "$rel" ]; do sleep 0.05; done
+    tail -n +4 "$tmp"
+    emitted=1
+    ;;
   *SLOW*)
     head -n 1 "$tmp"
     : > "$dir/header-sent"
@@ -237,6 +260,32 @@ impl Env {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
+    fn wait_header(&self, what: &str) {
+        let path = self.dir.join("header-sent");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !path.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !path.is_file() {
+            let files: Vec<_> = std::fs::read_dir(&self.dir)
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name())
+                .collect();
+            panic!(
+                "timed out: {what}; argv={:?}; stdin={:?}; files={files:?}",
+                std::fs::read_to_string(self.dir.join("argv.txt")),
+                std::fs::read(self.dir.join("stdin-1.bin")).map(|bytes| String::from_utf8_lossy(
+                    &bytes
+                )
+                .chars()
+                .take(80)
+                .collect::<String>())
+            );
+        }
+    }
+
     fn record(&self, id: &str) -> Value {
         let p: PathBuf = self.dir.join("delegate-jobs").join(format!("{id}.json"));
         serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
@@ -261,6 +310,96 @@ fn until(what: &str, mut f: impl FnMut() -> bool) {
         assert!(t.elapsed() < Duration::from_secs(10), "timed out: {what}");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn codex_open_tool_survives_waiting_message_past_idle_window() {
+    let e = Env::new("tool-waiting-message");
+    let stream = e.write_stream("tool.jsonl", TOOL_STREAM);
+    let out = e.delegate_with(
+        &[
+            "run",
+            "--model",
+            "codex/gpt-6-luna",
+            "--idle-ms",
+            "1500",
+            "--tool-idle-ms",
+            "5000",
+        ],
+        Some(b"TOOL_WAIT"),
+        false,
+        Some(&stream),
+        "0",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    e.wait_header("Codex command and waiting message started");
+
+    until("waiting message consumed by supervisor", || {
+        let record = e.record(&id);
+        record["progress"]["lastAssistant"] == "Waiting on CI"
+            && record["progress"]["phase"] == "running_tool"
+    });
+    until("watchdog heartbeat past the idle window", || {
+        let record = e.record(&id);
+        record["status"] == "RUNNING"
+            && record["progress"]["phase"] == "running_tool"
+            && record["progress"]["lastAssistant"] == "Waiting on CI"
+            && record["progress"]["lastEventAgeMs"]
+                .as_f64()
+                .unwrap_or_default()
+                >= 1_500.0
+    });
+    let waiting = e.record(&id);
+    let _ = std::fs::write(e.dir.join("go"), "release");
+    let done = e.wait_terminal(&id);
+
+    assert_eq!(waiting["status"], "RUNNING", "{waiting}");
+    assert_eq!(waiting["progress"]["phase"], "running_tool", "{waiting}");
+    assert_eq!(done["status"], "DONE", "{done}");
+}
+
+#[test]
+fn a_silent_codex_command_is_still_killed_at_the_tool_idle_window() {
+    let e = Env::new("tool-silent");
+    let stream = e.write_stream("tool.jsonl", TOOL_STREAM);
+    let out = e.delegate_with(
+        &[
+            "run",
+            "--model",
+            "codex/gpt-6-luna",
+            "--idle-ms",
+            "5000",
+            "--tool-idle-ms",
+            "7500",
+        ],
+        Some(b"TOOL_SILENT"),
+        false,
+        Some(&stream),
+        "0",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    e.wait_header("silent Codex command started");
+    let stalled = e.wait_terminal(&id);
+
+    assert_eq!(stalled["status"], "STALLED", "{stalled}");
+    assert!(
+        stalled["result"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("(window 7.5s)"),
+        "{}",
+        stalled["result"]["text"]
+    );
 }
 
 #[test]
