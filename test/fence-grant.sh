@@ -34,6 +34,17 @@ printf '%s\n' "$*" >>"$T/gh.log"
 case "$1" in
   api)
     case "$2" in
+      --paginate)
+        case "${3:-}" in
+          repos/*/pulls/*/files\?per_page=100)
+            api_pr="${3#*/pulls/}"
+            api_pr="${api_pr%%/*}"
+            [ -f "$T/pr/$api_pr.files.json" ] || { echo "missing PR files fixture for $api_pr" >&2; exit 1; }
+            cat "$T/pr/$api_pr.files.json"
+            ;;
+          *) echo "stub gh: unexpected: $*" >&2; exit 99;;
+        esac
+        ;;
       graphql)
         [ "${GH_TICKET_FAIL:-0}" != 1 ] || { echo 'ticket state stub failure' >&2; exit 1; }
         [ "${GH_TICKET_BAD:-0}" != 1 ] || { printf 'not graphql json'; exit 0; }
@@ -87,6 +98,7 @@ print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATE
         ;;
       diff)
         pr="$3"
+        [ "${GH_DIFF_406_PR:-}" != "$pr" ] || { echo 'HTTP 406: the diff exceeded the maximum number of files (300)' >&2; exit 1; }
         case " $* " in
           *' --name-only '*)
             [ "${GH_DIFFN_FAIL:-}" != "$pr" ] || { echo 'pr names stub failure' >&2; exit 1; }
@@ -290,9 +302,9 @@ reset_case() {
 TREE
   GH_TREE_SHA=aaaaaaaa GH_SHA_FAIL=0 GH_SHA_ERROR= GH_TREE_ERROR=
   export GH_TREE_SHA GH_SHA_FAIL GH_SHA_ERROR GH_TREE_ERROR
-  GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL=
+  GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL= GH_DIFF_406_PR=
   GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT= SSH_STDERR=
-  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
+  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_DIFF_406_PR GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
   GH_TICKET_STATES= GH_TICKET_FAIL=0 GH_TICKET_BAD=0 GH_TICKET_MISSING=0 GH_TICKET_OMIT=
   export GH_TICKET_STATES GH_TICKET_FAIL GH_TICKET_BAD GH_TICKET_MISSING GH_TICKET_OMIT
   FW_DELEGATE_DIR="$T/delegate-jobs"
@@ -1156,6 +1168,78 @@ printf 'diff --git a/docs/tui.md b/docs/tui.md\n' >"$T/pr/11.diff"
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'PR without branch name overlaps but is not own'
 assert_line 'OVERLAP docs/tui.md PR #11' 'missing branch name overlap'
+
+# 406 fallback preserves renamed paths, ordinary hunk holds, additions and patchless whole-file holds.
+reset_case
+set_pr 11 fix/other docs/tui.md
+GH_PRLIST='[{"number":11,"headRefName":"fix/other","changedFiles":4}]'
+export GH_PRLIST
+printf '%s\n' docs/tui.md crates/a/tests.rs main_journeys.rs bin/job-record >"$T/pr/11.names"
+cat >"$T/pr/11.diff" <<'DIFF'
+diff --git a/docs/events.md b/docs/tui.md
+similarity index 90%
+rename from docs/events.md
+rename to docs/tui.md
+index 1111111..2222222 100644
+--- a/docs/events.md
++++ b/docs/tui.md
+@@ -3,2 +3,2 @@
+-three
++THREE
+diff --git a/crates/a/tests.rs b/crates/a/tests.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/a/tests.rs
+@@ -0,0 +1,1 @@
++new
+diff --git a/main_journeys.rs b/main_journeys.rs
+index 1111111..2222222 100644
+--- a/main_journeys.rs
++++ b/main_journeys.rs
+@@ -3,2 +3,2 @@
+-three
++THREE
+diff --git a/bin/job-record b/bin/job-record
+index 1111111..2222222 100644
+DIFF
+cat >"$T/pr/11.files.json" <<'FILES'
+[
+  {"filename":"docs/tui.md","previous_filename":"docs/events.md","status":"renamed","patch":"@@ -3,2 +3,2 @@\n-three\n+THREE"},
+  {"filename":"crates/a/tests.rs","status":"added","patch":"@@ -0,0 +1,1 @@\n+new"},
+  {"filename":"main_journeys.rs","status":"modified","patch":"@@ -3,2 +3,2 @@\n-three\n+THREE"},
+  {"filename":"bin/job-record","status":"modified"}
+]
+FILES
+run_fg 77 --paths docs/tui.md,docs/events.md,crates/a/tests.rs,main_journeys.rs,bin/job-record --ranges 'docs/tui.md:3-4,docs/events.md:1-2,crates/a/tests.rs:1-2,main_journeys.rs:3-4,bin/job-record:5-6' --dry
+assert_rc 0 'ordinary diff fixture with rename, addition, modification and patchless file'
+ordinary_pr_holds=$(cat "$T/out")
+GH_DIFF_406_PR=11
+export GH_DIFF_406_PR
+run_fg 77 --paths docs/tui.md,docs/events.md,crates/a/tests.rs,main_journeys.rs,bin/job-record --ranges 'docs/tui.md:3-4,docs/events.md:1-2,crates/a/tests.rs:1-2,main_journeys.rs:3-4,bin/job-record:5-6' --dry
+assert_rc 0 '406 API fallback returns equivalent PR holds'
+[ "$(cat "$T/out")" = "$ordinary_pr_holds" ] || fail "406 API fallback holds differ from ordinary diff: $(cat "$T/out") vs $ordinary_pr_holds"
+assert_line 'OVERLAP docs/events.md PR #11' '406 fallback includes the renamed source path'
+assert_line 'OVERLAP bin/job-record PR #11' '406 fallback holds a file with no patch whole'
+grep -qF 'api --paginate repos/aakshintala/fiber/pulls/11/files?per_page=100' "$T/gh.log" || fail '406 fallback reads paginated PR files API'
+run_fg 77 --pre-plan 'crates/a/**'
+assert_rc 0 'pre-plan name-only lookup falls back after HTTP 406'
+assert_line 'WARN PRE-PLAN PR #11: 1 files under crates/a/**' 'pre-plan fallback counts paginated API filenames'
+
+# A PR exceeding the files API cap fails closed with a PR-specific error.
+reset_case
+GH_PRLIST='[{"number":11,"headRefName":"fix/other","changedFiles":3001}]'
+export GH_PRLIST GH_DIFF_406_PR=11
+python3 - "$T/pr/11.files.json" <<'PY'
+import json,sys
+with open(sys.argv[1], "w") as f:
+  json.dump([{"filename":"file-%04d.txt" % i,"status":"modified","patch":"@@ -1 +1 @@"} for i in range(3000)], f)
+PY
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 3 'over-3000 PR file list fails closed'
+assert_contains 'ERROR gh pr diff 11' 'over-3000 error names the PR'
+assert_contains 'PR #11' 'over-3000 diagnostic identifies the PR number'
+assert_contains '3000' 'over-3000 error states the API limit'
 
 # A correct existing path and symbol still goes through the holder sweep.
 reset_case

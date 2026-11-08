@@ -39,6 +39,10 @@ if [ "${GH_STUB_FAIL:-0}" = "1" ]; then
 fi
 if [ "$1" = "pr" ] && [ "$2" = "diff" ]; then
   n="$3"
+  if [ -n "${GH_DIFF_406_PR:-}" ] && [ "$n" = "$GH_DIFF_406_PR" ]; then
+    echo "HTTP 406: the diff exceeded the maximum number of files (300)" >&2
+    exit 1
+  fi
   if [ -n "${GH_DIFF_FAIL_PR:-}" ] && [ "$n" = "$GH_DIFF_FAIL_PR" ]; then
     # A partial download: some of the diff, then a failure.
     [ -n "${GH_DIFF_DIR:-}" ] && [ -f "$GH_DIFF_DIR/$n.diff" ] && head -n 9 "$GH_DIFF_DIR/$n.diff"
@@ -93,8 +97,11 @@ print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATE
       exit 0
     fi
   fi
+  has_query=0
+  for arg in "$@"; do [ "$arg" != "-q" ] || has_query=1; done
+  if [ "$has_query" = 0 ] && [ -n "${GH_API_DIFF_FILES:-}" ]; then cat "$GH_API_DIFF_FILES"; exit 0; fi
   if [ -n "${GH_API_FILES:-}" ]; then cat "$GH_API_FILES"; exit 0; fi
-  jq -r --arg n "$pr" '.[] | select((.number|tostring) == $n) | (.files // [])[] | .path' "$GH_PRS_JSON"
+  jq -r --arg n "$pr" '.[] | select((.number|tostring) == $n) | (.files // [])[] | (.filename // .path)' "$GH_PRS_JSON"
   exit 0
 fi
 cat "$GH_PRS_JSON"
@@ -340,6 +347,76 @@ out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" GH_DIFF_FAIL_PR=21 bash "$F
 [ "$?" = "1" ] || fail "diff-fail claim exits 1"
 [ "$out" = "$(printf 'REFUSE two.txt pr#21 hunks=unknown\nREFUSE ins.txt pr#21 hunks=unknown\nREFUSE new.txt pr#21 hunks=unknown\nfile-claim: no claims recorded; 3 refused, 0 unclaimed because the batch was refused')" ] || fail "unknown hunks: $out"
 [ "$(grep -cF 'pr diff 21' "$GH_ARGS_LOG")" = "1" ] || fail "failed diff fetched once per PR"
+
+# A 406 fallback must preserve the same rename, hunk and whole-file holds.
+R="$(fresh)"
+printf '[{"number":21,"changedFiles":4,"files":[{"path":"renamed.txt"},{"path":"added.txt"},{"path":"modified.txt"},{"path":"patchless.bin"}]}]' >"$T/prs-406.json"
+export GH_PRS_JSON="$T/prs-406.json"
+cat >"$T/diffs/21.diff" <<'DIFF_EOF'
+diff --git a/old.txt b/renamed.txt
+similarity index 90%
+rename from old.txt
+rename to renamed.txt
+index 1111111..2222222 100644
+--- a/old.txt
++++ b/renamed.txt
+@@ -5,2 +5,2 @@ context
+-old
++new
+diff --git a/added.txt b/added.txt
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/added.txt
+@@ -0,0 +1,1 @@
++new
+diff --git a/modified.txt b/modified.txt
+index 1111111..2222222 100644
+--- a/modified.txt
++++ b/modified.txt
+@@ -10,2 +10,2 @@ context
+-old
++new
+diff --git a/patchless.bin b/patchless.bin
+index 1111111..2222222 100644
+DIFF_EOF
+cat >"$T/api-pr-21-diff.json" <<'FILES_EOF'
+[
+  {"filename":"renamed.txt","previous_filename":"old.txt","status":"renamed","patch":"@@ -5,2 +5,2 @@ context\n-old\n+new"},
+  {"filename":"added.txt","status":"added","patch":"@@ -0,0 +1,1 @@\n+new"},
+  {"filename":"modified.txt","status":"modified","patch":"@@ -10,2 +10,2 @@ context\n-old\n+new"},
+  {"filename":"patchless.bin","status":"modified"}
+]
+FILES_EOF
+: >"$GH_ARGS_LOG"
+rc=0
+out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" bash "$FC" $SWEEP_CLAIM renamed.txt added.txt modified.txt patchless.bin 2>/dev/null)" || rc=$?
+[ "$rc" = "1" ] || fail "ordinary rename diff refusal exits 1, got $rc: $out"
+ordinary_holds="$out"
+: >"$GH_ARGS_LOG"
+rc=0
+out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_DIR="$T/diffs" GH_DIFF_406_PR=21 GH_API_DIFF_FILES="$T/api-pr-21-diff.json" bash "$FC" $SWEEP_CLAIM renamed.txt added.txt modified.txt patchless.bin 2>/dev/null)" || rc=$?
+[ "$rc" = "1" ] || fail "406 API fallback refusal exits 1, got $rc: $out"
+[ "$out" = "$ordinary_holds" ] || fail "406 API fallback holds differ from ordinary diff: $out vs $ordinary_holds"
+case "$out" in *'renamed.txt pr#21 hunks=5-6'*) ;; *) fail "renamed path hunk missing from fallback: $out";; esac
+case "$out" in *'patchless.bin pr#21 hunks=whole'*) ;; *) fail "patchless file is not held whole: $out";; esac
+grep -qF 'api --paginate repos/test/repo/pulls/21/files?per_page=100' "$GH_ARGS_LOG" || fail "406 fallback uses paginated files API: $(cat "$GH_ARGS_LOG")"
+
+# More than 3000 API entries fail closed as unknown holder hunks.
+R="$(fresh)"
+python3 - "$T/prs-over-3000.json" "$T/api-over-3000.json" <<'PY'
+import json,sys
+paths=["file-%04d.txt" % i for i in range(3001)]
+with open(sys.argv[1], "w") as f:
+  json.dump([{"number":21,"changedFiles":3001,"files":[{"path":p} for p in paths]}], f)
+with open(sys.argv[2], "w") as f:
+  json.dump([{"filename":p,"status":"modified","patch":"@@ -1 +1 @@"} for p in paths], f)
+PY
+export GH_PRS_JSON="$T/prs-over-3000.json"
+rc=0
+out="$(FILE_CLAIM_REMOTE="$R" GH_DIFF_406_PR=21 GH_API_DIFF_FILES="$T/api-over-3000.json" bash "$FC" $SWEEP_CLAIM file-0000.txt 2>/dev/null)" || rc=$?
+[ "$rc" = "1" ] || fail "over-3000 holder remains a sweep refusal, got $rc: $out"
+[ "$out" = "$(printf 'REFUSE file-0000.txt pr#21 hunks=unknown\nfile-claim: no claims recorded; 1 refused, 0 unclaimed because the batch was refused')" ] || fail "over-3000 holder is unknown: $out"
 
 # A colliding path after the first 100 is returned by the paginated REST read.
 R="$(fresh)"
