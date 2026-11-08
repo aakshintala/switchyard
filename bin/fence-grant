@@ -847,6 +847,8 @@ FW_CLAUDE_ERR="$tmp/claudeerr"; FW_SSH_ERR="$tmp/ssherr"
 # Capture the box once in the parent shell. The lane readers below run in
 # command substitutions, whose variable changes would not be shared.
 _fw_box_probe
+# Keep the probe's own stderr: a later session-list retry overwrites the file.
+boxerr=$(head -c 200 "$tmp/ssherr" 2>/dev/null | tr '\n' ' ')
 if mac_names=$(fw_lane_names_mac); then mac_ok=1; else mac_ok=0; mac_names=""; fi
 if box_names=$(fw_box_lane_names); then box_ok=1; else box_ok=0; box_names=""; fi
 if pimac_names=$(fw_pi_lane_names_mac); then pimac_ok=1; else pimac_ok=0; pimac_names=""; fi
@@ -857,12 +859,15 @@ if dsess_names=$(fw_delegate_session_lane_names); then dsess_ok=1; else dsess_ok
 if msess_names=$(fw_mac_delegate_session_lane_names); then msess_ok=1; else msess_ok=0; msess_names=""; fi
 FW_CLAUDE_ERR=/dev/null; FW_SSH_ERR=/dev/null
 [ "$mac_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/claudeerr" 2>/dev/null | tr '\n' ' '); echo "ERROR claude agents $g"; exit 3; }
-[ "$box_ok" -eq 1 ] || { g=$(head -c 100 "$tmp/ssherr" 2>/dev/null | tr '\n' ' '); echo "ERROR ssh box $g"; exit 3; }
+# A failed probe is reported once, here, with ssh's exit code and stderr, so
+# it never surfaces as a later section's missing marker (#1394).
+[ "${FW_BOX_OK:-0}" = 1 ] || { echo "ERROR ssh box exit $FW_BOX_RC: ${boxerr:-no stderr; output lacks the FWSEC markers}"; exit 3; }
+[ "$box_ok" -eq 1 ] || { echo "ERROR box claude agents: unparseable output ${boxerr}"; exit 3; }
 [ "$pimac_ok" -eq 1 ] || { echo "ERROR mac pi lanes: run directory missing"; exit 3; }
-[ "$pibox_ok" -eq 1 ] || { echo "ERROR box pi lanes: no PILANESOK marker"; exit 3; }
+[ "$pibox_ok" -eq 1 ] || { echo "ERROR box pi lanes: no PILANESOK marker${boxerr:+; box stderr: $boxerr}"; exit 3; }
 [ "$dmac_ok" -eq 1 ] || { echo "ERROR mac delegate lanes: registry directory missing"; exit 3; }
-[ "$dbox_ok" -eq 1 ] || { echo "ERROR box delegate lanes: no DELEGATEOK marker"; exit 3; }
-[ "$dsess_ok" -eq 1 ] || { echo "ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON"; exit 3; }
+[ "$dbox_ok" -eq 1 ] || { echo "ERROR box delegate lanes: no DELEGATEOK marker${boxerr:+; box stderr: $boxerr}"; exit 3; }
+[ "$dsess_ok" -eq 1 ] || { echo "ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON${boxerr:+; box stderr: $boxerr}"; exit 3; }
 [ "$msess_ok" -eq 1 ] || { echo "ERROR mac delegate sessions: delegate session list failed, or the roster mapper refused the JSON"; exit 3; }
 # A lane is a Claude session, a pi lane or a delegate job; each holds its
 # fence. A pi lane launched by delegate shows up twice, so the list is
