@@ -1511,23 +1511,33 @@ fn live_background_child_suppresses_idle_until_it_exits() {
             None => false,
         },
     );
-    // The fake wrote the pid after the result that ended the turn, so the
-    // last model event is at least this old from here on.
-    let turn_ended = Instant::now();
-
     // The ticket's check: the job outlives idle_ms while the child is alive.
-    // The child is blocked on the fifo, so only the watchdog could end the job.
-    let held_until = turn_ended + Duration::from_millis(idle_ms * 2 + 100);
-    while Instant::now() < held_until {
+    // The fake published the pid after the turn-ending result, and the child
+    // is blocked on the fifo, so only the watchdog could end the job. Each
+    // record must be RUNNING with an idle clock the live-child check keeps
+    // below the window; the wait ends once the record shows the job has run
+    // for two windows.
+    let window = idle_ms as f64;
+    until("the job runs for two idle windows", || {
         assert!(alive(bg_pid), "background command ended before its release");
-        if let Some(rec) = read_record(&id) {
-            assert_eq!(
-                rec["status"], "RUNNING",
-                "job ended while its child was alive: {rec}"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+        let Some(rec) = read_record(&id) else {
+            return false;
+        };
+        assert_eq!(
+            rec["status"], "RUNNING",
+            "job ended while its child was alive: {rec}"
+        );
+        let age = rec["progress"]["lastEventAgeMs"]
+            .as_f64()
+            .expect("progress carries lastEventAgeMs");
+        assert!(
+            age < window,
+            "live child did not refresh the idle clock: {rec}"
+        );
+        rec["progress"]["elapsedMs"]
+            .as_f64()
+            .is_some_and(|ms| ms > 2.0 * window)
+    });
     let held = e.delegate(&["status", &id], None);
     assert_eq!(held.status.code(), Some(0));
     let held_text = String::from_utf8_lossy(&held.stdout);
