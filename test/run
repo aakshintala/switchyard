@@ -46,6 +46,9 @@ if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
   fi
   printf 'test/run: Bash 5 unavailable; continuing with Bash %s\n' "$BASH_VERSION" >&2
 fi
+# The marker guards only this process's re-exec; a nested test/run (as in
+# bash5-runner.sh) must do its own discovery.
+unset SWITCHYARD_TEST_RUN_BASH5_REEXEC
 
 # CLAUDECODE must not change gh-ci wait timeouts under test: suites that need
 # it set it per case, so start unset however the gate is invoked.
