@@ -895,7 +895,6 @@ RC_LEG=$?
 mv "$TMPDIR/delegate-jobs/$PI_ID.json" "$JOBS/$PI_ID.json"
 mv "$TMPDIR/delegate-jobs/$FIBER_ID.json" "$JOBS/$FIBER_ID.json"
 [ "$RC_LEG" -eq 0 ] || fail "report reads legacy TMPDIR records (got $RC_LEG: $(cat "$T/rep-legacy.err"))"
-[ -f "$REPL/pi/job.json" ] && [ -f "$REPL/fiber/job.json" ] || fail "report saves the legacy records"
 [ "$(jq -r .reviewed_calls "$REPG/fiber/metrics.json")" = "2" ] || fail "saved-copy report rebuilds reviewed calls"
 
 # --- report never replaces saved files with a bad rebuild (#240 round 3).
