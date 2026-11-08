@@ -10,7 +10,9 @@
 # A verifier-r* slot's wall cap travels on the run call (--wall-ms); watch
 # only reads the record.
 # Every state read and write goes through tkt-state; the model comes from
-# --model or state model.<slot> and is never picked here.
+# --model or state model.<slot> and is never picked here. A --resume passes
+# --model to delegate resume only when given (delegate refuses a backend
+# switch); without it the resumed job keeps its stored model.
 # Usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] |
 #   --brief <file> | --resume <job id> --prompt <file>) [--model <id>]
 #   [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]
@@ -23,6 +25,7 @@ set -euo pipefail
 usage() {
   echo "usage: tkt-job <state> --slot <name> (--template <path> [KEY=VALUE...] | --brief <file> | --resume <job id> --prompt <file>) [--model <id>] [--gate-from-plan | --gate '<cmd>'] [--expect-commits] [--out-file <path>]" >&2
   echo "If a slot has a prompt hash, a different supplied prompt requires clearing the slot or using a new one." >&2
+  echo "With --resume, --model is passed to delegate resume; without it the resumed job keeps its stored model." >&2
   exit 2
 }
 
@@ -313,8 +316,11 @@ if [ -n "$resume" ]; then
   # An empty --gate is the same as no flag: the resume inherits the stored gate.
   gate_args=()
   if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
+  # No --model keeps the stored model; delegate itself refuses a backend switch.
+  model_args=()
+  if [ -n "$model" ]; then model_args=(--model "$model"); fi
   prompt_hash="$(shasum -a 256 <"$prompt" | awk '{print $1}')"
-  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
+  jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${model_args[@]+"${model_args[@]}"} ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
   tkt set "job.$slot" "$jobid"
   tkt set "job.$slot.prompt" "$prompt_hash"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"

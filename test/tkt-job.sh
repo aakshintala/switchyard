@@ -69,11 +69,12 @@ case "\$cmd" in
     ;;
   resume)
     id="\${1:-}"; shift || true
-    prompt=""; gate=""
+    prompt=""; gate=""; rmodel=""
     while [ \$# -gt 0 ]; do
       case "\$1" in
         --prompt-file) prompt="\$2"; shift 2 ;;
         --gate) gate="\$2"; shift 2 ;;
+        --model) rmodel="\$2"; shift 2 ;;
         *) shift ;;
       esac
     done
@@ -81,6 +82,7 @@ case "\$cmd" in
     printf '%s' "\$n" >"$T/counter"
     printf 'resume|id=%s|prompt=%s|new=stub-%s\n' "\$id" "\$prompt" "\$n" >>"\$log"
     if [ -n "\$gate" ]; then printf 'resumegate=%s\n' "\$gate" >>"\$log"; fi
+    if [ -n "\$rmodel" ]; then printf 'resumemodel=%s\n' "\$rmodel" >>"\$log"; fi
     printf 'stub-%s\n' "\$n"
     ;;
   watch)
@@ -749,6 +751,17 @@ grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" 
 [ "$(bash "$TKT_STATE" "$S" get job.lane)" = "stub-1" ] || fail "resume stores the new id"
 expected_resume_hash="$(shasum -a 256 <"$T/resume-prompt.md" | awk '{print $1}')"
 [ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$expected_resume_hash" ] || fail "resume stores the new prompt hash"
+! grep -q '^resumemodel=' "$T/stub.log" || fail "resume without --model passes no --model"
+
+# --- --resume with --model passes the model to delegate resume ---------------
+setup_case resume-model
+reset_stub
+make_record old-9 BLOCKED none 0 2 0 none stub-1
+make_record stub-1 DONE 0 1 2 0
+run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --model openai/gpt-6-luna:xhigh
+[ "$RC" -eq 0 ] || fail "resume with --model exits 0"
+grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" || fail "resume with --model calls delegate resume"
+grep -qx 'resumemodel=openai/gpt-6-luna:xhigh' "$T/stub.log" || fail "resume passes --model to delegate resume"
 
 # --- a stored job refuses a prompt that differs from its dispatch -------------
 setup_case prompt-changed
