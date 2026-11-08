@@ -278,6 +278,11 @@ if [ "$n" -gt 0 ]; then
   else
     digest="${digest%$'\n'}"
   fi
+  # Name both routes to widen the fence; the check itself is unchanged.
+  digest="$digest
+the fence is read from the plan's Files and the state's fence list; fence-grant is not read
+for a path a merge of main moved, run per path: tkt-state $state add fence <path>
+for scope the plan never covered, add it to the plan's Files and re-confirm with tkt-plan"
   emit "FENCE n=$n" 1
 fi
 
