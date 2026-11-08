@@ -173,31 +173,39 @@ reset_stubs() {
   : >"$T/calls.log"
 }
 
-# New case: a bare origin, a seed main, and a clone worktree on branch
-# tkt-529 pushed to the origin, with plan, findings and base state. Sets
-# CDIR, WT, S. $1 is the case name.
+# Build the identical local git fixture once. Each case gets a private copy,
+# including its own bare origin, so the real fetch/push paths remain exercised.
+TEMPLATE="$T/case-template"
+mkdir -p "$TEMPLATE"
+git init -q --bare "$TEMPLATE/origin.git"
+git --git-dir="$TEMPLATE/origin.git" symbolic-ref HEAD refs/heads/main
+git init -q "$TEMPLATE/seed"
+git -C "$TEMPLATE/seed" symbolic-ref HEAD refs/heads/main
+git -C "$TEMPLATE/seed" config user.email t@t
+git -C "$TEMPLATE/seed" config user.name t
+printf 'base\n' >"$TEMPLATE/seed/base.txt"
+git -C "$TEMPLATE/seed" add base.txt
+git -C "$TEMPLATE/seed" commit -qm init
+git -C "$TEMPLATE/seed" remote add origin "$TEMPLATE/origin.git"
+git -C "$TEMPLATE/seed" push -q origin main
+git clone -q "$TEMPLATE/origin.git" "$TEMPLATE/wt"
+git -C "$TEMPLATE/wt" config user.email t@t
+git -C "$TEMPLATE/wt" config user.name t
+git -C "$TEMPLATE/wt" checkout -qb tkt-529
+git -C "$TEMPLATE/wt" push -q origin tkt-529
+git -C "$TEMPLATE/wt" remote set-url origin ../origin.git
+rm -rf "$TEMPLATE/seed"
+
+# New case: a private copy of the bare origin and worktree. Sets CDIR, WT, S.
+# $1 is the case name.
 setup_case() {
   cp "$T/tkt-job-stub" "$T/bin/tkt-job"
   unset JOB_RECORD_SYSTEM_DIR DELEGATE_JOBS_DIR
   CDIR="$T/cases/$1"
+  mkdir -p "$CDIR"
+  cp -R "$TEMPLATE/." "$CDIR/"
   mkdir -p "$CDIR/run"
-  git init -q --bare "$CDIR/origin.git"
-  git --git-dir="$CDIR/origin.git" symbolic-ref HEAD refs/heads/main
-  git init -q "$CDIR/seed"
-  git -C "$CDIR/seed" symbolic-ref HEAD refs/heads/main
-  git -C "$CDIR/seed" config user.email t@t
-  git -C "$CDIR/seed" config user.name t
-  printf 'base\n' >"$CDIR/seed/base.txt"
-  git -C "$CDIR/seed" add base.txt
-  git -C "$CDIR/seed" commit -qm init
-  git -C "$CDIR/seed" remote add origin "$CDIR/origin.git"
-  git -C "$CDIR/seed" push -q origin main
   WT="$CDIR/wt"
-  git clone -q "$CDIR/origin.git" "$WT"
-  git -C "$WT" config user.email t@t
-  git -C "$WT" config user.name t
-  git -C "$WT" checkout -qb tkt-529
-  git -C "$WT" push -q origin tkt-529
   cat >"$CDIR/plan.md" <<'EOF'
 # Plan
 

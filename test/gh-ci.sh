@@ -18,7 +18,8 @@ fail() {
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-gh-ci.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 
-mkdir -p "$T/state"
+mkdir -p "$T/home" "$T/tmp" "$T/state"
+export HOME="$T/home" TMPDIR="$T/tmp"
 export GH_CI_REPO="O/N"
 export GH_CI_INTERVAL=7
 # CLAUDECODE must not change wait timeouts under test: each case below

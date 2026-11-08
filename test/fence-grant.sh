@@ -18,8 +18,8 @@ cleanup() {
   rm -rf "$T"
 }
 trap cleanup EXIT
-mkdir -p "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
-export TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_DELEGATE="$T/stubs/delegate" FW_BOX_HOST=stub-box
+mkdir -p "$T/home" "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
+export HOME="$T/home" TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_DELEGATE="$T/stubs/delegate" FW_BOX_HOST=stub-box
 export FW_TREE_CACHE="$T/tree-cache"
 # The Mac delegate probe reads the writer dir under the cache root; keep it
 # off the real user cache and any inherited override.
@@ -230,8 +230,8 @@ FC_STUB
 chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$FW_DELEGATE" "$T/stubs/file-claim"
 
 reset_case() {
-  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE" "$XDG_CACHE_HOME"
-  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs"
+  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$XDG_CACHE_HOME"
+  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE"
   : >"$FW_RUN/roster"
   DSESS_JSON='{"ok":true,"sessions":[]}'
   DSESS_RETRY_JSON='' DSESS_RETRY_FAIL=0 DSESS_FULL_FAIL=0
@@ -362,6 +362,7 @@ assert_rc 0 'guard calls file-claim reap before checking holders'
 
 # Recursive trees are cached by immutable tree SHA across sweeps.
 reset_case
+rm -rf "$FW_TREE_CACHE"
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'tree cache miss'
 [ "$(grep -c 'git/trees/' "$T/gh.log")" = 1 ] || fail 'cache miss fetches once'
@@ -1167,6 +1168,7 @@ assert_error 'tree SHA rate limit' 'ERROR gh tree SHA main API rate limit exceed
 
 reset_case
 GH_TREE_FAIL=1 GH_TREE_ERROR='API rate limit exceeded'
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'tree fetch rate limit' 'ERROR gh trees main API rate limit exceeded '
 [ ! -e "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'rate limited fetch leaves cache entry'
@@ -1174,12 +1176,14 @@ assert_error 'tree fetch rate limit' 'ERROR gh trees main API rate limit exceede
 reset_case
 GH_TREE_FAIL=1
 export GH_TREE_FAIL
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'tree fetch failure' 'ERROR gh trees main tree stub failure '
 
 reset_case
 GH_TREE_JSON='not-json'
 export GH_TREE_JSON
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'unparseable tree' 'ERROR tree of main unreadable or truncated'
 [ ! -e "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'unparseable tree leaves cache entry'
@@ -1187,6 +1191,7 @@ assert_error 'unparseable tree' 'ERROR tree of main unreadable or truncated'
 reset_case
 GH_TREE_JSON='{"truncated":true,"tree":[{"type":"blob","path":"docs/tui.md"}]}'
 export GH_TREE_JSON
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'truncated tree' 'ERROR tree of main unreadable or truncated'
 [ ! -e "$FW_TREE_CACHE/aaaaaaaa.tree" ] || fail 'truncated tree leaves cache entry'
@@ -1194,6 +1199,7 @@ assert_error 'truncated tree' 'ERROR tree of main unreadable or truncated'
 reset_case
 GH_TREE_JSON='{"truncated":false,"tree":[]}'
 export GH_TREE_JSON
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths docs/tui.md
 assert_error 'empty tree' 'ERROR tree of main is empty'
 
@@ -1338,6 +1344,7 @@ assert_line 'WOULD-GRANT docs/tui.md' 'other path is granted'
 reset_case
 GH_TREE_JSON='{"truncated":false,"tree":[{"type":"blob","path":"crates/extensions/src/process/tests.rs"},{"type":"blob","path":"crates/extensions/src/process_tests.rs"}]}'
 export GH_TREE_JSON
+rm -rf "$FW_TREE_CACHE"
 write_blob crates/extensions/src/process/tests.rs "$(python3 -c 'print("quiet\n" * 3153 + "other\n", end="")')"
 write_blob crates/extensions/src/process_tests.rs "$(python3 -c 'print("quiet\n" * 3153 + "envelope_line\n", end="")')"
 run_fg 77 --paths crates/extensions/src/process/tests.rs --expect crates/extensions/src/process/tests.rs:3154:envelope_line --dry
@@ -1347,6 +1354,7 @@ grep -qF 'contents/crates/extensions/src/process/tests.rs?ref=main' "$T/gh.log" 
 grep -qF 'contents/crates/extensions/src/process_tests.rs?ref=main' "$T/gh.log" || fail 'alternate blob fetched'
 ! cmp -s "$T/blobs/crates/extensions/src/process/tests.rs" "$T/blobs/crates/extensions/src/process_tests.rs" || fail 'same-basename fixture contents differ'
 assert_no_grant 'expected symbol absent'
+rm -rf "$FW_TREE_CACHE"
 
 reset_case
 write_blob crates/extensions/src/process/tests.rs "$(python3 -c 'print("quiet\n" * 3153 + "other\n", end="")')"
@@ -1369,6 +1377,7 @@ assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane ne
 
 # --repo routes every gh call, including the expected-symbol content read.
 reset_case
+rm -rf "$FW_TREE_CACHE"
 write_blob docs/tui.md 'needle\n'
 set_pr 11 fix/other docs/tui.md
 cat >"$T/pr/11.diff" <<'DIFF'
@@ -1389,6 +1398,7 @@ grep -qF 'pr diff 11 -R other/x --name-only' "$T/gh.log" || fail 'PR names use -
 grep -qF 'pr diff 11 -R other/x --allow-escape-sequences' "$T/gh.log" || fail 'PR diff uses --repo'
 
 reset_case
+rm -rf "$FW_TREE_CACHE"
 run_fg 77 --paths=docs/tui.md --repo=other/x --dry
 assert_rc 0 '--repo equals form'
 grep -qF 'api repos/other/x/git/trees/aaaaaaaa?recursive=1' "$T/gh.log" || fail 'repo equals form uses requested repo'
@@ -1817,4 +1827,92 @@ unset FW_NO_FENCE
 run_fg --require 77 --phase ship
 assert_rc 2 'ship phase without a grant is refused'
 
-echo 'fence-grant tests passed'
+# --- FW_RUN and box probes follow HOME and the current host ----------------
+reset_case
+HOST_BIN="$T/host-bin"
+DEFAULT_HOME="$T/default-home"
+DEFAULT_RUN="$DEFAULT_HOME/work/fiber-worktrees/flywheel/run"
+mkdir -p "$HOST_BIN" "$DEFAULT_RUN" "$DEFAULT_HOME/.local/bin"
+: >"$DEFAULT_RUN/roster"
+: >"$T/host-ssh.log"
+: >"$T/local-probe.log"
+cat >"$HOST_BIN/hostname" <<'HOSTNAME_STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf '%s\n' "${TEST_HOSTNAME_SHORT:-${TEST_HOSTNAME%%.*}}";;
+  *) printf '%s\n' "$TEST_HOSTNAME";;
+esac
+HOSTNAME_STUB
+cat >"$HOST_BIN/ssh" <<'HOST_SSH_STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >>"$T/host-ssh.log"
+case "${2:-}" in
+  *'echo FWSEC=UPTIME'*)
+    printf '%s\n' 'FWSEC=UPTIME' 'FWSEC=AGENTS' '[]' 'FWSEC=DELEGATE' DELEGATEOK \
+      'FWSEC=DSESS' '{"ok":true,"sessions":[]}' DSESSJSONOK 'FWSEC=PILANES' PILANESOK 'FWSEC=END'
+    ;;
+  *) printf '%s\n' '{"ok":true,"sessions":[]}' DSESSJSONOK;;
+esac
+HOST_SSH_STUB
+cat >"$HOST_BIN/uptime" <<'UPTIME_STUB'
+#!/usr/bin/env bash
+printf 'uptime\n' >>"$T/local-probe.log"
+printf '%s\n' 'local uptime'
+UPTIME_STUB
+cat >"$HOST_BIN/free" <<'FREE_STUB'
+#!/usr/bin/env bash
+printf '%s\n' 'local free'
+FREE_STUB
+cat >"$HOST_BIN/df" <<'DF_STUB'
+#!/usr/bin/env bash
+printf '%s\n' 'local disk'
+DF_STUB
+cat >"$HOST_BIN/claude" <<'CLAUDE_BOX_STUB'
+#!/usr/bin/env bash
+printf '%s\n' '[]'
+CLAUDE_BOX_STUB
+cat >"$DEFAULT_HOME/.local/bin/delegate" <<'DELEGATE_BOX_STUB'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$T/local-delegate-count" ] || count=$(cat "$T/local-delegate-count")
+count=$((count + 1))
+printf '%s\n' "$count" >"$T/local-delegate-count"
+if [ "$count" -eq 1 ]; then
+  printf '%s\n' 'not-json'
+else
+  printf '%s\n' '{"ok":true,"sessions":[]}'
+fi
+DELEGATE_BOX_STUB
+chmod +x "$HOST_BIN"/* "$DEFAULT_HOME/.local/bin/delegate"
+(
+  export HOME="$DEFAULT_HOME" PATH="$HOST_BIN:$PATH" FW_BOX_HOST=roundhouse-7010-plus-1.local
+  unset FW_RUN FW_SSH
+  export TEST_HOSTNAME=roundhouse-7010-plus-1.other TEST_HOSTNAME_SHORT=roundhouse-7010-plus-1
+  run_fg 88 --paths docs/tui.md --dry
+  assert_rc 0 'box host probe succeeds locally'
+  [ -s "$T/local-probe.log" ] || fail 'box host executes the one-round-trip probe locally'
+  [ "$(cat "$T/local-delegate-count")" = 2 ] || fail 'box host retries malformed delegate sessions locally'
+  [ ! -s "$T/host-ssh.log" ] || fail 'box host does not call ssh'
+) || exit 1
+(
+  export HOME="$DEFAULT_HOME" PATH="$HOST_BIN:$PATH" FW_BOX_HOST=roundhouse-7010-plus-1.local
+  unset FW_RUN FW_SSH
+  export TEST_HOSTNAME=elsewhere.local
+  rm -f "$T/local-delegate-count" "$T/local-probe.log" "$T/host-ssh.log"
+  run_fg 88 --paths docs/tui.md --dry
+  assert_rc 0 'off-box probe succeeds over ssh'
+  [ ! -s "$T/local-probe.log" ] || fail 'off-box does not execute the probe locally'
+  [ "$(head -n 1 "$T/host-ssh.log")" = roundhouse-7010-plus-1.local ] || fail 'off-box ssh targets FW_BOX_HOST'
+) || exit 1
+(
+  export HOME="$DEFAULT_HOME" PATH="$HOST_BIN:$PATH" FW_BOX_HOST=roundhouse-7010-plus-1.local
+  unset FW_RUN FW_SSH
+  export TEST_HOSTNAME=elsewhere.local
+  bash "$FG" --require 9876 --phase plan >"$T/default-run.out" 2>"$T/default-run.err"
+  default_rc=$?
+  [ "$default_rc" = 2 ] || fail 'missing default-path grant is refused'
+  grep -qF "matching $DEFAULT_RUN/fiber-9876*-fence-grant*.md" "$T/default-run.err" \
+    || fail 'FW_RUN defaults under fake HOME'
+) || exit 1
+
+printf 'fence-grant tests passed\n'

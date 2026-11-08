@@ -71,5 +71,5 @@ with open(sys.argv[3], "w") as output:
 
 # Same default run directory as fence-grant; tests set FW_RUN to an isolated path.
 ticket_states_run_dir() {
-  printf '%s' "${FW_RUN:-/Users/aakshintala/work/fiber-worktrees/flywheel/run}"
+  printf '%s' "${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"
 }
