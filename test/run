@@ -8,42 +8,23 @@ unset CLAUDECODE
 
 D="$(cd "$(dirname "$0")" && pwd)"
 
-# --- parallel helper: run suites at most 3 at once. Each suite's output
-# goes to its own file under $PAR_T (a temp dir created with mktemp -d);
-# each file is printed without interleaving in allowlist order as each
-# finishes (batches block in order). Any failure sets failed=1.
+# --- parallel helper: run suites at most 3 at once from one pool (xargs -P),
+# so a slot frees as soon as any suite ends rather than when its batch of
+# three does. Each suite's output, exit code and wall seconds go to files
+# under $PAR_T (a temp dir created with mktemp -d); once all have ended,
+# each log is printed without interleaving in allowlist order. Put the
+# longest suites first. Any failure sets failed=1.
 run_parallel() {
-  _batch=""
-  _count=0
+  printf '%s\n' "$@" | xargs -P 3 -I{} bash -c '
+    _b="$(basename "$1")"; _s=$SECONDS
+    bash "$1" >"$2/$_b.log" 2>&1; _r=$?
+    echo $((SECONDS - _s)) >"$2/$_b.secs"; echo "$_r" >"$2/$_b.rc"' _ {} "$PAR_T"
   for _t in "$@"; do
-    _base="$(basename "$_t")"
-    (_s=$SECONDS; bash "$_t" >"$PAR_T/$_base.log" 2>&1; _r=$?
-      echo $((SECONDS - _s)) >"$PAR_T/$_base.secs"; exit "$_r") &
-    _batch="$_batch $!:$_base"
-    _count=$((_count + 1))
-    if [ "$_count" -ge 3 ]; then
-      for _item in $_batch; do
-        _pid="${_item%%:*}"; _name="${_item##*:}"
-        wait "$_pid"; _rc=$?
-        cat "$PAR_T/$_name.log"
-        _secs="$(cat "$PAR_T/$_name.secs" 2>/dev/null || echo '?')"
-        if [ "$_rc" -eq 0 ]; then
-          echo "PASS: $_name (${_secs}s)"
-        else
-          echo "FAIL: $_name (exit $_rc, ${_secs}s)" >&2
-          failed=1
-        fi
-      done
-      _batch=""
-      _count=0
-    fi
-  done
-  for _item in $_batch; do
-    _pid="${_item%%:*}"; _name="${_item##*:}"
-    wait "$_pid"; _rc=$?
-    cat "$PAR_T/$_name.log"
+    _name="$(basename "$_t")"
+    cat "$PAR_T/$_name.log" 2>/dev/null
+    _rc="$(cat "$PAR_T/$_name.rc" 2>/dev/null || echo 'none')"
     _secs="$(cat "$PAR_T/$_name.secs" 2>/dev/null || echo '?')"
-    if [ "$_rc" -eq 0 ]; then
+    if [ "$_rc" = "0" ]; then
       echo "PASS: $_name (${_secs}s)"
     else
       echo "FAIL: $_name (exit $_rc, ${_secs}s)" >&2
@@ -109,18 +90,19 @@ for t in "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/check-pack
     failed=1
   fi
 done
-# Allowlist (exactly these 18 isolated suites run in parallel, at most 3):
-# ship-pr.sh, tkt-build.sh, tkt-start.sh, file-claim.sh, tkt-plan.sh,
-# tkt-fix.sh, tkt-job.sh, tkt-gate.sh, review-pr.sh, delegate-canary.sh,
-# tkt-ship.sh, gh-ci.sh, ci-health.sh, ci-friction.sh, plan-sweep.sh,
-# fence-grant.sh, lanestat.sh, git-hook-guard.sh.
+# Allowlist (exactly these 18 isolated suites run in parallel, at most 3),
+# longest first by the 2026-11-07 profile: ship-pr.sh, tkt-build.sh,
+# tkt-start.sh, tkt-plan.sh, tkt-fix.sh, file-claim.sh, review-pr.sh,
+# fence-grant.sh, tkt-job.sh, delegate-canary.sh, tkt-gate.sh, gh-ci.sh,
+# tkt-ship.sh, lanestat.sh, plan-sweep.sh, ci-friction.sh,
+# git-hook-guard.sh, ci-health.sh.
 PAR_T="$(mktemp -d "${TMPDIR:-/tmp}/test-run-parallel.XXXXXX")"
 trap 'rm -rf "$PAR_T"' EXIT
-run_parallel "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/file-claim.sh "$D"/tkt-plan.sh \
-  "$D"/tkt-fix.sh "$D"/tkt-job.sh "$D"/tkt-gate.sh "$D"/review-pr.sh \
-  "$D"/delegate-canary.sh "$D"/tkt-ship.sh "$D"/gh-ci.sh \
-  "$D"/ci-health.sh "$D"/ci-friction.sh "$D"/plan-sweep.sh \
-  "$D"/fence-grant.sh "$D"/lanestat.sh "$D"/git-hook-guard.sh
+run_parallel "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/tkt-plan.sh \
+  "$D"/tkt-fix.sh "$D"/file-claim.sh "$D"/review-pr.sh "$D"/fence-grant.sh \
+  "$D"/tkt-job.sh "$D"/delegate-canary.sh "$D"/tkt-gate.sh "$D"/gh-ci.sh \
+  "$D"/tkt-ship.sh "$D"/lanestat.sh "$D"/plan-sweep.sh "$D"/ci-friction.sh \
+  "$D"/git-hook-guard.sh "$D"/ci-health.sh
 _s=$SECONDS
 if bash "$D"/cargo-slot.sh; then
   echo "PASS: cargo-slot.sh ($((SECONDS - _s))s)"
