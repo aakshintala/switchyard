@@ -122,7 +122,9 @@
 #        On every invocation, before step 3, delete only regular xcrun_db-* files directly under
 #        ${TMPDIR:-/tmp} when they are over a day old; ignore deletion errors. With --gate,
 #        require at least 20 GB free on the volumes holding --worktree and ${TMPDIR:-/tmp}.
-#        Both gate runs set NEXTEST_RETRIES=1, retrying failed nextest tests once.
+#        Both gate runs set NEXTEST_RETRIES=1, retrying failed nextest tests once, unless
+#        --worktree's .config/nextest.toml sets retries: then they unset NEXTEST_RETRIES
+#        and leave the repo's own retry policy in charge.
 #        Report each FLAKY result and its failed-attempt panic text; retries do not
 #        change the gate's exit status.
 #        With --gate or --merge-check, step 7 refetches origin/main after step 2: when it is not
@@ -369,7 +371,13 @@ run_gate() {
   output_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-${check_file_label}.XXXXXX")"
   cargo_slot_dir="$(mktemp -d "${TMPDIR:-/tmp}/ship-pr-cargo-slot.XXXXXX")"
   ln -s "$here/cargo-slot" "$cargo_slot_dir/cargo"
-  if (cd "$worktree" && PATH="$cargo_slot_dir:$PATH" NEXTEST_RETRIES=1 bash -c "$check_cmd" </dev/null) >"$output_file" 2>&1; then
+  if (cd "$worktree" || exit
+    if grep -Eq '^[[:space:]]*retries[[:space:]]*=' .config/nextest.toml 2>/dev/null; then
+      unset NEXTEST_RETRIES
+    else
+      export NEXTEST_RETRIES=1
+    fi
+    PATH="$cargo_slot_dir:$PATH" bash -c "$check_cmd" </dev/null) >"$output_file" 2>&1; then
     rm -rf "$cargo_slot_dir"
     if report_flakes "$output_file"; then
       GH_CI_LOG_LINES=0 bash "$here/gh-ci" panics <"$output_file" >&2

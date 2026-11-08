@@ -983,6 +983,13 @@ ship --gate 'echo "$NEXTEST_RETRIES" >>"$ST/retries"'
 expect 0 "both gate steps enable nextest retries"
 [ "$(cat "$ST/retries")" = "1
 1" ] || fail "both gate steps see NEXTEST_RETRIES=1: [$(cat "$ST/retries")]"
+setup; mkdir -p "$WT/.config"; printf '[profile.ci]\nretries = 0\n' >"$WT/.config/nextest.toml"
+git -C "$WT" add .config && git -C "$WT" commit -qm nextest && git -C "$WT" push -q origin feature
+HEAD0="$(git -C "$WT" rev-parse HEAD)"; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
+NEXTEST_RETRIES=5 ship --gate 'echo "${NEXTEST_RETRIES-unset}" >>"$ST/retries"'
+expect 0 "a repo nextest retry policy keeps ship-pr's override off"
+[ "$(cat "$ST/retries")" = "unset
+unset" ] || fail "a nextest config with retries gets no NEXTEST_RETRIES: [$(cat "$ST/retries")]"
 FALLBACK_LINE='cannot read whether required checks on main are strict; assuming strict'
 
 setup; ship; expect 0 "default reads strict"
