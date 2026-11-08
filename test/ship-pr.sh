@@ -63,7 +63,66 @@ git -C "$T/template-seed" push -q "$TEMPLATE" main
 
 # --- fake gh. Reads $ST (state dir) and $ORIGIN. The PR head is origin's
 # --- feature branch, so a push is visible to gh-ci. --jq runs through jq.
-gh() (
+gh() {
+  local many_rid="${3:-}" many_fields="" many_jq=""
+  # The stress case below intentionally exercises all 3,000 failed runs. Keep
+  # its fake API responses equivalent, but avoid a nested shell and jq process
+  # for every attempt read; the test still checks every rerun call.
+  if [ -e "$ST/jobs-many-cancelled.json" ] && [ "${1:-}" = run ]; then
+    case "${2:-}" in
+      list)
+        printf 'gh %s\n' "$*" >>"$ST/gh.log"
+        if [[ "$*" == *'--json databaseId,name,event,conclusion,workflowName,status'* ]]; then
+          # gh-ci needs one cancelled job to classify the failure as external;
+          # the full 3,000-run list below remains for ship-pr's rerun stress case.
+          printf '%s\n' '[{"databaseId":1000,"name":"ci","event":"push","conclusion":"cancelled","workflowName":"CI-0","status":"completed"}]'
+        elif [ -e "$ST/run-list.json" ]; then
+          cat "$ST/run-list.json"
+        else
+          echo '[]'
+        fi
+        return 0 ;;
+      view)
+        printf 'gh %s\n' "$*" >>"$ST/gh.log"
+        shift 3
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --json) many_fields="$2"; shift 2;;
+            --jq) many_jq="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        case "$many_fields" in
+          jobs)
+            printf '%s\n' '{"jobs":[{"conclusion":"cancelled","databaseId":1,"name":"ci"}]}' ;;
+          status)
+            printf '%s\n' '{"status":"completed"}' ;;
+          attempt,status)
+            if [ -e "$ST/many-reruns-started" ]; then many_rid=2; else many_rid=1; fi
+            if [ "$many_jq" = '[.attempt, .status] | @tsv' ]; then
+              printf '%s\tcompleted\n' "$many_rid"
+            else
+              printf '{"attempt":%s,"status":"completed"}\n' "$many_rid"
+            fi ;;
+          *) echo "fake gh: unexpected many-run view $many_fields" >&2; return 2;;
+        esac
+        return 0 ;;
+      rerun)
+        printf 'gh %s\n' "$*" >>"$ST/gh.log"
+        if [ ! -e "$ST/many-reruns-started" ]; then
+          touch "$ST/many-reruns-started"
+          printf '%s\n' '[{"bucket":"pass","name":"ci"}]' >"$ST/checks"
+        fi
+        return 0 ;;
+    esac
+  fi
+  if [ -e "$ST/jobs-many-cancelled.json" ] && [ "${1:-}" = api ] \
+    && [[ "$*" == *actions/runs/* ]]; then
+    printf 'gh %s\n' "$*" >>"$ST/gh.log"
+    printf ' \n'
+    return 0
+  fi
+  (
   set -euo pipefail
   echo "gh $*" >>"$ST/gh.log"
   rd() { [ -e "$ST/$1" ] && cat "$ST/$1" || echo "$2"; }
@@ -261,7 +320,8 @@ gh() (
       [ ! -e "$ST/merge-deletes-branch" ] || git --git-dir="$ORIGIN" update-ref -d refs/heads/feature;;
     *) echo "fake gh: unknown $sub" >&2; exit 2;;
   esac
-)
+  )
+}
 sleep() ( echo "$*" >>"$ST/sleeps.txt" )
 export -f gh sleep
 
