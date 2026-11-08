@@ -11,6 +11,7 @@ fail() {
 }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-fence-grant.XXXXXX")"
+ORIGINAL_PATH=$PATH
 export T
 PI_PID=""
 cleanup() {
@@ -109,6 +110,13 @@ cat >"$FW_CLAUDE" <<'CLAUDE_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/claude.log"
 [ "${CLAUDE_FAIL:-0}" != 1 ] || { echo 'claude stub failure' >&2; exit 1; }
+if [ "${CLAUDE_NONBLOCKING:-0}" = 1 ]; then
+  python3 -c 'import fcntl,os
+flags = fcntl.fcntl(1, fcntl.F_GETFL)
+fcntl.fcntl(1, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+os.write(1, b"[]")'
+  exit $?
+fi
 printf '%s' "${CLAUDE_JSON:-[]}"
 CLAUDE_STUB
 
@@ -124,20 +132,36 @@ cat >"$FW_SSH" <<'SSH_STUB'
 printf '%s\n' "$*" >>"$T/ssh.log"
 [ "${SSH_FAIL:-0}" != 1 ] || { echo 'ssh stub failure' >&2; exit 255; }
 [ -z "${SSH_STDERR:-}" ] || printf '%s\n' "$SSH_STDERR" >&2
-if [ -n "${SSH_OUT:-}" ]; then printf '%s\n' "$SSH_OUT"; elif [[ "${2:-}" == *'echo FWSEC=UPTIME'* ]]; then
-  printf '%s\n' 'FWSEC=UPTIME' 'FWSEC=AGENTS' '[]' 'FWSEC=DELEGATE' DELEGATEOK \
-    'FWSEC=DSESS' "$DSESS_JSON"
+if [ "${SSH_EXEC:-0}" = 1 ]; then
+  sh -c "$2" | python3 "$T/slow-box-reader.py"
+elif [ -n "${SSH_OUT:-}" ]; then printf '%s\n' "$SSH_OUT"; elif [[ "${2:-}" == *FWSEC=UPTIME* ]]; then
+  printf '%s\n' '' 'FWSEC=UPTIME' '' 'FWSEC=AGENTS' '[]' '' 'FWSEC=DELEGATE' DELEGATEOK '' 'FWSEC=DSESS'
+  if [ "${DSESS_NO_NEWLINE:-0}" = 1 ]; then printf '%s' "$DSESS_JSON"; else printf '%s\n' "$DSESS_JSON"; fi
   case "${2:-}" in
     *'&& echo DSESSJSONOK'*) [ "${DSESS_FULL_FAIL:-0}" != 1 ] && printf '%s\n' DSESSJSONOK;;
     *) printf '%s\n' DSESSJSONOK;;
   esac
-  printf '%s\n' 'FWSEC=PILANES' PILANESOK 'FWSEC=END'
+  printf '%s\n' '' 'FWSEC=PILANES' PILANESOK '' 'FWSEC=END'
 else
   printf '%s\n' "${DSESS_RETRY_JSON:-$DSESS_JSON}"
   [ "${DSESS_RETRY_FAIL:-0}" != 1 ] || exit 1
   printf '%s\n' DSESSJSONOK
 fi
 SSH_STUB
+cat >"$T/slow-box-reader.py" <<'SLOW_BOX_READER'
+import os
+import time
+
+time.sleep(0.25)
+while True:
+    block = os.read(0, 4096)
+    if not block:
+        break
+    written = 0
+    while written < len(block):
+        written += os.write(1, block[written:])
+    time.sleep(0.01)
+SLOW_BOX_READER
 cat >"$T/stubs/file-claim" <<'FC_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/file-claim.log"
@@ -235,9 +259,11 @@ reset_case() {
   mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE"
   : >"$FW_RUN/roster"
   DSESS_JSON='{"ok":true,"sessions":[]}'
-  DSESS_RETRY_JSON='' DSESS_RETRY_FAIL=0 DSESS_FULL_FAIL=0
+  DSESS_RETRY_JSON='' DSESS_RETRY_FAIL=0 DSESS_FULL_FAIL=0 DSESS_NO_NEWLINE=0 SSH_EXEC=0 CLAUDE_NONBLOCKING=0
   MAC_DSESS_JSON='{"ok":true,"sessions":[]}' MAC_DELEGATE_FAIL=0
-  export DSESS_JSON DSESS_RETRY_JSON DSESS_RETRY_FAIL DSESS_FULL_FAIL MAC_DSESS_JSON MAC_DELEGATE_FAIL
+  export DSESS_JSON DSESS_RETRY_JSON DSESS_RETRY_FAIL DSESS_FULL_FAIL DSESS_NO_NEWLINE SSH_EXEC CLAUDE_NONBLOCKING MAC_DSESS_JSON MAC_DELEGATE_FAIL
+  PATH=$ORIGINAL_PATH
+  export PATH
   : >"$T/gh.log"
   : >"$T/claude.log"
   : >"$T/ssh.log"
@@ -440,9 +466,58 @@ assert_line 'WOULD-GRANT' 'stopped session grant'
 reset_case
 run_fg 77 --paths docs/tui.md
 assert_rc 0 'valid box sessions need one probe'
-[ "$(grep -cF 'echo FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "valid box sessions use one full probe: $(cat "$T/ssh.log")"
+[ "$(grep -cF 'FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "valid box sessions use one full probe: $(cat "$T/ssh.log")"
 [ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 1 ] || fail "valid box sessions have no retry: $(cat "$T/ssh.log")"
-grep -qF 'delegate session list --json 2>/dev/null && echo DSESSJSONOK' "$T/ssh.log" || fail "box marker is conditional on delegate success: $(cat "$T/ssh.log")"
+grep -qF 'delegate session list --json 2>/dev/null' "$T/ssh.log" || fail "box delegate command is present: $(cat "$T/ssh.log")"
+
+# Reproduce a command that makes its inherited stdout pipe nonblocking, then
+# make a large delegate response contend with a throttled reader.
+reset_case
+mkdir -p "$HOME/.local/bin"
+cat >"$HOME/.local/bin/delegate" <<'LARGE_DELEGATE'
+#!/usr/bin/env python3
+import fcntl
+import json
+import os
+import sys
+
+payload = json.dumps({
+    "ok": True,
+    "sessions": [{"id": "abcdef123456", "status": "running"}],
+    "padding": "x" * 220000,
+}, separators=(",", ":")).encode() + bytes([10])
+flags = fcntl.fcntl(1, fcntl.F_GETFL)
+if flags & os.O_NONBLOCK:
+    try:
+        written = os.write(1, payload)
+    except BlockingIOError:
+        sys.exit(1)
+    sys.exit(0 if written == len(payload) else 1)
+view = memoryview(payload)
+while view:
+    view = view[os.write(1, view):]
+LARGE_DELEGATE
+chmod +x "$HOME/.local/bin/delegate"
+printf '%b\n' '2026-11-08 launch\t88\tbox\tfiber-88\tabcdef123456' >"$FW_RUN/roster"
+printf 'Grant 1\n\nTicket: 88\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-88-fence-grant-1.md"
+SSH_EXEC=1 CLAUDE_NONBLOCKING=1
+export SSH_EXEC CLAUDE_NONBLOCKING
+PATH="$T/stubs:$ORIGINAL_PATH"
+export PATH
+run_fg 77 --paths docs/tui.md
+assert_rc 0 'large box sessions survive Claude nonblocking stdout'
+assert_contains 'OVERLAP docs/tui.md lane #88' 'large box session section remains intact'
+assert_line 'GRANT docs/tui.md' 'large box probe grants successfully'
+grep -qF 'claude agents --json | cat' "$T/ssh.log" || fail "Claude gets its own pipe: $(cat "$T/ssh.log")"
+grep -qF 'delegate session list --json 2>/dev/null | cat' "$T/ssh.log" || fail "delegate gets its own pipe: $(cat "$T/ssh.log")"
+
+# A newline-less partial delegate response must not hide the following section.
+reset_case
+DSESS_JSON='{"ok":true,"sessions":[{"id":"'
+DSESS_NO_NEWLINE=1 DSESS_FULL_FAIL=1
+export DSESS_JSON DSESS_NO_NEWLINE DSESS_FULL_FAIL
+run_fg 77 --paths docs/tui.md
+assert_error 'newline-less box delegate output reports DSESS failure' 'ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON'
 
 reset_case
 DSESS_FULL_FAIL=1
@@ -457,7 +532,7 @@ DSESS_RETRY_JSON='{"ok":true,"sessions":[]}'
 export DSESS_JSON DSESS_RETRY_JSON
 run_fg 77 --paths docs/tui.md
 assert_rc 0 'truncated box sessions recover on retry'
-[ "$(grep -cF 'echo FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "truncated box sessions use one full probe: $(cat "$T/ssh.log")"
+[ "$(grep -cF 'FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "truncated box sessions use one full probe: $(cat "$T/ssh.log")"
 [ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 2 ] || fail "truncated box sessions use one retry: $(cat "$T/ssh.log")"
 [ "$(grep -cF 'stub-box ~/.local/bin/delegate session list --json' "$T/ssh.log")" = 1 ] || fail "truncated box sessions retry only the session list: $(cat "$T/ssh.log")"
 
@@ -467,7 +542,7 @@ DSESS_RETRY_JSON="$DSESS_JSON"
 export DSESS_JSON DSESS_RETRY_JSON
 run_fg 77 --paths docs/tui.md
 assert_error 'always-truncated box sessions fail closed' 'ERROR box delegate sessions: no DSESSJSONOK marker, or the roster mapper refused the JSON'
-[ "$(grep -cF 'echo FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "always-truncated box sessions use one full probe: $(cat "$T/ssh.log")"
+[ "$(grep -cF 'FWSEC=UPTIME' "$T/ssh.log")" = 1 ] || fail "always-truncated box sessions use one full probe: $(cat "$T/ssh.log")"
 [ "$(wc -l <"$T/ssh.log" | tr -d ' ')" = 3 ] || fail "always-truncated box sessions use two retries: $(cat "$T/ssh.log")"
 [ "$(grep -cF 'stub-box ~/.local/bin/delegate session list --json' "$T/ssh.log")" = 2 ] || fail "always-truncated box sessions retry only the session list: $(cat "$T/ssh.log")"
 
@@ -1863,9 +1938,9 @@ cat >"$HOST_BIN/ssh" <<'HOST_SSH_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$1" >>"$T/host-ssh.log"
 case "${2:-}" in
-  *'echo FWSEC=UPTIME'*)
-    printf '%s\n' 'FWSEC=UPTIME' 'FWSEC=AGENTS' '[]' 'FWSEC=DELEGATE' DELEGATEOK \
-      'FWSEC=DSESS' '{"ok":true,"sessions":[]}' DSESSJSONOK 'FWSEC=PILANES' PILANESOK 'FWSEC=END'
+  *FWSEC=UPTIME*)
+    printf '%s\n' '' 'FWSEC=UPTIME' '' 'FWSEC=AGENTS' '[]' '' 'FWSEC=DELEGATE' DELEGATEOK \
+      '' 'FWSEC=DSESS' '{"ok":true,"sessions":[]}' DSESSJSONOK '' 'FWSEC=PILANES' PILANESOK '' 'FWSEC=END'
     ;;
   *) printf '%s\n' '{"ok":true,"sessions":[]}' DSESSJSONOK;;
 esac
