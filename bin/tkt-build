@@ -9,10 +9,10 @@ usage() { echo "$USAGE" >&2; exit 2; }
 [ $# -ge 1 ] || usage
 case "$1" in -h|--help) echo "$USAGE"; exit 0 ;; esac
 state="$1"; shift
-from=lane; no_verifier=0; lane_model=""; review_model=""; overbuild_model=""
+from=lane; from_given=0; no_verifier=0; lane_model=""; review_model=""; overbuild_model=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --from) [ $# -ge 2 ] || usage; from="$2"; shift 2 ;;
+    --from) [ $# -ge 2 ] || usage; from="$2"; from_given=1; shift 2 ;;
     --no-verifier) no_verifier=1; shift ;;
     --lane-model) [ $# -ge 2 ] || usage; lane_model="$2"; shift 2 ;;
     --review-model) [ $# -ge 2 ] || usage; review_model="$2"; shift 2 ;;
@@ -111,7 +111,9 @@ lookup_branch_pr() {
   pr_json="$(gh pr list --head "$branch" --repo "$repo" --json number,headRefOid 2>/dev/null || true)"
   pr="$(jq -r '.[0].number // empty' <<<"$pr_json" 2>/dev/null || true)"
   head="$(jq -r '.[0].headRefOid // empty' <<<"$pr_json" 2>/dev/null || true)"
-  [ -n "${pr:-}" ] && [ -n "${head:-}" ] || emit "PRECONDITION missing=pr" 2 "tkt-build: no PR for branch $branch (gh pr list --head $branch --json number,headRefOid)" "$(repair_hint pr)"
+  if [ -n "${pr:-}" ] && [ -n "${head:-}" ]; then return 0; fi
+  [ "${1:-}" = optional ] && return 1
+  emit "PRECONDITION missing=pr" 2 "tkt-build: no PR for branch $branch (gh pr list --head $branch --json number,headRefOid)" "$(repair_hint pr)"
 }
 fetch_branch_pr() {
   lookup_branch_pr
@@ -195,6 +197,27 @@ part_suffix="$(part_findings_suffix "$(tkt get part 2>/dev/null || true)")"
 # plan without the line ends in a PR; Outcome: measurement ends in the gate.
 outcome="$(plan_outcome "$plan" 2>/dev/null || true)"
 [ -n "$outcome" ] || outcome=pr
+last_review_status="$(tkt get review_status 2>/dev/null || true)"
+# A completed lane may have opened the branch PR before the state saved its
+# keys. Refuse the default replay and name the continuation after the last
+# recorded review status: gate for pending/failed or unknown, review after ready/done.
+if [ "$from_given" -eq 0 ] && [ "$from" = lane ] && [ "$outcome" != measurement ] && \
+  { [ -z "$(tkt get pr 2>/dev/null || true)" ] || [ -z "$(tkt get head 2>/dev/null || true)" ]; }; then
+  lane_job="$(tkt get job.lane 2>/dev/null || true)"
+  if [ -n "$lane_job" ]; then
+    lane_record="$(bash "$bin_dir/job-record" "$lane_job" 2>/dev/null || true)"
+    lane_status="$(jq -r '.status // .result.status // empty' "$lane_record" 2>/dev/null || true)"
+    if [ -f "$lane_record" ] && [ "$lane_status" = DONE ] && lookup_branch_pr optional; then
+      case "$last_review_status" in
+        ready|done) repair_from=review ;;
+        *) repair_from=gate ;;
+      esac
+      emit "PRECONDITION missing=pr" 2 \
+        "tkt-build: lane job $lane_job is DONE and branch PR $pr is open, but state lacks pr/head; refusing to replay the lane" \
+        "Repair command: tkt-build $state --from $repair_from"
+    fi
+  fi
+fi
 if [ "$outcome" = measurement ]; then
   tkt set review_status skipped
 elif [ "$(tkt get review_status 2>/dev/null || true)" != done ]; then
