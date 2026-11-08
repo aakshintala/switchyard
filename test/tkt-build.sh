@@ -298,33 +298,41 @@ Map every mutant CI listed for PR #__PR__ (issue #__ISSUE__) in __REPO__, in wor
 __MUTANTS__
 EOF
 
-# New case: a bare origin, a seed main, and a clone worktree on branch tkt-528
-# with one pushed commit covered by the plan's Files. Sets CDIR, WT, S and H.
+# Build the common local Git history once. Each case copies its own origin and
+# worktree so fetch/push and mutation checks still run against isolated repos.
+CASE_TEMPLATE="$T/case-template"
+mkdir -p "$CASE_TEMPLATE"
+git init -q --bare "$CASE_TEMPLATE/origin.git"
+git --git-dir="$CASE_TEMPLATE/origin.git" symbolic-ref HEAD refs/heads/main
+git init -q "$CASE_TEMPLATE/seed"
+git -C "$CASE_TEMPLATE/seed" symbolic-ref HEAD refs/heads/main
+git -C "$CASE_TEMPLATE/seed" config user.email t@t
+git -C "$CASE_TEMPLATE/seed" config user.name t
+printf 'base\n' >"$CASE_TEMPLATE/seed/base.txt"
+git -C "$CASE_TEMPLATE/seed" add base.txt
+git -C "$CASE_TEMPLATE/seed" commit -qm init
+git -C "$CASE_TEMPLATE/seed" push -q "$CASE_TEMPLATE/origin.git" main
+git -C "$CASE_TEMPLATE/seed" remote add origin ../origin.git
+git -C "$CASE_TEMPLATE/seed" rev-parse HEAD >"$CASE_TEMPLATE/main0"
+git clone -q "$CASE_TEMPLATE/origin.git" "$CASE_TEMPLATE/wt"
+git -C "$CASE_TEMPLATE/wt" config user.email t@t
+git -C "$CASE_TEMPLATE/wt" config user.name t
+git -C "$CASE_TEMPLATE/wt" checkout -qb tkt-528
+mkdir -p "$CASE_TEMPLATE/wt/src"
+printf 'a\n' >"$CASE_TEMPLATE/wt/src/a.txt"
+git -C "$CASE_TEMPLATE/wt" add src/a.txt
+git -C "$CASE_TEMPLATE/wt" commit -qm change
+git -C "$CASE_TEMPLATE/wt" push -q origin tkt-528
+git -C "$CASE_TEMPLATE/wt" remote set-url origin ../origin.git
+
+# New case: private copies of the bare origin, seed repo and tkt-528 worktree.
+# Sets CDIR, WT, S and H.
 setup_case() {
   CDIR="$T/cases/$1"
+  mkdir -p "$CDIR"
+  cp -R "$CASE_TEMPLATE/." "$CDIR/"
   mkdir -p "$CDIR/run"
-  git init -q --bare "$CDIR/origin.git"
-  git --git-dir="$CDIR/origin.git" symbolic-ref HEAD refs/heads/main
-  git init -q "$CDIR/seed"
-  git -C "$CDIR/seed" symbolic-ref HEAD refs/heads/main
-  git -C "$CDIR/seed" config user.email t@t
-  git -C "$CDIR/seed" config user.name t
-  printf 'base\n' >"$CDIR/seed/base.txt"
-  git -C "$CDIR/seed" add base.txt
-  git -C "$CDIR/seed" commit -qm init
-  git -C "$CDIR/seed" remote add origin "$CDIR/origin.git"
-  git -C "$CDIR/seed" push -q origin main
-  git -C "$CDIR/seed" rev-parse HEAD >"$CDIR/main0"
   WT="$CDIR/wt"
-  git clone -q "$CDIR/origin.git" "$WT"
-  git -C "$WT" config user.email t@t
-  git -C "$WT" config user.name t
-  git -C "$WT" checkout -qb tkt-528
-  mkdir -p "$WT/src"
-  printf 'a\n' >"$WT/src/a.txt"
-  git -C "$WT" add src/a.txt
-  git -C "$WT" commit -qm change
-  git -C "$WT" push -q origin tkt-528
   H="$(git -C "$WT" rev-parse HEAD)"
   printf '%s' "$H" >"$T/prhead"
   printf '7' >"$T/prnum"
