@@ -285,7 +285,17 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
       recover_new_head="$actual"
       keep=1
     fi
-    [ "$keep" -eq 1 ] || emit "DRIFT" 3 "state head=$stored" "PR head=$prhead" "worktree HEAD=$actual"
+    if [ "$keep" -eq 0 ]; then
+      # A pushed rebase or main merge leaves PR head == worktree HEAD on a
+      # clean tree, descended from the state head. Name the supported route;
+      # the head never moves here.
+      route=""
+      if [ "$prhead" = "$actual" ] && [ "$clean" -eq 1 ] \
+        && git -C "$worktree" merge-base --is-ancestor "$stored" "$actual" 2>/dev/null; then
+        route="after a rebase or main merge, run: tkt-state $state set head $actual"
+      fi
+      emit "DRIFT" 3 "state head=$stored" "PR head=$prhead" "worktree HEAD=$actual" ${route:+"$route"}
+    fi
   fi
 fi
 recover_unpushed="${recover_unpushed:-0}"
