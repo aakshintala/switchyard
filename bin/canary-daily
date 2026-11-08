@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# canary-daily: run and report the daily jcode-bench parity canary.
+# Usage: canary-daily run [--full] [--cap N] [--harness h]... [--task t]...
+#        canary-daily report [--days N]
+#        canary-daily install [--print] [--at HH:MM]
+# CANARY_DIR defaults to "$HOME/canary"; CANARY_TIMEOUT is passed through.
+set -euo pipefail
+
+usage() {
+  echo "usage: canary-daily run [--full] [--cap N] [--harness h]... [--task t]..." >&2
+  echo "       canary-daily report [--days N]" >&2
+  echo "       canary-daily install [--print] [--at HH:MM]" >&2
+  exit 2
+}
+
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$script_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+script_path="$script_dir/$(basename "$script_path")"
+helper="$script_dir/lib/canary-daily.py"
+DAILY_TMP_DIR=""
+DAILY_LOCK_ROOT=""
+DAILY_LOCK_FALLBACK=0
+
+cleanup_run() {
+  if [ -n "$DAILY_TMP_DIR" ]; then rm -rf "$DAILY_TMP_DIR"; fi
+  if [ "$DAILY_LOCK_FALLBACK" -eq 1 ]; then
+    rmdir "$DAILY_LOCK_ROOT/.canary-daily.lock" 2>/dev/null || true
+  fi
+}
+
+canary_dir() {
+  printf '%s\n' "${CANARY_DIR:-$HOME/canary}"
+}
+
+is_integer() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+run_daily() {
+  local full=0 cap=10 today rotation host daily_log rows_file failed=0 pair_index=0
+  local harness task rc stderr_file stdout_file tmp_dir
+  local -a harnesses=() tasks=() selected_tasks=() statuses=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --full) full=1; shift ;;
+      --cap)
+        [ "$#" -ge 2 ] || usage
+        is_integer "$2" || usage
+        cap=$((10#$2))
+        [ "$cap" -ge 1 ] && [ "$cap" -le 60 ] || usage
+        shift 2
+        ;;
+      --harness)
+        [ "$#" -ge 2 ] || usage
+        case "$2" in codex|fiber|pi) harnesses+=("$2") ;; *) usage ;; esac
+        shift 2
+        ;;
+      --task)
+        [ "$#" -ge 2 ] || usage
+        case "$2" in json-unescape|float-print|utf16-transcode) tasks+=("$2") ;; *) usage ;; esac
+        shift 2
+        ;;
+      *) usage ;;
+    esac
+  done
+  if [ "$full" -eq 1 ] && [ "${#tasks[@]}" -gt 0 ]; then usage; fi
+
+  if [ "${#harnesses[@]}" -eq 0 ]; then
+    harnesses=(codex fiber pi)
+  else
+    local -a unique_harnesses=()
+    for harness in "${harnesses[@]}"; do
+      local seen=0 existing
+      for existing in "${unique_harnesses[@]-}"; do
+        [ "$existing" != "$harness" ] || seen=1
+      done
+      [ "$seen" -eq 1 ] || unique_harnesses+=("$harness")
+    done
+    harnesses=("${unique_harnesses[@]}")
+  fi
+
+  if [ "$full" -eq 1 ]; then
+    selected_tasks=(json-unescape float-print utf16-transcode)
+  elif [ "${#tasks[@]}" -gt 0 ]; then
+    local -a unique_tasks=()
+    for task in "${tasks[@]}"; do
+      local seen=0 existing
+      for existing in "${unique_tasks[@]-}"; do
+        [ "$existing" != "$task" ] || seen=1
+      done
+      [ "$seen" -eq 1 ] || unique_tasks+=("$task")
+    done
+    selected_tasks=("${unique_tasks[@]}")
+  else
+    today="${CANARY_TODAY:-$(date -u +%F)}"
+    rotation="$(python3 -I "$helper" rotation "$today")"
+    case "$rotation" in
+      0) selected_tasks=(json-unescape) ;;
+      1) selected_tasks=(float-print) ;;
+      2) selected_tasks=(utf16-transcode) ;;
+      *) echo "canary-daily: invalid rotation result" >&2; return 1 ;;
+    esac
+  fi
+
+  today="${CANARY_TODAY:-$(date -u +%F)}"
+  # Validate injected dates as well as dates obtained from the system clock.
+  python3 -I "$helper" rotation "$today" >/dev/null
+  local root
+  root="$(canary_dir)"
+  mkdir -p "$root/daily"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$root/.canary-daily.lock"
+    if ! flock -n 9; then
+      echo "canary-daily: another run is active; skipping"
+      return 0
+    fi
+  else
+    if ! mkdir "$root/.canary-daily.lock" 2>/dev/null; then
+      echo "canary-daily: another run is active; skipping"
+      return 0
+    fi
+    DAILY_LOCK_FALLBACK=1
+    DAILY_LOCK_ROOT="$root"
+  fi
+
+  DAILY_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/canary-daily.XXXXXX")"
+  tmp_dir="$DAILY_TMP_DIR"
+  trap cleanup_run EXIT
+  rows_file="$tmp_dir/rows.jsonl"
+  : >"$rows_file"
+  daily_log="$root/daily/$today.log"
+  host="$(hostname -s)"
+
+  for harness in "${harnesses[@]}"; do
+    for task in "${selected_tasks[@]}"; do
+      pair_index=$((pair_index + 1))
+      stdout_file="$tmp_dir/stdout-$pair_index"
+      stderr_file="$tmp_dir/stderr-$pair_index"
+      : >"$stderr_file"
+      set +e
+      bash "$root/canary-run.sh" "$harness" "$task" "$cap" 2>"$stderr_file" \
+        | tee -a "$daily_log" | tee "$stdout_file"
+      statuses=("${PIPESTATUS[@]}")
+      set -e
+      rc="${statuses[0]:-1}"
+      if [ "${statuses[1]:-0}" -ne 0 ] || [ "${statuses[2]:-0}" -ne 0 ]; then rc=1; fi
+      if [ -s "$stderr_file" ]; then cat "$stderr_file" >&2; fi
+      if [ "$rc" -eq 2 ]; then
+        # Rows stay staged until the entire invocation is clear of refusals.
+        return 2
+      fi
+      if ! grep -q '^run dir: ' "$stdout_file"; then
+        echo "canary-daily: $harness/$task exited $rc without a run dir; skipping" >&2
+        failed=1
+        continue
+      fi
+      if ! python3 -I "$helper" row "$root" "$today" "$host" "$harness" "$stdout_file" >>"$rows_file"; then
+        failed=1
+        continue
+      fi
+    done
+  done
+
+  if [ -s "$rows_file" ]; then
+    cat "$rows_file" >>"$root/series.jsonl"
+  fi
+  local report_output
+  if report_output="$(python3 -I "$helper" report "$root" 14)"; then
+    printf '%s\n' "$report_output" | tee "$root/latest-report.txt"
+  else
+    failed=1
+  fi
+  return "$failed"
+}
+
+print_install() {
+  local at="$1" unit_dir="$2" exec_path="$3" quoted_path
+  quoted_path="${exec_path//\\/\\\\}"
+  quoted_path="${quoted_path//\"/\\\"}"
+  quoted_path="${quoted_path//%/%%}"
+  printf '# %s/canary-daily.service\n' "$unit_dir"
+  cat <<UNIT
+[Unit]
+Description=Daily jcode-bench parity canary
+
+[Service]
+Type=oneshot
+ExecStart="$quoted_path" run
+TimeoutStartSec=4h
+UNIT
+  printf '\n# %s/canary-daily.timer\n' "$unit_dir"
+  cat <<UNIT
+[Unit]
+Description=Daily jcode-bench parity canary timer
+
+[Timer]
+OnCalendar=*-*-* $at:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  printf '\n# Commands (not run):\n'
+  printf 'mkdir -p %q\n' "$unit_dir"
+  echo 'systemctl --user daemon-reload'
+  echo 'systemctl --user enable --now canary-daily.timer'
+  echo 'loginctl show-user "${USER}" -p Linger'
+}
+
+install_daily() {
+  local print_only=0 at=09:00 unit_dir config_home user linger
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --print) print_only=1; shift ;;
+      --at)
+        [ "$#" -ge 2 ] || usage
+        at="$2"
+        shift 2
+        ;;
+      *) usage ;;
+    esac
+  done
+  [[ "$at" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || usage
+  config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  unit_dir="$config_home/systemd/user"
+  if [ "$print_only" -eq 1 ]; then
+    print_install "$at" "$unit_dir" "$script_path"
+    return 0
+  fi
+
+  mkdir -p "$unit_dir"
+  local quoted_path
+  quoted_path="${script_path//\\/\\\\}"
+  quoted_path="${quoted_path//\"/\\\"}"
+  quoted_path="${quoted_path//%/%%}"
+  cat >"$unit_dir/canary-daily.service" <<UNIT
+[Unit]
+Description=Daily jcode-bench parity canary
+
+[Service]
+Type=oneshot
+ExecStart="$quoted_path" run
+TimeoutStartSec=4h
+UNIT
+  cat >"$unit_dir/canary-daily.timer" <<UNIT
+[Unit]
+Description=Daily jcode-bench parity canary timer
+
+[Timer]
+OnCalendar=*-*-* $at:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl --user daemon-reload
+  systemctl --user enable --now canary-daily.timer
+  user="${USER:-$(id -un)}"
+  if linger="$(loginctl show-user "$user" -p Linger 2>/dev/null)" && [ "$linger" = "Linger=yes" ]; then
+    :
+  else
+    echo "canary-daily: warning: user lingering is not enabled; the timer may not run while logged out" >&2
+  fi
+}
+
+report_daily() {
+  local days=14 root
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --days)
+        [ "$#" -ge 2 ] || usage
+        is_integer "$2" || usage
+        days=$((10#$2))
+        [ "$days" -ge 1 ] || usage
+        shift 2
+        ;;
+      *) usage ;;
+    esac
+  done
+  root="$(canary_dir)"
+  python3 -I "$helper" report "$root" "$days"
+}
+
+[ "$#" -ge 1 ] || usage
+command_name="$1"
+shift
+case "$command_name" in
+  run) run_daily "$@" ;;
+  report) report_daily "$@" ;;
+  install) install_daily "$@" ;;
+  *) usage ;;
+esac
