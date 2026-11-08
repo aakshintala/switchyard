@@ -5,7 +5,7 @@
 #   lib="$script_dir/lib/plan-tokens.sh"
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.
 # Globals, per function:
-#   is_path: none. is_symbol: none.
+#   is_path: none. is_symbol: none. is_symbol_shape: none.
 #   in_files: reads FILES (|a|b| form), GLOBS (newline list).
 #   plan_base: reads PLAN from its argument only.
 #   plan_outcome: reads PLAN from its argument only.
@@ -28,12 +28,21 @@ is_path() {
   return 1
 }
 
-# is_symbol TOKEN: an identifier with `_`, `::` or an uppercase letter after its first character
-is_symbol() {
+# is_symbol_shape TOKEN: true when TOKEN is an identifier or a `::` path of identifiers.
+# A trailing `()` is accepted because plan tokens may name a call.
+is_symbol_shape() {
   local s="$1" symre='^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$'
   case "$s" in *"()") s="${s%??}" ;; esac
+  [[ $s =~ $symre ]]
+}
+
+# is_symbol TOKEN: the plan-check symbol rule: an identifier with `_`, `::` or
+# an uppercase letter after its first character.
+is_symbol() {
+  local s="$1"
+  case "$s" in *"()") s="${s%??}" ;; esac
   case "$s" in *"{"*) return 1 ;; esac
-  [[ $s =~ $symre ]] || return 1
+  is_symbol_shape "$s" || return 1
   case "$s" in *_*|*::*) return 0 ;; esac
   [[ ${s:1} =~ [A-Z] ]]
 }
