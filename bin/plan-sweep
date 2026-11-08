@@ -885,8 +885,33 @@ LC_ALL=C awk -F '\t' '
   END { if (path != "") emit() }
 ' "$work/outside-pairs" >"$work/outside-paths"
 ob="$work/outside.md"
-{
-  printf '## Outside Files\n'
+printf '## Outside Files\n' >"$ob"
+if [ -z "$GLOBS" ]; then
+  FILESET="$FILES" OUTLINED_SET="$OUTLINED" DOC_SET="$DOC_PATHS" LC_ALL=C awk -F '\t' '
+    BEGIN {
+      count = split(ENVIRON["FILESET"], entries, "|")
+      for (i = 1; i <= count; i++) if (entries[i] != "") files[entries[i]] = 1
+    }
+    function is_covered(path, entry, d) {
+      if (substr(path, length(path), 1) == "/") {
+        d = substr(path, 1, length(path) - 1) "/"
+        if (files[d]) return 1
+      } else if (files[path]) {
+        return 1
+      }
+      for (entry in files)
+        if (substr(entry, length(entry), 1) == "/" && substr(path, 1, length(entry)) == entry) return 1
+      return 0
+    }
+    {
+      path = $1
+      if (is_covered(path)) next
+      if (index(ENVIRON["OUTLINED_SET"], "|" path "|")) next
+      if (index(ENVIRON["DOC_SET"], "|" path "|")) next
+      if ($2 != "") print path " " $2
+    }
+  ' "$work/outside-paths" >>"$ob"
+else
   while IFS=$'\t' read -r p reasons; do
     [ -n "$p" ] || continue
     if covered "$p"; then continue; fi
@@ -894,8 +919,8 @@ ob="$work/outside.md"
     case "$DOC_PATHS" in *"|$p|"*) continue ;; esac
     [ -n "$reasons" ] || continue
     printf '%s %s\n' "$p" "$reasons"
-  done <"$work/outside-paths"
-} >"$ob"
+  done <"$work/outside-paths" >>"$ob"
+fi
 outside_n="$(($(nlines "$ob") - 1))"
 [ "$outside_n" -ge 0 ] || outside_n=0
 
