@@ -379,14 +379,8 @@ def collect_ledger(path, cutoff, by_model, by_project):
                 cost = None
         except (TypeError, ValueError):
             cost = None
-        add_totals(ledger_model[model], usage, cost, model)
-        project_bucket = ledger_project[project]
-        add_totals(project_bucket, usage, cost, model)
+        add_log_record(ledger_model, ledger_project, model, project, usage, cost)
         if cost is None:
-            unknown = project_bucket.setdefault("unknownTokens", {})
-            tokens = unknown.setdefault(model, {key: 0 for key in ("input", "cacheRead", "cacheWrite", "output")})
-            for key in tokens:
-                tokens[key] += usage.get(key, 0)
             unpriced += 1
         else:
             total_usd += cost
