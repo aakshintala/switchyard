@@ -92,11 +92,11 @@ add_symbol() {
   SYMS="$SYMS$1"$'\t'"$2"$'\n'
 }
 
-# classify_symbol_hits MAP: classify all matched symbol lines in one AWK process.
-# batch-sorted groups the rows by pattern index, keeping per-symbol records in
-# git order so AWK can close each output set before opening the next.
+# classify_symbol_hits MAP SORTED_HITS: classify all matched symbol lines in one AWK process.
+# SORTED_HITS is supplied by the word pass, not a shared intermediate that a
+# later qual pass can overwrite.
 classify_symbol_hits() {
-  local map="$1"
+  local map="$1" sorted_hits="$2"
   [ -s "$map" ] || return 0
   REV="$rev" WORK="$work" SYMMAP="$map" OUTSIDE="$work/outside-raw" \
     LC_ALL=C awk '
@@ -223,7 +223,7 @@ classify_symbol_hits() {
       printf "%s:%s: %s\n", path, lineno, text >> callers[idx]
       printf "%s\tcaller\n", path >> ENVIRON["OUTSIDE"]
     }
-    END { close_symbol(active) }' "$work/batch-sorted"
+    END { close_symbol(active) }' "$sorted_hits"
   return 0
 }
 
@@ -365,12 +365,13 @@ pat_idx() {
   grep -nxF -- "$1" "$work/patterns" 2>/dev/null | cut -d: -f1 | head -n 1
 }
 
-# flush_batch_idx OUTDIR: stable-sort $work/batch-idx into one file per name
-# under OUTDIR in git's order. Shared by both splitters; their attribution
-# predicates stay separate.
+# flush_batch_idx IDXFILE OUTDIR SORTED: stable-sort IDXFILE into one file per
+# name under OUTDIR, using SORTED as the explicit sorted intermediate. The
+# caller chooses a pass-specific SORTED path so later passes cannot overwrite it.
 flush_batch_idx() {
-  LC_ALL=C sort -s -n -k1,1 "$work/batch-idx" >"$work/batch-sorted"
-  OUTDIR="$1" LC_ALL=C awk '
+  local idxfile="$1" outdir="$2" sorted="$3"
+  LC_ALL=C sort -s -n -k1,1 "$idxfile" >"$sorted"
+  OUTDIR="$outdir" LC_ALL=C awk '
     {
       line = $0
       t = index(line, "\t")
@@ -382,7 +383,7 @@ flush_batch_idx() {
         prev = idx
       }
       print rest > out
-    }' "$work/batch-sorted"
+    }' "$sorted"
 }
 
 # split_word_hits PATFILE HITS OUTDIR: attribute each hit line to every name
@@ -426,7 +427,7 @@ split_word_hits() {
       }
       return 0
     }' "$2" >"$work/batch-idx"
-  flush_batch_idx "$3"
+  flush_batch_idx "$work/batch-idx" "$3" "$work/word-batch-sorted"
 }
 
 # split_qual_hits PATFILE HITS OUTDIR: attribute each hit line to every
@@ -462,7 +463,7 @@ split_qual_hits() {
       if (isword(pre)) return 0
       return 1
     }' "$2" >"$work/batch-idx"
-  flush_batch_idx "$3"
+  flush_batch_idx "$work/batch-idx" "$3" "$work/qual-batch-sorted"
 }
 
 # ere_alternation PATFILE: build one escaped ERE alternation from fixed strings.
@@ -725,7 +726,7 @@ while IFS=$'\t' read -r name title; do
     printf '%s\t%s\t%s\n' "$idx" "$sym_n" "$name" >>"$work/symbol-map"
   fi
 done <<<"$SYMS"
-classify_symbol_hits "$work/symbol-map"
+classify_symbol_hits "$work/symbol-map" "$work/word-batch-sorted"
 
 if [ "$lang" = rust ]; then
   : >"$work/qualpatterns"

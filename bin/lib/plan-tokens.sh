@@ -5,7 +5,7 @@
 #   lib="$script_dir/lib/plan-tokens.sh"
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.
 # Globals, per function:
-#   is_path: none. is_symbol: none.
+#   is_path: none. is_symbol: none. is_symbol_shape: none.
 #   in_files: reads FILES (|a|b| form), GLOBS (newline list).
 #   plan_base: reads PLAN from its argument only.
 #   plan_outcome: reads PLAN from its argument only.
