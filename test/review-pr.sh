@@ -26,17 +26,21 @@ mkdir -p "$TMPDIR" "$T/canned" "$T/state" "$T/override"
 git init -q -b main "$T/origin"
 git -C "$T/origin" config user.email t@t
 git -C "$T/origin" config user.name t
-echo v1 >"$T/origin/file.txt"
+echo v0 >"$T/origin/file.txt"
 git -C "$T/origin" add .
 git -C "$T/origin" commit -qm init
+MAIN_SHA="$(git -C "$T/origin" rev-parse HEAD)"
+git -C "$T/origin" checkout -q -b pr7
+echo v1 >"$T/origin/file.txt"
+git -C "$T/origin" diff >"$T/diff.txt"
+git -C "$T/origin" add file.txt
+git -C "$T/origin" commit -qm 'PR 7 text change'
 FAKE_SHA="$(git -C "$T/origin" rev-parse HEAD)"
 SHORT="${FAKE_SHA:0:8}"
-echo v2 >"$T/origin/file.txt"
-git -C "$T/origin" diff >"$T/diff.txt"
-git -C "$T/origin" checkout -q -- file.txt
+git -C "$T/origin" checkout -q main
 git -C "$T/origin" update-ref refs/pull/7/head "$FAKE_SHA"
 # PR 8: NEW_SHA is one commit on top of main (OLD_SHA is main's tip).
-OLD_SHA="$FAKE_SHA"
+OLD_SHA="$MAIN_SHA"
 git -C "$T/origin" checkout -q -b feat
 echo pr >"$T/origin/pr.txt"
 git -C "$T/origin" add pr.txt
@@ -63,7 +67,14 @@ git -C "$T/origin" add fetch-only.txt
 git -C "$T/origin" commit -qm 'fetch-only head'
 FETCH_SHA="$(git -C "$T/origin" rev-parse HEAD)"
 git -C "$T/origin" update-ref refs/pull/10/head "$FETCH_SHA"
+git -C "$T/origin" checkout -q -b escape main
+printf 'a\033[0m\n' >"$T/origin/esc.txt"
+git -C "$T/origin" add esc.txt
+git -C "$T/origin" commit -qm 'PR 11 escape byte'
+ESC_SHA="$(git -C "$T/origin" rev-parse HEAD)"
+git -C "$T/origin" diff "main...$ESC_SHA" >"$T/escape-diff.txt"
 git -C "$T/origin" checkout -q main
+git -C "$T/origin" update-ref refs/pull/11/head "$ESC_SHA"
 EXPECTED_PID="$(git patch-id --stable <"$T/diff.txt" | awk '{print $1}')"
 [ -n "$EXPECTED_PID" ] || fail "fixture patch-id computable"
 
@@ -140,8 +151,14 @@ gh() (
         if [ -f "$T/state/pr-body.txt" ]; then cat "$T/state/pr-body.txt"; else printf '\n'; fi
         exit 0
       fi
+      if [ "${5:-}" = "--json" ] && [ "${6:-}" = "baseRefName" ] && [ -e "$T/state/fail-base" ]; then
+        echo "fake gh: base lookup failed" >&2
+        exit 1
+      fi
       h="$FAKE_SHA"
       if [ "$2" = "9" ]; then h="$SYMLINK_SHA"; fi
+      if [ "$2" = "11" ]; then h="$ESC_SHA"; fi
+      if [ -e "$T/state/empty-diff" ]; then h="$MAIN_SHA"; fi
       if [ -f "$T/state/heads.txt" ]; then
         h="$(head -1 "$T/state/heads.txt")"
         if [ "$(wc -l <"$T/state/heads.txt")" -gt 1 ]; then
@@ -150,19 +167,8 @@ gh() (
       fi
       printf '{"headRefOid":"%s","baseRefName":"main"}\n' "$h";;
     diff)
-      # As gh does: refuse a diff with terminal escapes unless the flag is passed.
-      allow=""
-      for a in "$@"; do
-        if [ "$a" = "--allow-escape-sequences" ]; then allow=1; fi
-      done
-      if [ -z "$allow" ]; then
-        echo "the diff contains terminal escape sequences; pass --allow-escape-sequences to output it anyway" >&2
-        exit 1
-      fi
-      if [ -e "$T/state/fail-diff" ]; then echo "fake gh: diff failed" >&2; exit 1; fi
-      if [ -e "$T/state/escape-diff" ]; then cat "$T/escape-diff.txt"
-      elif [ ! -e "$T/state/empty-diff" ]; then cat "$T/diff.txt"; fi
-      ;;
+      echo "HTTP 406: Sorry, the diff exceeded the maximum number of files (300)" >&2
+      exit 1;;
     checks) cat "$T/checks.txt";;
     comment)
       if [ -e "$T/state/fail-comment" ]; then echo "fake gh: comment failed" >&2; exit 1; fi
@@ -221,7 +227,7 @@ delegate() (
 sleep() (
   echo "$*" >>"$T/state/sleeps.txt"
 )
-export T FAKE_SHA SYMLINK_SHA
+export T FAKE_SHA MAIN_SHA SYMLINK_SHA ESC_SHA
 export -f gh delegate sleep
 
 write_record() {
@@ -351,6 +357,25 @@ stale_state() {
   stale_ts="$(stale_ts_for "$stale_age")"
   touch -t "$stale_ts" "$TMPDIR/review-pr/$stale_jid" || fail "stale fixture touch"
 }
+
+# --- case: a GitHub 406 does not prevent the clone diff and patch-id
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || \
+  fail "clone diff starts when gh pr diff returns HTTP 406"
+wt="$(worktree_for standards)"
+wt_diff="$wt/.review-context/pr.diff"
+git -C "$T/clone" diff --no-ext-diff --no-textconv --find-renames \
+  "$MAIN_SHA...$FAKE_SHA" >"$T/expected-clone.diff"
+cmp -s "$wt_diff" "$T/expected-clone.diff" || fail "review pr.diff is the clone's three-dot diff"
+cmp -s "$wt_diff" "$T/diff.txt" || fail "clone text diff matches the former gh-style fixture"
+clone_pid="$(git patch-id --stable <"$wt_diff" | awk '{print $1}')"
+[ "$(sed -n 's/^patch_id=//p' "$TMPDIR/review-pr/job-standards")" = "$clone_pid" ] || \
+  fail "recorded patch-id matches the clone diff"
+[ "$clone_pid" = "$EXPECTED_PID" ] || fail "clone patch-id matches the former gh-style diff patch-id"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "clone diff regression collects"
 
 # --- case: review-mode success across start and collect
 reset_state
@@ -637,18 +662,21 @@ grep -Fq '.review-context/issue-886.md' "$T/state/prompt-overbuild.md" || \
 bash "$REVIEW" collect job-overbuild >/dev/null 2>&1 || fail "overbuild-only prefetch collect exits 0"
 
 # --- case: fetch failure stops before any worktree or job starts
-for failed_fetch in fail-diff empty-diff fail-issue fail-issue-comments fail-body; do
+for failed_fetch in fail-base empty-diff fail-issue fail-issue-comments fail-body; do
   reset_state
   printf 'ci\tpass\n' >"$T/checks.txt"
   write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
   : >"$T/state/$failed_fetch"
   st=0
-  err="$(start_review 7 --repo O/N --cwd "$T/clone" --head "$FAKE_SHA" --axes spec \
+  test_head="$FAKE_SHA"
+  [ "$failed_fetch" != "empty-diff" ] || test_head="$MAIN_SHA"
+  err="$(start_review 7 --repo O/N --cwd "$T/clone" --head "$test_head" --axes spec \
     --model M --issue 1 2>&1 >/dev/null)" || st=$?
   [ "$st" -ne 0 ] || fail "$failed_fetch exits non-zero"
   case "$failed_fetch" in
-    fail-diff|empty-diff) grep -q 'could not fetch the diff of PR 7' <<<"$err" || fail "$failed_fetch names the PR diff";;
+    fail-base) grep -q 'could not fetch the base branch for PR 7' <<<"$err" || fail "$failed_fetch names the base branch";;
+    empty-diff) grep -q 'could not fetch the diff of PR 7' <<<"$err" || fail "$failed_fetch names the PR diff";;
     fail-issue|fail-issue-comments) grep -q 'could not fetch ticket #1' <<<"$err" || fail "$failed_fetch names the ticket";;
     fail-body) grep -q 'could not fetch the body of PR 7' <<<"$err" || fail "$failed_fetch names the PR body";;
   esac
@@ -670,20 +698,19 @@ grep -q 'could not fetch the diff of PR 7' <<<"$err" || fail "empty diff without
 [ ! -e "$T/state/runs.txt" ] || fail "empty diff without --head starts no job"
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || fail "empty diff without --head creates no worktree"
 
-# --- case: a diff with a raw ESC byte is fetched with the escape flag and kept intact
+# --- case: a diff with a raw ESC byte is generated from the clone and kept intact
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
-printf 'diff --git a/esc.txt b/esc.txt\nnew file mode 100644\n--- /dev/null\n+++ b/esc.txt\n@@ -0,0 +1 @@\n+a\033[0m\n' >"$T/escape-diff.txt"
 ESC_PID="$(git patch-id --stable <"$T/escape-diff.txt" | awk '{print $1}')"
 [ -n "$ESC_PID" ] || fail "escape fixture patch-id computable"
-: >"$T/state/escape-diff"
-start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M --issue 1 >/dev/null 2>&1 || fail "escape diff starts"
+start_review 11 --repo O/N --cwd "$T/clone" --axes spec --model M --issue 1 >/dev/null 2>&1 || \
+  fail "escape diff starts from the clone despite gh HTTP 406"
 wt_diff="$(worktree_for spec)/.review-context/pr.diff"
-cmp -s "$wt_diff" "$T/escape-diff.txt" || fail "escape diff keeps the raw ESC byte in pr.diff"
+cmp -s "$wt_diff" "$T/escape-diff.txt" || fail "clone diff keeps the raw ESC byte in pr.diff"
 out="$(bash "$REVIEW" collect job-spec 2>/dev/null)" || fail "escape diff collects"
-[ "$(head -1 <<<"$out")" = "patch-id $ESC_PID" ] || fail "escape diff patch-id matches the raw fixture"
+[ "$(head -1 <<<"$out")" = "patch-id $ESC_PID" ] || fail "escape diff patch-id matches the clone fixture"
 
 # --- case: --issue without --spec defaults SPEC to the first --issue, not the PR
 reset_state

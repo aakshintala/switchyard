@@ -421,6 +421,7 @@ cmd_start() {
 
   repo=""; clone=""; issues=(); issue_count=0; specn=""; model=""; omodel=""
   verify=""; since=""; wdoc=""; head=""; axes=""; axes_given=""; context_files=()
+  patch_id=""
   full_rereview=""; full_rereview_given=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -624,22 +625,6 @@ cmd_start() {
       echo "review-pr: no head SHA for PR $pr in $repo" >&2
       exit 1
     fi
-
-    # Patch-id of the diff the reviews will see, taken before they start.
-    # Fetch first, so a failed gh or an empty diff is an error, not "none".
-    patch_src="$(mktemp "${TMPDIR:-/tmp}/review-pr.patch.XXXXXX")"
-    if ! gh pr diff "$pr" --repo "$repo" --allow-escape-sequences >"$patch_src" \
-      || [ ! -s "$patch_src" ]; then
-      rm -f "$patch_src"
-      echo "review-pr: could not fetch the diff of PR $pr" >&2
-      exit 1
-    fi
-    patch_id="$(git patch-id --stable <"$patch_src" | awk '{print $1}')"
-    rm -f "$patch_src"
-    if [ -z "$patch_id" ]; then
-      echo "review-pr: could not fetch the diff of PR $pr (no patch-id)" >&2
-      exit 1
-    fi
   fi
 
   prune_stale_runs >/dev/null 2>&1 || true
@@ -683,21 +668,47 @@ cmd_start() {
       echo "review-pr: expected head $head is not fetchable for PR $pr" >&2
       exit 1
     fi
-    # Patch-id from the same state the reviews check out: the merge-base diff
-    # against a freshly fetched base tip, as GitHub shows it.
-    base="$(gh pr view "$pr" --repo "$repo" --json baseRefName | jq -r .baseRefName)"
-    git -C "$clone" fetch origin "$base" >&2
-    base_tip="$(git -C "$clone" rev-parse FETCH_HEAD)"
-    patch_id="$(git -C "$clone" diff "$base_tip...$head" | git patch-id --stable | awk '{print $1}')"
-    if [ -z "$patch_id" ]; then patch_id="none"; fi
-  elif [ "$mode" = "verify" ]; then
-    base="$(gh pr view "$pr" --repo "$repo" --json baseRefName | jq -r .baseRefName)"
-    if [ -z "$base" ] || [ "$base" = "null" ]; then
-      echo "review-pr: no base branch for PR $pr in $repo" >&2
+  fi
+
+  if ! base="$(gh pr view "$pr" --repo "$repo" --json baseRefName | jq -r '.baseRefName // empty')"; then
+    echo "review-pr: could not fetch the base branch for PR $pr in $repo" >&2
+    exit 1
+  fi
+  if [ -z "$base" ] || [ "$base" = "null" ]; then
+    echo "review-pr: no base branch for PR $pr in $repo" >&2
+    exit 1
+  fi
+  if ! git -C "$clone" fetch origin "$base" >&2; then
+    echo "review-pr: could not fetch the base branch for PR $pr in $repo" >&2
+    exit 1
+  fi
+  if ! base_tip="$(git -C "$clone" rev-parse FETCH_HEAD)"; then
+    echo "review-pr: could not resolve the base branch for PR $pr in $repo" >&2
+    exit 1
+  fi
+
+  pr_diff="$run_dir/pr.diff"
+  # GitHub's PR diff is a merge-base (three-dot) diff. On ordinary text-only
+  # PRs its stable patch-id matches the patch-id of that diff text (covered
+  # by test/review-pr.sh). Pin diff drivers and rename detection so local Git
+  # config cannot change the review input; binary and mode-only changes may
+  # still differ in presentation from GitHub's patch format.
+  if ! git -C "$clone" diff --no-ext-diff --no-textconv --find-renames \
+    "$base_tip...$sha" >"$pr_diff"; then
+    echo "review-pr: could not fetch the diff of PR $pr" >&2
+    exit 1
+  fi
+  patch_id="$(git patch-id --stable <"$pr_diff" | awk '{print $1}')"
+  if [ -z "$patch_id" ] && [ -n "$head" ]; then patch_id="none"; fi
+  if [ -z "$head" ]; then
+    if [ ! -s "$pr_diff" ]; then
+      echo "review-pr: could not fetch the diff of PR $pr" >&2
       exit 1
     fi
-    git -C "$clone" fetch origin "$base" >&2
-    base_tip="$(git -C "$clone" rev-parse FETCH_HEAD)"
+    if [ -z "$patch_id" ]; then
+      echo "review-pr: could not fetch the diff of PR $pr (no patch-id)" >&2
+      exit 1
+    fi
   fi
 
   if [ "$mode" = "review" ] && [ -z "$full_rereview_given" ]; then
@@ -727,10 +738,7 @@ cmd_start() {
   if [ "$mode" = "review" ]; then
     review_context="$run_dir/review-context"
     mkdir -p "$review_context"
-    if ! gh pr diff "$pr" --repo "$repo" --allow-escape-sequences >"$review_context/pr.diff"; then
-      echo "review-pr: could not fetch the diff of PR $pr" >&2
-      exit 1
-    fi
+    cp "$pr_diff" "$review_context/pr.diff"
     if [ ! -s "$review_context/pr.diff" ]; then
       echo "review-pr: could not fetch the diff of PR $pr" >&2
       exit 1
