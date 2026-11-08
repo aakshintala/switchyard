@@ -13,13 +13,14 @@ cat > "$dir/prompt"
 prompt=$(cat "$dir/prompt")
 case "$prompt" in
   *BACKGROUND_SESSION*)
+    # agent.pid is complete before background.pid appears; the test waits on the latter.
+    echo "$$" > "$dir/agent.pid"
     # The backend's direct child is a new-session Bash, with a live child of its own.
     perl -MPOSIX -e 'POSIX::setsid() or die; exec @ARGV' /bin/bash -c 'sleep 30 & child=$!; read -r _ < "$1"; kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; : > "$2"' background "$dir/background.fifo" "$dir/background-exited" </dev/null >/dev/null 2>&1 &
     bg=$!
     printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-background"}'
     printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"turn ended","session_id":"s-background"}'
-    echo "$bg" > "$dir/background.pid"
-    echo "$$" > "$dir/agent.pid"
+    echo "$bg" > "$dir/background.pid.tmp" && mv "$dir/background.pid.tmp" "$dir/background.pid"
     wait "$bg"
     while :; do :; done
     ;;
@@ -239,9 +240,13 @@ fn live_new_session_background_command_holds_claude_job_until_exit() {
         "Bash command must lead its process group after setsid: {command_row}"
     );
 
-    let still_live_since = Instant::now();
+    // As in the #1372 sibling (cli_e2e.rs): every record stays RUNNING with an
+    // idle clock the live-child check keeps below the window, and the wait ends
+    // on the record's own clock two windows past the first read.
+    let window = idle_ms as f64;
+    let mut held_until = None;
     until(
-        "job stays running for an idle window with a detached child",
+        "job stays running for two idle windows with a detached child",
         || {
             assert!(alive(background_pid), "detached Bash exited too early");
             let record = env.record(&id);
@@ -249,7 +254,17 @@ fn live_new_session_background_command_holds_claude_job_until_exit() {
                 record["status"], "RUNNING",
                 "job ended while its detached child was alive: {record}"
             );
-            still_live_since.elapsed() >= Duration::from_millis(idle_ms)
+            let age = record["progress"]["lastEventAgeMs"]
+                .as_f64()
+                .expect("progress carries lastEventAgeMs");
+            assert!(
+                age < window,
+                "live child did not refresh the idle clock: {record}"
+            );
+            let elapsed = record["progress"]["elapsedMs"]
+                .as_f64()
+                .expect("progress carries elapsedMs");
+            elapsed >= *held_until.get_or_insert(elapsed + 2.0 * window)
         },
     );
 
