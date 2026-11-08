@@ -72,10 +72,10 @@ deterministic_parallel_failure_case() (
 
 if [ "${1:-}" = "--self-test-parallel-failure" ]; then
   if deterministic_parallel_failure_case; then
-    echo "PASS: deterministic-parallel-failure"
+    echo "PASS: deterministic-parallel-failure (${SECONDS}s)"
     exit 0
   else
-    echo "FAIL: deterministic-parallel-failure" >&2
+    echo "FAIL: deterministic-parallel-failure (${SECONDS}s)" >&2
     exit 1
   fi
 fi
@@ -110,10 +110,11 @@ else
   echo "FAIL: cargo-slot.sh (exit $?, $((SECONDS - _s))s)" >&2
   failed=1
 fi
+_s=$SECONDS
 if deterministic_parallel_failure_case; then
-  echo "PASS: deterministic-parallel-failure"
+  echo "PASS: deterministic-parallel-failure ($((SECONDS - _s))s)"
 else
-  echo "FAIL: deterministic-parallel-failure (expected parallel failure not proven)" >&2
+  echo "FAIL: deterministic-parallel-failure (expected parallel failure not proven, $((SECONDS - _s))s)" >&2
   failed=1
 fi
 echo "test/run wall time: ${SECONDS}s"
