@@ -1012,6 +1012,26 @@ expect_verdict "TKT tkt-build DRIFT state=00000000000000000000000000000000000000
 grep -q "$H" "$CDIR/stderr.txt" || fail "drift: stderr names the worktree HEAD"
 grep -q "^run|" "$T/calls.log" && fail "drift: the lane never dispatches"
 
+# --- a finished lane and existing branch PR name the repair on a plain rerun
+setup_case rerun-repairs-open-pr
+mkdir -p "$TMPDIR/delegate-jobs"
+jq -n '{status:"DONE",result:{status:"DONE",text:"lane finished",gateResult:{passed:true,exitCode:0},changeSet:{headBefore:"a",headAfter:"b",newCommits:["deadbeef"],uncommittedFiles:[]}}}' \
+  >"$TMPDIR/delegate-jobs/lane-done.json" || fail "rerun-repairs-open-pr: seed DONE lane record"
+bash "$TKT_STATE" "$S" set job.lane lane-done >/dev/null || fail "rerun-repairs-open-pr: set lane job"
+bash "$TKT_STATE" "$S" set job.lane.prompt stale-prompt-hash >/dev/null || fail "rerun-repairs-open-pr: make lane prompt stale"
+bash "$TKT_STATE" "$S" set review_status pending >/dev/null || fail "rerun-repairs-open-pr: set last review status"
+[ -z "$(bash "$TKT_STATE" "$S" get pr 2>/dev/null || true)" ] || fail "rerun-repairs-open-pr: pr starts missing"
+[ -z "$(bash "$TKT_STATE" "$S" get head 2>/dev/null || true)" ] || fail "rerun-repairs-open-pr: head starts missing"
+run_build
+[ "$RC" -eq 2 ] || fail "rerun-repairs-open-pr refuses with a repair command (rc=$RC): $OUT"
+expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "rerun-repairs-open-pr"
+grep -Fq 'lane job lane-done is DONE and branch PR 7 is open' <<<"$OUT" || fail "rerun-repairs-open-pr: digest names the completed lane and open PR"
+grep -Fq "Repair command: tkt-build $S --from gate" <<<"$OUT" || fail "rerun-repairs-open-pr: names the exact gate recovery command"
+! grep -q '^gate|' "$T/calls.log" || fail "rerun-repairs-open-pr: waits for the printed recovery command"
+! grep -q '^job|.*--slot lane' "$T/calls.log" || fail "rerun-repairs-open-pr: does not restart the finished lane"
+[ -z "$(bash "$TKT_STATE" "$S" get pr 2>/dev/null || true)" ] || fail "rerun-repairs-open-pr: refusal does not write pr"
+[ -z "$(bash "$TKT_STATE" "$S" get head 2>/dev/null || true)" ] || fail "rerun-repairs-open-pr: refusal does not write head"
+
 # --- --from gate skips the lane; --from review skips the lane and the gate ---
 setup_case from-gate
 run_build --from gate
