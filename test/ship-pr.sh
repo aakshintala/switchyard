@@ -754,6 +754,16 @@ ship; expect 0 "matching open P3 issue is reused"
 [ "$(jq 'length' "$ST/created-issues" 2>/dev/null || echo 0)" = 0 ] || fail "no duplicate P3 issue filed"
 grep -qF 'issues/432' "$ST/comment.txt" || fail "existing P3 issue linked from PR: [$(cat "$ST/comment.txt")]"
 
+# The shape of PR #1353's verify: prose naming a fixed P2 is not an open finding.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:113,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nThe P2 ownership finding is fixed. No new findings.\n\nFIX-INCOMPLETE\n\nP3 bin/x:1 duplicated code remains\n\nSTATUS: DONE_WITH_CONCERNS")}
+]' >"$ST/review-comments"
+ship; expect 0 "prose naming a fixed P2 does not block a P3-only verify"
+jq -e '.[0].body | contains("P3 bin/x:1 duplicated code remains")' "$ST/created-issues" >/dev/null \
+  || fail "P3 from #1353-shaped verify is filed: [$(cat "$ST/created-issues")]"
+
 # Any P1 or P2 in readable findings keeps the refusal and files no issues.
 for priority in P1 P2; do
   setup
