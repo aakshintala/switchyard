@@ -188,14 +188,20 @@ fn live_new_session_background_command_holds_claude_job_until_exit() {
                 .expect("run ps");
             assert!(ps.status.success());
             ps_text = String::from_utf8_lossy(&ps.stdout).into_owned();
-            [backend_pid, background_pid].into_iter().all(|wanted| {
-                ps_text.lines().any(|line| {
-                    line.split_whitespace()
-                        .next()
-                        .and_then(|pid| pid.parse::<i64>().ok())
-                        == Some(wanted)
+            let row = |wanted: i64| {
+                ps_text.lines().find_map(|line| {
+                    let fields = line
+                        .split_whitespace()
+                        .take(3)
+                        .map(|f| f.parse::<i64>().ok())
+                        .collect::<Option<Vec<_>>>()?;
+                    (fields.first() == Some(&wanted)).then_some(fields)
                 })
-            })
+            };
+            // The pid file can land before perl's setsid() runs, so wait for
+            // the background row to lead its own group, not just to appear.
+            row(backend_pid).is_some()
+                && row(background_pid).is_some_and(|f| f.get(2) == Some(&background_pid))
         },
     );
     let row_for = |pid: i64| {
