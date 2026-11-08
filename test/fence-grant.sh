@@ -302,9 +302,9 @@ reset_case() {
 TREE
   GH_TREE_SHA=aaaaaaaa GH_SHA_FAIL=0 GH_SHA_ERROR= GH_TREE_ERROR=
   export GH_TREE_SHA GH_SHA_FAIL GH_SHA_ERROR GH_TREE_ERROR
-  GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL=
+  GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL= GH_DIFF_406_PR=
   GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT= SSH_STDERR=
-  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
+  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_DIFF_406_PR GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
   GH_TICKET_STATES= GH_TICKET_FAIL=0 GH_TICKET_BAD=0 GH_TICKET_MISSING=0 GH_TICKET_OMIT=
   export GH_TICKET_STATES GH_TICKET_FAIL GH_TICKET_BAD GH_TICKET_MISSING GH_TICKET_OMIT
   FW_DELEGATE_DIR="$T/delegate-jobs"
@@ -1222,6 +1222,9 @@ assert_rc 0 '406 API fallback returns equivalent PR holds'
 assert_line 'OVERLAP docs/events.md PR #11' '406 fallback includes the renamed source path'
 assert_line 'OVERLAP bin/job-record PR #11' '406 fallback holds a file with no patch whole'
 grep -qF 'api --paginate repos/aakshintala/fiber/pulls/11/files?per_page=100' "$T/gh.log" || fail '406 fallback reads paginated PR files API'
+run_fg 77 --pre-plan 'crates/a/**'
+assert_rc 0 'pre-plan name-only lookup falls back after HTTP 406'
+assert_line 'WARN PRE-PLAN PR #11: 1 files under crates/a/**' 'pre-plan fallback counts paginated API filenames'
 
 # A PR exceeding the files API cap fails closed with a PR-specific error.
 reset_case
@@ -1234,7 +1237,8 @@ with open(sys.argv[1], "w") as f:
 PY
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 3 'over-3000 PR file list fails closed'
-assert_contains 'ERROR PR #11' 'over-3000 error names the PR'
+assert_contains 'ERROR gh pr diff 11' 'over-3000 error names the PR'
+assert_contains 'PR #11' 'over-3000 diagnostic identifies the PR number'
 assert_contains '3000' 'over-3000 error states the API limit'
 
 # A correct existing path and symbol still goes through the holder sweep.

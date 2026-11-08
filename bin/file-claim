@@ -57,6 +57,7 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 . "$script_dir/lib/lane-ticket.sh"
 . "$script_dir/lib/plan-tokens.sh"
 . "$script_dir/lib/ticket-state.sh"
+. "$script_dir/lib/pr-diff.sh"
 W=""
 LIST_PRMAP_PID=""
 cleanup() {
@@ -225,6 +226,7 @@ build_prmap() {
   done <"$prmap_list"
   while IFS="$TAB" read -r pr changed_files; do
     index=$((index + 1))
+    printf '%s' "$changed_files" >"$W/pr-changed-$pr"
     read_pr_files "$repo" "$pr" "$changed_files" "$W/pr-files-$index" "$W/pr-$index.err" &
     job_pids+=("$!"); job_indexes+=("$index")
     batch=$((batch + 1))
@@ -261,10 +263,11 @@ pr_hunks() {
   # once per PR per run; a failed fetch, partial output included, prints
   # unknown for every path that PR holds. A sweep refusal stands either way, so
   # this always succeeds.
-  local repo="$1" pr="$2" path="$3" diff="$W/diff-$pr" sec hunks r a b ranges
+  local repo="$1" pr="$2" path="$3" diff="$W/diff-$pr" sec hunks r a b ranges expected
   [ -f "$diff.failed" ] && { printf 'unknown'; return 0; }
   if [ ! -f "$diff" ]; then
-    if ! gh pr diff "$pr" -R "$repo" >"$diff.part" 2>"$W/gh-diff.err"; then : >"$diff.failed"; printf 'unknown'; return 0; fi
+    expected="$(cat "$W/pr-changed-$pr" 2>/dev/null || true)"
+    if ! pr_diff_fetch gh "$repo" "$pr" "$expected" >"$diff.part" 2>"$W/gh-diff.err"; then : >"$diff.failed"; printf 'unknown'; return 0; fi
     mv "$diff.part" "$diff"
   fi
   sec="$(awk -v f="$path" '/^diff --git /{on = ($4 == "b/" f)} on {print}' "$diff")"

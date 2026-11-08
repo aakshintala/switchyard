@@ -386,8 +386,19 @@ case "$repo" in
   [!/]*/[!/]*) ;;
   *) _usage; exit 2;;
 esac
+# Siblings resolve from the script's real path: callers such as flywheel's
+# bin/fence-grant reach it through a symlink in a directory with no file-claim.
+self="$0"
+case "$self" in */*) ;; *) self="$(command -v "$self")" ;; esac
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in /*) self="$link" ;; *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;; esac
+done
+self_dir="$(cd "$(dirname "$self")" && pwd)"
+# shellcheck disable=SC1091
+. "$self_dir/lib/pr-diff.sh"
 if [ -n "$preplan" ]; then
-  prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
+  prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,changedFiles 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
   preplan_prs=$(printf '%s' "$prjson" | python3 -I -c 'import json,sys
 try:
   data = json.load(sys.stdin)
@@ -398,20 +409,35 @@ if not isinstance(data, list):
 for row in data:
   if not isinstance(row, dict) or not isinstance(row.get("number"), int) or row["number"] < 1:
     sys.exit(1)
-  print(row["number"])' 2>/dev/null) || { echo "ERROR gh pr list unreadable"; exit 3; }
+  count = row.get("changedFiles", "")
+  if count is None:
+    count = ""
+  if count != "" and (not isinstance(count, int) or count < 0):
+    sys.exit(1)
+  print("%s\t%s" % (row["number"], count))' 2>/dev/null) || { echo "ERROR gh pr list unreadable"; exit 3; }
   preplan_n=$(printf '%s\n' "$preplan_prs" | grep -c .)
   case "$preplan_n" in ''|*[!0-9]*) echo "ERROR gh pr list count"; exit 3;; esac
   [ "$preplan_n" -lt 200 ] || { echo "ERROR gh pr list truncated at 200"; exit 3; }
   preplan_rows=""
-  for _pr in $preplan_prs; do
-    _files=$("${FW_GH:-gh}" pr diff "$_pr" -R "$repo" --name-only 2>/dev/null) || { echo "ERROR gh pr diff $_pr"; exit 3; }
+  while IFS=$'\t' read -r _pr _expected; do
+    [ -n "$_pr" ] || continue
+    _preplan_err=$(mktemp "${TMPDIR:-/tmp}/fence-pr-diff.XXXXXX") || { echo "ERROR cannot make temp file"; exit 3; }
+    if _files=$(pr_diff_fetch "${FW_GH:-gh}" "$repo" "$_pr" "$_expected" --name-only 2>"$_preplan_err"); then
+      :
+    else
+      g=$(head -c 200 "$_preplan_err" 2>/dev/null | tr '\n' ' ')
+      rm -f "$_preplan_err"
+      echo "ERROR gh pr diff $_pr $g"
+      exit 3
+    fi
+    rm -f "$_preplan_err"
     _count=0
     while IFS= read -r _file; do
       [ -n "$_file" ] || continue
       case "$_file" in $preplan) _count=$((_count + 1));; esac
     done <<< "$_files"
     preplan_rows="${preplan_rows}${preplan_rows:+$'\n'}$_count $_pr"
-  done
+  done <<< "$preplan_prs"
   if [ -n "$preplan_rows" ]; then
     printf '%s\n' "$preplan_rows" | sort -k1,1nr -k2,2n | while read -r _count _pr; do
       printf 'WARN PRE-PLAN PR #%s: %s files under %s\n' "$_pr" "$_count" "$preplan"
@@ -425,15 +451,6 @@ case "$paths" in
 esac
 
 run=$(_fw_run)
-# Siblings resolve from the script's real path: callers such as flywheel's
-# bin/fence-grant reach it through a symlink in a directory with no file-claim.
-self="$0"
-case "$self" in */*) ;; *) self="$(command -v "$self")" ;; esac
-while [ -L "$self" ]; do
-  link="$(readlink "$self")"
-  case "$link" in /*) self="$link" ;; *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;; esac
-done
-self_dir="$(cd "$(dirname "$self")" && pwd)"
 # shellcheck disable=SC1091
 . "$self_dir/lib/lane-ticket.sh"
 . "$self_dir/lib/ticket-state.sh"
@@ -808,7 +825,7 @@ print("\n".join(out))' "$_ef"
 fi
 
 # --- open PRs (fail closed) ---
-prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,headRefName 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
+prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,headRefName,changedFiles 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
 prs=$(printf '%s' "$prjson" | python3 -c 'import json,sys
 try:
   data = json.load(sys.stdin)
@@ -1074,16 +1091,36 @@ print(n)' "$_lc_lane" <"$_lc_out" 2>/dev/null) || {
 }
 
 # --- PR side: a rename holds old and new; created/binary/hunkless hold all ---
+_pr_expected_files() {
+  printf '%s' "$prjson" | python3 -c 'import json,sys
+try:
+  data = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+want = sys.argv[1]
+for row in data:
+  if isinstance(row, dict) and str(row.get("number", "")) == want:
+    count = row.get("changedFiles")
+    if count is None:
+      print("")
+    elif isinstance(count, int) and count >= 0:
+      print(count)
+    else:
+      sys.exit(1)
+    sys.exit(0)
+sys.exit(1)' "$1" 2>/dev/null
+}
 _pr_touched() {
   # $1 = PR number. Writes touched "normbase|sectionbase" lines to $tmp/touched-$1.
-  nf=$("${FW_GH:-gh}" pr diff "$1" -R "$repo" --name-only 2>"$tmp/gderr-$1") || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+  _expected=$(_pr_expected_files "$1") || { echo "ERROR gh pr list changedFiles for PR #$1"; exit 3; }
+  nf=$(pr_diff_fetch "${FW_GH:-gh}" "$repo" "$1" "$_expected" --name-only 2>"$tmp/gderr-$1") || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
   printf '%s\n' "$nf" | grep . | while IFS= read -r f; do
     b=$(_norm_base "$f")
     [ -n "$b" ] || continue
     printf '%s|%s\n' "$b" "$b"
   done > "$tmp/touched-$1"
   if [ -s "$tmp/touched-$1" ]; then
-    "${FW_GH:-gh}" pr diff "$1" -R "$repo" --allow-escape-sequences > "$tmp/full-$1.diff" 2>"$tmp/gderr-$1" || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+    pr_diff_fetch "${FW_GH:-gh}" "$repo" "$1" "$_expected" --allow-escape-sequences > "$tmp/full-$1.diff" 2>"$tmp/gderr-$1" || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
     [ -s "$tmp/full-$1.diff" ] || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
     grep '^rename from ' "$tmp/full-$1.diff" 2>/dev/null | sed 's/^rename from //' | while IFS= read -r o; do
       b=$(_norm_base "$o")
