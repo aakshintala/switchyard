@@ -1127,9 +1127,29 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "round-zero
 expect_state round 0 "round-zero-unreviewed retains zero as the spent fix count"
 expect_state reviewed "$H" "round-zero-unreviewed completes the first review"
 
-# --- a state with round already set is refused before any job or gate ---
+# --- a round-1 gate fix without a completed review can resume at either phase ---
+setup_case round-one-unreviewed-review
+bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "round-one-unreviewed-review: seed round"
+bash "$TKT_STATE" "$S" set pr 7 >/dev/null || fail "round-one-unreviewed-review: seed PR"
+bash "$TKT_STATE" "$S" set head "$H" >/dev/null || fail "round-one-unreviewed-review: seed head"
+run_build --from review
+[ "$RC" -eq 0 ] || fail "round-one-unreviewed-review proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "round-one-unreviewed-review"
+grep -q "^review-start|" "$T/calls.log" || fail "round-one-unreviewed-review starts review"
+# The completed first review resets the count, so the gate fix spends no review round (tkt-fix ROUND-LIMIT).
+expect_state round 0 "round-one-unreviewed-review resets the fix-round count"
+
+setup_case round-one-unreviewed-gate
+bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "round-one-unreviewed-gate: seed round"
+run_build --from gate
+[ "$RC" -eq 0 ] || fail "round-one-unreviewed-gate proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "round-one-unreviewed-gate"
+grep -q "^gate|" "$T/calls.log" || fail "round-one-unreviewed-gate runs gate"
+
+# --- a state with round already set and a completed review is refused ---
 setup_case round-set
 bash "$TKT_STATE" "$S" set round 1 >/dev/null || fail "seed round"
+bash "$TKT_STATE" "$S" set reviewed "$H" >/dev/null || fail "seed reviewed head"
 run_build
 [ "$RC" -eq 1 ] || fail "round-set build exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-build ROUND-LIMIT round=1 log=*" "round-set build"

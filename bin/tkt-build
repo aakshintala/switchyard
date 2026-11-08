@@ -212,10 +212,8 @@ if [ "$from" = review ] && [ "$outcome" != measurement ]; then
   fi
 fi
 rnd="$(tkt get round 2>/dev/null || true)"
-# Zero is the initial fix-round count, not proof that review completed.
-# A first build that stopped at its gate can therefore resume; a build
-# that completed round 0 has a reviewed head and must not be replayed.
-if [ -n "$rnd" ] && { [ "$rnd" != 0 ] || [ -n "$(tkt get reviewed 2>/dev/null || true)" ]; }; then
+# A build can resume until a reviewed head records the first completed review.
+if [ -n "$(tkt get reviewed 2>/dev/null || true)" ]; then
   emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the wrong phase after the first round; continue with tkt-fix $state --verify [--resume <job id> --prompt <file>] or tkt-ship $state; this is not the round limit"
 fi
 if stored_head="$(tkt get head 2>/dev/null)"; then
