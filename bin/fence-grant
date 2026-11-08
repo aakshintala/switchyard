@@ -1694,25 +1694,32 @@ if [ "$dry" -eq 0 ]; then
   if [ "${#fc_args[@]}" -gt 0 ]; then
     : > "$tmp/fc-overlaps"
     fc_cmd=("$file_claim" claim --lane "$(claim_holder "$ticket")" --plan --repo "$repo")
-    # Every PR skipped above as this ticket's own, plus --ignore-pr, must
-    # exempt the claim too, or the ledger refuses a path the own PR holds.
-    # file-claim takes one --self-pr per flag; each exempt PR gets its own.
-    _seen_self=""
+    # The lane's own PRs must be recorded so reap can release them when they
+    # close. Ignored and hunk-probed PRs only need a file-check exemption.
+    # Deduplicate across all sources while keeping own PRs as --self-pr.
+    _seen_prs=""
     # shellcheck disable=SC2086
-    for _op in $ownprs $ignore; do
+    for _op in $ownprs; do
       [ -n "$_op" ] || continue
-      case " $_seen_self " in *" $_op "*) continue;; esac
-      _seen_self="$_seen_self $_op"
+      case " $_seen_prs " in *" $_op "*) continue;; esac
+      _seen_prs="$_seen_prs $_op"
       fc_cmd+=(--self-pr "$_op")
+    done
+    # shellcheck disable=SC2086
+    for _op in $ignore; do
+      [ -n "$_op" ] || continue
+      case " $_seen_prs " in *" $_op "*) continue;; esac
+      _seen_prs="$_seen_prs $_op"
+      fc_cmd+=(--exempt-pr "$_op")
     done
     if [ -n "$fc_ranges" ]; then
       # The fence probe checked these PRs by hunk; exempt them from the
       # file-level PR check before recording the whole-file claim.
       for _op in $prs; do
         [ -n "$_op" ] || continue
-        case " $_seen_self " in *" $_op "*) continue;; esac
-        _seen_self="$_seen_self $_op"
-        fc_cmd+=(--self-pr "$_op")
+        case " $_seen_prs " in *" $_op "*) continue;; esac
+        _seen_prs="$_seen_prs $_op"
+        fc_cmd+=(--exempt-pr "$_op")
       done
     fi
     fc_cmd+=(-- "${fc_args[@]}")

@@ -2,7 +2,8 @@
 # file-claim: lanes self-grant files via a claims ref in the claim repo.
 # Claim IDs must be exactly fiber-<n> or sweep-<n>...
 # Claim lanes need a ticket number; release and list accept any lane ID.
-# Usage: file-claim claim --lane ID (--paths PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... (each own PR) [--worktree HOST:DIR] [--repo R]
+# Usage: file-claim claim --lane ID (--paths PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... [--exempt-pr N]... [--worktree HOST:DIR] [--repo R]
+# --self-pr exempts and records the lane's own PR; --exempt-pr exempts without recording.
 #        file-claim release --lane ID [--repo R] [PATH...]
 #        file-claim prune --lane ID [--repo R]
 #        file-claim list [--lane ID] [--repo R]
@@ -26,7 +27,7 @@ TRIES=8
 TAB=$'\t'
 NL=$'\n'
 usage() {
-  echo "usage: file-claim claim --lane ID (--paths PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N] [--worktree HOST:DIR] [--repo R]" >&2
+  echo "usage: file-claim claim --lane ID (--paths PATH... | --plan-file PLAN | --grant PATH...) [--self-pr N]... [--exempt-pr N]... [--worktree HOST:DIR] [--repo R]" >&2
   echo "       claim IDs must be exactly fiber-<n> or sweep-<n>..." >&2
   echo "       release and list accept any lane ID" >&2
   echo "       ordinary lane and PR holds are advisory; sweep-* lane ids hold exclusively" >&2
@@ -292,7 +293,7 @@ pr_hunks() {
   printf '%s' "$ranges"
 }
 cmd_claim() {
-  local lane="$1" kind="$2" self_pr="$3" worktree="$4" repo="$5"; shift 5
+  local lane="$1" kind="$2" self_pr="$3" exempt_pr="$4" worktree="$5" repo="$6"; shift 6
   local remote now main_tip prmap tip claims attempt paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr prs_for_path holders own_hold blocked
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [ $# -gt 0 ] || usage
@@ -317,7 +318,7 @@ cmd_claim() {
     for p in "${paths[@]}"; do
       reason="new"
       if [ "$(git -C "$W" cat-file -t "$main_tip:$p" 2>/dev/null)" = blob ]; then reason="exists"; fi
-      prs_for_path="$(awk -F'\t' -v q="$p" -v s="$self_pr" '$2==q&&index(","s",", ","$1",")==0{print $1}' "$prmap" | sort -n)"
+      prs_for_path="$(awk -F'\t' -v q="$p" -v s="$exempt_pr" '$2==q&&index(","s",", ","$1",")==0{print $1}' "$prmap" | sort -n)"
       blocked=0; own_hold=0
       if [ -n "$prs_for_path" ]; then
         if [[ "$lane" == sweep-* ]]; then
@@ -576,7 +577,7 @@ main() {
   [ $# -ge 1 ] || usage
   local cmd="$1"; shift
   case "$cmd" in claim|release|prune|list|reap) ;; *) usage;; esac
-  local lane="" mode="" self_pr="" worktree="" repo="$REPO_DEFAULT" plan_file="" ticket_num="" holder=""
+  local lane="" mode="" self_pr="" exempt_pr="" worktree="" repo="$REPO_DEFAULT" plan_file="" ticket_num="" holder=""
   local paths line p; paths=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -584,7 +585,8 @@ main() {
       --paths|--plan) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; mode="plan"; shift;;
       --plan-file) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; [ $# -ge 2 ] || usage; valid_field "$2" || usage; mode="plan"; plan_file="$2"; shift 2;;
       --grant) [ "$cmd" = claim ] || usage; [ -z "$mode" ] || usage; mode="grant"; shift;;
-      --self-pr) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; self_pr="${self_pr:+$self_pr,}$2"; shift 2;;
+      --self-pr) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; self_pr="${self_pr:+$self_pr,}$2"; exempt_pr="${exempt_pr:+$exempt_pr,}$2"; shift 2;;
+      --exempt-pr) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; exempt_pr="${exempt_pr:+$exempt_pr,}$2"; shift 2;;
       --worktree) [ "$cmd" = claim ] || usage; [ $# -ge 2 ] || usage; worktree="$2"; shift 2;;
       --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2;;
       --) shift; while [ $# -gt 0 ]; do paths+=("$1"); shift; done;;
@@ -593,6 +595,7 @@ main() {
     esac
   done
   case "$self_pr" in "") ;; *[!0-9,]*|,*|*,|*,,*|0*|*,0*) usage;; esac
+  case "$exempt_pr" in "") ;; *[!0-9,]*|,*|*,|*,,*|0*|*,0*) usage;; esac
   [ -n "$repo" ] || usage; valid_field "$repo" || usage
   case "$cmd" in
     claim) [ -n "$lane" ] || usage; valid_field "$lane" || usage
@@ -628,7 +631,7 @@ main() {
           done
         fi
       fi
-      cmd_claim "$lane" "$mode" "$self_pr" "$worktree" "$repo" "${paths[@]}";;
+      cmd_claim "$lane" "$mode" "$self_pr" "$exempt_pr" "$worktree" "$repo" "${paths[@]}";;
     release) [ -n "$lane" ] || usage; valid_field "$lane" || usage; if [ "${#paths[@]}" -gt 0 ]; then cmd_release "$lane" "$repo" "${paths[@]}"; else cmd_release "$lane" "$repo"; fi;;
     prune) [ -n "$lane" ] || usage; valid_field "$lane" || usage; [ "${#paths[@]}" -eq 0 ] || usage; cmd_release "$lane" "$repo";;
     list) if [ -n "$lane" ]; then valid_field "$lane" || usage; fi; cmd_list "$lane" "$repo";;
