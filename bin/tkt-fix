@@ -4,12 +4,12 @@
 # A lane blocked before its PR resumes with tkt-job --resume <job.lane> followed by tkt-build --from gate, or with tkt-build --from lane when no lane ran.
 # Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>]
 #   [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]
-#   --fix-model overrides the stored model on --resume; omit it to keep the stored model (backend must match).
+#   --fix-model overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model.
 set -euo pipefail
 
 usage() {
   echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
-  echo "  --fix-model <id> overrides the stored model on --resume; omit it to keep the stored model (backend must match)." >&2
+  echo "  --fix-model <id> overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model." >&2
   exit 2
 }
 
