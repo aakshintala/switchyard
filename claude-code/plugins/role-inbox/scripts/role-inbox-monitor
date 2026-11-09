@@ -17,12 +17,19 @@
 #
 # It does not move files: the session reads a message and moves it to read/
 # as before. Bash 3.2 compatible.
+#
+# ROLE_INBOX_STOP=<file>, for tests: once <file> exists, every stream and
+# every loop here ends and the monitor exits 0, so a test stops it without a
+# signal. The streams inherit it; a remote stream does not (ssh passes no env).
 set -u
 
 here=$(cd "$(dirname "$0")" && pwd)
 conf=${ROLE_INBOX_CONF:-$here/../inboxes.conf}
+# ROLE_INBOX_SSH: the ssh command, split on spaces (tests pass `bash <stub>`).
 ssh_cmd=${ROLE_INBOX_SSH:-ssh}
 retry=${ROLE_INBOX_RETRY_S:-15}
+stop=${ROLE_INBOX_STOP:-}
+self=$$
 cwd=$(pwd -P)
 state=$(mktemp -d "${TMPDIR:-/tmp}/role-inbox.XXXXXX")
 
@@ -33,17 +40,35 @@ cleanup() {
 trap 'cleanup; exit 0' TERM INT HUP
 trap cleanup EXIT
 
+stopped() { [ -n "$stop" ] && [ -e "$stop" ]; }
+
+# idle: wait forever, or until the stop file appears.
+idle() {
+  if [ -z "$stop" ]; then
+    while :; do sleep 86400; done
+  fi
+  until stopped; do sleep 0.5; done
+  exit 0
+}
+
 expand() {
   case $1 in "~/"*) printf '%s\n' "$HOME/${1#"~/"}" ;; *) printf '%s\n' "$1" ;; esac
 }
 
 # filter <mark> <label>: pass INBOX blocks through, drop READY and HEARTBEAT.
 # On READY, a <mark> file left by a lost connection becomes one `restored` line.
+# On HEARTBEAT it exits when this monitor is gone (Claude Code ended it) or the
+# stop file exists. That is the teardown: its stream's next heartbeat then
+# hits a closed pipe and dies, and over ssh the remote stream follows, so no
+# process outlives the monitor by more than about two heartbeats.
 filter() {
   local line
   while IFS= read -r line; do
     case $line in
-      HEARTBEAT) ;;
+      HEARTBEAT)
+        ps -p "$self" >/dev/null 2>&1 || exit 0
+        stopped && exit 0
+        ;;
       "READY "*)
         if [ -n "$1" ] && [ -e "$1" ]; then
           rm -f "$1"
@@ -62,12 +87,13 @@ stream_local() {
 stream_remote() {
   local host=$1 dir=$2 rc
   local mark="$state/lost.$3"
-  while :; do
-    "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=10 \
+  until stopped; do
+    $ssh_cmd -o BatchMode=yes -o ConnectTimeout=10 \
       -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
       "$host" "bash -c \"\$(cat)\" inbox-wait $(printf '%q' "$dir")" \
       <"$here/inbox-stream" | filter "$mark" "$host:$dir"
     rc=${PIPESTATUS[0]}
+    stopped && break
     if [ ! -e "$mark" ]; then
       : >"$mark"
       echo "INBOX-WATCH lost $host:$dir (ssh exit $rc); retrying every ${retry}s"
@@ -92,10 +118,9 @@ if [ -f "$conf" ]; then
   done <"$conf"
 fi
 
-if [ "$n" -eq 0 ]; then
-  while :; do sleep 86400; done
-fi
+[ "$n" -eq 0 ] && idle
 wait
+stopped && exit 0
 # Every stream loops forever; reaching here means all of them ended.
 echo "INBOX-WATCH stopped: every stream exited; run /reload-plugins or restart the session"
-while :; do sleep 86400; done
+idle

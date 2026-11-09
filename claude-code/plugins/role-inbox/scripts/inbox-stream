@@ -22,8 +22,10 @@
 # `bash -c "$(cat)" inbox-wait <dir>` on stdin, so the remote host needs no
 # copy, and the process's argument list keeps the `inbox-wait <dir>` words
 # that inbox-watchers looks for. Bash 3.2 compatible (macOS), no arrays.
+# ROLE_INBOX_STOP=<file>, for tests: exit 0 once <file> exists.
 set -u
 
+stop=${ROLE_INBOX_STOP:-}
 dir=${1:?usage: inbox-stream <dir>}
 case $dir in "~/"*) dir=$HOME/${dir#"~/"} ;; esac
 mkdir -p -- "$dir"
@@ -34,6 +36,7 @@ seen=$nl
 pass=0
 echo "READY $dir"
 while :; do
+  if [ -n "$stop" ] && [ -e "$stop" ]; then exit 0; fi
   pass=$((pass + 1))
   # `|| exit`: a parent that ignores SIGPIPE leaves the write failing instead.
   if [ $((pass % 30)) -eq 0 ]; then echo HEARTBEAT || exit 0; fi
