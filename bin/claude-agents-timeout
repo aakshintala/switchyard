@@ -1,0 +1,62 @@
+#!/bin/bash
+# Run one claude agents probe in its own process group and reap it on timeout.
+set -u
+
+timeout=${1:-}
+shift || exit 2
+case "$timeout" in
+  ''|*[!0-9]*) echo "claude agents timeout must be a positive integer (got '$timeout')" >&2; exit 2;;
+esac
+case "$timeout" in
+  *[1-9]*) ;;
+  *) echo "claude agents timeout must be a positive integer (got '$timeout')" >&2; exit 2;;
+esac
+if [ "$#" -eq 0 ]; then
+  echo 'claude agents timeout: missing command' >&2
+  exit 2
+fi
+
+exec perl - "$timeout" "$@" <<'PERL'
+use strict;
+use warnings;
+use Errno qw(EINTR);
+
+my $seconds = shift @ARGV;
+my $pid = fork();
+die "claude agents timeout: fork failed: $!\n" unless defined $pid;
+if ($pid == 0) {
+    setpgrp(0, 0) or die "claude agents timeout: setpgrp failed: $!\n";
+    exec { $ARGV[0] } @ARGV;
+    die "claude agents timeout: exec failed: $!\n";
+}
+
+my $timed_out = 0;
+my $term_sent = 0;
+$SIG{ALRM} = sub {
+    if (!$term_sent++) {
+        $timed_out = 1;
+        kill 'TERM', -$pid;
+        alarm 1;
+    } else {
+        kill 'KILL', -$pid;
+        alarm 0;
+    }
+};
+alarm($seconds);
+while (1) {
+    my $waited = waitpid($pid, 0);
+    last if $waited == $pid;
+    next if $waited == -1 && $! == EINTR;
+    die "claude agents timeout: waitpid failed: $!\n";
+}
+my $status = $?;
+alarm(0);
+if ($timed_out) {
+    # The leader may have exited while a descendant ignored TERM. Kill every
+    # remaining member of its process group before reporting the timeout.
+    kill 'KILL', -$pid;
+    print STDERR "claude agents timed out after ${seconds}s\n";
+    exit 124;
+}
+exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
+PERL
