@@ -204,8 +204,8 @@ pub(crate) struct Started {
     pub stderr: ChildStderr,
 }
 
-pub(crate) fn start_child(spec: &JobSpec) -> Result<Started, String> {
-    start_child_with_stdin(spec, Stdio::null())
+pub(crate) fn start_child(spec: &JobSpec, env: &[(&str, &str)]) -> Result<Started, String> {
+    start_child_with_stdin_and_env(spec, Stdio::null(), env)
 }
 
 /// Split only the staged `-- <prompt>` suffix, preserving argv for direct child invocations.
@@ -249,9 +249,18 @@ fn append_stdin_error(result: &mut BackendResult, stdin_err: Option<String>) {
 /// keep null stdin. The caller owns the prompt-sized write: do it on the drive
 /// thread while the pipes drain, never synchronously during dispatch.
 pub(crate) fn start_child_with_stdin(spec: &JobSpec, stdin: Stdio) -> Result<Started, String> {
+    start_child_with_stdin_and_env(spec, stdin, &[])
+}
+
+fn start_child_with_stdin_and_env(
+    spec: &JobSpec,
+    stdin: Stdio,
+    env: &[(&str, &str)],
+) -> Result<Started, String> {
     let spawned = captured_command(&spec.bin)
         .map_err(|e| format!("cannot write cargo-mutants shim: {e}"))?
         .args(&spec.argv)
+        .envs(env.iter().copied())
         .current_dir(&spec.cwd)
         .stdin(stdin)
         .stdout(Stdio::piped())
@@ -444,7 +453,7 @@ mod tests {
             s.argv = vec![];
             s.cwd = "/tmp".into();
         });
-        let mut started = start_child(&spec).expect("start cat");
+        let mut started = start_child(&spec, &[]).expect("start cat");
         let mut out = String::new();
         use std::io::Read;
         started.stdout.read_to_string(&mut out).unwrap();
@@ -507,7 +516,7 @@ mod tests {
             ];
             s.cwd = "/tmp".into();
         });
-        let mut started = start_child(&spec).expect("start trap child");
+        let mut started = start_child(&spec, &[]).expect("start trap child");
         let pid = started.pid;
         let reaped = started.reaped.clone();
         for _ in 0..500 {
@@ -560,7 +569,7 @@ mod tests {
             s.argv = vec!["30".into()];
             s.cwd = "/tmp".into();
         });
-        let mut started = start_child(&spec).expect("start sleep");
+        let mut started = start_child(&spec, &[]).expect("start sleep");
         started
             .reaped
             .store(true, std::sync::atomic::Ordering::SeqCst);
