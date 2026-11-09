@@ -973,6 +973,30 @@ grep -qF -- 'model.lane=new' "$S" || fail "partmodel: state misses [model.lane=n
 grep -qE '^model\.lane=old$' "$S" && fail "partmodel: stale model.lane value remains"
 [ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "partmodel: state wants 1 model.lane"
 
+# Each carried model.* line is named in the TKT output, with its real value;
+# a role the new run passes with --model is not carried and gets no note.
+setup partcarry ONE AGAINST; part_seed_pr partcarry
+case "$OUT" in *carried*) fail "partcarry: a run without --part must print no carried note" ;; esac
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set model.fix fixm
+printf 'MERGED\n' >"$T/prstate"
+reload --model; run_start --part 2
+want "CURRENT " 0 partcarry
+for line in model.lane=sol model.fix=fixm model.preflight=luna; do
+  note="carried $line from part 1; pass --model ${line#model.} to change it"
+  [ "$(printf '%s\n' "$OUT" | grep -cxF -- "$note")" -eq 1 ] || fail "partcarry: output wants one [$note]"
+done
+setup partcarrymodel ONE AGAINST; part_seed_pr partcarrymodel
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set model.fix fixm
+printf 'MERGED\n' >"$T/prstate"
+reload --model; run_start --part 2 --model lane=X
+want "CURRENT " 0 partcarrymodel
+case "$OUT" in *'carried model.lane'*) fail "partcarrymodel: a --model role must get no carried note" ;; esac
+printf '%s\n' "$OUT" | grep -qxF -- 'carried model.fix=fixm from part 1; pass --model fix=fixm to change it' \
+  || fail "partcarrymodel: output misses the model.fix note"
+grep -qxF -- 'model.lane=X' "$S" || fail "partcarrymodel: state misses [model.lane=X]"
+
 # A part split carries the plan verdict: the plan is shared across parts, so
 # the new part keeps plan_verdict and plan_verdict_base and the build does
 # not refuse with verdict=none.
