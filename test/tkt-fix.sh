@@ -583,14 +583,15 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "gatefill exited $?"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "gatefill bad verdict: $(head -n 1 <<<"$out")"
 grep -F -q "GATE=true" "$T/calls.log" || fail "gatefill: GATE=true not passed to tkt-job"
 
-# 7c. A gate-failed round counts: the fix job breaks the fence (gate grc 1),
-# round goes to 1 and the next call dispatches fix2, not RECOVER on fix1.
+# 7c. A FENCE stop closes its slot without counting a round; the next call
+# dispatches fix2, not RECOVER on fix1.
 setup_case gatefail
 printf 'evil' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "gatefail exited 0"
 rc=$?; [ "$rc" = "1" ] || fail "gatefail exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FENCE n=1" || fail "gatefail bad verdict: $(head -n 1 <<<"$out")"
-[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "gatefail round not 1"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "0" ] || fail "FENCE stop changed round"
+[ "$(bash "$TKT_STATE" "$S" get fixslot)" = "1" ] || fail "FENCE stop did not close its slot"
 printf 'done' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")"
 grep -q "RECOVER" <<<"$out" && fail "second call printed RECOVER"
