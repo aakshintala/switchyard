@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$SCRIPT_DIR/../bin/roles-restart"
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-roles-restart.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
+# macOS TMPDIR ends in /; normalise so paths match the $PWD that cd produces.
+T="$(cd "$T" && pwd)"
 
 fail() {
   echo "FAIL: $1" >&2
