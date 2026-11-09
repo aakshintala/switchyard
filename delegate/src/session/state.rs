@@ -333,6 +333,7 @@ impl Store {
             seq = seq.saturating_add(1);
         }
         if !output.is_empty() {
+            hold_test_event_write(&output)?;
             let _ = guard.events.write_all(&output);
         }
         guard.next_seq = seq;
@@ -370,6 +371,38 @@ impl Store {
             }
         }
     }
+}
+
+// Test-only synchronization hook for reproducing the window between publishing
+// session state and appending its event log entry.
+fn hold_test_event_write(output: &[u8]) -> std::io::Result<()> {
+    let Some(release) = std::env::var_os("DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL") else {
+        return Ok(());
+    };
+    let Some(target_turn_id) = std::env::var("DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_TURN_ID").ok()
+    else {
+        return Ok(());
+    };
+    let is_target_completion = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .any(|line| {
+            line["kind"] == "turn.completed"
+                && line["turnId"].as_str() == Some(target_turn_id.as_str())
+        });
+    if !is_target_completion {
+        return Ok(());
+    }
+
+    let release = PathBuf::from(release);
+    let mut held = release.as_os_str().to_os_string();
+    held.push(".held");
+    File::create(PathBuf::from(held))?;
+    while !release.exists() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
 }
 
 fn epoch_ms() -> u64 {

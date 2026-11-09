@@ -191,7 +191,10 @@ impl Harness {
     }
 
     fn wait_file(&self, name: &str, what: &str) {
-        let path = self.fake_dir.join(name);
+        self.wait_path(&self.fake_dir.join(name), what);
+    }
+
+    fn wait_path(&self, path: &std::path::Path, what: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !path.exists() {
             assert!(
@@ -200,6 +203,18 @@ impl Harness {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn spawn_watch(&self, id: &str, ready: &std::path::Path) -> Child {
+        Command::new(BIN)
+            .args(["session", "watch", id, "--json"])
+            .env("HOME", &self.home)
+            .env("DELEGATE_SESSION_TEST_WATCH_READY", ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
     }
 
     fn requests(&self) -> Vec<Value> {
@@ -1043,7 +1058,25 @@ fn pi_failures_map_to_the_existing_contracts() {
 #[test]
 fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let h = Harness::new();
-    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "STEER_RACE", None, &[]);
+    let release_event_write = h.base.join("release-event-write");
+    let release_event_write_env = release_event_write.to_str().unwrap();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "STEER_RACE",
+        None,
+        &[
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL",
+                release_event_write_env,
+            ),
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_TURN_ID",
+                "pi-turn-2",
+            ),
+        ],
+    );
     assert!(
         started.status.success(),
         "{}",
@@ -1062,7 +1095,47 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     assert_eq!(state["activeTurnId"], "pi-turn-2");
 
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
-    watch_ok(&h, &id);
+    let held_marker = std::path::PathBuf::from(format!("{}.held", release_event_write.display()));
+    h.wait_path(&held_marker, "turn-2 event append hold");
+
+    let watch_ready = h.base.join("watch.ready");
+    let mut watcher = h.spawn_watch(&id, &watch_ready);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let exited_before_ready = loop {
+        if let Some(status) = watcher.try_wait().unwrap() {
+            break Some(status);
+        }
+        if watch_ready.exists() {
+            break None;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watch neither returned nor observed running state"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    if let Some(status) = exited_before_ready {
+        let logs = h.logs(&id);
+        assert!(
+            logs.iter()
+                .any(|line| { line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-2" }),
+            "watch returned with {status} before turn.completed pi-turn-2 was appended; state={}, events={logs:?}",
+            h.state(&id)
+        );
+        panic!("watch returned before observing the running session: {status}");
+    }
+    assert!(
+        watcher.try_wait().unwrap().is_none(),
+        "watch exited while turn.completed pi-turn-2 was held"
+    );
+    std::fs::write(&release_event_write, "").unwrap();
+    let watched = wait_cli(
+        &mut watcher,
+        Duration::from_secs(10),
+        &h.root(),
+        &["watch", &id],
+    );
+    assert!(watched.success(), "watch exited with {watched}");
 
     let logs = h.logs(&id);
     let done1 = logs
