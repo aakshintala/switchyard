@@ -46,6 +46,7 @@ cat > "$T/stub/ssh" <<'EOF'
 case " $* " in
   *"claude agents"*) cat "$STUBD/cagents" 2>/dev/null || echo '[]';;
   *"delegate session list"*) cat "$STUBD/dsess" 2>/dev/null || echo '{"ok":true,"sessions":[]}';;
+  *"ps -eo pid=,ppid=,etime=,args="*) cat "$STUBD/pending" 2>/dev/null || true;;
   *"ps -eo args"*) cat "$STUBD/pending" 2>/dev/null || true;;
   *"delegate-jobs"*) cat "$STUBD/asking" 2>/dev/null || true;;
   *) echo '[]';;

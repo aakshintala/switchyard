@@ -725,7 +725,7 @@ fi
 # ticket. A stalled lane with work still running wants waking, one with nothing
 # running wants retiring, and `status` alone cannot tell them apart. One ps.
 "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
-  "ps -eo args= | grep -E 'tkt-(plan|build|ship|fix|gate)|gh-ci wait|delegate watch' | grep -v grep" \
+  "ps -eo pid=,ppid=,etime=,args= | grep -E 'tkt-(plan|build|ship|fix|gate)|gh-ci wait|delegate watch' | grep -v grep" \
   >"$tmp/pending.txt" 2>/dev/null
 
 # One portable process snapshot per host. The lane-specific descendant probe
@@ -858,15 +858,30 @@ def live_muse(path):
                         r.get("hostPid"), r.get("supervisorPid"))
     return ids, None
 
-# ticket -> the pending command line, from the box ps probe. A failed or empty
-# probe leaves this empty, which keeps the old STALL wording rather than
-# claiming nothing is running: an absent probe is not evidence of idleness.
+# ticket -> the pending command line and, when available, its PID-bearing
+# process row. A failed or empty probe leaves these empty, which keeps the old
+# STALL wording rather than claiming nobody is running.
 pending = {}
+pending_processes = {}
 try:
     for line in open(os.path.join(tmp, "pending.txt")):
         line = line.strip()
-        for word in re.findall(r"\b\d{3,5}\b", line):
-            pending.setdefault(word, line)
+        fields = line.split(None, 3)
+        pid = None
+        args = line
+        elapsed_text = ""
+        if len(fields) == 4:
+            try:
+                pid = int(fields[0])
+                int(fields[1])
+                elapsed_text, args = fields[2], fields[3]
+            except ValueError:
+                pid = None
+        for word in re.findall(r"\b\d{3,5}\b", args):
+            pending.setdefault(word, args)
+            if pid is not None:
+                pending_processes.setdefault(word, []).append(
+                    {"pid": pid, "args": args, "elapsed": elapsed_text})
 except OSError:
     pass
 
@@ -1099,6 +1114,8 @@ def job_command(args):
         return match.group(1)
     if re.search(r"(?<![\w-])delegate\s+watch(?:\s|$)", args):
         return "delegate watch"
+    if re.search(r"(?<![\w-])gh-ci\s+wait(?:\s|$)", args):
+        return "gh-ci wait"
     return None
 
 
@@ -1369,6 +1386,10 @@ def missed_answers(ticket, start_ms, end_ms, status_lines, user_messages):
             continue
         ids = set(re.findall(r"\b(?:(?:ADMIT|RULING)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*|WAKE)\b",
                              content + " " + os.path.basename(path)))
+        # Flywheel rulings use the `RULING FW<n>` header rather than the
+        # `RULING-...` token format used by other answer archives. Read only
+        # the header so references to earlier FW rulings do not become answers.
+        ids.update(re.findall(r"(?im)^\s*RULING\s+(FW[0-9]+)\b", content))
         for answer_id in sorted(ids):
             delivered = [at for at, text in user_messages
                          if at is not None and start_ms <= at <= end_ms and answer_id in text]
@@ -1530,10 +1551,43 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         processes, ps_ok = process_hosts[store]
         roots = root_pids(processes, (jid, sess), explicit_roots)
         tree_known = ps_ok and any(pid in processes for pid in roots)
-        current_jobs = []
-        if tree_known:
-            current_jobs = descendant_jobs(processes, roots)
-            current_ids = {f"{job['pid']}:{job['cmd']}" for job in current_jobs}
+        current_jobs = descendant_jobs(processes, roots) if tree_known else []
+        current_ids = {f"{job['pid']}:{job['cmd']}" for job in current_jobs}
+        if store == "box":
+            # The ticket-wide pending probe also sees a lane job whose parent
+            # has changed since launch. Keep the pid:command identity used for
+            # descendant jobs; PPID is deliberately not part of the key.
+            pending_rows = pending_processes.get(n, [])
+            if pending_rows:
+                for pending_row in pending_rows:
+                    command = job_command(pending_row["args"])
+                    if command is None:
+                        continue
+                    job = {"pid": pending_row["pid"], "cmd": command,
+                           "args": pending_row["args"],
+                           "elapsed": parse_elapsed(pending_row["elapsed"])}
+                    identity = f"{job['pid']}:{command}"
+                    if identity not in current_ids:
+                        current_jobs.append(job)
+                        current_ids.add(identity)
+            elif n in pending:
+                # Args-only fixture/probe: recover the pid from the separate
+                # full-process snapshot when that process is still present.
+                pending_args = pending[n]
+                for pid, row in processes.items():
+                    if row["args"] != pending_args:
+                        continue
+                    command = job_command(row["args"])
+                    if command is None:
+                        continue
+                    job = {"pid": pid, "cmd": command, "args": row["args"],
+                           "elapsed": row["elapsed"]}
+                    identity = f"{pid}:{command}"
+                    if identity not in current_ids:
+                        current_jobs.append(job)
+                        current_ids.add(identity)
+        current_jobs.sort(key=lambda job: (job["elapsed"], job["pid"]))
+        if ps_ok:
             finished = lane_record["finished"]
             finished_ids = {f"{job.get('pid')}:{job.get('cmd')}" for job in finished}
             for job in lane_record["running"]:
@@ -1634,7 +1688,7 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
             job = current_jobs[0]
             print(f"WAITING {n} {host} {sess} {job['cmd']} {elapsed_label(job['elapsed'])}{blind}")
             wake_done = True
-        elif not working and finished_jobs and deleg and not parked and not jobq and tree_known:
+        elif not working and finished_jobs and deleg and not parked and not jobq:
             job = finished_jobs[0]
             action_id = f"job:{job['pid']}:{job['cmd']}"
             rc_text = job.get("rc") or "unknown"
