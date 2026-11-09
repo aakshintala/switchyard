@@ -197,7 +197,24 @@ do_verify() {
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
-  [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$(head -n "$REPORT_LINES" <<<"$pc_out")"
+  if [ "$prc" -eq 1 ]; then
+    planner_job="$(t get job.planner 2>/dev/null || true)"
+    if [ -n "$planner_job" ]; then
+      resume_prompt="$(mktemp "$run/$namebase-plan-check-resume.XXXXXX")" || exit 2
+      printf '%s\n' "$pc_out" >"$resume_prompt" || exit 2
+      if "$tktjob" "$state" --slot planner --resume "$planner_job" --prompt "$resume_prompt" >"$tmp" 2>&1; then
+        resume_rc=0
+      else
+        resume_rc=$?
+      fi
+      pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
+      [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
+      planner_note="planner job $planner_job resumed once (tkt-job exit=$resume_rc)"
+    else
+      planner_note="planner job not recorded in job.planner; not resumed"
+    fi
+    [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$planner_note" "$(head -n "$REPORT_LINES" <<<"$pc_out")"
+  fi
   round="$(ronum)"
   # The drift exemption is derived from recorded state, not a caller flag: a
   # verify is exempt only when a previous round recorded a base and main

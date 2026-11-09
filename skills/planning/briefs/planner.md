@@ -7,6 +7,7 @@ __EXTRA__
 
 - Your working directory stays unedited: the one file you write is the plan. The lane builds and runs tests; you build only in a scratch copy of __BASE__ (outside the working directory), and only for the Files sweep that step 2 calls for.
 - Step 2's rules on `core` rulings and on a ticket's stated behaviour bind you: a doc-reading choice is `core`, and no stated behaviour is deferred.
+- Before returning the plan, run `~/.agents/bin/plan-check __PLAN__ --base __BASE__ --cwd "$PWD"`. Clear every printed line as `planning` SKILL.md step 3 directs: add its path to Files, correct it, or mark it `new`, `new-confirmed`, `removed`, or `reads`. Return only when the check is clean, or when every remaining line needs a ruling you cannot supply; name those lines.
 - You stop at a blocked seam, or a `core` item the preflight missed: end the plan file with a `Blocked` section (the seam or item, the options, a recommendation) and write no task past it.
 
 ## Plan file
