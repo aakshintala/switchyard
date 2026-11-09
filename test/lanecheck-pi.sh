@@ -32,6 +32,10 @@ if [ "${SSH_BOOM:-0}" = 1 ]; then echo 'fixture host unreachable' >&2; exit 255;
 case "$command" in
   *'claude agents --json'*) cat "$STUBD/box-agents" ;;
   *'delegate session list --json'*) printf '{"ok":true,"sessions":[]}\n' ;;
+  *'python3 -I -'*)
+    py_args=${command#*python3 -I -}
+    read -r -a args <<< "$py_args"
+    env -u FW_RUN -u RUN_DIR HOME="$BOX_HOME" python3 -I - "${args[@]}" ;;
   *'python3 -'*) env -u FW_RUN -u RUN_DIR HOME="$BOX_HOME" python3 - ;;
   *'ps -eo args='*) exit 0 ;;
   *'python3 -c'*) exit 0 ;;
@@ -76,6 +80,12 @@ printf '%s\n' "$$" > "$BOX_RUN/fiber-1463-pi.pid"
 printf '%s\n' 99999999 > "$BOX_RUN/fiber-1464-pi.pid"
 printf '%s\n' 99999999 > "$BOX_RUN/fiber-1467-pi.pid"
 printf '%s\n' 99999999 > "$BOX_RUN/fiber-1468-pi.pid"
+printf '%s\n' 99999999 > "$T/macrun/fiber-1467-pi.pid"
+printf '%s\n' 99999999 > "$T/macrun/fiber-1468-pi.pid"
+printf '%s\n' 99999999 > "$T/macrun/fiber-1469-pi.pid"
+printf '%s\n' "$$" > "$T/macrun/fiber-1470-pi.pid"
+printf '%s\n' 99999999 > "$BOX_RUN/fiber-1471-pi.pid"
+printf '%s\n' "$$" > "$BOX_RUN/fiber-1472-pi.pid"
 printf '%s\n' "$$" > "$T/macrun/fiber-1466.pid" # fiberlaunch, not a pi lane
 
 printf 'STATUS: MAC-OLD-1461\n' > "$T/macrun/fiber-1461-report.md"
@@ -128,11 +138,73 @@ if printf '%s\n' "$out" | grep -Fq 'PI-BOX 1468 '; then
 else
   echo 'ok newer-live-roster-session-suppresses-stale-pi-box'
 fi
+if printf '%s\n' "$out" | grep -Fq 'PI-MAC 1467 '; then
+  echo 'FAIL retired-ticket-mac-pi-is-suppressed' >&2; rc=1
+else
+  echo 'ok retired-ticket-mac-pi-is-suppressed'
+fi
+if printf '%s\n' "$out" | grep -Fq 'PI-MAC 1468 '; then
+  echo 'FAIL older-mac-pi-than-live-roster-is-suppressed' >&2; rc=1
+else
+  echo 'ok older-mac-pi-than-live-roster-is-suppressed'
+fi
 if printf '%s\n' "$out" | grep -Fq 'PI-MAC 1466'; then
   echo 'FAIL mac-fiberlaunch-is-not-a-pi-lane' >&2; rc=1
 else
   echo 'ok mac-fiberlaunch-is-not-a-pi-lane'
 fi
+
+done_out=
+done_rc=0
+run_done() {
+  if done_out=$(env "${common[@]}" bash "$BIN/lanecheck" done "$1" 2>&1); then
+    done_rc=0
+  else
+    done_rc=$?
+  fi
+}
+expect_done() {
+  if [[ "$done_out" == *"$1"* ]]; then printf 'ok %s\n' "$2";
+  else printf 'FAIL %s (missing: %s)\n' "$2" "$1" >&2; rc=1; fi
+}
+run_done 1469
+if [ "$done_rc" -eq 0 ]; then echo 'ok dead-mac-pid-only-done-does-not-crash';
+else echo "FAIL dead-mac-pid-only-done-does-not-crash (exit $done_rc)" >&2; rc=1; fi
+expect_done 'moved PI pidfile (PI-MAC): fiber-1469-pi.pid' dead-mac-pidfile-move-is-printed
+if [ ! -e "$T/macrun/fiber-1469-pi.pid" ] && [ -e "$T/macrun/done/fiber-1469-pi.pid" ]; then
+  echo 'ok dead-mac-pidfile-moves-to-done'
+else
+  echo 'FAIL dead-mac-pidfile-moves-to-done' >&2; rc=1
+fi
+
+run_done 1470
+if [ "$done_rc" -ne 0 ]; then echo 'ok live-mac-pidfile-done-is-refused';
+else echo 'FAIL live-mac-pidfile-done-is-refused' >&2; rc=1; fi
+expect_done 'REFUSING to retire PI-MAC pidfile fiber-1470-pi.pid' live-mac-refusal-is-explained
+if [ -e "$T/macrun/fiber-1470-pi.pid" ]; then echo 'ok live-mac-pidfile-stays';
+else echo 'FAIL live-mac-pidfile-stays' >&2; rc=1; fi
+if ! awk -F '\t' '$2 == 1470 { found=1 } END { exit found ? 0 : 1 }' "$T/macrun/roster-done"; then
+  echo 'ok live-mac-pidfile-ticket-is-not-retired'
+else
+  echo 'FAIL live-mac-pidfile-ticket-is-not-retired' >&2; rc=1
+fi
+
+run_done 1471
+if [ "$done_rc" -eq 0 ]; then echo 'ok dead-box-pid-only-done-does-not-crash';
+else echo "FAIL dead-box-pid-only-done-does-not-crash (exit $done_rc)" >&2; rc=1; fi
+expect_done 'moved PI pidfile (PI-BOX): fiber-1471-pi.pid' dead-box-pidfile-move-is-printed
+if [ ! -e "$BOX_RUN/fiber-1471-pi.pid" ] && [ -e "$BOX_RUN/done/fiber-1471-pi.pid" ]; then
+  echo 'ok dead-box-pidfile-moves-to-done'
+else
+  echo 'FAIL dead-box-pidfile-moves-to-done' >&2; rc=1
+fi
+
+run_done 1472
+if [ "$done_rc" -ne 0 ]; then echo 'ok live-box-pidfile-done-is-refused';
+else echo 'FAIL live-box-pidfile-done-is-refused' >&2; rc=1; fi
+expect_done 'REFUSING to retire PI-BOX pidfile fiber-1472-pi.pid' live-box-refusal-is-explained
+if [ -e "$BOX_RUN/fiber-1472-pi.pid" ]; then echo 'ok live-box-pidfile-stays';
+else echo 'FAIL live-box-pidfile-stays' >&2; rc=1; fi
 
 out=$(env "${common[@]}" SSH_BOOM=1 bash "$BIN/lanecheck" 2>&1)
 expect 'UNREACHABLE PI-BOX' unreachable-box-is-not-reported-as-dead
