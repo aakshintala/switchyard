@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# inbox-stream <dir>: print each message in a file inbox once, as it arrives,
+# and never exit.
+#
+# A message is a regular *.md file directly in <dir>, the rule inbox-wait uses:
+# files in read/ and dotfiles (inbox-send's .tmp.* staging names) never count.
+# For each new message it prints one block:
+#   INBOX <path> (<n> bytes)
+#   <the first 1500 bytes>
+#   [truncated: read the file]      (only when the file is longer)
+# It prints `READY <dir>` once at start, so a caller can tell a fresh
+# connection from a dead one, and `HEARTBEAT` about once a minute. The
+# heartbeat is how it dies when its reader does: a write to a closed pipe
+# ends it with SIGPIPE, so a dropped ssh never leaves a stream behind on the
+# remote host. Callers drop both lines.
+#
+# Each name is printed once while it stays in the inbox. A name that leaves
+# (moved to read/) and comes back is printed again. Files already waiting at
+# start are printed: a new session has not seen them.
+#
+# It runs where the inbox is. role-inbox-monitor sends it to another host as
+# `bash -c "$(cat)" inbox-wait <dir>` on stdin, so the remote host needs no
+# copy, and the process's argument list keeps the `inbox-wait <dir>` words
+# that inbox-watchers looks for. Bash 3.2 compatible (macOS), no arrays.
+set -u
+
+dir=${1:?usage: inbox-stream <dir>}
+case $dir in "~/"*) dir=$HOME/${dir#"~/"} ;; esac
+mkdir -p -- "$dir"
+
+nl='
+'
+seen=$nl
+pass=0
+echo "READY $dir"
+while :; do
+  pass=$((pass + 1))
+  # `|| exit`: a parent that ignores SIGPIPE leaves the write failing instead.
+  if [ $((pass % 30)) -eq 0 ]; then echo HEARTBEAT || exit 0; fi
+  now=$nl
+  for f in "$dir"/*.md; do
+    [ -f "$f" ] || continue
+    name=${f##*/}
+    now=$now$name$nl
+    case $seen in *"$nl$name$nl"*) continue ;; esac
+    size=$(wc -c <"$f" | tr -d ' ')
+    printf 'INBOX %s (%s bytes)\n' "$f" "$size"
+    head -c 1500 "$f"
+    echo
+    [ "$size" -gt 1500 ] && echo "[truncated: read the file]"
+  done
+  seen=$now
+  sleep 2
+done

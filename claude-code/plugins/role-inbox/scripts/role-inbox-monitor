@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# role-inbox-monitor: the role-inbox plugin's monitor. Claude Code starts it at
+# session start (and on plugin reload) in the session's cwd and keeps it for the
+# whole session; each line it prints reaches the session as a notification.
+#
+# It reads inboxes.conf (ROLE_INBOX_CONF overrides the path), keeps the lines
+# whose <session-dir> is the cwd or a directory above it, and runs one
+# inbox-stream per inbox: locally, or over ssh for a <host>:<dir> inbox. It
+# prints the streams' INBOX blocks and drops their READY and HEARTBEAT lines.
+# A session that matches no line prints nothing and sleeps; it never exits,
+# because a monitor that exits does not come back.
+#
+# ssh: when a connection ends it prints `INBOX-WATCH lost <host>:<dir> (ssh
+# exit <rc>); retrying every 15s` once, retries quietly, and prints
+# `INBOX-WATCH restored <host>:<dir>` when a stream on the host says READY
+# again. The handling session needs no reply to either.
+#
+# It does not move files: the session reads a message and moves it to read/
+# as before. Bash 3.2 compatible.
+set -u
+
+here=$(cd "$(dirname "$0")" && pwd)
+conf=${ROLE_INBOX_CONF:-$here/../inboxes.conf}
+ssh_cmd=${ROLE_INBOX_SSH:-ssh}
+retry=${ROLE_INBOX_RETRY_S:-15}
+cwd=$(pwd -P)
+state=$(mktemp -d "${TMPDIR:-/tmp}/role-inbox.XXXXXX")
+
+cleanup() {
+  kill $(jobs -p) 2>/dev/null
+  rm -rf "$state"
+}
+trap 'cleanup; exit 0' TERM INT HUP
+trap cleanup EXIT
+
+expand() {
+  case $1 in "~/"*) printf '%s\n' "$HOME/${1#"~/"}" ;; *) printf '%s\n' "$1" ;; esac
+}
+
+# filter <mark> <label>: pass INBOX blocks through, drop READY and HEARTBEAT.
+# On READY, a <mark> file left by a lost connection becomes one `restored` line.
+filter() {
+  local line
+  while IFS= read -r line; do
+    case $line in
+      HEARTBEAT) ;;
+      "READY "*)
+        if [ -n "$1" ] && [ -e "$1" ]; then
+          rm -f "$1"
+          echo "INBOX-WATCH restored $2"
+        fi
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done
+}
+
+stream_local() {
+  bash -c "$(cat "$here/inbox-stream")" inbox-wait "$1" | filter "" ""
+}
+
+stream_remote() {
+  local host=$1 dir=$2 rc
+  local mark="$state/lost.$3"
+  while :; do
+    "$ssh_cmd" -o BatchMode=yes -o ConnectTimeout=10 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+      "$host" "bash -c \"\$(cat)\" inbox-wait $(printf '%q' "$dir")" \
+      <"$here/inbox-stream" | filter "$mark" "$host:$dir"
+    rc=${PIPESTATUS[0]}
+    if [ ! -e "$mark" ]; then
+      : >"$mark"
+      echo "INBOX-WATCH lost $host:$dir (ssh exit $rc); retrying every ${retry}s"
+    fi
+    sleep "$retry"
+  done
+}
+
+n=0
+if [ -f "$conf" ]; then
+  while read -r sess inbox _; do
+    case $sess in "" | "#"*) continue ;; esac
+    sess=$(expand "$sess")
+    sess=$(cd "$sess" 2>/dev/null && pwd -P) || continue
+    case $cwd/ in "$sess"/*) ;; *) continue ;; esac
+    case $inbox in
+      /* | "~/"*) stream_local "$(expand "$inbox")" & ;;
+      *:/*) stream_remote "${inbox%%:*}" "${inbox#*:}" "$n" & ;;
+      *) echo "INBOX-WATCH bad inbox in $conf: $inbox" ; continue ;;
+    esac
+    n=$((n + 1))
+  done <"$conf"
+fi
+
+if [ "$n" -eq 0 ]; then
+  while :; do sleep 86400; done
+fi
+wait
+# Every stream loops forever; reaching here means all of them ended.
+echo "INBOX-WATCH stopped: every stream exited; run /reload-plugins or restart the session"
+while :; do sleep 86400; done
