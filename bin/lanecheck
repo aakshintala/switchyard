@@ -489,6 +489,9 @@ fi
 export FW_LOCAL_BOX
 FW_SNAP_AT=$(date -u +%s)
 export FW_SNAP_AT
+# A fixed epoch makes the shared rolling-hour wake cap deterministic in tests.
+FW_LANECHECK_NOW=${FW_LANECHECK_NOW:-$(date +%s)}
+export FW_LANECHECK_NOW
 # pi lanes have no Claude session row. Probe their pidfiles on each host, where
 # kill(pid, 0) has the same process-namespace semantics as `kill -0`.
 cat >"$tmp/pi-snapshot.py" <<'PY'
@@ -614,6 +617,16 @@ fi
   "ps -eo args= | grep -E 'tkt-(plan|build|ship|fix|gate)|gh-ci wait|delegate watch' | grep -v grep" \
   >"$tmp/pending.txt" 2>/dev/null
 
+# One portable process snapshot per host. The lane-specific descendant probe
+# below uses PID/PPID rather than treating any ticket-named process as its job.
+if ps -A -o pid=,ppid=,etime=,args= >"$tmp/mac-procs.txt" 2>/dev/null; then
+  : >"$tmp/mac-procs.ok"
+fi
+if "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
+    "ps -A -o pid=,ppid=,etime=,args=" >"$tmp/box-procs.txt" 2>/dev/null; then
+  : >"$tmp/box-procs.ok"
+fi
+
 # Pending work with no process: a delegate job in NEEDS_CONTEXT has asked a
 # question and is waiting on an answer. The ps probe above cannot see it, so
 # #4099 read as a STALL on 2026-11-04 and both remedies the STALL line offers
@@ -661,9 +674,10 @@ else
   rm -f "$tmp/openprs.ok"
 fi
 
-python3 -I - "$tmp" "$roster" "$retired" "$R" "$BOX" <<'PY'
-import glob, json, sys, os, re
-tmp, roster, retired, R, BOX = sys.argv[1:6]
+python3 -I - "$tmp" "$roster" "$retired" "$R" "$BOX" "$boxssh" "$FW_LOCAL_BOX" "$script_dir/job-record" <<'PY'
+import glob, json, sys, os, re, shlex, subprocess, tempfile, time, fcntl
+
+tmp, roster, retired, R, BOX, BOXSSH, LOCAL_BOX, JOB_RECORD = sys.argv[1:9]
 
 def onbox(cmd, msg=False, where="box"):
     """A `delegate` line for a delegate lane, in the form that runs from here.
@@ -701,11 +715,12 @@ def live(path):
     rows = data if isinstance(data, list) else data.get("agents") or data.get("sessions") or []
     for r in rows:
         if isinstance(r, dict) and r.get("name"):
-            names[r["name"]] = (r.get("state") or "?", r.get("status") or "?")
+            names[r["name"]] = (r.get("state") or "?", r.get("status") or "?",
+                                r.get("pid") or r.get("processId"))
     return names, None
 
 def live_muse(path):
-    """delegate session ids -> (status, terminal, working, turns). Keyed by id:
+    """delegate ids -> status, terminal, working, turns, last turn, host pid, supervisor pid.
     a muse lane has no session name. `dead` is reported as dead rather than
     omitted, so a lane that exited is MISSING with its reason instead of
     silently absent.
@@ -713,7 +728,8 @@ def live_muse(path):
     `working` is activeTurnId being set. A muse lane with no active turn is not
     doing anything and nothing will wake it: that is the #4097 stall, and it is
     invisible from `status` alone, which cannot tell "finished" from "stalled"
-    from "waiting for a ruling" (switchyard #1086)."""
+    from "waiting for a ruling" (switchyard #1086). The rest of the tuple keeps
+    the durable turn text and process roots alongside the already-read state."""
     ids = {}
     try:
         data = json.load(open(path))
@@ -725,8 +741,10 @@ def live_muse(path):
         status = r.get("status") or "?"
         if status == "dead":
             continue
-        ids[r["id"]] = (status, ((r.get("lastTurn") or {}).get("terminal") or "?"),
-                        bool(r.get("activeTurnId")), r.get("turnCount"))
+        last_turn = r.get("lastTurn") if isinstance(r.get("lastTurn"), dict) else {}
+        ids[r["id"]] = (status, (last_turn.get("terminal") or "?"),
+                        bool(r.get("activeTurnId")), r.get("turnCount"), last_turn,
+                        r.get("hostPid"), r.get("supervisorPid"))
     return ids, None
 
 # ticket -> the pending command line, from the box ps probe. A failed or empty
@@ -923,6 +941,345 @@ def launched(ts):
     except Exception:
         return None
 
+
+def parse_elapsed(value):
+    try:
+        days = 0
+        if "-" in value:
+            day, value = value.split("-", 1)
+            days = int(day)
+        parts = [int(x) for x in value.split(":")]
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+        elif len(parts) == 2:
+            hours, minutes, seconds = 0, parts[0], parts[1]
+        elif len(parts) == 1:
+            hours, minutes, seconds = 0, 0, parts[0]
+        else:
+            return 0
+        return days * 86400 + hours * 3600 + minutes * 60 + seconds
+    except (TypeError, ValueError):
+        return 0
+
+
+def read_processes(path, ok_path):
+    rows = {}
+    if not os.path.exists(ok_path):
+        return rows, False
+    try:
+        for line in open(path, errors="replace"):
+            fields = line.strip().split(None, 3)
+            if len(fields) < 4:
+                continue
+            try:
+                pid, ppid = int(fields[0]), int(fields[1])
+            except ValueError:
+                continue
+            rows[pid] = {"pid": pid, "ppid": ppid, "elapsed": parse_elapsed(fields[2]),
+                         "args": fields[3]}
+    except OSError:
+        return {}, False
+    return rows, True
+
+
+def job_command(args):
+    match = re.search(r"(?<![\w-])(tkt-[A-Za-z0-9-]+)(?:\s|$)", args)
+    if match:
+        return match.group(1)
+    if re.search(r"(?<![\w-])delegate\s+watch(?:\s|$)", args):
+        return "delegate watch"
+    return None
+
+
+def process_tokens(args):
+    try:
+        return shlex.split(args)
+    except ValueError:
+        return args.split()
+
+
+def root_pids(processes, identifiers, explicit=()):
+    roots = set()
+    for value in explicit:
+        try:
+            pid = int(value)
+            if pid > 1:
+                roots.add(pid)
+        except (TypeError, ValueError):
+            pass
+    tokens = {str(x) for x in identifiers if x not in (None, "", "?")}
+    for pid, row in processes.items():
+        argv = process_tokens(row["args"])
+        if tokens.intersection(argv):
+            roots.add(pid)
+    return roots
+
+
+def descendant_jobs(processes, roots):
+    children = {}
+    for pid, row in processes.items():
+        children.setdefault(row["ppid"], []).append(pid)
+    descendants = set()
+    todo = list(roots)
+    while todo:
+        parent = todo.pop()
+        for child in children.get(parent, []):
+            if child not in descendants and child not in roots:
+                descendants.add(child)
+                todo.append(child)
+    jobs = []
+    for pid in descendants:
+        row = processes.get(pid)
+        command = job_command(row["args"]) if row else None
+        if command:
+            jobs.append({"pid": pid, "cmd": command, "args": row["args"],
+                         "elapsed": row["elapsed"]})
+    return sorted(jobs, key=lambda job: (job["elapsed"], job["pid"]))
+
+
+try:
+    NOW = float(os.environ.get("FW_LANECHECK_NOW", ""))
+except ValueError:
+    NOW = time.time()
+if not NOW:
+    NOW = time.time()
+WAKE_STATE = os.path.join(R, "lanecheck-wake.json")
+wake_lock = open(os.path.join(R, "lanecheck-wake.lock"), "a")
+fcntl.flock(wake_lock.fileno(), fcntl.LOCK_EX)
+try:
+    with open(WAKE_STATE) as f:
+        wake_state = json.load(f)
+    if not isinstance(wake_state, dict) or not isinstance(wake_state.get("lanes"), dict):
+        raise ValueError("bad wake state")
+except (OSError, ValueError, TypeError):
+    wake_state = {"version": 1, "lanes": {}}
+
+
+def save_wake_state():
+    fd, path = tempfile.mkstemp(prefix=".lanecheck-wake.", dir=R)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(wake_state, f, sort_keys=True)
+            f.write("\n")
+        os.replace(path, WAKE_STATE)
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def lane_state(key):
+    value = wake_state["lanes"].setdefault(key, {})
+    value.setdefault("running", [])
+    value.setdefault("finished", [])
+    value.setdefault("actions", [])
+    value.setdefault("handled", [])
+    return value
+
+
+def lane_key(ticket, host, session, jid):
+    return "\t".join((ticket, host, session, jid if jid not in ("", "?") else "-"))
+
+
+def elapsed_label(seconds):
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60}m"
+    if seconds >= 60:
+        return f"{seconds // 60}m{seconds % 60}s"
+    return f"{seconds}s"
+
+
+def action_status(entry, action_id):
+    entry["actions"] = [item for item in entry["actions"]
+                        if isinstance(item, dict) and NOW - float(item.get("at", 0)) < 3600]
+    if action_id in entry["handled"]:
+        return "handled", len(entry["actions"])
+    if len(entry["actions"]) >= 2:
+        return "capped", len(entry["actions"])
+    entry["actions"].append({"at": NOW, "id": action_id})
+    entry["handled"].append(action_id)
+    try:
+        save_wake_state()
+    except OSError:
+        entry["actions"].pop()
+        entry["handled"].pop()
+        return "unrecorded", len(entry["actions"])
+    return "ready", len(entry["actions"])
+
+
+def send_action(entry, action_id, store, jid, message):
+    status, count = action_status(entry, action_id)
+    if status != "ready":
+        return status, count
+    result = delegate_tool(store, "send", jid, message)
+    if result is not None and result.returncode == 0:
+        return "sent", count
+    return "failed", count
+
+
+def state_path_for(ticket, args=""):
+    for token in process_tokens(args):
+        if token.endswith(".state"):
+            candidate = os.path.abspath(token)
+            if os.path.isfile(candidate) or os.path.isfile(candidate[:-6] + ".journal"):
+                return candidate
+    candidates = sorted(glob.glob(os.path.join(R, "*-" + ticket + ".state")))
+    for candidate in candidates:
+        try:
+            values = {}
+            for line in open(candidate, errors="replace"):
+                key, sep, value = line.rstrip("\n").partition("=")
+                if sep:
+                    values.setdefault(key, value)
+            if values.get("issue") == ticket:
+                return os.path.abspath(candidate)
+        except OSError:
+            pass
+    if candidates:
+        return os.path.abspath(candidates[0])
+    return os.path.abspath(os.path.join(R, "fiber-" + ticket + ".state"))
+
+
+def job_exit_code(command, args, ticket, store):
+    if command == "delegate watch":
+        match = re.search(r"\bdelegate\s+watch\s+([A-Za-z0-9-]+)", args)
+        if match:
+            try:
+                job_id = match.group(1)
+                if store == "mac" or LOCAL_BOX == "1":
+                    result = subprocess.run([JOB_RECORD, job_id], text=True,
+                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                            timeout=10)
+                    record_path = result.stdout.strip() if result.returncode == 0 else ""
+                    record = json.load(open(record_path)) if record_path else {}
+                else:
+                    remote = (f'record=$(bash "$HOME/.agents/bin/job-record" '
+                              f'{shlex.quote(job_id)}) || exit; cat "$record"')
+                    result = subprocess.run([BOXSSH, "-o", "BatchMode=yes", "-o",
+                                             "ConnectTimeout=10", BOX, remote], text=True,
+                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                            timeout=10)
+                    record = json.loads(result.stdout) if result.returncode == 0 else {}
+                for key in ("exitCode", "exit_code"):
+                    code = record.get(key)
+                    if type(code) is int:
+                        return str(code)
+                result_record = record.get("result") or {}
+                for key in ("exitCode", "exit_code"):
+                    code = result_record.get(key)
+                    if type(code) is int:
+                        return str(code)
+                gate_result = result_record.get("gateResult") or {}
+                for key in ("exitCode", "exit_code"):
+                    code = gate_result.get(key)
+                    if type(code) is int:
+                        return str(code)
+            except Exception:
+                pass
+        return "unknown"
+    state_path = state_path_for(ticket, args)
+    journal = state_path[:-6] + ".journal" if state_path.endswith(".state") else state_path + ".journal"
+    try:
+        for line in reversed(open(journal, errors="replace").read().splitlines()):
+            if re.search(r"\b" + re.escape(command) + r"\b", line):
+                match = re.search(r"\b(?:rc|exit(?:\s+code)?)\s*[=:]?\s*(-?\d+)\b", line)
+                return match.group(1) if match else "unknown"
+    except OSError:
+        pass
+    return "unknown"
+
+
+def delegate_tool(store, verb, jid, text=None):
+    binary = os.environ.get("FW_DELEGATE") or os.path.expanduser("~/.local/bin/delegate")
+    if store == "mac" or LOCAL_BOX == "1":
+        command = [binary, "session", verb, jid]
+        if verb == "send":
+            command.append("-")
+        else:
+            command.append("--json")
+    else:
+        quoted = shlex.quote(jid)
+        if verb == "send":
+            remote = f"TMPDIR=/srv/lanes/tmp PATH=$HOME/.local/bin:$PATH delegate session send {quoted} -"
+        else:
+            remote = f"PATH=$HOME/.local/bin:$PATH delegate session logs {quoted} --json"
+        command = [BOXSSH, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", BOX, remote]
+    try:
+        return subprocess.run(command, input=text, text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=30)
+    except Exception as e:
+        return None
+
+
+def turn_log(store, jid):
+    result = delegate_tool(store, "logs", jid)
+    if result is None or result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+        lines = data.get("lines") if isinstance(data, dict) else data
+        return lines if isinstance(lines, list) else None
+    except Exception:
+        return None
+
+
+def turn_details(lines, turn_id, ended_at):
+    events = [line for line in lines if isinstance(line, dict)
+              and line.get("turnId") == turn_id]
+    started = next((line.get("at") for line in events if line.get("kind") == "turn.started"
+                    and isinstance(line.get("at"), (int, float))), None)
+    statuses = []
+    user_messages = []
+    for event in events:
+        if event.get("kind") == "user" and isinstance(event.get("text"), str):
+            at = event.get("at")
+            user_messages.append((at if isinstance(at, (int, float)) else None,
+                                  event["text"]))
+        if event.get("kind") != "message" or not isinstance(event.get("text"), str):
+            continue
+        for status in re.findall(r"(?im)^\s*STATUS\s*:[^\n]*", event["text"]):
+            at = event.get("at")
+            statuses.append((at if isinstance(at, (int, float)) else None, status))
+    return (started, (ended_at if isinstance(ended_at, (int, float)) else None),
+            statuses, user_messages)
+
+
+def missed_answers(ticket, start_ms, end_ms, status_lines, user_messages):
+    if start_ms is None or end_ms is None:
+        return []
+    pending_answers = []
+    paths = sorted(glob.glob(os.path.join(R, "rulings", f"ruling-{ticket}-*.md")),
+                   key=lambda path: os.path.getmtime(path))
+    for path in paths:
+        try:
+            mtime_ms = os.path.getmtime(path) * 1000
+            content = open(path, errors="replace", newline="").read()
+        except OSError:
+            continue
+        ids = set(re.findall(r"\b(?:(?:ADMIT|RULING)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*|WAKE)\b",
+                             content + " " + os.path.basename(path)))
+        for answer_id in sorted(ids):
+            delivered = [at for at, text in user_messages
+                         if at is not None and start_ms <= at <= end_ms and answer_id in text]
+            if delivered:
+                delivered_at = min(delivered)
+            elif start_ms <= mtime_ms <= end_ms:
+                delivered_at = mtime_ms
+            else:
+                continue
+            next_status = next((status for at, status in status_lines
+                                if at is not None and at >= delivered_at), None)
+            if next_status is None or answer_id not in next_status:
+                pending_answers.append((delivered_at, answer_id, path, content))
+    return sorted(pending_answers, key=lambda answer: (answer[0], answer[1]))
+
+
+mac_processes, mac_ps_ok = read_processes(os.path.join(tmp, "mac-procs.txt"),
+                                           os.path.join(tmp, "mac-procs.ok"))
+box_processes, box_ps_ok = read_processes(os.path.join(tmp, "box-procs.txt"),
+                                           os.path.join(tmp, "box-procs.ok"))
+process_hosts = {"mac": (mac_processes, mac_ps_ok), "box": (box_processes, box_ps_ok)}
+
 mac, mac_err = live(os.path.join(tmp, "mac.json"))
 box, box_err = live(os.path.join(tmp, "box.json"))
 muse, muse_err = live_muse(os.path.join(tmp, "muse.json"))
@@ -1032,22 +1389,16 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         if len(hits) == 1:
             key = hits[0]
     if key in names:
-        working, turns = True, None
+        working, turns, last_turn = True, None, {}
+        explicit_roots = ()
         if deleg:
-            state, status, working, turns = names[key]
+            state, status, working, turns, last_turn, host_pid, supervisor_pid = names[key]
+            explicit_roots = (host_pid, supervisor_pid)
         else:
-            state, status = names[key]
+            state, status, pid = names[key]
+            explicit_roots = (pid,)
             # A Claude lane's "no active turn" is `status == "busy"` being
-            # false, exactly what `activeTurnId` says for a muse lane. Until
-            # 2026-11-06 this branch left `working` at its True default, so
-            # every box Claude lane fell straight to LIVE whatever it had
-            # reported: #4256 ended its turn on "STATUS: BLOCKED on the gate
-            # decision" and this printed `LIVE 4256 box fiber-4256-plan
-            # done/idle`, while bin/ruled.sh on the same lane printed STOPPED.
-            # Two tools in one toolchain disagreeing about one lane, and the
-            # one I sweep with was the wrong one. `claude agents --json` gives
-            # state in {working, done, blocked} and status in {busy, idle}, so
-            # the signal was there all along and nothing read it.
+            # false, exactly what `activeTurnId` says for a muse lane.
             working = status == "busy"
         # Which delegate store a wake for this lane would run against. `deleg`
         # is None for a Claude lane but its jobs still live on its own host, so
@@ -1061,6 +1412,39 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         # #4099 cost a re-derivation to.
         sendline = ("`" + onbox(f"session send {jid} -", msg=True, where=store) + "`"
                     if deleg else f"SendMessage to '{sess}'")
+        lane_record = lane_state(lane_key(n, host, sess, jid))
+        processes, ps_ok = process_hosts[store]
+        roots = root_pids(processes, (jid, sess), explicit_roots)
+        tree_known = ps_ok and any(pid in processes for pid in roots)
+        current_jobs = []
+        if tree_known:
+            current_jobs = descendant_jobs(processes, roots)
+            current_ids = {f"{job['pid']}:{job['cmd']}" for job in current_jobs}
+            finished = lane_record["finished"]
+            finished_ids = {f"{job.get('pid')}:{job.get('cmd')}" for job in finished}
+            for job in lane_record["running"]:
+                identity = f"{job.get('pid')}:{job.get('cmd')}"
+                if identity not in current_ids and identity not in finished_ids:
+                    completed_job = dict(job)
+                    completed_job["finishedAt"] = NOW
+                    completed_job["rc"] = job_exit_code(job["cmd"], job.get("args", ""), n, store)
+                    finished.append(completed_job)
+                    finished_ids.add(identity)
+            lane_record["finished"] = [job for job in finished
+                                       if f"{job.get('pid')}:{job.get('cmd')}" not in current_ids]
+            lane_record["running"] = current_jobs
+        finished_jobs = lane_record["finished"]
+        turn_lines = None
+        turn_started_ms = turn_ended_ms = None
+        status_lines = []
+        user_messages = []
+        last_turn_id = last_turn.get("turnId") if isinstance(last_turn, dict) else None
+        terminal = last_turn.get("terminal") if isinstance(last_turn, dict) else None
+        if deleg and not working and terminal == "completed" and last_turn_id:
+            turn_lines = turn_log(store, jid)
+            if turn_lines is not None:
+                turn_started_ms, turn_ended_ms, status_lines, user_messages = turn_details(
+                    turn_lines, last_turn_id, last_turn.get("endedAt"))
         blind = ""
         # A lane reads an inbox file only while it has a watcher armed. Unread
         # files with no watcher means a ruling is sitting where nothing will
@@ -1126,7 +1510,86 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                       f"{rep[4]}, then `bash bin/ruled.sh {n} <file>`. The lane "
                       f"is working, so this is not a stall: part of its work is "
                       f"waiting on me")
-        if not working:
+        jobq = asking.get(n)
+        if (jobq and lane_started is not None and jobq[1] is not None
+                and jobq[1] < lane_started - 60):
+            jobq = None
+        parked = n in waiting and (lane_started is None or waiting[n][1] >= lane_started - 60)
+        wake_done = False
+        if current_jobs and not parked and not jobq:
+            job = current_jobs[0]
+            print(f"WAITING {n} {host} {sess} {job['cmd']} {elapsed_label(job['elapsed'])}{blind}")
+            wake_done = True
+        elif not working and finished_jobs and deleg and not parked and not jobq and tree_known:
+            job = finished_jobs[0]
+            action_id = f"job:{job['pid']}:{job['cmd']}"
+            rc_text = job.get("rc") or "unknown"
+            reason = f"tracked {job['cmd']} finished (exit {rc_text})"
+            message = (f"WAKE (lanecheck): {job['cmd']} finished (exit {rc_text}). "
+                       "Read its output and continue from your brief. End with STATUS.")
+            result, count = send_action(lane_record, action_id, store, jid, message)
+            if result in ("sent", "failed"):
+                label = "WAKE" if result == "sent" else "WAKE-FAILED"
+                print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
+                lane_record["finished"] = [saved for saved in lane_record["finished"]
+                                            if saved is not job]
+                save_wake_state()
+                wake_done = True
+            elif result == "capped":
+                print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                      f"{reason}; wake cap reached ({count}/2 this rolling hour), "
+                      "so no message was sent")
+                wake_done = True
+            elif result == "unrecorded":
+                print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                      "could not record the wake cap, so no message was sent")
+                wake_done = True
+        elif (not working and deleg and not parked and not jobq and not current_jobs
+              and not finished_jobs and n not in pending and turn_lines is not None
+              and tree_known and terminal == "completed" and last_turn_id):
+            answers_to_resend = missed_answers(n, turn_started_ms, turn_ended_ms,
+                                                status_lines, user_messages)
+            if answers_to_resend:
+                _, answer_id, answer_path, answer_text = answers_to_resend[0]
+                action_id = "answer:" + os.path.basename(answer_path)
+                reason = f"missed steer {answer_id}"
+                result, count = send_action(lane_record, action_id, store, jid, answer_text)
+                if result in ("sent", "failed"):
+                    label = "WAKE" if result == "sent" else "WAKE-FAILED"
+                    print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
+                    wake_done = True
+                elif result == "capped":
+                    print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                          f"{reason}; wake cap reached ({count}/2 this rolling hour), "
+                          "so no message was sent")
+                    wake_done = True
+                elif result == "unrecorded":
+                    print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                          "could not record the re-send cap, so no message was sent")
+                    wake_done = True
+            elif not status_lines:
+                action_id = "silent:" + str(last_turn_id)
+                state_path = state_path_for(n)
+                reason = f"silent idle turn {last_turn_id}"
+                message = ("WAKE (lanecheck): your last turn ended with no STATUS line and no job running. "
+                           f"Read {state_path} and your journal, take the next step your brief names, "
+                           "and end every turn with a STATUS line. Never background a wait: run tkt-* "
+                           "and delegate watch in the foreground.")
+                result, count = send_action(lane_record, action_id, store, jid, message)
+                if result in ("sent", "failed"):
+                    label = "WAKE" if result == "sent" else "WAKE-FAILED"
+                    print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
+                    wake_done = True
+                elif result == "capped":
+                    print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                          f"{reason}; wake cap reached ({count}/2 this rolling hour), "
+                          "so no message was sent")
+                    wake_done = True
+                elif result == "unrecorded":
+                    print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                          "could not record the wake cap, so no message was sent")
+                    wake_done = True
+        if not working and not wake_done:
             # The abandoned wait: work still running for a lane that has
             # stopped. Nothing will wake it when the work finishes, so this is
             # the line that needs acting on today, not a retirement candidate.
@@ -1244,7 +1707,7 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                           f"and no work running for it{settled or landed}: retire it if its report "
                           f"landed, else wake it with "
                           + sendline)
-        else:
+        elif working and not wake_done:
             started = launched(ts)
             if started is not None:
                 live_roster_starts[n] = max(started, live_roster_starts.get(n, 0))
@@ -1291,6 +1754,11 @@ for host, path in (("PI-MAC", os.path.join(tmp, "mac-pi.tsv")),
                     print(f"{state} {host} {ticket} {status}")
     except OSError:
         pass
+
+try:
+    save_wake_state()
+except OSError as error:
+    print(f"UNKNOWN lanecheck wake state — cannot persist {WAKE_STATE}: {error}")
 
 print(f"-- {len(entries)} roster entries, {len(done)} tickets and {len(done_sess)} sessions retired, {missing} missing")
 sys.exit(1 if missing else 0)
