@@ -306,6 +306,81 @@ fi
 export FW_LOCAL_BOX
 FW_SNAP_AT=$(date -u +%s)
 export FW_SNAP_AT
+# pi lanes have no Claude session row. Probe their pidfiles on each host, where
+# kill(pid, 0) has the same process-namespace semantics as `kill -0`.
+cat >"$tmp/pi-snapshot.py" <<'PY'
+import glob, os, re, sys
+
+
+def report_status(run, ticket):
+    paths = (glob.glob(os.path.join(run, "inbox", "*.md"))
+             + glob.glob(os.path.join(run, "inbox", "read", "*.md"))
+             + glob.glob(os.path.join(run, "fiber-*-report.md")))
+    candidates = []
+    for path in paths:
+        name = os.path.basename(path)
+        match = (re.match(r"^fiber-(\d+)-report\.md$", name)
+                 or re.match(r"^(?:[a-z]+-[a-z]+|box)-(\d+)-", name))
+        if match and match.group(1) == ticket:
+            try:
+                candidates.append((os.path.getmtime(path), path))
+            except OSError:
+                pass
+    if not candidates:
+        return "no report"
+    path = max(candidates)[1]
+    try:
+        lines = [line.strip() for line in open(path, errors="replace") if line.strip()]
+    except OSError:
+        return "report unreadable"
+    for key in ("STATUS", "ASKING"):
+        statuses = [line for line in lines if line.startswith(key)]
+        if statuses:
+            return " ".join(statuses[-1].split())[:110]
+    return " ".join((lines[-1] if lines else "no report").split())[:110]
+
+
+run = (sys.argv[1] if len(sys.argv) > 1 else
+       os.environ.get("FW_RUN") or os.environ.get("FW_BOX_RUN") or
+       os.path.expanduser("~/work/fiber-worktrees/flywheel/run"))
+if not os.path.isdir(run):
+    print("ERROR\tpi run directory unavailable")
+    raise SystemExit(0)
+for path in sorted(glob.glob(os.path.join(run, "fiber-*-pi.pid"))):
+    match = re.fullmatch(r"fiber-(\d+)-pi\.pid", os.path.basename(path))
+    if not match:
+        continue
+    ticket = match.group(1)
+    try:
+        pid = open(path).read().strip()
+        if not pid.isdigit() or int(pid) <= 0:
+            raise ValueError("invalid pid")
+        os.kill(int(pid), 0)
+        state = "LIVE"
+    except PermissionError:
+        state = "LIVE"  # kill -0 reports an existing but inaccessible process
+    except (OSError, ValueError):
+        state = "DEAD"
+    print(f"{ticket}\t{state}\t{report_status(run, ticket)}")
+PY
+python3 "$tmp/pi-snapshot.py" "$R" >"$tmp/mac-pi.tsv" 2>/dev/null
+if [ -n "${FW_BOX_RUN:-}" ]; then
+  printf -v _box_run_arg '%q' "$FW_BOX_RUN"
+  _box_pi_command="FW_RUN=$_box_run_arg python3 -"
+else
+  _box_pi_command='python3 -'
+fi
+if "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" "$_box_pi_command" \
+     <"$tmp/pi-snapshot.py" >"$tmp/box-pi.tsv" 2>"$tmp/box-pi.err"; then
+  :
+else
+  _box_pi_rc=$?
+  if [ "$_box_pi_rc" = 255 ]; then
+    printf 'UNREACHABLE\t%s\n' "$BOX" >"$tmp/box-pi.tsv"
+  else
+    printf 'UNKNOWN\tBox pi pidfile probe failed (exit %s)\n' "$_box_pi_rc" >"$tmp/box-pi.tsv"
+  fi
+fi
 claude agents --json >"$tmp/mac.json" 2>"$tmp/mac.err"
 "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" 'claude agents --json' >"$tmp/box.json" 2>"$tmp/box.err"
 # A muse lane (muselaunch.sh, host column `muse`) is a delegate session, not a
@@ -664,6 +739,23 @@ for host, err, f in (("mac", mac_err, "mac.err"), ("box", box_err, "box.err"),
     if err is not None:
         detail = open(os.path.join(tmp, f)).read().strip().splitlines()
         print(f"UNKNOWN {host} — cannot list sessions: {err}" + (f" | {detail[-1]}" if detail else ""))
+
+for host, path in (("PI-MAC", os.path.join(tmp, "mac-pi.tsv")),
+                   ("PI-BOX", os.path.join(tmp, "box-pi.tsv"))):
+    try:
+        with open(path) as pi_rows:
+            for row in pi_rows:
+                fields = row.rstrip("\n").split("\t", 2)
+                if fields[0] == "UNREACHABLE":
+                    print(f"UNREACHABLE {host} — cannot read pidfiles from {fields[1]}")
+                elif fields[0] == "UNKNOWN":
+                    print(f"UNKNOWN {host} — {fields[1]}")
+                elif fields[0] == "ERROR":
+                    print(f"UNKNOWN {host} — {fields[1]}")
+                elif len(fields) == 3:
+                    print(f"{fields[1]} {host} {fields[0]} {fields[2]}")
+    except OSError:
+        pass
 
 # `NO-WATCHER ~/lane-inbox/<ticket> unread=<n>` lines from inbox-watchers. Absent
 # file or failed ssh (WATCH-ERROR) means no pairing rather than a false all-clear,
