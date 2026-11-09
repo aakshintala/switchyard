@@ -55,9 +55,15 @@ if [ "\$(cat "$T/pcmode")" = real ]; then
   "$REAL_BIN/plan-check" "\$@"
   exit \$?
 fi
-if [ "\$(cat "$T/pcmode")" = lines ]; then
+pcmode="\$(cat "$T/pcmode")"
+if [ "\$pcmode" = lines ] || [ "\$pcmode" = retry-once ] || [ "\$pcmode" = retry-always ]; then
+  pc_count="\$(cat "$T/pc-count" 2>/dev/null || printf '0')"
+  pc_count=\$((pc_count + 1))
+  printf '%s' "\$pc_count" >"$T/pc-count"
+  if [ "\$pcmode" != retry-once ] || [ "\$pc_count" -eq 1 ]; then
   printf 'missing path: bin/ghost (line 9): correct it, or mark the line new or removed\noutside Files: test/ghost (line 12): add it to Files, or mark the line reads\n'
   exit 1
+  fi
 fi
 exit 0
 EOF
@@ -71,16 +77,25 @@ cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
 state="\$1"
-slot=""; out=""; rest=""
+slot=""; out=""; rest=""; resume=""; prompt=""; tmpl=""
 while [ \$# -gt 0 ]; do
   case "\$1" in
     --slot) slot="\$2"; shift 2 ;;
     --template) tmpl="\$2"; shift 2 ;;
     --out-file) out="\$2"; shift 2 ;;
+    --resume) resume="\$2"; shift 2 ;;
+    --prompt) prompt="\$2"; shift 2 ;;
     *) rest="\$rest \$1"; shift ;;
   esac
 done
 printf 'job|slot=%s|tmpl=%s|out=%s|rest=%s\n' "\$slot" "\$tmpl" "\$out" "\$rest" >>"$T/stub.log"
+if [ -n "\$resume" ]; then
+  printf 'resume|slot=%s|job=%s|prompt=%s\n' "\$slot" "\$resume" "\$prompt" >>"$T/stub.log"
+  sed 's/^/resume-prompt|/' "\$prompt" >>"$T/stub.log"
+  bash "$REAL_BIN/tkt-state" "\$state" set "job.\$slot" resumed-job-id || exit 2
+  echo "TKT tkt-job DONE id=resumed-job-id head=h commits=0 gate=none report=resume log=x"
+  exit 0
+fi
 if [ "\$slot" = confirm ]; then
   confirm_job="\$(bash "$REAL_BIN/tkt-state" "\$state" get job.confirm 2>/dev/null || true)"
   printf 'confirm-job|%s\n' "\$confirm_job" >>"$T/stub.log"
@@ -230,6 +245,8 @@ setup_case() {
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR/run"
   printf 'ok' >"$T/ghmode"
+  printf 'ok' >"$T/pcmode"
+  printf '0' >"$T/pc-count"
   git init -q "$CDIR/wt"
   wcommit "$CDIR/wt" f.txt "v1"
   git -C "$CDIR/wt" rev-parse HEAD >"$CDIR/base"
@@ -348,7 +365,46 @@ run_plan verify
 expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "PLAN-CHECK"
 grep -q "missing path: bin/ghost" <<<"$OUT" || fail "PLAN-CHECK lists the first line"
 grep -q "outside Files: test/ghost" <<<"$OUT" || fail "PLAN-CHECK lists the second line"
+grep -Fq 'planner job not recorded in job.planner; not resumed' <<<"$OUT" || fail "PLAN-CHECK reports that the planner job was not recorded"
 grep -q "^job|" "$T/stub.log" && fail "PLAN-CHECK starts no job"
+printf 'ok' >"$T/pcmode"
+
+# --- a recorded planner job gets one plan-check retry before the Verifier ---
+: >"$T/stub.log"
+setup_case plan-check-resume-clean
+rebase_plan
+bash "$TKT_STATE" "$S" set job.planner planner-job-1471 || fail "seed planner job"
+printf 'retry-once' >"$T/pcmode"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "clean plan-check retry continues (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "clean plan-check retry"
+[ "$(cat "$T/pc-count")" = 2 ] || fail "clean plan-check retry checks twice"
+grep -Fq 'resume|slot=planner|job=planner-job-1471|prompt=' "$T/stub.log" || fail "resume uses the planner slot, recorded job and prompt file"
+grep -Fxq 'resume-prompt|missing path: bin/ghost (line 9): correct it, or mark the line new or removed' "$T/stub.log" || fail "resume prompt carries first plan-check line"
+grep -Fxq 'resume-prompt|outside Files: test/ghost (line 12): add it to Files, or mark the line reads' "$T/stub.log" || fail "resume prompt carries second plan-check line"
+first_check_line="$(grep -n '^check|' "$T/stub.log" | sed -n '1s/:.*//p')"
+resume_line="$(grep -n '^resume|' "$T/stub.log" | sed -n '1s/:.*//p')"
+second_check_line="$(grep -n '^check|' "$T/stub.log" | sed -n '2s/:.*//p')"
+verifier_line="$(grep -n '^job|slot=verifier-r1' "$T/stub.log" | sed -n '1s/:.*//p')"
+[ "$first_check_line" -lt "$resume_line" ] && [ "$resume_line" -lt "$second_check_line" ] && [ "$second_check_line" -lt "$verifier_line" ] || fail "resume and recheck precede the Verifier"
+[ "$(state_get verifier_round)" = 1 ] || fail "planner resume does not count as a Verifier round"
+[ "$(state_get job.planner)" = resumed-job-id ] || fail "resume keeps the planner slot on the resumed job"
+
+# --- a second failing plan-check stops before any Verifier round ---
+: >"$T/stub.log"
+setup_case plan-check-resume-still-fails
+rebase_plan
+bash "$TKT_STATE" "$S" set job.planner planner-job-1471 || fail "seed failing planner job"
+printf 'retry-always' >"$T/pcmode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "second plan-check failure exits 1"
+expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "second plan-check failure"
+grep -q 'missing path: bin/ghost' <<<"$OUT" || fail "second plan-check failure reports its lines"
+[ "$(cat "$T/pc-count")" = 2 ] || fail "second plan-check failure checks exactly twice"
+[ "$(grep -c '^resume|' "$T/stub.log")" -eq 1 ] || fail "second plan-check failure resumes exactly once"
+[ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" -eq 0 ] || fail "second plan-check failure spends no Verifier round"
+[ -z "$(state_get verifier_round)" ] || fail "second plan-check failure leaves Verifier round count unchanged"
 printf 'ok' >"$T/pcmode"
 
 # --- real plan-check citation hints reach the PLAN-CHECK output ---
