@@ -186,6 +186,25 @@ fn wall_cap_ms(spec: &JobSpec) -> Option<u64> {
     spec.wall_ms.map(|ms| ms.max(0.0) as u64)
 }
 
+const DISABLED_REMINDER_ENV: [(&str, &str); 6] = [
+    ("MUSE_EXPERIMENTAL_MEMORY_REMINDER", "0"),
+    ("MUSE_EXPERIMENTAL_TODO_REMINDER", "0"),
+    ("MUSE_EXPERIMENTAL_SKILL_REMINDER", "0"),
+    ("MUSE_EXPERIMENTAL_GOAL_REMINDER", "0"),
+    ("MUSE_EXPERIMENTAL_VERIFY_REMINDER", "0"),
+    ("MUSE_EXPERIMENTAL_SCOPE_REMINDER", "0"),
+];
+
+/// Disable Muse reminder children by default, while leaving explicitly set
+/// caller values in the inherited environment untouched.
+fn reminder_env_overrides() -> Vec<(&'static str, &'static str)> {
+    DISABLED_REMINDER_ENV
+        .iter()
+        .copied()
+        .filter(|(name, _)| std::env::var_os(name).is_none())
+        .collect()
+}
+
 pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     // The stream usually repeats this id in its `session` header; when it
     // doesn't (a crash before the first line), the result still carries it.
@@ -202,7 +221,8 @@ pub(crate) fn spawn(spec: &JobSpec) -> Spawned {
     };
     let mut wired = spec.clone();
     wired.argv = lower(&spec.argv, &spec.cwd, &prompt_file.path);
-    let started = match super::start_child(&wired) {
+    let child_env = reminder_env_overrides();
+    let started = match super::start_child(&wired, &child_env) {
         Ok(s) => s,
         Err(msg) => return super::spawn_failed(&msg),
     };
@@ -1285,6 +1305,38 @@ mod tests {
         path
     }
 
+    const REMINDER_ENV_KEYS: [&str; 6] = [
+        "MUSE_EXPERIMENTAL_MEMORY_REMINDER",
+        "MUSE_EXPERIMENTAL_TODO_REMINDER",
+        "MUSE_EXPERIMENTAL_SKILL_REMINDER",
+        "MUSE_EXPERIMENTAL_GOAL_REMINDER",
+        "MUSE_EXPERIMENTAL_VERIFY_REMINDER",
+        "MUSE_EXPERIMENTAL_SCOPE_REMINDER",
+    ];
+
+    fn fake_muse_environment_script(
+        dir: &std::path::Path,
+        fixture: &std::path::Path,
+        env_record: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let body = format!(
+            r#"#!/bin/sh
+printf '%s\n' \
+  "MUSE_EXPERIMENTAL_MEMORY_REMINDER=${{MUSE_EXPERIMENTAL_MEMORY_REMINDER-__unset__}}" \
+  "MUSE_EXPERIMENTAL_TODO_REMINDER=${{MUSE_EXPERIMENTAL_TODO_REMINDER-__unset__}}" \
+  "MUSE_EXPERIMENTAL_SKILL_REMINDER=${{MUSE_EXPERIMENTAL_SKILL_REMINDER-__unset__}}" \
+  "MUSE_EXPERIMENTAL_GOAL_REMINDER=${{MUSE_EXPERIMENTAL_GOAL_REMINDER-__unset__}}" \
+  "MUSE_EXPERIMENTAL_VERIFY_REMINDER=${{MUSE_EXPERIMENTAL_VERIFY_REMINDER-__unset__}}" \
+  "MUSE_EXPERIMENTAL_SCOPE_REMINDER=${{MUSE_EXPERIMENTAL_SCOPE_REMINDER-__unset__}}" \
+  > "{}"
+cat "{}"
+"#,
+            env_record.display(),
+            fixture.display()
+        );
+        fake_muse_script(dir, &body)
+    }
+
     fn fake_muse_prompt_script(
         dir: &std::path::Path,
         fixture: &std::path::Path,
@@ -1800,6 +1852,83 @@ touch "$dir/released"
         assert!(!prompt_path.exists());
         assert!(!recorded.iter().any(|arg| arg == "hi"), "{recorded:?}");
         assert!(!recorded.iter().any(|a| a == "--disable-sandbox"));
+    }
+
+    #[test]
+    fn spawned_muse_receives_default_disabled_reminder_switches() {
+        let _lock = crate::test_env::lock();
+        let dir = scratch_dir("reminder-env-defaults");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let _unset: Vec<_> = REMINDER_ENV_KEYS
+            .iter()
+            .map(|name| EnvGuard::remove(name))
+            .collect();
+        let fixture = dir.join("tool-calls-fix.stdout");
+        std::fs::write(&fixture, TOOL_CALLS_FIX).unwrap();
+        let env_record = dir.join("environment.txt");
+        let fake = fake_muse_environment_script(&dir, &fixture, &env_record);
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let spec = job_spec(
+            &resolve_bin(None),
+            argv("muse/muse-spark-1.3-contributor", None, "hi"),
+            &cwd,
+        );
+
+        let result = (spawn(&spec).drive)(&|_| {});
+        assert_eq!(result.is_error, Some(false), "{}", result.text);
+        let actual = std::fs::read_to_string(env_record).unwrap();
+        assert_eq!(
+            actual.lines().collect::<Vec<_>>(),
+            vec![
+                "MUSE_EXPERIMENTAL_MEMORY_REMINDER=0",
+                "MUSE_EXPERIMENTAL_TODO_REMINDER=0",
+                "MUSE_EXPERIMENTAL_SKILL_REMINDER=0",
+                "MUSE_EXPERIMENTAL_GOAL_REMINDER=0",
+                "MUSE_EXPERIMENTAL_VERIFY_REMINDER=0",
+                "MUSE_EXPERIMENTAL_SCOPE_REMINDER=0",
+            ]
+        );
+    }
+
+    #[test]
+    fn spawned_muse_preserves_caller_reminder_switch_values() {
+        let _lock = crate::test_env::lock();
+        let dir = scratch_dir("reminder-env-override");
+        let _home = EnvGuard::set("HOME", dir.to_str().unwrap());
+        let _tmp = EnvGuard::set("TMPDIR", dir.to_str().unwrap());
+        let _unset: Vec<_> = REMINDER_ENV_KEYS
+            .iter()
+            .map(|name| EnvGuard::remove(name))
+            .collect();
+        let _caller_skill = EnvGuard::set("MUSE_EXPERIMENTAL_SKILL_REMINDER", "false");
+        let fixture = dir.join("tool-calls-fix.stdout");
+        std::fs::write(&fixture, TOOL_CALLS_FIX).unwrap();
+        let env_record = dir.join("environment.txt");
+        let fake = fake_muse_environment_script(&dir, &fixture, &env_record);
+        let _bin = EnvGuard::set("MUSE_BIN", fake.to_str().unwrap());
+        let cwd = dir.join("repo").to_string_lossy().into_owned();
+        let spec = job_spec(
+            &resolve_bin(None),
+            argv("muse/muse-spark-1.3-contributor", None, "hi"),
+            &cwd,
+        );
+
+        let result = (spawn(&spec).drive)(&|_| {});
+        assert_eq!(result.is_error, Some(false), "{}", result.text);
+        let actual = std::fs::read_to_string(env_record).unwrap();
+        assert_eq!(
+            actual.lines().collect::<Vec<_>>(),
+            vec![
+                "MUSE_EXPERIMENTAL_MEMORY_REMINDER=0",
+                "MUSE_EXPERIMENTAL_TODO_REMINDER=0",
+                "MUSE_EXPERIMENTAL_SKILL_REMINDER=false",
+                "MUSE_EXPERIMENTAL_GOAL_REMINDER=0",
+                "MUSE_EXPERIMENTAL_VERIFY_REMINDER=0",
+                "MUSE_EXPERIMENTAL_SCOPE_REMINDER=0",
+            ]
+        );
     }
 
     #[test]
