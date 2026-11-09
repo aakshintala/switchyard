@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# wired-check: log kernel wired memory and notify switchyard above 7 GiB.
+# Run hourly from the uninstalled template in claude-code/launchd/.
+# WIRED_CHECK_BYTES, WIRED_CHECK_STATE_FILE and WIRED_CHECK_INBOX_SEND are test overrides.
+set -euo pipefail
+
+limit=$((7 * 1024 * 1024 * 1024))
+if [ -n "${WIRED_CHECK_BYTES:-}" ]; then
+  [[ "$WIRED_CHECK_BYTES" =~ ^[0-9]+$ ]] || { echo "wired-check: WIRED_CHECK_BYTES must be a non-negative integer" >&2; exit 2; }
+  wired=$((10#$WIRED_CHECK_BYTES))
+else
+  pages="$(vm_stat | awk '/Pages wired down/ {gsub("\\.","",$4); print $4}')"
+  psize="$(sysctl -n hw.pagesize)"
+  [[ "$pages" =~ ^[0-9]+$ && "$psize" =~ ^[0-9]+$ ]] || { echo "wired-check: could not read wired memory" >&2; exit 1; }
+  wired=$((pages * psize))
+fi
+vn="${WIRED_CHECK_VNODES:-$(sysctl -n kern.num_vnodes)}"
+vmax="${WIRED_CHECK_MAXVNODES:-$(sysctl -n kern.maxvnodes)}"
+log_file="${WIRED_CHECK_LOG:-$HOME/.cache/agents/wired-check.log}"
+state_file="${WIRED_CHECK_STATE_FILE:-$HOME/.cache/agents/wired-check.state}"
+
+mkdir -p "$(dirname "$log_file")" "$(dirname "$state_file")"
+gb="$(awk -v w="$wired" 'BEGIN {printf "%.1f", w / 1073741824}')"
+printf '%s wired %sG vnodes %s/%s\n' "$(date '+%F %T')" "$gb" "$vn" "$vmax" >>"$log_file"
+
+if [ "$wired" -gt "$limit" ]; then
+  note="wired-check: kernel wired memory is ${gb}G (limit 7G), vnodes ${vn}/${vmax}. Schedule a Mac drain and restart for the next 09:00 local (owner rule (b), 2026-11-01)."
+  printf '%s\n' "$note" | "${WIRED_CHECK_INBOX_SEND:-$HOME/.agents/bin/inbox-send}" \
+    "${WIRED_CHECK_INBOX:-$HOME/.cache/agents/inbox/switchyard}" wired-check
+  state="off"
+  [ ! -f "$state_file" ] || IFS= read -r state <"$state_file" || true
+  if [ "$state" != on ]; then
+    owner-ask log --from switchyard --kind breaker-on --name wired-memory \
+      --title "wired memory exceeded 7 GiB"
+    printf 'on\n' >"$state_file"
+  fi
+elif [ -f "$state_file" ]; then
+  state="off"
+  IFS= read -r state <"$state_file" || true
+  if [ "$state" = on ]; then
+    owner-ask log --from switchyard --kind breaker-off --name wired-memory \
+      --title "wired memory recovered below 7 GiB"
+    printf 'off\n' >"$state_file"
+  fi
+fi
