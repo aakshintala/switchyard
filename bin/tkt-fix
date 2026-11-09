@@ -375,6 +375,18 @@ record_round_head() {
   t journal "fix round head write fix$knum $path"
 }
 
+is_clean_main_merge() {
+  local commit="$1" parents merge_commit parent1 parent2 extra automatic_tree commit_tree
+  parents="$(git -C "$worktree" rev-list --parents -n 1 "$commit" 2>/dev/null)" || return 1
+  read -r merge_commit parent1 parent2 extra <<<"$parents"
+  [ -n "$parent1" ] && [ -n "$parent2" ] && [ -z "$extra" ] || return 1
+  git -C "$worktree" merge-base --is-ancestor "$parent2" origin/main 2>/dev/null || return 1
+  # merge-tree --write-tree (Git 2.38+) fails on conflicts; those merges stay unaccounted.
+  automatic_tree="$(git -C "$worktree" merge-tree --write-tree "$parent1" "$parent2" 2>/dev/null)" || return 1
+  commit_tree="$(git -C "$worktree" rev-parse --verify "${commit}^{tree}" 2>/dev/null)" || return 1
+  [ "$automatic_tree" = "$commit_tree" ]
+}
+
 verify_round_coverage() {
   local round_list_file="$1" unaccounted_file="$2" commits commit owner limit n round_start round_head round_findings
   local sha_list missing_rounds repair_command state_arg since_arg path_arg first_round_start first_round_commit concrete_start any_round_start
@@ -384,8 +396,8 @@ verify_round_coverage() {
       "branch history was rewritten after the review, so scoped-verify rounds cannot be mapped" \
       "route: re-review the head, or record reviewed as the rebased equivalent of the reviewed commit"
   fi
-  # First parent only: a merge of main into the branch needs an owning round,
-  # but the main commits it brings in were never this branch's fix work.
+  # First parent only: main's commits are not branch fix work. Clean automatic
+  # merges from origin/main need no round ownership; manual merges do.
   commits="$(git -C "$worktree" rev-list --first-parent --reverse "$verify_since..$new_head")" || emit "FINDINGS-SCOPE-ERROR" 1 "cannot enumerate commits in $verify_since..$new_head"
   limit="$fixslot"; [ "$knum" -le "$limit" ] || limit="$knum"
   for commit in $commits; do
@@ -413,6 +425,8 @@ verify_round_coverage() {
       else
         printf '%s %s\n' "$commit" "$owner" >>"$unaccounted_file"
       fi
+    elif is_clean_main_merge "$commit"; then
+      :
     else
       printf '%s unknown\n' "$commit" >>"$unaccounted_file"
     fi
@@ -687,7 +701,12 @@ fi
 grc=0
 "$tktgate" "$state" --checks-only --expect-head "$new_head" >"$tmp/gate.out" 2>"$tmp/gate.err" || grc=$?
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
-[ "$grc" -eq 1 ] && { round=$((round + 1)); t set round "$round"; close_slot "$knum"; } # a gate-failed round counts
+if [ "$grc" -eq 1 ]; then
+  case "$(head -n 1 "$tmp/gate.out")" in
+    "TKT tkt-gate FENCE "*) close_slot "$knum" ;;
+    *) round=$((round + 1)); t set round "$round"; close_slot "$knum" ;;
+  esac
+fi
 if [ "$grc" -ne 0 ]; then
   if [ "$no_commits" -eq 1 ]; then printf 'no commits\n' >>"$tmp/gate.out"; fi
   pass tkt-gate "$tmp/gate.out" "$grc" "$tmp/gate.err"
