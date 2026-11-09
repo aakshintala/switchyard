@@ -931,6 +931,7 @@ RULING_ARCHIVE_FROM = float(os.environ.get("FW_RULING_ARCHIVE_FROM") or 17937936
 # which keeps the old behaviour rather than silencing every MISSING.
 SNAP_AT = float(os.environ.get("FW_SNAP_AT") or 0.0)
 reported = {}
+inbox_reports = {}
 # Three sources, not two. A lane's report reaches me either as an inbox message
 # or as `run/fiber-<n>-report.md` written in place, and which one depends on the
 # machine: a box lane sends, a Mac delegate lane has no inbox to send to and only
@@ -940,10 +941,12 @@ reported = {}
 # cost nine hours that way: REVIEWED, CI green, PR #4298 ready to ship, and
 # nothing looking. The file is the same shape as the message, so it goes through
 # the same status precedence below rather than getting a branch of its own.
-_srcs = [glob.glob(os.path.join(R, "inbox", "*.md")),
-         glob.glob(os.path.join(R, "inbox", "read", "*.md")),
-         glob.glob(os.path.join(R, "fiber-*-report.md"))]
-for _d in _srcs:
+_srcs = [
+    (glob.glob(os.path.join(R, "inbox", "*.md")), True),
+    (glob.glob(os.path.join(R, "inbox", "read", "*.md")), True),
+    (glob.glob(os.path.join(R, "fiber-*-report.md")), False),
+]
+for _d, _is_inbox in _srcs:
     for p in _d:
         base = os.path.basename(p)
         m = (re.match(r"^(?:[a-z]+-[a-z]+|box)-(\d{3,5})-", base)
@@ -956,6 +959,8 @@ for _d in _srcs:
         except OSError:
             continue
         t = m.group(1)
+        if _is_inbox:
+            inbox_reports.setdefault(t, []).append((when, text))
         if t in reported and reported[t][0] >= when:
             continue
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -1343,21 +1348,28 @@ def turn_details(lines, turn_id, ended_at):
                     and isinstance(line.get("at"), (int, float))), None)
     statuses = []
     user_messages = []
+    assistant_messages = []
     for event in events:
         if event.get("kind") == "user" and isinstance(event.get("text"), str):
             at = event.get("at")
             user_messages.append((at if isinstance(at, (int, float)) else None,
                                   event["text"]))
-        if event.get("kind") != "message" or not isinstance(event.get("text"), str):
+    for event in lines:
+        if not isinstance(event, dict) or event.get("kind") != "message" \
+                or not isinstance(event.get("text"), str):
+            continue
+        at = event.get("at")
+        timestamp = at if isinstance(at, (int, float)) else None
+        assistant_messages.append((timestamp, event["text"]))
+        if event.get("turnId") != turn_id:
             continue
         for status in re.findall(r"(?im)^\s*STATUS\s*:[^\n]*", event["text"]):
-            at = event.get("at")
-            statuses.append((at if isinstance(at, (int, float)) else None, status))
+            statuses.append((timestamp, status))
     return (started, (ended_at if isinstance(ended_at, (int, float)) else None),
-            statuses, user_messages)
+            statuses, user_messages, assistant_messages)
 
 
-def missed_answers(ticket, start_ms, end_ms, status_lines, user_messages):
+def missed_answers(ticket, start_ms, end_ms, user_messages, assistant_messages, inbox_reports):
     if start_ms is None or end_ms is None:
         return []
     pending_answers = []
@@ -1384,9 +1396,12 @@ def missed_answers(ticket, start_ms, end_ms, status_lines, user_messages):
                 delivered_at = mtime_ms
             else:
                 continue
-            next_status = next((status for at, status in status_lines
-                                if at is not None and at >= delivered_at), None)
-            if next_status is None or answer_id not in next_status:
+            acknowledged = any(at is not None and at >= delivered_at and answer_id in text
+                               for at, text in assistant_messages)
+            acknowledged = acknowledged or any(
+                report_at * 1000 >= delivered_at and answer_id in text
+                for report_at, text in inbox_reports)
+            if not acknowledged:
                 pending_answers.append((delivered_at, answer_id, path, content))
     return sorted(pending_answers, key=lambda answer: (answer[0], answer[1]))
 
@@ -1579,12 +1594,14 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         turn_started_ms = turn_ended_ms = None
         status_lines = []
         user_messages = []
+        assistant_messages = []
         last_turn_id = last_turn.get("turnId") if isinstance(last_turn, dict) else None
         terminal = last_turn.get("terminal") if isinstance(last_turn, dict) else None
         if deleg and not working and terminal == "completed" and last_turn_id:
             turn_lines = turn_log(store, jid)
             if turn_lines is not None:
-                turn_started_ms, turn_ended_ms, status_lines, user_messages = turn_details(
+                (turn_started_ms, turn_ended_ms, status_lines, user_messages,
+                 assistant_messages) = turn_details(
                     turn_lines, last_turn_id, last_turn.get("endedAt"))
         blind = ""
         # A lane reads an inbox file only while it has a watcher armed. Unread
@@ -1689,7 +1706,8 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
               and not finished_jobs and n not in pending and turn_lines is not None
               and tree_known and terminal == "completed" and last_turn_id):
             answers_to_resend = missed_answers(n, turn_started_ms, turn_ended_ms,
-                                                status_lines, user_messages)
+                                                user_messages, assistant_messages,
+                                                inbox_reports.get(n, []))
             if answers_to_resend:
                 _, answer_id, answer_path, answer_text = answers_to_resend[0]
                 action_id = "answer:" + os.path.basename(answer_path)

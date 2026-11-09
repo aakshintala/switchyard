@@ -254,7 +254,104 @@ fi
 
 r_missed="$r"
 
-# A STATUS that predates the answer is not the lane's next STATUS.
+# An ID cited only in a later assistant message body is an acknowledgement,
+# even when the STATUS line does not repeat it.
+r=$(newrun missed-steer-body-ack)
+lane "$r" 3004 fiber-3004-build sid-3004
+mkdir -p "$r/rulings"
+cat >"$r/rulings/ruling-3004-RULING-3004-1.md" <<'EOF'
+RULING-3004-1: apply this answer.
+EOF
+python3 - "$r/rulings/ruling-3004-RULING-3004-1.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1900, 1900))
+PY
+set_session sid-3004 3004 turn-body-ack completed 2100000
+python3 - "$T/dlogs" <<'PY'
+import json, sys
+json.dump({"ok": True, "lines": [
+    {"kind": "turn.started", "turnId": "turn-body-ack", "at": 2000000},
+    {"kind": "user", "turnId": "turn-body-ack", "text": "RULING-3004-1: apply this answer.", "at": 2050000},
+    {"kind": "message", "turnId": "turn-body-ack", "text": "RULING-3004-1 was applied to the plan.", "at": 2099998},
+    {"kind": "message", "turnId": "turn-body-ack", "text": "STATUS: DONE — plan updated", "at": 2099999},
+    {"kind": "turn.completed", "turnId": "turn-body-ack", "terminal": "completed", "at": 2100000},
+]}, open(sys.argv[1], "w"))
+PY
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 2101); lrc=$?
+if [ "$lrc" -eq 0 ] && [ ! -s "$T/send-commands" ]; then
+  ok missed-steer-body-citation-acknowledges
+else
+  fail "missed-steer-body-citation-acknowledges (rc=$lrc out=$out)"
+fi
+
+# An ACK line in a lane report received after delivery also acknowledges it.
+r=$(newrun missed-steer-report-ack)
+lane "$r" 3006 fiber-3006-build sid-3006
+mkdir -p "$r/rulings" "$r/inbox"
+cat >"$r/rulings/ruling-3006-admit.md" <<'EOF'
+ADMIT-3006-4: proceed with the admitted plan.
+EOF
+cat >"$r/inbox/box-box-3006-report.md" <<'EOF'
+STATUS: DONE — admitted plan implemented
+ACK ADMIT-3006-4
+EOF
+python3 - "$r/inbox/box-box-3006-report.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (2075, 2075))
+PY
+set_session sid-3006 3006 turn-report-ack completed 2100000
+python3 - "$T/dlogs" <<'PY'
+import json, sys
+json.dump({"ok": True, "lines": [
+    {"kind": "turn.started", "turnId": "turn-report-ack", "at": 2000000},
+    {"kind": "user", "turnId": "turn-report-ack", "text": "ADMIT-3006-4: proceed with the admitted plan.", "at": 2050000},
+    {"kind": "message", "turnId": "turn-report-ack", "text": "STATUS: DONE — work complete", "at": 2099999},
+    {"kind": "turn.completed", "turnId": "turn-report-ack", "terminal": "completed", "at": 2100000},
+]}, open(sys.argv[1], "w"))
+PY
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 2101); lrc=$?
+if [ "$lrc" -eq 0 ] && [ ! -s "$T/send-commands" ]; then
+  ok missed-steer-ack-line-in-inbox-report-acknowledges
+else
+  fail "missed-steer-ack-line-in-inbox-report-acknowledges (rc=$lrc out=$out)"
+fi
+
+# The archive glob accepts any ruling suffix, including -admit-diag.
+r=$(newrun missed-steer-admit-diag)
+lane "$r" 3007 fiber-3007-build sid-3007
+mkdir -p "$r/rulings"
+cat >"$r/rulings/ruling-3007-admit-diag.md" <<'EOF'
+ADMIT-3007-2: continue with the diagnostic admission.
+EOF
+python3 - "$r/rulings/ruling-3007-admit-diag.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1900, 1900))
+PY
+set_session sid-3007 3007 turn-admit-diag completed 2100000
+python3 - "$T/dlogs" <<'PY'
+import json, sys
+json.dump({"ok": True, "lines": [
+    {"kind": "turn.started", "turnId": "turn-admit-diag", "at": 2000000},
+    {"kind": "user", "turnId": "turn-admit-diag", "text": "ADMIT-3007-2: continue with the diagnostic admission.", "at": 2050000},
+    {"kind": "message", "turnId": "turn-admit-diag", "text": "STATUS: DONE — diagnostic plan reviewed without citing its ID", "at": 2099999},
+    {"kind": "turn.completed", "turnId": "turn-admit-diag", "terminal": "completed", "at": 2100000},
+]}, open(sys.argv[1], "w"))
+PY
+set_processes
+: >"$T/send-commands"
+out=$(run_lanecheck "$r" 2101); lrc=$?
+if [ "$lrc" -eq 0 ] && cmp -s "$r/rulings/ruling-3007-admit-diag.md" "$T/last-send" \
+   && printf '%s' "$out" | grep -q '^WAKE 3007 .*missed steer ADMIT-3007-2'; then
+  ok missed-steer-finds-admit-diag-suffixed-ruling
+else
+  fail "missed-steer-finds-admit-diag-suffixed-ruling (rc=$lrc out=$out)"
+fi
+
+# Assistant text that predates delivery cannot acknowledge the answer.
 r=$(newrun missed-steer-next-status)
 lane "$r" 3005 fiber-3005-build sid-3005
 mkdir -p "$r/rulings"
@@ -278,9 +375,9 @@ set_processes
 out=$(run_lanecheck "$r" 4100); lrc=$?
 if [ "$lrc" -eq 0 ] && cmp -s "$r/rulings/ruling-3005-RULING-3005-1.md" "$T/last-send" \
    && printf '%s' "$out" | grep -q '^WAKE 3005 .*missed steer RULING-3005-1'; then
-  ok missed-steer-ignores-a-status-before-the-answer
+  ok missed-steer-ignores-assistant-text-before-delivery
 else
-  fail "missed-steer-ignores-a-status-before-the-answer (rc=$lrc out=$out)"
+  fail "missed-steer-ignores-assistant-text-before-delivery (rc=$lrc out=$out)"
 fi
 
 # A subsequent STATUS that mentions the ID is accepted and is not resent.
