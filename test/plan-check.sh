@@ -76,6 +76,13 @@ expect_code() {
 clean="$(mkplan clean '## Files\n- `src/lib.rs`\n- `cfg/unique.toml`\n\n## Rulings\nKeep `docs/guide.md` and call `make_widget()` on `WidgetThing`.\n\n## Tasks\n1. Edit `src/lib.rs:1-2` and `unique.toml`.\n')"
 expect_clean "clean plan" "$clean"
 
+# Tasks with a command but no resolvable path warn without changing the exit status.
+no_task_path="$(mkplan no_task_path '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Sweep with `perl -pi -e '\''s/old/new/'\'' src/lib.rs`.\n')"
+run "$no_task_path" --cwd "$R"
+[ "$code" = 0 ] || fail "unresolvable Tasks path warning keeps exit 0, got $code [$out]"
+[ -z "$out" ] || fail "unresolvable Tasks path warning prints nothing on stdout, got [$out]"
+grep -Fq 'warning: no resolvable path in ## Tasks; drift exemption will use ## Files paths' "$T/err.txt" || fail "unresolvable Tasks path warning names the Files fallback"
+
 # Citations check the symbol at the base, including a single line and a range.
 expect_clean "symbol at cited line" "$(mkplan citeok '## Files\n- `src/lib.rs`\n\n## Rulings\n`make_widget()` at `src/lib.rs:1`.\n`src/lib.rs:1-2` holds `WidgetThing`.\n')"
 expect_problems "citation refusal names the nearer paired symbol" "$(mkplan nearestbad '## Rulings\n`make_widget()` at `src/lib.rs:2` then `WidgetThing`.\n')" \
