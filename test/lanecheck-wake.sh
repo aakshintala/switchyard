@@ -337,4 +337,83 @@ else
   fail "rolling-hour-cap-expires (rc=$lrc sends=$send_count out=$out)"
 fi
 
+# The real #4177 shape: tkt-fix is visible to the ticket-wide pending probe,
+# but its PPID has moved outside the session's process tree. It must be tracked
+# by PID/cmd so the same lane gets a job-exit wake when that process disappears.
+r=$(newrun reparented-tkt-fix)
+lane "$r" 4177 fiber-4177 sid-4177
+printf 'repo=aakshintala/fiber\nissue=4177\n' >"$r/fiber-4177.state"
+set_session sid-4177 4177 turn-reparented completed 5000000
+set_logs turn-reparented 4900000 5000000 'STATUS: PENDING fix job'
+printf '90 1 01:00:00 delegate __supervise\n100 90 00:30 muse serve\n101 1 00:12 /bin/sh -c tkt-fix %s/fiber-4177.state --no-verify\n' "$r" >"$T/box-procs"
+printf '/bin/sh -c tkt-fix %s/fiber-4177.state --no-verify\n' "$r" >"$T/pending"
+: >"$T/send-commands"
+: >"$T/sent-messages"
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 5000); lrc=$?
+
+if [ "$lrc" -eq 0 ] && printf '%s' "$out" | grep -q '^WAITING 4177 .* tkt-fix 12s' \
+   && ! printf '%s' "$out" | grep -q '^ABANDONED 4177'; then
+  ok reparented-pending-job-is-waiting
+else
+  fail "reparented-pending-job-is-waiting (rc=$lrc out=$out)"
+fi
+set_processes
+: >"$T/pending"
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 5001); lrc=$?
+
+expected='WAKE (lanecheck): tkt-fix finished (exit unknown). Read its output and continue from your brief. End with STATUS.'
+if [ "$lrc" -eq 0 ] && grep -Fqx "$expected" "$T/last-send" \
+   && printf '%s' "$out" | grep -q '^WAKE 4177 .*tkt-fix finished (exit unknown) (1/2 this rolling hour)'; then
+  ok reparented-pending-job-exit-wakes-lane
+else
+  fail "reparented-pending-job-exit-wakes-lane (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# The live #4054 ruling used the FW13 header and arrived in the archive during
+# the turn, after its only STATUS. Its user steer is in the following turn.
+r=$(newrun missed-fw-ruling)
+lane "$r" 4054 fiber-4054 sid-4054
+mkdir -p "$r/rulings"
+cat >"$r/fiber-4054-report.md" <<'EOF'
+STATUS: BLOCKED awaiting the ruling's plan grant.
+EOF
+cat >"$r/rulings/ruling-4054-ruling-13.md" <<'EOF'
+RULING FW13 (flywheel, #4054): continue with the amended plan.
+<!-- answers-report: fiber-4054-report.md -->
+EOF
+python3 - "$r/fiber-4054-report.md" "$r/rulings/ruling-4054-ruling-13.md" <<'PY'
+import os, sys
+os.utime(sys.argv[1], (1794253000.0, 1794253000.0))
+os.utime(sys.argv[2], (1794253095.305, 1794253095.305))
+PY
+set_session sid-4054 4054 turn-fw13 completed 1794253103396
+python3 - "$T/dlogs" <<'PY'
+import json, sys
+json.dump({"ok": True, "lines": [
+    {"kind": "turn.started", "turnId": "turn-fw13", "at": 1794253055687},
+    {"kind": "message", "turnId": "turn-fw13",
+     "text": "STATUS: BLOCKED on the plan grant", "at": 1794253070166},
+    {"kind": "turn.completed", "turnId": "turn-fw13", "terminal": "completed",
+     "at": 1794253103396},
+    {"kind": "turn.started", "turnId": "turn-after-fw13", "at": 1794253142760},
+    {"kind": "user", "turnId": "turn-after-fw13",
+     "text": "RULING FW13 (flywheel, #4054): continue with the amended plan.",
+     "at": 1794253142760},
+]}, open(sys.argv[1], "w"))
+PY
+set_processes
+: >"$T/send-commands"
+: >"$T/sent-messages"
+: >"$T/last-send"
+out=$(run_lanecheck "$r" 1794253200); lrc=$?
+
+if [ "$lrc" -eq 0 ] && cmp -s "$r/rulings/ruling-4054-ruling-13.md" "$T/last-send" \
+   && printf '%s' "$out" | grep -q '^WAKE 4054 .*missed steer FW13 (1/2 this rolling hour)'; then
+  ok missed-fw-ruling-is-resent
+else
+  fail "missed-fw-ruling-is-resent (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
 exit "$rc"

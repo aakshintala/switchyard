@@ -1099,6 +1099,8 @@ def job_command(args):
         return match.group(1)
     if re.search(r"(?<![\w-])delegate\s+watch(?:\s|$)", args):
         return "delegate watch"
+    if re.search(r"(?<![\w-])gh-ci\s+wait(?:\s|$)", args):
+        return "gh-ci wait"
     return None
 
 
@@ -1369,6 +1371,10 @@ def missed_answers(ticket, start_ms, end_ms, status_lines, user_messages):
             continue
         ids = set(re.findall(r"\b(?:(?:ADMIT|RULING)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*|WAKE)\b",
                              content + " " + os.path.basename(path)))
+        # Flywheel rulings use the `RULING FW<n>` header rather than the
+        # `RULING-...` token format used by other answer archives. Read only
+        # the header so references to earlier FW rulings do not become answers.
+        ids.update(re.findall(r"(?im)^\s*RULING\s+(FW[0-9]+)\b", content))
         for answer_id in sorted(ids):
             delivered = [at for at, text in user_messages
                          if at is not None and start_ms <= at <= end_ms and answer_id in text]
@@ -1530,10 +1536,31 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         processes, ps_ok = process_hosts[store]
         roots = root_pids(processes, (jid, sess), explicit_roots)
         tree_known = ps_ok and any(pid in processes for pid in roots)
-        current_jobs = []
-        if tree_known:
-            current_jobs = descendant_jobs(processes, roots)
-            current_ids = {f"{job['pid']}:{job['cmd']}" for job in current_jobs}
+        current_jobs = descendant_jobs(processes, roots) if tree_known else []
+        current_ids = {f"{job['pid']}:{job['cmd']}" for job in current_jobs}
+        # A lane job whose parent changed since launch (backgrounded, then
+        # re-parented when the turn ended) falls out of the descendant walk
+        # but still names its ticket, which is how ABANDONED finds it (#1465).
+        # Track it by the same pid:command identity; PPID is not in the key.
+        for pid, row in processes.items():
+            command = job_command(row["args"])
+            if (command and f"{pid}:{command}" not in current_ids
+                    and n in re.findall(r"\b\d{3,5}\b", row["args"])):
+                current_jobs.append({"pid": pid, "cmd": command, "args": row["args"],
+                                     "elapsed": row["elapsed"]})
+                current_ids.add(f"{pid}:{command}")
+        # A job already tracked for this lane stays running while its pid
+        # still runs the same command, wherever its parent is now.
+        for job in lane_record["running"]:
+            row = processes.get(job.get("pid"))
+            identity = f"{job.get('pid')}:{job.get('cmd')}"
+            if (row and identity not in current_ids
+                    and job_command(row["args"]) == job.get("cmd")):
+                current_jobs.append({"pid": row["pid"], "cmd": job["cmd"],
+                                     "args": row["args"], "elapsed": row["elapsed"]})
+                current_ids.add(identity)
+        current_jobs.sort(key=lambda job: (job["elapsed"], job["pid"]))
+        if ps_ok:
             finished = lane_record["finished"]
             finished_ids = {f"{job.get('pid')}:{job.get('cmd')}" for job in finished}
             for job in lane_record["running"]:
@@ -1634,7 +1661,7 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
             job = current_jobs[0]
             print(f"WAITING {n} {host} {sess} {job['cmd']} {elapsed_label(job['elapsed'])}{blind}")
             wake_done = True
-        elif not working and finished_jobs and deleg and not parked and not jobq and tree_known:
+        elif not working and finished_jobs and deleg and not parked and not jobq:
             job = finished_jobs[0]
             action_id = f"job:{job['pid']}:{job['cmd']}"
             rc_text = job.get("rc") or "unknown"
