@@ -407,10 +407,11 @@ do_triaged() {
   esac
   load_plan
   round="$(ronum)"
+  stored_verdict="$(t get plan_verdict 2>/dev/null || true)"
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   if [ -z "$confirmed_for" ] && [ "$round" -lt 2 ]; then
     plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
-    [ "$plan_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
+    { [ "$plan_verdict" = lines ] || [ "$stored_verdict" = lines ]; } || emit "TRIAGED-REFUSED reason=rounds-open" 1
   fi
   plan_verdict_write "$tkt_state" "$state" triaged "$base" "$plan" "$worktree"
   t set plan_triage_comment "$comment"

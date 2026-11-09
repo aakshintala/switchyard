@@ -966,6 +966,25 @@ expect_plan_verdict triaged "$base_now" "triaged current LINES verdict before ro
 [ "$(state_get plan_verdict_hash)" = "$(git hash-object "$CDIR/plan.md")" ] || fail "triaged stores current plan hash"
 [ "$(state_get plan_triage_comment)" = 123457 ] || fail "triaged current LINES verdict records the comment id"
 
+# --- a ruling-only plan edit closes LINES and permits posting without another round ---
+setup_case ruling-only-post
+rebase_plan
+base_now="$(cat "$CDIR/base")"
+printf 'Base: %s\n\n## Rulings\n\n- Open line: use the default behavior.\n\n## Files\n\n- `f.txt`\n\n## Gate\n\n`true`\n' "$base_now" >"$CDIR/plan.md"
+printf 'lines' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 1 ] || fail "ruling-only-post records a LINES verdict (rc=$RC)"
+expect_plan_verdict lines "$base_now" "ruling-only-post LINES verdict"
+awk '{ if ($0 == "- Open line: use the default behavior.") print "- Ruling comment 654321 settles the open line."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+run_plan triaged --comment 654321
+[ "$RC" -eq 0 ] || fail "ruling-only-post accepts a Rulings-only edit (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_plan_verdict triaged "$base_now" "ruling-only-post settled verdict"
+[ "$(state_get plan_triage_comment)" = 654321 ] || fail "ruling-only-post records the ruling comment id"
+[ "$(state_get verifier_round)" = 1 ] || fail "ruling-only-post does not spend a Verifier round"
+run_plan post
+[ "$RC" -eq 0 ] || fail "ruling-only-post posts without another Verifier round (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "ruling-only-post"
+
 # A used confirm round is an alternate eligibility path, even before round 2.
 setup_case triaged-after-confirm
 rebase_plan

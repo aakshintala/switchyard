@@ -18,7 +18,7 @@ plan_verdict_read() {
 
 plan_verdict_write() {
   local state_tool="$1" state="$2" verdict="$3" base="$4" plan="$5" worktree="$6" hash
-  hash="$(git -C "$worktree" hash-object "$plan" 2>/dev/null)" || return 1
+  hash="$(git -C "$worktree" hash-object -w "$plan" 2>/dev/null)" || return 1
   "$state_tool" "$state" set plan_verdict "$verdict"
   "$state_tool" "$state" set plan_verdict_base "$base"
   "$state_tool" "$state" set plan_verdict_hash "$hash"
