@@ -284,7 +284,7 @@ def handle_prompt(command):
 
 
 def handle_steer(command):
-    global RACE_PHASE, RACE_TEXT
+    global RACE_PHASE, RACE_TEXT, HOLD_START
     text = command.get("message", "")
     if RACE_PHASE == 1:
         RACE_PHASE = 2
