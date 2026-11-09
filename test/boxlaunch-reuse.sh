@@ -75,6 +75,10 @@ cat >"$T/stub/inbox-watchers" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+cat >"$T/stub/lanecheck" <<'EOF'
+#!/usr/bin/env bash
+cat "$BOX_LANE_OUTPUT"
+EOF
 cat >"$T/stub/noop" <<'EOF'
 #!/bin/sh
 exit 0
@@ -83,6 +87,7 @@ chmod +x "$T/stub/"*
 
 export STUBD=$T BOX_AGENTS="$T/box-agents.json" MAC_AGENTS="$T/mac-agents.json"
 export DELEGATE_JSON="$T/delegate.json" STOP_LOG="$T/stops.log" LAUNCH_LOG="$T/launches.log"
+export BOX_LANE_OUTPUT="$T/box-lanes.txt"
 export NEW_SESSION_ID=launch-id-2465
 export PATH="$T/stub:$PATH"
 : >"$STOP_LOG"; : >"$LAUNCH_LOG"
@@ -104,7 +109,9 @@ launch_box() {
     FW_RUN="$run" FW_BOX_RUN="$boxrun" FW_BOX_HOME="$boxhome" \
     FW_MAC_HOME="$T/mac-home" FW_BOX_HOST=fixture FW_LOCAL_BOX=0 \
     BOX_SSH="$T/stub/ssh" FW_AGENTS_FF="$T/stub/noop" \
-    FW_BOXSTALE="$T/stub/noop" FW_NO_FENCE='fixture has no production fence' NEWDISK=1 \
+    FW_BOXSTALE="$T/stub/noop" FW_BOX_LANECHECK="$T/stub/lanecheck" \
+    FW_BOX_LANES="${FW_TEST_BOX_LANES:-12}" \
+    FW_NO_FENCE='fixture has no production fence' NEWDISK=1 \
     bash "$BIN/boxlaunch.sh" 2465 sonnet phase-plan
 }
 
@@ -220,6 +227,54 @@ if [ "$done_rc" = 2 ] && printf '%s\n' "$out" | grep -Fq 'is ambiguous' \
   ok done-refuses-ambiguous-delegate-id
 else
   fail "done-refuses-ambiguous-delegate-id (rc=$done_rc; $out; $(cat "$STOP_LOG"))"
+fi
+
+
+# The launch cap includes LIVE Claude/delegate lanes on Box and muse, plus
+# LIVE PI-BOX pidfile lanes. PI-MAC lanes do not consume Box capacity.
+prepare_run cap-default
+printf '[]\n' >"$BOX_AGENTS"
+: >"$STOP_LOG"; : >"$LAUNCH_LOG"
+{
+  for i in $(seq 1 6); do printf 'LIVE %s box lane-%s working/busy\n' "$i" "$i"; done
+  for i in $(seq 7 11); do printf 'LIVE %s muse lane-%s working/busy\n' "$i" "$i"; done
+  printf '12 PI-BOX LIVE STATUS: RUNNING\n'
+  printf '99 PI-MAC LIVE STATUS: RUNNING\n'
+} >"$BOX_LANE_OUTPUT"
+if out=$(launch_box 2>&1); then cap_rc=0; else cap_rc=$?; fi
+if [ "$cap_rc" = 2 ] && printf '%s\n' "$out" | grep -Fq '12 box lanes are live' \
+    && [ ! -s "$LAUNCH_LOG" ]; then
+  ok cap-refuses-twelve-live-box-muse-and-pi-box-lanes
+else
+  fail "cap-refuses-twelve-live-box-muse-and-pi-box-lanes (rc=$cap_rc; $out)"
+fi
+
+prepare_run cap-raised
+printf '[]\n' >"$BOX_AGENTS"
+: >"$STOP_LOG"; : >"$LAUNCH_LOG"
+{
+  for i in $(seq 1 6); do printf 'LIVE %s box lane-%s working/busy\n' "$i" "$i"; done
+  for i in $(seq 7 12); do printf 'LIVE %s muse lane-%s working/busy\n' "$i" "$i"; done
+} >"$BOX_LANE_OUTPUT"
+if out=$(FW_TEST_BOX_LANES=13 launch_box 2>&1); then raised_rc=0; else raised_rc=$?; fi
+if [ "$raised_rc" = 0 ] && [ "$(wc -l <"$LAUNCH_LOG" | tr -d ' ')" = 1 ]; then
+  ok cap-override-allows-twelve-under-thirteen
+else
+  fail "cap-override-allows-twelve-under-thirteen (rc=$raised_rc; $out)"
+fi
+
+prepare_run cap-eleven
+printf '[]\n' >"$BOX_AGENTS"
+: >"$STOP_LOG"; : >"$LAUNCH_LOG"
+{
+  for i in $(seq 1 6); do printf 'LIVE %s box lane-%s working/busy\n' "$i" "$i"; done
+  for i in $(seq 7 11); do printf 'LIVE %s muse lane-%s working/busy\n' "$i" "$i"; done
+} >"$BOX_LANE_OUTPUT"
+if out=$(launch_box 2>&1); then eleven_rc=0; else eleven_rc=$?; fi
+if [ "$eleven_rc" = 0 ] && [ "$(wc -l <"$LAUNCH_LOG" | tr -d ' ')" = 1 ]; then
+  ok cap-allows-eleven-live-lanes
+else
+  fail "cap-allows-eleven-live-lanes (rc=$eleven_rc; $out)"
 fi
 
 exit "$rc"

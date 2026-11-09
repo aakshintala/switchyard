@@ -84,6 +84,10 @@ cd "$HOME" || exit 1
 export PATH="$STUB_PATH:$PATH"
 exec bash -c "$*"
 EOF
+cat > "$T/stubs/lanecheck" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
 cat > "$T/stubs/noop" <<'EOF'
 #!/bin/sh
 exit 0
@@ -97,7 +101,8 @@ for _ in 1 2; do
     FW_RUN="$T/run" RUN_DIR="$T/run" FW_BOX_RUN="$T/run" \
     FW_BOX_HOME="$T/home" FW_MAC_HOME="$T/home" FW_BOX_HOST=fixture \
     BOX_SSH="$T/stubs/ssh" FW_AGENTS_FF="$T/stubs/noop" \
-    FW_BOXSTALE="$T/stubs/noop" bash "$T/boxlaunch-via-link" 1448 sonnet >/dev/null
+    FW_BOXSTALE="$T/stubs/noop" FW_BOX_LANECHECK="$T/stubs/lanecheck" \
+    bash "$T/boxlaunch-via-link" 1448 sonnet >/dev/null
 done
 [ "$(cat "$CLAUDE_COUNT")" = 2 ]
 [ "$(grep -c '^BOX LANE:' "$T/run/fiber-1448-orchestrator-brief.md")" = 1 ]

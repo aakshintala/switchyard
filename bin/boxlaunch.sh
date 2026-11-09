@@ -38,6 +38,21 @@ boxrun=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}
 b=$run/fiber-$n-orchestrator-brief.md
 [ -f "$b" ] || { echo "no brief $b" >&2; exit 2; }
+# Refuse when the Box is at capacity. Claude and delegate lanes use LIVE lines
+# with the host in column 3; PI-BOX pidfile lanes use ticket, PI-BOX, LIVE.
+# PI-MAC lanes do not run on this Box and do not consume its slots.
+cap=${FW_BOX_LANES:-12}
+lc_out=$(FW_RUN="$run" bash "${FW_BOX_LANECHECK:-$script_dir/lanecheck}" 2>/dev/null || true)
+live_box=$(printf '%s\n' "$lc_out" | awk '
+  ($1 == "LIVE" && ($3 == "box" || $3 == "muse")) ||
+  ($2 == "PI-BOX" && $3 == "LIVE") { n++ }
+  END { print n + 0 }
+')
+if [ "$live_box" -ge "$cap" ]; then
+  echo "boxlaunch: $live_box box lanes are live, cap is $cap. Refusing." >&2
+  echo "  Retire a finished lane first (bash bin/lanecheck done <ticket>), or raise it with FW_BOX_LANES=<n>." >&2
+  exit 2
+fi
 # Say out loud when the box's toolchain is behind this Mac's. A warning, not a
 # refusal: stale tools cost a lane some rounds, refusing every box launch costs
 # the whole round. `|| true` because an unreachable box is boxstale's exit 2 and
