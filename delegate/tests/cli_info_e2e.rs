@@ -39,7 +39,7 @@ fn pi_script(fail_model: Option<&str>) -> String {
     // --list-models answers every query with the full bundled pi table; the
     // doctor matches provider/model exactly (and thinking yes for :suffixed
     // ids), so every bundled model resolves.
-    let list = "provider model context max-out thinking images\nopenai gpt-6-astra 272K 128K yes yes\nopenai gpt-6-luna 272K 128K yes yes\nopenai gpt-6.1-sol 272K 128K yes yes\nopencode-go muse-spark-1.3-contributor 1.1M 128K yes yes\nopencode-go glm-5.3-flash 1.1M 128K yes yes\nopencode-go deepseek-v4.1-flash 1.1M 128K yes yes";
+    let list = "provider model context max-out thinking images\nopenai gpt-6-astra 272K 128K yes yes\nopenai gpt-6-luna 272K 128K yes yes\nopenai gpt-6.1-sol 272K 128K yes yes\nopenai gpt-6.1-terra 272K 128K yes yes\nopencode-go muse-spark-1.3-contributor 1.1M 128K yes yes\nopencode-go glm-5.3-flash 1.1M 128K yes yes\nopencode-go deepseek-v4.1-flash 1.1M 128K yes yes";
     format!(
         r#"#!/bin/sh
 case "$1" in
@@ -58,7 +58,7 @@ fn fiber_script() -> String {
     r#"#!/bin/sh
 case "$1" in
   version) echo "0.0.0" ;;
-  models) printf '%s\n' '{"model":"codex/gpt-6-astra","context_window":272000,"input":10,"output":50,"default":false}' '{"model":"codex/gpt-6.1-sol","context_window":272000,"input":2,"output":10,"default":false}' '{"model":"codex/gpt-6-luna","context_window":272000,"input":0.1,"output":0.5,"default":false}' '{"model":"opencode-go/muse-spark-1.3-contributor","context_window":1048576,"input":0.1,"output":0.2,"default":false}' '{"model":"opencode-go/glm-5.3-flash","context_window":1048576,"input":0.1,"output":0.2,"default":false}' '{"model":"anthropic/claude-opus-5-5","context_window":200000,"input":4,"output":20,"default":false}' '{"model":"anthropic/claude-sonnet-5-5","context_window":200000,"input":2,"output":10,"default":false}' '{"model":"anthropic/claude-haiku-5-5","context_window":200000,"input":0.1,"output":0.5,"default":false}' ;;
+  models) printf '%s\n' '{"model":"codex/gpt-6-astra","context_window":272000,"input":10,"output":50,"default":false}' '{"model":"codex/gpt-6.1-sol","context_window":272000,"input":2,"output":10,"default":false}' '{"model":"codex/gpt-6.1-terra","context_window":272000,"input":1,"output":5,"default":false}' '{"model":"codex/gpt-6-luna","context_window":272000,"input":0.1,"output":0.5,"default":false}' '{"model":"opencode-go/muse-spark-1.3-contributor","context_window":1048576,"input":0.1,"output":0.2,"default":false}' '{"model":"opencode-go/glm-5.3-flash","context_window":1048576,"input":0.1,"output":0.2,"default":false}' '{"model":"anthropic/claude-opus-5-5","context_window":200000,"input":4,"output":20,"default":false}' '{"model":"anthropic/claude-sonnet-5-5","context_window":200000,"input":2,"output":10,"default":false}' '{"model":"anthropic/claude-haiku-5-5","context_window":200000,"input":0.1,"output":0.5,"default":false}' ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
 esac
 "#
@@ -174,6 +174,7 @@ const EXPECTED_IDS: &[&str] = &[
     "codex/gpt-6-luna:medium",
     "codex/gpt-6-luna:xhigh",
     "codex/gpt-6.1-sol",
+    "codex/gpt-6.1-terra",
     "composer-2.5",
     "grok-4.7-high",
     "grok-4.7-xhigh",
@@ -182,12 +183,14 @@ const EXPECTED_IDS: &[&str] = &[
     "fiber/codex/gpt-6-luna:medium",
     "fiber/codex/gpt-6-luna:xhigh",
     "fiber/codex/gpt-6.1-sol",
+    "fiber/codex/gpt-6.1-terra",
     "fiber/opencode-go/muse-spark-1.3-contributor",
     "muse/muse-spark-1.3-contributor",
     "openai/gpt-6-astra",
     "openai/gpt-6-luna:medium",
     "openai/gpt-6-luna:xhigh",
     "openai/gpt-6.1-sol",
+    "openai/gpt-6.1-terra",
     "opencode-go/deepseek-v4.1-flash",
     "opencode-go/glm-5.3-flash",
     "opencode-go/muse-spark-1.3-contributor",
@@ -287,6 +290,7 @@ fn doctor_passes_against_full_fake() {
         "codex/gpt-6-luna:medium",
         "codex/gpt-6-luna:xhigh",
         "codex/gpt-6.1-sol",
+        "codex/gpt-6.1-terra",
     ] {
         assert!(
             stdout.contains(&format!(
@@ -296,7 +300,7 @@ fn doctor_passes_against_full_fake() {
         );
     }
     let warns: Vec<&str> = stdout.lines().filter(|l| l.starts_with("warn")).collect();
-    assert_eq!(warns.len(), 6, "{stdout}");
+    assert_eq!(warns.len(), 7, "{stdout}");
     assert!(!stdout.contains("skip  claude"), "{stdout}");
     assert!(!stdout.lines().any(|l| l.starts_with("fail")), "{stdout}");
 }

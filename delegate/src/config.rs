@@ -494,13 +494,13 @@ mod tests {
         assert!(models["openai/gpt-6-astra"].tiers.is_empty());
         assert!(models["openai/gpt-6-luna:xhigh"].tiers.is_empty());
         assert!(models["openai/gpt-6.1-sol"].tiers.is_empty());
-        for (id, backend) in [
-            ("codex/gpt-6.1-terra", "codex"),
-            ("openai/gpt-6.1-terra", "pi"),
-            ("fiber/codex/gpt-6.1-terra", "fiber"),
+        for (id, backend, tiers) in [
+            ("codex/gpt-6.1-terra", "codex", vec!["strong"]),
+            ("openai/gpt-6.1-terra", "pi", vec!["strong"]),
+            ("fiber/codex/gpt-6.1-terra", "fiber", vec![]),
         ] {
             assert_eq!(models[id].backend, backend, "{id}");
-            assert!(models[id].tiers.is_empty(), "{id}");
+            assert_eq!(models[id].tiers, tiers, "{id}");
         }
         assert!(models["claude-fable-5-1"].tiers.is_empty());
         assert_eq!(models["muse/muse-wonder-1.0"].backend, "muse");
