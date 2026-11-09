@@ -129,6 +129,29 @@ fi
 [ ! -s "$CLAUDE_LOG" ] || fail "invalid role row launched a session"
 grep -F 'invalid role table row' "$T/roles-restart.log" >/dev/null || fail "invalid role row was not logged"
 
+# Default rows pass the role-inbox plugin dir to surveyor and switchyard only.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+printf '[]\n' >"$AGENTS_JSON"
+for default_role in surveyor switchyard flywheel; do
+  mkdir -p "$HOME/work/wiki/state"
+  printf '## Crons\n' >"$HOME/work/wiki/state/$default_role.md"
+done
+mkdir -p "$HOME/work/fiber-worktrees/surveyor/home" "$HOME/work/sy-wt/main" "$HOME/work/fiber"
+ROLE_TABLE=""
+export ROLE_TABLE
+run_restart >"$T/defaults.out" 2>"$T/defaults.err" || fail "default rows run failed: $(cat "$T/defaults.err")"
+plugin_roles="$(awk 'BEGIN { RS = "" } {
+  role = ""; plugin = 0
+  n = split($0, lines, "\n")
+  for (i = 1; i <= n; i++) {
+    if (lines[i] == "arg=--agent") role = lines[i + 1]
+    if (lines[i] == "arg=--plugin-dir" && lines[i + 1] == "arg=/Users/aakshintala/.agents/claude-code/plugins/role-inbox" && role == "") plugin = 1
+  }
+  print role ":" plugin
+}' "$CLAUDE_LOG" | sort | tr '\n' ' ')"
+[ "$plugin_roles" = "arg=flywheel:0 arg=surveyor:1 arg=switchyard:1 " ] \
+  || fail "default rows plugin-dir mismatch: $plugin_roles"
+
 # A missing handoff is skipped, logged and recorded as an owner note.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
 ROLE_TABLE="no-handoff|$ROLE_HOME|$T/not-present.md"

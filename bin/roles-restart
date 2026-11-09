@@ -132,9 +132,11 @@ launch_role() {
 if [ -n "${ROLES_RESTART_ROLES:-}" ]; then
   roles="$ROLES_RESTART_ROLES"
 else
+  # Absolute path: launchd does not expand ~. The directory comes from PR #1488.
+  role_inbox="--plugin-dir /Users/aakshintala/.agents/claude-code/plugins/role-inbox"
   roles="$(printf '%s\n' \
-    "surveyor|$HOME/work/fiber-worktrees/surveyor/home|$HOME/work/wiki/state/surveyor.md|" \
-    "switchyard|$HOME/work/sy-wt/main|$HOME/work/wiki/state/switchyard.md|" \
+    "surveyor|$HOME/work/fiber-worktrees/surveyor/home|$HOME/work/wiki/state/surveyor.md|$role_inbox" \
+    "switchyard|$HOME/work/sy-wt/main|$HOME/work/wiki/state/switchyard.md|$role_inbox" \
     "flywheel|$HOME/work/fiber|$HOME/work/wiki/state/flywheel.md|")"
 fi
 
