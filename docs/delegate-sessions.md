@@ -4,7 +4,9 @@ This page records the ordering and cardinality guarantees that session tests rel
 
 ## Event and state ordering
 
-`Store::update` writes the new state before it appends the update's event lines. The transition to `dead` appends exactly one `session.dead` event in that same update. A later call that sees an already-dead state appends no second dead event. `logs --follow` reads state before draining complete event lines, so it drains `session.dead` before exiting after the session dies.
+`Store::update` appends event lines before publishing new state. A `watch` cannot return on that state until those lines exist. If the state write fails, the store attempts to truncate the append and keeps its in-memory state and event sequence unchanged.
+
+A transition to `dead` appends one `session.dead` event. Later updates to an already-dead session do not append another. `logs --follow` reads state before draining complete event lines, so it drains `session.dead` before exiting.
 
 `send`, `logs`, `watch`, and `stop` accept a full session id or a unique prefix. If a prefix matches multiple sessions, the command exits with code 2 and lists their ids. If it matches none, the command exits with code 3 and reports `no such session`.
 

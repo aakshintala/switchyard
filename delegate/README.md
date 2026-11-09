@@ -60,7 +60,7 @@ A Muse model id is `muse/` plus the Muse model name (for example, `muse/muse-spa
 ## Muse session state contracts
 
 - `turnCount` starts at zero. It increases once when a host turn starts: on an accepted `turn/start` acknowledgement with disposition `started`, or on `turn/started` when the session is idle with no active turn.
-- `Store::update` writes state before appending event lines. If the state write fails, it commits neither state nor event sequence.
+- `Store::update` appends event lines before publishing state. If the state write fails, it attempts to truncate the append; the in-memory state and event sequence stay unchanged.
 - A new session starts its event sequence at 1. Each successful append advances the sequence by one.
 - Session ordering, event and inbox guarantees are documented in [the session contracts](../docs/delegate-sessions.md).
 - The MSP adapter preserves each `turn/completed` terminal value (`completed`, `failed` or `cancelled`) and preserves a failed turn's error kind.
