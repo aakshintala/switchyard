@@ -913,6 +913,16 @@ fn prompt_command(id: &str, session_id: &str, prompt: &str) -> String {
     .to_string()
 }
 
+fn add_directory_command(id: &str, session_id: &str, path: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "command": "add_directory",
+        "session_id": session_id,
+        "args": {"path": path},
+    })
+    .to_string()
+}
+
 fn close_command(id: &str, session_id: &str) -> String {
     serde_json::json!({
         "id": id,
@@ -1150,6 +1160,8 @@ pub struct HubRequest {
     pub bounds: Bounds,
     /// Values passed to Fiber's `start` command as CLI configuration overrides.
     pub overrides: Vec<String>,
+    /// Directories added to a fresh session before its first prompt.
+    pub add_dirs: Vec<String>,
     /// Existing session id; when set, the client skips `start`.
     pub resume: Option<String>,
 }
@@ -1366,6 +1378,55 @@ fn drive_turn(
     // prompt with the client-minted id C, unless the run is stopping: then
     // go to the read loop in the stopping state (R2).
     pause!(shared, Point::AfterSubscribeAck);
+    if req.resume.is_none() {
+        for dir in &req.add_dirs {
+            let add_id = new_command_id();
+            if !lock(&shared.out).send_checked(&add_directory_command(&add_id, &session_id, dir)) {
+                if lock(&shared.out).intent == Intent::None {
+                    return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+                }
+                return fail_with_cleanup(
+                    &mut conn,
+                    &mut rest,
+                    stop_crash(&shared, Some(session_id), intent_reason(&shared)),
+                );
+            }
+            match conn.await_ack(
+                &add_id,
+                &mut known,
+                &mut rest,
+                &shared,
+                ack_deadline(&shared, &req.bounds, "add_directory"),
+                false,
+                |_| None,
+            ) {
+                WaitOutcome::Ack(Ack::Accepted { .. }) => {}
+                WaitOutcome::Ack(Ack::Rejected { code, message }) => {
+                    return fail_with_cleanup(
+                        &mut conn,
+                        &mut rest,
+                        crash_text(format!("hub rejected add_directory: {code}: {message}")),
+                    );
+                }
+                WaitOutcome::Stopped(step) => {
+                    if let Some(done) = apply_step(&mut conn, &mut rest, step) {
+                        return done;
+                    }
+                    return fail_with_cleanup(
+                        &mut conn,
+                        &mut rest,
+                        crash_text(
+                            "protocol error: add_directory wait stopped without an answer"
+                                .to_string(),
+                        ),
+                    );
+                }
+                WaitOutcome::Lost => {
+                    return fail_with_cleanup(&mut conn, &mut rest, lost_text(&session_id));
+                }
+            }
+        }
+    }
     let mut resume_buffer = Vec::new();
     if req.resume.is_some() {
         let Some(last_seq) = rest.last_seq else {
@@ -2814,12 +2875,16 @@ mod tests {
             r#"{"id":"c_3","command":"prompt","session_id":"s_36e63d22c39750e1","args":{"content":[{"type":"text","text":"hi"}]}}"#
         );
         assert_eq!(
-            close_command("c_4", "s_36e63d22c39750e1"),
-            r#"{"id":"c_4","command":"close","session_id":"s_36e63d22c39750e1"}"#
+            add_directory_command("c_4", "s_36e63d22c39750e1", "/tmp/work"),
+            r#"{"id":"c_4","command":"add_directory","session_id":"s_36e63d22c39750e1","args":{"path":"/tmp/work"}}"#
         );
         assert_eq!(
-            close_now_command("c_5", "s_36e63d22c39750e1"),
-            r#"{"id":"c_5","command":"close","session_id":"s_36e63d22c39750e1","args":{"now":true}}"#
+            close_command("c_5", "s_36e63d22c39750e1"),
+            r#"{"id":"c_5","command":"close","session_id":"s_36e63d22c39750e1"}"#
+        );
+        assert_eq!(
+            close_now_command("c_6", "s_36e63d22c39750e1"),
+            r#"{"id":"c_6","command":"close","session_id":"s_36e63d22c39750e1","args":{"now":true}}"#
         );
     }
 
@@ -3161,6 +3226,7 @@ mod tests {
             prompt: "go".to_string(),
             bounds: Bounds::default(),
             overrides: Vec::new(),
+            add_dirs: Vec::new(),
             resume: None,
         }
     }
@@ -3177,6 +3243,7 @@ mod tests {
     fn resume_request() -> HubRequest {
         let mut request = hub_request();
         request.resume = Some("s_9".to_string());
+        request.add_dirs = vec!["/tmp/work".to_string()];
         request
     }
 
@@ -3388,6 +3455,101 @@ mod tests {
             crate::output::derive_status(&res.text, res.is_error, res.clean_exit)
                 == crate::types::RunStatus::Done
         );
+    }
+
+    #[test]
+    fn fresh_run_adds_each_directory_after_its_ack_before_prompt() {
+        let mut request = hub_request();
+        request.add_dirs = vec!["/tmp/first".into(), "/tmp/second".into()];
+        let request_for_run = request.clone();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, start) = recv_id(srv);
+            assert_eq!(start["command"], "start");
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+
+            let (sub_id, subscribe) = recv_id(srv);
+            assert_eq!(subscribe["command"], "subscribe");
+            assert_eq!(subscribe["args"]["level"], "full");
+            srv.send(&accepted(&sub_id, serde_json::json!({})));
+
+            for path in ["/tmp/first", "/tmp/second"] {
+                let (add_id, add) = recv_id(srv);
+                assert_eq!(add["command"], "add_directory");
+                assert_eq!(add["session_id"], "s_1");
+                assert_eq!(add["args"]["path"], path);
+                srv.send(&accepted(&add_id, serde_json::json!({})));
+            }
+
+            let (prompt_id, prompt) = recv_id(srv);
+            assert_eq!(prompt["command"], "prompt");
+            assert_eq!(prompt["args"]["content"][0]["text"], "go");
+            srv.send(&accepted(&prompt_id, serde_json::json!({})));
+            srv.send(&turn_started_ev(&prompt_id, 1));
+            srv.send(&turn_completed_ev(2, "completed", None));
+            srv.send(&exited_ev(3, 0, "DONE", None));
+            let (_, close) = recv_id(srv);
+            assert_eq!(close["command"], "close");
+            srv.expect_eof();
+        });
+        let res = run_turn(&request_for_run, &path, &|_| {});
+        let received = join_fake(&path, rx);
+        assert_eq!(res.text, "DONE");
+        assert_eq!(
+            received_commands(&received),
+            [
+                "start",
+                "subscribe",
+                "add_directory",
+                "add_directory",
+                "prompt",
+                "close"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejected_add_directory_fails_before_prompt() {
+        let mut request = hub_request();
+        request.add_dirs = vec!["/tmp/not-allowed".into()];
+        let request_for_run = request.clone();
+        let (path, rx) = spawn_fake(|srv| {
+            srv.send(&hello(serde_json::json!(1), "9.9.9"));
+            let (start_id, _) = recv_id(srv);
+            srv.send(&accepted(
+                &start_id,
+                serde_json::json!({"session_id": "s_1"}),
+            ));
+            let (sub_id, _) = recv_id(srv);
+            srv.send(&accepted(&sub_id, serde_json::json!({})));
+            let (add_id, add) = recv_id(srv);
+            assert_eq!(add["command"], "add_directory");
+            assert_eq!(add["args"]["path"], "/tmp/not-allowed");
+            srv.send(&rejected(
+                Some(&add_id),
+                "directory_denied",
+                "outside boundary",
+            ));
+            let (_, close_now) = recv_id(srv);
+            assert_eq!(close_now["command"], "close");
+            assert_eq!(close_now["args"]["now"], true);
+            srv.expect_eof();
+        });
+        let res = run_turn(&request_for_run, &path, &|_| {});
+        let received = join_fake(&path, rx);
+        assert!(res.text.contains("directory_denied"), "{}", res.text);
+        assert!(res.text.contains("outside boundary"), "{}", res.text);
+        assert_eq!(res.is_error, Some(true));
+        assert_eq!(
+            received_commands(&received),
+            ["start", "subscribe", "add_directory", "close"]
+        );
+        assert!(received.iter().all(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["command"] != "prompt"
+        }));
     }
 
     #[test]

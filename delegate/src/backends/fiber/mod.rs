@@ -83,6 +83,7 @@ fn hub_request(spec: &JobSpec) -> hub::HubRequest {
         bounds: hub::Bounds::default(),
         resume,
         overrides,
+        add_dirs: spec.add_dirs.clone(),
     }
 }
 
@@ -703,25 +704,30 @@ mod tests {
     fn hub_request_recovers_staged_inputs_and_prompt_suffixes() {
         let model = "fiber/opencode-go/muse-spark-1.3-contributor:high";
         let cwd = "/work/tree";
+        let add_dirs = vec!["/outside".to_string()];
         for prompt in [
             "--",
             "first line\nsecond line",
             "-starts with a dash",
             "--resume not-session",
         ] {
-            let fresh = staged_spec(model, None, prompt, cwd);
+            let mut fresh = staged_spec(model, None, prompt, cwd);
+            fresh.add_dirs = add_dirs.clone();
             let request = hub_request(&fresh);
             assert_eq!(request.cwd, cwd);
             assert_eq!(request.model, fresh.model);
             assert_eq!(request.prompt, prompt);
             assert_eq!(request.resume, None);
+            assert_eq!(request.add_dirs, add_dirs);
 
-            let resumed = staged_spec(model, Some("s_1"), prompt, cwd);
+            let mut resumed = staged_spec(model, Some("s_1"), prompt, cwd);
+            resumed.add_dirs = add_dirs.clone();
             let request = hub_request(&resumed);
             assert_eq!(request.cwd, cwd);
             assert_eq!(request.model, resumed.model);
             assert_eq!(request.prompt, prompt);
             assert_eq!(request.resume.as_deref(), Some("s_1"));
+            assert_eq!(request.add_dirs, add_dirs);
         }
     }
 

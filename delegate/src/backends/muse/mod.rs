@@ -1357,6 +1357,7 @@ cat "{}"
             idle_ms: None,
             tool_idle_ms: None,
             wall_ms: None,
+            add_dirs: vec![],
             price_map: std::collections::HashMap::new(),
             resume_context: crate::types::ResumeContext {
                 model: "muse/muse-spark-1.3-contributor".to_string(),

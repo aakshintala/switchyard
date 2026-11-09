@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) const USAGE: &str =
-    "usage: delegate run --model M [--cwd D] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
+    "usage: delegate run --model M [--cwd D] [--add-dir D ...] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
        delegate resume <jobId> [--model M] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
@@ -111,6 +111,30 @@ fn flag<'a>(kv: &'a [(String, String)], name: &str) -> Option<&'a str> {
     kv.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
+fn flag_values<'a>(kv: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+    kv.iter()
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
+        .collect()
+}
+
+fn add_directories(kv: &[(String, String)], backend: &str) -> Result<Vec<String>, Usage> {
+    let values = flag_values(kv, "--add-dir");
+    if !values.is_empty() && backend != "fiber" {
+        return usage("--add-dir is only supported by the fiber backend");
+    }
+    values
+        .into_iter()
+        .map(|dir| {
+            let path = resolve_path(dir);
+            if !std::path::Path::new(&path).is_dir() {
+                return usage(format!("add-dir {path} is not a directory"));
+            }
+            Ok(path)
+        })
+        .collect()
+}
+
 /// A millisecond flag: `None` when absent, else a finite number above zero.
 fn positive_ms_flag(kv: &[(String, String)], name: &str) -> Result<Option<f64>, String> {
     match flag(kv, name) {
@@ -153,6 +177,7 @@ struct LaunchParams<'a> {
     tool_idle_ms: Option<f64>,
     idle_ms: Option<f64>,
     wall_ms: Option<f64>,
+    add_dirs: &'a [String],
     session: Option<&'a str>,
     resumed_from: Option<&'a str>,
 }
@@ -252,6 +277,10 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
         supervise_args.push("--wall-ms".into());
         supervise_args.push(ms.to_string());
     }
+    for dir in p.add_dirs {
+        supervise_args.push("--add-dir".into());
+        supervise_args.push(dir.clone());
+    }
     if let Some(s) = p.session {
         supervise_args.push("--session".into());
         supervise_args.push(s.to_string());
@@ -345,6 +374,7 @@ fn run(args: &[String]) -> Result<i32, Usage> {
             "--tool-idle-ms",
             "--idle-ms",
             "--wall-ms",
+            "--add-dir",
             "--prompt-file",
         ],
     )?;
@@ -367,16 +397,20 @@ fn run(args: &[String]) -> Result<i32, Usage> {
             return Ok(1);
         }
     };
-    if let Err(e) = resolve_model(Some(model), &deps.config) {
-        // An unknown id lists the valid ids; any other failure (e.g. a model on
-        // a backend that is not implemented yet) prints the actual error.
-        if e.downcast_ref::<crate::models::ModelNotAllowedError>()
-            .is_some()
-        {
-            return usage(unknown_model(&deps.config, model));
+    let resolved = match resolve_model(Some(model), &deps.config) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            // An unknown id lists the valid ids; any other failure (e.g. a model on a
+            // backend that is not implemented yet) prints the actual error.
+            if e.downcast_ref::<crate::models::ModelNotAllowedError>()
+                .is_some()
+            {
+                return usage(unknown_model(&deps.config, model));
+            }
+            return usage(format!("{e}"));
         }
-        return usage(format!("{e}"));
-    }
+    };
+    let add_dirs = add_directories(&kv, &resolved.backend)?;
     let prompt = read_prompt(&kv)?;
     let cwd = match flag(&kv, "--cwd") {
         Some(d) => resolve_path(d),
@@ -396,6 +430,7 @@ fn run(args: &[String]) -> Result<i32, Usage> {
         tool_idle_ms,
         idle_ms,
         wall_ms,
+        add_dirs: &add_dirs,
         session: None,
         resumed_from: None,
     }) {
@@ -456,6 +491,13 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
     }
     let stored_cwd = old["resume"]["cwd"].as_str().unwrap_or("").to_string();
     let stored_gate = old["resume"]["gate"].as_str().unwrap_or("").to_string();
+    let add_dirs = old["resume"]["addDirs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let tool_idle_ms = resume_ms_flag(&kv, "--tool-idle-ms", old["resume"]["toolIdleMs"].as_f64())
         .or_else(usage)?;
     let idle_ms =
@@ -525,6 +567,7 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
         tool_idle_ms,
         idle_ms,
         wall_ms,
+        add_dirs: &add_dirs,
         session: session.as_deref(),
         resumed_from: Some(old_id),
     }) {
@@ -696,6 +739,7 @@ fn supervise(args: &[String]) -> i32 {
             "--tool-idle-ms",
             "--idle-ms",
             "--wall-ms",
+            "--add-dir",
             "--session",
             "--resumed-from",
             "--caller",
@@ -750,6 +794,10 @@ fn supervise(args: &[String]) -> i32 {
     };
     let caller_command = flag(&kv, "--caller-command").map(str::to_string);
     let caller_cwd = flag(&kv, "--caller-cwd").map(str::to_string);
+    let add_dirs = flag_values(&kv, "--add-dir")
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let mut argv = backend.argv(model, session.as_deref(), &prompt);
     // The catalogue selects this reviewer; rows without one leave Fiber's own defaults intact.
     if backend == Backend::Fiber
@@ -780,6 +828,7 @@ fn supervise(args: &[String]) -> i32 {
         idle_ms: idle_ms.map(Some),
         tool_idle_ms: tool_idle_ms.map(Some).or(config.profile.tool_idle_ms),
         wall_ms,
+        add_dirs: add_dirs.clone(),
         price_map,
         resume_context: ResumeContext {
             model: model.clone(),
@@ -830,6 +879,7 @@ fn supervise(args: &[String]) -> i32 {
         tool_idle_ms,
         idle_ms,
         wall_ms,
+        add_dirs,
         resumed_from: resumed_from.clone(),
     });
     let registry = JobHandle::new(rd);
@@ -1252,6 +1302,51 @@ mod tests {
     }
 
     #[test]
+    fn add_dir_accepts_repeated_existing_directories() {
+        let root = std::env::temp_dir().join(format!("delegate-add-dir-{}", random_uuid()));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let args = vec![
+            "--add-dir".into(),
+            first.to_string_lossy().into_owned(),
+            "--add-dir".into(),
+            second.to_string_lossy().into_owned(),
+        ];
+        let (kv, pos) =
+            parse(&args, &["--add-dir"]).unwrap_or_else(|Usage(message)| panic!("{message}"));
+        assert!(pos.is_empty());
+        assert_eq!(
+            add_directories(&kv, "fiber").unwrap_or_else(|Usage(message)| panic!("{message}")),
+            [
+                resolve_path(first.to_str().unwrap()),
+                resolve_path(second.to_str().unwrap())
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_dir_rejects_a_missing_path_before_launch() {
+        let missing = resolve_path(&format!("/tmp/delegate-add-dir-missing-{}", random_uuid()));
+        let parsed = vec![("--add-dir".into(), missing.clone())];
+        let Err(Usage(message)) = add_directories(&parsed, "fiber") else {
+            panic!("a missing add-dir path must be a usage error");
+        };
+        assert_eq!(message, format!("add-dir {missing} is not a directory"));
+    }
+
+    #[test]
+    fn add_dir_is_rejected_for_non_fiber_backends() {
+        let parsed = vec![("--add-dir".into(), "/tmp".into())];
+        let Err(Usage(message)) = add_directories(&parsed, "cursor") else {
+            panic!("--add-dir must be refused for non-Fiber models");
+        };
+        assert_eq!(message, "--add-dir is only supported by the fiber backend");
+    }
+
+    #[test]
     fn idle_ms_flag_parses_a_positive_number() {
         let args: Vec<String> = ["--idle-ms", "1200000"].map(String::from).to_vec();
         let Ok((parsed, pos)) = parse(&args, &["--idle-ms"]) else {
@@ -1362,10 +1457,12 @@ mod tests {
             tool_idle_ms: None,
             idle_ms: Some(1_200_000.0),
             wall_ms: None,
+            add_dirs: vec!["/tmp/additional".into()],
         };
         let rec = serde_json::to_value(&resume).unwrap();
-        // `resume()` reads this key back for the next run.
+        // `resume()` reads these values back for the next run.
         assert_eq!(rec["idleMs"].as_f64(), Some(1_200_000.0));
+        assert_eq!(rec["addDirs"], serde_json::json!(["/tmp/additional"]));
         assert!(rec.get("toolIdleMs").is_some());
         assert!(rec["wallMs"].is_null());
 
