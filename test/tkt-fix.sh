@@ -400,8 +400,8 @@ grep -q '^review-pr|' "$T/calls.log" && fail "round-ownership ran review-pr on u
 fi
 
 # Merging main into the branch brings main's own commits into since..head.
-# Coverage walks the branch's first-parent chain: main's commits need no
-# round, the merge commit does.
+# Coverage walks the branch's first-parent chain, so clean main merges before
+# a round need the exemption while merges with hand edits need an owner.
 
 # Advance main by one commit, push it, and merge main into the branch.
 # Sets MAIN_COMMIT and MERGE.
@@ -414,12 +414,18 @@ merge_main() {
   git -C "$WT" push -q origin main
   git -C "$WT" checkout -q tkt-529
   git -C "$WT" merge -q --no-edit main
+  if [ "${1:-}" = hand-edit ]; then
+    printf 'manual merge edit\n' >>"$WT/main.txt"
+    git -C "$WT" add main.txt
+    git -C "$WT" commit --amend -q --no-edit
+  fi
   MERGE="$(git -C "$WT" rev-parse HEAD)"
   git -C "$WT" push -q origin tkt-529
 }
 
 # $1 is the case name; $2 is "in" (round 1 ends at the merge) or "after"
-# (round 1 ends before it). Sets ROUND1_FIX, MAIN_COMMIT, MERGE.
+# (round 1 ends before it). Optional $3 creates a hand-edited merge.
+# Sets ROUND1_FIX, MAIN_COMMIT, MERGE.
 setup_main_merge() {
   setup_case "$1"
   # A lane commit, so the reviewed head (and round 1's start) is on the
@@ -433,12 +439,39 @@ setup_main_merge() {
   git -C "$WT" add fix.txt
   git -C "$WT" commit -qm 'fix: round one'
   ROUND1_FIX="$(git -C "$WT" rev-parse HEAD)"
-  merge_main
+  merge_main "${3:-}"
   bash "$TKT_STATE" "$S" set head "$MERGE" >/dev/null
   bash "$TKT_STATE" "$S" set round 1 >/dev/null
   bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
   if [ "$2" = in ]; then record_test_round 1 "$MERGE"; else record_test_round 1 "$ROUND1_FIX"; fi
 }
+
+if want main-merge-before-round; then
+setup_case main-merge-before-round
+# A clean main merge landed after review and before round 1 began.
+printf 'lane\n' >>"$WT/base.txt"
+git -C "$WT" add base.txt
+git -C "$WT" commit -qm 'lane: work'
+OLD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set reviewed "$OLD" >/dev/null
+merge_main
+printf 'round one fix\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'fix: round one'
+ROUND1_FIX="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin tkt-529
+bash "$TKT_STATE" "$S" set head "$ROUND1_FIX" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+record_test_round 1 "$ROUND1_FIX"
+bash "$TKT_STATE" "$S" set fix_round.1.start "$MERGE" >/dev/null
+AUTO_TREE="$(git -C "$WT" merge-tree --write-tree "$MERGE^1" "$MERGE^2")" || fail "main-merge-before-round could not compute automatic merge tree"
+[ "$(git -C "$WT" rev-parse "$MERGE^{tree}")" = "$AUTO_TREE" ] || fail "main-merge-before-round merge tree is not clean"
+git -C "$WT" merge-base --is-ancestor "$MERGE^2" origin/main || fail "main-merge-before-round second parent is not on origin/main"
+out="$(bash "$TKT" "$S" --verify --since "$OLD" 2>"$T/stderr")" || fail "main-merge-before-round exited $?: $(head -n 3 <<<"$out") $(cat "$T/stderr")"
+grep -Fq 'FINDINGS-UNACCOUNTED' <<<"$out" && fail "main-merge-before-round reported unowned clean merge: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "main-merge-before-round bad verdict: $(head -n 1 <<<"$out")"
+fi
 
 if want main-merge; then
 setup_main_merge main-merge in
@@ -446,8 +479,10 @@ out="$(bash "$TKT" "$S" --verify --since "$OLD" 2>"$T/stderr")" || fail "main-me
 grep -Fq "$MAIN_COMMIT" <<<"$out" && fail "main-merge reported main's commit: $(head -n 1 <<<"$out")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "main-merge bad verdict: $(head -n 1 <<<"$out")"
 
-setup_main_merge main-merge-unowned after
+setup_main_merge main-merge-unowned after hand-edit
 run_rc=0; out="$(bash "$TKT" "$S" --verify --since "$OLD" 2>"$T/stderr")" || run_rc=$?
+AUTO_TREE="$(git -C "$WT" merge-tree --write-tree "$MERGE^1" "$MERGE^2")" || fail "main-merge-unowned could not compute automatic merge tree"
+[ "$(git -C "$WT" rev-parse "$MERGE^{tree}")" != "$AUTO_TREE" ] || fail "main-merge-unowned merge tree has no hand edit"
 [ "$run_rc" = "1" ] || fail "main-merge-unowned exited $run_rc, want 1: $out"
 grep -Fq "FINDINGS-UNACCOUNTED commits=$MERGE" <<<"$out" || fail "main-merge-unowned did not report only the merge: $(head -n 1 <<<"$out")"
 grep -Fq "$MAIN_COMMIT" <<<"$out" && fail "main-merge-unowned reported main's commit: $(head -n 1 <<<"$out")"
