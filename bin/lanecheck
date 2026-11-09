@@ -27,6 +27,20 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path=$link;; *) script_path=$script_dir/$link;; esac
 done
 script_dir=$(cd "$(dirname "$script_path")" && pwd)
+run_claude_agents() {
+  local json_file="$1" err_file="$2" status
+  shift 2
+  if bash "$script_dir/claude-agents-timeout" "${FW_CLAUDE_AGENTS_TIMEOUT:-30}" "$@" >"$json_file" 2>"$err_file"; then
+    return 0
+  else
+    status=$?
+  fi
+  : >"$json_file"
+  if [ "$status" -ne 124 ] && [ ! -s "$err_file" ]; then
+    printf 'claude agents exited with status %s\n' "$status" >"$err_file"
+  fi
+  return "$status"
+}
 R=${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}
 BOX=${FW_BOX_HOST:-roundhouse-7010-plus-1.local}
 FW_LOCAL_BOX=${FW_LOCAL_BOX:-}
@@ -88,7 +102,8 @@ PY
     fi
   fi
   if [ "$need_box" = 1 ]; then
-    if ! "$done_boxssh" -o BatchMode=yes "$BOX" 'claude agents --json' >"$done_tmp/box-claude.json" 2>"$done_tmp/box-claude.err"; then
+    if ! run_claude_agents "$done_tmp/box-claude.json" "$done_tmp/box-claude.err" \
+        "$done_boxssh" -o BatchMode=yes "$BOX" 'claude agents --json'; then
       echo "cannot check Box Claude sessions; no lane retired" >&2
       return 2
     fi
@@ -100,7 +115,8 @@ PY
     fi
   fi
   if [ "$need_mac" = 1 ]; then
-    if ! claude agents --json >"$done_tmp/mac-claude.json" 2>"$done_tmp/mac-claude.err"; then
+    if ! run_claude_agents "$done_tmp/mac-claude.json" "$done_tmp/mac-claude.err" \
+        claude agents --json; then
       echo "cannot check Mac Claude sessions; no lane retired" >&2
       return 2
     fi
@@ -578,8 +594,9 @@ else
     printf 'UNKNOWN\tBox pi pidfile probe failed (exit %s)\n' "$_box_pi_rc" >"$tmp/box-pi.tsv"
   fi
 fi
-claude agents --json >"$tmp/mac.json" 2>"$tmp/mac.err"
-"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" 'claude agents --json' >"$tmp/box.json" 2>"$tmp/box.err"
+run_claude_agents "$tmp/mac.json" "$tmp/mac.err" claude agents --json
+run_claude_agents "$tmp/box.json" "$tmp/box.err" \
+  "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" 'claude agents --json'
 # A muse lane (muselaunch.sh, host column `muse`) is a delegate session, not a
 # Claude session, so `claude agents` never lists it and it would print MISSING
 # for its whole life. Its liveness is keyed by the delegate session id the
@@ -1288,8 +1305,11 @@ for host, err, f in (("mac", mac_err, "mac.err"), ("box", box_err, "box.err"),
                      ("muse", muse_err, "muse.err"),
                      ("mac delegate", macmuse_err, "macmuse.err")):
     if err is not None:
-        detail = open(os.path.join(tmp, f)).read().strip().splitlines()
-        print(f"UNKNOWN {host} — cannot list sessions: {err}" + (f" | {detail[-1]}" if detail else ""))
+        stderr = open(os.path.join(tmp, f)).read().strip().splitlines()
+        timeout_reason = next((line for line in stderr
+                               if line.startswith("claude agents timed out after ")), None)
+        reason = timeout_reason or (stderr[0] if stderr else err)
+        print(f"UNKNOWN {host} — cannot list sessions: {reason}")
 
 # `NO-WATCHER ~/lane-inbox/<ticket> unread=<n>` lines from inbox-watchers. Absent
 # file or failed ssh (WATCH-ERROR) means no pairing rather than a false all-clear,

@@ -323,7 +323,18 @@ for s in (data.get("sessions") or []) if isinstance(data, dict) else []:
         print("busy" if st == "running" else st)
         break' "$lanejid" 2>/dev/null)
             else
-                sess_status=$(fw_box_ssh -o BatchMode=yes "$host" "claude agents --json" 2>/dev/null | python3 -I -c 'import json,sys
+                claude_agents_ssh=${BOX_SSH:-${FW_SSH:-}}
+                if [ -z "$claude_agents_ssh" ]; then
+                    if [ "$(uname -s)" = Darwin ]; then
+                        claude_agents_ssh=ssh
+                    else
+                        claude_agents_ssh=${FW_BOX_LOCAL:-$script_dir/box-local.sh}
+                    fi
+                fi
+                if sess_json=$(bash "$script_dir/claude-agents-timeout" \
+                    "${FW_CLAUDE_AGENTS_TIMEOUT:-30}" "$claude_agents_ssh" \
+                    -o BatchMode=yes "$host" "claude agents --json" 2>/dev/null); then
+                    sess_status=$(printf '%s\n' "$sess_json" | python3 -I -c 'import json,sys
 try:
     data = json.load(sys.stdin)
 except Exception:
@@ -334,6 +345,9 @@ for a in data:
     if isinstance(a, dict) and a.get("name") == sys.argv[1]:
         print(a.get("status", ""))
         break' "$lanesess" 2>/dev/null)
+                else
+                    sess_status=''
+                fi
             fi
             case "$sess_status" in
                 busy)
