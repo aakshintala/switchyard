@@ -870,6 +870,8 @@ grep -Fq "next: tkt-plan $S confirm --edits <file>" <<<"$OUT" || fail "grant suc
 run_plan verify
 [ "$RC" -eq 1 ] || fail "pending grant does not unlock verify"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify with pending grant"
+grep -Fq "a grant is pending (switchyard:1234); verify does not consume it: run tkt-plan $S confirm --edits <file>" <<<"$OUT" || fail "verify with pending grant points at confirm without consuming the grant"
+! grep -Fq "if no grant is recorded" <<<"$OUT" || fail "verify with pending grant does not suggest recording another grant"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "verify does not consume the pending grant"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify with pending grant starts no job"
 run_plan confirm --edits "$CDIR/edits.md"
@@ -1370,11 +1372,19 @@ bash "$TKT_STATE" "$S" set granted_by switchyard || fail "seed replan grant auth
 bash "$TKT_STATE" "$S" set granted_comment replan || fail "seed replan grant comment"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "seed replan grant usage"
 bash "$TKT_STATE" "$S" set last_report "$CDIR/replan-report.md" || fail "seed replan report"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed replan verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed replan verdict base"
+replan_plan_hash="$(git -C "$WT" hash-object "$CDIR/plan.md")"
+bash "$TKT_STATE" "$S" set plan_verdict_hash "$replan_plan_hash" || fail "seed replan verdict hash"
+bash "$TKT_STATE" "$S" set verified_plan_hash "$replan_plan_hash" || fail "seed replan verified plan hash"
 bash "$TKT_STATE" "$S" set pack_plan_hash old-plan-hash || fail "seed replan pack hash"
+bash "$TKT_STATE" "$S" set plan_triage_comment 123456 || fail "seed replan triage comment"
+bash "$TKT_STATE" "$S" set reviewed "$(cat "$CDIR/base")" || fail "seed replan reviewed head"
+bash "$TKT_STATE" "$S" set review_status done || fail "seed replan review status"
 bash "$TKT_STATE" "$S" set job.verifier-r1 j-v1 || fail "seed verifier job"
 run_plan replan
 [ "$RC" -eq 0 ] || fail "replan exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings log=*" "replan"
+expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings,reviewed,review_status log=*" "replan"
 [ -z "$(bash "$TKT_STATE" "$S" get round 2>/dev/null || true)" ] || fail "replan clears round"
 [ -z "$(bash "$TKT_STATE" "$S" get job.lane 2>/dev/null || true)" ] || fail "replan clears job.lane"
 [ -z "$(bash "$TKT_STATE" "$S" get job.fix1 2>/dev/null || true)" ] || fail "replan clears job.fix1"
@@ -1382,7 +1392,14 @@ expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job
 [ -z "$(bash "$TKT_STATE" "$S" get job.fix3 2>/dev/null || true)" ] || fail "replan clears job.fix3"
 [ -z "$(bash "$TKT_STATE" "$S" get job.preflight 2>/dev/null || true)" ] || fail "replan clears job.preflight"
 [ -z "$(bash "$TKT_STATE" "$S" get findings 2>/dev/null || true)" ] || fail "replan clears findings"
+[ "$(state_get plan_verdict)" = "ok" ] || fail "replan keeps matching plan verdict"
+[ "$(state_get plan_verdict_base)" = "$(cat "$CDIR/base")" ] || fail "replan keeps matching plan verdict base"
+[ "$(state_get plan_verdict_hash)" = "$replan_plan_hash" ] || fail "replan keeps matching plan verdict hash"
+[ -z "$(bash "$TKT_STATE" "$S" get verified_plan_hash 2>/dev/null || true)" ] || fail "replan clears verified plan hash"
 [ -z "$(bash "$TKT_STATE" "$S" get pack_plan_hash 2>/dev/null || true)" ] || fail "replan clears pack plan hash"
+[ -z "$(bash "$TKT_STATE" "$S" get plan_triage_comment 2>/dev/null || true)" ] || fail "replan clears plan triage comment"
+[ -z "$(bash "$TKT_STATE" "$S" get reviewed 2>/dev/null || true)" ] || fail "replan clears reviewed head"
+[ -z "$(bash "$TKT_STATE" "$S" get review_status 2>/dev/null || true)" ] || fail "replan clears review status"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "replan keeps verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "replan keeps confirmed_for"
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "replan keeps grant author"
@@ -1390,6 +1407,21 @@ expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job
 [ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "replan keeps grant usage"
 [ "$(bash "$TKT_STATE" "$S" get last_report)" = "$CDIR/replan-report.md" ] || fail "replan keeps last_report"
 [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-v1" ] || fail "replan keeps verifier jobs"
+setup_case replan-stale-verdict
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed stale replan verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed stale replan verdict base"
+bash "$TKT_STATE" "$S" set plan_verdict_hash stale-plan-hash || fail "seed stale replan verdict hash"
+run_plan replan
+[ "$RC" -eq 0 ] || fail "replan with stale verdict exits 0"
+expect_plan_verdict "" "" "replan clears a stale plan verdict"
+
+setup_case replan-missing-verdict-hash
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed replan verdict without hash"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed replan verdict base without hash"
+run_plan replan
+[ "$RC" -eq 0 ] || fail "replan with unhashable verdict exits 0"
+expect_plan_verdict "" "" "replan clears a verdict without a matching hash"
+
 run_plan replan
 [ "$RC" -eq 0 ] || fail "replan twice exits 0"
 run_plan replan extra
@@ -1566,6 +1598,37 @@ run_plan verify
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-h Files outside tasks"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-h leaves verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$A" ] || fail "drift-h leaves verified_base"
+
+# --- no resolvable task path: Files paths are the drift fallback ---
+setup_case drift-no-task-path
+mkdir -p "$WT/src"
+wcommit "$WT" src/a.rs "a1"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+git -C "$WT" rev-parse HEAD >"$CDIR/base"
+A="$(cat "$CDIR/base")"
+{
+  printf 'Base: %s\n' "$A"
+  printf '\n## Files\n\n- `src/a.rs`\n\n## Tasks\n\n1. Sweep with `perl -pi -e '\''s/old/new/'\'' src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "drift-no-task-path seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "drift-no-task-path seed confirm"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "drift-no-task-path seed verified_base"
+wcommit "$WT" src/a.rs "a2"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+git -C "$WT" rev-parse HEAD >"$CDIR/base"
+B="$(cat "$CDIR/base")"
+{
+  printf 'Base: %s\n' "$B"
+  printf '\n## Files\n\n- `src/a.rs`\n\n## Tasks\n\n1. Sweep with `perl -pi -e '\''s/old/new/'\'' src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+[ "$A" != "$B" ] || fail "drift-no-task-path needs a new base"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-no-task-path exempt exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "drift-no-task-path"
+grep -q "slot=verifier-r3-drift" <<<"$(tail -n 1 "$T/stub.log")" || fail "drift-no-task-path uses the drift slot"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = 2 ] || fail "drift-no-task-path leaves verifier_round"
+[ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$B" ] || fail "drift-no-task-path updates verified_base"
 
 setup_case drift-c
 rebase_plan

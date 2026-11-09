@@ -155,7 +155,7 @@ for basekey in plan_verdict_base verified_base review_head reviewed; do
   [ "$(bash "$TKT" "$BKS" get "$basekey")" = "$FULL" ] || fail "get returns the stored full $basekey"
 done
 # callers clear these keys by writing empty, so an empty write still resets them
-for basekey in plan_verdict_base verified_base; do
+for basekey in plan_verdict_base verified_base reviewed; do
   bash "$TKT" "$T/base-$basekey.state" set "$basekey" "" || fail "set $basekey to empty exits 0"
 done
 

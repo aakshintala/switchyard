@@ -179,34 +179,6 @@ runjob() {
   report_passed "$rep" && { RV="PLAN-OK out=$rep"; REC=0; } || { RV="LINES report_lines=$(wc -l <"$rep" | tr -d ' ') out=$rep"; REC=1; }
 }
 
-# task_pathspec KIND VALUE: expand_token's callback for task records. Resolve
-# paths at the plan base so unique basename tokens become root-relative paths.
-task_pathspec() {
-  case "$1" in
-    glob) printf '%s\n' "$2"; return 0 ;;
-    path) ;;
-    *) return 0 ;;
-  esac
-  resolve_path "$2"
-  [ "$RES_KIND" = found ] || return 0
-  printf '%s\n' "$RES"
-}
-
-# plan_task_pathspecs PLAN: resolved paths from backticked tokens on ## Tasks
-# lines. The shared reader skips fences and non-Tasks sections; expand_token
-# handles ports, symbols and brace alternatives before resolve_path applies the
-# plan's path rules. A task path outside Files is still listed.
-plan_task_pathspecs() {
-  local tok
-  local dir="$worktree" rev="$base" tree CUR_SEC=tasks
-  tree="$(git -C "$dir" ls-tree -r --name-only "$rev")"
-  while IFS= read -r tok; do
-    [ -n "$tok" ] || continue
-    expand_token "$tok" task_pathspec
-  done < <(plan_records "$1" | awk -F '\t' '$1 == "tasks" { print $5 }')
-  return 0
-}
-
 do_verify() {
   extra=""; model=""
   while [ $# -gt 0 ]; do case "$1" in
@@ -229,13 +201,17 @@ do_verify() {
   round="$(ronum)"
   # The drift exemption is derived from recorded state, not a caller flag: a
   # verify is exempt only when a previous round recorded a base and main
-  # changed a task path between that base and the current one. A Files
-  # change no task names is not drift, so the round limit applies.
+  # changed a path in the selected scope between that base and the current one.
+  # Task paths are the scope when any resolve; Files paths provide a fallback
+  # only when none do. A Files change is not drift when the tasks do name paths.
   drift=0
   vbase="$(t get verified_base 2>/dev/null || true)"
   if [ -n "$vbase" ]; then
     tpaths=()
-    while IFS= read -r p; do tpaths+=("$p"); done < <(plan_task_pathspecs "$plan")
+    while IFS= read -r p; do tpaths+=("$p"); done < <(plan_task_pathspecs "$plan" "$worktree" "$base")
+    if [ "${#tpaths[@]}" -eq 0 ]; then
+      while IFS= read -r p; do tpaths+=("$p"); done < <(plan_files_pathspecs "$plan")
+    fi
     if [ "${#tpaths[@]}" -gt 0 ]; then
       if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${tpaths[@]}" 2>/dev/null)"; then
         [ -n "$dstat" ] && drift=1 || drift=0
@@ -245,7 +221,14 @@ do_verify() {
     fi
   fi
   if [ "$drift" -eq 0 ]; then
-    [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT round=$round confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+    if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
+      if grant_pending; then
+        granted_by="$(t get granted_by 2>/dev/null || true)"
+        granted_comment="$(t get granted_comment 2>/dev/null || true)"
+        emit "ROUND-LIMIT round=$round confirm=done" 1 "a grant is pending ($granted_by:$granted_comment); verify does not consume it: run tkt-plan $state confirm --edits <file>" "$(open_lines)"
+      fi
+      emit "ROUND-LIMIT round=$round confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+    fi
     [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan $state confirm --edits <file>, or after triage answers every open line run tkt-plan $state triaged --comment <id>" "$(open_lines)"
   fi
   model="$(vmodel "$model")" || exit 2
@@ -497,11 +480,20 @@ do_replan() {
   # A re-plan has a plan, so a missing key is a usage error before any write.
   plan_key="$(t get plan 2>/dev/null || true)"
   if [ -z "$plan_key" ]; then echo "tkt-plan: missing key: plan" >&2; exit 2; fi
+  # Preserve PLAN-OK only for the exact plan snapshot that was checked. The
+  # shared reader blanks a hash-mismatched verdict; a missing/unreadable hash
+  # is not a match either, so clear the stored triple in both cases.
+  plan="$plan_key"
+  plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
+  if [ -z "$plan_verdict_file_hash" ] || [ "$plan_verdict_hash" != "$plan_verdict_file_hash" ]; then
+    t set plan_verdict ""
+    t set plan_verdict_base ""
+    t set plan_verdict_hash ""
+  fi
   # Job slots and findings first, round last: a half-done replan leaves
   # round non-empty and tkt-build refuses loudly instead of reusing a stale slot.
-  t set plan_verdict ""
-  t set plan_verdict_base ""
-  t set plan_verdict_hash ""
+  # The verdict triple is the one plan-specific record tkt-build needs; the
+  # verifier snapshot, pack hash and triage comment are not part of PLAN-OK.
   t set verified_plan_hash ""
   t set pack_plan_hash ""
   t set plan_triage_comment ""
@@ -511,8 +503,10 @@ do_replan() {
   t set job.fix3 ""
   t set job.preflight ""
   t set findings ""
+  t set reviewed ""
+  t set review_status ""
   t set round ""
-  emit "REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings" 0
+  emit "REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings,reviewed,review_status" 0
 }
 
 case "$sub" in

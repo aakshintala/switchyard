@@ -300,6 +300,21 @@ TOPLIST="|$(git -C "$dir" ls-tree --name-only "$rev" | tr '\n' '|')"
 # Fenced blocks and the Gate section are skipped.
 records="$(plan_records "$plan" 1)"
 
+# A Tasks section with no paths resolvable by tkt-plan cannot scope its drift
+# exemption to task paths, so report the Files fallback without failing the plan.
+has_tasks="$(awk '
+  /^[[:space:]]*```/ { in_fence = !in_fence; next }
+  in_fence { next }
+  /^## / {
+    if ($0 ~ /^## Tasks([[:space:]]|$)/) { found = 1; next }
+    if (found) exit
+  }
+  END { if (found) print "yes" }
+' "$plan")"
+if [ "$has_tasks" = yes ] && [ -z "$(plan_task_pathspecs "$plan" "$dir" "$rev")" ]; then
+  echo 'warning: no resolvable path in ## Tasks; drift exemption will use ## Files paths' >&2
+fi
+
 FOUND=0
 SEEN="|"
 FILES="|"

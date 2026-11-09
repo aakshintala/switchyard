@@ -1179,6 +1179,24 @@ grep -q "tkt-ship" <<<"$OUT" || fail "round-set build names tkt-ship"
 grep -q "not the round limit" <<<"$OUT" || fail "round-set build distinguishes the round limit"
 [ ! -s "$T/calls.log" ] || fail "round-set build dispatches nothing: $(cat "$T/calls.log")"
 
+# --- replan clears the completed review marker before the next lane ---
+setup_case replan-reviewed
+bash "$TKT_STATE" "$S" set reviewed "$H" >/dev/null || fail "replan-reviewed: seed reviewed head"
+bash "$TKT_STATE" "$S" set review_status done >/dev/null || fail "replan-reviewed: seed review status"
+REPLAN_OUT="$(bash "$SCRIPT_DIR/../bin/tkt-plan" "$S" replan 2>"$CDIR/replan-stderr.txt")"; REPLAN_RC=$?
+[ "$REPLAN_RC" -eq 0 ] || fail "replan-reviewed: replan exits 0 (rc=$REPLAN_RC): $(cat "$CDIR/replan-stderr.txt")"
+REPLAN_REVIEWED="$(bash "$TKT_STATE" "$S" get reviewed 2>/dev/null || true)"
+REPLAN_REVIEW_STATUS="$(bash "$TKT_STATE" "$S" get review_status 2>/dev/null || true)"
+run_build --from lane --no-verifier
+[ "$RC" -eq 0 ] || fail "replan-reviewed: --from lane proceeds after replan (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "replan-reviewed lane"
+[ -z "$REPLAN_REVIEWED" ] || fail "replan-reviewed: reviewed head is cleared"
+[ -z "$REPLAN_REVIEW_STATUS" ] || fail "replan-reviewed: review status is cleared"
+case "$(head -n 1 <<<"$REPLAN_OUT")" in
+  "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings,reviewed,review_status log="*) ;;
+  *) fail "replan-reviewed: replan verdict lists the cleared review markers: $(head -n 1 <<<"$REPLAN_OUT")" ;;
+esac
+
 # --- an incomplete map never approves, but stays in the digest ---
 setup_case mapfail
 printf 'mutant_job=%s\n' Selection >>"$S"
