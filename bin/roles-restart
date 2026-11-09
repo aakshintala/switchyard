@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# roles-restart: relaunch missing Claude role sessions after a reboot.
+# Install manually only when approved:
+#   cp claude-code/launchd/com.aakshintala.roles-restart.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aakshintala.roles-restart.plist
+# The plist is a template; this script never installs or bootstraps it.
+# ROLES_RESTART_ROLES may override defaults as newline-separated role|home|handoff rows.
+# ROLES_RESTART_WAIT_TIMEOUT bounds the gh auth status network/auth wait (seconds).
+set -euo pipefail
+
+log_file="${ROLES_RESTART_LOG:-$HOME/.cache/agents/roles-restart.log}"
+lock_dir="${ROLES_RESTART_LOCK_DIR:-$HOME/.cache/agents/roles-restart.lock}"
+jobs_dir="${ROLES_RESTART_JOBS_DIR:-$HOME/.claude/jobs}"
+wait_timeout="${ROLES_RESTART_WAIT_TIMEOUT:-120}"
+
+log() {
+  mkdir -p "$(dirname "$log_file")"
+  printf '%s %s\n' "$(date '+%F %T')" "$1" >>"$log_file"
+}
+
+# The trap invokes this handler at process exit.
+# shellcheck disable=SC2329
+cleanup() {
+  rmdir "$lock_dir" 2>/dev/null || true
+}
+
+if [[ ! "$wait_timeout" =~ ^[0-9]+$ ]]; then
+  echo "roles-restart: ROLES_RESTART_WAIT_TIMEOUT must be a non-negative integer" >&2
+  exit 2
+fi
+mkdir -p "$(dirname "$lock_dir")"
+if ! mkdir "$lock_dir" 2>/dev/null; then
+  if [ -e "$lock_dir" ]; then
+    log "another run holds the lock; skipping"
+    exit 0
+  fi
+  log "could not create lock $lock_dir"
+  exit 1
+fi
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+wait_for_auth() {
+  local started="$SECONDS"
+  while :; do
+    if gh auth status >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$((SECONDS - started))" -ge "$wait_timeout" ]; then
+      log "timed out waiting for network and gh auth status after ${wait_timeout}s"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+if ! wait_for_auth; then
+  exit 1
+fi
+
+if [ -n "${ROLES_RESTART_ROLES:-}" ]; then
+  roles="$ROLES_RESTART_ROLES"
+else
+  roles="$(printf '%s\n' \
+    "surveyor|$HOME/work/fiber-worktrees/surveyor/home|$HOME/work/wiki/state/surveyor.md" \
+    "switchyard|$HOME/work/sy-wt/main|$HOME/work/wiki/state/switchyard.md" \
+    "flywheel|$HOME/work/fiber|$HOME/work/wiki/state/flywheel.md")"
+fi
+
+failed=0
+while IFS= read -r entry || [ -n "$entry" ]; do
+  [ -n "$entry" ] || continue
+  role=""; home=""; handoff=""; extra=""
+  IFS='|' read -r role home handoff extra <<<"$entry"
+  if [ -z "$role" ] || [ -z "$home" ] || [ -z "$handoff" ] || [ -n "$extra" ]; then
+    log "invalid role table row; expected role|home|handoff: $entry"
+    failed=1
+    continue
+  fi
+
+  if [ ! -f "$handoff" ]; then
+    log "skipping $role: missing handoff $handoff"
+    owner-ask log --from switchyard --kind note --title "roles-restart missing handoff $role" \
+      || log "owner-ask note failed for missing handoff: $role"
+    continue
+  fi
+
+  if python3 -I - "$jobs_dir" "$role" "$home" <<'PY'
+import glob
+import json
+import os
+import sys
+
+jobs_dir, role, home = sys.argv[1:]
+terminal = {"done", "stopped", "failed"}
+for path in glob.glob(os.path.join(jobs_dir, "*", "state.json")):
+    try:
+        with open(path, encoding="utf-8") as source:
+            job = json.load(source)
+    except (OSError, ValueError):
+        continue
+    if (job.get("template") == role and job.get("cwd") == home
+            and job.get("state") not in terminal):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
+    log "skipping $role: live session found"
+    continue
+  fi
+
+  if [ ! -d "$home" ]; then
+    log "could not relaunch $role: missing home $home"
+    failed=1
+    continue
+  fi
+  prompt="Read your handoff at $handoff. Follow its instructions, re-create the crons listed in its ## Crons section, restart your inbox wait, and carry on."
+  if (cd "$home" && claude --bg --agent "$role" "$prompt"); then
+    log "roles-restart relaunched $role"
+    owner-ask log --from switchyard --kind process --title "roles-restart relaunched $role" \
+      || { log "owner-ask process line failed for $role"; failed=1; }
+  else
+    status=$?
+    log "failed to launch $role (exit $status)"
+    failed=1
+  fi
+done <<<"$roles"
+
+exit "$failed"
