@@ -77,6 +77,8 @@ chmod +x "$T/bin/cargo"
 setup_case() {
   CDIR="$T/cases/$1"
   mkdir -p "$CDIR/run"
+  FW_RUN="$CDIR/run"
+  export FW_RUN
   git init -q --bare "$CDIR/origin.git"
   git --git-dir="$CDIR/origin.git" symbolic-ref HEAD refs/heads/main
   git init -q "$CDIR/seed"
@@ -286,6 +288,59 @@ run_gate --expect-head 0000000000000000000000000000000000000000
 expect_verdict "TKT tkt-gate TIP * log=*" "expect TIP"
 grep -q "0000000000000000000000000000000000000000" <<<"$OUT" || fail "expect TIP names the expected sha"
 
+# --- PASS: a matching fence-grant Paths entry covers a changed file ---
+setup_case fence-grant-pass
+write_plan
+cat >"$FW_RUN/fiber-517-fence-grant-1.md" <<'EOF'
+Ticket: 517
+Paths:
+- evil.txt
+
+Reads:
+- read-only.txt
+EOF
+commit_file evil.txt "granted change"
+push_branch
+run_gate
+[ "$RC" -eq 0 ] || fail "matching fence-grant Paths passes (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "matching fence-grant Paths"
+[ -f "$T/gate-ran" ] || fail "matching fence-grant Paths runs the gate"
+
+# --- FENCE: a grant file for another ticket does not cover this change ---
+setup_case fence-grant-other-ticket
+write_plan
+cat >"$FW_RUN/fiber-518-fence-grant-1.md" <<'EOF'
+Ticket: 518
+Paths:
+- evil.txt
+EOF
+commit_file evil.txt "other ticket grant"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "other-ticket fence-grant exits 1"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "other-ticket fence-grant"
+grep -qx "evil.txt" <<<"$OUT" || fail "other-ticket fence-grant does not cover evil.txt"
+[ ! -f "$T/gate-ran" ] || fail "other-ticket fence-grant runs no gate"
+
+# --- FENCE: a path listed only under a grant's Reads is not covered ---
+setup_case fence-grant-reads
+write_plan
+cat >"$FW_RUN/fiber-517-fence-grant-1.md" <<'EOF'
+Ticket: 517
+Paths:
+- another.txt
+
+Reads:
+- evil.txt
+EOF
+commit_file evil.txt "read-only change"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "Reads-only fence-grant exits 1"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "Reads-only fence-grant"
+grep -qx "evil.txt" <<<"$OUT" || fail "Reads-only fence-grant does not cover evil.txt"
+[ ! -f "$T/gate-ran" ] || fail "Reads-only fence-grant runs no gate"
+
 # --- FENCE: an uncovered file runs no gate ---
 setup_case fence
 write_plan
@@ -296,7 +351,8 @@ run_gate
 expect_verdict "TKT tkt-gate FENCE n=1 log=*" "FENCE"
 grep -qx "evil.txt" <<<"$OUT" || fail "FENCE digest lists the path"
 grep -qF "tkt-state $S add fence <path>" <<<"$OUT" || fail "FENCE names the tkt-state add fence route"
-grep -qF "fence-grant is not read" <<<"$OUT" || fail "FENCE says fence-grant is not read"
+grep -qF "or a matching fence-grant Paths block" <<<"$OUT" || fail "FENCE names the matching fence-grant route"
+! grep -qF "fence-grant is not read" <<<"$OUT" || fail "FENCE drops the stale fence-grant wording"
 grep -qF "re-confirm with tkt-plan" <<<"$OUT" || fail "FENCE names the plan route"
 [ ! -f "$T/gate-ran" ] || fail "FENCE runs no gate"
 
