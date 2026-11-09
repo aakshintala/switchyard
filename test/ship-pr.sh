@@ -450,6 +450,7 @@ run() {
           exit 1
         fi
       fi
+      if [[ " $* " == *" push "* ]]; then printf 'git %s\n' "$*" >>"$ST/push.log"; fi
       if [ -e "$ST/delete-fails" ] && [[ " $* " == *" push origin --delete "* ]]; then
         echo "error: cannot lock ref 'refs/remotes/origin/feature': unable to resolve reference" >&2
         exit 1
@@ -609,20 +610,17 @@ ship; expect 1 "a fetch that always fails exits non-zero after 3 tries"
 [ "$(grep -c '^1$' "$ST/sleeps.txt" 2>/dev/null)" = "2" ] || fail "always-fail fetch sleeps 1 s twice: [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
 no_merge "always-fail fetch"
 
-# ===== exit 3: rebase conflict aborts cleanly
+# ===== exit 3: merge conflict aborts cleanly
 setup
 echo changed >"$WT/file.txt"; git -C "$WT" commit -qam "touch file"; git -C "$WT" push -q origin feature
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
 advance_main file.txt conflicting
-ship; expect 3 "rebase conflict"; untouched "rebase conflict"
-for d in rebase-merge rebase-apply; do
-  [ ! -e "$(git -C "$WT" rev-parse --git-path $d)" ] || fail "conflict leaves no $d"
-done
+ship; expect 3 "merge conflict"; untouched "merge conflict"
+[ ! -e "$(git -C "$WT" rev-parse --git-path MERGE_HEAD)" ] || fail "conflict leaves no MERGE_HEAD"
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail "conflict leaves a clean tree"
 no_merge "conflict"
 
-# A merge commit preserves a conflict resolution until main moves again. Strict
-# mode must replay that resolved tree without retrying the original conflicting commit.
+# A later clean merge keeps an earlier conflict-resolution merge commit intact.
 setup
 echo feature >"$WT/file.txt"; git -C "$WT" commit -qam "touch file"; git -C "$WT" push -q origin feature
 advance_main file.txt conflicting
@@ -636,11 +634,14 @@ git -C "$WT" push -q origin feature
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
 git -C "$WT" rev-parse --verify "$HEAD0^2" >/dev/null || fail "conflict resolution is a merge commit"
 advance_main other.txt unrelated
-ship; expect 0 "strict rebase preserves a merge conflict resolution"
+MAIN1="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+ship; expect 0 "strict merge preserves an earlier conflict resolution"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "resolved merge still merges: [$OUT]"
 PIN="$(sed -n 's/.*--match-head-commit //p' "$ST/gh.log")"
-git --git-dir="$ORIGIN" merge-base --is-ancestor refs/heads/main "$PIN" \
-  || fail "resolved merge rebases onto the latest main"
+git --git-dir="$ORIGIN" cat-file -p "$PIN" | grep -qx "parent $HEAD0" \
+  || fail "new merge keeps the previous conflict-resolution head as a parent"
+git --git-dir="$ORIGIN" cat-file -p "$PIN" | grep -qx "parent $MAIN1" \
+  || fail "new merge includes the latest main as a parent"
 
 # ===== exit 4: a different patch than the reviewed one
 setup
@@ -797,16 +798,20 @@ run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$T/no-
 expect 0 "FIX-INCOMPLETE with --unverified-fixes ships the unverified path"
 grep -q '^gh pr merge' "$ST/gh.log" || fail "FIX-INCOMPLETE unverified path merged"
 
-# ===== patch-id ignores context lines: a rebase over a main commit that
-# ===== touched only the neighbouring line still matches, while a changed
-# ===== added line still mismatches
+# ===== patch-id ignores context lines: a clean merge over a main commit that
+# ===== touched only the neighbouring line keeps the reviewed patch-id, while
+# ===== a changed added line still mismatches
 setup
 printf 'A\nb\nc\n' >"$WT/file.txt"
 git -C "$WT" commit -qam "PR changes line 1"; git -C "$WT" push -q origin feature
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
+REVIEWED_PID="$(git -C "$WT" diff -U0 "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 advance_main file.txt "$(printf 'a\nb\nC')"
-ship; expect 0 "rebase over a context-only change passes the patch-id check"
+ship; expect 0 "clean merge over a context-only change keeps the reviewed patch-id"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "context-only change still merges: [$OUT]"
+PIN="$(sed -n 's/.*--match-head-commit //p' "$ST/gh.log")"
+PIN_PID="$(git --git-dir="$ORIGIN" diff -U0 refs/heads/main..."$PIN" | git patch-id --stable | awk '{print $1}')"
+[ "$PIN_PID" = "$REVIEWED_PID" ] || fail "clean merge patch-id matches reviewed patch: reviewed=$REVIEWED_PID merged=$PIN_PID"
 
 setup
 printf 'A\nb\nc\n' >"$WT/file.txt"
@@ -837,7 +842,7 @@ GATE_FILE="$(sed -n 's/^full gate output: //p' <<<"$OUT")"
 [ -f "$GATE_FILE" ] || fail "failing gate after main moved: log exists: [$GATE_FILE]"
 rm -f "$GATE_FILE"
 setup; advance_main other.txt o
-ship --gate 'test ! -e other.txt'; expect 0 "gate runs on the pre-rebase head"
+ship --gate 'test ! -e other.txt'; expect 0 "gate runs on the pre-merge head"
 ! compgen -G "$TMPDIR/ship-pr-7-gate.*" >/dev/null || fail "passing gate leaves no log file"
 setup
 ship --gate "cat '$SCRIPT_DIR/fixtures/ship-pr-nextest-flaky.txt'"
@@ -887,7 +892,7 @@ TMPDIR="$T/tmp"; export TMPDIR
 
 # ===== exit 1 and 124: push and CI
 setup; echo '[{"bucket":"fail","name":"ci"},{"bucket":"pass","name":"lint"}]' >"$ST/checks"
-ship; expect 1 "failing CI"; untouched "failing CI, no rebase, no push"
+ship; expect 1 "failing CI"; untouched "failing CI, no merge, no push"
 grep -q '^failing: ci$' <<<"$OUT" || fail "failing line printed: [$OUT]"
 grep -qx "gh-ci: ${HEAD0:0:8} pending=0 passed=0 failing=1" <<<"$ERR" || fail "gh-ci progress reaches ship-pr stderr: [$ERR]"
 grep -q 'pending' <<<"$OUT" && fail "progress stays off ship-pr stdout: [$OUT]"
@@ -896,7 +901,7 @@ no_merge "failing CI"
 
 setup; echo DIRTY >"$ST/merge-state"
 ship; expect 3 "conflict after the push"; no_merge "conflict after the push"
-grep -q "PR conflicts with origin/main after the push; rebase again, then rerun" <<<"$ERR" || fail "conflict message: [$ERR]"
+grep -q "PR conflicts with origin/main after the push; merge origin/main again, then rerun" <<<"$ERR" || fail "conflict message: [$ERR]"
 [ -d "$WT" ] || fail "worktree kept after a conflict"
 
 setup; echo '[{"bucket":"pending","name":"ci"}]' >"$ST/checks"
@@ -917,29 +922,35 @@ grep -q "timeout after 7200s" <<<"$OUT" || fail "default timeout header: [$OUT]"
 export GH_CI_INTERVAL=7
 
 setup; advance_main other.txt o
+MAIN1="$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
 checks_hook 'git --git-dir="$ORIGIN" rev-parse refs/heads/feature >"$ST/at-ci"'
-ship; expect 0 "rebased happy path"
+ship; expect 0 "moved strict main is merged into the branch"
 PIN="$(sed -n 's/.*--match-head-commit //p' "$ST/gh.log")"
-[ "$(cat "$ST/at-ci")" = "$PIN" ] || fail "origin branch is the rebased head before the CI wait"
-[ "$PIN" != "$HEAD0" ] || fail "the rebase moved HEAD"
+[ "$(cat "$ST/at-ci")" = "$PIN" ] || fail "origin branch is the merged head before the CI wait"
+[ "$PIN" != "$HEAD0" ] || fail "the merge moved HEAD"
+git --git-dir="$ORIGIN" cat-file -p "$PIN" | grep -qx "parent $HEAD0" || fail "merge keeps the reviewed head as a parent"
+git --git-dir="$ORIGIN" cat-file -p "$PIN" | grep -qx "parent $MAIN1" || fail "merge includes moved origin/main as a parent"
+git --git-dir="$ORIGIN" merge-base --is-ancestor "$O0" "$PIN" || fail "push is a fast-forward from the previous remote head"
+grep -Fq ' push origin HEAD:refs/heads/feature' "$ST/push.log" || fail "merge is pushed without force: [$(cat "$ST/push.log")]"
+! grep -q -- '--force-with-lease' "$ST/push.log" || fail "ship-pr never force-pushes: [$(cat "$ST/push.log")]"
 
 setup; checks_hook 'git --git-dir="$ORIGIN" update-ref refs/heads/feature "$(git --git-dir="$ORIGIN" commit-tree "refs/heads/feature^{tree}" -p refs/heads/feature -m b)"'
 ship; expect 1 "CI passes on a moved head"; no_merge "moved head"
 grep -q 'other than' <<<"$ERR" || fail "moved head message: [$ERR]"
 
-# main moving during the CI wait sends ship-pr back to the rebase, at most 3 times
+# main moving during the CI wait sends ship-pr back to merge origin/main, at most 3 times
 setup; checks_hook "$BUMP_MAIN"
 ship; expect 0 "main moves once during CI"
-grep -q 'origin/main moved during CI; rebasing again (retry 1 of 3)' <<<"$ERR" || fail "retry message: [$ERR]"
+grep -q 'origin/main moved during CI; merging again (retry 1 of 3)' <<<"$ERR" || fail "retry message: [$ERR]"
 PIN="$(sed -n 's/.*--match-head-commit //p' "$ST/gh.log")"
 [ -n "$PIN" ] && git --git-dir="$ORIGIN" merge-base --is-ancestor refs/heads/main "$PIN" \
   || fail "merge pinned to a head that descends from the moved main: [$PIN]"
 [ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 2 ] || fail "two CI waits"
 
-# the second push leases against the first pushed head, not the PR head read at the start
+# a retry pushes the merge commit as a fast-forward from the first pushed head
 setup; advance_main other.txt o; checks_hook "$BUMP_MAIN"
-ship; expect 0 "initial rebase, then main moves during CI"
-grep -q 'retry 1 of 3' <<<"$ERR" || fail "retry after an initial rebase: [$ERR]"
+ship; expect 0 "initial merge, then main moves during CI"
+grep -q 'retry 1 of 3' <<<"$ERR" || fail "retry after an initial merge: [$ERR]"
 
 setup; checks_each "$BUMP_MAIN"
 ship; expect 1 "main moves on every CI wait"; no_merge "main moves every wait"
@@ -954,9 +965,7 @@ echo changed >"$WT/file.txt"; git -C "$WT" commit -qam "touch file"; git -C "$WT
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
 checks_hook 'echo conflicting >"$C/file.txt"; git -C "$C" commit -qam m; git -C "$C" push -q origin main'
 ship; expect 3 "main moves during CI with a conflicting change"; no_merge "conflict on retry"
-for d in rebase-merge rebase-apply; do
-  [ ! -e "$(git -C "$WT" rev-parse --git-path $d)" ] || fail "retry conflict leaves no $d"
-done
+[ ! -e "$(git -C "$WT" rev-parse --git-path MERGE_HEAD)" ] || fail "retry conflict leaves no MERGE_HEAD"
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail "retry conflict leaves a clean tree"
 
 setup
@@ -964,19 +973,19 @@ sed -i.bak 1s/a/x/ "$WT/file.txt"; rm "$WT/file.txt.bak"
 git -C "$WT" commit -qam "edit line 1"; git -C "$WT" push -q origin feature
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
 checks_hook 'sed -i.bak 3s/c/z/ "$C/file.txt"; rm "$C/file.txt.bak"; git -C "$C" commit -qam m; git -C "$C" push -q origin main'
-ship; expect 0 "main moves during CI with a clean rebase that changes only context"
-[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "context-only rebase on retry still merges: [$OUT]"
+ship; expect 0 "main moves during CI with a clean merge that changes only context"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "context-only merge on retry still merges: [$OUT]"
 
 setup; checks_hook 'echo n >"$C/newfile.txt"; git -C "$C" add .; git -C "$C" commit -qm m; git -C "$C" push -q origin main'
-ship --gate 'test ! -e newfile.txt && echo x >>"$ST/gates"'; expect 0 "gate runs once, not again after a rebase"
+ship --gate 'test ! -e newfile.txt && echo x >>"$ST/gates"'; expect 0 "gate runs once, not again after a merge"
 [ "$(wc -l <"$ST/gates")" -eq 1 ] || fail "gate ran exactly once"
 [ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 2 ] || fail "2 CI waits"
 mh="$(grep -o 'match-head-commit [0-9a-f]*' "$ST/gh.log" | awk '{print $2}')"
 git --git-dir="$ORIGIN" merge-base --is-ancestor main "$mh" || fail "merge pinned to a head descending from the moved main"
 
-# ===== strictness of main's required checks decides when ship-pr rebases
-STRICT_LINE='required checks on main are strict: rebasing when origin/main moves'
-LOOSE_LINE='required checks on main are not strict: rebasing only on a conflict'
+# ===== strictness of main's required checks decides when ship-pr merges
+STRICT_LINE='required checks on main are strict: merging origin/main when it moved'
+LOOSE_LINE='required checks on main are not strict: merging only on a conflict'
 NOSTRICT='[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"ci"}]}}]'
 setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
 ship --gate 'echo "$NEXTEST_RETRIES" >>"$ST/retries"'
@@ -1009,11 +1018,11 @@ grep -q "$FALLBACK_LINE" <<<"$ERR" && grep -q "$STRICT_LINE" <<<"$ERR" || fail "
 setup; echo "$NOSTRICT" >"$ST/rules"; touch "$ST/classic-fail"; ship; expect 0 "classic lookup fails"
 grep -q "$FALLBACK_LINE" <<<"$ERR" && grep -q "$STRICT_LINE" <<<"$ERR" || fail "classic failure falls back to strict: [$ERR]"
 
-# not strict: no rebase because main moved
+# not strict: no merge because main moved without a reported conflict
 setup; echo "$NOSTRICT" >"$ST/rules"; advance_main other.txt o
 ship; expect 0 "not strict, main moved before ship"
-grep -q 'rebasing feature' <<<"$ERR" && fail "no rebase: [$ERR]"
-! grep -q 'pushing rebased' <<<"$ERR" || fail "no push: [$ERR]"
+grep -q 'merging feature' <<<"$ERR" && fail "no merge: [$ERR]"
+! grep -q 'pushing merged' <<<"$ERR" || fail "no push: [$ERR]"
 grep -q "^gh pr merge 7 --repo O/N --squash --match-head-commit $HEAD0\$" "$ST/gh.log" || fail "merge pinned to HEAD0"
 [ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 1 ] || fail "one CI wait"
 
@@ -1023,38 +1032,36 @@ grep -q 'retry' <<<"$ERR" && fail "no retry: [$ERR]"
 grep -q "^gh pr merge 7 --repo O/N --squash --match-head-commit $HEAD0\$" "$ST/gh.log" || fail "merge pinned to HEAD0 after a main move"
 [ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 1 ] || fail "one CI wait despite the main move"
 
-# not strict: a reported conflict rebases, before the first push
+# not strict: a reported conflict merges origin/main, before the first push
 setup; echo "$NOSTRICT" >"$ST/rules"; echo CONFLICTING >"$ST/mergeable"; advance_main other.txt o
-ship --gate 'test ! -e other.txt && echo x >>"$ST/gates"'; expect 0 "not strict, conflict that rebases cleanly"
-[ "$(wc -l <"$ST/gates")" -eq 1 ] || fail "gate ran once, on the pre-rebase head"
+ship --gate 'test ! -e other.txt && echo x >>"$ST/gates"'; expect 0 "not strict, conflict that merges cleanly"
+[ "$(wc -l <"$ST/gates")" -eq 1 ] || fail "gate ran once, on the pre-merge head"
 mh="$(grep -o 'match-head-commit [0-9a-f]*' "$ST/gh.log" | awk '{print $2}')"
-[ "$mh" != "$HEAD0" ] && git --git-dir="$ORIGIN" merge-base --is-ancestor main "$mh" || fail "merge pinned to the rebased head"
-[ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 1 ] || fail "one CI wait after the rebase"
+[ "$mh" != "$HEAD0" ] && git --git-dir="$ORIGIN" merge-base --is-ancestor main "$mh" || fail "merge pinned to a head descending from main"
+[ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 1 ] || fail "one CI wait after the merge"
 
 setup; echo "$NOSTRICT" >"$ST/rules"; echo CONFLICTING >"$ST/mergeable"; advance_main other.txt o
-run 7 --repo O/N --reviewed "$(git -C "$C" rev-parse HEAD)" --worktree "$WT"; expect 4 "not strict, rebase checks the patch-id"
+run 7 --repo O/N --reviewed "$(git -C "$C" rev-parse HEAD)" --worktree "$WT"; expect 4 "not strict, merge checks the patch-id"
 no_merge "not strict patch-id"; [ "$(origin_head)" = "$HEAD0" ] || fail "mismatch pushes nothing"
 
 setup; echo "$NOSTRICT" >"$ST/rules"; echo DIRTY >"$ST/merge-state"; advance_main other.txt o
-ship; expect 3 "not strict, DIRTY after the rebase and push"; no_merge "not strict DIRTY"
-grep -q "PR conflicts with origin/main after the push; rebase again, then rerun" <<<"$ERR" || fail "DIRTY message: [$ERR]"
-[ "$(origin_head)" != "$HEAD0" ] || fail "DIRTY probe rebased and pushed"
+ship; expect 3 "not strict, DIRTY after the merge and push"; no_merge "not strict DIRTY"
+grep -q "PR conflicts with origin/main after the push; merge origin/main again, then rerun" <<<"$ERR" || fail "DIRTY message: [$ERR]"
+[ "$(origin_head)" != "$HEAD0" ] || fail "DIRTY probe merged and pushed"
 
 setup; echo "$NOSTRICT" >"$ST/rules"; echo UNKNOWN >"$ST/mergeable"; echo UNKNOWN >"$ST/merge-state"; advance_main other.txt o
 ship; expect 0 "not strict, UNKNOWN mergeable"
-! grep -q "rebasing feature" <<<"$ERR" || fail "UNKNOWN does not rebase: [$ERR]"
+! grep -q "merging feature" <<<"$ERR" || fail "UNKNOWN does not merge: [$ERR]"
 
 setup; echo "$NOSTRICT" >"$ST/rules"; echo CONFLICTING >"$ST/mergeable"
 echo changed >"$WT/file.txt"; git -C "$WT" commit -qam "touch file"; git -C "$WT" push -q origin feature
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
 advance_main file.txt conflicting
 ship; expect 3 "not strict, truly conflicting"; untouched "not strict conflict"; no_merge "not strict conflict"
-for d in rebase-merge rebase-apply; do
-  [ ! -e "$(git -C "$WT" rev-parse --git-path $d)" ] || fail "not strict conflict leaves no $d"
-done
+[ ! -e "$(git -C "$WT" rev-parse --git-path MERGE_HEAD)" ] || fail "not strict conflict leaves no MERGE_HEAD"
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail "not strict conflict leaves a clean tree"
 
-# the conflicting commit lands during the gate: the probe's rebase refetches main first
+# the conflicting commit lands during the gate: the conflict probe refetches main first
 setup; echo "$NOSTRICT" >"$ST/rules"; echo CONFLICTING >"$ST/mergeable"
 echo changed >"$WT/file.txt"; git -C "$WT" commit -qam "touch file"; git -C "$WT" push -q origin feature
 HEAD0="$(git -C "$WT" rev-parse HEAD)"
@@ -1167,7 +1174,7 @@ HEAD0="$(git -C "$WT" rev-parse HEAD)"
 advance_main file.txt conflicting
 ship --gate true
 expect 3 "not strict guard conflicts"; no_merge "guard conflict"
-grep -q "PR conflicts with current origin/main; rebase, then rerun" <<<"$ERR" || fail "guard conflict message: [$ERR]"
+grep -q "PR conflicts with current origin/main; merge origin/main, then rerun" <<<"$ERR" || fail "guard conflict message: [$ERR]"
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD0" ] || fail "guard conflict: worktree back on the pinned head"
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail "guard conflict: worktree clean"
 [ ! -e "$(git -C "$WT" rev-parse --git-path MERGE_HEAD)" ] || fail "guard conflict: no merge in progress"
@@ -1190,7 +1197,7 @@ ship; expect 5 "stray closing keyword"; no_merge "pr-closes"
 grep -q '^#9 body: fixes #9$' <<<"$OUT" || fail "stray line printed: [$OUT]"
 [ -d "$WT" ] || fail "worktree kept on exit 5"
 
-# ===== --body-has: required PR body lines, checked before any rebase, push or CI call
+# ===== --body-has: required PR body lines, checked before any merge, push or CI call
 setup
 for args in "--body-has" "--body-has ''" ; do
   # shellcheck disable=SC2086
@@ -1585,13 +1592,13 @@ grep -q 'review required' <<<"$ERR" || fail "gh error printed: [$ERR]"
 [ -d "$WT" ] || fail "worktree kept when the merge is refused"
 
 # ===== lost race: 'the head branch is not up to date with the base branch'
-# ===== re-enters the rebase once, counted against the retries budget of 3
+# ===== re-enters the merge once, counted against the retries budget of 3
 setup; merge_once "$BUMP_MAIN"; printf '%s' "$OUTDATED" >"$ST/merge-fail-once"
 ship; expect 0 "lost race recovers"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line after recovery: [$OUT]"
 [ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 2 ] || fail "recovery merges twice"
 [ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 2 ] || fail "recovery waits twice"
-grep -q 'origin/main moved before the merge; rebasing again (retry 1 of 3)' <<<"$ERR" || fail "recovery message: [$ERR]"
+grep -q 'origin/main moved before the merge; merging again (retry 1 of 3)' <<<"$ERR" || fail "recovery message: [$ERR]"
 PIN="$(sed -n 's/.*--match-head-commit //p' "$ST/gh.log" | tail -n 1)"
 git --git-dir="$ORIGIN" merge-base --is-ancestor refs/heads/main "$PIN" || fail "second merge pinned below the moved main: [$PIN]"
 [ ! -e "$ST/sleeps.txt" ] || ! grep -qx '5' "$ST/sleeps.txt" || fail "recovery sleeps zero"
@@ -1604,14 +1611,14 @@ ship; expect 1 "second loss exits 1"
 grep -qF 'gh pr merge failed: lost the race to origin/main' <<<"$ERR" || fail "lost-race message: [$ERR]"
 grep -qF "rerun: bash $ABS_SHIP 7 --repo O/N --reviewed $HEAD0 --worktree $WT" <<<"$ERR" || fail "rerun line: [$ERR]"
 [ -d "$WT" ] || fail "worktree kept after a second loss"
-[ "$(origin_head)" != "$HEAD0" ] || fail "second pass pushed a rebased head"
+[ "$(origin_head)" != "$HEAD0" ] || fail "second pass pushed a merged head"
 [ "$OUT" != "merged $MERGE_SHA" ] || fail "second loss never merges"
 
 setup; merge_once "$BUMP_MAIN"; printf '%s' "$OUTDATED" >"$ST/merge-fail-once"; touch "$ST/merge-fails-but-merges"
 ship; expect 0 "merged despite the error still merges"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line when already merged: [$OUT]"
 [ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 1 ] || fail "no second merge when already merged"
-! grep -q 'rebasing again' <<<"$ERR" || fail "no recovery when already merged: [$ERR]"
+! grep -q 'merging again' <<<"$ERR" || fail "no recovery when already merged: [$ERR]"
 
 setup; printf '%s' "$OUTDATED" >"$ST/merge-fail-msg"
 ship; expect 1 "race with main unmoved exits 1"
@@ -1639,7 +1646,7 @@ setup; echo "$NOSTRICT" >"$ST/rules"; merge_each "$BUMP_MAIN"; printf '%s' "$OUT
 ship; expect 1 "non-strict never recovers a lost race"
 [ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 1 ] || fail "non-strict merges once"
 ! grep -q 'lost the race' <<<"$ERR" || fail "non-strict names no lost race: [$ERR]"
-! grep -q 'rebasing again' <<<"$ERR" || fail "non-strict never rebases again: [$ERR]"
+! grep -q 'merging again' <<<"$ERR" || fail "non-strict never merges again: [$ERR]"
 
 setup; merge_once "$BUMP_MAIN"; printf 'GraphQL error: %s' "$OUTDATED" >"$ST/merge-fail-once"
 ship; expect 0 "strict prefers the lost race over GraphQL"
@@ -1655,7 +1662,7 @@ ship; expect 0 "GraphQL then lost race recovers"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "merged line after a retry-path race: [$OUT]"
 [ "$(grep -c '^gh pr merge' "$ST/gh.log")" -eq 3 ] || fail "retry-path race merges three times"
 [ "$(grep -c 'check-runs' "$ST/gh.log")" -eq 2 ] || fail "retry-path race waits twice"
-grep -q 'origin/main moved before the merge; rebasing again (retry 1 of 3)' <<<"$ERR" || fail "retry-path recovery message: [$ERR]"
+grep -q 'origin/main moved before the merge; merging again (retry 1 of 3)' <<<"$ERR" || fail "retry-path recovery message: [$ERR]"
 PIN="$(sed -n 's/.*--match-head-commit //p' "$ST/gh.log" | tail -n 1)"
 git --git-dir="$ORIGIN" merge-base --is-ancestor refs/heads/main "$PIN" || fail "retry-path second merge pinned below the moved main: [$PIN]"
 [ "$(grep -c '^5$' "$ST/sleeps.txt")" -eq 1 ] || fail "retry-path sleeps 5 s once, on the GraphQL retry: [$(cat "$ST/sleeps.txt" 2>/dev/null)]"
@@ -1925,7 +1932,7 @@ expect 2 "empty findings path"; no_gh "empty findings path"
 setup; ship --unverified-fixes "$F"; expect 0 "match with --unverified-fixes merges"
 [ "$(comment_count)" -eq 0 ] || fail "match: no comment posted"
 
-# 5. a failed comment post: exit 1 and nothing pushed. The rebase moves the local
+# 5. a failed comment post: exit 1 and nothing pushed. A merge moves the local
 # head, so only the origin branch is checked.
 setup
 echo changed >"$WT/feature.txt"; git -C "$WT" commit -qam "fix nit"; git -C "$WT" push -q origin feature

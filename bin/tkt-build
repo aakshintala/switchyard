@@ -278,18 +278,18 @@ if [ "${#stale_files[@]}" -gt 0 ]; then
       if git -C "$worktree" merge-tree --write-tree origin/main HEAD >/dev/null 2>"$tmpd/merge-tree-err"; then
         printf '%s\n' "tkt-build: plan Base $base is behind origin/main on $n planned files; the branch merges cleanly, continuing" >&2
       else
-        # A rebase alone still refuses: plan_verdict_base names the old base
+        # Merging alone still refuses: plan_verdict_base names the old base
         # while main changed a planned file, and a stored head drifts; the
-        # gate also wants origin/<branch> at the rebased head. Name the exact
-        # recovery: rebase, push, point the plan Base at the new origin/main,
+        # gate also wants origin/<branch> at the merged head. Name the exact
+        # recovery: merge, push, point the plan Base at the new origin/main,
         # refresh the stored head, record a fresh verdict with tkt-plan verify
         # (drift-exempt after a recorded stale-plan revision), and rerun. Only
-        # the post-rebase head is unknown until step 1 runs.
+        # the post-merge head is unknown until step 1 runs.
         newbase="$(git -C "$worktree" rev-parse origin/main 2>/dev/null || true)"
         [ -n "$newbase" ] || emit "STALE n=$n base=$base" 1 "$stat_out"
         recover="To recover past STALE and VERDICT-REFUSED, run:
-1. git -C $worktree rebase origin/main
-2. git -C $worktree push --force-with-lease origin $branch
+1. git -C $worktree merge origin/main
+2. git -C $worktree push origin $branch
 3. set the Base: line in $plan to Base: $newbase"
         step=4
         if tkt get head >/dev/null 2>&1; then
@@ -302,7 +302,7 @@ $step. tkt-plan $state verify"
         step=$((step + 1))
         recover="$recover
 $step. tkt-build $state --from $from
-Resolve any step-1 conflicts, then run git -C $worktree rebase --continue before step 2."
+Resolve any step-1 conflicts, then finish the merge with git -C $worktree commit before step 2."
         emit "STALE n=$n base=$base" 1 "$stat_out" "$recover"
       fi
     else

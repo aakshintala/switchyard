@@ -2115,8 +2115,8 @@ bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "gat
 run_build --from gate
 [ "$RC" -eq 1 ] || fail "gate-conflict exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "gate-conflict"
-grep -F -q "1. git -C $WT rebase origin/main" <<<"$OUT" || fail "gate-conflict: step 1 rebases the worktree: $OUT"
-grep -F -q "2. git -C $WT push --force-with-lease origin tkt-528" <<<"$OUT" || fail "gate-conflict: step 2 pushes the rebased branch: $OUT"
+grep -F -q "1. git -C $WT merge origin/main" <<<"$OUT" || fail "gate-conflict: step 1 merges origin/main into the worktree: $OUT"
+grep -F -q "2. git -C $WT push origin tkt-528" <<<"$OUT" || fail "gate-conflict: step 2 pushes the merged branch plainly: $OUT"
 grep -F -q "3. set the Base: line in $CDIR/plan.md to Base: $(git -C "$WT" rev-parse origin/main)" <<<"$OUT" || fail "gate-conflict: step 3 names the plan Base edit with the new sha: $OUT"
 grep -F -q "4. tkt-plan $S verify" <<<"$OUT" || fail "gate-conflict: step 4 re-verifies the plan: $OUT"
 grep -F -q "5. tkt-build $S --from gate" <<<"$OUT" || fail "gate-conflict: step 5 reruns the build: $OUT"
@@ -2125,7 +2125,7 @@ grep -q "^gate|" "$T/calls.log" && fail "gate-conflict: the gate never runs"
 
 # --- a conflicting STALE prints numbered recovery steps that reach APPROVE ---
 # The digest's numbered commands run in order with the harness stubs (the
-# Verifier returns PLAN OK): rebase, the Base edit it names, the stored-head
+# Verifier returns PLAN OK): merge, the Base edit it names, the stored-head
 # refresh, a fresh verify, and the rerun. Step 2 is the file edit the digest
 # names, applied here the way a follower of the hint applies it.
 setup_case gate-conflict-recover
@@ -2145,25 +2145,25 @@ bash "$TKT_STATE" "$S" set head "$H" || fail "gate-conflict-recover: set head"
 run_build --from gate
 [ "$RC" -eq 1 ] || fail "gate-conflict-recover exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "gate-conflict-recover"
-grep -F -q "1. git -C $WT rebase origin/main" <<<"$OUT" || fail "gate-conflict-recover: step 1 rebases the worktree: $OUT"
-grep -F -q "2. git -C $WT push --force-with-lease origin tkt-528" <<<"$OUT" || fail "gate-conflict-recover: step 2 pushes the rebased branch: $OUT"
+grep -F -q "1. git -C $WT merge origin/main" <<<"$OUT" || fail "gate-conflict-recover: step 1 merges origin/main into the worktree: $OUT"
+grep -F -q "2. git -C $WT push origin tkt-528" <<<"$OUT" || fail "gate-conflict-recover: step 2 pushes the merged branch plainly: $OUT"
 grep -F -q "3. set the Base: line in $CDIR/plan.md to Base: " <<<"$OUT" || fail "gate-conflict-recover: step 3 names the plan Base edit: $OUT"
 grep -F -q "4. tkt-state $S set head <new-head-sha>" <<<"$OUT" || fail "gate-conflict-recover: step 4 refreshes the stored head: $OUT"
 grep -F -q "5. tkt-plan $S verify" <<<"$OUT" || fail "gate-conflict-recover: step 5 re-verifies the plan: $OUT"
-grep -F -q "then run git -C $WT rebase --continue before step 2" <<<"$OUT" || fail "gate-conflict-recover: the continue step targets the worktree: $OUT"
+grep -F -q "then finish the merge with git -C $WT commit before step 2" <<<"$OUT" || fail "gate-conflict-recover: the commit step targets the worktree: $OUT"
 grep -F -q "6. tkt-build $S --from gate" <<<"$OUT" || fail "gate-conflict-recover: step 6 reruns the build: $OUT"
-git -C "$WT" rebase origin/main >/dev/null 2>&1 || true
+git -C "$WT" merge origin/main >/dev/null 2>&1 || true
 printf 'resolved\n' >"$WT/src/a.txt"
 git -C "$WT" add src/a.txt
-GIT_EDITOR=true git -C "$WT" rebase --continue || fail "gate-conflict-recover: rebase --continue"
+git -C "$WT" commit -qm "merge origin/main and resolve conflict" || fail "gate-conflict-recover: finish merge commit"
 H2="$(git -C "$WT" rev-parse HEAD)"
 printf '%s' "$H2" >"$T/prhead"
-git -C "$WT" push -q --force-with-lease origin tkt-528 || fail "gate-conflict-recover: step 2 pushes the rebased branch"
+git -C "$WT" push origin tkt-528 || fail "gate-conflict-recover: step 2 pushes the merged branch"
 newbase="$(git -C "$WT" rev-parse origin/main)"
 grep -F -q "3. set the Base: line in $CDIR/plan.md to Base: $newbase" <<<"$OUT" || fail "gate-conflict-recover: step 3 fills in the new origin/main sha: $OUT"
 { printf 'Base: %s\n' "$newbase"; tail -n +2 "$CDIR/plan.md"; } >"$CDIR/plan.tmp"
 mv "$CDIR/plan.tmp" "$CDIR/plan.md"
-bash "$TKT_STATE" "$S" set head "$H2" || fail "gate-conflict-recover: step 4 sets the rebased head"
+bash "$TKT_STATE" "$S" set head "$H2" || fail "gate-conflict-recover: step 4 sets the merged head"
 cp "$SCRIPT_DIR/../skills/planning/briefs/verifier.md" "$T/home/.agents/skills/planning/briefs/verifier.md" || fail "gate-conflict-recover: install the verifier brief"
 printf 'pack\n' >"$CDIR/pack.md"
 bash "$TKT_STATE" "$S" set pack "$CDIR/pack.md" || fail "gate-conflict-recover: set pack"
