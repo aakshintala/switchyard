@@ -4,6 +4,11 @@
 <dict>
   <key>Label</key>
   <string>com.aakshintala.switchyard.wired-check</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/aakshintala/.local/bin:/Users/aakshintala/.agents/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
