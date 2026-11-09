@@ -150,6 +150,8 @@ def delegate_rows(rows, sid):
             (r["id"] == sid or r["id"].startswith(sid) or sid.startswith(r["id"]))]
 
 for line in open(targets):
+    if not line.strip():
+        continue
     host, name, sid = line.rstrip("\n").split("\t")
     if host == "box":
         kind, rows = "claude", claude_rows(box_claude, name)
@@ -235,6 +237,97 @@ PY
   done <<<"$plan"
 }
 
+retire_pi_pidfiles() (
+  local pi_tmp action n pi_args boxssh box_run_arg pi_command output_file error_file
+  local -a pi_tickets=()
+  pi_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck-pi-done.XXXXXX") || return 2
+  trap 'rm -rf "$pi_tmp"' EXIT
+  for n in "$@"; do
+    case "$n" in *:*) continue;; esac
+    case "$n" in ""|*[!0-9]*) continue;; esac
+    pi_tickets+=("$n")
+  done
+  [ "${#pi_tickets[@]}" -gt 0 ] || return 0
+
+  cat >"$pi_tmp/retire.py" <<'PY'
+import os, sys
+
+mode, host, *tickets = sys.argv[1:]
+run = (os.environ.get("FW_RUN") or os.environ.get("FW_BOX_RUN") or
+       os.path.expanduser("~/work/fiber-worktrees/flywheel/run"))
+done = os.path.join(run, "done")
+failed = False
+for ticket in tickets:
+    name = f"fiber-{ticket}-pi.pid"
+    path = os.path.join(run, name)
+    if not os.path.isfile(path):
+        continue
+    pid_text = "?"
+    try:
+        pid_text = open(path).read().strip()
+        if not pid_text.isdigit() or int(pid_text) <= 0:
+            raise ValueError("invalid pid")
+        os.kill(int(pid_text), 0)
+        alive = True
+    except PermissionError:
+        alive = True
+    except (OSError, ValueError):
+        alive = False
+    if alive:
+        print(f"REFUSING to retire {host} pidfile {name} — pid {pid_text} is alive")
+        failed = True
+        continue
+    if mode == "move":
+        try:
+            os.makedirs(done, exist_ok=True)
+            os.replace(path, os.path.join(done, name))
+        except OSError as exc:
+            print(f"cannot move {host} PI pidfile {name}: {exc}")
+            failed = True
+        else:
+            print(f"moved PI pidfile ({host}): {name}")
+if mode not in ("check", "move"):
+    raise SystemExit(f"unknown pidfile action: {mode}")
+raise SystemExit(2 if failed else 0)
+PY
+  if [ "$FW_LOCAL_BOX" = 1 ]; then
+    boxssh=${FW_BOX_LOCAL:-$script_dir/box-local.sh}
+  else
+    boxssh=${BOX_SSH:-${FW_SSH:-ssh}}
+  fi
+  pi_args=""
+  for n in "${pi_tickets[@]}"; do
+    printf -v _pi_ticket_arg '%q' "$n"
+    pi_args="$pi_args $_pi_ticket_arg"
+  done
+  for action in check move; do
+    output_file="$pi_tmp/mac-$action.out"
+    error_file="$pi_tmp/mac-$action.err"
+    if ! FW_RUN="$R" python3 -I "$pi_tmp/retire.py" "$action" PI-MAC "${pi_tickets[@]}" \
+        >"$output_file" 2>"$error_file"; then
+      echo "cannot $action Mac PI pidfiles; no lane retired" >&2
+      sed 's/^/  /' "$output_file" "$error_file" >&2
+      return 2
+    fi
+    cat "$output_file"
+    if [ -n "${FW_BOX_RUN:-}" ]; then
+      printf -v box_run_arg '%q' "$FW_BOX_RUN"
+      pi_command="FW_RUN=$box_run_arg python3 -I - $action PI-BOX$pi_args"
+    else
+      pi_command="env -u FW_RUN -u RUN_DIR python3 -I - $action PI-BOX$pi_args"
+    fi
+    output_file="$pi_tmp/box-$action.out"
+    error_file="$pi_tmp/box-$action.err"
+    if ! "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" "$pi_command" \
+        <"$pi_tmp/retire.py" >"$output_file" 2>"$error_file"; then
+      echo "cannot $action Box PI pidfiles; no lane retired" >&2
+      sed 's/^/  /' "$output_file" "$error_file" >&2
+      return 2
+    fi
+    cat "$output_file"
+  done
+)
+
 if [ "${1:-}" = done ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...]" >&2; exit 2; }
@@ -318,6 +411,7 @@ if [ "${1:-}" = done ]; then
     echo "Nothing retired — see the REFUSING line above for which guard fired. Check with 'bash bin/lanecheck' first. Override with FW_DONE_FORCE=1." >&2
     exit 2
   fi
+  retire_pi_pidfiles "$@" || exit $?
   stop_retired_sessions "$@" || exit $?
   for n in "$@"; do
     case "$n" in
@@ -1761,16 +1855,15 @@ for host, path in (("PI-MAC", os.path.join(tmp, "mac-pi.tsv")),
                     print(f"UNKNOWN {host} — {fields[1]}")
                 elif len(fields) == 4:
                     ticket, state, pid_mtime, status = fields
-                    if host == "PI-BOX":
-                        if ticket in retired_tickets:
-                            continue
-                        try:
-                            pid_mtime = float(pid_mtime)
-                        except ValueError:
-                            pid_mtime = None
-                        started = live_roster_starts.get(ticket)
-                        if pid_mtime is not None and started is not None and started > pid_mtime:
-                            continue
+                    if ticket in retired_tickets:
+                        continue
+                    try:
+                        pid_mtime = float(pid_mtime)
+                    except ValueError:
+                        pid_mtime = None
+                    started = live_roster_starts.get(ticket)
+                    if pid_mtime is not None and started is not None and started > pid_mtime:
+                        continue
                     print(f"{state} {host} {ticket} {status}")
     except OSError:
         pass
