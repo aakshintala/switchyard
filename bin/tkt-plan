@@ -73,6 +73,23 @@ load_plan() {
   base="$(base_of "$plan")"
 }
 
+plan_without_rulings() {
+  awk '
+    /^## Rulings[[:space:]]*$/ { in_rulings=1; next }
+    /^## / && in_rulings { in_rulings=0 }
+    !in_rulings { print }
+  ' "$1"
+}
+
+plan_rulings_section() {
+  awk '
+    /^## Rulings[[:space:]]*$/ { in_rulings=1; found=1 }
+    /^## / && in_rulings && $0 !~ /^## Rulings[[:space:]]*$/ { in_rulings=0 }
+    in_rulings { print }
+    END { if (!found) exit 1 }
+  ' "$1"
+}
+
 # gate.script, when set, is the gate script every Gate line must run; plan-gate gets it as --script.
 gate_script="$(t get gate.script 2>/dev/null || true)"
 gate_args=()
@@ -407,10 +424,59 @@ do_triaged() {
   esac
   load_plan
   round="$(ronum)"
+  stored_verdict="$(t get plan_verdict 2>/dev/null || true)"
+  stored_hash="$(t get plan_verdict_hash 2>/dev/null || true)"
+  stored_base="$(t get plan_verdict_base 2>/dev/null || true)"
+  current_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+  ruling_revision=0
+
+  if [ "$stored_verdict" = lines ] && [ -z "$stored_hash" ]; then
+    emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "the LINES verdict has no saved plan snapshot; run one Verifier pass: tkt-plan $state verify"
+  fi
+  if [ -n "$stored_hash" ] && [ "$stored_hash" != "$current_hash" ]; then
+    case "$stored_hash" in *[!0123456789abcdefABCDEF]*) emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan $state verify";; esac
+    snapshot_file="$tmp.snapshot"
+    before_rest="$tmp.before-rest"
+    after_rest="$tmp.after-rest"
+    before_rulings="$tmp.before-rulings"
+    after_rulings="$tmp.after-rulings"
+    if ! git -C "$worktree" cat-file blob "$stored_hash" >"$snapshot_file" 2>/dev/null; then
+      rm -f "$snapshot_file"
+      emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan $state verify"
+    fi
+    plan_without_rulings "$snapshot_file" >"$before_rest" || exit 2
+    plan_without_rulings "$plan" >"$after_rest" || exit 2
+    after_has_rulings=0
+    if plan_rulings_section "$snapshot_file" >"$before_rulings"; then :; fi
+    if plan_rulings_section "$plan" >"$after_rulings"; then after_has_rulings=1; fi
+    if [ "$stored_base" = "$base" ] && [ "$after_has_rulings" -eq 1 ] && cmp -s "$before_rest" "$after_rest" && ! cmp -s "$before_rulings" "$after_rulings"; then
+      ruling_revision=1
+    else
+      diff_file="$(mktemp "$run/$namebase-ruling-diff.XXXXXX")" || exit 2
+      raw_diff="$tmp.diff"
+      diff_rc=0
+      if diff -u "$snapshot_file" "$plan" >"$raw_diff"; then :; else diff_rc=$?; fi
+      [ "$diff_rc" -le 1 ] || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$diff_file"; exit 2; }
+      {
+        printf 'Plan diff after verdict %s (stored Base %s; current Base %s).\n' "$stored_hash" "${stored_base:-none}" "$base"
+        printf '%s\n' "--- plan at verdict $stored_hash" "+++ current plan $plan"
+        tail -n +3 "$raw_diff"
+      } >"$diff_file" || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$diff_file"; exit 2; }
+      printf -v verify_command 'tkt-plan %q verify --extra %q' "$state" "$diff_file"
+      rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff"
+      emit "TRIAGED-REFUSED reason=plan-changed" 1 "run one scoped Verifier pass: $verify_command" "EXTRA diff: $diff_file"
+    fi
+    rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings"
+  fi
+
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   if [ -z "$confirmed_for" ] && [ "$round" -lt 2 ]; then
-    plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
-    [ "$plan_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
+    if [ "$ruling_revision" -eq 1 ]; then
+      [ "$stored_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
+    else
+      plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
+      [ "$plan_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
+    fi
   fi
   plan_verdict_write "$tkt_state" "$state" triaged "$base" "$plan" "$worktree"
   t set plan_triage_comment "$comment"
