@@ -103,6 +103,13 @@ stamp = time.time() - int(sys.argv[2]) * 60
 os.utime(sys.argv[1], (stamp, stamp))
 PY
 }
+future() { # print an ISO UTC timestamp N minutes from now, portably
+  python3 - "$1" <<'PY'
+import datetime, sys
+stamp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=int(sys.argv[1]))
+print(stamp.strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
 
 # Each case gets its own run dir: retirement appends, so a shared one carries
 # the previous case's roster-done into the next and the fence cases stop being
@@ -863,7 +870,7 @@ fi
 # sample that began at 15:07:00Z: the line carried its own refutation, and the
 # remedy it offered (relaunch) would have started a second lane on one fence.
 r=$(newrun 20)
-printf '%s\t%s\tmuse\t%s\t%s\n' "$(date -u -v+1M +%Y-%m-%dT%H:%M:%SZ)" 4300 fiber-4300-build ccc33333 >> "$r/roster"
+printf '%s\t%s\tmuse\t%s\t%s\n' "$(future 1)" 4300 fiber-4300-build ccc33333 >> "$r/roster"
 out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
 if printf '%s' "$out" | grep -q '^NEW 4300' \
    && ! printf '%s' "$out" | grep -q '^MISSING 4300' \

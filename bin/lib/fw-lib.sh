@@ -228,9 +228,10 @@ fw_inbox_files() {
   return 0
 }
 
-# Epoch mtime of a file; empty when unknown. Portable (macOS/Linux stat).
+# Epoch mtime; GNU stat is tried first, then BSD stat, and only a number is accepted.
 fw_mtime() {
-  _fw_m=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null) || _fw_m=""
+  _fw_m=$(stat -c %Y "$1" 2>/dev/null) || _fw_m=""
+  case "$_fw_m" in *[!0-9]*|'') _fw_m=$(stat -f %m "$1" 2>/dev/null) || _fw_m="";; esac
   case "$_fw_m" in *[!0-9]*|'') printf '';; *) printf '%s' "$_fw_m";; esac
   return 0
 }

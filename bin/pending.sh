@@ -33,6 +33,16 @@ read_dir="$inbox/read"
 
 [ -d "$read_dir" ] || { echo "no such directory: $read_dir" >&2; exit 1; }
 
+file_mtime() {
+    local value
+    value=$(stat -c %Y "$1" 2>/dev/null) || value=
+    case "$value" in
+        ''|*[!0-9]*) value=$(stat -f %m "$1" 2>/dev/null) || return 1 ;;
+    esac
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$value"
+}
+
 now=$(date +%s)
 
 # Newest file per ticket number, across read/ and any undrained reports.
@@ -44,7 +54,7 @@ for f in "$read_dir"/*.md "$inbox"/*.md; do
     ticket=$(printf '%s\n' "$base" | sed -n 's/^[a-z]*-[a-z]*-\([0-9][0-9]*\)-.*/\1/p')
     [ -n "$ticket" ] || ticket=$(printf '%s\n' "$base" | sed -n 's/^box-\([0-9][0-9]*\)-.*/\1/p')
     [ -n "$ticket" ] || continue
-    printf '%s\t%s\t%s\n' "$ticket" "$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f")" "$f"
+    printf '%s\t%s\t%s\n' "$ticket" "$(file_mtime "$f")" "$f"
 done | sort -k1,1n -k2,2nr | awk -F'\t' '!seen[$1]++' > /tmp/pending-newest.$$
 
 rulings="$R/rulings"
@@ -56,7 +66,7 @@ while IFS=$'\t' read -r ticket mtime file; do
     ruled='-'
     newest=$(ls -t "$rulings"/ruling-"$ticket"-*.md 2>/dev/null | head -1)
     if [ -n "$newest" ]; then
-        rmtime=$(stat -f %m "$newest" 2>/dev/null || stat -c %Y "$newest")
+        rmtime=$(file_mtime "$newest")
         ruled="$(( (now - rmtime) / 60 ))m"
         [ "$rmtime" -gt "$mtime" ] && ruled="$ruled<-"
     fi
