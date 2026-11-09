@@ -130,6 +130,17 @@ if [ "${1:-}" = "--self-test-parallel-failure" ]; then
 fi
 
 failed=0
+# Moved flywheel slice tests. Keep these in the gate even though they are not
+# part of the long parallel allowlist below.
+for t in "$D"/agents-ff.sh "$D"/binbox-move.sh "$D"/boxstale.sh "$D"/fw-lib-move.sh "$D"/lanecheck.sh; do
+  _s=$SECONDS
+  if bash "$t"; then
+    echo "PASS: $(basename "$t") ($((SECONDS - _s))s)"
+  else
+    echo "FAIL: $(basename "$t") (exit $?, $((SECONDS - _s))s)" >&2
+    failed=1
+  fi
+done
 for t in "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/inbox.sh "$D"/inbox-watchers.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh "$D"/target-reap.sh "$D"/canary-daily.sh "$D"/bash5-runner.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh; do
   _s=$SECONDS
   if bash "$t"; then

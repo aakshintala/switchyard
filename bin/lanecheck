@@ -1,0 +1,1006 @@
+#!/bin/bash
+# lanecheck — which lanes in run/roster are no longer live sessions.
+#
+#   bash bin/lanecheck            # print LIVE/MISSING per roster entry, exit 1 if any MISSING
+#   bash bin/lanecheck done 3890  # retire ticket 3890's roster entries (it reported)
+#   bash bin/lanecheck done 3954:fiber-3954-plan   # retire one session only
+#
+# Retire by ticket when the whole ticket is finished. Retire by
+# <ticket>:<session> when one of a ticket's sessions has finished and another
+# is still live: a plan session that has reported while its build session runs
+# otherwise prints MISSING on every run and cannot be silenced without also
+# silencing the live lane, which is how MISSING stops meaning anything
+# (2026-11-03: 15 MISSING lines, most of them finished plan sessions).
+#
+# Retiring is not permanent. A roster entry launched after its retirement line
+# is a relaunch and is checked again, so parking a blocked ticket here does not
+# hide the lane that later picks it up under the same session name.
+#
+# Liveness comes from `claude agents --json` on each host, not from the lane
+# writing anything: a lane waiting on a background job is alive and silent for
+# long stretches, so a lane-written heartbeat flags healthy lanes as dead.
+set -u
+script_path=$0
+while [ -L "$script_path" ]; do
+  script_dir=$(cd "$(dirname "$script_path")" && pwd)
+  link=$(readlink "$script_path")
+  case "$link" in /*) script_path=$link;; *) script_path=$script_dir/$link;; esac
+done
+script_dir=$(cd "$(dirname "$script_path")" && pwd)
+R=${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}
+BOX=${FW_BOX_HOST:-roundhouse-7010-plus-1.local}
+FW_LOCAL_BOX=${FW_LOCAL_BOX:-}
+if [ -z "$FW_LOCAL_BOX" ]; then
+  FW_LOCAL_BOX=0
+  if [ -z "${BOX_SSH:-${FW_SSH:-}}" ] && [ "$(uname -s)" != Darwin ]; then FW_LOCAL_BOX=1; fi
+fi
+roster="$R/roster"
+retired="$R/roster-done"
+
+if [ "${1:-}" = done ]; then
+  shift
+  [ $# -gt 0 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...]" >&2; exit 2; }
+  # Retiring a ticket whose lane was launched minutes ago is always a mistake,
+  # never an intent, and because retirement is time-ordered it hides that live
+  # lane from every later check. On 2026-11-03 `lanecheck done 3857 3975` ran ten
+  # minutes after fiber-3975-build was launched and dropped it from the roster
+  # view: 14 LIVE instead of 16, with no 3975 row and no warning. Refuse instead.
+  # FW_DONE_MIN seconds (default 1800) is the floor; FW_DONE_FORCE=1 overrides it
+  # for the real case of a lane that started and died inside the window.
+  young=0
+  # One open-PR list for every ticket being retired, matched by head branch.
+  # The body search this replaced matched any pull request whose body merely
+  # mentioned the number: on 2026-11-04 retiring 4042 was refused by PR #4116
+  # (head `feat/3890-keeper-shell-path`), whose only mention of 4042 is a doc
+  # paragraph saying another ticket owns a passage. A false refusal teaches the
+  # operator to reach for FW_DONE_FORCE by reflex, which disarms the guard for
+  # the #4125 case it exists for. A lane's own pull request is the one on this
+  # ticket's branch, by mkbrief's `<area>/<n>-<slug>` convention.
+  _prs_ok=0
+  if _prs=$(gh pr list --repo aakshintala/fiber --state open --limit 200 --json number,headRefName --jq '.[] | "\(.number) \(.headRefName)"' 2>/dev/null); then
+    _prs_ok=1
+  fi
+  for n in "$@"; do
+    tn=${n%%:*}
+    # A session-scoped retirement asks about that session only. Reading the
+    # ticket's newest entry instead refuses the very case this form exists for:
+    # a plan session that has reported while the build session it handed off to
+    # was launched seconds ago (2026-11-03, #4097). Scope the age check the same
+    # way the retirement line is scoped.
+    sn=""
+    case "$n" in *:*) sn=${n#*:} ;; esac
+    newest=$(awk -F'\t' -v t="$tn" -v s="$sn" '$2==t && (s=="" || $4==s){print $1}' "$roster" 2>/dev/null | sort | tail -1)
+    [ -n "$newest" ] || continue
+    if [ "$(uname -s)" = Darwin ]; then
+      when=$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$newest" +%s 2>/dev/null) || continue
+    else
+      when=$(date -u -d "$newest" +%s 2>/dev/null) || continue
+    fi
+    age=$(( $(date +%s) - when ))
+    if [ "$age" -lt "${FW_DONE_MIN:-1800}" ]; then
+      # Say which way it is going in the same line. Printing REFUSING and then
+      # `retired:` two lines later, as this did under FW_DONE_FORCE=1, leaves a
+      # log a later reader cannot tell apart from a refusal that held.
+      # Name the argument, not the ticket: this guard is session-scoped when the
+      # argument is, and printing `4275` for `4275:prep-4275` on 2026-11-06 read
+      # as the ticket being held when only its finished prep session was young.
+      if [ "${FW_DONE_FORCE:-0}" = 1 ]; then
+        echo "FORCING retire of $n — newest roster entry is ${age}s old ($newest), under ${FW_DONE_MIN:-1800}s; FW_DONE_FORCE=1 overrides." >&2
+      else
+        echo "REFUSING to retire $n — its newest roster entry is ${age}s old ($newest), under ${FW_DONE_MIN:-1800}s." >&2
+      fi
+      young=1
+    fi
+    # A lane's last step is the ship, not the green PR: template-tkt.md:110 has
+    # it run ship-pr as soon as its gate passes. Retiring on "PR green and
+    # reviewed" takes the slot back one step early and leaves the merge to
+    # whoever notices, which is how #4125 sat unmerged from 23:47Z (this ticket
+    # retired at roster-done:60 with no fiber-4084-ship log anywhere) until the
+    # owner asked why the flywheel was shipping instead of the lane.
+    # Fails open on a gh error: a network blip must not wedge retirement, but
+    # the line says the guard did not run so the log cannot be misread.
+    if [ "$_prs_ok" = 1 ]; then
+      open_pr=$(printf '%s\n' "$_prs" | awk -v t="$tn" '$2 ~ ("^[^/]+/" t "-") || $2 ~ ("^" t "-") { print $1 }')
+      if [ -n "$open_pr" ]; then
+        if [ "${FW_DONE_FORCE:-0}" = 1 ]; then
+          echo "FORCING retire of $tn — PR(s) $(echo "$open_pr" | tr '\n' ' ')still open and unmerged; FW_DONE_FORCE=1 overrides." >&2
+        else
+          echo "REFUSING to retire $tn — PR(s) $(echo "$open_pr" | tr '\n' ' ')still open and unmerged. The lane's last step is the ship; let it run ship-pr, or merge first." >&2
+        fi
+        young=1
+      fi
+    else
+      echo "note: open-PR guard did not run for $tn (gh pr list failed); age guard only." >&2
+    fi
+  done
+  if [ "$young" = 1 ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
+    # Two guards share this exit, so the summary stays cause-neutral: the
+    # refusal line above names which one fired. Naming only the age cause here
+    # told a reader the lane was young when its real sin was an unmerged PR.
+    echo "Nothing retired — see the REFUSING line above for which guard fired. Check with 'bash bin/lanecheck' first. Override with FW_DONE_FORCE=1." >&2
+    exit 2
+  fi
+  for n in "$@"; do
+    case "$n" in
+      *:*) printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${n%%:*}" "${n#*:}" >>"$retired" ;;
+      *)   printf '%s\t%s\n'      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" >>"$retired" ;;
+    esac
+  done
+  echo "retired: $*"
+
+  # Retire a ticket's fence grants once its LAST session retires. This is the
+  # one place that knows a lane is finished, and it used to leave the grants in
+  # run/, where fence-grant holds them for 360m with no live lane behind them.
+  # On 2026-11-04 that blocked two dispatches in five minutes: #4111's grants
+  # (PR #4146, merged) held panel_look.rs against #4089's build, and #4029's
+  # (PR #4147, merged) held notices_tests.rs against #4161. fence-grant was
+  # printing the right remedy both times; nothing was running it.
+  #
+  # Keyed on the ticket having no live session left, not on one session
+  # retiring. The first cut keyed on the session and pulled the fences out from
+  # under two running builds the same minute it shipped: retiring the finished
+  # fiber-4089-plan and fiber-4152-plan rows dropped the grants that
+  # fiber-4089-build and fiber-4152-build were working behind. A ticket runs
+  # several sessions across its phases and the fence belongs to the ticket.
+  for n in "$@"; do
+    t=${n%%:*}
+    live=$(python3 -I - "$roster" "$retired" "$t" <<'PY'
+import sys
+roster, retired, t = sys.argv[1], sys.argv[2], sys.argv[3]
+# One entry per session, carrying both handles, because roster-done records
+# whichever one the operator typed: the reports print the name, the done
+# guard accepts either, and a name subtracted from a set of ids removes
+# nothing.
+sessions = set()
+for line in open(roster):
+    f = line.rstrip("\n").split("\t")
+    if len(f) >= 5 and f[1] == t:
+        sessions.add((f[3], f[4]))
+done = set()
+whole = False
+for line in open(retired):
+    f = line.rstrip("\n").split("\t")
+    if len(f) == 2 and f[1] == t:
+        whole = True                 # a bare-ticket retirement ends the ticket
+    elif len(f) >= 3 and f[1] == t:
+        done.add(f[2])
+live = 0 if whole else sum(
+    1 for name, sid in sessions if name not in done and sid not in done
+)
+print(live)
+PY
+)
+    if [ "${live:-1}" != 0 ]; then
+      echo "fence kept for #$t: $live session(s) still live"
+      continue
+    fi
+    for g in "$R"/fiber-"$t"-fence-grant-*.md; do
+      [ -e "$g" ] || continue
+      mv "$g" "$R/done/" && echo "fence retired: $(basename "$g")"
+    done
+    # Retiring the roster line and the grant records released nothing in
+    # file-claim, so the claims outlived the lane: 17 of them across three
+    # closed tickets on 2026-11-06, and `fence-grant` called every one HELD
+    # because the holder's session was still resident (switchyard#1313). A
+    # claim's liveness cannot be read off a process -- those sessions were
+    # `idle` with live supervisor pids -- so the release has to happen where
+    # the ticket ends, which is here.
+    #
+    # Release every holder shape this roster knows: the bare `fiber-<n>` the
+    # claim is usually written under, plus each session name, since a lane
+    # launched by phase claims as `fiber-<n>-plan` or `-build`. A holder named
+    # by branch (`arch/4276-log-diag-leaf`) stays for switchyard#1272's
+    # canonical holder id; it is reported, not hidden -- and the report now
+    # names it exactly, see below.
+    fc=${FW_FILE_CLAIM:-$HOME/.agents/bin/file-claim}
+    holders=$(awk -F'\t' -v t="$t" '$2 == t && $4 != "" { print $4 }' "$roster" | sort -u)
+    for h in "fiber-$t" $holders; do
+      if out=$("$fc" release --lane "$h" --repo "${FW_REPO:-aakshintala/fiber}" 2>&1); then
+        # One `RELEASE <path>` line per claim dropped, and no output at all when
+        # the holder held nothing -- which is the common case for two of the
+        # three shapes tried, so stay quiet rather than printing three zeroes.
+        nrel=$(printf '%s\n' "$out" | grep -c '^RELEASE ')
+        [ "$nrel" -gt 0 ] && echo "claims released: $h ($nrel)"
+      else
+        echo "CLAIMS NOT RELEASED for $h -- release by hand: $fc release --lane $h --repo ${FW_REPO:-aakshintala/fiber}"
+        echo "  $out"
+      fi
+    done
+    # Name the holders this ticket leaves behind that the loop above cannot
+    # release, with the command that clears each. Reporting, not releasing, and
+    # the distinction is the point: a `--lane` that is not `fiber-<n>` is
+    # classifier-denied to an orchestrator session, so a lanecheck that released
+    # them would be this session doing through a script what it may not do
+    # directly. The owner's hands or switchyard#1272's canonical holder id are
+    # the two legitimate routes.
+    #
+    # Detection costs nothing and was the whole gap: on 2026-11-06 retiring
+    # #4271 printed "claims released: fiber-4271 (2)" and said nothing about
+    # `docs/4271-needs-plan-label` keeping two more, so the leak was found days
+    # later by a lane hitting an OVERLAP against a closed ticket. Six paths
+    # across two closed tickets had accumulated by then. Silence was the defect;
+    # a named holder and a paste-ready command is the fix available from here.
+    #
+    # THREE holder shapes, not two, and the third was found by running the
+    # standing check rather than recalling it (cycle 22). Beside `fiber-<n>` and
+    # the branch, `file-claim` also holds claims under `pr#<number>`: on
+    # 2026-11-06 #4162 held 35 paths under `contract/4162-kind-private` and 36
+    # under `pr#4328`, the larger group. The first version of this report
+    # searched for the ticket number inside the holder name, which can never
+    # find a `pr#` holder, because that name carries the PR number and not the
+    # ticket's. So a `pr#` holder is resolved through its PR's head branch,
+    # which does carry the ticket. `gh pr view` is used rather than the open-PR
+    # list built at the top of this script: by the time a ticket retires its PR
+    # has usually merged, and a merged PR is not in that list.
+    claims=$("$fc" list --repo "${FW_REPO:-aakshintala/fiber}" 2>/dev/null) || claims=""
+    for h in $(printf '%s\n' "$claims" |
+      awk -F'\t' -v t="$t" '$2 ~ ("^[A-Za-z0-9_.-]+/" t "-") { print $2 }' | sort -u); do
+      n=$(printf '%s\n' "$claims" | awk -F'\t' -v h="$h" '$2 == h' | wc -l | tr -d ' ')
+      echo "BRANCH-SHAPED CLAIMS LEFT for $h ($n path(s)) -- release them:"
+      if [ "$FW_LOCAL_BOX" = 1 ]; then
+        echo "  PATH=\$HOME/.agents/bin:\$PATH file-claim release --lane $h --repo ${FW_REPO:-aakshintala/fiber}"
+      else
+        echo "  ssh roundhouse-7010-plus-1.local 'PATH=\$HOME/.agents/bin:\$PATH file-claim release --lane $h --repo ${FW_REPO:-aakshintala/fiber}'"
+      fi
+    done
+    for h in $(printf '%s\n' "$claims" |
+      awk -F'\t' '$2 ~ /^pr#[0-9]+$/ { print $2 }' | sort -u); do
+      n=$(printf '%s\n' "$claims" | awk -F'\t' -v h="$h" '$2 == h' | wc -l | tr -d ' ')
+      br=$(gh pr view "${h#pr\#}" --repo "${FW_REPO:-aakshintala/fiber}" \
+        --json headRefName --jq .headRefName 2>/dev/null) || br=""
+      if [ -z "$br" ]; then
+        # An unresolved holder is reported, never skipped. Silence is the defect
+        # this whole block exists to fix, and a gh failure here would otherwise
+        # reintroduce it for exactly the shape that holds the most paths.
+        echo "PR-SHAPED HOLDER UNRESOLVED: $h ($n path(s)) -- gh could not read its head branch,"
+        echo "  so whether it belongs to #$t is unknown. Check it by hand:"
+        echo "  gh pr view ${h#pr\#} --repo ${FW_REPO:-aakshintala/fiber} --json headRefName"
+        continue
+      fi
+      case "$br" in
+        */"$t"-*) ;;
+        *) continue ;;
+      esac
+      echo "PR-SHAPED CLAIMS LEFT for $h on $br ($n path(s)) -- release them:"
+      if [ "$FW_LOCAL_BOX" = 1 ]; then
+        echo "  PATH=\$HOME/.agents/bin:\$PATH file-claim release --lane $h --repo ${FW_REPO:-aakshintala/fiber}"
+      else
+        echo "  ssh roundhouse-7010-plus-1.local 'PATH=\$HOME/.agents/bin:\$PATH file-claim release --lane $h --repo ${FW_REPO:-aakshintala/fiber}'"
+      fi
+    done
+  done
+  exit 0
+fi
+
+[ -f "$roster" ] || { echo "no roster at $roster"; exit 0; }
+touch "$retired"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck.XXXXXX") || exit 3
+trap 'rm -rf "$tmp"' EXIT
+
+log="$R/lane-liveness.log"
+if [ "${FW_SKIP_SAMPLER_CHECK:-0}" != 1 ]; then
+  if [ -f "$log" ]; then
+    if [ "$(uname -s)" = Darwin ]; then
+      age=$(( $(date +%s) - $(stat -f %m "$log") ))
+    else
+      age=$(( $(date +%s) - $(stat -c %Y "$log") ))
+    fi
+    if [ "$age" -gt 900 ]; then
+      echo "SAMPLER STALE — $log last written ${age}s ago (over 900); restart: bash bin/lanesample.sh"
+    fi
+  else
+    echo "SAMPLER ABSENT — no $log; start it: bash bin/lanesample.sh"
+  fi
+fi
+
+# When the liveness snapshots were taken. A lane launched after this cannot
+# appear in them, and reporting it MISSING is a false positive: on 2026-11-05
+# the sampler printed `MISSING 3895 ... launched 2026-11-05T15:07:06Z` from a
+# sample that started at 15:07:00Z, so the line carried its own refutation.
+if [ "$FW_LOCAL_BOX" = 1 ]; then
+  boxssh=${FW_BOX_LOCAL:-$script_dir/box-local.sh}
+else
+  boxssh=${BOX_SSH:-${FW_SSH:-ssh}}
+fi
+export FW_LOCAL_BOX
+FW_SNAP_AT=$(date -u +%s)
+export FW_SNAP_AT
+claude agents --json >"$tmp/mac.json" 2>"$tmp/mac.err"
+"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" 'claude agents --json' >"$tmp/box.json" 2>"$tmp/box.err"
+# A muse lane (muselaunch.sh, host column `muse`) is a delegate session, not a
+# Claude session, so `claude agents` never lists it and it would print MISSING
+# for its whole life. Its liveness is keyed by the delegate session id the
+# roster's 5th column holds, not by a session name.
+"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" 'delegate session list --json' >"$tmp/muse.json" 2>"$tmp/muse.err"
+# maclaunch.sh starts a muse lane too, so a `mac` roster line is a delegate
+# session as often as a Claude one, and only this list can tell them apart. On
+# 2026-11-06 #4272 (running) and #4273 (idle, its PR pushed 25 minutes earlier)
+# both printed MISSING, because `mac` was looked up in `claude agents` alone
+# (switchyard #1069). A false MISSING invites a second lane on the same fence.
+"${FW_DELEGATE:-$HOME/.local/bin/delegate}" session list --json >"$tmp/macmuse.json" 2>"$tmp/macmuse.err"
+# Blind delivery: a ruling scp'd into a lane's inbox is only read by the
+# `inbox-wait` watcher the lane arms, and a lane that ends a turn without
+# re-arming one leaves every later file inert. On 2026-11-03 three live lanes
+# sat on unread rulings that way while ruled.sh reported "delivered". Ask
+# inbox-watchers, the one primitive ruled.sh also uses, so the two cannot drift
+# apart; it prints NO-WATCHER only for an inbox with no watcher, and the report
+# below pairs that with the live lanes. One ssh, for every box ticket at once.
+inbox_dirs=()
+while IFS= read -r t; do
+  if [ "$FW_LOCAL_BOX" = 1 ]; then inbox_dirs+=("$HOME/lane-inbox/$t"); else inbox_dirs+=("~/lane-inbox/$t"); fi
+done < <(awk -F'\t' '($3 == "box" || $3 == "muse") && $2 != "" { print $2 }' "$roster" | sort -u)
+if [ "${#inbox_dirs[@]}" -gt 0 ]; then
+  if [ "$FW_LOCAL_BOX" = 1 ]; then
+    "${FW_INBOX_WATCHERS:-$HOME/.agents/bin/inbox-watchers}" "${inbox_dirs[@]}" >"$tmp/inbox.txt" 2>/dev/null
+  else
+    "${FW_INBOX_WATCHERS:-$HOME/.agents/bin/inbox-watchers}" --host "$BOX" "${inbox_dirs[@]}" >"$tmp/inbox.txt" 2>/dev/null
+  fi
+fi
+
+# Pending work, for the STALL lines below: any live process on the box naming a
+# ticket. A stalled lane with work still running wants waking, one with nothing
+# running wants retiring, and `status` alone cannot tell them apart. One ps.
+"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
+  "ps -eo args= | grep -E 'tkt-(plan|build|ship|fix|gate)|gh-ci wait|delegate watch' | grep -v grep" \
+  >"$tmp/pending.txt" 2>/dev/null
+
+# Pending work with no process: a delegate job in NEEDS_CONTEXT has asked a
+# question and is waiting on an answer. The ps probe above cannot see it, so
+# #4099 read as a STALL on 2026-11-04 and both remedies the STALL line offers
+# were wrong. The ticket comes from the lane worktree in resume.cwd; a
+# superseded job's question is stale.
+"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
+  "python3 -c \"
+import json, glob, re, os, time
+cut = time.time() - 7 * 86400
+for p in glob.glob('/srv/lanes/tmp/delegate-jobs/*.json'):
+    try:
+        # The directory keeps every job ever run and nothing prunes it. A
+        # question older than any lane's life cannot be reported anyway.
+        if os.path.getmtime(p) < cut:
+            continue
+        d = json.load(open(p))
+    except Exception:
+        continue
+    if d.get('status') != 'NEEDS_CONTEXT' or d.get('supersededBy'):
+        continue
+    r = d.get('resume') or {}
+    m = re.findall(r'/(\d{3,5})-', (r.get('cwd') or '') + ' ' + (r.get('gate') or ''))
+    print((m[-1] if m else '?') + '\t' + os.path.basename(p)[:-5] + '\t' + str(int(os.path.getmtime(p))))
+\"" >"$tmp/asking.txt" 2>/dev/null
+
+# A third kind of waiting, with neither a process nor a question: a lane that
+# finished its leg and waits on a named external event. Both probes above are
+# blind to it, which is how #4099 read as a STALL at 11:25Z on 2026-11-04 --
+# it had not been abandoned and had asked nothing, it was waiting for PR #4153
+# to merge, and the STALL line's two remedies (retire it, or wake it) were both
+# wrong. The lane declares the wait in run/fiber-<n>-waiting-on.md. This list
+# resolves a `pr <N>` condition: a PR absent from the open list has merged or
+# closed either way, so the wait is over.
+#
+# The marker file is the difference between "no PRs are open" and "the fetch
+# failed". Without it an empty list reads as every waited-on PR having closed,
+# which turns a network blip into a WAKE for every waiting lane -- the one
+# direction that costs a wasted wake and a confused lane.
+if gh pr list --repo aakshintala/fiber --state open --limit 200 \
+     --json number,headRefName --jq '.[] | "\(.number) \(.headRefName)"' \
+     >"$tmp/openprs.txt" 2>/dev/null; then
+  : >"$tmp/openprs.ok"
+else
+  : >"$tmp/openprs.txt"
+  rm -f "$tmp/openprs.ok"
+fi
+
+python3 -I - "$tmp" "$roster" "$retired" "$R" "$BOX" <<'PY'
+import glob, json, sys, os, re
+tmp, roster, retired, R, BOX = sys.argv[1:6]
+
+def onbox(cmd, msg=False, where="box"):
+    """A `delegate` line for a delegate lane, in the form that runs from here.
+
+    `where` is the machine whose delegate store holds the session: "box" for a
+    muse lane, "mac" for one maclaunch.sh started here. The box form needs the
+    ssh wrapper, the local form needs the absolute binary, because a bare
+    `delegate` is refused over the runtime $HOME.
+
+    Every muse lane's session lives on the box, so a bare `delegate session
+    send <id> -` printed in this report fails from the orchestrator's session
+    with "no such session" — the local session store holds none of them. On
+    2026-11-04 the #4099 wake was printed bare, run bare, and failed; the
+    remedy had to be re-derived before the lane could be woken. A remedy that
+    does not run as printed is the same defect as a line that points at the
+    wrong state: it costs the reader a failed command and a re-derivation.
+
+    `msg=True` for a command that takes a message on stdin (`session send`,
+    `resume`), which needs the redirect to be a complete command.
+    """
+    if where == "mac":
+        line = f"{os.path.expanduser('~')}/.local/bin/delegate {cmd}"
+    elif os.environ.get("FW_LOCAL_BOX") == "1":
+        line = f"PATH=$HOME/.local/bin:$PATH delegate {cmd}"
+    else:
+        line = f"ssh {BOX} 'PATH=$HOME/.local/bin:$PATH delegate {cmd}'"
+    return f"{line} < <file>" if msg else line
+
+def live(path):
+    names = {}
+    try:
+        data = json.load(open(path))
+    except Exception as e:
+        return None, str(e)
+    rows = data if isinstance(data, list) else data.get("agents") or data.get("sessions") or []
+    for r in rows:
+        if isinstance(r, dict) and r.get("name"):
+            names[r["name"]] = (r.get("state") or "?", r.get("status") or "?")
+    return names, None
+
+def live_muse(path):
+    """delegate session ids -> (status, terminal, working, turns). Keyed by id:
+    a muse lane has no session name. `dead` is reported as dead rather than
+    omitted, so a lane that exited is MISSING with its reason instead of
+    silently absent.
+
+    `working` is activeTurnId being set. A muse lane with no active turn is not
+    doing anything and nothing will wake it: that is the #4097 stall, and it is
+    invisible from `status` alone, which cannot tell "finished" from "stalled"
+    from "waiting for a ruling" (switchyard #1086)."""
+    ids = {}
+    try:
+        data = json.load(open(path))
+    except Exception as e:
+        return None, str(e)
+    for r in data.get("sessions") or []:
+        if not isinstance(r, dict) or not r.get("id"):
+            continue
+        status = r.get("status") or "?"
+        if status == "dead":
+            continue
+        ids[r["id"]] = (status, ((r.get("lastTurn") or {}).get("terminal") or "?"),
+                        bool(r.get("activeTurnId")), r.get("turnCount"))
+    return ids, None
+
+# ticket -> the pending command line, from the box ps probe. A failed or empty
+# probe leaves this empty, which keeps the old STALL wording rather than
+# claiming nothing is running: an absent probe is not evidence of idleness.
+pending = {}
+try:
+    for line in open(os.path.join(tmp, "pending.txt")):
+        line = line.strip()
+        for word in re.findall(r"\b\d{3,5}\b", line):
+            pending.setdefault(word, line)
+except OSError:
+    pass
+
+# ticket -> the job id of a NEEDS_CONTEXT job, from the box probe. Same
+# fail-open rule as `pending`: an unreadable probe is not evidence that nobody
+# is waiting on an answer.
+asking = {}
+try:
+    for line in open(os.path.join(tmp, "asking.txt")):
+        f = line.strip().split("\t")
+        if len(f) >= 2 and f[0] != "?":
+            when = int(f[2]) if len(f) > 2 and f[2].isdigit() else None
+            # Newest question per ticket: an older one for the same ticket is
+            # from a previous round either way. An unstamped question sorts
+            # newest, so it survives to be reported rather than dropped.
+            rank = (when is None, when or 0)
+            if f[0] not in asking or rank > asking[f[0]][2]:
+                asking[f[0]] = (f[1], when, rank)
+except OSError:
+    pass
+
+
+# A lane waiting on a named external event declares it in the first line of
+# run/fiber-<n>-waiting-on.md. The flag is the orchestrator's to write when it
+# parks a lane and to remove when it wakes it; a lane cannot be trusted to
+# retract its own, which is why the staleness bound below keys on the lane's
+# launch rather than on the lane clearing the file.
+waiting = {}
+for p in glob.glob(os.path.join(R, "fiber-*-waiting-on.md")):
+    m = re.search(r"fiber-(\d{3,5})-waiting-on\.md$", p)
+    if not m:
+        continue
+    try:
+        first = open(p).readline().strip()
+        when = os.path.getmtime(p)
+    except OSError:
+        continue
+    if first:
+        waiting[m.group(1)] = (first, when)
+
+# ticket -> (mtime, status line, wants something) for its newest lane report,
+# and ticket -> mtime of its newest archived ruling. Together these answer the
+# fourth waiting state: a lane that reported a block or a question through the
+# inbox and then ended its turn. Such a lane has no NEEDS_CONTEXT job (nothing
+# of its own is running), no running command (so not ABANDONED) and no
+# waiting-on flag (I never parked it), so before this it fell through to STALL
+# — whose remedy, "retire it if its report landed", is exactly wrong here: the
+# report landed and asked for something.
+#
+# debt: bin/pending.sh derives the same two facts for every ticket and prints
+# them as a table. The duplication ceiling is a third reader: when something
+# else needs "newest report, newest ruling", the pair moves out of both
+# scripts into one helper. Two readers do not earn the indirection.
+# 2026-11-04 12:00Z: bin/ruled.sh's first archived ruling. Before it, rulings
+# were delivered by hand and never filed, so an empty `ruled` entry for an
+# older report is unknown, not unanswered. FW_RULING_ARCHIVE_FROM lets the
+# suite pin it: a case for this branch needs a report both newer than its lane
+# and older than the cutoff, and with the cutoff fixed in the past that window
+# closes as real time passes, so the case rotted rather than failed.
+RULING_ARCHIVE_FROM = float(os.environ.get("FW_RULING_ARCHIVE_FROM") or 1793793600.0)
+# When the liveness snapshots were taken, set by the shell above. 0 when unset,
+# which keeps the old behaviour rather than silencing every MISSING.
+SNAP_AT = float(os.environ.get("FW_SNAP_AT") or 0.0)
+reported = {}
+# Three sources, not two. A lane's report reaches me either as an inbox message
+# or as `run/fiber-<n>-report.md` written in place, and which one depends on the
+# machine: a box lane sends, a Mac delegate lane has no inbox to send to and only
+# writes the file. Scanning the inbox alone made every Mac lane's report
+# invisible here, so its row printed the bare STALL remedy "retire it if its
+# report landed" -- with the report sitting unread in run/. On 2026-11-06 #4040
+# cost nine hours that way: REVIEWED, CI green, PR #4298 ready to ship, and
+# nothing looking. The file is the same shape as the message, so it goes through
+# the same status precedence below rather than getting a branch of its own.
+_srcs = [glob.glob(os.path.join(R, "inbox", "*.md")),
+         glob.glob(os.path.join(R, "inbox", "read", "*.md")),
+         glob.glob(os.path.join(R, "fiber-*-report.md"))]
+for _d in _srcs:
+    for p in _d:
+        base = os.path.basename(p)
+        m = (re.match(r"^(?:[a-z]+-[a-z]+|box)-(\d{3,5})-", base)
+             or re.match(r"^fiber-(\d{3,5})-report\.md$", base))
+        if not m:
+            continue
+        try:
+            when = os.path.getmtime(p)
+            text = open(p, errors="replace").read()
+        except OSError:
+            continue
+        t = m.group(1)
+        if t in reported and reported[t][0] >= when:
+            continue
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        # Same precedence as bin/pending.sh: the last STATUS line, else the
+        # last ASKING line, else the report's last line.
+        status = ""
+        for key in ("STATUS", "ASKING"):
+            hits = [ln for ln in lines if ln.startswith(key)]
+            if hits:
+                status = hits[-1]
+                break
+        if not status and lines:
+            status = lines[-1]
+        # Whether the lane wants something, read from the whole report and not
+        # only from the line the precedence above picked. On 2026-11-06 #3635
+        # ended its turn on `STATUS: REVIEWED head=... last=FIX-OK PR #4308.
+        # ASKING: merge-term call on the new sandbox notice code, and a fence
+        # for the crates/hub follow-up` -- two asks, in the status line itself.
+        # None of BLOCKED, READY, AWAIT or `?` appears in it (REVIEWED is not
+        # READY), so wants came out false and the row read as a finished lane
+        # for 2.5 hours while both asks sat unread.
+        #
+        # An ASKING line is the lane saying it is asking, so it counts wherever
+        # it appears. Only its content can retire it: a lane that writes
+        # `ASKING: nothing` has answered the question, which is why the filter
+        # is on the text after the colon rather than on the keyword.
+        def _asks(ln):
+            body = ln.split(":", 1)[1].strip().rstrip(".").lower() if ":" in ln else ""
+            return body not in ("", "nothing", "none", "n/a", "no", "-")
+        wants = (bool(re.search(r"BLOCKED|READY|AWAIT|await|\?", status))
+                 or any(_asks(ln) for ln in lines if "ASKING" in ln))
+        # Both the basename and a path that resolves. The basename is what the
+        # ruling trailers record, so the answered/unanswered match below must
+        # keep comparing on it; the row I read is a command I act on, and a
+        # bare basename is not. On 2026-11-06 #4318's row named
+        # box-prep-4318-....md and I ran `cat` on it from the flywheel dir,
+        # where no such file exists -- the file was under run/inbox/. The
+        # absolute path, not one relative to the flywheel dir: a relative path
+        # is only true for a reader standing in that directory, and the row is
+        # also read from a sandbox and over ssh.
+        reported[t] = (when, " ".join(status.split())[:110], wants,
+                       os.path.basename(p), os.path.abspath(p))
+
+# Two facts about a ticket's rulings, because one of them is not enough.
+#
+# `ruled` is the newest ruling's time, which was the whole test until #4131 on
+# 2026-11-05. Its report landed 16:04:33Z and RULING-4131-3 was archived
+# 16:08:37Z, four minutes later -- so the time rule called the lane answered,
+# while that ruling in fact answered an earlier question and said nothing about
+# the harness defect the new report raised. The ask read as a settled lane and
+# sat unseen while it held up PR #4205, and #3891 behind that.
+#
+# `answers` is which report each ruling says it answered, stamped by
+# bin/ruled.sh at archive time. A newest report that no trailer names is
+# unanswered however new the rulings are. Time cannot stand in for identity:
+# that substitution is the same shape as every other probe that inferred a fact
+# from a weaker signal, and it is the one that costs a lost question.
+ruled = {}
+answers = {}
+for p in glob.glob(os.path.join(R, "rulings", "ruling-*.md")):
+    m = re.search(r"ruling-(\d{3,5})-", os.path.basename(p))
+    if not m:
+        continue
+    try:
+        when = os.path.getmtime(p)
+        text = open(p, errors="replace").read()
+    except OSError:
+        continue
+    if ruled.get(m.group(1), 0.0) < when:
+        ruled[m.group(1)] = when
+    for named in re.findall(r"<!--\s*answers-report:\s*(\S+)\s*-->", text):
+        answers.setdefault(m.group(1), set()).add(named)
+
+# prs_ok says the fetch succeeded, so an empty set means nothing is open rather
+# than nothing is known. Only a successful fetch may resolve a wait as over.
+open_prs = set()
+prs_ok = os.path.exists(os.path.join(tmp, "openprs.ok"))
+try:
+    for line in open(os.path.join(tmp, "openprs.txt")):
+        f = line.split()
+        if f and f[0].isdigit():
+            open_prs.add(f[0])
+except OSError:
+    prs_ok = False
+
+
+def launched(ts):
+    """Roster stamp -> epoch, or None when it cannot be read. None fails open:
+    an unparseable stamp must not swallow a live question."""
+    import datetime
+    try:
+        d = datetime.datetime.fromisoformat(ts.split()[0].rstrip("Z"))
+        return d.replace(tzinfo=datetime.timezone.utc).timestamp()
+    except Exception:
+        return None
+
+mac, mac_err = live(os.path.join(tmp, "mac.json"))
+box, box_err = live(os.path.join(tmp, "box.json"))
+muse, muse_err = live_muse(os.path.join(tmp, "muse.json"))
+macmuse, macmuse_err = live_muse(os.path.join(tmp, "macmuse.json"))
+for host, err, f in (("mac", mac_err, "mac.err"), ("box", box_err, "box.err"),
+                     ("muse", muse_err, "muse.err"),
+                     ("mac delegate", macmuse_err, "macmuse.err")):
+    if err is not None:
+        detail = open(os.path.join(tmp, f)).read().strip().splitlines()
+        print(f"UNKNOWN {host} — cannot list sessions: {err}" + (f" | {detail[-1]}" if detail else ""))
+
+# `NO-WATCHER ~/lane-inbox/<ticket> unread=<n>` lines from inbox-watchers. Absent
+# file or failed ssh (WATCH-ERROR) means no pairing rather than a false all-clear,
+# so start empty; only unread > 0 is blind, an empty unwatched inbox is fine.
+inbox = {}
+try:
+    for line in open(os.path.join(tmp, "inbox.txt")):
+        p = line.split()
+        if len(p) == 3 and p[0] == "NO-WATCHER" and p[2].startswith("unread="):
+            inbox[p[1].rsplit("/", 1)[-1]] = int(p[2][7:])
+        elif p and p[0] == "WATCH-ERROR":
+            print("UNKNOWN box inbox — watcher state unreadable: " + line.strip())
+except Exception:
+    pass
+
+# Retirement is time-ordered: a roster entry launched after its retirement line
+# is a relaunch and is checked again. Without this, retiring a parked ticket
+# hides the lane that later picks it up, under its usual session name.
+# frontier.sh holds a second copy of this rule, which drifted from this one and
+# cost a double-launch. De-duplication is #4336; until it lands, change both.
+done = {}
+done_sess = {}
+for line in open(retired):
+    p = [x.strip() for x in line.split("\t")]
+    if len(p) > 2 and p[2]:
+        k = (p[1], p[2])
+        done_sess[k] = max(p[0], done_sess.get(k, ""))
+    elif len(p) > 1:
+        done[p[1]] = max(p[0], done.get(p[1], ""))
+
+# last roster line per (ticket, session) wins
+entries = {}
+for line in open(roster):
+    p = line.rstrip("\n").split("\t")
+    if len(p) < 4:
+        continue
+    ts, n, host, sess = p[0], p[1], p[2], p[3]
+    jid = p[4] if len(p) > 4 else "?"
+    entries[(n, sess)] = (ts, host, jid)
+
+missing = 0
+for (n, sess), (ts, host, jid) in sorted(entries.items()):
+    # A `done <ticket>:<key>` line names the session either way round: by its
+    # roster name (`fiber-4026-plan`) or by its delegate session id, whole or
+    # as a prefix. Keying on the name alone silently dropped every retirement
+    # typed with an id — and the id is what every MISSING and STALL line here
+    # prints as the thing to act on, so that was the form in use (2026-11-04:
+    # 19 retirements recorded, 16 of them inert).
+    cut = done.get(n, "")
+    for (dn, dk), dts in done_sess.items():
+        if dn != n:
+            continue
+        if dk == sess or dk == jid or (jid not in ("", "?") and (jid.startswith(dk) or dk.startswith(jid))):
+            cut = max(cut, dts)
+    if cut and ts.split()[0] <= cut:
+        continue
+    # A delegate lane is looked up by its session id (column 5), a Claude lane
+    # by its session name (column 4). `deleg` holds which machine's delegate
+    # store the id lives in, or None for a Claude session, and every branch
+    # below keys on that rather than on the host word: `mac` names both kinds,
+    # because maclaunch.sh starts a muse session and bglaunch.sh a Claude one.
+    deleg = None
+    if host == "muse":
+        names, key, deleg = muse, jid, "box"
+    elif host == "mac":
+        if mac is not None and sess in mac:
+            names, key = mac, sess
+        else:
+            names, key, deleg = macmuse, jid, "mac"
+    else:
+        names, key = box, sess
+    if names is None:
+        print(f"UNCHECKED {n} {host} {sess} (launched {ts}) — host list unavailable")
+        continue
+    # A `mac` line reaches the delegate store only because the Claude list did
+    # not name it, so an unreadable Claude list makes that fall-through
+    # meaningless: absent from the delegate store then says nothing about a
+    # Claude lane. UNCHECKED, not MISSING — MISSING is the reading that invites
+    # a second lane onto the same fence.
+    if host == "mac" and mac is None and key not in names:
+        print(f"UNCHECKED {n} {host} {sess} (launched {ts}) — not in the local "
+              "delegate store, and `claude agents` is unreadable")
+        continue
+    if deleg and key in ("", "?"):
+        missing += 1
+        print(f"MISSING {n} {host} {sess} launched {ts} — no delegate session id in the roster line, so liveness cannot be checked")
+        continue
+    # Accept a shortened session id. muselaunch.sh writes the full uuid, but a
+    # roster line repaired by hand carries the 8-char form, and reading a live
+    # lane as MISSING invites a second lane on the same fence — the one failure
+    # here that costs more than a stale line. Only an unambiguous prefix counts.
+    if deleg and key not in names:
+        hits = [k for k in names if k.startswith(key)]
+        if len(hits) == 1:
+            key = hits[0]
+    if key in names:
+        working, turns = True, None
+        if deleg:
+            state, status, working, turns = names[key]
+        else:
+            state, status = names[key]
+            # A Claude lane's "no active turn" is `status == "busy"` being
+            # false, exactly what `activeTurnId` says for a muse lane. Until
+            # 2026-11-06 this branch left `working` at its True default, so
+            # every box Claude lane fell straight to LIVE whatever it had
+            # reported: #4256 ended its turn on "STATUS: BLOCKED on the gate
+            # decision" and this printed `LIVE 4256 box fiber-4256-plan
+            # done/idle`, while bin/ruled.sh on the same lane printed STOPPED.
+            # Two tools in one toolchain disagreeing about one lane, and the
+            # one I sweep with was the wrong one. `claude agents --json` gives
+            # state in {working, done, blocked} and status in {busy, idle}, so
+            # the signal was there all along and nothing read it.
+            working = status == "busy"
+        # Which delegate store a wake for this lane would run against. `deleg`
+        # is None for a Claude lane but its jobs still live on its own host, so
+        # the remedy lines below cannot key on `deleg` alone without printing
+        # the ssh form for a mac lane.
+        store = deleg or ("mac" if host == "mac" else "box")
+        # The wake for a lane with no active turn. A delegate lane takes a
+        # message on stdin; a Claude lane has a SendMessage address and no
+        # delegate session at all, so `delegate session send` against it fails
+        # with "no such session" -- the same defect as the bare-delegate line
+        # #4099 cost a re-derivation to.
+        sendline = ("`" + onbox(f"session send {jid} -", msg=True, where=store) + "`"
+                    if deleg else f"SendMessage to '{sess}'")
+        blind = ""
+        # A lane reads an inbox file only while it has a watcher armed. Unread
+        # files with no watcher means a ruling is sitting where nothing will
+        # read it: say so here rather than let "delivered" stand. The remedy
+        # differs by host, so name it. A muse lane is a `delegate session`, not
+        # a Claude session: it has no SendMessage address, and once it reports
+        # idle or completed it never polls again, so unread mail there waits on
+        # a relaunch. On 2026-11-04 #4077 and #3899 both sat that way.
+        if (host == "box" or deleg == "box") and n in inbox:
+            unread = inbox[n]
+            if unread > 0:
+                # A muse lane has no SendMessage address, but it is not
+                # unreachable: `delegate session send <full-uuid> -` takes a
+                # message on stdin and starts a turn on an idle session. Proved
+                # 2026-11-04 on #4026's lane and #4077's (switchyard #1086); it
+                # prints `started` on an idle session, `steered` on a busy one.
+                # Relaunching instead throws away the lane's whole turn.
+                fix = (f"deliver by SendMessage to {sess}" if host == "box"
+                       else "wake with: " + onbox(f"session send {jid} -", msg=True, where=deleg))
+                blind = f"  BLIND-INBOX {unread} unread, no inbox-wait armed — {fix}"
+        # A lane holding no active turn has stopped and nothing wakes it.
+        # Either it reported and wants retiring, or it is the #4097 stall and
+        # wants a nudge. Both need the orchestrator, so say so rather than let
+        # LIVE stand for a lane doing nothing. This covers a Claude lane as
+        # well as a delegate one since 2026-11-06; it was `deleg and not
+        # working` before, which exempted every box Claude lane from the whole
+        # block.
+        # Whether this lane's newest report asks for something no ruling has
+        # answered. Computed for every lane, not only a stopped one, because a
+        # lane can be mid-turn and still waiting on me: #4250 reported "Round 3
+        # cannot call the live fold from loop. Rule where the pure fold lives"
+        # at 14:49Z on 2026-11-06 and printed `LIVE 4250 box fiber-4250-plan
+        # working/busy` for five hours. Its session had an active turn, so the
+        # whole waiting block below was skipped, and NEEDS-ANSWER keys on a
+        # NEEDS_CONTEXT job, which a lane that reports in a file does not have.
+        # The report was in run/inbox/ the whole time with nothing reading it.
+        #
+        # A busy lane is not a stopped one and must not print a stopped lane's
+        # state, so this rides the LIVE row as a note rather than becoming a
+        # fifth waiting state. What it says is the only thing that matters:
+        # something on this lane is waiting on a ruling even though the lane
+        # itself is working.
+        lane_started = launched(ts)
+        rep = reported.get(n)
+        fresh = rep and (lane_started is None or rep[0] >= lane_started - 60)
+        # Which report the rulings say they answered, when any of this ticket's
+        # rulings says so at all. A ticket whose rulings are all older than
+        # bin/ruled.sh's stamping carries no trailer, and for those the time
+        # rule is still the best available answer -- so the fallback is the old
+        # behaviour, not a flip to unanswered, which would turn every
+        # historical lane into a question.
+        named = answers.get(n)
+        if named is not None and rep is not None:
+            unanswered = rep[3] not in named
+            why = ("no archived ruling names that report (the newest "
+                   "ruling answers a different one)")
+        else:
+            unanswered = ruled.get(n, 0.0) <= rep[0] if fresh else False
+            why = "no archived ruling postdates that report"
+        open_ask = bool(fresh and rep[2] and unanswered)
+        if open_ask:
+            blind += (f"  ASK-OPEN it reported \"{rep[1]}\" and {why} — read "
+                      f"{rep[4]}, then `bash bin/ruled.sh {n} <file>`. The lane "
+                      f"is working, so this is not a stall: part of its work is "
+                      f"waiting on me")
+        if not working:
+            # The abandoned wait: work still running for a lane that has
+            # stopped. Nothing will wake it when the work finishes, so this is
+            # the line that needs acting on today, not a retirement candidate.
+            # A job older than this lane's launch is a previous lane's
+            # question. Job records never expire, so without this every stall
+            # on a ticket that once asked something would point at a dead job.
+            jobq = asking.get(n)
+            if (jobq and lane_started is not None and jobq[1] is not None
+                    and jobq[1] < lane_started - 60):
+                jobq = None
+            # Precedence: the park flag first, then NEEDS-ANSWER, then
+            # ABANDONED, then the fourth state. The flag is the orchestrator's
+            # own declaration that this lane is not to be acted on, and a line
+            # that nudges me to do the thing I just deferred is a line I learn
+            # to ignore — #4161 was parked on 2026-11-04 and went on printing
+            # NEEDS-ANSWER. Nothing is lost by putting it first, because the
+            # park line carries whatever the state it outranks would have
+            # said: the open question with its resume command, or the running
+            # work with its command line. A verdict is not lost while parked
+            # either; the work writes it to the ticket's state file and the
+            # lane reads it on waking, which is what parking is for.
+            # NEEDS-ANSWER stays above ABANDONED (cycle 13): when a job sits
+            # in NEEDS_CONTEXT the process `ps` sees is that same stuck work,
+            # so re-attaching to it is the wrong remedy.
+            if n in waiting and (lane_started is None
+                                 or waiting[n][1] >= lane_started - 60):
+                # A flag older than this lane's launch belongs to a previous
+                # lane for the ticket, the same bound the question probe uses:
+                # run/ files outlive the lanes that wrote them.
+                # Capped like the ABANDONED line's command: the flag's first
+                # line is prose a lane or I wrote, and an uncapped echo of it
+                # pushed the remedy off the end of the terminal on its first
+                # real run.
+                cond = " ".join(waiting[n][0].split())[:110]
+                flag = os.path.join(R, f"fiber-{n}-waiting-on.md")
+                # A parked lane may also hold an open question, and then the
+                # wake is `delegate resume <job>`, not a session send: a park
+                # that printed the session remedy would send the lane a turn
+                # with its question still unanswered. Both the question and any
+                # running work are named on the line, so parking cannot hide
+                # either.
+                wake = ("`" + onbox(f"resume {jobq[0]} -", msg=True, where=store) + "`" if jobq
+                        else sendline)
+                asknote = (f", and its job {jobq[0]} is still NEEDS_CONTEXT, so "
+                           f"the wake answers that question" if jobq else "")
+                if n in pending:
+                    asknote += (", and work is still running for it: "
+                                + " ".join(pending[n].split())[:110])
+                pr = re.match(r"pr\s*#?(\d+)", cond, re.I)
+                if pr and prs_ok and pr.group(1) not in open_prs:
+                    print(f"WAKE {n} {host} {sess} {state}/{status} turns={turns} — "
+                          f"it reported and parked on \"{cond}\", and PR "
+                          f"#{pr.group(1)} is no longer open, so the wait is over"
+                          f"{asknote}: wake it with {wake} and "
+                          f"remove {flag}")
+                else:
+                    blind_note = "" if prs_ok else \
+                        " (the open-PR list could not be fetched, so this condition was not resolved)"
+                    print(f"WAITING {n} {host} {sess} {state}/{status} turns={turns} — "
+                          f"no active turn because it reported and parked on "
+                          f"\"{cond}\"{blind_note}: it is neither stalled nor "
+                          f"abandoned, so leave it until that holds{asknote}, then "
+                          f"wake it with {wake} and remove {flag}")
+            elif jobq:
+                print(f"NEEDS-ANSWER {n} {host} {sess} {state}/{status} turns={turns} — "
+                      f"no active turn because its job {jobq[0]} is NEEDS_CONTEXT: "
+                      f"it asked a question and is waiting on an answer, so it is "
+                      f"neither finished nor running. Read it with `"
+                      + onbox(f"status {jobq[0]}", where=store) + "`, then rule and have the "
+                      f"lane answer it with `"
+                      + onbox(f"resume {jobq[0]} -", msg=True, where=store) + "`")
+            elif n in pending:
+                cmd = " ".join(pending[n].split())[:110]
+                print(f"ABANDONED {n} {host} {sess} {state}/{status} turns={turns} — "
+                      f"no active turn, but work is still running for it: {cmd} — "
+                      f"wake it with " + sendline
+                      + " so it waits on that work itself")
+            else:
+                # The fourth waiting state: it reported a block or a question
+                # and ended its turn. Bounded by the lane's launch, like the
+                # question and flag probes above, because run/ and inbox files
+                # outlive the lanes that wrote them.
+                # rep, fresh, named, unanswered and why are computed above the
+                # `working` split, so a busy lane's open ask is visible too.
+                if open_ask:
+                    unknown = ("" if rep[0] >= RULING_ARCHIVE_FROM or n in ruled else
+                               " (its report predates the ruling archive, so an"
+                               " off-archive ruling would not show here —"
+                               " confirm before ruling again)")
+                    print(f"NEEDS-RULING {n} {host} {sess} {state}/{status} turns={turns} — "
+                          f"no active turn because it reported \"{rep[1]}\" and ended its "
+                          f"turn, and {why}{unknown}: it "
+                          f"is waiting on me, not stalled, so do not retire it. Rule it and "
+                          f"deliver with `bash bin/ruled.sh {n} <file>`, which archives the "
+                          f"ruling and wakes the lane in one step")
+                else:
+                    settled = ("" if not fresh or not rep[2] else
+                               " — its report asked for something and a ruling already "
+                               + ("names it" if named is not None else "postdates it")
+                               + ", so this is a lane that stopped after being "
+                               "answered")
+                    # "Retire it if its report landed" is a question, and until
+                    # 2026-11-06 this line asked it without answering it -- so
+                    # #4040's row looked the same whether its report existed or
+                    # not. It existed, said REVIEWED with CI green and a
+                    # shippable PR in it, and sat nine hours. A report that is
+                    # on the record and does not ask for anything is the
+                    # commonest reason a lane goes quiet, so name the file and
+                    # quote its status here: the answer costs one line and the
+                    # question cost a working day.
+                    landed = ("" if not fresh else
+                              f" — its report landed in {rep[4]} and says \"{rep[1]}\","
+                              " so read that before retiring")
+                    print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — no active turn "
+                          f"and no work running for it{settled or landed}: retire it if its report "
+                          f"landed, else wake it with "
+                          + sendline)
+        else:
+            print(f"LIVE {n} {host} {sess} {state}/{status}{blind}")
+    else:
+        # A lane launched after the snapshots were taken cannot be in them, so
+        # it is new, not missing. Five seconds of slack covers the roster write
+        # racing the snapshot in the other direction.
+        started = launched(ts)
+        if SNAP_AT and started is not None and started >= SNAP_AT - 5:
+            print(f"NEW {n} {host} {sess} id={jid} launched {ts} — launched after this "
+                  f"run's liveness snapshot, so its liveness is unknown until the next run")
+        else:
+            missing += 1
+            print(f"MISSING {n} {host} {sess} id={jid} launched {ts} — relaunch or park with a reason")
+
+print(f"-- {len(entries)} roster entries, {len(done)} tickets and {len(done_sess)} sessions retired, {missing} missing")
+sys.exit(1 if missing else 0)
+PY
+rc=$?
+
+# Box tool skew, printed in the footer I read every cycle.
+#
+# boxstale.sh already answers this question, and on 2026-11-06 I still ruled on a
+# box lane's tkt-plan failure by reading the Mac's copy of the script -- a copy
+# the lane never executed, because the box was 10 hours behind. The check was not
+# missing; nothing put its answer where I would see it. A tool that has to be
+# remembered is a tool that gets skipped, so it prints itself here.
+#
+# Never fails the report: the roster verdict above is what callers key on, so the
+# exit status is restored either way.
+boxstale=${FW_BOXSTALE:-$script_dir/boxstale.sh}
+[ ! -r "$boxstale" ] || bash "$boxstale" || true
+exit "$rc"
