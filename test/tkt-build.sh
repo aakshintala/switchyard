@@ -11,6 +11,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$SCRIPT_DIR/../bin/tkt-build"
+TKT_PLAN="$SCRIPT_DIR/../bin/tkt-plan"
 TKT_STATE="$SCRIPT_DIR/../bin/tkt-state"
 REAL_BIN="$SCRIPT_DIR/../bin"
 
@@ -1863,6 +1864,33 @@ bash "$TKT_STATE" "$S" set plan_verdict triaged || fail "seed triaged verdict"
 run_build
 [ "$RC" -eq 0 ] || fail "triaged verdict proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "triaged verdict proceeds"
+
+# --- a ruling-only revision records a verdict that passes the real build precondition ---
+setup_case ruling-verdict-precondition
+cat >"$CDIR/plan.md" <<EOF
+Base: $H
+
+## Rulings
+
+- Open line: use the default behavior.
+
+## Files
+
+- \`src/a.txt\`
+
+## Gate
+
+\`true\`
+EOF
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "ruling-verdict-precondition: seed LINES"
+bash "$TKT_STATE" "$S" set plan_verdict_hash "$(git -C "$WT" hash-object -w "$CDIR/plan.md")" || fail "ruling-verdict-precondition: seed plan snapshot"
+awk '{ if ($0 == "- Open line: use the default behavior.") print "- Ruling comment 721473 settles the open line."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+TKT_PLAN_OUT="$(bash "$TKT_PLAN" "$S" triaged --comment 721473 2>"$CDIR/ruling-stderr.txt")"; TKT_PLAN_RC=$?
+[ "$TKT_PLAN_RC" -eq 0 ] || fail "ruling-verdict-precondition: ruling is recorded (rc=$TKT_PLAN_RC): $(head -n 1 <<<"$TKT_PLAN_OUT") $(cat "$CDIR/ruling-stderr.txt")"
+expect_state plan_verdict triaged "ruling-verdict-precondition"
+run_build --from gate
+[ "$RC" -eq 0 ] || fail "ruling-verdict-precondition: tkt-build passes the verdict precondition (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "ruling-verdict-precondition"
 
 # --- a missing verdict refuses; --no-verifier records or refreshes skipped ---
 setup_case verdict-none
