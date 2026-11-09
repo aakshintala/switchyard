@@ -446,6 +446,7 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
 done
 here="$(cd "$(dirname "$script_path")" && pwd)"
+. "$here/lib/verify-section.sh"
 # rerun_cmd rebuilds this invocation against this file for the lost-race diagnostic.
 rerun_cmd="$(printf '%q ' bash "$here/$(basename "$0")" ${ship_args[@]+"${ship_args[@]}"})"
 rerun_cmd="${rerun_cmd% }"
@@ -717,37 +718,32 @@ review_verdict() {
 }
 
 parse_p3_verify_findings() {
-  local encoded="$1" output="$2" decoded="${2}.comment" line in_verify=0 saw_verify=0 count=0
+  local encoded="$1" output="$2" decoded="${2}.comment" line count=0 decoded_ok=1 valid=1 result=1
   if ! printf '%s' "$encoded" | base64 -D >"$decoded" 2>/dev/null; then
-    printf '%s' "$encoded" | base64 -d >"$decoded" 2>/dev/null || { rm -f "$decoded"; return 1; }
+    if ! printf '%s' "$encoded" | base64 -d >"$decoded" 2>/dev/null; then
+      decoded_ok=0
+    fi
   fi
-  : >"$output"
-  while IFS= read -r line || [ -n "$line" ]; do
-    if [[ "$line" == "## verify" || "$line" == "## verify "* ]]; then
-      in_verify=1
-      saw_verify=1
-      continue
-    fi
-    if [[ "$line" == "## "* ]]; then
-      in_verify=0
-      continue
-    fi
-    [ "$in_verify" = 1 ] || continue
-    # A finding is a line that starts with a priority token once markup and any
-    # list marker are gone; prose that mentions a fixed P1 or P2 is not one.
-    line="$(printf '%s' "$line" | tr -d '*`' | sed -E -e 's/^[[:space:]]*//' -e 's/^([-+]|[0-9]+[.)])[[:space:]]+//' -e 's/[[:space:]]*$//')"
-    if [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
-      if [[ "$line" =~ ^P3[[:space:]]+[^[:space:]] ]]; then
-        printf '%s\n' "$line" >>"$output"
-        count=$((count + 1))
-      else
-        rm -f "$decoded"
-        return 1
+  if [ "$decoded_ok" = 1 ]; then
+    : >"$output"
+    while IFS= read -r line || [ -n "$line" ]; do
+      # A finding is a line that starts with a priority token once markup and any
+      # list marker are gone; prose that mentions a fixed P1 or P2 is not one.
+      line="$(printf '%s' "$line" | tr -d '*`' | sed -E -e 's/^[[:space:]]*//' -e 's/^([-+]|[0-9]+[.)])[[:space:]]+//' -e 's/[[:space:]]*$//')"
+      if [[ "$line" =~ ^P[0-9]([^[:alnum:]_]|$) ]]; then
+        if [[ "$line" =~ ^P3[[:space:]]+[^[:space:]] ]]; then
+          printf '%s\n' "$line" >>"$output"
+          count=$((count + 1))
+        else
+          valid=0
+          break
+        fi
       fi
-    fi
-  done <"$decoded"
+    done < <(verify_section_lines <"$decoded")
+    [ "$valid" = 1 ] && [ "$count" -gt 0 ] && result=0
+  fi
   rm -f "$decoded"
-  [ "$saw_verify" = 1 ] && [ "$count" -gt 0 ]
+  [ "$result" = 0 ]
 }
 
 reviewed_patch_id="$(review_patch_id "$reviewed")"

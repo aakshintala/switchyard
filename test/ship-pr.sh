@@ -732,6 +732,17 @@ grep -qF 'P3 first open finding' "$ST/comment.txt" && grep -qF 'P3 second open f
   "$(grep -n '^gh pr merge' "$ST/gh.log" | head -n 1 | cut -d: -f1)" ] \
   || fail "P3 issues are linked before the merge"
 
+# A decorated verify heading is normalised the same way as review-pr's parser.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:114,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n**## verify**\n\nFIX-INCOMPLETE one finding remains\nP3 decorated-heading finding")}
+]' >"$ST/review-comments"
+ship; expect 0 "decorated verify heading opens the P3 findings section"
+[ "$(jq 'length' "$ST/created-issues")" = 1 ] || fail "decorated verify heading files its P3 finding: [$(cat "$ST/created-issues")]"
+jq -e '.[0].body | contains("P3 decorated-heading finding")' "$ST/created-issues" >/dev/null \
+  || fail "decorated verify heading keeps the finding: [$(cat "$ST/created-issues")]"
+
 # The P3 issue side effect is deferred until CI and every other refusal check pass.
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
