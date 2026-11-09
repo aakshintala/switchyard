@@ -99,6 +99,52 @@ repair_hint() {
     *) printf 'Repair command: rerun tkt-start with the missing ticket metadata, or tkt-plan %s set <plan-path> as appropriate\n' "$state" ;;
   esac
 }
+journal_build() {
+  tkt journal "$1" 2>/dev/null || true
+}
+stale_recovery() {
+  local newbase="$1" step=4 recover
+  recover="To recover past STALE and VERDICT-REFUSED, run:
+1. git -C $worktree merge origin/main
+2. git -C $worktree push origin $branch
+3. set the Base: line in $plan to Base: $newbase"
+  if [ "${head_was_stored:-0}" -eq 1 ]; then
+    recover="$recover
+$step. tkt-state $state set head <new-head-sha>"
+    step=$((step + 1))
+  fi
+  recover="$recover
+$step. tkt-plan $state verify"
+  step=$((step + 1))
+  recover="$recover
+$step. tkt-build $state --from $from
+Resolve any step-1 conflicts, then finish the merge with git -C $worktree commit before step 2."
+  printf '%s\n' "$recover"
+}
+write_plan_base() {
+  local path="$1" newbase="$2" tmp_plan
+  tmp_plan="$(mktemp "${path}.tmp.XXXXXX")" || return 1
+  if ! awk -v base="$newbase" '
+    /^Base:/ && !updated { print "Base: " base; updated=1; next }
+    { print }
+    END { if (!updated) exit 1 }
+  ' "$path" >"$tmp_plan"; then
+    rm -f "$tmp_plan"
+    return 1
+  fi
+  if ! mv "$tmp_plan" "$path"; then
+    rm -f "$tmp_plan"
+    return 1
+  fi
+}
+path_in_plan_files() {
+  local candidate="$1" spec touched
+  for spec in "${plan_files[@]}"; do
+    touched="$(git -C "$worktree" diff --name-only "$merge_base..HEAD" -- "$spec" 2>"$tmpd/git-err")" || return 2
+    if grep -F -x -- "$candidate" <<<"$touched" >/dev/null 2>&1; then return 0; fi
+  done
+  return 1
+}
 require_keys() {
   req_err="$(tkt require "$@" 2>&1)" || {
     printf '%s\n' "$req_err" >&2
@@ -239,7 +285,9 @@ rnd="$(tkt get round 2>/dev/null || true)"
 if [ -n "$(tkt get reviewed 2>/dev/null || true)" ]; then
   emit "ROUND-LIMIT round=$rnd" 1 "tkt-build is the wrong phase after the first round; continue with tkt-fix $state --verify [--resume <job id> --prompt <file>] or tkt-ship $state; this is not the round limit"
 fi
+head_was_stored=0
 if stored_head="$(tkt get head 2>/dev/null)"; then
+  head_was_stored=1
   actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
   if [ "$outcome" = measurement ]; then
     # A measurement ends in the gate: no PR exists, so only the worktree
@@ -275,36 +323,110 @@ if [ "${#stale_files[@]}" -gt 0 ]; then
   if [ -n "$stat_out" ]; then
     n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${stale_files[@]}" 2>/dev/null | wc -l | tr -d ' ')"
     if [ "$from" = gate ] || [ "$from" = review ]; then
-      if git -C "$worktree" merge-tree --write-tree origin/main HEAD >/dev/null 2>"$tmpd/merge-tree-err"; then
-        printf '%s\n' "tkt-build: plan Base $base is behind origin/main on $n planned files; the branch merges cleanly, continuing" >&2
-      else
-        # Merging alone still refuses: plan_verdict_base names the old base
-        # while main changed a planned file, and a stored head drifts; the
-        # gate also wants origin/<branch> at the merged head. Name the exact
-        # recovery: merge, push, point the plan Base at the new origin/main,
-        # refresh the stored head, record a fresh verdict with tkt-plan verify
-        # (drift-exempt after a recorded stale-plan revision), and rerun. Only
-        # the post-merge head is unknown until step 1 runs.
-        newbase="$(git -C "$worktree" rev-parse origin/main 2>/dev/null || true)"
-        [ -n "$newbase" ] || emit "STALE n=$n base=$base" 1 "$stat_out"
-        recover="To recover past STALE and VERDICT-REFUSED, run:
-1. git -C $worktree merge origin/main
-2. git -C $worktree push origin $branch
-3. set the Base: line in $plan to Base: $newbase"
-        step=4
-        if tkt get head >/dev/null 2>&1; then
-          recover="$recover
-$step. tkt-state $state set head <new-head-sha>"
-          step=$((step + 1))
+      # Do not merge a main change that overlaps a branch edit outside the
+      # plan's Files. The planned-file stale check above still controls when
+      # this recovery runs; this overlap check protects the merge's full diff.
+      merge_base="$(git -C "$worktree" merge-base HEAD origin/main 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+      main_changes="$(git -C "$worktree" diff --name-only "$merge_base..origin/main" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+      branch_changes="$(git -C "$worktree" diff --name-only "$merge_base..HEAD" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+      outside_overlaps=""
+      while IFS= read -r changed_path; do
+        [ -n "$changed_path" ] || continue
+        if grep -F -x -- "$changed_path" <<<"$branch_changes" >/dev/null 2>&1; then
+          if path_in_plan_files "$changed_path"; then
+            :
+          else
+            path_rc=$?
+            [ "$path_rc" -ne 2 ] || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+            outside_overlaps="${outside_overlaps}${outside_overlaps:+, }$changed_path"
+          fi
         fi
-        recover="$recover
-$step. tkt-plan $state verify"
-        step=$((step + 1))
-        recover="$recover
-$step. tkt-build $state --from $from
-Resolve any step-1 conflicts, then finish the merge with git -C $worktree commit before step 2."
-        emit "STALE n=$n base=$base" 1 "$stat_out" "$recover"
+      done <<<"$main_changes"
+      if [ -n "$outside_overlaps" ]; then
+        journal_build "tkt-build stale recovery outside-files=$outside_overlaps"
+        emit "STALE n=$n base=$base" 1 "$stat_out" "tkt-build: merge would change paths outside plan Files that the branch also touches: $outside_overlaps"
       fi
+
+      old_head="$(git -C "$worktree" rev-parse HEAD 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+      merge_rc=0
+      git -C "$worktree" merge origin/main >"$tmpd/merge-out" 2>"$tmpd/merge-err" || merge_rc=$?
+      if [ "$merge_rc" -ne 0 ]; then
+        unmerged="$(git -C "$worktree" ls-files -u 2>/dev/null || true)"
+        if [ -n "$unmerged" ]; then
+          journal_build "tkt-build stale recovery merge-conflict base=$base"
+          abort_rc=0
+          git -C "$worktree" merge --abort >"$tmpd/merge-abort-out" 2>"$tmpd/merge-abort-err" || abort_rc=$?
+          clean_after_abort=0
+          [ -z "$(git -C "$worktree" status --porcelain 2>/dev/null || true)" ] && clean_after_abort=1
+          journal_build "tkt-build stale recovery merge-abort rc=$abort_rc clean=$clean_after_abort"
+          newbase="$(git -C "$worktree" rev-parse origin/main 2>/dev/null || true)"
+          recover="$(stale_recovery "$newbase")"
+          merge_details="$(cat "$tmpd/merge-err" "$tmpd/merge-out" 2>/dev/null || true)"
+          [ "$abort_rc" -eq 0 ] || merge_details="$merge_details
+$(cat "$tmpd/merge-abort-err" 2>/dev/null || true)"
+          [ "$clean_after_abort" -eq 1 ] || merge_details="$merge_details
+ tkt-build: merge --abort did not leave a clean worktree"
+          emit "STALE n=$n base=$base" 1 "$stat_out" "$merge_details" "$recover"
+        fi
+        if git -C "$worktree" rev-parse --verify -q MERGE_HEAD >/dev/null 2>&1; then
+          abort_rc=0
+          git -C "$worktree" merge --abort >"$tmpd/merge-abort-out" 2>"$tmpd/merge-abort-err" || abort_rc=$?
+          journal_build "tkt-build stale recovery merge-abort rc=$abort_rc"
+        fi
+        journal_build "tkt-build stale recovery merge-failed rc=$merge_rc"
+        newbase="$(git -C "$worktree" rev-parse origin/main 2>/dev/null || true)"
+        recover="$(stale_recovery "$newbase")"
+        merge_details="$(cat "$tmpd/merge-err" "$tmpd/merge-out" 2>/dev/null || true)"
+        emit "STALE n=$n base=$base" 1 "$stat_out" "$merge_details" "$recover"
+      fi
+
+      merged_head="$(git -C "$worktree" rev-parse HEAD 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+      merge_parents="$(git -C "$worktree" rev-list --parents -n 1 "$merged_head" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+      parent_count="$(wc -w <<<"$merge_parents" | tr -d ' ')"
+      if [ "$parent_count" -eq 3 ]; then
+        newbase="$(awk '{print $3}' <<<"$merge_parents")"
+      elif [ "$merged_head" != "$old_head" ]; then
+        newbase="$merged_head"
+      else
+        newbase="$(git -C "$worktree" rev-parse origin/main 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+      fi
+      journal_build "tkt-build stale recovery merge origin/main head=$merged_head base=$newbase"
+
+      push_rc=0
+      git -C "$worktree" push origin "$branch" >"$tmpd/push-out" 2>"$tmpd/push-err" || push_rc=$?
+      if [ "$push_rc" -ne 0 ]; then
+        journal_build "tkt-build stale recovery push-failed rc=$push_rc"
+        recover="$(stale_recovery "$newbase")"
+        emit "STALE n=$n base=$base" 1 "$stat_out" "$(cat "$tmpd/push-err" 2>/dev/null || true)" "$recover"
+      fi
+      journal_build "tkt-build stale recovery push origin $branch"
+
+      if ! write_plan_base "$plan" "$newbase"; then
+        journal_build "tkt-build stale recovery plan-base-failed base=$newbase"
+        recover="$(stale_recovery "$newbase")"
+        emit "STALE n=$n base=$base" 1 "$stat_out" "tkt-build: could not update Base: in $plan" "$recover"
+      fi
+      journal_build "tkt-build stale recovery plan Base=$newbase"
+
+      if [ "$head_was_stored" -eq 1 ]; then
+        if ! tkt set head "$merged_head"; then
+          journal_build "tkt-build stale recovery head-failed head=$merged_head"
+          emit "PRECONDITION state=failed" 2 "tkt-build: could not set head to $merged_head"
+        fi
+        journal_build "tkt-build stale recovery head=$merged_head"
+      fi
+
+      verify_rc=0
+      verify_out="$("$bin_dir/tkt-plan" "$state" verify 2>"$tmpd/verify-err")" || verify_rc=$?
+      verify_line="$(head -n 1 <<<"$verify_out")"
+      if [ "$verify_rc" -ne 0 ] || [[ "$verify_line" != "TKT tkt-plan PLAN-OK "* ]]; then
+        journal_build "tkt-build stale recovery verify failed rc=$verify_rc verdict=${verify_line:-none}"
+        if [ -n "$verify_line" ]; then printf '%s\n' "$verify_line"; fi
+        [ ! -s "$tmpd/verify-err" ] || cat "$tmpd/verify-err" >&2
+        [ "$verify_rc" -ne 0 ] || verify_rc=1
+        exit "$verify_rc"
+      fi
+      journal_build "tkt-build stale recovery verify PLAN-OK"
     else
       emit "STALE n=$n base=$base" 1 "$stat_out"
     fi

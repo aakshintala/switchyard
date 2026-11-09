@@ -59,6 +59,7 @@ chmod +x "$T/bin/tkt-job" "$T/bin/tkt-gate"
 ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
 ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
+ln -s "$REAL_BIN/tkt-plan" "$T/bin/tkt-plan" || fail "symlink tkt-plan"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 ln -s "$REAL_BIN/job-record" "$T/bin/job-record" || fail "symlink job-record"
 ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
@@ -140,6 +141,12 @@ chmod +x "$T/bin/delegate"
 # (failing with $T/artifacts-fail, cause in $T/artifacts-err).
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
+current_pr_head() {
+  if [ -f "$T/pr-origin" ]; then
+    git --git-dir="\$(cat "$T/pr-origin")" rev-parse refs/heads/tkt-528 2>/dev/null && return
+  fi
+  cat "$T/prhead"
+}
 printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 case " \$* " in
   *" pr view "*)
@@ -155,10 +162,10 @@ case " \$* " in
 esac
 case " \$* " in
   *" pr list "*)
-    if [ -f "$T/empty-pr" ]; then printf '[]\n'; else printf '[{"number":%s,"headRefOid":"%s"}]\n' "\$(cat "$T/prnum")" "\$(cat "$T/prhead")"; fi
+    if [ -f "$T/empty-pr" ]; then printf '[]\n'; else printf '[{"number":%s,"headRefOid":"%s"}]\n' "\$(cat "$T/prnum")" "\$(current_pr_head)"; fi
     ;;
   *" headRefOid "*)
-    cat "$T/prhead"
+    current_pr_head
     ;;
   *" run list "*)
     if [ -f "$T/no-runs" ]; then printf '[]\n'; else printf '[{"databaseId":101}]\n'; fi
@@ -336,6 +343,7 @@ setup_case() {
   H="$(git -C "$WT" rev-parse HEAD)"
   printf '%s' "$H" >"$T/prhead"
   printf '7' >"$T/prnum"
+  rm -f "$T/pr-origin"
   printf 'Selection' >"$T/mutant-job"
   cat >"$CDIR/plan.md" <<EOF
 Base: $H
@@ -421,6 +429,15 @@ advance_build_head() {
   H="$(git -C "$WT" rev-parse HEAD)"
   printf '%s' "$H" >"$T/prhead"
   bash "$TKT_STATE" "$S" set head "$H" || fail "advance build head state"
+}
+
+prepare_drift_verify() {
+  cp "$SCRIPT_DIR/../skills/planning/briefs/verifier.md" "$T/home/.agents/skills/planning/briefs/verifier.md" || fail "install verifier brief"
+  ln -sf "$REAL_BIN/plan-check" "$T/bin/plan-check" || fail "link plan-check"
+  printf 'pack\n' >"$CDIR/pack.md"
+  bash "$TKT_STATE" "$S" set pack "$CDIR/pack.md" || fail "set verifier pack"
+  bash "$TKT_STATE" "$S" set model.verifier vm || fail "set verifier model"
+  bash "$TKT_STATE" "$S" set verified_base "$(cat "$CDIR/main0")" || fail "set verifier base"
 }
 
 first_line() {
@@ -2100,7 +2117,7 @@ run_build
 grep -F -q "tkt-build: refusing to overwrite $CDIR/run/switchyard-528-findings-r0.md: switchyard-528-findings-r0.md names are reserved for this ticket's own findings output; write hand-kept notes to switchyard-528-dispositions-r0.md instead" "$CDIR/stderr.txt" || fail "findings-failed-collect rerun stderr missing refusal: $(cat "$CDIR/stderr.txt")"
 cmp -s "$CDIR/run/switchyard-528-findings-r0.md" "$T/findings-failed-collect-copy.md" || fail "findings-failed-collect rerun: existing file changed"
 
-# --- --from gate with main moved on a planned file but a clean merge continues ---
+# --- --from gate merges a clean stale update, refreshes state and continues ---
 setup_case gate-clean-merge
 printf 'main change\n' >"$CDIR/seed/base.txt"
 git -C "$CDIR/seed" add base.txt
@@ -2109,13 +2126,57 @@ git -C "$CDIR/seed" push -q origin main
 git -C "$WT" fetch -q origin
 {
   printf 'Base: %s\n' "$(cat "$CDIR/main0")"
-  printf '\n## Files\n\n- `src/a.txt`\n- `base.txt`\n\n## Gate\n\n`true`\n'
+  printf '\n## Files\n\n- `src/a.txt` (new-confirmed)\n- `base.txt`\n\n## Gate\n\n`true`\n'
 } >"$CDIR/plan.md"
 bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "gate-clean-merge: seed matching verdict base"
+bash "$TKT_STATE" "$S" set head "$H" || fail "gate-clean-merge: seed stored head"
+bash "$TKT_STATE" "$S" set pr 7 || fail "gate-clean-merge: seed PR"
+printf '%s' "$CDIR/origin.git" >"$T/pr-origin"
+prepare_drift_verify
+printf 'verify-ok' >"$T/delegate-mode"
 run_build --from gate
-[ "$RC" -eq 0 ] || fail "gate-clean-merge exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "gate-clean-merge"
-grep -F -q "tkt-build: plan Base $(cat "$CDIR/main0") is behind origin/main on 1 planned files; the branch merges cleanly, continuing" "$CDIR/stderr.txt" || fail "gate-clean-merge: clean-merge stderr line missing: $(cat "$CDIR/stderr.txt")"
+[ "$RC" -eq 0 ] || fail "gate-clean-merge exits 0 (rc=$RC): $(first_line): $(cat "${OUT##*log=}") $(cat "$CDIR/stderr.txt")"
+H2="$(git -C "$WT" rev-parse HEAD)"
+newbase="$(git -C "$WT" rev-parse origin/main)"
+[ "$H2" != "$H" ] || fail "gate-clean-merge: merge commit advances the branch"
+[ "$(git -C "$WT" rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')" -eq 3 ] || fail "gate-clean-merge: HEAD is a merge commit"
+[ "$(head -n 1 "$CDIR/plan.md")" = "Base: $newbase" ] || fail "gate-clean-merge: plan Base records origin/main"
+expect_state head "$H2" gate-clean-merge
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-528)" = "$H2" ] || fail "gate-clean-merge: plain push updates the branch"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H2 findings=* log=*" "gate-clean-merge"
+grep -q 'tkt-build stale recovery merge origin/main' "$CDIR/tkt.journal" || fail "gate-clean-merge: merge step is journaled"
+grep -q 'tkt-build stale recovery push origin tkt-528' "$CDIR/tkt.journal" || fail "gate-clean-merge: push step is journaled"
+grep -q "tkt-build stale recovery plan Base=$newbase" "$CDIR/tkt.journal" || fail "gate-clean-merge: Base step is journaled"
+grep -q "tkt-build stale recovery head=$H2" "$CDIR/tkt.journal" || fail "gate-clean-merge: head step is journaled"
+grep -q 'tkt-build stale recovery verify PLAN-OK' "$CDIR/tkt.journal" || fail "gate-clean-merge: verify step is journaled"
+grep -q 'verifier-r1-drift' "$T/calls.log" || fail "gate-clean-merge: verification uses the drift slot"
+grep -q '^gate|' "$T/calls.log" || fail "gate-clean-merge: gate continues after recovery"
+
+# --- a failed drift verify returns its own verdict line and stops ---
+setup_case gate-verify-fail
+printf 'main change\n' >"$CDIR/seed/base.txt"
+git -C "$CDIR/seed" add base.txt
+git -C "$CDIR/seed" -c user.email=t@t -c user.name=t commit -qm "main moves base"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt` (new-confirmed)\n- `base.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "gate-verify-fail: seed matching verdict base"
+bash "$TKT_STATE" "$S" set head "$H" || fail "gate-verify-fail: seed stored head"
+bash "$TKT_STATE" "$S" set pr 7 || fail "gate-verify-fail: seed PR"
+printf '%s' "$CDIR/origin.git" >"$T/pr-origin"
+prepare_drift_verify
+printf 'done' >"$T/delegate-mode"
+run_build --from gate
+[ "$RC" -ne 0 ] || fail "gate-verify-fail exits non-zero"
+planlog=""
+for candidate in "$CDIR/run"/*-tkt-plan-*.log; do [ -f "$candidate" ] && planlog="$candidate"; done
+[ -n "$planlog" ] || fail "gate-verify-fail: tkt-plan wrote its verdict log"
+[ "$(first_line)" = "$(head -n 1 "$planlog")" ] || fail "gate-verify-fail: tkt-build preserves tkt-plan's verdict line: $(first_line)"
+case "$(first_line)" in 'TKT tkt-plan LINES '*) ;; *) fail "gate-verify-fail: verifier returns its own non-PLAN-OK verdict: $(first_line)";; esac
+grep -q '^gate|' "$T/calls.log" && fail "gate-verify-fail: gate does not run after a failed verify"
 
 # --- --from gate with a conflicting move still exits STALE with the rerun line ---
 setup_case gate-conflict
@@ -2135,11 +2196,64 @@ run_build --from gate
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "gate-conflict"
 grep -F -q "1. git -C $WT merge origin/main" <<<"$OUT" || fail "gate-conflict: step 1 merges origin/main into the worktree: $OUT"
 grep -F -q "2. git -C $WT push origin tkt-528" <<<"$OUT" || fail "gate-conflict: step 2 pushes the merged branch plainly: $OUT"
+grep -q 'tkt-build stale recovery merge-conflict' "$CDIR/tkt.journal" || fail "gate-conflict: failed merge is journaled"
+grep -q 'tkt-build stale recovery merge-abort' "$CDIR/tkt.journal" || fail "gate-conflict: merge abort is journaled"
+[ "$(git -C "$WT" rev-parse HEAD)" = "$H" ] || fail "gate-conflict: abort leaves the original head"
+[ -z "$(git -C "$WT" status --porcelain)" ] || fail "gate-conflict: abort leaves a clean worktree"
+[ ! -e "$WT/.git/MERGE_HEAD" ] || fail "gate-conflict: merge state is cleared"
 grep -F -q "3. set the Base: line in $CDIR/plan.md to Base: $(git -C "$WT" rev-parse origin/main)" <<<"$OUT" || fail "gate-conflict: step 3 names the plan Base edit with the new sha: $OUT"
 grep -F -q "4. tkt-plan $S verify" <<<"$OUT" || fail "gate-conflict: step 4 re-verifies the plan: $OUT"
 grep -F -q "5. tkt-build $S --from gate" <<<"$OUT" || fail "gate-conflict: step 5 reruns the build: $OUT"
 grep -F -q "tkt-state $S set head" <<<"$OUT" && fail "gate-conflict: no stored head, so no head step: $OUT"
 grep -q "^gate|" "$T/calls.log" && fail "gate-conflict: the gate never runs"
+
+# --- overlap outside plan Files stops before a clean merge ---
+setup_case gate-outside-files
+rm -rf "$CDIR/origin.git" "$CDIR/seed" "$WT"
+git init -q --bare "$CDIR/origin.git"
+git --git-dir="$CDIR/origin.git" symbolic-ref HEAD refs/heads/main
+git init -q "$CDIR/seed"
+git -C "$CDIR/seed" symbolic-ref HEAD refs/heads/main
+git -C "$CDIR/seed" config user.email t@t
+git -C "$CDIR/seed" config user.name t
+mkdir -p "$CDIR/seed/src"
+printf 'first line\nsecond line\n' >"$CDIR/seed/base.txt"
+printf 'base content\n' >"$CDIR/seed/src/a.txt"
+git -C "$CDIR/seed" add base.txt src/a.txt
+git -C "$CDIR/seed" commit -qm "shared base"
+git -C "$CDIR/seed" remote add origin ../origin.git
+git -C "$CDIR/seed" push -q origin main
+git -C "$CDIR/seed" rev-parse HEAD >"$CDIR/main0"
+git clone -q "$CDIR/origin.git" "$WT"
+git -C "$WT" config user.email t@t
+git -C "$WT" config user.name t
+git -C "$WT" checkout -qb tkt-528
+printf 'branch first line\nsecond line\n' >"$WT/base.txt"
+git -C "$WT" add base.txt
+git -C "$WT" commit -qm "branch changes outside plan"
+git -C "$WT" push -q origin tkt-528
+printf 'first line\nmain second line\n' >"$CDIR/seed/base.txt"
+printf 'main planned change\n' >"$CDIR/seed/src/a.txt"
+git -C "$CDIR/seed" add base.txt src/a.txt
+git -C "$CDIR/seed" commit -qm "main changes planned and shared paths"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+H="$(git -C "$WT" rev-parse HEAD)"
+printf '%s' "$H" >"$T/prhead"
+{
+  printf 'Base: %s\n' "$(cat "$CDIR/main0")"
+  printf '\n## Files\n\n- `src/a.txt`\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "gate-outside-files: seed matching verdict base"
+bash "$TKT_STATE" "$S" set head "$H" || fail "gate-outside-files: seed head"
+bash "$TKT_STATE" "$S" set pr 7 || fail "gate-outside-files: seed PR"
+run_build --from gate
+[ "$RC" -eq 1 ] || fail "gate-outside-files exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "gate-outside-files"
+grep -F -q 'outside plan Files that the branch also touches: base.txt' <<<"$OUT" || fail "gate-outside-files: names the overlapping path: $OUT"
+[ "$(git -C "$WT" rev-parse HEAD)" = "$H" ] || fail "gate-outside-files: refuses before merging"
+[ -z "$(git -C "$WT" status --porcelain)" ] || fail "gate-outside-files: worktree remains clean"
+grep -q "^gate|" "$T/calls.log" && fail "gate-outside-files: the gate never runs"
 
 # --- a conflicting STALE prints numbered recovery steps that reach APPROVE ---
 # The digest's numbered commands run in order with the harness stubs (the
@@ -2207,7 +2321,7 @@ git -C "$WT" fetch -q origin
   printf '\n## Files\n\n- `src/a.txt`\n- `base.txt`\n\n## Gate\n\n`true`\n'
 } >"$CDIR/plan.md"
 bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/main0")" || fail "lane-clean-stale: seed matching verdict base"
-run_build
+run_build --from lane
 [ "$RC" -eq 1 ] || fail "lane-clean-stale exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-build STALE n=1 base=* log=*" "lane-clean-stale"
 grep -q "merges cleanly" "$CDIR/stderr.txt" && fail "lane-clean-stale: lane must not continue cleanly"
