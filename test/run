@@ -132,7 +132,7 @@ fi
 failed=0
 # Moved flywheel slice tests. Keep these in the gate even though they are not
 # part of the long parallel allowlist below.
-for t in "$D"/agents-ff.sh "$D"/binbox-move.sh "$D"/boxlaunch-reuse.sh "$D"/boxstale.sh "$D"/fw-lib-move.sh "$D"/lanecheck-pi.sh "$D"/lanecheck.sh; do
+for t in "$D"/agents-ff.sh "$D"/binbox-move.sh "$D"/boxlaunch-reuse.sh "$D"/boxstale.sh "$D"/fw-lib-move.sh "$D"/fw-selftest-stale.sh "$D"/lanecheck-pi.sh "$D"/lanecheck.sh; do
   _s=$SECONDS
   if bash "$t"; then
     echo "PASS: $(basename "$t") ($((SECONDS - _s))s)"
