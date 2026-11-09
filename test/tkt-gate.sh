@@ -306,6 +306,20 @@ run_gate
 expect_verdict "TKT tkt-gate PASS head=* log=*" "matching fence-grant Paths"
 [ -f "$T/gate-ran" ] || fail "matching fence-grant Paths runs the gate"
 
+# --- PASS: an extensionless granted file (bin/<script>) is covered ---
+setup_case fence-grant-extensionless
+write_plan
+cat >"$FW_RUN/fiber-517-fence-grant-1.md" <<'EOF'
+Ticket: 517
+Paths:
+- Makefile
+EOF
+commit_file Makefile "granted extensionless change"
+push_branch
+run_gate
+[ "$RC" -eq 0 ] || fail "extensionless fence-grant path passes (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "extensionless fence-grant path"
+
 # --- FENCE: a grant file for another ticket does not cover this change ---
 setup_case fence-grant-other-ticket
 write_plan

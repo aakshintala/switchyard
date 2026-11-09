@@ -270,7 +270,8 @@ for grant_file in "$grant_run"/fiber-"$issue"-fence-grant*.md; do
       *)
         case "${grant_path##*/}" in
           *.*) FILES="$FILES$grant_path|" ;;
-          *) FILES="$FILES${grant_path%/}/|" ;;
+          # An extensionless name (bin/<script>, Makefile) may be a file or a directory.
+          *) FILES="$FILES$grant_path|$grant_path/|" ;;
         esac
         ;;
     esac
