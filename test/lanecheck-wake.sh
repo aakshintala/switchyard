@@ -25,7 +25,6 @@ case " $* " in
     printf '\n---END-SEND---\n' >>"$STUBD/sent-messages"
     echo '{"ok":true,"disposition":"started"}'
     ;;
-  *"ps -eo pid=,ppid=,etime=,args="*) cat "$STUBD/pending" 2>/dev/null || true;;
   *"ps -eo args="*) cat "$STUBD/pending" 2>/dev/null || true;;
   *"ps -A -o pid="*) cat "$STUBD/box-procs" 2>/dev/null || true;;
   *"job-record"*)
