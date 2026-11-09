@@ -26,7 +26,7 @@ STUB
 chmod +x "$T/stubs/uname" "$T/stubs/ps" "$T/box-local"
 
 out=$(HOME="$T/home" PATH="$T/stubs:$PATH" FW_BOX_LOCAL="$T/box-local" \
-  FW_BOX_HOST=fixture bash -c '. "$1/fw-lib.sh"; fw_shippers' _ "$here/../bin")
+  FW_BOX_HOST=fixture bash -c '. "$1/lib/fw-lib.sh"; fw_shippers' _ "$here/../bin")
 if [ "$out" != 2 ]; then
   printf 'FAIL fw_shippers counted a local ship-pr twice: expected 2, got %s\n' "$out" >&2
   exit 1

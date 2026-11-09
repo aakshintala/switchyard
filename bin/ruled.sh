@@ -32,7 +32,7 @@ script_dir=$(cd "$(dirname "$script_path")" && pwd)
 root=$(cd "$script_dir/.." && pwd)
 R=${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}
 archive="$R/rulings"
-. "$script_dir/fw-lib.sh"
+. "$script_dir/lib/fw-lib.sh"
 
 ticket="${1:-}"
 src="${2:-}"

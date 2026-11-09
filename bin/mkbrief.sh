@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mkbrief <issue> <branch> <notes-file>  -> $HOME/work/fiber-worktrees/flywheel/run/fiber-<issue>-orchestrator-brief.md
-# PI=1 (with TKT=1): the pi/muse RPC lane template, template-pi.md.
-# TKT=1: state-mode brief from template-tkt.md plus run/fiber-<issue>-extra.md; CLOSING fills __CLOSING__ (default "Resolves #<n>").
+# PI=1 (with TKT=1): the pi/muse RPC lane template, template-pi.md in lib/.
+# TKT=1: state-mode brief from template-tkt.md in lib/ plus run/fiber-<issue>-extra.md; CLOSING fills __CLOSING__ (default "Resolves #<n>").
 # RUN_DIR and TPL_DIR override the run and template directories (tests).
 set -euo pipefail
 script_path=$0
@@ -16,14 +16,14 @@ R=${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}
 out=$R/fiber-${TAG:-$n}-orchestrator-brief.md
 REPO=${FW_REPO:-$HOME/work/fiber}
 WORKTREES=${FW_WORKTREE_ROOT:-$HOME/work/fiber-worktrees}
-L=${FW_LIB:-$script_dir/fw-lib.sh}
+L=${FW_LIB:-$script_dir/lib/fw-lib.sh}
 . "$L"
-# The model pool, from bin/pool.md and nowhere else (switchyard #1065). Every
+# The model pool, from bin/lib/pool.md and nowhere else (switchyard #1065). Every
 # template carries `__POOL__` instead of its own wording, so a pool swap is one
 # edit. Refusing on a missing or empty file rather than falling back to a baked
 # default: a default here would be a fourth place the pool can be set, which is
 # the defect.
-pool_f=${POOL_FILE:-$T/pool.md}
+pool_f=${POOL_FILE:-$T/lib/pool.md}
 pool=$(grep -v '^#' "$pool_f" 2>/dev/null | grep -v '^[[:space:]]*$' | head -1)
 [ -n "$pool" ] || { echo "no model pool: $pool_f is missing or has no non-comment line" >&2; exit 2; }
 pool_esc=$(printf '%s' "$pool" | sed 's/[\\&|]/\\&/g')
@@ -57,7 +57,7 @@ if [ -z "${SKIP_PATHS:-}" ]; then
   [ -n "$bad" ] && { printf 'notes name paths missing on origin/main (git fetch first, or mark the line "new"):\n%s\n' "$bad" >&2; exit 2; }
 fi
 if [ "${TKT:-}" = 1 ]; then
-  tpl=$T/template-tkt.md; [ "${PI:-}" = 1 ] && tpl=$T/template-pi.md
+  tpl=$T/lib/template-tkt.md; [ "${PI:-}" = 1 ] && tpl=$T/lib/template-pi.md
   closing=${CLOSING:-Resolves #$n}; closing_esc=$(printf '%s' "$closing" | sed 's/[\\&|]/\\&/g')
   # The extra file is an input, not an output: it holds the one project rule
   # this ticket turns on, written by whoever briefs the lane. Writing it with
@@ -77,7 +77,7 @@ else
   # asked for by name. Refusing, not warning: the two outputs are
   # indistinguishable once written, which is the whole defect.
   [ "${CLAUDE_TPL:-}" = 1 ] || { echo "no TKT=1: that builds the Claude template (template.md) to the same path as the lane brief. Pass TKT=1 (with PI=1 for a muse lane), or CLAUDE_TPL=1 if you really mean the Claude template." >&2; exit 2; }
-  tpl=$T/template.md; fill="s|__N__|$n|g; s|__BR__|$br|g; s|__PARENT__|$parent|g; s|__POOL__|$pool_esc|g"
+  tpl=$T/lib/template.md; fill="s|__N__|$n|g; s|__BR__|$br|g; s|__PARENT__|$parent|g; s|__POOL__|$pool_esc|g"
 fi
 filled=$(sed -e "s|/Users/aakshintala|$HOME|g" -e "s|/home/aakshintala|$HOME|g" -e "$fill" "$tpl")
 # No placeholder reaches a launched brief. #4111 shipped a brief naming a

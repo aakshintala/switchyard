@@ -11,7 +11,7 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path=$link;; *) script_path=$script_dir/$link;; esac
 done
 script_dir=$(cd "$(dirname "$script_path")" && pwd)
-. "$script_dir/fw-lib.sh"
+. "$script_dir/lib/fw-lib.sh"
 n=$1; model=${2:-haiku}; ph=${3:-}
 # A provider-prefixed id (muse/..., openai/..., grok-...) is a `delegate` model,
 # not a Claude Code session model. `claude --bg --model <that>` backgrounds

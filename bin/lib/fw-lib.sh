@@ -1,7 +1,7 @@
 #!/bin/bash
 # fw-lib.sh: shared measurements for fw-tick, fw-watch and fence-grant.
 # bash 3.2 compatible, `set -u` safe. Source it, do not execute:
-#   . "$(dirname "$0")/fw-lib.sh"
+#   . "$(dirname "$0")/lib/fw-lib.sh"
 # Overridables: FW_RUN, FW_GH, FW_CLAUDE, FW_SSH, FW_QUOTA, FW_BOX_HOST.
 # Host-independent testing: FW_MAC_LOADAVG, FW_MAC_MEMPRESS, FW_MAC_DF
 # override the raw stdout of sysctl, memory_pressure and `df -g /`.

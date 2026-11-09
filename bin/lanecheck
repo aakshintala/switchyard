@@ -273,7 +273,7 @@ if [ "${1:-}" = done ]; then
       fi
       young=1
     fi
-    # A lane's last step is the ship, not the green PR: template-tkt.md:110 has
+    # A lane's last step is the ship, not the green PR: bin/lib/template-tkt.md:110 has
     # it run ship-pr as soon as its gate passes. Retiring on "PR green and
     # reviewed" takes the slot back one step early and leaves the merge to
     # whoever notices, which is how #4125 sat unmerged from 23:47Z (this ticket
