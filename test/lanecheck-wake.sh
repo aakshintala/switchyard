@@ -3,7 +3,8 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 BIN="$here/../bin"
-T=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck-wake.XXXXXX")
+tmp_root=${TMPDIR:-/tmp}
+T=$(mktemp -d "${tmp_root%/}/lanecheck-wake.XXXXXX")
 trap 'rm -rf "${T:?}"' EXIT
 trap 'exit 130' INT TERM
 rc=0
