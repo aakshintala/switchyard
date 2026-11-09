@@ -372,6 +372,29 @@ fw_parent() {
   return 0
 }
 
+# Names every script or template in bin/ that is newer than the last selftest
+# run, one per line, and returns 0 when there is at least one. The bin dir is
+# supplied explicitly because this library lives in bin/lib/, not in bin/.
+# The comparison is `find -newer` against run/selftest-log.tsv's own mtime, not
+# the timestamp inside its last line: the log is append-only, so its mtime is
+# the last run, and this needs no date parsing on either host.
+#
+# It keys on staleness, never on green or red. A red suite must not block a
+# launch, or the guard becomes a thing to route around.
+#
+# notes-*.txt are ticket notes the flywheel writes between launches, not code,
+# so they do not make the suite stale; neither do the .bak and .v1 keeps.
+fw_selftest_stale() {
+  _fw_sb=$1
+  _fw_sl=${2:-$(_fw_run)/selftest-log.tsv}
+  [ -f "$_fw_sl" ] || { printf '%s\n' "$_fw_sl is missing: no selftest has ever run"; return 0; }
+  _fw_sn=$(find -L "$_fw_sb" -maxdepth 1 -type f ! -name 'notes-*' ! -name '*.bak*' \
+             ! -name '*.v1' -newer "$_fw_sl" 2>/dev/null)
+  [ -n "$_fw_sn" ] || return 1
+  printf '%s\n' "$_fw_sn"
+  return 0
+}
+
 # fw_is_liveness <file>: true when the file is a supervisor liveness note and
 # nothing else -- one line, exactly `[session <uuid> idle|dead]`.
 #

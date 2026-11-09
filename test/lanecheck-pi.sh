@@ -57,12 +57,16 @@ exit 0
 EOF
 chmod +x "$T/stub/"*
 : > "$T/mac-agents"
-printf '[{"name":"fiber-1465-build","state":"working","status":"busy"}]\n' > "$T/box-agents"
+printf '[{"name":"fiber-1465-build","state":"working","status":"busy"},{"name":"fiber-1468-plan","state":"working","status":"busy"}]\n' > "$T/box-agents"
 mkdir -p "$T/macrun/done" "$BOX_RUN/done"
 printf '%s\t1465\tbox\tfiber-1465-build\t-\n' \
   "$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))')" \
   > "$T/macrun/roster"
-: > "$T/macrun/roster-done"
+printf '%s\t1468\tbox\tfiber-1468-plan\t-\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$T/macrun/roster"
+printf '%s\t1467\tbox\tfiber-1467-plan\t-\n' \
+  "$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))')" \
+  >> "$T/macrun/roster"
+printf '%s\t1467\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$T/macrun/roster-done"
 
 # Pid equal to this still-running test process is live from either host's PID
 # namespace; a high unallocated pid is dead. No Claude session or remote host is used.
@@ -70,6 +74,8 @@ printf '%s\n' "$$" > "$T/macrun/fiber-1461-pi.pid"
 printf '%s\n' 99999999 > "$T/macrun/fiber-1462-pi.pid"
 printf '%s\n' "$$" > "$BOX_RUN/fiber-1463-pi.pid"
 printf '%s\n' 99999999 > "$BOX_RUN/fiber-1464-pi.pid"
+printf '%s\n' 99999999 > "$BOX_RUN/fiber-1467-pi.pid"
+printf '%s\n' 99999999 > "$BOX_RUN/fiber-1468-pi.pid"
 printf '%s\n' "$$" > "$T/macrun/fiber-1466.pid" # fiberlaunch, not a pi lane
 
 printf 'STATUS: MAC-OLD-1461\n' > "$T/macrun/fiber-1461-report.md"
@@ -82,7 +88,8 @@ python3 - "$T/macrun" "$BOX_RUN" <<'PY'
 import os, sys, time
 for root in sys.argv[1:]:
     for name, age in (("fiber-1461-report.md", 60), ("inbox/read/box-1461-latest.md", 1),
-                      ("fiber-1463-report.md", 60), ("inbox/read/box-1463-latest.md", 1)):
+                      ("fiber-1463-report.md", 60), ("inbox/read/box-1463-latest.md", 1),
+                      ("fiber-1468-pi.pid", 60)):
         p = os.path.join(root, name)
         if os.path.exists(p):
             os.utime(p, (time.time() - age, time.time() - age))
@@ -110,6 +117,17 @@ expect 'DEAD PI-BOX 1464 ' box-dead-pid-is-probed-on-box
 expect 'BOX-LATEST-1463' box-latest-report-is-shown
 expect 'BOX-LATEST-1464' box-dead-lane-report-is-shown
 expect 'LIVE 1465 box fiber-1465-build' box-claude-roster-is-preserved
+expect 'LIVE 1468 box fiber-1468-plan' newer-box-roster-session-is-live
+if printf '%s\n' "$out" | grep -Fq 'PI-BOX 1467 '; then
+  echo 'FAIL roster-done-pi-box-is-suppressed' >&2; rc=1
+else
+  echo 'ok roster-done-pi-box-is-suppressed'
+fi
+if printf '%s\n' "$out" | grep -Fq 'PI-BOX 1468 '; then
+  echo 'FAIL newer-live-roster-session-suppresses-stale-pi-box' >&2; rc=1
+else
+  echo 'ok newer-live-roster-session-suppresses-stale-pi-box'
+fi
 if printf '%s\n' "$out" | grep -Fq 'PI-MAC 1466'; then
   echo 'FAIL mac-fiberlaunch-is-not-a-pi-lane' >&2; rc=1
 else

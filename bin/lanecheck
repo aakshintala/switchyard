@@ -492,7 +492,18 @@ export FW_SNAP_AT
 # pi lanes have no Claude session row. Probe their pidfiles on each host, where
 # kill(pid, 0) has the same process-namespace semantics as `kill -0`.
 cat >"$tmp/pi-snapshot.py" <<'PY'
-import glob, os, re, sys
+import glob, os, re, sys, subprocess
+
+
+def file_mtime(path):
+    # GNU stat first, with the BSD/macOS form as the fallback.
+    for args in (("-c", "%Y"), ("-f", "%m")):
+        try:
+            return int(subprocess.check_output(
+                ["stat", *args, path], stderr=subprocess.DEVNULL).strip())
+        except Exception:
+            pass
+    return os.path.getmtime(path)
 
 
 def report_status(run, ticket):
@@ -544,7 +555,7 @@ for path in sorted(glob.glob(os.path.join(run, "fiber-*-pi.pid"))):
         state = "LIVE"  # kill -0 reports an existing but inaccessible process
     except (OSError, ValueError):
         state = "DEAD"
-    print(f"{ticket}\t{state}\t{report_status(run, ticket)}")
+    print(f"{ticket}\t{state}\t{int(file_mtime(path))}\t{report_status(run, ticket)}")
 PY
 python3 "$tmp/pi-snapshot.py" "$R" >"$tmp/mac-pi.tsv" 2>/dev/null
 if [ -n "${FW_BOX_RUN:-}" ]; then
@@ -923,23 +934,6 @@ for host, err, f in (("mac", mac_err, "mac.err"), ("box", box_err, "box.err"),
         detail = open(os.path.join(tmp, f)).read().strip().splitlines()
         print(f"UNKNOWN {host} — cannot list sessions: {err}" + (f" | {detail[-1]}" if detail else ""))
 
-for host, path in (("PI-MAC", os.path.join(tmp, "mac-pi.tsv")),
-                   ("PI-BOX", os.path.join(tmp, "box-pi.tsv"))):
-    try:
-        with open(path) as pi_rows:
-            for row in pi_rows:
-                fields = row.rstrip("\n").split("\t", 2)
-                if fields[0] == "UNREACHABLE":
-                    print(f"UNREACHABLE {host} — cannot read pidfiles from {fields[1]}")
-                elif fields[0] == "UNKNOWN":
-                    print(f"UNKNOWN {host} — {fields[1]}")
-                elif fields[0] == "ERROR":
-                    print(f"UNKNOWN {host} — {fields[1]}")
-                elif len(fields) == 3:
-                    print(f"{fields[1]} {host} {fields[0]} {fields[2]}")
-    except OSError:
-        pass
-
 # `NO-WATCHER ~/lane-inbox/<ticket> unread=<n>` lines from inbox-watchers. Absent
 # file or failed ssh (WATCH-ERROR) means no pairing rather than a false all-clear,
 # so start empty; only unread > 0 is blind, an empty unwatched inbox is fine.
@@ -980,6 +974,8 @@ for line in open(roster):
     entries[(n, sess)] = (ts, host, jid)
 
 missing = 0
+active_roster_tickets = set()
+live_roster_starts = {}
 for (n, sess), (ts, host, jid) in sorted(entries.items()):
     # A `done <ticket>:<key>` line names the session either way round: by its
     # roster name (`fiber-4026-plan`) or by its delegate session id, whole or
@@ -995,6 +991,7 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
             cut = max(cut, dts)
     if cut and ts.split()[0] <= cut:
         continue
+    active_roster_tickets.add(n)
     # A delegate lane is looked up by its session id (column 5), a Claude lane
     # by its session name (column 4). `deleg` holds which machine's delegate
     # store the id lives in, or None for a Claude session, and every branch
@@ -1248,6 +1245,9 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                           f"landed, else wake it with "
                           + sendline)
         else:
+            started = launched(ts)
+            if started is not None:
+                live_roster_starts[n] = max(started, live_roster_starts.get(n, 0))
             print(f"LIVE {n} {host} {sess} {state}/{status}{blind}")
     else:
         # A lane launched after the snapshots were taken cannot be in them, so
@@ -1260,6 +1260,37 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
         else:
             missing += 1
             print(f"MISSING {n} {host} {sess} id={jid} launched {ts} — relaunch or park with a reason")
+
+recorded_retirements = set(done)
+recorded_retirements.update(n for n, _ in done_sess)
+retired_tickets = recorded_retirements - active_roster_tickets
+for host, path in (("PI-MAC", os.path.join(tmp, "mac-pi.tsv")),
+                   ("PI-BOX", os.path.join(tmp, "box-pi.tsv"))):
+    try:
+        with open(path) as pi_rows:
+            for row in pi_rows:
+                fields = row.rstrip("\n").split("\t", 3)
+                if fields[0] == "UNREACHABLE":
+                    print(f"UNREACHABLE {host} — cannot read pidfiles from {fields[1]}")
+                elif fields[0] == "UNKNOWN":
+                    print(f"UNKNOWN {host} — {fields[1]}")
+                elif fields[0] == "ERROR":
+                    print(f"UNKNOWN {host} — {fields[1]}")
+                elif len(fields) == 4:
+                    ticket, state, pid_mtime, status = fields
+                    if host == "PI-BOX":
+                        if ticket in retired_tickets:
+                            continue
+                        try:
+                            pid_mtime = float(pid_mtime)
+                        except ValueError:
+                            pid_mtime = None
+                        started = live_roster_starts.get(ticket)
+                        if pid_mtime is not None and started is not None and started > pid_mtime:
+                            continue
+                    print(f"{state} {host} {ticket} {status}")
+    except OSError:
+        pass
 
 print(f"-- {len(entries)} roster entries, {len(done)} tickets and {len(done_sess)} sessions retired, {missing} missing")
 sys.exit(1 if missing else 0)
