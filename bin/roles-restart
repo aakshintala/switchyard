@@ -3,13 +3,14 @@
 # Install manually only when approved:
 #   cp claude-code/launchd/com.aakshintala.roles-restart.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aakshintala.roles-restart.plist
 # The plist is a template; this script never installs or bootstraps it.
-# ROLES_RESTART_ROLES may override defaults as newline-separated role|home|handoff rows.
+# ROLES_RESTART_ROLES may override defaults as newline-separated role|home|handoff[|extra-args] rows.
+# Fourth-column extra args are split on whitespace and passed before --agent.
+# ROLES_RESTART_AGENTS_JSON may provide a fixture instead of running claude agents --json.
 # ROLES_RESTART_WAIT_TIMEOUT bounds the gh auth status network/auth wait (seconds).
 set -euo pipefail
 
 log_file="${ROLES_RESTART_LOG:-$HOME/.cache/agents/roles-restart.log}"
 lock_dir="${ROLES_RESTART_LOCK_DIR:-$HOME/.cache/agents/roles-restart.lock}"
-jobs_dir="${ROLES_RESTART_JOBS_DIR:-$HOME/.claude/jobs}"
 wait_timeout="${ROLES_RESTART_WAIT_TIMEOUT:-120}"
 
 log() {
@@ -57,26 +58,102 @@ if ! wait_for_auth; then
   exit 1
 fi
 
+if [ -n "${ROLES_RESTART_AGENTS_JSON:-}" ]; then
+  if ! agents_json="$(cat "$ROLES_RESTART_AGENTS_JSON")"; then
+    log "could not read agents JSON file $ROLES_RESTART_AGENTS_JSON"
+    exit 1
+  fi
+else
+  if agents_json="$(claude agents --json)"; then
+    :
+  else
+    status=$?
+    log "claude agents --json failed (exit $status)"
+    exit 1
+  fi
+fi
+
+if agents_error="$(printf '%s\n' "$agents_json" | python3 -I -c '
+import json
+import sys
+
+try:
+    agents = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError) as error:
+    print(error)
+    raise SystemExit(1)
+if not isinstance(agents, list):
+    print("expected a JSON array")
+    raise SystemExit(1)
+')"; then
+  :
+else
+  log "could not parse claude agents --json: $agents_error"
+  exit 1
+fi
+
+role_is_live() {
+  local role_name="$1" matching_pids pid
+  if ! matching_pids="$(printf '%s\n' "$agents_json" | python3 -I -c '
+import json
+import sys
+
+role = sys.argv[1]
+for row in json.load(sys.stdin):
+    if not isinstance(row, dict) or row.get("name") != role:
+        continue
+    pid = row.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        print(pid)
+' "$role_name")"; then
+    return 2
+  fi
+  while IFS= read -r pid; do
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+  done <<<"$matching_pids"
+  return 1
+}
+
+launch_role() {
+  local role_name="$1" role_home="$2" role_prompt="$3" extra_args_text="$4"
+  if [ -n "$extra_args_text" ]; then
+    local -a extra_args
+    IFS=$' \t\n' read -r -a extra_args <<<"$extra_args_text"
+    if [ -n "${extra_args[0]:-}" ]; then
+      (cd "$role_home" && claude --bg "${extra_args[@]}" --agent "$role_name" "$role_prompt")
+      return $?
+    fi
+  fi
+  (cd "$role_home" && claude --bg --agent "$role_name" "$role_prompt")
+}
+
 if [ -n "${ROLES_RESTART_ROLES:-}" ]; then
   roles="$ROLES_RESTART_ROLES"
 else
   roles="$(printf '%s\n' \
-    "surveyor|$HOME/work/fiber-worktrees/surveyor/home|$HOME/work/wiki/state/surveyor.md" \
-    "switchyard|$HOME/work/sy-wt/main|$HOME/work/wiki/state/switchyard.md" \
-    "flywheel|$HOME/work/fiber|$HOME/work/wiki/state/flywheel.md")"
+    "surveyor|$HOME/work/fiber-worktrees/surveyor/home|$HOME/work/wiki/state/surveyor.md|" \
+    "switchyard|$HOME/work/sy-wt/main|$HOME/work/wiki/state/switchyard.md|" \
+    "flywheel|$HOME/work/fiber|$HOME/work/wiki/state/flywheel.md|")"
 fi
 
 failed=0
 while IFS= read -r entry || [ -n "$entry" ]; do
   [ -n "$entry" ] || continue
-  role=""; home=""; handoff=""; extra=""
-  IFS='|' read -r role home handoff extra <<<"$entry"
-  if [ -z "$role" ] || [ -z "$home" ] || [ -z "$handoff" ] || [ -n "$extra" ]; then
-    log "invalid role table row; expected role|home|handoff: $entry"
+  role=""; home=""; handoff=""; extra_args_text=""
+  columns=1
+  remaining="$entry"
+  while [[ "$remaining" == *'|'* ]]; do
+    columns=$((columns + 1))
+    remaining="${remaining#*|}"
+  done
+  IFS='|' read -r role home handoff extra_args_text <<<"$entry"
+  if [ "$columns" -gt 4 ] || [ -z "$role" ] || [ -z "$home" ] || [ -z "$handoff" ]; then
+    log "invalid role table row; expected role|home|handoff[|extra-args]: $entry"
     failed=1
     continue
   fi
-
   if [ ! -f "$handoff" ]; then
     log "skipping $role: missing handoff $handoff"
     owner-ask log --from switchyard --kind note --title "roles-restart missing handoff $role" \
@@ -84,28 +161,15 @@ while IFS= read -r entry || [ -n "$entry" ]; do
     continue
   fi
 
-  if python3 -I - "$jobs_dir" "$role" "$home" <<'PY'
-import glob
-import json
-import os
-import sys
-
-jobs_dir, role, home = sys.argv[1:]
-terminal = {"done", "stopped", "failed"}
-for path in glob.glob(os.path.join(jobs_dir, "*", "state.json")):
-    try:
-        with open(path, encoding="utf-8") as source:
-            job = json.load(source)
-    except (OSError, ValueError):
-        continue
-    if (job.get("template") == role and job.get("cwd") == home
-            and job.get("state") not in terminal):
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
-  then
+  if role_is_live "$role"; then
     log "skipping $role: live session found"
     continue
+  else
+    status=$?
+    if [ "$status" -eq 2 ]; then
+      log "could not check claude agents JSON for $role"
+      exit 1
+    fi
   fi
 
   if [ ! -d "$home" ]; then
@@ -113,8 +177,8 @@ PY
     failed=1
     continue
   fi
-  prompt="Read your handoff at $handoff. Follow its instructions, re-create the crons listed in its ## Crons section, restart your inbox wait, and carry on."
-  if (cd "$home" && claude --bg --agent "$role" "$prompt"); then
+  prompt="Read your handoff at $handoff. Follow its instructions, re-create the crons listed in its ## Crons section, restart your inbox wait, and carry on. If it has no ## Crons section, say so on owner-ask and carry on."
+  if launch_role "$role" "$home" "$prompt" "$extra_args_text"; then
     log "roles-restart relaunched $role"
     owner-ask log --from switchyard --kind process --title "roles-restart relaunched $role" \
       || { log "owner-ask process line failed for $role"; failed=1; }
