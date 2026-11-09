@@ -298,7 +298,19 @@ grep -Fq 'unverified=fix round 1' "$history" || fail "no-verify history did not 
 printf 'history-two' >"$T/vermode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "verify after no-verify exited $?"
 grep -Fq 'unverified=fix round 1' "$T/verify-input-1.md" || fail "verify after no-verify lost the unverified round label"
+fi
 
+if want findings-overwrite-repair; then
+setup_case findings-overwrite-repair
+FINDINGS_PATH="$CDIR/run/switchyard-529-fix-round-1-findings.md"
+printf 'existing findings\n' >"$FINDINGS_PATH"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>&1)" || run_rc=$?
+[ "$run_rc" = "2" ] || fail "findings-overwrite-repair exited $run_rc, want 2: $out"
+grep -Fq 'refusing to overwrite unrecorded round findings' <<<"$out" || fail "findings-overwrite-repair did not refuse overwrite: $out"
+grep -Fq "tkt-state $S set fix_round.1.findings $FINDINGS_PATH" <<<"$out" || fail "findings-overwrite-repair omitted concrete re-record command: $out"
+fi
+
+if want missing-round-findings; then
 setup_case missing-round-findings
 printf 'round one fix\n' >"$WT/fix.txt"
 git -C "$WT" add fix.txt
@@ -315,6 +327,55 @@ rc=$?; [ "$rc" = "1" ] || fail "missing-round-findings exited $rc, want 1"
 grep -Fq "FINDINGS-UNACCOUNTED commits=$ROUND1_HEAD" <<<"$out" || fail "missing-round-findings did not list its commit: $(head -n 1 <<<"$out")"
 grep -Fq "tkt-state $S set fix_round.1.findings $CDIR/run/switchyard-529-fix-round-1-findings.md && tkt-fix $S --verify --since $OLD" <<<"$out" || fail "missing-round-findings omitted repair command: $(tail -n +2 <<<"$out")"
 grep -q '^review-pr|' "$T/calls.log" && fail "missing-round-findings ran review-pr"
+fi
+
+if want since-not-ancestor; then
+setup_case since-not-ancestor
+# The reviews covered a lane commit, then the branch was rewritten onto main.
+printf 'reviewed lane\n' >>"$WT/base.txt"
+git -C "$WT" add base.txt
+git -C "$WT" commit -qm 'lane: reviewed head'
+OLD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set reviewed "$OLD" >/dev/null
+bash "$TKT_STATE" "$S" set head "$OLD" >/dev/null
+git -C "$WT" checkout -q main
+git -C "$WT" checkout -q -B tkt-529 main
+printf 'rebased lane\n' >>"$WT/base.txt"
+git -C "$WT" add base.txt
+git -C "$WT" commit -qm 'lane: rebased head'
+REBASED_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$REBASED_HEAD" >/dev/null
+printf 'done' >"$T/jobmode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --since "$OLD" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "since-not-ancestor exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -Fq "SINCE-NOT-ANCESTOR since=$OLD head=" <<<"$out" || fail "since-not-ancestor verdict missing: $out"
+grep -Fq 'FINDINGS-UNACCOUNTED' <<<"$out" && fail "since-not-ancestor reported unaccounted findings: $out"
+grep -Fq 'branch history was rewritten after the review' <<<"$out" || fail "since-not-ancestor did not explain the rewrite: $out"
+grep -Fq 're-review the head' <<<"$out" || fail "since-not-ancestor omitted its recovery route: $out"
+fi
+
+if want unknown-gap-repair; then
+setup_case unknown-gap-repair
+# This hand commit landed after review but before round 1's recorded start.
+printf 'hand commit\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'hand: between review and round start'
+HAND_HEAD="$(git -C "$WT" rev-parse HEAD)"
+printf 'round start marker\n' >>"$WT/base.txt"
+git -C "$WT" add base.txt
+git -C "$WT" commit -qm 'round: start marker'
+ROUND_START="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" merge-base --is-ancestor "$HAND_HEAD" "$ROUND_START" || fail "unknown-gap-repair hand commit is not before round start"
+git -C "$WT" push -q origin tkt-529
+bash "$TKT_STATE" "$S" set head "$ROUND_START" >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.1.start "$ROUND_START" >/dev/null
+printf 'done' >"$T/jobmode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --since "$OLD" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "unknown-gap-repair exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -Fq 'FINDINGS-UNACCOUNTED' <<<"$out" || fail "unknown-gap-repair did not report uncovered hand work: $out"
+grep -Fq "tkt-state $S set fix_round.1.start $OLD && tkt-fix $S --verify --since $OLD" <<<"$out" || fail "unknown-gap-repair omitted concrete command: $out"
+[[ "$out" != *'<'* ]] || fail "unknown-gap-repair left a placeholder in output: $out"
+[ -n "$HAND_HEAD" ] || fail "unknown-gap-repair fixture did not make its hand commit"
 fi
 
 if want round-ownership; then

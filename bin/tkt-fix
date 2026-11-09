@@ -333,7 +333,7 @@ write_findings() {
 }
 
 record_round_findings() {
-  local key="fix_round.$knum.findings" path
+  local key="fix_round.$knum.findings" path state_arg path_arg
   path="$(t get "$key" 2>/dev/null || true)"
   if [ -n "$path" ]; then
     [ -r "$path" ] || { echo "tkt-fix: recorded round findings are missing: $key=$path" >&2; exit 2; }
@@ -341,7 +341,9 @@ record_round_findings() {
   fi
   path="$run/$namebase$part_suffix-fix-round-$knum-findings.md"
   if [ -e "$path" ]; then
+    state_arg="$(printf '%q' "$state")"; path_arg="$(printf '%q' "$path")"
     echo "tkt-fix: refusing to overwrite unrecorded round findings: $path" >&2
+    echo "re-record with: tkt-state $state_arg set $key $path_arg" >&2
     exit 2
   fi
   cp "$findings" "$path" || { echo "tkt-fix: cannot record round findings: $path" >&2; exit 2; }
@@ -375,8 +377,13 @@ record_round_head() {
 
 verify_round_coverage() {
   local round_list_file="$1" unaccounted_file="$2" commits commit owner limit n round_start round_head round_findings
-  local sha_list missing_rounds repair_command state_arg since_arg path_arg
+  local sha_list missing_rounds repair_command state_arg since_arg path_arg first_round_start first_round_commit concrete_start any_round_start
   : >"$round_list_file"; : >"$unaccounted_file"
+  if ! git -C "$worktree" merge-base --is-ancestor "$verify_since" "$new_head" 2>/dev/null; then
+    emit "SINCE-NOT-ANCESTOR since=$verify_since head=$new_head" 1 \
+      "branch history was rewritten after the review, so scoped-verify rounds cannot be mapped" \
+      "route: re-review the head, or record reviewed as the rebased equivalent of the reviewed commit"
+  fi
   # First parent only: a merge of main into the branch needs an owning round,
   # but the main commits it brings in were never this branch's fix work.
   commits="$(git -C "$worktree" rev-list --first-parent --reverse "$verify_since..$new_head")" || emit "FINDINGS-SCOPE-ERROR" 1 "cannot enumerate commits in $verify_since..$new_head"
@@ -424,7 +431,37 @@ verify_round_coverage() {
       done
       repair_command="restore the named round findings file(s), then run: $repair_command && tkt-fix $state_arg --verify --since $since_arg"
     else
-      repair_command="record the owning round with tkt-state $state_arg set fix_round.<n>.start <round start> && tkt-state $state_arg set fix_round.<n>.head <round head> && tkt-state $state_arg set fix_round.<n>.findings <round findings file>, then run tkt-fix $state_arg --verify --since $since_arg"
+      first_round_start="$(t get fix_round.1.start 2>/dev/null || true)"
+      concrete_start=0
+      if [ -z "$first_round_start" ]; then
+        any_round_start=0
+        n=1
+        while [ "$n" -le "$limit" ]; do
+          if [ -n "$(t get "fix_round.$n.start" 2>/dev/null || true)" ]; then
+            any_round_start=1
+            break
+          fi
+          n=$((n + 1))
+        done
+        [ "$any_round_start" -eq 0 ] && concrete_start=1
+      else
+        first_round_commit="$(git -C "$worktree" rev-parse --verify "${first_round_start}^{commit}" 2>/dev/null || true)"
+        if [ -n "$first_round_commit" ]; then
+          concrete_start=1
+          while IFS= read -r commit; do
+            [ -n "$commit" ] || continue
+            if ! git -C "$worktree" merge-base --is-ancestor "$commit" "$first_round_commit" 2>/dev/null; then
+              concrete_start=0
+              break
+            fi
+          done < <(awk '$2 == "unknown" {print $1}' "$unaccounted_file")
+        fi
+      fi
+      if [ "$concrete_start" -eq 1 ]; then
+        repair_command="tkt-state $state_arg set fix_round.1.start $since_arg && tkt-fix $state_arg --verify --since $since_arg"
+      else
+        repair_command="record the owning round with tkt-state $state_arg set fix_round.<n>.start <round start> && tkt-state $state_arg set fix_round.<n>.head <round head> && tkt-state $state_arg set fix_round.<n>.findings <round findings file>, then run tkt-fix $state_arg --verify --since $since_arg"
+      fi
     fi
     emit "FINDINGS-UNACCOUNTED commits=$sha_list" 1 \
       "rounds missing findings=${missing_rounds:-unknown}" \
