@@ -56,6 +56,14 @@ expect_clean() {
   [ ! -s "$T/err.txt" ] || fail "$1: nothing on stderr"
 }
 
+# expect_task_warning_clean NAME PLAN: clean exit plus the advisory drift warning.
+expect_task_warning_clean() {
+  run "$2" --cwd "$R"
+  [ "$code" = 0 ] || fail "$1: exits 0, got $code [$out]"
+  [ -z "$out" ] || fail "$1: nothing on stdout, got [$out]"
+  grep -Fq 'warning: no resolvable path in ## Tasks; drift exemption will use ## Files paths' "$T/err.txt" || fail "$1: warning names the Files fallback"
+}
+
 # expect_problems NAME PLAN WANT: exit 1, stdout is WANT (printf %b)
 expect_problems() {
   run "$2" --cwd "$R"
@@ -77,11 +85,7 @@ clean="$(mkplan clean '## Files\n- `src/lib.rs`\n- `cfg/unique.toml`\n\n## Rulin
 expect_clean "clean plan" "$clean"
 
 # Tasks with a command but no resolvable path warn without changing the exit status.
-no_task_path="$(mkplan no_task_path '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Sweep with `perl -pi -e '\''s/old/new/'\'' src/lib.rs`.\n')"
-run "$no_task_path" --cwd "$R"
-[ "$code" = 0 ] || fail "unresolvable Tasks path warning keeps exit 0, got $code [$out]"
-[ -z "$out" ] || fail "unresolvable Tasks path warning prints nothing on stdout, got [$out]"
-grep -Fq 'warning: no resolvable path in ## Tasks; drift exemption will use ## Files paths' "$T/err.txt" || fail "unresolvable Tasks path warning names the Files fallback"
+expect_task_warning_clean "unresolvable Tasks path warning" "$(mkplan no_task_path '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Sweep with `perl -pi -e '\''s/old/new/'\'' src/lib.rs`.\n')"
 
 # Citations check the symbol at the base, including a single line and a range.
 expect_clean "symbol at cited line" "$(mkplan citeok '## Files\n- `src/lib.rs`\n\n## Rulings\n`make_widget()` at `src/lib.rs:1`.\n`src/lib.rs:1-2` holds `WidgetThing`.\n')"
@@ -155,7 +159,7 @@ claim_out="$(PATH="$T/stubbin:$PATH" FILE_CLAIM_REMOTE="$claim_remote" bash "$SC
 case "$claim_out" in *"GRANT crates/newcrate/src/lib.rs new"*) ;; *) fail "file-claim --plan-file claims newcrate path: $claim_out" ;; esac
 claim_blob="$(git --git-dir="$claim_remote" show refs/claims/live:claims)"
 case "$claim_blob" in *$'crates/newcrate/src/lib.rs\tfiber-1243\tplan\t'*) ;; *) fail "claims ref contains newcrate path" ;; esac
-expect_clean "new exempts a Files path and its task line" "$(mkplan newok '## Files\n- `src/brand.rs` (New file)\n\n## Tasks\n1. Write new `src/brand.rs` with `WidgetThing`.\n')"
+expect_task_warning_clean "new exempts a Files path and its task line" "$(mkplan newok '## Files\n- `src/brand.rs` (New file)\n\n## Tasks\n1. Write new `src/brand.rs` with `WidgetThing`.\n')"
 
 # 3b. new paths close to a base filename need confirmation; new-confirmed bypasses it
 expect_problems "new path close to a base filename" "$(mkplan nearnew '## Files\n- `xtask/tests/class_data/9v45-sessions-list.json` (new)\n')" \
@@ -179,7 +183,7 @@ expect_problems "newer is not new" "$(mkplan newer '## Files\n- `src/nope.rs` (n
   'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
 # 5. an ambiguous suffix (two files end in /x.rs) resolves but stays out of the Files check
-expect_clean "ambiguous suffix is not outside Files" "$(mkplan ambig '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `x.rs`.\n')"
+expect_task_warning_clean "ambiguous suffix is not outside Files" "$(mkplan ambig '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `x.rs`.\n')"
 
 # 6. a task path outside Files
 expect_problems "task path outside Files" "$(mkplan outside '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `docs/guide.md` and `src/lib.rs`.\n')" \
@@ -237,7 +241,7 @@ expect_problems "directory not covered by Files" "$(mkplan dirout '## Files\n- `
   'outside Files: docs/ (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 11f. symbol rule: prose symbols are never checked, in any section
-expect_clean "symbols in Tasks are not checked" "$(mkplan tasksym '## Tasks\n1. Add `NoSuchThing()`.\n')"
+expect_task_warning_clean "symbols in Tasks are not checked" "$(mkplan tasksym '## Tasks\n1. Add `NoSuchThing()`.\n')"
 expect_clean "symbols in Red commit are not checked" "$(mkplan redsym '## Red commit\n`Frob_Thing`\n')"
 expect_clean "new line exempts a symbol in a backticked token" "$(mkplan newsym '## Rulings\nAdd new `src/x.rs::Brand_New`.\nCall `Brand_New`.\n')"
 
