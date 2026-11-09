@@ -44,7 +44,7 @@ The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `ver
 | `tkt-state` | exit 0 | exit 2 |
 | `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `TRIAGED-REFUSED`, `POST-FAIL`, `SET-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-job` | `DONE`, `CONCERNS` | `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `GATE-REFUSED` (gate exited 75: refused, nothing tested; not a pass or code failure—rerun the gate where it has room), `NO-COMMITS`, `UNKNOWN` |
-| `tkt-build` | `APPROVE`; `MEASURED` for an `Outcome: measurement` plan, which ends the ticket with no PR | `CHANGES`, `STALE`, `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `VERDICT-REFUSED`, `<step>-ERROR` |
+| `tkt-build` | `APPROVE`; `MEASURED` for an `Outcome: measurement` plan, which ends the ticket with no PR | `CHANGES`, `STALE` (build-phase STALE merges `origin/main`, updates the plan and head, verifies, and continues when those steps pass), `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `VERDICT-REFUSED`, `<step>-ERROR` |
 | `tkt-gate` | `PASS` | `TIP`, `FENCE`, `FAIL` |
 | `tkt-fix` | `FIX-OK`; `PUSHED` then `tkt-ship --unverified-fixes` | `FIX-INCOMPLETE`, `VERIFY-FAIL`, `PUSH-FAIL`, `CI-WAIT`, `RECOVER`, `DRIFT`, `FINDINGS-UNACCOUNTED`, `SINCE-NOT-ANCESTOR`, `FINDINGS-SCOPE-ERROR`, `ROUND-LIMIT`, `UNKNOWN`, gate stops |
 | `tkt-ship` | `MERGED` | `PENDING`, `CONFLICT`, `PATCH-CHANGED`, `BODY`, `LABEL`, `REVIEW`, `MUTANTS`, `SHIP`, `GATE-FAIL`, `MERGE-FAIL`, `CI-FAIL`, `PRECONDITION`, `BUSY`, `DRIFT`, `UNKNOWN` |
