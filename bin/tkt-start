@@ -190,7 +190,10 @@ if [ "$part_given" -eq 1 ]; then
               for m in ${models[@]+"${models[@]}"}; do
                 if [ "${m%%=*}" = "$model_role" ]; then model_replaced=1; fi
               done
-              if [ "$model_replaced" -eq 0 ]; then carried_models+=("$state_line"); fi
+              if [ "$model_replaced" -eq 0 ]; then
+                carried_models+=("$state_line")
+                part_notes+=("carried $state_line from part $((part - 1)); pass --model ${state_line#model.} to change it")
+              fi
               ;;
           esac
         done <"$state"
@@ -316,7 +319,7 @@ if [ -n "$stop_pr" ] && [ "$recur_ok" -eq 1 ]; then
   if [ "$recur_hit" = "true" ]; then notes+=("NOTE recurred after merged PR #$recur_pr"); stop_pr=""; fi
 fi
 [ -n "$stop_pr" ] && deny "MERGED-STOP pr=$stop_pr" 1 "tkt-start: issue #$issue already resolved by merged PR #$stop_pr"
-part_notes=(${notes[@]+"${notes[@]}"})
+part_notes+=(${notes[@]+"${notes[@]}"})
 # With --mutant-job, the branch PR must carry the mutants label, or ship-pr
 # later refuses the draft for lacking it. When the repo defines the label
 # (the same labels read ship-pr checks), add it to the branch's open PR when
