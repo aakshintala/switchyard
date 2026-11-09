@@ -92,6 +92,9 @@ case "\$(cat "$T/jobmode")" in
   stale-resume)
     echo "delegate resume j1: unknown job j1 (record missing)" >&2
     exit 2;;
+  backend-refusal)
+    echo 'cannot resume j9: model requested-model uses backend "anthropic", but stored-model ran on backend "openai"' >&2
+    exit 2;;
   stderr-only)
     echo 'tkt-job refused: missing required context' >&2
     exit 3;;
@@ -584,6 +587,27 @@ setup_case resume
 printf 'resume brief\n' >"$CDIR/prompt.md"
 out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "resume exited $?"
 grep -q "job|.*--resume j9.*--prompt $CDIR/prompt.md.*--gate-from-plan" "$T/calls.log" || fail "resume args not forwarded with --gate-from-plan"
+grep -q 'job|.*--model' "$T/calls.log" && fail "resume without --fix-model passed a model"
+
+# --fix-model overrides the stored model for a resume.
+if want RESUME-MODEL; then
+setup_case resume-model
+printf 'resume brief\n' >"$CDIR/prompt.md"
+out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" --fix-model requested-model 2>"$T/stderr")" || fail "resume-model exited $?"
+grep -q "job|.*--resume j9.*--prompt $CDIR/prompt.md.*--model requested-model.*--gate-from-plan" "$T/calls.log" || fail "resume-model did not forward --fix-model to tkt-job: $(cat "$T/calls.log")"
+fi
+
+# A backend switch refusal keeps delegate's message and points to a fresh fix job.
+if want RESUME-BACKEND-REFUSAL; then
+setup_case resume-backend-refusal
+printf 'resume brief\n' >"$CDIR/prompt.md"
+printf 'backend-refusal' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" --fix-model requested-model 2>"$T/stderr")" && fail "resume backend refusal exited 0"
+rc=$?; [ "$rc" = "3" ] || fail "resume backend refusal exited $rc, want 3"
+grep -Fq 'cannot resume j9: model requested-model uses backend "anthropic", but stored-model ran on backend "openai"' "$T/stderr" || fail "delegate backend refusal missing from stderr: $(cat "$T/stderr")"
+grep -Fq 'tkt-fix: start a fresh fix job (drop --resume) with --fix-model requested-model' "$T/stderr" || fail "backend refusal fresh-job hint missing: $(cat "$T/stderr")"
+grep -q 'job|.*--model requested-model' "$T/calls.log" || fail "backend refusal did not pass requested model to tkt-job"
+fi
 
 # 7b. With gate.script set, a resume whose plan Gate line skips the script stops before dispatch.
 setup_case resume-gate-script
@@ -591,8 +615,9 @@ printf 'gate.script=%s\n' scripts/check >>"$S"
 printf 'resume brief\n' >"$CDIR/prompt.md"
 bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" >/dev/null 2>"$T/stderr" && fail "resume-gate-script exited 0"
 grep -q "job|" "$T/calls.log" && fail "resume-gate-script dispatched a job"
-bash "$TKT" "$S" 2>/dev/null && fail "bare flags exited 0"
+bash "$TKT" "$S" 2>"$T/stderr" && fail "bare flags exited 0"
 rc=$?; [ "$rc" = "2" ] || fail "bare flags exited $rc, want 2"
+grep -Fq -- '--fix-model <id> overrides the stored model on --resume' "$T/stderr" || fail "usage does not explain --fix-model on resume: $(cat "$T/stderr")"
 # 7a. Round 2 refuses a fresh fix before any slot or dispatch; --resume still runs.
 setup_case round-limit
 bash "$TKT_STATE" "$S" set round 2 >/dev/null

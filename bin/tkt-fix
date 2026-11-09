@@ -4,10 +4,12 @@
 # A lane blocked before its PR resumes with tkt-job --resume <job.lane> followed by tkt-build --from gate, or with tkt-build --from lane when no lane ran.
 # Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>]
 #   [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]
+#   --fix-model overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model.
 set -euo pipefail
 
 usage() {
   echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
+  echo "  --fix-model <id> overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model." >&2
   exit 2
 }
 
@@ -646,7 +648,10 @@ if [ "$recover_unpushed" -eq 1 ]; then
   t set fixopen 0
   echo "tkt-fix: pushed unpushed fix job head $recover_old_head -> $recover_new_head" >&2
 else
-  if [ -n "$resume" ]; then args=(--slot "$slot" --resume "$resume" --prompt "$prompt" --gate-from-plan)
+  if [ -n "$resume" ]; then
+    args=(--slot "$slot" --resume "$resume" --prompt "$prompt")
+    [ -z "$fixmodel" ] || args+=(--model "$fixmodel")
+    args+=(--gate-from-plan)
   else
     [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
     args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$gate_cmd" --gate-from-plan --expect-commits)
@@ -662,6 +667,10 @@ else
       "Recovery: triage owning slot $slot before deciding whether it may start a fresh job; the slot remains owned by $resume."
   fi
   if [ -s "$tmp/job.err" ]; then cat "$tmp/job.err" >&2; fi
+  if [ "$jrc" -ne 0 ] && [ -n "$resume" ] && [ -n "$fixmodel" ] \
+    && grep -Fq -- " uses backend " "$tmp/job.err"; then
+    printf 'tkt-fix: start a fresh fix job (drop --resume) with --fix-model %s\n' "$fixmodel" >&2
+  fi
   if [ "$jrc" -ne 0 ]; then
     aborted_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
     [ -z "$aborted_head" ] || record_round_head "$aborted_head"
