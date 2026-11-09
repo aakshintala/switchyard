@@ -37,6 +37,188 @@ fi
 roster="$R/roster"
 retired="$R/roster-done"
 
+stop_retired_sessions() {
+  _lanecheck_done_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck-done.XXXXXX") || return 2
+  trap 'rm -rf "$_lanecheck_done_tmp"' EXIT
+  local done_tmp=$_lanecheck_done_tmp targets need_box need_muse need_mac h sess jid
+  if ! targets=$(python3 -I - "$roster" "$@" <<'PY'
+import sys
+roster, *requested = sys.argv[1:]
+selected = set()
+for line in open(roster):
+    fields = line.rstrip("\n").split("\t")
+    if len(fields) < 4:
+        continue
+    _, ticket, host, name = fields[:4]
+    sid = fields[4] if len(fields) > 4 else "?"
+    for arg in requested:
+        target, sep, key = arg.partition(":")
+        if ticket != target:
+            continue
+        if not sep or key == name or key == sid or (sid not in ("", "?") and
+                (sid.startswith(key) or key.startswith(sid))):
+            selected.add((host, name, sid))
+for row in sorted(selected):
+    print("\t".join(row))
+PY
+); then
+    echo "cannot resolve lanecheck done arguments against $roster" >&2
+    return 2
+  fi
+  printf '%s\n' "$targets" >"$done_tmp/targets.tsv"
+  printf '[]\n' >"$done_tmp/box-claude.json"
+  printf '[]\n' >"$done_tmp/mac-claude.json"
+  printf '{"sessions":[]}\n' >"$done_tmp/box-delegate.json"
+  printf '{"sessions":[]}\n' >"$done_tmp/mac-delegate.json"
+  need_box=0; need_muse=0; need_mac=0
+  while IFS=$'\t' read -r h sess jid; do
+    [ -n "$h" ] || continue
+    case "$h" in
+      box) need_box=1;;
+      muse) need_muse=1;;
+      mac) need_mac=1;;
+      *) echo "cannot stop lane on unknown roster host '$h'" >&2; return 2;;
+    esac
+  done <"$done_tmp/targets.tsv"
+  if [ "$need_box" = 1 ] || [ "$need_muse" = 1 ]; then
+    if [ "$FW_LOCAL_BOX" = 1 ]; then
+      done_boxssh=${FW_BOX_LOCAL:-$script_dir/box-local.sh}
+    else
+      done_boxssh=${BOX_SSH:-${FW_SSH:-ssh}}
+    fi
+  fi
+  if [ "$need_box" = 1 ]; then
+    if ! "$done_boxssh" -o BatchMode=yes "$BOX" 'claude agents --json' >"$done_tmp/box-claude.json" 2>"$done_tmp/box-claude.err"; then
+      echo "cannot check Box Claude sessions; no lane retired" >&2
+      return 2
+    fi
+  fi
+  if [ "$need_muse" = 1 ]; then
+    if ! "$done_boxssh" -o BatchMode=yes "$BOX" 'delegate session list --json' >"$done_tmp/box-delegate.json" 2>"$done_tmp/box-delegate.err"; then
+      echo "cannot check Box delegate sessions; no lane retired" >&2
+      return 2
+    fi
+  fi
+  if [ "$need_mac" = 1 ]; then
+    if ! claude agents --json >"$done_tmp/mac-claude.json" 2>"$done_tmp/mac-claude.err"; then
+      echo "cannot check Mac Claude sessions; no lane retired" >&2
+      return 2
+    fi
+    if ! "${FW_DELEGATE:-$HOME/.local/bin/delegate}" session list --json >"$done_tmp/mac-delegate.json" 2>"$done_tmp/mac-delegate.err"; then
+      echo "cannot check Mac delegate sessions; no lane retired" >&2
+      return 2
+    fi
+  fi
+  cat >"$done_tmp/plan.py" <<'PY'
+import json, re, sys
+
+targets, boxc, mac_c, boxd, mac_d = sys.argv[1:]
+def load(path):
+    try:
+        data = json.load(open(path))
+    except Exception as exc:
+        raise SystemExit(f"cannot parse session list {path}: {exc}")
+    return data if isinstance(data, list) else data.get("agents") or data.get("sessions") or []
+
+box_claude, mac_claude = load(boxc), load(mac_c)
+box_delegate, mac_delegate = load(boxd), load(mac_d)
+ops, refusals = set(), []
+
+def claude_rows(rows, name):
+    return [r for r in rows if isinstance(r, dict) and r.get("name") == name]
+
+def delegate_rows(rows, sid):
+    if sid in ("", "?"):
+        return []
+    return [r for r in rows if isinstance(r, dict) and r.get("id") and
+            (r["id"] == sid or r["id"].startswith(sid) or sid.startswith(r["id"]))]
+
+for line in open(targets):
+    host, name, sid = line.rstrip("\n").split("\t")
+    if host == "box":
+        kind, rows = "claude", claude_rows(box_claude, name)
+    elif host == "muse":
+        kind, rows = "delegate", delegate_rows(box_delegate, sid)
+    else:
+        rows = claude_rows(mac_claude, name)
+        kind = "claude"
+        if not rows:
+            kind, rows = "delegate", delegate_rows(mac_delegate, sid)
+    if kind == "delegate" and len(rows) > 1:
+        refusals.append(f"{name}: delegate session id {sid} is ambiguous")
+        continue
+    if not rows:
+        # The session is already absent from its host's live-session list.
+        continue
+    for row in rows:
+        if kind == "claude":
+            session_id = row.get("id") or row.get("sessionId") or ""
+            status = row.get("status")
+            if status is None:
+                refusals.append(f"{name}: Claude status unavailable (id {session_id or '?'})")
+            elif status == "busy":
+                refusals.append(f"{name}: Claude session {session_id or '?'} is mid-turn")
+        else:
+            session_id = row.get("id") or ""
+            if row.get("status") == "dead":
+                continue
+            if "activeTurnId" not in row:
+                refusals.append(f"{name}: delegate activeTurnId unavailable (id {session_id or '?'})")
+            elif row.get("activeTurnId") is not None:
+                refusals.append(f"{name}: delegate session {session_id or '?'} is mid-turn")
+        if not session_id or not re.fullmatch(r"[A-Za-z0-9_-]+", str(session_id)):
+            refusals.append(f"{name}: no safe stop id")
+        elif kind == "claude":
+            ops.add(("claude", host, str(session_id), name))
+        else:
+            ops.add(("delegate", "box" if host == "muse" else host, str(session_id), name))
+if refusals:
+    for refusal in sorted(set(refusals)):
+        print(f"REFUSING to retire — {refusal}")
+    raise SystemExit(2)
+for op in sorted(ops):
+    print("\t".join(op))
+PY
+  if ! plan=$(python3 -I "$done_tmp/plan.py" "$done_tmp/targets.tsv" \
+      "$done_tmp/box-claude.json" "$done_tmp/mac-claude.json" \
+      "$done_tmp/box-delegate.json" "$done_tmp/mac-delegate.json" 2>&1); then
+    printf '%s\n' "$plan" >&2
+    return 2
+  fi
+  while IFS=$'\t' read -r kind host sid name; do
+    [ -n "$kind" ] || continue
+    case "$kind:$host" in
+      claude:box)
+        if ! stop_out=$("$done_boxssh" -o BatchMode=yes "$BOX" "claude stop $sid" 2>&1); then
+          echo "could not stop Box Claude session $sid ($name); no lane retired" >&2
+          printf '%s\n' "$stop_out" | sed 's/^/  /' >&2
+          return 2
+        fi;;
+      claude:mac)
+        if ! stop_out=$(claude stop "$sid" 2>&1); then
+          echo "could not stop Mac Claude session $sid ($name); no lane retired" >&2
+          printf '%s\n' "$stop_out" | sed 's/^/  /' >&2
+          return 2
+        fi;;
+      delegate:box)
+        if ! stop_out=$("$done_boxssh" -o BatchMode=yes "$BOX" \
+            "PATH=\$HOME/.local/bin:\$PATH delegate session stop $sid" 2>&1); then
+          echo "could not stop Box delegate session $sid ($name); no lane retired" >&2
+          printf '%s\n' "$stop_out" | sed 's/^/  /' >&2
+          return 2
+        fi;;
+      delegate:mac)
+        if ! stop_out=$("${FW_DELEGATE:-$HOME/.local/bin/delegate}" session stop "$sid" 2>&1); then
+          echo "could not stop Mac delegate session $sid ($name); no lane retired" >&2
+          printf '%s\n' "$stop_out" | sed 's/^/  /' >&2
+          return 2
+        fi;;
+      *) echo "cannot stop $kind session on $host" >&2; return 2;;
+    esac
+    echo "stopped retired session $sid ($name)"
+  done <<<"$plan"
+}
+
 if [ "${1:-}" = done ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...]" >&2; exit 2; }
@@ -120,6 +302,7 @@ if [ "${1:-}" = done ]; then
     echo "Nothing retired — see the REFUSING line above for which guard fired. Check with 'bash bin/lanecheck' first. Override with FW_DONE_FORCE=1." >&2
     exit 2
   fi
+  stop_retired_sessions "$@" || exit $?
   for n in "$@"; do
     case "$n" in
       *:*) printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${n%%:*}" "${n#*:}" >>"$retired" ;;

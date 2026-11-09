@@ -58,13 +58,19 @@ exit 0
 EOF
 cat > "$T/stubs/claude" <<'EOF'
 #!/bin/sh
-[ "${1:-}" = --bg ] || exit 2
+case "${1:-}" in
+  agents) [ "${2:-}" = --json ] && echo '[]' ;;
+  stop) echo "stopped ${2:-}" ;;
+  --bg)
 n=0
 [ ! -f "$CLAUDE_COUNT" ] || n=$(cat "$CLAUDE_COUNT")
 n=$((n + 1))
 printf '%s\n' "$n" > "$CLAUDE_COUNT"
 printf '%s\n' "$*" >> "$CLAUDE_LOG"
 printf 'backgrounded session %s\n' "fixture-$n"
+  ;;
+  *) exit 2 ;;
+esac
 EOF
 cat > "$T/stubs/ssh" <<'EOF'
 #!/bin/bash

@@ -89,12 +89,12 @@ if [ ! -e "${fgrants[0]}" ]; then
   fi
 fi
 # The selftest refusal guard is deliberately excluded from this moved slice.
-sess=fiber-$n; phase_line=""
+sess_base=fiber-$n; phase_line=""
 case "$ph" in
   "") ;;
   phase-plan|phase-build|phase-ship)
     grep -q '^- State file ' "$b" || { echo "$ph: $b is not a state-mode brief (no '- State file ' line); build it with TKT=1 mkbrief.sh" >&2; exit 2; }
-    sess=fiber-$n-${ph#phase-}
+    sess_base=fiber-$n-${ph#phase-}
     case "$ph" in
       phase-plan) phase_line="PHASE: plan. Read tkt-state and the journal if they exist. Run tkt-start, then immediately \`tkt-state <state> set gate.script scripts/check\`, then the planner (brief per Settings), then tkt-plan verify/confirm/post. That one state key is what makes tkt-plan set and post refuse a hand-expanded Gate line, through plan-gate --script (~/.agents f016d79); without it the check is inert and a bad Gate line is only the Verifier's to catch. It accepts \`scripts/check --base <sha>\`, a leading allowlisted env assignment and a \`bash \` prefix, so the line the planning skill asks for passes as written. End with the last tkt-plan verdict line and STATUS: PLANNED, or STATUS: BLOCKED with the question.";;
       phase-build) phase_line="PHASE: build. Read tkt-state and the journal first. Run tkt-build, then tkt-fix rounds until the review loop is done. End with the last verdict line, the pushed head, and STATUS: REVIEWED, or STATUS: BLOCKED.";;
@@ -102,8 +102,10 @@ case "$ph" in
     esac;;
   *) echo "unknown phase $ph (phase-plan|phase-build|phase-ship)" >&2; exit 2;;
 esac
+launch_id=$(python3 -c 'import uuid; print(uuid.uuid4().hex[:8])')
+sess=$sess_base-$launch_id
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
+trap 'rm -f "$tmp" "${tmp}.agents.json"' EXIT
 disk_line=""
 # Where a lane worktree lives, and whether to cut one, used to ride on NEWDISK
 # together — and its probe tested the wrong disk. Leaving a fresh lane on /home
@@ -171,6 +173,65 @@ for f in "$run/report-format.md" "$run/fiber-$n-notes.md" "$run/fiber-$n-"*-note
 done
 set -f
 $boxssh "$host" "cat > $boxrun/fiber-$n-orchestrator-brief.md" < "$tmp"
+# A relaunch must not leave an old Remote Control session under this phase's
+# name. Include both the legacy exact name and names made by this launcher.
+if prior_agents=$($boxssh -o BatchMode=yes "$host" "claude agents --json" 2>&1); then
+  printf '%s\n' "$prior_agents" >"${tmp}.agents.json"
+else
+  echo "boxlaunch: cannot list existing sessions on $host; refusing to launch." >&2
+  printf '%s\n' "$prior_agents" | sed 's/^/  /' >&2
+  exit 2
+fi
+if prior_sessions=$(python3 - "${tmp}.agents.json" "$sess_base" <<'PY'
+import json, re, sys
+path, base = sys.argv[1:]
+try:
+    data = json.load(open(path))
+except Exception as exc:
+    print(f"cannot parse claude agents --json: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+rows = data if isinstance(data, list) else data.get("agents") or data.get("sessions") or []
+pattern = re.compile(re.escape(base) + r"(?:-[0-9a-f]{8})?")
+for row in rows:
+    if not isinstance(row, dict) or not pattern.fullmatch(str(row.get("name") or "")):
+        continue
+    session_id = row.get("id") or row.get("sessionId") or ""
+    status = row.get("status") or ""
+    print(f"{session_id}\t{row['name']}\t{status}")
+PY
+); then
+  :
+else
+  echo "boxlaunch: cannot interpret existing sessions on $host; refusing to launch." >&2
+  exit 2
+fi
+old_ids=()
+old_names=()
+while IFS=$'\t' read -r old_id old_name old_status; do
+  [ -n "$old_name" ] || continue
+  case "$old_id" in
+    ''|*[!A-Za-z0-9_-]*)
+      echo "boxlaunch: REFUSING — existing session '$old_name' has no safe stop id." >&2
+      exit 2;;
+  esac
+  if [ "$old_status" = busy ]; then
+    echo "boxlaunch: REFUSING — existing session '$old_name' is mid-turn (id $old_id)." >&2
+    exit 2
+  fi
+  [ -n "$old_status" ] || {
+    echo "boxlaunch: REFUSING — existing session '$old_name' has no status to check (id $old_id)." >&2
+    exit 2
+  }
+  old_ids+=("$old_id")
+  old_names+=("$old_name")
+done <<<"$prior_sessions"
+for i in "${!old_ids[@]}"; do
+  if ! $boxssh -o BatchMode=yes "$host" "claude stop ${old_ids[$i]}"; then
+    echo "boxlaunch: could not stop old session ${old_ids[$i]} (${old_names[$i]}); refusing to launch." >&2
+    exit 2
+  fi
+  echo "boxlaunch: stopped old session ${old_ids[$i]} (${old_names[$i]})" >&2
+done
 # Capture the launch, then filter it, in two steps. The one-liner this replaces
 # ended its pipeline in `grep -o 'backgrounded.*'`, and a launch that prints no
 # such line — a quota refusal, a model the harness rejects, an ssh error — made
