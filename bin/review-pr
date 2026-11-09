@@ -82,6 +82,7 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
 done
 script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+. "$script_dir/lib/verify-section.sh"
 skills_dir="$(dirname "$script_dir")/skills"
 briefs_dir="$skills_dir/review-loop/briefs"
 fill_brief="$script_dir/fill-brief"
@@ -150,12 +151,6 @@ brief_for() {
     overbuild) printf '%s' "$briefs_dir/over-engineering-review.md";;
     verify) printf '%s' "$briefs_dir/verify.md";;
   esac
-}
-
-# norm_line: strip verdict decoration (asterisks, backticks) and trim
-# surrounding whitespace, so decorated verdicts match the vocabulary.
-norm_line() {
-  printf '%s' "$1" | tr -d '*`' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
 # is_verdict ROLE NORMALISED_LINE: the line starts with a recognised verdict
@@ -271,17 +266,13 @@ last_review_header() {
 
 verify_comment_has_fix_ok() {
   # Match ship-pr's normalised verdict-line rule, but only in a verify section.
-  local body="$1" line norm in_verify=""
+  local body="$1" line norm
   while IFS= read -r line; do
     norm="$(norm_line "$line")"
-    case "$norm" in
-      "## verify"|"## verify "*) in_verify="1"; continue;;
-      "## "*) in_verify=""; continue;;
-    esac
-    if [ "$in_verify" = "1" ] && is_verdict verify "$norm"; then
+    if is_verdict verify "$norm"; then
       case "$norm" in FIX-OK|FIX-OK[[:space:]]*) return 0;; esac
     fi
-  done <<<"$body"
+  done < <(printf '%s\n' "$body" | verify_section_lines)
   return 1
 }
 
