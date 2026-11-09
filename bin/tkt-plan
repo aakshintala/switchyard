@@ -221,7 +221,14 @@ do_verify() {
     fi
   fi
   if [ "$drift" -eq 0 ]; then
-    [ -z "$(t get confirmed_for 2>/dev/null || true)" ] || emit "ROUND-LIMIT round=$round confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+    if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
+      if grant_pending; then
+        granted_by="$(t get granted_by 2>/dev/null || true)"
+        granted_comment="$(t get granted_comment 2>/dev/null || true)"
+        emit "ROUND-LIMIT round=$round confirm=done" 1 "a grant is pending ($granted_by:$granted_comment); verify does not consume it: run tkt-plan $state confirm --edits <file>" "$(open_lines)"
+      fi
+      emit "ROUND-LIMIT round=$round confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+    fi
     [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan $state confirm --edits <file>, or after triage answers every open line run tkt-plan $state triaged --comment <id>" "$(open_lines)"
   fi
   model="$(vmodel "$model")" || exit 2

@@ -870,6 +870,8 @@ grep -Fq "next: tkt-plan $S confirm --edits <file>" <<<"$OUT" || fail "grant suc
 run_plan verify
 [ "$RC" -eq 1 ] || fail "pending grant does not unlock verify"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify with pending grant"
+grep -Fq "a grant is pending (switchyard:1234); verify does not consume it: run tkt-plan $S confirm --edits <file>" <<<"$OUT" || fail "verify with pending grant points at confirm without consuming the grant"
+! grep -Fq "if no grant is recorded" <<<"$OUT" || fail "verify with pending grant does not suggest recording another grant"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "verify does not consume the pending grant"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "verify with pending grant starts no job"
 run_plan confirm --edits "$CDIR/edits.md"
