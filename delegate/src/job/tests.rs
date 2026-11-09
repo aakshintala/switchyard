@@ -24,6 +24,7 @@ pub(crate) fn spec_of(over: impl FnOnce(&mut JobSpec)) -> JobSpec {
         idle_ms: None,
         tool_idle_ms: None,
         wall_ms: None,
+        add_dirs: vec![],
         price_map: HashMap::new(),
         resume_context: ResumeContext {
             model: "composer-2.5".into(),
@@ -343,6 +344,7 @@ fn failed_status_record_write_does_not_stop_job() {
             tool_idle_ms: None,
             idle_ms: None,
             wall_ms: None,
+            add_dirs: vec![],
             resumed_from: None,
             started_at_ms: Mutex::new(None),
             ended_at_ms: Mutex::new(None),

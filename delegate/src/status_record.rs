@@ -265,6 +265,7 @@ pub struct CliResume {
     pub idle_ms: Option<f64>,
     #[serde(serialize_with = "crate::util::js_num_opt")]
     pub wall_ms: Option<f64>,
+    pub add_dirs: Vec<String>,
 }
 
 /// `PollResult` plus what a watcher needs to find and resume the job, plus the resume
@@ -304,6 +305,7 @@ pub struct CliRecordWriter {
     pub tool_idle_ms: Option<f64>,
     pub idle_ms: Option<f64>,
     pub wall_ms: Option<f64>,
+    pub add_dirs: Vec<String>,
     pub resumed_from: Option<String>,
     pub started_at_ms: Mutex<Option<f64>>,
     pub ended_at_ms: Mutex<Option<f64>>,
@@ -382,6 +384,7 @@ impl StatusRecordWriter for CliRecordWriter {
                 tool_idle_ms: self.tool_idle_ms,
                 idle_ms: self.idle_ms,
                 wall_ms: self.wall_ms,
+                add_dirs: self.add_dirs.clone(),
             },
             resumed_from: self.resumed_from.clone(),
         };
@@ -552,6 +555,7 @@ mod tests {
             tool_idle_ms: None,
             idle_ms: None,
             wall_ms: None,
+            add_dirs: vec!["/tmp/additional".into()],
             resumed_from: None,
             started_at_ms: Mutex::new(None),
             ended_at_ms: Mutex::new(None),
@@ -577,6 +581,10 @@ mod tests {
 
         writer.write(job_id, &terminal);
         writer.write(job_id, &terminal);
+        assert_eq!(
+            written_record(job_id)["resume"]["addDirs"],
+            json!(["/tmp/additional"])
+        );
 
         let lines: Vec<_> = fs::read_to_string(&ledger)
             .unwrap()

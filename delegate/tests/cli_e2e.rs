@@ -275,6 +275,61 @@ fn until(what: &str, mut f: impl FnMut() -> bool) {
 }
 
 #[test]
+fn run_rejects_missing_add_dir_before_starting_a_fiber_job() {
+    let e = Env::new("missing-add-dir");
+    let missing = e.dir.join("missing-directory");
+    let fiber_home = e.dir.join("fiber-home");
+    let out = e.delegate_env(
+        &[
+            "run",
+            "--model",
+            "fiber/codex/gpt-6-luna",
+            "--add-dir",
+            missing.to_str().unwrap(),
+        ],
+        Some("prompt"),
+        &[("FIBER_HOME", fiber_home.to_str().unwrap())],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is not a directory"));
+    assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
+    assert!(
+        !e.jobs_dir().exists(),
+        "a rejected path must not launch a job"
+    );
+    assert!(
+        !fiber_home.exists(),
+        "validation must happen before hub access"
+    );
+}
+
+#[test]
+fn run_rejects_add_dir_for_non_fiber_models() {
+    let e = Env::new("non-fiber-add-dir");
+    let out = e.delegate(
+        &["run", "--model", "composer-2.5", "--add-dir", "/tmp"],
+        Some("prompt"),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("only supported by the fiber backend"));
+    assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
+    assert!(
+        !e.jobs_dir().exists(),
+        "a non-Fiber model must not launch a job"
+    );
+}
+
+#[test]
 fn run_returns_id_while_job_runs_then_it_finishes() {
     let e = Env::new("run");
     let id = e.run("SLOW do it");

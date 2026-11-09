@@ -320,6 +320,7 @@ pub struct JobSpec {
     pub idle_ms: Option<Option<f64>>,
     pub tool_idle_ms: Option<Option<f64>>,
     pub wall_ms: Option<f64>,
+    pub add_dirs: Vec<String>,
     pub price_map: PriceMap,
     pub resume_context: ResumeContext,
 }
