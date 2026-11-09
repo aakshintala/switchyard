@@ -4,25 +4,25 @@
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require a matching
-#        review-pr verdict for --reviewed (APPROVE on every axis, FIX-OK from
-#        a scoped verify, or FIX-INCOMPLETE with readable, non-empty P3-only
-#        findings; each P3 is filed or matched to an open issue and linked from
-#        the PR immediately before merge; --unverified-fixes permits a no-real-bug
+#        review-pr verdict for --reviewed (the head the last verdict covers;
+#        APPROVE on every axis, FIX-OK from a scoped verify, or FIX-INCOMPLETE
+#        with readable, non-empty P3-only findings; each P3 is filed or matched
+#        to an open issue and linked from the PR immediately before merge;
+#        --unverified-fixes permits a no-real-bug
 #        fix round after either CHANGES or FIX-INCOMPLETE); require each --body-has
 #        line and run pr-closes (see below); run --gate in the worktree on that head,
-#        once, before any rebase or push; flatten commits since the merge base when
-#        the branch has merge commits, then rebase onto origin/main (see below);
-#        compare the PR diff's `git patch-id --stable` with
-#        <sha>'s, ignoring context lines (with --unverified-fixes, a mismatch posts a comment and goes on, see
-#        below); push a rebased branch with --force-with-lease; mark a draft
-#        ready (once, before the first CI wait); `gh-ci wait` (--timeout, default
-#        7200), rerunning failed jobs once when the failure is outside the diff
-#        (see below); on a non-strict base with --gate, or --merge-check when
-#        --gate is absent, check the PR merged with current origin/main in a
-#        throwaway merge commit (step 7); squash-merge
+#        once, before any merge or push; merge origin/main when required (see below);
+#        compare the reviewed patch with the new head's diff against origin/main by
+#        `git patch-id --stable`, ignoring context lines (with --unverified-fixes, a
+#        mismatch posts a comment and goes on, see below); push the merge commit with
+#        a plain fast-forward push; mark a draft ready (once, before the first CI
+#        wait); `gh-ci wait` (--timeout, default 7200), rerunning failed jobs once
+#        when the failure is outside the diff (see below); on a non-strict base with
+#        --gate, or --merge-check when --gate is absent, check the PR merged with
+#        current origin/main in a throwaway merge commit (step 7); squash-merge
 #        pinned to the checked head, retrying once on a base race or GraphQL error
-#        and re-entering the rebase once after the merge lost the race to
-#        origin/main in strict mode (no extra sleep, sharing the 3 retries);
+#        and re-entering the merge once after the merge lost the race to origin/main
+#        in strict mode (no extra sleep, sharing the 3 retries);
 #        polling MERGED even after a failed retry; wait for MERGED; by default
 #        remove the worktree and local branch by default after a merge when
 #        clean and no process has its cwd inside. Keep them when --keep-branch
@@ -40,7 +40,7 @@
 #        draft run reports `CI (draft)`; the required check is `CI`).
 #        Each --body-has <prefix> (repeatable) requires a PR body line that starts
 #        with <prefix>, literally and case-sensitively; it is checked after step 1,
-#        before the rebase, and each missing one prints `missing body line: <prefix>`.
+#        before the merge, and each missing one prints `missing body line: <prefix>`.
 #        When the prefix is exactly `Implemented by:`, every such line must hold
 #        model ids (comma-separated items, none empty after trimming, none
 #        `unknown` in any letter case); each bad line prints `bad body line: <line>`.
@@ -65,7 +65,7 @@
 #        completed run on the pinned head whose Selection job log contains
 #        `mutants in the diff: 0`; an in-progress or absent run fails before ready.
 #        Step 2 runs pr-closes just after the --body-has check, before any gate,
-#        rebase, push or CI wait. With --allow-commit-closes, a stray match whose
+#        merge, push or CI wait. With --allow-commit-closes, a stray match whose
 #        report's second field is `commit <sha>` is printed to stderr as a warning
 #        and does not fail; a title or body match still exits 5. Without the flag
 #        every stray match exits 5. Both repos that use ship-pr squash with the PR
@@ -88,7 +88,7 @@
 #        Prints `merged <squash sha>` on success. A `gh pr merge` error containing
 #        `GraphQL` retries once like `Base branch was modified`, sleeping 5 s first.
 #        An error saying the head branch is not up to date with the base branch
-#        re-enters the rebase, push and CI-wait steps once in strict mode (counted
+#        re-enters the merge, push and CI-wait steps once in strict mode (counted
 #        against the 3 retries), after checking `gh pr view` for MERGED; a second
 #        loss, an unmoved main, or no retries left exits 1 with `lost the race to
 #        origin/main` and the rerun command. After a failed retry of any kind ship-pr
@@ -104,20 +104,20 @@
 #        ship-pr sets none. A gate run on the PR merged with current
 #        origin/main counts as a gate failure; a merge that lost the race
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
-#        precondition, 3 rebase conflict (aborted), a conflict `gh-ci wait` found after the push,
+#        precondition, 3 merge conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
 #        verdict; with --unverified-fixes, no exit 4), 5 PR text or review state needs a fix (missing --body-has lines, a bad --body-ends ending, a bad `Implemented by:` value, a draft missing the mutants label, an uncited authority claim in the body or a comment, stray closing keywords from pr-closes, or no approved review verdict: CHANGES needs a scoped verify; FIX-INCOMPLETE needs readable, non-empty P3-only findings or --unverified-fixes for a no-real-bug fix round), 124 CI wait timeout.
-#        Rebase rule, by whether main's required-status-checks rule is strict (a
+#        Merge rule, by whether main's required-status-checks rule is strict (a
 #        ruleset's strict_required_status_checks_policy, or classic branch
 #        protection's required_status_checks.strict; strict if either says so; a
 #        failed lookup, other than a classic 404, falls back to strict). The mode is
 #        printed once.
-#        Strict: rebase onto origin/main when it moved. When origin/main moves during
-#        the CI wait, ship-pr goes back to the rebase (rebase, patch-id check, push
-#        and CI wait again; no gate), at most 3 times; the 4th move exits 1. A merge
-#        that lost the race re-enters the same rebase, sharing the 3 retries.
+#        Strict: merge origin/main when it moved. When origin/main moves during the
+#        CI wait, ship-pr goes back to the merge (merge, patch-id check, push and CI
+#        wait again; no gate), at most 3 times; the 4th move exits 1. A merge that
+#        lost the race re-enters the same steps, sharing the 3 retries.
 #        Not strict: after the gate, read the PR's mergeable and mergeStateStatus;
-#        rebase (after refetching origin/main) only on CONFLICTING or DIRTY. One CI
+#        merge origin/main (after refetching it) only on CONFLICTING or DIRTY. One CI
 #        wait, no retry when origin/main moves; a conflict found after CI exits 3.
 #        On every invocation, before step 3, delete only regular xcrun_db-* files directly under
 #        ${TMPDIR:-/tmp} when they are over a day old; ignore deletion errors. With --gate,
@@ -574,7 +574,7 @@ if [ -z "$mutants_gate" ]; then
   fi
 fi
 
-# Step 2: no stray closing keywords, before any gate, rebase, push or CI wait.
+# Step 2: no stray closing keywords, before any gate, merge, push or CI wait.
 rc=0
 closes_out="$(bash "$here/pr-closes" "$pr" --repo "$repo" 2>/dev/null)" || rc=$?
 case "$rc" in
@@ -834,28 +834,16 @@ strict_checks() {
   [ "$out" = "true" ]
 }
 if strict_checks; then
-  strict=1; say "required checks on main are strict: rebasing when origin/main moves"
+  strict=1; say "required checks on main are strict: merging origin/main when it moved"
 else
-  strict=0; say "required checks on main are not strict: rebasing only on a conflict"
+  strict=0; say "required checks on main are not strict: merging only on a conflict"
 fi
 
-rebase_main() {
-  local merges head merge_base
-  say "rebasing $branch onto origin/main"
-  merges="$(git -C "$worktree" rev-list --merges origin/main..HEAD)" \
-    || die_after_ready 1 "cannot inspect merge commits before rebasing"
-  if [ -n "$merges" ]; then
-    head="$(git -C "$worktree" rev-parse HEAD)"
-    merge_base="$(git -C "$worktree" merge-base origin/main HEAD)" \
-      || die_after_ready 1 "cannot find merge base with origin/main"
-    say "flattening merged changes before rebasing"
-    git -C "$worktree" reset --soft "$merge_base" >&2 \
-      && git -C "$worktree" commit -C "$head" >&2 \
-      || die_after_ready 1 "cannot flatten merged changes before rebasing"
-  fi
-  if ! git -C "$worktree" rebase origin/main >&2; then
-    git -C "$worktree" rebase --abort >&2 || true
-    die_after_ready 3 "rebase onto origin/main conflicts; resolve it, then rerun"
+merge_main() {
+  say "merging $branch with origin/main"
+  if ! git -C "$worktree" merge --no-ff --no-edit origin/main >&2; then
+    git -C "$worktree" merge --abort >&2 || true
+    die_after_ready 3 "merge of origin/main conflicts; resolve it, then rerun"
   fi
 }
 
@@ -935,8 +923,8 @@ check_mutants_gate() {
   refuse MUTANTS "mutants gate failed: Selection log on run $run_id does not prove mutants in the diff: 0"
 }
 
-# Step 3: the gate runs once, on the PR head, before any rebase or push. It checks
-# code; it never changes what was reviewed. CI covers the rebased head.
+# Step 3: the gate runs once, on the PR head, before any merge or push. It checks
+# code; it never changes what was reviewed. CI covers the merged head.
 if [ -n "$gate" ]; then
   gate_preflight
   say "running gate"
@@ -946,12 +934,12 @@ if [ -n "$gate" ]; then
 fi
 
 # Not strict: ask GitHub for a conflict now, after the gate (which takes minutes).
-# main may have gained the conflicting commit meanwhile, so refetch before the rebase.
+# main may have gained the conflicting commit meanwhile, so refetch before merging.
 conflict=""
 if [ "$strict" = 0 ]; then
   probe="$(gh pr view "$pr" --repo "$repo" --json mergeable,mergeStateStatus \
     --jq '[.mergeable, .mergeStateStatus] | @tsv' 2>/dev/null)" || probe=""
-  [ -n "$probe" ] || say "cannot read PR $pr mergeability; not rebasing"
+  [ -n "$probe" ] || say "cannot read PR $pr mergeability; not merging"
   case "$probe" in CONFLICTING*|*DIRTY) conflict=1 ;; esac
   if [ -n "$conflict" ]; then
     fetch_retry origin +refs/heads/main:refs/remotes/origin/main || die 1 "git fetch origin main failed"
@@ -959,39 +947,37 @@ if [ "$strict" = 0 ]; then
 fi
 
 # Steps 4-6 repeat when origin/main moves during the CI wait (strict only), at most 3 times.
-# lease is the branch SHA last known on the remote: head0, then each pushed pin.
-lease="$head0" retries=0 unverified_posted="" lost_race_done=""
+retries=0 unverified_posted="" lost_race_done=""
 # lost_race_die exits 1 naming the lost race and the command that reruns it.
 lost_race_die() {
   die_after_ready 1 "gh pr merge failed: lost the race to origin/main ($1); rerun: $rerun_cmd"
 }
-# The outer loop re-enters the rebase when the merge loses the race to
-# origin/main, sharing the 3 retries; every other path breaks out of it.
+# The outer loop re-enters the merge when it loses the race to origin/main,
+# sharing the 3 retries; every other path breaks out of it.
 while :; do
   while :; do
-    # Step 4: rebase onto origin/main when it moved (strict) or on a reported conflict.
+    # Step 4: merge origin/main when it moved (strict) or on a reported conflict.
     if [ "$strict" = 1 ]; then
-      git -C "$worktree" merge-base --is-ancestor origin/main HEAD || rebase_main
+      git -C "$worktree" merge-base --is-ancestor origin/main HEAD || merge_main
     elif [ -n "$conflict" ]; then
-      rebase_main
+      merge_main
     fi
     pin="$(git -C "$worktree" rev-parse HEAD)"
   
-    # Step 5: the patch under review is the patch about to merge (review-loop's Identity rule).
+    # Step 5: the reviewed patch-id must match the new head's diff against origin/main (review-loop's Identity rule).
     if [ "$(patch_id "$reviewed")" != "$(patch_id "$pin")" ]; then
-      [ -n "$unverified" ] || die_after_ready 4 "patch-id of the PR differs from --reviewed $reviewed; the change needs a new verdict: when the findings were answered by a recorded ruling with no code change, rerun with --unverified-fixes <findings file>; otherwise run a scoped verify (review-pr run --verify <findings file> --since $reviewed)"
+      [ -n "$unverified" ] || die_after_ready 4 "the new head's diff against origin/main has a different patch-id from --reviewed $reviewed; the change needs a new verdict: when the findings were answered by a recorded ruling with no code change, rerun with --unverified-fixes <findings file>; otherwise run a scoped verify (review-pr run --verify <findings file> --since $reviewed)"
       if [ -z "$unverified_posted" ]; then
         post_unverified "$pin"
         unverified_posted=1
       fi
     fi
   
-    # Step 6: push a rebased branch, then wait for CI on exactly that head.
-    if [ "$pin" != "$lease" ]; then
-      say "pushing rebased $branch"
-      git -C "$worktree" push -q --force-with-lease="$branch:$lease" origin "HEAD:refs/heads/$branch" >&2 \
-        || die_after_ready 1 "push of rebased $branch failed"
-      lease="$pin"
+    # Step 6: push the merged branch with a fast-forward push, then wait for CI on that head.
+    if [ "$pin" != "$head0" ]; then
+      say "pushing merged $branch"
+      git -C "$worktree" push origin "HEAD:refs/heads/$branch" >&2 \
+        || die_after_ready 1 "push of merged $branch failed"
     fi
     if [ "$draft" = "true" ]; then
       [ -z "$mutants_gate" ] || check_mutants_gate
@@ -1007,7 +993,7 @@ while :; do
       printf '%s\n' "$ci_out"
       case "$rc" in
         124) exit_after_ready 124 "CI timed out" ;;
-        3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
+        3) die_after_ready 3 "PR conflicts with origin/main after the push; merge origin/main again, then rerun" ;;
         4) die_after_ready 1 "CI never started: a required check has no check run" ;;
         *)
           if [ -z "$ci_rerun_done" ]; then
@@ -1065,7 +1051,7 @@ while :; do
                   printf '%s\n' "$ci_out"
                   case "$rc" in
                     124) exit_after_ready 124 "CI timed out" ;;
-                    3) die_after_ready 3 "PR conflicts with origin/main after the push; rebase again, then rerun" ;;
+                    3) die_after_ready 3 "PR conflicts with origin/main after the push; merge origin/main again, then rerun" ;;
                     4) die_after_ready 1 "CI never started: a required check has no check run" ;;
                     *) die_after_ready 1 "CI failed" ;;
                   esac
@@ -1086,7 +1072,7 @@ while :; do
     git -C "$worktree" merge-base --is-ancestor origin/main "$pin" && break
     [ "$retries" -lt 3 ] || die_after_ready 1 "origin/main moved during CI after 3 retries; rerun ship-pr"
     retries=$((retries + 1))
-    say "origin/main moved during CI; rebasing again (retry $retries of 3)"
+    say "origin/main moved during CI; merging again (retry $retries of 3)"
   done
   
   # Step 7: on a non-strict base, check the PR merged with current origin/main.
@@ -1113,7 +1099,7 @@ while :; do
         if ! git -C "$worktree" -c user.name=ship-pr -c user.email=ship-pr@localhost merge --no-ff --no-edit origin/main >&2; then
           guard_restore
           trap - EXIT INT TERM
-          die_after_ready 3 "PR conflicts with current origin/main; rebase, then rerun"
+          die_after_ready 3 "PR conflicts with current origin/main; merge origin/main, then rerun"
         fi
         if ! run_gate "$step7_cmd" "$step7_check"; then
           guard_restore
@@ -1170,12 +1156,12 @@ while :; do
         if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
           lost_race_die "origin/main has not moved past ${pin:0:8}"
         fi
-        [ -z "$lost_race_done" ] || lost_race_die "the rebased head lost the race again"
+        [ -z "$lost_race_done" ] || lost_race_die "the merged head lost the race again"
         [ "$retries" -lt 3 ] || lost_race_die "no retries left"
         lost_race_done=1
         retries=$((retries + 1))
         merge_attempted=0
-        say "origin/main moved before the merge; rebasing again (retry $retries of 3)"
+        say "origin/main moved before the merge; merging again (retry $retries of 3)"
         continue
       fi
     else
@@ -1200,12 +1186,12 @@ while :; do
                 if git -C "$worktree" merge-base --is-ancestor origin/main "$pin"; then
                   lost_race_die "origin/main has not moved past ${pin:0:8}"
                 fi
-                [ -z "$lost_race_done" ] || lost_race_die "the rebased head lost the race again"
+                [ -z "$lost_race_done" ] || lost_race_die "the merged head lost the race again"
                 [ "$retries" -lt 3 ] || lost_race_die "no retries left"
                 lost_race_done=1
                 retries=$((retries + 1))
                 merge_attempted=0
-                say "origin/main moved before the merge; rebasing again (retry $retries of 3)"
+                say "origin/main moved before the merge; merging again (retry $retries of 3)"
                 continue
               fi
             else
