@@ -316,7 +316,6 @@ impl Store {
         let mut guard = self.lock();
         let mut next = guard.state.clone();
         let lines = update(&mut next);
-        write_state(&self.paths, &next)?;
 
         let mut seq = guard.next_seq;
         let now = epoch_ms();
@@ -333,8 +332,18 @@ impl Store {
             seq = seq.saturating_add(1);
         }
         if !output.is_empty() {
+            let previous_events_len = guard.events.metadata()?.len();
             hold_test_event_write(&output)?;
-            let _ = guard.events.write_all(&output);
+            if let Err(error) = guard.events.write_all(&output) {
+                let _ = guard.events.set_len(previous_events_len);
+                return Err(error);
+            }
+            if let Err(error) = write_state(&self.paths, &next) {
+                guard.events.set_len(previous_events_len)?;
+                return Err(error);
+            }
+        } else {
+            write_state(&self.paths, &next)?;
         }
         guard.next_seq = seq;
         guard.state = next;
@@ -373,8 +382,7 @@ impl Store {
     }
 }
 
-// Test-only synchronization hook for reproducing the window between publishing
-// session state and appending its event log entry.
+// Test-only synchronization hook to pause before a turn-completion event is appended.
 fn hold_test_event_write(output: &[u8]) -> std::io::Result<()> {
     let Some(release) = std::env::var_os("DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL") else {
         return Ok(());
@@ -1594,7 +1602,7 @@ mod tests {
     }
 
     #[test]
-    fn store_commits_state_before_logs_under_one_lock() {
+    fn store_serializes_state_and_log_updates_under_one_lock() {
         let scratch = Scratch::new();
         let store = Arc::new(scratch.store());
         let (entered_tx, entered_rx) = mpsc::channel();
