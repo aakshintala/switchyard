@@ -1372,11 +1372,19 @@ bash "$TKT_STATE" "$S" set granted_by switchyard || fail "seed replan grant auth
 bash "$TKT_STATE" "$S" set granted_comment replan || fail "seed replan grant comment"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "seed replan grant usage"
 bash "$TKT_STATE" "$S" set last_report "$CDIR/replan-report.md" || fail "seed replan report"
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed replan verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed replan verdict base"
+replan_plan_hash="$(git -C "$WT" hash-object "$CDIR/plan.md")"
+bash "$TKT_STATE" "$S" set plan_verdict_hash "$replan_plan_hash" || fail "seed replan verdict hash"
+bash "$TKT_STATE" "$S" set verified_plan_hash "$replan_plan_hash" || fail "seed replan verified plan hash"
 bash "$TKT_STATE" "$S" set pack_plan_hash old-plan-hash || fail "seed replan pack hash"
+bash "$TKT_STATE" "$S" set plan_triage_comment 123456 || fail "seed replan triage comment"
+bash "$TKT_STATE" "$S" set reviewed "$(cat "$CDIR/base")" || fail "seed replan reviewed head"
+bash "$TKT_STATE" "$S" set review_status done || fail "seed replan review status"
 bash "$TKT_STATE" "$S" set job.verifier-r1 j-v1 || fail "seed verifier job"
 run_plan replan
 [ "$RC" -eq 0 ] || fail "replan exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings log=*" "replan"
+expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job.fix3,job.preflight,findings,reviewed,review_status log=*" "replan"
 [ -z "$(bash "$TKT_STATE" "$S" get round 2>/dev/null || true)" ] || fail "replan clears round"
 [ -z "$(bash "$TKT_STATE" "$S" get job.lane 2>/dev/null || true)" ] || fail "replan clears job.lane"
 [ -z "$(bash "$TKT_STATE" "$S" get job.fix1 2>/dev/null || true)" ] || fail "replan clears job.fix1"
@@ -1384,7 +1392,14 @@ expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job
 [ -z "$(bash "$TKT_STATE" "$S" get job.fix3 2>/dev/null || true)" ] || fail "replan clears job.fix3"
 [ -z "$(bash "$TKT_STATE" "$S" get job.preflight 2>/dev/null || true)" ] || fail "replan clears job.preflight"
 [ -z "$(bash "$TKT_STATE" "$S" get findings 2>/dev/null || true)" ] || fail "replan clears findings"
+[ "$(state_get plan_verdict)" = "ok" ] || fail "replan keeps matching plan verdict"
+[ "$(state_get plan_verdict_base)" = "$(cat "$CDIR/base")" ] || fail "replan keeps matching plan verdict base"
+[ "$(state_get plan_verdict_hash)" = "$replan_plan_hash" ] || fail "replan keeps matching plan verdict hash"
+[ -z "$(bash "$TKT_STATE" "$S" get verified_plan_hash 2>/dev/null || true)" ] || fail "replan clears verified plan hash"
 [ -z "$(bash "$TKT_STATE" "$S" get pack_plan_hash 2>/dev/null || true)" ] || fail "replan clears pack plan hash"
+[ -z "$(bash "$TKT_STATE" "$S" get plan_triage_comment 2>/dev/null || true)" ] || fail "replan clears plan triage comment"
+[ -z "$(bash "$TKT_STATE" "$S" get reviewed 2>/dev/null || true)" ] || fail "replan clears reviewed head"
+[ -z "$(bash "$TKT_STATE" "$S" get review_status 2>/dev/null || true)" ] || fail "replan clears review status"
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "replan keeps verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get confirmed_for)" = "2" ] || fail "replan keeps confirmed_for"
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "replan keeps grant author"
@@ -1392,6 +1407,21 @@ expect_verdict "TKT tkt-plan REPLAN cleared=round,job.lane,job.fix1,job.fix2,job
 [ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "replan keeps grant usage"
 [ "$(bash "$TKT_STATE" "$S" get last_report)" = "$CDIR/replan-report.md" ] || fail "replan keeps last_report"
 [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-v1" ] || fail "replan keeps verifier jobs"
+setup_case replan-stale-verdict
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed stale replan verdict"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed stale replan verdict base"
+bash "$TKT_STATE" "$S" set plan_verdict_hash stale-plan-hash || fail "seed stale replan verdict hash"
+run_plan replan
+[ "$RC" -eq 0 ] || fail "replan with stale verdict exits 0"
+expect_plan_verdict "" "" "replan clears a stale plan verdict"
+
+setup_case replan-missing-verdict-hash
+bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed replan verdict without hash"
+bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed replan verdict base without hash"
+run_plan replan
+[ "$RC" -eq 0 ] || fail "replan with unhashable verdict exits 0"
+expect_plan_verdict "" "" "replan clears a verdict without a matching hash"
+
 run_plan replan
 [ "$RC" -eq 0 ] || fail "replan twice exits 0"
 run_plan replan extra
