@@ -470,7 +470,11 @@ do_set() {
     pack="$(awk '/^PACK /{print $2; exit}' <<<"$sweep_out")"; [ -n "$pack" ] || { echo "tkt-plan: plan-sweep printed no PACK line" >&2; exit 2; }
   fi
   t set plan "$plan"; t set pack "$pack"
-  # Re-setting the same plan keeps the round counts and job slots; a new path starts over.
+  # Re-setting the same plan keeps the job slots. A new path clears the
+  # plan-specific verdicts, job slots, last report and pack hash. Either way the
+  # planning counters (verifier_round, confirmed_for, grants) carry over: a new
+  # path does not reset the planning budget. A later part of a split gets a
+  # fresh budget from tkt-start --part <n>, not from a new path.
   if [ "$old_plan" != "$plan" ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
     t set verified_base ""; t set verified_plan_hash ""
