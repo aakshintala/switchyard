@@ -246,6 +246,32 @@ _plan_files_awk='
 # entries. Blank tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
 plan_files_pathspecs() { awk -v mode="${2:-all}" "$_plan_files_awk" "$1"; }
 
+# _plan_task_pathspec KIND VALUE: expand_token's callback for task records.
+# Resolve paths at the plan base so unique basename tokens become root-relative paths.
+_plan_task_pathspec() {
+  case "$1" in
+    glob) printf '%s\n' "$2"; return 0 ;;
+    path) ;;
+    *) return 0 ;;
+  esac
+  resolve_path "$2"
+  [ "$RES_KIND" = found ] || return 0
+  printf '%s\n' "$RES"
+}
+
+# plan_task_pathspecs PLAN DIR REV: resolved paths from backticked tokens on
+# ## Tasks lines. Uses the shared token expansion and path resolution so all
+# callers agree on which task tokens resolve.
+plan_task_pathspecs() {
+  local plan="$1" dir="$2" rev="$3" tree CUR_SEC=tasks GLOBS="" tok
+  tree="$(git -C "$dir" ls-tree -r --name-only "$rev")"
+  while IFS= read -r tok; do
+    [ -n "$tok" ] || continue
+    expand_token "$tok" _plan_task_pathspec
+  done < <(plan_records "$plan" | awk -F '\t' '$1 == "tasks" { print $5 }')
+  return 0
+}
+
 # plan_bare_dirs PLAN WORKTREE: one "Files line N: ..." line per entry whose path
 # has no slash and is a directory in WORKTREE: a git pathspec that covers the
 # whole tree. Names the plan line, so the planner sees which entry to fix.

@@ -1597,6 +1597,37 @@ expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "drift-h Fi
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "2" ] || fail "drift-h leaves verifier_round"
 [ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$A" ] || fail "drift-h leaves verified_base"
 
+# --- no resolvable task path: Files paths are the drift fallback ---
+setup_case drift-no-task-path
+mkdir -p "$WT/src"
+wcommit "$WT" src/a.rs "a1"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+git -C "$WT" rev-parse HEAD >"$CDIR/base"
+A="$(cat "$CDIR/base")"
+{
+  printf 'Base: %s\n' "$A"
+  printf '\n## Files\n\n- `src/a.rs`\n\n## Tasks\n\n1. Sweep with `perl -pi -e '\''s/old/new/'\'' src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "drift-no-task-path seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "drift-no-task-path seed confirm"
+bash "$TKT_STATE" "$S" set verified_base "$A" || fail "drift-no-task-path seed verified_base"
+wcommit "$WT" src/a.rs "a2"
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+git -C "$WT" rev-parse HEAD >"$CDIR/base"
+B="$(cat "$CDIR/base")"
+{
+  printf 'Base: %s\n' "$B"
+  printf '\n## Files\n\n- `src/a.rs`\n\n## Tasks\n\n1. Sweep with `perl -pi -e '\''s/old/new/'\'' src/a.rs`.\n\n## Gate\n\n`true`\n'
+} >"$CDIR/plan.md"
+[ "$A" != "$B" ] || fail "drift-no-task-path needs a new base"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "drift-no-task-path exempt exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "drift-no-task-path"
+grep -q "slot=verifier-r3-drift" <<<"$(tail -n 1 "$T/stub.log")" || fail "drift-no-task-path uses the drift slot"
+[ "$(bash "$TKT_STATE" "$S" get verifier_round)" = 2 ] || fail "drift-no-task-path leaves verifier_round"
+[ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$B" ] || fail "drift-no-task-path updates verified_base"
+
 setup_case drift-c
 rebase_plan
 A="$(cat "$CDIR/base")"
