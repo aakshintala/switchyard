@@ -36,9 +36,9 @@ case "$command" in
     py_args=${command#*python3 -I -}
     read -r -a args <<< "$py_args"
     env -u FW_RUN -u RUN_DIR HOME="$BOX_HOME" python3 -I - "${args[@]}" ;;
+  *'python3 -c'*) exit 0 ;;
   *'python3 -'*) env -u FW_RUN -u RUN_DIR HOME="$BOX_HOME" python3 - ;;
   *'ps -eo args='*) exit 0 ;;
-  *'python3 -c'*) exit 0 ;;
   *'bash -s'*) env -u FW_RUN -u RUN_DIR HOME="$BOX_HOME" PATH="$STUBD:$PATH" bash -c "$command" ;;
   *) exit 0 ;;
 esac
@@ -111,6 +111,45 @@ common=(FW_RUN="$T/macrun" FW_SKIP_SAMPLER_CHECK=1 FW_LOCAL_BOX=0
   BOX_SSH="$T/stub/ssh" FW_DELEGATE="$T/stub/delegate"
   FW_FILE_CLAIM="$T/stub/file-claim" FW_INBOX_WATCHERS="$T/stub/inbox-watchers"
   FW_BOXSTALE="$T/stub/boxstale")
+
+# Keep the caller's pipe open while lanecheck runs. The test fails in bounded
+# time if an SSH probe accidentally inherits this stdin instead of closing it.
+if python3 - "$BIN/lanecheck" "${common[@]}" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+read_fd, write_fd = os.pipe()
+command = ["env", *sys.argv[2:], "bash", sys.argv[1]]
+process = subprocess.Popen(
+    command,
+    stdin=read_fd,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+os.close(read_fd)
+try:
+    try:
+        status = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        print("FAIL lanecheck-does-not-read-caller-stdin (timed out)", file=sys.stderr)
+        raise SystemExit(1)
+finally:
+    os.close(write_fd)
+if status != 0:
+    print(f"FAIL lanecheck-does-not-read-caller-stdin (exit {status})", file=sys.stderr)
+    raise SystemExit(1)
+PY
+then
+  echo 'ok lanecheck-does-not-read-caller-stdin'
+else
+  echo 'FAIL lanecheck-does-not-read-caller-stdin' >&2
+  exit 1
+fi
 
 out=$(env "${common[@]}" bash "$BIN/lanecheck" 2>&1)
 rc=0

@@ -30,7 +30,7 @@ script_dir=$(cd "$(dirname "$script_path")" && pwd)
 run_claude_agents() {
   local json_file="$1" err_file="$2" status
   shift 2
-  if bash "$script_dir/claude-agents-timeout" "${FW_CLAUDE_AGENTS_TIMEOUT:-30}" "$@" >"$json_file" 2>"$err_file"; then
+  if bash "$script_dir/claude-agents-timeout" "${FW_CLAUDE_AGENTS_TIMEOUT:-30}" "$@" </dev/null >"$json_file" 2>"$err_file"; then
     return 0
   else
     status=$?
@@ -109,7 +109,7 @@ PY
     fi
   fi
   if [ "$need_muse" = 1 ]; then
-    if ! "$done_boxssh" -o BatchMode=yes "$BOX" 'delegate session list --json' >"$done_tmp/box-delegate.json" 2>"$done_tmp/box-delegate.err"; then
+    if ! "$done_boxssh" -o BatchMode=yes "$BOX" 'delegate session list --json' </dev/null >"$done_tmp/box-delegate.json" 2>"$done_tmp/box-delegate.err"; then
       echo "cannot check Box delegate sessions; no lane retired" >&2
       return 2
     fi
@@ -207,7 +207,7 @@ PY
     [ -n "$kind" ] || continue
     case "$kind:$host" in
       claude:box)
-        if ! stop_out=$("$done_boxssh" -o BatchMode=yes "$BOX" "claude stop $sid" 2>&1); then
+        if ! stop_out=$("$done_boxssh" -o BatchMode=yes "$BOX" "claude stop $sid" </dev/null 2>&1); then
           echo "could not stop Box Claude session $sid ($name); no lane retired" >&2
           printf '%s\n' "$stop_out" | sed 's/^/  /' >&2
           return 2
@@ -220,7 +220,7 @@ PY
         fi;;
       delegate:box)
         if ! stop_out=$("$done_boxssh" -o BatchMode=yes "$BOX" \
-            "PATH=\$HOME/.local/bin:\$PATH delegate session stop $sid" 2>&1); then
+            "PATH=\$HOME/.local/bin:\$PATH delegate session stop $sid" </dev/null 2>&1); then
           echo "could not stop Box delegate session $sid ($name); no lane retired" >&2
           printf '%s\n' "$stop_out" | sed 's/^/  /' >&2
           return 2
@@ -695,7 +695,7 @@ run_claude_agents "$tmp/box.json" "$tmp/box.err" \
 # Claude session, so `claude agents` never lists it and it would print MISSING
 # for its whole life. Its liveness is keyed by the delegate session id the
 # roster's 5th column holds, not by a session name.
-"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" 'delegate session list --json' >"$tmp/muse.json" 2>"$tmp/muse.err"
+"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" 'delegate session list --json' </dev/null >"$tmp/muse.json" 2>"$tmp/muse.err"
 # maclaunch.sh starts a muse lane too, so a `mac` roster line is a delegate
 # session as often as a Claude one, and only this list can tell them apart. On
 # 2026-11-06 #4272 (running) and #4273 (idle, its PR pushed 25 minutes earlier)
@@ -727,7 +727,7 @@ fi
 # be attributed through the lane-specific PID/PPID probe below, or not at all.
 "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
   "ps -eo args= | grep -E 'tkt-(plan|build|ship|fix|gate)|gh-ci wait|delegate watch' | grep -v grep" \
-  >"$tmp/pending.txt" 2>/dev/null
+  </dev/null >"$tmp/pending.txt" 2>/dev/null
 
 # One portable process snapshot per host. The lane-specific descendant probe
 # below uses PID/PPID rather than treating any ticket-named process as its job.
@@ -735,7 +735,7 @@ if ps -A -o pid=,ppid=,etime=,args= >"$tmp/mac-procs.txt" 2>/dev/null; then
   : >"$tmp/mac-procs.ok"
 fi
 if "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
-    "ps -A -o pid=,ppid=,etime=,args=" >"$tmp/box-procs.txt" 2>/dev/null; then
+    "ps -A -o pid=,ppid=,etime=,args=" </dev/null >"$tmp/box-procs.txt" 2>/dev/null; then
   : >"$tmp/box-procs.ok"
 fi
 
@@ -744,7 +744,7 @@ fi
 # #4099 read as a STALL on 2026-11-04 and both remedies the STALL line offers
 # were wrong. The ticket comes from the lane worktree in resume.cwd; a
 # superseded job's question is stale.
-"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
+"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" </dev/null \
   "python3 -c \"
 import json, glob, re, os, time
 cut = time.time() - 7 * 86400

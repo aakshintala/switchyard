@@ -66,7 +66,7 @@ run_parallel() {
   # shellcheck disable=SC2016
   printf '%s\n' "$@" | xargs -P 3 -I{} bash -c '
     _b="$(basename "$1")"; _s=$SECONDS
-    bash "$1" >"$2/$_b.log" 2>&1; _r=$?
+    bash "$1" </dev/null >"$2/$_b.log" 2>&1; _r=$?
     echo $((SECONDS - _s)) >"$2/$_b.secs"; echo "$_r" >"$2/$_b.rc"' _ {} "$PAR_T"
   for _t in "$@"; do
     _name="$(basename "$_t")"
@@ -87,7 +87,7 @@ run_parallel() {
 run_serial() {
   for t in "$@"; do
     _s=$SECONDS
-    bash "$t"; _rc=$?
+    bash "$t" </dev/null; _rc=$?
     if [ "$_rc" = "0" ]; then
       echo "PASS: $(basename "$t") ($((SECONDS - _s))s)"
     else
