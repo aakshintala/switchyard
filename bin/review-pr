@@ -1165,11 +1165,11 @@ cmd_collect() {
     if [ "$latest_id" = "$requested_id" ]; then
       resume_prompt="Your previous final message was empty. Please return the verdict block requested by your original task now."
       if ! resumed_id="$(printf '%s\n' "$resume_prompt" | delegate resume "$latest_id")"; then
-        echo "review-pr: $role job $requested_id has an empty final message and could not be resumed. Manual repair: delegate resume $latest_id, then review-pr collect <new-job-id>." >&2
+        echo "review-pr: $role job $requested_id has an empty final message and could not be resumed. Manual repair: delegate resume $latest_id, then review-pr collect $requested_id." >&2
         exit 1
       fi
       if ! delegate watch "$resumed_id" >/dev/null; then
-        echo "review-pr: resumed $role job $resumed_id did not finish. Manual repair: delegate watch $resumed_id, then review-pr collect $requested_id." >&2
+        echo "review-pr: resumed $role job $resumed_id could not be watched. Manual repair: delegate watch $resumed_id, then review-pr collect $requested_id." >&2
         exit 1
       fi
       resumed_rec="$(job_rec "$resumed_id")"
@@ -1181,12 +1181,12 @@ cmd_collect() {
       fi
       case "$resumed_status" in DONE|DONE_WITH_CONCERNS)
         if ! [[ "$resumed_text" =~ [^[:space:]] ]]; then
-          echo "review-pr: $role job $requested_id resumed as $resumed_id but its final message is still empty. Manual repair: delegate resume $resumed_id, then review-pr collect <new-job-id>." >&2
+          echo "review-pr: $role job $requested_id resumed as $resumed_id but its final message is still empty. Manual repair: delegate resume $resumed_id, then review-pr collect $requested_id." >&2
           exit 1
         fi;;
       esac
     else
-      echo "review-pr: $role job $requested_id (latest job $latest_id) has an empty final message after a resume. Manual repair: delegate resume $latest_id, then review-pr collect <new-job-id>." >&2
+      echo "review-pr: $role job $requested_id (latest job $latest_id) has an empty final message after a resume. Manual repair: delegate resume $latest_id, then review-pr collect $requested_id." >&2
       exit 1
     fi
   done

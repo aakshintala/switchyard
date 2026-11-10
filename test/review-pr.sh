@@ -1359,7 +1359,7 @@ cp "$T/canned/verify.json" "$T/canned/resumed.json"
 out="$(bash "$REVIEW" collect job-verify 2>&1)" && fail "collect exits 1 when resumed final message is empty"
 grep -q 'job-verify' <<<"$out" || fail "empty-resume message names the original job id"
 grep -q 'delegate resume job-verify-resumed' <<<"$out" || fail "empty-resume message prints manual delegate resume"
-grep -q 'review-pr collect' <<<"$out" || fail "empty-resume message prints manual collect"
+grep -q 'review-pr collect job-verify\.' <<<"$out" || fail "empty-resume message prints manual collect on the original id"
 [ "$(wc -l <"$T/state/resumes.log" | tr -d ' ')" = "1" ] || fail "empty resumed result is not automatically resumed again"
 
 # --- case: run starts, waits on the started ids, collects; exits 0 on all APPROVE
