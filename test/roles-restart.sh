@@ -18,6 +18,7 @@ export HOME="$T/home"
 STUBS="$T/stubs"
 mkdir -p "$HOME" "$STUBS"
 export GH_LOG="$T/gh.log" CLAUDE_LOG="$T/claude.log" OWNER_ASK_LOG="$T/owner-ask.log"
+export CLAUDE_NAME_LOG="$T/claude-name.log" TEST_PID="$$"
 
 cat >"$STUBS/gh" <<'GH'
 #!/usr/bin/env bash
@@ -31,6 +32,24 @@ cat >"$STUBS/claude" <<'CLAUDE'
   printf 'arg=%s\n' "$@"
   printf '\n'
 } >>"$CLAUDE_LOG"
+# Record --name and register a live session under it, as claude agents --json would.
+name=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --name ] && [ "$#" -gt 1 ]; then name="$2"; break; fi
+  shift
+done
+if [ -n "$name" ]; then
+  printf 'name=%s\n' "$name" >>"$CLAUDE_NAME_LOG"
+  python3 -I -c '
+import json, sys
+path, name, pid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(path) as f:
+    rows = json.load(f)
+rows.append({"pid": pid, "name": name, "state": "running"})
+with open(path, "w") as f:
+    json.dump(rows, f)
+' "$AGENTS_JSON" "$name" "$TEST_PID"
+fi
 CLAUDE
 cat >"$STUBS/owner-ask" <<'OWNER'
 #!/usr/bin/env bash
@@ -83,6 +102,15 @@ grep -F 'If it has no ## Crons section, say so on owner-ask and carry on.' "$CLA
 grep -F 'roles-restart relaunched test-role' "$T/roles-restart.log" >/dev/null || fail "relaunch was not written to local log"
 grep -F 'owner-ask log --from switchyard --kind process --title roles-restart relaunched test-role' "$OWNER_ASK_LOG" >/dev/null \
   || fail "relaunch was not posted as a process line"
+
+# A relaunched role is named after itself, so the next pass sees it live.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"; : >"$CLAUDE_NAME_LOG"
+printf '[]\n' >"$AGENTS_JSON"
+run_restart >"$T/named.out" 2>"$T/named.err" || fail "named launch run failed: $(cat "$T/named.err")"
+grep -Fqx 'name=test-role' "$CLAUDE_NAME_LOG" || fail "relaunch did not pass --name test-role"
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+run_restart >"$T/named2.out" 2>"$T/named2.err" || fail "second named run failed: $(cat "$T/named2.err")"
+[ ! -s "$CLAUDE_LOG" ] || fail "second pass relaunched a role the first pass started"
 
 # A matching row whose pid is dead does not mask a needed restart.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
