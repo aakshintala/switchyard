@@ -392,8 +392,9 @@ is_clean_main_merge() {
 verify_round_coverage() {
   local round_list_file="$1" unaccounted_file="$2" commits commit owner limit n round_start round_head round_findings
   local sha_list missing_rounds repair_command state_arg since_arg path_arg first_round_start first_round_commit concrete_start any_round_start
-  local replacement_path replacement_index repair_resume repair_prompt repair_resume_arg repair_prompt_arg repair_resume_args verify_command
+  local replacement_path replacement_index repair_resume repair_prompt repair_prompt_arg repair_resume_arg repair_resume_args verify_command repair_note_rounds
   local -a repair_notes=()
+  repair_note_rounds="," # comma-delimited round numbers
   : >"$round_list_file"; : >"$unaccounted_file"
   if ! git -C "$worktree" merge-base --is-ancestor "$verify_since" "$new_head" 2>/dev/null; then
     emit "SINCE-NOT-ANCESTOR since=$verify_since head=$new_head" 1 \
@@ -429,8 +430,14 @@ verify_round_coverage() {
       else
         printf '%s %s\n' "$commit" "$owner" >>"$unaccounted_file"
         if [ -n "$round_findings" ] && [ -r "$round_findings" ] && ! grep -q '^P[123] ' "$round_findings"; then
-          repair_notes+=("round $owner findings file has no column-0 P1/P2/P3 lines: $round_findings")
-          repair_notes+=("round $owner findings must be written as column-0 P<n> <path>:<line> — ... lines")
+          case "$repair_note_rounds" in
+            *",$owner,"*) ;;
+            *)
+              repair_note_rounds="${repair_note_rounds}${owner},"
+              repair_notes+=("round $owner findings file has no column-0 P1/P2/P3 lines: $round_findings")
+              repair_notes+=("round $owner findings must be written as column-0 P<n> <path>:<line> — ... lines")
+              ;;
+          esac
         fi
       fi
     elif is_clean_main_merge "$commit"; then
@@ -456,9 +463,13 @@ verify_round_coverage() {
           "unaccounted commits=$sha_list" \
           "cannot print a round-$round repair command: no recorded fix job for slot $slot"
       fi
-      [ -n "$repair_prompt" ] || repair_prompt="$fbrief"
+      if [ -z "$repair_prompt" ]; then
+        repair_prompt_arg="<file>"
+        repair_notes+=("write a prompt scoping the verify to the round's delta")
+      else
+        repair_prompt_arg="$(printf '%q' "$repair_prompt")"
+      fi
       repair_resume_arg="$(printf '%q' "$repair_resume")"
-      repair_prompt_arg="$(printf '%q' "$repair_prompt")"
       repair_resume_args=" --resume $repair_resume_arg --prompt $repair_prompt_arg"
     fi
     verify_command="tkt-fix $state_arg --verify --since $since_arg$repair_resume_args"
