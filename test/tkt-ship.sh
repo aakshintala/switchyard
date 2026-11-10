@@ -210,6 +210,49 @@ run_ship
 [ "$RC" -eq 0 ] || fail "missing plan verdict key permits ship (rc=$RC)"
 expect_line1 "MERGED sha=" "missing plan verdict key permits ship"
 
+# --- a takeover uses its recorded gate without a plan file and names its PR ---
+reset_stub; setup_case takeover
+printf '0' >"$T/exitcodes"
+printf 'Title\n\nImplemented by: m/a\n' >"$T/prbody"
+printf 'plan=takeover #123\ngate=bash test/run && bash bin/check-pack\nmerge_gate=gate\n' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "takeover: exit $RC: $OUT"
+expect_line1 "MERGED sha=" takeover
+[ "$(grep -Fc 'Takeover of #123: no plan; review against the ticket.' "$T/prbody")" -eq 1 ] || fail "takeover line missing or duplicated in PR body: $(cat "$T/prbody")"
+got="$(grep -A1 -x -F 'arg|--gate' "$T/calls.log" | sed -n 2p)"
+[ "$got" = 'arg|bash test/run && bash bin/check-pack' ] || fail "takeover gate not passed to ship-pr: [$got]"
+
+reset_stub; setup_case takeover-note-fail
+printf 'plan=takeover #123\ngate=bash test/run\nmerge_gate=gate\n' >>"$S"
+printf 'Title\n' >"$T/prbody"
+: >"$T/body-write-fail"
+run_ship
+[ "$RC" -eq 2 ] || fail "takeover body-write failure: exit $RC"
+expect_line1 "PRECONDITION takeover-note=unwritten" "takeover body-write failure"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "takeover body-write failure invoked ship-pr"
+
+# --- ordinary missing plan, bare takeover and takeover without a gate refuse ---
+reset_stub; setup_case no-plan
+printf 'merge_gate=gate\n' >>"$S"
+run_ship
+[ "$RC" -eq 2 ] || fail "ordinary missing plan: exit $RC"
+expect_line1 "PRECONDITION missing=plan" "ordinary missing plan"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "ordinary missing plan invoked ship-pr"
+
+reset_stub; setup_case bare-takeover
+printf 'plan=takeover\ngate=bash test/run\nmerge_gate=gate\n' >>"$S"
+run_ship
+[ "$RC" -eq 2 ] || fail "bare takeover: exit $RC"
+case "$OUT" in *takeover*) ;; *) fail "bare takeover refusal does not name takeover: [$OUT]" ;; esac
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "bare takeover invoked ship-pr"
+
+reset_stub; setup_case takeover-no-gate
+printf 'plan=takeover #123\nmerge_gate=gate\n' >>"$S"
+run_ship
+[ "$RC" -eq 2 ] || fail "takeover without gate: exit $RC"
+case "$OUT" in *gate*) ;; *) fail "takeover without gate refusal does not name gate: [$OUT]" ;; esac
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "takeover without gate invoked ship-pr"
+
 # --- flake note on stderr text ---
 reset_stub; setup_case flake
 printf '0' >"$T/exitcodes"

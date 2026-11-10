@@ -6,16 +6,18 @@
 # The preflight report carries `Core items: <n>` and `Non-blocking items: <n>` field lines just before its STATUS line; tkt-start reads the last such lines. A core item a ruling already settles is not counted in the fields.
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # --part N archives the prior state after its PR merges; merged-PR head drift tells you the next --part.
-# Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]
+# Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 # Words after --files run to the next word starting with '-': write such a path as ./-name.
 # Example: --files a b c, the same as --files a,b,c.
 set -euo pipefail
 usage() {
-  echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight]" >&2
+  echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]" >&2
+  echo "  --takeover PR-OR-BRANCH records plan=takeover PR-OR-BRANCH; --gate CMD records its required check command" >&2
   echo "  --spec FILE: a file holding the ticket body; a Part-of closing needs 'Part of #N' in it" >&2
   echo "  --spec-issue N: the issue holding the spec, when it is not this ticket; review-pr checks the spec axis against it" >&2
   echo "  --files PATHS: paths separated by commas or spaces, e.g. --files a b c or --files a,b,c" >&2
+  echo "  With --takeover, --files also records the takeover file fence." >&2
   exit 2
 }
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
@@ -23,6 +25,7 @@ env=""; extra=""; merge_gate=""; merge_check=""; mutant_job=""; files=""; no_pre
 body_has=(); models=()
 model_roles=(lane fix map verifier verify review overbuild preflight)
 body_ends=""; body_ends_given=0; spec_issue=""; spec_issue_given=0
+takeover_ref=""; takeover_given=0; takeover_gate=""; takeover_gate_given=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --body-has) [ $# -ge 2 ] || usage; body_has+=("$2"); shift 2 ;;
@@ -30,6 +33,8 @@ while [ $# -gt 0 ]; do
     --spec-issue) [ $# -ge 2 ] || usage; spec_issue="$2"; spec_issue_given=1; shift 2 ;;
     --model) [ $# -ge 2 ] || usage; models+=("$2"); shift 2 ;;
     --part) [ $# -ge 2 ] || usage; part="$2"; part_given=1; shift 2 ;;
+    --takeover) [ $# -ge 2 ] || usage; takeover_ref="$2"; takeover_given=1; shift 2 ;;
+    --gate) [ $# -ge 2 ] || usage; takeover_gate="$2"; takeover_gate_given=1; shift 2 ;;
     --files) [ $# -ge 2 ] && [[ $2 != -* ]] || usage; shift; while [ $# -gt 0 ] && [[ $1 != -* ]]; do files="${files:+$files,}${1//[[:space:]]/,}"; shift; done ;;
     --no-preflight) no_preflight=1; shift ;;
     --run|--repo|--issue|--spec|--branch|--worktree|--closing|--env|--extra|--merge-gate|--merge-check|--mutant-job|--workflow-doc)
@@ -41,6 +46,20 @@ done
 while [[ $files == *,,* ]]; do files="${files//,,/,}"; done
 files="${files#,}"; files="${files%,}"
 for v in run repo issue spec branch worktree workflow_doc closing; do [ -n "${!v}" ] || { echo "tkt-start: missing required flag: --${v//_/-}" >&2; exit 2; }; done
+if [ "$takeover_given" -eq 1 ]; then
+  if [ -z "${takeover_ref//[[:space:]]/}" ] || [[ $takeover_ref == -* ]] || [[ $takeover_ref == *[[:space:]]* ]]; then
+    echo "tkt-start: --takeover needs one PR or branch reference with no whitespace: $takeover_ref" >&2
+    exit 2
+  fi
+  if [ "$takeover_gate_given" -ne 1 ] || [ -z "${takeover_gate//[[:space:]]/}" ]; then
+    echo "tkt-start: --takeover requires a non-blank --gate CMD" >&2
+    exit 2
+  fi
+  case "$takeover_gate" in *$'\n'*) echo "tkt-start: --gate CMD holds a newline" >&2; exit 2 ;; esac
+elif [ "$takeover_gate_given" -eq 1 ]; then
+  echo "tkt-start: --gate CMD requires --takeover PR-OR-BRANCH" >&2
+  exit 2
+fi
 if [[ $env =~ (^|[[:space:]])([^[:space:]=]+)=([[:space:]]|$) ]]; then
   echo "tkt-start: --env sets ${BASH_REMATCH[2]} to an empty value; drop it or give it a value" >&2
   exit 2
@@ -238,6 +257,18 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
 fi
 for k in repo issue spec branch worktree run workflow_doc closing; do tkt set "$k" "${!k}"; done
 for k in env extra merge_gate merge_check mutant_job; do [ -n "${!k}" ] && tkt set "$k" "${!k}"; done
+if [ "$takeover_given" -eq 1 ]; then
+  tkt set plan "takeover $takeover_ref"
+  tkt set gate "$takeover_gate"
+  if [ -n "$files" ]; then
+    IFS=',' read -ra takeover_paths <<<"$files"
+    for takeover_path in ${takeover_paths[@]+"${takeover_paths[@]}"}; do
+      takeover_path="$(printf '%s' "$takeover_path" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      [ -n "$takeover_path" ] || continue
+      tkt list fence 2>/dev/null | grep -xF -- "$takeover_path" >/dev/null || tkt add fence "$takeover_path"
+    done
+  fi
+fi
 if [ "$body_ends_given" -eq 1 ]; then tkt set body_ends "$body_ends"; fi
 if [ "$spec_issue_given" -eq 1 ]; then tkt set spec_issue "$spec_issue"; fi
 for b in ${body_has[@]+"${body_has[@]}"}; do tkt list body_has 2>/dev/null | grep -xF -- "$b" >/dev/null || tkt add body_has "$b"; done
