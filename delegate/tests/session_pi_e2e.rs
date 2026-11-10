@@ -1487,6 +1487,11 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
         &replay_decision_marker,
         "pi replay decision while turn-start event is held",
     );
+    assert_eq!(
+        h.notes(&id, "idle").len(),
+        0,
+        "idle note appeared before the queued continuation's TurnStarted"
+    );
     let ordinary_prompts_before_release = h
         .requests()
         .iter()

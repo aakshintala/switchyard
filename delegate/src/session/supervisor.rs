@@ -1110,9 +1110,13 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
             .iter()
             .any(|pending| queued_steers.contains(&pending.command_id));
         if has_queued_pending && !state.stopping {
-            // The host owns delivery of queued steers. Stay busy until its
-            // continuation starts and completes, then reconsider any dropped
-            // steers under admission.
+            // pi's host contract delivers queued steers on the next continuation
+            // (docs/delegate-sessions.md:40); the fake models this in
+            // tests/support/pi_host_fake.py:131-145, and
+            // steer_racing_the_end_of_a_turn_starts_the_next_turn holds
+            // TurnStarted before releasing the host (tests/session_pi_e2e.rs:1440).
+            // Stay busy until that turn starts and completes, then reconsider
+            // any dropped steers under admission.
             return Vec::new();
         }
         let decision = if pi_host {
@@ -1461,6 +1465,9 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
         should_interrupt && current.status == Status::Running && turn_id.is_some();
     if should_interrupt {
         if shared.kind == HostKind::Pi {
+            // debt: pi may continue queued steers after an interrupt despite
+            // this clear request; upgrade when pi provides an authoritative
+            // clear-queue acknowledgement or reports any steer lost by abort.
             // An abort continues queued messages left in the session, so
             // drop unsent steers first: they are reported as unconsumed on
             // the cancelled completion instead of running after the abort.
