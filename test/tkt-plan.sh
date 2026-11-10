@@ -3023,12 +3023,17 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = amendment ]; th
   [ -n "$(state_get plan_verdict_at)" ] || fail "PLAN-OK records its verdict time"
   replace_plan_line '1. Preserve the existing interface.' '1. Use the revised interface.'
   bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed old PLAN-OK verdict time"
-  set_ruling_comment $'```diff\n-1. Preserve the existing interface.\n+1. Use the revised interface.\n```'
+  # Dated after the seeded verdict but before the triaged verdict this run records.
+  set_ruling_comment $'```diff\n-1. Preserve the existing interface.\n+1. Use the revised interface.\n```' 2001-01-01T00:00:00Z
   run_plan triaged --comment 700006
   [ "$RC" -eq 0 ] || fail "triaged-plan-ok-newer-ruling accepts a newer quoted ruling (rc=$RC): $OUT"
   expect_plan_verdict triaged "$(cat "$CDIR/base")" "triaged-plan-ok-newer-ruling"
   triaged_verdict_at="$(state_get plan_verdict_at)"
   [ -n "$triaged_verdict_at" ] && [ "$triaged_verdict_at" != 2000-01-01T00:00:00Z ] || fail "passing triaged refreshes the plan verdict time"
+  # Replaying the same comment after it passed triaged is stale.
+  run_plan triaged --comment 700006
+  [ "$RC" -eq 1 ] || fail "triaged-plan-ok-newer-ruling refuses a replay of comment 700006 (rc=$RC): $OUT"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-stale log=*" "triaged-plan-ok-newer-ruling-replay"
 
   setup_case triaged-plan-ok-old-ruling
   rebase_plan

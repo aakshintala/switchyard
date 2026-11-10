@@ -118,8 +118,10 @@ plan_open_questions() {
   ' "$1"
 }
 
-normalize_plan_ruling_line() {
-  printf '%s\n' "$1" | awk '
+# Normalizes ruling lines on stdin for matching: drops fence lines, a diff +/- marker,
+# a list marker and surrounding space; prints only non-empty lines. Plan and comment share it.
+normalize_ruling_lines() {
+  awk '
     {
       line=$0
       sub(/^[[:space:]]+/, "", line)
@@ -130,7 +132,7 @@ normalize_plan_ruling_line() {
       sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
-      print line
+      if (length(line)) print line
     }
   '
 }
@@ -614,23 +616,10 @@ do_triaged() {
       if diff -u "$before_rest" "$after_rest" >"$outside_diff"; then :; else diff_rc=$?; fi
       [ "$diff_rc" -le 1 ] || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$diff_file"; exit 2; }
       jq -r '.body' "$comment_json" >"$comment_body" || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$comment_json" "$comment_body" "$comment_error" "$diff_file"; exit 2; }
-      awk '
-        {
-          line=$0
-          sub(/^[[:space:]]+/, "", line)
-          sub(/[[:space:]]+$/, "", line)
-          if (line ~ /^(```|~~~)/) next
-          sub(/^[-+]/, "", line)
-          sub(/^[[:space:]]+/, "", line)
-          sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
-          sub(/^[[:space:]]+/, "", line)
-          sub(/[[:space:]]+$/, "", line)
-          if (length(line)) print line
-        }
-      ' "$comment_body" >"$normalized_comment"
+      normalize_ruling_lines <"$comment_body" >"$normalized_comment"
       first_unmatched=""
       while IFS= read -r changed_line; do
-        normalized_line="$(normalize_plan_ruling_line "$changed_line")"
+        normalized_line="$(printf '%s\n' "$changed_line" | normalize_ruling_lines)"
         [ -n "$normalized_line" ] || continue
         if ! grep -Fqx -- "$normalized_line" "$normalized_comment"; then
           first_unmatched="$changed_line"
