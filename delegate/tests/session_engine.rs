@@ -652,6 +652,55 @@ fn supervisor_send_while_running_steers_and_tracks_the_command() {
 }
 
 #[test]
+fn supervisor_replays_unconsumed_steers_after_turn_completion() {
+    let mut session = Session::spawn("HOLD,STEER_NOEFFECT", "brief", None, Bounds::default());
+    session.until("held first turn", |state| {
+        state.status == Status::Running && state.active_turn_id.is_some()
+    });
+
+    for text in ["first replay", "second replay"] {
+        let reply = session.send(text).unwrap();
+        assert_eq!(reply["disposition"], "steered");
+    }
+    let steering: Vec<_> = session
+        .requests()
+        .into_iter()
+        .filter(|request| request["method"] == "turn/steer")
+        .collect();
+    assert_eq!(steering.len(), 2);
+    let command_ids: Vec<_> = steering
+        .iter()
+        .map(|request| request["params"]["commandId"].as_str().unwrap())
+        .collect();
+
+    std::fs::write(session.fake_dir.join("go"), "").unwrap();
+    let replayed_state = session.until("replayed turn", |state| state.turn_count == 2);
+    let starts: Vec<_> = session
+        .requests()
+        .into_iter()
+        .filter(|request| request["method"] == "turn/start")
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(
+        starts[1]["params"]["input"][0]["text"],
+        "first replay\n\nsecond replay"
+    );
+    assert_eq!(replayed_state.turn_count, 2);
+
+    let replay_log = session
+        .events()
+        .into_iter()
+        .find(|event| event["kind"] == "steer.replayed")
+        .expect("replay must be logged");
+    assert_eq!(replay_log["commandIds"], json!(command_ids));
+    assert!(session
+        .events()
+        .iter()
+        .all(|event| event["kind"] != "steer.unconsumed"));
+    assert_eq!(session.stop_and_join(), 0);
+}
+
+#[test]
 fn supervisor_refused_steer_retries_after_idle_but_not_while_running() {
     let mut ended = Session::spawn("STEERREFUSE", "brief", None, Bounds::default());
     ended.until("initial held turn", |state| state.active_turn_id.is_some());
