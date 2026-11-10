@@ -583,6 +583,23 @@ run_gate --checks-only
 [ "$RC" -eq 0 ] || fail "fence list exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-gate PASS head=$H log=*" "fence list"
 
+# --- bare takeover plans and takeovers without a state gate are refused ---
+setup_case takeover-bare
+printf 'plan=takeover\ngate=gate-ok\n' >>"$S"
+run_gate
+[ "$RC" -eq 2 ] || fail "bare takeover exits 2 (rc=$RC)"
+[ -z "$OUT" ] || fail "bare takeover writes no verdict: [$OUT]"
+grep -Fxq "tkt-gate: invalid takeover plan value: expected 'takeover <pr-or-branch>'" "$CDIR/stderr.txt" \
+  || fail "bare takeover refusal message changed: $(cat "$CDIR/stderr.txt")"
+
+setup_case takeover-no-gate
+printf 'plan=takeover #123\n' >>"$S"
+run_gate
+[ "$RC" -eq 2 ] || fail "takeover without gate exits 2 (rc=$RC)"
+[ -z "$OUT" ] || fail "takeover without gate writes no verdict: [$OUT]"
+grep -Fxq 'tkt-gate: takeover #123 has no gate command in state (key: gate)' "$CDIR/stderr.txt" \
+  || fail "takeover without gate refusal message changed: $(cat "$CDIR/stderr.txt")"
+
 # --- takeover state uses its stored fence and gate without a plan file ---
 setup_case takeover
 printf 'plan=takeover #123\ngate=gate-ok\nfence=base.txt\n' >>"$S"

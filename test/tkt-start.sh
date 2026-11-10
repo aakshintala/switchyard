@@ -204,6 +204,22 @@ want "SKIPPED filing=" 0 gate-script-present
 grep -qxF 'gate.script=scripts/check' "$RUN/widget-42.state" \
   || fail "gate-script-present: state does not set gate.script to scripts/check"
 
+setup takeover-no-files ONE AGAINST
+reload --files
+run_start --no-preflight --takeover '#123' --gate 'bash scripts/check'
+[ "$RC" -eq 2 ] || fail "takeover-no-files: exit $RC, want 2"
+grep -Fxq 'tkt-start: --takeover requires non-blank --files PATHS' "$CDIR/stderr" \
+  || fail "takeover-no-files: refusal message missing: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "takeover-no-files: state was written before refusal"
+
+setup takeover-blank-files ONE AGAINST
+reload --files
+run_start --no-preflight --takeover '#123' --gate 'bash scripts/check' --files '  '
+[ "$RC" -eq 2 ] || fail "takeover-blank-files: exit $RC, want 2"
+grep -Fxq 'tkt-start: --takeover requires non-blank --files PATHS' "$CDIR/stderr" \
+  || fail "takeover-blank-files: refusal message missing: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "takeover-blank-files: state was written before refusal"
+
 setup takeover ONE AGAINST
 run_start --no-preflight --takeover '#123' --gate 'bash scripts/check'
 want "SKIPPED filing=" 0 takeover
