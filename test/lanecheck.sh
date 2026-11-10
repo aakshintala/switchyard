@@ -715,6 +715,21 @@ else
   fail "a-lane-that-reported-blocked-and-stopped-is-waiting-on-a-ruling ($out)"
 fi
 
+# A planner QUESTIONS status is an open ruling request, not a completed plan.
+rq=$(newrun GQ); lane "$rq" 4180 fiber-4180-plan qst1
+printf '{"ok":true,"sessions":[{"id":"qst1","status":"running","turnCount":2}]}' > "$T/dsess"
+: > "$T/pending"; : > "$T/asking"; : > "$T/prs"
+rep "$rq" 4180 'STATUS: QUESTIONS — planner has open design choices.'
+out=$(FW_RUN=$rq FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
+if printf '%s' "$out" | grep -q '^NEEDS-RULING 4180' \
+   && printf '%s' "$out" | grep -q 'open design choices' \
+   && ! printf '%s' "$out" | grep -q '^STALL 4180'; then
+  ok planner-questions-status-needs-a-ruling
+else
+  fail "planner-questions-status-needs-a-ruling ($out)"
+fi
+printf '{"ok":true,"sessions":[{"id":"yz1","status":"running","turnCount":7}]}' > "$T/dsess"
+
 # A ruling newer than the report means the lane was answered and stopped
 # anyway. That is a genuine stall with the opposite remedy, and the line has to
 # say which it is or the reader re-rules a question already answered.

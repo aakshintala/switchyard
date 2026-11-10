@@ -186,5 +186,13 @@ while IFS= read -r f; do
   done <<<"$hits"
 done <<<"$bin_files"
 
+planner_skill="$root/skills/implement/SKILL.md"
+if [ -f "$planner_skill" ] && ! grep -Fq 'tkt-job <state> --slot planner --brief <filled planner brief>' "$planner_skill"; then
+  hit="$(grep -nF 'When a worker writes the plan' "$planner_skill" | head -n 1 || true)"
+  line="${hit%%:*}"
+  [ -n "$line" ] || line=1
+  fail "skills/implement/SKILL.md" "$line" "planner dispatch must name --slot planner"
+fi
+
 if [ "$failures" -gt 0 ]; then exit 1; fi
 exit 0
