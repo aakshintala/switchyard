@@ -687,7 +687,12 @@ fn supervisor_send_reports_unconsumed_msp_steer_after_turn_completion() {
         "HOLD,STEER_NOEFFECT,STEER_ACK_HOLD",
         "brief",
         None,
-        Bounds::default(),
+        // The fake holds the steer ack until the test releases it; the RPC
+        // timeout must outlast that hold or the session dies under load.
+        Bounds {
+            rpc_ms: 15_000,
+            ..Bounds::default()
+        },
     );
     session.until("held first turn", |state| state.active_turn_id.is_some());
 
