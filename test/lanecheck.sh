@@ -690,6 +690,25 @@ ruling() { # ruling <run> <ticket> <n> [age in minutes, default 1]
   age_file "$f" "${4:-1}"
 }
 
+# At the plan-to-build handoff, both sessions use one ticket state file. The
+# pending tkt-build belongs to the newer live build session, not the plan that
+# has already reported PLANNED and ended its turn.
+r=$(newrun 1518); lane "$r" 1518 fiber-1518-plan plan1518 3H; lane "$r" 1518 fiber-1518-build build1518 1M
+printf '{"ok":true,"sessions":[{"id":"plan1518","status":"completed","turnCount":2},{"id":"build1518","status":"running","activeTurnId":"t1","turnCount":1}]}' > "$T/dsess"
+printf '/bin/bash /home/a/.agents/bin/tkt-build /srv/lanes/run/fiber-1518.state --phase build\n' > "$T/pending"
+rep "$r" 1518 'STATUS: PLANNED — plan handed off to build.'
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
+if printf '%s' "$out" | grep -q '^STALL 1518 muse fiber-1518-plan' \
+   && printf '%s' "$out" | grep -q 'STATUS: PLANNED' \
+   && printf '%s' "$out" | grep -q 'retire it if its report landed' \
+   && printf '%s' "$out" | grep -q '^LIVE 1518 muse fiber-1518-build' \
+   && ! printf '%s' "$out" | grep -q '^ABANDONED 1518 muse fiber-1518-plan'; then
+  ok planned-session-is-retirable-after-build-handoff
+else
+  fail "planned-session-is-retirable-after-build-handoff ($out)"
+fi
+: > "$T/pending"
+
 r=$(newrun G); lane "$r" 4152 fiber-4152-build yz1
 printf '{"ok":true,"sessions":[{"id":"yz1","status":"running","turnCount":7}]}' > "$T/dsess"
 : > "$T/pending"; : > "$T/asking"; : > "$T/prs"
