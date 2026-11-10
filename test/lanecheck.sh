@@ -711,6 +711,22 @@ else
 fi
 : > "$T/pending"
 
+# A retired newer build entry cannot own pending work on the shared state file.
+r=$(newrun 1519); lane "$r" 1519 fiber-1519-plan plan1519 3H; lane "$r" 1519 fiber-1519-build build1519 1M
+printf '%s\t1519\tfiber-1519-build\n' "$(future 1)" > "$r/roster-done"
+printf '{"ok":true,"sessions":[{"id":"plan1519","status":"completed","turnCount":2}]}' > "$T/dsess"
+printf '/bin/bash /home/a/.agents/bin/tkt-build /srv/lanes/run/fiber-1519.state --phase build\n' > "$T/pending"
+rep "$r" 1519 'STATUS: PLANNED — plan handed off to build.'
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
+if printf '%s' "$out" | grep -q '^ABANDONED 1519 muse fiber-1519-plan' \
+   && ! printf '%s' "$out" | grep -q '^STALL 1519 muse fiber-1519-plan' \
+   && ! printf '%s' "$out" | grep -q 'newer roster entry muse/fiber-1519-build'; then
+  ok retired-newer-roster-entry-does-not-own-shared-state-work
+else
+  fail "retired-newer-roster-entry-does-not-own-shared-state-work ($out)"
+fi
+: > "$T/pending"
+
 r=$(newrun G); lane "$r" 4152 fiber-4152-build yz1
 printf '{"ok":true,"sessions":[{"id":"yz1","status":"running","turnCount":7}]}' > "$T/dsess"
 : > "$T/pending"; : > "$T/asking"; : > "$T/prs"
