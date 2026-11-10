@@ -212,6 +212,64 @@ run_post 7 "$T/plan1.md" --repo "$REPO"
 [ ! -e "$T/deleted-302" ] || fail "another user's marked comment is not deleted"
 [ ! -e "$T/created-1.md" ] || fail "other-user re-post creates nothing"
 
+# --- case: a new run leaves legacy and earlier run comments untouched
+reset_state
+cat >"$T/comments.json" <<'EOF'
+[
+  {"id":151,"body":"<!-- post-plan 1/2 -->\nlegacy part 1","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/151"},
+  {"id":152,"body":"<!-- post-plan 2/2 -->\nlegacy part 2","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/152"},
+  {"id":153,"body":"<!-- post-plan 1/2 run=old-run -->\nold run part 1","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/153"},
+  {"id":154,"body":"<!-- post-plan 2/2 run=old-run -->\nold run part 2","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/154"}
+]
+EOF
+run_post 7 "$T/plan2.md" --repo "$REPO" --run new-run
+[ "$rc" = "0" ] || fail "new run exits 0 (got $rc: $(cat "$T/stderr.txt"))"
+[ "$(wc -l <"$T/stdout.txt" | tr -d ' ')" = "3" ] || fail "new run creates three plan comments"
+k=1
+while [ "$k" -le 3 ]; do
+  [ -f "$T/created-$k.md" ] || fail "new run creates part $k"
+  [ "$(sed -n '1p' "$T/created-$k.md")" = "<!-- post-plan $k/3 run=new-run -->" ] || fail "new run part $k carries its run id"
+  k=$((k + 1))
+done
+{ tail -n +2 "$T/created-1.md"; tail -n +2 "$T/created-2.md"; tail -n +2 "$T/created-3.md"; } \
+  | cmp -s - "$T/plan2.md" || fail "new run's comments joined equal the new plan"
+for id in 151 152 153 154; do
+  [ ! -e "$T/patched-$id.md" ] || fail "new run does not edit earlier comment $id"
+  [ ! -e "$T/deleted-$id" ] || fail "new run does not delete earlier comment $id"
+done
+grep -q -- '-X PATCH' "$T/calls.log" && fail "new run makes no PATCH calls"
+grep -q -- '-X DELETE' "$T/calls.log" && fail "new run makes no DELETE calls"
+
+# --- case: a rerun reuses comments from the same run and label
+reset_state
+cat >"$T/comments.json" <<'EOF'
+[
+  {"id":161,"body":"<!-- post-plan P1 1/2 run=same-run -->\nold part 1","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/161"},
+  {"id":162,"body":"<!-- post-plan P1 2/2 run=same-run -->\nold part 2","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/162"}
+]
+EOF
+run_post 7 "$T/plan2.md" --repo "$REPO" --part P1 --run same-run
+[ "$rc" = "0" ] || fail "same-run rerun exits 0 (got $rc: $(cat "$T/stderr.txt"))"
+[ "$(sed -n '1p' "$T/patched-161.md")" = "<!-- post-plan P1 1/3 run=same-run -->" ] || fail "same-run rerun edits the oldest matching comment"
+[ "$(sed -n '1p' "$T/patched-162.md")" = "<!-- post-plan P1 2/3 run=same-run -->" ] || fail "same-run rerun edits the second matching comment"
+[ "$(sed -n '1p' "$T/created-1.md")" = "<!-- post-plan P1 3/3 run=same-run -->" ] || fail "same-run rerun creates its extra part"
+{ tail -n +2 "$T/patched-161.md"; tail -n +2 "$T/patched-162.md"; tail -n +2 "$T/created-1.md"; } \
+  | cmp -s - "$T/plan2.md" || fail "same-run rerun's comments joined equal the plan"
+[ ! -e "$T/deleted-161" ] && [ ! -e "$T/deleted-162" ] || fail "same-run rerun keeps the comments it edits"
+
+# --- case: without --run, a run-tagged labelled comment is not reused
+reset_state
+cat >"$T/comments.json" <<'EOF'
+[
+  {"id":171,"body":"<!-- post-plan P2 1/1 run=tagged-run -->\nold tagged part","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/171"}
+]
+EOF
+run_post 7 "$T/plan1.md" --repo "$REPO" --part P2
+[ "$rc" = "0" ] || fail "no-run labelled post exits 0 (got $rc: $(cat "$T/stderr.txt"))"
+[ "$(sed -n '1p' "$T/created-1.md")" = "<!-- post-plan P2 1/1 -->" ] || fail "no-run labelled post creates a legacy header"
+[ ! -e "$T/patched-171.md" ] || fail "no-run post does not edit a run-tagged comment"
+[ ! -e "$T/deleted-171" ] || fail "no-run post does not delete a run-tagged comment"
+
 # --- case: one section over the limit exits 1 naming the heading, posting nothing
 reset_state
 run_post 7 "$T/huge.md" --repo "$REPO"
@@ -279,5 +337,9 @@ reset_state
 run_post 7 "$T/plan1.md" --repo "$REPO" --part 'bad label'
 [ "$rc" = "2" ] || fail "--part with a space exits 2 (got $rc)"
 [ ! -e "$T/calls.log" ] || fail "bad --part makes no gh calls"
+reset_state
+run_post 7 "$T/plan1.md" --repo "$REPO" --run 'bad run'
+[ "$rc" = "2" ] || fail "--run with a space exits 2 (got $rc)"
+[ ! -e "$T/calls.log" ] || fail "bad --run makes no gh calls"
 
 echo "post-plan: all cases passed"

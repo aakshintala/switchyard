@@ -1277,11 +1277,22 @@ printf 'ok' >"$T/mode"
 setup_case post
 bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed post verdict"
 bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed post verdict base"
+: >"$T/stub.log"
 run_plan post
 [ "$RC" -eq 0 ] || fail "POSTED exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan POSTED urls=*issuecomment-11* log=*" "POSTED"
 grep -q "issuecomment-12" <<<"$OUT" || fail "POSTED lists every URL"
 grep -q "post|518.*--repo switchyard" "$T/stub.log" || fail "post passes issue and repo to post-plan"
+post_run="$(state_get post_run)"
+[[ "$post_run" =~ ^[A-Za-z0-9._-]+$ ]] || fail "post stores a valid per-state run id"
+grep -Fq -- "--run $post_run" "$T/stub.log" || fail "post passes the stored run id to post-plan"
+run_plan post
+[ "$RC" -eq 0 ] || fail "same-state post exits 0"
+post_run_again="$(state_get post_run)"
+[ "$post_run_again" = "$post_run" ] || fail "same-state post keeps its run id"
+[ "$(grep -c '^post|' "$T/stub.log")" = "2" ] || fail "same-state post invokes post-plan again"
+second_post="$(grep '^post|' "$T/stub.log" | sed -n '2p')"
+case "$second_post" in *"--run $post_run"*) ;; *) fail "same-state post passes the same run id again";; esac
 run_plan post --part P3
 [ "$RC" -eq 0 ] || fail "--part post exits 0"
 grep -q "post|.*--part P3" "$T/stub.log" || fail "--part reaches post-plan"
