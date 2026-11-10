@@ -38,8 +38,11 @@ boxrun=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}
 sync_roster() {
   fw_box_is_local && return 0
-  [ -f "$run/roster" ] || { echo "boxlaunch: missing run roster $run/roster" >&2; return 1; }
-  if ! $boxssh -o BatchMode=yes "$host" "cat > $boxrun/roster" < "$run/roster"; then
+  # No roster yet means no lane has launched, so there is nothing to map; the
+  # sync after this launch's roster row creates it on the box.
+  [ -f "$run/roster" ] || return 0
+  # Write then rename, so a box probe never reads a half-written roster.
+  if ! $boxssh -o BatchMode=yes "$host" "cat > $boxrun/roster.tmp && mv $boxrun/roster.tmp $boxrun/roster" < "$run/roster"; then
     echo "boxlaunch: cannot sync run roster to $host" >&2
     return 1
   fi
@@ -279,4 +282,6 @@ if [ -z "$jid" ]; then
 fi
 printf '%s\n' "$launchout"
 printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" box "$sess" "$jid" >> "$run/roster"
-sync_roster || exit 2
+# The lane is already running, so a failed sync must not read as a failed
+# launch (a caller would relaunch). Name it and the command that repairs it.
+sync_roster || echo "boxlaunch: WARNING roster not synced to $host; box fence-grant exits 3 until bash bin/box-push.sh $n succeeds" >&2
