@@ -535,6 +535,20 @@ assert_rc 0 'live roster grant overlap is advisory'
 assert_line 'OVERLAP docs/tui.md lane #77' 'live roster overlap output'
 assert_line 'WOULD-GRANT docs/tui.md' 'live roster overlap grants'
 
+# Unmapped live sessions warn, but mapped lane holds remain visible and advisory.
+reset_case
+printf '2026-11-05 launch\t77\tbox\tfiber-77\tabcdef12\n' >"$FW_RUN/roster"
+printf 'Grant 1\n\nTicket: 77\nPaths:\n- docs/tui.md\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
+touch -t 202001010000 "$FW_RUN/fiber-77-fence-grant-1.md"
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-77\tgrant\t0\tt:stub\t\n')"
+MAC_DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"running"},{"id":"orphan-session-987","status":"idle"}]}'
+export FILE_CLAIM_LIST MAC_DSESS_JSON
+run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'unmapped live delegate session is warning-only'
+assert_line 'OVERLAP docs/tui.md lane #77' 'mapped session lane still prints its overlap'
+grep -qxF 'WARN fw-sess-lanes: UNMAPPED orphan-session-987' "$T/err" \
+  || fail "unmapped live delegate session warns by id: $(cat "$T/err")"
+
 # Prefix matching also works when the roster has the longer id.
 printf '2026-11-05 launch\t77\tbox\tfiber-77\tabcdef1234567890\n' >"$FW_RUN/roster"
 run_fg 88 --paths docs/tui.md --dry

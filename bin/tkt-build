@@ -185,42 +185,65 @@ map_lane_provider() {
     *) return 1 ;;
   esac
 }
-check_lane_quota() {
-  local provider row status feed weekly weekly_text
-  provider="$(map_lane_provider "$lane_model" 2>/dev/null || true)"
+quota_refusal() {
+  local verdict="$1" model="$2" provider="$3" detail="$4" repair="$5" include_model="$6"
+  if [ "$include_model" = 1 ]; then
+    if [ -n "$repair" ]; then
+      emit "$verdict" 2 "tkt-build: quota refusal: model=$model provider=$provider $detail" "$repair"
+    else
+      emit "$verdict" 2 "tkt-build: quota refusal: model=$model provider=$provider $detail"
+    fi
+  else
+    emit "$verdict" 2 "tkt-build: quota refusal: provider=$provider $detail"
+  fi
+}
+check_model_quota() {
+  local model="$1" repair="$2" report="$3" provider row status feed weekly weekly_text include_model=0
+  [ "$report" = lane ] || include_model=1
+  provider="$(map_lane_provider "$model" 2>/dev/null || true)"
   if [ -z "$provider" ]; then
-    emit "PRECONDITION quota=unmapped" 2 "tkt-build: quota refusal: model=$lane_model provider=unknown status=unmapped; cannot map the lane model id to a QuotaBar provider"
+    if [ "$report" != lane ]; then
+      quota_refusal "PRECONDITION quota=unmapped" "$model" unknown \
+        "status=unmapped; cannot map the model id to a QuotaBar provider" "$repair" 1
+    fi
+    emit "PRECONDITION quota=unmapped" 2 "tkt-build: quota refusal: model=$model provider=unknown status=unmapped; cannot map the lane model id to a QuotaBar provider"
   fi
   if [ ! -x "$quota_bin" ] || ! feed="$("$quota_bin" --json 2>"$tmpd/quota-err")"; then
-    emit "PRECONDITION quota=unavailable" 2 "tkt-build: quota refusal: provider=$provider status=unavailable; QuotaBar feed did not answer"
+    quota_refusal "PRECONDITION quota=unavailable" "$model" "$provider" \
+      "status=unavailable; QuotaBar feed did not answer" "$repair" "$include_model"
   fi
   if ! jq -e '.providers | type == "array"' >/dev/null 2>&1 <<<"$feed"; then
-    emit "PRECONDITION quota=unavailable" 2 "tkt-build: quota refusal: provider=$provider status=unavailable; QuotaBar feed was not valid provider JSON"
+    quota_refusal "PRECONDITION quota=unavailable" "$model" "$provider" \
+      "status=unavailable; QuotaBar feed was not valid provider JSON" "$repair" "$include_model"
   fi
   row="$(jq -c --arg id "$provider" '[.providers[] | select(.id == $id)][0] // empty' <<<"$feed")"
   if [ -z "$row" ]; then
-    emit "PRECONDITION quota=missing" 2 "tkt-build: quota refusal: provider=$provider status=missing; provider is absent from the QuotaBar feed"
+    quota_refusal "PRECONDITION quota=missing" "$model" "$provider" \
+      "status=missing; provider is absent from the QuotaBar feed" "$repair" "$include_model"
   fi
   status="$(jq -r '.status // "unknown"' <<<"$row")"
   if [ "$status" != healthy ]; then
-    emit "PRECONDITION quota=refused" 2 "tkt-build: quota refusal: provider=$provider status=$status; provider status must be healthy"
+    quota_refusal "PRECONDITION quota=refused" "$model" "$provider" \
+      "status=$status; provider status must be healthy" "$repair" "$include_model"
   fi
   if [ "$provider" = claude ]; then
     weekly="$(jq -r '[.quotas[]? | select((.key // "" | ascii_downcase) == "weekly" or (.label // "" | ascii_downcase) == "weekly")][0].percentRemaining // empty' <<<"$row")"
     if [ -n "$weekly" ] && jq -e --argjson weekly "$weekly" '$weekly < 40' >/dev/null 2>&1 <<<"$row"; then
       weekly_text="$(jq -r --argjson weekly "$weekly" 'if $weekly == ($weekly | floor) then "\($weekly | floor)%" else "\($weekly)%" end' <<<"null")"
-      emit "PRECONDITION quota=refused" 2 "tkt-build: quota refusal: provider=claude status=$status weekly=$weekly_text floor=40%; weekly quota is below the launch floor"
+      quota_refusal "PRECONDITION quota=refused" "$model" "$provider" \
+        "status=$status weekly=$weekly_text floor=40%; weekly quota is below the launch floor" "$repair" "$include_model"
     fi
     if [ -n "$weekly" ] && jq -e --argjson weekly "$weekly" '($weekly | type) == "number"' >/dev/null 2>&1 <<<"$row"; then
       weekly_text="$(jq -r --argjson weekly "$weekly" 'if $weekly == ($weekly | floor) then "\($weekly | floor)%" else "\($weekly)%" end' <<<"null")"
     else
       weekly_text=unknown
     fi
-    quota_line="quota: provider=claude status=$status weekly=$weekly_text floor=40%"
-  else
+    if [ "$report" = lane ]; then quota_line="quota: provider=claude status=$status weekly=$weekly_text floor=40%"; fi
+  elif [ "$report" = lane ]; then
     quota_line="quota: provider=$provider status=$status"
   fi
 }
+
 forward() {
   local step="$1" inner="$2" rc="$3" err="$4" first words rest
   first="$(head -n 1 <<<"$inner")"
@@ -455,7 +478,7 @@ if [ "$from" = lane ]; then
     printf '%s\n' "tkt-build: missing key: model.lane (no --lane-model and no state model.lane)" >&2
     emit "PRECONDITION missing=model.lane" 2 "tkt-build: no lane model: the lane slot has no id (pass --lane-model or set model.lane)" "$(repair_hint model.lane)"
   fi
-  check_lane_quota
+  check_model_quota "$lane_model" "" lane
   lane_args=(--slot lane --template "$lane_brief" --gate-from-plan --expect-commits "BASE=$base" "GATE=$gate_cmd" "CLOSING=$closing" "ATTRIBUTION=$attr" "LANE_MODEL=$lane_model")
   lane_args+=(--model "$lane_model")
   rc=0; lane_out="$("$tktjob" "$state" "${lane_args[@]}" 2>"$tmpd/lane-err")" || rc=$?
@@ -540,6 +563,9 @@ rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
 om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
 [ -n "$rm" ] || emit "PRECONDITION missing=model.review" 2 "tkt-state: missing key: model.review" "$(repair_hint model.review)"
 [ -n "$om" ] || emit "PRECONDITION missing=model.overbuild" 2 "tkt-state: missing key: model.overbuild" "$(repair_hint model.overbuild)"
+# The refused slot's hint is `<id>`; only the other pick is prefilled.
+check_model_quota "$rm" "Repair command: tkt-build $state --from review --review-model <id> --overbuild-model $om" review
+check_model_quota "$om" "Repair command: tkt-build $state --from review --review-model $rm --overbuild-model <id>" review
 map_note=""; map_id=""; map_out="$run/$slug-$issue-map-r0.md"
 if [ "$mutant_count" -gt 0 ]; then
   if sm="$(tkt get job.map 2>/dev/null)" && [ -n "$sm" ]; then map_id="$sm"
