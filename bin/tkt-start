@@ -237,6 +237,7 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
   fi
 fi
 for k in repo issue spec branch worktree run workflow_doc closing; do tkt set "$k" "${!k}"; done
+tkt set post_run ""
 for k in env extra merge_gate merge_check mutant_job; do [ -n "${!k}" ] && tkt set "$k" "${!k}"; done
 if [ "$body_ends_given" -eq 1 ]; then tkt set body_ends "$body_ends"; fi
 if [ "$spec_issue_given" -eq 1 ]; then tkt set spec_issue "$spec_issue"; fi

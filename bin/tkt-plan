@@ -657,8 +657,14 @@ do_post() {
   while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
   if ! plan_verdict_check build "$tkt_state" "$state" "$no_verifier" "$plan" "$base" "$worktree" ${files[@]+"${files[@]}"}; then emit "POST-FAIL reason=verdict verdict=$verdict_refusal" 1 "$verdict_digest"; fi
   "$plangate" ${gate_args[@]+"${gate_args[@]}"} "$plan" >"$tmp" 2>&1 || emit "POST-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
-  pargs=(); [ -z "$part" ] || pargs=(--part "$part")
-  urls="$("$postplan" "$issue" "$plan" --repo "$repo" ${pargs[@]+"${pargs[@]}"} 2>"$tmp")" || emit "POST-FAIL reason=post" "$?" "$(head -n 10 "$tmp")"
+  post_run_id="$(t get post_run 2>/dev/null || true)"
+  if [ -z "$post_run_id" ]; then
+    post_run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    t set post_run "$post_run_id"
+  fi
+  [[ "$post_run_id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "tkt-plan: invalid post_run state id" >&2; exit 2; }
+  pargs=(--run "$post_run_id"); [ -z "$part" ] || pargs+=(--part "$part")
+  urls="$("$postplan" "$issue" "$plan" --repo "$repo" "${pargs[@]}" 2>"$tmp")" || emit "POST-FAIL reason=post" "$?" "$(head -n 10 "$tmp")"
   emit "POSTED urls=$(tr '\n' ',' <<<"$urls" | sed 's/,$//')" 0 "$urls"
 }
 

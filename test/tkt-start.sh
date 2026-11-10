@@ -72,6 +72,18 @@ if [ -f "$T/job-concerns" ]; then [ -f "$T/job-noise" ] && { echo "watch noise" 
 exit 0
 EOF
 chmod +x "$T/tktbin/tkt-job"
+cat >"$T/tktbin/plan-check" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$T/tktbin/plan-check"
+ln -s "$SCRIPT_DIR/../bin/plan-gate" "$T/tktbin/plan-gate"
+cat >"$T/tktbin/post-plan" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$T/post-plan.log"
+printf 'https://example.invalid/comment/1\\n'
+EOF
+chmod +x "$T/tktbin/post-plan"
 # reload [DROP]: rebuild ARGS from the shared flag set, minus DROP and its value.
 reload() {
   ARGS=(); skip=0
@@ -330,8 +342,11 @@ case "$OUT" in *"sweep=none"*) ;; *) fail "nofiles: digest must mark the sweep s
 setup drift ONE AGAINST; run_start
 [ "$RC" -eq 0 ] || fail "driftsetup: exit $RC"
 ACTUAL="$(git -C "$WT" rev-parse HEAD)"
-bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set head deadbeefdeadbeefdeadbeefdeadbeefdeadbeef; run_start
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set post_run old-run
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set head deadbeefdeadbeefdeadbeefdeadbeefdeadbeef; run_start
 want "DRIFT state=deadbeef" 3 drift
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$S" get post_run)" = old-run ] || fail "drift: refused start preserves post_run"
 case "$OUT" in *"worktree=$ACTUAL"*) ;; *) fail "drift: digest misses the worktree HEAD" ;; esac
 case "$OUT" in *"pr=none"*) ;; *) fail "drift: digest misses the pr head" ;; esac
 bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set head "$ACTUAL"; run_start
@@ -953,6 +968,34 @@ model_roles="$(sed -n 's/^model_roles=(\(.*\))$/\1/p' "$TKT")"
 for role in $model_roles; do
   grep -qF -- "\`$role\`" "$SCRIPT_DIR/../skills/implement/SKILL.md" \
     || fail "modelrole: skills/implement/SKILL.md does not name role [$role]"
+done
+
+# Posting before and after a successful tkt-start restart uses different run
+# IDs. post-plan is stubbed here; test/post-plan.sh covers comment creation.
+setup post-run-reset ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 post-run-reset-first-start
+S="$RUN/widget-42.state"
+base="$(git -C "$WT" rev-parse HEAD)"
+plan="$CDIR/plan.md"
+printf 'Base: %s\n\n## Files\n\n- `f.txt`\n\n## Gate\n\n`true`\n' "$base" >"$plan"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan "$plan" || fail "post-run-reset: set plan"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict ok || fail "post-run-reset: set plan verdict"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan_verdict_base "$base" || fail "post-run-reset: set verdict base"
+: >"$T/post-plan.log"
+post_out="$(bash "$SCRIPT_DIR/../bin/tkt-plan" "$S" post 2>"$CDIR/post-first.stderr")" || fail "post-run-reset: first post failed: $(cat "$CDIR/post-first.stderr")"
+post_run_first="$(bash "$SCRIPT_DIR/../bin/tkt-state" "$S" get post_run)"
+[ -n "$post_run_first" ] || fail "post-run-reset: first post stores its run ID"
+run_start --no-preflight
+want "SKIPPED filing=" 0 post-run-reset-restart
+[ -z "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$S" get post_run)" ] || fail "post-run-reset: successful restart clears post_run"
+post_out="$(bash "$SCRIPT_DIR/../bin/tkt-plan" "$S" post 2>"$CDIR/post-second.stderr")" || fail "post-run-reset: second post failed: $(cat "$CDIR/post-second.stderr")"
+post_run_second="$(bash "$SCRIPT_DIR/../bin/tkt-state" "$S" get post_run)"
+[ -n "$post_run_second" ] || fail "post-run-reset: second post stores its run ID"
+[ "$post_run_second" != "$post_run_first" ] || fail "post-run-reset: second post gets a fresh run ID"
+[ "$(wc -l <"$T/post-plan.log" | tr -d ' ')" = 2 ] || fail "post-run-reset: post-plan is called twice"
+for post_run in "$post_run_first" "$post_run_second"; do
+  grep -Fq -- "--run $post_run" "$T/post-plan.log" || fail "post-run-reset: post-plan receives run ID $post_run"
 done
 
 # A new ticket can start at any part without an older state to archive.

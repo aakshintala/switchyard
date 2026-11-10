@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
 # post-plan: post a plan file to an issue as one comment per part.
-# Usage: post-plan <issue> <plan-file> [--repo OWNER/NAME] [--part LABEL]
+# Usage: post-plan <issue> <plan-file> [--repo OWNER/NAME] [--part LABEL] [--run ID]
 #        post-plan -h | --help
 #        Splits the plan into parts of at most MAX_PART (60000) characters
-#        each, including the part's header line: `<!-- post-plan i/n -->`,
-#        or `<!-- post-plan LABEL i/n -->` with --part LABEL (LABEL matches
-#        ^[A-Za-z0-9._-]+$; anything else is bad usage). Use --part when
-#        several plans for one issue (one per ticket part) must not
-#        overwrite each other.
+#        each, including the header line: `<!-- post-plan i/n -->` or
+#        `<!-- post-plan LABEL i/n -->`, with `run=ID` appended when --run
+#        ID is supplied. LABEL and ID match ^[A-Za-z0-9._-]+$.
 #        Cuts only before lines starting with `## ` and packs as many whole
 #        sections as fit into each part, in order; text before the first
 #        `## ` belongs to the first part. A section that alone exceeds the
-#        limit names its heading on stderr and nothing is posted. Reusable
-#        comments are those on the issue by the current user whose body
-#        starts with this run's header form: `<!-- post-plan i/n -->` for an
-#        unlabelled run, or `<!-- post-plan LABEL ` for --part LABEL. Those
-#        are reused oldest-first: part i edits the i-th in place, each extra
-#        part creates a comment, and each leftover is deleted. Other plans
-#        on the issue are never touched. Prints one comment URL
+#        limit names its heading on stderr and nothing is posted. Without
+#        --run, legacy untagged comments retain the old reuse behavior. With
+#        --run, only comments by the current user whose header has that run id
+#        and the same label (or no label) are reused oldest-first: part i
+#        edits the i-th in place, each extra part creates a comment, and each
+#        leftover matching comment is deleted. Comments from other runs,
+#        including legacy comments, are never touched. Prints one comment URL
 #        (html_url) per part. Without --repo, the repo comes from
 #        `gh repo view`. The plan must pass plan-gate (a valid `## Gate`
 #        section) before anything is posted; plan-gate's stderr is passed on.
@@ -29,7 +27,7 @@ set -euo pipefail
 MAX_PART=60000
 
 usage_text() {
-  echo "usage: post-plan <issue> <plan-file> [--repo OWNER/NAME] [--part LABEL]"
+  echo "usage: post-plan <issue> <plan-file> [--repo OWNER/NAME] [--part LABEL] [--run ID]"
   echo "       post-plan -h | --help"
 }
 
@@ -42,15 +40,22 @@ help() {
   usage_text
   cat <<'EOF'
 
-Post PLAN-FILE to ISSUE as one comment per part, reusing this script's own
-prior comments oldest-first: edit in place, create the extras, delete the
-leftovers. Each part holds at most 60000 characters including its
-<!-- post-plan i/n --> header line, cut only before ## headings.
+Post PLAN-FILE to ISSUE as one comment per part. Without --run, legacy
+untagged headers keep the old behavior: this script's own comments are reused
+oldest-first, extras are created and leftover matches are deleted; run-tagged
+headers are ignored. Each part holds at most 60000 characters including its
+header line, cut only before ## headings.
 
-With --part LABEL the header is <!-- post-plan LABEL i/n -->, and only
-comments with that label are reused or deleted, so a plan for another part
-of the same ticket is left alone. LABEL may hold only letters, digits, dot,
+With --run ID, headers are <!-- post-plan i/n run=ID -->, or
+<!-- post-plan LABEL i/n run=ID --> with --part LABEL. Only comments by the
+current user with the same run id and label (or no label) are reused or
+deleted. Comments from earlier runs, including legacy comments without a run
+id, are left alone. ID and LABEL may hold only letters, digits, dot,
 underscore and dash.
+
+With --part LABEL and no --run, the legacy header is
+<!-- post-plan LABEL i/n -->; comments with that label are managed without
+touching comments for another label.
 
 The plan must pass plan-gate (a valid ## Gate section) before anything is
 posted.
@@ -71,7 +76,9 @@ issue="$1"; plan="$2"; shift 2
 case "$issue" in ''|*[!0-9]*) usage ;; esac
 repo=""
 part=""
+run_id=""
 label_re='^[A-Za-z0-9._-]+$'
+run_re='^[A-Za-z0-9._-]+$'
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) [ $# -ge 2 ] || usage; repo="$2"; shift 2 ;;
@@ -79,6 +86,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || usage
       [[ "$2" =~ $label_re ]] || usage
       part="$2"; shift 2 ;;
+    --run)
+      [ $# -ge 2 ] || usage
+      [[ "$2" =~ $run_re ]] || usage
+      run_id="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -164,7 +175,13 @@ pack() {
 
 # header I N: the header line of part I of N, with the --part label if any.
 header() {
-  if [ -n "$part" ]; then
+  if [ -n "$run_id" ]; then
+    if [ -n "$part" ]; then
+      printf '<!-- post-plan %s %d/%d run=%s -->' "$part" "$1" "$2" "$run_id"
+    else
+      printf '<!-- post-plan %d/%d run=%s -->' "$1" "$2" "$run_id"
+    fi
+  elif [ -n "$part" ]; then
     printf '<!-- post-plan %s %d/%d -->' "$part" "$1" "$2"
   else
     printf '<!-- post-plan %d/%d -->' "$1" "$2"
@@ -190,8 +207,34 @@ me="$(gh api user --jq .login)" \
 [ -n "$me" ] || { echo "post-plan: cannot read the current GitHub user" >&2; exit 1; }
 comments="$(gh api "repos/$repo/issues/$issue/comments" --paginate)" \
   || { echo "post-plan: cannot list comments on $repo issue $issue" >&2; exit 1; }
-jq -r --arg me "$me" --arg part "$part" \
-  '[sort_by(.id)[] | select(.user.login == $me and ((.body // "") as $b | if $part == "" then ($b | test("^<!-- post-plan [0-9]+/[0-9]+ -->")) else ($b | startswith("<!-- post-plan " + $part + " ")) end)) | .id] | .[]' \
+jq -r --arg me "$me" --arg part "$part" --arg run "$run_id" '
+  [sort_by(.id)[]
+   | select(
+       .user.login == $me
+       and (
+         (.body // "") as $b
+         | ($b | split("\n")[0]) as $h
+         | if $run == "" then
+             if $part == "" then
+               ($b | test("^<!-- post-plan [0-9]+/[0-9]+ -->"))
+             else
+               ($b | startswith("<!-- post-plan " + $part + " "))
+               and (($h | test(" run=[A-Za-z0-9._-]+ -->$")) | not)
+             end
+           else
+             if $part == "" then
+               ($h | test("^<!-- post-plan [0-9]+/[0-9]+ run=[A-Za-z0-9._-]+ -->$"))
+               and ($h | endswith(" run=" + $run + " -->"))
+             else
+               ($h | startswith("<!-- post-plan " + $part + " "))
+               and ($h | test("^<!-- post-plan [A-Za-z0-9._-]+ [0-9]+/[0-9]+ run=[A-Za-z0-9._-]+ -->$"))
+               and ($h | endswith(" run=" + $run + " -->"))
+             end
+           end
+       )
+     )
+   | .id
+  ] | .[]' \
   <<<"$comments" >"$tmp/ids.txt" \
   || { echo "post-plan: cannot read the issue comments" >&2; exit 1; }
 total_ids="$(wc -l <"$tmp/ids.txt" | tr -d ' ')"
