@@ -128,7 +128,7 @@ merge_main_into_gated_head() {
   main="$(git -C "$WT" rev-parse HEAD)" || fail "merge fixture: read main head"
   git -C "$WT" update-ref refs/remotes/origin/main "$main" || fail "merge fixture: advance origin/main"
   git -C "$WT" checkout -q --detach "$gated" || fail "merge fixture: checkout gated head"
-  git -C "$WT" merge --no-ff -m 'merge origin/main' "$main" >/dev/null || fail "merge fixture: merge main"
+  git -C "$WT" -c user.email=t@t -c user.name=t merge --no-ff -m 'merge origin/main' "$main" >/dev/null || fail "merge fixture: merge main"
   git -C "$WT" rev-parse HEAD || fail "merge fixture: read merge head"
 }
 
