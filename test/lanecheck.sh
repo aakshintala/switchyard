@@ -21,7 +21,10 @@ rc=0
 ok() { printf 'ok %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; rc=1; }
 
-mkdir -p "$T/stub"
+mkdir -p "$T/stub" "$T/home/.local/bin/cards"
+HOME="$T/home"
+export HOME
+unset FW_OWNER_ASK
 # Quiet stubs. `gh` serves the open-PR list from $T/prs so a case can seed it;
 # an empty list means no PR guard. `ssh` serves the two scan probes from files.
 #
@@ -38,6 +41,13 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   cat "$STUBD/prbranch-${3:-}" 2>/dev/null || exit 1
   exit 0
 fi
+case " $* " in
+  *" --state merged "*)
+    [ "${GH_MERGED_BOOM:-0}" != 1 ] || { echo "HTTP 502" >&2; exit 1; }
+    cat "$STUBD/merged-prs" 2>/dev/null || echo '[]'
+    exit 0
+    ;;
+esac
 cat "$STUBD/prs" 2>/dev/null || true
 exit 0
 EOF
@@ -52,6 +62,13 @@ case " $* " in
 esac
 exit 0
 EOF
+cat > "$T/stub/owner-ask" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$STUBD/owner-ask.log"
+[ "${1:-}" = list ] || exit 2
+[ "${OWNER_ASK_BOOM:-0}" != 1 ] || exit 1
+cat "$STUBD/owner-ask-list" 2>/dev/null || true
+EOF
 cat > "$T/stub/claude" <<'EOF'
 #!/bin/sh
 [ "${1:-}" = agents ] && [ "${2:-}" = --json ] || exit 2
@@ -64,6 +81,7 @@ cat "$STUBD/dsess" 2>/dev/null || echo '{"ok":true,"sessions":[]}'
 EOF
 cat > "$T/stub/file-claim" <<'EOF'
 #!/bin/sh
+printf '%s\n' "$*" >>"$STUBD/file-claim.log"
 [ "${1:-}" = list ] && exit 0
 [ "${1:-}" = release ] && exit 0
 exit 2
@@ -77,7 +95,9 @@ cat > "$T/stub/boxstale" <<'EOF'
 exit 0
 EOF
 chmod +x "$T/stub/gh" "$T/stub/ssh" "$T/stub/claude" "$T/stub/delegate" \
-  "$T/stub/file-claim" "$T/stub/inbox-watchers" "$T/stub/boxstale"
+  "$T/stub/file-claim" "$T/stub/owner-ask" "$T/stub/inbox-watchers" "$T/stub/boxstale"
+cp "$T/stub/owner-ask" "$HOME/.local/bin/owner-ask"
+chmod +x "$HOME/.local/bin/owner-ask"
 export STUBD=$T PATH=$T/stub:$PATH
 export BOX_SSH=$T/stub/ssh FW_DELEGATE=$T/stub/delegate \
   FW_FILE_CLAIM=$T/stub/file-claim FW_INBOX_WATCHERS=$T/stub/inbox-watchers \
@@ -85,6 +105,9 @@ export BOX_SSH=$T/stub/ssh FW_DELEGATE=$T/stub/delegate \
 printf '[]' > "$T/cagents"
 printf '{"ok":true,"sessions":[]}' > "$T/dsess"
 : > "$T/prs"
+: > "$T/merged-prs"
+: > "$T/owner-ask-list"
+: > "$T/file-claim.log"
 : > "$T/pending"
 : > "$T/asking"
 
@@ -123,6 +146,17 @@ lane() { # lane <run> <ticket> <name> <id> [age, default 3H]
 }
 grant() { # grant <run> <ticket>
   printf 'GRANT\n' > "$1/fiber-$2-fence-grant-20261104T0000Z.md"
+}
+write_owner_card() { # id title body
+  python3 - "$HOME/.local/bin/cards/$1.json" "$1" "$2" "$3" <<'PY'
+import json, sys
+path, card_id, title, body = sys.argv[1:]
+with open(path, "w") as f:
+    json.dump({"id": card_id, "title": title, "context": body}, f)
+PY
+}
+write_merged_pr() { # number branch mergedAt
+  printf '[{"number":%s,"headRefName":"%s","mergedAt":"%s"}]\n' "$1" "$2" "$3" > "$T/merged-prs"
 }
 
 # --- the two-session fence cases ---------------------------------------------
@@ -180,6 +214,74 @@ r=$(newrun 6); lane "$r" 4097 fiber-4097-plan 888 3H; lane "$r" 4097 fiber-4097-
 out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4097:fiber-4097-plan 2>&1); grc=$?
 if [ "$grc" = 0 ] && ! printf '%s' "$out" | grep -q REFUSING; then ok age-check-scoped-to-session; else fail "age-check-scoped-to-session (rc=$grc) $out"; fi
 
+# A newly merged no-prefix fiber branch can release its own young session.
+r=$(newrun 5a); lane "$r" 3975 fiber-3975-build 777 10M
+: > "$T/prs"; write_merged_pr 4171 fiber-3975 "$(old 5M)"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3975:fiber-3975-build 2>&1); grc=$?
+if [ "$grc" = 0 ] \
+  && printf '%s' "$out" | grep -qF 'age guard skipped for 3975:fiber-3975-build — PR #4171 merged' \
+  && grep -qF '3975' "$r/roster-done"; then
+  ok age-guard-skips-for-newer-fiber-branch-merge
+else
+  fail "age-guard-skips-for-newer-fiber-branch-merge (rc=$grc) $out"
+fi
+
+# A part PR can use the exact branch stored in that ticket's current state.
+r=$(newrun 5b); lane "$r" 3976 fiber-3976-build 778 10M
+printf 'branch=feature/3976-part-two\npart=2\n' > "$r/switchyard-3976.state"
+: > "$T/prs"; write_merged_pr 4172 feature/3976-part-two "$(old 5M)"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3976:fiber-3976-build 2>&1); grc=$?
+if [ "$grc" = 0 ] \
+  && printf '%s' "$out" | grep -qF 'age guard skipped for 3976:fiber-3976-build — PR #4172 merged'; then
+  ok age-guard-matches-state-branch-for-part
+else
+  fail "age-guard-matches-state-branch-for-part (rc=$grc) $out"
+fi
+
+# An earlier part's merge cannot excuse a young session on a later part.
+r=$(newrun 5c); lane "$r" 3977 fiber-3977-build 779 10M
+: > "$T/prs"; write_merged_pr 4173 fiber-3977 "$(old 20M)"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3977:fiber-3977-build 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'REFUSING to retire 3977:fiber-3977-build' \
+  && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
+  ok age-guard-refuses-older-merged-pr
+else
+  fail "age-guard-refuses-older-merged-pr (rc=$grc) $out"
+fi
+
+# The bypass is session-scoped; a bare ticket still sees the age guard.
+r=$(newrun 5d); lane "$r" 3978 fiber-3978-build 780 10M
+: > "$T/prs"; write_merged_pr 4174 fiber-3978 "$(old 5M)"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3978 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'REFUSING to retire 3978' \
+  && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
+  ok age-guard-refuses-bare-ticket-after-merge
+else
+  fail "age-guard-refuses-bare-ticket-after-merge (rc=$grc) $out"
+fi
+
+# An open but unmerged ticket still refuses a young scoped retirement.
+r=$(newrun 5e); lane "$r" 3979 fiber-3979-build 781 10M
+: > "$T/merged-prs"; printf '4175 fix/3979-part-two\n' > "$T/prs"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3979:fiber-3979-build 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'REFUSING to retire 3979:fiber-3979-build' \
+  && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
+  ok age-guard-refuses-unmerged-ticket
+else
+  fail "age-guard-refuses-unmerged-ticket (rc=$grc) $out"
+fi
+
+# A failed merged-PR lookup never authorizes a young scoped retirement.
+r=$(newrun 5f); lane "$r" 3980 fiber-3980-build 782 10M
+: > "$T/prs"; write_merged_pr 4176 fiber-3980 "$(old 5M)"
+out=$(FW_RUN=$r GH_MERGED_BOOM=1 bash "$BIN/lanecheck" done 3980:fiber-3980-build 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'REFUSING to retire 3980:fiber-3980-build' \
+  && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
+  ok age-guard-refuses-merged-pr-lookup-failure
+else
+  fail "age-guard-refuses-merged-pr-lookup-failure (rc=$grc) $out"
+fi
+
 # --- the open-PR guard -------------------------------------------------------
 # The lane's last step is the ship, not the green PR, so an open PR on this
 # ticket's branch refuses retirement.
@@ -187,6 +289,112 @@ r=$(newrun 7); lane "$r" 4155 fiber-4155-build abc
 printf '4170 tests/4155-selector\n' > "$T/prs"
 out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4155 2>&1); grc=$?
 if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'PR(s) 4170 still open'; then ok pr-guard-refuses-open-pr; else fail "pr-guard-refuses-open-pr (rc=$grc) $out"; fi
+
+# FW_OWNER_ASK does not waive the ordinary open-PR guard for done.
+r=$(newrun 7aa); lane "$r" 4155 fiber-4155-build abc
+printf '4170 tests/4155-selector\n' > "$T/prs"
+out=$(FW_RUN=$r FW_OWNER_ASK="$T/stub/owner-ask" bash "$BIN/lanecheck" done 4155 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'PR(s) 4170 still open' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok fw-owner-ask-does-not-waive-open-pr-guard
+else
+  fail "fw-owner-ask-does-not-waive-open-pr-guard (rc=$grc) $out"
+fi
+
+# An open owner card naming this PR waives only the open-PR guard. Retirement
+# records the handoff and leaves both the grant and file claims in place.
+r=$(newrun 7a); lane "$r" 4155 fiber-4155-build abc; grant "$r" 4155
+printf '4170 tests/4155-selector\n' > "$T/prs"
+write_owner_card 0610-fly-1234 'Review PR #4170' 'Please merge PR #4170 after label review.'
+printf '0610-fly-1234 flywheel Review PR #4170\n' > "$T/owner-ask-list"
+: > "$T/file-claim.log"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4155 --handed-to-owner 0610-fly-1234 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -qF 'handed-to-owner 0610-fly-1234 PR #4170' \
+  && grep -qF 'handed-to-owner 0610-fly-1234 PR #4170' "$r/roster-done" \
+  && [ -f "$r/fiber-4155-fence-grant-20261104T0000Z.md" ] \
+  && ! grep -q '^release ' "$T/file-claim.log"; then
+  ok handed-to-owner-pr-card-keeps-claims
+else
+  fail "handed-to-owner-pr-card-keeps-claims (rc=$grc) $out"
+fi
+
+# FW_OWNER_ASK is never honored as an alternate owner authority.
+r=$(newrun 7f); lane "$r" 4155 fiber-4155-build abc
+override_card="untrusted-test-$$"
+write_owner_card "$override_card" 'Review PR #4170' 'Please merge PR #4170.'
+printf '%s flywheel Review PR #4170\n' "$override_card" > "$T/owner-ask-list"
+: > "$T/owner-ask.log"
+out=$(FW_RUN=$r FW_OWNER_ASK="$T/stub/owner-ask" bash "$BIN/lanecheck" done 4155 --handed-to-owner "$override_card" 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'FW_OWNER_ASK is not honoured for --handed-to-owner' \
+  && [ ! -s "$T/owner-ask.log" ] \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok handed-to-owner-rejects-fw-owner-ask
+else
+  fail "handed-to-owner-rejects-fw-owner-ask (rc=$grc) $out"
+fi
+
+# A missing fixed owner-ask binary names its path instead of looking like a
+# closed card. Restore it immediately after this isolated invocation.
+r=$(newrun 7g); lane "$r" 4155 fiber-4155-build abc
+printf '%s flywheel Review PR #4170\n' "$override_card" > "$T/owner-ask-list"
+owner_ask_bin="$HOME/.local/bin/owner-ask"
+mv "$owner_ask_bin" "$T/owner-ask.saved"
+out=$(env -u FW_OWNER_ASK FW_RUN="$r" bash "$BIN/lanecheck" done 4155 --handed-to-owner "$override_card" 2>&1); grc=$?
+mv "$T/owner-ask.saved" "$owner_ask_bin"
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF "owner-ask not found at $owner_ask_bin; --handed-to-owner needs the Mac's owner-ask" \
+  && ! printf '%s' "$out" | grep -qF 'is not open' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok handed-to-owner-missing-owner-ask-names-path
+else
+  fail "handed-to-owner-missing-owner-ask-names-path (rc=$grc) $out"
+fi
+
+# An answered card is absent from owner-ask list, so it cannot authorize the
+# open-PR waiver.
+r=$(newrun 7b); lane "$r" 4155 fiber-4155-build abc; grant "$r" 4155
+: > "$T/owner-ask-list"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4155 --handed-to-owner 0610-fly-1234 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'card 0610-fly-1234 is not open' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok handed-to-owner-closed-card-refuses
+else
+  fail "handed-to-owner-closed-card-refuses (rc=$grc) $out"
+fi
+
+# An open card that names neither the PR nor ticket also refuses.
+r=$(newrun 7c); lane "$r" 4155 fiber-4155-build abc
+write_owner_card 0610-fly-5678 'Review lane' 'Review the current changes.'
+printf '0610-fly-5678 flywheel Review lane\n' > "$T/owner-ask-list"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4155 --handed-to-owner 0610-fly-5678 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'title/body does not name open PR(s) 4170 or ticket #4155' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok handed-to-owner-unrelated-card-refuses
+else
+  fail "handed-to-owner-unrelated-card-refuses (rc=$grc) $out"
+fi
+
+# Naming the ticket is an alternate card match.
+r=$(newrun 7d); lane "$r" 4155 fiber-4155-build abc
+write_owner_card 0610-fly-5679 'Take over #4155' 'The owner will review this ticket.'
+printf '0610-fly-5679 flywheel Take over #4155\n' > "$T/owner-ask-list"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4155 --handed-to-owner 0610-fly-5679 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -qF 'handed-to-owner 0610-fly-5679 PR #4170'; then
+  ok handed-to-owner-ticket-card-accepted
+else
+  fail "handed-to-owner-ticket-card-accepted (rc=$grc) $out"
+fi
+
+# A valid owner card cannot waive the age guard.
+r=$(newrun 7e); lane "$r" 4155 fiber-4155-build abc 1M
+write_owner_card 0610-fly-5680 'Review PR #4170' 'Please merge PR #4170.'
+printf '0610-fly-5680 flywheel Review PR #4170\n' > "$T/owner-ask-list"
+out=$(FW_RUN=$r FW_DONE_MIN=1800 bash "$BIN/lanecheck" done 4155 --handed-to-owner 0610-fly-5680 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'REFUSING to retire 4155 — its newest roster entry' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok handed-to-owner-does-not-waive-age-guard
+else
+  fail "handed-to-owner-does-not-waive-age-guard (rc=$grc) $out"
+fi
 
 # #4042's false refusal: a PR whose body merely mentioned the number used to
 # block it. The guard matches the head branch, so another ticket's branch is
