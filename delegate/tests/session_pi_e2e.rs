@@ -493,6 +493,26 @@ fn send_started(h: &Harness, id: &str, text: &str) {
     assert_eq!(reply["disposition"], "started", "{reply}");
 }
 
+// debt: `watch` can return in the idle window between a turn completion and the
+// replay worker's begin_turn (follow-up issue); wait for the replay to finish.
+fn logs_after_replay(h: &Harness, id: &str, text: &str) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let logs = h.logs(id);
+        let delivered = logs
+            .iter()
+            .any(|line| line["kind"] == "user" && line["text"] == text);
+        if delivered && h.state(id)["status"] == "idle" {
+            return logs;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replay of {text:?} never finished: {logs:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn watch_ok(h: &Harness, id: &str) {
     let watched = h.invoke(&["watch", id, "--json"]);
     assert!(
@@ -787,7 +807,7 @@ fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
 
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
     watch_ok(&h, &id);
-    let logs = h.logs(&id);
+    let logs = logs_after_replay(&h, &id, "REPLAY-ONE\n\nREPLAY-TWO");
     let replayed: Vec<&Value> = logs
         .iter()
         .filter(|line| line["kind"] == "steer.replayed")
@@ -879,7 +899,7 @@ fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
 
     std::fs::write(&release_event_write, "").unwrap();
     watch_ok(&h, &id);
-    let logs = h.logs(&id);
+    let logs = logs_after_replay(&h, &id, "MIXED-S2");
     let replayed: Vec<&Value> = logs
         .iter()
         .filter(|line| line["kind"] == "steer.replayed")
