@@ -835,7 +835,14 @@ echo "merged deadbeef1234567890"
 exit 0
 EOF
 chmod +x "$T/tktbin/ship-pr"
+cat >"$T/tktbin/lanecheck" <<EOF
+#!/usr/bin/env bash
+printf 'lanecheck|%s\n' "\$*" >>"$T/lanecheckcalls.log"
+exit 0
+EOF
+chmod +x "$T/tktbin/lanecheck"
 : >"$T/shipcalls.log"
+: >"$T/lanecheckcalls.log"
 run_start --body-ends 'X'
 want "CURRENT " 0 bodyendse2e
 grep -qF 'body_ends=X' "$RUN/widget-42.state" || fail "bodyendse2e: state misses [body_ends=X]"
@@ -847,6 +854,7 @@ bash "$SCRIPT_DIR/../bin/tkt-state" "$S2E_STATE" set head "$S2E_HEAD"
 printf '%s' "$S2E_HEAD" >"$T/prhead"
 S2E_OUT="$(bash "$SCRIPT_DIR/../bin/tkt-ship" "$S2E_STATE" 2>"$CDIR/ship-stderr")" || fail "bodyendse2e: tkt-ship exit $?"
 case "$S2E_OUT" in "TKT tkt-ship MERGED"*) ;; *) fail "bodyendse2e: tkt-ship [$S2E_OUT] wants MERGED" ;; esac
+grep -Fxq 'lanecheck|done 42' "$T/lanecheckcalls.log" || fail "bodyendse2e: tkt-ship did not retire the lane"
 [ "$(grep -c -x -F 'arg|--body-ends' "$T/shipcalls.log")" -eq 1 ] || fail "bodyendse2e: body-ends once: $(cat "$T/shipcalls.log")"
 got="$(grep -A1 -x -F 'arg|--body-ends' "$T/shipcalls.log" | sed -n 2p)"
 [ "$got" = 'arg|X' ] || fail "bodyendse2e: body-ends value, got [$got]"
