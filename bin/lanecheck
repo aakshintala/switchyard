@@ -1469,6 +1469,16 @@ for line in open(roster):
     jid = p[4] if len(p) > 4 else "?"
     entries[(n, sess)] = (ts, host, jid)
 
+# A pending command names a ticket state file, not the session running it. Keep
+# the newest roster entry so a reported plan is not blamed for work handed to
+# the newer phase on that shared state file.
+newest_roster = {}
+for (n, sess), (ts, host, jid) in entries.items():
+    started = launched(ts)
+    current = newest_roster.get(n)
+    if started is not None and (current is None or started > current[0]):
+        newest_roster[n] = (started, host, sess)
+
 missing = 0
 active_roster_tickets = set()
 live_roster_starts = {}
@@ -1667,6 +1677,12 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
             unanswered = ruled.get(n, 0.0) <= rep[0] if fresh else False
             why = "no archived ruling postdates that report"
         open_ask = bool(fresh and rep[2] and unanswered)
+        newest_lane = newest_roster.get(n)
+        planned_handoff = bool(
+            n in pending and fresh and rep is not None
+            and re.match(r"^STATUS\s*:\s*PLANNED\b", rep[1], re.I)
+            and not open_ask and lane_started is not None
+            and newest_lane is not None and newest_lane[0] > lane_started)
         if open_ask:
             blind += (f"  ASK-OPEN it reported \"{rep[1]}\" and {why} — read "
                       f"{rep[4]}, then `bash bin/ruled.sh {n} <file>`. The lane "
@@ -1798,7 +1814,7 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                         else sendline)
                 asknote = (f", and its job {jobq[0]} is still NEEDS_CONTEXT, so "
                            f"the wake answers that question" if jobq else "")
-                if n in pending:
+                if n in pending and not planned_handoff:
                     asknote += (", and work is still running for it: "
                                 + " ".join(pending[n].split())[:110])
                 pr = re.match(r"pr\s*#?(\d+)", cond, re.I)
@@ -1824,12 +1840,19 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                       + onbox(f"status {jobq[0]}", where=store) + "`, then rule and have the "
                       f"lane answer it with `"
                       + onbox(f"resume {jobq[0]} -", msg=True, where=store) + "`")
-            elif n in pending:
+            elif n in pending and not planned_handoff:
                 cmd = " ".join(pending[n].split())[:110]
                 print(f"ABANDONED {n} {host} {sess} {state}/{status} turns={turns} — "
                       f"no active turn, but work is still running for it: {cmd} — "
                       f"wake it with " + sendline
                       + " so it waits on that work itself")
+            elif planned_handoff:
+                newer_host, newer_sess = newest_lane[1], newest_lane[2]
+                cmd = " ".join(pending[n].split())[:110]
+                print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
+                      f"it reported \"{rep[1]}\" before newer roster entry "
+                      f"{newer_host}/{newer_sess}; retire it if its report landed. "
+                      f"The shared-state pending work is credited to that newer session: {cmd}")
             else:
                 # The fourth waiting state: it reported a block or a question
                 # and ended its turn. Bounded by the lane's launch, like the
