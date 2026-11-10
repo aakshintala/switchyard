@@ -549,7 +549,9 @@ pub fn apply_event(state: &mut State, event: &HostEvent, now_ms: u64) -> Vec<Val
         }
         HostEvent::TurnStarted { turn_id } => {
             drop_steer(state, turn_id);
-            if state.status == Status::Idle && state.active_turn_id.is_none() {
+            if state.active_turn_id.is_none()
+                && (state.status == Status::Idle || state.status == Status::Running)
+            {
                 state.status = Status::Running;
                 state.active_turn_id = Some(turn_id.clone());
                 state.turn_count += 1;
@@ -614,7 +616,14 @@ pub(crate) fn begin_pending_steer_replay(
             log: json!({"kind":"steer.unconsumed","turnId":turn_id,"commandIds":command_ids}),
         });
     }
-    if !begin_turn(state, now_ms) {
+    if state.status == Status::Idle {
+        if !begin_turn(state, now_ms) {
+            return None;
+        }
+    } else if state.status == Status::Running && state.active_turn_id.is_none() {
+        state.updated_at = now_ms;
+        state.last_progress_at = now_ms;
+    } else {
         return None;
     }
     let pending = std::mem::take(&mut state.pending_steers);

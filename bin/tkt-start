@@ -383,6 +383,15 @@ fi
 # Every deny is behind us: only a start that gets this far drops the last
 # run's plan-comment id, so a refused start leaves it alone (#1517).
 tkt set post_run ""
+# Claim takeover files before the lane resumes; file-claim treats the same ticket holder as an existing hold.
+if [ "$takeover_given" -eq 1 ] && [ -n "$files" ]; then
+  file_claim="${FW_FILE_CLAIM:-$script_dir/file-claim}"
+  claim_host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf unknown)"
+  claim_out="$("$file_claim" claim --lane "fiber-$issue" --paths --repo "$repo" \
+    --worktree "$claim_host:$worktree" -- "${fpaths[@]}" 2>&1)" \
+    || fail_step file-claim "$?" "$claim_out"
+  tkt journal "tkt-start takeover claims files=${files}"
+fi
 if [ "$no_preflight" -eq 1 ]; then tkt journal "tkt-start check SKIPPED filing=${filing:-none}"; emit "SKIPPED filing=${filing:-none} files=${files:-none}" 0 "${dg[@]}"; fi
 if [ -n "$stale" ]; then dg=("reason=$reason" ${dg[@]+"${dg[@]}"}); tkt journal "tkt-start check STALE reason=$reason filing=${filing:-none}"
 else tkt journal "tkt-start check CURRENT filing=$filing"; emit "CURRENT filing=$filing files=${files:-none}" 0 "${dg[@]}"; fi

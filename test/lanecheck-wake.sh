@@ -19,6 +19,11 @@ case " $* " in
   *"delegate session list --json"*) cat "$STUBD/dsess" 2>/dev/null || echo '{"ok":true,"sessions":[]}';;
   *"delegate session logs"*) cat "$STUBD/dlogs" 2>/dev/null || echo '{"ok":true,"lines":[]}';;
   *"delegate session send"*)
+    if [ -f "$STUBD/send-busy" ]; then
+      cat >/dev/null
+      echo 'session is busy' >&2
+      exit 5
+    fi
     printf '%s\n' "$*" >>"$STUBD/send-commands"
     cat >"$STUBD/last-send"
     cat "$STUBD/last-send" >>"$STUBD/sent-messages"
@@ -132,6 +137,29 @@ if [ "$lrc" -eq 0 ] && grep -Fqx "$expected" "$T/last-send" \
   ok silent-idle-sends-exact-wake
 else
   fail "silent-idle-sends-exact-wake (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
+fi
+
+# A busy replay bridge must leave a wake action retryable, not consume it.
+r=$(newrun busy-send-retry)
+lane "$r" 1002 fiber-1002-build sid-1002
+printf 'repo=aakshintala/fiber\nissue=1002\n' >"$r/fiber-1002.state"
+set_session sid-1002 1002 turn-busy completed 1000000
+set_logs turn-busy 900000 1000000 'Finished without a report.'
+set_processes
+touch "$T/send-busy"
+out=$(run_lanecheck "$r" 1000); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s' "$out" | grep -q '^WAKE-DEFERRED 1002 .* action remains pending'; then
+  ok busy-wake-remains-pending
+else
+  fail "busy-wake-remains-pending (rc=$lrc out=$out)"
+fi
+rm -f "$T/send-busy"
+out=$(run_lanecheck "$r" 1000); lrc=$?
+if [ "$lrc" -eq 0 ] && grep -Fqx 'WAKE (lanecheck): your last turn ended with no STATUS line and no job running. Read '"$r"'/fiber-1002.state and your journal, take the next step your brief names, and end every turn with a STATUS line. Never background a wait: run tkt-* and delegate watch in the foreground.' "$T/last-send" \
+   && printf '%s' "$out" | grep -q '^WAKE 1002 .*silent idle turn turn-busy'; then
+  ok busy-wake-retries-after-busy
+else
+  fail "busy-wake-retries-after-busy (rc=$lrc out=$out sent=$(cat "$T/last-send" 2>/dev/null))"
 fi
 
 # A live descendant seen on one tick is WAITING, then a gone descendant wakes

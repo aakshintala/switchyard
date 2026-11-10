@@ -1068,6 +1068,11 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     let old_times = (before.updated_at, before.last_progress_at);
     if update_store(shared, |state| {
         let lines = state::apply_event(state, &event, now_ms());
+        if should_note_idle && state.status == Status::Idle && !state.pending_steers.is_empty() {
+            // Keep the completing turn busy until replay_pending_steers makes
+            // the decision while holding admission. No turn is active yet.
+            state.status = Status::Running;
+        }
         if status_change {
             state.updated_at = old_times.0;
             state.last_progress_at = old_times.1;
@@ -1080,20 +1085,28 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     }
     if should_note_idle {
         let after = shared.store.snapshot();
-        if after.status == Status::Idle {
-            if after.pending_steers.is_empty() {
-                note_idle_once(shared, &after);
-            } else {
-                let replay_shared = shared.clone();
-                // The reader thread must stay free to process the turn/start reply.
-                let _ = thread::spawn(move || {
-                    guard_thread(replay_shared.clone(), || {
-                        replay_pending_steers(&replay_shared);
-                    });
+        if after.status == Status::Idle && after.pending_steers.is_empty() {
+            note_idle_once(shared, &after);
+        } else if after.status == Status::Running && after.active_turn_id.is_none() {
+            let replay_shared = shared.clone();
+            // The reader thread must stay free to process the turn/start reply.
+            let _ = thread::spawn(move || {
+                guard_thread(replay_shared.clone(), || {
+                    replay_pending_steers(&replay_shared);
                 });
-            }
+            });
         }
     }
+}
+
+fn finish_replay_pending_state(state: &mut state::State, now: u64) -> bool {
+    if state.status != Status::Running || state.active_turn_id.is_some() {
+        return false;
+    }
+    state.status = Status::Idle;
+    state.updated_at = now;
+    state.last_progress_at = now;
+    true
 }
 
 fn replay_pending_steers(shared: &Arc<Shared>) {
@@ -1104,29 +1117,36 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
     } else {
         Vec::new()
     };
-    let has_queued_pending = if queued_steers.is_empty() {
-        false
-    } else {
-        let pending = shared.store.snapshot().pending_steers;
-        queued_steers
-            .iter()
-            .any(|queued| pending.iter().any(|steer| steer.command_id == *queued))
-    };
     if let Some(path) = std::env::var_os("DELEGATE_SESSION_TEST_REPLAY_DECISION_FILE") {
         let _ = std::fs::write(path, b"checked");
     }
-    if has_queued_pending {
-        return;
-    }
     if !pi_host {
+        // Muse may run a pending steer itself as a turn whose turnId is the
+        // steer's commandId; give that turn a bounded window to start.
         let _ = shared.store.wait_until(
             |state| state.status == Status::Dead || state.pending_steers.is_empty(),
             shared.config.steer_settle,
         );
     }
+
     let mut replay_text = None;
     let mut replayed_ids = Vec::new();
+    let mut idle_published = false;
     let updated = update_store(shared, |state| {
+        let has_queued_pending = state
+            .pending_steers
+            .iter()
+            .any(|pending| queued_steers.contains(&pending.command_id));
+        if has_queued_pending && !state.stopping {
+            // pi's host contract delivers queued steers on the next continuation
+            // (docs/delegate-sessions.md:40); the fake models this in
+            // tests/support/pi_host_fake.py:131-145, and
+            // steer_racing_the_end_of_a_turn_starts_the_next_turn holds
+            // TurnStarted before releasing the host (tests/session_pi_e2e.rs:1440).
+            // Stay busy until that turn starts and completes, then reconsider
+            // any dropped steers under admission.
+            return Vec::new();
+        }
         let decision = if pi_host {
             state::begin_pending_steer_replay(state, now_ms())
         } else {
@@ -1144,8 +1164,16 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
                     .collect();
                 vec![log]
             }
-            Some(state::PendingSteerReplay::Unconsumed { log }) => vec![log],
-            None => Vec::new(),
+            Some(state::PendingSteerReplay::Unconsumed { log }) => {
+                idle_published = finish_replay_pending_state(state, now_ms());
+                vec![log]
+            }
+            None => {
+                if state.pending_steers.is_empty() {
+                    idle_published = finish_replay_pending_state(state, now_ms());
+                }
+                Vec::new()
+            }
         }
     })
     .is_ok();
@@ -1155,7 +1183,7 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
                 lock(&shared.wire).forget_steers(&replayed_ids);
             }
             let _ = start_turn(shared, &text);
-        } else {
+        } else if idle_published {
             let state = shared.store.snapshot();
             note_idle_once(shared, &state);
         }
@@ -1314,7 +1342,11 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
         } else if state::begin_turn(state, now_ms()) {
             started = true;
         } else if state.status == Status::Running {
-            active_turn = state.active_turn_id.clone();
+            if let Some(turn_id) = state.active_turn_id.as_deref() {
+                active_turn = Some(turn_id.to_string());
+            } else {
+                rejected = Some(error_reply("busy", "session is busy"));
+            }
         } else {
             rejected = Some(error_reply("busy", "session is busy"));
         }
@@ -1334,7 +1366,7 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
     }
     let Some(turn_id) = active_turn else {
         drop(admission);
-        return error_reply("failed", "active turn id is not available");
+        return error_reply("busy", "session is busy");
     };
 
     let params = msp::turn_steer_params(
@@ -1432,7 +1464,6 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
         return reply;
     }
     let mut no_op = false;
-    let mut turn_id = None;
     let mut should_interrupt = false;
     let mut rejected = None;
     if update_store(shared, |state| {
@@ -1445,7 +1476,6 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
         } else {
             state.stopping = true;
             should_interrupt = state.status == Status::Running;
-            turn_id = state.active_turn_id.clone();
         }
         Vec::new()
     })
@@ -1466,9 +1496,14 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
         return reply;
     }
     let current = shared.store.snapshot();
-    let should_interrupt = should_interrupt && current.status == Status::Running;
+    let turn_id = current.active_turn_id.clone();
+    let should_interrupt =
+        should_interrupt && current.status == Status::Running && turn_id.is_some();
     if should_interrupt {
         if shared.kind == HostKind::Pi {
+            // debt: pi may continue queued steers after an interrupt despite
+            // this clear request; upgrade when pi provides an authoritative
+            // clear-queue acknowledgement or reports any steer lost by abort.
             // An abort continues queued messages left in the session, so
             // drop unsent steers first: they are reported as unconsumed on
             // the cancelled completion instead of running after the abort.
