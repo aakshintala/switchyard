@@ -197,6 +197,9 @@ case " \$* " in
     fi
     touch "$T/jobs-first-done"
     ;;
+  *" api "*"/issues/comments/"*)
+    if [ -f "$T/comment.json" ]; then cat "$T/comment.json"; else printf '{}\n'; fi
+    ;;
   *)
     printf '{}\n'
     ;;
@@ -1884,9 +1887,12 @@ Base: $H
 EOF
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "ruling-verdict-precondition: seed LINES"
 bash "$TKT_STATE" "$S" set plan_verdict_hash "$(git -C "$WT" hash-object -w "$CDIR/plan.md")" || fail "ruling-verdict-precondition: seed plan snapshot"
+bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2000-01-01T00:00:00Z || fail "ruling-verdict-precondition: seed stop time"
+jq -n '{body:"Ruling comment 721473 settles the open line.",issue_url:"https://api.github.com/repos/switchyard/issues/528",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
 awk '{ if ($0 == "- Open line: use the default behavior.") print "- Ruling comment 721473 settles the open line."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
 TKT_PLAN_OUT="$(bash "$TKT_PLAN" "$S" triaged --comment 721473 2>"$CDIR/ruling-stderr.txt")"; TKT_PLAN_RC=$?
 [ "$TKT_PLAN_RC" -eq 0 ] || fail "ruling-verdict-precondition: ruling is recorded (rc=$TKT_PLAN_RC): $(head -n 1 <<<"$TKT_PLAN_OUT") $(cat "$CDIR/ruling-stderr.txt")"
+rm -f "$T/comment.json"
 expect_state plan_verdict triaged "ruling-verdict-precondition"
 run_build --from gate
 [ "$RC" -eq 0 ] || fail "ruling-verdict-precondition: tkt-build passes the verdict precondition (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
