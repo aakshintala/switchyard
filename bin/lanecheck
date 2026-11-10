@@ -721,9 +721,10 @@ if [ "${#inbox_dirs[@]}" -gt 0 ]; then
   fi
 fi
 
-# Pending work, for the STALL lines below: any live process on the box naming a
-# ticket. A stalled lane with work still running wants waking, one with nothing
-# running wants retiring, and `status` alone cannot tell them apart. One ps.
+# Pending work, for the STALL/ABANDONED lines below: selected live commands on
+# the box. Python keys a line only by its fiber-<n>.state path; bare numbers in
+# notes, PRs and ports do not identify work. A wait/watch with no state path can
+# be attributed through the lane-specific PID/PPID probe below, or not at all.
 "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
   "ps -eo args= | grep -E 'tkt-(plan|build|ship|fix|gate)|gh-ci wait|delegate watch' | grep -v grep" \
   >"$tmp/pending.txt" 2>/dev/null
@@ -858,15 +859,15 @@ def live_muse(path):
                         r.get("hostPid"), r.get("supervisorPid"))
     return ids, None
 
-# ticket -> the pending command line, from the box ps probe. A failed or empty
-# probe leaves this empty, which keeps the old STALL wording rather than
-# claiming nothing is running: an absent probe is not evidence of idleness.
+# ticket -> pending command line, keyed only by a fiber-<n>.state path in its
+# argv, regardless of command. Bare numbers do not identify a ticket; a line
+# with no state path adds no entry. A failed or empty probe remains unknown.
 pending = {}
 try:
     for line in open(os.path.join(tmp, "pending.txt")):
         line = line.strip()
-        for word in re.findall(r"\b\d{3,5}\b", line):
-            pending.setdefault(word, line)
+        for ticket in re.findall(r"\bfiber-(\d+)\.state\b", line):
+            pending.setdefault(ticket, line)
 except OSError:
     pass
 

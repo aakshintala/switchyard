@@ -348,9 +348,8 @@ else
   fail "turnless-lane-with-no-pending-work-is-a-stall ($out)"
 fi
 
-# Another ticket's pending work is not this one's. The probe matches on the
-# number, so a 4-digit number anywhere in the wrong command line would make
-# every stalled lane read as busy and the check would never fire.
+# Another ticket's pending work is not this one's. A state-file number is the
+# key, not any other number on the command line.
 printf '/bin/bash /home/a/.agents/bin/tkt-build /srv/lanes/run/fiber-4152.state\n' > "$T/pending"
 out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
 if printf '%s' "$out" | grep -q '^STALL 4099'; then
@@ -367,6 +366,22 @@ if printf '%s' "$out" | grep -qE '^(STALL|ABANDONED) 4099'; then
   ok absent-pending-probe-still-reports-the-lane
 else
   fail "absent-pending-probe-still-reports-the-lane ($out)"
+fi
+: > "$T/pending"
+
+# A number in a command's note is not a ticket key. The process belongs to
+# 4444 because its argv names fiber-4444.state; the heredoc note's 3897 is just
+# text and must not make that stopped lane look like it has work.
+r=$(newrun pending-state-key); lane "$r" 4444 fiber-4444-build pnd44444; lane "$r" 3897 fiber-3897-build pnd38977
+printf '{"ok":true,"sessions":[{"id":"pnd44444","status":"running","turnCount":9},{"id":"pnd38977","status":"running","turnCount":9}]}' > "$T/dsess"
+printf 'tkt-build run/fiber-4444.state ... <<EOF note about fiber-3897 EOF\n' > "$T/pending"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
+if printf '%s' "$out" | grep -q '^ABANDONED 4444' \
+   && ! printf '%s' "$out" | grep -q '^ABANDONED 3897' \
+   && printf '%s' "$out" | grep -q '^STALL 3897'; then
+  ok pending-work-is-keyed-by-state-file-not-arbitrary-argv-numbers
+else
+  fail "pending-work-is-keyed-by-state-file-not-arbitrary-argv-numbers ($out)"
 fi
 : > "$T/pending"
 
