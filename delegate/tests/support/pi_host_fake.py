@@ -148,6 +148,9 @@ def finish_hold(completed):
         if QUEUE:
             deliver_queue()
             return
+        if "REPLAY_UNCONSUMED" in SCENARIOS:
+            send({"type": "agent_end", "messages": [], "willRetry": False})
+            send({"type": "agent_settled", "aborted": False})
     else:
         send(
             {
@@ -254,7 +257,7 @@ def handle_prompt(command):
         RACE_PHASE = 1
         HOLD_START = time.monotonic()
         return
-    if "HOLD_TOOL" in SCENARIOS:
+    if "HOLD_TOOL" in SCENARIOS or ("HOLD_REPLAY" in SCENARIOS and PROMPT_COUNT == 1):
         hold_run(text)
         return
     if "DIALOG" in SCENARIOS:
@@ -298,6 +301,9 @@ def handle_steer(command):
         send(user_frame(text))
         with open(path("delivered.txt"), "a", encoding="utf-8") as output:
             output.write(text + "\n")
+        return
+    if "REPLAY_UNCONSUMED" in SCENARIOS:
+        respond(command.get("id"), "prompt", True, {"disposition": "queued"})
         return
     QUEUE.append(text)
     with open(path("queue.txt"), "a", encoding="utf-8") as output:

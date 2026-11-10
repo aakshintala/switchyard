@@ -755,10 +755,79 @@ fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
         logs.iter().all(|line| line["kind"] != "steer.unconsumed"),
         "{logs:?}"
     );
+    assert!(
+        logs.iter().all(|line| line["kind"] != "steer.replayed"),
+        "a normally consumed steer must not be replayed: {logs:?}"
+    );
     let delivered = std::fs::read_to_string(h.fake_dir.join("delivered.txt")).unwrap();
     assert_eq!(
         delivered.lines().filter(|line| *line == "STEER-1").count(),
         1
+    );
+}
+
+#[test]
+fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
+    let h = Harness::new();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_REPLAY,REPLAY_UNCONSUMED",
+        None,
+        &[],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    for text in ["REPLAY-ONE", "REPLAY-TWO"] {
+        let steered = h.invoke(&["send", &id, text, "--json"]);
+        assert!(
+            steered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&steered.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+        assert_eq!(reply["disposition"], "steered", "{reply}");
+    }
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    watch_ok(&h, &id);
+    let logs = h.logs(&id);
+    let replayed: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "steer.replayed")
+        .collect();
+    assert_eq!(replayed.len(), 1, "{logs:?}");
+    let command_ids = replayed[0]["commandIds"].as_array().unwrap();
+    assert_eq!(command_ids.len(), 2, "{replayed:?}");
+    let replay_text = "REPLAY-ONE\n\nREPLAY-TWO";
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "user" && line["text"] == replay_text)
+            .count(),
+        1,
+        "{logs:?}"
+    );
+    let replayed_command_ids: Vec<&str> =
+        command_ids.iter().map(|id| id.as_str().unwrap()).collect();
+    let replay_command_id = logs
+        .iter()
+        .find(|line| line["kind"] == "user" && line["text"] == replay_text)
+        .unwrap()["commandId"]
+        .as_str()
+        .unwrap();
+    assert_eq!(replayed_command_ids[0], replay_command_id);
+    assert_eq!(h.state(&id)["turnCount"], 2);
+    assert!(
+        logs.iter().all(|line| line["kind"] != "steer.unconsumed"),
+        "{logs:?}"
     );
 }
 

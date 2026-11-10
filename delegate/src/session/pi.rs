@@ -1259,7 +1259,6 @@ mod tests {
     struct ReplayFrame {
         kind: String,
         status: crate::session::state::Status,
-        logs: Vec<serde_json::Value>,
     }
 
     struct ReplayResult {
@@ -1333,7 +1332,6 @@ mod tests {
                 result.frames.push(ReplayFrame {
                     kind: kind.to_string(),
                     status: state.status.clone(),
-                    logs: Vec::new(),
                 });
                 continue;
             }
@@ -1353,7 +1351,6 @@ mod tests {
                 val["id"] = serde_json::Value::String(mapped);
             }
             let incomings = wire.parse(&val.to_string());
-            let mut logs = Vec::new();
             for incoming in &incomings {
                 match incoming {
                     Incoming::Response { result, .. } => {
@@ -1371,22 +1368,7 @@ mod tests {
                         }
                     }
                     Incoming::Event(event) => {
-                        logs.extend(st::apply_event(state, event, now));
-                        if let crate::session::msp::HostEvent::TurnCompleted { turn_id, .. } = event
-                            && !state.stopping
-                            && !state.pending_steers.is_empty()
-                        {
-                            let pending = std::mem::take(&mut state.pending_steers);
-                            let command_ids: Vec<_> = pending
-                                .iter()
-                                .map(|steer| steer.command_id.as_str())
-                                .collect();
-                            logs.push(serde_json::json!({
-                                "kind":"steer.replayed",
-                                "turnId":turn_id,
-                                "commandIds":command_ids
-                            }));
-                        }
+                        let _ = st::apply_event(state, event, now);
                     }
                     _ => {}
                 }
@@ -1394,7 +1376,6 @@ mod tests {
             result.frames.push(ReplayFrame {
                 kind: kind.to_string(),
                 status: state.status.clone(),
-                logs,
             });
             result.incomings.extend(incomings);
         }
@@ -1568,19 +1549,6 @@ mod tests {
         assert_eq!(completions[1].0, "pi-turn-2");
         assert_eq!(completions[1].1, "completed");
         assert!(completions[1].2.is_none());
-        assert!(
-            replayed
-                .frames
-                .iter()
-                .flat_map(|frame| &frame.logs)
-                .any(|line| {
-                    line.get("kind").and_then(|value| value.as_str()) == Some("steer.replayed")
-                        && line
-                            .get("commandIds")
-                            .and_then(|ids| ids.as_array())
-                            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some("cmd-2")))
-                })
-        );
         assert_eq!(state.status, st::Status::Idle);
         assert_eq!(state.turn_count, 2);
         assert_eq!(
@@ -1590,6 +1558,20 @@ mod tests {
         assert_eq!(state.usage.prompt_tokens, 6015);
         assert_eq!(state.usage.output_tokens, 175);
         assert_eq!(state.usage.total_tokens, 6190);
+
+        match st::begin_pending_steer_replay(&mut state, 2000).unwrap() {
+            st::PendingSteerReplay::Started { text, log } => {
+                assert_eq!(
+                    text,
+                    "After the sleep, include the word STEERED in your short response."
+                );
+                assert_eq!(log["kind"], "steer.replayed");
+                assert_eq!(log["commandIds"], serde_json::json!(["cmd-2"]));
+            }
+            other => panic!("pending pi steer should be replayed, got {other:?}"),
+        }
+        assert!(state.pending_steers.is_empty());
+        assert_eq!(state.status, st::Status::Running);
     }
     #[test]
     fn races_and_echoes_behave() {
