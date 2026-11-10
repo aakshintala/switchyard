@@ -35,6 +35,7 @@ fn paths() -> (Paths, String, std::path::PathBuf) {
 struct Bounds {
     rpc_ms: u64,
     steer_ms: u64,
+    steer_reply_ms: u64,
     interrupt_ms: u64,
     stop_ms: u64,
     term_ms: u64,
@@ -46,6 +47,7 @@ impl Default for Bounds {
         Self {
             rpc_ms: 300,
             steer_ms: 300,
+            steer_reply_ms: 10_000,
             interrupt_ms: 300,
             stop_ms: 300,
             term_ms: 300,
@@ -129,6 +131,7 @@ impl Session {
             muse_bin: muse_bin.unwrap_or_else(|| fake.to_string_lossy().into_owned()),
             rpc_timeout: Duration::from_millis(bounds.rpc_ms),
             steer_settle: Duration::from_millis(bounds.steer_ms),
+            steer_reply_wait: Duration::from_millis(bounds.steer_reply_ms),
             interrupt_wait: Duration::from_millis(bounds.interrupt_ms),
             stop_grace: Duration::from_millis(bounds.stop_ms),
             term_wait: Duration::from_millis(bounds.term_ms),
@@ -309,6 +312,24 @@ impl Drop for Session {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+}
+
+fn spawn_send(
+    session: &Session,
+    text: &'static str,
+    timeout: Duration,
+) -> (
+    std::thread::JoinHandle<()>,
+    mpsc::Receiver<Result<Value, ipc::IpcError>>,
+) {
+    let paths = session.paths.clone();
+    let id = session.id.clone();
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let sender = std::thread::spawn(move || {
+        let reply = ipc::request(&paths, &id, &json!({"op":"send","text":text}), timeout);
+        reply_tx.send(reply).unwrap();
+    });
+    (sender, reply_rx)
 }
 
 fn make_stale_socket(socket: &std::path::Path) -> OwnedFd {
@@ -663,37 +684,33 @@ fn supervisor_send_while_running_steers_and_tracks_the_command() {
 #[test]
 fn supervisor_send_reports_unconsumed_msp_steer_after_turn_completion() {
     let mut session = Session::spawn(
-        "HOLD,STEER_NOEFFECT,STEER_NOACK",
+        "HOLD,STEER_NOEFFECT,STEER_ACK_HOLD",
         "brief",
         None,
         Bounds::default(),
     );
     session.until("held first turn", |state| state.active_turn_id.is_some());
 
-    let paths = session.paths.clone();
-    let id = session.id.clone();
-    let (reply_tx, reply_rx) = mpsc::channel();
-    let sender = std::thread::spawn(move || {
-        let reply = ipc::request(
-            &paths,
-            &id,
-            &json!({"op":"send","text":"report if this steer is dropped"}),
-            Duration::from_secs(5),
-        );
-        reply_tx.send(reply).unwrap();
-    });
+    let (sender, reply_rx) = spawn_send(
+        &session,
+        "report if this steer is dropped",
+        Duration::from_secs(5),
+    );
     session.until("steer request", |_| {
         session
             .requests()
             .iter()
             .any(|request| request["method"] == "turn/steer")
     });
+    session.until("held steer RPC acknowledgement", |_| {
+        session.fake_dir.join("steer_ack.pending").exists()
+    });
     assert!(matches!(
         reply_rx.try_recv(),
         Err(mpsc::TryRecvError::Empty)
     ));
-    std::thread::sleep(Duration::from_millis(400));
     assert_eq!(session.state().status, Status::Running);
+    std::fs::write(session.fake_dir.join("steer_ack.release"), "").unwrap();
     std::fs::write(session.fake_dir.join("go"), "").unwrap();
 
     let reply = reply_rx
@@ -715,63 +732,65 @@ fn supervisor_send_reports_unconsumed_msp_steer_after_turn_completion() {
 }
 
 #[test]
-fn supervisor_accepts_a_late_muse_self_turn_without_a_steer_rpc_ack() {
-    let mut session = Session::spawn("HOLD,LATE_SELF_STEER", "brief", None, Bounds::default());
+fn supervisor_send_returns_pending_when_muse_steer_wait_cap_expires() {
+    let mut session = Session::spawn(
+        "HOLD,STEER_NOEFFECT",
+        "brief",
+        None,
+        Bounds {
+            steer_reply_ms: 100,
+            ..Bounds::default()
+        },
+    );
     session.until("held first turn", |state| state.active_turn_id.is_some());
 
-    let paths = session.paths.clone();
-    let id = session.id.clone();
-    let (reply_tx, reply_rx) = mpsc::channel();
-    let sender = std::thread::spawn(move || {
-        let reply = ipc::request(
-            &paths,
-            &id,
-            &json!({"op":"send","text":"late self-start signal"}),
-            Duration::from_secs(5),
-        );
-        reply_tx.send(reply).unwrap();
-    });
-    session.until("late steer request", |_| {
+    let (sender, reply_rx) = spawn_send(
+        &session,
+        "a steer that remains pending",
+        Duration::from_secs(5),
+    );
+    session.until("steer request", |_| {
         session
             .requests()
             .iter()
             .any(|request| request["method"] == "turn/steer")
     });
-    let command_id = session
-        .requests()
-        .into_iter()
-        .find(|request| request["method"] == "turn/steer")
-        .unwrap()["params"]["commandId"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    std::fs::write(session.fake_dir.join("go"), "").unwrap();
-
     let reply = reply_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("send response after Muse starts its own steer turn")
+        .recv_timeout(Duration::from_secs(2))
+        .expect("send returns after its injected wait cap")
         .unwrap();
     sender.join().unwrap();
-    assert_eq!(reply["disposition"], "steered");
-    session.until("late steer user message", |_| {
+    assert_eq!(reply["disposition"], "pending");
+    assert_eq!(session.state().status, Status::Running);
+    assert!(
         session
             .events()
             .iter()
-            .any(|event| event["kind"] == "user" && event["commandId"] == command_id)
+            .all(|event| event["kind"] != "steer.unconsumed")
+    );
+
+    std::fs::write(session.fake_dir.join("go"), "").unwrap();
+    session.until("unconsumed steer resolution", |state| {
+        state.status == Status::Idle
+            && session.events().iter().any(|event| {
+                event["kind"] == "steer.unconsumed"
+                    && event["commandIds"][0]
+                        == session
+                            .requests()
+                            .iter()
+                            .find(|request| request["method"] == "turn/steer")
+                            .unwrap()["params"]["commandId"]
+            })
     });
-    let events = session.events();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event["kind"] == "user" && event["commandId"] == command_id)
-            .count(),
-        1
-    );
-    assert!(
-        events.iter().all(|event| {
-            event["kind"] != "steer.unconsumed" && event["kind"] != "steer.replayed"
-        })
-    );
+    assert!(session.events().iter().any(|event| {
+        event["kind"] == "steer.unconsumed"
+            && event["commandIds"][0]
+                == session
+                    .requests()
+                    .iter()
+                    .find(|request| request["method"] == "turn/steer")
+                    .unwrap()["params"]["commandId"]
+    }));
     assert_eq!(session.stop_and_join(), 0);
 }
 
@@ -790,19 +809,7 @@ fn supervisor_logs_msp_pending_steers_as_unconsumed_at_turn_completion() {
 
     let mut sends = Vec::new();
     for text in ["first steer", "second steer"] {
-        let paths = session.paths.clone();
-        let id = session.id.clone();
-        let (reply_tx, reply_rx) = mpsc::channel();
-        let sender = std::thread::spawn(move || {
-            let reply = ipc::request(
-                &paths,
-                &id,
-                &json!({"op":"send","text":text}),
-                Duration::from_secs(10),
-            );
-            reply_tx.send(reply).unwrap();
-        });
-        sends.push((sender, reply_rx));
+        sends.push(spawn_send(&session, text, Duration::from_secs(10)));
     }
     session.until("two steer requests", |_| {
         session

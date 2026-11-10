@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const RPC_TIMEOUT: u64 = 10_000;
 pub const STEER_SETTLE: u64 = 2_000;
+pub const STEER_REPLY_WAIT: u64 = 10_000;
 pub const INTERRUPT_WAIT: u64 = 10_000;
 pub const STOP_GRACE: u64 = 10_000;
 pub const TERM_WAIT: u64 = 2_000;
@@ -48,6 +49,7 @@ pub struct SupervisorConfig {
     pub muse_bin: String,
     pub rpc_timeout: Duration,
     pub steer_settle: Duration,
+    pub steer_reply_wait: Duration,
     pub interrupt_wait: Duration,
     pub stop_grace: Duration,
     pub term_wait: Duration,
@@ -67,6 +69,7 @@ impl SupervisorConfig {
             muse_bin: msp::resolve_muse_bin(),
             rpc_timeout: Duration::from_millis(RPC_TIMEOUT),
             steer_settle: Duration::from_millis(STEER_SETTLE),
+            steer_reply_wait: Duration::from_millis(STEER_REPLY_WAIT),
             interrupt_wait: Duration::from_millis(INTERRUPT_WAIT),
             stop_grace: grace_ms
                 .map(Duration::from_millis)
@@ -102,8 +105,6 @@ impl PanicMode {
 
 struct Pending {
     method: String,
-    command_id: Option<String>,
-    expected_turn_id: Option<String>,
     response: Sender<Result<Value, RpcError>>,
 }
 
@@ -730,22 +731,6 @@ fn call_within(
     params: Value,
     timeout: Duration,
 ) -> Result<Value, CallFailure> {
-    let command_id = if method == "turn/steer" {
-        params
-            .get("commandId")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    } else {
-        None
-    };
-    let expected_turn_id = if method == "turn/steer" {
-        params
-            .get("expectedTurnId")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    } else {
-        None
-    };
     let id = shared.next_request_id.fetch_add(1, Ordering::SeqCst);
     let line = match shared.kind {
         HostKind::Muse => msp::request(id, method, params),
@@ -763,8 +748,6 @@ fn call_within(
         id,
         Pending {
             method: method.to_string(),
-            command_id,
-            expected_turn_id,
             response: response_tx,
         },
     );
@@ -817,9 +800,6 @@ fn call_within(
             Ok(result) => result,
             Err(_) => {
                 lock(&shared.pending).remove(&id);
-                if shared.kind == HostKind::Muse && method == "turn/steer" {
-                    return Ok(json!({"status":"accepted"}));
-                }
                 let message = format!("{label} host request timed out");
                 timeout_host(shared, method, &message);
                 return Err(CallFailure::Failed(message));
@@ -1081,11 +1061,6 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     {
         return;
     }
-    let completed_turn_id = match &event {
-        HostEvent::TurnCompleted { turn_id, .. } => Some(turn_id.as_str()),
-        _ => None,
-    };
-    resolve_pending_steer_responses(shared, completed_turn_id);
     if should_note_idle {
         let after = shared.store.snapshot();
         if after.status == Status::Idle {
@@ -1101,47 +1076,6 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
                 });
             }
         }
-    }
-}
-
-fn resolve_pending_steer_responses(shared: &Arc<Shared>, completed_turn_id: Option<&str>) {
-    if shared.kind != HostKind::Muse {
-        return;
-    }
-    let unresolved_ids: Vec<_> = shared
-        .store
-        .snapshot()
-        .pending_steers
-        .into_iter()
-        .map(|steer| steer.command_id)
-        .collect();
-    let resolved = {
-        let mut requests = lock(&shared.pending);
-        let ids: Vec<_> = requests
-            .iter()
-            .filter_map(|(id, request)| {
-                (request.method == "turn/steer"
-                    && (request
-                        .command_id
-                        .as_ref()
-                        .is_some_and(|command_id| !unresolved_ids.contains(command_id))
-                        || completed_turn_id.is_some_and(|turn_id| {
-                            request.expected_turn_id.as_deref() == Some(turn_id)
-                        })))
-                .then_some(*id)
-            })
-            .collect();
-        ids.into_iter()
-            .filter_map(|id| requests.remove(&id))
-            .collect::<Vec<_>>()
-    };
-    for request in resolved {
-        let Some(command_id) = request.command_id else {
-            continue;
-        };
-        let _ = request
-            .response
-            .send(Ok(json!({"status":"accepted","turnId":command_id})));
     }
 }
 
@@ -1199,7 +1133,6 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
     })
     .is_ok();
     if updated {
-        resolve_pending_steer_responses(shared, None);
         if let Some(text) = replay_text {
             if pi_host && !replayed_ids.is_empty() {
                 lock(&shared.wire).forget_steers(&replayed_ids);
@@ -1413,13 +1346,17 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
     match call(shared, "turn/steer", params) {
         Ok(_) => {
             drop(admission);
-            let unconsumed =
-                shared.kind == HostKind::Muse && wait_for_steer_resolution(shared, &command_id);
-            if unconsumed {
-                json!({"ok":true,"disposition":"unconsumed"})
+            let resolution = if shared.kind == HostKind::Muse {
+                wait_for_steer_resolution(shared, &command_id, shared.config.steer_reply_wait)
             } else {
-                json!({"ok":true,"disposition":"steered"})
-            }
+                SteerResolution::Consumed
+            };
+            let disposition = match resolution {
+                SteerResolution::Consumed => "steered",
+                SteerResolution::Unconsumed => "unconsumed",
+                SteerResolution::Pending => "pending",
+            };
+            json!({"ok":true,"disposition":disposition})
         }
         Err(CallFailure::Rpc(error)) => {
             drop_steer(shared, &command_id);
@@ -1624,29 +1561,34 @@ fn reject_dead(shared: &Shared) -> Option<Value> {
     (shared.store.snapshot().status == Status::Dead).then(|| error_reply("dead", "session is dead"))
 }
 
-fn wait_for_steer_resolution(shared: &Arc<Shared>, command_id: &str) -> bool {
-    loop {
-        if let Some(state) = shared.store.wait_until(
-            |state| {
-                state.status == Status::Dead
-                    || !state
-                        .pending_steers
-                        .iter()
-                        .any(|pending| pending.command_id == command_id)
-            },
-            Duration::from_millis(100),
-        ) {
-            if state.status == Status::Dead {
-                return true;
-            }
-            break;
-        }
-        if shared.shutdown.load(Ordering::SeqCst) {
-            return true;
-        }
+enum SteerResolution {
+    Consumed,
+    Unconsumed,
+    Pending,
+}
+
+fn wait_for_steer_resolution(
+    shared: &Arc<Shared>,
+    command_id: &str,
+    timeout: Duration,
+) -> SteerResolution {
+    let Some(state) = shared.store.wait_until(
+        |state| {
+            state.status == Status::Dead
+                || !state
+                    .pending_steers
+                    .iter()
+                    .any(|pending| pending.command_id == command_id)
+        },
+        timeout,
+    ) else {
+        return SteerResolution::Pending;
+    };
+    if state.status == Status::Dead || shared.shutdown.load(Ordering::SeqCst) {
+        return SteerResolution::Pending;
     }
 
-    fs::read_to_string(shared.config.paths.events_file(&shared.id))
+    let unconsumed = fs::read_to_string(shared.config.paths.events_file(&shared.id))
         .ok()
         .is_some_and(|events| {
             events.lines().any(|line| {
@@ -1657,7 +1599,12 @@ fn wait_for_steer_resolution(shared: &Arc<Shared>, command_id: &str) -> bool {
                             .is_some_and(|ids| ids.iter().any(|id| id == command_id))
                 })
             })
-        })
+        });
+    if unconsumed {
+        SteerResolution::Unconsumed
+    } else {
+        SteerResolution::Consumed
+    }
 }
 
 fn drop_steer(shared: &Shared, command_id: &str) {

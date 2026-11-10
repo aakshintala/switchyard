@@ -23,7 +23,6 @@ TURN_NUMBER = 0
 ACTIVE_TURN = None
 ACTIVE_SCENARIOS = set()
 HELD_TERMINAL = "completed"
-PENDING_STEER = None
 STOP_READING = False
 
 
@@ -35,6 +34,14 @@ def write_file(name, text):
 def hold_start():
     write_file("start.pending", "")
     release_path = os.path.join(FAKE_DIR, "start.release")
+    deadline = time.monotonic() + 10
+    while not os.path.exists(release_path) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def hold_steer_ack():
+    write_file("steer_ack.pending", "")
+    release_path = os.path.join(FAKE_DIR, "steer_ack.release")
     deadline = time.monotonic() + 10
     while not os.path.exists(release_path) and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -110,7 +117,7 @@ def emit_start_events(turn_id, command_id, text, features, include_ack=None):
 
 
 def complete_turn(terminal=None):
-    global ACTIVE_TURN, PENDING_STEER
+    global ACTIVE_TURN
     if ACTIVE_TURN is None:
         return
     turn_id = ACTIVE_TURN
@@ -129,10 +136,6 @@ def complete_turn(terminal=None):
         }
     ACTIVE_TURN = None
     send_frames(*frames)
-    if "LATE_SELF_STEER" in ACTIVE_SCENARIOS and PENDING_STEER is not None:
-        command_id, text = PENDING_STEER
-        PENDING_STEER = None
-        emit_start_events(command_id, command_id, text, ACTIVE_SCENARIOS)
 
 
 def start_turn(frame):
@@ -201,7 +204,7 @@ def start_turn(frame):
 
 
 def handle(frame, raw_line=None):
-    global ACTIVE_TURN, ACTIVE_SCENARIOS, HELD_TERMINAL, PENDING_STEER
+    global ACTIVE_TURN, ACTIVE_SCENARIOS, HELD_TERMINAL
     if raw_line is None:
         log_frame(frame)
     else:
@@ -230,20 +233,15 @@ def handle(frame, raw_line=None):
         start_turn(frame)
     elif method == "turn/steer":
         command_id = params.get("commandId")
-        if "LATE_SELF_STEER" in SCENARIOS:
-            PENDING_STEER = (
-                command_id,
-                params.get("input", [{}])[0].get("text", ""),
-            )
-        elif "STEER_NOACK" in SCENARIOS:
-            return
-        elif "STEERREFUSE" in SCENARIOS or "STEERREFUSE_HOLD" in SCENARIOS:
+        if "STEERREFUSE" in SCENARIOS or "STEERREFUSE_HOLD" in SCENARIOS:
             frames = [error_response(request_id, "turn already ended")]
             if "STEERREFUSE_HOLD" not in SCENARIOS and ACTIVE_TURN is not None:
                 frames.append(event("turn/completed", {"turnId": ACTIVE_TURN, "terminal": "completed"}))
                 ACTIVE_TURN = None
             send_frames(*frames)
         else:
+            if "STEER_ACK_HOLD" in SCENARIOS:
+                hold_steer_ack()
             frames = [response(request_id, {"commandId": command_id, "status": "accepted", "turnId": ACTIVE_TURN})]
             if "STEER_NOEFFECT" not in SCENARIOS and ACTIVE_TURN is not None:
                 frames.append(
