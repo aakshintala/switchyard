@@ -3,8 +3,10 @@
 # Fetches, checks the branch tip against origin/<branch> (and --expect-head),
 # checks git diff --name-only --no-renames origin/main...HEAD against the
 # plan's Files or the state's fence list, records the history, then runs the
-# gate script from the plan's Gate section to a per-run log and sets state
-# head. Prints one verdict line plus a digest of at most 40 lines.
+# gate script from the plan's Gate section, or from state key `gate` when the
+# plan value is `takeover <ref>`, to a per-run log and sets state head. Prints
+# one verdict line plus a digest of at most 40 lines. For takeovers, the file
+# fence comes from the state's `fence` list.
 # An uncovered path still passes when it exists on origin/main and the branch
 # only adds lines to it (no deleted line, not binary), so additive edits at
 # registration points stay open; only rewritten and new paths are fenced.
@@ -147,8 +149,25 @@ mkdir -p "$run"
 
 # The fence comes from the plan's Files, the state's fence list, or both.
 plan="$(tkt get plan 2>/dev/null || true)"
+takeover=0
+takeover_ref=""
+takeover_gate=""
+if [ "$plan" = takeover ] || [[ $plan == "takeover "* ]]; then
+  takeover=1
+  if [ "$plan" != takeover ]; then takeover_ref="${plan#takeover }"; fi
+  if [ -z "${takeover_ref//[[:space:]]/}" ] || [[ $takeover_ref == *[[:space:]]* ]]; then
+    echo "tkt-gate: invalid takeover plan value: expected 'takeover <pr-or-branch>'" >&2
+    exit 2
+  fi
+  takeover_gate="$(tkt get gate 2>/dev/null || true)"
+  if [ -z "${takeover_gate//[[:space:]]/}" ]; then
+    echo "tkt-gate: takeover $takeover_ref has no gate command in state (key: gate)" >&2
+    exit 2
+  fi
+  plan=""
+fi
 fence_list="$(tkt list fence 2>/dev/null || true)"
-if [ -z "$plan" ] && [ -z "$fence_list" ]; then
+if [ -z "$plan" ] && [ -z "$fence_list" ] && [ "$takeover" -eq 0 ]; then
   tkt require plan
 fi
 if [ -n "$plan" ] && [ ! -r "$plan" ]; then
@@ -329,9 +348,13 @@ merges="$(git -C "$worktree" rev-list --count --merges "origin/main..HEAD" 2>/de
 
 gate_word="skipped"
 if [ "$checks_only" -eq 0 ]; then
-  [ -n "$plan" ] || tkt require plan
-  plan_gate_args tkt
-  gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")" || exit 2
+  if [ "$takeover" -eq 1 ]; then
+    gate_cmd="$takeover_gate"
+  else
+    [ -n "$plan" ] || tkt require plan
+    plan_gate_args tkt
+    gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")" || exit 2
+  fi
   env_prefix=""
   if e="$(tkt get env 2>/dev/null)" && [ -n "$e" ]; then
     env_prefix="$e "

@@ -196,6 +196,14 @@ want "SKIPPED filing=" 0 gate-script-present
 grep -qxF 'gate.script=scripts/check' "$RUN/widget-42.state" \
   || fail "gate-script-present: state does not set gate.script to scripts/check"
 
+setup takeover ONE AGAINST
+run_start --no-preflight --takeover '#123' --gate 'bash scripts/check'
+want "SKIPPED filing=" 0 takeover
+S="$RUN/widget-42.state"
+grep -qxF 'plan=takeover #123' "$S" || fail "takeover: state does not record the source in plan"
+grep -qxF 'gate=bash scripts/check' "$S" || fail "takeover: state does not record the gate"
+grep -qxF 'fence=f.txt' "$S" || fail "takeover: --files did not seed the takeover fence"
+
 # current, plus the resume path: a rerun reuses the worktree with no dup lines.
 setup current ONE AGAINST; run_start
 want "CURRENT " 0 current

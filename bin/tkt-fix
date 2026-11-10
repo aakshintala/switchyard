@@ -589,18 +589,37 @@ write_findings_history() {
   t set "fix_round.$knum.history" "$history_file"
 }
 
-# A resume checks the plan's Gate line too, and passes --gate-from-plan so the
-# resumed job runs the current plan's gate, not the one it was created with.
+# A resume checks the current plan Gate line and passes it to tkt-job. A
+# takeover has no plan file, so its recorded state gate is passed directly.
 plan="$(t get plan 2>/dev/null || true)"
+takeover=0
+takeover_ref=""
+gate_cmd=""
+takeover_gate_arg=""
 if [ -z "$plan" ]; then
   echo "tkt-fix: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
   exit 2
+elif [ "$plan" = takeover ] || [[ $plan == "takeover "* ]]; then
+  takeover=1
+  if [ "$plan" != takeover ]; then takeover_ref="${plan#takeover }"; fi
+  if [ -z "${takeover_ref//[[:space:]]/}" ] || [[ $takeover_ref == *[[:space:]]* ]]; then
+    echo "tkt-fix: invalid takeover plan value: expected 'takeover <pr-or-branch>'" >&2
+    exit 2
+  fi
+  gate_cmd="$(t get gate 2>/dev/null || true)"
+  if [ -z "${gate_cmd//[[:space:]]/}" ]; then
+    echo "tkt-fix: takeover $takeover_ref has no gate command in state (key: gate)" >&2
+    exit 2
+  fi
+  takeover_gate_arg="$gate_cmd"
+  if e="$(t get env 2>/dev/null)" && [ -n "$e" ]; then takeover_gate_arg="$e $gate_cmd"; fi
+else
+  plan_gate_args t
+  gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")" || {
+    echo "tkt-fix: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
+    exit 2
+  }
 fi
-plan_gate_args t
-gate_cmd="$("$plangate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")" || {
-  echo "tkt-fix: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
-  exit 2
-}
 concerns_file=""
 no_commits=0
 round_start="$(git -C "$worktree" rev-parse HEAD)"
@@ -651,10 +670,12 @@ else
   if [ -n "$resume" ]; then
     args=(--slot "$slot" --resume "$resume" --prompt "$prompt")
     [ -z "$fixmodel" ] || args+=(--model "$fixmodel")
-    args+=(--gate-from-plan)
+    if [ "$takeover" -eq 1 ]; then args+=(--gate "$takeover_gate_arg"); else args+=(--gate-from-plan); fi
   else
     [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
-    args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$gate_cmd" --gate-from-plan --expect-commits)
+    args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$gate_cmd")
+    if [ "$takeover" -eq 1 ]; then args+=(--gate "$takeover_gate_arg"); else args+=(--gate-from-plan); fi
+    args+=(--expect-commits)
     if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
   fi
   t set fixopen "$knum" # this job's commits may land ahead of head

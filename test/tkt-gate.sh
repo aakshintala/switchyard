@@ -583,6 +583,27 @@ run_gate --checks-only
 [ "$RC" -eq 0 ] || fail "fence list exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-gate PASS head=$H log=*" "fence list"
 
+# --- takeover state uses its stored fence and gate without a plan file ---
+setup_case takeover
+printf 'plan=takeover #123\ngate=gate-ok\nfence=base.txt\n' >>"$S"
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+run_gate --checks-only
+[ "$RC" -eq 0 ] || fail "takeover checks-only exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "takeover checks-only"
+[ ! -f "$T/gate-ran" ] || fail "takeover checks-only runs no gate"
+
+setup_case takeover-full
+printf 'plan=takeover branch-123\ngate=gate-ok\nfence=base.txt\n' >>"$S"
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+run_gate
+[ "$RC" -eq 0 ] || fail "takeover full gate exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "takeover full gate"
+[ -f "$T/gate-ran" ] || fail "takeover full gate did not run the state gate"
+
 # --- a gate with no plan key exits 2 naming plan ---
 setup_case gate-no-plan
 printf 'fence=%s\n' 'base.txt' >>"$S"

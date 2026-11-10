@@ -8,12 +8,15 @@
 # State key body_ends: text passed to ship-pr as --body-ends; absent, unreadable,
 # empty or blank passes no flag and asks for no check.
 # State key unverified: path passed to ship-pr as --unverified-fixes.
+# State plan value `takeover <ref>` has no plan file; it requires state key
+# gate and adds a ticket-review line to the PR body.
 set -euo pipefail
 
 usage() {
   echo "usage: tkt-ship <state>" >&2
   echo "       longest wait 144000 s (40 h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" >&2
   echo "       state keys: no_mutants_label passes --no-mutants-label, mutant_job passes --mutants-gate, body_ends passes --body-ends, unverified passes --unverified-fixes, merge_check passes --merge-check unless merge_gate is gate" >&2
+  echo "       takeover: plan=takeover <pr-or-branch> uses required state gate and adds a ticket-review line to the PR body" >&2
   exit 2
 }
 [ $# -eq 1 ] || usage
@@ -149,9 +152,23 @@ worktree="$(abspath "$worktree")" || {
 mkdir -p "$run"
 
 plan="$(tkt get plan 2>/dev/null || true)"
+takeover=0
+takeover_ref=""
+takeover_gate=""
+if [ "$plan" = takeover ] || [[ $plan == "takeover "* ]]; then
+  takeover=1
+  if [ "$plan" != takeover ]; then takeover_ref="${plan#takeover }"; fi
+  if [ -z "${takeover_ref//[[:space:]]/}" ] || [[ $takeover_ref == *[[:space:]]* ]]; then
+    emit "PRECONDITION takeover=invalid" 2 "tkt-ship: invalid takeover plan value: expected 'takeover <pr-or-branch>'"
+  fi
+  takeover_gate="$(tkt get gate 2>/dev/null || true)"
+  if [ -z "${takeover_gate//[[:space:]]/}" ]; then
+    emit "PRECONDITION takeover=gate-missing" 2 "tkt-ship: takeover $takeover_ref has no gate command in state (key: gate)"
+  fi
+fi
 base=""
-if [ -n "$plan" ]; then base="$(plan_base "$plan" 2>/dev/null || true)"; fi
-if ! plan_verdict_check ship "$tkt_state" "$state" 0 "$plan" "$base" "$worktree"; then
+if [ "$takeover" -eq 0 ] && [ -n "$plan" ]; then base="$(plan_base "$plan" 2>/dev/null || true)"; fi
+if [ "$takeover" -eq 0 ] && ! plan_verdict_check ship "$tkt_state" "$state" 0 "$plan" "$base" "$worktree"; then
   emit "VERDICT-REFUSED verdict=$verdict_refusal" 1 "$verdict_digest" \
     "tkt-plan $state triaged --comment <id>, or edit the plan and use --no-verifier"
 fi
@@ -213,8 +230,9 @@ last_pass="$(grep -o 'tkt-gate PASS head=[0-9a-fA-F]\{40\}$' "${state%.state}.jo
 last_pass_head="${last_pass#tkt-gate PASS head=}"
 local_gate_cmd=""
 if [ -n "$last_pass" ]; then
-  plan_gate_args tkt
-  if plan_path="$(tkt get plan 2>/dev/null)" && [ -n "$plan_path" ]; then
+  if [ "$takeover" -eq 1 ]; then
+    local_gate_cmd="$takeover_gate"
+  elif plan_gate_args tkt && plan_path="$(tkt get plan 2>/dev/null)" && [ -n "$plan_path" ]; then
     local_gate_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan_path" 2>/dev/null || true)"
   fi
 fi
@@ -226,6 +244,19 @@ if [ -n "$last_pass" ] && [ "$last_pass_head" != "$pr_head" ]; then
   fi
 fi
 if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""' 2>/dev/null)"; then
+  body_changed=0
+  takeover_line=""
+  if [ "$takeover" -eq 1 ]; then
+    takeover_line="Takeover of $takeover_ref: no plan; review against the ticket."
+    if ! grep -Fqx -- "$takeover_line" <<<"$pr_body_text"; then
+      if [ -n "$pr_body_text" ]; then
+        pr_body_text="$pr_body_text"$'\n\n'"$takeover_line"
+      else
+        pr_body_text="$takeover_line"
+      fi
+      body_changed=1
+    fi
+  fi
   gate_line_sha="$(printf '%s\n' "$pr_body_text" | sed -n 's/^Local gate: pass at \([0-9a-fA-F]\{40\}\).*/\1/p' | head -n 1)"
   if [ -z "$last_pass" ] && [ -n "$gate_line_sha" ] && [ "$gate_line_sha" != "$pr_head" ]; then
     if ! gate_diff_comparison "$gate_line_sha" "$pr_head"; then
@@ -251,7 +282,20 @@ if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""
     if tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-ship-body.XXXXXX" 2>/dev/null)"; then
       if printf '%s\n' "$new_body" >"$tmp_body" \
         && gh pr edit "$pr" --repo "$repo" --body-file "$tmp_body" 2>/dev/null; then
-        :
+        body_changed=0
+      else
+        printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
+      fi
+      rm -f "$tmp_body"
+    else
+      printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
+    fi
+  fi
+  if [ "$body_changed" -eq 1 ]; then
+    if tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-ship-body.XXXXXX" 2>/dev/null)"; then
+      if printf '%s\n' "$pr_body_text" >"$tmp_body" \
+        && gh pr edit "$pr" --repo "$repo" --body-file "$tmp_body" 2>/dev/null; then
+        body_changed=0
       else
         printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
       fi
@@ -261,7 +305,13 @@ if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""
     fi
   fi
 else
+  if [ "$takeover" -eq 1 ]; then
+    emit "PRECONDITION takeover-note=unreadable" 2 "tkt-ship: cannot read PR $pr body to add the required takeover note"
+  fi
   printf 'tkt-ship: warning: cannot read PR %s body; skipping the Local gate check\n' "$pr" >&2
+fi
+if [ "$takeover" -eq 1 ] && [ "$body_changed" -eq 1 ]; then
+  emit "PRECONDITION takeover-note=unwritten" 2 "tkt-ship: cannot add the required takeover note to PR $pr body"
 fi
 
 args=("$pr" --repo "$repo" --reviewed "$reviewed" --worktree "$worktree")
@@ -291,20 +341,26 @@ if nm="$(tkt get no_mutants_label 2>/dev/null)" && [ -n "$nm" ]; then
   args+=(--no-mutants-label "$nm")
 fi
 if [ "$(tkt get merge_gate 2>/dev/null || true)" = "gate" ]; then
-  if ! plan_err="$(tkt require plan 2>&1)"; then
-    printf '%s\n' "$plan_err" >&2
-    emit "PRECONDITION missing=plan" 2 "$plan_err" "$(ship_repair_hint plan)"
+  if [ "$takeover" -eq 1 ]; then
+    gate_cmd="$takeover_gate"
+  else
+    if ! plan_err="$(tkt require plan 2>&1)"; then
+      printf '%s\n' "$plan_err" >&2
+      emit "PRECONDITION missing=plan" 2 "$plan_err" "$(ship_repair_hint plan)"
+    fi
+    plan_gate_args tkt
+    gate_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$(tkt get plan)")" || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $(tkt get plan)"
   fi
-  plan_gate_args tkt
-  gate_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$(tkt get plan)")" || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $(tkt get plan)"
   e="$(tkt get env 2>/dev/null || true)"
   args+=(--gate "${e:+$e }$gate_cmd")
 else
   # A CI-gated ship runs no local gate, but a Gate line that skips gate.script
   # still stops it: the plan's Gate line is checked on every read.
-  plan_gate_args tkt
-  if [ -n "${plan_gate_argv[*]+x}" ] && plan="$(tkt get plan 2>/dev/null)" && [ -n "$plan" ]; then
-    "$bin_dir/plan-gate" "${plan_gate_argv[@]}" "$plan" >/dev/null || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $plan"
+  if [ "$takeover" -eq 0 ]; then
+    plan_gate_args tkt
+    if [ -n "${plan_gate_argv[*]+x}" ] && plan="$(tkt get plan 2>/dev/null)" && [ -n "$plan" ]; then
+      "$bin_dir/plan-gate" "${plan_gate_argv[@]}" "$plan" >/dev/null || emit "PRECONDITION gate=failed" 2 "plan-gate rejected $plan"
+    fi
   fi
   if merge_check="$(tkt get merge_check 2>/dev/null)" && [ -n "$merge_check" ]; then
     e="$(tkt get env 2>/dev/null || true)"
