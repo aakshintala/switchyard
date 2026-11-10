@@ -372,7 +372,9 @@ if [ "${1:-}" = done ]; then
   set -- "${done_args[@]}"
   if [ -n "$handed_card" ]; then
     case "$handed_card" in ""|*[!A-Za-z0-9_-]*) echo "lanecheck done: invalid owner-ask card id: $handed_card" >&2; exit 2 ;; esac
-    owner_ask_bin=${FW_OWNER_ASK:-owner-ask}
+    owner_ask_bin="$HOME/.local/bin/owner-ask"
+    # The override is test-only so a lane cannot substitute its own owner authority.
+    if [ "${SWITCHYARD_TEST:-0}" = 1 ] && [ -n "${FW_OWNER_ASK:-}" ]; then owner_ask_bin="$FW_OWNER_ASK"; fi
     owner_ask_list_rc=0
     owner_ask_list=$("$owner_ask_bin" list 2>/dev/null) || owner_ask_list_rc=$?
     owner_ask_open=0
@@ -429,6 +431,45 @@ PY
   _merged_prs_loaded=0
   handed_tickets=()
   handed_prs=()
+  handoff_problem_for() {
+    local open_pr="$1" handoff_ok p
+    handoff_problem=""
+    if [ "$owner_ask_list_rc" -ne 0 ]; then
+      handoff_problem="owner-ask list failed for card $handed_card"
+    elif [ "$owner_ask_open" != 1 ]; then
+      handoff_problem="card $handed_card is not open"
+    elif [ "$_prs_ok" != 1 ]; then
+      handoff_problem="open-PR lookup failed, so the PR cannot be verified"
+    elif [ -z "$open_pr" ]; then
+      handoff_problem="no open PR for lane #$tn to hand to the owner"
+    elif [ "$owner_ask_text_rc" -ne 0 ]; then
+      handoff_problem="card $handed_card title/body could not be read"
+    else
+      handoff_match=$(python3 -I -c 'import re,sys
+text, ticket, prs = sys.argv[1:]
+if re.search(r"(?<![A-Za-z0-9_])#" + re.escape(ticket) + r"(?![0-9])", text):
+    print("ticket")
+else:
+    print(" ".join(pr for pr in prs.split() if re.search(r"\bPR\s+#" + re.escape(pr) + r"(?![0-9])", text)))' \
+        "$owner_ask_text" "$tn" "$open_pr")
+      if [ "$handoff_match" != ticket ]; then
+        handoff_ok=1
+        for p in $open_pr; do
+          case " $handoff_match " in *" $p "*) ;; *) handoff_ok=0 ;; esac
+        done
+        if [ "$handoff_ok" = 0 ]; then handoff_problem="card $handed_card title/body does not name open PR(s) $(printf '%s ' $open_pr)or ticket #$tn"; fi
+      fi
+    fi
+  }
+  handoff_pr_for() {
+    local wanted_ticket="$1" i
+    for i in "${!handed_tickets[@]}"; do
+      if [ "${handed_tickets[$i]}" = "$wanted_ticket" ]; then
+        printf '%s' "${handed_prs[$i]}"
+        return 0
+      fi
+    done
+  }
   for n in "$@"; do
     tn=${n%%:*}
     # A session-scoped retirement asks about that session only. Reading the
@@ -512,72 +553,28 @@ for pr in prs:
     # the line says the guard did not run so the log cannot be misread.
     if [ "$_prs_ok" = 1 ]; then
       open_pr=$(printf '%s\n' "$_prs" | awk -v t="$tn" '$2 ~ ("^[^/]+/" t "-") || $2 ~ ("^" t "-") { print $1 }')
+    else
+      open_pr=""
+    fi
+    if [ -n "$handed_card" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
+      handoff_problem_for "$open_pr"
+      if [ -n "$handoff_problem" ]; then
+        echo "REFUSING to retire $n — handed-to-owner check failed: $handoff_problem." >&2
+        young=1
+      elif [ -n "$open_pr" ]; then
+        handoff_pr=$(printf '%s\n' "$open_pr" | head -1)
+        handed_tickets+=("$tn")
+        handed_prs+=("$handoff_pr")
+      fi
+    elif [ "$_prs_ok" = 1 ]; then
       if [ -n "$open_pr" ]; then
-        if [ -n "$handed_card" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
-          handoff_problem=""
-          if [ "$owner_ask_list_rc" -ne 0 ]; then
-            handoff_problem="owner-ask list failed for card $handed_card"
-          elif [ "$owner_ask_open" != 1 ]; then
-            handoff_problem="card $handed_card is not open"
-          elif [ "$owner_ask_text_rc" -ne 0 ]; then
-            handoff_problem="card $handed_card title/body could not be read"
-          else
-            handoff_match=$(python3 -I -c 'import re,sys
-text, ticket, prs = sys.argv[1:]
-if re.search(r"(?<![A-Za-z0-9_])#" + re.escape(ticket) + r"(?![0-9])", text):
-    print("ticket")
-else:
-    print(" ".join(pr for pr in prs.split() if re.search(r"\bPR\s+#" + re.escape(pr) + r"(?![0-9])", text)))' \
-              "$owner_ask_text" "$tn" "$open_pr")
-            if [ "$handoff_match" = ticket ]; then
-              handoff_ok=1
-            else
-              handoff_ok=1
-              for p in $open_pr; do
-                case " $handoff_match " in *" $p "*) ;; *) handoff_ok=0 ;; esac
-              done
-              if [ "$handoff_ok" = 0 ]; then handoff_problem="card $handed_card title/body does not name open PR(s) $(printf '%s ' $open_pr)or ticket #$tn"; fi
-            fi
-          fi
-          if [ -n "$handoff_problem" ]; then
-            echo "REFUSING to retire $n — handed-to-owner check failed: $handoff_problem." >&2
-            young=1
-          else
-            handoff_pr=$(printf '%s\n' "$open_pr" | head -1)
-            handed_tickets+=("$tn")
-            handed_prs+=("$handoff_pr")
-          fi
-        elif [ "${FW_DONE_FORCE:-0}" = 1 ]; then
+        if [ "${FW_DONE_FORCE:-0}" = 1 ]; then
           echo "FORCING retire of $tn — PR(s) $(echo "$open_pr" | tr '\n' ' ')still open and unmerged; FW_DONE_FORCE=1 overrides." >&2
         else
           echo "REFUSING to retire $tn — PR(s) $(echo "$open_pr" | tr '\n' ' ')still open and unmerged. The lane's last step is the ship; let it run ship-pr, or merge first." >&2
           young=1
         fi
-      elif [ -n "$handed_card" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
-        if [ "$owner_ask_list_rc" -ne 0 ]; then
-          handoff_problem="owner-ask list failed for card $handed_card"
-        elif [ "$owner_ask_open" != 1 ]; then
-          handoff_problem="card $handed_card is not open"
-        elif [ "$_prs_ok" != 1 ]; then
-          handoff_problem="open-PR lookup failed, so the PR cannot be verified"
-        else
-          handoff_problem="no open PR for lane #$tn to hand to the owner"
-        fi
-        echo "REFUSING to retire $n — handed-to-owner check failed: $handoff_problem." >&2
-        young=1
       fi
-    elif [ -n "$handed_card" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
-      if [ "$owner_ask_list_rc" -ne 0 ]; then
-        handoff_problem="owner-ask list failed for card $handed_card"
-      elif [ "$owner_ask_open" != 1 ]; then
-        handoff_problem="card $handed_card is not open"
-      elif [ "$_prs_ok" != 1 ]; then
-        handoff_problem="open-PR lookup failed, so the PR cannot be verified"
-      else
-        handoff_problem="no open PR for lane #$tn to hand to the owner"
-      fi
-      echo "REFUSING to retire $n — handed-to-owner check failed: $handoff_problem." >&2
-      young=1
     else
       echo "note: open-PR guard did not run for $tn (gh pr list failed); age guard only." >&2
     fi
@@ -595,10 +592,7 @@ else:
   write_retirement_helper "$retirement_helper"
   for n in "$@"; do
     tn=${n%%:*}
-    handoff_pr=""
-    for i in "${!handed_tickets[@]}"; do
-      if [ "${handed_tickets[$i]}" = "$tn" ]; then handoff_pr="${handed_prs[$i]}"; break; fi
-    done
+    handoff_pr=$(handoff_pr_for "$tn")
     case "$n" in
       *:*) retire_line="$(printf '%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn" "${n#*:}")" ;;
       *)   retire_line="$(printf '%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn")" ;;
@@ -652,10 +646,7 @@ PY
       echo "fence kept for #$t: $live session(s) still live"
       continue
     fi
-    handoff_pr=""
-    for i in "${!handed_tickets[@]}"; do
-      if [ "${handed_tickets[$i]}" = "$t" ]; then handoff_pr="${handed_prs[$i]}"; break; fi
-    done
+    handoff_pr=$(handoff_pr_for "$t")
     if [ -n "$handoff_pr" ]; then
       echo "fence kept for #$t: handed-to-owner $handed_card PR #$handoff_pr"
       continue

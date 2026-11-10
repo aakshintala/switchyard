@@ -12,6 +12,8 @@
 # the one shape that cannot show the bug. A case is only worth its line if it
 # is the case that would fail.
 set -u
+SWITCHYARD_TEST=1
+export SWITCHYARD_TEST
 here="$(cd "$(dirname "$0")" && pwd)"
 BIN=${FW_TEST_BIN:-$here/../bin}
 T=$(mktemp -d "${TMPDIR:-/tmp}/lctest.XXXXXX")
@@ -61,6 +63,7 @@ exit 0
 EOF
 cat > "$T/stub/owner-ask" <<'EOF'
 #!/bin/sh
+printf '%s\n' "$*" >>"$STUBD/owner-ask.log"
 [ "${1:-}" = list ] || exit 2
 [ "${OWNER_ASK_BOOM:-0}" != 1 ] || exit 1
 cat "$STUBD/owner-ask-list" 2>/dev/null || true
@@ -300,6 +303,21 @@ if [ "$grc" = 0 ] && printf '%s' "$out" | grep -qF 'handed-to-owner 0610-fly-123
   ok handed-to-owner-pr-card-keeps-claims
 else
   fail "handed-to-owner-pr-card-keeps-claims (rc=$grc) $out"
+fi
+
+# A test-provided open card cannot authorize retirement outside the test harness.
+r=$(newrun 7f); lane "$r" 4155 fiber-4155-build abc
+forged_card="untrusted-test-$$"
+write_owner_card "$forged_card" 'Review PR #4170' 'Please merge PR #4170.'
+printf '%s flywheel Review PR #4170\n' "$forged_card" > "$T/owner-ask-list"
+: > "$T/owner-ask.log"
+out=$(env -u SWITCHYARD_TEST FW_RUN="$r" FW_OWNER_ASK="$T/stub/owner-ask" bash "$BIN/lanecheck" done 4155 --handed-to-owner "$forged_card" 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'handed-to-owner check failed:' \
+  && [ ! -s "$T/owner-ask.log" ] \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok handed-to-owner-ignores-test-override-without-test-mode
+else
+  fail "handed-to-owner-ignores-test-override-without-test-mode (rc=$grc) $out"
 fi
 
 # An answered card is absent from owner-ask list, so it cannot authorize the

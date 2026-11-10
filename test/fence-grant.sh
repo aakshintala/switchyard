@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tests for bin/fence-grant. Exits non-zero on the first failed case.
 set -uo pipefail
+SWITCHYARD_TEST=1
+export SWITCHYARD_TEST
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FG="${FG:-$SCRIPT_DIR/../bin/fence-grant}"
@@ -94,9 +96,20 @@ print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATE
   pr)
     case "$2" in
       list)
-        [ "${GH_PRLIST_FAIL:-0}" = 1 ] && { echo 'pr list stub failure' >&2; exit 1; }
-        [ -n "${GH_PRLIST_JSON:-}" ] && { printf '%s' "$GH_PRLIST_JSON"; exit 0; }
-        printf '%s' "$GH_PRLIST"
+        [ "${GH_PRLIST_FAIL:-0}" != 1 ] || { echo 'pr list stub failure' >&2; exit 1; }
+        pr_state=open pr_filter=""
+        shift 2
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --state) pr_state="$2"; shift 2;;
+            --jq) pr_filter="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        if [ "$pr_state" = merged ]; then pr_list=${GH_MERGED_PRLIST:-[]}
+        elif [ -n "${GH_PRLIST_JSON:-}" ]; then pr_list=$GH_PRLIST_JSON
+        else pr_list=$GH_PRLIST; fi
+        if [ -n "$pr_filter" ]; then printf '%s' "$pr_list" | jq -r "$pr_filter"; else printf '%s' "$pr_list"; fi
         ;;
       diff)
         pr="$3"
@@ -188,6 +201,17 @@ while True:
         written += os.write(1, block[written:])
     time.sleep(0.01)
 SLOW_BOX_READER
+cat >"$T/stubs/owner-ask" <<'OWNER_ASK_STUB'
+#!/usr/bin/env bash
+[ "${1:-}" = list ] || exit 2
+printf 'handoff-77 flywheel Review PR #4170\n'
+OWNER_ASK_STUB
+mkdir -p "$T/stubs/cards"
+printf '{"id":"handoff-77","title":"Review PR #4170","context":"Please merge PR #4170 after review."}\n' >"$T/stubs/cards/handoff-77.json"
+chmod +x "$T/stubs/owner-ask"
+FW_OWNER_ASK="$T/stubs/owner-ask"
+export FW_OWNER_ASK
+
 cat >"$T/stubs/file-claim" <<'FC_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/file-claim.log"
@@ -421,6 +445,12 @@ git -C "$T/claim-seed" commit -qm seed || fail 'commit claim seed'
 git -C "$T/claim-seed" remote add origin "$R" || fail 'add claim seed remote'
 git -C "$T/claim-seed" push -q origin main || fail 'push claim seed'
 ln -s "$FW_GH" "$T/claim-gh-bin/gh"
+cat >"$T/claim-gh-bin/claude" <<'CLAUDE_LANECHECK_STUB'
+#!/usr/bin/env bash
+[ "${1:-}" = agents ] && [ "${2:-}" = --json ] || exit 2
+printf '[]'
+CLAUDE_LANECHECK_STUB
+chmod +x "$T/claim-gh-bin/claude"
 PATH="$T/claim-gh-bin:$ORIGINAL_PATH"
 export PATH
 REAL_FILE_CLAIM="$SCRIPT_DIR/../bin/file-claim"
@@ -466,6 +496,48 @@ claims_after="$(git -C "$R" show refs/claims/live:claims)"
 [ "$claims_after" = "$claims_before" ] || fail 'takeover rewrites the retained claim instead of reusing it'
 [ "$(grep -c '^claim ' "$T/file-claim.log")" = 1 ] || fail 'takeover grant invokes one claim operation'
 ! grep -q '^release ' "$T/file-claim.log" || fail 'takeover releases claims before re-granting'
+
+# A lane hands the same PR to the owner, then tkt-start reuses its real claim.
+GH_PRLIST_JSON='[{"number":11,"headRefName":"fix/other","changedFiles":1},{"number":4170,"headRefName":"fix/77-test","changedFiles":1}]'
+GH_MERGED_PRLIST='[]'
+GH_TICKET_STATES='11:OPEN,77:OPEN'
+export GH_PRLIST_JSON GH_MERGED_PRLIST GH_TICKET_STATES
+printf '[{"filename":"docs/tui.md"}]' >"$T/pr/4170.files.json"
+printf '2020-01-01T00:00:00Z\t77\tmac\tfiber-77-build\tbuild77\n' >"$FW_RUN/roster"
+: >"$FW_RUN/roster-done"
+cp "$T/file-claim.log" "$T/file-claim-before-handoff.log"
+: >"$T/file-claim.log"
+claims_before_handoff="$(git -C "$R" show refs/claims/live:claims)"
+awk -F '\t' '$1 == "docs/tui.md" && $2 == "fiber-77" { found = 1 } END { exit !found }' <<<"$claims_before_handoff" \
+  || fail 'handoff integration starts with a real fiber-77 claim'
+out=$(FW_RUN="$FW_RUN" bash "$SCRIPT_DIR/../bin/lanecheck" done 77 --handed-to-owner handoff-77 2>&1); handoff_rc=$?
+if [ "$handoff_rc" = 0 ] \
+  && printf '%s' "$out" | grep -qF 'handed-to-owner handoff-77 PR #4170' \
+  && grep -qF 'handed-to-owner handoff-77 PR #4170' "$FW_RUN/roster-done"; then
+  :
+else
+  fail "lanecheck handed-to-owner retires the lane (rc=$handoff_rc): $out"
+fi
+claims_after_retire="$(git -C "$R" show refs/claims/live:claims)"
+[ "$claims_after_retire" = "$claims_before_handoff" ] || fail 'handed-to-owner retirement changes the real claim row'
+
+out=$(cd "$T/claim-seed" && bash "$SCRIPT_DIR/../bin/tkt-start" \
+  --run "$T/takeover-run" --repo aakshintala/fiber --issue 77 --spec "$T/issue.md" \
+  --branch fiber-77-takeover --worktree "$T/takeover-worktree" \
+  --workflow-doc docs/workflow.md --closing 'Resolves #77' --no-preflight \
+  --takeover '#4170' --gate 'bash scripts/check' --files docs/tui.md 2>&1); takeover_rc=$?
+if [ "$takeover_rc" != 0 ] || ! printf '%s' "$out" | grep -qF 'TKT tkt-start SKIPPED'; then
+  fail "tkt-start takeover on handed-off PR succeeds (rc=$takeover_rc): $out"
+fi
+claims_after_takeover="$(git -C "$R" show refs/claims/live:claims)"
+[ "$claims_after_takeover" = "$claims_before_handoff" ] || fail 'tkt-start takeover changes the retained real claim row'
+[ "$(grep -c '^claim --lane fiber-77 --paths --repo aakshintala/fiber ' "$T/file-claim.log")" = 1 ] \
+  || fail 'takeover uses file-claim exactly once for fiber-77'
+! grep -q '^release ' "$T/file-claim.log" || fail 'handoff and takeover release the retained claim'
+echo 'ok handed-to-owner-takeover-reuses-real-claims'
+cp "$T/file-claim-before-handoff.log" "$T/file-claim.log"
+GH_PRLIST_JSON='[{"number":11,"headRefName":"fix/other","changedFiles":1}]'
+export GH_PRLIST_JSON
 
 GH_TICKET_STATES='11:OPEN,12:OPEN,77:OPEN,78:OPEN'
 export GH_TICKET_STATES

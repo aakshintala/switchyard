@@ -2,6 +2,8 @@
 # test/run: run every test file in this directory.
 # Usage: test/run [--self-test-parallel-failure|--self-test-serial-failure]; internal: test/run --run-parallel <paths...>
 set -uo pipefail
+SWITCHYARD_TEST=1
+export SWITCHYARD_TEST
 
 # Keep the local gate on the same Bash major version as CI. Prefer the
 # Homebrew installation on macOS, then search PATH for any Bash 5 executable.
