@@ -43,10 +43,9 @@ def wait_for_gate(name):
     deadline = time.monotonic() + GO_WAIT
     while not os.path.exists(path(name)):
         if time.monotonic() >= deadline:
-            write_file(name + ".timeout", "")
-            return False
+            raise TimeoutError(f"timed out waiting for fake-host gate {name}")
         time.sleep(0.01)
-    return True
+    return None
 
 
 def send(obj):

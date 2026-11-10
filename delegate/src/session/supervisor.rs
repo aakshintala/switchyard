@@ -1109,14 +1109,10 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
             .pending_steers
             .iter()
             .any(|pending| queued_steers.contains(&pending.command_id));
-        let all_pending_queued = state
-            .pending_steers
-            .iter()
-            .all(|pending| queued_steers.contains(&pending.command_id));
         if has_queued_pending && !state.stopping {
-            if all_pending_queued {
-                idle_published = finish_replay_pending_state(state, now_ms());
-            }
+            // The host owns delivery of queued steers. Stay busy until its
+            // continuation starts and completes, then reconsider any dropped
+            // steers under admission.
             return Vec::new();
         }
         let decision = if pi_host {

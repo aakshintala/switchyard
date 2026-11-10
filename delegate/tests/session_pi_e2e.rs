@@ -993,13 +993,20 @@ fn pending_steer_replay_stays_busy_while_send_holds_admission() {
 
         let watch_h = &h;
         let watch_id = &id;
+        let watch_ready = h.fake_dir.join("watch.ready");
+        let watch_ready = watch_ready.to_str().unwrap().to_string();
         scope.spawn(move || {
             watch_tx
-                .send(watch_h.invoke(&["watch", watch_id, "--json"]))
+                .send(watch_h.invoke_with(
+                    &["watch", watch_id, "--json"],
+                    None,
+                    "",
+                    None,
+                    &[("DELEGATE_SESSION_TEST_WATCH_READY", &watch_ready)],
+                ))
                 .unwrap();
         });
-        std::thread::sleep(Duration::from_millis(100));
-        let watch_returned_before_send_release = watch_rx.try_recv().ok();
+        h.wait_file("watch.ready", "watch waiting through replay");
 
         std::fs::write(h.fake_dir.join("steer.release"), "").unwrap();
         let sent = send_rx
@@ -1016,21 +1023,14 @@ fn pending_steer_replay_stays_busy_while_send_holds_admission() {
         h.wait_file("replay-start.paused", "the replay turn start request");
         let replay_start_state = h.state(&id);
         let busy_before_replay_start = replay_start_state["status"] == "running";
-        let watch_returned_before_replay_start = watch_rx.try_recv().ok();
 
         std::fs::write(h.fake_dir.join("replay-start.go"), "").unwrap();
         h.wait_state(&id, "replay turn completion", |state| {
             state["status"] == "idle" && state["turnCount"] == 2
         });
-        let watched_early =
-            watch_returned_before_send_release.or(watch_returned_before_replay_start);
-        let did_watch_return_early = watched_early.is_some();
-        let watched = match watched_early {
-            Some(output) => output,
-            None => watch_rx
-                .recv_timeout(Duration::from_secs(10))
-                .expect("watch did not return after the replay turn completed"),
-        };
+        let watched = watch_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("watch did not return after the replay turn completed");
         assert!(
             watched.status.success(),
             "{}",
@@ -1063,9 +1063,82 @@ fn pending_steer_replay_stays_busy_while_send_holds_admission() {
             busy_before_replay_start,
             "replay decision published idle before its turn started: {replay_start_state}"
         );
+    });
+}
+
+#[test]
+fn interrupt_during_pending_replay_cancels_without_starting_replay() {
+    let h = Harness::new();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_REPLAY,REPLAY_UNCONSUMED,REPLAY_SEND_HOLD",
+        None,
+        &[],
+    );
+    assert!(started.status.success());
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+    h.wait_file("tool.paused", "the held tool call");
+
+    let (send_tx, send_rx) = mpsc::channel();
+    let (stop_tx, stop_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let send_h = &h;
+        let send_id = &id;
+        scope.spawn(move || {
+            send_tx
+                .send(send_h.invoke(&["send", send_id, "INTERRUPT-ME", "--json"]))
+                .unwrap()
+        });
+        h.wait_file("steer.paused", "send holding admission after completion");
+        h.wait_state(&id, "replay-pending completion", |state| {
+            state["status"] == "running" && state["activeTurnId"].is_null()
+        });
+        let stop_h = &h;
+        let stop_id = &id;
+        scope.spawn(move || {
+            stop_tx
+                .send(stop_h.invoke(&["stop", stop_id, "--interrupt", "--json"]))
+                .unwrap()
+        });
+        h.wait_state(&id, "interrupt claimed replay-pending session", |state| {
+            state["stopping"] == true
+        });
+        std::fs::write(h.fake_dir.join("steer.release"), "").unwrap();
+        let stopped = stop_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("stop did not complete");
         assert!(
-            !did_watch_return_early,
-            "watch returned before replay started"
+            stopped.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&stopped.stdout).unwrap();
+        assert_eq!(reply["interrupted"], true, "{reply}");
+        let sent = send_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("send did not complete");
+        assert!(
+            sent.status.success(),
+            "{}",
+            String::from_utf8_lossy(&sent.stderr)
+        );
+        let logs = h.logs(&id);
+        assert!(
+            logs.iter().all(|line| line["kind"] != "steer.replayed"),
+            "{logs:?}"
+        );
+        let requests = h.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["type"] == "prompt"
+                    && request.get("streamingBehavior") != Some(&Value::from("steer")))
+                .count(),
+            1,
+            "{requests:?}"
         );
     });
 }
@@ -1492,7 +1565,7 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     );
 
     assert_eq!(h.state(&id)["turnCount"], 2);
-    h.notes_poll(&id, "idle", 2);
+    h.notes_poll(&id, "idle", 1);
 }
 
 #[test]
