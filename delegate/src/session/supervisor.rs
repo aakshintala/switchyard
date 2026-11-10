@@ -164,6 +164,22 @@ struct Shared {
     thread_panicked: AtomicBool,
     fatal_write: Arc<AtomicBool>,
     panic_mode: Option<PanicMode>,
+    idle_note_guard: IdleNoteGuard,
+}
+
+#[derive(Default)]
+struct IdleNoteGuard(Mutex<Option<String>>);
+
+impl IdleNoteGuard {
+    fn claim(&self, turn_id: &str) -> bool {
+        let mut last_turn_id = lock(&self.0);
+        if last_turn_id.as_deref() == Some(turn_id) {
+            false
+        } else {
+            *last_turn_id = Some(turn_id.to_string());
+            true
+        }
+    }
 }
 
 struct RunGuard {
@@ -423,6 +439,7 @@ fn run_inner(config: SupervisorConfig, id: &str) -> i32 {
         thread_panicked: AtomicBool::new(false),
         fatal_write: fatal_write.clone(),
         panic_mode,
+        idle_note_guard: IdleNoteGuard::default(),
     });
     let mut guard = RunGuard {
         shared: shared.clone(),
@@ -1065,7 +1082,7 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
         let after = shared.store.snapshot();
         if after.status == Status::Idle {
             if after.pending_steers.is_empty() {
-                note_inbox(shared, &after.inbox, Note::Idle);
+                note_idle_once(shared, &after);
             } else {
                 let replay_shared = shared.clone();
                 // The reader thread must stay free to process the turn/start reply.
@@ -1140,9 +1157,7 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
             let _ = start_turn(shared, &text);
         } else {
             let state = shared.store.snapshot();
-            if state.status == Status::Idle && state.pending_steers.is_empty() {
-                note_inbox(shared, &state.inbox, Note::Idle);
-            }
+            note_idle_once(shared, &state);
         }
     }
 }
@@ -1354,7 +1369,7 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
             let disposition = match resolution {
                 SteerResolution::Consumed => "steered",
                 SteerResolution::Unconsumed => "unconsumed",
-                SteerResolution::Pending => "pending",
+                SteerResolution::Expired => "steered",
             };
             json!({"ok":true,"disposition":disposition})
         }
@@ -1564,7 +1579,7 @@ fn reject_dead(shared: &Shared) -> Option<Value> {
 enum SteerResolution {
     Consumed,
     Unconsumed,
-    Pending,
+    Expired,
 }
 
 fn wait_for_steer_resolution(
@@ -1582,10 +1597,10 @@ fn wait_for_steer_resolution(
         },
         timeout,
     ) else {
-        return SteerResolution::Pending;
+        return SteerResolution::Expired;
     };
     if state.status == Status::Dead || shared.shutdown.load(Ordering::SeqCst) {
-        return SteerResolution::Pending;
+        return SteerResolution::Expired;
     }
 
     let unconsumed = fs::read_to_string(shared.config.paths.events_file(&shared.id))
@@ -1701,6 +1716,18 @@ fn mark_dead(
     }
     if changed && let Ok(state) = state::read_state(paths, id) {
         write_note_or_log(store, id, &state.inbox, Note::Dead, fatal_write);
+    }
+}
+
+fn note_idle_once(shared: &Shared, state: &State) {
+    if state.status != Status::Idle || !state.pending_steers.is_empty() {
+        return;
+    }
+    let Some(turn_id) = state.last_turn.as_ref().map(|turn| turn.turn_id.as_str()) else {
+        return;
+    };
+    if shared.idle_note_guard.claim(turn_id) {
+        note_inbox(shared, &state.inbox, Note::Idle);
     }
 }
 
@@ -1949,6 +1976,14 @@ fn error_reply(code: &str, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_note_guard_claims_once_per_turn_completion() {
+        let guard = IdleNoteGuard::default();
+        assert!(guard.claim("turn-1"));
+        assert!(!guard.claim("turn-1"));
+        assert!(guard.claim("turn-2"));
+    }
 
     #[test]
     fn host_exit_does_not_win_after_stop_is_published() {

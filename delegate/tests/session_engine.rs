@@ -732,7 +732,7 @@ fn supervisor_send_reports_unconsumed_msp_steer_after_turn_completion() {
 }
 
 #[test]
-fn supervisor_send_returns_pending_when_muse_steer_wait_cap_expires() {
+fn supervisor_send_replies_steered_when_muse_wait_cap_expires() {
     let mut session = Session::spawn(
         "HOLD,STEER_NOEFFECT",
         "brief",
@@ -760,7 +760,7 @@ fn supervisor_send_returns_pending_when_muse_steer_wait_cap_expires() {
         .expect("send returns after its injected wait cap")
         .unwrap();
     sender.join().unwrap();
-    assert_eq!(reply["disposition"], "pending");
+    assert_eq!(reply["disposition"], "steered");
     assert_eq!(session.state().status, Status::Running);
     assert!(
         session
