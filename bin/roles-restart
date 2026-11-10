@@ -137,7 +137,7 @@ else
   roles="$(printf '%s\n' \
     "surveyor|$HOME/work/fiber-worktrees/surveyor/home|$HOME/work/wiki/state/surveyor.md|$role_inbox" \
     "switchyard|$HOME/work/sy-wt/main|$HOME/work/wiki/state/switchyard.md|$role_inbox" \
-    "flywheel|$HOME/work/fiber|$HOME/work/wiki/state/flywheel.md|--plugin-dir /Users/aakshintala/.agents/claude-code/plugins/role-inbox")"
+    "flywheel|$HOME/work/fiber|$HOME/work/wiki/state/flywheel.md|$role_inbox")"
 fi
 
 failed=0
