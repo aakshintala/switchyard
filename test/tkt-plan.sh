@@ -212,6 +212,12 @@ cat >"$T/ghbin/gh" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
 printf 'gh|%s\n' "\$*" >>"$T/gh.log"
+if [ "\${1:-}" = api ]; then
+  case "\${2:-}" in
+    repos/*/issues/comments/*) cat "$T/comment.json"; exit $? ;;
+    *) echo "gh stub: unexpected API endpoint \${2:-}" >&2; exit 2 ;;
+  esac
+fi
 mode="\$(cat "$T/ghmode")"
 comments=0
 for a in "\$@"; do [ "\$a" = --comments ] && comments=1; done
@@ -2537,5 +2543,95 @@ printf 'ok' >"$T/pcmode"
 [ "$RC" -eq 1 ] || fail "verdict-plan-check-line-count exits 1"
 expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "verdict-plan-check-line-count names report_lines"
 case "$(first_line)" in *" n="*) fail "verdict-plan-check-line-count carries no bare n=: [$(first_line)]";; esac
+
+# Verbatim ruling acceptance: test selectors run one added regression group
+# after the existing suite, so each required pre-fix failure is observable.
+write_triaged_tasks_plan() {
+  printf 'Base: %s\n\n## Rulings\n\n- Open line: clarify the task wording.\n\n## Tasks\n\n1. Keep the existing task wording.\n\n## Files\n\n- `f.txt`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+}
+
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; then
+  # A quote permits a task line to be applied verbatim without spending another
+  # Verifier round, and the accepted plan diff remains journaled in run/.
+  setup_case triaged-verbatim
+  rebase_plan
+  write_triaged_tasks_plan
+  base_now="$(cat "$CDIR/base")"
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-verbatim records a LINES verdict"
+  jobs_before="$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)"
+  awk '{ if ($0 == "- Open line: clarify the task wording.") print "- Comment 654323 rules: apply the task wording exactly."; else if ($0 == "1. Keep the existing task wording.") print "1. Use the exact wording."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  jq -n --arg body '  - Use the exact wording.  ' '{body:$body}' >"$T/comment.json"
+  : >"$T/gh.log"
+  run_plan triaged --comment 654323
+  [ "$RC" -eq 0 ] || fail "triaged-verbatim accepts the quoted Tasks edit (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan SET triaged=654323 plan-diff=* log=*" "triaged-verbatim success names its diff"
+  expect_plan_verdict triaged "$base_now" "triaged-verbatim records a passing verdict"
+  expect_current_plan_verdict_hash "triaged-verbatim records the current plan hash"
+  [ "$(state_get plan_triage_comment)" = 654323 ] || fail "triaged-verbatim records the ruling comment id"
+  [ "$(state_get verifier_round)" = 1 ] || fail "triaged-verbatim does not spend a Verifier round"
+  [ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" = "$jobs_before" ] || fail "triaged-verbatim starts no additional Verifier"
+  diff_file="$(sed -n 's/.*plan-diff=\([^ ]*\).*/\1/p' <<<"$(first_line)")"
+  [ -r "$diff_file" ] && [[ "$diff_file" == "$CDIR/run/"* ]] || fail "triaged-verbatim keeps the plan diff in run/: [$diff_file]"
+  grep -Fq "gh|api repos/switchyard/issues/comments/654323" "$T/gh.log" || fail "triaged-verbatim reads the ruling comment through gh api"
+
+  # One unquoted addition makes the whole outside-Rulings edit ineligible.
+  setup_case triaged-verbatim-extra-line
+  rebase_plan
+  write_triaged_tasks_plan
+  base_now="$(cat "$CDIR/base")"
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-verbatim-extra-line records a LINES verdict"
+  awk '{ if ($0 == "- Open line: clarify the task wording.") print "- Comment 654324 rules: apply the task wording exactly."; else if ($0 == "1. Keep the existing task wording.") { print "1. Use the exact wording."; print "2. Add this unquoted task." } else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  jq -n --arg body 'Use the exact wording.' '{body:$body}' >"$T/comment.json"
+  : >"$T/gh.log"
+  run_plan triaged --comment 654324
+  [ "$RC" -eq 1 ] || fail "triaged-verbatim-extra-line refuses an unquoted task"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-verbatim-extra-line"
+  grep -Fq 'first unmatched line: 2. Add this unquoted task.' <<<"$OUT" || fail "triaged-verbatim-extra-line names its first unmatched line: $OUT"
+  [ "$(state_get plan_verdict)" = lines ] || fail "triaged-verbatim-extra-line preserves the LINES verdict"
+  [ -z "$(state_get plan_triage_comment)" ] || fail "triaged-verbatim-extra-line does not record triage"
+
+  # A quoted line cannot be accepted against a plan whose Base has moved.
+  setup_case triaged-verbatim-base-moved
+  rebase_plan
+  write_triaged_tasks_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-verbatim-base-moved records a LINES verdict"
+  awk '{ if ($0 == "1. Keep the existing task wording.") print "1. Use the exact wording."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_plan_base "$(git -C "$WT" rev-parse HEAD)"
+  jq -n --arg body 'Use the exact wording.' '{body:$body}' >"$T/comment.json"
+  : >"$T/gh.log"
+  run_plan triaged --comment 654325
+  [ "$RC" -eq 1 ] || fail "triaged-verbatim-base-moved refuses a moved Base"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-verbatim-base-moved"
+  [ "$(state_get plan_verdict)" = lines ] || fail "triaged-verbatim-base-moved preserves the LINES verdict"
+  [ -z "$(grep -F 'gh|api repos/switchyard/issues/comments/654325' "$T/gh.log" || true)" ] || fail "triaged-verbatim-base-moved does not read a comment on a moved Base"
+fi
+
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = amendment ]; then
+  # After the Verifier budget is spent, an unmatched triaged edit must point to
+  # grant-round + confirm rather than a verify --extra that ROUND-LIMIT rejects.
+  setup_case triaged-verbatim-spent-rounds
+  rebase_plan
+  write_triaged_tasks_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-verbatim-spent-rounds records a LINES verdict"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-verbatim-spent-rounds seed spent rounds"
+  awk '{ if ($0 == "1. Keep the existing task wording.") print "1. Add an unquoted task."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  jq -n --arg body 'No task-line quote here.' '{body:$body}' >"$T/comment.json"
+  : >"$T/gh.log"
+  run_plan triaged --comment 654326
+  [ "$RC" -eq 1 ] || fail "triaged-verbatim-spent-rounds refuses the unmatched edit"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-verbatim-spent-rounds"
+  diff_file="$(sed -n 's/^EXTRA diff: //p' <<<"$OUT")"
+  [ -n "$diff_file" ] && [ -r "$diff_file" ] || fail "triaged-verbatim-spent-rounds exposes its diff"
+  grep -Fq "run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits $diff_file" <<<"$OUT" || fail "triaged-verbatim-spent-rounds names the grant-round + confirm repair: $OUT"
+  ! grep -Fq 'verify --extra' <<<"$OUT" || fail "triaged-verbatim-spent-rounds does not suggest verify --extra: $OUT"
+fi
 
 echo "tkt-plan: all cases passed"
