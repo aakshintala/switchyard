@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# tkt-drive: run routine tkt-* steps from ticket state until a verdict needs action.
+# Usage: tkt-drive <state>
+set -euo pipefail
+
+usage() {
+  echo "usage: tkt-drive <state>" >&2
+  exit 2
+}
+[ $# -eq 1 ] || usage
+state="$1"
+
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+tkt_state="$script_dir/tkt-state"
+bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+tokens_lib="$script_dir/lib/plan-tokens.sh"
+if [ ! -r "$tokens_lib" ]; then
+  echo "tkt-drive: cannot read shared lib: $tokens_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$tokens_lib"
+t() { "$tkt_state" "$state" "$@"; }
+get() { t get "$1" 2>/dev/null || true; }
+
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-drive.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+trigger=state
+
+internal_stop() {
+  local detail="$1" code="${2:-2}"
+  t journal "tkt-drive STOP trigger=$trigger" 2>/dev/null || true
+  printf 'TKT tkt-drive STOP\n'
+  [ -z "$detail" ] || printf '%s\n' "$detail" >&2
+  exit "$code"
+}
+
+# Keep the stopped tool's stdout byte-for-byte at the start of our output.
+stop_with_tool() {
+  local tool="$1" verdict="$2" code="$3" out="$4" err="$5"
+  cat "$out"
+  [ ! -s "$err" ] || cat "$err" >&2
+  t journal "tkt-drive STOP tool=$tool verdict=$verdict trigger=$trigger" 2>/dev/null || true
+  printf 'TKT tkt-drive STOP tool=%s verdict=%s\n' "$tool" "$verdict"
+  exit "$code"
+}
+
+last_tool_verdict() {
+  local journal="${state%.state}.journal"
+  [ -r "$journal" ] || return 0
+  awk '$2 ~ /^tkt-(plan|build|fix|ship)$/ && $3 ~ /^[A-Z][A-Z0-9-]*$/ { tool=$2; word=$3 }
+       END { if (tool != "") print tool, word }' "$journal"
+}
+
+last_plan_verdict() {
+  local journal="${state%.state}.journal"
+  [ -r "$journal" ] || return 0
+  awk '$2 == "tkt-plan" && $3 ~ /^[A-Z][A-Z0-9-]*$/ { word=$3 }
+       END { print word }' "$journal"
+}
+
+plan_grant_recorded() {
+  local journal="${state%.state}.journal" wanted="$1"
+  [ -r "$journal" ] || return 1
+  awk -v wanted="$wanted" '
+    $2 == "tkt-plan" && ($3 == "PLAN-OK" || $3 == "POSTED") { current=$3; granted=0 }
+    $2 == "tkt-drive" && $3 == "fence-grant" && $4 == "GRANT" \
+      && $5 == "trigger=tkt-plan" && $6 == current { granted=1 }
+    END { exit !(current == wanted && granted) }
+  ' "$journal"
+}
+
+owner_held() {
+  local value
+  value="$(get owner_held)"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in 1|yes|true|held|owner-held) return 0 ;; esac
+  return 1
+}
+
+surveyor_sequence() {
+  [ -n "$(get surveyor_sequence)" ]
+}
+
+plan_posted() {
+  [ "$(last_plan_verdict)" = POSTED ]
+}
+
+has_open_findings() {
+  local file="$1"
+  [ -n "$file" ] && [ -r "$file" ] && grep -qE '^P[123][[:space:]]' "$file"
+}
+
+add_overlap_context() {
+  local overlap_file="$1" run_dir="$2" issue="$3" current extra_source target
+  [ -s "$overlap_file" ] || return 0
+  [ -n "$run_dir" ] || return 1
+  mkdir -p "$run_dir" || return 1
+  current="$(get extra)"
+  extra_source="${current#@}"
+  target="$run_dir/fiber-$issue-tkt-drive-extra.md"
+  if [ -n "$extra_source" ]; then
+    [ -r "$extra_source" ] || {
+      echo "tkt-drive: cannot read existing extra input: $extra_source" >&2
+      return 1
+    }
+    cat "$extra_source" >"$tmp/extra.md" || return 1
+  else
+    : >"$tmp/extra.md"
+  fi
+
+  : >"$tmp/overlaps.new"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if ! grep -Fxq -- "$line" "$tmp/extra.md"; then printf '%s\n' "$line" >>"$tmp/overlaps.new"; fi
+  done <"$overlap_file"
+  if [ -s "$tmp/overlaps.new" ]; then
+    if grep -qxF '## Fence overlaps' "$tmp/extra.md"; then
+      printf '\n' >>"$tmp/extra.md"
+    else
+      [ ! -s "$tmp/extra.md" ] || printf '\n' >>"$tmp/extra.md"
+      printf '## Fence overlaps\n' >>"$tmp/extra.md"
+    fi
+    cat "$tmp/overlaps.new" >>"$tmp/extra.md"
+  fi
+  mv "$tmp/extra.md" "$target" || return 1
+  t set extra "$target" || return 1
+  t journal "tkt-drive overlap-input $target"
+}
+
+grant_plan() {
+  local issue="$1" plan="$2" repo="$3" run_dir="$4" part="$5"
+  local output="$tmp/grant.out" error="$tmp/grant.err" rc=0 paths reads
+  local -a grant_args
+  [ -r "$plan" ] || internal_stop "tkt-drive: cannot read plan: $plan"
+  paths="$(plan_files_pathspecs "$plan" all)"
+  [ -n "$paths" ] || internal_stop "tkt-drive: plan Files section has no paths: $plan"
+  paths="$(printf '%s\n' "$paths" | paste -sd, -)"
+  # shellcheck disable=SC2154
+  reads="$(awk -v mode=entries "$_plan_files_awk" "$plan" | awk -F '\t' '$2 == "read" { print $1 }' | paste -sd, -)"
+  grant_args=("$issue" --repo "$repo" --paths "$paths")
+  [ -z "$reads" ] || grant_args+=(--reads "$reads")
+  case "$part" in
+    ''|1) ;;
+    *[!0-9]*) internal_stop "tkt-drive: invalid state part: $part" ;;
+    *) grant_args+=(--part "$part") ;;
+  esac
+
+  t journal "tkt-drive step=fence-grant trigger=$trigger"
+  FW_RUN="$run_dir" "$bin_dir/fence-grant" "${grant_args[@]}" >"$output" 2>"$error" || rc=$?
+  if grep -Eq '^HELD .*sweep-[^[:space:]]*|^HELD .* by file-claim grant cap' "$output"; then
+    [ "$rc" -ne 0 ] || rc=1
+    stop_with_tool fence-grant STOP "$rc" "$output" "$error"
+  fi
+  case "$rc" in
+    3|4) stop_with_tool fence-grant STOP "$rc" "$output" "$error" ;;
+    0) ;;
+    *) stop_with_tool fence-grant STOP "$rc" "$output" "$error" ;;
+  esac
+  [ ! -s "$error" ] || cat "$error" >&2
+  grep '^OVERLAP ' "$output" >"$tmp/overlaps" || :
+  if [ -s "$tmp/overlaps" ]; then
+    add_overlap_context "$tmp/overlaps" "$run_dir" "$issue" || \
+      internal_stop 'tkt-drive: cannot add fence overlaps to the lane brief input'
+  fi
+  t journal "tkt-drive fence-grant GRANT trigger=$trigger"
+}
+
+issue="$(get issue)"
+repo="$(get repo)"
+run_dir="$(get run)"
+plan="$(get plan)"
+[ -n "$issue" ] || internal_stop 'tkt-drive: missing state key: issue'
+[ -n "$repo" ] || internal_stop 'tkt-drive: missing state key: repo'
+[ -n "$run_dir" ] || internal_stop 'tkt-drive: missing state key: run'
+[ -n "$plan" ] || internal_stop 'tkt-drive: missing state key: plan (set it with tkt-plan <state> set <plan>)'
+[ -r "$plan" ] || internal_stop "tkt-drive: cannot read plan: $plan"
+
+if prior="$(last_tool_verdict)" && [ -n "$prior" ]; then
+  trigger="$prior"
+  prior_tool="${prior%% *}"
+  prior_word="${prior#* }"
+  if [ "$prior_tool" = tkt-plan ] \
+    && { [ "$prior_word" = PLAN-OK ] || [ "$prior_word" = POSTED ]; } \
+    && ! plan_grant_recorded "$prior_word"; then
+    grant_plan "$issue" "$plan" "$repo" "$run_dir" "$(get part)"
+  fi
+fi
+
+step_count=0
+while :; do
+  step_count=$((step_count + 1))
+  [ "$step_count" -le 12 ] || internal_stop 'tkt-drive: routine chain exceeded 12 steps; inspect the state and journal' 3
+
+  tool=""
+  args=()
+  review_status="$(get review_status)"
+  reviewed="$(get reviewed)"
+  findings="$(get findings)"
+  unverified="$(get unverified)"
+
+  case "$review_status" in
+    skipped)
+      internal_stop 'tkt-drive: measurement outcome is complete; there is no PR to ship' 0 ;;
+    gate-failed)
+      tool=tkt-build; args=(--from gate) ;;
+    pending)
+      tool=tkt-build ;;
+    ready|done)
+      if [ -z "$reviewed" ]; then
+        tool=tkt-build; args=(--from review)
+      elif [ -n "$unverified" ]; then
+        tool=tkt-ship
+      elif has_open_findings "$findings"; then
+        tool=tkt-fix; args=(--verify --findings "$findings")
+      else
+        tool=tkt-ship
+      fi
+      ;;
+    *)
+      plan_verdict="$(get plan_verdict)"
+      case "$plan_verdict" in
+        ok|triaged|skipped)
+          if plan_posted; then
+            tool=tkt-build
+          else
+            tool=tkt-plan; args=(post)
+          fi
+          ;;
+        *) tool=tkt-plan; args=(verify) ;;
+      esac
+      ;;
+  esac
+
+  if [ "$tool" = tkt-ship ]; then
+    if owner_held; then
+      internal_stop 'tkt-drive: state owner_held marker prevents tkt-ship' 1
+    fi
+    if surveyor_sequence; then
+      internal_stop 'tkt-drive: state surveyor_sequence marker prevents tkt-ship' 1
+    fi
+  fi
+
+  t journal "tkt-drive step=$tool${args[*]:+ ${args[*]}} trigger=$trigger"
+  output="$tmp/tool.out"; error="$tmp/tool.err"; rc=0
+  "$bin_dir/$tool" "$state" ${args[@]+"${args[@]}"} >"$output" 2>"$error" || rc=$?
+  verdict="$(awk -v tool="$tool" '$1 == "TKT" && $2 == tool { print $3; exit }' "$output")"
+  [ -n "$verdict" ] || {
+    code="$rc"; [ "$code" -ne 0 ] || code=3
+    stop_with_tool "$tool" UNKNOWN "$code" "$output" "$error"
+  }
+
+  case "$verdict" in
+    SET|PLAN-OK|POSTED|MERGED) ;;
+    *) stop_with_tool "$tool" "$verdict" "$rc" "$output" "$error" ;;
+  esac
+
+  if [ "$verdict" = PLAN-OK ] || [ "$verdict" = POSTED ]; then
+    [ "$tool" = tkt-plan ] || stop_with_tool "$tool" "$verdict" "$rc" "$output" "$error"
+    trigger="$tool $verdict"
+    grant_plan "$issue" "$plan" "$repo" "$run_dir" "$(get part)"
+  elif [ "$verdict" = MERGED ]; then
+    trigger="$tool $verdict"
+    t journal "tkt-drive step=lanecheck-done trigger=$trigger"
+    lane_out="$tmp/lanecheck.out"; lane_err="$tmp/lanecheck.err"; lane_rc=0
+    FW_RUN="$run_dir" "$bin_dir/lanecheck" "done" "$issue" >"$lane_out" 2>"$lane_err" || lane_rc=$?
+    cat "$output"
+    [ ! -s "$lane_out" ] || cat "$lane_out"
+    [ ! -s "$error" ] || cat "$error" >&2
+    [ ! -s "$lane_err" ] || cat "$lane_err" >&2
+    if [ "$lane_rc" -ne 0 ]; then
+      t journal "tkt-drive STOP lanecheck rc=$lane_rc trigger=$trigger" 2>/dev/null || true
+      printf 'TKT tkt-drive STOP lanecheck=failed\n'
+      exit "$lane_rc"
+    fi
+    while IFS= read -r dependent; do
+      [ -n "$dependent" ] || continue
+      printf 'DEPENDENT %s\n' "$dependent"
+    done < <(t list dependents 2>/dev/null || true)
+    t journal 'tkt-drive MERGED dependents-listed'
+    printf 'TKT tkt-drive MERGED tool=%s\n' "$tool"
+    exit 0
+  else
+    trigger="$tool $verdict"
+  fi
+done
