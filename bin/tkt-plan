@@ -89,6 +89,20 @@ plan_rulings_section() {
   ' "$1"
 }
 
+normalize_plan_ruling_line() {
+  printf '%s\n' "$1" | awk '
+    {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      print line
+    }
+  '
+}
+
 # gate.script, when set, is the gate script every Gate line must run; plan-gate gets it as --script.
 gate_script="$(t get gate.script 2>/dev/null || true)"
 gate_args=()
@@ -426,7 +440,9 @@ do_triaged() {
   stored_hash="$(t get plan_verdict_hash 2>/dev/null || true)"
   stored_base="$(t get plan_verdict_base 2>/dev/null || true)"
   current_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+  confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   ruling_revision=0
+  accepted_diff=""
 
   if [ "$stored_verdict" = lines ] && [ -z "$stored_hash" ]; then
     emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "the LINES verdict has no saved plan snapshot; run one Verifier pass: tkt-plan $state verify"
@@ -438,6 +454,12 @@ do_triaged() {
     after_rest="$tmp.after-rest"
     before_rulings="$tmp.before-rulings"
     after_rulings="$tmp.after-rulings"
+    raw_diff="$tmp.diff"
+    outside_diff="$tmp.outside-diff"
+    comment_json="$tmp.comment.json"
+    comment_body="$tmp.comment-body"
+    normalized_comment="$tmp.comment-normalized"
+    comment_error="$tmp.comment-error"
     if ! git -C "$worktree" cat-file blob "$stored_hash" >"$snapshot_file" 2>/dev/null; then
       rm -f "$snapshot_file"
       emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan $state verify"
@@ -447,27 +469,75 @@ do_triaged() {
     after_has_rulings=0
     if plan_rulings_section "$snapshot_file" >"$before_rulings"; then :; fi
     if plan_rulings_section "$plan" >"$after_rulings"; then after_has_rulings=1; fi
+    diff_rc=0
+    if diff -u "$snapshot_file" "$plan" >"$raw_diff"; then :; else diff_rc=$?; fi
+    [ "$diff_rc" -le 1 ] || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff"; exit 2; }
+    diff_file="$(mktemp "$run/$namebase-ruling-diff.XXXXXX")" || exit 2
+    {
+      printf 'Plan diff after verdict %s (stored Base %s; current Base %s).\n' "$stored_hash" "${stored_base:-none}" "$base"
+      printf '%s\n' "--- plan at verdict $stored_hash" "+++ current plan $plan"
+      tail -n +3 "$raw_diff"
+    } >"$diff_file" || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$diff_file"; exit 2; }
+
     if [ "$stored_base" = "$base" ] && [ "$after_has_rulings" -eq 1 ] && cmp -s "$before_rest" "$after_rest" && ! cmp -s "$before_rulings" "$after_rulings"; then
       ruling_revision=1
-    else
-      diff_file="$(mktemp "$run/$namebase-ruling-diff.XXXXXX")" || exit 2
-      raw_diff="$tmp.diff"
-      diff_rc=0
-      if diff -u "$snapshot_file" "$plan" >"$raw_diff"; then :; else diff_rc=$?; fi
-      [ "$diff_rc" -le 1 ] || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$diff_file"; exit 2; }
-      {
-        printf 'Plan diff after verdict %s (stored Base %s; current Base %s).\n' "$stored_hash" "${stored_base:-none}" "$base"
-        printf '%s\n' "--- plan at verdict $stored_hash" "+++ current plan $plan"
-        tail -n +3 "$raw_diff"
-      } >"$diff_file" || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$diff_file"; exit 2; }
-      printf -v verify_command 'tkt-plan %q verify --extra %q' "$state" "$diff_file"
-      rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff"
-      emit "TRIAGED-REFUSED reason=plan-changed" 1 "run one scoped Verifier pass: $verify_command" "EXTRA diff: $diff_file"
+    elif [ "$stored_base" = "$base" ] && ! cmp -s "$before_rest" "$after_rest"; then
+      # Match the plan parser's section-heading convention. A structural edit
+      # to Files, Gate or Tasks still needs a Verifier even if quoted.
+      protected_heading_changed=0
+      if grep -Eq '^[+-]## (Files|Gate|Tasks)([[:space:]]|$)' "$raw_diff"; then protected_heading_changed=1; fi
+      if [ "$protected_heading_changed" -eq 0 ]; then
+        diff_rc=0
+        if diff -u "$before_rest" "$after_rest" >"$outside_diff"; then :; else diff_rc=$?; fi
+        [ "$diff_rc" -le 1 ] || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$diff_file"; exit 2; }
+        if gh api "repos/$repo/issues/comments/$comment" >"$comment_json" 2>"$comment_error" && jq -e 'type == "object" and (.body | type == "string")' "$comment_json" >/dev/null 2>&1; then
+          jq -r '.body' "$comment_json" >"$comment_body" || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$comment_json" "$comment_body" "$comment_error" "$diff_file"; exit 2; }
+          awk '
+            {
+              line=$0
+              sub(/^[[:space:]]+/, "", line)
+              sub(/[[:space:]]+$/, "", line)
+              sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
+              sub(/^[[:space:]]+/, "", line)
+              sub(/[[:space:]]+$/, "", line)
+              if (length(line)) print line
+            }
+          ' "$comment_body" >"$normalized_comment"
+          first_unmatched=""
+          while IFS= read -r added_line; do
+            normalized_line="$(normalize_plan_ruling_line "$added_line")"
+            [ -n "$normalized_line" ] || continue
+            if ! grep -Fqx -- "$normalized_line" "$normalized_comment"; then
+              first_unmatched="$added_line"
+              break
+            fi
+          done < <(awk '/^\+\+\+/ { next } /^\+/ { print substr($0, 2) }' "$outside_diff")
+          if [ -z "$first_unmatched" ]; then
+            ruling_revision=1
+            accepted_diff="$diff_file"
+          fi
+        else
+          comment_error_text="$(head -n 1 "$comment_error" 2>/dev/null || true)"
+          first_unmatched="could not read comment $comment${comment_error_text:+: $comment_error_text}"
+        fi
+      fi
     fi
-    rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings"
+    if [ "$ruling_revision" -ne 1 ]; then
+      if [ "$round" -ge 2 ] || [ -n "$confirmed_for" ]; then
+        printf -v repair_command 'run tkt-plan %q grant-round --by %s --comment %s, then tkt-plan %q confirm --edits %q' "$state" '<who>' '<id>' "$state" "$diff_file"
+        repair_line="$repair_command"
+      else
+        printf -v verify_command 'tkt-plan %q verify --extra %q' "$state" "$diff_file"
+        repair_line="run one scoped Verifier pass: $verify_command"
+      fi
+      refusal_details=("$repair_line" "EXTRA diff: $diff_file")
+      [ -z "${first_unmatched:-}" ] || refusal_details+=("first unmatched line: $first_unmatched")
+      rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$comment_json" "$comment_body" "$normalized_comment" "$comment_error"
+      emit "TRIAGED-REFUSED reason=plan-changed" 1 "${refusal_details[@]}"
+    fi
+    rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$comment_json" "$comment_body" "$normalized_comment" "$comment_error"
   fi
 
-  confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   if [ -z "$confirmed_for" ] && [ "$round" -lt 2 ]; then
     if [ "$ruling_revision" -eq 1 ]; then
       [ "$stored_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
@@ -478,6 +548,7 @@ do_triaged() {
   fi
   plan_verdict_write "$tkt_state" "$state" triaged "$base" "$plan" "$worktree"
   t set plan_triage_comment "$comment"
+  [ -z "$accepted_diff" ] || emit "SET triaged=$comment plan-diff=$accepted_diff" 0
   emit "SET triaged=$comment" 0
 }
 
