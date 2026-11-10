@@ -35,9 +35,9 @@ trap 'rm -rf "$tmp"' EXIT
 trigger=state
 
 internal_stop() {
-  local detail="$1" code="${2:-2}"
-  t journal "tkt-drive STOP trigger=$trigger" 2>/dev/null || true
-  printf 'TKT tkt-drive STOP\n'
+  local detail="$1" code="${2:-2}" fields="${3:-}"
+  t journal "tkt-drive STOP${fields:+ $fields} trigger=$trigger" 2>/dev/null || true
+  printf 'TKT tkt-drive STOP%s\n' "${fields:+ $fields}"
   [ -z "$detail" ] || printf '%s\n' "$detail" >&2
   exit "$code"
 }
@@ -246,7 +246,7 @@ while :; do
     if surveyor_sequence; then
       internal_stop 'tkt-drive: state surveyor_sequence marker prevents tkt-ship' 1
     fi
-    internal_stop 'tkt-drive: tkt-ship is a separate role step; invoke it explicitly when authorized'
+    internal_stop 'tkt-drive: tkt-ship is a separate role step; invoke it explicitly when authorized' 2 next=tkt-ship
   fi
 
   t journal "tkt-drive step=$tool${args[*]:+ ${args[*]}} trigger=$trigger"
