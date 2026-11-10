@@ -1044,42 +1044,10 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
         }
         _ => false,
     };
-    let admission = if should_note_idle {
-        shared.admission.try_lock().ok()
-    } else {
-        None
-    };
-    let queued_steers = if shared.kind == HostKind::Pi {
-        lock(&shared.wire).queued_steer_ids()
-    } else {
-        Vec::new()
-    };
-    let mut replay = None;
     let status_change = matches!(&event, HostEvent::StatusChanged { .. });
     let old_times = (before.updated_at, before.last_progress_at);
     if update_store(shared, |state| {
-        let mut lines = state::apply_event(state, &event, now_ms());
-        if should_note_idle && admission.is_some() {
-            let held_pending = state.pending_steers.iter().any(|pending| {
-                queued_steers
-                    .iter()
-                    .any(|queued| queued == &pending.command_id)
-            });
-            if !held_pending
-                && let Some(state::PendingSteerReplay::Started { text, log }) =
-                    state::begin_pending_steer_replay(state, now_ms())
-            {
-                let command_ids: Vec<String> = log["commandIds"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect();
-                replay = Some((text, command_ids));
-                lines.push(log);
-            }
-        }
+        let lines = state::apply_event(state, &event, now_ms());
         if status_change {
             state.updated_at = old_times.0;
             state.last_progress_at = old_times.1;
@@ -1090,30 +1058,71 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     {
         return;
     }
-    drop(admission);
-    if should_note_idle
-        && !before.pending_steers.is_empty()
-        && let Some(path) = std::env::var_os("DELEGATE_SESSION_TEST_REPLAY_DECISION_FILE")
-    {
-        let _ = std::fs::write(path, b"checked");
-    }
-    if let Some((text, command_ids)) = replay {
-        let replay_shared = shared.clone();
-        let _ = thread::spawn(move || {
-            guard_thread(replay_shared.clone(), || {
-                if replay_shared.kind == HostKind::Pi && !command_ids.is_empty() {
-                    lock(&replay_shared.wire).forget_steers(&command_ids);
-                }
-                let _ = start_turn(&replay_shared, &text);
-            });
-        });
-        return;
-    }
     if should_note_idle {
         let after = shared.store.snapshot();
-        if after.status == Status::Idle && after.pending_steers.is_empty() {
-            note_inbox(shared, &after.inbox, Note::Idle);
+        if after.status == Status::Idle {
+            if after.pending_steers.is_empty() {
+                note_inbox(shared, &after.inbox, Note::Idle);
+            } else {
+                let replay_shared = shared.clone();
+                // The reader thread must stay free to process the turn/start reply.
+                let _ = thread::spawn(move || {
+                    guard_thread(replay_shared.clone(), || {
+                        replay_pending_steers(&replay_shared);
+                    });
+                });
+            }
         }
+    }
+}
+
+fn replay_pending_steers(shared: &Arc<Shared>) {
+    let _admission = lock(&shared.admission);
+    let queued_steers = if shared.kind == HostKind::Pi {
+        lock(&shared.wire).queued_steer_ids()
+    } else {
+        Vec::new()
+    };
+    let has_queued_pending = if queued_steers.is_empty() {
+        false
+    } else {
+        let pending = shared.store.snapshot().pending_steers;
+        queued_steers
+            .iter()
+            .any(|queued| pending.iter().any(|steer| steer.command_id == *queued))
+    };
+    if let Some(path) = std::env::var_os("DELEGATE_SESSION_TEST_REPLAY_DECISION_FILE") {
+        let _ = std::fs::write(path, b"checked");
+    }
+    if has_queued_pending {
+        return;
+    }
+    let mut replay_text = None;
+    let mut replayed_ids = Vec::new();
+    if update_store(shared, |state| {
+        match state::begin_pending_steer_replay(state, now_ms()) {
+            Some(state::PendingSteerReplay::Started { text, log }) => {
+                replay_text = Some(text);
+                replayed_ids = log["commandIds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+                vec![log]
+            }
+            Some(state::PendingSteerReplay::Unconsumed { log }) => vec![log],
+            None => Vec::new(),
+        }
+    })
+    .is_ok()
+        && let Some(text) = replay_text
+    {
+        if shared.kind == HostKind::Pi && !replayed_ids.is_empty() {
+            lock(&shared.wire).forget_steers(&replayed_ids);
+        }
+        let _ = start_turn(shared, &text);
     }
 }
 
