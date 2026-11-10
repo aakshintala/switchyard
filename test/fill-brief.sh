@@ -26,6 +26,14 @@ lane_out="$(bash "$FILL" "$SCRIPT_DIR/../skills/planning/briefs/lane.md" \
   CLOSING='Resolves #4271' CLAIM_HOLDER=fiber-4271 2>"$T/err-lane-brief")" || fail "lane brief fills its holder placeholder: $(cat "$T/err-lane-brief")"
 grep -qF -- 'file-claim claim --lane fiber-4271' <<<"$lane_out" || fail "lane brief uses the filled claim holder"
 
+# The lane templates name file-claim's plan form unambiguously (#1519, a #1157 regression):
+# `--plan <plan Files>` read as "the plan file" and lanes were refused.
+for tpl in template-pi.md template-tkt.md; do
+  tpl_path="$SCRIPT_DIR/../bin/lib/$tpl"
+  grep -qF -- 'file-claim claim --lane fiber-__N__ --plan-file <plan path>' "$tpl_path" || fail "$tpl claims with --plan-file <plan path>"
+  if grep -qE -- 'file-claim claim [^`]*--plan [^`]*<plan' "$tpl_path"; then fail "$tpl still says --plan <plan ...>"; fi
+done
+
 # a bare template name resolves to the pack's brief (issue #1083); a path keeps working
 out="$(bash "$FILL" planner BASE=x ISSUE=1 PACK=none PLAN=/p PREFLIGHT=/pf REPO=o/r WORKFLOW_DOC=/w 2>"$T/err-bare.txt")" || fail "bare template name exits 0"
 case "$out" in *"o/r"*) ;; *) fail "bare template name fills the planner brief, got [$out]" ;; esac
