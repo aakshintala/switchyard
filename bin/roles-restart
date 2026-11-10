@@ -122,11 +122,11 @@ launch_role() {
     local -a extra_args
     IFS=$' \t\n' read -r -a extra_args <<<"$extra_args_text"
     if [ -n "${extra_args[0]:-}" ]; then
-      (cd "$role_home" && claude --bg "${extra_args[@]}" --agent "$role_name" "$role_prompt")
+      (cd "$role_home" && claude --bg "${extra_args[@]}" --name "$role_name" --agent "$role_name" "$role_prompt")
       return $?
     fi
   fi
-  (cd "$role_home" && claude --bg --agent "$role_name" "$role_prompt")
+  (cd "$role_home" && claude --bg --name "$role_name" --agent "$role_name" "$role_prompt")
 }
 
 if [ -n "${ROLES_RESTART_ROLES:-}" ]; then
