@@ -175,9 +175,9 @@ if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$pr_head" ]; then
 fi
 
 # The journal is the source of truth for full-gate coverage. A stale journal
-# PASS warns even if the body line is absent; a current PASS replaces a missing
-# or stale body line. The body-line-sha warning applies only when no full PASS
-# exists in the journal. These warnings and best-effort body writes never block ship.
+# PASS refuses even if the body line is absent; a current PASS replaces a
+# missing or stale body line. A stale body line refuses only when no full PASS
+# exists in the journal. Current-PASS body writes remain best effort.
 last_pass="$(grep -o 'tkt-gate PASS head=[0-9a-fA-F]\{40\}$' "${state%.state}.journal" 2>/dev/null | tail -n 1 || true)"
 last_pass_head="${last_pass#tkt-gate PASS head=}"
 local_gate_cmd=""
@@ -188,19 +188,21 @@ if [ -n "$last_pass" ]; then
   fi
 fi
 if [ -n "$last_pass" ] && [ "$last_pass_head" != "$pr_head" ]; then
-  printf 'tkt-ship: warning: tkt-gate last passed at %s but PR head is %s; the gate did not run on the head (gate: %s)\n' "$last_pass_head" "$pr_head" "$local_gate_cmd" >&2
+  msg="tkt-ship: tkt-gate last passed at $last_pass_head but PR head is $pr_head; the gate did not run on the head (gate: $local_gate_cmd)"
+  printf '%s\n' "$msg" >&2
+  emit "GATE-STALE gate=$last_pass_head head=$pr_head" 1 "$msg"
 fi
 if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""' 2>/dev/null)"; then
   gate_line_sha="$(printf '%s\n' "$pr_body_text" | sed -n 's/^Local gate: pass at \([0-9a-fA-F]\{40\}\).*/\1/p' | head -n 1)"
-  if [ -n "$last_pass" ] && [ "$last_pass_head" != "$pr_head" ]; then
-    :
-  elif [ -z "$last_pass" ] && [ -n "$gate_line_sha" ] && [ "$gate_line_sha" != "$pr_head" ]; then
+  if [ -z "$last_pass" ] && [ -n "$gate_line_sha" ] && [ "$gate_line_sha" != "$pr_head" ]; then
     gate_line_full="$(printf '%s\n' "$pr_body_text" | grep -m1 '^Local gate:' || true)"
     case "$gate_line_full" in
       *\(*\)) gate_line_cmd="${gate_line_full#*\(}"; gate_line_cmd="${gate_line_cmd%\)*}" ;;
       *) gate_line_cmd="" ;;
     esac
-    printf 'tkt-ship: warning: Local gate sha %s is not PR head %s (gate: %s); the gate did not run on the head\n' "$gate_line_sha" "$pr_head" "$gate_line_cmd" >&2
+    msg="tkt-ship: Local gate sha $gate_line_sha is not PR head $pr_head (gate: $gate_line_cmd); the gate did not run on the head"
+    printf '%s\n' "$msg" >&2
+    emit "GATE-STALE gate=$gate_line_sha head=$pr_head" 1 "$msg"
   elif [ -n "$last_pass" ] && [ "$last_pass_head" = "$pr_head" ] \
     && [ "$gate_line_sha" != "$pr_head" ]; then
     gate_line="Local gate: pass at $last_pass_head ($local_gate_cmd)"

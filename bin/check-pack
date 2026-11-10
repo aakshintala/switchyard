@@ -194,5 +194,10 @@ if [ -f "$planner_skill" ] && ! grep -Fq 'tkt-job <state> --slot planner --brief
   fail "skills/implement/SKILL.md" "$line" "planner dispatch must name --slot planner"
 fi
 
+if [ -f "$root/test/tkt-verdicts.sh" ] \
+  && ! bash "$root/test/tkt-verdicts.sh" "$root" >/dev/null 2>&1; then
+  fail "bin/check-pack" 1 "tkt verdict words must be listed in skills/implement/SKILL.md's Commands table"
+fi
+
 if [ "$failures" -gt 0 ]; then exit 1; fi
 exit 0

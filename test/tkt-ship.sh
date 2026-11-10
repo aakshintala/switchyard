@@ -650,19 +650,20 @@ expect_line1 "CI-FAIL jobs=0 inside-diff=0 mutants=0" neverstarted
 case "$OUT" in *"gh-ci: check ci has no check run after 10 min; it never started"*) ;; *) fail "digest carries never-started line: [$OUT]" ;; esac
 case "$OUT" in *"gh-ci reported no failed jobs"*) fail "digest drops empty failed-jobs line: [$OUT]" ;; esac
 
-# --- a stale Local gate sha warns but still merges ---
+# --- a stale Local gate sha refuses ship ---
 reset_stub; setup_case gateship-stale
 printf '0' >"$T/exitcodes"
 stale="0000000000000000000000000000000000000000"
 printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$stale" >"$T/prbody"
 cp "$T/prbody" "$CDIR/body-before"
 run_ship
-[ "$RC" -eq 0 ] || fail "gateship-stale: exit $RC"
-expect_line1 "MERGED sha=" gateship-stale
-grep -Fq "tkt-ship: warning: Local gate sha $stale is not PR head $H (gate: bash test/gate.sh); the gate did not run on the head" "$CDIR/stderr" \
-  || fail "gateship-stale: stderr misses the existing stale-line warning: [$(cat "$CDIR/stderr")]"
+[ "$RC" -eq 1 ] || fail "gateship-stale: exit $RC"
+expect_line1 "GATE-STALE gate=$stale head=$H" gateship-stale
+grep -Fq "tkt-ship: Local gate sha $stale is not PR head $H (gate: bash test/gate.sh); the gate did not run on the head" "$CDIR/stderr" \
+  || fail "gateship-stale: stderr misses the refusal reason: [$(cat "$CDIR/stderr")]"
 cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-stale: stale body remains unchanged without a journal PASS"
 ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-stale: no body edit without a journal PASS"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gateship-stale: did not invoke ship-pr after refusing"
 
 # --- a fresh Local gate sha says nothing ---
 reset_stub; setup_case gateship-fresh
@@ -718,7 +719,7 @@ EOF
 cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-fill: body line is not in gate placement: [$(cat "$T/prbody")]"
 grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-fill: edited body after a current PASS"
 
-# --- a PASS at an older head warns with both shas and the gate command ---
+# --- a PASS at an older head refuses with both shas and the gate command ---
 reset_stub; setup_case gateship-earlier
 printf '0' >"$T/exitcodes"
 OLD=1111111111111111111111111111111111111111
@@ -738,13 +739,14 @@ bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$OLD" || fail "gates
 printf 'Title\n' >"$T/prbody"
 cp "$T/prbody" "$CDIR/body-before"
 run_ship
-[ "$RC" -eq 0 ] || fail "gateship-earlier: exit $RC"
-expect_line1 "MERGED sha=" gateship-earlier
-grep -Fq "tkt-gate last passed at $OLD but PR head is $H; the gate did not run on the head (gate: bash test/gate.sh)" "$CDIR/stderr" \
-  || fail "gateship-earlier: stderr misses the head-drift warning: [$(cat "$CDIR/stderr")]"
-[ "$(grep -c 'tkt-gate last passed at' "$CDIR/stderr")" = "1" ] || fail "gateship-earlier: head-drift warning is not printed exactly once"
+[ "$RC" -eq 1 ] || fail "gateship-earlier: exit $RC"
+expect_line1 "GATE-STALE gate=$OLD head=$H" gateship-earlier
+grep -Fq "tkt-ship: tkt-gate last passed at $OLD but PR head is $H; the gate did not run on the head (gate: bash test/gate.sh)" "$CDIR/stderr" \
+  || fail "gateship-earlier: stderr misses the stale-gate refusal: [$(cat "$CDIR/stderr")]"
+[ "$(grep -c 'tkt-gate last passed at' "$CDIR/stderr")" = "1" ] || fail "gateship-earlier: head-drift refusal is not printed exactly once"
 cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-earlier: body changed after an older PASS"
 ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-earlier: no body edit after an older PASS"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gateship-earlier: did not invoke ship-pr after refusing"
 
 # A full PASS at B overrides an older Local gate body line without warning.
 reset_stub; setup_case gateship-pass-current-stale-body
@@ -804,12 +806,13 @@ bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$B checks-only" || f
 printf 'Title\n\nImplemented by: m/a\n' >"$T/prbody"
 cp "$T/prbody" "$CDIR/body-before"
 run_ship
-[ "$RC" -eq 0 ] || fail "gateship-checks-only-at-new-head: exit $RC"
-expect_line1 "MERGED sha=" gateship-checks-only-at-new-head
-grep -Fq "tkt-gate last passed at $A but PR head is $B; the gate did not run on the head" "$CDIR/stderr" \
-  || fail "gateship-checks-only-at-new-head: stderr misses the full-PASS drift warning: [$(cat "$CDIR/stderr")]"
+[ "$RC" -eq 1 ] || fail "gateship-checks-only-at-new-head: exit $RC"
+expect_line1 "GATE-STALE gate=$A head=$B" gateship-checks-only-at-new-head
+grep -Fq "tkt-ship: tkt-gate last passed at $A but PR head is $B; the gate did not run on the head" "$CDIR/stderr" \
+  || fail "gateship-checks-only-at-new-head: stderr misses the full-PASS refusal: [$(cat "$CDIR/stderr")]"
 ! grep -q 'Local gate: pass at' "$T/prbody" || fail "gateship-checks-only-at-new-head: checks-only PASS inserted a body line"
 cmp -s "$CDIR/body-before" "$T/prbody" || fail "gateship-checks-only-at-new-head: body changed after an older full PASS"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gateship-checks-only-at-new-head: did not invoke ship-pr after refusing"
 
 # A body line cannot hide a stale journal PASS.
 reset_stub; setup_case gateship-pass-with-body
@@ -829,11 +832,13 @@ printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
 bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$OLD" || fail "gateship-pass-with-body: journal the old gate PASS"
 printf 'Title\n\nLocal gate: pass at %s (bash test/gate.sh)\nImplemented by: m/a\n' "$H" >"$T/prbody"
 run_ship
-[ "$RC" -eq 0 ] || fail "gateship-pass-with-body: exit $RC"
-grep -Fq "tkt-gate last passed at $OLD but PR head is $H; the gate did not run on the head (gate: bash test/gate.sh)" "$CDIR/stderr" \
-  || fail "gateship-pass-with-body: body line hid the stale PASS: [$(cat "$CDIR/stderr")]"
-[ "$(grep -c 'tkt-gate last passed at' "$CDIR/stderr")" = "1" ] || fail "gateship-pass-with-body: head-drift warning is not printed exactly once"
+[ "$RC" -eq 1 ] || fail "gateship-pass-with-body: exit $RC"
+expect_line1 "GATE-STALE gate=$OLD head=$H" gateship-pass-with-body
+grep -Fq "tkt-ship: tkt-gate last passed at $OLD but PR head is $H; the gate did not run on the head (gate: bash test/gate.sh)" "$CDIR/stderr" \
+  || fail "gateship-pass-with-body: body line hid the stale-gate refusal: [$(cat "$CDIR/stderr")]"
+[ "$(grep -c 'tkt-gate last passed at' "$CDIR/stderr")" = "1" ] || fail "gateship-pass-with-body: stale-gate refusal is not printed exactly once"
 ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-pass-with-body: no body edit after an older PASS"
+[ "$(grep -c '^ship-pr|' "$T/calls.log")" -eq 0 ] || fail "gateship-pass-with-body: did not invoke ship-pr after refusing"
 
 # --- body read failure only warns, and body write failure only warns ---
 reset_stub; setup_case gateship-readfail
@@ -850,15 +855,13 @@ cat >"$CDIR/plan.md" <<'EOF'
 `bash test/gate.sh`
 EOF
 printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
-READ_OLD=2222222222222222222222222222222222222222
-bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$READ_OLD" || fail "gateship-readfail: journal the old gate PASS"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "gateship-readfail: journal the current gate PASS"
 : >"$T/body-read-fail"
 run_ship
 [ "$RC" -eq 0 ] || fail "gateship-readfail: exit $RC"
+expect_line1 "MERGED sha=" gateship-readfail
 grep -q 'cannot read PR 7 body; skipping the Local gate check' "$CDIR/stderr" || fail "gateship-readfail: missing read warning: [$(cat "$CDIR/stderr")]"
-grep -Fq "tkt-gate last passed at $READ_OLD but PR head is $H; the gate did not run on the head (gate: bash test/gate.sh)" "$CDIR/stderr" \
-  || fail "gateship-readfail: body read failure hid the journal PASS warning: [$(cat "$CDIR/stderr")]"
-[ "$(grep -c 'tkt-gate last passed at' "$CDIR/stderr")" = "1" ] || fail "gateship-readfail: head-drift warning is not printed exactly once"
+! grep -q 'tkt-gate last passed at' "$CDIR/stderr" || fail "gateship-readfail: unexpected stale-gate refusal: [$(cat "$CDIR/stderr")]"
 ! grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-readfail: no edit after a failed body read"
 
 reset_stub; setup_case gateship-writefail
