@@ -29,6 +29,13 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 tkt_state="$script_dir/tkt-state"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tkt() { "$tkt_state" "$state" "$@"; }
+for hold_key in owner_held surveyor_sequence; do
+  if hold_value="$(tkt get "$hold_key" 2>/dev/null)" && [ -n "$hold_value" ]; then
+    printf 'TKT tkt-ship PRECONDITION blocked=%s\n' "$hold_key"
+    printf 'tkt-ship: state %s marker prevents shipping\n' "$hold_key" >&2
+    exit 2
+  fi
+done
 verdict_lib="$script_dir/lib/plan-verdict.sh"
 if [ ! -r "$verdict_lib" ]; then echo "tkt-ship: cannot read shared lib: $verdict_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090

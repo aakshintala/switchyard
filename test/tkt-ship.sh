@@ -191,6 +191,20 @@ expect_line1 "MERGED sha=" merged-lanecheck-fail
 grep -Fxq 'TKT tkt-ship STOP lanecheck=failed' <<<"$OUT" || fail "merged-lanecheck-fail: missing STOP marker: [$OUT]"
 grep -Fq 'lane retired for issue 515' <<<"$OUT" || fail "merged-lanecheck-fail: lanecheck output missing: [$OUT]"
 
+# Held state markers refuse shipping before ship-pr or any state-file write.
+for hold_key in owner_held surveyor_sequence; do
+  reset_stub; setup_case "held-$hold_key"
+  printf '0' >"$T/exitcodes"
+  bash "$REAL_BIN/tkt-state" "$S" set "$hold_key" held || fail "$hold_key: could not set hold marker"
+  cp "$S" "$CDIR/state-before"
+  run_ship
+  [ "$RC" -ne 0 ] || fail "$hold_key: tkt-ship did not refuse (rc=$RC)"
+  expect_line1 "PRECONDITION" "$hold_key"
+  grep -Fq "$hold_key" <<<"$OUT" || fail "$hold_key: refusal does not name the key: [$OUT]"
+  [ "$(grep -c '^ship-pr|' "$T/calls.log" || true)" -eq 0 ] || fail "$hold_key: ship-pr was called"
+  cmp -s "$CDIR/state-before" "$S" || fail "$hold_key: state file changed on refusal"
+done
+
 # --- a current LINES plan verdict refuses ship with both sanctioned exits ---
 reset_stub; setup_case verdict-lines
 printf '0' >"$T/exitcodes"
