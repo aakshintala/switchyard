@@ -392,6 +392,8 @@ is_clean_main_merge() {
 verify_round_coverage() {
   local round_list_file="$1" unaccounted_file="$2" commits commit owner limit n round_start round_head round_findings
   local sha_list missing_rounds repair_command state_arg since_arg path_arg first_round_start first_round_commit concrete_start any_round_start
+  local replacement_path replacement_index repair_resume repair_prompt repair_resume_arg repair_prompt_arg repair_resume_args verify_command
+  local -a repair_notes=()
   : >"$round_list_file"; : >"$unaccounted_file"
   if ! git -C "$worktree" merge-base --is-ancestor "$verify_since" "$new_head" 2>/dev/null; then
     emit "SINCE-NOT-ANCESTOR since=$verify_since head=$new_head" 1 \
@@ -426,6 +428,10 @@ verify_round_coverage() {
         grep -qx "$owner" "$round_list_file" || printf '%s\n' "$owner" >>"$round_list_file"
       else
         printf '%s %s\n' "$commit" "$owner" >>"$unaccounted_file"
+        if [ -n "$round_findings" ] && [ -r "$round_findings" ] && ! grep -q '^P[123] ' "$round_findings"; then
+          repair_notes+=("round $owner findings file has no column-0 P1/P2/P3 lines: $round_findings")
+          repair_notes+=("round $owner findings must be written as column-0 P<n> <path>:<line> — ... lines")
+        fi
       fi
     elif is_clean_main_merge "$commit"; then
       :
@@ -437,15 +443,46 @@ verify_round_coverage() {
     sha_list="$(awk '{print $1}' "$unaccounted_file" | paste -sd, -)"
     missing_rounds="$(awk '$2 != "unknown" {print $2}' "$unaccounted_file" | sort -nu | paste -sd, -)"
     state_arg="$(printf '%q' "$state")"; since_arg="$(printf '%q' "$verify_since")"
+    repair_resume_args=""
+    if [ "$round" -ge 2 ]; then
+      repair_resume="$resume"
+      repair_prompt="$prompt"
+      if [ -z "$repair_resume" ]; then
+        repair_resume="$(t get "job.$slot" 2>/dev/null || true)"
+        [ -n "$repair_resume" ] || repair_resume="$(t get "job.fix$knum" 2>/dev/null || true)"
+      fi
+      if [ -z "$repair_resume" ]; then
+        emit "FINDINGS-SCOPE-ERROR" 1 \
+          "unaccounted commits=$sha_list" \
+          "cannot print a round-$round repair command: no recorded fix job for slot $slot"
+      fi
+      [ -n "$repair_prompt" ] || repair_prompt="$fbrief"
+      repair_resume_arg="$(printf '%q' "$repair_resume")"
+      repair_prompt_arg="$(printf '%q' "$repair_prompt")"
+      repair_resume_args=" --resume $repair_resume_arg --prompt $repair_prompt_arg"
+    fi
+    verify_command="tkt-fix $state_arg --verify --since $since_arg$repair_resume_args"
     if [ -n "$missing_rounds" ]; then
       repair_command=""
       for n in $(tr ',' ' ' <<<"$missing_rounds"); do
         round_findings="$(t get "fix_round.$n.findings" 2>/dev/null || true)"
         [ -n "$round_findings" ] || round_findings="$run/$namebase$part_suffix-fix-round-$n-findings.md"
-        path_arg="$(printf '%q' "$round_findings")"
+        if [ -r "$round_findings" ] && ! grep -q '^P[123] ' "$round_findings"; then
+          replacement_path="$run/$namebase$part_suffix-fix-round-$n-findings-replacement.md"
+          replacement_index=2
+          while [ -e "$replacement_path" ]; do
+            replacement_path="$run/$namebase$part_suffix-fix-round-$n-findings-replacement-$replacement_index.md"
+            replacement_index=$((replacement_index + 1))
+          done
+          path_arg="$(printf '%q' "$replacement_path")"
+          repair_notes+=("write a NEW findings file for round $n (originals are append-only; do not edit): $replacement_path")
+        else
+          path_arg="$(printf '%q' "$round_findings")"
+          repair_notes+=("restore the named round findings file(s)")
+        fi
         repair_command="${repair_command}${repair_command:+ && }tkt-state $state_arg set fix_round.$n.findings $path_arg"
       done
-      repair_command="restore the named round findings file(s), then run: $repair_command && tkt-fix $state_arg --verify --since $since_arg"
+      repair_command="$repair_command && $verify_command"
     else
       first_round_start="$(t get fix_round.1.start 2>/dev/null || true)"
       concrete_start=0
@@ -474,13 +511,15 @@ verify_round_coverage() {
         fi
       fi
       if [ "$concrete_start" -eq 1 ]; then
-        repair_command="tkt-state $state_arg set fix_round.1.start $since_arg && tkt-fix $state_arg --verify --since $since_arg"
+        repair_command="tkt-state $state_arg set fix_round.1.start $since_arg && $verify_command"
       else
-        repair_command="record the owning round with tkt-state $state_arg set fix_round.<n>.start <round start> && tkt-state $state_arg set fix_round.<n>.head <round head> && tkt-state $state_arg set fix_round.<n>.findings <round findings file>, then run tkt-fix $state_arg --verify --since $since_arg"
+        repair_notes+=("record the owning round with tkt-state $state_arg set fix_round.<n>.start <round start> && tkt-state $state_arg set fix_round.<n>.head <round head> && tkt-state $state_arg set fix_round.<n>.findings <round findings file>")
+        repair_command="$verify_command"
       fi
     fi
     emit "FINDINGS-UNACCOUNTED commits=$sha_list" 1 \
       "rounds missing findings=${missing_rounds:-unknown}" \
+      ${repair_notes[@]+"${repair_notes[@]}"} \
       "repair command: $repair_command"
   fi
 }

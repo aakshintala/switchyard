@@ -30,6 +30,7 @@ ln -s "$REAL_BIN/tkt-gate" "$T/bin/tkt-gate" || fail "symlink tkt-gate"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
+ln -s "$REAL_BIN/tkt-fix" "$T/bin/tkt-fix" || fail "symlink tkt-fix"
 ln -s "$REAL_BIN/lib" "$T/bin/lib" || fail "symlink lib"
 ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
 # Lane and fix slots need a fence grant (test/tkt-job.sh covers that); these cases test the fix flow.
@@ -47,12 +48,13 @@ cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 printf 'job|%s\n' "\$*" >>"$T/calls.log"
 state="\$1"
-slot=""; prev=""
+slot=""; jobid="j1"; prev=""
 for a in "\$@"; do
   if [ "\$prev" = "--slot" ]; then slot="\$a"; fi
+  if [ "\$prev" = "--resume" ]; then jobid="\$a"; fi
   prev="\$a"
 done
-[ -n "\$slot" ] && "$TKT_STATE" "\$state" set "job.\$slot" j1 >/dev/null
+[ -n "\$slot" ] && "$TKT_STATE" "\$state" set "job.\$slot" "\$jobid" >/dev/null
 wt="\$("$TKT_STATE" "\$state" get worktree)"
 commit_as_job() {
   printf '%s' "\$2" >"\$wt/\$1"
@@ -328,8 +330,47 @@ bash "$TKT_STATE" "$S" set fix_round.1.head "$ROUND1_HEAD" >/dev/null
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "missing-round-findings exited 0"
 rc=$?; [ "$rc" = "1" ] || fail "missing-round-findings exited $rc, want 1"
 grep -Fq "FINDINGS-UNACCOUNTED commits=$ROUND1_HEAD" <<<"$out" || fail "missing-round-findings did not list its commit: $(head -n 1 <<<"$out")"
-grep -Fq "tkt-state $S set fix_round.1.findings $CDIR/run/switchyard-529-fix-round-1-findings.md && tkt-fix $S --verify --since $OLD" <<<"$out" || fail "missing-round-findings omitted repair command: $(tail -n +2 <<<"$out")"
-grep -q '^review-pr|' "$T/calls.log" && fail "missing-round-findings ran review-pr"
+FIX_ROUND_FINDINGS="$CDIR/run/switchyard-529-fix-round-1-findings.md"
+grep -Fq "rounds missing findings=1" <<<"$out" || fail "missing-round-findings did not name round 1: $out"
+repair_command="$(sed -n 's/^repair command: //p' <<<"$out")"
+[ -n "$repair_command" ] || fail "missing-round-findings omitted repair command: $out"
+printf 'P1 fix.txt:1 — round one finding\n' >"$FIX_ROUND_FINDINGS"
+repair_out="$(eval "$repair_command" 2>"$T/stderr")" || fail "printed missing-round-findings repair failed: $(head -n 3 <<<"$repair_out") $(cat "$T/stderr")"
+head -n 1 <<<"$repair_out" | grep -q 'TKT tkt-fix FIX-OK' || fail "printed missing-round-findings repair did not pass coverage: $(head -n 1 <<<"$repair_out")"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" = "$FIX_ROUND_FINDINGS" ] || fail "missing-round-findings repair did not record the restored file"
+grep -q '^review-pr|' "$T/calls.log" || fail "missing-round-findings repair did not reach review-pr"
+fi
+
+if want no-p-round-findings; then
+setup_case no-p-round-findings
+printf 'round one fix\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'fix: round one'
+ROUND1_HEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin tkt-529
+bash "$TKT_STATE" "$S" set head "$ROUND1_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.1.start "$OLD" >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.1.head "$ROUND1_HEAD" >/dev/null
+ROUND1_FINDINGS="$CDIR/run/switchyard-529-fix-round-1-findings.md"
+printf 'no open findings\n' >"$ROUND1_FINDINGS"
+bash "$TKT_STATE" "$S" set fix_round.1.findings "$ROUND1_FINDINGS" >/dev/null
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "no-p-round-findings exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "no-p-round-findings exited $rc, want 1"
+grep -Fq "FINDINGS-UNACCOUNTED commits=$ROUND1_HEAD" <<<"$out" || fail "no-p-round-findings did not leave the commit unaccounted: $out"
+grep -Fq "round 1 findings file has no column-0 P1/P2/P3 lines: $ROUND1_FINDINGS" <<<"$out" || fail "no-p-round-findings did not name the file: $out"
+grep -Fq 'round 1 findings must be written as column-0 P<n> <path>:<line> — ... lines' <<<"$out" || fail "no-p-round-findings omitted the required format: $out"
+grep -Fq 'write a NEW findings file' <<<"$out" || fail "no-p-round-findings did not require a new append-only file: $out"
+new_path="$(sed -n 's/^write a NEW findings file for round 1 (originals are append-only; do not edit): //p' <<<"$out")"
+[ -n "$new_path" ] || fail "no-p-round-findings omitted a new file path: $out"
+[ "$new_path" != "$ROUND1_FINDINGS" ] || fail "no-p-round-findings proposed editing the original findings file"
+repair_command="$(sed -n 's/^repair command: //p' <<<"$out")"
+grep -Fq "tkt-state $S set fix_round.1.findings $new_path" <<<"$repair_command" || fail "no-p-round-findings repair command did not record the new file: $repair_command"
+printf 'P1 fix.txt:1 — replacement finding\n' >"$new_path"
+repair_out="$(eval "$repair_command" 2>"$T/stderr")" || fail "printed no-p-round-findings repair failed: $(head -n 3 <<<"$repair_out") $(cat "$T/stderr")"
+head -n 1 <<<"$repair_out" | grep -q 'TKT tkt-fix FIX-OK' || fail "printed no-p-round-findings repair did not pass coverage: $(head -n 1 <<<"$repair_out")"
+[ "$(cat "$ROUND1_FINDINGS")" = 'no open findings' ] || fail "no-p-round-findings modified the append-only original"
 fi
 
 if want since-not-ancestor; then
@@ -379,6 +420,37 @@ grep -Fq 'FINDINGS-UNACCOUNTED' <<<"$out" || fail "unknown-gap-repair did not re
 grep -Fq "tkt-state $S set fix_round.1.start $OLD && tkt-fix $S --verify --since $OLD" <<<"$out" || fail "unknown-gap-repair omitted concrete command: $out"
 [[ "$out" != *'<'* ]] || fail "unknown-gap-repair left a placeholder in output: $out"
 [ -n "$HAND_HEAD" ] || fail "unknown-gap-repair fixture did not make its hand commit"
+fi
+
+if want unknown-gap-round2; then
+setup_case unknown-gap-round2
+printf 'round one fix\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'fix: round one'
+ROUND1_HEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin tkt-529
+bash "$TKT_STATE" "$S" set head "$ROUND1_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+record_test_round 1 "$ROUND1_HEAD"
+printf 'hand commit\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'hand: before round two start'
+HAND_HEAD="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin tkt-529
+bash "$TKT_STATE" "$S" set head "$HAND_HEAD" >/dev/null
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "unknown-gap-round2 exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -Fq "FINDINGS-UNACCOUNTED commits=$HAND_HEAD" <<<"$out" || fail "unknown-gap-round2 did not report its hand commit: $out"
+repair_command="$(sed -n 's/^repair command: //p' <<<"$out")"
+grep -Fq "tkt-fix $S --verify --since $OLD --resume j1 --prompt $HOME/.agents/skills/review-loop/briefs/fix.md" <<<"$repair_command" || fail "unknown-gap-round2 repair omitted the recorded job resume: $repair_command"
+# The repair note asks for ownership metadata. Once recorded, the printed
+# command must be executable and move past coverage.
+ROUND2_HEAD="$(bash "$TKT_STATE" "$S" get fix_round.2.head)"
+bash "$TKT_STATE" "$S" set fix_round.2.start "$ROUND1_HEAD" >/dev/null
+repair_out="$(eval "$repair_command" 2>"$T/stderr")" || fail "printed unknown-gap-round2 repair failed: $(head -n 3 <<<"$repair_out") $(cat "$T/stderr")"
+head -n 1 <<<"$repair_out" | grep -q 'TKT tkt-fix FIX-OK' || fail "printed unknown-gap-round2 repair did not pass coverage: $(head -n 1 <<<"$repair_out")"
+[ -n "$ROUND2_HEAD" ] || fail "unknown-gap-round2 had no recorded round head"
 fi
 
 if want round-ownership; then
