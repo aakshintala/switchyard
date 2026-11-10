@@ -251,7 +251,13 @@ base="$(git -C "$gdir" rev-parse origin/main 2>&1)" || fail_step fetch "$?" "$ba
 wt_note="reused"; if [ ! -e "$worktree" ]; then
   werr="$(git worktree add --no-track -b "$branch" "$worktree" origin/main 2>&1)" || fail_step worktree "$?" "$werr"
   wt_note="created"
-fi; tkt journal "tkt-start worktree $worktree $wt_note"; fpaths=()
+fi
+# Seed the repo gate once so a planner cannot omit the script check in its Gate line.
+if [ -z "$(tkt get gate.script 2>/dev/null || true)" ] \
+  && [ -f "$worktree/scripts/check" ] && [ -x "$worktree/scripts/check" ]; then
+  tkt set gate.script scripts/check
+fi
+tkt journal "tkt-start worktree $worktree $wt_note"; fpaths=()
 if [ -n "$files" ]; then IFS=',' read -ra parts <<<"$files"
   for p in ${parts[@]+"${parts[@]}"}; do p="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"; [ -n "$p" ] && fpaths+=("$p"); done; fi
 stale=""; reason=""; filing=""; lognote="not run"; sincenote="no edit info"
