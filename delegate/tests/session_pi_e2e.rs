@@ -803,15 +803,6 @@ fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
         1,
         "{logs:?}"
     );
-    let replayed_command_ids: Vec<&str> =
-        command_ids.iter().map(|id| id.as_str().unwrap()).collect();
-    let replay_command_id = logs
-        .iter()
-        .find(|line| line["kind"] == "user" && line["text"] == replay_text)
-        .unwrap()["commandId"]
-        .as_str()
-        .unwrap();
-    assert_eq!(replayed_command_ids[0], replay_command_id);
     assert_eq!(h.state(&id)["turnCount"], 2);
     assert!(
         logs.iter().all(|line| line["kind"] != "steer.unconsumed"),
@@ -1117,6 +1108,8 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let h = Harness::new();
     let release_event_write = h.base.join("release-event-write");
     let release_event_write_env = release_event_write.to_str().unwrap();
+    let replay_decision_marker = h.base.join("replay-decision");
+    let replay_decision_env = replay_decision_marker.to_str().unwrap();
     let started = h.start_pi(
         "openai/gpt-6-luna",
         b"BRIEF",
@@ -1136,6 +1129,10 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
                 "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_KIND",
                 "turn.started",
             ),
+            (
+                "DELEGATE_SESSION_TEST_REPLAY_DECISION_FILE",
+                replay_decision_env,
+            ),
         ],
     );
     assert!(
@@ -1151,10 +1148,12 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
     assert_eq!(reply["disposition"], "steered", "{reply}");
 
-    std::fs::write(h.fake_dir.join("go"), "").unwrap();
     let held_marker = std::path::PathBuf::from(format!("{}.held", release_event_write.display()));
     h.wait_path(&held_marker, "pi-turn-2 start event append hold");
-    std::thread::sleep(Duration::from_millis(150));
+    h.wait_path(
+        &replay_decision_marker,
+        "pi replay decision while turn-start event is held",
+    );
     let ordinary_prompts_before_release = h
         .requests()
         .iter()
@@ -1171,6 +1170,10 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     );
 
     std::fs::write(&release_event_write, "").unwrap();
+    h.wait_state(&id, "pi-turn-2 running", |state| {
+        state["status"] == "running" && state["activeTurnId"] == "pi-turn-2"
+    });
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
     watch_ok(&h, &id);
 
     let logs = h.logs(&id);

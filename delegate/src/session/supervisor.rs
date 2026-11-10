@@ -1078,11 +1078,38 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
 
 fn replay_pending_steers(shared: &Arc<Shared>) {
     let _admission = lock(&shared.admission);
+    let queued_steers = if shared.kind == HostKind::Pi {
+        lock(&shared.wire).queued_steer_ids()
+    } else {
+        Vec::new()
+    };
+    let has_queued_pending = if queued_steers.is_empty() {
+        false
+    } else {
+        let pending = shared.store.snapshot().pending_steers;
+        queued_steers
+            .iter()
+            .any(|queued| pending.iter().any(|steer| steer.command_id == *queued))
+    };
+    if let Some(path) = std::env::var_os("DELEGATE_SESSION_TEST_REPLAY_DECISION_FILE") {
+        let _ = std::fs::write(path, b"checked");
+    }
+    if has_queued_pending {
+        return;
+    }
     let mut replay_text = None;
+    let mut replayed_ids = Vec::new();
     if update_store(shared, |state| {
         match state::begin_pending_steer_replay(state, now_ms()) {
             Some(state::PendingSteerReplay::Started { text, log }) => {
                 replay_text = Some(text);
+                replayed_ids = log["commandIds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
                 vec![log]
             }
             Some(state::PendingSteerReplay::Unconsumed { log }) => vec![log],
@@ -1092,6 +1119,9 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
     .is_ok()
         && let Some(text) = replay_text
     {
+        if shared.kind == HostKind::Pi && !replayed_ids.is_empty() {
+            lock(&shared.wire).forget_steers(&replayed_ids);
+        }
         let _ = start_turn(shared, &text);
     }
 }
