@@ -701,6 +701,8 @@ out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
 if printf '%s' "$out" | grep -q '^STALL 1518 muse fiber-1518-plan' \
    && printf '%s' "$out" | grep -q 'STATUS: PLANNED' \
    && printf '%s' "$out" | grep -q 'retire it if its report landed' \
+   && printf '%s' "$out" | grep -q 'newer roster entry muse/fiber-1518-build' \
+   && printf '%s' "$out" | grep -q 'shared-state pending work is credited to that newer session: /bin/bash.*tkt-build' \
    && printf '%s' "$out" | grep -q '^LIVE 1518 muse fiber-1518-build' \
    && ! printf '%s' "$out" | grep -q '^ABANDONED 1518 muse fiber-1518-plan'; then
   ok planned-session-is-retirable-after-build-handoff
