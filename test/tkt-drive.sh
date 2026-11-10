@@ -288,36 +288,50 @@ for verdict in STALE BLOCKED; do
   assert_no_merge
 done
 
-# MERGED retires the lane and prints dependents without waking or merging them.
-reset_case merged
-state_set "$STATE" review_status "done"
-state_set "$STATE" reviewed 0000000000000000000000000000000000000001
-state_add "$STATE" dependents 'ticket-1473'
-state_add "$STATE" dependents 'run/fiber-1473-lane'
-state_journal "$STATE" 'tkt-build APPROVE'
-run_drive
-[ "$RC" -eq 0 ] || fail "MERGED should complete successfully (rc=$RC)"
-assert_prefix $'TKT tkt-ship MERGED payload=unchanged\nship detail stays here\n' "$OUT"
-grep -Fxq 'lanecheck|done 1472' "$TEST_LANECHECK_CALLS" || fail 'lanecheck done <issue> not called'
-grep -Fxq 'DEPENDENT ticket-1473' "$OUT" || fail 'state dependent ticket was not printed'
-grep -Fxq 'DEPENDENT run/fiber-1473-lane' "$OUT" || fail 'state dependent roster name was not printed'
-grep -Fxq 'TKT tkt-drive MERGED tool=tkt-ship' "$OUT" || fail 'drive did not report merged completion'
-assert_no_merge
-
-# Explicit owner-held and surveyor-sequence markers guard tkt-ship.
+# Explicit owner-held and surveyor-sequence markers guard tkt-ship. Set them
+# through the public tkt-state interface used by their documented writers.
 for marker in owner_held surveyor_sequence; do
   reset_case "guard-$marker"
   state_set "$STATE" review_status "done"
   state_set "$STATE" reviewed 0000000000000000000000000000000000000001
   state_journal "$STATE" 'tkt-build APPROVE'
   if [ "$marker" = owner_held ]; then
-    state_set "$STATE" owner_held yes
+    bash "$STATE_BIN" "$STATE" set owner_held yes || fail 'could not set owner_held marker'
   else
-    state_set "$STATE" surveyor_sequence plan-then-build
+    bash "$STATE_BIN" "$STATE" set surveyor_sequence post-merge-review || fail 'could not set surveyor_sequence marker'
   fi
   run_drive
   [ "$RC" -ne 0 ] || fail "$marker did not stop tkt-ship"
+  grep -Fq "state $marker marker prevents tkt-ship" "$ERR" || fail "$marker stop reason missing: $(cat "$ERR")"
+  grep -Fq 'TKT tkt-drive STOP' "$OUT" || fail "$marker did not report STOP: $(cat "$OUT")"
   [ "$(grep -c '^tkt-ship|' "$TEST_CALLS" || true)" -eq 0 ] || fail "$marker called tkt-ship"
+  assert_no_merge
+done
+
+# tkt-drive never invokes tkt-ship, even when a previous APPROVE or verify
+# verdict and review_status would otherwise select it.
+for status in ready done; do
+  for prior in 'tkt-build APPROVE' 'tkt-fix FIX-OK' 'tkt-fix FIX-INCOMPLETE' 'tkt-fix VERIFY-FAIL' 'tkt-fix PUSHED'; do
+    reset_case "no-ship-$status-${prior#* }"
+    state_set "$STATE" review_status "$status"
+    state_set "$STATE" reviewed 0000000000000000000000000000000000000001
+    state_journal "$STATE" "$prior"
+    run_drive
+    grep -Fq 'TKT tkt-drive STOP' "$OUT" || fail "$status after $prior did not stop before shipping: $(cat "$OUT")"
+    grep -Fq 'tkt-ship is a separate role step' "$ERR" || fail "$status after $prior lacked the separate-ship instruction: $(cat "$ERR")"
+    [ "$(grep -c '^tkt-ship|' "$TEST_CALLS" || true)" -eq 0 ] || fail "$status after $prior called tkt-ship"
+    assert_no_merge
+  done
+done
+
+# Every documented or fallback review_status takes a non-shipping route.
+for status in missing pending gate-failed ready done skipped other; do
+  reset_case "status-$status"
+  if [ "$status" != missing ]; then state_set "$STATE" review_status "$status"; fi
+  state_set "$STATE" reviewed 0000000000000000000000000000000000000001
+  state_journal "$STATE" 'tkt-build APPROVE'
+  run_drive
+  [ "$(grep -c '^tkt-ship|' "$TEST_CALLS" || true)" -eq 0 ] || fail "$status review_status called tkt-ship"
   assert_no_merge
 done
 

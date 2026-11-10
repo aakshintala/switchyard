@@ -246,6 +246,7 @@ while :; do
     if surveyor_sequence; then
       internal_stop 'tkt-drive: state surveyor_sequence marker prevents tkt-ship' 1
     fi
+    internal_stop 'tkt-drive: tkt-ship is a separate role step; invoke it explicitly when authorized'
   fi
 
   t journal "tkt-drive step=$tool${args[*]:+ ${args[*]}} trigger=$trigger"
