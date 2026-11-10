@@ -73,9 +73,9 @@ During triage (Step 1: Gather context), read all files in `.out-of-scope/`. When
 
 - Check if the request matches an existing out-of-scope concept
 - Matching is by concept similarity, not keyword: "night theme" matches `dark-mode.md`
-- If there's a match, surface it to the maintainer: "This is similar to `.out-of-scope/dark-mode.md`. We rejected this before because [reason]. Do you still feel the same way?"
+- If there's a match, use the project docs and prior rulings. The triage role decides whether to apply or reverse the out-of-scope ruling when they settle it. An owner-filed enhancement proposed for out-of-scope is a novel product decision: file one dashboard card (`owner-ask file ...`) and park the ticket; never ask in chat.
 
-The maintainer may:
+The triage role decides from project docs and prior rulings:
 
 - **Confirm**: the new issue gets added to the existing file's "Prior requests" list, then closed
 - **Reconsider**: the out-of-scope file gets deleted or updated, and the issue proceeds through normal triage
@@ -89,7 +89,7 @@ Do **not** write here when something is closed as `wontfix` because it's **alrea
 
 The flow:
 
-1. Maintainer decides a feature request is out of scope
+1. Closing an owner-filed enhancement as out of scope is a novel product decision: file one dashboard card (`owner-ask file ...`) and park the ticket. For other requests, the triage role decides they are out of scope when project docs or prior rulings settle it.
 2. Check if a matching `.out-of-scope/` file already exists
 3. If yes: append the new issue to the "Prior requests" list
 4. If no: create a new file with the concept name, decision, reason, and first prior request
@@ -98,7 +98,7 @@ The flow:
 
 ## Updating or removing out-of-scope files
 
-If the maintainer changes their mind about a previously rejected concept:
+If the triage role reverses a prior rejection based on project docs or a ruling:
 
 - Delete the `.out-of-scope/` file
 - The skill does not need to reopen old issues; they're historical records
