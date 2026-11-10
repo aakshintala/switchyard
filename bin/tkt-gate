@@ -53,6 +53,13 @@ if [ ! -r "$tokens_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$tokens_lib"
+fence_grant_lib="$script_dir/lib/fence-grant-paths.sh"
+if [ ! -r "$fence_grant_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $fence_grant_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$fence_grant_lib"
 gate_lib="$script_dir/lib/gate-script.sh"
 if [ ! -r "$gate_lib" ]; then
   echo "tkt-gate: cannot read shared lib: $gate_lib" >&2
@@ -244,6 +251,32 @@ if [ -n "$fence_list" ]; then
     esac
   done <<<"$fence_list"
 fi
+
+# fence-grant --require resolves the run directory from FW_RUN or the same
+# HOME fallback. Only files belonging to this exact ticket number count.
+grant_run="${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"
+for grant_file in "$grant_run"/fiber-"$issue"-fence-grant*.md; do
+  [ -f "$grant_file" ] || continue
+  while IFS= read -r grant_path; do
+    [ -n "$grant_path" ] || continue
+    while :; do case "$grant_path" in ./*) grant_path=${grant_path#./};; *) break;; esac; done
+    case "$grant_path" in
+      */\*\*) grant_path="${grant_path%/\*\*}/" ;;
+      */\*) grant_path="${grant_path%/\*}/" ;;
+    esac
+    case "$grant_path" in
+      */) FILES="$FILES$grant_path|" ;;
+      *\**|*\?*|*\[*|*\{*) GLOBS="$GLOBS$grant_path"$'\n' ;;
+      *)
+        case "${grant_path##*/}" in
+          *.*) FILES="$FILES$grant_path|" ;;
+          # An extensionless name (bin/<script>, Makefile) may be a file or a directory.
+          *) FILES="$FILES$grant_path|$grant_path/|" ;;
+        esac
+        ;;
+    esac
+  done < <(fence_grant_pathspecs "$grant_file")
+done
 changed="$(git -C "$worktree" diff --name-only --no-renames "origin/main...HEAD" 2>/dev/null)" || {
   echo "tkt-gate: cannot diff origin/main...HEAD in $worktree" >&2
   exit 2
@@ -278,9 +311,9 @@ if [ "$n" -gt 0 ]; then
   else
     digest="${digest%$'\n'}"
   fi
-  # Name both routes to widen the fence; the check itself is unchanged.
+  # Name the plan, state fence and matching grant routes; the check itself is unchanged.
   digest="$digest
-the fence is read from the plan's Files and the state's fence list; fence-grant is not read
+the fence is read from the plan's Files, the state's fence list, or a matching fence-grant Paths block in this ticket's grant file
 for a path a merge of main moved, run per path: tkt-state $state add fence <path>
 for scope the plan never covered, add it to the plan's Files and re-confirm with tkt-plan"
   emit "FENCE n=$n" 1
