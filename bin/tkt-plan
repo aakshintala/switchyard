@@ -7,6 +7,7 @@ set -euo pipefail
 usage() {
   printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <id>]\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
   printf '       tkt-plan <state> triaged --comment <id>\n' >&2
+  printf '       tkt-plan <state> rule-questions --comment <id>\n' >&2
   exit 2
 }
 
@@ -86,6 +87,23 @@ plan_rulings_section() {
     /^## / && in_rulings && $0 !~ /^## Rulings[[:space:]]*$/ { in_rulings=0 }
     in_rulings { print }
     END { if (!found) exit 1 }
+  ' "$1"
+}
+
+plan_open_questions() {
+  awk '
+    /^## Open questions[[:space:]]*$/ { in_questions=1; next }
+    /^## / && in_questions { in_questions=0 }
+    in_questions {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      answer=line
+      sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", answer)
+      sub(/^[[:space:]]+/, "", answer)
+      sub(/[[:space:]]+$/, "", answer)
+      if (answer != "" && tolower(answer) != "none") print line
+    }
   ' "$1"
 }
 
@@ -247,6 +265,17 @@ do_verify() {
       planner_note="planner job not recorded in job.planner; not resumed"
     fi
     [ "$prc" -ne 1 ] || { clear_verdict; emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$planner_note" "$(head -n "$REPORT_LINES" <<<"$pc_out")"; }
+  fi
+  questions="$(plan_open_questions "$plan")"
+  if [ -n "$questions" ]; then
+    question_hash="$(printf '%s\n' "$questions" | git -C "$worktree" hash-object --stdin 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+    recorded_hash="$(t get plan_questions_hash 2>/dev/null || true)"
+    recorded_comment="$(t get plan_questions_comment 2>/dev/null || true)"
+    if [ -z "$recorded_comment" ] || [ "$recorded_hash" != "$question_hash" ]; then
+      clear_verdict
+      plan_verdict_write "$tkt_state" "$state" questions "$base" "$plan" "$worktree"
+      emit "QUESTIONS" 1 "record one ticket comment answering every question with: tkt-plan $state rule-questions --comment <id>, then rerun verify" "## Open questions" "$questions"
+    fi
   fi
   round="$(ronum)"
   # The drift exemption is derived from recorded state, not a caller flag: a
@@ -556,6 +585,36 @@ do_triaged() {
   emit "SET triaged=$comment" 0
 }
 
+do_rule_questions() {
+  comment=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --comment) [ $# -ge 2 ] || usage; comment="$2"; shift 2;;
+    *) usage;; esac; done
+  case "$comment" in
+    ""|*[!0-9]*) echo "tkt-plan: comment id must contain only digits" >&2; exit 2;;
+  esac
+  load_plan
+  questions="$(plan_open_questions "$plan")"
+  [ -n "$questions" ] || emit "QUESTIONS-REFUSED reason=none" 1 "the plan has no open questions"
+  comment_json="$(gh api "repos/$repo/issues/comments/$comment" 2>"$tmp")" || {
+    comment_error="$(head -n 1 "$tmp" 2>/dev/null || true)"
+    emit "QUESTIONS-REFUSED reason=comment" 1 "could not read ruling comment $comment${comment_error:+: $comment_error}"
+  }
+  if ! jq -e --arg repo "$repo" --arg issue "$issue" '
+    type == "object" and (.body | type == "string") and (.body | test("[^[:space:]]"))
+      and (.issue_url | type == "string")
+      and (.issue_url | contains("/repos/" + $repo + "/"))
+      and (.issue_url | endswith("/issues/" + $issue))
+  ' <<<"$comment_json" >/dev/null 2>&1; then
+    emit "QUESTIONS-REFUSED reason=comment" 1 "comment $comment is empty or does not belong to $repo#$issue"
+  fi
+  question_hash="$(printf '%s\n' "$questions" | git -C "$worktree" hash-object --stdin 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+  plan_verdict_write "$tkt_state" "$state" questions "$base" "$plan" "$worktree"
+  t set plan_questions_comment "$comment"
+  t set plan_questions_hash "$question_hash"
+  emit "QUESTIONS-RECORDED comment=$comment" 0 "next: tkt-plan $state verify"
+}
+
 do_post() {
   part=""; no_verifier=0
   while [ $# -gt 0 ]; do case "$1" in
@@ -666,4 +725,4 @@ do_replan() {
 }
 
 case "$sub" in
-  verify) do_verify "$@";; confirm) do_confirm "$@";; grant-round) do_grant "$@";; triaged) do_triaged "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac
+  verify) do_verify "$@";; confirm) do_confirm "$@";; grant-round) do_grant "$@";; triaged) do_triaged "$@";; rule-questions) do_rule_questions "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac
