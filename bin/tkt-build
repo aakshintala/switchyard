@@ -222,9 +222,11 @@ check_model_quota() {
       "status=missing; provider is absent from the QuotaBar feed" "$repair" "$include_model"
   fi
   status="$(jq -r '.status // "unknown"' <<<"$row")"
-  if [ "$status" != healthy ]; then
+  # muse spend is not rationed (owner, 2026-11-06; RULING-1562-1): its warning is a pace signal, so it launches.
+  if [ "$status" != healthy ] && { [ "$provider" != muse ] || [ "$status" != warning ]; }; then
+    local need="healthy"; [ "$provider" = muse ] && need="healthy or warning"
     quota_refusal "PRECONDITION quota=refused" "$model" "$provider" \
-      "status=$status; provider status must be healthy" "$repair" "$include_model"
+      "status=$status; provider status must be $need" "$repair" "$include_model"
   fi
   if [ "$provider" = claude ]; then
     weekly="$(jq -r '[.quotas[]? | select((.key // "" | ascii_downcase) == "weekly" or (.label // "" | ascii_downcase) == "weekly")][0].percentRemaining // empty' <<<"$row")"
