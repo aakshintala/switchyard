@@ -34,6 +34,30 @@ fi
 grep -F -- 'Part of #1448' "$brief" >/dev/null
 printf 'ok mkbrief-resolves-sibling-template-and-home-paths\n'
 
+# The pi lane builds its fence grant itself after settling the plan; the
+# rendered brief must not ask it to wait for flywheel admission.
+(
+  cd "$T"
+  HOME="$T/home" FW_RUN="$T/run" RUN_DIR="$T/run" FW_REPO="$T/repo" \
+    FW_WORKTREE_ROOT="$T/home/work/fiber-worktrees" SKIP_PATHS=1 TKT=1 PI=1 \
+    bash "$bin/mkbrief.sh" 1476 feat/1476-pi-selfgrant "$T/notes.md"
+)
+pi_brief="$T/run/fiber-1476-orchestrator-brief.md"
+test -s "$pi_brief"
+if grep -Fq 'ADMITTED' "$pi_brief"; then
+  echo 'FAIL pi brief still mentions ADMITTED' >&2
+  exit 1
+fi
+if grep -Fq 'report PLANNED' "$pi_brief"; then
+  echo 'FAIL pi brief still asks for a PLANNED report' >&2
+  exit 1
+fi
+grep -F -- '~/.agents/bin/fence-grant 1476 --paths' "$pi_brief" >/dev/null || {
+  echo 'FAIL pi brief omits the self-grant command' >&2
+  exit 1
+}
+printf 'ok mkbrief-pi-self-grants-plan-files-without-admission-wait\n'
+
 mkdir -p "$T/run/inbox/read" "$T/run/rulings"
 printf 'STATUS: BLOCKED on fixture\n' > "$T/run/inbox/read/box-2465-20261109T120000Z-1-1.md"
 out=$(FW_RUN="$T/run" bash "$bin/pending.sh")

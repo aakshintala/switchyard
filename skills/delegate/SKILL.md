@@ -20,17 +20,17 @@ Pick the lowest rung whose definition covers the job:
 - `strong`: under-specified tickets. Makes local design calls, and stops and flags a plan that's wrong instead of following it. Writes a lane brief from an approved plan. Checks a plan as the Verifier.
 - `frontier`: long-horizon planning, cross-cutting design, sub-orchestrating a ticket, and the last escalation before the owner.
 
-The current pool is in the `delegate models` Tiers column. Use a model with no rung only when the owner names it. Within a rung, pick the cheapest model with headroom (the `$OUT/1M` column); on a price tie, pick the provider with more headroom.
+The current pool is in the `delegate models` Tiers column. Use a model with no rung only when flywheel rules it in. Within a rung, pick the cheapest model with headroom (the `$OUT/1M` column); on a price tie, pick the provider with more headroom.
 
 When the pick is a Claude model and you run in a Claude Code session, start it as a local `claude-worker` subagent with that model and effort (`model: haiku` for `claude-haiku-5-5`), and run the gate yourself on its result. A script with no session to host a subagent, such as `review-pr`, passes the Claude model to `delegate run`. A session started before Claude Code learned of a model may resolve its alias to the older one (`haiku` to Haiku 4.5), so check the model id the subagent reports.
 
-At session start, propose a pool per rung from `delegate models` and `~/.agents/bin/quota`, showing each provider's headroom. The owner confirms it. When the owner is unavailable, use the last confirmed pool, step down within the rung when a provider runs low, and report the switch.
+Flywheel confirms the model pool for each rung from `delegate models` and `~/.agents/bin/quota`. Step down within the rung when a provider runs low, and report the switch.
 
 A provider's headroom is its remaining quota on its tightest window (session, weekly or monthly): the lowest percent on its line from `~/.agents/bin/quota`. Map providers by backend or prefix: the `cursor` backend, `opencode-go/*`, `claude-*`, `muse/*`, and `openai/*`.
 
 Mechanical jobs (rebase conflicts and compile fixes, formatting and lint fixes, mutant-killing tests, renames, moves, repeated edits) take the cheapest `standard` model; when it fails, the next cheapest. A Claude model that reviews, verifies or diagnoses runs at `:medium`, and `:high` only after it fails twice on one finding. A diagnosis reports the cause and its evidence, and leaves the fix to a lane.
 
-Escalation: when a model fails, go up one rung. When a `frontier` model fails, stop and ask the owner. Never escalate to a model with no rung.
+Escalation: when a model fails, go up one rung. When a `frontier` model fails, stop and send the finding to flywheel. Never escalate to a model with no rung.
 
 Review rule: review with a model from a different family than the implementer's, at the same rung or higher. Family means the model's maker, such as Anthropic, OpenAI, xAI or Cursor, not its backend or provider.
 
