@@ -1256,6 +1256,17 @@ def send_action(entry, action_id, store, jid, message):
     result = delegate_tool(store, "send", jid, message)
     if result is not None and result.returncode == 0:
         return "sent", count
+    if result is not None and result.returncode == 5:
+        # `busy` is a definite rejection, not an accepted send. Release the
+        # dedupe claim so the same source can be retried on the next lanecheck.
+        entry["handled"] = [item for item in entry["handled"] if item != action_id]
+        entry["actions"] = [item for item in entry["actions"]
+                            if not isinstance(item, dict) or item.get("id") != action_id]
+        try:
+            save_wake_state()
+        except OSError:
+            return "unrecorded", count
+        return "busy", count
     return "failed", count
 
 
@@ -1715,6 +1726,9 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                                             if saved is not job]
                 save_wake_state()
                 wake_done = True
+            elif result == "busy":
+                print(f"WAKE-DEFERRED {n} {host} {sess} — {reason}; action remains pending for the next lanecheck")
+                wake_done = True
             elif result == "capped":
                 print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
                       f"{reason}; wake cap reached ({count}/2 this rolling hour), "
@@ -1739,6 +1753,9 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                     label = "WAKE" if result == "sent" else "WAKE-FAILED"
                     print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
                     wake_done = True
+                elif result == "busy":
+                    print(f"WAKE-DEFERRED {n} {host} {sess} — {reason}; missed answer remains pending for the next lanecheck")
+                    wake_done = True
                 elif result == "capped":
                     print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "
                           f"{reason}; wake cap reached ({count}/2 this rolling hour), "
@@ -1760,6 +1777,9 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                 if result in ("sent", "failed"):
                     label = "WAKE" if result == "sent" else "WAKE-FAILED"
                     print(f"{label} {n} {host} {sess} — {reason} ({count}/2 this rolling hour)")
+                    wake_done = True
+                elif result == "busy":
+                    print(f"WAKE-DEFERRED {n} {host} {sess} — {reason}; action remains pending for the next lanecheck")
                     wake_done = True
                 elif result == "capped":
                     print(f"STALL {n} {host} {sess} {state}/{status} turns={turns} — "

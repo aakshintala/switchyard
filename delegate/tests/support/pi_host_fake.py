@@ -39,6 +39,15 @@ def write_file(name, data):
         output.write(data)
 
 
+def wait_for_gate(name):
+    deadline = time.monotonic() + GO_WAIT
+    while not os.path.exists(path(name)):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"timed out waiting for fake-host gate {name}")
+        time.sleep(0.01)
+    return None
+
+
 def send(obj):
     sys.stdout.write(json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n")
     sys.stdout.flush()
@@ -248,6 +257,13 @@ def handle_prompt(command):
     if command.get("streamingBehavior") == "steer":
         handle_steer(command)
         return
+    if (
+        "REPLAY_SEND_HOLD" in SCENARIOS
+        and PROMPT_COUNT > 1
+        and text == "STEER-LOCKED"
+    ):
+        write_file("replay-start.paused", "")
+        wait_for_gate("replay-start.go")
     if "PROMPT_FAIL" in SCENARIOS and PROMPT_COUNT == 2:
         respond(command.get("id"), "prompt", False, error="fake prompt failed")
         return
@@ -304,6 +320,14 @@ def handle_prompt(command):
 def handle_steer(command):
     global RACE_PHASE, RACE_TEXT, HOLD_START
     text = command.get("message", "")
+    if "REPLAY_SEND_HOLD" in SCENARIOS:
+        QUEUE.clear()
+        send({"type": "queue_update", "steering": [], "followUp": []})
+        finish_hold(True)
+        write_file("steer.paused", "")
+        wait_for_gate("steer.release")
+        respond(command.get("id"), "prompt", True, {"disposition": "queued"})
+        return
     if RACE_PHASE == 1:
         RACE_PHASE = 2
         RACE_TEXT = text

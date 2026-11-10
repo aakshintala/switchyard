@@ -194,7 +194,7 @@ Muse sessions use `--disable-sandbox` and `allowAll`. pi sessions use no sandbox
 
 Use `send <id> TEXT` to start a turn when idle or steer the active turn. `send <id> -` reads text from stdin; it fails rather than prompting when stdin is a terminal. For text that starts with a dash, use `send <id> -- TEXT`. Text is limited to 8 MiB, must be non-empty after trimming, and cannot contain NUL. Text starting with `/` is rejected with a usage error on a pi session: pi would expand `/skill:<name>` or `/<template>` or run an extension command instead of sending the text to the model. Muse text is sent unchanged.
 
-`steered` means the host accepted the message for application on the next model continuation. It does not mean the model has acted on it yet.
+`steered` means the host accepted the message for application on the next model continuation. It does not mean the model has acted on it yet. If `send` exits 5 with `busy`, it did not accept the text; retain it and retry once the replay bridge or host continuation resolves.
 
 Plain `stop` interrupts a running turn, closes host stdin, and ends the session. `stop --interrupt` interrupts the running turn and keeps the session; at idle, it is a no-op.
 
@@ -206,7 +206,7 @@ The host applies `--model` after start (`set_model`, then `set_thinking_level` w
 
 pi keeps its defaults: extensions, skills, and context files load into the lane, no `--no-*` flags and no `--tools` restriction are passed, and a project-trust prompt is refused. The pi boot bound is a const; there is no config knob for it. A Muse start never resolves the pi binary.
 
-A steer queued during a tool call is delivered after that turn's tool calls and before the next model call. `stop --interrupt` and plain `stop` clear the queue (`clear_queue`) before the abort, dropping unsent steers, which are reported as `steer.unconsumed`; the host survives an interrupt. A steer that races the end of a turn starts the next turn.
+A steer queued during a tool call is delivered after that turn's tool calls and before the next model call. `stop --interrupt` and plain `stop` request that the queue be cleared (`clear_queue`) before the abort; pi may still continue queued steers after the request, so do not assume they were all dropped. The host survives an interrupt. A steer that races the end of a turn starts the next turn.
 
 The session records only `completed`, `failed` or `cancelled`, so a caller reads the trailing `STATUS:` line of the last `message` log line:
 
