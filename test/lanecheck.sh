@@ -701,6 +701,43 @@ ruling() { # ruling <run> <ticket> <n> [age in minutes, default 1]
   age_file "$f" "${4:-1}"
 }
 
+# At the plan-to-build handoff, both sessions use one ticket state file. The
+# pending tkt-build belongs to the newer live build session, not the plan that
+# has already reported PLANNED and ended its turn.
+r=$(newrun 1518); lane "$r" 1518 fiber-1518-plan plan1518 3H; lane "$r" 1518 fiber-1518-build build1518 1M
+printf '{"ok":true,"sessions":[{"id":"plan1518","status":"completed","turnCount":2},{"id":"build1518","status":"running","activeTurnId":"t1","turnCount":1}]}' > "$T/dsess"
+printf '/bin/bash /home/a/.agents/bin/tkt-build /srv/lanes/run/fiber-1518.state --phase build\n' > "$T/pending"
+rep "$r" 1518 'STATUS: PLANNED — plan handed off to build.'
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
+if printf '%s' "$out" | grep -q '^STALL 1518 muse fiber-1518-plan' \
+   && printf '%s' "$out" | grep -q 'STATUS: PLANNED' \
+   && printf '%s' "$out" | grep -q 'retire it if its report landed' \
+   && printf '%s' "$out" | grep -q 'newer roster entry muse/fiber-1518-build' \
+   && printf '%s' "$out" | grep -q 'shared-state pending work is credited to that newer session: /bin/bash.*tkt-build' \
+   && printf '%s' "$out" | grep -q '^LIVE 1518 muse fiber-1518-build' \
+   && ! printf '%s' "$out" | grep -q '^ABANDONED 1518 muse fiber-1518-plan'; then
+  ok planned-session-is-retirable-after-build-handoff
+else
+  fail "planned-session-is-retirable-after-build-handoff ($out)"
+fi
+: > "$T/pending"
+
+# A retired newer build entry cannot own pending work on the shared state file.
+r=$(newrun 1519); lane "$r" 1519 fiber-1519-plan plan1519 3H; lane "$r" 1519 fiber-1519-build build1519 1M
+printf '%s\t1519\tfiber-1519-build\n' "$(future 1)" > "$r/roster-done"
+printf '{"ok":true,"sessions":[{"id":"plan1519","status":"completed","turnCount":2}]}' > "$T/dsess"
+printf '/bin/bash /home/a/.agents/bin/tkt-build /srv/lanes/run/fiber-1519.state --phase build\n' > "$T/pending"
+rep "$r" 1519 'STATUS: PLANNED — plan handed off to build.'
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
+if printf '%s' "$out" | grep -q '^ABANDONED 1519 muse fiber-1519-plan' \
+   && ! printf '%s' "$out" | grep -q '^STALL 1519 muse fiber-1519-plan' \
+   && ! printf '%s' "$out" | grep -q 'newer roster entry muse/fiber-1519-build'; then
+  ok retired-newer-roster-entry-does-not-own-shared-state-work
+else
+  fail "retired-newer-roster-entry-does-not-own-shared-state-work ($out)"
+fi
+: > "$T/pending"
+
 r=$(newrun G); lane "$r" 4152 fiber-4152-build yz1
 printf '{"ok":true,"sessions":[{"id":"yz1","status":"running","turnCount":7}]}' > "$T/dsess"
 : > "$T/pending"; : > "$T/asking"; : > "$T/prs"
@@ -1033,6 +1070,25 @@ if [ "$(grep -c '' "$T/fclog")" = 0 ] && printf '%s' "$out" | grep -q 'fence kep
   ok fence-kept-releases-nothing
 else
   fail "fence-kept-releases-nothing (log=$(cat "$T/fclog")) ($out)"
+fi
+
+# An old whole-ticket retirement cannot retire a session launched afterward.
+# Finishing the older plan session must leave the newer build's fence and claim.
+r=$(newrun C10)
+printf '2019-12-31T00:00:00Z\t1543\tmuse\tfiber-1543-plan\tplan1543\n2020-01-02T00:00:00Z\t1543\tmuse\tfiber-1543-build\tbuild1543\n' > "$r/roster"
+printf '2020-01-01T00:00:00Z\t1543\n' > "$r/roster-done"
+grant "$r" 1543
+: > "$T/fclog"; : > "$T/fcheld"; held fiber-1543 crates/loop/src/1543.rs
+out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
+  bash "$BIN/lanecheck" "done" 1543:fiber-1543-plan 2>&1)
+if [ -e "$r/fiber-1543-fence-grant-20261104T0000Z.md" ] \
+   && [ ! -e "$r/done/fiber-1543-fence-grant-20261104T0000Z.md" ] \
+   && printf '%s' "$out" | grep -q 'fence kept for #1543: 1 session' \
+   && [ "$(grep -c '' "$T/fclog")" = 0 ] \
+   && grep -q '^fiber-1543[[:space:]]' "$T/fcheld"; then
+  ok old-ticket-retirement-does-not-release-new-session-claims
+else
+  fail "old-ticket-retirement-does-not-release-new-session-claims (log=$(cat "$T/fclog")) ($out)"
 fi
 
 # A failed release names the hand command and does not stop the retirement. The

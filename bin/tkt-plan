@@ -81,6 +81,14 @@ plan_without_rulings() {
   ' "$1"
 }
 
+plan_protected_sections() {
+  awk '
+    /^## (Files|Gate|Tasks)([[:space:]]|$)/ { in_protected=1; print; next }
+    /^## / { in_protected=0 }
+    in_protected { print }
+  ' "$1"
+}
+
 plan_rulings_section() {
   awk '
     /^## Rulings[[:space:]]*$/ { in_rulings=1; found=1 }
@@ -116,6 +124,9 @@ normalize_plan_ruling_line() {
       line=$0
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
+      if (line ~ /^(```|~~~)/) next
+      sub(/^[-+]/, "", line)
+      sub(/^[[:space:]]+/, "", line)
       sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
@@ -237,6 +248,21 @@ clear_verdict() {
   t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
 }
 
+record_plan_stop_verdict() {
+  local kind="$1" stop_hash existing_hash existing_at
+  stop_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+  stop_hash="$kind:$base:$stop_hash"
+  existing_hash="$(t get plan_stop_verdict_key 2>/dev/null || true)"
+  existing_at="$(t get plan_stop_verdict_at 2>/dev/null || true)"
+  # ROUND-LIMIT reports a stop that already happened: keep any recorded time,
+  # so a ruling posted after the LINES stop stays newer than it.
+  if [ "$kind" = round-limit ] && [ -n "$existing_at" ]; then return 0; fi
+  if [ "$existing_hash" != "$stop_hash" ] || [ -z "$existing_at" ]; then
+    t set plan_stop_verdict_key "$stop_hash"
+    t set plan_stop_verdict_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  fi
+}
+
 do_verify() {
   extra=""; model=""
   while [ $# -gt 0 ]; do case "$1" in
@@ -309,16 +335,37 @@ do_verify() {
       fi
     fi
   fi
+  # A build-phase STALE recovery carries a state marker tied to its new Base
+  # and exact plan snapshot. Its stale check is Files-based, so those changed
+  # Files paths remain exempt even when resolved Task paths omit them.
+  if [ "$drift" -eq 0 ]; then
+    recovery_base="$(t get build_stale_recovery_base 2>/dev/null || true)"
+    recovery_plan_hash="$(t get build_stale_recovery_plan_hash 2>/dev/null || true)"
+    if [ "$recovery_base" = "$base" ] && [ -n "$recovery_plan_hash" ] && [ -n "$vbase" ] && [ "$vbase" != "$base" ]; then
+      current_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+      if [ "$current_plan_hash" = "$recovery_plan_hash" ]; then
+        recovery_files=()
+        while IFS= read -r p; do recovery_files+=("$p"); done < <(plan_files_pathspecs "$plan")
+        if [ "${#recovery_files[@]}" -gt 0 ]; then
+          if recovery_stat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${recovery_files[@]}" 2>/dev/null)"; then
+            [ -n "$recovery_stat" ] && drift=1
+          fi
+        fi
+      fi
+    fi
+  fi
   if [ "$drift" -eq 0 ]; then
     if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
       if grant_pending; then
         granted_by="$(t get granted_by 2>/dev/null || true)"
         granted_comment="$(t get granted_comment 2>/dev/null || true)"
+        record_plan_stop_verdict round-limit
         emit "ROUND-LIMIT round=$round confirm=done" 1 "a grant is pending ($granted_by:$granted_comment); verify does not consume it: run tkt-plan $state confirm --edits <file>" "$(open_lines)"
       fi
+      record_plan_stop_verdict round-limit
       emit "ROUND-LIMIT round=$round confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
     fi
-    [ "$round" -lt 2 ] || emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan $state confirm --edits <file>, or after triage answers every open line run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+    [ "$round" -lt 2 ] || { record_plan_stop_verdict round-limit; emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan $state confirm --edits <file>, or after triage answers every open line run tkt-plan $state triaged --comment <id>" "$(open_lines)"; }
   fi
   clear_verdict
   model="$(vmodel "$model")" || exit 2
@@ -351,6 +398,14 @@ do_verify() {
   if [ "$drift" -eq 0 ]; then
     t set verifier_round "$((round + 1))"
   fi
+  if [ "$REC" -eq 1 ]; then
+    record_plan_stop_verdict lines
+  else
+    t set plan_stop_verdict_key ""
+    t set plan_stop_verdict_at ""
+  fi
+  t set build_stale_recovery_base ""
+  t set build_stale_recovery_plan_hash ""
   t set last_report "$rep"
   emit "$RV" "$REC" "$(head -n "$REPORT_LINES" "$rep")"
 }
@@ -478,6 +533,33 @@ do_triaged() {
     ""|*[!0-9]*) echo "tkt-plan: comment id must contain only digits" >&2; exit 2;;
   esac
   load_plan
+  comment_json="$tmp.triaged-comment.json"
+  comment_error="$tmp.triaged-comment-error"
+  if ! gh api "repos/$repo/issues/comments/$comment" >"$comment_json" 2>"$comment_error"; then
+    rm -f "$comment_json" "$comment_error"
+    emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "could not verify that comment $comment belongs to $repo#$issue"
+  fi
+  if ! jq -e --arg repo "$repo" --arg issue "$issue" '
+    type == "object" and (.body | type == "string")
+      and (.issue_url | type == "string")
+      and (.issue_url | contains("/repos/" + $repo + "/"))
+      and (.issue_url | endswith("/issues/" + $issue))
+  ' "$comment_json" >/dev/null 2>&1; then
+    rm -f "$comment_json" "$comment_error"
+    emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "comment $comment is not on $repo#$issue"
+  fi
+  stop_verdict_at="$(t get plan_stop_verdict_at 2>/dev/null || true)"
+  plan_verdict_at="$(t get plan_verdict_at 2>/dev/null || true)"
+  ruling_after_verdict_at="$stop_verdict_at"
+  if [ -n "$plan_verdict_at" ] && { [ -z "$ruling_after_verdict_at" ] || [[ "$plan_verdict_at" > "$ruling_after_verdict_at" ]]; }; then
+    ruling_after_verdict_at="$plan_verdict_at"
+  fi
+  if [ -z "$ruling_after_verdict_at" ] || ! jq -e --arg verdict_at "$ruling_after_verdict_at" '
+    (.created_at | type == "string") and (.created_at > $verdict_at)
+  ' "$comment_json" >/dev/null 2>&1; then
+    rm -f "$comment_json" "$comment_error"
+    emit "TRIAGED-REFUSED reason=ruling-stale" 1 "comment $comment does not postdate the latest plan verdict"
+  fi
   round="$(ronum)"
   stored_verdict="$(t get plan_verdict 2>/dev/null || true)"
   stored_hash="$(t get plan_verdict_hash 2>/dev/null || true)"
@@ -499,10 +581,8 @@ do_triaged() {
     after_rulings="$tmp.after-rulings"
     raw_diff="$tmp.diff"
     outside_diff="$tmp.outside-diff"
-    comment_json="$tmp.comment.json"
     comment_body="$tmp.comment-body"
     normalized_comment="$tmp.comment-normalized"
-    comment_error="$tmp.comment-error"
     if ! git -C "$worktree" cat-file blob "$stored_hash" >"$snapshot_file" 2>/dev/null; then
       rm -f "$snapshot_file"
       emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan $state verify"
@@ -525,44 +605,41 @@ do_triaged() {
     if [ "$stored_base" = "$base" ] && [ "$after_has_rulings" -eq 1 ] && cmp -s "$before_rest" "$after_rest" && ! cmp -s "$before_rulings" "$after_rulings"; then
       ruling_revision=1
     elif [ "$stored_base" = "$base" ] && ! cmp -s "$before_rest" "$after_rest"; then
-      # Match the plan parser's section-heading convention. A structural edit
-      # to Files, Gate or Tasks still needs a Verifier even if quoted.
-      protected_heading_changed=0
-      if grep -Eq '^[+-]## (Files|Gate|Tasks)([[:space:]]|$)' "$raw_diff"; then protected_heading_changed=1; fi
-      if [ "$protected_heading_changed" -eq 0 ]; then
-        diff_rc=0
-        if diff -u "$before_rest" "$after_rest" >"$outside_diff"; then :; else diff_rc=$?; fi
-        [ "$diff_rc" -le 1 ] || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$diff_file"; exit 2; }
-        if gh api "repos/$repo/issues/comments/$comment" >"$comment_json" 2>"$comment_error" && jq -e 'type == "object" and (.body | type == "string")' "$comment_json" >/dev/null 2>&1; then
-          jq -r '.body' "$comment_json" >"$comment_body" || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$comment_json" "$comment_body" "$comment_error" "$diff_file"; exit 2; }
-          awk '
-            {
-              line=$0
-              sub(/^[[:space:]]+/, "", line)
-              sub(/[[:space:]]+$/, "", line)
-              sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
-              sub(/^[[:space:]]+/, "", line)
-              sub(/[[:space:]]+$/, "", line)
-              if (length(line)) print line
-            }
-          ' "$comment_body" >"$normalized_comment"
-          first_unmatched=""
-          while IFS= read -r added_line; do
-            normalized_line="$(normalize_plan_ruling_line "$added_line")"
-            [ -n "$normalized_line" ] || continue
-            if ! grep -Fqx -- "$normalized_line" "$normalized_comment"; then
-              first_unmatched="$added_line"
-              break
-            fi
-          done < <(awk '/^\+\+\+/ { next } /^\+/ { print substr($0, 2) }' "$outside_diff")
-          if [ -z "$first_unmatched" ]; then
-            ruling_revision=1
-            accepted_diff="$diff_file"
-          fi
-        else
-          comment_error_text="$(head -n 1 "$comment_error" 2>/dev/null || true)"
-          first_unmatched="could not read comment $comment${comment_error_text:+: $comment_error_text}"
+      # Any edit within Files, Gate or Tasks still needs a Verifier, even if quoted.
+      protected_section_changed=0
+      if ! cmp -s <(plan_protected_sections "$snapshot_file") <(plan_protected_sections "$plan"); then
+        protected_section_changed=1
+      fi
+      diff_rc=0
+      if diff -u "$before_rest" "$after_rest" >"$outside_diff"; then :; else diff_rc=$?; fi
+      [ "$diff_rc" -le 1 ] || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$diff_file"; exit 2; }
+      jq -r '.body' "$comment_json" >"$comment_body" || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$comment_json" "$comment_body" "$comment_error" "$diff_file"; exit 2; }
+      awk '
+        {
+          line=$0
+          sub(/^[[:space:]]+/, "", line)
+          sub(/[[:space:]]+$/, "", line)
+          if (line ~ /^(```|~~~)/) next
+          sub(/^[-+]/, "", line)
+          sub(/^[[:space:]]+/, "", line)
+          sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
+          sub(/^[[:space:]]+/, "", line)
+          sub(/[[:space:]]+$/, "", line)
+          if (length(line)) print line
+        }
+      ' "$comment_body" >"$normalized_comment"
+      first_unmatched=""
+      while IFS= read -r changed_line; do
+        normalized_line="$(normalize_plan_ruling_line "$changed_line")"
+        [ -n "$normalized_line" ] || continue
+        if ! grep -Fqx -- "$normalized_line" "$normalized_comment"; then
+          first_unmatched="$changed_line"
+          break
         fi
+      done < <(awk 'NR <= 2 && /^(---|\+\+\+)/ { next } /^[+-]/ { print substr($0, 2) }' "$outside_diff")
+      if [ -z "$first_unmatched" ] && [ "$protected_section_changed" -eq 0 ]; then
+        ruling_revision=1
+        accepted_diff="$diff_file"
       fi
     fi
     if [ "$ruling_revision" -ne 1 ]; then
@@ -583,7 +660,7 @@ do_triaged() {
 
   if [ -z "$confirmed_for" ] && [ "$round" -lt 2 ]; then
     if [ "$ruling_revision" -eq 1 ]; then
-      [ "$stored_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
+      case "$stored_verdict" in lines|ok) ;; *) emit "TRIAGED-REFUSED reason=rounds-open" 1;; esac
     else
       plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
       [ "$plan_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
@@ -657,8 +734,14 @@ do_post() {
   while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
   if ! plan_verdict_check build "$tkt_state" "$state" "$no_verifier" "$plan" "$base" "$worktree" ${files[@]+"${files[@]}"}; then emit "POST-FAIL reason=verdict verdict=$verdict_refusal" 1 "$verdict_digest"; fi
   "$plangate" ${gate_args[@]+"${gate_args[@]}"} "$plan" >"$tmp" 2>&1 || emit "POST-FAIL reason=gate" 1 "$(head -n 10 "$tmp")"
-  pargs=(); [ -z "$part" ] || pargs=(--part "$part")
-  urls="$("$postplan" "$issue" "$plan" --repo "$repo" ${pargs[@]+"${pargs[@]}"} 2>"$tmp")" || emit "POST-FAIL reason=post" "$?" "$(head -n 10 "$tmp")"
+  post_run_id="$(t get post_run 2>/dev/null || true)"
+  if [ -z "$post_run_id" ]; then
+    post_run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    t set post_run "$post_run_id"
+  fi
+  [[ "$post_run_id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "tkt-plan: invalid post_run state id" >&2; exit 2; }
+  pargs=(--run "$post_run_id"); [ -z "$part" ] || pargs+=(--part "$part")
+  urls="$("$postplan" "$issue" "$plan" --repo "$repo" "${pargs[@]}" 2>"$tmp")" || emit "POST-FAIL reason=post" "$?" "$(head -n 10 "$tmp")"
   emit "POSTED urls=$(tr '\n' ',' <<<"$urls" | sed 's/,$//')" 0 "$urls"
 }
 
@@ -692,6 +775,8 @@ do_set() {
   # fresh budget from tkt-start --part <n>, not from a new path.
   if [ "$old_plan" != "$plan" ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
+    t set plan_stop_verdict_key ""; t set plan_stop_verdict_at ""
+    t set build_stale_recovery_base ""; t set build_stale_recovery_plan_hash ""
     t set plan_questions_comment ""; t set plan_questions_hash ""; t set plan_questions_verdict_at ""; t set plan_questions_verdict_hash ""
     t set verified_base ""; t set verified_plan_hash ""
     t set pack_plan_hash ""; t set last_report ""
@@ -729,6 +814,10 @@ do_replan() {
   # verifier snapshot, pack hash and triage comment are not part of PLAN-OK.
   t set verified_plan_hash ""
   t set pack_plan_hash ""
+  t set plan_stop_verdict_key ""
+  t set plan_stop_verdict_at ""
+  t set build_stale_recovery_base ""
+  t set build_stale_recovery_plan_hash ""
   t set plan_triage_comment ""
   t set job.lane ""
   t set job.fix1 ""

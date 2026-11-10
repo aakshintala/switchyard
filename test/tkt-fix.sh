@@ -637,7 +637,61 @@ grep -q "job|.*--slot fix3.*--resume j9" "$T/calls.log" || fail "resume at round
 bash "$TKT" "$S" --verify --resume j9 2>/dev/null && fail "resume without prompt exited 0"
 rc=$?; [ "$rc" = "2" ] || fail "resume without prompt exited $rc, want 2"
 
-# 7b. The fix brief gets the plan gate as GATE (fix.md fills __GATE__).
+# 7b. A takeover uses its recorded gate without a plan file.
+setup_case takeover
+rm -f "$CDIR/plan.md"
+drop_state_key plan
+bash "$TKT_STATE" "$S" set plan 'takeover #123' >/dev/null
+bash "$TKT_STATE" "$S" set gate 'bash test/run && bash bin/check-pack' >/dev/null
+bash "$TKT_STATE" "$S" add fence fix.txt >/dev/null
+bash "$TKT_STATE" "$S" set env 'FOO=1 BAR=2' >/dev/null
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "takeover exited $? (stderr: $(cat "$T/stderr"); calls: $(cat "$T/calls.log"))"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "takeover bad verdict: $(head -n 1 <<<"$out")"
+grep -F -q 'GATE=bash test/run && bash bin/check-pack' "$T/calls.log" || fail "takeover gate not passed to fix brief"
+grep -F -q -- '--gate FOO=1 BAR=2 bash test/run && bash bin/check-pack' "$T/calls.log" || fail "takeover gate not passed to tkt-job with state env"
+
+setup_case takeover-resume
+rm -f "$CDIR/plan.md"
+drop_state_key plan
+bash "$TKT_STATE" "$S" set plan 'takeover #123' >/dev/null
+bash "$TKT_STATE" "$S" set gate 'bash test/run && bash bin/check-pack' >/dev/null
+bash "$TKT_STATE" "$S" add fence fix.txt >/dev/null
+bash "$TKT_STATE" "$S" set env 'FOO=1 BAR=2' >/dev/null
+printf 'resume brief\n' >"$CDIR/prompt.md"
+out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "takeover resume exited $? (stderr: $(cat "$T/stderr"))"
+grep -F -q -- "--resume j9 --prompt $CDIR/prompt.md --gate FOO=1 BAR=2 bash test/run && bash bin/check-pack" "$T/calls.log" || fail "takeover resume did not pass the stored gate directly with state env"
+grep -q 'job|.*--gate-from-plan' "$T/calls.log" && fail "takeover resume requested a nonexistent plan gate"
+
+# Ordinary states without a plan, bare takeover values, and takeover without a
+# gate remain refusals before a fix job is dispatched.
+setup_case no-plan
+rm -f "$CDIR/plan.md"
+drop_state_key plan
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "ordinary missing plan exited 0"
+rc=$?; [ "$rc" = "2" ] || fail "ordinary missing plan exited $rc, want 2"
+grep -q 'missing key: plan' "$T/stderr" || fail "ordinary missing plan did not name plan"
+grep -q 'job|' "$T/calls.log" && fail "ordinary missing plan dispatched a job"
+
+setup_case bare-takeover
+rm -f "$CDIR/plan.md"
+drop_state_key plan
+bash "$TKT_STATE" "$S" set plan takeover >/dev/null
+bash "$TKT_STATE" "$S" set gate 'bash test/run' >/dev/null
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "bare takeover exited 0"
+rc=$?; [ "$rc" = "2" ] || fail "bare takeover exited $rc, want 2"
+grep -Fq 'invalid takeover plan value' "$T/stderr" || fail "bare takeover refusal did not identify its invalid value"
+grep -q 'job|' "$T/calls.log" && fail "bare takeover dispatched a job"
+
+setup_case takeover-no-gate
+rm -f "$CDIR/plan.md"
+drop_state_key plan
+bash "$TKT_STATE" "$S" set plan 'takeover #123' >/dev/null
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "takeover without gate exited 0"
+rc=$?; [ "$rc" = "2" ] || fail "takeover without gate exited $rc, want 2"
+grep -qi 'takeover.*gate\|missing.*gate' "$T/stderr" || fail "takeover without gate did not name its missing gate"
+grep -q 'job|' "$T/calls.log" && fail "takeover without gate dispatched a job"
+
+# The fix brief gets the plan gate as GATE (fix.md fills __GATE__).
 setup_case gatefill
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "gatefill exited $?"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "gatefill bad verdict: $(head -n 1 <<<"$out")"

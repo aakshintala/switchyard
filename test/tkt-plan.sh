@@ -308,6 +308,16 @@ expect_verdict() {
 
 state_get() { bash "$TKT_STATE" "$S" get "$1" 2>/dev/null || true; }
 
+set_ruling_comment() {
+  local body="$1" created_at="${2:-2099-01-01T00:00:00Z}" comment_issue="${3:-518}"
+  jq -n --arg body "$body" --arg url "https://api.github.com/repos/switchyard/issues/$comment_issue" --arg created_at "$created_at" '{body:$body,issue_url:$url,created_at:$created_at}' >"$T/comment.json"
+}
+
+seed_triaged_stop() {
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2000-01-01T00:00:00Z || fail "seed prior triaged stop timestamp"
+  set_ruling_comment 'Ruling for the open line.'
+}
+
 expect_plan_verdict() {
   [ "$(state_get plan_verdict)" = "$1" ] || fail "$3: plan_verdict is [$(state_get plan_verdict)], expected [$1]"
   [ "$(state_get plan_verdict_base)" = "$2" ] || fail "$3: plan_verdict_base is [$(state_get plan_verdict_base)], expected [$2]"
@@ -1069,6 +1079,7 @@ expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm after gran
 setup_case triaged-before-round-limit
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 1 || fail "triaged-before-round-limit seed round"
+seed_triaged_stop
 run_plan triaged --comment 123456
 [ "$RC" -eq 1 ] || fail "triaged before the confirm round or round limit exits 1"
 expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=rounds-open log=*" "triaged before round limit"
@@ -1082,6 +1093,7 @@ bash "$TKT_STATE" "$S" set verifier_round 1 || fail "triaged-lines-before-round-
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "triaged-lines-before-round-limit seed LINES"
 bash "$TKT_STATE" "$S" set plan_verdict_base "$base_now" || fail "triaged-lines-before-round-limit seed base"
 bash "$TKT_STATE" "$S" set plan_verdict_hash "$(git hash-object "$CDIR/plan.md")" || fail "triaged-lines-before-round-limit seed hash"
+seed_triaged_stop
 run_plan triaged --comment 123457
 [ "$RC" -eq 0 ] || fail "triaged current LINES verdict before round limit exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_plan_verdict triaged "$base_now" "triaged current LINES verdict before round limit"
@@ -1098,6 +1110,7 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "ruling-only-post records a LINES verdict (rc=$RC)"
 expect_plan_verdict lines "$base_now" "ruling-only-post LINES verdict"
 awk '{ if ($0 == "- Open line: use the default behavior.") print "- Ruling comment 654321 settles the open line."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+set_ruling_comment 'Use the default behavior.'
 run_plan triaged --comment 654321
 [ "$RC" -eq 0 ] || fail "ruling-only-post accepts a Rulings-only edit (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
 expect_plan_verdict triaged "$base_now" "ruling-only-post settled verdict"
@@ -1117,6 +1130,7 @@ run_plan verify
 [ "$RC" -eq 1 ] || fail "ruling-files-change records a LINES verdict"
 original_verdict_hash="$(state_get plan_verdict_hash)"
 awk '{ if ($0 == "- `f.txt`") print "- `g.txt`"; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+set_ruling_comment 'The Files path changed.'
 run_plan triaged --comment 654322
 [ "$RC" -eq 1 ] || fail "ruling-files-change refuses a Files edit (rc=$RC)"
 expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "ruling-files-change"
@@ -1133,6 +1147,7 @@ setup_case triaged-after-confirm
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 1 || fail "triaged-after-confirm seed round"
 bash "$TKT_STATE" "$S" set confirmed_for 1 || fail "triaged-after-confirm seed confirm"
+seed_triaged_stop
 run_plan triaged --comment 234567
 [ "$RC" -eq 0 ] || fail "triaged after confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_plan_verdict triaged "$(cat "$CDIR/base")" "triaged after confirm"
@@ -1142,6 +1157,7 @@ expect_plan_verdict triaged "$(cat "$CDIR/base")" "triaged after confirm"
 setup_case triaged-post
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-post seed rounds"
+seed_triaged_stop
 run_plan triaged --comment 345678
 [ "$RC" -eq 0 ] || fail "triaged after round limit exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_plan_verdict triaged "$(cat "$CDIR/base")" "triaged after round limit"
@@ -1161,6 +1177,7 @@ grep -Fq 'tkt-plan: comment id must contain only digits' "$CDIR/stderr.txt" || f
 setup_case triaged-stale
 rebase_plan
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-stale seed rounds"
+seed_triaged_stop
 run_plan triaged --comment 456789
 [ "$RC" -eq 0 ] || fail "triaged-stale records its verdict"
 set_plan_base 0000000000000000000000000000000000000000
@@ -1260,11 +1277,22 @@ printf 'ok' >"$T/mode"
 setup_case post
 bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed post verdict"
 bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed post verdict base"
+: >"$T/stub.log"
 run_plan post
 [ "$RC" -eq 0 ] || fail "POSTED exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan POSTED urls=*issuecomment-11* log=*" "POSTED"
 grep -q "issuecomment-12" <<<"$OUT" || fail "POSTED lists every URL"
 grep -q "post|518.*--repo switchyard" "$T/stub.log" || fail "post passes issue and repo to post-plan"
+post_run="$(state_get post_run)"
+[[ "$post_run" =~ ^[A-Za-z0-9._-]+$ ]] || fail "post stores a valid per-state run id"
+grep -Fq -- "--run $post_run" "$T/stub.log" || fail "post passes the stored run id to post-plan"
+run_plan post
+[ "$RC" -eq 0 ] || fail "same-state post exits 0"
+post_run_again="$(state_get post_run)"
+[ "$post_run_again" = "$post_run" ] || fail "same-state post keeps its run id"
+[ "$(grep -c '^post|' "$T/stub.log")" = "2" ] || fail "same-state post invokes post-plan again"
+second_post="$(grep '^post|' "$T/stub.log" | sed -n '2p')"
+case "$second_post" in *"--run $post_run"*) ;; *) fail "same-state post passes the same run id again";; esac
 run_plan post --part P3
 [ "$RC" -eq 0 ] || fail "--part post exits 0"
 grep -q "post|.*--part P3" "$T/stub.log" || fail "--part reaches post-plan"
@@ -2667,7 +2695,105 @@ write_triaged_tasks_plan() {
   printf 'Base: %s\n\n## Rulings\n\n- Open line: clarify the task wording.\n\n## Tasks\n\n1. Keep the existing task wording.\n\n## Files\n\n- `f.txt`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
 }
 
+write_triaged_interfaces_plan() {
+  printf 'Base: %s\n\n## Rulings\n\n- Open line: clarify the interface wording.\n\n## Interfaces\n\n1. Preserve the existing interface.\n\n## Files\n\n- `f.txt`\n\n## Tasks\n\n1. Preserve the existing task.\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+}
+
+replace_plan_line() {
+  local old_line="$1" new_line="$2"
+  printf '%s\n' "$new_line" >"$T/replacement-lines"
+  awk -v old_line="$old_line" -v replacements_file="$T/replacement-lines" '
+    BEGIN { while ((getline line < replacements_file) > 0) replacements[++count]=line }
+    $0 == old_line { for (i=1; i<=count; i++) print replacements[i]; next }
+    { print }
+  ' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+}
+
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; then
+  setup_case triaged-lines-stop-time
+  rebase_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-lines-stop-time records a LINES verdict"
+  lines_stop_at="$(state_get plan_stop_verdict_at)"
+  [ -n "$lines_stop_at" ] || fail "triaged-lines-stop-time records its stop timestamp"
+  lines_stop_at=2000-01-01T00:00:00Z
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at "$lines_stop_at" || fail "triaged-lines-stop-time seeds a known stop time"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-lines-stop-time repeats the LINES verdict"
+  [ "$(state_get plan_stop_verdict_at)" = "$lines_stop_at" ] || fail "triaged-lines-stop-time keeps the first time for the same stop"
+  run_plan replan
+  [ "$RC" -eq 0 ] || fail "triaged-lines-stop-time replans"
+  [ -z "$(state_get plan_stop_verdict_at)" ] || fail "replan clears the plan stop timestamp"
+  [ -z "$(state_get plan_stop_verdict_key)" ] || fail "replan clears the plan stop key"
+
+  setup_case triaged-round-limit-stop-time
+  rebase_plan
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed triaged round limit"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-round-limit-stop-time emits ROUND-LIMIT"
+  expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "triaged-round-limit-stop-time"
+  round_limit_stop_at="$(state_get plan_stop_verdict_at)"
+  [ -n "$round_limit_stop_at" ] || fail "triaged-round-limit-stop-time records its stop timestamp"
+  round_limit_stop_at=2000-01-01T00:00:00Z
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at "$round_limit_stop_at" || fail "triaged-round-limit-stop-time seeds a known stop time"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-round-limit-stop-time repeats ROUND-LIMIT"
+  [ "$(state_get plan_stop_verdict_at)" = "$round_limit_stop_at" ] || fail "triaged-round-limit-stop-time keeps the first time for the same stop"
+
+  # A ruling written into the plan changes its hash; the ROUND-LIMIT that
+  # follows must keep the LINES stop time, or the ruling reads as stale.
+  setup_case triaged-round-limit-after-edit
+  rebase_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-round-limit-after-edit records a LINES verdict"
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2000-01-01T00:00:00Z || fail "triaged-round-limit-after-edit seeds a known stop time"
+  printf '\n## Rulings\n\n- Ruling comment settles the open line.\n' >>"$CDIR/plan.md"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-round-limit-after-edit seeds the round limit"
+  run_plan verify
+  expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "triaged-round-limit-after-edit"
+  [ "$(state_get plan_stop_verdict_at)" = 2000-01-01T00:00:00Z ] || fail "triaged-round-limit-after-edit keeps the LINES stop time"
+
+  # A ruling always comes from the current ticket and must postdate its stop.
+  setup_case triaged-ruling-source
+  rebase_plan
+  write_triaged_tasks_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-ruling-source records a LINES verdict"
+  set_ruling_comment 'Use exact wording.' '2099-01-01T00:00:00Z' 519
+  : >"$T/gh.log"
+  run_plan triaged --comment 654320
+  [ "$RC" -eq 1 ] || fail "triaged-ruling-source refuses a comment on another issue"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-source issue=518 log=*" "triaged-ruling-source"
+  grep -Fq 'gh|api repos/switchyard/issues/comments/654320' "$T/gh.log" || fail "triaged-ruling-source fetches the comment"
+
+  setup_case triaged-ruling-stale
+  rebase_plan
+  write_triaged_tasks_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-ruling-stale records a LINES verdict"
+  awk '{ if ($0 == "- Open line: clarify the task wording.") print "- Comment 654321 settles the open line."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_ruling_comment 'Use exact wording.' '2000-01-01T00:00:00Z'
+  run_plan triaged --comment 654321
+  [ "$RC" -eq 1 ] || fail "triaged-ruling-stale refuses a comment before the stop verdict"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-stale log=*" "triaged-ruling-stale"
+
+  setup_case triaged-ruling-missing-stop-time
+  rebase_plan
+  write_triaged_tasks_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-ruling-missing-stop-time records a LINES verdict"
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at "" || fail "clear triaged stop timestamp"
+  bash "$TKT_STATE" "$S" set plan_verdict_at "" || fail "clear triaged plan verdict timestamp"
+  set_ruling_comment 'Use exact wording.'
+  run_plan triaged --comment 654321
+  [ "$RC" -eq 1 ] || fail "triaged-ruling-missing-stop-time refuses a missing stop timestamp"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-stale log=*" "triaged-ruling-missing-stop-time"
+
   # Keep the pre-existing Rulings-only success and unrelated Files-diff
   # refusal on the focused path too.
   setup_case triaged-focused-ruling-only
@@ -2678,6 +2804,7 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   run_plan verify
   [ "$RC" -eq 1 ] || fail "triaged-focused-ruling-only records a LINES verdict"
   awk '{ if ($0 == "- Open line: use the default behavior.") print "- Comment 654321 settles the open line."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_ruling_comment 'Use the default behavior.'
   run_plan triaged --comment 654321
   [ "$RC" -eq 0 ] || fail "triaged-focused-ruling-only preserves Rulings-only acceptance (rc=$RC): $(first_line)"
   expect_plan_verdict triaged "$base_now" "triaged-focused-ruling-only"
@@ -2691,7 +2818,7 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   run_plan verify
   [ "$RC" -eq 1 ] || fail "triaged-focused-other-diff records a LINES verdict"
   awk '{ if ($0 == "- `f.txt`") print "- `g.txt`"; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
-  rm -f "$T/comment.json"
+  set_ruling_comment 'The unrelated Files change is not ruled.'
   run_plan triaged --comment 654322
   [ "$RC" -eq 1 ] || fail "triaged-focused-other-diff refuses a nonverbatim Files change"
   expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-focused-other-diff"
@@ -2703,17 +2830,17 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   # Verifier round, and the accepted plan diff remains journaled in run/.
   setup_case triaged-verbatim
   rebase_plan
-  write_triaged_tasks_plan
+  write_triaged_interfaces_plan
   base_now="$(cat "$CDIR/base")"
   printf 'lines' >"$T/mode"
   run_plan verify
   [ "$RC" -eq 1 ] || fail "triaged-verbatim records a LINES verdict"
   jobs_before="$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)"
-  awk '{ if ($0 == "- Open line: clarify the task wording.") print "- Comment 654323 rules: apply the task wording exactly."; else if ($0 == "1. Keep the existing task wording.") print "1. Use the exact wording."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
-  jq -n --arg body '  - Use the exact wording.  ' '{body:$body}' >"$T/comment.json"
+  awk '{ if ($0 == "- Open line: clarify the interface wording.") print "- Comment 654323 rules: apply the interface wording exactly."; else if ($0 == "1. Preserve the existing interface.") print "1. Use the revised interface."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_ruling_comment $'  - Preserve the existing interface.  \n  - Use the revised interface.  '
   : >"$T/gh.log"
   run_plan triaged --comment 654323
-  [ "$RC" -eq 0 ] || fail "triaged-verbatim accepts the quoted Tasks edit (rc=$RC): $(first_line)"
+  [ "$RC" -eq 0 ] || fail "triaged-verbatim accepts the quoted Interfaces edit (rc=$RC): $(first_line)"
   expect_verdict "TKT tkt-plan SET triaged=654323 plan-diff=* log=*" "triaged-verbatim success names its diff"
   expect_plan_verdict triaged "$base_now" "triaged-verbatim records a passing verdict"
   expect_current_plan_verdict_hash "triaged-verbatim records the current plan hash"
@@ -2727,20 +2854,34 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   # One unquoted addition makes the whole outside-Rulings edit ineligible.
   setup_case triaged-verbatim-extra-line
   rebase_plan
-  write_triaged_tasks_plan
+  write_triaged_interfaces_plan
   base_now="$(cat "$CDIR/base")"
   printf 'lines' >"$T/mode"
   run_plan verify
   [ "$RC" -eq 1 ] || fail "triaged-verbatim-extra-line records a LINES verdict"
-  awk '{ if ($0 == "- Open line: clarify the task wording.") print "- Comment 654324 rules: apply the task wording exactly."; else if ($0 == "1. Keep the existing task wording.") { print "1. Use the exact wording."; print "2. Add this unquoted task." } else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
-  jq -n --arg body 'Use the exact wording.' '{body:$body}' >"$T/comment.json"
+  awk '{ if ($0 == "- Open line: clarify the interface wording.") print "- Comment 654324 rules: apply the interface wording exactly."; else if ($0 == "1. Preserve the existing interface.") { print "1. Use the revised interface."; print "2. Add this unquoted interface." } else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_ruling_comment $'  - Preserve the existing interface.  \n  - Use the revised interface.  '
   : >"$T/gh.log"
   run_plan triaged --comment 654324
   [ "$RC" -eq 1 ] || fail "triaged-verbatim-extra-line refuses an unquoted task"
   expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-verbatim-extra-line"
-  grep -Fq 'first unmatched line: 2. Add this unquoted task.' <<<"$OUT" || fail "triaged-verbatim-extra-line names its first unmatched line: $OUT"
+  grep -Fq 'first unmatched line: 2. Add this unquoted interface.' <<<"$OUT" || fail "triaged-verbatim-extra-line names its first unmatched line: $OUT"
   [ "$(state_get plan_verdict)" = lines ] || fail "triaged-verbatim-extra-line preserves the LINES verdict"
   [ -z "$(state_get plan_triage_comment)" ] || fail "triaged-verbatim-extra-line does not record triage"
+
+  # A deleted Gate command is covered by the ruling check just like an addition.
+  setup_case triaged-deleted-gate
+  rebase_plan
+  write_triaged_tasks_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-deleted-gate records a LINES verdict"
+  awk '{ if ($0 == "- Open line: clarify the task wording.") print "- Comment 654327 rules: use the exact task wording."; else if ($0 == "`true`") next; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_ruling_comment 'Use the exact wording.'
+  run_plan triaged --comment 654327
+  [ "$RC" -eq 1 ] || fail "triaged-deleted-gate refuses an unquoted deleted Gate line"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-deleted-gate"
+  grep -Fq 'first unmatched line: `true`' <<<"$OUT" || fail "triaged-deleted-gate names the deleted Gate line: $OUT"
 
   # A quoted line cannot be accepted against a plan whose Base has moved.
   setup_case triaged-verbatim-base-moved
@@ -2751,13 +2892,41 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   [ "$RC" -eq 1 ] || fail "triaged-verbatim-base-moved records a LINES verdict"
   awk '{ if ($0 == "1. Keep the existing task wording.") print "1. Use the exact wording."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
   set_plan_base "$(git -C "$WT" rev-parse HEAD^)"
-  jq -n --arg body 'Use the exact wording.' '{body:$body}' >"$T/comment.json"
+  set_ruling_comment 'Use the exact wording.'
   : >"$T/gh.log"
   run_plan triaged --comment 654325
   [ "$RC" -eq 1 ] || fail "triaged-verbatim-base-moved refuses a moved Base"
   expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-verbatim-base-moved"
   [ "$(state_get plan_verdict)" = lines ] || fail "triaged-verbatim-base-moved preserves the LINES verdict"
-  [ -z "$(grep -F 'gh|api repos/switchyard/issues/comments/654325' "$T/gh.log" || true)" ] || fail "triaged-verbatim-base-moved does not read a comment on a moved Base"
+  [ -n "$(grep -F 'gh|api repos/switchyard/issues/comments/654325' "$T/gh.log" || true)" ] || fail "triaged-verbatim-base-moved always reads the ruling comment"
+fi
+
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = stale-recovery ]; then
+  # A build stale-recovery verify exempts changed plan Files even when the
+  # plan's resolved Task paths do not include the changed file.
+  setup_case build-stale-recovery-drift
+  wcommit "$WT" task.txt "task source"
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  A="$(git -C "$WT" rev-parse HEAD)"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "build-stale-recovery-drift seed round"
+  bash "$TKT_STATE" "$S" set verified_base "$A" || fail "build-stale-recovery-drift seed verified base"
+  wcommit "$WT" f.txt v3
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  B="$(git -C "$WT" rev-parse HEAD)"
+  {
+    printf 'Base: %s\n' "$B"
+    printf '\n## Files\n\n- `f.txt`\n- `task.txt`\n\n## Tasks\n\n1. Inspect `task.txt`.\n\n## Gate\n\n`true`\n'
+  } >"$CDIR/plan.md"
+  bash "$TKT_STATE" "$S" set build_stale_recovery_base "$B" || fail "build-stale-recovery-drift seed recovery Base"
+  bash "$TKT_STATE" "$S" set build_stale_recovery_plan_hash "$(git -C "$WT" hash-object "$CDIR/plan.md")" || fail "build-stale-recovery-drift seed recovery plan hash"
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "build-stale-recovery-drift exempt verify runs at the round limit (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "build-stale-recovery-drift"
+  grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "build-stale-recovery-drift uses the drift slot"
+  [ "$(state_get verifier_round)" = 2 ] || fail "build-stale-recovery-drift leaves the round budget unchanged"
+  [ -z "$(state_get build_stale_recovery_base)" ] || fail "build-stale-recovery-drift clears the recovery Base"
+  [ -z "$(state_get build_stale_recovery_plan_hash)" ] || fail "build-stale-recovery-drift clears the recovery plan hash"
 fi
 
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = amendment ]; then
@@ -2765,21 +2934,160 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = amendment ]; th
   # grant-round + confirm rather than a verify --extra that ROUND-LIMIT rejects.
   setup_case triaged-verbatim-spent-rounds
   rebase_plan
-  write_triaged_tasks_plan
+  write_triaged_interfaces_plan
   printf 'lines' >"$T/mode"
   run_plan verify
   [ "$RC" -eq 1 ] || fail "triaged-verbatim-spent-rounds records a LINES verdict"
   bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-verbatim-spent-rounds seed spent rounds"
-  awk '{ if ($0 == "1. Keep the existing task wording.") print "1. Add an unquoted task."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
-  jq -n --arg body 'No task-line quote here.' '{body:$body}' >"$T/comment.json"
+  awk '{ if ($0 == "1. Preserve the existing interface.") print "1. Add an unquoted interface."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_ruling_comment 'No interface-line quote here.'
   : >"$T/gh.log"
   run_plan triaged --comment 654326
-  [ "$RC" -eq 1 ] || fail "triaged-verbatim-spent-rounds refuses the unmatched edit"
+  [ "$RC" -eq 1 ] || fail "triaged-verbatim-spent-rounds refuses the unmatched interface edit"
   expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-verbatim-spent-rounds"
   diff_file="$(sed -n 's/^EXTRA diff: //p' <<<"$OUT")"
   [ -n "$diff_file" ] && [ -r "$diff_file" ] || fail "triaged-verbatim-spent-rounds exposes its diff"
   grep -Fq "run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits $diff_file" <<<"$OUT" || fail "triaged-verbatim-spent-rounds names the grant-round + confirm repair: $OUT"
   ! grep -Fq 'verify --extra' <<<"$OUT" || fail "triaged-verbatim-spent-rounds does not suggest verify --extra: $OUT"
+
+  # A pasted diff is a ruling when its added lines match, fenced or bare.
+  setup_case triaged-pasted-diff-fenced
+  rebase_plan
+  write_triaged_interfaces_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-pasted-diff-fenced records LINES"
+  replace_plan_line '1. Preserve the existing interface.' '1. Use the revised interface.'
+  set_ruling_comment $'Apply the quoted change:\n```diff\n-1. Preserve the existing interface.\n+1. Use the revised interface.\n```'
+  run_plan triaged --comment 700001
+  [ "$RC" -eq 0 ] || fail "triaged-pasted-diff-fenced accepts the fenced diff (rc=$RC): $OUT"
+  expect_plan_verdict triaged "$(cat "$CDIR/base")" "triaged-pasted-diff-fenced"
+
+  setup_case triaged-pasted-diff-bare
+  rebase_plan
+  write_triaged_interfaces_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-pasted-diff-bare records LINES"
+  replace_plan_line '1. Preserve the existing interface.' '1. Use the revised interface.'
+  set_ruling_comment $'Apply the quoted change:\n-1. Preserve the existing interface.\n+1. Use the revised interface.'
+  run_plan triaged --comment 700002
+  [ "$RC" -eq 0 ] || fail "triaged-pasted-diff-bare accepts bare diff lines (rc=$RC): $OUT"
+
+  # Every added line must be quoted, and the refusal names the missing one.
+  setup_case triaged-pasted-diff-missing-line
+  rebase_plan
+  write_triaged_interfaces_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-pasted-diff-missing-line records LINES"
+  replace_plan_line '1. Preserve the existing interface.' $'1. Use the revised interface.\n2. Add the second interface.'
+  set_ruling_comment $'```diff\n-1. Preserve the existing interface.\n+1. Use the revised interface.\n```'
+  run_plan triaged --comment 700003
+  [ "$RC" -eq 1 ] || fail "triaged-pasted-diff-missing-line refuses an unquoted addition"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-pasted-diff-missing-line"
+  grep -Fq 'first unmatched line: 2. Add the second interface.' <<<"$OUT" || fail "triaged-pasted-diff-missing-line names the missing line: $OUT"
+
+  # A pasted deletion line is a ruling; omitting it names the deleted line.
+  setup_case triaged-pasted-diff-deletion
+  rebase_plan
+  write_triaged_interfaces_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-pasted-diff-deletion records LINES"
+  replace_plan_line '1. Preserve the existing interface.' ''
+  set_ruling_comment $'```diff\n-1. Preserve the existing interface.\n```'
+  run_plan triaged --comment 700004
+  [ "$RC" -eq 0 ] || fail "triaged-pasted-diff-deletion accepts its deleted line (rc=$RC): $OUT"
+
+  setup_case triaged-pasted-diff-deletion-missing
+  rebase_plan
+  write_triaged_interfaces_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-pasted-diff-deletion-missing records LINES"
+  replace_plan_line '1. Preserve the existing interface.' ''
+  set_ruling_comment 'This ruling does not quote the deleted line.'
+  run_plan triaged --comment 700005
+  [ "$RC" -eq 1 ] || fail "triaged-pasted-diff-deletion-missing refuses an unquoted deletion"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-pasted-diff-deletion-missing"
+  grep -Fq 'first unmatched line: 1. Preserve the existing interface.' <<<"$OUT" || fail "triaged-pasted-diff-deletion-missing names the deleted line: $OUT"
+
+  # PLAN-OK has no stop time, so its verdict time governs ruling freshness.
+  setup_case triaged-plan-ok-newer-ruling
+  rebase_plan
+  write_triaged_interfaces_plan
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "triaged-plan-ok-newer-ruling records PLAN-OK (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+  [ -n "$(state_get plan_verdict_at)" ] || fail "PLAN-OK records its verdict time"
+  replace_plan_line '1. Preserve the existing interface.' '1. Use the revised interface.'
+  bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed old PLAN-OK verdict time"
+  set_ruling_comment $'```diff\n-1. Preserve the existing interface.\n+1. Use the revised interface.\n```'
+  run_plan triaged --comment 700006
+  [ "$RC" -eq 0 ] || fail "triaged-plan-ok-newer-ruling accepts a newer quoted ruling (rc=$RC): $OUT"
+  expect_plan_verdict triaged "$(cat "$CDIR/base")" "triaged-plan-ok-newer-ruling"
+  triaged_verdict_at="$(state_get plan_verdict_at)"
+  [ -n "$triaged_verdict_at" ] && [ "$triaged_verdict_at" != 2000-01-01T00:00:00Z ] || fail "passing triaged refreshes the plan verdict time"
+
+  setup_case triaged-plan-ok-old-ruling
+  rebase_plan
+  write_triaged_interfaces_plan
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "triaged-plan-ok-old-ruling records PLAN-OK"
+  replace_plan_line '1. Preserve the existing interface.' '1. Use the revised interface.'
+  set_ruling_comment 'The ruling is older than PLAN-OK.' 2000-01-01T00:00:00Z
+  run_plan triaged --comment 700007
+  [ "$RC" -eq 1 ] || fail "triaged-plan-ok-old-ruling refuses an older ruling"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-stale log=*" "triaged-plan-ok-old-ruling"
+
+  setup_case triaged-plan-ok-unquoted
+  rebase_plan
+  write_triaged_interfaces_plan
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "triaged-plan-ok-unquoted records PLAN-OK"
+  replace_plan_line '1. Preserve the existing interface.' '1. Use the revised interface.'
+  set_ruling_comment 'This newer ruling does not quote the edit.'
+  run_plan triaged --comment 700008
+  [ "$RC" -eq 1 ] || fail "triaged-plan-ok-unquoted refuses an unquoted edit"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-plan-ok-unquoted"
+
+  setup_case triaged-plan-ok-ruling-replay
+  rebase_plan
+  write_triaged_interfaces_plan
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "triaged-plan-ok-ruling-replay records PLAN-OK"
+  replace_plan_line '1. Preserve the existing interface.' '1. Use the revised interface.'
+  set_ruling_comment $'```diff\n-1. Preserve the existing interface.\n+1. Use the revised interface.\n```'
+  run_plan triaged --comment 700009
+  [ "$RC" -eq 0 ] || fail "triaged-plan-ok-ruling-replay accepts the first ruling"
+  set_ruling_comment 'Replay an older ruling.' 2000-01-01T00:00:00Z
+  run_plan triaged --comment 700010
+  [ "$RC" -eq 1 ] || fail "triaged-plan-ok-ruling-replay refuses an older ruling after triage"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-stale log=*" "triaged-plan-ok-ruling-replay"
+
+  # Quoting cannot bypass the Verifier requirement for structural sections.
+  for section in Files Gate Tasks; do
+    setup_case "triaged-protected-$section"
+    rebase_plan
+    write_triaged_interfaces_plan
+    printf 'lines' >"$T/mode"
+    run_plan verify
+    [ "$RC" -eq 1 ] || fail "triaged-protected-$section records LINES"
+    case "$section" in
+      Files) old_line='- `f.txt`'; new_line='- `g.txt`' ;;
+      Gate) old_line='`true`'; new_line='`false`' ;;
+      Tasks) old_line='1. Preserve the existing task.'; new_line='1. Revise the existing task.' ;;
+    esac
+    replace_plan_line "$old_line" "$new_line"
+    set_ruling_comment "$(printf '```diff\n-%s\n+%s\n```' "$old_line" "$new_line")"
+    run_plan triaged --comment 700011
+    [ "$RC" -eq 1 ] || fail "triaged-protected-$section refuses a quoted structural edit"
+    expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-protected-$section"
+  done
 fi
 
 echo "tkt-plan: all cases passed"

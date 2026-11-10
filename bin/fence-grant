@@ -141,6 +141,21 @@ fw_box_lane_names() {
   return 0
 }
 
+# Run the shared session mapper, passing its unmapped-session diagnostics through
+# as named warnings without changing a successful probe's stdout.
+fw_map_session_json() {
+  _fw_warn_file=$(mktemp "$tmp/fw-sess-lanes.XXXXXX") || return 1
+  _fw_names=$(python3 -I "$self_dir/fw-sess-lanes" "$1" 2>"$_fw_warn_file")
+  _fw_map_rc=$?
+  while IFS= read -r _fw_warning; do
+    [ -n "$_fw_warning" ] || continue
+    printf 'WARN fw-sess-lanes: %s\n' "$_fw_warning" >&2
+  done <"$_fw_warn_file"
+  rm -f "$_fw_warn_file"
+  [ "$_fw_map_rc" -eq 0 ] || return 1
+  printf '%s' "$_fw_names"
+}
+
 # Prints live Mac delegate session-lane names, `fiber-<n>` per live `delegate session`
 # the roster maps to a ticket. The Mac's sessions are local, not present in the
 # box probe's DSESS section, so probe them directly. Exit 1 when the command
@@ -149,7 +164,7 @@ fw_mac_delegate_session_lane_names() {
   _fw_out=$("${FW_DELEGATE:-delegate}" session list --json 2>/dev/null) || return 1
   _fw_roster=$(_fw_run)/roster
   [ -f "$_fw_roster" ] || return 1
-  _fw_names=$(printf '%s' "$_fw_out" | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
+  _fw_names=$(printf '%s' "$_fw_out" | fw_map_session_json "$_fw_roster") || return 1
   printf '%s' "$_fw_names" | tr '\n' ' '
   return 0
 }
@@ -276,7 +291,7 @@ fw_delegate_session_lane_names() {
   _fw_roster=$(_fw_run)/roster
   [ -f "$_fw_roster" ] || return 1
   _fw_parse_dsess() {
-    _fw_out=$(printf '%s\n' "$1" | grep -v '^DSESSJSONOK$' | python3 -I "$self_dir/fw-sess-lanes" "$_fw_roster") || return 1
+    _fw_out=$(printf '%s\n' "$1" | grep -v '^DSESSJSONOK$' | fw_map_session_json "$_fw_roster") || return 1
     printf '%s' "$_fw_out"
     return 0
   }

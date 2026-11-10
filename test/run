@@ -54,6 +54,13 @@ unset SWITCHYARD_TEST_RUN_BASH5_REEXEC
 # it set it per case, so start unset however the gate is invoked.
 unset CLAUDECODE
 
+# Fixture commits must not depend on a developer's global Git identity.
+GIT_AUTHOR_NAME='Switchyard Test'
+GIT_AUTHOR_EMAIL='switchyard-test@example.invalid'
+GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+
 D="$(cd "$(dirname "$0")" && pwd)"
 
 # --- parallel helper: run suites at most 3 at once from one pool (xargs -P),
@@ -66,7 +73,7 @@ run_parallel() {
   # shellcheck disable=SC2016
   printf '%s\n' "$@" | xargs -P 3 -I{} bash -c '
     _b="$(basename "$1")"; _s=$SECONDS
-    bash "$1" >"$2/$_b.log" 2>&1; _r=$?
+    bash "$1" </dev/null >"$2/$_b.log" 2>&1; _r=$?
     echo $((SECONDS - _s)) >"$2/$_b.secs"; echo "$_r" >"$2/$_b.rc"' _ {} "$PAR_T"
   for _t in "$@"; do
     _name="$(basename "$_t")"
@@ -87,7 +94,7 @@ run_parallel() {
 run_serial() {
   for t in "$@"; do
     _s=$SECONDS
-    bash "$t"; _rc=$?
+    bash "$t" </dev/null; _rc=$?
     if [ "$_rc" = "0" ]; then
       echo "PASS: $(basename "$t") ($((SECONDS - _s))s)"
     else

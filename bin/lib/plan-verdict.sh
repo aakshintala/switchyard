@@ -17,11 +17,13 @@ plan_verdict_read() {
 }
 
 plan_verdict_write() {
-  local state_tool="$1" state="$2" verdict="$3" base="$4" plan="$5" worktree="$6" hash
+  local state_tool="$1" state="$2" verdict="$3" base="$4" plan="$5" worktree="$6" hash verdict_at
   hash="$(git -C "$worktree" hash-object -w "$plan" 2>/dev/null)" || return 1
+  verdict_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   "$state_tool" "$state" set plan_verdict "$verdict"
   "$state_tool" "$state" set plan_verdict_base "$base"
   "$state_tool" "$state" set plan_verdict_hash "$hash"
+  "$state_tool" "$state" set plan_verdict_at "$verdict_at"
 }
 
 plan_verdict_check() {

@@ -197,6 +197,9 @@ case " \$* " in
     fi
     touch "$T/jobs-first-done"
     ;;
+  *" api "*"/issues/comments/"*)
+    if [ -f "$T/comment.json" ]; then cat "$T/comment.json"; else printf '{}\n'; fi
+    ;;
   *)
     printf '{}\n'
     ;;
@@ -368,8 +371,8 @@ EOF
     printf 'closing=%s\n' 'Resolves #528'
     printf 'workflow_doc=%s\n' docs/agents/workflow.md
     printf 'model.lane=%s\n' codex/test-model
-    printf 'model.review=%s\n' rm
-    printf 'model.overbuild=%s\n' om
+    printf 'model.review=%s\n' codex/default-review-model
+    printf 'model.overbuild=%s\n' cursor/default-overbuild-model
     printf 'model.map=%s\n' mm
     printf 'extra=%s\n' "$CDIR/extra.md"
     printf 'body_has=%s\n' 'Resolves #528' 'Co-authored with Test <t@t>'
@@ -459,7 +462,7 @@ expect_state() {
 
 # --- happy path: no mutants, every axis APPROVE ---
 setup_case happy
-run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "happy exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "happy"
 [ "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')" -le 41 ] || fail "happy: over 40 digest lines"
@@ -476,9 +479,9 @@ grep -q "$H" "$brief" || fail "happy: the filled brief holds the base"
 grep -q "Resolves #528" "$brief" || fail "happy: the filled brief holds CLOSING"
 grep -q "Co-authored with Test" "$brief" || fail "happy: the filled brief holds ATTRIBUTION"
 grep -q "^gate|.*--expect-head $H$" "$T/calls.log" || fail "happy: the gate checks the lane head"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model rrm --overbuild-model oom --axes standards --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: standards starts with state and flag values"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model rrm --overbuild-model oom --axes spec --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: spec starts per axis"
-grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model rrm --overbuild-model oom --axes overbuild --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: overbuild starts per axis"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model codex/test-review-model --overbuild-model composer-2.5 --axes standards --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: standards starts with state and flag values"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model codex/test-review-model --overbuild-model composer-2.5 --axes spec --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: spec starts per axis"
+grep -q "^review-start|7 --repo switchyard --cwd $WT --state $S --head $H --issue 528 --model codex/test-review-model --overbuild-model composer-2.5 --axes overbuild --full-rereview tkt-build round-0 full review$" "$T/calls.log" || fail "happy: overbuild starts per axis"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "happy: one start per axis"
 rvh="$(bash "$TKT_STATE" "$S" get review_ids)"; [ "$(printf '%s' "$rvh" | wc -w | tr -d ' ')" -eq 3 ] || fail "happy: three review ids persisted"
 grep -q "^watch|r1 r2 r3$" "$T/calls.log" || fail "happy: one delegate watch covers the review ids"
@@ -498,7 +501,7 @@ logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 setup_case real-lane-brief
 cp "$T/home/.agents/skills/planning/briefs/lane.md" "$T/lane-stub.md" || fail "real-lane-brief: keep the stub lane brief"
 cp "$SCRIPT_DIR/../skills/planning/briefs/lane.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: install the real lane brief"
-run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "real-lane-brief exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 brief="$(grep '^run|id=stub-1|' "$T/calls.log" | sed 's/.*prompt=//')"
 cp "$T/lane-stub.md" "$T/home/.agents/skills/planning/briefs/lane.md" || fail "real-lane-brief: restore the stub lane brief"
@@ -509,14 +512,14 @@ grep -q 'STATUS: BLOCKED' "$brief" || fail "real-lane-brief: the filled brief na
 setup_case attr-ends
 bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-ends: set body_has"
 bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-ends: set body_ends"
-run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "attr-ends exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-ends: ATTRIBUTION reaches the lane"
 
 # --- with no body_ends, a body_has co-author reaches the lane ---
 setup_case attr-body
 bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-body: set body_has"
-run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "attr-body exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "ATTRIBUTION=Co-authored with Body" "$T/calls.log" || fail "attr-body: ATTRIBUTION reaches the lane"
 
@@ -524,14 +527,14 @@ grep -q "ATTRIBUTION=Co-authored with Body" "$T/calls.log" || fail "attr-body: A
 setup_case attr-both
 bash "$TKT_STATE" "$S" set body_has 'Co-authored with Body' || fail "attr-both: set body_has"
 bash "$TKT_STATE" "$S" set body_ends 'Co-authored with Ends' || fail "attr-both: set body_ends"
-run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "attr-both exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "ATTRIBUTION=Co-authored with Ends" "$T/calls.log" || fail "attr-both: ATTRIBUTION reaches the lane"
 
 # --- with neither key, the ATTRIBUTION slot stays empty ---
 setup_case attr-empty
 bash "$TKT_STATE" "$S" set body_has 'Resolves #528' || fail "attr-empty: set body_has"
-run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "attr-empty exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q "ATTRIBUTION= LANE_MODEL=" "$T/calls.log" || fail "attr-empty: ATTRIBUTION stays empty"
 
@@ -551,7 +554,7 @@ mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
 [ "$(grep -c . "$mfile")" -eq 3 ] || fail "mutants: three log lines match"
 grep -q "^run|id=stub-1|model=codex/test-model|" "$T/calls.log" || fail "mutants: the lane defaults to model.lane"
 grep -q "^run|id=stub-2|model=mm|prompt=.*-map-1.md$" "$T/calls.log" || fail "mutants: the map job dispatches once"
-grep -q "^review-start|.*--model rm --overbuild-model om" "$T/calls.log" || fail "mutants: review defaults to state models"
+grep -q "^review-start|.*--model codex/default-review-model --overbuild-model cursor/default-overbuild-model" "$T/calls.log" || fail "mutants: review defaults to state models"
 grep -q "^watch|r1 r2 r3 stub-2$" "$T/calls.log" || fail "mutants: one watch covers review and map ids"
 mapbrief="$(grep '^run|id=stub-2' "$T/calls.log" | sed 's/.*prompt=//')"
 grep -q "src/a.rs:10:20" "$mapbrief" || fail "mutants: MUTANTS reaches the map brief"
@@ -762,7 +765,33 @@ run_build --lane-model claude-sonnet-5
 [ "$RC" -eq 0 ] || fail "quota-claude-healthy exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q '^quota: provider=claude status=healthy weekly=69% floor=40%$' <<<"$OUT" || fail "quota-claude-healthy: launch report shows the pick and floor"
 
-# --- an unmappable model id is refused with the id before dispatch ---
+setup_case quota-review-depleted
+jq '.providers |= map(if .id == "codex" then .status = "depleted" else . end)' \
+  "$T/quota-healthy.json" >"$T/quota.json"
+run_build --lane-model muse/test-model --review-model codex/gpt-6-luna --overbuild-model composer-2.5
+[ "$RC" -eq 2 ] || fail "quota-review-depleted exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build PRECONDITION quota=refused log=*" "quota-review-depleted"
+grep -q 'model=codex/gpt-6-luna provider=codex status=depleted' <<<"$OUT" || fail "quota-review-depleted: refusal names review model and provider"
+grep -qF "Repair command: tkt-build $S --from review --review-model <id> --overbuild-model composer-2.5" <<<"$OUT" || fail "quota-review-depleted: repair hint blanks the review slot and prefills the overbuild pick"
+! grep -q '^review-start|' "$T/calls.log" || fail "quota-review-depleted: no review session starts"
+
+setup_case quota-overbuild-depleted
+jq '.providers |= map(if .id == "cursor" then .status = "depleted" else . end)' \
+  "$T/quota-healthy.json" >"$T/quota.json"
+run_build --lane-model codex/test-model --review-model codex/gpt-6-luna --overbuild-model composer-2.5
+[ "$RC" -eq 2 ] || fail "quota-overbuild-depleted exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build PRECONDITION quota=refused log=*" "quota-overbuild-depleted"
+grep -q 'model=composer-2.5 provider=cursor status=depleted' <<<"$OUT" || fail "quota-overbuild-depleted: refusal names overbuild model and provider"
+grep -qF "Repair command: tkt-build $S --from review --review-model codex/gpt-6-luna --overbuild-model <id>" <<<"$OUT" || fail "quota-overbuild-depleted: repair hint prefills the review pick and blanks the overbuild slot"
+! grep -q '^review-start|' "$T/calls.log" || fail "quota-overbuild-depleted: no review session starts"
+
+setup_case quota-review-healthy
+cp "$T/quota-healthy.json" "$T/quota.json"
+run_build --lane-model codex/test-model --review-model codex/gpt-6-luna --overbuild-model composer-2.5
+[ "$RC" -eq 0 ] || fail "quota-review-healthy proceeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "quota-review-healthy: starts all review sessions"
+
+
 setup_case quota-unmapped
 run_build --lane-model unregistered/model-x
 [ "$RC" -eq 2 ] || fail "quota-unmapped exits 2 (rc=$RC)"
@@ -900,7 +929,7 @@ expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "basetick"
 setup_case spec-path
 printf 'ticket body\n' >"$CDIR/spec.md"
 bash "$TKT_STATE" "$S" set spec "$CDIR/spec.md" || fail "spec-path: set spec"
-run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "spec-path exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "spec-path"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "spec-path: one start per axis"
@@ -913,7 +942,7 @@ setup_case spec-issue
 printf 'ticket body\n' >"$CDIR/spec.md"
 bash "$TKT_STATE" "$S" set spec "$CDIR/spec.md" || fail "spec-issue: set spec path"
 bash "$TKT_STATE" "$S" set spec_issue 445 || fail "spec-issue: set spec issue"
-run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "spec-issue exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "spec-issue"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "spec-issue: one start per axis"
@@ -922,7 +951,7 @@ grep -qF -- "$CDIR/spec.md" "$T/calls.log" && fail "spec-issue: spec path reache
 
 # --- an unset spec_issue and spec key add no --spec argument ---
 setup_case no-spec-issue
-run_build --lane-model codex/test-model --review-model rrm --overbuild-model oom
+run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
 [ "$RC" -eq 0 ] || fail "no-spec-issue exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "no-spec-issue"
 [ "$(grep -c '^review-start|' "$T/calls.log")" -eq 3 ] || fail "no-spec-issue: one start per axis"
@@ -1884,9 +1913,12 @@ Base: $H
 EOF
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "ruling-verdict-precondition: seed LINES"
 bash "$TKT_STATE" "$S" set plan_verdict_hash "$(git -C "$WT" hash-object -w "$CDIR/plan.md")" || fail "ruling-verdict-precondition: seed plan snapshot"
+bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2000-01-01T00:00:00Z || fail "ruling-verdict-precondition: seed stop time"
+jq -n '{body:"Ruling comment 721473 settles the open line.",issue_url:"https://api.github.com/repos/switchyard/issues/528",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
 awk '{ if ($0 == "- Open line: use the default behavior.") print "- Ruling comment 721473 settles the open line."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
 TKT_PLAN_OUT="$(bash "$TKT_PLAN" "$S" triaged --comment 721473 2>"$CDIR/ruling-stderr.txt")"; TKT_PLAN_RC=$?
 [ "$TKT_PLAN_RC" -eq 0 ] || fail "ruling-verdict-precondition: ruling is recorded (rc=$TKT_PLAN_RC): $(head -n 1 <<<"$TKT_PLAN_OUT") $(cat "$CDIR/ruling-stderr.txt")"
+rm -f "$T/comment.json"
 expect_state plan_verdict triaged "ruling-verdict-precondition"
 run_build --from gate
 [ "$RC" -eq 0 ] || fail "ruling-verdict-precondition: tkt-build passes the verdict precondition (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
@@ -2177,6 +2209,7 @@ grep -q 'tkt-build stale recovery push origin tkt-528' "$CDIR/tkt.journal" || fa
 grep -q "tkt-build stale recovery plan Base=$newbase" "$CDIR/tkt.journal" || fail "gate-clean-merge: Base step is journaled"
 grep -q "tkt-build stale recovery head=$H2" "$CDIR/tkt.journal" || fail "gate-clean-merge: head step is journaled"
 grep -q 'tkt-build stale recovery verify PLAN-OK' "$CDIR/tkt.journal" || fail "gate-clean-merge: verify step is journaled"
+grep -F -q "tkt-build stale recovery verify-exemption base=$newbase plan=" "$CDIR/tkt.journal" || fail "gate-clean-merge: exact plan/base drift exemption is journaled"
 grep -q 'verifier-r1-drift' "$T/calls.log" || fail "gate-clean-merge: verification uses the drift slot"
 grep -q '^gate|' "$T/calls.log" || fail "gate-clean-merge: gate continues after recovery"
 

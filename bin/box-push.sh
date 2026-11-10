@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# box-push.sh <ticket> -- send a ticket's run/ files to the box, again.
+# box-push.sh <ticket> -- send a ticket's run/ files and the roster to the box.
+#
+# The box-side fence probe maps live delegate sessions through this roster, so
+# refresh it whenever lane state is pushed.
 #
 # boxlaunch.sh copies these files once, at launch. Anything written after that
 # -- an admit file, a grant from a mid-plan fence-grant run, a ruling, an added
@@ -20,7 +23,7 @@ if [ -z "${BOX_SSH:-}" ] && [ "$(uname -s)" != Darwin ]; then
   exit 0
 fi
 ssh=${BOX_SSH:-ssh}
-host=roundhouse-7010-plus-1.local
+host=${FW_BOX_HOST:-roundhouse-7010-plus-1.local}
 mac=${FW_MAC_HOME:-$HOME}; box=${FW_BOX_HOME:-/home/${USER:-aakshintala}}
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}
 dst=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
@@ -28,6 +31,7 @@ dst=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 sent=0
 set +f
 for f in \
+  "$run/roster" \
   "$run/report-format.md" \
   "$run/fiber-$n-notes.md" \
   "$run/fiber-$n-"*-notes.md \
