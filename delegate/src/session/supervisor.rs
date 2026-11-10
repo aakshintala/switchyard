@@ -1634,8 +1634,13 @@ fn wait_for_steer_resolution(
     ) else {
         return SteerResolution::Expired;
     };
-    if state.status == Status::Dead || shared.shutdown.load(Ordering::SeqCst) {
-        return SteerResolution::Expired;
+    let still_pending = state
+        .pending_steers
+        .iter()
+        .any(|pending| pending.command_id == command_id);
+    if still_pending && (state.status == Status::Dead || shared.shutdown.load(Ordering::SeqCst)) {
+        // The session ended before the steer ran; report it so the caller can resend.
+        return SteerResolution::Unconsumed;
     }
 
     let unconsumed = fs::read_to_string(shared.config.paths.events_file(&shared.id))

@@ -737,6 +737,38 @@ fn supervisor_send_reports_unconsumed_msp_steer_after_turn_completion() {
 }
 
 #[test]
+fn supervisor_send_reports_unconsumed_when_host_dies_with_steer_pending() {
+    let session = Session::spawn("HOLD,STEER_NOEFFECT", "brief", None, Bounds::default());
+    session.until("held first turn", |state| state.active_turn_id.is_some());
+
+    let (sender, reply_rx) = spawn_send(
+        &session,
+        "a steer lost with its host",
+        Duration::from_secs(15),
+    );
+    session.until("acked pending steer", |_| {
+        std::fs::read_to_string(session.paths.state_file(&session.id))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .is_some_and(|state| {
+                state["pendingSteers"]
+                    .as_array()
+                    .is_some_and(|steers| !steers.is_empty())
+            })
+    });
+    let host_pid = session.state().host_pid.unwrap();
+    unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+
+    let reply = reply_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("send returns once the host dies")
+        .unwrap();
+    sender.join().unwrap();
+    assert_eq!(reply["disposition"], "unconsumed");
+    assert_eq!(session.state().status, Status::Dead);
+}
+
+#[test]
 fn supervisor_send_replies_steered_when_muse_wait_cap_expires() {
     let mut session = Session::spawn(
         "HOLD,STEER_NOEFFECT",
