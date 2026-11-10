@@ -119,6 +119,7 @@ expect_script_out "script with several allowed assignments" "scripts/check" '## 
 expect_script_out "script with a leading CARGO_TARGET_DIR" "scripts/check" '## Gate\n\nCARGO_TARGET_DIR=/tmp/x scripts/check\n' 'CARGO_TARGET_DIR=/tmp/x scripts/check'
 expect_script_out "script with a leading TMPDIR" "scripts/check" '## Gate\n\nTMPDIR=/tmp/x scripts/check\n' 'TMPDIR=/tmp/x scripts/check'
 expect_script_err "hand-expanded steps" "scripts/check" '## Gate\n\ncargo fmt --check && cargo nextest run\n' 'cargo fmt --check && cargo nextest run'
+expect_script_err "screen-ratchet subcommand" "scripts/check" '## Gate\n\ncargo xtask screen-ratchet\n' 'cargo xtask screen-ratchet'
 expect_script_err "hand-written steps keep the old message" "scripts/check" '## Gate\n\nmake check\n' 'make check'
 expect_allowlist_err "unlisted leading variable" "scripts/check" '## Gate\n\nFOO=1 scripts/check\n' 'FOO'
 expect_script_err "script name as a prefix of another word" "scripts/check" '## Gate\n\nscripts/checker --base abc\n' 'scripts/checker --base abc'

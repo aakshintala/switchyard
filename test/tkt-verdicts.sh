@@ -24,5 +24,15 @@ while IFS= read -r word; do
   fi
 done <<< "$words"
 
+ship_words="$(grep -hEo '(emit|deny) \"[A-Z][A-Z-]*' "$ROOT/bin/tkt-ship" | grep -Eo '[A-Z][A-Z-]*$' | sort -u)"
+ship_row="$(grep -F '| `tkt-ship` |' "$SKILL" || true)"
+while IFS= read -r word; do
+  [ -n "$word" ] || continue
+  if ! printf '%s\n' "$ship_row" | grep -Eq "(^|[^[:alnum:]_-])${word}([^[:alnum:]_-]|$)"; then
+    echo "missing tkt-ship verdict word in skills/implement/SKILL.md Commands table: $word" >&2
+    missing=1
+  fi
+done <<< "$ship_words"
+
 [ "$missing" -eq 0 ] || exit 1
 echo "tkt-verdicts: all emitted words are documented"

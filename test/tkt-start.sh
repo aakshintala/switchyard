@@ -180,6 +180,22 @@ RC=0; OUT="$(cd "$T/nonrepo" && bash "$TKT" "${ARGS[@]}" 2>"$CDIR/stderr")" || R
 want "STEP-FAIL step=repo rc=128" 128 norepo
 case "$OUT" in *"run from inside acme/widget's checkout"*) ;; *) fail "norepo: failure misses checkout guidance" ;; esac
 [ ! -e "$RUN/widget-42.state" ] || fail "norepo: state was written"
+# A worktree without the repo gate leaves gate.script unset; a worktree with
+# an executable scripts/check seeds it automatically before planning starts.
+setup gate-script-absent ONE AGAINST; run_start --no-preflight
+want "SKIPPED filing=" 0 gate-script-absent
+if grep -q '^gate\.script=' "$RUN/widget-42.state"; then fail "gate-script-absent: unexpected gate.script key"; fi
+
+setup gate-script-present ONE AGAINST
+git -C "$CLONE" worktree add --no-track -b tkt-start "$WT" origin/main >/dev/null
+mkdir -p "$WT/scripts"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$WT/scripts/check"
+chmod +x "$WT/scripts/check"
+run_start --no-preflight
+want "SKIPPED filing=" 0 gate-script-present
+grep -qxF 'gate.script=scripts/check' "$RUN/widget-42.state" \
+  || fail "gate-script-present: state does not set gate.script to scripts/check"
+
 # current, plus the resume path: a rerun reuses the worktree with no dup lines.
 setup current ONE AGAINST; run_start
 want "CURRENT " 0 current
