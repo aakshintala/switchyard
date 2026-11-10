@@ -13,12 +13,10 @@ First run `implement` step 1 (check setup). Then set the session:
 
 - Repo, work source (a list of tickets, or a stack of PRs for PR-stack mode), base commit.
 - Models: flywheel chooses the pool for each rung (per the `delegate` skill), a review pool (a correctness and an over-engineering reviewer, each from a family other than the implementers', at the same rung or higher), and the lane budget (2 works).
-- Merge terms: the cases that need flywheel's call beyond the workflow doc's merge rule. Terms only add cases; the workflow doc's merge rule always holds. The terms also name the repo's CI contract owner; with none named, the triage role decides in that role. Non-publishing workflow changes and adding or pinning third-party actions are flywheel's call. These owner-held changes still need the owner's call (owner, 2026-10-08):
+- Merge terms: the cases that need flywheel's call beyond the workflow doc's merge rule. Terms only add cases; the workflow doc's merge rule always holds. The terms also name the repo's CI contract owner (for Fiber, surveyor); with none named, the triage role decides in that role. Workflow changes that don't publish, and adding or pinning third-party actions, are flywheel's call. These stay owner-held (owner, 2026-10-08):
   - ruleset or branch-protection changes;
   - `secrets.*`, `permissions:`, `pull_request_target`, and release or publish workflows;
-
-
-  When the terms include CI-boundary changes, making the required check pass where the repo's CI doc says it fails (for example a gating job missing from the required aggregate job's `needs`, whether removed or never added, a renamed required check, or `continue-on-error`) needs the CI contract owner's approval, not the owner's (owner, 2026-11-01). Otherwise it is flywheel's call. A doc edit in the same pull request is never that approval.
+  - making the required check pass where the repo's CI doc says it fails (for example a gating job missing from the required aggregate job's `needs`, whether removed or never added, a renamed required check, or `continue-on-error`). When the terms include CI-boundary changes, this needs the CI contract owner's approval instead (owner, 2026-11-01). A doc edit in the same pull request is never that approval.
 
   Items that remain owner-held release only on the owner's own words, quoted with where they were typed. The CI contract owner's approval likewise is its own message, quoted with where it was sent. A tracker comment's author field proves neither: every session posts with the owner's credentials, so an agent's comment shows the same login and `OWNER` association as the owner's.
 - `gh auth status` shows the `workflow` scope; without it, PRs touching `.github/workflows/*` fail to merge.
