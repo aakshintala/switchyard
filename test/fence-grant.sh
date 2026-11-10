@@ -453,6 +453,20 @@ run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-2
 assert_rc 0 'real file-claim accepts the path after a disjoint hunk probe'
 assert_line 'GRANT docs/tui.md' 'hunk-disjoint path granted'
 [ -f "$FW_RUN/fiber-77-fence-grant-1.md" ] || fail 'real hunk grant file exists'
+
+# A planless takeover reuses the ticket's retained claim and makes a fresh
+# fence grant without releasing and recreating the claim row.
+claims_before="$(git -C "$R" show refs/claims/live:claims)"
+: >"$T/file-claim.log"
+run_fg 77 --paths docs/tui.md --ranges docs/tui.md:1-2
+assert_rc 0 'takeover fence grant reuses retained claims'
+assert_line 'GRANT docs/tui.md' 'takeover fence grant over retained claim'
+[ -f "$FW_RUN/fiber-77-fence-grant-2.md" ] || fail 'takeover writes its fence grant'
+claims_after="$(git -C "$R" show refs/claims/live:claims)"
+[ "$claims_after" = "$claims_before" ] || fail 'takeover rewrites the retained claim instead of reusing it'
+[ "$(grep -c '^claim ' "$T/file-claim.log")" = 1 ] || fail 'takeover grant invokes one claim operation'
+! grep -q '^release ' "$T/file-claim.log" || fail 'takeover releases claims before re-granting'
+
 GH_TICKET_STATES='11:OPEN,12:OPEN,77:OPEN,78:OPEN'
 export GH_TICKET_STATES
 FILE_CLAIM_REMOTE="$R" bash "$REAL_FILE_CLAIM" claim --lane fiber-78 --grant --worktree t:own --repo aakshintala/fiber --self-pr 12 docs/tui.md >/dev/null 2>"$T/own-claim.err" || fail "own-PR claim setup: $(cat "$T/own-claim.err")"

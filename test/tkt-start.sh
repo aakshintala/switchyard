@@ -47,6 +47,14 @@ case " \$* " in
 esac
 EOF
 chmod +x "$T/bin/gh"
+cat >"$T/bin/file-claim" <<EOF
+#!/usr/bin/env bash
+printf 'file-claim|%s\\n' "\$*" >>"$T/calls.log"
+[ "\${1:-}" = claim ] || exit 2
+printf 'GRANT takeover fence\\n'
+EOF
+chmod +x "$T/bin/file-claim"
+export FW_FILE_CLAIM="$T/bin/file-claim"
 cat >"$T/tktbin/plan-sweep" <<EOF
 #!/usr/bin/env bash
 printf 'plan-sweep|%s\n' "\$*" >>"$T/calls.log"
@@ -203,6 +211,12 @@ S="$RUN/widget-42.state"
 grep -qxF 'plan=takeover #123' "$S" || fail "takeover: state does not record the source in plan"
 grep -qxF 'gate=bash scripts/check' "$S" || fail "takeover: state does not record the gate"
 grep -qxF 'fence=f.txt' "$S" || fail "takeover: --files did not seed the takeover fence"
+claim_host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf unknown)"
+grep -qxF "file-claim|claim --lane fiber-42 --paths --repo acme/widget --worktree $claim_host:$WT -- f.txt" "$T/calls.log" \
+  || fail "takeover: --files did not claim/reuse its fence: $(grep '^file-claim|' "$T/calls.log" || true)"
+
+after_takeover_calls="$(grep -c '^file-claim|' "$T/calls.log")"
+[ "$after_takeover_calls" -eq 1 ] || fail "takeover did not make exactly one claim check"
 
 # current, plus the resume path: a rerun reuses the worktree with no dup lines.
 setup current ONE AGAINST; run_start
