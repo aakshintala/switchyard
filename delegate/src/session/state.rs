@@ -578,6 +578,22 @@ pub fn apply_event(state: &mut State, event: &HostEvent, now_ms: u64) -> Vec<Val
     vec![line]
 }
 
+pub(crate) fn pending_steers_unconsumed(state: &mut State) -> Option<PendingSteerReplay> {
+    if state.pending_steers.is_empty() {
+        return None;
+    }
+    let command_ids: Vec<_> = state
+        .pending_steers
+        .iter()
+        .map(|pending| pending.command_id.clone())
+        .collect();
+    let turn_id = state.last_turn.as_ref().map(|turn| turn.turn_id.clone());
+    state.pending_steers.clear();
+    Some(PendingSteerReplay::Unconsumed {
+        log: json!({"kind":"steer.unconsumed","turnId":turn_id,"commandIds":command_ids}),
+    })
+}
+
 pub(crate) fn begin_pending_steer_replay(
     state: &mut State,
     now_ms: u64,
@@ -1578,6 +1594,34 @@ mod tests {
         }
         assert!(state.pending_steers.is_empty());
         assert_eq!(state.status, Status::Running);
+    }
+
+    #[test]
+    fn msp_pending_steers_are_unconsumed_at_turn_completion() {
+        let scratch = Scratch::new();
+        let mut state = scratch.state();
+        assert!(begin_turn(&mut state, 1));
+        apply_ack(&mut state, "msp-turn", Disposition::Started, 2);
+        note_steer(&mut state, "msp-command", "late muse steer");
+        apply_event(
+            &mut state,
+            &HostEvent::TurnCompleted {
+                turn_id: "msp-turn".into(),
+                terminal: "completed".into(),
+                error: None,
+            },
+            3,
+        );
+
+        match pending_steers_unconsumed(&mut state).unwrap() {
+            PendingSteerReplay::Unconsumed { log } => {
+                assert_eq!(log["kind"], "steer.unconsumed");
+                assert_eq!(log["commandIds"], json!(["msp-command"]));
+            }
+            other => panic!("MSP pending steer must be unconsumed, got {other:?}"),
+        }
+        assert!(state.pending_steers.is_empty());
+        assert_eq!(state.status, Status::Idle);
     }
 
     #[test]

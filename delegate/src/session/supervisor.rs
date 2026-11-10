@@ -1078,7 +1078,8 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
 
 fn replay_pending_steers(shared: &Arc<Shared>) {
     let _admission = lock(&shared.admission);
-    let queued_steers = if shared.kind == HostKind::Pi {
+    let pi_host = shared.kind == HostKind::Pi;
+    let queued_steers = if pi_host {
         lock(&shared.wire).queued_steer_ids()
     } else {
         Vec::new()
@@ -1099,8 +1100,14 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
     }
     let mut replay_text = None;
     let mut replayed_ids = Vec::new();
-    if update_store(shared, |state| {
-        match state::begin_pending_steer_replay(state, now_ms()) {
+    let mut unconsumed = false;
+    let updated = update_store(shared, |state| {
+        let decision = if pi_host {
+            state::begin_pending_steer_replay(state, now_ms())
+        } else {
+            state::pending_steers_unconsumed(state)
+        };
+        match decision {
             Some(state::PendingSteerReplay::Started { text, log }) => {
                 replay_text = Some(text);
                 replayed_ids = log["commandIds"]
@@ -1112,17 +1119,26 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
                     .collect();
                 vec![log]
             }
-            Some(state::PendingSteerReplay::Unconsumed { log }) => vec![log],
+            Some(state::PendingSteerReplay::Unconsumed { log }) => {
+                unconsumed = true;
+                vec![log]
+            }
             None => Vec::new(),
         }
     })
-    .is_ok()
-        && let Some(text) = replay_text
-    {
-        if shared.kind == HostKind::Pi && !replayed_ids.is_empty() {
-            lock(&shared.wire).forget_steers(&replayed_ids);
+    .is_ok();
+    if updated {
+        if let Some(text) = replay_text {
+            if pi_host && !replayed_ids.is_empty() {
+                lock(&shared.wire).forget_steers(&replayed_ids);
+            }
+            let _ = start_turn(shared, &text);
+        } else if unconsumed {
+            let state = shared.store.snapshot();
+            if state.status == Status::Idle && state.pending_steers.is_empty() {
+                note_inbox(shared, &state.inbox, Note::Idle);
+            }
         }
-        let _ = start_turn(shared, &text);
     }
 }
 
