@@ -473,6 +473,36 @@ run_plan confirm --edits "$CDIR/edits.md"
 [ "$(bash "$TKT_STATE" "$S" get granted_used)" = "1" ] || fail "granted confirm after PLAN-CHECK uses the grant"
 : >"$T/stub.log"
 
+# --- a refused verify keeps the verdict a granted confirm wrote (#1491) ---
+# fiber #4234: ROUND-LIMIT, granted confirm PLAN-OK, a later grant, verify
+# ROUND-LIMIT again, then post failed verdict=none: the refused verify had
+# blanked the verdict on entry before it refused.
+setup_case post-after-granted-confirm
+rebase_plan
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "post-after-granted-confirm seed round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "post-after-granted-confirm seed confirm"
+bash "$TKT_STATE" "$S" set granted_by flywheel || fail "post-after-granted-confirm seed author"
+bash "$TKT_STATE" "$S" set granted_comment 111 || fail "post-after-granted-confirm seed comment"
+printf 'ok' >"$T/mode"
+run_plan verify
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "post-after-granted-confirm first verify"
+printf 'round 2, line 1: add bin/x to Files\ndone: added\n' >"$CDIR/edits.md"
+run_plan confirm --edits "$CDIR/edits.md"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "post-after-granted-confirm confirm"
+expect_plan_verdict ok "$(cat "$CDIR/base")" "post-after-granted-confirm confirm verdict"
+run_plan grant-round --by flywheel --comment 222 --ruling 222
+expect_verdict "TKT tkt-plan SET grant=flywheel:222 log=*" "post-after-granted-confirm grant"
+jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
+run_plan verify
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "post-after-granted-confirm second verify"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "post-after-granted-confirm ROUND-LIMIT starts no job"
+expect_plan_verdict ok "$(cat "$CDIR/base")" "post-after-granted-confirm ROUND-LIMIT keeps the verdict"
+expect_current_plan_verdict_hash "post-after-granted-confirm ROUND-LIMIT keeps the hash"
+run_plan post
+[ "$RC" -eq 0 ] || fail "post-after-granted-confirm post exits 0 (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan POSTED urls=* log=*" "post-after-granted-confirm post"
+: >"$T/stub.log"
+
 # --- LINES, then PLAN-OK, then the round limit ---
 setup_case rounds
 rebase_plan
@@ -2228,7 +2258,7 @@ run_plan post
 [ "$RC" -eq 1 ] || fail "sibling-base: non-descendant base exits 1"
 expect_verdict "TKT tkt-plan POST-FAIL reason=verdict verdict=stale log=*" "sibling-base"
 
-# --- every verify refusal after argument parsing clears the previous verdict ---
+# --- every verify refusal after argument parsing, except ROUND-LIMIT, clears the previous verdict ---
 seed_ok_verdict() {
   current_base="$(cat "$CDIR/base")"
   bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed verify verdict"
@@ -2264,8 +2294,9 @@ seed_ok_verdict
 bash "$TKT_STATE" "$S" set verifier_round 2 || fail "seed round limit"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "ROUND-LIMIT verify exits 1"
-expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "ROUND-LIMIT clears verdict"
-expect_plan_verdict "" "" "ROUND-LIMIT clears pair"
+expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "ROUND-LIMIT keeps verdict"
+# ROUND-LIMIT is a budget refusal, not a judgment of the plan: it keeps the verdict (#1491).
+expect_plan_verdict ok "$current_base" "ROUND-LIMIT keeps pair"
 setup_case verdict-clear-model
 rebase_plan
 seed_ok_verdict
