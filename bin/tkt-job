@@ -6,7 +6,9 @@
 # through delegate, watch with no timeout, follow supersededBy to the newest
 # record, and print one verdict line plus a digest of at most 40 lines. A
 # dispatched job gets one JSON line per id in jobs.log beside the state file;
-# reruns recover a missing line without duplicating an existing entry.
+# gated dispatches also journal the unwrapped inner command as
+# `tkt-job gate slot=<slot> job=<id> cmd=<command>` for later gate verification.
+# Reruns recover a missing jobs.log line without duplicating an existing entry.
 # A verifier-r* slot's wall cap travels on the run call (--wall-ms); watch
 # only reads the record.
 # Every state read and write goes through tkt-state; the model comes from
@@ -40,6 +42,7 @@ resume=""
 prompt=""
 model=""
 gate=""
+inner_gate_cmd=""
 gate_from_plan=0
 expect_commits=0
 out_file=""
@@ -62,6 +65,7 @@ while [ $# -gt 0 ]; do
     *) usage ;;
   esac
 done
+inner_gate_cmd="$gate"
 [ -n "$slot" ] || usage
 # A prompt file only resumes; a resume needs its prompt and takes no fresh
 # brief. A resume may carry a gate; the two gate sources never combine.
@@ -114,6 +118,19 @@ plangate="$bin_dir/plan-gate"
 
 tkt() {
   "$tkt_state" "$state" "$@"
+}
+
+validate_gate_journal_command() {
+  case "$inner_gate_cmd" in
+    *$'\n'*)
+      echo "tkt-job: gate command must be one line to journal it" >&2
+      exit 2
+      ;;
+  esac
+}
+
+journal_gate_command() {
+  [ -z "$inner_gate_cmd" ] || tkt journal "tkt-job gate slot=$slot job=$jobid cmd=$inner_gate_cmd"
 }
 
 # Probe the shared lock and release it at once: the delegate wait below
@@ -190,6 +207,8 @@ build_gate_from_plan() {
     echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>: $gate_cmd" >&2
     exit 2
   }
+  inner_gate_cmd="$gate_cmd"
+  validate_gate_journal_command
   # The gate script keeps the whole chain inside the redirected block and is
   # judged by its exit code, never the log line (see bin/lib/gate-script.sh).
   env_prefix=""
@@ -313,6 +332,7 @@ if [ -n "$resume" ]; then
   if [ "$gate_from_plan" -eq 1 ]; then
     build_gate_from_plan
   fi
+  validate_gate_journal_command
   # An empty --gate is the same as no flag: the resume inherits the stored gate.
   gate_args=()
   if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
@@ -324,6 +344,7 @@ if [ -n "$resume" ]; then
   tkt set "job.$slot" "$jobid"
   tkt set "job.$slot.prompt" "$prompt_hash"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"
+  journal_gate_command
   fresh=1
 elif [ -n "$stored" ]; then
   # A stored id never dispatches again: a matching or legacy prompt only watches.
@@ -335,6 +356,7 @@ else
   if [ "$gate_from_plan" -eq 1 ]; then
     build_gate_from_plan
   fi
+  validate_gate_journal_command
   prepare_brief
   prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
   if [ -z "$model" ]; then
@@ -357,6 +379,7 @@ else
   tkt set "job.$slot" "$jobid"
   tkt set "job.$slot.prompt" "$prompt_hash"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid"
+  journal_gate_command
   fresh=1
 fi
 

@@ -935,6 +935,14 @@ set -- "$CDIR"/run/switchyard-502-*-gate-*.sh
 gout="$(bash "$1" 2>&1)"; grc=$?
 [ "$grc" -eq 0 ] || fail "a passing gate script exits 0"
 grep -q "GATE PASS" <<<"$gout" || fail "a passing gate script prints GATE PASS"
+grep -Eq ' tkt-job gate slot=lane job=stub-1 cmd=true$' "$CDIR/tkt.journal" || fail "--gate-from-plan journals the inner gate command"
+
+setup_case gate-journal-explicit
+reset_stub
+make_record stub-1 DONE none 0 1 0
+run_job --slot lane --template "$T/tmpl-basic.md" --gate 'echo explicit'
+[ "$RC" -eq 0 ] || fail "an explicit gate dispatch exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -Eq ' tkt-job gate slot=lane job=stub-1 cmd=echo explicit$' "$CDIR/tkt.journal" || fail "--gate journals its command"
 
 # --- a failing nextest gate prints its failing block and the log path ---
 . "$REAL_BIN/lib/gate-script.sh"
