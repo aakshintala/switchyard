@@ -112,7 +112,7 @@ launch_box() {
     BOX_SSH="$T/stub/ssh" FW_AGENTS_FF="$T/stub/noop" \
     FW_BOXSTALE="$T/stub/noop" FW_BOX_LANECHECK="$T/stub/lanecheck" \
     FW_BOX_LANES="${FW_TEST_BOX_LANES:-12}" \
-    FW_NO_FENCE='fixture has no production fence' NEWDISK=1 \
+    FW_NO_FENCE='fixture has no production fence' FW_NO_TMP_REAP="${FW_TEST_NO_TMP_REAP:-1}" NEWDISK=1 \
     bash "$BIN/boxlaunch.sh" 2465 sonnet phase-plan
 }
 
@@ -281,6 +281,37 @@ if [ "$eleven_rc" = 0 ] && [ "$(wc -l <"$LAUNCH_LOG" | tr -d ' ')" = 1 ]; then
   ok cap-allows-eleven-live-lanes
 else
   fail "cap-allows-eleven-live-lanes (rc=$eleven_rc; $out)"
+fi
+
+# The default box-side reap command is issued after sync and its failure cannot
+# prevent the lane session from starting.
+prepare_run tmp-reap-failure
+printf '[]\n' >"$BOX_AGENTS"
+: >"$BOX_LANE_OUTPUT"; : >"$LAUNCH_LOG"
+mkdir -p "$T/mac-home/.agents/bin"
+export REAP_LOG="$T/reap.log"
+cat >"$T/mac-home/.agents/bin/box-tmp-reap" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$REAP_LOG"
+echo 'simulated reap failure'
+exit 19
+EOF
+chmod +x "$T/mac-home/.agents/bin/box-tmp-reap"
+if FW_TEST_NO_TMP_REAP=0 launch_box >"$T/reap-launch.out" 2>&1; then
+  reap_launch_rc=0
+else
+  reap_launch_rc=$?
+fi
+for _ in {1..50}; do
+  if [ -s "$REAP_LOG" ] && grep -Fq 'boxlaunch: tmp reap: simulated reap failure' "$T/reap-launch.out"; then break; fi
+  sleep .1
+done
+if [ "$reap_launch_rc" = 0 ] && [ "$(wc -l <"$LAUNCH_LOG" | tr -d ' ')" = 1 ] \
+    && grep -Fxq '/srv/lanes/tmp /tmp' "$REAP_LOG" \
+    && grep -Fq 'boxlaunch: tmp reap: simulated reap failure' "$T/reap-launch.out"; then
+  ok tmp-reap-runs-on-box-and-failure-does-not-block-launch
+else
+  fail "tmp-reap-runs-on-box-and-failure-does-not-block-launch (rc=$reap_launch_rc; log=$(cat "$REAP_LOG" 2>/dev/null); out=$(cat "$T/reap-launch.out"))"
 fi
 
 exit "$rc"
