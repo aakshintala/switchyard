@@ -514,14 +514,9 @@ impl Wire {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                for text in cleared.iter().filter_map(Value::as_str) {
-                    if let Some(index) = self
-                        .steer_texts
-                        .iter()
-                        .position(|(_, known_text)| known_text == text)
-                    {
-                        self.steer_texts.remove(index);
-                    }
+                let resolved = self.resolve_steer_texts(&cleared);
+                for (index, _) in resolved.into_iter().rev() {
+                    self.steer_texts.remove(index);
                 }
                 let count = data
                     .get("steering")
@@ -546,6 +541,24 @@ impl Wire {
                 result: Ok(data),
             }],
         }
+    }
+
+    fn resolve_steer_texts(&self, reported: &[Value]) -> Vec<(usize, String)> {
+        let mut used = HashSet::new();
+        reported
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|text| {
+                self.steer_texts
+                    .iter()
+                    .enumerate()
+                    .find(|(index, (_, known_text))| !used.contains(index) && known_text == text)
+                    .map(|(index, (command_id, _))| {
+                        used.insert(index);
+                        (index, command_id.clone())
+                    })
+            })
+            .collect()
     }
 
     fn parse_event(
@@ -672,22 +685,10 @@ impl Wire {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                let mut used = HashSet::new();
-                self.queued_steer_ids = steering
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .filter_map(|text| {
-                        self.steer_texts
-                            .iter()
-                            .enumerate()
-                            .find(|(index, (_, known_text))| {
-                                !used.contains(index) && known_text == text
-                            })
-                            .map(|(index, (command_id, _))| {
-                                used.insert(index);
-                                command_id.clone()
-                            })
-                    })
+                self.queued_steer_ids = self
+                    .resolve_steer_texts(&steering)
+                    .into_iter()
+                    .map(|(_, command_id)| command_id)
                     .collect();
                 vec![crate::session::msp::Incoming::Event(
                     crate::session::msp::HostEvent::Ignored,
