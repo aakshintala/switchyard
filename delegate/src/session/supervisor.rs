@@ -102,6 +102,8 @@ impl PanicMode {
 
 struct Pending {
     method: String,
+    command_id: Option<String>,
+    expected_turn_id: Option<String>,
     response: Sender<Result<Value, RpcError>>,
 }
 
@@ -728,6 +730,22 @@ fn call_within(
     params: Value,
     timeout: Duration,
 ) -> Result<Value, CallFailure> {
+    let command_id = if method == "turn/steer" {
+        params
+            .get("commandId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    } else {
+        None
+    };
+    let expected_turn_id = if method == "turn/steer" {
+        params
+            .get("expectedTurnId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    } else {
+        None
+    };
     let id = shared.next_request_id.fetch_add(1, Ordering::SeqCst);
     let line = match shared.kind {
         HostKind::Muse => msp::request(id, method, params),
@@ -745,6 +763,8 @@ fn call_within(
         id,
         Pending {
             method: method.to_string(),
+            command_id,
+            expected_turn_id,
             response: response_tx,
         },
     );
@@ -797,6 +817,9 @@ fn call_within(
             Ok(result) => result,
             Err(_) => {
                 lock(&shared.pending).remove(&id);
+                if shared.kind == HostKind::Muse && method == "turn/steer" {
+                    return Ok(json!({"status":"accepted"}));
+                }
                 let message = format!("{label} host request timed out");
                 timeout_host(shared, method, &message);
                 return Err(CallFailure::Failed(message));
@@ -1058,6 +1081,11 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     {
         return;
     }
+    let completed_turn_id = match &event {
+        HostEvent::TurnCompleted { turn_id, .. } => Some(turn_id.as_str()),
+        _ => None,
+    };
+    resolve_pending_steer_responses(shared, completed_turn_id);
     if should_note_idle {
         let after = shared.store.snapshot();
         if after.status == Status::Idle {
@@ -1073,6 +1101,47 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
                 });
             }
         }
+    }
+}
+
+fn resolve_pending_steer_responses(shared: &Arc<Shared>, completed_turn_id: Option<&str>) {
+    if shared.kind != HostKind::Muse {
+        return;
+    }
+    let unresolved_ids: Vec<_> = shared
+        .store
+        .snapshot()
+        .pending_steers
+        .into_iter()
+        .map(|steer| steer.command_id)
+        .collect();
+    let resolved = {
+        let mut requests = lock(&shared.pending);
+        let ids: Vec<_> = requests
+            .iter()
+            .filter_map(|(id, request)| {
+                (request.method == "turn/steer"
+                    && (request
+                        .command_id
+                        .as_ref()
+                        .is_some_and(|command_id| !unresolved_ids.contains(command_id))
+                        || completed_turn_id.is_some_and(|turn_id| {
+                            request.expected_turn_id.as_deref() == Some(turn_id)
+                        })))
+                .then_some(*id)
+            })
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| requests.remove(&id))
+            .collect::<Vec<_>>()
+    };
+    for request in resolved {
+        let Some(command_id) = request.command_id else {
+            continue;
+        };
+        let _ = request
+            .response
+            .send(Ok(json!({"status":"accepted","turnId":command_id})));
     }
 }
 
@@ -1098,9 +1167,14 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
     if has_queued_pending {
         return;
     }
+    if !pi_host {
+        let _ = shared.store.wait_until(
+            |state| state.status == Status::Dead || state.pending_steers.is_empty(),
+            shared.config.steer_settle,
+        );
+    }
     let mut replay_text = None;
     let mut replayed_ids = Vec::new();
-    let mut unconsumed = false;
     let updated = update_store(shared, |state| {
         let decision = if pi_host {
             state::begin_pending_steer_replay(state, now_ms())
@@ -1119,21 +1193,19 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
                     .collect();
                 vec![log]
             }
-            Some(state::PendingSteerReplay::Unconsumed { log }) => {
-                unconsumed = true;
-                vec![log]
-            }
+            Some(state::PendingSteerReplay::Unconsumed { log }) => vec![log],
             None => Vec::new(),
         }
     })
     .is_ok();
     if updated {
+        resolve_pending_steer_responses(shared, None);
         if let Some(text) = replay_text {
             if pi_host && !replayed_ids.is_empty() {
                 lock(&shared.wire).forget_steers(&replayed_ids);
             }
             let _ = start_turn(shared, &text);
-        } else if unconsumed {
+        } else {
             let state = shared.store.snapshot();
             if state.status == Status::Idle && state.pending_steers.is_empty() {
                 note_inbox(shared, &state.inbox, Note::Idle);
@@ -1341,7 +1413,13 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
     match call(shared, "turn/steer", params) {
         Ok(_) => {
             drop(admission);
-            json!({"ok":true,"disposition":"steered"})
+            let unconsumed =
+                shared.kind == HostKind::Muse && wait_for_steer_resolution(shared, &command_id);
+            if unconsumed {
+                json!({"ok":true,"disposition":"unconsumed"})
+            } else {
+                json!({"ok":true,"disposition":"steered"})
+            }
         }
         Err(CallFailure::Rpc(error)) => {
             drop_steer(shared, &command_id);
@@ -1544,6 +1622,42 @@ fn reject_stopping_or_dead(shared: &Shared) -> Option<Value> {
 
 fn reject_dead(shared: &Shared) -> Option<Value> {
     (shared.store.snapshot().status == Status::Dead).then(|| error_reply("dead", "session is dead"))
+}
+
+fn wait_for_steer_resolution(shared: &Arc<Shared>, command_id: &str) -> bool {
+    loop {
+        if let Some(state) = shared.store.wait_until(
+            |state| {
+                state.status == Status::Dead
+                    || !state
+                        .pending_steers
+                        .iter()
+                        .any(|pending| pending.command_id == command_id)
+            },
+            Duration::from_millis(100),
+        ) {
+            if state.status == Status::Dead {
+                return true;
+            }
+            break;
+        }
+        if shared.shutdown.load(Ordering::SeqCst) {
+            return true;
+        }
+    }
+
+    fs::read_to_string(shared.config.paths.events_file(&shared.id))
+        .ok()
+        .is_some_and(|events| {
+            events.lines().any(|line| {
+                serde_json::from_str::<Value>(line).is_ok_and(|event| {
+                    event["kind"] == "steer.unconsumed"
+                        && event["commandIds"]
+                            .as_array()
+                            .is_some_and(|ids| ids.iter().any(|id| id == command_id))
+                })
+            })
+        })
 }
 
 fn drop_steer(shared: &Shared, command_id: &str) {
