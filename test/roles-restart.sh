@@ -45,7 +45,7 @@ import json, sys
 path, name, pid = sys.argv[1], sys.argv[2], int(sys.argv[3])
 with open(path) as f:
     rows = json.load(f)
-rows.append({"pid": pid, "name": name, "state": "running"})
+rows.append({"pid": pid, "name": name, "kind": "background", "state": "running"})
 with open(path, "w") as f:
     json.dump(rows, f)
 ' "$AGENTS_JSON" "$name" "$TEST_PID"
@@ -80,10 +80,21 @@ export ROLE_HOME HANDOFF AGENTS_JSON LOCK ROLE_TABLE
 # A done background session in a worktree is still live when its pid exists.
 # Keep this first: the old state.json check relaunches it and fails this test.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
-printf '[{"pid":%s,"name":"test-role","cwd":"%s/worktree","state":"done"}]\n' "$$" "$ROLE_HOME" >"$AGENTS_JSON"
+printf '[{"pid":%s,"name":"test-role","kind":"background","cwd":"%s/worktree","state":"done"}]\n' "$$" "$ROLE_HOME" >"$AGENTS_JSON"
 run_restart >"$T/live.out" 2>"$T/live.err" || fail "live role run failed: $(cat "$T/live.err")"
 [ ! -s "$CLAUDE_LOG" ] || fail "live role was launched twice"
 [ ! -s "$OWNER_ASK_LOG" ] || fail "live role emitted a relaunch line"
+
+# An interactive session holding the role name is not a live background role.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"; : >"$T/roles-restart.log"
+printf '[{"pid":%s,"name":"test-role","kind":"interactive","cwd":"%s/worktree","status":"idle"}]\n' "$$" "$ROLE_HOME" >"$AGENTS_JSON"
+run_restart >"$T/interactive.out" 2>"$T/interactive.err" || fail "interactive-session run failed: $(cat "$T/interactive.err")"
+grep -Fqx "cwd=$ROLE_HOME" "$CLAUDE_LOG" || fail "interactive session prevented the background role from launching"
+grep -Fqx 'arg=--bg' "$CLAUDE_LOG" || fail "interactive-session launch omitted --bg"
+grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: interactive session pid $$ holds the name; launching the background role anyway\. Two test-role sessions now run: quit the interactive one$" "$T/roles-restart.log" >/dev/null \
+  || fail "interactive-session warning was not logged exactly"
+grep -Fq 'Two test-role sessions now run' "$T/roles-restart.log" \
+  || fail "interactive-session warning does not say two sessions now run"
 
 # A missing role launches a fresh session from its home with a handoff-aware prompt.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
@@ -117,7 +128,7 @@ run_restart >"$T/named2.out" 2>"$T/named2.err" || fail "second named run failed:
 sleep 0 &
 dead_pid=$!
 wait "$dead_pid"
-printf '[{"pid":%s,"name":"test-role","cwd":"%s/worktree","state":"running"}]\n' "$dead_pid" "$ROLE_HOME" >"$AGENTS_JSON"
+printf '[{"pid":%s,"name":"test-role","kind":"background","cwd":"%s/worktree","state":"running"}]\n' "$dead_pid" "$ROLE_HOME" >"$AGENTS_JSON"
 run_restart >"$T/dead.out" 2>"$T/dead.err" || fail "dead role restart failed: $(cat "$T/dead.err")"
 grep -Fqx "cwd=$ROLE_HOME" "$CLAUDE_LOG" || fail "dead role was incorrectly counted as live"
 

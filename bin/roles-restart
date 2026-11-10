@@ -93,8 +93,8 @@ else
 fi
 
 role_is_live() {
-  local role_name="$1" matching_pids pid
-  if ! matching_pids="$(printf '%s\n' "$agents_json" | python3 -I -c '
+  local role_name="$1" matching_sessions pid kind
+  if ! matching_sessions="$(printf '%s\n' "$agents_json" | python3 -I -c '
 import json
 import sys
 
@@ -104,15 +104,23 @@ for row in json.load(sys.stdin):
         continue
     pid = row.get("pid")
     if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-        print(pid)
+        kind = row.get("kind")
+        if not isinstance(kind, str):
+            kind = ""
+        print(f"{pid}\t{kind}")
 ' "$role_name")"; then
     return 2
   fi
-  while IFS= read -r pid; do
+  while IFS=$'\t' read -r pid kind; do
     if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-      return 0
+      if [ "$kind" = "background" ]; then
+        return 0
+      fi
+      if [ "$kind" = "interactive" ]; then
+        log "$role_name: interactive session pid $pid holds the name; launching the background role anyway. Two $role_name sessions now run: quit the interactive one"
+      fi
     fi
-  done <<<"$matching_pids"
+  done <<<"$matching_sessions"
   return 1
 }
 
