@@ -21,8 +21,9 @@ id is sometimes an 8-char prefix, so matching is by prefix either way.
 
 Usage: delegate session list --json | fw-sess-lanes.py <roster path>
 Exit 1 and print nothing when the JSON is unusable; the caller fails closed.
-No live lane prints nothing and exits 0, so the caller reads the exit code,
-not the emptiness of the output.
+With no live sessions, the mapper prints nothing and exits 0. A live session that matches no
+roster row prints `UNMAPPED <session-id>` on stderr and still exits 0, so an
+unmapped non-lane session warns without hiding mapped lanes or failing the probe.
 """
 
 import json
@@ -55,6 +56,7 @@ def main() -> int:
     if not live:
         return 0
     out = []
+    matched = set()
     try:
         with open(sys.argv[1], encoding="utf-8") as fh:
             rows = fh.readlines()
@@ -69,13 +71,15 @@ def main() -> int:
             continue
         # A `prep-<n>` session reads the ticket and writes notes; it holds no
         # fence, so counting it as a holder would block the very lane its prep
-        # exists to start. Only a `fiber-*` lane session holds paths.
-        if not name.startswith("fiber-"):
-            continue
+        # exists to start. It still matches the roster and is not unmapped.
         for sid in live:
             if sid == rid or sid.startswith(rid) or rid.startswith(sid):
-                out.append("fiber-" + ticket)
+                matched.add(sid)
+                if name.startswith("fiber-"):
+                    out.append("fiber-" + ticket)
                 break
+    for sid in sorted(live - matched):
+        print("UNMAPPED " + sid, file=sys.stderr)
     for name in sorted(set(out)):
         print(name)
     return 0
