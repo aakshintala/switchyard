@@ -157,7 +157,7 @@ fi
 [ ! -s "$CLAUDE_LOG" ] || fail "invalid role row launched a session"
 grep -F 'invalid role table row' "$T/roles-restart.log" >/dev/null || fail "invalid role row was not logged"
 
-# Default rows pass the role-inbox plugin dir to surveyor and switchyard only.
+# Default rows pass the role-inbox plugin dir to all three roles.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
 printf '[]\n' >"$AGENTS_JSON"
 for default_role in surveyor switchyard flywheel; do
@@ -177,7 +177,7 @@ plugin_roles="$(awk 'BEGIN { RS = "" } {
   }
   print role ":" plugin
 }' "$CLAUDE_LOG" | sort | tr '\n' ' ')"
-[ "$plugin_roles" = "arg=flywheel:0 arg=surveyor:1 arg=switchyard:1 " ] \
+[ "$plugin_roles" = "arg=flywheel:1 arg=surveyor:1 arg=switchyard:1 " ] \
   || fail "default rows plugin-dir mismatch: $plugin_roles"
 
 # A missing handoff is skipped, logged and recorded as an owner note.
