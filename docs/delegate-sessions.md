@@ -2,6 +2,12 @@
 
 This page records the ordering and cardinality guarantees that session tests rely on.
 
+## Box TMPDIR setup
+
+Run `bin/box-setup` on the box as the box user to set `TMPDIR=/srv/lanes/tmp` for new SSH commands and systemd user services. From the Mac, run `ssh <box> 'bash -s' < bin/box-setup`, or run the script from a checkout on the box.
+
+Delegate session daemons that were already running keep their old environment. Before restarting one, check `delegate session list --json` and find its entry in `sessions[]`. Stop it only when `activeTurnId` is `null`, which means the session is idle. Run `delegate session stop <id>`, then start a fresh session with the original `delegate session start` arguments.
+
 ## Event and state ordering
 
 `Store::update` appends event lines before publishing new state. A `watch` cannot return on that state until those lines exist. If the state write fails, the store attempts to truncate the append and keeps its in-memory state and event sequence unchanged.

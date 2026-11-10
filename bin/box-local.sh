@@ -18,4 +18,6 @@ shift   # the host
 [ $# -gt 0 ] || exit 0
 cd "$HOME" || exit 1
 export PATH="$HOME/.cargo/bin:$HOME/.agents/bin:$HOME/.local/bin:$PATH"
+# Match ssh's box-user TMPDIR for local command shims; the path is absent on the Mac.
+if [ -z "${TMPDIR:-}" ] && [ -d /srv/lanes/tmp ]; then export TMPDIR=/srv/lanes/tmp; fi
 exec bash -c "$*"

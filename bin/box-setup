@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# box-setup: provision the box user's TMPDIR for ssh commands and systemd services.
+# Run on the box as the box user (for example: ssh <box> 'bash -s' < bin/box-setup).
+set -euo pipefail
+
+home=${HOME:?box-setup must run with HOME set}
+lanes_tmp=${BOX_LANES_TMP:-/srv/lanes/tmp}
+bashrc="$home/.bashrc"
+config_dir="$home/.config/environment.d"
+config="$config_dir/lanes.conf"
+start_marker='# >>> switchyard box-setup: TMPDIR >>>'
+end_marker='# <<< switchyard box-setup: TMPDIR <<<'
+
+mkdir -p "$lanes_tmp" "$config_dir"
+bashrc_tmp="$(mktemp "$home/.bashrc.XXXXXX")"
+body_tmp="$(mktemp "$home/.bashrc-body.XXXXXX")"
+config_tmp="$(mktemp "$config_dir/lanes.conf.XXXXXX")"
+trap 'rm -f "${bashrc_tmp:-}" "${body_tmp:-}" "${config_tmp:-}"' EXIT
+
+# Keep every byte outside a previous marked block, including a missing final
+# newline. read's status distinguishes a newline-terminated line from EOF.
+strip_setup_block() {
+  local source_file=$1 destination=$2 skipping=0 line read_status
+  : >"$destination"
+  while :; do
+    line=
+    if IFS= read -r line; then
+      read_status=0
+    else
+      read_status=$?
+    fi
+    if [ "$read_status" -ne 0 ] && [ -z "$line" ]; then
+      break
+    fi
+    if [ "$skipping" -eq 0 ]; then
+      if [ "$line" = "$start_marker" ]; then
+        skipping=1
+      else
+        printf '%s' "$line" >>"$destination"
+        if [ "$read_status" -eq 0 ]; then
+          printf '\n' >>"$destination"
+        fi
+      fi
+    elif [ "$line" = "$end_marker" ]; then
+      skipping=0
+    fi
+    [ "$read_status" -eq 0 ] || break
+  done <"$source_file"
+  if [ "$skipping" -ne 0 ]; then
+    echo "box-setup: unterminated TMPDIR block in $source_file" >&2
+    return 1
+  fi
+}
+
+if [ -f "$bashrc" ]; then
+  if [ "$(uname -s)" = Darwin ]; then
+    bashrc_mode="$(stat -f '%Lp' "$bashrc")"
+  else
+    bashrc_mode="$(stat -c '%a' "$bashrc")"
+  fi
+  strip_setup_block "$bashrc" "$body_tmp"
+  chmod "$bashrc_mode" "$bashrc_tmp"
+else
+  : >"$body_tmp"
+fi
+{
+  printf '%s\n' "$start_marker"
+  printf 'export TMPDIR=%s\n' "$lanes_tmp"
+  printf '%s\n' "$end_marker"
+  cat "$body_tmp"
+} >"$bashrc_tmp"
+if [ -f "$bashrc" ] && cmp -s "$bashrc_tmp" "$bashrc"; then
+  echo "box-setup: $bashrc unchanged"
+else
+  mv -f "$bashrc_tmp" "$bashrc"
+  bashrc_tmp=
+  echo "box-setup: $bashrc changed"
+fi
+
+printf 'TMPDIR=%s\n' "$lanes_tmp" >"$config_tmp"
+if [ -f "$config" ] && cmp -s "$config_tmp" "$config"; then
+  echo "box-setup: $config unchanged"
+else
+  mv -f "$config_tmp" "$config"
+  config_tmp=
+  echo "box-setup: $config changed"
+fi
