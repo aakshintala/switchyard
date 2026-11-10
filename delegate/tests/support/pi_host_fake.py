@@ -248,6 +248,13 @@ def handle_prompt(command):
     if command.get("streamingBehavior") == "steer":
         handle_steer(command)
         return
+    if "REPLAY_MIXED" in SCENARIOS and text == "MIXED-S2":
+        write_file("replay-start.paused", "")
+        deadline = time.monotonic() + GO_WAIT
+        while not os.path.exists(path("replay-start.go")):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("replay-start.go deadline")
+            time.sleep(0.01)
     if "PROMPT_FAIL" in SCENARIOS and PROMPT_COUNT == 2:
         respond(command.get("id"), "prompt", False, error="fake prompt failed")
         return

@@ -878,6 +878,10 @@ fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
     );
 
     std::fs::write(&release_event_write, "").unwrap();
+    h.wait_file("replay-start.paused", "the replay turn start request");
+    assert_eq!(h.state(&id)["status"], "running");
+    assert_eq!(h.state(&id)["activeTurnId"], Value::Null);
+    std::fs::write(h.fake_dir.join("replay-start.go"), "").unwrap();
     watch_ok(&h, &id);
     let logs = h.logs(&id);
     let replayed: Vec<&Value> = logs
