@@ -205,18 +205,6 @@ impl Harness {
         }
     }
 
-    fn spawn_watch(&self, id: &str, ready: &std::path::Path) -> Child {
-        Command::new(BIN)
-            .args(["session", "watch", id, "--json"])
-            .env("HOME", &self.home)
-            .env("DELEGATE_SESSION_TEST_WATCH_READY", ready)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
-    }
-
     fn requests(&self) -> Vec<Value> {
         std::fs::read_to_string(self.fake_dir.join("requests.jsonl"))
             .unwrap_or_default()
@@ -505,6 +493,26 @@ fn send_started(h: &Harness, id: &str, text: &str) {
     assert_eq!(reply["disposition"], "started", "{reply}");
 }
 
+// debt: `watch` can return in the idle window between a turn completion and the
+// replay worker's begin_turn (follow-up issue); wait for the replay to finish.
+fn logs_after_replay(h: &Harness, id: &str, text: &str) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let logs = h.logs(id);
+        let delivered = logs
+            .iter()
+            .any(|line| line["kind"] == "user" && line["text"] == text);
+        if delivered && h.state(id)["status"] == "idle" {
+            return logs;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replay of {text:?} never finished: {logs:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn watch_ok(h: &Harness, id: &str) {
     let watched = h.invoke(&["watch", id, "--json"]);
     assert!(
@@ -755,10 +763,210 @@ fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
         logs.iter().all(|line| line["kind"] != "steer.unconsumed"),
         "{logs:?}"
     );
+    assert!(
+        logs.iter().all(|line| line["kind"] != "steer.replayed"),
+        "a normally consumed steer must not be replayed: {logs:?}"
+    );
     let delivered = std::fs::read_to_string(h.fake_dir.join("delivered.txt")).unwrap();
     assert_eq!(
         delivered.lines().filter(|line| *line == "STEER-1").count(),
         1
+    );
+}
+
+#[test]
+fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
+    let h = Harness::new();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_REPLAY,REPLAY_UNCONSUMED",
+        None,
+        &[],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    for text in ["REPLAY-ONE", "REPLAY-TWO"] {
+        let steered = h.invoke(&["send", &id, text, "--json"]);
+        assert!(
+            steered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&steered.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+        assert_eq!(reply["disposition"], "steered", "{reply}");
+    }
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    watch_ok(&h, &id);
+    let logs = logs_after_replay(&h, &id, "REPLAY-ONE\n\nREPLAY-TWO");
+    let replayed: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "steer.replayed")
+        .collect();
+    assert_eq!(replayed.len(), 1, "{logs:?}");
+    let command_ids = replayed[0]["commandIds"].as_array().unwrap();
+    assert_eq!(command_ids.len(), 2, "{replayed:?}");
+    let replay_text = "REPLAY-ONE\n\nREPLAY-TWO";
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "user" && line["text"] == replay_text)
+            .count(),
+        1,
+        "{logs:?}"
+    );
+    assert_eq!(h.state(&id)["turnCount"], 2);
+    assert!(
+        logs.iter().all(|line| line["kind"] != "steer.unconsumed"),
+        "{logs:?}"
+    );
+}
+
+#[test]
+fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
+    let h = Harness::new();
+    let release_event_write = h.base.join("release-event-write");
+    let release_event_write_env = release_event_write.to_str().unwrap();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_REPLAY,REPLAY_MIXED",
+        None,
+        &[
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL",
+                release_event_write_env,
+            ),
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_TURN_ID",
+                "pi-turn-2",
+            ),
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_KIND",
+                "turn.started",
+            ),
+        ],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    for text in ["MIXED-S1", "MIXED-S2"] {
+        let steered = h.invoke(&["send", &id, text, "--json"]);
+        assert!(
+            steered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&steered.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+        assert_eq!(reply["disposition"], "steered", "{reply}");
+    }
+    let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    let s2_id = pending[1]["commandId"].as_str().unwrap().to_string();
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    let held_marker = std::path::PathBuf::from(format!("{}.held", release_event_write.display()));
+    h.wait_path(&held_marker, "pi continuation start event hold");
+    let ordinary_starts = h
+        .requests()
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .count();
+    assert_eq!(
+        ordinary_starts,
+        1,
+        "unexpected replay during continuation start: {:?}",
+        h.requests()
+    );
+
+    std::fs::write(&release_event_write, "").unwrap();
+    watch_ok(&h, &id);
+    let logs = logs_after_replay(&h, &id, "MIXED-S2");
+    let replayed: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "steer.replayed")
+        .collect();
+    assert_eq!(replayed.len(), 1, "{logs:?}");
+    assert_eq!(
+        replayed[0]["commandIds"],
+        serde_json::json!([s2_id]),
+        "{replayed:?}"
+    );
+    let s1_delivery = logs
+        .iter()
+        .position(|line| line["kind"] == "user" && line["text"] == "MIXED-S1")
+        .unwrap();
+    let s2_delivery = logs
+        .iter()
+        .position(|line| line["kind"] == "user" && line["text"] == "MIXED-S2")
+        .unwrap();
+    assert!(s1_delivery < s2_delivery, "{logs:?}");
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "user" && line["text"] == "MIXED-S1")
+            .count(),
+        1,
+        "{logs:?}"
+    );
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "user" && line["text"] == "MIXED-S2")
+            .count(),
+        1,
+        "{logs:?}"
+    );
+    let continuation_done = logs
+        .iter()
+        .position(|line| line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-2")
+        .unwrap();
+    let replayed_at = logs
+        .iter()
+        .position(|line| line["kind"] == "steer.replayed")
+        .unwrap();
+    assert!(continuation_done < replayed_at, "{logs:?}");
+    let delivered = std::fs::read_to_string(h.fake_dir.join("delivered.txt")).unwrap();
+    assert_eq!(delivered, "MIXED-S1\n");
+    assert_eq!(h.state(&id)["turnCount"], 3);
+    let requests = h.requests();
+    let replay_turn_starts: Vec<&Value> = requests
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .collect();
+    assert_eq!(replay_turn_starts.len(), 2, "{requests:?}");
+    assert_eq!(replay_turn_starts[1]["message"], "MIXED-S2");
+    let ordinary_starts = requests
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .count();
+    assert_eq!(
+        ordinary_starts,
+        2,
+        "one initial start plus the S2 replay: {:?}",
+        h.requests()
     );
 }
 
@@ -1060,6 +1268,8 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let h = Harness::new();
     let release_event_write = h.base.join("release-event-write");
     let release_event_write_env = release_event_write.to_str().unwrap();
+    let replay_decision_marker = h.base.join("replay-decision");
+    let replay_decision_env = replay_decision_marker.to_str().unwrap();
     let started = h.start_pi(
         "openai/gpt-6-luna",
         b"BRIEF",
@@ -1074,6 +1284,14 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
             (
                 "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_TURN_ID",
                 "pi-turn-2",
+            ),
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_KIND",
+                "turn.started",
+            ),
+            (
+                "DELEGATE_SESSION_TEST_REPLAY_DECISION_FILE",
+                replay_decision_env,
             ),
         ],
     );
@@ -1090,70 +1308,57 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
     assert_eq!(reply["disposition"], "steered", "{reply}");
 
-    let state = h.state(&id);
-    assert_eq!(state["status"], "running");
-    assert_eq!(state["activeTurnId"], "pi-turn-2");
-
-    std::fs::write(h.fake_dir.join("go"), "").unwrap();
     let held_marker = std::path::PathBuf::from(format!("{}.held", release_event_write.display()));
-    h.wait_path(&held_marker, "turn-2 event append hold");
+    h.wait_path(&held_marker, "pi-turn-2 start event append hold");
+    h.wait_path(
+        &replay_decision_marker,
+        "pi replay decision while turn-start event is held",
+    );
+    let ordinary_prompts_before_release = h
+        .requests()
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .count();
+    assert_eq!(
+        ordinary_prompts_before_release,
+        1,
+        "replay must not race pi's queued continuation: {:?}",
+        h.requests()
+    );
 
-    let watch_ready = h.base.join("watch.ready");
-    let mut watcher = h.spawn_watch(&id, &watch_ready);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let exited_before_ready = loop {
-        if let Some(status) = watcher.try_wait().unwrap() {
-            break Some(status);
-        }
-        if watch_ready.exists() {
-            break None;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "watch neither returned nor observed running state"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    if let Some(status) = exited_before_ready {
-        let logs = h.logs(&id);
-        assert!(
-            logs.iter()
-                .any(|line| { line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-2" }),
-            "watch returned with {status} before turn.completed pi-turn-2 was appended; state={}, events={logs:?}",
-            h.state(&id)
-        );
-        panic!("watch returned before observing the running session: {status}");
-    }
-    assert!(
-        watcher.try_wait().unwrap().is_none(),
-        "watch exited while turn.completed pi-turn-2 was held"
-    );
     std::fs::write(&release_event_write, "").unwrap();
-    let watched = wait_cli(
-        &mut watcher,
-        Duration::from_secs(10),
-        &h.root(),
-        &["watch", &id],
-    );
-    assert!(watched.success(), "watch exited with {watched}");
+    h.wait_state(&id, "pi-turn-2 running", |state| {
+        state["status"] == "running" && state["activeTurnId"] == "pi-turn-2"
+    });
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    watch_ok(&h, &id);
 
     let logs = h.logs(&id);
-    let done1 = logs
+    let replayed: Vec<&Value> = logs
         .iter()
-        .position(|line| line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-1")
-        .unwrap();
-    let unconsumed: Vec<usize> = logs
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line["kind"] == "steer.unconsumed")
-        .map(|(index, _)| index)
+        .filter(|line| line["kind"] == "steer.replayed")
         .collect();
-    assert_eq!(unconsumed.len(), 1);
+    assert!(
+        replayed.is_empty(),
+        "pi-started steer must not replay: {logs:?}"
+    );
+    assert!(
+        logs.iter().all(|line| line["kind"] != "steer.unconsumed"),
+        "pi-delivered steer must not be marked unconsumed: {logs:?}"
+    );
+    let deliveries: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "user" && line["text"] == "STEER-3")
+        .collect();
+    assert_eq!(deliveries.len(), 1, "{logs:?}");
     let started2 = logs
         .iter()
         .position(|line| line["kind"] == "turn.started" && line["turnId"] == "pi-turn-2")
         .unwrap();
-    let user = logs
+    let delivered = logs
         .iter()
         .position(|line| line["kind"] == "user" && line["text"] == "STEER-3")
         .unwrap();
@@ -1161,10 +1366,33 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
         .iter()
         .position(|line| line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-2")
         .unwrap();
-    assert!(done1 < unconsumed[0] && unconsumed[0] < started2 && started2 < user && user < done2);
+    assert!(started2 < delivered && delivered < done2, "{logs:?}");
+    assert_eq!(deliveries[0]["turnId"], "pi-turn-2");
+    assert_eq!(
+        std::fs::read_to_string(h.fake_dir.join("delivered.txt")).unwrap(),
+        "STEER-3\n"
+    );
+    let replay_prompt_requests = h
+        .requests()
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .count();
+    assert_eq!(
+        replay_prompt_requests,
+        1,
+        "{}",
+        h.requests()
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\\n")
+    );
 
     assert_eq!(h.state(&id)["turnCount"], 2);
-    h.notes_poll(&id, "idle", 2);
+    h.notes_poll(&id, "idle", 1);
 }
 
 #[test]

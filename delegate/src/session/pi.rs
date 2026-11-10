@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 pub const TRIGGER: &str = "Your instructions are in your system prompt. Begin.";
@@ -99,6 +99,9 @@ pub struct Wire {
     started_emitted: bool,
     pending: HashMap<String, Pending>,
     fifo: VecDeque<String>,
+    steer_texts: VecDeque<(String, String)>,
+    queued_steer_ids: Vec<String>,
+    queue_observed: bool,
     prompt_cumulative: u64,
     output_cumulative: u64,
     total_cumulative: u64,
@@ -113,7 +116,28 @@ impl Wire {
     }
 
     pub fn queued_steers(&self) -> usize {
-        self.fifo.len()
+        self.queued_steer_ids().len()
+    }
+
+    pub fn queued_steer_ids(&self) -> Vec<String> {
+        if self.queue_observed {
+            self.queued_steer_ids.clone()
+        } else {
+            self.steer_texts
+                .iter()
+                .map(|(command_id, _)| command_id.clone())
+                .collect()
+        }
+    }
+
+    pub fn forget_steers(&mut self, command_ids: &[String]) {
+        let command_ids: HashSet<&str> = command_ids.iter().map(String::as_str).collect();
+        self.steer_texts
+            .retain(|(command_id, _)| !command_ids.contains(command_id.as_str()));
+        self.queued_steer_ids
+            .retain(|command_id| !command_ids.contains(command_id.as_str()));
+        self.fifo
+            .retain(|command_id| !command_ids.contains(command_id.as_str()));
     }
 
     pub fn encode(&mut self, id: i64, method: &str, params: &Value) -> Result<String, String> {
@@ -168,6 +192,8 @@ impl Wire {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
+                self.steer_texts
+                    .push_back((command_id.clone(), text.to_string()));
                 self.pending.insert(
                     wire_id.clone(),
                     Pending {
@@ -481,6 +507,17 @@ impl Wire {
                 }
             }
             "queue/clear" => {
+                self.queue_observed = true;
+                self.queued_steer_ids.clear();
+                let cleared = data
+                    .get("steering")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let resolved = self.resolve_steer_texts(&cleared);
+                for (index, _) in resolved.into_iter().rev() {
+                    self.steer_texts.remove(index);
+                }
                 let count = data
                     .get("steering")
                     .and_then(Value::as_array)
@@ -504,6 +541,24 @@ impl Wire {
                 result: Ok(data),
             }],
         }
+    }
+
+    fn resolve_steer_texts(&self, reported: &[Value]) -> Vec<(usize, String)> {
+        let mut used = HashSet::new();
+        reported
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|text| {
+                self.steer_texts
+                    .iter()
+                    .enumerate()
+                    .find(|(index, (_, known_text))| !used.contains(index) && known_text == text)
+                    .map(|(index, (command_id, _))| {
+                        used.insert(index);
+                        (index, command_id.clone())
+                    })
+            })
+            .collect()
     }
 
     fn parse_event(
@@ -623,6 +678,22 @@ impl Wire {
     ) -> Vec<crate::session::msp::Incoming> {
         let _ = line;
         match kind {
+            "queue_update" => {
+                self.queue_observed = true;
+                let steering = object
+                    .get("steering")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                self.queued_steer_ids = self
+                    .resolve_steer_texts(&steering)
+                    .into_iter()
+                    .map(|(_, command_id)| command_id)
+                    .collect();
+                vec![crate::session::msp::Incoming::Event(
+                    crate::session::msp::HostEvent::Ignored,
+                )]
+            }
             "tool_execution_start" => {
                 let turn_id = self.current.clone().unwrap_or_default();
                 let tool = object
@@ -743,6 +814,12 @@ impl Wire {
                     })
                     .unwrap_or_default();
                 let command_id = self.fifo.pop_front();
+                if let Some(command_id) = &command_id {
+                    self.steer_texts
+                        .retain(|(known_id, _)| known_id != command_id);
+                    self.queued_steer_ids
+                        .retain(|known_id| known_id != command_id);
+                }
                 vec![crate::session::msp::Incoming::Event(
                     crate::session::msp::HostEvent::UserMessage {
                         turn_id,
@@ -1259,7 +1336,6 @@ mod tests {
     struct ReplayFrame {
         kind: String,
         status: crate::session::state::Status,
-        logs: Vec<serde_json::Value>,
     }
 
     struct ReplayResult {
@@ -1303,7 +1379,7 @@ mod tests {
                         command_seq += 1;
                         let cmd_id = format!("cmd-{command_seq}");
                         if is_steer {
-                            st::note_steer(state, &cmd_id);
+                            st::note_steer(state, &cmd_id, text_msg);
                             let params = serde_json::json!({
                                 "input": [{"type": "text", "text": text_msg}],
                                 "commandId": cmd_id,
@@ -1333,7 +1409,6 @@ mod tests {
                 result.frames.push(ReplayFrame {
                     kind: kind.to_string(),
                     status: state.status.clone(),
-                    logs: Vec::new(),
                 });
                 continue;
             }
@@ -1353,7 +1428,6 @@ mod tests {
                 val["id"] = serde_json::Value::String(mapped);
             }
             let incomings = wire.parse(&val.to_string());
-            let mut logs = Vec::new();
             for incoming in &incomings {
                 match incoming {
                     Incoming::Response { result, .. } => {
@@ -1370,14 +1444,15 @@ mod tests {
                             st::abort_turn(state, now);
                         }
                     }
-                    Incoming::Event(event) => logs.extend(st::apply_event(state, event, now)),
+                    Incoming::Event(event) => {
+                        let _ = st::apply_event(state, event, now);
+                    }
                     _ => {}
                 }
             }
             result.frames.push(ReplayFrame {
                 kind: kind.to_string(),
                 status: state.status.clone(),
-                logs,
             });
             result.incomings.extend(incomings);
         }
@@ -1514,6 +1589,26 @@ mod tests {
         assert_eq!(state.usage.total_tokens, 5569);
     }
     #[test]
+    fn queue_updates_identify_which_pending_steers_pi_still_holds() {
+        let mut wire = super::Wire::new();
+        let _ = wire
+            .encode(
+                1,
+                "turn/steer",
+                &serde_json::json!({
+                    "input":[{"type":"text","text":"held"}],
+                    "commandId":"steer-held"
+                }),
+            )
+            .unwrap();
+        wire.parse(r#"{"type":"queue_update","steering":["held"],"followUp":[]}"#);
+        assert_eq!(wire.queued_steer_ids(), ["steer-held"]);
+
+        wire.parse(r#"{"type":"queue_update","steering":[],"followUp":[]}"#);
+        assert!(wire.queued_steer_ids().is_empty());
+    }
+
+    #[test]
     fn replay_steer_abort_then_after_abort() {
         use crate::session::msp::{HostEvent, Incoming};
         use crate::session::state as st;
@@ -1551,19 +1646,6 @@ mod tests {
         assert_eq!(completions[1].0, "pi-turn-2");
         assert_eq!(completions[1].1, "completed");
         assert!(completions[1].2.is_none());
-        assert!(
-            replayed
-                .frames
-                .iter()
-                .flat_map(|frame| &frame.logs)
-                .any(|line| {
-                    line.get("kind").and_then(|value| value.as_str()) == Some("steer.unconsumed")
-                        && line
-                            .get("commandIds")
-                            .and_then(|ids| ids.as_array())
-                            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some("cmd-2")))
-                })
-        );
         assert_eq!(state.status, st::Status::Idle);
         assert_eq!(state.turn_count, 2);
         assert_eq!(
@@ -1573,6 +1655,20 @@ mod tests {
         assert_eq!(state.usage.prompt_tokens, 6015);
         assert_eq!(state.usage.output_tokens, 175);
         assert_eq!(state.usage.total_tokens, 6190);
+
+        match st::begin_pending_steer_replay(&mut state, 2000).unwrap() {
+            st::PendingSteerReplay::Started { text, log } => {
+                assert_eq!(
+                    text,
+                    "After the sleep, include the word STEERED in your short response."
+                );
+                assert_eq!(log["kind"], "steer.replayed");
+                assert_eq!(log["commandIds"], serde_json::json!(["cmd-2"]));
+            }
+            other => panic!("pending pi steer should be replayed, got {other:?}"),
+        }
+        assert!(state.pending_steers.is_empty());
+        assert_eq!(state.status, st::Status::Running);
     }
     #[test]
     fn races_and_echoes_behave() {
@@ -1623,7 +1719,7 @@ mod tests {
             }
             assert_eq!(wire.queued_steers(), 0);
             now += 10;
-            st::note_steer(&mut state, "steer-a");
+            st::note_steer(&mut state, "steer-a", "more");
             let _ = wire
                 .encode(
                     2,
@@ -1631,6 +1727,8 @@ mod tests {
                     &serde_json::json!({"input":[{"type":"text","text":"more"}],"commandId":"steer-a"}),
                 )
                 .unwrap();
+            let out = wire.parse(r#"{"type":"queue_update","steering":["more"],"followUp":[]}"#);
+            let _ = out;
             let out = wire.parse(
                 r#"{"id":"2","type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}"#,
             );
@@ -1662,12 +1760,12 @@ mod tests {
                     lines.extend(st::apply_event(&mut state, &event, now));
                 }
             }
-            assert!(
-                !lines
-                    .iter()
-                    .any(|line| line.get("kind").and_then(|v| v.as_str())
-                        == Some("steer.unconsumed"))
-            );
+            assert!(!lines.iter().any(|line| {
+                matches!(
+                    line.get("kind").and_then(|v| v.as_str()),
+                    Some("steer.unconsumed" | "steer.replayed")
+                )
+            }));
         }
         // (b) FIFO alignment: start + steer = 2, echoes pop front.
         {
@@ -1689,10 +1787,11 @@ mod tests {
                     &serde_json::json!({"input":[{"type":"text","text":"more"}],"commandId":"steer-b"}),
                 )
                 .unwrap();
+            let _ = wire.parse(r#"{"type":"queue_update","steering":["more"],"followUp":[]}"#);
             let _ = wire.parse(
                 r#"{"id":"2","type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}"#,
             );
-            assert_eq!(wire.queued_steers(), 2);
+            assert_eq!(wire.queued_steers(), 1);
             let out = wire.parse(
                 r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
             );
@@ -1719,7 +1818,7 @@ mod tests {
             let mut wire = super::Wire::new();
             let mut state = st::new_state("s-c", "m", "/work", "/inbox", 1000);
             let mut now = 1000;
-            st::note_steer(&mut state, "steer-c");
+            st::note_steer(&mut state, "steer-c", "more");
             let _ = wire
                 .encode(
                     1,

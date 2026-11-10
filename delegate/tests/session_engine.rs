@@ -646,7 +646,84 @@ fn supervisor_send_while_running_steers_and_tracks_the_command() {
         !session
             .events()
             .iter()
-            .any(|event| event["kind"] == "steer.unconsumed")
+            .any(|event| event["kind"] == "steer.unconsumed" || event["kind"] == "steer.replayed")
+    );
+    assert_eq!(
+        session
+            .requests()
+            .iter()
+            .filter(|request| request["method"] == "turn/start")
+            .count(),
+        1,
+        "a normally consumed steer must not start a replay turn"
+    );
+    assert_eq!(session.stop_and_join(), 0);
+}
+
+#[test]
+fn supervisor_logs_msp_pending_steers_as_unconsumed_at_turn_completion() {
+    let inbox = temp_root("ds-msp-unconsumed-inbox");
+    let mut session = Session::spawn(
+        "HOLD,STEER_NOEFFECT",
+        "brief",
+        Some(&inbox),
+        Bounds::default(),
+    );
+    session.until("held first turn", |state| {
+        state.status == Status::Running && state.active_turn_id.is_some()
+    });
+
+    for text in ["first replay", "second replay"] {
+        let reply = session.send(text).unwrap();
+        assert_eq!(reply["disposition"], "steered");
+    }
+    let steering: Vec<_> = session
+        .requests()
+        .into_iter()
+        .filter(|request| request["method"] == "turn/steer")
+        .collect();
+    assert_eq!(steering.len(), 2);
+    let command_ids: Vec<_> = steering
+        .iter()
+        .map(|request| request["params"]["commandId"].as_str().unwrap())
+        .collect();
+
+    std::fs::write(session.fake_dir.join("go"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let unconsumed = loop {
+        if let Some(event) = session
+            .events()
+            .into_iter()
+            .find(|event| event["kind"] == "steer.unconsumed")
+        {
+            break event;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing steer.unconsumed: {:?}",
+            session.events()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(unconsumed["commandIds"], json!(command_ids));
+    let state = session.until("idle after unconsumed steers and inbox note", |state| {
+        state.status == Status::Idle
+            && session
+                .inbox_notes(&inbox)
+                .contains(&format!("[session {} idle]\n", session.id))
+    });
+    assert_eq!(state.turn_count, 1);
+    let starts: Vec<_> = session
+        .requests()
+        .into_iter()
+        .filter(|request| request["method"] == "turn/start")
+        .collect();
+    assert_eq!(starts.len(), 1, "MSP must not start a replay turn");
+    assert!(
+        session
+            .events()
+            .iter()
+            .all(|event| event["kind"] != "steer.replayed")
     );
     assert_eq!(session.stop_and_join(), 0);
 }

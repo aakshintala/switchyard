@@ -120,13 +120,16 @@ def hold_run(text):
 
 
 def deliver_queue():
+    queued = list(QUEUE)
+    send({"type": "agent_start"})
     send({"type": "turn_start"})
-    for text in QUEUE:
+    for text in queued:
         send(user_frame(text))
         with open(path("delivered.txt"), "a", encoding="utf-8") as output:
             output.write(text + "\n")
-    send(assistant_frame("saw: " + ", ".join(QUEUE)))
     QUEUE.clear()
+    send({"type": "queue_update", "steering": [], "followUp": []})
+    send(assistant_frame("saw: " + ", ".join(queued)))
     send({"type": "turn_end"})
     send({"type": "agent_end", "messages": [], "willRetry": False})
     send({"type": "agent_settled", "aborted": False})
@@ -144,10 +147,25 @@ def finish_hold(completed):
         send({"type": "tool_execution_end", "toolName": "bash", "toolCallId": "call_1"})
         send({"type": "message_start", "message": {"role": "toolResult"}})
         send({"type": "message_end", "message": {"role": "toolResult"}})
+        if "REPLAY_MIXED" in SCENARIOS:
+            send({"type": "turn_end"})
+            send({"type": "agent_end", "messages": [], "willRetry": False})
+            send({"type": "agent_settled", "aborted": False})
+            if QUEUE:
+                deliver_queue()
+            return
+        if "REPLAY_UNCONSUMED" in SCENARIOS:
+            # Model pi dropping an accepted queued steer: it first reports the
+            # queue entry, then reports an empty queue without delivering it.
+            QUEUE.clear()
+            send({"type": "queue_update", "steering": [], "followUp": []})
         send({"type": "turn_end"})
         if QUEUE:
             deliver_queue()
             return
+        if "REPLAY_UNCONSUMED" in SCENARIOS:
+            send({"type": "agent_end", "messages": [], "willRetry": False})
+            send({"type": "agent_settled", "aborted": False})
     else:
         send(
             {
@@ -254,7 +272,7 @@ def handle_prompt(command):
         RACE_PHASE = 1
         HOLD_START = time.monotonic()
         return
-    if "HOLD_TOOL" in SCENARIOS:
+    if "HOLD_TOOL" in SCENARIOS or ("HOLD_REPLAY" in SCENARIOS and PROMPT_COUNT == 1):
         hold_run(text)
         return
     if "DIALOG" in SCENARIOS:
@@ -290,14 +308,27 @@ def handle_steer(command):
         RACE_PHASE = 2
         RACE_TEXT = text
         HOLD_START = time.monotonic()
+        send({"type": "queue_update", "steering": [text], "followUp": []})
+        respond(command.get("id"), "prompt", True, {"disposition": "queued"})
+        send({"type": "turn_end"})
         send({"type": "agent_end", "messages": [], "willRetry": False})
         send({"type": "agent_settled", "aborted": False})
-        respond(command.get("id"), "prompt", True, {"disposition": "started"})
         send({"type": "agent_start"})
         send({"type": "turn_start"})
         send(user_frame(text))
         with open(path("delivered.txt"), "a", encoding="utf-8") as output:
             output.write(text + "\n")
+        return
+    if "REPLAY_MIXED" in SCENARIOS:
+        if text == "MIXED-S1":
+            QUEUE.append(text)
+        send({"type": "queue_update", "steering": list(QUEUE), "followUp": []})
+        respond(command.get("id"), "prompt", True, {"disposition": "queued"})
+        return
+    if "REPLAY_UNCONSUMED" in SCENARIOS:
+        QUEUE.append(text)
+        send({"type": "queue_update", "steering": list(QUEUE), "followUp": []})
+        respond(command.get("id"), "prompt", True, {"disposition": "queued"})
         return
     QUEUE.append(text)
     with open(path("queue.txt"), "a", encoding="utf-8") as output:

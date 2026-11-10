@@ -41,4 +41,8 @@ A steer queued during a tool call reaches the next continuation: it is delivered
 
 An interrupt clears the queue before the abort and the host survives: `stop --interrupt` (and a plain `stop` on a running turn) sends `clear_queue` before the abort, dropping unsent steers, which are reported as one `steer.unconsumed` line on the cancelled completion; the host process keeps running and the session returns to `idle`.
 
-A steer racing the end of a turn starts the next turn: the finished turn's `steer.unconsumed` line comes first, then the queued steer opens a new turn that carries it as its `user` line.
+A steer racing the end of a turn starts the next turn: pi still holds it in its queue, so the supervisor does not replay it, and neither `steer.replayed` nor `steer.unconsumed` is logged; the queued steer opens a new turn that carries it as its `user` line, exactly once.
+
+A steer pi accepted but no longer holds at turn end, and never delivered, is replayed: the supervisor logs `steer.replayed` and starts one new turn carrying the pending steers' text in order. If pi still holds some pending steers and dropped others, the supervisor waits for pi's continuation turn to end and replays the dropped ones then, so order is kept and pi never gets a second turn start.
+
+Pending steers are replayed only for pi, whose host reports queue snapshots. At an MSP/Muse turn end, pending steers are logged as `steer.unconsumed` with their command ids and cleared, with no replay turn; Muse may execute a late steer itself, so replay could duplicate delivery. The Muse case is tracked in #1557.

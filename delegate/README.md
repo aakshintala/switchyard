@@ -64,7 +64,7 @@ A Muse model id is `muse/` plus the Muse model name (for example, `muse/muse-spa
 - A new session starts its event sequence at 1. Each successful append advances the sequence by one.
 - Session ordering, event and inbox guarantees are documented in [the session contracts](../docs/delegate-sessions.md).
 - The MSP adapter preserves each `turn/completed` terminal value (`completed`, `failed` or `cancelled`) and preserves a failed turn's error kind.
-- A matching turn completion returns one event line. If pending steer ids remain, it returns one `steer.unconsumed` line and clears them.
+- A matching turn completion returns one event line and keeps any pending steers (id and text). Only pi sessions replay pending steers in order as one new turn and log one `steer.replayed` line with their ids; MSP/Muse sessions log one `steer.unconsumed` line with the ids and clear them instead. Muse can run a late steer itself, so replaying it could deliver it twice; that Muse behavior is tracked in #1557. A stopping or dead session also logs `steer.unconsumed` and clears pending steers. A pi steer that pi still holds in its own queue is not replayed: pi delivers it.
 - The Muse session host command is `serve --provider meta --model <model-id> --disable-sandbox`.
 - Muse binary lookup checks `MUSE_BIN`, then `which muse`, then `~/.local/bin/muse`.
 - An idle `session/statusChanged` event does not end a turn. A matching `turn/completed` event does.
