@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# box-setup: provision the box user's TMPDIR for ssh commands and systemd services.
+# Run on the box as the box user (for example: ssh <box> 'bash -s' < bin/box-setup).
+# The systemd user manager reads environment.d only at start or reload, so this
+# runs `systemctl --user daemon-reload`; a user unit picks TMPDIR up the next
+# time it restarts after that reload. BOX_SYSTEMCTL overrides systemctl (tests).
+set -euo pipefail
+
+home=${HOME:?box-setup must run with HOME set}
+lanes_tmp=${BOX_LANES_TMP:-/srv/lanes/tmp}
+bashrc="$home/.bashrc"
+config_dir="$home/.config/environment.d"
+config="$config_dir/lanes.conf"
+start_marker='# >>> switchyard box-setup: TMPDIR >>>'
+end_marker='# <<< switchyard box-setup: TMPDIR <<<'
+
+mkdir -p "$lanes_tmp" "$config_dir"
+bashrc_tmp="$(mktemp "$home/.bashrc.XXXXXX")"
+body_tmp="$(mktemp "$home/.bashrc-body.XXXXXX")"
+config_tmp="$(mktemp "$config_dir/lanes.conf.XXXXXX")"
+trap 'rm -f "${bashrc_tmp:-}" "${body_tmp:-}" "${config_tmp:-}"' EXIT
+
+if [ -f "$bashrc" ]; then
+  if [ "$(uname -s)" = Darwin ]; then
+    bashrc_mode="$(stat -f '%Lp' "$bashrc")"
+  else
+    bashrc_mode="$(stat -c '%a' "$bashrc")"
+  fi
+  sed '/^# >>> switchyard box-setup/,/^# <<< switchyard box-setup/d' "$bashrc" >"$body_tmp"
+  chmod "$bashrc_mode" "$bashrc_tmp"
+else
+  : >"$body_tmp"
+fi
+{
+  printf '%s\n' "$start_marker"
+  printf 'export TMPDIR=%s\n' "$lanes_tmp"
+  printf '%s\n' "$end_marker"
+  cat "$body_tmp"
+} >"$bashrc_tmp"
+if [ -f "$bashrc" ] && cmp -s "$bashrc_tmp" "$bashrc"; then
+  echo "box-setup: $bashrc unchanged"
+else
+  mv -f "$bashrc_tmp" "$bashrc"
+  bashrc_tmp=
+  echo "box-setup: $bashrc changed"
+fi
+
+printf 'TMPDIR=%s\n' "$lanes_tmp" >"$config_tmp"
+if [ -f "$config" ] && cmp -s "$config_tmp" "$config"; then
+  echo "box-setup: $config unchanged"
+else
+  mv -f "$config_tmp" "$config"
+  config_tmp=
+  echo "box-setup: $config changed"
+fi
+
+# Make the user manager re-read environment.d; absent off the box, so ignore failure.
+"${BOX_SYSTEMCTL:-systemctl}" --user daemon-reload 2>/dev/null || true
