@@ -81,6 +81,14 @@ plan_without_rulings() {
   ' "$1"
 }
 
+plan_protected_sections() {
+  awk '
+    /^## (Files|Gate|Tasks)([[:space:]]|$)/ { in_protected=1; print; next }
+    /^## / { in_protected=0 }
+    in_protected { print }
+  ' "$1"
+}
+
 plan_rulings_section() {
   awk '
     /^## Rulings[[:space:]]*$/ { in_rulings=1; found=1 }
@@ -116,6 +124,9 @@ normalize_plan_ruling_line() {
       line=$0
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
+      if (line ~ /^(```|~~~)/) next
+      sub(/^[-+]/, "", line)
+      sub(/^[[:space:]]+/, "", line)
       sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
@@ -538,11 +549,16 @@ do_triaged() {
     emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "comment $comment is not on $repo#$issue"
   fi
   stop_verdict_at="$(t get plan_stop_verdict_at 2>/dev/null || true)"
-  if [ -z "$stop_verdict_at" ] || ! jq -e --arg stop_verdict_at "$stop_verdict_at" '
-    (.created_at | type == "string") and (.created_at > $stop_verdict_at)
+  plan_verdict_at="$(t get plan_verdict_at 2>/dev/null || true)"
+  ruling_after_verdict_at="$stop_verdict_at"
+  if [ -n "$plan_verdict_at" ] && { [ -z "$ruling_after_verdict_at" ] || [[ "$plan_verdict_at" > "$ruling_after_verdict_at" ]]; }; then
+    ruling_after_verdict_at="$plan_verdict_at"
+  fi
+  if [ -z "$ruling_after_verdict_at" ] || ! jq -e --arg verdict_at "$ruling_after_verdict_at" '
+    (.created_at | type == "string") and (.created_at > $verdict_at)
   ' "$comment_json" >/dev/null 2>&1; then
     rm -f "$comment_json" "$comment_error"
-    emit "TRIAGED-REFUSED reason=ruling-stale" 1 "comment $comment does not postdate the verdict that stopped the plan"
+    emit "TRIAGED-REFUSED reason=ruling-stale" 1 "comment $comment does not postdate the latest plan verdict"
   fi
   round="$(ronum)"
   stored_verdict="$(t get plan_verdict 2>/dev/null || true)"
@@ -589,39 +605,41 @@ do_triaged() {
     if [ "$stored_base" = "$base" ] && [ "$after_has_rulings" -eq 1 ] && cmp -s "$before_rest" "$after_rest" && ! cmp -s "$before_rulings" "$after_rulings"; then
       ruling_revision=1
     elif [ "$stored_base" = "$base" ] && ! cmp -s "$before_rest" "$after_rest"; then
-      # Match the plan parser's section-heading convention. A structural edit
-      # to Files, Gate or Tasks still needs a Verifier even if quoted.
-      protected_heading_changed=0
-      if grep -Eq '^[+-]## (Files|Gate|Tasks)([[:space:]]|$)' "$raw_diff"; then protected_heading_changed=1; fi
-      if [ "$protected_heading_changed" -eq 0 ]; then
-        diff_rc=0
-        if diff -u "$before_rest" "$after_rest" >"$outside_diff"; then :; else diff_rc=$?; fi
-        [ "$diff_rc" -le 1 ] || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$diff_file"; exit 2; }
-        jq -r '.body' "$comment_json" >"$comment_body" || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$comment_json" "$comment_body" "$comment_error" "$diff_file"; exit 2; }
-        awk '
-            {
-              line=$0
-              sub(/^[[:space:]]+/, "", line)
-              sub(/[[:space:]]+$/, "", line)
-              sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
-              sub(/^[[:space:]]+/, "", line)
-              sub(/[[:space:]]+$/, "", line)
-              if (length(line)) print line
-            }
-          ' "$comment_body" >"$normalized_comment"
-          first_unmatched=""
-          while IFS= read -r changed_line; do
-            normalized_line="$(normalize_plan_ruling_line "$changed_line")"
-            [ -n "$normalized_line" ] || continue
-            if ! grep -Fqx -- "$normalized_line" "$normalized_comment"; then
-              first_unmatched="$changed_line"
-              break
-            fi
-          done < <(awk 'NR <= 2 && /^(---|\+\+\+)/ { next } /^[+-]/ { print substr($0, 2) }' "$outside_diff")
-          if [ -z "$first_unmatched" ]; then
-            ruling_revision=1
-            accepted_diff="$diff_file"
-          fi
+      # Any edit within Files, Gate or Tasks still needs a Verifier, even if quoted.
+      protected_section_changed=0
+      if ! cmp -s <(plan_protected_sections "$snapshot_file") <(plan_protected_sections "$plan"); then
+        protected_section_changed=1
+      fi
+      diff_rc=0
+      if diff -u "$before_rest" "$after_rest" >"$outside_diff"; then :; else diff_rc=$?; fi
+      [ "$diff_rc" -le 1 ] || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$diff_file"; exit 2; }
+      jq -r '.body' "$comment_json" >"$comment_body" || { rm -f "$snapshot_file" "$before_rest" "$after_rest" "$before_rulings" "$after_rulings" "$raw_diff" "$outside_diff" "$comment_json" "$comment_body" "$comment_error" "$diff_file"; exit 2; }
+      awk '
+        {
+          line=$0
+          sub(/^[[:space:]]+/, "", line)
+          sub(/[[:space:]]+$/, "", line)
+          if (line ~ /^(```|~~~)/) next
+          sub(/^[-+]/, "", line)
+          sub(/^[[:space:]]+/, "", line)
+          sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", line)
+          sub(/^[[:space:]]+/, "", line)
+          sub(/[[:space:]]+$/, "", line)
+          if (length(line)) print line
+        }
+      ' "$comment_body" >"$normalized_comment"
+      first_unmatched=""
+      while IFS= read -r changed_line; do
+        normalized_line="$(normalize_plan_ruling_line "$changed_line")"
+        [ -n "$normalized_line" ] || continue
+        if ! grep -Fqx -- "$normalized_line" "$normalized_comment"; then
+          first_unmatched="$changed_line"
+          break
+        fi
+      done < <(awk 'NR <= 2 && /^(---|\+\+\+)/ { next } /^[+-]/ { print substr($0, 2) }' "$outside_diff")
+      if [ -z "$first_unmatched" ] && [ "$protected_section_changed" -eq 0 ]; then
+        ruling_revision=1
+        accepted_diff="$diff_file"
       fi
     fi
     if [ "$ruling_revision" -ne 1 ]; then
@@ -642,7 +660,7 @@ do_triaged() {
 
   if [ -z "$confirmed_for" ] && [ "$round" -lt 2 ]; then
     if [ "$ruling_revision" -eq 1 ]; then
-      [ "$stored_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
+      case "$stored_verdict" in lines|ok) ;; *) emit "TRIAGED-REFUSED reason=rounds-open" 1;; esac
     else
       plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
       [ "$plan_verdict" = lines ] || emit "TRIAGED-REFUSED reason=rounds-open" 1
