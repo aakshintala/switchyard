@@ -29,8 +29,16 @@ stale_block_is_replaced() {
   ! grep -Fq '/old/tmp' "$1" && [ "$(grep -Fc 'switchyard box-setup: TMPDIR' "$1")" = 2 ]
 }
 
+# A systemctl stub records its args, so the test never reloads a real user manager.
+SYSTEMCTL_LOG="$T/systemctl.log"
+cat >"$T/systemctl" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >>"$SYSTEMCTL_LOG"
+EOF
+chmod +x "$T/systemctl"
+
 run_setup() {
-  out="$(BOX_LANES_TMP="$LANES_TMP" HOME="$home" bash "$BIN" 2>&1)"
+  out="$(BOX_SYSTEMCTL="$T/systemctl" BOX_LANES_TMP="$LANES_TMP" HOME="$home" bash "$BIN" 2>&1)"
   code=$?
 }
 
@@ -53,6 +61,7 @@ ok 'fresh setup creates the tmp directory' test -d "$LANES_TMP"
 ok 'fresh setup creates the bashrc block first' cmp -s "$T/expected-bashrc" "$home/.bashrc"
 ok 'fresh setup creates the systemd environment file' cmp -s "$T/expected-lanes.conf" "$home/.config/environment.d/lanes.conf"
 ok 'fresh setup reports both files changed' has_both "$out" '.bashrc changed' 'lanes.conf changed'
+ok 'fresh setup reloads the systemd user manager' grep -qx -- '--user daemon-reload' "$SYSTEMCTL_LOG"
 
 # A second run must be byte-identical and report no file changes.
 cp "$home/.bashrc" "$T/second-bashrc"

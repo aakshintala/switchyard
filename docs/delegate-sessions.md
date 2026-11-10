@@ -4,7 +4,7 @@ This page records the ordering and cardinality guarantees that session tests rel
 
 ## Box TMPDIR setup
 
-Run `bin/box-setup` on the box as the box user to set `TMPDIR=/srv/lanes/tmp` for new SSH commands and systemd user services. From the Mac, run `ssh <box> 'bash -s' < bin/box-setup`, or run the script from a checkout on the box.
+Run `bin/box-setup` on the box as the box user to set `TMPDIR=/srv/lanes/tmp` for new SSH commands and systemd user services. From the Mac, run `ssh <box> 'bash -s' < bin/box-setup`, or run the script from a checkout on the box. It runs `systemctl --user daemon-reload` so the user manager re-reads `environment.d`; a systemd user unit picks up `TMPDIR` the next time it restarts after that reload.
 
 Delegate session daemons that were already running keep their old environment. Before restarting one, check `delegate session list --json` and find its entry in `sessions[]`. Stop it only when `activeTurnId` is `null`, which means the session is idle. Run `delegate session stop <id>`, then start a fresh session with the original `delegate session start` arguments.
 
