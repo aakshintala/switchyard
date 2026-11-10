@@ -1469,11 +1469,21 @@ for line in open(roster):
     jid = p[4] if len(p) > 4 else "?"
     entries[(n, sess)] = (ts, host, jid)
 
+def entry_is_retired(n, sess, jid, ts):
+    cut = done.get(n, "")
+    for (dn, dk), dts in done_sess.items():
+        if dn == n and (dk == sess or dk == jid or
+                        (jid not in ("", "?") and (jid.startswith(dk) or dk.startswith(jid)))):
+            cut = max(cut, dts)
+    return bool(cut and ts.split()[0] <= cut)
+
 # A pending command names a ticket state file, not the session running it. Keep
-# the newest roster entry so a reported plan is not blamed for work handed to
-# the newer phase on that shared state file.
+# the newest non-retired roster entry so a reported plan is not blamed for work
+# handed to a live newer phase on that shared state file.
 newest_roster = {}
 for (n, sess), (ts, host, jid) in entries.items():
+    if entry_is_retired(n, sess, jid, ts):
+        continue
     started = launched(ts)
     current = newest_roster.get(n)
     if started is not None and (current is None or started > current[0]):
@@ -1483,19 +1493,7 @@ missing = 0
 active_roster_tickets = set()
 live_roster_starts = {}
 for (n, sess), (ts, host, jid) in sorted(entries.items()):
-    # A `done <ticket>:<key>` line names the session either way round: by its
-    # roster name (`fiber-4026-plan`) or by its delegate session id, whole or
-    # as a prefix. Keying on the name alone silently dropped every retirement
-    # typed with an id — and the id is what every MISSING and STALL line here
-    # prints as the thing to act on, so that was the form in use (2026-11-04:
-    # 19 retirements recorded, 16 of them inert).
-    cut = done.get(n, "")
-    for (dn, dk), dts in done_sess.items():
-        if dn != n:
-            continue
-        if dk == sess or dk == jid or (jid not in ("", "?") and (jid.startswith(dk) or dk.startswith(jid))):
-            cut = max(cut, dts)
-    if cut and ts.split()[0] <= cut:
+    if entry_is_retired(n, sess, jid, ts):
         continue
     active_roster_tickets.add(n)
     # A delegate lane is looked up by its session id (column 5), a Claude lane
