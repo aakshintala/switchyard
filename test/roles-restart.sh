@@ -5,9 +5,17 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$SCRIPT_DIR/../bin/roles-restart"
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-roles-restart.XXXXXX")"
-trap 'rm -rf "$T"' EXIT
 # macOS TMPDIR ends in /; normalise so paths match the $PWD that cd produces.
 T="$(cd "$T" && pwd)"
+
+cleanup() {
+  if [ -n "${test_sleep_pid:-}" ]; then
+    kill "$test_sleep_pid" 2>/dev/null || true
+    wait "$test_sleep_pid" 2>/dev/null || true
+  fi
+  rm -rf "$T"
+}
+trap cleanup EXIT
 
 fail() {
   echo "FAIL: $1" >&2
@@ -62,6 +70,7 @@ run_restart() {
   ROLES_RESTART_ROLES="$ROLE_TABLE" \
     ROLES_RESTART_AGENTS_JSON="$AGENTS_JSON" \
     ROLES_RESTART_PS="$PS_FILE" \
+    ROLES_RESTART_STATE_DIR="$STATE_DIR" \
     ROLES_RESTART_LOCK_DIR="$LOCK" \
     ROLES_RESTART_LOG="$T/roles-restart.log" \
     ROLES_RESTART_WAIT_TIMEOUT="${WAIT_TIMEOUT:-2}" \
@@ -72,6 +81,7 @@ ROLE_HOME="$T/role-home"
 HANDOFF="$T/handoff.md"
 AGENTS_JSON="$T/agents.json"
 PS_FILE="$T/ps.txt"
+STATE_DIR="$T/roles-restart-state"
 LOCK="$T/roles-restart.lock"
 : >"$PS_FILE"
 mkdir -p "$ROLE_HOME/worktree"
@@ -104,6 +114,30 @@ grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: backg
   || fail "background session without watcher warning was not logged exactly"
 grep -F "owner-ask log --from roles-restart --kind process --title $no_watcher_line" "$OWNER_ASK_LOG" >/dev/null \
   || fail "background session without watcher was not reported as a process line"
+
+: >"$T/roles-restart.log"
+run_restart >"$T/no-watcher-again.out" 2>"$T/no-watcher-again.err" \
+  || fail "second no-watcher run failed: $(cat "$T/no-watcher-again.err")"
+grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: background session pid $$ has no role-inbox monitor; not relaunching over it$" "$T/roles-restart.log" >/dev/null \
+  || fail "second no-watcher run did not write the local log line"
+owner_ask_count="$(grep -Fc "owner-ask log --from roles-restart --kind process --title $no_watcher_line" "$OWNER_ASK_LOG")"
+[ "$owner_ask_count" -eq 1 ] || fail "same session posted $owner_ask_count owner-ask lines instead of one"
+
+sleep 60 &
+test_sleep_pid=$!
+printf '[{"pid":%s,"name":"test-role","kind":"background"}]\n' "$test_sleep_pid" >"$AGENTS_JSON"
+: >"$T/roles-restart.log"
+run_restart >"$T/new-pid.out" 2>"$T/new-pid.err" || fail "new-pid run failed: $(cat "$T/new-pid.err")"
+new_pid_line="test-role: background session pid $test_sleep_pid has no role-inbox monitor; not relaunching over it"
+grep -F "owner-ask log --from roles-restart --kind process --title $new_pid_line" "$OWNER_ASK_LOG" >/dev/null \
+  || fail "different live pid did not post an owner-ask line"
+owner_ask_count="$(grep -Fc 'owner-ask log --from roles-restart --kind process --title test-role: background session pid ' "$OWNER_ASK_LOG")"
+[ "$owner_ask_count" -eq 2 ] || fail "different live pid did not produce exactly one additional owner-ask line"
+grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: background session pid $test_sleep_pid has no role-inbox monitor; not relaunching over it$" "$T/roles-restart.log" >/dev/null \
+  || fail "different live pid did not write the local log line"
+kill "$test_sleep_pid" 2>/dev/null || true
+wait "$test_sleep_pid" 2>/dev/null || true
+test_sleep_pid=""
 
 # A matching row without a kind is not a live background role and names the missing kind.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"; : >"$T/roles-restart.log"
