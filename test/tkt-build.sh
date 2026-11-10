@@ -713,23 +713,33 @@ case "$impl" in *unknown*) fail "lane-model: the Implemented by line never holds
 
 # --- mapped provider refusals name their provider and stop before dispatch ---
 quota_refusal_case() {
-  local case_name="$1" model="$2" provider="$3"
+  local case_name="$1" model="$2" provider="$3" status="${4:-warning}"
   setup_case "$case_name"
-  jq --arg provider "$provider" '.providers |= map(if .id == $provider then .status = "warning" else . end)' \
-    "$T/quota-healthy.json" >"$T/quota.json" || fail "$case_name: build warning feed"
+  jq --arg provider "$provider" --arg status "$status" '.providers |= map(if .id == $provider then .status = $status else . end)' \
+    "$T/quota-healthy.json" >"$T/quota.json" || fail "$case_name: build $status feed"
   run_build --lane-model "$model"
   [ "$RC" -eq 2 ] || fail "$case_name exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
   expect_verdict "TKT tkt-build PRECONDITION quota=refused log=*" "$case_name"
-  grep -q "provider=$provider status=warning" <<<"$OUT" || fail "$case_name: refusal names provider and status"
+  grep -q "provider=$provider status=$status" <<<"$OUT" || fail "$case_name: refusal names provider and status"
   ! grep -q '^run|id=stub-' "$T/calls.log" || fail "$case_name: refused lane was dispatched"
 }
 quota_refusal_case quota-codex codex/test-model codex
 quota_refusal_case quota-openai openai/test-model codex
 quota_refusal_case quota-cursor fiber/cursor/test-model cursor
 quota_refusal_case quota-opencode fiber/opencode-go/test-model opencode-go
-quota_refusal_case quota-muse fiber/muse/test-model muse
 quota_refusal_case quota-claude-prefix fiber/claude/test-model claude
 quota_refusal_case quota-bare-config composer-2.5 cursor
+# muse spend is not rationed (owner, 2026-11-06): warning launches; critical and depleted refuse
+quota_refusal_case quota-muse-critical fiber/muse/test-model muse critical
+quota_refusal_case quota-muse-depleted fiber/muse/test-model muse depleted
+
+setup_case quota-muse-warning
+jq '.providers |= map(if .id == "muse" then .status = "warning" else . end)' \
+  "$T/quota-healthy.json" >"$T/quota.json" || fail "quota-muse-warning: build warning feed"
+run_build --lane-model fiber/muse/test-model
+[ "$RC" -eq 0 ] || fail "quota-muse-warning exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^quota: provider=muse status=warning$' <<<"$OUT" || fail "quota-muse-warning: launch report shows status=warning"
+grep -q '^run|id=stub-1|model=fiber/muse/test-model|' "$T/calls.log" || fail "quota-muse-warning: lane dispatches on muse"
 
 # --- provider missing from the feed and a non-answer both refuse pre-dispatch ---
 setup_case quota-missing-provider
