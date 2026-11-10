@@ -323,6 +323,7 @@ expect_current_plan_verdict_hash() {
 
 : >"$T/stub.log"
 
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ]; then
 # --- a stale plan stops before plan-check ---
 setup_case stale
 run_plan verify
@@ -2543,14 +2544,46 @@ printf 'ok' >"$T/pcmode"
 [ "$RC" -eq 1 ] || fail "verdict-plan-check-line-count exits 1"
 expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "verdict-plan-check-line-count names report_lines"
 case "$(first_line)" in *" n="*) fail "verdict-plan-check-line-count carries no bare n=: [$(first_line)]";; esac
+fi
 
-# Verbatim ruling acceptance: test selectors run one added regression group
-# after the existing suite, so each required pre-fix failure is observable.
+# Verbatim ruling acceptance: selectors skip legacy cases for focused runs;
+# the unfiltered invocation still covers all cases.
 write_triaged_tasks_plan() {
   printf 'Base: %s\n\n## Rulings\n\n- Open line: clarify the task wording.\n\n## Tasks\n\n1. Keep the existing task wording.\n\n## Files\n\n- `f.txt`\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
 }
 
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; then
+  # Keep the pre-existing Rulings-only success and unrelated Files-diff
+  # refusal on the focused path too.
+  setup_case triaged-focused-ruling-only
+  rebase_plan
+  base_now="$(cat "$CDIR/base")"
+  printf 'Base: %s\n\n## Rulings\n\n- Open line: use the default behavior.\n\n## Files\n\n- `f.txt`\n\n## Gate\n\n`true`\n' "$base_now" >"$CDIR/plan.md"
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-focused-ruling-only records a LINES verdict"
+  awk '{ if ($0 == "- Open line: use the default behavior.") print "- Comment 654321 settles the open line."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  run_plan triaged --comment 654321
+  [ "$RC" -eq 0 ] || fail "triaged-focused-ruling-only preserves Rulings-only acceptance (rc=$RC): $(first_line)"
+  expect_plan_verdict triaged "$base_now" "triaged-focused-ruling-only"
+  [ "$(state_get plan_triage_comment)" = 654321 ] || fail "triaged-focused-ruling-only records the comment id"
+
+  setup_case triaged-focused-other-diff
+  rebase_plan
+  base_now="$(cat "$CDIR/base")"
+  printf 'Base: %s\n\n## Rulings\n\n- Open line: use the default behavior.\n\n## Files\n\n- `f.txt`\n\n## Gate\n\n`true`\n' "$base_now" >"$CDIR/plan.md"
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-focused-other-diff records a LINES verdict"
+  awk '{ if ($0 == "- `f.txt`") print "- `g.txt`"; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  rm -f "$T/comment.json"
+  run_plan triaged --comment 654322
+  [ "$RC" -eq 1 ] || fail "triaged-focused-other-diff refuses a nonverbatim Files change"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-focused-other-diff"
+  diff_file="$(sed -n 's/^EXTRA diff: //p' <<<"$OUT")"
+  [ -n "$diff_file" ] && [ -r "$diff_file" ] || fail "triaged-focused-other-diff keeps the scoped diff"
+  grep -Fq "verify --extra $diff_file" <<<"$OUT" || fail "triaged-focused-other-diff points at one scoped Verifier pass"
+
   # A quote permits a task line to be applied verbatim without spending another
   # Verifier round, and the accepted plan diff remains journaled in run/.
   setup_case triaged-verbatim
@@ -2602,7 +2635,7 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   run_plan verify
   [ "$RC" -eq 1 ] || fail "triaged-verbatim-base-moved records a LINES verdict"
   awk '{ if ($0 == "1. Keep the existing task wording.") print "1. Use the exact wording."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
-  set_plan_base "$(git -C "$WT" rev-parse HEAD)"
+  set_plan_base "$(git -C "$WT" rev-parse HEAD^)"
   jq -n --arg body 'Use the exact wording.' '{body:$body}' >"$T/comment.json"
   : >"$T/gh.log"
   run_plan triaged --comment 654325
