@@ -18,6 +18,7 @@ export HOME="$T/home"
 STUBS="$T/stubs"
 mkdir -p "$HOME" "$STUBS"
 export GH_LOG="$T/gh.log" CLAUDE_LOG="$T/claude.log" OWNER_ASK_LOG="$T/owner-ask.log"
+export CLAUDE_NAME_LOG="$T/claude-name.log" TEST_PID="$$"
 
 cat >"$STUBS/gh" <<'GH'
 #!/usr/bin/env bash
@@ -31,6 +32,24 @@ cat >"$STUBS/claude" <<'CLAUDE'
   printf 'arg=%s\n' "$@"
   printf '\n'
 } >>"$CLAUDE_LOG"
+# Record --name and register a live session under it, as claude agents --json would.
+name=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --name ] && [ "$#" -gt 1 ]; then name="$2"; break; fi
+  shift
+done
+if [ -n "$name" ]; then
+  printf 'name=%s\n' "$name" >>"$CLAUDE_NAME_LOG"
+  python3 -I -c '
+import json, sys
+path, name, pid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(path) as f:
+    rows = json.load(f)
+rows.append({"pid": pid, "name": name, "state": "running"})
+with open(path, "w") as f:
+    json.dump(rows, f)
+' "$AGENTS_JSON" "$name" "$TEST_PID"
+fi
 CLAUDE
 cat >"$STUBS/owner-ask" <<'OWNER'
 #!/usr/bin/env bash
@@ -41,7 +60,7 @@ export PATH="$STUBS:$PATH"
 
 run_restart() {
   ROLES_RESTART_ROLES="$ROLE_TABLE" \
-    ROLES_RESTART_JOBS_DIR="$JOBS" \
+    ROLES_RESTART_AGENTS_JSON="$AGENTS_JSON" \
     ROLES_RESTART_LOCK_DIR="$LOCK" \
     ROLES_RESTART_LOG="$T/roles-restart.log" \
     ROLES_RESTART_WAIT_TIMEOUT="${WAIT_TIMEOUT:-2}" \
@@ -50,15 +69,25 @@ run_restart() {
 
 ROLE_HOME="$T/role-home"
 HANDOFF="$T/handoff.md"
-JOBS="$T/jobs"
+AGENTS_JSON="$T/agents.json"
 LOCK="$T/roles-restart.lock"
-mkdir -p "$ROLE_HOME" "$JOBS"
+mkdir -p "$ROLE_HOME/worktree"
 printf '## Crons\n- test cron\n' >"$HANDOFF"
+printf '[]\n' >"$AGENTS_JSON"
 ROLE_TABLE="test-role|$ROLE_HOME|$HANDOFF"
-export ROLE_HOME HANDOFF JOBS LOCK ROLE_TABLE
+export ROLE_HOME HANDOFF AGENTS_JSON LOCK ROLE_TABLE
+
+# A done background session in a worktree is still live when its pid exists.
+# Keep this first: the old state.json check relaunches it and fails this test.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+printf '[{"pid":%s,"name":"test-role","cwd":"%s/worktree","state":"done"}]\n' "$$" "$ROLE_HOME" >"$AGENTS_JSON"
+run_restart >"$T/live.out" 2>"$T/live.err" || fail "live role run failed: $(cat "$T/live.err")"
+[ ! -s "$CLAUDE_LOG" ] || fail "live role was launched twice"
+[ ! -s "$OWNER_ASK_LOG" ] || fail "live role emitted a relaunch line"
 
 # A missing role launches a fresh session from its home with a handoff-aware prompt.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+printf '[]\n' >"$AGENTS_JSON"
 run_restart >"$T/missing.out" 2>"$T/missing.err" || fail "missing role run failed: $(cat "$T/missing.err")"
 grep -Fqx "cwd=$ROLE_HOME" "$CLAUDE_LOG" || fail "claude was not run from role home"
 grep -Fqx 'arg=--bg' "$CLAUDE_LOG" || fail "fresh launch omitted --bg"
@@ -68,22 +97,88 @@ grep -F "arg=Read your handoff at $HANDOFF" "$CLAUDE_LOG" >/dev/null || fail "pr
 grep -F '## Crons' "$CLAUDE_LOG" >/dev/null || fail "prompt omitted cron recreation instruction"
 grep -F 'restart your inbox wait' "$CLAUDE_LOG" >/dev/null || fail "prompt omitted inbox wait instruction"
 grep -F 'carry on' "$CLAUDE_LOG" >/dev/null || fail "prompt omitted carry-on instruction"
+grep -F 'If it has no ## Crons section, say so on owner-ask and carry on.' "$CLAUDE_LOG" >/dev/null \
+  || fail "prompt omitted no-Crons instruction"
 grep -F 'roles-restart relaunched test-role' "$T/roles-restart.log" >/dev/null || fail "relaunch was not written to local log"
 grep -F 'owner-ask log --from switchyard --kind process --title roles-restart relaunched test-role' "$OWNER_ASK_LOG" >/dev/null \
   || fail "relaunch was not posted as a process line"
 
-# A matching live job (role template and exact cwd) prevents a duplicate session.
+# A relaunched role is named after itself, so the next pass sees it live.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"; : >"$CLAUDE_NAME_LOG"
+printf '[]\n' >"$AGENTS_JSON"
+run_restart >"$T/named.out" 2>"$T/named.err" || fail "named launch run failed: $(cat "$T/named.err")"
+grep -Fqx 'name=test-role' "$CLAUDE_NAME_LOG" || fail "relaunch did not pass --name test-role"
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
-mkdir -p "$JOBS/job-live"
-printf '{"template":"test-role","cwd":"%s","state":"working"}\n' "$ROLE_HOME" >"$JOBS/job-live/state.json"
-run_restart >"$T/live.out" 2>"$T/live.err" || fail "live role run failed: $(cat "$T/live.err")"
-[ ! -s "$CLAUDE_LOG" ] || fail "live role was launched twice"
-[ ! -s "$OWNER_ASK_LOG" ] || fail "live role emitted a relaunch line"
+run_restart >"$T/named2.out" 2>"$T/named2.err" || fail "second named run failed: $(cat "$T/named2.err")"
+[ ! -s "$CLAUDE_LOG" ] || fail "second pass relaunched a role the first pass started"
 
-# A terminal job is not live and must not mask a needed restart.
-printf '{"template":"test-role","cwd":"%s","state":"failed"}\n' "$ROLE_HOME" >"$JOBS/job-live/state.json"
-run_restart >"$T/terminal.out" 2>"$T/terminal.err" || fail "terminal job restart failed: $(cat "$T/terminal.err")"
-grep -Fqx "cwd=$ROLE_HOME" "$CLAUDE_LOG" || fail "terminal job incorrectly counted as live"
+# A matching row whose pid is dead does not mask a needed restart.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+sleep 0 &
+dead_pid=$!
+wait "$dead_pid"
+printf '[{"pid":%s,"name":"test-role","cwd":"%s/worktree","state":"running"}]\n' "$dead_pid" "$ROLE_HOME" >"$AGENTS_JSON"
+run_restart >"$T/dead.out" 2>"$T/dead.err" || fail "dead role restart failed: $(cat "$T/dead.err")"
+grep -Fqx "cwd=$ROLE_HOME" "$CLAUDE_LOG" || fail "dead role was incorrectly counted as live"
+
+# Fourth-column arguments are passed after --bg and before --agent.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+printf '[]\n' >"$AGENTS_JSON"
+ROLE_TABLE="test-role|$ROLE_HOME|$HANDOFF|--plugin-dir /x/role-inbox"
+export ROLE_TABLE
+run_restart >"$T/extra-args.out" 2>"$T/extra-args.err" || fail "extra-args run failed: $(cat "$T/extra-args.err")"
+bg_line="$(grep -nF 'arg=--bg' "$CLAUDE_LOG" | cut -d: -f1)"
+plugin_line="$(grep -nF 'arg=--plugin-dir' "$CLAUDE_LOG" | cut -d: -f1)"
+plugin_path_line="$(grep -nF 'arg=/x/role-inbox' "$CLAUDE_LOG" | cut -d: -f1)"
+agent_line="$(grep -nF 'arg=--agent' "$CLAUDE_LOG" | cut -d: -f1)"
+[ -n "$bg_line" ] && [ -n "$plugin_line" ] && [ -n "$plugin_path_line" ] && [ -n "$agent_line" ] \
+  || fail "extra arguments were not passed to claude"
+[ "$bg_line" -lt "$plugin_line" ] && [ "$plugin_line" -lt "$plugin_path_line" ] \
+  && [ "$plugin_path_line" -lt "$agent_line" ] \
+  || fail "extra arguments did not appear after --bg and before --agent"
+
+# Agent-list parse failures are logged and fail closed without launching.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+printf '{not json\n' >"$AGENTS_JSON"
+if run_restart >"$T/invalid-json.out" 2>"$T/invalid-json.err"; then
+  fail "invalid agents JSON unexpectedly succeeded"
+fi
+[ ! -s "$CLAUDE_LOG" ] || fail "role launched after agents JSON parse failure"
+grep -F 'agents' "$T/roles-restart.log" >/dev/null || fail "agents JSON parse failure was not logged"
+
+# More than four columns is invalid and must not launch.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+printf '[]\n' >"$AGENTS_JSON"
+ROLE_TABLE="test-role|$ROLE_HOME|$HANDOFF|--plugin-dir /x|extra-column"
+export ROLE_TABLE
+if run_restart >"$T/invalid-row.out" 2>"$T/invalid-row.err"; then
+  fail "role row with more than four columns unexpectedly succeeded"
+fi
+[ ! -s "$CLAUDE_LOG" ] || fail "invalid role row launched a session"
+grep -F 'invalid role table row' "$T/roles-restart.log" >/dev/null || fail "invalid role row was not logged"
+
+# Default rows pass the role-inbox plugin dir to surveyor and switchyard only.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+printf '[]\n' >"$AGENTS_JSON"
+for default_role in surveyor switchyard flywheel; do
+  mkdir -p "$HOME/work/wiki/state"
+  printf '## Crons\n' >"$HOME/work/wiki/state/$default_role.md"
+done
+mkdir -p "$HOME/work/fiber-worktrees/surveyor/home" "$HOME/work/sy-wt/main" "$HOME/work/fiber"
+ROLE_TABLE=""
+export ROLE_TABLE
+run_restart >"$T/defaults.out" 2>"$T/defaults.err" || fail "default rows run failed: $(cat "$T/defaults.err")"
+plugin_roles="$(awk 'BEGIN { RS = "" } {
+  role = ""; plugin = 0
+  n = split($0, lines, "\n")
+  for (i = 1; i <= n; i++) {
+    if (lines[i] == "arg=--agent") role = lines[i + 1]
+    if (lines[i] == "arg=--plugin-dir" && lines[i + 1] == "arg=/Users/aakshintala/.agents/claude-code/plugins/role-inbox" && role == "") plugin = 1
+  }
+  print role ":" plugin
+}' "$CLAUDE_LOG" | sort | tr '\n' ' ')"
+[ "$plugin_roles" = "arg=flywheel:0 arg=surveyor:1 arg=switchyard:1 " ] \
+  || fail "default rows plugin-dir mismatch: $plugin_roles"
 
 # A missing handoff is skipped, logged and recorded as an owner note.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
