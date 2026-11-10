@@ -6,7 +6,7 @@ This page records the ordering and cardinality guarantees that session tests rel
 
 Run `bin/box-setup` on the box as the box user to set `TMPDIR=/srv/lanes/tmp` for new SSH commands and systemd user services. From the Mac, run `ssh <box> 'bash -s' < bin/box-setup`, or run the script from a checkout on the box. It runs `systemctl --user daemon-reload` so the user manager re-reads `environment.d`; a systemd user unit picks up `TMPDIR` the next time it restarts after that reload.
 
-Delegate session daemons that were already running keep their old environment. Before restarting one, check `delegate session list --json` and find its entry in `sessions[]`. Stop it only when `activeTurnId` is `null`, which means the session is idle. Run `delegate session stop <id>`, then start a fresh session with the original `delegate session start` arguments.
+Delegate session daemons that were already running keep their old environment. Before restarting one, check `delegate session list --json` and find its entry in `sessions[]`. Stop it only when `status` is `idle` and `activeTurnId` is `null`; a null active turn id alone can also mean a replay decision is pending. Run `delegate session stop <id>`, then start a fresh session with the original `delegate session start` arguments.
 
 ## Event and state ordering
 
@@ -18,7 +18,7 @@ A transition to `dead` appends one `session.dead` event. Later updates to an alr
 
 `list` includes each valid session directory, marks a directory with unreadable state as `unreadable`, and sorts readable sessions by `startedAt`, then by session id. Human-readable entries use `<id> <status> <model> turns=<n> <cwd>`.
 
-When `send` reaches an idle session, the host reply is `started`. When it reaches a running session, the host reply is `steered`; that means the host accepted the message for its next model continuation.
+When `send` reaches an idle session, the host reply is `started`. When it reaches a running session with an active turn, the host reply is `steered`; that means the host accepted the message for its next model continuation. While a replay decision is pending (running with no active turn id), `send` returns `busy` instead of starting ahead of the pending steers.
 
 ## Job kill contracts
 
@@ -33,7 +33,7 @@ nothing, so a late kill cannot hit a recycled pid.
 
 ## Inbox notes
 
-A matching turn completion changes the session from `running` to `idle` and triggers one `[session <id> idle]` inbox note. The transition to `dead` triggers one `[session <id> dead]` note. If a verb finds a dead supervisor, a `dead.noted` marker lets only the first settling verb write the fallback note. Inbox writes are best-effort and do not change the verb's exit code.
+A matching turn completion with no pending steers changes the session from `running` to `idle` and triggers one `[session <id> idle]` inbox note. With pending steers, the session stays `running` (with no active turn id) while the replay worker waits for admission; the reader does not wait on admission. Under admission, the worker starts a pi replay turn without publishing `idle`, or publishes `idle` and the inbox note when replay is not needed (the pending steers have been resolved, the host is not pi, or all pending pi steers remain queued). If pi still has some steers queued but dropped others, the session stays busy through the continuation and retries the replay decision when that turn completes. `watch` waits through a replay turn, `send` rejects new text as busy during the decision, and `stop --interrupt` does not return its idle no-op. The transition to `dead` triggers one `[session <id> dead]` note. If a verb finds a dead supervisor, a `dead.noted` marker lets only the first settling verb write the fallback note. Inbox writes are best-effort and do not change the verb's exit code.
 
 ## Pi host contracts
 
