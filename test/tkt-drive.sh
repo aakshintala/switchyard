@@ -15,8 +15,7 @@ export TEST_STATE_BIN="$STATE_BIN" TEST_CALLS="$T/calls.log"
 export TEST_PLAN_VERDICT="$T/plan-verdict" TEST_POST_VERDICT="$T/post-verdict"
 export TEST_BUILD_VERDICT="$T/build-verdict" TEST_SHIP_VERDICT="$T/ship-verdict"
 export TEST_FENCE_MODE="$T/fence-mode" TEST_FENCE_CALLS="$T/fence-calls.log" TEST_FENCE_RESULTS="$T/fence-results.log"
-export TEST_BUILD_EXTRA="$T/build-extra.md" TEST_MERGE_CALLS="$T/merge-calls.log"
-export TEST_LANECHECK_CALLS="$T/lanecheck-calls.log" TEST_STATE_HELPERS="$T/state-helpers.sh"
+export TEST_BUILD_EXTRA="$T/build-extra.md" TEST_MERGE_CALLS="$T/merge-calls.log" TEST_STATE_HELPERS="$T/state-helpers.sh"
 
 cat >"$TEST_STATE_HELPERS" <<'EOF'
 state_set() {
@@ -24,9 +23,6 @@ state_set() {
   awk -F= -v key="$key" '$1 != key' "$state" >"$tmp_state"
   printf '%s=%s\n' "$key" "$value" >>"$tmp_state"
   mv "$tmp_state" "$state"
-}
-state_add() {
-  printf '%s=%s\n' "$2" "$3" >>"$1"
 }
 state_journal() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >>"${1%.state}.journal"
@@ -136,14 +132,6 @@ esac
 EOF
 chmod +x "$T/bin/fence-grant"
 
-cat >"$T/bin/lanecheck" <<'EOF'
-#!/usr/bin/env bash
-set -uo pipefail
-printf 'lanecheck|%s\n' "$*" >>"$TEST_LANECHECK_CALLS"
-printf 'lane retired for %s\n' "${3:-unknown}"
-EOF
-chmod +x "$T/bin/lanecheck"
-
 # Guard the test against an accidental direct merge route.
 cat >"$T/bin/ship-pr" <<'EOF'
 #!/usr/bin/env bash
@@ -177,7 +165,7 @@ PLANEOF
   printf 'MERGED\n' >"$TEST_SHIP_VERDICT"
   printf 'clean\n' >"$TEST_FENCE_MODE"
   : >"$TEST_CALLS"; : >"$TEST_FENCE_CALLS"; : >"$TEST_FENCE_RESULTS"; : >"$TEST_MERGE_CALLS"
-  : >"$TEST_LANECHECK_CALLS"; rm -f "$TEST_BUILD_EXTRA"
+  rm -f "$TEST_BUILD_EXTRA"
   export CASE_DIR STATE PLAN
 }
 

@@ -71,7 +71,7 @@ trap cleanup_lock EXIT
 
 # Verdict on line 1 plus at most 40 digest lines, to stdout and the run log.
 emit() {
-  local verdict="$1" code="$2" out
+  local verdict="$1" code="$2" out lane_tmp lane_rc dependent
   shift 2
   out="TKT tkt-ship $verdict log=$runlog"
   if [ $# -gt 0 ]; then
@@ -81,6 +81,27 @@ $(printf '%s\n' "$@" | head -n 40)"
   printf '%s\n' "$out" | tee -a "$runlog"
   release_lock
   tkt journal "tkt-ship $verdict"
+  case "$verdict" in
+    MERGED*)
+      tkt journal "tkt-ship step=lanecheck-done trigger=tkt-ship $verdict"
+      lane_tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-ship-lanecheck.XXXXXX")"
+      lane_rc=0
+      FW_RUN="$run" "$bin_dir/lanecheck" "done" "$issue" >"$lane_tmp/out" 2>"$lane_tmp/err" || lane_rc=$?
+      [ ! -s "$lane_tmp/out" ] || cat "$lane_tmp/out"
+      [ ! -s "$lane_tmp/err" ] || cat "$lane_tmp/err" >&2
+      rm -rf "$lane_tmp"
+      if [ "$lane_rc" -ne 0 ]; then
+        tkt journal "tkt-ship STOP lanecheck rc=$lane_rc trigger=tkt-ship $verdict" 2>/dev/null || true
+        printf 'TKT tkt-ship STOP lanecheck=failed\n'
+        exit "$lane_rc"
+      fi
+      while IFS= read -r dependent; do
+        [ -n "$dependent" ] || continue
+        printf 'DEPENDENT %s\n' "$dependent"
+      done < <(tkt list dependents 2>/dev/null || true)
+      tkt journal 'tkt-ship MERGED dependents-listed'
+      ;;
+  esac
   exit "$code"
 }
 

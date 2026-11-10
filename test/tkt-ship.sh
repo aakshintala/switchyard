@@ -22,6 +22,7 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export PATH="$T/bin:$PATH"
+export TEST_LANECHECK_CALLS="$T/lanecheck-calls.log"
 
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
@@ -71,6 +72,14 @@ exit 0
 EOF
 chmod +x "$T/bin/gh"
 
+cat >"$T/bin/lanecheck" <<EOF
+#!/usr/bin/env bash
+printf 'lanecheck|%s|FW_RUN=%s\n' "\$*" "\${FW_RUN:-}" >>"$TEST_LANECHECK_CALLS"
+printf 'lane retired for issue %s\n' "\${2:-unknown}"
+exit "\$(cat "$T/lanecheck-rc")"
+EOF
+chmod +x "$T/bin/lanecheck"
+
 # Reset per-case stub controls.
 reset_stub() {
   printf '0' >"$T/count"
@@ -80,6 +89,8 @@ reset_stub() {
   printf 'OPEN' >"$T/ghstate"
   : >"$T/prhead"
   : >"$T/prbody"
+  printf '0' >"$T/lanecheck-rc"
+  : >"$TEST_LANECHECK_CALLS"
 }
 
 # New case dir with run dir, git worktree and base state (head set, PR head
@@ -158,6 +169,27 @@ expect_journal merged MERGED
 expect_logfile merged
 [ ! -e "$S.lock" ] || fail "merged: lock not released"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 41 ] || fail "merged: over 40 digest lines"
+
+# MERGED retires this lane and prints dependents without waking or merging them.
+reset_stub; setup_case merged-lane
+printf '0' >"$T/exitcodes"; printf 'cafef00d1234' >"$T/sha"
+printf 'dependents=ticket-1473\ndependents=run/fiber-1473-lane\n' >>"$S"
+run_ship
+[ "$RC" -eq 0 ] || fail "merged-lane: exit $RC"
+expect_line1 "MERGED sha=cafef00d1234 " merged-lane
+[ "$(head -n 1 <<<"$OUT" | cut -d' ' -f1-3)" = 'TKT tkt-ship MERGED' ] || fail "merged-lane: tkt-ship verdict is not first"
+grep -Fxq "lanecheck|done 515|FW_RUN=$CDIR/run" "$TEST_LANECHECK_CALLS" || fail "merged-lane: lanecheck done <issue> not called with run dir"
+grep -Fxq 'DEPENDENT ticket-1473' <<<"$OUT" || fail "merged-lane: dependent ticket was not printed"
+grep -Fxq 'DEPENDENT run/fiber-1473-lane' <<<"$OUT" || fail "merged-lane: dependent roster name was not printed"
+
+# A lanecheck failure preserves the MERGED line, then reports and propagates its status.
+reset_stub; setup_case merged-lanecheck-fail
+printf '0' >"$T/exitcodes"; printf '7' >"$T/lanecheck-rc"
+run_ship
+[ "$RC" -eq 7 ] || fail "merged-lanecheck-fail: exit $RC, wants lanecheck status 7"
+expect_line1 "MERGED sha=" merged-lanecheck-fail
+grep -Fxq 'TKT tkt-ship STOP lanecheck=failed' <<<"$OUT" || fail "merged-lanecheck-fail: missing STOP marker: [$OUT]"
+grep -Fq 'lane retired for issue 515' <<<"$OUT" || fail "merged-lanecheck-fail: lanecheck output missing: [$OUT]"
 
 # --- a current LINES plan verdict refuses ship with both sanctioned exits ---
 reset_stub; setup_case verdict-lines
