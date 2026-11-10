@@ -51,6 +51,10 @@ plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
 if [ ! -r "$plan_gate_lib" ]; then echo "tkt-ship: cannot read shared lib: $plan_gate_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$plan_gate_lib"
+takeover_lib="$script_dir/lib/takeover-plan-gate.sh"
+if [ ! -r "$takeover_lib" ]; then echo "tkt-ship: cannot read shared lib: $takeover_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$takeover_lib"
 local_gate_body_lib="$script_dir/lib/local-gate-body.sh"
 if [ ! -r "$local_gate_body_lib" ]; then echo "tkt-ship: cannot read shared lib: $local_gate_body_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -178,16 +182,14 @@ plan="$(tkt get plan 2>/dev/null || true)"
 takeover=0
 takeover_ref=""
 takeover_gate=""
-if [ "$plan" = takeover ] || [[ $plan == "takeover "* ]]; then
-  takeover=1
-  if [ "$plan" != takeover ]; then takeover_ref="${plan#takeover }"; fi
-  if [ -z "${takeover_ref//[[:space:]]/}" ] || [[ $takeover_ref == *[[:space:]]* ]]; then
-    emit "PRECONDITION takeover=invalid" 2 "tkt-ship: invalid takeover plan value: expected 'takeover <pr-or-branch>'"
-  fi
-  takeover_gate="$(tkt get gate 2>/dev/null || true)"
-  if [ -z "${takeover_gate//[[:space:]]/}" ]; then
-    emit "PRECONDITION takeover=gate-missing" 2 "tkt-ship: takeover $takeover_ref has no gate command in state (key: gate)"
-  fi
+takeover_error=""
+takeover_error_kind=""
+if ! takeover_plan_gate tkt-ship "$plan" tkt 2>/dev/null; then
+  case "$takeover_error_kind" in
+    invalid) emit "PRECONDITION takeover=invalid" 2 "$takeover_error" ;;
+    gate-missing) emit "PRECONDITION takeover=gate-missing" 2 "$takeover_error" ;;
+    *) emit "PRECONDITION takeover=invalid" 2 "$takeover_error" ;;
+  esac
 fi
 base=""
 if [ "$takeover" -eq 0 ] && [ -n "$plan" ]; then base="$(plan_base "$plan" 2>/dev/null || true)"; fi

@@ -83,6 +83,13 @@ if [ ! -r "$plan_gate_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$plan_gate_lib"
+takeover_lib="$script_dir/lib/takeover-plan-gate.sh"
+if [ ! -r "$takeover_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $takeover_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$takeover_lib"
 local_gate_body_lib="$script_dir/lib/local-gate-body.sh"
 if [ ! -r "$local_gate_body_lib" ]; then
   echo "tkt-gate: cannot read shared lib: $local_gate_body_lib" >&2
@@ -150,22 +157,9 @@ mkdir -p "$run"
 # The fence comes from the plan's Files, the state's fence list, or both.
 plan="$(tkt get plan 2>/dev/null || true)"
 takeover=0
-takeover_ref=""
 takeover_gate=""
-if [ "$plan" = takeover ] || [[ $plan == "takeover "* ]]; then
-  takeover=1
-  if [ "$plan" != takeover ]; then takeover_ref="${plan#takeover }"; fi
-  if [ -z "${takeover_ref//[[:space:]]/}" ] || [[ $takeover_ref == *[[:space:]]* ]]; then
-    echo "tkt-gate: invalid takeover plan value: expected 'takeover <pr-or-branch>'" >&2
-    exit 2
-  fi
-  takeover_gate="$(tkt get gate 2>/dev/null || true)"
-  if [ -z "${takeover_gate//[[:space:]]/}" ]; then
-    echo "tkt-gate: takeover $takeover_ref has no gate command in state (key: gate)" >&2
-    exit 2
-  fi
-  plan=""
-fi
+if ! takeover_plan_gate tkt-gate "$plan" tkt; then exit 2; fi
+if [ "$takeover" -eq 1 ]; then plan=""; fi
 fence_list="$(tkt list fence 2>/dev/null || true)"
 if [ -z "$plan" ] && [ -z "$fence_list" ] && [ "$takeover" -eq 0 ]; then
   tkt require plan
