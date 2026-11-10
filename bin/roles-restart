@@ -6,6 +6,7 @@
 # ROLES_RESTART_ROLES may override defaults as newline-separated role|home|handoff[|extra-args] rows.
 # Fourth-column extra args are split on whitespace and passed before --agent.
 # ROLES_RESTART_AGENTS_JSON may provide a fixture instead of running claude agents --json.
+# ROLES_RESTART_PS may provide process-list lines instead of running ps -axo args=.
 # ROLES_RESTART_WAIT_TIMEOUT bounds the gh auth status network/auth wait (seconds).
 set -euo pipefail
 
@@ -93,7 +94,8 @@ else
 fi
 
 role_is_live() {
-  local role_name="$1" matching_sessions pid kind
+  local role_name="$1" matching_sessions pid kind process_args process_line watcher_suffix
+  local live_background=0 unmonitored_background=0 has_watcher kind_label message
   if ! matching_sessions="$(printf '%s\n' "$agents_json" | python3 -I -c '
 import json
 import sys
@@ -111,16 +113,53 @@ for row in json.load(sys.stdin):
 ' "$role_name")"; then
     return 2
   fi
+  if [ -n "${ROLES_RESTART_PS:-}" ]; then
+    if ! process_args="$(cat "$ROLES_RESTART_PS")"; then
+      log "could not read process list file $ROLES_RESTART_PS"
+      return 4
+    fi
+  else
+    if ! process_args="$(ps -axo args=)"; then
+      log "could not read process list with ps -axo args="
+      return 4
+    fi
+  fi
+  watcher_suffix="inbox-wait $HOME/.cache/agents/inbox/$role_name"
   while IFS=$'\t' read -r pid kind; do
     if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
       if [ "$kind" = "background" ]; then
-        return 0
-      fi
-      if [ "$kind" = "interactive" ]; then
-        log "$role_name: interactive session pid $pid holds the name; launching the background role anyway. Two $role_name sessions now run: quit the interactive one"
+        has_watcher=0
+        while IFS= read -r process_line; do
+          if [[ "$process_line" == *"$watcher_suffix" ]]; then
+            has_watcher=1
+            break
+          fi
+        done <<<"$process_args"
+        if [ "$has_watcher" -eq 1 ]; then
+          live_background=1
+        else
+          message="$role_name: background session pid $pid has no role-inbox monitor; not relaunching over it"
+          log "$message"
+          owner-ask log --from roles-restart --kind process --title "$message" \
+            || { log "owner-ask process line failed for missing role-inbox monitor: $role_name"; failed=1; }
+          unmonitored_background=1
+        fi
+      else
+        kind_label="${kind:-no kind}"
+        if [ "$kind" = "interactive" ]; then
+          log "$role_name: interactive session pid $pid holds the name; launching the background role anyway. Two $role_name sessions now run: quit the interactive one"
+        else
+          log "$role_name: $kind_label session pid $pid holds the name; launching the background role anyway. Two $role_name sessions now run: quit the $kind_label one"
+        fi
       fi
     fi
   done <<<"$matching_sessions"
+  if [ "$live_background" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$unmonitored_background" -eq 1 ]; then
+    return 3
+  fi
   return 1
 }
 
@@ -178,6 +217,11 @@ while IFS= read -r entry || [ -n "$entry" ]; do
     status=$?
     if [ "$status" -eq 2 ]; then
       log "could not check claude agents JSON for $role"
+      exit 1
+    elif [ "$status" -eq 3 ]; then
+      continue
+    elif [ "$status" -eq 4 ]; then
+      log "could not check process list for $role"
       exit 1
     fi
   fi
