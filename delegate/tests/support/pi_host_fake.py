@@ -144,6 +144,11 @@ def finish_hold(completed):
         send({"type": "tool_execution_end", "toolName": "bash", "toolCallId": "call_1"})
         send({"type": "message_start", "message": {"role": "toolResult"}})
         send({"type": "message_end", "message": {"role": "toolResult"}})
+        if "REPLAY_UNCONSUMED" in SCENARIOS:
+            # Model pi dropping an accepted queued steer: it first reports the
+            # queue entry, then reports an empty queue without delivering it.
+            QUEUE.clear()
+            send({"type": "queue_update", "steering": [], "followUp": []})
         send({"type": "turn_end"})
         if QUEUE:
             deliver_queue()
@@ -303,6 +308,8 @@ def handle_steer(command):
             output.write(text + "\n")
         return
     if "REPLAY_UNCONSUMED" in SCENARIOS:
+        QUEUE.append(text)
+        send({"type": "queue_update", "steering": list(QUEUE), "followUp": []})
         respond(command.get("id"), "prompt", True, {"disposition": "queued"})
         return
     QUEUE.append(text)

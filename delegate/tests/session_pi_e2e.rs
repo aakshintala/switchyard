@@ -1207,22 +1207,28 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     assert!(watched.success(), "watch exited with {watched}");
 
     let logs = h.logs(&id);
-    let done1 = logs
+    let replayed: Vec<&Value> = logs
         .iter()
-        .position(|line| line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-1")
-        .unwrap();
-    let unconsumed: Vec<usize> = logs
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line["kind"] == "steer.unconsumed")
-        .map(|(index, _)| index)
+        .filter(|line| line["kind"] == "steer.replayed")
         .collect();
-    assert_eq!(unconsumed.len(), 1);
+    assert!(
+        replayed.is_empty(),
+        "pi-started steer must not replay: {logs:?}"
+    );
+    assert!(
+        logs.iter().all(|line| line["kind"] != "steer.unconsumed"),
+        "pi-delivered steer must not be marked unconsumed: {logs:?}"
+    );
+    let deliveries: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "user" && line["text"] == "STEER-3")
+        .collect();
+    assert_eq!(deliveries.len(), 1, "{logs:?}");
     let started2 = logs
         .iter()
         .position(|line| line["kind"] == "turn.started" && line["turnId"] == "pi-turn-2")
         .unwrap();
-    let user = logs
+    let delivered = logs
         .iter()
         .position(|line| line["kind"] == "user" && line["text"] == "STEER-3")
         .unwrap();
@@ -1230,10 +1236,33 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
         .iter()
         .position(|line| line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-2")
         .unwrap();
-    assert!(done1 < unconsumed[0] && unconsumed[0] < started2 && started2 < user && user < done2);
+    assert!(started2 < delivered && delivered < done2, "{logs:?}");
+    assert_eq!(deliveries[0]["turnId"], "pi-turn-2");
+    assert_eq!(
+        std::fs::read_to_string(h.fake_dir.join("delivered.txt")).unwrap(),
+        "STEER-3\n"
+    );
+    let replay_prompt_requests = h
+        .requests()
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .count();
+    assert_eq!(
+        replay_prompt_requests,
+        1,
+        "{}",
+        h.requests()
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\\n")
+    );
 
     assert_eq!(h.state(&id)["turnCount"], 2);
-    h.notes_poll(&id, "idle", 2);
+    h.notes_poll(&id, "idle", 1);
 }
 
 #[test]
