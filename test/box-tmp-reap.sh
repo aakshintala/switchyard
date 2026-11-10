@@ -68,4 +68,44 @@ printf '%s\n' "$out" | grep -F 'lsof not found; skipping deletion for this run' 
   || fail missing-lsof-reported
 ok missing-lsof-reported
 
+# lsof stderr decides whether the open set is known (#1554). Each case gets a
+# dir with an old owned entry, an old owned entry lsof reports open, and a
+# directory standing in for a root-owned /tmp/systemd-private-* dir.
+# fake_lsof <name> <exit> <stderr line>: a fake that reports <dir>/open/f open.
+fake_lsof() {
+  printf '#!/usr/bin/env bash\nprintf "n%%s/open/f\\n" "$3"\nprintf "%%s\\n" %q >&2\nexit %s\n' \
+    "$3" "$2" >"$T/$1"
+  chmod +x "$T/$1"
+}
+lsof_case() { # <name> <exit> <stderr line, with @ for the dir> <expect: reap|keep>
+  local d=$T/case-$1 rd out line
+  mkdir -p "$d/open"
+  rd=$(cd -P "$d" && pwd -P)
+  printf old >"$d/old"; printf x >"$d/open/f"
+  touch -t "$old_stamp" "$d/old" "$d/open/f" "$d/open"
+  line=${3//@/$rd}
+  fake_lsof "lsof-$1" "$2" "$line"
+  out=$(BOX_TMP_REAP_LSOF="$T/lsof-$1" bash "$BIN/box-tmp-reap" "$d" 2>&1) || fail "lsof-$1-exits-zero ($out)"
+  [ -e "$d/open/f" ] || fail "lsof-$1-keeps-open-entry"
+  if [ "$4" = reap ]; then
+    [ ! -e "$d/old" ] || fail "lsof-$1-reaps-old-entry ($out)"
+    printf '%s\n' "$out" | grep -E "box-tmp-reap: $d deleted=1 kept=1 secs=[0-9]+$" >/dev/null \
+      || fail "lsof-$1-summary ($out)"
+  else
+    [ -e "$d/old" ] || fail "lsof-$1-deletes-nothing ($out)"
+    printf '%s\n' "$out" | grep -F "box-tmp-reap: lsof failed for $d; skipping deletion" >/dev/null \
+      || fail "lsof-$1-reported ($out)"
+  fi
+  ok "lsof-$1"
+}
+# A warning for a dir under an entry owned by someone else is harmless. The
+# fixture cannot chown to another user, so it names a path that does not exist:
+# `find -user` finds no owned entry there, the same answer as a root-owned dir.
+lsof_case unowned-opendir-warning 1 "lsof: WARNING: can't opendir(@/systemd-private-x/tmp): Permission denied" reap
+# The same warning under an entry this user owns: its contents are unknown.
+lsof_case owned-opendir-warning 1 "lsof: WARNING: can't opendir(@/open/sub): Permission denied" keep
+# Any other stderr line, or an exit above 1, fails closed.
+lsof_case other-stderr 1 "lsof: status error on /proc/1/fd: Permission denied" keep
+lsof_case exit-2 2 "" keep
+
 exit 0

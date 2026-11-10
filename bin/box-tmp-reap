@@ -28,28 +28,51 @@ for arg in "$@"; do
     continue
   fi
 
+  started=$SECONDS
   deleted=0
   kept=0
-  open_paths=''
+  can_delete=$have_lsof
+  open_tops=''
   if [ "$have_lsof" -eq 1 ]; then
-    # lsof exits 1 when no files are open; its output is still useful on any
-    # nonzero status, so keep the captured names and continue.
-    open_paths=$("$lsof_cmd" -Fn +D "$dir" 2>/dev/null) || :
+    # lsof exits 1 with nothing on stderr when no files are open. Any other
+    # failure means the open set is unknown, and only lsof protects a live
+    # socket such as /tmp/tmux-<uid>, so delete nothing in this dir (#1554).
+    # One stderr line is harmless: lsof cannot open a dir under a top-level
+    # entry another user owns (/tmp/systemd-private-*), and `find -user`
+    # below never offers such an entry for deletion.
+    lsof_err=$(mktemp "${TMPDIR:-/tmp}/box-tmp-reap-lsof.XXXXXX")
+    rc=0
+    open_paths=$("$lsof_cmd" -Fn +D "$dir" 2>"$lsof_err") || rc=$?
+    bad_err=0
+    while IFS= read -r line; do
+      case "$line" in
+        "lsof: WARNING: can't opendir($dir/"*"): Permission denied")
+          rest=${line#"lsof: WARNING: can't opendir($dir/"}
+          top=$dir/${rest%%/*}
+          top=${top%"): Permission denied"}
+          if [ -n "$(find "$top" -maxdepth 0 -user "$current_user" 2>/dev/null)" ]; then
+            bad_err=1
+          fi ;;
+        *) bad_err=1 ;;
+      esac
+    done <"$lsof_err"
+    if [ "$rc" -gt 1 ] || { [ "$rc" -ne 0 ] && [ "$bad_err" -eq 1 ]; }; then
+      printf 'box-tmp-reap: lsof failed for %s; skipping deletion\n' "$arg" >&2
+      can_delete=0
+    fi
+    rm -f -- "$lsof_err"
+    # One list of open top-level names, so each entry costs one lookup.
+    open_tops=$(printf '%s\n' "$open_paths" | awk -v p="n$dir/" '
+      index($0, p) == 1 { s = substr($0, length(p) + 1); sub(/\/.*/, "", s); print s }' | sort -u)
   fi
 
   while IFS= read -r -d '' entry; do
-    if [ "$have_lsof" -eq 0 ]; then
+    if [ "$can_delete" -eq 0 ]; then
       kept=$((kept + 1))
       continue
     fi
 
-    is_open=0
-    while IFS= read -r path_line; do
-      case "$path_line" in
-        n"$entry"|n"$entry"/*) is_open=1; break ;;
-      esac
-    done <<<"$open_paths"
-    if [ "$is_open" -eq 1 ]; then
+    if [ -n "$open_tops" ] && printf '%s\n' "$open_tops" | grep -Fxq -- "${entry##*/}"; then
       kept=$((kept + 1))
       continue
     fi
@@ -81,7 +104,7 @@ for arg in "$@"; do
     fi
   done < <(find "$dir" -mindepth 1 -maxdepth 1 -mmin +1440 -user "$current_user" -print0 2>/dev/null)
 
-  printf 'box-tmp-reap: %s deleted=%s kept=%s\n' "$arg" "$deleted" "$kept"
+  printf 'box-tmp-reap: %s deleted=%s kept=%s secs=%s\n' "$arg" "$deleted" "$kept" "$((SECONDS - started))"
 done
 
 exit 0
