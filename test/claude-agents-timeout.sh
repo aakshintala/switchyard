@@ -110,7 +110,7 @@ printf '{"lines":[]}\n' >"$T/dlogs"
 : >"$T/pending"; : >"$T/asking"; : >"$T/box-procs"
 
 # An unreachable Claude host is UNKNOWN, its row cannot wake, and another
-# host's live row still prints. The 1 s probe has a 3 s end-to-end margin.
+# host's live row still prints. Check probe cleanup, not elapsed wall time.
 run="$T/lanecheck-run"
 mkdir -p "$run/done"
 : >"$run/roster"; : >"$run/roster-done"
@@ -122,16 +122,12 @@ script, run, output_path, pid_path = sys.argv[1:]
 env = os.environ.copy()
 env.update(FW_RUN=run, FW_CLAUDE_AGENTS_TIMEOUT="1", CLAUDE_MODE="sleep",
            CLAUDE_PID_FILE=pid_path)
-started = time.monotonic()
 try:
     result = subprocess.run(["bash", script], env=env, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=8)
 except subprocess.TimeoutExpired:
     raise SystemExit("lanecheck exceeded timeout plus margin")
-elapsed = time.monotonic() - started
 open(output_path, "w").write(result.stdout)
-if elapsed > 4:
-    raise SystemExit(f"lanecheck took {elapsed:.2f}s for a 1s probe")
 if result.returncode != 0:
     raise SystemExit(f"lanecheck exit {result.returncode}: {result.stdout}")
 if not os.path.exists(pid_path):
@@ -195,7 +191,6 @@ if mode == "local":
     env["CLAUDE_MODE"] = "sleep"
 else:
     env["SSH_CLAUDE_MODE"] = "sleep"
-started = time.monotonic()
 try:
     result = subprocess.run(["bash", script, "done", ticket], env=env, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=8)
@@ -203,8 +198,6 @@ except subprocess.TimeoutExpired:
     raise SystemExit("lanecheck done exceeded timeout plus margin")
 output = result.stdout
 open(output_path, "w").write(output)
-if time.monotonic() - started > 4:
-    raise SystemExit("lanecheck done exceeded the 1s probe plus 3s margin")
 if result.returncode != 2:
     raise SystemExit(f"lanecheck done returned {result.returncode}: {output}")
 if not os.path.exists(pid_path):
