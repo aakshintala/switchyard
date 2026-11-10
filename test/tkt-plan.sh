@@ -2703,7 +2703,8 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   [ "$RC" -eq 1 ] || fail "triaged-lines-stop-time records a LINES verdict"
   lines_stop_at="$(state_get plan_stop_verdict_at)"
   [ -n "$lines_stop_at" ] || fail "triaged-lines-stop-time records its stop timestamp"
-  sleep 1
+  lines_stop_at=2000-01-01T00:00:00Z
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at "$lines_stop_at" || fail "triaged-lines-stop-time seeds a known stop time"
   run_plan verify
   [ "$RC" -eq 1 ] || fail "triaged-lines-stop-time repeats the LINES verdict"
   [ "$(state_get plan_stop_verdict_at)" = "$lines_stop_at" ] || fail "triaged-lines-stop-time keeps the first time for the same stop"
@@ -2720,7 +2721,8 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "triaged-round-limit-stop-time"
   round_limit_stop_at="$(state_get plan_stop_verdict_at)"
   [ -n "$round_limit_stop_at" ] || fail "triaged-round-limit-stop-time records its stop timestamp"
-  sleep 1
+  round_limit_stop_at=2000-01-01T00:00:00Z
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at "$round_limit_stop_at" || fail "triaged-round-limit-stop-time seeds a known stop time"
   run_plan verify
   [ "$RC" -eq 1 ] || fail "triaged-round-limit-stop-time repeats ROUND-LIMIT"
   [ "$(state_get plan_stop_verdict_at)" = "$round_limit_stop_at" ] || fail "triaged-round-limit-stop-time keeps the first time for the same stop"
