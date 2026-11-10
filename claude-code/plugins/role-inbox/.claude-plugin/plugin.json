@@ -1,0 +1,5 @@
+{
+  "name": "role-inbox",
+  "version": "0.1.0",
+  "description": "Session-long inbox watch for the role sessions: one notification per new inbox message, no re-arm"
+}

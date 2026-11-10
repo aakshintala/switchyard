@@ -23,7 +23,9 @@ When you were started with a brief or notes file, that file is your contract for
 
 ## Commands
 
-When the brief names a state file, run each phase through its `tkt-*` command: steps 1–2 `tkt-start`, step 3 `tkt-plan`, steps 4–6 `tkt-build`, each fix round `tkt-fix`, steps 7–8 `tkt-ship`. When the ticket's spec is another issue, pass its number with `tkt-start --spec-issue <N>`. `tkt-build` passes that number to `review-pr`. When the repo's workflow doc names a gate script (e.g. `scripts/check`), run `tkt-state <state> set gate.script <script>` right after `tkt-start`; `tkt-plan set` and `tkt-plan post` then reject a Gate line that does not run that script. Run each call alone as `cmd > out 2>&1`, with nothing after it in that Bash call, then read `out` separately. Decide from the verdict word on the first `TKT tkt-<tool> <WORD>` line, not the harness exit code. Go on only for the words below; a lane `CONCERNS` continues per step 4, and so does a fix round's `CONCERNS` (`tkt-fix` sends the concerns file to the verify as `--context`); every other word is a stop.
+When a brief provides a state file, or after `tkt-start` creates it and completes steps 1–2, run `tkt-drive <state>` in the background, alone in its tool call. Keep any `tkt-state` setup (such as `gate.script`) after `tkt-start`. The driver runs the next routine step, chains `SET`, `PLAN-OK`, and `POSTED` after taking the plan's fence grant, and retires the lane on `MERGED`. Read its output once when it stops; the stopped tool's output is unchanged and starts on line 1. Act on that tool's verdict, not the harness exit code. When that verdict means another routine phase is due, rerun `tkt-drive` instead of calling the phase tool directly. On resume, read state and the journal. When no state exists, run the steps below by hand.
+
+When the ticket's spec is another issue, pass its number with `tkt-start --spec-issue <N>`. `tkt-build` passes that number to `review-pr`. When the repo's workflow doc names a gate script (e.g. `scripts/check`), run `tkt-state <state> set gate.script <script>` right after `tkt-start`; `tkt-plan set` and `tkt-plan post` then reject a Gate line that does not run that script.
 
 `tkt-start --model ROLE=ID` accepts these roles:
 
@@ -38,16 +40,17 @@ When the brief names a state file, run each phase through its `tkt-*` command: s
 
 The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `verifier-rN` and `verifier-rN-drift` → `verifier`, `confirm` → `verifier`, and `fixN` → `fix`. `verifier` is the plan Verifier; `verify` is review-loop's scoped verify.
 
-| Tool | Go on | Other verdicts that stop |
+| Tool | Driver behavior / next action | Stop verdicts to route |
 | --- | --- | --- |
 | `tkt-start` | `CURRENT`; `SKIPPED` with `--no-preflight`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
 | `tkt-state` | exit 0 | exit 2 |
-| `tkt-plan` | `PLAN-OK`, `POSTED`, `SET`, `REPLAN` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `TRIAGED-REFUSED`, `POST-FAIL`, `SET-FAIL`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
+| `tkt-drive` | Chains `SET`, `PLAN-OK`, and `POSTED` after a grant; handles `MERGED` by retiring the lane and listing dependents | `STOP`: act on the unchanged underlying verdict; rerun `tkt-drive` when another routine phase is due |
+| `tkt-plan` | The driver chains `SET`, `PLAN-OK`, and `POSTED` | `LINES`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `TRIAGED-REFUSED`, `POST-FAIL`, `SET-FAIL`, `REPLAN`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-job` | `DONE`, `CONCERNS` | `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `GATE-REFUSED` (gate exited 75: refused, nothing tested; not a pass or code failure—rerun the gate where it has room), `NO-COMMITS`, `UNKNOWN` |
-| `tkt-build` | `APPROVE`; `MEASURED` for an `Outcome: measurement` plan, which ends the ticket with no PR | `CHANGES`, `STALE` (build-phase STALE merges `origin/main`, updates the plan and head, verifies, and continues when those steps pass), `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `VERDICT-REFUSED`, `<step>-ERROR` |
+| `tkt-build` | The driver stops on `APPROVE`; rerun `tkt-drive` for the next phase. `MEASURED` ends the ticket with no PR | `CHANGES`, `STALE` (build-phase STALE merges `origin/main`, updates the plan and head, verifies, and continues when those steps pass), `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `VERDICT-REFUSED`, `<step>-ERROR` |
 | `tkt-gate` | `PASS` | `TIP`, `FENCE`, `FAIL` |
-| `tkt-fix` | `FIX-OK`; `PUSHED` then `tkt-ship --unverified-fixes` | `FIX-INCOMPLETE`, `VERIFY-FAIL`, `PUSH-FAIL`, `CI-WAIT`, `RECOVER`, `DRIFT`, `FINDINGS-UNACCOUNTED`, `SINCE-NOT-ANCESTOR`, `FINDINGS-SCOPE-ERROR`, `ROUND-LIMIT`, `UNKNOWN`, gate stops |
-| `tkt-ship` | `MERGED` | `PENDING`, `CONFLICT`, `PATCH-CHANGED`, `BODY`, `LABEL`, `REVIEW`, `MUTANTS`, `SHIP`, `GATE-FAIL`, `MERGE-FAIL`, `CI-FAIL`, `PRECONDITION`, `BUSY`, `DRIFT`, `UNKNOWN` |
+| `tkt-fix` | The driver stops; rerun it after `FIX-OK` or `PUSHED` as state directs | `FIX-INCOMPLETE`, `VERIFY-FAIL`, `PUSH-FAIL`, `CI-WAIT`, `RECOVER`, `DRIFT`, `FINDINGS-UNACCOUNTED`, `SINCE-NOT-ANCESTOR`, `FINDINGS-SCOPE-ERROR`, `ROUND-LIMIT`, `UNKNOWN`, gate stops |
+| `tkt-ship` | `MERGED` is handled by the driver: it retires the lane and prints dependents | `PENDING`, `CONFLICT`, `PATCH-CHANGED`, `BODY`, `LABEL`, `REVIEW`, `MUTANTS`, `SHIP`, `GATE-FAIL`, `MERGE-FAIL`, `CI-FAIL`, `PRECONDITION`, `BUSY`, `DRIFT`, `UNKNOWN` |
 
 `FINDINGS-UNACCOUNTED` names commits outside recorded round ranges or whose findings are unavailable; use its repair command to restore the owning round's start, head and findings, then rerun the printed `tkt-fix` command. `SINCE-NOT-ANCESTOR since=<sha> head=<sha>` means the branch history was rewritten after the review, so scoped-verify rounds cannot be mapped; re-review the head, or record `reviewed` as the rebased equivalent of the reviewed commit, then rerun. `FINDINGS-SCOPE-ERROR` means Git could not enumerate the verify range; correct the named `--since` or head ref and rerun. Read a stop once, then route it by the step that owns it. State and the journal are the ticket's record: read them on resume. A repo without state runs the steps below by hand.
 

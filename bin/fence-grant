@@ -396,6 +396,7 @@ while [ -L "$self" ]; do
 done
 self_dir="$(cd "$(dirname "$self")" && pwd)"
 # shellcheck disable=SC1091
+. "$self_dir/lib/fence-grant-paths.sh"
 . "$self_dir/lib/pr-diff.sh"
 if [ -n "$preplan" ]; then
   prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,changedFiles 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
@@ -1474,7 +1475,7 @@ _grant_entries() {
   # (2026-10-31). `fiber-2413-plan-fence-grant.md` carries 700 lines of the
   # same shape.
   if grep -q '^Paths:[[:space:]]*$' "$1" 2>/dev/null; then
-    awk '/^Reads:[[:space:]]*$/ {stop = 1} /^##([[:space:]]|$)/ {stop = 1} stop {next} /^Paths:[[:space:]]*$/ {paths = 1; next} paths {print}' "$1" 2>/dev/null
+    fence_grant_paths_block "$1"
   else
     awk '/^Reads:[[:space:]]*$/ {stop = 1} stop {next} {if (tolower($0) ~ /grant/) f = 1} f && /^[[:space:]]/ {next} f {print}' "$1" 2>/dev/null
   fi | _strip_foreign_hold | sed -e "s/$_ng_re.*//" | _expand_braces_lines | _collect_entries | _narrow_grant_entries

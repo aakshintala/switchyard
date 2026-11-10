@@ -1,0 +1,7 @@
+[
+  {
+    "name": "inbox",
+    "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/role-inbox-monitor\"",
+    "description": "Role inbox: one notice per new message"
+  }
+]
