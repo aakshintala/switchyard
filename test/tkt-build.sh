@@ -2177,6 +2177,7 @@ grep -q 'tkt-build stale recovery push origin tkt-528' "$CDIR/tkt.journal" || fa
 grep -q "tkt-build stale recovery plan Base=$newbase" "$CDIR/tkt.journal" || fail "gate-clean-merge: Base step is journaled"
 grep -q "tkt-build stale recovery head=$H2" "$CDIR/tkt.journal" || fail "gate-clean-merge: head step is journaled"
 grep -q 'tkt-build stale recovery verify PLAN-OK' "$CDIR/tkt.journal" || fail "gate-clean-merge: verify step is journaled"
+grep -F -q "tkt-build stale recovery verify-exemption base=$newbase plan=" "$CDIR/tkt.journal" || fail "gate-clean-merge: exact plan/base drift exemption is journaled"
 grep -q 'verifier-r1-drift' "$T/calls.log" || fail "gate-clean-merge: verification uses the drift slot"
 grep -q '^gate|' "$T/calls.log" || fail "gate-clean-merge: gate continues after recovery"
 

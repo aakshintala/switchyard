@@ -2859,6 +2859,34 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   [ -n "$(grep -F 'gh|api repos/switchyard/issues/comments/654325' "$T/gh.log" || true)" ] || fail "triaged-verbatim-base-moved always reads the ruling comment"
 fi
 
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = stale-recovery ]; then
+  # A build stale-recovery verify exempts changed plan Files even when the
+  # plan's resolved Task paths do not include the changed file.
+  setup_case build-stale-recovery-drift
+  wcommit "$WT" task.txt "task source"
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  A="$(git -C "$WT" rev-parse HEAD)"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "build-stale-recovery-drift seed round"
+  bash "$TKT_STATE" "$S" set verified_base "$A" || fail "build-stale-recovery-drift seed verified base"
+  wcommit "$WT" f.txt v3
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  B="$(git -C "$WT" rev-parse HEAD)"
+  {
+    printf 'Base: %s\n' "$B"
+    printf '\n## Files\n\n- `f.txt`\n- `task.txt`\n\n## Tasks\n\n1. Inspect `task.txt`.\n\n## Gate\n\n`true`\n'
+  } >"$CDIR/plan.md"
+  bash "$TKT_STATE" "$S" set build_stale_recovery_base "$B" || fail "build-stale-recovery-drift seed recovery Base"
+  bash "$TKT_STATE" "$S" set build_stale_recovery_plan_hash "$(git -C "$WT" hash-object "$CDIR/plan.md")" || fail "build-stale-recovery-drift seed recovery plan hash"
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "build-stale-recovery-drift exempt verify runs at the round limit (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "build-stale-recovery-drift"
+  grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "build-stale-recovery-drift uses the drift slot"
+  [ "$(state_get verifier_round)" = 2 ] || fail "build-stale-recovery-drift leaves the round budget unchanged"
+  [ -z "$(state_get build_stale_recovery_base)" ] || fail "build-stale-recovery-drift clears the recovery Base"
+  [ -z "$(state_get build_stale_recovery_plan_hash)" ] || fail "build-stale-recovery-drift clears the recovery plan hash"
+fi
+
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = amendment ]; then
   # After the Verifier budget is spent, an unmatched triaged edit must point to
   # grant-round + confirm rather than a verify --extra that ROUND-LIMIT rejects.

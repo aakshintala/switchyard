@@ -321,6 +321,25 @@ do_verify() {
       fi
     fi
   fi
+  # A build-phase STALE recovery carries a state marker tied to its new Base
+  # and exact plan snapshot. Its stale check is Files-based, so those changed
+  # Files paths remain exempt even when resolved Task paths omit them.
+  if [ "$drift" -eq 0 ]; then
+    recovery_base="$(t get build_stale_recovery_base 2>/dev/null || true)"
+    recovery_plan_hash="$(t get build_stale_recovery_plan_hash 2>/dev/null || true)"
+    if [ "$recovery_base" = "$base" ] && [ -n "$recovery_plan_hash" ] && [ -n "$vbase" ] && [ "$vbase" != "$base" ]; then
+      current_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+      if [ "$current_plan_hash" = "$recovery_plan_hash" ]; then
+        recovery_files=()
+        while IFS= read -r p; do recovery_files+=("$p"); done < <(plan_files_pathspecs "$plan")
+        if [ "${#recovery_files[@]}" -gt 0 ]; then
+          if recovery_stat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${recovery_files[@]}" 2>/dev/null)"; then
+            [ -n "$recovery_stat" ] && drift=1
+          fi
+        fi
+      fi
+    fi
+  fi
   if [ "$drift" -eq 0 ]; then
     if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
       if grant_pending; then
@@ -371,6 +390,8 @@ do_verify() {
     t set plan_stop_verdict_key ""
     t set plan_stop_verdict_at ""
   fi
+  t set build_stale_recovery_base ""
+  t set build_stale_recovery_plan_hash ""
   t set last_report "$rep"
   emit "$RV" "$REC" "$(head -n "$REPORT_LINES" "$rep")"
 }
@@ -728,6 +749,7 @@ do_set() {
   if [ "$old_plan" != "$plan" ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
     t set plan_stop_verdict_key ""; t set plan_stop_verdict_at ""
+    t set build_stale_recovery_base ""; t set build_stale_recovery_plan_hash ""
     t set plan_questions_comment ""; t set plan_questions_hash ""; t set plan_questions_verdict_at ""; t set plan_questions_verdict_hash ""
     t set verified_base ""; t set verified_plan_hash ""
     t set pack_plan_hash ""; t set last_report ""
@@ -767,6 +789,8 @@ do_replan() {
   t set pack_plan_hash ""
   t set plan_stop_verdict_key ""
   t set plan_stop_verdict_at ""
+  t set build_stale_recovery_base ""
+  t set build_stale_recovery_plan_hash ""
   t set plan_triage_comment ""
   t set job.lane ""
   t set job.fix1 ""
