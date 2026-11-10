@@ -354,12 +354,61 @@ PY
 
 if [ "${1:-}" = done ]; then
   shift
-  [ $# -gt 0 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...]" >&2; exit 2; }
-  # Retiring a ticket whose lane was launched minutes ago is always a mistake,
-  # never an intent, and because retirement is time-ordered it hides that live
-  # lane from every later check. On 2026-11-03 `lanecheck done 3857 3975` ran ten
-  # minutes after fiber-3975-build was launched and dropped it from the roster
-  # view: 14 LIVE instead of 16, with no 3975 row and no warning. Refuse instead.
+  done_args=()
+  have_done_arg=0
+  handed_card=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --handed-to-owner)
+        [ $# -ge 2 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...] [--handed-to-owner <card-id>]" >&2; exit 2; }
+        [ -z "$handed_card" ] || { echo "lanecheck done: --handed-to-owner may be used once" >&2; exit 2; }
+        handed_card="$2"
+        shift 2
+        ;;
+      *) done_args+=("$1"); have_done_arg=1; shift ;;
+    esac
+  done
+  [ "$have_done_arg" = 1 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...] [--handed-to-owner <card-id>]" >&2; exit 2; }
+  set -- "${done_args[@]}"
+  if [ -n "$handed_card" ]; then
+    case "$handed_card" in ""|*[!A-Za-z0-9_-]*) echo "lanecheck done: invalid owner-ask card id: $handed_card" >&2; exit 2 ;; esac
+    owner_ask_bin=${FW_OWNER_ASK:-owner-ask}
+    owner_ask_list_rc=0
+    owner_ask_list=$("$owner_ask_bin" list 2>/dev/null) || owner_ask_list_rc=$?
+    owner_ask_open=0
+    if [ "$owner_ask_list_rc" -eq 0 ] && printf '%s\n' "$owner_ask_list" | awk -v id="$handed_card" '$1 == id { found=1 } END { exit !found }'; then
+      owner_ask_open=1
+      owner_ask_path="$owner_ask_bin"
+      case "$owner_ask_path" in */*) ;; *) owner_ask_path=$(command -v "$owner_ask_path" 2>/dev/null || true) ;; esac
+      while [ -n "$owner_ask_path" ] && [ -L "$owner_ask_path" ]; do
+        owner_ask_dir=$(cd "$(dirname "$owner_ask_path")" && pwd)
+        owner_ask_link=$(readlink "$owner_ask_path")
+        case "$owner_ask_link" in /*) owner_ask_path="$owner_ask_link" ;; *) owner_ask_path="$owner_ask_dir/$owner_ask_link" ;; esac
+      done
+      owner_ask_text=""
+      if [ -n "$owner_ask_path" ]; then
+        owner_ask_text=$(python3 -I - "$owner_ask_path" "$handed_card" <<'PY'
+import json, os, sys
+path, card_id = sys.argv[1:]
+try:
+    cards = os.path.join(os.path.dirname(os.path.realpath(path)), "cards")
+    card = json.load(open(os.path.join(cards, card_id + ".json")))
+    if card.get("id") != card_id:
+        raise ValueError("card id mismatch")
+    print(str(card.get("title", "")) + "\n" + str(card.get("context", "")))
+except Exception:
+    sys.exit(1)
+PY
+        )
+        owner_ask_text_rc=$?
+      else
+        owner_ask_text_rc=1
+      fi
+    else
+      owner_ask_text_rc=1
+    fi
+  fi
+  # Retiring a ticket whose lane was launched minutes ago is always a mistake, never an intent, and because retirement is time-ordered it hides that live lane from every later check. On 2026-11-03 `lanecheck done 3857 3975` ran ten minutes after fiber-3975-build was launched and dropped it from the roster view: 14 LIVE instead of 16, with no 3975 row and no warning. Refuse instead.
   # FW_DONE_MIN seconds (default 1800) is the floor; FW_DONE_FORCE=1 overrides it
   # for the real case of a lane that started and died inside the window.
   young=0
@@ -375,6 +424,8 @@ if [ "${1:-}" = done ]; then
   if _prs=$(gh pr list --repo aakshintala/fiber --state open --limit 200 --json number,headRefName --jq '.[] | "\(.number) \(.headRefName)"' 2>/dev/null); then
     _prs_ok=1
   fi
+  handed_tickets=()
+  handed_prs=()
   for n in "$@"; do
     tn=${n%%:*}
     # A session-scoped retirement asks about that session only. Reading the
@@ -417,13 +468,71 @@ if [ "${1:-}" = done ]; then
     if [ "$_prs_ok" = 1 ]; then
       open_pr=$(printf '%s\n' "$_prs" | awk -v t="$tn" '$2 ~ ("^[^/]+/" t "-") || $2 ~ ("^" t "-") { print $1 }')
       if [ -n "$open_pr" ]; then
-        if [ "${FW_DONE_FORCE:-0}" = 1 ]; then
+        if [ -n "$handed_card" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
+          handoff_problem=""
+          if [ "$owner_ask_list_rc" -ne 0 ]; then
+            handoff_problem="owner-ask list failed for card $handed_card"
+          elif [ "$owner_ask_open" != 1 ]; then
+            handoff_problem="card $handed_card is not open"
+          elif [ "$owner_ask_text_rc" -ne 0 ]; then
+            handoff_problem="card $handed_card title/body could not be read"
+          else
+            handoff_match=$(python3 -I -c 'import re,sys
+text, ticket, prs = sys.argv[1:]
+if re.search(r"(?<![A-Za-z0-9_])#" + re.escape(ticket) + r"(?![0-9])", text):
+    print("ticket")
+else:
+    print(" ".join(pr for pr in prs.split() if re.search(r"\bPR\s+#" + re.escape(pr) + r"(?![0-9])", text)))' \
+              "$owner_ask_text" "$tn" "$open_pr")
+            if [ "$handoff_match" = ticket ]; then
+              handoff_ok=1
+            else
+              handoff_ok=1
+              for p in $open_pr; do
+                case " $handoff_match " in *" $p "*) ;; *) handoff_ok=0 ;; esac
+              done
+              if [ "$handoff_ok" = 0 ]; then handoff_problem="card $handed_card title/body does not name open PR(s) $(printf '%s ' $open_pr)or ticket #$tn"; fi
+            fi
+          fi
+          if [ -n "$handoff_problem" ]; then
+            echo "REFUSING to retire $n — handed-to-owner check failed: $handoff_problem." >&2
+            young=1
+          else
+            handoff_pr=$(printf '%s\n' "$open_pr" | head -1)
+            handed_tickets+=("$tn")
+            handed_prs+=("$handoff_pr")
+          fi
+        elif [ "${FW_DONE_FORCE:-0}" = 1 ]; then
           echo "FORCING retire of $tn — PR(s) $(echo "$open_pr" | tr '\n' ' ')still open and unmerged; FW_DONE_FORCE=1 overrides." >&2
         else
           echo "REFUSING to retire $tn — PR(s) $(echo "$open_pr" | tr '\n' ' ')still open and unmerged. The lane's last step is the ship; let it run ship-pr, or merge first." >&2
+          young=1
         fi
+      elif [ -n "$handed_card" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
+        if [ "$owner_ask_list_rc" -ne 0 ]; then
+          handoff_problem="owner-ask list failed for card $handed_card"
+        elif [ "$owner_ask_open" != 1 ]; then
+          handoff_problem="card $handed_card is not open"
+        elif [ "$_prs_ok" != 1 ]; then
+          handoff_problem="open-PR lookup failed, so the PR cannot be verified"
+        else
+          handoff_problem="no open PR for lane #$tn to hand to the owner"
+        fi
+        echo "REFUSING to retire $n — handed-to-owner check failed: $handoff_problem." >&2
         young=1
       fi
+    elif [ -n "$handed_card" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
+      if [ "$owner_ask_list_rc" -ne 0 ]; then
+        handoff_problem="owner-ask list failed for card $handed_card"
+      elif [ "$owner_ask_open" != 1 ]; then
+        handoff_problem="card $handed_card is not open"
+      elif [ "$_prs_ok" != 1 ]; then
+        handoff_problem="open-PR lookup failed, so the PR cannot be verified"
+      else
+        handoff_problem="no open PR for lane #$tn to hand to the owner"
+      fi
+      echo "REFUSING to retire $n — handed-to-owner check failed: $handoff_problem." >&2
+      young=1
     else
       echo "note: open-PR guard did not run for $tn (gh pr list failed); age guard only." >&2
     fi
@@ -440,12 +549,25 @@ if [ "${1:-}" = done ]; then
   retirement_helper=$_lanecheck_done_tmp/roster-retirement.py
   write_retirement_helper "$retirement_helper"
   for n in "$@"; do
+    tn=${n%%:*}
+    handoff_pr=""
+    for i in "${!handed_tickets[@]}"; do
+      if [ "${handed_tickets[$i]}" = "$tn" ]; then handoff_pr="${handed_prs[$i]}"; break; fi
+    done
     case "$n" in
-      *:*) printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${n%%:*}" "${n#*:}" >>"$retired" ;;
-      *)   printf '%s\t%s\n'      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" >>"$retired" ;;
+      *:*) retire_line="$(printf '%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn" "${n#*:}")" ;;
+      *)   retire_line="$(printf '%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn")" ;;
     esac
+    if [ -n "$handoff_pr" ]; then
+      if [[ "$n" == *:* ]]; then retire_line="$retire_line$(printf '\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; else retire_line="$retire_line$(printf '\t\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; fi
+    fi
+    printf '%s\n' "$retire_line" >>"$retired"
   done
-  echo "retired: $*"
+  retire_log="retired: $*"
+  for i in "${!handed_tickets[@]}"; do
+    retire_log="$retire_log handed-to-owner $handed_card PR #${handed_prs[$i]}"
+  done
+  echo "$retire_log"
 
   # Retire a ticket's fence grants once its LAST session retires. This is the
   # one place that knows a lane is finished, and it used to leave the grants in
@@ -483,6 +605,14 @@ PY
 )
     if [ "${live:-1}" != 0 ]; then
       echo "fence kept for #$t: $live session(s) still live"
+      continue
+    fi
+    handoff_pr=""
+    for i in "${!handed_tickets[@]}"; do
+      if [ "${handed_tickets[$i]}" = "$t" ]; then handoff_pr="${handed_prs[$i]}"; break; fi
+    done
+    if [ -n "$handoff_pr" ]; then
+      echo "fence kept for #$t: handed-to-owner $handed_card PR #$handoff_pr"
       continue
     fi
     for g in "$R"/fiber-"$t"-fence-grant-*.md; do
