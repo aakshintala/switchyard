@@ -291,7 +291,7 @@ for marker in owner_held surveyor_sequence; do
   run_drive
   [ "$RC" -ne 0 ] || fail "$marker did not stop tkt-ship"
   grep -Fq "state $marker marker prevents tkt-ship" "$ERR" || fail "$marker stop reason missing: $(cat "$ERR")"
-  grep -Fq 'TKT tkt-drive STOP' "$OUT" || fail "$marker did not report STOP: $(cat "$OUT")"
+  [ "$(head -n 1 "$OUT")" = 'TKT tkt-drive STOP' ] || fail "$marker did not report a bare STOP: $(cat "$OUT")"
   [ "$(grep -c '^tkt-ship|' "$TEST_CALLS" || true)" -eq 0 ] || fail "$marker called tkt-ship"
   assert_no_merge
 done
@@ -305,7 +305,7 @@ for status in ready done; do
     state_set "$STATE" reviewed 0000000000000000000000000000000000000001
     state_journal "$STATE" "$prior"
     run_drive
-    grep -Fq 'TKT tkt-drive STOP' "$OUT" || fail "$status after $prior did not stop before shipping: $(cat "$OUT")"
+    [ "$(head -n 1 "$OUT")" = 'TKT tkt-drive STOP next=tkt-ship' ] || fail "$status after $prior did not report next=tkt-ship on stdout: $(cat "$OUT")"
     grep -Fq 'tkt-ship is a separate role step' "$ERR" || fail "$status after $prior lacked the separate-ship instruction: $(cat "$ERR")"
     [ "$(grep -c '^tkt-ship|' "$TEST_CALLS" || true)" -eq 0 ] || fail "$status after $prior called tkt-ship"
     assert_no_merge
