@@ -38,9 +38,6 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   cat "$STUBD/prbranch-${3:-}" 2>/dev/null || exit 1
   exit 0
 fi
-case " $* " in
-  *" --state merged "*) cat "$STUBD/merged-prs" 2>/dev/null || true; exit 0 ;;
-esac
 cat "$STUBD/prs" 2>/dev/null || true
 exit 0
 EOF
@@ -88,7 +85,6 @@ export BOX_SSH=$T/stub/ssh FW_DELEGATE=$T/stub/delegate \
 printf '[]' > "$T/cagents"
 printf '{"ok":true,"sessions":[]}' > "$T/dsess"
 : > "$T/prs"
-: > "$T/merged-prs"
 : > "$T/pending"
 : > "$T/asking"
 
@@ -163,46 +159,6 @@ FW_RUN=$r bash "$BIN/lanecheck" done 4026 >/dev/null 2>&1
 if [ -e "$r/fiber-4099-fence-grant-20261104T0000Z.md" ]; then ok other-ticket-fence-untouched; else fail other-ticket-fence-untouched; fi
 
 # --- the age guard -----------------------------------------------------------
-# A fresh scoped session may be retired after its ticket's branch PR merged.
-r=$(newrun 5a); lane "$r" 3975 fiber-3975-build 777 10M
-printf '4171 tests/3975-selector\\n' > "$T/merged-prs"
-out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3975:fiber-3975-build 2>&1); grc=$?
-if [ "$grc" = 0 ] && printf '%s' "$out" | grep -qF 'age guard skipped for 3975:fiber-3975-build — PR #4171 merged' && grep -q "3975[[:space:]]*fiber-3975-build" "$r/roster-done"; then
-  ok age-guard-skipped-for-scoped-merged-pr
-else
-  fail "age-guard-skipped-for-scoped-merged-pr (rc=$grc) $out"
-fi
-
-# A fresh scoped session with no merged ticket PR still hits the age refusal.
-r=$(newrun 5b); lane "$r" 3975 fiber-3975-build 777 10M
-: > "$T/merged-prs"
-out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3975:fiber-3975-build 2>&1); grc=$?
-if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'REFUSING to retire 3975:fiber-3975-build' && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
-  ok age-guard-still-refuses-scoped-without-merged-pr
-else
-  fail "age-guard-still-refuses-scoped-without-merged-pr (rc=$grc) $out"
-fi
-
-# A merged-PR lookup failure fails closed for the age-guard bypass.
-r=$(newrun 5d); lane "$r" 3975 fiber-3975-build 777 10M
-printf '4171 tests/3975-selector\\n' > "$T/merged-prs"
-out=$(FW_RUN=$r GH_BOOM=1 bash "$BIN/lanecheck" done 3975:fiber-3975-build 2>&1); grc=$?
-if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'REFUSING to retire 3975:fiber-3975-build' && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
-  ok age-guard-still-refuses-when-merged-pr-lookup-fails
-else
-  fail "age-guard-still-refuses-when-merged-pr-lookup-fails (rc=$grc) $out"
-fi
-
-# A merged PR does not let a bare ticket retirement bypass the young-lane guard.
-r=$(newrun 5c); lane "$r" 3975 fiber-3975-build 777 10M
-printf '4171 tests/3975-selector\\n' > "$T/merged-prs"
-out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3975 2>&1); grc=$?
-if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'REFUSING to retire 3975' && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
-  ok age-guard-still-refuses-bare-ticket-after-merged-pr
-else
-  fail "age-guard-still-refuses-bare-ticket-after-merged-pr (rc=$grc) $out"
-fi
-
 r=$(newrun 5); lane "$r" 3975 fiber-3975-build 777 10M; grant "$r" 3975
 out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3975 2>&1); grc=$?
 if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'REFUSING to retire 3975' && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then

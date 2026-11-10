@@ -375,10 +375,6 @@ if [ "${1:-}" = done ]; then
   if _prs=$(gh pr list --repo aakshintala/fiber --state open --limit 200 --json number,headRefName --jq '.[] | "\(.number) \(.headRefName)"' 2>/dev/null); then
     _prs_ok=1
   fi
-  _merged_prs_ok=0
-  if _merged_prs=$(gh pr list --repo aakshintala/fiber --state merged --limit 200 --json number,headRefName --jq '.[] | "\(.number) \(.headRefName)"' 2>/dev/null); then
-    _merged_prs_ok=1
-  fi
   for n in "$@"; do
     tn=${n%%:*}
     # A session-scoped retirement asks about that session only. Reading the
@@ -397,25 +393,18 @@ if [ "${1:-}" = done ]; then
     fi
     age=$(( $(date +%s) - when ))
     if [ "$age" -lt "${FW_DONE_MIN:-1800}" ]; then
-      merged_pr=""
-      if [ -n "$sn" ] && [ "$_merged_prs_ok" = 1 ]; then
-        merged_pr=$(printf '%s\n' "$_merged_prs" | awk -v t="$tn" '$2 ~ ("^[^/]+/" t "-") || $2 ~ ("^" t "-") { print $1; exit }')
-      fi
-      if [ -n "$merged_pr" ]; then
-        echo "age guard skipped for $n — PR #$merged_pr merged"
       # Say which way it is going in the same line. Printing REFUSING and then
-      # `retired:` two lines later, as this did under FW_DONE_FORCE=1, leaves
-      # a log a later reader cannot tell apart from a refusal that held.
-      # Name the argument, not the ticket: this guard is session-scoped when
-      # the argument is, and printing `4275` for `4275:prep-4275` on 2026-11-06
-      # read as the ticket being held when only its finished prep session was young.
-      elif [ "${FW_DONE_FORCE:-0}" = 1 ]; then
-        echo "FORCING retire of $n — newest roster entry is ${age}s old ($newest), under ${FW_DONE_MIN:-1800}s; FW_DONE_FORCE=1 overrides."
-        young=1
+      # `retired:` two lines later, as this did under FW_DONE_FORCE=1, leaves a
+      # log a later reader cannot tell apart from a refusal that held.
+      # Name the argument, not the ticket: this guard is session-scoped when the
+      # argument is, and printing `4275` for `4275:prep-4275` on 2026-11-06 read
+      # as the ticket being held when only its finished prep session was young.
+      if [ "${FW_DONE_FORCE:-0}" = 1 ]; then
+        echo "FORCING retire of $n — newest roster entry is ${age}s old ($newest), under ${FW_DONE_MIN:-1800}s; FW_DONE_FORCE=1 overrides." >&2
       else
         echo "REFUSING to retire $n — its newest roster entry is ${age}s old ($newest), under ${FW_DONE_MIN:-1800}s." >&2
-        young=1
       fi
+      young=1
     fi
     # A lane's last step is the ship, not the green PR: bin/lib/template-tkt.md:110 has
     # it run ship-pr as soon as its gate passes. Retiring on "PR green and
