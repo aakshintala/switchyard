@@ -5,9 +5,17 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$SCRIPT_DIR/../bin/roles-restart"
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-roles-restart.XXXXXX")"
-trap 'rm -rf "$T"' EXIT
 # macOS TMPDIR ends in /; normalise so paths match the $PWD that cd produces.
 T="$(cd "$T" && pwd)"
+
+cleanup() {
+  if [ -n "${test_sleep_pid:-}" ]; then
+    kill "$test_sleep_pid" 2>/dev/null || true
+    wait "$test_sleep_pid" 2>/dev/null || true
+  fi
+  rm -rf "$T"
+}
+trap cleanup EXIT
 
 fail() {
   echo "FAIL: $1" >&2
@@ -61,6 +69,8 @@ export PATH="$STUBS:$PATH"
 run_restart() {
   ROLES_RESTART_ROLES="$ROLE_TABLE" \
     ROLES_RESTART_AGENTS_JSON="$AGENTS_JSON" \
+    ROLES_RESTART_PS="$PS_FILE" \
+    ROLES_RESTART_STATE_DIR="$STATE_DIR" \
     ROLES_RESTART_LOCK_DIR="$LOCK" \
     ROLES_RESTART_LOG="$T/roles-restart.log" \
     ROLES_RESTART_WAIT_TIMEOUT="${WAIT_TIMEOUT:-2}" \
@@ -70,20 +80,73 @@ run_restart() {
 ROLE_HOME="$T/role-home"
 HANDOFF="$T/handoff.md"
 AGENTS_JSON="$T/agents.json"
+PS_FILE="$T/ps.txt"
+STATE_DIR="$T/roles-restart-state"
 LOCK="$T/roles-restart.lock"
+: >"$PS_FILE"
 mkdir -p "$ROLE_HOME/worktree"
 printf '## Crons\n- test cron\n' >"$HANDOFF"
 printf '[]\n' >"$AGENTS_JSON"
 ROLE_TABLE="test-role|$ROLE_HOME|$HANDOFF"
-export ROLE_HOME HANDOFF AGENTS_JSON LOCK ROLE_TABLE
+export ROLE_HOME HANDOFF AGENTS_JSON PS_FILE LOCK ROLE_TABLE
+
+set_watcher() {
+  printf 'inbox-stream inbox-wait %s/.cache/agents/inbox/%s\n' "$HOME" "$1" >"$PS_FILE"
+}
 
 # A done background session in a worktree is still live when its pid exists.
 # Keep this first: the old state.json check relaunches it and fails this test.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+set_watcher test-role
 printf '[{"pid":%s,"name":"test-role","kind":"background","cwd":"%s/worktree","state":"done"}]\n' "$$" "$ROLE_HOME" >"$AGENTS_JSON"
 run_restart >"$T/live.out" 2>"$T/live.err" || fail "live role run failed: $(cat "$T/live.err")"
 [ ! -s "$CLAUDE_LOG" ] || fail "live role was launched twice"
 [ ! -s "$OWNER_ASK_LOG" ] || fail "live role emitted a relaunch line"
+
+# A live background session without its role-inbox watcher must not be relaunched.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"; : >"$T/roles-restart.log"
+: >"$PS_FILE"
+printf '[{"pid":%s,"name":"test-role","kind":"background"}]\n' "$$" >"$AGENTS_JSON"
+run_restart >"$T/no-watcher.out" 2>"$T/no-watcher.err" || fail "no-watcher run failed: $(cat "$T/no-watcher.err")"
+[ ! -s "$CLAUDE_LOG" ] || fail "background session without watcher was relaunched"
+no_watcher_line="test-role: background session pid $$ has no role-inbox monitor; not relaunching over it"
+grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: background session pid $$ has no role-inbox monitor; not relaunching over it$" "$T/roles-restart.log" >/dev/null \
+  || fail "background session without watcher warning was not logged exactly"
+grep -F "owner-ask log --from roles-restart --kind process --title $no_watcher_line" "$OWNER_ASK_LOG" >/dev/null \
+  || fail "background session without watcher was not reported as a process line"
+
+: >"$T/roles-restart.log"
+run_restart >"$T/no-watcher-again.out" 2>"$T/no-watcher-again.err" \
+  || fail "second no-watcher run failed: $(cat "$T/no-watcher-again.err")"
+grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: background session pid $$ has no role-inbox monitor; not relaunching over it$" "$T/roles-restart.log" >/dev/null \
+  || fail "second no-watcher run did not write the local log line"
+owner_ask_count="$(grep -Fc "owner-ask log --from roles-restart --kind process --title $no_watcher_line" "$OWNER_ASK_LOG")"
+[ "$owner_ask_count" -eq 1 ] || fail "same session posted $owner_ask_count owner-ask lines instead of one"
+
+sleep 60 &
+test_sleep_pid=$!
+printf '[{"pid":%s,"name":"test-role","kind":"background"}]\n' "$test_sleep_pid" >"$AGENTS_JSON"
+: >"$T/roles-restart.log"
+run_restart >"$T/new-pid.out" 2>"$T/new-pid.err" || fail "new-pid run failed: $(cat "$T/new-pid.err")"
+new_pid_line="test-role: background session pid $test_sleep_pid has no role-inbox monitor; not relaunching over it"
+grep -F "owner-ask log --from roles-restart --kind process --title $new_pid_line" "$OWNER_ASK_LOG" >/dev/null \
+  || fail "different live pid did not post an owner-ask line"
+owner_ask_count="$(grep -Fc 'owner-ask log --from roles-restart --kind process --title test-role: background session pid ' "$OWNER_ASK_LOG")"
+[ "$owner_ask_count" -eq 2 ] || fail "different live pid did not produce exactly one additional owner-ask line"
+grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: background session pid $test_sleep_pid has no role-inbox monitor; not relaunching over it$" "$T/roles-restart.log" >/dev/null \
+  || fail "different live pid did not write the local log line"
+kill "$test_sleep_pid" 2>/dev/null || true
+wait "$test_sleep_pid" 2>/dev/null || true
+test_sleep_pid=""
+
+# A matching row without a kind is not a live background role and names the missing kind.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"; : >"$T/roles-restart.log"
+: >"$PS_FILE"
+printf '[{"pid":%s,"name":"test-role"}]\n' "$$" >"$AGENTS_JSON"
+run_restart >"$T/no-kind.out" 2>"$T/no-kind.err" || fail "no-kind run failed: $(cat "$T/no-kind.err")"
+grep -Fqx "cwd=$ROLE_HOME" "$CLAUDE_LOG" || fail "no-kind session prevented the background role from launching"
+grep -F " test-role: no kind session pid $$ holds the name;" "$T/roles-restart.log" >/dev/null \
+  || fail "no-kind session warning did not name the missing kind"
 
 # An interactive session holding the role name is not a live background role.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"; : >"$T/roles-restart.log"
@@ -120,6 +183,7 @@ printf '[]\n' >"$AGENTS_JSON"
 run_restart >"$T/named.out" 2>"$T/named.err" || fail "named launch run failed: $(cat "$T/named.err")"
 grep -Fqx 'name=test-role' "$CLAUDE_NAME_LOG" || fail "relaunch did not pass --name test-role"
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
+set_watcher test-role
 run_restart >"$T/named2.out" 2>"$T/named2.err" || fail "second named run failed: $(cat "$T/named2.err")"
 [ ! -s "$CLAUDE_LOG" ] || fail "second pass relaunched a role the first pass started"
 
