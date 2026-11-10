@@ -341,10 +341,16 @@ expect_verdict "TKT tkt-plan QUESTIONS log=*" "open questions stop"
 grep -Fq 'Which fallback applies when the primary path is missing?' <<<"$OUT" || fail "QUESTIONS prints the first question"
 grep -Fq 'Should the planner resume automatically after a plan-check failure?' <<<"$OUT" || fail "QUESTIONS prints the second question"
 expect_plan_verdict questions "$(cat "$CDIR/base")" "open questions stop"
+[ -n "$(state_get plan_questions_verdict_at)" ] || fail "QUESTIONS records its verdict timestamp"
 [ -z "$(state_get verifier_round)" ] || fail "QUESTIONS does not spend a Verifier round"
 [ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" = 0 ] || fail "QUESTIONS starts no Verifier"
 
-jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' '{body:$body,issue_url:$url}' >"$T/comment.json"
+jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2000-01-01T00:00:00Z' '{body:$body,issue_url:$url,created_at:$created_at}' >"$T/comment.json"
+run_plan rule-questions --comment 654321
+[ "$RC" -eq 1 ] || fail "ruling comment before the QUESTIONS verdict is refused (rc=$RC)"
+expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=comment-time log=*" "reject pre-verdict ruling comment"
+[ -z "$(state_get plan_questions_comment)" ] || fail "pre-verdict comment is not recorded as a ruling"
+jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,issue_url:$url,created_at:$created_at}' >"$T/comment.json"
 run_plan rule-questions --comment 654321
 [ "$RC" -eq 0 ] || fail "record ruling for all questions (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan QUESTIONS-RECORDED comment=654321 log=*" "record ruling for all questions"
@@ -380,7 +386,24 @@ EOF
 run_plan verify
 [ "$RC" -eq 0 ] || fail "none questions section continues verify (rc=$RC)"
 expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "none questions section"
-[ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" = 1 ] || fail "none questions section starts Verifier"
+# Empty markers match lanecheck's unanswered-question rules.
+setup_case questions-empty-markers
+rebase_plan
+cat >>"$CDIR/plan.md" <<'EOF'
+
+## Open questions
+
+- nothing
+- NONE.
+- n/a
+- no
+- -
+EOF
+: >"$T/stub.log"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "empty question markers continue verify (rc=$RC)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "empty question markers"
+[ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" = 1 ] || fail "empty question markers start Verifier"
 : >"$T/stub.log"
 
 # --- a stale plan stops before plan-check ---

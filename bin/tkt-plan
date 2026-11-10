@@ -102,7 +102,10 @@ plan_open_questions() {
       sub(/^([-*+][[:space:]]+|[0-9]+[.)][[:space:]]+)/, "", answer)
       sub(/^[[:space:]]+/, "", answer)
       sub(/[[:space:]]+$/, "", answer)
-      if (answer != "" && tolower(answer) != "none") print line
+      sub(/[.]+$/, "", answer)
+      sub(/[[:space:]]+$/, "", answer)
+      answer=tolower(answer)
+      if (answer != "" && answer !~ /^(nothing|none|n\/a|no|-)$/) print line
     }
   ' "$1"
 }
@@ -274,6 +277,8 @@ do_verify() {
     if [ -z "$recorded_comment" ] || [ "$recorded_hash" != "$question_hash" ]; then
       clear_verdict
       plan_verdict_write "$tkt_state" "$state" questions "$base" "$plan" "$worktree"
+      question_verdict_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      t set plan_questions_verdict_at "$question_verdict_at"
       emit "QUESTIONS" 1 "record one ticket comment answering every question with: tkt-plan $state rule-questions --comment <id>, then rerun verify" "## Open questions" "$questions"
     fi
   fi
@@ -605,8 +610,15 @@ do_rule_questions() {
       and (.issue_url | type == "string")
       and (.issue_url | contains("/repos/" + $repo + "/"))
       and (.issue_url | endswith("/issues/" + $issue))
+      and (.created_at | type == "string")
   ' <<<"$comment_json" >/dev/null 2>&1; then
     emit "QUESTIONS-REFUSED reason=comment" 1 "comment $comment is empty or does not belong to $repo#$issue"
+  fi
+  question_verdict_at="$(t get plan_questions_verdict_at 2>/dev/null || true)"
+  if [ -z "$question_verdict_at" ] || ! jq -e --arg verdict_at "$question_verdict_at" '
+    .created_at > $verdict_at
+  ' <<<"$comment_json" >/dev/null 2>&1; then
+    emit "QUESTIONS-REFUSED reason=comment-time" 1 "comment $comment predates the QUESTIONS verdict"
   fi
   question_hash="$(printf '%s\n' "$questions" | git -C "$worktree" hash-object --stdin 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
   plan_verdict_write "$tkt_state" "$state" questions "$base" "$plan" "$worktree"
@@ -675,6 +687,7 @@ do_set() {
   # fresh budget from tkt-start --part <n>, not from a new path.
   if [ "$old_plan" != "$plan" ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
+    t set plan_questions_comment ""; t set plan_questions_hash ""; t set plan_questions_verdict_at ""
     t set verified_base ""; t set verified_plan_hash ""
     t set pack_plan_hash ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
