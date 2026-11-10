@@ -40,7 +40,13 @@ for arg in "$@"; do
     # One stderr line is harmless: lsof cannot open a dir under a top-level
     # entry another user owns (/tmp/systemd-private-*), and `find -user`
     # below never offers such an entry for deletion.
-    lsof_err=$(mktemp "${TMPDIR:-/tmp}/box-tmp-reap-lsof.XXXXXX")
+    # No temp file means no lsof stderr to read, so the open set is unknown:
+    # delete nothing. mktemp fails when TMPDIR is full, when a reap matters most.
+    if ! lsof_err=$(mktemp "${TMPDIR:-/tmp}/box-tmp-reap-lsof.XXXXXX" 2>/dev/null) || [ ! -f "$lsof_err" ]; then
+      printf 'box-tmp-reap: cannot create a temp file for lsof stderr; skipping deletion in %s\n' "$arg" >&2
+      printf 'box-tmp-reap: %s deleted=0 kept=0 secs=%s\n' "$arg" "$((SECONDS - started))"
+      continue
+    fi
     rc=0
     open_paths=$("$lsof_cmd" -Fn +D "$dir" 2>"$lsof_err") || rc=$?
     bad_err=0
@@ -55,7 +61,7 @@ for arg in "$@"; do
           fi ;;
         *) bad_err=1 ;;
       esac
-    done <"$lsof_err"
+    done <"$lsof_err" || bad_err=1  # an unreadable stderr file is a failure too
     if [ "$rc" -gt 1 ] || { [ "$rc" -ne 0 ] && [ "$bad_err" -eq 1 ]; }; then
       printf 'box-tmp-reap: lsof failed for %s; skipping deletion\n' "$arg" >&2
       can_delete=0
@@ -63,7 +69,10 @@ for arg in "$@"; do
     rm -f -- "$lsof_err"
     # One list of open top-level names, so each entry costs one lookup.
     open_tops=$(printf '%s\n' "$open_paths" | awk -v p="n$dir/" '
-      index($0, p) == 1 { s = substr($0, length(p) + 1); sub(/\/.*/, "", s); print s }' | sort -u)
+      index($0, p) == 1 {
+        s = substr($0, length(p) + 1)
+        sub(/ type=[A-Z]+.*$/, "", s)  # a socket prints "n<path> type=STREAM"
+        sub(/\/.*/, "", s); print s }' | sort -u)
   fi
 
   while IFS= read -r -d '' entry; do

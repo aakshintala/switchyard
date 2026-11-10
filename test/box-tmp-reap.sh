@@ -108,4 +108,37 @@ lsof_case owned-opendir-warning 1 "lsof: WARNING: can't opendir(@/open/sub): Per
 lsof_case other-stderr 1 "lsof: status error on /proc/1/fd: Permission denied" keep
 lsof_case exit-2 2 "" keep
 
+# A top-level socket prints "n<path> type=STREAM"; it is still open (#1554).
+sockdir=$T/socket
+mkdir -p "$sockdir"
+printf x >"$sockdir/tmux-1000"; printf old >"$sockdir/old"
+touch -t "$old_stamp" "$sockdir/tmux-1000" "$sockdir/old"
+cat >"$T/lsof-socket" <<'EOF'
+#!/usr/bin/env bash
+printf 'p9\nf4\nn%s/tmux-1000 type=STREAM\n' "$3"
+exit 0
+EOF
+chmod +x "$T/lsof-socket"
+out=$(BOX_TMP_REAP_LSOF="$T/lsof-socket" bash "$BIN/box-tmp-reap" "$sockdir" 2>&1) \
+  || fail "socket-exits-zero ($out)"
+[ -e "$sockdir/tmux-1000" ] || fail "top-level-socket-kept ($out)"
+[ ! -e "$sockdir/old" ] || fail "socket-dir-still-reaps-old ($out)"
+ok top-level-socket-kept
+
+# No writable TMPDIR means no lsof stderr to inspect: delete nothing.
+# root writes through mode 555, so the case only runs for an ordinary user.
+[ "$(id -u)" -ne 0 ] || { echo 'skip mktemp-failure-fails-closed (root)'; exit 0; }
+nowrite=$T/nowrite; ro=$T/ro-tmp
+mkdir -p "$nowrite" "$ro"
+printf old >"$nowrite/old"
+touch -t "$old_stamp" "$nowrite/old"
+chmod 555 "$ro"
+out=$(TMPDIR="$ro" BOX_TMP_REAP_LSOF="$T/lsof" bash "$BIN/box-tmp-reap" "$nowrite" 2>&1) \
+  || fail "mktemp-failure-exits-zero ($out)"
+chmod 755 "$ro"
+[ -e "$nowrite/old" ] || fail "mktemp-failure-deletes-nothing ($out)"
+printf '%s\n' "$out" | grep -F "skipping deletion in $nowrite" >/dev/null \
+  || fail "mktemp-failure-reported ($out)"
+ok mktemp-failure-fails-closed
+
 exit 0
