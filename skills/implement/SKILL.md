@@ -110,7 +110,7 @@ Follow `planning` steps 1–5. The Verifier (`planning` step 3) runs only when t
 
 Done when the lane brief is filled.
 
-When triage answers every open planning line, record it with `tkt-plan <state> triaged --comment <id>` using the numeric ticket comment id. `confirm --edits <file>`, not `verify`, consumes a grant-round.
+When triage answers every open planning line, record it with `tkt-plan <state> triaged --comment <id>` using the numeric ticket comment id. `triaged` always fetches the comment and refuses one from another ticket with `ruling-source`. It refuses a comment that does not postdate the stop verdict, or when no stop timestamp is recorded, with `ruling-stale`. `confirm --edits <file>`, not `verify`, consumes a grant-round.
 
 ### 4. Lane
 

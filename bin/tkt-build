@@ -416,6 +416,12 @@ $(cat "$tmpd/merge-abort-err" 2>/dev/null || true)"
         journal_build "tkt-build stale recovery head=$merged_head"
       fi
 
+      recovery_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmpd/git-err")" || emit "PRECONDITION git=failed" 2 "$(cat "$tmpd/git-err")"
+      if ! tkt set build_stale_recovery_base "$newbase" || ! tkt set build_stale_recovery_plan_hash "$recovery_plan_hash"; then
+        emit "PRECONDITION state=failed" 2 "tkt-build: could not record the stale-recovery verify exemption"
+      fi
+      journal_build "tkt-build stale recovery verify-exemption base=$newbase plan=$recovery_plan_hash"
+
       verify_rc=0
       verify_out="$("$bin_dir/tkt-plan" "$state" verify 2>"$tmpd/verify-err")" || verify_rc=$?
       verify_line="$(head -n 1 <<<"$verify_out")"
