@@ -991,7 +991,10 @@ for _d, _is_inbox in _srcs:
         def _asks(ln):
             body = ln.split(":", 1)[1].strip().rstrip(".").lower() if ":" in ln else ""
             return body not in ("", "nothing", "none", "n/a", "no", "-")
-        wants = (bool(re.search(r"BLOCKED|READY|AWAIT|await|\?", status))
+        # QUESTIONS is the planner's explicit stop before granting the fence;
+        # do not mistake it for a completed plan merely because its prose has
+        # no ordinary ask keyword.
+        wants = (bool(re.search(r"BLOCKED|READY|AWAIT|await|QUESTIONS|\?", status))
                  or any(_asks(ln) for ln in lines if "ASKING" in ln))
         # Both the basename and a path that resolves. The basename is what the
         # ruling trailers record, so the answered/unanswered match below must
