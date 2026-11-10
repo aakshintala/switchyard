@@ -148,6 +148,14 @@ DELEGATE_STUB
 cat >"$FW_SSH" <<'SSH_STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$T/ssh.log"
+case "${2:-}" in
+  'cat > '*)
+    dest=${2#cat > }
+    mkdir -p "$(dirname "$dest")"
+    cat >"$dest"
+    exit 0
+    ;;
+esac
 [ "${SSH_FAIL:-0}" != 1 ] || { echo 'ssh stub failure' >&2; exit 255; }
 [ -z "${SSH_STDERR:-}" ] || printf '%s\n' "$SSH_STDERR" >&2
 if [ "${SSH_EXEC:-0}" = 1 ]; then
@@ -544,6 +552,25 @@ DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"stopped"}]}'
 run_fg 88 --paths docs/tui.md --dry
 assert_rc 0 'stopped session holds nothing'
 assert_line 'WOULD-GRANT' 'stopped session grant'
+
+# A box has no Mac run directory of its own. Push the Mac roster through the
+# existing lane-state path before asking fence-grant to map its live session.
+reset_case
+MAC_RUN="$T/mac-run"; BOX_RUN="$T/box-run"
+mkdir -p "$MAC_RUN" "$BOX_RUN"
+printf '2026-11-09 launch\t77\tbox\tfiber-77-build\tabcdef123456\n' >"$MAC_RUN/roster"
+printf 'fixture notes\n' >"$MAC_RUN/fiber-77-notes.md"
+[ ! -e "$BOX_RUN/roster" ] || fail 'box starts without a local roster'
+BOX_SSH="$FW_SSH" FW_RUN="$MAC_RUN" FW_BOX_RUN="$BOX_RUN" \
+  FW_MAC_HOME="$T/mac-home" FW_BOX_HOME="$T/box-home" \
+  bash "$SCRIPT_DIR/../bin/box-push.sh" 77 >"$T/box-push.out" 2>"$T/box-push.err" \
+  || fail "box-push accepts the Mac roster fixture: $(cat "$T/box-push.err")"
+DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"running"}]}'
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-77\tgrant\t0\tt:stub\t\n')"
+export DSESS_JSON FILE_CLAIM_LIST
+FW_RUN="$BOX_RUN" run_fg 88 --paths docs/tui.md --dry
+assert_rc 0 'box fence-grant resolves the live session from the pushed roster'
+assert_line 'OVERLAP docs/tui.md lane #77' 'box fence-grant still catches the live overlap'
 
 reset_case
 run_fg 77 --paths docs/tui.md

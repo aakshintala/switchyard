@@ -32,6 +32,7 @@ case "${1:-}" in
     echo "stopped $2"
     ;;
   --bg)
+    [ -f "$FW_BOX_RUN/roster" ] || { echo 'missing box roster before lane start' >&2; exit 3; }
     name=""
     while [ $# -gt 0 ]; do
       if [ "$1" = -n ]; then name=$2; shift 2; else shift; fi
@@ -133,6 +134,11 @@ if [ "$ticket" = 2465 ] && [ "$host" = box ] && [ "$roster_name" = "$session" ] 
   ok roster-records-launch-name-and-session-id
 else
   fail "roster-records-launch-name-and-session-id ($ticket $host $roster_name $session_id)"
+fi
+if cmp -s "$run/roster" "$boxrun/roster"; then
+  ok roster-synced-to-box-run
+else
+  fail "roster-synced-to-box-run ($(cat "$boxrun/roster" 2>/dev/null))"
 fi
 
 printf '[{"id":"%s","name":"%s","state":"done","status":"idle"}]\n' "$NEW_SESSION_ID" "$session" >"$BOX_AGENTS"

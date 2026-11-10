@@ -36,6 +36,14 @@ box=${FW_BOX_HOME:-/home/${USER:-aakshintala}}
 if fw_box_is_local; then box=$HOME; fi
 boxrun=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}
+sync_roster() {
+  fw_box_is_local && return 0
+  [ -f "$run/roster" ] || { echo "boxlaunch: missing run roster $run/roster" >&2; return 1; }
+  if ! $boxssh -o BatchMode=yes "$host" "cat > $boxrun/roster" < "$run/roster"; then
+    echo "boxlaunch: cannot sync run roster to $host" >&2
+    return 1
+  fi
+}
 b=$run/fiber-$n-orchestrator-brief.md
 [ -f "$b" ] || { echo "no brief $b" >&2; exit 2; }
 # Refuse when the Box is at capacity. Claude and delegate lanes use LIVE lines
@@ -173,6 +181,10 @@ ESCALATION: before you stop to ask, look for a line that settles the question â€
 EOT
 [ -z "$phase_line" ] || printf '%s\n' "$phase_line" >> "$tmp"
 $boxssh -o BatchMode=yes "$host" "mkdir -p $boxrun $box/flywheel-inbox $box/lane-inbox/$n/read /srv/lanes/fiber-worktrees /srv/lanes/tmp && git -C $box/work/fiber fetch -q origin"
+# Box delegate-session probes need this map before the new process can ask for
+# a fence grant. Refresh it at launch; box-push.sh also refreshes it after
+# later run-state changes.
+sync_roster || exit 2
 # `set -f` is still in force from the fence guard above, so the two globs in
 # this list expand to nothing without `set +f` and `[ -f ]` skips them. That is
 # how the fence grants went unsent until 2026-11-06: `fiber-<n>-fence-grant*.md`
@@ -267,3 +279,4 @@ if [ -z "$jid" ]; then
 fi
 printf '%s\n' "$launchout"
 printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" box "$sess" "$jid" >> "$run/roster"
+sync_roster || exit 2
