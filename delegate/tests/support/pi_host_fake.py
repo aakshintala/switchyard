@@ -120,13 +120,16 @@ def hold_run(text):
 
 
 def deliver_queue():
+    queued = list(QUEUE)
+    send({"type": "agent_start"})
     send({"type": "turn_start"})
-    for text in QUEUE:
+    for text in queued:
         send(user_frame(text))
         with open(path("delivered.txt"), "a", encoding="utf-8") as output:
             output.write(text + "\n")
-    send(assistant_frame("saw: " + ", ".join(QUEUE)))
     QUEUE.clear()
+    send({"type": "queue_update", "steering": [], "followUp": []})
+    send(assistant_frame("saw: " + ", ".join(queued)))
     send({"type": "turn_end"})
     send({"type": "agent_end", "messages": [], "willRetry": False})
     send({"type": "agent_settled", "aborted": False})
@@ -144,6 +147,13 @@ def finish_hold(completed):
         send({"type": "tool_execution_end", "toolName": "bash", "toolCallId": "call_1"})
         send({"type": "message_start", "message": {"role": "toolResult"}})
         send({"type": "message_end", "message": {"role": "toolResult"}})
+        if "REPLAY_MIXED" in SCENARIOS:
+            send({"type": "turn_end"})
+            send({"type": "agent_end", "messages": [], "willRetry": False})
+            send({"type": "agent_settled", "aborted": False})
+            if QUEUE:
+                deliver_queue()
+            return
         if "REPLAY_UNCONSUMED" in SCENARIOS:
             # Model pi dropping an accepted queued steer: it first reports the
             # queue entry, then reports an empty queue without delivering it.
@@ -308,6 +318,12 @@ def handle_steer(command):
         send(user_frame(text))
         with open(path("delivered.txt"), "a", encoding="utf-8") as output:
             output.write(text + "\n")
+        return
+    if "REPLAY_MIXED" in SCENARIOS:
+        if text == "MIXED-S1":
+            QUEUE.append(text)
+        send({"type": "queue_update", "steering": list(QUEUE), "followUp": []})
+        respond(command.get("id"), "prompt", True, {"disposition": "queued"})
         return
     if "REPLAY_UNCONSUMED" in SCENARIOS:
         QUEUE.append(text)

@@ -811,6 +811,146 @@ fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
 }
 
 #[test]
+fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
+    let h = Harness::new();
+    let release_event_write = h.base.join("release-event-write");
+    let release_event_write_env = release_event_write.to_str().unwrap();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_REPLAY,REPLAY_MIXED",
+        None,
+        &[
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL",
+                release_event_write_env,
+            ),
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_TURN_ID",
+                "pi-turn-2",
+            ),
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_KIND",
+                "turn.started",
+            ),
+        ],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    for text in ["MIXED-S1", "MIXED-S2"] {
+        let steered = h.invoke(&["send", &id, text, "--json"]);
+        assert!(
+            steered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&steered.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+        assert_eq!(reply["disposition"], "steered", "{reply}");
+    }
+    let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    let s2_id = pending[1]["commandId"].as_str().unwrap().to_string();
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    let held_marker = std::path::PathBuf::from(format!("{}.held", release_event_write.display()));
+    h.wait_path(&held_marker, "pi continuation start event hold");
+    let ordinary_starts = h
+        .requests()
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .count();
+    assert_eq!(
+        ordinary_starts,
+        1,
+        "unexpected replay during continuation start: {:?}",
+        h.requests()
+    );
+
+    std::fs::write(&release_event_write, "").unwrap();
+    watch_ok(&h, &id);
+    let logs = h.logs(&id);
+    let replayed: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "steer.replayed")
+        .collect();
+    assert_eq!(replayed.len(), 1, "{logs:?}");
+    assert_eq!(
+        replayed[0]["commandIds"],
+        serde_json::json!([s2_id]),
+        "{replayed:?}"
+    );
+    let s1_delivery = logs
+        .iter()
+        .position(|line| line["kind"] == "user" && line["text"] == "MIXED-S1")
+        .unwrap();
+    let s2_delivery = logs
+        .iter()
+        .position(|line| line["kind"] == "user" && line["text"] == "MIXED-S2")
+        .unwrap();
+    assert!(s1_delivery < s2_delivery, "{logs:?}");
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "user" && line["text"] == "MIXED-S1")
+            .count(),
+        1,
+        "{logs:?}"
+    );
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "user" && line["text"] == "MIXED-S2")
+            .count(),
+        1,
+        "{logs:?}"
+    );
+    let continuation_done = logs
+        .iter()
+        .position(|line| line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-2")
+        .unwrap();
+    let replayed_at = logs
+        .iter()
+        .position(|line| line["kind"] == "steer.replayed")
+        .unwrap();
+    assert!(continuation_done < replayed_at, "{logs:?}");
+    let delivered = std::fs::read_to_string(h.fake_dir.join("delivered.txt")).unwrap();
+    assert_eq!(delivered, "MIXED-S1\n");
+    assert_eq!(h.state(&id)["turnCount"], 3);
+    let requests = h.requests();
+    let replay_turn_starts: Vec<&Value> = requests
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .collect();
+    assert_eq!(replay_turn_starts.len(), 2, "{requests:?}");
+    assert_eq!(replay_turn_starts[1]["message"], "MIXED-S2");
+    let ordinary_starts = requests
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .count();
+    assert_eq!(
+        ordinary_starts,
+        2,
+        "one initial start plus the S2 replay: {:?}",
+        h.requests()
+    );
+}
+
+#[test]
 fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
     let h = Harness::new();
     let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "HOLD_TOOL", None, &[]);
