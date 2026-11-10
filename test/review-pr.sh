@@ -220,6 +220,8 @@ delegate() (
       jobs_dir="${DELEGATE_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}"
       old_record="$jobs_dir/$old_id.json"
       [ -f "$old_record" ] || { echo "fake delegate: missing resume source $old_id" >&2; exit 1; }
+      if [ -e "$T/state/capture-resume-prompt" ]; then cat >"$T/state/resume-prompt.txt"; fi
+      printf '%s\n' "$old_id" >>"$T/state/resumes.log"
       jq --arg id "$new_id" '. + {supersededBy: $id}' "$old_record" >"$old_record.tmp"
       mv "$old_record.tmp" "$old_record"
       jq --arg id "$old_id" '. + {resumedFrom: $id}' "$T/canned/resumed.json" >"$jobs_dir/$new_id.json"
@@ -270,6 +272,7 @@ reset_state() {
   rm -f "$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
   rm -rf "$TMPDIR/review-pr/posted"
   rm -f "$T/state"/prompt-*.md "$TMPDIR"/delegate-jobs/*.json "$T/override"/*.json "$TMPDIR"/review-pr/* 2>/dev/null || true
+  rm -f "$T/state/resumes.log" "$T/state/resume-prompt.txt" "$T/state/capture-resume-prompt"
 }
 
 plant_comment() {
@@ -1326,6 +1329,38 @@ cp "$T/state/comments.log" "$T/resumed-verify-comments.log"
 out="$(bash "$REVIEW" collect "$resumed_id" 2>/dev/null)" || fail "unchanged resumed verify re-collect by the resumed id exits 0"
 [ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "2" ] || fail "unchanged resumed verify posts no third comment"
 cmp -s "$T/resumed-verify-comments.log" "$T/state/comments.log" || fail "unchanged resumed verify adds nothing to the PR comments"
+
+# --- case: an empty finished verify is resumed once before collecting its verdict
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 fixture finding\n- Evidence: refuted: this fixture exercises empty-result resume\n' >"$T/findings.txt"
+write_record verify DONE_WITH_CONCERNS "" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "empty-result verify starts"
+write_record verify DONE $'FIX-OK\nSTATUS: DONE' 0
+cp "$T/canned/verify.json" "$T/canned/resumed.json"
+touch "$T/state/capture-resume-prompt"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "collect resumes an empty verify and exits 0: [$out]"
+grep -Fxq 'FIX-OK' <<<"$out" || fail "collect prints the resumed verify verdict"
+[ "$(cat "$T/state/resumes.log")" = "job-verify" ] || fail "empty verify is resumed exactly once"
+grep -Fxq 'watch job-verify-resumed' "$T/state/watch.txt" || fail "collect waits for the resumed job"
+grep -qi 'verdict block' "$T/state/resume-prompt.txt" || fail "resume asks for the original verdict block"
+grep -q '^FIX-OK$' "$T/state/comment.md" || fail "collect posts the resumed verify verdict"
+
+# --- case: an empty resumed final message exits 1 with the manual repair steps
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 fixture finding\n- Evidence: refuted: this fixture exercises empty-result resume\n' >"$T/findings.txt"
+write_record verify DONE "" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "empty-result verify starts for failed-resume case"
+write_record verify DONE "" 0
+cp "$T/canned/verify.json" "$T/canned/resumed.json"
+out="$(bash "$REVIEW" collect job-verify 2>&1)" && fail "collect exits 1 when resumed final message is empty"
+grep -q 'job-verify' <<<"$out" || fail "empty-resume message names the original job id"
+grep -q 'delegate resume job-verify-resumed' <<<"$out" || fail "empty-resume message prints manual delegate resume"
+grep -q 'review-pr collect' <<<"$out" || fail "empty-resume message prints manual collect"
+[ "$(wc -l <"$T/state/resumes.log" | tr -d ' ')" = "1" ] || fail "empty resumed result is not automatically resumed again"
 
 # --- case: run starts, waits on the started ids, collects; exits 0 on all APPROVE
 reset_state
