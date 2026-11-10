@@ -1058,8 +1058,38 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     if should_note_idle {
         let after = shared.store.snapshot();
         if after.status == Status::Idle {
-            note_inbox(shared, &after.inbox, Note::Idle);
+            if after.pending_steers.is_empty() {
+                note_inbox(shared, &after.inbox, Note::Idle);
+            } else {
+                let replay_shared = shared.clone();
+                // The reader thread must stay free to process the turn/start reply.
+                let _ = thread::spawn(move || {
+                    guard_thread(replay_shared.clone(), || {
+                        replay_pending_steers(&replay_shared);
+                    });
+                });
+            }
         }
+    }
+}
+
+fn replay_pending_steers(shared: &Arc<Shared>) {
+    let _admission = lock(&shared.admission);
+    let mut replay_text = None;
+    if update_store(shared, |state| {
+        match state::begin_pending_steer_replay(state, now_ms()) {
+            Some(state::PendingSteerReplay::Started { text, log }) => {
+                replay_text = Some(text);
+                vec![log]
+            }
+            Some(state::PendingSteerReplay::Unconsumed { log }) => vec![log],
+            None => Vec::new(),
+        }
+    })
+    .is_ok()
+        && let Some(text) = replay_text
+    {
+        let _ = start_turn(shared, &text);
     }
 }
 
@@ -1251,7 +1281,7 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
     );
     let command_id = params["commandId"].as_str().unwrap_or_default().to_string();
     if update_store(shared, |state| {
-        state::note_steer(state, &command_id);
+        state::note_steer(state, &command_id, text);
         Vec::new()
     })
     .is_err()

@@ -1303,7 +1303,7 @@ mod tests {
                         command_seq += 1;
                         let cmd_id = format!("cmd-{command_seq}");
                         if is_steer {
-                            st::note_steer(state, &cmd_id);
+                            st::note_steer(state, &cmd_id, text_msg);
                             let params = serde_json::json!({
                                 "input": [{"type": "text", "text": text_msg}],
                                 "commandId": cmd_id,
@@ -1370,7 +1370,24 @@ mod tests {
                             st::abort_turn(state, now);
                         }
                     }
-                    Incoming::Event(event) => logs.extend(st::apply_event(state, event, now)),
+                    Incoming::Event(event) => {
+                        logs.extend(st::apply_event(state, event, now));
+                        if let crate::session::msp::HostEvent::TurnCompleted { turn_id, .. } = event
+                            && !state.stopping
+                            && !state.pending_steers.is_empty()
+                        {
+                            let pending = std::mem::take(&mut state.pending_steers);
+                            let command_ids: Vec<_> = pending
+                                .iter()
+                                .map(|steer| steer.command_id.as_str())
+                                .collect();
+                            logs.push(serde_json::json!({
+                                "kind":"steer.replayed",
+                                "turnId":turn_id,
+                                "commandIds":command_ids
+                            }));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1557,7 +1574,7 @@ mod tests {
                 .iter()
                 .flat_map(|frame| &frame.logs)
                 .any(|line| {
-                    line.get("kind").and_then(|value| value.as_str()) == Some("steer.unconsumed")
+                    line.get("kind").and_then(|value| value.as_str()) == Some("steer.replayed")
                         && line
                             .get("commandIds")
                             .and_then(|ids| ids.as_array())
@@ -1623,7 +1640,7 @@ mod tests {
             }
             assert_eq!(wire.queued_steers(), 0);
             now += 10;
-            st::note_steer(&mut state, "steer-a");
+            st::note_steer(&mut state, "steer-a", "more");
             let _ = wire
                 .encode(
                     2,
@@ -1662,12 +1679,12 @@ mod tests {
                     lines.extend(st::apply_event(&mut state, &event, now));
                 }
             }
-            assert!(
-                !lines
-                    .iter()
-                    .any(|line| line.get("kind").and_then(|v| v.as_str())
-                        == Some("steer.unconsumed"))
-            );
+            assert!(!lines.iter().any(|line| {
+                matches!(
+                    line.get("kind").and_then(|v| v.as_str()),
+                    Some("steer.unconsumed" | "steer.replayed")
+                )
+            }));
         }
         // (b) FIFO alignment: start + steer = 2, echoes pop front.
         {
@@ -1719,7 +1736,7 @@ mod tests {
             let mut wire = super::Wire::new();
             let mut state = st::new_state("s-c", "m", "/work", "/inbox", 1000);
             let mut now = 1000;
-            st::note_steer(&mut state, "steer-c");
+            st::note_steer(&mut state, "steer-c", "more");
             let _ = wire
                 .encode(
                     1,

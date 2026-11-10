@@ -646,7 +646,16 @@ fn supervisor_send_while_running_steers_and_tracks_the_command() {
         !session
             .events()
             .iter()
-            .any(|event| event["kind"] == "steer.unconsumed")
+            .any(|event| event["kind"] == "steer.unconsumed" || event["kind"] == "steer.replayed")
+    );
+    assert_eq!(
+        session
+            .requests()
+            .iter()
+            .filter(|request| request["method"] == "turn/start")
+            .count(),
+        1,
+        "a normally consumed steer must not start a replay turn"
     );
     assert_eq!(session.stop_and_join(), 0);
 }
@@ -693,10 +702,12 @@ fn supervisor_replays_unconsumed_steers_after_turn_completion() {
         .find(|event| event["kind"] == "steer.replayed")
         .expect("replay must be logged");
     assert_eq!(replay_log["commandIds"], json!(command_ids));
-    assert!(session
-        .events()
-        .iter()
-        .all(|event| event["kind"] != "steer.unconsumed"));
+    assert!(
+        session
+            .events()
+            .iter()
+            .all(|event| event["kind"] != "steer.unconsumed")
+    );
     assert_eq!(session.stop_and_join(), 0);
 }
 

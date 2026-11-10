@@ -55,6 +55,19 @@ pub struct DeadInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PendingSteer {
+    pub(crate) command_id: String,
+    pub(crate) text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingSteerReplay {
+    Started { text: String, log: Value },
+    Unconsumed { log: Value },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct State {
     pub schema: u32,
     pub id: String,
@@ -74,8 +87,8 @@ pub struct State {
     pub last_turn: Option<LastTurn>,
     pub usage: Usage,
     pub dead: Option<DeadInfo>,
-    #[serde(skip)]
-    pub(crate) pending_steers: Vec<String>,
+    #[serde(default)]
+    pub(crate) pending_steers: Vec<PendingSteer>,
 }
 
 pub fn new_state(id: &str, model: &str, cwd: &str, inbox: &str, now_ms: u64) -> State {
@@ -472,14 +485,19 @@ pub fn apply_ack(
     vec![json!({"kind":"ack.unexpected","turnId":turn_id,"disposition":disposition_name})]
 }
 
-pub fn note_steer(state: &mut State, command_id: &str) {
+pub fn note_steer(state: &mut State, command_id: &str, text: &str) {
     if state.status != Status::Dead {
-        state.pending_steers.push(command_id.to_string());
+        state.pending_steers.push(PendingSteer {
+            command_id: command_id.to_string(),
+            text: text.to_string(),
+        });
     }
 }
 
 pub fn drop_steer(state: &mut State, command_id: &str) {
-    state.pending_steers.retain(|pending| pending != command_id);
+    state
+        .pending_steers
+        .retain(|pending| pending.command_id != command_id);
 }
 
 pub fn apply_event(state: &mut State, event: &HostEvent, now_ms: u64) -> Vec<Value> {
@@ -510,8 +528,14 @@ pub fn apply_event(state: &mut State, event: &HostEvent, now_ms: u64) -> Vec<Val
         state.updated_at = now_ms;
         state.last_progress_at = now_ms;
         let mut lines = vec![line];
-        if !state.pending_steers.is_empty() {
-            lines.push(json!({"kind":"steer.unconsumed","turnId":turn_id,"commandIds":state.pending_steers}));
+        if !state.pending_steers.is_empty() && state.stopping {
+            let command_ids: Vec<_> = state
+                .pending_steers
+                .iter()
+                .map(|pending| pending.command_id.as_str())
+                .collect();
+            lines
+                .push(json!({"kind":"steer.unconsumed","turnId":turn_id,"commandIds":command_ids}));
             state.pending_steers.clear();
         }
         return lines;
@@ -549,6 +573,40 @@ pub fn apply_event(state: &mut State, event: &HostEvent, now_ms: u64) -> Vec<Val
     state.updated_at = now_ms;
     state.last_progress_at = now_ms;
     vec![line]
+}
+
+pub(crate) fn begin_pending_steer_replay(
+    state: &mut State,
+    now_ms: u64,
+) -> Option<PendingSteerReplay> {
+    if state.pending_steers.is_empty() {
+        return None;
+    }
+    let command_ids: Vec<_> = state
+        .pending_steers
+        .iter()
+        .map(|pending| pending.command_id.clone())
+        .collect();
+    let turn_id = state.last_turn.as_ref().map(|turn| turn.turn_id.clone());
+    if state.stopping || state.status == Status::Dead {
+        state.pending_steers.clear();
+        return Some(PendingSteerReplay::Unconsumed {
+            log: json!({"kind":"steer.unconsumed","turnId":turn_id,"commandIds":command_ids}),
+        });
+    }
+    if !begin_turn(state, now_ms) {
+        return None;
+    }
+    let pending = std::mem::take(&mut state.pending_steers);
+    let text = pending
+        .iter()
+        .map(|steer| steer.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(PendingSteerReplay::Started {
+        text,
+        log: json!({"kind":"steer.replayed","turnId":turn_id,"commandIds":command_ids}),
+    })
 }
 
 pub fn mark_dead(
@@ -852,7 +910,13 @@ mod tests {
                     );
                     pending.insert(request["id"].as_i64().unwrap(), ());
                 } else if request["method"] == "turn/steer" {
-                    note_steer(state, request["params"]["commandId"].as_str().unwrap());
+                    note_steer(
+                        state,
+                        request["params"]["commandId"].as_str().unwrap(),
+                        request["params"]["input"][0]["text"]
+                            .as_str()
+                            .unwrap_or_default(),
+                    );
                 }
                 continue;
             }
@@ -1074,17 +1138,15 @@ mod tests {
         let scratch = Scratch::new();
         create_session_dir(&scratch.paths, &scratch.id).unwrap();
         let mut state = scratch.state();
-        state.pending_steers.push("not-on-disk".into());
+        state.pending_steers.push(PendingSteer {
+            command_id: "not-on-disk".into(),
+            text: "not persisted before this change".into(),
+        });
         write_state(&scratch.paths, &state).unwrap();
+        assert_eq!(read_state(&scratch.paths, &scratch.id).unwrap(), state);
         assert_eq!(
-            read_state(&scratch.paths, &scratch.id).unwrap(),
-            state_with_no_pending(state.clone())
-        );
-        assert!(
-            serde_json::to_value(&state)
-                .unwrap()
-                .get("pendingSteers")
-                .is_none()
+            serde_json::to_value(&state).unwrap()["pendingSteers"][0],
+            json!({"commandId":"not-on-disk","text":"not persisted before this change"})
         );
         assert!(
             std::fs::read_dir(scratch.paths.dir(&scratch.id))
@@ -1094,6 +1156,20 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .ends_with(".tmp"))
+        );
+
+        let mut old_state = serde_json::to_value(scratch.state()).unwrap();
+        old_state.as_object_mut().unwrap().remove("pendingSteers");
+        std::fs::write(
+            scratch.paths.state_file(&scratch.id),
+            serde_json::to_vec(&old_state).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            read_state(&scratch.paths, &scratch.id)
+                .unwrap()
+                .pending_steers
+                .is_empty()
         );
 
         let missing = crate::util::random_uuid();
@@ -1117,11 +1193,6 @@ mod tests {
             read_state(&scratch.paths, &scratch.id),
             Err(StateError::Unreadable(_))
         ));
-    }
-
-    fn state_with_no_pending(mut state: State) -> State {
-        state.pending_steers.clear();
-        state
     }
 
     #[test]
@@ -1451,12 +1522,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_steers_are_consumed_or_reported_at_completion() {
+    fn pending_steers_are_consumed_or_replayed_at_completion() {
         let scratch = Scratch::new();
         let mut state = scratch.state();
         assert!(begin_turn(&mut state, 1));
         apply_ack(&mut state, "turn", Disposition::Started, 2);
-        note_steer(&mut state, "cmd");
+        note_steer(&mut state, "cmd", "steer");
         apply_event(
             &mut state,
             &HostEvent::UserMessage {
@@ -1481,7 +1552,7 @@ mod tests {
 
         assert!(begin_turn(&mut state, 5));
         apply_ack(&mut state, "turn-2", Disposition::Started, 6);
-        note_steer(&mut state, "unread");
+        note_steer(&mut state, "unread", "please replay");
         let logs = apply_event(
             &mut state,
             &HostEvent::TurnCompleted {
@@ -1491,11 +1562,19 @@ mod tests {
             },
             7,
         );
-        // Contract: delegate/README.md:54.
-        assert_eq!(logs.len(), 2);
-        assert_eq!(logs[1]["kind"], "steer.unconsumed");
-        assert_eq!(logs[1]["commandIds"], json!(["unread"]));
+        assert_eq!(logs.len(), 1);
+        assert_eq!(state.pending_steers.len(), 1);
+        let replay = begin_pending_steer_replay(&mut state, 8).unwrap();
+        match replay {
+            PendingSteerReplay::Started { text, log } => {
+                assert_eq!(text, "please replay");
+                assert_eq!(log["kind"], "steer.replayed");
+                assert_eq!(log["commandIds"], json!(["unread"]));
+            }
+            other => panic!("pending steer should start a replay, got {other:?}"),
+        }
         assert!(state.pending_steers.is_empty());
+        assert_eq!(state.status, Status::Running);
     }
 
     #[test]
@@ -1504,7 +1583,7 @@ mod tests {
         let mut state = scratch.state();
         assert!(begin_turn(&mut state, 1));
         apply_ack(&mut state, "turn", Disposition::Started, 2);
-        note_steer(&mut state, "early");
+        note_steer(&mut state, "early", "early");
         apply_event(
             &mut state,
             &HostEvent::UserMessage {
@@ -1529,7 +1608,7 @@ mod tests {
 
         assert!(begin_turn(&mut state, 5));
         apply_ack(&mut state, "next", Disposition::Started, 6);
-        note_steer(&mut state, "rejected");
+        note_steer(&mut state, "rejected", "rejected text");
         drop_steer(&mut state, "rejected");
         let logs = apply_event(
             &mut state,
@@ -1540,8 +1619,40 @@ mod tests {
             },
             7,
         );
-        // Contract: delegate/README.md:54.
         assert_eq!(logs.len(), 1);
+
+        assert!(begin_turn(&mut state, 8));
+        apply_ack(&mut state, "stopping-turn", Disposition::Started, 9);
+        note_steer(&mut state, "stopping-steer", "drop on stop");
+        state.stopping = true;
+        let logs = apply_event(
+            &mut state,
+            &HostEvent::TurnCompleted {
+                turn_id: "stopping-turn".into(),
+                terminal: "cancelled".into(),
+                error: None,
+            },
+            10,
+        );
+        assert_eq!(logs[1]["kind"], "steer.unconsumed");
+        assert_eq!(logs[1]["commandIds"], json!(["stopping-steer"]));
+        assert!(state.pending_steers.is_empty());
+        assert!(begin_pending_steer_replay(&mut state, 11).is_none());
+
+        let mut dead = scratch.state();
+        dead.pending_steers.push(PendingSteer {
+            command_id: "dead-steer".into(),
+            text: "do not replay after death".into(),
+        });
+        mark_dead(&mut dead, DeadReason::Stopped, None, "stopped", 12);
+        match begin_pending_steer_replay(&mut dead, 13).unwrap() {
+            PendingSteerReplay::Unconsumed { log } => {
+                assert_eq!(log["kind"], "steer.unconsumed");
+                assert_eq!(log["commandIds"], json!(["dead-steer"]));
+            }
+            other => panic!("dead session must not replay a steer, got {other:?}"),
+        }
+        assert!(dead.pending_steers.is_empty());
     }
 
     #[test]
