@@ -344,6 +344,11 @@ expect_plan_verdict questions "$(cat "$CDIR/base")" "open questions stop"
 [ -n "$(state_get plan_questions_verdict_at)" ] || fail "QUESTIONS records its verdict timestamp"
 [ -z "$(state_get verifier_round)" ] || fail "QUESTIONS does not spend a Verifier round"
 [ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" = 0 ] || fail "QUESTIONS starts no Verifier"
+first_verdict_at="$(state_get plan_questions_verdict_at)"
+sleep 1
+run_plan verify
+[ "$RC" -eq 1 ] || fail "rerun verify with open questions stops again (rc=$RC)"
+[ "$(state_get plan_questions_verdict_at)" = "$first_verdict_at" ] || fail "rerun verify keeps the first QUESTIONS verdict time"
 
 jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2000-01-01T00:00:00Z' '{body:$body,issue_url:$url,created_at:$created_at}' >"$T/comment.json"
 run_plan rule-questions --comment 654321

@@ -277,8 +277,13 @@ do_verify() {
     if [ -z "$recorded_comment" ] || [ "$recorded_hash" != "$question_hash" ]; then
       clear_verdict
       plan_verdict_write "$tkt_state" "$state" questions "$base" "$plan" "$worktree"
-      question_verdict_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-      t set plan_questions_verdict_at "$question_verdict_at"
+      # Keep the first verdict time for an unchanged question list, so a rerun
+      # verify does not push it past an answer already posted.
+      if [ "$(t get plan_questions_verdict_hash 2>/dev/null || true)" != "$question_hash" ] \
+        || [ -z "$(t get plan_questions_verdict_at 2>/dev/null || true)" ]; then
+        t set plan_questions_verdict_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        t set plan_questions_verdict_hash "$question_hash"
+      fi
       emit "QUESTIONS" 1 "record one ticket comment answering every question with: tkt-plan $state rule-questions --comment <id>, then rerun verify" "## Open questions" "$questions"
     fi
   fi
@@ -687,7 +692,7 @@ do_set() {
   # fresh budget from tkt-start --part <n>, not from a new path.
   if [ "$old_plan" != "$plan" ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
-    t set plan_questions_comment ""; t set plan_questions_hash ""; t set plan_questions_verdict_at ""
+    t set plan_questions_comment ""; t set plan_questions_hash ""; t set plan_questions_verdict_at ""; t set plan_questions_verdict_hash ""
     t set verified_base ""; t set verified_plan_hash ""
     t set pack_plan_hash ""; t set last_report ""
     for s in verifier-r1 verifier-r2 confirm lane fix1 fix2 fix3; do t set "job.$s" ""; done
