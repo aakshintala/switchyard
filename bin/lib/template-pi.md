@@ -117,7 +117,7 @@ CI and mutants:
 PR and merge:
 - Body, beyond docs/workflow.md "Pull requests": `Doc friction: …` and `Implemented by: …` are unbulleted lines at column 0 (ship-pr --body-has matches only there); last "Co-authored with Claude Code.". Partial PRs say "Part of #__N__"; the PR that finishes the ticket says "Resolves #__N__".
 - ship-pr merges as soon as its gate passes: check every ruled precondition (a CI condition, a waited-on merge) before you run it.
-- Once ship-pr's ruled preconditions (such as the CI condition and any waited-on merge) hold and shipping is authorized, the lane runs `tkt-ship <state>` itself as its own explicit step.
+- Once ship-pr's ruled preconditions (such as the CI condition and any waited-on merge) hold and shipping is authorized, the lane runs `tkt-ship <state>` itself as its own explicit step. On `MERGED`, copy the printed `RETIRE` line into the lane's final report; the lane does not retire itself, and flywheel's or switchyard's next `lanecheck` pass performs the retirement.
 - Owner rule: whenever you stop without a merge (blocked, holding on a ruling, parked, or after a failed ship-pr), run `rm -rf /Users/aakshintala/work/fiber-worktrees/__BR__/target` (run_in_background) before you report. Keep target/ while you work and into ship-pr; ship-pr removes the worktree on merge.
 - Read ship-pr's whole log, not its tail: it reports each rebase and re-gate there.
 - Issue comments: `gh issue view <n> -R aakshintala/fiber --json body,comments`.
