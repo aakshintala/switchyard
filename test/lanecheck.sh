@@ -1061,6 +1061,25 @@ else
   fail "fence-kept-releases-nothing (log=$(cat "$T/fclog")) ($out)"
 fi
 
+# An old whole-ticket retirement cannot retire a session launched afterward.
+# Finishing the older plan session must leave the newer build's fence and claim.
+r=$(newrun C10)
+printf '2019-12-31T00:00:00Z\t1543\tmuse\tfiber-1543-plan\tplan1543\n2020-01-02T00:00:00Z\t1543\tmuse\tfiber-1543-build\tbuild1543\n' > "$r/roster"
+printf '2020-01-01T00:00:00Z\t1543\n' > "$r/roster-done"
+grant "$r" 1543
+: > "$T/fclog"; : > "$T/fcheld"; held fiber-1543 crates/loop/src/1543.rs
+out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
+  bash "$BIN/lanecheck" "done" 1543:fiber-1543-plan 2>&1)
+if [ -e "$r/fiber-1543-fence-grant-20261104T0000Z.md" ] \
+   && [ ! -e "$r/done/fiber-1543-fence-grant-20261104T0000Z.md" ] \
+   && printf '%s' "$out" | grep -q 'fence kept for #1543: 1 session' \
+   && [ "$(grep -c '' "$T/fclog")" = 0 ] \
+   && grep -q '^fiber-1543[[:space:]]' "$T/fcheld"; then
+  ok old-ticket-retirement-does-not-release-new-session-claims
+else
+  fail "old-ticket-retirement-does-not-release-new-session-claims (log=$(cat "$T/fclog")) ($out)"
+fi
+
 # A failed release names the hand command and does not stop the retirement. The
 # fence record still moves: a retirement that half-ran and said nothing is how
 # the 17 claims went unnoticed in the first place.
