@@ -563,9 +563,9 @@ rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
 om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
 [ -n "$rm" ] || emit "PRECONDITION missing=model.review" 2 "tkt-state: missing key: model.review" "$(repair_hint model.review)"
 [ -n "$om" ] || emit "PRECONDITION missing=model.overbuild" 2 "tkt-state: missing key: model.overbuild" "$(repair_hint model.overbuild)"
-review_quota_repair="Repair command: tkt-build $state --from review --review-model $rm --overbuild-model $om"
-check_model_quota "$rm" "$review_quota_repair" review
-check_model_quota "$om" "$review_quota_repair" review
+# The refused slot's hint is `<id>`; only the other pick is prefilled.
+check_model_quota "$rm" "Repair command: tkt-build $state --from review --review-model <id> --overbuild-model $om" review
+check_model_quota "$om" "Repair command: tkt-build $state --from review --review-model $rm --overbuild-model <id>" review
 map_note=""; map_id=""; map_out="$run/$slug-$issue-map-r0.md"
 if [ "$mutant_count" -gt 0 ]; then
   if sm="$(tkt get job.map 2>/dev/null)" && [ -n "$sm" ]; then map_id="$sm"

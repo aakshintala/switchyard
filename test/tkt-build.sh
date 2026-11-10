@@ -772,7 +772,7 @@ run_build --lane-model muse/test-model --review-model codex/gpt-6-luna --overbui
 [ "$RC" -eq 2 ] || fail "quota-review-depleted exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build PRECONDITION quota=refused log=*" "quota-review-depleted"
 grep -q 'model=codex/gpt-6-luna provider=codex status=depleted' <<<"$OUT" || fail "quota-review-depleted: refusal names review model and provider"
-grep -qF "Repair command: tkt-build $S --from review --review-model codex/gpt-6-luna --overbuild-model composer-2.5" <<<"$OUT" || fail "quota-review-depleted: repair hint keeps both model picks explicit"
+grep -qF "Repair command: tkt-build $S --from review --review-model <id> --overbuild-model composer-2.5" <<<"$OUT" || fail "quota-review-depleted: repair hint blanks the review slot and prefills the overbuild pick"
 ! grep -q '^review-start|' "$T/calls.log" || fail "quota-review-depleted: no review session starts"
 
 setup_case quota-overbuild-depleted
@@ -782,6 +782,7 @@ run_build --lane-model codex/test-model --review-model codex/gpt-6-luna --overbu
 [ "$RC" -eq 2 ] || fail "quota-overbuild-depleted exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build PRECONDITION quota=refused log=*" "quota-overbuild-depleted"
 grep -q 'model=composer-2.5 provider=cursor status=depleted' <<<"$OUT" || fail "quota-overbuild-depleted: refusal names overbuild model and provider"
+grep -qF "Repair command: tkt-build $S --from review --review-model codex/gpt-6-luna --overbuild-model <id>" <<<"$OUT" || fail "quota-overbuild-depleted: repair hint prefills the review pick and blanks the overbuild slot"
 ! grep -q '^review-start|' "$T/calls.log" || fail "quota-overbuild-depleted: no review session starts"
 
 setup_case quota-review-healthy
