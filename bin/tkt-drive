@@ -246,6 +246,7 @@ while :; do
     if surveyor_sequence; then
       internal_stop 'tkt-drive: state surveyor_sequence marker prevents tkt-ship' 1
     fi
+    internal_stop 'tkt-drive: tkt-ship is a separate role step; invoke it explicitly when authorized'
   fi
 
   t journal "tkt-drive step=$tool${args[*]:+ ${args[*]}} trigger=$trigger"
@@ -258,7 +259,7 @@ while :; do
   }
 
   case "$verdict" in
-    SET|PLAN-OK|POSTED|MERGED) ;;
+    SET|PLAN-OK|POSTED) ;;
     *) stop_with_tool "$tool" "$verdict" "$rc" "$output" "$error" ;;
   esac
 
@@ -266,27 +267,6 @@ while :; do
     [ "$tool" = tkt-plan ] || stop_with_tool "$tool" "$verdict" "$rc" "$output" "$error"
     trigger="$tool $verdict"
     grant_plan "$issue" "$plan" "$repo" "$run_dir" "$(get part)"
-  elif [ "$verdict" = MERGED ]; then
-    trigger="$tool $verdict"
-    t journal "tkt-drive step=lanecheck-done trigger=$trigger"
-    lane_out="$tmp/lanecheck.out"; lane_err="$tmp/lanecheck.err"; lane_rc=0
-    FW_RUN="$run_dir" "$bin_dir/lanecheck" "done" "$issue" >"$lane_out" 2>"$lane_err" || lane_rc=$?
-    cat "$output"
-    [ ! -s "$lane_out" ] || cat "$lane_out"
-    [ ! -s "$error" ] || cat "$error" >&2
-    [ ! -s "$lane_err" ] || cat "$lane_err" >&2
-    if [ "$lane_rc" -ne 0 ]; then
-      t journal "tkt-drive STOP lanecheck rc=$lane_rc trigger=$trigger" 2>/dev/null || true
-      printf 'TKT tkt-drive STOP lanecheck=failed\n'
-      exit "$lane_rc"
-    fi
-    while IFS= read -r dependent; do
-      [ -n "$dependent" ] || continue
-      printf 'DEPENDENT %s\n' "$dependent"
-    done < <(t list dependents 2>/dev/null || true)
-    t journal 'tkt-drive MERGED dependents-listed'
-    printf 'TKT tkt-drive MERGED tool=%s\n' "$tool"
-    exit 0
   else
     trigger="$tool $verdict"
   fi

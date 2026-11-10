@@ -32,6 +32,13 @@ script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 tkt_state="$script_dir/tkt-state"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tkt() { "$tkt_state" "$state" "$@"; }
+for hold_key in owner_held surveyor_sequence; do
+  if hold_value="$(tkt get "$hold_key" 2>/dev/null)" && [ -n "$hold_value" ]; then
+    printf 'TKT tkt-ship PRECONDITION blocked=%s\n' "$hold_key"
+    printf 'tkt-ship: state %s marker prevents shipping\n' "$hold_key" >&2
+    exit 2
+  fi
+done
 verdict_lib="$script_dir/lib/plan-verdict.sh"
 if [ ! -r "$verdict_lib" ]; then echo "tkt-ship: cannot read shared lib: $verdict_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -74,16 +81,32 @@ trap cleanup_lock EXIT
 
 # Verdict on line 1 plus at most 40 digest lines, to stdout and the run log.
 emit() {
-  local verdict="$1" code="$2" out
+  local verdict="$1" code="$2" out dependent part
   shift 2
   out="TKT tkt-ship $verdict log=$runlog"
+  if [[ $verdict == MERGED* ]]; then
+    part="$(tkt get part 2>/dev/null || true)"
+    out+=$'\nRETIRE issue='"$issue"
+    case "$part" in
+      ''|*[!0-9]*) ;;
+      *) out+=" part=$part" ;;
+    esac
+  fi
   if [ $# -gt 0 ]; then
-    out="$out
-$(printf '%s\n' "$@" | head -n 40)"
+    out+=$'\n'"$(printf '%s\n' "$@" | head -n 40)"
   fi
   printf '%s\n' "$out" | tee -a "$runlog"
   release_lock
   tkt journal "tkt-ship $verdict"
+  case "$verdict" in
+    MERGED*)
+      while IFS= read -r dependent; do
+        [ -n "$dependent" ] || continue
+        printf 'DEPENDENT %s\n' "$dependent"
+      done < <(tkt list dependents 2>/dev/null || true)
+      tkt journal 'tkt-ship MERGED dependents-listed'
+      ;;
+  esac
   exit "$code"
 }
 

@@ -412,6 +412,7 @@ done
 self_dir="$(cd "$(dirname "$self")" && pwd)"
 # shellcheck disable=SC1091
 . "$self_dir/lib/fence-grant-paths.sh"
+# shellcheck disable=SC1091
 . "$self_dir/lib/pr-diff.sh"
 if [ -n "$preplan" ]; then
   prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,changedFiles 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
@@ -469,6 +470,7 @@ esac
 run=$(_fw_run)
 # shellcheck disable=SC1091
 . "$self_dir/lib/lane-ticket.sh"
+# shellcheck disable=SC1091
 . "$self_dir/lib/ticket-state.sh"
 file_claim="${FW_FILE_CLAIM:-$self_dir/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }

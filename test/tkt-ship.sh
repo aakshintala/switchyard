@@ -22,6 +22,7 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin"
 export PATH="$T/bin:$PATH"
+export TEST_LANECHECK_CALLS="$T/lanecheck-calls.log"
 
 [ -x "$REAL_BIN/plan-gate" ] || fail "real plan-gate missing"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
@@ -71,6 +72,18 @@ exit 0
 EOF
 chmod +x "$T/bin/gh"
 
+cat >"$T/bin/lanecheck" <<EOF
+#!/usr/bin/env bash
+printf 'lanecheck|%s|FW_RUN=%s\n' "\$*" "\${FW_RUN:-}" >>"$TEST_LANECHECK_CALLS"
+if [ -f "$T/lanecheck-forbidden" ]; then
+  printf 'called\n' >"$T/lanecheck-called"
+  echo 'lanecheck must not be called by tkt-ship' >&2
+  exit 99
+fi
+exit 0
+EOF
+chmod +x "$T/bin/lanecheck"
+
 # Reset per-case stub controls.
 reset_stub() {
   printf '0' >"$T/count"
@@ -80,6 +93,9 @@ reset_stub() {
   printf 'OPEN' >"$T/ghstate"
   : >"$T/prhead"
   : >"$T/prbody"
+  rm -f "$T/lanecheck-forbidden" "$T/lanecheck-called"
+  printf '0' >"$T/lanecheck-rc"
+  : >"$TEST_LANECHECK_CALLS"
 }
 
 # New case dir with run dir, git worktree and base state (head set, PR head
@@ -175,6 +191,48 @@ expect_journal merged MERGED
 expect_logfile merged
 [ ! -e "$S.lock" ] || fail "merged: lock not released"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 41 ] || fail "merged: over 40 digest lines"
+
+# MERGED reports a scoped retirement for the caller and prints dependents without invoking lanecheck.
+reset_stub; setup_case merged-lane
+printf '0' >"$T/exitcodes"; printf 'cafef00d1234' >"$T/sha"
+printf 'dependents=ticket-1473\ndependents=run/fiber-1473-lane\n' >>"$S"
+: >"$T/lanecheck-forbidden"
+run_ship
+[ "$RC" -eq 0 ] || fail "merged-lane: exit $RC"
+expect_line1 "MERGED sha=cafef00d1234 " merged-lane
+[ "$(head -n 1 <<<"$OUT" | cut -d' ' -f1-3)" = 'TKT tkt-ship MERGED' ] || fail "merged-lane: tkt-ship verdict is not first"
+[ "$(sed -n '2p' <<<"$OUT")" = 'RETIRE issue=515' ] || fail "merged-lane: RETIRE is not immediately after verdict: [$OUT]"
+grep -Fxq 'RETIRE issue=515' <<<"$OUT" || fail "merged-lane: missing lane-scoped RETIRE line: [$OUT]"
+! grep -q '^RETIRE .*session=' <<<"$OUT" || fail "merged-lane: emitted session absent from state: [$OUT]"
+[ ! -e "$T/lanecheck-called" ] || fail "merged-lane: lanecheck was called"
+grep -Fxq 'DEPENDENT ticket-1473' <<<"$OUT" || fail "merged-lane: dependent ticket was not printed"
+grep -Fxq 'DEPENDENT run/fiber-1473-lane' <<<"$OUT" || fail "merged-lane: dependent roster name was not printed"
+
+# A part state scopes the RETIRE instruction to that part.
+reset_stub; setup_case merged-part2
+printf '0' >"$T/exitcodes"; printf 'cafef00d1234' >"$T/sha"
+printf 'part=2\n' >>"$S"
+: >"$T/lanecheck-forbidden"
+run_ship
+[ "$RC" -eq 0 ] || fail "merged-part2: exit $RC"
+expect_line1 "MERGED sha=cafef00d1234 " merged-part2
+[ "$(sed -n '2p' <<<"$OUT")" = 'RETIRE issue=515 part=2' ] || fail "merged-part2: RETIRE is not immediately after verdict: [$OUT]"
+grep -Fxq 'RETIRE issue=515 part=2' <<<"$OUT" || fail "merged-part2: missing part-scoped RETIRE line: [$OUT]"
+[ ! -e "$T/lanecheck-called" ] || fail "merged-part2: lanecheck was called"
+
+# Held state markers refuse shipping before ship-pr or any state-file write.
+for hold_key in owner_held surveyor_sequence; do
+  reset_stub; setup_case "held-$hold_key"
+  printf '0' >"$T/exitcodes"
+  bash "$REAL_BIN/tkt-state" "$S" set "$hold_key" held || fail "$hold_key: could not set hold marker"
+  cp "$S" "$CDIR/state-before"
+  run_ship
+  [ "$RC" -ne 0 ] || fail "$hold_key: tkt-ship did not refuse (rc=$RC)"
+  expect_line1 "PRECONDITION" "$hold_key"
+  grep -Fq "$hold_key" <<<"$OUT" || fail "$hold_key: refusal does not name the key: [$OUT]"
+  [ "$(grep -c '^ship-pr|' "$T/calls.log" || true)" -eq 0 ] || fail "$hold_key: ship-pr was called"
+  cmp -s "$CDIR/state-before" "$S" || fail "$hold_key: state file changed on refusal"
+done
 
 # --- a current LINES plan verdict refuses ship with both sanctioned exits ---
 reset_stub; setup_case verdict-lines

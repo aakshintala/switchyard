@@ -886,7 +886,7 @@ pending = {}
 try:
     for line in open(os.path.join(tmp, "pending.txt")):
         line = line.strip()
-        for ticket in re.findall(r"\bfiber-(\d+)\.state\b", line):
+        for ticket in re.findall(r"\bfiber-(\d+)(?:-p\d+)?\.state\b", line):
             pending.setdefault(ticket, line)
 except OSError:
     pass
