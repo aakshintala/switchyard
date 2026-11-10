@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test/run: run every test file in this directory.
-# Usage: test/run [--self-test-parallel-failure]; internal: test/run --run-parallel <paths...>
+# Usage: test/run [--self-test-parallel-failure|--self-test-serial-failure]; internal: test/run --run-parallel <paths...>
 set -uo pipefail
 
 # Keep the local gate on the same Bash major version as CI. Prefer the
@@ -82,6 +82,21 @@ run_parallel() {
   done
 }
 
+# --- serial helper: run every suite with the same exit-code reporting, including
+# the single cargo-slot suite. Any failure sets failed=1.
+run_serial() {
+  for t in "$@"; do
+    _s=$SECONDS
+    bash "$t"; _rc=$?
+    if [ "$_rc" = "0" ]; then
+      echo "PASS: $(basename "$t") ($((SECONDS - _s))s)"
+    else
+      echo "FAIL: $(basename "$t") (exit $_rc, $((SECONDS - _s))s)" >&2
+      failed=1
+    fi
+  done
+}
+
 # --- controlled internal mode: run the given paths through run_parallel
 # with the same final failure exit logic. The temp output dir is cleaned
 # by its own scoped trap. Used by deterministic_parallel_failure_case so
@@ -119,6 +134,30 @@ deterministic_parallel_failure_case() (
   return 0
 )
 
+deterministic_serial_failure_case() (
+  ST="$(mktemp -d "${TMPDIR:-/tmp}/test-run-serial-deterministic.XXXXXX")"
+  trap 'rm -rf "$ST"' EXIT
+  printf '#!/usr/bin/env bash\necho "deterministic serial failure output"\nexit 3\n' >"$ST/deterministic-serial-fail.sh"
+  chmod +x "$ST/deterministic-serial-fail.sh"
+  out="$ST/combined.log"
+  failed=0
+  run_serial "$ST/deterministic-serial-fail.sh" >"$out" 2>&1
+  [ "$failed" -eq 1 ] || return 1
+  grep -q 'FAIL: deterministic-serial-fail.sh (exit 3,' "$out" || return 1
+  cat "$out"
+  return 0
+)
+
+if [ "${1:-}" = "--self-test-serial-failure" ]; then
+  if deterministic_serial_failure_case; then
+    echo "PASS: deterministic-serial-failure (${SECONDS}s)"
+    exit 0
+  else
+    echo "FAIL: deterministic-serial-failure (${SECONDS}s)" >&2
+    exit 1
+  fi
+fi
+
 if [ "${1:-}" = "--self-test-parallel-failure" ]; then
   if deterministic_parallel_failure_case; then
     echo "PASS: deterministic-parallel-failure (${SECONDS}s)"
@@ -130,26 +169,8 @@ if [ "${1:-}" = "--self-test-parallel-failure" ]; then
 fi
 
 failed=0
-# Moved flywheel slice tests. Keep these in the gate even though they are not
-# part of the long parallel allowlist below.
-for t in "$D"/agents-ff.sh "$D"/binbox-move.sh "$D"/boxlaunch-reuse.sh "$D"/boxstale.sh "$D"/fw-lib-move.sh "$D"/fw-selftest-stale.sh "$D"/lanecheck-pi.sh "$D"/claude-agents-timeout.sh "$D"/lanecheck.sh "$D"/lanecheck-wake.sh "$D"/tkt-drive.sh; do
-  _s=$SECONDS
-  if bash "$t"; then
-    echo "PASS: $(basename "$t") ($((SECONDS - _s))s)"
-  else
-    echo "FAIL: $(basename "$t") (exit $?, $((SECONDS - _s))s)" >&2
-    failed=1
-  fi
-done
-for t in "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/inbox.sh "$D"/inbox-watchers.sh "$D"/role-inbox.sh "$D"/roles-restart.sh "$D"/wired-check.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh "$D"/target-reap.sh "$D"/canary-daily.sh "$D"/bash5-runner.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh; do
-  _s=$SECONDS
-  if bash "$t"; then
-    echo "PASS: $(basename "$t") ($((SECONDS - _s))s)"
-  else
-    echo "FAIL: $(basename "$t") (exit $?, $((SECONDS - _s))s)" >&2
-    failed=1
-  fi
-done
+run_serial "$D"/agents-ff.sh "$D"/binbox-move.sh "$D"/boxlaunch-reuse.sh "$D"/boxstale.sh "$D"/fw-lib-move.sh "$D"/fw-selftest-stale.sh "$D"/lanecheck-pi.sh "$D"/claude-agents-timeout.sh "$D"/lanecheck.sh "$D"/lanecheck-wake.sh "$D"/tkt-drive.sh
+run_serial "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/inbox.sh "$D"/inbox-watchers.sh "$D"/role-inbox.sh "$D"/roles-restart.sh "$D"/wired-check.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh "$D"/target-reap.sh "$D"/canary-daily.sh "$D"/bash5-runner.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh
 # Allowlist (exactly these 18 isolated suites run in parallel, at most 3),
 # longest first by the 2026-11-07 profile: ship-pr.sh, tkt-build.sh,
 # tkt-start.sh, tkt-plan.sh, tkt-fix.sh, file-claim.sh, review-pr.sh,
@@ -163,18 +184,19 @@ run_parallel "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/tkt-plan.s
   "$D"/tkt-job.sh "$D"/delegate-canary.sh "$D"/tkt-gate.sh "$D"/gh-ci.sh \
   "$D"/tkt-ship.sh "$D"/lanestat.sh "$D"/plan-sweep.sh "$D"/ci-friction.sh \
   "$D"/git-hook-guard.sh "$D"/ci-health.sh
-_s=$SECONDS
-if bash "$D"/cargo-slot.sh; then
-  echo "PASS: cargo-slot.sh ($((SECONDS - _s))s)"
-else
-  echo "FAIL: cargo-slot.sh (exit $?, $((SECONDS - _s))s)" >&2
-  failed=1
-fi
+run_serial "$D"/cargo-slot.sh
 _s=$SECONDS
 if deterministic_parallel_failure_case; then
   echo "PASS: deterministic-parallel-failure ($((SECONDS - _s))s)"
 else
   echo "FAIL: deterministic-parallel-failure (expected parallel failure not proven, $((SECONDS - _s))s)" >&2
+  failed=1
+fi
+_s=$SECONDS
+if deterministic_serial_failure_case; then
+  echo "PASS: deterministic-serial-failure ($((SECONDS - _s))s)"
+else
+  echo "FAIL: deterministic-serial-failure (expected serial failure not proven, $((SECONDS - _s))s)" >&2
   failed=1
 fi
 echo "test/run wall time: ${SECONDS}s"
