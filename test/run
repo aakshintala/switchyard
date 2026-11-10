@@ -2,8 +2,6 @@
 # test/run: run every test file in this directory.
 # Usage: test/run [--self-test-parallel-failure|--self-test-serial-failure]; internal: test/run --run-parallel <paths...>
 set -uo pipefail
-SWITCHYARD_TEST=1
-export SWITCHYARD_TEST
 
 # Keep the local gate on the same Bash major version as CI. Prefer the
 # Homebrew installation on macOS, then search PATH for any Bash 5 executable.
@@ -15,7 +13,7 @@ _test_run_bash5_is_valid() {
 
 if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
   _test_run_bash5=""
-  if [ "${SWITCHYARD_TEST_RUN_BASH5_REEXEC:-0}" != 1 ]; then
+  if [ "${TEST_RUN_BASH5_REEXEC:-0}" != 1 ]; then
     _test_run_homebrew_bash="${TEST_RUN_HOMEBREW_BASH-/opt/homebrew/bin/bash}"
     if [ -n "$_test_run_homebrew_bash" ] && _test_run_bash5_is_valid "$_test_run_homebrew_bash"; then
       _test_run_bash5="$_test_run_homebrew_bash"
@@ -41,8 +39,8 @@ if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
       [ -n "$_test_run_bash5_dir" ] || _test_run_bash5_dir=/
       PATH="$_test_run_bash5_dir${PATH:+:$PATH}"
       export PATH
-      SWITCHYARD_TEST_RUN_BASH5_REEXEC=1
-      export SWITCHYARD_TEST_RUN_BASH5_REEXEC
+      TEST_RUN_BASH5_REEXEC=1
+      export TEST_RUN_BASH5_REEXEC
       exec "$_test_run_bash5" "$0" "$@"
     fi
   fi
@@ -50,7 +48,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
 fi
 # The marker guards only this process's re-exec; a nested test/run (as in
 # bash5-runner.sh) must do its own discovery.
-unset SWITCHYARD_TEST_RUN_BASH5_REEXEC
+unset TEST_RUN_BASH5_REEXEC
 
 # CLAUDECODE must not change gh-ci wait timeouts under test: suites that need
 # it set it per case, so start unset however the gate is invoked.

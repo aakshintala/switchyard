@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Tests for bin/fence-grant. Exits non-zero on the first failed case.
 set -uo pipefail
-SWITCHYARD_TEST=1
-export SWITCHYARD_TEST
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FG="${FG:-$SCRIPT_DIR/../bin/fence-grant}"
@@ -23,6 +21,8 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/run" "$T/stubs" "$T/blobs" "$T/pr"
 export HOME="$T/home" TMPDIR="$T/tmp" FW_RUN="$T/run" FW_GH="$T/stubs/gh" FW_CLAUDE="$T/stubs/claude" FW_SSH="$T/stubs/ssh" FW_DELEGATE="$T/stubs/delegate" FW_BOX_HOST=stub-box
+unset FW_OWNER_ASK
+mkdir -p "$HOME/.local/bin/cards"
 export FW_TREE_CACHE="$T/tree-cache"
 # The Mac delegate probe reads the writer dir under the cache root; keep it
 # off the real user cache and any inherited override.
@@ -201,16 +201,13 @@ while True:
         written += os.write(1, block[written:])
     time.sleep(0.01)
 SLOW_BOX_READER
-cat >"$T/stubs/owner-ask" <<'OWNER_ASK_STUB'
+cat >"$HOME/.local/bin/owner-ask" <<'OWNER_ASK_STUB'
 #!/usr/bin/env bash
 [ "${1:-}" = list ] || exit 2
 printf 'handoff-77 flywheel Review PR #4170\n'
 OWNER_ASK_STUB
-mkdir -p "$T/stubs/cards"
-printf '{"id":"handoff-77","title":"Review PR #4170","context":"Please merge PR #4170 after review."}\n' >"$T/stubs/cards/handoff-77.json"
-chmod +x "$T/stubs/owner-ask"
-FW_OWNER_ASK="$T/stubs/owner-ask"
-export FW_OWNER_ASK
+printf '{"id":"handoff-77","title":"Review PR #4170","context":"Please merge PR #4170 after review."}\n' >"$HOME/.local/bin/cards/handoff-77.json"
+chmod +x "$HOME/.local/bin/owner-ask"
 
 cat >"$T/stubs/file-claim" <<'FC_STUB'
 #!/usr/bin/env bash

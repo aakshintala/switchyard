@@ -371,29 +371,26 @@ if [ "${1:-}" = done ]; then
   [ "$have_done_arg" = 1 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...] [--handed-to-owner <card-id>]" >&2; exit 2; }
   set -- "${done_args[@]}"
   if [ -n "$handed_card" ]; then
+    if [ "${FW_OWNER_ASK+x}" = x ]; then
+      echo "REFUSING --handed-to-owner: FW_OWNER_ASK is not honoured for --handed-to-owner" >&2
+      exit 2
+    fi
     case "$handed_card" in ""|*[!A-Za-z0-9_-]*) echo "lanecheck done: invalid owner-ask card id: $handed_card" >&2; exit 2 ;; esac
-    owner_ask_bin="$HOME/.local/bin/owner-ask"
-    # The override is test-only so a lane cannot substitute its own owner authority.
-    if [ "${SWITCHYARD_TEST:-0}" = 1 ] && [ -n "${FW_OWNER_ASK:-}" ]; then owner_ask_bin="$FW_OWNER_ASK"; fi
+    if [ ! -f "$HOME/.local/bin/owner-ask" ] || [ ! -x "$HOME/.local/bin/owner-ask" ]; then
+      echo "REFUSING --handed-to-owner: owner-ask not found at $HOME/.local/bin/owner-ask; --handed-to-owner needs the Mac's owner-ask" >&2
+      exit 2
+    fi
     owner_ask_list_rc=0
-    owner_ask_list=$("$owner_ask_bin" list 2>/dev/null) || owner_ask_list_rc=$?
+    owner_ask_list=$("$HOME/.local/bin/owner-ask" list 2>/dev/null) || owner_ask_list_rc=$?
     owner_ask_open=0
     if [ "$owner_ask_list_rc" -eq 0 ] && printf '%s\n' "$owner_ask_list" | awk -v id="$handed_card" '$1 == id { found=1 } END { exit !found }'; then
       owner_ask_open=1
-      owner_ask_path="$owner_ask_bin"
-      case "$owner_ask_path" in */*) ;; *) owner_ask_path=$(command -v "$owner_ask_path" 2>/dev/null || true) ;; esac
-      while [ -n "$owner_ask_path" ] && [ -L "$owner_ask_path" ]; do
-        owner_ask_dir=$(cd "$(dirname "$owner_ask_path")" && pwd)
-        owner_ask_link=$(readlink "$owner_ask_path")
-        case "$owner_ask_link" in /*) owner_ask_path="$owner_ask_link" ;; *) owner_ask_path="$owner_ask_dir/$owner_ask_link" ;; esac
-      done
-      owner_ask_text=""
-      if [ -n "$owner_ask_path" ]; then
-        owner_ask_text=$(python3 -I - "$owner_ask_path" "$handed_card" <<'PY'
+      owner_ask_text=$(python3 -I - "$HOME/.local/bin/owner-ask" "$handed_card" <<'PY'
 import json, os, sys
 path, card_id = sys.argv[1:]
 try:
-    cards = os.path.join(os.path.dirname(os.path.realpath(path)), "cards")
+    real_owner_ask = os.path.realpath(path)
+    cards = os.path.join(os.path.dirname(real_owner_ask), "cards")
     card = json.load(open(os.path.join(cards, card_id + ".json")))
     if card.get("id") != card_id:
         raise ValueError("card id mismatch")
@@ -401,11 +398,8 @@ try:
 except Exception:
     sys.exit(1)
 PY
-        )
-        owner_ask_text_rc=$?
-      else
-        owner_ask_text_rc=1
-      fi
+      )
+      owner_ask_text_rc=$?
     else
       owner_ask_text_rc=1
     fi

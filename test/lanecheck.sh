@@ -12,8 +12,6 @@
 # the one shape that cannot show the bug. A case is only worth its line if it
 # is the case that would fail.
 set -u
-SWITCHYARD_TEST=1
-export SWITCHYARD_TEST
 here="$(cd "$(dirname "$0")" && pwd)"
 BIN=${FW_TEST_BIN:-$here/../bin}
 T=$(mktemp -d "${TMPDIR:-/tmp}/lctest.XXXXXX")
@@ -23,7 +21,10 @@ rc=0
 ok() { printf 'ok %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; rc=1; }
 
-mkdir -p "$T/stub"
+mkdir -p "$T/stub" "$T/home/.local/bin/cards"
+HOME="$T/home"
+export HOME
+unset FW_OWNER_ASK
 # Quiet stubs. `gh` serves the open-PR list from $T/prs so a case can seed it;
 # an empty list means no PR guard. `ssh` serves the two scan probes from files.
 #
@@ -95,11 +96,12 @@ exit 0
 EOF
 chmod +x "$T/stub/gh" "$T/stub/ssh" "$T/stub/claude" "$T/stub/delegate" \
   "$T/stub/file-claim" "$T/stub/owner-ask" "$T/stub/inbox-watchers" "$T/stub/boxstale"
+cp "$T/stub/owner-ask" "$HOME/.local/bin/owner-ask"
+chmod +x "$HOME/.local/bin/owner-ask"
 export STUBD=$T PATH=$T/stub:$PATH
 export BOX_SSH=$T/stub/ssh FW_DELEGATE=$T/stub/delegate \
-  FW_FILE_CLAIM=$T/stub/file-claim FW_OWNER_ASK=$T/stub/owner-ask FW_INBOX_WATCHERS=$T/stub/inbox-watchers \
+  FW_FILE_CLAIM=$T/stub/file-claim FW_INBOX_WATCHERS=$T/stub/inbox-watchers \
   FW_BOXSTALE=$T/stub/boxstale
-mkdir -p "$T/stub/cards"
 printf '[]' > "$T/cagents"
 printf '{"ok":true,"sessions":[]}' > "$T/dsess"
 : > "$T/prs"
@@ -146,7 +148,7 @@ grant() { # grant <run> <ticket>
   printf 'GRANT\n' > "$1/fiber-$2-fence-grant-20261104T0000Z.md"
 }
 write_owner_card() { # id title body
-  python3 - "$T/stub/cards/$1.json" "$1" "$2" "$3" <<'PY'
+  python3 - "$HOME/.local/bin/cards/$1.json" "$1" "$2" "$3" <<'PY'
 import json, sys
 path, card_id, title, body = sys.argv[1:]
 with open(path, "w") as f:
@@ -288,6 +290,17 @@ printf '4170 tests/4155-selector\n' > "$T/prs"
 out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4155 2>&1); grc=$?
 if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'PR(s) 4170 still open'; then ok pr-guard-refuses-open-pr; else fail "pr-guard-refuses-open-pr (rc=$grc) $out"; fi
 
+# FW_OWNER_ASK does not waive the ordinary open-PR guard for done.
+r=$(newrun 7aa); lane "$r" 4155 fiber-4155-build abc
+printf '4170 tests/4155-selector\n' > "$T/prs"
+out=$(FW_RUN=$r FW_OWNER_ASK="$T/stub/owner-ask" bash "$BIN/lanecheck" done 4155 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -q 'PR(s) 4170 still open' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok fw-owner-ask-does-not-waive-open-pr-guard
+else
+  fail "fw-owner-ask-does-not-waive-open-pr-guard (rc=$grc) $out"
+fi
+
 # An open owner card naming this PR waives only the open-PR guard. Retirement
 # records the handoff and leaves both the grant and file claims in place.
 r=$(newrun 7a); lane "$r" 4155 fiber-4155-build abc; grant "$r" 4155
@@ -305,19 +318,35 @@ else
   fail "handed-to-owner-pr-card-keeps-claims (rc=$grc) $out"
 fi
 
-# A test-provided open card cannot authorize retirement outside the test harness.
+# FW_OWNER_ASK is never honored as an alternate owner authority.
 r=$(newrun 7f); lane "$r" 4155 fiber-4155-build abc
-forged_card="untrusted-test-$$"
-write_owner_card "$forged_card" 'Review PR #4170' 'Please merge PR #4170.'
-printf '%s flywheel Review PR #4170\n' "$forged_card" > "$T/owner-ask-list"
+override_card="untrusted-test-$$"
+write_owner_card "$override_card" 'Review PR #4170' 'Please merge PR #4170.'
+printf '%s flywheel Review PR #4170\n' "$override_card" > "$T/owner-ask-list"
 : > "$T/owner-ask.log"
-out=$(env -u SWITCHYARD_TEST FW_RUN="$r" FW_OWNER_ASK="$T/stub/owner-ask" bash "$BIN/lanecheck" done 4155 --handed-to-owner "$forged_card" 2>&1); grc=$?
-if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'handed-to-owner check failed:' \
+out=$(FW_RUN=$r FW_OWNER_ASK="$T/stub/owner-ask" bash "$BIN/lanecheck" done 4155 --handed-to-owner "$override_card" 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'FW_OWNER_ASK is not honoured for --handed-to-owner' \
   && [ ! -s "$T/owner-ask.log" ] \
   && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
-  ok handed-to-owner-ignores-test-override-without-test-mode
+  ok handed-to-owner-rejects-fw-owner-ask
 else
-  fail "handed-to-owner-ignores-test-override-without-test-mode (rc=$grc) $out"
+  fail "handed-to-owner-rejects-fw-owner-ask (rc=$grc) $out"
+fi
+
+# A missing fixed owner-ask binary names its path instead of looking like a
+# closed card. Restore it immediately after this isolated invocation.
+r=$(newrun 7g); lane "$r" 4155 fiber-4155-build abc
+printf '%s flywheel Review PR #4170\n' "$override_card" > "$T/owner-ask-list"
+owner_ask_bin="$HOME/.local/bin/owner-ask"
+mv "$owner_ask_bin" "$T/owner-ask.saved"
+out=$(env -u FW_OWNER_ASK FW_RUN="$r" bash "$BIN/lanecheck" done 4155 --handed-to-owner "$override_card" 2>&1); grc=$?
+mv "$T/owner-ask.saved" "$owner_ask_bin"
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF "owner-ask not found at $owner_ask_bin; --handed-to-owner needs the Mac's owner-ask" \
+  && ! printf '%s' "$out" | grep -qF 'is not open' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 0 ]; then
+  ok handed-to-owner-missing-owner-ask-names-path
+else
+  fail "handed-to-owner-missing-owner-ask-names-path (rc=$grc) $out"
 fi
 
 # An answered card is absent from owner-ask list, so it cannot authorize the
