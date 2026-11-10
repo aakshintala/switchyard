@@ -558,7 +558,7 @@ spec_issue="$(tkt get spec_issue 2>/dev/null || true)"
 n=0; for ax in standards spec overbuild; do n=$((n+1))
   slot="$(printf '%s' "$rids" | awk -v n="$n" '{print $n}')"
   case "$slot" in ''|RESTART) ;; *) continue;; esac
-  start_args=(start "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --issue "$issue" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review")
+  start_args=(start "$pr" --repo "$repo" --cwd "$worktree" --state "$state" --head "$head" --issue "$issue" --model "$rm" --overbuild-model "$om" --axes "$ax" --full-rereview "tkt-build round-0 full review")
   if [ -n "$spec_issue" ]; then start_args+=(--spec "$spec_issue"); fi
   if [ "${#context_args[@]}" -gt 0 ]; then start_args+=("${context_args[@]}"); fi
   rc=0; one="$("$reviewpr" "${start_args[@]}" 2>"$tmpd/start-$ax-err")" || rc=$?

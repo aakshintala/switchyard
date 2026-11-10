@@ -400,8 +400,9 @@ STATUS: DONE" 0
 write_record overbuild DONE "looks lean
 VERDICT: APPROVE
 STATUS: DONE" 0
+: >"$T/no-fence.state"
 start_out="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
-  --model M --overbuild-model M2 2>"$T/stderr.txt")" || fail "start exits 0"
+  --state "$T/no-fence.state" --model M --overbuild-model M2 2>"$T/stderr.txt")" || fail "start exits 0"
 [ "$start_out" = "standards job-standards
 spec job-spec
 overbuild job-overbuild
@@ -434,6 +435,12 @@ grep -q '^## overbuild (M2)$' "$T/state/comment.md" || fail "comment overbuild h
 grep -q 'P1 fix the off-by-one' "$T/state/comment.md" || fail "comment carries full text"
 grep -q 'Code review (Spec axis) of PR #7 in O/N for issue #1 (spec #2)' "$T/state/prompt-spec.md" || fail "spec brief filled"
 grep -q 'Standards axis' "$T/state/prompt-standards.md" || fail "standards brief names its axis"
+grep -Fq 'No fence was recorded for this ticket.' "$T/state/prompt-standards.md" || fail "standards brief explains the missing fence"
+grep -Fq 'No fence was recorded for this ticket.' "$T/state/prompt-spec.md" || fail "spec brief explains the missing fence"
+grep -Fq '.review-context/issue-1.md' "$T/state/prompt-standards.md" || fail "standards brief names ticket text"
+grep -Fq '.review-context/issue-1.md' "$T/state/prompt-spec.md" || fail "spec brief names ticket text"
+grep -Fq 'A finding about code outside this fence' "$T/state/prompt-standards.md" || fail "standards brief sets the fence finding severity"
+grep -Fq 'A finding about code outside this fence' "$T/state/prompt-spec.md" || fail "spec brief sets the fence finding severity"
 grep -q '__[A-Z]' "$T/state/prompt-standards.md" && fail "standards brief has no placeholders left"
 grep -q '__[A-Z]' "$T/state/prompt-spec.md" && fail "spec brief has no placeholders left"
 grep -q '__[A-Z]' "$T/state/prompt-overbuild.md" && fail "overbuild brief has no placeholders left"
@@ -507,14 +514,27 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
+printf 'fence=bin/review-pr\nfence=test/review-pr.sh\n' >"$T/review-state"
 start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --issue 3 --spec 2 \
-  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "prefetch review start exits 0"
+  --state "$T/review-state" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "prefetch review start exits 0"
 for role in standards spec overbuild; do
   wt="$(worktree_for "$role")"
   [ -f "$wt/.review-context/pr.diff" ] || fail "$role worktree holds the PR diff"
   cmp -s "$T/diff.txt" "$wt/.review-context/pr.diff" || fail "$role diff matches the fetched PR diff"
   ! grep -Eq '(^|[^[:alnum:]])gh[[:space:]]' "$T/state/prompt-$role.md" || fail "$role prompt does not tell the reviewer to run gh"
   ! grep -Eq '__[A-Z]' "$T/state/prompt-$role.md" || fail "$role prompt has no placeholders"
+done
+for role in standards spec; do
+  grep -Fq -- '- bin/review-pr' "$T/state/prompt-$role.md" || fail "$role brief fills the first fence path"
+  grep -Fq -- '- test/review-pr.sh' "$T/state/prompt-$role.md" || fail "$role brief fills the second fence path"
+  grep -Fq 'A finding about code outside this fence' "$T/state/prompt-$role.md" || fail "$role brief carries the fence ruling rule"
+done
+for n in 1 3 2; do
+  issue_file="$(worktree_for standards)/.review-context/issue-$n.md"
+  [ -f "$issue_file" ] || fail "standards worktree holds ticket #$n text"
+  printf 'ISSUE-%s BODY\nISSUE-%s COMMENTS\n' "$n" "$n" >"$T/expected-issue.md"
+  cmp -s "$T/expected-issue.md" "$issue_file" || fail "standards ticket #$n body precedes its comments"
+  grep -Fq ".review-context/issue-$n.md" "$T/state/prompt-standards.md" || fail "standards prompt names ticket #$n file"
 done
 for n in 1 3 2; do
   issue_file="$(worktree_for spec)/.review-context/issue-$n.md"
@@ -530,8 +550,6 @@ for n in 1 3 2; do
   cmp -s "$T/expected-issue.md" "$issue_file" || fail "overbuild ticket #$n body precedes its comments"
   grep -Fq ".review-context/issue-$n.md" "$T/state/prompt-overbuild.md" || fail "overbuild prompt names ticket #$n file"
 done
-! find "$(worktree_for standards)/.review-context" -name 'issue-*.md' -print | grep -q . || \
-  fail "standards worktree has no ticket text"
 grep -Fq '.review-context/pr.diff' "$T/state/prompt-standards.md" || fail "standards prompt names the diff file"
 grep -Fq '.review-context/pr.diff' "$T/state/prompt-spec.md" || fail "spec prompt names the diff file"
 grep -Fq '.review-context/pr.diff' "$T/state/prompt-overbuild.md" || fail "overbuild prompt names the diff file"
@@ -642,7 +660,7 @@ printf '2 body\n2 comments\n' >"$T/expected-issue-calls.txt"
 cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "issue and spec duplicates fetch once"
 bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "duplicate spec ticket prefetch collect exits 0"
 
-# --- case: only the spec axis fetches ticket text
+# --- case: both review axes fetch ticket text
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 write_record standards DONE "VERDICT standards: APPROVE
@@ -651,8 +669,14 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 || fail "standards-only prefetch start exits 0"
 [ -f "$(worktree_for standards)/.review-context/pr.diff" ] || fail "standards-only worktree holds the diff"
-[ ! -e "$T/state/issue-calls.txt" ] || fail "standards-only run fetches no tickets"
+[ -f "$(worktree_for standards)/.review-context/issue-7.md" ] || fail "standards-only run fetches the PR ticket"
+printf '7 body\n7 comments\n' >"$T/expected-issue-calls.txt"
+cmp -s "$T/expected-issue-calls.txt" "$T/state/issue-calls.txt" || fail "standards-only run fetches ticket body and comments"
 bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "standards-only prefetch collect exits 0"
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
 start_review 7 --repo O/N --cwd "$T/clone" --axes spec --model M >/dev/null 2>&1 || fail "spec-only prefetch start exits 0"
 [ -f "$(worktree_for spec)/.review-context/issue-7.md" ] || fail "spec-only run fetches the PR ticket"
 bash "$REVIEW" collect job-spec >/dev/null 2>&1 || fail "spec-only prefetch collect exits 0"
