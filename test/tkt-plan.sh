@@ -2727,6 +2727,20 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   [ "$RC" -eq 1 ] || fail "triaged-round-limit-stop-time repeats ROUND-LIMIT"
   [ "$(state_get plan_stop_verdict_at)" = "$round_limit_stop_at" ] || fail "triaged-round-limit-stop-time keeps the first time for the same stop"
 
+  # A ruling written into the plan changes its hash; the ROUND-LIMIT that
+  # follows must keep the LINES stop time, or the ruling reads as stale.
+  setup_case triaged-round-limit-after-edit
+  rebase_plan
+  printf 'lines' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "triaged-round-limit-after-edit records a LINES verdict"
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2000-01-01T00:00:00Z || fail "triaged-round-limit-after-edit seeds a known stop time"
+  printf '\n## Rulings\n\n- Ruling comment settles the open line.\n' >>"$CDIR/plan.md"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "triaged-round-limit-after-edit seeds the round limit"
+  run_plan verify
+  expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 log=*" "triaged-round-limit-after-edit"
+  [ "$(state_get plan_stop_verdict_at)" = 2000-01-01T00:00:00Z ] || fail "triaged-round-limit-after-edit keeps the LINES stop time"
+
   # A ruling always comes from the current ticket and must postdate its stop.
   setup_case triaged-ruling-source
   rebase_plan

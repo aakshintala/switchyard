@@ -243,6 +243,9 @@ record_plan_stop_verdict() {
   stop_hash="$kind:$base:$stop_hash"
   existing_hash="$(t get plan_stop_verdict_key 2>/dev/null || true)"
   existing_at="$(t get plan_stop_verdict_at 2>/dev/null || true)"
+  # ROUND-LIMIT reports a stop that already happened: keep any recorded time,
+  # so a ruling posted after the LINES stop stays newer than it.
+  if [ "$kind" = round-limit ] && [ -n "$existing_at" ]; then return 0; fi
   if [ "$existing_hash" != "$stop_hash" ] || [ -z "$existing_at" ]; then
     t set plan_stop_verdict_key "$stop_hash"
     t set plan_stop_verdict_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
