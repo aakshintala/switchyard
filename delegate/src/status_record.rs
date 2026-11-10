@@ -791,6 +791,9 @@ mod tests {
 
     #[test]
     fn locator_lookup_waits_for_legacy_hits_and_requires_regular_files() {
+        // temp_dir() follows process-wide TMPDIR; serialize against tests that
+        // point it inside a temporary root they remove during cleanup.
+        let _env = crate::test_env::lock();
         let root = std::env::temp_dir().join(format!("delegate-locator-order-{}", random_uuid()));
         let dirs: Vec<_> = ["override", "caller-tmp", "system"]
             .into_iter()

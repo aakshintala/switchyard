@@ -30,7 +30,7 @@ script_dir=$(cd "$(dirname "$script_path")" && pwd)
 run_claude_agents() {
   local json_file="$1" err_file="$2" status
   shift 2
-  if bash "$script_dir/claude-agents-timeout" "${FW_CLAUDE_AGENTS_TIMEOUT:-30}" "$@" >"$json_file" 2>"$err_file"; then
+  if bash "$script_dir/claude-agents-timeout" "${FW_CLAUDE_AGENTS_TIMEOUT:-30}" "$@" </dev/null >"$json_file" 2>"$err_file"; then
     return 0
   else
     status=$?
@@ -50,6 +50,30 @@ if [ -z "$FW_LOCAL_BOX" ]; then
 fi
 roster="$R/roster"
 retired="$R/roster-done"
+
+write_retirement_helper() {
+  cat >"$1" <<'PY'
+def read_retirements(path):
+    done = {}
+    done_sess = {}
+    for line in open(path):
+        p = [x.strip() for x in line.split("\t")]
+        if len(p) > 2 and p[2]:
+            key = (p[1], p[2])
+            done_sess[key] = max(p[0], done_sess.get(key, ""))
+        elif len(p) > 1:
+            done[p[1]] = max(p[0], done.get(p[1], ""))
+    return done, done_sess
+
+def entry_is_retired(ticket, sess, jid, ts, done, done_sess):
+    cut = done.get(ticket, "")
+    for (done_ticket, key), done_at in done_sess.items():
+        if done_ticket == ticket and (key == sess or key == jid or
+                (jid not in ("", "?") and (jid.startswith(key) or key.startswith(jid)))):
+            cut = max(cut, done_at)
+    return bool(cut and ts.split()[0] <= cut)
+PY
+}
 
 stop_retired_sessions() {
   _lanecheck_done_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck-done.XXXXXX") || return 2
@@ -109,7 +133,7 @@ PY
     fi
   fi
   if [ "$need_muse" = 1 ]; then
-    if ! "$done_boxssh" -o BatchMode=yes "$BOX" 'delegate session list --json' >"$done_tmp/box-delegate.json" 2>"$done_tmp/box-delegate.err"; then
+    if ! "$done_boxssh" -o BatchMode=yes "$BOX" 'delegate session list --json' </dev/null >"$done_tmp/box-delegate.json" 2>"$done_tmp/box-delegate.err"; then
       echo "cannot check Box delegate sessions; no lane retired" >&2
       return 2
     fi
@@ -207,7 +231,7 @@ PY
     [ -n "$kind" ] || continue
     case "$kind:$host" in
       claude:box)
-        if ! stop_out=$("$done_boxssh" -o BatchMode=yes "$BOX" "claude stop $sid" 2>&1); then
+        if ! stop_out=$("$done_boxssh" -o BatchMode=yes "$BOX" "claude stop $sid" </dev/null 2>&1); then
           echo "could not stop Box Claude session $sid ($name); no lane retired" >&2
           printf '%s\n' "$stop_out" | sed 's/^/  /' >&2
           return 2
@@ -220,7 +244,7 @@ PY
         fi;;
       delegate:box)
         if ! stop_out=$("$done_boxssh" -o BatchMode=yes "$BOX" \
-            "PATH=\$HOME/.local/bin:\$PATH delegate session stop $sid" 2>&1); then
+            "PATH=\$HOME/.local/bin:\$PATH delegate session stop $sid" </dev/null 2>&1); then
           echo "could not stop Box delegate session $sid ($name); no lane retired" >&2
           printf '%s\n' "$stop_out" | sed 's/^/  /' >&2
           return 2
@@ -413,6 +437,8 @@ if [ "${1:-}" = done ]; then
   fi
   retire_pi_pidfiles "$@" || exit $?
   stop_retired_sessions "$@" || exit $?
+  retirement_helper=$_lanecheck_done_tmp/roster-retirement.py
+  write_retirement_helper "$retirement_helper"
   for n in "$@"; do
     case "$n" in
       *:*) printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${n%%:*}" "${n#*:}" >>"$retired" ;;
@@ -437,28 +463,20 @@ if [ "${1:-}" = done ]; then
   # several sessions across its phases and the fence belongs to the ticket.
   for n in "$@"; do
     t=${n%%:*}
-    live=$(python3 -I - "$roster" "$retired" "$t" <<'PY'
+    live=$(python3 -I - "$roster" "$retired" "$t" "$retirement_helper" <<'PY'
 import sys
-roster, retired, t = sys.argv[1], sys.argv[2], sys.argv[3]
-# One entry per session, carrying both handles, because roster-done records
-# whichever one the operator typed: the reports print the name, the done
-# guard accepts either, and a name subtracted from a set of ids removes
-# nothing.
-sessions = set()
+roster, retired, ticket, helper = sys.argv[1:]
+exec(compile(open(helper).read(), helper, "exec"), globals())
+done, done_sess = read_retirements(retired)
+entries = {}
 for line in open(roster):
     f = line.rstrip("\n").split("\t")
-    if len(f) >= 5 and f[1] == t:
-        sessions.add((f[3], f[4]))
-done = set()
-whole = False
-for line in open(retired):
-    f = line.rstrip("\n").split("\t")
-    if len(f) == 2 and f[1] == t:
-        whole = True                 # a bare-ticket retirement ends the ticket
-    elif len(f) >= 3 and f[1] == t:
-        done.add(f[2])
-live = 0 if whole else sum(
-    1 for name, sid in sessions if name not in done and sid not in done
+    if len(f) >= 4 and f[1] == ticket:
+        jid = f[4] if len(f) > 4 else "?"
+        entries[f[3]] = (f[0], jid)
+live = sum(
+    not entry_is_retired(ticket, name, jid, ts, done, done_sess)
+    for name, (ts, jid) in entries.items()
 )
 print(live)
 PY
@@ -570,6 +588,7 @@ touch "$retired"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck.XXXXXX") || exit 3
 trap 'rm -rf "$tmp"' EXIT
+write_retirement_helper "$tmp/roster-retirement.py"
 
 log="$R/lane-liveness.log"
 if [ "${FW_SKIP_SAMPLER_CHECK:-0}" != 1 ]; then
@@ -695,7 +714,7 @@ run_claude_agents "$tmp/box.json" "$tmp/box.err" \
 # Claude session, so `claude agents` never lists it and it would print MISSING
 # for its whole life. Its liveness is keyed by the delegate session id the
 # roster's 5th column holds, not by a session name.
-"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" 'delegate session list --json' >"$tmp/muse.json" 2>"$tmp/muse.err"
+"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" 'delegate session list --json' </dev/null >"$tmp/muse.json" 2>"$tmp/muse.err"
 # maclaunch.sh starts a muse lane too, so a `mac` roster line is a delegate
 # session as often as a Claude one, and only this list can tell them apart. On
 # 2026-11-06 #4272 (running) and #4273 (idle, its PR pushed 25 minutes earlier)
@@ -727,7 +746,7 @@ fi
 # be attributed through the lane-specific PID/PPID probe below, or not at all.
 "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
   "ps -eo args= | grep -E 'tkt-(plan|build|ship|fix|gate)|gh-ci wait|delegate watch' | grep -v grep" \
-  >"$tmp/pending.txt" 2>/dev/null
+  </dev/null >"$tmp/pending.txt" 2>/dev/null
 
 # One portable process snapshot per host. The lane-specific descendant probe
 # below uses PID/PPID rather than treating any ticket-named process as its job.
@@ -735,7 +754,7 @@ if ps -A -o pid=,ppid=,etime=,args= >"$tmp/mac-procs.txt" 2>/dev/null; then
   : >"$tmp/mac-procs.ok"
 fi
 if "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
-    "ps -A -o pid=,ppid=,etime=,args=" >"$tmp/box-procs.txt" 2>/dev/null; then
+    "ps -A -o pid=,ppid=,etime=,args=" </dev/null >"$tmp/box-procs.txt" 2>/dev/null; then
   : >"$tmp/box-procs.ok"
 fi
 
@@ -744,7 +763,7 @@ fi
 # #4099 read as a STALL on 2026-11-04 and both remedies the STALL line offers
 # were wrong. The ticket comes from the lane worktree in resume.cwd; a
 # superseded job's question is stale.
-"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" \
+"$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$BOX" </dev/null \
   "python3 -c \"
 import json, glob, re, os, time
 cut = time.time() - 7 * 86400
@@ -786,10 +805,11 @@ else
   rm -f "$tmp/openprs.ok"
 fi
 
-python3 -I - "$tmp" "$roster" "$retired" "$R" "$BOX" "$boxssh" "$FW_LOCAL_BOX" "$script_dir/job-record" <<'PY'
+python3 -I - "$tmp" "$roster" "$retired" "$R" "$BOX" "$boxssh" "$FW_LOCAL_BOX" "$script_dir/job-record" "$tmp/roster-retirement.py" <<'PY'
 import glob, json, sys, os, re, shlex, subprocess, tempfile, time, fcntl
 
-tmp, roster, retired, R, BOX, BOXSSH, LOCAL_BOX, JOB_RECORD = sys.argv[1:9]
+tmp, roster, retired, R, BOX, BOXSSH, LOCAL_BOX, JOB_RECORD, RETIREMENT_HELPER = sys.argv[1:10]
+exec(compile(open(RETIREMENT_HELPER).read(), RETIREMENT_HELPER, "exec"), globals())
 
 def onbox(cmd, msg=False, where="box"):
     """A `delegate` line for a delegate lane, in the form that runs from here.
@@ -1449,15 +1469,7 @@ except Exception:
 # hides the lane that later picks it up, under its usual session name.
 # frontier.sh holds a second copy of this rule, which drifted from this one and
 # cost a double-launch. De-duplication is #4336; until it lands, change both.
-done = {}
-done_sess = {}
-for line in open(retired):
-    p = [x.strip() for x in line.split("\t")]
-    if len(p) > 2 and p[2]:
-        k = (p[1], p[2])
-        done_sess[k] = max(p[0], done_sess.get(k, ""))
-    elif len(p) > 1:
-        done[p[1]] = max(p[0], done.get(p[1], ""))
+done, done_sess = read_retirements(retired)
 
 # last roster line per (ticket, session) wins
 entries = {}
@@ -1469,20 +1481,12 @@ for line in open(roster):
     jid = p[4] if len(p) > 4 else "?"
     entries[(n, sess)] = (ts, host, jid)
 
-def entry_is_retired(n, sess, jid, ts):
-    cut = done.get(n, "")
-    for (dn, dk), dts in done_sess.items():
-        if dn == n and (dk == sess or dk == jid or
-                        (jid not in ("", "?") and (jid.startswith(dk) or dk.startswith(jid)))):
-            cut = max(cut, dts)
-    return bool(cut and ts.split()[0] <= cut)
-
 # A pending command names a ticket state file, not the session running it. Keep
 # the newest non-retired roster entry so a reported plan is not blamed for work
 # handed to a live newer phase on that shared state file.
 newest_roster = {}
 for (n, sess), (ts, host, jid) in entries.items():
-    if entry_is_retired(n, sess, jid, ts):
+    if entry_is_retired(n, sess, jid, ts, done, done_sess):
         continue
     started = launched(ts)
     current = newest_roster.get(n)
@@ -1493,7 +1497,7 @@ missing = 0
 active_roster_tickets = set()
 live_roster_starts = {}
 for (n, sess), (ts, host, jid) in sorted(entries.items()):
-    if entry_is_retired(n, sess, jid, ts):
+    if entry_is_retired(n, sess, jid, ts, done, done_sess):
         continue
     active_roster_tickets.add(n)
     # A delegate lane is looked up by its session id (column 5), a Claude lane
