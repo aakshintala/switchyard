@@ -1027,6 +1027,9 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     if matches!(event, HostEvent::Ignored) {
         return;
     }
+    if state::hold_test_event_write(&event).is_err() {
+        return;
+    }
     if shared.panic_mode == Some(PanicMode::Apply) && raw_line == "PANIC_LINE" {
         let _ = shared
             .store

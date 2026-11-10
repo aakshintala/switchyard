@@ -298,9 +298,11 @@ def handle_steer(command):
         RACE_PHASE = 2
         RACE_TEXT = text
         HOLD_START = time.monotonic()
+        send({"type": "queue_update", "steering": [text], "followUp": []})
+        respond(command.get("id"), "prompt", True, {"disposition": "queued"})
+        send({"type": "turn_end"})
         send({"type": "agent_end", "messages": [], "willRetry": False})
         send({"type": "agent_settled", "aborted": False})
-        respond(command.get("id"), "prompt", True, {"disposition": "started"})
         send({"type": "agent_start"})
         send({"type": "turn_start"})
         send(user_frame(text))

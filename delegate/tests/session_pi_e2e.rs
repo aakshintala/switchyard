@@ -205,18 +205,6 @@ impl Harness {
         }
     }
 
-    fn spawn_watch(&self, id: &str, ready: &std::path::Path) -> Child {
-        Command::new(BIN)
-            .args(["session", "watch", id, "--json"])
-            .env("HOME", &self.home)
-            .env("DELEGATE_SESSION_TEST_WATCH_READY", ready)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
-    }
-
     fn requests(&self) -> Vec<Value> {
         std::fs::read_to_string(self.fake_dir.join("requests.jsonl"))
             .unwrap_or_default()
@@ -1144,6 +1132,10 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
                 "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_TURN_ID",
                 "pi-turn-2",
             ),
+            (
+                "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_KIND",
+                "turn.started",
+            ),
         ],
     );
     assert!(
@@ -1159,52 +1151,27 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
     assert_eq!(reply["disposition"], "steered", "{reply}");
 
-    let state = h.state(&id);
-    assert_eq!(state["status"], "running");
-    assert_eq!(state["activeTurnId"], "pi-turn-2");
-
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
     let held_marker = std::path::PathBuf::from(format!("{}.held", release_event_write.display()));
-    h.wait_path(&held_marker, "turn-2 event append hold");
+    h.wait_path(&held_marker, "pi-turn-2 start event append hold");
+    std::thread::sleep(Duration::from_millis(150));
+    let ordinary_prompts_before_release = h
+        .requests()
+        .iter()
+        .filter(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") != Some(&Value::from("steer"))
+        })
+        .count();
+    assert_eq!(
+        ordinary_prompts_before_release,
+        1,
+        "replay must not race pi's queued continuation: {:?}",
+        h.requests()
+    );
 
-    let watch_ready = h.base.join("watch.ready");
-    let mut watcher = h.spawn_watch(&id, &watch_ready);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let exited_before_ready = loop {
-        if let Some(status) = watcher.try_wait().unwrap() {
-            break Some(status);
-        }
-        if watch_ready.exists() {
-            break None;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "watch neither returned nor observed running state"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    if let Some(status) = exited_before_ready {
-        let logs = h.logs(&id);
-        assert!(
-            logs.iter()
-                .any(|line| { line["kind"] == "turn.completed" && line["turnId"] == "pi-turn-2" }),
-            "watch returned with {status} before turn.completed pi-turn-2 was appended; state={}, events={logs:?}",
-            h.state(&id)
-        );
-        panic!("watch returned before observing the running session: {status}");
-    }
-    assert!(
-        watcher.try_wait().unwrap().is_none(),
-        "watch exited while turn.completed pi-turn-2 was held"
-    );
     std::fs::write(&release_event_write, "").unwrap();
-    let watched = wait_cli(
-        &mut watcher,
-        Duration::from_secs(10),
-        &h.root(),
-        &["watch", &id],
-    );
-    assert!(watched.success(), "watch exited with {watched}");
+    watch_ok(&h, &id);
 
     let logs = h.logs(&id);
     let replayed: Vec<&Value> = logs

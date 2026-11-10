@@ -346,7 +346,6 @@ impl Store {
         }
         if !output.is_empty() {
             let previous_events_len = guard.events.metadata()?.len();
-            hold_test_event_write(&output)?;
             if let Err(error) = guard.events.write_all(&output) {
                 let _ = guard.events.set_len(previous_events_len);
                 return Err(error);
@@ -395,8 +394,8 @@ impl Store {
     }
 }
 
-// Test-only synchronization hook to pause before a turn-completion event is appended.
-fn hold_test_event_write(output: &[u8]) -> std::io::Result<()> {
+// Test-only synchronization hook to pause before a selected turn event is applied.
+pub(crate) fn hold_test_event_write(event: &HostEvent) -> std::io::Result<()> {
     let Some(release) = std::env::var_os("DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL") else {
         return Ok(());
     };
@@ -404,15 +403,19 @@ fn hold_test_event_write(output: &[u8]) -> std::io::Result<()> {
     else {
         return Ok(());
     };
-    let is_target_completion = output
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-        .any(|line| {
-            line["kind"] == "turn.completed"
-                && line["turnId"].as_str() == Some(target_turn_id.as_str())
-        });
-    if !is_target_completion {
+    let default_kind = match event {
+        HostEvent::TurnCompleted { .. } => "turn.completed",
+        HostEvent::TurnStarted { .. } => "turn.started",
+        _ => return Ok(()),
+    };
+    let target_kind = std::env::var("DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_KIND")
+        .unwrap_or_else(|_| default_kind.to_string());
+    let (kind, turn_id) = match event {
+        HostEvent::TurnCompleted { turn_id, .. } => ("turn.completed", turn_id),
+        HostEvent::TurnStarted { turn_id } => ("turn.started", turn_id),
+        _ => return Ok(()),
+    };
+    if kind != target_kind || turn_id != &target_turn_id {
         return Ok(());
     }
 
