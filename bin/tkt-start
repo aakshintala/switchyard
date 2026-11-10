@@ -13,11 +13,11 @@
 set -euo pipefail
 usage() {
   echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]" >&2
-  echo "  --takeover PR-OR-BRANCH records plan=takeover PR-OR-BRANCH; --gate CMD records its required check command" >&2
+  echo "  --takeover PR-OR-BRANCH records plan=takeover PR-OR-BRANCH; --gate CMD records its required check command; non-blank --files PATHS is required for its file fence" >&2
   echo "  --spec FILE: a file holding the ticket body; a Part-of closing needs 'Part of #N' in it" >&2
   echo "  --spec-issue N: the issue holding the spec, when it is not this ticket; review-pr checks the spec axis against it" >&2
-  echo "  --files PATHS: paths separated by commas or spaces, e.g. --files a b c or --files a,b,c" >&2
-  echo "  With --takeover, --files also records the takeover file fence." >&2
+  echo "  --files PATHS: paths separated by commas or spaces, e.g. --files a b c or --files a,b,c; required and non-blank with --takeover" >&2
+  echo "  With --takeover, --files records the takeover file fence." >&2
   exit 2
 }
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
@@ -49,6 +49,10 @@ for v in run repo issue spec branch worktree workflow_doc closing; do [ -n "${!v
 if [ "$takeover_given" -eq 1 ]; then
   if [ -z "${takeover_ref//[[:space:]]/}" ] || [[ $takeover_ref == -* ]] || [[ $takeover_ref == *[[:space:]]* ]]; then
     echo "tkt-start: --takeover needs one PR or branch reference with no whitespace: $takeover_ref" >&2
+    exit 2
+  fi
+  if [ -z "$files" ]; then
+    echo "tkt-start: --takeover requires non-blank --files PATHS" >&2
     exit 2
   fi
   if [ "$takeover_gate_given" -ne 1 ] || [ -z "${takeover_gate//[[:space:]]/}" ]; then

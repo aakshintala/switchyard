@@ -50,6 +50,10 @@ plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
 if [ ! -r "$plan_gate_lib" ]; then echo "tkt-fix: cannot read shared lib: $plan_gate_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$plan_gate_lib"
+takeover_lib="$script_dir/lib/takeover-plan-gate.sh"
+if [ ! -r "$takeover_lib" ]; then echo "tkt-fix: cannot read shared lib: $takeover_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$takeover_lib"
 gate_lib="$script_dir/lib/gate-script.sh"
 if [ ! -r "$gate_lib" ]; then echo "tkt-fix: cannot read shared lib: $gate_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -643,24 +647,16 @@ write_findings_history() {
 # takeover has no plan file, so its recorded state gate is passed directly.
 plan="$(t get plan 2>/dev/null || true)"
 takeover=0
-takeover_ref=""
+takeover_gate=""
 gate_cmd=""
 takeover_gate_arg=""
 if [ -z "$plan" ]; then
   echo "tkt-fix: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
   exit 2
-elif [ "$plan" = takeover ] || [[ $plan == "takeover "* ]]; then
-  takeover=1
-  if [ "$plan" != takeover ]; then takeover_ref="${plan#takeover }"; fi
-  if [ -z "${takeover_ref//[[:space:]]/}" ] || [[ $takeover_ref == *[[:space:]]* ]]; then
-    echo "tkt-fix: invalid takeover plan value: expected 'takeover <pr-or-branch>'" >&2
-    exit 2
-  fi
-  gate_cmd="$(t get gate 2>/dev/null || true)"
-  if [ -z "${gate_cmd//[[:space:]]/}" ]; then
-    echo "tkt-fix: takeover $takeover_ref has no gate command in state (key: gate)" >&2
-    exit 2
-  fi
+elif ! takeover_plan_gate tkt-fix "$plan" t; then
+  exit 2
+elif [ "$takeover" -eq 1 ]; then
+  gate_cmd="$takeover_gate"
   takeover_gate_arg="$gate_cmd"
   if e="$(t get env 2>/dev/null)" && [ -n "$e" ]; then takeover_gate_arg="$e $gate_cmd"; fi
 else
