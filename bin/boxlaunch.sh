@@ -85,6 +85,13 @@ fi
 # not close, with the commit list.
 bash "${FW_AGENTS_FF:-$script_dir/agents-ff.sh}" || true
 bash "${FW_BOXSTALE:-$script_dir/boxstale.sh}" || true
+# switchyard #1554: reap on each box launch, without making a failed sweep a launch failure.
+if [ "${FW_NO_TMP_REAP:-0}" != 1 ]; then
+  (
+    { $boxssh -o BatchMode=yes "$host" "${FW_BOX_TMP_REAP:-bash ~/.agents/bin/box-tmp-reap /srv/lanes/tmp /tmp}" 2>&1 || true; } |
+      sed 's/^/boxlaunch: tmp reap: /' >&2
+  ) </dev/null &
+fi
 # A fence is granted when fence-grant has written the grant file, not when the
 # ruling prose says so. 2026-11-05: #4174, #4190 and #4142 were launched off
 # `fence-grant --dry` probes, which write no grant file and record no claim, so

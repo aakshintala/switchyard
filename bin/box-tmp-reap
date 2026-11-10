@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Reap stale top-level entries in one or more box temporary directories.
+set -u
+
+if [ "$#" -eq 0 ]; then
+  echo 'usage: box-tmp-reap <dir>...' >&2
+  exit 2
+fi
+
+lsof_cmd=${BOX_TMP_REAP_LSOF:-lsof}
+if command -v "$lsof_cmd" >/dev/null 2>&1; then
+  have_lsof=1
+else
+  have_lsof=0
+  echo 'box-tmp-reap: lsof not found; skipping deletion for this run' >&2
+fi
+current_user=$(id -un)
+
+for arg in "$@"; do
+  if [ ! -d "$arg" ] || [ ! -r "$arg" ] || [ ! -x "$arg" ]; then
+    printf 'box-tmp-reap: %s is missing or unreadable; skipping\n' "$arg" >&2
+    printf 'box-tmp-reap: %s deleted=0 kept=0\n' "$arg"
+    continue
+  fi
+  if ! dir=$(cd -P -- "$arg" 2>/dev/null && pwd -P); then
+    printf 'box-tmp-reap: %s is missing or unreadable; skipping\n' "$arg" >&2
+    printf 'box-tmp-reap: %s deleted=0 kept=0\n' "$arg"
+    continue
+  fi
+
+  started=$SECONDS
+  deleted=0
+  kept=0
+  can_delete=$have_lsof
+  open_tops=''
+  if [ "$have_lsof" -eq 1 ]; then
+    # lsof exits 1 with nothing on stderr when no files are open. Any other
+    # failure means the open set is unknown, and only lsof protects a live
+    # socket such as /tmp/tmux-<uid>, so delete nothing in this dir (#1554).
+    # One stderr line is harmless: lsof cannot open a dir under a top-level
+    # entry another user owns (/tmp/systemd-private-*), and `find -user`
+    # below never offers such an entry for deletion.
+    # No temp file means no lsof stderr to read, so the open set is unknown:
+    # delete nothing. mktemp fails when TMPDIR is full, when a reap matters most.
+    if ! lsof_err=$(mktemp "${TMPDIR:-/tmp}/box-tmp-reap-lsof.XXXXXX" 2>/dev/null) || [ ! -f "$lsof_err" ]; then
+      printf 'box-tmp-reap: cannot create a temp file for lsof stderr; skipping deletion in %s\n' "$arg" >&2
+      printf 'box-tmp-reap: %s deleted=0 kept=0 secs=%s\n' "$arg" "$((SECONDS - started))"
+      continue
+    fi
+    rc=0
+    open_paths=$("$lsof_cmd" -Fn +D "$dir" 2>"$lsof_err") || rc=$?
+    bad_err=0
+    while IFS= read -r line; do
+      case "$line" in
+        "lsof: WARNING: can't opendir($dir/"*"): Permission denied")
+          rest=${line#"lsof: WARNING: can't opendir($dir/"}
+          top=$dir/${rest%%/*}
+          top=${top%"): Permission denied"}
+          if [ -n "$(find "$top" -maxdepth 0 -user "$current_user" 2>/dev/null)" ]; then
+            bad_err=1
+          fi ;;
+        *) bad_err=1 ;;
+      esac
+    done <"$lsof_err" || bad_err=1  # an unreadable stderr file is a failure too
+    if [ "$rc" -gt 1 ] || { [ "$rc" -ne 0 ] && [ "$bad_err" -eq 1 ]; }; then
+      printf 'box-tmp-reap: lsof failed for %s; skipping deletion\n' "$arg" >&2
+      can_delete=0
+    fi
+    rm -f -- "$lsof_err"
+    # One list of open top-level names, so each entry costs one lookup.
+    open_tops=$(printf '%s\n' "$open_paths" | awk -v p="n$dir/" '
+      index($0, p) == 1 {
+        s = substr($0, length(p) + 1)
+        sub(/ type=[A-Z]+.*$/, "", s)  # a socket prints "n<path> type=STREAM"
+        sub(/\/.*/, "", s); print s }' | sort -u)
+  fi
+
+  while IFS= read -r -d '' entry; do
+    if [ "$can_delete" -eq 0 ]; then
+      kept=$((kept + 1))
+      continue
+    fi
+
+    if [ -n "$open_tops" ] && printf '%s\n' "$open_tops" | grep -Fxq -- "${entry##*/}"; then
+      kept=$((kept + 1))
+      continue
+    fi
+
+    # Do not traverse a top-level symlink. Removing it below removes only the
+    # link, never anything at its target.
+    if [ -d "$entry" ] && [ ! -L "$entry" ]; then
+      if [ ! -r "$entry" ] || [ ! -x "$entry" ]; then
+        kept=$((kept + 1))
+        continue
+      fi
+      if fresh=$(find "$entry" -mindepth 1 -mmin -1440 -print -quit 2>/dev/null); then
+        if [ -n "$fresh" ]; then
+          kept=$((kept + 1))
+          continue
+        fi
+      else
+        # If the scan was incomplete, the age of its contents is unknown.
+        kept=$((kept + 1))
+        continue
+      fi
+    fi
+
+    if rm -rf -- "$entry"; then
+      deleted=$((deleted + 1))
+    else
+      printf 'box-tmp-reap: could not remove %s\n' "$entry" >&2
+      kept=$((kept + 1))
+    fi
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 -mmin +1440 -user "$current_user" -print0 2>/dev/null)
+
+  printf 'box-tmp-reap: %s deleted=%s kept=%s secs=%s\n' "$arg" "$deleted" "$kept" "$((SECONDS - started))"
+done
+
+exit 0
