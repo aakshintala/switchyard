@@ -424,6 +424,9 @@ PY
   if _prs=$(gh pr list --repo aakshintala/fiber --state open --limit 200 --json number,headRefName --jq '.[] | "\(.number) \(.headRefName)"' 2>/dev/null); then
     _prs_ok=1
   fi
+  _merged_prs=""
+  _merged_prs_ok=0
+  _merged_prs_loaded=0
   handed_tickets=()
   handed_prs=()
   for n in "$@"; do
@@ -444,18 +447,60 @@ PY
     fi
     age=$(( $(date +%s) - when ))
     if [ "$age" -lt "${FW_DONE_MIN:-1800}" ]; then
+      merged_pr=""
+      if [ -n "$sn" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
+        if [ "$_merged_prs_loaded" = 0 ]; then
+          _merged_prs_loaded=1
+          if _merged_prs=$(gh pr list --repo aakshintala/fiber --state merged --limit 200 --json number,headRefName,mergedAt 2>/dev/null); then
+            _merged_prs_ok=1
+          fi
+        fi
+        if [ "$_merged_prs_ok" = 1 ]; then
+          state_branch=""
+          for state_file in "$R"/*-"$tn".state "$R/fiber-$tn.state"; do
+            [ -f "$state_file" ] || continue
+            state_branch=$(sed -n 's/^branch=//p' "$state_file" | head -n 1)
+            [ -z "$state_branch" ] || break
+          done
+          merged_pr=$(python3 -I -c 'import json,re,sys
+
+ticket,newest,state_branch=sys.argv[1:]
+try:
+    prs=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(prs,list):
+    sys.exit(0)
+valid=re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+for pr in prs:
+    if not isinstance(pr,dict):
+        continue
+    head=pr.get("headRefName")
+    merged=pr.get("mergedAt")
+    number=pr.get("number")
+    if not isinstance(head,str) or not isinstance(merged,str) or not valid.fullmatch(merged) or merged <= newest:
+        continue
+    if head == "fiber-" + ticket or head.startswith("fiber-" + ticket + "-") or (state_branch and head == state_branch):
+        if isinstance(number,(int,str)):
+            print(number)
+            break' "$tn" "$newest" "$state_branch" <<<"$_merged_prs" 2>/dev/null) || merged_pr=""
+        fi
+      fi
+      if [ -n "$merged_pr" ]; then
+        echo "age guard skipped for $n — PR #$merged_pr merged"
       # Say which way it is going in the same line. Printing REFUSING and then
       # `retired:` two lines later, as this did under FW_DONE_FORCE=1, leaves a
       # log a later reader cannot tell apart from a refusal that held.
       # Name the argument, not the ticket: this guard is session-scoped when the
       # argument is, and printing `4275` for `4275:prep-4275` on 2026-11-06 read
       # as the ticket being held when only its finished prep session was young.
-      if [ "${FW_DONE_FORCE:-0}" = 1 ]; then
+      elif [ "${FW_DONE_FORCE:-0}" = 1 ]; then
         echo "FORCING retire of $n — newest roster entry is ${age}s old ($newest), under ${FW_DONE_MIN:-1800}s; FW_DONE_FORCE=1 overrides." >&2
+        young=1
       else
         echo "REFUSING to retire $n — its newest roster entry is ${age}s old ($newest), under ${FW_DONE_MIN:-1800}s." >&2
+        young=1
       fi
-      young=1
     fi
     # A lane's last step is the ship, not the green PR: bin/lib/template-tkt.md:110 has
     # it run ship-pr as soon as its gate passes. Retiring on "PR green and

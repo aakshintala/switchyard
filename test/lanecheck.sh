@@ -38,6 +38,13 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   cat "$STUBD/prbranch-${3:-}" 2>/dev/null || exit 1
   exit 0
 fi
+case " $* " in
+  *" --state merged "*)
+    [ "${GH_MERGED_BOOM:-0}" != 1 ] || { echo "HTTP 502" >&2; exit 1; }
+    cat "$STUBD/merged-prs" 2>/dev/null || echo '[]'
+    exit 0
+    ;;
+esac
 cat "$STUBD/prs" 2>/dev/null || true
 exit 0
 EOF
@@ -93,6 +100,7 @@ mkdir -p "$T/stub/cards"
 printf '[]' > "$T/cagents"
 printf '{"ok":true,"sessions":[]}' > "$T/dsess"
 : > "$T/prs"
+: > "$T/merged-prs"
 : > "$T/owner-ask-list"
 : > "$T/file-claim.log"
 : > "$T/pending"
@@ -141,6 +149,9 @@ path, card_id, title, body = sys.argv[1:]
 with open(path, "w") as f:
     json.dump({"id": card_id, "title": title, "context": body}, f)
 PY
+}
+write_merged_pr() { # number branch mergedAt
+  printf '[{"number":%s,"headRefName":"%s","mergedAt":"%s"}]\n' "$1" "$2" "$3" > "$T/merged-prs"
 }
 
 # --- the two-session fence cases ---------------------------------------------
@@ -197,6 +208,74 @@ fi
 r=$(newrun 6); lane "$r" 4097 fiber-4097-plan 888 3H; lane "$r" 4097 fiber-4097-build 999 1M
 out=$(FW_RUN=$r bash "$BIN/lanecheck" done 4097:fiber-4097-plan 2>&1); grc=$?
 if [ "$grc" = 0 ] && ! printf '%s' "$out" | grep -q REFUSING; then ok age-check-scoped-to-session; else fail "age-check-scoped-to-session (rc=$grc) $out"; fi
+
+# A newly merged no-prefix fiber branch can release its own young session.
+r=$(newrun 5a); lane "$r" 3975 fiber-3975-build 777 10M
+: > "$T/prs"; write_merged_pr 4171 fiber-3975 "$(old 5M)"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3975:fiber-3975-build 2>&1); grc=$?
+if [ "$grc" = 0 ] \
+  && printf '%s' "$out" | grep -qF 'age guard skipped for 3975:fiber-3975-build — PR #4171 merged' \
+  && grep -qF '3975' "$r/roster-done"; then
+  ok age-guard-skips-for-newer-fiber-branch-merge
+else
+  fail "age-guard-skips-for-newer-fiber-branch-merge (rc=$grc) $out"
+fi
+
+# A part PR can use the exact branch stored in that ticket's current state.
+r=$(newrun 5b); lane "$r" 3976 fiber-3976-build 778 10M
+printf 'branch=feature/3976-part-two\npart=2\n' > "$r/switchyard-3976.state"
+: > "$T/prs"; write_merged_pr 4172 feature/3976-part-two "$(old 5M)"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3976:fiber-3976-build 2>&1); grc=$?
+if [ "$grc" = 0 ] \
+  && printf '%s' "$out" | grep -qF 'age guard skipped for 3976:fiber-3976-build — PR #4172 merged'; then
+  ok age-guard-matches-state-branch-for-part
+else
+  fail "age-guard-matches-state-branch-for-part (rc=$grc) $out"
+fi
+
+# An earlier part's merge cannot excuse a young session on a later part.
+r=$(newrun 5c); lane "$r" 3977 fiber-3977-build 779 10M
+: > "$T/prs"; write_merged_pr 4173 fiber-3977 "$(old 20M)"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3977:fiber-3977-build 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'REFUSING to retire 3977:fiber-3977-build' \
+  && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
+  ok age-guard-refuses-older-merged-pr
+else
+  fail "age-guard-refuses-older-merged-pr (rc=$grc) $out"
+fi
+
+# The bypass is session-scoped; a bare ticket still sees the age guard.
+r=$(newrun 5d); lane "$r" 3978 fiber-3978-build 780 10M
+: > "$T/prs"; write_merged_pr 4174 fiber-3978 "$(old 5M)"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3978 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'REFUSING to retire 3978' \
+  && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
+  ok age-guard-refuses-bare-ticket-after-merge
+else
+  fail "age-guard-refuses-bare-ticket-after-merge (rc=$grc) $out"
+fi
+
+# An open but unmerged ticket still refuses a young scoped retirement.
+r=$(newrun 5e); lane "$r" 3979 fiber-3979-build 781 10M
+: > "$T/merged-prs"; printf '4175 fix/3979-part-two\n' > "$T/prs"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 3979:fiber-3979-build 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'REFUSING to retire 3979:fiber-3979-build' \
+  && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
+  ok age-guard-refuses-unmerged-ticket
+else
+  fail "age-guard-refuses-unmerged-ticket (rc=$grc) $out"
+fi
+
+# A failed merged-PR lookup never authorizes a young scoped retirement.
+r=$(newrun 5f); lane "$r" 3980 fiber-3980-build 782 10M
+: > "$T/prs"; write_merged_pr 4176 fiber-3980 "$(old 5M)"
+out=$(FW_RUN=$r GH_MERGED_BOOM=1 bash "$BIN/lanecheck" done 3980:fiber-3980-build 2>&1); grc=$?
+if [ "$grc" = 2 ] && printf '%s' "$out" | grep -qF 'REFUSING to retire 3980:fiber-3980-build' \
+  && [ "$(grep -c '' "$r/roster-done")" = 0 ]; then
+  ok age-guard-refuses-merged-pr-lookup-failure
+else
+  fail "age-guard-refuses-merged-pr-lookup-failure (rc=$grc) $out"
+fi
 
 # --- the open-PR guard -------------------------------------------------------
 # The lane's last step is the ship, not the green PR, so an open PR on this
