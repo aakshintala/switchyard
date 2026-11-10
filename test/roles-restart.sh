@@ -85,6 +85,15 @@ run_restart >"$T/live.out" 2>"$T/live.err" || fail "live role run failed: $(cat 
 [ ! -s "$CLAUDE_LOG" ] || fail "live role was launched twice"
 [ ! -s "$OWNER_ASK_LOG" ] || fail "live role emitted a relaunch line"
 
+# An interactive session holding the role name is not a live background role.
+: >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"; : >"$T/roles-restart.log"
+printf '[{"pid":%s,"name":"test-role","kind":"interactive","cwd":"%s/worktree","status":"idle"}]\n' "$$" "$ROLE_HOME" >"$AGENTS_JSON"
+run_restart >"$T/interactive.out" 2>"$T/interactive.err" || fail "interactive-session run failed: $(cat "$T/interactive.err")"
+grep -Fqx "cwd=$ROLE_HOME" "$CLAUDE_LOG" || fail "interactive session prevented the background role from launching"
+grep -Fqx 'arg=--bg' "$CLAUDE_LOG" || fail "interactive-session launch omitted --bg"
+grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: interactive session pid $$ holds the name; launching the background role anyway$" "$T/roles-restart.log" >/dev/null \
+  || fail "interactive-session warning was not logged exactly"
+
 # A missing role launches a fresh session from its home with a handoff-aware prompt.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
 printf '[]\n' >"$AGENTS_JSON"
