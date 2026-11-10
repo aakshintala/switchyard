@@ -5,28 +5,26 @@ description: "Flywheel: land a stack of tickets or PRs through parallel lanes, a
 
 # Autonomous flywheel
 
-Schedule many tickets through `implement` in parallel lanes, or many PRs through `review-loop` and `ci-triage`. Each ticket's own work is `implement`; this skill holds only the scheduling around it. The owner confirms the session at start, then may be away for the rest of it.
+Schedule many tickets through `implement` in parallel lanes, or many PRs through `review-loop` and `ci-triage`. Each ticket's own work is `implement`; this skill holds only the scheduling around it. The flywheel sets the session at start; it does not wait for the owner.
 
 ### 1. Confirm the session
 
-First run `implement` step 1 (check setup). Then, with the owner, at start (a typed start means they're present now):
+First run `implement` step 1 (check setup). Then set the session:
 
 - Repo, work source (a list of tickets, or a stack of PRs for PR-stack mode), base commit.
-- Models: the pool for each rung (per the `delegate` skill), a review pool (a correctness and an over-engineering reviewer, each from a family other than the implementers', at the same rung or higher), and the lane budget (2 works).
-- Merge terms: the cases that need the owner's call beyond the workflow doc's merge rule. Terms only add cases; the workflow doc's merge rule always holds. The terms also name the repo's CI contract owner (for Fiber, surveyor); with none named, the owner decides in that role. CI-boundary changes (workflows, rulesets) need the owner's call unless the terms include them. When the terms include them, these still need the owner's call (owner, 2026-10-08):
+- Models: flywheel chooses the pool for each rung (per the `delegate` skill), a review pool (a correctness and an over-engineering reviewer, each from a family other than the implementers', at the same rung or higher), and the lane budget (2 works).
+- Merge terms: the cases that need flywheel's call beyond the workflow doc's merge rule. Terms only add cases; the workflow doc's merge rule always holds. The terms also name the repo's CI contract owner (for Fiber, surveyor); with none named, the triage role decides in that role. Workflow changes that don't publish, and adding or pinning third-party actions, are flywheel's call. These stay owner-held (owner, 2026-10-08):
   - ruleset or branch-protection changes;
   - `secrets.*`, `permissions:`, `pull_request_target`, and release or publish workflows;
-  - adding a third-party action, or pinning one to a branch rather than a tag or SHA (a bump of a first-party `actions/*` action is a normal change).
+  - making the required check pass where the repo's CI doc says it fails (for example a gating job missing from the required aggregate job's `needs`, whether removed or never added, a renamed required check, or `continue-on-error`). When the terms include CI-boundary changes, this needs the CI contract owner's approval instead (owner, 2026-11-01). A doc edit in the same pull request is never that approval.
 
-  When the terms include CI-boundary changes, making the required check pass where the repo's CI doc says it fails (for example a gating job missing from the required aggregate job's `needs`, whether removed or never added, a renamed required check, or `continue-on-error`) needs the CI contract owner's approval, not the owner's (owner, 2026-11-01). Otherwise it needs the owner's call. A doc edit in the same pull request is never that approval.
-
-  Anything that needs the owner's call, the CI-boundary default and the three cases above included, releases only on the owner's own words, quoted with where they were typed. The CI contract owner's approval likewise is its own message, quoted with where it was sent. A tracker comment's author field proves neither: every session posts with the owner's credentials, so an agent's comment shows the same login and `OWNER` association as the owner's.
+  Items that remain owner-held release only on the owner's own words, quoted with where they were typed. The CI contract owner's approval likewise is its own message, quoted with where it was sent. A tracker comment's author field proves neither: every session posts with the owner's credentials, so an agent's comment shows the same login and `OWNER` association as the owner's.
 - `gh auth status` shows the `workflow` scope; without it, PRs touching `.github/workflows/*` fail to merge.
-- Whether the owner will be around for rulings (see `implement`).
+- Flywheel owns the session start; no owner-availability check is needed for rulings.
 
 Write these to the state file (step 4).
 
-Done when the owner has confirmed every bullet.
+Done when flywheel has set the session terms.
 
 ### 2. Fill the lanes
 
@@ -47,7 +45,7 @@ Done when every lane is filled or its idle reason is recorded.
 
 ### 3. Rule and merge
 
-Answer each sub-orchestrator's escalations as `implement`'s rules say. Merge a PR only within the confirmed terms, through `tkt-ship` or `ship-pr`, never a bare `gh pr merge`: they refuse a worktree head that differs from the PR head and a patch changed since review. Watch a PR's CI with `~/.agents/bin/gh-ci wait <pr>`, never a hand-rolled `gh pr checks` loop: it prints the head each verdict covers and discards a verdict when the head moves. Report a CI verdict with the head SHA it covers. A merge neither tool covers, like a case the terms don't cover, goes to the owner by `implement`'s presence rule.
+Answer each sub-orchestrator's escalations as `implement`'s rules say. Merge a PR only within the confirmed terms, through `tkt-ship` or `ship-pr`, never a bare `gh pr merge`: they refuse a worktree head that differs from the PR head and a patch changed since review. Watch a PR's CI with `~/.agents/bin/gh-ci wait <pr>`, never a hand-rolled `gh pr checks` loop: it prints the head each verdict covers and discards a verdict when the head moves. Report a CI verdict with the head SHA it covers. A merge neither tool covers, like a case the terms don't cover, goes to flywheel. A truly novel decision uses one dashboard card (`owner-ask file ...`) and parks the ticket; never ask in chat.
 
 A merge the permission system denies ends merging for the session, even when an earlier merge in the same session succeeded. Record the denial in the state file. Attempt no merge by any route after it, `ship-pr` and `tkt-ship` included: a second route to a denied action is scored as a bypass. Hand no merge to a lane or peer either: a merge run elsewhere launders the denial. The round's goal becomes green and reported: drive each remaining PR to green with its review loop closed, then list them in the round report as one owner action, with each PR number and its exact merge command.
 

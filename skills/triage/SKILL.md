@@ -30,23 +30,23 @@ Three **category** roles:
 
 Five **state** roles:
 
-- `needs-triage`: maintainer needs to evaluate
+- `needs-triage`: the triage role needs to evaluate
 - `needs-info`: waiting on reporter for more information
 - `ready-for-agent`: fully specified, ready for an AFK agent
-- `ready-for-human`: needs human implementation
+- `ready-for-human`: requires credentials, physical access, or a filed novel-decision card
 - `wontfix`: will not be actioned
 
-For a PR, the same states read against the attached code: `ready-for-agent` means a brief is attached and an agent should take the next step on the diff; `ready-for-human` means it's ready for a human to merge.
+For a PR, the same states read against the attached code: `ready-for-agent` means a brief is attached and an agent should take the next step on the diff; `ready-for-human` means one of the label conditions above applies to the attached code.
 
-Every triaged issue should carry exactly one category role and one state role. If state roles conflict, flag it and ask the maintainer before doing anything else.
+Every triaged issue should carry exactly one category role and one state role. If state roles conflict, flag the conflict for the triage role before doing anything else.
 
 These are canonical role names. The actual label strings used in the issue tracker may differ. The mapping is in `docs/agents/`. When `docs/agents/` is missing, stop and report "repo not set up" to whoever started you.
 
-State transitions: an unlabeled issue normally goes to `needs-triage` first; from there it moves to `needs-info`, `ready-for-agent`, `ready-for-human`, or `wontfix`. `needs-info` returns to `needs-triage` once the reporter replies. The maintainer can override at any time; flag transitions that look unusual and ask before proceeding.
+State transitions: an unlabeled issue normally goes to `needs-triage` first; from there it moves to `needs-info`, `ready-for-agent`, `ready-for-human`, or `wontfix`. `needs-info` returns to `needs-triage` once the reporter replies. The triage role can override at any time; flag unusual transitions for a ruling before proceeding.
 
 ## Invocation
 
-The maintainer invokes `/triage` and describes what they want in natural language. Interpret the request and act. Examples:
+The triage role runs `/triage` on a request. Interpret it and act from the project docs and prior rulings. Examples:
 
 - "Show me anything that needs my attention"
 - "Let's look at #42" (issue or PR)
@@ -63,21 +63,21 @@ Query the issue tracker and present three buckets, oldest first:
 
 When PRs are in scope, include external PRs in these buckets and tag each line `[PR]` or `[issue]`. Discovery surfaces only *external* PRs (the tracker config defines who counts as external), so a collaborator's in-flight PR is not triage work. This filter is discovery-only; an explicitly named PR is always triaged regardless of author.
 
-Show counts and a one-line summary per item. Let the maintainer pick.
+Show counts and a one-line summary per item. Let the triage role choose the next item.
 
 ## Triage a specific issue or PR
 
 1. **Gather context.** Read the full issue or PR (body, comments, labels, author, dates; for a PR, the diff too). Parse any prior triage notes so you don't re-ask resolved questions. Explore the codebase using the project's domain glossary, respecting ADRs in the area. Run two checks against the codebase: (a) **redundancy**: search for an existing implementation of the requested behavior by domain concept (not just the request's wording), and report where you looked. If found, it's an already-implemented `wontfix` (step 5). (b) **prior rejection**: read `.out-of-scope/*.md` and surface any that resembles this request.
 
-2. **Recommend.** Tell the maintainer your category and state recommendation with reasoning, plus a brief codebase summary relevant to the request (including whether it's already implemented). Wait for direction.
+2. **Recommend.** State the category and state supported by project docs and prior rulings, with reasoning and a brief codebase summary (including whether the behavior is already implemented). Apply the settled decision. For a truly novel decision, file one dashboard card (`owner-ask file ...`) and park the ticket; never ask in chat.
 
 3. **Verify the claim.** Before any grilling, check that the claim holds up. For a bug, reproduce it from the reporter's steps. For a PR, confirm the diff does what it claims: check it out, run the relevant tests or commands. Report what happened: confirmed (with code path), failed, or insufficient detail (a strong `needs-info` signal). A confirmed verification makes a much stronger agent brief.
 
-4. **Grill (if needed).** If the request needs fleshing out, call the Skill tool twice, for "grilling" and "domain-modeling", and grill it into shape a round of questions at a time, sharpening domain terms and updating `GLOSSARY.md`/ADRs inline as decisions land.
+4. **Grill (if needed).** Use the "grilling" and "domain-modeling" skills to surface unanswered details, then resolve them from project docs and prior rulings. Record settled decisions in `GLOSSARY.md` or ADRs. If a truly novel decision has no answer and changes what a user sees or how parts fit, file one dashboard card (`owner-ask file ...`) and park the ticket; never ask it in chat.
 
 5. **Apply the outcome.** Every backticked path in a body or brief you post resolves at `origin/main` when you post it, and every stated count or measurement names the command and base commit that produced it.
    - `ready-for-agent`: post an agent brief comment ([AGENT-BRIEF.md](AGENT-BRIEF.md)).
-   - `ready-for-human`: same structure as an agent brief, but note why it can't be delegated (judgment calls, external access, design decisions, manual testing).
+   - `ready-for-human`: post the same structure as an agent brief, and identify whether credentials, physical access, or a filed novel-decision card is needed.
    - `needs-info`: post triage notes (template below).
    - For `wontfix`, close the issue, with the comment depending on *why*:
      - **Already implemented**: the change already exists in the codebase. Point to where it lives; do **not** write to `.out-of-scope/` (that KB is for *rejected* requests, not built ones).
@@ -87,7 +87,7 @@ Show counts and a one-line summary per item. Let the maintainer pick.
 
 ## Quick state override
 
-If the maintainer says "move #42 to ready-for-agent", trust them and apply the role directly. Confirm what you're about to do (role changes, comment, close), then act. Skip grilling. If moving to `ready-for-agent` without a grilling session, ask whether they want to write an agent brief.
+If the triage role rules "move #42 to ready-for-agent", apply the role, comment or closure as directed. Skip grilling when the docs and rulings settle it. If moving to `ready-for-agent` without a grilling session, write the agent brief from the ticket; don't ask whether one is wanted. For a novel decision, file one dashboard card and park the ticket.
 
 ## Needs-info template
 
@@ -109,7 +109,7 @@ Capture everything resolved during grilling under "established so far" so the wo
 
 ## Resuming a previous session
 
-If prior triage notes exist on the issue or PR, read them, check whether the reporter has answered any outstanding questions, and present an updated picture before continuing. Don't re-ask resolved questions.
+If prior triage notes exist on the issue or PR, read them and check whether the reporter has answered any outstanding questions. Use project docs and prior rulings to resolve settled questions; don't re-ask them.
 
 ## Next phase
 

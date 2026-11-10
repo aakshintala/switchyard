@@ -5,8 +5,7 @@ set -euo pipefail
 # limit; the exemption is derived from recorded state below.
 
 usage() {
-  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <id>]
-         (--owner-approved <id> is an alias for --ruling <id>)\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
+  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <id>]\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
   printf '       tkt-plan <state> triaged --comment <id>\n' >&2
   exit 2
 }
@@ -385,7 +384,6 @@ do_grant() {
     --by) [ $# -ge 2 ] || usage; who="$2"; shift 2;;
     --comment) [ $# -ge 2 ] || usage; comment="$2"; shift 2;;
     --ruling) [ $# -ge 2 ] && [ -n "$2" ] || usage; ruling="$2"; via="ruling"; shift 2;;
-    --owner-approved) [ $# -ge 2 ] && [ -n "$2" ] || usage; ruling="$2"; via="owner-approved"; shift 2;;
     *) usage;; esac; done
   [ -n "$who" ] && [ -n "$comment" ] || usage
   case "$who$comment$ruling" in *[[:space:]]*) usage;; esac
