@@ -530,6 +530,16 @@ case "$OUT" in *CURRENT*) fail "mergedstop: must never print CURRENT" ;; esac
 [ "$(grep -c '^tkt-job|' "$T/calls.log")" -eq 0 ] || fail "mergedstop: tkt-job must not run" # docs/agents/issue-tracker.md:31
 [ "$(grep -c '^plan-sweep|' "$T/calls.log")" -eq 0 ] || fail "mergedstop: plan-sweep must not run" # docs/agents/issue-tracker.md:31
 grep -qF -- '--state merged' "$T/calls.log" || fail "mergedstop: search misses --state merged"
+# a MERGED-STOP rerun after a successful start leaves post_run alone (#1517).
+setup mergedpostrun ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 mergedpostrun-first-start
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set post_run old-run
+printf '%s\n' '[{"number":7,"body":"Fixes it.\n\nResolves #42.\n","files":[{"path":"f.txt"}]}]' >"$T/prlist"
+run_start --no-preflight
+want "MERGED-STOP pr=7" 1 mergedpostrun
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$S" get post_run)" = old-run ] || fail "mergedpostrun: MERGED-STOP preserves post_run"
 grep -qF -- '--limit 100' "$T/calls.log" || fail "mergedstop: search misses --limit 100"
 grep -qF -- '#42 in:body' "$T/calls.log" || fail "mergedstop: search misses [#42 in:body]"
 # a Part-of hit notes every touched path, unfiltered by --files, and continues.
