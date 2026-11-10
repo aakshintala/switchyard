@@ -117,7 +117,7 @@ for row in json.load(sys.stdin):
         return 0
       fi
       if [ "$kind" = "interactive" ]; then
-        log "$role_name: interactive session pid $pid holds the name; launching the background role anyway"
+        log "$role_name: interactive session pid $pid holds the name; launching the background role anyway. Two $role_name sessions now run: quit the interactive one"
       fi
     fi
   done <<<"$matching_sessions"

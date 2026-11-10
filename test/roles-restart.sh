@@ -91,8 +91,10 @@ printf '[{"pid":%s,"name":"test-role","kind":"interactive","cwd":"%s/worktree","
 run_restart >"$T/interactive.out" 2>"$T/interactive.err" || fail "interactive-session run failed: $(cat "$T/interactive.err")"
 grep -Fqx "cwd=$ROLE_HOME" "$CLAUDE_LOG" || fail "interactive session prevented the background role from launching"
 grep -Fqx 'arg=--bg' "$CLAUDE_LOG" || fail "interactive-session launch omitted --bg"
-grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: interactive session pid $$ holds the name; launching the background role anyway$" "$T/roles-restart.log" >/dev/null \
+grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} test-role: interactive session pid $$ holds the name; launching the background role anyway\. Two test-role sessions now run: quit the interactive one$" "$T/roles-restart.log" >/dev/null \
   || fail "interactive-session warning was not logged exactly"
+grep -Fq 'Two test-role sessions now run' "$T/roles-restart.log" \
+  || fail "interactive-session warning does not say two sessions now run"
 
 # A missing role launches a fresh session from its home with a handoff-aware prompt.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
