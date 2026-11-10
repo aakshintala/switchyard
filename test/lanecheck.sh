@@ -358,6 +358,17 @@ else
   fail "pending-work-is-matched-to-its-own-ticket ($out)"
 fi
 
+# A part-ticket lane's state file carries a -p<n> suffix (fiber-4099-p2.state).
+# Its pending work still belongs to ticket 4099, so the lane is not a STALL.
+printf '/bin/bash /home/a/.agents/bin/tkt-build /srv/lanes/run/fiber-4099-p2.state --phase build\n' > "$T/pending"
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1)
+if printf '%s' "$out" | grep -q '^ABANDONED 4099' \
+   && printf '%s' "$out" | grep -q 'work is still running for it'; then
+  ok part-ticket-state-file-counts-as-pending
+else
+  fail "part-ticket-state-file-counts-as-pending ($out)"
+fi
+
 # A failed probe leaves the pending map empty, and an absent probe is not
 # evidence that nothing is running: the lane still gets a line, never silence.
 rm -f "$T/pending"
