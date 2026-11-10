@@ -122,6 +122,8 @@ To watch a running lane, run `~/.agents/bin/lanestat <run-dir>`: a row reads `IN
 
 A plan split into parts runs each part through steps 4–8 in order. For part `n` (2 or more), run `tkt-start ... --part <n>` once the previous part's PR has merged. It archives the previous state as `<state>.part<n-1>`, starts fresh state and refuses while that PR is open. A `DRIFT` that names a merged `pr` is the signal to add `--part`. Pass `--body-ends`, `--model` and `--spec-issue` again after `--part`, since only `issue`, `repo`, `run`, `worktree` and `model.*` lines carry. Cut the next lane once the previous part has merged.
 
+For work already underway that must not be re-planned, start state with `tkt-start ... --takeover <pr-or-branch> --gate '<gate command>' --files <paths>`; this records the source in `plan`, the required gate in `gate`, and the takeover fence in `fence`, which `tkt-fix` and `tkt-ship` use without a plan file.
+
 A lane `CONCERNS` verdict is exit 1 from `tkt-job`, but `tkt-build` consumes it, runs the gate and review itself, and passes the file in state key `concerns.lane` to every review start as `--context`. The orchestrator reads the concerns file before accepting the review verdict. A concern that questions a posted ruling, the fence or ticket scope routes as `ASK`.
 
 Done when the lane reports a PR URL and head SHA, or a failure triage.
