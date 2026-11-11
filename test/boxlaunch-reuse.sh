@@ -80,6 +80,7 @@ EOF
 cat >"$T/stub/lanecheck" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = done ]; then
+  printf '%s\n' "$*" >>"$LANECHECK_DONE_LOG"
   if [ "${FW_TEST_RETIRE_FAIL:-0}" = 1 ]; then
     echo 'simulated lanecheck done failure' >&2
     exit 2
@@ -98,6 +99,7 @@ chmod +x "$T/stub/"*
 export STUBD=$T BOX_AGENTS="$T/box-agents.json" MAC_AGENTS="$T/mac-agents.json"
 export TEST_LANECHECK="$BIN/lanecheck"
 export DELEGATE_JSON="$T/delegate.json" STOP_LOG="$T/stops.log" LAUNCH_LOG="$T/launches.log"
+export LANECHECK_DONE_LOG="$T/lanecheck-done.log"
 export BOX_LANE_OUTPUT="$T/box-lanes.txt"
 export NEW_SESSION_ID=launch-id-2465
 export PATH="$T/stub:$PATH"
@@ -114,6 +116,7 @@ prepare_run() {
   : >"$run/fiber-2465-fence-grant-fixture.md"
   : >"$run/roster"
   : >"$run/roster-done"
+  : >"$LANECHECK_DONE_LOG"
 }
 launch_box() {
   local phase=${1:-phase-plan}
@@ -296,6 +299,23 @@ phase_retirement_case phase-ship build success phase-ship-success
 phase_retirement_case phase-build plan failed phase-build-failure
 phase_retirement_case phase-ship build failed phase-ship-failure
 phase_retirement_case phase-build plan retirement-failure phase-build-retirement-failure
+
+# A relaunch must not try to retire a previous-phase row that roster-done already retires.
+prepare_run phase-build-already-retired
+previous_session=fiber-2465-plan-deadbeef
+printf '2026-11-01T00:00:00Z\t2465\tbox\t%s\tprevious-session-id\n' "$previous_session" >"$run/roster"
+printf '2026-11-02T00:00:00Z\t2465\t%s\n' "$previous_session" >"$run/roster-done"
+printf '[]\n' >"$BOX_AGENTS"
+if out=$(FW_TEST_LAUNCH_FAIL=0 FW_TEST_RETIRE_FAIL=1 launch_box phase-build 2>&1); then
+  if ! printf '%s\n' "$out" | grep -Fq 'WARNING could not retire' \
+      && ! grep -Fxq "done 2465:$previous_session" "$LANECHECK_DONE_LOG"; then
+    ok phase-build-relaunch-skips-already-retired-previous-phase
+  else
+    fail "phase-build-relaunch-skips-already-retired-previous-phase (called: $(cat "$LANECHECK_DONE_LOG"); $out)"
+  fi
+else
+  fail "phase-build-relaunch-skips-already-retired-previous-phase (launch failed: $out)"
+fi
 
 # The launch cap includes LIVE Claude/delegate lanes on Box and muse, plus
 # LIVE PI-BOX pidfile lanes. PI-MAC lanes do not consume Box capacity.
