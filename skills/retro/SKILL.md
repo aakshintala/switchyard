@@ -57,14 +57,16 @@ When the owner is present, present the lessons in chat, most severe first, and l
 
 When the owner is away:
 
-1. Search the destination repo's open issues labelled `retro-candidate` (create the label when it's missing). Close any with no new evidence for 30 days, commenting "expired, no recurrence".
-2. A lesson matching an open (or closed, then reopened) candidate is a second sighting: open a PR with the change.
-3. A first sighting becomes an issue labelled `retro-candidate`, holding the evidence.
+1. Read the "Dropped lessons" section of the wiki's retro page (`~/work/wiki/pages/flywheel-friction-and-retro.md`). A lesson listed there is a second sighting: carry both sightings into what you file.
+2. A lesson the owning role will fund this week becomes an ordinary issue in the destination repo right away, through normal triage, with a priority and the evidence. A mechanical lesson the owning role can make within the round becomes a PR instead.
+3. A lesson nobody funds this week is dropped, not parked: add one line under "Dropped lessons" with the lesson, the date and the round.
 4. A lesson about data loss, or a destructive or out-of-scope edit, becomes a PR on its first sighting.
+
+Do not use a holding label such as `retro-candidate`; it was retired on 2026-11-11.
 
 Every retro PR opens with its evidence and its destination, so the owner can decide without reading the diff.
 
-Done when every lesson is presented, filed or merged into an existing candidate.
+Done when every lesson is presented, filed as an issue or PR, or dropped with its line.
 
 ## Reference
 
