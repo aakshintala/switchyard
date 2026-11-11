@@ -76,6 +76,11 @@ cat "$STUBD/cagents" 2>/dev/null || echo '[]'
 EOF
 cat > "$T/stub/delegate" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = version ] && [ "${DELEGATE_STALE_TEST:-0}" = 1 ]; then
+  printf '%s\n' 'delegate 0.0.0 (built from 1111111111111111111111111111111111111111)' \
+    'warn  delegate binary is stale: built from 1111111111111111111111111111111111111111, but delegate/ is at 2222222222222222222222222222222222222222'
+  exit 0
+fi
 [ "${1:-}" = session ] && [ "${2:-}" = list ] || exit 2
 cat "$STUBD/dsess" 2>/dev/null || echo '{"ok":true,"sessions":[]}'
 EOF
@@ -158,6 +163,24 @@ PY
 write_merged_pr() { # number branch mergedAt
   printf '[{"number":%s,"headRefName":"%s","mergedAt":"%s"}]\n' "$1" "$2" "$3" > "$T/merged-prs"
 }
+
+# lanecheck forwards a stale-install warning from delegate version exactly once.
+# A binary predating `version` exits nonzero and remains a silent, non-fatal skip.
+r=$(newrun 0)
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 DELEGATE_STALE_TEST=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+warning='warn  delegate binary is stale: built from 1111111111111111111111111111111111111111, but delegate/ is at 2222222222222222222222222222222222222222'
+if [ "$grc" = 0 ] && [ "$(printf '%s\n' "$out" | grep -Fc "$warning")" = 1 ]; then
+  ok stale-delegate-warning-once
+else
+  fail "stale-delegate-warning-once (rc=$grc) $out"
+fi
+r=$(newrun 0-old)
+out=$(FW_RUN=$r FW_SKIP_SAMPLER_CHECK=1 bash "$BIN/lanecheck" 2>&1); grc=$?
+if [ "$grc" = 0 ] && ! printf '%s\n' "$out" | grep -qF 'delegate binary is stale'; then
+  ok old-delegate-version-is-optional
+else
+  fail "old-delegate-version-is-optional (rc=$grc) $out"
+fi
 
 # --- the two-session fence cases ---------------------------------------------
 # A ticket runs several sessions across its phases and the fence belongs to the

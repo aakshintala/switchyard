@@ -20,6 +20,21 @@ pub fn doctor() -> Result<i32, String> {
     Ok(code)
 }
 
+/// `delegate version`: print the package version, embedded build commit and freshness status.
+pub fn version() -> i32 {
+    print!("{}", version_text());
+    0
+}
+
+fn version_text() -> String {
+    format!(
+        "delegate {} (built from {})\n{}",
+        env!("CARGO_PKG_VERSION"),
+        crate::build_info::build_commit(),
+        crate::build_info::status_line()
+    )
+}
+
 pub(crate) fn status_line(status: &str, msg: &str) -> String {
     format!("{status:<5} {msg}\n")
 }
@@ -106,8 +121,16 @@ pub fn doctor_text(config: &Config) -> (String, i32) {
         text += &status_line("fail", "delegate: version unknown");
         failed = true;
     } else {
-        text += &status_line("ok", &format!("delegate {}", report.plugin.version));
+        text += &status_line(
+            "ok",
+            &format!(
+                "delegate {} (built from {})",
+                report.plugin.version,
+                crate::build_info::build_commit()
+            ),
+        );
     }
+    text += &crate::build_info::status_line();
 
     for backend in Backend::ALL {
         let (section, bad) = backend.doctor_lines(&report);

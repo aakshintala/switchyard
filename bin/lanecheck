@@ -27,6 +27,15 @@ while [ -L "$script_path" ]; do
   case "$link" in /*) script_path=$link;; *) script_path=$script_dir/$link;; esac
 done
 script_dir=$(cd "$(dirname "$script_path")" && pwd)
+check_delegate_build() {
+  local delegate_bin=${FW_DELEGATE:-$HOME/.local/bin/delegate} output warning
+  [ -x "$delegate_bin" ] || return 0
+  if output=$("$delegate_bin" version 2>/dev/null); then
+    warning=$(printf '%s\n' "$output" | grep '^warn  delegate binary is stale:' || true)
+    [ -z "$warning" ] || printf '%s\n' "$warning"
+  fi
+}
+check_delegate_build
 run_claude_agents() {
   local json_file="$1" err_file="$2" status
   shift 2

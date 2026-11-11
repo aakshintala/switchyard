@@ -131,6 +131,7 @@ impl Env {
         let mut child = Command::new(env!("CARGO_BIN_EXE_delegate"))
             .args(args)
             .current_dir(&self.dir)
+            .env("HOME", &self.dir)
             .env("TMPDIR", &self.dir)
             .env("FIBER_HOME", self.dir.join("fh"))
             .env("CURSOR_AGENT_BIN", cursor_bin)
@@ -246,6 +247,70 @@ fn models_lists_every_row_with_default_marked() {
             .any(|line| line.starts_with("* composer-2.5")),
         "default model is not marked: {stdout}"
     );
+}
+
+#[test]
+fn version_prints_the_embedded_build_commit() {
+    let out = Command::new(env!("CARGO_BIN_EXE_delegate"))
+        .args(["version"])
+        .env("HOME", std::env::temp_dir())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("built from {}", env!("DELEGATE_BUILD_COMMIT"))),
+        "{stdout}"
+    );
+}
+
+fn git_output(repo: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn doctor_warns_when_installed_build_commit_predates_delegate_head() {
+    let e = Env::new("doctor-stale-build", &agent_script(FULL_LIST));
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let checkout = e.dir.join(".agents");
+    let clone = Command::new("git")
+        .args(["clone", "--quiet", "--shared"])
+        .arg(source)
+        .arg(&checkout)
+        .output()
+        .unwrap();
+    assert!(
+        clone.status.success(),
+        "git clone failed: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    git_output(&checkout, &["config", "user.email", "test@example.invalid"]);
+    git_output(&checkout, &["config", "user.name", "Delegate e2e test"]);
+    std::fs::write(checkout.join("delegate/.stale-build-probe"), "newer\n").unwrap();
+    git_output(&checkout, &["add", "delegate/.stale-build-probe"]);
+    git_output(&checkout, &["commit", "-qm", "newer delegate checkout"]);
+    let delegate_head = git_output(&checkout, &["rev-parse", "HEAD"]);
+
+    let out = e.delegate(&["doctor"], None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let warning = format!(
+        "warn  delegate binary is stale: built from {}, but delegate/ is at {delegate_head}",
+        env!("DELEGATE_BUILD_COMMIT")
+    );
+    assert!(stdout.contains(&warning), "{stdout}");
 }
 
 #[test]

@@ -34,6 +34,7 @@ pub(crate) const USAGE: &str =
        delegate ack <jobId>...  (mark one or more job reports as read)
        delegate models
        delegate doctor
+       delegate version
        delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)
        delegate session start --model muse/MODEL|PROVIDER/MODEL[:LEVEL] --brief FILE --inbox DIR [--json]
        delegate session send <id-or-prefix> TEXT|- [--json]
@@ -72,6 +73,7 @@ pub fn main() -> i32 {
         Some("ack") => ack(&args[1..]),
         Some("models") => crate::cli_info::models().map_err(Usage),
         Some("doctor") => crate::cli_info::doctor().map_err(Usage),
+        Some("version") => Ok(crate::cli_info::version()),
         Some("__supervise") => return supervise(&args[1..]),
         Some(name) => usage(format!(
             "unknown subcommand {name}; `delegate status <jobId>` prints a job's state, `delegate watch <jobId>` prints a job's state and result, and the id that superseded it\n{USAGE}"
