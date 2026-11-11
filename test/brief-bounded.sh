@@ -47,7 +47,9 @@ for budget in "$BRIEF_MAX_LINES" "$BRIEF_MAX_BYTES"; do
   if within_budget "$((budget + 1))" "$budget"; then fail "budget comparison accepts just above $budget"; fi
 done
 
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/brief-bounded.XXXXXX")" || fail "create temporary directory"
+# Fixed /tmp root, not the caller's TMPDIR: the filled brief embeds these
+# paths, so a longer TMPDIR (test/run's) would change the measured bytes.
+TMP_ROOT="$(mktemp -d /tmp/brief-bounded.XXXXXX)" || fail "create temporary directory"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 mkdir -p "$TMP_ROOT/tmp" "$TMP_ROOT/worktrees" "$TMP_ROOT/run-tkt" "$TMP_ROOT/run-pi" || fail "create test directories"
 TMPDIR="$TMP_ROOT/tmp"
