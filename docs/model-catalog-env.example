@@ -1,0 +1,13 @@
+# ANTHROPIC_API_KEY=
+# OPENAI_API_KEY=
+# GEMINI_API_KEY=
+# OPENROUTER_API_KEY=
+# DATABRICKS_TOKEN=
+# DATABRICKS_HOST=
+# MUSE_API_KEY=
+# MODEL_CATALOG_CODEX_CLIENT_VERSION=0.1.0
+#
+# Optional sibling file: ignore
+# Whitespace-separated vendor model field rows; blank lines and # comments are ignored.
+# Example known pin:
+# codex gpt-5.1 context
