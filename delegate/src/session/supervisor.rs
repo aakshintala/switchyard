@@ -28,9 +28,12 @@ pub const TERM_WAIT: u64 = 2_000;
 // before it reads stdin: separate bounds plus the prompt bound would reach
 // past START_WAIT.
 pub const PI_BOOT_WAIT: u64 = 30_000;
-// Existing pi continuation tests start TurnStarted in the settled-event cycle.
-// Thirty seconds is 15x the 2-second steer-settle wait, well above that observed
-// latency while leaving real-host scheduling headroom.
+// The fake pi starts TurnStarted in the settled-event cycle, but no real-pi
+// trace measures this latency. Thirty seconds is 15x STEER_SETTLE, a margin,
+// not a measurement. TurnStarted may wait on the first model response, so a slow
+// model or compaction can exceed this bound.
+// debt: measure a real-pi trace; upgrade if steer.unconsumed is followed by a
+// late continuation turn.
 pub const PI_CONTINUATION_WAIT: u64 = 30_000;
 
 fn pi_continuation_wait() -> Duration {
@@ -1104,29 +1107,34 @@ fn finish_replay_pending_state(state: &mut state::State, now: u64) -> bool {
 }
 
 fn replay_pending_steers(shared: &Arc<Shared>) {
-    let admission = lock(&shared.admission);
+    let mut admission = Some(lock(&shared.admission));
     let pi_host = shared.kind == HostKind::Pi;
     let queued_steers = if pi_host {
         lock(&shared.wire).queued_steer_ids()
     } else {
         Vec::new()
     };
-    if let Some(path) = std::env::var_os("DELEGATE_SESSION_TEST_REPLAY_DECISION_FILE") {
-        let _ = std::fs::write(path, b"checked");
-    }
 
     let current = shared.store.snapshot();
     let has_queued_pending = current
         .pending_steers
         .iter()
         .any(|pending| queued_steers.contains(&pending.command_id));
+    let mut force_unconsumed = false;
     if has_queued_pending && !current.stopping {
-        // The pi host normally starts its continuation in the same settled-event
-        // cycle; bound the exceptional case so a missed continuation cannot keep
-        // the session busy forever. See PI_CONTINUATION_WAIT for the rationale.
-        drop(admission);
+        // Bound the exceptional case so a missed continuation cannot keep the
+        // session busy forever. The bound and its unmeasured basis are documented
+        // at PI_CONTINUATION_WAIT.
+        drop(admission.take());
+        let wait_started = AtomicBool::new(false);
         let continued = shared.store.wait_until(
             |state| {
+                if !wait_started.swap(true, Ordering::SeqCst)
+                    && let Some(path) =
+                        std::env::var_os("DELEGATE_SESSION_TEST_CONTINUATION_WAIT_FILE")
+                {
+                    let _ = fs::write(path, b"waiting");
+                }
                 state.status != Status::Running || state.active_turn_id.is_some() || state.stopping
             },
             shared.config.pi_continuation_wait,
@@ -1138,34 +1146,28 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
             return;
         }
 
-        let _admission = lock(&shared.admission);
-        let mut idle_published = false;
-        let updated = update_store(shared, |state| {
-            if state.status != Status::Running || state.active_turn_id.is_some() {
-                return Vec::new();
-            }
-            let log = state::pending_steers_unconsumed(state).map(|decision| match decision {
-                state::PendingSteerReplay::Unconsumed { log } => log,
-                state::PendingSteerReplay::Started { .. } => unreachable!(),
-            });
-            idle_published = finish_replay_pending_state(state, now_ms());
-            log.into_iter().collect()
-        })
-        .is_ok();
-        if updated && idle_published {
-            let state = shared.store.snapshot();
-            if state.status == Status::Idle {
-                note_inbox(shared, &state.inbox, Note::Idle);
-            }
+        admission = Some(lock(&shared.admission));
+        let current = shared.store.snapshot();
+        if current.stopping {
+            return;
         }
-        return;
+        if current.status == Status::Running && current.active_turn_id.is_none() {
+            // Best effort, like the interrupt path: a late pi continuation may
+            // still run despite this clear request.
+            let _ = call(shared, "queue/clear", json!({}));
+            force_unconsumed = true;
+        }
     }
 
+    let _admission = admission;
     let mut replay_text = None;
     let mut replayed_ids = Vec::new();
     let mut idle_published = false;
     let updated = update_store(shared, |state| {
-        let decision = if pi_host {
+        if state.stopping || state.status != Status::Running || state.active_turn_id.is_some() {
+            return Vec::new();
+        }
+        let decision = if pi_host && !force_unconsumed {
             state::begin_pending_steer_replay(state, now_ms())
         } else {
             state::pending_steers_unconsumed(state)
@@ -1505,7 +1507,30 @@ fn stop_session(shared: &Arc<Shared>, interrupt: bool) -> Value {
         drop(admission);
         return reply;
     }
-    let current = shared.store.snapshot();
+    let mut current = shared.store.snapshot();
+    if current.status == Status::Running && current.active_turn_id.is_none() {
+        // The replay waiter exits when stopping is set. Stop must own the
+        // pending-steer cleanup and settle this no-active-turn session.
+        if update_store(shared, |state| {
+            if !state.stopping || state.status != Status::Running || state.active_turn_id.is_some()
+            {
+                return Vec::new();
+            }
+            let mut lines = Vec::new();
+            if let Some(state::PendingSteerReplay::Unconsumed { log }) =
+                state::pending_steers_unconsumed(state)
+            {
+                lines.push(log);
+            }
+            finish_replay_pending_state(state, now_ms());
+            lines
+        })
+        .is_err()
+        {
+            return error_reply("failed", "could not write session state");
+        }
+        current = shared.store.snapshot();
+    }
     let turn_id = current.active_turn_id.clone();
     let should_interrupt =
         should_interrupt && current.status == Status::Running && turn_id.is_some();
