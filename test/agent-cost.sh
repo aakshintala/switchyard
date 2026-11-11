@@ -104,7 +104,7 @@ USD_CLAUDE="$T/usd-claude"
 USD_PI="$T/usd-pi"
 USD_CODEX="$T/usd-codex"
 USD_LEDGER="$T/usd-delegate-cost.jsonl"
-mkdir -p "$USD_CLAUDE/encoded-project" "$USD_CLAUDE/opus5" "$USD_CLAUDE/opus48" "$USD_PI/workspace" "$USD_CODEX/2026/11/06"
+mkdir -p "$USD_CLAUDE/encoded-project" "$USD_CLAUDE/opus5" "$USD_CLAUDE/opus48" "$USD_PI/workspace" "$USD_PI/muse" "$USD_CODEX/2026/11/06"
 cat >"$USD_CLAUDE/encoded-project/main.jsonl" <<'FIXTURE'
 {"type":"assistant","timestamp":"2026-11-05T08:00:00Z","message":{"id":"dup-1","model":"claude-sonnet-5","usage":{"input_tokens":500,"output_tokens":10}}}
 {"type":"assistant","timestamp":"2026-11-05T08:00:01Z","message":{"id":"dup-1","model":"claude-sonnet-5","usage":{"input_tokens":1000,"output_tokens":100,"cache_read_input_tokens":200,"cache_creation_input_tokens":400,"cache_creation":{"ephemeral_1h_input_tokens":100}}}}
@@ -121,6 +121,11 @@ cat >"$USD_PI/workspace/session.jsonl" <<'FIXTURE'
 {"type":"session","cwd":"/work/pi-app"}
 {"type":"message","timestamp":"2026-11-05T09:00:00Z","message":{"role":"assistant","model":"claude-haiku-4-5","usage":{"input":100,"output":20,"cacheRead":50,"cacheWrite":10,"cost":{"total":99}}}}
 {"type":"message","timestamp":"2026-10-30T09:00:00Z","message":{"role":"assistant","model":"claude-haiku-4-5","usage":{"input":1000000,"output":0,"cacheRead":0,"cacheWrite":0}}}
+FIXTURE
+# A bare Muse id has no exact models.json key; it prices through its prefixed keys.
+cat >"$USD_PI/muse/session.jsonl" <<'FIXTURE'
+{"type":"session","cwd":"/work/muse-app"}
+{"type":"message","timestamp":"2026-11-05T10:00:00Z","message":{"role":"assistant","model":"muse-spark-1.3-contributor","usage":{"input":1000,"output":100,"cacheRead":500,"cacheWrite":0}}}
 FIXTURE
 python3 -I - "$USD_CODEX/2026/11/06/rollout.jsonl" "$USD_LEDGER" <<'PY'
 import json
@@ -172,13 +177,54 @@ contains '  model=experimental-model unpriced input=50 cacheRead=0 cacheWrite=0 
 contains '  project=encoded-project usd=0.004190000 unpricedRecords=1 unpriced=experimental-model(input=50,cacheRead=0,cacheWrite=0,output=2)'
 contains '  project=/work/pi-app usd=0.000217500'
 contains '  project=/work/codex-app usd=0.000071500'
-contains 'logs total pricedUsd=0.004603750 unpricedRecords=1'
+contains '  model=muse-spark-1.3-contributor usd=0.000121000 input=1000 cacheRead=500 cacheWrite=0 output=100'
+contains '  project=/work/muse-app usd=0.000121000'
+contains 'logs total pricedUsd=0.004724750 unpricedRecords=1'
 contains '  model=codex/gpt-6-luna usd=0.000071500 input=600 cacheRead=400 cacheWrite=20 output=10'
 contains '  model=experimental-ledger-model unpriced input=3 cacheRead=4 cacheWrite=5 output=6'
 contains '  project=/work/codex-app usd=0.000071500 unpricedRecords=1 unpriced=experimental-ledger-model(input=3,cacheRead=4,cacheWrite=5,output=6)'
 contains 'delegate ledger (separate total; may overlap log rows from the same jobs):'
 contains 'delegate ledger total recordedUsd=0.000071500 entries=2 unpricedRecords=1'
 case "$OUT" in *2000000*|*10000000*|*1000000*) fail "USD report used records before --since" ;; esac
+
+# Bare-id fallback, against fixture prices: it prices only when every matching key agrees,
+# and never changes a match the earlier candidates already make.
+python3 -I -B - "$BIN" <<'PY' || fail "bare-id pricing fallback"
+import sys
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+
+loader = SourceFileLoader("agent_cost", sys.argv[1])
+mod = module_from_spec(spec_from_loader("agent_cost", loader))
+loader.exec_module(mod)
+cheap = {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 0}
+dear = {"input": 3, "output": 6, "cacheRead": 0.3, "cacheWrite": 0}
+models = {
+    "muse/muse-spark-1.3-contributor": {"price": cheap},
+    "opencode-go/muse-spark-1.3-contributor": {"price": cheap},
+    "fiber/codex/gpt-6-luna:xhigh": {"price": cheap},
+    "openai/gpt-6-luna:medium": {"price": cheap},
+    "opencode-go/glm-5.3-flash": {"price": cheap},
+    "zen/glm-5.3-flash:max": {"price": dear},
+    "claude-haiku-4-5": {"price": dear},
+    "codex/gpt-6-sol": {"price": dear},
+}
+cases = [
+    (("muse-spark-1.3-contributor", "pi", models), ("muse-spark-1.3-contributor", "muse/muse-spark-1.3-contributor")),
+    (("gpt-6-luna", "pi", models), ("gpt-6-luna", "fiber/codex/gpt-6-luna:xhigh")),
+    (("glm-5.3-flash", "pi", models), ("glm-5.3-flash", None)),
+    (("claude-haiku-4-5", "pi", models), ("claude-haiku-4-5", "claude-haiku-4-5")),
+    (("gpt-6-sol", "codex", models), ("codex/gpt-6-sol", "codex/gpt-6-sol")),
+]
+for args, want in cases:
+    got = mod.model_and_price(*args)
+    if got != want:
+        sys.exit(f"model_and_price{args[:2]} = {got}, want {want}")
+usage = {"input": 1000, "cacheRead": 0, "cacheWrite": 0, "output": 100}
+usd = mod.price_usage("muse/muse-spark-1.3-contributor", usage, models, "pi")
+if abs(usd - 0.0012) > 1e-12:
+    sys.exit(f"bare muse usd = {usd}, want 0.0012")
+PY
 
 # XDG_CACHE_HOME isolates the default delegate ledger location too.
 mkdir -p "$T/xdg-cache/agents"
