@@ -281,32 +281,52 @@ fn last_event(s: &Setup) -> Instant {
         .last_event
 }
 
-fn wait_for_activity_past_initial_deadline(
+fn wait_for_rearmed_idle_window(
     s: &Setup,
+    id: &str,
     idle_window: Duration,
     send: impl FnOnce(&FakeHandle),
 ) {
     let initial_event = last_event(s);
+    let activity_deadline = initial_event + idle_window / 2;
+    wait_until("midpoint of initial idle window", Duration::from_secs(5), || {
+        Instant::now() >= activity_deadline
+    });
+
+    let before_activity = last_event(s);
     send(&s.fake.handle(0));
     wait_until("watchdog activity event", Duration::from_secs(5), || {
-        last_event(s) > initial_event
+        last_event(s) > before_activity
     });
 
     let activity_at = last_event(s);
     let original_deadline = initial_event + idle_window;
-    let scheduling_margin = Duration::from_millis(500);
     assert!(
-        activity_at + scheduling_margin < original_deadline,
-        "activity was not processed with enough margin before the original idle deadline"
+        activity_at + idle_window / 4 < original_deadline,
+        "activity was not processed with a clear margin before the original idle deadline"
     );
-    // Wait just beyond the deadline that would have killed the job without
-    // activity. The 500 ms margin still leaves most of the refreshed 2 s window.
-    let beyond_original_deadline = original_deadline + Duration::from_millis(50);
-    wait_until(
-        "original idle deadline after activity",
-        Duration::from_secs(5),
-        || Instant::now() >= beyond_original_deadline,
+
+    // Check the watchdog's recorded idle duration instead of sampling the narrow
+    // interval between the old and refreshed deadlines; this remains meaningful
+    // when the test thread is descheduled under load.
+    wait_until("rearmed watchdog stall", Duration::from_secs(5), || {
+        s.reg.poll(id).status_label() == "STALLED"
+    });
+    let text = terminal_text(&s.reg, id);
+    let idle = text
+        .split("idle ")
+        .nth(1)
+        .unwrap()
+        .split('s')
+        .next()
+        .unwrap()
+        .parse::<f64>()
+        .unwrap();
+    assert!(
+        idle >= idle_window.as_secs_f64(),
+        "watchdog did not measure a full idle window after activity: {text}"
     );
+    assert_eq!(s.fake.handle(0).killed(), ["SIGTERM"]);
 }
 
 /// Wait until the fake backend has recorded `want`: the recording itself
@@ -631,11 +651,9 @@ fn a_progress_event_rearms_the_idle_watchdog() {
     const IDLE_WINDOW: Duration = Duration::from_secs(2);
     let s = setup_with(|d| d.idle_ms = Some(IDLE_WINDOW.as_millis() as f64));
     let id = s.reg.dispatch(spec_of(|_| {}));
-    wait_for_activity_past_initial_deadline(&s, IDLE_WINDOW, |handle| {
+    wait_for_rearmed_idle_window(&s, &id, IDLE_WINDOW, |handle| {
         handle.progress("shell", 1.0, None, &[], None);
     });
-    assert!(s.fake.handle(0).killed().is_empty());
-    assert_eq!(s.reg.poll(&id), "RUNNING");
 }
 
 #[test]
@@ -717,9 +735,7 @@ fn raw_activity_rearms_the_watchdog() {
     const IDLE_WINDOW: Duration = Duration::from_secs(2);
     let s = setup_with(|d| d.idle_ms = Some(IDLE_WINDOW.as_millis() as f64));
     let id = s.reg.dispatch(spec_of(|_| {}));
-    wait_for_activity_past_initial_deadline(&s, IDLE_WINDOW, FakeHandle::activity);
-    assert!(s.fake.handle(0).killed().is_empty());
-    assert_eq!(s.reg.poll(&id), "RUNNING");
+    wait_for_rearmed_idle_window(&s, &id, IDLE_WINDOW, FakeHandle::activity);
 }
 
 #[test]

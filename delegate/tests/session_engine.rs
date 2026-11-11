@@ -933,14 +933,7 @@ fn supervisor_refused_steer_retries_after_idle_but_not_while_running() {
         state.status == Status::Running && state.active_turn_id.is_some()
     });
     let reply = ended.send("retry this text").unwrap();
-    assert_eq!(
-        reply["disposition"],
-        "started",
-        "unexpected retry reply: {reply}; state: {:?}; requests: {:?}; events: {:?}",
-        ended.state(),
-        ended.requests(),
-        ended.events()
-    );
+    assert_eq!(reply["disposition"], "started");
     let starts: Vec<_> = ended
         .requests()
         .into_iter()
@@ -984,6 +977,60 @@ fn supervisor_refused_steer_retries_after_idle_but_not_while_running() {
         request["method"] != "turn/start" || request["params"]["input"][0]["text"] != "do not queue"
     }));
     assert_eq!(held.stop_and_join(), 0);
+}
+
+#[test]
+fn supervisor_retries_refused_steer_when_completion_precedes_refusal_reply() {
+    let mut session = Session::spawn(
+        "STEERREFUSE_COMPLETION_FIRST",
+        "brief",
+        None,
+        Bounds {
+            steer_ms: 500,
+            ..Bounds::default()
+        },
+    );
+    session.until("initial held turn", |state| {
+        state.status == Status::Running && state.active_turn_id.is_some()
+    });
+
+    let completion_pending = session.fake_dir.join("steer-refusal-completed.pending");
+    let completion_release = session.fake_dir.join("steer-refusal-completed.release");
+    let (sender, reply_rx) = spawn_send(
+        &session,
+        "retry after completed turn",
+        Duration::from_secs(5),
+    );
+    session.until("completion before refusal reply", |state| {
+        completion_pending.exists()
+            && state.status == Status::Running
+            && state.active_turn_id.is_none()
+            && state
+                .last_turn
+                .as_ref()
+                .is_some_and(|turn| turn.terminal == "completed")
+    });
+
+    // The fake host withholds its refusal response until the completion event is
+    // durably reflected in session state, so drop_steer cannot race ahead of it.
+    std::fs::write(completion_release, "release").unwrap();
+    let reply = reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("refused-steer retry response")
+        .unwrap();
+    sender.join().unwrap();
+    assert_eq!(reply["disposition"], "started", "{reply}");
+
+    let starts: Vec<_> = session
+        .requests()
+        .into_iter()
+        .filter(|request| request["method"] == "turn/start")
+        .collect();
+    assert_eq!(
+        starts.last().unwrap()["params"]["input"][0]["text"],
+        "retry after completed turn"
+    );
+    assert_eq!(session.stop_and_join(), 0);
 }
 
 #[test]
