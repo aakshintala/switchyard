@@ -268,16 +268,6 @@ fn wait_killed(s: &Setup, want: &[&'static str]) {
     assert_eq!(s.fake.handle(0).killed(), want);
 }
 
-fn wait_for_records(s: &Setup, count: usize) {
-    for _ in 0..1000 {
-        if s.spy.len() >= count {
-            return;
-        }
-        sleep(Duration::from_millis(5));
-    }
-    assert!(s.spy.len() >= count, "expected at least {count} status records");
-}
-
 fn terminal_text(reg: &JobHandle, id: &str) -> String {
     match reg.poll(id) {
         PollResult::Terminal { result, .. } => result.text,
@@ -310,13 +300,15 @@ fn heartbeat_refreshes_running_record_and_stops_at_retirement() {
     let id = s.reg.dispatch(spec_of(|_| {}));
     assert_eq!(s.spy.len(), 1);
 
-    wait_for_records(&s, 2);
+    sleep(Duration::from_millis(150));
+    assert_eq!(s.spy.len(), 2);
     let (jid, rec) = s.spy.nth(1);
     assert_eq!(jid, id);
     assert_eq!(status_of(&rec), "RUNNING");
     assert!(rec["lastHeartbeatAt"].is_u64());
 
-    wait_for_records(&s, 3);
+    sleep(Duration::from_millis(100));
+    assert_eq!(s.spy.len(), 3);
 
     s.fake.handle(0).finish(done_ok());
     assert_eq!(settle(&s.reg, &id), "DONE");

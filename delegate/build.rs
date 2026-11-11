@@ -27,10 +27,26 @@ fn watch_git_path(manifest_dir: &str, git_path: &str) {
 
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    let commit =
-        git_output(&manifest_dir, &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+    // The paths that make up the binary. Watch them so the dirty marker below
+    // tracks edits made after the last build-script run.
+    let sources = ["src", "build.rs", "Cargo.toml", "Cargo.lock"];
+    for source in sources {
+        println!("cargo:rerun-if-changed={source}");
+    }
+    let commit = match git_output(&manifest_dir, &["rev-parse", "HEAD"]) {
+        Some(head) => {
+            let mut args = vec!["status", "--porcelain", "--"];
+            args.extend(sources);
+            // Uncommitted source edits: HEAD alone would claim a clean build.
+            if git_output(&manifest_dir, &args).is_some() {
+                format!("{head}-dirty")
+            } else {
+                head
+            }
+        }
+        None => "unknown".to_string(),
+    };
     println!("cargo:rustc-env=DELEGATE_BUILD_COMMIT={commit}");
-    println!("cargo:rerun-if-changed=build.rs");
 
     // Re-run when the checked-out commit changes, for both attached and
     // detached worktrees (the branch ref can live in the common git directory).
@@ -40,7 +56,12 @@ fn main() {
     if let Some(reference) = git_output(&manifest_dir, &["symbolic-ref", "-q", "HEAD"])
         && let Some(ref_path) = git_output(&manifest_dir, &["rev-parse", "--git-path", &reference])
     {
-        watch_git_path(&manifest_dir, &ref_path);
+        // A packed ref has no loose file, and cargo treats a missing watched
+        // path as always changed; packed-refs is watched below instead.
+        let loose = PathBuf::from(&manifest_dir).join(&ref_path);
+        if loose.exists() {
+            watch_git_path(&manifest_dir, &ref_path);
+        }
     }
     if let Some(packed_refs) =
         git_output(&manifest_dir, &["rev-parse", "--git-path", "packed-refs"])

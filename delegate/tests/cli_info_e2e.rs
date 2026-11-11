@@ -306,11 +306,16 @@ fn doctor_warns_when_installed_build_commit_predates_delegate_head() {
 
     let out = e.delegate(&["doctor"], None);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let warning = format!(
-        "warn  delegate binary is stale: built from {}, but delegate/ is at {delegate_head}",
-        env!("DELEGATE_BUILD_COMMIT")
-    );
-    assert!(stdout.contains(&warning), "{stdout}");
+    let build_commit = env!("DELEGATE_BUILD_COMMIT");
+    // A local build with uncommitted delegate/ edits has no commit to compare.
+    let expected = if build_commit.ends_with("-dirty") {
+        "skip  delegate build freshness: built from uncommitted delegate/ edits".to_string()
+    } else {
+        format!(
+            "warn  delegate binary is stale: built from {build_commit}, but delegate/ is at {delegate_head}"
+        )
+    };
+    assert!(stdout.contains(&expected), "{stdout}");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const BUILD_COMMIT: &str = env!("DELEGATE_BUILD_COMMIT");
+const BUILD_COMMIT: &str = env!("DELEGATE_BUILD_COMMIT");
 
 #[derive(Debug, Eq, PartialEq)]
 enum BuildFreshness {
@@ -13,6 +13,7 @@ enum BuildFreshness {
         delegate_head: String,
     },
     UnknownBuildCommit,
+    DirtyBuild,
     MissingCheckout(PathBuf),
     CannotCompare(PathBuf),
 }
@@ -33,6 +34,9 @@ fn checkout_path() -> Option<PathBuf> {
 fn check_freshness(build_commit: &str, checkout: Option<&Path>) -> BuildFreshness {
     if build_commit.is_empty() || build_commit == "unknown" {
         return BuildFreshness::UnknownBuildCommit;
+    }
+    if build_commit.ends_with("-dirty") {
+        return BuildFreshness::DirtyBuild;
     }
     let Some(checkout) = checkout else {
         return BuildFreshness::MissingCheckout(PathBuf::from("~/.agents"));
@@ -90,6 +94,9 @@ fn freshness_status(freshness: BuildFreshness) -> String {
         BuildFreshness::UnknownBuildCommit => {
             "skip  delegate build freshness: build commit is unknown\n".into()
         }
+        BuildFreshness::DirtyBuild => {
+            "skip  delegate build freshness: built from uncommitted delegate/ edits\n".into()
+        }
         BuildFreshness::MissingCheckout(path) => format!(
             "skip  delegate build freshness: checkout is missing ({})\n",
             path.display()
@@ -104,26 +111,19 @@ fn freshness_status(freshness: BuildFreshness) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::TempDir;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    struct TempRepo(PathBuf);
+    struct TempRepo(TempDir);
 
     impl TempRepo {
         fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "delegate-build-freshness-{}-{unique}",
-                std::process::id()
-            ));
-            fs::create_dir_all(path.join("delegate")).unwrap();
-            git(&path, &["init", "-q"]);
-            git(&path, &["config", "user.email", "test@example.invalid"]);
-            git(&path, &["config", "user.name", "Delegate build test"]);
-            Self(path)
+            let dir = TempDir::new("delegate-build-freshness");
+            fs::create_dir(dir.join("delegate")).unwrap();
+            git(&dir, &["init", "-q"]);
+            git(&dir, &["config", "user.email", "test@example.invalid"]);
+            git(&dir, &["config", "user.name", "Delegate build test"]);
+            Self(dir)
         }
 
         fn commit(&self, path: &str, contents: &str) -> String {
@@ -131,12 +131,6 @@ mod tests {
             git(&self.0, &["add", path]);
             git(&self.0, &["commit", "-qm", "test commit"]);
             git(&self.0, &["rev-parse", "HEAD"])
-        }
-    }
-
-    impl Drop for TempRepo {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
@@ -162,7 +156,7 @@ mod tests {
         let build_commit = repo.commit("delegate/source", "old build\n");
         let delegate_head = repo.commit("delegate/source", "new delegate source\n");
 
-        let warning = freshness_status(check_freshness(&build_commit, Some(&repo.0)));
+        let warning = freshness_status(check_freshness(&build_commit, Some(&*repo.0)));
         assert_eq!(
             warning,
             format!(
@@ -172,7 +166,7 @@ mod tests {
 
         let checkout_head = repo.commit("README", "unrelated later change\n");
         assert_eq!(
-            check_freshness(&delegate_head, Some(&repo.0)),
+            check_freshness(&delegate_head, Some(&*repo.0)),
             BuildFreshness::Current { delegate_head }
         );
         assert_ne!(checkout_head, build_commit);
@@ -183,6 +177,13 @@ mod tests {
         assert_eq!(
             freshness_status(check_freshness("unknown", None)),
             "skip  delegate build freshness: build commit is unknown\n"
+        );
+        assert_eq!(
+            freshness_status(check_freshness(
+                "0123456789012345678901234567890123456789-dirty",
+                None
+            )),
+            "skip  delegate build freshness: built from uncommitted delegate/ edits\n"
         );
         assert_eq!(
             freshness_status(check_freshness(
