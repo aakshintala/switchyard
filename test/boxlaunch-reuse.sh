@@ -32,6 +32,7 @@ case "${1:-}" in
     echo "stopped $2"
     ;;
   --bg)
+    [ "${FW_TEST_LAUNCH_FAIL:-0}" = 1 ] && { echo 'simulated launch failure'; exit 1; }
     [ -f "$FW_BOX_RUN/roster" ] || { echo 'missing box roster before lane start' >&2; exit 3; }
     name=""
     while [ $# -gt 0 ]; do
@@ -78,6 +79,14 @@ exit 0
 EOF
 cat >"$T/stub/lanecheck" <<'EOF'
 #!/usr/bin/env bash
+if [ "${1:-}" = done ]; then
+  if [ "${FW_TEST_RETIRE_FAIL:-0}" = 1 ]; then
+    echo 'simulated lanecheck done failure' >&2
+    exit 2
+  fi
+  exec env FW_FILE_CLAIM="$STUBD/stub/file-claim" \
+    FW_REPO=aakshintala/switchyard bash "$TEST_LANECHECK" "$@"
+fi
 cat "$BOX_LANE_OUTPUT"
 EOF
 cat >"$T/stub/noop" <<'EOF'
@@ -87,6 +96,7 @@ EOF
 chmod +x "$T/stub/"*
 
 export STUBD=$T BOX_AGENTS="$T/box-agents.json" MAC_AGENTS="$T/mac-agents.json"
+export TEST_LANECHECK="$BIN/lanecheck"
 export DELEGATE_JSON="$T/delegate.json" STOP_LOG="$T/stops.log" LAUNCH_LOG="$T/launches.log"
 export BOX_LANE_OUTPUT="$T/box-lanes.txt"
 export NEW_SESSION_ID=launch-id-2465
@@ -106,6 +116,7 @@ prepare_run() {
   : >"$run/roster-done"
 }
 launch_box() {
+  local phase=${1:-phase-plan}
   HOME="$T/mac-home" USER=fixture PATH="$T/stub:$PATH" \
     FW_RUN="$run" FW_BOX_RUN="$boxrun" FW_BOX_HOME="$boxhome" \
     FW_MAC_HOME="$T/mac-home" FW_BOX_HOST=fixture FW_LOCAL_BOX=0 \
@@ -113,7 +124,14 @@ launch_box() {
     FW_BOXSTALE="$T/stub/noop" FW_BOX_LANECHECK="$T/stub/lanecheck" \
     FW_BOX_LANES="${FW_TEST_BOX_LANES:-12}" \
     FW_NO_FENCE='fixture has no production fence' FW_NO_TMP_REAP="${FW_TEST_NO_TMP_REAP:-1}" NEWDISK=1 \
-    bash "$BIN/boxlaunch.sh" 2465 sonnet phase-plan
+    bash "$BIN/boxlaunch.sh" 2465 sonnet "$phase"
+}
+check_run_roster() {
+  HOME="$T/mac-home" PATH="$T/stub:$PATH" FW_RUN="$run" FW_SKIP_SAMPLER_CHECK=1 \
+    FW_LOCAL_BOX=0 BOX_SSH="$T/stub/ssh" FW_DELEGATE="$T/stub/delegate" \
+    FW_FILE_CLAIM="$T/stub/file-claim" FW_INBOX_WATCHERS="$T/stub/inbox-watchers" \
+    FW_BOXSTALE="$T/stub/noop" FW_REPO=aakshintala/switchyard \
+    bash "$BIN/lanecheck" 2>&1
 }
 
 rc=0
@@ -235,6 +253,49 @@ else
   fail "done-refuses-ambiguous-delegate-id (rc=$done_rc; $out; $(cat "$STOP_LOG"))"
 fi
 
+
+# A phase launch retires only the latest roster entry from its immediately
+# previous phase. Failed launches leave that entry visible to lanecheck.
+phase_retirement_case() {
+  local phase=$1 previous=$2 outcome=$3 label=$4
+  local previous_session="fiber-2465-$previous-deadbeef" launch_rc=0 check_rc=0 out
+  prepare_run "$label"
+  printf '%s\t2465\tbox\t%s\tprevious-session-id\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$previous_session" >"$run/roster"
+  printf '[]\n' >"$BOX_AGENTS"
+  : >"$LAUNCH_LOG"
+  if [ "$outcome" = success ] || [ "$outcome" = retirement-failure ]; then
+    if FW_TEST_LAUNCH_FAIL=0 FW_TEST_RETIRE_FAIL="$([[ $outcome = retirement-failure ]] && echo 1 || echo 0)" \
+        launch_box "$phase" >"$T/$label-launch.out" 2>&1; then :; else launch_rc=$?; fi
+  else
+    if FW_TEST_LAUNCH_FAIL=1 launch_box "$phase" >"$T/$label-launch.out" 2>&1; then launch_rc=0; else launch_rc=$?; fi
+  fi
+  if out=$(check_run_roster); then check_rc=0; else check_rc=$?; fi
+  if [ "$outcome" = success ]; then
+    local new_phase=${phase#phase-}
+    if [ "$launch_rc" = 0 ] && ! printf '%s\n' "$out" | grep -Fq "$previous_session" \
+        && printf '%s\n' "$out" | grep -Fq "fiber-2465-$new_phase-" \
+        && awk -F'\t' -v session="$previous_session" '$2 == "2465" && $3 == session { found=1 } END { exit !found }' "$run/roster-done"; then
+      ok "$label-launch-retires-previous-phase-in-lanecheck"
+    else
+      fail "$label-launch-retires-previous-phase-in-lanecheck (launch=$launch_rc check=$check_rc; $out; $(cat "$run/roster-done" 2>/dev/null))"
+    fi
+  elif [ "$outcome" = retirement-failure ] \
+      && [ "$launch_rc" = 0 ] && printf '%s\n' "$out" | grep -Fq "$previous_session" \
+      && grep -Fq 'WARNING could not retire' "$T/$label-launch.out" \
+      && grep -Fq "manually run: FW_DONE_FORCE=1 FW_RUN='$run' bash '$T/stub/lanecheck' done '2465:$previous_session'" "$T/$label-launch.out"; then
+    ok "$label-warns-but-launch-succeeds"
+  elif [ "$launch_rc" != 0 ] && printf '%s\n' "$out" | grep -Fq "$previous_session" \
+      && ! awk -F'\t' -v session="$previous_session" '$2 == "2465" && $3 == session { found=1 } END { exit !found }' "$run/roster-done"; then
+    ok "$label-failed-launch-keeps-previous-phase-in-lanecheck"
+  else
+    fail "$label-failed-launch-keeps-previous-phase-in-lanecheck (launch=$launch_rc check=$check_rc; $out; $(cat "$run/roster-done" 2>/dev/null))"
+  fi
+}
+phase_retirement_case phase-build plan success phase-build-success
+phase_retirement_case phase-ship build success phase-ship-success
+phase_retirement_case phase-build plan failed phase-build-failure
+phase_retirement_case phase-ship build failed phase-ship-failure
+phase_retirement_case phase-build plan retirement-failure phase-build-retirement-failure
 
 # The launch cap includes LIVE Claude/delegate lanes on Box and muse, plus
 # LIVE PI-BOX pidfile lanes. PI-MAC lanes do not consume Box capacity.

@@ -3,10 +3,12 @@
 # The ticket-orchestrator job engine (orch-tools-spec section 5, C2): probe the
 # shared lock, drift-check state head against the worktree, reuse a stored job
 # id, fill the brief from flags then state, write the gate script, dispatch
-# through delegate, watch with no timeout, follow supersededBy to the newest
-# record, and print one verdict line plus a digest of at most 40 lines. A
+# through delegate, watch with no timeout, follow supersededBy through shared
+# job-walk.sh, and print one verdict line plus a digest of at most 40 lines. A
 # dispatched job gets one JSON line per id in jobs.log beside the state file;
-# reruns recover a missing line without duplicating an existing entry.
+# gated dispatches journal the base64-encoded inner command and ticket env as
+# cmd64=<base64> env64=<base64> for gate verification.
+# Reruns recover a missing jobs.log line without duplicating an existing entry.
 # A verifier-r* slot's wall cap travels on the run call (--wall-ms); watch
 # only reads the record.
 # Every state read and write goes through tkt-state; the model comes from
@@ -40,6 +42,10 @@ resume=""
 prompt=""
 model=""
 gate=""
+inner_gate_cmd=""
+inner_gate_cmd64=""
+inner_gate_env64=""
+inherited_gate=0
 gate_from_plan=0
 expect_commits=0
 out_file=""
@@ -62,6 +68,7 @@ while [ $# -gt 0 ]; do
     *) usage ;;
   esac
 done
+inner_gate_cmd="$gate"
 [ -n "$slot" ] || usage
 # A prompt file only resumes; a resume needs its prompt and takes no fresh
 # brief. A resume may carry a gate; the two gate sources never combine.
@@ -86,6 +93,9 @@ if [ ! -r "$gate_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$gate_lib"
+job_walk_lib="$script_dir/lib/job-walk.sh"
+if [ ! -r "$job_walk_lib" ]; then echo "tkt-job: cannot read shared lib: $job_walk_lib" >&2; exit 2; fi
+. "$job_walk_lib"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then
   echo "tkt-job: cannot read shared lib: $namebase_lib" >&2
@@ -114,6 +124,29 @@ plangate="$bin_dir/plan-gate"
 
 tkt() {
   "$tkt_state" "$state" "$@"
+}
+
+validate_gate_journal_command() {
+  case "$inner_gate_cmd" in
+    *$'\n'*)
+      echo "tkt-job: gate command must be one line to journal it" >&2
+      exit 2
+      ;;
+  esac
+}
+
+journal_gate_command() {
+  [ -n "$inner_gate_cmd" ] || return 0
+  local cmd64 env64 env_value
+  if [ "$inherited_gate" -eq 1 ]; then
+    cmd64="$inner_gate_cmd64"
+    env64="$inner_gate_env64"
+  else
+    cmd64="$(printf '%s' "$inner_gate_cmd" | jq -Rrs '@base64')" || return 0
+    env_value="$(tkt get env 2>/dev/null || true)"
+    env64="$(printf '%s' "$env_value" | jq -Rrs '@base64')" || return 0
+  fi
+  tkt journal "tkt-job gate slot=$slot job=$jobid cmd64=$cmd64 env64=$env64"
 }
 
 # Probe the shared lock and release it at once: the delegate wait below
@@ -190,6 +223,8 @@ build_gate_from_plan() {
     echo "tkt-job: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>: $gate_cmd" >&2
     exit 2
   }
+  inner_gate_cmd="$gate_cmd"
+  validate_gate_journal_command
   # The gate script keeps the whole chain inside the redirected block and is
   # judged by its exit code, never the log line (see bin/lib/gate-script.sh).
   env_prefix=""
@@ -313,7 +348,20 @@ if [ -n "$resume" ]; then
   if [ "$gate_from_plan" -eq 1 ]; then
     build_gate_from_plan
   fi
-  # An empty --gate is the same as no flag: the resume inherits the stored gate.
+  if [ -z "$inner_gate_cmd" ]; then
+    inherited_line="$(grep -F "tkt-job gate " "${state%.state}.journal" 2>/dev/null | grep -F "job=$resume " | tail -n 1 || true)"
+    inherited_payload="${inherited_line#* tkt-job gate }"
+    case "$inherited_payload" in
+      *" cmd64="*" env64="*)
+        inherited_rest="${inherited_payload#* cmd64=}"
+        inner_gate_cmd64="${inherited_rest%% env64=*}"
+        inner_gate_env64="${inherited_rest#* env64=}"
+        inner_gate_cmd="$(printf '%s' "$inner_gate_cmd64" | jq -Rrs '@base64d' 2>/dev/null)" || inner_gate_cmd=""
+        if [ -n "$inner_gate_cmd" ]; then inherited_gate=1; fi
+        ;;
+    esac
+  fi
+  validate_gate_journal_command
   gate_args=()
   if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
   # No --model keeps the stored model; delegate itself refuses a backend switch.
@@ -324,6 +372,7 @@ if [ -n "$resume" ]; then
   tkt set "job.$slot" "$jobid"
   tkt set "job.$slot.prompt" "$prompt_hash"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"
+  journal_gate_command
   fresh=1
 elif [ -n "$stored" ]; then
   # A stored id never dispatches again: a matching or legacy prompt only watches.
@@ -335,6 +384,7 @@ else
   if [ "$gate_from_plan" -eq 1 ]; then
     build_gate_from_plan
   fi
+  validate_gate_journal_command
   prepare_brief
   prompt_hash="$(shasum -a 256 <"$brief" | awk '{print $1}')"
   if [ -z "$model" ]; then
@@ -357,6 +407,7 @@ else
   tkt set "job.$slot" "$jobid"
   tkt set "job.$slot.prompt" "$prompt_hash"
   tkt journal "tkt-job dispatch slot=$slot id=$jobid"
+  journal_gate_command
   fresh=1
 fi
 
@@ -395,17 +446,14 @@ fi
 # Follow supersededBy to the newest record; a loop is unrecognised, not a hang.
 # Each link resolves through the lookup, so a chain may span directories.
 broken=0
-seen=" $jobid "
-while [ -f "$record" ]; do
-  sup="$(jq -r '.supersededBy // empty' "$record" 2>/dev/null || true)"
-  [ -n "$sup" ] || break
-  case "$seen" in
-    *" $sup "*) broken=1; break ;;
-  esac
-  seen="$seen$sup "
-  jobid="$sup"
-  record="$(rec_of "$jobid")"
-done
+chain="$(job_walk_superseded "$jobid")" || broken=1
+if [ -n "$chain" ]; then
+  while IFS=$'\t' read -r chain_id chain_record; do
+    [ -n "$chain_id" ] || continue
+    jobid="$chain_id"
+    record="$chain_record"
+  done <<<"$chain"
+fi
 
 verdict=""
 digest="id=$jobid"
