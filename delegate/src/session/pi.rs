@@ -920,6 +920,55 @@ mod tests {
         include_str!("../../tests/fixtures/contract/pi-rpc/after-abort.jsonl");
     const SET_MODEL_BAD: &str =
         include_str!("../../tests/fixtures/contract/pi-rpc/set-model-bad.jsonl");
+    const FORBIDDEN_PRIVATE_MARKERS: [&str; 2] = ["/Users/", "Global agent notes"];
+    const CONTINUATION_BEAM_FREE_EARLY_STEER: &str = include_str!(
+        "../../tests/fixtures/contract/pi-rpc/continuation-beam-free-early-steer.jsonl"
+    );
+    const CONTINUATION_BEAM_FREE_POST_TOOL: &str =
+        include_str!("../../tests/fixtures/contract/pi-rpc/continuation-beam-free-post-tool.jsonl");
+    const CONTINUATION_GPT_6_LUNA_POST_TOOL: &str = include_str!(
+        "../../tests/fixtures/contract/pi-rpc/continuation-gpt-6-luna-post-tool.jsonl"
+    );
+
+    fn check_system_sections_redacted(value: &serde_json::Value, fixture: &str) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if object.get("role").and_then(serde_json::Value::as_str) == Some("system")
+                    && let Some(sections) = object.get("sections")
+                {
+                    let sections = sections
+                        .as_object()
+                        .unwrap_or_else(|| panic!("{fixture} system sections must be an object"));
+                    for (name, value) in sections {
+                        assert_eq!(
+                            value.as_str(),
+                            Some("[redacted]"),
+                            "{fixture} system section {name} must be redacted"
+                        );
+                    }
+                }
+                for value in object.values() {
+                    check_system_sections_redacted(value, fixture);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    check_system_sections_redacted(item, fixture);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "system section project_context must be redacted")]
+    fn redaction_guard_rejects_an_unredacted_system_section_value() {
+        let frame = serde_json::json!({
+            "role": "system",
+            "sections": {"project_context": "private prompt"}
+        });
+        check_system_sections_redacted(&frame, "synthetic negative control");
+    }
 
     fn check_response_id(value: &serde_json::Value) {
         match value {
@@ -2246,50 +2295,84 @@ mod tests {
         use serde_json::{Value, json};
 
         const STEER: &str = "For the queued continuation, reply with exactly: queued steer handled";
-        let dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/recorded/pi");
-        for stem in [
-            "continuation-beam-free-early-steer",
-            "continuation-beam-free-post-tool",
-            "continuation-gpt-6-luna-post-tool",
+        for (stem, transcript, post_tool) in [
+            (
+                "continuation-beam-free-early-steer",
+                CONTINUATION_BEAM_FREE_EARLY_STEER,
+                false,
+            ),
+            (
+                "continuation-beam-free-post-tool",
+                CONTINUATION_BEAM_FREE_POST_TOOL,
+                true,
+            ),
+            (
+                "continuation-gpt-6-luna-post-tool",
+                CONTINUATION_GPT_6_LUNA_POST_TOOL,
+                true,
+            ),
         ] {
-            let path = dir.join(format!("{stem}.stdout"));
-            let stdout = std::fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
             let mut wire = super::Wire::new();
-            wire.encode(
-                1,
-                "turn/start",
-                &json!({"input":[{"type":"text","text":super::TRIGGER}],"commandId":"recorded-start"}),
-            )
-            .unwrap();
+            let start = wire
+                .encode(
+                    1,
+                    "turn/start",
+                    &json!({"input":[{"type":"text","text":super::TRIGGER}],"commandId":"recorded-start"}),
+                )
+                .unwrap();
+            let start_frame: Value = serde_json::from_str(&start).unwrap();
 
+            let mut start_encoded = false;
             let mut steer_encoded = false;
+            let mut tool_started = false;
+            let mut tool_completed = false;
             let mut queued_ack = false;
             let mut queued_at_turn_end = false;
             let mut continuation_started = false;
             let mut queue_cleared = false;
             let mut steer_delivered = false;
+            let mut settled = false;
             let mut host_turn_starts = 0;
-            for line in stdout.lines() {
-                let frame: Value = serde_json::from_str(line)
-                    .unwrap_or_else(|error| panic!("{stem} invalid RPC line: {error}"));
-                if frame["type"] == "queue_update"
-                    && frame["steering"]
-                        .as_array()
-                        .is_some_and(|steering| steering.iter().any(|text| text == STEER))
-                    && !steer_encoded
-                {
-                    wire.encode(
-                        2,
-                        "turn/steer",
-                        &json!({"input":[{"type":"text","text":STEER}],"commandId":"recorded-steer"}),
-                    )
-                    .unwrap();
-                    steer_encoded = true;
+            for line in transcript.lines() {
+                if let Some(stdin) = line.strip_prefix("> ") {
+                    let frame: Value = serde_json::from_str(stdin)
+                        .unwrap_or_else(|error| panic!("{stem} invalid stdin frame: {error}"));
+                    if frame["streamingBehavior"] == "steer" {
+                        assert!(!steer_encoded, "{stem} has one steer input");
+                        assert_eq!(tool_started, post_tool, "{stem} steer timing vs tool call");
+                        assert_eq!(tool_completed, post_tool, "{stem} steer timing vs tool end");
+                        let encoded = wire
+                            .encode(
+                                2,
+                                "turn/steer",
+                                &json!({"input":[{"type":"text","text":STEER}],"commandId":"recorded-steer"}),
+                            )
+                            .unwrap();
+                        assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), frame);
+                        steer_encoded = true;
+                    } else {
+                        assert!(!start_encoded, "{stem} has one initial prompt");
+                        assert_eq!(frame, start_frame, "{stem} initial stdin frame");
+                        start_encoded = true;
+                    }
+                    continue;
                 }
 
-                let incoming = wire.parse(line);
+                let stdout = line
+                    .strip_prefix("< ")
+                    .unwrap_or_else(|| panic!("{stem} transcript line lacks direction: {line}"));
+                let frame: Value = serde_json::from_str(stdout)
+                    .unwrap_or_else(|error| panic!("{stem} invalid RPC line: {error}"));
+                match frame["type"].as_str() {
+                    Some("tool_execution_start") => tool_started = true,
+                    Some("tool_execution_end") => {
+                        assert!(tool_started, "{stem} tool ended before it started");
+                        tool_completed = true;
+                    }
+                    _ => {}
+                }
+
+                let incoming = wire.parse(stdout);
                 if incoming
                     .iter()
                     .any(|item| matches!(item, Incoming::Event(HostEvent::TurnStarted { .. })))
@@ -2301,7 +2384,7 @@ mod tests {
                         .as_array()
                         .is_some_and(|steering| steering.iter().any(|text| text == STEER))
                 {
-                    assert!(steer_encoded, "{stem} steer command was not encoded");
+                    assert!(steer_encoded, "{stem} steer input precedes queue update");
                     assert_eq!(wire.queued_steers(), 1, "{stem} queued steer");
                 }
                 if frame["type"] == "response" && frame["id"] == "2" {
@@ -2362,7 +2445,13 @@ mod tests {
                     );
                     steer_delivered = true;
                 }
+                if frame["type"] == "agent_settled" {
+                    assert_eq!(wire.queued_steers(), 0, "{stem} queue clear before settle");
+                    assert!(queue_cleared, "{stem} settled after queue clear");
+                    settled = true;
+                }
             }
+            assert!(start_encoded, "{stem} has an initial prompt");
             assert!(steer_encoded, "{stem} has a queued steer");
             assert!(queued_ack, "{stem} has a queued acknowledgement");
             assert!(
@@ -2372,6 +2461,7 @@ mod tests {
             assert!(continuation_started, "{stem} has the next pi turn_start");
             assert!(queue_cleared, "{stem} clears the queue at continuation");
             assert!(steer_delivered, "{stem} delivers the steer once");
+            assert!(settled, "{stem} settles after the queue clears");
             assert_eq!(host_turn_starts, 1, "{stem} has no second host TurnStarted");
         }
     }
@@ -2384,6 +2474,21 @@ mod tests {
             ("steer-abort", STEER_ABORT, 34),
             ("after-abort", AFTER_ABORT, 16),
             ("set-model-bad", SET_MODEL_BAD, 2),
+            (
+                "continuation-beam-free-early-steer",
+                CONTINUATION_BEAM_FREE_EARLY_STEER,
+                15,
+            ),
+            (
+                "continuation-beam-free-post-tool",
+                CONTINUATION_BEAM_FREE_POST_TOOL,
+                18,
+            ),
+            (
+                "continuation-gpt-6-luna-post-tool",
+                CONTINUATION_GPT_6_LUNA_POST_TOOL,
+                18,
+            ),
         ];
         for (name, text, expected_lines) in fixtures {
             let lines: Vec<&str> = text.lines().collect();
@@ -2402,9 +2507,11 @@ mod tests {
                     serde_json::from_str(frame).expect("{name} frame must parse as JSON");
                 assert!(parsed.is_object(), "{name} frame must be a JSON object");
                 check_response_id(&parsed);
+                check_system_sections_redacted(&parsed, name);
             }
             for forbidden in [
-                "/Users/",
+                FORBIDDEN_PRIVATE_MARKERS[0],
+                FORBIDDEN_PRIVATE_MARKERS[1],
                 "aakshintala",
                 "sessions-spike",
                 "/opt/homebrew",
@@ -2416,6 +2523,49 @@ mod tests {
                     "{name} must not contain {forbidden}"
                 );
             }
+        }
+
+        let recorded_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/recorded/pi");
+        for stem in [
+            "continuation-beam-free-early-steer",
+            "continuation-beam-free-post-tool",
+            "continuation-gpt-6-luna-post-tool",
+        ] {
+            let mut stdout = None;
+            let mut timings = None;
+            for extension in ["stdout", "stderr", "argv", "timings.tsv"] {
+                let path = recorded_dir.join(format!("{stem}.{extension}"));
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                for forbidden in FORBIDDEN_PRIVATE_MARKERS {
+                    assert!(
+                        !text.contains(forbidden),
+                        "{stem}.{extension} must not contain {forbidden}"
+                    );
+                }
+                if extension == "stdout" {
+                    for (index, line) in text.lines().enumerate() {
+                        let frame: serde_json::Value = serde_json::from_str(line)
+                            .unwrap_or_else(|error| panic!("{stem} line {}: {error}", index + 1));
+                        check_system_sections_redacted(&frame, stem);
+                    }
+                    stdout = Some(text);
+                } else if extension == "timings.tsv" {
+                    timings = Some(text);
+                }
+            }
+            let stdout_lines = stdout.expect("stdout read").lines().count();
+            let timing_rows = timings.expect("timings read").lines().skip(1).count();
+            assert_eq!(stdout_lines, timing_rows, "{stem} timing rows");
+        }
+        let note = std::fs::read_to_string(recorded_dir.join("continuation-latency.md"))
+            .expect("continuation latency note");
+        for forbidden in FORBIDDEN_PRIVATE_MARKERS {
+            assert!(
+                !note.contains(forbidden),
+                "continuation note must not contain {forbidden}"
+            );
         }
     }
 }

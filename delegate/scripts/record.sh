@@ -2,7 +2,10 @@
 # Run one prompt through a backend's raw headless CLI and save stdout/stderr as a parser fixture.
 #
 #   scripts/record.sh BACKEND MODEL NAME [CWD] [SESSION] < prompt
+#   scripts/record.sh --redact FILE...
 #
+# --redact applies the recording redaction to an existing JSON-lines capture,
+# including RPC traces captured by a session host, then leak-scans the files.
 # BACKEND: cursor | pi | claude. Every backend records with its write flags.
 # SESSION resumes that backend session; pi and claude get a fresh id when it is omitted.
 # CANCEL_AFTER=N sends the CLI SIGTERM after N seconds.
@@ -11,9 +14,27 @@
 # tests/fixtures/contract/BACKEND/ instead, for curated parser-contract streams.
 set -uo pipefail
 
+here="$(cd "$(dirname "$0")" && pwd)"
+redact_files() {
+  for f in "$@"; do
+    if jq -rR -L "$here" 'include "redact"; (fromjson? | redact | tojson) // .' "$f" \
+      | sed "s|${HOME:?}|[redacted]|g; s|${USER:?}|user|g" > "$f.tmp"; then
+      mv "$f.tmp" "$f"
+    else
+      rm -f "$f.tmp"
+      return 1
+    fi
+  done
+}
+if [ "${1:-}" = "--redact" ]; then
+  shift
+  [ "$#" -gt 0 ] || { echo "usage: $0 --redact FILE..." >&2; exit 2; }
+  redact_files "$@" || exit 2
+  "$here/leak-scan.sh" "$@"
+  exit $?
+fi
 [ $# -ge 3 ] || { sed -n 2,11p "$0"; exit 2; }
 backend=$1 model=$2 name=$3 cwd=${4:-$PWD} session=${5:-}
-here="$(cd "$(dirname "$0")" && pwd)"
 kind=${FIXTURE_KIND:-recorded}
 case "$kind" in contract|recorded) ;; *) echo "bad fixture kind: $kind" >&2; exit 2 ;; esac
 out="$here/../tests/fixtures/$kind/$backend"
@@ -44,10 +65,7 @@ pid=$!
 [ -n "${CANCEL_AFTER:-}" ] && sleep "$CANCEL_AFTER" && kill -TERM "$pid" 2>/dev/null
 wait "$pid"
 code=$?
-# Redact the user's setup (see redact.jq) and home-directory name; non-JSON lines pass through.
-for f in "$out/$name".{stdout,stderr,argv}; do
-  jq -rR -L "$here" 'include "redact"; (fromjson? | redact | tojson) // .' "$f" | sed "s/${USER:?}/user/g" > "$f.tmp" && mv "$f.tmp" "$f"
-done
+redact_files "$out/$name.stdout" "$out/$name.stderr" "$out/$name.argv" || exit 2
 # Leak-scan the files just written, after redaction. On a hit the fixture
 # is deleted and recording fails: a fixture quoting a pattern is not
 # committed (no allowlist). The scan prints pattern names only, never

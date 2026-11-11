@@ -29,11 +29,12 @@ pub const TERM_WAIT: u64 = 2_000;
 // before it reads stdin: separate bounds plus the prompt bound would reach
 // past START_WAIT.
 pub const PI_BOOT_WAIT: u64 = 30_000;
-// Real pi 1.5.0 RPC traces kept a queued steer through turn_end; the next
-// internal turn_start followed 0.098-0.147 ms later. Thirty seconds is over
-// 204,000x the largest observed gap. The traces did not exercise the rare
-// post-agent_settled wait for a host TurnStarted; keep this bound as a safety
-// deadline for a continuation that pi leaves queued after settling.
+// In pi 1.5.0 traces, any steer still queued at turn_end is consumed by pi's
+// next internal turn_start about 0.1 ms later, and the queue clears before
+// agent_settled. The supervisor's post-settle wait for a host TurnStarted is
+// therefore not entered in normal flow; 30 seconds remains a safety deadline
+// for that unmeasured path.
+// debt: measure the post-agent_settled host TurnStarted gap; upgrade if steer.unconsumed is followed by a late continuation.
 pub const PI_CONTINUATION_WAIT: u64 = 30_000;
 
 fn pi_continuation_wait() -> Duration {
