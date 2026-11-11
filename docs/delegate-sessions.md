@@ -37,7 +37,7 @@ A matching turn completion with no pending steers changes the session from `runn
 
 ## Pi host contracts
 
-A steer queued during a tool call reaches the next continuation: it is delivered after that turn's tool calls and before the next model call, and no `steer.unconsumed` line is emitted for it.
+A steer queued during a tool call reaches the next continuation: it is delivered after that turn's tool calls and before the next model call, and no `steer.unconsumed` line is emitted for it. When pi still reports the steer queued at turn end, the session stays `running` while waiting for `turn.started`; if no continuation starts within 30 seconds, the pending steers are logged as `steer.unconsumed` and the session becomes `idle` with one inbox note. Existing pi continuation tests start `TurnStarted` in the settled-event cycle; 30 seconds is a 15× margin over the existing 2-second steer-settle wait. Tests or hosts can override the bound with `DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS`.
 
 An interrupt requests that pi clear its queue before the abort. This is best-effort: pi may still continue queued messages after `stop --interrupt`; callers must not treat the clear request as proof that every queued steer was dropped. The host survives, the session returns to `idle` when the abort settles, and any unsent steer reported on the cancelled completion is logged as `steer.unconsumed`. The remaining interrupt/queue race is tracked as debt in `delegate/src/session/supervisor.rs`.
 

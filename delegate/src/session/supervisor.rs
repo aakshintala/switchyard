@@ -28,6 +28,18 @@ pub const TERM_WAIT: u64 = 2_000;
 // before it reads stdin: separate bounds plus the prompt bound would reach
 // past START_WAIT.
 pub const PI_BOOT_WAIT: u64 = 30_000;
+// Existing pi continuation tests start TurnStarted in the settled-event cycle.
+// Thirty seconds is 15x the 2-second steer-settle wait, well above that observed
+// latency while leaving real-host scheduling headroom.
+pub const PI_CONTINUATION_WAIT: u64 = 30_000;
+
+fn pi_continuation_wait() -> Duration {
+    std::env::var("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(PI_CONTINUATION_WAIT))
+}
 
 fn pi_boot_wait() -> Duration {
     std::env::var("DELEGATE_SESSION_PI_BOOT_WAIT_MS")
@@ -48,6 +60,7 @@ pub struct SupervisorConfig {
     pub muse_bin: String,
     pub rpc_timeout: Duration,
     pub steer_settle: Duration,
+    pub pi_continuation_wait: Duration,
     pub interrupt_wait: Duration,
     pub stop_grace: Duration,
     pub term_wait: Duration,
@@ -67,6 +80,7 @@ impl SupervisorConfig {
             muse_bin: msp::resolve_muse_bin(),
             rpc_timeout: Duration::from_millis(RPC_TIMEOUT),
             steer_settle: Duration::from_millis(STEER_SETTLE),
+            pi_continuation_wait: pi_continuation_wait(),
             interrupt_wait: Duration::from_millis(INTERRUPT_WAIT),
             stop_grace: grace_ms
                 .map(Duration::from_millis)
@@ -1090,7 +1104,7 @@ fn finish_replay_pending_state(state: &mut state::State, now: u64) -> bool {
 }
 
 fn replay_pending_steers(shared: &Arc<Shared>) {
-    let _admission = lock(&shared.admission);
+    let admission = lock(&shared.admission);
     let pi_host = shared.kind == HostKind::Pi;
     let queued_steers = if pi_host {
         lock(&shared.wire).queued_steer_ids()
@@ -1101,24 +1115,56 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
         let _ = std::fs::write(path, b"checked");
     }
 
+    let current = shared.store.snapshot();
+    let has_queued_pending = current
+        .pending_steers
+        .iter()
+        .any(|pending| queued_steers.contains(&pending.command_id));
+    if has_queued_pending && !current.stopping {
+        // The pi host normally starts its continuation in the same settled-event
+        // cycle; bound the exceptional case so a missed continuation cannot keep
+        // the session busy forever. See PI_CONTINUATION_WAIT for the rationale.
+        drop(admission);
+        let continued = shared.store.wait_until(
+            |state| {
+                state.status != Status::Running || state.active_turn_id.is_some() || state.stopping
+            },
+            shared.config.pi_continuation_wait,
+        );
+        if continued
+            .as_ref()
+            .is_some_and(|state| state.status == Status::Running && state.active_turn_id.is_some())
+        {
+            return;
+        }
+
+        let _admission = lock(&shared.admission);
+        let mut idle_published = false;
+        let updated = update_store(shared, |state| {
+            if state.status != Status::Running || state.active_turn_id.is_some() {
+                return Vec::new();
+            }
+            let log = state::pending_steers_unconsumed(state).map(|decision| match decision {
+                state::PendingSteerReplay::Unconsumed { log } => log,
+                state::PendingSteerReplay::Started { .. } => unreachable!(),
+            });
+            idle_published = finish_replay_pending_state(state, now_ms());
+            log.into_iter().collect()
+        })
+        .is_ok();
+        if updated && idle_published {
+            let state = shared.store.snapshot();
+            if state.status == Status::Idle {
+                note_inbox(shared, &state.inbox, Note::Idle);
+            }
+        }
+        return;
+    }
+
     let mut replay_text = None;
     let mut replayed_ids = Vec::new();
     let mut idle_published = false;
     let updated = update_store(shared, |state| {
-        let has_queued_pending = state
-            .pending_steers
-            .iter()
-            .any(|pending| queued_steers.contains(&pending.command_id));
-        if has_queued_pending && !state.stopping {
-            // pi's host contract delivers queued steers on the next continuation
-            // (docs/delegate-sessions.md:40); the fake models this in
-            // tests/support/pi_host_fake.py:131-145, and
-            // steer_racing_the_end_of_a_turn_starts_the_next_turn holds
-            // TurnStarted before releasing the host (tests/session_pi_e2e.rs:1440).
-            // Stay busy until that turn starts and completes, then reconsider
-            // any dropped steers under admission.
-            return Vec::new();
-        }
         let decision = if pi_host {
             state::begin_pending_steer_replay(state, now_ms())
         } else {

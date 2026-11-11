@@ -129,6 +129,7 @@ impl Session {
             muse_bin: muse_bin.unwrap_or_else(|| fake.to_string_lossy().into_owned()),
             rpc_timeout: Duration::from_millis(bounds.rpc_ms),
             steer_settle: Duration::from_millis(bounds.steer_ms),
+            pi_continuation_wait: Duration::from_millis(supervisor::PI_CONTINUATION_WAIT),
             interrupt_wait: Duration::from_millis(bounds.interrupt_ms),
             stop_grace: Duration::from_millis(bounds.stop_ms),
             term_wait: Duration::from_millis(bounds.term_ms),

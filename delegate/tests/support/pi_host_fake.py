@@ -169,6 +169,10 @@ def finish_hold(completed):
             QUEUE.clear()
             send({"type": "queue_update", "steering": [], "followUp": []})
         send({"type": "turn_end"})
+        if "NO_CONTINUATION" in SCENARIOS:
+            send({"type": "agent_end", "messages": [], "willRetry": False})
+            send({"type": "agent_settled", "aborted": False})
+            return
         if QUEUE:
             deliver_queue()
             return

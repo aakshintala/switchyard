@@ -811,6 +811,58 @@ fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
 }
 
 #[test]
+fn all_queued_pi_steers_become_unconsumed_if_no_continuation_starts() {
+    let h = Harness::new();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_TOOL,NO_CONTINUATION",
+        None,
+        &[("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS", "150")],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    let steered = h.invoke(&["send", &id, "NEVER-CONTINUE", "--json"]);
+    assert!(steered.status.success());
+    let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    let command_id = pending[0]["commandId"].as_str().unwrap();
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    h.wait_state(&id, "settled turn with queued steer", |state| {
+        state["status"] == "running"
+            && state["activeTurnId"].is_null()
+            && state["lastTurn"]["terminal"] == "completed"
+    });
+    let idle = h.wait_state(&id, "idle after continuation deadline", |state| {
+        state["status"] == "idle"
+    });
+    assert!(idle["pendingSteers"].as_array().unwrap().is_empty());
+    h.notes_poll(&id, "idle", 1);
+
+    let logs = h.logs(&id);
+    let unconsumed: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "steer.unconsumed")
+        .collect();
+    assert_eq!(unconsumed.len(), 1, "{logs:?}");
+    assert_eq!(unconsumed[0]["commandIds"], serde_json::json!([command_id]));
+    assert!(
+        logs.iter().all(|line| line["kind"] != "steer.replayed"),
+        "{logs:?}"
+    );
+    assert_eq!(h.notes(&id, "idle").len(), 1);
+}
+
+#[test]
 fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
     let h = Harness::new();
     let release_event_write = h.base.join("release-event-write");
@@ -1466,6 +1518,7 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
                 "DELEGATE_SESSION_TEST_REPLAY_DECISION_FILE",
                 replay_decision_env,
             ),
+            ("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS", "3000"),
         ],
     );
     assert!(
