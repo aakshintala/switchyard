@@ -186,10 +186,19 @@ def clean_url(base, path):
     return urllib.parse.urljoin(base.rstrip("/") + "/", path.lstrip("/"))
 
 
+class RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    # urllib copies credential headers onto a redirect, even across hosts, so refuse every 30x.
+    def redirect_request(self, *_args):
+        raise FetchFailure("redirect")
+
+
+OPENER = urllib.request.build_opener(RefuseRedirect)
+
+
 def request_json(url, headers, timeout):
     request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with OPENER.open(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         raise FetchFailure(f"HTTP {error.code}") from None

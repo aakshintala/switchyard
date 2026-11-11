@@ -130,6 +130,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
             send_json(self, {"endpoints": [{"name": "db-one", "task": "llm/v1/chat"}, {"name": "db-embed", "task": "llm/v1/embeddings"}]})
         elif path == "/muse/v1/models":
             send_json(self, {"data": [{"id": "muse-one"}]})
+        elif path == "/muse-redirect/v1/models":
+            self.send_response(302)
+            self.send_header("Location", f"{sink_base}/muse/v1/models")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         else:
             send_json(self, {"error": "unknown fixture route"}, status=404)
 
@@ -138,6 +143,23 @@ server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
 thread = threading.Thread(target=server.serve_forever, daemon=True)
 thread.start()
 base = f"http://127.0.0.1:{server.server_port}"
+
+# A second server stands in for wherever a vendor's 30x points; it must never see a request.
+sink_requests = []
+
+
+class SinkHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        sink_requests.append((self.path, dict(self.headers)))
+        send_json(self, {"data": [{"id": "muse-one"}]})
+
+
+sink = ThreadingHTTPServer(("127.0.0.1", 0), SinkHandler)
+threading.Thread(target=sink.serve_forever, daemon=True).start()
+sink_base = f"http://127.0.0.1:{sink.server_port}"
 
 
 def write_credentials(include_muse):
@@ -246,6 +268,16 @@ try:
     expect("muse: connection refused" in refused_report, "connection-refused skip missing")
     assert_no_secrets(refused_report, result.stdout, result.stderr)
 
+    # A 30x is refused, not followed, so a credential header never reaches the redirect target.
+    redirect_inbox = temp_root / "inbox-redirect"
+    result, _ = run_case("redirect", True, redirect_inbox, mode="clean", muse_base=f"{base}/muse-redirect")
+    expect(result.returncode == 0, f"redirect run failed: {result.stderr}")
+    redirect_report = (redirect_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("muse: redirect" in redirect_report, "redirect skip missing")
+    expect(not any(secrets["MUSE_API_KEY"] in str(headers) for _, headers in sink_requests), "redirect target received the muse credential")
+    expect(not sink_requests, "redirect was followed")
+    assert_no_secrets(redirect_report, result.stdout, result.stderr)
+
     # With no differences and every endpoint checked, a run is quiet and writes nothing.
     clean_inbox = temp_root / "inbox-clean"
     clean_result, _ = run_case("clean", True, clean_inbox, mode="clean")
@@ -282,6 +314,7 @@ try:
     assert_no_secrets(usage.stdout, usage.stderr, printed.stdout, printed.stderr, default_print.stdout, default_print.stderr, invalid_time.stdout, invalid_time.stderr)
 finally:
     server.shutdown()
+    sink.shutdown()
     server.server_close()
     thread.join(timeout=2)
 
