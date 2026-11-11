@@ -1,0 +1,18 @@
+> {"id":"1","type":"prompt","message":"Your instructions are in your system prompt. Begin."}
+< {"id":"1","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}
+< {"type":"agent_start"}
+< {"type":"turn_start"}
+< {"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Your instructions are in your system prompt. Begin."}]}}
+< {"type":"tool_execution_start","toolCallId":"call_4fb3f931b8b440168c4f02c21f82b105","toolName":"bash"}
+< {"type":"tool_execution_end","toolCallId":"call_4fb3f931b8b440168c4f02c21f82b105","toolName":"bash","isError":false}
+< {"type":"message_end","message":{"role":"toolResult","content":[{"type":"text","text":"first tool done\n"}]}}
+< {"type":"turn_end"}
+< {"type":"turn_start"}
+> {"id":"2","type":"prompt","message":"For the queued continuation, reply with exactly: queued steer handled","streamingBehavior":"steer"}
+< {"type":"queue_update","steering":["For the queued continuation, reply with exactly: queued steer handled"],"followUp":[]}
+< {"id":"2","type":"response","command":"prompt","success":true,"data":{"disposition":"queued"}}
+< {"type":"turn_end"}
+< {"type":"turn_start"}
+< {"type":"queue_update","steering":[],"followUp":[]}
+< {"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"For the queued continuation, reply with exactly: queued steer handled"}]}}
+< {"type":"agent_settled","aborted":false}

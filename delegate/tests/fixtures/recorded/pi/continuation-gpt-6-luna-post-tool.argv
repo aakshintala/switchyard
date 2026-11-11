@@ -1,0 +1,1 @@
+pi --mode rpc --model openai/gpt-6-luna --session-id 4091202d-3120-423a-8857-3856ca28621f --session-dir /tmp/sy-1581-pi-recording/run9/sessions --append-system-prompt /tmp/sy-1581-pi-recording/run9/brief.txt

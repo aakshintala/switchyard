@@ -1,0 +1,19 @@
+# Real pi continuation latency
+
+Recorded 2026-11-11 with pi 1.5.0 in RPC mode. These captures were run through `scripts/record.sh --redact`, which applies the existing `scripts/redact.jq` filter to each line: values in system-prompt `sections` become `[redacted]`, `toolsAdded` retains only tool names, and the recorder home path and username are scrubbed. Redaction preserves stdout line count and event order while reserializing JSON objects. Each `.timings.tsv` has a header plus one UTC and monotonic receive-time row per stdout line; the row counts match. The `.argv` files preserve the RPC argument shape used by the session host (`--mode rpc --model ... --session-id ... --session-dir ... --append-system-prompt ...`), with no personal home paths.
+
+The recorder started the first prompt with `Your instructions are in your system prompt. Begin.` It sent the steer with `streamingBehavior: "steer"` after the second assistant `message_start` in the post-tool trials, and after the first assistant `message_start` in the early-steer trial. The early-steer trace queues before any tool call; the two post-tool traces queue after a tool call. The queue update and RPC response confirmed `queued` before the measured `turn_end` in all three traces. The next raw pi `turn_start` followed that `turn_end` by:
+
+| Model | Trace | `turn_end` receive time | next `turn_start` receive time | Gap |
+| --- | --- | --- | --- | ---: |
+| `opencode-go/beam-free` | `continuation-beam-free-early-steer` | 1.559657333 s | 1.559804042 s | 0.146709 ms |
+| `opencode-go/beam-free` | `continuation-beam-free-post-tool` | 2.422093166 s | 2.422200458 s | 0.107292 ms |
+| `openai/gpt-6-luna` | `continuation-gpt-6-luna-post-tool` | 3.857878708 s | 3.857976542 s | 0.097834 ms |
+
+The largest measured `turn_end`-to-`turn_start` gap was 0.146709 ms. In all three traces, any steer still queued at `turn_end` is consumed by pi's next internal `turn_start` about 0.1 ms later, and the steering queue clears before `agent_settled`. The supervisor's post-settle wait for a host `TurnStarted` is therefore not entered in normal flow; 30 seconds remains a safety deadline for that unmeasured path. The `gpt-6-luna` run took 5.782 s from process start through `agent_settled`, versus 3.175 s for the comparable post-tool `beam-free` run. No `compaction_start` event occurred. A forced compaction was not attempted: the available models have large contexts, and manufacturing a context-sized prompt would add substantial unrelated input without improving this boundary measurement.
+
+## Event-layer limitation
+
+These traces measure pi's raw internal `turn_end` to `turn_start` boundary while the steer remains in pi's steering queue. The early-steer case is queued before a tool call; the two post-tool cases are queued after a tool call. In each trace, the next internal `turn_start` consumes the queued user message and the queue clears before `agent_settled`; there is no second top-level `agent_start` in these normal queued-steer traces. The session `Wire` parser maps top-level `agent_start` to host `TurnStarted` and intentionally ignores internal `turn_start` events. Thus the traces establish that the supervisor's post-`agent_settled` wait for a new host-level `TurnStarted` is not entered in normal flow, but do not measure that exceptional path; the 30-second bound remains its safety deadline. The parser test records this distinction rather than treating the internal event as a host event.
+
+An earlier request to the `opencode-go` route using `muse-spark-1.3-contributor` returned HTTP 402 (insufficient balance), so the free `beam-free` model was used for repeated trials. An `openai/gpt-4.1-mini` attempt returned HTTP 400 (`model_not_found` for the configured ChatGPT account); the `openai/gpt-6-luna` RPC trace succeeded.

@@ -793,6 +793,13 @@ mod tests {
             .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
             .map(|e| e.unwrap().path())
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("stdout"))
+            // RPC captures are not pi's JSON output-mode format; their curated
+            // excerpts are validated by the session wire test instead.
+            .filter(|p| {
+                !std::fs::read_to_string(p.with_extension("argv"))
+                    .unwrap_or_default()
+                    .contains("--mode rpc")
+            })
             .collect();
         files.sort();
         assert!(!files.is_empty(), "no recorded pi fixtures");
