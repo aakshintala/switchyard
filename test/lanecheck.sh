@@ -228,6 +228,41 @@ else
   fail "done-ticket-wide-already-retired-is-no-op (rc=$grc; $out; $(cat "$r/roster-done"))"
 fi
 
+# A handoff on an already-retired target still checks the card and records its
+# PR on the existing row, rather than silently returning or duplicating it.
+r=$(newrun 2b1); lane "$r" 1405 fiber-1405-build deadbabe
+printf '%s\t1405\tfiber-1405-build\n' "$(old 2H)" > "$r/roster-done"
+printf '4175 tests/1405-owner-handoff\n' > "$T/prs"
+write_owner_card 0610-fly-1589 'Review PR #4175' 'Please merge PR #4175 after review.'
+printf '0610-fly-1589 flywheel Review PR #4175\n' > "$T/owner-ask-list"
+: > "$T/owner-ask.log"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 1405 --handed-to-owner 0610-fly-1589 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -qF 'handed-to-owner 0610-fly-1589 PR #4175' \
+  && grep -qF 'handed-to-owner 0610-fly-1589 PR #4175' "$r/roster-done" \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 1 ] \
+  && grep -qx 'list' "$T/owner-ask.log"; then
+  ok done-already-retired-records-owner-handoff
+else
+  fail "done-already-retired-records-owner-handoff (rc=$grc; $out; $(cat "$r/roster-done"))"
+fi
+
+# Repeating done after a partial retirement completes fence and claim cleanup,
+# while preserving the existing row and the established no-op message.
+r=$(newrun 2b2); lane "$r" 1410 fiber-1410-build deadcafe; grant "$r" 1410
+printf '%s\t1410\n' "$(old 2H)" > "$r/roster-done"
+: > "$T/file-claim.log"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 1410 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -qF 'already retired: #1410:fiber-1410-build' \
+  && [ -e "$r/done/fiber-1410-fence-grant-20261104T0000Z.md" ] \
+  && [ ! -e "$r/fiber-1410-fence-grant-20261104T0000Z.md" ] \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 1 ] \
+  && grep -q '^release --lane fiber-1410 --repo ' "$T/file-claim.log" \
+  && grep -q '^release --lane fiber-1410-build --repo ' "$T/file-claim.log"; then
+  ok done-already-retired-completes-fence-and-claim-cleanup
+else
+  fail "done-already-retired-completes-fence-and-claim-cleanup (rc=$grc; $out; claims=$(cat "$T/file-claim.log"))"
+fi
+
 # A JID-prefix retirement matches the full session id in the roster.
 r=$(newrun 2c); lane "$r" 1403 fiber-1403-plan abcd1234
 printf '%s\t1403\tabcd\n' "$(old 2H)" > "$r/roster-done"

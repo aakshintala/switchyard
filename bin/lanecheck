@@ -420,9 +420,52 @@ if [ "${1:-}" = done ]; then
   done
   [ "$have_done_arg" = 1 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...] [--handed-to-owner <card-id>]" >&2; exit 2; }
   set -- "${done_args[@]}"
-  if already_retired_targets "$@"; then
-    exit 0
+  already_retired=0
+  already_retired_message=""
+  if already_retired_message=$(already_retired_targets "$@"); then already_retired=1; fi
+  if [ "$already_retired" = 1 ]; then
+    _lanecheck_done_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck-done.XXXXXX") || exit 3
+    trap 'rm -rf "$_lanecheck_done_tmp"' EXIT
   fi
+  handed_tickets=()
+  handed_prs=()
+  handoff_pr_for() {
+    local wanted_ticket="$1" i
+    for i in "${!handed_tickets[@]}"; do
+      if [ "${handed_tickets[$i]}" = "$wanted_ticket" ]; then
+        printf '%s' "${handed_prs[$i]}"
+        return 0
+      fi
+    done
+  }
+  record_handoff_on_retirement() {
+    local ticket="$1" pr="$2"
+    python3 -I - "$retired" "$ticket" "handed-to-owner $handed_card PR #$pr" <<'PY'
+import sys
+path, ticket, marker = sys.argv[1:]
+with open(path) as f:
+    lines = f.readlines()
+matches = [i for i, line in enumerate(lines)
+           if len(line.rstrip("\n").split("\t")) > 1
+           and line.rstrip("\n").split("\t")[1] == ticket]
+if not matches:
+    raise SystemExit(1)
+i = matches[-1]
+fields = lines[i].rstrip("\n").split("\t")
+while len(fields) < 4:
+    fields.append("")
+notes = fields[3].split("; ") if fields[3] else []
+if marker not in notes:
+    notes.append(marker)
+fields[3] = "; ".join(notes)
+lines[i] = "\t".join(fields) + "\n"
+with open(path, "w") as f:
+    f.writelines(lines)
+PY
+  }
+  # A plain rerun skips retirement guards and row appends, but falls through to
+  # the shared fence-grant and claim cleanup below.
+  if [ "$already_retired" != 1 ] || [ -n "$handed_card" ]; then
   if [ -n "$handed_card" ]; then
     if [ "${FW_OWNER_ASK+x}" = x ]; then
       echo "REFUSING --handed-to-owner: FW_OWNER_ASK is not honoured for --handed-to-owner" >&2
@@ -476,8 +519,6 @@ PY
   _merged_prs=""
   _merged_prs_ok=0
   _merged_prs_loaded=0
-  handed_tickets=()
-  handed_prs=()
   handoff_problem_for() {
     local open_pr="$1" handoff_ok p
     handoff_problem=""
@@ -508,15 +549,6 @@ else:
       fi
     fi
   }
-  handoff_pr_for() {
-    local wanted_ticket="$1" i
-    for i in "${!handed_tickets[@]}"; do
-      if [ "${handed_tickets[$i]}" = "$wanted_ticket" ]; then
-        printf '%s' "${handed_prs[$i]}"
-        return 0
-      fi
-    done
-  }
   for n in "$@"; do
     tn=${n%%:*}
     # A session-scoped retirement asks about that session only. Reading the
@@ -534,7 +566,7 @@ else:
       when=$(date -u -d "$newest" +%s 2>/dev/null) || continue
     fi
     age=$(( $(date +%s) - when ))
-    if [ "$age" -lt "${FW_DONE_MIN:-1800}" ]; then
+    if [ "$already_retired" != 1 ] && [ "$age" -lt "${FW_DONE_MIN:-1800}" ]; then
       merged_pr=""
       if [ -n "$sn" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
         if [ "$_merged_prs_loaded" = 0 ]; then
@@ -633,27 +665,44 @@ for pr in prs:
     echo "Nothing retired — see the REFUSING line above for which guard fired. Check with 'bash bin/lanecheck' first. Override with FW_DONE_FORCE=1." >&2
     exit 2
   fi
-  retire_pi_pidfiles "$@" || exit $?
-  stop_retired_sessions "$@" || exit $?
+  if [ "$already_retired" = 1 ]; then
+    if [ -n "$handed_card" ]; then
+      for i in "${!handed_tickets[@]}"; do
+        record_handoff_on_retirement "${handed_tickets[$i]}" "${handed_prs[$i]}" || {
+          echo "could not record handed-to-owner $handed_card PR #${handed_prs[$i]} on an existing retirement row for #${handed_tickets[$i]}" >&2
+          exit 2
+        }
+      done
+    fi
+  else
+    retire_pi_pidfiles "$@" || exit $?
+    stop_retired_sessions "$@" || exit $?
+  fi
+  if [ "$already_retired" != 1 ]; then
+    for n in "$@"; do
+      tn=${n%%:*}
+      handoff_pr=$(handoff_pr_for "$tn")
+      case "$n" in
+        *:*) retire_line="$(printf '%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn" "${n#*:}")" ;;
+        *)   retire_line="$(printf '%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn")" ;;
+      esac
+      if [ -n "$handoff_pr" ]; then
+        if [[ "$n" == *:* ]]; then retire_line="$retire_line$(printf '\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; else retire_line="$retire_line$(printf '\t\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; fi
+      fi
+      printf '%s\n' "$retire_line" >>"$retired"
+    done
+    retire_log="retired: $*"
+    for i in "${!handed_tickets[@]}"; do
+      retire_log="$retire_log handed-to-owner $handed_card PR #${handed_prs[$i]}"
+    done
+    echo "$retire_log"
+  fi
+  fi
+  if [ "$already_retired" = 1 ]; then
+    echo "$already_retired_message"
+  fi
   retirement_helper=$_lanecheck_done_tmp/roster-retirement.py
   write_retirement_helper "$retirement_helper"
-  for n in "$@"; do
-    tn=${n%%:*}
-    handoff_pr=$(handoff_pr_for "$tn")
-    case "$n" in
-      *:*) retire_line="$(printf '%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn" "${n#*:}")" ;;
-      *)   retire_line="$(printf '%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn")" ;;
-    esac
-    if [ -n "$handoff_pr" ]; then
-      if [[ "$n" == *:* ]]; then retire_line="$retire_line$(printf '\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; else retire_line="$retire_line$(printf '\t\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; fi
-    fi
-    printf '%s\n' "$retire_line" >>"$retired"
-  done
-  retire_log="retired: $*"
-  for i in "${!handed_tickets[@]}"; do
-    retire_log="$retire_log handed-to-owner $handed_card PR #${handed_prs[$i]}"
-  done
-  echo "$retire_log"
 
   # Retire a ticket's fence grants once its LAST session retires. This is the
   # one place that knows a lane is finished, and it used to leave the grants in
