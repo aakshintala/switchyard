@@ -300,21 +300,24 @@ phase_retirement_case phase-build plan failed phase-build-failure
 phase_retirement_case phase-ship build failed phase-ship-failure
 phase_retirement_case phase-build plan retirement-failure phase-build-retirement-failure
 
-# A relaunch must not try to retire a previous-phase row that roster-done already retires.
+# A relaunch still asks lanecheck to retire the previous phase. The real
+# lanecheck reports that the existing retirement is a quiet no-op.
 prepare_run phase-build-already-retired
 previous_session=fiber-2465-plan-deadbeef
 printf '2026-11-01T00:00:00Z\t2465\tbox\t%s\tprevious-session-id\n' "$previous_session" >"$run/roster"
 printf '2026-11-02T00:00:00Z\t2465\t%s\n' "$previous_session" >"$run/roster-done"
 printf '[]\n' >"$BOX_AGENTS"
-if out=$(FW_TEST_LAUNCH_FAIL=0 FW_TEST_RETIRE_FAIL=1 launch_box phase-build 2>&1); then
-  if ! printf '%s\n' "$out" | grep -Fq 'WARNING could not retire' \
-      && ! grep -Fxq "done 2465:$previous_session" "$LANECHECK_DONE_LOG"; then
-    ok phase-build-relaunch-skips-already-retired-previous-phase
+if out=$(FW_TEST_LAUNCH_FAIL=0 launch_box phase-build 2>&1); then
+  if grep -Fxq "done 2465:$previous_session" "$LANECHECK_DONE_LOG" \
+      && printf '%s\n' "$out" | grep -Fq "already retired: #2465:$previous_session" \
+      && ! printf '%s\n' "$out" | grep -Fq 'WARNING could not retire' \
+      && [ "$(wc -l < "$run/roster-done" | tr -d ' ')" = 1 ]; then
+    ok phase-build-relaunch-lanecheck-reports-already-retired
   else
-    fail "phase-build-relaunch-skips-already-retired-previous-phase (called: $(cat "$LANECHECK_DONE_LOG"); $out)"
+    fail "phase-build-relaunch-lanecheck-reports-already-retired (called: $(cat "$LANECHECK_DONE_LOG"); $out)"
   fi
 else
-  fail "phase-build-relaunch-skips-already-retired-previous-phase (launch failed: $out)"
+  fail "phase-build-relaunch-lanecheck-reports-already-retired (launch failed: $out)"
 fi
 
 # The launch cap includes LIVE Claude/delegate lanes on Box and muse, plus

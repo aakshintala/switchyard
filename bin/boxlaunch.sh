@@ -299,31 +299,9 @@ case "$ph" in
 esac
 if [ -n "$previous_phase" ]; then
   previous_base=fiber-$n-$previous_phase
-  done_file=$run/roster-done
-  [ -f "$done_file" ] || done_file=/dev/null
-  previous_sess=$(awk -F'\t' -v ticket="$n" -v base="$previous_base" '
-    FILENAME == ARGV[1] {
-      ts=$1; t=$2; key=$3
-      if (NF > 2 && key != "") {
-        done_n++
-        done_ticket[done_n]=t; done_key[done_n]=key; done_ts[done_n]=ts
-      } else if (NF > 1 && ts > ticket_done[t]) {
-        ticket_done[t]=ts
-      }
-      next
-    }
-    $2 == ticket && ($4 == base || index($4, base "-") == 1) {
-      sess=$4; jid=(NF > 4 ? $5 : "?"); cut=ticket_done[ticket]
-      for (i=1; i<=done_n; i++) {
-        key=done_key[i]
-        if (done_ticket[i] == ticket && (key == sess || key == jid ||
-            (jid != "" && jid != "?" && (index(jid, key) == 1 || index(key, jid) == 1))) &&
-            done_ts[i] > cut) cut=done_ts[i]
-      }
-      if ($1 > cut) previous_sess=sess
-    }
-    END { print previous_sess }
-  ' "$done_file" "$run/roster")
+  previous_sess=$(awk -F'\t' -v ticket="$n" -v base="$previous_base" \
+    '$2 == ticket && ($4 == base || index($4, base "-") == 1) { sess=$4 }
+     END { print sess }' "$run/roster")
   if [ -n "$previous_sess" ]; then
     lanecheck=${FW_BOX_LANECHECK:-$script_dir/lanecheck}
     # The successful handoff confirms this phase is finished, even if its row
