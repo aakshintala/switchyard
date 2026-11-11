@@ -929,9 +929,18 @@ fn supervisor_refused_steer_retries_after_idle_but_not_while_running() {
             ..Bounds::default()
         },
     );
-    ended.until("initial held turn", |state| state.active_turn_id.is_some());
+    ended.until("initial held turn", |state| {
+        state.status == Status::Running && state.active_turn_id.is_some()
+    });
     let reply = ended.send("retry this text").unwrap();
-    assert_eq!(reply["disposition"], "started");
+    assert_eq!(
+        reply["disposition"],
+        "started",
+        "unexpected retry reply: {reply}; state: {:?}; requests: {:?}; events: {:?}",
+        ended.state(),
+        ended.requests(),
+        ended.events()
+    );
     let starts: Vec<_> = ended
         .requests()
         .into_iter()
@@ -954,7 +963,10 @@ fn supervisor_refused_steer_retries_after_idle_but_not_while_running() {
             ..Bounds::default()
         },
     );
-    held.until("initial held turn", |state| state.active_turn_id.is_some());
+    held.until("initial held turn", |state| {
+        // send_text takes the steer branch only for this exact running-turn state.
+        state.status == Status::Running && state.active_turn_id.is_some()
+    });
     let started = Instant::now();
     let reply = held.send("do not queue").unwrap();
     assert_eq!(reply["ok"], false);

@@ -256,6 +256,59 @@ fn settle(reg: &JobHandle, id: &str) -> String {
     "RUNNING".into()
 }
 
+fn wait_until(what: &str, timeout: Duration, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if condition() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        sleep(Duration::from_millis(2));
+    }
+}
+
+fn wait_for_records(spy: &Spy, want: usize) {
+    wait_until("status records", Duration::from_secs(5), || spy.len() >= want);
+}
+
+fn last_event(s: &Setup) -> Instant {
+    s.reg
+        .lock()
+        .job
+        .as_ref()
+        .expect("dispatched job")
+        .1
+        .last_event
+}
+
+fn wait_for_activity_past_initial_deadline(
+    s: &Setup,
+    idle_window: Duration,
+    send: impl FnOnce(&FakeHandle),
+) {
+    let initial_event = last_event(s);
+    send(&s.fake.handle(0));
+    wait_until("watchdog activity event", Duration::from_secs(5), || {
+        last_event(s) > initial_event
+    });
+
+    let activity_at = last_event(s);
+    let original_deadline = initial_event + idle_window;
+    let scheduling_margin = Duration::from_millis(500);
+    assert!(
+        activity_at + scheduling_margin < original_deadline,
+        "activity was not processed with enough margin before the original idle deadline"
+    );
+    // Wait just beyond the deadline that would have killed the job without
+    // activity. The 500 ms margin still leaves most of the refreshed 2 s window.
+    let beyond_original_deadline = original_deadline + Duration::from_millis(50);
+    wait_until(
+        "original idle deadline after activity",
+        Duration::from_secs(5),
+        || Instant::now() >= beyond_original_deadline,
+    );
+}
+
 /// Wait until the fake backend has recorded `want`: the recording itself
 /// acknowledges the watchdog kill, so no fixed delay assumes it fired.
 fn wait_killed(s: &Setup, want: &[&'static str]) {
@@ -296,26 +349,32 @@ fn ps_child_check_handles_claude_sessions_and_zombies() {
 
 #[test]
 fn heartbeat_refreshes_running_record_and_stops_at_retirement() {
-    let s = setup_with(|d| d.heartbeat_ms = 100);
+    const HEARTBEAT_MS: u64 = 100;
+    let s = setup_with(|d| d.heartbeat_ms = HEARTBEAT_MS);
     let id = s.reg.dispatch(spec_of(|_| {}));
     assert_eq!(s.spy.len(), 1);
 
-    sleep(Duration::from_millis(150));
-    assert_eq!(s.spy.len(), 2);
+    wait_for_records(&s.spy, 2);
     let (jid, rec) = s.spy.nth(1);
     assert_eq!(jid, id);
     assert_eq!(status_of(&rec), "RUNNING");
     assert!(rec["lastHeartbeatAt"].is_u64());
 
-    sleep(Duration::from_millis(100));
-    assert_eq!(s.spy.len(), 3);
+    wait_for_records(&s.spy, 3);
 
     s.fake.handle(0).finish(done_ok());
     assert_eq!(settle(&s.reg, &id), "DONE");
     let after = s.spy.len();
     assert_eq!(status_of(&s.spy.last().1), "DONE");
-    sleep(Duration::from_millis(300));
-    assert_eq!(s.spy.len(), after);
+
+    // Observe three heartbeat intervals after retirement: long enough to catch
+    // an accidentally continuing heartbeat, without relying on an exact count.
+    let quiet_until = Instant::now() + Duration::from_millis(HEARTBEAT_MS * 3);
+    wait_until(
+        "heartbeat records to stop after retirement",
+        Duration::from_secs(5),
+        || s.spy.len() == after && Instant::now() >= quiet_until,
+    );
 }
 
 #[test]
@@ -569,11 +628,12 @@ fn post_sigterm_event_does_not_reset_reported_idle_duration() {
 
 #[test]
 fn a_progress_event_rearms_the_idle_watchdog() {
-    let s = setup_with(|d| d.idle_ms = Some(300.0));
+    const IDLE_WINDOW: Duration = Duration::from_secs(2);
+    let s = setup_with(|d| d.idle_ms = Some(IDLE_WINDOW.as_millis() as f64));
     let id = s.reg.dispatch(spec_of(|_| {}));
-    sleep(Duration::from_millis(200));
-    s.fake.handle(0).progress("shell", 1.0, None, &[], None);
-    sleep(Duration::from_millis(200));
+    wait_for_activity_past_initial_deadline(&s, IDLE_WINDOW, |handle| {
+        handle.progress("shell", 1.0, None, &[], None);
+    });
     assert!(s.fake.handle(0).killed().is_empty());
     assert_eq!(s.reg.poll(&id), "RUNNING");
 }
@@ -654,11 +714,10 @@ fn a_per_call_tool_idle_override_applies_while_a_tool_is_in_flight() {
 
 #[test]
 fn raw_activity_rearms_the_watchdog() {
-    let s = setup_with(|d| d.idle_ms = Some(300.0));
+    const IDLE_WINDOW: Duration = Duration::from_secs(2);
+    let s = setup_with(|d| d.idle_ms = Some(IDLE_WINDOW.as_millis() as f64));
     let id = s.reg.dispatch(spec_of(|_| {}));
-    sleep(Duration::from_millis(200));
-    s.fake.handle(0).activity();
-    sleep(Duration::from_millis(200));
+    wait_for_activity_past_initial_deadline(&s, IDLE_WINDOW, FakeHandle::activity);
     assert!(s.fake.handle(0).killed().is_empty());
     assert_eq!(s.reg.poll(&id), "RUNNING");
 }
