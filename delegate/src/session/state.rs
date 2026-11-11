@@ -482,6 +482,7 @@ pub fn apply_ack(
     let disposition_name = match disposition {
         Disposition::Queued => "queued",
         Disposition::Steered => "steered",
+        Disposition::Unconfirmed => "unconfirmed",
         Disposition::Other => "other",
         Disposition::Started => unreachable!(),
     };
@@ -1557,6 +1558,7 @@ mod tests {
         for disposition in [
             Disposition::Queued,
             Disposition::Steered,
+            Disposition::Unconfirmed,
             Disposition::Other,
         ] {
             let mut state = scratch.state();

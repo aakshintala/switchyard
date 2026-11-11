@@ -811,6 +811,22 @@ if [ "$bad" -gt 0 ] || [ -z "$map_note" ]; then
 fi
 [ -n "$map_note" ] && bad=$((bad + 1))
 approve_digest="$collect_out"; digest="$(cat "$findings_file")"
+plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
+plan_verdict_note=""
+if [ "$plan_verdict" = ok ]; then
+  ruled_by="$(tkt get plan_verdict_by 2>/dev/null || true)"
+  ruling="$(tkt get plan_verdict_ruling 2>/dev/null || true)"
+  ruled_comment="$(tkt get plan_verdict_comment 2>/dev/null || true)"
+  if [ -n "$ruled_by" ] && [ -n "$ruling" ] && [ -n "$ruled_comment" ]; then
+    plan_verdict_note="PLAN-VERDICT ruled by=$ruled_by ruling=$ruling comment=$ruled_comment"
+  fi
+fi
+if [ -n "$plan_verdict_note" ]; then
+  approve_digest="$plan_verdict_note
+$approve_digest"
+  digest="$plan_verdict_note
+$digest"
+fi
 if [ -n "$map_note" ]; then approve_digest="$map_note
 $approve_digest"; digest="$map_note
 $digest"; fi

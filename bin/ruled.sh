@@ -42,6 +42,154 @@ case "$ticket" in
 esac
 [ -s "$src" ] || { echo "no such ruling file, or empty: $src" >&2; exit 2; }
 
+# Parse the stable session-send JSON response rather than guessing from human output.
+send_json_field() {
+    local field=$1
+    python3 -I -c 'import json,sys; value=json.load(sys.stdin).get(sys.argv[1]); print(value if isinstance(value,str) else "")' "$field" <<<"$2"
+}
+
+# Return unconsumed, delivered, or missing for one command id in `logs --json`.
+steer_event_outcome() {
+    python3 -I -c '
+import json,sys
+command_id=sys.argv[1]
+payload=json.load(sys.stdin)
+delivered=False
+for event in payload.get("lines", []):
+    kind=event.get("kind")
+    ids=event.get("commandIds", [])
+    if kind == "steer.unconsumed" and command_id in ids:
+        print("unconsumed")
+        raise SystemExit(0)
+    if ((kind == "user" and event.get("commandId") == command_id) or
+        (kind == "steer.replayed" and command_id in ids)):
+        delivered=True
+print("delivered" if delivered else "missing")
+' "$1" <<<"$2"
+}
+
+session_command() {
+    local route=$1 host=$2 session_id=$3 verb=$4 flag=${5:-}
+    if [ "$route" = mac ]; then
+        if [ -n "$flag" ]; then
+            "${FW_DELEGATE:-$HOME/.local/bin/delegate}" session "$verb" "$session_id" "$flag"
+        else
+            "${FW_DELEGATE:-$HOME/.local/bin/delegate}" session "$verb" "$session_id"
+        fi
+    else
+        if [ -n "$flag" ]; then
+            fw_box_ssh -o BatchMode=yes "$host" \
+                "TMPDIR=/srv/lanes/tmp ~/.local/bin/delegate session $verb $session_id $flag"
+        else
+            fw_box_ssh -o BatchMode=yes "$host" \
+                "TMPDIR=/srv/lanes/tmp ~/.local/bin/delegate session $verb $session_id"
+        fi
+    fi
+}
+
+session_send_ruling() {
+    local route=$1 host=$2 session_id=$3 ruling_file=$4
+    if [ "$route" = mac ]; then
+        "${FW_DELEGATE:-$HOME/.local/bin/delegate}" session send "$session_id" - --json <"$ruling_file"
+    else
+        fw_box_ssh -o BatchMode=yes "$host" \
+            "cat | TMPDIR=/srv/lanes/tmp ~/.local/bin/delegate session send $session_id - --json" \
+            <"$ruling_file"
+    fi
+}
+
+# Share the wait/reconcile/resend policy across local and SSH delegate routes.
+# Return 0 when resolved, 1 when the initial send failed (Muse may file-fallback),
+# and 2 when delivery remains uncertain (do not use a second delivery route).
+deliver_session_ruling() {
+    local route=$1 host=$2 session_id=$3 ruling_file=$4 lane_name=$5
+    local send sendrc disposition command_id watch watchrc logs logsrc outcome resend
+
+    send=$(session_send_ruling "$route" "$host" "$session_id" "$ruling_file" 2>&1)
+    sendrc=$?
+    if [ "$sendrc" -ne 0 ]; then
+        echo "SEND FAILED for #$ticket ($session_id, exit $sendrc): $send" >&2
+        return 1
+    fi
+    disposition=$(send_json_field disposition "$send") || {
+        echo "SEND RESPONSE UNREADABLE for #$ticket ($session_id): $send" >&2
+        return 2
+    }
+    command_id=$(send_json_field commandId "$send") || {
+        echo "SEND RESPONSE UNREADABLE for #$ticket ($session_id): $send" >&2
+        return 2
+    }
+
+    case "$disposition" in
+        unconsumed|unconfirmed) ;;
+        started|steered)
+            echo "delivered into the turn: $lane_name ($session_id) — $disposition"
+            return 0
+            ;;
+        *)
+            echo "unrecognized send disposition for #$ticket ($session_id): ${disposition:-missing}" >&2
+            return 2
+            ;;
+    esac
+    echo "send returned $disposition for $session_id; waiting for the lane to go idle"
+    watch=$(session_command "$route" "$host" "$session_id" watch 2>&1)
+    watchrc=$?
+    if [ "$watchrc" -ne 0 ]; then
+        echo "WAIT FAILED for #$ticket ($session_id, exit $watchrc): $watch" >&2
+        echo "delivery is uncertain; not sending through another route" >&2
+        return 2
+    fi
+    echo "lane is idle ($session_id)"
+
+    if [ "$disposition" = unconfirmed ]; then
+        if [ -z "$command_id" ]; then
+            echo "unconfirmed reply had no commandId; delivery is uncertain, not resending" >&2
+            return 2
+        fi
+        logs=$(session_command "$route" "$host" "$session_id" logs --json 2>&1)
+        logsrc=$?
+        if [ "$logsrc" -ne 0 ]; then
+            echo "LOG LOOKUP FAILED for #$ticket ($session_id, exit $logsrc): $logs" >&2
+            echo "delivery is uncertain; not sending through another route" >&2
+            return 2
+        fi
+        outcome=$(steer_event_outcome "$command_id" "$logs") || {
+            echo "LOG RESPONSE UNREADABLE for #$ticket ($session_id): $logs" >&2
+            echo "delivery is uncertain; not sending through another route" >&2
+            return 2
+        }
+        case "$outcome" in
+            delivered)
+                echo "delivery event confirms commandId $command_id; not resending"
+                return 0
+                ;;
+            unconsumed)
+                echo "events confirm unconsumed commandId $command_id; resending once as a fresh turn"
+                ;;
+            missing)
+                echo "commandId is absent from delivery events; resending once as a fresh turn"
+                ;;
+            *)
+                echo "unknown delivery evidence for $command_id; not resending" >&2
+                return 2
+                ;;
+        esac
+    else
+        echo "unconsumed; resending once as a fresh turn"
+    fi
+
+    resend=$(session_send_ruling "$route" "$host" "$session_id" "$ruling_file" 2>&1)
+    sendrc=$?
+    if [ "$sendrc" -ne 0 ]; then
+        echo "RESEND FAILED for #$ticket ($session_id, exit $sendrc): $resend" >&2
+        echo "not sending through another route because the resend may have been accepted" >&2
+        return 2
+    fi
+    disposition=$(send_json_field disposition "$resend") || disposition=unknown
+    echo "resent once after idle: $lane_name ($session_id) — ${disposition:-unknown}"
+    return 0
+}
+
 # The selftest refusal guard is deliberately not included in this moved slice.
 # The archive has exactly one name shape, `ruling-<ticket>-<rest>.md`, because a
 # reader globs for it: bin/lanecheck's NEEDS-RULING probe finds a lane's answers
@@ -160,17 +308,12 @@ case "${INBOX_HOST:-$lanehost}" in
         # exist (switchyard #1069). Ask the store before deciding.
         if [ -n "$lanejid" ] && "${FW_DELEGATE:-$HOME/.local/bin/delegate}" \
                 session list 2>/dev/null | grep -q "^$lanejid "; then
-            send=$("${FW_DELEGATE:-$HOME/.local/bin/delegate}" \
-                session send "$lanejid" - <"$dest" 2>&1)
-            sendrc=$?
-            # Same contract as the muse branch below: the exit code decides, not
-            # the disposition word, so `steered` is not read as a failure.
-            if [ "$sendrc" -eq 0 ]; then
-                echo "delivered into the turn: $lanesess ($lanejid) on this mac — ${send:-ok}"
+            deliver_session_ruling mac "" "$lanejid" "$dest" "$lanesess"
+            delivery_rc=$?
+            if [ "$delivery_rc" -eq 0 ]; then
                 exit 0
             fi
-            echo "SEND FAILED for #$ticket ($lanejid, exit $sendrc): $send" >&2
-            echo "  a mac lane has no lane-inbox to fall back to. Deliver it by hand and say so." >&2
+            echo "  a mac lane has no lane-inbox to fall back to. Resolve delivery manually and say so." >&2
             exit 3
         fi
         echo "lane $ticket is a mac Claude session ($lanesess), which has no inbox file to deliver to." >&2
@@ -230,26 +373,14 @@ fi
 # drain lane-inbox/ at turn start, so delivering twice makes a lane act on one
 # ruling twice. The scp is the fallback for when the send fails.
 if [ "$lanehost" = muse ] && [ -n "$lanejid" ]; then
-    send=$(fw_box_ssh -o BatchMode=yes "$host" \
-        "cat | TMPDIR=/srv/lanes/tmp ~/.local/bin/delegate session send $lanejid -" \
-        <"$dest" 2>&1)
-    sendrc=$?
-    # Branch on the exit code, not on the disposition word. The first version of
-    # this matched `started|queued` and called everything else a failure, which
-    # on its second real use (#3899 and #4152, 2026-11-04) read `steered` -- the
-    # BEST outcome, the message folded into the lane's running turn -- as a send
-    # failure, and then scp'd as well. Both lanes got the same ruling twice.
-    # The set of disposition words is delegate's to extend and not mine to
-    # enumerate; the exit code is the part it actually contracts.
-    if [ "$sendrc" -eq 0 ]; then
-        echo "delivered into the turn: $lanesess ($lanejid) — ${send:-ok}"
+    deliver_session_ruling muse "$host" "$lanejid" "$dest" "$lanesess"
+    delivery_rc=$?
+    if [ "$delivery_rc" -eq 0 ]; then
         exit 0
+    elif [ "$delivery_rc" -eq 2 ]; then
+        exit 3
     fi
-    # A failed send is not a reason to leave the ruling undelivered: fall through
-    # to the file route, which at least survives until the lane's next turn, and
-    # say plainly that the better route failed.
-    echo "SEND FAILED for #$ticket ($lanejid, exit $sendrc): $send" >&2
-    echo "  falling back to the lane-inbox file route; its BLIND verdict below is the real one." >&2
+    echo "  falling back to the lane-inbox file route after the initial send failed; its BLIND verdict below is the real one." >&2
 fi
 
 if fw_box_is_local; then

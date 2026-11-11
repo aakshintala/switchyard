@@ -45,7 +45,7 @@ The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `ver
 | `tkt-start` | `CURRENT`; `SKIPPED` with `--no-preflight`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
 | `tkt-state` | exit 0 | exit 2 |
 | `tkt-drive` | Chains `SET`, `PLAN-OK`, and `POSTED` after a grant; never invokes `tkt-ship`, which the lane takes as a separate explicit step only after required checks and authorization | `STOP`: act on the unchanged underlying verdict; rerun `tkt-drive` when another routine phase is due; run `tkt-ship <state>` itself only when shipping is authorized |
-| `tkt-plan` | The driver chains `SET`, `PLAN-OK`, and `POSTED` | `LINES`, `QUESTIONS`, `QUESTIONS-RECORDED`, `QUESTIONS-REFUSED`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `TRIAGED-REFUSED`, `POST-FAIL`, `SET-FAIL`, `REPLAN`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
+| `tkt-plan` | The driver chains `SET`, `PLAN-OK`, and `POSTED` | `LINES`, `QUESTIONS`, `QUESTIONS-RECORDED`, `QUESTIONS-REFUSED`, `RULE-OK`, `RULE-OK-REFUSED`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `TRIAGED-REFUSED`, `POST-FAIL`, `SET-FAIL`, `REPLAN`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
 | `tkt-job` | `DONE`, `CONCERNS` | `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `GATE-REFUSED` (gate exited 75: refused, nothing tested; not a pass or code failure—rerun the gate where it has room), `NO-COMMITS`, `UNKNOWN` |
 | `tkt-build` | The driver stops on `APPROVE`; rerun `tkt-drive` for the next phase. `MEASURED` ends the ticket with no PR | `CHANGES`, `STALE` (build-phase STALE merges `origin/main`, updates the plan and head, verifies, and continues when those steps pass), `DRIFT`, `PRECONDITION`, `ROUND-LIMIT`, `REVIEW-INCOMPLETE`, `VERDICT-REFUSED`, `<step>-ERROR` |
 | `tkt-gate` | `PASS`; `OUTSIDE-PLAN` means the gate passed and the paths were recorded | `STOP-LIST` (contract change: ask first), `TIP`, `FAIL` |
@@ -110,7 +110,7 @@ Follow `planning` steps 1–5. The Verifier (`planning` step 3) runs only when t
 
 Done when the lane brief is filled.
 
-When triage answers every open planning line, record it with `tkt-plan <state> triaged --comment <id>` using the numeric ticket comment id. `triaged` always fetches the comment and refuses one from another ticket with `ruling-source`. It refuses a comment that does not postdate the stop verdict, or when no stop timestamp is recorded, with `ruling-stale`. `confirm --edits <file>`, not `verify`, consumes a grant-round.
+When triage answers every open planning line, record it with `tkt-plan <state> triaged --comment <id>` using the numeric ticket comment id. `triaged` always fetches the comment and refuses one from another ticket with `ruling-source`. It refuses a comment that does not postdate the stop verdict, or when no stop timestamp is recorded, with `ruling-stale`. When a confirm still does not converge, the sub-orchestrator escalates to a flywheel or surveyor steward. The steward posts a ruling comment on the ticket; the sub-orchestrator records that ruling with `tkt-plan <state> rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>`. The ruling comment must name the ruling and postdate the latest plan or stop verdict; `rule-ok` records PLAN OK only for the unchanged, non-stale plan. `confirm --edits <file>`, not `verify`, consumes a grant-round.
 
 ### 4. Lane
 

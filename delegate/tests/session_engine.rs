@@ -797,7 +797,7 @@ fn supervisor_send_reports_unconsumed_when_host_dies_with_steer_pending() {
 }
 
 #[test]
-fn supervisor_send_replies_steered_when_muse_wait_cap_expires() {
+fn supervisor_send_replies_unconfirmed_when_muse_wait_cap_expires() {
     let mut session = Session::spawn(
         "HOLD,STEER_NOEFFECT",
         "brief",
@@ -825,7 +825,7 @@ fn supervisor_send_replies_steered_when_muse_wait_cap_expires() {
         .expect("send returns after its injected wait cap")
         .unwrap();
     sender.join().unwrap();
-    assert_eq!(reply["disposition"], "steered");
+    assert_eq!(reply["disposition"], "unconfirmed");
     assert_eq!(session.state().status, Status::Running);
     assert!(
         session
