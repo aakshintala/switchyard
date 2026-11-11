@@ -74,6 +74,7 @@ def read_retirements(path):
             done[p[1]] = max(p[0], done.get(p[1], ""))
     return done, done_sess
 
+
 def entry_is_retired(ticket, sess, jid, ts, done, done_sess):
     cut = done.get(ticket, "")
     for (done_ticket, key), done_at in done_sess.items():
@@ -82,6 +83,46 @@ def entry_is_retired(ticket, sess, jid, ts, done, done_sess):
             cut = max(cut, done_at)
     return bool(cut and ts.split()[0] <= cut)
 PY
+}
+
+already_retired_targets() {
+  [ -f "$roster" ] && [ -f "$retired" ] || return 1
+  local check_tmp result
+  check_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck-done-check.XXXXXX") || return 1
+  write_retirement_helper "$check_tmp/roster-retirement.py"
+  result=$(python3 -I - "$roster" "$retired" "$check_tmp/roster-retirement.py" "$@" <<'PY'
+import sys
+roster, retired, helper, *requested = sys.argv[1:]
+exec(compile(open(helper).read(), helper, "exec"), globals())
+done, done_sess = read_retirements(retired)
+rows = []
+for line in open(roster):
+    fields = line.rstrip("\n").split("\t")
+    if len(fields) < 4:
+        continue
+    ts, ticket, host, name = fields[:4]
+    jid = fields[4] if len(fields) > 4 else "?"
+    rows.append((ticket, name, jid, ts))
+selected = []
+for arg in requested:
+    target, sep, key = arg.partition(":")
+    matches = [row for row in rows if row[0] == target and
+               (not sep or key == row[1] or key == row[2] or
+                (row[2] not in ("", "?") and
+                 (row[2].startswith(key) or key.startswith(row[2]))))]
+    if not matches:
+        raise SystemExit(1)
+    selected.extend(matches)
+if not selected or not all(entry_is_retired(ticket, name, jid, ts, done, done_sess)
+                           for ticket, name, jid, ts in selected):
+    raise SystemExit(1)
+targets = sorted({f"#{ticket}:{name}" for ticket, name, _, _ in selected})
+print("already retired: " + ", ".join(targets))
+PY
+  ) || { rm -rf "$check_tmp"; return 1; }
+  rm -rf "$check_tmp"
+  [ -n "$result" ] || return 1
+  printf '%s\n' "$result"
 }
 
 stop_retired_sessions() {
@@ -379,6 +420,9 @@ if [ "${1:-}" = done ]; then
   done
   [ "$have_done_arg" = 1 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...] [--handed-to-owner <card-id>]" >&2; exit 2; }
   set -- "${done_args[@]}"
+  if already_retired_targets "$@"; then
+    exit 0
+  fi
   if [ -n "$handed_card" ]; then
     if [ "${FW_OWNER_ASK+x}" = x ]; then
       echo "REFUSING --handed-to-owner: FW_OWNER_ASK is not honoured for --handed-to-owner" >&2

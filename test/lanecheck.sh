@@ -204,6 +204,58 @@ r=$(newrun 2); lane "$r" 4152 fiber-4152-plan ccc33333; lane "$r" 4152 fiber-415
 FW_RUN=$r bash "$BIN/lanecheck" done 4152 >/dev/null 2>&1
 if [ -e "$r/done/fiber-4152-fence-grant-20261104T0000Z.md" ]; then ok bare-ticket-retires-fence; else fail bare-ticket-retires-fence; fi
 
+# Repeating done for an exact-session retirement is a quiet no-op: do not stop
+# its session and do not append another retirement row.
+r=$(newrun 2a); lane "$r" 1401 fiber-1401-plan deadbeef
+printf '%s\t1401\tfiber-1401-plan\n' "$(old 2H)" > "$r/roster-done"
+printf '{"ok":true,"sessions":[{"id":"deadbeef","activeTurnId":null,"status":"idle"}]}' > "$T/dsess"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 1401:fiber-1401-plan 2>&1); grc=$?
+if [ "$grc" = 0 ] && [ "$out" = 'already retired: #1401:fiber-1401-plan' ] \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 1 ]; then
+  ok done-exact-session-already-retired-is-no-op
+else
+  fail "done-exact-session-already-retired-is-no-op (rc=$grc; $out; $(cat "$r/roster-done"))"
+fi
+
+# A ticket-wide roster-done row already retires each earlier target session.
+r=$(newrun 2b); lane "$r" 1402 fiber-1402-plan deadbeef
+printf '%s\t1402\n' "$(old 2H)" > "$r/roster-done"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 1402 2>&1); grc=$?
+if [ "$grc" = 0 ] && [ "$out" = 'already retired: #1402:fiber-1402-plan' ] \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 1 ]; then
+  ok done-ticket-wide-already-retired-is-no-op
+else
+  fail "done-ticket-wide-already-retired-is-no-op (rc=$grc; $out; $(cat "$r/roster-done"))"
+fi
+
+# A JID-prefix retirement matches the full session id in the roster.
+r=$(newrun 2c); lane "$r" 1403 fiber-1403-plan abcd1234
+printf '%s\t1403\tabcd\n' "$(old 2H)" > "$r/roster-done"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 1403:abcd123 2>&1); grc=$?
+if [ "$grc" = 0 ] && [ "$out" = 'already retired: #1403:fiber-1403-plan' ] \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 1 ]; then
+  ok done-jid-prefix-already-retired-is-no-op
+else
+  fail "done-jid-prefix-already-retired-is-no-op (rc=$grc; $out; $(cat "$r/roster-done"))"
+fi
+
+# The old plan row is retired, but done on a newer unretired plan row must use
+# the ordinary retirement path rather than mistaking the ticket for complete.
+r=$(newrun 2d)
+printf '%s\t1404\tmuse\tfiber-1404-plan-old\toldjid\n' "$(old 4H)" > "$r/roster"
+printf '%s\t1404\tmuse\tfiber-1404-plan-new\tnewjid\n' "$(old 1H)" >> "$r/roster"
+printf '%s\t1404\tfiber-1404-plan-old\n' "$(old 2H)" > "$r/roster-done"
+printf '{"ok":true,"sessions":[]}' > "$T/dsess"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 1404:fiber-1404-plan-new 2>&1); grc=$?
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -q '^retired: 1404:fiber-1404-plan-new$' \
+  && ! printf '%s' "$out" | grep -q '^already retired:' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 2 ] \
+  && grep -Fq $'\t1404\tfiber-1404-plan-new' "$r/roster-done"; then
+  ok done-newer-unretired-plan-still-retires
+else
+  fail "done-newer-unretired-plan-still-retires (rc=$grc; $out; $(cat "$r/roster-done"))"
+fi
+
 # A session id retires the same row its name would: the roster records both and
 # the operator has whichever one the report printed.
 r=$(newrun 3); lane "$r" 4026 fiber-4026-build eee55555; grant "$r" 4026
@@ -1314,12 +1366,13 @@ out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fche
   bash "$BIN/lanecheck" "done" 1543:fiber-1543-plan 2>&1)
 if [ -e "$r/fiber-1543-fence-grant-20261104T0000Z.md" ] \
    && [ ! -e "$r/done/fiber-1543-fence-grant-20261104T0000Z.md" ] \
-   && printf '%s' "$out" | grep -q 'fence kept for #1543: 1 session' \
+   && printf '%s' "$out" | grep -q 'already retired: #1543:fiber-1543-plan' \
+   && [ "$(grep -c '' "$r/roster-done")" = 1 ] \
    && [ "$(grep -c '' "$T/fclog")" = 0 ] \
    && grep -q '^fiber-1543[[:space:]]' "$T/fcheld"; then
-  ok old-ticket-retirement-does-not-release-new-session-claims
+  ok old-ticket-retirement-no-op-keeps-new-session-claims
 else
-  fail "old-ticket-retirement-does-not-release-new-session-claims (log=$(cat "$T/fclog")) ($out)"
+  fail "old-ticket-retirement-no-op-keeps-new-session-claims (log=$(cat "$T/fclog")) ($out)"
 fi
 
 # A failed release names the hand command and does not stop the retirement. The
