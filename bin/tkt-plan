@@ -7,6 +7,7 @@ set -euo pipefail
 usage() {
   printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <id>]\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
   printf '       tkt-plan <state> triaged --comment <id>\n' >&2
+  printf '       tkt-plan <state> rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>\n' >&2
   printf '       tkt-plan <state> rule-questions --comment <id>\n' >&2
   exit 2
 }
@@ -248,6 +249,7 @@ runjob() {
 # after a granted confirm must not blank that confirm's PLAN-OK (#1491).
 clear_verdict() {
   t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
+  t set plan_verdict_by ""; t set plan_verdict_ruling ""; t set plan_verdict_comment ""
 }
 
 record_plan_stop_verdict() {
@@ -365,7 +367,7 @@ do_verify() {
         emit "ROUND-LIMIT round=$round confirm=done" 1 "a grant is pending ($granted_by:$granted_comment); verify does not consume it: run tkt-plan $state confirm --edits <file>" "$(open_lines)"
       fi
       record_plan_stop_verdict round-limit
-      emit "ROUND-LIMIT round=$round confirm=done" 1 "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+      emit "ROUND-LIMIT round=$round confirm=done" 1 "if another fully specified confirm is authorized, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $state rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
     fi
     [ "$round" -lt 2 ] || { record_plan_stop_verdict round-limit; emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan $state confirm --edits <file>, or after triage answers every open line run tkt-plan $state triaged --comment <id>" "$(open_lines)"; }
   fi
@@ -454,7 +456,7 @@ do_confirm() {
       if [ "$reconfirm_used" != 1 ] && [ -n "$latest_edits" ] && [ -n "$last_confirm_report" ] && [ -f "$last_confirm_report" ] && [ "$latest_edits" -nt "$last_confirm_report" ]; then
         reconfirm_free=1
       else
-        emit "ROUND-LIMIT confirm=done" 1 "staleness-check: $staleness_check" "if no grant is recorded, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+        emit "ROUND-LIMIT confirm=done" 1 "staleness-check: $staleness_check" "if another fully specified confirm is authorized, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $state rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
       fi
     fi
   fi
@@ -524,6 +526,83 @@ do_grant() {
   t set granted_used ""
   t add grant "round=$grant_round by=$who via=$via comment=$comment ruling=$ruling"
   emit "SET grant=$who:$comment" 0 "next: tkt-plan $state confirm --edits <file>"
+}
+
+do_rule_ok() {
+  who=""; ruling=""; comment=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --by) [ $# -ge 2 ] || usage; who="$2"; shift 2;;
+    --ruling) [ $# -ge 2 ] || usage; ruling="$2"; shift 2;;
+    --comment) [ $# -ge 2 ] || usage; comment="$2"; shift 2;;
+    *) usage;; esac; done
+  case "$who" in
+    flywheel|surveyor) ;;
+    *) emit "RULE-OK-REFUSED reason=steward" 1 "--by must be flywheel or surveyor" ;;
+  esac
+  case "$ruling" in
+    ""|*[[:space:]]*) emit "RULE-OK-REFUSED reason=ruling-id" 1 "--ruling must be a non-empty id without whitespace" ;;
+  esac
+  case "$comment" in
+    ""|*[!0-9]*) emit "RULE-OK-REFUSED reason=comment-id" 1 "comment id must contain only digits" ;;
+  esac
+
+  plan="$(t get plan 2>/dev/null || true)"
+  [ -n "$plan" ] && [ -r "$plan" ] || emit "RULE-OK-REFUSED reason=plan" 1 "no readable plan is recorded in state $state"
+  base="$(plan_base "$plan")"
+  [ -n "$base" ] || emit "RULE-OK-REFUSED reason=plan" 1 "plan $plan has no Base line"
+  plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
+  [ "$plan_verdict" != ok ] || emit "RULE-OK-REFUSED reason=already-ok" 1 "the current plan already has plan_verdict ok"
+
+  files=()
+  while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
+  if [ "${#files[@]}" -gt 0 ]; then
+    if ! stat="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${files[@]}" 2>"$tmp")"; then
+      emit "RULE-OK-REFUSED reason=stale-check" 1 "could not compare plan Files against origin/main" "$(head -n 1 "$tmp" 2>/dev/null || true)"
+    fi
+    if [ -n "$stat" ]; then
+      emit "RULE-OK-REFUSED reason=stale" 1 "$stat"
+    fi
+  fi
+
+  comment_json="$tmp.rule-ok-comment.json"
+  comment_error="$tmp.rule-ok-comment-error"
+  if ! gh api "repos/$repo/issues/comments/$comment" >"$comment_json" 2>"$comment_error"; then
+    rm -f "$comment_json" "$comment_error"
+    emit "RULE-OK-REFUSED reason=comment-fetch" 1 "could not verify that comment $comment belongs to $repo#$issue"
+  fi
+  if ! jq -e --arg repo "$repo" --arg issue "$issue" '
+    type == "object" and (.body | type == "string")
+      and (.issue_url | type == "string")
+      and (.issue_url | contains("/repos/" + $repo + "/"))
+      and (.issue_url | endswith("/issues/" + $issue))
+  ' "$comment_json" >/dev/null 2>&1; then
+    rm -f "$comment_json" "$comment_error"
+    emit "RULE-OK-REFUSED reason=comment-issue" 1 "comment $comment is not on $repo#$issue"
+  fi
+  stop_verdict_at="$(t get plan_stop_verdict_at 2>/dev/null || true)"
+  plan_verdict_at="$(t get plan_verdict_at 2>/dev/null || true)"
+  ruling_after_verdict_at="$stop_verdict_at"
+  if [ -n "$plan_verdict_at" ] && { [ -z "$ruling_after_verdict_at" ] || [[ "$plan_verdict_at" > "$ruling_after_verdict_at" ]]; }; then
+    ruling_after_verdict_at="$plan_verdict_at"
+  fi
+  if [ -z "$ruling_after_verdict_at" ] || ! jq -e --arg verdict_at "$ruling_after_verdict_at" '
+    (.created_at | type == "string") and (.created_at > $verdict_at)
+  ' "$comment_json" >/dev/null 2>&1; then
+    rm -f "$comment_json" "$comment_error"
+    emit "RULE-OK-REFUSED reason=comment-time" 1 "comment $comment does not postdate the latest plan or stop verdict"
+  fi
+  if ! jq -e --arg ruling "$ruling" '.body | contains($ruling)' "$comment_json" >/dev/null 2>&1; then
+    rm -f "$comment_json" "$comment_error"
+    emit "RULE-OK-REFUSED reason=ruling-missing" 1 "comment $comment does not contain ruling id $ruling"
+  fi
+  rm -f "$comment_json" "$comment_error"
+
+  plan_verdict_write "$tkt_state" "$state" ok "$base" "$plan" "$worktree"
+  t set plan_verdict_by "$who"
+  t set plan_verdict_ruling "$ruling"
+  t set plan_verdict_comment "$comment"
+  t journal "tkt-plan rule-ok by=$who ruling=$ruling comment=$comment"
+  emit "RULE-OK by=$who ruling=$ruling comment=$comment" 0 "next: tkt-build $state"
 }
 
 do_triaged() {
@@ -764,6 +843,7 @@ do_set() {
   # fresh budget from tkt-start --part <n>, not from a new path.
   if [ "$old_plan" != "$plan" ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
+    t set plan_verdict_by ""; t set plan_verdict_ruling ""; t set plan_verdict_comment ""
     t set plan_stop_verdict_key ""; t set plan_stop_verdict_at ""
     t set build_stale_recovery_base ""; t set build_stale_recovery_plan_hash ""
     t set plan_questions_comment ""; t set plan_questions_hash ""; t set plan_questions_verdict_at ""; t set plan_questions_verdict_hash ""
@@ -775,6 +855,7 @@ do_set() {
   plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
   if [ "$old_plan" = "$plan" ] && [ "$no_verifier" -eq 0 ] && [ "$plan_verdict" = skipped ]; then
     t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
+    t set plan_verdict_by ""; t set plan_verdict_ruling ""; t set plan_verdict_comment ""
   fi
   if [ "$no_verifier" -eq 1 ] && { [ -z "$plan_verdict" ] || [ "$plan_verdict" = skipped ]; }; then
     plan_verdict_write "$tkt_state" "$state" skipped "$base" "$plan" "$worktree"
@@ -796,6 +877,9 @@ do_replan() {
     t set plan_verdict ""
     t set plan_verdict_base ""
     t set plan_verdict_hash ""
+    t set plan_verdict_by ""
+    t set plan_verdict_ruling ""
+    t set plan_verdict_comment ""
   fi
   # Job slots and findings first, round last: a half-done replan leaves
   # round non-empty and tkt-build refuses loudly instead of reusing a stale slot.
@@ -821,4 +905,4 @@ do_replan() {
 }
 
 case "$sub" in
-  verify) do_verify "$@";; confirm) do_confirm "$@";; grant-round) do_grant "$@";; triaged) do_triaged "$@";; rule-questions) do_rule_questions "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac
+  verify) do_verify "$@";; confirm) do_confirm "$@";; grant-round) do_grant "$@";; rule-ok) do_rule_ok "$@";; triaged) do_triaged "$@";; rule-questions) do_rule_questions "$@";; post) do_post "$@";; set) do_set "$@";; replan) do_replan "$@";; *) usage;; esac

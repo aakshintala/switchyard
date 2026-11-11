@@ -24,6 +24,9 @@ plan_verdict_write() {
   "$state_tool" "$state" set plan_verdict_base "$base"
   "$state_tool" "$state" set plan_verdict_hash "$hash"
   "$state_tool" "$state" set plan_verdict_at "$verdict_at"
+  "$state_tool" "$state" set plan_verdict_by ""
+  "$state_tool" "$state" set plan_verdict_ruling ""
+  "$state_tool" "$state" set plan_verdict_comment ""
 }
 
 plan_verdict_check() {

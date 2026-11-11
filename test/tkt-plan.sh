@@ -214,7 +214,7 @@ set -uo pipefail
 printf 'gh|%s\n' "\$*" >>"$T/gh.log"
 if [ "\${1:-}" = api ]; then
   case "\${2:-}" in
-    repos/*/issues/comments/*) cat "$T/comment.json"; exit $? ;;
+    repos/*/issues/comments/*) [ -f "$T/comment.json" ] || exit 1; cat "$T/comment.json"; exit 0 ;;
     *) echo "gh stub: unexpected API endpoint \${2:-}" >&2; exit 2 ;;
   esac
 fi
@@ -1046,11 +1046,11 @@ jobs_before="$(grep -c '^job|' "$T/stub.log")"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "grant-extra verify before grant exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "verify before grant"
-grep -Fq "if no grant is recorded, run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits <file>; after triage answers every open line, run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "verify ROUND-LIMIT names the grant and triaged paths"
+grep -Fq "if another fully specified confirm is authorized, run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $S rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "verify ROUND-LIMIT names the grant, steward ruling and triaged paths"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 1 ] || fail "grant-extra confirm before grant exits 1"
 expect_verdict "TKT tkt-plan ROUND-LIMIT confirm=done log=*" "confirm before grant"
-grep -Fq "if no grant is recorded, run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits <file>; after triage answers every open line, run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "confirm ROUND-LIMIT names the grant and triaged paths"
+grep -Fq "if another fully specified confirm is authorized, run tkt-plan $S grant-round --by <who> --comment <id>, then tkt-plan $S confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $S rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "confirm ROUND-LIMIT names the grant, steward ruling and triaged paths"
 [ "$(grep -c '^job|' "$T/stub.log")" = "$jobs_before" ] || fail "limits before grant start no job"
 run_plan grant-round --by switchyard --comment 1234
 [ "$RC" -eq 0 ] || fail "grant-extra grant exits 0"
@@ -2086,7 +2086,7 @@ ticket_fail_case() {
   bash "$TKT_STATE" "$S" set job.verifier-r1 j-keep || fail "$1 seed job"
   bash "$TKT_STATE" "$S" set plan_verdict ok || fail "$1 seed verdict"
   bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "$1 seed verdict base"
-  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_verdict_hash=' -e '^plan_triage_comment=' "$S" >"$CDIR/expected.state"
+  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_verdict_hash=' -e '^plan_verdict_at=' -e '^plan_verdict_by=' -e '^plan_verdict_ruling=' -e '^plan_verdict_comment=' -e '^plan_triage_comment=' "$S" >"$CDIR/expected.state"
   printf '%s' "$2" >"$T/ghmode"
   jobs_before="$(grep -c '^job|' "$T/stub.log" || true)"
   run_plan verify
@@ -2094,7 +2094,7 @@ ticket_fail_case() {
   [ "$RC" -eq 2 ] || fail "$1 exits 2 (rc=$RC)"
   grep -q "tkt-plan: cannot read ticket text for switchyard#518" "$CDIR/stderr.txt" || fail "$1 names the ticket"
   [ "$(grep -c '^job|' "$T/stub.log" || true)" = "$jobs_before" ] || fail "$1 starts no job"
-  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_verdict_hash=' -e '^plan_triage_comment=' "$S" >"$CDIR/actual.state"
+  grep -v -e '^plan_verdict=' -e '^plan_verdict_base=' -e '^plan_verdict_hash=' -e '^plan_verdict_at=' -e '^plan_verdict_by=' -e '^plan_verdict_ruling=' -e '^plan_verdict_comment=' -e '^plan_triage_comment=' "$S" >"$CDIR/actual.state"
   cmp -s "$CDIR/actual.state" "$CDIR/expected.state" || fail "$1 clears only the verdict metadata"
   [ "$(bash "$TKT_STATE" "$S" get job.verifier-r1)" = "j-keep" ] || fail "$1 keeps the job slot"
 }
@@ -2129,6 +2129,7 @@ run_plan verify
 expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "order confirmed"
 grep -q "grant-round --by <who> --comment <id>" <<<"$OUT" || fail "confirm=done names the grant command"
 grep -q "confirm --edits <file>" <<<"$OUT" || fail "confirm=done names the confirm command"
+grep -q "rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>" <<<"$OUT" || fail "confirm=done names the steward ruling path"
 grep -q "triaged --comment <id>" <<<"$OUT" || fail "confirm=done names the triage escape"
 [ "$(gh_count)" = "$gh_before" ] || fail "confirm=done reads no ticket"
 
@@ -3093,6 +3094,95 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = amendment ]; th
     [ "$RC" -eq 1 ] || fail "triaged-protected-$section refuses a quoted structural edit"
     expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=plan-changed log=*" "triaged-protected-$section"
   done
+fi
+
+# A steward ruling records PLAN-OK only for the current, fresh plan and a
+# comment on this issue that follows the latest plan/stop verdict.
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
+  setup_case rule-ok-invalid-steward
+  rebase_plan
+  run_plan rule-ok --by owner --ruling RULING-1604 --comment 654001
+  [ "$RC" -eq 1 ] || fail "rule-ok-invalid-steward refuses an unapproved steward"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=steward log=*" "rule-ok-invalid-steward"
+
+  setup_case rule-ok-comment-fetch
+  rebase_plan
+  bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok comment-fetch verdict time"
+  rm -f "$T/comment.json"
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654002
+  [ "$RC" -eq 1 ] || fail "rule-ok-comment-fetch refuses an unreadable comment"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=comment-fetch log=*" "rule-ok-comment-fetch"
+
+  setup_case rule-ok-comment-issue
+  rebase_plan
+  bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok comment-issue verdict time"
+  set_ruling_comment 'Steward ruling RULING-1604.' 2099-01-01T00:00:00Z 519
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654003
+  [ "$RC" -eq 1 ] || fail "rule-ok-comment-issue refuses another issue's comment"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=comment-issue log=*" "rule-ok-comment-issue"
+
+  setup_case rule-ok-before-plan-verdict
+  rebase_plan
+  bash "$TKT_STATE" "$S" set plan_verdict_at 2010-01-01T00:00:00Z || fail "seed rule-ok latest plan verdict time"
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok older stop time"
+  set_ruling_comment 'Steward ruling RULING-1604.' 2005-01-01T00:00:00Z
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654004
+  [ "$RC" -eq 1 ] || fail "rule-ok-before-plan-verdict refuses an old comment"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=comment-time log=*" "rule-ok-before-plan-verdict"
+
+  setup_case rule-ok-before-stop-verdict
+  rebase_plan
+  bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok older plan verdict time"
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2010-01-01T00:00:00Z || fail "seed rule-ok latest stop time"
+  set_ruling_comment 'Steward ruling RULING-1604.' 2005-01-01T00:00:00Z
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654005
+  [ "$RC" -eq 1 ] || fail "rule-ok-before-stop-verdict refuses an old comment"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=comment-time log=*" "rule-ok-before-stop-verdict"
+
+  setup_case rule-ok-missing-ruling
+  rebase_plan
+  bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok missing-ruling verdict time"
+  set_ruling_comment 'Steward ruling RULING-OTHER.'
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654006
+  [ "$RC" -eq 1 ] || fail "rule-ok-missing-ruling refuses a body without the requested id"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=ruling-missing log=*" "rule-ok-missing-ruling"
+
+  setup_case rule-ok-no-plan
+  rebase_plan
+  bash "$TKT_STATE" "$S" set plan "" || fail "clear rule-ok plan"
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654007
+  [ "$RC" -eq 1 ] || fail "rule-ok-no-plan refuses when no plan is recorded"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=plan log=*" "rule-ok-no-plan"
+
+  setup_case rule-ok-stale
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654008
+  [ "$RC" -eq 1 ] || fail "rule-ok-stale refuses a plan behind origin/main"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=stale log=*" "rule-ok-stale"
+
+  setup_case rule-ok-already-ok
+  rebase_plan
+  bash "$TKT_STATE" "$S" set plan_verdict ok || fail "seed rule-ok already-ok verdict"
+  bash "$TKT_STATE" "$S" set plan_verdict_base "$(cat "$CDIR/base")" || fail "seed rule-ok already-ok base"
+  bash "$TKT_STATE" "$S" set plan_verdict_hash "$(git -C "$WT" hash-object -w "$CDIR/plan.md")" || fail "seed rule-ok already-ok hash"
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654009
+  [ "$RC" -eq 1 ] || fail "rule-ok-already-ok refuses an existing PLAN-OK"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=already-ok log=*" "rule-ok-already-ok"
+
+  setup_case rule-ok-success
+  rebase_plan
+  bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok success verdict time"
+  bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2001-01-01T00:00:00Z || fail "seed rule-ok success stop time"
+  set_ruling_comment 'Steward ruling RULING-1604: dispatch this exact plan.'
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654010
+  [ "$RC" -eq 0 ] || fail "rule-ok-success records PLAN-OK (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_verdict "TKT tkt-plan RULE-OK by=surveyor ruling=RULING-1604 comment=654010 log=*" "rule-ok-success"
+  expect_plan_verdict ok "$(cat "$CDIR/base")" "rule-ok-success"
+  expect_current_plan_verdict_hash "rule-ok-success"
+  [ "$(state_get plan_verdict_by)" = surveyor ] || fail "rule-ok-success records steward provenance"
+  [ "$(state_get plan_verdict_ruling)" = RULING-1604 ] || fail "rule-ok-success records ruling provenance"
+  [ "$(state_get plan_verdict_comment)" = 654010 ] || fail "rule-ok-success records comment provenance"
+  grep -Fq "next: tkt-build $S" <<<"$OUT" || fail "rule-ok-success prints tkt-build as the next step"
+  grep -Fq 'tkt-plan rule-ok by=surveyor ruling=RULING-1604 comment=654010' "$CDIR/tkt.journal" || fail "rule-ok-success journals its ruling provenance"
 fi
 
 echo "tkt-plan: all cases passed"
