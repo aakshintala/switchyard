@@ -881,12 +881,7 @@ do_replan() {
   plan="$plan_key"
   plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
   if [ -z "$plan_verdict_file_hash" ] || [ "$plan_verdict_hash" != "$plan_verdict_file_hash" ]; then
-    t set plan_verdict ""
-    t set plan_verdict_base ""
-    t set plan_verdict_hash ""
-    t set plan_verdict_by ""
-    t set plan_verdict_ruling ""
-    t set plan_verdict_comment ""
+    clear_verdict
   fi
   # Job slots and findings first, round last: a half-done replan leaves
   # round non-empty and tkt-build refuses loudly instead of reusing a stale slot.
