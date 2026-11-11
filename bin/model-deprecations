@@ -26,7 +26,9 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 RUN_TMP_DIR=""
 
 cleanup_run() {
-  if [ -n "$RUN_TMP_DIR" ]; then rm -rf "$RUN_TMP_DIR"; fi
+  if [ -n "$RUN_TMP_DIR" ]; then
+    rm -rf "$RUN_TMP_DIR" "${RUN_TMP_DIR}.delegate-run.err" "${RUN_TMP_DIR}.delegate-watch.err"
+  fi
 }
 
 render_units() {
@@ -110,7 +112,7 @@ install_weekly() {
 }
 
 run_deprecations() {
-  local model today source_sha scratch delegate_output job_id rc inbox
+  local model today source_sha scratch delegate_output job_id rc inbox status_output delegate_status
   RUN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/model-deprecations.XXXXXX")"
   trap cleanup_run EXIT
   scratch="$RUN_TMP_DIR/report.md"
@@ -126,21 +128,48 @@ run_deprecations() {
       printf '\nReport date: %s\n' "$today"
       printf 'Source line: source: model-deprecations %s\n' "$source_sha"
       printf 'Scratch report path (write only the report here): %s\n' "$scratch"
-    } | delegate run --model "$model" --cwd "$repo_root" 2>"$RUN_TMP_DIR/delegate-run.err"
+    } | delegate run --model "$model" --cwd "$RUN_TMP_DIR" 2>"${RUN_TMP_DIR}.delegate-run.err"
   )"
   rc=$?
   set -e
+  job_id="$(printf '%s\n' "$delegate_output" | grep -Eo '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | tail -n 1 || true)"
+  if [ -n "$job_id" ]; then
+    if status_output="$(delegate status "$job_id" 2>/dev/null)"; then
+      delegate_status="$(printf '%s\n' "$status_output" | sed -nE 's/^[^:]+: ([A-Z][A-Z_]*)( .*)?$/\1/p' | head -n 1)"
+    else
+      delegate_status=""
+    fi
+  else
+    delegate_status=""
+  fi
   if [ "$rc" -ne 0 ]; then
     echo "model-deprecations: delegate run failed" >&2
+    python3 -I "$helper" failure "$inbox" "$today" "$source_sha" "$delegate_status"
     return 1
   fi
-  job_id="$(printf '%s\n' "$delegate_output" | grep -Eo '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | tail -n 1 || true)"
   if [ -z "$job_id" ]; then
     echo "model-deprecations: delegate run returned no job id" >&2
+    python3 -I "$helper" failure "$inbox" "$today" "$source_sha"
     return 1
   fi
-  if ! delegate watch "$job_id" >/dev/null 2>"$RUN_TMP_DIR/delegate-watch.err"; then
-    echo "model-deprecations: delegate job did not complete successfully" >&2
+
+  set +e
+  delegate watch "$job_id" >/dev/null 2>"${RUN_TMP_DIR}.delegate-watch.err"
+  rc=$?
+  set -e
+  if status_output="$(delegate status "$job_id" 2>/dev/null)"; then
+    delegate_status="$(printf '%s\n' "$status_output" | sed -nE 's/^[^:]+: ([A-Z][A-Z_]*)( .*)?$/\1/p' | head -n 1)"
+  else
+    delegate_status=""
+  fi
+  if [ "$rc" -ne 0 ] || [ "$delegate_status" != DONE ]; then
+    echo "model-deprecations: delegate job did not finish with DONE" >&2
+    python3 -I "$helper" failure "$inbox" "$today" "$source_sha" "$delegate_status"
+    return 1
+  fi
+  if [ ! -s "$scratch" ]; then
+    echo "model-deprecations: delegate produced no scratch report" >&2
+    python3 -I "$helper" failure "$inbox" "$today" "$source_sha" "$delegate_status"
     return 1
   fi
   python3 -I "$helper" publish "$scratch" "$inbox" "$today" "$source_sha"

@@ -24,22 +24,27 @@ case "${1:-}" in
   run)
     shift
     model=""
+    cwd=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --model) model="$2"; shift 2 ;;
-        --cwd) shift 2 ;;
+        --cwd) cwd="$2"; shift 2 ;;
         *) echo "unexpected delegate run argument" >&2; exit 2 ;;
       esac
     done
     prompt="$(cat)"
-    printf 'run model=%s\n' "$model" >>"$DELEGATE_CALLS"
+    report_path="$(sed -n 's/^Scratch report path (write only the report here): //p' <<<"$prompt")"
+    empty=yes
+    [ -z "$(find "$cwd" -mindepth 1 -print -quit)" ] || empty=no
+    printf 'run model=%s cwd=%s scratch=%s empty=%s\n' "$model" "$cwd" "$report_path" "$empty" >>"$DELEGATE_CALLS"
     printf '%s\n' "$prompt" >"$DELEGATE_PROMPT"
-    if [ "${DEPRECATIONS_STUB_MODE:-report}" = report ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ]; then
-      report_path="$(sed -n 's/^Scratch report path (write only the report here): //p' <<<"$prompt")"
+    if [ "${DEPRECATIONS_STUB_MODE:-report}" = report ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ] || [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ]; then
       report_date="$(sed -n 's/^Report date: //p' <<<"$prompt")"
       source_line="$(sed -n 's/^Source line: //p' <<<"$prompt")"
       if [ "${DEPRECATIONS_STUB_MODE:-report}" = invalid ]; then
         printf '# Wrong heading\n' >"$report_path"
+      elif [ "${DEPRECATIONS_STUB_MODE:-report}" = empty ]; then
+        printf '# Model deprecations %s\n%s\n\n## skipped\n' "$report_date" "$source_line" >"$report_path"
       else
         cat >"$report_path" <<REPORT
 # Model deprecations $report_date
@@ -54,16 +59,24 @@ $source_line
 | claude-new | new | source | https://platform.claude.com/docs/en/about-claude/model-deprecations | - |
 
 ## skipped
-- muse: page unavailable (fixture)
+- gemini: page unavailable (fixture)
 REPORT
       fi
     fi
     echo "12345678-1234-1234-1234-123456789abc"
+    if [ "${DEPRECATIONS_STUB_MODE:-report}" = run-fail ]; then exit 1; fi
     ;;
   watch)
     shift
     [ "$#" -eq 1 ] || { echo "unexpected delegate watch arguments" >&2; exit 2; }
     printf 'watch %s\n' "$1" >>"$DELEGATE_CALLS"
+    if [ "${DEPRECATIONS_WATCH_RC:-0}" -ne 0 ]; then exit "$DEPRECATIONS_WATCH_RC"; fi
+    ;;
+  status)
+    shift
+    [ "$#" -eq 1 ] || { echo "unexpected delegate status arguments" >&2; exit 2; }
+    printf 'status %s\n' "$1" >>"$DELEGATE_CALLS"
+    printf '%s: %s (caller=fixture)\n' "$1" "${DEPRECATIONS_STATUS:-DONE}"
     ;;
   *) echo "unexpected delegate command" >&2; exit 2 ;;
 esac
@@ -78,10 +91,11 @@ export MODEL_DEPRECATIONS_TODAY=2026-05-04
 
 # The checked-in brief names every vendor page and the required report layout.
 BRIEF="$ROOT/bin/lib/model-deprecations-brief.md"
-for vendor in Anthropic OpenAI Gemini OpenRouter Databricks Muse; do
+for vendor in Anthropic OpenAI Gemini OpenRouter Databricks; do
   grep -q "^- $vendor:" "$BRIEF" || fail "brief page list missing $vendor"
 done
-for value in 'model | kind | field | vendor | models.dev' '## skipped' 'tool allowlist' 'prompt-only restriction'; do
+if grep -q '^- Muse:' "$BRIEF"; then fail "Muse API endpoint was left in the weekly page list"; fi
+for value in 'model | kind | field | vendor | models.dev' '## skipped' 'Tools are not allowlisted' 'empty temporary working directory' 'caller script, not the model' 'Always write a complete report' 'caller script will publish nothing' 'https://ai.google.dev/gemini-api/docs/deprecations' 'OpenRouter is a catalog' 'There is no public Meta model lifecycle page' 'daily `model-catalog-diff` job covers Muse'; do
   grep -qi "$value" "$BRIEF" || fail "brief missing $value"
 done
 
@@ -98,12 +112,19 @@ grep -q '^| claude-old | deprecated | retirement date | 2026-10-01 (source: http
 grep -q '^| claude-retired | retired | source | https://platform.claude.com/' "$REPORT" || fail "retired row or source missing"
 grep -q '^| claude-new | new | source | https://platform.claude.com/' "$REPORT" || fail "new row or source missing"
 grep -q '^## skipped$' "$REPORT" || fail "skipped section missing"
-grep -q '^- muse: page unavailable (fixture)$' "$REPORT" || fail "failed page entry missing"
+grep -q '^- gemini: page unavailable (fixture)$' "$REPORT" || fail "failed page entry missing"
 [ -z "$(find "$INBOX" -maxdepth 1 -name '.model-deprecations-*.tmp' -print -quit)" ] || fail "atomic inbox temporary file was left behind"
 [ -z "$(find "$TMPDIR" -mindepth 1 -print -quit)" ] || fail "delegate scratch directory was left behind"
 [ "$(grep -c '^run ' "$DELEGATE_CALLS")" -eq 1 ] || fail "run did not make exactly one delegate run"
 [ "$(grep -c '^watch ' "$DELEGATE_CALLS")" -eq 1 ] || fail "delegate job was not waited on"
-grep -q '^run model=muse/muse-spark-1.3-contributor$' "$DELEGATE_CALLS" || fail "default standard-rung Muse model was not selected"
+grep -q '^run model=muse/muse-spark-1.3-contributor cwd=' "$DELEGATE_CALLS" || fail "default standard-rung Muse model was not selected"
+RUN_LINE="$(grep '^run ' "$DELEGATE_CALLS")"
+RUN_CWD="$(sed -E 's/.* cwd=([^ ]+) scratch=.*/\1/' <<<"$RUN_LINE")"
+RUN_SCRATCH="$(sed -E 's/.* scratch=([^ ]+) empty=.*/\1/' <<<"$RUN_LINE")"
+case "$RUN_CWD" in "$TMPDIR"/model-deprecations.*) ;; *) fail "delegate cwd was not a fresh temporary directory: $RUN_CWD" ;; esac
+[ "$RUN_CWD" != "$ROOT" ] || fail "delegate cwd was the repository root"
+[ "$RUN_SCRATCH" = "$RUN_CWD/report.md" ] || fail "scratch report was outside delegate cwd"
+grep -q '^run .* empty=yes$' "$DELEGATE_CALLS" || fail "delegate cwd was not empty at job start"
 grep -q '^Report date: 2026-05-04$' "$DELEGATE_PROMPT" || fail "date was not passed to the model"
 
 # An empty job writes nothing and can use a configured model.
@@ -114,8 +135,36 @@ DEPRECATIONS_STUB_MODE=empty MODEL_DEPRECATIONS_MODEL=custom/test-model MODEL_CA
 [ ! -s "$T/empty.out" ] && [ ! -s "$T/empty.err" ] || fail "empty result was not quiet"
 [ ! -e "$EMPTY_INBOX" ] || fail "empty result wrote a report"
 [ "$(grep -c '^run ' "$DELEGATE_CALLS")" -eq 1 ] || fail "empty result made more than one delegate run"
-grep -q '^run model=custom/test-model$' "$DELEGATE_CALLS" || fail "MODEL_DEPRECATIONS_MODEL override was ignored"
+grep -q '^run model=custom/test-model cwd=' "$DELEGATE_CALLS" || fail "MODEL_DEPRECATIONS_MODEL override was ignored"
 [ "$(grep -c '^watch ' "$DELEGATE_CALLS")" -eq 1 ] || fail "empty delegate job was not waited on"
+
+# A missing scratch report is different from a valid no-change report.
+MISSING_INBOX="$T/missing-inbox"
+if DEPRECATIONS_STUB_MODE=missing MODEL_CATALOG_INBOX="$MISSING_INBOX" bash "$BIN" run >"$T/missing.out" 2>"$T/missing.err"; then
+  fail "missing scratch report was accepted as no changes"
+fi
+MISSING_REPORT="$MISSING_INBOX/model-deprecations-2026-05-04.md"
+[ -f "$MISSING_REPORT" ] || fail "missing scratch report did not publish a failure report"
+grep -q '^- muse: model produced no report (delegate status: DONE)$' "$MISSING_REPORT" || fail "missing report status was not recorded"
+grep -q '^## skipped$' "$MISSING_REPORT" || fail "missing report failure has no skipped section"
+
+# A job that did not finish with DONE publishes a failure report with its known status.
+FAILED_INBOX="$T/failed-inbox"
+if DEPRECATIONS_STATUS=ERROR MODEL_CATALOG_INBOX="$FAILED_INBOX" bash "$BIN" run >"$T/failed.out" 2>"$T/failed.err"; then
+  fail "non-DONE delegate status was accepted"
+fi
+FAILED_REPORT="$FAILED_INBOX/model-deprecations-2026-05-04.md"
+[ -f "$FAILED_REPORT" ] || fail "non-DONE job did not publish a failure report"
+grep -q '^- muse: model produced no report (delegate status: ERROR)$' "$FAILED_REPORT" || fail "non-DONE status was not recorded"
+
+# A failed delegate run also publishes a failure report when its job status is known.
+RUN_FAIL_INBOX="$T/run-fail-inbox"
+if DEPRECATIONS_STUB_MODE=run-fail DEPRECATIONS_STATUS=FAILED MODEL_CATALOG_INBOX="$RUN_FAIL_INBOX" bash "$BIN" run >"$T/run-fail.out" 2>"$T/run-fail.err"; then
+  fail "failed delegate run was accepted"
+fi
+RUN_FAIL_REPORT="$RUN_FAIL_INBOX/model-deprecations-2026-05-04.md"
+[ -f "$RUN_FAIL_REPORT" ] || fail "failed delegate run did not publish a failure report"
+grep -q '^- muse: model produced no report (delegate status: FAILED)$' "$RUN_FAIL_REPORT" || fail "failed run status was not recorded"
 
 # Invalid model output is rejected before it can enter the inbox.
 INVALID_INBOX="$T/invalid-inbox"

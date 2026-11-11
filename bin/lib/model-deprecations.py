@@ -109,20 +109,7 @@ def validate_report(text, today, source):
     return row_count, skip_count
 
 
-def publish(scratch, inbox, today, source):
-    scratch = Path(scratch)
-    try:
-        if not scratch.is_file() or scratch.stat().st_size == 0:
-            return 0
-        text = scratch.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        fail("cannot read scratch report")
-    if not text.strip():
-        return 0
-    rows, skipped = validate_report(text, today, source)
-    if rows == 0 and skipped == 0:
-        return 0
-
+def write_report(text, inbox, today):
     inbox = Path(inbox).expanduser()
     try:
         inbox.mkdir(parents=True, exist_ok=True)
@@ -144,10 +131,46 @@ def publish(scratch, inbox, today, source):
     return 0
 
 
+def publish(scratch, inbox, today, source):
+    scratch = Path(scratch)
+    try:
+        if not scratch.is_file():
+            fail("scratch report is missing")
+        text = scratch.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        fail("cannot read scratch report")
+    if not text.strip():
+        fail("scratch report is empty")
+    rows, skipped = validate_report(text, today, source)
+    if rows == 0 and skipped == 0:
+        return 0
+    return write_report(text, inbox, today)
+
+
+def publish_failure(inbox, today, source, status=""):
+    reason = "model produced no report"
+    if status:
+        if not re.fullmatch(r"[A-Z][A-Z_]*", status):
+            fail("invalid delegate job status")
+        reason += f" (delegate status: {status})"
+    text = "\n".join((
+        f"# Model deprecations {today}",
+        f"source: model-deprecations {source}",
+        "",
+        "## skipped",
+        f"- muse: {reason}",
+        "",
+    ))
+    validate_report(text, today, source)
+    return write_report(text, inbox, today)
+
+
 def main(argv):
-    if len(argv) != 6 or argv[1] != "publish":
-        fail("usage: model-deprecations.py publish SCRATCH INBOX YYYY-MM-DD SOURCE")
-    return publish(argv[2], argv[3], argv[4], argv[5])
+    if len(argv) == 6 and argv[1] == "publish":
+        return publish(argv[2], argv[3], argv[4], argv[5])
+    if len(argv) in (5, 6) and argv[1] == "failure":
+        return publish_failure(argv[2], argv[3], argv[4], argv[5] if len(argv) == 6 else "")
+    fail("usage: model-deprecations.py publish SCRATCH INBOX YYYY-MM-DD SOURCE")
 
 
 if __name__ == "__main__":

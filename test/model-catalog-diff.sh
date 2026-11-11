@@ -12,6 +12,7 @@ python3 -I - "$BIN" "$T" "$ROOT" <<'PY'
 import json
 import os
 import re
+import runpy
 import socket
 import subprocess
 import sys
@@ -22,6 +23,32 @@ from pathlib import Path
 
 binary, temp_root, repo = map(Path, sys.argv[1:])
 temp_root.mkdir(parents=True, exist_ok=True)
+specs = {spec["name"]: spec for spec in runpy.run_path(str(repo / "bin/lib/model-catalog-diff.py"))["VENDORS"]}
+expected_hosts = {
+    "anthropic": "api.anthropic.com",
+    "openai": "api.openai.com",
+    "gemini": "generativelanguage.googleapis.com",
+    "codex": "chatgpt.com",
+    "openrouter": "openrouter.ai",
+    "muse": "api.meta.ai",
+}
+expected_credentials = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "muse": "MUSE_API_KEY",
+}
+for name, host in expected_hosts.items():
+    actual_host = specs[name]["base"].split("://", 1)[1].split("/", 1)[0]
+    if actual_host != host:
+        raise AssertionError(f"{name} credential default host changed: {actual_host}")
+    if name in expected_credentials and specs[name].get("credential") != expected_credentials[name]:
+        raise AssertionError(f"{name} credential was assigned to the wrong default host")
+if not specs["codex"].get("auth_file") or specs["databricks"].get("credential") != "DATABRICKS_TOKEN":
+    raise AssertionError("Codex and Databricks credential sources changed")
+if specs["databricks"]["base"] != "" or specs["databricks"]["host_credential"] != "DATABRICKS_HOST":
+    raise AssertionError("Databricks credential host must come from DATABRICKS_HOST")
 secrets = {
     "ANTHROPIC_API_KEY": "fake-anthropic-KEY-1595",
     "OPENAI_API_KEY": "fake-openai-KEY-1595",
@@ -61,11 +88,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "openai": {"models": {
                     "openai-a": {"limit": {"context": 2048}},
                     "openai-b": {"limit": {"context": 4096}},
-                    "codex-one": {},
+                    "codex-one": {"limit": {"context": 1000}},
+                    "text-embedding-3-small": {},
                 }},
-                "google": {"models": {"gemini-one": {}}},
-                "openrouter": {"models": {"router-one": {}}},
-                "databricks": {"models": {"db-one": {}}},
+                "google": {"models": {"gemini-one": {}, "gemini-embed": {}}},
+                "openrouter": {"models": {"router-one": {"cost": {"input": 0.15, "output": 0.25}}}},
+                "databricks": {"models": {"db-one": {}, "db-embed": {}}},
                 "muse": {"models": {"muse-one": {}}},
             })
         elif path == "/anthropic/v1/models":
@@ -81,20 +109,25 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 ]})
         elif path == "/openai/v1/models":
             if "after=page-one" in self.path:
-                send_json(self, {"data": [{"id": "openai-b"}, {"id": "codex-one"}], "has_more": False})
+                send_json(self, {"data": [{"id": "openai-b"}, {"id": "codex-one"}, {"id": "text-embedding-3-small"}], "has_more": False})
             else:
                 send_json(self, {"data": [{"id": "openai-a"}], "has_more": True, "last_id": "page-one"})
         elif path == "/gemini/v1beta/models":
-            send_json(self, {"models": [{"name": "models/gemini-one"}]})
+            send_json(self, {"models": [{"name": "models/gemini-one", "supportedGenerationMethods": ["generateContent"]}, {"name": "models/gemini-embed", "supportedGenerationMethods": ["embedContent"]}]})
         elif path == "/codex/backend-api/codex/models":
-            send_json(self, {"models": [{"slug": "codex-one"}, {"slug": "openai-a"}, {"slug": "openai-b"}]})
+            if "client_version" not in self.path:
+                send_json(self, {"error": "client_version required"}, status=400)
+            elif self.mode == "clean":
+                send_json(self, {"models": [{"slug": "codex-one", "context_window": 1000}, {"slug": "openai-a"}, {"slug": "openai-b"}]})
+            else:
+                send_json(self, {"models": [{"slug": "codex-one", "context_window": 900}, {"slug": "codex-extra"}]})
         elif path == "/openrouter/api/v1/models":
             if self.mode == "gaps":
                 send_json(self, {"error": "not authorized"}, status=401)
             else:
-                send_json(self, {"data": [{"id": "router-one"}]})
+                send_json(self, {"data": [{"id": "router-one", "pricing": {"prompt": "0.00000015000000000000002", "completion": "0.00000025"}}]})
         elif path == "/databricks/api/2.0/serving-endpoints":
-            send_json(self, {"endpoints": [{"name": "db-one"}]})
+            send_json(self, {"endpoints": [{"name": "db-one", "task": "llm/v1/chat"}, {"name": "db-embed", "task": "llm/v1/embeddings"}]})
         elif path == "/muse/v1/models":
             send_json(self, {"data": [{"id": "muse-one"}]})
         else:
@@ -115,7 +148,7 @@ def write_credentials(include_muse):
     return path
 
 
-def run_case(label, include_muse, inbox, mode="gaps", muse_base=None, env_file=None):
+def run_case(label, include_muse, inbox, mode="gaps", muse_base=None, env_file=None, codex_version=None):
     FixtureHandler.mode = mode
     env_path = env_file or write_credentials(include_muse)
     auth_dir = temp_root / "home" / ".codex"
@@ -137,6 +170,9 @@ def run_case(label, include_muse, inbox, mode="gaps", muse_base=None, env_file=N
         "MODEL_CATALOG_DATABRICKS_BASE": f"{base}/databricks",
         "MODEL_CATALOG_MUSE_BASE": muse_base or f"{base}/muse",
     })
+    env.pop("MODEL_CATALOG_CODEX_CLIENT_VERSION", None)
+    if codex_version is not None:
+        env["MODEL_CATALOG_CODEX_CLIENT_VERSION"] = codex_version
     result = subprocess.run(["bash", str(binary), "run"], env=env, text=True, capture_output=True, check=False)
     return result, env
 
@@ -173,13 +209,30 @@ try:
     expect("| claude-gone | gone |" in report, "gone row missing")
     expect("openrouter: HTTP 401" in report, "401 skip missing")
     expect("muse: no credential" in report, "missing credential skip missing")
+    expect("| codex-extra | missing |" in report, "codex missing row was not reported")
+    expect("| codex-one | mismatch | context | 900 | 1000 |" in report, "codex context mismatch missing")
+    expect("| openai-a | gone |" not in report and "| openai-b | gone |" not in report, "codex gone noise was reported")
+    for identifier in ("text-embedding-3-small", "gemini-embed", "db-embed"):
+        expect(identifier not in report, f"non-chat model {identifier} was not filtered")
     expect("## skipped" in report, "skipped section missing")
     expect(not list(inbox.glob("*.tmp")) and not list(inbox.glob(".model-catalog-*.tmp")), "temporary report file was left behind")
     assert_no_secrets(report, result.stdout, result.stderr)
     expect(any("after=page-one" in path for path, _headers in requests), "openai pagination was not followed")
     gemini_request = next(headers for path, headers in requests if path.startswith("/gemini/"))
     expect(any(key.lower() == "x-goog-api-key" and value == secrets["GEMINI_API_KEY"] for key, value in gemini_request.items()), "Gemini credential was not sent as a header")
-    expect("key=" not in next(path for path, _headers in requests if path.startswith("/gemini/")), "Gemini key was sent in the URL")
+    codex_request = next(path for path, _headers in requests if path.startswith("/codex/"))
+    expect("client_version=0.1.0" in codex_request, "Codex default client_version query parameter missing")
+
+    # A sibling ignore file pins a known Codex context mismatch without suppressing other rows.
+    pinned_env = write_credentials(True)
+    (pinned_env.parent / "ignore").write_text("# vendor model field\ncodex codex-one context # known API pin\n", encoding="utf-8")
+    pinned_inbox = temp_root / "inbox-pinned"
+    pinned_result, _ = run_case("pinned", True, pinned_inbox, env_file=pinned_env, codex_version="fixture-codex-version")
+    expect(pinned_result.returncode == 0, f"pinned run failed: {pinned_result.stderr}")
+    pinned_report = (pinned_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("| codex-one | mismatch | context |" not in pinned_report, "ignore pin did not suppress Codex context mismatch")
+    expect("| codex-extra | missing |" in pinned_report, "ignore pin suppressed an unrelated Codex row")
+    expect(any("client_version=fixture-codex-version" in path for path, _headers in requests), "Codex client_version override was ignored")
 
     # Connection-refused behavior is exercised against a closed localhost port.
     probe = socket.socket()

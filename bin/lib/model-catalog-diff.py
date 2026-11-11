@@ -3,6 +3,7 @@
 
 import errno
 import json
+import math
 import os
 import re
 import socket
@@ -20,6 +21,8 @@ INBOX_DEFAULT = "/srv/lanes/fiber-worktrees/surveyor/run/inbox"
 ENV_DEFAULT = ".config/model-catalog/env"
 AUTH_DEFAULT = ".codex/auth.json"
 PAGE_LIMIT = 100
+CODEX_CLIENT_VERSION = "0.1.0"
+OPENAI_NON_CHAT = re.compile(r"embedding|tts|whisper|dall-e|moderation|transcribe|image|realtime|audio|search", re.I)
 VENDORS = (
     {
         "name": "anthropic",
@@ -89,7 +92,7 @@ VENDORS = (
     {
         "name": "muse",
         "base_env": "MODEL_CATALOG_MUSE_BASE",
-        "base": "https://api.muse.ai",
+        "base": "https://api.meta.ai",
         "path": "v1/models",
         "credential": "MUSE_API_KEY",
         "header": "Authorization",
@@ -146,6 +149,26 @@ def read_credentials():
     return credentials
 
 
+def read_ignore_pins():
+    path = credential_file().parent / "ignore"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        fail("cannot read model catalog ignore file")
+    vendors = {spec["name"] for spec in VENDORS}
+    pins = set()
+    for number, line in enumerate(lines, 1):
+        fields = line.split("#", 1)[0].split()
+        if not fields:
+            continue
+        if len(fields) != 3 or fields[0] not in vendors or fields[2] not in FIELD_NAMES:
+            fail(f"invalid model catalog ignore file line {number}")
+        pins.add(tuple(fields))
+    return pins
+
+
 def read_codex_token():
     path = Path.home() / AUTH_DEFAULT
     try:
@@ -187,29 +210,35 @@ def request_json(url, headers, timeout):
 
 def payload_items(payload, vendor):
     if isinstance(payload, list):
-        return payload
-    if not isinstance(payload, dict):
+        value = payload
+    elif isinstance(payload, dict):
+        value = None
+        for key in ("data", "models", "endpoints"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                value = candidate
+                break
+        if value is None:
+            raise FetchFailure("invalid response")
+    else:
         raise FetchFailure("invalid response")
-    for key in ("data", "models", "endpoints"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            if vendor == "databricks":
-                flattened = []
-                for endpoint in value:
-                    if not isinstance(endpoint, dict):
-                        continue
-                    name = endpoint.get("name")
-                    config = endpoint.get("config")
-                    served = config.get("served_entities") if isinstance(config, dict) else None
-                    if isinstance(served, list) and served:
-                        for entity in served:
-                            if isinstance(entity, dict):
-                                flattened.append({**entity, "id": entity.get("entity_name") or entity.get("model_name") or name})
-                    else:
-                        flattened.append({**endpoint, "id": endpoint.get("entity_name") or name})
-                return flattened
-            return value
-    raise FetchFailure("invalid response")
+
+    if vendor != "databricks":
+        return value
+    flattened = []
+    for endpoint in value:
+        if not isinstance(endpoint, dict):
+            continue
+        name = endpoint.get("name")
+        config = endpoint.get("config")
+        served = config.get("served_entities") if isinstance(config, dict) else None
+        if isinstance(served, list) and served:
+            for entity in served:
+                if isinstance(entity, dict):
+                    flattened.append({**endpoint, **entity, "task": endpoint.get("task"), "id": entity.get("entity_name") or entity.get("model_name") or name})
+        else:
+            flattened.append({**endpoint, "id": endpoint.get("entity_name") or name})
+    return flattened
 
 
 def next_page(payload, vendor):
@@ -252,7 +281,15 @@ def fetch_vendor(spec, credentials, codex_token, timeout):
     headers[spec["header"]] = f"Bearer {secret}" if spec.get("bearer") else secret
     if spec["name"] == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
-    url = clean_url(base, spec["path"])
+    base_url = clean_url(base, spec["path"])
+    base_parts = urllib.parse.urlsplit(base_url)
+    base_query = urllib.parse.parse_qsl(base_parts.query, keep_blank_values=True)
+    if spec["name"] == "codex":
+        client_version = os.environ.get("MODEL_CATALOG_CODEX_CLIENT_VERSION", CODEX_CLIENT_VERSION)
+        if not client_version:
+            raise FetchFailure("empty Codex client version")
+        base_query.append(("client_version", client_version))
+    url = urllib.parse.urlunsplit((base_parts.scheme, base_parts.netloc, base_parts.path, urllib.parse.urlencode(base_query), ""))
     first_origin = url
     models = []
     seen_tokens = set()
@@ -273,7 +310,7 @@ def fetch_vendor(spec, credentials, codex_token, timeout):
                 raise FetchFailure("invalid pagination response")
             seen_tokens.add(value)
             parts = urllib.parse.urlsplit(clean_url(base, spec["path"]))
-            query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+            query = list(base_query)
             query.append((spec["pagination"], value))
             url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(query), ""))
     raise FetchFailure("too many pages")
@@ -394,8 +431,35 @@ def markdown(value, secrets):
     return text
 
 
-def compare_vendor(vendor_items, reference, vendor):
+def filtered_vendor_items(items, vendor):
+    kept = []
+    excluded = set()
+    for item in items:
+        identifier = model_id(item, vendor)
+        if vendor == "gemini":
+            methods = item.get("supportedGenerationMethods") if isinstance(item, dict) else None
+            if not isinstance(methods, list) or "generateContent" not in methods:
+                if identifier:
+                    excluded.add(identifier)
+                continue
+        elif vendor == "openai" and identifier and OPENAI_NON_CHAT.search(identifier):
+            excluded.add(identifier)
+            continue
+        elif vendor == "databricks" and (not isinstance(item, dict) or item.get("task") != "llm/v1/chat"):
+            if identifier:
+                excluded.add(identifier)
+            continue
+        kept.append(item)
+    return kept, excluded
+
+
+def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
+    vendor_items, excluded = filtered_vendor_items(vendor_items, vendor)
     vendor_index = index_models(vendor_items, vendor)
+    if vendor == "openai":
+        reference = {identifier: model for identifier, model in reference.items() if not OPENAI_NON_CHAT.search(identifier)}
+    else:
+        reference = {identifier: model for identifier, model in reference.items() if identifier not in excluded}
     rows = []
     for identifier in sorted(set(vendor_index) | set(reference)):
         left = vendor_index.get(identifier)
@@ -404,13 +468,21 @@ def compare_vendor(vendor_items, reference, vendor):
             rows.append((identifier, "missing", "-", "listed", "-"))
             continue
         if left is None:
-            rows.append((identifier, "gone", "-", "-", "listed"))
+            if vendor != "codex":
+                rows.append((identifier, "gone", "-", "-", "listed"))
             continue
         left_fields = vendor_fields(left, vendor)
         right_fields = reference_fields(right)
         for field in FIELD_NAMES:
-            if field in left_fields and field in right_fields and left_fields[field] != right_fields[field]:
-                rows.append((identifier, "mismatch", field, left_fields[field], right_fields[field]))
+            if field not in left_fields or field not in right_fields:
+                continue
+            if (vendor, identifier, field) in ignore_pins:
+                continue
+            left_value, right_value = left_fields[field], right_fields[field]
+            if field in ("input_price", "output_price") and math.isclose(left_value, right_value, rel_tol=1e-6):
+                continue
+            if left_value != right_value:
+                rows.append((identifier, "mismatch", field, left_value, right_value))
     return rows
 
 
@@ -486,6 +558,7 @@ def run(script_path):
     else:
         model_dev_failure = None
 
+    ignore_pins = read_ignore_pins()
     skipped = []
     rows_by_vendor = {}
     for spec in VENDORS:
@@ -499,7 +572,7 @@ def run(script_path):
             continue
         try:
             reference = reference_models(reference_payload, spec["provider"])
-            rows = compare_vendor(items, reference, spec["name"])
+            rows = compare_vendor(items, reference, spec["name"], ignore_pins)
         except FetchFailure as error:
             skipped.append((spec["name"], error.reason))
             continue
