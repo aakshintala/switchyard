@@ -6,8 +6,8 @@
 # through delegate, watch with no timeout, follow supersededBy through shared
 # job-walk.sh, and print one verdict line plus a digest of at most 40 lines. A
 # dispatched job gets one JSON line per id in jobs.log beside the state file;
-# gated dispatches journal the inner command and encoded ticket env for later
-# gate verification.
+# gated dispatches journal the base64-encoded inner command and ticket env as
+# cmd64=<base64> env64=<base64> for gate verification.
 # Reruns recover a missing jobs.log line without duplicating an existing entry.
 # A verifier-r* slot's wall cap travels on the run call (--wall-ms); watch
 # only reads the record.
@@ -43,6 +43,7 @@ prompt=""
 model=""
 gate=""
 inner_gate_cmd=""
+inner_gate_cmd64=""
 inner_gate_env64=""
 inherited_gate=0
 gate_from_plan=0
@@ -136,14 +137,16 @@ validate_gate_journal_command() {
 
 journal_gate_command() {
   [ -n "$inner_gate_cmd" ] || return 0
-  local env64 env_value
+  local cmd64 env64 env_value
   if [ "$inherited_gate" -eq 1 ]; then
+    cmd64="$inner_gate_cmd64"
     env64="$inner_gate_env64"
   else
+    cmd64="$(printf '%s' "$inner_gate_cmd" | jq -Rrs '@base64')" || return 0
     env_value="$(tkt get env 2>/dev/null || true)"
     env64="$(printf '%s' "$env_value" | jq -Rrs '@base64')" || return 0
   fi
-  tkt journal "tkt-job gate slot=$slot job=$jobid cmd=$inner_gate_cmd env64=$env64"
+  tkt journal "tkt-job gate slot=$slot job=$jobid cmd64=$cmd64 env64=$env64"
 }
 
 # Probe the shared lock and release it at once: the delegate wait below
@@ -349,11 +352,12 @@ if [ -n "$resume" ]; then
     inherited_line="$(grep -F "tkt-job gate " "${state%.state}.journal" 2>/dev/null | grep -F "job=$resume " | tail -n 1 || true)"
     inherited_payload="${inherited_line#* tkt-job gate }"
     case "$inherited_payload" in
-      *" cmd="*" env64="*)
-        inherited_rest="${inherited_payload#* cmd=}"
-        inner_gate_cmd="${inherited_rest%% env64=*}"
+      *" cmd64="*" env64="*)
+        inherited_rest="${inherited_payload#* cmd64=}"
+        inner_gate_cmd64="${inherited_rest%% env64=*}"
         inner_gate_env64="${inherited_rest#* env64=}"
-        inherited_gate=1
+        inner_gate_cmd="$(printf '%s' "$inner_gate_cmd64" | jq -Rrs '@base64d' 2>/dev/null)" || inner_gate_cmd=""
+        if [ -n "$inner_gate_cmd" ]; then inherited_gate=1; fi
         ;;
     esac
   fi

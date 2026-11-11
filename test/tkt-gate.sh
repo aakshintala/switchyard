@@ -190,7 +190,7 @@ journal_env64() {
 }
 
 journal_job_gate() {
-  bash "$TKT_STATE" "$S" journal "tkt-job gate slot=fix1 job=$1 cmd=$2 env64=$(journal_env64)" || fail "journal delegate gate command"
+  bash "$TKT_STATE" "$S" journal "tkt-job gate slot=fix1 job=$1 cmd64=$(printf '%s' "$2" | jq -Rrs '@base64') env64=$(journal_env64)" || fail "journal delegate gate command"
   cp "$CDIR/tkt.journal" "$CDIR/journal-before"
 }
 
@@ -1193,6 +1193,27 @@ run_gate --from-job job-unpushed
 [ "$RC" -eq 1 ] || fail "--from-job unpushed tip refusal exits 1"
 expect_verdict "TKT tkt-gate TIP * log=*" "--from-job unpushed tip"
 ! grep -q 'tkt-gate PASS head=' "$CDIR/tkt.journal" || fail "--from-job unpushed tip refusal journals no PASS"
+
+# --- newest resumed job's own explicit gate line overrides the dispatch line ---
+setup_from_job_case from-job-resumed-explicit-gate
+plant_job_record old-9 present 0 "$H" false
+jq '.supersededBy = "stub-1"' "$DELEGATE_JOBS_DIR/old-9.json" >"$CDIR/record.tmp" \
+  && mv "$CDIR/record.tmp" "$DELEGATE_JOBS_DIR/old-9.json" || fail "link resumed explicit-gate job"
+plant_job_record stub-1 present 0 "$H" false
+journal_job_gate old-9 gate-ok
+journal_job_gate stub-1 gate-x
+expect_from_job_refusal old-9 'gate command/environment'
+
+# --- a newest old-format journal line cannot fall back to an older valid line ---
+setup_from_job_case from-job-old-format-newest
+plant_job_record old-9 present 0 "$H" false
+jq '.supersededBy = "stub-1"' "$DELEGATE_JOBS_DIR/old-9.json" >"$CDIR/record.tmp" \
+  && mv "$CDIR/record.tmp" "$DELEGATE_JOBS_DIR/old-9.json" || fail "link old-format resumed job"
+plant_job_record stub-1 present 0 "$H" false
+journal_job_gate old-9 gate-ok
+bash "$TKT_STATE" "$S" journal 'tkt-job gate slot=fix1 job=stub-1 cmd=gate-ok env64=' || fail "journal old-format newest line"
+cp "$CDIR/tkt.journal" "$CDIR/journal-before"
+expect_from_job_refusal old-9 'gate command/environment'
 
 # --- --from-job journals the newest job in a superseded chain ---
 setup_from_job_case from-job-superseded
