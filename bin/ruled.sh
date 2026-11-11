@@ -42,6 +42,16 @@ case "$ticket" in
 esac
 [ -s "$src" ] || { echo "no such ruling file, or empty: $src" >&2; exit 2; }
 
+# A steer can be accepted but left unconsumed, or its delivery wait can expire
+# before the host resolves it. Only those two successful replies need a fresh
+# turn; all other disposition words remain successful deliveries.
+needs_fresh_turn_retry() {
+    case "$1" in
+        unconsumed|unconfirmed) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # The selftest refusal guard is deliberately not included in this moved slice.
 # The archive has exactly one name shape, `ruling-<ticket>-<rest>.md`, because a
 # reader globs for it: bin/lanecheck's NEEDS-RULING probe finds a lane's answers
@@ -163,9 +173,28 @@ case "${INBOX_HOST:-$lanehost}" in
             send=$("${FW_DELEGATE:-$HOME/.local/bin/delegate}" \
                 session send "$lanejid" - <"$dest" 2>&1)
             sendrc=$?
-            # Same contract as the muse branch below: the exit code decides, not
-            # the disposition word, so `steered` is not read as a failure.
             if [ "$sendrc" -eq 0 ]; then
+                if needs_fresh_turn_retry "$send"; then
+                    echo "send returned $send; waiting for $lanejid to go idle before one fresh-turn resend"
+                    watch=$("${FW_DELEGATE:-$HOME/.local/bin/delegate}" \
+                        session watch "$lanejid" 2>&1)
+                    watchrc=$?
+                    if [ "$watchrc" -eq 0 ]; then
+                        echo "lane is idle; resending ruling once as a fresh turn"
+                        send=$("${FW_DELEGATE:-$HOME/.local/bin/delegate}" \
+                            session send "$lanejid" - <"$dest" 2>&1)
+                        sendrc=$?
+                        if [ "$sendrc" -eq 0 ]; then
+                            echo "resent once after idle: $lanesess ($lanejid) on this mac — ${send:-ok}"
+                            exit 0
+                        fi
+                        echo "RESEND FAILED for #$ticket ($lanejid, exit $sendrc): $send" >&2
+                    else
+                        echo "WAIT FAILED for #$ticket ($lanejid, exit $watchrc): $watch" >&2
+                    fi
+                    echo "  a mac lane has no lane-inbox to fall back to. Deliver it by hand and say so." >&2
+                    exit 3
+                fi
                 echo "delivered into the turn: $lanesess ($lanejid) on this mac — ${send:-ok}"
                 exit 0
             fi
@@ -234,22 +263,38 @@ if [ "$lanehost" = muse ] && [ -n "$lanejid" ]; then
         "cat | TMPDIR=/srv/lanes/tmp ~/.local/bin/delegate session send $lanejid -" \
         <"$dest" 2>&1)
     sendrc=$?
-    # Branch on the exit code, not on the disposition word. The first version of
-    # this matched `started|queued` and called everything else a failure, which
-    # on its second real use (#3899 and #4152, 2026-11-04) read `steered` -- the
-    # BEST outcome, the message folded into the lane's running turn -- as a send
-    # failure, and then scp'd as well. Both lanes got the same ruling twice.
-    # The set of disposition words is delegate's to extend and not mine to
-    # enumerate; the exit code is the part it actually contracts.
     if [ "$sendrc" -eq 0 ]; then
-        echo "delivered into the turn: $lanesess ($lanejid) — ${send:-ok}"
-        exit 0
+        if needs_fresh_turn_retry "$send"; then
+            echo "send returned $send; waiting for $lanejid to go idle before one fresh-turn resend"
+            watch=$(fw_box_ssh -o BatchMode=yes "$host" \
+                "TMPDIR=/srv/lanes/tmp ~/.local/bin/delegate session watch $lanejid" 2>&1)
+            watchrc=$?
+            if [ "$watchrc" -eq 0 ]; then
+                echo "lane is idle; resending ruling once as a fresh turn"
+                send=$(fw_box_ssh -o BatchMode=yes "$host" \
+                    "cat | TMPDIR=/srv/lanes/tmp ~/.local/bin/delegate session send $lanejid -" \
+                    <"$dest" 2>&1)
+                sendrc=$?
+                if [ "$sendrc" -eq 0 ]; then
+                    echo "resent once after idle: $lanesess ($lanejid) — ${send:-ok}"
+                    exit 0
+                fi
+                echo "RESEND FAILED for #$ticket ($lanejid, exit $sendrc): $send" >&2
+            else
+                echo "WAIT FAILED for #$ticket ($lanejid, exit $watchrc): $watch" >&2
+            fi
+            echo "  falling back to the lane-inbox file route; its BLIND verdict below is the real one." >&2
+        else
+            echo "delivered into the turn: $lanesess ($lanejid) — ${send:-ok}"
+            exit 0
+        fi
+    else
+        # A failed send is not a reason to leave the ruling undelivered: fall through
+        # to the file route, which at least survives until the lane's next turn, and
+        # say plainly that the better route failed.
+        echo "SEND FAILED for #$ticket ($lanejid, exit $sendrc): $send" >&2
+        echo "  falling back to the lane-inbox file route; its BLIND verdict below is the real one." >&2
     fi
-    # A failed send is not a reason to leave the ruling undelivered: fall through
-    # to the file route, which at least survives until the lane's next turn, and
-    # say plainly that the better route failed.
-    echo "SEND FAILED for #$ticket ($lanejid, exit $sendrc): $send" >&2
-    echo "  falling back to the lane-inbox file route; its BLIND verdict below is the real one." >&2
 fi
 
 if fw_box_is_local; then

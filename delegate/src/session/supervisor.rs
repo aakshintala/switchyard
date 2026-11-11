@@ -1180,8 +1180,8 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
             return;
         }
         if current.status == Status::Running && current.active_turn_id.is_none() {
-            // Best effort, like the interrupt path: a late pi continuation may
-            // still run despite this clear request.
+            // Best effort: if clearing fails, a later explicit prompt may drain
+            // the queue, but the already-settled pi run will not restart itself.
             let _ = call(shared, "queue/clear", json!({}));
             force_unconsumed = true;
         }
@@ -1449,16 +1449,9 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
     match call(shared, "turn/steer", params) {
         Ok(_) => {
             drop(admission);
-            let resolution = if shared.kind == HostKind::Muse {
-                wait_for_steer_resolution(shared, &command_id, shared.config.steer_reply_wait)
-            } else {
-                SteerResolution::Consumed
-            };
-            let disposition = match resolution {
-                SteerResolution::Consumed => "steered",
-                SteerResolution::Unconsumed => "unconsumed",
-                SteerResolution::Expired => "steered",
-            };
+            let resolution =
+                wait_for_steer_resolution(shared, &command_id, shared.config.steer_reply_wait);
+            let disposition = steer_resolution_disposition(resolution);
             json!({"ok":true,"disposition":disposition})
         }
         Err(CallFailure::Rpc(error)) => {
@@ -1517,6 +1510,7 @@ fn start_turn(shared: &Arc<Shared>, text: &str) -> Value {
     ) {
         Ok(result) => match msp::ack_disposition(&result) {
             Disposition::Steered => json!({"ok":true,"disposition":"steered"}),
+            Disposition::Unconfirmed => json!({"ok":true,"disposition":"unconfirmed"}),
             Disposition::Started | Disposition::Queued | Disposition::Other => {
                 json!({"ok":true,"disposition":"started"})
             }
@@ -1704,6 +1698,14 @@ enum SteerResolution {
     Consumed,
     Unconsumed,
     Expired,
+}
+
+fn steer_resolution_disposition(resolution: SteerResolution) -> &'static str {
+    match resolution {
+        SteerResolution::Consumed => "steered",
+        SteerResolution::Unconsumed => "unconsumed",
+        SteerResolution::Expired => "unconfirmed",
+    }
 }
 
 fn wait_for_steer_resolution(
@@ -2105,6 +2107,22 @@ fn error_reply(code: &str, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_steer_resolution_is_not_reported_as_steered() {
+        assert_eq!(
+            steer_resolution_disposition(SteerResolution::Consumed),
+            "steered"
+        );
+        assert_eq!(
+            steer_resolution_disposition(SteerResolution::Unconsumed),
+            "unconsumed"
+        );
+        assert_eq!(
+            steer_resolution_disposition(SteerResolution::Expired),
+            "unconfirmed"
+        );
+    }
 
     #[test]
     fn idle_note_guard_claims_once_per_turn_completion() {

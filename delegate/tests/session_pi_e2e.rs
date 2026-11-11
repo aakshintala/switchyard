@@ -65,7 +65,7 @@ impl Harness {
             scenario,
             cassette,
             extra_env,
-            Duration::from_secs(10),
+            Duration::from_secs(20),
         )
     }
 
@@ -633,7 +633,7 @@ fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
     let steered = h.invoke(&["send", &id, "steer me", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
     assert!(
         h.logs(&id)
             .iter()
@@ -715,7 +715,7 @@ fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
     let steered = h.invoke(&["send", &id, "STEER-1", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
 
     let requests = h.requests();
     let steer_at = requests
@@ -801,7 +801,7 @@ fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
             String::from_utf8_lossy(&steered.stderr)
         );
         let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-        assert_eq!(reply["disposition"], "steered", "{reply}");
+        assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
     }
 
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
@@ -929,7 +929,7 @@ fn pi_clears_queued_steers_before_a_late_continuation_can_start() {
     let steered = h.invoke(&["send", &id, "LATE-STEER", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
 
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
     let idle = h.wait_state(&id, "idle after continuation deadline", |state| {
@@ -1084,7 +1084,7 @@ fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
             String::from_utf8_lossy(&steered.stderr)
         );
         let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-        assert_eq!(reply["disposition"], "steered", "{reply}");
+        assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
     }
     let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
     assert_eq!(pending.len(), 2, "{pending:?}");
@@ -1390,7 +1390,7 @@ fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
     let steered = h.invoke(&["send", &id, "STEER-2", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
 
     let stopped = h.invoke(&["stop", &id, "--interrupt", "--json"]);
     assert!(stopped.status.success());
@@ -1460,7 +1460,7 @@ fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
     let steered = h.invoke(&["send", &id, "STEER-4", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
 
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
     watch_ok(&h, &id);
@@ -1710,7 +1710,7 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let steered = h.invoke(&["send", &id, "STEER-3", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
 
     let held_marker = std::path::PathBuf::from(format!("{}.held", release_event_write.display()));
     h.wait_path(&held_marker, "pi-turn-2 start event append hold");

@@ -1948,7 +1948,9 @@ for (n, sess), (ts, host, jid) in sorted(entries.items()):
                 # unreachable: `delegate session send <full-uuid> -` takes a
                 # message on stdin and starts a turn on an idle session. Proved
                 # 2026-11-04 on #4026's lane and #4077's (switchyard #1086); it
-                # prints `started` on an idle session, `steered` on a busy one.
+                # prints `started` on an idle session, `steered` when delivery
+                # is confirmed, `unconsumed` when dropped, and `unconfirmed` if
+                # the caller's delivery wait expires while the steer is pending.
                 # Relaunching instead throws away the lane's whole turn.
                 fix = (f"deliver by SendMessage to {sess}" if host == "box"
                        else "wake with: " + onbox(f"session send {jid} -", msg=True, where=deleg))
