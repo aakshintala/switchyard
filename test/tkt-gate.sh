@@ -185,8 +185,12 @@ plant_job_record() {
   esac
 }
 
+journal_env64() {
+  printf '%s' "$(bash "$TKT_STATE" "$S" get env 2>/dev/null || true)" | base64 | tr -d '\n'
+}
+
 journal_job_gate() {
-  bash "$TKT_STATE" "$S" journal "tkt-job gate slot=fix1 job=$1 cmd=$2" || fail "journal delegate gate command"
+  bash "$TKT_STATE" "$S" journal "tkt-job gate slot=fix1 job=$1 cmd=$2 env64=$(journal_env64)" || fail "journal delegate gate command"
   cp "$CDIR/tkt.journal" "$CDIR/journal-before"
 }
 
@@ -1056,21 +1060,10 @@ grep -qx "Local gate: pass at $H (gate-ok)" "$T/pr-body" || fail "second PASS re
 grep -q "0000000000000000000000000000000000000000" "$T/pr-body" && fail "second PASS drops the old sha"
 
 # --- --from-job journals a delegate's full-gate PASS for tkt-ship ---
-setup_case from-job-pass
-write_plan
-commit_file base.txt "base changed"
-push_branch
-H="$(git -C "$WT" rev-parse HEAD)"
-printf '%s\n' "$H" >"$T/pr-head"
-: >"$T/pr-body"
-bash "$TKT_STATE" "$S" set pr 7 || fail "from-job set PR"
+setup_from_job_case from-job-pass
 bash "$TKT_STATE" "$S" set reviewed 1111111111111111111111111111111111111111 || fail "from-job set reviewed"
-mkdir -p "$DELEGATE_JOBS_DIR"
-jq -n --arg head "$H" \
-  '{result:{gateResult:{command:"bash gate-wrapper.sh",exitCode:0},
-            changeSet:{headAfter:$head,dirtyAfter:false}}}' \
-  >"$DELEGATE_JOBS_DIR/job-from-job.json" || fail "from-job record"
-bash "$TKT_STATE" "$S" journal 'tkt-job gate slot=fix1 job=job-from-job cmd=gate-ok' || fail "from-job journal gate command"
+plant_job_record job-from-job present 0 "$H" false
+journal_job_gate job-from-job gate-ok
 run_gate --from-job job-from-job
 [ "$RC" -eq 0 ] || fail "--from-job PASS exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-gate PASS head=$H log=*" "--from-job PASS"
@@ -1102,6 +1095,13 @@ setup_from_job_case from-job-command
 plant_job_record job-command present 0 "$H" false
 journal_job_gate job-command 'gate-wrong'
 expect_from_job_refusal job-command 'gate command'
+
+# --- --from-job refuses when the current ticket environment differs ---
+setup_from_job_case from-job-env
+plant_job_record job-env present 0 "$H" false
+journal_job_gate job-env gate-ok
+bash "$TKT_STATE" "$S" set env 'FOO=changed' || fail "change from-job env"
+expect_from_job_refusal job-env 'gate command/environment'
 
 # --- --from-job refuses a nonzero delegate gate exit ---
 setup_from_job_case from-job-nonzero
@@ -1150,6 +1150,31 @@ jq 'del(.result.changeSet.headAfter)' "$DELEGATE_JOBS_DIR/job-missing-head.json"
   && mv "$CDIR/record.tmp" "$DELEGATE_JOBS_DIR/job-missing-head.json" || fail "remove headAfter"
 journal_job_gate job-missing-head gate-ok
 expect_from_job_refusal job-missing-head 'head check'
+
+# --- --from-job refuses a matching job when the plan Files fence is exceeded ---
+setup_from_job_case from-job-fence
+commit_file outside.txt "outside"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+printf '%s\n' "$H" >"$T/pr-head"
+plant_job_record job-fence present 0 "$H" false
+journal_job_gate job-fence gate-ok
+run_gate --from-job job-fence
+[ "$RC" -eq 1 ] || fail "--from-job fence refusal exits 1"
+expect_verdict "TKT tkt-gate FENCE n=1 log=*" "--from-job fence"
+! grep -q 'tkt-gate PASS head=' "$CDIR/tkt.journal" || fail "--from-job fence refusal journals no PASS"
+
+# --- --from-job refuses an unpushed tip even when the delegate head matches ---
+setup_from_job_case from-job-unpushed
+commit_file base.txt "unpushed change"
+H="$(git -C "$WT" rev-parse HEAD)"
+printf '%s\n' "$H" >"$T/pr-head"
+plant_job_record job-unpushed present 0 "$H" false
+journal_job_gate job-unpushed gate-ok
+run_gate --from-job job-unpushed
+[ "$RC" -eq 1 ] || fail "--from-job unpushed tip refusal exits 1"
+expect_verdict "TKT tkt-gate TIP * log=*" "--from-job unpushed tip"
+! grep -q 'tkt-gate PASS head=' "$CDIR/tkt.journal" || fail "--from-job unpushed tip refusal journals no PASS"
 
 # --- --from-job journals the newest job in a superseded chain ---
 setup_from_job_case from-job-superseded

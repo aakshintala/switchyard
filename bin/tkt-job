@@ -3,11 +3,11 @@
 # The ticket-orchestrator job engine (orch-tools-spec section 5, C2): probe the
 # shared lock, drift-check state head against the worktree, reuse a stored job
 # id, fill the brief from flags then state, write the gate script, dispatch
-# through delegate, watch with no timeout, follow supersededBy to the newest
-# record, and print one verdict line plus a digest of at most 40 lines. A
+# through delegate, watch with no timeout, follow supersededBy through shared
+# job-walk.sh, and print one verdict line plus a digest of at most 40 lines. A
 # dispatched job gets one JSON line per id in jobs.log beside the state file;
-# gated dispatches also journal the unwrapped inner command as
-# `tkt-job gate slot=<slot> job=<id> cmd=<command>` for later gate verification.
+# gated dispatches journal the inner command and encoded ticket env for later
+# gate verification.
 # Reruns recover a missing jobs.log line without duplicating an existing entry.
 # A verifier-r* slot's wall cap travels on the run call (--wall-ms); watch
 # only reads the record.
@@ -90,6 +90,9 @@ if [ ! -r "$gate_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$gate_lib"
+job_walk_lib="$script_dir/lib/job-walk.sh"
+if [ ! -r "$job_walk_lib" ]; then echo "tkt-job: cannot read shared lib: $job_walk_lib" >&2; exit 2; fi
+. "$job_walk_lib"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then
   echo "tkt-job: cannot read shared lib: $namebase_lib" >&2
@@ -130,7 +133,7 @@ validate_gate_journal_command() {
 }
 
 journal_gate_command() {
-  [ -z "$inner_gate_cmd" ] || tkt journal "tkt-job gate slot=$slot job=$jobid cmd=$inner_gate_cmd"
+  [ -z "$inner_gate_cmd" ] || tkt journal "tkt-job gate slot=$slot job=$jobid cmd=$inner_gate_cmd env64=$(tkt get env 2>/dev/null | base64 | tr -d '\\n')"
 }
 
 # Probe the shared lock and release it at once: the delegate wait below
@@ -332,8 +335,11 @@ if [ -n "$resume" ]; then
   if [ "$gate_from_plan" -eq 1 ]; then
     build_gate_from_plan
   fi
+  if [ -n "$resume" ] && [ -z "$inner_gate_cmd" ]; then
+    inherited="$(grep -F "tkt-job gate " "${state%.state}.journal" 2>/dev/null | grep -F "job=$resume " | tail -n 1 || true)"
+    case "$inherited" in *" cmd="*) inner_gate_cmd="${inherited#* cmd=}"; inner_gate_cmd="${inner_gate_cmd%% env64=*}" ;; esac
+  fi
   validate_gate_journal_command
-  # An empty --gate is the same as no flag: the resume inherits the stored gate.
   gate_args=()
   if [ -n "$gate" ]; then gate_args=(--gate "$gate"); fi
   # No --model keeps the stored model; delegate itself refuses a backend switch.
@@ -418,17 +424,14 @@ fi
 # Follow supersededBy to the newest record; a loop is unrecognised, not a hang.
 # Each link resolves through the lookup, so a chain may span directories.
 broken=0
-seen=" $jobid "
-while [ -f "$record" ]; do
-  sup="$(jq -r '.supersededBy // empty' "$record" 2>/dev/null || true)"
-  [ -n "$sup" ] || break
-  case "$seen" in
-    *" $sup "*) broken=1; break ;;
-  esac
-  seen="$seen$sup "
-  jobid="$sup"
-  record="$(rec_of "$jobid")"
-done
+chain="$(job_walk_superseded "$jobid")" || broken=1
+if [ -n "$chain" ]; then
+  while IFS=$'\t' read -r chain_id chain_record; do
+    [ -n "$chain_id" ] || continue
+    jobid="$chain_id"
+    record="$chain_record"
+  done <<<"$chain"
+fi
 
 verdict=""
 digest="id=$jobid"

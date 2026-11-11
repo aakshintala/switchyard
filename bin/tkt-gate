@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# tkt-gate: pre-push checks and the gate on the remote tip, or journal a
-# delegate job's recorded full-gate PASS after validating its command, result,
-# head and clean-tree evidence. The normal path fetches, checks the branch tip
+# tkt-gate: pre-push checks and the gate on the remote tip, or validate a
+# delegate job's gate evidence after the same stored-head, fetch, tip, fence
+# and history checks. From-job matches command and ticket env, then shares the
+# normal head update and PASS journal path.
 # against origin/<branch> (and --expect-head), checks git diff --name-only
 # --no-renames origin/main...HEAD against the plan's Files or the state's fence
 # list, records the history, then runs the gate script from the plan's Gate
@@ -73,6 +74,9 @@ if [ ! -r "$gate_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$gate_lib"
+job_walk_lib="$script_dir/lib/job-walk.sh"
+if [ ! -r "$job_walk_lib" ]; then echo "tkt-gate: cannot read shared lib: $job_walk_lib" >&2; exit 2; fi
+. "$job_walk_lib"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then
   echo "tkt-gate: cannot read shared lib: $namebase_lib" >&2
@@ -118,22 +122,18 @@ from_job_refuse() {
 # supersededBy chain that tkt-job watches.
 from_job_pass() {
   local jobid record next prior gate_exit expected_gate
-  local journal_path journal_line journal_payload rest recorded_slot recorded_id recorded_cmd
-  local command_match head_after local_head pr pr_repo pr_head dirty
+  local journal_path journal_line journal_payload rest recorded_slot recorded_id recorded_cmd recorded_env current_env
+  local command_match head_after pr pr_repo pr_head dirty candidate_id chain chain_id chain_record
   local -a seen=()
-  jobid="$from_job"
-  while :; do
-    for prior in ${seen[@]+"${seen[@]}"}; do
-      [ "$prior" != "$jobid" ] || from_job_refuse "job record supersededBy cycle at id=$jobid"
-    done
-    seen+=("$jobid")
-    record="$(bash "$script_dir/job-record" "$jobid" 2>/dev/null)" || from_job_refuse "job record not found for id=$jobid"
-    [ -n "$record" ] && [ -f "$record" ] || from_job_refuse "job record not found for id=$jobid"
-    jq -e . "$record" >/dev/null 2>&1 || from_job_refuse "job record is not valid JSON for id=$jobid"
-    next="$(jq -r '.supersededBy // empty' "$record" 2>/dev/null)" || from_job_refuse "job record supersededBy is unreadable for id=$jobid"
-    [ -n "$next" ] || break
-    jobid="$next"
-  done
+  chain="$(job_walk_superseded "$from_job")" || from_job_refuse "job record supersededBy cycle in chain starting at id=$from_job"
+  while IFS=$'\t' read -r candidate_id record; do
+    [ -n "$candidate_id" ] || continue
+    seen+=("$candidate_id")
+    jobid="$candidate_id"
+  done <<<"$chain"
+  record="$(bash "$script_dir/job-record" "$jobid" 2>/dev/null)" || from_job_refuse "job record not found for id=$jobid"
+  [ -f "$record" ] || from_job_refuse "job record not found for id=$jobid"
+  jq -e . "$record" >/dev/null 2>&1 || from_job_refuse "job record is not valid JSON for id=$jobid"
 
   if ! jq -e '
     (.result.gateResult | type) == "object"
@@ -167,16 +167,22 @@ from_job_pass() {
           rest="${rest#* job=}"
           case "$rest" in *" cmd="*) ;; *) continue ;; esac
           recorded_id="${rest%% cmd=*}"
-          recorded_cmd="${rest#* cmd=}"
-          if [ -n "$recorded_slot" ] && [ "$recorded_id" = "$jobid" ] && [ "$recorded_cmd" = "$expected_gate" ]; then
-            command_match=1
-            break
-          fi
+          rest="${rest#* cmd=}"
+          case "$rest" in *" env64="*) ;; *) continue ;; esac
+          recorded_cmd="${rest%% env64=*}"
+          recorded_env="$(printf '%s' "${rest#* env64=}" | base64 -D 2>/dev/null || true)"
+          current_env="$(tkt get env 2>/dev/null || true)"
+          for candidate_id in ${seen[@]+"${seen[@]}"}; do
+            if [ -n "$recorded_slot" ] && [ "$recorded_id" = "$candidate_id" ] && [ "$recorded_cmd" = "$expected_gate" ] && [ "$recorded_env" = "$current_env" ]; then
+              command_match=1
+              break
+            fi
+          done
           ;;
       esac
     done <"$journal_path"
   fi
-  [ "$command_match" -eq 1 ] || from_job_refuse "gate command check failed: no tkt-job gate journal line for id=$jobid matches the current plan gate"
+  [ "$command_match" -eq 1 ] || from_job_refuse "gate command/environment check failed: no tkt-job gate journal line for the job chain matches the current plan gate and ticket env"
   [ "$gate_exit" = 0 ] || from_job_refuse "gate exit code check failed: delegate gateResult exitCode=$gate_exit for id=$jobid"
 
   head_after="$(jq -r '.result.changeSet.headAfter // empty' "$record" 2>/dev/null)" || from_job_refuse "head check failed: cannot read changeSet.headAfter for id=$jobid"
@@ -200,10 +206,10 @@ from_job_pass() {
   [ -z "$dirty" ] || from_job_refuse "dirty tree check failed: worktree has uncommitted changes"
 
   digest="commits=delegate gate=PASS id=$jobid"
-  hist=""
-  tkt set head "$head_after"
-  tkt journal "tkt-gate from-job id=$jobid head=$head_after"
-  emit "PASS head=$head_after" 0
+  from_job_id="$jobid"
+  from_job_head="$head_after"
+  gate_cmd="$expected_gate"
+  gate_word="PASS"
 }
 
 # emit VERDICT EXIT: write the verdict plus the digest (and the history, when
@@ -263,9 +269,6 @@ takeover_gate=""
 if ! takeover_plan_gate tkt-gate "$plan" tkt; then exit 2; fi
 if [ "$takeover" -eq 1 ]; then plan=""; fi
 fence_list="$(tkt list fence 2>/dev/null || true)"
-if [ -n "$from_job" ]; then
-  from_job_pass
-fi
 if [ -z "$plan" ] && [ -z "$fence_list" ] && [ "$takeover" -eq 0 ]; then
   tkt require plan
 fi
@@ -447,6 +450,9 @@ merges="$(git -C "$worktree" rev-list --count --merges "origin/main..HEAD" 2>/de
 
 gate_word="skipped"
 if [ "$checks_only" -eq 0 ]; then
+  if [ -n "$from_job" ]; then
+    from_job_pass
+  else
   if [ "$takeover" -eq 1 ]; then
     gate_cmd="$takeover_gate"
   else
@@ -496,6 +502,7 @@ $gerr"
     fi
     emit "FAIL rc=$rc" 1
   fi
+  fi
 fi
 
 digest="commits=$commits merges=$merges
@@ -534,6 +541,9 @@ if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
   else
     echo "tkt-gate: warning: cannot read PR $gate_pr body; leaving it unchanged" >&2
   fi
+fi
+if [ -n "$from_job" ]; then
+  tkt journal "tkt-gate from-job id=$from_job_id head=$from_job_head"
 fi
 if [ "$checks_only" -eq 1 ]; then
   emit "PASS head=$local_head" 0 checks-only
