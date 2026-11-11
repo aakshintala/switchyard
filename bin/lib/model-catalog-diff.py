@@ -508,6 +508,9 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
             latest_dated[base] = candidate
     for identifier in tuple(vendor_index):
         if identifier in reference_ids:
+            base = dated_model_base(identifier)
+            if base in reference_ids and base not in original_vendor_ids:
+                reference.pop(base, None)
             continue
         base = dated_model_base(identifier)
         if base not in reference_ids:

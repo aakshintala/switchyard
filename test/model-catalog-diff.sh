@@ -103,7 +103,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "databricks": {"models": {"db-one": {}, "db-embed": {}}},
                 "muse": {"models": {"muse-one": {}}},
             }
-            if self.mode == "dated":
+            if self.mode == "anthropic-dated":
+                models_dev["anthropic"]["models"].update({
+                    "claude-opus-4-5": {"limit": {"context": 100}},
+                    "claude-opus-4-5-20251101": {"limit": {"context": 300, "output": 30}},
+                })
+            elif self.mode == "dated":
                 models_dev["openai"]["models"].update({
                     "dated-dash": {},
                     "dated-compact": {},
@@ -120,7 +125,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 })
             send_json(self, models_dev)
         elif path == "/anthropic/v1/models":
-            if self.mode == "clean":
+            if self.mode == "anthropic-dated":
+                send_json(self, {"data": [
+                    {"id": "claude-opus-4-5-20251101", "context_window": 200, "max_tokens": 20},
+                ]})
+            elif self.mode == "clean":
                 send_json(self, {"data": [
                     {"id": "claude-shared", "context_window": 1000, "max_tokens": 100, "input_price": 1, "output_price": 2, "deprecated": False},
                     {"id": "claude-gone", "context_window": 512},
@@ -343,6 +352,16 @@ try:
     expect("| dated-latest |" not in dated_report, "latest dated model was not selected deterministically")
     expect("| exact-only-2026-05-04 | mismatch | context | 200 | 100 |" in dated_report, "exact dated model was not compared normally")
     expect("| chat-latest | missing |" in dated_report, "undated unknown OpenAI ID was not reported missing")
+
+    # An exact dated Anthropic model compares normally without marking its undated
+    # models.dev alias as gone.
+    anthropic_dated_inbox = temp_root / "inbox-anthropic-dated"
+    anthropic_dated_result, _ = run_case("anthropic-dated", True, anthropic_dated_inbox, mode="anthropic-dated")
+    expect(anthropic_dated_result.returncode == 0, f"Anthropic dated run failed: {anthropic_dated_result.stderr}")
+    anthropic_dated_report = (anthropic_dated_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("| claude-opus-4-5 | gone |" not in anthropic_dated_report, "undated Anthropic alias was reported gone")
+    expect("| claude-opus-4-5-20251101 | mismatch | context | 200 | 300 |" in anthropic_dated_report, "exact dated Anthropic context was not compared")
+    expect("| claude-opus-4-5-20251101 | mismatch | output | 20 | 30 |" in anthropic_dated_report, "exact dated Anthropic output was not compared")
 
     # OpenRouter prices may match a time-window override; without overrides, mismatches remain.
     pricing_inbox = temp_root / "inbox-pricing"
