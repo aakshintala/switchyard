@@ -3,30 +3,32 @@
 // close inherits the write fd until its exec, and the exec of the fake fails.
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 
 mod support;
 
 const ITERATIONS: usize = 400;
 const FORKERS: usize = 16;
-// Keep the contending spawns finite; previously each worker spawned until the
-// writer finished, making test duration depend on mutex scheduling under load.
-const SPAWNS_PER_FORKER: usize = ITERATIONS / FORKERS;
 
 #[test]
 fn fake_script_exec_survives_concurrent_spawns() {
     let dir = std::env::temp_dir().join(format!("fake-exec-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let start = Arc::new(Barrier::new(FORKERS + 1));
+    let writer_done = Arc::new(AtomicBool::new(false));
     let forkers: Vec<_> = (0..FORKERS)
         .map(|_| {
             let start = start.clone();
+            let writer_done = writer_done.clone();
             std::thread::spawn(move || {
                 start.wait();
-                for _ in 0..SPAWNS_PER_FORKER {
-                    let _guard = support::exec_lock();
+                while !writer_done.load(Ordering::Acquire) {
+                    let guard = support::exec_lock();
                     let status = Command::new("true").status().unwrap();
+                    drop(guard);
                     assert!(status.success(), "concurrent true spawn failed: {status}");
+                    std::thread::yield_now();
                 }
             })
         })
@@ -47,6 +49,7 @@ fn fake_script_exec_survives_concurrent_spawns() {
             }
         }
     }
+    writer_done.store(true, Ordering::Release);
     for forker in forkers {
         forker.join().unwrap();
     }
