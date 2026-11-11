@@ -378,6 +378,16 @@ def vendor_fields(model, vendor):
             value = number(pricing.get(key), 1_000_000)
             if value is not None:
                 fields[field] = value
+            overrides = pricing.get("overrides")
+            if isinstance(overrides, list):
+                alternatives = [
+                    candidate
+                    for override in overrides
+                    if isinstance(override, dict)
+                    and (candidate := number(override.get(key), 1_000_000)) is not None
+                ]
+                if alternatives:
+                    fields[field + "_alternatives"] = alternatives
     for field, keys in (("input_price", ("input_price",)), ("output_price", ("output_price",))):
         if field not in fields:
             value = next((model.get(key) for key in keys if model.get(key) is not None), None)
@@ -467,19 +477,29 @@ def filtered_vendor_items(items, vendor):
     return kept, excluded
 
 
+def dated_model_base(identifier):
+    match = re.fullmatch(r"(.+)-(?:\d{4}-\d{2}-\d{2}|\d{8})", identifier)
+    return match.group(1) if match else None
+
+
 def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
     vendor_items, excluded = filtered_vendor_items(vendor_items, vendor)
     vendor_index = index_models(vendor_items, vendor)
     if vendor == "openai":
         reference = {identifier: model for identifier, model in reference.items() if not OPENAI_NON_CHAT.search(identifier)}
-    elif vendor == "anthropic":
-        reference = {
-            identifier: model
-            for identifier, model in reference.items()
-            if not any(re.fullmatch(re.escape(identifier) + r"-\d{8}", vendor_id) for vendor_id in vendor_index)
-        }
     else:
         reference = {identifier: model for identifier, model in reference.items() if identifier not in excluded}
+    for identifier in tuple(vendor_index):
+        base = dated_model_base(identifier)
+        if base not in reference:
+            continue
+        if base in vendor_index:
+            del vendor_index[identifier]
+            reference.pop(identifier, None)
+        elif identifier in reference:
+            reference.pop(base)
+        else:
+            vendor_index[base] = vendor_index.pop(identifier)
     rows = []
     for identifier in sorted(set(vendor_index) | set(reference)):
         left = vendor_index.get(identifier)
@@ -499,8 +519,10 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
             if (vendor, identifier, field) in ignore_pins:
                 continue
             left_value, right_value = left_fields[field], right_fields[field]
-            if field in ("input_price", "output_price") and math.isclose(left_value, right_value, rel_tol=1e-6):
-                continue
+            if field in ("input_price", "output_price"):
+                alternatives = left_fields.get(field + "_alternatives", ())
+                if any(math.isclose(value, right_value, rel_tol=1e-6) for value in (left_value, *alternatives)):
+                    continue
             if left_value != right_value:
                 rows.append((identifier, "mismatch", field, left_value, right_value))
     return rows
