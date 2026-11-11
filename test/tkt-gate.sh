@@ -186,7 +186,7 @@ plant_job_record() {
 }
 
 journal_env64() {
-  printf '%s' "$(bash "$TKT_STATE" "$S" get env 2>/dev/null || true)" | base64 | tr -d '\n'
+  printf '%s' "$(bash "$TKT_STATE" "$S" get env 2>/dev/null || true)" | jq -Rrs '@base64'
 }
 
 journal_job_gate() {
@@ -1098,10 +1098,28 @@ expect_from_job_refusal job-command 'gate command'
 
 # --- --from-job refuses when the current ticket environment differs ---
 setup_from_job_case from-job-env
+bash "$TKT_STATE" "$S" set env 'FOO=dispatch' || fail "set original from-job env"
+plant_job_record job-env-old present 0 "$H" false
+jq '.supersededBy = "job-env"' "$DELEGATE_JOBS_DIR/job-env-old.json" >"$CDIR/record.tmp" \
+  && mv "$CDIR/record.tmp" "$DELEGATE_JOBS_DIR/job-env-old.json" || fail "link resumed job"
 plant_job_record job-env present 0 "$H" false
+journal_job_gate job-env-old gate-ok
 journal_job_gate job-env gate-ok
 bash "$TKT_STATE" "$S" set env 'FOO=changed' || fail "change from-job env"
-expect_from_job_refusal job-env 'gate command/environment'
+expect_from_job_refusal job-env-old 'gate command/environment'
+
+# --- --from-job passes with a long ticket environment encoded on one line ---
+setup_from_job_case from-job-long-env
+long_ticket_env='FOO=LZSQks5W03TsZ2IkZYmBQaX5sL4gmbQpD61j3JP6ZsYvVv1VVwhwX8qgF6LkcNbnEbDQzAyrfRnbJRjC'
+bash "$TKT_STATE" "$S" set env "$long_ticket_env" || fail "set long from-job env"
+plant_job_record job-long-env present 0 "$H" false
+journal_job_gate job-long-env gate-ok
+encoded_env="$(printf '%s' "$long_ticket_env" | jq -Rrs '@base64')"
+case "$encoded_env" in *n*) ;; *) fail "long env fixture encoding contains n" ;; esac
+[ "${#encoded_env}" -gt 76 ] || fail "long env fixture encoding exceeds base64 wrap width"
+run_gate --from-job job-long-env
+[ "$RC" -eq 0 ] || fail "--from-job passes long env (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=$H log=*" "--from-job long env"
 
 # --- --from-job refuses a nonzero delegate gate exit ---
 setup_from_job_case from-job-nonzero

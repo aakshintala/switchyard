@@ -744,7 +744,10 @@ reset_stub
 make_record old-9 BLOCKED none 0 2 0 none stub-1
 make_record stub-1 DONE 0 1 2 0
 printf 'job.lane=%s\njob.lane.prompt=old-prompt-hash\n' old-8 >>"$S"
-bash "$TKT_STATE" "$S" journal 'tkt-job gate slot=lane job=old-9 cmd=echo inherited env64=' || fail "journal inherited gate"
+bash "$TKT_STATE" "$S" set env 'FOO=dispatch' || fail "set dispatch env"
+original_env64="$(printf 'FOO=dispatch' | jq -Rrs '@base64')"
+bash "$TKT_STATE" "$S" journal "tkt-job gate slot=lane job=old-9 cmd=echo inherited env64=$original_env64" || fail "journal inherited gate"
+bash "$TKT_STATE" "$S" set env 'FOO=changed' || fail "change env before resume"
 run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md"
 [ "$RC" -eq 0 ] || fail "resume exits 0"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=1 gate=PASS log=*" "resume"
@@ -753,7 +756,7 @@ grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" 
 expected_resume_hash="$(shasum -a 256 <"$T/resume-prompt.md" | awk '{print $1}')"
 [ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$expected_resume_hash" ] || fail "resume stores the new prompt hash"
 ! grep -q '^resumemodel=' "$T/stub.log" || fail "resume without --model passes no --model"
-grep -q ' tkt-job gate slot=lane job=stub-1 cmd=echo inherited env64=' "$CDIR/tkt.journal" || fail "resume journals inherited gate command for new id"
+grep -q " tkt-job gate slot=lane job=stub-1 cmd=echo inherited env64=$original_env64" "$CDIR/tkt.journal" || fail "resume journals original gate env for new id"
 
 # --- --resume with --model passes the model to delegate resume ---------------
 setup_case resume-model
@@ -764,6 +767,7 @@ run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --model openai
 [ "$RC" -eq 0 ] || fail "resume with --model exits 0"
 grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" || fail "resume with --model calls delegate resume"
 grep -qx 'resumemodel=openai/gpt-6-luna:xhigh' "$T/stub.log" || fail "resume passes --model to delegate resume"
+! grep -q ' tkt-job gate slot=lane job=stub-1 ' "$CDIR/tkt.journal" || fail "resume without an original gate line journals no inherited gate"
 
 # --- a stored job refuses a prompt that differs from its dispatch -------------
 setup_case prompt-changed

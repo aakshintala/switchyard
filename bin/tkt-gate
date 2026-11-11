@@ -170,7 +170,7 @@ from_job_pass() {
           rest="${rest#* cmd=}"
           case "$rest" in *" env64="*) ;; *) continue ;; esac
           recorded_cmd="${rest%% env64=*}"
-          recorded_env="$(printf '%s' "${rest#* env64=}" | base64 -D 2>/dev/null || true)"
+          recorded_env="$(printf '%s' "${rest#* env64=}" | jq -Rrs '@base64d' 2>/dev/null || true)"
           current_env="$(tkt get env 2>/dev/null || true)"
           for candidate_id in ${seen[@]+"${seen[@]}"}; do
             if [ -n "$recorded_slot" ] && [ "$recorded_id" = "$candidate_id" ] && [ "$recorded_cmd" = "$expected_gate" ] && [ "$recorded_env" = "$current_env" ]; then

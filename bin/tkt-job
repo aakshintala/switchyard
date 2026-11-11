@@ -43,6 +43,8 @@ prompt=""
 model=""
 gate=""
 inner_gate_cmd=""
+inner_gate_env64=""
+inherited_gate=0
 gate_from_plan=0
 expect_commits=0
 out_file=""
@@ -133,7 +135,15 @@ validate_gate_journal_command() {
 }
 
 journal_gate_command() {
-  [ -z "$inner_gate_cmd" ] || tkt journal "tkt-job gate slot=$slot job=$jobid cmd=$inner_gate_cmd env64=$(tkt get env 2>/dev/null | base64 | tr -d '\\n')"
+  [ -n "$inner_gate_cmd" ] || return 0
+  local env64 env_value
+  if [ "$inherited_gate" -eq 1 ]; then
+    env64="$inner_gate_env64"
+  else
+    env_value="$(tkt get env 2>/dev/null || true)"
+    env64="$(printf '%s' "$env_value" | jq -Rrs '@base64')" || return 0
+  fi
+  tkt journal "tkt-job gate slot=$slot job=$jobid cmd=$inner_gate_cmd env64=$env64"
 }
 
 # Probe the shared lock and release it at once: the delegate wait below
@@ -335,9 +345,17 @@ if [ -n "$resume" ]; then
   if [ "$gate_from_plan" -eq 1 ]; then
     build_gate_from_plan
   fi
-  if [ -n "$resume" ] && [ -z "$inner_gate_cmd" ]; then
-    inherited="$(grep -F "tkt-job gate " "${state%.state}.journal" 2>/dev/null | grep -F "job=$resume " | tail -n 1 || true)"
-    case "$inherited" in *" cmd="*) inner_gate_cmd="${inherited#* cmd=}"; inner_gate_cmd="${inner_gate_cmd%% env64=*}" ;; esac
+  if [ -z "$inner_gate_cmd" ]; then
+    inherited_line="$(grep -F "tkt-job gate " "${state%.state}.journal" 2>/dev/null | grep -F "job=$resume " | tail -n 1 || true)"
+    inherited_payload="${inherited_line#* tkt-job gate }"
+    case "$inherited_payload" in
+      *" cmd="*" env64="*)
+        inherited_rest="${inherited_payload#* cmd=}"
+        inner_gate_cmd="${inherited_rest%% env64=*}"
+        inner_gate_env64="${inherited_rest#* env64=}"
+        inherited_gate=1
+        ;;
+    esac
   fi
   validate_gate_journal_command
   gate_args=()
