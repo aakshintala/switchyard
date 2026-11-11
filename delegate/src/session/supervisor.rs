@@ -29,12 +29,11 @@ pub const TERM_WAIT: u64 = 2_000;
 // before it reads stdin: separate bounds plus the prompt bound would reach
 // past START_WAIT.
 pub const PI_BOOT_WAIT: u64 = 30_000;
-// The fake pi starts TurnStarted in the settled-event cycle, but no real-pi
-// trace measures this latency. Thirty seconds is 15x STEER_SETTLE, a margin,
-// not a measurement. TurnStarted may wait on the first model response, so a slow
-// model or compaction can exceed this bound.
-// debt: measure a real-pi trace; upgrade if steer.unconsumed is followed by a
-// late continuation turn.
+// Real pi 1.5.0 RPC traces kept a queued steer through turn_end; the next
+// internal turn_start followed 0.098-0.147 ms later. Thirty seconds is over
+// 204,000x the largest observed gap. The traces did not exercise the rare
+// post-agent_settled wait for a host TurnStarted; keep this bound as a safety
+// deadline for a continuation that pi leaves queued after settling.
 pub const PI_CONTINUATION_WAIT: u64 = 30_000;
 
 fn pi_continuation_wait() -> Duration {
@@ -1143,8 +1142,8 @@ fn replay_pending_steers(shared: &Arc<Shared>) {
     let mut force_unconsumed = false;
     if has_queued_pending && !current.stopping {
         // Bound the exceptional case so a missed continuation cannot keep the
-        // session busy forever. The bound and its unmeasured basis are documented
-        // at PI_CONTINUATION_WAIT.
+        // session busy forever. The bound and its event-layer limitation are
+        // documented at PI_CONTINUATION_WAIT.
         drop(admission.take());
         let wait_started = AtomicBool::new(false);
         let continued = shared.store.wait_until(

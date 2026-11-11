@@ -1,0 +1,1 @@
+pi --mode rpc --model opencode-go/beam-free --session-id 8ed84651-93b5-44cd-af8c-45845f8c0c08 --session-dir /tmp/sy-1581-pi-recording/run7/sessions --append-system-prompt /tmp/sy-1581-pi-recording/run7/brief.txt

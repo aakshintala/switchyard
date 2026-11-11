@@ -2241,6 +2241,142 @@ mod tests {
     }
 
     #[test]
+    fn recorded_rpc_steer_stays_queued_through_turn_end_and_continuation() {
+        use crate::session::msp::{Disposition, HostEvent, Incoming, ack_disposition};
+        use serde_json::{Value, json};
+
+        const STEER: &str = "For the queued continuation, reply with exactly: queued steer handled";
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/recorded/pi");
+        for stem in [
+            "continuation-beam-free-early-steer",
+            "continuation-beam-free-post-tool",
+            "continuation-gpt-6-luna-post-tool",
+        ] {
+            let path = dir.join(format!("{stem}.stdout"));
+            let stdout = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let mut wire = super::Wire::new();
+            wire.encode(
+                1,
+                "turn/start",
+                &json!({"input":[{"type":"text","text":super::TRIGGER}],"commandId":"recorded-start"}),
+            )
+            .unwrap();
+
+            let mut steer_encoded = false;
+            let mut queued_ack = false;
+            let mut queued_at_turn_end = false;
+            let mut continuation_started = false;
+            let mut queue_cleared = false;
+            let mut steer_delivered = false;
+            let mut host_turn_starts = 0;
+            for line in stdout.lines() {
+                let frame: Value = serde_json::from_str(line)
+                    .unwrap_or_else(|error| panic!("{stem} invalid RPC line: {error}"));
+                if frame["type"] == "queue_update"
+                    && frame["steering"]
+                        .as_array()
+                        .is_some_and(|steering| steering.iter().any(|text| text == STEER))
+                    && !steer_encoded
+                {
+                    wire.encode(
+                        2,
+                        "turn/steer",
+                        &json!({"input":[{"type":"text","text":STEER}],"commandId":"recorded-steer"}),
+                    )
+                    .unwrap();
+                    steer_encoded = true;
+                }
+
+                let incoming = wire.parse(line);
+                if incoming
+                    .iter()
+                    .any(|item| matches!(item, Incoming::Event(HostEvent::TurnStarted { .. })))
+                {
+                    host_turn_starts += 1;
+                }
+                if frame["type"] == "queue_update"
+                    && frame["steering"]
+                        .as_array()
+                        .is_some_and(|steering| steering.iter().any(|text| text == STEER))
+                {
+                    assert!(steer_encoded, "{stem} steer command was not encoded");
+                    assert_eq!(wire.queued_steers(), 1, "{stem} queued steer");
+                }
+                if frame["type"] == "response" && frame["id"] == "2" {
+                    assert_eq!(frame["data"]["disposition"], "queued", "{stem}");
+                    assert!(
+                        incoming.iter().any(|item| matches!(
+                            item,
+                            Incoming::Response {
+                                result: Ok(value),
+                                ..
+                            } if ack_disposition(value) == Disposition::Steered
+                        )),
+                        "{stem} queued steer acknowledgement"
+                    );
+                    queued_ack = true;
+                }
+                if frame["type"] == "turn_end" && queued_ack && !queued_at_turn_end {
+                    assert_eq!(wire.queued_steers(), 1, "{stem} steer at turn_end");
+                    queued_at_turn_end = true;
+                }
+                if frame["type"] == "turn_start" && queued_at_turn_end && !continuation_started {
+                    assert_eq!(wire.queued_steers(), 1, "{stem} steer at continuation");
+                    assert!(
+                        incoming
+                            .iter()
+                            .any(|item| matches!(item, Incoming::Event(HostEvent::Ignored))),
+                        "{stem} pi internal turn_start remains an ignored host event"
+                    );
+                    continuation_started = true;
+                }
+                if frame["type"] == "queue_update"
+                    && continuation_started
+                    && frame["steering"]
+                        .as_array()
+                        .is_some_and(|steering| steering.is_empty())
+                {
+                    assert_eq!(wire.queued_steers(), 0, "{stem} queue cleared");
+                    queue_cleared = true;
+                }
+                if frame["type"] == "message_end"
+                    && frame["message"]["role"] == "user"
+                    && frame["message"]["content"][0]["text"] == STEER
+                {
+                    assert!(
+                        continuation_started,
+                        "{stem} steer arrived before continuation"
+                    );
+                    assert!(queue_cleared, "{stem} steer delivered before queue clear");
+                    assert!(
+                        incoming.iter().any(|item| matches!(
+                            item,
+                            Incoming::Event(HostEvent::UserMessage {
+                                command_id: Some(command_id),
+                                ..
+                            }) if command_id == "recorded-steer"
+                        )),
+                        "{stem} delivered steer command id"
+                    );
+                    steer_delivered = true;
+                }
+            }
+            assert!(steer_encoded, "{stem} has a queued steer");
+            assert!(queued_ack, "{stem} has a queued acknowledgement");
+            assert!(
+                queued_at_turn_end,
+                "{stem} keeps the steer through turn_end"
+            );
+            assert!(continuation_started, "{stem} has the next pi turn_start");
+            assert!(queue_cleared, "{stem} clears the queue at continuation");
+            assert!(steer_delivered, "{stem} delivers the steer once");
+            assert_eq!(host_turn_starts, 1, "{stem} has no second host TurnStarted");
+        }
+    }
+
+    #[test]
     fn fixtures_are_redacted_and_shaped() {
         let fixtures = [
             ("prompt-basic", PROMPT_BASIC, 18),
