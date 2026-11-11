@@ -857,13 +857,25 @@ fn all_queued_pi_steers_become_unconsumed_if_no_continuation_starts() {
     let id = value["session"]["id"].as_str().unwrap().to_string();
 
     h.wait_file("tool.paused", "the held tool call");
-    let steered = h.invoke(&["send", &id, "NEVER-CONTINUE", "--json"]);
-    assert!(steered.status.success());
-    let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
-    assert_eq!(pending.len(), 1, "{pending:?}");
-    let command_id = pending[0]["commandId"].as_str().unwrap();
+    let (steered, command_id) = std::thread::scope(|scope| {
+        let send = scope.spawn(|| h.invoke(&["send", &id, "NEVER-CONTINUE", "--json"]));
+        h.wait_path(&h.fake_dir.join("queue.txt"), "pi to accept the steer");
+        let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        let command_id = pending[0]["commandId"].as_str().unwrap().to_string();
 
-    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+        std::fs::write(h.fake_dir.join("go"), "").unwrap();
+        let sent = send.join().unwrap();
+        (sent, command_id)
+    });
+    assert!(
+        steered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&steered.stderr)
+    );
+    let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+    assert_eq!(reply["disposition"], "unconsumed", "{reply}");
+
     h.wait_path(&continuation_wait_marker, "the continuation wait to start");
     let idle = h.wait_state(&id, "idle after continuation deadline", |state| {
         state["status"] == "idle"
