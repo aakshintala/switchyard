@@ -212,6 +212,7 @@ PATH="$STUBS/install:$STUBS:$PATH" XDG_CONFIG_HOME="$INSTALL_CONFIG" HOME="$T/in
 [ -f "$INSTALL_CONFIG/systemd/user/model-deprecations.service" ] || fail "service unit was not installed"
 [ -f "$INSTALL_CONFIG/systemd/user/model-deprecations.timer" ] || fail "timer unit was not installed"
 grep -q 'ExecStart=.*model-deprecations.* run' "$INSTALL_CONFIG/systemd/user/model-deprecations.service" || fail "service command missing"
+grep -q '^Environment=PATH=%h/.local/bin:' "$INSTALL_CONFIG/systemd/user/model-deprecations.service" || fail "service PATH does not reach delegate"
 grep -q 'OnCalendar=Sun \*-\*-\* 06:10:00 UTC' "$INSTALL_CONFIG/systemd/user/model-deprecations.timer" || fail "installed weekly schedule missing"
 grep -q '^--user daemon-reload$' "$SYSTEMCTL_CALLS" || fail "daemon-reload was not called"
 grep -q '^--user enable --now model-deprecations.timer$' "$SYSTEMCTL_CALLS" || fail "timer was not enabled"

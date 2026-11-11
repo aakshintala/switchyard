@@ -80,6 +80,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
         requests.append((self.path, dict(self.headers)))
         path = self.path.split("?", 1)[0]
         if path == "/modelsdev/api.json":
+            if self.headers.get("User-Agent", "").startswith("Python-urllib"):
+                # The real models.dev refuses the default urllib User-Agent.
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             send_json(self, {
                 "anthropic": {"models": {
                     "claude-shared": {"limit": {"context": 1000, "output": 100}, "cost": {"input": 1, "output": 2}, "deprecated": False},

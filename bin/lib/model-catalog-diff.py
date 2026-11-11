@@ -22,6 +22,8 @@ ENV_DEFAULT = ".config/model-catalog/env"
 AUTH_DEFAULT = ".codex/auth.json"
 PAGE_LIMIT = 100
 CODEX_CLIENT_VERSION = "0.1.0"
+# models.dev answers 403 to the default Python-urllib User-Agent (seen 2026-11-11).
+USER_AGENT = "model-catalog-diff/1"
 OPENAI_NON_CHAT = re.compile(r"embedding|tts|whisper|dall-e|moderation|transcribe|image|realtime|audio|search", re.I)
 VENDORS = (
     {
@@ -286,7 +288,7 @@ def fetch_vendor(spec, credentials, codex_token, timeout):
         base = credentials.get(spec.get("host_credential", ""), "") or spec["base"]
     if not base:
         raise FetchFailure("no credential")
-    headers = {"Accept": "application/json", "User-Agent": "model-catalog-diff/1"}
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
     headers[spec["header"]] = f"Bearer {secret}" if spec.get("bearer") else secret
     if spec["name"] == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
@@ -561,7 +563,7 @@ def run(script_path):
     reference_payload = None
     model_dev_base = os.environ.get("MODEL_CATALOG_MODELS_DEV_BASE", "https://models.dev")
     try:
-        reference_payload = request_json(clean_url(model_dev_base, "api.json"), {"Accept": "application/json"}, timeout)
+        reference_payload = request_json(clean_url(model_dev_base, "api.json"), {"Accept": "application/json", "User-Agent": USER_AGENT}, timeout)
     except FetchFailure as error:
         model_dev_failure = error.reason
     else:
