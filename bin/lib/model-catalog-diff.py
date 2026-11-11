@@ -384,6 +384,8 @@ def vendor_fields(model, vendor):
                     candidate
                     for override in overrides
                     if isinstance(override, dict)
+                    and "utc_start" in override
+                    and "utc_end" in override
                     and (candidate := number(override.get(key), 1_000_000)) is not None
                 ]
                 if alternatives:
@@ -482,6 +484,11 @@ def dated_model_base(identifier):
     return match.group(1) if match else None
 
 
+def dated_model_date(identifier):
+    base = dated_model_base(identifier)
+    return identifier[len(base) + 1 :].replace("-", "") if base else ""
+
+
 def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
     vendor_items, excluded = filtered_vendor_items(vendor_items, vendor)
     vendor_index = index_models(vendor_items, vendor)
@@ -489,15 +496,26 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
         reference = {identifier: model for identifier, model in reference.items() if not OPENAI_NON_CHAT.search(identifier)}
     else:
         reference = {identifier: model for identifier, model in reference.items() if identifier not in excluded}
-    for identifier in tuple(vendor_index):
+    original_vendor_ids = set(vendor_index)
+    reference_ids = set(reference)
+    latest_dated = {}
+    for identifier in vendor_index:
         base = dated_model_base(identifier)
-        if base not in reference:
+        if base not in reference_ids or base in original_vendor_ids or identifier in reference_ids:
             continue
-        if base in vendor_index:
+        candidate = (dated_model_date(identifier), identifier)
+        if candidate > latest_dated.get(base, ("", "")):
+            latest_dated[base] = candidate
+    for identifier in tuple(vendor_index):
+        if identifier in reference_ids:
+            continue
+        base = dated_model_base(identifier)
+        if base not in reference_ids:
+            continue
+        if base in original_vendor_ids:
             del vendor_index[identifier]
-            reference.pop(identifier, None)
-        elif identifier in reference:
-            reference.pop(base)
+        elif latest_dated.get(base, (None, None))[1] != identifier:
+            del vendor_index[identifier]
         else:
             vendor_index[base] = vendor_index.pop(identifier)
     rows = []

@@ -107,12 +107,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 models_dev["openai"]["models"].update({
                     "dated-dash": {},
                     "dated-compact": {},
+                    "dated-both": {"limit": {"context": 100}},
+                    "dated-both-2026-05-04": {"limit": {"context": 300}},
+                    "dated-latest": {"limit": {"context": 200}},
                     "exact-only-2026-05-04": {"limit": {"context": 100}},
                 })
             elif self.mode == "pricing":
                 models_dev["openrouter"]["models"].update({
                     "router-window": {"cost": {"input": 0.4, "output": 0.5}},
                     "router-mismatch": {"cost": {"input": 0.6, "output": 0.7}},
+                    "router-tier": {"cost": {"input": 0.4, "output": 0.5}},
                 })
             send_json(self, models_dev)
         elif path == "/anthropic/v1/models":
@@ -133,6 +137,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 send_json(self, {"data": [
                     {"id": "dated-dash-2026-05-04"},
                     {"id": "dated-compact-20260504"},
+                    {"id": "dated-both", "context_window": 100},
+                    {"id": "dated-both-2026-05-04", "context_window": 200},
+                    # Newest comes first to make selection independent of catalog order.
+                    {"id": "dated-latest-20260504", "context_window": 200},
+                    {"id": "dated-latest-2026-05-03", "context_window": 100},
                     {"id": "exact-only-2026-05-04", "context_window": 200},
                     {"id": "chat-latest"},
                 ]})
@@ -162,6 +171,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
                         "overrides": [{"utc_start": "00:00", "utc_end": "12:00", "prompt": "0.0000004", "completion": "0.0000005"}],
                     }},
                     {"id": "router-mismatch", "pricing": {"prompt": "0.0000001", "completion": "0.0000002"}},
+                    {"id": "router-tier", "pricing": {
+                        "prompt": "0.0000001", "completion": "0.0000002",
+                        "overrides": [{"min_prompt_tokens": 100000, "prompt": "0.0000004", "completion": "0.0000005"}],
+                    }},
                 ]})
             else:
                 send_json(self, {"data": [{"id": "router-one", "pricing": {"prompt": "0.00000015000000000000002", "completion": "0.00000025"}}]})
@@ -323,7 +336,11 @@ try:
     expect(dated_result.returncode == 0, f"dated run failed: {dated_result.stderr}")
     dated_report = (dated_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
     expect("| dated-dash-2026-05-04 |" not in dated_report, "dashed date alias produced a row")
+    expect("| dated-dash |" not in dated_report, "dashed date alias left its undated base gone")
     expect("| dated-compact-20260504 |" not in dated_report, "compact date alias produced a row")
+    expect("| dated-compact |" not in dated_report, "compact date alias left its undated base gone")
+    expect("| dated-both-2026-05-04 | mismatch | context | 200 | 300 |" in dated_report, "exact dated model alongside its base was not compared")
+    expect("| dated-latest |" not in dated_report, "latest dated model was not selected deterministically")
     expect("| exact-only-2026-05-04 | mismatch | context | 200 | 100 |" in dated_report, "exact dated model was not compared normally")
     expect("| chat-latest | missing |" in dated_report, "undated unknown OpenAI ID was not reported missing")
 
@@ -334,6 +351,7 @@ try:
     pricing_report = (pricing_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
     expect("| router-window |" not in pricing_report, "matching OpenRouter override price produced a row")
     expect(re.search(r"\| router-mismatch \| mismatch \| input_price \| [^|]+ \| 0\.6 \|", pricing_report), "OpenRouter price mismatch without overrides was not reported")
+    expect(re.search(r"\| router-tier \| mismatch \| input_price \| [^|]+ \| 0\.4 \|", pricing_report), "long-context tier price was treated as an alternative price")
 
     # A 30x is refused, not followed, so a credential header never reaches the redirect target.
     redirect_inbox = temp_root / "inbox-redirect"
