@@ -378,6 +378,18 @@ def vendor_fields(model, vendor):
             value = number(pricing.get(key), 1_000_000)
             if value is not None:
                 fields[field] = value
+            overrides = pricing.get("overrides")
+            if isinstance(overrides, list):
+                alternatives = [
+                    candidate
+                    for override in overrides
+                    if isinstance(override, dict)
+                    and "utc_start" in override
+                    and "utc_end" in override
+                    and (candidate := number(override.get(key), 1_000_000)) is not None
+                ]
+                if alternatives:
+                    fields[field + "_alternatives"] = alternatives
     for field, keys in (("input_price", ("input_price",)), ("output_price", ("output_price",))):
         if field not in fields:
             value = next((model.get(key) for key in keys if model.get(key) is not None), None)
@@ -456,12 +468,25 @@ def filtered_vendor_items(items, vendor):
         elif vendor == "openai" and identifier and OPENAI_NON_CHAT.search(identifier):
             excluded.add(identifier)
             continue
+        elif vendor == "openrouter" and identifier and re.search(r":[^:]+$", identifier):
+            excluded.add(identifier)
+            continue
         elif vendor == "databricks" and (not isinstance(item, dict) or item.get("task") != "llm/v1/chat"):
             if identifier:
                 excluded.add(identifier)
             continue
         kept.append(item)
     return kept, excluded
+
+
+def dated_model_base(identifier):
+    match = re.fullmatch(r"(.+)-(?:\d{4}-\d{2}-\d{2}|\d{8})", identifier)
+    return match.group(1) if match else None
+
+
+def dated_model_date(identifier):
+    base = dated_model_base(identifier)
+    return identifier[len(base) + 1 :].replace("-", "") if base else ""
 
 
 def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
@@ -471,6 +496,31 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
         reference = {identifier: model for identifier, model in reference.items() if not OPENAI_NON_CHAT.search(identifier)}
     else:
         reference = {identifier: model for identifier, model in reference.items() if identifier not in excluded}
+    original_vendor_ids = set(vendor_index)
+    reference_ids = set(reference)
+    latest_dated = {}
+    for identifier in vendor_index:
+        base = dated_model_base(identifier)
+        if base not in reference_ids or base in original_vendor_ids or identifier in reference_ids:
+            continue
+        candidate = (dated_model_date(identifier), identifier)
+        if candidate > latest_dated.get(base, ("", "")):
+            latest_dated[base] = candidate
+    for identifier in tuple(vendor_index):
+        if identifier in reference_ids:
+            base = dated_model_base(identifier)
+            if base in reference_ids and base not in original_vendor_ids:
+                reference.pop(base, None)
+            continue
+        base = dated_model_base(identifier)
+        if base not in reference_ids:
+            continue
+        if base in original_vendor_ids:
+            del vendor_index[identifier]
+        elif latest_dated.get(base, (None, None))[1] != identifier:
+            del vendor_index[identifier]
+        else:
+            vendor_index[base] = vendor_index.pop(identifier)
     rows = []
     for identifier in sorted(set(vendor_index) | set(reference)):
         left = vendor_index.get(identifier)
@@ -490,8 +540,10 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
             if (vendor, identifier, field) in ignore_pins:
                 continue
             left_value, right_value = left_fields[field], right_fields[field]
-            if field in ("input_price", "output_price") and math.isclose(left_value, right_value, rel_tol=1e-6):
-                continue
+            if field in ("input_price", "output_price"):
+                alternatives = left_fields.get(field + "_alternatives", ())
+                if any(math.isclose(value, right_value, rel_tol=1e-6) for value in (left_value, *alternatives)):
+                    continue
             if left_value != right_value:
                 rows.append((identifier, "mismatch", field, left_value, right_value))
     return rows
