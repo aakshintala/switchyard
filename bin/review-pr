@@ -45,6 +45,10 @@
 #     the job record, writes --findings-out the same way, and posts nothing. It
 #     is COLLECTED only if its current result matches the posted-record hash;
 #     otherwise it reports UNPOSTED and exits 1.
+#     If a DONE or DONE_WITH_CONCERNS review/verify job has an empty final
+#     message, collect resumes it once and asks for the verdict block before
+#     collecting. If the resumed message is empty too, it exits 1 with the job
+#     id and manual delegate resume / review-pr collect repair steps.
 #   review-pr run <same args as start>
 #     start, then delegate watch on every job id start launched, then collect on
 #     those ids. Prints start's lines, then collect's output, and exits with
@@ -1135,6 +1139,57 @@ cmd_collect() {
     canonical_ids[${#canonical_ids[@]}]="$(job_review_state_id "$requested_id")"
   done
   set -- "${canonical_ids[@]}"
+
+  # A completed review with no final message may still have its verdict in the
+  # resumed session. Ask once for the original task's verdict block before
+  # collection; an existing supersededBy chain means that attempt was already
+  # made, so report the manual repair instead of resuming again.
+  for requested_id in "$@"; do
+    sf="$state_dir/$requested_id"
+    [ -f "$sf" ] || continue
+    role="$(state_get "$sf" role)"
+    case "$role" in standards|spec|overbuild|verify) ;; *) continue;; esac
+
+    latest_id=""
+    latest_rec=""
+    while IFS=$'\t' read -r walked_id walked_rec; do
+      latest_id="$walked_id"
+      latest_rec="$walked_rec"
+    done < <(job_walk "$requested_id" supersededBy)
+    [ -f "$latest_rec" ] || continue
+    status="$(jq -r '.status // "MISSING"' "$latest_rec" 2>/dev/null || echo MISSING)"
+    case "$status" in DONE|DONE_WITH_CONCERNS) ;; *) continue;; esac
+    text="$(jq -r '.result.text // empty' "$latest_rec" 2>/dev/null || true)"
+    [[ "$text" =~ [^[:space:]] ]] && continue
+
+    if [ "$latest_id" = "$requested_id" ]; then
+      resume_prompt="Your previous final message was empty. Please return the verdict block requested by your original task now."
+      if ! resumed_id="$(printf '%s\n' "$resume_prompt" | delegate resume "$latest_id")"; then
+        echo "review-pr: $role job $requested_id has an empty final message and could not be resumed. Manual repair: delegate resume $latest_id, then review-pr collect $requested_id." >&2
+        exit 1
+      fi
+      if ! delegate watch "$resumed_id" >/dev/null; then
+        echo "review-pr: resumed $role job $resumed_id could not be watched. Manual repair: delegate watch $resumed_id, then review-pr collect $requested_id." >&2
+        exit 1
+      fi
+      resumed_rec="$(job_rec "$resumed_id")"
+      resumed_status="MISSING"
+      resumed_text=""
+      if [ -f "$resumed_rec" ]; then
+        resumed_status="$(jq -r '.status // "MISSING"' "$resumed_rec" 2>/dev/null || echo MISSING)"
+        resumed_text="$(jq -r '.result.text // empty' "$resumed_rec" 2>/dev/null || true)"
+      fi
+      case "$resumed_status" in DONE|DONE_WITH_CONCERNS)
+        if ! [[ "$resumed_text" =~ [^[:space:]] ]]; then
+          echo "review-pr: $role job $requested_id resumed as $resumed_id but its final message is still empty. Manual repair: delegate resume $resumed_id, then review-pr collect $requested_id." >&2
+          exit 1
+        fi;;
+      esac
+    else
+      echo "review-pr: $role job $requested_id (latest job $latest_id) has an empty final message after a resume. Manual repair: delegate resume $latest_id, then review-pr collect $requested_id." >&2
+      exit 1
+    fi
+  done
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/review-pr.collect.XXXXXX")"
   state_rm=()
