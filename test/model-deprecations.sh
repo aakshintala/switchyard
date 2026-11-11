@@ -145,7 +145,7 @@ if DEPRECATIONS_STUB_MODE=missing MODEL_CATALOG_INBOX="$MISSING_INBOX" bash "$BI
 fi
 MISSING_REPORT="$MISSING_INBOX/model-deprecations-2026-05-04.md"
 [ -f "$MISSING_REPORT" ] || fail "missing scratch report did not publish a failure report"
-grep -q '^- muse: model produced no report (delegate status: DONE)$' "$MISSING_REPORT" || fail "missing report status was not recorded"
+grep -q '^- all: model produced no report (delegate status: DONE)$' "$MISSING_REPORT" || fail "missing report status was not recorded"
 grep -q '^## skipped$' "$MISSING_REPORT" || fail "missing report failure has no skipped section"
 
 # A job that did not finish with DONE publishes a failure report with its known status.
@@ -155,7 +155,7 @@ if DEPRECATIONS_STATUS=ERROR MODEL_CATALOG_INBOX="$FAILED_INBOX" bash "$BIN" run
 fi
 FAILED_REPORT="$FAILED_INBOX/model-deprecations-2026-05-04.md"
 [ -f "$FAILED_REPORT" ] || fail "non-DONE job did not publish a failure report"
-grep -q '^- muse: model produced no report (delegate status: ERROR)$' "$FAILED_REPORT" || fail "non-DONE status was not recorded"
+grep -q '^- all: model produced no report (delegate status: ERROR)$' "$FAILED_REPORT" || fail "non-DONE status was not recorded"
 
 # A failed delegate run also publishes a failure report when its job status is known.
 RUN_FAIL_INBOX="$T/run-fail-inbox"
@@ -164,7 +164,7 @@ if DEPRECATIONS_STUB_MODE=run-fail DEPRECATIONS_STATUS=FAILED MODEL_CATALOG_INBO
 fi
 RUN_FAIL_REPORT="$RUN_FAIL_INBOX/model-deprecations-2026-05-04.md"
 [ -f "$RUN_FAIL_REPORT" ] || fail "failed delegate run did not publish a failure report"
-grep -q '^- muse: model produced no report (delegate status: FAILED)$' "$RUN_FAIL_REPORT" || fail "failed run status was not recorded"
+grep -q '^- all: model produced no report (delegate status: FAILED)$' "$RUN_FAIL_REPORT" || fail "failed run status was not recorded"
 
 # Invalid model output is rejected before it can enter the inbox.
 INVALID_INBOX="$T/invalid-inbox"

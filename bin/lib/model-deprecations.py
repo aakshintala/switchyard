@@ -103,7 +103,7 @@ def validate_report(text, today, source):
         if not line.strip():
             continue
         match = re.fullmatch(r"- ([a-z]+): .+", line)
-        if not match or match.group(1) not in VENDORS:
+        if not match or match.group(1) not in VENDORS | {"all"}:
             fail("invalid skipped entry")
         skip_count += 1
     return row_count, skip_count
@@ -158,7 +158,7 @@ def publish_failure(inbox, today, source, status=""):
         f"source: model-deprecations {source}",
         "",
         "## skipped",
-        f"- muse: {reason}",
+        f"- all: {reason}",
         "",
     ))
     validate_report(text, today, source)
