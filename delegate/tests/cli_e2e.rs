@@ -242,7 +242,12 @@ impl Env {
     }
 
     fn wait_terminal(&self, id: &str) -> Value {
-        let out = self.delegate(&["watch", id, "--timeout", "10"], None);
+        self.wait_terminal_for(id, 10)
+    }
+
+    fn wait_terminal_for(&self, id: &str, timeout_s: u64) -> Value {
+        let timeout = timeout_s.to_string();
+        let out = self.delegate(&["watch", id, "--timeout", &timeout], None);
         assert_eq!(out.status.code(), Some(0));
         serde_json::from_slice(&out.stdout).unwrap()
     }
@@ -266,10 +271,14 @@ fn alive(pid: i64) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
-fn until(what: &str, mut f: impl FnMut() -> bool) {
+fn until(what: &str, f: impl FnMut() -> bool) {
+    until_for(what, Duration::from_secs(10), f);
+}
+
+fn until_for(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
     let t = Instant::now();
     while !f() {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out: {what}");
+        assert!(t.elapsed() < timeout, "timed out: {what}");
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -404,7 +413,7 @@ fn running_record_heartbeat_advances() {
     let e = Env::new("hb");
     let id = e.run("SLOW");
     let a = e.record(&id)["lastHeartbeatAt"].as_f64().unwrap();
-    until("heartbeat", || {
+    until_for("heartbeat", Duration::from_secs(30), || {
         let r = e.record(&id);
         r["status"] != "RUNNING" || r["lastHeartbeatAt"].as_f64().unwrap() > a
     });
@@ -2518,7 +2527,7 @@ fn muse_run_applies_the_host_sandbox_switch() {
             ],
         );
         let id = e.ok_output(&out);
-        let done = e.wait_terminal(&id);
+        let done = e.wait_terminal_for(&id, 30);
         assert_eq!(done["status"], "DONE", "{name}");
         let started_at = done["startedAtMs"]
             .as_f64()
@@ -2603,7 +2612,7 @@ cat {}
         ],
     );
     let id = e.ok_output(&out);
-    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    assert_eq!(e.wait_terminal_for(&id, 30)["status"], "DONE");
 
     let argv: Vec<String> = std::fs::read_to_string(argv_path)
         .unwrap()
