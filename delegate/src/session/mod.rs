@@ -1099,6 +1099,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn request_error_maps_unreachable_dead_session_to_dead() {
+        let mut dead = live_state(None);
+        state::mark_dead(
+            &mut dead,
+            state::DeadReason::HostUnresponsive,
+            None,
+            "supervisor thread panicked",
+            1001,
+        );
+        let setup = failed_setup(dead);
+
+        let error = request_error(
+            &setup.paths,
+            &setup.id,
+            ipc::IpcError::Unreachable("socket removed".into()),
+        );
+
+        assert_eq!(error.code, "dead");
+        assert_eq!(error.exit, EXIT_DEAD);
+    }
+
     struct FailedSetup {
         paths: state::Paths,
         id: String,
