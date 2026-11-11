@@ -1303,6 +1303,110 @@ run_gate
 expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "covered Cargo.toml new dependency"
 expect_stop_list_path Cargo.toml
 
+# --- a covered Cargo.toml may add a dependency named in Files or Tasks ---
+prepare_cargo_case covered-named-dependency
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `Cargo.toml` (adds `ring`)
+
+## Gate
+
+`gate-ok`
+EOF
+cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ring = "1"
+EOF
+git -C "$WT" add -- Cargo.toml
+git -C "$WT" commit -qm "add planned ring dependency"
+push_branch
+run_gate
+[ "$RC" -eq 0 ] || fail "named dependency in covered Cargo.toml exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "named dependency in covered Cargo.toml"
+grep -q '^OUTSIDE-PLAN ' <<<"$OUT" && fail "named dependency is not outside-plan"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = "" ] || fail "named dependency is not recorded outside-plan"
+[ -f "$T/gate-ran" ] || fail "named dependency runs the gate"
+
+# --- Tasks can name the crate for a covered manifest too ---
+prepare_cargo_case covered-task-named-dependency
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `Cargo.toml`
+
+## Tasks
+
+1. Add the `ring` crate.
+
+## Gate
+
+`gate-ok`
+EOF
+cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ring = "1"
+EOF
+git -C "$WT" add -- Cargo.toml
+git -C "$WT" commit -qm "add task-named ring dependency"
+push_branch
+run_gate
+[ "$RC" -eq 0 ] || fail "task-named dependency in covered Cargo.toml exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "task-named dependency in covered Cargo.toml"
+grep -q '^OUTSIDE-PLAN ' <<<"$OUT" && fail "task-named dependency is not outside-plan"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = "" ] || fail "task-named dependency is not recorded outside-plan"
+[ -f "$T/gate-ran" ] || fail "task-named dependency runs the gate"
+
+# --- an uncovered Cargo.toml stops even when the plan names the crate ---
+prepare_cargo_case uncovered-named-dependency
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+
+## Tasks
+
+1. Add the `ring` crate.
+
+## Gate
+
+`gate-ok`
+EOF
+cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ring = "1"
+EOF
+git -C "$WT" add -- Cargo.toml
+git -C "$WT" commit -qm "add unplanned ring dependency"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "uncovered Cargo.toml dependency exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "uncovered Cargo.toml dependency"
+expect_stop_list_path Cargo.toml
+
 # --- a version bump of an existing dependency is not a stop-list change ---
 prepare_cargo_case dependency-version-bump
 cat >"$WT/Cargo.toml" <<'EOF'

@@ -8,11 +8,11 @@
 # line when present; it then shares the normal head update and PASS path.
 # For takeovers, the gate comes from state key `gate` when the plan value is
 # `takeover <ref>`, and the file fence comes from the state's `fence` list.
-# Every path covered by Files or the state's fence list stays covered. New
-# dependencies in any changed Cargo.toml stop the gate even when covered. For
-# uncovered paths, docs, workflows and scripts/check stop even when additive;
-# other existing files that only gain lines pass, and remaining paths are
-# reported outside the plan.
+# Files and the state's fence cover changed paths except new Cargo dependencies.
+# Those pass only when the manifest is covered and each new name appears in
+# backticks in Files or Tasks. For uncovered paths, docs, workflows and
+# scripts/check stop even when additive; other existing files that only gain
+# lines pass, and remaining paths are reported outside the plan.
 # Every state read and write goes through tkt-state. The Files cover rule is
 # covered() from lib/plan-tokens.sh; the gate script writer is
 # write_gate_script() from lib/gate-script.sh. Neither is copied here.
@@ -525,14 +525,24 @@ cargo_dependency_names() {
     }
   ' "$@"
 }
+planned_dependency_names=""
+if [ -n "$plan" ]; then
+  planned_dependency_names="$(plan_records "$plan" | awk -F '\t' '$1 == "files" || $1 == "tasks" { print $5 }')"
+fi
 new_cargo_dependency() {
-  local path="$1" base current entry
+  local path="$1" base current entry name covered_manifest=0
+  covered "$path" && covered_manifest=1
   base="$(git -C "$worktree" show "origin/main:$path" 2>/dev/null || true)"
   base="$(printf '%s\n' "$base" | cargo_dependency_names)"
   current="$(cargo_dependency_names <"$worktree/$path")"
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
-    if ! grep -Fqx -- "$entry" <<<"$base"; then return 0; fi
+    if ! grep -Fqx -- "$entry" <<<"$base"; then
+      name="${entry#*$'\t'}"
+      # Compare dependency kind as well as name: moving a crate from
+      # dependencies to dev-dependencies deliberately counts as a new entry.
+      if [ "$covered_manifest" -eq 0 ] || ! grep -Fqx -- "$name" <<<"$planned_dependency_names"; then return 0; fi
+    fi
   done <<<"$current"
   return 1
 }
@@ -552,11 +562,7 @@ while IFS= read -r p; do
   esac
   if covered "$p"; then continue; fi
   case "$p" in
-    .github/workflows/*|scripts/check)
-      stop_paths+=("$p")
-      continue
-      ;;
-    GLOSSARY.md|docs/*.md|docs/adr/*)
+    .github/workflows/*|scripts/check|GLOSSARY.md|docs/*.md|docs/adr/*)
       stop_paths+=("$p")
       continue
       ;;
