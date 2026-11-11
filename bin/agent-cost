@@ -154,7 +154,20 @@ def model_and_price(raw, source, models, provider=None):
         )
         if matching:
             return display, matching[0]
+    # Session logs often carry a bare id (`glm-5.3-flash`) where models.json keys carry a
+    # backend prefix and variant (`opencode-go/glm-5.3-flash`, `codex/gpt-6-luna:xhigh`).
+    # Price by bare id only when every matching key agrees on the price.
+    bare = bare_model_id(raw)
+    if bare:
+        matching = sorted(key for key in models if bare_model_id(key) == bare)
+        prices = [models[key].get("price") for key in matching]
+        if matching and all(price == prices[0] for price in prices):
+            return display, matching[0]
     return display, None
+
+
+def bare_model_id(model_id):
+    return model_id.rsplit("/", 1)[-1].split(":", 1)[0]
 
 
 def price_usage(price_key, usage, models, source):
