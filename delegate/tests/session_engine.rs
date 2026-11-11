@@ -35,6 +35,7 @@ fn paths() -> (Paths, String, std::path::PathBuf) {
 struct Bounds {
     rpc_ms: u64,
     steer_ms: u64,
+    steer_reply_ms: u64,
     interrupt_ms: u64,
     stop_ms: u64,
     term_ms: u64,
@@ -46,6 +47,7 @@ impl Default for Bounds {
         Self {
             rpc_ms: 300,
             steer_ms: 300,
+            steer_reply_ms: 10_000,
             interrupt_ms: 300,
             stop_ms: 300,
             term_ms: 300,
@@ -129,6 +131,7 @@ impl Session {
             muse_bin: muse_bin.unwrap_or_else(|| fake.to_string_lossy().into_owned()),
             rpc_timeout: Duration::from_millis(bounds.rpc_ms),
             steer_settle: Duration::from_millis(bounds.steer_ms),
+            steer_reply_wait: Duration::from_millis(bounds.steer_reply_ms),
             interrupt_wait: Duration::from_millis(bounds.interrupt_ms),
             stop_grace: Duration::from_millis(bounds.stop_ms),
             term_wait: Duration::from_millis(bounds.term_ms),
@@ -309,6 +312,24 @@ impl Drop for Session {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+}
+
+fn spawn_send(
+    session: &Session,
+    text: &'static str,
+    timeout: Duration,
+) -> (
+    std::thread::JoinHandle<()>,
+    mpsc::Receiver<Result<Value, ipc::IpcError>>,
+) {
+    let paths = session.paths.clone();
+    let id = session.id.clone();
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let sender = std::thread::spawn(move || {
+        let reply = ipc::request(&paths, &id, &json!({"op":"send","text":text}), timeout);
+        reply_tx.send(reply).unwrap();
+    });
+    (sender, reply_rx)
 }
 
 fn make_stale_socket(socket: &std::path::Path) -> OwnedFd {
@@ -661,6 +682,156 @@ fn supervisor_send_while_running_steers_and_tracks_the_command() {
 }
 
 #[test]
+fn supervisor_send_reports_unconsumed_msp_steer_after_turn_completion() {
+    let mut session = Session::spawn(
+        "HOLD,STEER_NOEFFECT,STEER_ACK_HOLD",
+        "brief",
+        None,
+        // The fake holds the steer ack until the test releases it; the RPC
+        // timeout must outlast that hold or the session dies under load.
+        Bounds {
+            rpc_ms: 15_000,
+            ..Bounds::default()
+        },
+    );
+    session.until("held first turn", |state| state.active_turn_id.is_some());
+
+    let (sender, reply_rx) = spawn_send(
+        &session,
+        "report if this steer is dropped",
+        Duration::from_secs(5),
+    );
+    session.until("steer request", |_| {
+        session
+            .requests()
+            .iter()
+            .any(|request| request["method"] == "turn/steer")
+    });
+    session.until("held steer RPC acknowledgement", |_| {
+        session.fake_dir.join("steer_ack.pending").exists()
+    });
+    assert!(matches!(
+        reply_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    assert_eq!(session.state().status, Status::Running);
+    std::fs::write(session.fake_dir.join("steer_ack.release"), "").unwrap();
+    std::fs::write(session.fake_dir.join("go"), "").unwrap();
+
+    let reply = reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("send response after steer resolution")
+        .unwrap();
+    sender.join().unwrap();
+    assert_eq!(reply["disposition"], "unconsumed");
+    assert!(session.events().iter().any(|event| {
+        event["kind"] == "steer.unconsumed"
+            && event["commandIds"][0]
+                == session
+                    .requests()
+                    .iter()
+                    .find(|request| request["method"] == "turn/steer")
+                    .unwrap()["params"]["commandId"]
+    }));
+    assert_eq!(session.stop_and_join(), 0);
+}
+
+#[test]
+fn supervisor_send_reports_unconsumed_when_host_dies_with_steer_pending() {
+    let session = Session::spawn("HOLD,STEER_NOEFFECT", "brief", None, Bounds::default());
+    session.until("held first turn", |state| state.active_turn_id.is_some());
+
+    let (sender, reply_rx) = spawn_send(
+        &session,
+        "a steer lost with its host",
+        Duration::from_secs(15),
+    );
+    session.until("acked pending steer", |_| {
+        std::fs::read_to_string(session.paths.state_file(&session.id))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .is_some_and(|state| {
+                state["pendingSteers"]
+                    .as_array()
+                    .is_some_and(|steers| !steers.is_empty())
+            })
+    });
+    let host_pid = session.state().host_pid.unwrap();
+    unsafe { libc::kill(-host_pid, libc::SIGKILL) };
+
+    let reply = reply_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("send returns once the host dies")
+        .unwrap();
+    sender.join().unwrap();
+    assert_eq!(reply["disposition"], "unconsumed");
+    assert_eq!(session.state().status, Status::Dead);
+}
+
+#[test]
+fn supervisor_send_replies_steered_when_muse_wait_cap_expires() {
+    let mut session = Session::spawn(
+        "HOLD,STEER_NOEFFECT",
+        "brief",
+        None,
+        Bounds {
+            steer_reply_ms: 100,
+            ..Bounds::default()
+        },
+    );
+    session.until("held first turn", |state| state.active_turn_id.is_some());
+
+    let (sender, reply_rx) = spawn_send(
+        &session,
+        "a steer that remains pending",
+        Duration::from_secs(5),
+    );
+    session.until("steer request", |_| {
+        session
+            .requests()
+            .iter()
+            .any(|request| request["method"] == "turn/steer")
+    });
+    let reply = reply_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("send returns after its injected wait cap")
+        .unwrap();
+    sender.join().unwrap();
+    assert_eq!(reply["disposition"], "steered");
+    assert_eq!(session.state().status, Status::Running);
+    assert!(
+        session
+            .events()
+            .iter()
+            .all(|event| event["kind"] != "steer.unconsumed")
+    );
+
+    std::fs::write(session.fake_dir.join("go"), "").unwrap();
+    session.until("unconsumed steer resolution", |state| {
+        state.status == Status::Idle
+            && session.events().iter().any(|event| {
+                event["kind"] == "steer.unconsumed"
+                    && event["commandIds"][0]
+                        == session
+                            .requests()
+                            .iter()
+                            .find(|request| request["method"] == "turn/steer")
+                            .unwrap()["params"]["commandId"]
+            })
+    });
+    assert!(session.events().iter().any(|event| {
+        event["kind"] == "steer.unconsumed"
+            && event["commandIds"][0]
+                == session
+                    .requests()
+                    .iter()
+                    .find(|request| request["method"] == "turn/steer")
+                    .unwrap()["params"]["commandId"]
+    }));
+    assert_eq!(session.stop_and_join(), 0);
+}
+
+#[test]
 fn supervisor_logs_msp_pending_steers_as_unconsumed_at_turn_completion() {
     let inbox = temp_root("ds-msp-unconsumed-inbox");
     let mut session = Session::spawn(
@@ -673,10 +844,18 @@ fn supervisor_logs_msp_pending_steers_as_unconsumed_at_turn_completion() {
         state.status == Status::Running && state.active_turn_id.is_some()
     });
 
-    for text in ["first replay", "second replay"] {
-        let reply = session.send(text).unwrap();
-        assert_eq!(reply["disposition"], "steered");
+    let mut sends = Vec::new();
+    for text in ["first steer", "second steer"] {
+        sends.push(spawn_send(&session, text, Duration::from_secs(10)));
     }
+    session.until("two steer requests", |_| {
+        session
+            .requests()
+            .iter()
+            .filter(|request| request["method"] == "turn/steer")
+            .count()
+            == 2
+    });
     let steering: Vec<_> = session
         .requests()
         .into_iter()
@@ -706,6 +885,16 @@ fn supervisor_logs_msp_pending_steers_as_unconsumed_at_turn_completion() {
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(unconsumed["commandIds"], json!(command_ids));
+    for (sender, reply_rx) in sends {
+        assert_eq!(
+            reply_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("send response after unconsumed decision")
+                .unwrap()["disposition"],
+            "unconsumed"
+        );
+        sender.join().unwrap();
+    }
     let state = session.until("idle after unconsumed steers and inbox note", |state| {
         state.status == Status::Idle
             && session

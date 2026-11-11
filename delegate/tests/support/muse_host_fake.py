@@ -39,6 +39,14 @@ def hold_start():
         time.sleep(0.01)
 
 
+def hold_steer_ack():
+    write_file("steer_ack.pending", "")
+    release_path = os.path.join(FAKE_DIR, "steer_ack.release")
+    deadline = time.monotonic() + 10
+    while not os.path.exists(release_path) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 def log_frame(frame):
     with open(os.path.join(FAKE_DIR, "requests.jsonl"), "a", encoding="utf-8") as output:
         output.write(json.dumps(frame, separators=(",", ":"), ensure_ascii=False) + "\n")
@@ -232,6 +240,8 @@ def handle(frame, raw_line=None):
                 ACTIVE_TURN = None
             send_frames(*frames)
         else:
+            if "STEER_ACK_HOLD" in SCENARIOS:
+                hold_steer_ack()
             frames = [response(request_id, {"commandId": command_id, "status": "accepted", "turnId": ACTIVE_TURN})]
             if "STEER_NOEFFECT" not in SCENARIOS and ACTIVE_TURN is not None:
                 frames.append(

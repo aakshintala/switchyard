@@ -547,13 +547,15 @@ pub fn apply_event(state: &mut State, event: &HostEvent, now_ms: u64) -> Vec<Val
         HostEvent::SessionStarted { session_id } => {
             state.muse_session_id = Some(session_id.clone())
         }
-        HostEvent::TurnStarted { turn_id }
+        HostEvent::TurnStarted { turn_id } => {
+            drop_steer(state, turn_id);
             if state.active_turn_id.is_none()
-                && (state.status == Status::Idle || state.status == Status::Running) =>
-        {
-            state.status = Status::Running;
-            state.active_turn_id = Some(turn_id.clone());
-            state.turn_count += 1;
+                && (state.status == Status::Idle || state.status == Status::Running)
+            {
+                state.status = Status::Running;
+                state.active_turn_id = Some(turn_id.clone());
+                state.turn_count += 1;
+            }
         }
         HostEvent::UserMessage {
             command_id: Some(command_id),
@@ -914,6 +916,9 @@ mod tests {
             "client.jsonl" => include_str!("../../tests/fixtures/contract/muse-serve/client.jsonl"),
             "client-abort-race.jsonl" => {
                 include_str!("../../tests/fixtures/contract/muse-serve/client-abort-race.jsonl")
+            }
+            "natural-late-steer.jsonl" => {
+                include_str!("../../tests/fixtures/contract/muse-serve/natural-late-steer.jsonl")
             }
             "bad-model.jsonl" => {
                 include_str!("../../tests/fixtures/contract/muse-serve/bad-model.jsonl")
@@ -1305,6 +1310,54 @@ mod tests {
         }
     }
 
+    fn assert_fixture_steers_delivered_once(name: &str) {
+        let mut steers = HashMap::new();
+        let mut messages = HashMap::<String, Vec<String>>::new();
+        for line in fixture(name).lines() {
+            if let Some(frame) = line.strip_prefix("> ") {
+                let request: Value = serde_json::from_str(frame).unwrap();
+                if request["method"] == "turn/steer" {
+                    steers.insert(
+                        request["params"]["commandId"].as_str().unwrap().to_string(),
+                        request["params"]["input"][0]["text"]
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                    );
+                }
+            } else if let Some(frame) = line.strip_prefix("< ")
+                && let crate::session::msp::Incoming::Event(HostEvent::UserMessage {
+                    command_id: Some(command_id),
+                    text,
+                    ..
+                }) = parse_line(frame)
+            {
+                messages.entry(command_id).or_default().push(text);
+            }
+        }
+
+        assert!(!steers.is_empty(), "{name} has no steer request");
+        for (command_id, text) in steers {
+            assert_eq!(
+                messages.get(&command_id),
+                Some(&vec![text]),
+                "steer {command_id} must be delivered exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn natural_late_steer_fixture_delivers_steer_exactly_once() {
+        assert_fixture_steers_delivered_once("natural-late-steer.jsonl");
+        let scratch = Scratch::new();
+        let mut state = scratch.state();
+        let logs = replay(fixture("natural-late-steer.jsonl"), &mut state);
+        assert!(state.pending_steers.is_empty());
+        assert!(logs.iter().flat_map(|(_, _, lines, _)| lines).all(|line| {
+            line["kind"] != "steer.unconsumed" && line["kind"] != "steer.replayed"
+        }));
+    }
+
     #[test]
     fn client_fixture_replay_waits_for_turn_completed_not_status_idle() {
         let scratch = Scratch::new();
@@ -1344,6 +1397,7 @@ mod tests {
 
     #[test]
     fn abort_race_fixture_rolls_back_queued_ack_and_starts_host_turn() {
+        assert_fixture_steers_delivered_once("client-abort-race.jsonl");
         let scratch = Scratch::new();
         let mut state = scratch.state();
         let logs = replay(fixture("client-abort-race.jsonl"), &mut state);
@@ -1358,6 +1412,9 @@ mod tests {
             logs.iter()
                 .all(|(_, _, lines, _)| lines.iter().all(|line| line["stale"] != true))
         );
+        assert!(logs.iter().flat_map(|(_, _, lines, _)| lines).all(|line| {
+            line["kind"] != "steer.unconsumed" && line["kind"] != "steer.replayed"
+        }));
         let queued = logs.iter().find(|(line, _, _, _)| *line == 82).unwrap();
         assert_eq!(queued.3.status, Status::Idle);
         let started = logs
