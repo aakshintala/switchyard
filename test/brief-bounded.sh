@@ -18,14 +18,21 @@ fail_over_budget() {
   fail "tkt-brief-bounded: $label $value > $limit"
 }
 
-# The absolute budgets and rebasing policy come from flywheel's
+# The tkt ceiling and rebasing policy come from flywheel's
 # tkt-brief-bounded budget in /Users/aakshintala/work/fiber-worktrees/flywheel/bin/test-launch.sh:
 # measured 2026-11-06 at 117 lines / 32994 bytes, allowing ~5% growth so a
 # paragraph fits but a new section does not. Rebase only deliberately, with a
-# new measurement written into that source comment.
+# new measurement written into that source comment. Tkt's 33280 B / 125-line
+# ceilings are hard. Pi's original 1 KiB below the tkt byte ceiling was
+# switchyard's choice, not flywheel's measurement.
+# Real pi briefs include notes and EXTRA; fiber #4618's brief was 36313 B. This
+# fixture bounds the filled template, not the full brief lanes read.
+# Flywheel ruled on PR #1583 that no dropped rule outranks 1 KiB headroom. Restore
+# rules and tighten wording first; if actual headroom remains below 1 KiB, round
+# the assertion down to a clean value. The restored pi template leaves 256 B.
 BRIEF_MAX_BYTES=33280
 BRIEF_MAX_LINES=125
-PI_HEADROOM_BYTES=1024
+PI_HEADROOM_BYTES=256
 PI_MAX_BYTES=$((BRIEF_MAX_BYTES - PI_HEADROOM_BYTES))
 
 within_budget() {
