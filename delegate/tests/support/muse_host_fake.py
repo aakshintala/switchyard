@@ -300,6 +300,10 @@ def main():
                 output.write(session_start.decode("utf-8"))
             if "HOLD_START" in SCENARIOS:
                 hold_start()
+            if "SLOW_START" in SCENARIOS:
+                # Cross the old 300ms test RPC bound, but fit within its new 5s setup allowance.
+                write_file("slow-start.pending", "")
+                time.sleep(0.5)
             if "STARTFAIL" in SCENARIOS:
                 sys.stdout.buffer.write(b'{"jsonrpc":"2.0","id":2,"error":{"code":-32020,"message":"fake session start failed"}}\n')
             else:

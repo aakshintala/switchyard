@@ -380,7 +380,8 @@ def handle(command):
         if "SLOW_BOOT" in SCENARIOS:
             return
         if "SLOW_THINK" in SCENARIOS:
-            time.sleep(1.5)
+            # Consume most of the 3s shared boot budget; separate call budgets would add another 3s.
+            time.sleep(2.5)
         if "BADMODEL" in SCENARIOS:
             bad = set_model_bad()
             bad["id"] = command.get("id")
@@ -449,6 +450,9 @@ def main():
         ),
     )
     if "EXIT_NOW" in SCENARIOS:
+        # Let initialize reach the pipe, but do not consume it; this isolates EOF from EPIPE timing.
+        ready, _, _ = select.select([sys.stdin.fileno()], [], [], 5.0)
+        write_file("stdin-ready", "" if ready else "no input arrived")
         os._exit(2)
     if CASSETTE:
         SEGMENTS = load_cassette()

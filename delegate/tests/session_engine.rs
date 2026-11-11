@@ -45,7 +45,7 @@ struct Bounds {
 impl Default for Bounds {
     fn default() -> Self {
         Self {
-            rpc_ms: 300,
+            rpc_ms: 5_000, // Starting a healthy fake host is setup, not the timeout under test.
             steer_ms: 300,
             steer_reply_ms: 10_000,
             interrupt_ms: 300,
@@ -919,7 +919,15 @@ fn supervisor_logs_msp_pending_steers_as_unconsumed_at_turn_completion() {
 
 #[test]
 fn supervisor_refused_steer_retries_after_idle_but_not_while_running() {
-    let mut ended = Session::spawn("STEERREFUSE", "brief", None, Bounds::default());
+    let mut ended = Session::spawn(
+        "STEERREFUSE",
+        "brief",
+        None,
+        Bounds {
+            steer_ms: 5_000,
+            ..Bounds::default()
+        },
+    );
     ended.until("initial held turn", |state| state.active_turn_id.is_some());
     let reply = ended.send("retry this text").unwrap();
     assert_eq!(reply["disposition"], "started");
@@ -934,13 +942,30 @@ fn supervisor_refused_steer_retries_after_idle_but_not_while_running() {
     );
     assert_eq!(ended.stop_and_join(), 0);
 
-    let mut held = Session::spawn("STEERREFUSE_HOLD", "brief", None, Bounds::default());
+    // steer_reply_ms sits well above the 10 s guard below, so a send that waited out the
+    // reply window fails the guard by a clear margin. The guard itself is a sanity cap.
+    let mut held = Session::spawn(
+        "STEERREFUSE_HOLD",
+        "brief",
+        None,
+        Bounds {
+            steer_reply_ms: 30_000,
+            ..Bounds::default()
+        },
+    );
     held.until("initial held turn", |state| state.active_turn_id.is_some());
     let started = Instant::now();
     let reply = held.send("do not queue").unwrap();
     assert_eq!(reply["ok"], false);
     assert_eq!(reply["code"], "failed");
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // An rpc timeout also returns code "failed"; only the refusal branch says this.
+    assert!(
+        reply["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("steer refused")),
+        "{reply}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
     assert_eq!(held.state().status, Status::Running);
     assert!(held.requests().iter().all(|request| {
         request["method"] != "turn/start" || request["params"]["input"][0]["text"] != "do not queue"
@@ -1088,11 +1113,16 @@ fn supervisor_plain_stop_interrupts_then_closes_and_reaps_the_host() {
 
 #[test]
 fn supervisor_escalates_when_the_host_ignores_eof_or_sigterm() {
-    for scenario in ["IGNORE_EOF", "IGNORE_EOF,IGNORE_TERM"] {
+    // SLOW_START is a regression guard for #1513: a host slower than the old 300 ms test
+    // rpc bound must still reach the escalation path rather than die with StartFailed.
+    for scenario in ["SLOW_START,IGNORE_EOF", "IGNORE_EOF,IGNORE_TERM"] {
         let mut session = Session::spawn(scenario, "brief", None, Bounds::default());
         session.until("idle session", |state| {
             state.status == Status::Idle && state.last_turn.is_some()
         });
+        if scenario.starts_with("SLOW_START") {
+            assert!(session.fake_dir.join("slow-start.pending").exists());
+        }
         let started = Instant::now();
         assert_eq!(session.stop(false).unwrap()["ok"], true);
         assert_eq!(session.wait_run(), 0);
@@ -1208,7 +1238,15 @@ fn supervisor_interrupt_timeout_kills_host_and_plain_stop_still_finishes() {
 
 #[test]
 fn supervisor_kills_a_host_that_stops_reading_without_blocking_other_calls() {
-    let mut session = Session::spawn("STOP_READING", "brief", None, Bounds::default());
+    let mut session = Session::spawn(
+        "STOP_READING",
+        "brief",
+        None,
+        Bounds {
+            rpc_ms: 300,
+            ..Bounds::default()
+        },
+    );
     session.until("startup turn completed", |state| {
         state.status == Status::Idle && state.last_turn.is_some()
     });
@@ -1458,7 +1496,15 @@ fn supervisor_startup_and_runtime_failures_are_recorded() {
     );
     assert_eq!(start_failure.wait_run(), 0);
 
-    let mut no_ack = Session::spawn("NO_INIT_ACK", "brief", None, Bounds::default());
+    let mut no_ack = Session::spawn(
+        "NO_INIT_ACK",
+        "brief",
+        None,
+        Bounds {
+            rpc_ms: 300,
+            ..Bounds::default()
+        },
+    );
     let dead = no_ack.until("initialization timeout", |state| {
         state.status == Status::Dead
     });
@@ -1473,7 +1519,15 @@ fn supervisor_startup_and_runtime_failures_are_recorded() {
     assert!(!too_deep.fake_dir.join("host.pid").exists());
     assert_eq!(too_deep.wait_run(), 0);
 
-    let mut muted = Session::spawn("MUTE_AFTER_START", "brief", None, Bounds::default());
+    let mut muted = Session::spawn(
+        "MUTE_AFTER_START",
+        "brief",
+        None,
+        Bounds {
+            rpc_ms: 300,
+            ..Bounds::default()
+        },
+    );
     muted.until("first turn completion", |state| {
         state.status == Status::Idle && state.last_turn.is_some()
     });

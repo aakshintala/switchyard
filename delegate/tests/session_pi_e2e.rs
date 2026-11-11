@@ -1397,7 +1397,7 @@ fn pi_failures_map_to_the_existing_contracts() {
         assert!(message.contains("thinking/set"), "{message}");
         assert!(!message.contains("model/set"), "{message}");
         assert!(
-            elapsed < Duration::from_millis(4000),
+            elapsed < Duration::from_millis(4500),
             "shared boot deadline not applied: {elapsed:?}"
         );
         assert!(
@@ -1577,6 +1577,11 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
 fn pi_that_exits_before_reading_stdin_fails_start_with_the_eof_text() {
     let h = Harness::new();
     let started = h.start_pi("openai/gpt-6-luna", b"B", true, "EXIT_NOW", None, &[]);
+    assert_eq!(
+        std::fs::read(h.fake_dir.join("stdin-ready")).unwrap(),
+        b"",
+        "fake host must exit only after initialize bytes are pending, without reading them"
+    );
     let value = assert_json_error(&started, 1, "failed");
     let message = value["error"]["message"].as_str().unwrap();
     assert!(message.contains("pi host closed stdout"), "{message}");
