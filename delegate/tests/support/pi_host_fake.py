@@ -21,6 +21,7 @@ HELD = False
 HOLD_START = 0.0
 RACE_PHASE = 0
 RACE_TEXT = ""
+LATE_WAITING = False
 SEGMENTS = []
 
 
@@ -145,7 +146,7 @@ def deliver_queue():
 
 
 def finish_hold(completed):
-    global HELD
+    global HELD, LATE_WAITING
     for name in ("go", "tool.paused"):
         try:
             os.remove(path(name))
@@ -169,6 +170,13 @@ def finish_hold(completed):
             QUEUE.clear()
             send({"type": "queue_update", "steering": [], "followUp": []})
         send({"type": "turn_end"})
+        if "NO_CONTINUATION" in SCENARIOS:
+            send({"type": "agent_end", "messages": [], "willRetry": False})
+            send({"type": "agent_settled", "aborted": False})
+            if "LATE_CONTINUATION" in SCENARIOS:
+                LATE_WAITING = True
+                write_file("late_continuation_waiting", "")
+            return
         if QUEUE:
             deliver_queue()
             return
@@ -425,11 +433,11 @@ def handle(command):
 
 
 def waiting():
-    return HELD or RACE_PHASE in (1, 2)
+    return HELD or RACE_PHASE in (1, 2) or LATE_WAITING
 
 
 def main():
-    global SEGMENTS
+    global SEGMENTS, LATE_WAITING
     os.makedirs(FAKE_DIR, exist_ok=True)
     write_file("argv.txt", "\n".join(sys.argv[1:]) + ("\n" if sys.argv[1:] else ""))
     write_file("host.pid", str(os.getpid()) + "\n")
@@ -467,6 +475,12 @@ def main():
     pending = bytearray()
     eof = False
     while True:
+        if LATE_WAITING and os.path.exists(path("late_continue")):
+            LATE_WAITING = False
+            if QUEUE:
+                deliver_queue()
+            else:
+                write_file("late_continuation_cleared", "")
         if waiting() and os.path.exists(path("go")):
             if HELD:
                 finish_hold(True)

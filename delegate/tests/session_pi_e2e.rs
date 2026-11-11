@@ -59,6 +59,25 @@ impl Harness {
         cassette: Option<&str>,
         extra_env: &[(&str, &str)],
     ) -> Output {
+        self.invoke_with_timeout(
+            args,
+            input,
+            scenario,
+            cassette,
+            extra_env,
+            Duration::from_secs(10),
+        )
+    }
+
+    fn invoke_with_timeout(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+        scenario: &str,
+        cassette: Option<&str>,
+        extra_env: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Output {
         let mut command = Command::new(BIN);
         command
             .arg("session")
@@ -118,12 +137,12 @@ impl Harness {
         if let Some(input) = input {
             child.stdin.take().unwrap().write_all(input).unwrap();
         }
-        let status = wait_cli(&mut child, Duration::from_secs(10), &self.root(), args);
+        let status = wait_cli(&mut child, timeout, &self.root(), args);
         let stdout = stdout_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(timeout)
             .expect("stdout EOF deadline");
         let stderr = stderr_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(timeout)
             .expect("stderr EOF deadline");
         Output {
             status,
@@ -811,6 +830,206 @@ fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
 }
 
 #[test]
+fn all_queued_pi_steers_become_unconsumed_if_no_continuation_starts() {
+    let h = Harness::new();
+    let continuation_wait_marker = h.base.join("continuation-wait-started");
+    let continuation_wait_marker_env = continuation_wait_marker.to_str().unwrap();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_TOOL,NO_CONTINUATION",
+        None,
+        &[
+            ("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS", "150"),
+            (
+                "DELEGATE_SESSION_TEST_CONTINUATION_WAIT_FILE",
+                continuation_wait_marker_env,
+            ),
+        ],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    let steered = h.invoke(&["send", &id, "NEVER-CONTINUE", "--json"]);
+    assert!(steered.status.success());
+    let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    let command_id = pending[0]["commandId"].as_str().unwrap();
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    h.wait_path(&continuation_wait_marker, "the continuation wait to start");
+    let idle = h.wait_state(&id, "idle after continuation deadline", |state| {
+        state["status"] == "idle"
+    });
+    assert!(idle["pendingSteers"].as_array().unwrap().is_empty());
+    h.notes_poll(&id, "idle", 1);
+
+    let logs = h.logs(&id);
+    let unconsumed: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "steer.unconsumed")
+        .collect();
+    assert_eq!(unconsumed.len(), 1, "{logs:?}");
+    assert_eq!(unconsumed[0]["commandIds"], serde_json::json!([command_id]));
+    let completed_at = logs
+        .iter()
+        .position(|line| line["kind"] == "turn.completed")
+        .unwrap();
+    let unconsumed_at = logs
+        .iter()
+        .position(|line| line["kind"] == "steer.unconsumed")
+        .unwrap();
+    assert!(completed_at < unconsumed_at, "{logs:?}");
+    assert!(
+        logs.iter().all(|line| line["kind"] != "steer.replayed"),
+        "{logs:?}"
+    );
+    assert_eq!(h.notes(&id, "idle").len(), 1);
+}
+
+#[test]
+fn pi_clears_queued_steers_before_a_late_continuation_can_start() {
+    let h = Harness::new();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_TOOL,NO_CONTINUATION,LATE_CONTINUATION",
+        None,
+        &[("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS", "150")],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    let steered = h.invoke(&["send", &id, "LATE-STEER", "--json"]);
+    assert!(steered.status.success());
+    let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+    assert_eq!(reply["disposition"], "steered", "{reply}");
+
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    let idle = h.wait_state(&id, "idle after continuation deadline", |state| {
+        state["status"] == "idle"
+    });
+    assert!(idle["pendingSteers"].as_array().unwrap().is_empty());
+    h.notes_poll(&id, "idle", 1);
+    h.wait_file(
+        "late_continuation_waiting",
+        "the fake pi's late continuation mode",
+    );
+
+    std::fs::write(h.fake_dir.join("late_continue"), "").unwrap();
+    h.wait_file(
+        "late_continuation_cleared",
+        "the fake pi's late continuation check",
+    );
+    assert_eq!(h.state(&id)["status"], "idle");
+    assert_eq!(h.state(&id)["turnCount"], 1);
+    assert_eq!(h.notes(&id, "idle").len(), 1);
+
+    let requests = h.requests();
+    let steer_at = requests
+        .iter()
+        .position(|request| {
+            request["type"] == "prompt"
+                && request.get("streamingBehavior") == Some(&Value::from("steer"))
+        })
+        .unwrap();
+    assert_eq!(
+        requests[steer_at + 1]["type"],
+        "clear_queue",
+        "{requests:?}"
+    );
+    let logs = h.logs(&id);
+    assert_eq!(
+        logs.iter()
+            .filter(|line| line["kind"] == "steer.unconsumed")
+            .count(),
+        1,
+        "{logs:?}"
+    );
+    assert!(
+        logs.iter()
+            .all(|line| { !(line["kind"] == "user" && line["text"] == "LATE-STEER") }),
+        "the cleared steer must not be delivered by a late turn: {logs:?}"
+    );
+}
+
+#[test]
+fn stopping_during_pi_continuation_wait_does_not_publish_idle() {
+    let h = Harness::new();
+    let continuation_wait_marker = h.base.join("continuation-wait-started");
+    let continuation_wait_marker_env = continuation_wait_marker.to_str().unwrap();
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_TOOL,NO_CONTINUATION",
+        None,
+        &[(
+            "DELEGATE_SESSION_TEST_CONTINUATION_WAIT_FILE",
+            continuation_wait_marker_env,
+        )],
+    );
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let value: Value = serde_json::from_slice(&started.stdout).unwrap();
+    let id = value["session"]["id"].as_str().unwrap().to_string();
+
+    h.wait_file("tool.paused", "the held tool call");
+    let steered = h.invoke(&["send", &id, "STOP-DURING-WAIT", "--json"]);
+    assert!(steered.status.success());
+    let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
+    assert_eq!(pending.len(), 1);
+    let command_id = pending[0]["commandId"].as_str().unwrap();
+    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+    h.wait_path(&continuation_wait_marker, "the continuation wait to start");
+
+    let stopped = h.invoke_with_timeout(
+        &["stop", &id, "--interrupt", "--json"],
+        None,
+        "",
+        None,
+        &[],
+        Duration::from_secs(30),
+    );
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let reply: Value = serde_json::from_slice(&stopped.stdout).unwrap();
+    assert_eq!(reply["interrupted"], true, "{reply}");
+    assert_eq!(h.state(&id)["status"], "idle");
+    assert!(
+        h.notes(&id, "idle").is_empty(),
+        "the continuation wait must not publish an idle note when stop owns the session"
+    );
+    let logs = h.logs(&id);
+    let unconsumed: Vec<&Value> = logs
+        .iter()
+        .filter(|line| line["kind"] == "steer.unconsumed")
+        .collect();
+    assert_eq!(unconsumed.len(), 1, "{logs:?}");
+    assert_eq!(unconsumed[0]["commandIds"], serde_json::json!([command_id]));
+}
+
+#[test]
 fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
     let h = Harness::new();
     let release_event_write = h.base.join("release-event-write");
@@ -1441,8 +1660,8 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let h = Harness::new();
     let release_event_write = h.base.join("release-event-write");
     let release_event_write_env = release_event_write.to_str().unwrap();
-    let replay_decision_marker = h.base.join("replay-decision");
-    let replay_decision_env = replay_decision_marker.to_str().unwrap();
+    let continuation_wait_marker = h.base.join("continuation-wait-started");
+    let continuation_wait_marker_env = continuation_wait_marker.to_str().unwrap();
     let started = h.start_pi(
         "openai/gpt-6-luna",
         b"BRIEF",
@@ -1463,8 +1682,8 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
                 "turn.started",
             ),
             (
-                "DELEGATE_SESSION_TEST_REPLAY_DECISION_FILE",
-                replay_decision_env,
+                "DELEGATE_SESSION_TEST_CONTINUATION_WAIT_FILE",
+                continuation_wait_marker_env,
             ),
         ],
     );
@@ -1484,8 +1703,8 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let held_marker = std::path::PathBuf::from(format!("{}.held", release_event_write.display()));
     h.wait_path(&held_marker, "pi-turn-2 start event append hold");
     h.wait_path(
-        &replay_decision_marker,
-        "pi replay decision while turn-start event is held",
+        &continuation_wait_marker,
+        "the continuation wait after the replay decision",
     );
     assert_eq!(
         h.notes(&id, "idle").len(),
