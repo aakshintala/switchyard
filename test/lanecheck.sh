@@ -246,6 +246,41 @@ else
   fail "done-already-retired-records-owner-handoff (rc=$grc; $out; $(cat "$r/roster-done"))"
 fi
 
+# A session-scoped handoff annotates that session's retirement row even when
+# a later row for another session of the ticket follows it.
+r=$(newrun 2b1a)
+printf '%s\t1406\tmuse\tfiber-1406-plan\tplanjid\n' "$(old 4H)" > "$r/roster"
+printf '%s\t1406\tmuse\tfiber-1406-build\tbuildjid\n' "$(old 3H)" >> "$r/roster"
+printf '%s\t1406\tfiber-1406-plan\n' "$(old 3H)" > "$r/roster-done"
+printf '%s\t1406\tfiber-1406-build\n' "$(old 2H)" >> "$r/roster-done"
+printf '4176 tests/1406-owner-handoff\n' > "$T/prs"
+write_owner_card 0610-fly-1590 'Review PR #4176' 'Please merge PR #4176 after review.'
+printf '0610-fly-1590 flywheel Review PR #4176\n' > "$T/owner-ask-list"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 1406:fiber-1406-plan --handed-to-owner 0610-fly-1590 2>&1); grc=$?
+first_row=$(sed -n '1p' "$r/roster-done")
+second_row=$(sed -n '2p' "$r/roster-done")
+if [ "$grc" = 0 ] && printf '%s' "$first_row" | grep -qF 'handed-to-owner 0610-fly-1590 PR #4176' \
+  && ! printf '%s' "$second_row" | grep -qF 'handed-to-owner 0610-fly-1590 PR #4176'; then
+  ok done-session-scoped-handoff-annotates-matching-row
+else
+  fail "done-session-scoped-handoff-annotates-matching-row (rc=$grc; $out; $first_row / $second_row)"
+fi
+
+# FW_DONE_FORCE does not make an already-retired handoff record an annotation.
+r=$(newrun 2b1b); lane "$r" 1407 fiber-1407-build forcejid
+printf '%s\t1407\n' "$(old 2H)" > "$r/roster-done"
+printf '4177 tests/1407-owner-handoff\n' > "$T/prs"
+write_owner_card 0610-fly-1591 'Review PR #4177' 'Please merge PR #4177 after review.'
+printf '0610-fly-1591 flywheel Review PR #4177\n' > "$T/owner-ask-list"
+out=$(FW_RUN=$r FW_DONE_FORCE=1 bash "$BIN/lanecheck" done 1407 --handed-to-owner 0610-fly-1591 2>&1); grc=$?
+warning='WARNING: handed-to-owner card 0610-fly-1591 was not recorded on a retirement row.'
+if [ "$grc" = 0 ] && [ "$(printf '%s\n' "$out" | grep -Fc "$warning")" = 1 ] \
+  && ! grep -qF 'handed-to-owner 0610-fly-1591' "$r/roster-done"; then
+  ok done-force-already-retired-handoff-warns-when-unrecorded
+else
+  fail "done-force-already-retired-handoff-warns-when-unrecorded (rc=$grc; $out; $(cat "$r/roster-done"))"
+fi
+
 # Repeating done after a partial retirement completes fence and claim cleanup,
 # while preserving the existing row and the established no-op message.
 r=$(newrun 2b2); lane "$r" 1410 fiber-1410-build deadcafe; grant "$r" 1410
