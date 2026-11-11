@@ -1326,6 +1326,12 @@ grep -qxF 'outside-plan path has no one-line reason: src/a.go' <<<"$OUT" || fail
 setup; printf '## Summary\nNo extra scope.\n\n## Outside-plan files\n- src/a.go — inspected existing parser\n- src/b.go — updated caller for new interface\n\n## Tests\nPassed.\n' >"$ST/body"
 ship --outside-plan 'src/a.go' --outside-plan 'src/b.go'; expect 0 "outside-plan paths and reasons listed"
 
+setup; printf '## Outside-plan files\n- src/a.go - checked scope\n' >"$ST/body"
+ship --outside-plan 'src/a.go'; expect 0 "outside-plan path accepts spaced hyphen separator"
+
+setup; printf '## Outside-plan files\n- `src/a.go`: checked scope\n' >"$ST/body"
+ship --outside-plan 'src/a.go'; expect 0 "outside-plan path accepts backticks and colon separator"
+
 setup; ship; expect 0 "no --body-has"
 [ "$(grep -c -- '--json body ' "$ST/gh.log")" -eq 1 ] || fail "no --body-has: one body read, for the authority check: [$(cat "$ST/gh.log")]"
 

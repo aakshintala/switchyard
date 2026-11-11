@@ -50,9 +50,11 @@
 #        lines are ignored; a body with no non-blank line fails. It is checked
 #        in the same block and prints `body does not end with (--body-ends): <text>`.
 #        --outside-plan <path> (repeatable) requires each recorded path in the
-#        body's `Outside-plan files` section as a bullet `- <path> — <reason>`.
-#        The reason must be non-blank and on that same line. This check is
-#        opt-in; an empty recorded list needs no section.
+#        body's `Outside-plan files` section as `- <path> — <reason>`; it also
+#        accepts `- <path> - <reason>` and `- \`<path>\`: <reason>`. A path may
+#        have one pair of surrounding backticks. The reason must be non-blank
+#        and on that same line. This check is opt-in; an empty recorded list
+#        needs no section.
 #        Always, the PR body and each PR comment whose first line starts with
 #        `Review round closed` (the review record; other comments are not read) are
 #        scanned for authority claims: a line with
@@ -552,20 +554,33 @@ if [ "${#body_has[@]}" -gt 0 ] || [ -n "$body_ends" ] || [ "${#outside_plan[@]}"
           '* '*) entry="${entry#\* }" ;;
           *) continue ;;
         esac
-        if [ "$entry" = "$path" ]; then
-          found=1
-          missing_reason=1
-        elif [[ "$entry" == "$path — "* ]]; then
-          found=1
-          detail="${entry#"$path — "}"
-          if [ -n "${detail//[[:space:]]/}" ]; then reason=1; else missing_reason=1; fi
-        else
-          rest="${entry#"$path"}"
-          if [ "$rest" != "$entry" ]; then
-            case "${rest:0:1}" in
-              ' '|$'\t') found=1; missing_reason=1 ;;
-            esac
+        matched=0
+        for candidate in "$path" "\`$path\`"; do
+          if [ "$entry" = "$candidate" ]; then
+            found=1
+            missing_reason=1
+            matched=1
+            break
           fi
+          for separator in ' — ' ' - ' ': '; do
+            prefix="$candidate$separator"
+            case "$entry" in
+              "$prefix"*)
+                found=1
+                matched=1
+                detail="${entry#"$prefix"}"
+                if [ -n "${detail//[[:space:]]/}" ]; then reason=1; else missing_reason=1; fi
+                break 2
+                ;;
+            esac
+          done
+        done
+        if [ "$matched" -eq 0 ]; then
+          for candidate in "$path" "\`$path\`"; do
+            case "$entry" in
+              "$candidate "*|"$candidate"$'\t'*) found=1; missing_reason=1 ;;
+            esac
+          done
         fi
       done <<<"$body"
       if [ "$found" -eq 0 ]; then

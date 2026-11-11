@@ -8,9 +8,11 @@
 # line when present; it then shares the normal head update and PASS path.
 # For takeovers, the gate comes from state key `gate` when the plan value is
 # `takeover <ref>`, and the file fence comes from the state's `fence` list.
-# Every path covered by Files or the state's fence list stays covered. An
-# uncovered path still passes when it exists on origin/main and the branch only
-# adds lines to it; otherwise it is reported unless it is on the stop-list.
+# Every path covered by Files or the state's fence list stays covered. New
+# dependencies in any changed Cargo.toml stop the gate even when covered. For
+# uncovered paths, docs, workflows and scripts/check stop even when additive;
+# other existing files that only gain lines pass, and remaining paths are
+# reported outside the plan.
 # Every state read and write goes through tkt-state. The Files cover rule is
 # covered() from lib/plan-tokens.sh; the gate script writer is
 # write_gate_script() from lib/gate-script.sh. Neither is copied here.
@@ -455,12 +457,62 @@ additive_only() {
 }
 cargo_dependency_names() {
   awk '
+    function clean_key(key, quote) {
+      sub(/^[[:space:]]*/, "", key)
+      sub(/[[:space:]]*$/, "", key)
+      if (substr(key, 1, 1) == "\"" || substr(key, 1, 1) == "\047") {
+        quote = substr(key, 1, 1)
+        if (substr(key, length(key), 1) == quote) key = substr(key, 2, length(key) - 2)
+      }
+      return key
+    }
+    function emit_dependency(kind, key) {
+      key = clean_key(key)
+      if (key != "") print kind "\t" key
+    }
+    function parse_table(header,    i, kind, prefix, marker, from, at, pos, rest) {
+      section = ""
+      for (i = 1; i <= 3; i++) {
+        kind = (i == 1 ? "dependencies" : i == 2 ? "dev-dependencies" : "build-dependencies")
+        if (header == kind) { section = kind; return }
+        prefix = kind "."
+        if (index(header, prefix) == 1) {
+          emit_dependency(kind, substr(header, length(prefix) + 1))
+          return
+        }
+      }
+      if (header == "workspace.dependencies") { section = header; return }
+      prefix = "workspace.dependencies."
+      if (index(header, prefix) == 1) {
+        emit_dependency("workspace.dependencies", substr(header, length(prefix) + 1))
+        return
+      }
+      if (header !~ /^target\./) return
+      for (i = 1; i <= 3; i++) {
+        kind = (i == 1 ? "dependencies" : i == 2 ? "dev-dependencies" : "build-dependencies")
+        marker = "." kind
+        pos = 0
+        from = 1
+        while (from <= length(header)) {
+          at = index(substr(header, from), marker)
+          if (!at) break
+          pos = from + at - 1
+          from = pos + length(marker)
+        }
+        if (!pos || substr(header, 1, pos - 1) !~ /^target\./) continue
+        rest = substr(header, pos + length(marker))
+        if (rest == "") { section = kind; return }
+        if (substr(rest, 1, 1) == ".") {
+          emit_dependency(kind, substr(rest, 2))
+          return
+        }
+      }
+    }
     /^[[:space:]]*\[/ {
       header = $0
       sub(/^[[:space:]]*\[/, "", header)
       sub(/\][[:space:]]*(#.*)?$/, "", header)
-      if (header == "dependencies" || header == "dev-dependencies" || header == "workspace.dependencies") section = header
-      else section = ""
+      parse_table(header)
       next
     }
     section != "" {
@@ -469,13 +521,7 @@ cargo_dependency_names() {
       if (key == "" || key ~ /^#/) next
       eq = index(key, "=")
       if (!eq) next
-      key = substr(key, 1, eq - 1)
-      sub(/[[:space:]]*$/, "", key)
-      if (substr(key, 1, 1) == "\"" || substr(key, 1, 1) == "\047") {
-        quote = substr(key, 1, 1)
-        if (substr(key, length(key), 1) == quote) key = substr(key, 2, length(key) - 2)
-      }
-      if (key != "") print section "\t" key
+      emit_dependency(section, substr(key, 1, eq - 1))
     }
   ' "$@"
 }
@@ -496,19 +542,23 @@ stop_paths=()
 outside_paths=()
 while IFS= read -r p; do
   [ -n "$p" ] || continue
-  if covered "$p"; then continue; fi
-  case "$p" in
-    GLOSSARY.md|docs/*.md|docs/adr/*|.github/workflows/*|scripts/check)
-      stop_paths+=("$p")
-      continue
-      ;;
-  esac
   case "$p" in
     Cargo.toml|*/Cargo.toml)
       if new_cargo_dependency "$p"; then
         stop_paths+=("$p")
         continue
       fi
+      ;;
+  esac
+  if covered "$p"; then continue; fi
+  case "$p" in
+    .github/workflows/*|scripts/check)
+      stop_paths+=("$p")
+      continue
+      ;;
+    GLOSSARY.md|docs/*.md|docs/adr/*)
+      stop_paths+=("$p")
+      continue
       ;;
   esac
   if additive_only "$p"; then continue; fi

@@ -515,17 +515,38 @@ grep -qx "base.txt" <<<"$OUT" || fail "rename report lists the old path"
 # --- stop-list: unplanned documentation, including root and nested paths ---
 setup_case stop-docs
 write_plan
-mkdir -p "$WT/docs/guide/nested" "$WT/docs/adr"
+mkdir -p "$WT/docs/guide/nested" "$WT/docs/adr" "$WT/docs/testing"
 commit_file GLOSSARY.md "unplanned glossary"
 commit_file docs/guide/nested/guide.md "unplanned nested docs"
 commit_file docs/adr/decision.md "unplanned ADR"
+commit_file docs/testing/x.md "nested testing guide"
 push_branch
 run_gate
 [ "$RC" -eq 1 ] || fail "docs stop-list exits 1"
-expect_verdict "TKT tkt-gate STOP-LIST n=3 log=*" "docs stop-list"
+expect_verdict "TKT tkt-gate STOP-LIST n=4 log=*" "docs stop-list"
 expect_stop_list_path GLOSSARY.md
 expect_stop_list_path docs/guide/nested/guide.md
 expect_stop_list_path docs/adr/decision.md
+expect_stop_list_path docs/testing/x.md
+
+# --- stop-list beats additive-only for an existing unplanned docs file ---
+setup_case stop-additive-doc
+mkdir -p "$CDIR/seed/docs"
+printf '# Guide\n\nExisting guide.\n' >"$CDIR/seed/docs/guide.md"
+git -C "$CDIR/seed" add docs/guide.md
+git -C "$CDIR/seed" commit -qm "add guide on main"
+git -C "$CDIR/seed" push -q origin main
+git -C "$WT" fetch -q origin
+git -C "$WT" reset -q --hard origin/main
+write_plan
+printf '\n## New section\n\nAdded guidance.\n' >>"$WT/docs/guide.md"
+git -C "$WT" add docs/guide.md
+git -C "$WT" commit -qm "append to unplanned guide"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "additive docs stop-list exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "additive docs stop-list"
+expect_stop_list_path docs/guide.md
 
 # --- stop-list: unplanned GitHub workflows ---
 setup_case stop-workflows
@@ -1209,6 +1230,77 @@ push_branch
 run_gate
 [ "$RC" -eq 1 ] || fail "new [workspace.dependencies] entry exits 1"
 expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "new [workspace.dependencies] entry"
+expect_stop_list_path Cargo.toml
+
+expect_new_cargo_table() {
+  local name="$1" table="$2" form="$3" dependency="$4"
+  prepare_cargo_case "$name"
+  cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = []
+EOF
+  printf '[%s]\n' "$table" >>"$WT/Cargo.toml"
+  if [ "$form" = entry ]; then
+    printf '%s = "1"\n' "$dependency" >>"$WT/Cargo.toml"
+  else
+    printf 'version = "1"\n' >>"$WT/Cargo.toml"
+  fi
+  git -C "$WT" add -- Cargo.toml
+  git -C "$WT" commit -qm "add $dependency dependency"
+  push_branch
+  run_gate
+  [ "$RC" -eq 1 ] || fail "new dependency in [$table] exits 1"
+  expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "new dependency in [$table]"
+  expect_stop_list_path Cargo.toml
+}
+
+# --- stop-list: each Cargo dependency table form detects a new crate ---
+expect_new_cargo_table new-build-table build-dependencies entry build-tool
+expect_new_cargo_table new-target-dependencies "target.'cfg(unix)'.dependencies" entry target-runtime
+expect_new_cargo_table new-target-dev-dependencies "target.'cfg(unix)'.dev-dependencies" entry target-test
+expect_new_cargo_table new-target-build-dependencies "target.'cfg(unix)'.build-dependencies" entry target-build-tool
+expect_new_cargo_table new-dependency-header dependencies.direct-header header direct-header
+expect_new_cargo_table new-dev-dependency-header dev-dependencies.direct-dev-header header direct-dev-header
+expect_new_cargo_table new-build-dependency-header build-dependencies.direct-build-header header direct-build-header
+expect_new_cargo_table new-workspace-dependency-header workspace.dependencies.direct-workspace-header header direct-workspace-header
+expect_new_cargo_table new-target-dependency-header "target.'cfg(unix)'.dependencies.target-header" header target-header
+expect_new_cargo_table new-target-dev-dependency-header "target.'cfg(unix)'.dev-dependencies.target-dev-header" header target-dev-header
+expect_new_cargo_table new-target-build-dependency-header "target.'cfg(unix)'.build-dependencies.target-build-header" header target-build-header
+
+# --- a covered Cargo.toml still cannot add a dependency ---
+prepare_cargo_case covered-new-dependency
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `Cargo.toml`
+
+## Gate
+
+`gate-ok`
+EOF
+cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+covered-new = "1"
+EOF
+git -C "$WT" add -- Cargo.toml
+git -C "$WT" commit -qm "add dependency to covered manifest"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "covered Cargo.toml new dependency exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "covered Cargo.toml new dependency"
 expect_stop_list_path Cargo.toml
 
 # --- a version bump of an existing dependency is not a stop-list change ---

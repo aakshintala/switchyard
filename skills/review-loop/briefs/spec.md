@@ -8,9 +8,9 @@ __FENCE__
 The ticket state records these outside-plan files:
 __OUTSIDE_PLAN__
 
-check each outside-plan file against the ticket: needed, or scope creep?
+Check each outside-plan file against the ticket: needed, or scope creep?
 
-A finding about code outside this fence, or one that contradicts a ruling you quote word for word, is P3 (non-blocking). Name the fence or the ruling.
+A scope-creep finding about an outside-plan file is P2. Other findings about code outside this fence and findings that contradict a ruling you quote word for word are P3 (non-blocking). Name the fence or the ruling.
 
 When the ticket carries a plan, judge the Spec axis against its `Rules this ticket implements`, quoted word for word. A diagnosis ticket (its job is to find a cause) is met by a recorded cause or by a recorded no-failure result with the runs that show it; judge it on that evidence, not on a failure the ticket's wording assumes. A test timeout, wait, retry count or numeric tolerance loosened in the diff is a P2 finding unless the plan or the ticket's acceptance criteria rule on it. So is a new test that waits a span of real time for an event to happen or not happen, where a signal or pause point the test controls would decide it. So is a test the PR adds or changes that (1) where the workflow doc names a docs area for the thing asserted, asserts an order or count without citing the `docs/<area>.md` line that promises it (a repo whose workflow doc names no docs area has no such line: an uncited count there is not a finding, and its source is the ticket, plan or ruling the PR cites), (2) sends a pointer input that follows a grid match instead of a readiness signal, or (3) has a fake send its signal before the state it announces. The gate has passed on this head: run a test only to confirm a specific suspected finding, and run just that test.
 

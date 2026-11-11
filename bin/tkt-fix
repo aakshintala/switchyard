@@ -779,7 +779,7 @@ grc=0
 if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
 if [ "$grc" -eq 1 ]; then
   case "$(head -n 1 "$tmp/gate.out")" in
-    "TKT tkt-gate FENCE "*|"TKT tkt-gate STOP-LIST "*) close_slot "$knum" ;;
+    "TKT tkt-gate STOP-LIST "*) close_slot "$knum" ;;
     *) round=$((round + 1)); t set round "$round"; close_slot "$knum" ;;
   esac
 fi
