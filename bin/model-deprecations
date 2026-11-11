@@ -42,6 +42,8 @@ Description=Weekly vendor model deprecations report
 
 [Service]
 Type=oneshot
+# A systemd user unit gets a PATH without ~/.local/bin, where delegate lives.
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart="$quoted_path" run
 TimeoutStartSec=4h
 UNIT
