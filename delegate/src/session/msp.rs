@@ -28,6 +28,7 @@ pub enum Disposition {
     Started,
     Queued,
     Steered,
+    Unconfirmed,
     Other,
 }
 
@@ -261,6 +262,7 @@ pub fn ack_disposition(result: &Value) -> Disposition {
         Some("started") => Disposition::Started,
         Some("queued") => Disposition::Queued,
         Some("steered") => Disposition::Steered,
+        Some("unconfirmed") => Disposition::Unconfirmed,
         _ => Disposition::Other,
     }
 }
@@ -554,6 +556,10 @@ mod tests {
             )
         });
         assert!(bad_model_failed);
+        assert_eq!(
+            ack_disposition(&json!({"disposition":"unconfirmed"})),
+            Disposition::Unconfirmed
+        );
         assert_eq!(
             ack_disposition(&json!({"disposition":"future"})),
             Disposition::Other

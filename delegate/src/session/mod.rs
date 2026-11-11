@@ -545,10 +545,11 @@ fn send(args: &[String], json_mode: bool) -> Result<i32> {
     let session = state::read_state(&paths, id)
         .map_err(|error| failed(format!("state unreadable: {error}")))?;
     if json_mode {
-        println!(
-            "{}",
-            json!({"ok":true,"disposition":disposition,"session":session})
-        );
+        let mut response = json!({"ok":true,"disposition":disposition,"session":session});
+        if let Some(command_id) = reply.get("commandId").and_then(Value::as_str) {
+            response["commandId"] = json!(command_id);
+        }
+        println!("{}", response);
     } else {
         println!("{disposition}");
     }
