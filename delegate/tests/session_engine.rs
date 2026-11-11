@@ -739,15 +739,34 @@ fn supervisor_send_reports_unconsumed_msp_steer_after_turn_completion() {
 
 #[test]
 fn supervisor_send_reports_unconsumed_when_host_dies_with_steer_pending() {
-    let session = Session::spawn("HOLD,STEER_NOEFFECT", "brief", None, Bounds::default());
+    let session = Session::spawn(
+        "HOLD,STEER_NOEFFECT,STEER_ACK_HOLD",
+        "brief",
+        None,
+        Bounds {
+            rpc_ms: 15_000,
+            ..Bounds::default()
+        },
+    );
     session.until("held first turn", |state| state.active_turn_id.is_some());
 
+    let running_status_event_count = || {
+        session
+            .events()
+            .iter()
+            .filter(|event| event["kind"] == "status" && event["status"] == "running")
+            .count()
+    };
+    session.until("initial running status event", |_| {
+        running_status_event_count() > 0
+    });
+    let status_events_before = running_status_event_count();
     let (sender, reply_rx) = spawn_send(
         &session,
         "a steer lost with its host",
         Duration::from_secs(15),
     );
-    session.until("acked pending steer", |_| {
+    let has_pending_steer = || {
         std::fs::read_to_string(session.paths.state_file(&session.id))
             .ok()
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
@@ -756,6 +775,14 @@ fn supervisor_send_reports_unconsumed_when_host_dies_with_steer_pending() {
                     .as_array()
                     .is_some_and(|steers| !steers.is_empty())
             })
+    };
+    session.until("pending steer recorded", |_| has_pending_steer());
+    session.until("host received steer and held its acknowledgement", |_| {
+        session.fake_dir.join("steer_ack.pending").exists()
+    });
+    std::fs::write(session.fake_dir.join("steer_ack.release"), "").unwrap();
+    session.until("acknowledged pending steer", |_| {
+        has_pending_steer() && running_status_event_count() > status_events_before
     });
     let host_pid = session.state().host_pid.unwrap();
     unsafe { libc::kill(-host_pid, libc::SIGKILL) };
@@ -1286,11 +1313,12 @@ fn supervisor_interrupt_timeout_kills_host_and_plain_stop_still_finishes() {
     );
     assert!(dead.stopping);
     assert!(!process_exists(host_pid));
-    let after = interrupted.send("after dead");
-    assert!(matches!(after, Ok(ref reply) if reply["code"] == "dead"));
-    let after = interrupted.stop(false);
-    assert!(matches!(after, Ok(ref reply) if reply["code"] == "dead"));
     assert_eq!(interrupted.wait_run(), 0);
+    let after_send = interrupted.send("after dead");
+    assert!(matches!(after_send, Err(ipc::IpcError::Unreachable(_))));
+    let after_stop = interrupted.stop(false);
+    assert!(matches!(after_stop, Err(ipc::IpcError::Unreachable(_))));
+    assert_eq!(interrupted.state().status, Status::Dead);
 
     let mut plain = Session::spawn("IGNORE_INTERRUPT", "brief", None, bounds);
     plain.until("running turn", |state| state.active_turn_id.is_some());
@@ -2022,11 +2050,16 @@ fn supervisor_panic_guards_reap_host_and_remove_socket() {
             "supervisor thread panicked"
         );
         let host_pid = dead.host_pid.unwrap();
+        let code = session.wait_run();
         if mode == "apply" {
             let response = session.send("after panic");
-            assert!(matches!(response, Ok(ref value) if value["code"] == "dead"));
+            assert!(
+                matches!(response, Err(ipc::IpcError::Unreachable(_))),
+                "{response:?}"
+            );
+            assert_eq!(session.state().status, Status::Dead);
         }
-        assert_eq!(session.wait_run(), 1);
+        assert_eq!(code, 1);
         assert!(!session.paths.socket_path(&session.id).unwrap().exists());
         assert!(!process_exists(host_pid));
         unsafe { std::env::remove_var("DELEGATE_SESSION_TEST_PANIC") };

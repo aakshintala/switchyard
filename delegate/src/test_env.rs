@@ -106,7 +106,10 @@ mod tests {
         use std::sync::{TryLockError, mpsc};
         use std::time::Duration;
         const JOB_DIR: &str = "DELEGATE_JOBS_DIR";
-        const WAIT: Duration = Duration::from_secs(2);
+        // Channels bound waits for the process-wide ENV_LOCK and lock-acquisition
+        // checks without assuming that either test thread is scheduled promptly
+        // under suite-wide load.
+        const WAIT: Duration = Duration::from_secs(30);
         let (held_tx, held_rx) = mpsc::channel::<()>();
         let (contended_tx, contended_rx) = mpsc::channel::<()>();
         let (done_tx, done_rx) = mpsc::channel::<()>();

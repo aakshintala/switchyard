@@ -258,6 +258,9 @@ def handle(frame, raw_line=None):
             if "STEER_ACK_HOLD" in SCENARIOS:
                 hold_steer_ack()
             frames = [response(request_id, {"commandId": command_id, "status": "accepted", "turnId": ACTIVE_TURN})]
+            if "STEER_ACK_HOLD" in SCENARIOS:
+                # The supervisor processes this event after resolving the RPC ack.
+                frames.append(event("session/statusChanged", {"sessionId": SESSION_ID, "status": "running"}))
             if "STEER_NOEFFECT" not in SCENARIOS and ACTIVE_TURN is not None:
                 frames.append(
                     event(

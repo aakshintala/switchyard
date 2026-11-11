@@ -25,7 +25,9 @@ const TOOL_STREAM: &str = concat!(
     "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1}}\n",
 );
 
-const FAKE_CODEX: &str = r#"#!/bin/sh
+const FAKE_CODEX: &str = r##"#!/bin/sh
+# Keep macOS's first-exec scan out of the test's startup budget.
+if [ "${DELEGATE_TEST_CODEX_WARMUP:-}" = 1 ]; then exit 0; fi
 # Replays a synthetic `codex exec --json` stream. Every invocation appends its
 # argv and captures its stdin bytes exactly, so run + resume assertions can
 # read both.
@@ -100,7 +102,7 @@ fi
 # while stdout carries the JSONL.
 printf 'codex-stderr-marker\n' >&2
 exit "${DELEGATE_TEST_CODEX_EXIT:-0}"
-"#;
+"##;
 
 struct Env {
     dir: PathBuf,
@@ -120,6 +122,14 @@ impl Env {
         let agent = dir.join("codex.sh");
         std::fs::write(&agent, FAKE_CODEX).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = Command::new(&agent)
+            .env("DELEGATE_TEST_CODEX_WARMUP", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "fake Codex executable warm-up failed");
         std::fs::write(dir.join("fixture.jsonl"), FIXTURE).unwrap();
         Env {
             dir,
