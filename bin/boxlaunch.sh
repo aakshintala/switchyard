@@ -289,6 +289,28 @@ if [ -z "$jid" ]; then
 fi
 printf '%s\n' "$launchout"
 printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" box "$sess" "$jid" >> "$run/roster"
+# Once the next phase has a confirmed launch, retire the latest roster entry
+# from the phase it replaces. lanecheck done needs the exact session name; phase
+# launches include a unique suffix, so pass the name recorded in the roster.
+previous_phase=""
+case "$ph" in
+  phase-build) previous_phase=plan;;
+  phase-ship) previous_phase=build;;
+esac
+if [ -n "$previous_phase" ]; then
+  previous_base=fiber-$n-$previous_phase
+  previous_sess=$(awk -F'\t' -v ticket="$n" -v base="$previous_base" \
+    '$2 == ticket && ($4 == base || index($4, base "-") == 1) { sess=$4 }
+     END { print sess }' "$run/roster")
+  if [ -n "$previous_sess" ]; then
+    lanecheck=${FW_BOX_LANECHECK:-$script_dir/lanecheck}
+    # The successful handoff confirms this phase is finished, even if its row
+    # is young; lanecheck still refuses to stop a session with active work.
+    if ! FW_RUN="$run" FW_DONE_FORCE=1 bash "$lanecheck" done "$n:$previous_sess"; then
+      echo "boxlaunch: WARNING could not retire $previous_sess; manually run: FW_DONE_FORCE=1 FW_RUN='$run' bash '$lanecheck' done '$n:$previous_sess'" >&2
+    fi
+  fi
+fi
 # The lane is already running, so a failed sync must not read as a failed
 # launch (a caller would relaunch). Name it and the command that repairs it.
 sync_roster || echo "boxlaunch: WARNING roster not synced to $host; box fence-grant exits 3 until bash bin/box-push.sh $n succeeds" >&2
