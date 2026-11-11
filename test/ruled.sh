@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A ruling with an unresolved session-send disposition waits for idle, then retries once.
+# A ruling waits for idle, then resends only when event history says it was not delivered.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 BIN="$here/../bin"
@@ -24,7 +24,27 @@ case "${1:-} ${2:-}" in
     printf '%s\n' "$n" >"$SEND_COUNT"
     cat >"$T/send-$n"
     printf 'send-%s\n' "$n" >>"$EVENTS"
-    if [ "$n" -eq 1 ]; then echo "$FIRST_DISPOSITION"; else echo started; fi
+    if [ "$n" -eq 1 ]; then
+      printf '{"ok":true,"disposition":"%s","commandId":"%s"}\n' \
+        "$FIRST_DISPOSITION" "$COMMAND_ID"
+    else
+      echo '{"ok":true,"disposition":"started"}'
+    fi
+    ;;
+  "session logs")
+    printf 'logs\n' >>"$EVENTS"
+    case "$EVENT_OUTCOME" in
+      consumed)
+        printf '{"ok":true,"lines":[{"kind":"user","commandId":"%s"},{"kind":"steer.replayed","commandIds":["%s"]}]}\n' \
+          "$COMMAND_ID" "$COMMAND_ID"
+        ;;
+      unconsumed)
+        printf '{"ok":true,"lines":[{"kind":"steer.unconsumed","commandIds":["%s"]}]}\n' \
+          "$COMMAND_ID"
+        ;;
+      missing) echo '{"ok":true,"lines":[]}' ;;
+      *) echo "unexpected event outcome: $EVENT_OUTCOME" >&2; exit 2 ;;
+    esac
     ;;
   *) echo "unexpected delegate call: $*" >&2; exit 2 ;;
 esac
@@ -34,17 +54,37 @@ cat >"$T/stub/ssh" <<'STUB'
 set -euo pipefail
 command=${!#}
 case "$command" in
-  *'session watch '*)
+  *'session watch '* )
     printf 'watch\n' >>"$EVENTS"
     echo idle
     ;;
-  *'session send '*)
+  *'session send '* )
     n=$(cat "$SEND_COUNT")
     n=$((n + 1))
     printf '%s\n' "$n" >"$SEND_COUNT"
     cat >"$T/send-$n"
     printf 'send-%s\n' "$n" >>"$EVENTS"
-    if [ "$n" -eq 1 ]; then echo "$FIRST_DISPOSITION"; else echo started; fi
+    if [ "$n" -eq 1 ]; then
+      printf '{"ok":true,"disposition":"%s","commandId":"%s"}\n' \
+        "$FIRST_DISPOSITION" "$COMMAND_ID"
+    else
+      echo '{"ok":true,"disposition":"started"}'
+    fi
+    ;;
+  *'session logs '* )
+    printf 'logs\n' >>"$EVENTS"
+    case "$EVENT_OUTCOME" in
+      consumed)
+        printf '{"ok":true,"lines":[{"kind":"user","commandId":"%s"},{"kind":"steer.replayed","commandIds":["%s"]}]}\n' \
+          "$COMMAND_ID" "$COMMAND_ID"
+        ;;
+      unconsumed)
+        printf '{"ok":true,"lines":[{"kind":"steer.unconsumed","commandIds":["%s"]}]}\n' \
+          "$COMMAND_ID"
+        ;;
+      missing) echo '{"ok":true,"lines":[]}' ;;
+      *) echo "unexpected event outcome: $EVENT_OUTCOME" >&2; exit 2 ;;
+    esac
     ;;
   *) echo "unexpected ssh call: $*" >&2; exit 2 ;;
 esac
@@ -56,7 +96,7 @@ failures=0
 fail() { echo "FAIL $1" >&2; failures=$((failures + 1)); }
 
 run_case() {
-  local route=$1 disposition=$2 ticket run ruling sid output rc count
+  local route=$1 disposition=$2 outcome=$3 resend=$4 ticket run ruling sid output rc count expected_events expected_count
   case_number=$((case_number + 1))
   ticket=$((5100 + case_number))
   sid="session-$case_number"
@@ -68,7 +108,9 @@ run_case() {
     "$ticket" "$route" "fiber-$ticket-build" "$sid" >"$run/roster"
   printf '0\n' >"$T/count-$case_number"
   : >"$T/events-$case_number"
-  export T SESSION_ID="$sid" FIRST_DISPOSITION="$disposition"
+  export T SESSION_ID="$sid" FIRST_DISPOSITION="$disposition" EVENT_OUTCOME="$outcome"
+  COMMAND_ID="command-$case_number"
+  export COMMAND_ID
   export SEND_COUNT="$T/count-$case_number" EVENTS="$T/events-$case_number"
   if [ "$route" = mac ]; then
     output=$(HOME="$T/home" FW_RUN="$run" FW_NO_BOX_PUSH=1 \
@@ -80,21 +122,39 @@ run_case() {
       bash "$BIN/ruled.sh" "$ticket" "$ruling" 2>&1) && rc=0 || rc=$?
   fi
   count=$(cat "$SEND_COUNT")
-  if [ "$rc" -ne 0 ] || [ "$count" -ne 2 ] \
-      || [ "$(cat "$EVENTS")" != $'send-1\nwatch\nsend-2' ] \
-      || ! printf '%s\n' "$output" | grep -q "send returned $disposition; waiting for $sid to go idle" \
-      || ! printf '%s\n' "$output" | grep -q 'lane is idle; resending ruling once as a fresh turn' \
-      || ! printf '%s\n' "$output" | grep -q 'resent once after idle:' \
-      || [ "$(cat "$T/send-1")" != "RULING-$ticket" ] \
-      || [ "$(cat "$T/send-2")" != "RULING-$ticket" ]; then
-    fail "$route $disposition waits for idle and resends once (rc=$rc count=$count events=$(cat "$EVENTS") output=$output)"
+  if [ "$disposition" = unconfirmed ]; then
+    if [ "$resend" = yes ]; then
+      expected_count=2
+      expected_events=$'send-1\nwatch\nlogs\nsend-2'
+      if [ "$outcome" = unconsumed ]; then
+        grep -q 'events confirm unconsumed commandId .*; resending once' <<<"$output" || fail "$route $disposition $outcome reports confirmed drop"
+      else
+        grep -q 'commandId is absent from delivery events; resending once' <<<"$output" || fail "$route $disposition $outcome reports missing event"
+      fi
+    else
+      expected_count=1
+      expected_events=$'send-1\nwatch\nlogs'
+      grep -q 'delivery event confirms commandId .*; not resending' <<<"$output" || fail "$route $disposition $outcome reports no resend"
+    fi
   else
-    echo "ok $route-$disposition-waits-and-resends-once"
+    expected_count=2
+    expected_events=$'send-1\nwatch\nsend-2'
+    grep -q 'unconsumed; resending once as a fresh turn' <<<"$output" || fail "$route immediate unconsumed reports resend"
+  fi
+  if [ "$rc" -ne 0 ] || [ "$count" -ne "$expected_count" ] \
+      || [ "$(cat "$EVENTS")" != "$expected_events" ] \
+      || [ "$(cat "$T/send-1")" != "RULING-$ticket" ] \
+      || { [ "$resend" = yes ] && [ "$(cat "$T/send-2")" != "RULING-$ticket" ]; }; then
+    fail "$route $disposition $outcome resend=$resend (rc=$rc count=$count events=$(cat "$EVENTS") output=$output)"
+  else
+    echo "ok $route-$disposition-$outcome-resend-$resend"
   fi
 }
 
-run_case mac unconsumed
-run_case mac unconfirmed
-run_case muse unconsumed
-run_case muse unconfirmed
+for route in mac muse; do
+  run_case "$route" unconfirmed consumed no
+  run_case "$route" unconfirmed unconsumed yes
+  run_case "$route" unconfirmed missing yes
+  run_case "$route" unconsumed ignored yes
+done
 [ "$failures" -eq 0 ]

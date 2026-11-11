@@ -65,7 +65,7 @@ impl Harness {
             scenario,
             cassette,
             extra_env,
-            Duration::from_secs(20),
+            Duration::from_secs(10),
         )
     }
 
@@ -571,7 +571,7 @@ fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
         true,
         "OK",
         Some(&cassette()),
-        &[],
+        &[("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100")],
     );
     assert!(
         started.status.success(),
@@ -702,7 +702,14 @@ fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
 #[test]
 fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
     let h = Harness::new();
-    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "HOLD_TOOL", None, &[]);
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_TOOL",
+        None,
+        &[("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100")],
+    );
     assert!(
         started.status.success(),
         "{}",
@@ -716,6 +723,9 @@ fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
     assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
+    let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(reply["commandId"], pending[0]["commandId"], "{reply}");
 
     let requests = h.requests();
     let steer_at = requests
@@ -782,7 +792,7 @@ fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
         true,
         "HOLD_REPLAY,REPLAY_UNCONSUMED",
         None,
-        &[],
+        &[("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100")],
     );
     assert!(
         started.status.success(),
@@ -915,7 +925,10 @@ fn pi_clears_queued_steers_before_a_late_continuation_can_start() {
         true,
         "HOLD_TOOL,NO_CONTINUATION,LATE_CONTINUATION",
         None,
-        &[("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS", "150")],
+        &[
+            ("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS", "150"),
+            ("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100"),
+        ],
     );
     assert!(
         started.status.success(),
@@ -990,10 +1003,13 @@ fn stopping_during_pi_continuation_wait_does_not_publish_idle() {
         true,
         "HOLD_TOOL,NO_CONTINUATION",
         None,
-        &[(
-            "DELEGATE_SESSION_TEST_CONTINUATION_WAIT_FILE",
-            continuation_wait_marker_env,
-        )],
+        &[
+            (
+                "DELEGATE_SESSION_TEST_CONTINUATION_WAIT_FILE",
+                continuation_wait_marker_env,
+            ),
+            ("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100"),
+        ],
     );
     assert!(
         started.status.success(),
@@ -1053,6 +1069,7 @@ fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
         "HOLD_REPLAY,REPLAY_MIXED",
         None,
         &[
+            ("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100"),
             (
                 "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL",
                 release_event_write_env,
@@ -1377,7 +1394,14 @@ fn interrupt_during_pending_replay_cancels_without_starting_replay() {
 #[test]
 fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
     let h = Harness::new();
-    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "HOLD_TOOL", None, &[]);
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_TOOL",
+        None,
+        &[("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100")],
+    );
     assert!(
         started.status.success(),
         "{}",
@@ -1681,6 +1705,7 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
         "STEER_RACE",
         None,
         &[
+            ("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100"),
             (
                 "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL",
                 release_event_write_env,

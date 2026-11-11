@@ -37,6 +37,14 @@ pub const PI_BOOT_WAIT: u64 = 30_000;
 // debt: measure the post-agent_settled host TurnStarted gap; upgrade if steer.unconsumed is followed by a late continuation.
 pub const PI_CONTINUATION_WAIT: u64 = 30_000;
 
+fn steer_reply_wait() -> Duration {
+    std::env::var("DELEGATE_SESSION_STEER_REPLY_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(STEER_REPLY_WAIT))
+}
+
 fn pi_continuation_wait() -> Duration {
     std::env::var("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS")
         .ok()
@@ -86,7 +94,7 @@ impl SupervisorConfig {
             rpc_timeout: Duration::from_millis(RPC_TIMEOUT),
             steer_settle: Duration::from_millis(STEER_SETTLE),
             pi_continuation_wait: pi_continuation_wait(),
-            steer_reply_wait: Duration::from_millis(STEER_REPLY_WAIT),
+            steer_reply_wait: steer_reply_wait(),
             interrupt_wait: Duration::from_millis(INTERRUPT_WAIT),
             stop_grace: grace_ms
                 .map(Duration::from_millis)
@@ -1452,7 +1460,7 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
             let resolution =
                 wait_for_steer_resolution(shared, &command_id, shared.config.steer_reply_wait);
             let disposition = steer_resolution_disposition(resolution);
-            json!({"ok":true,"disposition":disposition})
+            json!({"ok":true,"disposition":disposition,"commandId":command_id})
         }
         Err(CallFailure::Rpc(error)) => {
             drop_steer(shared, &command_id);
