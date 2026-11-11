@@ -39,6 +39,14 @@ def hold_start():
         time.sleep(0.01)
 
 
+def hold_steer_refusal_after_completion():
+    write_file("steer-refusal-completed.pending", "")
+    release_path = os.path.join(FAKE_DIR, "steer-refusal-completed.release")
+    deadline = time.monotonic() + 10
+    while not os.path.exists(release_path) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 def hold_steer_ack():
     write_file("steer_ack.pending", "")
     release_path = os.path.join(FAKE_DIR, "steer_ack.release")
@@ -193,7 +201,7 @@ def start_turn(frame):
     if "IDLE_EARLY" in features:
         send_frames(event("session/statusChanged", {"sessionId": SESSION_ID, "status": "idle"}))
         return
-    if any(flag in features for flag in ("HOLD", "HOLD_INTERRUPT", "STEERREFUSE", "STEERREFUSE_HOLD", "IGNORE_INTERRUPT")):
+    if any(flag in features for flag in ("HOLD", "HOLD_INTERRUPT", "STEERREFUSE", "STEERREFUSE_HOLD", "STEERREFUSE_COMPLETION_FIRST", "IGNORE_INTERRUPT")):
         if "STEERREFUSE" in features or "STEERREFUSE_HOLD" in features:
             ACTIVE_SCENARIOS |= {"STEERREFUSE"} if "STEERREFUSE" in features else set()
         return
@@ -233,7 +241,14 @@ def handle(frame, raw_line=None):
         start_turn(frame)
     elif method == "turn/steer":
         command_id = params.get("commandId")
-        if "STEERREFUSE" in SCENARIOS or "STEERREFUSE_HOLD" in SCENARIOS:
+        if "STEERREFUSE_COMPLETION_FIRST" in SCENARIOS:
+            if ACTIVE_TURN is not None:
+                completed_turn = ACTIVE_TURN
+                ACTIVE_TURN = None
+                send_frames(event("turn/completed", {"turnId": completed_turn, "terminal": "completed"}))
+                hold_steer_refusal_after_completion()
+            send_frames(error_response(request_id, "turn already ended"))
+        elif "STEERREFUSE" in SCENARIOS or "STEERREFUSE_HOLD" in SCENARIOS:
             frames = [error_response(request_id, "turn already ended")]
             if "STEERREFUSE_HOLD" not in SCENARIOS and ACTIVE_TURN is not None:
                 frames.append(event("turn/completed", {"turnId": ACTIVE_TURN, "terminal": "completed"}))
