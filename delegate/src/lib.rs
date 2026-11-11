@@ -3,6 +3,7 @@
 #![allow(clippy::type_complexity, clippy::large_enum_variant)]
 
 pub mod backends;
+pub mod build_info;
 pub mod cli;
 pub mod cli_info;
 pub mod config;

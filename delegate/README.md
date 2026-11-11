@@ -25,7 +25,8 @@ You need Rust (`cargo`), and `cursor-agent` on PATH with `cursor-agent login` be
 | `delegate status <jobId>` | Print the job's state without waiting; show its caller and add a short same-line summary of available result text and changes for finished jobs. |
 | `delegate ack <jobId>...` | Mark one or more job reports as read. |
 | `delegate models` | List configured model ids, labels, backends, prices, and tiers. Rows are sorted by backend, then by id; `*` marks the default. |
-| `delegate doctor` | Check configured backend binaries, login state, the Fiber hub socket, and model menu drift. |
+| `delegate doctor` | Check configured backend binaries, login state, the Fiber hub socket, model menu drift and whether this binary is stale against `~/.agents`. |
+| `delegate version` | Print the package version, embedded build commit and delegate checkout freshness. |
 | `delegate session start` | Start a detached Muse or pi session from a brief. |
 | `delegate session send` | Start a turn or steer the active turn. |
 | `delegate session logs` | Read session events, optionally following them. |
