@@ -86,10 +86,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            send_json(self, {
+            models_dev = {
                 "anthropic": {"models": {
                     "claude-shared": {"limit": {"context": 1000, "output": 100}, "cost": {"input": 1, "output": 2}, "deprecated": False},
                     "claude-gone": {"limit": {"context": 512}},
+                    "claude-alias": {},
                 }},
                 "openai": {"models": {
                     "openai-a": {"limit": {"context": 2048}},
@@ -101,20 +102,59 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "openrouter": {"models": {"router-one": {"cost": {"input": 0.15, "output": 0.25}}}},
                 "databricks": {"models": {"db-one": {}, "db-embed": {}}},
                 "muse": {"models": {"muse-one": {}}},
-            })
+            }
+            if self.mode == "anthropic-dated":
+                models_dev["anthropic"]["models"].update({
+                    "claude-opus-4-5": {"limit": {"context": 100}},
+                    "claude-opus-4-5-20251101": {"limit": {"context": 300, "output": 30}},
+                })
+            elif self.mode == "dated":
+                models_dev["openai"]["models"].update({
+                    "dated-dash": {},
+                    "dated-compact": {},
+                    "dated-both": {"limit": {"context": 100}},
+                    "dated-both-2026-05-04": {"limit": {"context": 300}},
+                    "dated-latest": {"limit": {"context": 200}},
+                    "exact-only-2026-05-04": {"limit": {"context": 100}},
+                })
+            elif self.mode == "pricing":
+                models_dev["openrouter"]["models"].update({
+                    "router-window": {"cost": {"input": 0.4, "output": 0.5}},
+                    "router-mismatch": {"cost": {"input": 0.6, "output": 0.7}},
+                    "router-tier": {"cost": {"input": 0.4, "output": 0.5}},
+                })
+            send_json(self, models_dev)
         elif path == "/anthropic/v1/models":
-            if self.mode == "clean":
+            if self.mode == "anthropic-dated":
+                send_json(self, {"data": [
+                    {"id": "claude-opus-4-5-20251101", "context_window": 200, "max_tokens": 20},
+                ]})
+            elif self.mode == "clean":
                 send_json(self, {"data": [
                     {"id": "claude-shared", "context_window": 1000, "max_tokens": 100, "input_price": 1, "output_price": 2, "deprecated": False},
                     {"id": "claude-gone", "context_window": 512},
+                    {"id": "claude-alias"},
                 ]})
             else:
                 send_json(self, {"data": [
                     {"id": "claude-shared", "context_window": 1200, "max_tokens": 99, "input_price": 1.5, "output_price": 2.5, "deprecated": True},
                     {"id": "claude-extra", "context_window": 256},
+                    {"id": "claude-alias-20260504"},
                 ]})
         elif path == "/openai/v1/models":
-            if "after=page-one" in self.path:
+            if self.mode == "dated":
+                send_json(self, {"data": [
+                    {"id": "dated-dash-2026-05-04"},
+                    {"id": "dated-compact-20260504"},
+                    {"id": "dated-both", "context_window": 100},
+                    {"id": "dated-both-2026-05-04", "context_window": 200},
+                    # Newest comes first to make selection independent of catalog order.
+                    {"id": "dated-latest-20260504", "context_window": 200},
+                    {"id": "dated-latest-2026-05-03", "context_window": 100},
+                    {"id": "exact-only-2026-05-04", "context_window": 200},
+                    {"id": "chat-latest"},
+                ]})
+            elif "after=page-one" in self.path:
                 send_json(self, {"data": [{"id": "openai-b"}, {"id": "codex-one"}, {"id": "text-embedding-3-small"}], "has_more": False})
             else:
                 send_json(self, {"data": [{"id": "openai-a"}], "has_more": True, "last_id": "page-one"})
@@ -130,6 +170,21 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif path == "/openrouter/api/v1/models":
             if self.mode == "gaps":
                 send_json(self, {"error": "not authorized"}, status=401)
+            elif self.mode == "variants":
+                send_json(self, {"data": [{"id": "x:batch"}, {"id": "plain-unknown"}]})
+            elif self.mode == "pricing":
+                send_json(self, {"data": [
+                    {"id": "router-one", "pricing": {"prompt": "0.00000015", "completion": "0.00000025"}},
+                    {"id": "router-window", "pricing": {
+                        "prompt": "0.0000001", "completion": "0.0000002",
+                        "overrides": [{"utc_start": "00:00", "utc_end": "12:00", "prompt": "0.0000004", "completion": "0.0000005"}],
+                    }},
+                    {"id": "router-mismatch", "pricing": {"prompt": "0.0000001", "completion": "0.0000002"}},
+                    {"id": "router-tier", "pricing": {
+                        "prompt": "0.0000001", "completion": "0.0000002",
+                        "overrides": [{"min_prompt_tokens": 100000, "prompt": "0.0000004", "completion": "0.0000005"}],
+                    }},
+                ]})
             else:
                 send_json(self, {"data": [{"id": "router-one", "pricing": {"prompt": "0.00000015000000000000002", "completion": "0.00000025"}}]})
         elif path == "/databricks/api/2.0/serving-endpoints":
@@ -235,6 +290,7 @@ try:
     for field, vendor_value, reference_value in (("output", "99", "100"), ("input_price", "1.5", "1"), ("output_price", "2.5", "2"), ("deprecated", "True", "False")):
         expect(f"| claude-shared | mismatch | {field} | {vendor_value} | {reference_value} |" in report, f"{field} mismatch missing")
     expect("| claude-gone | gone |" in report, "gone row missing")
+    expect("| claude-alias |" not in report, "dated Anthropic alias produced a row")
     expect("openrouter: HTTP 401" in report, "401 skip missing")
     expect("muse: no credential" in report, "missing credential skip missing")
     expect("| codex-extra | missing |" in report, "codex missing row was not reported")
@@ -273,6 +329,48 @@ try:
     refused_report = (refused_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
     expect("muse: connection refused" in refused_report, "connection-refused skip missing")
     assert_no_secrets(refused_report, result.stdout, result.stderr)
+
+    # OpenRouter variants are not catalog models, while ordinary unknown IDs remain visible.
+    variants_inbox = temp_root / "inbox-variants"
+    variants_result, _ = run_case("variants", True, variants_inbox, mode="variants")
+    expect(variants_result.returncode == 0, f"variants run failed: {variants_result.stderr}")
+    variants_report = (variants_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("| x:batch |" not in variants_report, "OpenRouter variant was reported")
+    expect("| plain-unknown | missing |" in variants_report, "plain unknown OpenRouter ID was not reported")
+
+    # Date-stamped IDs match an undated catalog entry for any vendor, but exact dated
+    # entries still compare when the undated model is absent.
+    dated_inbox = temp_root / "inbox-dated"
+    dated_result, _ = run_case("dated", True, dated_inbox, mode="dated")
+    expect(dated_result.returncode == 0, f"dated run failed: {dated_result.stderr}")
+    dated_report = (dated_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("| dated-dash-2026-05-04 |" not in dated_report, "dashed date alias produced a row")
+    expect("| dated-dash |" not in dated_report, "dashed date alias left its undated base gone")
+    expect("| dated-compact-20260504 |" not in dated_report, "compact date alias produced a row")
+    expect("| dated-compact |" not in dated_report, "compact date alias left its undated base gone")
+    expect("| dated-both-2026-05-04 | mismatch | context | 200 | 300 |" in dated_report, "exact dated model alongside its base was not compared")
+    expect("| dated-latest |" not in dated_report, "latest dated model was not selected deterministically")
+    expect("| exact-only-2026-05-04 | mismatch | context | 200 | 100 |" in dated_report, "exact dated model was not compared normally")
+    expect("| chat-latest | missing |" in dated_report, "undated unknown OpenAI ID was not reported missing")
+
+    # An exact dated Anthropic model compares normally without marking its undated
+    # models.dev alias as gone.
+    anthropic_dated_inbox = temp_root / "inbox-anthropic-dated"
+    anthropic_dated_result, _ = run_case("anthropic-dated", True, anthropic_dated_inbox, mode="anthropic-dated")
+    expect(anthropic_dated_result.returncode == 0, f"Anthropic dated run failed: {anthropic_dated_result.stderr}")
+    anthropic_dated_report = (anthropic_dated_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("| claude-opus-4-5 | gone |" not in anthropic_dated_report, "undated Anthropic alias was reported gone")
+    expect("| claude-opus-4-5-20251101 | mismatch | context | 200 | 300 |" in anthropic_dated_report, "exact dated Anthropic context was not compared")
+    expect("| claude-opus-4-5-20251101 | mismatch | output | 20 | 30 |" in anthropic_dated_report, "exact dated Anthropic output was not compared")
+
+    # OpenRouter prices may match a time-window override; without overrides, mismatches remain.
+    pricing_inbox = temp_root / "inbox-pricing"
+    pricing_result, _ = run_case("pricing", True, pricing_inbox, mode="pricing")
+    expect(pricing_result.returncode == 0, f"pricing run failed: {pricing_result.stderr}")
+    pricing_report = (pricing_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("| router-window |" not in pricing_report, "matching OpenRouter override price produced a row")
+    expect(re.search(r"\| router-mismatch \| mismatch \| input_price \| [^|]+ \| 0\.6 \|", pricing_report), "OpenRouter price mismatch without overrides was not reported")
+    expect(re.search(r"\| router-tier \| mismatch \| input_price \| [^|]+ \| 0\.4 \|", pricing_report), "long-context tier price was treated as an alternative price")
 
     # A 30x is refused, not followed, so a credential header never reaches the redirect target.
     redirect_inbox = temp_root / "inbox-redirect"
