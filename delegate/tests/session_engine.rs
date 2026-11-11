@@ -1001,7 +1001,7 @@ fn supervisor_retries_refused_steer_when_completion_precedes_refusal_reply() {
         "retry after completed turn",
         Duration::from_secs(5),
     );
-    session.until("completion before refusal reply", |state| {
+    let completed = session.until("completion before refusal reply", |state| {
         completion_pending.exists()
             && state.status == Status::Running
             && state.active_turn_id.is_none()
@@ -1030,6 +1030,21 @@ fn supervisor_retries_refused_steer_when_completion_precedes_refusal_reply() {
         starts.last().unwrap()["params"]["input"][0]["text"],
         "retry after completed turn"
     );
+    // The replay thread blocked on admission must find the retried turn, not
+    // publish Idle over it: the turn/start ack lands before the reply.
+    let first_turn = completed.last_turn.unwrap().turn_id;
+    session.until("retried turn owns the session", |state| {
+        let retried_active = state.status == Status::Running
+            && state
+                .active_turn_id
+                .as_ref()
+                .is_some_and(|turn| *turn != first_turn);
+        let retried_done = state
+            .last_turn
+            .as_ref()
+            .is_some_and(|turn| turn.turn_id != first_turn && turn.terminal == "completed");
+        retried_active || retried_done
+    });
     assert_eq!(session.stop_and_join(), 0);
 }
 

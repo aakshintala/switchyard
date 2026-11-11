@@ -1116,6 +1116,14 @@ fn handle_event(shared: &Arc<Shared>, event: HostEvent, raw_line: &str) {
     }
 }
 
+/// A completed turn left the session Running for replay_pending_steers, but no
+/// steer is left to replay.
+fn turn_ended_with_no_replay(state: &state::State) -> bool {
+    state.status == Status::Running
+        && state.active_turn_id.is_none()
+        && state.pending_steers.is_empty()
+}
+
 fn finish_replay_pending_state(state: &mut state::State, now: u64) -> bool {
     if state.status != Status::Running || state.active_turn_id.is_some() {
         return false;
@@ -1459,25 +1467,20 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
             // Running without an active turn while replay_pending_steers waits on
             // our admission lock. Once this steer is removed, settle that state
             // here so we can retry without opening admission to another sender.
+            // The waiting replay thread can't then see this turn as missing: the
+            // reader applies the turn/start ack (apply_ack) before start_turn
+            // returns, so active_turn_id is set before we release admission.
             if shared
                 .store
                 .wait_until(
-                    |state| {
-                        state.status == Status::Idle
-                            || (state.status == Status::Running
-                                && state.active_turn_id.is_none()
-                                && state.pending_steers.is_empty())
-                    },
+                    |state| state.status == Status::Idle || turn_ended_with_no_replay(state),
                     shared.config.steer_settle,
                 )
                 .is_some()
             {
                 let mut started = false;
                 if update_store(shared, |state| {
-                    if state.status == Status::Running
-                        && state.active_turn_id.is_none()
-                        && state.pending_steers.is_empty()
-                    {
+                    if turn_ended_with_no_replay(state) {
                         finish_replay_pending_state(state, now_ms());
                     }
                     started = state::begin_turn(state, now_ms());
