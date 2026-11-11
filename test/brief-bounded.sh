@@ -27,9 +27,12 @@ fail_over_budget() {
 # switchyard's choice, not flywheel's measurement.
 # Real pi briefs include notes and EXTRA; fiber #4618's brief was 36313 B. This
 # fixture bounds the filled template, not the full brief lanes read.
-# Flywheel ruled on PR #1583 that no dropped rule outranks 1 KiB headroom. Restore
-# rules and tighten wording first; if actual headroom remains below 1 KiB, round
-# the assertion down to a clean value. The restored pi template leaves 256 B.
+# Pi headroom is 256 B, not #1575's 1 KiB, by flywheel's peer-read ruling
+# (https://github.com/aakshintala/switchyard/pull/1583#issuecomment-6786694697):
+# "#1575's "no rule dropped" outranks its 1 KiB headroom. If restoring the
+# rules leaves less than 1 KiB, find the bytes elsewhere without dropping a
+# rule, or ship with whatever headroom is left and say so in the PR body."
+# With every rule restored, the pi template leaves 256 B.
 BRIEF_MAX_BYTES=33280
 BRIEF_MAX_LINES=125
 PI_HEADROOM_BYTES=256
