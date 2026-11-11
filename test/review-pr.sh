@@ -517,7 +517,7 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-printf 'fence=bin/review-pr\nfence=test/review-pr.sh\n' >"$T/review-state"
+printf 'fence=bin/review-pr\nfence=test/review-pr.sh\noutside_plan=src/outside-a.rs\noutside_plan=src/outside-b.rs\n' >"$T/review-state"
 start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --issue 3 --spec 2 \
   --state "$T/review-state" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "prefetch review start exits 0"
 for role in standards spec overbuild; do
@@ -546,6 +546,10 @@ for n in 1 3 2; do
   cmp -s "$T/expected-issue.md" "$issue_file" || fail "ticket #$n body precedes its comments"
   grep -Fq ".review-context/issue-$n.md" "$T/state/prompt-spec.md" || fail "spec prompt names ticket #$n file"
 done
+grep -Fq -- '- src/outside-a.rs' "$T/state/prompt-spec.md" || fail "spec brief carries the first outside-plan path"
+grep -Fq -- '- src/outside-b.rs' "$T/state/prompt-spec.md" || fail "spec brief carries the second outside-plan path"
+grep -Fq 'check each outside-plan file against the ticket: needed, or scope creep?' \
+  "$T/state/prompt-spec.md" || fail "spec brief asks whether each outside-plan file was needed"
 for n in 1 3 2; do
   issue_file="$(worktree_for overbuild)/.review-context/issue-$n.md"
   [ -f "$issue_file" ] || fail "overbuild worktree holds ticket #$n text"

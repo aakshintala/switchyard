@@ -219,6 +219,15 @@ expect_verdict() {
   esac
 }
 
+expect_stop_list_path() {
+  local path="$1"
+  grep -Fqx "$path — contract change: ask first" <<<"$OUT" \
+    || fail "stop-list names $path with contract-change instruction: [$OUT]"
+  [ "$(bash "$TKT_STATE" "$S" list outside_plan)" = "" ] \
+    || fail "stop-list does not record refused paths in outside_plan"
+  [ ! -f "$T/gate-ran" ] || fail "stop-list refusal runs no gate"
+}
+
 # --- PASS: tip matches, the fence covers the change, the gate passes ---
 setup_case pass
 write_plan
@@ -389,7 +398,7 @@ run_gate
 [ "$RC" -eq 0 ] || fail "extensionless fence-grant path passes (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-gate PASS head=* log=*" "extensionless fence-grant path"
 
-# --- FENCE: a grant file for another ticket does not cover this change ---
+# --- OUTSIDE-PLAN: a grant file for another ticket does not cover this change ---
 setup_case fence-grant-other-ticket
 write_plan
 cat >"$FW_RUN/fiber-518-fence-grant-1.md" <<'EOF'
@@ -400,12 +409,14 @@ EOF
 commit_file evil.txt "other ticket grant"
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "other-ticket fence-grant exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "other-ticket fence-grant"
-grep -qx "evil.txt" <<<"$OUT" || fail "other-ticket fence-grant does not cover evil.txt"
-[ ! -f "$T/gate-ran" ] || fail "other-ticket fence-grant runs no gate"
+[ "$RC" -eq 0 ] || fail "other-ticket fence-grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "other-ticket fence-grant"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "other-ticket grant reports outside-plan path"
+grep -qx "evil.txt" <<<"$OUT" || fail "other-ticket fence-grant reports evil.txt"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = evil.txt ] || fail "other-ticket path is recorded in state"
+[ -f "$T/gate-ran" ] || fail "other-ticket fence-grant runs the gate"
 
-# --- FENCE: a path listed only under a grant's Reads is not covered ---
+# --- OUTSIDE-PLAN: a path listed only under a grant's Reads is not covered ---
 setup_case fence-grant-reads
 write_plan
 cat >"$FW_RUN/fiber-517-fence-grant-1.md" <<'EOF'
@@ -419,27 +430,27 @@ EOF
 commit_file evil.txt "read-only change"
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "Reads-only fence-grant exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "Reads-only fence-grant"
-grep -qx "evil.txt" <<<"$OUT" || fail "Reads-only fence-grant does not cover evil.txt"
-[ ! -f "$T/gate-ran" ] || fail "Reads-only fence-grant runs no gate"
+[ "$RC" -eq 0 ] || fail "Reads-only fence-grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "Reads-only fence-grant"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "Reads-only grant reports outside-plan path"
+grep -qx "evil.txt" <<<"$OUT" || fail "Reads-only fence-grant reports evil.txt"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = evil.txt ] || fail "Reads-only path is recorded in state"
+[ -f "$T/gate-ran" ] || fail "Reads-only fence-grant runs the gate"
 
-# --- FENCE: an uncovered file runs no gate ---
+# --- OUTSIDE-PLAN: an uncovered file is reported and the gate runs ---
 setup_case fence
 write_plan
 commit_file evil.txt "evil"
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "FENCE exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "FENCE"
-grep -qx "evil.txt" <<<"$OUT" || fail "FENCE digest lists the path"
-grep -qF "tkt-state $S add fence <path>" <<<"$OUT" || fail "FENCE names the tkt-state add fence route"
-grep -qF "or a matching fence-grant Paths block" <<<"$OUT" || fail "FENCE names the matching fence-grant route"
-! grep -qF "fence-grant is not read" <<<"$OUT" || fail "FENCE drops the stale fence-grant wording"
-grep -qF "re-confirm with tkt-plan" <<<"$OUT" || fail "FENCE names the plan route"
-[ ! -f "$T/gate-ran" ] || fail "FENCE runs no gate"
+[ "$RC" -eq 0 ] || fail "OUTSIDE-PLAN exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "OUTSIDE-PLAN"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "outside-plan report counts the path"
+grep -qx "evil.txt" <<<"$OUT" || fail "outside-plan report lists the path"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = evil.txt ] || fail "outside-plan path is recorded in state"
+[ -f "$T/gate-ran" ] || fail "OUTSIDE-PLAN runs the gate"
 
-# --- FENCE lists 30 paths fully, then counts the rest ---
+# --- OUTSIDE-PLAN lists every changed path without truncation ---
 setup_case fence-many
 write_plan
 i=1
@@ -451,12 +462,13 @@ git -C "$WT" add -A
 git -C "$WT" commit -qm many
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "many FENCE exits 1"
-expect_verdict "TKT tkt-gate FENCE n=32 log=*" "many FENCE"
-[ "$(grep -c "^f[0-9]*\.txt$" <<<"$OUT")" -eq 30 ] || fail "many FENCE lists 30 paths"
-grep -qx "... and 2 more" <<<"$OUT" || fail "many FENCE counts the rest"
+[ "$RC" -eq 0 ] || fail "many OUTSIDE-PLAN exits 0"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "many OUTSIDE-PLAN"
+grep -qx "OUTSIDE-PLAN n=32" <<<"$OUT" || fail "many outside-plan report counts 32 paths"
+[ "$(grep -c '^f[0-9]*\.txt$' <<<"$OUT")" -eq 32 ] || fail "many outside-plan report lists all 32 paths"
+[ -f "$T/gate-ran" ] || fail "many outside-plan report runs the gate"
 
-# --- FENCE at the edge: 30 uncovered files list fully with no rest line ---
+# --- OUTSIDE-PLAN lists all 30 paths without an extra count line ---
 setup_case fence-thirty
 write_plan
 i=1
@@ -468,14 +480,14 @@ git -C "$WT" add -A
 git -C "$WT" commit -qm thirty
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "thirty FENCE exits 1"
-expect_verdict "TKT tkt-gate FENCE n=30 log=*" "thirty FENCE"
-[ "$(grep -c "^g[0-9]*\.txt$" <<<"$OUT")" -eq 30 ] || fail "thirty FENCE lists every path"
-grep -q "more" <<<"$OUT" && fail "thirty FENCE has no rest line"
+[ "$RC" -eq 0 ] || fail "thirty OUTSIDE-PLAN exits 0"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "thirty OUTSIDE-PLAN"
+grep -qx "OUTSIDE-PLAN n=30" <<<"$OUT" || fail "thirty outside-plan report counts 30 paths"
+[ "$(grep -c '^g[0-9]*\.txt$' <<<"$OUT")" -eq 30 ] || fail "thirty outside-plan report lists every path"
+grep -q "more" <<<"$OUT" && fail "thirty outside-plan report has no rest line"
+[ -f "$T/gate-ran" ] || fail "thirty outside-plan report runs the gate"
 
-# --- a renamed file is listed under its old path: Files covers only the new
-# --- name, so the fence fires on the old one. Without --no-renames the diff
-# --- would list moved.txt alone and pass.
+# --- OUTSIDE-PLAN: an unplanned rename is reported under its old path ---
 setup_case rename
 cat >"$CDIR/plan.md" <<'EOF'
 # Plan
@@ -493,10 +505,49 @@ git -C "$WT" mv base.txt moved.txt
 git -C "$WT" commit -qm rename
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "rename exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "rename"
-grep -qx "base.txt" <<<"$OUT" || fail "rename fence lists the old path"
-[ ! -f "$T/gate-ran" ] || fail "rename runs no gate"
+[ "$RC" -eq 0 ] || fail "rename exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "rename"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "rename reports one outside-plan path"
+grep -qx "base.txt" <<<"$OUT" || fail "rename report lists the old path"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = base.txt ] || fail "rename records the old path"
+[ -f "$T/gate-ran" ] || fail "rename runs the gate"
+
+# --- stop-list: unplanned documentation, including root and nested paths ---
+setup_case stop-docs
+write_plan
+mkdir -p "$WT/docs/guide/nested" "$WT/docs/adr"
+commit_file GLOSSARY.md "unplanned glossary"
+commit_file docs/guide/nested/guide.md "unplanned nested docs"
+commit_file docs/adr/decision.md "unplanned ADR"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "docs stop-list exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=3 log=*" "docs stop-list"
+expect_stop_list_path GLOSSARY.md
+expect_stop_list_path docs/guide/nested/guide.md
+expect_stop_list_path docs/adr/decision.md
+
+# --- stop-list: unplanned GitHub workflows ---
+setup_case stop-workflows
+write_plan
+mkdir -p "$WT/.github/workflows"
+commit_file .github/workflows/ci.yml "unplanned workflow"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "workflow stop-list exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "workflow stop-list"
+expect_stop_list_path .github/workflows/ci.yml
+
+# --- stop-list: scripts/check ---
+setup_case stop-check-script
+write_plan
+mkdir -p "$WT/scripts"
+commit_file scripts/check "unplanned check script"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "scripts/check stop-list exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "scripts/check stop-list"
+expect_stop_list_path scripts/check
 
 # --- a `*` cover in Files ---
 setup_case glob
@@ -818,8 +869,12 @@ push_branch
 NEW_HEAD="$(git -C "$WT" rev-parse HEAD)"
 printf '%s\n' "$NEW_HEAD" >"$T/pr-head"
 run_gate
-[ "$RC" -eq 1 ] || fail "pushed head drift continues to the fence (rc=$RC): $(cat "$CDIR/stderr.txt")"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "pushed head drift"
+[ "$RC" -eq 0 ] || fail "pushed head drift reports outside-plan path (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "pushed head drift"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "pushed head drift reports one outside-plan path"
+grep -qx "stray.txt" <<<"$OUT" || fail "pushed head drift reports stray.txt"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = stray.txt ] || fail "pushed head drift records stray.txt"
+[ -f "$T/gate-ran" ] || fail "pushed head drift runs the gate"
 drift_line="$(grep 'accepted pushed head drift' "$CDIR/stderr.txt")"
 case "$drift_line" in
   *"$OLD_HEAD"*"$NEW_HEAD"*) ;;
@@ -948,7 +1003,7 @@ run_gate
 [ "$RC" -eq 0 ] || fail "additive append exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-gate PASS head=* log=*" "additive append"
 
-# --- additive: a changed line on origin/main is a deleted line and is fenced ---
+# --- OUTSIDE-PLAN: a rewrite of an origin/main file is reported ---
 setup_case additive-rewrite
 write_plan
 add_main_file
@@ -956,22 +1011,25 @@ printf 'ONE\ntwo\n' >"$WT/reg.txt"
 git -C "$WT" commit -qam "rewrite reg"
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "additive rewrite exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive rewrite"
-grep -qx "reg.txt" <<<"$OUT" || fail "additive rewrite digest lists reg.txt"
-[ ! -f "$T/gate-ran" ] || fail "additive rewrite runs no gate"
+[ "$RC" -eq 0 ] || fail "outside-plan rewrite exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "outside-plan rewrite"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "outside-plan rewrite reports one path"
+grep -qx "reg.txt" <<<"$OUT" || fail "outside-plan rewrite reports reg.txt"
+[ -f "$T/gate-ran" ] || fail "outside-plan rewrite runs the gate"
 
-# --- additive: a new file is not on origin/main, so it is fenced ---
+# --- OUTSIDE-PLAN: a new file is reported ---
 setup_case additive-new
 write_plan
 commit_file new.txt "new"
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "additive new file exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive new file"
-grep -qx "new.txt" <<<"$OUT" || fail "additive new file digest lists new.txt"
+[ "$RC" -eq 0 ] || fail "outside-plan new file exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "outside-plan new file"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "outside-plan new file reports one path"
+grep -qx "new.txt" <<<"$OUT" || fail "outside-plan new file reports new.txt"
+[ -f "$T/gate-ran" ] || fail "outside-plan new file runs the gate"
 
-# --- additive: a binary file changed on the branch is fenced (numstat prints "-") ---
+# --- OUTSIDE-PLAN: a binary rewrite is reported ---
 setup_case additive-binary
 write_plan
 printf '\0\1\2' >"$CDIR/seed/bin.dat"
@@ -983,11 +1041,13 @@ printf '\0\1\2\3' >"$WT/bin.dat"
 git -C "$WT" commit -qam "change binary"
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "additive binary exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive binary"
-grep -qx "bin.dat" <<<"$OUT" || fail "additive binary digest lists bin.dat"
+[ "$RC" -eq 0 ] || fail "outside-plan binary exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "outside-plan binary"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "outside-plan binary reports one path"
+grep -qx "bin.dat" <<<"$OUT" || fail "outside-plan binary reports bin.dat"
+[ -f "$T/gate-ran" ] || fail "outside-plan binary runs the gate"
 
-# --- additive: a mix passes the appended file and fences only the new one ---
+# --- OUTSIDE-PLAN: the additive exception and covered files stay covered ---
 setup_case additive-mix
 write_plan
 add_main_file
@@ -997,13 +1057,16 @@ git -C "$WT" commit -qam "covered and additive"
 commit_file new.txt "new"
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "additive mix exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "additive mix"
-grep -qx "new.txt" <<<"$OUT" || fail "additive mix digest lists new.txt"
-grep -qx "reg.txt" <<<"$OUT" && fail "additive mix digest drops reg.txt"
-grep -qx "base.txt" <<<"$OUT" && fail "additive mix digest drops covered base.txt"
+[ "$RC" -eq 0 ] || fail "outside-plan mix exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "outside-plan mix"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "outside-plan mix reports only the uncovered path"
+grep -qx "new.txt" <<<"$OUT" || fail "outside-plan mix reports new.txt"
+grep -qx "reg.txt" <<<"$OUT" && fail "outside-plan mix omits additive reg.txt"
+grep -qx "base.txt" <<<"$OUT" && fail "outside-plan mix omits covered base.txt"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = new.txt ] || fail "outside-plan mix records only new.txt"
+[ -f "$T/gate-ran" ] || fail "outside-plan mix runs the gate"
 
-# --- a new file the plan marks new in Tasks is covered; an unmarked one is fenced ---
+# --- a new file the plan marks new in Tasks is covered; an unmarked one is reported ---
 setup_case new-marked
 cat >"$CDIR/plan.md" <<'EOF'
 # Plan
@@ -1026,10 +1089,158 @@ commit_file made.txt "made"
 commit_file stray.txt "stray"
 push_branch
 run_gate
-[ "$RC" -eq 1 ] || fail "new-marked exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "new-marked"
-grep -qx "stray.txt" <<<"$OUT" || fail "new-marked digest lists stray.txt"
-grep -qx "made.txt" <<<"$OUT" && fail "new-marked digest drops made.txt"
+[ "$RC" -eq 0 ] || fail "new-marked exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "new-marked"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "new-marked reports one outside-plan path"
+grep -qx "stray.txt" <<<"$OUT" || fail "new-marked reports stray.txt"
+grep -qx "made.txt" <<<"$OUT" && fail "new-marked report drops made.txt"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = stray.txt ] || fail "new-marked records only stray.txt"
+[ -f "$T/gate-ran" ] || fail "new-marked runs the gate"
+
+prepare_cargo_case() {
+  setup_case "$1"
+  cat >"$CDIR/seed/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = []
+
+[dependencies]
+alpha = "1"
+
+[dev-dependencies]
+fixture-test = "1"
+
+[workspace.dependencies]
+shared-fixture = "1"
+EOF
+  git -C "$CDIR/seed" add -- Cargo.toml
+  git -C "$CDIR/seed" commit -qm "add Cargo manifest"
+  git -C "$CDIR/seed" push -q origin main
+  git -C "$WT" fetch -q origin && git -C "$WT" reset -q --hard origin/main
+  write_plan
+}
+
+# --- stop-list: new dependencies in [dependencies] refuse ---
+prepare_cargo_case new-dependency
+cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = []
+
+[dependencies]
+alpha = "1"
+beta = "2"
+
+[dev-dependencies]
+fixture-test = "1"
+
+[workspace.dependencies]
+shared-fixture = "1"
+EOF
+git -C "$WT" add -- Cargo.toml
+git -C "$WT" commit -qm "add runtime dependency"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "new [dependencies] entry exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "new [dependencies] entry"
+expect_stop_list_path Cargo.toml
+
+# --- stop-list: new dependencies in [dev-dependencies] refuse ---
+prepare_cargo_case new-dev-dependency
+cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = []
+
+[dependencies]
+alpha = "1"
+
+[dev-dependencies]
+fixture-test = "1"
+new-test = "2"
+
+[workspace.dependencies]
+shared-fixture = "1"
+EOF
+git -C "$WT" add -- Cargo.toml
+git -C "$WT" commit -qm "add dev dependency"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "new [dev-dependencies] entry exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "new [dev-dependencies] entry"
+expect_stop_list_path Cargo.toml
+
+# --- stop-list: new dependencies in [workspace.dependencies] refuse ---
+prepare_cargo_case new-workspace-dependency
+cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = []
+
+[dependencies]
+alpha = "1"
+
+[dev-dependencies]
+fixture-test = "1"
+
+[workspace.dependencies]
+shared-fixture = "1"
+new-shared = "2"
+EOF
+git -C "$WT" add -- Cargo.toml
+git -C "$WT" commit -qm "add workspace dependency"
+push_branch
+run_gate
+[ "$RC" -eq 1 ] || fail "new [workspace.dependencies] entry exits 1"
+expect_verdict "TKT tkt-gate STOP-LIST n=1 log=*" "new [workspace.dependencies] entry"
+expect_stop_list_path Cargo.toml
+
+# --- a version bump of an existing dependency is not a stop-list change ---
+prepare_cargo_case dependency-version-bump
+cat >"$WT/Cargo.toml" <<'EOF'
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = []
+
+[dependencies]
+alpha = "2"
+
+[dev-dependencies]
+fixture-test = "1"
+
+[workspace.dependencies]
+shared-fixture = "1"
+EOF
+git -C "$WT" add -- Cargo.toml
+git -C "$WT" commit -qm "bump dependency version"
+push_branch
+run_gate
+[ "$RC" -eq 0 ] || fail "dependency version bump exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "dependency version bump"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "dependency version bump is reported as ordinary outside-plan work"
+grep -qx "Cargo.toml" <<<"$OUT" || fail "dependency version bump lists Cargo.toml"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = Cargo.toml ] || fail "version bump is recorded outside-plan"
+[ -f "$T/gate-ran" ] || fail "dependency version bump runs the gate"
 
 # --- PASS writes a Local gate line directly above Implemented by: ---
 setup_case gate-body
@@ -1178,9 +1389,13 @@ printf '%s\n' "$H" >"$T/pr-head"
 plant_job_record job-fence present 0 "$H" false
 journal_job_gate job-fence gate-ok
 run_gate --from-job job-fence
-[ "$RC" -eq 1 ] || fail "--from-job fence refusal exits 1"
-expect_verdict "TKT tkt-gate FENCE n=1 log=*" "--from-job fence"
-! grep -q 'tkt-gate PASS head=' "$CDIR/tkt.journal" || fail "--from-job fence refusal journals no PASS"
+[ "$RC" -eq 0 ] || fail "--from-job outside-plan report exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-gate PASS head=* log=*" "--from-job outside-plan report"
+grep -qx "OUTSIDE-PLAN n=1" <<<"$OUT" || fail "--from-job reports one outside-plan path"
+grep -qx "outside.txt" <<<"$OUT" || fail "--from-job reports outside.txt"
+[ "$(bash "$TKT_STATE" "$S" list outside_plan)" = outside.txt ] || fail "--from-job records outside.txt"
+grep -q 'tkt-gate PASS head=' "$CDIR/tkt.journal" || fail "--from-job outside-plan report journals PASS"
+! [ -f "$T/gate-ran" ] || fail "--from-job validates stored gate evidence without rerunning the gate"
 
 # --- --from-job refuses an unpushed tip even when the delegate head matches ---
 setup_from_job_case from-job-unpushed
