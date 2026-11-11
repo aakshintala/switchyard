@@ -456,6 +456,9 @@ def filtered_vendor_items(items, vendor):
         elif vendor == "openai" and identifier and OPENAI_NON_CHAT.search(identifier):
             excluded.add(identifier)
             continue
+        elif vendor == "openrouter" and identifier and re.search(r":[^:]+$", identifier):
+            excluded.add(identifier)
+            continue
         elif vendor == "databricks" and (not isinstance(item, dict) or item.get("task") != "llm/v1/chat"):
             if identifier:
                 excluded.add(identifier)
@@ -469,6 +472,12 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
     vendor_index = index_models(vendor_items, vendor)
     if vendor == "openai":
         reference = {identifier: model for identifier, model in reference.items() if not OPENAI_NON_CHAT.search(identifier)}
+    elif vendor == "anthropic":
+        reference = {
+            identifier: model
+            for identifier, model in reference.items()
+            if not any(re.fullmatch(re.escape(identifier) + r"-\d{8}", vendor_id) for vendor_id in vendor_index)
+        }
     else:
         reference = {identifier: model for identifier, model in reference.items() if identifier not in excluded}
     rows = []

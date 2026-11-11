@@ -90,6 +90,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "anthropic": {"models": {
                     "claude-shared": {"limit": {"context": 1000, "output": 100}, "cost": {"input": 1, "output": 2}, "deprecated": False},
                     "claude-gone": {"limit": {"context": 512}},
+                    "claude-alias": {},
                 }},
                 "openai": {"models": {
                     "openai-a": {"limit": {"context": 2048}},
@@ -107,11 +108,13 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 send_json(self, {"data": [
                     {"id": "claude-shared", "context_window": 1000, "max_tokens": 100, "input_price": 1, "output_price": 2, "deprecated": False},
                     {"id": "claude-gone", "context_window": 512},
+                    {"id": "claude-alias"},
                 ]})
             else:
                 send_json(self, {"data": [
                     {"id": "claude-shared", "context_window": 1200, "max_tokens": 99, "input_price": 1.5, "output_price": 2.5, "deprecated": True},
                     {"id": "claude-extra", "context_window": 256},
+                    {"id": "claude-alias-20260504"},
                 ]})
         elif path == "/openai/v1/models":
             if "after=page-one" in self.path:
@@ -130,6 +133,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif path == "/openrouter/api/v1/models":
             if self.mode == "gaps":
                 send_json(self, {"error": "not authorized"}, status=401)
+            elif self.mode == "variants":
+                send_json(self, {"data": [{"id": "x:batch"}, {"id": "plain-unknown"}]})
             else:
                 send_json(self, {"data": [{"id": "router-one", "pricing": {"prompt": "0.00000015000000000000002", "completion": "0.00000025"}}]})
         elif path == "/databricks/api/2.0/serving-endpoints":
@@ -235,6 +240,7 @@ try:
     for field, vendor_value, reference_value in (("output", "99", "100"), ("input_price", "1.5", "1"), ("output_price", "2.5", "2"), ("deprecated", "True", "False")):
         expect(f"| claude-shared | mismatch | {field} | {vendor_value} | {reference_value} |" in report, f"{field} mismatch missing")
     expect("| claude-gone | gone |" in report, "gone row missing")
+    expect("| claude-alias |" not in report, "dated Anthropic alias produced a row")
     expect("openrouter: HTTP 401" in report, "401 skip missing")
     expect("muse: no credential" in report, "missing credential skip missing")
     expect("| codex-extra | missing |" in report, "codex missing row was not reported")
@@ -273,6 +279,14 @@ try:
     refused_report = (refused_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
     expect("muse: connection refused" in refused_report, "connection-refused skip missing")
     assert_no_secrets(refused_report, result.stdout, result.stderr)
+
+    # OpenRouter variants are not catalog models, while ordinary unknown IDs remain visible.
+    variants_inbox = temp_root / "inbox-variants"
+    variants_result, _ = run_case("variants", True, variants_inbox, mode="variants")
+    expect(variants_result.returncode == 0, f"variants run failed: {variants_result.stderr}")
+    variants_report = (variants_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("| x:batch |" not in variants_report, "OpenRouter variant was reported")
+    expect("| plain-unknown | missing |" in variants_report, "plain unknown OpenRouter ID was not reported")
 
     # A 30x is refused, not followed, so a credential header never reaches the redirect target.
     redirect_inbox = temp_root / "inbox-redirect"
