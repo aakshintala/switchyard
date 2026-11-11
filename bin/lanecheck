@@ -125,9 +125,13 @@ PY
   printf '%s\n' "$result"
 }
 
-stop_retired_sessions() {
-  _lanecheck_done_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck-done.XXXXXX") || return 2
+setup_done_tmp() {
+  _lanecheck_done_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck-done.XXXXXX") || return 1
   trap 'rm -rf "$_lanecheck_done_tmp"' EXIT
+}
+
+stop_retired_sessions() {
+  setup_done_tmp || return 2
   local done_tmp=$_lanecheck_done_tmp targets need_box need_muse need_mac h sess jid
   if ! targets=$(python3 -I - "$roster" "$@" <<'PY'
 import sys
@@ -420,9 +424,80 @@ if [ "${1:-}" = done ]; then
   done
   [ "$have_done_arg" = 1 ] || { echo "usage: lanecheck done <ticket>[:<session-name-or-id>] [...] [--handed-to-owner <card-id>]" >&2; exit 2; }
   set -- "${done_args[@]}"
-  if already_retired_targets "$@"; then
-    exit 0
+  already_retired=0
+  already_retired_message=""
+  if already_retired_message=$(already_retired_targets "$@"); then already_retired=1; fi
+  if [ "$already_retired" = 1 ]; then
+    setup_done_tmp || exit 3
   fi
+  handed_tickets=()
+  handed_targets=()
+  handed_prs=()
+  handoff_pr_for() {
+    local wanted_ticket="$1" i
+    for i in "${!handed_tickets[@]}"; do
+      if [ "${handed_tickets[$i]}" = "$wanted_ticket" ]; then
+        printf '%s' "${handed_prs[$i]}"
+        return 0
+      fi
+    done
+  }
+  # Rewrites and appends share this lock so an atomic replacement cannot drop a
+  # retirement row appended by another lanecheck done process.
+  record_handoff_on_retirement() {
+    local target="$1" pr="$2"
+    python3 -I - "$retired" "$target" "handed-to-owner $handed_card PR #$pr" <<'PY'
+import fcntl, os, stat, sys, tempfile
+path, target, marker = sys.argv[1:]
+ticket, sep, session = target.partition(":")
+
+def update():
+    with open(path) as f:
+        lines = f.readlines()
+    matches = []
+    for i, line in enumerate(lines):
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) <= 1 or fields[1] != ticket:
+            continue
+        if sep:
+            if len(fields) <= 2:
+                continue
+            row_session = fields[2]
+            if row_session != session and not (session and row_session not in ("", "?") and
+                    (row_session.startswith(session) or session.startswith(row_session))):
+                continue
+        matches.append(i)
+    if not matches:
+        raise SystemExit(1)
+    i = matches[-1]
+    fields = lines[i].rstrip("\n").split("\t")
+    while len(fields) < 4:
+        fields.append("")
+    notes = fields[3].split("; ") if fields[3] else []
+    if marker not in notes:
+        notes.append(marker)
+        fields[3] = "; ".join(notes)
+        lines[i] = "\t".join(fields) + "\n"
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        directory = os.path.dirname(os.path.abspath(path))
+        fd, temp_path = tempfile.mkstemp(prefix=".roster-done.", dir=directory)
+        try:
+            with os.fdopen(fd, "w") as f:
+                os.fchmod(f.fileno(), mode)
+                f.writelines(lines)
+            os.replace(temp_path, path)
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+with open(path + ".lock", "a") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    update()
+PY
+  }
+  # A plain rerun skips retirement guards and row appends, but falls through to
+  # the shared fence-grant and claim cleanup below.
+  if [ "$already_retired" != 1 ] || [ -n "$handed_card" ]; then
   if [ -n "$handed_card" ]; then
     if [ "${FW_OWNER_ASK+x}" = x ]; then
       echo "REFUSING --handed-to-owner: FW_OWNER_ASK is not honoured for --handed-to-owner" >&2
@@ -476,8 +551,6 @@ PY
   _merged_prs=""
   _merged_prs_ok=0
   _merged_prs_loaded=0
-  handed_tickets=()
-  handed_prs=()
   handoff_problem_for() {
     local open_pr="$1" handoff_ok p
     handoff_problem=""
@@ -508,15 +581,6 @@ else:
       fi
     fi
   }
-  handoff_pr_for() {
-    local wanted_ticket="$1" i
-    for i in "${!handed_tickets[@]}"; do
-      if [ "${handed_tickets[$i]}" = "$wanted_ticket" ]; then
-        printf '%s' "${handed_prs[$i]}"
-        return 0
-      fi
-    done
-  }
   for n in "$@"; do
     tn=${n%%:*}
     # A session-scoped retirement asks about that session only. Reading the
@@ -534,7 +598,7 @@ else:
       when=$(date -u -d "$newest" +%s 2>/dev/null) || continue
     fi
     age=$(( $(date +%s) - when ))
-    if [ "$age" -lt "${FW_DONE_MIN:-1800}" ]; then
+    if [ "$already_retired" != 1 ] && [ "$age" -lt "${FW_DONE_MIN:-1800}" ]; then
       merged_pr=""
       if [ -n "$sn" ] && [ "${FW_DONE_FORCE:-0}" != 1 ]; then
         if [ "$_merged_prs_loaded" = 0 ]; then
@@ -611,6 +675,7 @@ for pr in prs:
       elif [ -n "$open_pr" ]; then
         handoff_pr=$(printf '%s\n' "$open_pr" | head -1)
         handed_tickets+=("$tn")
+        handed_targets+=("$n")
         handed_prs+=("$handoff_pr")
       fi
     elif [ "$_prs_ok" = 1 ]; then
@@ -633,27 +698,52 @@ for pr in prs:
     echo "Nothing retired — see the REFUSING line above for which guard fired. Check with 'bash bin/lanecheck' first. Override with FW_DONE_FORCE=1." >&2
     exit 2
   fi
-  retire_pi_pidfiles "$@" || exit $?
-  stop_retired_sessions "$@" || exit $?
+  if [ "$already_retired" = 1 ]; then
+    if [ -n "$handed_card" ]; then
+      for i in "${!handed_tickets[@]}"; do
+        record_handoff_on_retirement "${handed_targets[$i]}" "${handed_prs[$i]}" || {
+          echo "could not record handed-to-owner $handed_card PR #${handed_prs[$i]} on an existing retirement row for #${handed_tickets[$i]}" >&2
+          exit 2
+        }
+      done
+    fi
+  else
+    retire_pi_pidfiles "$@" || exit $?
+    stop_retired_sessions "$@" || exit $?
+    for n in "$@"; do
+      tn=${n%%:*}
+      handoff_pr=$(handoff_pr_for "$tn")
+      case "$n" in
+        *:*) retire_line="$(printf '%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn" "${n#*:}")" ;;
+        *)   retire_line="$(printf '%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn")" ;;
+      esac
+      if [ -n "$handoff_pr" ]; then
+        if [[ "$n" == *:* ]]; then retire_line="$retire_line$(printf '\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; else retire_line="$retire_line$(printf '\t\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; fi
+      fi
+      python3 -I - "$retired" "$retire_line" <<'PY'
+import fcntl, sys
+path, line = sys.argv[1:]
+with open(path + ".lock", "a") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with open(path, "a") as f:
+        f.write(line + "\n")
+PY
+    done
+    retire_log="retired: $*"
+    for i in "${!handed_tickets[@]}"; do
+      retire_log="$retire_log handed-to-owner $handed_card PR #${handed_prs[$i]}"
+    done
+    echo "$retire_log"
+  fi
+  if [ -n "$handed_card" ] && [ "${#handed_tickets[@]}" = 0 ]; then
+    echo "WARNING: handed-to-owner card $handed_card was not recorded on a retirement row." >&2
+  fi
+  fi
+  if [ "$already_retired" = 1 ]; then
+    echo "$already_retired_message"
+  fi
   retirement_helper=$_lanecheck_done_tmp/roster-retirement.py
   write_retirement_helper "$retirement_helper"
-  for n in "$@"; do
-    tn=${n%%:*}
-    handoff_pr=$(handoff_pr_for "$tn")
-    case "$n" in
-      *:*) retire_line="$(printf '%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn" "${n#*:}")" ;;
-      *)   retire_line="$(printf '%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tn")" ;;
-    esac
-    if [ -n "$handoff_pr" ]; then
-      if [[ "$n" == *:* ]]; then retire_line="$retire_line$(printf '\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; else retire_line="$retire_line$(printf '\t\t%s' "handed-to-owner $handed_card PR #$handoff_pr")"; fi
-    fi
-    printf '%s\n' "$retire_line" >>"$retired"
-  done
-  retire_log="retired: $*"
-  for i in "${!handed_tickets[@]}"; do
-    retire_log="$retire_log handed-to-owner $handed_card PR #${handed_prs[$i]}"
-  done
-  echo "$retire_log"
 
   # Retire a ticket's fence grants once its LAST session retires. This is the
   # one place that knows a lane is finished, and it used to leave the grants in
