@@ -1934,6 +1934,36 @@ run_build --from gate
 [ "$RC" -eq 0 ] || fail "ruling-verdict-precondition: tkt-build passes the verdict precondition (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "ruling-verdict-precondition"
 
+# --- rule-ok records steward provenance, permits the build and names the ruling ---
+setup_case ruled-verdict-build
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "ruled-verdict-build: seed LINES"
+bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "ruled-verdict-build: seed plan verdict time"
+bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2001-01-01T00:00:00Z || fail "ruled-verdict-build: seed stop verdict time"
+jq -n '{body:"Steward ruling RULING-1604 approves this plan.",issue_url:"https://api.github.com/repos/switchyard/issues/528",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
+RULE_OUT="$(bash "$TKT_PLAN" "$S" rule-ok --by surveyor --ruling RULING-1604 --comment 721474 2>"$CDIR/rule-stderr.txt")"; RULE_RC=$?
+[ "$RULE_RC" -eq 0 ] || fail "ruled-verdict-build: rule-ok records the ruling (rc=$RULE_RC): $(cat "$CDIR/rule-stderr.txt")"
+expect_state plan_verdict ok "ruled-verdict-build"
+expect_state plan_verdict_by surveyor "ruled-verdict-build"
+expect_state plan_verdict_ruling RULING-1604 "ruled-verdict-build"
+expect_state plan_verdict_comment 721474 "ruled-verdict-build"
+run_build --from gate
+[ "$RC" -eq 0 ] || fail "ruled-verdict-build: tkt-build proceeds (rc=$RC): $(first_line) $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "ruled-verdict-build"
+grep -q '^PLAN-VERDICT ruled by=surveyor ruling=RULING-1604 comment=721474$' <<<"$OUT" || fail "ruled-verdict-build: output names the steward ruling"
+
+# --- editing the plan invalidates a ruled PLAN-OK before build ---
+setup_case ruled-verdict-edited-plan
+bash "$TKT_STATE" "$S" set plan_verdict lines || fail "ruled-verdict-edited-plan: seed LINES"
+bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "ruled-verdict-edited-plan: seed plan verdict time"
+jq -n '{body:"Steward ruling RULING-1604 approves this plan.",issue_url:"https://api.github.com/repos/switchyard/issues/528",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
+RULE_OUT="$(bash "$TKT_PLAN" "$S" rule-ok --by flywheel --ruling RULING-1604 --comment 721475 2>"$CDIR/rule-stderr.txt")"; RULE_RC=$?
+[ "$RULE_RC" -eq 0 ] || fail "ruled-verdict-edited-plan: rule-ok records the ruling (rc=$RULE_RC): $(cat "$CDIR/rule-stderr.txt")"
+printf '\n<!-- later plan edit -->\n' >>"$CDIR/plan.md"
+run_build --from gate
+[ "$RC" -eq 1 ] || fail "ruled-verdict-edited-plan: plan hash change refuses build (rc=$RC)"
+expect_verdict "TKT tkt-build VERDICT-REFUSED verdict=none log=*" "ruled-verdict-edited-plan"
+grep -q '^job|' "$T/calls.log" && fail "ruled-verdict-edited-plan: stale ruled verdict dispatches no job"
+
 # --- a missing verdict refuses; --no-verifier records or refreshes skipped ---
 setup_case verdict-none
 bash "$TKT_STATE" "$S" set plan_verdict "" || fail "clear plan verdict"
