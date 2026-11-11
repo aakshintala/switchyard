@@ -252,6 +252,54 @@ clear_verdict() {
   t set plan_verdict_by ""; t set plan_verdict_ruling ""; t set plan_verdict_comment ""
 }
 
+# Collect the plan's Files paths and compare them with origin/main. Callers own
+# the policy and refusal output; this helper only shares the stale diff itself.
+plan_stale_stat() {
+  local stale_plan="$1" stale_base="$2" stale_worktree="$3" p
+  plan_stale_files=()
+  while IFS= read -r p; do plan_stale_files+=("$p"); done < <(plan_files_pathspecs "$stale_plan")
+  plan_stale_stat_output=""
+  [ "${#plan_stale_files[@]}" -gt 0 ] || return 0
+  plan_stale_stat_output="$(git -C "$stale_worktree" diff --stat "$stale_base...origin/main" -- "${plan_stale_files[@]}" 2>"$tmp")" || return 1
+}
+
+# Fetch, issue-check and freshness-check a ruling comment. Callers map the
+# failure kind to their own stable verdict tags and reasons.
+check_ruling_comment() {
+  local comment_id="$1" comment_json="$2" comment_error="$3"
+  local stop_verdict_at plan_verdict_at ruling_after_verdict_at
+  ruling_comment_failure=""
+  if ! gh api "repos/$repo/issues/comments/$comment_id" >"$comment_json" 2>"$comment_error"; then
+    rm -f "$comment_json" "$comment_error"
+    ruling_comment_failure=fetch
+    return 1
+  fi
+  if ! jq -e --arg repo "$repo" --arg issue "$issue" '
+    type == "object" and (.body | type == "string")
+      and (.issue_url | type == "string")
+      and (.issue_url | contains("/repos/" + $repo + "/"))
+      and (.issue_url | endswith("/issues/" + $issue))
+  ' "$comment_json" >/dev/null 2>&1; then
+    rm -f "$comment_json" "$comment_error"
+    ruling_comment_failure=issue
+    return 1
+  fi
+  stop_verdict_at="$(t get plan_stop_verdict_at 2>/dev/null || true)"
+  plan_verdict_at="$(t get plan_verdict_at 2>/dev/null || true)"
+  ruling_after_verdict_at="$stop_verdict_at"
+  if [ -n "$plan_verdict_at" ] && { [ -z "$ruling_after_verdict_at" ] || [[ "$plan_verdict_at" > "$ruling_after_verdict_at" ]]; }; then
+    ruling_after_verdict_at="$plan_verdict_at"
+  fi
+  if [ -z "$ruling_after_verdict_at" ] || ! jq -e --arg verdict_at "$ruling_after_verdict_at" '
+    (.created_at | type == "string") and (.created_at > $verdict_at)
+  ' "$comment_json" >/dev/null 2>&1; then
+    rm -f "$comment_json" "$comment_error"
+    ruling_comment_failure=time
+    return 1
+  fi
+  return 0
+}
+
 record_plan_stop_verdict() {
   local kind="$1" stop_hash existing_hash existing_at
   stop_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
@@ -273,11 +321,11 @@ do_verify() {
     --extra) [ $# -ge 2 ] || usage; extra="$2"; shift 2;;
     --model) [ $# -ge 2 ] || usage; model="$2"; shift 2;; *) usage;; esac; done
   load_plan
-  files=()
-  while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
-  if [ "${#files[@]}" -gt 0 ]; then
-    stat="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${files[@]}" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
-    if [ -n "$stat" ]; then n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${files[@]}" | wc -l | tr -d ' ')"; clear_verdict; emit "STALE n=$n base=$base" 1 "$({ plan_bare_dirs "$plan" "$worktree"; head -n "$REPORT_LINES" <<<"$stat"; })"; fi
+  plan_stale_stat "$plan" "$base" "$worktree" || { cat "$tmp" >&2; exit 2; }
+  if [ -n "$plan_stale_stat_output" ]; then
+    n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${plan_stale_files[@]}" | wc -l | tr -d ' ')"
+    clear_verdict
+    emit "STALE n=$n base=$base" 1 "$({ plan_bare_dirs "$plan" "$worktree"; head -n "$REPORT_LINES" <<<"$plan_stale_stat_output"; })"
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
@@ -553,43 +601,22 @@ do_rule_ok() {
   plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
   [ "$plan_verdict" != ok ] || emit "RULE-OK-REFUSED reason=already-ok" 1 "the current plan already has plan_verdict ok"
 
-  files=()
-  while IFS= read -r p; do files+=("$p"); done < <(plan_files_pathspecs "$plan")
-  if [ "${#files[@]}" -gt 0 ]; then
-    if ! stat="$(git -C "$worktree" diff --stat "$base...origin/main" -- "${files[@]}" 2>"$tmp")"; then
-      emit "RULE-OK-REFUSED reason=stale-check" 1 "could not compare plan Files against origin/main" "$(head -n 1 "$tmp" 2>/dev/null || true)"
-    fi
-    if [ -n "$stat" ]; then
-      emit "RULE-OK-REFUSED reason=stale" 1 "$stat"
-    fi
+  ferr="$(git -C "$worktree" fetch -q origin main 2>&1)" || emit "RULE-OK-REFUSED reason=stale-check" 1 "could not compare plan Files against origin/main" "$(head -n 1 <<<"$ferr")"
+  if ! plan_stale_stat "$plan" "$base" "$worktree"; then
+    emit "RULE-OK-REFUSED reason=stale-check" 1 "could not compare plan Files against origin/main" "$(head -n 1 "$tmp" 2>/dev/null || true)"
+  fi
+  if [ -n "$plan_stale_stat_output" ]; then
+    emit "RULE-OK-REFUSED reason=stale" 1 "$plan_stale_stat_output" "run implement's stale-plan check, revise the plan, then tkt-plan $state set $plan, then rerun: tkt-plan $state rule-ok --by $who --ruling $ruling --comment $comment"
   fi
 
   comment_json="$tmp.rule-ok-comment.json"
   comment_error="$tmp.rule-ok-comment-error"
-  if ! gh api "repos/$repo/issues/comments/$comment" >"$comment_json" 2>"$comment_error"; then
-    rm -f "$comment_json" "$comment_error"
-    emit "RULE-OK-REFUSED reason=comment-fetch" 1 "could not verify that comment $comment belongs to $repo#$issue"
-  fi
-  if ! jq -e --arg repo "$repo" --arg issue "$issue" '
-    type == "object" and (.body | type == "string")
-      and (.issue_url | type == "string")
-      and (.issue_url | contains("/repos/" + $repo + "/"))
-      and (.issue_url | endswith("/issues/" + $issue))
-  ' "$comment_json" >/dev/null 2>&1; then
-    rm -f "$comment_json" "$comment_error"
-    emit "RULE-OK-REFUSED reason=comment-issue" 1 "comment $comment is not on $repo#$issue"
-  fi
-  stop_verdict_at="$(t get plan_stop_verdict_at 2>/dev/null || true)"
-  plan_verdict_at="$(t get plan_verdict_at 2>/dev/null || true)"
-  ruling_after_verdict_at="$stop_verdict_at"
-  if [ -n "$plan_verdict_at" ] && { [ -z "$ruling_after_verdict_at" ] || [[ "$plan_verdict_at" > "$ruling_after_verdict_at" ]]; }; then
-    ruling_after_verdict_at="$plan_verdict_at"
-  fi
-  if [ -z "$ruling_after_verdict_at" ] || ! jq -e --arg verdict_at "$ruling_after_verdict_at" '
-    (.created_at | type == "string") and (.created_at > $verdict_at)
-  ' "$comment_json" >/dev/null 2>&1; then
-    rm -f "$comment_json" "$comment_error"
-    emit "RULE-OK-REFUSED reason=comment-time" 1 "comment $comment does not postdate the latest plan or stop verdict"
+  if ! check_ruling_comment "$comment" "$comment_json" "$comment_error"; then
+    case "$ruling_comment_failure" in
+      fetch) emit "RULE-OK-REFUSED reason=comment-fetch" 1 "could not verify that comment $comment belongs to $repo#$issue" ;;
+      issue) emit "RULE-OK-REFUSED reason=comment-issue" 1 "comment $comment is not on $repo#$issue" ;;
+      time) emit "RULE-OK-REFUSED reason=comment-time" 1 "comment $comment does not postdate the latest plan or stop verdict" ;;
+    esac
   fi
   if ! jq -e --arg ruling "$ruling" '.body | contains($ruling)' "$comment_json" >/dev/null 2>&1; then
     rm -f "$comment_json" "$comment_error"
@@ -616,30 +643,12 @@ do_triaged() {
   load_plan
   comment_json="$tmp.triaged-comment.json"
   comment_error="$tmp.triaged-comment-error"
-  if ! gh api "repos/$repo/issues/comments/$comment" >"$comment_json" 2>"$comment_error"; then
-    rm -f "$comment_json" "$comment_error"
-    emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "could not verify that comment $comment belongs to $repo#$issue"
-  fi
-  if ! jq -e --arg repo "$repo" --arg issue "$issue" '
-    type == "object" and (.body | type == "string")
-      and (.issue_url | type == "string")
-      and (.issue_url | contains("/repos/" + $repo + "/"))
-      and (.issue_url | endswith("/issues/" + $issue))
-  ' "$comment_json" >/dev/null 2>&1; then
-    rm -f "$comment_json" "$comment_error"
-    emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "comment $comment is not on $repo#$issue"
-  fi
-  stop_verdict_at="$(t get plan_stop_verdict_at 2>/dev/null || true)"
-  plan_verdict_at="$(t get plan_verdict_at 2>/dev/null || true)"
-  ruling_after_verdict_at="$stop_verdict_at"
-  if [ -n "$plan_verdict_at" ] && { [ -z "$ruling_after_verdict_at" ] || [[ "$plan_verdict_at" > "$ruling_after_verdict_at" ]]; }; then
-    ruling_after_verdict_at="$plan_verdict_at"
-  fi
-  if [ -z "$ruling_after_verdict_at" ] || ! jq -e --arg verdict_at "$ruling_after_verdict_at" '
-    (.created_at | type == "string") and (.created_at > $verdict_at)
-  ' "$comment_json" >/dev/null 2>&1; then
-    rm -f "$comment_json" "$comment_error"
-    emit "TRIAGED-REFUSED reason=ruling-stale" 1 "comment $comment does not postdate the latest plan verdict"
+  if ! check_ruling_comment "$comment" "$comment_json" "$comment_error"; then
+    case "$ruling_comment_failure" in
+      fetch) emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "could not verify that comment $comment belongs to $repo#$issue" ;;
+      issue) emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "comment $comment is not on $repo#$issue" ;;
+      time) emit "TRIAGED-REFUSED reason=ruling-stale" 1 "comment $comment does not postdate the latest plan verdict" ;;
+    esac
   fi
   round="$(ronum)"
   stored_verdict="$(t get plan_verdict 2>/dev/null || true)"
@@ -842,8 +851,7 @@ do_set() {
   # path does not reset the planning budget. A later part of a split gets a
   # fresh budget from tkt-start --part <n>, not from a new path.
   if [ "$old_plan" != "$plan" ]; then
-    t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
-    t set plan_verdict_by ""; t set plan_verdict_ruling ""; t set plan_verdict_comment ""
+    clear_verdict
     t set plan_stop_verdict_key ""; t set plan_stop_verdict_at ""
     t set build_stale_recovery_base ""; t set build_stale_recovery_plan_hash ""
     t set plan_questions_comment ""; t set plan_questions_hash ""; t set plan_questions_verdict_at ""; t set plan_questions_verdict_hash ""
@@ -854,8 +862,7 @@ do_set() {
   t set pack_plan_hash "$plan_hash"
   plan_verdict_read "$tkt_state" "$state" "$plan" "$worktree"
   if [ "$old_plan" = "$plan" ] && [ "$no_verifier" -eq 0 ] && [ "$plan_verdict" = skipped ]; then
-    t set plan_verdict ""; t set plan_verdict_base ""; t set plan_verdict_hash ""; t set plan_triage_comment ""
-    t set plan_verdict_by ""; t set plan_verdict_ruling ""; t set plan_verdict_comment ""
+    clear_verdict
   fi
   if [ "$no_verifier" -eq 1 ] && { [ -z "$plan_verdict" ] || [ "$plan_verdict" = skipped ]; }; then
     plan_verdict_write "$tkt_state" "$state" skipped "$base" "$plan" "$worktree"

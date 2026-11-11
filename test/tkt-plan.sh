@@ -236,6 +236,23 @@ case "\$mode:\$comments" in
 esac
 EOF
 chmod +x "$T/ghbin/gh"
+REAL_GIT="$(command -v git)"
+cat >"$T/ghbin/git" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+for arg in "\$@"; do
+  if [ "\$arg" = fetch ]; then
+    printf 'fetch|%s\\n' "\$*" >>"$T/git-fetch.log"
+    if [ -f "$T/fetch-fail" ]; then
+      echo 'fatal: simulated fetch failure' >&2
+      exit 1
+    fi
+    exit 0
+  fi
+done
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$T/ghbin/git"
 export PATH="$T/ghbin:$PATH"
 
 # Commit FILE with CONTENT in the repo at DIR; prints nothing.
@@ -3154,10 +3171,34 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
   [ "$RC" -eq 1 ] || fail "rule-ok-no-plan refuses when no plan is recorded"
   expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=plan log=*" "rule-ok-no-plan"
 
+  setup_case rule-ok-fetch-failure
+  rebase_plan
+  : >"$T/fetch-fail"
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654008
+  rm -f "$T/fetch-fail"
+  [ "$RC" -eq 1 ] || fail "rule-ok-fetch-failure refuses when origin fetch fails"
+  expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=stale-check log=*" "rule-ok-fetch-failure"
+  grep -Fq 'fatal: simulated fetch failure' <<<"$OUT" || fail "rule-ok-fetch-failure prints the first fetch error line"
+
   setup_case rule-ok-stale
+  : >"$T/git-fetch.log"
+  bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok stale verdict time"
+  set_ruling_comment 'Steward ruling RULING-1604: dispatch this exact plan.'
   run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654008
   [ "$RC" -eq 1 ] || fail "rule-ok-stale refuses a plan behind origin/main"
   expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=stale log=*" "rule-ok-stale"
+  grep -Fq "fetch|-C $WT fetch -q origin main" "$T/git-fetch.log" || fail "rule-ok-stale fetches origin before checking staleness"
+  grep -Fq "run implement's stale-plan check, revise the plan, then tkt-plan $S set $CDIR/plan.md, then rerun: tkt-plan $S rule-ok --by surveyor --ruling RULING-1604 --comment 654008" <<<"$OUT" || fail "rule-ok-stale prints the stale recovery sequence with the same comment"
+  stale_plan_verdict_at="$(state_get plan_verdict_at)"
+  rebase_plan
+  run_plan set "$CDIR/plan.md"
+  [ "$RC" -eq 0 ] || fail "rule-ok-stale set after rebase succeeds (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_verdict "TKT tkt-plan SET plan=$CDIR/plan.md log=*" "rule-ok-stale set after rebase"
+  [ "$(state_get plan_verdict_at)" = "$stale_plan_verdict_at" ] || fail "set after rebase preserves plan_verdict_at"
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654008
+  [ "$RC" -eq 0 ] || fail "rule-ok-stale accepts the same comment after rebase and set (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_verdict "TKT tkt-plan RULE-OK by=surveyor ruling=RULING-1604 comment=654008 log=*" "rule-ok-stale same-comment retry"
+
 
   setup_case rule-ok-already-ok
   rebase_plan
