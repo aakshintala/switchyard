@@ -1455,16 +1455,31 @@ fn send_text(shared: &Arc<Shared>, text: &str) -> Value {
         }
         Err(CallFailure::Rpc(error)) => {
             drop_steer(shared, &command_id);
+            // A completion that races ahead of this refusal can leave the session
+            // Running without an active turn while replay_pending_steers waits on
+            // our admission lock. Once this steer is removed, settle that state
+            // here so we can retry without opening admission to another sender.
             if shared
                 .store
                 .wait_until(
-                    |state| state.status == Status::Idle,
+                    |state| {
+                        state.status == Status::Idle
+                            || (state.status == Status::Running
+                                && state.active_turn_id.is_none()
+                                && state.pending_steers.is_empty())
+                    },
                     shared.config.steer_settle,
                 )
                 .is_some()
             {
                 let mut started = false;
                 if update_store(shared, |state| {
+                    if state.status == Status::Running
+                        && state.active_turn_id.is_none()
+                        && state.pending_steers.is_empty()
+                    {
+                        finish_replay_pending_state(state, now_ms());
+                    }
                     started = state::begin_turn(state, now_ms());
                     Vec::new()
                 })
