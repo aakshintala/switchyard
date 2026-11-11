@@ -942,12 +942,29 @@ fn supervisor_refused_steer_retries_after_idle_but_not_while_running() {
     );
     assert_eq!(ended.stop_and_join(), 0);
 
-    let mut held = Session::spawn("STEERREFUSE_HOLD", "brief", None, Bounds::default());
+    // steer_reply_ms sits well above the 10 s guard below, so a send that waited out the
+    // reply window fails the guard by a clear margin. The guard itself is a sanity cap.
+    let mut held = Session::spawn(
+        "STEERREFUSE_HOLD",
+        "brief",
+        None,
+        Bounds {
+            steer_reply_ms: 30_000,
+            ..Bounds::default()
+        },
+    );
     held.until("initial held turn", |state| state.active_turn_id.is_some());
     let started = Instant::now();
     let reply = held.send("do not queue").unwrap();
     assert_eq!(reply["ok"], false);
     assert_eq!(reply["code"], "failed");
+    // An rpc timeout also returns code "failed"; only the refusal branch says this.
+    assert!(
+        reply["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("steer refused")),
+        "{reply}"
+    );
     assert!(started.elapsed() < Duration::from_secs(10));
     assert_eq!(held.state().status, Status::Running);
     assert!(held.requests().iter().all(|request| {
@@ -1096,6 +1113,8 @@ fn supervisor_plain_stop_interrupts_then_closes_and_reaps_the_host() {
 
 #[test]
 fn supervisor_escalates_when_the_host_ignores_eof_or_sigterm() {
+    // SLOW_START is a regression guard for #1513: a host slower than the old 300 ms test
+    // rpc bound must still reach the escalation path rather than die with StartFailed.
     for scenario in ["SLOW_START,IGNORE_EOF", "IGNORE_EOF,IGNORE_TERM"] {
         let mut session = Session::spawn(scenario, "brief", None, Bounds::default());
         session.until("idle session", |state| {
