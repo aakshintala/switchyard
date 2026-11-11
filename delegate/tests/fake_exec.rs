@@ -3,34 +3,40 @@
 // close inherits the write fd until its exec, and the exec of the fake fails.
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
 
 mod support;
 
 const ITERATIONS: usize = 400;
 const FORKERS: usize = 16;
+// Keep the contending spawns finite; previously each worker spawned until the
+// writer finished, making test duration depend on mutex scheduling under load.
+const SPAWNS_PER_FORKER: usize = ITERATIONS / FORKERS;
 
 #[test]
 fn fake_script_exec_survives_concurrent_spawns() {
     let dir = std::env::temp_dir().join(format!("fake-exec-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let stop = Arc::new(AtomicBool::new(false));
+    let start = Arc::new(Barrier::new(FORKERS + 1));
     let forkers: Vec<_> = (0..FORKERS)
         .map(|_| {
-            let stop = stop.clone();
+            let start = start.clone();
             std::thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
+                start.wait();
+                for _ in 0..SPAWNS_PER_FORKER {
                     let _guard = support::exec_lock();
-                    let _ = Command::new("true").status();
+                    let status = Command::new("true").status().unwrap();
+                    assert!(status.success(), "concurrent true spawn failed: {status}");
                 }
             })
         })
         .collect();
+    let fake = dir.join("fake");
+    start.wait();
     let mut failure = None;
     for i in 0..ITERATIONS {
         let _guard = support::exec_lock();
-        let fake = dir.join(format!("fake-{i}"));
+        // Reuse the executable so macOS does not rescan 400 distinct scripts.
         std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         match Command::new(&fake).status() {
@@ -41,7 +47,6 @@ fn fake_script_exec_survives_concurrent_spawns() {
             }
         }
     }
-    stop.store(true, Ordering::Relaxed);
     for forker in forkers {
         forker.join().unwrap();
     }

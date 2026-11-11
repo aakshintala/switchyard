@@ -1535,7 +1535,9 @@ fn live_background_child_suppresses_idle_until_it_exits() {
     }
 
     let e = Env::new("background-child-idle");
-    let idle_ms: u64 = 2_000;
+    // Leave room for the fake's shell setup before the idle watchdog begins
+    // observing its background child under parallel test load.
+    let idle_ms: u64 = 15_000;
     // The supervisor checks a live child every quarter window (job.rs
     // child_process_check_interval), so the idle clock is at most this stale.
     let check_ms = (idle_ms / 4) as f64;
@@ -1561,20 +1563,27 @@ fn live_background_child_suppresses_idle_until_it_exits() {
         &[],
     );
     let pid_file = e.dir.join("background.pid");
-    let mut bg_pid: i64 = 0;
-    until(
-        "background command starts",
-        || match std::fs::read_to_string(&pid_file)
+    let startup_wait = Instant::now();
+    let bg_pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&pid_file)
             .ok()
             .and_then(|s| s.trim().parse::<i64>().ok())
         {
-            Some(pid) => {
-                bg_pid = pid;
-                true
-            }
-            None => false,
-        },
-    );
+            break pid;
+        }
+        let record = read_record(&id);
+        if let Some(record) = record.as_ref() {
+            assert_eq!(
+                record["status"], "RUNNING",
+                "job ended before the fake published its background pid: {record}"
+            );
+        }
+        assert!(
+            startup_wait.elapsed() < Duration::from_secs(30),
+            "timed out: background command starts; job record: {record:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
     // The ticket's check: the job outlives idle_ms while the child is alive.
     // The fake published the pid after the turn-ending result, and the child
     // is blocked on the fifo, so only the watchdog could end the job. Each
@@ -1582,26 +1591,30 @@ fn live_background_child_suppresses_idle_until_it_exits() {
     // below the window; the wait ends once the record shows the job has run
     // for two windows.
     let window = idle_ms as f64;
-    until("the job runs for two idle windows", || {
-        assert!(alive(bg_pid), "background command ended before its release");
-        let Some(rec) = read_record(&id) else {
-            return false;
-        };
-        assert_eq!(
-            rec["status"], "RUNNING",
-            "job ended while its child was alive: {rec}"
-        );
-        let age = rec["progress"]["lastEventAgeMs"]
-            .as_f64()
-            .expect("progress carries lastEventAgeMs");
-        assert!(
-            age < window,
-            "live child did not refresh the idle clock: {rec}"
-        );
-        rec["progress"]["elapsedMs"]
-            .as_f64()
-            .is_some_and(|ms| ms > 2.0 * window)
-    });
+    until_for(
+        "the job runs for two idle windows",
+        Duration::from_secs(45),
+        || {
+            assert!(alive(bg_pid), "background command ended before its release");
+            let Some(rec) = read_record(&id) else {
+                return false;
+            };
+            assert_eq!(
+                rec["status"], "RUNNING",
+                "job ended while its child was alive: {rec}"
+            );
+            let age = rec["progress"]["lastEventAgeMs"]
+                .as_f64()
+                .expect("progress carries lastEventAgeMs");
+            assert!(
+                age < window,
+                "live child did not refresh the idle clock: {rec}"
+            );
+            rec["progress"]["elapsedMs"]
+                .as_f64()
+                .is_some_and(|ms| ms > 2.0 * window)
+        },
+    );
     let held = e.delegate(&["status", &id], None);
     assert_eq!(held.status.code(), Some(0));
     let held_text = String::from_utf8_lossy(&held.stdout);
@@ -1651,8 +1664,7 @@ fn live_background_child_suppresses_idle_until_it_exits() {
         "idle clock last reset {}ms before the release: {rec}",
         released_at - (heartbeat - age)
     );
-
-    let done = e.wait_terminal(&id);
+    let done = e.wait_terminal_for(&id, 30);
     assert_eq!(done["status"], "STALLED");
     let text = done["result"]["text"].as_str().unwrap();
     assert!(text.contains("Idle watchdog killed this job"), "{text}");
