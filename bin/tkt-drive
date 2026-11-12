@@ -135,17 +135,85 @@ add_overlap_context() {
   t journal "tkt-drive overlap-input $target"
 }
 
+load_main_tree() {
+  local repo="$1" tree_file="$2" treesha cache tree_json cache_tmp error_text
+  treesha=$("${FW_GH:-gh}" api "repos/$repo/commits/main" --jq .commit.tree.sha 2>"$tmp/tree.err") || {
+    error_text="$(head -c 200 "$tmp/tree.err" 2>/dev/null | tr '\n' ' ')"
+    echo "tkt-drive: cannot read main tree SHA for $repo${error_text:+: $error_text}" >&2
+    return 1
+  }
+  case "$treesha" in
+    ''|*[!0-9a-fA-F]*) echo "tkt-drive: main tree SHA for $repo is unreadable" >&2; return 1 ;;
+  esac
+  cache="${FW_TREE_CACHE:-$HOME/.cache/fence-grant/${repo//\//_}}"
+  if [ -f "$cache/$treesha.tree" ]; then
+    cp "$cache/$treesha.tree" "$tree_file" || { echo 'tkt-drive: cannot read main tree cache' >&2; return 1; }
+    [ -s "$tree_file" ] || { echo 'tkt-drive: main tree cache is empty' >&2; return 1; }
+    return 0
+  fi
+  if ! "${FW_GH:-gh}" api "repos/$repo/git/trees/$treesha?recursive=1" >"$tmp/tree.json" 2>"$tmp/tree.err"; then
+    error_text="$(head -c 200 "$tmp/tree.err" 2>/dev/null | tr '\n' ' ')"
+    echo "tkt-drive: cannot read main tree for $repo${error_text:+: $error_text}" >&2
+    return 1
+  fi
+  tree_json="$tmp/tree.json"
+  python3 -I -c 'import json,sys
+try:
+  d = json.load(open(sys.argv[1]))
+except Exception:
+  sys.exit(1)
+if d.get("truncated"):
+  sys.exit(1)
+t = d.get("tree")
+if not isinstance(t, list):
+  sys.exit(1)
+for e in t:
+  if isinstance(e, dict) and e.get("type") == "blob" and e.get("path"):
+    print(e["path"])' "$tree_json" >"$tree_file" || {
+    echo 'tkt-drive: main tree is unreadable or truncated' >&2
+    return 1
+  }
+  [ -s "$tree_file" ] || { echo 'tkt-drive: main tree is empty' >&2; return 1; }
+  mkdir -p "$cache" || { echo 'tkt-drive: cannot create main tree cache' >&2; return 1; }
+  cache_tmp="$(mktemp "$cache/.tree.XXXXXX")" || { echo 'tkt-drive: cannot make main tree cache temp file' >&2; return 1; }
+  if ! cp "$tree_file" "$cache_tmp" || ! mv "$cache_tmp" "$cache/$treesha.tree"; then
+    rm -f "$cache_tmp"
+    echo 'tkt-drive: cannot write main tree cache' >&2
+    return 1
+  fi
+}
+
 grant_plan() {
   local issue="$1" plan="$2" repo="$3" run_dir="$4" part="$5"
-  local output="$tmp/grant.out" error="$tmp/grant.err" rc=0 paths reads
+  local output="$tmp/grant.out" error="$tmp/grant.err" rc=0 paths reads newpaths path
+  local all_paths="$tmp/all-paths" write_paths="$tmp/write-paths" tree_file="$tmp/main.tree"
   local -a grant_args
   [ -r "$plan" ] || internal_stop "tkt-drive: cannot read plan: $plan"
-  paths="$(plan_files_pathspecs "$plan" all)"
-  [ -n "$paths" ] || internal_stop "tkt-drive: plan Files section has no paths: $plan"
-  paths="$(printf '%s\n' "$paths" | paste -sd, -)"
+  plan_files_pathspecs "$plan" all >"$all_paths"
+  [ -s "$all_paths" ] || internal_stop "tkt-drive: plan Files section has no paths: $plan"
+  plan_files_pathspecs "$plan" writes >"$write_paths"
+  load_main_tree "$repo" "$tree_file" || internal_stop "tkt-drive: cannot read main tree for $repo"
+  : >"$tmp/new-paths"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if grep -Fxq -- "$path" "$write_paths"; then
+      case "$path" in
+        *'*'*|*'?'*|*'['*|*'{'*|*/) continue ;;
+      esac
+      if grep -Fxq -- "$path" "$tree_file" || awk -v prefix="${path%/}/" 'index($0, prefix) == 1 { found = 1; exit } END { exit !found }' "$tree_file"; then
+        continue
+      fi
+      printf '%s\n' "$path" >>"$tmp/new-paths"
+    fi
+  done <"$all_paths"
+  paths="$(paste -sd, "$all_paths")"
+  newpaths="$(paste -sd, "$tmp/new-paths")"
+  # fence-grant checks --new paths against main, but --paths defines grant scope.
+  # Keep every Files path in --paths and also mark missing write files as --new.
   # shellcheck disable=SC2154
   reads="$(awk -v mode=entries "$_plan_files_awk" "$plan" | awk -F '\t' '$2 == "read" { print $1 }' | paste -sd, -)"
   grant_args=("$issue" --repo "$repo" --paths "$paths")
+  [ -z "$newpaths" ] || grant_args+=(--new "$newpaths")
   [ -z "$reads" ] || grant_args+=(--reads "$reads")
   case "$part" in
     ''|1) ;;

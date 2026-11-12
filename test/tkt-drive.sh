@@ -16,6 +16,7 @@ export TEST_PLAN_VERDICT="$T/plan-verdict" TEST_POST_VERDICT="$T/post-verdict"
 export TEST_BUILD_VERDICT="$T/build-verdict" TEST_SHIP_VERDICT="$T/ship-verdict"
 export TEST_FENCE_MODE="$T/fence-mode" TEST_FENCE_CALLS="$T/fence-calls.log" TEST_FENCE_RESULTS="$T/fence-results.log"
 export TEST_BUILD_EXTRA="$T/build-extra.md" TEST_MERGE_CALLS="$T/merge-calls.log" TEST_STATE_HELPERS="$T/state-helpers.sh"
+export FW_TREE_CACHE="$T/tree-cache" TEST_TREE_JSON="$T/tree.json" TEST_TREE_SHA
 
 cat >"$TEST_STATE_HELPERS" <<'EOF'
 state_set() {
@@ -140,8 +141,16 @@ exit 99
 EOF
 cat >"$T/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-printf 'gh|%s\n' "$*" >>"$TEST_MERGE_CALLS"
-exit 99
+if [ "${1:-}" = api ]; then
+  case "${2:-}" in
+    repos/acme/switchyard/commits/main) printf '%s\n' "$TEST_TREE_SHA" ;;
+    repos/acme/switchyard/git/trees/*) cat "$TEST_TREE_JSON" ;;
+    *) echo "unexpected gh API request: $*" >&2; exit 90 ;;
+  esac
+else
+  printf 'gh|%s\n' "$*" >>"$TEST_MERGE_CALLS"
+  exit 99
+fi
 EOF
 chmod +x "$T/bin/ship-pr" "$T/bin/gh"
 
@@ -149,6 +158,9 @@ reset_case() {
   local name="$1"
   CASE_DIR="$T/$name"
   mkdir -p "$CASE_DIR/run"
+  TEST_TREE_SHA="$(printf '%s' "$name" | cksum | awk '{printf "%08x", $1}')"
+  export TEST_TREE_SHA
+  printf '{"truncated":false,"tree":[{"path":"src/read.txt","type":"blob"},{"path":"src/write.txt","type":"blob"}]}\n' >"$TEST_TREE_JSON"
   STATE="$CASE_DIR/ticket.state"
   PLAN="$CASE_DIR/plan.md"
   cat >"$PLAN" <<'PLANEOF'
@@ -189,19 +201,47 @@ assert_call_count() {
 }
 
 assert_fence_args() {
-  local line
+  local expected_paths="${1:-src/read.txt,src/write.txt}" expected_new="${2:-}" expected_reads="${3-src/read.txt}" expected line
+  expected="fence-grant|1472 --repo acme/switchyard --paths $expected_paths"
+  [ -z "$expected_new" ] || expected="$expected --new $expected_new"
+  [ -z "$expected_reads" ] || expected="$expected --reads $expected_reads"
   [ -s "$TEST_FENCE_CALLS" ] || fail 'fence-grant was not called'
   while IFS= read -r line; do
-    case "$line" in
-      *'--repo acme/switchyard --paths src/read.txt,src/write.txt --reads src/read.txt'*) ;;
-      *) fail "incorrect fence-grant arguments: $line" ;;
-    esac
+    [ "$line" = "$expected" ] || fail "incorrect fence-grant arguments: $line (expected $expected)"
   done <"$TEST_FENCE_CALLS"
 }
 
 assert_no_merge() {
   [ ! -s "$TEST_MERGE_CALLS" ] || fail "merge command ran: $(cat "$TEST_MERGE_CALLS")"
 }
+
+# New write paths are marked for fence-grant's existence check but remain in
+# --paths, which is the grant scope. Mixed and all-new plans both grant.
+reset_case mixed-new-write
+cat >"$PLAN" <<'PLANEOF'
+## Files
+- `src/existing.txt`
+- `src/new.snap`
+PLANEOF
+printf '{"truncated":false,"tree":[{"path":"src/existing.txt","type":"blob"}]}\n' >"$TEST_TREE_JSON"
+run_drive
+[ "$RC" -eq 1 ] || fail "mixed existing/new plan should grant then stop at fake BLOCKED (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+assert_fence_args 'src/existing.txt,src/new.snap' 'src/new.snap' ''
+grep -q '^.* tkt-drive fence-grant GRANT ' "${STATE%.state}.journal" || fail 'mixed existing/new plan did not record GRANT'
+assert_no_merge
+
+reset_case all-new-writes
+cat >"$PLAN" <<'PLANEOF'
+## Files
+- `src/new-a.snap`
+- `fixtures/events.jsonl`
+PLANEOF
+printf '{"truncated":false,"tree":[{"path":"README.md","type":"blob"}]}\n' >"$TEST_TREE_JSON"
+run_drive
+[ "$RC" -eq 1 ] || fail "all-new plan should grant then stop at fake BLOCKED (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+assert_fence_args 'src/new-a.snap,fixtures/events.jsonl' 'src/new-a.snap,fixtures/events.jsonl' ''
+grep -q '^.* tkt-drive fence-grant GRANT ' "${STATE%.state}.journal" || fail 'all-new plan did not record GRANT'
+assert_no_merge
 
 # SET chains to the next plan step; POSTED grants and continues into the build.
 reset_case set-chain
