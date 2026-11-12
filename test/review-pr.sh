@@ -2934,8 +2934,12 @@ grep -Fq '.review-context/repair-plan.md' "$T/state/prompt-verify.md" || \
   fail "#1641 verify brief lists its context file"
 grep -Eiq 'missing context.*reported.*never searched|never search.*missing context' "$T/state/prompt-verify.md" || \
   fail "#1641 verify brief forbids searching for missing context"
-grep -Fq 'find' "$T/state/prompt-verify.md" && grep -Fq 'locate' "$T/state/prompt-verify.md" || \
+grep -Fq 'Do not use `find` or `locate`' "$T/state/prompt-verify.md" || \
   fail "#1641 verify brief names prohibited search tools"
+grep -Fq 'An open P3 from the `--verify` file still gives `FIX-INCOMPLETE` listing it' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief keeps an open P3 from the findings file blocking FIX-OK"
+! grep -Fq 'P3 findings never block' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief must not waive open P3s from the findings file"
 grep -Fq 'restates every open and new finding in full' "$T/state/prompt-verify.md" || \
   fail "#1641 verify brief requires complete final findings"
 grep -Fq 'even when context is missing' "$T/state/prompt-verify.md" || \

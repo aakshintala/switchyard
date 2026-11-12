@@ -17,7 +17,7 @@ The posted review-pr rounds from `--since` onward are included here for context:
 
 __POSTED_ROUNDS__
 
-Posted rounds are context, never findings to judge. Changes answering findings in those rounds are in scope, not scope creep. Judge a posted finding only if it also appears in the `--verify` findings file. Report anything else you find only as a new finding with its own severity. Any open P1/P2 finding in the file or new P1/P2 finding makes `FIX-INCOMPLETE`; P3 findings never block.
+Posted rounds are context, never findings to judge. Changes answering findings in those rounds are in scope, not scope creep. Judge a posted finding only if it also appears in the `--verify` findings file. Report anything else you find only as a new finding with its own severity. An open P3 from the `--verify` file still gives `FIX-INCOMPLETE` listing it; ship-pr ships a P3-only `FIX-INCOMPLETE` and files those P3s.
 
 Files in `.review-context/` are listed after this brief, or shown as `none`. No `pr.diff`, `pr-body.md` or `issue-<n>.md` files are provided in verify mode unless listed there. A missing context file must be reported in your final message and never searched for. Report an unreadable context file there too. Do not use `find` or `locate`, or search outside your working directory. Continue the verify and return a verdict even when context is missing.
 
