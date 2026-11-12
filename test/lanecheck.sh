@@ -89,6 +89,17 @@ cat > "$T/stub/file-claim" <<'EOF'
 printf '%s\n' "$*" >>"$STUBD/file-claim.log"
 [ "${1:-}" = list ] && exit 0
 [ "${1:-}" = release ] && exit 0
+if [ "${1:-}" = prune ]; then
+  [ "${STUB_PRUNE_FAIL:-0}" != 1 ] || { echo 'stub file-claim prune: unreachable' >&2; exit 2; }
+  lane=""
+  while [ $# -gt 0 ]; do
+    [ "$1" != --lane ] || { lane="$2"; shift 2; continue; }
+    shift
+  done
+  awk -F '\t' -v lane="$lane" '$2 != lane' "$STUBD/claim-rows" >"$STUBD/claim-rows.new"
+  mv "$STUBD/claim-rows.new" "$STUBD/claim-rows"
+  exit 0
+fi
 exit 2
 EOF
 cat > "$T/stub/inbox-watchers" <<'EOF'
@@ -104,6 +115,7 @@ chmod +x "$T/stub/gh" "$T/stub/ssh" "$T/stub/claude" "$T/stub/delegate" \
 cp "$T/stub/owner-ask" "$HOME/.local/bin/owner-ask"
 chmod +x "$HOME/.local/bin/owner-ask"
 export STUBD=$T PATH=$T/stub:$PATH
+: > "$T/claim-rows"
 export BOX_SSH=$T/stub/ssh FW_DELEGATE=$T/stub/delegate \
   FW_FILE_CLAIM=$T/stub/file-claim FW_INBOX_WATCHERS=$T/stub/inbox-watchers \
   FW_BOXSTALE=$T/stub/boxstale
@@ -163,6 +175,33 @@ PY
 write_merged_pr() { # number branch mergedAt
   printf '[{"number":%s,"headRefName":"%s","mergedAt":"%s"}]\n' "$1" "$2" "$3" > "$T/merged-prs"
 }
+
+# The retired-lane query lists only tickets whose roster entries are all retired.
+r=$(newrun retired-query)
+lane "$r" 2001 fiber-2001-plan jid-plan
+lane "$r" 2001 fiber-2001-build jid-build
+latest_done=$(old 1H)
+printf '%s\t2001\tfiber-2001-plan\n' "$(old 2H)" >"$r/roster-done"
+printf '%s\t2001\tfiber-2001-build\n' "$latest_done" >>"$r/roster-done"
+lane "$r" 2002 fiber-2002-plan jid-plan
+lane "$r" 2002 fiber-2002-build jid-build
+printf '%s\t2002\tfiber-2002-plan\n' "$(old 2H)" >>"$r/roster-done"
+lane "$r" 2003 fiber-2003-build jid-build
+printf '%s\t2003\n' "$(old 2H)" >>"$r/roster-done"
+lane "$r" 2004 fiber-2004-build jid-build
+printf '%s\t2004\t\thanded-to-owner handoff-2004 PR #4170\n' "$(old 2H)" >>"$r/roster-done"
+lane "$r" 2005 fiber-2005-build jid-build
+printf 'not-a-timestamp\t2005\n' >>"$r/roster-done"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" retired 2>"$T/retired-query.err"); grc=$?
+if [ "$grc" = 0 ] && [ "$(printf '%s\n' "$out" | cut -f1)" = "$(printf 'fiber-2001\nfiber-2003')" ] \
+  && [ "$(printf '%s\n' "$out" | awk -F '\t' '$1 == "fiber-2001" {print $2}')" = "$latest_done" ]; then
+  ok retired-query-lists-only-fully-retired-ticket-lanes
+else
+  fail "retired-query-lists-only-fully-retired-ticket-lanes (rc=$grc; $out; $(cat "$T/retired-query.err"))"
+fi
+r=$(newrun retired-query-missing); rm -f "$r/roster"
+FW_RUN=$r bash "$BIN/lanecheck" retired >/dev/null 2>&1; grc=$?
+if [ "$grc" -ne 0 ]; then ok retired-query-fails-when-roster-cannot-be-read; else fail retired-query-fails-when-roster-cannot-be-read; fi
 
 # lanecheck forwards a stale-install warning from delegate version exactly once.
 # A binary predating `version` exits nonzero and remains a silent, non-fatal skip.
@@ -291,11 +330,35 @@ if [ "$grc" = 0 ] && printf '%s' "$out" | grep -qF 'already retired: #1410:fiber
   && [ -e "$r/done/fiber-1410-fence-grant-20261104T0000Z.md" ] \
   && [ ! -e "$r/fiber-1410-fence-grant-20261104T0000Z.md" ] \
   && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 1 ] \
-  && grep -q '^release --lane fiber-1410 --repo ' "$T/file-claim.log" \
-  && grep -q '^release --lane fiber-1410-build --repo ' "$T/file-claim.log"; then
+  && grep -qx 'prune --lane fiber-1410' "$T/file-claim.log" \
+  && grep -qx 'prune --lane fiber-1410-build' "$T/file-claim.log"; then
   ok done-already-retired-completes-fence-and-claim-cleanup
 else
   fail "done-already-retired-completes-fence-and-claim-cleanup (rc=$grc; $out; claims=$(cat "$T/file-claim.log"))"
+fi
+
+# Ticket-wide retirement prunes the retired lane's claims, and a failed prune is only a warning.
+r=$(newrun 2d-prune); lane "$r" 1411 fiber-1411-build eee55555
+printf 'path.txt\tfiber-1411\n' >"$T/claim-rows"
+: >"$T/file-claim.log"
+out=$(FW_RUN=$r bash "$BIN/lanecheck" done 1411 2>&1); grc=$?
+if [ "$grc" = 0 ] && [ ! -s "$T/claim-rows" ] \
+  && grep -qx 'prune --lane fiber-1411' "$T/file-claim.log"; then
+  ok done-prunes-claims-for-retired-lane
+else
+  fail "done-prunes-claims-for-retired-lane (rc=$grc; $out; rows=$(cat "$T/claim-rows"); calls=$(cat "$T/file-claim.log"))"
+fi
+r=$(newrun 2e-prune); lane "$r" 1412 fiber-1412-build fff66666
+printf 'path.txt\tfiber-1412\n' >"$T/claim-rows"
+: >"$T/file-claim.log"
+out=$(FW_RUN=$r STUB_PRUNE_FAIL=1 bash "$BIN/lanecheck" done 1412 >"$T/done-prune.out" 2>"$T/done-prune.err"); grc=$?
+out="$(cat "$T/done-prune.out")"
+err="$(cat "$T/done-prune.err")"
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -qF 'CLAIMS NOT RELEASED for fiber-1412' \
+  && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 1 ]; then
+  ok done-continues-when-file-claim-prune-fails
+else
+  fail "done-continues-when-file-claim-prune-fails (rc=$grc; stdout=$out; stderr=$err)"
 fi
 
 # A JID-prefix retirement matches the full session id in the roster.
@@ -1349,13 +1412,9 @@ else
   fail "a-ruling-with-no-report-does-not-crash-the-board (rc=$lrc) $out"
 fi
 
-# --- retirement releases the lane's claims -------------------------------------
-# switchyard#1313: retiring the roster line and the grant records released
-# nothing in file-claim, so 17 claims across three closed tickets outlived their
-# lanes on 2026-11-06 and `fence-grant` called every one HELD. Liveness cannot
-# be read off a process -- those holders' sessions were `idle` with live
-# supervisor pids -- so the release belongs where the ticket ends.
-#
+# --- retirement prunes the lane's claims -------------------------------------
+# Retiring the last lane for a ticket prunes claims alongside its fence records,
+# so an open ticket does not keep paths held after its holder is gone.
 # The stub records every call and serves RELEASE lines per holder from $T/fcheld,
 # so a case can assert which holder shapes were tried, not merely that something
 # was called.
@@ -1387,11 +1446,11 @@ r=$(newrun C1); lane "$r" 4275 fiber-4275-build h1; grant "$r" 4275
 : > "$T/fclog"; : > "$T/fcheld"; held fiber-4275 crates/loop/src/x.rs
 out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
   bash "$BIN/lanecheck" done 4275 2>&1)
-if printf '%s' "$out" | grep -q 'claims released: fiber-4275 (1)' \
+if printf '%s' "$out" | grep -q 'claims pruned: fiber-4275 (1)' \
    && grep -qx 'fiber-4275' "$T/fclog"; then
-  ok retirement-releases-the-bare-holder
+  ok done-prunes-the-bare-holder
 else
-  fail "retirement-releases-the-bare-holder ($out)"
+  fail "done-prunes-the-bare-holder ($out)"
 fi
 
 # ...and every session name on the roster, because a lane launched by phase
@@ -1404,15 +1463,15 @@ grant "$r" 4307
 held fiber-4307-plan docs/ci.md; held fiber-4307-build crates/main/src/y.rs
 out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
   bash "$BIN/lanecheck" done 4307 2>&1)
-if printf '%s' "$out" | grep -q 'claims released: fiber-4307-plan (1)' \
-   && printf '%s' "$out" | grep -q 'claims released: fiber-4307-build (1)'; then
-  ok retirement-releases-every-phase-holder
+if printf '%s' "$out" | grep -q 'claims pruned: fiber-4307-plan (1)' \
+   && printf '%s' "$out" | grep -q 'claims pruned: fiber-4307-build (1)'; then
+  ok done-prunes-every-phase-holder
 else
-  fail "retirement-releases-every-phase-holder ($out)"
+  fail "done-prunes-every-phase-holder ($out)"
 fi
 
-# A fence kept is a claim kept. The first of two sessions retiring must release
-# nothing, or the release reopens the running build's files -- the exact defect
+# A fence kept is a claim kept. The first of two sessions retiring must prune
+# nothing, or the prune reopens the running build's files -- the exact defect
 # the 2026-11-04 fence fix was written for, one level down.
 r=$(newrun C3); lane "$r" 4089 fiber-4089-plan h4; lane "$r" 4089 fiber-4089-build h5
 grant "$r" 4089
@@ -1453,11 +1512,11 @@ r=$(newrun C4); lane "$r" 4162 fiber-4162-build h6; grant "$r" 4162
 out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
   FC_BOOM=1 bash "$BIN/lanecheck" done 4162 2>&1)
 if printf '%s' "$out" | grep -q 'CLAIMS NOT RELEASED for fiber-4162' \
-   && printf '%s' "$out" | grep -q 'release --lane fiber-4162' \
+   && printf '%s' "$out" | grep -q 'prune --lane fiber-4162' \
    && [ -e "$r/done/fiber-4162-fence-grant-20261104T0000Z.md" ]; then
-  ok failed-release-is-named-and-retirement-continues
+  ok failed-prune-is-warned-and-retirement-continues
 else
-  fail "failed-release-is-named-and-retirement-continues ($out)"
+  fail "failed-prune-is-warned-and-retirement-continues ($out)"
 fi
 
 # A branch-shaped holder is NAMED, with its path count and a paste-ready

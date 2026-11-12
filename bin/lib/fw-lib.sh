@@ -456,7 +456,7 @@ fw_has_nonempty_grant() {
 # Returns 1 when GitHub/fence-grant fails or no grant file appears in <run>.
 # FW_GH and FW_FENCE_GRANT override gh and fence-grant (tests).
 fw_self_grant() {
-  local who=$1 n=$2 run=$3 refresh_existing=${4:-0} phase=${5:-} body lists w r rg fg nw g found
+  local who=$1 n=$2 run=$3 refresh_existing=${4:-0} phase=${5:-} body lists w r rg fg nw g found what
   local -a a=()
   fg=${FW_FENCE_GRANT:-$_FW_LIB_DIR/fence-grant}
   _fw_grant_ssh=${FW_SSH:-}
@@ -494,8 +494,8 @@ print(",".join(w)); print(",".join(r)); print(",".join(rg))') || return 1
   rg=$(printf '%s\n' "$lists" | sed -n 3p)
   if [ -z "$w" ]; then
     if [ -z "$body" ] && [ "$phase" != plan ]; then
-      phase=${phase:-build}
-      echo "$who: #$n has no posted plan; a $phase phase needs one to grant its fence" >&2
+      if [ -n "$phase" ]; then what="a $phase phase"; else what="a launch with no phase"; fi
+      echo "$who: #$n has no posted plan; $what needs one to grant its fence" >&2
       return 1
     fi
     if [ "$refresh_existing" = 1 ] && fw_has_grant_file "$n" "$run"; then
