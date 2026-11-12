@@ -183,7 +183,7 @@ case "$slot" in
   lane|fix[0-9]*)
     phase=build
     if ! fw_has_nonempty_grant "$issue" "$run" && [ -z "${FW_NO_FENCE:-}" ]; then
-      fw_self_grant tkt-job "$issue" "$run" 1 || {
+      fw_self_grant tkt-job "$issue" "$run" 1 build || {
         echo "tkt-job: could not self-grant a fence for #$issue" >&2
         exit 2
       }
