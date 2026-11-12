@@ -274,10 +274,14 @@ add_selected_suite() {
 }
 
 run_since() {
-  local since="$1" path relative suite candidate full_reason="" skills_changed=0
-  local diff_output
-  if ! diff_output="$(git -C "$D/.." diff --name-only "$since"..HEAD 2>&1)"; then
-    printf 'test/run: cannot diff %s..HEAD: %s\n' "$since" "$diff_output" >&2
+  local since="$1" path relative suite candidate full_reason="" skills_changed=0 delegate_changed=0
+  local diff_output untracked_output
+  if ! diff_output="$(git -C "$D/.." diff --name-only "$since" 2>&1)"; then
+    printf 'test/run: cannot diff %s: %s\n' "$since" "$diff_output" >&2
+    return 2
+  fi
+  if ! untracked_output="$(git -C "$D/.." ls-files --others --exclude-standard 2>&1)"; then
+    printf 'test/run: cannot list untracked files: %s\n' "$untracked_output" >&2
     return 2
   fi
 
@@ -285,6 +289,13 @@ run_since() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     case "$path" in
+      docs/*|.github/*|*/LICENSE|LICENSE)
+        ;;
+      skills/*)
+        skills_changed=1
+        ;;
+      *.md)
+        ;;
       bin/lib/*|test/run)
         [ -n "$full_reason" ] || full_reason="$path"
         ;;
@@ -315,12 +326,27 @@ run_since() {
             ;;
         esac
         ;;
-      skills/*) skills_changed=1 ;;
+      delegate/*)
+        delegate_changed=1
+        for suite in "$D"/*.sh; do
+          [ -f "$suite" ] || continue
+          if grep -F 'delegate/' "$suite" >/dev/null; then
+            add_selected_suite "$suite"
+          fi
+        done
+        ;;
+      *)
+        [ -n "$full_reason" ] || full_reason="$path"
+        ;;
     esac
   done <<EOF_PATHS
 $diff_output
+$untracked_output
 EOF_PATHS
 
+  if [ "$delegate_changed" -eq 1 ]; then
+    printf 'test/run --since %s: delegate/ cargo gate runs in CI\n' "$since"
+  fi
   if [ -n "$full_reason" ]; then
     printf 'test/run --since %s: selected full suite (%s)\n' "$since" "$full_reason"
     run_full_suite

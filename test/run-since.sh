@@ -71,13 +71,17 @@ commit_delta() {
   git -C "$repo" commit -qm 'fixture change' || fail 'could not commit fixture change'
 }
 
-run_since() {
-  local arg="${1:-$BASE}"
-  if (cd "$repo" && FIXTURE_LOG="$log" bash test/run --since "$arg") >"$out" 2>&1; then
+run_since_from() {
+  local cwd="$1" arg="${2:-$BASE}"
+  if (cd "$cwd" && FIXTURE_LOG="$log" bash "$repo/test/run" --since "$arg") >"$out" 2>&1; then
     run_rc=0
   else
     run_rc=$?
   fi
+}
+
+run_since() {
+  run_since_from "$repo" "${1:-$BASE}"
 }
 
 assert_selected() {
@@ -92,6 +96,14 @@ assert_not_selected() {
     cat "$out" >&2
     fail "selection unexpectedly included $1"
   fi
+}
+
+assert_no_suites_selected() {
+  grep -F "test/run --since $BASE: no suites selected" "$out" >/dev/null || {
+    cat "$out" >&2
+    fail 'ignored path change did not print no suites selected'
+  }
+  [ ! -s "$log" ] || fail 'ignored path change unexpectedly ran a suite'
 }
 
 assert_only_suite() {
@@ -127,6 +139,37 @@ run_since
 [ "$run_rc" -eq 0 ] || fail 'changed suite run failed'
 assert_selected test/agents-ff.sh
 assert_only_suite agents-ff.sh
+
+# An uncommitted edit is included in the diff from the baseline SHA.
+new_fixture
+commit_base
+printf '\n# uncommitted suite edit\n' >>"$repo/test/agents-ff.sh"
+run_since
+[ "$run_rc" -eq 0 ] || fail 'uncommitted suite edit run failed'
+assert_selected test/agents-ff.sh
+assert_only_suite agents-ff.sh
+echo 'PASS: uncommitted suite edit selected its suite'
+
+# An untracked new suite is included in the changed-path union.
+new_fixture
+commit_base
+ensure_suite untracked-new.sh
+run_since
+[ "$run_rc" -eq 0 ] || fail 'untracked suite run failed'
+assert_selected test/untracked-new.sh
+assert_only_suite untracked-new.sh
+echo 'PASS: untracked new suite selected itself'
+
+# The fixture runner finds the repository root even when invoked from elsewhere.
+new_fixture
+commit_base
+printf '\n# changed suite from another cwd\n' >>"$repo/test/agents-ff.sh"
+commit_delta
+run_since_from /
+[ "$run_rc" -eq 0 ] || fail 'suite selection from another cwd failed'
+assert_selected test/agents-ff.sh
+assert_only_suite agents-ff.sh
+echo 'PASS: --since works when invoked outside the repository'
 
 # A changed bin command selects its same-named suite when that suite exists.
 new_fixture
@@ -180,13 +223,15 @@ printf '%s\n' suite:tkt-fix.sh suite:path-command.sh suite:bare-command.sh | sor
 grep '^suite:' "$log" | sort >"$actual" || :
 diff -u "$expected" "$actual" >/dev/null || fail 'command-reference run selected the wrong suites'
 
-# Changes under bin/lib, test/run, and a shared test helper run the full list.
-for fallback in bin-lib test-run test-helper; do
+# Changes under bin/lib, test/run, a shared test helper, and unknown code paths run the full list.
+for fallback in bin-lib test-run test-helper claude-code-hook unknown-root; do
   new_fixture
   case "$fallback" in
     bin-lib) mkdir -p "$repo/bin/lib"; target="$repo/bin/lib/helper.sh" ;;
     test-run) target="$repo/test/run" ;;
     test-helper) mkdir -p "$repo/test/lib"; target="$repo/test/lib/helper.sh" ;;
+    claude-code-hook) mkdir -p "$repo/claude-code/hooks"; target="$repo/claude-code/hooks/x" ;;
+    unknown-root) target="$repo/unmapped-config" ;;
   esac
   [ -e "$target" ] || printf '# fixture helper\n' >"$target"
   commit_base
@@ -202,20 +247,39 @@ for fallback in bin-lib test-run test-helper; do
   echo "PASS: $fallback change ran the complete full-suite list"
 done
 
-# Documentation-only changes select nothing and return success.
+# Documentation and GitHub metadata changes select nothing.
+for ignored_path in docs/x.md README.md .github/workflows/x.yml LICENSE claude-code/plugins/LICENSE; do
+  new_fixture
+  target="$repo/$ignored_path"
+  mkdir -p "$(dirname "$target")"
+  printf 'fixture ignored path\n' >"$target"
+  commit_base
+  printf '\nchanged\n' >>"$target"
+  commit_delta
+  run_since
+  [ "$run_rc" -eq 0 ] || fail "$ignored_path selection did not exit 0"
+  assert_no_suites_selected
+  echo "PASS: $ignored_path selected no suites"
+done
+
+# Delegate code selects every suite mentioning the fixed string delegate/.
 new_fixture
-printf 'fixture docs\n' >"$repo/docs/notes.md"
+printf '\n# fixture exercises delegate/ paths\n' >>"$repo/test/delegate-replay.sh"
+printf '\n# fixture also exercises delegate/ paths\n' >>"$repo/test/delegate-canary.sh"
+mkdir -p "$repo/delegate/src"
+printf 'fixture delegate source\n' >"$repo/delegate/src/x.rs"
 commit_base
-printf '\nchanged\n' >>"$repo/docs/notes.md"
+printf '\nchanged\n' >>"$repo/delegate/src/x.rs"
 commit_delta
 run_since
-[ "$run_rc" -eq 0 ] || fail 'docs-only selection did not exit 0'
-grep -F "test/run --since $BASE: no suites selected" "$out" >/dev/null || {
-  cat "$out" >&2
-  fail 'docs-only selection did not print no suites selected'
-}
-[ ! -s "$log" ] || fail 'docs-only change unexpectedly ran a suite'
-echo 'PASS: docs-only change selected no suites'
+[ "$run_rc" -eq 0 ] || fail 'delegate selection failed'
+assert_selected test/delegate-canary.sh
+assert_selected test/delegate-replay.sh
+printf '%s\n' suite:delegate-canary.sh suite:delegate-replay.sh | sort >"$expected"
+grep '^suite:' "$log" | sort >"$actual" || :
+diff -u "$expected" "$actual" >/dev/null || fail 'delegate change selected the wrong suites'
+grep -F "test/run --since $BASE: delegate/ cargo gate runs in CI" "$out" >/dev/null || fail 'delegate CI cargo-gate note missing'
+echo 'PASS: delegate change selected all matching suites'
 
 # Skills changes select and run check-pack.
 new_fixture
