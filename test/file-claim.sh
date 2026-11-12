@@ -586,12 +586,12 @@ out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4224 --diff "$DWT" -
   || fail "pushed hunk claim succeeds: $out"
 [ "$out" = "$(printf 'GRANT a.txt:1-1 exists\nfile-claim: 1 granted, 0 refused')" ] || fail "pushed hunk claim output: $out"
 claims="$(claims_blob "$R")"
-[ "$(printf '%s\n' "$claims" | grep -c '^a.txt:1-1\tfiber-4224\tplan\t')" = 1 ] \
+[ "$(printf '%s\n' "$claims" | grep -c "^a.txt:1-1${TAB}fiber-4224${TAB}plan${TAB}")" = 1 ] \
   || fail "pushed hunk claim replaces the ticket's whole-file plan claim: $claims"
-if grep -q '^a.txt\tfiber-4224\t' <<<"$claims"; then
+if grep -q "^a.txt${TAB}fiber-4224${TAB}" <<<"$claims"; then
   fail "pushed hunk claim leaves no whole-file claim for the changed path"
 fi
-[ "$(printf '%s\n' "$claims" | grep -c '^b.txt\tfiber-4224\tplan\t')" = 1 ] \
+[ "$(printf '%s\n' "$claims" | grep -c "^b.txt${TAB}fiber-4224${TAB}plan${TAB}")" = 1 ] \
   || fail "pushed hunk claim preserves the whole-file plan claim for the untouched path: $claims"
 out="$(FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-4225 --plan --worktree t:dOther --repo test/repo a.txt:1-1 2>/dev/null)" \
   || fail "overlapping pushed hunk is advisory: $out"
