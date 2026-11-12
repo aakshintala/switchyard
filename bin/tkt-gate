@@ -280,15 +280,7 @@ $digest"
 # holder's pid. Separate from <state>.lock, which tkt-state takes per write.
 phasedir="$state.phase"
 require_state_file tkt-gate "$state"
-if ! mkdir "$phasedir" 2>/dev/null; then
-  pid="$(cat "$phasedir/pid" 2>/dev/null || true)"
-  if [ -n "$pid" ]; then
-    echo "tkt-gate: state locked by pid $pid" >&2
-  else
-    echo "tkt-gate: state locked" >&2
-  fi
-  exit 2
-fi
+take_state_lock tkt-gate "$phasedir"
 printf '%s\n' "$$" >"$phasedir/pid"
 cargo_slot_dir=""
 release_phase() {
