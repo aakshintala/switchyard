@@ -361,6 +361,7 @@ def number(value, scale=1):
 
 def vendor_fields(model, vendor):
     fields = {}
+    alternatives_by_field = {}
     aliases = {
         "context": ("context_window", "context_length", "inputTokenLimit", "input_token_limit"),
         "output": ("max_tokens", "max_output_tokens", "outputTokenLimit", "output_token_limit"),
@@ -384,12 +385,11 @@ def vendor_fields(model, vendor):
                     candidate
                     for override in overrides
                     if isinstance(override, dict)
-                    and "utc_start" in override
-                    and "utc_end" in override
+                    and any(key in override for key in ("utc_days", "utc_start", "utc_end"))
                     and (candidate := number(override.get(key), 1_000_000)) is not None
                 ]
                 if alternatives:
-                    fields[field + "_alternatives"] = alternatives
+                    alternatives_by_field[field] = alternatives
     for field, keys in (("input_price", ("input_price",)), ("output_price", ("output_price",))):
         if field not in fields:
             value = next((model.get(key) for key in keys if model.get(key) is not None), None)
@@ -402,7 +402,7 @@ def vendor_fields(model, vendor):
         status = model["status"].lower()
         if status in ("deprecated", "retired", "active", "available"):
             fields["deprecated"] = status in ("deprecated", "retired")
-    return fields
+    return fields, alternatives_by_field
 
 
 def reference_fields(model):
@@ -491,6 +491,15 @@ def dated_model_date(identifier):
 
 def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
     vendor_items, excluded = filtered_vendor_items(vendor_items, vendor)
+    if vendor == "gemini":
+        # The vendor's models.list has no modality field, so this filter reads models.dev's.
+        for identifier, model in reference.items():
+            if not isinstance(model, dict):
+                continue
+            output_modalities = nested(model, "modalities", "output")
+            if (isinstance(output_modalities, list) and "text" not in output_modalities) or model.get("tool_call") is False:
+                excluded.add(identifier)
+        vendor_items = [item for item in vendor_items if model_id(item, vendor) not in excluded]
     vendor_index = index_models(vendor_items, vendor)
     if vendor == "openai":
         reference = {identifier: model for identifier, model in reference.items() if not OPENAI_NON_CHAT.search(identifier)}
@@ -498,10 +507,15 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
         reference = {identifier: model for identifier, model in reference.items() if identifier not in excluded}
     original_vendor_ids = set(vendor_index)
     reference_ids = set(reference)
+    exact_dated_bases = {
+        base
+        for identifier in vendor_index
+        if identifier in reference_ids and (base := dated_model_base(identifier)) is not None
+    }
     latest_dated = {}
     for identifier in vendor_index:
         base = dated_model_base(identifier)
-        if base not in reference_ids or base in original_vendor_ids or identifier in reference_ids:
+        if base not in reference_ids or base in original_vendor_ids or base in exact_dated_bases or identifier in reference_ids:
             continue
         candidate = (dated_model_date(identifier), identifier)
         if candidate > latest_dated.get(base, ("", "")):
@@ -522,6 +536,7 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
         else:
             vendor_index[base] = vendor_index.pop(identifier)
     rows = []
+    account_gone = 0
     for identifier in sorted(set(vendor_index) | set(reference)):
         left = vendor_index.get(identifier)
         right = reference.get(identifier)
@@ -529,10 +544,12 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
             rows.append((identifier, "missing", "-", "listed", "-"))
             continue
         if left is None:
-            if vendor != "codex":
+            if vendor == "openai":
+                account_gone += 1
+            elif vendor != "codex":
                 rows.append((identifier, "gone", "-", "-", "listed"))
             continue
-        left_fields = vendor_fields(left, vendor)
+        left_fields, left_alternatives = vendor_fields(left, vendor)
         right_fields = reference_fields(right)
         for field in FIELD_NAMES:
             if field not in left_fields or field not in right_fields:
@@ -541,12 +558,15 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
                 continue
             left_value, right_value = left_fields[field], right_fields[field]
             if field in ("input_price", "output_price"):
-                alternatives = left_fields.get(field + "_alternatives", ())
+                alternatives = left_alternatives.get(field, ())
                 if any(math.isclose(value, right_value, rel_tol=1e-6) for value in (left_value, *alternatives)):
                     continue
             if left_value != right_value:
                 rows.append((identifier, "mismatch", field, left_value, right_value))
-    return rows
+    notes = []
+    if account_gone:
+        notes.append(f"{account_gone} models.dev models not listed for this account (per-account visibility)")
+    return rows, notes
 
 
 def short_sha(script_path):
@@ -564,17 +584,25 @@ def short_sha(script_path):
         return "unknown"
 
 
-def write_report(inbox, today, source, rows_by_vendor, skipped, secrets):
+def write_report(inbox, today, source, rows_by_vendor, notes_by_vendor, skipped, secrets):
     lines = [f"# Model catalog gaps {today}", f"source: model-catalog-diff {source}", ""]
     for vendor in VENDORS:
-        rows = rows_by_vendor.get(vendor["name"], [])
-        if not rows:
+        name = vendor["name"]
+        rows = rows_by_vendor.get(name, [])
+        notes = notes_by_vendor.get(name, [])
+        if not rows and not notes:
             continue
-        lines.extend((f"## {vendor['name']}", "", "| model | kind | field | vendor | models.dev |", "|---|---|---|---|---|"))
-        for identifier, kind, field, left, right in rows:
-            values = (identifier, kind, field, left, right)
-            lines.append("| " + " | ".join(markdown(value, secrets) for value in values) + " |")
-        lines.append("")
+        lines.extend((f"## {name}", ""))
+        for note in notes:
+            lines.append(f"- {markdown(note, secrets)}")
+        if notes:
+            lines.append("")
+        if rows:
+            lines.extend(("| model | kind | field | vendor | models.dev |", "|---|---|---|---|---|"))
+            for identifier, kind, field, left, right in rows:
+                values = (identifier, kind, field, left, right)
+                lines.append("| " + " | ".join(markdown(value, secrets) for value in values) + " |")
+            lines.append("")
     lines.extend(("## skipped", ""))
     for vendor, reason in skipped:
         lines.append(f"- {markdown(vendor, secrets)}: {markdown(reason, secrets)}")
@@ -624,6 +652,7 @@ def run(script_path):
     ignore_pins = read_ignore_pins()
     skipped = []
     rows_by_vendor = {}
+    notes_by_vendor = {}
     for spec in VENDORS:
         try:
             items = fetch_vendor(spec, credentials, codex_token, timeout)
@@ -634,11 +663,21 @@ def run(script_path):
             skipped.append((spec["name"], "models.dev " + model_dev_failure))
             continue
         try:
+            if not isinstance(reference_payload, dict):
+                raise FetchFailure("invalid response")
+            provider_data = reference_payload.get(spec["provider"])
+            if not isinstance(provider_data, dict):
+                notes_by_vendor.setdefault(spec["name"], []).append(
+                    f"models.dev carries no {spec['provider']} provider"
+                )
+                continue
             reference = reference_models(reference_payload, spec["provider"])
-            rows = compare_vendor(items, reference, spec["name"], ignore_pins)
+            rows, vendor_notes = compare_vendor(items, reference, spec["name"], ignore_pins)
         except FetchFailure as error:
             skipped.append((spec["name"], error.reason))
             continue
+        if vendor_notes:
+            notes_by_vendor.setdefault(spec["name"], []).extend(vendor_notes)
         if rows:
             rows_by_vendor[spec["name"]] = rows
 
@@ -647,7 +686,7 @@ def run(script_path):
     if not rows_by_vendor and not skipped:
         return 0
     inbox = Path(os.environ.get("MODEL_CATALOG_INBOX", INBOX_DEFAULT)).expanduser()
-    target = write_report(inbox, today, short_sha(script_path), rows_by_vendor, skipped, secrets)
+    target = write_report(inbox, today, short_sha(script_path), rows_by_vendor, notes_by_vendor, skipped, secrets)
     print(f"model-catalog-diff: wrote {target.name}")
     return 0
 
