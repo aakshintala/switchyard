@@ -1,16 +1,25 @@
 Scoped verify of the repair on PR #__PR__ in __REPO__. Do not edit, push or comment. Do not delegate further.
 
-Follow the scoped-verify mode of `__SKILLS__/code-review/SKILL.md`. Your working directory is a checkout of the PR head; the repair diff is `git diff __SINCE__..HEAD`. The findings it answers:
+Follow the scoped-verify mode of `__SKILLS__/code-review/SKILL.md`.
+
+Checkout: `__CHECKOUT__`.
+Repair range: `git diff __SINCE__..HEAD`.
+
+Only the findings in the `--verify` findings file are judged as fixed, refuted or open. The findings are included here:
 
 __FINDINGS__
 
-The `--verify` findings file may contain a cumulative history rather than only the latest open findings. It labels each finding with the review or fix round that raised it, its current status, and rounds deliberately run without verification. The header lists the finding rounds held and earlier fix rounds in this diff. Treat the complete history as the scoped findings; use the labels as context, then judge each finding against the repair diff at HEAD.
+The findings file may contain a cumulative history rather than only the latest open findings. It labels each finding with the review or fix round that raised it, its current status, and rounds deliberately run without verification. The header lists the finding rounds held and earlier fix rounds in this diff. Treat the complete history in this file as the scoped findings; use the labels as context, then judge each finding against the repair diff at HEAD.
 
 ## Earlier posted review rounds
 
-The posted review-pr rounds from `--since` onward are appended automatically; changes answering findings in those rounds are in scope. The findings file carries what was never posted: CI and mutant findings, rulings, and refutations.
+The posted review-pr rounds from `--since` onward are included here for context:
 
 __POSTED_ROUNDS__
+
+Posted rounds are context, never findings to judge. Changes answering findings in those rounds are in scope, not scope creep. Judge a posted finding only if it also appears in the `--verify` findings file. Report anything else you find only as a new finding with its own severity. Any open P1/P2 finding in the file or new P1/P2 finding makes `FIX-INCOMPLETE`; P3 findings never block.
+
+Files in `.review-context/` are listed after this brief, or shown as `none`. No `pr.diff`, `pr-body.md` or `issue-<n>.md` files are provided in verify mode unless listed there. A missing context file must be reported in your final message and never searched for. Report an unreadable context file there too. Do not use `find` or `locate`, or search outside your working directory. Continue the verify and return a verdict even when context is missing.
 
 Read the code at HEAD before calling any finding open: a finding whose fix is in the repair diff is fixed, whatever the findings file's wording or its line numbers say (they point at the reviewed head).
 
@@ -18,4 +27,4 @@ A finding carrying `refuted: <evidence>` is judged as the skill says, and stays 
 
 A repair that detects a bad state at entry (a drift or precondition check) and stops there fixes a finding about detection; a finding about recovering from that state stays open until a path recovers.
 
-Max 150 words. End with exactly `FIX-OK` when every finding is fixed or refuted, else `FIX-INCOMPLETE` followed by every still-open and every new finding in the finding format, then a STATUS line.
+Final message restates every open and new finding in full, using the finding format. Do not say “the verdict stands” or refer to earlier text. End with exactly one verdict line (`FIX-OK` or `FIX-INCOMPLETE`), then exactly one `STATUS: DONE` or `STATUS: DONE_WITH_CONCERNS` line, even when context is missing.

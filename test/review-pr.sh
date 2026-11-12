@@ -2493,6 +2493,8 @@ STATUS: DONE" 0
 bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
   --verify "$T/clean-findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || \
   fail "run --verify accepts the no-findings file"
+grep -Fq 'Files in .review-context/ for this verify: none' "$T/state/prompt-verify.md" || \
+  fail "verify without --context lists no context files"
 
 # --- case: a reprint of a collected job writes --findings-out too, and posts nothing
 reset_state
@@ -2897,6 +2899,49 @@ line_x="$(grep -nF 'P1 finding X: earlier reviewed behavior' "$T/state/prompt-ve
 line_z="$(grep -nF 'P2 finding Z: latest verify finding' "$T/state/prompt-verify.md" | tail -n 1 | cut -d: -f1)"
 [ "$line_x" -lt "$line_z" ] || fail "verify brief keeps posted rounds in comment order"
 bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "verify with the latest-only findings file collects"
+
+# --- case #1641: only --verify findings are judged; posted rounds are context
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf '%s\n' "$NEW_SHA" >"$T/state/heads.txt"
+printf 'P2 finding: the repair fixes this finding\n- Evidence: repair is in the diff\n' >"$T/findings.txt"
+mkdir -p "$T/verify-context"
+printf 'repair context\n' >"$T/verify-context/repair-plan.md"
+write_record verify DONE "FIX-OK
+STATUS: DONE" 0
+plant_comment "2026-10-09T10:00:00Z" 241 "review-pr: patch-id $EXPECTED_NEW_PID, head $OLD_SHA
+
+## standards (M)
+
+P2 finding: the repair fixes this finding
+P3 finding: a non-blocking issue from the posted review
+VERDICT standards: CHANGES"
+start_review 8 --repo O/N --cwd "$T/clone" --model M --verify "$T/findings.txt" \
+  --since "$OLD_SHA" --head "$NEW_SHA" --context "$T/verify-context/repair-plan.md" \
+  >/dev/null 2>"$T/verify-1641-stderr.txt" || { cat "$T/verify-1641-stderr.txt" >&2; fail "#1641 verify starts"; }
+wt="$(worktree_for verify)"
+grep -Fq 'Only the findings in the `--verify` findings file are judged as fixed, refuted or open' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief limits judged findings to the --verify file"
+grep -Fq 'P2 finding: the repair fixes this finding' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief includes the P2 from the findings file"
+grep -Fq 'P3 finding: a non-blocking issue from the posted review' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief includes posted P3 only as context"
+grep -Fq "git diff $OLD_SHA..HEAD" "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief names the repair range"
+grep -Fq "$wt" "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief names its checkout"
+grep -Fq '.review-context/repair-plan.md' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief lists its context file"
+grep -Eiq 'missing context.*reported.*never searched|never search.*missing context' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief forbids searching for missing context"
+grep -Fq 'find' "$T/state/prompt-verify.md" && grep -Fq 'locate' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief names prohibited search tools"
+grep -Fq 'restates every open and new finding in full' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief requires complete final findings"
+grep -Fq 'even when context is missing' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief requires a verdict when context is missing"
+bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "#1641 verify collects"
+grep -Fxq 'FIX-OK' "$T/state/comment.md" || fail "#1641 collected verify posts FIX-OK"
 
 # --- case #1183: a later FIX-OK verify refuses an older --since before dispatch
 reset_state

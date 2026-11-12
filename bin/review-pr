@@ -966,7 +966,7 @@ cmd_start() {
         ;;
       verify)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" "SKILLS=$skills_dir" \
-          "SINCE=$since" "FINDINGS=@$verify" "POSTED_ROUNDS=@$verify_round_file" >"$brief"
+          "CHECKOUT=$wt" "SINCE=$since" "FINDINGS=@$verify" "POSTED_ROUNDS=@$verify_round_file" >"$brief"
         ;;
     esac
     if [ "$mode" = "review" ] && [ -f "$review_context/pr-body.md" ]; then
@@ -989,11 +989,19 @@ cmd_start() {
       esac
     fi
     # Context files live outside the checkout; copy them into each reviewer
-    # worktree and list their paths in the brief.
+    # worktree and list their paths in the brief. Verify starts with a clean
+    # context directory so it can name exactly what the verifier receives.
+    if [ "$mode" = "verify" ]; then
+      rm -rf "$wt/.review-context"
+    fi
     if [ "${#context_files[@]}" -gt 0 ]; then
       mkdir -p "$wt/.review-context"
       {
-        printf '\nContext files outside the checkout, copied into your working directory (read them as needed):\n'
+        if [ "$mode" = "verify" ]; then
+          printf '\nFiles in .review-context/ for this verify:\n'
+        else
+          printf '\nContext files outside the checkout, copied into your working directory (read them as needed):\n'
+        fi
         for context_path in ${context_files[@]+"${context_files[@]}"}; do
           context_base="$(basename "$context_path")"
           context_dest="$context_base"
@@ -1006,6 +1014,8 @@ cmd_start() {
           printf '.review-context/%s\n' "$context_dest"
         done
       } >>"$brief"
+    elif [ "$mode" = "verify" ]; then
+      printf '\nFiles in .review-context/ for this verify: none\n' >>"$brief"
     fi
 
     echo "review-pr: starting $role job ($(model_for "$role"))" >&2
