@@ -58,6 +58,7 @@ format_reanchor_symbols() {
 t() { "$tkt_state" "$state" "$@"; }
 
 lockdir="$state.lock"
+require_state_file tkt-plan "$state"
 if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-plan: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
 

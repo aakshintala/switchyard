@@ -1117,6 +1117,14 @@ OUT="$(bash "$BUILD" 2>/dev/null)"; RC=$?
 OUT="$(bash "$BUILD" "$S" --help 2>/dev/null)"; RC=$?
 [ "$RC" -eq 2 ] || fail "--help exits 2"
 
+# --- a missing state file is not reported as a held lock ---
+setup_case missing-state
+missing_state="missing/state"
+OUT="$(cd "$CDIR" && bash "$BUILD" "$missing_state" 2>"$CDIR/stderr.txt")"; RC=$?
+[ "$RC" -eq 2 ] || fail "missing state exits 2 (rc=$RC)"
+grep -Fq "no state file at $missing_state" "$CDIR/stderr.txt" || fail "missing state names its path: $(cat "$CDIR/stderr.txt")"
+grep -q "state locked" "$CDIR/stderr.txt" && fail "missing state is not reported locked"
+
 # --- a held lock names its holder and runs nothing ---
 setup_case locked
 mkdir "$S.lock"

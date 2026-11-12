@@ -155,6 +155,7 @@ journal_gate_command() {
 # Probe the shared lock and release it at once: the delegate wait below
 # outlives any lock, and tkt-state locks each write itself.
 lockdir="$state.lock"
+require_state_file tkt-job "$state"
 if ! mkdir "$lockdir" 2>/dev/null; then
   pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
   if [ -n "$pid" ]; then

@@ -279,6 +279,7 @@ $digest"
 # Hold the phase lock for the whole command: a second run exits 2 naming the
 # holder's pid. Separate from <state>.lock, which tkt-state takes per write.
 phasedir="$state.phase"
+require_state_file tkt-gate "$state"
 if ! mkdir "$phasedir" 2>/dev/null; then
   pid="$(cat "$phasedir/pid" 2>/dev/null || true)"
   if [ -n "$pid" ]; then
