@@ -94,6 +94,11 @@ expect_problems "path line citation rejected" "$(mkplan linecite '## Files\n- `s
   'line-number citation: foo.rs:120 (line 8): cite `path::symbol` or a doc heading'
 expect_problems "prose line citation rejected" "$(mkplan prose_linecite '## Rulings\nThe parser is shown at line 120.\n')" \
   'line-number citation: line 120 (line 5): cite `path::symbol` or a doc heading'
+expect_clean "deadline number is not a line citation" "$(mkplan deadline '## Rulings\nThe deadline 40 days from submission.\n')"
+expect_problems "second path citation after a quoted panic is still rejected" "$(mkplan second_linecite '## Rulings\nThe original panic was "panic at a.rs:20"; review b.rs:30.\n')" \
+  'line-number citation: b.rs:30 (line 5): cite `path::symbol` or a doc heading'
+expect_problems "apostrophes in contractions do not quote citations" "$(mkplan apostrophe '## Rulings\nThe lane'\''s error at foo.rs:120 isn'\''t fixed.\n')" \
+  'line-number citation: foo.rs:120 (line 5): cite `path::symbol` or a doc heading'
 expect_clean "line citations inside fenced code are legal" "$(mkplan linecode '## Rulings\n```text\nSee foo.rs:120 and line 120.\n```\n')"
 expect_clean "line citations inside tilde-fenced code are legal" "$(mkplan linetilde '## Rulings\n~~~text\nSee foo.rs:120 and line 120.\n~~~\n')"
 expect_clean "line citations in quoted panic messages are legal" "$(mkplan linepanic '## Rulings\n> panic: foo.rs:120\n> error: line 120\n')"

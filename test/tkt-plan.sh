@@ -1795,8 +1795,8 @@ expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "reanchor-brace-in-string"
 grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "reanchor-brace-in-string checks the changed body"
 grep -Fq 'Re-anchor review is limited to these cited symbols: src/lib.rs::cited.' <<<"$OUT" || fail "reanchor-brace-in-string names the changed citation"
 
-# A changed cited body reopens only that citation, even when both planning
-# counters are exhausted; the Verifier extra names just the changed symbol.
+# With only the Base line changed, a changed cited body reopens only that
+# citation, even when both planning counters are exhausted.
 setup_case reanchor-changed-symbol
 mkdir -p "$WT/src"
 wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn cited_two() {\n    let value = 2;\n}\npub fn unrelated() {\n    let value = 10;\n}\n'
@@ -2850,6 +2850,32 @@ expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "verdict-plan-chec
 case "$(first_line)" in *" n="*) fail "verdict-plan-check-line-count carries no bare n=: [$(first_line)]";; esac
 fi
 
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = unresolved-insertion ]; then
+  # Inserting a task beside an unresolved-symbol fix is not an exempt repair.
+  setup_case confirm-unresolved-insertion
+  mkdir -p "$WT/src"
+  wcommit "$WT" src/cited.rs $'pub fn available() {}\n'
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  B="$(git -C "$WT" rev-parse HEAD)"
+  {
+    printf 'Base: %s\n\n## Files\n\n- `src/cited.rs`\n\n## Tasks\n\n1. Preserve `src/cited.rs::absent`.\n\n## Gate\n\n`true`\n' "$B"
+  } >"$CDIR/plan.md"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-unresolved-insertion seed verifier round"
+  bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "confirm-unresolved-insertion seed confirm round"
+  printf 'real' >"$T/pcmode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "unresolved-symbol finding is recorded before the insertion test (rc=$RC)"
+  expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=* log=*" "confirm-unresolved-insertion unresolved baseline"
+  awk '{ if ($0 == "1. Preserve `src/cited.rs::absent`.") { print "1. Preserve `src/cited.rs::available`."; print "2. Add an independent task."; } else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  : >"$T/stub.log"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "inserted task beside an unresolved fix reaches ROUND-LIMIT (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "confirm-unresolved-insertion is not unresolved-only"
+  [ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" = 0 ] || fail "confirm-unresolved-insertion starts no free Verifier job"
+  [ "$(state_get verifier_round)" = 2 ] || fail "confirm-unresolved-insertion preserves the exhausted count"
+  : >"$T/stub.log"
+fi
+
 # Verbatim ruling acceptance: selectors skip legacy cases for focused runs;
 # the unfiltered invocation still covers all cases.
 write_triaged_tasks_plan() {
@@ -3063,6 +3089,36 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
 fi
 
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = stale-recovery ]; then
+  # A changed cited symbol with a plan-body edit gets a full drift review, not
+  # the symbol-limited note reserved for an unchanged plan body.
+  setup_case reanchor-body-edited
+  mkdir -p "$WT/src"
+  wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn cited_two() {\n    let value = 2;\n}\n'
+  A="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" update-ref refs/remotes/origin/main "$A"
+  {
+    printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n\n## Tasks\n\n1. Preserve `src/lib.rs::cited_one` and `src/lib.rs::cited_two`.\n\n## Gate\n\n`true`\n' "$A"
+  } >"$CDIR/plan.md"
+  printf 'real' >"$T/pcmode"
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "reanchor-body-edited initial verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "reanchor-body-edited seed exhausted Verifier count"
+  bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "reanchor-body-edited seed confirm count"
+  wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn cited_two() {\n    let value = 22;\n}\n'
+  B="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" update-ref refs/remotes/origin/main "$B"
+  awk '{ if ($0 == "1. Preserve `src/lib.rs::cited_one` and `src/lib.rs::cited_two`.") print "1. Carefully preserve `src/lib.rs::cited_one` and `src/lib.rs::cited_two`."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_plan_base "$B"
+  : >"$T/stub.log"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "reanchor-body-edited dispatches a drift verify (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "reanchor-body-edited"
+  grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "reanchor-body-edited uses a drift Verifier slot"
+  reanchor_edited_extra="$CDIR/run/switchyard-518-verifier-extra-r3-drift.md"
+  if grep -Fq 'Re-anchor review is limited to these cited symbols:' "$reanchor_edited_extra"; then fail "reanchor-body-edited does not limit review of an edited plan body"; fi
+  if grep -Fq 'Re-anchor review is limited to these cited symbols:' <<<"$OUT"; then fail "reanchor-body-edited output does not limit review of an edited plan body"; fi
+
   # Task-path drift remains exempt for a cited plan whose body changed, so
   # mechanical re-anchor does not apply.
   setup_case reanchor-task-path-drift

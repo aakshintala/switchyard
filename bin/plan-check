@@ -235,6 +235,7 @@ check_line_citations() {
       for (i = 1; i <= length(line); i++) {
         ch = substr(line, i, 1)
         if (quote == "") {
+          if (ch == "\047" && i > 1 && substr(line, i - 1, 1) ~ /[[:alnum:]]/) continue
           if (ch == "\"" || ch == "\047" || ch == "`") { quote = ch; start = i }
         } else if (ch == quote) {
           text = substr(line, start + 1, i - start - 1)
@@ -257,9 +258,11 @@ check_line_citations() {
     }
     in_gate { next }
     {
-      if (match($0, /[[:alnum:]_.-]+:[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*/)) {
-        cite_start = RSTART
-        cite_end = RSTART + RLENGTH - 1
+      # Accepted false positives by ruling: IP:port and hostname:port prose can match.
+      offset = 0
+      while (offset < length($0) && match(substr($0, offset + 1), /[[:alnum:]_.-]+:[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*/)) {
+        cite_start = offset + RSTART
+        cite_end = cite_start + RLENGTH - 1
         start = cite_start
         while (start > 1) {
           char = substr($0, start - 1, 1)
@@ -270,9 +273,24 @@ check_line_citations() {
         colon = index(cite, ":")
         path = substr(cite, 1, colon - 1)
         if ((path ~ /[.]/ || index(path, "/")) && !quoted_message($0, cite_start)) print NR "\t" cite
+        offset = cite_end
       }
-      if (match($0, /[Ll][Ii][Nn][Ee][Ss]?[[:space:]]+[0-9]+(-[0-9]+)?/) && !quoted_message($0, RSTART)) {
-        print NR "\t" substr($0, RSTART, RLENGTH)
+      offset = 0
+      while (offset < length($0)) {
+        rest = substr($0, offset + 1)
+        if (offset == 0) matched = match(rest, /(^|[^[:alpha:]])[Ll][Ii][Nn][Ee][Ss]?[[:space:]]+[0-9]+(-[0-9]+)?/)
+        else matched = match(rest, /[^[:alpha:]][Ll][Ii][Nn][Ee][Ss]?[[:space:]]+[0-9]+(-[0-9]+)?/)
+        if (!matched) break
+        match_start = offset + RSTART
+        match_end = offset + RSTART + RLENGTH - 1
+        cite_start = match_start
+        cite = substr($0, match_start, match_end - match_start + 1)
+        if (substr($0, match_start, 1) !~ /[[:alpha:]]/) {
+          cite_start++
+          cite = substr($0, cite_start, match_end - cite_start + 1)
+        }
+        if (!quoted_message($0, cite_start)) print NR "\t" cite
+        offset = match_end
       }
     }
   ' "$plan")

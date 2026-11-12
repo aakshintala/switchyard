@@ -559,14 +559,15 @@ unresolved_plan_changed_only() {
     /^@@ / {
       old = $2
       sub(/^-/, "", old)
-      split(old, range, ",")
-      start = range[1] + 0
-      count = (range[2] == "" ? 1 : range[2] + 0)
-      if (count == 0) {
-        if (!unresolved[start] && !unresolved[start + 1]) bad = 1
-      } else {
-        for (line = start; line < start + count; line++) if (!unresolved[line]) bad = 1
-      }
+      split(old, old_range, ",")
+      old_start = old_range[1] + 0
+      old_count = (old_range[2] == "" ? 1 : old_range[2] + 0)
+      new = $3
+      sub(/^\+/, "", new)
+      split(new, new_range, ",")
+      new_count = (new_range[2] == "" ? 1 : new_range[2] + 0)
+      if (new_count != old_count || old_count == 0) bad = 1
+      for (line = old_start; line < old_start + old_count; line++) if (!unresolved[line]) bad = 1
     }
     END { exit bad }
   ' <<<"$diff_output"
@@ -780,11 +781,16 @@ do_verify() {
   # --extra wins over state extra; the ticket text goes before either.
   [ -n "$extra" ] || extra="$(t get extra 2>/dev/null || true)"
   ticket_extra "$xfile" "$extra"
+  reanchor_note=""
   if reanchor_has_changed_symbols; then
-    reanchor_note="Re-anchor review is limited to these cited symbols: $(format_reanchor_symbols). Check only whether their signature/body changed or they no longer resolve; do not reopen other plan claims."
-    printf '\n## Mechanical re-anchor\n%s\n' "$reanchor_note" >>"$xfile"
-  else
-    reanchor_note=""
+    verified_plan_hash="$(t get verified_plan_hash 2>/dev/null || true)"
+    if [ -n "$verified_plan_hash" ] \
+      && verified_body_hash="$(plan_object_body_hash "$verified_plan_hash" 2>/dev/null)" \
+      && current_body_hash="$(plan_body_hash "$plan" 2>/dev/null)" \
+      && [ "$verified_body_hash" = "$current_body_hash" ]; then
+      reanchor_note="Re-anchor review is limited to these cited symbols: $(format_reanchor_symbols). Check only whether their signature/body changed or they no longer resolve; do not reopen other plan claims."
+      printf '\n## Mechanical re-anchor\n%s\n' "$reanchor_note" >>"$xfile"
+    fi
   fi
   printf '\nWhen the plan passes, the report must start with this exact first line, with nothing before or after it on that line:\n\nPLAN OK\n' >>"$xfile"
   args+=(EXTRA="@$xfile")
