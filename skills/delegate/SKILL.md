@@ -124,7 +124,7 @@ Every terminal job appends one cost record to `$XDG_CACHE_HOME/agents/delegate-c
 
 The record is `DELEGATE_JOBS_DIR/<id>.json` when that override is set, else `<cache-root>/delegate/jobs/<id>.json`, where `<cache-root>` is absolute `XDG_CACHE_HOME` or `$HOME/.cache` (a terminal record has no `lastHeartbeatAt`). `cancel`, `status`, `watch`, `resume`, `ack` and `bin/job-record` search the override or cache directory, your legacy `$TMPDIR/delegate-jobs`, `/tmp/delegate-jobs`, then the per-user locator at `<cache-root>/delegate/locators/<id>`.
 
-After acting on a job's report, run `delegate ack <id>` so lanestat stops showing it as DONE-UNREAD.
+After acting on a job's report, run `delegate ack <id>` so lanestat stops showing it as DONE-UNREAD. The cwd and caller-label check guards against misattribution, not access: acking from `$HOME` or `/` can pass every record. Records from before this check have no `callerCwd`; only the orchestrator uses `--any` for those. A lane reports such a record and does not use `--any` itself. Wait on and ack only the job ids your own run printed or your state file names; never act on a job found by browsing the delegate cache.
 
 The locator finds jobs started under another `TMPDIR` when both processes use the same cache root. For older records without a locator that are outside the legacy directories, set `DELEGATE_JOBS_DIR=<that dir>/delegate-jobs`. The unknown-job error lists the searched directories, including the locator directory and a stale target's parent. See [delegate job records](../../docs/delegate-jobs.md) for the locator format and lookup details. The record shape is unchanged:
 
