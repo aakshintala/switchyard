@@ -491,6 +491,15 @@ def dated_model_date(identifier):
 
 def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
     vendor_items, excluded = filtered_vendor_items(vendor_items, vendor)
+    if vendor == "gemini":
+        # The vendor's models.list has no modality field, so this filter reads models.dev's.
+        for identifier, model in reference.items():
+            if not isinstance(model, dict):
+                continue
+            output_modalities = nested(model, "modalities", "output")
+            if (isinstance(output_modalities, list) and "text" not in output_modalities) or model.get("tool_call") is False:
+                excluded.add(identifier)
+        vendor_items = [item for item in vendor_items if model_id(item, vendor) not in excluded]
     vendor_index = index_models(vendor_items, vendor)
     if vendor == "openai":
         reference = {identifier: model for identifier, model in reference.items() if not OPENAI_NON_CHAT.search(identifier)}

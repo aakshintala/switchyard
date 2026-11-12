@@ -127,6 +127,13 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     "account-hidden-a": {},
                     "account-hidden-b": {},
                 })
+            elif self.mode == "gemini-filter":
+                models_dev["google"]["models"].update({
+                    "gemini-audio": {"limit": {"context": 100}, "modalities": {"output": ["audio"]}},
+                    "gemini-image": {"limit": {"context": 100}, "modalities": {"output": ["text", "image"]}, "tool_call": False},
+                    "gemini-tools": {"limit": {"context": 100}, "modalities": {"output": ["text"]}, "tool_call": True},
+                    "gemini-unclassified": {"limit": {"context": 100}},
+                })
             elif self.mode == "pricing":
                 models_dev["openrouter"]["models"].update({
                     "router-window": {"cost": {"input": 0.4, "output": 0.5}},
@@ -181,7 +188,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
             else:
                 send_json(self, {"data": [{"id": "openai-a"}], "has_more": True, "last_id": "page-one"})
         elif path == "/gemini/v1beta/models":
-            send_json(self, {"models": [{"name": "models/gemini-one", "supportedGenerationMethods": ["generateContent"]}, {"name": "models/gemini-embed", "supportedGenerationMethods": ["embedContent"]}]})
+            if self.mode == "gemini-filter":
+                send_json(self, {"models": [
+                    {"name": "models/gemini-one", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemini-audio", "supportedGenerationMethods": ["generateContent"], "inputTokenLimit": 200},
+                    {"name": "models/gemini-image", "supportedGenerationMethods": ["generateContent"], "inputTokenLimit": 200},
+                    {"name": "models/gemini-tools", "supportedGenerationMethods": ["generateContent"], "inputTokenLimit": 200},
+                    {"name": "models/gemini-unclassified", "supportedGenerationMethods": ["generateContent"], "inputTokenLimit": 200},
+                    {"name": "models/gemini-unlisted", "supportedGenerationMethods": ["generateContent"]},
+                ]})
+            else:
+                send_json(self, {"models": [{"name": "models/gemini-one", "supportedGenerationMethods": ["generateContent"]}, {"name": "models/gemini-embed", "supportedGenerationMethods": ["embedContent"]}]})
         elif path == "/codex/backend-api/codex/models":
             if "client_version" not in self.path:
                 send_json(self, {"error": "client_version required"}, status=400)
@@ -372,6 +389,20 @@ try:
     expect("| openai-a | gone |" not in report and "| openai-b | gone |" not in report, "codex gone noise was reported")
     for identifier in ("text-embedding-3-small", "gemini-embed", "db-embed"):
         expect(identifier not in report, f"non-chat model {identifier} was not filtered")
+
+    # Gemini exposes neither output modalities nor tool-call support on models.list.
+    # Use models.dev to omit known non-text/non-tool-capable models, while retaining
+    # models with usable or unknown reference fields and models missing from models.dev.
+    gemini_filter_inbox = temp_root / "inbox-gemini-filter"
+    gemini_filter_result, _ = run_case("gemini-filter", True, gemini_filter_inbox, mode="gemini-filter")
+    expect(gemini_filter_result.returncode == 0, f"gemini-filter run failed: {gemini_filter_result.stderr}")
+    gemini_filter_report = (gemini_filter_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("| gemini-audio |" not in gemini_filter_report, "audio-only Gemini model produced a row")
+    expect("| gemini-image |" not in gemini_filter_report, "non-tool-capable Gemini image model produced a row")
+    expect("| gemini-tools | mismatch | context | 200 | 100 |" in gemini_filter_report, "text Gemini model with tool calls was not diffed")
+    expect("| gemini-unclassified | mismatch | context | 200 | 100 |" in gemini_filter_report, "Gemini model without modality/tool-call fields was not diffed")
+    expect("| gemini-unlisted | missing |" in gemini_filter_report, "unlisted Gemini model did not retain its missing row")
+
     expect("## skipped" in report, "skipped section missing")
     expect(not list(inbox.glob("*.tmp")) and not list(inbox.glob(".model-catalog-*.tmp")), "temporary report file was left behind")
     assert_no_secrets(report, result.stdout, result.stderr)
