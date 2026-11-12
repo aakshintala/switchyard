@@ -62,9 +62,21 @@ grep -q '^Ranges: none$' "$FW_RUN/fiber-1607-fence-grant-1.md" || fail "whole-fi
 rm -f "$FW_RUN/fiber-1607-fence-grant-1.md"
 : >"$PLAN_BODY"
 : >"$FG_LOG"
-fw_self_grant test 1608 "$FW_RUN" 2>"$T/empty.stderr" || fail "missing plan self-grants empty"
+fw_self_grant test 1608 "$FW_RUN" 0 plan 2>"$T/empty.stderr" || fail "missing plan self-grants empty"
 [ -f "$FW_RUN/fiber-1608-fence-grant-1.md" ] || fail "missing plan writes an empty grant"
 grep -q '^1608 --empty$' "$FG_LOG" || fail "missing plan requests an empty grant"
 grep -q '^Paths:$' "$FW_RUN/fiber-1608-fence-grant-1.md" || fail "empty grant uses the standard Paths block"
 grep -q '^Ranges: none$' "$FW_RUN/fiber-1608-fence-grant-1.md" || fail "empty grant uses the standard Ranges line"
+# A missing posted plan cannot grant a build fence, even with refresh-empty and an existing grant.
+: >"$PLAN_BODY"
+: >"$FG_LOG"
+if fw_self_grant test 1609 "$FW_RUN" 0 build 2>"$T/build.stderr"; then fail "build without plan refuses"; fi
+[ ! -e "$FW_RUN/fiber-1609-fence-grant-1.md" ] || fail "refused build writes no grant"
+[ ! -s "$FG_LOG" ] || fail "refused build does not call fence-grant"
+grep -q 'test: #1609 has no posted plan; a build phase needs one to grant its fence' "$T/build.stderr" || fail "build refusal explains missing plan"
+if fw_self_grant test 1610 "$FW_RUN" 2>"$T/no-phase.stderr"; then fail "unset phase without plan refuses"; fi
+grep -q 'a build phase needs one' "$T/no-phase.stderr" || fail "unset phase defaults to build"
+printf 'Grant 1\n\nTicket: 1611\nPart: 1\nPaths:\nRanges: none\n' >"$FW_RUN/fiber-1611-fence-grant-1.md"
+if fw_self_grant test 1611 "$FW_RUN" 1 build 2>"$T/refresh.stderr"; then fail "refresh-empty build without plan refuses"; fi
+[ ! -s "$FG_LOG" ] || fail "refresh refusal does not call fence-grant"
 printf 'ok fw-self-grant-whole-file-and-empty\n'

@@ -340,7 +340,7 @@ FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
 grep -q '^Part: 2$' "$CDIR/run/fiber-502-fence-grant-2.md" || fail "empty-grant-build-refresh advances the grant part"
 grep -q '^- src/tkt-job.c$' "$CDIR/run/fiber-502-fence-grant-2.md" || fail "empty-grant-build-refresh grants the posted write path"
 
-# --- an empty build plan keeps its existing empty grant without duplication --
+# --- a build with no posted plan refuses, even with an existing empty grant (#1628) --
 setup_case empty-grant-no-writes
 rm "$CDIR/run/fiber-502-fence-grant-test.md"
 printf 'Grant 1\n\nTicket: 502\nPart: 1\nPaths:\nRanges: none\n' >"$CDIR/run/fiber-502-fence-grant-1.md"
@@ -350,9 +350,24 @@ reset_stub
 make_record stub-1 DONE none 0 1 0
 FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
   run_job --slot lane --template "$T/tmpl-basic.md"
-[ "$RC" -eq 0 ] || fail "empty-grant-no-writes launches (rc=$RC): $(cat "$CDIR/stderr.txt")"
-[ ! -e "$CDIR/run/fiber-502-fence-grant-2.md" ] || fail "empty-grant-no-writes does not create a second empty grant"
-[ ! -s "$SELF_GRANT_LOG" ] || fail "empty-grant-no-writes does not invoke fence-grant again"
+[ "$RC" -ne 0 ] || fail "empty-grant-no-writes build without a posted plan refuses"
+[ ! -e "$CDIR/run/fiber-502-fence-grant-2.md" ] || fail "refused build does not create another grant"
+[ ! -s "$SELF_GRANT_LOG" ] || fail "refused build does not invoke fence-grant"
+grep -q 'has no posted plan; a build phase needs one' "$CDIR/stderr.txt" || fail "refusal names the missing plan"
+
+# --- a posted plan with no write path keeps its existing empty grant (#1628) --
+setup_case empty-grant-plan-no-writes
+rm "$CDIR/run/fiber-502-fence-grant-test.md"
+printf 'Grant 1\n\nTicket: 502\nPart: 1\nPaths:\nRanges: none\n' >"$CDIR/run/fiber-502-fence-grant-1.md"
+printf '%s\n' '# Plan' '## Files' '- none: this ticket writes no file' >"$SELF_GRANT_PLAN"
+: >"$SELF_GRANT_LOG"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
+  run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "empty-grant-plan-no-writes launches (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ ! -e "$CDIR/run/fiber-502-fence-grant-2.md" ] || fail "empty-grant-plan-no-writes does not create a second empty grant"
+[ ! -s "$SELF_GRANT_LOG" ] || fail "empty-grant-plan-no-writes does not invoke fence-grant again"
 
 setup_case fence-granted
 reset_stub

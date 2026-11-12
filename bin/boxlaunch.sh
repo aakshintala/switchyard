@@ -102,7 +102,7 @@ elif [ "$ph" = phase-build ] && ! fw_has_nonempty_grant "$n" "$run"; then
   needs_grant=1
 fi
 if [ "$needs_grant" -eq 1 ]; then
-  if fw_self_grant boxlaunch "$n" "$run" 1; then
+  if fw_self_grant boxlaunch "$n" "$run" 1 "${ph#phase-}"; then
     :
   elif [ -n "${FW_NO_FENCE:-}" ]; then
     echo "boxlaunch: no fence grant for #$n, launching anyway: $FW_NO_FENCE" >&2
