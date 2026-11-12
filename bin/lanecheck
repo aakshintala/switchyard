@@ -878,13 +878,12 @@ PY
         nrel=$(printf '%s\n' "$out" | grep -c '^RELEASE ')
         [ "$nrel" -gt 0 ] && echo "claims pruned: $h ($nrel)"
       else
-        printf 'WARNING: could not prune claims for %s; lanecheck done continues. Retry: %s prune --lane %s%s\n' \
-          "$h" "$fc" "$h" "$fc_retry_repo" >&2
-        [ -z "$out" ] || printf '  %s\n' "$out" >&2
+        echo "CLAIMS NOT RELEASED for $h -- release by hand: $fc prune --lane $h$fc_retry_repo"
+        echo "  $out"
       fi
     done
     # A file-claim outage must not turn a completed lane into a failed done:
-    # the warning is on stderr, and reap remains the fallback for dead holders.
+    # it is reported on stdout, and reap remains the fallback for retired lanes.
     # Name the holders this ticket leaves behind that the loop above cannot
     # release, with the command that clears each. Reporting, not releasing, and
     # the distinction is the point: a `--lane` that is not `fiber-<n>` is

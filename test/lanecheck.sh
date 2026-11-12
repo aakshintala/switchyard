@@ -352,7 +352,7 @@ printf 'path.txt\tfiber-1412\n' >"$T/claim-rows"
 out=$(FW_RUN=$r STUB_PRUNE_FAIL=1 bash "$BIN/lanecheck" done 1412 >"$T/done-prune.out" 2>"$T/done-prune.err"); grc=$?
 out="$(cat "$T/done-prune.out")"
 err="$(cat "$T/done-prune.err")"
-if [ "$grc" = 0 ] && printf '%s' "$err" | grep -qF 'WARNING: could not prune claims' \
+if [ "$grc" = 0 ] && printf '%s' "$out" | grep -qF 'CLAIMS NOT RELEASED for fiber-1412' \
   && [ "$(wc -l < "$r/roster-done" | tr -d ' ')" = 1 ]; then
   ok done-continues-when-file-claim-prune-fails
 else
@@ -1509,7 +1509,7 @@ r=$(newrun C4); lane "$r" 4162 fiber-4162-build h6; grant "$r" 4162
 : > "$T/fclog"; : > "$T/fcheld"; held fiber-4162 crates/log/src/diag.rs
 out=$(FW_RUN=$r FW_FILE_CLAIM=$T/stub/file-claim FC_LOG=$T/fclog FC_HELD=$T/fcheld \
   FC_BOOM=1 bash "$BIN/lanecheck" done 4162 2>&1)
-if printf '%s' "$out" | grep -q 'WARNING: could not prune claims for fiber-4162' \
+if printf '%s' "$out" | grep -q 'CLAIMS NOT RELEASED for fiber-4162' \
    && printf '%s' "$out" | grep -q 'prune --lane fiber-4162' \
    && [ -e "$r/done/fiber-4162-fence-grant-20261104T0000Z.md" ]; then
   ok failed-prune-is-warned-and-retirement-continues
