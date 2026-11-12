@@ -4,6 +4,7 @@
 #   bash bin/lanecheck            # print LIVE/MISSING per roster entry, exit 1 if any MISSING
 #   bash bin/lanecheck done 3890  # retire ticket 3890's roster entries (it reported)
 #   bash bin/lanecheck done 3954:fiber-3954-plan   # retire one session only
+#   bash bin/lanecheck retired                     # list fully retired ticket lanes for claim reaping
 #
 # Retire by ticket when the whole ticket is finished. Retire by
 # <ticket>:<session> when one of a ticket's sessions has finished and another
@@ -35,7 +36,7 @@ check_delegate_build() {
     [ -z "$warning" ] || printf '%s\n' "$warning"
   fi
 }
-check_delegate_build
+if [ "${1:-}" != retired ]; then check_delegate_build; fi
 run_claude_agents() {
   local json_file="$1" err_file="$2" status
   shift 2
@@ -84,6 +85,48 @@ def entry_is_retired(ticket, sess, jid, ts, done, done_sess):
     return bool(cut and ts.split()[0] <= cut)
 PY
 }
+
+list_retired_lanes() {
+  [ -r "$roster" ] && [ -r "$retired" ] || {
+    echo "lanecheck: cannot read roster or roster-done for retired-lane query" >&2
+    return 1
+  }
+  local query_tmp
+  query_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck-retired.XXXXXX") || return 1
+  write_retirement_helper "$query_tmp/roster-retirement.py"
+  if ! python3 -I - "$roster" "$retired" "$query_tmp/roster-retirement.py" <<'PY'
+import sys
+roster, retired, helper = sys.argv[1:]
+exec(compile(open(helper).read(), helper, "exec"), globals())
+done, done_sess = read_retirements(retired)
+by_ticket = {}
+for line in open(roster):
+    if not line.strip():
+        continue
+    fields = line.rstrip("\n").split("\t")
+    if len(fields) < 4 or not fields[1].isdigit() or not fields[0]:
+        raise SystemExit("malformed roster row")
+    ts, ticket, _host, name = fields[:4]
+    jid = fields[4] if len(fields) > 4 else "?"
+    by_ticket.setdefault(ticket, []).append((name, jid, ts))
+for ticket in sorted(by_ticket, key=int):
+    entries = by_ticket[ticket]
+    if all(entry_is_retired(ticket, name, jid, ts, done, done_sess)
+           for name, jid, ts in entries):
+        print("fiber-" + ticket)
+PY
+  then
+    rm -rf "$query_tmp"
+    return 1
+  fi
+  rm -rf "$query_tmp"
+}
+
+if [ "${1:-}" = retired ]; then
+  [ "$#" = 1 ] || { echo "usage: lanecheck retired" >&2; exit 2; }
+  list_retired_lanes || exit $?
+  exit 0
+fi
 
 already_retired_targets() {
   [ -f "$roster" ] && [ -f "$retired" ] || return 1
@@ -792,34 +835,43 @@ PY
       [ -e "$g" ] || continue
       mv "$g" "$R/done/" && echo "fence retired: $(basename "$g")"
     done
-    # Retiring the roster line and the grant records released nothing in
-    # file-claim, so the claims outlived the lane: 17 of them across three
-    # closed tickets on 2026-11-06, and `fence-grant` called every one HELD
-    # because the holder's session was still resident (switchyard#1313). A
-    # claim's liveness cannot be read off a process -- those sessions were
-    # `idle` with live supervisor pids -- so the release has to happen where
-    # the ticket ends, which is here.
+    # Retiring the roster line and grant records used to leave open-ticket
+    # claims behind when no later reap ran. Session liveness is not enough to
+    # clear those rows: a retired lane's shell PID may still be alive. `done`
+    # prunes the known holder names here; reap handles missed cleanup only once
+    # the recorded holder PID is dead on its host.
     #
-    # Release every holder shape this roster knows: the bare `fiber-<n>` the
+    # Prune every holder shape this roster knows: the bare `fiber-<n>` the
     # claim is usually written under, plus each session name, since a lane
     # launched by phase claims as `fiber-<n>-plan` or `-build`. A holder named
-    # by branch (`arch/4276-log-diag-leaf`) stays for switchyard#1272's
-    # canonical holder id; it is reported, not hidden -- and the report now
-    # names it exactly, see below.
+    # by branch (`arch/4276-log-diag-leaf`) remains reported below.
     fc=${FW_FILE_CLAIM:-$HOME/.agents/bin/file-claim}
+    fc_retry_repo=""
+    if [ -n "${FW_REPO:-}" ]; then fc_retry_repo=" --repo $FW_REPO"; fi
+    run_file_claim_prune() {
+      local file_claim="$1" holder="$2"
+      if [ -n "${FW_REPO:-}" ]; then
+        "$file_claim" prune --lane "$holder" --repo "$FW_REPO"
+      else
+        "$file_claim" prune --lane "$holder"
+      fi
+    }
     holders=$(awk -F'\t' -v t="$t" '$2 == t && $4 != "" { print $4 }' "$roster" | sort -u)
     for h in "fiber-$t" $holders; do
-      if out=$("$fc" release --lane "$h" --repo "${FW_REPO:-aakshintala/fiber}" 2>&1); then
+      if out=$(run_file_claim_prune "$fc" "$h" 2>&1); then
         # One `RELEASE <path>` line per claim dropped, and no output at all when
         # the holder held nothing -- which is the common case for two of the
         # three shapes tried, so stay quiet rather than printing three zeroes.
         nrel=$(printf '%s\n' "$out" | grep -c '^RELEASE ')
-        [ "$nrel" -gt 0 ] && echo "claims released: $h ($nrel)"
+        [ "$nrel" -gt 0 ] && echo "claims pruned: $h ($nrel)"
       else
-        echo "CLAIMS NOT RELEASED for $h -- release by hand: $fc release --lane $h --repo ${FW_REPO:-aakshintala/fiber}"
-        echo "  $out"
+        printf 'WARNING: could not prune claims for %s; lanecheck done continues. Retry: %s prune --lane %s%s\n' \
+          "$h" "$fc" "$h" "$fc_retry_repo" >&2
+        [ -z "$out" ] || printf '  %s\n' "$out" >&2
       fi
     done
+    # A file-claim outage must not turn a completed lane into a failed done:
+    # the warning is on stderr, and reap remains the fallback for dead holders.
     # Name the holders this ticket leaves behind that the loop above cannot
     # release, with the command that clears each. Reporting, not releasing, and
     # the distinction is the point: a `--lane` that is not `fiber-<n>` is

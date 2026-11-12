@@ -106,9 +106,17 @@ print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATE
 fi
 cat "$GH_PRS_JSON"
 STUB_EOF
-chmod +x "$T/stubbin/gh"
+cat >"$T/stubbin/lanecheck" <<'STUB_EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = retired ] || exit 2
+[ "${LANECHECK_RETIRED_FAIL:-0}" != 1 ] || { echo 'stub lanecheck retired: unavailable' >&2; exit 1; }
+cat "${LANECHECK_RETIRED_FILE:-/dev/null}"
+STUB_EOF
+chmod +x "$T/stubbin/gh" "$T/stubbin/lanecheck"
 PATH="$T/stubbin:$PATH"
-export PATH FW_GH="$T/stubbin/gh"
+export PATH FW_GH="$T/stubbin/gh" FW_LANECHECK="$T/stubbin/lanecheck"
+export LANECHECK_RETIRED_FILE="$T/retired-lanes"
+: >"$LANECHECK_RETIRED_FILE"
 export GH_ARGS_LOG="$T/gh-args.log"
 : >"$GH_ARGS_LOG"
 export GH_PRS_JSON="$T/prs-empty.json"
@@ -144,6 +152,30 @@ claims_blob() {
   tip="$(claim_tip "$1")"
   [ -n "$tip" ] || return 0
   git -C "$1" cat-file -p "$tip:claims" || fail "read claims blob"
+}
+
+# Replace one claim's worktree host and optional holder PID in a fixture ref.
+set_claim_owner() {
+  local remote path lane host pid work
+  remote="$1"; path="$2"; lane="$3"; host="$4"; pid="$5"
+  work="$T/claim-owner-${lane#fiber-}"
+  rm -rf "$work"
+  git -c init.defaultBranch=main init -q "$work" || fail "init claim-owner fixture"
+  git -C "$work" config user.email t@t.t || fail "claim-owner fixture email"
+  git -C "$work" config user.name t || fail "claim-owner fixture name"
+  git -C "$work" remote add origin "$remote" || fail "claim-owner fixture remote"
+  git -C "$work" fetch -q origin refs/claims/live || fail "fetch claim-owner ref"
+  git -C "$work" checkout -q -b claim-owner FETCH_HEAD || fail "checkout claim-owner ref"
+  awk -F '\t' -v OFS='\t' -v path="$path" -v lane="$lane" -v host="$host" -v pid="$pid" '
+    $1 == path && $2 == lane { $5 = host; $7 = pid; found = 1 }
+    { print }
+    END { if (!found) exit 1 }
+  ' "$work/claims" >"$work/claims.new" || fail "find claim row for $path"
+  mv "$work/claims.new" "$work/claims"
+  git -C "$work" add claims || fail "stage claim-owner row"
+  git -C "$work" diff --cached --quiet && return 0
+  git -C "$work" commit -qm 'set claim owner fixture' || fail "commit claim-owner row"
+  git -C "$work" push -q origin HEAD:refs/claims/live || fail "publish claim-owner row"
 }
 
 NFILE="$T/n"
@@ -1191,6 +1223,37 @@ list="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>/dev/null)" ||
 grep -qF 'open.txt' <<<"$list" || fail "open-ticket claim remains on next check: $list"
 grep -qF 'sweep.txt' <<<"$list" || fail "sweep claim remains after closed ticket: $list"
 ! grep -qF 'closed.txt' <<<"$list" || fail "closed-ticket claim is gone on next check: $list"
+
+# --- retired lanes with dead local holders are reaped, live and active holds stay ---
+R="$(fresh)"
+for id in 6101 6102 6103 6104; do
+  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "fiber-$id" --grant --worktree "$(hostname -s):claim-$id" --repo test/repo "retired-$id.txt" >/dev/null 2>&1 \
+    || fail "retired-holder setup for $id"
+done
+dead_holder=999999
+while kill -0 "$dead_holder" 2>/dev/null; do dead_holder=$((dead_holder + 1)); done
+set_claim_owner "$R" retired-6101.txt fiber-6101 "$(hostname -s):claim-6101" "$dead_holder"
+set_claim_owner "$R" retired-6102.txt fiber-6102 "$(hostname -s):claim-6102" "$$"
+set_claim_owner "$R" retired-6103.txt fiber-6103 "$(hostname -s):claim-6103" "$dead_holder"
+set_claim_owner "$R" retired-6104.txt fiber-6104 remote-fixture:claim-6104 "$dead_holder"
+printf 'fiber-6101\nfiber-6102\nfiber-6104\n' >"$LANECHECK_RETIRED_FILE"
+out="$(GH_TICKET_STATES='6101:OPEN,6102:OPEN,6103:OPEN,6104:OPEN' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-retired")" \
+  || fail "reap handles retired-lane claims: $(cat "$T/e-reap-retired")"
+! grep -qF 'retired-6101.txt' <<<"$(claims_blob "$R")" || fail "retired lane with dead local holder is reaped"
+grep -qF 'retired-6102.txt' <<<"$(claims_blob "$R")" || fail "retired lane with live holder keeps its row"
+grep -qF 'retired-6103.txt' <<<"$(claims_blob "$R")" || fail "active lane with dead holder keeps its row"
+grep -qF 'retired-6104.txt' <<<"$(claims_blob "$R")" || fail "retired remote-host holder is conservatively kept"
+grep -qF 'REAP claim retired-6101.txt by fiber-6101' <<<"$out" || fail "reaped retired-lane claim is reported: $out"
+
+# A failure to read lanecheck's retired list makes the whole reap a safe no-op.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6110 --grant --worktree "$(hostname -s):closed" --repo test/repo fail-lanecheck-open.txt >/dev/null 2>&1 || fail "lanecheck lookup failure setup open"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6111 --grant --worktree "$(hostname -s):closed" --repo test/repo fail-lanecheck-closed.txt >/dev/null 2>&1 || fail "lanecheck lookup failure setup closed"
+before="$(claims_blob "$R")"
+out="$(LANECHECK_RETIRED_FAIL=1 GH_TICKET_STATES='6110:OPEN,6111:CLOSED' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-lanecheck-fail")" \
+  || fail "retired-list lookup failure is a safe no-op: $(cat "$T/e-reap-lanecheck-fail")"
+[ -z "$out" ] || fail "failed lanecheck lookup reports no drops: $out"
+[ "$(claims_blob "$R")" = "$before" ] || fail "failed lanecheck lookup keeps every claim"
 
 # A stale-only holder is removed before a sweep claimant decides whether it can grant.
 R="$(fresh)"

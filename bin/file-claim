@@ -10,7 +10,9 @@
 #        file-claim reap [--repo R]
 # Ordinary lane and PR overlaps are advisory; sweep-* lanes hold paths exclusively.
 # Claim batches are all-or-nothing only when a sweep or the grant cap refuses a path.
-# Reap drops closed-ticket or closed/merged-PR claims and fence-grant files; sweep-* claims stay held.
+# Claim rows record the caller PID; worktree HOST identifies where to check it.
+# Reap drops closed-ticket/PR claims, retired-lane claims with a dead local PID,
+# and terminal fence-grant files; sweep and remote-host claims stay held.
 # Without --lane, list adds one row per open-PR path: <path> pr#N pr - - N.
 # FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5); N must be a positive integer.
 # FILE_CLAIM_READ_WAIT=N sets the retry wait in whole seconds (default 1).
@@ -35,7 +37,7 @@ usage() {
   echo "       file-claim release --lane ID [--repo R] [PATH...]" >&2
   echo "       file-claim prune --lane ID [--repo R]  (release all rows for the lane)" >&2
   echo "       file-claim list [--lane ID] [--repo R]  (no --lane adds one row per open-PR path)" >&2
-  echo "       file-claim reap [--repo R]  (drop closed-ticket and closed/merged-PR claims and fence-grant files)" >&2
+  echo "       file-claim reap [--repo R]  (drop closed-ticket/PR claims, and retired-lane claims with a dead local holder PID)" >&2
   echo "       FILE_CLAIM_MAX_GRANT=N sets the grant cap (default 5)" >&2
   exit 2
 }
@@ -75,6 +77,22 @@ valid_path() { case "$1" in ""|*[[:space:]]*|/*|./*|../*|*/../*|*/..|..|*//*|*/|
 # already stored with a composite path stay removable.
 valid_release_path() { case "$1" in ""|*"$TAB"*|*"$NL"*|/*|./*|../*|*/../*|*/..|..|*//*|*/|.|*/.|*/./*) return 1;; esac; }
 valid_field() { case "$1" in ""|*"$TAB"*|*"$NL"*) return 1;; esac; }
+# Split tab-separated claims without IFS whitespace collapsing empty PR fields.
+parse_claim_line() {
+  local rest="$1"
+  c_path="${rest%%"$TAB"*}"; rest="${rest#*"$TAB"}"
+  c_lane="${rest%%"$TAB"*}"; rest="${rest#*"$TAB"}"
+  c_kind="${rest%%"$TAB"*}"; rest="${rest#*"$TAB"}"
+  c_at="${rest%%"$TAB"*}"; rest="${rest#*"$TAB"}"
+  c_wt="${rest%%"$TAB"*}"; rest="${rest#*"$TAB"}"
+  if [[ "$rest" == *"$TAB"* ]]; then
+    c_pr="${rest%%"$TAB"*}"
+    c_pid="${rest#*"$TAB"}"
+  else
+    c_pr="$rest"
+    c_pid=""
+  fi
+}
 # is_plan_file PATH: a readable regular file with Files entries that git does not
 # track. Outside a repo, git fails, so the file counts as untracked.
 is_plan_file() {
@@ -169,9 +187,21 @@ load_claims() {
         field[i] = substr(rest, 1, pos - 1)
         rest = substr(rest, pos + 1)
       }
-      if (!bad && index(rest, "\t")) bad = 1
-      field[6] = rest
-      if (bad || (field[3] != "plan" && field[3] != "grant") || !date_epoch(field[4])) {
+      if (bad) {
+        field[6] = ""
+        field[7] = ""
+      } else {
+        pos = index(rest, "\t")
+        if (pos) {
+          field[6] = substr(rest, 1, pos - 1)
+          field[7] = substr(rest, pos + 1)
+          if (index(field[7], "\t")) bad = 1
+        } else {
+          field[6] = rest
+        }
+      }
+      if (bad || (field[3] != "plan" && field[3] != "grant") || !date_epoch(field[4]) ||
+          (field[7] != "" && field[7] !~ /^[1-9][0-9]*$/)) {
         print NR > bad_file
         close(bad_file)
         exit 1
@@ -203,11 +233,11 @@ store_claims() {
 }
 filter_release() {
   local claims="$1" lane="$2" kept="$3" dropped="$4"; shift 4
-  local line c_path c_lane c_kind c_at c_wt c_pr p drop
+  local line c_path c_lane c_kind c_at c_wt c_pr c_pid p drop
   : >"$kept"; : >"$dropped"
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
-    IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr <<<"$line"
+    parse_claim_line "$line"
     drop=0
     if [ "$c_lane" = "$lane" ]; then if [ $# -eq 0 ]; then drop=1; else for p in "$@"; do if [ "$p" = "$c_path" ]; then drop=1; break; fi; done; fi; fi
     if [ "$drop" = "1" ]; then printf '%s\n' "$c_path" >>"$dropped"; else printf '%s\n' "$line" >>"$kept"; fi
@@ -351,7 +381,7 @@ cmd_claim() {
       if [ "$blocked" = "1" ]; then refused=$((refused + 1)); continue; fi
       if [ "$own_hold" = "1" ]; then out+=("GRANT $p $reason"); granted=$((granted + 1)); continue; fi
       if [ "$kind" = grant ] && [ "$cap_hit" = "1" ]; then out+=("REFUSE $p cap"); refused=$((refused + 1)); saw_cap=1; continue; fi
-      out+=("PENDING $p $reason"); granted=$((granted + 1)); new_lines+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$p" "$lane" "$kind" "$now" "$worktree" "$self_pr")")
+      out+=("PENDING $p $reason"); granted=$((granted + 1)); new_lines+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$p" "$lane" "$kind" "$now" "$worktree" "$self_pr" "$PPID")")
     done
     if [ "$refused" -gt 0 ]; then
       final_out=(); unclaimed=0
@@ -410,9 +440,39 @@ ticket_state_is_terminal() {
   return 1
 }
 
+# Only local host aliases are probed. A PID on another host is not evidence of
+# death unless a safe remote probe exists; currently remote holders stay live.
+claim_holder_is_local() {
+  local holder_host="${1%%:*}" short_host full_host
+  short_host="$(hostname -s 2>/dev/null || true)"
+  full_host="$(hostname 2>/dev/null || true)"
+  [ -n "$holder_host" ] && { [ "$holder_host" = "$short_host" ] || [ "$holder_host" = "$full_host" ]; }
+}
+
+claim_holder_pid_is_dead() {
+  local worktree="$1" pid="$2"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  claim_holder_is_local "$worktree" || return 1
+  python3 -I - "$pid" <<'PY'
+import os, sys
+try:
+    os.kill(int(sys.argv[1]), 0)
+except ProcessLookupError:
+    raise SystemExit(0)
+except (PermissionError, OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(1)
+PY
+}
+
+retired_lane_is_listed() {
+  local lane="$1" retired_file="$2"
+  awk -v lane="$lane" '$0 == lane { found = 1 } END { exit !found }' "$retired_file"
+}
+
 cmd_reap() {
   local repo="$1" remote run_dir attempt=1 tip claims numbers prefix lookup_rc expected actual
-  local line c_path c_lane c_kind c_at c_wt c_pr ticket pr_number reason path
+  local line c_path c_lane c_kind c_at c_wt c_pr c_pid ticket pr_number reason path retired_lanes need_retirement_list lanecheck
   local kept dropped dropped_files grant_prs grant_file base grant_ticket
   remote="$(default_remote "$repo")"
   run_dir="$(ticket_states_run_dir)"
@@ -424,8 +484,9 @@ cmd_reap() {
     load_claims "$tip" "$claims"
     numbers="$W/ticket-numbers.tsv"
     : >"$numbers"
-    while IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr || [ -n "$c_path" ]; do
-      [ -n "$c_path" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      parse_claim_line "$line"
       case "$c_lane" in sweep-*) continue;; esac
       ticket="$(lane_ticket_num "$c_lane")"
       [ -z "$ticket" ] || printf '%s\n' "$ticket" >>"$numbers"
@@ -471,10 +532,47 @@ cmd_reap() {
       return 0
     fi
 
+    # Only query retirement when an open, local-host claim with a stored PID
+    # could be subject to lane retirement. A failed or malformed list is a
+    # batch-wide safe no-op, matching the ticket-state lookup contract.
+    need_retirement_list=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      parse_claim_line "$line"
+      case "$c_lane" in sweep-*) continue;; esac
+      [ -n "$c_pid" ] || continue
+      claim_holder_is_local "$c_wt" || continue
+      ticket="$(lane_ticket_num "$c_lane")"
+      if [ -n "$ticket" ] && ticket_state_is_terminal "$ticket" "$prefix.states"; then continue; fi
+      if [ -n "$c_pr" ]; then
+        local pr_closed=0
+        IFS=',' read -r -a pr_numbers <<<"$c_pr"
+        for pr_number in "${pr_numbers[@]}"; do
+          case "$pr_number" in ''|*[!0-9]*|0*) continue;; esac
+          if ticket_state_is_terminal "$pr_number" "$prefix.states"; then pr_closed=1; break; fi
+        done
+        [ "$pr_closed" = 0 ] || continue
+      fi
+      need_retirement_list=1
+      break
+    done <"$claims"
+    retired_lanes="$W/retired-lanes.tsv"
+    if [ "$need_retirement_list" = 1 ]; then
+      lanecheck="${FW_LANECHECK:-$script_dir/lanecheck}"
+      if ! "$lanecheck" retired >"$retired_lanes" 2>"$W/lanecheck.err" ||
+          ! awk 'NF && $0 !~ /^fiber-[0-9]+$/ { bad = 1 } END { exit bad }' "$retired_lanes"; then
+        echo "file-claim: reap skipped: lanecheck retired-lane lookup failed; all holds kept" >&2
+        return 0
+      fi
+    else
+      : >"$retired_lanes"
+    fi
+
     kept="$W/kept.tsv"; dropped="$W/dropped.tsv"; dropped_files="$W/dropped-files.tsv"; grant_prs="$W/grant-prs.tsv"
     : >"$kept"; : >"$dropped"; : >"$dropped_files"; : >"$grant_prs"
-    while IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr || [ -n "$c_path" ]; do
-      [ -n "$c_path" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      parse_claim_line "$line"
       reason=""
       case "$c_lane" in
         sweep-*) ;;
@@ -493,12 +591,21 @@ cmd_reap() {
               fi
             done
           fi
+          if [ -z "$reason" ] && [ -n "$c_pid" ] && [ -n "$ticket" ] &&
+              retired_lane_is_listed "$c_lane" "$retired_lanes" &&
+              claim_holder_pid_is_dead "$c_wt" "$c_pid"; then
+            reason="retired lane holder pid $c_pid is dead on host ${c_wt%%:*}"
+          fi
           ;;
       esac
       if [ -n "$reason" ]; then
         printf '%s\t%s\t%s\n' "$c_path" "$c_lane" "$reason" >>"$dropped"
       else
-        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$c_at" "$c_wt" "$c_pr"
+        if [ -n "$c_pid" ]; then
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$c_at" "$c_wt" "$c_pr" "$c_pid"
+        else
+          printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$c_path" "$c_lane" "$c_kind" "$c_at" "$c_wt" "$c_pr"
+        fi
       fi
     done <"$claims" >"$kept"
 
@@ -536,7 +643,7 @@ cmd_reap() {
 
 cmd_list() {
   local lane="$1" repo="$2"
-  local remote tip claims epochs now line c_path c_lane c_kind c_at c_wt c_pr c_epoch age pr path prmap
+  local remote tip claims epochs now line c_path c_lane c_kind c_at c_wt c_pr c_pid c_epoch age pr path prmap
   remote="$(default_remote "$repo")"
   new_workdir
   if [ -z "$lane" ]; then
@@ -558,7 +665,7 @@ cmd_list() {
     while IFS= read -r line || [ -n "$line" ]; do
       [ -n "$line" ] || continue
       IFS="$TAB" read -r c_epoch <&3 || die 2 "claims epoch list is corrupt"
-      IFS="$TAB" read -r c_path c_lane c_kind c_at c_wt c_pr <<<"$line"
+      parse_claim_line "$line"
       case "$c_path" in *[[:space:]]*) printf 'file-claim: warning: claimed path contains whitespace: %s\n' "$c_path" >&2;; esac
       if [ -n "$lane" ] && [ "$c_lane" != "$lane" ]; then continue; fi
       age=$((now - c_epoch)); if [ "$age" -lt 0 ]; then age=0; fi
