@@ -1181,6 +1181,16 @@ run_job --slot lane --template "$T/tmpl-basic.md" --model flag-model
 [ "$RC" -eq 0 ] || fail "--model exits 0"
 grep -q "|model=flag-model|" "$T/stub.log" || fail "--model beats the state"
 
+# --- a missing state file is not reported as a held lock ---
+setup_case missing-state
+reset_stub
+missing_state="missing/state"
+OUT="$(cd "$CDIR" && bash "$TKT" "$missing_state" --slot lane --template "$T/tmpl-basic.md" 2>"$CDIR/stderr.txt")"; RC=$?
+[ "$RC" -eq 2 ] || fail "missing state exits 2 (rc=$RC)"
+grep -Fq "no state file at $missing_state" "$CDIR/stderr.txt" || fail "missing state names its path: $(cat "$CDIR/stderr.txt")"
+grep -q "state locked" "$CDIR/stderr.txt" && fail "missing state is not reported locked"
+grep -q "^run|" "$T/stub.log" && fail "missing state dispatches nothing"
+
 # --- a held lock exits 2 naming the pid, and dispatches nothing ---
 setup_case locked
 reset_stub

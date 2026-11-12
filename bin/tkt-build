@@ -60,6 +60,7 @@ lane_brief="$HOME/.agents/skills/planning/briefs/lane.md"
 map_brief="$HOME/.agents/skills/review-loop/briefs/mutant-map.md"
 tkt() { "$tkt_state" "$state" "$@"; }
 lockdir="$state.lock"
+require_state_file tkt-build "$state"
 if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 elif pid="$(cat "$lockdir/pid" 2>/dev/null)" && [ -n "${pid:-}" ]; then
   echo "tkt-build: state locked by pid $pid" >&2; exit 2

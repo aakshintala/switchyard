@@ -4,6 +4,17 @@
 #   namebase_lib="$script_dir/lib/namebase.sh"
 # Every function returns 0 unless stated, and is safe under `set -euo pipefail`.
 
+# require_state_file SCRIPT STATE: exit 2 with a caller-specific diagnostic when
+# STATE is missing. Check before probing its lock so a missing parent directory
+# cannot be misreported as a held state lock.
+require_state_file() {
+  local caller="$1" state_path="$2"
+  if [ ! -f "$state_path" ]; then
+    printf '%s: no state file at %s\n' "$caller" "$state_path" >&2
+    exit 2
+  fi
+}
+
 # set_namebase REPO ISSUE: set $namebase to "<repo tail>-<issue>", the stem
 # every tkt-* script builds its run, brief, gate and log paths from.
 set_namebase() {
