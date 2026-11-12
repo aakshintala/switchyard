@@ -83,6 +83,9 @@ plan_outcome() {
 # fixture, which stay line-level task marks, not Files entry marks: prose
 # after a Files token (such as "reads `other`") never flips the entry.
 _plan_read_mark='\(read\)'
+# The new mark plan-check reads: the word `new` or `new-confirmed` on the line
+# outside backticks. plan_records and the Files reader share it.
+_plan_new_word='(^|[^a-z0-9_])new(-confirmed)?([^a-z0-9_]|$)'
 
 # plan_records PLAN [files-entry-flag]: one record per backticked token outside
 # fenced blocks and `## Gate`: section, line, new mark, read mark, token. The
@@ -105,7 +108,7 @@ plan_records() {
       lower = tolower($0)
       gsub(/`[^`]*`/, "", lower)
       if (lower ~ /(^|[^a-z0-9_])new-confirmed([^a-z0-9_]|$)/) newmark = 2
-      else if (lower ~ /(^|[^a-z0-9_])new([^a-z0-9_]|$)/) newmark = 1
+      else if (lower ~ /'"$_plan_new_word"'/) newmark = 1
       else if (lower ~ /(^|[^a-z0-9_])(removed|remove|deleted|delete)([^a-z0-9_]|$)/) newmark = 3
       else newmark = 0
       isread = (tolower($0) ~ /(^|[^a-z0-9_])(reads|read-only|fixture)([^a-z0-9_]|$)/ || tolower($0) ~ /'"$_plan_read_mark"'/)
@@ -236,14 +239,22 @@ _plan_files_awk='
     if (t == "") next
     rest = substr($0, RSTART + RLENGTH)
     read = (readsec || tolower(rest) ~ /'"$_plan_read_mark"'/)
+    lower = tolower($0); gsub(/`[^`]*`/, "", lower)
+    newmark = (lower ~ /'"$_plan_new_word"'/)
     if (mode == "entries") print t "\t" (read ? "read" : "write")
     else if (mode == "lines") print NR "\t" t
+    else if (mode == "new-conflicts" && read && newmark) print t
+    else if (mode == "new" && newmark && !read) print t
+    else if (mode == "new" || mode == "new-conflicts") next
     else if (mode == "writes" && read) next
     else print t
   }'
 
-# plan_files_pathspecs PLAN [all|writes]: one path per line from the `## Files`
-# entries. Blank tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
+# plan_files_pathspecs PLAN [all|writes|new|lines|new-conflicts]: one path per line
+# from the `## Files` entries. `new` selects writes carrying plan-check's new
+# mark (`new` or `new-confirmed`); `new-conflicts`
+# selects paths marked both read and new. Blank tokens are dropped. Ends with
+# awk, so no pipe can fail under pipefail.
 plan_files_pathspecs() { awk -v mode="${2:-all}" "$_plan_files_awk" "$1"; }
 
 # _plan_task_pathspec KIND VALUE: expand_token's callback for task records.

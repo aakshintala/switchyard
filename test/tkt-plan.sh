@@ -26,12 +26,14 @@ unset DELEGATE_JOBS_DIR
 # Files entries expose their read/write mark as a second parser field. A
 # missing marker is a write, and the default pathspec mode still includes all.
 parser_plan="$T/files-parser.md"
-printf '## Files\n- `read.txt` (read)\n| `table.txt` | (read) |\n- `write.txt`\n' >"$parser_plan"
+printf '## Files\n- `read.txt` (read)\n| `table.txt` | (read) |\n- `write.txt`\n- `new.txt` (new)\n- `newdir/c.txt` (new-confirmed)\n' >"$parser_plan"
 parser_entries="$(awk -v mode=entries "$_plan_files_awk" "$parser_plan")"
-[ "$parser_entries" = "$(printf 'read.txt\tread\ntable.txt\tread\nwrite.txt\twrite')" ] || fail "Files parser fields: [$parser_entries]"
-[ "$(plan_files_pathspecs "$parser_plan")" = "$(printf 'read.txt\ntable.txt\nwrite.txt')" ] || fail "all Files paths include reads and writes"
-[ "$(plan_files_pathspecs "$parser_plan" all)" = "$(printf 'read.txt\ntable.txt\nwrite.txt')" ] || fail "explicit all Files paths include reads and writes"
-[ "$(plan_files_pathspecs "$parser_plan" writes)" = "write.txt" ] || fail "write Files paths omit reads, table rows included"
+[ "$parser_entries" = "$(printf 'read.txt\tread\ntable.txt\tread\nwrite.txt\twrite\nnew.txt\twrite\nnewdir/c.txt\twrite')" ] || fail "Files parser fields: [$parser_entries]"
+[ "$(plan_files_pathspecs "$parser_plan")" = "$(printf 'read.txt\ntable.txt\nwrite.txt\nnew.txt\nnewdir/c.txt')" ] || fail "all Files paths include reads and writes"
+[ "$(plan_files_pathspecs "$parser_plan" all)" = "$(printf 'read.txt\ntable.txt\nwrite.txt\nnew.txt\nnewdir/c.txt')" ] || fail "explicit all Files paths include reads and writes"
+[ "$(plan_files_pathspecs "$parser_plan" writes)" = "$(printf 'write.txt\nnew.txt\nnewdir/c.txt')" ] || fail "writes include new entries and omit reads"
+[ "$(plan_files_pathspecs "$parser_plan" new)" = "$(printf 'new.txt\nnewdir/c.txt')" ] || fail "new mode returns marked writes only"
+[ "$(plan_files_pathspecs "$parser_plan" lines)" = "$(printf '2\tread.txt\n3\ttable.txt\n4\twrite.txt\n5\tnew.txt\n6\tnewdir/c.txt')" ] || fail "lines mode preserves new token and line number"
 
 # A prose-suffixed (read) mark is a read in the shared reader.
 prose_plan="$T/files-prose-read.md"

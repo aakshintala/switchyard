@@ -14,7 +14,7 @@ export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" PATH="$T/bin:$PATH"
 export TEST_STATE_BIN="$STATE_BIN" TEST_CALLS="$T/calls.log"
 export TEST_PLAN_VERDICT="$T/plan-verdict" TEST_POST_VERDICT="$T/post-verdict"
 export TEST_BUILD_VERDICT="$T/build-verdict" TEST_SHIP_VERDICT="$T/ship-verdict"
-export TEST_FENCE_MODE="$T/fence-mode" TEST_FENCE_CALLS="$T/fence-calls.log" TEST_FENCE_RESULTS="$T/fence-results.log"
+export TEST_FENCE_MODE="$T/fence-mode" TEST_FENCE_CALLS="$T/fence-calls.log" TEST_FENCE_RESULTS="$T/fence-results.log" TEST_FENCE_MISSING_PATH="$T/fence-missing-path"
 export TEST_BUILD_EXTRA="$T/build-extra.md" TEST_MERGE_CALLS="$T/merge-calls.log" TEST_STATE_HELPERS="$T/state-helpers.sh"
 
 cat >"$TEST_STATE_HELPERS" <<'EOF'
@@ -114,6 +114,24 @@ case " $* " in
   *' --dry '*) echo 'unexpected --dry'; exit 90 ;;
   *' --ranges '*) echo 'unexpected --ranges'; exit 90 ;;
 esac
+paths=""; newpaths=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --paths) paths="${2:-}"; shift 2 ;;
+    --new) newpaths="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+missing="$(cat "$TEST_FENCE_MISSING_PATH" 2>/dev/null || true)"
+if [ -n "$missing" ]; then
+  case ",$paths," in
+    *,"$missing",*)
+      case ",$newpaths," in
+        *,"$missing",*) ;;
+        *) printf 'MISSING %s\n' "$missing"; exit 4 ;;
+      esac ;;
+  esac
+fi
 mode="$(cat "$TEST_FENCE_MODE")"
 if [ "$mode" = mixed ]; then
   calls="$(wc -l <"$TEST_FENCE_CALLS" | tr -d ' ')"
@@ -165,7 +183,7 @@ PLANEOF
   printf 'MERGED\n' >"$TEST_SHIP_VERDICT"
   printf 'clean\n' >"$TEST_FENCE_MODE"
   : >"$TEST_CALLS"; : >"$TEST_FENCE_CALLS"; : >"$TEST_FENCE_RESULTS"; : >"$TEST_MERGE_CALLS"
-  rm -f "$TEST_BUILD_EXTRA"
+  rm -f "$TEST_BUILD_EXTRA" "$TEST_FENCE_MISSING_PATH"
   export CASE_DIR STATE PLAN
 }
 
@@ -189,19 +207,102 @@ assert_call_count() {
 }
 
 assert_fence_args() {
-  local line
+  local expected_paths="${1:-src/read.txt,src/write.txt}" expected_new="${2:-}" expected_reads="${3-src/read.txt}" expected line
+  expected="fence-grant|1472 --repo acme/switchyard --paths $expected_paths"
+  [ -z "$expected_new" ] || expected="$expected --new $expected_new"
+  [ -z "$expected_reads" ] || expected="$expected --reads $expected_reads"
   [ -s "$TEST_FENCE_CALLS" ] || fail 'fence-grant was not called'
   while IFS= read -r line; do
-    case "$line" in
-      *'--repo acme/switchyard --paths src/read.txt,src/write.txt --reads src/read.txt'*) ;;
-      *) fail "incorrect fence-grant arguments: $line" ;;
-    esac
+    [ "$line" = "$expected" ] || fail "incorrect fence-grant arguments: $line (expected $expected)"
   done <"$TEST_FENCE_CALLS"
 }
 
 assert_no_merge() {
   [ ! -s "$TEST_MERGE_CALLS" ] || fail "merge command ran: $(cat "$TEST_MERGE_CALLS")"
 }
+
+# Explicit `(new)` writes stay in --paths, which is the grant scope, and
+# also reach fence-grant through --new. Existing entries are not inferred.
+reset_case mixed-new-write
+cat >"$PLAN" <<'PLANEOF'
+## Files
+- `src/existing.txt`
+- `src/new.snap` (new)
+PLANEOF
+run_drive
+[ "$RC" -eq 1 ] || fail "mixed existing/new plan should grant then stop at fake BLOCKED (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+assert_fence_args 'src/existing.txt,src/new.snap' 'src/new.snap' ''
+grep -q '^.* tkt-drive fence-grant GRANT ' "${STATE%.state}.journal" || fail 'mixed existing/new plan did not record GRANT'
+assert_no_merge
+
+reset_case all-new-writes
+cat >"$PLAN" <<'PLANEOF'
+## Files
+- `src/new-a.snap` (new)
+- `fixtures/control-7/events.jsonl` (new-confirmed)
+PLANEOF
+run_drive
+[ "$RC" -eq 1 ] || fail "all-new marked plan should grant then stop at fake BLOCKED (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+assert_fence_args 'src/new-a.snap,fixtures/control-7/events.jsonl' 'src/new-a.snap,fixtures/control-7/events.jsonl' ''
+grep -q '^.* tkt-drive fence-grant GRANT ' "${STATE%.state}.journal" || fail 'all-new marked plan did not record GRANT'
+assert_no_merge
+
+# Each supported directory-token suffix is normalized to fence-grant's base.
+for suffix in slash star doublestar; do
+  reset_case "new-dir-$suffix"
+  case "$suffix" in
+    slash) token='src/new-dir/' ;;
+    star) token='src/new-dir/*' ;;
+    doublestar) token='src/new-dir/**' ;;
+  esac
+  printf '## Files\n- `%s` (new)\n' "$token" >"$PLAN"
+  run_drive
+  [ "$RC" -eq 1 ] || fail "new dir token $token should grant then stop at fake BLOCKED (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+  assert_fence_args "$token" 'src/new-dir' ''
+  assert_no_merge
+done
+
+# Reads sub-headings still feed --reads while every Files entry stays in --paths.
+reset_case reads-subheading
+cat >"$PLAN" <<'PLANEOF'
+## Files
+### Reads
+- `src/read.txt`
+### Writes
+- `src/write.txt`
+PLANEOF
+run_drive
+[ "$RC" -eq 1 ] || fail "Reads sub-heading should grant then stop at fake BLOCKED (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+assert_fence_args 'src/read.txt,src/write.txt' '' 'src/read.txt'
+assert_no_merge
+
+# A missing unmarked file remains in scope but is not exempted by --new.
+reset_case unmarked-missing
+cat >"$PLAN" <<'PLANEOF'
+## Files
+- `src/read.txt` (read)
+- `src/ghost.txt`
+PLANEOF
+printf 'src/ghost.txt\n' >"$TEST_FENCE_MISSING_PATH"
+run_drive
+[ "$RC" -eq 4 ] || fail "unmarked missing path should stop with fence-grant rc 4 (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+grep -q '^MISSING src/ghost.txt$' "$OUT" || fail "unmarked missing path did not report MISSING: $(cat "$OUT")"
+grep -q '^TKT tkt-drive STOP tool=fence-grant verdict=STOP$' "$OUT" || fail 'unmarked missing path did not report the fence-grant STOP'
+assert_fence_args 'src/read.txt,src/ghost.txt' '' 'src/read.txt'
+assert_no_merge
+
+# A Files entry cannot be both a read and a new write.
+reset_case read-new-conflict
+cat >"$PLAN" <<'PLANEOF'
+## Files
+- `src/conflict.txt` (read) (new)
+PLANEOF
+run_drive
+[ "$RC" -eq 2 ] || fail "read/new conflict should be refused internally (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+grep -Fq 'src/conflict.txt' "$ERR" || fail "read/new conflict did not name its path: $(cat "$ERR")"
+grep -Fq 'both read and new' "$ERR" || fail "read/new conflict reason missing: $(cat "$ERR")"
+[ ! -s "$TEST_FENCE_CALLS" ] || fail 'read/new conflict reached fence-grant'
+assert_no_merge
 
 # SET chains to the next plan step; POSTED grants and continues into the build.
 reset_case set-chain

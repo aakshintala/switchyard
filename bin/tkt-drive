@@ -137,15 +137,40 @@ add_overlap_context() {
 
 grant_plan() {
   local issue="$1" plan="$2" repo="$3" run_dir="$4" part="$5"
-  local output="$tmp/grant.out" error="$tmp/grant.err" rc=0 paths reads
+  local output="$tmp/grant.out" error="$tmp/grant.err" rc=0 paths reads newpaths path conflict
+  local all_paths="$tmp/all-paths" new_paths="$tmp/new-paths" conflicts="$tmp/new-read-conflicts"
   local -a grant_args
   [ -r "$plan" ] || internal_stop "tkt-drive: cannot read plan: $plan"
-  paths="$(plan_files_pathspecs "$plan" all)"
-  [ -n "$paths" ] || internal_stop "tkt-drive: plan Files section has no paths: $plan"
-  paths="$(printf '%s\n' "$paths" | paste -sd, -)"
+  plan_files_pathspecs "$plan" all >"$all_paths"
+  [ -s "$all_paths" ] || internal_stop "tkt-drive: plan Files section has no paths: $plan"
+  plan_files_pathspecs "$plan" new-conflicts >"$conflicts"
+  if [ -s "$conflicts" ]; then
+    conflict="$(head -n 1 "$conflicts")"
+    internal_stop "tkt-drive: plan path is marked both read and new: $conflict"
+  fi
+  plan_files_pathspecs "$plan" new >"$tmp/new-marked-paths"
+  : >"$new_paths"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      */\*\*|*/\*|*/)
+        while [ "${path#./}" != "$path" ]; do path="${path#./}"; done
+        case "$path" in
+          */\*\*) path="${path%/\*\*}" ;;
+          */\*) path="${path%/\*}" ;;
+          */) path="${path%/}" ;;
+        esac ;;
+    esac
+    printf '%s\n' "$path" >>"$new_paths"
+  done <"$tmp/new-marked-paths"
+  paths="$(paste -sd, "$all_paths")"
+  newpaths="$(paste -sd, "$new_paths")"
+  # Keep every Files path in --paths for grant scope; only explicit (new)
+  # write marks bypass fence-grant's main-tree existence check.
   # shellcheck disable=SC2154
   reads="$(awk -v mode=entries "$_plan_files_awk" "$plan" | awk -F '\t' '$2 == "read" { print $1 }' | paste -sd, -)"
   grant_args=("$issue" --repo "$repo" --paths "$paths")
+  [ -z "$newpaths" ] || grant_args+=(--new "$newpaths")
   [ -z "$reads" ] || grant_args+=(--reads "$reads")
   case "$part" in
     ''|1) ;;
