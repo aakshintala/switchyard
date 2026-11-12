@@ -7,6 +7,7 @@
 # State key merge_check: command passed to ship-pr as --merge-check unless merge_gate is gate.
 # State key body_ends: text passed to ship-pr as --body-ends; absent, unreadable,
 # empty or blank passes no flag and asks for no check.
+# State key outside_plan: each path is passed to ship-pr as --outside-plan.
 # State key unverified: path passed to ship-pr as --unverified-fixes.
 # State plan value `takeover <ref>` has no plan file; it requires state key
 # gate and adds a ticket-review line to the PR body.
@@ -15,7 +16,7 @@ set -euo pipefail
 usage() {
   echo "usage: tkt-ship <state>" >&2
   echo "       longest wait 144000 s (40 h): 4 ship-pr attempts x 5 CI waits x 7200 s, plus the gate; run it in the background with no shell timeout" >&2
-  echo "       state keys: no_mutants_label passes --no-mutants-label, mutant_job passes --mutants-gate, body_ends passes --body-ends, unverified passes --unverified-fixes, merge_check passes --merge-check unless merge_gate is gate" >&2
+  echo "       state keys: no_mutants_label passes --no-mutants-label, mutant_job passes --mutants-gate, body_ends passes --body-ends, outside_plan passes --outside-plan, unverified passes --unverified-fixes, merge_check passes --merge-check unless merge_gate is gate" >&2
   echo "       takeover: plan=takeover <pr-or-branch> uses required state gate and adds a ticket-review line to the PR body" >&2
   exit 2
 }
@@ -351,6 +352,10 @@ while IFS= read -r b; do
   [ -n "$b" ] || continue
   args+=(--body-has "$b")
 done <<<"$(tkt list body_has 2>/dev/null || true)"
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  args+=(--outside-plan "$p")
+done <<<"$(tkt list outside_plan 2>/dev/null || true)"
 if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
   args+=(--mutants-gate)
 fi
@@ -484,9 +489,12 @@ if grep -Eq 'gh pr merge failed|merge status could not be confirmed' "$runlog"; 
     emit "MERGED" 0 "$(tail -n 20 "$runlog")"
   fi
   emit "MERGE-FAIL" 1 "$(tail -n 20 "$runlog")"
-elif grep -Eq 'gate failed|fails the gate' "$runlog"; then
+elif grep -Eq 'gate failed|fails the gate|the gate changed the worktree' "$runlog"; then
   emit "GATE-FAIL" 1 "$(tail -n 20 "$runlog")"
+elif grep -Eq 'only [0-9]+ GB free on .*; a gate needs 20 GB\. Free space, then rerun\.|cannot check free space on ' "$runlog"; then
+  emit "DISK" 1 "$(tail -n 20 "$runlog")"
 else
+  ship_detail="$(tail -n 20 "$runlog")"
   printf '\n--- gh-ci failures ---\n' >>"$runlog"
   (cd "$worktree" && GH_CI_LOG_LINES=300 "$bin_dir/gh-ci" failures --pr "$pr" --repo "$repo" >>"$runlog" 2>&1) || true
   digest="$(ci_digest)"
@@ -501,6 +509,17 @@ ${summary}"
     else
       digest="${never_started}
 ${summary}"
+    fi
+  fi
+  if [ -z "$never_started" ] && grep -q '^SUMMARY jobs=0 ' <<<"$digest"; then
+    if grep -Eq 'origin/main moved during CI after 3 retries|origin/main moved during the merge check; rerun ship-pr|CI passed on a head other than' <<<"$ship_detail"; then
+      emit "HEAD-MOVED" 1 "$ship_detail"
+    else
+      ship_line="$(grep '^ship-pr:' "$runlog" | tail -n 1 || true)"
+      if [ -n "$ship_line" ]; then
+        emit "SHIP-ERROR" 1 "$ship_line" "$ship_detail"
+      fi
+      emit "SHIP-ERROR" 1 "$ship_detail"
     fi
   fi
   emit "CI-FAIL $(tail -n 1 <<<"$digest" | sed 's/^SUMMARY //')" 1 "$(sed '$d' <<<"$digest")"

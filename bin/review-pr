@@ -548,13 +548,23 @@ cmd_start() {
       echo "review-pr: could not read fence from ticket state: $ticket_state" >&2
       exit 1
     }
+    outside_plan="$(bash "$script_dir/tkt-state" "$ticket_state" list outside_plan)" || {
+      echo "review-pr: could not read outside-plan files from ticket state: $ticket_state" >&2
+      exit 1
+    }
   else
     fence=""
+    outside_plan=""
   fi
   if [ -z "$fence" ]; then
     fence="No fence was recorded for this ticket."
   else
     fence="$(printf '%s\n' "$fence" | sed 's/^/- /')"
+  fi
+  if [ -z "$outside_plan" ]; then
+    outside_plan="No outside-plan files were recorded."
+  else
+    outside_plan="$(printf '%s\n' "$outside_plan" | sed 's/^/- /')"
   fi
   if [ -n "$verify" ]; then
     mode="verify"
@@ -947,7 +957,7 @@ cmd_start() {
       spec)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" "ISSUE=$issue" \
           "SPEC=$specn" "DIFF_FILE=.review-context/pr.diff" "TICKET_FILES=$ticket_files" \
-          "FENCE=$fence" "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
+          "FENCE=$fence" "OUTSIDE_PLAN=$outside_plan" "SKILLS=$skills_dir" "WORKFLOW_DOC=$wdoc" >"$brief"
         ;;
       overbuild)
         bash "$fill_brief" "$brief_src" "PR=$pr" "REPO=$repo" \

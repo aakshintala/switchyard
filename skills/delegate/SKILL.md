@@ -194,7 +194,7 @@ Muse sessions use `--disable-sandbox` and `allowAll`. pi sessions use no sandbox
 
 Use `send <id> TEXT` to start a turn when idle or steer the active turn. `send <id> -` reads text from stdin; it fails rather than prompting when stdin is a terminal. For text that starts with a dash, use `send <id> -- TEXT`. Text is limited to 8 MiB, must be non-empty after trimming, and cannot contain NUL. Text starting with `/` is rejected with a usage error on a pi session: pi would expand `/skill:<name>` or `/<template>` or run an extension command instead of sending the text to the model. Muse text is sent unchanged.
 
-`steered` means the host accepted the message for application on the next model continuation. It does not mean the model has acted on it yet. If `send` exits 5 with `busy`, it did not accept the text; retain it and retry once the replay bridge or host continuation resolves.
+`steered` means the host confirmed delivery, either by pi consuming/replaying the steer or Muse resolving it. `unconsumed` means the host recorded that it was not delivered. `unconfirmed` means the reply wait expired while delivery was still pending. Wait for idle, then use the `commandId` from `send --json` with the session event logs: resend if `steer.unconsumed.commandIds` contains it, or if no `user.commandId` or `steer.replayed.commandIds` records delivery. Do not resend when either event confirms delivery. If `send` exits 5 with `busy`, it did not accept the text; retain it and retry once the replay bridge or host continuation resolves.
 
 Plain `stop` interrupts a running turn, closes host stdin, and ends the session. `stop --interrupt` interrupts the running turn and keeps the session; at idle, it is a no-op.
 
@@ -227,7 +227,7 @@ Every session verb accepts `--json`. Success output has these shapes:
 | Verb | JSON output |
 |---|---|
 | `start` | `{"ok":true,"session":<State>}` |
-| `send` | `{"ok":true,"disposition":"started|steered","session":<State>}` |
+| `send` | `{"ok":true,"disposition":"started|steered|unconsumed|unconfirmed","commandId":<string, when a steer was accepted>,"session":<State>}` |
 | `logs` | `{"ok":true,"lines":[<event>, ...]}` without `--follow`; JSON lines with `--follow` |
 | `watch` | `{"ok":true,"session":<State>}` |
 | `stop` | `{"ok":true,"interrupted":true|false,"session":<State>}` |

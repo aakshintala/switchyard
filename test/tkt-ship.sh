@@ -577,6 +577,7 @@ rm -rf "$S.lock"
 reset_stub; setup_case flags
 printf '0' >"$T/exitcodes"
 printf 'body_has=%s\n' 'Resolves #515' 'Co-authored-by: T' >>"$S"
+printf 'outside_plan=%s\n' 'src/outside-a.go' 'src/outside-b.go' >>"$S"
 printf 'body_ends=%s\n' 'Co-authored with Claude Code.' >>"$S"
 printf 'unverified text\n' >"$CDIR/unverified.md"
 printf 'unverified=%s\n' "$CDIR/unverified.md" >>"$S"
@@ -589,6 +590,9 @@ run_ship
 [ "$RC" -eq 0 ] || fail "flags: exit $RC"
 grep -F -q -- '--body-has Resolves #515' "$T/calls.log" || fail "flags: body-has 1 missing"
 grep -F -q -- '--body-has Co-authored-by: T' "$T/calls.log" || fail "flags: body-has 2 missing"
+[ "$(grep -c -x -F 'arg|--outside-plan' "$T/calls.log")" -eq 2 ] || fail "flags: outside-plan passed once per path: $(cat "$T/calls.log")"
+grep -F -q -- '--outside-plan src/outside-a.go' "$T/calls.log" || fail "flags: first outside-plan path missing"
+grep -F -q -- '--outside-plan src/outside-b.go' "$T/calls.log" || fail "flags: second outside-plan path missing"
 [ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "flags: body-ends once: $(cat "$T/calls.log")"
 got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
 [ "$got" = 'arg|Co-authored with Claude Code.' ] || fail "flags: body-ends value, got [$got]"
@@ -767,6 +771,78 @@ run_ship
 expect_line1 "CI-FAIL jobs=0 inside-diff=0 mutants=0" neverstarted
 case "$OUT" in *"gh-ci: check ci has no check run after 10 min; it never started"*) ;; *) fail "digest carries never-started line: [$OUT]" ;; esac
 case "$OUT" in *"gh-ci reported no failed jobs"*) fail "digest drops empty failed-jobs line: [$OUT]" ;; esac
+
+# --- exit 1 with no failed jobs and a real fetch error is not a CI failure ---
+reset_stub; setup_case ship-error-fetch
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: git fetch origin failed\n' >"$T/shiplog"
+printf 'gh-ci reported no failed jobs\n' >"$T/failures-log"
+run_ship
+[ "$RC" -eq 1 ] || fail "ship-error-fetch: exit $RC"
+expect_line1 "SHIP-ERROR" ship-error-fetch
+case "$OUT" in *"CI-FAIL"*) fail "ship-error-fetch: reported CI-FAIL: [$OUT]" ;; esac
+case "$OUT" in *"CI-PENDING"*) fail "ship-error-fetch: reported CI-PENDING: [$OUT]" ;; esac
+first_detail="$(printf '%s\n' "$OUT" | sed -n '2p')"
+[ "$first_detail" = 'ship-pr: git fetch origin failed' ] || fail "ship-error-fetch: first detail line is [$first_detail]"
+expect_journal ship-error-fetch SHIP-ERROR
+
+# --- low disk gets an actionable DISK verdict, not a retry loop ---
+reset_stub; setup_case disk
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: only 1 GB free on /; a gate needs 20 GB. Free space, then rerun.\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "disk: exit $RC"
+expect_line1 "DISK" disk
+case "$OUT" in *"only 1 GB free on /; a gate needs 20 GB"*) ;; *) fail "disk: verdict omits low-disk cause: [$OUT]" ;; esac
+
+# --- inability to inspect free space gets the DISK verdict ---
+reset_stub; setup_case disk-check
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: cannot check free space on /tmp\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "disk-check: exit $RC"
+expect_line1 "DISK" disk-check
+case "$OUT" in *"cannot check free space on /tmp"*) ;; *) fail "disk-check: verdict omits free-space cause: [$OUT]" ;; esac
+
+# --- exhausted origin/main retries without failed CI jobs are head movement ---
+reset_stub; setup_case head-moved
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: origin/main moved during CI after 3 retries; rerun ship-pr\n' >"$T/shiplog"
+printf 'gh-ci reported no failed jobs\n' >"$T/failures-log"
+run_ship
+[ "$RC" -eq 1 ] || fail "head-moved: exit $RC"
+expect_line1 "HEAD-MOVED" head-moved
+case "$OUT" in *"origin/main moved during CI after 3 retries"*) ;; *) fail "head-moved: verdict omits ship-pr log tail: [$OUT]" ;; esac
+expect_journal head-moved HEAD-MOVED
+
+# --- CI passed on a different head is head movement ---
+reset_stub; setup_case head-moved-other-head
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: CI passed on a head other than deadbeef\n' >"$T/shiplog"
+printf 'gh-ci reported no failed jobs\n' >"$T/failures-log"
+run_ship
+[ "$RC" -eq 1 ] || fail "head-moved-other-head: exit $RC"
+expect_line1 "HEAD-MOVED" head-moved-other-head
+case "$OUT" in *"CI passed on a head other than deadbeef"*) ;; *) fail "head-moved-other-head: verdict omits ship-pr message: [$OUT]" ;; esac
+
+# --- origin/main moving during merge check is head movement ---
+reset_stub; setup_case head-moved-merge-check
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: origin/main moved during the merge check; rerun ship-pr\n' >"$T/shiplog"
+printf 'gh-ci reported no failed jobs\n' >"$T/failures-log"
+run_ship
+[ "$RC" -eq 1 ] || fail "head-moved-merge-check: exit $RC"
+expect_line1 "HEAD-MOVED" head-moved-merge-check
+case "$OUT" in *"origin/main moved during the merge check; rerun ship-pr"*) ;; *) fail "head-moved-merge-check: verdict omits ship-pr message: [$OUT]" ;; esac
+
+# --- gate mutations in the worktree get the GATE-FAIL verdict ---
+reset_stub; setup_case gate-worktree-changed
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: the gate changed the worktree; commit nothing from a gate\n' >"$T/shiplog"
+run_ship
+[ "$RC" -eq 1 ] || fail "gate-worktree-changed: exit $RC"
+expect_line1 "GATE-FAIL" gate-worktree-changed
+grep -q '^gh-ci|' "$T/calls.log" && fail "gate-worktree-changed: gh-ci must not run"
 
 # --- a merge-only head with newer origin/main preserves the gated diff ---
 reset_stub; setup_case gateship-main-merge-journal

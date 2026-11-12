@@ -571,7 +571,7 @@ fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
         true,
         "OK",
         Some(&cassette()),
-        &[],
+        &[("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100")],
     );
     assert!(
         started.status.success(),
@@ -633,7 +633,7 @@ fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
     let steered = h.invoke(&["send", &id, "steer me", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
     assert!(
         h.logs(&id)
             .iter()
@@ -702,7 +702,14 @@ fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
 #[test]
 fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
     let h = Harness::new();
-    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "HOLD_TOOL", None, &[]);
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_TOOL",
+        None,
+        &[("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100")],
+    );
     assert!(
         started.status.success(),
         "{}",
@@ -715,7 +722,10 @@ fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
     let steered = h.invoke(&["send", &id, "STEER-1", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
+    let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(reply["commandId"], pending[0]["commandId"], "{reply}");
 
     let requests = h.requests();
     let steer_at = requests
@@ -782,7 +792,7 @@ fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
         true,
         "HOLD_REPLAY,REPLAY_UNCONSUMED",
         None,
-        &[],
+        &[("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100")],
     );
     assert!(
         started.status.success(),
@@ -801,7 +811,7 @@ fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
             String::from_utf8_lossy(&steered.stderr)
         );
         let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-        assert_eq!(reply["disposition"], "steered", "{reply}");
+        assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
     }
 
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
@@ -857,13 +867,25 @@ fn all_queued_pi_steers_become_unconsumed_if_no_continuation_starts() {
     let id = value["session"]["id"].as_str().unwrap().to_string();
 
     h.wait_file("tool.paused", "the held tool call");
-    let steered = h.invoke(&["send", &id, "NEVER-CONTINUE", "--json"]);
-    assert!(steered.status.success());
-    let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
-    assert_eq!(pending.len(), 1, "{pending:?}");
-    let command_id = pending[0]["commandId"].as_str().unwrap();
+    let (steered, command_id) = std::thread::scope(|scope| {
+        let send = scope.spawn(|| h.invoke(&["send", &id, "NEVER-CONTINUE", "--json"]));
+        h.wait_path(&h.fake_dir.join("queue.txt"), "pi to accept the steer");
+        let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        let command_id = pending[0]["commandId"].as_str().unwrap().to_string();
 
-    std::fs::write(h.fake_dir.join("go"), "").unwrap();
+        std::fs::write(h.fake_dir.join("go"), "").unwrap();
+        let sent = send.join().unwrap();
+        (sent, command_id)
+    });
+    assert!(
+        steered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&steered.stderr)
+    );
+    let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
+    assert_eq!(reply["disposition"], "unconsumed", "{reply}");
+
     h.wait_path(&continuation_wait_marker, "the continuation wait to start");
     let idle = h.wait_state(&id, "idle after continuation deadline", |state| {
         state["status"] == "idle"
@@ -903,7 +925,10 @@ fn pi_clears_queued_steers_before_a_late_continuation_can_start() {
         true,
         "HOLD_TOOL,NO_CONTINUATION,LATE_CONTINUATION",
         None,
-        &[("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS", "150")],
+        &[
+            ("DELEGATE_SESSION_PI_CONTINUATION_WAIT_MS", "150"),
+            ("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100"),
+        ],
     );
     assert!(
         started.status.success(),
@@ -917,7 +942,7 @@ fn pi_clears_queued_steers_before_a_late_continuation_can_start() {
     let steered = h.invoke(&["send", &id, "LATE-STEER", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
 
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
     let idle = h.wait_state(&id, "idle after continuation deadline", |state| {
@@ -978,10 +1003,13 @@ fn stopping_during_pi_continuation_wait_does_not_publish_idle() {
         true,
         "HOLD_TOOL,NO_CONTINUATION",
         None,
-        &[(
-            "DELEGATE_SESSION_TEST_CONTINUATION_WAIT_FILE",
-            continuation_wait_marker_env,
-        )],
+        &[
+            (
+                "DELEGATE_SESSION_TEST_CONTINUATION_WAIT_FILE",
+                continuation_wait_marker_env,
+            ),
+            ("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100"),
+        ],
     );
     assert!(
         started.status.success(),
@@ -1041,6 +1069,7 @@ fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
         "HOLD_REPLAY,REPLAY_MIXED",
         None,
         &[
+            ("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100"),
             (
                 "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL",
                 release_event_write_env,
@@ -1072,7 +1101,7 @@ fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
             String::from_utf8_lossy(&steered.stderr)
         );
         let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-        assert_eq!(reply["disposition"], "steered", "{reply}");
+        assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
     }
     let pending = h.state(&id)["pendingSteers"].as_array().unwrap().clone();
     assert_eq!(pending.len(), 2, "{pending:?}");
@@ -1365,7 +1394,14 @@ fn interrupt_during_pending_replay_cancels_without_starting_replay() {
 #[test]
 fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
     let h = Harness::new();
-    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "HOLD_TOOL", None, &[]);
+    let started = h.start_pi(
+        "openai/gpt-6-luna",
+        b"BRIEF",
+        true,
+        "HOLD_TOOL",
+        None,
+        &[("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100")],
+    );
     assert!(
         started.status.success(),
         "{}",
@@ -1378,7 +1414,7 @@ fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
     let steered = h.invoke(&["send", &id, "STEER-2", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
 
     let stopped = h.invoke(&["stop", &id, "--interrupt", "--json"]);
     assert!(stopped.status.success());
@@ -1448,7 +1484,7 @@ fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
     let steered = h.invoke(&["send", &id, "STEER-4", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
 
     std::fs::write(h.fake_dir.join("go"), "").unwrap();
     watch_ok(&h, &id);
@@ -1669,6 +1705,7 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
         "STEER_RACE",
         None,
         &[
+            ("DELEGATE_SESSION_STEER_REPLY_WAIT_MS", "100"),
             (
                 "DELEGATE_SESSION_TEST_HOLD_EVENT_WRITE_UNTIL",
                 release_event_write_env,
@@ -1698,7 +1735,7 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let steered = h.invoke(&["send", &id, "STEER-3", "--json"]);
     assert!(steered.status.success());
     let reply: Value = serde_json::from_slice(&steered.stdout).unwrap();
-    assert_eq!(reply["disposition"], "steered", "{reply}");
+    assert_eq!(reply["disposition"], "unconfirmed", "{reply}");
 
     let held_marker = std::path::PathBuf::from(format!("{}.held", release_event_write.display()));
     h.wait_path(&held_marker, "pi-turn-2 start event append hold");

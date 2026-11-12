@@ -76,6 +76,12 @@ case "\$(cat "$T/jobmode")" in
     echo "TKT tkt-job NO-COMMITS id=j1 gate=PASS log=x"
     exit 1;;
   evil) commit_as_job evil.txt "outside"; echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
+  stop-list)
+    mkdir -p "\$wt/docs"
+    printf 'outside' >"\$wt/docs/outside.md"
+    git -C "\$wt" add docs/outside.md
+    git -C "\$wt" -c user.email=t@t -c user.name=t commit -qm "fix: docs/outside.md"
+    echo "TKT tkt-job DONE id=j1 head=h commits=1 gate=PASS log=x";;
   ask)
     echo "TKT tkt-job ASK id=j1 log=x"
     echo "which design rules the retry?"
@@ -688,12 +694,13 @@ grep -F -q 'OVERLAP fix.txt lane:fiber-999' "$T/stderr" || fail "overlapping cla
 grep -q "failing: nightly" <<<"$out" || fail "failed CI jobs missing from digest"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
 
-# 4. Fence breach after the fix passes through with the gate's verdict.
+# 4. A stop-list breach after the fix passes through with the gate's verdict.
 setup_case fence
-printf 'evil' >"$T/jobmode"
-out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "fence breach exited 0"
-rc=$?; [ "$rc" = "1" ] || fail "fence breach exited $rc, want 1"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix FENCE n=1" || fail "bad verdict: $(head -n 1 <<<"$out")"
+printf 'stop-list' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "stop-list breach exited 0"
+rc=$?; [ "$rc" = "1" ] || fail "stop-list breach exited $rc, want 1"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix STOP-LIST n=1" || fail "bad verdict: $(head -n 1 <<<"$out")"
+grep -Fq 'docs/outside.md — contract change: ask first' <<<"$out" || fail "stop-list path and reason missing from digest: $out"
 
 # 5. No-verify closes the round and records the findings file.
 setup_case noverify
@@ -827,15 +834,15 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "gatefill exited $?"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "gatefill bad verdict: $(head -n 1 <<<"$out")"
 grep -F -q "GATE=true" "$T/calls.log" || fail "gatefill: GATE=true not passed to tkt-job"
 
-# 7c. A FENCE stop closes its slot without counting a round; the next call
+# 7c. A STOP-LIST stop closes its slot without counting a round; the next call
 # dispatches fix2, not RECOVER on fix1.
 setup_case gatefail
-printf 'evil' >"$T/jobmode"
+printf 'stop-list' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "gatefail exited 0"
 rc=$?; [ "$rc" = "1" ] || fail "gatefail exited $rc, want 1"
-head -n 1 <<<"$out" | grep -q "TKT tkt-fix FENCE n=1" || fail "gatefail bad verdict: $(head -n 1 <<<"$out")"
-[ "$(bash "$TKT_STATE" "$S" get round)" = "0" ] || fail "FENCE stop changed round"
-[ "$(bash "$TKT_STATE" "$S" get fixslot)" = "1" ] || fail "FENCE stop did not close its slot"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix STOP-LIST n=1" || fail "bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "0" ] || fail "STOP-LIST changed round"
+[ "$(bash "$TKT_STATE" "$S" get fixslot)" = "1" ] || fail "STOP-LIST did not close its slot"
 printf 'done' >"$T/jobmode"
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")"
 grep -q "RECOVER" <<<"$out" && fail "second call printed RECOVER"
