@@ -246,6 +246,7 @@ assert_fence_args() {
   done <"$TEST_FENCE_CALLS"
 }
 
+# Explicit `(new)` writes stay in --paths, which is the grant scope, and
 # also reach fence-grant through --new. Existing entries are not inferred.
 reset_case mixed-new-write
 cat >"$PLAN" <<'PLANEOF'
