@@ -102,8 +102,11 @@ roster, retired, helper = sys.argv[1:]
 exec(compile(open(helper).read(), helper, "exec"), globals())
 done, done_sess = read_retirements(retired)
 handed_off = set()
+latest_done = {}
 for line in open(retired):
     fields = line.rstrip("\n").split("\t")
+    if len(fields) > 1 and fields[1]:
+        latest_done[fields[1]] = max(fields[0], latest_done.get(fields[1], ""))
     if len(fields) > 3 and fields[3].startswith("handed-to-owner "):
         handed_off.add(fields[1])
 by_ticket = {}
@@ -122,7 +125,10 @@ for ticket in sorted(by_ticket, key=int):
     entries = by_ticket[ticket]
     if all(entry_is_retired(ticket, name, jid, ts, done, done_sess)
            for name, jid, ts in entries):
-        print("fiber-" + ticket)
+        done_at = latest_done.get(ticket, "")
+        if not done_at:
+            raise SystemExit("retired ticket has no done timestamp")
+        print("fiber-" + ticket + "\t" + done_at)
 PY
   then
     rm -rf "$query_tmp"
@@ -845,10 +851,8 @@ PY
       mv "$g" "$R/done/" && echo "fence retired: $(basename "$g")"
     done
     # Retiring the roster line and grant records used to leave open-ticket
-    # claims behind when no later reap ran. Session liveness is not enough to
-    # clear those rows: a retired lane's shell PID may still be alive. `done`
-    # prunes the known holder names here; reap handles missed cleanup only once
-    # the recorded holder PID is dead on its host.
+    # claims behind when no later reap ran. `done` prunes the known holder
+    # names here; reap handles missed cleanup using the roster's done stamp.
     #
     # Prune every holder shape this roster knows: the bare `fiber-<n>` the
     # claim is usually written under, plus each session name, since a lane

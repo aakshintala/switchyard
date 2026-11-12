@@ -154,28 +154,44 @@ claims_blob() {
   git -C "$1" cat-file -p "$tip:claims" || fail "read claims blob"
 }
 
-# Replace one claim's worktree host and optional holder PID in a fixture ref.
-set_claim_owner() {
-  local remote path lane host pid work
-  remote="$1"; path="$2"; lane="$3"; host="$4"; pid="$5"
-  work="$T/claim-owner-${lane#fiber-}"
+# Replace one claim's lane or timestamp in a fixture ref.
+set_claim_lane() {
+  local remote path lane work
+  remote="$1"; path="$2"; lane="$3"
+  work="$T/claim-lane-${path//\//-}"
   rm -rf "$work"
-  git -c init.defaultBranch=main init -q "$work" || fail "init claim-owner fixture"
-  git -C "$work" config user.email t@t.t || fail "claim-owner fixture email"
-  git -C "$work" config user.name t || fail "claim-owner fixture name"
-  git -C "$work" remote add origin "$remote" || fail "claim-owner fixture remote"
-  git -C "$work" fetch -q origin refs/claims/live || fail "fetch claim-owner ref"
-  git -C "$work" checkout -q -b claim-owner FETCH_HEAD || fail "checkout claim-owner ref"
-  awk -F '\t' -v OFS='\t' -v path="$path" -v lane="$lane" -v host="$host" -v pid="$pid" '
-    $1 == path && $2 == lane { $5 = host; $7 = pid; found = 1 }
+  git -c init.defaultBranch=main init -q "$work" || fail "init claim-lane fixture"
+  git -C "$work" config user.email t@t.t || fail "claim-lane fixture email"
+  git -C "$work" config user.name t || fail "claim-lane fixture name"
+  git -C "$work" remote add origin "$remote" || fail "claim-lane fixture remote"
+  git -C "$work" fetch -q origin refs/claims/live || fail "fetch claim-lane ref"
+  git -C "$work" checkout -q -b claim-lane FETCH_HEAD || fail "checkout claim-lane ref"
+  awk -F '\t' -v OFS='\t' -v path="$path" -v lane="$lane" '$1 == path { $2 = lane } { print }' "$work/claims" >"$work/claims.new"
+  mv "$work/claims.new" "$work/claims"
+  git -C "$work" add claims || fail "stage claim-lane row"
+  git -C "$work" commit -qm 'set claim lane fixture' || fail "commit claim-lane row"
+  git -C "$work" push -q origin HEAD:refs/claims/live || fail "publish claim-lane row"
+}
+set_claim_timestamp() {
+  local remote path at work
+  remote="$1"; path="$2"; at="$3"
+  work="$T/claim-time-${path//\//-}"
+  rm -rf "$work"
+  git -c init.defaultBranch=main init -q "$work" || fail "init claim-time fixture"
+  git -C "$work" config user.email t@t.t || fail "claim-time fixture email"
+  git -C "$work" config user.name t || fail "claim-time fixture name"
+  git -C "$work" remote add origin "$remote" || fail "claim-time fixture remote"
+  git -C "$work" fetch -q origin refs/claims/live || fail "fetch claim-time ref"
+  git -C "$work" checkout -q -b claim-time FETCH_HEAD || fail "checkout claim-time ref"
+  awk -F '\t' -v OFS='\t' -v path="$path" -v at="$at" '
+    $1 == path { $4 = at; found = 1 }
     { print }
     END { if (!found) exit 1 }
   ' "$work/claims" >"$work/claims.new" || fail "find claim row for $path"
   mv "$work/claims.new" "$work/claims"
-  git -C "$work" add claims || fail "stage claim-owner row"
-  git -C "$work" diff --cached --quiet && return 0
-  git -C "$work" commit -qm 'set claim owner fixture' || fail "commit claim-owner row"
-  git -C "$work" push -q origin HEAD:refs/claims/live || fail "publish claim-owner row"
+  git -C "$work" add claims || fail "stage claim-time row"
+  git -C "$work" commit -qm 'set claim timestamp fixture' || fail "commit claim-time row"
+  git -C "$work" push -q origin HEAD:refs/claims/live || fail "publish claim-time row"
 }
 
 NFILE="$T/n"
@@ -1224,26 +1240,25 @@ grep -qF 'open.txt' <<<"$list" || fail "open-ticket claim remains on next check:
 grep -qF 'sweep.txt' <<<"$list" || fail "sweep claim remains after closed ticket: $list"
 ! grep -qF 'closed.txt' <<<"$list" || fail "closed-ticket claim is gone on next check: $list"
 
-# --- retired lanes with dead local holders are reaped, live and active holds stay ---
+# --- retired lanes reap claims at/before done, but preserve newer claims ---
 R="$(fresh)"
-for id in 6101 6102 6103 6104; do
-  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "fiber-$id" --grant --worktree "$(hostname -s):claim-$id" --repo test/repo "retired-$id.txt" >/dev/null 2>&1 \
-    || fail "retired-holder setup for $id"
+for spec in '6101 fiber-6101 before-6101.txt' '6102 fiber-6102 newer-6102.txt' '6103 fiber-6103 active-6103.txt' '6104 fiber-6104 phase-6104.txt'; do
+  read -r id lane path <<<"$spec"
+  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "$lane" --grant --worktree "fixture:claim-$id" --repo test/repo "$path" >/dev/null 2>&1 || fail "retired-holder setup for $lane"
 done
-dead_holder=999999
-while kill -0 "$dead_holder" 2>/dev/null; do dead_holder=$((dead_holder + 1)); done
-set_claim_owner "$R" retired-6101.txt fiber-6101 "$(hostname -s):claim-6101" "$dead_holder"
-set_claim_owner "$R" retired-6102.txt fiber-6102 "$(hostname -s):claim-6102" "$$"
-set_claim_owner "$R" retired-6103.txt fiber-6103 "$(hostname -s):claim-6103" "$dead_holder"
-set_claim_owner "$R" retired-6104.txt fiber-6104 remote-fixture:claim-6104 "$dead_holder"
-printf 'fiber-6101\nfiber-6102\nfiber-6104\n' >"$LANECHECK_RETIRED_FILE"
-out="$(GH_TICKET_STATES='6101:OPEN,6102:OPEN,6103:OPEN,6104:OPEN' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-retired")" \
-  || fail "reap handles retired-lane claims: $(cat "$T/e-reap-retired")"
-! grep -qF 'retired-6101.txt' <<<"$(claims_blob "$R")" || fail "retired lane with dead local holder is reaped"
-grep -qF 'retired-6102.txt' <<<"$(claims_blob "$R")" || fail "retired lane with live holder keeps its row"
-grep -qF 'retired-6103.txt' <<<"$(claims_blob "$R")" || fail "active lane with dead holder keeps its row"
-grep -qF 'retired-6104.txt' <<<"$(claims_blob "$R")" || fail "retired remote-host holder is conservatively kept"
-grep -qF 'REAP claim retired-6101.txt by fiber-6101' <<<"$out" || fail "reaped retired-lane claim is reported: $out"
+set_claim_timestamp "$R" before-6101.txt 2020-01-01T00:00:00Z
+set_claim_timestamp "$R" newer-6102.txt 2022-01-01T00:00:00Z
+set_claim_timestamp "$R" active-6103.txt 2020-01-01T00:00:00Z
+set_claim_timestamp "$R" phase-6104.txt 2020-01-01T00:00:00Z
+set_claim_lane "$R" phase-6104.txt fiber-6104-build
+printf 'fiber-6101\t2021-01-01T00:00:00Z\nfiber-6102\t2021-01-01T00:00:00Z\nfiber-6104\t2021-01-01T00:00:00Z\n' >"$LANECHECK_RETIRED_FILE"
+[ "$(claims_blob "$R" | awk -F '\t' 'NF != 6 { bad = 1 } END { print bad+0 }')" = 0 ] || fail "new claim rows have exactly six fields"
+out="$(GH_TICKET_STATES='6101:OPEN,6102:OPEN,6103:OPEN,6104:OPEN' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-retired")" || fail "reap handles retired-lane claims: $(cat "$T/e-reap-retired")"
+! grep -qF 'before-6101.txt' <<<"$(claims_blob "$R")" || fail "retired lane claim at/before done is reaped"
+grep -qF 'newer-6102.txt' <<<"$(claims_blob "$R")" || fail "claim newer than done stamp is retained"
+grep -qF 'active-6103.txt' <<<"$(claims_blob "$R")" || fail "active lane claim remains"
+! grep -qF 'phase-6104.txt' <<<"$(claims_blob "$R")" || fail "retired phase-holder claim is reaped"
+grep -qF 'REAP claim before-6101.txt by fiber-6101' <<<"$out" || fail "reaped retired-lane claim is reported: $out"
 
 # A failure to read lanecheck's retired list makes the whole reap a safe no-op.
 R="$(fresh)"

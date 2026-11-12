@@ -180,8 +180,9 @@ write_merged_pr() { # number branch mergedAt
 r=$(newrun retired-query)
 lane "$r" 2001 fiber-2001-plan jid-plan
 lane "$r" 2001 fiber-2001-build jid-build
-printf '%s\t2001\tfiber-2001-plan\n' "$(old 1H)" >"$r/roster-done"
-printf '%s\t2001\tfiber-2001-build\n' "$(old 1H)" >>"$r/roster-done"
+latest_done=$(old 1H)
+printf '%s\t2001\tfiber-2001-plan\n' "$(old 2H)" >"$r/roster-done"
+printf '%s\t2001\tfiber-2001-build\n' "$latest_done" >>"$r/roster-done"
 lane "$r" 2002 fiber-2002-plan jid-plan
 lane "$r" 2002 fiber-2002-build jid-build
 printf '%s\t2002\tfiber-2002-plan\n' "$(old 2H)" >>"$r/roster-done"
@@ -190,7 +191,8 @@ printf '%s\t2003\n' "$(old 2H)" >>"$r/roster-done"
 lane "$r" 2004 fiber-2004-build jid-build
 printf '%s\t2004\t\thanded-to-owner handoff-2004 PR #4170\n' "$(old 2H)" >>"$r/roster-done"
 out=$(FW_RUN=$r bash "$BIN/lanecheck" retired 2>"$T/retired-query.err"); grc=$?
-if [ "$grc" = 0 ] && [ "$out" = "$(printf 'fiber-2001\nfiber-2003')" ]; then
+if [ "$grc" = 0 ] && [ "$(printf '%s\n' "$out" | cut -f1)" = "$(printf 'fiber-2001\nfiber-2003')" ] \
+  && [ "$(printf '%s\n' "$out" | awk -F '\t' '$1 == "fiber-2001" {print $2}')" = "$latest_done" ]; then
   ok retired-query-lists-only-fully-retired-ticket-lanes
 else
   fail "retired-query-lists-only-fully-retired-ticket-lanes (rc=$grc; $out; $(cat "$T/retired-query.err"))"
