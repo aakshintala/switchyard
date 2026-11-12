@@ -181,6 +181,14 @@ expect_logfile() {
   [ -f "$log" ] || fail "$1: missing log file [$log]"
 }
 
+# --- a missing state file is not reported as a running ship ---
+reset_stub; setup_case missing-state
+missing_state="missing/state"
+OUT="$(cd "$CDIR" && bash "$TKT" "$missing_state" 2>"$CDIR/stderr")"; RC=$?
+[ "$RC" -eq 2 ] || fail "missing state exits 2 (rc=$RC)"
+grep -Fq "no state file at $missing_state" "$CDIR/stderr" || fail "missing state names its path: $(cat "$CDIR/stderr")"
+! grep -q "already running" "$CDIR/stderr" || fail "missing state is not reported as already running"
+
 # --- merged ---
 reset_stub; setup_case merged
 printf '0' >"$T/exitcodes"; printf 'cafef00d1234' >"$T/sha"
