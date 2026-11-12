@@ -528,21 +528,53 @@ grep -q 'missing path: bin/ghost' <<<"$OUT" || fail "second plan-check failure r
 [ -z "$(state_get verifier_round)" ] || fail "second plan-check failure leaves Verifier round count unchanged"
 printf 'ok' >"$T/pcmode"
 
-# --- real plan-check citation hints reach the PLAN-CHECK output ---
+# --- real plan-check line-number citation guidance reaches PLAN-CHECK output ---
 setup_case citation-hint
 mkdir -p "$WT/src"
 wcommit "$WT" src/lib.rs $'pub fn existing() {}\n'
 git -C "$WT" update-ref refs/remotes/origin/main HEAD
 git -C "$WT" rev-parse HEAD >"$CDIR/base"
-printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n\n## Rulings\n\n`missing_widget()` at `src/lib.rs:1`.\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
+printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n\n## Rulings\n\nSee `src/lib.rs:1`.\n\n## Gate\n\n`true`\n' "$(cat "$CDIR/base")" >"$CDIR/plan.md"
 printf 'real' >"$T/pcmode"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "citation-hint PLAN-CHECK exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=1 log=*" "citation-hint PLAN-CHECK"
-grep -Fq "missing symbol:" <<<"$OUT" || fail "citation-hint output has missing symbol prefix"
-grep -Fq "pairs it with the nearest backticked name" <<<"$OUT" || fail "citation-hint output explains symbol pairing"
-grep -Fq "cite src/lib.rs::missing_widget() to check the whole file" <<<"$OUT" || fail "citation-hint output suggests a path::symbol citation"
+grep -Fq "line-number citation:" <<<"$OUT" || fail "citation-hint output identifies the line-number citation"
+grep -Fq 'cite `path::symbol` or a doc heading' <<<"$OUT" || fail "citation-hint output suggests a stable citation"
 printf 'ok' >"$T/pcmode"
+
+# --- resolving only an unresolved-symbol line does not consume a confirm round ---
+setup_case confirm-unresolved-free
+mkdir -p "$WT/src"
+wcommit "$WT" src/cited.rs $'pub fn available() {}\n'
+git -C "$WT" update-ref refs/remotes/origin/main HEAD
+B="$(git -C "$WT" rev-parse HEAD)"
+{
+  printf 'Base: %s\n\n## Files\n\n- `src/cited.rs`\n\n## Rulings\n\nSee `src/cited.rs::absent`.\n\n## Gate\n\n`true`\n' "$B"
+} >"$CDIR/plan.md"
+printf 'round 2, line 1: cite the existing symbol\ndone: corrected the plan citation\n' >"$CDIR/edits.md"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-unresolved-free seed verifier round"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "confirm-unresolved-free seed confirm round"
+printf 'real' >"$T/pcmode"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 1 ] || fail "unresolved-symbol confirm check stops without spending a round"
+expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "unresolved symbol is reported before confirm accounting"
+grep -Fq 'Unresolved symbols:' <<<"$OUT" || fail "confirm PLAN-CHECK names the unresolved section"
+grep -Fq 'src/cited.rs::absent' <<<"$OUT" || fail "confirm PLAN-CHECK names the unresolved citation"
+[ "$(state_get confirmed_for)" = 2 ] || fail "unresolved PLAN-CHECK preserves the prior confirm counter"
+sed 's/::absent/::available/' "$CDIR/plan.md" >"$CDIR/plan.fixed.md"
+mv "$CDIR/plan.fixed.md" "$CDIR/plan.md"
+run_plan confirm --edits "$CDIR/edits.md"
+[ "$RC" -eq 0 ] || fail "unresolved-only repair is free (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan UNRESOLVED-FIX log=*" "unresolved-only plan repair"
+[ "$(state_get confirmed_for)" = 2 ] || fail "unresolved-only confirm retry does not move confirmed_for"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "unresolved-only repair verifies without a confirm round (rc=$RC): $(first_line)"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "unresolved-only repair verify"
+grep -Fq 'slot=verifier-r3-unresolved' "$T/stub.log" || fail "unresolved-only repair uses its free verifier slot"
+[ "$(state_get verifier_round)" = 2 ] || fail "unresolved-only repair does not increment verifier_round"
+[ "$(state_get confirmed_for)" = 2 ] || fail "unresolved-only repair keeps the confirm counter unchanged"
+: >"$T/stub.log"
 
 # --- plan-check lines block confirm without consuming its round or grant ---
 setup_case confirm-plan-check
@@ -1707,6 +1739,117 @@ run_plan verify
 [ "$(bash "$TKT_STATE" "$S" get verifier_round)" = "1" ] || fail "drift-a counts round 1"
 [ "$(bash "$TKT_STATE" "$S" get verified_base)" = "$(cat "$CDIR/base")" ] || fail "drift-a records verified_base"
 
+# Cited-symbol re-anchor: unrelated changes move the base without another
+# Verifier round when every cited declaration and body is unchanged.
+setup_case reanchor-untouched
+mkdir -p "$WT/src"
+wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn cited_two() {\n    let value = 2;\n}\npub fn unrelated() {\n    let value = 10;\n}\n'
+A="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" update-ref refs/remotes/origin/main "$A"
+{
+  printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n\n## Tasks\n\n1. Preserve `src/lib.rs::cited_one` and `src/lib.rs::cited_two`.\n\n## Gate\n\n`true`\n' "$A"
+} >"$CDIR/plan.md"
+printf 'real' >"$T/pcmode"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "reanchor-untouched initial verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(state_get plan_verdict)" = ok ] || fail "reanchor-untouched initial verify records an OK verdict"
+[ "$(state_get verified_base)" = "$A" ] || fail "reanchor-untouched initial verify records base A"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "reanchor-untouched seed exhausted Verifier count"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "reanchor-untouched seed confirm count"
+wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn cited_two() {\n    let value = 2;\n}\npub fn unrelated() {\n    let value = 11;\n}\n'
+B="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" update-ref refs/remotes/origin/main "$B"
+set_plan_base "$B"
+: >"$T/stub.log"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "reanchor-untouched is mechanical (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan REANCHORED base=$B log=*" "reanchor-untouched"
+[ "$(state_get verified_base)" = "$B" ] || fail "reanchor-untouched advances verified_base"
+[ "$(state_get verifier_round)" = 2 ] || fail "reanchor-untouched does not spend a Verifier round"
+[ "$(state_get confirmed_for)" = 2 ] || fail "reanchor-untouched preserves the confirm count"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = 0 ] || fail "reanchor-untouched starts no Verifier job"
+
+# Braces inside strings are data, not the end of a cited symbol's body.
+setup_case reanchor-brace-in-string
+mkdir -p "$WT/src"
+wcommit "$WT" src/lib.rs $'pub fn cited() {\n    let marker = "}";\n    let value = 1;\n}\npub fn unrelated() {\n    let value = 10;\n}\n'
+A="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" update-ref refs/remotes/origin/main "$A"
+{
+  printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n\n## Tasks\n\n1. Preserve `src/lib.rs::cited`.\n\n## Gate\n\n`true`\n' "$A"
+} >"$CDIR/plan.md"
+printf 'real' >"$T/pcmode"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "reanchor-brace-in-string initial verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "reanchor-brace-in-string seed exhausted Verifier count"
+wcommit "$WT" src/lib.rs $'pub fn cited() {\n    let marker = "}";\n    let value = 2;\n}\npub fn unrelated() {\n    let value = 10;\n}\n'
+B="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" update-ref refs/remotes/origin/main "$B"
+set_plan_base "$B"
+: >"$T/stub.log"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "reanchor-brace-in-string dispatches a drift verify (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "reanchor-brace-in-string"
+grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "reanchor-brace-in-string checks the changed body"
+grep -Fq 'Re-anchor review is limited to these cited symbols: src/lib.rs::cited.' <<<"$OUT" || fail "reanchor-brace-in-string names the changed citation"
+
+# With only the Base line changed, a changed cited body reopens only that
+# citation, even when both planning counters are exhausted.
+setup_case reanchor-changed-symbol
+mkdir -p "$WT/src"
+wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn cited_two() {\n    let value = 2;\n}\npub fn unrelated() {\n    let value = 10;\n}\n'
+A="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" update-ref refs/remotes/origin/main "$A"
+{
+  printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n\n## Tasks\n\n1. Preserve `src/lib.rs::cited_one` and `src/lib.rs::cited_two`.\n\n## Gate\n\n`true`\n' "$A"
+} >"$CDIR/plan.md"
+printf 'real' >"$T/pcmode"
+printf 'ok' >"$T/mode"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "reanchor-changed-symbol initial verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ "$(state_get plan_verdict)" = ok ] || fail "reanchor-changed-symbol initial verify records an OK verdict"
+bash "$TKT_STATE" "$S" set verifier_round 2 || fail "reanchor-changed-symbol seed exhausted Verifier count"
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "reanchor-changed-symbol seed confirm count"
+wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn cited_two() {\n    let value = 22;\n}\npub fn unrelated() {\n    let value = 10;\n}\n'
+B="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" update-ref refs/remotes/origin/main "$B"
+set_plan_base "$B"
+: >"$T/stub.log"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "reanchor-changed-symbol dispatches a drift verify (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "reanchor-changed-symbol"
+[ "$(state_get verified_base)" = "$B" ] || fail "reanchor-changed-symbol advances verified_base after review"
+[ "$(state_get verifier_round)" = 2 ] || fail "reanchor-changed-symbol leaves Verifier count unchanged"
+[ "$(state_get confirmed_for)" = 2 ] || fail "reanchor-changed-symbol leaves confirm count unchanged"
+grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "reanchor-changed-symbol uses a drift Verifier slot"
+[ "$(grep -c '^job|' "$T/stub.log" || true)" = 1 ] || fail "reanchor-changed-symbol starts exactly one Verifier job"
+reanchor_extra="$CDIR/run/switchyard-518-verifier-extra-r3-drift.md"
+grep -Fq 'Re-anchor review is limited to these cited symbols: src/lib.rs::cited_two.' "$reanchor_extra" || fail "reanchor-changed-symbol names the changed citation"
+grep -Fq 'Re-anchor review is limited to these cited symbols: src/lib.rs::cited_two.' <<<"$OUT" || fail "reanchor-changed-symbol emits the changed citation"
+if grep -Fq 'src/lib.rs::cited_one' "$reanchor_extra"; then fail "reanchor-changed-symbol does not name the untouched citation"; fi
+if grep -Fq 'src/lib.rs::cited_one' <<<"$OUT"; then fail "reanchor-changed-symbol does not emit the untouched citation"; fi
+
+# A cited symbol renamed in the new base follows the same focused review path,
+# rather than stopping as an unresolved-symbol plan-check error.
+wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn renamed_two() {\n    let value = 22;\n}\npub fn unrelated() {\n    let value = 10;\n}\n'
+C="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" update-ref refs/remotes/origin/main "$C"
+set_plan_base "$C"
+: >"$T/stub.log"
+run_plan verify
+[ "$RC" -eq 0 ] || fail "reanchor-renamed-symbol dispatches a drift verify (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "reanchor-renamed-symbol"
+[ "$(state_get verified_base)" = "$C" ] || fail "reanchor-renamed-symbol advances verified_base after review"
+[ "$(state_get verifier_round)" = 2 ] || fail "reanchor-renamed-symbol leaves Verifier count unchanged"
+[ "$(state_get confirmed_for)" = 2 ] || fail "reanchor-renamed-symbol leaves confirm count unchanged"
+grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "reanchor-renamed-symbol uses a drift Verifier slot"
+grep -Fq 'Re-anchor review is limited to these cited symbols: src/lib.rs::cited_two.' "$reanchor_extra" || fail "reanchor-renamed-symbol names the missing citation"
+grep -Fq 'Re-anchor review is limited to these cited symbols: src/lib.rs::cited_two.' <<<"$OUT" || fail "reanchor-renamed-symbol emits the missing citation"
+if grep -Fq 'src/lib.rs::cited_one' "$reanchor_extra"; then fail "reanchor-renamed-symbol does not name the untouched citation"; fi
+if grep -Fq 'src/lib.rs::cited_one' <<<"$OUT"; then fail "reanchor-renamed-symbol does not emit the untouched citation"; fi
+
 setup_case drift-b
 rebase_plan
 A="$(cat "$CDIR/base")"
@@ -2707,6 +2850,32 @@ expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=2 log=*" "verdict-plan-chec
 case "$(first_line)" in *" n="*) fail "verdict-plan-check-line-count carries no bare n=: [$(first_line)]";; esac
 fi
 
+if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = unresolved-insertion ]; then
+  # Inserting a task beside an unresolved-symbol fix is not an exempt repair.
+  setup_case confirm-unresolved-insertion
+  mkdir -p "$WT/src"
+  wcommit "$WT" src/cited.rs $'pub fn available() {}\n'
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  B="$(git -C "$WT" rev-parse HEAD)"
+  {
+    printf 'Base: %s\n\n## Files\n\n- `src/cited.rs`\n\n## Tasks\n\n1. Preserve `src/cited.rs::absent`.\n\n## Gate\n\n`true`\n' "$B"
+  } >"$CDIR/plan.md"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "confirm-unresolved-insertion seed verifier round"
+  bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "confirm-unresolved-insertion seed confirm round"
+  printf 'real' >"$T/pcmode"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "unresolved-symbol finding is recorded before the insertion test (rc=$RC)"
+  expect_verdict "TKT tkt-plan PLAN-CHECK report_lines=* log=*" "confirm-unresolved-insertion unresolved baseline"
+  awk '{ if ($0 == "1. Preserve `src/cited.rs::absent`.") { print "1. Preserve `src/cited.rs::available`."; print "2. Add an independent task."; } else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  : >"$T/stub.log"
+  run_plan verify
+  [ "$RC" -eq 1 ] || fail "inserted task beside an unresolved fix reaches ROUND-LIMIT (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan ROUND-LIMIT round=2 confirm=done log=*" "confirm-unresolved-insertion is not unresolved-only"
+  [ "$(grep -c '^job|slot=verifier-' "$T/stub.log" || true)" = 0 ] || fail "confirm-unresolved-insertion starts no free Verifier job"
+  [ "$(state_get verifier_round)" = 2 ] || fail "confirm-unresolved-insertion preserves the exhausted count"
+  : >"$T/stub.log"
+fi
+
 # Verbatim ruling acceptance: selectors skip legacy cases for focused runs;
 # the unfiltered invocation still covers all cases.
 write_triaged_tasks_plan() {
@@ -2920,6 +3089,66 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
 fi
 
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = stale-recovery ]; then
+  # A changed cited symbol with a plan-body edit gets a full drift review, not
+  # the symbol-limited note reserved for an unchanged plan body.
+  setup_case reanchor-body-edited
+  mkdir -p "$WT/src"
+  wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn cited_two() {\n    let value = 2;\n}\n'
+  A="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" update-ref refs/remotes/origin/main "$A"
+  {
+    printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n\n## Tasks\n\n1. Preserve `src/lib.rs::cited_one` and `src/lib.rs::cited_two`.\n\n## Gate\n\n`true`\n' "$A"
+  } >"$CDIR/plan.md"
+  printf 'real' >"$T/pcmode"
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "reanchor-body-edited initial verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "reanchor-body-edited seed exhausted Verifier count"
+  bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "reanchor-body-edited seed confirm count"
+  wcommit "$WT" src/lib.rs $'pub fn cited_one() {\n    let value = 1;\n}\npub fn cited_two() {\n    let value = 22;\n}\n'
+  B="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" update-ref refs/remotes/origin/main "$B"
+  awk '{ if ($0 == "1. Preserve `src/lib.rs::cited_one` and `src/lib.rs::cited_two`.") print "1. Carefully preserve `src/lib.rs::cited_one` and `src/lib.rs::cited_two`."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_plan_base "$B"
+  : >"$T/stub.log"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "reanchor-body-edited dispatches a drift verify (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "reanchor-body-edited"
+  grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "reanchor-body-edited uses a drift Verifier slot"
+  reanchor_edited_extra="$CDIR/run/switchyard-518-verifier-extra-r3-drift.md"
+  if grep -Fq 'Re-anchor review is limited to these cited symbols:' "$reanchor_edited_extra"; then fail "reanchor-body-edited does not limit review of an edited plan body"; fi
+  if grep -Fq 'Re-anchor review is limited to these cited symbols:' <<<"$OUT"; then fail "reanchor-body-edited output does not limit review of an edited plan body"; fi
+
+  # Task-path drift remains exempt for a cited plan whose body changed, so
+  # mechanical re-anchor does not apply.
+  setup_case reanchor-task-path-drift
+  mkdir -p "$WT/src"
+  wcommit "$WT" src/lib.rs $'pub fn cited() {\n    let value = 1;\n}\n'
+  wcommit "$WT" task.txt "task source v1"
+  A="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" update-ref refs/remotes/origin/main "$A"
+  {
+    printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n- `task.txt`\n\n## Tasks\n\n1. Inspect `task.txt` and preserve `src/lib.rs::cited`.\n\n## Gate\n\n`true`\n' "$A"
+  } >"$CDIR/plan.md"
+  printf 'real' >"$T/pcmode"
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "reanchor-task-path-drift initial verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "reanchor-task-path-drift seed exhausted Verifier count"
+  bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "reanchor-task-path-drift seed confirm count"
+  wcommit "$WT" task.txt "task source v2"
+  B="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" update-ref refs/remotes/origin/main "$B"
+  awk '{ if ($0 == "1. Inspect `task.txt` and preserve `src/lib.rs::cited`.") print "1. Inspect `task.txt` carefully and preserve `src/lib.rs::cited`."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_plan_base "$B"
+  : >"$T/stub.log"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "reanchor-task-path-drift exempt verify runs at the round limit (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "reanchor-task-path-drift"
+  grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "reanchor-task-path-drift uses the drift slot"
+  [ "$(state_get verifier_round)" = 2 ] || fail "reanchor-task-path-drift leaves the round budget unchanged"
+  [ "$(state_get confirmed_for)" = 2 ] || fail "reanchor-task-path-drift preserves the confirm count"
+
   # A build stale-recovery verify exempts changed plan Files even when the
   # plan's resolved Task paths do not include the changed file.
   setup_case build-stale-recovery-drift
@@ -2945,6 +3174,33 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = stale-recovery 
   [ "$(state_get verifier_round)" = 2 ] || fail "build-stale-recovery-drift leaves the round budget unchanged"
   [ -z "$(state_get build_stale_recovery_base)" ] || fail "build-stale-recovery-drift clears the recovery Base"
   [ -z "$(state_get build_stale_recovery_plan_hash)" ] || fail "build-stale-recovery-drift clears the recovery plan hash"
+  # Build stale recovery keeps the drift exemption for a plan with citations.
+  setup_case build-stale-recovery-cited
+  mkdir -p "$WT/src"
+  wcommit "$WT" src/lib.rs $'pub fn cited() {\n    let value = 1;\n}\n'
+  wcommit "$WT" task.txt "task source"
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  A="$(git -C "$WT" rev-parse HEAD)"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "build-stale-recovery-cited seed round"
+  bash "$TKT_STATE" "$S" set verified_base "$A" || fail "build-stale-recovery-cited seed verified base"
+  wcommit "$WT" f.txt v3
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  B="$(git -C "$WT" rev-parse HEAD)"
+  {
+    printf 'Base: %s\n' "$B"
+    printf '\n## Files\n\n- `f.txt`\n- `task.txt`\n- `src/lib.rs`\n\n## Tasks\n\n1. Inspect `task.txt`.\n\n## Rulings\nPreserve `src/lib.rs::cited`.\n\n## Gate\n\n`true`\n'
+  } >"$CDIR/plan.md"
+  bash "$TKT_STATE" "$S" set build_stale_recovery_base "$B" || fail "build-stale-recovery-cited seed recovery Base"
+  bash "$TKT_STATE" "$S" set build_stale_recovery_plan_hash "$(git -C "$WT" hash-object "$CDIR/plan.md")" || fail "build-stale-recovery-cited seed recovery plan hash"
+  printf 'ok' >"$T/mode"
+  : >"$T/stub.log"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "build-stale-recovery-cited exempt verify runs at the round limit (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "build-stale-recovery-cited"
+  grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "build-stale-recovery-cited uses the drift slot"
+  [ "$(state_get verifier_round)" = 2 ] || fail "build-stale-recovery-cited leaves the round budget unchanged"
+  [ -z "$(state_get build_stale_recovery_base)" ] || fail "build-stale-recovery-cited clears the recovery Base"
+  [ -z "$(state_get build_stale_recovery_plan_hash)" ] || fail "build-stale-recovery-cited clears the recovery plan hash"
 fi
 
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = amendment ]; then

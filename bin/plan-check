@@ -12,8 +12,10 @@
 #        pattern, never reported), and `/`, `.`,
 #        `..` or a bare extension. A token with one `{a,b}` group is checked once
 #        per alternative; with more than one group it is skipped. A `path::symbol`
-#        token checks its path and symbol at REV. A file:N or file:A-B beside
-#        a backticked symbol must hold it; `path`, "heading" must name a heading.
+#        token checks its path and symbol at REV; `path`, "heading" must name a
+#        heading. Prose citations such as `path:120` or "line 120" are rejected
+#        in favour of a symbol or heading; fenced code and quoted panic/error
+#        messages are exempt.
 #        1. A path (a `/` or a source or doc extension) resolves at REV: by full
 #           path, a directory by its trailing `/`, or by a suffix that names exactly
 #           one file. A suffix naming two or more files resolves but is left out of
@@ -73,7 +75,12 @@ seen() {
 }
 
 problem() {
-  printf '%s\n' "$1"
+  FINDINGS="${FINDINGS}${1}"$'\n'
+  FOUND=1
+}
+
+unresolved() {
+  UNRESOLVED="${UNRESOLVED}${1}"$'\n'
   FOUND=1
 }
 
@@ -173,9 +180,9 @@ check_path() {
   return 0
 }
 
-# check_citation TOKEN: verify an adjacent quoted symbol at the cited base lines.
+# check_citation TOKEN: verify a quoted symbol or heading in an adjacent path token.
 check_citation() {
-  local citation="$1" lines symbol content heading
+  local citation="$1" symbol content heading
   [ "$RES_KIND" = found ] || return 0
   heading="$(awk -v ln="$CUR_LN" -v token="$citation" '
     NR == ln {
@@ -206,37 +213,87 @@ check_citation() {
       symbol="${citation#*::}"
       content="$(git -C "$dir" show "$rev:$RES")"
       if ! grep -Fq -- "${symbol%()}" <<<"$content" && ! seen "s:$citation:$symbol"; then
-        problem "missing symbol: $citation does not contain $symbol: correct the citation (the symbol must appear somewhere in ${citation%%::*} at the base)"
+        unresolved "missing symbol: $citation does not contain $symbol (plan line $CUR_LN): correct the citation (the symbol must appear somewhere in ${citation%%::*} at the base)"
       fi
       return 0 ;;
   esac
-  [[ $citation =~ :([0-9]+)(-([0-9]+))?$ ]] || return 0
-  local start_line end_line expected_lines
-  start_line="${BASH_REMATCH[1]}"
-  end_line="${BASH_REMATCH[3]:-$start_line}"
-  lines="$start_line,$end_line"
-  if [ "$start_line" = "$end_line" ]; then
-    expected_lines="line $start_line"
-  else
-    expected_lines="lines $start_line-$end_line"
-  fi
-  symbol="$(awk -v ln="$CUR_LN" -v token="$citation" '
-    NR == ln {
-      n = split($0, a, "`")
-      for (i = 2; i <= n; i += 2) if (a[i] == token) {
-        before = (i > 2 && a[i-2] ~ /^[A-Za-z_][A-Za-z0-9_:]*(\(\))?$/)
-        after = (i + 2 <= n && a[i+2] ~ /^[A-Za-z_][A-Za-z0-9_:]*(\(\))?$/)
-        if (before && (!after || length(a[i-1]) <= length(a[i+1]))) print a[i-2]
-        else if (after) print a[i+2]
-        exit
+}
+
+# check_line_citations: reject unstable line-number references in prose while
+# leaving fenced code and quoted panic/error messages alone.
+check_line_citations() {
+  local citation ln
+  while IFS=$'\t' read -r ln citation; do
+    [ -n "$citation" ] || continue
+    if ! seen "line-citation:$ln:$citation"; then
+      problem "line-number citation: $citation (line $ln): cite \`path::symbol\` or a doc heading"
+    fi
+  done < <(awk '
+    function quoted_message(line, pos, i, ch, quote, start, text) {
+      if (line ~ /^[[:space:]]*>/ && tolower(line) ~ /(panic|error)/) return 1
+      quote = ""
+      for (i = 1; i <= length(line); i++) {
+        ch = substr(line, i, 1)
+        if (quote == "") {
+          if (ch == "\047" && i > 1 && substr(line, i - 1, 1) ~ /[[:alnum:]]/) continue
+          if (ch == "\"" || ch == "\047" || ch == "`") { quote = ch; start = i }
+        } else if (ch == quote) {
+          text = substr(line, start + 1, i - start - 1)
+          if (pos > start && pos < i && tolower(text) ~ /(panic|error)/) return 1
+          quote = ""
+        }
       }
-    }' "$plan")"
-  [ -n "$symbol" ] || return 0
-  handle_token symbol "$symbol"
-  content="$(git -C "$dir" show "$rev:$RES" | sed -n "${lines}p")"
-  if ! grep -Fq -- "${symbol%()}" <<<"$content" && ! seen "s:$citation:$symbol"; then
-    problem "missing symbol: $citation does not contain $symbol: correct the citation (plan line $CUR_LN pairs it with the nearest backticked name, $symbol, which must appear in $expected_lines at the base; fix the line range, put the intended symbol next to the citation, or cite ${citation%%:*}::$symbol to check the whole file)"
-  fi
+      return 0
+    }
+    /^[[:space:]]*```/ || /^[[:space:]]*~~~/ {
+      marker = ($0 ~ /^[[:space:]]*```/ ? "```" : "~~~")
+      if (!in_fence) { in_fence = 1; fence_marker = marker }
+      else if (marker == fence_marker) in_fence = 0
+      next
+    }
+    in_fence { next }
+    /^## / {
+      in_gate = ($0 ~ /^## Gate([[:space:]]|$)/)
+      next
+    }
+    in_gate { next }
+    {
+      # Accepted false positives by ruling: IP:port and hostname:port prose can match.
+      offset = 0
+      while (offset < length($0) && match(substr($0, offset + 1), /[[:alnum:]_.-]+:[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*/)) {
+        cite_start = offset + RSTART
+        cite_end = cite_start + RLENGTH - 1
+        start = cite_start
+        while (start > 1) {
+          char = substr($0, start - 1, 1)
+          if (char ~ /[[:alnum:]_.-]/ || char == "/") start--
+          else break
+        }
+        cite = substr($0, start, cite_end - start + 1)
+        colon = index(cite, ":")
+        path = substr(cite, 1, colon - 1)
+        if ((path ~ /[.]/ || index(path, "/")) && !quoted_message($0, cite_start)) print NR "\t" cite
+        offset = cite_end
+      }
+      offset = 0
+      while (offset < length($0)) {
+        rest = substr($0, offset + 1)
+        if (offset == 0) matched = match(rest, /(^|[^[:alpha:]])[Ll][Ii][Nn][Ee][Ss]?[[:space:]]+[0-9]+(-[0-9]+)?/)
+        else matched = match(rest, /[^[:alpha:]][Ll][Ii][Nn][Ee][Ss]?[[:space:]]+[0-9]+(-[0-9]+)?/)
+        if (!matched) break
+        match_start = offset + RSTART
+        match_end = offset + RSTART + RLENGTH - 1
+        cite_start = match_start
+        cite = substr($0, match_start, match_end - match_start + 1)
+        if (substr($0, match_start, 1) !~ /[[:alpha:]]/) {
+          cite_start++
+          cite = substr($0, cite_start, match_end - cite_start + 1)
+        }
+        if (!quoted_message($0, cite_start)) print NR "\t" cite
+        offset = match_end
+      }
+    }
+  ' "$plan")
 }
 
 # handle_token KIND VALUE: the expand_token callback replacing check_token's dispatch.
@@ -321,6 +378,8 @@ FILES="|"
 GLOBS=""
 TASKS=""
 SYMBOLS=""
+FINDINGS=""
+UNRESOLVED=""
 
 while IFS=$'\t' read -r CUR_SEC CUR_LN CUR_NEW CUR_READ CUR_FILES_ENTRY tok; do
   [ -n "$tok" ] || continue
@@ -363,6 +422,23 @@ if grep -Eq '^Outcome:($|[[:space:]])' "$plan"; then
 fi
 
 if [ "$FOUND" = 1 ]; then
+  check_line_citations
+  if [ -n "$UNRESOLVED" ]; then
+    if [ -n "$FINDINGS" ]; then printf 'Findings:\n%s' "$FINDINGS"; fi
+    printf 'Unresolved symbols:\n%s' "$UNRESOLVED"
+  else
+    printf '%s' "$FINDINGS"
+  fi
+  exit 1
+fi
+check_line_citations
+if [ "$FOUND" = 1 ]; then
+  if [ -n "$UNRESOLVED" ]; then
+    if [ -n "$FINDINGS" ]; then printf 'Findings:\n%s' "$FINDINGS"; fi
+    printf 'Unresolved symbols:\n%s' "$UNRESOLVED"
+  else
+    printf '%s' "$FINDINGS"
+  fi
   exit 1
 fi
 exit 0
