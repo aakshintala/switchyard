@@ -192,6 +192,35 @@ run_drive() {
   if bash "$DRIVER" "$STATE" >"$OUT" 2>"$ERR"; then RC=0; else RC=$?; fi
 }
 
+assert_no_merge() {
+  [ ! -s "$TEST_MERGE_CALLS" ] || fail "merge command ran: $(cat "$TEST_MERGE_CALLS")"
+}
+
+# A missing plan is the normal pre-planning state, not a blocked lane.
+reset_case missing-plan
+awk -F= '$1 != "plan"' "$STATE" >"$CASE_DIR/state.tmp"
+mv "$CASE_DIR/state.tmp" "$STATE"
+run_drive
+[ "$RC" -eq 5 ] || fail "missing plan should report NEEDS-PLAN with reserved rc 5 (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+printf 'TKT tkt-drive NEEDS-PLAN\n' >"$CASE_DIR/expected.out"
+cmp -s "$CASE_DIR/expected.out" "$OUT" || fail "missing plan verdict mismatch: $(cat "$OUT")"
+printf 'No plan yet. Run planning (planner, Verifier, `tkt-plan <state> set <plan>`), then rerun tkt-drive.\n' >"$CASE_DIR/expected.err"
+cmp -s "$CASE_DIR/expected.err" "$ERR" || fail "missing plan next step mismatch: $(cat "$ERR")"
+grep -q ' tkt-drive NEEDS-PLAN trigger=state$' "${STATE%.state}.journal" || fail 'missing plan verdict was not journaled'
+assert_no_merge
+
+# Missing required state other than plan remains a STOP verdict.
+reset_case missing-issue
+awk -F= '$1 != "issue"' "$STATE" >"$CASE_DIR/state.tmp"
+mv "$CASE_DIR/state.tmp" "$STATE"
+run_drive
+[ "$RC" -eq 2 ] || fail "missing issue should remain STOP with rc 2 (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
+printf 'TKT tkt-drive STOP\n' >"$CASE_DIR/expected.out"
+cmp -s "$CASE_DIR/expected.out" "$OUT" || fail "missing issue STOP mismatch: $(cat "$OUT")"
+printf 'tkt-drive: missing state key: issue\n' >"$CASE_DIR/expected.err"
+cmp -s "$CASE_DIR/expected.err" "$ERR" || fail "missing issue detail mismatch: $(cat "$ERR")"
+assert_no_merge
+
 assert_prefix() {
   local expected="$1" output="$2" bytes
   printf '%s' "$expected" >"$CASE_DIR/expected"
@@ -215,10 +244,6 @@ assert_fence_args() {
   while IFS= read -r line; do
     [ "$line" = "$expected" ] || fail "incorrect fence-grant arguments: $line (expected $expected)"
   done <"$TEST_FENCE_CALLS"
-}
-
-assert_no_merge() {
-  [ ! -s "$TEST_MERGE_CALLS" ] || fail "merge command ran: $(cat "$TEST_MERGE_CALLS")"
 }
 
 # Explicit `(new)` writes stay in --paths, which is the grant scope, and
