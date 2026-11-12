@@ -162,6 +162,11 @@ gh() {
           esac
         done
         ticket="$(rd "ticket-$number.json" '{"state":"CLOSED","body":"","createdAt":"2026-11-01T00:00:00Z","comments":[]}')"
+        if [ "$number" = 166 ] && [ -e "$ST/ticket-created-after-gate" ] && [ -e "$ST/gate-ran" ]; then
+          ticket="$(jq -c '.createdAt = "2099-12-31T23:59:59Z"' <<<"$ticket")"
+          printf '%s\n' "$ticket" >"$ST/ticket-166-post-gate.json"
+          touch "$ST/ticket-created-after-gate-seen"
+        fi
         if [ -n "$jq" ]; then jq -r "$jq" <<<"$ticket"; else echo "$ticket"; fi;;
       comment)
         number="$1"; shift
@@ -2328,6 +2333,24 @@ known_ship
 expect_refused KNOWN-FLAKE
 grep -q 'closed' <<<"$ERR" || fail "closed ticket message: [$ERR]"
 no_merge "closed ticket"
+
+# An open ticket created after the PR opened can name the red test in its body.
+prepare_known_flake
+jq -nc --arg name "$KNOWN_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-06T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+known_ship
+expect 0 "ticket created after PR opens"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "post-PR ticket merged output: [$OUT]"
+
+# The issue view returns a ticket creation date after this fixture's fresh gate.
+prepare_known_flake
+touch "$ST/ticket-created-after-gate"
+POST_GATE_TICKET_GATE='touch "$ST/gate-ran"; printf "%s\\n" "FAIL [ 0.001s] crate_name::integration_tests tests::flaky"; exit 1'
+ship --known-flake 166 --by flywheel --gate "$POST_GATE_TICKET_GATE" --keep-branch
+expect 0 "ticket created after fresh gate"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "post-gate ticket merged output: [$OUT]"
+[ -e "$ST/ticket-created-after-gate-seen" ] || fail "ticket fixture assigned its date after the gate"
+jq -e '.createdAt == "2099-12-31T23:59:59Z"' "$ST/ticket-166-post-gate.json" >/dev/null \
+  || fail "post-gate ticket date: [$(cat "$ST/ticket-166-post-gate.json" 2>/dev/null)]"
 
 # A named red test refuses when cargo metadata cannot resolve its crate.
 prepare_known_flake
