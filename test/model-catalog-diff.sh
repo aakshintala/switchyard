@@ -122,6 +122,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     "X": {"limit": {"context": 900}},
                     "X-2026-05-01": {"limit": {"context": 100}},
                 })
+            elif self.mode in ("openai-gone", "clean-no-provider"):
+                models_dev["openai"]["models"].update({
+                    "account-hidden-a": {},
+                    "account-hidden-b": {},
+                })
             elif self.mode == "pricing":
                 models_dev["openrouter"]["models"].update({
                     "router-window": {"cost": {"input": 0.4, "output": 0.5}},
@@ -307,6 +312,17 @@ try:
     for field, vendor_value, reference_value in (("output", "99", "100"), ("input_price", "1.5", "1"), ("output_price", "2.5", "2"), ("deprecated", "True", "False")):
         expect(f"| claude-shared | mismatch | {field} | {vendor_value} | {reference_value} |" in report, f"{field} mismatch missing")
     expect("| claude-gone | gone |" in report, "gone row missing")
+
+    # OpenAI models absent from this account's /models listing are summarized by count.
+    openai_gone_inbox = temp_root / "inbox-openai-gone"
+    openai_gone_result, _ = run_case("openai-gone", True, openai_gone_inbox, mode="openai-gone")
+    expect(openai_gone_result.returncode == 0, f"openai-gone run failed: {openai_gone_result.stderr}")
+    openai_gone_report = (openai_gone_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("2 models.dev models not listed for this account (per-account visibility)" in openai_gone_report, "OpenAI per-account visibility note missing")
+    for hidden in ("account-hidden-a", "account-hidden-b"):
+        expect(f"| {hidden} | gone |" not in openai_gone_report, f"OpenAI per-model gone row remained for {hidden}")
+    expect("| claude-gone | gone |" in openai_gone_report, "non-OpenAI gone row was suppressed")
+
     expect("| claude-alias |" not in report, "dated Anthropic alias produced a row")
     expect("openrouter: HTTP 401" in report, "401 skip missing")
     expect("muse: no credential" in report, "missing credential skip missing")
@@ -327,7 +343,7 @@ try:
     expect("models.dev carries no muse provider" not in provider_empty_report, "present empty provider was treated as absent")
     expect("| muse-one | missing |" in provider_empty_report, "present empty provider did not retain missing rows")
 
-    # A provider-level note alone does not create a report.
+    # Provider-level notes alone do not create a report.
     clean_no_provider_inbox = temp_root / "inbox-clean-no-provider"
     clean_no_provider_result, _ = run_case("clean-no-provider", True, clean_no_provider_inbox, mode="clean-no-provider")
     expect(clean_no_provider_result.returncode == 0, f"clean-no-provider run failed: {clean_no_provider_result.stderr}")

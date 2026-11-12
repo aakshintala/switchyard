@@ -528,6 +528,7 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
         else:
             vendor_index[base] = vendor_index.pop(identifier)
     rows = []
+    account_gone = 0
     for identifier in sorted(set(vendor_index) | set(reference)):
         left = vendor_index.get(identifier)
         right = reference.get(identifier)
@@ -535,7 +536,9 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
             rows.append((identifier, "missing", "-", "listed", "-"))
             continue
         if left is None:
-            if vendor != "codex":
+            if vendor == "openai":
+                account_gone += 1
+            elif vendor != "codex":
                 rows.append((identifier, "gone", "-", "-", "listed"))
             continue
         left_fields, left_alternatives = vendor_fields(left, vendor)
@@ -552,7 +555,10 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
                     continue
             if left_value != right_value:
                 rows.append((identifier, "mismatch", field, left_value, right_value))
-    return rows
+    notes = []
+    if account_gone:
+        notes.append(f"{account_gone} models.dev models not listed for this account (per-account visibility)")
+    return rows, notes
 
 
 def short_sha(script_path):
@@ -658,10 +664,12 @@ def run(script_path):
                 )
                 continue
             reference = reference_models(reference_payload, spec["provider"])
-            rows = compare_vendor(items, reference, spec["name"], ignore_pins)
+            rows, vendor_notes = compare_vendor(items, reference, spec["name"], ignore_pins)
         except FetchFailure as error:
             skipped.append((spec["name"], error.reason))
             continue
+        if vendor_notes:
+            notes_by_vendor.setdefault(spec["name"], []).extend(vendor_notes)
         if rows:
             rows_by_vendor[spec["name"]] = rows
 
