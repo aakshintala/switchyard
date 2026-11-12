@@ -202,11 +202,48 @@ fn caller_cwd() -> Option<String> {
         })
 }
 
+fn canonicalize_with_missing_tail(path: &std::path::Path) -> std::path::PathBuf {
+    // A relative path resolves against the acker's cwd. caller_cwd() records DELEGATE_CALLER_CWD
+    // verbatim, so a caller that exports a relative value gets a relative record cwd.
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let Ok(cwd) = std::env::current_dir() else {
+            return path.to_path_buf();
+        };
+        cwd.join(path)
+    };
+
+    let mut ancestor = absolute_path.as_path();
+    loop {
+        if let Ok(mut canonical) = std::fs::canonicalize(ancestor) {
+            if let Ok(missing_tail) = absolute_path.strip_prefix(ancestor) {
+                for component in missing_tail.components() {
+                    match component {
+                        std::path::Component::CurDir => {}
+                        std::path::Component::ParentDir => {
+                            canonical.pop();
+                        }
+                        std::path::Component::Normal(part) => canonical.push(part),
+                        std::path::Component::Prefix(_) | std::path::Component::RootDir => {}
+                    }
+                }
+            }
+            return canonical;
+        }
+        let Some(parent) = ancestor.parent() else {
+            return absolute_path;
+        };
+        if parent == ancestor {
+            return absolute_path;
+        }
+        ancestor = parent;
+    }
+}
+
 fn cwd_paths_related(record_cwd: &str, ack_cwd: &str) -> bool {
-    let record_path =
-        std::fs::canonicalize(record_cwd).unwrap_or_else(|_| std::path::PathBuf::from(record_cwd));
-    let ack_path =
-        std::fs::canonicalize(ack_cwd).unwrap_or_else(|_| std::path::PathBuf::from(ack_cwd));
+    let record_path = canonicalize_with_missing_tail(std::path::Path::new(record_cwd));
+    let ack_path = canonicalize_with_missing_tail(std::path::Path::new(ack_cwd));
     record_path.starts_with(&ack_path) || ack_path.starts_with(&record_path)
 }
 
@@ -1362,6 +1399,25 @@ fn settle_dead_supervisor(id: &str) {
 mod tests {
     use super::*;
     use crate::status_record::CliResume;
+
+    #[test]
+    fn canonicalizes_missing_tail_parent_components() {
+        let root = std::env::temp_dir().join(format!(
+            "delegate-canonicalize-missing-tail-{}",
+            random_uuid()
+        ));
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let canonical_real = std::fs::canonicalize(&real).unwrap();
+
+        let normalized = canonicalize_with_missing_tail(&real.join("gone/../../x"));
+        assert!(
+            !normalized.starts_with(&canonical_real),
+            "{normalized:?} should not remain under {canonical_real:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn kv(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
