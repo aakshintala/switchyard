@@ -20,7 +20,6 @@ use crate::util::{captured_command, json_compact, random_uuid, resolve_path};
 use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -203,16 +202,12 @@ fn caller_cwd() -> Option<String> {
         })
 }
 
-fn paths_related(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
-}
-
 fn cwd_paths_related(record_cwd: &str, ack_cwd: &str) -> bool {
-    let record_raw = PathBuf::from(record_cwd);
-    let ack_raw = PathBuf::from(ack_cwd);
-    let record_canonical = std::fs::canonicalize(record_cwd).unwrap_or_else(|_| record_raw.clone());
-    let ack_canonical = std::fs::canonicalize(ack_cwd).unwrap_or_else(|_| ack_raw.clone());
-    paths_related(&record_raw, &ack_raw) || paths_related(&record_canonical, &ack_canonical)
+    let record_path =
+        std::fs::canonicalize(record_cwd).unwrap_or_else(|_| std::path::PathBuf::from(record_cwd));
+    let ack_path =
+        std::fs::canonicalize(ack_cwd).unwrap_or_else(|_| std::path::PathBuf::from(ack_cwd));
+    record_path.starts_with(&ack_path) || ack_path.starts_with(&record_path)
 }
 
 fn caller_label_matches(record_caller: &str, ack_caller: &str) -> bool {
