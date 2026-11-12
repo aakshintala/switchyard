@@ -939,7 +939,7 @@ print("\n".join(out))' "$_ef"
 fi
 
 # --- open PRs (fail closed) ---
-prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,headRefName,changedFiles,headRefOid 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
+prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,headRefName,changedFiles,headRefOid,baseRefName 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
 prs=$(printf '%s' "$prjson" | python3 -c 'import json,sys
 try:
   data = json.load(sys.stdin)
@@ -1245,6 +1245,16 @@ for row in data:
     sys.exit(0)
 sys.exit(1)' "$1" 2>/dev/null
 }
+_pr_base_branch() {
+  printf '%s' "$prjson" | python3 -c 'import json,sys
+try: data=json.load(sys.stdin)
+except Exception: sys.exit(1)
+for row in data:
+  if isinstance(row,dict) and str(row.get("number","")) == sys.argv[1]:
+    base=row.get("baseRefName")
+    if isinstance(base,str) and base: print(base); sys.exit(0)
+sys.exit(1)' "$1" 2>/dev/null
+}
 _pr_touched() {
   # $1 = PR number. Writes touched "normbase|sectionbase" lines to $tmp/touched-$1.
   [ -f "$tmp/touched-$1" ] && return 0
@@ -1254,14 +1264,15 @@ _pr_touched() {
     return 0
   fi
   _head_sha=$(_pr_head_sha "$1") || { echo "ERROR gh pr list headRefOid for PR #$1"; exit 3; }
-  nf=$(pr_diff_fetch_cached "${FW_GH:-gh}" "$repo" "$1" "$_expected" "$_head_sha" --name-only 2>"$tmp/gderr-$1") || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+  _base_branch=$(_pr_base_branch "$1") || _base_branch=""
+  nf=$(pr_diff_fetch_cached "${FW_GH:-gh}" "$repo" "$1" "$_expected" "$_head_sha" "$_base_branch" --name-only 2>"$tmp/gderr-$1") || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
   printf '%s\n' "$nf" | grep . | while IFS= read -r f; do
     b=$(_norm_base "$f")
     [ -n "$b" ] || continue
     printf '%s|%s\n' "$b" "$b"
   done > "$tmp/touched-$1"
   if [ -s "$tmp/touched-$1" ]; then
-    pr_diff_fetch_cached "${FW_GH:-gh}" "$repo" "$1" "$_expected" "$_head_sha" --allow-escape-sequences > "$tmp/full-$1.diff" 2>"$tmp/gderr-$1" || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+    pr_diff_fetch_cached "${FW_GH:-gh}" "$repo" "$1" "$_expected" "$_head_sha" "$_base_branch" --allow-escape-sequences > "$tmp/full-$1.diff" 2>"$tmp/gderr-$1" || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
     [ -s "$tmp/full-$1.diff" ] || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
     grep '^rename from ' "$tmp/full-$1.diff" 2>/dev/null | sed 's/^rename from //' | while IFS= read -r o; do
       b=$(_norm_base "$o")
