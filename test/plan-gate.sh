@@ -48,6 +48,35 @@ expect_out "section ends at next heading" '## Gate\nbash test/run\n## Notes\nbas
 # a ### subheading inside the section is skipped, not a terminator
 expect_out "### Command subheading" '## Gate\n### Command\nbash test/run\n' 'bash test/run'
 
+# --fix selects the optional Fix gate, requires its placeholder, and keeps
+# --script validation on the selected gate.
+expect_fix_out() {
+  printf '%b' "$2" >"$T/plan.md"
+  out="$(bash "$GATE" --fix "$T/plan.md" 2>"$T/err.txt")" || fail "$1: exits 0"
+  [ "$out" = "$3" ] || fail "$1: got [$out], want [$3]"
+  [ ! -s "$T/err.txt" ] || fail "$1: nothing on stderr"
+}
+
+expect_fix_out "fix gate command" '## Gate\nbash test/run\n\n## Fix gate\n`bash test/run --since <since>`\n' 'bash test/run --since <since>'
+printf '%b' '## Gate\nbash test/run\n' >"$T/plan.md"
+stdout="$(bash "$GATE" --fix "$T/plan.md" 2>"$T/err.txt")"; rc=$?
+[ "$rc" = "3" ] || fail "missing Fix gate exits 3 (got $rc)"
+[ -z "$stdout" ] || fail "missing Fix gate prints nothing on stdout"
+expect_err_fix() {
+  printf '%b' "$2" >"$T/plan.md"
+  stdout="$(bash "$GATE" --fix "$T/plan.md" 2>"$T/err.txt")"; rc=$?
+  [ "$rc" = "1" ] || fail "$1: exits 1 (got $rc)"
+  [ -z "$stdout" ] || fail "$1: prints nothing on stdout"
+  [ "$(wc -l <"$T/err.txt" | tr -d ' ')" = "1" ] || fail "$1: one stderr line"
+  grep -q '^plan-gate: ' "$T/err.txt" || fail "$1: stderr starts with plan-gate:"
+}
+expect_err_fix "Fix gate without since" '## Fix gate\nbash test/run\n'
+printf '%b' '## Fix gate\nbash test/run --since <since>\n' >"$T/plan.md"
+stdout="$(bash "$GATE" --fix --script scripts/check "$T/plan.md" 2>"$T/err.txt")"; rc=$?
+[ "$rc" = "1" ] || fail "Fix gate script mismatch exits 1 (got $rc)"
+[ -z "$stdout" ] || fail "Fix gate script mismatch prints nothing on stdout"
+[ "$(wc -l <"$T/err.txt" | tr -d ' ')" = "1" ] || fail "Fix gate script mismatch writes one stderr line"
+
 # exit 1 cases
 expect_err "missing heading" '# Plan\n\nbash test/run\n'
 expect_err "subheading does not end the section" '## Gate\nbash test/run\n### Notes\nbash other\n'
