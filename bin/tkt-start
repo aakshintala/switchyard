@@ -409,8 +409,9 @@ if [ "$jrc" -ne 0 ]; then
   esac
 fi
 [ -f "$out" ] || fail_step tkt-job 1 "no out file: $out"
-core="$(grep -E '^Core items: [0-9]+$' "$out" | tail -n 1 | sed -n 's/^Core items: \([0-9][0-9]*\)$/\1/p' || true)"
-nb="$(grep -E '^Non-blocking items: [0-9]+$' "$out" | tail -n 1 | sed -n 's/^Non-blocking items: \([0-9][0-9]*\)$/\1/p' || true)"
+# Trailing whitespace is allowed: a markdown line break ends the line with two spaces (#1666).
+core="$(grep -E '^Core items: [0-9]+[[:space:]]*$' "$out" | tail -n 1 | sed -n 's/^Core items: \([0-9][0-9]*\)[[:space:]]*$/\1/p' || true)"
+nb="$(grep -E '^Non-blocking items: [0-9]+[[:space:]]*$' "$out" | tail -n 1 | sed -n 's/^Non-blocking items: \([0-9][0-9]*\)[[:space:]]*$/\1/p' || true)"
 [ -n "$nb" ] || nb=0
 [ -n "$core" ] || core=unknown
 tkt journal "tkt-start preflight core=$core out=$out"; dg+=("sweep=$sweep_out" "out=$out"); report="$(head -n 30 "$out")"
