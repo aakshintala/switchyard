@@ -34,6 +34,12 @@ for tpl in template-pi.md template-tkt.md; do
   if grep -qE -- 'file-claim claim [^`]*--plan [^`]*<plan' "$tpl_path"; then fail "$tpl still says --plan <plan ...>"; fi
 done
 
+# Model routing has one source: the pool injected into each filled brief.
+for tpl in template-pi.md template.md template-tkt.md; do
+  tpl_path="$SCRIPT_DIR/../bin/lib/$tpl"
+  if grep -Eq 'muse/|openai/|grok-|claude-' "$tpl_path"; then fail "$tpl names a model instead of using the pool"; fi
+done
+
 # a bare template name resolves to the pack's brief (issue #1083); a path keeps working
 out="$(bash "$FILL" planner BASE=x ISSUE=1 PACK=none PLAN=/p PREFLIGHT=/pf REPO=o/r WORKFLOW_DOC=/w 2>"$T/err-bare.txt")" || fail "bare template name exits 0"
 case "$out" in *"o/r"*) ;; *) fail "bare template name fills the planner brief, got [$out]" ;; esac
