@@ -9,7 +9,7 @@ usage() { echo "$USAGE" >&2; exit 2; }
 [ $# -ge 1 ] || usage
 case "$1" in -h|--help) echo "$USAGE"; exit 0 ;; esac
 state="$1"; shift
-from=lane; from_given=0; no_verifier=0; lane_model=""; review_model=""; overbuild_model=""
+from=lane; from_given=0; no_verifier=0; lane_model=""; review_model=""; overbuild_model=""; haiku_exempt_pending=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --from) [ $# -ge 2 ] || usage; from="$2"; from_given=1; shift 2 ;;
@@ -233,13 +233,23 @@ check_model_quota() {
     if [ -n "$weekly" ] && jq -e --argjson weekly "$weekly" '$weekly < 40' >/dev/null 2>&1 <<<"$row"; then
       weekly_text="$(jq -r --argjson weekly "$weekly" 'if $weekly == ($weekly | floor) then "\($weekly | floor)%" else "\($weekly)%" end' <<<"null")"
       # Haiku review exempt from the floor once per PR (owner card 1112-fly-c8ba, switchyard#1622).
-      if [ "$report" = review ] && { [ "$model" = claude-haiku-5-5 ] || [ "$model" = fiber/claude/claude-haiku-5-5 ]; } && [ "$(tkt get quota.haiku_floor_exempt 2>/dev/null || true)" != 1 ]; then
-        tkt set quota.haiku_floor_exempt 1 || quota_refusal "PRECONDITION quota=refused" "$model" "$provider" "status=$status weekly=$weekly_text floor=40%; could not record Haiku review exemption" "$repair" "$include_model"
-        printf 'tkt-build: quota: claude weekly=%s floor=40%% exempt=haiku-review (owner card 1112-fly-c8ba, one per PR)\n' "$weekly_text" >&2
-      else
-        quota_refusal "PRECONDITION quota=refused" "$model" "$provider" \
-          "status=$status weekly=$weekly_text floor=40%; weekly quota is below the launch floor" "$repair" "$include_model"
+      # The cap covers tkt-build's review only: tkt-fix re-reviews never run this floor check.
+      # The key is spent after both review checks pass (see the call sites), so a refused
+      # overbuild pick does not spend it.
+      local reason="weekly quota is below the launch floor"
+      if [ "$report" = review ] && { [ "${model%:*}" = claude-haiku-5-5 ] || [ "${model%:*}" = fiber/claude/claude-haiku-5-5 ]; }; then
+        if [ "$(tkt get quota.haiku_floor_exempt 2>/dev/null || true)" = 1 ]; then
+          reason="Haiku review exemption already used for this PR (card 1112-fly-c8ba)"
+        elif [ "$haiku_exempt_pending" = 1 ]; then
+          reason="the Haiku review exemption covers one review per PR; pick a non-Claude overbuild model (card 1112-fly-c8ba)"
+        else
+          haiku_exempt_pending=1
+          printf 'tkt-build: quota: claude weekly=%s floor=40%% exempt=haiku-review (owner card 1112-fly-c8ba, one per PR)\n' "$weekly_text" >&2
+          reason=""
+        fi
       fi
+      [ -z "$reason" ] || quota_refusal "PRECONDITION quota=refused" "$model" "$provider" \
+        "status=$status weekly=$weekly_text floor=40%; $reason" "$repair" "$include_model"
     fi
     if [ -n "$weekly" ] && jq -e --argjson weekly "$weekly" '($weekly | type) == "number"' >/dev/null 2>&1 <<<"$row"; then
       weekly_text="$(jq -r --argjson weekly "$weekly" 'if $weekly == ($weekly | floor) then "\($weekly | floor)%" else "\($weekly)%" end' <<<"null")"
@@ -574,6 +584,9 @@ om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
 # The refused slot's hint is `<id>`; only the other pick is prefilled.
 check_model_quota "$rm" "Repair command: tkt-build $state --from review --review-model <id> --overbuild-model $om" review
 check_model_quota "$om" "Repair command: tkt-build $state --from review --review-model $rm --overbuild-model <id>" review
+if [ "$haiku_exempt_pending" = 1 ]; then
+  tkt set quota.haiku_floor_exempt 1 || emit "PRECONDITION quota=refused" 2 "tkt-build: quota refusal: could not record the Haiku review exemption (card 1112-fly-c8ba)"
+fi
 map_note=""; map_id=""; map_out="$run/$slug-$issue-map-r0.md"
 if [ "$mutant_count" -gt 0 ]; then
   if sm="$(tkt get job.map 2>/dev/null)" && [ -n "$sm" ]; then map_id="$sm"

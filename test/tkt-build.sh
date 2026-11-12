@@ -784,6 +784,23 @@ bash "$TKT_STATE" "$S" set quota.haiku_floor_exempt 1 || fail "quota-haiku-revie
 run_build --lane-model muse/test-model --review-model claude-haiku-5-5 --overbuild-model composer-2.5
 [ "$RC" -eq 2 ] || fail "quota-haiku-review-used exits 2 (rc=$RC)"
 expect_verdict "TKT tkt-build PRECONDITION quota=refused log=*" "quota-haiku-review-used"
+grep -q 'Haiku review exemption already used for this PR' <<<"$OUT" || fail "quota-haiku-review-used: refusal names the spent exemption"
+
+setup_case quota-haiku-review-level
+jq '.providers |= map(if .id == "claude" then .quotas[0].percentRemaining = 15 else . end)' \
+  "$T/quota-healthy.json" >"$T/quota.json"
+run_build --lane-model muse/test-model --review-model claude-haiku-5-5:medium --overbuild-model composer-2.5
+[ "$RC" -eq 0 ] || fail "quota-haiku-review-level exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q 'exempt=haiku-review' "$CDIR/stderr.txt" || fail "quota-haiku-review-level: a :level suffix still gets the exemption"
+
+setup_case quota-haiku-review-and-overbuild
+jq '.providers |= map(if .id == "claude" then .quotas[0].percentRemaining = 15 else . end)' \
+  "$T/quota-healthy.json" >"$T/quota.json"
+run_build --lane-model muse/test-model --review-model claude-haiku-5-5 --overbuild-model claude-haiku-5-5
+[ "$RC" -eq 2 ] || fail "quota-haiku-review-and-overbuild exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION quota=refused log=*" "quota-haiku-review-and-overbuild"
+grep -q 'covers one review per PR' <<<"$OUT" || fail "quota-haiku-review-and-overbuild: refusal names the one-review cap"
+[ "$(bash "$TKT_STATE" "$S" get quota.haiku_floor_exempt 2>/dev/null || true)" != 1 ] || fail "quota-haiku-review-and-overbuild: a refused run spent the exemption"
 
 setup_case quota-sonnet-review-low
 jq '.providers |= map(if .id == "claude" then .quotas[0].percentRemaining = 15 else . end)' \
