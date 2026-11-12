@@ -133,3 +133,123 @@ for name, old, status, patch in files:
   rm -rf "$work"
   return 1
 }
+
+# fence-grant caches PR diffs by repository, number and immutable head SHA.
+# A relative XDG_CACHE_HOME is ignored: Git's convention only gives an absolute
+# cache root, and falling back to HOME keeps the location deterministic.
+_pr_diff_cache_root() {
+  if [ -n "${FENCE_GRANT_CACHE_DIR:-}" ]; then
+    printf '%s\n' "$FENCE_GRANT_CACHE_DIR"
+  else
+    case "${XDG_CACHE_HOME:-}" in
+      /*) printf '%s/switchyard/fence-grant/pr-diffs\n' "$XDG_CACHE_HOME";;
+      *) printf '%s/.cache/switchyard/fence-grant/pr-diffs\n' "$HOME";;
+    esac
+  fi
+}
+
+# Usage matches pr_diff_fetch with HEAD_SHA inserted before the options.
+# Fetch into a temporary file, validate its shape, then publish with a same-dir
+# rename so concurrent readers see either no entry or a complete entry.
+pr_diff_fetch_cached() {
+  local gh="$1" repo="$2" pr="$3" expected="$4" head_sha="$5" mode="diff" cache_option
+  local cache_root cache_dir cache_file work tmp_file actual expected_names sections last_byte
+  shift 5
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name-only) mode="names";;
+      --allow-escape-sequences) :;;
+      *) echo "pr-diff: unknown option $1" >&2; return 1;;
+    esac
+    shift
+  done
+  if [ "$mode" = names ]; then cache_option=--name-only; else cache_option=--allow-escape-sequences; fi
+
+  # Older API fixtures may omit headRefOid. They still work, but cannot safely
+  # share a cached result with a later head.
+  case "$head_sha" in
+    ''|*[!0-9a-fA-F]*)
+      pr_diff_fetch "$gh" "$repo" "$pr" "$expected" "$cache_option"
+      return $?
+      ;;
+  esac
+  case "${#head_sha}" in 40|64) :;; *)
+    pr_diff_fetch "$gh" "$repo" "$pr" "$expected" "$cache_option"
+    return $?
+    ;;
+  esac
+
+  cache_root=$(_pr_diff_cache_root)
+  cache_dir="$cache_root/$repo/$pr"
+  if [ "$mode" = names ]; then cache_file="$cache_dir/$head_sha.names"; else cache_file="$cache_dir/$head_sha.diff"; fi
+  if [ -f "$cache_file" ]; then
+    cat "$cache_file"
+    return $?
+  fi
+
+  work="$(mktemp -d "${TMPDIR:-/tmp}/pr-diff-cache.XXXXXX")" || {
+    echo "pr-diff: cannot make temporary directory for PR #$pr" >&2
+    return 1
+  }
+  if ! pr_diff_fetch "$gh" "$repo" "$pr" "$expected" "$cache_option" >"$work/fetch"; then
+    rm -rf "$work"
+    return 1
+  fi
+
+  # A successful but cut-off stream is not a reusable cache entry. All file
+  # names and diff sections produced by gh (and the files-API fallback) end in
+  # a newline; known file counts provide a second truncation check.
+  if [ -s "$work/fetch" ]; then
+    last_byte=$(tail -c 1 "$work/fetch" | od -An -t x1 | tr -d '[:space:]')
+    if [ "$last_byte" != 0a ]; then
+      echo "pr-diff: PR #$pr returned a truncated diff" >&2
+      rm -rf "$work"
+      return 1
+    fi
+  fi
+  if [ "$mode" = names ]; then
+    actual=$(awk 'END { print NR }' "$work/fetch")
+    if [ -n "$expected" ] && [ "$expected" != "$actual" ]; then
+      echo "pr-diff: PR #$pr returned $actual filenames; changedFiles is $expected" >&2
+      rm -rf "$work"
+      return 1
+    fi
+  else
+    sections=$(grep -c '^diff --git ' "$work/fetch" 2>/dev/null || true)
+    expected_names=$expected
+    if [ -f "$cache_dir/$head_sha.names" ]; then
+      expected_names=$(awk 'END { print NR }' "$cache_dir/$head_sha.names")
+    fi
+    if [ -n "$expected_names" ] && [ "$expected_names" != "$sections" ]; then
+      echo "pr-diff: PR #$pr returned $sections diff sections; expected $expected_names" >&2
+      rm -rf "$work"
+      return 1
+    fi
+    if [ ! -s "$work/fetch" ] && [ -n "$expected_names" ] && [ "$expected_names" -gt 0 ]; then
+      echo "pr-diff: PR #$pr returned an empty diff" >&2
+      rm -rf "$work"
+      return 1
+    fi
+  fi
+
+  if ! mkdir -p "$cache_dir"; then
+    echo "pr-diff: cannot create cache directory for PR #$pr" >&2
+    rm -rf "$work"
+    return 1
+  fi
+  tmp_file=$(mktemp "$cache_dir/.pr-diff.XXXXXX") || {
+    echo "pr-diff: cannot make cache file for PR #$pr" >&2
+    rm -rf "$work"
+    return 1
+  }
+  if ! cp "$work/fetch" "$tmp_file" || ! mv -f "$tmp_file" "$cache_file"; then
+    echo "pr-diff: cannot publish cache for PR #$pr" >&2
+    rm -f "$tmp_file"
+    rm -rf "$work"
+    return 1
+  fi
+  cat "$cache_file"
+  local rc=$?
+  rm -rf "$work"
+  return "$rc"
+}

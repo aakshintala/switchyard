@@ -464,9 +464,29 @@ self_dir="$(cd "$(dirname "$self")" && pwd)"
 . "$self_dir/lib/fence-grant-paths.sh"
 # shellcheck disable=SC1091
 . "$self_dir/lib/pr-diff.sh"
+# Wait for one bounded PR-fetch batch and print the first failure in input order.
+# The PID and PR arrays are scoped by the calling fetch loop.
+_wait_pr_fetch_batch() {
+  local output_dir="$1" i failed_pr=""
+  for i in "${!_pr_fetch_pids[@]}"; do
+    if ! wait "${_pr_fetch_pids[$i]}"; then
+      [ -n "$failed_pr" ] || failed_pr=${_pr_fetch_ids[$i]}
+    fi
+  done
+  if [ -n "$failed_pr" ]; then
+    if [ -s "$output_dir/fetch-$failed_pr.out" ]; then
+      cat "$output_dir/fetch-$failed_pr.out"
+    else
+      echo "ERROR gh pr diff $failed_pr"
+    fi
+    return 1
+  fi
+  return 0
+}
+
 if [ -n "$preplan" ]; then
-  prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,changedFiles 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
-  preplan_prs=$(printf '%s' "$prjson" | python3 -I -c 'import json,sys
+  prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,changedFiles,headRefOid 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
+  preplan_prs=$(printf '%s' "$prjson" | python3 -I -c 'import json,re,sys
 try:
   data = json.load(sys.stdin)
 except Exception:
@@ -481,23 +501,49 @@ for row in data:
     count = ""
   if count != "" and (not isinstance(count, int) or count < 0):
     sys.exit(1)
-  print("%s\t%s" % (row["number"], count))' 2>/dev/null) || { echo "ERROR gh pr list unreadable"; exit 3; }
+  head = row.get("headRefOid")
+  if head is None:
+    head = ""
+  elif not isinstance(head, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head):
+    sys.exit(1)
+  print("%s|%s|%s" % (row["number"], count, head))' 2>/dev/null) || { echo "ERROR gh pr list unreadable"; exit 3; }
   preplan_n=$(printf '%s\n' "$preplan_prs" | grep -c .)
   case "$preplan_n" in ''|*[!0-9]*) echo "ERROR gh pr list count"; exit 3;; esac
   [ "$preplan_n" -lt 200 ] || { echo "ERROR gh pr list truncated at 200"; exit 3; }
-  preplan_rows=""
-  while IFS=$'\t' read -r _pr _expected; do
+  preplan_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-preplan.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
+  trap 'rm -rf "$preplan_tmp"' EXIT
+  _pr_fetch_pids=()
+  _pr_fetch_ids=()
+  while IFS='|' read -r _pr _expected _head; do
     [ -n "$_pr" ] || continue
-    _preplan_err=$(mktemp "${TMPDIR:-/tmp}/fence-pr-diff.XXXXXX") || { echo "ERROR cannot make temp file"; exit 3; }
-    if _files=$(pr_diff_fetch "${FW_GH:-gh}" "$repo" "$_pr" "$_expected" --name-only 2>"$_preplan_err"); then
-      :
-    else
-      g=$(head -c 200 "$_preplan_err" 2>/dev/null | tr '\n' ' ')
-      rm -f "$_preplan_err"
-      echo "ERROR gh pr diff $_pr $g"
-      exit 3
+    if [ "$_expected" = 0 ]; then
+      : >"$preplan_tmp/names-$_pr"
+      continue
     fi
-    rm -f "$_preplan_err"
+    (
+      if _files=$(pr_diff_fetch_cached "${FW_GH:-gh}" "$repo" "$_pr" "$_expected" "$_head" --name-only 2>"$preplan_tmp/fetch-$_pr.err"); then
+        printf '%s\n' "$_files" >"$preplan_tmp/names-$_pr"
+      else
+        g=$(head -c 200 "$preplan_tmp/fetch-$_pr.err" 2>/dev/null | tr '\n' ' ')
+        echo "ERROR gh pr diff $_pr $g"
+        exit 3
+      fi
+    ) >"$preplan_tmp/fetch-$_pr.out" 2>&1 &
+    _pr_fetch_pids+=("$!")
+    _pr_fetch_ids+=("$_pr")
+    if [ "${#_pr_fetch_pids[@]}" -eq 6 ]; then
+      _wait_pr_fetch_batch "$preplan_tmp" || exit 3
+      _pr_fetch_pids=()
+      _pr_fetch_ids=()
+    fi
+  done <<< "$preplan_prs"
+  if [ "${#_pr_fetch_pids[@]}" -gt 0 ]; then
+    _wait_pr_fetch_batch "$preplan_tmp" || exit 3
+  fi
+  preplan_rows=""
+  while IFS='|' read -r _pr _expected _head; do
+    [ -n "$_pr" ] || continue
+    _files=$(cat "$preplan_tmp/names-$_pr" 2>/dev/null) || _files=""
     _count=0
     while IFS= read -r _file; do
       [ -n "$_file" ] || continue
@@ -893,7 +939,7 @@ print("\n".join(out))' "$_ef"
 fi
 
 # --- open PRs (fail closed) ---
-prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,headRefName,changedFiles 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
+prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,headRefName,changedFiles,headRefOid 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
 prs=$(printf '%s' "$prjson" | python3 -c 'import json,sys
 try:
   data = json.load(sys.stdin)
@@ -1178,17 +1224,44 @@ for row in data:
     sys.exit(0)
 sys.exit(1)' "$1" 2>/dev/null
 }
+_pr_head_sha() {
+  printf '%s' "$prjson" | python3 -c 'import json,re,sys
+try:
+  data = json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+if not isinstance(data, list):
+  sys.exit(1)
+want = sys.argv[1]
+for row in data:
+  if isinstance(row, dict) and str(row.get("number", "")) == want:
+    head = row.get("headRefOid")
+    if head is None:
+      print("")
+    elif isinstance(head, str) and re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head):
+      print(head)
+    else:
+      sys.exit(1)
+    sys.exit(0)
+sys.exit(1)' "$1" 2>/dev/null
+}
 _pr_touched() {
   # $1 = PR number. Writes touched "normbase|sectionbase" lines to $tmp/touched-$1.
+  [ -f "$tmp/touched-$1" ] && return 0
   _expected=$(_pr_expected_files "$1") || { echo "ERROR gh pr list changedFiles for PR #$1"; exit 3; }
-  nf=$(pr_diff_fetch "${FW_GH:-gh}" "$repo" "$1" "$_expected" --name-only 2>"$tmp/gderr-$1") || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+  if [ "$_expected" = 0 ]; then
+    : > "$tmp/touched-$1"
+    return 0
+  fi
+  _head_sha=$(_pr_head_sha "$1") || { echo "ERROR gh pr list headRefOid for PR #$1"; exit 3; }
+  nf=$(pr_diff_fetch_cached "${FW_GH:-gh}" "$repo" "$1" "$_expected" "$_head_sha" --name-only 2>"$tmp/gderr-$1") || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
   printf '%s\n' "$nf" | grep . | while IFS= read -r f; do
     b=$(_norm_base "$f")
     [ -n "$b" ] || continue
     printf '%s|%s\n' "$b" "$b"
   done > "$tmp/touched-$1"
   if [ -s "$tmp/touched-$1" ]; then
-    pr_diff_fetch "${FW_GH:-gh}" "$repo" "$1" "$_expected" --allow-escape-sequences > "$tmp/full-$1.diff" 2>"$tmp/gderr-$1" || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
+    pr_diff_fetch_cached "${FW_GH:-gh}" "$repo" "$1" "$_expected" "$_head_sha" --allow-escape-sequences > "$tmp/full-$1.diff" 2>"$tmp/gderr-$1" || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
     [ -s "$tmp/full-$1.diff" ] || { g=$(head -c 200 "$tmp/gderr-$1" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr diff $1 $g"; exit 3; }
     grep '^rename from ' "$tmp/full-$1.diff" 2>/dev/null | sed 's/^rename from //' | while IFS= read -r o; do
       b=$(_norm_base "$o")
@@ -1252,6 +1325,29 @@ _pr_touches_doc_heading() {
   ' "$1" | _normalize_doc_heading | grep -qxF -- "$_pth_want"
 }
 
+_prefetch_pr_diffs() {
+  local pr
+  _pr_fetch_pids=()
+  _pr_fetch_ids=()
+  for pr in $prs; do
+    case " $ignore " in *" $pr "*) continue;; esac
+    case " $ownprs " in *" $pr "*) continue;; esac
+    ( _pr_touched "$pr" ) >"$tmp/fetch-$pr.out" 2>&1 &
+    _pr_fetch_pids+=("$!")
+    _pr_fetch_ids+=("$pr")
+    if [ "${#_pr_fetch_pids[@]}" -eq 6 ]; then
+      _wait_pr_fetch_batch "$tmp" || return 1
+      _pr_fetch_pids=()
+      _pr_fetch_ids=()
+    fi
+  done
+  if [ "${#_pr_fetch_pids[@]}" -gt 0 ]; then
+    _wait_pr_fetch_batch "$tmp" || return 1
+  fi
+  return 0
+}
+
+_prefetch_pr_diffs || exit 3
 for pr in $prs; do
   case " $ignore " in *" $pr "*) continue;; esac
   case " $ownprs " in *" $pr "*) echo "OWN skipping PR #$pr: its branch names ticket $ticket"; continue;; esac

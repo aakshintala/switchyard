@@ -27,6 +27,7 @@ export FW_TREE_CACHE="$T/tree-cache"
 # The Mac delegate probe reads the writer dir under the cache root; keep it
 # off the real user cache and any inherited override.
 export XDG_CACHE_HOME="$T/cache"
+export FENCE_GRANT_CACHE_DIR="$T/fence-grant-cache"
 unset DELEGATE_JOBS_DIR
 export GH_TREE="$T/tree.json" GH_PRLIST='[]' CLAUDE_JSON='[]' SSH_OUT
 
@@ -302,8 +303,8 @@ FC_STUB
 chmod +x "$FW_GH" "$FW_CLAUDE" "$FW_SSH" "$FW_DELEGATE" "$T/stubs/file-claim"
 
 reset_case() {
-  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$XDG_CACHE_HOME"
-  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE"
+  rm -rf "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$XDG_CACHE_HOME" "$FENCE_GRANT_CACHE_DIR"
+  mkdir -p "$FW_RUN" "$T/blobs" "$T/pr" "$T/delegate-jobs" "$TMPDIR/delegate-jobs" "$FW_TREE_CACHE" "$FENCE_GRANT_CACHE_DIR"
   : >"$FW_RUN/roster"
   DSESS_JSON='{"ok":true,"sessions":[]}'
   DSESS_RETRY_JSON='' DSESS_RETRY_FAIL=0 DSESS_FULL_FAIL=0 DSESS_NO_NEWLINE=0 SSH_EXEC=0 CLAUDE_NONBLOCKING=0
@@ -883,7 +884,7 @@ assert_no_grant 'missing cited doc heading'
 [ ! -s "$T/ssh.log" ] || fail 'missing cited doc heading skips box probes'
 
 reset_case
-GH_PRLIST='[{"number":11,"headRefName":"fix/one"},{"number":12,"headRefName":"fix/two"}]'
+GH_PRLIST='[{"number":11,"headRefName":"fix/one","changedFiles":3,"headRefOid":"1111111111111111111111111111111111111111"},{"number":12,"headRefName":"fix/two","changedFiles":0,"headRefOid":"2222222222222222222222222222222222222222"}]'
 export GH_PRLIST
 printf '%s\n' crates/main/src/a.rs crates/main/src/b.rs docs/tui.md >"$T/pr/11.names"
 printf '%s\n' crates/tui/src/a.rs >"$T/pr/12.names"
@@ -891,7 +892,48 @@ run_fg 77 --pre-plan 'crates/main/**'
 assert_rc 0 'pre-plan reports open PR path counts'
 assert_line 'WARN PRE-PLAN PR #11: 2 files under crates/main/**' 'pre-plan matching PR count'
 assert_line 'WARN PRE-PLAN PR #12: 0 files under crates/main/**' 'pre-plan zero count'
+! grep -q '^pr diff 12 ' "$T/gh.log" || fail 'pre-plan skips names fetch when changedFiles is zero'
 ! grep -q 'git/trees/' "$T/gh.log" || fail 'pre-plan skips path existence probes'
+
+# Twenty open PRs exercise the cold cache, a warm second call and a moved head.
+reset_case
+python3 - "$T/prlist-20.json" <<'PY'
+import json,sys
+rows=[]
+for n in range(1,21):
+  rows.append({"number":n,"headRefName":"fix/other-%d"%n,"changedFiles":1,"headRefOid":"%040x"%n})
+with open(sys.argv[1],"w") as f: json.dump(rows,f)
+PY
+GH_PRLIST_JSON="$(cat "$T/prlist-20.json")"
+export GH_PRLIST_JSON
+_n=1
+while [ "$_n" -le 20 ]; do
+  printf '%s\n' docs/tui.md >"$T/pr/$_n.names"
+  printf 'diff --git a/docs/tui.md b/docs/tui.md\nindex 1111111..2222222 100644\n--- a/docs/tui.md\n+++ b/docs/tui.md\n@@ -1 +1 @@\n-old\n+new\n' >"$T/pr/$_n.diff"
+  _n=$((_n + 1))
+done
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 0 '20-PR cold cache fixture'
+[ "$(grep -c '^pr diff ' "$T/gh.log")" = 40 ] || fail "20-PR cold cache makes 40 gh pr diff calls: $(cat "$T/gh.log")"
+: >"$T/gh.log"
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 0 'unchanged PR heads use cached diffs'
+[ "$(grep -c '^pr diff ' "$T/gh.log")" = 0 ] || fail "unchanged PR heads make no gh pr diff calls: $(cat "$T/gh.log")"
+GH_PRLIST_JSON=$(python3 - "$T/prlist-20.json" <<'PY'
+import json,sys
+rows=json.load(open(sys.argv[1]))
+for row in rows:
+  if row["number"] == 7:
+    row["headRefOid"] = "f" * 40
+print(json.dumps(rows))
+PY
+)
+export GH_PRLIST_JSON
+: >"$T/gh.log"
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 0 'moved PR head refreshes its cache'
+[ "$(grep -c '^pr diff ' "$T/gh.log")" = 2 ] || fail "moved PR fetches only its names and full diff: $(cat "$T/gh.log")"
+[ "$(grep -c '^pr diff 7 ' "$T/gh.log")" = 2 ] || fail "moved PR is the only PR fetched: $(cat "$T/gh.log")"
 
 reset_case
 run_fg 77 --paths=docs/tui.md --dry
