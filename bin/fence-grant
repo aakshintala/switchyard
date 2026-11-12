@@ -464,6 +464,25 @@ self_dir="$(cd "$(dirname "$self")" && pwd)"
 . "$self_dir/lib/fence-grant-paths.sh"
 # shellcheck disable=SC1091
 . "$self_dir/lib/pr-diff.sh"
+_cleanup_pr_fetch_children() {
+  local pid
+  for pid in "${_pr_fetch_pids[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+  for pid in "${_pr_fetch_pids[@]:-}"; do wait "$pid" 2>/dev/null || true; done
+  _pr_fetch_pids=()
+}
+
+_pr_fetch_exit() {
+  _cleanup_pr_fetch_children
+  [ -z "${cachetmp:-}" ] || rm -f "$cachetmp"
+  [ -z "${preplan_tmp:-}" ] || rm -rf "$preplan_tmp"
+  [ -z "${tmp:-}" ] || rm -rf "$tmp"
+  if [ "${locked:-0}" -eq 1 ]; then rmdir "$lockdir" 2>/dev/null || true; fi
+}
+_install_pr_fetch_traps() {
+  trap '_pr_fetch_exit' EXIT
+  trap '_cleanup_pr_fetch_children; exit 130' INT TERM
+}
+
 # Wait for one bounded PR-fetch batch and print the first failure in input order.
 # The PID and PR arrays are scoped by the calling fetch loop.
 _wait_pr_fetch_batch() {
@@ -484,8 +503,37 @@ _wait_pr_fetch_batch() {
   return 0
 }
 
+_flush_pr_fetch_batch() {
+  local output_dir="$1"
+  [ "${#_pr_fetch_pids[@]}" -gt 0 ] || return 0
+  _wait_pr_fetch_batch "$output_dir"; local rc=$?
+  _pr_fetch_pids=()
+  _pr_fetch_ids=()
+  return "$rc"
+}
+_schedule_pr_fetch() {
+  local output_dir="$1" pr="$2" callback="$3"
+  shift 3
+  ( "$callback" "$@" ) >"$output_dir/fetch-$pr.out" 2>&1 &
+  _pr_fetch_pids+=("$!")
+  _pr_fetch_ids+=("$pr")
+  if [ "${#_pr_fetch_pids[@]}" -eq 6 ]; then
+    _flush_pr_fetch_batch "$output_dir" || return 1
+  fi
+}
+_preplan_fetch_one() {
+  local pr="$1" expected="$2" head="$3" base="$4" files g
+  if files=$(pr_diff_fetch_cached "${FW_GH:-gh}" "$repo" "$pr" "$expected" "$head" "$base" --name-only 2>"$preplan_tmp/fetch-$pr.err"); then
+    printf '%s\n' "$files" >"$preplan_tmp/names-$pr"
+  else
+    g=$(head -c 200 "$preplan_tmp/fetch-$pr.err" 2>/dev/null | tr '\n' ' ')
+    echo "ERROR gh pr diff $pr $g"
+    return 3
+  fi
+}
+
 if [ -n "$preplan" ]; then
-  prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,changedFiles,headRefOid 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
+  prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,changedFiles,headRefOid,baseRefName 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
   preplan_prs=$(printf '%s' "$prjson" | python3 -I -c 'import json,re,sys
 try:
   data = json.load(sys.stdin)
@@ -506,42 +554,29 @@ for row in data:
     head = ""
   elif not isinstance(head, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head):
     sys.exit(1)
-  print("%s|%s|%s" % (row["number"], count, head))' 2>/dev/null) || { echo "ERROR gh pr list unreadable"; exit 3; }
+  base = row.get("baseRefName") or ""
+  if base and (not isinstance(base, str) or any(ch.isspace() for ch in base)):
+    sys.exit(1)
+  print("%s|%s|%s|%s" % (row["number"], count, head, base))' 2>/dev/null) || { echo "ERROR gh pr list unreadable"; exit 3; }
   preplan_n=$(printf '%s\n' "$preplan_prs" | grep -c .)
   case "$preplan_n" in ''|*[!0-9]*) echo "ERROR gh pr list count"; exit 3;; esac
   [ "$preplan_n" -lt 200 ] || { echo "ERROR gh pr list truncated at 200"; exit 3; }
   preplan_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-preplan.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
-  trap 'rm -rf "$preplan_tmp"' EXIT
+  _install_pr_fetch_traps
+
   _pr_fetch_pids=()
   _pr_fetch_ids=()
-  while IFS='|' read -r _pr _expected _head; do
+  while IFS='|' read -r _pr _expected _head _base; do
     [ -n "$_pr" ] || continue
     if [ "$_expected" = 0 ]; then
       : >"$preplan_tmp/names-$_pr"
       continue
     fi
-    (
-      if _files=$(pr_diff_fetch_cached "${FW_GH:-gh}" "$repo" "$_pr" "$_expected" "$_head" --name-only 2>"$preplan_tmp/fetch-$_pr.err"); then
-        printf '%s\n' "$_files" >"$preplan_tmp/names-$_pr"
-      else
-        g=$(head -c 200 "$preplan_tmp/fetch-$_pr.err" 2>/dev/null | tr '\n' ' ')
-        echo "ERROR gh pr diff $_pr $g"
-        exit 3
-      fi
-    ) >"$preplan_tmp/fetch-$_pr.out" 2>&1 &
-    _pr_fetch_pids+=("$!")
-    _pr_fetch_ids+=("$_pr")
-    if [ "${#_pr_fetch_pids[@]}" -eq 6 ]; then
-      _wait_pr_fetch_batch "$preplan_tmp" || exit 3
-      _pr_fetch_pids=()
-      _pr_fetch_ids=()
-    fi
+    _schedule_pr_fetch "$preplan_tmp" "$_pr" _preplan_fetch_one "$_pr" "$_expected" "$_head" "$_base" || exit 3
   done <<< "$preplan_prs"
-  if [ "${#_pr_fetch_pids[@]}" -gt 0 ]; then
-    _wait_pr_fetch_batch "$preplan_tmp" || exit 3
-  fi
+  _flush_pr_fetch_batch "$preplan_tmp" || exit 3
   preplan_rows=""
-  while IFS='|' read -r _pr _expected _head; do
+  while IFS='|' read -r _pr _expected _head _base; do
     [ -n "$_pr" ] || continue
     _files=$(cat "$preplan_tmp/names-$_pr" 2>/dev/null) || _files=""
     _count=0
@@ -573,8 +608,8 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot ma
 lockdir="$run/.fence-grant.lock"
 locked=0
 cachetmp=""
-trap '[ -z "$cachetmp" ] || rm -f "$cachetmp"; rm -rf "$tmp"; if [ "$locked" -eq 1 ]; then rmdir "$lockdir" 2>/dev/null || true; fi' EXIT
-trap 'exit 130' INT TERM
+_install_pr_fetch_traps
+
 
 # Brace-expand whole text ({a,b}, nested, empty, spaced and slashed members).
 _expand_braces() {
@@ -940,14 +975,17 @@ fi
 
 # --- open PRs (fail closed) ---
 prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,headRefName,changedFiles,headRefOid,baseRefName 2>"$tmp/gherr") || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
-prs=$(printf '%s' "$prjson" | python3 -c 'import json,sys
-try:
-  data = json.load(sys.stdin)
-except Exception:
-  sys.exit(1)
-if not isinstance(data, list):
-  sys.exit(1)
-print(" ".join(str(x.get("number", "")) for x in data if isinstance(x, dict)))' 2>/dev/null) || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
+prs=$(printf '%s' "$prjson" | python3 -I -c 'import json,re,sys
+try: data=json.load(sys.stdin)
+except Exception: sys.exit(1)
+if not isinstance(data,list): sys.exit(1)
+nums=[]
+for row in data:
+  if not isinstance(row,dict) or not isinstance(row.get("number"),int) or row["number"] < 1: sys.exit(1)
+  head=row.get("headRefOid")
+  if head is not None and (not isinstance(head,str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",head)): sys.exit(1)
+  nums.append(str(row["number"]))
+print(" ".join(nums))' 2>/dev/null) || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
 # The ticket's own open pull request holds its own paths, which reads as a hold on every path the lane asked for
 # and says nothing. The lane and grant-file sides already skip the ticket itself; the pull-request side skips it here
 # too, by branch, since Fiber names a branch `<role>/<ticket>-<slug>` (2026-10-31: lane 3695's eight paths all came
@@ -1238,7 +1276,7 @@ for row in data:
     head = row.get("headRefOid")
     if head is None:
       print("")
-    elif isinstance(head, str) and re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head):
+    elif isinstance(head, str):
       print(head)
     else:
       sys.exit(1)
@@ -1343,18 +1381,9 @@ _prefetch_pr_diffs() {
   for pr in $prs; do
     case " $ignore " in *" $pr "*) continue;; esac
     case " $ownprs " in *" $pr "*) continue;; esac
-    ( _pr_touched "$pr" ) >"$tmp/fetch-$pr.out" 2>&1 &
-    _pr_fetch_pids+=("$!")
-    _pr_fetch_ids+=("$pr")
-    if [ "${#_pr_fetch_pids[@]}" -eq 6 ]; then
-      _wait_pr_fetch_batch "$tmp" || return 1
-      _pr_fetch_pids=()
-      _pr_fetch_ids=()
-    fi
+    _schedule_pr_fetch "$tmp" "$pr" _pr_touched "$pr" || return 1
   done
-  if [ "${#_pr_fetch_pids[@]}" -gt 0 ]; then
-    _wait_pr_fetch_batch "$tmp" || return 1
-  fi
+  _flush_pr_fetch_batch "$tmp" || return 1
   return 0
 }
 

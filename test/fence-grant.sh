@@ -75,6 +75,16 @@ for alias, number in re.findall(r"(\w+):\s*issueOrPullRequest\(number:\s*(\d+)\)
     result[alias] = {"state": states.get(number, "OPEN")}
 print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATES:-}" "${GH_TICKET_OMIT:-}"
         ;;
+      repos/*/compare/*)
+        compare_ref="${2##*/compare/}"
+        compare_sha="${compare_ref##*...}"
+        pr_list=${GH_PRLIST_JSON:-$GH_PRLIST}
+        compare_pr=$(printf '%s' "$pr_list" | jq -r --arg sha "$compare_sha" '.[] | select(.headRefOid == $sha) | .number' | head -n 1)
+        [ -n "$compare_pr" ] && [ -f "$T/pr/$compare_pr.diff" ] || { echo "missing compare fixture for $compare_sha" >&2; exit 1; }
+        [ "${GH_COMPARE_FAIL_SHA:-}" != "$compare_sha" ] || { echo 'compare unavailable' >&2; exit 1; }
+        [ "${GH_DIFF_406_PR:-}" != "$compare_pr" ] || { echo 'HTTP 406: compare diff exceeds the maximum size' >&2; exit 1; }
+        case " $* " in *' application/vnd.github.diff '*) cat "$T/pr/$compare_pr.diff";; *) echo "stub gh: compare requires diff media type: $*" >&2; exit 99;; esac
+        ;;
       repos/*/commits/main)
         [ "${GH_SHA_FAIL:-0}" = 1 ] && { echo "${GH_SHA_ERROR:-sha stub failure}" >&2; exit 1; }
         printf '%s\n' "$GH_TREE_SHA"
@@ -339,8 +349,8 @@ TREE
   GH_TREE_SHA=aaaaaaaa GH_SHA_FAIL=0 GH_SHA_ERROR= GH_TREE_ERROR=
   export GH_TREE_SHA GH_SHA_FAIL GH_SHA_ERROR GH_TREE_ERROR
   GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL= GH_DIFF_406_PR=
-  GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_FAIL_WITH_OUTPUT=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT= SSH_STDERR=
-  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_DIFF_406_PR GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_FAIL_WITH_OUTPUT CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
+  GH_COMPARE_FAIL_SHA= GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_FAIL_WITH_OUTPUT=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT= SSH_STDERR=
+  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_DIFF_406_PR GH_COMPARE_FAIL_SHA GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_FAIL_WITH_OUTPUT CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
   GH_TICKET_STATES= GH_TICKET_FAIL=0 GH_TICKET_BAD=0 GH_TICKET_MISSING=0 GH_TICKET_OMIT=
   export GH_TICKET_STATES GH_TICKET_FAIL GH_TICKET_BAD GH_TICKET_MISSING GH_TICKET_OMIT
   FW_DELEGATE_DIR="$T/delegate-jobs"
@@ -884,9 +894,10 @@ assert_no_grant 'missing cited doc heading'
 [ ! -s "$T/ssh.log" ] || fail 'missing cited doc heading skips box probes'
 
 reset_case
-GH_PRLIST='[{"number":11,"headRefName":"fix/one","changedFiles":3,"headRefOid":"1111111111111111111111111111111111111111"},{"number":12,"headRefName":"fix/two","changedFiles":0,"headRefOid":"2222222222222222222222222222222222222222"}]'
+GH_PRLIST='[{"number":11,"headRefName":"fix/one","changedFiles":3,"headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main"},{"number":12,"headRefName":"fix/two","changedFiles":0,"headRefOid":"2222222222222222222222222222222222222222","baseRefName":"main"}]'
 export GH_PRLIST
 printf '%s\n' crates/main/src/a.rs crates/main/src/b.rs docs/tui.md >"$T/pr/11.names"
+printf 'diff --git a/crates/main/src/a.rs b/crates/main/src/a.rs\n--- a/crates/main/src/a.rs\n+++ b/crates/main/src/a.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/crates/main/src/b.rs b/crates/main/src/b.rs\n--- a/crates/main/src/b.rs\n+++ b/crates/main/src/b.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/docs/tui.md b/docs/tui.md\n--- a/docs/tui.md\n+++ b/docs/tui.md\n@@ -1 +1 @@\n-a\n+b\n' >"$T/pr/11.diff"
 printf '%s\n' crates/tui/src/a.rs >"$T/pr/12.names"
 run_fg 77 --pre-plan 'crates/main/**'
 assert_rc 0 'pre-plan reports open PR path counts'
@@ -901,7 +912,7 @@ python3 - "$T/prlist-20.json" <<'PY'
 import json,sys
 rows=[]
 for n in range(1,21):
-  rows.append({"number":n,"headRefName":"fix/other-%d"%n,"changedFiles":1,"headRefOid":"%040x"%n})
+  rows.append({"number":n,"headRefName":"fix/other-%d"%n,"changedFiles":1,"headRefOid":"%040x"%n,"baseRefName":"main"})
 with open(sys.argv[1],"w") as f: json.dump(rows,f)
 PY
 GH_PRLIST_JSON="$(cat "$T/prlist-20.json")"
@@ -914,11 +925,19 @@ while [ "$_n" -le 20 ]; do
 done
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 '20-PR cold cache fixture'
-[ "$(grep -c '^pr diff ' "$T/gh.log")" = 40 ] || fail "20-PR cold cache makes 40 gh pr diff calls: $(cat "$T/gh.log")"
+[ "$(grep -c '^api repos/aakshintala/fiber/compare/' "$T/gh.log")" = 20 ] || fail "20-PR cold cache makes 20 compare calls: $(cat "$T/gh.log")"
+[ "$(grep -c '^pr diff ' "$T/gh.log")" = 0 ] || fail "20-PR cacheable path does not use pr diff: $(cat "$T/gh.log")"
+_n=1
+while [ "$_n" -le 20 ]; do
+  _sha=$(printf '%040x' "$_n")
+  [ "$(grep -c "^api repos/aakshintala/fiber/compare/main...$_sha " "$T/gh.log")" = 1 ] || fail "cold cache fetches PR $_n exactly once: $(cat "$T/gh.log")"
+  _n=$((_n + 1))
+done
 : >"$T/gh.log"
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'unchanged PR heads use cached diffs'
-[ "$(grep -c '^pr diff ' "$T/gh.log")" = 0 ] || fail "unchanged PR heads make no gh pr diff calls: $(cat "$T/gh.log")"
+[ "$(grep -c '^api repos/aakshintala/fiber/compare/' "$T/gh.log")" = 0 ] || fail "unchanged PR heads make no compare calls: $(cat "$T/gh.log")"
+[ "$(grep -c '^pr diff ' "$T/gh.log")" = 0 ] || fail "unchanged PR heads make no pr diff calls: $(cat "$T/gh.log")"
 GH_PRLIST_JSON=$(python3 - "$T/prlist-20.json" <<'PY'
 import json,sys
 rows=json.load(open(sys.argv[1]))
@@ -932,8 +951,43 @@ export GH_PRLIST_JSON
 : >"$T/gh.log"
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'moved PR head refreshes its cache'
-[ "$(grep -c '^pr diff ' "$T/gh.log")" = 2 ] || fail "moved PR fetches only its names and full diff: $(cat "$T/gh.log")"
-[ "$(grep -c '^pr diff 7 ' "$T/gh.log")" = 2 ] || fail "moved PR is the only PR fetched: $(cat "$T/gh.log")"
+[ "$(grep -c '^api repos/aakshintala/fiber/compare/' "$T/gh.log")" = 1 ] || fail "moved PR fetches exactly one compare diff: $(cat "$T/gh.log")"
+[ "$(grep -c '^api repos/aakshintala/fiber/compare/.*...f' "$T/gh.log")" = 1 ] || fail "only moved PR is fetched: $(cat "$T/gh.log")"
+[ "$(find "$T/fence-grant-cache/aakshintala/fiber/7" -type f | wc -l | tr -d ' ')" = 1 ] || fail 'publishing new head evicts prior cached head'
+# A base change invalidates only that PR's compare entry.
+GH_PRLIST_JSON=$(python3 - "$T/prlist-20.json" <<'PY'
+import json,sys
+rows=json.load(open(sys.argv[1]))
+for row in rows:
+  if row["number"] == 7: row["headRefOid"] = "f" * 40; row["baseRefName"] = "release"
+print(json.dumps(rows))
+PY
+)
+export GH_PRLIST_JSON
+: >"$T/gh.log"
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 0 'changed PR base refreshes its cache'
+[ "$(grep -c '^api repos/aakshintala/fiber/compare/' "$T/gh.log")" = 1 ] || fail "base change fetches only one PR: $(cat "$T/gh.log")"
+grep -q '^api repos/aakshintala/fiber/compare/release\.\.\.ffffffffffffffffffffffffffffffffffffffff ' "$T/gh.log" || fail "base change fetches PR 7 at its new base only: $(cat "$T/gh.log")"
+# Compare failures use pr diff, and that fallback is deliberately uncached.
+GH_PRLIST_JSON=$(python3 - "$T/prlist-20.json" <<'PY'
+import json,sys
+rows=json.load(open(sys.argv[1]))
+for row in rows:
+  if row["number"] == 7: row["headRefOid"] = "f" * 40; row["baseRefName"] = "fallback"
+print(json.dumps(rows))
+PY
+)
+export GH_PRLIST_JSON
+GH_COMPARE_FAIL_SHA=ffffffffffffffffffffffffffffffffffffffff
+export GH_COMPARE_FAIL_SHA
+: >"$T/gh.log"
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 0 'compare fallback result is usable'
+: >"$T/gh.log"
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 0 'compare fallback result is not cached'
+[ "$(grep -c '^pr diff 7 ' "$T/gh.log")" = 2 ] || fail "fallback is fetched again rather than cached: $(cat "$T/gh.log")"
 
 reset_case
 run_fg 77 --paths=docs/tui.md --dry

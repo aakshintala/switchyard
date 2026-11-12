@@ -152,19 +152,20 @@ _pr_diff_cache_root() {
 # Fallback results remain uncached because they are not pinned by compare.
 pr_diff_fetch_cached() {
   local gh="$1" repo="$2" pr="$3" expected="$4" head_sha="$5" base="$6" mode="diff"
-  local cache_root cache_dir cache_file work tmp_file actual sections last_byte
+  local cache_root cache_dir cache_file work tmp_file actual sections last_byte cache_base
   shift 6
   while [ "$#" -gt 0 ]; do
     case "$1" in --name-only) mode="names";; --allow-escape-sequences) :;; *) echo "pr-diff: unknown option $1" >&2; return 1;; esac
     shift
   done
-  if ! [[ "$head_sha" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] || [ -z "$base" ]; then
+  if [ -z "$head_sha" ] || [ -z "$base" ]; then
     if [ "$mode" = names ]; then pr_diff_fetch "$gh" "$repo" "$pr" "$expected" --name-only; else pr_diff_fetch "$gh" "$repo" "$pr" "$expected" --allow-escape-sequences; fi
     return $?
   fi
   cache_root=$(_pr_diff_cache_root)
   cache_dir="$cache_root/$repo/$pr"
-  cache_file="$cache_dir/$head_sha-$base.diff"
+  cache_base=${base//\//%2F}
+  cache_file="$cache_dir/$head_sha-$cache_base.diff"
   work="$(mktemp -d "${TMPDIR:-/tmp}/pr-diff-cache.XXXXXX")" || { echo "pr-diff: cannot make temporary directory for PR #$pr" >&2; return 1; }
   if [ -f "$cache_file" ]; then cp "$cache_file" "$work/fetch"; else
     if ! "$gh" api "repos/$repo/compare/$base...$head_sha" -H 'Accept: application/vnd.github.diff' >"$work/fetch" 2>"$work/compare.err"; then
@@ -185,7 +186,7 @@ pr_diff_fetch_cached() {
     tmp_file=$(mktemp "$cache_dir/.pr-diff.XXXXXX") || { rm -rf "$work"; return 1; }
     if ! cp "$work/fetch" "$tmp_file" || ! mv -f "$tmp_file" "$cache_file"; then rm -f "$tmp_file"; rm -rf "$work"; return 1; fi
     # A newly published head supersedes all cached heads for this PR.
-    find "$cache_dir" -type f ! -name "$head_sha-$base.diff" -delete
+    find "$cache_dir" -type f ! -name "$head_sha-$cache_base.diff" -delete
   fi
   if [ "$mode" = names ]; then sed -n 's/^diff --git a\/[^ ]* b\/\(.*\)$/\1/p' "$work/fetch"; else cat "$work/fetch"; fi
   local rc=$?; rm -rf "$work"; return "$rc"
