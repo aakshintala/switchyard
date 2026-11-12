@@ -177,7 +177,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     {"id": "router-one", "pricing": {"prompt": "0.00000015", "completion": "0.00000025"}},
                     {"id": "router-window", "pricing": {
                         "prompt": "0.0000001", "completion": "0.0000002",
-                        "overrides": [{"utc_start": "00:00", "utc_end": "12:00", "prompt": "0.0000004", "completion": "0.0000005"}],
+                        "overrides": [
+                            {"utc_start": "00:00", "utc_end": "12:00", "prompt": "0.00000045", "completion": "0.00000055"},
+                            {"utc_start": "12:00", "utc_end": "24:00", "prompt": "0.0000004", "completion": "0.0000005"},
+                        ],
                     }},
                     {"id": "router-mismatch", "pricing": {"prompt": "0.0000001", "completion": "0.0000002"}},
                     {"id": "router-tier", "pricing": {

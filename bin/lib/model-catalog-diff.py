@@ -361,6 +361,7 @@ def number(value, scale=1):
 
 def vendor_fields(model, vendor):
     fields = {}
+    alternatives_by_field = {}
     aliases = {
         "context": ("context_window", "context_length", "inputTokenLimit", "input_token_limit"),
         "output": ("max_tokens", "max_output_tokens", "outputTokenLimit", "output_token_limit"),
@@ -389,7 +390,7 @@ def vendor_fields(model, vendor):
                     and (candidate := number(override.get(key), 1_000_000)) is not None
                 ]
                 if alternatives:
-                    fields[field + "_alternatives"] = alternatives
+                    alternatives_by_field[field] = alternatives
     for field, keys in (("input_price", ("input_price",)), ("output_price", ("output_price",))):
         if field not in fields:
             value = next((model.get(key) for key in keys if model.get(key) is not None), None)
@@ -402,7 +403,7 @@ def vendor_fields(model, vendor):
         status = model["status"].lower()
         if status in ("deprecated", "retired", "active", "available"):
             fields["deprecated"] = status in ("deprecated", "retired")
-    return fields
+    return fields, alternatives_by_field
 
 
 def reference_fields(model):
@@ -532,7 +533,7 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
             if vendor != "codex":
                 rows.append((identifier, "gone", "-", "-", "listed"))
             continue
-        left_fields = vendor_fields(left, vendor)
+        left_fields, left_alternatives = vendor_fields(left, vendor)
         right_fields = reference_fields(right)
         for field in FIELD_NAMES:
             if field not in left_fields or field not in right_fields:
@@ -541,7 +542,7 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
                 continue
             left_value, right_value = left_fields[field], right_fields[field]
             if field in ("input_price", "output_price"):
-                alternatives = left_fields.get(field + "_alternatives", ())
+                alternatives = left_alternatives.get(field, ())
                 if any(math.isclose(value, right_value, rel_tol=1e-6) for value in (left_value, *alternatives)):
                     continue
             if left_value != right_value:
