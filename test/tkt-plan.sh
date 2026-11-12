@@ -3063,6 +3063,36 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
 fi
 
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = stale-recovery ]; then
+  # Task-path drift remains exempt for a cited plan whose body changed, so
+  # mechanical re-anchor does not apply.
+  setup_case reanchor-task-path-drift
+  mkdir -p "$WT/src"
+  wcommit "$WT" src/lib.rs $'pub fn cited() {\n    let value = 1;\n}\n'
+  wcommit "$WT" task.txt "task source v1"
+  A="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" update-ref refs/remotes/origin/main "$A"
+  {
+    printf 'Base: %s\n\n## Files\n\n- `src/lib.rs`\n- `task.txt`\n\n## Tasks\n\n1. Inspect `task.txt` and preserve `src/lib.rs::cited`.\n\n## Gate\n\n`true`\n' "$A"
+  } >"$CDIR/plan.md"
+  printf 'real' >"$T/pcmode"
+  printf 'ok' >"$T/mode"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "reanchor-task-path-drift initial verify exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "reanchor-task-path-drift seed exhausted Verifier count"
+  bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "reanchor-task-path-drift seed confirm count"
+  wcommit "$WT" task.txt "task source v2"
+  B="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" update-ref refs/remotes/origin/main "$B"
+  awk '{ if ($0 == "1. Inspect `task.txt` and preserve `src/lib.rs::cited`.") print "1. Inspect `task.txt` carefully and preserve `src/lib.rs::cited`."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
+  set_plan_base "$B"
+  : >"$T/stub.log"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "reanchor-task-path-drift exempt verify runs at the round limit (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "reanchor-task-path-drift"
+  grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "reanchor-task-path-drift uses the drift slot"
+  [ "$(state_get verifier_round)" = 2 ] || fail "reanchor-task-path-drift leaves the round budget unchanged"
+  [ "$(state_get confirmed_for)" = 2 ] || fail "reanchor-task-path-drift preserves the confirm count"
+
   # A build stale-recovery verify exempts changed plan Files even when the
   # plan's resolved Task paths do not include the changed file.
   setup_case build-stale-recovery-drift
@@ -3088,6 +3118,33 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = stale-recovery 
   [ "$(state_get verifier_round)" = 2 ] || fail "build-stale-recovery-drift leaves the round budget unchanged"
   [ -z "$(state_get build_stale_recovery_base)" ] || fail "build-stale-recovery-drift clears the recovery Base"
   [ -z "$(state_get build_stale_recovery_plan_hash)" ] || fail "build-stale-recovery-drift clears the recovery plan hash"
+  # Build stale recovery keeps the drift exemption for a plan with citations.
+  setup_case build-stale-recovery-cited
+  mkdir -p "$WT/src"
+  wcommit "$WT" src/lib.rs $'pub fn cited() {\n    let value = 1;\n}\n'
+  wcommit "$WT" task.txt "task source"
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  A="$(git -C "$WT" rev-parse HEAD)"
+  bash "$TKT_STATE" "$S" set verifier_round 2 || fail "build-stale-recovery-cited seed round"
+  bash "$TKT_STATE" "$S" set verified_base "$A" || fail "build-stale-recovery-cited seed verified base"
+  wcommit "$WT" f.txt v3
+  git -C "$WT" update-ref refs/remotes/origin/main HEAD
+  B="$(git -C "$WT" rev-parse HEAD)"
+  {
+    printf 'Base: %s\n' "$B"
+    printf '\n## Files\n\n- `f.txt`\n- `task.txt`\n- `src/lib.rs`\n\n## Tasks\n\n1. Inspect `task.txt`.\n\n## Rulings\nPreserve `src/lib.rs::cited`.\n\n## Gate\n\n`true`\n'
+  } >"$CDIR/plan.md"
+  bash "$TKT_STATE" "$S" set build_stale_recovery_base "$B" || fail "build-stale-recovery-cited seed recovery Base"
+  bash "$TKT_STATE" "$S" set build_stale_recovery_plan_hash "$(git -C "$WT" hash-object "$CDIR/plan.md")" || fail "build-stale-recovery-cited seed recovery plan hash"
+  printf 'ok' >"$T/mode"
+  : >"$T/stub.log"
+  run_plan verify
+  [ "$RC" -eq 0 ] || fail "build-stale-recovery-cited exempt verify runs at the round limit (rc=$RC): $(first_line)"
+  expect_verdict "TKT tkt-plan PLAN-OK out=* log=*" "build-stale-recovery-cited"
+  grep -q 'slot=verifier-r3-drift' "$T/stub.log" || fail "build-stale-recovery-cited uses the drift slot"
+  [ "$(state_get verifier_round)" = 2 ] || fail "build-stale-recovery-cited leaves the round budget unchanged"
+  [ -z "$(state_get build_stale_recovery_base)" ] || fail "build-stale-recovery-cited clears the recovery Base"
+  [ -z "$(state_get build_stale_recovery_plan_hash)" ] || fail "build-stale-recovery-cited clears the recovery plan hash"
 fi
 
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = amendment ]; then

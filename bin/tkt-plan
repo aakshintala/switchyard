@@ -714,40 +714,35 @@ do_verify() {
     t set build_stale_recovery_plan_hash ""
     emit "REANCHORED base=$base" 0 "cited symbol bodies and signatures are unchanged; no Verifier round spent"
   fi
-  # Plans without a cited path::symbol keep the existing task-scoped drift
-  # exemption. Cited symbols use the narrower body/signature comparison above.
-  if [ "$reanchor_has_citations" -eq 0 ]; then
-    drift=0
-    vbase="$(t get verified_base 2>/dev/null || true)"
-    if [ -n "$vbase" ]; then
-      tpaths=()
-      while IFS= read -r p; do tpaths+=("$p"); done < <(plan_task_pathspecs "$plan" "$worktree" "$base")
-      if [ "${#tpaths[@]}" -eq 0 ]; then
-        while IFS= read -r p; do tpaths+=("$p"); done < <(plan_files_pathspecs "$plan")
-      fi
-      if [ "${#tpaths[@]}" -gt 0 ]; then
-        if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${tpaths[@]}" 2>/dev/null)"; then
-          [ -n "$dstat" ] && drift=1 || drift=0
-        else
-          drift=0
-        fi
+  # Re-anchor analysis and the task-scoped drift exemption are independent: a
+  # cited plan whose body changed still receives the existing drift check.
+  vbase="$(t get verified_base 2>/dev/null || true)"
+  if [ -n "$vbase" ]; then
+    tpaths=()
+    while IFS= read -r p; do tpaths+=("$p"); done < <(plan_task_pathspecs "$plan" "$worktree" "$base")
+    if [ "${#tpaths[@]}" -eq 0 ]; then
+      while IFS= read -r p; do tpaths+=("$p"); done < <(plan_files_pathspecs "$plan")
+    fi
+    if [ "${#tpaths[@]}" -gt 0 ]; then
+      if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${tpaths[@]}" 2>/dev/null)"; then
+        [ -n "$dstat" ] && drift=1
       fi
     fi
-    # A build-phase STALE recovery carries a state marker tied to its new Base
-    # and exact plan snapshot. Its stale check is Files-based, so those changed
-    # Files paths remain exempt even when resolved Task paths omit them.
-    if [ "$drift" -eq 0 ]; then
-      recovery_base="$(t get build_stale_recovery_base 2>/dev/null || true)"
-      recovery_plan_hash="$(t get build_stale_recovery_plan_hash 2>/dev/null || true)"
-      if [ "$recovery_base" = "$base" ] && [ -n "$recovery_plan_hash" ] && [ -n "$vbase" ] && [ "$vbase" != "$base" ]; then
-        current_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
-        if [ "$current_plan_hash" = "$recovery_plan_hash" ]; then
-          recovery_files=()
-          while IFS= read -r p; do recovery_files+=("$p"); done < <(plan_files_pathspecs "$plan")
-          if [ "${#recovery_files[@]}" -gt 0 ]; then
-            if recovery_stat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${recovery_files[@]}" 2>/dev/null)"; then
-              [ -n "$recovery_stat" ] && drift=1
-            fi
+  fi
+  # A build-phase STALE recovery carries a state marker tied to its new Base
+  # and exact plan snapshot. Its stale check is Files-based, so those changed
+  # Files paths remain exempt even when resolved Task paths omit them.
+  if [ "$drift" -eq 0 ]; then
+    recovery_base="$(t get build_stale_recovery_base 2>/dev/null || true)"
+    recovery_plan_hash="$(t get build_stale_recovery_plan_hash 2>/dev/null || true)"
+    if [ "$recovery_base" = "$base" ] && [ -n "$recovery_plan_hash" ] && [ -n "$vbase" ] && [ "$vbase" != "$base" ]; then
+      current_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+      if [ "$current_plan_hash" = "$recovery_plan_hash" ]; then
+        recovery_files=()
+        while IFS= read -r p; do recovery_files+=("$p"); done < <(plan_files_pathspecs "$plan")
+        if [ "${#recovery_files[@]}" -gt 0 ]; then
+          if recovery_stat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${recovery_files[@]}" 2>/dev/null)"; then
+            [ -n "$recovery_stat" ] && drift=1
           fi
         fi
       fi

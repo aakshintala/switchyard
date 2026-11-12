@@ -85,6 +85,9 @@ expect_code() {
 clean="$(mkplan clean '## Files\n- `src/lib.rs`\n- `cfg/unique.toml`\n\n## Rulings\nKeep `docs/guide.md` and call `make_widget()` on `WidgetThing`.\n\n## Tasks\n1. Edit `src/lib.rs` and `unique.toml`.\n')"
 expect_clean "clean plan" "$clean"
 
+# Tasks with a command but no resolvable path warn without changing the exit status.
+expect_task_warning_clean "unresolvable Tasks path warning" "$(mkplan no_task_path '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Sweep with `perl -pi -e '\''s/old/new/'\'' src/lib.rs`.\n')"
+
 # Line-number citations are unstable; cite source symbols and doc headings instead.
 expect_clean "symbol citation" "$(mkplan symbolcite '## Files\n- `src/lib.rs`\n\n## Rulings\n`src/lib.rs::make_widget()` and `src/lib.rs::WidgetThing`.\n')"
 expect_problems "path line citation rejected" "$(mkplan linecite '## Files\n- `src/lib.rs`\n\n## Rulings\nSee `foo.rs:120`.\n')" \
