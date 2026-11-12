@@ -1288,15 +1288,18 @@ grep -qF 'active-6103.txt' <<<"$(claims_blob "$R")" || fail "active lane claim r
 ! grep -qF 'phase-6104.txt' <<<"$(claims_blob "$R")" || fail "retired phase-holder claim is reaped"
 grep -qF 'REAP claim before-6101.txt by fiber-6101' <<<"$out" || fail "reaped retired-lane claim is reported: $out"
 
-# A failure to read lanecheck's retired list makes the whole reap a safe no-op.
+# A failed retired-lane lookup disables only retirement-based drops; closed-ticket
+# cleanup still runs, and an open claim on a retired lane remains held.
 R="$(fresh)"
-FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6110 --grant --worktree "$(hostname -s):closed" --repo test/repo fail-lanecheck-open.txt >/dev/null 2>&1 || fail "lanecheck lookup failure setup open"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6110 --grant --worktree "$(hostname -s):open" --repo test/repo fail-lanecheck-open.txt >/dev/null 2>&1 || fail "lanecheck lookup failure setup open"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6111 --grant --worktree "$(hostname -s):closed" --repo test/repo fail-lanecheck-closed.txt >/dev/null 2>&1 || fail "lanecheck lookup failure setup closed"
-before="$(claims_blob "$R")"
+printf 'fiber-6110\t2021-01-01T00:00:00Z\n' >"$LANECHECK_RETIRED_FILE"
 out="$(LANECHECK_RETIRED_FAIL=1 GH_TICKET_STATES='6110:OPEN,6111:CLOSED' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-lanecheck-fail")" \
-  || fail "retired-list lookup failure is a safe no-op: $(cat "$T/e-reap-lanecheck-fail")"
-[ -z "$out" ] || fail "failed lanecheck lookup reports no drops: $out"
-[ "$(claims_blob "$R")" = "$before" ] || fail "failed lanecheck lookup keeps every claim"
+  || fail "reap continues after retired-list failure: $(cat "$T/e-reap-lanecheck-fail")"
+grep -qF 'REAP claim fail-lanecheck-closed.txt by fiber-6111' <<<"$out" || fail "closed claim drops after retired-list failure: $out"
+grep -qF 'fail-lanecheck-open.txt' <<<"$(claims_blob "$R")" || fail "open claim remains after retired-list failure"
+! grep -qF 'fail-lanecheck-closed.txt' <<<"$(claims_blob "$R")" || fail "closed claim removed after retired-list failure"
+grep -qF 'lanecheck retired-lane lookup failed' "$T/e-reap-lanecheck-fail" || fail "failed retired lookup warns on stderr"
 
 # A stale-only holder is removed before a sweep claimant decides whether it can grant.
 R="$(fresh)"

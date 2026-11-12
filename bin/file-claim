@@ -658,10 +658,14 @@ cmd_reap() {
 
     retired_lanes="$W/retired-lanes.tsv"
     lanecheck="${FW_LANECHECK:-$script_dir/lanecheck}"
-    if ! "$lanecheck" retired >"$retired_lanes" 2>"$W/lanecheck.err" ||
-        ! awk -F '\t' 'NF != 2 || $1 !~ /^fiber-[0-9]+$/ || $2 !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/ { bad = 1 } END { exit bad }' "$retired_lanes"; then
-      echo "file-claim: reap skipped: lanecheck retired-lane lookup failed; all holds kept" >&2
-      return 0
+    if ! "$lanecheck" retired >"$retired_lanes" 2>"$W/lanecheck.err"; then
+      cause="$(head -c 200 "$W/lanecheck.err" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+      [ -n "$cause" ] || cause="command exited nonzero"
+      echo "file-claim: warning: lanecheck retired-lane lookup failed ($cause); retirement-based drops disabled" >&2
+      : >"$retired_lanes"
+    elif ! awk -F '\t' 'NF != 2 || $1 !~ /^fiber-[0-9]+$/ || $2 !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/ { bad = 1 } END { exit bad }' "$retired_lanes"; then
+      echo "file-claim: warning: malformed lanecheck retired-lane list; retirement-based drops disabled" >&2
+      : >"$retired_lanes"
     fi
 
     kept="$W/kept.tsv"; dropped="$W/dropped.tsv"; dropped_files="$W/dropped-files.tsv"; grant_prs="$W/grant-prs.tsv"
