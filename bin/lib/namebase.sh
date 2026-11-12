@@ -16,7 +16,9 @@ require_state_file() {
 }
 
 # take_state_lock CALLER DIR: create DIR or report its holder and exit 2.
-# On success, DIR remains held for the caller to release.
+# On success, DIR remains held for the caller to release. Callers that only
+# check for a holder (tkt-build, tkt-fix, tkt-plan, tkt-job) rmdir it on the
+# next line; tkt-gate holds it for the whole run.
 take_state_lock() {
   local caller="$1" lock_dir="$2" pid
   if mkdir "$lock_dir" 2>/dev/null; then
