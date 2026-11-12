@@ -1129,6 +1129,44 @@ fn ack_accepts_record_cwd_from_ack_subdirectory() {
 }
 
 #[test]
+fn ack_accepts_deleted_record_cwd_from_symlinked_parent() {
+    let e = Env::new("ack-deleted-cwd-symlink-parent");
+    let real_parent = e.dir.join("real-parent");
+    std::fs::create_dir(&real_parent).unwrap();
+    let linked_parent = e.dir.join("linked-parent");
+    std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+    let record_cwd = linked_parent.join("clone");
+    std::fs::create_dir(&record_cwd).unwrap();
+    let record_cwd = record_cwd.to_str().unwrap();
+
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "known report",
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", record_cwd),
+        ],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    std::fs::remove_dir_all(record_cwd).unwrap();
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", linked_parent.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn ack_canonicalizes_symlinked_caller_cwd() {
     let e = Env::new("ack-cwd-symlink");
     let clone = e.dir.join("clone");
