@@ -1162,6 +1162,42 @@ fn ack_canonicalizes_symlinked_caller_cwd() {
 }
 
 #[test]
+fn ack_canonicalizes_deleted_symlinked_caller_cwd() {
+    let e = Env::new("ack-cwd-deleted-symlink");
+    let real = e.dir.join("real");
+    std::fs::create_dir(&real).unwrap();
+    let symlink = e.dir.join("link");
+    std::os::unix::fs::symlink(&real, &symlink).unwrap();
+    let clone = symlink.join("clone");
+    std::fs::create_dir(&clone).unwrap();
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "known report",
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", clone.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    std::fs::remove_dir(&clone).unwrap();
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", real.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn ack_accepts_review_pr_caller_prefix() {
     let e = Env::new("ack-review-pr-prefix");
     let clone = e.dir.join("clone");
