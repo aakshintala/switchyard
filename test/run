@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test/run: run every test file in this directory.
-# Usage: test/run [--self-test-parallel-failure|--self-test-serial-failure]; internal: test/run --run-parallel <paths...>
+# Usage: test/run [--since <sha>|--self-test-parallel-failure|--self-test-serial-failure]; internal: test/run --run-parallel <paths...>
 set -uo pipefail
 
 # Keep the local gate on the same Bash major version as CI. Prefer the
@@ -62,6 +62,30 @@ GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 
 D="$(cd "$(dirname "$0")" && pwd)"
+
+# Keep these lists as the single source for the full gate and scoped fallback.
+SERIAL_BEFORE_PARALLEL=(
+  "$D"/agents-ff.sh "$D"/binbox-move.sh "$D"/box-tmp-reap.sh "$D"/box-setup.sh
+  "$D"/boxlaunch-reuse.sh "$D"/boxstale.sh "$D"/fw-lib-move.sh "$D"/fw-self-grant.sh
+  "$D"/fw-selftest-stale.sh "$D"/lanecheck-pi.sh "$D"/claude-agents-timeout.sh
+  "$D"/lanecheck.sh "$D"/lanecheck-wake.sh "$D"/ruled.sh "$D"/tkt-drive.sh
+  "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/brief-bounded.sh
+  "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/agent-cost.sh "$D"/post-plan.sh
+  "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/inbox.sh
+  "$D"/inbox-watchers.sh "$D"/role-inbox.sh "$D"/roles-restart.sh "$D"/wired-check.sh
+  "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh
+  "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh
+  "$D"/target-reap.sh "$D"/canary-daily.sh "$D"/model-catalog-diff.sh "$D"/model-deprecations.sh
+  "$D"/bash5-runner.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh
+)
+PARALLEL_SUITES=(
+  "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/tkt-plan.sh
+  "$D"/tkt-fix.sh "$D"/file-claim.sh "$D"/review-pr.sh "$D"/fence-grant.sh
+  "$D"/tkt-job.sh "$D"/delegate-canary.sh "$D"/tkt-gate.sh "$D"/gh-ci.sh
+  "$D"/tkt-ship.sh "$D"/lanestat.sh "$D"/plan-sweep.sh "$D"/ci-friction.sh
+  "$D"/git-hook-guard.sh "$D"/ci-health.sh
+)
+SERIAL_AFTER_PARALLEL=("$D"/cargo-slot.sh "$D"/run-since.sh)
 
 # --- parallel helper: run suites at most 3 at once from one pool (xargs -P),
 # so a slot frees as soon as any suite ends rather than when its batch of
@@ -175,37 +199,175 @@ if [ "${1:-}" = "--self-test-parallel-failure" ]; then
   fi
 fi
 
-failed=0
-run_serial "$D"/agents-ff.sh "$D"/binbox-move.sh "$D"/box-tmp-reap.sh "$D"/box-setup.sh "$D"/boxlaunch-reuse.sh "$D"/boxstale.sh "$D"/fw-lib-move.sh "$D"/fw-self-grant.sh "$D"/fw-selftest-stale.sh "$D"/lanecheck-pi.sh "$D"/claude-agents-timeout.sh "$D"/lanecheck.sh "$D"/lanecheck-wake.sh "$D"/ruled.sh "$D"/tkt-drive.sh
-run_serial "$D"/tkt-state.sh "$D"/job-record.sh "$D"/fill-brief.sh "$D"/brief-bounded.sh "$D"/check-pack.sh "$D"/pr-closes.sh "$D"/agent-cost.sh "$D"/post-plan.sh "$D"/plan-gate.sh "$D"/plan-check.sh "$D"/delegate-replay.sh "$D"/inbox.sh "$D"/inbox-watchers.sh "$D"/role-inbox.sh "$D"/roles-restart.sh "$D"/wired-check.sh "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh "$D"/target-reap.sh "$D"/canary-daily.sh "$D"/model-catalog-diff.sh "$D"/model-deprecations.sh "$D"/bash5-runner.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh
-# Allowlist (exactly these 18 isolated suites run in parallel, at most 3),
-# longest first by the 2026-11-07 profile: ship-pr.sh, tkt-build.sh,
-# tkt-start.sh, tkt-plan.sh, tkt-fix.sh, file-claim.sh, review-pr.sh,
-# fence-grant.sh, tkt-job.sh, delegate-canary.sh, tkt-gate.sh, gh-ci.sh,
-# tkt-ship.sh, lanestat.sh, plan-sweep.sh, ci-friction.sh,
-# git-hook-guard.sh, ci-health.sh.
-PAR_T="$(mktemp -d "${TMPDIR:-/tmp}/test-run-parallel.XXXXXX")"
-trap 'rm -rf "$PAR_T"' EXIT
-run_parallel "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/tkt-plan.sh \
-  "$D"/tkt-fix.sh "$D"/file-claim.sh "$D"/review-pr.sh "$D"/fence-grant.sh \
-  "$D"/tkt-job.sh "$D"/delegate-canary.sh "$D"/tkt-gate.sh "$D"/gh-ci.sh \
-  "$D"/tkt-ship.sh "$D"/lanestat.sh "$D"/plan-sweep.sh "$D"/ci-friction.sh \
-  "$D"/git-hook-guard.sh "$D"/ci-health.sh
-run_serial "$D"/cargo-slot.sh
-_s=$SECONDS
-if deterministic_parallel_failure_case; then
-  echo "PASS: deterministic-parallel-failure ($((SECONDS - _s))s)"
-else
-  echo "FAIL: deterministic-parallel-failure (expected parallel failure not proven, $((SECONDS - _s))s)" >&2
-  failed=1
+run_full_suite() {
+  failed=0
+  run_serial "${SERIAL_BEFORE_PARALLEL[@]}"
+  # Allowlist (exactly these 18 isolated suites run in parallel, at most 3),
+  # longest first by the 2026-11-07 profile; the array is shared with --since.
+  PAR_T="$(mktemp -d "${TMPDIR:-/tmp}/test-run-parallel.XXXXXX")"
+  trap 'rm -rf "$PAR_T"' EXIT
+  run_parallel "${PARALLEL_SUITES[@]}"
+  run_serial "${SERIAL_AFTER_PARALLEL[@]}"
+  _s=$SECONDS
+  if deterministic_parallel_failure_case; then
+    echo "PASS: deterministic-parallel-failure ($((SECONDS - _s))s)"
+  else
+    echo "FAIL: deterministic-parallel-failure (expected parallel failure not proven, $((SECONDS - _s))s)" >&2
+    failed=1
+  fi
+  _s=$SECONDS
+  if deterministic_serial_failure_case; then
+    echo "PASS: deterministic-serial-failure ($((SECONDS - _s))s)"
+  else
+    echo "FAIL: deterministic-serial-failure (expected serial failure not proven, $((SECONDS - _s))s)" >&2
+    failed=1
+  fi
+  echo "test/run wall time: ${SECONDS}s"
+  [ "$failed" = "0" ] || return 1
+  echo "all suites passed"
+}
+
+# Hyphens are part of command names, so tkt-fix must not match tkt-fix-foo.
+is_word_character() {
+  case "$1" in
+    [[:alnum:]_-]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+contains_command_token() {
+  local remaining="$1" needle="$2" prefix tail before after prefix_length
+  while [[ "$remaining" == *"$needle"* ]]; do
+    prefix="${remaining%%"$needle"*}"
+    tail="${remaining#*"$needle"}"
+    prefix_length=${#prefix}
+    before=""
+    after="${tail:0:1}"
+    if [ "$prefix_length" -gt 0 ]; then
+      before="${prefix:$((prefix_length - 1)):1}"
+    fi
+    if ! is_word_character "$before" && ! is_word_character "$after"; then
+      return 0
+    fi
+    remaining="$tail"
+  done
+  return 1
+}
+
+suite_mentions_bin_command() {
+  local suite="$1" path="$2" name="${2#bin/}" line
+  while IFS= read -r line || [ -n "$line" ]; do
+    if contains_command_token "$line" "$path" || contains_command_token "$line" "$name"; then
+      return 0
+    fi
+  done <"$suite"
+  return 1
+}
+
+add_selected_suite() {
+  local candidate="$1" existing
+  for existing in "${selected_suites[@]}"; do
+    [ -n "$existing" ] || continue
+    [ "$existing" != "$candidate" ] || return 0
+  done
+  selected_suites[${#selected_suites[@]}]="$candidate"
+}
+
+run_since() {
+  local since="$1" path relative suite candidate full_reason="" skills_changed=0
+  local diff_output
+  if ! diff_output="$(git -C "$D/.." diff --name-only "$since"..HEAD 2>&1)"; then
+    printf 'test/run: cannot diff %s..HEAD: %s\n' "$since" "$diff_output" >&2
+    return 2
+  fi
+
+  selected_suites=("")
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      bin/lib/*|test/run)
+        [ -n "$full_reason" ] || full_reason="$path"
+        ;;
+      test/*)
+        relative="${path#test/}"
+        case "$relative" in
+          */*) [ -n "$full_reason" ] || full_reason="$path" ;;
+          *.sh)
+            candidate="$D/$relative"
+            [ ! -f "$candidate" ] || add_selected_suite "$candidate"
+            ;;
+          *) [ -n "$full_reason" ] || full_reason="$path" ;;
+        esac
+        ;;
+      bin/*)
+        relative="${path#bin/}"
+        case "$relative" in
+          */*) [ -n "$full_reason" ] || full_reason="$path" ;;
+          *)
+            candidate="$D/$relative.sh"
+            [ ! -f "$candidate" ] || add_selected_suite "$candidate"
+            for suite in "$D"/*.sh; do
+              [ -f "$suite" ] || continue
+              if suite_mentions_bin_command "$suite" "$path"; then
+                add_selected_suite "$suite"
+              fi
+            done
+            ;;
+        esac
+        ;;
+      skills/*) skills_changed=1 ;;
+    esac
+  done <<EOF_PATHS
+$diff_output
+EOF_PATHS
+
+  if [ -n "$full_reason" ]; then
+    printf 'test/run --since %s: selected full suite (%s)\n' "$since" "$full_reason"
+    run_full_suite
+    return $?
+  fi
+
+  for suite in "${selected_suites[@]:1}"; do
+    printf 'test/run --since %s: selected test/%s\n' "$since" "${suite#"$D"/}"
+  done
+  if [ "$skills_changed" -eq 1 ]; then
+    printf 'test/run --since %s: selected bin/check-pack\n' "$since"
+  fi
+  if [ "${#selected_suites[@]}" -eq 1 ] && [ "$skills_changed" -eq 0 ]; then
+    printf 'test/run --since %s: no suites selected\n' "$since"
+    return 0
+  fi
+
+  failed=0
+  if [ "${#selected_suites[@]}" -gt 1 ]; then
+    run_serial "${selected_suites[@]:1}"
+  fi
+  if [ "$skills_changed" -eq 1 ]; then
+    if bash "$D/../bin/check-pack"; then
+      echo 'PASS: check-pack'
+    else
+      local pack_rc=$?
+      echo "FAIL: check-pack (exit $pack_rc)" >&2
+      failed=1
+    fi
+  fi
+  [ "$failed" = "0" ] || return 1
+  echo 'selected suites passed'
+}
+
+if [ "${1:-}" = "--since" ]; then
+  if [ "$#" -ne 2 ] || [ -z "${2:-}" ]; then
+    echo 'usage: test/run --since <sha>' >&2
+    exit 2
+  fi
+  run_since "$2"
+  exit $?
 fi
-_s=$SECONDS
-if deterministic_serial_failure_case; then
-  echo "PASS: deterministic-serial-failure ($((SECONDS - _s))s)"
-else
-  echo "FAIL: deterministic-serial-failure (expected serial failure not proven, $((SECONDS - _s))s)" >&2
-  failed=1
+
+if [ "$#" -ne 0 ]; then
+  echo 'usage: test/run [--since <sha>|--self-test-parallel-failure|--self-test-serial-failure]' >&2
+  exit 2
 fi
-echo "test/run wall time: ${SECONDS}s"
-[ "$failed" = "0" ] || exit 1
-echo "all suites passed"
+
+run_full_suite
+exit $?
