@@ -77,8 +77,9 @@ grep -q 'test: #1609 has no posted plan; a build phase needs one to grant its fe
 if fw_self_grant test 1610 "$FW_RUN" 2>"$T/no-phase.stderr"; then fail "unset phase without plan refuses"; fi
 grep -q 'test: #1610 has no posted plan; a launch with no phase needs one to grant its fence' "$T/no-phase.stderr" || fail "unset phase refusal names a launch with no phase"
 printf 'Grant 1\n\nTicket: 1611\nPart: 1\nPaths:\nRanges: none\n' >"$FW_RUN/fiber-1611-fence-grant-1.md"
+cp "$FW_RUN/fiber-1611-fence-grant-1.md" "$T/grant-1611.before"
 if fw_self_grant test 1611 "$FW_RUN" 1 build 2>"$T/refresh.stderr"; then fail "refresh-empty build without plan refuses"; fi
 [ ! -s "$FG_LOG" ] || fail "refresh refusal does not call fence-grant"
 grep -q 'test: #1611 has no posted plan; a build phase needs one to grant its fence' "$T/refresh.stderr" || fail "refresh refusal explains missing plan"
-[ "$(cat "$FW_RUN/fiber-1611-fence-grant-1.md")" = "$(printf 'Grant 1\n\nTicket: 1611\nPart: 1\nPaths:\nRanges: none')" ] || fail "refresh refusal leaves the existing grant unchanged"
+cmp -s "$T/grant-1611.before" "$FW_RUN/fiber-1611-fence-grant-1.md" || fail "refresh refusal leaves the existing grant unchanged"
 printf 'ok fw-self-grant-whole-file-and-empty\n'
