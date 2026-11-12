@@ -83,6 +83,7 @@ plan_outcome() {
 # fixture, which stay line-level task marks, not Files entry marks: prose
 # after a Files token (such as "reads `other`") never flips the entry.
 _plan_read_mark='\(read\)'
+_plan_new_mark='\(new\)'
 
 # plan_records PLAN [files-entry-flag]: one record per backticked token outside
 # fenced blocks and `## Gate`: section, line, new mark, read mark, token. The
@@ -236,14 +237,20 @@ _plan_files_awk='
     if (t == "") next
     rest = substr($0, RSTART + RLENGTH)
     read = (readsec || tolower(rest) ~ /'"$_plan_read_mark"'/)
+    newmark = (tolower(rest) ~ /'"$_plan_new_mark"'/)
     if (mode == "entries") print t "\t" (read ? "read" : "write")
     else if (mode == "lines") print NR "\t" t
+    else if (mode == "new-conflicts" && read && newmark) print t
+    else if (mode == "new" && newmark && !read) print t
+    else if (mode == "new" || mode == "new-conflicts") next
     else if (mode == "writes" && read) next
     else print t
   }'
 
-# plan_files_pathspecs PLAN [all|writes]: one path per line from the `## Files`
-# entries. Blank tokens are dropped. Ends with awk, so no pipe can fail under pipefail.
+# plan_files_pathspecs PLAN [all|writes|new|lines|new-conflicts]: one path per line
+# from the `## Files` entries. `new` selects marked writes; `new-conflicts`
+# selects paths marked both read and new. Blank tokens are dropped. Ends with
+# awk, so no pipe can fail under pipefail.
 plan_files_pathspecs() { awk -v mode="${2:-all}" "$_plan_files_awk" "$1"; }
 
 # _plan_task_pathspec KIND VALUE: expand_token's callback for task records.
