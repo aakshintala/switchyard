@@ -17,6 +17,7 @@ trap 'rm -rf "$T"' EXIT
 R="$T/repo"
 mkdir -p "$R/src" "$R/docs" "$R/crates/a" "$R/crates/b" "$R/cfg" "$R/xtask/tests/class_data" "$T/empty"
 printf 'pub fn make_widget() {}\npub struct WidgetThing;\n' >"$R/src/lib.rs"
+printf 'pub fn foo() {}\n' >"$R/foo.rs"
 mkdir -p "$R/crates/tui/src"
 printf 'pub fn tui_marker() {}\n' >"$R/crates/tui/src/marker.rs"
 printf '# guide\n' >"$R/docs/guide.md"
@@ -80,25 +81,32 @@ expect_code() {
   [ -z "$out" ] || fail "$name: nothing on stdout"
 }
 
-# 1. a clean plan: resolved paths, a line range, a basename, symbols, a path in Rulings
-clean="$(mkplan clean '## Files\n- `src/lib.rs`\n- `cfg/unique.toml`\n\n## Rulings\nKeep `docs/guide.md` and call `make_widget()` on `WidgetThing`.\n\n## Tasks\n1. Edit `src/lib.rs:1-2` and `unique.toml`.\n')"
+# 1. a clean plan: resolved paths, a basename, symbols, a path in Rulings
+clean="$(mkplan clean '## Files\n- `src/lib.rs`\n- `cfg/unique.toml`\n\n## Rulings\nKeep `docs/guide.md` and call `make_widget()` on `WidgetThing`.\n\n## Tasks\n1. Edit `src/lib.rs` and `unique.toml`.\n')"
 expect_clean "clean plan" "$clean"
 
-# Tasks with a command but no resolvable path warn without changing the exit status.
-expect_task_warning_clean "unresolvable Tasks path warning" "$(mkplan no_task_path '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Sweep with `perl -pi -e '\''s/old/new/'\'' src/lib.rs`.\n')"
+# Line-number citations are unstable; cite source symbols and doc headings instead.
+expect_clean "symbol citation" "$(mkplan symbolcite '## Files\n- `src/lib.rs`\n\n## Rulings\n`src/lib.rs::make_widget()` and `src/lib.rs::WidgetThing`.\n')"
+expect_problems "path line citation rejected" "$(mkplan linecite '## Files\n- `src/lib.rs`\n\n## Rulings\nSee `foo.rs:120`.\n')" \
+  'line-number citation: foo.rs:120 (line 8): cite `path::symbol` or a doc heading'
+expect_problems "prose line citation rejected" "$(mkplan prose_linecite '## Rulings\nThe parser is shown at line 120.\n')" \
+  'line-number citation: line 120 (line 5): cite `path::symbol` or a doc heading'
+expect_clean "line citations inside fenced code are legal" "$(mkplan linecode '## Rulings\n```text\nSee foo.rs:120 and line 120.\n```\n')"
+expect_clean "line citations inside tilde-fenced code are legal" "$(mkplan linetilde '## Rulings\n~~~text\nSee foo.rs:120 and line 120.\n~~~\n')"
+expect_clean "line citations in quoted panic messages are legal" "$(mkplan linepanic '## Rulings\n> panic: foo.rs:120\n> error: line 120\n')"
+expect_clean "inline quoted panic citation is legal" "$(mkplan inlinepanic '## Rulings\nThe exact message was "panic at line 120".\n')"
+expect_problems "quoted error word does not shield a prose citation" "$(mkplan quotedword '## Rulings\nThe word "error" appears before `src/lib.rs:120`.\n')" \
+  'line-number citation: src/lib.rs:120 (line 5): cite `path::symbol` or a doc heading'
 
-# Citations check the symbol at the base, including a single line and a range.
-expect_clean "symbol at cited line" "$(mkplan citeok '## Files\n- `src/lib.rs`\n\n## Rulings\n`make_widget()` at `src/lib.rs:1`.\n`src/lib.rs:1-2` holds `WidgetThing`.\n')"
-expect_problems "citation refusal names the nearer paired symbol" "$(mkplan nearestbad '## Rulings\n`make_widget()` at `src/lib.rs:2` then `WidgetThing`.\n')" \
-  'missing symbol: src/lib.rs:2 does not contain make_widget(): correct the citation (plan line 5 pairs it with the nearest backticked name, make_widget(), which must appear in line 2 at the base; fix the line range, put the intended symbol next to the citation, or cite src/lib.rs::make_widget() to check the whole file)'
-expect_problems "symbol absent from cited line" "$(mkplan citebad '## Rulings\n`make_widget()` at `src/lib.rs:2`.\n')" \
-  'missing symbol: src/lib.rs:2 does not contain make_widget(): correct the citation (plan line 5 pairs it with the nearest backticked name, make_widget(), which must appear in line 2 at the base; fix the line range, put the intended symbol next to the citation, or cite src/lib.rs::make_widget() to check the whole file)'
-expect_problems "symbol absent from cited range" "$(mkplan rangebad '## Rulings\n`src/lib.rs:1-2` holds `MissingThing`.\n')" \
-  'missing symbol: src/lib.rs:1-2 does not contain MissingThing: correct the citation (plan line 5 pairs it with the nearest backticked name, MissingThing, which must appear in lines 1-2 at the base; fix the line range, put the intended symbol next to the citation, or cite src/lib.rs::MissingThing to check the whole file)'
+# Unresolved symbols have a section separate from ordinary plan findings.
+run "$(mkplan unresolved '## Rulings\nSee `src/lib.rs::NoSuch`.\n')" --cwd "$R"
+[ "$code" = 1 ] || fail "unresolved symbol exits 1, got $code"
+case "$out" in *"Unresolved symbols:"*"missing symbol: src/lib.rs::NoSuch"*) ;; *) fail "unresolved symbol has its own output section: [$out]" ;; esac
+case "$out" in *"Findings:"*) fail "unresolved symbol is not mixed into findings: [$out]" ;; esac
 
-expect_clean "two adjacent citation pairs" "$(mkplan citepairs '## Rulings\n`make_widget()` at `src/lib.rs:1` and `WidgetThing` at `src/lib.rs:2`.\n')"
+expect_clean "two adjacent symbol citations" "$(mkplan citepairs '## Rulings\n`src/lib.rs::make_widget()` and `src/lib.rs::WidgetThing`.\n')"
 printf 'changed working tree\n' >"$R/src/lib.rs"
-expect_clean "citations read the base" "$(mkplan citebase '## Rulings\n`make_widget()` at `src/lib.rs:1`.\n')"
+expect_clean "citations read the base" "$(mkplan citebase '## Rulings\n`src/lib.rs::make_widget()`.\n')"
 git -C "$R" checkout -q -- src/lib.rs
 
 # Quoted doc sections must be actual headings, not just text in the file.
@@ -134,7 +142,7 @@ printf '# Plan: #1 test\nBase: %s\n\n## Files\n- `Makefile`\n' "$BASE1" >"$make_
 expect_problems "missing Makefile Files entry" "$make_absent" 'missing path: Makefile (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 expect_problems "new symbol-shaped Files entry needs a path" "$(mkplan newfeed '## Files\n- `feed_row` (new)\n')" 'new Files entry feed_row must contain a slash or dot and cannot start with ./: give the full path'
 expect_problems "new Files entry rejects a dot-slash path" "$(mkplan newdot '## Files\n- `./feed_row.rs` (new)\n')" 'new Files entry ./feed_row.rs must contain a slash or dot and cannot start with ./: give the full path'
-expect_clean "new root Files path with extension passes" "$(mkplan newroot '## Files\n- `foo.rs` (new)\n')"
+expect_clean "new root Files path with extension passes" "$(mkplan newroot '## Files\n- `bar.rs` (new)\n')"
 expect_clean "new Files path with a base parent resolves" "$(mkplan newpath '## Files\n- `crates/tui/src/feed_row.rs` (new)\n')"
 expect_problems "new Files path needs a parent on the base" "$(mkplan newparent '## Files\n- `crates/tui/src/nosuchdir/x.rs` (new)\n')" 'new Files entry crates/tui/src/nosuchdir/x.rs needs a parent directory on the base: give the full path, or, for a file in a new directory, mark it (new-confirmed)'
 make_confirmed="$T/make-confirmed.md"
@@ -194,8 +202,8 @@ expect_problems "red commit outside Files" "$(mkplan red '## Files\n- `src/lib.r
   'outside Files: docs/guide.md (line 8): add it to Files, or mark the line (reads) if the task only reads it'
 
 # 8. the same token printed once, on its first line
-expect_problems "problem printed once per token" "$(mkplan once '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `docs/guide.md:3`.\n2. Edit `docs/guide.md`.\n')" \
-  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line (reads) if the task only reads it'
+expect_problems "problem printed once per path, plus line-citation finding" "$(mkplan once '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `docs/guide.md:3`.\n2. Edit `docs/guide.md`.\n')" \
+  'outside Files: docs/guide.md (line 8): add it to Files, or mark the line (reads) if the task only reads it\nline-number citation: docs/guide.md:3 (line 8): cite `path::symbol` or a doc heading'
 
 # 9. fenced blocks and the Gate section are skipped
 expect_clean "fence and Gate skipped" "$(mkplan skip '## Files\n- `src/lib.rs`\n\n## Rulings\n```\nsee `src/gone.rs` and `src/gone2.rs`\n```\n\n## Gate\n`src/gone.rs`\n')"
@@ -231,7 +239,7 @@ expect_problems "braces: an alternative outside Files" "$(mkplan bouts '## Files
 # 11d. path::symbol checks both halves.
 expect_clean "path::symbol exists" "$(mkplan splitok '## Rulings\n`src/lib.rs::make_widget`.\n')"
 expect_problems "path::symbol missing" "$(mkplan split1 '## Rulings\n`src/lib.rs::NoSuch`.\n')" \
-  'missing symbol: src/lib.rs::NoSuch does not contain NoSuch: correct the citation (the symbol must appear somewhere in src/lib.rs at the base)'
+  'Unresolved symbols:\nmissing symbol: src/lib.rs::NoSuch does not contain NoSuch (plan line 5): correct the citation (the symbol must appear somewhere in src/lib.rs at the base)'
 expect_problems "path::symbol: missing path" "$(mkplan split2 '## Rulings\n`src/nope.rs::make_widget`.\n')" \
   'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
@@ -264,11 +272,13 @@ expect_clean "camelCase and test names in prose pass" "$(mkplan prose101 '## Fil
 expect_problems "a bad path in Files still fails" "$(mkplan prose10b '## Files\n- `src/lib.rs`\n- `src/nope.rs`\n\n## Rulings\nCall `parseHeader` with `test_handles_empty_files` on `Shape::Round`.\n')" \
   'missing path: src/nope.rs (line 6): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
 
-# 11j. line lists: a comma list of numbers and ranges is lines of the file (see #462)
-expect_clean "comma list on a Files path" "$(mkplan linelist '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1,2`.\n')"
-expect_clean "mixed range and number list on a Files path" "$(mkplan linemix '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1-2,5`.\n')"
-expect_problems "comma list on a missing path names the path" "$(mkplan linemissing '## Rulings\nSee `src/nope.rs:1,2`.\n')" \
-  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it'
+# 11j. numbered file citations are rejected in prose, including comma lists.
+expect_problems "comma list citation is rejected" "$(mkplan linelist '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1,2`.\n')" \
+  'line-number citation: src/lib.rs:1,2 (line 8): cite `path::symbol` or a doc heading'
+expect_problems "mixed range and number citation is rejected" "$(mkplan linemix '## Files\n- `src/lib.rs`\n\n## Tasks\n1. Edit `src/lib.rs:1-2,5`.\n')" \
+  'line-number citation: src/lib.rs:1-2,5 (line 8): cite `path::symbol` or a doc heading'
+expect_problems "comma list citation on a missing path reports both findings" "$(mkplan linemissing '## Rulings\nSee `src/nope.rs:1,2`.\n')" \
+  'missing path: src/nope.rs (line 5): does not exist on the base; correct the path, or mark the line (new) if the plan creates it, or (removed) if it deletes it\nline-number citation: src/nope.rs:1,2 (line 5): cite `path::symbol` or a doc heading'
 
 # 11k. Files directory and glob entries cover task paths (see #462)
 expect_clean "Files directory covers a task path under it" "$(mkplan dircover '## Files\n- `src/`\n\n## Tasks\n1. Edit `src/lib.rs`.\n')"
