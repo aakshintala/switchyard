@@ -95,8 +95,21 @@ cat >"$T/stub/noop" <<'EOF'
 exit 0
 EOF
 chmod +x "$T/stub/"*
+cat >"$T/stub/gh-self-grant" <<'GH'
+#!/usr/bin/env bash
+cat "$SELF_GRANT_PLAN"
+GH
+cat >"$T/stub/fence-grant-self" <<'FG'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SELF_GRANT_LOG"
+ticket=$1
+mkdir -p "$FW_RUN"
+printf 'Grant\n\nTicket: %s\nPaths:\nRanges: none\n' "$ticket" >"$FW_RUN/fiber-$ticket-fence-grant-self.md"
+FG
+chmod +x "$T/stub/gh-self-grant" "$T/stub/fence-grant-self"
 
 export STUBD=$T BOX_AGENTS="$T/box-agents.json" MAC_AGENTS="$T/mac-agents.json"
+export SELF_GRANT_PLAN="$T/self-grant-plan.md" SELF_GRANT_LOG="$T/self-grant.log"
 export TEST_LANECHECK="$BIN/lanecheck"
 export DELEGATE_JSON="$T/delegate.json" STOP_LOG="$T/stops.log" LAUNCH_LOG="$T/launches.log"
 export LANECHECK_DONE_LOG="$T/lanecheck-done.log"
@@ -125,7 +138,9 @@ launch_box() {
     FW_MAC_HOME="$T/mac-home" FW_BOX_HOST=fixture FW_LOCAL_BOX=0 \
     BOX_SSH="$T/stub/ssh" FW_AGENTS_FF="$T/stub/noop" \
     FW_BOXSTALE="$T/stub/noop" FW_BOX_LANECHECK="$T/stub/lanecheck" \
-    FW_BOX_LANES="${FW_TEST_BOX_LANES:-12}" \
+    FW_BOX_LANES="${FW_TEST_BOX_LANES:-12}" FW_GH="$T/stub/gh-self-grant" \
+    FW_FENCE_GRANT="$T/stub/fence-grant-self" SELF_GRANT_LOG="$SELF_GRANT_LOG" \
+    SELF_GRANT_PLAN="$SELF_GRANT_PLAN" \
     FW_NO_FENCE='fixture has no production fence' FW_NO_TMP_REAP="${FW_TEST_NO_TMP_REAP:-1}" NEWDISK=1 \
     bash "$BIN/boxlaunch.sh" 2465 sonnet "$phase"
 }
@@ -161,6 +176,21 @@ if cmp -s "$run/roster" "$boxrun/roster"; then
 else
   fail "roster-synced-to-box-run ($(cat "$boxrun/roster" 2>/dev/null))"
 fi
+
+# A plan-phase launch with no earlier grant records an empty grant before dispatch.
+saved_run=$run saved_boxrun=$boxrun saved_boxhome=$boxhome
+prepare_run plan-self-grant
+rm "$run/fiber-2465-fence-grant-fixture.md"
+: >"$SELF_GRANT_PLAN"
+: >"$SELF_GRANT_LOG"
+printf '[]\n' >"$BOX_AGENTS"
+if launch_box phase-plan >"$T/plan-self-grant-launch.out" 2>&1; then :; else
+  fail "plan phase self-grants before launch ($(cat "$T/plan-self-grant-launch.out"))"
+fi
+[ -f "$run/fiber-2465-fence-grant-self.md" ] || fail "plan phase writes a grant file"
+grep -q '^2465 --empty$' "$SELF_GRANT_LOG" || fail "plan phase records an empty grant when no plan is posted"
+grep -q '^Paths:$' "$run/fiber-2465-fence-grant-self.md" || fail "plan phase empty grant has a Paths block"
+run=$saved_run boxrun=$saved_boxrun boxhome=$saved_boxhome
 
 printf '[{"id":"%s","name":"%s","state":"done","status":"idle"}]\n' "$NEW_SESSION_ID" "$session" >"$BOX_AGENTS"
 out=$(HOME="$T/mac-home" PATH="$T/stub:$PATH" FW_RUN="$run" FW_SKIP_SAMPLER_CHECK=1 \

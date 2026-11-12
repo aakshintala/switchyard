@@ -404,7 +404,7 @@ assert_no_ticket_state_probe() {
 assert_usage() {
   assert_rc 2 "$1"
   assert_out '' "$1 stdout"
-  assert_stderr "$(printf 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship\n       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive')" "$1 usage"
+  assert_stderr "$(printf 'usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--empty] [--dry] | --require <ticket> --phase plan|build|ship\n       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive')" "$1 usage"
   assert_no_probes "$1"
   assert_no_grant "$1"
 }
@@ -1445,7 +1445,7 @@ assert_not_contains 'NOSYMBOL' 'valid expect accepted'
 assert_line 'OVERLAP docs/tui.md PR #11' 'valid expect overlap'
 
 # --- Exit 2: bad arguments -----------------------------------------------------
-USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship
+USAGE='usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--empty] [--dry] | --require <ticket> --phase plan|build|ship
        non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive'
 reset_case
 run_fg
@@ -2300,5 +2300,14 @@ chmod +x "$HOST_BIN"/* "$DEFAULT_HOME/.local/bin/delegate"
   grep -qF "matching $DEFAULT_RUN/fiber-9876*-fence-grant*.md" "$T/default-run.err" \
     || fail 'FW_RUN defaults under fake HOME'
 ) || exit 1
+
+# Empty self-grants keep the standard file layout and satisfy phase checks.
+FW_RUN="$T/run" bash "$FG" 9876 --empty >"$T/empty.out" 2>"$T/empty.err"
+empty_grant="$T/run/fiber-9876-fence-grant-1.md"
+[ -f "$empty_grant" ] || fail 'empty grant writer creates the standard grant file'
+grep -q '^Paths:$' "$empty_grant" || fail 'empty grant has a Paths block'
+grep -q '^Ranges: none$' "$empty_grant" || fail 'empty grant has a Ranges line'
+FW_RUN="$T/run" bash "$FG" --require 9876 --phase build >/dev/null 2>&1 \
+  || fail 'empty grant satisfies the build-phase require check'
 
 printf 'fence-grant tests passed\n'

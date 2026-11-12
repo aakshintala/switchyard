@@ -32,6 +32,35 @@ ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
 ln -s "$REAL_BIN/fence-grant" "$T/bin/fence-grant" || fail "symlink fence-grant"
 ln -s "$REAL_BIN/fence-grant" "$T/home/.agents/bin/fence-grant" || fail "symlink default fence-grant"
+cat >"$T/bin/gh-self-grant" <<'GH'
+#!/usr/bin/env bash
+cat "$SELF_GRANT_PLAN"
+GH
+cat >"$T/bin/fence-grant-self" <<'FG'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SELF_GRANT_LOG"
+ticket=$1
+empty=0
+dry=0
+paths=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --empty) empty=1; shift;;
+    --dry) dry=1; shift;;
+    --paths) paths=$2; shift 2;;
+    *) shift;;
+  esac
+done
+[ "$dry" -eq 1 ] && exit 0
+mkdir -p "$FW_RUN"
+if [ "$empty" -eq 1 ]; then
+  printf 'Grant\n\nTicket: %s\nPaths:\nRanges: none\n' "$ticket" >"$FW_RUN/fiber-$ticket-fence-grant-self.md"
+else
+  printf 'Grant\n\nTicket: %s\nPaths:\n- %s\nRanges: none\n' "$ticket" "$paths" >"$FW_RUN/fiber-$ticket-fence-grant-self.md"
+fi
+FG
+chmod +x "$T/bin/gh-self-grant" "$T/bin/fence-grant-self"
+export SELF_GRANT_PLAN="$T/self-grant-plan.md" SELF_GRANT_LOG="$T/self-grant.log"
 unset FW_NO_FENCE TKT_LAUNCH_GUARD
 
 # Stub delegate: run/resume print a fresh job id and log the call; watch copies
@@ -254,15 +283,29 @@ printf 'extra words here\n' >"$T/extra.md"
 printf 'do the thing\n' >"$T/brief.md"
 printf 'resume prompt\n' >"$T/resume-prompt.md"
 
-# --- build slots require a fence grant; non-writing slots do not ------------
+# --- a build slot self-grants from the posted plan when no grant exists ------
 setup_case fence-required
 rm "$CDIR/run/fiber-502-fence-grant-test.md"
+cat >"$SELF_GRANT_PLAN" <<'PLAN'
+## Files
+
+- `src/tkt-job.c`
+
+## Gate
+
+`true`
+PLAN
+: >"$SELF_GRANT_LOG"
 reset_stub
 make_record stub-1 DONE none 0 1 0
-run_job --slot lane --template "$T/tmpl-basic.md"
-[ "$RC" -eq 2 ] || fail "lane without a fence grant exits 2 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-grep -q 'needs a fence grant' "$CDIR/stderr.txt" || fail "missing grant names the fence fix: $(cat "$CDIR/stderr.txt")"
-[ -z "$(cat "$T/stub.log")" ] || fail "lane without a fence grant never dispatches"
+FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
+  run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "lane without a prior grant self-grants (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -q '^run|' "$T/stub.log" || fail "self-granted lane dispatches"
+[ -f "$CDIR/run/fiber-502-fence-grant-self.md" ] || fail "self-granted lane writes a grant file"
+grep -q '^502 --repo [^ ]* --paths src/tkt-job.c --dry$' "$SELF_GRANT_LOG" || fail "self-grant probes the plan path"
+grep -q '^502 --repo [^ ]* --paths src/tkt-job.c$' "$SELF_GRANT_LOG" || fail "self-grant grants path without line ranges"
+! grep -q -- '--ranges' "$SELF_GRANT_LOG" || fail "self-grant does not require line ranges"
 
 setup_case fence-granted
 reset_stub

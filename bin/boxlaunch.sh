@@ -92,32 +92,21 @@ if [ "${FW_NO_TMP_REAP:-0}" != 1 ]; then
       sed 's/^/boxlaunch: tmp reap: /' >&2
   ) </dev/null &
 fi
-# A fence is granted when fence-grant has written the grant file, not when the
-# ruling prose says so. 2026-11-05: #4174, #4190 and #4142 were launched off
-# `fence-grant --dry` probes, which write no grant file and record no claim, so
-# for an hour the fence system held no record of three live lanes and cleared
-# docs/model-routing.md for a fourth while #4190 was working in it. A dry probe
-# is a question, never an answer.
-# This stays a local guard rather than a call to `fence-grant --require`
-# (switchyard#1254): --require exempts a plan phase, and fiber grants the fence
-# before the planning lane launches, so eleven of twelve live lanes on
-# 2026-11-06 were plan lanes whose record this guard is the only thing keeping.
-# switchyard#1264 asks for a flag that requires it at every phase.
-# FW_NO_FENCE=<reason> for a ticket that genuinely holds no path.
+# Self-grant from the posted plan in every phase. A plan without write paths
+# records an empty Paths block, so it still has a host-local grant file; a
+# build without an earlier planning launch grants its own write fence too.
+# FW_NO_FENCE remains an explicit override for a ticket that truly holds no path.
 set +f
 fgrants=("$run"/fiber-"$n"-fence-grant*.md)
 set -f
 if [ ! -e "${fgrants[0]}" ]; then
-  # A build whose plan is posted grants its own fence from that plan's Files
-  # list (fw_self_grant in fw-lib.sh); a plan or ship phase still refuses.
-  if [ "${ph:-}" = phase-build ] && fw_self_grant boxlaunch "$n" "$run"; then
+  if fw_self_grant boxlaunch "$n" "$run"; then
     :
   elif [ -n "${FW_NO_FENCE:-}" ]; then
     echo "boxlaunch: no fence grant for #$n, launching anyway: $FW_NO_FENCE" >&2
   else
-    echo "boxlaunch: no $run/fiber-$n-fence-grant*.md -- the fence was never recorded." >&2
-    echo "  Run fence-grant without --dry (it writes the file and claims the paths), or" >&2
-    echo "  pass FW_NO_FENCE='<why this ticket holds no path>'." >&2
+    echo "boxlaunch: no $run/fiber-$n-fence-grant*.md -- self-grant from the posted plan failed." >&2
+    echo "  Post a plan with its Files paths, or pass FW_NO_FENCE='<why this ticket holds no path>'." >&2
     exit 2
   fi
 fi

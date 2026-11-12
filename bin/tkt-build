@@ -46,6 +46,10 @@ verdict_lib="$script_dir/lib/plan-verdict.sh"
 if [ ! -r "$verdict_lib" ]; then echo "tkt-build: cannot read shared lib: $verdict_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$verdict_lib"
+claim_lib="$script_dir/lib/tkt-claims.sh"
+if [ ! -r "$claim_lib" ]; then echo "tkt-build: cannot read shared lib: $claim_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$claim_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"
 quota_bin="$bin_dir/quota"; models_file="$script_dir/../delegate/config/models.json"
@@ -425,6 +429,7 @@ $(cat "$tmpd/merge-abort-err" 2>/dev/null || true)"
         emit "STALE n=$n base=$base" 1 "$stat_out" "$(cat "$tmpd/push-err" 2>/dev/null || true)" "$recover"
       fi
       journal_build "tkt-build stale recovery push origin $branch"
+      tkt_claim_pushed_hunks "$issue" "$worktree" "$repo"
 
       if ! write_plan_base "$plan" "$newbase"; then
         journal_build "tkt-build stale recovery plan-base-failed base=$newbase"

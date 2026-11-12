@@ -117,6 +117,9 @@ if [ ! -r "$lane_ticket_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$lane_ticket_lib"
+fw_lib="$script_dir/lib/fw-lib.sh"
+if [ ! -r "$fw_lib" ]; then echo "tkt-job: cannot read shared lib: $fw_lib" >&2; exit 2; fi
+. "$fw_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 if [ -n "${TKT_BIN:-}" ]; then delegate="$TKT_BIN/delegate"; else delegate=delegate; fi
 fillbrief="$bin_dir/fill-brief"
@@ -171,12 +174,24 @@ run="$(tkt get run)"
 worktree="$(tkt get worktree)"
 mkdir -p "$run"
 
-# Writing slots build the ticket and therefore need a fence. Other slots are
-# plan work. A configured launch guard runs for either phase before dispatch.
+# Writing slots need a fence. If no prior phase wrote one, record it from the
+# posted plan now; a missing plan produces an empty grant instead of blocking
+# a build that has no declared write paths. Keep --require as the final check
+# and explicit FW_NO_FENCE override.
 phase=plan
+grant_found=0
 case "$slot" in
   lane|fix[0-9]*)
     phase=build
+    for grant in "$run"/fiber-"$issue"*-fence-grant*.md; do
+      [ -f "$grant" ] && { grant_found=1; break; }
+    done
+    if [ "$grant_found" -eq 0 ] && [ -z "${FW_NO_FENCE:-}" ]; then
+      fw_self_grant tkt-job "$issue" "$run" || {
+        echo "tkt-job: could not self-grant a fence for #$issue" >&2
+        exit 2
+      }
+    fi
     FW_RUN="$run" "$bin_dir/fence-grant" --require "$issue" --phase "$phase" >&2
     ;;
 esac

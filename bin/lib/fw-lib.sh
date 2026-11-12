@@ -418,24 +418,26 @@ fw_is_liveness() {
 }
 
 # fw_self_grant <launcher> <n> <run>: record the fence from the ticket's posted
-# plan, so a settled plan never waits on the flywheel to type it in (owner,
-# 2026-11-07: "build the launcher self-grant"). Reads the last comment carrying
-# a `## Files` section; a bullet that opens with a backticked path is a write,
-# unless it is marked `(read)` or sits under a "Reads" line, which go to
-# --reads. Ranges are not parsed, so writes are granted whole. Returns 1 --
-# and the launcher refuses as before -- when there is no plan, no write path,
-# fence-grant refuses, or no grant file appears in <run>.
+# plan for every phase. Reads the last comment carrying a `## Files` section;
+# a bullet that opens with a backticked path is a write, unless it is marked
+# `(read)` or sits under a "Reads" line, which go to --reads. Optional path
+# ranges narrow a grant; without them each write is a whole-file claim until
+# push-time hunks arrive. If no posted write plan exists, record an empty grant.
+# Returns 1 when GitHub/fence-grant fails or no grant file appears in <run>.
 # FW_GH and FW_FENCE_GRANT override gh and fence-grant (tests).
 fw_self_grant() {
-  local who=$1 n=$2 run=$3 body lists w r rg fg
+  local who=$1 n=$2 run=$3 body lists w r rg fg nw g found
+  local -a a=()
   fg=${FW_FENCE_GRANT:-$_FW_LIB_DIR/fence-grant}
   _fw_grant_ssh=${FW_SSH:-}
   if [ -z "$_fw_grant_ssh" ] && [ "$(uname -s)" != Darwin ]; then
     _fw_grant_ssh=${FW_BOX_LOCAL:-$_FW_LIB_DIR/box-local.sh}
   fi
   body=$("${FW_GH:-gh}" api "repos/aakshintala/fiber/issues/$n/comments?per_page=100" \
-    --jq '[.[]|select(.body|test("(?im)^#+ *files"))]|last|.body // ""' 2>/dev/null) || return 1
-  [ -n "$body" ] || { echo "$who: #$n has no posted plan with a Files section" >&2; return 1; }
+    --jq '[.[]|select(.body|test("(?im)^#+ *files"))]|last|.body // ""' 2>/dev/null) || {
+      echo "$who: cannot read the posted plan for #$n" >&2
+      return 1
+    }
   lists=$(printf '%s\n' "$body" | python3 -c 'import re,sys
 w=[];r=[];rg=[];on=False;reads=False
 for line in sys.stdin:
@@ -460,10 +462,24 @@ for line in sys.stdin:
 print(",".join(w)); print(",".join(r)); print(",".join(rg))') || return 1
   w=$(printf '%s\n' "$lists" | sed -n 1p); r=$(printf '%s\n' "$lists" | sed -n 2p)
   rg=$(printf '%s\n' "$lists" | sed -n 3p)
-  [ -n "$w" ] || { echo "$who: #$n's plan Files section names no write path" >&2; return 1; }
+  if [ -z "$w" ]; then
+    if [ -z "$body" ]; then
+      echo "$who: #$n has no posted plan; recording an empty grant" >&2
+    else
+      echo "$who: #$n's plan has no write path; recording an empty grant" >&2
+    fi
+    a=(--empty)
+    [ -n "$r" ] && a+=(--reads "$r")
+    FW_SSH="$_fw_grant_ssh" FW_RUN=$run bash "$fg" "$n" "${a[@]}" >&2 || return 1
+    found=0
+    set +f
+    for g in "$run"/fiber-"$n"-fence-grant*.md; do [ -f "$g" ] && { found=1; break; }; done
+    set -f
+    [ "$found" -eq 1 ] || { echo "$who: fence-grant ran but wrote no grant file in $run" >&2; return 1; }
+    return 0
+  fi
   # A path the plan creates is not on main yet, and fence-grant wants it under
   # --new as well as --paths: ask a --dry probe, which names each one MISSING.
-  local nw a
   nw=$(FW_SSH="$_fw_grant_ssh" FW_RUN=$run bash "$fg" "$n" --repo aakshintala/fiber --paths "$w" --dry 2>&1 \
     | sed -n 's/^MISSING //p' | paste -sd, -)
   echo "$who: no fence grant for #$n; granting from the posted plan: $w${nw:+ (new: $nw)}${rg:+ (ranges: $rg)}" >&2
@@ -472,6 +488,9 @@ print(",".join(w)); print(",".join(r)); print(",".join(rg))') || return 1
   [ -n "$rg" ] && a+=(--ranges "$rg")
   [ -n "$r" ] && a+=(--reads "$r")
   FW_SSH="$_fw_grant_ssh" FW_RUN=$run bash "$fg" "$n" --repo aakshintala/fiber "${a[@]}" >&2 || return 1
-  set +f; local g=("$run"/fiber-"$n"-fence-grant*.md); set -f
-  [ -e "${g[0]}" ] || { echo "$who: fence-grant ran but wrote no grant file in $run" >&2; return 1; }
+  found=0
+  set +f
+  for g in "$run"/fiber-"$n"-fence-grant*.md; do [ -f "$g" ] && { found=1; break; }; done
+  set -f
+  [ "$found" -eq 1 ] || { echo "$who: fence-grant ran but wrote no grant file in $run" >&2; return 1; }
 }
