@@ -443,7 +443,8 @@ grep -Fq 'No fence was recorded for this ticket.' "$T/state/prompt-spec.md" || f
 grep -Fq '.review-context/issue-1.md' "$T/state/prompt-standards.md" || fail "standards brief names ticket text"
 grep -Fq '.review-context/issue-1.md' "$T/state/prompt-spec.md" || fail "spec brief names ticket text"
 grep -Fq 'A finding about code outside this fence' "$T/state/prompt-standards.md" || fail "standards brief sets the fence finding severity"
-grep -Fq 'A finding about code outside this fence' "$T/state/prompt-spec.md" || fail "spec brief sets the fence finding severity"
+grep -Fq 'A scope-creep finding about an outside-plan file is P2.' "$T/state/prompt-spec.md" || fail "spec brief sets scope-creep severity to P2"
+grep -Fq 'Other findings about code outside this fence' "$T/state/prompt-spec.md" || fail "spec brief keeps other outside-fence findings at P3"
 grep -q '__[A-Z]' "$T/state/prompt-standards.md" && fail "standards brief has no placeholders left"
 grep -q '__[A-Z]' "$T/state/prompt-spec.md" && fail "spec brief has no placeholders left"
 grep -q '__[A-Z]' "$T/state/prompt-overbuild.md" && fail "overbuild brief has no placeholders left"
@@ -517,7 +518,7 @@ write_record spec DONE "VERDICT spec: APPROVE
 STATUS: DONE" 0
 write_record overbuild DONE "VERDICT: APPROVE
 STATUS: DONE" 0
-printf 'fence=bin/review-pr\nfence=test/review-pr.sh\n' >"$T/review-state"
+printf 'fence=bin/review-pr\nfence=test/review-pr.sh\noutside_plan=src/outside-a.rs\noutside_plan=src/outside-b.rs\n' >"$T/review-state"
 start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --issue 3 --spec 2 \
   --state "$T/review-state" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "prefetch review start exits 0"
 for role in standards spec overbuild; do
@@ -530,7 +531,11 @@ done
 for role in standards spec; do
   grep -Fq -- '- bin/review-pr' "$T/state/prompt-$role.md" || fail "$role brief fills the first fence path"
   grep -Fq -- '- test/review-pr.sh' "$T/state/prompt-$role.md" || fail "$role brief fills the second fence path"
-  grep -Fq 'A finding about code outside this fence' "$T/state/prompt-$role.md" || fail "$role brief carries the fence ruling rule"
+  if [ "$role" = standards ]; then
+    grep -Fq 'A finding about code outside this fence' "$T/state/prompt-$role.md" || fail "standards brief carries the fence ruling rule"
+  else
+    grep -Fq 'A scope-creep finding about an outside-plan file is P2.' "$T/state/prompt-$role.md" || fail "spec brief carries the P2 outside-plan scope-creep rule"
+  fi
 done
 for n in 1 3 2; do
   issue_file="$(worktree_for standards)/.review-context/issue-$n.md"
@@ -546,6 +551,10 @@ for n in 1 3 2; do
   cmp -s "$T/expected-issue.md" "$issue_file" || fail "ticket #$n body precedes its comments"
   grep -Fq ".review-context/issue-$n.md" "$T/state/prompt-spec.md" || fail "spec prompt names ticket #$n file"
 done
+grep -Fq -- '- src/outside-a.rs' "$T/state/prompt-spec.md" || fail "spec brief carries the first outside-plan path"
+grep -Fq -- '- src/outside-b.rs' "$T/state/prompt-spec.md" || fail "spec brief carries the second outside-plan path"
+grep -Fq 'Check each outside-plan file against the ticket: needed, or scope creep?' \
+  "$T/state/prompt-spec.md" || fail "spec brief asks whether each outside-plan file was needed"
 for n in 1 3 2; do
   issue_file="$(worktree_for overbuild)/.review-context/issue-$n.md"
   [ -f "$issue_file" ] || fail "overbuild worktree holds ticket #$n text"

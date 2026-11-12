@@ -8,9 +8,11 @@
 # line when present; it then shares the normal head update and PASS path.
 # For takeovers, the gate comes from state key `gate` when the plan value is
 # `takeover <ref>`, and the file fence comes from the state's `fence` list.
-# An uncovered path still passes when it exists on origin/main and the branch
-# only adds lines to it (no deleted line, not binary), so additive edits at
-# registration points stay open; only rewritten and new paths are fenced.
+# Files and the state's fence cover changed paths except new Cargo dependencies.
+# Those pass only when the manifest is covered and each new name appears in
+# backticks in Files or Tasks. For uncovered paths, docs, workflows and
+# scripts/check stop even when additive; other existing files that only gain
+# lines pass, and remaining paths are reported outside the plan.
 # Every state read and write goes through tkt-state. The Files cover rule is
 # covered() from lib/plan-tokens.sh; the gate script writer is
 # write_gate_script() from lib/gate-script.sh. Neither is copied here.
@@ -256,7 +258,12 @@ emit() {
   logpath="$(mktemp "$run/$namebase-tkt-gate-$twelve-XXXXXX")"
   mv "$logpath" "$logpath.log"
   logpath="$logpath.log"
-  output="TKT tkt-gate $verdict log=$logpath
+  output="TKT tkt-gate $verdict log=$logpath"
+  if [ -n "${outside_report:-}" ]; then
+    output="$output
+$outside_report"
+  fi
+  output="$output
 $digest"
   printf '%s\n' "$output" >"$logpath"
   if [ -n "$hist" ]; then
@@ -373,8 +380,8 @@ if [ -n "$tip_detail" ]; then
   emit "TIP $tip_detail" 1
 fi
 
-# Fence: every changed path is covered by Files or the fence list. Renamed
-# files stay under their old path, so a cover on the old name still holds.
+# Coverage: every changed path is checked against Files or the fence list.
+# Renamed files stay under their old path, so a cover on the old name still holds.
 FILES="|"
 GLOBS=""
 collect_fence() {
@@ -448,33 +455,147 @@ additive_only() {
   esac
   return 1
 }
+cargo_dependency_names() {
+  awk '
+    function clean_key(key, quote) {
+      sub(/^[[:space:]]*/, "", key)
+      sub(/[[:space:]]*$/, "", key)
+      if (substr(key, 1, 1) == "\"" || substr(key, 1, 1) == "\047") {
+        quote = substr(key, 1, 1)
+        if (substr(key, length(key), 1) == quote) key = substr(key, 2, length(key) - 2)
+      }
+      return key
+    }
+    function emit_dependency(kind, key) {
+      key = clean_key(key)
+      if (key != "") print kind "\t" key
+    }
+    function parse_table(header,    i, kind, prefix, marker, from, at, pos, rest) {
+      section = ""
+      for (i = 1; i <= 3; i++) {
+        kind = (i == 1 ? "dependencies" : i == 2 ? "dev-dependencies" : "build-dependencies")
+        if (header == kind) { section = kind; return }
+        prefix = kind "."
+        if (index(header, prefix) == 1) {
+          emit_dependency(kind, substr(header, length(prefix) + 1))
+          return
+        }
+      }
+      if (header == "workspace.dependencies") { section = header; return }
+      prefix = "workspace.dependencies."
+      if (index(header, prefix) == 1) {
+        emit_dependency("workspace.dependencies", substr(header, length(prefix) + 1))
+        return
+      }
+      if (header !~ /^target\./) return
+      for (i = 1; i <= 3; i++) {
+        kind = (i == 1 ? "dependencies" : i == 2 ? "dev-dependencies" : "build-dependencies")
+        marker = "." kind
+        pos = 0
+        from = 1
+        while (from <= length(header)) {
+          at = index(substr(header, from), marker)
+          if (!at) break
+          pos = from + at - 1
+          from = pos + length(marker)
+        }
+        if (!pos || substr(header, 1, pos - 1) !~ /^target\./) continue
+        rest = substr(header, pos + length(marker))
+        if (rest == "") { section = kind; return }
+        if (substr(rest, 1, 1) == ".") {
+          emit_dependency(kind, substr(rest, 2))
+          return
+        }
+      }
+    }
+    /^[[:space:]]*\[/ {
+      header = $0
+      sub(/^[[:space:]]*\[/, "", header)
+      sub(/\][[:space:]]*(#.*)?$/, "", header)
+      parse_table(header)
+      next
+    }
+    section != "" {
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      if (key == "" || key ~ /^#/) next
+      eq = index(key, "=")
+      if (!eq) next
+      emit_dependency(section, substr(key, 1, eq - 1))
+    }
+  ' "$@"
+}
+planned_dependency_names=""
+if [ -n "$plan" ]; then
+  planned_dependency_names="$(plan_records "$plan" | awk -F '\t' '$1 == "files" || $1 == "tasks" { print $5 }')"
+fi
+new_cargo_dependency() {
+  local path="$1" base current entry name covered_manifest=0
+  covered "$path" && covered_manifest=1
+  base="$(git -C "$worktree" show "origin/main:$path" 2>/dev/null || true)"
+  base="$(printf '%s\n' "$base" | cargo_dependency_names)"
+  current="$(cargo_dependency_names <"$worktree/$path")"
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if ! grep -Fqx -- "$entry" <<<"$base"; then
+      name="${entry#*$'\t'}"
+      # Compare dependency kind as well as name: moving a crate from
+      # dependencies to dev-dependencies deliberately counts as a new entry.
+      if [ "$covered_manifest" -eq 0 ] || ! grep -Fqx -- "$name" <<<"$planned_dependency_names"; then return 0; fi
+    fi
+  done <<<"$current"
+  return 1
+}
+
 n=0
-shown=0
-digest=""
+stop_paths=()
+outside_paths=()
 while IFS= read -r p; do
   [ -n "$p" ] || continue
+  case "$p" in
+    Cargo.toml|*/Cargo.toml)
+      if new_cargo_dependency "$p"; then
+        stop_paths+=("$p")
+        continue
+      fi
+      ;;
+  esac
   if covered "$p"; then continue; fi
+  case "$p" in
+    .github/workflows/*|scripts/check|GLOSSARY.md|docs/*.md|docs/adr/*)
+      stop_paths+=("$p")
+      continue
+      ;;
+  esac
   if additive_only "$p"; then continue; fi
-  n=$((n + 1))
-  if [ "$shown" -lt 30 ]; then
-    digest="$digest$p"$'\n'
-    shown=$((shown + 1))
-  fi
+  outside_paths+=("$p")
 done <<<"$changed"
-if [ "$n" -gt 0 ]; then
-  rest=$((n - shown))
-  if [ "$rest" -gt 0 ]; then
-    digest="$digest... and $rest more"
-  else
-    digest="${digest%$'\n'}"
-  fi
-  # Name the plan, state fence and matching grant routes; the check itself is unchanged.
-  digest="$digest
-the fence is read from the plan's Files, the state's fence list, or a matching fence-grant Paths block in this ticket's grant file
-for a path a merge of main moved, run per path: tkt-state $state add fence <path>
-for scope the plan never covered, add it to the plan's Files and re-confirm with tkt-plan"
-  emit "FENCE n=$n" 1
+if [ "${#stop_paths[@]}" -gt 0 ]; then
+  digest=""
+  for p in "${stop_paths[@]}"; do
+    digest="${digest}${digest:+$'\n'}$p — contract change: ask first"
+  done
+  tkt set outside_plan ""
+  emit "STOP-LIST n=${#stop_paths[@]}" 1
 fi
+
+n="${#outside_paths[@]}"
+if [ "$n" -eq 0 ]; then
+  tkt set outside_plan ""
+else
+  tkt set outside_plan "${outside_paths[0]}"
+  i=1
+  while [ "$i" -lt "$n" ]; do
+    tkt add outside_plan "${outside_paths[$i]}"
+    i=$((i + 1))
+  done
+fi
+outside_report=""
+if [ "$n" -gt 0 ]; then
+  outside_report="OUTSIDE-PLAN n=$n"
+  for p in ${outside_paths[@]+"${outside_paths[@]}"}; do outside_report="$outside_report"$'\n'"$p"; done
+fi
+
 
 # History: the oneline list goes into the log, the counts into the digest.
 hist="$(git -C "$worktree" log --oneline "origin/main..HEAD" 2>/dev/null)" || {
