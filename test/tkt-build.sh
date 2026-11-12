@@ -408,6 +408,7 @@ EOF
   printf '0' >"$T/dcounter"
   printf '0' >"$T/rcounter"
   : >"$T/calls.log"
+  : >"$T/file-claim.log"
   cat >"$T/collect-out" <<'EOF'
 patch-id deadbeef
 VERDICT standards: APPROVE
@@ -509,9 +510,18 @@ expect_state reviewed "$H" happy
 expect_state review_status done happy
 [ -f "$(bash "$TKT_STATE" "$S" get findings)" ] || fail "happy: findings file exists"
 expect_state round 0 happy
+[ "$(grep -F -c "claim --lane fiber-528 --diff $WT" "$T/file-claim.log")" -eq 1 ] || fail "happy: the lane push records its hunk claim exactly once"
 grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is journaled"
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
+
+# --- a claim failure at the lane push warns without stopping build/review ---
+setup_case lane-claim-failure
+CLAIM_STUB_MODE=error run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
+[ "$RC" -eq 0 ] || fail "lane-claim-failure exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "lane-claim-failure"
+grep -F -q "claim --lane fiber-528 --diff $WT" "$T/file-claim.log" || fail "lane-claim-failure: hunk claim helper is invoked"
+grep -q 'WARN tkt: could not record pushed hunk claims for #528' "$CDIR/stderr.txt" || fail "lane-claim-failure: claim failure warns without failing the push"
 
 # --- the real lane brief fills and carries the second-patch stop rule (#982) ---
 setup_case real-lane-brief

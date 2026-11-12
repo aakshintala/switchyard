@@ -508,6 +508,9 @@ if [ "$outcome" = measurement ]; then
   head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
 elif [ "$from" != review ]; then
   fetch_branch_pr
+  if [ "$from" = lane ]; then
+    tkt_claim_pushed_hunks "$issue" "$worktree" "$repo"
+  fi
 else
   pr="$(tkt get pr 2>/dev/null || true)"; head="$(tkt get head 2>/dev/null || true)"
   if [ -z "${pr:-}" ] || [ -z "${head:-}" ]; then
