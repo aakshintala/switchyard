@@ -130,7 +130,7 @@ A lane `CONCERNS` verdict is exit 1 from `tkt-job`, but `tkt-build` consumes it,
 
 Done when the lane reports a PR URL and head SHA, or a failure triage.
 
-After acting on a job's report, run `delegate ack <id>` so lanestat stops showing it as DONE-UNREAD. Wait on and ack only the job ids your own run printed or your state file names; never act on a job found by browsing the delegate cache. `--any` is for the orchestrator only.
+After acting on a job's report, run `delegate ack <id>` so lanestat stops showing it as DONE-UNREAD. The check prevents misattribution, not access; `--any` is for the orchestrator only. Wait on and ack only the job ids your own run printed or your state file names; never act on a job found by browsing the delegate cache.
 
 ### 5. Gate
 

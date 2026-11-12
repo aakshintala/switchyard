@@ -295,6 +295,20 @@ fn until_for(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
     }
 }
 
+fn assert_ack_refusal_hint(stderr: &str) {
+    let refusal_lines: Vec<_> = stderr
+        .lines()
+        .filter(|line| line.contains(" check failed:"))
+        .collect();
+    assert!(!refusal_lines.is_empty(), "{stderr}");
+    assert!(
+        refusal_lines
+            .iter()
+            .all(|line| line.ends_with("use --any to override")),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn run_rejects_missing_add_dir_before_starting_a_fiber_job() {
     let e = Env::new("missing-add-dir");
@@ -1024,6 +1038,7 @@ fn ack_refuses_job_from_foreign_cwd() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(&id), "{stderr}");
     assert!(stderr.contains("cwd"), "{stderr}");
+    assert_ack_refusal_hint(&stderr);
     assert!(
         !e.dir.join("xdg-cache/delegate/read").join(&id).exists(),
         "foreign-cwd refusal writes no marker"
@@ -1055,6 +1070,7 @@ fn ack_refuses_job_with_a_different_caller_label() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(&id), "{stderr}");
     assert!(stderr.contains("caller"), "{stderr}");
+    assert_ack_refusal_hint(&stderr);
     assert!(!e.dir.join("xdg-cache/delegate/read").join(&id).exists());
 }
 
@@ -1087,6 +1103,159 @@ fn ack_accepts_same_cwd_and_parent_cwd() {
 }
 
 #[test]
+fn ack_accepts_record_cwd_from_ack_subdirectory() {
+    let e = Env::new("ack-cwd-descendant");
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "known report",
+        &[("DELEGATE_CALLER", "lane-a"), ("DELEGATE_CALLER_CWD", "/a")],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", "/a/b"),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn ack_canonicalizes_symlinked_caller_cwd() {
+    let e = Env::new("ack-cwd-symlink");
+    let clone = e.dir.join("clone");
+    std::fs::create_dir(&clone).unwrap();
+    let symlink = e.dir.join("clone-link");
+    std::os::unix::fs::symlink(&clone, &symlink).unwrap();
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "known report",
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", symlink.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", clone.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn ack_accepts_review_pr_caller_prefix() {
+    let e = Env::new("ack-review-pr-prefix");
+    let clone = e.dir.join("clone");
+    std::fs::create_dir(&clone).unwrap();
+    let clone = clone.to_str().unwrap();
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "review report",
+        &[
+            ("DELEGATE_CALLER", "flywheel/review-pr"),
+            ("DELEGATE_CALLER_CWD", clone),
+        ],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[
+            ("DELEGATE_CALLER", "flywheel"),
+            ("DELEGATE_CALLER_CWD", clone),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn ack_refuses_review_pr_from_sibling_worktree() {
+    let e = Env::new("ack-review-pr-sibling");
+    let clone = e.dir.join("clone");
+    let orchestrator = e.dir.join("orchestrator");
+    std::fs::create_dir(&clone).unwrap();
+    std::fs::create_dir(&orchestrator).unwrap();
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "review report",
+        &[
+            ("DELEGATE_CALLER", "flywheel/review-pr"),
+            ("DELEGATE_CALLER_CWD", clone.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[
+            ("DELEGATE_CALLER", "flywheel"),
+            ("DELEGATE_CALLER_CWD", orchestrator.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cwd check failed"), "{stderr}");
+    assert!(!stderr.contains("caller check failed"), "{stderr}");
+    assert_ack_refusal_hint(&stderr);
+    assert!(!e.dir.join("xdg-cache/delegate/read").join(&id).exists());
+}
+
+#[test]
+fn ack_rejects_non_component_caller_label_prefixes() {
+    let e = Env::new("ack-caller-prefix-boundary");
+    let clone = e.dir.to_str().unwrap();
+
+    for caller in ["flywheelx", "other"] {
+        let id = e.ok(
+            &["run", "--model", "composer-2.5"],
+            "known report",
+            &[("DELEGATE_CALLER", caller), ("DELEGATE_CALLER_CWD", clone)],
+        );
+        assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+        let out = e.delegate_env(
+            &["ack", &id],
+            None,
+            &[
+                ("DELEGATE_CALLER", "flywheel"),
+                ("DELEGATE_CALLER_CWD", clone),
+            ],
+        );
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("caller check failed"), "{stderr}");
+        assert_ack_refusal_hint(&stderr);
+        assert!(!e.dir.join("xdg-cache/delegate/read").join(&id).exists());
+    }
+}
+
+#[test]
 fn ack_rejects_sibling_prefix_cwd() {
     let e = Env::new("ack-sibling-prefix");
     let id = e.ok(
@@ -1111,6 +1280,7 @@ fn ack_rejects_sibling_prefix_cwd() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(&id), "{stderr}");
     assert!(stderr.contains("cwd"), "{stderr}");
+    assert_ack_refusal_hint(&stderr);
     assert!(!e.dir.join("xdg-cache/delegate/read").join(&id).exists());
 }
 
@@ -1180,6 +1350,7 @@ fn ack_refused_multi_id_call_writes_no_markers() {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(&foreign), "{stderr}");
+    assert_ack_refusal_hint(&stderr);
     let read_dir = e.dir.join("xdg-cache/delegate/read");
     for id in [&valid, &foreign] {
         assert!(!read_dir.join(id).exists(), "refusal wrote marker for {id}");
@@ -1214,6 +1385,7 @@ fn ack_refuses_records_without_caller_cwd_unless_any() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(&id), "{stderr}");
     assert!(stderr.contains("no callerCwd"), "{stderr}");
+    assert_ack_refusal_hint(&stderr);
     assert!(!e.dir.join("xdg-cache/delegate/read").join(&id).exists());
 
     let out = e.delegate_env(

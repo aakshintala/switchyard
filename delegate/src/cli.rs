@@ -202,6 +202,18 @@ fn caller_cwd() -> Option<String> {
         })
 }
 
+fn cwd_paths_related(record_cwd: &str, ack_cwd: &str) -> bool {
+    let record_path =
+        std::fs::canonicalize(record_cwd).unwrap_or_else(|_| std::path::PathBuf::from(record_cwd));
+    let ack_path =
+        std::fs::canonicalize(ack_cwd).unwrap_or_else(|_| std::path::PathBuf::from(ack_cwd));
+    record_path.starts_with(&ack_path) || ack_path.starts_with(&record_path)
+}
+
+fn caller_label_matches(record_caller: &str, ack_caller: &str) -> bool {
+    record_caller == ack_caller || record_caller.starts_with(&format!("{ack_caller}/"))
+}
+
 /// Capture attribution in the invoking CLI, before it detaches the supervisor.
 /// Scripts may provide a more meaningful label and source cwd explicitly.
 fn caller_info() -> CallerInfo {
@@ -1157,12 +1169,12 @@ fn ack(args: &[String]) -> Result<i32, Usage> {
             };
             match record.get("callerCwd").and_then(serde_json::Value::as_str) {
                 Some(record_cwd) => match ack_cwd.as_deref() {
-                    Some(ack_cwd) if std::path::Path::new(record_cwd).starts_with(ack_cwd) => {}
+                    Some(ack_cwd) if cwd_paths_related(record_cwd, ack_cwd) => {}
                     Some(ack_cwd) => errors.push(format!(
-                        "job {id} cwd check failed: record cwd {record_cwd} is not under caller cwd {ack_cwd}"
+                        "job {id} cwd check failed: record cwd {record_cwd} is unrelated to caller cwd {ack_cwd}; use --any to override"
                     )),
                     None => errors.push(format!(
-                        "job {id} cwd check failed: acknowledgement caller cwd is unavailable"
+                        "job {id} cwd check failed: acknowledgement caller cwd is unavailable; use --any to override"
                     )),
                 },
                 None => errors.push(format!(
@@ -1170,14 +1182,17 @@ fn ack(args: &[String]) -> Result<i32, Usage> {
                 )),
             }
             if let Some(caller) = caller_label.as_deref()
-                && record.get("caller").and_then(serde_json::Value::as_str) != Some(caller)
+                && !record
+                    .get("caller")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|record_caller| caller_label_matches(record_caller, caller))
             {
                 let record_caller = record
                     .get("caller")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("<missing>");
                 errors.push(format!(
-                    "job {id} caller check failed: caller label {caller} does not match record caller {record_caller}"
+                    "job {id} caller check failed: caller label {caller} does not match record caller {record_caller}; use --any to override"
                 ));
             }
         }
