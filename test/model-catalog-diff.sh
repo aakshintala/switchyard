@@ -128,13 +128,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     "router-mismatch": {"cost": {"input": 0.6, "output": 0.7}},
                     "router-tier": {"cost": {"input": 0.4, "output": 0.5}},
                 })
+            if self.mode in ("provider-absent", "clean-no-provider"):
+                del models_dev["muse"]
+            elif self.mode == "provider-empty":
+                models_dev["muse"] = {"models": {}}
             send_json(self, models_dev)
         elif path == "/anthropic/v1/models":
             if self.mode == "anthropic-dated":
                 send_json(self, {"data": [
                     {"id": "claude-opus-4-5-20251101", "context_window": 200, "max_tokens": 20},
                 ]})
-            elif self.mode == "clean":
+            elif self.mode in ("clean", "clean-no-provider"):
                 send_json(self, {"data": [
                     {"id": "claude-shared", "context_window": 1000, "max_tokens": 100, "input_price": 1, "output_price": 2, "deprecated": False},
                     {"id": "claude-gone", "context_window": 512},
@@ -173,7 +177,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         elif path == "/codex/backend-api/codex/models":
             if "client_version" not in self.path:
                 send_json(self, {"error": "client_version required"}, status=400)
-            elif self.mode == "clean":
+            elif self.mode in ("clean", "clean-no-provider"):
                 send_json(self, {"models": [{"slug": "codex-one", "context_window": 1000}, {"slug": "openai-a"}, {"slug": "openai-b"}]})
             else:
                 send_json(self, {"models": [{"slug": "codex-one", "context_window": 900}, {"slug": "codex-extra"}]})
@@ -306,6 +310,30 @@ try:
     expect("| claude-alias |" not in report, "dated Anthropic alias produced a row")
     expect("openrouter: HTTP 401" in report, "401 skip missing")
     expect("muse: no credential" in report, "missing credential skip missing")
+
+    # An absent models.dev provider is a provider note, while an existing provider
+    # with an empty catalog retains per-model missing rows.
+    provider_absent_inbox = temp_root / "inbox-provider-absent"
+    provider_absent_result, _ = run_case("provider-absent", True, provider_absent_inbox, mode="provider-absent")
+    expect(provider_absent_result.returncode == 0, f"provider-absent run failed: {provider_absent_result.stderr}")
+    provider_absent_report = (provider_absent_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("models.dev carries no muse provider" in provider_absent_report, "absent provider note missing")
+    expect("| muse-one | missing |" not in provider_absent_report, "absent provider produced per-model missing row")
+
+    provider_empty_inbox = temp_root / "inbox-provider-empty"
+    provider_empty_result, _ = run_case("provider-empty", True, provider_empty_inbox, mode="provider-empty")
+    expect(provider_empty_result.returncode == 0, f"provider-empty run failed: {provider_empty_result.stderr}")
+    provider_empty_report = (provider_empty_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("models.dev carries no muse provider" not in provider_empty_report, "present empty provider was treated as absent")
+    expect("| muse-one | missing |" in provider_empty_report, "present empty provider did not retain missing rows")
+
+    # A provider-level note alone does not create a report.
+    clean_no_provider_inbox = temp_root / "inbox-clean-no-provider"
+    clean_no_provider_result, _ = run_case("clean-no-provider", True, clean_no_provider_inbox, mode="clean-no-provider")
+    expect(clean_no_provider_result.returncode == 0, f"clean-no-provider run failed: {clean_no_provider_result.stderr}")
+    expect(clean_no_provider_result.stdout == "" and clean_no_provider_result.stderr == "", "note-only run was not quiet")
+    expect(not clean_no_provider_inbox.exists(), "provider note alone wrote a report")
+
     expect("| codex-extra | missing |" in report, "codex missing row was not reported")
     expect("| codex-one | mismatch | context | 900 | 1000 |" in report, "codex context mismatch missing")
     expect("| openai-a | gone |" not in report and "| openai-b | gone |" not in report, "codex gone noise was reported")

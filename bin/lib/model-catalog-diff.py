@@ -570,17 +570,25 @@ def short_sha(script_path):
         return "unknown"
 
 
-def write_report(inbox, today, source, rows_by_vendor, skipped, secrets):
+def write_report(inbox, today, source, rows_by_vendor, notes_by_vendor, skipped, secrets):
     lines = [f"# Model catalog gaps {today}", f"source: model-catalog-diff {source}", ""]
     for vendor in VENDORS:
-        rows = rows_by_vendor.get(vendor["name"], [])
-        if not rows:
+        name = vendor["name"]
+        rows = rows_by_vendor.get(name, [])
+        notes = notes_by_vendor.get(name, [])
+        if not rows and not notes:
             continue
-        lines.extend((f"## {vendor['name']}", "", "| model | kind | field | vendor | models.dev |", "|---|---|---|---|---|"))
-        for identifier, kind, field, left, right in rows:
-            values = (identifier, kind, field, left, right)
-            lines.append("| " + " | ".join(markdown(value, secrets) for value in values) + " |")
-        lines.append("")
+        lines.extend((f"## {name}", ""))
+        for note in notes:
+            lines.append(f"- {markdown(note, secrets)}")
+        if notes:
+            lines.append("")
+        if rows:
+            lines.extend(("| model | kind | field | vendor | models.dev |", "|---|---|---|---|---|"))
+            for identifier, kind, field, left, right in rows:
+                values = (identifier, kind, field, left, right)
+                lines.append("| " + " | ".join(markdown(value, secrets) for value in values) + " |")
+            lines.append("")
     lines.extend(("## skipped", ""))
     for vendor, reason in skipped:
         lines.append(f"- {markdown(vendor, secrets)}: {markdown(reason, secrets)}")
@@ -630,6 +638,7 @@ def run(script_path):
     ignore_pins = read_ignore_pins()
     skipped = []
     rows_by_vendor = {}
+    notes_by_vendor = {}
     for spec in VENDORS:
         try:
             items = fetch_vendor(spec, credentials, codex_token, timeout)
@@ -640,6 +649,14 @@ def run(script_path):
             skipped.append((spec["name"], "models.dev " + model_dev_failure))
             continue
         try:
+            if not isinstance(reference_payload, dict):
+                raise FetchFailure("invalid response")
+            provider_data = reference_payload.get(spec["provider"])
+            if not isinstance(provider_data, dict):
+                notes_by_vendor.setdefault(spec["name"], []).append(
+                    f"models.dev carries no {spec['provider']} provider"
+                )
+                continue
             reference = reference_models(reference_payload, spec["provider"])
             rows = compare_vendor(items, reference, spec["name"], ignore_pins)
         except FetchFailure as error:
@@ -653,7 +670,7 @@ def run(script_path):
     if not rows_by_vendor and not skipped:
         return 0
     inbox = Path(os.environ.get("MODEL_CATALOG_INBOX", INBOX_DEFAULT)).expanduser()
-    target = write_report(inbox, today, short_sha(script_path), rows_by_vendor, skipped, secrets)
+    target = write_report(inbox, today, short_sha(script_path), rows_by_vendor, notes_by_vendor, skipped, secrets)
     print(f"model-catalog-diff: wrote {target.name}")
     return 0
 
