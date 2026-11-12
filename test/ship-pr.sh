@@ -133,6 +133,29 @@ gh() {
       list)
         [ ! -e "$ST/issue-list-fail" ] || { echo 'gh: issue list failed' >&2; exit 1; }
         rd issues '[]';;
+      view)
+        number="$1"; shift
+        fields="" jq=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --json) fields="$2"; shift 2;;
+            --jq) jq="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        ticket="$(rd "ticket-$number.json" '{"state":"CLOSED","body":"","createdAt":"2026-11-01T00:00:00Z","comments":[]}')"
+        if [ -n "$jq" ]; then jq -r "$jq" <<<"$ticket"; else echo "$ticket"; fi;;
+      comment)
+        number="$1"; shift
+        body_file=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body-file) body_file="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        [ -n "$body_file" ] || { echo 'fake gh: issue comment needs --body-file' >&2; exit 2; }
+        cp "$body_file" "$ST/ticket-comment-$number.txt";;
       create)
         title=""; body_file=""
         while [ $# -gt 0 ]; do
@@ -323,11 +346,11 @@ gh() {
         rm -f "$ST/head-first-stale"
       fi
       state="$(rd state OPEN)"
-      json="$(jq -nc --arg h "$h" --arg s "$state" --arg d "$(rd draft false)" --arg ms "$(rd merge-state CLEAN)" --arg mg "$(rd mergeable MERGEABLE)" --arg b "$(rd body 'Resolves #97')" \
+      json="$(jq -nc --arg h "$h" --arg s "$state" --arg d "$(rd draft false)" --arg ms "$(rd merge-state CLEAN)" --arg mg "$(rd mergeable MERGEABLE)" --arg b "$(rd body 'Resolves #97')" --arg ca "$(rd pr-created 2026-11-04T00:00:00Z)" \
         --argjson bn "$([ -e "$ST/body-null" ] && echo true || echo false)" --argjson c "$(rd commits '[]')" --arg m "$MERGE_SHA" \
         --argjson l "$(rd pr-labels '[]')" \
         '{state:$s, headRefName:"feature", baseRefName:"main", headRefOid:$h, isDraft:($d=="true"), mergeStateStatus:$ms, mergeable:$mg,
-          title:"t", body:(if $bn then null else $b end), commits:$c, labels:$l, mergeCommit:(if $s=="MERGED" then {oid:$m} else null end)}')"
+          title:"t", body:(if $bn then null else $b end), createdAt:$ca, commits:$c, labels:$l, mergeCommit:(if $s=="MERGED" then {oid:$m} else null end)}')"
       jq=""
       while [ $# -gt 0 ]; do [ "$1" = "--jq" ] && jq="$2"; shift; done
       if [ -n "$jq" ]; then jq -r "$jq" <<<"$json"; else echo "$json"; fi;;
@@ -2225,5 +2248,160 @@ grep -Fq 'gh-ci: check ci has no check run after 1 min; it never started' <<<"$O
 grep -Fq 'failing: lint' <<<"$OUT" || fail "ship-pr prints the failing required check: [$OUT]"
 ! grep -q 'gh run rerun' "$ST/gh.log" || fail "never-started check is not rerun: [$(cat "$ST/gh.log")]"
 [ "$(grep -c 'check-runs' "$ST/gh.log")" = "10" ] || fail "one-minute bound is reached after ten polls at seven-second intervals: [$(cat "$ST/gh.log")]"
+
+# ===== --known-flake: only flywheel can opt into ticket-backed red-gate acceptance
+KNOWN_TEST='tests::flaky'
+KNOWN_GATE="printf '%s\\n' 'FAIL [ 0.001s] integration_tests $KNOWN_TEST'; exit 1"
+CARGO_FAILURE_GATE="printf '%s\\n' 'test tests::unknown ... FAILED' 'failures:' '    tests::unknown' 'test result: FAILED. 0 passed; 1 failed'; exit 1"
+CARGO_SOURCE_DIFF_GATE="printf '%s\\n' 'test crate::foo::tests::flaky ... FAILED' 'failures:' '    crate::foo::tests::flaky' 'test result: FAILED. 0 passed; 1 failed'; exit 1"
+prepare_known_flake() {
+  setup
+  printf '%s\n' '2026-11-05T00:00:00Z' >"$ST/pr-created"
+  jq -nc --arg name "$KNOWN_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+  jq -nc --arg h "$HEAD0" '[{databaseId:771,name:"CI",workflowName:"CI",event:"pull_request",status:"completed",conclusion:"success",headSha:$h,createdAt:"2026-11-05T00:01:00Z"}]' >"$ST/run-list.json"
+}
+known_ship() {
+  ship --known-flake 166 --by flywheel --gate "$KNOWN_GATE" --keep-branch
+}
+known_ship_multiple_tickets() {
+  ship --known-flake 165 166 --by flywheel --gate "$KNOWN_GATE" --keep-branch
+}
+
+prepare_known_flake
+ship --known-flake 166 --gate 'touch "$ST/gate-ran"; exit 1' --keep-branch
+expect_refused KNOWN-FLAKE
+[ ! -e "$ST/gate-ran" ] || fail "known-flake missing by: no gate runs"
+! grep -q 'check-runs' "$ST/gh.log" 2>/dev/null || fail "known-flake missing by: no CI wait"
+no_merge "known-flake missing by"
+
+prepare_known_flake
+ship --known-flake 166 --by lane --gate 'touch "$ST/gate-ran"; exit 1' --keep-branch
+expect_refused KNOWN-FLAKE
+[ ! -e "$ST/gate-ran" ] || fail "known-flake wrong by: no gate runs"
+! grep -q 'check-runs' "$ST/gh.log" 2>/dev/null || fail "known-flake wrong by: no CI wait"
+no_merge "known-flake wrong by"
+
+# CI is the first acceptance check and must be green on the pinned head.
+prepare_known_flake
+ship --known-flake 166 --by flywheel --gate "$CARGO_FAILURE_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -q 'red test.*not named' <<<"$ERR" || fail "cargo failure block is parsed for ticket matching: [$ERR]"
+no_merge "unnamed cargo test"
+
+prepare_known_flake
+echo '[{"bucket":"fail","name":"ci"}]' >"$ST/checks"
+known_ship
+expect 5 "known-flake CI refusal"
+expect_refused KNOWN-FLAKE
+grep -q 'known-flake check 1 failed: CI is not green' <<<"$ERR" || fail "known-flake CI refusal names the red CI gate: [$ERR]"
+no_merge "known-flake CI refusal"
+
+# Every red test must be named on an open ticket before the PR was opened.
+prepare_known_flake
+jq -nc --arg name 'integration_tests tests::different' '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+known_ship
+expect_refused KNOWN-FLAKE
+grep -q 'not named' <<<"$ERR" || fail "unnamed red test message: [$ERR]"
+no_merge "unnamed red test"
+
+prepare_known_flake
+jq -nc --arg name "$KNOWN_TEST" '{state:"CLOSED",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+known_ship
+expect_refused KNOWN-FLAKE
+grep -q 'closed' <<<"$ERR" || fail "closed ticket message: [$ERR]"
+no_merge "closed ticket"
+
+prepare_known_flake
+jq -nc --arg name "$KNOWN_TEST" '{state:"OPEN",body:"",createdAt:"2026-11-01T00:00:00Z",comments:[{body:("sighting: " + $name),createdAt:"2026-11-06T00:00:00Z"}]}' >"$ST/ticket-166.json"
+known_ship
+expect_refused KNOWN-FLAKE
+grep -q 'after the PR was opened' <<<"$ERR" || fail "late sighting message: [$ERR]"
+no_merge "late sighting"
+
+# A nextest binary maps to tests/<binary>.rs for the diff exclusion.
+prepare_known_flake
+mkdir -p "$WT/tests"
+printf 'fn touched() {}\n' >"$WT/tests/integration_tests.rs"
+push_test_change tests/integration_tests.rs 'touch flaky test source'
+jq --arg h "$HEAD0" 'map(.headSha = $h)' "$ST/run-list.json" >"$ST/run-list.tmp" && mv "$ST/run-list.tmp" "$ST/run-list.json"
+known_ship
+expect_refused KNOWN-FLAKE
+grep -q 'tests/integration_tests.rs' <<<"$ERR" || fail "red test file diff message: [$ERR]"
+no_merge "red test source in diff"
+
+prepare_known_flake
+mkdir -p "$WT/crates/crate/src"
+printf '[package]\nname = "crate"\nversion = "0.1.0"\n' >"$WT/crates/crate/Cargo.toml"
+printf 'pub fn touched() {}\n' >"$WT/crates/crate/src/foo.rs"
+git -C "$WT" add -- crates/crate/Cargo.toml crates/crate/src/foo.rs
+git -C "$WT" commit -qm 'touch flaky unit-test source'
+git -C "$WT" push -q origin feature
+HEAD0="$(git -C "$WT" rev-parse HEAD)"
+jq --arg h "$HEAD0" 'map(.headSha = $h)' "$ST/run-list.json" >"$ST/run-list.tmp" && mv "$ST/run-list.tmp" "$ST/run-list.json"
+jq -nc '{state:"OPEN",body:"known flake: crate::foo::tests::flaky",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+ship --known-flake 166 --by flywheel --gate "$CARGO_SOURCE_DIFF_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -q 'check 3 failed.*src/foo.rs' <<<"$ERR" || fail "cargo unit test maps to its crate source: [$ERR]"
+no_merge "cargo unit-test source in diff"
+
+# A compile error or an unrelated non-test failure is not an accepted flake.
+prepare_known_flake
+ship --known-flake 166 --by flywheel --gate "echo 'error[E0425]: cannot find value'; exit 1" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -q 'build\|compile\|only test failures' <<<"$ERR" || fail "build failure message: [$ERR]"
+no_merge "known-flake build failure"
+
+prepare_known_flake
+NON_TEST_GATE="printf '%s\\n' 'FAIL [ 0.001s] integration_tests $KNOWN_TEST' 'format check failed'; exit 1"
+ship --known-flake 166 --by flywheel --gate "$NON_TEST_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -q 'other failure\|only test failures\|non-test failure' <<<"$ERR" || fail "non-test gate failure message: [$ERR]"
+no_merge "known-flake non-test failure"
+
+# All four checks allow merge; a body or pre-PR comment can sight the test.
+prepare_known_flake
+jq -nc --arg name "$KNOWN_TEST" '{state:"OPEN",body:"",createdAt:"2026-11-01T00:00:00Z",comments:[{body:("known flake: " + $name),createdAt:"2026-11-04T00:00:00Z"}]}' >"$ST/ticket-166.json"
+known_ship_multiple_tickets
+expect 0 "known-flake ticketed red gate merges"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "known-flake merged output: [$OUT]"
+[ -f "$ST/comment.txt" ] || fail "known-flake PR comment posted"
+grep -Fq "$KNOWN_TEST" "$ST/comment.txt" || fail "known-flake PR comment names the red test"
+grep -Fq '166' "$ST/comment.txt" || fail "known-flake PR comment names its ticket"
+grep -Fq 'CI run id: 771' "$ST/comment.txt" || fail "known-flake PR comment names the CI run"
+grep -Fq 'feature.txt' "$ST/comment.txt" || fail "known-flake PR comment lists diff paths"
+grep -Fq 'script checked the red tests' "$ST/comment.txt" || fail "known-flake PR comment records file check and judgment"
+[ -f "$ST/ticket-comment-166.txt" ] || fail "known-flake ticket sighting posted"
+grep -Fq 'PR #7' "$ST/ticket-comment-166.txt" || fail "ticket sighting names the PR"
+grep -Fq "$HEAD0" "$ST/ticket-comment-166.txt" || fail "ticket sighting names the PR head"
+grep -Fq 'ship-pr-7-gate.' "$ST/ticket-comment-166.txt" || fail "ticket sighting names the gate output"
+[ "$(grep -c '^gh pr comment 7 ' "$ST/gh.log")" -eq 1 ] || fail "known-flake posts one PR comment"
+[ "$(grep -c '^gh issue comment 166 ' "$ST/gh.log")" -eq 1 ] || fail "known-flake posts one ticket comment"
+GATE_FILE="$(sed -n 's/^full gate output: //p' <<<"$OUT")"
+case "$GATE_FILE" in "$TMPDIR"/ship-pr-7-gate.*) ;; *) fail "known-flake keeps the gate output path: [$GATE_FILE]" ;; esac
+[ -f "$GATE_FILE" ] || fail "known-flake retains the gate output file: [$GATE_FILE]"
+
+# Step 7 checks the PR merged with a newly moved base using the same acceptance.
+prepare_known_flake
+echo "$NOSTRICT" >"$ST/rules"
+checks_hook "$BUMP_MAIN"
+BEFORE_KNOWN_GATE_COUNT="$(find "$TMPDIR" -maxdepth 1 -type f -name 'ship-pr-7-gate.*' | wc -l | tr -d ' ')"
+known_ship
+expect 0 "known-flake step-7 gate on a moved base"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "step-7 known-flake merged output: [$OUT]"
+[ "$(find "$TMPDIR" -maxdepth 1 -type f -name 'ship-pr-7-gate.*' | wc -l | tr -d ' ')" -ge "$((BEFORE_KNOWN_GATE_COUNT + 2))" ] \
+  || fail "step-7 acceptance retains both gate output files"
+grep -Fq 'ship-pr-7-gate.' "$ST/comment.txt" || fail "step-7 PR comment records its gate output"
+grep -Fq 'ship-pr-7-gate.' "$ST/ticket-comment-166.txt" || fail "step-7 ticket comment records its gate output"
+
+# Step 7 refuses by the same ordered ticket check and restores the pinned head.
+prepare_known_flake
+echo "$NOSTRICT" >"$ST/rules"
+checks_hook "$BUMP_MAIN"
+STEP7_UNNAMED_GATE='if [ ! -e "$ST/step7-ran" ]; then touch "$ST/step7-ran"; echo "FAIL [ 0.001s] integration_tests tests::flaky"; else echo "FAIL [ 0.001s] integration_tests tests::different"; fi; exit 1'
+ship --known-flake 166 --by flywheel --gate "$STEP7_UNNAMED_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq "red test 'tests::different' is not named" <<<"$ERR" || fail "step-7 ticket refusal names the first failed check: [$ERR]"
+[ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD0" ] || fail "step-7 known-flake refusal restores pinned head"
+no_merge "step-7 unnamed red test"
 
 echo "ship-pr: all cases passed"
