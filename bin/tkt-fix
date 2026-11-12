@@ -133,6 +133,7 @@ stale_locator_target() {
 }
 
 lockdir="$state.lock"
+require_state_file tkt-fix "$state"
 if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
 else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-fix: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
 
