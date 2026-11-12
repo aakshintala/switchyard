@@ -1685,6 +1685,16 @@ assert_out 'ERROR --ranges names docs/events.md which is not under --paths' 'ran
 assert_stderr '' 'range outside paths stderr'
 assert_no_grant 'range outside paths'
 
+# --new only marks paths --paths already lists; alone it names that, not the
+# generic usage line a caller once read as a grant (#1659).
+reset_case
+run_fg 77 --new docs/new.md
+assert_rc 2 'new without paths'
+assert_out '' 'new without paths stdout'
+assert_stderr 'fence-grant: --new marks paths that --paths already lists; add them to --paths too' 'new without paths stderr'
+assert_no_probes 'new without paths'
+assert_no_grant 'new without paths'
+
 reset_case
 run_fg 77 --paths docs/tui.md:310-372 --dry
 assert_rc 2 'paths with line range'
