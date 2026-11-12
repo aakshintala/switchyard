@@ -31,7 +31,7 @@ pub(crate) const USAGE: &str =
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
        delegate status <jobId>  (print state and finished job result summary without waiting)
-       delegate ack <jobId>...  (mark one or more job reports as read)
+       delegate ack <jobId>... [--any]  (mark one or more job reports as read)
        delegate models
        delegate doctor
        delegate version
@@ -191,6 +191,17 @@ struct CallerInfo {
     cwd: Option<String>,
 }
 
+fn caller_cwd() -> Option<String> {
+    std::env::var_os("DELEGATE_CALLER_CWD")
+        .filter(|cwd| !cwd.is_empty())
+        .map(|cwd| cwd.to_string_lossy().into_owned())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.to_string_lossy().into_owned())
+        })
+}
+
 /// Capture attribution in the invoking CLI, before it detaches the supervisor.
 /// Scripts may provide a more meaningful label and source cwd explicitly.
 fn caller_info() -> CallerInfo {
@@ -202,14 +213,7 @@ fn caller_info() -> CallerInfo {
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .filter(|command| !command.is_empty());
-    let cwd = std::env::var_os("DELEGATE_CALLER_CWD")
-        .filter(|cwd| !cwd.is_empty())
-        .map(|cwd| cwd.to_string_lossy().into_owned())
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|cwd| cwd.to_string_lossy().into_owned())
-        });
+    let cwd = caller_cwd();
     let caller = std::env::var("DELEGATE_CALLER")
         .ok()
         .filter(|caller| !caller.is_empty())
@@ -1116,20 +1120,68 @@ fn status(args: &[String]) -> Result<i32, Usage> {
 }
 
 fn ack(args: &[String]) -> Result<i32, Usage> {
-    if args.is_empty() {
+    let any = args.iter().any(|arg| arg == "--any");
+    let ids: Vec<_> = args.iter().filter(|arg| arg.as_str() != "--any").collect();
+    if ids.is_empty() {
         return usage(USAGE);
     }
 
-    let mut valid_ids = Vec::with_capacity(args.len());
+    let (ack_cwd, caller_label) = if any {
+        (None, None)
+    } else {
+        (
+            caller_cwd(),
+            std::env::var("DELEGATE_CALLER")
+                .ok()
+                .filter(|caller| !caller.is_empty()),
+        )
+    };
+    let mut valid_ids = Vec::with_capacity(ids.len());
     let mut errors = Vec::new();
-    for id in args {
+    for id in ids {
         if !valid_job_id(id) {
             errors.push(format!("invalid job id {id}"));
-        } else if read_record(id).is_none() {
-            errors.push(missing_record(id).0);
-        } else {
-            valid_ids.push(id);
+            continue;
         }
+        let Some(raw) = read_record(id) else {
+            errors.push(missing_record(id).0);
+            continue;
+        };
+        if !any {
+            let record: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(record) => record,
+                Err(error) => {
+                    errors.push(format!("cannot read job {id}: {error}"));
+                    continue;
+                }
+            };
+            match record.get("callerCwd").and_then(serde_json::Value::as_str) {
+                Some(record_cwd) => match ack_cwd.as_deref() {
+                    Some(ack_cwd) if std::path::Path::new(record_cwd).starts_with(ack_cwd) => {}
+                    Some(ack_cwd) => errors.push(format!(
+                        "job {id} cwd check failed: record cwd {record_cwd} is not under caller cwd {ack_cwd}"
+                    )),
+                    None => errors.push(format!(
+                        "job {id} cwd check failed: acknowledgement caller cwd is unavailable"
+                    )),
+                },
+                None => errors.push(format!(
+                    "job {id} cwd check failed: record has no callerCwd; use --any to override"
+                )),
+            }
+            if let Some(caller) = caller_label.as_deref()
+                && record.get("caller").and_then(serde_json::Value::as_str) != Some(caller)
+            {
+                let record_caller = record
+                    .get("caller")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<missing>");
+                errors.push(format!(
+                    "job {id} caller check failed: caller label {caller} does not match record caller {record_caller}"
+                ));
+            }
+        }
+        valid_ids.push(id);
     }
     if !errors.is_empty() {
         return Err(Usage(errors.join("\n")));
