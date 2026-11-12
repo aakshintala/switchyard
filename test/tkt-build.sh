@@ -207,6 +207,22 @@ esac
 exit 0
 EOF
 chmod +x "$T/bin/gh"
+cat >"$T/bin/file-claim" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FILE_CLAIM_CALLS"
+case " $* " in
+  *' --diff '*)
+    if [ "${CLAIM_STUB_MODE:-ok}" = error ]; then
+      echo 'stub claim failure' >&2
+      exit 2
+    fi
+    echo 'OVERLAP src/a.txt lane:fiber-999'
+    exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$T/bin/file-claim"
+export FW_FILE_CLAIM="$T/bin/file-claim" FILE_CLAIM_CALLS="$T/file-claim.log"
 
 # Stub gh-ci: wait only, logging its args. A `--run` wait exits the run-wait
 # code; every other wait exits the listing code. A $T/ghci-err file, when
@@ -392,6 +408,7 @@ EOF
   printf '0' >"$T/dcounter"
   printf '0' >"$T/rcounter"
   : >"$T/calls.log"
+  : >"$T/file-claim.log"
   cat >"$T/collect-out" <<'EOF'
 patch-id deadbeef
 VERDICT standards: APPROVE
@@ -493,9 +510,18 @@ expect_state reviewed "$H" happy
 expect_state review_status done happy
 [ -f "$(bash "$TKT_STATE" "$S" get findings)" ] || fail "happy: findings file exists"
 expect_state round 0 happy
+[ "$(grep -F -c "claim --lane fiber-528 --diff $WT" "$T/file-claim.log")" -eq 1 ] || fail "happy: the lane push records its hunk claim exactly once"
 grep -q "tkt-build APPROVE" "$CDIR/tkt.journal" || fail "happy: the verdict is journaled"
 logpath="${OUT%%$'\n'*}"; logpath="${logpath##*log=}"
 [ -f "$logpath" ] || fail "happy: the run log exists"
+
+# --- a claim failure at the lane push warns without stopping build/review ---
+setup_case lane-claim-failure
+CLAIM_STUB_MODE=error run_build --lane-model codex/test-model --review-model codex/test-review-model --overbuild-model composer-2.5
+[ "$RC" -eq 0 ] || fail "lane-claim-failure exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE pr=7 head=$H findings=* log=*" "lane-claim-failure"
+grep -F -q "claim --lane fiber-528 --diff $WT" "$T/file-claim.log" || fail "lane-claim-failure: hunk claim helper is invoked"
+grep -q 'WARN tkt: could not record pushed hunk claims for #528' "$CDIR/stderr.txt" || fail "lane-claim-failure: claim failure warns without failing the push"
 
 # --- the real lane brief fills and carries the second-patch stop rule (#982) ---
 setup_case real-lane-brief
@@ -2234,7 +2260,8 @@ bash "$TKT_STATE" "$S" set pr 7 || fail "gate-clean-merge: seed PR"
 printf '%s' "$CDIR/origin.git" >"$T/pr-origin"
 prepare_drift_verify
 printf 'verify-ok' >"$T/delegate-mode"
-run_build --from gate
+: >"$T/file-claim.log"
+CLAIM_STUB_MODE=error run_build --from gate
 [ "$RC" -eq 0 ] || fail "gate-clean-merge exits 0 (rc=$RC): $(first_line): $(cat "${OUT##*log=}") $(cat "$CDIR/stderr.txt")"
 H2="$(git -C "$WT" rev-parse HEAD)"
 newbase="$(git -C "$WT" rev-parse origin/main)"
@@ -2246,6 +2273,8 @@ expect_state head "$H2" gate-clean-merge
 expect_verdict "TKT tkt-build APPROVE pr=7 head=$H2 findings=* log=*" "gate-clean-merge"
 grep -q 'tkt-build stale recovery merge origin/main' "$CDIR/tkt.journal" || fail "gate-clean-merge: merge step is journaled"
 grep -q 'tkt-build stale recovery push origin tkt-528' "$CDIR/tkt.journal" || fail "gate-clean-merge: push step is journaled"
+grep -F -q "claim --lane fiber-528 --diff $WT" "$T/file-claim.log" || fail "gate-clean-merge: successful push records changed hunks"
+grep -q 'WARN tkt: could not record pushed hunk claims for #528' "$CDIR/stderr.txt" || fail "gate-clean-merge: claim failure warns without failing the push"
 grep -q "tkt-build stale recovery plan Base=$newbase" "$CDIR/tkt.journal" || fail "gate-clean-merge: Base step is journaled"
 grep -q "tkt-build stale recovery head=$H2" "$CDIR/tkt.journal" || fail "gate-clean-merge: head step is journaled"
 grep -q 'tkt-build stale recovery verify PLAN-OK' "$CDIR/tkt.journal" || fail "gate-clean-merge: verify step is journaled"
