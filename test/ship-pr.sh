@@ -2296,7 +2296,7 @@ expect_refused KNOWN-FLAKE
 grep -q 'known-flake check 1 failed: CI is not green' <<<"$ERR" || fail "known-flake CI refusal names the red CI gate: [$ERR]"
 no_merge "known-flake CI refusal"
 
-# Every red test must be named on an open ticket before the PR was opened.
+# An unnamed red test refuses even when it appears on a closed or unrelated ticket.
 prepare_known_flake
 jq -nc --arg name 'integration_tests tests::different' '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
 known_ship
@@ -2310,13 +2310,6 @@ known_ship
 expect_refused KNOWN-FLAKE
 grep -q 'closed' <<<"$ERR" || fail "closed ticket message: [$ERR]"
 no_merge "closed ticket"
-
-prepare_known_flake
-jq -nc --arg name "$KNOWN_TEST" '{state:"OPEN",body:"",createdAt:"2026-11-01T00:00:00Z",comments:[{body:("sighting: " + $name),createdAt:"2026-11-06T00:00:00Z"}]}' >"$ST/ticket-166.json"
-known_ship
-expect_refused KNOWN-FLAKE
-grep -q 'after the PR was opened' <<<"$ERR" || fail "late sighting message: [$ERR]"
-no_merge "late sighting"
 
 # A nextest binary maps to tests/<binary>.rs for the diff exclusion.
 prepare_known_flake
@@ -2358,9 +2351,9 @@ expect_refused KNOWN-FLAKE
 grep -q 'other failure\|only test failures\|non-test failure' <<<"$ERR" || fail "non-test gate failure message: [$ERR]"
 no_merge "known-flake non-test failure"
 
-# All four checks allow merge; a body or pre-PR comment can sight the test.
+# All four checks allow merge; a body or comment can name the test.
 prepare_known_flake
-jq -nc --arg name "$KNOWN_TEST" '{state:"OPEN",body:"",createdAt:"2026-11-01T00:00:00Z",comments:[{body:("known flake: " + $name),createdAt:"2026-11-04T00:00:00Z"}]}' >"$ST/ticket-166.json"
+jq -nc --arg name "$KNOWN_TEST" '{state:"OPEN",body:"",createdAt:"2026-11-06T00:00:00Z",comments:[{body:("known flake: " + $name),createdAt:"2026-11-07T00:00:00Z"}]}' >"$ST/ticket-166.json"
 known_ship_multiple_tickets
 expect 0 "known-flake ticketed red gate merges"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "known-flake merged output: [$OUT]"

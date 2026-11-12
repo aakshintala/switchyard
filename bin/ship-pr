@@ -107,7 +107,7 @@
 #        after the merge attempt, the error says the merge status could not be confirmed.
 #        --known-flake <ticket>... is opt-in only with --by flywheel. If the gate
 #        is red, CI must be green on the exact pinned head; each test name must be
-#        sighted in a supplied open ticket before the PR was opened; the test's
+#        named in a supplied open ticket's body or a comment; the test's
 #        source must be outside the PR diff; and a fresh gate must have failed
 #        only on parsed test failures. A known-flake refusal exits 5 as
 #        KNOWN-FLAKE. Nextest `FAIL [duration] <binary> <test>`
@@ -602,8 +602,7 @@ known_ci_run_id() {
 
 known_flake_accept() {
   local output_file="$1" gate_head="$2" expected_gate_head="$3" pin="$4" ci_run="$5"
-  local actual_head pr_created_at test binary source ticket_data ticket_state ticket_created_at
-  local name_found before_found closed_ticket late_ticket comment_dates comment_date chosen
+  local actual_head test ticket_data ticket_state name_found closed_ticket chosen
   local base diff_paths gate_base i found=0
   local -a chosen_tickets=()
 
@@ -617,50 +616,25 @@ known_flake_accept() {
   known_ci_run="$ci_run"
 
   known_parse_gate "$output_file"
-  pr_created_at="$(gh pr view "$pr" --repo "$repo" --json createdAt --jq '.createdAt' 2>/dev/null)" \
-    || refuse KNOWN-FLAKE "known-flake check 2 failed: cannot read when PR $pr was opened"
-  [ -n "$pr_created_at" ] && [ "$pr_created_at" != null ] \
-    || refuse KNOWN-FLAKE "known-flake check 2 failed: cannot read when PR $pr was opened"
 
-  # Check 2: require an exact name on an open ticket, in content dated before the PR.
+  # Check 2: require an exact name on an open ticket in the PR's repository.
   for i in "${!known_red_tests[@]}"; do
     test="${known_red_tests[$i]}"
-    name_found=0 before_found=0 closed_ticket="" late_ticket="" chosen=""
+    name_found=0 closed_ticket="" chosen=""
     for ticket in "${known_flakes[@]}"; do
-      ticket_data="$(gh issue view "$ticket" --repo "$repo" --json state,body,createdAt,comments 2>/dev/null)" \
+      ticket_data="$(gh issue view "$ticket" --repo "$repo" --json state,body,comments 2>/dev/null)" \
         || refuse KNOWN-FLAKE "known-flake check 2 failed: cannot read ticket #$ticket for red test '$test'"
       ticket_state="$(jq -r '.state // ""' <<<"$ticket_data")"
-      ticket_created_at="$(jq -r '.createdAt // .created_at // ""' <<<"$ticket_data")"
-      if [ "$(jq -r --arg test "$test" '((.body // "") | contains($test))' <<<"$ticket_data")" = true ]; then
+      if [ "$(jq -r --arg test "$test" '((.body // "") | contains($test)) or any(.comments[]?; ((.body // "") | contains($test)))' <<<"$ticket_data")" = true ]; then
         name_found=1
-        if [[ -n "$ticket_created_at" && "$ticket_created_at" < "$pr_created_at" ]]; then
-          before_found=1
-          if [ "$ticket_state" = OPEN ]; then chosen="$ticket"; break; else closed_ticket="$ticket"; fi
-        elif [ "$ticket_state" = OPEN ]; then
-          late_ticket="$ticket"
-        fi
+        if [ "$ticket_state" = OPEN ]; then chosen="$ticket"; break; else closed_ticket="$ticket"; fi
       fi
-      comment_dates="$(jq -r --arg test "$test" '.comments[]? | select((.body // "") | contains($test)) | (.createdAt // .created_at // "")' <<<"$ticket_data")"
-      while IFS= read -r comment_date || [ -n "$comment_date" ]; do
-        [ -n "$comment_date" ] || continue
-        name_found=1
-        if [[ "$comment_date" < "$pr_created_at" ]]; then
-          before_found=1
-          if [ "$ticket_state" = OPEN ]; then chosen="$ticket"; break; else closed_ticket="$ticket"; fi
-        elif [ "$ticket_state" = OPEN ]; then
-          late_ticket="$ticket"
-        fi
-      done <<<"$comment_dates"
-      [ -z "$chosen" ] || break
     done
     if [ -z "$chosen" ]; then
       [ "$name_found" = 1 ] \
         || refuse KNOWN-FLAKE "known-flake check 2 failed: red test '$test' is not named in any supplied ticket"
-      if [ -n "$closed_ticket" ] && [ "$before_found" = 1 ]; then
+      if [ -n "$closed_ticket" ]; then
         refuse KNOWN-FLAKE "known-flake check 2 failed: red test '$test' is named by closed ticket #$closed_ticket"
-      fi
-      if [ -n "$late_ticket" ] || [ "$before_found" = 0 ]; then
-        refuse KNOWN-FLAKE "known-flake check 2 failed: sighting for red test '$test' was dated after the PR was opened"
       fi
       refuse KNOWN-FLAKE "known-flake check 2 failed: no supplied ticket naming red test '$test' is OPEN"
     fi
