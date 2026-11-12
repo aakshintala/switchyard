@@ -202,11 +202,37 @@ fn caller_cwd() -> Option<String> {
         })
 }
 
+fn canonicalize_with_missing_tail(path: &std::path::Path) -> std::path::PathBuf {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let Ok(cwd) = std::env::current_dir() else {
+            return path.to_path_buf();
+        };
+        cwd.join(path)
+    };
+
+    let mut ancestor = absolute_path.as_path();
+    loop {
+        if let Ok(mut canonical) = std::fs::canonicalize(ancestor) {
+            if let Ok(missing_tail) = absolute_path.strip_prefix(ancestor) {
+                canonical.push(missing_tail);
+            }
+            return canonical;
+        }
+        let Some(parent) = ancestor.parent() else {
+            return absolute_path;
+        };
+        if parent == ancestor {
+            return absolute_path;
+        }
+        ancestor = parent;
+    }
+}
+
 fn cwd_paths_related(record_cwd: &str, ack_cwd: &str) -> bool {
-    let record_path =
-        std::fs::canonicalize(record_cwd).unwrap_or_else(|_| std::path::PathBuf::from(record_cwd));
-    let ack_path =
-        std::fs::canonicalize(ack_cwd).unwrap_or_else(|_| std::path::PathBuf::from(ack_cwd));
+    let record_path = canonicalize_with_missing_tail(std::path::Path::new(record_cwd));
+    let ack_path = canonicalize_with_missing_tail(std::path::Path::new(ack_cwd));
     record_path.starts_with(&ack_path) || ack_path.starts_with(&record_path)
 }
 
