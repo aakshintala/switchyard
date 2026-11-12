@@ -203,7 +203,8 @@ fn caller_cwd() -> Option<String> {
 }
 
 fn canonicalize_with_missing_tail(path: &std::path::Path) -> std::path::PathBuf {
-    // Relative record cwds would resolve against the acker's cwd, but caller_cwd() always records absolute paths.
+    // A relative path resolves against the acker's cwd. caller_cwd() records DELEGATE_CALLER_CWD
+    // verbatim, so a caller that exports a relative value gets a relative record cwd.
     let absolute_path = if path.is_absolute() {
         path.to_path_buf()
     } else {
