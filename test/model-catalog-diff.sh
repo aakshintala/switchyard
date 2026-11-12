@@ -132,6 +132,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     "router-window": {"cost": {"input": 0.4, "output": 0.5}},
                     "router-mismatch": {"cost": {"input": 0.6, "output": 0.7}},
                     "router-tier": {"cost": {"input": 0.4, "output": 0.5}},
+                    "deepseek/deepseek-v4.1-flash-1017": {"cost": {"input": 0.3, "output": 1.2}},
+                    "deepseek-weekend-only": {"cost": {"input": 0.15, "output": 0.6}},
+                    "qwen/qwen3.5-9b": {"cost": {"input": 0.049, "output": 0.072}},
                 })
             if self.mode in ("provider-absent", "clean-no-provider"):
                 del models_dev["muse"]
@@ -201,6 +204,20 @@ class FixtureHandler(BaseHTTPRequestHandler):
                             {"utc_start": "12:00", "utc_end": "24:00", "prompt": "0.0000004", "completion": "0.0000005"},
                         ],
                     }},
+                    {"id": "deepseek/deepseek-v4.1-flash-1017", "pricing": {
+                        "prompt": "0.00000015", "completion": "0.0000006",
+                        "overrides": [
+                            {"utc_days": ["saturday", "sunday"], "prompt": "0.00000015", "completion": "0.0000006"},
+                            {"utc_days": ["monday", "tuesday", "wednesday", "thursday", "friday"], "utc_start": 100, "utc_end": 400, "prompt": "0.0000003", "completion": "0.0000012"},
+                        ],
+                    }},
+                    {"id": "deepseek-weekend-only", "pricing": {
+                        "prompt": "0.0000003", "completion": "0.0000012",
+                        "overrides": [
+                            {"utc_days": ["saturday", "sunday"], "prompt": "0.00000015", "completion": "0.0000006"},
+                        ],
+                    }},
+                    {"id": "qwen/qwen3.5-9b", "pricing": {"prompt": "0.000000041", "completion": "0.000000061"}},
                     {"id": "router-mismatch", "pricing": {"prompt": "0.0000001", "completion": "0.0000002"}},
                     {"id": "router-tier", "pricing": {
                         "prompt": "0.0000001", "completion": "0.0000002",
@@ -438,6 +455,9 @@ try:
     expect("| router-window |" not in pricing_report, "matching OpenRouter override price produced a row")
     expect(re.search(r"\| router-mismatch \| mismatch \| input_price \| [^|]+ \| 0\.6 \|", pricing_report), "OpenRouter price mismatch without overrides was not reported")
     expect(re.search(r"\| router-tier \| mismatch \| input_price \| [^|]+ \| 0\.4 \|", pricing_report), "long-context tier price was treated as an alternative price")
+    expect("| deepseek/deepseek-v4.1-flash-1017 |" not in pricing_report, "deepseek's real weekday/weekend override prices produced a row")
+    expect("| deepseek-weekend-only |" not in pricing_report, "weekend-only override price was not treated as an alternative")
+    expect(re.search(r"\| qwen/qwen3\.5-9b \| mismatch \| input_price \| [^|]+ \| 0\.049 \|", pricing_report), "qwen price drift without overrides was suppressed")
 
     # A 30x is refused, not followed, so a credential header never reaches the redirect target.
     redirect_inbox = temp_root / "inbox-redirect"

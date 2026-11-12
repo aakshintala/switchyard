@@ -385,8 +385,7 @@ def vendor_fields(model, vendor):
                     candidate
                     for override in overrides
                     if isinstance(override, dict)
-                    and "utc_start" in override
-                    and "utc_end" in override
+                    and any(key in override for key in ("utc_days", "utc_start", "utc_end"))
                     and (candidate := number(override.get(key), 1_000_000)) is not None
                 ]
                 if alternatives:
