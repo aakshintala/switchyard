@@ -2938,6 +2938,8 @@ grep -Fq 'Do not use `find` or `locate`' "$T/state/prompt-verify.md" || \
   fail "#1641 verify brief names prohibited search tools"
 grep -Fq 'An open P3 from the `--verify` file still gives `FIX-INCOMPLETE` listing it' "$T/state/prompt-verify.md" || \
   fail "#1641 verify brief keeps an open P3 from the findings file blocking FIX-OK"
+grep -Fq 'Any open P1/P2 finding in the file or new P1/P2 finding makes `FIX-INCOMPLETE`' "$T/state/prompt-verify.md" || \
+  fail "#1641 verify brief keeps open P1/P2 findings blocking FIX-OK"
 ! grep -Fq 'P3 findings never block' "$T/state/prompt-verify.md" || \
   fail "#1641 verify brief must not waive open P3s from the findings file"
 grep -Fq 'restates every open and new finding in full' "$T/state/prompt-verify.md" || \
