@@ -15,6 +15,24 @@ require_state_file() {
   fi
 }
 
+# take_state_lock CALLER DIR: create DIR or report its holder and exit 2.
+# On success, DIR remains held for the caller to release. Callers that only
+# check for a holder (tkt-build, tkt-fix, tkt-plan, tkt-job) rmdir it on the
+# next line; tkt-gate holds it for the whole run.
+take_state_lock() {
+  local caller="$1" lock_dir="$2" pid
+  if mkdir "$lock_dir" 2>/dev/null; then
+    return 0
+  fi
+  pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ]; then
+    printf '%s: state locked by pid %s\n' "$caller" "$pid" >&2
+  else
+    printf '%s: state locked\n' "$caller" >&2
+  fi
+  exit 2
+}
+
 # set_namebase REPO ISSUE: set $namebase to "<repo tail>-<issue>", the stem
 # every tkt-* script builds its run, brief, gate and log paths from.
 set_namebase() {

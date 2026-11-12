@@ -61,10 +61,8 @@ map_brief="$HOME/.agents/skills/review-loop/briefs/mutant-map.md"
 tkt() { "$tkt_state" "$state" "$@"; }
 lockdir="$state.lock"
 require_state_file tkt-build "$state"
-if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
-elif pid="$(cat "$lockdir/pid" 2>/dev/null)" && [ -n "${pid:-}" ]; then
-  echo "tkt-build: state locked by pid $pid" >&2; exit 2
-else echo "tkt-build: state locked" >&2; exit 2; fi
+take_state_lock tkt-build "$lockdir"
+rmdir "$lockdir"
 tmpd="$(mktemp -d "${TMPDIR:-/tmp}/tkt-build.XXXXXX")"
 trap 'rm -rf "$tmpd"' EXIT
 quota_line=""

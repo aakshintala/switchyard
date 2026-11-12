@@ -156,15 +156,7 @@ journal_gate_command() {
 # outlives any lock, and tkt-state locks each write itself.
 lockdir="$state.lock"
 require_state_file tkt-job "$state"
-if ! mkdir "$lockdir" 2>/dev/null; then
-  pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
-  if [ -n "$pid" ]; then
-    echo "tkt-job: state locked by pid $pid" >&2
-  else
-    echo "tkt-job: state locked" >&2
-  fi
-  exit 2
-fi
+take_state_lock tkt-job "$lockdir"
 rmdir "$lockdir"
 
 tkt require repo issue run worktree

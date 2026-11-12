@@ -965,8 +965,9 @@ mkdir "$S.phase"
 printf '424242\n' >"$S.phase/pid"
 run_gate
 [ "$RC" -eq 2 ] || fail "a held lock exits 2"
-grep -q "424242" "$CDIR/stderr.txt" || fail "a held lock names the pid"
+grep -q "tkt-gate: state locked by pid 424242" "$CDIR/stderr.txt" || fail "a held lock names the pid"
 [ ! -f "$T/gate-ran" ] || fail "a held lock runs no gate"
+[ "$(cat "$S.phase/pid" 2>/dev/null)" = "424242" ] || fail "a refused run leaves the holder's lock in place"
 rm -rf "$S.phase"
 
 # --- repo as owner/name still lands logs and scripts directly in run ---

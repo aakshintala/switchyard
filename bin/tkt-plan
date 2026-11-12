@@ -59,8 +59,8 @@ t() { "$tkt_state" "$state" "$@"; }
 
 lockdir="$state.lock"
 require_state_file tkt-plan "$state"
-if mkdir "$lockdir" 2>/dev/null; then rmdir "$lockdir"
-else pid="$(cat "$lockdir/pid" 2>/dev/null || true)"; echo "tkt-plan: state locked${pid:+ by pid $pid}" >&2; exit 2; fi
+take_state_lock tkt-plan "$lockdir"
+rmdir "$lockdir"
 
 t require repo issue run worktree
 repo="$(t get repo)"; issue="$(t get issue)"; set_namebase "$repo" "$issue"; run="$(t get run)"; worktree="$(t get worktree)"
