@@ -1051,6 +1051,13 @@ assert_rc 0 'section-count mismatch uses pr diff fallback'
 [ "$(grep -c '^pr diff 7 ' "$T/gh.log")" = 2 ] || fail "section-count mismatch uses pr diff for names and diff: $(cat "$T/gh.log")"
 [ "$(grep -c '^api repos/aakshintala/fiber/compare/main\.\.\.1647000000000000000000000000000000000000 ' "$T/gh.log")" = 2 ] || fail "section-count mismatch compare is retried without caching: $(cat "$T/gh.log")"
 [ -z "$(find "$FENCE_GRANT_CACHE_DIR/aakshintala/fiber/7" -type f -print 2>/dev/null)" ] || fail 'section-count mismatch is not cached'
+# A mismatch whose pr diff fallback also fails refuses the grant and caches nothing.
+GH_DIFF_FAIL=7
+export GH_DIFF_FAIL
+: >"$T/gh.log"
+run_fg 77 --paths docs/tui.md --dry
+[ "$RC" != 0 ] || fail "section-count mismatch with failed fallback fails closed: stdout=$(cat "$T/out")"
+[ -z "$(find "$FENCE_GRANT_CACHE_DIR/aakshintala/fiber/7" -type f -print 2>/dev/null)" ] || fail 'section-count mismatch with failed fallback is not cached'
 
 # If an entry disappears after the existence check, treat the failed copy as a miss.
 reset_case
