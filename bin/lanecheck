@@ -5,6 +5,8 @@
 #   bash bin/lanecheck done 3890  # retire ticket 3890's roster entries (it reported)
 #   bash bin/lanecheck done 3954:fiber-3954-plan   # retire one session only
 #   bash bin/lanecheck retired                     # list fully retired ticket lanes for claim reaping
+#   Handed-to-owner retirements remain excluded: the owner still needs the
+#   lane's retained claims while carrying the PR forward.
 #
 # Retire by ticket when the whole ticket is finished. Retire by
 # <ticket>:<session> when one of a ticket's sessions has finished and another
@@ -99,6 +101,11 @@ import sys
 roster, retired, helper = sys.argv[1:]
 exec(compile(open(helper).read(), helper, "exec"), globals())
 done, done_sess = read_retirements(retired)
+handed_off = set()
+for line in open(retired):
+    fields = line.rstrip("\n").split("\t")
+    if len(fields) > 3 and fields[3].startswith("handed-to-owner "):
+        handed_off.add(fields[1])
 by_ticket = {}
 for line in open(roster):
     if not line.strip():
@@ -110,6 +117,8 @@ for line in open(roster):
     jid = fields[4] if len(fields) > 4 else "?"
     by_ticket.setdefault(ticket, []).append((name, jid, ts))
 for ticket in sorted(by_ticket, key=int):
+    if ticket in handed_off:
+        continue
     entries = by_ticket[ticket]
     if all(entry_is_retired(ticket, name, jid, ts, done, done_sess)
            for name, jid, ts in entries):
