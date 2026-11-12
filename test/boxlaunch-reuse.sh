@@ -103,8 +103,33 @@ cat >"$T/stub/fence-grant-self" <<'FG'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$SELF_GRANT_LOG"
 ticket=$1
+empty=0
+paths=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --empty) empty=1; shift;;
+    --paths) paths=$2; shift 2;;
+    *) shift;;
+  esac
+done
 mkdir -p "$FW_RUN"
-printf 'Grant\n\nTicket: %s\nPaths:\nRanges: none\n' "$ticket" >"$FW_RUN/fiber-$ticket-fence-grant-self.md"
+max=0
+for grant in "$FW_RUN"/fiber-"$ticket"-fence-grant-*.md; do
+  [ -f "$grant" ] || continue
+  part="${grant##*-fence-grant-}"
+  part="${part%.md}"
+  case "$part" in ''|*[!0-9]*) continue;; esac
+  [ "$part" -gt "$max" ] && max="$part"
+done
+part=$((max + 1))
+grant="$FW_RUN/fiber-$ticket-fence-grant-$part.md"
+if [ "$empty" -eq 1 ]; then
+  printf 'Grant %s\n\nTicket: %s\nPart: %s\nPaths:\nRanges: none\n' \
+    "$part" "$ticket" "$part" >"$grant"
+else
+  printf 'Grant %s\n\nTicket: %s\nPart: %s\nPaths:\n- %s\nRanges: none\n' \
+    "$part" "$ticket" "$part" "$paths" >"$grant"
+fi
 FG
 chmod +x "$T/stub/gh-self-grant" "$T/stub/fence-grant-self"
 
@@ -187,9 +212,21 @@ printf '[]\n' >"$BOX_AGENTS"
 if launch_box phase-plan >"$T/plan-self-grant-launch.out" 2>&1; then :; else
   fail "plan phase self-grants before launch ($(cat "$T/plan-self-grant-launch.out"))"
 fi
-[ -f "$run/fiber-2465-fence-grant-self.md" ] || fail "plan phase writes a grant file"
+[ -f "$run/fiber-2465-fence-grant-1.md" ] || fail "plan phase writes a grant file"
 grep -q '^2465 --empty$' "$SELF_GRANT_LOG" || fail "plan phase records an empty grant when no plan is posted"
-grep -q '^Paths:$' "$run/fiber-2465-fence-grant-self.md" || fail "plan phase empty grant has a Paths block"
+grep -q '^Paths:$' "$run/fiber-2465-fence-grant-1.md" || fail "plan phase empty grant has a Paths block"
+cat >"$SELF_GRANT_PLAN" <<'PLAN'
+## Files
+
+- `src/box-lane.c`
+PLAN
+: >"$SELF_GRANT_LOG"
+if launch_box phase-build >"$T/build-self-grant-launch.out" 2>&1; then :; else
+  fail "build phase refreshes the empty grant ($(cat "$T/build-self-grant-launch.out"))"
+fi
+[ -f "$run/fiber-2465-fence-grant-2.md" ] || fail "build phase writes the second grant"
+grep -q '^Part: 2$' "$run/fiber-2465-fence-grant-2.md" || fail "build phase advances the grant part"
+grep -q '^- src/box-lane.c$' "$run/fiber-2465-fence-grant-2.md" || fail "build phase grant includes the newly posted write path"
 run=$saved_run boxrun=$saved_boxrun boxhome=$saved_boxhome
 
 printf '[{"id":"%s","name":"%s","state":"done","status":"idle"}]\n' "$NEW_SESSION_ID" "$session" >"$BOX_AGENTS"

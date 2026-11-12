@@ -417,16 +417,46 @@ fw_is_liveness() {
     grep -qxE '^\[session [0-9a-f-]{36} (idle|dead)\]$' "$1"
 }
 
-# fw_self_grant <launcher> <n> <run>: record the fence from the ticket's posted
-# plan for every phase. Reads the last comment carrying a `## Files` section;
+# Grant filenames must end the ticket number at a delimiter, so #426 cannot
+# inherit #4260's grant. The second pattern covers phase-qualified grants.
+fw_has_grant_file() {
+  local n="$1" run="$2" g was_noglob=0 found=1
+  case "$-" in *f*) was_noglob=1; set +f;; esac
+  for g in "$run"/fiber-"$n"-fence-grant*.md "$run"/fiber-"$n"-*-fence-grant*.md; do
+    if [ -f "$g" ]; then found=0; break; fi
+  done
+  [ "$was_noglob" -eq 0 ] || set -f
+  return "$found"
+}
+
+# Empty Paths blocks are valid for plan launches but do not fence build writes.
+fw_has_nonempty_grant() {
+  local n="$1" run="$2" g was_noglob=0 found=1
+  case "$-" in *f*) was_noglob=1; set +f;; esac
+  for g in "$run"/fiber-"$n"-fence-grant*.md "$run"/fiber-"$n"-*-fence-grant*.md; do
+    [ -f "$g" ] || continue
+    if awk '
+      /^Paths:[[:space:]]*$/ { in_paths=1; next }
+      in_paths && (/^Ranges:/ || /^Reads:/ || /^##[[:space:]]/) { exit }
+      in_paths && /^[[:space:]]*[-*][[:space:]]+[^[:space:]]/ { found=1 }
+      END { exit !found }
+    ' "$g"; then found=0; break; fi
+  done
+  [ "$was_noglob" -eq 0 ] || set -f
+  return "$found"
+}
+
+# fw_self_grant <launcher> <n> <run> [refresh-empty]: record the fence from the ticket's
+# posted plan for every phase. Reads the last comment carrying a `## Files` section;
 # a bullet that opens with a backticked path is a write, unless it is marked
 # `(read)` or sits under a "Reads" line, which go to --reads. Optional path
 # ranges narrow a grant; without them each write is a whole-file claim until
 # push-time hunks arrive. If no posted write plan exists, record an empty grant.
+# With refresh-empty, do not append another empty grant when one already exists.
 # Returns 1 when GitHub/fence-grant fails or no grant file appears in <run>.
 # FW_GH and FW_FENCE_GRANT override gh and fence-grant (tests).
 fw_self_grant() {
-  local who=$1 n=$2 run=$3 body lists w r rg fg nw g found
+  local who=$1 n=$2 run=$3 refresh_existing=${4:-0} body lists w r rg fg nw g found
   local -a a=()
   fg=${FW_FENCE_GRANT:-$_FW_LIB_DIR/fence-grant}
   _fw_grant_ssh=${FW_SSH:-}
@@ -463,6 +493,9 @@ print(",".join(w)); print(",".join(r)); print(",".join(rg))') || return 1
   w=$(printf '%s\n' "$lists" | sed -n 1p); r=$(printf '%s\n' "$lists" | sed -n 2p)
   rg=$(printf '%s\n' "$lists" | sed -n 3p)
   if [ -z "$w" ]; then
+    if [ "$refresh_existing" = 1 ] && fw_has_grant_file "$n" "$run"; then
+      return 0
+    fi
     if [ -z "$body" ]; then
       echo "$who: #$n has no posted plan; recording an empty grant" >&2
     else

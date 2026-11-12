@@ -53,10 +53,20 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$dry" -eq 1 ] && exit 0
 mkdir -p "$FW_RUN"
+max=0
+for grant in "$FW_RUN"/fiber-"$ticket"-fence-grant-*.md; do
+  [ -f "$grant" ] || continue
+  part="${grant##*-fence-grant-}"
+  part="${part%.md}"
+  case "$part" in ''|*[!0-9]*) continue;; esac
+  [ "$part" -gt "$max" ] && max="$part"
+done
+part=$((max + 1))
+grant="$FW_RUN/fiber-$ticket-fence-grant-$part.md"
 if [ "$empty" -eq 1 ]; then
-  printf 'Grant\n\nTicket: %s\nPaths:\nRanges: none\n' "$ticket" >"$FW_RUN/fiber-$ticket-fence-grant-self.md"
+  printf 'Grant %s\n\nTicket: %s\nPart: %s\nPaths:\nRanges: none\n' "$part" "$ticket" "$part" >"$grant"
 else
-  printf 'Grant\n\nTicket: %s\nPaths:\n- %s\nRanges: none\n' "$ticket" "$paths" >"$FW_RUN/fiber-$ticket-fence-grant-self.md"
+  printf 'Grant %s\n\nTicket: %s\nPart: %s\nPaths:\n- %s\nRanges: none\n' "$part" "$ticket" "$part" "$paths" >"$grant"
 fi
 FG
 chmod +x "$T/bin/gh-self-grant" "$T/bin/fence-grant-self"
@@ -165,7 +175,7 @@ setup_case() {
     printf 'head=%s\n' "$H"
     printf 'model.lane=%s\n' test-model
   } >"$S"
-  printf 'grant\n' >"$CDIR/run/fiber-502-fence-grant-test.md"
+  printf 'Grant 1\n\nTicket: 502\nPart: 1\nPaths:\n- src/existing.c\nRanges: none\n' >"$CDIR/run/fiber-502-fence-grant-test.md"
 }
 
 # Reset the stub between cases: fresh ids, an empty call log, no job records.
@@ -302,10 +312,47 @@ FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
   run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "lane without a prior grant self-grants (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q '^run|' "$T/stub.log" || fail "self-granted lane dispatches"
-[ -f "$CDIR/run/fiber-502-fence-grant-self.md" ] || fail "self-granted lane writes a grant file"
+[ -f "$CDIR/run/fiber-502-fence-grant-1.md" ] || fail "self-granted lane writes a grant file"
 grep -q '^502 --repo [^ ]* --paths src/tkt-job.c --dry$' "$SELF_GRANT_LOG" || fail "self-grant probes the plan path"
 grep -q '^502 --repo [^ ]* --paths src/tkt-job.c$' "$SELF_GRANT_LOG" || fail "self-grant grants path without line ranges"
 ! grep -q -- '--ranges' "$SELF_GRANT_LOG" || fail "self-grant does not require line ranges"
+
+# --- an empty plan grant is refreshed when the build plan now has writes ----
+setup_case empty-grant-build-refresh
+rm "$CDIR/run/fiber-502-fence-grant-test.md"
+printf 'Grant 1\n\nTicket: 502\nPart: 1\nPaths:\nRanges: none\n' >"$CDIR/run/fiber-502-fence-grant-1.md"
+cat >"$SELF_GRANT_PLAN" <<'PLAN'
+## Files
+
+- `src/tkt-job.c`
+
+## Gate
+
+`true`
+PLAN
+: >"$SELF_GRANT_LOG"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
+  run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "empty-grant-build-refresh launches (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ -f "$CDIR/run/fiber-502-fence-grant-2.md" ] || fail "empty-grant-build-refresh writes part 2"
+grep -q '^Part: 2$' "$CDIR/run/fiber-502-fence-grant-2.md" || fail "empty-grant-build-refresh advances the grant part"
+grep -q '^- src/tkt-job.c$' "$CDIR/run/fiber-502-fence-grant-2.md" || fail "empty-grant-build-refresh grants the posted write path"
+
+# --- an empty build plan keeps its existing empty grant without duplication --
+setup_case empty-grant-no-writes
+rm "$CDIR/run/fiber-502-fence-grant-test.md"
+printf 'Grant 1\n\nTicket: 502\nPart: 1\nPaths:\nRanges: none\n' >"$CDIR/run/fiber-502-fence-grant-1.md"
+: >"$SELF_GRANT_PLAN"
+: >"$SELF_GRANT_LOG"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
+  run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "empty-grant-no-writes launches (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ ! -e "$CDIR/run/fiber-502-fence-grant-2.md" ] || fail "empty-grant-no-writes does not create a second empty grant"
+[ ! -s "$SELF_GRANT_LOG" ] || fail "empty-grant-no-writes does not invoke fence-grant again"
 
 setup_case fence-granted
 reset_stub
@@ -313,6 +360,31 @@ make_record stub-1 DONE none 0 1 0
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 0 ] || fail "lane with a fence grant starts (rc=$RC): $(cat "$CDIR/stderr.txt")"
 grep -q '^run|' "$T/stub.log" || fail "lane with a fence grant dispatches"
+
+# --- a neighboring ticket's prefix-only grant is not this lane's fence -----
+setup_case unrelated-grant
+bash "$TKT_STATE" "$S" set issue 426 || fail "unrelated-grant: set issue"
+rm "$CDIR/run/fiber-502-fence-grant-test.md"
+printf 'Grant 1\n\nTicket: 4260\nPart: 1\nPaths:\n- src/other.c\nRanges: none\n' \
+  >"$CDIR/run/fiber-4260-fence-grant-1.md"
+cat >"$SELF_GRANT_PLAN" <<'PLAN'
+## Files
+
+- `src/tkt-job.c`
+
+## Gate
+
+`true`
+PLAN
+: >"$SELF_GRANT_LOG"
+reset_stub
+make_record stub-1 DONE none 0 1 0
+FW_GH="$T/bin/gh-self-grant" FW_FENCE_GRANT="$T/bin/fence-grant-self" \
+  run_job --slot lane --template "$T/tmpl-basic.md"
+[ "$RC" -eq 0 ] || fail "unrelated-grant lane self-grants (rc=$RC): $(cat "$CDIR/stderr.txt")"
+[ -f "$CDIR/run/fiber-426-fence-grant-1.md" ] || fail "unrelated-grant ignores #4260 and writes #426's grant"
+grep -q '^426 --repo [^ ]* --paths src/tkt-job.c$' "$SELF_GRANT_LOG" || fail "unrelated-grant self-grants from #426's plan"
+
 
 setup_case plan-slot-no-fence
 rm "$CDIR/run/fiber-502-fence-grant-test.md"

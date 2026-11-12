@@ -92,15 +92,17 @@ if [ "${FW_NO_TMP_REAP:-0}" != 1 ]; then
       sed 's/^/boxlaunch: tmp reap: /' >&2
   ) </dev/null &
 fi
-# Self-grant from the posted plan in every phase. A plan without write paths
-# records an empty Paths block, so it still has a host-local grant file; a
-# build without an earlier planning launch grants its own write fence too.
-# FW_NO_FENCE remains an explicit override for a ticket that truly holds no path.
-set +f
-fgrants=("$run"/fiber-"$n"-fence-grant*.md)
-set -f
-if [ ! -e "${fgrants[0]}" ]; then
-  if fw_self_grant boxlaunch "$n" "$run"; then
+# In a build launch, an earlier empty plan-phase grant is not a write fence.
+# Refresh it only when the current plan supplies writes; an unchanged empty
+# plan keeps its existing grant. FW_NO_FENCE remains an explicit override.
+needs_grant=0
+if ! fw_has_grant_file "$n" "$run"; then
+  needs_grant=1
+elif [ "$ph" = phase-build ] && ! fw_has_nonempty_grant "$n" "$run"; then
+  needs_grant=1
+fi
+if [ "$needs_grant" -eq 1 ]; then
+  if fw_self_grant boxlaunch "$n" "$run" 1; then
     :
   elif [ -n "${FW_NO_FENCE:-}" ]; then
     echo "boxlaunch: no fence grant for #$n, launching anyway: $FW_NO_FENCE" >&2

@@ -373,13 +373,22 @@ claim_diff_paths() {
 cmd_claim() {
   local lane="$1" kind="$2" self_pr="$3" exempt_pr="$4" worktree="$5" repo="$6"
   local diff_worktree="$7" refresh="$8"; shift 8
-  local remote now main_tip prmap tip claims attempt paths requested_paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr prs_for_path holders own_hold blocked path_base holder_path holder_lane own_existing
-  local -a paths=() requested_paths=()
+  local remote now main_tip prmap tip claims attempt paths requested_paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr prs_for_path holders own_hold blocked path_base holder_path holder_lane own_existing claim_line claim_path claim_lane claim_base diff_base drop_claim
+  local -a paths=() requested_paths=() diff_bases=()
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   new_workdir
   if [ -n "$diff_worktree" ]; then
     claim_diff_paths "$diff_worktree" >"$W/diff-paths"
-    while IFS= read -r p || [ -n "$p" ]; do [ -n "$p" ] && requested_paths+=("$p"); done <"$W/diff-paths"
+    while IFS= read -r p || [ -n "$p" ]; do
+      [ -n "$p" ] || continue
+      requested_paths+=("$p")
+      diff_base="$(claim_path_base "$p")"
+      held=0
+      if [ "${#diff_bases[@]}" -gt 0 ]; then
+        for path in "${diff_bases[@]}"; do [ "$path" = "$diff_base" ] && { held=1; break; }; done
+      fi
+      [ "$held" = 1 ] || diff_bases+=("$diff_base")
+    done <"$W/diff-paths"
   fi
   for p in "$@"; do requested_paths+=("$p"); done
   [ "${#requested_paths[@]}" -gt 0 ] || [ "$refresh" = 1 ] || usage
@@ -397,8 +406,25 @@ cmd_claim() {
     main_tip="$(fetch_main_tip "$remote")"; tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; load_claims "$tip" "$claims"
     own_existing=0
     if [ "$refresh" = 1 ]; then
-      own_existing="$(awk -F'\t' -v l="$lane" '$2 == l { n++ } END { print n+0 }' "$claims")"
-      awk -F'\t' -v l="$lane" '$2 != l' "$claims" >"$claims.refreshed"
+      : >"$claims.refreshed"
+      while IFS= read -r claim_line || [ -n "$claim_line" ]; do
+        [ -n "$claim_line" ] || continue
+        IFS="$TAB" read -r claim_path claim_lane _ <<<"$claim_line"
+        drop_claim=0
+        if [ "$claim_lane" = "$lane" ]; then
+          claim_base="$(claim_path_base "$claim_path")"
+          if [ "${#diff_bases[@]}" -gt 0 ]; then
+            for diff_base in "${diff_bases[@]}"; do
+              if [ "$claim_base" = "$diff_base" ]; then
+                drop_claim=1
+                own_existing=$((own_existing + 1))
+                break
+              fi
+            done
+          fi
+        fi
+        [ "$drop_claim" = 1 ] || printf '%s\n' "$claim_line" >>"$claims.refreshed"
+      done <"$claims"
       mv "$claims.refreshed" "$claims"
     fi
     out=(); new_lines=(); granted=0; refused=0; saw_cap=0; saw_prs=""

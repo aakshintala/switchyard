@@ -174,20 +174,16 @@ run="$(tkt get run)"
 worktree="$(tkt get worktree)"
 mkdir -p "$run"
 
-# Writing slots need a fence. If no prior phase wrote one, record it from the
-# posted plan now; a missing plan produces an empty grant instead of blocking
-# a build that has no declared write paths. Keep --require as the final check
-# and explicit FW_NO_FENCE override.
+# Writing slots need a non-empty fence. If a planning phase left only an empty
+# Paths block, refresh from the posted plan now; if the plan still has no writes,
+# keep that grant instead of appending another empty part. --require remains the
+# final check, with FW_NO_FENCE as the explicit override.
 phase=plan
-grant_found=0
 case "$slot" in
   lane|fix[0-9]*)
     phase=build
-    for grant in "$run"/fiber-"$issue"*-fence-grant*.md; do
-      [ -f "$grant" ] && { grant_found=1; break; }
-    done
-    if [ "$grant_found" -eq 0 ] && [ -z "${FW_NO_FENCE:-}" ]; then
-      fw_self_grant tkt-job "$issue" "$run" || {
+    if ! fw_has_nonempty_grant "$issue" "$run" && [ -z "${FW_NO_FENCE:-}" ]; then
+      fw_self_grant tkt-job "$issue" "$run" 1 || {
         echo "tkt-job: could not self-grant a fence for #$issue" >&2
         exit 2
       }

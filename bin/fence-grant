@@ -349,11 +349,11 @@ if [ "${1:-}" = --require ]; then
   run=$(_fw_run)
   run_abs=$(_fw_abs_path "$run")
   set +f
-  for grant in "$run"/fiber-"$ticket"*-fence-grant*.md; do
+  for grant in "$run"/fiber-"$ticket"-fence-grant*.md "$run"/fiber-"$ticket"-*-fence-grant*.md; do
     [ -f "$grant" ] && exit 0
   done
   host=$(hostname) || { echo 'fence-grant: cannot determine host name' >&2; exit 3; }
-  echo "fence-grant: issue $ticket needs a fence grant matching $run_abs/fiber-$ticket*-fence-grant*.md on host $host; a grant written on another machine is invisible here; create one or set FW_NO_FENCE=<reason>" >&2
+  echo "fence-grant: issue $ticket needs a fence grant matching $run_abs/fiber-$ticket-fence-grant*.md or $run_abs/fiber-$ticket-*-fence-grant*.md on host $host; a grant written on another machine is invisible here; create one or set FW_NO_FENCE=<reason>" >&2
   exit 2
 fi
 

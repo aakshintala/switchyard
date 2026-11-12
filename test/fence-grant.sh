@@ -2176,9 +2176,9 @@ assert_no_grant 'malformed claims read'
 reset_case
 run_fg --require 77 --phase plan
 assert_rc 2 'plan phase without a grant is refused'
-expected_refusal="fence-grant: issue 77 needs a fence grant matching $FW_RUN/fiber-77*-fence-grant*.md on host $(hostname); a grant written on another machine is invisible here; create one or set FW_NO_FENCE=<reason>"
+expected_refusal="fence-grant: issue 77 needs a fence grant matching $FW_RUN/fiber-77-fence-grant*.md or $FW_RUN/fiber-77-*-fence-grant*.md on host $(hostname); a grant written on another machine is invisible here; create one or set FW_NO_FENCE=<reason>"
 assert_stderr "$expected_refusal" 'plan requirement explains the searched host and path'
-grep -qF "matching $FW_RUN/fiber-77*-fence-grant*.md on host $(hostname)" "$T/err" \
+grep -qF "matching $FW_RUN/fiber-77-fence-grant*.md or $FW_RUN/fiber-77-*-fence-grant*.md on host $(hostname)" "$T/err" \
   || fail 'require refusal shows searched glob and host'
 grep -qF 'a grant written on another machine is invisible here' "$T/err" \
   || fail 'require refusal explains host-local visibility'
@@ -2193,6 +2193,11 @@ rm "$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg --require 77 --phase build
 assert_rc 2 'build phase without a grant is refused'
 assert_stderr "$expected_refusal" 'build requirement explains the searched host and path'
+
+printf 'Grant 1\n\nTicket: 4260\nPart: 1\nPaths:\n- docs/tui.md\nRanges: none\n' >"$FW_RUN/fiber-4260-fence-grant-1.md"
+run_fg --require 426 --phase build
+assert_rc 2 'ticket #426 does not accept only #4260 grant'
+rm "$FW_RUN/fiber-4260-fence-grant-1.md"
 
 printf 'grant\n' >"$FW_RUN/fiber-77-fence-grant-1.md"
 run_fg --require 77 --phase build
@@ -2297,7 +2302,7 @@ chmod +x "$HOST_BIN"/* "$DEFAULT_HOME/.local/bin/delegate"
   bash "$FG" --require 9876 --phase plan >"$T/default-run.out" 2>"$T/default-run.err"
   default_rc=$?
   [ "$default_rc" = 2 ] || fail 'missing default-path grant is refused'
-  grep -qF "matching $DEFAULT_RUN/fiber-9876*-fence-grant*.md" "$T/default-run.err" \
+  grep -qF "matching $DEFAULT_RUN/fiber-9876-fence-grant*.md or $DEFAULT_RUN/fiber-9876-*-fence-grant*.md" "$T/default-run.err" \
     || fail 'FW_RUN defaults under fake HOME'
 ) || exit 1
 
