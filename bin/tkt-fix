@@ -648,13 +648,17 @@ write_findings_history() {
   t set "fix_round.$knum.history" "$history_file"
 }
 
-# A resume checks the current plan Gate line and passes it to tkt-job. A
-# takeover has no plan file, so its recorded state gate is passed directly.
+# A resume uses the optional plan Fix gate when present; otherwise the job
+# reads the plan Gate line. A takeover has no plan file, so its recorded state
+# gate is passed directly.
 plan="$(t get plan 2>/dev/null || true)"
 takeover=0
 takeover_gate=""
 gate_cmd=""
 takeover_gate_arg=""
+fix_gate_cmd=""
+fix_gate_arg=""
+fix_gate_rc=3
 if [ -z "$plan" ]; then
   echo "tkt-fix: missing key: plan (the gate comes from the plan Gate section); set it with: tkt-plan $state set <plan file>" >&2
   exit 2
@@ -670,7 +674,18 @@ else
     echo "tkt-fix: missing gate: no Gate command in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
     exit 2
   }
+  if fix_gate_cmd="$("$plangate" --fix ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan")"; then
+    fix_gate_rc=0
+  else
+    fix_gate_rc=$?
+    if [ "$fix_gate_rc" -ne 3 ]; then
+      echo "tkt-fix: invalid Fix gate in plan $plan (key: plan); set it with: tkt-plan $state set <plan file>" >&2
+      exit 2
+    fi
+    fix_gate_cmd=""
+  fi
 fi
+brief_gate_cmd="$gate_cmd"
 concerns_file=""
 no_commits=0
 round_start="$(git -C "$worktree" rev-parse HEAD)"
@@ -686,6 +701,20 @@ elif [ -n "$resume" ]; then
   fi
 fi
 record_round_start "$round_start"
+if [ "$fix_gate_rc" -eq 0 ]; then
+  round_start="$(t get "fix_round.$knum.start" 2>/dev/null)" || {
+    echo "tkt-fix: cannot read recorded round start: fix_round.$knum.start" >&2
+    exit 2
+  }
+  round_start="$(git -C "$worktree" rev-parse --verify "${round_start}^{commit}")" || {
+    echo "tkt-fix: cannot resolve recorded round start: $round_start" >&2
+    exit 2
+  }
+  fix_gate_cmd="${fix_gate_cmd//<since>/$round_start}"
+  fix_gate_arg="$fix_gate_cmd"
+  if e="$(t get env 2>/dev/null)" && [ -n "$e" ]; then fix_gate_arg="$e $fix_gate_cmd"; fi
+  brief_gate_cmd="$fix_gate_cmd"
+fi
 record_round_findings
 if [ "$recover_unpushed" -eq 1 ]; then
   # Re-run the plan gate before publishing a commit left by a closed job.
@@ -722,11 +751,23 @@ else
   if [ -n "$resume" ]; then
     args=(--slot "$slot" --resume "$resume" --prompt "$prompt")
     [ -z "$fixmodel" ] || args+=(--model "$fixmodel")
-    if [ "$takeover" -eq 1 ]; then args+=(--gate "$takeover_gate_arg"); else args+=(--gate-from-plan); fi
+    if [ "$takeover" -eq 1 ]; then
+      args+=(--gate "$takeover_gate_arg")
+    elif [ "$fix_gate_rc" -eq 0 ]; then
+      args+=(--gate "$fix_gate_arg")
+    else
+      args+=(--gate-from-plan)
+    fi
   else
     [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
-    args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$gate_cmd")
-    if [ "$takeover" -eq 1 ]; then args+=(--gate "$takeover_gate_arg"); else args+=(--gate-from-plan); fi
+    args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$brief_gate_cmd")
+    if [ "$takeover" -eq 1 ]; then
+      args+=(--gate "$takeover_gate_arg")
+    elif [ "$fix_gate_rc" -eq 0 ]; then
+      args+=(--gate "$fix_gate_arg")
+    else
+      args+=(--gate-from-plan)
+    fi
     args+=(--expect-commits)
     if ! t get extra >/dev/null 2>&1; then args+=(EXTRA=""); fi
   fi

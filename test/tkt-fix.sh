@@ -726,6 +726,77 @@ out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/st
 grep -q "job|.*--resume j9.*--prompt $CDIR/prompt.md.*--gate-from-plan" "$T/calls.log" || fail "resume args not forwarded with --gate-from-plan"
 grep -q 'job|.*--model' "$T/calls.log" && fail "resume without --fix-model passed a model"
 
+# A plan-declared Fix gate substitutes the pre-fix HEAD for <since> and is
+# passed as both the job gate and the fresh fix brief's GATE value.
+if want fix-gate; then
+setup_case fix-gate
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `fix.txt`
+
+## Gate
+
+`true`
+
+## Fix gate
+
+`bash test/run --since <since> && bash bin/check-pack`
+EOF
+bash "$TKT_STATE" "$S" set env 'FOO=1 BAR=2' >/dev/null
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "fix-gate exited $?: $(cat "$T/stderr")"
+expected_gate="bash test/run --since $OLD && bash bin/check-pack"
+grep -Fq -- "--gate FOO=1 BAR=2 $expected_gate" "$T/calls.log" || fail "fix-gate job gate was not substituted with env: $(cat "$T/calls.log")"
+! grep -Fq -- '--gate-from-plan' "$T/calls.log" || fail "fix-gate passed --gate-from-plan: $(cat "$T/calls.log")"
+grep -Fq "GATE=$expected_gate" "$T/calls.log" || fail "fix-gate brief did not name substituted gate: $(cat "$T/calls.log")"
+fi
+
+# A resumed fix job also receives its plan-declared gate with the round-start SHA.
+if want fix-gate-resume; then
+setup_case fix-gate-resume
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `fix.txt`
+
+## Gate
+
+`true`
+
+## Fix gate
+
+`bash test/run --since <since> && bash bin/check-pack`
+EOF
+printf 'pre-resume fix\n' >"$WT/fix.txt"
+git -C "$WT" add fix.txt
+git -C "$WT" commit -qm 'fix: pre-resume change'
+git -C "$WT" push -q origin tkt-529
+PRE_JOB_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$PRE_JOB_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set reviewed "$PRE_JOB_HEAD" >/dev/null
+bash "$TKT_STATE" "$S" set fix_round.1.start "$OLD" >/dev/null
+bash "$TKT_STATE" "$S" set env 'FOO=1' >/dev/null
+printf 'resume brief\n' >"$CDIR/prompt.md"
+out="$(bash "$TKT" "$S" --verify --resume j9 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "fix-gate-resume exited $?: $(cat "$T/stderr")"
+expected_gate="bash test/run --since $OLD && bash bin/check-pack"
+grep -Fq -- "--gate FOO=1 $expected_gate" "$T/calls.log" || fail "fix-gate-resume did not pass substituted gate with env: $(cat "$T/calls.log")"
+! grep -Fq -- '--gate-from-plan' "$T/calls.log" || fail "fix-gate-resume passed --gate-from-plan: $(cat "$T/calls.log")"
+fi
+
+# Without a Fix gate the fresh job keeps --gate-from-plan and GATE is the full Gate.
+if want fix-gate-fallback; then
+setup_case fix-gate-fallback
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "fix-gate-fallback exited $?: $(cat "$T/stderr")"
+grep -Fq -- '--gate-from-plan' "$T/calls.log" || fail "fix-gate-fallback did not pass --gate-from-plan: $(cat "$T/calls.log")"
+grep -Fq 'GATE=true' "$T/calls.log" || fail "fix-gate-fallback brief did not retain full gate: $(cat "$T/calls.log")"
+fi
+
 # --fix-model overrides the stored model for a resume.
 if want RESUME-MODEL; then
 setup_case resume-model
