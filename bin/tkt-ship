@@ -492,6 +492,7 @@ if grep -Eq 'gh pr merge failed|merge status could not be confirmed' "$runlog"; 
 elif grep -Eq 'gate failed|fails the gate' "$runlog"; then
   emit "GATE-FAIL" 1 "$(tail -n 20 "$runlog")"
 else
+  ship_detail="$(tail -n 20 "$runlog")"
   printf '\n--- gh-ci failures ---\n' >>"$runlog"
   (cd "$worktree" && GH_CI_LOG_LINES=300 "$bin_dir/gh-ci" failures --pr "$pr" --repo "$repo" >>"$runlog" 2>&1) || true
   digest="$(ci_digest)"
@@ -506,6 +507,15 @@ ${summary}"
     else
       digest="${never_started}
 ${summary}"
+    fi
+  fi
+  if [ -z "$never_started" ] && grep -q '^SUMMARY jobs=0 ' <<<"$digest"; then
+    if grep -Eq 'origin/main moved during CI after 3 retries|origin/main moved during the merge check; rerun ship-pr|CI passed on a head other than' <<<"$ship_detail"; then
+      emit "HEAD-MOVED" 1 "$ship_detail"
+    elif grep -Eq 'gate changed the worktree|fails the merge check' <<<"$ship_detail"; then
+      emit "GATE-FAIL" 1 "$ship_detail"
+    else
+      emit "CI-PENDING" 1 "$ship_detail"
     fi
   fi
   emit "CI-FAIL $(tail -n 1 <<<"$digest" | sed 's/^SUMMARY //')" 1 "$(sed '$d' <<<"$digest")"

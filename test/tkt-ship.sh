@@ -772,6 +772,29 @@ expect_line1 "CI-FAIL jobs=0 inside-diff=0 mutants=0" neverstarted
 case "$OUT" in *"gh-ci: check ci has no check run after 10 min; it never started"*) ;; *) fail "digest carries never-started line: [$OUT]" ;; esac
 case "$OUT" in *"gh-ci reported no failed jobs"*) fail "digest drops empty failed-jobs line: [$OUT]" ;; esac
 
+# --- exit 1 with no failed jobs is retryable, not a CI failure ---
+reset_stub; setup_case ci-pending
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: CI wait ended without a failed job; retry ship-pr\n' >"$T/shiplog"
+printf 'gh-ci reported no failed jobs\n' >"$T/failures-log"
+run_ship
+[ "$RC" -eq 1 ] || fail "ci-pending: exit $RC"
+expect_line1 "CI-PENDING" ci-pending
+case "$OUT" in *"CI-FAIL"*) fail "ci-pending: reported CI-FAIL: [$OUT]" ;; esac
+case "$OUT" in *"ship-pr: CI wait ended without a failed job; retry ship-pr"*) ;; *) fail "ci-pending: verdict omits ship-pr log tail: [$OUT]" ;; esac
+expect_journal ci-pending CI-PENDING
+
+# --- exhausted origin/main retries without failed CI jobs are head movement ---
+reset_stub; setup_case head-moved
+printf '1' >"$T/exitcodes"
+printf 'ship-pr: origin/main moved during CI after 3 retries; rerun ship-pr\n' >"$T/shiplog"
+printf 'gh-ci reported no failed jobs\n' >"$T/failures-log"
+run_ship
+[ "$RC" -eq 1 ] || fail "head-moved: exit $RC"
+expect_line1 "HEAD-MOVED" head-moved
+case "$OUT" in *"origin/main moved during CI after 3 retries"*) ;; *) fail "head-moved: verdict omits ship-pr log tail: [$OUT]" ;; esac
+expect_journal head-moved HEAD-MOVED
+
 # --- a merge-only head with newer origin/main preserves the gated diff ---
 reset_stub; setup_case gateship-main-merge-journal
 printf '0' >"$T/exitcodes"
