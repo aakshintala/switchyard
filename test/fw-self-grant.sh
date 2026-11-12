@@ -79,4 +79,4 @@ grep -q 'a build phase needs one' "$T/no-phase.stderr" || fail "unset phase defa
 printf 'Grant 1\n\nTicket: 1611\nPart: 1\nPaths:\nRanges: none\n' >"$FW_RUN/fiber-1611-fence-grant-1.md"
 if fw_self_grant test 1611 "$FW_RUN" 1 build 2>"$T/refresh.stderr"; then fail "refresh-empty build without plan refuses"; fi
 [ ! -s "$FG_LOG" ] || fail "refresh refusal does not call fence-grant"
-printf 'ok fw-self-grant-whole-file-and-empty\\n'
+printf 'ok fw-self-grant-whole-file-and-empty\n'
