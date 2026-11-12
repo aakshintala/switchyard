@@ -1383,6 +1383,19 @@ mfile="$CDIR/run/switchyard-528-mutants-${H:0:12}.txt"
 [ "$(grep -c . "$mfile")" -eq 3 ] || fail "prefixed-log: three stripped lines match"
 grep -q "^src/a.rs:10:20:" "$mfile" || fail "prefixed-log: prefixes stripped"
 
+# --- summary and echoed script lines are not mutants (fiber #4683) ---
+setup_case summary-only-log
+printf 'mutant_job=%s\n' Selection >>"$S"
+cat >"$T/mutant-log" <<'EOF'
+Selection Build 2026-10-17T00:00:00Z   echo "mutants in the diff: $listed (not run: no Rust changes)"
+Selection Build 2026-10-17T00:00:00Z   echo "mutants in the diff: $count"
+Selection Build 2026-10-17T00:00:00Z mutants in the diff: 0
+EOF
+run_build
+[ "$RC" -eq 0 ] || fail "summary-only-log exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+expect_verdict "TKT tkt-build APPROVE*" "summary-only-log"
+grep -q "prompt=.*-map-" "$T/calls.log" && fail "summary-only-log: no map job for zero mutants"
+
 # --- an incomplete map does not APPROVE ---
 setup_case map-incomplete
 printf 'mutant_job=%s\n' Selection >>"$S"
