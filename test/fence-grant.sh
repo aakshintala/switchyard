@@ -83,6 +83,7 @@ print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATE
         [ -n "$compare_pr" ] && [ -f "$T/pr/$compare_pr.diff" ] || { echo "missing compare fixture for $compare_sha" >&2; exit 1; }
         [ "${GH_COMPARE_FAIL_SHA:-}" != "$compare_sha" ] || { echo 'compare unavailable' >&2; exit 1; }
         [ "${GH_DIFF_406_PR:-}" != "$compare_pr" ] || { echo 'HTTP 406: compare diff exceeds the maximum size' >&2; exit 1; }
+        [ "${GH_COMPARE_MISMATCH_SHA:-}" != "$compare_sha" ] || exit 0
         case " $* " in *' application/vnd.github.diff '*) cat "$T/pr/$compare_pr.diff";; *) echo "stub gh: compare requires diff media type: $*" >&2; exit 99;; esac
         ;;
       repos/*/commits/main)
@@ -349,8 +350,8 @@ TREE
   GH_TREE_SHA=aaaaaaaa GH_SHA_FAIL=0 GH_SHA_ERROR= GH_TREE_ERROR=
   export GH_TREE_SHA GH_SHA_FAIL GH_SHA_ERROR GH_TREE_ERROR
   GH_TREE_FAIL=0 GH_BLOB_FAIL=0 GH_PRLIST_FAIL=0 GH_DIFFN_FAIL= GH_DIFF_FAIL= GH_DIFF_406_PR=
-  GH_COMPARE_FAIL_SHA= GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_FAIL_WITH_OUTPUT=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT= SSH_STDERR=
-  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_DIFF_406_PR GH_COMPARE_FAIL_SHA GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_FAIL_WITH_OUTPUT CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
+  GH_COMPARE_FAIL_SHA= GH_COMPARE_MISMATCH_SHA= GH_TREE_JSON= GH_PRLIST_JSON= GH_PRLIST='[]' CLAUDE_FAIL=0 CLAUDE_FAIL_WITH_OUTPUT=0 CLAUDE_JSON='[]' SSH_FAIL=0 SSH_OUT= SSH_STDERR=
+  export GH_TREE_FAIL GH_BLOB_FAIL GH_PRLIST_FAIL GH_DIFFN_FAIL GH_DIFF_FAIL GH_DIFF_406_PR GH_COMPARE_FAIL_SHA GH_COMPARE_MISMATCH_SHA GH_TREE_JSON GH_PRLIST_JSON GH_PRLIST CLAUDE_FAIL CLAUDE_FAIL_WITH_OUTPUT CLAUDE_JSON SSH_FAIL SSH_OUT SSH_STDERR
   GH_TICKET_STATES= GH_TICKET_FAIL=0 GH_TICKET_BAD=0 GH_TICKET_MISSING=0 GH_TICKET_OMIT=
   export GH_TICKET_STATES GH_TICKET_FAIL GH_TICKET_BAD GH_TICKET_MISSING GH_TICKET_OMIT
   FW_DELEGATE_DIR="$T/delegate-jobs"
@@ -1036,6 +1037,61 @@ assert_rc 0 'compare fallback result is usable'
 run_fg 77 --paths docs/tui.md --dry
 assert_rc 0 'compare fallback result is not cached'
 [ "$(grep -c '^pr diff 7 ' "$T/gh.log")" = 2 ] || fail "fallback is fetched again rather than cached: $(cat "$T/gh.log")"
+
+# A successful but incomplete compare response falls back uncached to pr diff.
+reset_case
+GH_PRLIST_JSON='[{"number":7,"headRefName":"fix/mismatch","changedFiles":1,"headRefOid":"1647000000000000000000000000000000000000","baseRefName":"main"}]'
+export GH_PRLIST_JSON
+GH_COMPARE_MISMATCH_SHA=1647000000000000000000000000000000000000
+export GH_COMPARE_MISMATCH_SHA
+printf 'docs/tui.md\n' >"$T/pr/7.names"
+printf 'diff --git a/docs/tui.md b/docs/tui.md\nindex 1111111..2222222 100644\n--- a/docs/tui.md\n+++ b/docs/tui.md\n@@ -1 +1 @@\n-old\n+new\n' >"$T/pr/7.diff"
+run_fg 77 --paths docs/tui.md --dry
+assert_rc 0 'section-count mismatch uses pr diff fallback'
+[ "$(grep -c '^pr diff 7 ' "$T/gh.log")" = 2 ] || fail "section-count mismatch uses pr diff for names and diff: $(cat "$T/gh.log")"
+[ "$(grep -c '^api repos/aakshintala/fiber/compare/main\.\.\.1647000000000000000000000000000000000000 ' "$T/gh.log")" = 2 ] || fail "section-count mismatch compare is retried without caching: $(cat "$T/gh.log")"
+[ -z "$(find "$FENCE_GRANT_CACHE_DIR/aakshintala/fiber/7" -type f -print 2>/dev/null)" ] || fail 'section-count mismatch is not cached'
+# A mismatch whose pr diff fallback also fails refuses the grant and caches nothing.
+GH_DIFF_FAIL=7
+export GH_DIFF_FAIL
+: >"$T/gh.log"
+run_fg 77 --paths docs/tui.md --dry
+[ "$RC" != 0 ] || fail "section-count mismatch with failed fallback fails closed: stdout=$(cat "$T/out")"
+[ -z "$(find "$FENCE_GRANT_CACHE_DIR/aakshintala/fiber/7" -type f -print 2>/dev/null)" ] || fail 'section-count mismatch with failed fallback is not cached'
+
+# If an entry disappears after the existence check, treat the failed copy as a miss.
+reset_case
+source "$SCRIPT_DIR/../bin/lib/pr-diff.sh"
+GH_PRLIST_JSON='[{"number":7,"headRefName":"fix/cache-race","changedFiles":1,"headRefOid":"1647eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","baseRefName":"main"}]'
+export GH_PRLIST_JSON
+printf 'docs/tui.md\n' >"$T/pr/7.names"
+printf 'diff --git a/docs/tui.md b/docs/tui.md\nindex 1111111..2222222 100644\n--- a/docs/tui.md\n+++ b/docs/tui.md\n@@ -1 +1 @@\n-old\n+new\n' >"$T/pr/7.diff"
+race_cache="$FENCE_GRANT_CACHE_DIR/aakshintala/fiber/7/1647eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-main.diff"
+mkdir -p "${race_cache%/*}"
+cp "$T/pr/7.diff" "$race_cache"
+mkdir -p "$T/cp-race-bin"
+REAL_CP=$(command -v cp)
+RACE_CACHE_FILE="$race_cache"
+RACE_CP_TRIGGERED="$T/cp-race-triggered"
+export REAL_CP RACE_CACHE_FILE RACE_CP_TRIGGERED
+cat >"$T/cp-race-bin/cp" <<'CP_RACE'
+#!/usr/bin/env bash
+if [ "${1:-}" = "$RACE_CACHE_FILE" ] && [ ! -e "$RACE_CP_TRIGGERED" ]; then
+  rm -f "$1"
+  : >"$RACE_CP_TRIGGERED"
+  exit 1
+fi
+exec "$REAL_CP" "$@"
+CP_RACE
+chmod +x "$T/cp-race-bin/cp"
+PATH="$T/cp-race-bin:$ORIGINAL_PATH"
+export PATH
+pr_diff_fetch_cached "$FW_GH" aakshintala/fiber 7 1 1647eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee main --allow-escape-sequences >"$T/cache-race.out" 2>"$T/cache-race.err"
+RC=$?
+[ "$RC" = 0 ] || fail "evicted cache entry is refetched: exit $RC; stderr=$(cat "$T/cache-race.err")"
+cmp -s "$T/pr/7.diff" "$T/cache-race.out" || fail 'evicted cache entry returns the refetched diff'
+[ -e "$T/cp-race-triggered" ] || fail 'cache copy shim deleted the entry after its existence check'
+[ "$(grep -c '^api repos/aakshintala/fiber/compare/main\.\.\.1647eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee ' "$T/gh.log")" = 1 ] || fail "evicted cache entry makes one compare call: $(cat "$T/gh.log")"
 
 reset_case
 run_fg 77 --paths=docs/tui.md --dry

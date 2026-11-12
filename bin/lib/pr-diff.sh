@@ -305,7 +305,7 @@ PY
 # Fallback results remain uncached because they are not pinned by compare.
 pr_diff_fetch_cached() {
   local gh="$1" repo="$2" pr="$3" expected="$4" head_sha="$5" base="$6" mode="diff"
-  local cache_root cache_dir cache_file work tmp_file sections last_byte cache_base cache_hit=0
+  local cache_root cache_dir cache_file work tmp_file sections last_byte cache_base cache_hit=0 compare_failed=0 rc
   shift 6
   while [ "$#" -gt 0 ]; do
     case "$1" in --name-only) mode="names";; --allow-escape-sequences) :;; *) echo "pr-diff: unknown option $1" >&2; return 1;; esac
@@ -321,10 +321,28 @@ pr_diff_fetch_cached() {
   cache_file="$cache_dir/$head_sha-$cache_base.diff"
   work="$(mktemp -d "${TMPDIR:-/tmp}/pr-diff-cache.XXXXXX")" || { echo "pr-diff: cannot make temporary directory for PR #$pr" >&2; return 1; }
   if [ -f "$cache_file" ]; then
-    cp "$cache_file" "$work/fetch" || { rm -rf "$work"; return 1; }
-    cache_hit=1
-  else
+    if cp "$cache_file" "$work/fetch"; then
+      cache_hit=1
+    elif [ -e "$cache_file" ]; then
+      rm -rf "$work"
+      return 1
+    fi
+  fi
+  if [ "$cache_hit" -eq 0 ]; then
     if ! "$gh" api "repos/$repo/compare/$base...$head_sha" -H 'Accept: application/vnd.github.diff' >"$work/fetch" 2>"$work/compare.err"; then
+      compare_failed=1
+    else
+      if [ -s "$work/fetch" ]; then
+        last_byte=$(tail -c 1 "$work/fetch" | od -An -t x1 | tr -d '[:space:]')
+        if [ "$last_byte" != 0a ]; then echo "pr-diff: PR #$pr returned a truncated diff" >&2; rm -rf "$work"; return 1; fi
+      fi
+      sections=$(grep -c '^diff --git ' "$work/fetch" 2>/dev/null || true)
+      if [ -n "$expected" ] && [ "$expected" != "$sections" ]; then
+        echo "pr-diff: PR #$pr returned $sections diff sections; changedFiles is $expected" >&2
+        compare_failed=1
+      fi
+    fi
+    if [ "$compare_failed" = 1 ]; then
       if pr_diff_fetch "$gh" "$repo" "$pr" "$expected" --allow-escape-sequences >"$work/fallback"; then
         if [ "$mode" = names ]; then
           if ! pr_diff_names_from_diff "$work/fallback" >"$work/names"; then
@@ -334,16 +352,10 @@ pr_diff_fetch_cached() {
         else
           cat "$work/fallback"
         fi
-        local rc=$?; rm -rf "$work"; return "$rc"
+        rc=$?; rm -rf "$work"; return "$rc"
       fi
       cat "$work/compare.err" >&2; rm -rf "$work"; return 1
     fi
-    if [ -s "$work/fetch" ]; then
-      last_byte=$(tail -c 1 "$work/fetch" | od -An -t x1 | tr -d '[:space:]')
-      if [ "$last_byte" != 0a ]; then echo "pr-diff: PR #$pr returned a truncated diff" >&2; rm -rf "$work"; return 1; fi
-    fi
-    sections=$(grep -c '^diff --git ' "$work/fetch" 2>/dev/null || true)
-    if [ -n "$expected" ] && [ "$expected" != "$sections" ]; then echo "pr-diff: PR #$pr returned $sections diff sections; changedFiles is $expected" >&2; rm -rf "$work"; return 1; fi
     if ! pr_diff_names_from_diff "$work/fetch" >"$work/names"; then
       # An ambiguous mode-only header is never guessed or cached.
       if ! pr_diff_fetch "$gh" "$repo" "$pr" "$expected" --name-only >"$work/names"; then rm -rf "$work"; return 1; fi
@@ -365,5 +377,5 @@ pr_diff_fetch_cached() {
   else
     cat "$work/fetch"
   fi
-  local rc=$?; rm -rf "$work"; return "$rc"
+  rc=$?; rm -rf "$work"; return "$rc"
 }
