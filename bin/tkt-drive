@@ -209,7 +209,7 @@ plan="$(get plan)"
 if [ -z "$plan" ]; then
   t journal "tkt-drive NEEDS-PLAN trigger=$trigger" 2>/dev/null || true
   printf 'TKT tkt-drive NEEDS-PLAN\n'
-  printf 'No plan yet. Run planning (planner, Verifier, `tkt-plan <state> set <plan>`), then rerun tkt-drive.\n' >&2
+  printf 'NEEDS-PLAN is not a block: do not report it. Run the planning skill now (planner, Verifier, `tkt-plan <state> set <plan>`), then rerun tkt-drive.\n' >&2
   exit 5
 fi
 [ -r "$plan" ] || internal_stop "tkt-drive: cannot read plan: $plan"
