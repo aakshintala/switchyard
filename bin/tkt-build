@@ -583,7 +583,9 @@ if mutant_job="$(tkt get mutant_job 2>/dev/null)" && [ -n "$mutant_job" ]; then
   done
   esc="$(printf '\033')"
   grep -Eo '[^[:space:]]+\.rs:[0-9]+:[0-9]+: .*|mutants in the diff: .*' "$tmp_log" 2>/dev/null | tr -d '\r' | sed -E "s/${esc}\[[0-9;]*[A-Za-z]//g" >"$mutants_file" || true
-  mutant_count="$(grep -c . "$mutants_file" || true)"
+  # Count mutant locations only: summary lines, and the step source GitHub
+  # echoes into the log (`echo "mutants in the diff: $count"`), are not mutants.
+  mutant_count="$(grep -cE '^[^[:space:]]+\.rs:[0-9]+:[0-9]+: ' "$mutants_file" || true)"
 fi
 rm="${review_model:-$(tkt get model.review 2>/dev/null || true)}"
 om="${overbuild_model:-$(tkt get model.overbuild 2>/dev/null || true)}"
