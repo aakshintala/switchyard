@@ -795,6 +795,7 @@ setup_case fix-gate-fallback
 out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "fix-gate-fallback exited $?: $(cat "$T/stderr")"
 grep -Fq -- '--gate-from-plan' "$T/calls.log" || fail "fix-gate-fallback did not pass --gate-from-plan: $(cat "$T/calls.log")"
 grep -Fq 'GATE=true' "$T/calls.log" || fail "fix-gate-fallback brief did not retain full gate: $(cat "$T/calls.log")"
+! grep -Fq 'Fix gate' "$T/stderr" || fail "fix-gate-fallback printed plan-gate's missing-heading note: $(cat "$T/stderr")"
 fi
 
 # --fix-model overrides the stored model for a resume.
