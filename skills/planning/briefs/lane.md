@@ -8,7 +8,7 @@ Read the plan at `__PLAN__` before anything else, and reread it after any compac
 
 ## Before the first edit
 
-1. Before editing any file, run `file-claim claim --lane __CLAIM_HOLDER__ --grant <paths>` with this lane's claim holder and fenced paths, not a model ID. Give it no timeout argument: it can outlive 30 s, and exit 143 is your own timeout firing, not a refusal; if one fires, `file-claim list` shows what is already held before you rerun.
+1. Before editing any file, run `file-claim claim --lane __CLAIM_HOLDER__ --grant <paths>` with this lane's claim holder and fenced paths, not a model ID. Give it no timeout argument: it can outlive 30 s, and exit 143 is your own timeout firing, not a refusal; if one fires, `file-claim list` shows what is already held before you rerun. On pi, a call past 30 s becomes a job: wait on it (below).
 
 ## Rules
 
