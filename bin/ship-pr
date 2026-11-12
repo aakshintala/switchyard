@@ -107,14 +107,14 @@
 #        after the merge attempt, the error says the merge status could not be confirmed.
 #        --known-flake <ticket>... is opt-in only with --by flywheel. If the gate
 #        is red, CI must be green on the exact pinned head; each test name must be
-#        named in a supplied open ticket's body or a comment; the test's
-#        source must be outside the PR diff; and a fresh gate must have failed
+#        named in a supplied open ticket's body or a comment; no file in its Cargo crate
+#        directory may be in the PR diff; and a fresh gate must have failed
 #        only on parsed test failures. A known-flake refusal exits 5 as
-#        KNOWN-FLAKE. Nextest `FAIL [duration] <binary> <test>`
-#        names the exact `<test>` string; `<binary>` maps to a matching Cargo
-#        target source (including `tests/<binary>.rs` for integration tests).
-#        Cargo `test <name> ... FAILED` uses `<name>` and maps module paths under
-#        `src/` when present, otherwise to the crate's `src/lib.rs`.
+#        KNOWN-FLAKE. Nextest statuses `FAIL`, `TIMEOUT`, `SIGSEGV`, `SIGABRT`,
+#        `LEAK`, and `LEAK-FAIL` name tests as `<crate>::<binary> <test>` and
+#        resolve `<crate>` through Cargo metadata.
+#        Cargo `test <name> ... FAILED` uses `<name>` and resolves its crate from
+#        the source path in Cargo's `Running` line.
 #        Once merged, the PR and each used ticket get an audit/sighting comment;
 #        the failed gate output is retained for that acceptance.
 #        Exit 0 merged, 1 gate/CI/push/merge failure (including `gh-ci wait` exit 4
@@ -416,161 +416,145 @@ run_gate() {
   return 1
 }
 
-known_package_root() {
-  local want="$1" manifest name normalized root
-  want="${want//-/_}"
-  while IFS= read -r manifest; do
-    name="$(awk '
-      /^\[package\]$/ { in_package=1; next }
-      /^\[/ { in_package=0 }
-      in_package && /^[[:space:]]*name[[:space:]]*=/ {
-        sub(/^[^=]*=[[:space:]]*/, "")
-        gsub(/"/, "")
-        gsub(/[[:space:]]/, "")
-        print
-        exit
-      }
-    ' "$manifest")"
-    normalized="${name//-/_}"
-    if [ -n "$normalized" ] && [ "$normalized" = "$want" ]; then
-      manifest="${manifest%/Cargo.toml}"
-      root="${manifest#"$worktree"/}"
-      printf '%s\n' "${root:-.}"
-      return 0
-    fi
-  done < <(find "$worktree" -type f -name Cargo.toml -not -path '*/target/*' -print 2>/dev/null)
-  return 1
+known_metadata_package_root() {
+  local want="${1//-/_}" count manifest root
+  count="$(jq -r --arg want "$want" '[.packages[]? | select((.name | gsub("-"; "_")) == $want)] | length' <<<"$known_cargo_metadata" 2>/dev/null)" \
+    || return 1
+  [ "$count" = 1 ] || return 1
+  manifest="$(jq -r --arg want "$want" '.packages[]? | select((.name | gsub("-"; "_")) == $want) | .manifest_path' <<<"$known_cargo_metadata" 2>/dev/null)" \
+    || return 1
+  case "$manifest" in
+    "$worktree"/Cargo.toml) root="." ;;
+    "$worktree"/*/Cargo.toml) root="${manifest#"$worktree"/}"; root="${root%/Cargo.toml}" ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$root"
 }
 
-known_nextest_source() {
-  local binary="$1" path="" package_root=""
-  path="$(find "$worktree" -type f -path "*/tests/$binary.rs" -not -path '*/target/*' -print -quit 2>/dev/null || true)"
-  if [ -z "$path" ]; then
-    path="$(find "$worktree" -type f -path "*/src/$binary.rs" -not -path '*/target/*' -print -quit 2>/dev/null || true)"
-  fi
-  if [ -n "$path" ]; then
-    printf '%s\n' "${path#"$worktree"/}"
-  else
-    package_root="$(known_package_root "$binary" 2>/dev/null || true)"
-    [ "$package_root" != . ] || package_root=""
-    if [ -n "$package_root" ]; then
-      package_root="${package_root#./}"
-      for path in "$worktree/${package_root:+$package_root/}src/lib.rs" "$worktree/${package_root:+$package_root/}src/main.rs"; do
-        [ ! -f "$path" ] || { printf '%s\n' "${path#"$worktree"/}"; return; }
-      done
-    fi
-    path="$(find "$worktree" -type f -path '*/src/lib.rs' -not -path '*/target/*' -print -quit 2>/dev/null || true)"
-    if [ -n "$path" ]; then printf '%s\n' "${path#"$worktree"/}"; else printf 'tests/%s.rs\n' "$binary"; fi
-  fi
-}
-
-known_cargo_source() {
-  local test_name="$1" running_source="${2:-}" prefix module path package_hint package_root="" package_found=0 manifest
-  if [ -n "$running_source" ]; then
-    case "$running_source" in
-      "$worktree"/*) running_source="${running_source#"$worktree"/}" ;;
+known_metadata_package_for_source() {
+  local source="$1" package target target_rel matched=""
+  case "$source" in "$worktree"/*) source="${source#"$worktree"/}" ;; esac
+  source="${source#./}"
+  while IFS=$'\t' read -r package target; do
+    [ -n "$package" ] && [ -n "$target" ] || continue
+    case "$target" in
+      "$worktree"/*) target_rel="${target#"$worktree"/}" ;;
+      *) target_rel="$target" ;;
     esac
-    if [[ "$running_source" == src/* || "$running_source" == tests/* ]]; then
-      package_hint="${test_name%%::*}"
-      package_root="$(known_package_root "$package_hint" 2>/dev/null || true)"
-      if [ -n "$package_root" ]; then
-        [ "$package_root" != . ] || package_root=""
-        package_root="${package_root#./}"
-        printf '%s\n' "${package_root:+$package_root/}$running_source"
-        return
-      fi
-      while IFS= read -r manifest; do
-        path="${manifest%/Cargo.toml}/$running_source"
-        if [ -f "$path" ]; then printf '%s\n' "${path#"$worktree"/}"; return; fi
-      done < <(find "$worktree" -type f -name Cargo.toml -not -path '*/target/*' -print 2>/dev/null)
+    target_rel="${target_rel#./}"
+    if [ "$source" = "$target_rel" ] || [ "$source" = "$target" ]; then
+      [ -z "$matched" ] || return 1
+      matched="$package"
     fi
-    printf '%s\n' "$running_source"
-    return
+  done < <(jq -r '.packages[]? as $package | $package.targets[]? | [$package.name, .src_path] | @tsv' <<<"$known_cargo_metadata" 2>/dev/null)
+  [ -n "$matched" ] || return 1
+  printf '%s\n' "$matched"
+}
+
+known_nextest_failure_fields() {
+  local line="$1" status identifier name
+  if [[ "$line" =~ ^[[:space:]]*(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK)[[:space:]]+\[[^]]+\][[:space:]]+([^[:space:]]+)[[:space:]]+(.+)$ ]]; then
+    status="${BASH_REMATCH[1]}"
+    identifier="${BASH_REMATCH[2]}"
+    name="${BASH_REMATCH[3]}"
+  elif [[ "$line" =~ ^[[:space:]]*LEAK-FAIL([[:space:]]+\[[^]]+\])?[[:space:]]+([^[:space:]]+)[[:space:]]+(.+)$ ]]; then
+    status="LEAK-FAIL"
+    identifier="${BASH_REMATCH[2]}"
+    name="${BASH_REMATCH[3]}"
+  else
+    return 1
   fi
-  if [[ "$test_name" == *::tests::* ]]; then
-    prefix="${test_name%%::tests::*}"
-    package_hint="${prefix%%::*}"
-    if [[ "$prefix" == *::* ]]; then module="${prefix#*::}"; else module=""; fi
-    package_root="$(known_package_root "$package_hint" 2>/dev/null || true)"
-    [ -z "$package_root" ] || package_found=1
-    [ "$package_root" != . ] || package_root=""
-    if [ "$package_found" = 0 ]; then
-      [ -n "$module" ] || module="$prefix"
-    fi
-    module="${module//:://}"
-    if [ -n "$module" ]; then
-      for path in "$worktree/${package_root:+$package_root/}src/$module.rs" "$worktree/${package_root:+$package_root/}src/$module/mod.rs"; do
-        [ ! -f "$path" ] || { printf '%s\n' "${path#"$worktree"/}"; return; }
-      done
-      path="$(find "$worktree" -type f \( -path "*/src/$module.rs" -o -path "*/src/$module/mod.rs" \) -not -path '*/target/*' -print -quit 2>/dev/null || true)"
-      if [ -n "$path" ]; then printf '%s\n' "${path#"$worktree"/}"; return; fi
-    elif [ "$package_found" = 1 ]; then
-      path="$worktree/${package_root:+$package_root/}src/lib.rs"
-      if [ -f "$path" ]; then printf '%s\n' "${path#"$worktree"/}"; return; fi
-    fi
-  fi
-  if [ -f "$worktree/src/lib.rs" ]; then
-    printf 'src/lib.rs\n'
-    return
-  fi
-  path="$(find "$worktree" -type f -path '*/src/lib.rs' -not -path '*/target/*' -print -quit 2>/dev/null || true)"
-  if [ -n "$path" ]; then printf '%s\n' "${path#"$worktree"/}"; else printf 'src/lib.rs\n'; fi
+  [ -n "$identifier" ] && [ -n "$name" ] || return 1
+  printf '%s\t%s\t%s\n' "$status" "$identifier" "$name"
+}
+
+known_is_nextest_failure_line() {
+  [[ "$1" =~ ^[[:space:]]*(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL)([[:space:]]|$) ]]
 }
 
 known_add_test() {
-  local binary="$1" name="$2" source="$3" i
+  local binary="$1" name="$2" package="$3" cargo_source="$4" i
   [ -n "$name" ] || return 0
   for i in "${!known_red_tests[@]}"; do
-    [ "${known_red_tests[$i]}" = "$name" ] && [ "${known_red_binaries[$i]}" = "$binary" ] && return 0
+    [ "${known_red_tests[$i]}" = "$name" ] \
+      && [ "${known_red_binaries[$i]}" = "$binary" ] \
+      && [ "${known_red_packages[$i]}" = "$package" ] \
+      && [ "${known_red_cargo_sources[$i]}" = "$cargo_source" ] && return 0
   done
   known_red_tests+=("$name")
   known_red_binaries+=("$binary")
-  known_red_sources+=("$source")
+  known_red_packages+=("$package")
+  known_red_cargo_sources+=("$cargo_source")
 }
 
 known_parse_gate() {
-  local output_file="$1" line binary name in_failures=0 trimmed cargo_source=""
-  known_red_tests=() known_red_binaries=() known_red_sources=()
+  local output_file="$1" line binary name package identifier fields status in_failures=0 trimmed cargo_source=""
+  known_red_tests=() known_red_binaries=() known_red_packages=() known_red_cargo_sources=()
+  known_unnamed_failures=0
   while IFS= read -r line || [ -n "$line" ]; do
     if [[ "$line" =~ ^[[:space:]]*Running[[:space:]]+unittests[[:space:]]+([^[:space:]]+) ]]; then
       cargo_source="${BASH_REMATCH[1]}"
     elif [[ "$line" =~ ^[[:space:]]*Running[[:space:]]+([^[:space:]]+\.rs)([[:space:]]|$) ]]; then
       cargo_source="${BASH_REMATCH[1]}"
     fi
-    if [[ "$line" =~ ^FAIL[[:space:]]+\[[^]]+\][[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)$ ]]; then
-      binary="${BASH_REMATCH[1]}"
-      name="${BASH_REMATCH[2]}"
-      known_add_test "$binary" "$name" "$(known_nextest_source "$binary")"
+    if known_is_nextest_failure_line "$line"; then
+      if fields="$(known_nextest_failure_fields "$line")"; then
+        IFS=$'\t' read -r status identifier name <<<"$fields"
+        binary="$identifier"
+        package=""
+        if [[ "$identifier" == *::* ]]; then package="${identifier%%::*}"; binary="${identifier#*::}"; fi
+        known_add_test "$binary" "$name" "$package" ""
+      else
+        known_unnamed_failures=$((known_unnamed_failures + 1))
+      fi
       continue
     fi
     if [[ "$line" =~ ^test[[:space:]]+(.+)[[:space:]]+\.\.\.[[:space:]]+FAILED[[:space:]]*$ ]]; then
       name="${BASH_REMATCH[1]}"
-      known_add_test "" "$name" "$(known_cargo_source "$name" "$cargo_source")"
+      known_add_test "" "$name" "" "$cargo_source"
       continue
     fi
     case "$line" in
       failures:) in_failures=1; continue ;;
       'test result:'*) in_failures=0; continue ;;
     esac
-    if [ "$in_failures" = 1 ]; then
-      if [[ "$line" =~ ^[[:space:]]+(.+)$ ]]; then
-        trimmed="${BASH_REMATCH[1]}"
-        case "$trimmed" in
-          '---- '*" stdout ----") trimmed="${trimmed#---- }"; trimmed="${trimmed% stdout ----}" ;;
-          *' stdout ----') trimmed="${trimmed% stdout ----}" ;;
-        esac
-        [ -n "$trimmed" ] || continue
-        known_add_test "" "$trimmed" "$(known_cargo_source "$trimmed" "$cargo_source")"
-      fi
+    if [ "$in_failures" = 1 ] && [[ "$line" =~ ^[[:space:]]+(.+)$ ]]; then
+      trimmed="${BASH_REMATCH[1]}"
+      case "$trimmed" in
+        '---- '*" stdout ----") trimmed="${trimmed#---- }"; trimmed="${trimmed% stdout ----}" ;;
+        *' stdout ----') trimmed="${trimmed% stdout ----}" ;;
+      esac
+      [ -n "$trimmed" ] || continue
+      known_add_test "" "$trimmed" "" "$cargo_source"
     fi
   done <"$output_file"
 }
 
+known_load_metadata() {
+  local metadata
+  if metadata="$(cd "$worktree" && cargo metadata --format-version 1 --no-deps 2>/dev/null)" \
+    && jq -e '.packages | type == "array"' >/dev/null 2>&1 <<<"$metadata"; then
+    known_cargo_metadata="$metadata"
+    return 0
+  fi
+  if [ -n "${HOME:-}" ] && [ -x "$HOME/.cargo/bin/cargo" ] \
+    && metadata="$(cd "$worktree" && "$HOME/.cargo/bin/cargo" metadata --format-version 1 --no-deps 2>/dev/null)" \
+    && jq -e '.packages | type == "array"' >/dev/null 2>&1 <<<"$metadata"; then
+    known_cargo_metadata="$metadata"
+    return 0
+  fi
+  return 1
+}
+
 known_gate_has_other_failure() {
   local output_file="$1" line lower in_failures=0 trimmed
+  [ "${known_unnamed_failures:-0}" -eq 0 ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
-    if [[ "$line" =~ ^FAIL[[:space:]]+\[[^]]+\][[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+$ ]] \
-      || [[ "$line" =~ ^test[[:space:]]+.+[[:space:]]+\.\.\.[[:space:]]+FAILED[[:space:]]*$ ]]; then
+    if known_is_nextest_failure_line "$line"; then
+      known_nextest_failure_fields "$line" >/dev/null || return 0
+      continue
+    fi
+    if [[ "$line" =~ ^test[[:space:]]+.+[[:space:]]+\.\.\.[[:space:]]+FAILED[[:space:]]*$ ]]; then
       continue
     fi
     case "$line" in
@@ -584,7 +568,15 @@ known_gate_has_other_failure() {
     fi
     lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
     case "$lower" in
-      *'error: test failed'*|*'error: test run failed'*|*'test result: failed'*|*'assertion failed'*|*'assertion left'*|*'panicked at'*|failures:|summary*test*fail*) continue ;;
+      'diff in '*|*' leaked process'*|*'process leak'*|*'leaked child process'*|*'unreaped process'*|*'leftover process'*|*'processes remain'*|*'process remained'*|*'process still running'*|*'processes still running'*|*'child process still running'*|*'doctest failed'*|*'doc test failed'*|*'documentation check failed'*|*'rustdoc error'*) return 0 ;;
+    esac
+    case "$lower" in
+      *'error: test failed'*|*'error: test run failed'*|*'test result: failed'*|failures:|summary*test*fail*) continue ;;
+    esac
+    case "$lower" in
+      *'panicked at'*|*'assertion failed'*|*'assertion left'*)
+        [ "$in_failures" = 1 ] && continue
+        return 0 ;;
     esac
     if [[ "$lower" == *error* || "$lower" == *fail* || "$lower" == *failure* ]]; then
       return 0
@@ -603,7 +595,7 @@ known_ci_run_id() {
 known_flake_accept() {
   local output_file="$1" gate_head="$2" expected_gate_head="$3" pin="$4" ci_run="$5"
   local actual_head test ticket_data ticket_state name_found closed_ticket chosen
-  local base diff_paths gate_base i found=0
+  local base diff_paths gate_base i found=0 package package_root diff_path red_test_names
   local -a chosen_tickets=()
 
   actual_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
@@ -641,16 +633,31 @@ known_flake_accept() {
     chosen_tickets+=("$chosen")
   done
 
-  # Check 3: compare each parsed test's best-effort source path to the pinned PR diff.
+  # Check 3: resolve each test's Cargo package directory and reject any diff path inside it.
   base="$(git -C "$worktree" merge-base origin/main "$pin" 2>/dev/null)" \
     || refuse KNOWN-FLAKE "known-flake check 3 failed: cannot find the PR diff base for pinned head $pin"
-  diff_paths="$(git -C "$worktree" diff --name-only "$base...$pin" 2>/dev/null)" \
+  diff_paths="$(git -C "$worktree" diff --name-only --no-renames "$base...$pin" 2>/dev/null)" \
     || refuse KNOWN-FLAKE "known-flake check 3 failed: cannot read the PR diff for pinned head $pin"
+  if [ "${#known_red_tests[@]}" -gt 0 ]; then
+    red_test_names="${known_red_tests[*]}"
+    known_load_metadata \
+      || refuse KNOWN-FLAKE "known-flake check 3 failed: cannot run cargo metadata in the worktree to resolve red tests: $red_test_names"
+  fi
   for i in "${!known_red_tests[@]}"; do
-    source="${known_red_sources[$i]}"
-    if grep -Fqx -- "$source" <<<"$diff_paths"; then
-      refuse KNOWN-FLAKE "known-flake check 3 failed: red test '${known_red_tests[$i]}' maps to $source, which is in the PR diff"
+    package="${known_red_packages[$i]}"
+    if [ -z "$package" ]; then
+      package="$(known_metadata_package_for_source "${known_red_cargo_sources[$i]}" 2>/dev/null || true)"
     fi
+    [ -n "$package" ] \
+      || refuse KNOWN-FLAKE "known-flake check 3 failed: red test '${known_red_tests[$i]}' could not be resolved to a crate by cargo metadata"
+    package_root="$(known_metadata_package_root "$package" 2>/dev/null)" \
+      || refuse KNOWN-FLAKE "known-flake check 3 failed: red test '${known_red_tests[$i]}' could not be resolved to a crate by cargo metadata"
+    while IFS= read -r diff_path || [ -n "$diff_path" ]; do
+      [ -n "$diff_path" ] || continue
+      if [ "$package_root" = . ] || [[ "$diff_path" == "$package_root" || "$diff_path" == "$package_root/"* ]]; then
+        refuse KNOWN-FLAKE "known-flake check 3 failed: red test '${known_red_tests[$i]}' maps to crate directory $package_root, which contains diff path $diff_path"
+      fi
+    done <<<"$diff_paths"
   done
 
   # Check 4: the ship's failed gate must be the fresh run on the checked-out head,
@@ -702,7 +709,7 @@ post_known_flake_comments() {
     done
     printf '\nDiff paths:\n'
     if [ "${#paths[@]}" -eq 0 ]; then printf -- '- (none)\n'; else printf -- '- %s\n' "${paths[@]}"; fi
-    printf "\nThe script checked the red tests' files against the diff; flywheel judged that the PR touches nothing the tests exercise.\n"
+    printf "\nThe script checked the red tests' crate directories against the diff; flywheel judged that the PR touches nothing the tests exercise.\n"
   } >"$pr_body"
   gh pr comment "$pr" --repo "$repo" --body-file "$pr_body" >&2 || rc=$?
   rm -f "$pr_body"
