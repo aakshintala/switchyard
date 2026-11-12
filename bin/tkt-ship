@@ -489,9 +489,12 @@ if grep -Eq 'gh pr merge failed|merge status could not be confirmed' "$runlog"; 
     emit "MERGED" 0 "$(tail -n 20 "$runlog")"
   fi
   emit "MERGE-FAIL" 1 "$(tail -n 20 "$runlog")"
-elif grep -Eq 'gate failed|fails the gate' "$runlog"; then
+elif grep -Eq 'gate failed|fails the gate|the gate changed the worktree' "$runlog"; then
   emit "GATE-FAIL" 1 "$(tail -n 20 "$runlog")"
+elif grep -Eq 'only [0-9]+ GB free on .*; a gate needs 20 GB\. Free space, then rerun\.|cannot check free space on ' "$runlog"; then
+  emit "DISK" 1 "$(tail -n 20 "$runlog")"
 else
+  ship_detail="$(tail -n 20 "$runlog")"
   printf '\n--- gh-ci failures ---\n' >>"$runlog"
   (cd "$worktree" && GH_CI_LOG_LINES=300 "$bin_dir/gh-ci" failures --pr "$pr" --repo "$repo" >>"$runlog" 2>&1) || true
   digest="$(ci_digest)"
@@ -506,6 +509,17 @@ ${summary}"
     else
       digest="${never_started}
 ${summary}"
+    fi
+  fi
+  if [ -z "$never_started" ] && grep -q '^SUMMARY jobs=0 ' <<<"$digest"; then
+    if grep -Eq 'origin/main moved during CI after 3 retries|origin/main moved during the merge check; rerun ship-pr|CI passed on a head other than' <<<"$ship_detail"; then
+      emit "HEAD-MOVED" 1 "$ship_detail"
+    else
+      ship_line="$(grep '^ship-pr:' "$runlog" | tail -n 1 || true)"
+      if [ -n "$ship_line" ]; then
+        emit "SHIP-ERROR" 1 "$ship_line" "$ship_detail"
+      fi
+      emit "SHIP-ERROR" 1 "$ship_detail"
     fi
   fi
   emit "CI-FAIL $(tail -n 1 <<<"$digest" | sed 's/^SUMMARY //')" 1 "$(sed '$d' <<<"$digest")"
