@@ -38,6 +38,7 @@ done
 for tpl in template-pi.md template.md template-tkt.md; do
   tpl_path="$SCRIPT_DIR/../bin/lib/$tpl"
   if grep -Eq 'muse/|openai/|grok-|claude-' "$tpl_path"; then fail "$tpl names a model instead of using the pool"; fi
+  if grep -Eqiw 'luna|muse|grok|sol|gpt|haiku|sonnet|opus|fable' "$tpl_path"; then fail "$tpl names a model family instead of using the pool"; fi
 done
 
 # a bare template name resolves to the pack's brief (issue #1083); a path keeps working
