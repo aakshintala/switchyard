@@ -1309,6 +1309,29 @@ setup; touch "$ST/body-fail"
 ship --body-ends 'Co-authored with Claude Code.'; expect 2 "body-ends read failure"; untouched "body-ends read failure"
 grep -q 'cannot read PR 7 body' <<<"$ERR" || fail "body-ends read message: [$ERR]"
 
+# ===== --outside-plan: every recorded path needs a one-line reason in its section
+setup; printf 'Resolves #97\n' >"$ST/body"
+ship --outside-plan 'src/a.go'; nothing_ran "outside-plan path missing"
+expect_refused BODY
+grep -qxF 'missing outside-plan path: src/a.go' <<<"$OUT" || fail "missing outside-plan path printed: [$OUT]"
+
+setup; printf '## Outside-plan files\n- src/a.go — inspected existing parser\n' >"$ST/body"
+ship --outside-plan 'src/a.go' --outside-plan 'src/b.go'; nothing_ran "outside-plan second path missing"
+grep -qxF 'missing outside-plan path: src/b.go' <<<"$OUT" || fail "second outside-plan path printed: [$OUT]"
+
+setup; printf '## Outside-plan files\n- src/a.go\n' >"$ST/body"
+ship --outside-plan 'src/a.go'; nothing_ran "outside-plan reason missing"
+grep -qxF 'outside-plan path has no one-line reason: src/a.go' <<<"$OUT" || fail "missing reason printed: [$OUT]"
+
+setup; printf '## Summary\nNo extra scope.\n\n## Outside-plan files\n- src/a.go — inspected existing parser\n- src/b.go — updated caller for new interface\n\n## Tests\nPassed.\n' >"$ST/body"
+ship --outside-plan 'src/a.go' --outside-plan 'src/b.go'; expect 0 "outside-plan paths and reasons listed"
+
+setup; printf '## Outside-plan files\n- src/a.go - checked scope\n' >"$ST/body"
+ship --outside-plan 'src/a.go'; expect 0 "outside-plan path accepts spaced hyphen separator"
+
+setup; printf '## Outside-plan files\n- `src/a.go`: checked scope\n' >"$ST/body"
+ship --outside-plan 'src/a.go'; expect 0 "outside-plan path accepts backticks and colon separator"
+
 setup; ship; expect 0 "no --body-has"
 [ "$(grep -c -- '--json body ' "$ST/gh.log")" -eq 1 ] || fail "no --body-has: one body read, for the authority check: [$(cat "$ST/gh.log")]"
 
