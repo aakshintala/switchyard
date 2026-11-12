@@ -171,6 +171,18 @@ esac
 exit 0
 EOF
 chmod +x "$T/bin/gh"
+cat >"$T/bin/file-claim" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FILE_CLAIM_CALLS"
+case " $* " in
+  *' --diff '*)
+    printf 'OVERLAP fix.txt lane:fiber-999\n'
+    exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$T/bin/file-claim"
+export FW_FILE_CLAIM="$T/bin/file-claim" FILE_CLAIM_CALLS="$T/file-claim.log"
 
 reset_stubs() {
   printf 'done' >"$T/jobmode"
@@ -182,6 +194,7 @@ reset_stubs() {
   printf '[]' >"$T/prlist"
   printf '0' >"$T/prlistrc"
   : >"$T/calls.log"
+  : >"$T/file-claim.log"
 }
 
 # Build the identical local git fixture once. Each case gets a private copy,
@@ -676,6 +689,8 @@ out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "unpushed exited $?"
 grep -q "gh-ci|wait 7" "$T/calls.log" || fail "gh-ci wait did not run"
 grep -q "gh-ci|wait 7 --repo switchyard" "$T/calls.log" || fail "gh-ci wait missed --repo switchyard"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "push did not land"
+grep -F -q "claim --lane fiber-529 --diff $WT" "$T/file-claim.log" || fail "successful push records changed hunks"
+grep -F -q 'OVERLAP fix.txt lane:fiber-999' "$T/stderr" || fail "overlapping claim is reported after push"
 grep -q "failing: nightly" <<<"$out" || fail "failed CI jobs missing from digest"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK" || fail "bad verdict: $(head -n 1 <<<"$out")"
 

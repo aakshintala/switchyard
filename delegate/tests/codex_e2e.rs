@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+mod support;
+
 const FIXTURE: &str = concat!(
     "{\"type\":\"thread.started\",\"thread_id\":\"THREAD_ID\"}\n",
     "{\"type\":\"turn.started\"}\n",
@@ -120,6 +122,9 @@ impl Env {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let agent = dir.join("codex.sh");
+        // #663/#1617: hold the exec lock across write, chmod and warm-up exec,
+        // so no concurrent fork inherits the write fd and makes exec ETXTBSY.
+        let guard = support::exec_lock();
         std::fs::write(&agent, FAKE_CODEX).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
         let status = Command::new(&agent)
@@ -129,6 +134,7 @@ impl Env {
             .stderr(Stdio::null())
             .status()
             .unwrap();
+        drop(guard);
         assert!(status.success(), "fake Codex executable warm-up failed");
         std::fs::write(dir.join("fixture.jsonl"), FIXTURE).unwrap();
         Env {
@@ -226,12 +232,14 @@ impl Env {
         if big {
             cmd.env("DELEGATE_TEST_CODEX_BIG", "1");
         }
+        let guard = support::exec_lock();
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        drop(guard);
         let mut si = child.stdin.take().unwrap();
         if let Some(s) = stdin {
             let _ = si.write_all(s);

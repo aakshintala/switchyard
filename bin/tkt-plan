@@ -40,6 +40,20 @@ tktjob="$bin_dir/tkt-job"; plancheck="$bin_dir/plan-check"; plangate="$bin_dir/p
 postplan="$bin_dir/post-plan"; plansweep="$bin_dir/plan-sweep"
 vbrief="$HOME/.agents/skills/planning/briefs/verifier.md"; cbrief="$HOME/.agents/skills/planning/briefs/confirm.md"
 REPORT_LINES=38
+reanchor_changed_symbols=()
+
+reanchor_has_changed_symbols() {
+  [ -n "${reanchor_changed_symbols[0]+present}" ]
+}
+
+format_reanchor_symbols() {
+  local item joined=""
+  for item in ${reanchor_changed_symbols[@]+"${reanchor_changed_symbols[@]}"}; do
+    [ -z "$joined" ] || joined="$joined, "
+    joined="${joined}${item}"
+  done
+  printf '%s' "$joined"
+}
 
 t() { "$tkt_state" "$state" "$@"; }
 
@@ -231,12 +245,15 @@ runjob() {
         "TKT tkt-job ASK "*)
           # An asking Verifier still spent its round: count it unless the
           # verify is drift-exempt, where the retry stays exempt.
-          if [ "${drift:-0}" -eq 0 ] && [ -n "${round:-}" ]; then
+          if [ "${drift:-0}" -eq 0 ] && [ "${unresolved_fix:-0}" -eq 0 ] && [ -n "${round:-}" ]; then
             t set verifier_round "$((round + 1))"
           fi
           ;;
       esac
       extra=(); [ "$slot" != confirm ] || extra=("staleness-check: $staleness_check")
+      if reanchor_has_changed_symbols; then
+        extra+=("re-anchor symbols: $(format_reanchor_symbols)")
+      fi
       w="${line#TKT tkt-job }"; emit "${w% log=*}" "$jrc" ${extra[@]+"${extra[@]}"} "$(head -n "$REPORT_LINES" <<<"$job_out")"
     fi
   }
@@ -261,6 +278,304 @@ plan_stale_stat() {
   plan_stale_stat_output=""
   [ "${#plan_stale_files[@]}" -gt 0 ] || return 0
   plan_stale_stat_output="$(git -C "$stale_worktree" diff --stat "$stale_base...origin/main" -- "${plan_stale_files[@]}" 2>"$tmp")" || return 1
+}
+
+# Emit only the path and symbol half of a plan's path::symbol citations.
+collect_reanchor_citation() {
+  case "$1" in
+    path) REANCHOR_CITE_PATH="$2" ;;
+    symbol)
+      [ -n "${REANCHOR_CITE_PATH:-}" ] || return 0
+      printf '%s\t%s\n' "$REANCHOR_CITE_PATH" "$2"
+      ;;
+  esac
+}
+
+plan_symbol_citations() {
+  local plan_file="$1" section line new read files_entry token
+  local CUR_SEC CUR_LN CUR_NEW CUR_READ CUR_FILES_ENTRY GLOBS REANCHOR_CITE_PATH
+  GLOBS=""
+  while IFS=$'\t' read -r section line new read files_entry token; do
+    [ -n "$token" ] || continue
+    CUR_SEC="$section"; CUR_LN="$line"; CUR_NEW="$new"; CUR_READ="$read"; CUR_FILES_ENTRY="$files_entry"
+    REANCHOR_CITE_PATH=""
+    expand_token "$token" collect_reanchor_citation
+  done < <(plan_records "$plan_file" 1)
+}
+
+# Hash the plan without its Base line, so a verified plan can be compared with
+# the same plan after only its base anchor changes.
+plan_body_hash() {
+  awk '!/^Base:[[:space:]]/' "$1" | git -C "$worktree" hash-object --stdin
+}
+
+plan_object_body_hash() {
+  git -C "$worktree" cat-file blob "$1" | awk '!/^Base:[[:space:]]/' | git -C "$worktree" hash-object --stdin
+}
+
+# Extract a symbol's declaration/signature and brace-delimited body. The
+# fallback retains matching lines for languages or declarations without a
+# recognized block form, making the comparison conservative.
+symbol_snapshot() {
+  local revision="$1" path="$2" symbol="$3" name content snapshot
+  name="${symbol##*::}"; name="${name%()}"
+  content="$(git -C "$worktree" show "$revision:$path" 2>/dev/null)" || return 1
+  snapshot="$(awk -v sym="$name" '
+    function is_definition(line, decl) {
+      decl = "(^|[^[:alnum:]_])(fn|func|struct|enum|trait|type|const|static|mod|def|function)[[:space:]]+" sym "([[:space:]<(;=]|$)"
+      return line ~ decl || line ~ ("^[[:space:]]*" sym "[[:space:]]*\\(")
+    }
+    function has_single_quote_close(line, pos, j, ch, escaped) {
+      escaped = 0
+      for (j = pos + 1; j <= length(line) && j <= pos + 8; j++) {
+        ch = substr(line, j, 1)
+        if (escaped) { escaped = 0; continue }
+        if (ch == "\\") { escaped = 1; continue }
+        if (ch == sprintf("%c", 39)) return 1
+      }
+      return 0
+    }
+    function code_line(line, i, ch, nextch, out, j, n, single) {
+      single = sprintf("%c", 39)
+      out = ""
+      for (i = 1; i <= length(line); i++) {
+        ch = substr(line, i, 1)
+        nextch = substr(line, i + 1, 1)
+        if (block_comment) {
+          if (ch == "*" && nextch == "/") { block_comment = 0; i++ }
+          continue
+        }
+        if (quote == "raw") {
+          if (ch == "\"") {
+            j = i + 1; n = 0
+            while (substr(line, j, 1) == "#") { n++; j++ }
+            if (n == raw_hashes) { quote = ""; raw_hashes = 0; i = j - 1 }
+          }
+          continue
+        }
+        if (quote != "") {
+          if (escaped) { escaped = 0; continue }
+          if (ch == "\\") { escaped = 1; continue }
+          if (triple_quote) {
+            if (substr(line, i, 3) == quote quote quote) { quote = ""; triple_quote = 0; i += 2 }
+          } else if (ch == quote) quote = ""
+          continue
+        }
+        if (ch == "/" && nextch == "/") break
+        if (ch == "/" && nextch == "*") { block_comment = 1; i++; continue }
+        if (ch == "#" && nextch != "[" && (i == 1 || substr(line, i - 1, 1) ~ /[[:space:]]/)) break
+        if (ch == "r") {
+          j = i + 1; n = 0
+          while (substr(line, j, 1) == "#") { n++; j++ }
+          if (substr(line, j, 1) == "\"") { quote = "raw"; raw_hashes = n; i = j; continue }
+        }
+        if (ch == "\"" || ch == "`" || ch == single) {
+          if (ch == single && !has_single_quote_close(line, i)) { out = out ch; continue }
+          quote = ch
+          if (substr(line, i, 3) == ch ch ch) { triple_quote = 1; i += 2 }
+          else triple_quote = 0
+          continue
+        }
+        out = out ch
+      }
+      if (quote != "" && quote != "raw" && !triple_quote) { quote = ""; escaped = 0 }
+      return out
+    }
+    function brace_delta(line, rest, opens, closes) {
+      rest = line; opens = gsub(/[{]/, "", rest)
+      rest = line; closes = gsub(/[}]/, "", rest)
+      return opens - closes
+    }
+    {
+      code = code_line($0)
+      if (!capture && is_definition(code)) { capture = 1; has_body = 0; depth = 0 }
+      if (capture) {
+        print
+        if (index(code, "{")) has_body = 1
+        if (has_body) {
+          depth += brace_delta(code)
+          if (depth <= 0) capture = 0
+        } else if (code ~ /;/) capture = 0
+      }
+    }
+  ' <<<"$content")"
+  if [ -z "$snapshot" ]; then
+    snapshot="$(grep -F -- "$name" <<<"$content" || true)"
+  fi
+  printf '%s' "$snapshot"
+}
+
+# Compare cited symbols from verified_base to the plan's current Base. The
+# globals reanchor_has_citations, reanchor_changed_symbols and
+# mechanical_reanchor describe the result; drift is set for changed symbols.
+classify_reanchor() {
+  local vbase old_hash old_verdict p citation_path symbol symbol_name old_tree new_tree
+  local old_path new_path old_content new_content old_snapshot new_snapshot changed
+  local dir="$worktree"
+  reanchor_has_citations=0
+  mechanical_reanchor=0
+  drift=0
+  reanchor_changed_symbols=()
+  vbase="$(t get verified_base 2>/dev/null || true)"
+  [ -n "$vbase" ] && [ "$vbase" != "$base" ] || return 0
+  git -C "$worktree" merge-base --is-ancestor "$vbase" "$base" 2>/dev/null || return 0
+
+  FILES="|"; GLOBS=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in *\**) GLOBS="$GLOBS$p"$'\n' ;; *) FILES="$FILES$p|" ;; esac
+  done < <(plan_files_pathspecs "$plan")
+  old_tree="$(git -C "$worktree" ls-tree -r --name-only "$vbase")"
+  new_tree="$(git -C "$worktree" ls-tree -r --name-only "$base")"
+  while IFS=$'\t' read -r citation_path symbol; do
+    [ -n "$citation_path" ] || continue
+    rev="$base"; tree="$new_tree"; resolve_path "$citation_path"
+    new_path="$RES"; new_kind="$RES_KIND"
+    rev="$vbase"; tree="$old_tree"; resolve_path "$citation_path"
+    old_path="$RES"; old_kind="$RES_KIND"
+    if [ -n "$new_path" ]; then p="$new_path"
+    elif [ -n "$old_path" ]; then p="$old_path"
+    else p="$citation_path"
+    fi
+    covered "$p" || continue
+    reanchor_has_citations=1
+    changed=0
+    [ "$new_kind" = found ] && [ "$old_kind" = found ] || changed=1
+    symbol_name="${symbol##*::}"
+    symbol_name="${symbol_name%()}"
+    if [ "$changed" -eq 0 ]; then
+      old_content="$(git -C "$worktree" show "$vbase:$old_path" 2>/dev/null || true)"
+      new_content="$(git -C "$worktree" show "$base:$new_path" 2>/dev/null || true)"
+      if ! grep -Fq -- "$symbol_name" <<<"$old_content" || ! grep -Fq -- "$symbol_name" <<<"$new_content"; then
+        changed=1
+      else
+        old_snapshot="$(symbol_snapshot "$vbase" "$old_path" "$symbol" || true)"
+        new_snapshot="$(symbol_snapshot "$base" "$new_path" "$symbol" || true)"
+        [ "$old_snapshot" = "$new_snapshot" ] || changed=1
+      fi
+    fi
+    if [ "$changed" -eq 1 ]; then
+      local already=0 item
+      for item in ${reanchor_changed_symbols[@]+"${reanchor_changed_symbols[@]}"}; do [ "$item" = "$citation_path::$symbol" ] && already=1; done
+      [ "$already" -eq 1 ] || reanchor_changed_symbols+=("$citation_path::$symbol")
+    fi
+  done < <(plan_symbol_citations "$plan")
+
+  if reanchor_has_changed_symbols; then
+    drift=1
+    return 0
+  fi
+  [ "$reanchor_has_citations" -eq 1 ] || return 0
+  old_hash="$(t get verified_plan_hash 2>/dev/null || true)"
+  old_verdict="$(t get plan_verdict 2>/dev/null || true)"
+  case "$old_verdict" in ok|triaged) ;; *) return 0 ;; esac
+  [ -n "$old_hash" ] || return 0
+  if old_body_hash="$(plan_object_body_hash "$old_hash" 2>/dev/null)" &&
+     new_body_hash="$(plan_body_hash "$plan" 2>/dev/null)" &&
+     [ "$old_body_hash" = "$new_body_hash" ]; then
+    mechanical_reanchor=1
+  fi
+}
+
+# During re-anchor review, plan-check diagnostics for a cited symbol that no
+# longer resolves belong to the Verifier's drift review; unrelated findings
+# remain blocking.
+filter_reanchor_unresolved() {
+  local input="$1" section=line findings="" unresolved_lines="" line item drop citation_path missing_path
+  while IFS= read -r line; do
+    case "$line" in
+      "Findings:") section=findings; continue ;;
+      "Unresolved symbols:") section=unresolved; continue ;;
+    esac
+    if [ "$section" = unresolved ]; then
+      drop=0
+      case "$line" in
+        "missing symbol:"*)
+          for item in ${reanchor_changed_symbols[@]+"${reanchor_changed_symbols[@]}"}; do
+            case "$line" in *"$item"*) drop=1; break ;; esac
+          done ;;
+      esac
+      [ "$drop" -eq 1 ] || unresolved_lines="${unresolved_lines}${line}"$'\n'
+    else
+      drop=0
+      case "$line" in
+        "missing path:"*)
+          missing_path="${line#missing path: }"
+          missing_path="${missing_path%% *}"
+          for item in ${reanchor_changed_symbols[@]+"${reanchor_changed_symbols[@]}"}; do
+            citation_path="${item%%::*}"
+            [ "$missing_path" = "$citation_path" ] && { drop=1; break; }
+          done ;;
+      esac
+      [ "$drop" -eq 1 ] || findings="${findings}${line}"$'\n'
+    fi
+  done <<<"$input"
+  REANCHOR_FILTERED=""
+  if [ -n "$unresolved_lines" ]; then
+    if [ -n "$findings" ]; then REANCHOR_FILTERED="Findings:"$'\n'"$findings"; fi
+    REANCHOR_FILTERED="${REANCHOR_FILTERED}Unresolved symbols:"$'\n'"$unresolved_lines"
+  else
+    REANCHOR_FILTERED="$findings"
+  fi
+}
+
+unresolved_plan_lines() {
+  awk '
+    /^Unresolved symbols:[[:space:]]*$/ { in_unresolved = 1; next }
+    /^Findings:[[:space:]]*$/ { in_unresolved = 0; next }
+    in_unresolved && match($0, /plan line [0-9]+/) {
+      token = substr($0, RSTART, RLENGTH)
+      sub(/^plan line /, "", token)
+      print token
+    }
+  ' <<<"$1" | sort -nu | paste -sd, -
+}
+
+record_unresolved_snapshot() {
+  local output="$1" lines snapshot existing
+  lines="$(unresolved_plan_lines "$output")"
+  [ -n "$lines" ] || return 0
+  existing="$(t get unresolved_plan_snapshot 2>/dev/null || true)"
+  [ -n "$existing" ] && [ -r "$existing" ] && return 0
+  snapshot="$(free_path "$run/$namebase-unresolved-plan.md")" || exit 3
+  cp "$plan" "$snapshot" || { echo "tkt-plan: cannot save unresolved plan snapshot: $snapshot" >&2; exit 2; }
+  t set unresolved_plan_snapshot "$snapshot"
+  t set unresolved_plan_lines "$lines"
+}
+
+# True only when every changed old plan line was an unresolved-symbol line.
+unresolved_plan_changed_only() {
+  local snapshot lines diff_output diff_rc=0
+  snapshot="$(t get unresolved_plan_snapshot 2>/dev/null || true)"
+  lines="$(t get unresolved_plan_lines 2>/dev/null || true)"
+  [ -n "$snapshot" ] && [ -r "$snapshot" ] && [ -n "$lines" ] || return 1
+  diff_output="$(diff -U0 "$snapshot" "$plan")" || diff_rc=$?
+  [ "$diff_rc" -eq 1 ] || return 1
+  awk -v lines="$lines" '
+    BEGIN {
+      n = split(lines, a, ",")
+      for (i = 1; i <= n; i++) unresolved[a[i]] = 1
+    }
+    /^@@ / {
+      old = $2
+      sub(/^-/, "", old)
+      split(old, old_range, ",")
+      old_start = old_range[1] + 0
+      old_count = (old_range[2] == "" ? 1 : old_range[2] + 0)
+      new = $3
+      sub(/^\+/, "", new)
+      split(new, new_range, ",")
+      new_count = (new_range[2] == "" ? 1 : new_range[2] + 0)
+      if (new_count != old_count || old_count == 0) bad = 1
+      for (line = old_start; line < old_start + old_count; line++) if (!unresolved[line]) bad = 1
+    }
+    END { exit bad }
+  ' <<<"$diff_output"
+}
+
+clear_unresolved_snapshot() {
+  t set unresolved_plan_snapshot ""
+  t set unresolved_plan_lines ""
 }
 
 # Fetch, issue-check and freshness-check a ruling comment. Callers map the
@@ -321,15 +636,23 @@ do_verify() {
     --extra) [ $# -ge 2 ] || usage; extra="$2"; shift 2;;
     --model) [ $# -ge 2 ] || usage; model="$2"; shift 2;; *) usage;; esac; done
   load_plan
+  unresolved_fix=0
   plan_stale_stat "$plan" "$base" "$worktree" || { cat "$tmp" >&2; exit 2; }
   if [ -n "$plan_stale_stat_output" ]; then
     n="$(git -C "$worktree" diff --name-only "$base...origin/main" -- "${plan_stale_files[@]}" | wc -l | tr -d ' ')"
     clear_verdict
     emit "STALE n=$n base=$base" 1 "$({ plan_bare_dirs "$plan" "$worktree"; head -n "$REPORT_LINES" <<<"$plan_stale_stat_output"; })"
   fi
+  classify_reanchor
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
+  if [ "$prc" -eq 1 ] && reanchor_has_changed_symbols; then
+    filter_reanchor_unresolved "$pc_out"
+    pc_out="$REANCHOR_FILTERED"
+    [ -z "$pc_out" ] && prc=0
+  fi
   if [ "$prc" -eq 1 ]; then
+    record_unresolved_snapshot "$pc_out"
     planner_job="$(t get job.planner 2>/dev/null || true)"
     if [ -n "$planner_job" ]; then
       resume_prompt="$(mktemp "$run/$namebase-plan-check-resume.XXXXXX")" || exit 2
@@ -341,11 +664,25 @@ do_verify() {
       fi
       pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
       [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
+      if [ "$prc" -eq 1 ]; then record_unresolved_snapshot "$pc_out"; fi
+      if [ "$prc" -eq 1 ] && reanchor_has_changed_symbols; then
+        filter_reanchor_unresolved "$pc_out"
+        pc_out="$REANCHOR_FILTERED"
+        [ -z "$pc_out" ] && prc=0
+      fi
       planner_note="planner job $planner_job resumed once (tkt-job exit=$resume_rc)"
     else
       planner_note="planner job not recorded in job.planner; not resumed"
     fi
-    [ "$prc" -ne 1 ] || { clear_verdict; emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$planner_note" "$(head -n "$REPORT_LINES" <<<"$pc_out")"; }
+    [ "$prc" -ne 1 ] || { record_unresolved_snapshot "$pc_out"; clear_verdict; emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "$planner_note" "$(head -n "$REPORT_LINES" <<<"$pc_out")"; }
+  fi
+  if [ "$prc" -eq 0 ]; then
+    if unresolved_plan_changed_only; then
+      unresolved_fix=1
+    else
+      unresolved_snapshot="$(t get unresolved_plan_snapshot 2>/dev/null || true)"
+      [ -z "$unresolved_snapshot" ] || clear_unresolved_snapshot
+    fi
   fi
   questions="$(plan_open_questions "$plan")"
   if [ -n "$questions" ]; then
@@ -366,12 +703,20 @@ do_verify() {
     fi
   fi
   round="$(ronum)"
-  # The drift exemption is derived from recorded state, not a caller flag: a
-  # verify is exempt only when a previous round recorded a base and main
-  # changed a path in the selected scope between that base and the current one.
-  # Task paths are the scope when any resolve; Files paths provide a fallback
-  # only when none do. A Files change is not drift when the tasks do name paths.
-  drift=0
+  classify_reanchor
+  if [ "$mechanical_reanchor" -eq 1 ]; then
+    plan_verdict_write "$tkt_state" "$state" ok "$base" "$plan" "$worktree"
+    verified_plan_hash="$(git -C "$worktree" hash-object "$plan" 2>"$tmp")" || { cat "$tmp" >&2; exit 2; }
+    t set verified_base "$base"
+    t set verified_plan_hash "$verified_plan_hash"
+    t set plan_stop_verdict_key ""
+    t set plan_stop_verdict_at ""
+    t set build_stale_recovery_base ""
+    t set build_stale_recovery_plan_hash ""
+    emit "REANCHORED base=$base" 0 "cited symbol bodies and signatures are unchanged; no Verifier round spent"
+  fi
+  # Re-anchor analysis and the task-scoped drift exemption are independent: a
+  # cited plan whose body changed still receives the existing drift check.
   vbase="$(t get verified_base 2>/dev/null || true)"
   if [ -n "$vbase" ]; then
     tpaths=()
@@ -381,9 +726,7 @@ do_verify() {
     fi
     if [ "${#tpaths[@]}" -gt 0 ]; then
       if dstat="$(git -C "$worktree" diff --stat "$vbase...$base" -- "${tpaths[@]}" 2>/dev/null)"; then
-        [ -n "$dstat" ] && drift=1 || drift=0
-      else
-        drift=0
+        [ -n "$dstat" ] && drift=1
       fi
     fi
   fi
@@ -406,7 +749,7 @@ do_verify() {
       fi
     fi
   fi
-  if [ "$drift" -eq 0 ]; then
+  if [ "$drift" -eq 0 ] && [ "$unresolved_fix" -eq 0 ]; then
     if [ -n "$(t get confirmed_for 2>/dev/null || true)" ]; then
       if grant_pending; then
         granted_by="$(t get granted_by 2>/dev/null || true)"
@@ -426,6 +769,10 @@ do_verify() {
     slot="verifier-r$((round + 1))-drift"
     rep="$(free_path "$run/$namebase-verifier-out-r$((round + 1))-drift.md")" || exit 3
     xfile="$run/$namebase-verifier-extra-r$((round + 1))-drift.md"
+  elif [ "$unresolved_fix" -eq 1 ]; then
+    slot="verifier-r$((round + 1))-unresolved"
+    rep="$(free_path "$run/$namebase-verifier-out-r$((round + 1))-unresolved.md")" || exit 3
+    xfile="$run/$namebase-verifier-extra-r$((round + 1))-unresolved.md"
   else
     slot="verifier-r$((round + 1))"
     rep="$(free_path "$run/$namebase-verifier-out-r$((round + 1)).md")" || exit 3
@@ -434,6 +781,17 @@ do_verify() {
   # --extra wins over state extra; the ticket text goes before either.
   [ -n "$extra" ] || extra="$(t get extra 2>/dev/null || true)"
   ticket_extra "$xfile" "$extra"
+  reanchor_note=""
+  if reanchor_has_changed_symbols; then
+    verified_plan_hash="$(t get verified_plan_hash 2>/dev/null || true)"
+    if [ -n "$verified_plan_hash" ] \
+      && verified_body_hash="$(plan_object_body_hash "$verified_plan_hash" 2>/dev/null)" \
+      && current_body_hash="$(plan_body_hash "$plan" 2>/dev/null)" \
+      && [ "$verified_body_hash" = "$current_body_hash" ]; then
+      reanchor_note="Re-anchor review is limited to these cited symbols: $(format_reanchor_symbols). Check only whether their signature/body changed or they no longer resolve; do not reopen other plan claims."
+      printf '\n## Mechanical re-anchor\n%s\n' "$reanchor_note" >>"$xfile"
+    fi
+  fi
   printf '\nWhen the plan passes, the report must start with this exact first line, with nothing before or after it on that line:\n\nPLAN OK\n' >>"$xfile"
   args+=(EXTRA="@$xfile")
   # A failed round leaves its job id behind while the round counter stays
@@ -447,7 +805,8 @@ do_verify() {
   # or asking job leaves the prior state so the retry stays exempt.
   t set verified_base "$base"
   t set verified_plan_hash "$verified_plan_hash"
-  if [ "$drift" -eq 0 ]; then
+  if [ "$unresolved_fix" -eq 1 ]; then clear_unresolved_snapshot; fi
+  if [ "$drift" -eq 0 ] && [ "$unresolved_fix" -eq 0 ]; then
     t set verifier_round "$((round + 1))"
   fi
   if [ "$REC" -eq 1 ]; then
@@ -459,6 +818,9 @@ do_verify() {
   t set build_stale_recovery_base ""
   t set build_stale_recovery_plan_hash ""
   t set last_report "$rep"
+  if [ -n "$reanchor_note" ]; then
+    emit "$RV" "$REC" "$reanchor_note" "$(head -n "$REPORT_LINES" "$rep")"
+  fi
   emit "$RV" "$REC" "$(head -n "$REPORT_LINES" "$rep")"
 }
 
@@ -490,6 +852,7 @@ do_confirm() {
   fi
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
   granted=0
+  confirm_limited=0
   reconfirm_free=0
   if [ -n "$confirmed_for" ]; then
     if grant_pending; then
@@ -504,12 +867,28 @@ do_confirm() {
       if [ "$reconfirm_used" != 1 ] && [ -n "$latest_edits" ] && [ -n "$last_confirm_report" ] && [ -f "$last_confirm_report" ] && [ "$latest_edits" -nt "$last_confirm_report" ]; then
         reconfirm_free=1
       else
-        emit "ROUND-LIMIT confirm=done" 1 "staleness-check: $staleness_check" "if another fully specified confirm is authorized, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $state rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+        confirm_limited=1
       fi
     fi
   fi
   pc_out="$("$plancheck" "$plan" --base "$base" --cwd "$worktree" 2>"$tmp")" && prc=0 || prc=$?
   [ "$prc" -ne 2 ] || { cat "$tmp" >&2; exit 2; }
+  if [ "$prc" -eq 1 ]; then
+    record_unresolved_snapshot "$pc_out"
+    case "$pc_out" in
+      *"Unresolved symbols:"*)
+        emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "staleness-check: $staleness_check" "$(head -n "$REPORT_LINES" <<<"$pc_out")" ;;
+    esac
+  else
+    if unresolved_plan_changed_only; then
+      emit "UNRESOLVED-FIX" 0 "only lines previously reported as unresolved symbols changed; rerun tkt-plan $state verify; no confirm round spent"
+    fi
+    unresolved_snapshot="$(t get unresolved_plan_snapshot 2>/dev/null || true)"
+    [ -z "$unresolved_snapshot" ] || clear_unresolved_snapshot
+  fi
+  if [ "$confirm_limited" -eq 1 ]; then
+    emit "ROUND-LIMIT confirm=done" 1 "staleness-check: $staleness_check" "if another fully specified confirm is authorized, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $state rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+  fi
   [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "staleness-check: $staleness_check" "$(head -n "$REPORT_LINES" <<<"$pc_out")"
   cmodel="$(vmodel)" || exit 2
   rep="$(free_path "$run/$namebase-confirm-out.md")" || exit 3

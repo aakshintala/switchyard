@@ -331,7 +331,7 @@ fw_mtime() {
 }
 
 _usage() {
-  echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--dry] | --require <ticket> --phase plan|build|ship" >&2
+  echo "usage: fence-grant <ticket> --paths <comma list> [--ranges <file:start-end,...>] [--reads <comma list>] [--new <comma list>] [--expect <file:line:symbol,...>] [--repo <owner/name>] [--part <n>] [--ignore-pr <n>] [--ignore-ticket <n>] [--swept-to <comment id>] [--removes <symbol,...>] [--doc-heading <docs/file.md#heading> (review warning, not a grant)] [--pre-plan <path-shape>] [--empty] [--dry] | --require <ticket> --phase plan|build|ship" >&2
   echo "       non-sweep holds are advisory overlaps; sweep-* file claims remain exclusive" >&2
 }
 
@@ -349,11 +349,11 @@ if [ "${1:-}" = --require ]; then
   run=$(_fw_run)
   run_abs=$(_fw_abs_path "$run")
   set +f
-  for grant in "$run"/fiber-"$ticket"*-fence-grant*.md; do
+  for grant in "$run"/fiber-"$ticket"-fence-grant*.md "$run"/fiber-"$ticket"-*-fence-grant*.md; do
     [ -f "$grant" ] && exit 0
   done
   host=$(hostname) || { echo 'fence-grant: cannot determine host name' >&2; exit 3; }
-  echo "fence-grant: issue $ticket needs a fence grant matching $run_abs/fiber-$ticket*-fence-grant*.md on host $host; a grant written on another machine is invisible here; create one or set FW_NO_FENCE=<reason>" >&2
+  echo "fence-grant: issue $ticket needs a fence grant matching $run_abs/fiber-$ticket-fence-grant*.md or $run_abs/fiber-$ticket-*-fence-grant*.md on host $host; a grant written on another machine is invisible here; create one or set FW_NO_FENCE=<reason>" >&2
   exit 2
 fi
 
@@ -361,6 +361,7 @@ ticket="${1:-}"
 case "$ticket" in ''|*[!0-9]*) _usage; exit 2;; esac
 shift
 paths=""; ranges=""; readpaths=""; newpaths=""; expects=""; ignore=""; ignoreticket=""; sweptto=""; removes=""; docheadings=""; preplan=""; repo="aakshintala/fiber"; part=1; dry=0
+empty=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --paths) [ $# -ge 2 ] || { _usage; exit 2; }; paths="$2"; shift 2;;
@@ -388,6 +389,7 @@ while [ $# -gt 0 ]; do
     --doc-heading) [ $# -ge 2 ] || { _usage; exit 2; }; docheadings="${docheadings}${docheadings:+$'\n'}$2"; shift 2;;
     --pre-plan) [ $# -ge 2 ] || { _usage; exit 2; }; preplan="$2"; shift 2;;
     --pre-plan=*) preplan="${1#--pre-plan=}"; shift;;
+    --empty) empty=1; shift;;
     --dry) dry=1; shift;;
     *) _usage; exit 2;;
   esac
@@ -401,6 +403,54 @@ case "$repo" in
   [!/]*/[!/]*) ;;
   *) _usage; exit 2;;
 esac
+if [ "$empty" -eq 1 ]; then
+  [ -z "$paths$ranges$newpaths$expects$ignore$ignoreticket$sweptto$removes$docheadings$preplan" ] || { _usage; exit 2; }
+  [ "$dry" -eq 0 ] || { _usage; exit 2; }
+  run=$(_fw_run)
+  mkdir -p "$run" || { echo "ERROR cannot create run directory $run"; exit 3; }
+  lockdir="$run/.fence-grant.lock"
+  lock_tries=${FW_LOCK_TRIES:-50}; lock_poll=${FW_LOCK_POLL:-0.2}; i=0
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -lt "$lock_tries" ] || { echo "ERROR cannot lock $lockdir"; exit 3; }
+    sleep "$lock_poll"
+  done
+  trap 'rmdir "$lockdir" 2>/dev/null || true' EXIT
+  trap 'exit 130' INT TERM
+  max=0
+  set +f
+  for gf in "$run"/fiber-"$ticket"-fence-grant*.md; do
+    [ -e "$gf" ] || continue
+    b=$(basename "$gf")
+    set -f
+    rest=${b#fiber-$ticket-fence-grant}
+    case "$rest" in
+      .md) n=1;;
+      -*.md) n=${rest#-}; n=${n%.md}; case "$n" in ''|*[!0-9]*) set +f; continue;; esac;;
+      *) set +f; continue;;
+    esac
+    [ "$n" -gt "$max" ] && max=$n
+    set +f
+  done
+  set -f
+  k=$((max + 1))
+  gf="$run/fiber-$ticket-fence-grant-$k.md"
+  nowd=$(date '+%a %b %d %T %Z %Y')
+  {
+    printf 'Grant %s (fence-grant, %s)\n\nTicket: %s\nPart: %s\n' "$k" "$nowd" "$ticket" "$part"
+    [ -z "$sweptto" ] || printf 'Swept to comment %s\n' "$sweptto"
+    printf 'Paths:\nRanges: none\n\nNo paths to fence; an empty grant records that this phase has no posted write plan.\n'
+    if [ -n "$readpaths" ]; then
+      printf '\nReads:\n'
+      printf '%s\n' "$readpaths" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's/^/- /'
+    fi
+  } >"$gf" 2>/dev/null || { echo "ERROR cannot write $gf"; exit 3; }
+  host=$(hostname) || { echo 'ERROR cannot determine host name'; exit 3; }
+  grant_path="$(_fw_abs_path "$run")/${gf##*/}"
+  printf 'GRANT FILE host=%s path=%s\n' "$host" "$grant_path" >&2
+  echo GRANT
+  exit 0
+fi
 # Siblings resolve from the script's real path: callers such as flywheel's
 # bin/fence-grant reach it through a symlink in a directory with no file-claim.
 self="$0"

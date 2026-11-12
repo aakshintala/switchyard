@@ -11,5 +11,4 @@
 # which nothing requires.
 #
 # One line, because mkbrief substitutes it with sed. Keep it a line.
-# debt: template-pi.md:52, template.md:43 and template-tkt.md:45-54 still name review and lane models in their own words, upgrade trigger is #1618.
 standard openai/gpt-6-luna:medium; strong openai/gpt-6-luna:xhigh; frontier openai/gpt-6.1-sol. Build, fix and mechanical jobs run on openai/gpt-6-luna:medium through pi (owner, 2026-11-11: fewer tokens than codex, and the Muse weekly is critical). Reviews and Verifiers run on claude-haiku-5-5, or claude-sonnet-5-5 for a large or risky change, so they stay on a family other than the lane's (owner, 2026-11-11). That pool covers every job you start. The frontier rung on a ruling is flywheel's own call to make, not a model you reach for. Apart from those reviews, a claude-* model is reserved for flywheel, surveyor, switchyard and approved Claude plans. The ticket notes' MODEL ROUTING line wins over every model named here. Never cursor or opencode-go (monthly depleted).

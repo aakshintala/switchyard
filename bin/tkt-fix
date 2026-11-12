@@ -50,6 +50,10 @@ plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
 if [ ! -r "$plan_gate_lib" ]; then echo "tkt-fix: cannot read shared lib: $plan_gate_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$plan_gate_lib"
+claim_lib="$script_dir/lib/tkt-claims.sh"
+if [ ! -r "$claim_lib" ]; then echo "tkt-fix: cannot read shared lib: $claim_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$claim_lib"
 takeover_lib="$script_dir/lib/takeover-plan-gate.sh"
 if [ ! -r "$takeover_lib" ]; then echo "tkt-fix: cannot read shared lib: $takeover_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -709,6 +713,7 @@ if [ "$recover_unpushed" -eq 1 ]; then
     pass tkt-gate "$tmp/gate.out" 1 "$tmp/recovery-gate.err"
   fi
   if ! push_out="$(git -C "$worktree" push origin "$branch" 2>&1)"; then emit "PUSH-FAIL" 1 "$push_out"; fi
+  tkt_claim_pushed_hunks "$issue" "$worktree" "$repo"
   t set head "$recover_new_head"
   t set fixopen 0
   echo "tkt-fix: pushed unpushed fix job head $recover_old_head -> $recover_new_head" >&2
@@ -772,6 +777,7 @@ if [ "$remote_head" != "$new_head" ] && { [ -z "$remote_head" ] || git -C "$work
   [ "$crc" = "0" ] || [ "$crc" = "1" ] || emit "CI-WAIT rc=$crc" 1 "$(cat "$tmp/ci.out")"
   [ "$crc" = "0" ] || ci_note="$(grep . "$tmp/ci.out" | head -n 10)"
   if ! push_out="$(git -C "$worktree" push origin "$branch" 2>&1)"; then emit "PUSH-FAIL" 1 "$push_out"; fi
+  tkt_claim_pushed_hunks "$issue" "$worktree" "$repo"
 fi
 
 grc=0
