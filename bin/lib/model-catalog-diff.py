@@ -499,10 +499,15 @@ def compare_vendor(vendor_items, reference, vendor, ignore_pins=()):
         reference = {identifier: model for identifier, model in reference.items() if identifier not in excluded}
     original_vendor_ids = set(vendor_index)
     reference_ids = set(reference)
+    exact_dated_bases = {
+        base
+        for identifier in vendor_index
+        if identifier in reference_ids and (base := dated_model_base(identifier)) is not None
+    }
     latest_dated = {}
     for identifier in vendor_index:
         base = dated_model_base(identifier)
-        if base not in reference_ids or base in original_vendor_ids or identifier in reference_ids:
+        if base not in reference_ids or base in original_vendor_ids or base in exact_dated_bases or identifier in reference_ids:
             continue
         candidate = (dated_model_date(identifier), identifier)
         if candidate > latest_dated.get(base, ("", "")):

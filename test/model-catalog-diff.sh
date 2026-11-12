@@ -117,6 +117,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     "dated-latest": {"limit": {"context": 200}},
                     "exact-only-2026-05-04": {"limit": {"context": 100}},
                 })
+            elif self.mode == "dated-rename":
+                models_dev["openai"]["models"].update({
+                    "X": {"limit": {"context": 900}},
+                    "X-2026-05-01": {"limit": {"context": 100}},
+                })
             elif self.mode == "pricing":
                 models_dev["openrouter"]["models"].update({
                     "router-window": {"cost": {"input": 0.4, "output": 0.5}},
@@ -153,6 +158,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     {"id": "dated-latest-2026-05-03", "context_window": 100},
                     {"id": "exact-only-2026-05-04", "context_window": 200},
                     {"id": "chat-latest"},
+                ]})
+            elif self.mode == "dated-rename":
+                send_json(self, {"data": [
+                    {"id": "X-2026-05-01", "context_window": 200},
+                    {"id": "X-2026-05-02", "context_window": 300},
                 ]})
             elif "after=page-one" in self.path:
                 send_json(self, {"data": [{"id": "openai-b"}, {"id": "codex-one"}, {"id": "text-embedding-3-small"}], "has_more": False})
@@ -355,6 +365,16 @@ try:
     expect("| dated-latest |" not in dated_report, "latest dated model was not selected deterministically")
     expect("| exact-only-2026-05-04 | mismatch | context | 200 | 100 |" in dated_report, "exact dated model was not compared normally")
     expect("| chat-latest | missing |" in dated_report, "undated unknown OpenAI ID was not reported missing")
+
+    # A newer dated vendor ID must not be renamed onto a base when another dated
+    # vendor ID exactly matches the reference.
+    dated_rename_inbox = temp_root / "inbox-dated-rename"
+    dated_rename_result, _ = run_case("dated-rename", True, dated_rename_inbox, mode="dated-rename")
+    expect(dated_rename_result.returncode == 0, f"dated-rename run failed: {dated_rename_result.stderr}")
+    dated_rename_report = (dated_rename_inbox / "model-catalog-2026-05-04.md").read_text(encoding="utf-8")
+    expect("| X |" not in dated_rename_report, "dated alias was renamed onto the reference base")
+    expect("| X-2026-05-02 |" not in dated_rename_report, "newer dated model produced a separate row")
+    expect("| X-2026-05-01 | mismatch | context | 200 | 100 |" in dated_rename_report, "exact dated model fields were not compared")
 
     # An exact dated Anthropic model compares normally without marking its undated
     # models.dev alias as gone.
