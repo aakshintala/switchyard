@@ -106,9 +106,17 @@ print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATE
 fi
 cat "$GH_PRS_JSON"
 STUB_EOF
-chmod +x "$T/stubbin/gh"
+cat >"$T/stubbin/lanecheck" <<'STUB_EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = retired ] || exit 2
+[ "${LANECHECK_RETIRED_FAIL:-0}" != 1 ] || { echo 'stub lanecheck retired: unavailable' >&2; exit 1; }
+cat "${LANECHECK_RETIRED_FILE:-/dev/null}"
+STUB_EOF
+chmod +x "$T/stubbin/gh" "$T/stubbin/lanecheck"
 PATH="$T/stubbin:$PATH"
-export PATH FW_GH="$T/stubbin/gh"
+export PATH FW_GH="$T/stubbin/gh" FW_LANECHECK="$T/stubbin/lanecheck"
+export LANECHECK_RETIRED_FILE="$T/retired-lanes"
+: >"$LANECHECK_RETIRED_FILE"
 export GH_ARGS_LOG="$T/gh-args.log"
 : >"$GH_ARGS_LOG"
 export GH_PRS_JSON="$T/prs-empty.json"
@@ -144,6 +152,46 @@ claims_blob() {
   tip="$(claim_tip "$1")"
   [ -n "$tip" ] || return 0
   git -C "$1" cat-file -p "$tip:claims" || fail "read claims blob"
+}
+
+# Replace one claim's lane or timestamp in a fixture ref.
+set_claim_lane() {
+  local remote path lane work
+  remote="$1"; path="$2"; lane="$3"
+  work="$T/claim-lane-${path//\//-}"
+  rm -rf "$work"
+  git -c init.defaultBranch=main init -q "$work" || fail "init claim-lane fixture"
+  git -C "$work" config user.email t@t.t || fail "claim-lane fixture email"
+  git -C "$work" config user.name t || fail "claim-lane fixture name"
+  git -C "$work" remote add origin "$remote" || fail "claim-lane fixture remote"
+  git -C "$work" fetch -q origin refs/claims/live || fail "fetch claim-lane ref"
+  git -C "$work" checkout -q -b claim-lane FETCH_HEAD || fail "checkout claim-lane ref"
+  awk -F '\t' -v OFS='\t' -v path="$path" -v lane="$lane" '$1 == path { $2 = lane } { print }' "$work/claims" >"$work/claims.new"
+  mv "$work/claims.new" "$work/claims"
+  git -C "$work" add claims || fail "stage claim-lane row"
+  git -C "$work" commit -qm 'set claim lane fixture' || fail "commit claim-lane row"
+  git -C "$work" push -q origin HEAD:refs/claims/live || fail "publish claim-lane row"
+}
+set_claim_timestamp() {
+  local remote path at work
+  remote="$1"; path="$2"; at="$3"
+  work="$T/claim-time-${path//\//-}"
+  rm -rf "$work"
+  git -c init.defaultBranch=main init -q "$work" || fail "init claim-time fixture"
+  git -C "$work" config user.email t@t.t || fail "claim-time fixture email"
+  git -C "$work" config user.name t || fail "claim-time fixture name"
+  git -C "$work" remote add origin "$remote" || fail "claim-time fixture remote"
+  git -C "$work" fetch -q origin refs/claims/live || fail "fetch claim-time ref"
+  git -C "$work" checkout -q -b claim-time FETCH_HEAD || fail "checkout claim-time ref"
+  awk -F '\t' -v OFS='\t' -v path="$path" -v at="$at" '
+    $1 == path { $4 = at; found = 1 }
+    { print }
+    END { if (!found) exit 1 }
+  ' "$work/claims" >"$work/claims.new" || fail "find claim row for $path"
+  mv "$work/claims.new" "$work/claims"
+  git -C "$work" add claims || fail "stage claim-time row"
+  git -C "$work" commit -qm 'set claim timestamp fixture' || fail "commit claim-time row"
+  git -C "$work" push -q origin HEAD:refs/claims/live || fail "publish claim-time row"
 }
 
 NFILE="$T/n"
@@ -1219,6 +1267,39 @@ list="$(FILE_CLAIM_REMOTE="$R" bash "$FC" list --repo test/repo 2>/dev/null)" ||
 grep -qF 'open.txt' <<<"$list" || fail "open-ticket claim remains on next check: $list"
 grep -qF 'sweep.txt' <<<"$list" || fail "sweep claim remains after closed ticket: $list"
 ! grep -qF 'closed.txt' <<<"$list" || fail "closed-ticket claim is gone on next check: $list"
+
+# --- retired lanes reap claims at/before done, but preserve newer claims ---
+R="$(fresh)"
+for spec in '6101 fiber-6101 before-6101.txt' '6102 fiber-6102 newer-6102.txt' '6103 fiber-6103 active-6103.txt' '6104 fiber-6104 phase-6104.txt'; do
+  read -r id lane path <<<"$spec"
+  FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane "$lane" --grant --worktree "fixture:claim-$id" --repo test/repo "$path" >/dev/null 2>&1 || fail "retired-holder setup for $lane"
+done
+set_claim_timestamp "$R" before-6101.txt 2020-01-01T00:00:00Z
+set_claim_timestamp "$R" newer-6102.txt 2022-01-01T00:00:00Z
+set_claim_timestamp "$R" active-6103.txt 2020-01-01T00:00:00Z
+set_claim_timestamp "$R" phase-6104.txt 2020-01-01T00:00:00Z
+set_claim_lane "$R" phase-6104.txt fiber-6104-build
+printf 'fiber-6101\t2021-01-01T00:00:00Z\nfiber-6102\t2021-01-01T00:00:00Z\nfiber-6104\t2021-01-01T00:00:00Z\n' >"$LANECHECK_RETIRED_FILE"
+[ "$(claims_blob "$R" | awk -F '\t' 'NF != 6 { bad = 1 } END { print bad+0 }')" = 0 ] || fail "new claim rows have exactly six fields"
+out="$(GH_TICKET_STATES='6101:OPEN,6102:OPEN,6103:OPEN,6104:OPEN' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-retired")" || fail "reap handles retired-lane claims: $(cat "$T/e-reap-retired")"
+! grep -qF 'before-6101.txt' <<<"$(claims_blob "$R")" || fail "retired lane claim at/before done is reaped"
+grep -qF 'newer-6102.txt' <<<"$(claims_blob "$R")" || fail "claim newer than done stamp is retained"
+grep -qF 'active-6103.txt' <<<"$(claims_blob "$R")" || fail "active lane claim remains"
+! grep -qF 'phase-6104.txt' <<<"$(claims_blob "$R")" || fail "retired phase-holder claim is reaped"
+grep -qF 'REAP claim before-6101.txt by fiber-6101' <<<"$out" || fail "reaped retired-lane claim is reported: $out"
+
+# A failed retired-lane lookup disables only retirement-based drops; closed-ticket
+# cleanup still runs, and an open claim on a retired lane remains held.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6110 --grant --worktree "$(hostname -s):open" --repo test/repo fail-lanecheck-open.txt >/dev/null 2>&1 || fail "lanecheck lookup failure setup open"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6111 --grant --worktree "$(hostname -s):closed" --repo test/repo fail-lanecheck-closed.txt >/dev/null 2>&1 || fail "lanecheck lookup failure setup closed"
+printf 'fiber-6110\t2021-01-01T00:00:00Z\n' >"$LANECHECK_RETIRED_FILE"
+out="$(LANECHECK_RETIRED_FAIL=1 GH_TICKET_STATES='6110:OPEN,6111:CLOSED' FILE_CLAIM_REMOTE="$R" bash "$FC" reap --repo test/repo 2>"$T/e-reap-lanecheck-fail")" \
+  || fail "reap continues after retired-list failure: $(cat "$T/e-reap-lanecheck-fail")"
+grep -qF 'REAP claim fail-lanecheck-closed.txt by fiber-6111' <<<"$out" || fail "closed claim drops after retired-list failure: $out"
+grep -qF 'fail-lanecheck-open.txt' <<<"$(claims_blob "$R")" || fail "open claim remains after retired-list failure"
+! grep -qF 'fail-lanecheck-closed.txt' <<<"$(claims_blob "$R")" || fail "closed claim removed after retired-list failure"
+grep -qF 'lanecheck retired-lane lookup failed' "$T/e-reap-lanecheck-fail" || fail "failed retired lookup warns on stderr"
 
 # A stale-only holder is removed before a sweep claimant decides whether it can grant.
 R="$(fresh)"
