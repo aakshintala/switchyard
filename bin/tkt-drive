@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tkt-drive: run routine tkt-* steps from ticket state until a verdict needs action.
 # Usage: tkt-drive <state>
+# NEEDS-PLAN exits 5, reserved beyond tkt-drive's 0-3 and chained tools' 0-4 statuses.
 set -euo pipefail
 
 usage() {
@@ -205,7 +206,12 @@ plan="$(get plan)"
 [ -n "$issue" ] || internal_stop 'tkt-drive: missing state key: issue'
 [ -n "$repo" ] || internal_stop 'tkt-drive: missing state key: repo'
 [ -n "$run_dir" ] || internal_stop 'tkt-drive: missing state key: run'
-[ -n "$plan" ] || internal_stop 'tkt-drive: missing state key: plan (set it with tkt-plan <state> set <plan>)'
+if [ -z "$plan" ]; then
+  t journal "tkt-drive NEEDS-PLAN trigger=$trigger" 2>/dev/null || true
+  printf 'TKT tkt-drive NEEDS-PLAN\n'
+  printf 'No plan yet. Run planning (planner, Verifier, `tkt-plan <state> set <plan>`), then rerun tkt-drive.\n' >&2
+  exit 5
+fi
 [ -r "$plan" ] || internal_stop "tkt-drive: cannot read plan: $plan"
 
 if prior="$(last_tool_verdict)" && [ -n "$prior" ]; then
