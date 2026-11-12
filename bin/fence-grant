@@ -594,6 +594,10 @@ for row in data:
   fi
   exit 0
 fi
+if [ -z "$paths" ] && [ -n "$newpaths" ]; then
+  echo "fence-grant: --new marks paths that --paths already lists; add them to --paths too" >&2
+  exit 2
+fi
 [ -n "$paths" ] || { _usage; exit 2; }
 case "$paths" in
   *:[0-9]*) echo "ERROR a line range belongs in --ranges, not --paths: $paths" >&2; exit 2;;
