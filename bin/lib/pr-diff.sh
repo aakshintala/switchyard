@@ -148,11 +148,164 @@ _pr_diff_cache_root() {
   fi
 }
 
+# Emit changed paths from a unified diff. Quoted paths use Git's C-style
+# byte escapes; unresolved headers fail so callers can use the API names route.
+pr_diff_names_from_diff() {
+  python3 -I - "$1" <<'PY'
+import re
+import sys
+
+def fail():
+    raise ValueError("unresolved diff path")
+
+def unquote(value):
+    if not value.startswith('"'):
+        return value
+    if len(value) < 2 or not value.endswith('"'):
+        fail()
+    body = value[1:-1]
+    out = bytearray()
+    i = 0
+    escapes = {'"': 34, '\\': 92, 't': 9, 'n': 10, 'r': 13, 'b': 8, 'f': 12, 'v': 11}
+    while i < len(body):
+        ch = body[i]
+        if ch != '\\':
+            out.extend(ch.encode('utf-8'))
+            i += 1
+            continue
+        i += 1
+        if i >= len(body):
+            fail()
+        ch = body[i]
+        if ch in '01234567':
+            end = i
+            while end < len(body) and end < i + 3 and body[end] in '01234567':
+                end += 1
+            out.append(int(body[i:end], 8))
+            i = end
+        elif ch in escapes:
+            out.append(escapes[ch])
+            i += 1
+        else:
+            fail()
+    try:
+        value = out.decode('utf-8')
+    except UnicodeDecodeError:
+        fail()
+    if chr(10) in value or chr(13) in value:
+        fail()
+    return value
+
+def header_pair(header):
+    if header.startswith('"'):
+        values = []
+        i = 0
+        while i < len(header):
+            while i < len(header) and header[i] == ' ':
+                i += 1
+            if i == len(header):
+                break
+            start = i
+            if header[i] == '"':
+                i += 1
+                escaped = False
+                while i < len(header):
+                    if not escaped and header[i] == '"':
+                        i += 1
+                        break
+                    if not escaped and header[i] == '\\':
+                        escaped = True
+                    else:
+                        escaped = False
+                    i += 1
+                else:
+                    fail()
+                values.append(unquote(header[start:i]))
+            else:
+                while i < len(header) and header[i] != ' ':
+                    i += 1
+                values.append(header[start:i])
+        if len(values) == 2:
+            return values
+        return []
+    matches = []
+    for match in re.finditer(r' b/', header):
+        left, right = header[:match.start()], header[match.start() + 1:]
+        if left.startswith('a/') and right.startswith('b/'):
+            matches.append((left, right))
+    return matches[0] if len(matches) == 1 else []
+
+def marker(raw, side):
+    value = unquote(raw)
+    if value == '/dev/null':
+        return None
+    prefix = side + '/'
+    if not value.startswith(prefix):
+        fail()
+    value = value[2:]
+    if not value or chr(10) in value or chr(13) in value:
+        fail()
+    return value
+
+def section_paths(section):
+    old = marker(section['old'], 'a') if 'old' in section else None
+    new = marker(section['new'], 'b') if 'new' in section else None
+    if old is not None or new is not None:
+        return [new or old]
+    if section['renames']:
+        if len(section['renames']) != 2:
+            fail()
+        return section['renames']
+    pair = header_pair(section['header'])
+    if len(pair) != 2 or not pair[0].startswith('a/') or not pair[1].startswith('b/') or pair[0][2:] != pair[1][2:]:
+        fail()
+    return [pair[0][2:]]
+
+try:
+    with open(sys.argv[1], encoding='utf-8') as source:
+        lines = source.read().splitlines()
+    sections = []
+    current = None
+    for line in lines:
+        if line.startswith('diff --git '):
+            if current is not None:
+                sections.append(current)
+            current = {'header': line[len('diff --git '):], 'renames': [], 'in_hunk': False}
+        elif current is not None and line.startswith('@@ '):
+            current['in_hunk'] = True
+        elif current is not None and not current['in_hunk'] and line.startswith('--- '):
+            current['old'] = line[4:]
+        elif current is not None and not current['in_hunk'] and line.startswith('+++ '):
+            current['new'] = line[4:]
+        elif current is not None and not current['in_hunk'] and line.startswith('rename from '):
+            current['renames'].append(unquote(line[len('rename from '):]))
+        elif current is not None and not current['in_hunk'] and line.startswith('rename to '):
+            current['renames'].append(unquote(line[len('rename to '):]))
+    if current is not None:
+        sections.append(current)
+    if not sections:
+        fail()
+    seen = set()
+    ordered = []
+    for section in sections:
+        for path in section_paths(section):
+            if chr(10) in path or chr(13) in path:
+                fail()
+            if path not in seen:
+                seen.add(path)
+                ordered.append(path)
+    for path in ordered:
+        print(path)
+except Exception:
+    sys.exit(1)
+PY
+}
+
 # Cache compare-endpoint diffs by repository, PR, base and immutable head SHA.
 # Fallback results remain uncached because they are not pinned by compare.
 pr_diff_fetch_cached() {
   local gh="$1" repo="$2" pr="$3" expected="$4" head_sha="$5" base="$6" mode="diff"
-  local cache_root cache_dir cache_file work tmp_file actual sections last_byte cache_base
+  local cache_root cache_dir cache_file work tmp_file sections last_byte cache_base cache_hit=0
   shift 6
   while [ "$#" -gt 0 ]; do
     case "$1" in --name-only) mode="names";; --allow-escape-sequences) :;; *) echo "pr-diff: unknown option $1" >&2; return 1;; esac
@@ -167,12 +320,21 @@ pr_diff_fetch_cached() {
   cache_base=${base//\//%2F}
   cache_file="$cache_dir/$head_sha-$cache_base.diff"
   work="$(mktemp -d "${TMPDIR:-/tmp}/pr-diff-cache.XXXXXX")" || { echo "pr-diff: cannot make temporary directory for PR #$pr" >&2; return 1; }
-  if [ -f "$cache_file" ]; then cp "$cache_file" "$work/fetch"; else
+  if [ -f "$cache_file" ]; then
+    cp "$cache_file" "$work/fetch" || { rm -rf "$work"; return 1; }
+    cache_hit=1
+  else
     if ! "$gh" api "repos/$repo/compare/$base...$head_sha" -H 'Accept: application/vnd.github.diff' >"$work/fetch" 2>"$work/compare.err"; then
-      # Compare may reject oversized diffs; use the established path, uncached.
       if pr_diff_fetch "$gh" "$repo" "$pr" "$expected" --allow-escape-sequences >"$work/fallback"; then
-        if [ "$mode" = names ]; then sed -n 's/^diff --git a\/[^ ]* b\/\(.*\)$/\1/p' "$work/fallback"; else cat "$work/fallback"; fi
-        rm -rf "$work"; return 0
+        if [ "$mode" = names ]; then
+          if ! pr_diff_names_from_diff "$work/fallback" >"$work/names"; then
+            pr_diff_fetch "$gh" "$repo" "$pr" "$expected" --name-only >"$work/names" || { rm -rf "$work"; return 1; }
+          fi
+          cat "$work/names"
+        else
+          cat "$work/fallback"
+        fi
+        local rc=$?; rm -rf "$work"; return "$rc"
       fi
       cat "$work/compare.err" >&2; rm -rf "$work"; return 1
     fi
@@ -182,12 +344,26 @@ pr_diff_fetch_cached() {
     fi
     sections=$(grep -c '^diff --git ' "$work/fetch" 2>/dev/null || true)
     if [ -n "$expected" ] && [ "$expected" != "$sections" ]; then echo "pr-diff: PR #$pr returned $sections diff sections; changedFiles is $expected" >&2; rm -rf "$work"; return 1; fi
+    if ! pr_diff_names_from_diff "$work/fetch" >"$work/names"; then
+      # An ambiguous mode-only header is never guessed or cached.
+      if ! pr_diff_fetch "$gh" "$repo" "$pr" "$expected" --name-only >"$work/names"; then rm -rf "$work"; return 1; fi
+      if [ "$mode" = names ]; then cat "$work/names"; else cat "$work/fetch"; fi
+      local rc=$?; rm -rf "$work"; return "$rc"
+    fi
     mkdir -p "$cache_dir" || { rm -rf "$work"; return 1; }
     tmp_file=$(mktemp "$cache_dir/.pr-diff.XXXXXX") || { rm -rf "$work"; return 1; }
     if ! cp "$work/fetch" "$tmp_file" || ! mv -f "$tmp_file" "$cache_file"; then rm -f "$tmp_file"; rm -rf "$work"; return 1; fi
     # A newly published head supersedes all cached heads for this PR.
     find "$cache_dir" -type f ! -name "$head_sha-$cache_base.diff" -delete
   fi
-  if [ "$mode" = names ]; then sed -n 's/^diff --git a\/[^ ]* b\/\(.*\)$/\1/p' "$work/fetch"; else cat "$work/fetch"; fi
+  if [ "$mode" = names ]; then
+    if ! pr_diff_names_from_diff "$work/fetch" >"$work/names"; then
+      [ "$cache_hit" -eq 0 ] || rm -f "$cache_file"
+      pr_diff_fetch "$gh" "$repo" "$pr" "$expected" --name-only >"$work/names" || { rm -rf "$work"; return 1; }
+    fi
+    cat "$work/names"
+  else
+    cat "$work/fetch"
+  fi
   local rc=$?; rm -rf "$work"; return "$rc"
 }

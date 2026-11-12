@@ -906,6 +906,54 @@ assert_line 'WARN PRE-PLAN PR #12: 0 files under crates/main/**' 'pre-plan zero 
 ! grep -q '^pr diff 12 ' "$T/gh.log" || fail 'pre-plan skips names fetch when changedFiles is zero'
 ! grep -q 'git/trees/' "$T/gh.log" || fail 'pre-plan skips path existence probes'
 
+# Compare diff paths with whitespace, renames, deletions and C-quoted UTF-8.
+reset_case
+write_blob 'docs/my file.md' 'old\n'
+write_blob docs/new.md 'new\n'
+write_blob docs/gone.md 'old\n'
+write_blob 'docs/é.md' 'old\n'
+write_blob 'docs/x"y.md' 'old\n'
+GH_PRLIST='[{"number":11,"headRefName":"fix/quoted","changedFiles":5,"headRefOid":"3333333333333333333333333333333333333333","baseRefName":"main"}]'
+export GH_PRLIST
+cat >"$T/pr/11.diff" <<'DIFF'
+diff --git "a/docs/my file.md" "b/docs/my file.md"
+index 1111111..2222222 100644
+--- "a/docs/my file.md"
++++ "b/docs/my file.md"
+@@ -1 +1 @@
+-old
++new
+diff --git a/docs/old.md b/docs/new.md
+similarity index 100%
+rename from docs/old.md
+rename to docs/new.md
+diff --git a/docs/gone.md b/docs/gone.md
+deleted file mode 100644
+--- a/docs/gone.md
++++ /dev/null
+diff --git "a/docs/\303\251.md" "b/docs/\303\251.md"
+index 1111111..2222222 100644
+--- "a/docs/\303\251.md"
++++ "b/docs/\303\251.md"
+@@ -1 +1 @@
+-old
++new
+diff --git "a/docs/x\"y.md" "b/docs/x\"y.md"
+index 1111111..2222222 100644
+--- "a/docs/x\"y.md"
++++ "b/docs/x\"y.md"
+@@ -1 +1 @@
+-old
++new
+DIFF
+run_fg 77 --paths 'docs/my file.md,docs/new.md,docs/gone.md,docs/é.md,docs/x"y.md' --new 'docs/my file.md,docs/new.md,docs/gone.md,docs/é.md,docs/x"y.md' --dry
+assert_rc 0 'compare names decode paths with spaces, renames, deletions and quoted UTF-8'
+assert_line 'OVERLAP docs/my file.md PR #11' 'space-containing compare path is reported'
+assert_line 'OVERLAP docs/new.md PR #11' 'pure rename destination is reported'
+assert_line 'OVERLAP docs/gone.md PR #11' 'deleted compare path is reported'
+assert_line 'OVERLAP docs/é.md PR #11' 'quoted UTF-8 compare path is decoded'
+assert_line 'OVERLAP docs/x"y.md PR #11' 'escaped quote in compare path is decoded'
+
 # Twenty open PRs exercise the cold cache, a warm second call and a moved head.
 reset_case
 python3 - "$T/prlist-20.json" <<'PY'

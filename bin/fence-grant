@@ -532,6 +532,7 @@ _preplan_fetch_one() {
   fi
 }
 
+FG_HEAD_SHA_RE='(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})'
 if [ -n "$preplan" ]; then
   prjson=$("${FW_GH:-gh}" pr list -R "$repo" --state open --limit 200 --json number,changedFiles,headRefOid,baseRefName 2>/dev/null) || { echo "ERROR gh pr list"; exit 3; }
   preplan_prs=$(printf '%s' "$prjson" | python3 -I -c 'import json,re,sys
@@ -552,12 +553,12 @@ for row in data:
   head = row.get("headRefOid")
   if head is None:
     head = ""
-  elif not isinstance(head, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head):
+  elif not isinstance(head, str) or not re.fullmatch(sys.argv[1], head):
     sys.exit(1)
   base = row.get("baseRefName") or ""
   if base and (not isinstance(base, str) or any(ch.isspace() for ch in base)):
     sys.exit(1)
-  print("%s|%s|%s|%s" % (row["number"], count, head, base))' 2>/dev/null) || { echo "ERROR gh pr list unreadable"; exit 3; }
+  print("%s|%s|%s|%s" % (row["number"], count, head, base))' "$FG_HEAD_SHA_RE" 2>/dev/null) || { echo "ERROR gh pr list unreadable"; exit 3; }
   preplan_n=$(printf '%s\n' "$preplan_prs" | grep -c .)
   case "$preplan_n" in ''|*[!0-9]*) echo "ERROR gh pr list count"; exit 3;; esac
   [ "$preplan_n" -lt 200 ] || { echo "ERROR gh pr list truncated at 200"; exit 3; }
@@ -983,9 +984,9 @@ nums=[]
 for row in data:
   if not isinstance(row,dict) or not isinstance(row.get("number"),int) or row["number"] < 1: sys.exit(1)
   head=row.get("headRefOid")
-  if head is not None and (not isinstance(head,str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",head)): sys.exit(1)
+  if head is not None and (not isinstance(head,str) or not re.fullmatch(sys.argv[1],head)): sys.exit(1)
   nums.append(str(row["number"]))
-print(" ".join(nums))' 2>/dev/null) || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
+print(" ".join(nums))' "$FG_HEAD_SHA_RE" 2>/dev/null) || { g=$(head -c 200 "$tmp/gherr" 2>/dev/null | tr '\n' ' '); echo "ERROR gh pr list $g"; exit 3; }
 # The ticket's own open pull request holds its own paths, which reads as a hold on every path the lane asked for
 # and says nothing. The lane and grant-file sides already skip the ticket itself; the pull-request side skips it here
 # too, by branch, since Fiber names a branch `<role>/<ticket>-<slug>` (2026-10-31: lane 3695's eight paths all came
