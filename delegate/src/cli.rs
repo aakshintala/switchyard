@@ -203,6 +203,7 @@ fn caller_cwd() -> Option<String> {
 }
 
 fn canonicalize_with_missing_tail(path: &std::path::Path) -> std::path::PathBuf {
+    // Relative record cwds would resolve against the acker's cwd, but caller_cwd() always records absolute paths.
     let absolute_path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -216,7 +217,16 @@ fn canonicalize_with_missing_tail(path: &std::path::Path) -> std::path::PathBuf 
     loop {
         if let Ok(mut canonical) = std::fs::canonicalize(ancestor) {
             if let Ok(missing_tail) = absolute_path.strip_prefix(ancestor) {
-                canonical.push(missing_tail);
+                for component in missing_tail.components() {
+                    match component {
+                        std::path::Component::CurDir => {}
+                        std::path::Component::ParentDir => {
+                            canonical.pop();
+                        }
+                        std::path::Component::Normal(part) => canonical.push(part),
+                        std::path::Component::Prefix(_) | std::path::Component::RootDir => {}
+                    }
+                }
             }
             return canonical;
         }
@@ -1388,6 +1398,25 @@ fn settle_dead_supervisor(id: &str) {
 mod tests {
     use super::*;
     use crate::status_record::CliResume;
+
+    #[test]
+    fn canonicalizes_missing_tail_parent_components() {
+        let root = std::env::temp_dir().join(format!(
+            "delegate-canonicalize-missing-tail-{}",
+            random_uuid()
+        ));
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let canonical_real = std::fs::canonicalize(&real).unwrap();
+
+        let normalized = canonicalize_with_missing_tail(&real.join("gone/../../x"));
+        assert!(
+            !normalized.starts_with(&canonical_real),
+            "{normalized:?} should not remain under {canonical_real:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn kv(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

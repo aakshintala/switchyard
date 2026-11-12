@@ -1195,6 +1195,46 @@ fn ack_canonicalizes_deleted_symlinked_caller_cwd() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(
+        e.dir.join("xdg-cache/delegate/read").join(&id).exists(),
+        "successful acknowledgement writes a read marker"
+    );
+}
+
+#[test]
+fn ack_refuses_deleted_symlinked_record_cwd_from_sibling() {
+    let e = Env::new("ack-cwd-deleted-symlink-sibling");
+    let real = e.dir.join("real");
+    let record_dir = real.join("a");
+    let ack_dir = real.join("b");
+    std::fs::create_dir_all(&record_dir).unwrap();
+    std::fs::create_dir(&ack_dir).unwrap();
+    let symlink = e.dir.join("link");
+    std::os::unix::fs::symlink(&real, &symlink).unwrap();
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "known report",
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", symlink.join("a").to_str().unwrap()),
+        ],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    std::fs::remove_dir(&record_dir).unwrap();
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", ack_dir.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cwd check failed"), "{stderr}");
+    assert_ack_refusal_hint(&stderr);
+    assert!(!e.dir.join("xdg-cache/delegate/read").join(&id).exists());
 }
 
 #[test]
