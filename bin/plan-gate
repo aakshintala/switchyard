@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# plan-gate: print a plan's gate command, the content under its `## Gate` heading.
-# Usage: plan-gate [--script CMD] PLAN_FILE
+# plan-gate: print the command under `## Gate`, or the optional `## Fix gate` with --fix.
+# Usage: plan-gate [--fix] [--script CMD] PLAN_FILE
 #        plan-gate -h | --help
-#        The gate is the text under the first line starting `## Gate` (whatever
-#        follows on that heading line), up to the next `# ` or `## ` heading
+#        The selected gate is the text under the first matching heading (`## Gate`,
+#        or `## Fix gate` with --fix), up to the next `# ` or `## ` heading
 #        line or the end of the file. `###` and deeper headings are part of
 #        the section and are skipped, not command lines. It must hold exactly
 #        one non-blank command line, written bare, wrapped in single
@@ -12,8 +12,11 @@
 #        stripped, the command must hold no backtick: an
 #        annotation such as `cmd` → PASS is rejected, since /bin/sh would run
 #        it as command substitution. A gate that needs substitution uses $(...).
-#        Exit 1 (nothing on stdout, one line on stderr) when the heading is
-#        missing, holds no command, or holds more than one command line.
+#        With --fix, the selected heading is `## Fix gate`, and its command
+#        must contain the literal token `<since>`. With --fix and no such
+#        heading, the command exits 3 with nothing on stdout; other invalid
+#        sections exit 1. The default heading is `## Gate` and keeps its
+#        existing exit codes.
 #        With --script CMD, the command must run the repo's gate script CMD as
 #        its workflow doc writes it. Leading NAME=VALUE assignments are allowed
 #        only for CARGO_BUILD_JOBS, CARGO_INCREMENTAL, CARGO_TARGET_DIR,
@@ -29,25 +32,44 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: plan-gate [--script CMD] PLAN_FILE" >&2
+  echo "usage: plan-gate [--fix] [--script CMD] PLAN_FILE" >&2
   exit 2
 }
 
+fix=0
 script=""
-if [ "${1:-}" = --script ]; then
-  [ $# -ge 2 ] && [ -n "$2" ] || usage
-  script="$2"
-  shift 2
-fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fix) fix=1; shift ;;
+    --script)
+      [ $# -ge 2 ] && [ -n "$2" ] || usage
+      script="$2"
+      shift 2 ;;
+    *) break ;;
+  esac
+done
 [ $# -eq 1 ] || usage
 case "$1" in -h|--help) usage ;; esac
 plan="$1"
 [ -r "$plan" ] || { echo "plan-gate: cannot read plan file: $plan" >&2; exit 2; }
 
-grep -Eq '^## Gate([[:space:]]|$)' "$plan" || { echo "plan-gate: no '## Gate' heading in $plan" >&2; exit 1; }
+section_heading="Gate"
+heading_regex='^## Gate([[:space:]]|$)'
+if [ "$fix" -eq 1 ]; then
+  section_heading="Fix gate"
+  heading_regex='^## Fix gate([[:space:]]|$)'
+fi
+if ! grep -Eq "$heading_regex" "$plan"; then
+  if [ "$fix" -eq 1 ]; then
+    echo "plan-gate: no '## Fix gate' heading in $plan" >&2
+    exit 3
+  fi
+  echo "plan-gate: no '## Gate' heading in $plan" >&2
+  exit 1
+fi
 
-section="$(awk '
-  !in_gate && /^## Gate([[:space:]]|$)/ { in_gate = 1; next }
+section="$(awk -v heading="$section_heading" '
+  !in_gate && $0 ~ ("^## " heading "([[:space:]]|$)") { in_gate = 1; next }
   in_gate && /^##? / { exit }
   in_gate && /^###/ { next }
   in_gate { print }
@@ -68,11 +90,11 @@ while IFS= read -r line; do
 done <<<"$section"
 
 if [ "$count" -eq 0 ]; then
-  echo "plan-gate: the '## Gate' section holds no command: $plan" >&2
+  echo "plan-gate: the '## $section_heading' section holds no command: $plan" >&2
   exit 1
 fi
 if [ "$count" -gt 1 ]; then
-  echo "plan-gate: the '## Gate' section holds more than one command line: $plan" >&2
+  echo "plan-gate: the '## $section_heading' section holds more than one command line: $plan" >&2
   exit 1
 fi
 
@@ -84,13 +106,22 @@ fi
 cmd="${cmd#"${cmd%%[![:space:]]*}"}"
 cmd="${cmd%"${cmd##*[![:space:]]}"}"
 if [ -z "$cmd" ]; then
-  echo "plan-gate: the '## Gate' section holds no command: $plan" >&2
+  echo "plan-gate: the '## $section_heading' section holds no command: $plan" >&2
   exit 1
+fi
+
+if [ "$fix" -eq 1 ]; then
+  case "$cmd" in
+    *'<since>'*) ;;
+    *)
+      echo "plan-gate: the '## Fix gate' command must contain <since>: $plan" >&2
+      exit 1 ;;
+  esac
 fi
 
 case "$cmd" in
   *'`'*)
-    echo "plan-gate: the '## Gate' command holds a backtick: $plan: $cmd" >&2
+    echo "plan-gate: the '## $section_heading' command holds a backtick: $plan: $cmd" >&2
     exit 1 ;;
 esac
 
@@ -112,7 +143,7 @@ if [ -n "$script" ]; then
     case "${first%%=*}" in
       CARGO_BUILD_JOBS|CARGO_INCREMENTAL|CARGO_TARGET_DIR|NEXTEST_TEST_THREADS|RUSTC_WRAPPER|SCCACHE_*|KACHE_*|TMPDIR) ;;
       *)
-        echo "plan-gate: the Gate line sets ${first%%=*}, which is not in the allowed variable list (CARGO_BUILD_JOBS, CARGO_INCREMENTAL, CARGO_TARGET_DIR, NEXTEST_TEST_THREADS, RUSTC_WRAPPER, SCCACHE_*, KACHE_*, TMPDIR): $cmd" >&2
+        echo "plan-gate: the $section_heading line sets ${first%%=*}, which is not in the allowed variable list (CARGO_BUILD_JOBS, CARGO_INCREMENTAL, CARGO_TARGET_DIR, NEXTEST_TEST_THREADS, RUSTC_WRAPPER, SCCACHE_*, KACHE_*, TMPDIR): $cmd" >&2
         exit 1 ;;
     esac
     case "${first#*=}" in
@@ -133,7 +164,7 @@ if [ -n "$script" ]; then
     esac
   fi
   if [ "$ok" -eq 0 ]; then
-    echo "plan-gate: the Gate line must run the gate script $script as the workflow doc writes it, not its steps by hand: $cmd" >&2
+    echo "plan-gate: the $section_heading line must run the gate script $script as the workflow doc writes it, not its steps by hand: $cmd" >&2
     exit 1
   fi
 fi
