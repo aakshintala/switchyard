@@ -239,11 +239,11 @@ reset_case all-new-writes
 cat >"$PLAN" <<'PLANEOF'
 ## Files
 - `src/new-a.snap` (new)
-- `fixtures/events.jsonl` (new)
+- `fixtures/control-7/events.jsonl` (new-confirmed)
 PLANEOF
 run_drive
 [ "$RC" -eq 1 ] || fail "all-new marked plan should grant then stop at fake BLOCKED (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
-assert_fence_args 'src/new-a.snap,fixtures/events.jsonl' 'src/new-a.snap,fixtures/events.jsonl' ''
+assert_fence_args 'src/new-a.snap,fixtures/control-7/events.jsonl' 'src/new-a.snap,fixtures/control-7/events.jsonl' ''
 grep -q '^.* tkt-drive fence-grant GRANT ' "${STATE%.state}.journal" || fail 'all-new marked plan did not record GRANT'
 assert_no_merge
 
