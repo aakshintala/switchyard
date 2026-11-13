@@ -42,6 +42,8 @@ if [ "${NO_HOME_PATHS_SKIP_CASES:-0}" != 1 ]; then
   run_case unredacted-users-fixture fail delegate/tests/fixtures/case.txt 'echo /Users/somebody/x'
   run_case unredacted-home-fixture fail delegate/tests/fixtures/case.txt 'echo /home/somebody/x'
   run_case fixture-regex pass delegate/tests/fixtures/case.txt "grep -rlE '/Users/[a-z]+'"
+  run_case file-url-users-fixture fail delegate/tests/fixtures/case.txt 'file:///Users/somebody/x'
+  run_case file-url-home fail script.sh 'file:///home/somebody/x'
   run_case allowlisted-marker pass delegate/scripts/leak-scan.sh 'echo /Users/somebody/x'
 fi
 
@@ -58,7 +60,9 @@ allowed_markers = {
 # These are test placeholders, not owners: user/dev/test/a/operator are common
 # fixture names, and u/us/use are truncations of user in redaction examples.
 placeholder_names = {b"user", b"dev", b"test", b"a", b"operator", b"u", b"us", b"use"}
-home_marker = re.compile(rb"(?<![\w/])/(?:Users|home)/")
+# A slash before the marker is a longer path, except after a URL's `//`
+# (file:///Users/<name>, file:///home/<name>).
+home_marker = re.compile(rb"(?:(?<![\w/])|(?<=//))/(?:Users|home)/")
 literal_name = re.compile(rb"[A-Za-z0-9._-]+")
 
 result = subprocess.run(
