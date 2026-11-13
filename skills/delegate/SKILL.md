@@ -20,7 +20,7 @@ Pick the lowest rung whose definition covers the job:
 - `strong`: under-specified tickets. Makes local design calls, and stops and flags a plan that's wrong instead of following it. Writes a lane brief from an approved plan. Checks a plan as the Verifier.
 - `frontier`: long-horizon planning, cross-cutting design, sub-orchestrating a ticket, and the last escalation before the owner.
 
-The current pool is in the `delegate models` Tiers column. Use a model with no rung only when flywheel rules it in. Within a rung, pick the cheapest model with headroom (the `$OUT/1M` column); on a price tie, pick the provider with more headroom.
+The current spend pool is in the `delegate models` ALLOWED column. A model outside it needs `--model-ruling <comment URL>` for a ruled exception. Within a rung, pick the cheapest model with headroom (the `$OUT/1M` column); on a price tie, pick the provider with more headroom.
 
 When the pick is a Claude model and you run in a Claude Code session, start it as a local `claude-worker` subagent with that model and effort (`model: haiku` for `claude-haiku-5-5`), and run the gate yourself on its result. A script with no session to host a subagent, such as `review-pr`, passes the Claude model to `delegate run`. A session started before Claude Code learned of a model may resolve its alias to the older one (`haiku` to Haiku 4.5), so check the model id the subagent reports.
 
@@ -53,14 +53,14 @@ A brief that says something is absent (unwritten, missing, not done) names the r
 ## Running
 
 ```bash
-delegate run --model composer-2.5 --cwd /abs/repo \
+delegate run --model openai/gpt-6-luna:medium --cwd /abs/repo \
   --gate 'scripts/check' < brief.md
 ```
 
 The gate is the repo's own gate command (its workflow doc names it, e.g. `scripts/check` or `cargo nextest run`), exactly as CI runs it.
 
 `run` prints the job id and returns; the job runs in a detached supervisor.
-A Claude model id may carry a trailing `:<level>` (`low|medium|high|xhigh|max`), passed to `claude` as `--effort` (e.g. `claude-opus-5-5:high`).
+A Claude model id may carry a trailing `:<level>` (`low|medium|high|xhigh|max`), passed to `claude` as `--effort` (e.g. `claude-sonnet-5-5:high`).
 Every job can write, so a read task says "do not edit" in its brief, the record's
 `changeSet` shows any write, and parallel jobs need separate cwds (one worktree per lane).
 
