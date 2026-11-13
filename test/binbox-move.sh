@@ -28,8 +28,22 @@ test -s "$brief"
 grep -F -- "$T/home/.agents/skills/implement/SKILL.md" "$brief" >/dev/null
 grep -F -- "$T/home/work/fiber-worktrees/feat/1448-binbox-test" "$brief" >/dev/null
 # Any absolute home path outside the hermetic $T tree is host-specific,
-# whatever the caller's $HOME is.
-if sed "s|$T|T|g" "$brief" | grep -E '(^|[^[:alnum:]_/])/(Users|home)/' >/dev/null; then
+# whatever the caller's $HOME is. Like test/no-home-paths.sh, a marker after
+# `//` counts, so a file:/// URL to a home directory is caught too.
+has_home_path() { grep -E '(^|[^[:alnum:]_/]|//)/(Users|home)/' >/dev/null; }
+# Built at run time so no tracked line holds a literal home path.
+for top in Users home; do
+  url="file:///$top/somebody/x"
+  printf 'see %s\n' "$url" | has_home_path || {
+    echo "FAIL home-path check misses $url" >&2
+    exit 1
+  }
+done
+if printf 'see T/home/work\n' | has_home_path; then
+  echo 'FAIL home-path check flags a hermetic T/home path' >&2
+  exit 1
+fi
+if sed "s|$T|T|g" "$brief" | has_home_path; then
   echo 'FAIL mkbrief emits a host-specific home path' >&2
   exit 1
 fi

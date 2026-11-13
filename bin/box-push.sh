@@ -16,6 +16,14 @@
 # Same sed rewrite as boxlaunch.sh, so a Mac path inside a file still points
 # somewhere real on the box.
 set -euo pipefail
+script_path=${BASH_SOURCE[0]}
+while [ -L "$script_path" ]; do
+  script_dir=$(cd "$(dirname "$script_path")" && pwd)
+  link=$(readlink "$script_path")
+  case "$link" in /*) script_path=$link;; *) script_path=$script_dir/$link;; esac
+done
+script_dir=$(cd "$(dirname "$script_path")" && pwd)
+. "$script_dir/lib/fw-lib.sh"
 
 n=${1:?usage: box-push.sh <ticket>}
 if [ -z "${BOX_SSH:-}" ] && [ "$(uname -s)" != Darwin ]; then
@@ -24,7 +32,7 @@ if [ -z "${BOX_SSH:-}" ] && [ "$(uname -s)" != Darwin ]; then
 fi
 ssh=${BOX_SSH:-ssh}
 host=${FW_BOX_HOST:-roundhouse-7010-plus-1.local}
-mac=${FW_MAC_HOME:-$HOME}; box=${FW_BOX_HOME:-/home/${USER:-$(id -un)}}
+mac=${FW_MAC_HOME:-$HOME}; box=$(fw_box_home)
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}
 dst=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 

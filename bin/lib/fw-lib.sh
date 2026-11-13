@@ -39,6 +39,9 @@ fw_box_is_local() {
   [ -z "${BOX_SSH:-${FW_SSH:-}}" ] && [ "$(uname -s)" != Darwin ]
 }
 
+# The box user's home: FW_BOX_HOME, else /home/<user> (boxlaunch, box-push).
+fw_box_home() { printf '%s' "${FW_BOX_HOME:-/home/${USER:-$(id -un)}}"; }
+
 # Read `claude agents --json` on stdin; print live lane names (fiber-*,
 # busy/idle). Exits 1 when stdin is not parseable JSON (fail closed).
 _fw_lane_names_json() {
