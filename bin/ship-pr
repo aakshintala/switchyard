@@ -20,8 +20,9 @@
 #        `pull_request` run on that head. If none appears, assume no ready workflow
 #        is configured and continue (a later BLOCKED merge then most likely means
 #        the ready run was dispatched late: rerun ship-pr rather than triage). Once
-#        one appears, list again 5 s later and wait for every new run to complete
-#        (one deadline, bounded by --timeout) before `gh-ci wait`, so an older
+#        one appears, list every 5 s until a pass adds no new run (inside the same
+#        120 s) and wait for every new run to complete (one deadline, bounded by
+#        --timeout) before `gh-ci wait`, so an older
 #        green run cannot satisfy the wait. `gh-ci wait` (--timeout, default 7200),
 #        rerunning failed jobs once when the failure is outside the diff (see below);
 #        on a non-strict base with --gate, or --merge-check when --gate is absent,
@@ -163,8 +164,8 @@
 #        touch (a merge of main adds no base files), under `Changed since review:`. A failed
 #        post exits 1 before any push. A match posts nothing. The gate and CI run as usual.
 #        --timeout bounds each CI wait and the ready runs' completion wait (one
-#        deadline shared by all of them). A draft may spend up to 120 s locating a
-#        ready run, plus 5 s to list the rest, plus up to 5 CI waits (the first,
+#        deadline shared by all of them). A draft may spend up to 120 s locating the
+#        ready runs, plus up to 5 CI waits (the first,
 #        three strict-mode retries and the one rerun); the 3 retries are one budget
 #        shared with a merge that lost the race.
 #        SHIP_PR_INTERVAL: seconds between MERGED polls (default 5, at most 12 polls).
@@ -982,7 +983,8 @@ pull_request_run_ids() {
 # Wait for every workflow dispatched by ready_for_review, rather than trusting a
 # green check from a run that already existed when the draft was marked ready.
 # Ready can start several pull_request runs that are listed seconds apart, so
-# list once more after the first new run appears and wait on each new id.
+# after the first new run appears, list every 5 s until a pass adds none, then
+# wait on each new id.
 wait_ready_for_review_run() {
   local head="$1" before_ids="$2" elapsed=0 run_ids id new_ids="" status
   while :; do
@@ -997,10 +999,17 @@ wait_ready_for_review_run() {
     sleep 5
     elapsed=$((elapsed + 5))
   done
-  sleep 5
-  run_ids="$(pull_request_run_ids "$head")" \
-    || die_after_ready 1 "cannot read workflow runs after marking PR $pr ready"
-  new_ids="$(grep -vxF -f <(printf '%s\n' "$before_ids") <<<"$run_ids" | grep -v '^$' || true)"
+  # Keep listing until a pass adds no new run, within the same 120 s budget.
+  local more_ids
+  while [ "$elapsed" -lt 120 ]; do
+    sleep 5
+    elapsed=$((elapsed + 5))
+    run_ids="$(pull_request_run_ids "$head")" \
+      || die_after_ready 1 "cannot read workflow runs after marking PR $pr ready"
+    more_ids="$(grep -vxF -f <(printf '%s\n' "$before_ids") <<<"$run_ids" | grep -v '^$' || true)"
+    [ "$more_ids" = "$new_ids" ] && break
+    new_ids="$more_ids"
+  done
 
   say "waiting for ready_for_review runs to finish: $(paste -sd ' ' - <<<"$new_ids")"
   elapsed=0
