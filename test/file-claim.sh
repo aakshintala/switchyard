@@ -1334,6 +1334,23 @@ grep -qF 'REAP claim p.txt by fiber-6010' <<<"$out" || fail "guard reports autom
 grep -qF 'GRANT p.txt new' <<<"$out" || fail "guard grants after stale holder is removed: $out"
 [ "$(claims_blob "$R" | grep -c '^')" = 1 ] || fail "stale-only holder was replaced by claimant"
 
+# An unchecked command failing inside the reap step still stops the claim (errexit
+# stays on in reap): claim exits 2 with its reap message and grants nothing.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6012 --grant --worktree t:old --repo test/repo held.txt >/dev/null 2>&1 || fail "reap-errexit setup"
+mkdir -p "$T/awkfail"
+cat >"$T/awkfail/awk" <<'STUB_EOF'
+#!/usr/bin/env bash
+case "${!#}" in *ticket-numbers.tsv) exit 1;; esac
+exec "$REAL_AWK" "$@"
+STUB_EOF
+chmod +x "$T/awkfail/awk"
+rc=0
+out="$(REAL_AWK="$(command -v awk)" GH_TICKET_STATES='6012:OPEN' FILE_CLAIM_REMOTE="$R" PATH="$T/awkfail:$PATH" bash "$FC" claim --lane fiber-6013 --grant --worktree t:new --repo test/repo other.txt 2>"$T/e-reap-errexit")" || rc=$?
+[ "$rc" = 2 ] || fail "claim exits 2 when reap fails unchecked, got $rc: $out $(cat "$T/e-reap-errexit")"
+grep -qF 'cannot reap claims before claim' "$T/e-reap-errexit" || fail "claim reports reap failure: $(cat "$T/e-reap-errexit")"
+! grep -qF 'other.txt' <<<"$(claims_blob "$R")" || fail "claim grants nothing after reap failure"
+
 # A failed or partial ticket-state response keeps every hold in the batch.
 R="$(fresh)"
 FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6020 --grant --worktree t:one --repo test/repo fail-closed.txt >/dev/null 2>&1 || fail "lookup-failure setup 1"

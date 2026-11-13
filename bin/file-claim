@@ -390,7 +390,7 @@ claim_diff_paths() {
 cmd_claim() {
   local lane="$1" kind="$2" self_pr="$3" exempt_pr="$4" worktree="$5" repo="$6"
   local diff_worktree="$7" refresh="$8"; shift 8
-  local remote now main_tip prmap tip claims attempt paths requested_paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr prs_for_path holders own_hold blocked path_base holder_path holder_lane own_existing claim_line claim_path claim_lane claim_base diff_base drop_claim
+  local remote now main_tip prmap tip claims attempt paths requested_paths out new_lines final_out i p held granted refused unclaimed existing new_grants cap_hit reason pr holder path changed_files line saw_cap saw_prs hpr prs_for_path holders own_hold blocked path_base holder_path holder_lane own_existing claim_line claim_path claim_lane claim_base diff_base drop_claim reap_rc
   local -a paths=() requested_paths=() diff_bases=()
   remote="$(default_remote "$repo")"; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   new_workdir
@@ -414,7 +414,13 @@ cmd_claim() {
   # Fetch both tips here so reap can reuse this workdir and the same snapshots.
   if ! main_tip="$(fetch_main_tip "$remote")"; then die 2 "cannot reap claims before claim"; fi
   if ! tip="$(fetch_claim_tip "$remote")"; then die 2 "cannot reap claims before claim"; fi
-  if ! ( trap - EXIT; cmd_reap "$repo" "$main_tip" "$tip" ); then die 2 "cannot reap claims before claim"; fi
+  # Run reap outside a condition context so its set -e still applies, as it did
+  # when reap was its own process; an `if !` or `||` here would disable errexit.
+  set +e
+  ( set -e; trap - EXIT; cmd_reap "$repo" "$main_tip" "$tip" )
+  reap_rc=$?
+  set -e
+  [ "$reap_rc" -eq 0 ] || die 2 "cannot reap claims before claim"
   for p in "${requested_paths[@]}"; do
     held=0
     if [ "${#paths[@]}" -gt 0 ]; then for i in "${paths[@]}"; do if [ "$i" = "$p" ]; then held=1; break; fi; done; fi
