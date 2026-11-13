@@ -235,7 +235,9 @@ fn models_lists_every_row_with_default_marked() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
-    for column in ["ID", "LABEL", "BACKEND", "$IN/1M", "$OUT/1M", "TIERS"] {
+    for column in [
+        "ID", "LABEL", "BACKEND", "$IN/1M", "$OUT/1M", "ALLOWED", "TIERS",
+    ] {
         assert!(stdout.contains(column), "missing {column}: {stdout}");
     }
     for id in EXPECTED_IDS {
@@ -246,6 +248,22 @@ fn models_lists_every_row_with_default_marked() {
             .lines()
             .any(|line| line.starts_with("* composer-2.5")),
         "default model is not marked: {stdout}"
+    );
+    let sonnet = stdout
+        .lines()
+        .find(|line| line.contains("claude-sonnet-5-5"))
+        .unwrap();
+    assert!(
+        sonnet.split_whitespace().any(|column| column == "yes"),
+        "{sonnet}"
+    );
+    let composer = stdout
+        .lines()
+        .find(|line| line.contains("composer-2.5"))
+        .unwrap();
+    assert!(
+        !composer.split_whitespace().any(|column| column == "yes"),
+        "{composer}"
     );
 }
 

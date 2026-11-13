@@ -1,5 +1,8 @@
 //! End-to-end regression for Claude-style background Bash sessions.
 
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
+
 use serde_json::Value;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -44,7 +47,7 @@ impl Env {
 
     fn delegate(&self, args: &[&str], stdin: Option<&str>) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_delegate"))
-            .args(args)
+            .args(model_ruling::args_with_model_ruling(args))
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
             .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))

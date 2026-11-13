@@ -24,7 +24,7 @@ You need Rust (`cargo`), and `cursor-agent` on PATH with `cursor-agent login` be
 | `delegate watch <jobId>...` | Block until each job is terminal (optional `--timeout` seconds). |
 | `delegate status <jobId>` | Print the job's state without waiting; show its caller and add a short same-line summary of available result text and changes for finished jobs. |
 | `delegate ack <jobId>... [--any]` | Mark one or more job reports as read; the cwd and caller-label checks prevent misattribution, not access (`$HOME` or `/` can pass every record); `--any` skips the checks and is for the orchestrator only. |
-| `delegate models` | List configured model ids, labels, backends, prices, and tiers. Rows are sorted by backend, then by id; `*` marks the default. |
+| `delegate models` | List configured model ids, labels, backends, prices, tiers, and allowed-pool membership. Rows are sorted by backend, then by id; `*` marks the default and `yes` marks an allowed row. |
 | `delegate doctor` | Check configured backend binaries, login state, the Fiber hub socket, model menu drift and whether this binary is stale against `~/.agents`. |
 | `delegate version` | Print the package version, embedded build commit and delegate checkout freshness. |
 | `delegate session start` | Start a detached Muse or pi session from a brief. |
@@ -49,7 +49,7 @@ Every job runs with writes enabled. A read task says "do not edit" in its brief;
 | `codex` | Implemented (`codex exec`, `CODEX_BIN`). |
 | `muse` | Implemented (`muse exec`, `MUSE_BIN`). |
 
-Model ids and prices come from bundled `config/models.json`, merged with your host profile.
+Model ids and prices come from bundled `config/models.json`, merged with your host profile. The bundled rows marked `"allowed": true` form the run pool; a missing field means the row is not allowed. Host profiles cannot change pool membership. `delegate run` and `delegate resume` reject other models before starting a job. Use `--model-ruling https://github.com/<owner>/<repo>/(issues|pull)/<n>#issuecomment-<digits>` for a ruled exception; delegate records the URL at `resume.modelRuling`. `delegate model-check <model> [--model-ruling URL]` checks a model without starting a job. The same flags are available to `review-pr start` and `review-pr run`; review comments show the model and ruling from each job record.
 A Claude model id may carry a trailing `:<level>` (`low|medium|high|xhigh|max`), run as `claude --model <base> --effort <level>` (e.g. `claude-opus-5-5:high`); ids without a suffix are unchanged. A pi or fiber model id may carry a trailing thinking level (`:<off|minimal|low|medium|high|xhigh|max>`), which stays on the id handed to the harness (e.g. `opencode-go/muse-spark-1.3-contributor:high` runs as `pi --model opencode-go/muse-spark-1.3-contributor:high`); catalogue ids such as `openai/gpt-6-luna:xhigh` stay their own rows, and another colon tail is an error naming the levels.
 
 A fiber model id is `fiber/` plus Fiber's own `provider/model` reference (e.g. `fiber/opencode-go/muse-spark-1.3-contributor`). Jobs use supervised sessions through the Unix socket at `$FIBER_HOME/run/hub` (default `~/.fiber/run/hub`): a fresh job starts a supervised session, and resume reconnects to the saved session before sending new input. Jobs do not spawn Fiber or fall back to a per-run command. Only fiber/codex/gpt-6-luna:xhigh and fiber/codex/gpt-6.1-sol carry tiers; other Fiber models carry none, so the ladder never picks them. `delegate doctor` checks `fiber version`, membership in `fiber models --json`, and hub socket reachability; a missing or unreachable hub is a warning, not a doctor failure. Like a pi id, a Fiber id may carry a trailing thinking level (`:<off|minimal|low|medium|high|xhigh|max>`), kept on the model reference sent to the hub, while another colon tail is an error naming the levels. The real-Fiber resume tests run with `FIBER_BIN=<path to fiber> cargo test --test fiber_live` from `delegate/`; each test spends two live Muse turns and skips when the binary or hub socket is unavailable.
@@ -88,7 +88,7 @@ A RUNNING record's `progress.lastEventAgeMs` is the ms since the last event the 
 
 ## Host profile
 
-Optional JSON at `~/.config/delegate/host-profile.json` (or `$XDG_CONFIG_HOME/delegate/host-profile.json`). Override the path with `DELEGATE_HOST_PROFILE`. Keys can set `default`, `models`, `gate`, `idleMs`, `toolIdleMs`, and `museSandbox`. Missing file is fine; defaults are built in.
+Optional JSON at `~/.config/delegate/host-profile.json` (or `$XDG_CONFIG_HOME/delegate/host-profile.json`). Override the path with `DELEGATE_HOST_PROFILE`. Keys can set `default`, `models`, `gate`, `idleMs`, `toolIdleMs`, and `museSandbox`. A host-profile model row can override model settings, but its `allowed` value is ignored; bundled pool membership is authoritative. Missing file is fine; defaults are built in.
 
 ## Replay
 

@@ -255,6 +255,8 @@ pub fn file_status_record_writer() -> FileStatusRecordWriter {
 #[serde(rename_all = "camelCase")]
 pub struct CliResume {
     pub model: String,
+    #[serde(default)]
+    pub model_ruling: Option<String>,
     pub backend: Option<String>,
     pub cwd: String,
     pub session_id: Option<String>,
@@ -295,6 +297,7 @@ pub struct CliRecord {
 pub struct CliRecordWriter {
     pub job_id: String,
     pub model: String,
+    pub model_ruling: Option<String>,
     pub backend: Option<String>,
     pub cwd: String,
     pub caller: String,
@@ -377,6 +380,7 @@ impl StatusRecordWriter for CliRecordWriter {
             caller_cwd: self.caller_cwd.clone(),
             resume: CliResume {
                 model: self.model.clone(),
+                model_ruling: self.model_ruling.clone(),
                 backend: self.backend.clone(),
                 cwd: self.cwd.clone(),
                 session_id,
@@ -545,6 +549,7 @@ mod tests {
         let writer = CliRecordWriter {
             job_id: job_id.into(),
             model: "codex/gpt-6-luna".into(),
+            model_ruling: Some("https://github.com/example/repo/issues/1#issuecomment-2".into()),
             backend: Some("codex".into()),
             cwd: "/work/project".into(),
             caller: "test".into(),
@@ -581,6 +586,10 @@ mod tests {
 
         writer.write(job_id, &terminal);
         writer.write(job_id, &terminal);
+        assert_eq!(
+            written_record(job_id)["resume"]["modelRuling"],
+            "https://github.com/example/repo/issues/1#issuecomment-2"
+        );
         assert_eq!(
             written_record(job_id)["resume"]["addDirs"],
             json!(["/tmp/additional"])
@@ -909,12 +918,16 @@ mod tests {
         let _env = crate::test_env::lock();
         let prior = json!({
             "status": "RUNNING",
-            "resume": {"model": "model", "backend": "pi", "sessionId": "s-init"}
+            "resume": {"model": "model", "backend": "pi", "sessionId": "s-init", "modelRuling": "https://github.com/example/repo/issues/1#issuecomment-2"}
         });
         let cancelled_id = random_uuid();
         write_cancelled(&cancelled_id, &prior).unwrap();
         let cancelled = written_record(&cancelled_id);
         assert_eq!(cancelled["resume"]["sessionId"], "s-init");
+        assert_eq!(
+            cancelled["resume"]["modelRuling"],
+            "https://github.com/example/repo/issues/1#issuecomment-2"
+        );
         assert_eq!(cancelled["result"]["sessionId"], "s-init");
         assert_eq!(cancelled["result"]["backend"], "pi");
         assert!(cancelled["startedAtMs"].is_number());
@@ -932,6 +945,10 @@ mod tests {
         write_supervisor_died(&dead_id, &prior).unwrap();
         let dead = written_record(&dead_id);
         assert_eq!(dead["resume"]["sessionId"], "s-init");
+        assert_eq!(
+            dead["resume"]["modelRuling"],
+            "https://github.com/example/repo/issues/1#issuecomment-2"
+        );
         assert_eq!(dead["result"]["sessionId"], "s-init");
         assert_eq!(dead["result"]["backend"], "pi");
         assert!(dead["startedAtMs"].is_number());

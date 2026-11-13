@@ -9,8 +9,9 @@
 # report rebuilds metrics.json and summary.md from a finished run's saved
 # outputs and the Fiber event log; it reruns nothing and makes no network calls.
 #
-# `--thinking L` appends `:L` to both arms' model ids; without the flag the ids
-# pass through unchanged. The level itself is not checked here: delegate
+# `--thinking L` sets both arms' thinking level to L: it replaces a trailing
+# `:<level>` (off|minimal|low|medium|high|xhigh|max) on a model id, or appends
+# `:L` when the id has none; without the flag the ids pass through unchanged. The level itself is not checked here: delegate
 # rejects an unknown level, and each arm then fails as a harness error.
 #
 # Exit codes: 0 both runs finished, whatever their gates did;
@@ -21,8 +22,8 @@
 # is wrapped with a line telling each agent to commit locally and not push.
 set -uo pipefail
 
-PI_MODEL="opencode-go/muse-spark-1.3-contributor"
-FIBER_MODEL="fiber/opencode-go/muse-spark-1.3-contributor"
+PI_MODEL="openai/gpt-6-luna:medium"
+FIBER_MODEL="fiber/codex/gpt-6-luna:medium"
 DEFAULT_REPO="aakshintala/fiber"
 
 TAB="$(printf '\t')"
@@ -330,6 +331,17 @@ canary_worktree() {
   printf '%s/%s-canary-%s-%s' "$(dirname "$clone")" "$(basename "$clone")" "$ticket" "$side"
 }
 
+# with_thinking MODEL LEVEL: MODEL with its trailing thinking level, if any,
+# replaced by LEVEL, so a default such as openai/gpt-6-luna:medium becomes
+# openai/gpt-6-luna:xhigh rather than openai/gpt-6-luna:medium:xhigh.
+with_thinking() {
+  local model="$1" level="$2"
+  if [[ "$model" =~ ^(.+):(off|minimal|low|medium|high|xhigh|max)$ ]]; then
+    model="${BASH_REMATCH[1]}"
+  fi
+  printf '%s:%s\n' "$model" "$level"
+}
+
 # fiber_provider_of MODEL: the provider of a fiber/<provider>/<model> id,
 # with an optional :thinking suffix ignored by stopping at the second slash.
 # Prints the provider; returns 1 with no output for any other shape or for
@@ -502,8 +514,8 @@ cmd_run() {
     esac
   done
   if [ -n "$thinking" ]; then
-    pi_model="$pi_model:$thinking"
-    fiber_model="$fiber_model:$thinking"
+    pi_model="$(with_thinking "$pi_model" "$thinking")"
+    fiber_model="$(with_thinking "$fiber_model" "$thinking")"
   fi
   [[ "$ticket" =~ ^[0-9A-Za-z._-]+$ ]] || { err "bad ticket '$ticket'"; return 2; }
   [ -n "$gate" ] || { err "--gate is required"; return 2; }

@@ -176,6 +176,7 @@ mod tests {
                     },
                     tiers: vec![],
                     reviewer: None,
+                    allowed: false,
                 },
             );
         }
@@ -288,6 +289,7 @@ mod tests {
                 },
                 tiers: vec![],
                 reviewer: None,
+                allowed: false,
             },
         );
         let config = Config {

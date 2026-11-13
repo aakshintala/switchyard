@@ -64,6 +64,7 @@ fn models_config() -> Config {
             },
             tiers: vec![],
             reviewer: None,
+            allowed: false,
         },
     );
     models.insert(
@@ -79,6 +80,7 @@ fn models_config() -> Config {
             },
             tiers: vec![],
             reviewer: None,
+            allowed: false,
         },
     );
     models.insert(
@@ -94,6 +96,7 @@ fn models_config() -> Config {
             },
             tiers: vec![],
             reviewer: None,
+            allowed: false,
         },
     );
     models.insert(
@@ -109,6 +112,7 @@ fn models_config() -> Config {
             },
             tiers: vec![],
             reviewer: None,
+            allowed: false,
         },
     );
     Config {

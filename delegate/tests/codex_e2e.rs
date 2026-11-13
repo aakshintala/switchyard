@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
 mod support;
 
 const FIXTURE: &str = concat!(
@@ -205,7 +207,7 @@ impl Env {
         exit: &str,
     ) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
-        cmd.args(args)
+        cmd.args(model_ruling::args_with_model_ruling(args))
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
             .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))

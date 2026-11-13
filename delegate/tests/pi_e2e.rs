@@ -1,6 +1,9 @@
 //! Drives the real `delegate` binary as a process against a fake pi
 //! that replays `tests/fixtures/contract/pi/plain-answer.stdout`.
 
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
+
 use serde_json::Value;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -97,7 +100,7 @@ impl Env {
         fixture: &std::path::Path,
     ) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
-        cmd.args(args)
+        cmd.args(model_ruling::args_with_model_ruling(args))
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
             .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))
