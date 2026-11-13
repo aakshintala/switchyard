@@ -243,12 +243,12 @@ mkdir -p "$HOME/work/fiber-worktrees/surveyor/home" "$HOME/work/sy-wt/main" "$HO
 ROLE_TABLE=""
 export ROLE_TABLE
 run_restart >"$T/defaults.out" 2>"$T/defaults.err" || fail "default rows run failed: $(cat "$T/defaults.err")"
-plugin_roles="$(awk 'BEGIN { RS = "" } {
+plugin_roles="$(awk -v plugin_path="arg=$HOME/.agents/claude-code/plugins/role-inbox" 'BEGIN { RS = "" } {
   role = ""; plugin = 0
   n = split($0, lines, "\n")
   for (i = 1; i <= n; i++) {
     if (lines[i] == "arg=--agent") role = lines[i + 1]
-    if (lines[i] == "arg=--plugin-dir" && lines[i + 1] == "arg=/Users/aakshintala/.agents/claude-code/plugins/role-inbox" && role == "") plugin = 1
+    if (lines[i] == "arg=--plugin-dir" && lines[i + 1] == plugin_path && role == "") plugin = 1
   }
   print role ":" plugin
 }' "$CLAUDE_LOG" | sort | tr '\n' ' ')"

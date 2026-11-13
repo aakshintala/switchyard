@@ -19,7 +19,7 @@ fail_over_budget() {
 }
 
 # The tkt ceiling and rebasing policy come from flywheel's
-# tkt-brief-bounded budget in /Users/aakshintala/work/fiber-worktrees/flywheel/bin/test-launch.sh:
+# tkt-brief-bounded budget in ~/work/fiber-worktrees/flywheel/bin/test-launch.sh:
 # measured 2026-11-06 at 117 lines / 32994 bytes, allowing ~5% growth so a
 # paragraph fits but a new section does not. Rebase only deliberately, with a
 # new measurement written into that source comment. Tkt's 33280 B / 125-line

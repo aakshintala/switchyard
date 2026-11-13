@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # roles-restart: relaunch missing Claude role sessions after a reboot.
 # Install manually only when approved:
-#   cp claude-code/launchd/com.aakshintala.roles-restart.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aakshintala.roles-restart.plist
-# The plist is a template; this script never installs or bootstraps it.
+#   sed "s|__HOME__|$HOME|g" claude-code/launchd/com.aakshintala.roles-restart.plist > ~/Library/LaunchAgents/com.aakshintala.roles-restart.plist
+#   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aakshintala.roles-restart.plist
+# The plist is a template; the installer must substitute __HOME__ because launchd does not expand it. This script never installs or bootstraps it.
 # ROLES_RESTART_ROLES may override defaults as newline-separated role|home|handoff[|extra-args] rows.
 # Fourth-column extra args are split on whitespace and passed before --agent.
 # ROLES_RESTART_AGENTS_JSON may provide a fixture instead of running claude agents --json.
@@ -208,8 +209,8 @@ launch_role() {
 if [ -n "${ROLES_RESTART_ROLES:-}" ]; then
   roles="$ROLES_RESTART_ROLES"
 else
-  # Absolute path: launchd does not expand ~. The directory comes from PR #1488.
-  role_inbox="--plugin-dir /Users/aakshintala/.agents/claude-code/plugins/role-inbox"
+  # Use $HOME because launchd sets it for user agents but does not expand ~ in arguments.
+  role_inbox="--plugin-dir $HOME/.agents/claude-code/plugins/role-inbox"
   roles="$(printf '%s\n' \
     "surveyor|$HOME/work/fiber-worktrees/surveyor/home|$HOME/work/wiki/state/surveyor.md|$role_inbox" \
     "switchyard|$HOME/work/sy-wt/main|$HOME/work/wiki/state/switchyard.md|$role_inbox" \

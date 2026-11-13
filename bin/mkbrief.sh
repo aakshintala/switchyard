@@ -27,6 +27,7 @@ pool_f=${POOL_FILE:-$T/lib/pool.md}
 pool=$(grep -v '^#' "$pool_f" 2>/dev/null | grep -v '^[[:space:]]*$' | head -1)
 [ -n "$pool" ] || { echo "no model pool: $pool_f is missing or has no non-comment line" >&2; exit 2; }
 pool_esc=$(printf '%s' "$pool" | sed 's/[\\&|]/\\&/g')
+home_esc=$(printf '%s' "$HOME" | sed 's/[\\&|]/\\&/g')
 # The parent session a Mac --bg lane SendMessages its report to. bglaunch.sh
 # refuses to launch without a real one; the bare name here keeps a box or pi
 # brief (which reports by inbox, not SendMessage) buildable.
@@ -67,7 +68,7 @@ if [ "${TKT:-}" = 1 ]; then
   # and a lane briefed without one still gets a real rule rather than a blank.
   [ -s "$R/fiber-$n-extra.md" ] || printf '%s\n' 'Time-dependent behaviour is tested under an injected clock; no test reads or sleeps on the real clock, and a test advances a fake clock only after a signal that the code under test is waiting on it (docs/testing.md "Waits and timeouts").' > "$R/fiber-$n-extra.md"
   printf '%s\n' "Ticket #$n. Read it with gh issue view $n. Closing line: $closing." > "$R/fiber-$n-spec.md"
-  fill="s|__RUN__|$R|g; s|__CLOSING__|$closing_esc|g; s|__N__|$n|g; s|__BR__|$br|g; s|__PARENT__|$parent|g; s|__POOL__|$pool_esc|g"
+  fill="s|__HOME__|$home_esc|g; s|__RUN__|$R|g; s|__CLOSING__|$closing_esc|g; s|__N__|$n|g; s|__BR__|$br|g; s|__PARENT__|$parent|g; s|__POOL__|$pool_esc|g"
 else
   # A forgotten TKT=1 is invisible after the fact. The Claude template writes
   # to the same path as the state-mode one, so the brief looks built and a muse
@@ -77,9 +78,9 @@ else
   # asked for by name. Refusing, not warning: the two outputs are
   # indistinguishable once written, which is the whole defect.
   [ "${CLAUDE_TPL:-}" = 1 ] || { echo "no TKT=1: that builds the Claude template (template.md) to the same path as the lane brief. Pass TKT=1 (with PI=1 for a muse lane), or CLAUDE_TPL=1 if you really mean the Claude template." >&2; exit 2; }
-  tpl=$T/lib/template.md; fill="s|__N__|$n|g; s|__BR__|$br|g; s|__PARENT__|$parent|g; s|__POOL__|$pool_esc|g"
+  tpl=$T/lib/template.md; fill="s|__HOME__|$home_esc|g; s|__N__|$n|g; s|__BR__|$br|g; s|__PARENT__|$parent|g; s|__POOL__|$pool_esc|g"
 fi
-filled=$(sed -e "s|/Users/aakshintala|$HOME|g" -e "s|/home/aakshintala|$HOME|g" -e "$fill" "$tpl")
+filled=$(sed -e "$fill" "$tpl")
 # No placeholder reaches a launched brief. #4111 shipped a brief naming a
 # worktree that could not exist, and switchyard #1065's pool swap shipped two
 # briefs on the old pool; both were visible in the built file and nothing
