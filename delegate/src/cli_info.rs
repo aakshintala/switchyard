@@ -186,6 +186,7 @@ mod tests {
                         vec![]
                     },
                     reviewer: None,
+                    allowed: false,
                 },
             );
         }
