@@ -315,6 +315,17 @@ want "SKIPPED filing=" 0 split-same-label-resume
 [ "$(grep -c '^split=a$' "$RUN/widget-42.state")" -eq 1 ] \
   || fail "split-same-label: state does not retain exactly one split=a"
 
+# A plain start cannot resume a split part as if it were the whole ticket.
+setup split-plain-resume ONE AGAINST
+run_start --no-preflight --split a
+want "SKIPPED filing=" 0 split-plain-resume-first
+existing_state="$(cd "$RUN" && pwd -P)/widget-42.state"
+run_start --no-preflight
+want "DUPLICATE state=$existing_state split=a requested=none" 2 split-plain-resume
+case "$OUT" in *"--split <label>"*) ;; *) fail "split-plain-resume: output misses --split <label> hint: $OUT" ;; esac
+[ "$(grep -c '^split=a$' "$RUN/widget-42.state")" -eq 1 ] \
+  || fail "split-plain-resume: refused start modified state"
+
 # Labels are single non-blank words and reject whitespace or newlines.
 for bad_split_case in blank whitespace newline; do
   setup "split-invalid-$bad_split_case" ONE AGAINST
