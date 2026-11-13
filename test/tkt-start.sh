@@ -496,12 +496,34 @@ for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGH
   want "$want_line" "$rc" "$name"
   if [ "$name" = twocore ] || [ "$name" = dashcore ]; then case "$OUT" in *"nonblocking="*) fail "$name: nonzero core must not carry nonblocking" ;; esac; fi
 done
+# A nil-tagged core line must not satisfy a positive footer count.
+setup mismatchnone TWO FILING
+printf '%s\n' '1. core: none' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
+run_start
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 mismatchnone
+setup col0none TWO FILING
+printf '%s\n' 'core: none' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
+run_start
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 col0none
+setup col0core TWO FILING
+printf '%s\n' 'core: the guard must change; docs/x.md must say so' 'non-blocking: y' 'Core items: 1' 'Non-blocking items: 1' >"$T/jobout"
+run_start
+want "PREFLIGHT core=1 out=" 1 col0core
+setup fiber4637 TWO FILING
+printf '%s\n' 'core: none' 'non-blocking: finding one' 'non-blocking: finding two' 'non-blocking: finding three' 'non-blocking: finding four' 'non-blocking: finding five' 'non-blocking: finding six' 'Core items: 1' 'Non-blocking items: 5' >"$T/jobout"
+run_start
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 fiber4637
+case "$OUT" in *"(6 non-blocking)"*) ;; *) fail "fiber4637: diagnostic misses (6 non-blocking): $OUT" ;; esac
+setup ruledcore TWO FILING
+printf '%s\n' '1. core -- settled by a ruling' 'Core items: 0' 'Non-blocking items: 0' >"$T/jobout"
+run_start
+want "PREFLIGHT core=0 nonblocking=0 out=" 0 ruledcore
 # field-count cases: tkt-start reads the trailing Core/Non-blocking field
-# lines, not the bullet shapes above them.
+# lines; an untagged line cannot back a Core items count.
 setup fieldunbulleted TWO FILING
 printf 'The guard reaps early and the answer must say why.\nCore items: 1\nNon-blocking items: 0\n' >"$T/jobout"
 run_start
-want "PREFLIGHT core=1 out=" 1 fieldunbulleted
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 fieldunbulleted
 case "$OUT" in *"nonblocking="*) fail "fieldunbulleted: nonzero core must not carry nonblocking" ;; esac
 setup fieldruled TWO FILING
 printf '1. core -- first, settled by a ruling in the issue comments.\n1. non-blocking -- other\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"
