@@ -13,7 +13,12 @@ while [ -L "$_fw_source" ]; do
   case "$_fw_source_link" in /*) _fw_source=$_fw_source_link;; *) _fw_source=$_fw_source_dir/$_fw_source_link;; esac
 done
 _FW_LIB_DIR=$(cd "$(dirname "$_fw_source")" && pwd)
+_FW_BIN_DIR=$(dirname "$_FW_LIB_DIR")
 unset _fw_source _fw_source_dir _fw_source_link
+
+# Sibling tools: FW_FENCE_GRANT and FW_BOX_LOCAL override them (tests).
+_fw_fence_grant() { printf '%s' "${FW_FENCE_GRANT:-$_FW_BIN_DIR/fence-grant}"; }
+_fw_box_local() { printf '%s' "${FW_BOX_LOCAL:-$_FW_BIN_DIR/box-local.sh}"; }
 
 _fw_run() { printf '%s' "${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}"; }
 _fw_box_host() { printf '%s' "${FW_BOX_HOST:-roundhouse-7010-plus-1.local}"; }
@@ -26,7 +31,7 @@ fw_box_ssh() {
   elif [ "$(uname -s)" = Darwin ]; then
     ssh "$@"
   else
-    "${FW_BOX_LOCAL:-$_FW_LIB_DIR/box-local.sh}" "$@"
+    "$(_fw_box_local)" "$@"
   fi
 }
 
@@ -458,10 +463,10 @@ fw_has_nonempty_grant() {
 fw_self_grant() {
   local who=$1 n=$2 run=$3 refresh_existing=${4:-0} phase=${5:-} body lists w r rg fg nw g found what
   local -a a=()
-  fg=${FW_FENCE_GRANT:-$_FW_LIB_DIR/fence-grant}
+  fg=$(_fw_fence_grant)
   _fw_grant_ssh=${FW_SSH:-}
   if [ -z "$_fw_grant_ssh" ] && [ "$(uname -s)" != Darwin ]; then
-    _fw_grant_ssh=${FW_BOX_LOCAL:-$_FW_LIB_DIR/box-local.sh}
+    _fw_grant_ssh=$(_fw_box_local)
   fi
   body=$("${FW_GH:-gh}" api "repos/aakshintala/fiber/issues/$n/comments?per_page=100" \
     --jq '[.[]|select(.body|test("(?im)^#+ *files"))]|last|.body // ""' 2>/dev/null) || {
