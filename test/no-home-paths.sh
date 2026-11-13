@@ -61,7 +61,7 @@ allowed_markers = {
 # fixture names, and u/us/use are truncations of user in redaction examples.
 placeholder_names = {b"user", b"dev", b"test", b"a", b"operator", b"u", b"us", b"use"}
 # A slash before the marker is a longer path, except after a URL's `//`
-# (file:///Users/<name>, file:///home/<name>).
+# (a file:/// URL).
 home_marker = re.compile(rb"(?:(?<![\w/])|(?<=//))/(?:Users|home)/")
 literal_name = re.compile(rb"[A-Za-z0-9._-]+")
 
