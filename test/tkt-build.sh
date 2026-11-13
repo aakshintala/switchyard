@@ -1056,6 +1056,25 @@ printf '## Files\n\n- `src/a.txt`\n' >"$CDIR/plan.md"
 run_build
 [ "$RC" -eq 2 ] || fail "basemissing exits 2 (rc=$RC)"
 expect_verdict "TKT tkt-build PRECONDITION missing=base log=*" "basemissing"
+grep -Fq "no Base line in stored plan '$CDIR/plan.md'" <<<"$OUT" || fail "basemissing: message does not name the stored plan value"
+grep -Fq "Repair command: correct Base: in <plan-path>, run tkt-plan $S set <plan-path>" <<<"$OUT" \
+  || fail "basemissing: normal plan repair guidance changed"
+
+# --- a takeover plan value has no Base and must not suggest editing Base ---
+setup_case takeover-basemissing
+bash "$TKT_STATE" "$S" set plan 'takeover #1720' || fail "takeover-basemissing: set plan"
+run_build
+[ "$RC" -eq 2 ] || fail "takeover-basemissing exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION missing=base log=*" "takeover-basemissing"
+grep -Fq "no Base line in stored plan 'takeover #1720'" <<<"$OUT" \
+  || fail "takeover-basemissing: message does not name the stored plan value"
+grep -Fq "takeover state has no plan for tkt-build" <<<"$OUT" \
+  || fail "takeover-basemissing: repair misses takeover guidance"
+grep -Fq "continue with tkt-fix $S or tkt-ship $S" <<<"$OUT" \
+  || fail "takeover-basemissing: repair misses the continuation phases"
+grep -Fq "re-point with tkt-plan $S set <plan-path>" <<<"$OUT" \
+  || fail "takeover-basemissing: repair misses the re-point command"
+case "$OUT" in *"correct Base:"*) fail "takeover-basemissing: repair still tells the lane to edit Base" ;; esac
 
 # --- an unreadable base stops the build ---
 setup_case gitfail
