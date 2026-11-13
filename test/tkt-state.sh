@@ -35,18 +35,31 @@ bash "$TKT" "$S" add fruit banana || fail "add banana exits 0"
 [ "$(bash "$TKT" "$S" get fruit)" = "apple" ] || fail "get prints the first value"
 [ "$(bash "$TKT" "$S" list fruit)" = "$(printf 'apple\nbanana')" ] || fail "list prints every value"
 
-# unset removes every line for a key, preserves other lines, and journals the old value
+# unset head removes every head line, preserves other lines, and journals the first old value
 US="$T/unset.state"
-printf 'first=keep\nremove=old-value\nmiddle=stay\nremove=second-value\nlast=untouched\n' >"$US"
-bash "$TKT" "$US" unset remove || fail "unset of a present key exits 0"
+UHEAD=0123456789abcdef0123456789abcdef01234567
+UHEAD2=1123456789abcdef0123456789abcdef01234567
+printf 'first=keep\nhead=%s\nmiddle=stay\nhead=%s\nlast=untouched\n' "$UHEAD" "$UHEAD2" >"$US"
+bash "$TKT" "$US" unset head || fail "unset head exits 0"
 printf 'first=keep\nmiddle=stay\nlast=untouched\n' >"$T/unset.expected"
-cmp -s "$T/unset.expected" "$US" || fail "unset removes every matching line and leaves other lines unchanged"
+cmp -s "$T/unset.expected" "$US" || fail "unset head removes every head line and leaves other lines unchanged"
 JUS="${US%.state}.journal"
-grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z remove old-value -> <unset>$' "$JUS" \
-  || fail "unset journals the key and its old value"
-bash "$TKT" "$US" unset absent-key 2>"$T/err-unset-absent.txt" && fail "unset of an absent key exits non-zero"
-[ "$?" = "2" ] || fail "unset of an absent key exits 2"
-grep -Fq 'absent-key' "$T/err-unset-absent.txt" || fail "unset of an absent key names the key"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z head '"$UHEAD"' -> <none>$' "$JUS" \
+  || fail "unset head journals the first old head and clears it"
+NGS="$T/unset-non-head.state"
+printf 'gate=required\nother=unchanged\n' >"$NGS"
+cp "$NGS" "$T/unset-non-head.expected"
+bash "$TKT" "$NGS" unset gate 2>"$T/err-unset-gate.txt" && fail "unset of a non-head key exits non-zero"
+[ "$?" = "2" ] || fail "unset of a non-head key exits 2"
+grep -Fq 'head' "$T/err-unset-gate.txt" || fail "unset of a non-head key names head as the only accepted key"
+cmp -s "$T/unset-non-head.expected" "$NGS" || fail "rejected unset leaves the state file byte-identical"
+[ ! -e "${NGS%.state}.journal" ] || fail "rejected unset leaves the journal untouched"
+cp "$JUS" "$T/unset.journal.expected"
+bash "$TKT" "$US" unset head 2>"$T/err-unset-absent.txt" && fail "unset of an absent head exits non-zero"
+[ "$?" = "2" ] || fail "unset of an absent head exits 2"
+grep -Fq 'head' "$T/err-unset-absent.txt" || fail "unset of an absent head names head"
+cmp -s "$T/unset.expected" "$US" || fail "unset of an absent head leaves the state file unchanged"
+cmp -s "$T/unset.journal.expected" "$JUS" || fail "unset of an absent head leaves the journal unchanged"
 
 # values with spaces and = survive
 bash "$TKT" "$S" set note "a b=c d" || fail "set of a value with spaces and = exits 0"
@@ -191,6 +204,7 @@ grep -q 'usage' "$T/err-u1.txt" || fail "no args prints usage"
 for sub in get list set unset add journal require; do
   grep -q "^  $sub " "$T/err-u1.txt" || fail "no args usage lists the $sub subcommand"
 done
+grep -q '^  unset head$' "$T/err-u1.txt" || fail "usage names head as the unset key"
 bash "$TKT" "$S" >/dev/null 2>"$T/err-u4.txt"; [ "$?" = "2" ] || fail "a state file without a command exits 2"
 for sub in get list set unset add journal require; do
   grep -q "^  $sub " "$T/err-u4.txt" || fail "a state file without a command lists the $sub subcommand"
@@ -198,6 +212,7 @@ done
 for sub in get list set unset add journal require; do
   grep -q "^#   $sub " "$TKT" || fail "header usage block names the $sub subcommand"
 done
+grep -q '^#   unset head:' "$TKT" || fail "header help names head as the unset key"
 # the header help text says set replaces every line and names add the append form
 grep -q 'replace every line' "$TKT" || fail "help says set replaces every line"
 grep -q 'the append form of set' "$TKT" || fail "help names add as the append form of set"
