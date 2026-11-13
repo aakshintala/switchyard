@@ -42,7 +42,7 @@ The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `ver
 
 | Tool | Driver behavior / next action | Stop verdicts to route |
 | --- | --- | --- |
-| `tkt-start` | `CURRENT`; `SKIPPED` with `--no-preflight`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
+| `tkt-start` | `CURRENT`; `SKIPPED` with `--no-preflight`; `PREFLIGHT` only with `core=0` | `STALE`, `MERGED-STOP`, `BUSY`, `DUPLICATE`, `PRECONDITION`, `DRIFT`, `STEP-FAIL` |
 | `tkt-state` | exit 0 | exit 2 |
 | `tkt-drive` | `NEEDS-PLAN` is a go-on verdict: run planning (planner, Verifier, `tkt-plan <state> set <plan>`), then rerun `tkt-drive`. It chains `SET`, `PLAN-OK`, and `POSTED` after a grant; never invokes `tkt-ship`, which the lane takes as a separate explicit step only after required checks and authorization | `STOP`: act on the unchanged underlying verdict; rerun `tkt-drive` when another routine phase is due; run `tkt-ship <state>` itself only when shipping is authorized |
 | `tkt-plan` | The driver chains `SET`, `PLAN-OK`, and `POSTED`; `REANCHORED` (base moved, no cited symbol changed: go on as after `PLAN-OK`); `UNRESOLVED-FIX` (only unresolved-symbol lines changed: rerun `tkt-plan <state> verify`, no confirm round spent) | `LINES`, `QUESTIONS`, `QUESTIONS-RECORDED`, `QUESTIONS-REFUSED`, `RULE-OK`, `RULE-OK-REFUSED`, `ROUND-LIMIT`, `PLAN-CHECK`, `STALE`, `STALE-CONFIRM`, `TRIAGED-REFUSED`, `POST-FAIL`, `SET-FAIL`, `REPLAN`, `ASK`, `BLOCKED`, `WALL-CAP`, `JOB-ERROR`, `GATE-FAIL`, `NO-COMMITS`, `UNKNOWN` |
@@ -123,6 +123,8 @@ Before the first dispatch, `tkt-start` searches the merged PRs for one that alre
 To watch a running lane, run `~/.agents/bin/lanestat <run-dir>`: a row reads `IN-TOOL <tool>` while a tool call runs, `SETTLED` when the run ended, `SETTLED-OLD` once it has sat settled past `LANESTAT_SETTLED_MAX` seconds (default 7200; re-check why it is parked: resume or cancel a lane nothing holds, and keep holding one whose blocker is still open; `lanewatch` does not announce the change), and `STALL` after 5 minutes idle with no tool running. With no live lane it prints `lanestat: no live lanes in <run-dir>` instead of an empty table. `~/.agents/bin/lanewatch <run-dir> [ssh-target]` prints one line per lane the first time it settles or stalls, for Monitor.
 
 A plan split into parts runs each part through steps 4–8 in order. For part `n` (2 or more), run `tkt-start ... --part <n>` once the previous part's PR has merged. It archives the previous state as `<state>.part<n-1>`, starts fresh state and refuses while that PR is open. A `DRIFT` that names a merged `pr` is the signal to add `--part`. Pass `--body-ends`, `--model` and `--spec-issue` again after `--part`, since only `issue`, `repo`, `run`, `worktree` and `model.*` lines carry. Cut the next lane once the previous part has merged.
+
+Use `tkt-start ... --split <label>` for a concurrent sub-lane of one ticket; a state whose PR is MERGED or CLOSED, or whose filename ends in `.state.retired`, is not a duplicate. A split state resumes only with its own `--split <label>`.
 
 For work already underway that must not be re-planned, start state with `tkt-start ... --takeover <pr-or-branch> --gate '<gate command>' --files <paths>`; this records the source in `plan`, the required gate in `gate`, and the takeover fence in `fence`, which `tkt-fix` and `tkt-ship` use without a plan file.
 
