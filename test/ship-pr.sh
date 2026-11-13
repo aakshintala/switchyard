@@ -2389,6 +2389,59 @@ grep -Fq 'check 3 failed: cannot run cargo metadata' <<<"$ERR" || fail "unavaila
 grep -Fq "$KNOWN_TEST" <<<"$ERR" || fail "unavailable metadata refusal names red test: [$ERR]"
 no_merge "unavailable cargo metadata"
 
+# A space-padded nextest progress counter is not the binary identifier.
+prepare_known_flake
+PADDED_TEST='registry::tests::restore_detached_rejects_paths_outside_root_or_without_an_existing_file'
+jq -nc --arg name "$PADDED_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/jobs/Cargo.toml" \
+  '{packages:[{name:"jobs",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
+PADDED_GATE="printf '%s\\n' 'FAIL [   0.009s] ( 295/6774) jobs $PADDED_TEST'; exit 1"
+ship --known-flake 166 --by flywheel --gate "$PADDED_GATE" --keep-branch
+expect 0 "known-flake padded nextest counter"
+grep -Fq "$PADDED_TEST" "$ST/comment.txt" || fail "padded counter preserves test name"
+
+# Real nextest captured panic output belongs to the failing test block.
+prepare_known_flake
+REAL_TEST='keeper::a_second_crash_leaves_one_keeper_the_log_and_the_third_resume_orphans_the_other'
+jq -nc --arg name "$REAL_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/main/Cargo.toml" \
+  '{packages:[{name:"main",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
+REAL_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; exit 1"
+ship --known-flake 166 --by flywheel --gate "$REAL_GATE" --keep-branch
+expect 0 "known-flake real nextest panic block"
+[ -f "$ST/comment.txt" ] || fail "real nextest PR comment posted"
+grep -Fq "$REAL_TEST" "$ST/comment.txt" || fail "real nextest PR comment names the red test"
+[ -f "$ST/ticket-comment-166.txt" ] || fail "real nextest ticket comment posted"
+grep -Fq "$REAL_TEST" "$ST/ticket-comment-166.txt" || fail "real nextest ticket comment names the red test"
+
+# A panic after the captured test block is still an unrelated gate failure.
+prepare_known_flake
+jq -nc --arg name "$REAL_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/main/Cargo.toml" \
+  '{packages:[{name:"main",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
+STRAY_PANIC_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; printf '%s\\n' 'thread build_script panicked at build.rs:1:1:'; exit 1"
+ship --known-flake 166 --by flywheel --gate "$STRAY_PANIC_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'known-flake check 4 failed: gate output contains a build or other non-test failure' <<<"$ERR" \
+  || fail "stray panic after test block is refused by check 4: [$ERR]"
+no_merge "known-flake stray panic outside test block"
+
+# A ticket naming foo_bar does not name the distinct test foo.
+prepare_known_flake
+jq -nc '{state:"OPEN",body:"known flake: foo_bar",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+FOO_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests foo'; exit 1"
+ship --known-flake 166 --by flywheel --gate "$FOO_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq "check 2 failed: red test 'foo' is not named" <<<"$ERR" || fail "foo does not match foo_bar ticket: [$ERR]"
+no_merge "foo does not match foo_bar ticket"
+
+# A ticket naming the complete test token still authorizes it.
+prepare_known_flake
+jq -nc '{state:"OPEN",body:"known flake: foo",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+ship --known-flake 166 --by flywheel --gate "$FOO_GATE" --keep-branch
+expect 0 "known-flake exact test-name token"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "exact test-name token merged output: [$OUT]"
+
 # Any file under the red test's Cargo package directory is excluded, not only its source.
 prepare_known_flake
 printf 'touched\n' >"$WT/crates/main/README.md"
@@ -2433,7 +2486,7 @@ grep -Fq "red test 'tests::not_ticketed' is not named" <<<"$ERR" || fail "untick
 no_merge "unticketed timeout"
 
 prepare_known_flake
-TIMEOUT_TICKETED_GATE="printf '%s\\n' 'TIMEOUT [ 0.001s] crate_name::integration_tests $KNOWN_TEST'; exit 1"
+TIMEOUT_TICKETED_GATE="printf '%s\\n' 'TIMEOUT [ 0.001s] ( 1/1) crate_name::integration_tests $KNOWN_TEST'; exit 1"
 ship --known-flake 166 --by flywheel --gate "$TIMEOUT_TICKETED_GATE" --keep-branch
 expect 0 "known-flake ticketed timeout merges"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "known-flake ticketed timeout merged output: [$OUT]"
@@ -2478,7 +2531,7 @@ no_merge "signal without parsed test failure"
 prepare_known_flake
 jq -nc --arg segv 'tests::segv' --arg abrt 'tests::abrt' --arg leak 'tests::leak' --arg leak_fail 'tests::leak_fail' \
   '{state:"OPEN",body:([$segv,$abrt,$leak,$leak_fail] | join("\n")),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
-STATUS_GATE="printf '%s\\n' 'SIGSEGV [ 0.001s] crate_name::integration_tests tests::segv' 'SIGABRT [ 0.001s] crate_name::integration_tests tests::abrt' 'LEAK [ 0.001s] crate_name::integration_tests tests::leak' 'LEAK-FAIL crate_name::integration_tests tests::leak_fail'; exit 1"
+STATUS_GATE="printf '%s\\n' 'SIGSEGV [ 0.001s] ( 1/4) crate_name::integration_tests tests::segv' 'SIGABRT [ 0.001s] ( 2/4) crate_name::integration_tests tests::abrt' 'LEAK [ 0.001s] ( 3/4) crate_name::integration_tests tests::leak' 'LEAK-FAIL [ 0.001s] ( 4/4) crate_name::integration_tests tests::leak_fail'; exit 1"
 ship --known-flake 166 --by flywheel --gate "$STATUS_GATE" --keep-branch
 expect 0 "ticketed nextest statuses merge"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "ticketed nextest statuses merged output: [$OUT]"
