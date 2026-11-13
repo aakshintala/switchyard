@@ -413,6 +413,7 @@ fn failed_status_record_write_does_not_stop_job() {
         d.status_writer = Arc::new(CliRecordWriter {
             job_id: writer_job_id.into(),
             model: "composer-2.5".into(),
+            model_ruling: None,
             backend: Some("cursor".into()),
             cwd: "/tmp".into(),
             caller: "test-caller".into(),

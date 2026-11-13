@@ -8,14 +8,14 @@ use crate::backends::Backend;
 use crate::config::build_deps;
 use crate::git::capture_head;
 use crate::job::{JobDeps, JobHandle};
-use crate::models::{base_model_id, resolve_model};
+use crate::models::{allowed_pool, base_model_id, resolve_model};
 use crate::prompt::status_block;
 use crate::status_record::{
     CliRecordWriter, find_record_path, job_record_path, locator_path, locator_record_path,
     read_marker_path, record_path, search_dirs, valid_job_id, write_atomic, write_cancelled,
     write_locator, write_supervisor_died,
 };
-use crate::types::{Config, JobSpec, ResumeContext};
+use crate::types::{Config, JobSpec, ResolvedModel, ResumeContext};
 use crate::util::{captured_command, json_compact, random_uuid, resolve_path};
 use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -26,8 +26,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) const USAGE: &str =
-    "usage: delegate run --model M [--cwd D] [--add-dir D ...] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
-       delegate resume <jobId> [--model M] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
+    "usage: delegate run --model M [--model-ruling URL] [--cwd D] [--add-dir D ...] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
+       delegate resume <jobId> [--model M] [--model-ruling URL] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
+       delegate model-check <model> [--model-ruling URL]
        delegate cancel <jobId>
        delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
        delegate status <jobId>  (print state and finished job result summary without waiting)
@@ -67,6 +68,7 @@ pub fn main() -> i32 {
     let res = match args.first().map(String::as_str) {
         Some("run") => run(&args[1..]),
         Some("resume") => resume(&args[1..]),
+        Some("model-check") => model_check(&args[1..]),
         Some("cancel") => cancel(&args[1..]),
         Some("watch") => watch(&args[1..]),
         Some("status") => status(&args[1..]),
@@ -163,6 +165,72 @@ fn unknown_model(config: &Config, model: &str) -> String {
     format!("unknown model {model}; valid models: {}", ids.join(", "))
 }
 
+fn valid_model_ruling_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let parts: Vec<_> = rest.split('/').collect();
+    let [owner, repo, kind, tail] = parts.as_slice() else {
+        return false;
+    };
+    let valid_component = |value: &str| {
+        !value.is_empty()
+            && value != "."
+            && value != ".."
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    if !valid_component(owner) || !valid_component(repo) || !["issues", "pull"].contains(kind) {
+        return false;
+    }
+    let Some((number, comment)) = tail.split_once("#issuecomment-") else {
+        return false;
+    };
+    !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit())
+        && !comment.is_empty()
+        && comment.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn validate_model_ruling(ruling: Option<&str>) -> Result<(), String> {
+    match ruling {
+        None => Ok(()),
+        Some(url) if valid_model_ruling_url(url) => Ok(()),
+        Some(_) => Err(
+            "invalid --model-ruling; expected https://github.com/<owner>/<repo>/(issues|pull)/<n>#issuecomment-<digits>".into(),
+        ),
+    }
+}
+
+fn check_model_allowed(
+    config: &Config,
+    resolved: &ResolvedModel,
+    ruling: Option<&str>,
+) -> Result<(), String> {
+    if resolved.allowed || ruling.is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "model \"{}\" is not in the allowed pool (models.json rows with \"allowed\": true: {}); pass --model-ruling <comment URL> for a ruled exception",
+        resolved.model,
+        allowed_pool(config).join(", ")
+    ))
+}
+
+fn check_resolved_model(config: &Config, model: &str) -> Result<ResolvedModel, Usage> {
+    match resolve_model(Some(model), config) {
+        Ok(resolved) => Ok(resolved),
+        Err(e)
+            if e.downcast_ref::<crate::models::ModelNotAllowedError>()
+                .is_some() =>
+        {
+            Err(Usage(unknown_model(config, model)))
+        }
+        Err(e) => Err(Usage(e.to_string())),
+    }
+}
+
 /// The shared half of `run` and `resume`: stash the prompt, spawn the detached
 /// supervisor and wait for its first record. Returns the new job id. `Usage` means exit
 /// 2; `Done` means the reason is already on stderr, return the code.
@@ -174,6 +242,7 @@ enum LaunchErr {
 struct LaunchParams<'a> {
     prompt: &'a str,
     model: &'a str,
+    model_ruling: Option<&'a str>,
     cwd: &'a str,
     gate: &'a str,
     tool_idle_ms: Option<f64>,
@@ -315,6 +384,10 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
         p.model.to_string(),
         p.cwd.to_string(),
     ];
+    if let Some(ruling) = p.model_ruling {
+        supervise_args.push("--model-ruling".into());
+        supervise_args.push(ruling.to_string());
+    }
     if !p.gate.is_empty() {
         supervise_args.push("--gate".into());
         supervise_args.push(p.gate.to_string());
@@ -424,6 +497,7 @@ fn run(args: &[String]) -> Result<i32, Usage> {
         args,
         &[
             "--model",
+            "--model-ruling",
             "--cwd",
             "--gate",
             "--tool-idle-ms",
@@ -441,6 +515,8 @@ fn run(args: &[String]) -> Result<i32, Usage> {
     let Some(model) = flag(&kv, "--model") else {
         return usage("--model is required");
     };
+    let model_ruling = flag(&kv, "--model-ruling");
+    validate_model_ruling(model_ruling).or_else(usage)?;
     let gate = flag(&kv, "--gate").unwrap_or("").to_string();
     let tool_idle_ms = positive_ms_flag(&kv, "--tool-idle-ms").or_else(usage)?;
     let idle_ms = positive_ms_flag(&kv, "--idle-ms").or_else(usage)?;
@@ -452,19 +528,8 @@ fn run(args: &[String]) -> Result<i32, Usage> {
             return Ok(1);
         }
     };
-    let resolved = match resolve_model(Some(model), &deps.config) {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            // An unknown id lists the valid ids; any other failure (e.g. a model on a
-            // backend that is not implemented yet) prints the actual error.
-            if e.downcast_ref::<crate::models::ModelNotAllowedError>()
-                .is_some()
-            {
-                return usage(unknown_model(&deps.config, model));
-            }
-            return usage(format!("{e}"));
-        }
-    };
+    let resolved = check_resolved_model(&deps.config, model)?;
+    check_model_allowed(&deps.config, &resolved, model_ruling).or_else(usage)?;
     let add_dirs = add_directories(&kv, &resolved.backend)?;
     let prompt = read_prompt(&kv)?;
     let cwd = match flag(&kv, "--cwd") {
@@ -480,6 +545,7 @@ fn run(args: &[String]) -> Result<i32, Usage> {
     match launch(LaunchParams {
         prompt: &prompt,
         model,
+        model_ruling,
         cwd: &cwd,
         gate: &gate,
         tool_idle_ms,
@@ -498,11 +564,28 @@ fn run(args: &[String]) -> Result<i32, Usage> {
     }
 }
 
+fn model_check(args: &[String]) -> Result<i32, Usage> {
+    let (kv, pos) = parse(args, &["--model-ruling"])?;
+    let [model] = pos.as_slice() else {
+        return usage("delegate model-check <model> [--model-ruling URL]");
+    };
+    let ruling = flag(&kv, "--model-ruling");
+    validate_model_ruling(ruling).or_else(usage)?;
+    let deps = match build_deps() {
+        Ok(d) => d,
+        Err(e) => return Err(Usage(e.to_string())),
+    };
+    let resolved = check_resolved_model(&deps.config, model)?;
+    check_model_allowed(&deps.config, &resolved, ruling).or_else(usage)?;
+    Ok(0)
+}
+
 fn resume(args: &[String]) -> Result<i32, Usage> {
     let (kv, pos) = parse(
         args,
         &[
             "--model",
+            "--model-ruling",
             "--gate",
             "--tool-idle-ms",
             "--idle-ms",
@@ -513,6 +596,8 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
     let [old_id] = pos.as_slice() else {
         return usage(USAGE);
     };
+    let model_ruling_flag = flag(&kv, "--model-ruling");
+    validate_model_ruling(model_ruling_flag).or_else(usage)?;
     let Some(raw) = read_record(old_id) else {
         return Err(missing_record(old_id));
     };
@@ -529,21 +614,6 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
         .as_str()
         .filter(|s| !s.trim().is_empty())
         .map(String::from);
-    if session.is_none() {
-        // Fiber mints the session id on its first output line, so a job
-        // killed before that has no id to resume. An explicit resume of
-        // such a record runs fresh; a cancelled record is still refused,
-        // as is a record from any other backend.
-        let cancelled = old["status"] == "CANCELLED";
-        let is_fiber = build_deps()
-            .ok()
-            .and_then(|d| resolve_model(Some(&stored_model), &d.config).ok())
-            .map(|r| r.backend == "fiber")
-            .unwrap_or(false);
-        if cancelled || !is_fiber {
-            return usage(format!("cannot resume {old_id}: record has no session id"));
-        }
-    }
     let stored_cwd = old["resume"]["cwd"].as_str().unwrap_or("").to_string();
     let stored_gate = old["resume"]["gate"].as_str().unwrap_or("").to_string();
     let add_dirs = old["resume"]["addDirs"]
@@ -601,10 +671,24 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
             (_, None) => return usage(unknown_model(&deps.config, &model)),
             _ => {}
         }
-        // Unknown ids are rejected above; what remains is a same-backend id the
+        // Unknown ids are rejected below; what remains is a same-backend id the
         // resolver may still refuse (e.g. a backend that is not implemented yet).
-        if let Err(e) = resolve_model(Some(&model), &deps.config) {
-            return usage(format!("{e}"));
+    }
+    let resolved = check_resolved_model(&deps.config, &model)?;
+    let inherited_ruling = (model == stored_model)
+        .then(|| old["resume"]["modelRuling"].as_str())
+        .flatten();
+    let model_ruling = model_ruling_flag.or(inherited_ruling);
+    validate_model_ruling(model_ruling).or_else(usage)?;
+    check_model_allowed(&deps.config, &resolved, model_ruling).or_else(usage)?;
+    if session.is_none() {
+        // Fiber mints the session id on its first output line, so a job
+        // killed before that has no id to resume. An explicit resume of
+        // such a record runs fresh; a cancelled record is still refused,
+        // as is a record from any other backend.
+        let cancelled = old["status"] == "CANCELLED";
+        if cancelled || resolved.backend != "fiber" {
+            return usage(format!("cannot resume {old_id}: record has no session id"));
         }
     }
     let gate = flag(&kv, "--gate").unwrap_or(&stored_gate).to_string();
@@ -617,6 +701,7 @@ fn resume(args: &[String]) -> Result<i32, Usage> {
     let new_id = match launch(LaunchParams {
         prompt: &prompt,
         model: &model,
+        model_ruling,
         cwd: &stored_cwd,
         gate: &gate,
         tool_idle_ms,
@@ -794,6 +879,7 @@ fn supervise(args: &[String]) -> i32 {
             "--tool-idle-ms",
             "--idle-ms",
             "--wall-ms",
+            "--model-ruling",
             "--add-dir",
             "--session",
             "--resumed-from",
@@ -809,6 +895,10 @@ fn supervise(args: &[String]) -> i32 {
     let [id, model, cwd] = pos.as_slice() else {
         return 2;
     };
+    let model_ruling = flag(&kv, "--model-ruling");
+    if let Err(message) = validate_model_ruling(model_ruling) {
+        return fail(message);
+    }
     let gate = flag(&kv, "--gate").unwrap_or("").to_string();
     let (Ok(tool_idle_ms), Ok(idle_ms), Ok(wall_ms)) = (
         positive_ms_flag(&kv, "--tool-idle-ms"),
@@ -822,23 +912,25 @@ fn supervise(args: &[String]) -> i32 {
         Err(e) => return fail(e.to_string()),
     };
     let config = deps.config;
-    let prompt_file = job_record_path(id).with_extension("prompt");
-    let Ok(prompt) = std::fs::read_to_string(&prompt_file) else {
-        return fail(format!("cannot read {}", prompt_file.display()));
-    };
-    let _ = std::fs::remove_file(&prompt_file);
-    let prompt = format!("{prompt}\n\n---\n\n{}", status_block()).replace('\0', "");
-
     let resolved = match resolve_model(Some(model), &config) {
         Ok(r) => r,
         Err(e) => return fail(e.to_string()),
     };
+    if let Err(message) = check_model_allowed(&config, &resolved, model_ruling) {
+        return fail(message);
+    }
     let Some(backend) = Backend::from_name(&resolved.backend) else {
         return fail(format!(
             "model \"{model}\" uses backend \"{}\", which is not implemented yet",
             resolved.backend
         ));
     };
+    let prompt_file = job_record_path(id).with_extension("prompt");
+    let Ok(prompt) = std::fs::read_to_string(&prompt_file) else {
+        return fail(format!("cannot read {}", prompt_file.display()));
+    };
+    let _ = std::fs::remove_file(&prompt_file);
+    let prompt = format!("{prompt}\n\n---\n\n{}", status_block()).replace('\0', "");
     let session = flag(&kv, "--session").map(str::to_string);
     let resumed_from = flag(&kv, "--resumed-from").map(str::to_string);
     let Some(caller) = flag(&kv, "--caller").map(str::to_string) else {
@@ -927,6 +1019,7 @@ fn supervise(args: &[String]) -> i32 {
         caller_pid,
         caller_command,
         caller_cwd,
+        model_ruling: model_ruling.map(str::to_string),
         started_at_ms: std::sync::Mutex::new(None),
         ended_at_ms: std::sync::Mutex::new(None),
         last_session_id: std::sync::Mutex::new(None),
@@ -1427,6 +1520,56 @@ mod tests {
     }
 
     #[test]
+    fn model_ruling_requires_a_github_comment_url() {
+        for url in [
+            "https://github.com/aakshintala/switchyard/issues/1686#issuecomment-6844642628",
+            "https://github.com/example/repo/pull/42#issuecomment-123456",
+        ] {
+            assert_eq!(validate_model_ruling(Some(url)), Ok(()), "{url}");
+        }
+        for url in [
+            "https://github.com/example/repo/issues/42",
+            "http://github.com/example/repo/issues/42#issuecomment-123456",
+            "https://example.com/example/repo/issues/42#issuecomment-123456",
+            "https://github.com/example/repo/issues/42#issuecomment-123456trailing",
+        ] {
+            assert!(validate_model_ruling(Some(url)).is_err(), "accepted {url}");
+        }
+        assert_eq!(validate_model_ruling(None), Ok(()));
+    }
+
+    #[test]
+    fn hidden_supervisor_refuses_an_unruled_off_pool_model_before_backend_start() {
+        use crate::test_env::{EnvGuard, lock};
+
+        let _env = lock();
+        let root =
+            std::env::temp_dir().join(format!("delegate-supervisor-refusal-{}", random_uuid()));
+        let jobs = root.join("jobs");
+        let _jobs = EnvGuard::set("DELEGATE_JOBS_DIR", jobs.to_str().unwrap());
+        let _profile = EnvGuard::set(
+            "DELEGATE_HOST_PROFILE",
+            root.join("missing-profile.json").to_str().unwrap(),
+        );
+        let job_id = "unruled-off-pool";
+        let args = [
+            job_id,
+            "openai/gpt-6.1-sol",
+            "/tmp",
+            "--caller",
+            "test",
+            "--caller-pid",
+            "1",
+        ]
+        .map(String::from);
+
+        assert_eq!(supervise(&args), 1);
+        assert!(!job_record_path(job_id).exists());
+        assert!(!job_record_path(job_id).with_extension("prompt").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn add_dir_accepts_repeated_existing_directories() {
         let root = std::env::temp_dir().join(format!("delegate-add-dir-{}", random_uuid()));
         let first = root.join("first");
@@ -1575,6 +1718,7 @@ mod tests {
     fn resume_record_keeps_idle_ms_under_resume_as_idle_ms() {
         let resume = CliResume {
             model: "muse/m".into(),
+            model_ruling: Some("https://github.com/example/repo/issues/1#issuecomment-2".into()),
             backend: Some("muse".into()),
             cwd: "/tmp".into(),
             session_id: None,
@@ -1586,6 +1730,10 @@ mod tests {
         };
         let rec = serde_json::to_value(&resume).unwrap();
         // `resume()` reads these values back for the next run.
+        assert_eq!(
+            rec["modelRuling"],
+            "https://github.com/example/repo/issues/1#issuecomment-2"
+        );
         assert_eq!(rec["idleMs"].as_f64(), Some(1_200_000.0));
         assert_eq!(rec["addDirs"], serde_json::json!(["/tmp/additional"]));
         assert!(rec.get("toolIdleMs").is_some());
