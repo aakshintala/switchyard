@@ -496,6 +496,11 @@ for spec in "zerocore|0|PREFLIGHT core=0 nonblocking=3 out=" "twocore|1|PREFLIGH
   want "$want_line" "$rc" "$name"
   if [ "$name" = twocore ] || [ "$name" = dashcore ]; then case "$OUT" in *"nonblocking="*) fail "$name: nonzero core must not carry nonblocking" ;; esac; fi
 done
+# A nil-tagged core line must not satisfy a positive footer count.
+setup mismatchnone TWO FILING
+printf '%s\n' '1. core: none' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
+run_start
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 mismatchnone
 # field-count cases: tkt-start reads the trailing Core/Non-blocking field
 # lines, not the bullet shapes above them.
 setup fieldunbulleted TWO FILING
