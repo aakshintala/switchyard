@@ -264,7 +264,23 @@ gh() {
     sub="$1"; shift
     case "$sub" in
       list)
-        if [ -e "$ST/late-ready-run" ]; then
+        if [ -e "$ST/late-ready-after-budget" ]; then
+          n="$(cat "$ST/late-ready-after-budget-list-calls" 2>/dev/null || echo 0)"
+          n=$((n + 1)); echo "$n" >"$ST/late-ready-after-budget-list-calls"
+          now="$(cat "$ST/fake-elapsed" 2>/dev/null || echo 0)"
+          first_at="$(cat "$ST/late-ready-first-at" 2>/dev/null || echo 115)"
+          sibling_at="$(cat "$ST/late-ready-sibling-at" 2>/dev/null || echo 125)"
+          third_at="$(cat "$ST/late-ready-third-at" 2>/dev/null || echo 999999)"
+          if [ -e "$ST/late-ready-run-marked-ready" ] && [ -e "$ST/run-list-late-third.json" ] && [ "$now" -ge "$third_at" ]; then
+            cat "$ST/run-list-late-third.json"
+          elif [ -e "$ST/late-ready-run-marked-ready" ] && [ "$now" -ge "$sibling_at" ]; then
+            cat "$ST/run-list-late-sibling.json"
+          elif [ -e "$ST/late-ready-run-marked-ready" ] && [ "$now" -ge "$first_at" ]; then
+            cat "$ST/run-list-late-first.json"
+          else
+            cat "$ST/run-list-before-ready.json"
+          fi
+        elif [ -e "$ST/late-ready-run" ]; then
           n="$(cat "$ST/late-ready-run-list-calls" 2>/dev/null || echo 0)"
           n=$((n + 1)); echo "$n" >"$ST/late-ready-run-list-calls"
           if [ -e "$ST/late-ready-run-marked-ready" ] && [ "$n" -ge 5 ] && [ -e "$ST/run-list-after-ready-3.json" ]; then
@@ -338,7 +354,20 @@ gh() {
               h="$(git --git-dir="$ORIGIN" rev-parse refs/heads/feature 2>/dev/null || cat "$ST/lasthead")"
               json="$(jq -nc --arg h "$h" '{headSha: $h}')";;
             *status*)
-              if [ -e "$ST/late-ready-run" ] && [ "$rid" = "$(cat "$ST/late-ready-run-id" 2>/dev/null || echo 701)" ]; then
+              if [ -e "$ST/ready-run-view-fail-persistent" ]; then
+                echo "gh: ready run view failed for $rid" >&2
+                exit 1
+              elif [ -e "$ST/ready-run-view-fail-transient" ]; then
+                n="$(cat "$ST/ready-run-view-fail-transient-count" 2>/dev/null || echo 0)"
+                n=$((n + 1)); echo "$n" >"$ST/ready-run-view-fail-transient-count"
+                if [ "$n" -eq 1 ]; then
+                  echo "gh: transient ready run view failure for $rid" >&2
+                  exit 1
+                fi
+                touch "$ST/late-ready-run-completed"
+                echo '[{"bucket":"pass","name":"ci"}]' >"$ST/checks"
+                json='{"status":"completed"}'
+              elif [ -e "$ST/late-ready-run" ] && [ "$rid" = "$(cat "$ST/late-ready-run-id" 2>/dev/null || echo 701)" ]; then
                 n="$(cat "$ST/late-ready-run-view-calls" 2>/dev/null || echo 0)"
                 n=$((n + 1)); echo "$n" >"$ST/late-ready-run-view-calls"
                 if [ "$n" -ge 2 ]; then
@@ -404,7 +433,8 @@ gh() {
     ready)
       [ ! -e "$ST/ready-fail" ] || exit 1
       echo false >"$ST/draft"
-      [ ! -e "$ST/late-ready-run" ] || touch "$ST/late-ready-run-marked-ready";;
+      [ ! -e "$ST/late-ready-run" ] || touch "$ST/late-ready-run-marked-ready"
+      [ ! -e "$ST/late-ready-after-budget" ] || touch "$ST/late-ready-run-marked-ready";;
     comment)
       [ ! -e "$ST/comment-fail" ] || exit 1
       while [ $# -gt 0 ]; do [ "$1" = "--body-file" ] && cp "$2" "$ST/comment.txt"; shift; done;;
@@ -427,7 +457,13 @@ gh() {
   esac
   )
 }
-sleep() ( echo "$*" >>"$ST/sleeps.txt" )
+sleep() (
+  echo "$*" >>"$ST/sleeps.txt"
+  if [ -e "$ST/late-ready-after-budget" ]; then
+    n="$(cat "$ST/fake-elapsed" 2>/dev/null || echo 0)"
+    echo "$((n + ${1:-0}))" >"$ST/fake-elapsed"
+  fi
+)
 export -f gh sleep
 
 # --- fixture: main with file.txt, feature (one commit) pushed and checked out in $WT.
@@ -1597,6 +1633,50 @@ grep -qx false "$ST/draft" || fail "draft ends ready"
 [ ! -e "$WT" ] || fail "worktree removed"
 git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "local branch deleted"
 origin_head >/dev/null && fail "origin branch deleted"
+
+# The first ready run can appear at 115 s; a sibling listed at 125 s must
+# still be observed even though the first-sighting budget has elapsed.
+setup; echo true >"$ST/draft"; touch "$ST/late-ready-run" "$ST/late-ready-after-budget"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"}]' >"$ST/run-list-before-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-late-first.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null},{databaseId:702,name:"CI",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-late-sibling.json"
+ship --keep-branch; expect 0 "late ready runs get a separate settle budget"
+[ "$(cat "$ST/fake-elapsed")" -ge 125 ] || fail "late ready runs: fake clock reaches the sibling's listing"
+grep -q 'gh run view 701' "$ST/gh.log" || fail "late ready runs: waited on first run 701"
+grep -q 'gh run view 702' "$ST/gh.log" || fail "late ready runs: waited on sibling run 702"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "late ready runs: merge succeeded: [$OUT]"
+
+# An early first sighting keeps listing through the original 120 s window.
+# Runs arriving about 7 s and 17 s after it must all be awaited.
+setup; echo true >"$ST/draft"; touch "$ST/late-ready-run" "$ST/late-ready-after-budget"
+echo 10 >"$ST/late-ready-first-at"; echo 17 >"$ST/late-ready-sibling-at"; echo 27 >"$ST/late-ready-third-at"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"}]' >"$ST/run-list-before-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-late-first.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null},{databaseId:702,name:"CI",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-late-sibling.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null},{databaseId:702,name:"CI",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null},{databaseId:703,name:"Tests",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-late-third.json"
+ship --keep-branch; expect 0 "early ready sighting keeps full settle window"
+for id in 701 702 703; do
+  grep -q "gh run view $id" "$ST/gh.log" || fail "early ready runs: waited on run $id"
+done
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "early ready runs: merge succeeded: [$OUT]"
+
+# A persistent failure to read a ready run's status fails with gh's error
+# after three attempts, rather than spinning until the overall CI timeout.
+setup; echo true >"$ST/draft"; touch "$ST/late-ready-run" "$ST/ready-run-view-fail-persistent"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"}]' >"$ST/run-list-before-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"CI",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready.json"
+ship --keep-branch --timeout 10; expect 1 "persistent ready run view failure"
+[ "$(grep -c '^gh run view 701' "$ST/gh.log")" = 3 ] || fail "persistent ready run view failure: exactly three attempts"
+grep -Fq 'gh: ready run view failed for 701' <<<"$ERR" || fail "persistent ready run view failure: gh stderr is reported: [$ERR]"
+! grep -q '^gh pr merge' "$ST/gh.log" || fail "persistent ready run view failure: no merge"
+
+# A transient status lookup failure is reset when a subsequent lookup succeeds.
+setup; echo true >"$ST/draft"; touch "$ST/late-ready-run" "$ST/ready-run-view-fail-transient"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"}]' >"$ST/run-list-before-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"CI",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready.json"
+ship --keep-branch --timeout 10; expect 0 "transient ready run view failure"
+[ "$(grep -c '^gh run view 701' "$ST/gh.log")" = 2 ] || fail "transient ready run view failure: successful retry completes the run"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "transient ready run view failure: merge succeeded: [$OUT]"
 
 # A run already green on the head must not satisfy the wait triggered by ready.
 setup; echo true >"$ST/draft"; touch "$ST/late-ready-run"

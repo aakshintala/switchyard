@@ -165,7 +165,9 @@ gh() (
           tail -n +2 "$T/state/heads.txt" >"$T/state/heads.tmp"; mv "$T/state/heads.tmp" "$T/state/heads.txt"
         fi
       fi
-      printf '{"headRefOid":"%s","baseRefName":"main"}\n' "$h";;
+      mergeable="MERGEABLE"
+      [ ! -f "$T/state/mergeable" ] || mergeable="$(cat "$T/state/mergeable")"
+      printf '{"headRefOid":"%s","baseRefName":"main","mergeable":"%s"}\n' "$h" "$mergeable";;
     diff)
       echo "HTTP 406: Sorry, the diff exceeded the maximum number of files (300)" >&2
       exit 1;;
@@ -286,7 +288,7 @@ reset_state() {
   rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt" \
     "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log" \
     "$T/state"/caller-* "$T/state"/caller-cwd-*
-  rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/escape-diff" "$T/state/issue-calls.txt"
+  rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/escape-diff" "$T/state/issue-calls.txt" "$T/state/mergeable"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
   rm -f "$HOME/.cache/agents/review-pr-reap.log" 2>/dev/null || true
   rm -rf "$TMPDIR/review-pr/posted"
@@ -1100,6 +1102,22 @@ start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
   --model M --overbuild-model M2 >/dev/null 2>&1 || fail "non-draft start exits 0"
 out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || true
 grep -qx "CI $SHORT none" <<<"$out" || fail "non-draft PR with no runs prints CI none, got [$(grep '^CI ' <<<"$out")]"
+
+# A PR with no CI runs reports the base branch when its head conflicts.
+reset_state
+: >"$T/checks.txt"
+echo CONFLICTING >"$T/state/mergeable"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 --model M --overbuild-model M2 >/dev/null 2>&1 || fail "conflicting PR start exits 0"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || true
+conflicting_ci="$(grep '^CI ' <<<"$out")"
+[ "$conflicting_ci" = "CI $SHORT none: PR conflicts with main; merge origin/main" ] \
+  || fail "conflicting PR with no CI runs reports merge guidance, got [$conflicting_ci]"
 
 # --- case: draft CI display uses draft-specific results
 reset_state
