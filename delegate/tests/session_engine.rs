@@ -1,3 +1,5 @@
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
 mod support;
 
 use delegate::session::{
@@ -2253,6 +2255,8 @@ impl PrepublishRoot {
                 "start",
                 "--model",
                 PREPUBLISH_MODEL,
+                "--model-ruling",
+                model_ruling::TEST_MODEL_RULING,
                 "--brief",
                 &brief,
                 "--inbox",
@@ -2410,6 +2414,8 @@ fn prepublish_start_timeout_reaps_the_host() {
             "start",
             "--model",
             PREPUBLISH_MODEL,
+            "--model-ruling",
+            model_ruling::TEST_MODEL_RULING,
             "--brief",
             &brief,
             "--inbox",
