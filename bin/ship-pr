@@ -1451,6 +1451,15 @@ pull_request_run_ids() {
   jq -r --arg head "$1" '.[] | select(.headSha == $head and .event == "pull_request") | .databaseId | select(. != null) | tostring' <<<"$run_list" 2>/dev/null
 }
 
+# gh_err_text FILE: gh's stderr for a message. The first 400 bytes stay on
+# one line; blank stderr reads (no stderr).
+gh_err_text() {
+  local text
+  text="$(head -c 400 <"$1" | tr '\n\r' '  ')"
+  case "$text" in *[![:space:]]*) ;; *) text="(no stderr)" ;; esac
+  printf '%s' "$text"
+}
+
 # Wait for every workflow dispatched by ready_for_review, rather than trusting a
 # green check from a run that already existed when the draft was marked ready.
 # Ready can start several pull_request runs that are listed seconds apart, so
@@ -1499,9 +1508,7 @@ wait_ready_for_review_run() {
         status=""
         view_failures=$((view_failures + 1))
         if [ "$view_failures" -ge 3 ]; then
-          # Keep the first 400 bytes on one line; blank stderr reads (no stderr).
-          view_error="$(head -c 400 <"$view_err" | tr '\n\r' '  ')"
-          case "$view_error" in *[![:space:]]*) ;; *) view_error="(no stderr)" ;; esac
+          view_error="$(gh_err_text "$view_err")"
           rm -f "$view_err"
           die_after_ready 1 "cannot read status of ready_for_review run $id after 3 attempts: gh exit $view_rc: $view_error"
         fi
@@ -1696,9 +1703,7 @@ while :; do
                   rc=0
                   pre="$(gh run view "$rid" --repo "$repo" --json attempt,status --jq '[.attempt, .status] | @tsv' 2>"$attempt_err")" || rc=$?
                   if [ "$rc" -ne 0 ]; then
-                    # the first 400 bytes stay on one line; blank stderr reads (no stderr)
-                    text="$(head -c 400 <"$attempt_err" | tr '\n\r' '  ')"
-                    case "$text" in *[![:space:]]*) ;; *) text="(no stderr)" ;; esac
+                    text="$(gh_err_text "$attempt_err")"
                     rm -f "$attempt_err"
                     die_after_ready 1 "cannot read attempt of run $rid before rerun: gh exit $rc: $text"
                   fi
