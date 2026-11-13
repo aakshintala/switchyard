@@ -586,6 +586,8 @@ reset_stub; setup_case flags
 printf '0' >"$T/exitcodes"
 printf 'body_has=%s\n' 'Resolves #515' 'Co-authored-by: T' >>"$S"
 printf 'outside_plan=%s\n' 'src/outside-a.go' 'src/outside-b.go' >>"$S"
+printf 'known_flake=%s\n' 516 517 >>"$S"
+printf 'known_flake_by=%s\n' flywheel >>"$S"
 printf 'body_ends=%s\n' 'Co-authored with Claude Code.' >>"$S"
 printf 'unverified text\n' >"$CDIR/unverified.md"
 printf 'unverified=%s\n' "$CDIR/unverified.md" >>"$S"
@@ -601,6 +603,11 @@ grep -F -q -- '--body-has Co-authored-by: T' "$T/calls.log" || fail "flags: body
 [ "$(grep -c -x -F 'arg|--outside-plan' "$T/calls.log")" -eq 2 ] || fail "flags: outside-plan passed once per path: $(cat "$T/calls.log")"
 grep -F -q -- '--outside-plan src/outside-a.go' "$T/calls.log" || fail "flags: first outside-plan path missing"
 grep -F -q -- '--outside-plan src/outside-b.go' "$T/calls.log" || fail "flags: second outside-plan path missing"
+[ "$(grep -c -x -F 'arg|--known-flake' "$T/calls.log")" -eq 2 ] || fail "flags: known-flake passed once per ticket: $(cat "$T/calls.log")"
+[ "$(grep -c -x -F 'arg|516' "$T/calls.log")" -eq 1 ] || fail "flags: first known-flake ticket missing"
+[ "$(grep -c -x -F 'arg|517' "$T/calls.log")" -eq 1 ] || fail "flags: second known-flake ticket missing"
+[ "$(grep -c -x -F 'arg|--by' "$T/calls.log")" -eq 1 ] || fail "flags: known-flake by missing"
+grep -A1 -x -F 'arg|--by' "$T/calls.log" | grep -qx 'arg|flywheel' || fail "flags: by value missing"
 [ "$(grep -c -x -F 'arg|--body-ends' "$T/calls.log")" -eq 1 ] || fail "flags: body-ends once: $(cat "$T/calls.log")"
 got="$(grep -A1 -x -F 'arg|--body-ends' "$T/calls.log" | sed -n 2p)"
 [ "$got" = 'arg|Co-authored with Claude Code.' ] || fail "flags: body-ends value, got [$got]"
@@ -767,6 +774,10 @@ grep -q 'unverified' "$T/usage-err" \
   || fail "usage names the unverified state key: [$(cat "$T/usage-err")]"
 grep -q -F -- '--unverified-fixes' "$T/usage-err" \
   || fail "usage names --unverified-fixes: [$(cat "$T/usage-err")]"
+grep -q 'known_flake' "$T/usage-err" \
+  || fail "usage names the known_flake state key: [$(cat "$T/usage-err")]"
+grep -q -F -- '--known-flake' "$T/usage-err" \
+  || fail "usage names --known-flake: [$(cat "$T/usage-err")]"
 grep -q -F -- 'merge_check' "$T/usage-err" && grep -q -F -- '--merge-check' "$T/usage-err" \
   || fail "usage names the merge_check state key and --merge-check: [$(cat "$T/usage-err")]"
 

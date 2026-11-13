@@ -1,0 +1,7 @@
+     Summary [1083.889s] 7469 tests run: 7468 passed (5 slow), 1 failed, 13 skipped
+        FAIL [  40.810s] (5338/7469) main::hub_daemon keeper::a_second_crash_leaves_one_keeper_the_log_and_the_third_resume_orphans_the_other
+error: test run failed
+== leak scan
+warning: orphan process 69278: sleep 60 (started Thu Nov 12 06:25:33 2026; may belong to another run)
+scripts/check: full output in /tmp/scrubbed
+scripts/check: FAIL (exit 100)

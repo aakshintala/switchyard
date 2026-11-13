@@ -1,0 +1,2 @@
+running 1 test
+test result: FAILED. 0 passed; 1 failed

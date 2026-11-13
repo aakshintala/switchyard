@@ -1,0 +1,15 @@
+running 1 test
+test tests::unknown ... FAILED
+
+failures:
+
+---- tests::unknown stdout ----
+thread 'tests::unknown' panicked at tests/libtest.rs:1:1:
+assertion failed: false
+
+failures:
+    tests::unknown
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: could not compile `fixture` (test "unit")
