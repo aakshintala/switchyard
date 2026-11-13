@@ -221,7 +221,9 @@ gh() {
         if [ -e "$ST/late-ready-run" ]; then
           n="$(cat "$ST/late-ready-run-list-calls" 2>/dev/null || echo 0)"
           n=$((n + 1)); echo "$n" >"$ST/late-ready-run-list-calls"
-          if [ -e "$ST/late-ready-run-marked-ready" ] && [ "$n" -ge 3 ]; then
+          if [ -e "$ST/late-ready-run-marked-ready" ] && [ "$n" -ge 4 ] && [ -e "$ST/run-list-after-ready-2.json" ]; then
+            cat "$ST/run-list-after-ready-2.json"
+          elif [ -e "$ST/late-ready-run-marked-ready" ] && [ "$n" -ge 3 ]; then
             cat "$ST/run-list-after-ready.json"
           else
             cat "$ST/run-list-before-ready.json"
@@ -288,7 +290,7 @@ gh() {
               h="$(git --git-dir="$ORIGIN" rev-parse refs/heads/feature 2>/dev/null || cat "$ST/lasthead")"
               json="$(jq -nc --arg h "$h" '{headSha: $h}')";;
             *status*)
-              if [ -e "$ST/late-ready-run" ] && [ "$rid" = "701" ]; then
+              if [ -e "$ST/late-ready-run" ] && [ "$rid" = "$(cat "$ST/late-ready-run-id" 2>/dev/null || echo 701)" ]; then
                 n="$(cat "$ST/late-ready-run-view-calls" 2>/dev/null || echo 0)"
                 n=$((n + 1)); echo "$n" >"$ST/late-ready-run-view-calls"
                 if [ "$n" -ge 2 ]; then
@@ -1557,6 +1559,18 @@ ship --keep-branch; expect 0 "ready waits for its late run"
 [ -e "$ST/late-ready-run-completed" ] || fail "ready run: new run completed before merge"
 grep -q 'gh run view 701' "$ST/gh.log" || fail "ready run: explicitly waited on late pull_request run: [$(cat "$ST/gh.log")]"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "ready run: merge succeeded: [$OUT]"
+
+# Ready starts two runs: 701 is listed first and finishes at once; 702, which
+# carries the required check, is listed only on the next call and finishes later.
+setup; echo true >"$ST/draft"; touch "$ST/late-ready-run"; echo 702 >"$ST/late-ready-run-id"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"}]' >"$ST/run-list-before-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:702,name:"CI",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready-2.json"
+ship --keep-branch; expect 0 "ready waits for every new run"
+[ ! -e "$ST/merged-before-late-run-finished" ] || fail "two ready runs: merged before run 702 finished"
+[ -e "$ST/late-ready-run-completed" ] || fail "two ready runs: run 702 completed before merge"
+grep -q 'gh run view 702' "$ST/gh.log" || fail "two ready runs: waited on the later-listed run: [$(cat "$ST/gh.log")]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "two ready runs: merge succeeded: [$OUT]"
 
 # ===== merge and cleanup from inside the worktree: the worktree and local
 # ===== branch are kept, the origin branch is deleted
