@@ -37,7 +37,8 @@ pub(crate) const USAGE: &str =
        delegate doctor
        delegate version
        delegate run --model muse/MODEL ...  (muse exec; standard and strong rungs)
-       delegate session start --model muse/MODEL|PROVIDER/MODEL[:LEVEL] --brief FILE --inbox DIR [--json]
+       delegate session start --model muse/MODEL|PROVIDER/MODEL[:LEVEL] [--model-ruling URL] --brief FILE --inbox DIR [--json]
+       delegate session status <id-or-prefix> [--json]
        delegate session send <id-or-prefix> TEXT|- [--json]
        delegate session logs <id-or-prefix> [--follow] [--json]
        delegate session watch <id-or-prefix> [--json]
@@ -46,7 +47,7 @@ pub(crate) const USAGE: &str =
        Session exit codes: 0 ok, 1 failed, 2 usage, 3 no session, 4 dead, 5 busy";
 
 /// Bad input: reason on stderr, exit 2.
-struct Usage(String);
+pub(crate) struct Usage(pub(crate) String);
 
 fn usage<T>(msg: impl Into<String>) -> Result<T, Usage> {
     Err(Usage(msg.into()))
@@ -193,7 +194,7 @@ fn valid_model_ruling_url(url: &str) -> bool {
         && comment.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn validate_model_ruling(ruling: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_model_ruling(ruling: Option<&str>) -> Result<(), String> {
     match ruling {
         None => Ok(()),
         Some(url) if valid_model_ruling_url(url) => Ok(()),
@@ -203,7 +204,7 @@ fn validate_model_ruling(ruling: Option<&str>) -> Result<(), String> {
     }
 }
 
-fn check_model_allowed(
+pub(crate) fn check_model_allowed(
     config: &Config,
     resolved: &ResolvedModel,
     ruling: Option<&str>,
@@ -218,7 +219,7 @@ fn check_model_allowed(
     ))
 }
 
-fn check_resolved_model(config: &Config, model: &str) -> Result<ResolvedModel, Usage> {
+pub(crate) fn check_resolved_model(config: &Config, model: &str) -> Result<ResolvedModel, Usage> {
     match resolve_model(Some(model), config) {
         Ok(resolved) => Ok(resolved),
         Err(e)

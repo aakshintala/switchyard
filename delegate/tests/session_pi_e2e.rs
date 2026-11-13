@@ -1,3 +1,5 @@
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
 mod support;
 
 use serde_json::Value;
@@ -182,7 +184,8 @@ impl Harness {
             args.push("--json".to_string());
         }
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.invoke_with(&borrowed, None, scenario, cassette, env)
+        let args = model_ruling::args_with_model_ruling(&borrowed);
+        self.invoke_with(&args, None, scenario, cassette, env)
     }
 
     fn root(&self) -> std::path::PathBuf {
@@ -377,10 +380,19 @@ fn assert_json_error(output: &Output, exit: i32, code: &str) -> Value {
 #[test]
 fn start_launches_pi_with_the_brief_as_a_system_prompt() {
     let h = Harness::new();
-    let started = h.start_pi(
-        "openai/gpt-6-luna:xhigh",
-        b"BRIEF-TEXT-1",
-        true,
+    let brief_path = h.brief_file(b"BRIEF-TEXT-1");
+    let started = h.invoke_with(
+        &[
+            "start",
+            "--model",
+            "openai/gpt-6-luna:xhigh",
+            "--brief",
+            brief_path.to_str().unwrap(),
+            "--inbox",
+            h.inbox.to_str().unwrap(),
+            "--json",
+        ],
+        None,
         "HOLD_TOOL",
         None,
         &[],
@@ -393,6 +405,10 @@ fn start_launches_pi_with_the_brief_as_a_system_prompt() {
     let value: Value = serde_json::from_slice(&started.stdout).unwrap();
     let session = &value["session"];
     assert_eq!(session["status"], "running");
+    assert!(
+        session["modelRuling"].is_null(),
+        "allowed row had a ruling: {session}"
+    );
     let id = session["id"].as_str().unwrap().to_string();
     assert_eq!(session["activeTurnId"], "pi-turn-1");
     assert!(session["museSessionId"].is_null(), "{session}");
@@ -460,7 +476,7 @@ fn start_launches_pi_with_the_brief_as_a_system_prompt() {
 #[test]
 fn bad_model_fails_start_before_any_prompt() {
     let h = Harness::new();
-    let started = h.start_pi("openai/no-such-model", b"B", true, "BADMODEL", None, &[]);
+    let started = h.start_pi("openai/gpt-6.1-terra", b"B", true, "BADMODEL", None, &[]);
     let value = assert_json_error(&started, 1, "failed");
     let message = value["error"]["message"].as_str().unwrap();
     assert!(message.contains("Model not found"), "{message}");
@@ -524,7 +540,7 @@ fn watch_ok(h: &Harness, id: &str) {
 #[test]
 fn ui_dialog_requests_are_refused_and_other_ui_records_ignored() {
     let h = Harness::new();
-    let started = h.start_pi("openai/gpt-6-luna", b"BRIEF", true, "DIALOG", None, &[]);
+    let started = h.start_pi("openai/gpt-6.1-terra", b"BRIEF", true, "DIALOG", None, &[]);
     assert!(
         started.status.success(),
         "{}",
@@ -566,7 +582,7 @@ fn ui_dialog_requests_are_refused_and_other_ui_records_ignored() {
 fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
     let h = Harness::new();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "OK",
@@ -600,7 +616,7 @@ fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
         .find(|session| session["id"] == id)
         .cloned()
         .unwrap();
-    assert_eq!(entry["model"], "openai/gpt-6-luna");
+    assert_eq!(entry["model"], "openai/gpt-6.1-terra");
 
     send_started(&h, &id, "run tools");
     watch_ok(&h, &id);
@@ -703,7 +719,7 @@ fn recorded_pi_lifecycle_replays_through_the_session_verbs() {
 fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
     let h = Harness::new();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "HOLD_TOOL",
@@ -787,7 +803,7 @@ fn steer_queued_during_a_tool_call_reaches_the_next_continuation() {
 fn unconsumed_pi_steers_replay_in_order_after_the_turn_ends() {
     let h = Harness::new();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "HOLD_REPLAY,REPLAY_UNCONSUMED",
@@ -845,7 +861,7 @@ fn all_queued_pi_steers_become_unconsumed_if_no_continuation_starts() {
     let continuation_wait_marker = h.base.join("continuation-wait-started");
     let continuation_wait_marker_env = continuation_wait_marker.to_str().unwrap();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "HOLD_TOOL,NO_CONTINUATION",
@@ -920,7 +936,7 @@ fn all_queued_pi_steers_become_unconsumed_if_no_continuation_starts() {
 fn pi_clears_queued_steers_before_a_late_continuation_can_start() {
     let h = Harness::new();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "HOLD_TOOL,NO_CONTINUATION,LATE_CONTINUATION",
@@ -998,7 +1014,7 @@ fn stopping_during_pi_continuation_wait_does_not_publish_idle() {
     let continuation_wait_marker = h.base.join("continuation-wait-started");
     let continuation_wait_marker_env = continuation_wait_marker.to_str().unwrap();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "HOLD_TOOL,NO_CONTINUATION",
@@ -1063,7 +1079,7 @@ fn mixed_pi_queue_replays_only_dropped_steer_after_continuation() {
     let release_event_write = h.base.join("release-event-write");
     let release_event_write_env = release_event_write.to_str().unwrap();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "HOLD_REPLAY,REPLAY_MIXED",
@@ -1203,7 +1219,7 @@ fn pending_steer_replay_stays_busy_while_send_holds_admission() {
     const REPLAY_TEXT: &str = "STEER-LOCKED";
     let h = Harness::new();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "HOLD_REPLAY,REPLAY_UNCONSUMED,REPLAY_SEND_HOLD",
@@ -1318,7 +1334,7 @@ fn pending_steer_replay_stays_busy_while_send_holds_admission() {
 fn interrupt_during_pending_replay_cancels_without_starting_replay() {
     let h = Harness::new();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "HOLD_REPLAY,REPLAY_UNCONSUMED,REPLAY_SEND_HOLD",
@@ -1395,7 +1411,7 @@ fn interrupt_during_pending_replay_cancels_without_starting_replay() {
 fn interrupt_clears_the_queue_before_abort_and_the_host_survives() {
     let h = Harness::new();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "HOLD_TOOL",
@@ -1518,7 +1534,7 @@ fn pi_failures_map_to_the_existing_contracts() {
     {
         let h = Harness::new();
         let started = h.start_pi(
-            "openai/gpt-6-luna",
+            "openai/gpt-6.1-terra",
             b"B",
             true,
             "",
@@ -1536,7 +1552,14 @@ fn pi_failures_map_to_the_existing_contracts() {
     // text, and its stderr line is kept.
     {
         let h = Harness::new();
-        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "EXIT_AT_START", None, &[]);
+        let started = h.start_pi(
+            "openai/gpt-6.1-terra",
+            b"B",
+            true,
+            "EXIT_AT_START",
+            None,
+            &[],
+        );
         let value = assert_json_error(&started, 1, "failed");
         let message = value["error"]["message"].as_str().unwrap();
         assert!(message.contains("pi host"), "{message}");
@@ -1547,7 +1570,7 @@ fn pi_failures_map_to_the_existing_contracts() {
     // (iii) A host that dies mid-session leaves a dead/hostExited session.
     {
         let h = Harness::new();
-        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "DIE", None, &[]);
+        let started = h.start_pi("openai/gpt-6.1-terra", b"B", true, "DIE", None, &[]);
         assert!(started.status.success());
         let value: Value = serde_json::from_slice(&started.stdout).unwrap();
         let id = value["session"]["id"].as_str().unwrap().to_string();
@@ -1563,7 +1586,7 @@ fn pi_failures_map_to_the_existing_contracts() {
     // and leaves the session idle with its turn count unchanged.
     {
         let h = Harness::new();
-        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "HANDLED", None, &[]);
+        let started = h.start_pi("openai/gpt-6.1-terra", b"B", true, "HANDLED", None, &[]);
         assert!(started.status.success());
         let value: Value = serde_json::from_slice(&started.stdout).unwrap();
         let id = value["session"]["id"].as_str().unwrap().to_string();
@@ -1578,7 +1601,7 @@ fn pi_failures_map_to_the_existing_contracts() {
     // (v) A prompt the host refuses fails the send the same way.
     {
         let h = Harness::new();
-        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "PROMPT_FAIL", None, &[]);
+        let started = h.start_pi("openai/gpt-6.1-terra", b"B", true, "PROMPT_FAIL", None, &[]);
         assert!(started.status.success());
         let value: Value = serde_json::from_slice(&started.stdout).unwrap();
         let id = value["session"]["id"].as_str().unwrap().to_string();
@@ -1593,7 +1616,7 @@ fn pi_failures_map_to_the_existing_contracts() {
     // still completes.
     {
         let h = Harness::new();
-        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "NOISE", None, &[]);
+        let started = h.start_pi("openai/gpt-6.1-terra", b"B", true, "NOISE", None, &[]);
         assert!(started.status.success());
         let value: Value = serde_json::from_slice(&started.stdout).unwrap();
         let id = value["session"]["id"].as_str().unwrap().to_string();
@@ -1615,7 +1638,7 @@ fn pi_failures_map_to_the_existing_contracts() {
     {
         let h = Harness::new();
         let started = h.start_pi(
-            "openai/gpt-6-luna",
+            "openai/gpt-6.1-terra",
             b"B",
             true,
             "SLOW_BOOT",
@@ -1639,7 +1662,7 @@ fn pi_failures_map_to_the_existing_contracts() {
         let h = Harness::new();
         let begin = Instant::now();
         let started = h.start_pi(
-            "openai/gpt-6-luna:high",
+            "openai/gpt-6-luna:xhigh",
             b"B",
             true,
             "SLOW_THINK",
@@ -1666,7 +1689,7 @@ fn pi_failures_map_to_the_existing_contracts() {
     // prompt is sent; leading whitespace is sent as-is.
     {
         let h = Harness::new();
-        let started = h.start_pi("openai/gpt-6-luna", b"B", true, "", None, &[]);
+        let started = h.start_pi("openai/gpt-6.1-terra", b"B", true, "", None, &[]);
         assert!(started.status.success());
         let value: Value = serde_json::from_slice(&started.stdout).unwrap();
         let id = value["session"]["id"].as_str().unwrap().to_string();
@@ -1699,7 +1722,7 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
     let continuation_wait_marker = h.base.join("continuation-wait-started");
     let continuation_wait_marker_env = continuation_wait_marker.to_str().unwrap();
     let started = h.start_pi(
-        "openai/gpt-6-luna",
+        "openai/gpt-6.1-terra",
         b"BRIEF",
         true,
         "STEER_RACE",
@@ -1832,7 +1855,7 @@ fn steer_racing_the_end_of_a_turn_starts_the_next_turn() {
 #[test]
 fn pi_that_exits_before_reading_stdin_fails_start_with_the_eof_text() {
     let h = Harness::new();
-    let started = h.start_pi("openai/gpt-6-luna", b"B", true, "EXIT_NOW", None, &[]);
+    let started = h.start_pi("openai/gpt-6.1-terra", b"B", true, "EXIT_NOW", None, &[]);
     assert_eq!(
         std::fs::read(h.fake_dir.join("stdin-ready")).unwrap(),
         b"",
@@ -1873,7 +1896,14 @@ fn model_shapes_select_the_host() {
     }
     assert!(!h.fake_dir.join("requests.jsonl").exists());
 
-    let started = h.start_pi("museish/model", b"plain brief", true, "", None, &[]);
+    let started = h.start_pi(
+        "opencode-go/muse-spark-1.3-contributor",
+        b"plain brief",
+        true,
+        "",
+        None,
+        &[],
+    );
     assert!(
         started.status.success(),
         "{}",
@@ -1881,7 +1911,7 @@ fn model_shapes_select_the_host() {
     );
     let requests = h.requests();
     assert_eq!(requests[0]["type"], "set_model");
-    assert_eq!(requests[0]["provider"], "museish");
+    assert_eq!(requests[0]["provider"], "opencode-go");
     assert!(
         requests
             .iter()

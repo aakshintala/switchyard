@@ -4,7 +4,7 @@ pub fn args_with_model_ruling<'a>(args: &[&'a str]) -> Vec<&'a str> {
     let mut out = args.to_vec();
     let starts_job = args
         .first()
-        .is_some_and(|command| matches!(*command, "run" | "resume"));
+        .is_some_and(|command| matches!(*command, "run" | "resume" | "start"));
     let has_model = args.windows(2).any(|pair| pair[0] == "--model");
     let has_ruling = args.contains(&"--model-ruling");
     if starts_job && has_model && !has_ruling {
@@ -49,6 +49,16 @@ mod tests {
         ];
         assert_eq!(args_with_model_ruling(&explicit), explicit);
         assert_eq!(args_with_model_ruling(&["resume", "id"]), ["resume", "id"]);
+        assert_eq!(
+            args_with_model_ruling(&["start", "--model", "muse/muse-spark-1.3-contributor"]),
+            [
+                "start",
+                "--model",
+                "muse/muse-spark-1.3-contributor",
+                "--model-ruling",
+                TEST_MODEL_RULING
+            ]
+        );
         assert_eq!(args_with_model_ruling(&["status", "id"]), ["status", "id"]);
     }
 }

@@ -174,7 +174,9 @@ Use `delegate session` for a long-running Muse or pi sub-orchestrator. Each sess
 
 ```bash
 delegate session start --model muse/muse-spark-1.3-contributor \
+  --model-ruling https://github.com/example/repo/issues/1#issuecomment-1 \
   --brief /abs/brief.md --inbox /abs/inbox --json
+delegate session status <id> --json
 delegate session send <id> 'Check the test results'
 delegate session logs <id> --follow
 delegate session watch <id>
@@ -202,7 +204,7 @@ Plain `stop` interrupts a running turn, closes host stdin, and ends the session.
 
 A `--model` of the form `muse/<id>` selects Muse; any other `--model` must use the `<provider>/<id>[:<level>]` form and selects pi. A first segment that names another harness backend (for example `codex/...` or `fiber/...`) fails fast with a usage error, so `delegate session start` never launches pi for those. The thinking level is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; a colon tail that is not one of these stays in the id. A `muse/<id>` model takes no reasoning-effort suffix on a session: sessions run at Muse's default effort.
 
-The host applies `--model` after start (`set_model`, then `set_thinking_level` when a `:level` suffix was given), so a model the host rejects or missing credentials fail `start` with exit 1 (`failed`). No `models.json` lookup happens in `session start`; `delegate run` routes by the `models.json` backend instead.
+The host applies `--model` after start (`set_model`, then `set_thinking_level` when a `:level` suffix was given), so a model the host rejects or missing credentials fail `start` with exit 1 (`failed`). Session start resolves the model through `models.json` and rejects an off-pool row before starting a process; pass a valid `--model-ruling` comment URL for a ruled exception. The session record stores it as `modelRuling`, and `delegate session status <id>` shows it.
 
 pi keeps its defaults: extensions, skills, and context files load into the lane, no `--no-*` flags and no `--tools` restriction are passed, and a project-trust prompt is refused. The pi boot bound is a const; there is no config knob for it. A Muse start never resolves the pi binary.
 
@@ -227,6 +229,7 @@ Every session verb accepts `--json`. Success output has these shapes:
 | Verb | JSON output |
 |---|---|
 | `start` | `{"ok":true,"session":<State>}` |
+| `status` | `{"ok":true,"session":<State>}` |
 | `send` | `{"ok":true,"disposition":"started|steered|unconsumed|unconfirmed","commandId":<string, when a steer was accepted>,"session":<State>}` |
 | `logs` | `{"ok":true,"lines":[<event>, ...]}` without `--follow`; JSON lines with `--follow` |
 | `watch` | `{"ok":true,"session":<State>}` |
@@ -247,7 +250,7 @@ Errors produce `{"ok":false,"error":{"code":"...","message":"..."}}` on stdout a
 Use this form to start a session on a remote machine through SSH:
 
 ```bash
-ssh box 'cd /abs/worktree && delegate session start --model muse/muse-spark-1.3-contributor --brief /abs/brief.md --inbox ~/flywheel-inbox --json'
+ssh box 'cd /abs/worktree && delegate session start --model muse/muse-spark-1.3-contributor --model-ruling https://github.com/example/repo/issues/1#issuecomment-1 --brief /abs/brief.md --inbox ~/flywheel-inbox --json'
 ```
 
 The command still runs locally on the box. `delegate` has no `--host` option. Keep `--inbox` on that machine; the caller can pull its files separately.
