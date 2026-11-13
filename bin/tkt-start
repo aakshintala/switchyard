@@ -4,7 +4,8 @@
 # tokens still preflights; any other sweep failure exits with its code. No --files
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
 # Without --split, refuses another live state in the flywheel root or nearby run directories;
-# merged/closed-PR candidates and .state.retired files are ignored.
+# merged/closed-PR candidates and .state.retired files are ignored. A same-run state
+# whose split= label differs from --split (or is set when --split is absent) is refused.
 # The preflight report carries `Core items: <n>` and `Non-blocking items: <n>` field lines just before its STATUS line; tkt-start reads the last such lines. A core item a ruling already settles is not counted in the fields.
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # --part N archives the prior state after its PR merges; merged-PR head drift tells you the next --part.
@@ -234,6 +235,10 @@ if [ "$split_given" -eq 1 ] && [ -f "$state" ]; then
     deny "DUPLICATE state=$physical_state split=$stored_split requested=$split" 2 \
       "tkt-start: duplicate state at $physical_state (stored split=$stored_split, requested split=$split); resume with --run $run only with the matching --split label"
   fi
+elif [ -f "$state" ] && grep -q '^split=.' "$state"; then
+  stored_split="$(sed -n 's/^split=//p' "$state" | head -n 1)"
+  deny "DUPLICATE state=$physical_state split=$stored_split requested=none" 2 \
+    "tkt-start: duplicate state at $physical_state is split part $stored_split; resume it with --split <label> (--split $stored_split)"
 fi
 release_lock
 if [ "$part_given" -eq 1 ]; then

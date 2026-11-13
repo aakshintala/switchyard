@@ -124,7 +124,7 @@ To watch a running lane, run `~/.agents/bin/lanestat <run-dir>`: a row reads `IN
 
 A plan split into parts runs each part through steps 4–8 in order. For part `n` (2 or more), run `tkt-start ... --part <n>` once the previous part's PR has merged. It archives the previous state as `<state>.part<n-1>`, starts fresh state and refuses while that PR is open. A `DRIFT` that names a merged `pr` is the signal to add `--part`. Pass `--body-ends`, `--model` and `--spec-issue` again after `--part`, since only `issue`, `repo`, `run`, `worktree` and `model.*` lines carry. Cut the next lane once the previous part has merged.
 
-Use `tkt-start ... --split <label>` for a concurrent sub-lane of one ticket; a state whose PR is MERGED or CLOSED, or whose filename ends in `.state.retired`, is not a duplicate.
+Use `tkt-start ... --split <label>` for a concurrent sub-lane of one ticket; a state whose PR is MERGED or CLOSED, or whose filename ends in `.state.retired`, is not a duplicate. A split state resumes only with its own `--split <label>`.
 
 For work already underway that must not be re-planned, start state with `tkt-start ... --takeover <pr-or-branch> --gate '<gate command>' --files <paths>`; this records the source in `plan`, the required gate in `gate`, and the takeover fence in `fence`, which `tkt-fix` and `tkt-ship` use without a plan file.
 
