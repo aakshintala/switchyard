@@ -4,6 +4,7 @@
 #   get <key>: print the first value for the key.
 #   list <key>: print every value for the key, one per line.
 #   set <key> <value>: replace every line for the key with one line (not an append).
+#   unset <key>: remove every line for the key.
 #   add <key> <value>: append one line for the key (the append form of set).
 #   journal <line>: append a timestamped line to the sibling .journal file.
 #   require <key>...: exit 2 naming the first missing key, exit 0 when all
@@ -40,6 +41,7 @@ usage() {
   echo "  get <key>" >&2
   echo "  list <key>" >&2
   echo "  set <key> <value>" >&2
+  echo "  unset <key>" >&2
   echo "  add <key> <value>" >&2
   echo "  journal <line>" >&2
   echo "  require <key>..." >&2
@@ -298,6 +300,28 @@ case "$cmd" in
     if [ "$1" = "head" ] && [ "$old_head" != "$2" ]; then
       append_journal_line "head $old_head -> $2"
     fi
+    ;;
+  unset)
+    [ $# -eq 1 ] || usage
+    check_key "$1"
+    take_lock
+    if ! old_value="$(state_get "$1" 2>/dev/null)"; then
+      echo "tkt-state: missing key: $1" >&2
+      exit 2
+    fi
+    stage "$state"
+    keptfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
+    while IFS= read -r line || [ -n "$line" ]; do
+      if split_line "$line" && [ "$prefix" = "$1" ]; then
+        continue
+      fi
+      printf '%s\n' "$line" >>"$keptfile"
+    done <"$tmpfile"
+    mv "$keptfile" "$state"
+    keptfile=""
+    rm -f "$tmpfile"
+    tmpfile=""
+    append_journal_line "$1 $old_value -> <unset>"
     ;;
   add)
     [ $# -eq 2 ] || usage

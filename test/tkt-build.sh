@@ -1257,6 +1257,7 @@ touch "$T/noview"
 run_build --from review
 [ "$RC" -eq 3 ] || fail "review-noprhead exits 3 (rc=$RC)"
 expect_verdict "TKT tkt-build DRIFT state=$H worktree=$H pr=unreadable log=*" "review-noprhead"
+grep -Fq "tkt-state $S unset head" <<<"$OUT" || fail "review-noprhead: DRIFT recovery names the state path and unset command"
 
 # --- missing review models name the missing key ---
 setup_case missing-model

@@ -35,6 +35,19 @@ bash "$TKT" "$S" add fruit banana || fail "add banana exits 0"
 [ "$(bash "$TKT" "$S" get fruit)" = "apple" ] || fail "get prints the first value"
 [ "$(bash "$TKT" "$S" list fruit)" = "$(printf 'apple\nbanana')" ] || fail "list prints every value"
 
+# unset removes every line for a key, preserves other lines, and journals the old value
+US="$T/unset.state"
+printf 'first=keep\nremove=old-value\nmiddle=stay\nremove=second-value\nlast=untouched\n' >"$US"
+bash "$TKT" "$US" unset remove || fail "unset of a present key exits 0"
+printf 'first=keep\nmiddle=stay\nlast=untouched\n' >"$T/unset.expected"
+cmp -s "$T/unset.expected" "$US" || fail "unset removes every matching line and leaves other lines unchanged"
+JUS="${US%.state}.journal"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z remove old-value -> <unset>$' "$JUS" \
+  || fail "unset journals the key and its old value"
+bash "$TKT" "$US" unset absent-key 2>"$T/err-unset-absent.txt" && fail "unset of an absent key exits non-zero"
+[ "$?" = "2" ] || fail "unset of an absent key exits 2"
+grep -Fq 'absent-key' "$T/err-unset-absent.txt" || fail "unset of an absent key names the key"
+
 # values with spaces and = survive
 bash "$TKT" "$S" set note "a b=c d" || fail "set of a value with spaces and = exits 0"
 [ "$(bash "$TKT" "$S" get note)" = "a b=c d" ] || fail "a value with spaces and = survives"
@@ -175,14 +188,14 @@ bash "$TKT" "$S3" journal "$(printf 'x\ny')" 2>/dev/null && fail "a journal line
 # usage errors exit 2 with usage on stderr
 bash "$TKT" >/dev/null 2>"$T/err-u1.txt"; [ "$?" = "2" ] || fail "no args exits 2"
 grep -q 'usage' "$T/err-u1.txt" || fail "no args prints usage"
-for sub in get list set add journal require; do
+for sub in get list set unset add journal require; do
   grep -q "^  $sub " "$T/err-u1.txt" || fail "no args usage lists the $sub subcommand"
 done
 bash "$TKT" "$S" >/dev/null 2>"$T/err-u4.txt"; [ "$?" = "2" ] || fail "a state file without a command exits 2"
-for sub in get list set add journal require; do
+for sub in get list set unset add journal require; do
   grep -q "^  $sub " "$T/err-u4.txt" || fail "a state file without a command lists the $sub subcommand"
 done
-for sub in get list set add journal require; do
+for sub in get list set unset add journal require; do
   grep -q "^#   $sub " "$TKT" || fail "header usage block names the $sub subcommand"
 done
 # the header help text says set replaces every line and names add the append form
@@ -190,11 +203,12 @@ grep -q 'replace every line' "$TKT" || fail "help says set replaces every line"
 grep -q 'the append form of set' "$TKT" || fail "help names add as the append form of set"
 bash "$TKT" "$S" bogus >/dev/null 2>"$T/err-u2.txt"; [ "$?" = "2" ] || fail "an unknown command exits 2"
 grep -q 'usage' "$T/err-u2.txt" || fail "an unknown command prints usage"
-for sub in get list set add journal require; do
+for sub in get list set unset add journal require; do
   grep -q "^  $sub " "$T/err-u2.txt" || fail "an unknown command usage lists the $sub subcommand"
 done
 bash "$TKT" "$S" get >/dev/null 2>&1; [ "$?" = "2" ] || fail "get without a key exits 2"
 bash "$TKT" "$S" set onlykey >/dev/null 2>&1; [ "$?" = "2" ] || fail "set without a value exits 2"
+bash "$TKT" "$S" unset >/dev/null 2>&1; [ "$?" = "2" ] || fail "unset without a key exits 2"
 bash "$TKT" "$S" require >/dev/null 2>&1; [ "$?" = "2" ] || fail "require without a key exits 2"
 bash "$TKT" "$S" set 'a=b' v >/dev/null 2>"$T/err-u3.txt"; [ "$?" = "2" ] || fail "a key with = exits 2"
 grep -q 'usage' "$T/err-u3.txt" || fail "a key with = prints usage"

@@ -345,6 +345,9 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
     else early_pr="$(gh pr list --head "$branch" --repo "$repo" --json headRefOid 2>/dev/null | jq -r '.[0].headRefOid // empty' 2>/dev/null || true)"; fi
     if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$early_pr" ]; then
       msg="tkt-build: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr ${early_pr:-unreadable}"
+      if [ -z "$early_pr" ]; then
+        msg="$msg; recovery: tkt-state $state unset head"
+      fi
       printf '%s\n' "$msg" >&2; emit "DRIFT state=$stored_head worktree=$actual pr=${early_pr:-unreadable}" 3 "$msg"
     fi
   fi
