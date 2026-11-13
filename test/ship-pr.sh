@@ -1574,8 +1574,8 @@ ship --keep-branch; expect 0 "ready waits for every new run"
 grep -q 'gh run view 702' "$ST/gh.log" || fail "two ready runs: waited on the later-listed run: [$(cat "$ST/gh.log")]"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "two ready runs: merge succeeded: [$OUT]"
 
-# 702 is listed two calls after 701: one re-list is not enough; ship-pr keeps
-# listing until a pass adds no new run.
+# 702 is listed two calls after 701: one quiet re-list is not enough; ship-pr
+# keeps listing until three passes in a row add no new run.
 setup; echo true >"$ST/draft"; touch "$ST/late-ready-run"; echo 702 >"$ST/late-ready-run-id"
 jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"}]' >"$ST/run-list-before-ready.json"
 jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready.json"
