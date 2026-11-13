@@ -1486,14 +1486,34 @@ wait_ready_for_review_run() {
   say "waiting for ready_for_review runs to finish: $(paste -sd ' ' - <<<"$new_ids")"
   elapsed=0
   for id in $new_ids; do
+    local view_failures=0 view_err view_error view_rc
+    view_err="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-ready-run.XXXXXX")" \
+      || die_after_ready 1 "cannot create a temp file for gh stderr"
     while :; do
-      status="$(gh run view "$id" --repo "$repo" --json status --jq '.status' 2>/dev/null)" || status=""
+      view_rc=0
+      status="$(gh run view "$id" --repo "$repo" --json status --jq '.status' 2>"$view_err")" || view_rc=$?
+      if [ "$view_rc" -eq 0 ]; then
+        view_failures=0
+      else
+        status=""
+        view_failures=$((view_failures + 1))
+        if [ "$view_failures" -ge 3 ]; then
+          # Keep the first 400 bytes on one line; blank stderr reads (no stderr).
+          view_error="$(head -c 400 <"$view_err" | tr '\n\r' '  ')"
+          case "$view_error" in *[![:space:]]*) ;; *) view_error="(no stderr)" ;; esac
+          rm -f "$view_err"
+          die_after_ready 1 "cannot read status of ready_for_review run $id after 3 attempts: gh exit $view_rc: $view_error"
+        fi
+      fi
       [ "$status" = "completed" ] && break
-      [ "$elapsed" -ge "$effective_timeout" ] \
-        && die_after_ready 1 "ready_for_review run $id did not finish within the CI timeout (${effective_timeout} s)"
+      if [ "$view_rc" -eq 0 ] && [ "$elapsed" -ge "$effective_timeout" ]; then
+        rm -f "$view_err"
+        die_after_ready 1 "ready_for_review run $id did not finish within the CI timeout (${effective_timeout} s)"
+      fi
       sleep 5
       elapsed=$((elapsed + 5))
     done
+    rm -f "$view_err"
     say "ready_for_review run $id finished"
   done
 }
