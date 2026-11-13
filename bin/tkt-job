@@ -328,6 +328,8 @@ prepare_brief() {
 }
 
 stored="$(tkt get "job.$slot" 2>/dev/null || true)"
+# A slot cleared to whitespace (a retyped or ssh-quoted '') holds no job.
+case "$stored" in *[![:space:]]*) ;; *) stored="" ;; esac
 stored_prompt_hash=""
 if [ -n "$stored" ] && [ -z "$resume" ]; then
   stored_prompt_hash="$(tkt get "job.$slot.prompt" 2>/dev/null || true)"

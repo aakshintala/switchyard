@@ -931,6 +931,18 @@ grep -Fq "ERROR slot lane holds job stub-1 from a different prompt; clear it (tk
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "different prompt dispatches no new job"
 [ "$(grep -c '^watch|' "$T/stub.log")" -eq 1 ] || fail "different prompt does not watch the old job"
 
+# --- a slot holding only whitespace is empty: no refusal, a fresh dispatch ----
+setup_case slot-blank
+reset_stub
+make_record stub-1 DONE 0 0 1 0
+bash "$TKT_STATE" "$S" set job.lane ' '
+bash "$TKT_STATE" "$S" set job.lane.prompt old-prompt-hash
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "whitespace slot exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+! grep -q 'different prompt' "$CDIR/stderr.txt" || fail "whitespace slot reports no different prompt"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "whitespace slot dispatches a fresh job"
+[ "$(bash "$TKT_STATE" "$S" get job.lane)" = stub-1 ] || fail "whitespace slot stores the fresh job id"
+
 # --- crash-rerun: same prompt watches the stored id and does not redispatch ---
 setup_case prompt-same
 reset_stub
