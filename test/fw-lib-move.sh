@@ -32,3 +32,27 @@ if [ "$out" != 2 ]; then
   exit 1
 fi
 printf 'ok fw-shippers-counts-local-host-once\n'
+
+# Sibling tools live in bin/, the parent of bin/lib/ (#1701). Resolve the
+# defaults with no override set, and through a symlink to fw-lib.sh.
+repo_bin=$(cd "$here/../bin" && pwd)
+ln -s "$repo_bin/lib/fw-lib.sh" "$T/fw-lib-link.sh"
+for src in "$repo_bin/lib/fw-lib.sh" "$T/fw-lib-link.sh"; do
+  paths=$(env -u FW_FENCE_GRANT -u FW_BOX_LOCAL bash -c \
+    '. "$1"; _fw_fence_grant; echo; _fw_box_local' _ "$src")
+  for want in fence-grant box-local.sh; do
+    got=$(printf '%s\n' "$paths" | grep -- "/$want\$" || true)
+    if [ "$got" != "$repo_bin/$want" ] || [ ! -x "$got" ]; then
+      printf 'FAIL default %s from %s: expected executable %s, got %s\n' \
+        "$want" "$src" "$repo_bin/$want" "${got:-nothing}" >&2
+      exit 1
+    fi
+  done
+done
+over=$(FW_FENCE_GRANT=/x/fg FW_BOX_LOCAL=/x/bl bash -c \
+  '. "$1"; _fw_fence_grant; echo; _fw_box_local' _ "$repo_bin/lib/fw-lib.sh")
+if [ "$over" != "$(printf '/x/fg\n/x/bl')" ]; then
+  printf 'FAIL env overrides lost: got %s\n' "$over" >&2
+  exit 1
+fi
+printf 'ok fw-lib-sibling-tool-defaults\n'
