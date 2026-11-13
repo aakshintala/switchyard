@@ -501,6 +501,19 @@ setup mismatchnone TWO FILING
 printf '%s\n' '1. core: none' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
 run_start
 want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 mismatchnone
+setup col0none TWO FILING
+printf '%s\n' 'core: none' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
+run_start
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 col0none
+setup col0core TWO FILING
+printf '%s\n' 'core: the guard must change; docs/x.md must say so' 'non-blocking: y' 'Core items: 1' 'Non-blocking items: 1' >"$T/jobout"
+run_start
+want "PREFLIGHT core=1 out=" 1 col0core
+setup fiber4637 TWO FILING
+printf '%s\n' 'core: none' 'non-blocking: finding one' 'non-blocking: finding two' 'non-blocking: finding three' 'non-blocking: finding four' 'non-blocking: finding five' 'non-blocking: finding six' 'Core items: 1' 'Non-blocking items: 5' >"$T/jobout"
+run_start
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 fiber4637
+case "$OUT" in *"(6 non-blocking)"*) ;; *) fail "fiber4637: diagnostic misses (6 non-blocking): $OUT" ;; esac
 setup ruledcore TWO FILING
 printf '%s\n' '1. core -- settled by a ruling' 'Core items: 0' 'Non-blocking items: 0' >"$T/jobout"
 run_start
