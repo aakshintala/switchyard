@@ -209,7 +209,7 @@ launch_role() {
 if [ -n "${ROLES_RESTART_ROLES:-}" ]; then
   roles="$ROLES_RESTART_ROLES"
 else
-  # Use $HOME because launchd sets it for user agents but does not expand ~ in arguments.
+  # Use $HOME because launchd sets it for user agents but does not expand ~ in arguments. The directory comes from PR #1488.
   role_inbox="--plugin-dir $HOME/.agents/claude-code/plugins/role-inbox"
   roles="$(printf '%s\n' \
     "surveyor|$HOME/work/fiber-worktrees/surveyor/home|$HOME/work/wiki/state/surveyor.md|$role_inbox" \
