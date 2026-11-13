@@ -341,10 +341,26 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
       printf '%s\n' "$msg" >&2; emit "DRIFT state=$stored_head worktree=$actual pr=unreadable" 3 "$msg"
     fi
   else
-    if [ "$from" = review ]; then pr0="$(tkt get pr 2>/dev/null || true)"; early_pr="$(gh pr view "$pr0" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
-    else early_pr="$(gh pr list --head "$branch" --repo "$repo" --json headRefOid 2>/dev/null | jq -r '.[0].headRefOid // empty' 2>/dev/null || true)"; fi
+    early_pr_list_empty=0
+    if [ "$from" = review ]; then
+      pr0="$(tkt get pr 2>/dev/null || true)"
+      early_pr="$(gh pr view "$pr0" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+    else
+      early_pr_json=""
+      if early_pr_json="$(gh pr list --head "$branch" --repo "$repo" --json headRefOid 2>/dev/null)"; then
+        early_pr="$(jq -r '.[0].headRefOid // empty' <<<"$early_pr_json" 2>/dev/null || true)"
+        if jq -e 'type == "array" and length == 0' <<<"$early_pr_json" >/dev/null 2>&1; then
+          early_pr_list_empty=1
+        fi
+      else
+        early_pr=""
+      fi
+    fi
     if [ "$stored_head" != "$actual" ] || [ "$stored_head" != "$early_pr" ]; then
       msg="tkt-build: head drift: state $state head=$stored_head worktree $worktree HEAD=$actual pr ${early_pr:-unreadable}"
+      if [ "$early_pr_list_empty" = 1 ]; then
+        msg="$msg; recovery: tkt-state $state unset head"
+      fi
       printf '%s\n' "$msg" >&2; emit "DRIFT state=$stored_head worktree=$actual pr=${early_pr:-unreadable}" 3 "$msg"
     fi
   fi

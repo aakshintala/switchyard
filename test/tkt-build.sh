@@ -163,6 +163,7 @@ case " \$* " in
 esac
 case " \$* " in
   *" pr list "*)
+    if [ -f "$T/pr-list-fail" ]; then exit 1; fi
     if [ -f "$T/empty-pr" ]; then printf '[]\n'; else printf '[{"number":%s,"headRefOid":"%s"}]\n' "\$(cat "$T/prnum")" "\$(current_pr_head)"; fi
     ;;
   *" headRefOid "*)
@@ -404,7 +405,7 @@ EOF
   printf '0' >"$T/verdicts-rc"
   printf 'src/c.rs:5:6: MISSED\tcaught\n' >"$T/verdicts"
   printf '{"artifacts":[]}\n' >"$T/artifacts-json"
-  rm -f "$T/empty-pr" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err" "$T/collect-nowrite"
+  rm -f "$T/empty-pr" "$T/pr-list-fail" "$T/no-runs" "$T/noview" "$T/ghci-err" "$T/verdicts-err" "$T/jobs-json" "$T/jobs-json2" "$T/jobs-first-done" "$T/jobs-fail" "$T/jobs-err" "$T/artifacts-fail" "$T/artifacts-err" "$T/log-fail" "$T/log-err" "$T/collect-nowrite"
   printf '0' >"$T/dcounter"
   printf '0' >"$T/rcounter"
   : >"$T/calls.log"
@@ -1150,6 +1151,24 @@ expect_verdict "TKT tkt-build DRIFT state=00000000000000000000000000000000000000
 grep -q "$H" "$CDIR/stderr.txt" || fail "drift: stderr names the worktree HEAD"
 grep -q "^run|" "$T/calls.log" && fail "drift: the lane never dispatches"
 
+# --- a failed PR list does not suggest unsetting a possibly valid head ---
+setup_case drift-pr-list-fail
+bash "$TKT_STATE" "$S" set head 0000000000000000000000000000000000000000 || fail "set stale head"
+touch "$T/pr-list-fail"
+run_build --from gate
+[ "$RC" -eq 3 ] || fail "drift-pr-list-fail exits 3 (rc=$RC)"
+expect_verdict "TKT tkt-build DRIFT state=0000000000000000000000000000000000000000 worktree=$H pr=unreadable log=*" "drift-pr-list-fail"
+! grep -Fq "tkt-state $S unset head" <<<"$OUT" || fail "drift-pr-list-fail: a failed PR lookup has no recovery hint"
+
+# --- an empty successful PR list permits the unset-head recovery hint ---
+setup_case drift-empty-pr
+bash "$TKT_STATE" "$S" set head 0000000000000000000000000000000000000000 || fail "set stale head"
+touch "$T/empty-pr"
+run_build --from gate
+[ "$RC" -eq 3 ] || fail "drift-empty-pr exits 3 (rc=$RC)"
+expect_verdict "TKT tkt-build DRIFT state=0000000000000000000000000000000000000000 worktree=$H pr=unreadable log=*" "drift-empty-pr"
+grep -Fq "tkt-state $S unset head" <<<"$OUT" || fail "drift-empty-pr: successful empty PR lookup suggests unset head"
+
 # --- a finished lane and existing branch PR name the repair on a plain rerun
 setup_case rerun-repairs-open-pr
 mkdir -p "$TMPDIR/delegate-jobs"
@@ -1257,6 +1276,7 @@ touch "$T/noview"
 run_build --from review
 [ "$RC" -eq 3 ] || fail "review-noprhead exits 3 (rc=$RC)"
 expect_verdict "TKT tkt-build DRIFT state=$H worktree=$H pr=unreadable log=*" "review-noprhead"
+! grep -Fq "tkt-state $S unset head" <<<"$OUT" || fail "review-noprhead: an unreadable stored PR has no recovery hint"
 
 # --- missing review models name the missing key ---
 setup_case missing-model
