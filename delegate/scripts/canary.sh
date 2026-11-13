@@ -21,8 +21,8 @@
 # is wrapped with a line telling each agent to commit locally and not push.
 set -uo pipefail
 
-PI_MODEL="opencode-go/muse-spark-1.3-contributor"
-FIBER_MODEL="fiber/opencode-go/muse-spark-1.3-contributor"
+PI_MODEL="openai/gpt-6-luna:medium"
+FIBER_MODEL="fiber/codex/gpt-6-luna:medium"
 DEFAULT_REPO="aakshintala/fiber"
 
 TAB="$(printf '\t')"

@@ -295,8 +295,8 @@ done
 [ "$(jq -r .dirty "$OUT/fiber/metrics.json")" = "false" ] || fail "fiber tree clean"
 [ "$(jq -r .outcome "$OUT/pi/metrics.json")" = "DONE" ] || fail "pi outcome DONE"
 [ "$(jq -r .outcome "$OUT/fiber/metrics.json")" = "DONE" ] || fail "fiber outcome DONE"
-[ "$(jq -r .model "$OUT/pi/metrics.json")" = "opencode-go/muse-spark-1.3-contributor" ] || fail "pi model"
-[ "$(jq -r .model "$OUT/fiber/metrics.json")" = "fiber/opencode-go/muse-spark-1.3-contributor" ] || fail "fiber model"
+[ "$(jq -r .model "$OUT/pi/metrics.json")" = "openai/gpt-6-luna:medium" ] || fail "pi model"
+[ "$(jq -r .model "$OUT/fiber/metrics.json")" = "fiber/codex/gpt-6-luna:medium" ] || fail "fiber model"
 PI_ID="$(jq -r .job_id "$OUT/pi/metrics.json")"
 FIBER_ID="$(jq -r .job_id "$OUT/fiber/metrics.json")"
 [ -n "$PI_ID" ] && [ -f "$JOBS/$PI_ID.json" ] || fail "pi record exists"
@@ -342,8 +342,8 @@ assert_order() {
   [ "$(sed -n 5p "$log")" = "watch $4" ] || fail "fiber watch follows fiber run"
   [ "$(sed -n 6p "$log")" = "watch-done $4" ] || fail "fiber job finishes"
 }
-assert_order "opencode-go/muse-spark-1.3-contributor" \
-  "fiber/opencode-go/muse-spark-1.3-contributor" "$PI_ID" "$FIBER_ID" "$PI_WT" "$FIBER_WT"
+assert_order "openai/gpt-6-luna:medium" \
+  "fiber/codex/gpt-6-luna:medium" "$PI_ID" "$FIBER_ID" "$PI_WT" "$FIBER_WT"
 
 # summary table
 grep -q '^# Canary 223' "$OUT/summary.md" || fail "summary heading"
@@ -393,7 +393,9 @@ echo "model cases passed"
 : >"$FLOG/calls.log"
 OUT_THINK="$T/out-thinking"
 FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 245 "$T/brief.md" \
-  --gate 'test -f work-marker' --thinking high --out "$OUT_THINK" || fail "canary run with --thinking high exits 0"
+  --gate 'test -f work-marker' --thinking high \
+  --pi-model opencode-go/muse-spark-1.3-contributor --fiber-model fiber/opencode-go/muse-spark-1.3-contributor \
+  --out "$OUT_THINK" || fail "canary run with --thinking high exits 0"
 PI_WT_THINK="$(cat "$OUT_THINK/pi/worktree")"
 FIBER_WT_THINK="$(cat "$OUT_THINK/fiber/worktree")"
 [ "$(jq -r .model "$OUT_THINK/pi/metrics.json")" = "opencode-go/muse-spark-1.3-contributor:high" ] || fail "pi metrics model has :high"

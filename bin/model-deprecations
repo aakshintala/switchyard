@@ -120,7 +120,7 @@ run_deprecations() {
   scratch="$RUN_TMP_DIR/report.md"
   today="${MODEL_DEPRECATIONS_TODAY:-$(date -u +%F)}"
   source_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || printf unknown)"
-  model="${MODEL_DEPRECATIONS_MODEL:-muse/muse-spark-1.3-contributor}"
+  model="${MODEL_DEPRECATIONS_MODEL:-openai/gpt-6-luna:medium}"
   inbox="${MODEL_CATALOG_INBOX:-/srv/lanes/fiber-worktrees/surveyor/run/inbox}"
 
   set +e
