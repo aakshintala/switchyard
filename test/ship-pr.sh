@@ -2439,6 +2439,12 @@ grep -Fq "$PADDED_TEST" "$ST/comment.txt" || fail "padded counter preserves test
 # Real nextest captured panic output belongs to the failing test block.
 prepare_known_flake
 REAL_TEST='keeper::a_second_crash_leaves_one_keeper_the_log_and_the_third_resume_orphans_the_other'
+prepare_real_tail_known_flake() {
+  prepare_known_flake
+  jq -nc --arg name "$REAL_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+  jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/main/Cargo.toml" \
+    '{packages:[{name:"main",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
+}
 jq -nc --arg name "$REAL_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
 jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/main/Cargo.toml" \
   '{packages:[{name:"main",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
@@ -2472,6 +2478,48 @@ expect_refused KNOWN-FLAKE
 grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" \
   || fail "leaked process refusal after nextest summary: [$ERR]"
 no_merge "known-flake leaked process refusal"
+
+# The real scripts/check tail accepts its orphan-process warning, with both audit comments.
+prepare_real_tail_known_flake
+REAL_TAIL_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt' '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real-tail.txt'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$REAL_TAIL_GATE" --keep-branch
+expect 0 "known-flake real scripts/check tail"
+[ -f "$ST/comment.txt" ] || fail "real tail posts a PR comment"
+[ -f "$ST/ticket-comment-166.txt" ] || fail "real tail posts a ticket comment"
+
+# The raw gate exit code must be 100, not merely ship-pr's wrapper code 2.
+prepare_real_tail_known_flake
+REAL_TAIL_101_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt' '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real-tail.txt'; exit 101"
+ship --known-flake 166 --by flywheel --gate "$REAL_TAIL_101_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'gate exit status was 101' <<<"$ERR" || fail "real tail exit 101 refusal: [$ERR]"
+no_merge "real tail exit 101"
+
+# The final Summary count must agree with the distinct failing tests.
+prepare_real_tail_known_flake
+REAL_TAIL_MISMATCH_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; sed 's/7469 tests run: 7468 passed (5 slow), 1 failed/7469 tests run: 7468 passed (5 slow), 2 failed/' '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real-tail.txt'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$REAL_TAIL_MISMATCH_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'Summary reports 2 failing tests but 1 distinct failures' <<<"$ERR" \
+  || fail "real tail summary mismatch refusal: [$ERR]"
+no_merge "real tail summary mismatch"
+
+# A leak-scan warning still refuses even though the gate exits 100.
+prepare_real_tail_known_flake
+LEAK_SCAN_TAIL_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt' '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real-tail.txt'; printf '%s\\n' 'scripts/check: leaked processes (exit 1)'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$LEAK_SCAN_TAIL_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" \
+  || fail "real tail leaked-process refusal: [$ERR]"
+no_merge "real tail leaked process"
+
+# A TRY status repeats a failing test but must still identify that test.
+prepare_real_tail_known_flake
+TRY_REPEAT_GATE="printf '%s\\n' 'TRY 1 FAIL [  40.810s] (5338/7469) main::hub_daemon $REAL_TEST' 'Summary [1083.889s] 7469 tests run: 7468 passed (5 slow), 1 failed, 13 skipped'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$TRY_REPEAT_GATE" --keep-branch
+expect 0 "known-flake TRY status parses"
+[ -f "$ST/comment.txt" ] || fail "TRY status posts a PR comment"
+[ -f "$ST/ticket-comment-166.txt" ] || fail "TRY status posts a ticket comment"
 
 # Legacy nextest output can capture unindented panic lines under --- STDERR:.
 prepare_known_flake

@@ -172,6 +172,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--known-flake <ticket>...] [--by <who>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
+  echo "       --known-flake requires a fail-fast gate ending in nextest (exit 100 for test failures)" >&2
   echo "       longest wait: 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
   exit 2
 }
@@ -437,6 +438,9 @@ known_metadata_package_root() {
 
 known_nextest_failure_fields() {
   local line="$1" status identifier name
+  if [[ "$line" =~ ^[[:space:]]*TRY[[:space:]]+[0-9]+[[:space:]]+(.*)$ ]]; then
+    line="${BASH_REMATCH[1]}"
+  fi
   if [[ "$line" =~ ^[[:space:]]*(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK)[[:space:]]+\[[^]]+\]([[:space:]]+\([[:space:]]*[0-9]+/[0-9]+\))?[[:space:]]+([^[:space:]]+)[[:space:]]+(.+)$ ]]; then
     status="${BASH_REMATCH[1]}"
     identifier="${BASH_REMATCH[3]}"
@@ -453,7 +457,7 @@ known_nextest_failure_fields() {
 }
 
 known_is_nextest_failure_line() {
-  [[ "$1" =~ ^[[:space:]]*(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL)[[:space:]]+\[ ]]
+  [[ "$1" =~ ^[[:space:]]*(TRY[[:space:]]+[0-9]+[[:space:]]+)?(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL)[[:space:]]+\[ ]]
 }
 
 known_add_test() {
@@ -575,9 +579,13 @@ known_gate_has_libtest_output() {
 }
 
 known_gate_has_other_failure() {
-  local output_file="$1" line lower in_test_block=0 trimmed
+  local output_file="$1" line lower in_test_block=0 after_summary=0 trimmed
   [ "${known_unnamed_failures:-0}" -eq 0 ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$after_summary" = 1 ] \
+      && { known_is_nextest_failure_line "$line" || known_is_nextest_status_line "$line"; }; then
+      continue
+    fi
     if known_is_nextest_failure_line "$line"; then
       known_nextest_failure_fields "$line" >/dev/null || return 0
       in_test_block=1
@@ -593,6 +601,7 @@ known_gate_has_other_failure() {
     fi
     if known_is_nextest_summary_boundary "$line"; then
       in_test_block=0
+      after_summary=1
       continue
     fi
     if [ "$in_test_block" = 1 ]; then
