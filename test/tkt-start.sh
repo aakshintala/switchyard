@@ -506,7 +506,7 @@ printf '%s\n' '1. core -- settled by a ruling' 'Core items: 0' 'Non-blocking ite
 run_start
 want "PREFLIGHT core=0 nonblocking=0 out=" 0 ruledcore
 # field-count cases: tkt-start reads the trailing Core/Non-blocking field
-# lines, not the bullet shapes above them.
+# lines; an untagged line cannot back a Core items count.
 setup fieldunbulleted TWO FILING
 printf 'The guard reaps early and the answer must say why.\nCore items: 1\nNon-blocking items: 0\n' >"$T/jobout"
 run_start

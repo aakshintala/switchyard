@@ -6,7 +6,8 @@
 # Without --split, refuses another live state in the flywheel root or nearby run directories;
 # merged/closed-PR candidates and .state.retired files are ignored. A same-run state
 # whose split= label differs from --split (or is set when --split is absent) is refused.
-# The preflight report has Core/Non-blocking footer counts; tkt-start counts tagged finding lines and refuses a Core items footer above the tagged core count (excluding core: none). Fewer footer core items are allowed when rulings settle tags.
+# The preflight report carries `Core items: <n>` and `Non-blocking items: <n>` field lines just before its STATUS line; tkt-start reads the last such lines. A core item a ruling already settles is not counted in the fields.
+# tkt-start also counts the tagged finding lines (`core` lines other than a nil `core: none`, and `non-blocking` lines). A `Core items` field above the tagged core count emits PREFLIGHT core=mismatch footer=<n> tagged=<m> and exits 1; a lower field is allowed.
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # --part N archives the prior state after its PR merges; merged-PR head drift tells you the next --part.
 # Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--split <label>] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]
@@ -503,7 +504,7 @@ tagged_core="$(count_items '^([0-9]+\.|-) *`?\**core\b|^([0-9]+\.|-) .*(`core`|\
 tagged_nonblocking="$(count_items '^([0-9]+\.|-) *\**non-blocking\b')"
 if [ "$core" -gt "$tagged_core" ]; then
   tkt journal "tkt-start preflight core=mismatch footer=$core tagged=$tagged_core out=$out"
-  emit "PREFLIGHT core=mismatch footer=$core tagged=$tagged_core out=$out" 1 "${dg[@]}" "tkt-start: preflight footer says Core items: $core but $tagged_core core lines are tagged" "$report"
+  emit "PREFLIGHT core=mismatch footer=$core tagged=$tagged_core out=$out" 1 "${dg[@]}" "tkt-start: preflight footer says Core items: $core but $tagged_core core lines are tagged ($tagged_nonblocking non-blocking)" "$report"
 fi
 tkt journal "tkt-start preflight core=$core out=$out"
 [ "$core" -eq 0 ] && emit "PREFLIGHT core=0 nonblocking=$nb out=$out" 0 "${dg[@]}" "$report" || emit "PREFLIGHT core=$core out=$out" 1 "${dg[@]}" "$report"
