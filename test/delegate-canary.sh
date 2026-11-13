@@ -361,19 +361,19 @@ echo "task 2 cases passed"
 OUT2="$T/out-models"
 FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 224 "$T/brief.md" \
   --gate 'test -f work-marker' \
-  --pi-model openai/gpt-6-luna:medium --fiber-model fiber/codex/gpt-6-luna \
+  --pi-model openai/gpt-6-luna:xhigh --fiber-model fiber/codex/gpt-6-luna:xhigh \
   --out "$OUT2" || fail "canary run with model flags exits 0"
 PI_WT2="$(cat "$OUT2/pi/worktree")"
 FIBER_WT2="$(cat "$OUT2/fiber/worktree")"
 PI_ID2="$(jq -r .job_id "$OUT2/pi/metrics.json")"
 FIBER_ID2="$(jq -r .job_id "$OUT2/fiber/metrics.json")"
-[ "$(jq -r .model "$OUT2/pi/metrics.json")" = "openai/gpt-6-luna:medium" ] || fail "pi metrics model from --pi-model"
-[ "$(jq -r .model "$OUT2/fiber/metrics.json")" = "fiber/codex/gpt-6-luna" ] || fail "fiber metrics model from --fiber-model"
+[ "$(jq -r .model "$OUT2/pi/metrics.json")" = "openai/gpt-6-luna:xhigh" ] || fail "pi metrics model from --pi-model"
+[ "$(jq -r .model "$OUT2/fiber/metrics.json")" = "fiber/codex/gpt-6-luna:xhigh" ] || fail "fiber metrics model from --fiber-model"
 # This check is not race-sensitive: the fake watch has no delay here (FAKE_WATCH_SLEEP unset).
 # Task 2 alone pins backgrounded-watch ordering.
-assert_order "openai/gpt-6-luna:medium" "fiber/codex/gpt-6-luna" \
+assert_order "openai/gpt-6-luna:xhigh" "fiber/codex/gpt-6-luna:xhigh" \
   "$PI_ID2" "$FIBER_ID2" "$PI_WT2" "$FIBER_WT2"
-grep -q '| model | openai/gpt-6-luna:medium | fiber/codex/gpt-6-luna |' "$OUT2/summary.md" \
+grep -q '| model | openai/gpt-6-luna:xhigh | fiber/codex/gpt-6-luna:xhigh |' "$OUT2/summary.md" \
   || fail "summary names each side's model"
 
 # a run with no model in its metrics.json: report still rebuilds it
@@ -381,15 +381,15 @@ REPM2="$T/rep-no-model"
 cp -R "$OUT2" "$REPM2"
 jq 'del(.model)' "$OUT2/pi/metrics.json" >"$REPM2/pi/metrics.json"
 bash "$CANARY" report 224 --out "$REPM2" || fail "report of a run without model exits 0"
-grep -q '| model | unknown | fiber/codex/gpt-6-luna |' "$REPM2/summary.md" \
+grep -q '| model | unknown | fiber/codex/gpt-6-luna:xhigh |' "$REPM2/summary.md" \
   || fail "report names a missing model unknown"
 assert_clean_leaves_nothing 224 "$OUT2"
 
 echo "model cases passed"
 
-# --- Thinking levels: --thinking L appends :L to both arms' models. A run
+# --- Thinking levels: --thinking L sets :L on both arms' models. A run
 # without the flag appends nothing, already pinned by the Task 2 happy path's
-# assert_order on the unsuffixed ids. ---
+# assert_order on the default ids. ---
 : >"$FLOG/calls.log"
 OUT_THINK="$T/out-thinking"
 FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 245 "$T/brief.md" \
@@ -429,6 +429,19 @@ grep -q "^run opencode-go/muse-spark-1.3-contributor:low $PI_WT_LOW$" "$FLOG/cal
 grep -q "^run fiber/opencode-go/muse-spark-1.3-contributor:low $FIBER_WT_LOW$" "$FLOG/calls.log" \
   || fail "fiber run records the :low model"
 assert_clean_leaves_nothing 246 "$OUT_LOW"
+
+# The defaults already carry :medium; --thinking replaces that level rather
+# than appending a second one, so both arms land on the :xhigh rows.
+: >"$FLOG/calls.log"
+OUT_XH="$T/out-xhigh"
+FAKE_EVENTS="$T/ev2.jsonl" bash "$CANARY" run 244 "$T/brief.md" \
+  --gate 'test -f work-marker' --thinking xhigh \
+  --out "$OUT_XH" || fail "canary run with --thinking xhigh on defaults exits 0"
+[ "$(jq -r .model "$OUT_XH/pi/metrics.json")" = "openai/gpt-6-luna:xhigh" ] || fail "pi default level replaced by :xhigh"
+[ "$(jq -r .model "$OUT_XH/fiber/metrics.json")" = "fiber/codex/gpt-6-luna:xhigh" ] || fail "fiber default level replaced by :xhigh"
+grep -q "^run openai/gpt-6-luna:xhigh " "$FLOG/calls.log" || fail "pi run records the replaced level"
+grep -q "^run fiber/codex/gpt-6-luna:xhigh " "$FLOG/calls.log" || fail "fiber run records the replaced level"
+assert_clean_leaves_nothing 244 "$OUT_XH"
 
 # A missing or empty value is a usage error before any worktree is cut.
 if bash "$CANARY" run 247 "$T/brief.md" --gate true --out "$T/out-bad" --thinking 2>/dev/null; then

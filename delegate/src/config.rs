@@ -453,6 +453,7 @@ mod tests {
             "openai/gpt-6-luna:medium",
             "openai/gpt-6-luna:xhigh",
             "codex/gpt-6-luna:medium",
+            "codex/gpt-6-luna:xhigh",
             "fiber/codex/gpt-6-luna:medium",
             "fiber/codex/gpt-6-luna:xhigh",
             "claude-haiku-5-5",
