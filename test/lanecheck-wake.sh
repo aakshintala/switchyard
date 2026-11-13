@@ -140,6 +140,24 @@ if [ "$lrc" -eq 2 ] \
 else
   fail "populated-roster-without-retirement-ledger-refuses-actions (rc=$lrc out=$out commands=$(cat "$T/send-commands") messages=$(cat "$T/sent-messages"))"
 fi
+# `done` must not create the ledger either: one appended row would make the
+# next run read every other retired lane as live.
+out=$(FW_RUN="$r" FW_LANECHECK_NOW=3000 bash "$BIN/lanecheck" done 1722 2>&1); lrc=$?
+if [ "$lrc" -eq 2 ] \
+    && printf '%s\n' "$out" | grep -Fqx "lanecheck: $r/roster-done missing; roster has rows, refusing to retire lanes this run" \
+    && [ ! -e "$r/roster-done" ] && [ ! -s "$T/send-commands" ]; then
+  ok done-without-retirement-ledger-refuses
+else
+  fail "done-without-retirement-ledger-refuses (rc=$lrc out=$out)"
+fi
+# An existing empty ledger passes the guard, so the first retirement can fill it.
+: >"$r/roster-done"
+out=$(FW_RUN="$r" FW_LANECHECK_NOW=3000 bash "$BIN/lanecheck" done 1722 2>&1)
+if ! printf '%s\n' "$out" | grep -Fq "refusing to retire lanes"; then
+  ok done-with-empty-retirement-ledger-passes-guard
+else
+  fail "done-with-empty-retirement-ledger-passes-guard (out=$out)"
+fi
 
 # No roster remains a no-op, while an empty roster still gets an empty ledger.
 r="$T/no-roster"

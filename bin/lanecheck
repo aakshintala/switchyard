@@ -62,6 +62,18 @@ if [ -z "$FW_LOCAL_BOX" ]; then
 fi
 roster="$R/roster"
 retired="$R/roster-done"
+# A populated roster with no roster-done means the ledger was never synced here
+# (#1722). Creating it would make every retired lane read as live, so refuse.
+# refuse_missing_ledger <test> <action>: <test> is -e (refuse a missing ledger)
+# or -s (also refuse an empty one).
+refuse_missing_ledger() {
+  if [ -f "$roster" ] && ! test "$1" "$retired" && grep -q '[^[:space:]]' "$roster"; then
+    if [ -e "$retired" ]; then state=empty; else state=missing; fi
+    echo "lanecheck: $retired $state; roster has rows, refusing to $2 this run"
+    echo "  to clear: copy roster-done from the Mac (box-push.sh or boxlaunch.sh syncs it), or retire a lane with 'lanecheck done' once the file exists; ': > $retired' only if no roster lane has retired"
+    exit 2
+  fi
+}
 
 write_retirement_helper() {
   cat >"$1" <<'PY'
@@ -472,6 +484,7 @@ PY
 )
 
 if [ "${1:-}" = done ]; then
+  refuse_missing_ledger -e "retire lanes"
   shift
   done_args=()
   have_done_arg=0
@@ -958,10 +971,7 @@ PY
 fi
 
 [ -f "$roster" ] || { echo "no roster at $roster"; exit 0; }
-if [ ! -e "$retired" ] && grep -q '[^[:space:]]' "$roster"; then
-  echo "lanecheck: $retired missing; roster has rows, refusing to wake, steer or resend this run"
-  exit 2
-fi
+refuse_missing_ledger -e "wake, steer or resend"
 touch "$retired"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck.XXXXXX") || exit 3
