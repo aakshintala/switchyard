@@ -32,6 +32,8 @@ if [ "${NO_HOME_PATHS_SKIP_CASES:-0}" != 1 ]; then
   }
 
   run_case literal-users fail script.sh 'echo /Users/somebody/x'
+  run_case placeholder-users fail script.sh 'echo /Users/user/x'
+  run_case substring-users fail script.sh 'echo $T/Users/x'
   run_case literal-home fail script.sh 'echo /home/somebody/x'
   run_case temp-home pass script.sh 'echo $T/home/work'
   run_case placeholder-home pass script.sh 'echo /home/test/.cache'
@@ -77,7 +79,8 @@ for record in result.stdout.splitlines():
         continue
 
     is_fixture = path.startswith("delegate/tests/fixtures/")
-    invalid = False
+    # Outside fixtures any /Users/ fails, placeholder or not (#1694 Done-when 3).
+    invalid = not is_fixture and b"/Users/" in content
     for marker in home_marker.finditer(content):
         # Fixture grep patterns may contain a character class after /Users/.
         if is_fixture and content[marker.start():].startswith(b"/Users/["):
