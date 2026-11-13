@@ -3,17 +3,18 @@
 # miss run plan-sweep plus the preflight job. Only a sweep rc 1 listing unresolved
 # tokens still preflights; any other sweep failure exits with its code. No --files
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
-# Refuses another <namebase>.state in the flywheel root or nearby run directories.
+# Without --split, refuses another live state in the flywheel root or nearby run directories;
+# merged/closed-PR candidates and .state.retired files are ignored.
 # The preflight report carries `Core items: <n>` and `Non-blocking items: <n>` field lines just before its STATUS line; tkt-start reads the last such lines. A core item a ruling already settles is not counted in the fields.
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # --part N archives the prior state after its PR merges; merged-PR head drift tells you the next --part.
-# Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]
+# Usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--split <label>] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]
 # PATHS are separated by commas or spaces, and repeats of --files add more paths.
 # Words after --files run to the next word starting with '-': write such a path as ./-name.
 # Example: --files a b c, the same as --files a,b,c.
 set -euo pipefail
 usage() {
-  echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]" >&2
+  echo "usage: tkt-start --run DIR --repo R --issue N --spec FILE --branch B --worktree DIR --workflow-doc PATH --closing TEXT [--part N] [--split <label>] [--env PREFIX] [--body-has LINE]... [--body-ends TEXT] [--spec-issue N] [--extra FILE] [--merge-gate ci|gate] [--merge-check CMD] [--mutant-job NAME] [--model ROLE=ID]... [--files PATHS] [--no-preflight] [--takeover PR-OR-BRANCH --gate CMD]" >&2
   echo "  --takeover PR-OR-BRANCH records plan=takeover PR-OR-BRANCH; --gate CMD records its required check command; non-blank --files PATHS is required for its file fence" >&2
   echo "  --spec FILE: a file holding the ticket body; a Part-of closing needs 'Part of #N' in it" >&2
   echo "  --spec-issue N: the issue holding the spec, when it is not this ticket; review-pr checks the spec axis against it" >&2
@@ -22,7 +23,7 @@ usage() {
   exit 2
 }
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
-env=""; extra=""; merge_gate=""; merge_check=""; mutant_job=""; files=""; no_preflight=0; part=""; part_given=0
+env=""; extra=""; merge_gate=""; merge_check=""; mutant_job=""; files=""; no_preflight=0; part=""; part_given=0; split=""; split_given=0
 body_has=(); models=()
 model_roles=(lane fix map verifier verify review overbuild preflight)
 body_ends=""; body_ends_given=0; spec_issue=""; spec_issue_given=0
@@ -34,6 +35,7 @@ while [ $# -gt 0 ]; do
     --spec-issue) [ $# -ge 2 ] || usage; spec_issue="$2"; spec_issue_given=1; shift 2 ;;
     --model) [ $# -ge 2 ] || usage; models+=("$2"); shift 2 ;;
     --part) [ $# -ge 2 ] || usage; part="$2"; part_given=1; shift 2 ;;
+    --split) [ $# -ge 2 ] || usage; split="$2"; split_given=1; shift 2 ;;
     --takeover) [ $# -ge 2 ] || usage; takeover_ref="$2"; takeover_given=1; shift 2 ;;
     --gate) [ $# -ge 2 ] || usage; takeover_gate="$2"; takeover_gate_given=1; shift 2 ;;
     --files) [ $# -ge 2 ] && [[ $2 != -* ]] || usage; shift; while [ $# -gt 0 ] && [[ $1 != -* ]]; do files="${files:+$files,}${1//[[:space:]]/,}"; shift; done ;;
@@ -47,6 +49,11 @@ done
 while [[ $files == *,,* ]]; do files="${files//,,/,}"; done
 files="${files#,}"; files="${files%,}"
 for v in run repo issue spec branch worktree workflow_doc closing; do [ -n "${!v}" ] || { echo "tkt-start: missing required flag: --${v//_/-}" >&2; exit 2; }; done
+if [ "$split_given" -eq 1 ]; then
+  case "$split" in
+    ""|*[[:space:]]*) echo "tkt-start: --split needs a non-blank label with no whitespace or newline" >&2; exit 2 ;;
+  esac
+fi
 if [ "$takeover_given" -eq 1 ]; then
   if [ -z "${takeover_ref//[[:space:]]/}" ] || [[ $takeover_ref == -* ]] || [[ $takeover_ref == *[[:space:]]* ]]; then
     echo "tkt-start: --takeover needs one PR or branch reference with no whitespace: $takeover_ref" >&2
@@ -147,45 +154,60 @@ if [ ! -e "$worktree" ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
   fail_step repo 128 "run from inside $repo's checkout"
 fi
 deny() { printf '%s\n' "$3" >&2; emit "$1" "$2" "$3"; }
-# Refuse a state for this ticket in another nearby run before touching state.
-# Resolve all directories physically so ./ and symlink aliases of the same run
-# compare equal, and scan only the root/parent plus their direct subdirectories.
+# Refuse other live states for this ticket unless the caller explicitly starts
+# a concurrent split. Split runs still validate any state in their own run.
 physical_run="$(cd "$run" && pwd -P)"
 physical_state="$physical_run/$namebase.state"
-search_dirs=()
-add_search_dir() {
-  local path="$1" physical existing
-  [ -d "$path" ] || return 0
-  physical="$(cd "$path" && pwd -P)" || return 0
-  for existing in ${search_dirs[@]+"${search_dirs[@]}"}; do
-    [ "$existing" = "$physical" ] && return 0
-  done
-  search_dirs+=("$physical")
-}
-add_search_dir "${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"
-add_search_dir "$(dirname "$run")"
-seen_states=()
-for scan_dir in ${search_dirs[@]+"${search_dirs[@]}"}; do
-  while IFS= read -r -d '' candidate; do
-    candidate_dir="$(cd "$(dirname "$candidate")" && pwd -P)" || continue
-    candidate_path="$candidate_dir/$(basename "$candidate")"
-    already_seen=0
-    for seen_state in ${seen_states[@]+"${seen_states[@]}"}; do
-      if [ "$seen_state" = "$candidate_path" ]; then already_seen=1; break; fi
+pr_state() { gh pr view "$1" --repo "$repo" --json state --jq '.state' 2>/dev/null; }
+if [ "$split_given" -eq 0 ]; then
+  search_dirs=()
+  add_search_dir() {
+    local path="$1" physical existing
+    [ -d "$path" ] || return 0
+    physical="$(cd "$path" && pwd -P)" || return 0
+    for existing in ${search_dirs[@]+"${search_dirs[@]}"}; do
+      [ "$existing" = "$physical" ] && return 0
     done
-    [ "$already_seen" -eq 0 ] || continue
-    seen_states+=("$candidate_path")
-    [ "$candidate_path" = "$physical_state" ] && continue
-    existing_run="$(sed -n 's/^run=//p' "$candidate_path" | head -n 1)"
-    if [ -n "$existing_run" ]; then
-      resume_run="$existing_run"; diagnostic_run="$existing_run"
-    else
-      resume_run="$candidate_dir"; diagnostic_run=unknown
-    fi
-    deny "DUPLICATE state=$candidate_path run=$diagnostic_run" 2 \
-      "tkt-start: duplicate state at $candidate_path (run=$diagnostic_run); resume with --run $resume_run"
-  done < <(find "$scan_dir" -maxdepth 2 \( -type d -name "$namebase.state.lock" -prune \) -o \( -type f -name "$namebase.state" -print0 \))
-done
+    search_dirs+=("$physical")
+  }
+  add_search_dir "${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"
+  add_search_dir "$(dirname "$run")"
+  seen_states=()
+  for scan_dir in ${search_dirs[@]+"${search_dirs[@]}"}; do
+    while IFS= read -r -d '' candidate; do
+      candidate_dir="$(cd "$(dirname "$candidate")" && pwd -P)" || continue
+      candidate_path="$candidate_dir/$(basename "$candidate")"
+      already_seen=0
+      for seen_state in ${seen_states[@]+"${seen_states[@]}"}; do
+        if [ "$seen_state" = "$candidate_path" ]; then already_seen=1; break; fi
+      done
+      [ "$already_seen" -eq 0 ] || continue
+      seen_states+=("$candidate_path")
+      [ "$candidate_path" = "$physical_state" ] && continue
+      existing_run="$(sed -n 's/^run=//p' "$candidate_path" | head -n 1)"
+      if [ -n "$existing_run" ]; then
+        resume_run="$existing_run"; diagnostic_run="$existing_run"
+      else
+        resume_run="$candidate_dir"; diagnostic_run=unknown
+      fi
+      candidate_pr="$(sed -n 's/^pr=//p' "$candidate_path" | head -n 1)"
+      if [ -n "$candidate_pr" ]; then
+        candidate_pr_state="$(pr_state "$candidate_pr")" || candidate_pr_state=""
+        if [ "$candidate_pr_state" = MERGED ] || [ "$candidate_pr_state" = CLOSED ]; then
+          continue
+        fi
+        if [ -z "$candidate_pr_state" ]; then
+          deny "DUPLICATE state=$candidate_path run=$diagnostic_run" 2 \
+            "tkt-start: duplicate state at $candidate_path (PR state of $candidate_pr could not be read, so the state counts as live); resume with --run $resume_run"
+        fi
+        deny "DUPLICATE state=$candidate_path run=$diagnostic_run" 2 \
+          "tkt-start: duplicate state at $candidate_path (pr=$candidate_pr state=$candidate_pr_state); resume with --run $resume_run"
+      fi
+      deny "DUPLICATE state=$candidate_path run=$diagnostic_run" 2 \
+        "tkt-start: duplicate state at $candidate_path (no PR recorded); rename it to $candidate_path.retired or pass --split <label> to run a concurrent sub-lane; resume with --run $resume_run"
+    done < <(find "$scan_dir" -maxdepth 2 \( -type d -name "$namebase.state.lock" -prune \) -o \( -type f -name "$namebase.state" -print0 \))
+  done
+fi
 lockdir="$state.lock"; lock_owned=0
 lock_or_busy() {
   if ! mkdir "$lockdir" 2>/dev/null; then
@@ -201,8 +223,18 @@ release_lock() {
   fi
 }
 trap 'release_lock || true' EXIT
-pr_state() { gh pr view "$1" --repo "$repo" --json state --jq '.state' 2>/dev/null; }
 lock_or_busy
+if [ "$split_given" -eq 1 ] && [ -f "$state" ]; then
+  stored_split="none"
+  if grep -q '^split=' "$state"; then
+    stored_split="$(sed -n 's/^split=//p' "$state" | head -n 1)"
+    [ -n "$stored_split" ] || stored_split="none"
+  fi
+  if [ "$stored_split" != "$split" ]; then
+    deny "DUPLICATE state=$physical_state split=$stored_split requested=$split" 2 \
+      "tkt-start: duplicate state at $physical_state (stored split=$stored_split, requested split=$split); resume with --run $run only with the matching --split label"
+  fi
+fi
 release_lock
 if [ "$part_given" -eq 1 ]; then
   if [ -f "$state" ]; then
@@ -300,6 +332,7 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
   fi
 fi
 for k in repo issue spec branch worktree run workflow_doc closing; do tkt set "$k" "${!k}"; done
+[ "$split_given" -eq 0 ] || tkt set split "$split"
 for k in env extra merge_gate merge_check mutant_job; do [ -n "${!k}" ] && tkt set "$k" "${!k}"; done
 if [ "$takeover_given" -eq 1 ]; then
   tkt set plan "takeover $takeover_ref"

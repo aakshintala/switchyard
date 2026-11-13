@@ -269,6 +269,7 @@ RUN="$CDIR/sibling-run"; reload
 run_start --no-preflight
 want "DUPLICATE state=$existing_state run=$existing_run" 2 duplicate-sibling
 case "$OUT" in *"resume with --run $existing_run"*) ;; *) fail "duplicate-sibling: output misses resume hint: $OUT" ;; esac
+case "$OUT" in *"rename it to $existing_state.retired"*"pass --split <label>"*) ;; *) fail "duplicate-sibling: output misses retired/split exits: $OUT" ;; esac
 [ ! -e "$RUN/widget-42.state" ] || fail "duplicate-sibling: second state was written"
 
 # A run nested under FW_RUN cannot create a second state for a root-level run.
@@ -281,7 +282,89 @@ RUN="$FW_RUN/child-run"; reload
 run_start --no-preflight
 want "DUPLICATE state=$existing_state run=$existing_run" 2 duplicate-child
 case "$OUT" in *"resume with --run $existing_run"*) ;; *) fail "duplicate-child: output misses resume hint: $OUT" ;; esac
+case "$OUT" in *"rename it to $existing_state.retired"*"pass --split <label>"*) ;; *) fail "duplicate-child: output misses retired/split exits: $OUT" ;; esac
 [ ! -e "$RUN/widget-42.state" ] || fail "duplicate-child: second state was written"
+
+# --split opts into a sibling run while preserving the label in its state.
+setup split-sibling ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 split-sibling-first
+RUN="$CDIR/sibling-run"; reload
+run_start --no-preflight --split a
+want "SKIPPED filing=" 0 split-sibling
+[ "$(sed -n 's/^split=//p' "$RUN/widget-42.state" | head -n 1)" = a ] \
+  || fail "split-sibling: new state does not store split=a"
+
+# A split label cannot change the identity of a state already in this run.
+setup split-same-run ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 split-same-run-first
+existing_state="$(cd "$RUN" && pwd -P)/widget-42.state"
+run_start --no-preflight --split b
+want "DUPLICATE state=$existing_state split=none" 2 split-same-run
+case "$OUT" in *"stored split=none"*"requested split=b"*) ;; *) fail "split-same-run: output misses both labels: $OUT" ;; esac
+[ "$(grep -c '^split=' "$RUN/widget-42.state" || true)" -eq 0 ] \
+  || fail "split-same-run: refused start modified state"
+
+# Reusing the same split label follows the ordinary resume path.
+setup split-same-label ONE AGAINST
+run_start --no-preflight --split a
+want "SKIPPED filing=" 0 split-same-label-first
+run_start --no-preflight --split a
+want "SKIPPED filing=" 0 split-same-label-resume
+[ "$(grep -c '^split=a$' "$RUN/widget-42.state")" -eq 1 ] \
+  || fail "split-same-label: state does not retain exactly one split=a"
+
+# Labels are single non-blank words and reject whitespace or newlines.
+for bad_split_case in blank whitespace newline; do
+  setup "split-invalid-$bad_split_case" ONE AGAINST
+  case "$bad_split_case" in
+    blank) run_start --no-preflight --split '' ;;
+    whitespace) run_start --no-preflight --split '  ' ;;
+    newline) run_start --no-preflight --split $'a\nb' ;;
+  esac
+  [ "$RC" -eq 2 ] || fail "split-invalid-$bad_split_case: exit $RC, want 2"
+  grep -qF -- '--split' "$CDIR/stderr" || fail "split-invalid-$bad_split_case: stderr does not name --split"
+  [ ! -e "$RUN/widget-42.state" ] || fail "split-invalid-$bad_split_case: state was written"
+done
+
+# A sibling state with a terminal PR is no longer a live duplicate.
+for terminal_pr_state in MERGED CLOSED; do
+  setup "duplicate-terminal-$terminal_pr_state" ONE AGAINST
+  run_start --no-preflight
+  want "SKIPPED filing=" 0 "duplicate-terminal-$terminal_pr_state-first"
+  "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set pr 123
+  printf '%s\n' "$terminal_pr_state" >"$T/prstate"
+  existing_state="$(cd "$RUN" && pwd -P)/widget-42.state"
+  RUN="$CDIR/sibling-run"; reload
+  run_start --no-preflight
+  want "SKIPPED filing=" 0 "duplicate-terminal-$terminal_pr_state"
+  grep -qF 'gh|pr view 123 --repo acme/widget --json state --jq .state' "$T/calls.log" \
+    || fail "duplicate-terminal-$terminal_pr_state: candidate PR state was not checked"
+done
+
+# An unreadable PR state remains live and explains the failed lookup.
+setup duplicate-pr-unreadable ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 duplicate-pr-unreadable-first
+"$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" set pr 124
+: >"$T/prstate"
+touch "$T/gh-fail"
+existing_state="$(cd "$RUN" && pwd -P)/widget-42.state"; existing_run="$RUN"
+RUN="$CDIR/sibling-run"; reload
+run_start --no-preflight
+want "DUPLICATE state=$existing_state run=$existing_run" 2 duplicate-pr-unreadable
+case "$OUT" in *"PR state of 124 could not be read"*"counts as live"*) ;; *) fail "duplicate-pr-unreadable: output misses unreadable reason: $OUT" ;; esac
+case "$OUT" in *"resume with --run $existing_run"*) ;; *) fail "duplicate-pr-unreadable: output misses resume hint: $OUT" ;; esac
+[ ! -e "$RUN/widget-42.state" ] || fail "duplicate-pr-unreadable: second state was written"
+
+# The exact-state scan ignores a retired archive file.
+setup duplicate-retired ONE AGAINST
+printf 'retired fixture\n' >"$RUN/widget-42.state.retired"
+RUN="$CDIR/sibling-run"; reload
+run_start --no-preflight
+want "SKIPPED filing=" 0 duplicate-retired
+[ -f "$RUN/widget-42.state" ] || fail "duplicate-retired: start did not write a fresh state"
 
 # from any cwd: with the worktree in place, tkt-start resolves origin/main
 # through --worktree, not the caller's directory.
