@@ -942,6 +942,7 @@ run_job --slot lane --brief "$T/brief.md"
 ! grep -q 'different prompt' "$CDIR/stderr.txt" || fail "whitespace slot reports no different prompt"
 [ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "whitespace slot dispatches a fresh job"
 [ "$(bash "$TKT_STATE" "$S" get job.lane)" = stub-1 ] || fail "whitespace slot stores the fresh job id"
+[ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" != old-prompt-hash ] || fail "whitespace slot replaces the stale prompt hash"
 
 # --- crash-rerun: same prompt watches the stored id and does not redispatch ---
 setup_case prompt-same
