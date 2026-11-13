@@ -2487,6 +2487,29 @@ expect 0 "known-flake real scripts/check tail"
 [ -f "$ST/comment.txt" ] || fail "real tail posts a PR comment"
 [ -f "$ST/ticket-comment-166.txt" ] || fail "real tail posts a ticket comment"
 
+# The fixed tail line allows only surrounding whitespace, not a resource-cause suffix.
+prepare_real_tail_known_flake
+REAL_TAIL_TRAILING_SPACE_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt' '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real-tail.txt'; printf '%s\\n' '  scripts/check: FAIL (exit 100)  '; exit 100"
+ship --known-flake 166 --by flywheel --gate "$REAL_TAIL_TRAILING_SPACE_GATE" --keep-branch
+expect 0 "known-flake tail line surrounding whitespace"
+[ -f "$ST/comment.txt" ] && [ -f "$ST/ticket-comment-166.txt" ] || fail "whitespace tail comments posted"
+
+prepare_real_tail_known_flake
+REAL_TAIL_RESOURCE_FAILURE_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt' '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real-tail.txt'; printf '%s\\n' 'scripts/check: FAIL (exit 100): out of disk'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$REAL_TAIL_RESOURCE_FAILURE_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" \
+  || fail "tail resource cause is refused: [$ERR]"
+no_merge "real tail resource failure"
+
+prepare_real_tail_known_flake
+REAL_TAIL_LEAK_100_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt' '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real-tail.txt'; printf '%s\\n' 'scripts/check: leaked processes (exit 100)'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$REAL_TAIL_LEAK_100_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" \
+  || fail "exit-100 leaked-process line is refused: [$ERR]"
+no_merge "real tail leaked processes exit 100"
+
 # The raw gate exit code must be 100, not merely ship-pr's wrapper code 2.
 prepare_real_tail_known_flake
 REAL_TAIL_101_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt' '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real-tail.txt'; exit 101"
