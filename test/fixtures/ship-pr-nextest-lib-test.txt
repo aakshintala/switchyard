@@ -1,0 +1,1 @@
+        FAIL [   0.009s] ( 295/6774) jobs registry::tests::restore_detached_rejects_paths_outside_root_or_without_an_existing_file

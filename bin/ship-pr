@@ -571,18 +571,22 @@ known_gate_has_other_failure() {
       in_test_block=1
       continue
     fi
-    if [ "$in_test_block" = 1 ]; then
-      if [ -z "$line" ]; then continue; fi
-      if [[ "$line" =~ ^[[:space:]] ]]; then
-        trimmed="${line#"${line%%[![:space:]]*}"}"
-        lower="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
-        case "$lower" in
-          'diff in '*|*' leaked process'*|*'process leak'*|*'leaked child process'*|*'unreaped process'*|*'leftover process'*|*'processes remain'*|*'process remained'*|*'process still running'*|*'processes still running'*|*'child process still running'*|*'doctest failed'*|*'doc test failed'*|*'documentation check failed'*|*'rustdoc error'*) return 0 ;;
-        esac
-        continue
-      else
+    if [[ "$line" =~ ^[[:space:]]*(TRY[[:space:]]+[0-9]+[[:space:]]+)?(FAIL|PASS|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL|SKIP|START)([[:space:]]|$) ]]; then
+      in_test_block=0
+      continue
+    fi
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    case "$trimmed" in
+      Summary|Summary\ *|----*|────────*)
         in_test_block=0
-      fi
+        continue ;;
+    esac
+    if [ "$in_test_block" = 1 ]; then
+      lower="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
+      case "$lower" in
+        'diff in '*|*' leaked process'*|*'process leak'*|*'leaked child process'*|*'unreaped process'*|*'leftover process'*|*'processes remain'*|*'process remained'*|*'process still running'*|*'processes still running'*|*'child process still running'*|*'doctest failed'*|*'doc test failed'*|*'documentation check failed'*|*'rustdoc error'*) return 0 ;;
+      esac
+      continue
     fi
     case "$line" in
       failures:) in_failures=1; continue ;;
