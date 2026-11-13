@@ -1634,6 +1634,7 @@ grep -qF 'ship-pr: merge status could not be confirmed after 12 polls; worktree 
 [ "$(origin_head)" = "$HEAD0" ] || fail "origin branch kept when never MERGED"
 [ "$(grep -c '^1$' "$ST/sleeps.txt")" -eq 11 ] || fail "11 one-second sleeps across 12 polls: [$(cat "$ST/sleeps.txt")]"
 [ "$(grep -c '^5$' "$ST/sleeps.txt")" -eq 24 ] || fail "bounded no-run wait: 24 five-second sleeps: [$(cat "$ST/sleeps.txt")]"
+[ "$(wc -l <"$ST/sleeps.txt")" -eq 35 ] || fail "no sleeps besides the 11 polls and the 24 no-run waits: [$(cat "$ST/sleeps.txt")]"
 
 setup; touch "$ST/merge-fail"; ship; expect 1 "merge refused"
 [ -d "$WT" ] || fail "worktree kept when the merge is refused"
@@ -1669,6 +1670,7 @@ grep -q 'CI - Required' <<<"$ERR" || fail "BLOCKED merge: run name is reported: 
 grep -q '802' <<<"$ERR" || fail "BLOCKED merge: run id is reported: [$ERR]"
 grep -q 'in_progress' <<<"$ERR" || fail "BLOCKED merge: run status is reported: [$ERR]"
 ! grep -Eqi -- '--auto|--admin' <<<"$ERR" || fail "BLOCKED merge: gh merge hints are removed: [$ERR]"
+grep -q 'the base branch policy prohibits the merge' <<<"$ERR" || fail "BLOCKED merge: gh reason kept: [$ERR]"
 
 # ===== lost race: 'the head branch is not up to date with the base branch'
 # ===== re-enters the merge once, counted against the retries budget of 3

@@ -97,10 +97,11 @@
 #        within 120 s exits 1 naming the run.
 #        Prints `merged <squash sha>` on success. A `gh pr merge` error containing
 #        `GraphQL` retries once like `Base branch was modified`, sleeping 5 s first.
-#        If a failed merge reports `mergeStateStatus` BLOCKED, ship-pr removes lines
-#        mentioning `--auto` or `--admin` from gh's error and names pending or failing
-#        workflow runs on the pinned head, including each run's name, id, status and
-#        conclusion when available; it never relays gh's merge hints.
+#        ship-pr prints gh's merge output without any sentence that mentions
+#        `--auto` or `--admin`, keeping the rest of the line; it never relays gh's
+#        merge hints. If a failed merge reports `mergeStateStatus` BLOCKED, ship-pr
+#        also names pending or failing workflow runs on the pinned head, with each
+#        run's name, id, status and conclusion when available.
 #        An error saying the head branch is not up to date with the base branch
 #        re-enters the merge, push and CI-wait steps once in strict mode (counted
 #        against the 3 retries), after checking `gh pr view` for MERGED; a second
@@ -967,14 +968,19 @@ ci_failed_run_ids() {
   printf '%s\n' "$ids"
 }
 
+# Print the ids of `pull_request` runs on <head>, one per line.
+pull_request_run_ids() {
+  local run_list
+  run_list="$(gh run list --repo "$repo" --commit "$1" --limit 100 --json databaseId,headSha,event 2>/dev/null)" || return 1
+  jq -r --arg head "$1" '.[] | select(.headSha == $head and .event == "pull_request") | .databaseId | select(. != null) | tostring' <<<"$run_list" 2>/dev/null
+}
+
 # Wait for the workflow dispatched by ready_for_review, rather than trusting a
 # green check from a run that already existed when the draft was marked ready.
 wait_ready_for_review_run() {
-  local head="$1" before_ids="$2" elapsed=0 run_list run_ids id run_id="" status
+  local head="$1" before_ids="$2" elapsed=0 run_ids id run_id="" status
   while :; do
-    run_list="$(gh run list --repo "$repo" --commit "$head" --limit 100 --json databaseId,headSha,event 2>/dev/null)" \
-      || die_after_ready 1 "cannot list workflow runs after marking PR $pr ready"
-    run_ids="$(jq -r --arg head "$head" '.[] | select(.headSha == $head and .event == "pull_request") | .databaseId | select(. != null) | tostring' <<<"$run_list" 2>/dev/null)" \
+    run_ids="$(pull_request_run_ids "$head")" \
       || die_after_ready 1 "cannot read workflow runs after marking PR $pr ready"
     while IFS= read -r id || [ -n "$id" ]; do
       [ -n "$id" ] || continue
@@ -1002,10 +1008,11 @@ wait_ready_for_review_run() {
   say "ready_for_review run $run_id finished"
 }
 
-# gh's merge hint is not a ship-pr instruction. Drop any whole line that
-# mentions either hint before reporting a failed merge.
+# gh's merge hint is not a ship-pr instruction. Drop each sentence that
+# mentions `--auto` or `--admin`, keep the rest of its line (gh's reason),
+# and drop a line left empty.
 print_merge_error() {
-  printf '%s\n' "$1" | awk 'index($0, "--auto") == 0 && index($0, "--admin") == 0' >&2
+  printf '%s\n' "$1" | awk '{ gsub(/[^.]*--(auto|admin)[^.]*\.?/, ""); sub(/[ \t]+$/, "") } $0 != ""' >&2
 }
 
 report_blocked_runs() {
@@ -1120,9 +1127,7 @@ while :; do
     fi
     if [ "$draft" = "true" ]; then
       [ -z "$mutants_gate" ] || check_mutants_gate
-      ready_run_list="$(gh run list --repo "$repo" --commit "$pin" --limit 100 --json databaseId,headSha,event 2>/dev/null)" \
-        || die 1 "cannot list workflow runs before marking PR $pr ready"
-      ready_runs_before="$(jq -r --arg head "$pin" '.[] | select(.headSha == $head and .event == "pull_request") | .databaseId | select(. != null) | tostring' <<<"$ready_run_list" 2>/dev/null)" \
+      ready_runs_before="$(pull_request_run_ids "$pin")" \
         || die 1 "cannot read workflow runs before marking PR $pr ready"
       say "marking PR $pr ready"
       gh pr ready "$pr" --repo "$repo" >&2 || die 1 "gh pr ready failed"
