@@ -501,12 +501,16 @@ setup mismatchnone TWO FILING
 printf '%s\n' '1. core: none' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
 run_start
 want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 mismatchnone
+setup ruledcore TWO FILING
+printf '%s\n' '1. core -- settled by a ruling' 'Core items: 0' 'Non-blocking items: 0' >"$T/jobout"
+run_start
+want "PREFLIGHT core=0 nonblocking=0 out=" 0 ruledcore
 # field-count cases: tkt-start reads the trailing Core/Non-blocking field
 # lines, not the bullet shapes above them.
 setup fieldunbulleted TWO FILING
 printf 'The guard reaps early and the answer must say why.\nCore items: 1\nNon-blocking items: 0\n' >"$T/jobout"
 run_start
-want "PREFLIGHT core=1 out=" 1 fieldunbulleted
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 fieldunbulleted
 case "$OUT" in *"nonblocking="*) fail "fieldunbulleted: nonzero core must not carry nonblocking" ;; esac
 setup fieldruled TWO FILING
 printf '1. core -- first, settled by a ruling in the issue comments.\n1. non-blocking -- other\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"
