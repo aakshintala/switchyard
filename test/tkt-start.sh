@@ -509,6 +509,15 @@ setup col0core TWO FILING
 printf '%s\n' 'core: the guard must change; docs/x.md must say so' 'non-blocking: y' 'Core items: 1' 'Non-blocking items: 1' >"$T/jobout"
 run_start
 want "PREFLIGHT core=1 out=" 1 col0core
+setup col0prose TWO FILING
+printf '%s\n' 'core: X' 'core question: is this a tag?' 'non-blocking items here are prose' 'Core items: 2' 'Non-blocking items: 0' >"$T/jobout"
+run_start
+want "PREFLIGHT core=mismatch footer=2 tagged=1 out=" 1 col0prose
+case "$OUT" in *"(0 non-blocking)"*) ;; *) fail "col0prose: prose non-blocking line counted: $OUT" ;; esac
+setup col0dash TWO FILING
+printf '%s\n' 'core -- first' '**core:** second' 'non-blocking -- y' 'Core items: 2' 'Non-blocking items: 1' >"$T/jobout"
+run_start
+want "PREFLIGHT core=2 out=" 1 col0dash
 setup fiber4637 TWO FILING
 printf '%s\n' 'core: none' 'non-blocking: finding one' 'non-blocking: finding two' 'non-blocking: finding three' 'non-blocking: finding four' 'non-blocking: finding five' 'non-blocking: finding six' 'Core items: 1' 'Non-blocking items: 5' >"$T/jobout"
 run_start
