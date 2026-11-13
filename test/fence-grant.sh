@@ -176,9 +176,10 @@ printf '%s\n' "$*" >>"$T/ssh.log"
 case "${2:-}" in
   'cat > '*)
     dest=${2#cat > }
+    case "$dest" in *' && mv '*) dest=${dest%%' && mv '*};; esac
     mkdir -p "$(dirname "$dest")"
-    cat >"$dest"
-    exit 0
+    sh -c "$2"
+    exit $?
     ;;
 esac
 [ "${SSH_FAIL:-0}" != 1 ] || { echo 'ssh stub failure' >&2; exit 255; }
@@ -669,11 +670,17 @@ MAC_RUN="$T/mac-run"; BOX_RUN="$T/box-run"
 mkdir -p "$MAC_RUN" "$BOX_RUN"
 printf '2026-11-09 launch\t77\tbox\tfiber-77-build\tabcdef123456\n' >"$MAC_RUN/roster"
 printf 'fixture notes\n' >"$MAC_RUN/fiber-77-notes.md"
+printf '2026-11-09\t77\t%s/retired-state\n' "$T/mac-home" >"$MAC_RUN/roster-done"
 [ ! -e "$BOX_RUN/roster" ] || fail 'box starts without a local roster'
 BOX_SSH="$FW_SSH" FW_RUN="$MAC_RUN" FW_BOX_RUN="$BOX_RUN" \
   FW_MAC_HOME="$T/mac-home" FW_BOX_HOME="$T/box-home" \
   bash "$SCRIPT_DIR/../bin/box-push.sh" 77 >"$T/box-push.out" 2>"$T/box-push.err" \
   || fail "box-push accepts the Mac roster fixture: $(cat "$T/box-push.err")"
+expected_roster_done=$(printf '2026-11-09\t77\t%s/retired-state' "$T/box-home")
+[ "$(cat "$BOX_RUN/roster-done" 2>/dev/null)" = "$expected_roster_done" ] \
+  || fail "box-push copies and rewrites roster-done: $(cat "$BOX_RUN/roster-done" 2>/dev/null)"
+[ ! -e "$BOX_RUN/roster.tmp" ] && [ ! -e "$BOX_RUN/roster-done.tmp" ] \
+  || fail 'box-push leaves no roster temporary files after rename'
 DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"running"}]}'
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-77\tgrant\t0\tt:stub\t\n')"
 export DSESS_JSON FILE_CLAIM_LIST

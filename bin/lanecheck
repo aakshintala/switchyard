@@ -958,6 +958,10 @@ PY
 fi
 
 [ -f "$roster" ] || { echo "no roster at $roster"; exit 0; }
+if [ ! -e "$retired" ] && grep -q '[^[:space:]]' "$roster"; then
+  echo "lanecheck: $retired missing; roster has rows, refusing to wake, steer or resend this run"
+  exit 2
+fi
 touch "$retired"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/lanecheck.XXXXXX") || exit 3

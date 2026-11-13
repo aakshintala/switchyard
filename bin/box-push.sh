@@ -40,6 +40,7 @@ sent=0
 set +f
 for f in \
   "$run/roster" \
+  "$run/roster-done" \
   "$run/report-format.md" \
   "$run/fiber-$n-notes.md" \
   "$run/fiber-$n-"*-notes.md \
@@ -50,8 +51,13 @@ for f in \
   "$run/fiber-$n-fence-grant"*.md
 do
   [ -f "$f" ] || continue
-  sed "s|$mac|$box|g" "$f" | $ssh "$host" "cat > $dst/$(basename "$f")"
-  echo "sent $(basename "$f")"
+  name=$(basename "$f")
+  case "$name" in
+    roster|roster-done) remote="cat > $dst/$name.tmp && mv $dst/$name.tmp $dst/$name";;
+    *) remote="cat > $dst/$name";;
+  esac
+  sed "s|$mac|$box|g" "$f" | $ssh "$host" "$remote"
+  echo "sent $name"
   sent=$((sent + 1))
 done
 set -f

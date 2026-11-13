@@ -123,6 +123,45 @@ run_lanecheck() {
   FW_RUN="$run" FW_LANECHECK_NOW="$now" bash "$BIN/lanecheck" 2>&1
 }
 
+# A populated roster needs its retirement ledger. Without it, lanecheck must
+# stop before reporting lanes or sending any wake, steer or resend.
+r="$T/missing-retirement-ledger"
+mkdir -p "$r"
+printf '2026-01-01T00:00:00Z\t1722\tbox\tfiber-1722-build\tsid-1722\n' >"$r/roster"
+rm -f "$r/roster-done"
+: >"$T/send-commands"
+: >"$T/sent-messages"
+out=$(run_lanecheck "$r" 3000); lrc=$?
+if [ "$lrc" -eq 2 ] \
+    && printf '%s\n' "$out" | grep -Fqx "lanecheck: $r/roster-done missing; roster has rows, refusing to wake, steer or resend this run" \
+    && [ ! -e "$r/roster-done" ] \
+    && [ ! -s "$T/send-commands" ] && [ ! -s "$T/sent-messages" ]; then
+  ok populated-roster-without-retirement-ledger-refuses-actions
+else
+  fail "populated-roster-without-retirement-ledger-refuses-actions (rc=$lrc out=$out commands=$(cat "$T/send-commands") messages=$(cat "$T/sent-messages"))"
+fi
+
+# No roster remains a no-op, while an empty roster still gets an empty ledger.
+r="$T/no-roster"
+mkdir -p "$r"
+out=$(run_lanecheck "$r" 3001); lrc=$?
+if [ "$lrc" -eq 0 ] && printf '%s\n' "$out" | grep -Fqx "no roster at $r/roster" \
+    && [ ! -e "$r/roster-done" ]; then
+  ok missing-roster-remains-no-op
+else
+  fail "missing-roster-remains-no-op (rc=$lrc out=$out)"
+fi
+r="$T/empty-roster"
+mkdir -p "$r"
+: >"$r/roster"
+rm -f "$r/roster-done"
+out=$(run_lanecheck "$r" 3002); lrc=$?
+if [ "$lrc" -eq 0 ] && [ -f "$r/roster-done" ] && [ ! -s "$r/roster-done" ]; then
+  ok empty-roster-still-creates-empty-ledger
+else
+  fail "empty-roster-still-creates-empty-ledger (rc=$lrc out=$out)"
+fi
+
 # Silent completed idle turn: the message must match the ticket's exact WAKE text.
 r=$(newrun silent)
 lane "$r" 1001 fiber-1001-build sid-1001

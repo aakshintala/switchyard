@@ -38,13 +38,21 @@ boxrun=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}
 sync_roster() {
   fw_box_is_local && return 0
-  # No roster yet means no lane has launched, so there is nothing to map; the
-  # sync after this launch's roster row creates it on the box.
-  [ -f "$run/roster" ] || return 0
-  # Write then rename, so a box probe never reads a half-written roster.
-  if ! $boxssh -o BatchMode=yes "$host" "cat > $boxrun/roster.tmp && mv $boxrun/roster.tmp $boxrun/roster" < "$run/roster"; then
-    echo "boxlaunch: cannot sync run roster to $host" >&2
-    return 1
+  # A roster can be absent before the first lane launch, but sync either file
+  # independently when the Mac has it.
+  if [ -f "$run/roster" ]; then
+    # Write then rename, so a box probe never reads a half-written roster.
+    if ! $boxssh -o BatchMode=yes "$host" "cat > $boxrun/roster.tmp && mv $boxrun/roster.tmp $boxrun/roster" < "$run/roster"; then
+      echo "boxlaunch: cannot sync run roster to $host" >&2
+      return 1
+    fi
+  fi
+  if [ -f "$run/roster-done" ]; then
+    # Use the same atomic replacement for the retirement ledger.
+    if ! $boxssh -o BatchMode=yes "$host" "cat > $boxrun/roster-done.tmp && mv $boxrun/roster-done.tmp $boxrun/roster-done" < "$run/roster-done"; then
+      echo "boxlaunch: cannot sync run roster-done to $host" >&2
+      return 1
+    fi
   fi
 }
 b=$run/fiber-$n-orchestrator-brief.md

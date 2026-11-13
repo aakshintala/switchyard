@@ -184,6 +184,7 @@ fail() { printf 'FAIL %s\n' "$1" >&2; rc=1; }
 # An idle legacy name is stopped before the replacement starts. The generated
 # launch name is recorded in column 4 and is the name lanecheck tells us to use.
 prepare_run idle
+printf '2026-11-01T00:00:00Z\t2464\n' >"$run/roster-done"
 printf '[{"id":"stale-id-2465","name":"fiber-2465-plan","state":"done","status":"idle"}]\n' >"$BOX_AGENTS"
 if launch_box >"$T/launch.out" 2>&1; then :; else fail "idle-relaunch-command-succeeded ($(cat "$T/launch.out"))"; fi
 if grep -Fxq 'claude stale-id-2465' "$STOP_LOG"; then ok idle-old-session-stopped; else fail idle-old-session-stopped; fi
@@ -200,6 +201,11 @@ if cmp -s "$run/roster" "$boxrun/roster"; then
   ok roster-synced-to-box-run
 else
   fail "roster-synced-to-box-run ($(cat "$boxrun/roster" 2>/dev/null))"
+fi
+if cmp -s "$run/roster-done" "$boxrun/roster-done"; then
+  ok roster-done-synced-to-box-run
+else
+  fail "roster-done-synced-to-box-run ($(cat "$boxrun/roster-done" 2>/dev/null))"
 fi
 
 # A plan-phase launch with no earlier grant records an empty grant before dispatch.
