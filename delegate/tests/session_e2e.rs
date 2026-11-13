@@ -1,3 +1,5 @@
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
 mod support;
 
 use serde_json::{Value, json};
@@ -171,7 +173,14 @@ impl Harness {
         if json_mode {
             args.push("--json");
         }
-        self.invoke_timeout(&args, None, scenario, env, None, timeout)
+        self.invoke_timeout(
+            &model_ruling::args_with_model_ruling(&args),
+            None,
+            scenario,
+            env,
+            None,
+            timeout,
+        )
     }
 
     fn root(&self) -> std::path::PathBuf {
@@ -569,6 +578,100 @@ fn start_validates_detaches_and_prints_shared_help() {
 }
 
 #[test]
+fn session_model_rulings_are_checked_before_start_and_shown_by_status() {
+    let h = Harness::new();
+    let brief = h.brief_file(b"valid brief");
+    let brief = brief.to_str().unwrap();
+    let inbox = h.inbox.to_str().unwrap();
+    let refused = h.invoke(&[
+        "start", "--model", MODEL, "--brief", brief, "--inbox", inbox, "--json",
+    ]);
+    assert_json_error(&refused, 2, "usage");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("model \"muse/muse-spark-1.3-contributor\" is not in the allowed pool"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!h.root().exists(), "refusal created a session directory");
+    assert!(
+        !h.fake_dir.join("requests.jsonl").exists(),
+        "refusal spawned a host process"
+    );
+
+    let malformed = h.invoke(&[
+        "start",
+        "--model",
+        MODEL,
+        "--model-ruling",
+        "https://github.com/example/repo/issues/1",
+        "--brief",
+        brief,
+        "--inbox",
+        inbox,
+        "--json",
+    ]);
+    assert_json_error(&malformed, 2, "usage");
+    assert!(
+        String::from_utf8_lossy(&malformed.stderr)
+            .contains("invalid --model-ruling; expected https://github.com/"),
+        "{}",
+        String::from_utf8_lossy(&malformed.stderr)
+    );
+    assert!(
+        !h.root().exists(),
+        "invalid ruling created a session directory"
+    );
+    assert!(
+        !h.fake_dir.join("requests.jsonl").exists(),
+        "invalid ruling spawned a host process"
+    );
+
+    let ruled = h.invoke(&[
+        "start",
+        "--model",
+        MODEL,
+        "--model-ruling",
+        model_ruling::TEST_MODEL_RULING,
+        "--brief",
+        brief,
+        "--inbox",
+        inbox,
+        "--json",
+    ]);
+    assert!(
+        ruled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ruled.stderr)
+    );
+    let started: Value = serde_json::from_slice(&ruled.stdout).unwrap();
+    let id = started["session"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        started["session"]["modelRuling"],
+        model_ruling::TEST_MODEL_RULING
+    );
+
+    let status = h.invoke(&["status", &id, "--json"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(
+        status["session"]["modelRuling"],
+        model_ruling::TEST_MODEL_RULING
+    );
+    let plain = h.invoke(&["status", &id]);
+    assert!(plain.status.success());
+    assert!(
+        String::from_utf8_lossy(&plain.stdout).contains(model_ruling::TEST_MODEL_RULING),
+        "{}",
+        String::from_utf8_lossy(&plain.stdout)
+    );
+}
+
+#[test]
 fn start_rejects_an_effort_suffix_and_starts_a_bare_id() {
     let h = Harness::new();
     let suffixed = format!("{MODEL}:high");
@@ -623,6 +726,8 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
             "start",
             "--model",
             MODEL,
+            "--model-ruling",
+            model_ruling::TEST_MODEL_RULING,
             "--brief",
             brief.to_str().unwrap(),
             "--inbox",
@@ -657,6 +762,8 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
             "start",
             "--model",
             MODEL,
+            "--model-ruling",
+            model_ruling::TEST_MODEL_RULING,
             "--brief",
             brief.to_str().unwrap(),
             "--inbox",
@@ -676,6 +783,8 @@ fn start_fast_turn_and_startup_failure_paths_are_bounded() {
         "start",
         "--model",
         MODEL,
+        "--model-ruling",
+        model_ruling::TEST_MODEL_RULING,
         "--brief",
         oversized.to_str().unwrap(),
         "--inbox",

@@ -82,6 +82,7 @@ pub fn main(args: &[String]) -> i32 {
     };
     let result = match verb.as_str() {
         "start" => start(rest, json_mode),
+        "status" => status(rest, json_mode),
         "send" => send(rest, json_mode),
         "logs" => logs(rest, json_mode),
         "watch" => watch(rest, json_mode),
@@ -297,12 +298,17 @@ fn hold_step(trigger: bool, deadline_passed: bool, release: bool) -> HoldStep {
 }
 
 fn start(args: &[String], json_mode: bool) -> Result<i32> {
-    let (values, positional) =
-        parse_flags(args, &["--model", "--brief", "--inbox"], &["--json"]).map_err(usage)?;
+    let (values, positional) = parse_flags(
+        args,
+        &["--model", "--model-ruling", "--brief", "--inbox"],
+        &["--json"],
+    )
+    .map_err(usage)?;
     if !positional.is_empty() {
         return Err(usage("start does not take positional arguments"));
     }
     let model = flag(&values, "--model").ok_or_else(|| usage("start requires --model"))?;
+    let model_ruling = flag(&values, "--model-ruling");
     let brief_path = flag(&values, "--brief").ok_or_else(|| usage("start requires --brief"))?;
     let inbox_path = flag(&values, "--inbox").ok_or_else(|| usage("start requires --inbox"))?;
     if let Some(model_id) = model.strip_prefix("muse/") {
@@ -330,6 +336,11 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
             ));
         }
     }
+    crate::cli::validate_model_ruling(model_ruling).map_err(usage)?;
+    let deps = crate::config::build_deps().map_err(|error| failed(error.to_string()))?;
+    let resolved =
+        crate::cli::check_resolved_model(&deps.config, model).map_err(|error| usage(error.0))?;
+    crate::cli::check_model_allowed(&deps.config, &resolved, model_ruling).map_err(usage)?;
     let brief = read_brief(brief_path).map_err(usage)?;
     let cwd = std::env::current_dir()
         .map_err(|error| failed(format!("could not resolve cwd: {error}")))?;
@@ -355,6 +366,7 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
         return Err(failed(format!("{}: {error}", brief_file.display())));
     }
     let mut session = state::new_state(&id, model, &cwd, &inbox, now_ms());
+    session.model_ruling = model_ruling.map(str::to_string);
     session.supervisor_pid = None;
     state::write_state(&paths, &session)
         .map_err(|error| failed(format!("could not write session state: {error}")))?;
@@ -653,6 +665,33 @@ fn watch(args: &[String], json_mode: bool) -> Result<i32> {
         signal_test_readiness("DELEGATE_SESSION_TEST_WATCH_READY");
         thread::sleep(Duration::from_millis(WATCH_POLL));
     }
+}
+
+fn status(args: &[String], json_mode: bool) -> Result<i32> {
+    let (values, positional) = parse_flags(args, &[], &["--json"]).map_err(usage)?;
+    if positional.len() != 1 {
+        return Err(usage("status requires one session id"));
+    }
+    let id = resolve_session_id(&positional[0])?;
+    let json_mode = json_mode || has_flag(&values, "--json");
+    let current = load_and_settle(&default_paths(), &id)?;
+    if json_mode {
+        println!("{}", json!({"ok":true,"session":current}));
+    } else {
+        let ruling = current
+            .model_ruling
+            .as_deref()
+            .map(|url| format!(" model-ruling={url}"))
+            .unwrap_or_default();
+        println!(
+            "{} {} model={}{}",
+            current.id,
+            status_name(&current.status),
+            current.model,
+            ruling
+        );
+    }
+    Ok(EXIT_OK)
 }
 
 fn logs(args: &[String], json_mode: bool) -> Result<i32> {

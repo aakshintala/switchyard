@@ -74,6 +74,8 @@ pub struct State {
     pub status: Status,
     pub stopping: bool,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ruling: Option<String>,
     pub cwd: String,
     pub inbox: String,
     pub supervisor_pid: Option<i32>,
@@ -98,6 +100,7 @@ pub fn new_state(id: &str, model: &str, cwd: &str, inbox: &str, now_ms: u64) -> 
         status: Status::Idle,
         stopping: false,
         model: model.to_string(),
+        model_ruling: None,
         cwd: cwd.to_string(),
         inbox: inbox.to_string(),
         supervisor_pid: None,
