@@ -917,6 +917,9 @@ fn supervise(args: &[String]) -> i32 {
         Err(e) => return fail(e.to_string()),
     };
     if let Err(message) = check_model_allowed(&config, &resolved, model_ruling) {
+        // The launcher wrote the prompt for this job; a refused job never
+        // reads it, so remove it here rather than leave it in the jobs dir.
+        let _ = std::fs::remove_file(job_record_path(id).with_extension("prompt"));
         return fail(message);
     }
     let Some(backend) = Backend::from_name(&resolved.backend) else {
@@ -1562,6 +1565,8 @@ mod tests {
             "1",
         ]
         .map(String::from);
+        std::fs::create_dir_all(&jobs).unwrap();
+        std::fs::write(job_record_path(job_id).with_extension("prompt"), "prompt").unwrap();
 
         assert_eq!(supervise(&args), 1);
         assert!(!job_record_path(job_id).exists());
