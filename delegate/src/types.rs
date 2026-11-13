@@ -193,6 +193,8 @@ pub struct ModelEntry {
     pub tiers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allowed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -201,6 +203,7 @@ pub struct ResolvedModel {
     pub backend: String,
     pub price: Price,
     pub reviewer: Option<String>,
+    pub allowed: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

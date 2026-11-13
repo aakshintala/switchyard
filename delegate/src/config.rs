@@ -196,6 +196,7 @@ fn decode_model_entry(raw: &Value, id: &str, where_: &str) -> Result<ModelEntry,
         price: decode_price(obj.get("price").unwrap_or(&Value::Null), &loc)?,
         tiers: decode_tiers(obj, &loc)?,
         reviewer,
+        allowed: opt_bool(obj, "allowed", &loc)?.unwrap_or(false),
     })
 }
 
@@ -225,7 +226,15 @@ fn decode_host_profile(raw: Option<&Value>) -> Result<HostProfile, String> {
         profile.default = Some(d);
     }
     if let Some(models) = obj.get("models") {
-        profile.models = Some(decode_models(models, "host-profile.models")?);
+        let mut models = models.clone();
+        if let Some(rows) = models.as_object_mut() {
+            for row in rows.values_mut() {
+                if let Some(row) = row.as_object_mut() {
+                    row.remove("allowed");
+                }
+            }
+        }
+        profile.models = Some(decode_models(&models, "host-profile.models")?);
     }
     if let Some(g) = opt_str(obj, "gate", "host-profile")? {
         profile.gate = Some(g);
@@ -298,7 +307,9 @@ pub fn load_config(
     let mut models = file_models;
     if let Some(pm) = &profile.models {
         for (k, v) in pm {
-            models.insert(k.clone(), v.clone());
+            let mut entry = v.clone();
+            entry.allowed = models.get(k).is_some_and(|bundled| bundled.allowed);
+            models.insert(k.clone(), entry);
         }
     }
     let default_model = profile
@@ -387,6 +398,147 @@ mod tests {
             raw.as_object_mut().unwrap().insert("tiers".into(), tiers);
         }
         decode_model_entry(&raw, "m", "models.json.models")
+    }
+
+    fn model_entry_with_allowed(allowed: Option<Value>) -> Result<ModelEntry, String> {
+        let mut raw = serde_json::json!({
+            "label": "M",
+            "backend": "cursor",
+            "price": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0 }
+        });
+        if let Some(allowed) = allowed {
+            raw.as_object_mut()
+                .unwrap()
+                .insert("allowed".into(), allowed);
+        }
+        decode_model_entry(&raw, "m", "models.json.models")
+    }
+
+    #[test]
+    fn allowed_decodes_true_false_and_defaults_to_false() {
+        let true_entry = model_entry_with_allowed(Some(serde_json::json!(true))).unwrap();
+        assert!(true_entry.allowed);
+        let serialized = serde_json::to_value(&true_entry).unwrap();
+        assert_eq!(serialized["allowed"], true);
+
+        let false_entry = model_entry_with_allowed(Some(serde_json::json!(false))).unwrap();
+        assert!(!false_entry.allowed);
+        let serialized = serde_json::to_value(&false_entry).unwrap();
+        assert!(serialized.get("allowed").is_none());
+
+        let absent_entry = model_entry_with_allowed(None).unwrap();
+        assert!(!absent_entry.allowed);
+        assert!(
+            serde_json::to_value(absent_entry)
+                .unwrap()
+                .get("allowed")
+                .is_none()
+        );
+
+        let err = model_entry_with_allowed(Some(serde_json::json!("yes"))).unwrap_err();
+        assert!(err.contains("models.json.models[\"m\"].allowed"), "{err}");
+        assert!(err.contains("must be a boolean"), "{err}");
+    }
+
+    #[test]
+    fn bundled_allowed_pool_is_exactly_the_reviewed_models() {
+        let raw: Value = serde_json::from_str(BUNDLED_MODELS_JSON).unwrap();
+        let models = decode_models(&raw["models"], "models.json.models").unwrap();
+        let actual: std::collections::BTreeSet<_> = models
+            .iter()
+            .filter(|(_, entry)| entry.allowed)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let expected: std::collections::BTreeSet<_> = [
+            "openai/gpt-6-luna:medium",
+            "openai/gpt-6-luna:xhigh",
+            "codex/gpt-6-luna:medium",
+            "fiber/codex/gpt-6-luna:medium",
+            "fiber/codex/gpt-6-luna:xhigh",
+            "claude-haiku-5-5",
+            "claude-sonnet-5-5",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn bundled_tiered_models_outside_the_allowed_pool_are_exactly_the_expected_rows() {
+        let raw: Value = serde_json::from_str(BUNDLED_MODELS_JSON).unwrap();
+        let models = decode_models(&raw["models"], "models.json.models").unwrap();
+        let actual: std::collections::BTreeSet<_> = models
+            .iter()
+            .filter(|(_, entry)| !entry.tiers.is_empty() && !entry.allowed)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let expected: std::collections::BTreeSet<_> = [
+            "composer-2.5",
+            "grok-4.7-high",
+            "grok-4.7-xhigh",
+            "opencode-go/muse-spark-1.3-contributor",
+            "opencode-go/glm-5.3-flash",
+            "opencode-go/deepseek-v4.1-flash",
+            "codex/gpt-6.1-terra",
+            "fiber/codex/gpt-6.1-sol",
+            "openai/gpt-6.1-terra",
+            "muse/muse-spark-1.3-contributor",
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn host_profile_rows_preserve_bundled_allowed_and_cannot_allow_new_rows() {
+        let mut files = HashMap::new();
+        files.insert(
+            "/models.json".into(),
+            serde_json::json!({
+                "default": "claude-haiku-5-5",
+                "models": {
+                    "claude-haiku-5-5": {
+                        "label": "Bundled Haiku",
+                        "backend": "claude",
+                        "allowed": true,
+                        "tiers": ["standard"],
+                        "price": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0 }
+                    }
+                }
+            })
+            .to_string(),
+        );
+        files.insert(
+            "/profile.json".into(),
+            serde_json::json!({
+                "models": {
+                    "claude-haiku-5-5": {
+                        "label": "Profile Haiku",
+                        "backend": "claude",
+                        "allowed": false,
+                        "price": { "input": 2, "output": 2, "cacheRead": 0, "cacheWrite": 0 }
+                    },
+                    "profile-only": {
+                        "label": "Profile only",
+                        "backend": "claude",
+                        "allowed": "ignored",
+                        "price": { "input": 2, "output": 2, "cacheRead": 0, "cacheWrite": 0 }
+                    }
+                }
+            })
+            .to_string(),
+        );
+        let cfg = load_config(LoadConfigOpts {
+            models_path: "/models.json".into(),
+            host_profile_path: Some("/profile.json".into()),
+            read_file: Some(reader(files)),
+        })
+        .unwrap();
+        assert!(cfg.models["claude-haiku-5-5"].allowed);
+        assert!(!cfg.models["profile-only"].allowed);
     }
 
     #[test]

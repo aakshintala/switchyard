@@ -215,6 +215,7 @@ mod tests {
                     },
                     tiers: vec![],
                     reviewer: None,
+                    allowed: false,
                 },
             );
         }
