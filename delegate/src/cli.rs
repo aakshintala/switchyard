@@ -1522,7 +1522,7 @@ mod tests {
     #[test]
     fn model_ruling_requires_a_github_comment_url() {
         for url in [
-            "https://github.com/aakshintala/switchyard/issues/1686#issuecomment-6844642628",
+            "https://github.com/example/repo/issues/1686#issuecomment-6844642628",
             "https://github.com/example/repo/pull/42#issuecomment-123456",
         ] {
             assert_eq!(validate_model_ruling(Some(url)), Ok(()), "{url}");
