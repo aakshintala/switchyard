@@ -1,5 +1,8 @@
 //! Wall-clock and supervisor RSS budgets for the `delegate` CLI (debug test build).
 
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
+
 use serde_json::Value;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -164,7 +167,8 @@ impl Env {
 
     fn delegate(&self, args: &[&str], stdin: Option<&str>) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
-        cmd.args(args)
+        let args = model_ruling::args_with_model_ruling(args);
+        cmd.args(&args)
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
             .env("FIBER_HOME", self.dir.join("fh"))

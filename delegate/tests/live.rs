@@ -1,5 +1,8 @@
 //! Opt-in: real backends. Run with: cargo test --test live -- --ignored
 
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
+
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
@@ -11,7 +14,11 @@ fn ask_multiplies_on_real_agent() {
     std::fs::create_dir_all(&dir).unwrap();
     let bin = env!("CARGO_BIN_EXE_delegate");
     let mut run = Command::new(bin)
-        .args(["run", "--model", "composer-2.5"])
+        .args(model_ruling::args_with_model_ruling(&[
+            "run",
+            "--model",
+            "composer-2.5",
+        ]))
         .current_dir(&dir)
         .env("TMPDIR", &dir)
         .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
@@ -123,7 +130,11 @@ fn ask_multiplies_on_real_claude() {
 
     let bin = env!("CARGO_BIN_EXE_delegate");
     let mut run = Command::new(bin)
-        .args(["run", "--model", "claude-sonnet-5-5"])
+        .args(model_ruling::args_with_model_ruling(&[
+            "run",
+            "--model",
+            "claude-sonnet-5-5",
+        ]))
         .current_dir(&dir)
         .env("TMPDIR", &dir)
         .env("XDG_CACHE_HOME", dir.join("xdg-cache"))

@@ -7,6 +7,9 @@
 //! spends two live turns. Run with:
 //! `CODEX_BIN=<path to codex> cargo test --test codex_live -- --nocapture`.
 
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
+
 use std::cell::RefCell;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -78,8 +81,9 @@ impl LiveEnv {
     }
 
     fn delegate(&self, args: &[&str], stdin: Option<&str>) -> std::process::Output {
+        let args = model_ruling::args_with_model_ruling(args);
         let mut child = Command::new(env!("CARGO_BIN_EXE_delegate"))
-            .args(args)
+            .args(&args)
             .current_dir(&self.work)
             .env("TMPDIR", &self.root)
             .env("XDG_CACHE_HOME", self.root.join("xdg-cache"))

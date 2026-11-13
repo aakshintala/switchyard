@@ -1,5 +1,8 @@
 //! Drives the real `delegate` binary as a process against a fake cursor-agent.
 
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
+
 use serde_json::Value;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -87,6 +90,14 @@ case "$* $pt" in
 esac
 "#;
 
+const FAKE_MODEL_CLAUDE: &str = r#"#!/bin/sh
+cat "$DELEGATE_TEST_CLAUDE_FIXTURE"
+"#;
+
+const FAKE_MODEL_PI: &str = r#"#!/bin/sh
+sed 's/afcd8926-430b-4d9a-a552-d7c6d1b900ba/s-ruling-test/g' "$DELEGATE_TEST_PI_FIXTURE"
+"#;
+
 /// Wall budget both wall tests trigger on. Start-up latency (spawning the
 /// agent or gate) stays well below it, so the kill lands in the stage the
 /// test observes instead of during start-up; the idle windows (300 s model,
@@ -155,10 +166,26 @@ impl Env {
     }
 
     fn delegate_env(&self, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Output {
-        self.delegate_env_with_inherited_xdg(args, stdin, env, None)
+        let args = model_ruling::args_with_model_ruling(args);
+        self.delegate_env_raw(&args, stdin, env)
+    }
+
+    fn delegate_env_raw(&self, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Output {
+        self.delegate_env_with_inherited_xdg_raw(args, stdin, env, None)
     }
 
     fn delegate_env_with_inherited_xdg(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        env: &[(&str, &str)],
+        inherited_xdg: Option<&Path>,
+    ) -> Output {
+        let args = model_ruling::args_with_model_ruling(args);
+        self.delegate_env_with_inherited_xdg_raw(&args, stdin, env, inherited_xdg)
+    }
+
+    fn delegate_env_with_inherited_xdg_raw(
         &self,
         args: &[&str],
         stdin: Option<&str>,
@@ -3430,4 +3457,173 @@ fn slow_fake_exits_when_its_parent_is_killed() {
     wrapper.kill().unwrap();
     wrapper.wait().unwrap();
     until("orphaned fake exits", || !alive(pid));
+}
+
+#[test]
+fn model_pool_ruling_run_resume_and_model_check_contracts() {
+    let e = Env::new("model-ruling");
+    let claude_bin = e.dir.join("claude.sh");
+    let pi_bin = e.dir.join("pi.sh");
+    std::fs::write(&claude_bin, FAKE_MODEL_CLAUDE).unwrap();
+    std::fs::write(&pi_bin, FAKE_MODEL_PI).unwrap();
+    std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&pi_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let claude_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/contract/claude/plan-plain-answer.stdout");
+    let pi_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/contract/pi/plain-answer.stdout");
+    let profile = e.dir.join("missing-profile.json");
+    let backend_env = [
+        ("CLAUDE_BIN", claude_bin.to_str().unwrap()),
+        (
+            "DELEGATE_TEST_CLAUDE_FIXTURE",
+            claude_fixture.to_str().unwrap(),
+        ),
+        ("PI_BIN", pi_bin.to_str().unwrap()),
+        ("DELEGATE_TEST_PI_FIXTURE", pi_fixture.to_str().unwrap()),
+        ("DELEGATE_HOST_PROFILE", profile.to_str().unwrap()),
+    ];
+
+    for (args, expected_code) in [
+        (&["model-check", "claude-haiku-5-5"][..], 0),
+        (&["model-check", "openai/gpt-6.1-sol"][..], 2),
+        (
+            &[
+                "model-check",
+                "openai/gpt-6.1-sol",
+                "--model-ruling",
+                model_ruling::TEST_MODEL_RULING,
+            ][..],
+            0,
+        ),
+    ] {
+        let out = e.delegate_env(args, None, &backend_env);
+        assert_eq!(out.status.code(), Some(expected_code), "{args:?}");
+        if expected_code == 0 {
+            assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        } else {
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("allowed pool"),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    let allowed = e.delegate_env_raw(
+        &["run", "--model", "claude-sonnet-5-5"],
+        Some("allowed model"),
+        &backend_env,
+    );
+    assert!(allowed.status.success(), "{allowed:?}");
+    let allowed_id = String::from_utf8(allowed.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let allowed_record = e.wait_terminal(&allowed_id);
+    assert_eq!(allowed_record["resume"]["model"], "claude-sonnet-5-5");
+    assert!(allowed_record["resume"]["modelRuling"].is_null());
+
+    let refusal = Env::new("model-refusal");
+    let refusal_profile = refusal.dir.join("missing-profile.json");
+    let refusal_env = [("DELEGATE_HOST_PROFILE", refusal_profile.to_str().unwrap())];
+    let refused = refusal.delegate_env_raw(
+        &["run", "--model", "openai/gpt-6.1-sol"],
+        Some("must not launch"),
+        &refusal_env,
+    );
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&refused.stderr).trim(),
+        "model \"openai/gpt-6.1-sol\" is not in the allowed pool (models.json rows with \"allowed\": true: claude-haiku-5-5, claude-sonnet-5-5, codex/gpt-6-luna:medium, fiber/codex/gpt-6-luna:medium, fiber/codex/gpt-6-luna:xhigh, openai/gpt-6-luna:medium, openai/gpt-6-luna:xhigh); pass --model-ruling <comment URL> for a ruled exception"
+    );
+    assert!(
+        !refusal.jobs_dir().exists(),
+        "refusal created a job record directory"
+    );
+
+    let malformed = refusal.delegate_env_raw(
+        &[
+            "run",
+            "--model",
+            "openai/gpt-6.1-sol",
+            "--model-ruling",
+            "https://github.com/example/repo/issues/1",
+        ],
+        Some("must not launch"),
+        &refusal_env,
+    );
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("expected https://github.com/"));
+    assert!(!refusal.jobs_dir().exists());
+
+    let allowed_pi = e.delegate_env_raw(
+        &["run", "--model", "openai/gpt-6-luna:medium"],
+        Some("allowed pi model"),
+        &backend_env,
+    );
+    assert!(allowed_pi.status.success(), "{allowed_pi:?}");
+    let allowed_pi_id = String::from_utf8(allowed_pi.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let _ = e.wait_terminal(&allowed_pi_id);
+    let before_resume_refusal = std::fs::read_dir(e.jobs_dir()).unwrap().count();
+    let resume_off = e.delegate_env_raw(
+        &["resume", &allowed_pi_id, "--model", "openai/gpt-6.1-sol"],
+        Some("must not launch"),
+        &backend_env,
+    );
+    assert_eq!(resume_off.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&resume_off.stderr).contains("allowed pool"));
+    assert_eq!(
+        std::fs::read_dir(e.jobs_dir()).unwrap().count(),
+        before_resume_refusal
+    );
+
+    let ruled = e.delegate_env_raw(
+        &[
+            "run",
+            "--model",
+            "openai/gpt-6.1-sol",
+            "--model-ruling",
+            model_ruling::TEST_MODEL_RULING,
+        ],
+        Some("ruled sol model"),
+        &backend_env,
+    );
+    assert!(ruled.status.success(), "{ruled:?}");
+    let ruled_id = String::from_utf8(ruled.stdout).unwrap().trim().to_string();
+    let ruled_record = e.wait_terminal(&ruled_id);
+    assert_eq!(
+        ruled_record["resume"]["modelRuling"],
+        model_ruling::TEST_MODEL_RULING
+    );
+
+    let resumed = e.delegate_env_raw(&["resume", &ruled_id], Some("continue"), &backend_env);
+    assert!(resumed.status.success(), "{resumed:?}");
+    let resumed_id = String::from_utf8(resumed.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let resumed_record = e.wait_terminal(&resumed_id);
+    assert_eq!(resumed_record["resume"]["model"], "openai/gpt-6.1-sol");
+    assert_eq!(
+        resumed_record["resume"]["modelRuling"],
+        model_ruling::TEST_MODEL_RULING
+    );
+
+    let before_changed_resume = std::fs::read_dir(e.jobs_dir()).unwrap().count();
+    let changed = e.delegate_env_raw(
+        &["resume", &ruled_id, "--model", "openai/gpt-6.1-terra"],
+        Some("must not launch"),
+        &backend_env,
+    );
+    assert_eq!(changed.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("allowed pool"));
+    assert_eq!(
+        std::fs::read_dir(e.jobs_dir()).unwrap().count(),
+        before_changed_resume
+    );
 }

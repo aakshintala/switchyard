@@ -1,5 +1,8 @@
 //! Drives the real `delegate` binary against a fake Fiber hub.
 
+#[path = "support/model_ruling.rs"]
+mod model_ruling;
+
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -47,7 +50,7 @@ impl Env {
 
     fn command(&self, args: &[&str], stdin: Option<&str>, fiber_bin: bool) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_delegate"));
-        cmd.args(args)
+        cmd.args(model_ruling::args_with_model_ruling(args))
             .current_dir(&self.dir)
             .env("TMPDIR", &self.dir)
             .env("HOME", &self.dir)
