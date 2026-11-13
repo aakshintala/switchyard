@@ -75,7 +75,7 @@ SERIAL_BEFORE_PARALLEL=(
   "$D"/inbox-watchers.sh "$D"/role-inbox.sh "$D"/roles-restart.sh "$D"/wired-check.sh
   "$D"/lanewatch.sh "$D"/post-ruling.sh "$D"/mutant-verdicts.sh "$D"/tkt-verdicts.sh
   "$D"/bin-modes.sh "$D"/ctx-hook.sh "$D"/gh-label-guard.sh "$D"/merge-audit.sh
-  "$D"/target-reap.sh "$D"/canary-daily.sh "$D"/model-catalog-diff.sh "$D"/model-deprecations.sh
+  "$D"/no-home-paths.sh "$D"/target-reap.sh "$D"/canary-daily.sh "$D"/model-catalog-diff.sh "$D"/model-deprecations.sh
   "$D"/bash5-runner.sh "$D"/quota.sh "$D"/red-main.sh "$D"/brief-lint.sh "$D"/flake-loop.sh
 )
 PARALLEL_SUITES=(

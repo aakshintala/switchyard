@@ -24,7 +24,7 @@ if [ -z "${BOX_SSH:-}" ] && [ "$(uname -s)" != Darwin ]; then
 fi
 ssh=${BOX_SSH:-ssh}
 host=${FW_BOX_HOST:-roundhouse-7010-plus-1.local}
-mac=${FW_MAC_HOME:-$HOME}; box=${FW_BOX_HOME:-/home/${USER:-aakshintala}}
+mac=${FW_MAC_HOME:-$HOME}; box=${FW_BOX_HOME:-/home/${USER:?}}
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}
 dst=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 

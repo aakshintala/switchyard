@@ -125,8 +125,8 @@ resolve_repo() {
     return 1
   fi
   case "$cwd" in
-    /Users/aakshintala/work/fiber-worktrees/*) printf 'aakshintala/fiber' ;;
-    /Users/aakshintala/work/switchyard-*) printf 'aakshintala/switchyard' ;;
+    "$HOME"/work/fiber-worktrees/*) printf 'aakshintala/fiber' ;;
+    "$HOME"/work/switchyard-*) printf 'aakshintala/switchyard' ;;
     *) return 1 ;;
   esac
 }

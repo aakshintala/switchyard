@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The installer must substitute __HOME__ before installing this plist. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -7,12 +8,12 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/aakshintala/.local/bin:/Users/aakshintala/.agents/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>__HOME__/.local/bin:__HOME__/.agents/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/aakshintala/.agents/bin/wired-check</string>
+    <string>__HOME__/.agents/bin/wired-check</string>
   </array>
   <key>StartInterval</key>
   <integer>3600</integer>
