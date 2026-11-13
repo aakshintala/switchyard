@@ -931,10 +931,10 @@ echo "report cases passed"
 # and that the real $HOME/.fiber was neither created nor changed.
 : >"$FLOG/fiber-home.log"
 OUTFH="$T/out-fiber-home"
-# The decoy home is this run's real home, so it holds the opencode
+# The decoy home is this run's real home, so it holds the default codex
 # extension too (#830), with an env credential for the fail-fast.
-seed_extension "$T/decoy-fiber" opencode-go opencode
-printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$T/decoy-fiber/extensions/opencode/providers/opencode-go.json"
+seed_extension "$T/decoy-fiber" codex codex
+printf '{"credential":{"env":"CODEX_API_KEY"},"reviewer_model":"test-reviewer"}\n' >"$T/decoy-fiber/extensions/codex/providers/codex.json"
 if [ -e "$HOME/.fiber" ]; then
   FIBER_REAL_BEFORE="$(find "$HOME/.fiber" | sort)"
 else
@@ -985,7 +985,7 @@ REAL830_BEFORE="$(find "$REAL830/.fiber" | sort)"
 OUT830="$T/out-ext"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REAL830" bash "$CANARY" run 248 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT830" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT830" \
   || fail "extension run exits 0"
 # the isolated home holds exactly the opencode extension: its two files and
 # their directories, every file a real copy, no symlink into the real home
@@ -1041,7 +1041,7 @@ mkdir -p "$REAL832/.fiber"
 OUT832="$T/out-missing"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REAL832" bash "$CANARY" run 250 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT832" 2>"$T/missing.err"; then
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT832" 2>"$T/missing.err"; then
   fail "missing extension should not exit 0"
 else
   [ $? -eq 2 ] || fail "missing extension exits 2"
@@ -1067,7 +1067,7 @@ ln -s "$REAL833/.fiber/extensions/opencode/providers/opencode-go.json" \
 OUT833="$T/out-symlink"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REAL833" bash "$CANARY" run 251 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT833" 2>"$T/symlink.err"; then
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT833" 2>"$T/symlink.err"; then
   fail "symlink extension should not exit 0"
 else
   [ $? -eq 2 ] || fail "symlink extension exits 2"
@@ -1091,7 +1091,7 @@ printf '{}\n' >"$REAL834/.fiber/extensions/opencode/providers/opencode-go.json"
 OUT834="$T/out-cred"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REAL834" bash "$CANARY" run 252 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT834" 2>"$T/cred.err"; then
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT834" 2>"$T/cred.err"; then
   fail "credential-missing run should not exit 0"
 else
   [ $? -eq 2 ] || fail "credential-missing run exits 2"
@@ -1115,7 +1115,7 @@ for REVVAL in "" "a b" "$TABV"; do
   rm -rf "$OUTJ"
   : >"$FLOG/calls.log"
   if env -u FIBER_HOME HOME="$REAL830" bash "$CANARY" run 253 "$T/brief.md" \
-    --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTJ" \
+    --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTJ" \
     --fiber-reviewer-model "$REVVAL" 2>"$T/revflag.err"; then
     fail "reviewer flag value '$REVVAL' should not exit 0"
   else
@@ -1134,7 +1134,7 @@ OUTJ="$T/out-revflag"
 rm -rf "$OUTJ"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REAL830" bash "$CANARY" run 253 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTJ" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTJ" \
   --fiber-reviewer-model 2>"$T/revflag.err"; then
   fail "trailing reviewer flag should not exit 0"
 else
@@ -1161,7 +1161,7 @@ printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REALD/.fiber/extensions/
 OUTD="$T/out-rev-none"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REALD" bash "$CANARY" run 254 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTD" 2>"$T/revnone.err"; then
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTD" 2>"$T/revnone.err"; then
   fail "reviewer-less run should not exit 0"
 else
   [ $? -eq 2 ] || fail "reviewer-less run exits 2"
@@ -1187,7 +1187,7 @@ rev_bad_case() { # CONFIG LABEL
   rm -rf "$OUTI"
   : >"$FLOG/calls.log"
   if env -u FIBER_HOME HOME="$REALI" bash "$CANARY" run 255 "$T/brief.md" \
-    --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTI" 2>"$T/revbad.err"; then
+    --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTI" 2>"$T/revbad.err"; then
     fail "bad config ($2) should not exit 0"
   else
     [ $? -eq 2 ] || fail "bad config ($2) exits 2"
@@ -1220,7 +1220,7 @@ printf '{"providers":{"opencode-go":{"credential":{"env":"OPENCODE_API_KEY"}}}}\
 OUTK="$T/out-rev-k"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REALK" bash "$CANARY" run 256 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTK" 2>"$T/revk.err"; then
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTK" 2>"$T/revk.err"; then
   fail "pick-less run should not exit 0"
 else
   [ $? -eq 2 ] || fail "pick-less run exits 2"
@@ -1247,7 +1247,7 @@ OUTA="$T/out-rev-a"
 : >"$FLOG/calls.log"
 : >"$FLOG/fiber-home.log"
 env -u FIBER_HOME HOME="$REALA" bash "$CANARY" run 257 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTA" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTA" \
   --fiber-reviewer-model opencode-go/test-reviewer 2>"$T/rev257.err" \
   || fail "flag run exits 0"
 grep -qi warning "$T/rev257.err" && fail "same-provider flag run warns nothing"
@@ -1270,7 +1270,7 @@ REVB='p/m"$(>SENT-B)\x'
 OUTB="$T/out-rev-b"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REALB" P_API_KEY=SENTINEL-P-CRED bash "$CANARY" run 258 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTB" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTB" \
   --fiber-reviewer-model "$REVB" 2>"$T/rev258.err" \
   || fail "quoted flag run exits 0"
 [ "$(jq -r .reviewer.model "$OUTB/fiber-home/config.json")" = "$REVB" ] \
@@ -1292,7 +1292,7 @@ printf '{"providers":{"opencode-go":{"reviewer_model":"config-pick-c"}}}\n' >"$R
 OUTC="$T/out-rev-c"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REALC" bash "$CANARY" run 259 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTC" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTC" \
   --fiber-reviewer-model opencode-go/flag-pick-c \
   || fail "flag-wins run exits 0"
 [ "$(jq -c . "$OUTC/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-go/flag-pick-c"}}' ] \
@@ -1309,7 +1309,7 @@ printf '{"model":"SENTINEL-TOP-MODEL","credential":"SENTINEL-TOP-CRED","credenti
 OUTE="$T/out-rev-e"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REALE" bash "$CANARY" run 260 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTE" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTE" \
   || fail "config-pick run exits 0"
 [ "$(jq -c . "$OUTE/fiber-home/config.json")" = '{"providers":{"opencode-go":{"reviewer_model":"local-id"}}}' ] \
   || fail "config pick is copied with its key and provider only"
@@ -1328,7 +1328,7 @@ printf '{"providers":{"opencode-go":{"reviewer_model":"config-pick-f"}}}\n' >"$R
 OUTF="$T/out-rev-f"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REALF" bash "$CANARY" run 261 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTF" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTF" \
   || fail "config-over-package run exits 0"
 [ "$(jq -c . "$OUTF/fiber-home/config.json")" = '{"providers":{"opencode-go":{"reviewer_model":"config-pick-f"}}}' ] \
   || fail "config pick wins over the package default"
@@ -1343,7 +1343,7 @@ printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer
 OUTG="$T/out-rev-g"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REALG" bash "$CANARY" run 262 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTG" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTG" \
   || fail "package-default run exits 0"
 [ ! -e "$OUTG/fiber-home/config.json" ] || fail "package default writes no config.json"
 bash "$CANARY" clean 262 --out "$OUTG" || fail "clean 262 exits 0"
@@ -1357,19 +1357,19 @@ printf '{"credential":{"env":"OPENCODE_API_KEY"},"reviewer_model":"test-reviewer
 OUTH="$T/out-rev-h"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REALH" bash "$CANARY" run 263 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTH" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTH" \
   --fiber-reviewer-model opencode-go/round-one \
   || fail "stale first run exits 0"
 [ "$(jq -c . "$OUTH/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-go/round-one"}}' ] \
   || fail "stale first run writes round one"
 bash "$CANARY" clean 263 --out "$OUTH" || fail "clean 263 exits 0"
 env -u FIBER_HOME HOME="$REALH" bash "$CANARY" run 263 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTH" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTH" \
   || fail "stale second run exits 0"
 [ ! -e "$OUTH/fiber-home/config.json" ] || fail "stale config.json is gone on rerun"
 bash "$CANARY" clean 263 --out "$OUTH" || fail "clean 263 exits 0"
 env -u FIBER_HOME HOME="$REALH" bash "$CANARY" run 263 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTH" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTH" \
   --fiber-reviewer-model opencode-go/round-two \
   || fail "stale third run exits 0"
 [ "$(jq -c . "$OUTH/fiber-home/config.json")" = '{"reviewer":{"model":"opencode-go/round-two"}}' ] \
@@ -1388,7 +1388,7 @@ printf 'decoy\n' >"$OUTL/decoy"
 ln -s "$OUTL/decoy" "$OUTL/fiber-home/config.json"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REALL" bash "$CANARY" run 264 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTL" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTL" \
   --fiber-reviewer-model opencode-go/link-test \
   || fail "symlinked-config run exits 0"
 [ ! -L "$OUTL/fiber-home/config.json" ] || fail "symlinked config.json is replaced"
@@ -1418,7 +1418,7 @@ REAL265_BEFORE="$(find "$REAL265/.fiber" | sort)"
 OUT265="$T/out-x265"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REAL265" MUSE_API_KEY=SENTINEL-MUSE-CRED bash "$CANARY" run 265 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT265" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT265" \
   --fiber-reviewer-model muse/muse-spark-1.3-contributor 2>"$T/x265.err" \
   || fail "cross-provider run exits 0"
 [ "$(find "$OUT265/fiber-home" -mindepth 1 | sort)" = "$(printf '%s\n' \
@@ -1466,7 +1466,7 @@ OUT266="$T/out-x266"
 : >"$FLOG/fiber-home.log"
 env -u FIBER_HOME HOME="$REAL266" MUSE_API_KEY=SENTINEL-MUSE-CRED FAKE_EVENTS="$T/ev2.jsonl" \
   bash "$CANARY" run 266 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT266" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT266" \
   --fiber-reviewer-model muse/muse-spark-1.3-contributor \
   || fail "cross-provider metrics run exits 0"
 [ -d "$OUT266/fiber-home/extensions/muse" ] || fail "cross-provider home holds the muse extension"
@@ -1484,7 +1484,7 @@ printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL267/.fiber/extension
 OUT267="$T/out-x267"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REAL267" bash "$CANARY" run 267 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT267" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT267" \
   --fiber-reviewer-model muse/m 2>"$T/x267.err"; then
   fail "missing reviewer extension should not exit 0"
 else
@@ -1512,7 +1512,7 @@ ln -s "$REAL268/.fiber/extensions/muse/providers/muse.json" \
 OUT268="$T/out-x268"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REAL268" bash "$CANARY" run 268 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT268" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT268" \
   --fiber-reviewer-model muse/m 2>"$T/x268.err"; then
   fail "reviewer symlink should not exit 0"
 else
@@ -1537,7 +1537,7 @@ printf '{}\n' >"$REAL269/.fiber/extensions/muse/providers/muse.json"
 OUT269="$T/out-x269"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REAL269" bash "$CANARY" run 269 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT269" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT269" \
   --fiber-reviewer-model muse/m 2>"$T/x269.err"; then
   fail "non-env reviewer credential should not exit 0"
 else
@@ -1565,7 +1565,7 @@ printf '{"credential":{"env":"BAD NAME"}}\n' >"$REAL270/.fiber/extensions/muse/p
 OUT270="$T/out-x270"
 : >"$FLOG/calls.log"
 if env -u FIBER_HOME HOME="$REAL270" bash "$CANARY" run 270 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT270" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT270" \
   --fiber-reviewer-model muse/m 2>"$T/x270.err"; then
   fail "invalid reviewer credential name should not exit 0"
 else
@@ -1591,7 +1591,7 @@ printf '{"credential":{"env":"MUSE_API_KEY"}}\n' >"$REAL271/.fiber/extensions/mu
 OUT271="$T/out-x271"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME -u MUSE_API_KEY HOME="$REAL271" bash "$CANARY" run 271 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT271" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT271" \
   --fiber-reviewer-model muse/m 2>"$T/x271.err" \
   || fail "unset-credential run exits 0"
 grep -q '^run fiber' "$FLOG/calls.log" || fail "unset-credential run starts the fiber lane"
@@ -1601,7 +1601,7 @@ bash "$CANARY" clean 271 --out "$OUT271" || fail "clean 271 exits 0"
 OUT272="$T/out-x272"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REAL271" MUSE_API_KEY= bash "$CANARY" run 272 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT272" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT272" \
   --fiber-reviewer-model muse/m 2>"$T/x272.err" \
   || fail "empty-credential run exits 0"
 grep -q '^run fiber' "$FLOG/calls.log" || fail "empty-credential run starts the fiber lane"
@@ -1611,7 +1611,7 @@ bash "$CANARY" clean 272 --out "$OUT272" || fail "clean 272 exits 0"
 OUT273="$T/out-x273"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REAL271" MUSE_API_KEY=SENTINEL-MUSE-CRED bash "$CANARY" run 273 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT273" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT273" \
   --fiber-reviewer-model muse/m 2>"$T/x273.err" \
   || fail "set-credential run exits 0"
 grep -q MUSE_API_KEY "$T/x273.err" && fail "set credential warns nothing"
@@ -1631,7 +1631,7 @@ for REVX in "/m" "muse/" "../x/m" "a.b/m"; do
   rm -rf "$OUTX"
   : >"$FLOG/calls.log"
   if env -u FIBER_HOME HOME="$REAL274" bash "$CANARY" run "$TICK274" "$T/brief.md" \
-    --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUTX" \
+    --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUTX" \
     --fiber-reviewer-model "$REVX" 2>"$T/malform.err"; then
     fail "malformed reviewer value '$REVX' should not exit 0"
   else
@@ -1657,7 +1657,7 @@ printf '{"credential":{"env":"OPENCODE_API_KEY"}}\n' >"$REAL278/.fiber/extension
 OUT278="$T/out-x278"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REAL278" bash "$CANARY" run 278 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT278" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT278" \
   --fiber-reviewer-model bare-model 2>"$T/x278.err" \
   || fail "no-slash run exits 0"
 [ "$(find "$OUT278/fiber-home" -type f | wc -l | tr -d ' ')" = "3" ] || fail "no-slash home holds three files"
@@ -1676,7 +1676,7 @@ printf '{"credential":{"env":"OPENCODE_ALT_API_KEY"}}\n' >"$REAL279/.fiber/exten
 OUT279="$T/out-x279"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REAL279" OPENCODE_ALT_API_KEY=SENTINEL-ALT-CRED bash "$CANARY" run 279 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT279" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT279" \
   --fiber-reviewer-model opencode-alt/m 2>"$T/x279.err" \
   || fail "shared-tree run exits 0"
 [ "$(find "$OUT279/fiber-home" -type f | wc -l | tr -d ' ')" = "4" ] || fail "shared tree home holds four files"
@@ -1699,7 +1699,7 @@ printf 'not json at all\n' >"$REAL280/.fiber/config.json"
 OUT280="$T/out-x280"
 : >"$FLOG/calls.log"
 env -u FIBER_HOME HOME="$REAL280" MUSE_API_KEY=SENTINEL-MUSE-CRED bash "$CANARY" run 280 "$T/brief.md" \
-  --gate 'test -f work-marker' --clone "$CLONE830" --out "$OUT280" \
+  --gate 'test -f work-marker' --clone "$CLONE830" --fiber-model fiber/opencode-go/muse-spark-1.3-contributor --out "$OUT280" \
   --fiber-reviewer-model muse/m \
   || fail "malformed-config flag run exits 0"
 [ "$(jq -c . "$OUT280/fiber-home/config.json")" = '{"reviewer":{"model":"muse/m"}}' ] \
