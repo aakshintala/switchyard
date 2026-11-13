@@ -194,12 +194,25 @@ delegate() (
   set -euo pipefail
   cmd="${1:?}"; shift
   case "$cmd" in
+    model-check)
+      model=""; ruling=""
+      while [ $# -gt 0 ]; do case "$1" in
+        --model-ruling) ruling="$2"; shift 2;;
+        *) [ -n "$model" ] || model="$1"; shift;;
+      esac; done
+      printf 'model-check %s %s\n' "$model" "$ruling" >>"$T/state/calls.txt"
+      if [ "$model" = "openai/gpt-6.1-sol" ] && [ -z "$ruling" ]; then
+        echo 'model "openai/gpt-6.1-sol" is not in the allowed pool' >&2
+        exit 2
+      fi
+      ;;
     run)
-      model=""; cwd=""; prompt=""
+      model=""; cwd=""; prompt=""; ruling=""
       while [ $# -gt 0 ]; do case "$1" in
         --model) model="$2"; shift 2;;
         --cwd) cwd="$2"; shift 2;;
         --prompt-file) prompt="$2"; shift 2;;
+        --model-ruling) ruling="$2"; shift 2;;
         *) shift;;
       esac; done
       role="${cwd##*-}"
@@ -207,11 +220,17 @@ delegate() (
       printf '%s\n' "$PATH" >"$T/state/path-$role"
       printf '%s\n' "${DELEGATE_CALLER-unset}" >"$T/state/caller-$role"
       printf '%s\n' "${DELEGATE_CALLER_CWD-unset}" >"$T/state/caller-cwd-$role"
-      printf '%s %s\n' "$role" "$model" >>"$T/state/runs.txt"
+      if [ -n "$ruling" ]; then
+        printf '%s %s %s\n' "$role" "$model" "$ruling" >>"$T/state/runs.txt"
+      else
+        printf '%s %s\n' "$role" "$model" >>"$T/state/runs.txt"
+      fi
       cp "$prompt" "$T/state/prompt-$role.md"
       id="job-$role"
       mkdir -p "${DELEGATE_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}"
-      cp "$T/canned/$role.json" "${DELEGATE_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}/$id.json"
+      record_model="$model"
+      [ ! -f "$T/state/record-model-$role" ] || record_model="$(cat "$T/state/record-model-$role")"
+      jq --arg model "$record_model" --arg ruling "$ruling" '. + {resume: {model: $model, modelRuling: (if $ruling == "" then null else $ruling end)}}' "$T/canned/$role.json" >"${DELEGATE_JOBS_DIR:-${TMPDIR:-/tmp}/delegate-jobs}/$id.json"
       printf '%s\n' "$id"
       ;;
     resume)
@@ -403,9 +422,11 @@ STATUS: DONE" 0
 write_record overbuild DONE "looks lean
 VERDICT: APPROVE
 STATUS: DONE" 0
+printf 'record-model-standards\n' >"$T/state/record-model-standards"
 : >"$T/no-fence.state"
 start_out="$(start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
-  --state "$T/no-fence.state" --model M --overbuild-model M2 2>"$T/stderr.txt")" || fail "start exits 0"
+  --state "$T/no-fence.state" --model M --overbuild-model M2 \
+  --model-ruling https://github.com/o/r/issues/1#issuecomment-2 2>"$T/stderr.txt")" || fail "start exits 0"
 [ "$start_out" = "standards job-standards
 spec job-spec
 overbuild job-overbuild
@@ -432,9 +453,14 @@ leftovers="$(printf '%s' "$out" | grep -vE '^(patch-id |VERDICT|P[123] |FIX-OK|F
 [ -z "$leftovers" ] || fail "collect stdout shapes only: [$leftovers]"
 [ "$(cat "$T/state/comment-pr.txt")" = "7" ] || fail "comment posted to PR 7"
 [ "$(head -1 "$T/state/comment.md")" = "review-pr: patch-id $EXPECTED_PID, head $FAKE_SHA" ] || fail "comment first line"
-grep -q '^## standards (M)$' "$T/state/comment.md" || fail "comment standards heading"
-grep -q '^## spec (M)$' "$T/state/comment.md" || fail "comment spec heading"
-grep -q '^## overbuild (M2)$' "$T/state/comment.md" || fail "comment overbuild heading"
+grep -q '^## standards (record-model-standards, model-ruling https://github.com/o/r/issues/1#issuecomment-2)$' "$T/state/comment.md" || fail "comment header uses model from job record"
+grep -q '^## spec (M, model-ruling https://github.com/o/r/issues/1#issuecomment-2)$' "$T/state/comment.md" || fail "comment spec heading"
+grep -q '^## overbuild (M2, model-ruling https://github.com/o/r/issues/1#issuecomment-2)$' "$T/state/comment.md" || fail "comment overbuild heading"
+for role in standards spec overbuild; do
+  expected_model=M; [ "$role" = overbuild ] && expected_model=M2
+  grep -Fq "$role $expected_model https://github.com/o/r/issues/1#issuecomment-2" "$T/state/runs.txt" || fail "$role run receives the model ruling"
+  grep -Fq "## $role (" "$T/state/comment.md" && grep -Fq "model-ruling https://github.com/o/r/issues/1#issuecomment-2" "$T/state/comment.md" || fail "$role comment heading includes ruling"
+done
 grep -q 'P1 fix the off-by-one' "$T/state/comment.md" || fail "comment carries full text"
 grep -q 'Code review (Spec axis) of PR #7 in O/N for issue #1 (spec #2)' "$T/state/prompt-spec.md" || fail "spec brief filled"
 grep -q 'Standards axis' "$T/state/prompt-standards.md" || fail "standards brief names its axis"
@@ -452,6 +478,17 @@ grep -q 'workflow doc is none' "$T/state/prompt-spec.md" || fail "workflow doc d
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "0" ] || fail "collect removes the worktrees"
 [ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null)" ] || fail "collect removes the run dir"
 [ ! -e "$T/state/watch.txt" ] || fail "collect does not wait"
+
+# --- case: an off-pool role is refused before any job or worktree starts
+reset_state
+st=0
+err="$(start_review 7 --repo O/N --cwd "$T/clone" --axes overbuild --model M \
+  --overbuild-model openai/gpt-6.1-sol 2>&1 >/dev/null)" || st=$?
+[ "$st" -eq 2 ] || fail "off-pool model refusal exits 2"
+grep -q 'not in the allowed pool' <<<"$err" || fail "off-pool refusal prints delegate diagnostic"
+[ ! -e "$T/state/runs.txt" ] || fail "off-pool refusal starts no delegate run"
+[ "$(git -C "$T/clone" worktree list | grep -c 'wt-' || true)" = "0" ] || \
+  fail "off-pool refusal creates no role worktree"
 
 # --- case: inherited caller labels jobs as nested review-pr work
 reset_state

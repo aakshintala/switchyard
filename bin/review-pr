@@ -72,7 +72,7 @@ set -euo pipefail
 # verdict: loud failure, never UNFINISHED.
 
 usage() {
-  echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] [--state PATH] --model M [--overbuild-model M2] [--axes standards[,spec][,overbuild]] [--context PATH]... [--workflow-doc PATH] [--head SHA] [--full-rereview REASON]" >&2
+  echo "usage: review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] [--state PATH] --model M [--overbuild-model M2] [--axes standards[,spec][,overbuild]] [--context PATH]... [--workflow-doc PATH] [--head SHA] [--model-ruling URL] [--full-rereview REASON]" >&2
   echo "       review-pr start <pr> --repo OWNER/NAME --cwd CLONE --model M --verify FINDINGS_FILE --since SHA [--context PATH]... [--workflow-doc PATH] [--head SHA]" >&2
   echo "       review-pr run <same args as start>" >&2
   echo "       review-pr collect <job-id>... [--findings-out PATH]" >&2
@@ -459,7 +459,7 @@ cmd_start() {
   pr="$1"; shift
   case "$pr" in -*|"") usage;; esac
 
-  repo=""; clone=""; issues=(); issue_count=0; specn=""; model=""; omodel=""
+  repo=""; clone=""; issues=(); issue_count=0; specn=""; model=""; omodel=""; model_ruling=""
   verify=""; since=""; wdoc=""; head=""; axes=""; axes_given=""; context_files=(); ticket_state=""
   patch_id=""
   full_rereview=""; full_rereview_given=""
@@ -499,6 +499,7 @@ cmd_start() {
       --state) [ $# -ge 2 ] || usage; ticket_state="$2"; shift 2;;
       --model) [ $# -ge 2 ] || usage; model="$2"; shift 2;;
       --overbuild-model) [ $# -ge 2 ] || usage; omodel="$2"; shift 2;;
+      --model-ruling) [ $# -ge 2 ] || usage; model_ruling="$2"; shift 2;;
       --axes) [ $# -ge 2 ] || usage; axes="$2"; axes_given="1"; shift 2;;
       --verify) [ $# -ge 2 ] || usage; verify="$2"; shift 2;;
       --since) [ $# -ge 2 ] || usage; since="$2"; shift 2;;
@@ -659,6 +660,14 @@ cmd_start() {
       overbuild) printf '%s' "$omodel";;
     esac
   }
+  # Refuse before creating any role worktree or starting any job.
+  for role in $roles; do
+    if [ -n "$model_ruling" ]; then
+      delegate model-check "$(model_for "$role")" --model-ruling "$model_ruling"
+    else
+      delegate model-check "$(model_for "$role")"
+    fi || exit $?
+  done
 
   if [ -n "$head" ]; then
     if [ "${#head}" -lt 40 ]; then
@@ -1024,7 +1033,13 @@ cmd_start() {
       job_caller="${DELEGATE_CALLER}/review-pr"
     fi
     if [ -n "$cargo_slot_dir" ]; then
-      jid="$(DELEGATE_CALLER="$job_caller" DELEGATE_CALLER_CWD="$clone" PATH="$cargo_slot_dir:$PATH" delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
+      if [ -n "$model_ruling" ]; then
+        jid="$(DELEGATE_CALLER="$job_caller" DELEGATE_CALLER_CWD="$clone" PATH="$cargo_slot_dir:$PATH" delegate run --model "$(model_for "$role")" --model-ruling "$model_ruling" --cwd "$wt" --prompt-file "$brief")"
+      else
+        jid="$(DELEGATE_CALLER="$job_caller" DELEGATE_CALLER_CWD="$clone" PATH="$cargo_slot_dir:$PATH" delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
+      fi
+    elif [ -n "$model_ruling" ]; then
+      jid="$(DELEGATE_CALLER="$job_caller" DELEGATE_CALLER_CWD="$clone" delegate run --model "$(model_for "$role")" --model-ruling "$model_ruling" --cwd "$wt" --prompt-file "$brief")"
     else
       jid="$(DELEGATE_CALLER="$job_caller" DELEGATE_CALLER_CWD="$clone" delegate run --model "$(model_for "$role")" --cwd "$wt" --prompt-file "$brief")"
     fi
@@ -1479,8 +1494,11 @@ cmd_collect() {
         role="$(state_get "$state_dir/$jid" role)"
         rmodel="$(state_get "$state_dir/$jid" model)"
         rec="$(job_latest_rec "$jid")"
-        text=""
+        rruling=""
         if [ -f "$rec" ]; then
+          rmodel="$(jq -r '.resume.model // empty' "$rec" 2>/dev/null || true)"
+          rruling="$(jq -r '.resume.modelRuling // empty' "$rec" 2>/dev/null || true)"
+          [ -n "$rmodel" ] || rmodel="$(state_get "$state_dir/$jid" model)"
           text="$(jq -r '.result.text // empty' "$rec" 2>/dev/null || true)"
         fi
         result_hash="$(printf '%s' "$text" | shasum -a 256 | awk '{print $1}')"
@@ -1488,7 +1506,11 @@ cmd_collect() {
           --arg result_hash "$result_hash" \
           '{job_id: $job_id, repo: $repo, pr: $pr, result_hash: $result_hash}' \
           >"$tmp/posted-$jid"
-        printf '\n## %s (%s)\n\n%s\n' "$role" "$rmodel" "$text"
+        if [ -n "$rruling" ]; then
+          printf '\n## %s (%s, model-ruling %s)\n\n%s\n' "$role" "$rmodel" "$rruling" "$text"
+        else
+          printf '\n## %s (%s)\n\n%s\n' "$role" "$rmodel" "$text"
+        fi
       done
     } >"$body"
     if [ -n "$group_pr" ] && [ -n "$group_repo" ]; then
