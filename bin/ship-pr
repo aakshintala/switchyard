@@ -15,12 +15,20 @@
 #        compare the reviewed patch with the new head's diff against origin/main by
 #        `git patch-id --stable`, ignoring context lines (with --unverified-fixes, a
 #        mismatch posts a comment and goes on, see below); push the merge commit with
-#        a plain fast-forward push; mark a draft ready (once, before the first CI
-#        wait); `gh-ci wait` (--timeout, default 7200), rerunning failed jobs once
-#        when the failure is outside the diff (see below); on a non-strict base with
-#        --gate, or --merge-check when --gate is absent, check the PR merged with
-#        current origin/main in a throwaway merge commit (step 7); squash-merge
-#        pinned to the checked head, retrying once on a base race or GraphQL error
+#        a plain fast-forward push. For drafts, snapshot run ids on the pinned
+#        head before `gh pr ready`; after ready, wait up to 120 s for a new
+#        `pull_request` run on that head. If none appears, assume no ready workflow
+#        is configured and continue (a later BLOCKED merge then most likely means
+#        the ready run was dispatched late: rerun ship-pr rather than triage). Once
+#        one appears, list every 5 s until 15 s pass with no new run (inside the
+#        same 120 s) and wait for every new run to complete (one deadline, bounded by
+#        --timeout) before `gh-ci wait`, so an older
+#        green run cannot satisfy the wait. `gh-ci wait` (--timeout, default 7200),
+#        rerunning failed jobs once when the failure is outside the diff (see below);
+#        on a non-strict base with --gate, or --merge-check when --gate is absent,
+#        check the PR merged with current origin/main in a throwaway merge commit
+#        (step 7); squash-merge pinned to the checked head, retrying once on a base
+#        race or GraphQL error
 #        and re-entering the merge once after the merge lost the race to origin/main
 #        in strict mode (no extra sleep, sharing the 3 retries);
 #        polling MERGED even after a failed retry; wait for MERGED; by default
@@ -33,7 +41,7 @@
 #        only when it is on main with no tracked changes or local commits; untracked
 #        files are allowed. If skipped, print its lag and leave the merge successful.
 #        The CI wait trusts the repo's required checks: one green on the exact
-#        head counts whenever it ran, so marking ready need not start a new run,
+#        head counts after the ready_for_review run has completed (when one appeared),
 #        and a run that starts after the wait passed does not hold the merge. An
 #        absent required check is pending. To keep a draft run from satisfying
 #        the wait, give its check a name other than the required one (fiber's
@@ -93,6 +101,11 @@
 #        within 120 s exits 1 naming the run.
 #        Prints `merged <squash sha>` on success. A `gh pr merge` error containing
 #        `GraphQL` retries once like `Base branch was modified`, sleeping 5 s first.
+#        ship-pr prints gh's merge output without any sentence that mentions
+#        `--auto` or `--admin`, keeping the rest of the line; it never relays gh's
+#        merge hints. If a failed merge reports `mergeStateStatus` BLOCKED, ship-pr
+#        also names pending or failing workflow runs on the pinned head, with each
+#        run's name, id, status and conclusion when available.
 #        An error saying the head branch is not up to date with the base branch
 #        re-enters the merge, push and CI-wait steps once in strict mode (counted
 #        against the 3 retries), after checking `gh pr view` for MERGED; a second
@@ -170,9 +183,11 @@
 #        from the reviewed sha to the pinned head, limited to the files the repair commits
 #        touch (a merge of main adds no base files), under `Changed since review:`. A failed
 #        post exits 1 before any push. A match posts nothing. The gate and CI run as usual.
-#        --timeout bounds each CI wait, so a run can take one gate and up to 5 CI waits
-#        (the first, three strict-mode retries and the one rerun); the 3 retries are one
-#        budget shared with a merge that lost the race.
+#        --timeout bounds each CI wait and the ready runs' completion wait (one
+#        deadline shared by all of them). A draft may spend up to 120 s locating the
+#        ready runs, plus up to 5 CI waits (the first,
+#        three strict-mode retries and the one rerun); the 3 retries are one budget
+#        shared with a merge that lost the race.
 #        SHIP_PR_INTERVAL: seconds between MERGED polls (default 5, at most 12 polls).
 set -euo pipefail
 
@@ -181,7 +196,7 @@ usage() {
   echo "       --known-flake requires a fail-fast gate ending in nextest (exit 100 for test failures)" >&2
   echo "       only FAIL/TIMEOUT/SIG*/LEAK* open output blocks; other statuses close them" >&2
   echo "       after the final Summary, only Fiber's scripts/check tail is accepted; other output refuses" >&2
-  echo "       longest wait: 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
+  echo "       longest wait: 120 s to find the ready runs, their completion up to <timeout> s, 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
   exit 2
 }
 say() { echo "ship-pr: $*" >&2; }
@@ -1429,6 +1444,95 @@ ci_failed_run_ids() {
   printf '%s\n' "$ids"
 }
 
+# Print the ids of `pull_request` runs on <head>, one per line.
+pull_request_run_ids() {
+  local run_list
+  run_list="$(gh run list --repo "$repo" --commit "$1" --limit 100 --json databaseId,headSha,event 2>/dev/null)" || return 1
+  jq -r --arg head "$1" '.[] | select(.headSha == $head and .event == "pull_request") | .databaseId | select(. != null) | tostring' <<<"$run_list" 2>/dev/null
+}
+
+# Wait for every workflow dispatched by ready_for_review, rather than trusting a
+# green check from a run that already existed when the draft was marked ready.
+# Ready can start several pull_request runs that are listed seconds apart, so
+# after the first new run appears, list every 5 s until 15 s pass with none
+# added, then wait on each new id.
+wait_ready_for_review_run() {
+  local head="$1" before_ids="$2" elapsed=0 run_ids id new_ids="" status
+  while :; do
+    run_ids="$(pull_request_run_ids "$head")" \
+      || die_after_ready 1 "cannot read workflow runs after marking PR $pr ready"
+    new_ids="$(grep -vxF -f <(printf '%s\n' "$before_ids") <<<"$run_ids" | grep -v '^$' || true)"
+    [ -n "$new_ids" ] && break
+    if [ "$elapsed" -ge 120 ]; then
+      say "no new pull_request run on head ${head:0:8} appeared within 120 s after ready; proceeding to required-check wait. If the merge is later BLOCKED, the ready run was most likely dispatched late: rerun ship-pr rather than triage"
+      return 0
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  # Keep listing until three passes in a row (15 s) add no new run, within the
+  # same 120 s budget. No list proves every ready run was dispatched; a later
+  # one shows as a BLOCKED merge, which names it.
+  local more_ids quiet=0
+  while [ "$elapsed" -lt 120 ] && [ "$quiet" -lt 3 ]; do
+    sleep 5
+    elapsed=$((elapsed + 5))
+    run_ids="$(pull_request_run_ids "$head")" \
+      || die_after_ready 1 "cannot read workflow runs after marking PR $pr ready"
+    more_ids="$(grep -vxF -f <(printf '%s\n' "$before_ids") <<<"$run_ids" | grep -v '^$' || true)"
+    if [ "$more_ids" = "$new_ids" ]; then quiet=$((quiet + 1)); else quiet=0; new_ids="$more_ids"; fi
+  done
+
+  say "waiting for ready_for_review runs to finish: $(paste -sd ' ' - <<<"$new_ids")"
+  elapsed=0
+  for id in $new_ids; do
+    while :; do
+      status="$(gh run view "$id" --repo "$repo" --json status --jq '.status' 2>/dev/null)" || status=""
+      [ "$status" = "completed" ] && break
+      [ "$elapsed" -ge "$effective_timeout" ] \
+        && die_after_ready 1 "ready_for_review run $id did not finish within the CI timeout (${effective_timeout} s)"
+      sleep 5
+      elapsed=$((elapsed + 5))
+    done
+    say "ready_for_review run $id finished"
+  done
+}
+
+# gh's merge hint is not a ship-pr instruction. Drop each sentence that
+# mentions `--auto` or `--admin`, keep the rest of its line (gh's reason),
+# and drop a line left empty.
+print_merge_error() {
+  printf '%s\n' "$1" | awk '{ gsub(/[^.]*--(auto|admin)[^.]*\.?/, ""); sub(/[ \t]+$/, "") } $0 != ""' >&2
+}
+
+report_blocked_runs() {
+  local runs details
+  runs="$(gh run list --repo "$repo" --commit "$pin" --limit 100 --json databaseId,workflowName,name,headSha,status,conclusion,event 2>/dev/null)" \
+    || { say "could not read workflow runs on pinned head ${pin:0:8}"; return 0; }
+  details="$(jq -r --arg head "$pin" '
+    .[] | select(.headSha == $head) |
+    select((.status != "completed") or ((.conclusion // "") != "" and (.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral"))) |
+    "\(.workflowName // .name // "workflow") (run \(.databaseId // "unknown")): status=\(.status // "unknown"), conclusion=\(.conclusion // "unknown")"
+  ' <<<"$runs" 2>/dev/null)" || { say "could not parse workflow runs on pinned head ${pin:0:8}"; return 0; }
+  if [ -z "$details" ]; then
+    say "no pending or failing workflow runs found on pinned head ${pin:0:8}"
+    return 0
+  fi
+  while IFS= read -r detail || [ -n "$detail" ]; do
+    [ -n "$detail" ] && say "blocking run: $detail"
+  done <<<"$details"
+}
+
+show_merge_failure() {
+  local error="$1" merge_state
+  merge_state="$(gh pr view "$pr" --repo "$repo" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null)" || merge_state=""
+  print_merge_error "$error"
+  if [ "$merge_state" = "BLOCKED" ]; then
+    say "merge is BLOCKED on pinned head ${pin:0:8}; pending or failing workflow runs:"
+    report_blocked_runs
+  fi
+}
+
 check_mutants_gate() {
   local pr_labels run_list latest run_id run_status job_id
   pr_labels="$(gh pr view "$pr" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null)" \
@@ -1540,10 +1644,13 @@ while :; do
     fi
     if [ "$draft" = "true" ]; then
       [ -z "$mutants_gate" ] || check_mutants_gate
+      ready_runs_before="$(pull_request_run_ids "$pin")" \
+        || die 1 "cannot read workflow runs before marking PR $pr ready"
       say "marking PR $pr ready"
       gh pr ready "$pr" --repo "$repo" >&2 || die 1 "gh pr ready failed"
       draft=false
       pr_ready=1
+      wait_ready_for_review_run "$pin" "$ready_runs_before"
     fi
     say "waiting for CI"
     rc=0
@@ -1727,7 +1834,7 @@ while :; do
   merge_err=""
   merge_failed=""
   if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
-    printf '%s\n' "$merge_err" >&2
+    show_merge_failure "$merge_err"
     lost_race=""
     case "$merge_err" in
       *"the head branch is not up to date with the base branch"*)
@@ -1757,7 +1864,7 @@ while :; do
           esac
           sleep 5
           if ! merge_err="$(gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$pin" 2>&1)"; then
-            printf '%s\n' "$merge_err" >&2
+            show_merge_failure "$merge_err"
             lost_race2=""
             case "$merge_err" in
               *"the head branch is not up to date with the base branch"*)
@@ -1782,14 +1889,14 @@ while :; do
               merge_failed=1
             fi
           else
-            [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
+            [ -z "$merge_err" ] || print_merge_error "$merge_err"
           fi
           ;;
         *) die_after_ready 1 "gh pr merge failed" ;;
       esac
     fi
   else
-    [ -z "$merge_err" ] || printf '%s\n' "$merge_err" >&2
+    [ -z "$merge_err" ] || print_merge_error "$merge_err"
   fi
   break
 done

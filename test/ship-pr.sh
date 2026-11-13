@@ -264,7 +264,19 @@ gh() {
     sub="$1"; shift
     case "$sub" in
       list)
-        if [ -e "$ST/run-list.json" ]; then cat "$ST/run-list.json"; else echo '[]'; fi;;
+        if [ -e "$ST/late-ready-run" ]; then
+          n="$(cat "$ST/late-ready-run-list-calls" 2>/dev/null || echo 0)"
+          n=$((n + 1)); echo "$n" >"$ST/late-ready-run-list-calls"
+          if [ -e "$ST/late-ready-run-marked-ready" ] && [ "$n" -ge 5 ] && [ -e "$ST/run-list-after-ready-3.json" ]; then
+            cat "$ST/run-list-after-ready-3.json"
+          elif [ -e "$ST/late-ready-run-marked-ready" ] && [ "$n" -ge 4 ] && [ -e "$ST/run-list-after-ready-2.json" ]; then
+            cat "$ST/run-list-after-ready-2.json"
+          elif [ -e "$ST/late-ready-run-marked-ready" ] && [ "$n" -ge 3 ]; then
+            cat "$ST/run-list-after-ready.json"
+          else
+            cat "$ST/run-list-before-ready.json"
+          fi
+        elif [ -e "$ST/run-list.json" ]; then cat "$ST/run-list.json"; else echo '[]'; fi;;
       view)
         rid="$1"; shift
         jqex=""; json_fields=""; job=""; want_log=""; want_failed_log=""
@@ -326,7 +338,19 @@ gh() {
               h="$(git --git-dir="$ORIGIN" rev-parse refs/heads/feature 2>/dev/null || cat "$ST/lasthead")"
               json="$(jq -nc --arg h "$h" '{headSha: $h}')";;
             *status*)
-              json='{"status":"completed"}';;
+              if [ -e "$ST/late-ready-run" ] && [ "$rid" = "$(cat "$ST/late-ready-run-id" 2>/dev/null || echo 701)" ]; then
+                n="$(cat "$ST/late-ready-run-view-calls" 2>/dev/null || echo 0)"
+                n=$((n + 1)); echo "$n" >"$ST/late-ready-run-view-calls"
+                if [ "$n" -ge 2 ]; then
+                  touch "$ST/late-ready-run-completed"
+                  echo '[{"bucket":"pass","name":"ci"}]' >"$ST/checks"
+                  json='{"status":"completed"}'
+                else
+                  json='{"status":"in_progress"}'
+                fi
+              else
+                json='{"status":"completed"}'
+              fi;;
             *) json='{}';;
           esac
           if [ -n "$jqex" ]; then jq -r "$jqex" <<<"$json"; else echo "$json"; fi
@@ -379,11 +403,15 @@ gh() {
       if [ -n "$jq" ]; then jq -r "$jq" <<<"$json"; else echo "$json"; fi;;
     ready)
       [ ! -e "$ST/ready-fail" ] || exit 1
-      echo false >"$ST/draft";;
+      echo false >"$ST/draft"
+      [ ! -e "$ST/late-ready-run" ] || touch "$ST/late-ready-run-marked-ready";;
     comment)
       [ ! -e "$ST/comment-fail" ] || exit 1
       while [ $# -gt 0 ]; do [ "$1" = "--body-file" ] && cp "$2" "$ST/comment.txt"; shift; done;;
     merge)
+      if [ -e "$ST/late-ready-run" ] && [ ! -e "$ST/late-ready-run-completed" ]; then
+        touch "$ST/merged-before-late-run-finished"
+      fi
       if [ -e "$ST/merge-each" ]; then bash "$ST/merge-each"; fi
       if [ -e "$ST/merge-fail-once" ]; then
         cat "$ST/merge-fail-once" >&2
@@ -1570,6 +1598,40 @@ grep -qx false "$ST/draft" || fail "draft ends ready"
 git -C "$C" rev-parse --verify -q refs/heads/feature >/dev/null && fail "local branch deleted"
 origin_head >/dev/null && fail "origin branch deleted"
 
+# A run already green on the head must not satisfy the wait triggered by ready.
+setup; echo true >"$ST/draft"; touch "$ST/late-ready-run"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"}]' >"$ST/run-list-before-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"CI",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready.json"
+ship --keep-branch; expect 0 "ready waits for its late run"
+[ ! -e "$ST/merged-before-late-run-finished" ] || fail "ready run: merged before the ready_for_review run finished"
+[ -e "$ST/late-ready-run-completed" ] || fail "ready run: new run completed before merge"
+grep -q 'gh run view 701' "$ST/gh.log" || fail "ready run: explicitly waited on late pull_request run: [$(cat "$ST/gh.log")]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "ready run: merge succeeded: [$OUT]"
+
+# Ready starts two runs: 701 is listed first and finishes at once; 702, which
+# carries the required check, is listed only on the next call and finishes later.
+setup; echo true >"$ST/draft"; touch "$ST/late-ready-run"; echo 702 >"$ST/late-ready-run-id"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"}]' >"$ST/run-list-before-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:702,name:"CI",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready-2.json"
+ship --keep-branch; expect 0 "ready waits for every new run"
+[ ! -e "$ST/merged-before-late-run-finished" ] || fail "two ready runs: merged before run 702 finished"
+[ -e "$ST/late-ready-run-completed" ] || fail "two ready runs: run 702 completed before merge"
+grep -q 'gh run view 702' "$ST/gh.log" || fail "two ready runs: waited on the later-listed run: [$(cat "$ST/gh.log")]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "two ready runs: merge succeeded: [$OUT]"
+
+# 702 is listed two calls after 701: one quiet re-list is not enough; ship-pr
+# keeps listing until three passes in a row add no new run.
+setup; echo true >"$ST/draft"; touch "$ST/late-ready-run"; echo 702 >"$ST/late-ready-run-id"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"}]' >"$ST/run-list-before-ready.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready.json"
+cp "$ST/run-list-after-ready.json" "$ST/run-list-after-ready-2.json"
+jq -nc --arg h "$HEAD0" '[{databaseId:700,name:"CI (draft)",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:701,name:"Lint",event:"pull_request",headSha:$h,status:"completed",conclusion:"success"},{databaseId:702,name:"CI",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list-after-ready-3.json"
+ship --keep-branch; expect 0 "ready waits for a run listed two passes late"
+[ ! -e "$ST/merged-before-late-run-finished" ] || fail "late second run: merged before run 702 finished"
+grep -q 'gh run view 702' "$ST/gh.log" || fail "late second run: waited on run 702: [$(cat "$ST/gh.log")]"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "late second run: merge succeeded: [$OUT]"
+
 # ===== merge and cleanup from inside the worktree: the worktree and local
 # ===== branch are kept, the origin branch is deleted
 setup; echo true >"$ST/draft"
@@ -1644,7 +1706,9 @@ grep -qF 'ship-pr: merge status could not be confirmed after 12 polls; worktree 
 ! grep -qE 'nothing merged|still marked ready' <<<"$ERR" || fail "post-merge polling makes no merge or ready claim: [$ERR]"
 [ -d "$WT" ] || fail "worktree kept when never MERGED"
 [ "$(origin_head)" = "$HEAD0" ] || fail "origin branch kept when never MERGED"
-[ "$(wc -l <"$ST/sleeps.txt")" -eq 11 ] || fail "11 sleeps across 12 polls: [$(cat "$ST/sleeps.txt")]"
+[ "$(grep -c '^1$' "$ST/sleeps.txt")" -eq 11 ] || fail "11 one-second sleeps across 12 polls: [$(cat "$ST/sleeps.txt")]"
+[ "$(grep -c '^5$' "$ST/sleeps.txt")" -eq 24 ] || fail "bounded no-run wait: 24 five-second sleeps: [$(cat "$ST/sleeps.txt")]"
+[ "$(wc -l <"$ST/sleeps.txt")" -eq 35 ] || fail "no sleeps besides the 11 polls and the 24 no-run waits: [$(cat "$ST/sleeps.txt")]"
 
 setup; touch "$ST/merge-fail"; ship; expect 1 "merge refused"
 [ -d "$WT" ] || fail "worktree kept when the merge is refused"
@@ -1670,6 +1734,17 @@ ship; expect 1 "other merge errors never retry"
 ! grep -q 'retrying once' <<<"$ERR" || fail "no retry message on another error: [$ERR]"
 grep -q 'review required' <<<"$ERR" || fail "gh error printed: [$ERR]"
 [ -d "$WT" ] || fail "worktree kept when the merge is refused"
+
+# A BLOCKED merge reports the actionable workflow run without repeating gh hints.
+setup; echo BLOCKED >"$ST/merge-state"
+printf '%s\n' 'Pull request cannot be merged: the base branch policy prohibits the merge. Use the --auto flag to merge when requirements are met.' >"$ST/merge-fail-msg"
+jq -nc --arg h "$HEAD0" '[{databaseId:802,name:"CI - Required",event:"pull_request",headSha:$h,status:"in_progress",conclusion:null}]' >"$ST/run-list.json"
+ship; expect 1 "BLOCKED merge names its pending run"
+grep -q 'CI - Required' <<<"$ERR" || fail "BLOCKED merge: run name is reported: [$ERR]"
+grep -q '802' <<<"$ERR" || fail "BLOCKED merge: run id is reported: [$ERR]"
+grep -q 'in_progress' <<<"$ERR" || fail "BLOCKED merge: run status is reported: [$ERR]"
+! grep -Eqi -- '--auto|--admin' <<<"$ERR" || fail "BLOCKED merge: gh merge hints are removed: [$ERR]"
+grep -q 'the base branch policy prohibits the merge' <<<"$ERR" || fail "BLOCKED merge: gh reason kept: [$ERR]"
 
 # ===== lost race: 'the head branch is not up to date with the base branch'
 # ===== re-enters the merge once, counted against the retries budget of 3
@@ -1820,7 +1895,8 @@ setup; echo true >"$ST/draft"
 ship; expect 0 "repo without the mutants label passes unchecked"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "unchecked repo merged line: [$OUT]"
 ! grep -q -- '--json labels' "$ST/gh.log" || fail "unchecked repo: no PR label read"
-! grep -q '^gh run list' "$ST/gh.log" || fail "no mutants-gate flag: no run lookup"
+! grep -q '^gh run list.*databaseId,status,conclusion,headSha,createdAt' "$ST/gh.log" \
+  || fail "unchecked repo: no mutants proof lookup"
 
 # a repo with other labels only is not checked either
 setup; echo true >"$ST/draft"; repo_labels '[{"name":"docs"}]'
@@ -1834,7 +1910,8 @@ ship; expect 0 "non-draft skips the mutants check"
 # ===== --mutants-gate: before ready, require a label or zero-mutant proof
 setup; echo true >"$ST/draft"; on_pr_labels "$MUTANTS_LABEL"
 ship --mutants-gate; expect 0 "mutants gate accepts the PR label"
-! grep -q '^gh run list' "$ST/gh.log" || fail "mutants label: no run lookup needed"
+! grep -q '^gh run list.*databaseId,status,conclusion,headSha,createdAt' "$ST/gh.log" \
+  || fail "mutants label: no mutants proof lookup needed"
 grep -q -- '--json labels' "$ST/gh.log" || fail "mutants label: PR labels read"
 
 setup; echo true >"$ST/draft"
