@@ -1470,13 +1470,13 @@ wait_ready_for_review_run() {
     sleep 5
     elapsed=$((elapsed + 5))
   done
-  # Keep listing until three passes in a row (15 s) add no new run, within the
-  # same 120 s budget. No list proves every ready run was dispatched; a later
-  # one shows as a BLOCKED merge, which names it.
-  local more_ids quiet=0
-  while [ "$elapsed" -lt 120 ] && [ "$quiet" -lt 3 ]; do
+  # Keep listing every 5 s for three quiet passes, with a separate 15 s
+  # budget counted from the first sighting (independent of the 120 s
+  # first-sighting budget). A later run shows as a BLOCKED merge, which names it.
+  local more_ids quiet=0 settle_elapsed=0
+  while [ "$settle_elapsed" -lt 15 ] && [ "$quiet" -lt 3 ]; do
     sleep 5
-    elapsed=$((elapsed + 5))
+    settle_elapsed=$((settle_elapsed + 5))
     run_ids="$(pull_request_run_ids "$head")" \
       || die_after_ready 1 "cannot read workflow runs after marking PR $pr ready"
     more_ids="$(grep -vxF -f <(printf '%s\n' "$before_ids") <<<"$run_ids" | grep -v '^$' || true)"
