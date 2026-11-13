@@ -35,7 +35,7 @@ bash "$TKT" "$S" add fruit banana || fail "add banana exits 0"
 [ "$(bash "$TKT" "$S" get fruit)" = "apple" ] || fail "get prints the first value"
 [ "$(bash "$TKT" "$S" list fruit)" = "$(printf 'apple\nbanana')" ] || fail "list prints every value"
 
-# unset head removes every head line, preserves other lines, and journals the first old value
+# unset head removes every head line, preserves other lines, and journals each old value
 US="$T/unset.state"
 UHEAD=0123456789abcdef0123456789abcdef01234567
 UHEAD2=1123456789abcdef0123456789abcdef01234567
@@ -46,6 +46,9 @@ cmp -s "$T/unset.expected" "$US" || fail "unset head removes every head line and
 JUS="${US%.state}.journal"
 grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z head '"$UHEAD"' -> <none>$' "$JUS" \
   || fail "unset head journals the first old head and clears it"
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z head '"$UHEAD2"' -> <none>$' "$JUS" \
+  || fail "unset head journals every removed head value"
+[ "$(wc -l <"$JUS" | tr -d ' ')" = "2" ] || fail "unset head journals one line per removed head value"
 NGS="$T/unset-non-head.state"
 printf 'gate=required\nother=unchanged\n' >"$NGS"
 cp "$NGS" "$T/unset-non-head.expected"

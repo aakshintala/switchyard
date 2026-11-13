@@ -4,7 +4,7 @@
 #   get <key>: print the first value for the key.
 #   list <key>: print every value for the key, one per line.
 #   set <key> <value>: replace every line for the key with one line (not an append).
-#   unset head: remove every head line.
+#   unset head: remove every head line, journaling each removed value.
 #   add <key> <value>: append one line for the key (the append form of set).
 #   journal <line>: append a timestamped line to the sibling .journal file.
 #   require <key>...: exit 2 naming the first missing key, exit 0 when all
@@ -308,10 +308,11 @@ case "$cmd" in
       exit 2
     fi
     take_lock
-    if ! old_value="$(state_get head 2>/dev/null)"; then
+    if ! state_get head >/dev/null 2>&1; then
       echo "tkt-state: missing key: head" >&2
       exit 2
     fi
+    old_values="$(state_list head)"
     stage "$state"
     keptfile="$(mktemp "$(dirname "$state")/.tkt-state.XXXXXX")"
     while IFS= read -r line || [ -n "$line" ]; do
@@ -324,7 +325,9 @@ case "$cmd" in
     keptfile=""
     rm -f "$tmpfile"
     tmpfile=""
-    append_journal_line "head $old_value -> <none>"
+    while IFS= read -r old_value; do
+      append_journal_line "head $old_value -> <none>"
+    done <<<"$old_values"
     ;;
   add)
     [ $# -eq 2 ] || usage
