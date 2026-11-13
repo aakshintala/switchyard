@@ -2274,7 +2274,7 @@ grep -Fq 'failing: lint' <<<"$OUT" || fail "ship-pr prints the failing required 
 
 # ===== --known-flake: only flywheel can opt into ticket-backed red-gate acceptance
 KNOWN_TEST='tests::flaky'
-KNOWN_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST'; exit 1"
+KNOWN_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
 CARGO_FAILURE_GATE="printf '%s\\n' 'test tests::unknown ... FAILED' 'failures:' '    tests::unknown' 'test result: FAILED. 0 passed; 1 failed'; exit 1"
 CARGO_SOURCE_DIFF_GATE="printf '%s\\n' 'Running unittests crates/main/src/lib.rs (target/debug/deps/crate_name-000)' 'test crate_name::foo::tests::flaky ... FAILED' 'failures:' '    crate_name::foo::tests::flaky' 'test result: FAILED. 0 passed; 1 failed'; exit 1"
 prepare_known_flake() {
@@ -2308,8 +2308,44 @@ no_merge "known-flake wrong by"
 prepare_known_flake
 ship --known-flake 166 --by flywheel --gate "$CARGO_FAILURE_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
-grep -q 'red test.*not named' <<<"$ERR" || fail "cargo failure block is parsed for ticket matching: [$ERR]"
-no_merge "unnamed cargo test"
+grep -Fq 'known-flake: gate output is cargo libtest; only nextest gates are supported' <<<"$ERR" \
+  || fail "libtest failure refuses with unsupported-format message: [$ERR]"
+no_merge "cargo libtest refusal"
+
+# A full libtest failure followed by a compile error is never accepted.
+prepare_known_flake
+LIBTEST_FAIL_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-cargo-libtest-fail.txt'; exit 1"
+ship --known-flake 166 --by flywheel --gate "$LIBTEST_FAIL_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'known-flake: gate output is cargo libtest; only nextest gates are supported' <<<"$ERR" \
+  || fail "flywheel libtest compile failure refusal: [$ERR]"
+no_merge "cargo libtest compile failure"
+
+# A clean libtest-only log is unsupported even without a compile error.
+prepare_known_flake
+LIBTEST_CLEAN_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-cargo-libtest-clean.txt'; exit 1"
+ship --known-flake 166 --by flywheel --gate "$LIBTEST_CLEAN_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'known-flake: gate output is cargo libtest; only nextest gates are supported' <<<"$ERR" \
+  || fail "clean libtest refusal: [$ERR]"
+no_merge "clean cargo libtest refusal"
+
+# A bare libtest failure line has no nextest status block to contain it.
+prepare_known_flake
+BARE_LIBTEST_GATE="printf '%s\\n' 'test x ... FAILED'; exit 1"
+ship --known-flake 166 --by flywheel --gate "$BARE_LIBTEST_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'known-flake: gate output is cargo libtest; only nextest gates are supported' <<<"$ERR" \
+  || fail "bare libtest failure refusal: [$ERR]"
+no_merge "bare cargo libtest refusal"
+
+prepare_known_flake
+HEADER_LIBTEST_GATE="printf '%s\\n' ' ---- x stderr ----'; exit 1"
+ship --known-flake 166 --by flywheel --gate "$HEADER_LIBTEST_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'known-flake: gate output is cargo libtest; only nextest gates are supported' <<<"$ERR" \
+  || fail "indented libtest header refusal: [$ERR]"
+no_merge "indented libtest header refusal"
 
 prepare_known_flake
 echo '[{"bucket":"fail","name":"ci"}]' >"$ST/checks"
@@ -2344,7 +2380,7 @@ expect 0 "ticket created after PR opens"
 # The issue view returns a ticket creation date after this fixture's fresh gate.
 prepare_known_flake
 touch "$ST/ticket-created-after-gate"
-POST_GATE_TICKET_GATE='touch "$ST/gate-ran"; printf "%s\\n" "FAIL [ 0.001s] crate_name::integration_tests tests::flaky"; exit 1'
+POST_GATE_TICKET_GATE='touch "$ST/gate-ran"; printf "%s\\n" "FAIL [ 0.001s] crate_name::integration_tests tests::flaky" "Summary [ 0.001s] 1 test run: 0 passed, 1 failed"; exit 100'
 ship --known-flake 166 --by flywheel --gate "$POST_GATE_TICKET_GATE" --keep-branch
 expect 0 "ticket created after fresh gate"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "post-gate ticket merged output: [$OUT]"
@@ -2356,7 +2392,7 @@ jq -e '.createdAt == "2099-12-31T23:59:59Z"' "$ST/ticket-166-post-gate.json" >/d
 prepare_known_flake
 jq -nc --arg manifest "$WT/crates/other/Cargo.toml" --arg lib "$WT/crates/other/src/lib.rs" \
   '{packages:[{name:"other",manifest_path:$manifest,targets:[{name:"lib",kind:["lib"],src_path:$lib}]}]}' >"$ST/cargo-metadata.json"
-UNKNOWN_CRATE_GATE="printf '%s\\n' 'FAIL [ 0.001s] missing_crate::integration_tests $KNOWN_TEST'; exit 1"
+UNKNOWN_CRATE_GATE="printf '%s\\n' 'FAIL [ 0.001s] missing_crate::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$UNKNOWN_CRATE_GATE" --keep-branch
 [ "$CODE" = 5 ] || fail "unresolved test crate must refuse: out=[$OUT] err=[$ERR]"
 expect_refused KNOWN-FLAKE
@@ -2395,7 +2431,7 @@ PADDED_TEST='registry::tests::restore_detached_rejects_paths_outside_root_or_wit
 jq -nc --arg name "$PADDED_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
 jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/jobs/Cargo.toml" \
   '{packages:[{name:"jobs",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
-PADDED_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-nextest-lib-test.txt'; exit 1"
+PADDED_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-nextest-lib-test.txt'; printf '%s\\n' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$PADDED_GATE" --keep-branch
 expect 0 "known-flake padded nextest counter"
 grep -Fq "$PADDED_TEST" "$ST/comment.txt" || fail "padded counter preserves test name"
@@ -2406,7 +2442,7 @@ REAL_TEST='keeper::a_second_crash_leaves_one_keeper_the_log_and_the_third_resume
 jq -nc --arg name "$REAL_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
 jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/main/Cargo.toml" \
   '{packages:[{name:"main",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
-REAL_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; exit 1"
+REAL_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; printf '%s\\n' 'Summary [ 40.810s] 1 test run: 0 passed, 1 failed' 'FAIL' 'error: test run failed' '== leak scan' 'scripts/check: full output in /tmp/check.log' 'scripts/check: FAIL (exit 100)'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$REAL_GATE" --keep-branch
 expect 0 "known-flake real nextest panic block"
 [ -f "$ST/comment.txt" ] || fail "real nextest PR comment posted"
@@ -2414,9 +2450,32 @@ grep -Fq "$REAL_TEST" "$ST/comment.txt" || fail "real nextest PR comment names t
 [ -f "$ST/ticket-comment-166.txt" ] || fail "real nextest ticket comment posted"
 grep -Fq "$REAL_TEST" "$ST/ticket-comment-166.txt" || fail "real nextest ticket comment names the red test"
 
+prepare_known_flake
+REAL_101_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; printf '%s\\n' 'Summary [ 40.810s] 1 test run: 0 passed, 1 failed'; exit 101"
+ship --known-flake 166 --by flywheel --gate "$REAL_101_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'gate exit status was 101, not nextest' <<<"$ERR" || fail "non-nextest exit refusal: [$ERR]"
+no_merge "known-flake exit 101 refusal"
+
+prepare_known_flake
+SUMMARY_MISMATCH_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 2 tests run: 0 passed, 2 failed'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$SUMMARY_MISMATCH_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'Summary reports 2 failing tests but 1 distinct failures' <<<"$ERR" \
+  || fail "mismatched nextest summary refusal: [$ERR]"
+no_merge "known-flake summary mismatch refusal"
+
+prepare_known_flake
+LEAK_AFTER_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed' 'scripts/check: leaked processes (exit 1)'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$LEAK_AFTER_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" \
+  || fail "leaked process refusal after nextest summary: [$ERR]"
+no_merge "known-flake leaked process refusal"
+
 # Legacy nextest output can capture unindented panic lines under --- STDERR:.
 prepare_known_flake
-LEGACY_CAPTURE_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' '--- STDERR:' 'thread tests::flaky panicked at src/lib.rs:1:1:' 'assertion failed: deliberate failure' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 1"
+LEGACY_CAPTURE_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' '--- STDERR:' 'thread tests::flaky panicked at src/lib.rs:1:1:' 'assertion failed: deliberate failure' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$LEGACY_CAPTURE_GATE" --keep-branch
 expect 0 "known-flake legacy unindented panic block"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "legacy captured panic merged output: [$OUT]"
@@ -2426,7 +2485,7 @@ prepare_known_flake
 jq -nc --arg name "$REAL_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
 jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/main/Cargo.toml" \
   '{packages:[{name:"main",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
-STRAY_PANIC_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; printf '%s\\n' 'Summary [ 40.810s] 1 test run: 0 passed, 1 failed' 'thread build_script panicked at build.rs:1:1:'; exit 1"
+STRAY_PANIC_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; printf '%s\\n' 'Summary [ 40.810s] 1 test run: 0 passed, 1 failed' 'thread build_script panicked at build.rs:1:1:'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$STRAY_PANIC_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
 grep -Fq 'known-flake check 4 failed: gate output contains a build or other non-test failure' <<<"$ERR" \
@@ -2436,7 +2495,7 @@ no_merge "known-flake stray panic outside test block"
 # A ticket naming foo_bar does not name the distinct test foo.
 prepare_known_flake
 jq -nc '{state:"OPEN",body:"known flake: foo_bar",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
-FOO_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests foo'; exit 1"
+FOO_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests foo' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$FOO_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
 grep -Fq "check 2 failed: red test 'foo' is not named" <<<"$ERR" || fail "foo does not match foo_bar ticket: [$ERR]"
@@ -2460,25 +2519,23 @@ expect_refused KNOWN-FLAKE
 grep -q "check 3 failed.*red test 'tests::flaky'.*crates/main" <<<"$ERR" || fail "red test crate directory in diff: [$ERR]"
 no_merge "red test crate directory in diff"
 
+# Cargo unit-test source mapping is outside the supported known-flake format.
 prepare_known_flake
-printf 'pub fn touched() {}\n' >"$WT/crates/main/src/foo.rs"
-push_test_change crates/main/src/foo.rs 'touch flaky unit-test crate'
-jq --arg h "$HEAD0" 'map(.headSha = $h)' "$ST/run-list.json" >"$ST/run-list.tmp" && mv "$ST/run-list.tmp" "$ST/run-list.json"
-jq -nc '{state:"OPEN",body:"known flake: crate_name::foo::tests::flaky",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
 ship --known-flake 166 --by flywheel --gate "$CARGO_SOURCE_DIFF_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
-grep -q "check 3 failed.*red test 'crate_name::foo::tests::flaky'.*crates/main" <<<"$ERR" || fail "cargo unit test resolves its crate directory: [$ERR]"
-no_merge "cargo unit-test source in diff"
+grep -Fq 'known-flake: gate output is cargo libtest; only nextest gates are supported' <<<"$ERR" \
+  || fail "cargo unit-test source log refusal: [$ERR]"
+no_merge "cargo unit-test source refusal"
 
 # A compile error or an unrelated non-test failure is not an accepted flake.
 prepare_known_flake
 ship --known-flake 166 --by flywheel --gate "echo 'error[E0425]: cannot find value'; exit 1" --keep-branch
 expect_refused KNOWN-FLAKE
-grep -q 'build\|compile\|only test failures' <<<"$ERR" || fail "build failure message: [$ERR]"
+grep -q 'gate exit status was 1\|build\|compile\|only test failures' <<<"$ERR" || fail "build failure message: [$ERR]"
 no_merge "known-flake build failure"
 
 prepare_known_flake
-NON_TEST_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed' 'format check failed'; exit 1"
+NON_TEST_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed' 'format check failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$NON_TEST_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
 grep -q 'other failure\|only test failures\|non-test failure' <<<"$ERR" || fail "non-test gate failure message: [$ERR]"
@@ -2486,42 +2543,42 @@ no_merge "known-flake non-test failure"
 
 # Every nextest timeout is a named failure and must be ticketed like FAIL.
 prepare_known_flake
-TIMEOUT_UNNAMED_GATE="printf '%s\\n' 'TIMEOUT [ 0.001s] crate_name::integration_tests tests::not_ticketed'; exit 1"
+TIMEOUT_UNNAMED_GATE="printf '%s\\n' 'TIMEOUT [ 0.001s] crate_name::integration_tests tests::not_ticketed' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$TIMEOUT_UNNAMED_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
 grep -Fq "red test 'tests::not_ticketed' is not named" <<<"$ERR" || fail "unticketed timeout is parsed as a named red test: [$ERR]"
 no_merge "unticketed timeout"
 
 prepare_known_flake
-TIMEOUT_TICKETED_GATE="printf '%s\\n' 'TIMEOUT [ 0.001s] ( 1/1) crate_name::integration_tests $KNOWN_TEST'; exit 1"
+TIMEOUT_TICKETED_GATE="printf '%s\\n' 'TIMEOUT [ 0.001s] ( 1/1) crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$TIMEOUT_TICKETED_GATE" --keep-branch
 expect 0 "known-flake ticketed timeout merges"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "known-flake ticketed timeout merged output: [$OUT]"
 
 # A rustfmt diff is a non-test gate failure even if a known test also failed.
 prepare_known_flake
-FMT_DIFF_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed' 'Diff in crates/main/src/lib.rs at line 1'; exit 1"
+FMT_DIFF_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed' 'Diff in crates/main/src/lib.rs at line 1'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$FMT_DIFF_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
 grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" || fail "rustfmt diff is a non-test failure: [$ERR]"
 no_merge "known-flake rustfmt failure"
 
 prepare_known_flake
-LEAKED_PROCESS_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed' 'leaked child process pid 123'; exit 1"
+LEAKED_PROCESS_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed' 'leaked child process pid 123'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$LEAKED_PROCESS_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
 grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" || fail "leaked process is a non-test failure: [$ERR]"
 no_merge "known-flake leaked process"
 
 prepare_known_flake
-NON_TEST_PANIC_GATE="printf '%s\\n' 'thread main panicked at build.rs:1:1:' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST'; exit 1"
+NON_TEST_PANIC_GATE="printf '%s\\n' 'thread main panicked at build.rs:1:1:' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$NON_TEST_PANIC_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
 grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" || fail "non-test step panic is refused: [$ERR]"
 no_merge "known-flake non-test panic"
 
 prepare_known_flake
-MALFORMED_TIMEOUT_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'TIMEOUT [ 0.001s]'; exit 1"
+MALFORMED_TIMEOUT_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'TIMEOUT [ 0.001s]' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$MALFORMED_TIMEOUT_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
 grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" || fail "unnamed timeout failure is refused: [$ERR]"
@@ -2531,14 +2588,14 @@ prepare_known_flake
 NO_STATUS_SIGNAL_GATE='kill -TERM $$'
 ship --known-flake 166 --by flywheel --gate "$NO_STATUS_SIGNAL_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
-grep -Fq 'gate had no parsed test failures' <<<"$ERR" || fail "signalled gate without a failure line is refused: [$ERR]"
+grep -Fq 'gate was terminated by signal' <<<"$ERR" || fail "signalled gate is refused: [$ERR]"
 no_merge "signal without parsed test failure"
 
 # Nextest failure statuses other than FAIL are still named, ticketable tests.
 prepare_known_flake
 jq -nc --arg segv 'tests::segv' --arg abrt 'tests::abrt' --arg leak 'tests::leak' --arg leak_fail 'tests::leak_fail' \
   '{state:"OPEN",body:([$segv,$abrt,$leak,$leak_fail] | join("\n")),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
-STATUS_GATE="printf '%s\\n' 'SIGSEGV [ 0.001s] ( 1/4) crate_name::integration_tests tests::segv' 'SIGABRT [ 0.001s] ( 2/4) crate_name::integration_tests tests::abrt' 'LEAK [ 0.001s] ( 3/4) crate_name::integration_tests tests::leak' 'LEAK-FAIL [ 0.001s] ( 4/4) crate_name::integration_tests tests::leak_fail'; exit 1"
+STATUS_GATE="printf '%s\\n' 'SIGSEGV [ 0.001s] ( 1/4) crate_name::integration_tests tests::segv' 'SIGABRT [ 0.001s] ( 2/4) crate_name::integration_tests tests::abrt' 'LEAK [ 0.001s] ( 3/4) crate_name::integration_tests tests::leak' 'LEAK-FAIL [ 0.001s] ( 4/4) crate_name::integration_tests tests::leak_fail' 'Summary [ 0.001s] 4 tests run: 0 passed, 4 failed'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$STATUS_GATE" --keep-branch
 expect 0 "ticketed nextest statuses merge"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "ticketed nextest statuses merged output: [$OUT]"
@@ -2583,7 +2640,7 @@ grep -Fq 'ship-pr-7-gate.' "$ST/ticket-comment-166.txt" || fail "step-7 ticket c
 prepare_known_flake
 echo "$NOSTRICT" >"$ST/rules"
 checks_hook "$BUMP_MAIN"
-STEP7_UNNAMED_GATE='if [ ! -e "$ST/step7-ran" ]; then touch "$ST/step7-ran"; echo "FAIL [ 0.001s] crate_name::integration_tests tests::flaky"; else echo "TIMEOUT [ 0.001s] crate_name::integration_tests tests::different"; fi; exit 1'
+STEP7_UNNAMED_GATE='if [ ! -e "$ST/step7-ran" ]; then touch "$ST/step7-ran"; printf "%s\\n" "FAIL [ 0.001s] crate_name::integration_tests tests::flaky" "Summary [ 0.001s] 1 test run: 0 passed, 1 failed"; else printf "%s\\n" "TIMEOUT [ 0.001s] crate_name::integration_tests tests::different" "Summary [ 0.001s] 1 test run: 0 passed, 1 failed"; fi; exit 100'
 ship --known-flake 166 --by flywheel --gate "$STEP7_UNNAMED_GATE" --keep-branch
 expect_refused KNOWN-FLAKE
 grep -Fq "red test 'tests::different' is not named" <<<"$ERR" || fail "step-7 ticket refusal names the first failed check: [$ERR]"

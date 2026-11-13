@@ -109,12 +109,13 @@
 #        is red, CI must be green on the exact pinned head; each test name must be
 #        named in a supplied open ticket's body or a comment; no file in its Cargo crate
 #        directory may be in the PR diff; and a fresh gate must have failed
-#        only on parsed test failures. A known-flake refusal exits 5 as
-#        KNOWN-FLAKE. Nextest statuses `FAIL`, `TIMEOUT`, `SIGSEGV`, `SIGABRT`,
+#        only on parsed test failures. The gate must be fail-fast and end in a
+#        nextest run: its raw exit status must be 100, and the final Summary's
+#        failed, timed-out and leak-failed count must match distinct failing tests.
+#        The keyword scan also rejects leaked-process and other non-test output.
+#        A known-flake refusal exits 5 as KNOWN-FLAKE. Nextest statuses `FAIL`, `TIMEOUT`, `SIGSEGV`, `SIGABRT`,
 #        `LEAK`, and `LEAK-FAIL` name tests as `<crate>::<binary> <test>` and
 #        resolve `<crate>` through Cargo metadata.
-#        Cargo `test <name> ... FAILED` uses `<name>` and resolves its crate from
-#        the source path in Cargo's `Running` line.
 #        Once merged, the PR and each used ticket get an audit/sighting comment;
 #        the failed gate output is retained for that acceptance.
 #        Exit 0 merged, 1 gate/CI/push/merge failure (including `gh-ci wait` exit 4
@@ -398,6 +399,7 @@ run_gate() {
       export NEXTEST_RETRIES=1
     fi
     PATH="$cargo_slot_dir:$PATH" bash -c "$check_cmd" </dev/null) >"$output_file" 2>&1; then
+    gate_raw_exit=0
     rm -rf "$cargo_slot_dir"
     gate_output_path=""
     if report_flakes "$output_file"; then
@@ -405,6 +407,8 @@ run_gate() {
     fi
     rm -f "$output_file"
     return 0
+  else
+    gate_raw_exit=$?
   fi
   rm -rf "$cargo_slot_dir"
   gate_output_path="$output_file"
@@ -431,26 +435,6 @@ known_metadata_package_root() {
   printf '%s\n' "$root"
 }
 
-known_metadata_package_for_source() {
-  local source="$1" package target target_rel matched=""
-  case "$source" in "$worktree"/*) source="${source#"$worktree"/}" ;; esac
-  source="${source#./}"
-  while IFS=$'\t' read -r package target; do
-    [ -n "$package" ] && [ -n "$target" ] || continue
-    case "$target" in
-      "$worktree"/*) target_rel="${target#"$worktree"/}" ;;
-      *) target_rel="$target" ;;
-    esac
-    target_rel="${target_rel#./}"
-    if [ "$source" = "$target_rel" ] || [ "$source" = "$target" ]; then
-      [ -z "$matched" ] || return 1
-      matched="$package"
-    fi
-  done < <(jq -r '.packages[]? as $package | $package.targets[]? | [$package.name, .src_path] | @tsv' <<<"$known_cargo_metadata" 2>/dev/null)
-  [ -n "$matched" ] || return 1
-  printf '%s\n' "$matched"
-}
-
 known_nextest_failure_fields() {
   local line="$1" status identifier name
   if [[ "$line" =~ ^[[:space:]]*(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK)[[:space:]]+\[[^]]+\]([[:space:]]+\([[:space:]]*[0-9]+/[0-9]+\))?[[:space:]]+([^[:space:]]+)[[:space:]]+(.+)$ ]]; then
@@ -469,34 +453,27 @@ known_nextest_failure_fields() {
 }
 
 known_is_nextest_failure_line() {
-  [[ "$1" =~ ^[[:space:]]*(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL)([[:space:]]|$) ]]
+  [[ "$1" =~ ^[[:space:]]*(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL)[[:space:]]+\[ ]]
 }
 
 known_add_test() {
-  local binary="$1" name="$2" package="$3" cargo_source="$4" i
+  local binary="$1" name="$2" package="$3" i
   [ -n "$name" ] || return 0
   for i in "${!known_red_tests[@]}"; do
     [ "${known_red_tests[$i]}" = "$name" ] \
       && [ "${known_red_binaries[$i]}" = "$binary" ] \
-      && [ "${known_red_packages[$i]}" = "$package" ] \
-      && [ "${known_red_cargo_sources[$i]}" = "$cargo_source" ] && return 0
+      && [ "${known_red_packages[$i]}" = "$package" ] && return 0
   done
   known_red_tests+=("$name")
   known_red_binaries+=("$binary")
   known_red_packages+=("$package")
-  known_red_cargo_sources+=("$cargo_source")
 }
 
 known_parse_gate() {
-  local output_file="$1" line binary name package identifier fields status in_failures=0 trimmed cargo_source=""
-  known_red_tests=() known_red_binaries=() known_red_packages=() known_red_cargo_sources=()
+  local output_file="$1" line binary name package identifier fields status
+  known_red_tests=() known_red_binaries=() known_red_packages=()
   known_unnamed_failures=0
   while IFS= read -r line || [ -n "$line" ]; do
-    if [[ "$line" =~ ^[[:space:]]*Running[[:space:]]+unittests[[:space:]]+([^[:space:]]+) ]]; then
-      cargo_source="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ ^[[:space:]]*Running[[:space:]]+([^[:space:]]+\.rs)([[:space:]]|$) ]]; then
-      cargo_source="${BASH_REMATCH[1]}"
-    fi
     if known_is_nextest_failure_line "$line"; then
       if fields="$(known_nextest_failure_fields "$line")"; then
         IFS=$'\t' read -r status identifier name <<<"$fields"
@@ -509,29 +486,10 @@ known_parse_gate() {
           package="$identifier"
           binary=""
         fi
-        known_add_test "$binary" "$name" "$package" ""
+        known_add_test "$binary" "$name" "$package"
       else
         known_unnamed_failures=$((known_unnamed_failures + 1))
       fi
-      continue
-    fi
-    if [[ "$line" =~ ^test[[:space:]]+(.+)[[:space:]]+\.\.\.[[:space:]]+FAILED[[:space:]]*$ ]]; then
-      name="${BASH_REMATCH[1]}"
-      known_add_test "" "$name" "" "$cargo_source"
-      continue
-    fi
-    case "$line" in
-      failures:) in_failures=1; continue ;;
-      'test result:'*) in_failures=0; continue ;;
-    esac
-    if [ "$in_failures" = 1 ] && [[ "$line" =~ ^[[:space:]]+(.+)$ ]]; then
-      trimmed="${BASH_REMATCH[1]}"
-      case "$trimmed" in
-        '---- '*" stdout ----") trimmed="${trimmed#---- }"; trimmed="${trimmed% stdout ----}" ;;
-        *' stdout ----') trimmed="${trimmed% stdout ----}" ;;
-      esac
-      [ -n "$trimmed" ] || continue
-      known_add_test "" "$trimmed" "" "$cargo_source"
     fi
   done <"$output_file"
 }
@@ -552,8 +510,72 @@ known_load_metadata() {
   return 1
 }
 
+known_is_nextest_output_header() {
+  [[ "$1" =~ ^[[:space:]]*(stdout|stderr)[[:space:]]+───[[:space:]]*$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*---[[:space:]]+(STDOUT|STDERR): ]]
+}
+
+known_is_nextest_status_line() {
+  [[ "$1" =~ ^[[:space:]]*FAIL[[:space:]]*$ ]] && return 1
+  [[ "$1" =~ ^[[:space:]]*(TRY[[:space:]]+[0-9]+[[:space:]]+)?(FAIL|PASS|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL|SKIP|START)([[:space:]]|$) ]]
+}
+
+known_is_nextest_summary_boundary() {
+  [[ "$1" =~ ^[[:space:]]*FAIL[[:space:]]*$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*Summary([[:space:]]|$) ]] \
+    || [[ "$1" =~ ^[[:space:]]*-{4,}[[:space:]]*$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*─{4,}[[:space:]]*$ ]]
+}
+
+known_is_cargo_libtest_line() {
+  [[ "$1" =~ ^[[:space:]]*test[[:space:]]+.+[[:space:]]+[.][.][.][[:space:]]+FAILED$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*----[[:space:]].+[[:space:]]+(stdout|stderr)[[:space:]]+----$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*test[[:space:]]+result:[[:space:]]+FAILED ]]
+}
+
+known_gate_summary_failure_count() {
+  local output_file="$1" line count found="" summary_seen=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^[[:space:]]*Summary[[:space:]] ]]; then
+      summary_seen=1
+      count=0
+      if [[ "$line" =~ ([0-9]+)[[:space:]]+failed([,[:space:]]|$) ]]; then count=$((count + BASH_REMATCH[1])); fi
+      if [[ "$line" =~ ([0-9]+)[[:space:]]+timed[[:space:]]+out([,[:space:]]|$) ]]; then count=$((count + BASH_REMATCH[1])); fi
+      if [[ "$line" =~ ([0-9]+)[[:space:]]+leak-fail([,[:space:]]|$) ]]; then count=$((count + BASH_REMATCH[1])); fi
+      found="$count"
+    fi
+  done <"$output_file"
+  [ "$summary_seen" = 1 ] || return 1
+  printf '%s\n' "$found"
+}
+
+known_gate_has_libtest_output() {
+  local output_file="$1" line in_test_block=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if known_is_nextest_failure_line "$line"; then
+      in_test_block=1
+      continue
+    fi
+    if known_is_nextest_output_header "$line"; then
+      in_test_block=1
+      continue
+    fi
+    if known_is_nextest_status_line "$line"; then
+      in_test_block=1
+      continue
+    fi
+    if known_is_nextest_summary_boundary "$line"; then
+      in_test_block=0
+      continue
+    fi
+    [ "$in_test_block" = 1 ] && continue
+    known_is_cargo_libtest_line "$line" && return 0
+  done <"$output_file"
+  return 1
+}
+
 known_gate_has_other_failure() {
-  local output_file="$1" line lower in_failures=0 in_test_block=0 trimmed
+  local output_file="$1" line lower in_test_block=0 trimmed
   [ "${known_unnamed_failures:-0}" -eq 0 ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     if known_is_nextest_failure_line "$line"; then
@@ -561,40 +583,24 @@ known_gate_has_other_failure() {
       in_test_block=1
       continue
     fi
-    if [[ "$line" =~ ^test[[:space:]]+.+[[:space:]]+\.\.\.[[:space:]]+FAILED[[:space:]]*$ ]]; then
+    if known_is_nextest_output_header "$line"; then
       in_test_block=1
       continue
     fi
-    if [[ "$line" =~ ^[[:space:]]*(stdout|stderr)[[:space:]]+───[[:space:]]*$ ]] \
-      || [[ "$line" =~ ^[[:space:]]*---[[:space:]]+(STDOUT|STDERR): ]] \
-      || [[ "$line" =~ ^[[:space:]]*----[[:space:]].+[[:space:]]+(stdout|stderr)[[:space:]]+----[[:space:]]*$ ]]; then
+    if known_is_nextest_status_line "$line"; then
       in_test_block=1
       continue
     fi
-    if [[ "$line" =~ ^[[:space:]]*(TRY[[:space:]]+[0-9]+[[:space:]]+)?(FAIL|PASS|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL|SKIP|START)([[:space:]]|$) ]]; then
+    if known_is_nextest_summary_boundary "$line"; then
       in_test_block=0
       continue
     fi
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    case "$trimmed" in
-      Summary|Summary\ *|----*|────────*)
-        in_test_block=0
-        continue ;;
-    esac
     if [ "$in_test_block" = 1 ]; then
+      trimmed="${line#"${line%%[![:space:]]*}"}"
       lower="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
       case "$lower" in
         'diff in '*|*' leaked process'*|*'process leak'*|*'leaked child process'*|*'unreaped process'*|*'leftover process'*|*'processes remain'*|*'process remained'*|*'process still running'*|*'processes still running'*|*'child process still running'*|*'doctest failed'*|*'doc test failed'*|*'documentation check failed'*|*'rustdoc error'*) return 0 ;;
       esac
-      continue
-    fi
-    case "$line" in
-      failures:) in_failures=1; continue ;;
-      'test result:'*) in_failures=0; continue ;;
-    esac
-    if [ "$in_failures" = 1 ] && [[ "$line" =~ ^[[:space:]]+(.+)$ ]]; then
-      trimmed="${BASH_REMATCH[1]}"
-      case "$trimmed" in '---- '*" stdout ----"|*' stdout ----') continue ;; esac
       continue
     fi
     lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
@@ -602,12 +608,11 @@ known_gate_has_other_failure() {
       'diff in '*|*' leaked process'*|*'process leak'*|*'leaked child process'*|*'unreaped process'*|*'leftover process'*|*'processes remain'*|*'process remained'*|*'process still running'*|*'processes still running'*|*'child process still running'*|*'doctest failed'*|*'doc test failed'*|*'documentation check failed'*|*'rustdoc error'*) return 0 ;;
     esac
     case "$lower" in
-      *'error: test failed'*|*'error: test run failed'*|*'test result: failed'*|failures:|summary*test*fail*) continue ;;
+      *'error: test failed'*|*'error: test run failed'*|summary*test*fail*|fail) continue ;;
+      'scripts/check: fail (exit 100)') continue ;;
     esac
     case "$lower" in
-      *'panicked at'*|*'assertion failed'*|*'assertion left'*)
-        [ "$in_failures" = 1 ] && continue
-        return 0 ;;
+      *'panicked at'*|*'assertion failed'*|*'assertion left'*) return 0 ;;
     esac
     if [[ "$lower" == *error* || "$lower" == *fail* || "$lower" == *failure* ]]; then
       return 0
@@ -624,9 +629,9 @@ known_ci_run_id() {
 }
 
 known_flake_accept() {
-  local output_file="$1" gate_head="$2" expected_gate_head="$3" pin="$4" ci_run="$5"
+  local output_file="$1" gate_exit="$2" gate_head="$3" expected_gate_head="$4" pin="$5" ci_run="$6"
   local actual_head test ticket_data ticket_state name_found closed_ticket chosen
-  local base diff_paths gate_base i found=0 package package_root diff_path red_test_names
+  local base diff_paths gate_base i j found=0 package package_root diff_path red_test_names summary_failures distinct_failures
   local -a chosen_tickets=()
 
   actual_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
@@ -638,7 +643,28 @@ known_flake_accept() {
     || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is not green on exact pinned head $pin or its run id is unavailable"
   known_ci_run="$ci_run"
 
+  if known_gate_has_libtest_output "$output_file"; then
+    refuse KNOWN-FLAKE "known-flake: gate output is cargo libtest; only nextest gates are supported"
+  fi
+  if [ "$gate_exit" -gt 128 ] && [ "$gate_exit" -lt 256 ]; then
+    refuse KNOWN-FLAKE "known-flake check 4 failed: gate was terminated by signal (exit $gate_exit)"
+  fi
+  [ "$gate_exit" -eq 100 ] \
+    || refuse KNOWN-FLAKE "known-flake check 4 failed: gate exit status was $gate_exit, not nextest's test-failure status 100"
   known_parse_gate "$output_file"
+  summary_failures="$(known_gate_summary_failure_count "$output_file")" \
+    || refuse KNOWN-FLAKE "known-flake check 4 failed: gate has no final nextest Summary with a failure count"
+  distinct_failures=0
+  for i in "${!known_red_tests[@]}"; do
+    found=0
+    for j in "${!known_red_tests[@]}"; do
+      [ "$j" -ge "$i" ] && break
+      [ "${known_red_tests[$j]}" = "${known_red_tests[$i]}" ] && found=1 && break
+    done
+    [ "$found" = 1 ] || distinct_failures=$((distinct_failures + 1))
+  done
+  [ "$summary_failures" -eq "$distinct_failures" ] \
+    || refuse KNOWN-FLAKE "known-flake check 4 failed: final nextest Summary reports $summary_failures failing tests but $distinct_failures distinct failures were parsed"
 
   # Check 2: require an exact name on an open ticket in the PR's repository.
   for i in "${!known_red_tests[@]}"; do
@@ -685,9 +711,6 @@ known_flake_accept() {
   fi
   for i in "${!known_red_tests[@]}"; do
     package="${known_red_packages[$i]}"
-    if [ -z "$package" ]; then
-      package="$(known_metadata_package_for_source "${known_red_cargo_sources[$i]}" 2>/dev/null || true)"
-    fi
     [ -n "$package" ] \
       || refuse KNOWN-FLAKE "known-flake check 3 failed: red test '${known_red_tests[$i]}' could not be resolved to a crate by cargo metadata"
     package_root="$(known_metadata_package_root "$package" 2>/dev/null)" \
@@ -827,7 +850,7 @@ case "$timeout" in ''|*[!0-9]*) usage ;; esac
 if [ "${#known_flakes[@]}" -gt 0 ] && [ "$known_by" != flywheel ]; then
   refuse KNOWN-FLAKE "--known-flake requires --by flywheel"
 fi
-gate_output_path="" gate_red_output="" gate_red_head="" known_acceptance_used=0 known_ci_run="" known_diff_paths="" known_report_pin=""
+gate_output_path="" gate_red_output="" gate_red_head="" gate_raw_exit=0 known_acceptance_used=0 known_ci_run="" known_diff_paths="" known_report_pin=""
 declare -a known_report_tests=() known_report_binaries=() known_report_tickets=() known_report_outputs=() known_ticket_ids=()
 if [ -n "$unverified" ]; then
   [ -f "$unverified" ] && [ -r "$unverified" ] || die 2 "cannot read --unverified-fixes $unverified"
@@ -1568,7 +1591,7 @@ while :; do
       || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is green on exact pinned head $pin but its run id could not be read"
     [ -n "$known_ci_run" ] \
       || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is green on exact pinned head $pin but no successful CI run id was found"
-    known_flake_accept "$gate_red_output" "$gate_red_head" "$pin" "$pin" "$known_ci_run"
+    known_flake_accept "$gate_red_output" "$gate_raw_exit" "$gate_red_head" "$pin" "$pin" "$known_ci_run"
   fi
 
   # Step 7: on a non-strict base, check the PR merged with current origin/main.
@@ -1608,7 +1631,7 @@ while :; do
         fi
         if [ "$step7_gate_rc" -ne 0 ]; then
           if [ "$step7_check" = gate ] && [ "$step7_gate_rc" -eq 2 ] && [ "${#known_flakes[@]}" -gt 0 ]; then
-            known_flake_accept "$gate_output_path" "$step7_gate_head" "$step7_gate_head" "$pin" "$known_ci_run"
+            known_flake_accept "$gate_output_path" "$gate_raw_exit" "$step7_gate_head" "$step7_gate_head" "$pin" "$known_ci_run"
           else
             guard_restore
             trap - EXIT INT TERM
