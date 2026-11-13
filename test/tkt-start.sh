@@ -221,6 +221,22 @@ grep -Fxq 'tkt-start: --takeover requires non-blank --files PATHS' "$CDIR/stderr
   || fail "takeover-blank-files: refusal message missing: $(cat "$CDIR/stderr")"
 [ ! -e "$RUN/widget-42.state" ] || fail "takeover-blank-files: state was written before refusal"
 
+setup takeover-planned ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 takeover-planned-first
+S="$RUN/widget-42.state"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set plan "$CDIR/planned.md" || fail "takeover-planned: set plan"
+bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set head 0000000000000000000000000000000000000000 || fail "takeover-planned: seed drifted head"
+before_state="$(cksum "$S")"
+run_start --no-preflight --takeover '#123' --gate 'bash scripts/check'
+[ "$RC" -eq 2 ] || fail "takeover-planned: exit $RC, want 2"
+case "$OUT" in *"PRECONDITION takeover=planned"*) ;; *) fail "takeover-planned: wrong verdict: $OUT" ;; esac
+case "$OUT" in *"stored plan '$CDIR/planned.md'"*) ;; *) fail "takeover-planned: refusal does not name stored plan: $OUT" ;; esac
+grep -Fq "continue with the planned path (tkt-build, tkt-fix or tkt-ship) instead of a takeover" "$CDIR/stderr" \
+  || fail "takeover-planned: refusal misses planned-path guidance: $(cat "$CDIR/stderr")"
+after_state="$(cksum "$S")"
+[ "$before_state" = "$after_state" ] || fail "takeover-planned: refusal changed state ($before_state -> $after_state)"
+
 setup takeover ONE AGAINST
 run_start --no-preflight --takeover '#123' --gate 'bash scripts/check'
 want "SKIPPED filing=" 0 takeover

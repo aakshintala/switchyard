@@ -241,6 +241,15 @@ elif [ -f "$state" ] && grep -q '^split=.' "$state"; then
   deny "DUPLICATE state=$physical_state split=$stored_split requested=none" 2 \
     "tkt-start: duplicate state at $physical_state is split part $stored_split; resume it with --split <label> (--split $stored_split)"
 fi
+if [ "$takeover_given" -eq 1 ] && [ -f "$state" ]; then
+  if stored_plan="$(tkt get plan 2>/dev/null)"; then
+    case "$stored_plan" in
+      "takeover "*) ;;
+      *) deny "PRECONDITION takeover=planned" 2 \
+        "tkt-start: --takeover refused: stored plan '$stored_plan'; continue with the planned path (tkt-build, tkt-fix or tkt-ship) instead of a takeover" ;;
+    esac
+  fi
+fi
 release_lock
 if [ "$part_given" -eq 1 ]; then
   if [ -f "$state" ]; then

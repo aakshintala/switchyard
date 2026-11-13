@@ -366,7 +366,13 @@ if stored_head="$(tkt get head 2>/dev/null)"; then
   fi
 fi
 base="$(plan_base "$plan" 2>/dev/null || true)"
-[ -n "$base" ] || emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in $plan" "$(repair_hint base)"
+if [ -z "$base" ]; then
+  if [[ "$plan" == "takeover "* ]]; then
+    emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in stored plan '$plan'" \
+      "Repair command: takeover state has no plan for tkt-build; continue with tkt-fix $state or tkt-ship $state, or re-point with tkt-plan $state set <plan-path>"
+  fi
+  emit "PRECONDITION missing=base" 2 "tkt-build: no Base line in stored plan '$plan'" "$(repair_hint base)"
+fi
 # Only the first backticked token of a Files line is its path column; later ones are
 # prose (`reads`, `/reload`) that git would take as pathspecs. plan-check and plan-sweep
 # read every token (lib/plan-tokens.sh) because they check coverage, not staleness.
