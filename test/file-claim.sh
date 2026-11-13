@@ -205,6 +205,31 @@ fresh() {
 
 CLAIM="claim --lane fiber-4222 --grant --worktree t:d1 --repo test/repo"
 
+# A claim should fetch main once, shallowly. The wrapper is only placed on PATH
+# for this invocation, so fixture setup and the other tests do not affect count.
+R="$(fresh)"
+mkdir -p "$T/countbin"
+cat >"$T/countbin/git" <<'STUB_EOF'
+#!/usr/bin/env bash
+fetch=0
+main=0
+for arg in "$@"; do
+  [ "$arg" != fetch ] || fetch=1
+  case "$arg" in +refs/heads/main:*) main=1;; esac
+done
+if [ "$fetch" = 1 ] && [ "$main" = 1 ]; then printf '%s\n' "$*" >>"$FILE_CLAIM_FETCH_LOG"; fi
+exec "$REAL_GIT" "$@"
+STUB_EOF
+chmod +x "$T/countbin/git"
+export REAL_GIT
+FILE_CLAIM_FETCH_LOG="$T/main-fetches.log"
+: >"$FILE_CLAIM_FETCH_LOG"
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_FETCH_LOG="$FILE_CLAIM_FETCH_LOG" PATH="$T/countbin:$PATH" bash "$FC" claim --lane fiber-1721 --grant --worktree t:1721 --repo test/repo counted.txt 2>"$T/e-main-fetch-count")" || fail "counted claim exits 0: $(cat "$T/e-main-fetch-count")"
+main_fetch_count="$(wc -l <"$FILE_CLAIM_FETCH_LOG" | tr -d '[:space:]')"
+[ "$main_fetch_count" = 1 ] || fail "claim fetches main once, got $main_fetch_count: $(cat "$FILE_CLAIM_FETCH_LOG")"
+grep -F -- '--depth 1' "$FILE_CLAIM_FETCH_LOG" >/dev/null || fail "claim main fetch is shallow: $(cat "$FILE_CLAIM_FETCH_LOG")"
+[ "$out" = "$(printf 'GRANT counted.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "counted claim output is unchanged: $out"
+
 # make_plan NAME PATH...: write a plan under $T/plans whose Files section lists
 # each PATH as a backticked list item; prints the plan path.
 PLANS="$T/plans"

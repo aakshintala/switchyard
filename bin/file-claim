@@ -122,7 +122,7 @@ report() {
 }
 fetch_main_tip() {
   local r="$1" t
-  git -C "$W" fetch -q "$r" "+refs/heads/main:refs/file-claim/main" 2>"$W/fetch-main.err" || die 2 "cannot fetch main from $r: $(cat "$W/fetch-main.err")"
+  git -C "$W" fetch -q --depth 1 "$r" "+refs/heads/main:refs/file-claim/main" 2>"$W/fetch-main.err" || die 2 "cannot fetch main from $r: $(cat "$W/fetch-main.err")"
   t="$(git -C "$W" rev-parse --verify --quiet 'refs/file-claim/main^{commit}' 2>/dev/null || true)"; [ -n "$t" ] || die 2 "no main branch in $r"; printf '%s' "$t"
 }
 fetch_claim_tip() {
@@ -411,7 +411,10 @@ cmd_claim() {
   [ "${#requested_paths[@]}" -gt 0 ] || [ "$refresh" = 1 ] || usage
   for p in "${requested_paths[@]}"; do valid_path "$p" || die 2 "not a repo-relative path: $p"; done
   # Reap terminal ticket/PR holds before deciding whether this claim can run.
-  "$script_dir/file-claim" reap --repo "$repo" || die 2 "cannot reap claims before claim"
+  # Fetch both tips here so reap can reuse this workdir and the same snapshots.
+  if ! main_tip="$(fetch_main_tip "$remote")"; then die 2 "cannot reap claims before claim"; fi
+  if ! tip="$(fetch_claim_tip "$remote")"; then die 2 "cannot reap claims before claim"; fi
+  if ! ( trap - EXIT; cmd_reap "$repo" "$main_tip" "$tip" ); then die 2 "cannot reap claims before claim"; fi
   for p in "${requested_paths[@]}"; do
     held=0
     if [ "${#paths[@]}" -gt 0 ]; then for i in "${paths[@]}"; do if [ "$i" = "$p" ]; then held=1; break; fi; done; fi
@@ -420,7 +423,8 @@ cmd_claim() {
   build_prmap "$repo"
   attempt=1
   while [ "$attempt" -le "$TRIES" ]; do
-    main_tip="$(fetch_main_tip "$remote")"; tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; load_claims "$tip" "$claims"
+    if [ "$attempt" -gt 1 ]; then main_tip="$(fetch_main_tip "$remote")"; fi
+    tip="$(fetch_claim_tip "$remote")"; claims="$W/claims.tsv"; load_claims "$tip" "$claims"
     own_existing=0
     if [ "$refresh" = 1 ]; then
       : >"$claims.refreshed"
@@ -595,15 +599,19 @@ claim_is_retired_before_done() {
 }
 
 cmd_reap() {
-  local repo="$1" remote run_dir attempt=1 tip claims numbers prefix lookup_rc expected actual
+  local repo="$1" initial_main_tip="${2:-}" initial_tip="${3:-}" reuse_tips=0 remote run_dir attempt=1 tip claims numbers prefix lookup_rc expected actual
   local line c_path c_lane c_kind c_at c_wt c_pr ticket pr_number reason path retired_lanes lanecheck
   local kept dropped dropped_files grant_prs grant_file base grant_ticket closed_reason closed_pr
   remote="$(default_remote "$repo")"
   run_dir="$(ticket_states_run_dir)"
-  new_workdir
+  if [ "$#" -ge 3 ]; then reuse_tips=1; else new_workdir; fi
   while [ "$attempt" -le "$TRIES" ]; do
-    fetch_main_tip "$remote" >/dev/null
-    tip="$(fetch_claim_tip "$remote")"
+    if [ "$reuse_tips" = 1 ] && [ "$attempt" = 1 ]; then
+      tip="$initial_tip"
+    else
+      if [ -z "$initial_main_tip" ]; then fetch_main_tip "$remote" >/dev/null; fi
+      tip="$(fetch_claim_tip "$remote")"
+    fi
     claims="$W/claims.tsv"
     load_claims "$tip" "$claims"
     numbers="$W/ticket-numbers.tsv"
