@@ -205,6 +205,31 @@ fresh() {
 
 CLAIM="claim --lane fiber-4222 --grant --worktree t:d1 --repo test/repo"
 
+# A claim should fetch main once, shallowly. The wrapper is only placed on PATH
+# for this invocation, so fixture setup and the other tests do not affect count.
+R="$(fresh)"
+mkdir -p "$T/countbin"
+cat >"$T/countbin/git" <<'STUB_EOF'
+#!/usr/bin/env bash
+fetch=0
+main=0
+for arg in "$@"; do
+  [ "$arg" != fetch ] || fetch=1
+  case "$arg" in +refs/heads/main:*) main=1;; esac
+done
+if [ "$fetch" = 1 ] && [ "$main" = 1 ]; then printf '%s\n' "$*" >>"$FILE_CLAIM_FETCH_LOG"; fi
+exec "$REAL_GIT" "$@"
+STUB_EOF
+chmod +x "$T/countbin/git"
+export REAL_GIT
+FILE_CLAIM_FETCH_LOG="$T/main-fetches.log"
+: >"$FILE_CLAIM_FETCH_LOG"
+out="$(FILE_CLAIM_REMOTE="$R" FILE_CLAIM_FETCH_LOG="$FILE_CLAIM_FETCH_LOG" PATH="$T/countbin:$PATH" bash "$FC" claim --lane fiber-1721 --grant --worktree t:1721 --repo test/repo counted.txt 2>"$T/e-main-fetch-count")" || fail "counted claim exits 0: $(cat "$T/e-main-fetch-count")"
+main_fetch_count="$(wc -l <"$FILE_CLAIM_FETCH_LOG" | tr -d '[:space:]')"
+[ "$main_fetch_count" = 1 ] || fail "claim fetches main once, got $main_fetch_count: $(cat "$FILE_CLAIM_FETCH_LOG")"
+grep -F -- '--depth 1' "$FILE_CLAIM_FETCH_LOG" >/dev/null || fail "claim main fetch is shallow: $(cat "$FILE_CLAIM_FETCH_LOG")"
+[ "$out" = "$(printf 'GRANT counted.txt new\nfile-claim: 1 granted, 0 refused')" ] || fail "counted claim output is unchanged: $out"
+
 # make_plan NAME PATH...: write a plan under $T/plans whose Files section lists
 # each PATH as a backticked list item; prints the plan path.
 PLANS="$T/plans"
@@ -1308,6 +1333,23 @@ out="$(GH_TICKET_STATES='6010:CLOSED' FILE_CLAIM_REMOTE="$R" bash "$FC" claim --
 grep -qF 'REAP claim p.txt by fiber-6010' <<<"$out" || fail "guard reports automatic stale reap: $out"
 grep -qF 'GRANT p.txt new' <<<"$out" || fail "guard grants after stale holder is removed: $out"
 [ "$(claims_blob "$R" | grep -c '^')" = 1 ] || fail "stale-only holder was replaced by claimant"
+
+# An unchecked command failing inside the reap step still stops the claim (errexit
+# stays on in reap): claim exits 2 with its reap message and grants nothing.
+R="$(fresh)"
+FILE_CLAIM_REMOTE="$R" bash "$FC" claim --lane fiber-6012 --grant --worktree t:old --repo test/repo held.txt >/dev/null 2>&1 || fail "reap-errexit setup"
+mkdir -p "$T/awkfail"
+cat >"$T/awkfail/awk" <<'STUB_EOF'
+#!/usr/bin/env bash
+case "${!#}" in *ticket-numbers.tsv) exit 1;; esac
+exec "$REAL_AWK" "$@"
+STUB_EOF
+chmod +x "$T/awkfail/awk"
+rc=0
+out="$(REAL_AWK="$(command -v awk)" GH_TICKET_STATES='6012:OPEN' FILE_CLAIM_REMOTE="$R" PATH="$T/awkfail:$PATH" bash "$FC" claim --lane fiber-6013 --grant --worktree t:new --repo test/repo other.txt 2>"$T/e-reap-errexit")" || rc=$?
+[ "$rc" = 2 ] || fail "claim exits 2 when reap fails unchecked, got $rc: $out $(cat "$T/e-reap-errexit")"
+grep -qF 'cannot reap claims before claim' "$T/e-reap-errexit" || fail "claim reports reap failure: $(cat "$T/e-reap-errexit")"
+! grep -qF 'other.txt' <<<"$(claims_blob "$R")" || fail "claim grants nothing after reap failure"
 
 # A failed or partial ticket-state response keeps every hold in the batch.
 R="$(fresh)"
