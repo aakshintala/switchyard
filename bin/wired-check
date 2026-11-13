@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # wired-check: log kernel wired memory and notify switchyard above 7 GiB.
 # Run hourly from the uninstalled template in claude-code/launchd/.
+# Install manually only when approved:
+#   p=$(basename claude-code/launchd/*.switchyard.wired-check.plist)
+#   sed "s|__HOME__|$HOME|g" "claude-code/launchd/$p" > ~/Library/LaunchAgents/"$p"
+#   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/"$p"
+# The plist is a template; launchd does not expand __HOME__, so copying it as-is loads a literal __HOME__ path.
 # WIRED_CHECK_BYTES, WIRED_CHECK_STATE_FILE and WIRED_CHECK_INBOX_SEND are test overrides.
 set -euo pipefail
 

@@ -32,7 +32,7 @@ if [ -z "$boxssh" ]; then
 fi
 host=${FW_BOX_HOST:-roundhouse-7010-plus-1.local}
 mac=${FW_MAC_HOME:-$HOME}
-box=${FW_BOX_HOME:-/home/${USER:?}}
+box=${FW_BOX_HOME:-/home/${USER:-$(id -un)}}
 if fw_box_is_local; then box=$HOME; fi
 boxrun=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}

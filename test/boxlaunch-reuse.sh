@@ -465,4 +465,18 @@ else
   fail "tmp-reap-runs-on-box-and-failure-does-not-block-launch (rc=$reap_launch_rc; log=$(cat "$REAP_LOG" 2>/dev/null); out=$(cat "$T/reap-launch.out"))"
 fi
 
+# On a Linux box run locally (no BOX_SSH, no FW_BOX_HOME), an unset USER
+# must not abort before the local override (#1696).
+mkdir -p "$T/linux-stub" "$T/linux-run"
+printf '#!/bin/sh\necho Linux\n' >"$T/linux-stub/uname"
+chmod +x "$T/linux-stub/uname"
+out=$(env -u USER -u BOX_SSH -u FW_SSH -u FW_BOX_HOME -u FW_BOX_RUN HOME="$T/mac-home" \
+  PATH="$T/linux-stub:$PATH" RUN_DIR="$T/linux-run" FW_RUN="$T/linux-run" \
+  bash "$BIN/boxlaunch.sh" 1696 haiku 2>&1 || true)
+if printf '%s\n' "$out" | grep -Fq 'no brief'; then
+  ok local-linux-launch-tolerates-unset-user
+else
+  fail "local-linux-launch-tolerates-unset-user (out=$out)"
+fi
+
 exit "$rc"

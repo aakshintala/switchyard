@@ -27,7 +27,9 @@ brief="$T/run/fiber-1448-orchestrator-brief.md"
 test -s "$brief"
 grep -F -- "$T/home/.agents/skills/implement/SKILL.md" "$brief" >/dev/null
 grep -F -- "$T/home/work/fiber-worktrees/feat/1448-binbox-test" "$brief" >/dev/null
-if [ -n "${HOME:-}" ] && grep -F -- "$HOME" "$brief" >/dev/null; then
+# Any absolute home path outside the hermetic $T tree is host-specific,
+# whatever the caller's $HOME is.
+if sed "s|$T|T|g" "$brief" | grep -E '(^|[^[:alnum:]_/])/(Users|home)/' >/dev/null; then
   echo 'FAIL mkbrief emits a host-specific home path' >&2
   exit 1
 fi
