@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ship-pr: run a reviewed PR's merge tail in one command.
-# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]
+# Usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--known-flake <ticket>...] [--by <who>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]
 #        Run it after review-loop has a verdict on <sha>. In order: check the PR is
 #        open and its head branch is checked out clean in --worktree, waiting up to
 #        60 s for GitHub's head to match the local HEAD; require a matching
@@ -118,10 +118,30 @@
 #        After marking a draft PR ready, each later failure before `gh pr merge` says
 #        that nothing merged and the PR is still marked ready. If MERGED is not confirmed
 #        after the merge attempt, the error says the merge status could not be confirmed.
+#        --known-flake <ticket>... is opt-in only with --by flywheel. If the gate
+#        is red, CI must be green on the exact pinned head; each test name must be
+#        named in a supplied open ticket's body or a comment; no file in its Cargo crate
+#        directory may be in the PR diff; and a fresh gate must have failed
+#        only on parsed test failures. The gate must be fail-fast and end in a
+#        nextest run: its raw exit status must be 100, and the final Summary's
+#        failed, timed-out and leak-failed count must match distinct failing tests.
+#        The keyword scan also rejects leaked-process and other non-test output.
+#        Only `FAIL`, `TIMEOUT`, `SIG*`, and `LEAK*` statuses open test-output
+#        blocks; `PASS`, `SKIP`, `START`, `FLAKY`, and `SLOW` close them. After
+#        the final `Summary [`, only failing-test recaps, `error: test run failed`,
+#        `== leak scan`, orphan-process warnings, scripts/check's full-output line,
+#        and its `FAIL (exit 100)` line are allowed. Any other output refuses
+#        known-flake; it is safe to use the normal merge path for other gates.
+#        A known-flake refusal exits 5 as KNOWN-FLAKE. Nextest statuses `FAIL`, `TIMEOUT`, `SIGSEGV`, `SIGABRT`,
+#        `LEAK`, and `LEAK-FAIL` name tests as `<crate>::<binary> <test>` and
+#        resolve `<crate>` through Cargo metadata.
+#        Once merged, the PR and each used ticket get an audit/sighting comment;
+#        the failed gate output is retained for that acceptance.
 #        Exit 0 merged, 1 gate/CI/push/merge failure (including `gh-ci wait` exit 4
 #        when a required check never started, which needs a bound (`GH_CI_NO_JOBS_AFTER`);
 #        ship-pr sets none. A gate run on the PR merged with current
-#        origin/main counts as a gate failure; a merge that lost the race
+#        origin/main counts as a gate failure unless --known-flake passes the same
+#        acceptance checks on that output; a merge that lost the race
 #        and cannot recover counts as a merge failure), 2 bad usage or a failed
 #        precondition, 3 merge conflict (aborted), a conflict `gh-ci wait` found after the push,
 #        or a conflict merging current origin/main on a non-strict base, 4 patch-id mismatch (needs a new
@@ -172,8 +192,11 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
-  echo "       longest wait: 120 s to find the ready run, its completion up to <timeout> s, 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
+  echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--known-flake <ticket>...] [--by <who>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
+  echo "       --known-flake requires a fail-fast gate ending in nextest (exit 100 for test failures)" >&2
+  echo "       only FAIL/TIMEOUT/SIG*/LEAK* open output blocks; other statuses close them" >&2
+  echo "       after the final Summary, only Fiber's scripts/check tail is accepted; other output refuses" >&2
+  echo "       longest wait: 120 s to find the ready runs, their completion up to <timeout> s, 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
   exit 2
 }
 say() { echo "ship-pr: $*" >&2; }
@@ -188,9 +211,10 @@ refuse() {
     say "$message"
   fi
   say "refused $family"
+  refusal_in_progress=1
   exit 5
 }
-pr_ready=0 merge_attempted=0
+pr_ready=0 merge_attempted=0 refusal_in_progress=0
 # worktree_clean: no tracked changes and no untracked files except the
 # proptest-regressions/ seeds a gate run wrote (untracked, but not dirt).
 worktree_clean() {
@@ -399,27 +423,469 @@ run_gate() {
       export NEXTEST_RETRIES=1
     fi
     PATH="$cargo_slot_dir:$PATH" bash -c "$check_cmd" </dev/null) >"$output_file" 2>&1; then
+    gate_raw_exit=0
     rm -rf "$cargo_slot_dir"
+    gate_output_path=""
     if report_flakes "$output_file"; then
       GH_CI_LOG_LINES=0 bash "$here/gh-ci" panics <"$output_file" >&2
     fi
     rm -f "$output_file"
     return 0
+  else
+    gate_raw_exit=$?
   fi
   rm -rf "$cargo_slot_dir"
+  gate_output_path="$output_file"
   report_flakes "$output_file" || true
   tail -n 20 "$output_file" || true
   GH_CI_LOG_LINES=20 bash "$here/gh-ci" panics <"$output_file"
   printf 'full %s output: %s\n' "$check_label" "$output_file"
+  if [ "${#known_flakes[@]}" -gt 0 ]; then return 2; fi
   return 1
+}
+
+known_metadata_package_root() {
+  local want="${1//-/_}" count manifest root
+  count="$(jq -r --arg want "$want" '[.packages[]? | select((.name | gsub("-"; "_")) == $want)] | length' <<<"$known_cargo_metadata" 2>/dev/null)" \
+    || return 1
+  [ "$count" = 1 ] || return 1
+  manifest="$(jq -r --arg want "$want" '.packages[]? | select((.name | gsub("-"; "_")) == $want) | .manifest_path' <<<"$known_cargo_metadata" 2>/dev/null)" \
+    || return 1
+  case "$manifest" in
+    "$worktree"/Cargo.toml) root="." ;;
+    "$worktree"/*/Cargo.toml) root="${manifest#"$worktree"/}"; root="${root%/Cargo.toml}" ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$root"
+}
+
+known_nextest_failure_fields() {
+  local line="$1" status identifier name
+  if [[ "$line" =~ ^[[:space:]]*TRY[[:space:]]+[0-9]+[[:space:]]+(.*)$ ]]; then
+    line="${BASH_REMATCH[1]}"
+  fi
+  if [[ "$line" =~ ^[[:space:]]*(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK)[[:space:]]+\[[^]]+\]([[:space:]]+\([[:space:]]*[0-9]+/[0-9]+\))?[[:space:]]+([^[:space:]]+)[[:space:]]+(.+)$ ]]; then
+    status="${BASH_REMATCH[1]}"
+    identifier="${BASH_REMATCH[3]}"
+    name="${BASH_REMATCH[4]}"
+  elif [[ "$line" =~ ^[[:space:]]*LEAK-FAIL([[:space:]]+\[[^]]+\])?([[:space:]]+\([[:space:]]*[0-9]+/[0-9]+\))?[[:space:]]+([^[:space:]]+)[[:space:]]+(.+)$ ]]; then
+    status="LEAK-FAIL"
+    identifier="${BASH_REMATCH[3]}"
+    name="${BASH_REMATCH[4]}"
+  else
+    return 1
+  fi
+  [ -n "$identifier" ] && [ -n "$name" ] || return 1
+  printf '%s\t%s\t%s\n' "$status" "$identifier" "$name"
+}
+
+known_is_nextest_failure_line() {
+  [[ "$1" =~ ^[[:space:]]*(TRY[[:space:]]+[0-9]+[[:space:]]+)?(FAIL|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL)[[:space:]]+\[ ]]
+}
+
+known_add_test() {
+  local binary="$1" name="$2" package="$3" i
+  [ -n "$name" ] || return 0
+  for i in "${!known_red_tests[@]}"; do
+    [ "${known_red_tests[$i]}" = "$name" ] \
+      && [ "${known_red_binaries[$i]}" = "$binary" ] \
+      && [ "${known_red_packages[$i]}" = "$package" ] && return 0
+  done
+  known_red_tests+=("$name")
+  known_red_binaries+=("$binary")
+  known_red_packages+=("$package")
+}
+
+known_parse_gate() {
+  local output_file="$1" line binary name package identifier fields status
+  known_red_tests=() known_red_binaries=() known_red_packages=()
+  known_unnamed_failures=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if known_is_nextest_failure_line "$line"; then
+      if fields="$(known_nextest_failure_fields "$line")"; then
+        IFS=$'\t' read -r status identifier name <<<"$fields"
+        binary="$identifier"
+        package=""
+        if [[ "$identifier" == *::* ]]; then
+          package="${identifier%%::*}"
+          binary="${identifier#*::}"
+        else
+          package="$identifier"
+          binary=""
+        fi
+        known_add_test "$binary" "$name" "$package"
+      else
+        known_unnamed_failures=$((known_unnamed_failures + 1))
+      fi
+    fi
+  done <"$output_file"
+}
+
+known_load_metadata() {
+  local metadata
+  if metadata="$(cd "$worktree" && cargo metadata --format-version 1 --no-deps 2>/dev/null)" \
+    && jq -e '.packages | type == "array"' >/dev/null 2>&1 <<<"$metadata"; then
+    known_cargo_metadata="$metadata"
+    return 0
+  fi
+  if [ -n "${HOME:-}" ] && [ -x "$HOME/.cargo/bin/cargo" ] \
+    && metadata="$(cd "$worktree" && "$HOME/.cargo/bin/cargo" metadata --format-version 1 --no-deps 2>/dev/null)" \
+    && jq -e '.packages | type == "array"' >/dev/null 2>&1 <<<"$metadata"; then
+    known_cargo_metadata="$metadata"
+    return 0
+  fi
+  return 1
+}
+
+known_is_nextest_output_header() {
+  [[ "$1" =~ ^[[:space:]]*(stdout|stderr)[[:space:]]+───[[:space:]]*$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*---[[:space:]]+(STDOUT|STDERR): ]]
+}
+
+known_is_nextest_status_line() {
+  [[ "$1" =~ ^[[:space:]]*(TRY[[:space:]]+[0-9]+[[:space:]]+)?(PASS|SKIP|START|FLAKY|SLOW)([[:space:]]|$) ]]
+}
+
+known_is_nextest_summary_line() {
+  [[ "$1" =~ ^[[:space:]]*Summary[[:space:]]+\[ ]]
+}
+
+known_is_nextest_summary_boundary() {
+  [[ "$1" =~ ^[[:space:]]*FAIL[[:space:]]*$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*Summary([[:space:]]|$) ]] \
+    || [[ "$1" =~ ^[[:space:]]*-{4,}[[:space:]]*$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*─{4,}[[:space:]]*$ ]]
+}
+
+known_is_cargo_libtest_line() {
+  [[ "$1" =~ ^[[:space:]]*test[[:space:]]+.+[[:space:]]+[.][.][.][[:space:]]+FAILED$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*----[[:space:]].+[[:space:]]+(stdout|stderr)[[:space:]]+----$ ]] \
+    || [[ "$1" =~ ^[[:space:]]*test[[:space:]]+result:[[:space:]]+FAILED ]]
+}
+
+known_gate_summary_failure_count() {
+  local output_file="$1" line count found="" summary_seen=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^[[:space:]]*Summary[[:space:]] ]]; then
+      summary_seen=1
+      count=0
+      if [[ "$line" =~ ([0-9]+)[[:space:]]+failed([,[:space:]]|$) ]]; then count=$((count + BASH_REMATCH[1])); fi
+      if [[ "$line" =~ ([0-9]+)[[:space:]]+timed[[:space:]]+out([,[:space:]]|$) ]]; then count=$((count + BASH_REMATCH[1])); fi
+      if [[ "$line" =~ ([0-9]+)[[:space:]]+leak-fail([,[:space:]]|$) ]]; then count=$((count + BASH_REMATCH[1])); fi
+      found="$count"
+    fi
+  done <"$output_file"
+  [ "$summary_seen" = 1 ] || return 1
+  printf '%s\n' "$found"
+}
+
+known_gate_has_libtest_output() {
+  local output_file="$1" line in_test_block=0 after_summary=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$after_summary" = 1 ] && known_is_nextest_failure_line "$line"; then
+      continue
+    fi
+    if known_is_nextest_failure_line "$line"; then
+      in_test_block=1
+      continue
+    fi
+    if known_is_nextest_status_line "$line"; then
+      in_test_block=0
+      continue
+    fi
+    if known_is_nextest_summary_boundary "$line"; then
+      in_test_block=0
+      if known_is_nextest_summary_line "$line"; then after_summary=1; fi
+      continue
+    fi
+    if [ "$in_test_block" = 1 ] && known_is_nextest_output_header "$line"; then
+      continue
+    fi
+    [ "$in_test_block" = 1 ] && continue
+    known_is_cargo_libtest_line "$line" && return 0
+  done <"$output_file"
+  return 1
+}
+
+known_gate_has_other_failure() {
+  local output_file="$1" line trimmed lower fields status identifier test_name line_no=0 last_summary_line=0 i matched
+  local in_test_block=0
+  local -a parsed_before_summary=()
+  [ "${known_unnamed_failures:-0}" -eq 0 ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    known_is_nextest_summary_line "$line" && last_summary_line="$line_no"
+  done <"$output_file"
+  [ "$last_summary_line" -gt 0 ] || return 0
+
+  line_no=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [ "$line_no" -gt "$last_summary_line" ]; then
+      [ -z "$trimmed" ] && continue
+      [[ "$trimmed" =~ ^─+$ ]] && continue
+      if known_is_nextest_failure_line "$trimmed"; then
+        fields="$(known_nextest_failure_fields "$trimmed")" || return 0
+        IFS=$'\t' read -r status identifier test_name <<<"$fields"
+        matched=0
+        for i in "${!parsed_before_summary[@]}"; do
+          if [ "${parsed_before_summary[$i]}" = "$test_name" ]; then matched=1; break; fi
+        done
+        [ "$matched" = 1 ] || return 0
+        continue
+      fi
+      case "$trimmed" in
+        'error: test run failed'|'== leak scan'|'scripts/check: FAIL (exit 100)') continue ;;
+        'warning: orphan process '*|'scripts/check: full output in '*) continue ;;
+        *) return 0 ;;
+      esac
+    fi
+
+    if known_is_nextest_failure_line "$line"; then
+      fields="$(known_nextest_failure_fields "$line")" || return 0
+      IFS=$'\t' read -r status identifier test_name <<<"$fields"
+      parsed_before_summary+=("$test_name")
+      in_test_block=1
+      continue
+    fi
+    if known_is_nextest_status_line "$line"; then
+      in_test_block=0
+      continue
+    fi
+    if known_is_nextest_summary_boundary "$line"; then
+      in_test_block=0
+      continue
+    fi
+    if [ "$in_test_block" = 1 ] && known_is_nextest_output_header "$line"; then
+      continue
+    fi
+    if [ "$in_test_block" = 1 ]; then
+      lower="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
+      case "$lower" in
+        'diff in '*|*' leaked process'*|*'process leak'*|*'leaked child process'*|*'unreaped process'*|*'leftover process'*|*'processes remain'*|*'process remained'*|*'process still running'*|*'processes still running'*|*'child process still running'*|*'doctest failed'*|*'doc test failed'*|*'documentation check failed'*|*'rustdoc error'*) return 0 ;;
+      esac
+      continue
+    fi
+    known_is_cargo_libtest_line "$line" && return 0
+    lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+    case "$lower" in
+      'diff in '*|*' leaked process'*|*'process leak'*|*'leaked child process'*|*'unreaped process'*|*'leftover process'*|*'processes remain'*|*'process remained'*|*'process still running'*|*'processes still running'*|*'child process still running'*|*'doctest failed'*|*'doc test failed'*|*'documentation check failed'*|*'rustdoc error'*) return 0 ;;
+      *'error: test failed'*|*'error: test run failed'*|summary*test*fail*|fail) continue ;;
+    esac
+    case "$lower" in
+      *'panicked at'*|*'assertion failed'*|*'assertion left'*) return 0 ;;
+    esac
+    if [[ "$lower" == *error* || "$lower" == *fail* || "$lower" == *failure* ]]; then
+      return 0
+    fi
+  done <"$output_file"
+  return 1
+}
+
+known_ci_run_id() {
+  local runs
+  runs="$(gh run list --repo "$repo" --commit "$pin" --limit 100 \
+    --json databaseId,headSha,status,conclusion,workflowName,name,createdAt 2>/dev/null)" || return 1
+  jq -r --arg head "$pin" '[.[] | select(.headSha == $head and .status == "completed" and (.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral"))] | sort_by(.createdAt // "") | last | .databaseId // empty' <<<"$runs" 2>/dev/null
+}
+
+known_flake_accept() {
+  local output_file="$1" gate_exit="$2" gate_head="$3" expected_gate_head="$4" pin="$5" ci_run="$6"
+  local actual_head test ticket_data ticket_state name_found closed_ticket chosen
+  local base diff_paths gate_base i j found=0 package package_root diff_path red_test_names summary_failures distinct_failures
+  local -a chosen_tickets=()
+
+  actual_head="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid' 2>/dev/null)" \
+    || refuse KNOWN-FLAKE "known-flake check 1 failed: cannot confirm CI on pinned head $pin"
+  [ "$actual_head" = "$pin" ] \
+    || refuse KNOWN-FLAKE "known-flake check 1 failed: CI was not confirmed on exact pinned head $pin (PR head is $actual_head)"
+  [ -n "$ci_run" ] || ci_run="$(known_ci_run_id)"
+  [ -n "$ci_run" ] \
+    || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is not green on exact pinned head $pin or its run id is unavailable"
+  known_ci_run="$ci_run"
+
+  if known_gate_has_libtest_output "$output_file"; then
+    refuse KNOWN-FLAKE "known-flake: gate output is cargo libtest; only nextest gates are supported"
+  fi
+  if [ "$gate_exit" -gt 128 ] && [ "$gate_exit" -lt 256 ]; then
+    refuse KNOWN-FLAKE "known-flake check 4 failed: gate was terminated by signal (exit $gate_exit)"
+  fi
+  [ "$gate_exit" -eq 100 ] \
+    || refuse KNOWN-FLAKE "known-flake check 4 failed: gate exit status was $gate_exit, not nextest's test-failure status 100"
+  known_parse_gate "$output_file"
+  summary_failures="$(known_gate_summary_failure_count "$output_file")" \
+    || refuse KNOWN-FLAKE "known-flake check 4 failed: gate has no final nextest Summary with a failure count"
+  distinct_failures=0
+  for i in "${!known_red_tests[@]}"; do
+    found=0
+    for j in "${!known_red_tests[@]}"; do
+      [ "$j" -ge "$i" ] && break
+      [ "${known_red_tests[$j]}" = "${known_red_tests[$i]}" ] && found=1 && break
+    done
+    [ "$found" = 1 ] || distinct_failures=$((distinct_failures + 1))
+  done
+  [ "$summary_failures" -eq "$distinct_failures" ] \
+    || refuse KNOWN-FLAKE "known-flake check 4 failed: final nextest Summary reports $summary_failures failing tests but $distinct_failures distinct failures were parsed"
+
+  # Check 2: require an exact name on an open ticket in the PR's repository.
+  for i in "${!known_red_tests[@]}"; do
+    test="${known_red_tests[$i]}"
+    name_found=0 closed_ticket="" chosen=""
+    for ticket in "${known_flakes[@]}"; do
+      ticket_data="$(gh issue view "$ticket" --repo "$repo" --json state,body,comments 2>/dev/null)" \
+        || refuse KNOWN-FLAKE "known-flake check 2 failed: cannot read ticket #$ticket for red test '$test'"
+      ticket_state="$(jq -r '.state // ""' <<<"$ticket_data")"
+      if [ "$(jq -r --arg test "$test" '
+        def has_test_name($text; $name):
+          ($name | length) as $n
+          | [range(0; ($text | length)) as $i
+             | select($text[$i:($i + $n)] == $name)
+             | select($i == 0 or (($text[($i - 1):$i] | test("[A-Za-z0-9_:]")) | not))
+             | select(($i + $n) >= ($text | length) or (($text[($i + $n):($i + $n + 1)] | test("[A-Za-z0-9_:]")) | not))
+            ] | length > 0;
+        has_test_name((.body // ""); $test) or any(.comments[]?; has_test_name((.body // ""); $test))
+      ' <<<"$ticket_data")" = true ]; then
+        name_found=1
+        if [ "$ticket_state" = OPEN ]; then chosen="$ticket"; break; else closed_ticket="$ticket"; fi
+      fi
+    done
+    if [ -z "$chosen" ]; then
+      [ "$name_found" = 1 ] \
+        || refuse KNOWN-FLAKE "known-flake check 2 failed: red test '$test' is not named in any supplied ticket"
+      if [ -n "$closed_ticket" ]; then
+        refuse KNOWN-FLAKE "known-flake check 2 failed: red test '$test' is named by closed ticket #$closed_ticket"
+      fi
+      refuse KNOWN-FLAKE "known-flake check 2 failed: no supplied ticket naming red test '$test' is OPEN"
+    fi
+    chosen_tickets+=("$chosen")
+  done
+
+  # Check 3: resolve each test's Cargo package directory and reject any diff path inside it.
+  base="$(git -C "$worktree" merge-base origin/main "$pin" 2>/dev/null)" \
+    || refuse KNOWN-FLAKE "known-flake check 3 failed: cannot find the PR diff base for pinned head $pin"
+  diff_paths="$(git -C "$worktree" diff --name-only --no-renames "$base...$pin" 2>/dev/null)" \
+    || refuse KNOWN-FLAKE "known-flake check 3 failed: cannot read the PR diff for pinned head $pin"
+  if [ "${#known_red_tests[@]}" -gt 0 ]; then
+    red_test_names="${known_red_tests[*]}"
+    known_load_metadata \
+      || refuse KNOWN-FLAKE "known-flake check 3 failed: cannot run cargo metadata in the worktree to resolve red tests: $red_test_names"
+  fi
+  for i in "${!known_red_tests[@]}"; do
+    package="${known_red_packages[$i]}"
+    [ -n "$package" ] \
+      || refuse KNOWN-FLAKE "known-flake check 3 failed: red test '${known_red_tests[$i]}' could not be resolved to a crate by cargo metadata"
+    package_root="$(known_metadata_package_root "$package" 2>/dev/null)" \
+      || refuse KNOWN-FLAKE "known-flake check 3 failed: red test '${known_red_tests[$i]}' could not be resolved to a crate by cargo metadata"
+    while IFS= read -r diff_path || [ -n "$diff_path" ]; do
+      [ -n "$diff_path" ] || continue
+      if [ "$package_root" = . ] || [[ "$diff_path" == "$package_root" || "$diff_path" == "$package_root/"* ]]; then
+        refuse KNOWN-FLAKE "known-flake check 3 failed: red test '${known_red_tests[$i]}' maps to crate directory $package_root, which contains diff path $diff_path"
+      fi
+    done <<<"$diff_paths"
+  done
+
+  # Check 4: the ship's failed gate must be the fresh run on the checked-out head,
+  # and every failure in its saved output must be a parsed test failure.
+  [ -f "$output_file" ] && [ "$gate_head" = "$expected_gate_head" ] \
+    || refuse KNOWN-FLAKE "known-flake check 4 failed: gate did not run fresh on checked head $expected_gate_head"
+  [ "${#known_red_tests[@]}" -gt 0 ] \
+    || refuse KNOWN-FLAKE "known-flake check 4 failed: gate had no parsed test failures (build or non-test failure)"
+  if known_gate_has_other_failure "$output_file"; then
+    refuse KNOWN-FLAKE "known-flake check 4 failed: gate output contains a build or other non-test failure"
+  fi
+
+  gate_base="$(git -C "$worktree" merge-base origin/main "$gate_head" 2>/dev/null)" \
+    || refuse KNOWN-FLAKE "known-flake check 4 failed: cannot verify the fresh gate head $gate_head"
+  [ -n "$gate_base" ] || refuse KNOWN-FLAKE "known-flake check 4 failed: cannot verify the fresh gate head $gate_head"
+  if [ "$known_acceptance_used" = 1 ] && [ "$known_report_pin" != "$pin" ]; then
+    known_report_tests=() known_report_binaries=() known_report_tickets=() known_report_outputs=() known_ticket_ids=()
+  fi
+  known_acceptance_used=1
+  known_report_pin="$pin"
+  known_diff_paths="$diff_paths"
+  for i in "${!known_red_tests[@]}"; do
+    known_report_tests+=("${known_red_tests[$i]}")
+    known_report_binaries+=("${known_red_binaries[$i]}")
+    known_report_tickets+=("${chosen_tickets[$i]}")
+    known_report_outputs+=("$output_file")
+    ticket="${chosen_tickets[$i]}"
+    found=0
+    for j in "${!known_ticket_ids[@]}"; do
+      if [ "${known_ticket_ids[$j]}" = "$ticket" ]; then found=1; break; fi
+    done
+    [ "$found" = 1 ] || known_ticket_ids+=("$ticket")
+  done
+}
+
+post_known_flake_comments() {
+  local pr_body ticket_body ticket path i rc=0
+  local -a paths=()
+  [ "$known_acceptance_used" = 1 ] || return 0
+  while IFS= read -r path || [ -n "$path" ]; do [ -n "$path" ] && paths+=("$path"); done <<<"$known_diff_paths"
+  pr_body="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-known-flake-pr.XXXXXX")" \
+    || die 1 "cannot create known-flake PR comment"
+  {
+    printf 'Known-flake merge accepted with --by flywheel.\n\nHead SHA: %s\nCI run id: %s\n\nRed tests:\n' "$pin" "$known_ci_run"
+    for i in "${!known_report_tests[@]}"; do
+      printf -- '- %s — ticket #%s — gate output: %s — CI run id: %s' "${known_report_tests[$i]}" "${known_report_tickets[$i]}" "${known_report_outputs[$i]}" "$known_ci_run"
+      [ -z "${known_report_binaries[$i]}" ] || printf ' (binary %s)' "${known_report_binaries[$i]}"
+      printf '\n'
+    done
+    printf '\nDiff paths:\n'
+    if [ "${#paths[@]}" -eq 0 ]; then printf -- '- (none)\n'; else printf -- '- %s\n' "${paths[@]}"; fi
+    printf "\nThe script checked the red tests' crate directories against the diff; flywheel judged that the PR touches nothing the tests exercise.\n"
+  } >"$pr_body"
+  gh pr comment "$pr" --repo "$repo" --body-file "$pr_body" >&2 || rc=$?
+  rm -f "$pr_body"
+  [ "$rc" = 0 ] || die 1 "cannot post the known-flake audit comment on PR $pr after merge"
+
+  for ticket in "${known_ticket_ids[@]}"; do
+    ticket_body="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-known-flake-ticket.XXXXXX")" \
+      || die 1 "cannot create known-flake ticket comment"
+    {
+      printf 'Sighting from PR #%s.\n\nHead SHA: %s\nCI run id: %s\n\n' "$pr" "$pin" "$known_ci_run"
+      for i in "${!known_report_tests[@]}"; do
+        [ "${known_report_tickets[$i]}" = "$ticket" ] || continue
+        printf -- '- Red test %s — gate output: %s' "${known_report_tests[$i]}" "${known_report_outputs[$i]}"
+        [ -z "${known_report_binaries[$i]}" ] || printf ' (binary %s)' "${known_report_binaries[$i]}"
+        printf '\n'
+      done
+    } >"$ticket_body"
+    rc=0
+    gh issue comment "$ticket" --repo "$repo" --body-file "$ticket_body" >&2 || rc=$?
+    rm -f "$ticket_body"
+    [ "$rc" = 0 ] || die 1 "cannot post the known-flake sighting on ticket #$ticket after merge"
+  done
 }
 
 [ $# -ge 1 ] || usage
 ship_args=("$@")
 pr="$1"; shift
 case "$pr" in ''|*[!0-9]*) usage ;; esac
-repo="" reviewed="" worktree="" gate="" merge_check="" timeout=7200 body_has=() body_ends="" outside_plan=() unverified="" allow_commit_closes="" keep_branch="" no_mutants_label="" mutants_gate=""
+repo="" reviewed="" worktree="" gate="" merge_check="" timeout=7200 body_has=() body_ends="" outside_plan=() known_flakes=() known_by="" known_by_seen="" unverified="" allow_commit_closes="" keep_branch="" no_mutants_label="" mutants_gate=""
 while [ $# -gt 0 ]; do
+  case "$1" in
+    --known-flake)
+      shift
+      count=0
+      while [ $# -gt 0 ] && [[ "$1" != --* ]]; do
+        case "$1" in ''|*[!0-9]*) usage ;; esac
+        known_flakes+=("$1")
+        count=$((count + 1))
+        shift
+      done
+      [ "$count" -gt 0 ] || usage
+      continue ;;
+    --by)
+      [ "$#" -ge 2 ] && [ -z "$known_by_seen" ] || usage
+      [ -n "$2" ] && [[ "$2" != *$'\n'* ]] || usage
+      known_by="$2"
+      known_by_seen=1
+      shift 2
+      continue ;;
+  esac
   case "$1" in
     --allow-commit-closes) allow_commit_closes=1; shift; continue ;;
     --keep-branch) keep_branch="requested by --keep-branch"; shift; continue ;;
@@ -444,6 +910,11 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$repo" ] && [ -n "$reviewed" ] && [ -n "$worktree" ] || usage
 case "$timeout" in ''|*[!0-9]*) usage ;; esac
+if [ "${#known_flakes[@]}" -gt 0 ] && [ "$known_by" != flywheel ]; then
+  refuse KNOWN-FLAKE "--known-flake requires --by flywheel"
+fi
+gate_output_path="" gate_red_output="" gate_red_head="" gate_raw_exit=0 known_acceptance_used=0 known_ci_run="" known_diff_paths="" known_report_pin=""
+declare -a known_report_tests=() known_report_binaries=() known_report_tickets=() known_report_outputs=() known_ticket_ids=()
 if [ -n "$unverified" ]; then
   [ -f "$unverified" ] && [ -r "$unverified" ] || die 2 "cannot read --unverified-fixes $unverified"
   grep -q '[^[:space:]]' "$unverified" || die 2 "--unverified-fixes $unverified has no findings"
@@ -1093,7 +1564,14 @@ check_mutants_gate() {
 if [ -n "$gate" ]; then
   gate_preflight
   say "running gate"
-  run_gate || die 1 "gate failed"
+  gate_rc=0
+  run_gate || gate_rc=$?
+  if [ "$gate_rc" -eq 2 ] && [ "${#known_flakes[@]}" -gt 0 ]; then
+    gate_red_output="$gate_output_path"
+    gate_red_head="$head0"
+  elif [ "$gate_rc" -ne 0 ]; then
+    die 1 "gate failed"
+  fi
   [ "$(git -C "$worktree" rev-parse HEAD)" = "$head0" ] && worktree_clean \
     || die 1 "the gate changed the worktree; commit nothing from a gate"
 fi
@@ -1128,6 +1606,26 @@ while :; do
       merge_main
     fi
     pin="$(git -C "$worktree" rev-parse HEAD)"
+    if [ "$known_acceptance_used" = 1 ] && [ "$known_report_pin" != "$pin" ]; then
+      known_report_tests=() known_report_binaries=() known_report_tickets=() known_report_outputs=() known_ticket_ids=()
+      known_acceptance_used=0 known_report_pin="" known_ci_run="" known_diff_paths=""
+    fi
+    if [ "${#known_flakes[@]}" -gt 0 ] && [ -n "$gate_red_output" ] && [ "$gate_red_head" != "$pin" ]; then
+      say "running gate on the pinned head after merging origin/main"
+      gate_rc=0
+      run_gate || gate_rc=$?
+      if [ "$gate_rc" -eq 0 ]; then
+        gate_red_output="" gate_red_head=""
+      elif [ "$gate_rc" -eq 2 ]; then
+        gate_red_output="$gate_output_path"
+        gate_red_head="$pin"
+      else
+        die_after_ready 1 "gate failed on pinned head $pin"
+      fi
+      if [ "$(git -C "$worktree" rev-parse HEAD)" != "$pin" ] || ! worktree_clean; then
+        die_after_ready 1 "the gate changed the worktree; commit nothing from a gate"
+      fi
+    fi
   
     # Step 5: the reviewed patch-id must match the new head's diff against origin/main (review-loop's Identity rule).
     if [ "$(patch_id "$reviewed")" != "$(patch_id "$pin")" ]; then
@@ -1160,9 +1658,9 @@ while :; do
     if [ "$rc" -ne 0 ]; then
       printf '%s\n' "$ci_out"
       case "$rc" in
-        124) exit_after_ready 124 "CI timed out" ;;
-        3) die_after_ready 3 "PR conflicts with origin/main after the push; merge origin/main again, then rerun" ;;
-        4) die_after_ready 1 "CI never started: a required check has no check run" ;;
+        124) [ -z "$gate_red_output" ] || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is not green on exact pinned head $pin"; exit_after_ready 124 "CI timed out" ;;
+        3) [ -z "$gate_red_output" ] || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is not green on exact pinned head $pin"; die_after_ready 3 "PR conflicts with origin/main after the push; merge origin/main again, then rerun" ;;
+        4) [ -z "$gate_red_output" ] || refuse KNOWN-FLAKE "known-flake check 1 failed: CI never started on exact pinned head $pin"; die_after_ready 1 "CI never started: a required check has no check run" ;;
         *)
           if [ -z "$ci_rerun_done" ]; then
             if reason="$(ci_outside_reason 2>/dev/null)"; then
@@ -1218,16 +1716,16 @@ while :; do
                 if [ "$rc" -ne 0 ]; then
                   printf '%s\n' "$ci_out"
                   case "$rc" in
-                    124) exit_after_ready 124 "CI timed out" ;;
-                    3) die_after_ready 3 "PR conflicts with origin/main after the push; merge origin/main again, then rerun" ;;
-                    4) die_after_ready 1 "CI never started: a required check has no check run" ;;
-                    *) die_after_ready 1 "CI failed" ;;
+                    124) [ -z "$gate_red_output" ] || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is not green on exact pinned head $pin"; exit_after_ready 124 "CI timed out" ;;
+                    3) [ -z "$gate_red_output" ] || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is not green on exact pinned head $pin"; die_after_ready 3 "PR conflicts with origin/main after the push; merge origin/main again, then rerun" ;;
+                    4) [ -z "$gate_red_output" ] || refuse KNOWN-FLAKE "known-flake check 1 failed: CI never started on exact pinned head $pin"; die_after_ready 1 "CI never started: a required check has no check run" ;;
+                    *) [ -z "$gate_red_output" ] || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is not green on exact pinned head $pin"; die_after_ready 1 "CI failed" ;;
                   esac
                 fi
               fi
             fi
           fi
-          [ "$rc" -eq 0 ] || die_after_ready 1 "CI failed"
+          [ "$rc" -eq 0 ] || { [ -z "$gate_red_output" ] || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is not green on exact pinned head $pin"; die_after_ready 1 "CI failed"; }
           ;;
       esac
     fi
@@ -1242,7 +1740,15 @@ while :; do
     retries=$((retries + 1))
     say "origin/main moved during CI; merging again (retry $retries of 3)"
   done
-  
+
+  if [ "${#known_flakes[@]}" -gt 0 ] && [ -n "$gate_red_output" ]; then
+    known_ci_run="$(known_ci_run_id)" \
+      || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is green on exact pinned head $pin but its run id could not be read"
+    [ -n "$known_ci_run" ] \
+      || refuse KNOWN-FLAKE "known-flake check 1 failed: CI is green on exact pinned head $pin but no successful CI run id was found"
+    known_flake_accept "$gate_red_output" "$gate_raw_exit" "$gate_red_head" "$pin" "$pin" "$known_ci_run"
+  fi
+
   # Step 7: on a non-strict base, check the PR merged with current origin/main.
   # The merge is a throwaway commit in --worktree; nothing is pushed, and the
   # worktree goes back to the pinned head on every path.
@@ -1258,7 +1764,7 @@ while :; do
       guard_restore() {
         git -C "$worktree" reset -q --hard "$pin" >&2 || die_after_ready 1 "failed to restore pinned head ${pin:0:8}"
       }
-      trap 'guard_rc=$?; trap - EXIT INT TERM; guard_restore; if [ "$guard_rc" -ne 0 ]; then exit_after_ready "$guard_rc" "gate aborted"; else exit "$guard_rc"; fi' EXIT
+      trap 'guard_rc=$?; trap - EXIT INT TERM; guard_restore; if [ "$guard_rc" -ne 0 ] && [ "$refusal_in_progress" != 1 ]; then exit_after_ready "$guard_rc" "gate aborted"; else exit "$guard_rc"; fi' EXIT
       trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 143 "gate interrupted"' TERM
       trap 'trap - EXIT INT TERM; guard_restore; exit_after_ready 130 "gate interrupted"' INT
       merge_check_moves=0
@@ -1269,15 +1775,32 @@ while :; do
           trap - EXIT INT TERM
           die_after_ready 3 "PR conflicts with current origin/main; merge origin/main, then rerun"
         fi
-        if ! run_gate "$step7_cmd" "$step7_check"; then
+        step7_gate_head="$(git -C "$worktree" rev-parse HEAD)"
+        step7_gate_rc=0
+        run_gate "$step7_cmd" "$step7_check" || step7_gate_rc=$?
+        if [ "${#known_flakes[@]}" -gt 0 ] \
+          && { [ "$(git -C "$worktree" rev-parse HEAD)" != "$step7_gate_head" ] || ! worktree_clean; }; then
           guard_restore
           trap - EXIT INT TERM
-          die_after_ready 1 "the PR merged with current origin/main fails the $step7_check"
+          refuse KNOWN-FLAKE "known-flake check 4 failed: gate changed the merged-tree checkout instead of testing fresh head $step7_gate_head"
+        fi
+        if [ "$step7_gate_rc" -ne 0 ]; then
+          if [ "$step7_check" = gate ] && [ "$step7_gate_rc" -eq 2 ] && [ "${#known_flakes[@]}" -gt 0 ]; then
+            known_flake_accept "$gate_output_path" "$gate_raw_exit" "$step7_gate_head" "$step7_gate_head" "$pin" "$known_ci_run"
+          else
+            guard_restore
+            trap - EXIT INT TERM
+            die_after_ready 1 "the PR merged with current origin/main fails the $step7_check"
+          fi
         fi
         if [ "$step7_check" = gate ]; then
           guard_restore
           trap - EXIT INT TERM
-          say "gate passes on the PR merged with current origin/main"
+          if [ "$step7_gate_rc" -eq 2 ]; then
+            say "gate on the PR merged with current origin/main failed only on ticketed known flakes"
+          else
+            say "gate passes on the PR merged with current origin/main"
+          fi
           break
         fi
         git -C "$worktree" fetch -q origin +refs/heads/main:refs/remotes/origin/main >&2 || die_after_ready 1 "git fetch origin main failed"
@@ -1387,6 +1910,8 @@ done
 [ -n "$merged" ] || { [ -n "$merge_failed" ] && die 1 "gh pr merge failed"; die 1 "merge status could not be confirmed after 12 polls; worktree left in place"; }
 
 if [ "$repo" = "aakshintala/switchyard" ]; then fast_forward_agents; fi
+
+if [ "$known_acceptance_used" = 1 ]; then post_known_flake_comments; fi
 
 # Step 9: clean up from the common git dir, never from inside the worktree being removed.
 common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)"

@@ -1,0 +1,24 @@
+        FAIL [  40.810s] (5338/7469) main::hub_daemon keeper::a_second_crash_leaves_one_keeper_the_log_and_the_third_resume_orphans_the_other
+  stdout ───
+
+    running 1 test
+    test keeper::a_second_crash_leaves_one_keeper_the_log_and_the_third_resume_orphans_the_other ... FAILED
+
+    failures:
+
+    failures:
+        keeper::a_second_crash_leaves_one_keeper_the_log_and_the_third_resume_orphans_the_other
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 222 filtered out; finished in 40.80s
+
+  stderr ───
+
+    thread 'keeper::a_second_crash_leaves_one_keeper_the_log_and_the_third_resume_orphans_the_other' (466206232) panicked at crates/main/tests/hub_daemon/keeper.rs:177:9:
+    waited 39.999950625s for keeper refuse-only socket to accept
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'keeper::a_second_crash_leaves_one_keeper_the_log_and_the_third_resume_orphans_the_other' (466206232) panicked at crates/main/tests/hub_daemon/keeper.rs:190:9:
+    waited until the deadline for keeper refuse-only socket to accept; last connect error: Connection refused (os error 61); socket path /home/user/work/fiber-worktrees/tmp/fh-1a133950/h/run/s_23664bf9cc34146f: present (file type: FileType { is_file: false, is_dir: false, is_symlink: false, .. })
+    keeper dead (no process under the keeper pattern); bind history unobservable
+    session log tail:
+    {"kind":"session_started","session_id":"s_23664bf9cc34146f","ts":1794493121980,"schema_version":1,"seq":0,"payload":{"variables":{"names":["FIBER_CHECK_RUN","FIBER_HOME","FIBER_TEST_FAKE_KEY","HOME","__CF_USER_TEXT_ENCODING"],"path":"/home/user/.cache/delegate/jobs/shim:/home/user/.cache/delegate/jobs/shim:/home/user/.cache/delegate/jobs/shim:/home/user/.bun/bin:/home/user/.local/bin:/home/user/.agents/bin:/home/user/.local/bin:/home/user/.opencode/bin:/home/user/.local/bin:/home/user/.cargo/bin:/home/user/.bun/bin:/home/user/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin","source":"inherited"},"workspace":"/home/user/work/fiber-worktrees/tmp/fh-1a133950/w"}}
