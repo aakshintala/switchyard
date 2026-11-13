@@ -884,8 +884,7 @@ run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md"
 expect_verdict "TKT tkt-job DONE id=stub-1 head=bbbb commits=1 gate=PASS log=*" "resume"
 grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" || fail "resume calls delegate resume"
 [ "$(bash "$TKT_STATE" "$S" get job.lane)" = "stub-1" ] || fail "resume stores the new id"
-expected_resume_hash="$(shasum -a 256 <"$T/resume-prompt.md" | awk '{print $1}')"
-[ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$expected_resume_hash" ] || fail "resume stores the new prompt hash"
+[ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "old-prompt-hash" ] || fail "resume keeps the slot prompt hash"
 ! grep -q '^resumemodel=' "$T/stub.log" || fail "resume without --model passes no --model"
 grep -q " tkt-job gate slot=lane job=stub-1 cmd64=$original_cmd64 env64=$original_env64" "$CDIR/tkt.journal" || fail "resume journals original gate command and env for new id"
 
@@ -899,6 +898,25 @@ run_job --slot lane --resume old-9 --prompt "$T/resume-prompt.md" --model openai
 grep -q "^resume|id=old-9|prompt=$T/resume-prompt.md|new=stub-1$" "$T/stub.log" || fail "resume with --model calls delegate resume"
 grep -qx 'resumemodel=openai/gpt-6-luna:xhigh' "$T/stub.log" || fail "resume passes --model to delegate resume"
 ! grep -q ' tkt-job gate slot=lane job=stub-1 ' "$CDIR/tkt.journal" || fail "resume without an original gate line journals no inherited gate"
+expected_resume_hash="$(shasum -a 256 <"$T/resume-prompt.md" | awk '{print $1}')"
+[ "$(bash "$TKT_STATE" "$S" get job.lane.prompt)" = "$expected_resume_hash" ] || fail "resume of a legacy slot stores the resume prompt hash"
+
+# --- a resumed slot still matches the brief it was first dispatched from ------
+setup_case resume-then-brief
+reset_stub
+make_record stub-1 BLOCKED none 0 1 0 none stub-2
+make_record stub-2 DONE 0 1 2 0
+run_job --slot lane --brief "$T/brief.md"
+grep -q "^run|.*|prompt=$T/brief.md$" "$T/stub.log" || fail "resume-then-brief dispatches from the brief: $(cat "$CDIR/stderr.txt")"
+run_job --slot lane --resume stub-1 --prompt "$T/resume-prompt.md"
+[ "$RC" -eq 0 ] || fail "resume-then-brief resume exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+run_job --slot lane --brief "$T/brief.md"
+[ "$RC" -eq 0 ] || fail "original brief after a resume exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+! grep -q 'different prompt' "$CDIR/stderr.txt" || fail "original brief after a resume reports no different prompt"
+expect_verdict "TKT tkt-job DONE id=stub-2 head=bbbb commits=1 gate=PASS reused=stub-2 *" "original brief after a resume"
+[ "$(grep -c '^run|' "$T/stub.log")" -eq 1 ] || fail "original brief after a resume dispatches no new job"
+[ "$(grep -c '^resume|' "$T/stub.log")" -eq 1 ] || fail "original brief after a resume resumes nothing"
+[ "$(grep -c '^watch|stub-2' "$T/stub.log")" -eq 2 ] || fail "original brief after a resume watches the stored job"
 
 # --- a stored job refuses a prompt that differs from its dispatch -------------
 setup_case prompt-changed

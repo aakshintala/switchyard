@@ -374,7 +374,12 @@ if [ -n "$resume" ]; then
   prompt_hash="$(shasum -a 256 <"$prompt" | awk '{print $1}')"
   jobid="$("$delegate" resume "$resume" --prompt-file "$prompt" ${model_args[@]+"${model_args[@]}"} ${gate_args[@]+"${gate_args[@]}"} | head -n 1)"
   tkt set "job.$slot" "$jobid"
-  tkt set "job.$slot.prompt" "$prompt_hash"
+  # A resume continues the slot's job, so it keeps the slot's prompt identity:
+  # the brief the slot was dispatched from still matches on the next call.
+  # Only a legacy slot with no stored hash takes the resume prompt's.
+  if [ -z "$(tkt get "job.$slot.prompt" 2>/dev/null || true)" ]; then
+    tkt set "job.$slot.prompt" "$prompt_hash"
+  fi
   tkt journal "tkt-job dispatch slot=$slot id=$jobid resume=$resume"
   journal_gate_command
   fresh=1
