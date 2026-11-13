@@ -2448,7 +2448,7 @@ prepare_real_tail_known_flake() {
 jq -nc --arg name "$REAL_TEST" '{state:"OPEN",body:("known flake: " + $name),createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
 jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/main/Cargo.toml" \
   '{packages:[{name:"main",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
-REAL_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; printf '%s\\n' 'Summary [ 40.810s] 1 test run: 0 passed, 1 failed' 'FAIL' 'error: test run failed' '== leak scan' 'scripts/check: full output in /tmp/check.log' 'scripts/check: FAIL (exit 100)'; exit 100"
+REAL_GATE="cat '$SCRIPT_DIR/fixtures/ship-pr-known-flake-real.txt'; printf '%s\\n' 'Summary [ 40.810s] 1 test run: 0 passed, 1 failed' 'FAIL [  40.810s] (5338/7469) main::hub_daemon $REAL_TEST' 'error: test run failed' '== leak scan' 'scripts/check: full output in /tmp/check.log' 'scripts/check: FAIL (exit 100)'; exit 100"
 ship --known-flake 166 --by flywheel --gate "$REAL_GATE" --keep-branch
 expect 0 "known-flake real nextest panic block"
 [ -f "$ST/comment.txt" ] || fail "real nextest PR comment posted"
@@ -2575,7 +2575,34 @@ grep -Fq 'known-flake: gate output is cargo libtest; only nextest gates are supp
   || fail "cargo unit-test source log refusal: [$ERR]"
 no_merge "cargo unit-test source refusal"
 
-# A compile error or an unrelated non-test failure is not an accepted flake.
+# A PASS status closes blocks and cannot hide libtest output from the unsupported-format check.
+prepare_known_flake
+PASS_LIBTEST_GATE="printf '%s\\n' 'PASS [ 0.001s] crate_name::integration_tests tests::ok' 'test tests::flaky_lib ... FAILED' 'failures:' 'test result: FAILED. 0 passed; 1 failed' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$PASS_LIBTEST_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'known-flake: gate output is cargo libtest; only nextest gates are supported' <<<"$ERR" \
+  || fail "PASS before libtest refuses: [$ERR]"
+no_merge "PASS before libtest refusal"
+
+# A PASS line cannot open a test block that hides a following compile error.
+prepare_known_flake
+PASS_BUILD_GATE="printf '%s\\n' 'PASS [ 0.001s] crate_name::integration_tests tests::ok' 'error: could not compile \`fixture\` (test \"unit\")' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$PASS_BUILD_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" \
+  || fail "PASS does not hide compile error: [$ERR]"
+no_merge "PASS then compile error refusal"
+
+# A keyword-free tool failure after Summary is outside the post-summary allowlist.
+prepare_known_flake
+MACHETE_AFTER_SUMMARY_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests $KNOWN_TEST' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed' 'cargo-machete found the following unused dependencies in crates/main:'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$MACHETE_AFTER_SUMMARY_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq 'gate output contains a build or other non-test failure' <<<"$ERR" \
+  || fail "cargo-machete after Summary refuses: [$ERR]"
+no_merge "cargo-machete after Summary refusal"
+
+# Any other non-test failure is refused before accepting known flakes.
 prepare_known_flake
 ship --known-flake 166 --by flywheel --gate "echo 'error[E0425]: cannot find value'; exit 1" --keep-branch
 expect_refused KNOWN-FLAKE

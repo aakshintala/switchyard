@@ -113,6 +113,12 @@
 #        nextest run: its raw exit status must be 100, and the final Summary's
 #        failed, timed-out and leak-failed count must match distinct failing tests.
 #        The keyword scan also rejects leaked-process and other non-test output.
+#        Only `FAIL`, `TIMEOUT`, `SIG*`, and `LEAK*` statuses open test-output
+#        blocks; `PASS`, `SKIP`, `START`, `FLAKY`, and `SLOW` close them. After
+#        the final `Summary [`, only failing-test recaps, `error: test run failed`,
+#        `== leak scan`, orphan-process warnings, scripts/check's full-output line,
+#        and its `FAIL (exit 100)` line are allowed. Any other output refuses
+#        known-flake; it is safe to use the normal merge path for other gates.
 #        A known-flake refusal exits 5 as KNOWN-FLAKE. Nextest statuses `FAIL`, `TIMEOUT`, `SIGSEGV`, `SIGABRT`,
 #        `LEAK`, and `LEAK-FAIL` name tests as `<crate>::<binary> <test>` and
 #        resolve `<crate>` through Cargo metadata.
@@ -173,6 +179,8 @@ set -euo pipefail
 usage() {
   echo "usage: ship-pr <pr> --repo OWNER/NAME --reviewed <sha> --worktree <path> [--gate '<cmd>'] [--merge-check '<cmd>'] [--timeout <s>] [--body-has <prefix>]... [--body-ends <text>] [--outside-plan <path>]... [--known-flake <ticket>...] [--by <who>] [--unverified-fixes <findings file>] [--allow-commit-closes] [--keep-branch] [--no-mutants-label <reason>] [--mutants-gate]" >&2
   echo "       --known-flake requires a fail-fast gate ending in nextest (exit 100 for test failures)" >&2
+  echo "       only FAIL/TIMEOUT/SIG*/LEAK* open output blocks; other statuses close them" >&2
+  echo "       after the final Summary, only Fiber's scripts/check tail is accepted; other output refuses" >&2
   echo "       longest wait: 5 CI waits x <timeout> s, plus the gate; run it in the background with no shell timeout" >&2
   exit 2
 }
@@ -520,8 +528,11 @@ known_is_nextest_output_header() {
 }
 
 known_is_nextest_status_line() {
-  [[ "$1" =~ ^[[:space:]]*FAIL[[:space:]]*$ ]] && return 1
-  [[ "$1" =~ ^[[:space:]]*(TRY[[:space:]]+[0-9]+[[:space:]]+)?(FAIL|PASS|TIMEOUT|SIGSEGV|SIGABRT|LEAK|LEAK-FAIL|SKIP|START)([[:space:]]|$) ]]
+  [[ "$1" =~ ^[[:space:]]*(TRY[[:space:]]+[0-9]+[[:space:]]+)?(PASS|SKIP|START|FLAKY|SLOW)([[:space:]]|$) ]]
+}
+
+known_is_nextest_summary_line() {
+  [[ "$1" =~ ^[[:space:]]*Summary[[:space:]]+\[ ]]
 }
 
 known_is_nextest_summary_boundary() {
@@ -554,22 +565,25 @@ known_gate_summary_failure_count() {
 }
 
 known_gate_has_libtest_output() {
-  local output_file="$1" line in_test_block=0
+  local output_file="$1" line in_test_block=0 after_summary=0
   while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$after_summary" = 1 ] && known_is_nextest_failure_line "$line"; then
+      continue
+    fi
     if known_is_nextest_failure_line "$line"; then
       in_test_block=1
       continue
     fi
-    if known_is_nextest_output_header "$line"; then
-      in_test_block=1
-      continue
-    fi
     if known_is_nextest_status_line "$line"; then
-      in_test_block=1
+      in_test_block=0
       continue
     fi
     if known_is_nextest_summary_boundary "$line"; then
       in_test_block=0
+      if known_is_nextest_summary_line "$line"; then after_summary=1; fi
+      continue
+    fi
+    if [ "$in_test_block" = 1 ] && known_is_nextest_output_header "$line"; then
       continue
     fi
     [ "$in_test_block" = 1 ] && continue
@@ -579,46 +593,70 @@ known_gate_has_libtest_output() {
 }
 
 known_gate_has_other_failure() {
-  local output_file="$1" line lower in_test_block=0 after_summary=0 trimmed
+  local output_file="$1" line trimmed lower fields status identifier test_name line_no=0 last_summary_line=0 i matched
+  local in_test_block=0
+  local -a parsed_before_summary=()
   [ "${known_unnamed_failures:-0}" -eq 0 ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$after_summary" = 1 ] \
-      && { known_is_nextest_failure_line "$line" || known_is_nextest_status_line "$line"; }; then
-      continue
+    line_no=$((line_no + 1))
+    known_is_nextest_summary_line "$line" && last_summary_line="$line_no"
+  done <"$output_file"
+  [ "$last_summary_line" -gt 0 ] || return 0
+
+  line_no=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    if [ "$line_no" -gt "$last_summary_line" ]; then
+      [ -z "$trimmed" ] && continue
+      [[ "$trimmed" =~ ^─+$ ]] && continue
+      if known_is_nextest_failure_line "$trimmed"; then
+        fields="$(known_nextest_failure_fields "$trimmed")" || return 0
+        IFS=$'\t' read -r status identifier test_name <<<"$fields"
+        matched=0
+        for i in "${!parsed_before_summary[@]}"; do
+          if [ "${parsed_before_summary[$i]}" = "$test_name" ]; then matched=1; break; fi
+        done
+        [ "$matched" = 1 ] || return 0
+        continue
+      fi
+      case "$trimmed" in
+        'error: test run failed'|'== leak scan'|'scripts/check: FAIL (exit 100)') continue ;;
+        'warning: orphan process '*|'scripts/check: full output in '*) continue ;;
+        *) return 0 ;;
+      esac
     fi
+
     if known_is_nextest_failure_line "$line"; then
-      known_nextest_failure_fields "$line" >/dev/null || return 0
-      in_test_block=1
-      continue
-    fi
-    if known_is_nextest_output_header "$line"; then
+      fields="$(known_nextest_failure_fields "$line")" || return 0
+      IFS=$'\t' read -r status identifier test_name <<<"$fields"
+      parsed_before_summary+=("$test_name")
       in_test_block=1
       continue
     fi
     if known_is_nextest_status_line "$line"; then
-      in_test_block=1
+      in_test_block=0
       continue
     fi
     if known_is_nextest_summary_boundary "$line"; then
       in_test_block=0
-      after_summary=1
+      continue
+    fi
+    if [ "$in_test_block" = 1 ] && known_is_nextest_output_header "$line"; then
       continue
     fi
     if [ "$in_test_block" = 1 ]; then
-      trimmed="${line#"${line%%[![:space:]]*}"}"
       lower="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
       case "$lower" in
         'diff in '*|*' leaked process'*|*'process leak'*|*'leaked child process'*|*'unreaped process'*|*'leftover process'*|*'processes remain'*|*'process remained'*|*'process still running'*|*'processes still running'*|*'child process still running'*|*'doctest failed'*|*'doc test failed'*|*'documentation check failed'*|*'rustdoc error'*) return 0 ;;
       esac
       continue
     fi
+    known_is_cargo_libtest_line "$line" && return 0
     lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
     case "$lower" in
       'diff in '*|*' leaked process'*|*'process leak'*|*'leaked child process'*|*'unreaped process'*|*'leftover process'*|*'processes remain'*|*'process remained'*|*'process still running'*|*'processes still running'*|*'child process still running'*|*'doctest failed'*|*'doc test failed'*|*'documentation check failed'*|*'rustdoc error'*) return 0 ;;
-    esac
-    case "$lower" in
       *'error: test failed'*|*'error: test run failed'*|summary*test*fail*|fail) continue ;;
-      'scripts/check: fail (exit 100)') continue ;;
     esac
     case "$lower" in
       *'panicked at'*|*'assertion failed'*|*'assertion left'*) return 0 ;;
