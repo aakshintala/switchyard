@@ -11,7 +11,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-start.XXXXXX")"
 T="$(cd "$T" && pwd)"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/tktbin" "$T/cases"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/tktbin"
+export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/tktbin" FW_RUN="$T/fw-run"
 export PATH="$T/bin:$PATH"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t
 mkdir -p "$HOME/.agents/skills/planning/briefs"
@@ -139,6 +139,7 @@ setup() {
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobout"
   CDIR="$T/cases/$1"; rm -rf "$CDIR"; mkdir -p "$CDIR"
+  FW_RUN="$CDIR/fw-run"; export FW_RUN; mkdir -p "$FW_RUN"
   CASE_TEMPLATE="$TEMPLATES/$2"
   cp -R "$CASE_TEMPLATE/." "$CDIR/"
   ORIGIN="$CDIR/origin.git"; SEED="$CDIR/seed"; CLONE="$CDIR/clone"
@@ -249,6 +250,39 @@ run_start
 want "CURRENT " 0 rerun
 [ "$(grep -c '^body_has=' "$RUN/widget-42.state")" -eq 2 ] || fail "rerun: body_has duplicated"
 [ "$(grep -c '^model\.lane=' "$RUN/widget-42.state")" -eq 1 ] || fail "rerun: model.lane duplicated"
+# Resume the same physical run through a symlinked --run path. The duplicate
+# scan must compare physical paths, not spellings of the same state file.
+setup same-run-physical ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 same-run-physical-first
+ln -s "$RUN" "$CDIR/run-alias"
+RUN="$CDIR/run-alias"; reload
+run_start --no-preflight
+want "SKIPPED filing=" 0 same-run-physical-resume
+
+# A second run beside the existing one is refused before its state is written.
+setup duplicate-sibling ONE AGAINST
+run_start --no-preflight
+want "SKIPPED filing=" 0 duplicate-sibling-first
+existing_state="$(cd "$RUN" && pwd -P)/widget-42.state"; existing_run="$RUN"
+RUN="$CDIR/sibling-run"; reload
+run_start --no-preflight
+want "DUPLICATE state=$existing_state run=$existing_run" 2 duplicate-sibling
+case "$OUT" in *"resume with --run $existing_run"*) ;; *) fail "duplicate-sibling: output misses resume hint: $OUT" ;; esac
+[ ! -e "$RUN/widget-42.state" ] || fail "duplicate-sibling: second state was written"
+
+# A run nested under FW_RUN cannot create a second state for a root-level run.
+setup duplicate-child ONE AGAINST
+RUN="$FW_RUN"; reload
+run_start --no-preflight
+want "SKIPPED filing=" 0 duplicate-child-first
+existing_state="$(cd "$RUN" && pwd -P)/widget-42.state"; existing_run="$RUN"
+RUN="$FW_RUN/child-run"; reload
+run_start --no-preflight
+want "DUPLICATE state=$existing_state run=$existing_run" 2 duplicate-child
+case "$OUT" in *"resume with --run $existing_run"*) ;; *) fail "duplicate-child: output misses resume hint: $OUT" ;; esac
+[ ! -e "$RUN/widget-42.state" ] || fail "duplicate-child: second state was written"
+
 # from any cwd: with the worktree in place, tkt-start resolves origin/main
 # through --worktree, not the caller's directory.
 setup elsewhere ONE AGAINST

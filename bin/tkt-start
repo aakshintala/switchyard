@@ -3,6 +3,7 @@
 # miss run plan-sweep plus the preflight job. Only a sweep rc 1 listing unresolved
 # tokens still preflights; any other sweep failure exits with its code. No --files
 # skips the sweep. A stored head differing from the worktree or PR head exits 3.
+# Refuses another <namebase>.state in the flywheel root or nearby run directories.
 # The preflight report carries `Core items: <n>` and `Non-blocking items: <n>` field lines just before its STATUS line; tkt-start reads the last such lines. A core item a ruling already settles is not counted in the fields.
 # After the currency check, merged PRs mentioning the issue stop the run on a Resolves line or note the PR and its files on a Part-of line; an OPEN issue with a comment newer than the newest Resolves merge notes the recurrence and continues instead of stopping.
 # --part N archives the prior state after its PR merges; merged-PR head drift tells you the next --part.
@@ -146,6 +147,45 @@ if [ ! -e "$worktree" ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
   fail_step repo 128 "run from inside $repo's checkout"
 fi
 deny() { printf '%s\n' "$3" >&2; emit "$1" "$2" "$3"; }
+# Refuse a state for this ticket in another nearby run before touching state.
+# Resolve all directories physically so ./ and symlink aliases of the same run
+# compare equal, and scan only the root/parent plus their direct subdirectories.
+physical_run="$(cd "$run" && pwd -P)"
+physical_state="$physical_run/$namebase.state"
+search_dirs=()
+add_search_dir() {
+  local path="$1" physical existing
+  [ -d "$path" ] || return 0
+  physical="$(cd "$path" && pwd -P)" || return 0
+  for existing in ${search_dirs[@]+"${search_dirs[@]}"}; do
+    [ "$existing" = "$physical" ] && return 0
+  done
+  search_dirs+=("$physical")
+}
+add_search_dir "${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"
+add_search_dir "$(dirname "$run")"
+seen_states=()
+for scan_dir in ${search_dirs[@]+"${search_dirs[@]}"}; do
+  while IFS= read -r -d '' candidate; do
+    candidate_dir="$(cd "$(dirname "$candidate")" && pwd -P)" || continue
+    candidate_path="$candidate_dir/$(basename "$candidate")"
+    already_seen=0
+    for seen_state in ${seen_states[@]+"${seen_states[@]}"}; do
+      if [ "$seen_state" = "$candidate_path" ]; then already_seen=1; break; fi
+    done
+    [ "$already_seen" -eq 0 ] || continue
+    seen_states+=("$candidate_path")
+    [ "$candidate_path" = "$physical_state" ] && continue
+    existing_run="$(sed -n 's/^run=//p' "$candidate_path" | head -n 1)"
+    if [ -n "$existing_run" ]; then
+      resume_run="$existing_run"; diagnostic_run="$existing_run"
+    else
+      resume_run="$candidate_dir"; diagnostic_run=unknown
+    fi
+    deny "DUPLICATE state=$candidate_path run=$diagnostic_run" 2 \
+      "tkt-start: duplicate state at $candidate_path (run=$diagnostic_run); resume with --run $resume_run"
+  done < <(find "$scan_dir" -maxdepth 2 \( -type d -name "$namebase.state.lock" -prune \) -o \( -type f -name "$namebase.state" -print0 \))
+done
 lockdir="$state.lock"; lock_owned=0
 lock_or_busy() {
   if ! mkdir "$lockdir" 2>/dev/null; then
