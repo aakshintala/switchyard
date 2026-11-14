@@ -196,6 +196,10 @@ delegate() (
   set -euo pipefail
   cmd="${1:?}"; shift
   case "$cmd" in
+    ack)
+      printf 'ack %s cwd=%s\n' "$*" "$PWD" >>"$T/state/acks.txt"
+      if [ -e "$T/state/fail-ack" ]; then echo "fake delegate: ack failed" >&2; exit 1; fi
+      ;;
     model-check)
       model=""; ruling=""
       while [ $# -gt 0 ]; do case "$1" in
@@ -286,7 +290,7 @@ reset_state() {
   git -C "$T/clone" worktree prune >/dev/null 2>&1 || true
   rm -rf "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null || true
   rm -f "$T/state/runs.txt" "$T/state/watch.txt" "$T/state/comment.md" "$T/state/comment-pr.txt" \
-    "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log" \
+    "$T/state/pr-body.txt" "$T/state/body-calls.txt" "$T/state/comments.log" "$T/state/acks.txt" \
     "$T/state"/caller-* "$T/state"/caller-cwd-*
   rm -f "$T/state"/fail-* "$T/state/not-pr" "$T/state/draft" "$T/state/heads.txt" "$T/state/sleeps.txt" "$T/state/empty-diff" "$T/state/escape-diff" "$T/state/issue-calls.txt" "$T/state/mergeable"
   rm -f "$T/state/comments.json" "$T/state/fail-comments"
@@ -480,6 +484,92 @@ grep -q 'workflow doc is none' "$T/state/prompt-spec.md" || fail "workflow doc d
 [ "$(git -C "$T/clone" worktree list | grep -c 'wt-')" = "0" ] || fail "collect removes the worktrees"
 [ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null)" ] || fail "collect removes the run dir"
 [ ! -e "$T/state/watch.txt" ] || fail "collect does not wait"
+
+# --- case: collect acks every readable job from the original clone
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "ack success start exits 0"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>"$T/stderr.txt" || \
+  fail "ack success collect exits 0"
+# $PWD normalizes the path ($T can hold "//" when TMPDIR ends in "/").
+clone_pwd="$(cd "$T/clone" && pwd)"
+for id in job-standards job-spec job-overbuild; do
+  grep -Fxq "ack $id cwd=$clone_pwd" "$T/state/acks.txt" || \
+    fail "$id is acked from the clone cwd: $(cat "$T/state/acks.txt" 2>&1)"
+done
+[ "$(grep -c '^ack ' "$T/state/acks.txt")" = "3" ] || fail "collect acks exactly the three readable jobs"
+[ "$(grep -c -- '--any' "$REVIEW")" = "0" ] || fail "review-pr has no --any override"
+
+# --- case: collect does not ack a job whose record is not a completed result
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec MISSING "VERDICT spec: APPROVE
+STATUS: MISSING" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "missing-result start exits 0"
+missing_out=""
+if missing_out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>"$T/stderr.txt")"; then
+  fail "missing-result collect exits nonzero"
+else
+  missing_status=$?
+fi
+[ "$missing_status" -eq 1 ] || fail "missing-result collect exits 1"
+grep -q '^UNFINISHED spec MISSING ' <<<"$missing_out" || fail "missing-result collect reports spec unfinished"
+[ -f "$T/state/acks.txt" ] || fail "completed siblings are acked"
+! grep -q '^ack job-spec ' "$T/state/acks.txt" || fail "unreadable job remains unacked"
+
+# --- case: failed ack warns without changing the collect result
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: CHANGES
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "baseline ack start exits 0"
+baseline_out=""
+if baseline_out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>"$T/baseline-stderr.txt")"; then
+  baseline_status=0
+else
+  baseline_status=$?
+fi
+[ "$baseline_status" -eq 0 ] || fail "baseline collect exits 0"
+printf '%s\n' "$baseline_out" | grep '^VERDICT ' >"$T/baseline-verdicts.txt"
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: CHANGES
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "failed-ack start exits 0"
+touch "$T/state/fail-ack"
+failed_out=""
+if failed_out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>"$T/failed-stderr.txt")"; then
+  failed_status=0
+else
+  failed_status=$?
+fi
+[ "$failed_status" -eq "$baseline_status" ] || fail "ack failure preserves collect exit code"
+grep -qi 'warning: delegate ack failed' "$T/failed-stderr.txt" || fail "ack failure warns on stderr"
+printf '%s\n' "$failed_out" | grep '^VERDICT ' >"$T/failed-verdicts.txt"
+cmp -s "$T/baseline-verdicts.txt" "$T/failed-verdicts.txt" || \
+  fail "ack failure preserves verdict lines"
 
 # --- case: posted review comments redact host and lane worktree paths
 reset_state
