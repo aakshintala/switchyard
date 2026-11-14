@@ -1353,19 +1353,30 @@ fn ack(args: &[String]) -> Result<i32, Usage> {
                     continue;
                 }
             };
-            match record.get("callerCwd").and_then(serde_json::Value::as_str) {
-                Some(record_cwd) => match ack_cwd.as_deref() {
-                    Some(ack_cwd) if cwd_paths_related(record_cwd, ack_cwd) => {}
+            let caller_cwd = record.get("callerCwd").and_then(serde_json::Value::as_str);
+            let job_cwd = record
+                .get("resume")
+                .and_then(|resume| resume.get("cwd"))
+                .and_then(serde_json::Value::as_str);
+            if caller_cwd.is_none() && job_cwd.is_none() {
+                errors.push(format!(
+                    "job {id} cwd check failed: record has no callerCwd or job cwd; use --any to override"
+                ));
+            } else {
+                match ack_cwd.as_deref() {
+                    Some(ack_cwd)
+                        if caller_cwd
+                            .is_some_and(|cwd| cwd_paths_related(cwd, ack_cwd))
+                            || job_cwd.is_some_and(|cwd| cwd_paths_related(cwd, ack_cwd)) => {}
                     Some(ack_cwd) => errors.push(format!(
-                        "job {id} cwd check failed: record cwd {record_cwd} is unrelated to caller cwd {ack_cwd}; use --any to override"
+                        "job {id} cwd check failed: caller cwd {ack_cwd} is unrelated to job cwd {} and record callerCwd {}; use --any to override",
+                        job_cwd.unwrap_or("<missing>"),
+                        caller_cwd.unwrap_or("<missing>")
                     )),
                     None => errors.push(format!(
                         "job {id} cwd check failed: acknowledgement caller cwd is unavailable; use --any to override"
                     )),
-                },
-                None => errors.push(format!(
-                    "job {id} cwd check failed: record has no callerCwd; use --any to override"
-                )),
+                }
             }
             if let Some(caller) = caller_label.as_deref()
                 && !record

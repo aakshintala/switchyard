@@ -1217,6 +1217,87 @@ fn ack_accepts_record_cwd_from_ack_subdirectory() {
 }
 
 #[test]
+fn ack_accepts_job_cwd_target() {
+    let e = Env::new("ack-job-cwd-target");
+    let worker = e.dir.join("worker");
+    let worker_sub = worker.join("sub");
+    std::fs::create_dir_all(&worker_sub).unwrap();
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--cwd",
+            worker.to_str().unwrap(),
+        ],
+        "known report",
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", "/dispatcher"),
+        ],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    for cwd in [&worker, &worker_sub] {
+        let out = e.delegate_env(
+            &["ack", &id],
+            None,
+            &[
+                ("DELEGATE_CALLER", "lane-a"),
+                ("DELEGATE_CALLER_CWD", cwd.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "cwd {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn ack_refuses_cwd_unrelated_to_job_and_caller_cwd() {
+    let e = Env::new("ack-unrelated-job-and-caller-cwd");
+    let worker = e.dir.join("worker");
+    let worker_sub = worker.join("sub");
+    std::fs::create_dir_all(&worker_sub).unwrap();
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--cwd",
+            worker.to_str().unwrap(),
+        ],
+        "known report",
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", "/dispatcher"),
+        ],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let record = e.record(&id);
+    let job_cwd = record["resume"]["cwd"].as_str().unwrap();
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", "/elsewhere"),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(job_cwd), "{stderr}");
+    assert!(stderr.contains("/dispatcher"), "{stderr}");
+    assert_ack_refusal_hint(&stderr);
+    assert!(!e.dir.join("xdg-cache/delegate/read").join(&id).exists());
+}
+
+#[test]
 fn ack_canonicalizes_symlinked_caller_cwd() {
     let e = Env::new("ack-cwd-symlink");
     let clone = e.dir.join("clone");
@@ -1299,8 +1380,16 @@ fn ack_refuses_deleted_symlinked_record_cwd_from_sibling() {
     std::fs::create_dir(&ack_dir).unwrap();
     let symlink = e.dir.join("link");
     std::os::unix::fs::symlink(&real, &symlink).unwrap();
+    let job = e.dir.join("job");
+    std::fs::create_dir(&job).unwrap();
     let id = e.ok(
-        &["run", "--model", "composer-2.5"],
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--cwd",
+            job.to_str().unwrap(),
+        ],
         "known report",
         &[
             ("DELEGATE_CALLER", "lane-a"),
@@ -1362,10 +1451,18 @@ fn ack_refuses_review_pr_from_sibling_worktree() {
     let e = Env::new("ack-review-pr-sibling");
     let clone = e.dir.join("clone");
     let orchestrator = e.dir.join("orchestrator");
+    let job = e.dir.join("job");
     std::fs::create_dir(&clone).unwrap();
     std::fs::create_dir(&orchestrator).unwrap();
+    std::fs::create_dir(&job).unwrap();
     let id = e.ok(
-        &["run", "--model", "composer-2.5"],
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--cwd",
+            job.to_str().unwrap(),
+        ],
         "review report",
         &[
             ("DELEGATE_CALLER", "flywheel/review-pr"),
@@ -1535,6 +1632,7 @@ fn ack_refuses_records_without_caller_cwd_unless_any() {
     assert_eq!(e.wait_terminal(&id)["status"], "DONE");
     let mut record = e.record(&id);
     record.as_object_mut().unwrap().remove("callerCwd");
+    record["resume"].as_object_mut().unwrap().remove("cwd");
     e.write_record(&id, &record);
 
     let out = e.delegate_env(
