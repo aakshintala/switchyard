@@ -1522,7 +1522,9 @@ cmd_collect() {
       done
     } >"$body"
     if [ -n "$group_pr" ] && [ -n "$group_repo" ]; then
-      gh pr comment "$group_pr" --repo "$group_repo" --body-file "$body" >&2
+      redacted_body="$tmp/redacted-comment-$gi.md"
+      "$script_dir/lib/redact-paths" <"$body" >"$redacted_body"
+      gh pr comment "$group_pr" --repo "$group_repo" --body-file "$redacted_body" >&2
       mkdir -p "$posted_dir"
       for jid in ${group_state_ids[$gi]}; do
         mv "$tmp/posted-$jid" "$posted_dir/$jid"

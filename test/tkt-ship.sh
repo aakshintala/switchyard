@@ -979,6 +979,33 @@ EOF
 cmp -s "$CDIR/body-expected" "$T/prbody" || fail "gateship-fill: body line is not in gate placement: [$(cat "$T/prbody")]"
 grep -q '^gh|pr edit ' "$T/calls.log" || fail "gateship-fill: edited body after a current PASS"
 
+# --- a tkt-ship PR body edit redacts home and lane worktree paths
+reset_stub; setup_case gateship-redact
+printf '0' >"$T/exitcodes"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `src/a.go`
+
+## Gate
+
+`bash test/gate.sh`
+EOF
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+bash "$REAL_BIN/tkt-state" "$S" journal "tkt-gate PASS head=$H" || fail "gateship-redact: journal the latest gate PASS"
+mac_top=Users
+mac_home="/$mac_top/fixture"
+printf 'Title\n\nHost: %s/project/file and /srv/lanes/sample-worktrees/lane-a/src/file\nImplemented by: m/a\n' \
+  "$mac_home" >"$T/prbody"
+run_ship
+[ "$RC" -eq 0 ] || fail "gateship-redact: exit $RC"
+grep -Fq 'Host: ~/project/file and <lane worktree>/src/file' "$T/prbody" \
+  || fail "tkt-ship posted body redacts both host path kinds"
+! grep -Fq "/$mac_top/" "$T/prbody" || fail "tkt-ship posted body has no home prefix"
+! grep -Fq '/srv/lanes' "$T/prbody" || fail "tkt-ship posted body has no lane prefix"
+
 # --- a PASS at an older head refuses with both shas and the gate command ---
 reset_stub; setup_case gateship-earlier
 printf '0' >"$T/exitcodes"

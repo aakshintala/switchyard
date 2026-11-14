@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Redact host-local paths from text passed on stdin; preserve all other bytes.
+set -euo pipefail
+
+mac_top=Users
+linux_top=home
+REDACT_PATHS_MAC_TOP="$mac_top" REDACT_PATHS_LINUX_TOP="$linux_top" perl -pe '
+  BEGIN {
+    $mac_top = quotemeta($ENV{REDACT_PATHS_MAC_TOP});
+    $linux_top = quotemeta($ENV{REDACT_PATHS_LINUX_TOP});
+  }
+  s{(?<![A-Za-z0-9._-])/(?:$mac_top|$linux_top)/[^/\s]+/\.cache/agents/run(?=/|[\s\x60\x27"<>),;:!?]|\.(?=$|\s)|$)|(?<![A-Za-z0-9._-])/root/\.cache/agents/run(?=/|[\s\x60\x27"<>),;:!?]|\.(?=$|\s)|$)}{run}g;
+  s{(?<![A-Za-z0-9._-])/srv/lanes/(?:[^/\s]+-worktrees|sy-wt)/[^/\s]+}{<lane worktree>}g;
+  s{(?<![A-Za-z0-9._-])/(?:$mac_top|$linux_top)/[^/\s]+/}{~/}g;
+  s{(?<![A-Za-z0-9._-])/root/}{~/}g;
+'

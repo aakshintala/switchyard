@@ -201,6 +201,15 @@ usage() {
 }
 say() { echo "ship-pr: $*" >&2; }
 die() { local code="$1"; shift; say "$*"; exit "$code"; }
+redact_body_file() {
+  local source="$1" redacted
+  redacted="$(mktemp "${TMPDIR:-/tmp}/ship-pr-redacted.XXXXXX")" || return 1
+  if ! "$here/lib/redact-paths" <"$source" >"$redacted"; then
+    rm -f "$redacted"
+    return 1
+  fi
+  printf '%s' "$redacted"
+}
 refuse() {
   local family="$1" message="$2" mode="${3:-always}"
   if [ "$mode" = "ready-only" ]; then
@@ -820,7 +829,7 @@ known_flake_accept() {
 }
 
 post_known_flake_comments() {
-  local pr_body ticket_body ticket path i rc=0
+  local pr_body ticket_body redacted_body ticket path i rc=0
   local -a paths=()
   [ "$known_acceptance_used" = 1 ] || return 0
   while IFS= read -r path || [ -n "$path" ]; do [ -n "$path" ] && paths+=("$path"); done <<<"$known_diff_paths"
@@ -837,8 +846,10 @@ post_known_flake_comments() {
     if [ "${#paths[@]}" -eq 0 ]; then printf -- '- (none)\n'; else printf -- '- %s\n' "${paths[@]}"; fi
     printf "\nThe script checked the red tests' crate directories against the diff; flywheel judged that the PR touches nothing the tests exercise.\n"
   } >"$pr_body"
-  gh pr comment "$pr" --repo "$repo" --body-file "$pr_body" >&2 || rc=$?
-  rm -f "$pr_body"
+  redacted_body="$(redact_body_file "$pr_body")" \
+    || die 1 "cannot redact known-flake PR comment"
+  gh pr comment "$pr" --repo "$repo" --body-file "$redacted_body" >&2 || rc=$?
+  rm -f "$pr_body" "$redacted_body"
   [ "$rc" = 0 ] || die 1 "cannot post the known-flake audit comment on PR $pr after merge"
 
   for ticket in "${known_ticket_ids[@]}"; do
@@ -853,9 +864,11 @@ post_known_flake_comments() {
         printf '\n'
       done
     } >"$ticket_body"
+    redacted_body="$(redact_body_file "$ticket_body")" \
+      || die 1 "cannot redact known-flake ticket comment"
     rc=0
-    gh issue comment "$ticket" --repo "$repo" --body-file "$ticket_body" >&2 || rc=$?
-    rm -f "$ticket_body"
+    gh issue comment "$ticket" --repo "$repo" --body-file "$redacted_body" >&2 || rc=$?
+    rm -f "$ticket_body" "$redacted_body"
     [ "$rc" = 0 ] || die 1 "cannot post the known-flake sighting on ticket #$ticket after merge"
   done
 }
@@ -1156,7 +1169,7 @@ esac
 
 # Posts the unverified-fixes comment (step 5). Nothing is pushed if it fails.
 post_unverified() {
-  local pin="$1" short stat body rc=0 f
+  local pin="$1" short stat body redacted_body rc=0 f
   local files=()
   short="$(git -C "$worktree" rev-parse --short "$reviewed")" || die_after_ready 1 "cannot name $reviewed"
   # The stat covers the repair commits' files only: a merge of main would list the base's changes.
@@ -1175,8 +1188,10 @@ post_unverified() {
     cat "$unverified"
     printf '\n\nChanged since review:\n%s\n' "$stat"
   } >"$body"
-  gh pr comment "$pr" --repo "$repo" --body-file "$body" >&2 || rc=$?
-  rm -f "$body"
+  redacted_body="$(redact_body_file "$body")" \
+    || die_after_ready 1 "cannot redact the unverified-fixes comment"
+  gh pr comment "$pr" --repo "$repo" --body-file "$redacted_body" >&2 || rc=$?
+  rm -f "$body" "$redacted_body"
   [ "$rc" = 0 ] || die_after_ready 1 "cannot post the unverified-fixes comment on PR $pr; nothing pushed"
   say "posted the unverified-fixes comment on PR $pr"
 }
@@ -1313,7 +1328,7 @@ case "$review_state" in
 esac
 
 file_p3_findings() {
-  local body_file links_file finding detail issue_json issue_number issue_url title i
+  local body_file links_file redacted_body finding detail issue_json issue_number issue_url title i
   local -a seen_findings=() seen_issues=()
   body_file="$(mktemp "${TMPDIR:-/tmp}/ship-pr-${pr}-issue.XXXXXX")" \
     || die_after_ready 1 "cannot create an issue body for P3 findings"
@@ -1343,8 +1358,11 @@ file_p3_findings() {
           printf 'Open P3 finding from scoped verify for PR #%s.\n\n' "$pr"
           printf '%s\n' "$finding"
         } >"$body_file"
-        issue_url="$(gh issue create --repo "$repo" --title "$title" --body-file "$body_file")" \
-          || die_after_ready 1 "cannot file P3 finding as an issue: $finding"
+        redacted_body="$(redact_body_file "$body_file")" \
+          || die_after_ready 1 "cannot redact P3 finding issue body"
+        issue_url="$(gh issue create --repo "$repo" --title "$title" --body-file "$redacted_body")" \
+          || { rm -f "$redacted_body"; die_after_ready 1 "cannot file P3 finding as an issue: $finding"; }
+        rm -f "$redacted_body"
         issue_number="${issue_url##*/}"
       fi
       case "$issue_number" in ''|*[!0-9]*) die_after_ready 1 "no valid issue number for P3 finding: $finding" ;; esac
@@ -1358,9 +1376,13 @@ file_p3_findings() {
     printf 'Open P3 findings from the scoped verify are tracked as issues:\n\n'
     cat "$links_file"
   } >"$body_file"
-  gh pr comment "$pr" --repo "$repo" --body-file "$body_file" >&2 \
-    || die_after_ready 1 "cannot link P3 finding issues from PR $pr"
-  rm -f "$body_file" "$links_file"
+  redacted_body="$(redact_body_file "$body_file")" \
+    || die_after_ready 1 "cannot redact P3 issue links comment"
+  if ! gh pr comment "$pr" --repo "$repo" --body-file "$redacted_body" >&2; then
+    rm -f "$body_file" "$links_file" "$redacted_body"
+    die_after_ready 1 "cannot link P3 finding issues from PR $pr"
+  fi
+  rm -f "$body_file" "$links_file" "$redacted_body"
 }
 
 p3_issues_filed=0

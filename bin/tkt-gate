@@ -683,11 +683,13 @@ if [ "$checks_only" -eq 0 ] && gate_pr="$(tkt get pr 2>/dev/null)"; then
       new_body="$(tkt_local_gate_body_insert "$pr_body" "$gate_line" "$attr" "$attr_mode")"
     fi
     tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-gate-body.XXXXXX")"
+    tmp_redacted="$(mktemp "${TMPDIR:-/tmp}/tkt-gate-redacted.XXXXXX")"
     printf '%s\n' "$new_body" >"$tmp_body"
-    if ! gh pr edit "$gate_pr" --repo "$gate_pr_repo" --body-file "$tmp_body" 2>/dev/null; then
+    if ! "$script_dir/lib/redact-paths" <"$tmp_body" >"$tmp_redacted" \
+      || ! gh pr edit "$gate_pr" --repo "$gate_pr_repo" --body-file "$tmp_redacted" 2>/dev/null; then
       echo "tkt-gate: warning: cannot update PR $gate_pr body; leaving it unchanged" >&2
     fi
-    rm -f "$tmp_body"
+    rm -f "$tmp_body" "$tmp_redacted"
   else
     echo "tkt-gate: warning: cannot read PR $gate_pr body; leaving it unchanged" >&2
   fi
