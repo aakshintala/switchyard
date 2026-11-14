@@ -658,9 +658,10 @@ grep -q "which scope rules the retry?" <<<"$OUT" || fail "ask: the digest holds 
 grep -q "^gate|" "$T/calls.log" && fail "ask: the gate never runs"
 grep -q "^review-start|" "$T/calls.log" && fail "ask: review never starts"
 bash "$TKT_STATE" "$S" get head >/dev/null 2>&1 && fail "ask: pr and head stay unset"
-build_reports="$(find "$T/inbox" -type f -name 'tkt-build-*.md' | wc -l | tr -d ' ')"
-[ "$build_reports" -eq 1 ] || fail "ask sends one tkt-build stop report (count=$build_reports)"
-build_report="$(find "$T/inbox" -type f -name 'tkt-build-*.md' -print -quit)"
+# tkt-job and tkt-build both journal this ASK; one report goes out (tkt-job sends it).
+build_reports="$(find "$T/inbox" -type f -name 'tkt-*.md' | wc -l | tr -d ' ')"
+[ "$build_reports" -eq 1 ] || fail "ask sends exactly one stop report (count=$build_reports)"
+build_report="$(find "$T/inbox" -type f -name 'tkt-*.md' -print -quit)"
 grep -Fq 'Ticket: #528' "$build_report" || fail "ask report names the ticket"
 grep -Fq 'Job ID: stub-1' "$build_report" || fail "ask report names the job"
 grep -Fq 'Status: ASK' "$build_report" || fail "ask report names the status"
@@ -668,7 +669,7 @@ grep -Fq 'which scope rules the retry?' "$build_report" || fail "ask report incl
 run_build
 [ "$RC" -eq 1 ] || fail "ask rerun exits 1 (rc=$RC)"
 expect_verdict "TKT tkt-build ASK id=stub-1* log=*" "ask rerun"
-[ "$(find "$T/inbox" -type f -name 'tkt-build-*.md' | wc -l | tr -d ' ')" -eq 1 ] || fail "ask rerun does not send a duplicate tkt-build report"
+[ "$(find "$T/inbox" -type f -name 'tkt-*.md' | wc -l | tr -d ' ')" -eq 1 ] || fail "ask rerun does not send a duplicate stop report"
 
 # --- a CONCERNS lane continues through the gate and passes its file to reviews ---
 setup_case concerns-lane
