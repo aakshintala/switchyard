@@ -811,7 +811,13 @@ record_round_findings
 if [ "$recover_unpushed" -eq 1 ]; then
   # Recovery replaces this run's dispatch, so a --resume on it never runs.
   if [ -n "$resume" ]; then
-    printf 'tkt-fix: warning: --resume %s was not run: this run pushes the unpushed commits of closed slot %s instead; rerun tkt-fix with --resume %s --prompt <file> to deliver it\n' "$resume" "$slot" "$resume" >&2
+    rerun_mode="--no-verify"
+    if [ "$verify" -eq 1 ]; then
+      rerun_mode="--verify"
+      [ -z "$since" ] || rerun_mode="$rerun_mode --since $(printf '%q' "$since")"
+    fi
+    printf 'tkt-fix: warning: --resume %s was not run: this run pushes the unpushed commits of closed slot %s instead; to deliver it, rerun: tkt-fix %s %s --resume %s --prompt <file>\n' \
+      "$resume" "$slot" "$(printf '%q' "$state")" "$rerun_mode" "$(printf '%q' "$resume")" >&2
   fi
   # Re-run the plan gate before publishing a commit left by a closed job.
   env_prefix=""

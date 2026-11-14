@@ -2052,6 +2052,7 @@ grep -q 'DRIFT\|RECOVER' <<<"$out" && fail "recover-push-fail recovery reported 
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "recover-push-fail state head is not NEW"
 [ "$(bash "$TKT_STATE" "$S" get fixslot)" = "1" ] || fail "recover-push-fail did not close fix1"
 grep -q '^job|' "$T/calls.log" && fail "recover-push-fail dispatched another fix job"
+grep -q 'warning: --resume' "$T/stderr" && fail "recover-push-fail warned about a resume it was not given"
 fi
 
 # A --resume passed on a closed-slot recovery run is named in a warning, not dropped silently.
@@ -2073,6 +2074,7 @@ printf 'answer\n' >"$T/resume-answer.md"
 out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$T/resume-answer.md" 2>"$T/stderr")" || fail "recover-drops-resume recovery exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "recover-drops-resume recovery verdict missing: $(head -n 1 <<<"$out")"
 grep -q 'warning: --resume j1 was not run' "$T/stderr" || fail "recover-drops-resume did not warn about the dropped resume: $(cat "$T/stderr")"
+grep -Fq "rerun: tkt-fix $(printf '%q' "$S") --verify --resume j1 --prompt <file>" "$T/stderr" || fail "recover-drops-resume warning does not print a runnable rerun: $(cat "$T/stderr")"
 [ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-529)" = "$NEW" ] || fail "recover-drops-resume did not push NEW to origin"
 grep -q '^job|' "$T/calls.log" && fail "recover-drops-resume dispatched the resume alongside recovery"
 fi
