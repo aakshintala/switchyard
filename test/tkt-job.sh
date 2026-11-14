@@ -1256,6 +1256,14 @@ S="$CDIR/nomodel.state"
 run_job --slot lane --template "$T/tmpl-basic.md"
 [ "$RC" -eq 2 ] || fail "a missing model exits 2"
 grep -q "model.lane" "$CDIR/stderr.txt" || fail "a missing model names model.lane"
+# A re-plan of a state that already stores a plan but no planner refuses before dispatch, with no default planner (#1818).
+setup_case replan-no-planner
+reset_stub
+printf 'plan=%s\n' "$CDIR/plan.md" >>"$S"
+run_job --slot planner --template "$T/tmpl-basic.md"
+[ "$RC" -eq 2 ] || fail "a re-plan with no planner exits 2 (rc=$RC)"
+grep -Fq "missing key: model.planner" "$CDIR/stderr.txt" || fail "a re-plan with no planner names model.planner: $(cat "$CDIR/stderr.txt")"
+grep -q "^run|" "$T/stub.log" && fail "a re-plan with no planner dispatches nothing"
 setup_case flag-model
 reset_stub
 grep -v '^model\.lane=' "$S" >"$CDIR/nomodel.state"

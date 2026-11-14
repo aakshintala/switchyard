@@ -658,6 +658,12 @@ do_verify() {
     record_unresolved_snapshot "$pc_out"
     planner_job="$(t get job.planner 2>/dev/null || true)"
     if [ -n "$planner_job" ]; then
+      planner_model="$(t get model.planner 2>/dev/null || true)"
+      if [ -z "${planner_model//[[:space:]]/}" ]; then
+        printf -v planner_route 'tkt-state %q set model.planner %s' "$state" '<id>'
+        echo "tkt-plan: missing required role: model.planner; set it with: $planner_route" >&2
+        exit 2
+      fi
       resume_prompt="$(mktemp "$run/$namebase-plan-check-resume.XXXXXX")" || exit 2
       printf '%s\n' "$pc_out" >"$resume_prompt" || exit 2
       if "$tktjob" "$state" --slot planner --resume "$planner_job" --prompt "$resume_prompt" >"$tmp" 2>&1; then
