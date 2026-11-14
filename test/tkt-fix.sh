@@ -147,6 +147,7 @@ chmod +x "$T/bin/gh-ci"
 
 # Stub review-pr: $T/vermode holds ok (FIX-OK), incomplete or history outputs.
 printf 'ok' >"$T/vermode"
+printf 'ok' >"$T/collectmode"
 printf '0' >"$T/verify-count"
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
@@ -157,6 +158,14 @@ for arg in "\$@"; do
   if [ "\$previous" = "--context" ]; then context_files+=("\$arg"); fi
   previous="\$arg"
 done
+if [ "\${1:-}" = "collect" ]; then
+  case "\$(cat "$T/collectmode")" in
+    ok) printf 'FIX-OK. Every finding in the verify file is fixed at HEAD.\\n';;
+    incomplete) printf 'FIX-INCOMPLETE. One finding remains.\\nP1 open finding\\n';;
+    *) printf 'BAD-VERDICT verify FIX-OKAY\\n'; exit 1;;
+  esac
+  exit 0
+fi
 if [ -n "\$verify_file" ]; then
   n="\$((\$(cat "$T/verify-count") + 1))"
   printf '%s' "\$n" >"$T/verify-count"
@@ -164,9 +173,15 @@ if [ -n "\$verify_file" ]; then
   for context_file in "\${context_files[@]}"; do
     cp "\$context_file" "$T/verify-context-\$n-\$(basename "\$context_file")"
   done
+  job_id="verify-job-\$n"
+  mkdir -p "\${TMPDIR:-/tmp}/review-pr"
+  printf 'role=verify\\n' >"\${TMPDIR:-/tmp}/review-pr/\$job_id"
+  printf 'verify %s\\n' "\$job_id"
 fi
 case "\$(cat "$T/vermode")" in
   ok|history-two) printf 'FIX-OK\n';;
+  punct) printf 'FIX-OK. Every finding in the verify file is fixed at HEAD.\n';;
+  bad) printf 'BAD-VERDICT verify FIX-OKAY\n'; exit 1;;
   ruling)
     printf 'FIX-INCOMPLETE round=1\nP1 fix.txt:1 — a\n';;
   incomplete)
@@ -224,7 +239,9 @@ reset_stubs() {
   printf '0' >"$T/gatemode"
   : >"$T/ciout"
   printf 'ok' >"$T/vermode"
+  printf 'ok' >"$T/collectmode"
   printf '0' >"$T/verify-count"
+  rm -rf "$TMPDIR/review-pr"
   printf '[]' >"$T/prlist"
   printf '0' >"$T/prlistrc"
   : >"$T/calls.log"
@@ -345,6 +362,32 @@ write_job_record() {
     jq --arg id "$resumed_from" '. + {resumedFrom:$id}' "$record" >"$record.tmp" \
       && mv "$record.tmp" "$record" || fail "write $id resumedFrom"
   fi
+}
+
+prepare_legacy_collect_case() {
+  local case_name="$1" job_id="$2" role="$3" review_head="$4" started_at_ms="$5" head_before="${6:-}"
+  local head record review_state
+  setup_case "$case_name"
+  fixture_commit fix.txt "legacy fix" "fix: legacy collect fixture"
+  head="$(git -C "$WT" rev-parse HEAD)"
+  [ "$review_head" != slot ] || review_head="$head"
+  [ "$head_before" != slot ] || head_before="$head"
+  bash "$TKT_STATE" "$S" set head "$head" >/dev/null
+  bash "$TKT_STATE" "$S" set round 2 >/dev/null
+  bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+  bash "$TKT_STATE" "$S" set fix_round.3.start "$OLD" >/dev/null
+  bash "$TKT_STATE" "$S" set fix_round.3.findings "$CDIR/findings.md" >/dev/null
+  bash "$TKT_STATE" "$S" set fix_round.3.head "$head" >/dev/null
+  # A stable journal timestamp lets the fixture pin both sides of the ordering check.
+  printf '2020-01-01T00:00:00Z fix round head write fix3 %s\n' "$head" >"${S%.state}.journal"
+  mkdir -p "$TMPDIR/review-pr" "$TMPDIR/delegate-jobs"
+  review_state="$TMPDIR/review-pr/$job_id"
+  printf 'role=%s\n' "$role" >"$review_state"
+  [ -z "$review_head" ] || printf 'sha=%s\n' "$review_head" >>"$review_state"
+  record="$TMPDIR/delegate-jobs/$job_id.json"
+  jq -n --arg cwd "$WT/wt-verify" --argjson started "$started_at_ms" --arg head_before "$head_before" \
+    '{status:"DONE",startedAtMs:$started,resume:{cwd:$cwd},result:{changeSet:{headBefore:(if $head_before == "" then null else $head_before end)}}}' \
+    >"$record" || fail "write legacy $job_id record"
 }
 
 # Selector for the new cases below: empty or unset runs all of them.
@@ -961,6 +1004,166 @@ grep -Fq "$MAIN1" <<<"$out" && fail "main-merge-multi reported main's first comm
 grep -Fq "$MAIN2" <<<"$out" && fail "main-merge-multi reported main's second commit: $(head -n 1 <<<"$out")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "main-merge-multi bad verdict: $(head -n 1 <<<"$out")"
 fi
+
+# FIX-OK followed by punctuation and prose flows through the tkt-fix consumer.
+if want punct-verify; then
+setup_case punct-verify
+printf 'punct' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "punct verify exited $?: $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "punct verify is FIX-OK: $(head -n 1 <<<"$out")"
+punct_round="$(bash "$TKT_STATE" "$S" get round)"
+punct_verify_job="$(bash "$TKT_STATE" "$S" get "fix_round.$punct_round.verify_job")"
+[ "$punct_verify_job" = verify-job-1 ] || fail "punct verify records the printed verify job id"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "punct verify sets reviewed at the fixed head"
+fi
+
+# A BAD-VERDICT verify can be collected again without starting a third round.
+if want collect-verify; then
+setup_case collect-verify
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+printf 'bad' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "bad verify exited $run_rc, want VERIFY-FAIL: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix VERIFY-FAIL rc=1' || fail "bad verify route is VERIFY-FAIL: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "bad verify consumed exactly round 2"
+verify_job="$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job)"
+[ "$verify_job" = verify-job-1 ] || fail "tkt-fix records the verify id printed by review-pr"
+verify_head="$(bash "$TKT_STATE" "$S" get fix_round.2.verify_head)"
+[ "$verify_head" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "tkt-fix records the verify head"
+grep -Fq "tkt-fix $S --collect-verify $verify_job" <<<"$out" || fail "VERIFY-FAIL names the collect-verify recovery command"
+
+# A job recorded for another round is refused before review-pr collect.
+bash "$TKT_STATE" "$S" set fix_round.1.verify_job verify-job-old >/dev/null
+calls_before="$(grep -c '^review-pr|collect ' "$T/calls.log" || true)"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify verify-job-old 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "other-round verify exited $run_rc, want refusal: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix VERIFY-FAIL reason=collect-verify' || fail "other-round refusal uses VERIFY-FAIL"
+[ "$(grep -c '^review-pr|collect ' "$T/calls.log" || true)" = "$calls_before" ] || fail "other-round verify was not collected"
+
+# A recorded id is refused when its review-pr state says it is not a verify.
+printf 'role=standards\n' >"$TMPDIR/review-pr/$verify_job"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "non-verify job exited $run_rc, want refusal: $out"
+grep -Fq 'is not a verify' <<<"$out" || fail "non-verify refusal names the role"
+printf 'role=verify\n' >"$TMPDIR/review-pr/$verify_job"
+
+# A recorded verify is refused when its slot no longer records the produced head.
+bash "$TKT_STATE" "$S" set fix_round.2.head different-head >/dev/null
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "changed slot-head verify exited $run_rc, want refusal: $out"
+grep -Fq 'verify head does not match slot fix2 produced head' <<<"$out" || fail "slot-head refusal names the mismatch"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "slot-head refusal does not add to round"
+bash "$TKT_STATE" "$S" set fix_round.2.head "$verify_head" >/dev/null
+
+# A current-round verify is refused when the PR head no longer matches its slot.
+printf 'different-head' >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "moved-head verify exited $run_rc, want refusal: $out"
+grep -Fq 'PR head does not match verify head' <<<"$out" || fail "moved-head refusal names the mismatch"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "collect refusal does not add to round"
+printf 'WT:%s' "$WT" >"$T/prhead"
+
+# FIX-INCOMPLETE uses the normal result handler and leaves the round unchanged.
+printf 'incomplete' >"$T/collectmode"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "incomplete collect-verify exited $run_rc, want round-two stop: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-INCOMPLETE round=2 STOP-AT-TWO' || fail "collect-verify applies FIX-INCOMPLETE: $out"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "incomplete collect-verify does not add to round"
+[ "$(bash "$TKT_STATE" "$S" get reviewed 2>/dev/null || true)" != "$verify_head" ] || fail "incomplete collect-verify does not set reviewed"
+incomplete_findings="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fq 'P1 open finding' "$incomplete_findings" || fail "incomplete collect-verify records open findings"
+
+# The recorded verify collects, updates findings, and does not add to round.
+printf 'ok' >"$T/collectmode"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 0 ] || fail "valid collect-verify exited $run_rc: $out $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$verify_head" || fail "collect-verify applies FIX-OK: $out"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$verify_head" ] || fail "collect-verify sets reviewed to the collected head"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "collect-verify does not add to round"
+collect_history="$(bash "$TKT_STATE" "$S" get findings_history)"
+[[ "$collect_history" == *'-findings-history-r2.md' ]] || fail "collect-verify writes history for its recorded round: $collect_history"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.history)" = "$collect_history" ] || fail "collect-verify records history on its recorded round"
+
+# A legacy round without verify_* metadata can be collected only when the
+# review-pr and delegate records prove the verify's role, start time and head.
+prepare_legacy_collect_case legacy-collect-valid legacy-verify-job verify slot 1700000000000
+legacy_head="$(bash "$TKT_STATE" "$S" get fix_round.3.head)"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-verify-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 0 ] || fail "legacy collect-verify exited $run_rc: $out $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$legacy_head" || fail "legacy collect-verify did not apply FIX-OK: $out"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job)" = legacy-verify-job ] || fail "legacy collect-verify records verify_job on the latest round"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_head)" = "$legacy_head" ] || fail "legacy collect-verify records the proven verify head"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_slot)" = fix3 ] || fail "legacy collect-verify derives the slot from fixslot"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$legacy_head" ] || fail "legacy FIX-OK sets reviewed to the proven head"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "legacy collect-verify does not add a round"
+
+# A legacy verify with another role is refused.
+prepare_legacy_collect_case legacy-collect-role legacy-role-job standards slot 1700000000000
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-role-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "legacy non-verify exited $run_rc, want refusal: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix VERIFY-FAIL reason=collect-verify' || fail "legacy non-verify refusal uses VERIFY-FAIL"
+grep -Fq 'is not a verify (role=standards)' <<<"$out" || fail "legacy non-verify refusal names the role"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job 2>/dev/null || true)" ] || fail "legacy non-verify writes no verify metadata"
+
+# A legacy verify whose recorded run head differs from its fix slot is refused.
+prepare_legacy_collect_case legacy-collect-head legacy-head-job verify "$OLD" 1700000000000
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-head-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "legacy mismatched-head verify exited $run_rc, want refusal: $out"
+grep -Fq 'verify head does not match slot fix3 produced head' <<<"$out" || fail "legacy head refusal names the slot mismatch"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job 2>/dev/null || true)" ] || fail "legacy head mismatch writes no verify metadata"
+
+# A delegate job that predates the slot-head journal entry is refused.
+prepare_legacy_collect_case legacy-collect-start legacy-old-job verify slot 1577836799000
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-old-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "legacy pre-slot verify exited $run_rc, want refusal: $out"
+grep -Fq 'started before fix slot head was recorded' <<<"$out" || fail "legacy start-time refusal names the ordering failure"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job 2>/dev/null || true)" ] || fail "legacy early job writes no verify metadata"
+
+# A delegate record without review-pr state must prove the run head itself.
+prepare_legacy_collect_case legacy-collect-no-head legacy-no-head-job verify '' 1700000000000
+rm -f "$TMPDIR/review-pr/legacy-no-head-job"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-no-head-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "legacy unverifiable-head job exited $run_rc, want refusal: $out"
+grep -Fq 'cannot prove the head the verify ran at' <<<"$out" || fail "legacy missing-head refusal explains the absent proof"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job 2>/dev/null || true)" ] || fail "legacy missing head writes no verify metadata"
+
+# Without review-pr state, the delegate record's headBefore is accepted when it matches the slot.
+prepare_legacy_collect_case legacy-collect-record-head legacy-record-head-job verify '' 1700000000000 slot
+rm -f "$TMPDIR/review-pr/legacy-record-head-job"
+legacy_head="$(bash "$TKT_STATE" "$S" get fix_round.3.head)"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-record-head-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 0 ] || fail "legacy delegate-record head proof exited $run_rc: $out $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$legacy_head" || fail "delegate-record head proof did not apply FIX-OK: $out"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_head)" = "$legacy_head" ] || fail "delegate-record head proof records the run head"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_slot)" = fix3 ] || fail "delegate-record head proof derives the slot"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "delegate-record head proof does not add a round"
+
+# Without review-pr state, a different delegate head is refused.
+prepare_legacy_collect_case legacy-collect-record-mismatch legacy-record-mismatch-job verify '' 1700000000000 "$OLD"
+rm -f "$TMPDIR/review-pr/legacy-record-mismatch-job"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-record-mismatch-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "legacy delegate-record mismatched head exited $run_rc, want refusal: $out"
+grep -Fq 'verify head does not match slot fix3 produced head' <<<"$out" || fail "delegate-record head mismatch names the slot mismatch"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job 2>/dev/null || true)" ] || fail "delegate-record head mismatch writes no verify metadata"
+
+# Review-pr and delegate head proofs must agree when both are present.
+prepare_legacy_collect_case legacy-collect-proof-disagreement legacy-proof-disagreement-job verify slot 1700000000000 "$OLD"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-proof-disagreement-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "legacy disagreeing head proofs exited $run_rc, want refusal: $out"
+grep -Fq 'review-pr state head does not match delegate job head' <<<"$out" || fail "legacy proof disagreement names both record sources"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job 2>/dev/null || true)" ] || fail "legacy proof disagreement writes no verify metadata"
+
+# The legacy path is not used when even one verify_* key exists.
+prepare_legacy_collect_case legacy-collect-key-mismatch legacy-expected-job verify slot 1700000000000
+bash "$TKT_STATE" "$S" set fix_round.2.verify_job expected-verify-job >/dev/null
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify legacy-expected-job 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "legacy keys-present mismatch exited $run_rc, want refusal: $out"
+grep -Fq 'is not the verify recorded for latest tkt-fix round 2' <<<"$out" || fail "keys-present mismatch does not enter legacy path"
+[ -z "$(bash "$TKT_STATE" "$S" get fix_round.2.verify_head 2>/dev/null || true)" ] || fail "keys-present mismatch writes no missing verify metadata"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "legacy refusal does not add a round"
+fi
+
+case "${CASE:-}" in punct-verify|collect-verify) exit 0;; esac
 
 # 1. Verify OK on an already-pushed head: no CI wait, slot fix1, reviewed set.
 setup_case ok

@@ -4,20 +4,22 @@
 # A lane blocked before its PR resumes with tkt-job --resume <job.lane> followed by tkt-build --from gate, or with tkt-build --from lane when no lane ran.
 # Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>]
 #   [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>]
-#   [--fix-model <id>] [--verify-model <id>]
+#   [--fix-model <id>] [--verify-model <id>] [--collect-verify <job id>]
 #   --prompt appends orchestrator context to a fresh fix job; --resume requires --prompt.
+#   --collect-verify recollects the verify recorded for the latest tkt-fix round without adding a round.
 #   --fix-model overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model.
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>] [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
+  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify | --collect-verify <job id>) [--findings <file>] [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
+  echo "  --collect-verify <job id> recollects only the verify recorded for the latest tkt-fix round; it does not add a round." >&2
   echo "  --fix-model <id> overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model." >&2
   exit 2
 }
 
 [ $# -ge 2 ] || usage
 state="$1"; shift
-verify=0; noverify=0; findings=""; since=""; resume=""; prompt=""; fixmodel=""; verifymodel=""
+verify=0; noverify=0; findings=""; since=""; resume=""; prompt=""; fixmodel=""; verifymodel=""; collect_verify_job=""
 ruling_requested=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,13 +32,21 @@ while [ $# -gt 0 ]; do
     --prompt) [ $# -ge 2 ] && [ -n "$2" ] || usage; prompt="$2"; shift 2 ;;
     --fix-model) [ $# -ge 2 ] && [ -n "$2" ] || usage; fixmodel="$2"; shift 2 ;;
     --verify-model) [ $# -ge 2 ] && [ -n "$2" ] || usage; verifymodel="$2"; shift 2 ;;
+    --collect-verify) [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$collect_verify_job" ] || usage; collect_verify_job="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
-[ "$verify" -ne "$noverify" ] || usage
-[ "${#ruling_requested[@]}" -eq 0 ] || [ "$verify" -eq 1 ] || usage
-[ -z "$since" ] || [ "$verify" -eq 1 ] || usage
-[ -z "$resume" ] || [ -n "$prompt" ] || usage
+if [ -n "$collect_verify_job" ]; then
+  [ "$verify" -eq 0 ] && [ "$noverify" -eq 0 ] && [ -z "$findings" ] \
+    && [ "${#ruling_requested[@]}" -eq 0 ] && [ -z "$since" ] \
+    && [ -z "$resume" ] && [ -z "$prompt" ] && [ -z "$fixmodel" ] \
+    && [ -z "$verifymodel" ] || usage
+else
+  [ "$verify" -ne "$noverify" ] || usage
+  [ "${#ruling_requested[@]}" -eq 0 ] || [ "$verify" -eq 1 ] || usage
+  [ -z "$since" ] || [ "$verify" -eq 1 ] || usage
+  [ -z "$resume" ] || [ -n "$prompt" ] || usage
+fi
 
 script_path="$0"
 case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
@@ -279,7 +289,7 @@ history_file="$(history_path "$knum")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 limited=0
-if [ "$round" -ge 2 ] && [ -z "$resume" ]; then limited=1; fi
+if [ "$round" -ge 2 ] && [ -z "$resume" ] && [ -z "$collect_verify_job" ]; then limited=1; fi
 
 ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=()
 ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
@@ -296,6 +306,120 @@ emit() {
   } >"$logpath"
   cat "$logpath"; t journal "tkt-fix $verdict"; exit "$ec"
 }
+
+collect_verify_refuse() {
+  emit "VERIFY-FAIL reason=collect-verify" 1 "$@"
+}
+
+collect_verify_precheck() {
+  local latest_round recorded_job recorded_head recorded_slot slot_number slot_head state_head
+  local review_state role rec cwd prhead actual legacy
+  local review_head delegate_head
+  local has_job_key has_head_key has_slot_key started_at_ms journal_path journal_stamp journal_epoch recorded_at_ms
+  case "$collect_verify_job" in ''|-*|*/*|.|..) collect_verify_refuse "unsafe or empty job id: $collect_verify_job";; esac
+  latest_round="$round"
+  [ "$latest_round" -ge 1 ] || collect_verify_refuse "no completed tkt-fix round has a verify"
+
+  has_job_key=0; has_head_key=0; has_slot_key=0
+  t get "fix_round.$latest_round.verify_job" >/dev/null 2>&1 && has_job_key=1
+  t get "fix_round.$latest_round.verify_head" >/dev/null 2>&1 && has_head_key=1
+  t get "fix_round.$latest_round.verify_slot" >/dev/null 2>&1 && has_slot_key=1
+  legacy=0
+  if [ "$has_job_key" -eq 0 ] && [ "$has_head_key" -eq 0 ] && [ "$has_slot_key" -eq 0 ]; then
+    legacy=1
+    slot_number="$fixslot"
+    [[ "$slot_number" =~ ^[1-9][0-9]*$ ]] || \
+      collect_verify_refuse "latest tkt-fix round $latest_round has no recorded fixslot"
+    recorded_slot="fix$slot_number"
+    slot_head="$(t get "fix_round.$slot_number.head" 2>/dev/null || true)"
+    [ -n "$slot_head" ] || collect_verify_refuse "legacy verify slot $recorded_slot has no recorded produced head"
+  else
+    recorded_job="$(t get "fix_round.$latest_round.verify_job" 2>/dev/null || true)"
+    [ "$recorded_job" = "$collect_verify_job" ] || \
+      collect_verify_refuse "job $collect_verify_job is not the verify recorded for latest tkt-fix round $latest_round"
+    recorded_head="$(t get "fix_round.$latest_round.verify_head" 2>/dev/null || true)"
+    recorded_slot="$(t get "fix_round.$latest_round.verify_slot" 2>/dev/null || true)"
+    [[ "$recorded_slot" =~ ^fix[1-9][0-9]*$ ]] || \
+      collect_verify_refuse "latest tkt-fix round $latest_round has no recorded verify slot"
+    slot_number="${recorded_slot#fix}"
+    slot_head="$(t get "fix_round.$slot_number.head" 2>/dev/null || true)"
+    [ -n "$recorded_head" ] && [ "$recorded_head" = "$slot_head" ] || \
+      collect_verify_refuse "verify head does not match slot $recorded_slot produced head"
+  fi
+
+  review_state="${TMPDIR:-/tmp}/review-pr/$collect_verify_job"
+  rec=""
+  if [ ! -f "$review_state" ] || [ "$legacy" -eq 1 ]; then
+    rec="$(bash "$script_dir/job-record" "$collect_verify_job" 2>/dev/null || true)"
+  fi
+  if [ -f "$review_state" ]; then
+    role="$(sed -n 's/^role=//p' "$review_state" | head -1)"
+    [ "$role" = verify ] || collect_verify_refuse "job $collect_verify_job is not a verify (role=$role)"
+  else
+    [ -n "$rec" ] && [ -f "$rec" ] || collect_verify_refuse "job $collect_verify_job has no review-pr state or job record"
+    cwd="$(jq -r '.resume.cwd // .cwd // empty' "$rec" 2>/dev/null || true)"
+    case "$cwd" in */wt-verify) ;; *) collect_verify_refuse "job $collect_verify_job is not a verify (cwd=$cwd)";; esac
+  fi
+
+  if [ "$legacy" -eq 1 ]; then
+    [ -n "$rec" ] && [ -f "$rec" ] || \
+      collect_verify_refuse "cannot prove when verify $collect_verify_job started: no delegate job record"
+    started_at_ms="$(jq -r 'if (.startedAtMs | type) == "number" and .startedAtMs >= 0 then (.startedAtMs | floor | tostring) else empty end' "$rec" 2>/dev/null || true)"
+    case "$started_at_ms" in ''|*[!0-9]*) collect_verify_refuse "cannot prove when verify $collect_verify_job started: delegate record has no startedAtMs";; esac
+
+    journal_path="${state%.state}.journal"
+    journal_stamp="$(awk -v slot="$recorded_slot" -v head="$slot_head" \
+      '$2 == "fix" && $3 == "round" && $4 == "head" && $5 == "write" && $6 == slot && $7 == head { stamp = $1 } END { if (stamp != "") print stamp }' \
+      "$journal_path" 2>/dev/null || true)"
+    [[ "$journal_stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || \
+      collect_verify_refuse "cannot prove when fix_round.$slot_number.head was recorded: no matching journal entry"
+    if ! journal_epoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$journal_stamp" +%s 2>/dev/null)"; then
+      journal_epoch="$(date -u -d "$journal_stamp" +%s 2>/dev/null || true)"
+    fi
+    case "$journal_epoch" in ''|*[!0-9]*) collect_verify_refuse "cannot parse journal time for fix_round.$slot_number.head";; esac
+    recorded_at_ms="$((journal_epoch * 1000))"
+    if ! awk -v started="$started_at_ms" -v recorded="$recorded_at_ms" 'BEGIN { exit !(started > recorded) }'; then
+      collect_verify_refuse "verify $collect_verify_job started before fix slot head was recorded"
+    fi
+
+    review_head=""
+    if [ -f "$review_state" ]; then review_head="$(sed -n 's/^sha=//p' "$review_state" | head -1)"; fi
+    delegate_head="$(jq -r '.result.changeSet.headBefore // empty' "$rec" 2>/dev/null || true)"
+    if [ -n "$review_head" ] && [ -n "$delegate_head" ] && [ "$review_head" != "$delegate_head" ]; then
+      collect_verify_refuse "review-pr state head does not match delegate job head: review-pr=$review_head delegate=$delegate_head"
+    fi
+    if [[ "$review_head" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      recorded_head="$review_head"
+    elif [[ "$delegate_head" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      recorded_head="$delegate_head"
+    else
+      collect_verify_refuse "cannot prove the head the verify ran at from review-pr state or delegate job record"
+    fi
+    [ "$recorded_head" = "$slot_head" ] || \
+      collect_verify_refuse "verify head does not match slot $recorded_slot produced head"
+  fi
+
+  state_head="$(t get head 2>/dev/null || true)"
+  [ "$state_head" = "$recorded_head" ] || \
+    collect_verify_refuse "state head $state_head does not match verify head $recorded_head"
+  pr="$(t get pr 2>/dev/null || true)"
+  [ -n "$pr" ] || collect_verify_refuse "state has no PR number"
+  prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid 2>/dev/null)" || \
+    collect_verify_refuse "cannot read PR head for verify $collect_verify_job"
+  [ "$prhead" = "$recorded_head" ] || \
+    collect_verify_refuse "PR head does not match verify head: PR=$prhead verify=$recorded_head"
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  [ "$actual" = "$recorded_head" ] || \
+    collect_verify_refuse "worktree HEAD does not match verify head: worktree=$actual verify=$recorded_head"
+
+  if [ "$legacy" -eq 1 ]; then
+    t set "fix_round.$latest_round.verify_job" "$collect_verify_job"
+    t set "fix_round.$latest_round.verify_head" "$recorded_head"
+    t set "fix_round.$latest_round.verify_slot" "$recorded_slot"
+  fi
+}
+
+if [ -n "$collect_verify_job" ]; then collect_verify_precheck; fi
 
 ruling_refuse() {
   emit "RULING-REFUSED reason=$1 comment=$2" 2
@@ -530,6 +654,41 @@ write_findings() {
   t set findings "$fr"
 }
 
+verify_result_head_guard() {
+  local expected_head="$1" expected_slot="$2" slot_number slot_head state_head prhead actual
+  slot_number="${expected_slot#fix}"
+  slot_head="$(t get "fix_round.$slot_number.head" 2>/dev/null || true)"
+  state_head="$(t get head 2>/dev/null || true)"
+  prhead="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid 2>/dev/null)" || \
+    emit "VERIFY-FAIL reason=head-moved" 1 "cannot read PR head before recording verify result"
+  actual="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$slot_head" != "$expected_head" ] || [ "$state_head" != "$expected_head" ] \
+    || [ "$prhead" != "$expected_head" ] || [ "$actual" != "$expected_head" ]; then
+    emit "VERIFY-FAIL reason=head-moved" 1 \
+      "verify head=$expected_head slot=$expected_slot produced=$slot_head state=$state_head PR=$prhead worktree=$actual"
+  fi
+}
+
+handle_verify_result() {
+  local verify_output="$1" verify_head="$2" verify_slot="$3" verify_rounds="$4"
+  local fixline open
+  fixline="$(grep -m 1 '^FIX-' "$verify_output" || true)"
+  case "$fixline" in
+    FIX-OK*)
+      t set reviewed "$verify_head"
+      write_findings_history verified "$verify_output" "$verify_rounds"
+      write_findings "$verify_output"
+      emit "FIX-OK reviewed=$verify_head" 0 "head=$verify_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
+    FIX-INCOMPLETE*)
+      write_findings_history verified "$verify_output" "$verify_rounds"
+      write_findings "$verify_output"
+      open="$(grep '^P[123] ' "$verify_output" | head -n 30 || true)"
+      if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
+      emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
+    *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$verify_output")" ;;
+  esac
+}
+
 record_round_findings() {
   local key="fix_round.$knum.findings" path state_arg path_arg
   path="$(t get "$key" 2>/dev/null || true)"
@@ -735,6 +894,24 @@ verify_round_coverage() {
       "repair command: $repair_command"
   fi
 }
+
+if [ -n "$collect_verify_job" ]; then
+  notes=()
+  slot="$(t get "fix_round.$round.verify_slot")"
+  knum="${slot#fix}"
+  history_file="$(history_path "$knum")"
+  verify_head="$(t get "fix_round.$round.verify_head")"
+  new_head="$verify_head"
+  verify_job_id="$collect_verify_job"
+  verify_round_coverage "$tmp/verify-rounds" "$tmp/unaccounted"
+  write_findings_history prepare "" "$tmp/verify-rounds"
+  vrc=0; "$reviewpr" collect "$collect_verify_job" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
+  if [ -s "$tmp/verify.err" ]; then cat "$tmp/verify.err" >&2; fi
+  [ "$vrc" -eq 0 ] || emit "VERIFY-FAIL reason=collect-verify" 1 \
+    "review-pr collect $collect_verify_job exited $vrc" "$(cat "$tmp/verify.out")"
+  verify_result_head_guard "$verify_head" "$slot"
+  handle_verify_result "$tmp/verify.out" "$verify_head" "$slot" "$tmp/verify-rounds"
+fi
 
 # A fix job, fresh or resumed, uses the optional plan Fix gate when present;
 # otherwise the job reads the plan Gate line. A takeover has no plan file, so its recorded state
@@ -1030,14 +1207,19 @@ vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$v
 if [ -n "$concerns_file" ]; then vargs+=(--context "$concerns_file"); fi
 for ruling_index in "${!ruling_ids[@]}"; do vargs+=(--context "${ruling_bodies[$ruling_index]}"); done
 vrc=0; "$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
+verify_job_id="$(awk '$1 == "verify" && NF == 2 { print $2; exit }' "$tmp/verify.out")"
+case "$verify_job_id" in ''|*/*|.|..) verify_job_id="";; esac
+t set "fix_round.$round.verify_head" "$new_head"
+t set "fix_round.$round.verify_slot" "$slot"
+t journal "tkt-fix verify round=$round slot=$slot head=$new_head${verify_job_id:+ job=$verify_job_id}"
+if [ -n "$verify_job_id" ]; then t set "fix_round.$round.verify_job" "$verify_job_id"; fi
 if [ -s "$tmp/verify.err" ]; then cat "$tmp/verify.err" >&2; fi
-[ "$vrc" -eq 0 ] || emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")" ${notes[@]+"${notes[@]}"}
-fixline="$(grep -m 1 '^FIX-' "$tmp/verify.out" || true)"
-case "$fixline" in
-  FIX-OK*) t set reviewed "$new_head"; write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"; write_findings "$tmp/verify.out"
-    emit "FIX-OK reviewed=$new_head" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
-  FIX-INCOMPLETE*) write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"; write_findings "$tmp/verify.out"; open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
-    if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
-    emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
-  *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$tmp/verify.out")" ;;
-esac
+if [ "$vrc" -ne 0 ]; then
+  if [ -n "$verify_job_id" ] && grep -q '^BAD-VERDICT verify ' "$tmp/verify.out"; then
+    recovery_cmd="tkt-fix $(printf '%q' "$state") --collect-verify $(printf '%q' "$verify_job_id")"
+    emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")" \
+      "recovery: $recovery_cmd" ${notes[@]+"${notes[@]}"}
+  fi
+  emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")" ${notes[@]+"${notes[@]}"}
+fi
+handle_verify_result "$tmp/verify.out" "$new_head" "$slot" "$tmp/verify-rounds"

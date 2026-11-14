@@ -33,4 +33,4 @@ A new finding is a P1 or P2 defect on a line the repair diff added or changed, o
 
 A repair that detects a bad state at entry (a drift or precondition check) and stops there fixes a finding about detection; a finding about recovering from that state stays open until a path recovers.
 
-Final message restates every open and new finding in full, using the finding format. Do not say “the verdict stands” or refer to earlier text. End with exactly one verdict line (`FIX-OK` or `FIX-INCOMPLETE`), then exactly one `STATUS: DONE` or `STATUS: DONE_WITH_CONCERNS` line, even when context is missing.
+Final message restates every open and new finding in full, using the finding format. Do not say “the verdict stands” or refer to earlier text. End with exactly one verdict line (`FIX-OK` or `FIX-INCOMPLETE`), optionally followed by one of `.`, `:`, `;` or `,` and then whitespace with optional detail or the end of the line, then exactly one `STATUS: DONE` or `STATUS: DONE_WITH_CONCERNS` line, even when context is missing.
