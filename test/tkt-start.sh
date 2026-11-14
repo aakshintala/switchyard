@@ -626,13 +626,13 @@ want "PREFLIGHT core=0 nonblocking=1 out=" 0 fieldmissing-rerun
 
 setup resume-fixed TWO FILING
 printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
-printf '1. non-blocking -- repaired\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobresumeout"
+printf '1. non-blocking -- repaired\nCore items: 0\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobresumeout"
 run_start
 want "PREFLIGHT core=0 nonblocking=1 out=" 0 resume-fixed
 [ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] || fail "resume-fixed: no resume call"
 grep -qF -- "--resume stub-1 --prompt $RUN/widget-42-preflight-footer-repair.md" "$T/calls.log" \
   || fail "resume-fixed: tkt-job did not receive the stored job and run-dir prompt"
-[ "$(cat "$RUN/widget-42-preflight-footer-repair.md")" = 'Append the required footer lines exactly as skills/planning/briefs/preflight.md asks: Core items: <n> and Non-blocking items: <n>, using decimal counts. Do not change the findings.' ] \
+[ "$(cat "$RUN/widget-42-preflight-footer-repair.md")" = 'Append the required footer lines exactly as skills/planning/briefs/preflight.md asks: Core items: <n> and Non-blocking items: <n>, using decimal counts. Do not change the findings. Reply with the complete corrected report as your message: every finding line tagged "- core:" or "- non-blocking:", the Writes/Reads sweep, both footer lines ("Core items: <n>" and "Non-blocking items: <n>") matching the tagged lines, and the STATUS line. Write no file, and change no finding.' ] \
   || fail "resume-fixed: repair prompt is not the required one-line request"
 grep -qF 'tkt-start preflight resume job=stub-1' "$RUN/widget-42.journal" \
   || fail "resume-fixed: journal misses the resume"
@@ -646,6 +646,51 @@ want "PREFLIGHT core=unknown out=" 1 resume-no-second
   || fail "resume-no-second: rerun resumed the same preflight job twice"
 [ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
   || fail "resume-no-second: refusal did not clear the slot"
+
+# Replies that replace the report with footer-only content must not turn an empty report into zero findings.
+setup resume-footer-only TWO FILING
+printf '1. core -- first\nNon-blocking items: 0\n' >"$T/jobout"
+printf 'Core items: 0\nNon-blocking items: 0\n' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=unknown out=" 1 resume-footer-only
+grep -qF 'tkt-start: preflight footer resume failed (rc=0): resumed report has no STATUS: line' <<<"$OUT" \
+  || fail "resume-footer-only: refusal does not name the missing STATUS line: $OUT"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-footer-only: refused resume did not clear the job slot"
+grep -qF 'tkt-start preflight resume failed job=stub-1 rc=0 head=resumed report has no STATUS: line' "$RUN/widget-42.journal" \
+  || fail "resume-footer-only: journal misses the failed resume"
+
+# A file-path reply with STATUS but no findings still has no footer and must refuse.
+setup resume-file-reply TWO FILING
+printf '1. core -- first\nNon-blocking items: 0\n' >"$T/jobout"
+printf '%s\n' 'I wrote the corrected report to /tmp/x.md' 'STATUS: DONE' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=unknown out=" 1 resume-file-reply
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-file-reply: refused resume did not clear the job slot"
+case "$OUT" in *"no 'Core items:' line"*) ;; *) fail "resume-file-reply: refusal missed the absent footer: $OUT" ;; esac
+
+# Complete findings without STATUS must not pass a footer repair.
+setup resume-no-status TWO FILING
+printf '1. core -- first\nNon-blocking items: 0\n' >"$T/jobout"
+printf '%s\n' '- core: first' '- non-blocking: second' 'Core items: 1' 'Non-blocking items: 1' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=unknown out=" 1 resume-no-status
+grep -qF 'tkt-start: preflight footer resume failed (rc=0): resumed report has no STATUS: line' <<<"$OUT" \
+  || fail "resume-no-status: refusal does not name the missing STATUS line: $OUT"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-no-status: refused resume did not clear the job slot"
+
+# A tags repair cannot undercount the footer's non-blocking findings.
+setup resume-nonblocking-mismatch TWO FILING
+printf '%s\n' '- core: none' 'Core items: 1' 'Non-blocking items: 0' 'STATUS: DONE' >"$T/jobout"
+printf '%s\n' '- core: repaired finding' '- non-blocking: one finding' 'Core items: 1' 'Non-blocking items: 2' 'STATUS: DONE' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 resume-nonblocking-mismatch
+grep -qF 'tkt-start: preflight tags resume failed (rc=0): resumed report has 1 tagged non-blocking lines but footer says 2' <<<"$OUT" \
+  || fail "resume-nonblocking-mismatch: refusal does not name the undercount: $OUT"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-nonblocking-mismatch: refused resume did not clear the job slot"
 
 setup resume-failure TWO FILING
 printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
@@ -674,7 +719,7 @@ grep -qF 'tkt-start preflight resume failed job=stub-1 rc=1 head=TKT tkt-job ASK
 
 setup resume-mismatch TWO FILING
 printf '1. core -- first\nNon-blocking items: 0\n' >"$T/jobout"
-printf 'core: none\nCore items: 1\nNon-blocking items: 0\n' >"$T/jobresumeout"
+printf 'core: none\nCore items: 1\nNon-blocking items: 0\nSTATUS: DONE\n' >"$T/jobresumeout"
 run_start
 want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 resume-mismatch
 [ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
@@ -684,7 +729,7 @@ want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 resume-mismatch
 
 setup footer-alternative TWO FILING
 printf 'Core: 0 | Non-blocking: 4\n' >"$T/jobout"
-printf '1. non-blocking -- repaired\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobresumeout"
+printf '1. non-blocking -- repaired\nCore items: 0\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobresumeout"
 run_start
 want "PREFLIGHT core=0 nonblocking=1 out=" 0 footer-alternative
 [ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
@@ -719,7 +764,7 @@ if grep -qF 'reused=' "$T/job-results.log"; then fail "mismatch-rerun: reused th
 # A mismatch fixed by its one resume goes on as a valid report.
 setup mismatch-fixed TWO FILING
 printf '%s\n' '**Core findings**' '1. the guard reaps early' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
-printf '%s\n' '- core: the guard reaps early' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobresumeout"
+printf '%s\n' '- core: the guard reaps early' 'Core items: 1' 'Non-blocking items: 0' 'STATUS: DONE' >"$T/jobresumeout"
 run_start
 want "PREFLIGHT core=1 out=" 1 mismatch-fixed
 [ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
