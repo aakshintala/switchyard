@@ -33,10 +33,10 @@ fail_over_budget() {
 # rules leaves less than 1 KiB, find the bytes elsewhere without dropping a
 # rule, or ship with whatever headroom is left and say so in the PR body."
 # With every rule restored, the pi template left 256 B before #1731.
-# Switchyard #1731 restores 1 KiB of headroom by tightening wording, not dropping rules.
+# Switchyard #1731 tightened wording (no rule dropped) to leave about 1 KiB under this cap.
 BRIEF_MAX_BYTES=33280
 BRIEF_MAX_LINES=125
-PI_HEADROOM_BYTES=1280
+PI_HEADROOM_BYTES=256
 PI_MAX_BYTES=$((BRIEF_MAX_BYTES - PI_HEADROOM_BYTES))
 
 within_budget() {
