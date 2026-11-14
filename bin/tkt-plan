@@ -215,6 +215,30 @@ round_limit_recovery_route() {
   printf '%s\n' "$route"
 }
 
+rule_ok_author_route() {
+  local state="$1" who="$2" ruling="$3" route
+  printf -v route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q rule-ok --by %q --ruling %q --comment %s' "$state" "$who" "$ruling" '<new comment id>'
+  printf '%s\n' "$route"
+}
+
+triaged_author_route() {
+  local state="$1" route
+  printf -v route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q triaged --comment %s' "$state" '<new comment id>'
+  printf '%s\n' "$route"
+}
+
+rule_questions_author_route() {
+  local state="$1" route
+  printf -v route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q rule-questions --comment %s' "$state" '<new comment id>'
+  printf '%s\n' "$route"
+}
+
+triaged_snapshot_unavailable_route() {
+  local state="$1" route
+  printf -v route 'the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan %q verify' "$state"
+  printf '%s\n' "$route"
+}
+
 grant_pending() {
   local granted_by granted_used
   granted_by="$(t get granted_by 2>/dev/null || true)"
@@ -1081,8 +1105,7 @@ do_rule_ok() {
         emit "RULE-OK-REFUSED reason=comment-issue" 1 "comment $comment is not on $repo#$issue" "$rule_ok_route"
         ;;
       author)
-        printf -v rule_ok_route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q rule-ok --by %q --ruling %q --comment %s' "$state" "$who" "$ruling" '<new comment id>'
-        emit "RULE-OK-REFUSED reason=ruling-author" 1 "comment $comment is not from a repository owner, member or collaborator" "$rule_ok_route"
+        emit "RULE-OK-REFUSED reason=ruling-author" 1 "comment $comment is not from a repository owner, member or collaborator" "$(rule_ok_author_route "$state" "$who" "$ruling")"
         ;;
       time) emit "RULE-OK-REFUSED reason=comment-time" 1 "comment $comment does not postdate the latest plan or stop verdict" ;;
     esac
@@ -1121,8 +1144,7 @@ do_triaged() {
         emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "comment $comment is not on $repo#$issue" "$triaged_route"
         ;;
       author)
-        printf -v triaged_route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q triaged --comment %s' "$state" '<new comment id>'
-        emit "TRIAGED-REFUSED reason=ruling-author issue=$issue" 1 "comment $comment is not from a repository owner, member or collaborator" "$triaged_route"
+        emit "TRIAGED-REFUSED reason=ruling-author issue=$issue" 1 "comment $comment is not from a repository owner, member or collaborator" "$(triaged_author_route "$state")"
         ;;
       time) emit "TRIAGED-REFUSED reason=ruling-stale" 1 "comment $comment does not postdate the latest plan verdict" ;;
     esac
@@ -1143,8 +1165,7 @@ do_triaged() {
   if [ -n "$stored_hash" ] && [ "$stored_hash" != "$current_hash" ]; then
     case "$stored_hash" in
       *[!0123456789abcdefABCDEF]*)
-        printf -v verify_route 'the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan %q verify' "$state"
-        emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "$verify_route"
+        emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "$(triaged_snapshot_unavailable_route "$state")"
         ;;
     esac
     snapshot_file="$tmp.snapshot"
@@ -1158,8 +1179,7 @@ do_triaged() {
     normalized_comment="$tmp.comment-normalized"
     if ! git -C "$worktree" cat-file blob "$stored_hash" >"$snapshot_file" 2>/dev/null; then
       rm -f "$snapshot_file"
-      printf -v verify_route 'the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan %q verify' "$state"
-      emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "$verify_route"
+      emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "$(triaged_snapshot_unavailable_route "$state")"
     fi
     plan_without_rulings "$snapshot_file" >"$before_rest" || exit 2
     plan_without_rulings "$plan" >"$after_rest" || exit 2
@@ -1256,8 +1276,7 @@ do_rule_questions() {
         emit "QUESTIONS-REFUSED reason=comment" 1 "comment $comment is empty or does not belong to $repo#$issue" "$questions_route"
         ;;
       author)
-        printf -v questions_route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q rule-questions --comment %s' "$state" '<new comment id>'
-        emit "QUESTIONS-REFUSED reason=ruling-author" 1 "comment $comment is not from a repository owner, member or collaborator" "$questions_route"
+        emit "QUESTIONS-REFUSED reason=ruling-author" 1 "comment $comment is not from a repository owner, member or collaborator" "$(rule_questions_author_route "$state")"
         ;;
     esac
   fi
