@@ -56,8 +56,13 @@ while [ -L "$self" ]; do
   case "$link" in /*) self="$link" ;; *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;; esac
 done
 self_dir="$(cd "$(dirname "$self")" && pwd)"
-# shellcheck disable=SC1091
-. "$self_dir/lib/ticket-state.sh"
+ticket_state_lib="$self_dir/lib/ticket-state.sh"
+if [ ! -r "$ticket_state_lib" ]; then
+  echo "fence-grant: cannot read shared lib: $ticket_state_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$ticket_state_lib"
 _fw_run() { ticket_states_run_dir; }
 _fw_box_host() { printf '%s' "${FW_BOX_HOST:-roundhouse-7010-plus-1.local}"; }
 _fw_is_box() {
@@ -609,8 +614,6 @@ esac
 run=$(_fw_run)
 # shellcheck disable=SC1091
 . "$self_dir/lib/lane-ticket.sh"
-# shellcheck disable=SC1091
-. "$self_dir/lib/ticket-state.sh"
 file_claim="${FW_FILE_CLAIM:-$self_dir/file-claim}"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fence-grant.XXXXXX") || { echo "ERROR cannot make temp dir"; exit 3; }
 lockdir="$run/.fence-grant.lock"

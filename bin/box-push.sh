@@ -34,6 +34,7 @@ ssh=${BOX_SSH:-ssh}
 host=${FW_BOX_HOST:-roundhouse-7010-plus-1.local}
 mac=${FW_MAC_HOME:-$HOME}; box=$(fw_box_home)
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}
+run=$(ticket_states_shared_run_dir "$run")
 dst=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 
 sent=0
