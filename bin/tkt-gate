@@ -85,6 +85,13 @@ if [ ! -r "$namebase_lib" ]; then
 fi
 # shellcheck disable=SC1090
 . "$namebase_lib"
+ticket_state_lib="$script_dir/lib/ticket-state.sh"
+if [ ! -r "$ticket_state_lib" ]; then
+  echo "tkt-gate: cannot read shared lib: $ticket_state_lib" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$ticket_state_lib"
 plan_gate_lib="$script_dir/lib/plan-gate-args.sh"
 if [ ! -r "$plan_gate_lib" ]; then
   echo "tkt-gate: cannot read shared lib: $plan_gate_lib" >&2
@@ -409,9 +416,9 @@ if [ -n "$fence_list" ]; then
   done <<<"$fence_list"
 fi
 
-# fence-grant --require resolves the run directory from FW_RUN or the same
-# HOME fallback. Only files belonging to this exact ticket number count.
-grant_run="${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"
+# fence-grant --require resolves the ticket's shared run directory, while the
+# state and its ticket-owned files remain under the run recorded in the state.
+grant_run="$(ticket_states_shared_run_dir "$run")"
 for grant_file in "$grant_run"/fiber-"$issue"-fence-grant*.md; do
   [ -f "$grant_file" ] || continue
   while IFS= read -r grant_path; do

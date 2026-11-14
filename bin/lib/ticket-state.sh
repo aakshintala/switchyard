@@ -71,5 +71,48 @@ with open(sys.argv[3], "w") as output:
 
 # Same default run directory as fence-grant; tests set FW_RUN to an isolated path.
 ticket_states_run_dir() {
-  printf '%s' "${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"
+  ticket_states_shared_run_dir "${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"
+}
+
+# Per-state runs are immediate children of the shared run named
+# <name>-bound-<part> (tkt-start stores the supplied --run unchanged in state).
+# Prefer that structural suffix; otherwise use FW_RUN/RUN_DIR when it contains
+# the requested directory, falling back to the requested run unchanged.
+ticket_states_shared_run_dir() {
+  local requested="${1:-}" configured base bound parent
+  configured="${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}"
+  [ -n "$requested" ] || requested="$configured"
+  case "$requested" in */) requested="${requested%/}";; esac
+  case "$configured" in */) configured="${configured%/}";; esac
+  [ -n "$requested" ] || requested="/"
+  [ -n "$configured" ] || configured="/"
+  base="${requested##*/}"
+  case "$base" in
+    *-bound-*)
+      bound="${base##*-bound-}"
+      case "$bound" in
+        ''|*[!0-9]*) ;;
+        *)
+          parent="${requested%/*}"
+          [ -n "$parent" ] || parent="/"
+          if [ "$parent" != "$requested" ]; then
+            printf '%s' "$parent"
+            return 0
+          fi
+          ;;
+      esac
+      ;;
+  esac
+  configured="${configured%/}"
+  [ -n "$configured" ] || configured="/"
+  if [ "$requested" != "$configured" ]; then
+    if [ "$configured" = "/" ]; then
+      case "$requested" in /*) printf '%s' "$configured"; return 0;; esac
+    else
+      case "$requested/" in
+        "$configured/"*) printf '%s' "$configured"; return 0 ;;
+      esac
+    fi
+  fi
+  printf '%s' "$requested"
 }

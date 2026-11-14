@@ -38,6 +38,9 @@ box=$(fw_box_home)
 if fw_box_is_local; then box=$HOME; fi
 boxrun=${FW_BOX_RUN:-$box/work/fiber-worktrees/flywheel/run}
 run=${FW_RUN:-${RUN_DIR:-$mac/work/fiber-worktrees/flywheel/run}}
+# FW_RUN may name a ticket's bounded state directory; boxlaunch's roster,
+# briefs, grants and notes are shared lane facts in the flywheel run.
+run=$(ticket_states_shared_run_dir "$run")
 sync_roster() {
   fw_box_is_local && return 0
   # A roster can be absent before the first lane launch, but sync either file

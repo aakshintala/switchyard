@@ -15,12 +15,14 @@ done
 _FW_LIB_DIR=$(cd "$(dirname "$_fw_source")" && pwd)
 _FW_BIN_DIR=$(dirname "$_FW_LIB_DIR")
 unset _fw_source _fw_source_dir _fw_source_link
+# shellcheck disable=SC1091
+. "$_FW_LIB_DIR/ticket-state.sh"
 
 # Sibling tools: FW_FENCE_GRANT and FW_BOX_LOCAL override them (tests).
 _fw_fence_grant() { printf '%s' "${FW_FENCE_GRANT:-$_FW_BIN_DIR/fence-grant}"; }
 _fw_box_local() { printf '%s' "${FW_BOX_LOCAL:-$_FW_BIN_DIR/box-local.sh}"; }
 
-_fw_run() { printf '%s' "${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}"; }
+_fw_run() { ticket_states_shared_run_dir "${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}"; }
 _fw_box_host() { printf '%s' "${FW_BOX_HOST:-roundhouse-7010-plus-1.local}"; }
 
 # Use SSH from the Mac, and the local shim when the flywheel itself runs on
@@ -429,6 +431,7 @@ fw_is_liveness() {
 # inherit #4260's grant. The second pattern covers phase-qualified grants.
 fw_has_grant_file() {
   local n="$1" run="$2" g was_noglob=0 found=1
+  run=$(ticket_states_shared_run_dir "$run")
   case "$-" in *f*) was_noglob=1; set +f;; esac
   for g in "$run"/fiber-"$n"-fence-grant*.md "$run"/fiber-"$n"-*-fence-grant*.md; do
     if [ -f "$g" ]; then found=0; break; fi
@@ -440,6 +443,7 @@ fw_has_grant_file() {
 # Empty Paths blocks are valid for plan launches but do not fence build writes.
 fw_has_nonempty_grant() {
   local n="$1" run="$2" g was_noglob=0 found=1
+  run=$(ticket_states_shared_run_dir "$run")
   case "$-" in *f*) was_noglob=1; set +f;; esac
   for g in "$run"/fiber-"$n"-fence-grant*.md "$run"/fiber-"$n"-*-fence-grant*.md; do
     [ -f "$g" ] || continue
@@ -461,11 +465,12 @@ fw_has_nonempty_grant() {
 # ranges narrow a grant; without them each write is a whole-file claim until
 # push-time hunks arrive. If no posted write plan exists, record an empty grant.
 # With refresh-empty, do not append another empty grant when one already exists.
-# Returns 1 when GitHub/fence-grant fails or no grant file appears in <run>.
+# Returns 1 when GitHub/fence-grant fails or no grant file appears in the shared run directory.
 # FW_GH and FW_FENCE_GRANT override gh and fence-grant (tests).
 fw_self_grant() {
-  local who=$1 n=$2 run=$3 refresh_existing=${4:-0} phase=${5:-} body lists w r rg fg nw g found what
+  local who=$1 n=$2 run=$3 refresh_existing=${4:-0} phase=${5:-} body lists w r rg fg nw g found what grant_run
   local -a a=()
+  grant_run=$(ticket_states_shared_run_dir "$run")
   fg=$(_fw_fence_grant)
   _fw_grant_ssh=${FW_SSH:-}
   if [ -z "$_fw_grant_ssh" ] && [ "$(uname -s)" != Darwin ]; then
@@ -506,7 +511,7 @@ print(",".join(w)); print(",".join(r)); print(",".join(rg))') || return 1
       echo "$who: #$n has no posted plan; $what needs one to grant its fence" >&2
       return 1
     fi
-    if [ "$refresh_existing" = 1 ] && fw_has_grant_file "$n" "$run"; then
+    if [ "$refresh_existing" = 1 ] && fw_has_grant_file "$n" "$grant_run"; then
       return 0
     fi
     if [ -z "$body" ]; then
@@ -516,27 +521,27 @@ print(",".join(w)); print(",".join(r)); print(",".join(rg))') || return 1
     fi
     a=(--empty)
     [ -n "$r" ] && a+=(--reads "$r")
-    FW_SSH="$_fw_grant_ssh" FW_RUN=$run bash "$fg" "$n" "${a[@]}" >&2 || return 1
+    FW_SSH="$_fw_grant_ssh" FW_RUN=$grant_run bash "$fg" "$n" "${a[@]}" >&2 || return 1
     found=0
     set +f
-    for g in "$run"/fiber-"$n"-fence-grant*.md; do [ -f "$g" ] && { found=1; break; }; done
+    for g in "$grant_run"/fiber-"$n"-fence-grant*.md; do [ -f "$g" ] && { found=1; break; }; done
     set -f
-    [ "$found" -eq 1 ] || { echo "$who: fence-grant ran but wrote no grant file in $run" >&2; return 1; }
+    [ "$found" -eq 1 ] || { echo "$who: fence-grant ran but wrote no grant file in $grant_run" >&2; return 1; }
     return 0
   fi
   # A path the plan creates is not on main yet, and fence-grant wants it under
   # --new as well as --paths: ask a --dry probe, which names each one MISSING.
-  nw=$(FW_SSH="$_fw_grant_ssh" FW_RUN=$run bash "$fg" "$n" --repo aakshintala/fiber --paths "$w" --dry 2>&1 \
+  nw=$(FW_SSH="$_fw_grant_ssh" FW_RUN=$grant_run bash "$fg" "$n" --repo aakshintala/fiber --paths "$w" --dry 2>&1 \
     | sed -n 's/^MISSING //p' | paste -sd, -)
   echo "$who: no fence grant for #$n; granting from the posted plan: $w${nw:+ (new: $nw)}${rg:+ (ranges: $rg)}" >&2
   a=(--paths "$w")
   [ -n "$nw" ] && a+=(--new "$nw")
   [ -n "$rg" ] && a+=(--ranges "$rg")
   [ -n "$r" ] && a+=(--reads "$r")
-  FW_SSH="$_fw_grant_ssh" FW_RUN=$run bash "$fg" "$n" --repo aakshintala/fiber "${a[@]}" >&2 || return 1
+  FW_SSH="$_fw_grant_ssh" FW_RUN=$grant_run bash "$fg" "$n" --repo aakshintala/fiber "${a[@]}" >&2 || return 1
   found=0
   set +f
-  for g in "$run"/fiber-"$n"-fence-grant*.md; do [ -f "$g" ] && { found=1; break; }; done
+  for g in "$grant_run"/fiber-"$n"-fence-grant*.md; do [ -f "$g" ] && { found=1; break; }; done
   set -f
-  [ "$found" -eq 1 ] || { echo "$who: fence-grant ran but wrote no grant file in $run" >&2; return 1; }
+  [ "$found" -eq 1 ] || { echo "$who: fence-grant ran but wrote no grant file in $grant_run" >&2; return 1; }
 }

@@ -164,6 +164,7 @@ repo="$(tkt get repo)"
 issue="$(tkt get issue)"
 set_namebase "$repo" "$issue"
 run="$(tkt get run)"
+grant_run=$(ticket_states_shared_run_dir "$run")
 worktree="$(tkt get worktree)"
 mkdir -p "$run"
 
@@ -175,13 +176,13 @@ phase=plan
 case "$slot" in
   lane|fix[0-9]*)
     phase=build
-    if ! fw_has_nonempty_grant "$issue" "$run" && [ -z "${FW_NO_FENCE:-}" ]; then
+    if ! fw_has_nonempty_grant "$issue" "$grant_run" && [ -z "${FW_NO_FENCE:-}" ]; then
       fw_self_grant tkt-job "$issue" "$run" 1 build || {
         echo "tkt-job: could not self-grant a fence for #$issue" >&2
         exit 2
       }
     fi
-    FW_RUN="$run" "$bin_dir/fence-grant" --require "$issue" --phase "$phase" >&2
+    FW_RUN="$grant_run" "$bin_dir/fence-grant" --require "$issue" --phase "$phase" >&2
     ;;
 esac
 # Guard output goes to stderr: tkt-job's stdout is the job's output.

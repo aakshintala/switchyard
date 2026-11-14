@@ -46,7 +46,17 @@
 #      `##` heading so it cannot add another hold.
 set -u
 set -f
-_fw_run() { printf '%s' "${FW_RUN:-$HOME/work/fiber-worktrees/flywheel/run}"; }
+# Resolve sibling files once, before --require needs the shared-run helper.
+self="$0"
+case "$self" in */*) ;; *) self="$(command -v "$self")" ;; esac
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in /*) self="$link" ;; *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;; esac
+done
+self_dir="$(cd "$(dirname "$self")" && pwd)"
+# shellcheck disable=SC1091
+. "$self_dir/lib/ticket-state.sh"
+_fw_run() { ticket_states_run_dir; }
 _fw_box_host() { printf '%s' "${FW_BOX_HOST:-roundhouse-7010-plus-1.local}"; }
 _fw_is_box() {
   local box_host box_short host_full host_short
@@ -453,13 +463,6 @@ if [ "$empty" -eq 1 ]; then
 fi
 # Siblings resolve from the script's real path: callers such as flywheel's
 # bin/fence-grant reach it through a symlink in a directory with no file-claim.
-self="$0"
-case "$self" in */*) ;; *) self="$(command -v "$self")" ;; esac
-while [ -L "$self" ]; do
-  link="$(readlink "$self")"
-  case "$link" in /*) self="$link" ;; *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;; esac
-done
-self_dir="$(cd "$(dirname "$self")" && pwd)"
 # shellcheck disable=SC1091
 . "$self_dir/lib/fence-grant-paths.sh"
 # shellcheck disable=SC1091

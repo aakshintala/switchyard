@@ -75,6 +75,9 @@ for alias, number in re.findall(r"(\w+):\s*issueOrPullRequest\(number:\s*(\d+)\)
     result[alias] = {"state": states.get(number, "OPEN")}
 print(json.dumps({"data": {"repository": result}}))' "$query" "${GH_TICKET_STATES:-}" "${GH_TICKET_OMIT:-}"
         ;;
+      repos/*/issues/*/comments\?per_page=100)
+        cat "$T/self-grant-plan.md"
+        ;;
       repos/*/compare/*)
         compare_ref="${2##*/compare/}"
         compare_sha="${compare_ref##*...}"
@@ -798,6 +801,7 @@ reset_case
 mkdir -p "$T/realbin" "$T/realbin/lib" "$T/linkbin"
 cp "$FG" "$T/realbin/fence-grant"
 cp "$(dirname "$FG")/lib/lane-ticket.sh" "$T/realbin/lib/lane-ticket.sh"
+cp "$(dirname "$FG")/lib/ticket-state.sh" "$T/realbin/lib/ticket-state.sh"
 cp "$T/stubs/file-claim" "$T/realbin/file-claim"
 cp "$(dirname "$FG")/fw-sess-lanes" "$T/realbin/fw-sess-lanes"
 ln -sf ../realbin/fence-grant "$T/linkbin/fence-grant"
@@ -2531,5 +2535,61 @@ grep -q '^Paths:$' "$empty_grant" || fail 'empty grant has a Paths block'
 grep -q '^Ranges: none$' "$empty_grant" || fail 'empty grant has a Ranges line'
 FW_RUN="$T/run" bash "$FG" --require 9876 --phase build >/dev/null 2>&1 \
   || fail 'empty grant satisfies the build-phase require check'
+
+# A state run is a private subdirectory; lane facts and grants still live in
+# the shared run. Ordinary grant overlaps are reported, while an exclusive
+# sweep holder still refuses the grant.
+. "$SCRIPT_DIR/../bin/lib/fw-lib.sh"
+reset_case
+shared_run="$FW_RUN"
+state_run="$shared_run/fiber-1798-bound-2"
+mkdir -p "$state_run"
+cp "$shared_run/roster" "$state_run/roster"
+printf 'repo=aakshintala/fiber\nissue=1798\nrun=%s\n' "$state_run" >"$state_run/fiber-1798.state"
+cat >"$shared_run/fiber-66-fence-grant-1.md" <<'HOLDER_GRANT'
+Grant 1
+
+Ticket: 66
+Paths:
+- docs/tui.md
+Ranges: none
+HOLDER_GRANT
+CLAUDE_JSON='[{"name":"fiber-66","status":"busy"}]'
+export CLAUDE_JSON
+cat >"$T/self-grant-plan.md" <<'PLAN'
+## Files
+
+- `docs/tui.md`
+PLAN
+FW_RUN="$state_run" run_fg 1798 --paths docs/tui.md --dry
+assert_rc 0 'nested-run dry probe reads shared holder grant'
+assert_contains 'OVERLAP docs/tui.md lane #66' 'shared grant holder is visible from nested run'
+FILE_CLAIM_LIST="$(printf 'docs/tui.md\tsweep-1798-holder\tplan\t0\tt:stub\t\n')"
+export FILE_CLAIM_LIST
+if fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-overlap.out" 2>&1; then
+  fail 'nested-run self-grant refuses an exclusive overlapping holder'
+fi
+grep -qF 'HELD docs/tui.md by lane sweep-1798-holder' "$T/nested-overlap.out" \
+  || fail "nested-run self-grant refusal identifies the holder: $(cat "$T/nested-overlap.out")"
+[ ! -e "$shared_run/fiber-1798-fence-grant-1.md" ] || fail 'refused nested self-grant writes no shared grant'
+[ ! -e "$state_run/fiber-1798-fence-grant-1.md" ] || fail 'refused nested self-grant writes no state-local grant'
+
+FILE_CLAIM_LIST=''
+export FILE_CLAIM_LIST
+cat >"$T/self-grant-plan.md" <<'PLAN'
+## Files
+
+- `docs/events.md`
+PLAN
+fw_self_grant tkt-job 1798 "$state_run" 1 build >"$T/nested-free.out" 2>&1 \
+  || fail "nested-run self-grant grants a non-overlapping path: $(cat "$T/nested-free.out")"
+[ -f "$shared_run/fiber-1798-fence-grant-1.md" ] || fail 'nested-run self-grant writes its grant in shared run'
+[ ! -e "$state_run/fiber-1798-fence-grant-1.md" ] || fail 'nested-run self-grant does not hide its grant in state directory'
+grep -qxF -- '- docs/events.md' "$shared_run/fiber-1798-fence-grant-1.md" \
+  || fail 'shared self-grant records the requested non-overlapping path'
+fw_has_grant_file 1798 "$state_run" || fail 'grant-file reader finds the shared grant from a nested state run'
+fw_has_nonempty_grant 1798 "$state_run" || fail 'nonempty-grant reader finds the shared grant from a nested state run'
+FW_RUN="$state_run" bash "$FG" --require 1798 --phase build >/dev/null 2>&1 \
+  || fail 'fence-grant --require accepts the shared grant from a nested state run'
 
 printf 'fence-grant tests passed\n'
