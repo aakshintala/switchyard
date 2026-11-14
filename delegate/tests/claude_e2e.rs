@@ -14,6 +14,7 @@ const FAKE: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 n=$(cat "$dir/count" 2>/dev/null || echo 0)
 n=$((n + 1)); printf '%s' "$n" > "$dir/count"
+printf '%s\n' "${DELEGATE_JOB_ID-}" "${DELEGATE_JOB_CHAIN-}" > "$dir/job-env.$n"
 {
   printf '%s\n' "$@"
   printf '\n'
@@ -78,6 +79,8 @@ impl Env {
             .env("TMPDIR", &self.dir)
             .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))
             .env_remove("CLAUDECODE")
+            .env_remove("DELEGATE_JOB_ID")
+            .env_remove("DELEGATE_JOB_CHAIN")
             .env("CLAUDE_BIN", self.dir.join("claude.sh"))
             .env(
                 "DELEGATE_HOST_PROFILE",
@@ -161,6 +164,10 @@ fn run_watch_resume_and_auto_argv() {
     assert_eq!(done["result"]["text"], "391\n\nSTATUS: DONE");
     assert_eq!(done["result"]["costEstimated"], false);
     assert_eq!(
+        std::fs::read_to_string(e.dir.join("job-env.1")).unwrap(),
+        format!("{id}\n{id}\n")
+    );
+    assert_eq!(
         done["resume"]["sessionId"],
         "25dddfc3-4271-4019-9de0-6795bd6483fa"
     );
@@ -171,6 +178,10 @@ fn run_watch_resume_and_auto_argv() {
     let next = e.ok(&["resume", &id], "and plus one?");
     let resumed = e.wait_terminal(&next);
     assert_eq!(resumed["status"], "DONE");
+    assert_eq!(
+        std::fs::read_to_string(e.dir.join("job-env.2")).unwrap(),
+        format!("{next}\n{id} {next}\n")
+    );
     let argv = e.last_argv();
     assert!(
         argv.contains("\n--resume\n25dddfc3-4271-4019-9de0-6795bd6483fa\n"),

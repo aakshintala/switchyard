@@ -327,9 +327,31 @@ prepare_brief() {
   fi
 }
 
+job_chain_contains() {
+  local target="$1" candidate
+  [ -n "$target" ] || return 1
+  if [ -n "${DELEGATE_JOB_ID:-}" ] && [ "$DELEGATE_JOB_ID" = "$target" ]; then
+    return 0
+  fi
+  local -a chain_ids=()
+  IFS=$' \t\n' read -r -a chain_ids <<<"${DELEGATE_JOB_CHAIN:-}"
+  for candidate in "${chain_ids[@]+"${chain_ids[@]}"}"; do
+    [ "$candidate" = "$target" ] && return 0
+  done
+  return 1
+}
+
 stored="$(tkt get "job.$slot" 2>/dev/null || true)"
 # A slot cleared to whitespace (a retyped or ssh-quoted '') holds no job.
 case "$stored" in *[![:space:]]*) ;; *) stored="" ;; esac
+if [ -n "$resume" ] && job_chain_contains "$resume"; then
+  echo "tkt-job: refusing to resume $resume: it is the job this process runs inside (DELEGATE_JOB_ID/DELEGATE_JOB_CHAIN); report to your orchestrator instead" >&2
+  exit 2
+fi
+if [ -z "$resume" ] && [ -n "$stored" ] && job_chain_contains "$stored"; then
+  echo "tkt-job: refusing to watch $stored: it is the job this process runs inside (DELEGATE_JOB_ID/DELEGATE_JOB_CHAIN); report to your orchestrator instead" >&2
+  exit 2
+fi
 stored_prompt_hash=""
 if [ -n "$stored" ] && [ -z "$resume" ]; then
   stored_prompt_hash="$(tkt get "job.$slot.prompt" 2>/dev/null || true)"

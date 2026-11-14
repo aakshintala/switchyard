@@ -30,7 +30,7 @@ pub(crate) const USAGE: &str =
        delegate resume <jobId> [--model M] [--model-ruling URL] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
        delegate model-check <model> [--model-ruling URL]
        delegate cancel <jobId>
-       delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
+       delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING; exit 2: refusing to watch a job this process runs inside)
        delegate status <jobId>  (print state and finished job result summary without waiting)
        delegate ack <jobId>... [--any]  (mark one or more job reports as read)
        delegate models
@@ -114,6 +114,12 @@ fn parse(args: &[String], flags: &[&str]) -> Result<(Vec<(String, String)>, Vec<
 
 fn flag<'a>(kv: &'a [(String, String)], name: &str) -> Option<&'a str> {
     kv.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+}
+
+fn current_job_contains(id: &str) -> bool {
+    std::env::var("DELEGATE_JOB_ID").is_ok_and(|own| !own.is_empty() && own == id)
+        || std::env::var("DELEGATE_JOB_CHAIN")
+            .is_ok_and(|chain| chain.split_whitespace().any(|entry| entry == id))
 }
 
 fn flag_values<'a>(kv: &'a [(String, String)], name: &str) -> Vec<&'a str> {
@@ -441,6 +447,52 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
         discard_locator();
         LaunchErr::Usage(format!("cannot write cargo-mutants shim: {e}"))
     })?;
+    let mut chain = std::env::var("DELEGATE_JOB_CHAIN")
+        .ok()
+        .map(|chain| {
+            chain
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut chain_ids = chain
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    if let Some(old_id) = p.resumed_from {
+        let mut lineage = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut current = Some(old_id.to_string());
+        for _ in 0..64 {
+            let Some(job_id) = current.as_deref() else {
+                break;
+            };
+            if !visited.insert(job_id.to_string()) {
+                break;
+            }
+            lineage.push(job_id.to_string());
+            let Some(raw) = read_record(job_id) else {
+                break;
+            };
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                break;
+            };
+            current = record["resumedFrom"].as_str().map(str::to_string);
+        }
+        for ancestor in lineage.into_iter().rev() {
+            if chain_ids.insert(ancestor.clone()) {
+                chain.push(ancestor);
+            }
+        }
+    }
+    chain.push(id.clone());
+    let chain = chain.join(" ");
+    // debt: fiber workers do not see these (the hub daemon, not __supervise, owns their
+    // tools); upgrade when fiber#4822 ships FIBER_SESSION_ID, map it to the job record
+    // whose sessionId matches and extend DELEGATE_JOB_CHAIN from it.
+    cmd.env("DELEGATE_JOB_ID", &id)
+        .env("DELEGATE_JOB_CHAIN", chain);
     let mut child = unsafe {
         cmd.args(&supervise_args)
             .stdin(Stdio::null())
@@ -1375,6 +1427,11 @@ fn watch(args: &[String]) -> Result<i32, Usage> {
     let (kv, ids) = parse(args, &["--timeout"])?;
     if ids.is_empty() {
         return usage(USAGE);
+    }
+    if let Some(id) = ids.iter().find(|id| current_job_contains(id)) {
+        return usage(format!(
+            "delegate watch: refusing to watch {id}: it is the job this process runs inside (DELEGATE_JOB_ID/DELEGATE_JOB_CHAIN); report to your orchestrator instead"
+        ));
     }
     let timeout_arg = flag(&kv, "--timeout");
     let secs = match timeout_arg {

@@ -212,6 +212,8 @@ impl Env {
             .env("TMPDIR", &self.dir)
             .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))
             .env_remove("CLAUDECODE")
+            .env_remove("DELEGATE_JOB_ID")
+            .env_remove("DELEGATE_JOB_CHAIN")
             .env("CODEX_BIN", self.dir.join("codex.sh"))
             .env(
                 "DELEGATE_TEST_CODEX_FIXTURE",
@@ -436,6 +438,17 @@ fn codex_run_finishes_done_with_estimated_cost() {
         std::fs::read_to_string(e.dir.join("argv.txt")).is_ok_and(|s| s.lines().any(|l| l == "---"))
     });
     let done = e.wait_terminal(&id);
+    let agent_env = std::fs::read_to_string(e.dir.join("env-1.txt")).unwrap();
+    assert!(
+        agent_env
+            .lines()
+            .any(|line| line == format!("DELEGATE_JOB_ID={id}"))
+    );
+    assert!(
+        agent_env
+            .lines()
+            .any(|line| line == format!("DELEGATE_JOB_CHAIN={id}"))
+    );
     assert_eq!(done["status"], "DONE");
     assert_eq!(done["result"]["text"], "pong\nSTATUS: DONE");
     assert_eq!(done["result"]["backend"], "codex");

@@ -17,6 +17,7 @@ printf '%s\n' "$@" > "$(dirname "$0")/argv.txt"
 printf '%s %s\n' "${FORCE_COLOR-unset}" "${CLICOLOR_FORCE-unset}" > "$(dirname "$0")/color.env"
 rel="$(dirname "$0")/go"
 d="$(dirname "$0")"
+printf '%s\n' "${DELEGATE_JOB_ID-}" "${DELEGATE_JOB_CHAIN-}" > "$d/job-env.txt"
 # Concurrent jobs share $d: read this run's own copy, then publish it with an atomic mv.
 cat > "$d/stdin.$$"
 pt="$(cat "$d/stdin.$$")"
@@ -203,6 +204,8 @@ impl Env {
             .env("CURSOR_AGENT_BIN", self.dir.join("agent.sh"))
             .env("DELEGATE_HEARTBEAT_MS", "100")
             .env_remove("DELEGATE_JOBS_DIR")
+            .env_remove("DELEGATE_JOB_ID")
+            .env_remove("DELEGATE_JOB_CHAIN")
             .env_remove("CLAUDECODE");
         for (k, v) in env {
             cmd.env(k, v);
@@ -505,6 +508,64 @@ fn prompt_file_and_write_argv() {
         "{argv:?}"
     );
     assert!(argv.contains(&"--force".to_string()), "{argv:?}");
+}
+
+#[test]
+fn run_exports_its_job_id_and_chain_to_the_cursor_agent() {
+    let e = Env::new("job-env");
+    let id = e.run("quick");
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let env = std::fs::read_to_string(e.dir.join("job-env.txt")).unwrap();
+    assert_eq!(env, format!("{id}\n{id}\n"));
+}
+
+#[test]
+fn nested_run_appends_its_id_to_the_job_chain() {
+    let e = Env::new("nested-job-env");
+    let id = e.ok(
+        &["run", "--model", "composer-2.5"],
+        "quick",
+        &[("DELEGATE_JOB_CHAIN", "parent")],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let env = std::fs::read_to_string(e.dir.join("job-env.txt")).unwrap();
+    assert_eq!(env, format!("{id}\nparent {id}\n"));
+}
+
+#[test]
+fn watch_refuses_own_job_but_allows_a_different_job() {
+    let e = Env::new("self-watch");
+    let id = e.run("quick");
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+
+    let own = e.delegate_env(&["watch", &id], None, &[("DELEGATE_JOB_ID", &id)]);
+    assert_eq!(own.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(own.stderr).unwrap(),
+        format!(
+            "delegate watch: refusing to watch {id}: it is the job this process runs inside (DELEGATE_JOB_ID/DELEGATE_JOB_CHAIN); report to your orchestrator instead\n"
+        )
+    );
+
+    let chain = format!("ancestor {id} child");
+    let own_chain = e.delegate_env(&["watch", &id], None, &[("DELEGATE_JOB_CHAIN", &chain)]);
+    assert_eq!(own_chain.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&own_chain.stderr).contains("refusing to watch"));
+
+    let other = e.delegate_env(
+        &["watch", &id, "--timeout", "10"],
+        None,
+        &[
+            ("DELEGATE_JOB_ID", "another-job"),
+            ("DELEGATE_JOB_CHAIN", "parent another-job"),
+        ],
+    );
+    assert_eq!(
+        other.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&other.stderr)
+    );
 }
 
 #[test]
@@ -2310,6 +2371,49 @@ impl Env {
 }
 
 #[test]
+fn resumed_job_refuses_to_watch_its_ancestor() {
+    let e = Env::new("resume-watch-ancestor");
+    let a = e.run("first brief");
+    assert_eq!(e.wait_terminal(&a)["status"], "DONE");
+
+    let b = e.resume_ok(&a, &[], "follow up");
+    assert_eq!(e.wait_terminal(&b)["status"], "DONE");
+    let env = std::fs::read_to_string(e.dir.join("job-env.txt")).unwrap();
+    let mut lines = env.lines();
+    let job_id = lines.next().unwrap();
+    let chain = lines.next().unwrap();
+    assert_eq!(job_id, b);
+
+    let watch = e.delegate_env(
+        &["watch", &a],
+        None,
+        &[("DELEGATE_JOB_ID", job_id), ("DELEGATE_JOB_CHAIN", chain)],
+    );
+    assert_eq!(watch.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(watch.stderr).unwrap(),
+        format!(
+            "delegate watch: refusing to watch {a}: it is the job this process runs inside (DELEGATE_JOB_ID/DELEGATE_JOB_CHAIN); report to your orchestrator instead\n"
+        )
+    );
+}
+
+#[test]
+fn resume_lineage_accumulates_across_multiple_resumes() {
+    let e = Env::new("resume-lineage");
+    let a = e.run("first brief");
+    assert_eq!(e.wait_terminal(&a)["status"], "DONE");
+
+    let b = e.resume_ok(&a, &[], "second brief");
+    assert_eq!(e.wait_terminal(&b)["status"], "DONE");
+
+    let c = e.resume_ok(&b, &[], "third brief");
+    assert_eq!(e.wait_terminal(&c)["status"], "DONE");
+    let env = std::fs::read_to_string(e.dir.join("job-env.txt")).unwrap();
+    assert_eq!(env, format!("{c}\n{a} {b} {c}\n"));
+}
+
+#[test]
 fn resume_continues_session_and_links_chain() {
     let e = Env::new("resume");
     let a = e.run("first brief");
@@ -3084,6 +3188,42 @@ fn muse_run_applies_the_host_sandbox_switch() {
             "{name}: {argv:?}"
         );
     }
+}
+
+#[test]
+fn muse_run_exports_job_identity_to_the_muse_agent() {
+    let e = Env::new("muse-job-env");
+    let dir = e.dir.to_str().unwrap().to_string();
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/contract/muse/tool-calls-fix.stdout");
+    std::fs::copy(fixture, e.dir.join("fixture.stdout")).unwrap();
+    let fake = e.dir.join("muse.sh");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"${{DELEGATE_JOB_ID-}}\" \"${{DELEGATE_JOB_CHAIN-}}\" > {}\ncat {}\n",
+            e.dir.join("job-env.txt").display(),
+            e.dir.join("fixture.stdout").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = e.dir.join("nonexistent-profile.json");
+    let out = e.delegate_env(
+        &["run", "--model", "muse/muse-spark-1.3-contributor"],
+        Some("do the thing"),
+        &[
+            ("MUSE_BIN", fake.to_str().unwrap()),
+            ("HOME", &dir),
+            ("DELEGATE_HOST_PROFILE", profile.to_str().unwrap()),
+        ],
+    );
+    let id = e.ok_output(&out);
+    assert_eq!(e.wait_terminal_for(&id, 30)["status"], "DONE");
+    assert_eq!(
+        std::fs::read_to_string(e.dir.join("job-env.txt")).unwrap(),
+        format!("{id}\n{id}\n")
+    );
 }
 
 #[test]
