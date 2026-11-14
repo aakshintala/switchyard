@@ -438,10 +438,15 @@ for assoc in NONE CONTRIBUTOR; do
   run_plan rule-questions --comment 654321
   [ "$RC" -eq 1 ] || fail "$assoc author ruling comment is refused (rc=$RC)"
   expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=ruling-author log=*" "reject $assoc author ruling comment"
-  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S rule-questions --comment <id>" <<<"$OUT" || fail "$assoc author refusal prints the rule-questions recovery route"
+  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S rule-questions --comment <new comment id>" <<<"$OUT" || fail "$assoc author refusal prints the rule-questions route with the new comment placeholder"
   [ -z "$(state_get plan_questions_comment)" ] || fail "$assoc author comment is not recorded as a ruling"
   [ -z "$(state_get plan_questions_hash)" ] || fail "$assoc author comment does not record a question hash"
 done
+set_ruling_comment 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' '2099-01-01T00:00:00Z' 519
+run_plan rule-questions --comment 654321
+[ "$RC" -eq 1 ] || fail "rule-questions refuses an answer from another issue"
+expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=comment log=*" "rule-questions issue refusal"
+grep -Fq "post the answer on switchyard#518, then rerun tkt-plan $S rule-questions --comment <new comment id>" <<<"$OUT" || fail "rule-questions issue refusal prints its route with the new comment placeholder"
 jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,author_association:"OWNER",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
 run_plan rule-questions --comment 654321
 [ "$RC" -eq 0 ] || fail "record ruling for all questions (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -997,6 +1002,12 @@ rm -f "$T/comment.json"
 run_plan grant-round --by switchyard --comment 9001
 grant_refusal_expect 'grant-missing-comment' comment-fetch 'could not verify that comment 9001' "post the grant as a comment on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001"
 
+grant_refusal_setup grant-fetch-failure
+: >"$T/api-fail"
+run_plan grant-round --by switchyard --comment 9001
+rm -f "$T/api-fail"
+grant_refusal_expect 'grant-fetch-failure' comment-fetch 'could not verify that comment 9001 belongs to switchyard#518: gh: simulated ruling comment fetch failure' "post the grant as a comment on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001"
+
 grant_refusal_setup grant-comment-other-issue
 set_ruling_comment 'Grant this extra confirm round.' 2099-01-01T00:00:00Z 519
 run_plan grant-round --by switchyard --comment 9001
@@ -1012,6 +1023,11 @@ set_ruling_comment 'Grant this extra confirm round.'
 set_ruling_comment 'The ruling comment is not from a trusted author.' 2099-01-01T00:00:00Z 518 NONE "$T/comment-9002.json"
 run_plan grant-round --by switchyard --comment 9001 --ruling 9002
 grant_refusal_expect 'grant-ruling-author-none' ruling-author 'ruling comment 9002 is not from a repository owner' "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001 --ruling <new comment id>"
+
+grant_refusal_setup grant-ruling-other-issue yes
+set_ruling_comment 'The ruling comment is on another issue.' 2099-01-01T00:00:00Z 519 NONE "$T/comment-9002.json"
+run_plan grant-round --by switchyard --comment 9001 --ruling 9002
+grant_refusal_expect 'grant-ruling-other-issue' ruling-issue 'ruling comment 9002 is not on switchyard#518' "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001 --ruling <new comment id>"
 
 setup_case grant-invalid
 rebase_plan
@@ -1048,6 +1064,19 @@ grep -q 'switchyard:1234' "$CDIR/stderr.txt" || fail "pending grant error names 
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard" ] || fail "pending grant keeps the first author"
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "1234" ] || fail "pending grant keeps the first comment"
 
+# --- grant-round rejects a ruling name before attempting to fetch it ---
+setup_case grant-non-numeric-ruling
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-non-numeric-ruling seed confirm"
+: >"$T/gh.log"
+run_plan grant-round --by switchyard --comment 9001 --ruling RULING-4685-3
+[ "$RC" -eq 1 ] || fail "grant-non-numeric-ruling refuses the rule-ok ruling name (rc=$RC): $OUT"
+expect_verdict "TKT tkt-plan GRANT-REFUSED reason=ruling-id log=*" "grant-non-numeric-ruling"
+grep -Fq "grant-round --ruling takes the ruling comment's numeric id (for example --ruling 6879037718)" <<<"$OUT" || fail "grant-non-numeric-ruling explains the numeric comment id: $OUT"
+grep -Fq "then rerun: tkt-plan $S grant-round --by switchyard --comment 9001 --ruling <ruling comment id>" <<<"$OUT" || fail "grant-non-numeric-ruling prints the ruling comment id placeholder: $OUT"
+! grep -Fq "then rerun: tkt-plan $S grant-round --by switchyard --comment 9001 --ruling RULING-4685-3" <<<"$OUT" || fail "grant-non-numeric-ruling does not repeat the refused value: $OUT"
+[ ! -s "$T/gh.log" ] || fail "grant-non-numeric-ruling makes no gh call"
+
 setup_case grant-second-used
 rebase_plan
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-second-used seed confirm"
@@ -1057,7 +1086,7 @@ bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-second-used seed used"
 run_plan grant-round --by switchyard --comment 5678
 [ "$RC" -eq 2 ] || fail "second used grant exits 2 (rc=$RC)"
 grep -q 'old-grant:99' "$CDIR/stderr.txt" || fail "used grant refusal names the existing grant"
-grep -q -- '--ruling' "$CDIR/stderr.txt" || fail "used grant refusal names --ruling"
+grep -Fq 'a later grant needs a ruling: use --ruling <ruling comment id>' "$CDIR/stderr.txt" || fail "used grant refusal names the ruling comment id"
 grep -qi 'owner' "$CDIR/stderr.txt" && fail "used grant refusal has no owner wording: $(cat "$CDIR/stderr.txt")"
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "old-grant" ] || fail "used grant refusal keeps the first author"
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "99" ] || fail "used grant refusal keeps the first comment"
@@ -1070,31 +1099,58 @@ bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-ruling seed confirm"
 bash "$TKT_STATE" "$S" set granted_by 'old:by' || fail "grant-ruling seed old grant author"
 bash "$TKT_STATE" "$S" set granted_comment 'x:y' || fail "grant-ruling seed old grant comment"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-ruling seed used"
-run_plan grant-round --by 'switchyard:bot' --comment 'abc:def' --ruling 'own:1'
+run_plan grant-round --by 'switchyard:bot' --comment 'abc:def' --ruling 1001
 [ "$RC" -eq 0 ] || fail "ruling grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan SET grant=switchyard:bot:abc:def log=*" "ruling grant"
 [ "$(bash "$TKT_STATE" "$S" get granted_by)" = "switchyard:bot" ] || fail "ruling grant records the author"
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "abc:def" ] || fail "ruling grant records the comment"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "ruling grant writes no granted_owner"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "ruling grant starts unused"
-bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=switchyard:bot.*comment=abc:def.*ruling=own:1' || fail "ruling grant records round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=switchyard:bot.*comment=abc:def.*ruling=1001' || fail "ruling grant records round, grantor and comment"
 bash "$TKT_STATE" "$S" list grant | grep -q 'via=ruling' || fail "ruling grant records the ruling flag"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "ruling consume the grant"
 run_plan grant-round --by later --comment later
 [ "$RC" -eq 2 ] || fail "third grant without a ruling exits 2"
 grep -q 'switchyard:bot' "$CDIR/stderr.txt" || fail "third grant refusal names the latest author"
 grep -q 'abc:def' "$CDIR/stderr.txt" || fail "third grant refusal names the latest comment"
-grep -q -- '--ruling' "$CDIR/stderr.txt" || fail "third grant refusal names --ruling"
+grep -Fq 'a later grant needs a ruling: use --ruling <ruling comment id>' "$CDIR/stderr.txt" || fail "third grant refusal names the ruling comment id"
 grep -qi 'owner' "$CDIR/stderr.txt" && fail "third grant refusal has no owner wording: $(cat "$CDIR/stderr.txt")"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "third grant refusal writes no granted_owner"
 
 setup_case grant-first-ruling
 rebase_plan
 bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-first-ruling seed confirm"
-run_plan grant-round --by switchyard --comment first --ruling 'own:2'
+run_plan grant-round --by switchyard --comment first --ruling 2002
 [ "$RC" -eq 0 ] || fail "first ruling grant exits 0 (rc=$RC)"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "first grant writes no granted_owner"
-bash "$TKT_STATE" "$S" list grant | grep -q 'via=ruling.*ruling=own:2' || fail "first grant records the ruling flag"
+bash "$TKT_STATE" "$S" list grant | grep -q 'via=ruling.*ruling=2002' || fail "first grant records the ruling flag"
+
+# --- a used ruling id cannot authorize another grant, but a shared prefix can ---
+setup_case grant-ruling-reused
+rebase_plan
+bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-ruling-reused seed confirm"
+run_plan grant-round --by switchyard --comment first --ruling 21
+[ "$RC" -eq 0 ] || fail "grant-ruling-reused first grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-ruling-reused consume first grant"
+run_plan grant-round --by switchyard --comment second --ruling 2
+[ "$RC" -eq 0 ] || fail "grant-ruling-reused allows a distinct id sharing a prefix (rc=$RC): $(cat "$CDIR/stderr.txt")"
+bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-ruling-reused consume second grant"
+cp "$S" "$CDIR/state.before-first-ruling-reuse"
+: >"$T/gh.log"
+run_plan grant-round --by switchyard --comment third --ruling 21
+[ "$RC" -eq 1 ] || fail "grant-ruling-reused refuses a later grant that reuses the first grant's ruling id (rc=$RC): $OUT"
+expect_verdict "TKT tkt-plan GRANT-REFUSED reason=ruling-reused log=*" "grant-ruling-reused first id"
+cmp -s "$CDIR/state.before-first-ruling-reuse" "$S" || fail "grant-ruling-reused first-id reuse writes no state"
+[ ! -s "$T/gh.log" ] || fail "grant-ruling-reused first-id reuse makes no gh call"
+cp "$S" "$CDIR/state.before-reused-ruling"
+: >"$T/gh.log"
+run_plan grant-round --by switchyard --comment third --ruling 2
+[ "$RC" -eq 1 ] || fail "grant-ruling-reused refuses the second grant with the same ruling id (rc=$RC): $OUT"
+expect_verdict "TKT tkt-plan GRANT-REFUSED reason=ruling-reused log=*" "grant-ruling-reused"
+grep -Fq 'ruling 2 has already backed a grant' <<<"$OUT" || fail "grant-ruling-reused explains the reused ruling id: $OUT"
+grep -Fq "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment third --ruling <new comment id>" <<<"$OUT" || fail "grant-ruling-reused prints the replacement route: $OUT"
+cmp -s "$CDIR/state.before-reused-ruling" "$S" || fail "grant-ruling-reused writes no state"
+[ ! -s "$T/gh.log" ] || fail "grant-ruling-reused checks the reused id before fetching comments"
 
 # --- a second and a third grant with --ruling each re-arm the pending grant ---
 setup_case grant-ruling-repeat
@@ -1113,21 +1169,21 @@ run_plan grant-round --by fly --comment c1
 bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=fly.*comment=c1' || fail "grant-ruling-repeat first record carries round, grantor and comment"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "grant-ruling-repeat first granted confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-run_plan grant-round --by fly --comment c2 --ruling r2
+run_plan grant-round --by fly --comment c2 --ruling 2002
 [ "$RC" -eq 0 ] || fail "grant-ruling-repeat second grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan SET grant=fly:c2 log=*" "grant-ruling-repeat second grant"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "grant-ruling-repeat second grant re-arms the pending grant"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "grant-ruling-repeat second grant writes no granted_owner"
 [ "$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | grep -c .)" = "2" ] || fail "grant-ruling-repeat second grant leaves two records"
-bash "$TKT_STATE" "$S" list grant | grep -q 'round=4 by=fly.*comment=c2.*ruling=r2' || fail "grant-ruling-repeat second record carries round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=4 by=fly.*comment=c2.*ruling=2002' || fail "grant-ruling-repeat second record carries round, grantor and comment"
 bash "$TKT_STATE" "$S" list grant | grep -q 'via=ruling' || fail "grant-ruling-repeat second record names the ruling flag"
 run_plan confirm --edits "$CDIR/edits.md"
 [ "$RC" -eq 0 ] || fail "grant-ruling-repeat second granted confirm exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
-run_plan grant-round --by fly --comment c3 --ruling r3
+run_plan grant-round --by fly --comment c3 --ruling 2003
 [ "$RC" -eq 0 ] || fail "grant-ruling-repeat third grant exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "grant-ruling-repeat third grant re-arms the pending grant"
 [ "$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | grep -c .)" = "3" ] || fail "grant-ruling-repeat three grants leave three records"
-bash "$TKT_STATE" "$S" list grant | grep -q 'round=5 by=fly.*comment=c3.*ruling=r3' || fail "grant-ruling-repeat third record carries round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=5 by=fly.*comment=c3.*ruling=2003' || fail "grant-ruling-repeat third record carries round, grantor and comment"
 rounds="$(bash "$TKT_STATE" "$S" list grant 2>/dev/null | sed -n 's/^round=\([0-9]*\).*/\1/p')"
 [ "$rounds" = "$(printf '3\n4\n5')" ] || fail "grant-ruling-repeat records three distinct, increasing round numbers: [$rounds]"
 
@@ -1138,12 +1194,12 @@ bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "grant-second-ruling seed con
 bash "$TKT_STATE" "$S" set granted_by fly || fail "grant-second-ruling seed grant author"
 bash "$TKT_STATE" "$S" set granted_comment c1 || fail "grant-second-ruling seed grant comment"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-second-ruling seed used"
-run_plan grant-round --by fly --comment c2 --ruling o2
+run_plan grant-round --by fly --comment c2 --ruling 3002
 [ "$RC" -eq 0 ] || fail "grant-second-ruling exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
 expect_verdict "TKT tkt-plan SET grant=fly:c2 log=*" "grant-second-ruling"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "grant-second-ruling re-arms the pending grant"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "grant-second-ruling writes no granted_owner"
-bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=fly.*comment=c2.*ruling=o2' || fail "grant-second-ruling record carries round, grantor and comment"
+bash "$TKT_STATE" "$S" list grant | grep -q 'round=3 by=fly.*comment=c2.*ruling=3002' || fail "grant-second-ruling record carries round, grantor and comment"
 bash "$TKT_STATE" "$S" list grant | grep -q 'via=ruling' || fail "grant-second-ruling record names the ruling flag"
 
 setup_case grant-before-confirm
@@ -1642,7 +1698,7 @@ run_plan set
 [ "$RC" -eq 2 ] || fail "set without a file exits 2"
 OUT="$(bash "$TKT" 2>"$T/err-u.txt")"; [ "$?" = "2" ] || fail "no args exits 2"
 grep -q "usage" "$T/err-u.txt" || fail "no args prints usage"
-grep -q 'tkt-plan <state> grant-round --by <who> --comment <id> \[--ruling <id>\]' "$T/err-u.txt" || fail "usage names grant-round and --ruling"
+grep -q 'tkt-plan <state> grant-round --by <who> --comment <id> \[--ruling <ruling comment id>\]' "$T/err-u.txt" || fail "usage names grant-round and --ruling"
 
 # --- a held lock exits 2 naming the pid, and runs nothing ---
 setup_case locked
@@ -3058,18 +3114,26 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   printf 'lines' >"$T/mode"
   run_plan verify
   [ "$RC" -eq 1 ] || fail "triaged-ruling-source records a LINES verdict"
+  : >"$T/api-fail"
+  run_plan triaged --comment 654319
+  rm -f "$T/api-fail"
+  [ "$RC" -eq 1 ] || fail "triaged fetch failure is refused"
+  expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-source issue=518 log=*" "triaged fetch failure"
+  grep -Fq 'could not verify that comment 654319 belongs to switchyard#518: gh: simulated ruling comment fetch failure' <<<"$OUT" || fail "triaged fetch refusal prints the first gh stderr line"
   set_ruling_comment 'Use exact wording.' '2099-01-01T00:00:00Z' 519
   : >"$T/gh.log"
   run_plan triaged --comment 654320
   [ "$RC" -eq 1 ] || fail "triaged-ruling-source refuses a comment on another issue"
   expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-source issue=518 log=*" "triaged-ruling-source"
+  grep -Fq 'comment 654320 is not on switchyard#518' <<<"$OUT" || fail "triaged-ruling-source explains the wrong issue"
+  grep -Fq "post the ruling on switchyard#518, then rerun tkt-plan $S triaged --comment <new comment id>" <<<"$OUT" || fail "triaged issue refusal prints its route with the new comment placeholder"
   grep -Fq 'gh|api repos/switchyard/issues/comments/654320' "$T/gh.log" || fail "triaged-ruling-source fetches the comment"
 
   set_ruling_comment 'Use exact wording.' '2099-01-01T00:00:00Z' 518 CONTRIBUTOR
   run_plan triaged --comment 654321
   [ "$RC" -eq 1 ] || fail "triaged-ruling-author refuses a contributor comment"
   expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-author issue=518 log=*" "triaged-ruling-author"
-  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "triaged author refusal prints its recovery route"
+  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S triaged --comment <new comment id>" <<<"$OUT" || fail "triaged author refusal prints its route with the new comment placeholder"
 
   setup_case triaged-ruling-stale
   rebase_plan
@@ -3496,10 +3560,12 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
   setup_case rule-ok-comment-fetch
   rebase_plan
   bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok comment-fetch verdict time"
-  rm -f "$T/comment.json"
+  : >"$T/api-fail"
   run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654002
+  rm -f "$T/api-fail"
   [ "$RC" -eq 1 ] || fail "rule-ok-comment-fetch refuses an unreadable comment"
   expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=comment-fetch log=*" "rule-ok-comment-fetch"
+  grep -Fq 'could not verify that comment 654002 belongs to switchyard#518: gh: simulated ruling comment fetch failure' <<<"$OUT" || fail "rule-ok-comment-fetch prints the first gh stderr line"
 
   setup_case rule-ok-author-none
   rebase_plan
@@ -3508,15 +3574,28 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
   run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654009
   [ "$RC" -eq 1 ] || fail "rule-ok-author-none refuses an untrusted comment author"
   expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=ruling-author log=*" "rule-ok-author-none"
-  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S rule-ok --by surveyor --ruling RULING-1604 --comment <id>" <<<"$OUT" || fail "rule-ok author refusal prints its recovery route"
+  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S rule-ok --by surveyor --ruling RULING-1604 --comment <new comment id>" <<<"$OUT" || fail "rule-ok author refusal prints its recovery route with the new comment placeholder"
 
   setup_case rule-ok-comment-issue
   rebase_plan
   bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok comment-issue verdict time"
   set_ruling_comment 'Steward ruling RULING-1604.' 2099-01-01T00:00:00Z 519
+  space_state="$CDIR/state path/tkt.state"
+  mkdir -p "$(dirname "$space_state")"
+  mv "$S" "$space_state" || fail "move rule-ok comment-issue state to a path containing spaces"
+  S="$space_state"
   run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654003
   [ "$RC" -eq 1 ] || fail "rule-ok-comment-issue refuses another issue's comment"
   expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=comment-issue log=*" "rule-ok-comment-issue"
+  printf -v quoted_space_state '%q' "$S"
+  grep -Fq "post the ruling on switchyard#518, then rerun tkt-plan $quoted_space_state rule-ok --by surveyor --ruling RULING-1604 --comment <new comment id>" <<<"$OUT" || fail "rule-ok issue refusal prints a route with the new comment placeholder"
+  rule_ok_route="$(sed -n 's/^.*then rerun //p' <<<"$OUT")"
+  [ -n "$rule_ok_route" ] || fail "rule-ok issue refusal prints a command to execute"
+  set_ruling_comment 'Steward ruling RULING-1604.' 2099-01-01T00:00:00Z
+  rule_ok_route="${rule_ok_route//'<new comment id>'/654011}"
+  OUT="$(PATH="$REAL_BIN:$PATH" bash -c "$rule_ok_route" 2>"$CDIR/route.stderr")"; RC=$?
+  [ "$RC" -eq 0 ] || fail "rule-ok printed route runs with a state path containing spaces (rc=$RC): $OUT $(cat "$CDIR/route.stderr")"
+  expect_verdict "TKT tkt-plan RULE-OK by=surveyor ruling=RULING-1604 comment=654011 log=*" "rule-ok issue recovery route"
 
   setup_case rule-ok-before-plan-verdict
   rebase_plan

@@ -5,7 +5,7 @@ set -euo pipefail
 # limit; the exemption is derived from recorded state below.
 
 usage() {
-  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <id>]\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
+  printf 'usage: tkt-plan <state> verify [--extra <file>] [--model <id>]\n       tkt-plan <state> confirm --edits <file>\n       tkt-plan <state> grant-round --by <who> --comment <id> [--ruling <ruling comment id>]\n       tkt-plan <state> post [--part <label>] [--no-verifier]\n       tkt-plan <state> set <plan file> [--no-verifier]\n       tkt-plan <state> replan\n' >&2
   printf '       tkt-plan <state> triaged --comment <id>\n' >&2
   printf '       tkt-plan <state> rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>\n' >&2
   printf '       tkt-plan <state> rule-questions --comment <id>\n' >&2
@@ -203,6 +203,16 @@ open_lines() {
   else
     head -n "$REPORT_LINES" "$report"
   fi
+}
+
+round_limit_recovery_route() {
+  local grant_route confirm_route rule_ok_route triaged_route route
+  printf -v grant_route 'run tkt-plan %q grant-round --by %s --comment %s' "$state" '<who>' '<id>'
+  printf -v confirm_route 'tkt-plan %q confirm --edits %s' "$state" '<file>'
+  printf -v rule_ok_route 'run tkt-plan %q rule-ok --by %s --ruling %s --comment %s' "$state" '<flywheel|surveyor>' '<RULING-id>' '<id>'
+  printf -v triaged_route 'tkt-plan %q triaged --comment %s' "$state" '<id>'
+  printf -v route 'if another fully specified confirm is authorized, %s, then %s; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, %s; after triage answers every open line, run %s' "$grant_route" "$confirm_route" "$rule_ok_route" "$triaged_route"
+  printf '%s\n' "$route"
 }
 
 grant_pending() {
@@ -692,7 +702,8 @@ do_verify() {
         t set plan_questions_verdict_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         t set plan_questions_verdict_hash "$question_hash"
       fi
-      emit "QUESTIONS" 1 "record one ticket comment answering every question with: tkt-plan $state rule-questions --comment <id>, then rerun verify" "## Open questions" "$questions"
+      printf -v questions_route 'record one ticket comment answering every question with: tkt-plan %q rule-questions --comment %s, then rerun verify' "$state" '<id>'
+      emit "QUESTIONS" 1 "$questions_route" "## Open questions" "$questions"
     fi
   fi
   round="$(ronum)"
@@ -748,12 +759,17 @@ do_verify() {
         granted_by="$(t get granted_by 2>/dev/null || true)"
         granted_comment="$(t get granted_comment 2>/dev/null || true)"
         record_plan_stop_verdict round-limit
-        emit "ROUND-LIMIT round=$round confirm=done" 1 "a grant is pending ($granted_by:$granted_comment); verify does not consume it: run tkt-plan $state confirm --edits <file>" "$(open_lines)"
+        printf -v confirm_route 'a grant is pending (%s:%s); verify does not consume it: run tkt-plan %q confirm --edits %s' "$granted_by" "$granted_comment" "$state" '<file>'
+        emit "ROUND-LIMIT round=$round confirm=done" 1 "$confirm_route" "$(open_lines)"
       fi
       record_plan_stop_verdict round-limit
-      emit "ROUND-LIMIT round=$round confirm=done" 1 "if another fully specified confirm is authorized, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $state rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+      emit "ROUND-LIMIT round=$round confirm=done" 1 "$(round_limit_recovery_route)" "$(open_lines)"
     fi
-    [ "$round" -lt 2 ] || { record_plan_stop_verdict round-limit; emit "ROUND-LIMIT round=$round" 1 "two Verifier rounds ran with no confirm; run tkt-plan $state confirm --edits <file>, or after triage answers every open line run tkt-plan $state triaged --comment <id>" "$(open_lines)"; }
+    [ "$round" -lt 2 ] || {
+      record_plan_stop_verdict round-limit
+      printf -v round_limit_route 'two Verifier rounds ran with no confirm; run tkt-plan %q confirm --edits %s, or after triage answers every open line run tkt-plan %q triaged --comment %s' "$state" '<file>' "$state" '<id>'
+      emit "ROUND-LIMIT round=$round" 1 "$round_limit_route" "$(open_lines)"
+    }
   fi
   clear_verdict
   model="$(vmodel "$model")" || exit 2
@@ -840,7 +856,8 @@ do_confirm() {
       staleness_check="skipped (no verified_plan_hash)"
     fi
     if [ "$stale_confirm" -eq 1 ]; then
-      emit "STALE-CONFIRM edits=$latest_edits plan=$plan" 1 "staleness-check: $staleness_check" "apply edits from $latest_edits to $plan, then rerun: tkt-plan $state confirm --edits $latest_edits"
+      printf -v stale_confirm_route 'apply edits from %q to %q, then rerun: tkt-plan %q confirm --edits %q' "$latest_edits" "$plan" "$state" "$latest_edits"
+      emit "STALE-CONFIRM edits=$latest_edits plan=$plan" 1 "staleness-check: $staleness_check" "$stale_confirm_route"
     fi
   fi
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
@@ -874,13 +891,14 @@ do_confirm() {
     esac
   else
     if unresolved_plan_changed_only; then
-      emit "UNRESOLVED-FIX" 0 "only lines previously reported as unresolved symbols changed; rerun tkt-plan $state verify; no confirm round spent"
+      printf -v unresolved_fix_route 'only lines previously reported as unresolved symbols changed; rerun tkt-plan %q verify; no confirm round spent' "$state"
+      emit "UNRESOLVED-FIX" 0 "$unresolved_fix_route"
     fi
     unresolved_snapshot="$(t get unresolved_plan_snapshot 2>/dev/null || true)"
     [ -z "$unresolved_snapshot" ] || clear_unresolved_snapshot
   fi
   if [ "$confirm_limited" -eq 1 ]; then
-    emit "ROUND-LIMIT confirm=done" 1 "staleness-check: $staleness_check" "if another fully specified confirm is authorized, run tkt-plan $state grant-round --by <who> --comment <id>, then tkt-plan $state confirm --edits <file>; after a non-converging confirm, escalate to a flywheel or surveyor steward and, once its ruling comment is posted, run tkt-plan $state rule-ok --by <flywheel|surveyor> --ruling <RULING-id> --comment <id>; after triage answers every open line, run tkt-plan $state triaged --comment <id>" "$(open_lines)"
+    emit "ROUND-LIMIT confirm=done" 1 "staleness-check: $staleness_check" "$(round_limit_recovery_route)" "$(open_lines)"
   fi
   [ "$prc" -ne 1 ] || emit "PLAN-CHECK report_lines=$(grep -c . <<<"$pc_out" || true)" 1 "staleness-check: $staleness_check" "$(head -n "$REPORT_LINES" <<<"$pc_out")"
   cmodel="$(vmodel)" || exit 2
@@ -937,7 +955,11 @@ do_grant() {
   [ -n "$who" ] && [ -n "$comment" ] || usage
   case "$who$comment$ruling" in *[[:space:]]*) usage;; esac
   confirmed_for="$(t get confirmed_for 2>/dev/null || true)"
-  [ -n "$confirmed_for" ] || { echo "tkt-plan: no limit reached: the confirm round is still open; rerun: tkt-plan $state confirm --edits <file>" >&2; exit 2; }
+  if [ -z "$confirmed_for" ]; then
+    printf -v confirm_route 'tkt-plan: no limit reached: the confirm round is still open; rerun: tkt-plan %q confirm --edits %s' "$state" '<file>'
+    echo "$confirm_route" >&2
+    exit 2
+  fi
   granted_by="$(t get granted_by 2>/dev/null || true)"
   granted_used="$(t get granted_used 2>/dev/null || true)"
   if [ -n "$granted_by" ] && [ -z "$granted_used" ]; then
@@ -947,8 +969,13 @@ do_grant() {
   fi
   if [ -n "$granted_by" ] && [ -z "$ruling" ]; then
     recorded_comment="$(t get granted_comment 2>/dev/null || true)"
-    echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a later grant needs a ruling: use --ruling <comment id>" >&2
+    echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a later grant needs a ruling: use --ruling <ruling comment id>" >&2
     exit 2
+  fi
+  if [ -n "$ruling" ] && t list grant 2>/dev/null | awk -v wanted="ruling=$ruling" '{ for (i = 1; i <= NF; i++) if ($i == wanted) found = 1 } END { exit !found }'; then
+    printf -v grant_comment_arg '%q' "$comment"
+    grant_set_route "$grant_comment_arg" '<new comment id>'
+    emit "GRANT-REFUSED reason=ruling-reused" 1 "ruling $ruling has already backed a grant" "$grant_route"
   fi
   grant_count="$(t list grant 2>/dev/null | grep -c . || true)"
   case "$grant_count" in ''|*[!0-9]*) grant_count=0;; esac
@@ -960,11 +987,19 @@ do_grant() {
   grant_ruling_json="$tmp.grant-ruling.json"
   grant_ruling_error="$tmp.grant-ruling-error"
   printf -v grant_comment_arg '%q' "$comment"
+  if [ -n "$ruling" ]; then
+    case "$ruling" in
+      *[!0-9]*)
+        grant_set_route "$grant_comment_arg" '<ruling comment id>'
+        emit "GRANT-REFUSED reason=ruling-id" 1 "grant-round --ruling takes the ruling comment's numeric id (for example --ruling 6879037718)" "$grant_route"
+        ;;
+    esac
+  fi
   printf -v grant_ruling_arg '%q' "$ruling"
   grant_set_route "$grant_comment_arg" "$grant_ruling_arg"
   if ! fetch_issue_comment "$comment" "$grant_comment_json" "$grant_comment_error"; then
     case "$ruling_comment_failure" in
-      fetch) grant_failure_reason=comment-fetch; grant_failure_detail="could not verify that comment $comment belongs to $repo#$issue"; [ -z "$ruling_comment_error" ] || grant_failure_detail="$grant_failure_detail: $ruling_comment_error" ;;
+      fetch) grant_failure_reason=comment-fetch; grant_failure_detail="$(ruling_comment_fetch_detail "could not verify that comment $comment belongs to $repo#$issue")" ;;
       issue) grant_failure_reason=comment-issue; grant_failure_detail="comment $comment is not on $repo#$issue"; grant_set_route '<new comment id>' "$grant_ruling_arg" ;;
       author) grant_failure_reason=comment-author; grant_failure_detail="comment $comment is not from a repository owner, member or collaborator"; grant_set_route '<new comment id>' "$grant_ruling_arg" ;;
       *) grant_failure_reason=comment-fetch; grant_failure_detail="could not verify that comment $comment belongs to $repo#$issue" ;;
@@ -974,7 +1009,7 @@ do_grant() {
   fi
   if [ -n "$ruling" ] && ! fetch_issue_comment "$ruling" "$grant_ruling_json" "$grant_ruling_error"; then
     case "$ruling_comment_failure" in
-      fetch) grant_failure_reason=ruling-fetch; grant_failure_detail="could not verify ruling comment $ruling belongs to $repo#$issue"; [ -z "$ruling_comment_error" ] || grant_failure_detail="$grant_failure_detail: $ruling_comment_error" ;;
+      fetch) grant_failure_reason=ruling-fetch; grant_failure_detail="$(ruling_comment_fetch_detail "could not verify ruling comment $ruling belongs to $repo#$issue")" ;;
       issue) grant_failure_reason=ruling-issue; grant_failure_detail="ruling comment $ruling is not on $repo#$issue"; grant_set_route "$grant_comment_arg" '<new comment id>' ;;
       author) grant_failure_reason=ruling-author; grant_failure_detail="ruling comment $ruling is not from a repository owner, member or collaborator"; grant_set_route "$grant_comment_arg" '<new comment id>' ;;
       *) grant_failure_reason=ruling-fetch; grant_failure_detail="could not verify ruling comment $ruling belongs to $repo#$issue" ;;
@@ -988,7 +1023,8 @@ do_grant() {
   t set granted_comment "$comment"
   t set granted_used ""
   t add grant "round=$grant_round by=$who via=$via comment=$comment ruling=$ruling"
-  emit "SET grant=$who:$comment" 0 "next: tkt-plan $state confirm --edits <file>"
+  printf -v grant_next_route 'next: tkt-plan %q confirm --edits %s' "$state" '<file>'
+  emit "SET grant=$who:$comment" 0 "$grant_next_route"
 }
 
 do_rule_ok() {
@@ -1021,16 +1057,23 @@ do_rule_ok() {
     emit "RULE-OK-REFUSED reason=stale-check" 1 "could not compare plan Files against origin/main" "$(head -n 1 "$tmp" 2>/dev/null || true)"
   fi
   if [ -n "$plan_stale_stat_output" ]; then
-    emit "RULE-OK-REFUSED reason=stale" 1 "$plan_stale_stat_output" "run implement's stale-plan check, revise the plan, then tkt-plan $state set $plan, then rerun: tkt-plan $state rule-ok --by $who --ruling $ruling --comment $comment"
+    printf -v stale_route "run implement's stale-plan check, revise the plan, then tkt-plan %q set %q, then rerun: tkt-plan %q rule-ok --by %q --ruling %q --comment %q" "$state" "$plan" "$state" "$who" "$ruling" "$comment"
+    emit "RULE-OK-REFUSED reason=stale" 1 "$plan_stale_stat_output" "$stale_route"
   fi
 
   comment_json="$tmp.rule-ok-comment.json"
   comment_error="$tmp.rule-ok-comment-error"
   if ! check_ruling_comment "$comment" "$comment_json" "$comment_error"; then
     case "$ruling_comment_failure" in
-      fetch) emit "RULE-OK-REFUSED reason=comment-fetch" 1 "could not verify that comment $comment belongs to $repo#$issue${ruling_comment_error:+: $ruling_comment_error}" ;;
-      issue) emit "RULE-OK-REFUSED reason=comment-issue" 1 "comment $comment is not on $repo#$issue" ;;
-      author) emit "RULE-OK-REFUSED reason=ruling-author" 1 "comment $comment is not from a repository owner, member or collaborator" "post the answer from an owner, member or collaborator account, then rerun tkt-plan $state rule-ok --by $who --ruling $ruling --comment <id>" ;;
+      fetch) emit "RULE-OK-REFUSED reason=comment-fetch" 1 "$(ruling_comment_fetch_detail "could not verify that comment $comment belongs to $repo#$issue")" ;;
+      issue)
+        printf -v rule_ok_route 'post the ruling on %s, then rerun tkt-plan %q rule-ok --by %q --ruling %q --comment %s' "$repo#$issue" "$state" "$who" "$ruling" '<new comment id>'
+        emit "RULE-OK-REFUSED reason=comment-issue" 1 "comment $comment is not on $repo#$issue" "$rule_ok_route"
+        ;;
+      author)
+        printf -v rule_ok_route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q rule-ok --by %q --ruling %q --comment %s' "$state" "$who" "$ruling" '<new comment id>'
+        emit "RULE-OK-REFUSED reason=ruling-author" 1 "comment $comment is not from a repository owner, member or collaborator" "$rule_ok_route"
+        ;;
       time) emit "RULE-OK-REFUSED reason=comment-time" 1 "comment $comment does not postdate the latest plan or stop verdict" ;;
     esac
   fi
@@ -1045,7 +1088,8 @@ do_rule_ok() {
   t set plan_verdict_ruling "$ruling"
   t set plan_verdict_comment "$comment"
   t journal "tkt-plan rule-ok by=$who ruling=$ruling comment=$comment"
-  emit "RULE-OK by=$who ruling=$ruling comment=$comment" 0 "next: tkt-build $state"
+  printf -v rule_ok_next 'next: tkt-build %q' "$state"
+  emit "RULE-OK by=$who ruling=$ruling comment=$comment" 0 "$rule_ok_next"
 }
 
 do_triaged() {
@@ -1061,9 +1105,15 @@ do_triaged() {
   comment_error="$tmp.triaged-comment-error"
   if ! check_ruling_comment "$comment" "$comment_json" "$comment_error"; then
     case "$ruling_comment_failure" in
-      fetch) emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "could not verify that comment $comment belongs to $repo#$issue${ruling_comment_error:+: $ruling_comment_error}" ;;
-      issue) emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "comment $comment is not on $repo#$issue" ;;
-      author) emit "TRIAGED-REFUSED reason=ruling-author issue=$issue" 1 "comment $comment is not from a repository owner, member or collaborator" "post the answer from an owner, member or collaborator account, then rerun tkt-plan $state triaged --comment <id>" ;;
+      fetch) emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "$(ruling_comment_fetch_detail "could not verify that comment $comment belongs to $repo#$issue")" ;;
+      issue)
+        printf -v triaged_route 'post the ruling on %s, then rerun tkt-plan %q triaged --comment %s' "$repo#$issue" "$state" '<new comment id>'
+        emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "comment $comment is not on $repo#$issue" "$triaged_route"
+        ;;
+      author)
+        printf -v triaged_route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q triaged --comment %s' "$state" '<new comment id>'
+        emit "TRIAGED-REFUSED reason=ruling-author issue=$issue" 1 "comment $comment is not from a repository owner, member or collaborator" "$triaged_route"
+        ;;
       time) emit "TRIAGED-REFUSED reason=ruling-stale" 1 "comment $comment does not postdate the latest plan verdict" ;;
     esac
   fi
@@ -1077,10 +1127,16 @@ do_triaged() {
   accepted_diff=""
 
   if [ "$stored_verdict" = lines ] && [ -z "$stored_hash" ]; then
-    emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "the LINES verdict has no saved plan snapshot; run one Verifier pass: tkt-plan $state verify"
+    printf -v verify_route 'the LINES verdict has no saved plan snapshot; run one Verifier pass: tkt-plan %q verify' "$state"
+    emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "$verify_route"
   fi
   if [ -n "$stored_hash" ] && [ "$stored_hash" != "$current_hash" ]; then
-    case "$stored_hash" in *[!0123456789abcdefABCDEF]*) emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan $state verify";; esac
+    case "$stored_hash" in
+      *[!0123456789abcdefABCDEF]*)
+        printf -v verify_route 'the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan %q verify' "$state"
+        emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "$verify_route"
+        ;;
+    esac
     snapshot_file="$tmp.snapshot"
     before_rest="$tmp.before-rest"
     after_rest="$tmp.after-rest"
@@ -1092,7 +1148,8 @@ do_triaged() {
     normalized_comment="$tmp.comment-normalized"
     if ! git -C "$worktree" cat-file blob "$stored_hash" >"$snapshot_file" 2>/dev/null; then
       rm -f "$snapshot_file"
-      emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan $state verify"
+      printf -v verify_route 'the saved plan snapshot is unavailable; run one Verifier pass: tkt-plan %q verify' "$state"
+      emit "TRIAGED-REFUSED reason=snapshot-missing" 1 "$verify_route"
     fi
     plan_without_rulings "$snapshot_file" >"$before_rest" || exit 2
     plan_without_rulings "$plan" >"$after_rest" || exit 2
@@ -1182,12 +1239,16 @@ do_rule_questions() {
   if ! fetch_issue_comment "$comment" "$comment_json" "$comment_error"; then
     case "$ruling_comment_failure" in
       fetch)
-        ruling_detail="could not read ruling comment $comment"
-        [ -z "$ruling_comment_error" ] || ruling_detail="$ruling_detail: $ruling_comment_error"
-        emit "QUESTIONS-REFUSED reason=comment" 1 "$ruling_detail"
+        emit "QUESTIONS-REFUSED reason=comment" 1 "$(ruling_comment_fetch_detail "could not read ruling comment $comment")"
         ;;
-      issue) emit "QUESTIONS-REFUSED reason=comment" 1 "comment $comment is empty or does not belong to $repo#$issue" ;;
-      author) emit "QUESTIONS-REFUSED reason=ruling-author" 1 "comment $comment is not from a repository owner, member or collaborator" "post the answer from an owner, member or collaborator account, then rerun tkt-plan $state rule-questions --comment <id>" ;;
+      issue)
+        printf -v questions_route 'post the answer on %s, then rerun tkt-plan %q rule-questions --comment %s' "$repo#$issue" "$state" '<new comment id>'
+        emit "QUESTIONS-REFUSED reason=comment" 1 "comment $comment is empty or does not belong to $repo#$issue" "$questions_route"
+        ;;
+      author)
+        printf -v questions_route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q rule-questions --comment %s' "$state" '<new comment id>'
+        emit "QUESTIONS-REFUSED reason=ruling-author" 1 "comment $comment is not from a repository owner, member or collaborator" "$questions_route"
+        ;;
     esac
   fi
   if ! jq -e '
@@ -1209,7 +1270,8 @@ do_rule_questions() {
   plan_verdict_write "$tkt_state" "$state" questions "$base" "$plan" "$worktree"
   t set plan_questions_comment "$comment"
   t set plan_questions_hash "$question_hash"
-  emit "QUESTIONS-RECORDED comment=$comment" 0 "next: tkt-plan $state verify"
+  printf -v questions_next_route 'next: tkt-plan %q verify' "$state"
+  emit "QUESTIONS-RECORDED comment=$comment" 0 "$questions_next_route"
 }
 
 do_post() {
