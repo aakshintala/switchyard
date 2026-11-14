@@ -914,6 +914,19 @@ do_confirm() {
   emit "$RV" "$REC" "staleness-check: $staleness_check" "$(head -n "$REPORT_LINES" "$rep")"
 }
 
+# Set grant_route: post the grant (and ruling) on the ticket, then rerun
+# grant-round. The arguments are the --comment and --ruling values to print:
+# the literal id to retry a fetch, or a placeholder for an id that can never pass.
+grant_set_route() {
+  local rerun post="the grant as a comment"
+  printf -v rerun 'tkt-plan %q grant-round --by %q --comment %s' "$state" "$who" "$1"
+  if [ -n "$ruling" ]; then
+    rerun="$rerun --ruling $2"
+    post="the grant and ruling as comments"
+  fi
+  grant_route="post $post on $repo#$issue from an owner, member or collaborator, then rerun: $rerun"
+}
+
 do_grant() {
   who=""; comment=""; ruling=""; via=""
   while [ $# -gt 0 ]; do case "$1" in
@@ -946,18 +959,14 @@ do_grant() {
   grant_comment_error="$tmp.grant-comment-error"
   grant_ruling_json="$tmp.grant-ruling.json"
   grant_ruling_error="$tmp.grant-ruling-error"
-  printf -v grant_rerun 'tkt-plan %q grant-round --by %q --comment %q' "$state" "$who" "$comment"
-  if [ -n "$ruling" ]; then
-    printf -v grant_rerun '%s --ruling %q' "$grant_rerun" "$ruling"
-    grant_route="post the grant and ruling as comments on $repo#$issue from an owner, member or collaborator, then rerun: $grant_rerun"
-  else
-    grant_route="post the grant as a comment on $repo#$issue from an owner, member or collaborator, then rerun: $grant_rerun"
-  fi
+  printf -v grant_comment_arg '%q' "$comment"
+  printf -v grant_ruling_arg '%q' "$ruling"
+  grant_set_route "$grant_comment_arg" "$grant_ruling_arg"
   if ! fetch_issue_comment "$comment" "$grant_comment_json" "$grant_comment_error"; then
     case "$ruling_comment_failure" in
       fetch) grant_failure_reason=comment-fetch; grant_failure_detail="could not verify that comment $comment belongs to $repo#$issue" ;;
-      issue) grant_failure_reason=comment-issue; grant_failure_detail="comment $comment is not on $repo#$issue" ;;
-      author) grant_failure_reason=comment-author; grant_failure_detail="comment $comment is not from a repository owner, member or collaborator" ;;
+      issue) grant_failure_reason=comment-issue; grant_failure_detail="comment $comment is not on $repo#$issue"; grant_set_route '<new comment id>' "$grant_ruling_arg" ;;
+      author) grant_failure_reason=comment-author; grant_failure_detail="comment $comment is not from a repository owner, member or collaborator"; grant_set_route '<new comment id>' "$grant_ruling_arg" ;;
       *) grant_failure_reason=comment-fetch; grant_failure_detail="could not verify that comment $comment belongs to $repo#$issue" ;;
     esac
     rm -f "$grant_comment_json" "$grant_comment_error" "$grant_ruling_json" "$grant_ruling_error"
@@ -966,8 +975,8 @@ do_grant() {
   if [ -n "$ruling" ] && ! fetch_issue_comment "$ruling" "$grant_ruling_json" "$grant_ruling_error"; then
     case "$ruling_comment_failure" in
       fetch) grant_failure_reason=ruling-fetch; grant_failure_detail="could not verify ruling comment $ruling belongs to $repo#$issue" ;;
-      issue) grant_failure_reason=ruling-issue; grant_failure_detail="ruling comment $ruling is not on $repo#$issue" ;;
-      author) grant_failure_reason=ruling-author; grant_failure_detail="ruling comment $ruling is not from a repository owner, member or collaborator" ;;
+      issue) grant_failure_reason=ruling-issue; grant_failure_detail="ruling comment $ruling is not on $repo#$issue"; grant_set_route "$grant_comment_arg" '<new comment id>' ;;
+      author) grant_failure_reason=ruling-author; grant_failure_detail="ruling comment $ruling is not from a repository owner, member or collaborator"; grant_set_route "$grant_comment_arg" '<new comment id>' ;;
       *) grant_failure_reason=ruling-fetch; grant_failure_detail="could not verify ruling comment $ruling belongs to $repo#$issue" ;;
     esac
     rm -f "$grant_comment_json" "$grant_comment_error" "$grant_ruling_json" "$grant_ruling_error"

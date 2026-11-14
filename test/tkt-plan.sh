@@ -962,18 +962,18 @@ grant_refusal_expect 'grant-missing-comment' comment-fetch 'could not verify tha
 grant_refusal_setup grant-comment-other-issue
 set_ruling_comment 'Grant this extra confirm round.' 2099-01-01T00:00:00Z 519
 run_plan grant-round --by switchyard --comment 9001
-grant_refusal_expect 'grant-comment-other-issue' comment-issue 'comment 9001 is not on switchyard#518' "post the grant as a comment on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001"
+grant_refusal_expect 'grant-comment-other-issue' comment-issue 'comment 9001 is not on switchyard#518' "post the grant as a comment on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment <new comment id>"
 
 grant_refusal_setup grant-comment-author-none
 set_ruling_comment 'Grant this extra confirm round.' 2099-01-01T00:00:00Z 518 NONE
 run_plan grant-round --by switchyard --comment 9001
-grant_refusal_expect 'grant-comment-author-none' comment-author 'comment 9001 is not from a repository owner' "post the grant as a comment on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001"
+grant_refusal_expect 'grant-comment-author-none' comment-author 'comment 9001 is not from a repository owner' "post the grant as a comment on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment <new comment id>"
 
 grant_refusal_setup grant-ruling-author-none yes
 set_ruling_comment 'Grant this extra confirm round.'
 set_ruling_comment 'The ruling comment is not from a trusted author.' 2099-01-01T00:00:00Z 518 NONE "$T/comment-9002.json"
 run_plan grant-round --by switchyard --comment 9001 --ruling 9002
-grant_refusal_expect 'grant-ruling-author-none' ruling-author 'ruling comment 9002 is not from a repository owner' "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001 --ruling 9002"
+grant_refusal_expect 'grant-ruling-author-none' ruling-author 'ruling comment 9002 is not from a repository owner' "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001 --ruling <new comment id>"
 
 setup_case grant-invalid
 rebase_plan
