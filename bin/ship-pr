@@ -1217,13 +1217,17 @@ review_patch_id() {
 }
 
 # review_verdict REPO PR PATCH_ID: print approved, unverified, changes,
-# incomplete, incomplete-p3, missing or invalid for the newest review-pr comment.
+# incomplete, incomplete-p3, missing or invalid for the newest review-pr comment
+# from an OWNER, MEMBER or COLLABORATOR author.
 # On FIX-INCOMPLETE, return the readable P3 findings from that posted verify comment.
 review_verdict() {
   local repo="$1" pr="$2" reviewed_pid="$3" rows tab last created id header verdicts axes axis body64 findings_file
   local -a axis_list=()
   rows="$(gh api --paginate "repos/$repo/issues/$pr/comments" --jq '
     .[] | select((.body // "") | startswith("review-pr: patch-id")) |
+    # Only a trusted author can post a verdict; the repo is public (#1790).
+    select(.author_association == "OWNER" or .author_association == "MEMBER"
+      or .author_association == "COLLABORATOR") |
     . as $comment |
     ($comment.body | split("\n")) as $lines |
     ($lines[1:] | reduce .[] as $raw (
