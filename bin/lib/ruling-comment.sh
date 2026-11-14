@@ -32,3 +32,11 @@ fetch_issue_comment() {
   fi
   return 0
 }
+
+# Append the first stderr line captured by fetch_issue_comment to its caller's
+# refusal detail. Keep this formatting shared across all ruling-comment paths.
+ruling_comment_fetch_detail() {
+  local detail="$1"
+  [ -z "${ruling_comment_error:-}" ] || detail="$detail: $ruling_comment_error"
+  printf '%s' "$detail"
+}
