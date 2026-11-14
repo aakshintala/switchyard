@@ -43,8 +43,8 @@ cat "$CLAUDE_JSON"
 EOF
 cat >"$T/bin/box-ssh" <<'EOF'
 #!/usr/bin/env bash
-[ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = BatchMode=yes ] || exit 2
-case "$4" in
+[ "$#" -eq 6 ] && [ "$1" = -o ] && [ "$2" = BatchMode=yes ] && [ "$3" = -o ] && [ "$4" = ConnectTimeout=10 ] || exit 2
+case "$6" in
   'PATH=$HOME/.local/bin:$PATH delegate session list --json')
     if [ "${BOX_DELEGATE_FAIL:-0}" = 1 ]; then
       echo 'stub box delegate failed' >&2
@@ -284,7 +284,16 @@ printf '{"sessions":[]}\n' >"$T/box-delegate.json"
 BOX_DELEGATE_FAIL=1 run_pick
 [ "$RC" -eq 0 ] || fail "box probe failure exit $RC: $ERR"
 [ "$OUT" = 'openai/gpt-6-luna:medium muselaunch' ] || fail "box failure discarded Mac load: [$OUT]"
-grep -q 'warning: Box delegate probe failed; using Mac-only load' "$T/err" || fail "box failure warning missing: $ERR"
+grep -q 'warning: box delegate probe failed; using Mac-only load' "$T/err" || fail "box failure warning missing: $ERR"
+
+# A box probe that exits 0 but prints non-JSON (an ssh banner) also warns
+# without --explain, and still picks on Mac-only load.
+printf 'Welcome banner\n{"sessions":[]}\n' >"$T/box-delegate.json"
+run_pick
+[ "$RC" -eq 0 ] || fail "box non-JSON exit $RC: $ERR"
+[ "$OUT" = 'openai/gpt-6-luna:medium muselaunch' ] || fail "box non-JSON discarded Mac load: [$OUT]"
+grep -q 'warning: box delegate JSON unavailable; using Mac-only load' "$T/err" || fail "box non-JSON warning missing: $ERR"
+printf '{"sessions":[]}\n' >"$T/box-delegate.json"
 
 # --explain keeps stdout to one pick line and prints every candidate's quota,
 # load and score to stderr. Failed local probes mean zero local load and are called out.

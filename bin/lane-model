@@ -70,20 +70,18 @@ if ! "$claude_cmd" agents --json >"$work/claude.json" 2>"$work/claude.err"; then
 fi
 
 box_delegate_ok=1
-if ! "$boxssh" -o BatchMode=yes "$host" \
+if ! "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$host" \
     "PATH=\$HOME/.local/bin:\$PATH delegate session list --json" \
     </dev/null >"$work/box-delegate.json" 2>"$work/box-delegate.err"; then
   box_delegate_ok=0
   printf '{"sessions":[]}\n' >"$work/box-delegate.json"
-  echo 'lane-model: warning: Box delegate probe failed; using Mac-only load' >&2
 fi
 box_claude_ok=1
-if ! "$boxssh" -o BatchMode=yes "$host" \
+if ! "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$host" \
     "PATH=\$HOME/.local/bin:\$PATH claude agents --json" \
     </dev/null >"$work/box-claude.json" 2>"$work/box-claude.err"; then
   box_claude_ok=0
   printf '[]\n' >"$work/box-claude.json"
-  echo 'lane-model: warning: Box Claude probe failed; using Mac-only load' >&2
 fi
 
 python3 - "$work/providers.json" "$work/delegate.json" "$work/claude.json" \
@@ -198,6 +196,11 @@ box_delegate_rows, box_delegate_error = session_rows(
     box_delegate_path, "box delegate", box_delegate_ok)
 box_claude_rows, box_claude_error = session_rows(
     box_claude_path, "box claude", box_claude_ok)
+# A box probe that fails or prints unusable JSON always warns, not only with
+# --explain: the pick then rests on Mac-only load.
+for box_error in (box_delegate_error, box_claude_error):
+    if box_error:
+        print(f"lane-model: warning: {box_error}; using Mac-only load", file=sys.stderr)
 
 # A box's delegate sessions are rostered as host=muse and use the roster's
 # fifth-column session ID. Claude box sessions are rostered as host=box and
