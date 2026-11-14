@@ -11,7 +11,7 @@ A test timeout, wait, retry count or numeric tolerance loosened in the diff is a
 
 Name for each finding the gate its fix will land on, such as mutants, a lint or a test, and say which side wins when the fix would trip that gate.
 
-Max 250 words of findings. End with exactly one verdict line, `VERDICT standards: APPROVE` or `VERDICT standards: CHANGES` (no other word), then that axis's findings under it, then a STATUS line:
+Max 250 words of findings. End with exactly one verdict line, `VERDICT standards: APPROVE` or `VERDICT standards: CHANGES`, optionally with one trailing period, then that axis's findings under it, then a STATUS line:
 
 ```
 VERDICT standards: CHANGES

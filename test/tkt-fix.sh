@@ -147,6 +147,7 @@ chmod +x "$T/bin/gh-ci"
 
 # Stub review-pr: $T/vermode holds ok (FIX-OK), incomplete or history outputs.
 printf 'ok' >"$T/vermode"
+printf 'ok' >"$T/collectmode"
 printf '0' >"$T/verify-count"
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
@@ -157,6 +158,14 @@ for arg in "\$@"; do
   if [ "\$previous" = "--context" ]; then context_files+=("\$arg"); fi
   previous="\$arg"
 done
+if [ "\${1:-}" = "collect" ]; then
+  case "\$(cat "$T/collectmode")" in
+    ok) printf 'FIX-OK. Every finding in the verify file is fixed at HEAD.\\n';;
+    incomplete) printf 'FIX-INCOMPLETE. One finding remains.\\nP1 open finding\\n';;
+    *) printf 'BAD-VERDICT verify FIX-OKAY\\n'; exit 1;;
+  esac
+  exit 0
+fi
 if [ -n "\$verify_file" ]; then
   n="\$((\$(cat "$T/verify-count") + 1))"
   printf '%s' "\$n" >"$T/verify-count"
@@ -164,9 +173,15 @@ if [ -n "\$verify_file" ]; then
   for context_file in "\${context_files[@]}"; do
     cp "\$context_file" "$T/verify-context-\$n-\$(basename "\$context_file")"
   done
+  job_id="verify-job-\$n"
+  mkdir -p "\${TMPDIR:-/tmp}/review-pr"
+  printf 'role=verify\\n' >"\${TMPDIR:-/tmp}/review-pr/\$job_id"
+  printf 'verify %s\\n' "\$job_id"
 fi
 case "\$(cat "$T/vermode")" in
   ok|history-two) printf 'FIX-OK\n';;
+  punct) printf 'FIX-OK. Every finding in the verify file is fixed at HEAD.\n';;
+  bad) printf 'BAD-VERDICT verify FIX-OKAY\n'; exit 1;;
   ruling)
     printf 'FIX-INCOMPLETE round=1\nP1 fix.txt:1 — a\n';;
   incomplete)
@@ -224,7 +239,9 @@ reset_stubs() {
   printf '0' >"$T/gatemode"
   : >"$T/ciout"
   printf 'ok' >"$T/vermode"
+  printf 'ok' >"$T/collectmode"
   printf '0' >"$T/verify-count"
+  rm -rf "$TMPDIR/review-pr"
   printf '[]' >"$T/prlist"
   printf '0' >"$T/prlistrc"
   : >"$T/calls.log"
@@ -961,6 +978,88 @@ grep -Fq "$MAIN1" <<<"$out" && fail "main-merge-multi reported main's first comm
 grep -Fq "$MAIN2" <<<"$out" && fail "main-merge-multi reported main's second commit: $(head -n 1 <<<"$out")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "main-merge-multi bad verdict: $(head -n 1 <<<"$out")"
 fi
+
+# FIX-OK followed by punctuation and prose flows through the tkt-fix consumer.
+if want punct-verify; then
+setup_case punct-verify
+printf 'punct' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "punct verify exited $?: $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=" || fail "punct verify is FIX-OK: $(head -n 1 <<<"$out")"
+punct_round="$(bash "$TKT_STATE" "$S" get round)"
+punct_verify_job="$(bash "$TKT_STATE" "$S" get "fix_round.$punct_round.verify_job")"
+[ "$punct_verify_job" = verify-job-1 ] || fail "punct verify records the printed verify job id"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "punct verify sets reviewed at the fixed head"
+fi
+
+# A BAD-VERDICT verify can be collected again without starting a third round.
+if want collect-verify; then
+setup_case collect-verify
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+printf 'bad' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "bad verify exited $run_rc, want VERIFY-FAIL: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix VERIFY-FAIL rc=1' || fail "bad verify route is VERIFY-FAIL: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "bad verify consumed exactly round 2"
+verify_job="$(bash "$TKT_STATE" "$S" get fix_round.2.verify_job)"
+[ "$verify_job" = verify-job-1 ] || fail "tkt-fix records the verify id printed by review-pr"
+verify_head="$(bash "$TKT_STATE" "$S" get fix_round.2.verify_head)"
+[ "$verify_head" = "$(git -C "$WT" rev-parse HEAD)" ] || fail "tkt-fix records the verify head"
+grep -Fq "tkt-fix $S --collect-verify $verify_job" <<<"$out" || fail "VERIFY-FAIL names the collect-verify recovery command"
+
+# A job recorded for another round is refused before review-pr collect.
+bash "$TKT_STATE" "$S" set fix_round.1.verify_job verify-job-old >/dev/null
+calls_before="$(grep -c '^review-pr|collect ' "$T/calls.log" || true)"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify verify-job-old 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "other-round verify exited $run_rc, want refusal: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix VERIFY-FAIL reason=collect-verify' || fail "other-round refusal uses VERIFY-FAIL"
+[ "$(grep -c '^review-pr|collect ' "$T/calls.log" || true)" = "$calls_before" ] || fail "other-round verify was not collected"
+
+# A recorded id is refused when its review-pr state says it is not a verify.
+printf 'role=standards\n' >"$TMPDIR/review-pr/$verify_job"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "non-verify job exited $run_rc, want refusal: $out"
+grep -Fq 'is not a verify' <<<"$out" || fail "non-verify refusal names the role"
+printf 'role=verify\n' >"$TMPDIR/review-pr/$verify_job"
+
+# A recorded verify is refused when its slot no longer records the produced head.
+bash "$TKT_STATE" "$S" set fix_round.2.head different-head >/dev/null
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "changed slot-head verify exited $run_rc, want refusal: $out"
+grep -Fq 'verify head does not match slot fix2 produced head' <<<"$out" || fail "slot-head refusal names the mismatch"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "slot-head refusal does not add to round"
+bash "$TKT_STATE" "$S" set fix_round.2.head "$verify_head" >/dev/null
+
+# A current-round verify is refused when the PR head no longer matches its slot.
+printf 'different-head' >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "moved-head verify exited $run_rc, want refusal: $out"
+grep -Fq 'PR head does not match verify head' <<<"$out" || fail "moved-head refusal names the mismatch"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "collect refusal does not add to round"
+printf 'WT:%s' "$WT" >"$T/prhead"
+
+# FIX-INCOMPLETE uses the normal result handler and leaves the round unchanged.
+printf 'incomplete' >"$T/collectmode"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "incomplete collect-verify exited $run_rc, want round-two stop: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-INCOMPLETE round=2 STOP-AT-TWO' || fail "collect-verify applies FIX-INCOMPLETE: $out"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "incomplete collect-verify does not add to round"
+[ "$(bash "$TKT_STATE" "$S" get reviewed 2>/dev/null || true)" != "$verify_head" ] || fail "incomplete collect-verify does not set reviewed"
+incomplete_findings="$(bash "$TKT_STATE" "$S" get findings)"
+grep -Fq 'P1 open finding' "$incomplete_findings" || fail "incomplete collect-verify records open findings"
+
+# The recorded verify collects, updates findings, and does not add to round.
+printf 'ok' >"$T/collectmode"
+run_rc=0; out="$(bash "$TKT" "$S" --collect-verify "$verify_job" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 0 ] || fail "valid collect-verify exited $run_rc: $out $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$verify_head" || fail "collect-verify applies FIX-OK: $out"
+[ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$verify_head" ] || fail "collect-verify sets reviewed to the collected head"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "collect-verify does not add to round"
+collect_history="$(bash "$TKT_STATE" "$S" get findings_history)"
+[[ "$collect_history" == *'-findings-history-r2.md' ]] || fail "collect-verify writes history for its recorded round: $collect_history"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.2.history)" = "$collect_history" ] || fail "collect-verify records history on its recorded round"
+fi
+
+case "${CASE:-}" in punct-verify|collect-verify) exit 0;; esac
 
 # 1. Verify OK on an already-pushed head: no CI wait, slot fix1, reviewed set.
 setup_case ok

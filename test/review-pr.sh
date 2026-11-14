@@ -1473,6 +1473,94 @@ start_review 7 --repo O/N --cwd "$T/clone" --model M \
 grep -q "git diff $FAKE_SHA..HEAD" "$T/state/prompt-verify.md" || fail "non-empty verify brief keeps the same repair range"
 bash "$REVIEW" collect job-verify >/dev/null 2>&1 || fail "non-empty verify collects"
 
+# --- case: verify accepts a period before trailing detail
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 fixture finding\n- Evidence: refuted: this fixture exercises punctuation parsing\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OK. Every finding in the verify file is fixed at HEAD.
+FIX-OK: punctuation
+FIX-OK; punctuation
+FIX-OK, punctuation
+FIX-INCOMPLETE. punctuation
+FIX-INCOMPLETE: punctuation
+FIX-INCOMPLETE; punctuation
+FIX-INCOMPLETE, punctuation
+FIX-OK.
+FIX-INCOMPLETE.
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>"$T/period-start.err" || \
+  fail "period verify starts: $(cat "$T/period-start.err")"
+jq --arg cwd "$T/clone/wt-verify" '. + {cwd:$cwd}' \
+  "$TMPDIR/delegate-jobs/job-verify.json" >"$T/period-record.json" && \
+  mv "$T/period-record.json" "$TMPDIR/delegate-jobs/job-verify.json" || fail "period record role"
+out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "period verify collects: [$out]"
+grep -Fxq 'FIX-OK. Every finding in the verify file is fixed at HEAD.' <<<"$out" || \
+  fail "collect carries FIX-OK. detail"
+for punctuation in ':' ';' ','; do
+  grep -Fq "FIX-OK$punctuation punctuation" <<<"$out" || fail "collect accepts FIX-OK$punctuation"
+  grep -Fq "FIX-INCOMPLETE$punctuation punctuation" <<<"$out" || fail "collect accepts FIX-INCOMPLETE$punctuation"
+done
+grep -Fxq 'FIX-INCOMPLETE. punctuation' <<<"$out" || fail "collect accepts FIX-INCOMPLETE."
+grep -Fxq 'FIX-OK.' <<<"$out" || fail "collect accepts FIX-OK. at end of line"
+grep -Fxq 'FIX-INCOMPLETE.' <<<"$out" || fail "collect accepts FIX-INCOMPLETE. at end of line"
+grep -Fxq 'FIX-OK. Every finding in the verify file is fixed at HEAD.' "$T/state/comment.md" || \
+  fail "period verify comment includes its verdict"
+# A collected job with no live state is parsed from its record under the current vocabulary.
+recollected="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || fail "period verify re-collects: [$recollected]"
+grep -Fxq 'FIX-OK. Every finding in the verify file is fixed at HEAD.' <<<"$recollected" || \
+  fail "re-collect re-parses the period verdict"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || \
+  fail "period verify re-collect does not post a duplicate comment"
+
+# --- case: standards, spec and overbuild accept one trailing period only
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE $'VERDICT standards: APPROVE.\nSTATUS: DONE' 0
+write_record spec DONE $'VERDICT spec: APPROVE.\nSTATUS: DONE' 0
+write_record overbuild DONE $'VERDICT: APPROVE.\nSTATUS: DONE' 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "period axis review starts"
+out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || fail "period axis verdicts collect: [$out]"
+grep -Fxq 'VERDICT standards: APPROVE.' <<<"$out" || fail "standards accepts one trailing period"
+grep -Fxq 'VERDICT spec: APPROVE.' <<<"$out" || fail "spec accepts one trailing period"
+grep -Fxq 'VERDICT overbuild: APPROVE.' <<<"$out" || fail "overbuild accepts one trailing period"
+
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE $'VERDICT standards: APPROVE.\nSTATUS: DONE' 0
+write_record spec DONE $'VERDICT spec: APPROVE..\nSTATUS: DONE' 0
+write_record overbuild DONE $'VERDICT: APPROVE.\nSTATUS: DONE' 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M --overbuild-model M2 >/dev/null 2>&1 || fail "multiple-period axis review starts"
+collect_rc=0; out="$(bash "$REVIEW" collect job-standards job-spec job-overbuild 2>/dev/null)" || collect_rc=$?
+[ "$collect_rc" = 1 ] || fail "multiple trailing periods are BAD-VERDICT: [$out]"
+grep -Fxq 'BAD-VERDICT spec VERDICT spec: APPROVE..' <<<"$out" || fail "spec rejects multiple trailing periods"
+
+# --- case: malformed verify prefixes stay bad on fresh and repeated collect
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'P1 fixture finding\n- Evidence: refuted: this fixture exercises bad verdict parsing\n' >"$T/findings.txt"
+write_record verify DONE "FIX-OKAY
+FIX-OK-ish
+FIX-OK.x
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --model M \
+  --verify "$T/findings.txt" --since "$FAKE_SHA" >/dev/null 2>&1 || fail "bad-prefix verify starts"
+jq --arg cwd "$T/clone/wt-verify" '. + {cwd:$cwd}' \
+  "$TMPDIR/delegate-jobs/job-verify.json" >"$T/bad-prefix-record.json" && \
+  mv "$T/bad-prefix-record.json" "$TMPDIR/delegate-jobs/job-verify.json" || fail "bad-prefix record role"
+collect_rc=0; out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || collect_rc=$?
+[ "$collect_rc" = 1 ] || fail "bad-prefix collect exits 1: [$out]"
+for bad_line in FIX-OKAY FIX-OK-ish FIX-OK.x; do
+  grep -Fxq "BAD-VERDICT verify $bad_line" <<<"$out" || fail "bad-prefix collect rejects $bad_line"
+done
+[ -f "$TMPDIR/review-pr/job-verify" ] || fail "bad verdict keeps state for re-collection"
+rm -f "$TMPDIR/review-pr/job-verify" # model a job collected before the parser learned this vocabulary
+collect_rc=0; recollected="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || collect_rc=$?
+[ "$collect_rc" = 1 ] || fail "bad-prefix re-collect exits 1: [$recollected]"
+grep -Fxq 'BAD-VERDICT verify FIX-OKAY' <<<"$recollected" || fail "re-collect re-parses a bad verdict"
+[ "$(grep -c '^review-pr: patch-id ' "$T/state/comments.log")" = "1" ] || \
+  fail "bad verdict re-collect does not double-post"
+
 # --- case: verify mode runs one job with SINCE and FINDINGS filled
 reset_state
 printf 'ci\tpending\n' >"$T/checks.txt"

@@ -1237,16 +1237,16 @@ review_verdict() {
         ($line | capture("^## (?<section>standards|spec|overbuild|verify)").section) as $section |
         .section = $section |
         if ($section == "standards" or $section == "spec" or $section == "overbuild") then .axes += [$section] else . end
-      elif $line == "VERDICT standards: APPROVE" then .verdicts += ["standards:APPROVE"]
-      elif $line == "VERDICT standards: CHANGES" then .verdicts += ["standards:CHANGES"]
-      elif $line == "VERDICT spec: APPROVE" then .verdicts += ["spec:APPROVE"]
-      elif $line == "VERDICT spec: CHANGES" then .verdicts += ["spec:CHANGES"]
-      elif $line == "VERDICT overbuild: APPROVE" then .verdicts += ["overbuild:APPROVE"]
-      elif $line == "VERDICT overbuild: CHANGES" then .verdicts += ["overbuild:CHANGES"]
-      elif .section == "overbuild" and $line == "VERDICT: APPROVE" then .verdicts += ["overbuild:APPROVE"]
-      elif .section == "overbuild" and $line == "VERDICT: CHANGES" then .verdicts += ["overbuild:CHANGES"]
-      elif .section == "verify" and ($line | test("^FIX-OK($|\\s)")) then .verdicts += ["verify:FIX-OK"]
-      elif .section == "verify" and ($line | test("^FIX-INCOMPLETE($|\\s)")) then .verdicts += ["verify:FIX-INCOMPLETE"]
+      elif ($line | test("^VERDICT standards: APPROVE\\.?$")) then .verdicts += ["standards:APPROVE"]
+      elif ($line | test("^VERDICT standards: CHANGES\\.?$")) then .verdicts += ["standards:CHANGES"]
+      elif ($line | test("^VERDICT spec: APPROVE\\.?$")) then .verdicts += ["spec:APPROVE"]
+      elif ($line | test("^VERDICT spec: CHANGES\\.?$")) then .verdicts += ["spec:CHANGES"]
+      elif ($line | test("^VERDICT overbuild: APPROVE\\.?$")) then .verdicts += ["overbuild:APPROVE"]
+      elif ($line | test("^VERDICT overbuild: CHANGES\\.?$")) then .verdicts += ["overbuild:CHANGES"]
+      elif .section == "overbuild" and ($line | test("^VERDICT: APPROVE\\.?$")) then .verdicts += ["overbuild:APPROVE"]
+      elif .section == "overbuild" and ($line | test("^VERDICT: CHANGES\\.?$")) then .verdicts += ["overbuild:CHANGES"]
+      elif .section == "verify" and ($line | test("^FIX-OK([.:;,]($|\\s)|$|\\s)")) then .verdicts += ["verify:FIX-OK"]
+      elif .section == "verify" and ($line | test("^FIX-INCOMPLETE([.:;,]($|\\s)|$|\\s)")) then .verdicts += ["verify:FIX-INCOMPLETE"]
       elif ($line | test("^(VERDICT|FIX-)")) then .verdicts += ["INVALID"]
       else . end
     )) as $parsed |

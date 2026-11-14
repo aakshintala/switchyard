@@ -62,7 +62,7 @@ Never set `reviewed` by hand: a direct `review-pr --verify` inside a tkt run doe
 - `FIX-INCOMPLETE round=<n>`: the open findings are the next round's findings file (state `findings`); back to step 2. With `STOP-AT-TWO` on the line, go to step 4. At merge, `ship-pr` accepts a scoped `FIX-INCOMPLETE` only when its readable, non-empty open findings are all P3; it files or reuses an open issue for each and links the issues from the PR, while unreadable or empty findings and any P0-P2 finding still refuse.
 - `FINDINGS-UNACCOUNTED commits=<sha,...>`: a commit in the scoped diff is outside every recorded round range or has no readable findings record; restore the named slot with the printed `tkt-state` commands, then rerun the printed `tkt-fix` command.
 - `SINCE-NOT-ANCESTOR since=<sha> head=<sha>`: the branch history was rewritten after the review, so scoped-verify rounds cannot be mapped; no tool re-reviews a rewritten history yet (#1781); stop and ask the steward.
-- `DRIFT`: state, PR and worktree heads differ; reconcile and rerun. A worktree ahead of the PR head by the open fix job's own unpushed commits is not drift: the state head moves to the worktree HEAD and the run carries on. `RECOVER job=<id>`: a fix job for this round already exists; rerun with `--resume <id> --prompt <file>`. `CI-WAIT`, `PUSH-FAIL`, `VERIFY-FAIL`: read the digest and the log it names.
+- `DRIFT`: state, PR and worktree heads differ; reconcile and rerun. A worktree ahead of the PR head by the open fix job's own unpushed commits is not drift: the state head moves to the worktree HEAD and the run carries on. `RECOVER job=<id>`: a fix job for this round already exists; rerun with `--resume <id> --prompt <file>`. `CI-WAIT`, `PUSH-FAIL`: read the digest and the log it names. For `VERIFY-FAIL` with `BAD-VERDICT verify`, use the named `tkt-fix <state> --collect-verify <job id>` recovery command; it accepts only the verify recorded for the latest tkt-fix round when its state, PR and worktree heads still match, and does not add a round. For other `VERIFY-FAIL` results, read the digest and log.
 
 The verify prints `review-pr: repair base <sha> (<since> replayed onto <base>)`: it replays the reviewed head onto the current base so the diff holds only the fix round, and needs no action. A line above it saying the head "does not replay cleanly" means the diff also holds the rebase's conflict resolution: judge that part as part of the repair.
 
@@ -70,7 +70,7 @@ The verify prints `review-pr: repair base <sha> (<since> replayed onto <base>)`:
 
 A scoped verify stands for every axis: `FIX-OK` ends the loop and no full review pair follows, whichever axis raised the findings. A bare full pair on a PR that already has a review comment refuses (step 1). Run a full pair (step 1) only after a re-plan or take-back (step 4), or when the verify's new findings show the repair reached code outside the findings' bounds, passing `--full-rereview <reason>` for that full pair.
 
-Done when the verify has printed `FIX-OK` or `FIX-INCOMPLETE` for the current patch-id.
+Done when the verify has printed `FIX-OK` or `FIX-INCOMPLETE` for the current patch-id. Either verdict may stand alone or continue with whitespace and detail; it may instead have exactly one of `.`, `:`, `;` or `,` immediately after its name, followed by whitespace and optional detail or the end of the line.
 
 ### 4. Stop at two
 

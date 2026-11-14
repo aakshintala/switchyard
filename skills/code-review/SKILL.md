@@ -73,7 +73,7 @@ P1 src/order.ts:88 — refund skips the ledger entry the spec requires — write
 
 Each finding is `P1|P2|P3 file:line — defect — fix`, under its axis's verdict, most severe first. P1 is wrong behaviour or a security hole, P2 a missed acceptance criterion, an unrequested edit or a hard standards breach, P3 anything smaller, baseline smells included. An axis with any P1 or P2 is `CHANGES`. A merge needs both axes `APPROVE`.
 
-Every finding names its evidence: a concrete input or state that goes wrong, or the doc line or ruling it breaks (for a standard, the doc's rule and the code line; for a baseline smell, every site that shows it, such as both copies of duplicated code). A finding with neither is not written, whatever its severity. That drops a hypothetical input nothing in the code or ticket produces, a request to cite the ticket line that asks for the code, a name or shape that no doc rule covers and no second site shows, and remarks on process.
+Every finding names its evidence: a concrete input or state that goes wrong, or the doc line or ruling it breaks (for a standard, the doc's rule and the code line; for a baseline smell, every site that shows it, such as both copies of duplicated code). A finding with neither is not written, whatever its severity. That drops a hypothetical input nothing in the code or ticket produces, a request to cite the ticket line that asks for the code, a name or shape that no doc rule covers and no second site shows, and remarks on process. Standards, spec and overbuild verdict lines may end with one period. Verify verdicts may stand alone, continue with whitespace and detail, or have exactly one of `.`, `:`, `;` or `,` immediately after the verdict, followed by whitespace and optional detail or the end of the line.
 
 When the defect is a pattern that can recur, the finding names its class and a search shaped like the defect itself, so every instance is a hit and every hit an instance, bounded to the lines the PR adds or changes: `P2 src/order.ts:41 — catches and drops the write error (class: empty catch blocks; find: rg -nU 'catch \(\w*\) \{\s*\}' on the PR's changed hunks) — rethrow`. Code the PR didn't touch is outside the class.
 
@@ -85,7 +85,7 @@ Judge only findings in the `--verify` findings file against the repair diff (the
 FIX-OK
 ```
 
-or `FIX-INCOMPLETE`, followed by every finding still open and every new one, in the finding format above.
+or `FIX-INCOMPLETE`, followed by every finding still open and every new one, in the finding format above. A verify verdict may stand alone, continue with whitespace and detail, or have exactly one of `.`, `:`, `;` or `,` immediately after its name, followed by whitespace and optional detail or the end of the line.
 
 ## Answering the findings
 
