@@ -94,7 +94,12 @@ repair_hint() {
     gate)
       printf 'Repair command: correct the plan Gate: line to run gate.script, run tkt-plan %s set <plan-path>, then tkt-plan %s verify when the Verifier applies\n' "$state" "$state" ;;
     pr)
-      printf 'Repair command: tkt-build %s --from lane (create the branch PR, then resume with --from review)\n' "$state" ;;
+      lane_job="$(tkt get job.lane 2>/dev/null || true)"
+      if [ -n "$lane_job" ]; then
+        printf 'Repair command: tkt-job %s --slot lane --resume %s --prompt <file> --gate-from-plan --expect-commits, then tkt-build %s --from gate\n' "$state" "$lane_job" "$state"
+      else
+        printf 'Repair command: tkt-build %s --from lane (create the branch PR, then resume with --from review)\n' "$state"
+      fi ;;
     model.lane)
       printf 'Repair command: tkt-build %s --lane-model <model-id>\n' "$state" ;;
     model.review|model.overbuild)

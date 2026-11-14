@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tkt-fix: one review-loop fix round; slot fix<max(round,fixslot)+1> keeps
 # rounds apart: tkt-job re-prints a terminal slot's digest.
-# A lane blocked before its PR resumes with tkt-job --resume <job.lane> followed by tkt-build --from gate, or with tkt-build --from lane when no lane ran.
+# A lane blocked before its PR resumes with tkt-job --resume <job.lane>; the resumed lane must finish its brief's push step (which opens the PR) before tkt-build --from gate. When no lane ran, use tkt-build --from lane.
 # Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>]
 #   [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>]
 #   [--fix-model <id>] [--verify-model <id>] [--collect-verify <job id>]
