@@ -657,6 +657,10 @@ grep -Fq 'result line 30' "$stop_report" || fail "ASK stop report includes the f
 grep -Fq 'result line 10' "$stop_report" && fail "ASK stop report omits lines older than the last 20"
 stop_report_lines="$(sed -n '/^Last report lines/,$p' "$stop_report" | tail -n +2 | wc -l | tr -d ' ')"
 [ "$stop_report_lines" -le 20 ] || fail "ASK stop report has at most 20 report lines (got $stop_report_lines)"
+# tkt-build journals the same job's stop words after tkt-job; that sends no second report.
+(tkt_state="$TKT_STATE" script_dir="$REAL_BIN"; . "$REAL_BIN/lib/stop-report.sh"; stop_report_notify "$S" 502 tkt-build stub-1 ASK <<<"tkt-build ASK id=stub-1")
+stop_reports="$(find "$T/inbox" -type f -name 'tkt-*.md' | wc -l | tr -d ' ')"
+[ "$stop_reports" -eq 1 ] || fail "tkt-build relaying tkt-job's ASK sends no second report (count=$stop_reports)"
 
 # --- a non-stop job status sends no report ---
 setup_case report-nonstop

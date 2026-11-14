@@ -31,12 +31,14 @@ stop_report_notify() {
   report="$(tail -n 20 2>/dev/null || true)"
   [ -n "$job" ] || job=unknown
   journal="${state%.state}.journal"
-  key="$(printf '%s\0%s\0%s' "$tool" "$job" "$status" | shasum -a 256 | awk '{print $1}')" || return 0
+  # The key leaves out the tool: tkt-build passes tkt-job's stop words through,
+  # so one job's stop is journaled by both and must send one report.
+  key="$(printf '%s\0%s' "$job" "$status" | shasum -a 256 | awk '{print $1}')" || return 0
   if [ -r "$journal" ] && grep -Fq "stop-report attempt key=$key " "$journal"; then
     return 0
   fi
 
-  # Reserve the tuple before sending: even a failed or interrupted send is not
+  # Reserve the key before sending: even a failed or interrupted send is not
   # retried by a later write of the same stop verdict.
   "$tkt_state" "$state" journal "stop-report attempt key=$key tool=$tool job=$job status=$status" >/dev/null 2>&1 || return 0
 
