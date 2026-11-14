@@ -2545,7 +2545,7 @@ shared_run="$FW_RUN"
 state_run="$shared_run/fiber-1798-bound-2"
 mkdir -p "$state_run"
 cp "$shared_run/roster" "$state_run/roster"
-printf 'repo=aakshintala/fiber\nissue=1798\nrun=%s\n' "$state_run" >"$state_run/fiber-1798.state"
+printf 'repo=example/fiber\nissue=1798\nrun=%s\n' "$state_run" >"$state_run/fiber-1798.state"
 cat >"$shared_run/fiber-66-fence-grant-1.md" <<'HOLDER_GRANT'
 Grant 1
 

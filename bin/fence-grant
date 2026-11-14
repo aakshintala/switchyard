@@ -46,7 +46,9 @@
 #      `##` heading so it cannot add another hold.
 set -u
 set -f
-# Resolve sibling files once, before --require needs the shared-run helper.
+# Siblings resolve from the script's real path: callers such as flywheel's
+# bin/fence-grant reach it through a symlink in a directory with no file-claim.
+# Resolve them once, before --require needs the shared-run helper.
 self="$0"
 case "$self" in */*) ;; *) self="$(command -v "$self")" ;; esac
 while [ -L "$self" ]; do
@@ -461,8 +463,6 @@ if [ "$empty" -eq 1 ]; then
   echo GRANT
   exit 0
 fi
-# Siblings resolve from the script's real path: callers such as flywheel's
-# bin/fence-grant reach it through a symlink in a directory with no file-claim.
 # shellcheck disable=SC1091
 . "$self_dir/lib/fence-grant-paths.sh"
 # shellcheck disable=SC1091
