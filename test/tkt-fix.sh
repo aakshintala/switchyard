@@ -1444,10 +1444,8 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "bad verdict: $(head -
 grep -q "state head=$NEW" <<<"$out" || fail "state head missing from DRIFT digest"
 grep -q "PR head=$OLD" <<<"$out" || fail "PR head missing from DRIFT digest"
 grep -q "worktree HEAD=$NEW" <<<"$out" || fail "worktree sha missing from DRIFT digest"
-route_wt="$(cd "$WT" && pwd)"
-route_state="$(cd "$(dirname "$S")" && pwd)/$(basename "$S")"
-route_branch="$(bash "$TKT_STATE" "$S" get branch)"
-grep -Fq "after an unpushed main merge, run: git -C $route_wt push origin $route_branch, then: tkt-state $route_state set head $NEW" <<<"$out" || fail "set-head hand-push route missing on DRIFT B"
+grep -q "set head" <<<"$out" && fail "set-head route printed on DRIFT B"
+grep -q "push origin" <<<"$out" && fail "hand-push route printed on DRIFT B"
 grep -q "job|" "$T/calls.log" && fail "fix job dispatched on DRIFT B"
 [ "$(git -C "$WT" rev-parse "origin/tkt-529")" = "$NEW" ] || fail "drift-b moved origin"
 

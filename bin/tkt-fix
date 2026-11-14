@@ -382,13 +382,16 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
     if [ "$keep" -eq 0 ]; then
       # A pushed rebase or main merge leaves PR head == worktree HEAD on a
       # clean tree, descended from the state head. If an unpushed main merge
-      # leaves the worktree ahead of the PR head, name the hand-push route.
-      # Both routes are hints only; the head never moves here.
+      # leaves the worktree ahead of the PR head, name the hand-push route,
+      # but only while the state head agrees with the PR head: a PR head
+      # rewound behind the state head is someone else's force-push, and a
+      # push route would quietly undo it. Both routes are hints only; the
+      # head never moves here.
       route=""
       if [ "$prhead" = "$actual" ] && [ "$clean" -eq 1 ] \
         && git -C "$worktree" merge-base --is-ancestor "$stored" "$actual" 2>/dev/null; then
         route="after a rebase or main merge, run: tkt-state $state set head $actual"
-      elif [ "$prhead" != "$actual" ] && [ "$clean" -eq 1 ] \
+      elif [ "$prhead" != "$actual" ] && [ "$stored" = "$prhead" ] && [ "$clean" -eq 1 ] \
         && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
         route="after an unpushed main merge, run: git -C $worktree push origin $branch, then: tkt-state $state set head $actual"
       fi
