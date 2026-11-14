@@ -3,12 +3,13 @@
 # rounds apart: tkt-job re-prints a terminal slot's digest.
 # A lane blocked before its PR resumes with tkt-job --resume <job.lane> followed by tkt-build --from gate, or with tkt-build --from lane when no lane ran.
 # Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>]
-#   [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]
+#   [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]
+#   --prompt appends orchestrator context to a fresh fix job; --resume requires --prompt.
 #   --fix-model overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model.
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
+  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>] [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
   echo "  --fix-model <id> overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model." >&2
   exit 2
 }
@@ -31,7 +32,7 @@ while [ $# -gt 0 ]; do
 done
 [ "$verify" -ne "$noverify" ] || usage
 [ -z "$since" ] || [ "$verify" -eq 1 ] || usage
-[ -z "$resume$prompt" ] || { [ -n "$resume" ] && [ -n "$prompt" ]; } || usage
+[ -z "$resume" ] || [ -n "$prompt" ] || usage
 
 script_path="$0"
 case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
@@ -539,7 +540,9 @@ verify_round_coverage() {
     repair_resume_args=""
     if [ "$round" -ge 2 ]; then
       repair_resume="$resume"
-      repair_prompt="$prompt"
+      repair_prompt=""
+      # A fresh-job context prompt does not scope a suggested resume repair.
+      if [ -n "$resume" ]; then repair_prompt="$prompt"; fi
       if [ -z "$repair_resume" ]; then
         repair_resume="$(t get "job.$slot" 2>/dev/null || true)"
         [ -n "$repair_resume" ] || repair_resume="$(t get "job.fix$knum" 2>/dev/null || true)"
@@ -839,7 +842,22 @@ else
     fi
   else
     [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
-    args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$findings" "GATE=$brief_gate_cmd")
+    dispatch_findings="$findings"
+    if [ -n "$prompt" ]; then
+      [ -r "$prompt" ] || { echo "tkt-fix: cannot read prompt: $prompt" >&2; exit 2; }
+      dispatch_findings="$(mktemp "$run/$namebase$part_suffix-fix-round-$knum-findings-context-XXXXXX")"
+      if ! {
+        cat "$findings" \
+          && { [ ! -s "$findings" ] || [ "$(tail -c 1 "$findings" | wc -l)" -gt 0 ] || printf '\n'; } \
+          && printf '\n## Context from the orchestrator\n\n' \
+          && cat "$prompt"
+      } >"$dispatch_findings"; then
+        rm -f "$dispatch_findings"
+        echo "tkt-fix: cannot build combined findings and prompt: $dispatch_findings" >&2
+        exit 2
+      fi
+    fi
+    args=(--slot "$slot" --model "$fixmodel" --template "$fbrief" "FINDINGS=@$dispatch_findings" "GATE=$brief_gate_cmd")
     if [ "$takeover" -eq 1 ]; then
       args+=(--gate "$takeover_gate_arg")
     elif [ "$fix_gate_rc" -eq 0 ]; then
