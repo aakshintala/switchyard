@@ -26,7 +26,7 @@ stop_report_job_id() {
 
 stop_report_notify() {
   local state="$1" ticket="$2" tool="$3" job="$4" status="$5"
-  local journal key inbox host report message rc
+  local journal key inbox report message rc=0
 
   report="$(tail -n 20 2>/dev/null || true)"
   [ -n "$job" ] || job=unknown
@@ -34,24 +34,19 @@ stop_report_notify() {
   # The key leaves out the tool: tkt-build passes tkt-job's stop words through,
   # so one job's stop is journaled by both and must send one report.
   key="$(printf '%s\0%s' "$job" "$status" | shasum -a 256 | awk '{print $1}')" || return 0
-  if [ -r "$journal" ] && grep -Fq "stop-report attempt key=$key " "$journal"; then
+  # Only a sent report blocks a resend: a later write of a stop whose send
+  # failed retries it.
+  if [ -r "$journal" ] && grep -Fq "stop-report sent key=$key " "$journal"; then
     return 0
   fi
 
-  # Reserve the key before sending: even a failed or interrupted send is not
-  # retried by a later write of the same stop verdict.
-  "$tkt_state" "$state" journal "stop-report attempt key=$key tool=$tool job=$job status=$status" >/dev/null 2>&1 || return 0
-
-  if [ "${TKT_STOP_INBOX+x}" = x ]; then
-    inbox="$TKT_STOP_INBOX"
-    if [ -z "$inbox" ]; then
-      "$tkt_state" "$state" journal "stop-report WARN inbox unset key=$key" >/dev/null 2>&1 || true
-      return 0
-    fi
-  else
-    inbox="${HOME:-}/.cache/agents/inbox/flywheel"
+  # Default: the inbox beside the state, flywheel's watched run/inbox on both
+  # hosts (on the box it is a symlink to the box flywheel inbox).
+  inbox="${TKT_STOP_INBOX-$(dirname "$state")/inbox}"
+  if [ -z "$inbox" ]; then
+    "$tkt_state" "$state" journal "stop-report WARN inbox unset key=$key" >/dev/null 2>&1 || true
+    return 0
   fi
-  host="${TKT_STOP_INBOX_HOST:-}"
   message="Ticket: #$ticket
 Tool: $tool
 Job ID: $job
@@ -60,21 +55,12 @@ Status: $status
 Last report lines (up to 20):
 $report"
 
-  if [ -n "$host" ]; then
-    if printf '%s\n' "$message" | INBOX_HOST="$host" bash "$script_dir/inbox-send" "$inbox" "$tool" >/dev/null 2>&1; then
-      "$tkt_state" "$state" journal "stop-report sent key=$key" >/dev/null 2>&1 || true
-      return 0
-    else
-      rc=$?
-    fi
+  # Clear INBOX_HOST so an inherited value can't send this off-host.
+  printf '%s\n' "$message" | INBOX_HOST= bash "$script_dir/inbox-send" "$inbox" "$tool" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    "$tkt_state" "$state" journal "stop-report sent key=$key tool=$tool job=$job status=$status" >/dev/null 2>&1 || true
   else
-    if printf '%s\n' "$message" | bash "$script_dir/inbox-send" "$inbox" "$tool" >/dev/null 2>&1; then
-      "$tkt_state" "$state" journal "stop-report sent key=$key" >/dev/null 2>&1 || true
-      return 0
-    else
-      rc=$?
-    fi
+    "$tkt_state" "$state" journal "stop-report WARN inbox-send exit $rc key=$key" >/dev/null 2>&1 || true
   fi
-  "$tkt_state" "$state" journal "stop-report WARN inbox-send exit $rc key=$key" >/dev/null 2>&1 || true
   return 0
 }

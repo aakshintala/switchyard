@@ -23,7 +23,7 @@ fail() {
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-build.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases" "$T/inbox"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" TKT_STOP_INBOX="$T/inbox" TKT_STOP_INBOX_HOST=
+export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" TKT_STOP_INBOX="$T/inbox"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
 unset DELEGATE_JOBS_DIR

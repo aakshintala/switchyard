@@ -10,7 +10,7 @@ STATE_BIN="$ROOT/bin/tkt-state"
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-drive.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/inbox"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" PATH="$T/bin:$PATH" TKT_STOP_INBOX="$T/inbox" TKT_STOP_INBOX_HOST=
+export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" PATH="$T/bin:$PATH" TKT_STOP_INBOX="$T/inbox"
 export TEST_STATE_BIN="$STATE_BIN" TEST_CALLS="$T/calls.log"
 export TEST_PLAN_VERDICT="$T/plan-verdict" TEST_POST_VERDICT="$T/post-verdict"
 export TEST_BUILD_VERDICT="$T/build-verdict" TEST_SHIP_VERDICT="$T/ship-verdict"

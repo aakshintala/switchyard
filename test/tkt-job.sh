@@ -18,7 +18,7 @@ fail() {
 T="$(mktemp -d "${TMPDIR:-/tmp}/test-tkt-job.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home/.agents/bin" "$T/tmp" "$T/bin" "$T/records" "$T/cases" "$T/inbox"
-export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" TKT_STOP_INBOX="$T/inbox" TKT_STOP_INBOX_HOST=
+export HOME="$T/home" TMPDIR="$T/tmp" TKT_BIN="$T/bin" TKT_STOP_INBOX="$T/inbox"
 export STUB_JOBSDIR="$T/tmp/delegate-jobs"
 export JOB_RECORD_SYSTEM_DIR="$T/no-system-jobs"
 mkdir -p "$T/home/.agents/bin"
@@ -669,7 +669,7 @@ make_record stub-1 DONE none 0 2 0
 run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
 [ "$RC" -eq 0 ] || fail "non-stop DONE exits 0 (rc=$RC)"
 [ "$(find "$T/inbox" -type f | wc -l | tr -d ' ')" -eq 0 ] || fail "non-stop DONE sends no report"
-! grep -q 'stop-report attempt' "${S%.state}.journal" || fail "non-stop DONE records no stop-report attempt"
+! grep -q 'stop-report' "${S%.state}.journal" || fail "non-stop DONE journals no stop-report line"
 
 # --- an explicitly unset stop inbox warns without changing the stop ---
 setup_case report-unset-inbox
@@ -688,22 +688,24 @@ TKT_STOP_INBOX="$T/inbox"
 setup_case report-send-fails
 reset_stub
 make_record stub-1 BLOCKED none 0 2 0
-mkdir -p "$T/sshbin"
-cat >"$T/sshbin/ssh" <<'SSH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >>"$SSH_STUB_LOG"
-exit 42
-SSH
-chmod +x "$T/sshbin/ssh"
-SSH_STUB_LOG="$T/ssh.log" TKT_STOP_INBOX_HOST=unreachable-test PATH="$T/sshbin:$PATH" \
-  run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
+: >"$T/not-a-dir"
+TKT_STOP_INBOX="$T/not-a-dir/inbox" run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model
 [ "$RC" -eq 1 ] || fail "failed inbox-send keeps BLOCKED exit 1 (rc=$RC)"
 expect_verdict "TKT tkt-job BLOCKED id=stub-1 log=*" "failed inbox-send"
 grep -q ' tkt-job BLOCKED id=stub-1$' "${S%.state}.journal" || fail "failed inbox-send keeps the original journal line"
-grep -q 'stop-report WARN inbox-send exit 42' "${S%.state}.journal" || fail "failed inbox-send journals its exit code"
-grep -q '^' "$T/ssh.log" || fail "failed inbox-send exercised ssh"
-[ "$(find "$T/inbox" -type f | wc -l | tr -d ' ')" -eq 0 ] || fail "failed inbox-send creates no local report"
-TKT_STOP_INBOX_HOST=
+grep -Eq 'stop-report WARN inbox-send exit [1-9][0-9]* key=' "${S%.state}.journal" || fail "failed inbox-send journals its exit code"
+grep -q 'stop-report sent' "${S%.state}.journal" && fail "failed inbox-send journals no sent line"
+# A later write of the same stop retries the failed send, once.
+(tkt_state="$TKT_STATE" script_dir="$REAL_BIN"; . "$REAL_BIN/lib/stop-report.sh"; stop_report_notify "$S" 502 tkt-build stub-1 BLOCKED <<<"retry"; stop_report_notify "$S" 502 tkt-build stub-1 BLOCKED <<<"retry")
+[ "$(find "$T/inbox" -type f -name 'tkt-*.md' | wc -l | tr -d ' ')" -eq 1 ] || fail "a failed send is retried by the next write, exactly once"
+
+# --- with no TKT_STOP_INBOX, the report goes to the inbox beside the state ---
+setup_case report-default-inbox
+reset_stub
+make_record stub-1 BLOCKED none 0 2 0
+(unset TKT_STOP_INBOX; run_job --slot preflight --template "$T/tmpl-basic.md" --model test-model; exit "$RC")
+[ "$?" -eq 1 ] || fail "default inbox keeps BLOCKED exit 1"
+[ "$(find "$(dirname "$S")/inbox" -type f -name 'tkt-job-*.md' 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ] || fail "default inbox is the state dir's inbox"
 
 # --- BLOCKED ---
 setup_case blocked
