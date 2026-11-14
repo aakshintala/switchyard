@@ -1654,6 +1654,12 @@ cmd_collect() {
     ack_id="${ack_ids[$ai]}"
     ack_state="$state_dir/${ack_state_ids[$ai]}"
     ack_clone="$(state_get "$ack_state" clone 2>/dev/null || true)"
+    # An empty clone would leave cd in place and DELEGATE_CALLER_CWD unset, so
+    # delegate would check the ack against collect's own cwd instead.
+    if [ -z "$ack_clone" ] || [ ! -d "$ack_clone" ]; then
+      printf 'review-pr: warning: no clone for job %s; not acked\n' "$ack_id" >&2
+      continue
+    fi
     ack_error="$tmp/ack-error.txt"
     if ! (cd "$ack_clone" && DELEGATE_CALLER_CWD="$ack_clone" delegate ack "$ack_id") \
       >/dev/null 2>"$ack_error"; then

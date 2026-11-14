@@ -529,6 +529,26 @@ grep -q '^UNFINISHED spec MISSING ' <<<"$missing_out" || fail "missing-result co
 [ -f "$T/state/acks.txt" ] || fail "completed siblings are acked"
 ! grep -q '^ack job-spec ' "$T/state/acks.txt" || fail "unreadable job remains unacked"
 
+# --- case: a job whose state has no clone line is warned and not acked
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+write_record standards DONE "VERDICT standards: APPROVE
+STATUS: DONE" 0
+write_record spec DONE "VERDICT spec: APPROVE
+STATUS: DONE" 0
+write_record overbuild DONE "VERDICT: APPROVE
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --issue 1 --spec 2 \
+  --model M --overbuild-model M2 >/dev/null 2>&1 || fail "no-clone start exits 0"
+spec_sf="$TMPDIR/review-pr/job-spec"
+[ -f "$spec_sf" ] || fail "no-clone case finds the spec state file"
+grep -v '^clone=' "$spec_sf" >"$spec_sf.tmp" && mv "$spec_sf.tmp" "$spec_sf"
+bash "$REVIEW" collect job-standards job-spec job-overbuild >/dev/null 2>"$T/stderr.txt" || \
+  fail "no-clone collect exits 0"
+grep -Fq 'warning: no clone for job job-spec; not acked' "$T/stderr.txt" || fail "no-clone job is warned"
+! grep -q '^ack job-spec ' "$T/state/acks.txt" || fail "no-clone job is not acked"
+grep -q '^ack job-standards ' "$T/state/acks.txt" || fail "siblings of a no-clone job are acked"
+
 # --- case: failed ack warns without changing the collect result
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
