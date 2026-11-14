@@ -179,6 +179,8 @@ knum="${slot#fix}"
 history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
+limited=0
+if [ "$round" -ge 2 ] && [ -z "$resume" ]; then limited=1; fi
 
 emit() {
   verdict="$1"; ec="$2"; shift 2
@@ -186,8 +188,16 @@ emit() {
   { printf 'TKT tkt-fix %s log=%s\n' "$verdict" "$logpath"; [ $# -eq 0 ] || printf '%s\n' "$@" | head -n 40; } >"$logpath"
   cat "$logpath"; t journal "tkt-fix $verdict"; exit "$ec"
 }
-# Two rounds have run: a --resume may continue without an open slot.
-[ "$round" -lt 2 ] || [ -n "$resume" ] || emit "ROUND-LIMIT round=$round" 1 "resume a job with: tkt-fix $state --verify --resume <job id> --prompt <file> (works with no open slot); otherwise send the open findings to triage"
+
+round_limit() {
+  emit "ROUND-LIMIT round=$round" 1 "resume a job with: tkt-fix $state --verify --resume <job id> --prompt <file> (works with no open slot); otherwise send the open findings to triage"
+}
+# Two rounds have run: only a round-2 closed-slot recovery may pass without --resume.
+if [ "$limited" -eq 1 ]; then
+  limit_pr="$(t get pr 2>/dev/null || true)"
+  limit_head="$(t get head 2>/dev/null || true)"
+  if [ "$round" -ne 2 ] || [ -z "$limit_pr" ] || [ -z "$limit_head" ]; then round_limit; fi
+fi
 # Fill missing PR identity before checking entry drift or dispatching a fix.
 # pre_pr_resume_hint names the pre-PR resume on the no-PR refusals below.
 pre_pr_resume_hint() {
@@ -250,6 +260,7 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
     recover_unpushed=0
     wt_status="$(git -C "$worktree" status --porcelain 2>/dev/null || printf '?')"
     clean=0; [ -z "$wt_status" ] && clean=1
+    if [ "$limited" -eq 1 ] && [ "$openk" -gt 0 ]; then round_limit; fi
     if [ "$openk" -gt 0 ]; then
       if fjob="$(t get "job.fix$openk" 2>/dev/null || true)" && [ -n "$fjob" ] \
         && git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null \
@@ -259,7 +270,6 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         keep=1
       elif [ -n "$fjob" ] && [ "$prhead" != "$actual" ] \
         && [ "$clean" -eq 1 ] \
-        && { [ "$stored" = "$prhead" ] || [ "$stored" = "$actual" ]; } \
         && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
         # Ownership: the ahead commits must be the open job's own. Its
         # delegate record carries changeSet.headAfter, located the same way
@@ -267,10 +277,16 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         # proves no outside commit landed on top.
         rec="$(bash "$script_dir/job-record" "$fjob" 2>/dev/null || true)"
         owned=""
+        owned_before=""
         if [ -n "$rec" ] && [ -f "$rec" ]; then
           owned="$(jq -r '.result.changeSet.headAfter // ""' "$rec" 2>/dev/null || true)"
+          owned_before="$(jq -r '.result.changeSet.headBefore // ""' "$rec" 2>/dev/null || true)"
         fi
-        if [ -n "$owned" ] && [ "$owned" = "$actual" ]; then
+        if [ -n "$owned" ] && [ "$owned" = "$actual" ] \
+          && { { [ "$stored" = "$prhead" ] || [ "$stored" = "$actual" ]; } \
+            || { [ "$owned_before" = "$stored" ] \
+              && git -C "$worktree" merge-base --is-ancestor "$prhead" "$stored" 2>/dev/null \
+              && git -C "$worktree" merge-base --is-ancestor "$stored" "$actual" 2>/dev/null; }; }; then
           # Carry the validated recovery through tkt-job's head-drift guard
           # the same way a normal job end does. fixopen stays on the open
           # slot: its commits are still unpushed, and the dispatch below
@@ -283,19 +299,35 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
     fi
     # Closed slots may use this broader recovery; open slots still need the
     # exact job-record ownership proved above.
+    # debt: round<2 closed-slot recovery can push without job-record ownership; tighten when a round<2 closed-slot recovery pushes a commit no job record owns.
     if [ "$keep" -eq 0 ] && [ "$openk" -eq 0 ] && [ "$clean" -eq 1 ] && [ "$prhead" != "$actual" ] \
       && git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null \
-      && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
-      recovery_slot="$fixslot"
-      [ "$openk" -le 0 ] || recovery_slot="$openk"
-      [ "$recovery_slot" -gt 0 ] || recovery_slot="$n"
-      slot="fix$recovery_slot"
-      knum="$recovery_slot"
-      recover_unpushed=1
-      recover_old_head="$prhead"
-      recover_new_head="$actual"
-      keep=1
+      && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null \
+      && { [ "$limited" -eq 0 ] || [ "$fixslot" -ge 1 ]; }; then
+      closed_owned=1
+      if [ "$limited" -eq 1 ]; then
+        closed_job="$(t get "job.fix$fixslot" 2>/dev/null || true)"
+        closed_rec=""
+        if [ -n "$closed_job" ]; then closed_rec="$(bash "$script_dir/job-record" "$closed_job" 2>/dev/null || true)"; fi
+        closed_head_after=""
+        if [ -n "$closed_rec" ] && [ -f "$closed_rec" ]; then
+          closed_head_after="$(jq -r '.result.changeSet.headAfter // ""' "$closed_rec" 2>/dev/null || true)"
+        fi
+        [ -n "$closed_head_after" ] && [ "$closed_head_after" = "$actual" ] || closed_owned=0
+      fi
+      if [ "$closed_owned" -eq 1 ]; then
+        recovery_slot="$fixslot"
+        [ "$openk" -le 0 ] || recovery_slot="$openk"
+        [ "$recovery_slot" -gt 0 ] || recovery_slot="$n"
+        slot="fix$recovery_slot"
+        knum="$recovery_slot"
+        recover_unpushed=1
+        recover_old_head="$prhead"
+        recover_new_head="$actual"
+        keep=1
+      fi
     fi
+    if [ "$keep" -eq 0 ] && [ "$limited" -eq 1 ]; then round_limit; fi
     if [ "$keep" -eq 0 ]; then
       # A pushed rebase or main merge leaves PR head == worktree HEAD on a
       # clean tree, descended from the state head. Name the supported route;
@@ -309,6 +341,7 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
     fi
   fi
 fi
+if [ "$limited" -eq 1 ] && [ "${recover_unpushed:-0}" -ne 1 ]; then round_limit; fi
 recover_unpushed="${recover_unpushed:-0}"
 if [ "$recover_unpushed" -eq 0 ] && [ -z "$resume" ] && job="$(t get "job.$slot" 2>/dev/null || true)" && [ -n "$job" ]; then emit "RECOVER" 3 "job=$job" "slot=$slot"; fi
 [ -n "$findings" ] || findings="$(t get findings 2>/dev/null)" || { echo "tkt-fix: missing key: findings (no --findings and no state findings)" >&2; exit 2; }
