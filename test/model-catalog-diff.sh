@@ -133,12 +133,14 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     "gemini-image": {"limit": {"context": 100}, "modalities": {"output": ["text", "image"]}, "tool_call": False},
                     "gemini-tools": {"limit": {"context": 100}, "modalities": {"output": ["text"]}, "tool_call": True},
                     "gemini-unclassified": {"limit": {"context": 100}},
+                    "gemini-9-imageable": {"limit": {"context": 100}},
                 })
             elif self.mode == "pricing":
                 models_dev["openrouter"]["models"].update({
                     "router-window": {"cost": {"input": 0.4, "output": 0.5}},
                     "router-mismatch": {"cost": {"input": 0.6, "output": 0.7}},
                     "router-tier": {"cost": {"input": 0.4, "output": 0.5}},
+                    "deepseek/deepseek-v4.1-flash": {"cost": {"input": 0.3, "output": 1.2}},
                     "deepseek/deepseek-v4.1-flash-1017": {"cost": {"input": 0.3, "output": 1.2}},
                     "deepseek-weekend-only": {"cost": {"input": 0.15, "output": 0.6}},
                     "qwen/qwen3.5-9b": {"cost": {"input": 0.049, "output": 0.072}},
@@ -196,6 +198,13 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     {"name": "models/gemini-tools", "supportedGenerationMethods": ["generateContent"], "inputTokenLimit": 200},
                     {"name": "models/gemini-unclassified", "supportedGenerationMethods": ["generateContent"], "inputTokenLimit": 200},
                     {"name": "models/gemini-unlisted", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemini-9-pro-image-preview", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemini-9-flash-tts", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemini-9-transcribe", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/lyria-9", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/nano-banana-9-preview", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemini-nano-banana-9", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemini-9-imageable", "supportedGenerationMethods": ["generateContent"], "inputTokenLimit": 200},
                 ]})
             else:
                 send_json(self, {"models": [{"name": "models/gemini-one", "supportedGenerationMethods": ["generateContent"]}, {"name": "models/gemini-embed", "supportedGenerationMethods": ["embedContent"]}]})
@@ -221,6 +230,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                             {"utc_start": "12:00", "utc_end": "24:00", "prompt": "0.0000004", "completion": "0.0000005"},
                         ],
                     }},
+                    {"id": "deepseek/deepseek-v4.1-flash", "pricing": {"prompt": "0.0000000507", "completion": "0.0000002028"}},
                     {"id": "deepseek/deepseek-v4.1-flash-1017", "pricing": {
                         "prompt": "0.00000015", "completion": "0.0000006",
                         "overrides": [
@@ -402,6 +412,9 @@ try:
     expect("| gemini-tools | mismatch | context | 200 | 100 |" in gemini_filter_report, "text Gemini model with tool calls was not diffed")
     expect("| gemini-unclassified | mismatch | context | 200 | 100 |" in gemini_filter_report, "Gemini model without modality/tool-call fields was not diffed")
     expect("| gemini-unlisted | missing |" in gemini_filter_report, "unlisted Gemini model did not retain its missing row")
+    for identifier in ("gemini-9-pro-image-preview", "gemini-9-flash-tts", "gemini-9-transcribe", "lyria-9", "nano-banana-9-preview", "gemini-nano-banana-9"):
+        expect(f"| {identifier} |" not in gemini_filter_report, f"non-text Gemini model {identifier} produced a row")
+    expect("| gemini-9-imageable | mismatch | context | 200 | 100 |" in gemini_filter_report, "Gemini ID containing a non-text word outside its segment was filtered")
 
     expect("## skipped" in report, "skipped section missing")
     expect(not list(inbox.glob("*.tmp")) and not list(inbox.glob(".model-catalog-*.tmp")), "temporary report file was left behind")
@@ -486,6 +499,7 @@ try:
     expect("| router-window |" not in pricing_report, "matching OpenRouter override price produced a row")
     expect(re.search(r"\| router-mismatch \| mismatch \| input_price \| [^|]+ \| 0\.6 \|", pricing_report), "OpenRouter price mismatch without overrides was not reported")
     expect(re.search(r"\| router-tier \| mismatch \| input_price \| [^|]+ \| 0\.4 \|", pricing_report), "long-context tier price was treated as an alternative price")
+    expect(re.search(r"\| deepseek/deepseek-v4\.1-flash \| mismatch \| input_price \| [^|]+ \| 0\.3 \|", pricing_report), "DeepSeek price mismatch without overrides was suppressed")
     expect("| deepseek/deepseek-v4.1-flash-1017 |" not in pricing_report, "deepseek's real weekday/weekend override prices produced a row")
     expect("| deepseek-weekend-only |" not in pricing_report, "weekend-only override price was not treated as an alternative")
     expect(re.search(r"\| qwen/qwen3\.5-9b \| mismatch \| input_price \| [^|]+ \| 0\.049 \|", pricing_report), "qwen price drift without overrides was suppressed")
