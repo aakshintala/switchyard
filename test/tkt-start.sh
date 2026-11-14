@@ -694,13 +694,18 @@ setup mismatch-rerun TWO FILING
 printf '%s\n' 'core: none' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
 run_start
 want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 mismatch-rerun
-[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 0 ] \
-  || fail "mismatch-rerun: mismatch unexpectedly resumed the preflight job"
+# A mismatch takes one resume asking for per-line tags; still mismatched, it clears and refuses (#1833 amendment 2).
+[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
+  || fail "mismatch-rerun: mismatch was not resumed exactly once"
+grep -qF -- "--resume stub-1 --prompt $RUN/widget-42-preflight-tags-repair.md" "$T/calls.log" \
+  || fail "mismatch-rerun: mismatch resume did not use the tag prompt"
+grep -qF -- '- core: ...' "$RUN/widget-42-preflight-tags-repair.md" \
+  || fail "mismatch-rerun: tag prompt does not ask for per-line tags"
 [ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
   || fail "mismatch-rerun: preflight job slot was not cleared"
 [ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight.prompt)" = "" ] \
   || fail "mismatch-rerun: preflight prompt slot was not cleared"
-[ "$(grep -cF 'tkt-start preflight cleared job=stub-1' "$RUN/widget-42.journal")" -eq 1 ] \
+[ "$(grep -cF 'tkt-start preflight cleared job=stub-resume-1' "$RUN/widget-42.journal")" -eq 1 ] \
   || fail "mismatch-rerun: journal does not name the cleared job exactly once"
 [ "$(printf '%s\n' "$OUT" | sed -n '2p')" = 'tkt-start: rerun tkt-start for a fresh preflight' ] \
   || fail "mismatch-rerun: next step does not immediately ask for a fresh preflight"
@@ -710,6 +715,17 @@ want "PREFLIGHT core=0 nonblocking=1 out=" 0 mismatch-rerun-retry
 [ "$(grep -cF 'TKT tkt-job DONE id=stub-2 log=x' "$T/job-results.log")" -eq 1 ] \
   || fail "mismatch-rerun: did not dispatch a new preflight job"
 if grep -qF 'reused=' "$T/job-results.log"; then fail "mismatch-rerun: reused the mismatched preflight job"; fi
+
+# A mismatch fixed by its one resume goes on as a valid report.
+setup mismatch-fixed TWO FILING
+printf '%s\n' '**Core findings**' '1. the guard reaps early' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
+printf '%s\n' '- core: the guard reaps early' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=1 out=" 1 mismatch-fixed
+[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
+  || fail "mismatch-fixed: mismatch was not resumed exactly once"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "stub-resume-1" ] \
+  || fail "mismatch-fixed: a fixed report must keep its slot"
 
 setup valid-reuse TWO FILING
 printf '1. non-blocking -- valid report\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"

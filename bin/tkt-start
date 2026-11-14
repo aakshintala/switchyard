@@ -597,52 +597,63 @@ parse_preflight_footer
 
 dg+=("sweep=$sweep_out" "out=$out"); report="$(head -n 30 "$out")"
 tkt journal "tkt-start preflight core=$core out=$out"
+# One resume per preflight job, shared by the footer and tag checks: a
+# trailing " *" marks a resume in flight, so a start killed mid-resume can't
+# resume the same job again (#1833). Returns 0 with the resumed report reparsed.
+resume_diag=()
+resume_preflight() {
+  local slug="$1" text="$2" job attempted prompt rc=0 txt jobhead ok=0 new
+  job="$(tkt get job.preflight 2>/dev/null || true)"
+  attempted="$(tkt get preflight.resume_attempted 2>/dev/null || true)"
+  [ -n "$job" ] || return 1
+  case " $attempted " in *" * "*|*" $job "*) return 1 ;; esac
+  prompt="$run/$namebase-preflight-$slug-repair.md"
+  printf '%s\n' "$text" >"$prompt"
+  tkt set preflight.resume_attempted "$job *"
+  tkt journal "tkt-start preflight resume job=$job"
+  txt="$("$tktjob" "$state" --slot preflight --resume "$job" --prompt "$prompt" --out-file "$out" 2>&1)" || rc=$?
+  jobhead="$(grep -m1 '^TKT tkt-job ' <<<"$txt" || head -n 1 <<<"$txt")"
+  if [ "$rc" -eq 0 ]; then ok=1
+  elif [ "$rc" -eq 1 ]; then case "$jobhead" in "TKT tkt-job CONCERNS "*) ok=1 ;; esac
+  fi
+  if [ "$ok" -eq 0 ] || [ ! -f "$out" ]; then
+    resume_diag=("tkt-start: preflight $slug resume failed (rc=$rc): $jobhead")
+    tkt journal "tkt-start preflight resume failed job=$job rc=$rc head=$jobhead"
+    return 1
+  fi
+  new="$(tkt get job.preflight 2>/dev/null || true)"
+  attempted="$job"
+  [ -z "$new" ] || [ "$new" = "$job" ] || attempted="$attempted $new"
+  tkt set preflight.resume_attempted "$attempted"
+  parse_preflight_footer
+  report="$(head -n 30 "$out")"
+  tkt journal "tkt-start preflight resumed job=${new:-$job} core=$core out=$out"
+}
+refuse_unknown() {
+  clear_preflight_slot
+  emit "PREFLIGHT core=unknown out=$out" 1 "tkt-start: rerun tkt-start for a fresh preflight" "${dg[@]}" ${resume_diag[@]+"${resume_diag[@]}"} "tkt-start: preflight report has no 'Core items:' line" "$report"
+}
 if [ "$core" = unknown ]; then
-  preflight_job_id="$(tkt get job.preflight 2>/dev/null || true)"
-  resume_attempted="$(tkt get preflight.resume_attempted 2>/dev/null || true)"
-  resume_already_attempted=0
-  case " $resume_attempted " in *" * "*|*" $preflight_job_id "*) resume_already_attempted=1 ;; esac
-  if [ -n "$preflight_job_id" ] && [ "$resume_already_attempted" -eq 0 ]; then
-    repair_prompt="$run/$namebase-preflight-footer-repair.md"
-    printf '%s\n' 'Append the required footer lines exactly as skills/planning/briefs/preflight.md asks: Core items: <n> and Non-blocking items: <n>, using decimal counts. Do not change the findings.' >"$repair_prompt"
-    tkt set preflight.resume_attempted "$preflight_job_id *"
-    tkt journal "tkt-start preflight resume job=$preflight_job_id"
-    resume_rc=0; resume_txt="$("$tktjob" "$state" --slot preflight --resume "$preflight_job_id" --prompt "$repair_prompt" --out-file "$out" 2>&1)" || resume_rc=$?
-    resume_ok=0
-    resume_head="$(grep -m1 '^TKT tkt-job ' <<<"$resume_txt" || head -n 1 <<<"$resume_txt")"
-    if [ "$resume_rc" -eq 0 ]; then
-      resume_ok=1
-    elif [ "$resume_rc" -eq 1 ] && [ -f "$out" ]; then
-      case "$resume_head" in "TKT tkt-job CONCERNS "*) resume_ok=1 ;; esac
-    fi
-    if [ "$resume_ok" -eq 1 ] && [ -f "$out" ]; then
-      resumed_job_id="$(tkt get job.preflight 2>/dev/null || true)"
-      resume_attempted="$preflight_job_id"
-      if [ -n "$resumed_job_id" ] && [ "$resumed_job_id" != "$preflight_job_id" ]; then
-        resume_attempted="$resume_attempted $resumed_job_id"
-      fi
-      tkt set preflight.resume_attempted "$resume_attempted"
-      parse_preflight_footer
-      report="$(head -n 30 "$out")"
-      tkt journal "tkt-start preflight resumed job=${resumed_job_id:-$preflight_job_id} core=$core out=$out"
-    else
-      core=unknown
-      resume_diag=("tkt-start: preflight footer resume failed (rc=$resume_rc): $resume_head")
-      tkt journal "tkt-start preflight resume failed job=$preflight_job_id rc=$resume_rc head=$resume_head"
-    fi
-  fi
-  if [ "$core" = unknown ]; then
-    clear_preflight_slot
-    emit "PREFLIGHT core=unknown out=$out" 1 "tkt-start: rerun tkt-start for a fresh preflight" "${dg[@]}" ${resume_diag[@]+"${resume_diag[@]}"} "tkt-start: preflight report has no 'Core items:' line" "$report"
-  fi
+  resume_preflight footer 'Append the required footer lines exactly as skills/planning/briefs/preflight.md asks: Core items: <n> and Non-blocking items: <n>, using decimal counts. Do not change the findings.' || core=unknown
+  [ "$core" != unknown ] || refuse_unknown
 fi
 tail='[[:space:]`*:]*((none([[:space:]]+found)?|n/a|nothing)([.;!][[:space:][:print:]]*)?)?[[:space:][:punct:]]*$'
 count_items() { grep -E "($1)" "$out" | grep -cviE "(${2:-$1})$tail" || true; }
-tagged_core="$(count_items '^([0-9]+\.|-|\*)[[:space:]]+`?\**core([^[:alnum:]_]|$)|^[[:space:]]*`?\**core[`*]*(:| --)|^([0-9]+\.|-) .*(`core`|\*\*core\*\*)' '^(([0-9]+\.|-|\*)[[:space:]]+)?[[:space:]]*`?\**core')"
-tagged_nonblocking="$(count_items '^([0-9]+\.|-|\*)[[:space:]]+`?\**non-blocking([^[:alnum:]_]|$)|^[[:space:]]*`?\**non-blocking[`*]*(:| --)')"
+count_tags() {
+  tagged_core="$(count_items '^([0-9]+\.|-|\*)[[:space:]]+`?\**core([^[:alnum:]_]|$)|^[[:space:]]*`?\**core[`*]*(:| --)|^([0-9]+\.|-) .*(`core`|\*\*core\*\*)' '^(([0-9]+\.|-|\*)[[:space:]]+)?[[:space:]]*`?\**core')"
+  tagged_nonblocking="$(count_items '^([0-9]+\.|-|\*)[[:space:]]+`?\**non-blocking([^[:alnum:]_]|$)|^[[:space:]]*`?\**non-blocking[`*]*(:| --)')"
+}
+count_tags
 if [ "$core" -gt "$tagged_core" ]; then
   tkt journal "tkt-start preflight core=mismatch footer=$core tagged=$tagged_core out=$out"
+  if resume_preflight tags 'Start each finding line with its tag, as skills/planning/briefs/preflight.md asks: "- core: ..." or "- non-blocking: ...", and make the Core items: and Non-blocking items: counts equal the tagged lines. Do not change the findings.'; then
+    [ "$core" != unknown ] || refuse_unknown
+    count_tags
+    [ "$core" -le "$tagged_core" ] || tkt journal "tkt-start preflight core=mismatch footer=$core tagged=$tagged_core out=$out"
+  fi
+fi
+if [ "$core" -gt "$tagged_core" ]; then
   clear_preflight_slot
-  emit "PREFLIGHT core=mismatch footer=$core tagged=$tagged_core out=$out" 1 "tkt-start: rerun tkt-start for a fresh preflight" "${dg[@]}" "tkt-start: preflight footer says Core items: $core but $tagged_core core lines are tagged ($tagged_nonblocking non-blocking)" "$report"
+  emit "PREFLIGHT core=mismatch footer=$core tagged=$tagged_core out=$out" 1 "tkt-start: rerun tkt-start for a fresh preflight" "${dg[@]}" ${resume_diag[@]+"${resume_diag[@]}"} "tkt-start: preflight footer says Core items: $core but $tagged_core core lines are tagged ($tagged_nonblocking non-blocking)" "$report"
 fi
 [ "$core" -eq 0 ] && emit "PREFLIGHT core=0 nonblocking=$nb out=$out" 0 "${dg[@]}" "$report" || emit "PREFLIGHT core=$core out=$out" 1 "${dg[@]}" "$report"
