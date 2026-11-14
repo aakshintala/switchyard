@@ -2794,6 +2794,16 @@ ship --known-flake 166 --by flywheel --gate "$REGISTRY_GATE" --keep-branch
 expect 0 "known-flake own-crate prefix"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "own-crate prefix merged output: [$OUT]"
 
+# A hyphenated package matches its Rust path form (my-crate -> my_crate).
+prepare_known_flake
+jq -nc '{state:"OPEN",body:"known flake: my_crate::registry::tests::x",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+jq -nc --arg manifest "$(cd "$WT" && pwd -P)/crates/main/Cargo.toml" \
+  '{packages:[{name:"my-crate",manifest_path:$manifest,targets:[]}]}' >"$ST/cargo-metadata.json"
+HYPHEN_GATE="printf '%s\\n' 'FAIL [ 0.001s] my-crate::integration_tests registry::tests::x' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
+ship --known-flake 166 --by flywheel --gate "$HYPHEN_GATE" --keep-branch
+expect 0 "known-flake hyphenated own-crate prefix"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "hyphenated crate prefix merged output: [$OUT]"
+
 # A different crate's prefix names a different test.
 prepare_known_flake
 jq -nc '{state:"OPEN",body:"known flake: jobs::registry::tests::x",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
