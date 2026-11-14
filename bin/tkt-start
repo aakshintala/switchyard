@@ -27,7 +27,7 @@ usage() {
 run=""; repo=""; issue=""; spec=""; branch=""; worktree=""; workflow_doc=""; closing=""
 env=""; extra=""; merge_gate=""; merge_check=""; mutant_job=""; files=""; no_preflight=0; part=""; part_given=0; split=""; split_given=0
 body_has=(); models=()
-model_roles=(lane fix map verifier verify review overbuild preflight)
+model_roles=(lane fix map verifier verify review overbuild preflight planner)
 body_ends=""; body_ends_given=0; spec_issue=""; spec_issue_given=0
 takeover_ref=""; takeover_given=0; takeover_gate=""; takeover_gate_given=0
 while [ $# -gt 0 ]; do
@@ -84,6 +84,9 @@ if [ "$part_given" -eq 1 ]; then
   part="$((10#$part))"
   if [ "$part" -lt 2 ]; then echo "tkt-start: --part needs an integer of 2 or more: $part" >&2; exit 2; fi
 fi
+if [ "$part_given" -eq 1 ] && printf '%s\n' "$closing" | grep -qiE '^[[:space:]]*(resolves|closes|fixes)([^[:alpha:]]|$)'; then
+  echo "tkt-start: warning: --part $part uses a closing keyword in --closing; use 'Part of #<n>' for a part that isn't the last" >&2
+fi
 if [ "$spec_issue_given" -eq 1 ]; then
   if [[ ! $spec_issue =~ ^0*[1-9][0-9]*$ ]]; then echo "tkt-start: --spec-issue needs a positive integer: $spec_issue" >&2; exit 2; fi
 fi
@@ -97,6 +100,19 @@ for m in ${models[@]+"${models[@]}"}; do
     known_roles="$(printf '%s, ' "${model_roles[@]}")"; known_roles="${known_roles%, }"
     echo "tkt-start: unknown --model role '$model_role'; known roles: $known_roles" >&2
     exit 2
+  fi
+  model_id="${m#*=}"
+  if [[ "$model_id" == openai/* ]] && ! [[ "$model_id" =~ :[^/]+$ ]]; then
+    echo "tkt-start: --model role '$model_role' requires an openai effort suffix (e.g. :medium)" >&2
+    exit 2
+  fi
+done
+planner_flag_seen=0; planner_flag_available=0
+for m in ${models[@]+"${models[@]}"}; do
+  if [ "${m%%=*}" = planner ]; then
+    planner_flag_seen=1
+    model_id="${m#*=}"
+    [ -n "${model_id//[[:space:]]/}" ] && planner_flag_available=1
   fi
 done
 case "$merge_gate" in ""|ci|gate) ;; *) echo "tkt-start: --merge-gate needs ci or gate: $merge_gate" >&2; exit 2 ;; esac
@@ -134,7 +150,29 @@ if [ ! -r "$namebase_lib" ]; then echo "tkt-start: cannot read shared lib: $name
 # shellcheck disable=SC1090
 . "$namebase_lib"
 bin_dir="${TKT_BIN:-$HOME/.agents/bin}"; sweep="$bin_dir/plan-sweep"; tktjob="$bin_dir/tkt-job"
-set_namebase "$repo" "$issue"; state="$run/$namebase.state"; mkdir -p "$run"
+set_namebase "$repo" "$issue"; state="$run/$namebase.state"
+state_has_planner_model() {
+  local state_line model_id
+  [ -f "$state" ] || return 1
+  while IFS= read -r state_line || [ -n "$state_line" ]; do
+    case "$state_line" in
+      model.planner=*)
+        model_id="${state_line#*=}"
+        if [ -n "${model_id//[[:space:]]/}" ]; then return 0; fi
+        ;;
+    esac
+  done <"$state"
+  return 1
+}
+if [ "$no_preflight" -eq 0 ] && [ "$takeover_given" -eq 0 ]; then
+  planner_available="$planner_flag_available"
+  if [ "$planner_flag_seen" -eq 0 ] && state_has_planner_model; then planner_available=1; fi
+  if [ "$planner_available" -eq 0 ]; then
+    echo "tkt-start: missing required role: model.planner" >&2
+    exit 2
+  fi
+fi
+mkdir -p "$run"
 tkt() { "$tkt_state" "$state" "$@"; }
 part_notes=()
 emit() {
@@ -307,6 +345,22 @@ if [ "$part_given" -eq 1 ]; then
               ;;
           esac
         done <"$state"
+        if [ "$no_preflight" -eq 0 ] && [ "$takeover_given" -eq 0 ] \
+          && [ "$planner_flag_available" -eq 0 ]; then
+          carried_planner=0
+          for model_line in ${carried_models[@]+"${carried_models[@]}"}; do
+            case "$model_line" in
+              model.planner=*)
+                carried_planner_id="${model_line#*=}"
+                [ -n "${carried_planner_id//[[:space:]]/}" ] && carried_planner=1
+                ;;
+            esac
+          done
+          if [ "$carried_planner" -eq 0 ]; then
+            echo "tkt-start: missing required role: model.planner" >&2
+            exit 2
+          fi
+        fi
         if ! mv "$state" "$archive"; then
           deny "PRECONDITION part=$part archive=$archive" 2 "tkt-start: cannot archive state: $state -> $archive"
         fi
