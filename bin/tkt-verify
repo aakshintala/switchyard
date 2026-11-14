@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # tkt-verify: review an already-pushed head without starting a fix job.
-# Usage: tkt-verify <state> --findings <file> [--verify-model <id>]
+# Usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-verify <state> --findings <file> [--verify-model <id>]" >&2
+  echo "usage: tkt-verify <state> --findings <file> [--verify-model <id>] [--ruling <comment id>]" >&2
   exit 2
 }
 
 [ $# -ge 3 ] || usage
 state="$1"; shift
-findings=""; verifymodel=""
+findings=""; verifymodel=""; ruling_id=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --findings) [ $# -ge 2 ] && [ -n "$2" ] || usage; findings="$2"; shift 2 ;;
     --verify-model) [ $# -ge 2 ] && [ -n "$2" ] || usage; verifymodel="$2"; shift 2 ;;
+    --ruling) [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$ruling_id" ] || usage; ruling_id="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -37,6 +38,10 @@ history_lib="$script_dir/lib/findings-history.sh"
 if [ ! -r "$history_lib" ]; then echo "tkt-verify: cannot read shared lib: $history_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$history_lib"
+ruling_comment_lib="$script_dir/lib/ruling-comment.sh"
+if [ ! -r "$ruling_comment_lib" ]; then echo "tkt-verify: cannot read shared lib: $ruling_comment_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$ruling_comment_lib"
 reviewpr="$bin_dir/review-pr"
 t() { "$tkt_state" "$state" "$@"; }
 
@@ -45,6 +50,10 @@ emit() {
   shift 2
   printf 'TKT tkt-verify %s\n' "$message"
   [ "$#" -eq 0 ] || printf '%s\n' "$@"
+  if [ -n "${grant_url:-}" ]; then
+    printf 'Recorded ruling: %s\n' "$grant_url"
+    printf 'add this line to the PR body.\n'
+  fi
   exit "$status"
 }
 
@@ -84,8 +93,26 @@ round="$(t get round 2>/dev/null || printf '0')"
 case "$round" in ''|*[!0-9]*) round=0 ;; esac
 has_p_lines=0
 if grep -qE '^P[123] ' "$findings"; then has_p_lines=1; fi
-if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ]; then
-  emit "ROUND-LIMIT" 1 "round=$round; send the open findings to triage"
+issue="$(t get issue 2>/dev/null || true)"
+mkdir -p "$run"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-verify.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+round_grant_limited=0
+if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ]; then round_grant_limited=1; fi
+grant_comment_count=0
+grant_accepted=0
+grant_url=""
+if [ -n "$ruling_id" ]; then
+  grant_comment_count=1
+  ruling_json="$tmp/ruling-comment.json"
+  if ! check_round_grant "$ruling_json" "$ruling_id" "$round" t; then
+    emit "RULING-REFUSED reason=$ruling_comment_failure comment=$ruling_id" 2
+  fi
+  grant_accepted=1
+  record_round_grant "$ruling_id" "$grant_url" "$grant_round" t
+fi
+if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ] && [ "$grant_accepted" -ne 1 ]; then
+  emit "ROUND-LIMIT" 1 "round=$round; otherwise post an owner ruling with a column-0 grants: round $((round + 1)) line and retry with --ruling <comment id>; send the open findings to triage"
 fi
 fixslot="$(t get fixslot 2>/dev/null || printf '0')"
 case "$fixslot" in ''|*[!0-9]*) fixslot=0 ;; esac
@@ -96,18 +123,16 @@ if [ "$fixslot" -gt 0 ] \
 elif [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot + 1)); fi
 
 mkdir -p "$run"
-issue="$(t get issue 2>/dev/null || true)"
 if [ -n "$issue" ]; then set_namebase "$repo" "$issue"; else namebase="${repo##*/}"; fi
 part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
 history_file="$(history_path "$knum")"
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-verify.XXXXXX")"
-trap 'rm -rf "$tmp"' EXIT
 vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verifymodel" --verify "$findings" --since "$reviewed")
 
 advance_round() {
   if [ "$has_p_lines" -eq 1 ]; then
     round=$((round + 1))
     t set round "$round"
+    t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
 }
 
@@ -140,6 +165,8 @@ case "$fixline" in
     write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
     t set findings "$verify_output"
     advance_round
+    t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    t journal "tkt-verify FIX-INCOMPLETE"
     open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
     emit "FIX-INCOMPLETE" 1 "$open"
     ;;
@@ -165,6 +192,7 @@ case "$fixline" in
     advance_round
     t set reviewed "$head"
     t set head "$head"
+    t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
     t journal "tkt-verify FIX-OK reviewed=$head"
     emit "FIX-OK reviewed=$head" 0

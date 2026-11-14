@@ -509,6 +509,8 @@ grep -q "prompt=.*-map-" "$T/calls.log" && fail "happy: no map job without mutan
 [ -e "$CDIR/run/switchyard-528-mutants-${H:0:12}.txt" ] && fail "happy: no mutants file without mutant_job"
 expect_state reviewed "$H" happy
 expect_state review_status done happy
+[ -n "$(bash "$TKT_STATE" "$S" get verdict_at 2>/dev/null || true)" ] || fail "happy: review collection records verdict_at"
+grep -Eq '^verdict_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$S" || fail "happy: verdict_at is not a UTC timestamp"
 [ -f "$(bash "$TKT_STATE" "$S" get findings)" ] || fail "happy: findings file exists"
 expect_state round 0 happy
 [ "$(grep -F -c "claim --lane fiber-528 --diff $WT" "$T/file-claim.log")" -eq 1 ] || fail "happy: the lane push records its hunk claim exactly once"

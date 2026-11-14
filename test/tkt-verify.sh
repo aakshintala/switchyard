@@ -30,6 +30,15 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   jq -cn --arg head "$head" '{headRefOid:$head}'
   exit $?
 fi
+if [ "${1:-}" = api ]; then
+  case "${2:-}" in
+    repos/switchyard/issues/comments/*)
+      comment_id="${2##*/}"
+      [ -r "$T/comment-$comment_id.json" ] || exit 1
+      cat "$T/comment-$comment_id.json"
+      exit 0;;
+  esac
+fi
 exit 2
 EOF
 chmod +x "$T/bin/gh"
@@ -102,6 +111,7 @@ setup_case() {
     printf 'reviewed=%s\n' "$OLD"
     printf 'head=%s\n' "$HEAD"
     printf 'round=0\n'
+    printf 'verdict_at=%s\n' '2026-11-13T00:00:00Z'
     printf 'fixopen=0\n'
     printf 'model.verify=%s\n' state-verify-model
   } >"$S"
@@ -115,6 +125,12 @@ set_state() { bash "$TKT_STATE" "$S" set "$1" "$2" >/dev/null; }
 run_verify() {
   local rc=0
   OUT="$(bash "$TKT" "$S" --findings "$F" 2>"$T/stderr")" || rc=$?
+  RC="$rc"
+}
+
+run_verify_ruling() {
+  local id="$1" rc=0
+  OUT="$(bash "$TKT" "$S" --findings "$F" --ruling "$id" 2>"$T/stderr")" || rc=$?
   RC="$rc"
 }
 
@@ -133,8 +149,33 @@ assert_no_review() {
 }
 
 assert_no_slot() {
-  ! grep -q '^fix_round\.' "$S" || fail "$1 wrote fix-round state before refusing: $(grep '^fix_round\.' "$S")"
+  ! grep -q '^fix_round[.]' "$S" || fail "$1 wrote fix-round state before refusing: $(grep '^fix_round[.]' "$S")"
   ! grep -q '^fixslot=' "$S" || fail "$1 wrote fixslot before refusing: $(grep '^fixslot=' "$S")"
+}
+
+write_ruling_comment() {
+  local id="$1" body="$2" author_association="${3:-OWNER}" issue_number="${4:-1756}" created_at="${5:-2026-11-14T00:00:00Z}"
+  jq -n --arg body "$body" --arg author_association "$author_association" \
+    --arg issue_url "https://api.github.com/repos/switchyard/issues/$issue_number" \
+    --arg html_url "https://github.com/switchyard/switchyard/issues/$issue_number#issuecomment-$id" \
+    --arg created_at "$created_at" \
+    '{body:$body, author_association:$author_association, issue_url:$issue_url, html_url:$html_url, created_at:$created_at}' \
+    >"$T/comment-$id.json"
+}
+
+assert_no_grant() {
+  ! grep -q '^grant[.]' "$S" || fail "$1 wrote grant state: $(grep '^grant[.]' "$S")"
+}
+
+expect_grant_refused() {
+  local name="$1" reason="$2" id="$3" initial_round="${4:-2}"
+  run_verify_ruling "$id"
+  [ "$RC" = 2 ] || fail "$name exited $RC, want 2: $OUT $(cat "$T/stderr")"
+  grep -Fq "TKT tkt-verify RULING-REFUSED reason=$reason comment=$id" <<<"$OUT" || fail "$name refusal missing: $OUT"
+  assert_no_review "$name"
+  assert_no_slot "$name"
+  assert_no_grant "$name"
+  [ "$(read_state round)" = "$initial_round" ] || fail "$name changed round"
 }
 
 # FIX-OK records the exact reviewed head and the command passes the findings delta.
@@ -146,6 +187,8 @@ grep -Fq "reviewed=$HEAD" <<<"$OUT" || fail "FIX-OK omitted reviewed SHA: $OUT"
 [ "$(read_state reviewed)" = "$HEAD" ] || fail "FIX-OK did not advance reviewed to the exact head"
 [ "$(read_state head)" = "$HEAD" ] || fail "FIX-OK did not advance head to the exact head"
 [ "$(read_state round)" = 1 ] || fail "FIX-OK did not count the P-line findings round"
+[ "$(read_state verdict_at)" != '2026-11-13T00:00:00Z' ] || fail "FIX-OK did not advance verdict_at"
+grep -Eq '^verdict_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$S" || fail "FIX-OK verdict_at is not UTC"
 [ "$(read_state fix_round.1.start)" = "$OLD" ] || fail "FIX-OK did not record the slot start"
 [ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "FIX-OK did not record the slot head"
 [ "$(read_state fix_round.1.findings)" = "$F" ] || fail "FIX-OK did not record the input findings file"
@@ -171,6 +214,8 @@ assert_first_verdict FIX-INCOMPLETE 'FIX-INCOMPLETE'
 [ "$(read_state findings)" = "$RUN/switchyard-1756-tkt-verify-${HEAD:0:12}.md" ] || fail "FIX-INCOMPLETE did not store its verify output path"
 grep -Fq 'P1 src/main.sh:1 — finding remains open' "$(read_state findings)" || fail "FIX-INCOMPLETE output file omitted open findings"
 [ "$(read_state round)" = 1 ] || fail "FIX-INCOMPLETE did not count the P-line findings round"
+[ "$(read_state verdict_at)" != '2026-11-13T00:00:00Z' ] || fail "FIX-INCOMPLETE did not advance verdict_at"
+grep -Fq 'tkt-verify FIX-INCOMPLETE' "${S%.state}.journal" || fail "FIX-INCOMPLETE was not journalled"
 [ "$(read_state fix_round.1.start)" = "$OLD" ] || fail "FIX-INCOMPLETE did not record the slot start"
 [ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "FIX-INCOMPLETE did not record the slot head"
 [ "$(read_state fix_round.1.findings)" = "$F" ] || fail "FIX-INCOMPLETE did not record the input findings file"
@@ -319,6 +364,124 @@ run_verify
 assert_first_verdict ROUND-LIMIT 'ROUND-LIMIT'
 assert_no_review ROUND-LIMIT
 assert_no_slot ROUND-LIMIT
+assert_no_grant ROUND-LIMIT
+
+# A grant runs one P-line review past the cap and becomes a body requirement.
+if [ -z "${CASE:-}" ] || [ "$CASE" = grant-one-round ]; then
+setup_case grant-one-round
+set_state round 2
+write_ruling_comment 900 $'context\ngrants: round 3'
+printf 'incomplete\n' >"$T/vermode"
+run_verify_ruling 900
+[ "$RC" = 1 ] || fail "grant-one-round exited $RC, want FIX-INCOMPLETE: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-INCOMPLETE 'granted FIX-INCOMPLETE'
+[ "$(read_state round)" = 3 ] || fail "grant did not count round 3"
+[ "$(read_state grant.3)" = '900 https://github.com/switchyard/switchyard/issues/1756#issuecomment-900' ] || fail "grant.3 was not recorded"
+grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/1756#issuecomment-900 grants round 3' "${S%.state}.journal" || fail "grant journal omitted URL and round"
+grep -Fq 'body_has=Recorded ruling: https://github.com/switchyard/switchyard/issues/1756#issuecomment-900' "$S" || fail "grant body requirement was not recorded"
+grep -Fq 'Recorded ruling: https://github.com/switchyard/switchyard/issues/1756#issuecomment-900' <<<"$OUT" || fail "grant output omitted PR body line"
+grep -Fq 'add this line to the PR body' <<<"$OUT" || fail "grant output omitted body instruction"
+: >"$T/calls.log"
+run_verify_ruling 900
+[ "$RC" = 2 ] || fail "reuse exited $RC, want 2: $OUT"
+grep -Fq 'RULING-REFUSED reason=reused comment=900' <<<"$OUT" || fail "reuse was not refused as reused: $OUT"
+assert_no_review reuse
+: >"$T/calls.log"
+run_verify
+[ "$RC" = 1 ] || fail "next round without a grant exited $RC, want ROUND-LIMIT: $OUT"
+assert_first_verdict ROUND-LIMIT 'next round without grant'
+grep -Fq 'round=3' <<<"$OUT" || fail "next round hint omitted the current round: $OUT"
+assert_no_review 'next round without grant'
+fi
+
+# VERIFY-FAIL leaves the counted slot and grant available for a retry.
+if [ -z "${CASE:-}" ] || [ "$CASE" = grant-retry ]; then
+setup_case grant-retry
+set_state round 2
+write_ruling_comment 901 'grants: round 3'
+printf 'fail\n' >"$T/vermode"
+run_verify_ruling 901
+[ "$RC" = 1 ] || fail "grant retry first run exited $RC, want VERIFY-FAIL: $OUT"
+assert_first_verdict VERIFY-FAIL 'grant retry first run'
+[ "$(read_state round)" = 2 ] || fail "VERIFY-FAIL counted the granted round"
+[ "$(read_state grant.3)" != '' ] || fail "VERIFY-FAIL lost grant.3"
+printf 'incomplete\n' >"$T/vermode"
+run_verify_ruling 901
+[ "$RC" = 1 ] || fail "grant retry second run exited $RC: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'grant retry second run'
+[ "$(read_state round)" = 3 ] || fail "grant retry did not count round 3"
+[ "$(grep -c '^body_has=Recorded ruling:' "$S")" = 1 ] || fail "grant retry repeated the body requirement"
+fi
+
+# The shared grant refusals do not reserve a round or dispatch a review.
+if [ -z "${CASE:-}" ] || [ "$CASE" = grant-refusals ]; then
+setup_case grant-stale
+set_state round 2
+write_ruling_comment 910 'grants: round 3' OWNER 1756 '2026-11-12T00:00:00Z'
+expect_grant_refused stale stale 910
+
+setup_case grant-author
+set_state round 2
+write_ruling_comment 911 'grants: round 3' NONE
+expect_grant_refused author author 911
+
+setup_case grant-issue
+set_state round 2
+write_ruling_comment 912 'grants: round 3' OWNER 18
+expect_grant_refused issue issue 912
+
+setup_case grant-bad-form
+set_state round 2
+write_ruling_comment 913 'grants: round 2'
+expect_grant_refused bad-grant bad-grant 913
+
+setup_case grant-not-limited
+set_state round 1
+write_ruling_comment 914 'grants: round 2'
+expect_grant_refused not-limited not-limited 914 1
+
+setup_case grant-multiple-lines
+set_state round 2
+write_ruling_comment 915 $'grants: round 3\ngrants: round 3'
+expect_grant_refused multiple-lines bad-grant 915
+fi
+
+# A grant can be attached to the PR, and CRLF line endings are accepted.
+if [ -z "${CASE:-}" ] || [ "$CASE" = grant-on-pr ]; then
+setup_case grant-on-pr
+set_state round 2
+write_ruling_comment 916 $'grants: round 3\r' OWNER 17
+printf 'incomplete\n' >"$T/vermode"
+run_verify_ruling 916
+[ "$RC" = 1 ] || fail "PR grant exited $RC: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-INCOMPLETE 'PR grant'
+[ "$(read_state round)" = 3 ] || fail "PR grant did not count round 3"
+
+setup_case grant-no-state-issue
+set_state round 2
+grep -v '^issue=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+write_ruling_comment 919 'grants: round 3' OWNER 17
+printf 'incomplete\n' >"$T/vermode"
+run_verify_ruling 919
+[ "$RC" = 1 ] || fail "PR grant without state issue exited $RC: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-INCOMPLETE 'PR grant without state issue'
+[ "$(read_state round)" = 3 ] || fail "PR grant without state issue did not count round 3"
+fi
+
+# Legacy state falls back to its latest journaled review verdict.
+if [ -z "${CASE:-}" ] || [ "$CASE" = grant-legacy-fallback ]; then
+setup_case grant-legacy-fallback
+set_state round 2
+grep -v '^verdict_at=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+printf '%s tkt-fix FIX-INCOMPLETE round=2\n' '2026-11-13T00:00:00Z' >"${S%.state}.journal"
+write_ruling_comment 917 'grants: round 3' OWNER 1756 '2026-11-12T23:59:59Z'
+expect_grant_refused legacy-stale stale 917
+write_ruling_comment 918 'grants: round 3' OWNER 1756 '2026-11-13T00:00:01Z'
+printf 'incomplete\n' >"$T/vermode"
+run_verify_ruling 918
+[ "$RC" = 1 ] || fail "legacy fresh grant exited $RC: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-INCOMPLETE 'legacy fresh grant'
+fi
 
 # A merge-only note does not count as another round even at round 2.
 setup_case note-only

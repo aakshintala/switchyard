@@ -291,6 +291,7 @@ EOF
     printf 'reviewed=%s\n' "$OLD"
     printf 'head=%s\n' "$OLD"
     printf 'round=%s\n' 0
+    printf 'verdict_at=%s\n' '2026-11-13T00:00:00Z'
     printf 'model.fix=%s\n' fix-model
     printf 'model.verify=%s\n' verify-model
   } >"$S"
@@ -351,13 +352,14 @@ write_job_record() {
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
 
 write_ruling_comment() {
-  local id="$1" body="$2" ruling_issue="${3:-$(bash "$TKT_STATE" "$S" get issue)}" author_association="${4:-OWNER}"
+  local id="$1" body="$2" ruling_issue="${3:-$(bash "$TKT_STATE" "$S" get issue)}" author_association="${4:-OWNER}" created_at="${5:-2026-11-14T00:00:00Z}"
   local ruling_repo
   ruling_repo="$(bash "$TKT_STATE" "$S" get repo)"
   jq -n --arg body "$body" --arg author_association "$author_association" \
     --arg issue_url "https://api.github.com/repos/$ruling_repo/issues/$ruling_issue" \
     --arg html_url "https://github.com/switchyard/switchyard/issues/$ruling_issue#issuecomment-$id" \
-    '{body:$body, author_association:$author_association, issue_url:$issue_url, html_url:$html_url, created_at:"2026-11-14T00:00:00Z"}' \
+    --arg created_at "$created_at" \
+    '{body:$body, author_association:$author_association, issue_url:$issue_url, html_url:$html_url, created_at:$created_at}' \
     >"$T/comment-$id.json"
 }
 
@@ -368,6 +370,16 @@ expect_ruling_refused() {
   grep -Fq "TKT tkt-fix RULING-REFUSED reason=$reason comment=$id" <<<"$out" || fail "$name refusal is missing: $out"
   ! grep -q '^job|' "$T/calls.log" || fail "$name dispatched a fix job: $(cat "$T/calls.log")"
   [ -z "$(bash "$TKT_STATE" "$S" get fix_round.1.start 2>/dev/null || true)" ] || fail "$name wrote fix_round.1.start"
+}
+
+expect_fix_grant_refused() {
+  local name="$1" reason="$2" id="$3" initial_round="${4:-2}" run_rc=0 out
+  out="$(bash "$TKT" "$S" --verify --ruling "$id" 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "$name exited $run_rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq "TKT tkt-fix RULING-REFUSED reason=$reason comment=$id" <<<"$out" || fail "$name refusal is missing: $out"
+  ! grep -q '^job|' "$T/calls.log" || fail "$name dispatched a fix job: $(cat "$T/calls.log")"
+  ! grep -q '^grant[.]' "$S" || fail "$name wrote grant state: $(grep '^grant[.]' "$S")"
+  [ "$(bash "$TKT_STATE" "$S" get round)" = "$initial_round" ] || fail "$name changed round"
 }
 
 # A ruling closes only the named finding, and is passed as recorded context.
@@ -468,6 +480,14 @@ write_ruling_comment 99 'The issue needs more evidence.'
 expect_ruling_refused ruling-no-refutes no-refutes 99
 fi
 
+if want ruling-no-refutes-at-limit; then
+setup_case ruling-no-refutes-at-limit
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 99 'The issue needs more evidence.'
+expect_ruling_refused ruling-no-refutes-at-limit no-refutes 99
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "ruling-no-refutes-at-limit changed the round"
+fi
+
 if want ruling-other-issue; then
 setup_case ruling-other-issue
 issue="$(bash "$TKT_STATE" "$S" get issue)"
@@ -488,10 +508,10 @@ fi
 
 if want ruling-needs-verify; then
 setup_case ruling-needs-verify
+write_ruling_comment 99 'refutes: P1 base.txt:1'
 run_rc=0; out="$(bash "$TKT" "$S" --no-verify --ruling 99 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = 2 ] || fail "ruling-needs-verify exited $run_rc, want 2: $out $(cat "$T/stderr")"
-grep -Fq 'usage: tkt-fix' "$T/stderr" || fail "ruling-needs-verify did not print usage: $(cat "$T/stderr")"
-! grep -q 'RULING-REFUSED' <<<"$out$(cat "$T/stderr")" || fail "ruling-needs-verify produced a ruling refusal"
+grep -Fq 'TKT tkt-fix RULING-REFUSED reason=refutes-need-verify comment=99' <<<"$out" || fail "ruling-needs-verify did not refuse refutes without verification: $out"
 ! grep -q '^job|' "$T/calls.log" || fail "ruling-needs-verify dispatched a fix job"
 fi
 
@@ -978,6 +998,7 @@ expect_slot fix1
 grep -q "gh-ci|" "$T/calls.log" && fail "gh-ci wait ran on a pushed head"
 [ "$(bash "$TKT_STATE" "$S" get reviewed)" = "$NEW" ] || fail "reviewed not set"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "round not 1"
+grep -Eq '^verdict_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$S" || fail "FIX-OK did not write verdict_at"
 fr="$CDIR/run/switchyard-529-findings-r1.md"
 [ -f "$fr" ] || fail "findings-r1.md missing"
 grep -q "no open findings" "$fr" || fail "findings-r1.md should hold the no-findings line"
@@ -1282,6 +1303,7 @@ rc=$?; [ "$rc" = "1" ] || fail "R7 exited $rc, want 1"
 head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=3" || fail "R7 bad verdict: $(head -n 1 <<<"$out")"
 [ "$(bash "$TKT_STATE" "$S" get head)" = "$OLD" ] || fail "R7 state head changed"
 [ "$(bash "$TKT_STATE" "$S" get round)" = "3" ] || fail "R7 round changed"
+! grep -q '^grant[.]' "$S" || fail "R7 wrote a grant despite the unchanged round limit"
 grep -q "job|" "$T/calls.log" && fail "R7 dispatched a fix job"
 fi
 
@@ -2974,6 +2996,158 @@ run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = "3" ] || fail "K7 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix DRIFT' || fail "K7 bad verdict: $(head -n 1 <<<"$out")"
 [ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "K7 pushed"
+fi
+
+# Round grants buy one counted fix round, and retries reuse the same slot token.
+if want roundgrant-one; then
+setup_case roundgrant-one
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 920 'grants: round 3'
+out="$(bash "$TKT" "$S" --verify --ruling 920 2>"$T/stderr")" || fail "roundgrant-one exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "roundgrant-one did not finish FIX-OK: $out"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "roundgrant-one did not count round 3"
+[ "$(bash "$TKT_STATE" "$S" get grant.3)" = '920 https://github.com/switchyard/switchyard/issues/529#issuecomment-920' ] || fail "roundgrant-one did not store grant.3"
+grep -Fq 'ruling https://github.com/switchyard/switchyard/issues/529#issuecomment-920 grants round 3' "$CDIR/tkt.journal" || fail "roundgrant-one journal omitted grant"
+grep -Fq 'body_has=Recorded ruling: https://github.com/switchyard/switchyard/issues/529#issuecomment-920' "$S" || fail "roundgrant-one did not add the PR body requirement"
+grep -Fq 'Recorded ruling: https://github.com/switchyard/switchyard/issues/529#issuecomment-920' <<<"$out" || fail "roundgrant-one output omitted body line"
+grep -Fq 'add this line to the PR body' <<<"$out" || fail "roundgrant-one output omitted body instruction"
+[ "$(grep -c '^body_has=Recorded ruling:' "$S")" = 1 ] || fail "roundgrant-one duplicated the PR body requirement"
+: >"$T/calls.log"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 920 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "roundgrant-one reuse exited $run_rc, want 2: $out"
+grep -Fq 'TKT tkt-fix RULING-REFUSED reason=reused comment=920' <<<"$out" || fail "roundgrant-one reuse was not refused: $out"
+! grep -q '^job|' "$T/calls.log" || fail "roundgrant-one reuse dispatched a fix job"
+: >"$T/calls.log"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "roundgrant-one next call exited $run_rc, want ROUND-LIMIT: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix ROUND-LIMIT round=3' || fail "roundgrant-one next call missed limit: $out"
+! grep -q '^job|' "$T/calls.log" || fail "roundgrant-one next call dispatched a fix job"
+fi
+
+# A grant also lifts the limit on a closed-slot recovery push.
+if want roundgrant-closed-recovery; then
+setup_case roundgrant-closed-recovery
+set_closed_round 2
+fixture_commit fix.txt 'round two granted recovery' 'fix: round two granted recovery'
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+write_job_record j2 "$OLD" "$A"
+record_test_round 2 "$A"
+write_ruling_comment 944 'grants: round 3'
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify --ruling 944 2>"$T/stderr")" || fail "roundgrant-closed-recovery exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$A" || fail "roundgrant-closed-recovery did not verify: $out"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "roundgrant-closed-recovery did not consume round 3"
+[ "$(bash "$TKT_STATE" "$S" get grant.3)" != '' ] || fail "roundgrant-closed-recovery did not record grant.3"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$A" ] || fail "roundgrant-closed-recovery did not push the owned commit"
+! grep -q '^job|' "$T/calls.log" || fail "roundgrant-closed-recovery dispatched a new fix job"
+fi
+
+# An abnormal fix end does not count the grant's round, so the same grant retries.
+if want roundgrant-retry; then
+setup_case roundgrant-retry
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 921 'grants: round 3'
+printf 'ask' >"$T/jobmode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 921 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "roundgrant-retry first run exited $run_rc, want ASK: $out"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix ASK' || fail "roundgrant-retry first run did not stop abnormally: $out"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "roundgrant-retry abnormal end counted a round"
+[ "$(bash "$TKT_STATE" "$S" get grant.3)" != '' ] || fail "roundgrant-retry did not retain grant.3"
+printf 'done' >"$T/jobmode"
+out="$(bash "$TKT" "$S" --verify --ruling 921 2>"$T/stderr")" || fail "roundgrant-retry second run exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "roundgrant-retry did not rerun FIX-OK: $out"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "roundgrant-retry did not count round 3"
+[ "$(grep -c '^body_has=Recorded ruling:' "$S")" = 1 ] || fail "roundgrant-retry repeated body_has"
+[ "$(grep -c ' grants round 3$' "$CDIR/tkt.journal")" = 1 ] || fail "roundgrant-retry repeated grant journal entry"
+fi
+
+# Grant refusals preserve the round and do not dispatch a job.
+if want roundgrant-refusals; then
+setup_case roundgrant-stale
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 930 'grants: round 3' 529 OWNER '2026-11-12T00:00:00Z'
+expect_fix_grant_refused stale stale 930
+
+setup_case roundgrant-author
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 931 'grants: round 3' 529 NONE
+expect_fix_grant_refused author author 931
+
+setup_case roundgrant-issue
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 932 'grants: round 3' 530
+expect_fix_grant_refused issue issue 932
+
+setup_case roundgrant-bad-form
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 933 'grants: round 2'
+expect_fix_grant_refused bad-grant bad-grant 933
+
+setup_case roundgrant-not-limited
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+write_ruling_comment 934 'grants: round 2'
+expect_fix_grant_refused not-limited not-limited 934 1
+
+setup_case roundgrant-not-limited-mixed
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+printf 'P1 fix.txt:1 — a\n' >"$CDIR/findings.md"
+write_ruling_comment 943 $'grants: round 2\nrefutes: P1 fix.txt:1'
+expect_fix_grant_refused not-limited-mixed not-limited 943 1
+
+setup_case roundgrant-multiple-lines
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 935 $'grants: round 3\ngrants: round 3'
+expect_fix_grant_refused multiple-lines bad-grant 935
+
+setup_case roundgrant-multiple-comments
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 936 'grants: round 3'
+write_ruling_comment 937 'grants: round 3'
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 936 --ruling 937 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "roundgrant-multiple-comments exited $run_rc, want 2: $out"
+grep -Fq 'RULING-REFUSED reason=bad-grant comment=936' <<<"$out" || fail "roundgrant-multiple-comments did not refuse bad-grant: $out"
+! grep -q '^job|' "$T/calls.log" || fail "roundgrant-multiple-comments dispatched a fix job"
+! grep -q '^grant[.]' "$S" || fail "roundgrant-multiple-comments wrote a grant"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 2 ] || fail "roundgrant-multiple-comments changed round"
+fi
+
+# A grant may live on the PR; refutations remain ticket-only.
+if want roundgrant-pr; then
+setup_case roundgrant-pr
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 938 'grants: round 3' 7
+out="$(bash "$TKT" "$S" --verify --ruling 938 2>"$T/stderr")" || fail "roundgrant-pr exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "roundgrant-pr did not finish: $out"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "roundgrant-pr did not count round 3"
+setup_case roundgrant-refutes-pr
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 939 'refutes: P1 base.txt:1' 7
+expect_fix_grant_refused refutes-on-pr issue 939
+fi
+
+# Legacy states use the latest available review-verdict timestamp.
+if want roundgrant-legacy; then
+setup_case roundgrant-legacy
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+grep -v '^verdict_at=' "$S" >"$S.tmp" && mv "$S.tmp" "$S"
+printf '%s tkt-fix FIX-INCOMPLETE round=2\n' '2026-11-13T00:00:00Z' >"$CDIR/tkt.journal"
+write_ruling_comment 940 'grants: round 3' 529 OWNER '2026-11-12T23:59:59Z'
+expect_fix_grant_refused legacy-stale stale 940
+write_ruling_comment 941 'grants: round 3' 529 OWNER '2026-11-13T00:00:01Z'
+out="$(bash "$TKT" "$S" --verify --ruling 941 2>"$T/stderr")" || fail "roundgrant-legacy fresh comment exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "roundgrant-legacy fresh comment did not pass: $out"
+fi
+
+# --no-verify can run a grant but cannot consume a refutation-only ruling.
+if want roundgrant-noverify; then
+setup_case roundgrant-noverify
+bash "$TKT_STATE" "$S" set round 2 >/dev/null
+write_ruling_comment 942 'grants: round 3'
+out="$(bash "$TKT" "$S" --no-verify --ruling 942 2>"$T/stderr")" || fail "roundgrant-noverify grant exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix PUSHED unverified' || fail "roundgrant-noverify grant did not dispatch: $out"
+[ "$(bash "$TKT_STATE" "$S" get round)" = 3 ] || fail "roundgrant-noverify grant did not count round 3"
+[ "$(bash "$TKT_STATE" "$S" get grant.3)" != '' ] || fail "roundgrant-noverify grant was not recorded"
 fi
 
 echo "tkt-fix assertions passed"

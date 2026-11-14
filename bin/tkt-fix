@@ -34,7 +34,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ "$verify" -ne "$noverify" ] || usage
-[ "${#ruling_requested[@]}" -eq 0 ] || [ "$verify" -eq 1 ] || usage
 [ -z "$since" ] || [ "$verify" -eq 1 ] || usage
 [ -z "$resume" ] || [ -n "$prompt" ] || usage
 
@@ -281,8 +280,10 @@ trap 'rm -rf "$tmp"' EXIT
 limited=0
 if [ "$round" -ge 2 ] && [ -z "$resume" ]; then limited=1; fi
 
-ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=()
+ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=(); ruling_jsons=()
 ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
+ruling_grant_ids=()
+grant_comment_count=0; grant_accepted=0; grant_id=""; grant_url=""; grant_round=""
 if [ "${#ruling_requested[@]}" -gt 0 ] && [ -z "$findings" ]; then
   findings="$(t get findings 2>/dev/null || true)"
 fi
@@ -304,40 +305,74 @@ ruling_refuse() {
 if [ "${#ruling_requested[@]}" -gt 0 ]; then
   ruling_history_source="$(t get findings_history 2>/dev/null || true)"
   ruling_refutes_pattern='^P[123] [^ ]+:[0-9]+$'
+  ruling_alt_pr="$(t get pr 2>/dev/null || true)"
   for ruling_id in ${ruling_requested[@]+"${ruling_requested[@]}"}; do
     case "$ruling_id" in
       ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
     esac
     ruling_json="$tmp/ruling-$ruling_id.json"
     ruling_error="$tmp/ruling-$ruling_id.err"
-    if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error"; then
+    if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error" "$ruling_alt_pr"; then
       ruling_refuse "$ruling_comment_failure" "$ruling_id"
     fi
     ruling_body="$tmp/ruling-$ruling_id.md"
     jq -r '.body' "$ruling_json" >"$ruling_body" || ruling_refuse fetch "$ruling_id"
     ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
-    ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body")
+    ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body"); ruling_jsons+=("$ruling_json")
     ruling_refutes_file="$tmp/ruling-$ruling_id.refutes"
+    ruling_grants_file="$tmp/ruling-$ruling_id.grants"
     grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
-    [ -s "$ruling_refutes_file" ] || ruling_refuse no-refutes "$ruling_id"
-    while IFS= read -r ruling_line; do
+    grep '^grants:' "$ruling_body" >"$ruling_grants_file" || true
+    if [ -s "$ruling_refutes_file" ]; then
+      if ! jq -e --arg repo "$repo" --arg issue "$issue" '
+        (.issue_url | endswith("/repos/" + $repo + "/issues/" + $issue))
+      ' "$ruling_json" >/dev/null 2>&1; then
+        ruling_refuse issue "$ruling_id"
+      fi
+      [ "$noverify" -eq 0 ] || ruling_refuse refutes-need-verify "$ruling_id"
+    fi
+    if [ -s "$ruling_grants_file" ]; then
+      ruling_grant_ids+=("$ruling_id")
+      grant_comment_count=$((grant_comment_count + 1))
+    elif [ ! -s "$ruling_refutes_file" ]; then
+      ruling_refuse no-refutes "$ruling_id"
+    fi
+  done
+
+  round_grant_limited="$limited"
+  for grant_id in ${ruling_grant_ids[@]+"${ruling_grant_ids[@]}"}; do
+    grant_json="$tmp/ruling-$grant_id.json"
+    if ! check_round_grant "$grant_json" "$grant_id" "$round" t; then
+      ruling_refuse "$ruling_comment_failure" "$grant_id"
+    fi
+    grant_accepted=1
+  done
+
+  for ruling_index in "${!ruling_ids[@]}"; do
+    ruling_refutes_file="$tmp/ruling-${ruling_ids[$ruling_index]}.refutes"
+    while IFS= read -r ruling_line || [ -n "$ruling_line" ]; do
       ruling_line="${ruling_line%$'\r'}"
       case "$ruling_line" in
         'refutes: '*) ruling_prefix="${ruling_line#refutes: }" ;;
         *) ruling_prefix="${ruling_line#refutes:}" ;;
       esac
       if [[ ! "$ruling_prefix" =~ $ruling_refutes_pattern ]]; then
-        ruling_refuse bad-refutes "$ruling_id"
+        ruling_refuse bad-refutes "${ruling_ids[$ruling_index]}"
       fi
       ruling_match_begin
       ruling_match_file "$ruling_prefix" "$ruling_history_source" history
       ruling_match_file "$ruling_prefix" "$findings" current
-      [ "$ruling_match_count" -gt 0 ] || ruling_refuse no-match "$ruling_id"
-      [ "$ruling_match_count" -eq 1 ] || ruling_refuse ambiguous "$ruling_id"
-      ruling_refute_ids+=("$ruling_id"); ruling_refute_urls+=("$ruling_url")
+      [ "$ruling_match_count" -gt 0 ] || ruling_refuse no-match "${ruling_ids[$ruling_index]}"
+      [ "$ruling_match_count" -eq 1 ] || ruling_refuse ambiguous "${ruling_ids[$ruling_index]}"
+      ruling_refute_ids+=("${ruling_ids[$ruling_index]}"); ruling_refute_urls+=("${ruling_urls[$ruling_index]}")
       ruling_refute_prefixes+=("$ruling_prefix"); ruling_refute_bases+=("$ruling_match_base")
     done <"$ruling_refutes_file"
   done
+  if [ "$grant_accepted" -eq 1 ]; then
+    record_round_grant "$grant_id" "$grant_url" "$grant_round" t
+    limited=0
+    ruling_notes+=("Recorded ruling: $grant_url" "add this line to the PR body")
+  fi
   for ruling_index in "${!ruling_refute_ids[@]}"; do
     t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
   done
@@ -347,7 +382,7 @@ if [ "${#ruling_requested[@]}" -gt 0 ]; then
 fi
 
 round_limit() {
-  emit "ROUND-LIMIT round=$round" 1 "resume a job with: tkt-fix $state --verify --resume <job id> --prompt <file> (works with no open slot); otherwise send the open findings to triage"
+  emit "ROUND-LIMIT round=$round" 1 "resume a job with: tkt-fix $state --verify --resume <job id> --prompt <file> (works with no open slot); otherwise post an owner ruling with grants: round $((round + 1)) and pass --ruling <comment id>, or send the open findings to triage"
 }
 # Two rounds have run: only a round-2 closed-slot recovery may pass without --resume.
 if [ "$limited" -eq 1 ]; then
@@ -839,7 +874,7 @@ if [ "$recover_unpushed" -eq 1 ]; then
     gerr="$(grep -i -m 5 -E 'error|panick' "$recovery_log" || true)"
     if [ -n "$gerr" ]; then gate_digest="$gate_digest"$'\n'"$gerr"; fi
     printf 'TKT tkt-gate FAIL rc=%s log=%s\n%s\n' "$gate_rc" "$recovery_log" "$gate_digest" >"$tmp/gate.out"
-    round=$((round + 1)); t set round "$round"; close_slot "$knum"
+    round=$((round + 1)); t set round "$round"; t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; close_slot "$knum"
     pass tkt-gate "$tmp/gate.out" 1 "$tmp/recovery-gate.err"
   fi
   if ! push_out="$(git -C "$worktree" push origin "$branch" 2>&1)"; then emit "PUSH-FAIL" 1 "$push_out"; fi
@@ -969,14 +1004,15 @@ if [ -s "$tmp/gate.err" ]; then cat "$tmp/gate.err" >&2; fi
 if [ "$grc" -eq 1 ]; then
   case "$(head -n 1 "$tmp/gate.out")" in
     "TKT tkt-gate STOP-LIST "*) close_slot "$knum" ;;
-    *) round=$((round + 1)); t set round "$round"; close_slot "$knum" ;;
+    *) round=$((round + 1)); t set round "$round"; t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; close_slot "$knum" ;;
   esac
 fi
 if [ "$grc" -ne 0 ]; then
   if [ "$no_commits" -eq 1 ]; then printf 'no commits\n' >>"$tmp/gate.out"; fi
   pass tkt-gate "$tmp/gate.out" "$grc" "$tmp/gate.err"
 fi
-round=$((round + 1)); t set round "$round"; close_slot "$knum"
+# A successful gate counts the round even when verification is disabled.
+round=$((round + 1)); t set round "$round"; t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; close_slot "$knum"
 
 # Digest lines after the verdict: the CI notes, and the concerns file the
 # orchestrator reads before it accepts the verdict.
@@ -1034,9 +1070,9 @@ if [ -s "$tmp/verify.err" ]; then cat "$tmp/verify.err" >&2; fi
 [ "$vrc" -eq 0 ] || emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")" ${notes[@]+"${notes[@]}"}
 fixline="$(grep -m 1 '^FIX-' "$tmp/verify.out" || true)"
 case "$fixline" in
-  FIX-OK*) t set reviewed "$new_head"; write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"; write_findings "$tmp/verify.out"
+  FIX-OK*) t set reviewed "$new_head"; t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"; write_findings "$tmp/verify.out"
     emit "FIX-OK reviewed=$new_head" 0 "head=$new_head" "round=$round" ${notes[@]+"${notes[@]}"} ;;
-  FIX-INCOMPLETE*) write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"; write_findings "$tmp/verify.out"; open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
+  FIX-INCOMPLETE*) t set verdict_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"; write_findings "$tmp/verify.out"; open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
     if [ "$round" -ge 2 ]; then emit "FIX-INCOMPLETE round=$round STOP-AT-TWO" 1 "$open" ${notes[@]+"${notes[@]}"}; fi
     emit "FIX-INCOMPLETE round=$round" 1 "$open" ${notes[@]+"${notes[@]}"} ;;
   *) emit "VERIFY-FAIL" 1 "$(head -n 40 "$tmp/verify.out")" ;;
