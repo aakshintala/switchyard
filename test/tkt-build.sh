@@ -886,12 +886,19 @@ grep -q 'model=unregistered/model-x provider=unknown status=unmapped' <<<"$OUT" 
 # --- no PR for the branch stops the build before the gate ---
 setup_case prempty
 touch "$T/empty-pr"
-run_build --from gate
+run_build
 [ "$RC" -eq 2 ] || fail "prempty exits 2 (rc=$RC)"
 expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "prempty"
-grep -Fqx "Repair command: tkt-build $S --from lane (create the branch PR, then resume with --from review)" <<<"$OUT" \
-  || fail "prempty: unset job.lane keeps the existing repair hint"
 grep -q "^gate|" "$T/calls.log" && fail "prempty: the gate never runs"
+
+setup_case prempty-no-lane
+touch "$T/empty-pr"
+run_build --from gate
+[ "$RC" -eq 2 ] || fail "prempty-no-lane exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "prempty-no-lane"
+grep -Fqx "Repair command: tkt-build $S --from lane (create the branch PR, then resume with --from review)" <<<"$OUT" \
+  || fail "prempty-no-lane: unset job.lane keeps the existing repair hint"
+grep -q "^gate|" "$T/calls.log" && fail "prempty-no-lane: the gate never runs"
 
 setup_case prempty-resumed-lane
 bash "$TKT_STATE" "$S" set job.lane lane-resumable || fail "prempty-resumed-lane: set lane job"
