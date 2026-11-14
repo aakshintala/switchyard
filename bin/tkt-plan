@@ -972,10 +972,6 @@ do_grant() {
     echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a later grant needs a ruling: use --ruling <ruling comment id>" >&2
     exit 2
   fi
-  if [ -n "$comment" ] && t list grant 2>/dev/null | awk -v wanted="comment=$comment" '{ for (i = 1; i <= NF; i++) if ($i == wanted) found = 1 } END { exit !found }'; then
-    grant_set_route '<new comment id>' "$ruling"
-    emit "GRANT-REFUSED reason=comment-reused" 1 "comment $comment has already backed a grant" "$grant_route"
-  fi
   if [ -n "$ruling" ] && t list grant 2>/dev/null | awk -v wanted="ruling=$ruling" '{ for (i = 1; i <= NF; i++) if ($i == wanted) found = 1 } END { exit !found }'; then
     printf -v grant_comment_arg '%q' "$comment"
     grant_set_route "$grant_comment_arg" '<new comment id>'
@@ -1000,6 +996,12 @@ do_grant() {
     esac
   fi
   printf -v grant_ruling_arg '%q' "$ruling"
+  # After ruling-reused and ruling-id, so an identical rerun keeps ruling-reused
+  # and the route carries a quoted, numeric ruling id.
+  if t list grant 2>/dev/null | awk -v wanted="comment=$comment" '{ for (i = 1; i <= NF; i++) if ($i == wanted) found = 1 } END { exit !found }'; then
+    grant_set_route '<new comment id>' "$grant_ruling_arg"
+    emit "GRANT-REFUSED reason=comment-reused" 1 "comment $comment has already backed a grant" "$grant_route"
+  fi
   grant_set_route "$grant_comment_arg" "$grant_ruling_arg"
   if ! fetch_issue_comment "$comment" "$grant_comment_json" "$grant_comment_error"; then
     case "$ruling_comment_failure" in

@@ -1197,6 +1197,13 @@ grep -Fq 'ruling 2 has already backed a grant' <<<"$OUT" || fail "grant-ruling-r
 grep -Fq "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment third --ruling <new comment id>" <<<"$OUT" || fail "grant-ruling-reused prints the replacement route: $OUT"
 cmp -s "$CDIR/state.before-reused-ruling" "$S" || fail "grant-ruling-reused writes no state"
 [ ! -s "$T/gh.log" ] || fail "grant-ruling-reused checks the reused id before fetching comments"
+# An identical rerun (comment and ruling both recorded) still refuses with ruling-reused.
+: >"$T/gh.log"
+run_plan grant-round --by switchyard --comment first --ruling 21
+[ "$RC" -eq 1 ] || fail "grant-ruling-reused refuses an identical rerun (rc=$RC): $OUT"
+expect_verdict "TKT tkt-plan GRANT-REFUSED reason=ruling-reused log=*" "grant-ruling-reused identical rerun"
+cmp -s "$CDIR/state.before-reused-ruling" "$S" || fail "grant-ruling-reused identical rerun writes no state"
+[ ! -s "$T/gh.log" ] || fail "grant-ruling-reused identical rerun makes no gh call"
 
 # --- a second and a third grant with --ruling each re-arm the pending grant ---
 setup_case grant-ruling-repeat
