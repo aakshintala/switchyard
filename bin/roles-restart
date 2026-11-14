@@ -11,6 +11,8 @@
 # ROLES_RESTART_STATE_DIR may override the per-session marker directory (default: $HOME/.cache/agents/roles-restart-state).
 # ROLES_RESTART_WAIT_TIMEOUT bounds the gh auth status network/auth wait (seconds).
 set -euo pipefail
+# A session is not a delegate job: drop a job's DELEGATE_JOB_ID/CHAIN inherited from the caller's shell (#1748).
+unset DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
 
 log_file="${ROLES_RESTART_LOG:-$HOME/.cache/agents/roles-restart.log}"
 lock_dir="${ROLES_RESTART_LOCK_DIR:-$HOME/.cache/agents/roles-restart.lock}"

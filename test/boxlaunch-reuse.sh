@@ -40,6 +40,7 @@ case "${1:-}" in
     done
     [ -n "$name" ] || exit 2
     printf '%s\n' "$name" >> "$LAUNCH_LOG"
+    printf 'job-env=%s|%s\n' "${DELEGATE_JOB_ID-unset}" "${DELEGATE_JOB_CHAIN-unset}" >> "$LAUNCH_LOG.env"
     printf 'backgrounded session %s\n' "$NEW_SESSION_ID"
     ;;
   *) exit 2 ;;
@@ -469,6 +470,18 @@ if [ "$reap_launch_rc" = 0 ] && [ "$(wc -l <"$LAUNCH_LOG" | tr -d ' ')" = 1 ] \
   ok tmp-reap-runs-on-box-and-failure-does-not-block-launch
 else
   fail "tmp-reap-runs-on-box-and-failure-does-not-block-launch (rc=$reap_launch_rc; log=$(cat "$REAP_LOG" 2>/dev/null); out=$(cat "$T/reap-launch.out"))"
+fi
+
+# A launch from inside a delegate job's shell must not hand the job's
+# DELEGATE_JOB_ID/CHAIN to the session it starts (#1748).
+prepare_run job-env
+printf '[]\n' >"$BOX_AGENTS"
+: >"$STOP_LOG"; : >"$LAUNCH_LOG"; : >"$LAUNCH_LOG.env"; : >"$BOX_LANE_OUTPUT"
+if DELEGATE_JOB_ID=job-1748 DELEGATE_JOB_CHAIN='root-1748 job-1748' launch_box >"$T/job-env.out" 2>&1 \
+    && [ "$(cat "$LAUNCH_LOG.env")" = 'job-env=unset|unset' ]; then
+  ok launch-clears-delegate-job-env
+else
+  fail "launch-clears-delegate-job-env (env=$(cat "$LAUNCH_LOG.env") out=$(cat "$T/job-env.out"))"
 fi
 
 # On a Linux box run locally (no BOX_SSH, no FW_BOX_HOME), an unset USER

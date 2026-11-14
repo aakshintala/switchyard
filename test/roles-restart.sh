@@ -37,6 +37,7 @@ cat >"$STUBS/claude" <<'CLAUDE'
 #!/usr/bin/env bash
 {
   printf 'cwd=%s\n' "$PWD"
+  printf 'job-env=%s|%s\n' "${DELEGATE_JOB_ID-unset}" "${DELEGATE_JOB_CHAIN-unset}"
   printf 'arg=%s\n' "$@"
   printf '\n'
 } >>"$CLAUDE_LOG"
@@ -162,8 +163,11 @@ grep -Fq 'Two test-role sessions now run' "$T/roles-restart.log" \
 # A missing role launches a fresh session from its home with a handoff-aware prompt.
 : >"$CLAUDE_LOG"; : >"$OWNER_ASK_LOG"
 printf '[]\n' >"$AGENTS_JSON"
-run_restart >"$T/missing.out" 2>"$T/missing.err" || fail "missing role run failed: $(cat "$T/missing.err")"
+# Launch from a delegate job's shell: the session must not inherit its chain (#1748).
+DELEGATE_JOB_ID=job-1748 DELEGATE_JOB_CHAIN='root-1748 job-1748' \
+  run_restart >"$T/missing.out" 2>"$T/missing.err" || fail "missing role run failed: $(cat "$T/missing.err")"
 grep -Fqx "cwd=$ROLE_HOME" "$CLAUDE_LOG" || fail "claude was not run from role home"
+grep -Fqx 'job-env=unset|unset' "$CLAUDE_LOG" || fail "fresh launch saw a delegate job's DELEGATE_JOB_ID/CHAIN"
 grep -Fqx 'arg=--bg' "$CLAUDE_LOG" || fail "fresh launch omitted --bg"
 grep -Fqx 'arg=--agent' "$CLAUDE_LOG" || fail "fresh launch omitted --agent"
 grep -Fqx 'arg=test-role' "$CLAUDE_LOG" || fail "fresh launch omitted role name"
