@@ -217,6 +217,7 @@ printf 'gh|%s\n' "\$*" >>"$T/gh.log"
 if [ "\${1:-}" = api ]; then
   case "\${2:-}" in
     repos/*/issues/comments/*)
+      if [ -f "$T/api-fail" ]; then echo 'gh: simulated ruling comment fetch failure' >&2; exit 1; fi
       comment_file="$T/comment-\${2##*/}.json"
       if [ -f "\$comment_file" ]; then cat "\$comment_file"; exit 0; fi
       [ -f "$T/comment.json" ] || exit 1
@@ -258,6 +259,14 @@ for arg in "\$@"; do
     exit 0
   fi
 done
+if [ -f "$T/hash-object-fail" ]; then
+  for arg in "\$@"; do
+    if [ "\$arg" = --stdin ]; then
+      echo 'fatal: simulated hash-object failure' >&2
+      exit 1
+    fi
+  done
+fi
 exec "$REAL_GIT" "\$@"
 EOF
 chmod +x "$T/ghbin/git"
@@ -298,7 +307,7 @@ setup_case() {
     printf 'plan=%s\n' "$CDIR/plan.md"
     printf 'model.verifier=%s\n' test-model
   } >"$S"
-  rm -f "$T"/comment-*.json
+  rm -f "$T"/comment-*.json "$T/api-fail" "$T/hash-object-fail"
   set_ruling_comment 'Valid OWNER grant comment.'
 }
 
@@ -361,6 +370,38 @@ expect_current_plan_verdict_hash() {
 : >"$T/stub.log"
 
 if [ -z "${TKT_PLAN_TEST_ONLY:-}" ]; then
+setup_case questions-fetch-failure
+rebase_plan
+cat >>"$CDIR/plan.md" <<'EOF'
+
+## Open questions
+
+1. Which documented fallback applies?
+EOF
+: >"$T/api-fail"
+run_plan rule-questions --comment 654320
+rm -f "$T/api-fail"
+[ "$RC" -eq 1 ] || fail "rule-questions fetch failure exits 1 (rc=$RC)"
+expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=comment log=*" "rule-questions fetch failure"
+grep -Fq 'could not read ruling comment 654320: gh: simulated ruling comment fetch failure' <<<"$OUT" || fail "rule-questions fetch refusal prints the first gh stderr line"
+
+setup_case questions-hash-object-failure
+rebase_plan
+cat >>"$CDIR/plan.md" <<'EOF'
+
+## Open questions
+
+1. Which documented fallback applies?
+EOF
+run_plan verify
+[ "$RC" -eq 1 ] || fail "hash-object-failure records the QUESTIONS verdict"
+set_ruling_comment 'Use the documented fallback.' '2099-01-01T00:00:00Z'
+: >"$T/hash-object-fail"
+run_plan rule-questions --comment 654321
+rm -f "$T/hash-object-fail"
+[ "$RC" -eq 2 ] || fail "rule-questions hash-object failure exits 2 (rc=$RC)"
+[ -z "$(find "$T/tmp" -type f -name 'tkt-plan.*' -print -quit)" ] || fail "tkt-plan EXIT trap removes its suffixed temporary files"
+
 # --- open planner questions stop before a Verifier until one ruling is recorded ---
 setup_case questions-stop
 rebase_plan
@@ -392,18 +433,15 @@ run_plan rule-questions --comment 654321
 [ "$RC" -eq 1 ] || fail "ruling comment before the QUESTIONS verdict is refused (rc=$RC)"
 expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=comment-time log=*" "reject pre-verdict ruling comment"
 [ -z "$(state_get plan_questions_comment)" ] || fail "pre-verdict comment is not recorded as a ruling"
-jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,author_association:"NONE",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
-run_plan rule-questions --comment 654321
-[ "$RC" -eq 1 ] || fail "NONE author ruling comment is refused (rc=$RC)"
-expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=ruling-author log=*" "reject NONE author ruling comment"
-[ -z "$(state_get plan_questions_comment)" ] || fail "NONE author comment is not recorded as a ruling"
-[ -z "$(state_get plan_questions_hash)" ] || fail "NONE author comment does not record a question hash"
-jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,author_association:"CONTRIBUTOR",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
-run_plan rule-questions --comment 654321
-[ "$RC" -eq 1 ] || fail "CONTRIBUTOR author ruling comment is refused (rc=$RC)"
-expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=ruling-author log=*" "reject CONTRIBUTOR author ruling comment"
-[ -z "$(state_get plan_questions_comment)" ] || fail "CONTRIBUTOR author comment is not recorded as a ruling"
-[ -z "$(state_get plan_questions_hash)" ] || fail "CONTRIBUTOR author comment does not record a question hash"
+for assoc in NONE CONTRIBUTOR; do
+  set_ruling_comment 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' '2099-01-01T00:00:00Z' 518 "$assoc"
+  run_plan rule-questions --comment 654321
+  [ "$RC" -eq 1 ] || fail "$assoc author ruling comment is refused (rc=$RC)"
+  expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=ruling-author log=*" "reject $assoc author ruling comment"
+  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S rule-questions --comment <id>" <<<"$OUT" || fail "$assoc author refusal prints the rule-questions recovery route"
+  [ -z "$(state_get plan_questions_comment)" ] || fail "$assoc author comment is not recorded as a ruling"
+  [ -z "$(state_get plan_questions_hash)" ] || fail "$assoc author comment does not record a question hash"
+done
 jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,author_association:"OWNER",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
 run_plan rule-questions --comment 654321
 [ "$RC" -eq 0 ] || fail "record ruling for all questions (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -3031,6 +3069,7 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   run_plan triaged --comment 654321
   [ "$RC" -eq 1 ] || fail "triaged-ruling-author refuses a contributor comment"
   expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-author issue=518 log=*" "triaged-ruling-author"
+  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S triaged --comment <id>" <<<"$OUT" || fail "triaged author refusal prints its recovery route"
 
   setup_case triaged-ruling-stale
   rebase_plan
@@ -3469,6 +3508,7 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
   run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654009
   [ "$RC" -eq 1 ] || fail "rule-ok-author-none refuses an untrusted comment author"
   expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=ruling-author log=*" "rule-ok-author-none"
+  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S rule-ok --by surveyor --ruling RULING-1604 --comment <id>" <<<"$OUT" || fail "rule-ok author refusal prints its recovery route"
 
   setup_case rule-ok-comment-issue
   rebase_plan
