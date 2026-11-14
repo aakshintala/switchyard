@@ -555,11 +555,26 @@ grep -Fq 'planner job not recorded in job.planner; not resumed' <<<"$OUT" || fai
 grep -q "^job|" "$T/stub.log" && fail "PLAN-CHECK starts no job"
 printf 'ok' >"$T/pcmode"
 
+# --- a PLAN-CHECK planner resume refuses a blank required role before dispatch ---
+setup_case plan-check-resume-missing-planner
+rebase_plan
+bash "$TKT_STATE" "$S" set job.planner planner-job-1471 || fail "seed planner job without planner role"
+bash "$TKT_STATE" "$S" set model.planner '   ' || fail "seed blank planner role"
+printf 'lines' >"$T/pcmode"
+run_plan verify
+[ "$RC" -eq 2 ] || fail "missing planner role exits 2 (rc=$RC)"
+grep -Fq 'missing required role: model.planner' "$CDIR/stderr.txt" || fail "missing planner role names the required role: $(cat "$CDIR/stderr.txt")"
+grep -Fq "tkt-state $S set model.planner <id>" "$CDIR/stderr.txt" || fail "missing planner role gives the state repair route: $(cat "$CDIR/stderr.txt")"
+[ "$(cat "$T/pc-count")" = 1 ] || fail "missing planner role refuses after the initial PLAN-CHECK"
+[ "$(grep -c '^resume|' "$T/stub.log" || true)" -eq 0 ] || fail "missing planner role dispatches no resume"
+printf 'ok' >"$T/pcmode"
+
 # --- a recorded planner job gets one plan-check retry before the Verifier ---
 : >"$T/stub.log"
 setup_case plan-check-resume-clean
 rebase_plan
 bash "$TKT_STATE" "$S" set job.planner planner-job-1471 || fail "seed planner job"
+bash "$TKT_STATE" "$S" set model.planner test-planner || fail "seed planner role"
 printf 'retry-once' >"$T/pcmode"
 printf 'ok' >"$T/mode"
 run_plan verify
@@ -582,6 +597,7 @@ verifier_line="$(grep -n '^job|slot=verifier-r1' "$T/stub.log" | sed -n '1s/:.*/
 setup_case plan-check-resume-still-fails
 rebase_plan
 bash "$TKT_STATE" "$S" set job.planner planner-job-1471 || fail "seed failing planner job"
+bash "$TKT_STATE" "$S" set model.planner test-planner || fail "seed planner role for failing resume"
 printf 'retry-always' >"$T/pcmode"
 run_plan verify
 [ "$RC" -eq 1 ] || fail "second plan-check failure exits 1"

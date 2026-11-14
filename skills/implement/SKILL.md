@@ -38,9 +38,11 @@ When the ticket's spec is another issue, pass its number with `tkt-start --spec-
 - `review`: step 4 correctness review job.
 - `overbuild`: step 4 over-engineering review job.
 - `preflight`: step 2 preflight job.
-- `planner`: step 3 plan writer (`--slot planner`). tkt-start refuses to start without it unless `--no-preflight` or `--takeover` is given.
+- `planner`: step 3 plan writer (`--slot planner`). tkt-start refuses to start without it unless `--no-preflight` or `--takeover` is given or the state already stores a plan; a later `--slot planner` job and a tkt-plan `verify` that would resume a planner after PLAN-CHECK both refuse without it.
 
 The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `verifier-rN` and `verifier-rN-drift` → `verifier`, `confirm` → `verifier`, `planner` → `planner`, and `fixN` → `fix`. `verifier` is the plan Verifier; `verify` is review-loop's scoped verify.
+
+`tkt-job`, `tkt-build`, and `tkt-drive` send journaled stop reports to `TKT_STOP_INBOX`; when unset, it defaults to the `inbox` directory beside the state file (flywheel's run/inbox), while an explicitly empty value disables sending and records a warning. A failed send journals a warning and is retried by the next write of the same stop.
 
 | Tool | Driver behavior / next action | Stop verdicts to route |
 | --- | --- | --- |
