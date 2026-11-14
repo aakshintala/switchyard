@@ -30,7 +30,7 @@ pub(crate) const USAGE: &str =
        delegate resume <jobId> [--model M] [--model-ruling URL] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
        delegate model-check <model> [--model-ruling URL]
        delegate cancel <jobId>
-       delegate watch <jobId>... [--timeout S]  (exit 1: timed out; exit 2: refusing to watch a job this process runs inside)
+       delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING; exit 2: refusing to watch a job this process runs inside)
        delegate status <jobId>  (print state and finished job result summary without waiting)
        delegate ack <jobId>... [--any]  (mark one or more job reports as read)
        delegate models
@@ -453,8 +453,11 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
         .filter(|chain| !chain.is_empty())
         .map(|chain| format!("{chain} {id}"))
         .unwrap_or_else(|| id.clone());
+    // debt: fiber workers do not see these (the hub daemon, not __supervise, owns their
+    // tools); upgrade when fiber#4822 ships FIBER_SESSION_ID, map it to the job record
+    // whose sessionId matches and extend DELEGATE_JOB_CHAIN from it.
     cmd.env("DELEGATE_JOB_ID", &id)
-        .env("DELEGATE_JOB_CHAIN", chain); // debt: fiber workers do not see these (the hub daemon, not __supervise, owns their tools); upgrade when fiber's hub run request takes an env field, pass DELEGATE_JOB_ID and DELEGATE_JOB_CHAIN on it.
+        .env("DELEGATE_JOB_CHAIN", chain);
     let mut child = unsafe {
         cmd.args(&supervise_args)
             .stdin(Stdio::null())
