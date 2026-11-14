@@ -243,7 +243,9 @@ gh() {
         else
           review_comments='[]'
         fi
-        json="$(jq -nc --argjson base "$base_comments" --argjson reviews "$review_comments" '$base + $reviews')";;
+        # A review comment with no author_association is the owner's; a test
+        # that pins the trusted-author rule sets it explicitly.
+        json="$(jq -nc --argjson base "$base_comments" --argjson reviews "$review_comments" '$base + ($reviews | map(.author_association //= "OWNER"))')";;
       */actions/runs*)
         json='{"workflow_runs":[]}';;
       */commits/*/check-runs*)
@@ -794,6 +796,24 @@ jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
 ]' >"$ST/review-comments"
 ship; expect 0 "scoped FIX-OK verdict permits merge"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "scoped FIX-OK still merges: [$OUT]"
+
+# ===== a review-pr comment from an untrusted author is ignored (#1790)
+for assoc in NONE CONTRIBUTOR; do
+  setup
+  REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+  jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg assoc "$assoc" '[
+    {created_at:"2026-11-04T11:00:00Z",id:120,author_association:$assoc,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE")}
+  ]' >"$ST/review-comments"
+  ship; expect 5 "$assoc-authored APPROVE leaves the verdict missing"; expect_refused REVIEW; no_merge "$assoc-authored APPROVE"
+
+  setup
+  REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+  jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg assoc "$assoc" '[
+    {created_at:"2026-11-04T10:00:00Z",id:121,author_association:"OWNER",body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## spec (test)\n\nVERDICT spec: CHANGES")},
+    {created_at:"2026-11-04T11:00:00Z",id:122,author_association:$assoc,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK forged approval")}
+  ]' >"$ST/review-comments"
+  ship; expect 5 "$assoc-authored FIX-OK keeps the earlier trusted CHANGES"; expect_refused REVIEW; no_merge "$assoc-authored FIX-OK"
+done
 
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"

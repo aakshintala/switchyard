@@ -250,8 +250,9 @@ review_comments_sorted() {
   # review_comments_sorted REPO PR: print review-pr comments as sorted TSV rows:
   # created_at, numeric id, header, and base64-encoded full body. The shared
   # fetch and ordering keep verify scope aligned with the bare-review guard.
+  # Only an OWNER, MEMBER or COLLABORATOR comment counts; the repo is public (#1790).
   local repo="$1" pr="$2" rows tab
-  rows="$(gh api --paginate --jq '.[] | select((.body // "") | startswith("review-pr: patch-id")) | [.created_at, (.id | tostring), (.body | split("\n")[0]), (.body | @base64)] | @tsv' "repos/$repo/issues/$pr/comments")" || return 1
+  rows="$(gh api --paginate --jq '.[] | select((.body // "") | startswith("review-pr: patch-id")) | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | [.created_at, (.id | tostring), (.body | split("\n")[0]), (.body | @base64)] | @tsv' "repos/$repo/issues/$pr/comments")" || return 1
   [ -n "$rows" ] || return 0
   tab="$(printf '\t')"
   printf '%s\n' "$rows" | sort -t "$tab" -k1,1 -k2,2n
