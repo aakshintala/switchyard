@@ -792,10 +792,25 @@ grep -q 'review' <<<"$ERR" || fail "review refusal explains the missing approval
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
 jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
-  {created_at:"2026-11-04T11:00:00Z",id:104,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK all findings repaired")}
+  {created_at:"2026-11-04T11:00:00Z",id:104,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-OK. all findings repaired")}
 ]' >"$ST/review-comments"
-ship; expect 0 "scoped FIX-OK verdict permits merge"
+ship; expect 0 "scoped FIX-OK. prose verdict permits merge"
 [ "$OUT" = "merged $MERGE_SHA" ] || fail "scoped FIX-OK still merges: [$OUT]"
+
+# One trailing period is valid on each full-review axis; a second is not.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:105,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE.\n\n## spec (test)\n\nVERDICT spec: APPROVE.\n\n## overbuild (test)\n\nVERDICT overbuild: APPROVE.")}
+]' >"$ST/review-comments"
+ship; expect 0 "full-review verdicts with one trailing period permit merge"
+
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" '[
+  {created_at:"2026-11-04T11:00:00Z",id:106,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## standards (test)\n\nVERDICT standards: APPROVE..\n\n## spec (test)\n\nVERDICT spec: APPROVE.\n\n## overbuild (test)\n\nVERDICT overbuild: APPROVE.")}
+]' >"$ST/review-comments"
+ship; expect 5 "repeated trailing periods refuse merge"; expect_refused REVIEW; no_merge "repeated trailing periods"
 
 # ===== a review-pr comment from an untrusted author is ignored (#1790)
 for assoc in NONE CONTRIBUTOR; do

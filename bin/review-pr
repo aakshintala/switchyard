@@ -64,11 +64,12 @@ set -euo pipefail
 # Verdict vocabulary. This block is the one place every verdict line the
 # parser accepts is defined; the review briefs and the review skills state
 # the same lines.
-#   standards role: VERDICT standards: APPROVE|CHANGES
-#   spec role:      VERDICT spec: APPROVE|CHANGES
-#   overbuild role: VERDICT: APPROVE|CHANGES
+#   standards role: VERDICT standards: APPROVE|CHANGES (optional trailing period)
+#   spec role:      VERDICT spec: APPROVE|CHANGES (optional trailing period)
+#   overbuild role: VERDICT: APPROVE|CHANGES (optional trailing period)
 # (collect prints the overbuild verdict as VERDICT overbuild: APPROVE|CHANGES.)
-#   verify role:    FIX-OK | FIX-INCOMPLETE (trailing detail allowed)
+#   verify role:    FIX-OK | FIX-INCOMPLETE, alone or followed by whitespace and detail;
+#                   alternatively, one . : ; , may follow immediately, then whitespace and detail or end of line
 # Verdict lines must start with the form below (after normalisation).
 # Matching tolerates decoration: leading/trailing whitespace, **bold**, `code`.
 # A line that starts with VERDICT or FIX- but matches none of these is a bad
@@ -167,23 +168,26 @@ is_verdict() {
   case "$1" in
     standards)
       case "$2" in
-        "VERDICT standards: APPROVE"|"VERDICT standards: CHANGES") return 0;;
+        "VERDICT standards: APPROVE"|"VERDICT standards: APPROVE."|\
+        "VERDICT standards: CHANGES"|"VERDICT standards: CHANGES.") return 0;;
       esac
       return 1;;
     spec)
       case "$2" in
-        "VERDICT spec: APPROVE"|"VERDICT spec: CHANGES") return 0;;
+        "VERDICT spec: APPROVE"|"VERDICT spec: APPROVE."|\
+        "VERDICT spec: CHANGES"|"VERDICT spec: CHANGES.") return 0;;
       esac
       return 1;;
     overbuild)
       case "$2" in
-        "VERDICT: APPROVE"|"VERDICT: CHANGES") return 0;;
+        "VERDICT: APPROVE"|"VERDICT: APPROVE."|"VERDICT: CHANGES"|"VERDICT: CHANGES.") return 0;;
       esac
       return 1;;
     verify)
       case "$2" in
-        FIX-OK|FIX-OK[[:space:]]*|\
-        FIX-INCOMPLETE|FIX-INCOMPLETE[[:space:]]*) return 0;;
+        FIX-OK|FIX-OK[[:space:]]*|FIX-OK[.:,\;]|FIX-OK[.:,\;][[:space:]]*|\
+        FIX-INCOMPLETE|FIX-INCOMPLETE[[:space:]]*|FIX-INCOMPLETE[.:,\;]|\
+        FIX-INCOMPLETE[.:,\;][[:space:]]*) return 0;;
       esac
       return 1;;
   esac
@@ -279,7 +283,7 @@ verify_comment_has_fix_ok() {
   while IFS= read -r line; do
     norm="$(norm_line "$line")"
     if is_verdict verify "$norm"; then
-      case "$norm" in FIX-OK|FIX-OK[[:space:]]*) return 0;; esac
+      case "$norm" in FIX-OK|FIX-OK[[:space:]]*|FIX-OK[.:,\;]|FIX-OK[.:,\;][[:space:]]*) return 0;; esac
     fi
   done < <(printf '%s\n' "$body" | verify_section_lines)
   return 1
@@ -1162,7 +1166,12 @@ reprint_collected() {
       norm="$(norm_line "$line")"
       case "$norm" in
         VERDICT*|FIX-*)
-          if is_verdict overbuild "$norm" && { [ -z "$rrole" ] || [ "$rrole" = "overbuild" ]; }; then
+          if [ -n "$rrole" ] && is_verdict "$rrole" "$norm"; then
+            label_verdict "$rrole" "$norm"
+          elif [ -n "$rrole" ] && looks_like_verdict "$norm"; then
+            printf 'BAD-VERDICT %s %s\n' "$rrole" "$norm"
+            recollect_bad=1
+          elif is_verdict overbuild "$norm" && { [ -z "$rrole" ] || [ "$rrole" = "overbuild" ]; }; then
             label_verdict overbuild "$norm"
           else
             printf '%s\n' "$line"
@@ -1323,6 +1332,7 @@ cmd_collect() {
   unknown_f="$tmp/unknown.txt"
   : >"$unknown_f"
   recollect=0
+  recollect_bad=0
   unposted=0
   reprint_f="$tmp/reprint.txt"
   : >"$reprint_f"
@@ -1395,7 +1405,7 @@ cmd_collect() {
     # Nothing left to post or remove: every id was collected before.
     if [ "${#id_list[@]}" -eq 0 ] && [ ! -s "$unknown_f" ]; then
       if [ -n "$findings_out" ]; then write_findings "$findings_out" "$reprint_f"; fi
-      [ "$unposted" -eq 0 ] || exit 1
+      [ "$unposted" -eq 0 ] && [ "$recollect_bad" -eq 0 ] || exit 1
       exit 0
     fi
   fi
@@ -1619,7 +1629,8 @@ cmd_collect() {
     fi
     # A reviewer with findings may end DONE_WITH_CONCERNS; its verdict still stands.
     if [ -n "$role_bad" ]; then
-      : # a bad verdict fails loudly as BAD-VERDICT, never UNFINISHED
+      # Keep BAD-VERDICT results available for a later parser or posting retry.
+      cleanup_keep[${#cleanup_keep[@]}]="$sf"
     elif [ "$status" != "DONE" ] && [ "$status" != "DONE_WITH_CONCERNS" ]; then
       reason_suffix=""
       if [ "$status" = "ERROR" ]; then
