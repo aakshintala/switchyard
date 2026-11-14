@@ -376,6 +376,10 @@ fn start(args: &[String], json_mode: bool) -> Result<i32> {
     let mut command = Command::new(executable);
     command
         .args(["session", "__supervise", &id])
+        // A session can outlive the job that started it, so it starts chain-free,
+        // like the bin/ session launchers (#1748, #1753). The host inherits this.
+        .env_remove("DELEGATE_JOB_ID")
+        .env_remove("DELEGATE_JOB_CHAIN")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
