@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Tests for bin/tkt-fix: one review-loop fix round.
 # Stubs tkt-job, gh-ci and review-pr on a temp TKT_BIN; symlinks there reach
-# the real tkt-gate, tkt-state and lib/. The stub tkt-job makes the fix
+# the real tkt-state and lib/. tkt-gate is a wrapper stub: with gatemode set
+# to 2, the next --checks-only call fakes an UNKNOWN exit 2; every other call
+# execs the real tkt-gate. The stub tkt-job makes the fix
 # commit itself in the worktree (like a real job), so the drift check at
 # tkt-fix start sees a clean entry. A stub gh serves the worktree HEAD for
 # the gate's PR-head check. Real git on throwaway repos with a bare origin,

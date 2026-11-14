@@ -74,6 +74,8 @@ tktjob="$bin_dir/tkt-job"; tktgate="$bin_dir/tkt-gate"; ghci="$bin_dir/gh-ci"; r
 plangate="$bin_dir/plan-gate"
 fbrief="$HOME/.agents/skills/review-loop/briefs/fix.md"
 t() { "$tkt_state" "$state" "$@"; }
+# history_path K: the findings-history file for fix slot K.
+history_path() { printf '%s' "$run/$namebase$part_suffix-findings-history-r$1.md"; }
 
 # close_slot K: record slot fix<K> closed; the highest closed slot never drops.
 close_slot() {
@@ -232,7 +234,7 @@ if [ -n "$resume" ]; then
   fi
 fi
 knum="${slot#fix}"
-history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
+history_file="$(history_path "$knum")"
 tmp="$(mktemp "${TMPDIR:-/tmp}/tkt-fix.XXXXXX")"; rm -f "$tmp"; mkdir "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 limited=0
@@ -368,7 +370,7 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         [ "$recovery_slot" -gt 0 ] || recovery_slot="$n"
         slot="fix$recovery_slot"
         knum="$recovery_slot"
-        history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
+        history_file="$(history_path "$knum")"
         recover_unpushed=1
         recover_old_head="$prhead"
         recover_new_head="$actual"
