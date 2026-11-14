@@ -2576,6 +2576,17 @@ mkdir -p "${no_roster_run%/*}"
 resolved_run=$(FW_RUN="$no_roster_run" ticket_states_shared_run_dir "$no_roster_run")
 [ "$resolved_run" = "$no_roster_run" ] \
   || fail "bound configured run without a parent roster stays as given: $resolved_run"
+nested_run="$configured_run/sub/fiber-1798-bound-7"
+mkdir -p "${nested_run%/*}"
+resolved_run=$(FW_RUN="$configured_run" ticket_states_shared_run_dir "$nested_run")
+[ "$resolved_run" = "$nested_run" ] \
+  || fail "bound run under the configured run with an unmapped parent stays as given: $resolved_run"
+grant_parent="$T/grant-shared"
+mkdir -p "$grant_parent"
+: >"$grant_parent/fiber-1798-fence-grant-1.md"
+resolved_run=$(FW_RUN="$T/unrelated-configured" ticket_states_shared_run_dir "$grant_parent/fiber-1798-bound-8")
+[ "$resolved_run" = "$grant_parent" ] \
+  || fail "bound run maps to its parent when the parent holds a fence grant: $resolved_run"
 
 reset_case
 shared_run="$FW_RUN"

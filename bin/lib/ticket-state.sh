@@ -76,8 +76,9 @@ ticket_states_run_dir() {
 
 # Per-state runs are immediate children of the shared run named
 # <name>-bound-<part> (tkt-start stores the supplied --run unchanged in state).
-# Map that suffix only when the parent is configured as the shared run or has
-# a roster; otherwise retain the existing configured-prefix handling below.
+# Map that suffix to the parent only when the parent is the configured shared
+# run, has a roster, or holds a fence grant; otherwise use the bound run as
+# given. Other runs keep the configured-prefix handling below.
 ticket_states_shared_run_dir() {
   local requested="${1:-}" configured base bound parent
   configured="${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}"
@@ -96,10 +97,14 @@ ticket_states_shared_run_dir() {
           parent="${requested%/*}"
           [ -n "$parent" ] || parent="/"
           if [ "$parent" != "$requested" ] \
-            && { [ "$parent" = "$configured" ] || [ -f "$parent/roster" ]; }; then
+            && { [ "$parent" = "$configured" ] || [ -f "$parent/roster" ] \
+              || [ -n "$(find "$parent" -maxdepth 1 -name 'fiber-*-fence-grant*.md' -print -quit 2>/dev/null)" ]; }; then
             printf '%s' "$parent"
             return 0
           fi
+          # #1802 item 4: an unmapped bound run is used as given.
+          printf '%s' "$requested"
+          return 0
           ;;
       esac
       ;;
