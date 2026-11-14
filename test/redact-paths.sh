@@ -23,20 +23,31 @@ lanes=/srv/lanes
 repo=sample-repo
 worktree=lane-one
 
+run=work/fiber-worktrees/flywheel/run
 {
-  printf 'run `%s/.cache/agents/run/report.md` and %s/.cache/agents/run/log.txt\n' "$mac_home" "$linux_home"
-  printf 'root run %s/.cache/agents/run/root-log.txt\n' "$root_home"
+  printf 'run `%s/%s/report.md` and %s/%s/log.txt\n' "$mac_home" "$run" "$linux_home" "$run"
+  printf 'root run %s/%s/root-log.txt\n' "$root_home" "$run"
+  printf 'bare run `%s/%s` and %s/%s.\n' "$mac_home" "$run" "$linux_home" "$run"
   printf 'lanes %s/%s-worktrees/%s/src/main.rs and %s/sy-wt/%s/docs/readme.md\n' \
     "$lanes" "$repo" "$worktree" "$lanes" "$worktree"
+  printf 'bare lane `%s/%s-worktrees/%s`\n' "$lanes" "$repo" "$worktree"
   printf 'homes %s/project/file.txt %s/project/file.txt %s/etc/config\n' \
     "$mac_home" "$linux_home" "$root_home"
+  printf 'bare homes %s, `%s` and %s.\n' "$mac_home" "$linux_home" "$root_home"
+  printf 'other cache %s/.cache/agents/run/x.md\n' "$mac_home"
+  printf 'not homes /%sx/a /%s/b/c /%sfs/d\n' "$mac_top" "srv" "$root_top"
 } >"$T/input"
 "$FILTER" <"$T/input" >"$T/actual" || fail "filter accepts path examples"
 cat >"$T/expected" <<'EOF'
 run `run/report.md` and run/log.txt
 root run run/root-log.txt
+bare run `run` and run.
 lanes <lane worktree>/src/main.rs and <lane worktree>/docs/readme.md
+bare lane `<lane worktree>`
 homes ~/project/file.txt ~/project/file.txt ~/etc/config
+bare homes ~, `~` and ~.
+other cache ~/.cache/agents/run/x.md
+not homes /Usersx/a /srv/b/c /rootfs/d
 EOF
 cmp -s "$T/expected" "$T/actual" || fail "the three host path kinds are redacted in order"
 
