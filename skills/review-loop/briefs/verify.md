@@ -19,7 +19,7 @@ __POSTED_ROUNDS__
 
 Posted rounds are context, never findings to judge. Changes answering findings in those rounds are in scope, not scope creep. Judge a posted finding only if it also appears in the `--verify` findings file. Report anything else you find only as a new finding with its own severity. Any open P1/P2 finding in the file or new P1/P2 finding makes `FIX-INCOMPLETE`. An open P3 from the `--verify` file still gives `FIX-INCOMPLETE` listing it; ship-pr ships a P3-only `FIX-INCOMPLETE` and files those P3s.
 
-The PR body is provided as `.review-context/pr-body.md` when non-empty. It is the lane's claim, not ground truth: check the evidence it cites. A finding the body resolves (for example, one asking for a stated behaviour or a check line in the body) counts as fixed even with an empty repair diff for it.
+The PR body is provided as `.review-context/pr-body.md` when non-empty. It is the lane's claim, not ground truth: check the evidence it cites. A finding whose requested fix is text in the PR body itself (a stated behaviour, a check line) counts as fixed when the body now carries that text. A body sentence is never evidence that code, tests or docs at HEAD changed: judge those at HEAD as below.
 
 Files in `.review-context/` are listed after this brief, or shown as `none`. No `pr.diff` or `issue-<n>.md` files are provided in verify mode unless listed there. A missing context file must be reported in your final message and never searched for. Report an unreadable context file there too. Do not use `find` or `locate`, or search outside your working directory. Continue the verify and return a verdict even when context is missing.
 

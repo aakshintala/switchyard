@@ -831,6 +831,7 @@ cmd_start() {
       exit 1
     fi
   fi
+  # debt: FIX-OK pins the head, not the PR body; record the body's sha256 in the verify comment when a body edit after FIX-OK removes a line a finding required.
   if ! gh pr view "$pr" --repo "$repo" --json body -q .body >"$review_context/pr-body.md"; then
     echo "review-pr: could not fetch the body of PR $pr" >&2
     exit 1
