@@ -21,9 +21,8 @@
 #     --since is the reviewed head; verify diffs from its repair base on current base.
 #     Posted review-pr rounds from --since onward are appended; FINDINGS_FILE
 #     carries what was never posted: CI and mutant findings, rulings and refutations.
-#     An empty repair diff refuses findings without a refuted: line unless a
-#     non-empty PR body is available for the verifier to assess; otherwise push
-#     the repair or mark findings answered by a ruling as refuted before starting.
+#     An empty repair diff refuses findings without a refuted: line; push the
+#     repair or mark each finding answered by a ruling as refuted before starting.
 #     launches one job per review role, prints "<role> <job-id>" per job, then
 #     "watch: delegate watch <id>..." and "collect: review-pr collect <id>..."
 #     with every id spelled out, and returns at once. Wait for the ids with the
@@ -942,7 +941,7 @@ cmd_start() {
     echo "review-pr: repair base $repair_base ($since_full replayed onto $new_mb)" >&2
     since="$repair_base"
     if git -C "$clone" diff --quiet "$since..$sha"; then
-      if [ ! -f "$review_context/pr-body.md" ] && awk '
+      if awk '
         /^P[123] / {
           if (in_finding && !refuted) unrefuted = 1
           in_finding = 1

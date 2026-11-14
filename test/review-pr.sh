@@ -1319,9 +1319,11 @@ grep -q '^P1 unposted orphan finding$' <<<"$out" || fail "orphan result still re
 [ "$(cat "$T/orphan-findings.txt")" = "P1 unposted orphan finding" ] || fail "orphan writes --findings-out"
 [ ! -e "$T/state/comment-pr.txt" ] || fail "orphan unposted collect posts nothing"
 
-# --- case: empty verify diff refuses an unrefuted finding before starting a job
+# --- case: empty verify diff refuses an unrefuted finding before starting a job,
+# even when the PR body is non-empty
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
+printf 'The PR fixes the value.\n' >"$T/state/pr-body.txt"
 printf 'P1 file.txt:1 — wrong value — repair it\n- Evidence: reviewed code has the wrong value\n' >"$T/findings.txt"
 write_record verify DONE "FIX-OK
 STATUS: DONE" 0
@@ -2589,11 +2591,11 @@ run_out="$(bash "$REVIEW" collect job-verify 2>/dev/null)" || \
   fail "verify collect with a non-empty PR body exits 0"
 grep -q '^FIX-OK$' <<<"$run_out" || fail "verify run prints FIX-OK"
 
-# --- case: a body-resolved finding can verify with an empty repair diff
+# --- case: a finding the PR body resolves verifies as fixed
 reset_state
 printf 'ci\tpass\n' >"$T/checks.txt"
 printf 'The PR supports dry runs.\n' >"$T/state/pr-body.txt"
-printf 'P2 product.md:1 — missing statement — say the PR supports dry runs\n' >"$T/findings.txt"
+printf 'P2 product.md:1 — missing statement — say the PR supports dry runs\nrefuted: fixed in PR body\n' >"$T/findings.txt"
 write_record verify DONE "FIX-OK
 STATUS: DONE" 0
 run_out="$(bash "$REVIEW" run 7 --repo O/N --cwd "$T/clone" --model M \
