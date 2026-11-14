@@ -996,10 +996,13 @@ if [ "$recover_unpushed" -ne 1 ]; then
       credit_reason="job record supersededBy chain is invalid: $credit_job"
     else
       credit_job_id=""
+      credit_chain_ids=()
       while IFS=$'\t' read -r walk_id walk_record; do
         [ -n "$walk_id" ] || continue
         credit_job_id="$walk_id"
+        credit_chain_ids+=("$walk_id")
       done <<<"$credit_walk"
+      credit_job_chain="$(printf '%s\n' "${credit_chain_ids[@]}")"
       if [ -z "$credit_job_id" ]; then
         credit_reason="job record is missing for slot $slot"
       else
@@ -1014,7 +1017,7 @@ if [ "$recover_unpushed" -ne 1 ]; then
           else
             credit_journal="${state%.state}.journal"
             credit_env="$(t get env 2>/dev/null || true)"
-            if ! credit_reason="$(gate_credit_check "$credit_record" "$credit_journal" "$credit_job_id" "$gate_cmd" "$credit_env" "$new_head" 2>&1)"; then
+            if ! credit_reason="$(gate_credit_check "$credit_record" "$credit_journal" "$credit_job_chain" "$gate_cmd" "$credit_env" "$new_head" 2>&1)"; then
               :
             else
               if credit_hash="$(gate_credit_hash "$credit_env" "$gate_cmd" 2>/dev/null)" && [ -n "$credit_hash" ]; then

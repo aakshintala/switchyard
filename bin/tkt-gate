@@ -129,10 +129,9 @@ from_job_refuse() {
 # job-record uses delegate's lookup order; resumed jobs follow the same
 # supersededBy chain that tkt-job watches.
 from_job_pass() {
-  local jobid record next prior gate_exit expected_gate
-  local journal_path journal_line journal_payload rest recorded_slot recorded_id recorded_cmd64 recorded_env64
-  local command_match head_after pr pr_repo pr_head dirty candidate_id chain chain_id chain_record current_env index selected_index selected_id selected_cmd selected_env recorded_cmd recorded_env
-  local -a seen=() line_ids=() line_cmds=() line_envs=()
+  local jobid record gate_exit expected_gate journal_path
+  local command_match head_after pr pr_repo pr_head dirty candidate_id chain current_env selected_cmd selected_env
+  local -a seen=()
   chain="$(job_walk_superseded "$from_job")" || from_job_refuse "job record supersededBy cycle in chain starting at id=$from_job"
   while IFS=$'\t' read -r candidate_id record; do
     [ -n "$candidate_id" ] || continue
@@ -163,68 +162,12 @@ from_job_pass() {
   gate_exit="$(jq -r '.result.gateResult.exitCode | tostring' "$record")" || from_job_refuse "delegate gateResult check failed: cannot read exitCode for id=$jobid"
 
   journal_path="${state%.state}.journal"
-  command_match=0
-  line_ids=()
-  line_cmds=()
-  line_envs=()
-  if [ -r "$journal_path" ]; then
-    while IFS= read -r journal_line || [ -n "$journal_line" ]; do
-      journal_payload="${journal_line#* }"
-      case "$journal_payload" in "tkt-job gate slot="*) ;; *) continue ;; esac
-      rest="${journal_payload#tkt-job gate slot=}"
-      case "$rest" in *" "*) ;; *) continue ;; esac
-      recorded_slot="${rest%% *}"
-      rest="${rest#* }"
-      case "$rest" in job=*) ;; *) continue ;; esac
-      recorded_id="${rest#job=}"
-      case "$recorded_id" in *" "*) ;; *) continue ;; esac
-      recorded_id="${recorded_id%% *}"
-      [ -n "$recorded_slot" ] || continue
-      for candidate_id in ${seen[@]+"${seen[@]}"}; do
-        [ "$recorded_id" = "$candidate_id" ] || continue
-        index=0
-        while [ "$index" -lt "${#line_ids[@]}" ] && [ "${line_ids[$index]}" != "$recorded_id" ]; do index=$((index + 1)); done
-        if [ "$index" -eq "${#line_ids[@]}" ]; then line_ids+=("$recorded_id"); fi
-        # Any row for this id owns the match position, even if its evidence
-        # fields are malformed or from the pre-cmd64 format.
-        line_cmds[$index]=""
-        line_envs[$index]=""
-        rest="${rest#* }"
-        case "$rest" in cmd64=*) ;; *) continue ;; esac
-        recorded_cmd64="${rest#cmd64=}"
-        case "$recorded_cmd64" in *" "*) ;; *) continue ;; esac
-        recorded_cmd64="${recorded_cmd64%% *}"
-        rest="${rest#* }"
-        case "$rest" in env64=*) ;; *) continue ;; esac
-        recorded_env64="${rest#env64=}"
-        case "$recorded_env64" in *" "*) continue ;; esac
-        recorded_cmd="$(printf '%s' "$recorded_cmd64" | jq -Rrs '@base64d' 2>/dev/null)" || continue
-        recorded_env="$(printf '%s' "$recorded_env64" | jq -Rrs '@base64d' 2>/dev/null)" || continue
-        line_cmds[$index]="$recorded_cmd"
-        line_envs[$index]="$recorded_env"
-      done
-    done <"$journal_path"
-  fi
+  job_gate_journal_match "$journal_path" "${seen[@]}"
   current_env="$(tkt get env 2>/dev/null || true)"
-  selected_index=-1
-  selected_id=""
-  index=$((${#seen[@]} - 1))
-  while [ "$index" -ge 0 ]; do
-    candidate_id="${seen[$index]}"
-    selected_index=0
-    while [ "$selected_index" -lt "${#line_ids[@]}" ]; do
-      if [ "${line_ids[$selected_index]}" = "$candidate_id" ]; then
-        selected_id="$candidate_id"
-        break 2
-      fi
-      selected_index=$((selected_index + 1))
-    done
-    index=$((index - 1))
-  done
   command_match=0
-  if [ -n "$selected_id" ]; then
-    selected_cmd="${line_cmds[$selected_index]}"
-    selected_env="${line_envs[$selected_index]}"
+  if [ "$job_gate_journal_found" -eq 1 ]; then
+    selected_cmd="$job_gate_journal_cmd"
+    selected_env="$job_gate_journal_env"
     if [ "$selected_cmd" = "$expected_gate" ] && [ "$selected_env" = "$current_env" ]; then command_match=1; fi
   fi
   [ "$command_match" -eq 1 ] || from_job_refuse "gate command/environment check failed: newest job journal line does not match the current plan gate and ticket env"

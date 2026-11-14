@@ -13,16 +13,21 @@ gate_credit_refuse() {
   return 1
 }
 
-# gate_credit_check RECORD JOURNAL JOBID EXPECTED_CMD ENV HEAD
+# gate_credit_check RECORD JOURNAL JOB_CHAIN EXPECTED_CMD ENV HEAD
+# JOB_CHAIN is newline-separated ids oldest to newest, as job_walk_superseded prints them.
 # Prints one refusal reason to stderr and returns 1 unless the job record and
-# the newest gate journal row for JOBID prove the expected full gate at HEAD.
+# the newest gate journal row for the chain prove the expected full gate at HEAD.
 gate_credit_check() {
   [ "$#" -eq 6 ] || gate_credit_refuse 'invalid gate-credit check arguments' || return 1
-  local record="$1" journal="$2" jobid="$3" expected_cmd="$4" expected_env="$5" head="$6"
-  local line payload rest recorded_id cmd64 env64 recorded_cmd recorded_env
-  local journal_found=0
-
+  local record="$1" journal="$2" job_chain="$3" expected_cmd="$4" expected_env="$5" head="$6"
+  local jobid="" chain_id recorded_cmd recorded_env
+  local -a chain_ids=()
   [ -n "$expected_cmd" ] || { gate_credit_refuse 'expected gate command is empty'; return 1; }
+  while IFS= read -r chain_id; do
+    [ -n "$chain_id" ] || continue
+    chain_ids+=("$chain_id")
+    jobid="$chain_id"
+  done <<<"$job_chain"
   [ -n "$jobid" ] || { gate_credit_refuse 'job id is empty'; return 1; }
   [ -r "$record" ] || { gate_credit_refuse "job record is not readable: $jobid"; return 1; }
   jq -e . "$record" >/dev/null 2>&1 || { gate_credit_refuse "job record is not valid JSON: $jobid"; return 1; }
@@ -38,43 +43,10 @@ gate_credit_check() {
   fi
 
   [ -r "$journal" ] || { gate_credit_refuse "job gate journal is not readable: $jobid"; return 1; }
-  recorded_cmd=""
-  recorded_env=""
-  while IFS= read -r line || [ -n "$line" ]; do
-    payload="${line#* }"
-    case "$payload" in
-      'tkt-job gate slot='*) ;;
-      *) continue ;;
-    esac
-    rest="${payload#tkt-job gate slot=}"
-    case "$rest" in *' '*) ;; *) continue ;; esac
-    rest="${rest#* }"
-    case "$rest" in job=*) ;; *) continue ;; esac
-    recorded_id="${rest#job=}"
-    case "$recorded_id" in *' '*) recorded_id="${recorded_id%% *}"; rest="${rest#* }" ;; *) rest="" ;; esac
-    [ "$recorded_id" = "$jobid" ] || continue
-
-    # A later row for this id owns the match position even when malformed,
-    # just as tkt-gate's --from-job parser treats the latest row as evidence.
-    journal_found=1
-    recorded_cmd=""
-    recorded_env=""
-    case "$rest" in cmd64=*) ;; *) continue ;; esac
-    cmd64="${rest#cmd64=}"
-    case "$cmd64" in *' '*) cmd64="${cmd64%% *}"; rest="${rest#* }" ;; *) rest="" ;; esac
-    case "$rest" in env64=*) ;; *) continue ;; esac
-    env64="${rest#env64=}"
-    case "$env64" in *' '*) continue ;; esac
-    recorded_cmd="$(printf '%s' "$cmd64" | jq -Rrs '@base64d' 2>/dev/null)" || {
-      recorded_cmd=""
-      continue
-    }
-    recorded_env="$(printf '%s' "$env64" | jq -Rrs '@base64d' 2>/dev/null)" || {
-      recorded_cmd=""
-      recorded_env=""
-    }
-  done <"$journal"
-  [ "$journal_found" -eq 1 ] || { gate_credit_refuse "job gate journal line is missing: $jobid"; return 1; }
+  job_gate_journal_match "$journal" "${chain_ids[@]}"
+  [ "$job_gate_journal_found" -eq 1 ] || { gate_credit_refuse "job gate journal line is missing: $jobid"; return 1; }
+  recorded_cmd="$job_gate_journal_cmd"
+  recorded_env="$job_gate_journal_env"
   [ "$recorded_cmd" = "$expected_cmd" ] || {
     gate_credit_refuse "job gate command does not match the plan Gate: $jobid"
     return 1

@@ -77,7 +77,13 @@ for a in "\$@"; do
   if [ "\$a" = "--gate-from-plan" ]; then gate_from_plan=1; fi
   prev="\$a"
 done
-[ -n "\$slot" ] && "$TKT_STATE" "\$state" set "job.\$slot" "\$jobid" >/dev/null
+if [ -r "$T/job-credit-mode" ] && [ "\$(cat "$T/job-credit-mode")" = earlier-chain ]; then
+  stored_jobid=j1
+  jobid=j2
+else
+  stored_jobid="\$jobid"
+fi
+[ -n "\$slot" ] && "$TKT_STATE" "\$state" set "job.\$slot" "\$stored_jobid" >/dev/null
 wt="\$("$TKT_STATE" "\$state" get worktree)"
 commit_as_job() {
   printf '%s' "\$2" >"\$wt/\$1"
@@ -151,13 +157,18 @@ if [ -r "$T/job-credit-mode" ]; then
     env_value="\$("$TKT_STATE" "\$state" get env 2>/dev/null || true)"
     cmd64="\$(printf '%s' "\$recorded_cmd" | jq -Rrs '@base64')"
     env64="\$(printf '%s' "\$env_value" | jq -Rrs '@base64')"
-    "$TKT_STATE" "\$state" journal "tkt-job gate slot=\$slot job=\$jobid cmd64=\$cmd64 env64=\$env64" >/dev/null
+    journal_jobid="\$jobid"
+    if [ "\$credit_mode" = earlier-chain ]; then journal_jobid=j1; fi
+    "$TKT_STATE" "\$state" journal "tkt-job gate slot=\$slot job=\$journal_jobid cmd64=\$cmd64 env64=\$env64" >/dev/null
   fi
   mkdir -p "$TMPDIR/delegate-jobs"
   jq -n --arg head "\$head_after" --arg error "\$error" --argjson exit "\$exit_code" \\
     --argjson passed "\$passed" --argjson refused "\$refused" --argjson dirty "\$dirty" \\
     '{status:"DONE",result:{status:"DONE",gateResult:({command:"bash gate.sh",exitCode:\$exit,passed:\$passed,outputTail:"ok"} + (if \$refused then {refused:true} else {} end) + (if \$error == "" then {} else {error:\$error} end)),changeSet:{headAfter:\$head,dirtyAfter:\$dirty}}}' \\
     >"$TMPDIR/delegate-jobs/\$jobid.json"
+  if [ "\$credit_mode" = earlier-chain ]; then
+    jq -n --arg next "\$jobid" '{supersededBy:\$next}' >"$TMPDIR/delegate-jobs/j1.json"
+  fi
 fi
 exit 0
 EOF
@@ -3044,13 +3055,17 @@ EOF
   [ "$run_rc" -eq 0 ] || fail "$name exited $run_rc: $out $(cat "$T/stderr")"
   grep -q '^TKT tkt-fix FIX-OK ' <<<"$out" || fail "$name changed tkt-fix verdict: $out"
   journal="${S%.state}.journal"
-  if [ "$mode" = accepted ] || [ "$mode" = takeover-no-env ]; then
+  if [ "$mode" = accepted ] || [ "$mode" = takeover-no-env ] || [ "$mode" = earlier-chain ]; then
     new_head="$(git -C "$WT" rev-parse HEAD)"
     hash="$(printf '%s' 'true' | shasum -a 256 | awk '{print $1}')"
     grep -Fq "tkt-fix gate PASS head=$new_head cmd=$hash" "$journal" || fail "$name did not journal the exact gate credit: $(cat "$journal")"
     ! grep -Eq 'tkt-gate PASS head=[0-9a-fA-F]{40}$' "$journal" || fail "$name wrote a full tkt-gate PASS line: $(cat "$journal")"
-    if [ "$mode" = accepted ]; then
+    if [ "$mode" = accepted ] || [ "$mode" = earlier-chain ]; then
       grep -Fq 'tkt-job gate slot=fix1 job=j1 cmd64=' "$journal" || fail "$name lacks its full-gate job journal row"
+      if [ "$mode" = earlier-chain ]; then
+        jq -e '.supersededBy == "j2"' "$TMPDIR/delegate-jobs/j1.json" >/dev/null || fail "$name lacks the supersededBy link to j2"
+        ! grep -Fq 'tkt-job gate slot=fix1 job=j2 ' "$journal" || fail "$name unexpectedly journals the newest chain id"
+      fi
     fi
   else
     ! grep -q 'tkt-fix gate PASS ' "$journal" || fail "$name wrote a credit after refusal: $(cat "$journal")"
@@ -3060,6 +3075,9 @@ EOF
 
 if want gate-credit-accepted; then
   run_gate_credit_test gate-credit-accepted accepted
+fi
+if want gate-credit-earlier-chain; then
+  run_gate_credit_test gate-credit-earlier-chain earlier-chain
 fi
 if want gate-credit-scoped; then
   run_gate_credit_test gate-credit-scoped scoped
