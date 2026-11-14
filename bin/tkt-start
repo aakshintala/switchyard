@@ -90,6 +90,35 @@ fi
 if [ "$spec_issue_given" -eq 1 ]; then
   if [[ ! $spec_issue =~ ^0*[1-9][0-9]*$ ]]; then echo "tkt-start: --spec-issue needs a positive integer: $spec_issue" >&2; exit 2; fi
 fi
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+pool_has_bare_model() {
+  local model="$1" pool="$script_dir/lib/pool.md" line remaining before after
+  [ -r "$pool" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" == \#* ]] && continue
+    remaining="$line"
+    while [[ "$remaining" == *"$model"* ]]; do
+      before="${remaining%%"$model"*}"
+      after="${remaining#*"$model"}"
+      case "$before" in
+        ""|*[[:space:]]|*';'|*','|*'.'|*'(') ;;
+        *) remaining="$after"; continue ;;
+      esac
+      case "$after" in
+        ""|[[:space:]]*|';'*|','*|'.'*|')'*) return 0 ;;
+      esac
+      remaining="$after"
+    done
+  done < "$pool"
+  return 1
+}
 for m in ${models[@]+"${models[@]}"}; do
   case "$m" in *=*) ;; *) echo "tkt-start: --model needs ROLE=ID: $m" >&2; exit 2 ;; esac
   model_role="${m%%=*}"; known_role=0
@@ -102,7 +131,7 @@ for m in ${models[@]+"${models[@]}"}; do
     exit 2
   fi
   model_id="${m#*=}"
-  if [[ "$model_id" == openai/* ]] && ! [[ "$model_id" =~ :[^/]+$ ]]; then
+  if [[ "$model_id" == openai/* ]] && ! [[ "$model_id" =~ :[^/]+$ ]] && ! pool_has_bare_model "$model_id"; then
     echo "tkt-start: --model role '$model_role' requires an openai effort suffix (e.g. :medium)" >&2
     exit 2
   fi
@@ -136,14 +165,6 @@ if [ "$spec_part" -ne "$close_part" ]; then
   fi
   exit 2
 fi
-script_path="$0"
-case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
-while [ -L "$script_path" ]; do
-  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
-  link="$(readlink "$script_path")"
-  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
-done
-script_dir="$(cd "$(dirname "$script_path")" && pwd)"
 tkt_state="$script_dir/tkt-state"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-start: cannot read shared lib: $namebase_lib" >&2; exit 2; fi

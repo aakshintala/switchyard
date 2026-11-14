@@ -1306,13 +1306,26 @@ want "SKIPPED filing=" 0 part-closing-no-warning
 [ "$(grep -ci 'warning.*--part.*closing' "$CDIR/stderr")" -eq 0 ] \
   || fail "part-closing-no-warning: Part of closing warned: $(cat "$CDIR/stderr")"
 
-# OpenAI ids need their pool-listed effort suffix; other providers are unaffected.
+# OpenAI bare ids pass only when the pool lists that exact id; effort ids still pass.
+setup openai-pool-bare ONE AGAINST
+run_start --model lane=openai/gpt-6.1-sol
+want "CURRENT " 0 openai-pool-bare
+[ "$(grep -c '^model\.lane=openai/gpt-6.1-sol$' "$RUN/widget-42.state")" -eq 1 ] \
+  || fail "openai-pool-bare: state misses the listed bare model"
+
 setup openai-bare ONE AGAINST
 run_start --model lane=openai/gpt-6-luna
 [ "$RC" -eq 2 ] || fail "openai-bare: exit $RC, want 2"
 grep -qF "tkt-start: --model role 'lane' requires an openai effort suffix" "$CDIR/stderr" \
   || fail "openai-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
 [ ! -e "$RUN/widget-42.state" ] || fail "openai-bare: state was written"
+
+setup openai-prefix-bare ONE AGAINST
+run_start --model lane=openai/gpt-6.1
+[ "$RC" -eq 2 ] || fail "openai-prefix-bare: exit $RC, want 2"
+grep -qF "tkt-start: --model role 'lane' requires an openai effort suffix" "$CDIR/stderr" \
+  || fail "openai-prefix-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "openai-prefix-bare: state was written"
 
 setup openai-suffixed ONE AGAINST
 remove_model_role planner
