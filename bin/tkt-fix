@@ -50,6 +50,10 @@ job_walk_lib="$script_dir/lib/job-walk.sh"
 if [ ! -r "$job_walk_lib" ]; then echo "tkt-fix: cannot read shared lib: $job_walk_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$job_walk_lib"
+gate_credit_lib="$script_dir/lib/gate-credit.sh"
+if [ ! -r "$gate_credit_lib" ]; then echo "tkt-fix: cannot read shared lib: $gate_credit_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$gate_credit_lib"
 tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
 namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-fix: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
@@ -976,6 +980,61 @@ if [ "$grc" -ne 0 ]; then
   if [ "$no_commits" -eq 1 ]; then printf 'no commits\n' >>"$tmp/gate.out"; fi
   pass tkt-gate "$tmp/gate.out" "$grc" "$tmp/gate.err"
 fi
+
+# A checks-only PASS proves only the local checks. Credit a job-end full gate
+# separately, and only when its record covers this exact pushed PR head.
+if [ "$recover_unpushed" -ne 1 ]; then
+  credit_reason=""
+  credit_job="$(t get "job.$slot" 2>/dev/null || true)"
+  if [ -z "$gate_cmd" ]; then
+    credit_reason="expected gate command is empty"
+  elif [ -z "$credit_job" ]; then
+    credit_reason="job id is missing for slot $slot"
+  else
+    credit_walk=""
+    if ! credit_walk="$(job_walk_superseded "$credit_job" 2>/dev/null)"; then
+      credit_reason="job record supersededBy chain is invalid: $credit_job"
+    else
+      credit_job_id=""
+      while IFS=$'\t' read -r walk_id walk_record; do
+        [ -n "$walk_id" ] || continue
+        credit_job_id="$walk_id"
+      done <<<"$credit_walk"
+      if [ -z "$credit_job_id" ]; then
+        credit_reason="job record is missing for slot $slot"
+      else
+        credit_record="$(bash "$script_dir/job-record" "$credit_job_id" 2>/dev/null || true)"
+        if [ -z "$credit_record" ] || [ ! -f "$credit_record" ]; then
+          credit_reason="job record is not found for id=$credit_job_id"
+        else
+          credit_local_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+          credit_remote_head="$(git -C "$worktree" rev-parse --verify "origin/$branch" 2>/dev/null || true)"
+          if [ "$credit_local_head" != "$new_head" ] || [ "$credit_remote_head" != "$new_head" ]; then
+            credit_reason="pushed branch, worktree and fix head do not match: worktree=$credit_local_head origin/$branch=$credit_remote_head fix=$new_head"
+          else
+            credit_journal="${state%.state}.journal"
+            credit_env="$(t get env 2>/dev/null || true)"
+            if ! credit_reason="$(gate_credit_check "$credit_record" "$credit_journal" "$credit_job_id" "$gate_cmd" "$credit_env" "$new_head" 2>&1)"; then
+              :
+            else
+              if credit_hash="$(gate_credit_hash "$credit_env" "$gate_cmd" 2>/dev/null)" && [ -n "$credit_hash" ]; then
+                if ! t journal "tkt-fix gate PASS head=$new_head cmd=$credit_hash" >/dev/null 2>&1; then
+                  credit_reason="cannot write the gate credit journal line"
+                fi
+              else
+                credit_reason="cannot hash the gate command"
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+  if [ -n "$credit_reason" ]; then
+    printf 'tkt-fix: gate not credited: %s\n' "$credit_reason" >&2
+  fi
+fi
+
 round=$((round + 1)); t set round "$round"; close_slot "$knum"
 
 # Digest lines after the verdict: the CI notes, and the concerns file the

@@ -67,6 +67,10 @@ local_gate_body_lib="$script_dir/lib/local-gate-body.sh"
 if [ ! -r "$local_gate_body_lib" ]; then echo "tkt-ship: cannot read shared lib: $local_gate_body_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$local_gate_body_lib"
+gate_credit_lib="$script_dir/lib/gate-credit.sh"
+if [ ! -r "$gate_credit_lib" ]; then echo "tkt-ship: cannot read shared lib: $gate_credit_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$gate_credit_lib"
 
 # Command lock: <state>.lock, the same path tkt-state takes for every write.
 # Held only around the ship-pr run and its log work; released (pid file
@@ -262,11 +266,24 @@ gate_diff_comparison() {
 last_pass="$(grep -o 'tkt-gate PASS head=[0-9a-fA-F]\{40\}$' "${state%.state}.journal" 2>/dev/null | tail -n 1 || true)"
 last_pass_head="${last_pass#tkt-gate PASS head=}"
 local_gate_cmd=""
-if [ -n "$last_pass" ]; then
+journal_path="${state%.state}.journal"
+if [ -n "$last_pass" ] || grep -q 'tkt-fix gate PASS' "$journal_path" 2>/dev/null; then
   if [ "$takeover" -eq 1 ]; then
     local_gate_cmd="$takeover_gate"
   elif plan_gate_args tkt && plan_path="$(tkt get plan 2>/dev/null)" && [ -n "$plan_path" ]; then
     local_gate_cmd="$("$bin_dir/plan-gate" ${plan_gate_argv[@]+"${plan_gate_argv[@]}"} "$plan_path" 2>/dev/null || true)"
+  fi
+fi
+# A fix-job gate counts only when its exact command hash and head match the
+# gate tkt-ship would require now. A malformed, stale or scoped credit leaves
+# the existing tkt-gate path untouched.
+if [ "$last_pass_head" != "$pr_head" ] && [ -n "$local_gate_cmd" ]; then
+  credit_env="$(tkt get env 2>/dev/null || true)"
+  if credit_hash="$(gate_credit_hash "$credit_env" "$local_gate_cmd" 2>/dev/null)" && [ -n "$credit_hash" ]; then
+    if grep -E '(^| )tkt-fix gate PASS head=[0-9a-fA-F]{40} cmd=[0-9a-fA-F]{64}$' "$journal_path" 2>/dev/null | grep -Fq "tkt-fix gate PASS head=$pr_head cmd=$credit_hash"; then
+      last_pass="tkt-gate PASS head=$pr_head"
+      last_pass_head="$pr_head"
+    fi
   fi
 fi
 if [ -n "$last_pass" ] && [ "$last_pass_head" != "$pr_head" ]; then

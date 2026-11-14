@@ -69,10 +69,12 @@ for a in "\$@"; do
 done
 [ -z "\$prompt_file" ] || cp "\$prompt_file" "$T/job-prompt.md" || exit 2
 state="\$1"
-slot=""; jobid="j1"; prev=""
+slot=""; jobid="j1"; prev=""; gate_arg=""; gate_from_plan=0
 for a in "\$@"; do
   if [ "\$prev" = "--slot" ]; then slot="\$a"; fi
   if [ "\$prev" = "--resume" ]; then jobid="\$a"; fi
+  if [ "\$prev" = "--gate" ]; then gate_arg="\$a"; fi
+  if [ "\$a" = "--gate-from-plan" ]; then gate_from_plan=1; fi
   prev="\$a"
 done
 [ -n "\$slot" ] && "$TKT_STATE" "\$state" set "job.\$slot" "\$jobid" >/dev/null
@@ -129,6 +131,34 @@ case "\$(cat "$T/jobmode")" in
     exit 3;;
   no-output) exit 3;;
 esac
+if [ -r "$T/job-credit-mode" ]; then
+  credit_mode="\$(cat "$T/job-credit-mode")"
+  head_after="\$(git -C "\$wt" rev-parse HEAD)"
+  exit_code=0; passed=true; refused=false; dirty=false; error=""
+  case "\$credit_mode" in
+    killed) passed=false; error='gate killed after timeout at 600s' ;;
+    exit) exit_code=1 ;;
+    head) head_after="\$(git -C "\$wt" rev-parse HEAD^)" ;;
+    dirty) dirty=true ;;
+    refused) refused=true ;;
+  esac
+  if [ "\$credit_mode" != no-journal ]; then
+    recorded_cmd="\$gate_arg"
+    if [ "\$gate_from_plan" = 1 ]; then
+      plan_path="\$("$TKT_STATE" "\$state" get plan)"
+      recorded_cmd="\$("$T/bin/plan-gate" "\$plan_path")"
+    fi
+    env_value="\$("$TKT_STATE" "\$state" get env 2>/dev/null || true)"
+    cmd64="\$(printf '%s' "\$recorded_cmd" | jq -Rrs '@base64')"
+    env64="\$(printf '%s' "\$env_value" | jq -Rrs '@base64')"
+    "$TKT_STATE" "\$state" journal "tkt-job gate slot=\$slot job=\$jobid cmd64=\$cmd64 env64=\$env64" >/dev/null
+  fi
+  mkdir -p "$TMPDIR/delegate-jobs"
+  jq -n --arg head "\$head_after" --arg error "\$error" --argjson exit "\$exit_code" \\
+    --argjson passed "\$passed" --argjson refused "\$refused" --argjson dirty "\$dirty" \\
+    '{status:"DONE",passed:\$passed,refused:\$refused,error:(if \$error == "" then null else \$error end),result:{status:"DONE",gateResult:{exitCode:\$exit},changeSet:{headAfter:\$head,dirtyAfter:\$dirty}}}' \\
+    >"$TMPDIR/delegate-jobs/\$jobid.json"
+fi
 exit 0
 EOF
 chmod +x "$T/bin/tkt-job"
@@ -219,6 +249,7 @@ export FW_FILE_CLAIM="$T/bin/file-claim" FILE_CLAIM_CALLS="$T/file-claim.log"
 
 reset_stubs() {
   printf 'done' >"$T/jobmode"
+  rm -f "$T/job-credit-mode"
   printf '0' >"$T/jobcount"
   printf '0' >"$T/cimode"
   printf '0' >"$T/gatemode"
@@ -2974,6 +3005,88 @@ run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = "3" ] || fail "K7 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
 head -n 1 <<<"$out" | grep -q 'TKT tkt-fix DRIFT' || fail "K7 bad verdict: $(head -n 1 <<<"$out")"
 [ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "K7 pushed"
+fi
+
+# Gate-credit fixtures exercise the real tkt-fix flow; the job stub writes a
+# delegate record and the tkt-job gate journal row from its dispatched gate.
+run_gate_credit_test() {
+  local name="$1" mode="$2" run_rc=0 out journal new_head hash
+  setup_case "$name"
+  printf '%s' "$mode" >"$T/job-credit-mode"
+  case "$mode" in
+    scoped)
+      cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `fix.txt`
+
+## Gate
+
+`true`
+
+## Fix gate
+
+`true --since <since>`
+EOF
+      ;;
+    takeover-env|takeover-no-env)
+      "$TKT_STATE" "$S" set plan 'takeover #123' >/dev/null
+      "$TKT_STATE" "$S" set gate true >/dev/null
+      if [ "$mode" = takeover-env ]; then
+        "$TKT_STATE" "$S" set env 'RUN_CHECKS=1' >/dev/null
+      fi
+      ;;
+  esac
+  out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" -eq 0 ] || fail "$name exited $run_rc: $out $(cat "$T/stderr")"
+  grep -q '^TKT tkt-fix FIX-OK ' <<<"$out" || fail "$name changed tkt-fix verdict: $out"
+  journal="${S%.state}.journal"
+  if [ "$mode" = accepted ] || [ "$mode" = takeover-no-env ]; then
+    new_head="$(git -C "$WT" rev-parse HEAD)"
+    hash="$(printf '%s' 'true' | shasum -a 256 | awk '{print $1}')"
+    grep -Fq "tkt-fix gate PASS head=$new_head cmd=$hash" "$journal" || fail "$name did not journal the exact gate credit: $(cat "$journal")"
+    ! grep -Eq 'tkt-gate PASS head=[0-9a-fA-F]{40}$' "$journal" || fail "$name wrote a full tkt-gate PASS line: $(cat "$journal")"
+    if [ "$mode" = accepted ]; then
+      grep -Fq 'tkt-job gate slot=fix1 job=j1 cmd64=' "$journal" || fail "$name lacks its full-gate job journal row"
+    fi
+  else
+    ! grep -q 'tkt-fix gate PASS ' "$journal" || fail "$name wrote a credit after refusal: $(cat "$journal")"
+    grep -Fq 'tkt-fix: gate not credited:' "$T/stderr" || fail "$name omitted its stderr-only refusal: $(cat "$T/stderr")"
+  fi
+}
+
+if want gate-credit-accepted; then
+  run_gate_credit_test gate-credit-accepted accepted
+fi
+if want gate-credit-scoped; then
+  run_gate_credit_test gate-credit-scoped scoped
+fi
+if want gate-credit-killed; then
+  run_gate_credit_test gate-credit-killed killed
+fi
+if want gate-credit-exit; then
+  run_gate_credit_test gate-credit-exit exit
+fi
+if want gate-credit-head; then
+  run_gate_credit_test gate-credit-head head
+fi
+if want gate-credit-dirty; then
+  run_gate_credit_test gate-credit-dirty dirty
+fi
+if want gate-credit-refused; then
+  run_gate_credit_test gate-credit-refused refused
+fi
+if want gate-credit-no-journal; then
+  run_gate_credit_test gate-credit-no-journal no-journal
+fi
+if want gate-credit-takeover-env; then
+  run_gate_credit_test gate-credit-takeover-env takeover-env
+fi
+if want gate-credit-takeover-no-env; then
+  run_gate_credit_test gate-credit-takeover-no-env takeover-no-env
 fi
 
 echo "tkt-fix assertions passed"
