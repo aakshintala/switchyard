@@ -1067,7 +1067,7 @@ do_rule_ok() {
     case "$ruling_comment_failure" in
       fetch) emit "RULE-OK-REFUSED reason=comment-fetch" 1 "$(ruling_comment_fetch_detail "could not verify that comment $comment belongs to $repo#$issue")" ;;
       issue)
-        printf -v rule_ok_route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q rule-ok --by %q --ruling %q --comment %s' "$state" "$who" "$ruling" '<new comment id>'
+        printf -v rule_ok_route 'post the ruling on %s, then rerun tkt-plan %q rule-ok --by %q --ruling %q --comment %s' "$repo#$issue" "$state" "$who" "$ruling" '<new comment id>'
         emit "RULE-OK-REFUSED reason=comment-issue" 1 "comment $comment is not on $repo#$issue" "$rule_ok_route"
         ;;
       author)
@@ -1088,7 +1088,8 @@ do_rule_ok() {
   t set plan_verdict_ruling "$ruling"
   t set plan_verdict_comment "$comment"
   t journal "tkt-plan rule-ok by=$who ruling=$ruling comment=$comment"
-  emit "RULE-OK by=$who ruling=$ruling comment=$comment" 0 "next: tkt-build $state"
+  printf -v rule_ok_next 'next: tkt-build %q' "$state"
+  emit "RULE-OK by=$who ruling=$ruling comment=$comment" 0 "$rule_ok_next"
 }
 
 do_triaged() {
@@ -1106,7 +1107,7 @@ do_triaged() {
     case "$ruling_comment_failure" in
       fetch) emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "$(ruling_comment_fetch_detail "could not verify that comment $comment belongs to $repo#$issue")" ;;
       issue)
-        printf -v triaged_route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q triaged --comment %s' "$state" '<new comment id>'
+        printf -v triaged_route 'post the ruling on %s, then rerun tkt-plan %q triaged --comment %s' "$repo#$issue" "$state" '<new comment id>'
         emit "TRIAGED-REFUSED reason=ruling-source issue=$issue" 1 "comment $comment is not on $repo#$issue" "$triaged_route"
         ;;
       author)
@@ -1241,7 +1242,7 @@ do_rule_questions() {
         emit "QUESTIONS-REFUSED reason=comment" 1 "$(ruling_comment_fetch_detail "could not read ruling comment $comment")"
         ;;
       issue)
-        printf -v questions_route 'post the answer from an owner, member or collaborator account, then rerun tkt-plan %q rule-questions --comment %s' "$state" '<new comment id>'
+        printf -v questions_route 'post the answer on %s, then rerun tkt-plan %q rule-questions --comment %s' "$repo#$issue" "$state" '<new comment id>'
         emit "QUESTIONS-REFUSED reason=comment" 1 "comment $comment is empty or does not belong to $repo#$issue" "$questions_route"
         ;;
       author)

@@ -446,7 +446,7 @@ set_ruling_comment 'Use the documented fallback when the primary path is missing
 run_plan rule-questions --comment 654321
 [ "$RC" -eq 1 ] || fail "rule-questions refuses an answer from another issue"
 expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=comment log=*" "rule-questions issue refusal"
-grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S rule-questions --comment <new comment id>" <<<"$OUT" || fail "rule-questions issue refusal prints its route with the new comment placeholder"
+grep -Fq "post the answer on switchyard#518, then rerun tkt-plan $S rule-questions --comment <new comment id>" <<<"$OUT" || fail "rule-questions issue refusal prints its route with the new comment placeholder"
 jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,author_association:"OWNER",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
 run_plan rule-questions --comment 654321
 [ "$RC" -eq 0 ] || fail "record ruling for all questions (rc=$RC): $(cat "$CDIR/stderr.txt")"
@@ -1135,6 +1135,13 @@ bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-ruling-reused consume f
 run_plan grant-round --by switchyard --comment second --ruling 2
 [ "$RC" -eq 0 ] || fail "grant-ruling-reused allows a distinct id sharing a prefix (rc=$RC): $(cat "$CDIR/stderr.txt")"
 bash "$TKT_STATE" "$S" set granted_used 1 || fail "grant-ruling-reused consume second grant"
+cp "$S" "$CDIR/state.before-first-ruling-reuse"
+: >"$T/gh.log"
+run_plan grant-round --by switchyard --comment third --ruling 21
+[ "$RC" -eq 1 ] || fail "grant-ruling-reused refuses a later grant that reuses the first grant's ruling id (rc=$RC): $OUT"
+expect_verdict "TKT tkt-plan GRANT-REFUSED reason=ruling-reused log=*" "grant-ruling-reused first id"
+cmp -s "$CDIR/state.before-first-ruling-reuse" "$S" || fail "grant-ruling-reused first-id reuse writes no state"
+[ ! -s "$T/gh.log" ] || fail "grant-ruling-reused first-id reuse makes no gh call"
 cp "$S" "$CDIR/state.before-reused-ruling"
 : >"$T/gh.log"
 run_plan grant-round --by switchyard --comment third --ruling 2
@@ -3119,7 +3126,7 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = verbatim ]; the
   [ "$RC" -eq 1 ] || fail "triaged-ruling-source refuses a comment on another issue"
   expect_verdict "TKT tkt-plan TRIAGED-REFUSED reason=ruling-source issue=518 log=*" "triaged-ruling-source"
   grep -Fq 'comment 654320 is not on switchyard#518' <<<"$OUT" || fail "triaged-ruling-source explains the wrong issue"
-  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $S triaged --comment <new comment id>" <<<"$OUT" || fail "triaged issue refusal prints its route with the new comment placeholder"
+  grep -Fq "post the ruling on switchyard#518, then rerun tkt-plan $S triaged --comment <new comment id>" <<<"$OUT" || fail "triaged issue refusal prints its route with the new comment placeholder"
   grep -Fq 'gh|api repos/switchyard/issues/comments/654320' "$T/gh.log" || fail "triaged-ruling-source fetches the comment"
 
   set_ruling_comment 'Use exact wording.' '2099-01-01T00:00:00Z' 518 CONTRIBUTOR
@@ -3581,7 +3588,7 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
   [ "$RC" -eq 1 ] || fail "rule-ok-comment-issue refuses another issue's comment"
   expect_verdict "TKT tkt-plan RULE-OK-REFUSED reason=comment-issue log=*" "rule-ok-comment-issue"
   printf -v quoted_space_state '%q' "$S"
-  grep -Fq "post the answer from an owner, member or collaborator account, then rerun tkt-plan $quoted_space_state rule-ok --by surveyor --ruling RULING-1604 --comment <new comment id>" <<<"$OUT" || fail "rule-ok issue refusal prints a route with the new comment placeholder"
+  grep -Fq "post the ruling on switchyard#518, then rerun tkt-plan $quoted_space_state rule-ok --by surveyor --ruling RULING-1604 --comment <new comment id>" <<<"$OUT" || fail "rule-ok issue refusal prints a route with the new comment placeholder"
   rule_ok_route="$(sed -n 's/^.*then rerun //p' <<<"$OUT")"
   [ -n "$rule_ok_route" ] || fail "rule-ok issue refusal prints a command to execute"
   set_ruling_comment 'Steward ruling RULING-1604.' 2099-01-01T00:00:00Z
