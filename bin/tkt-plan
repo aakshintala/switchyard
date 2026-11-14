@@ -941,6 +941,40 @@ do_grant() {
   case "$grant_count" in ''|*[!0-9]*) grant_count=0;; esac
   case "$confirmed_for" in ''|*[!0-9]*) confirmed_for=0;; esac
   grant_round=$((confirmed_for + grant_count + 1))
+
+  grant_comment_json="$tmp.grant-comment.json"
+  grant_comment_error="$tmp.grant-comment-error"
+  grant_ruling_json="$tmp.grant-ruling.json"
+  grant_ruling_error="$tmp.grant-ruling-error"
+  printf -v grant_rerun 'tkt-plan %q grant-round --by %q --comment %q' "$state" "$who" "$comment"
+  if [ -n "$ruling" ]; then
+    printf -v grant_rerun '%s --ruling %q' "$grant_rerun" "$ruling"
+    grant_route="post the grant and ruling as comments on $repo#$issue from an owner, member or collaborator, then rerun: $grant_rerun"
+  else
+    grant_route="post the grant as a comment on $repo#$issue from an owner, member or collaborator, then rerun: $grant_rerun"
+  fi
+  if ! fetch_issue_comment "$comment" "$grant_comment_json" "$grant_comment_error"; then
+    case "$ruling_comment_failure" in
+      fetch) grant_failure_reason=comment-fetch; grant_failure_detail="could not verify that comment $comment belongs to $repo#$issue" ;;
+      issue) grant_failure_reason=comment-issue; grant_failure_detail="comment $comment is not on $repo#$issue" ;;
+      author) grant_failure_reason=comment-author; grant_failure_detail="comment $comment is not from a repository owner, member or collaborator" ;;
+      *) grant_failure_reason=comment-fetch; grant_failure_detail="could not verify that comment $comment belongs to $repo#$issue" ;;
+    esac
+    rm -f "$grant_comment_json" "$grant_comment_error" "$grant_ruling_json" "$grant_ruling_error"
+    emit "GRANT-REFUSED reason=$grant_failure_reason" 1 "$grant_failure_detail" "$grant_route"
+  fi
+  if [ -n "$ruling" ] && ! fetch_issue_comment "$ruling" "$grant_ruling_json" "$grant_ruling_error"; then
+    case "$ruling_comment_failure" in
+      fetch) grant_failure_reason=ruling-fetch; grant_failure_detail="could not verify ruling comment $ruling belongs to $repo#$issue" ;;
+      issue) grant_failure_reason=ruling-issue; grant_failure_detail="ruling comment $ruling is not on $repo#$issue" ;;
+      author) grant_failure_reason=ruling-author; grant_failure_detail="ruling comment $ruling is not from a repository owner, member or collaborator" ;;
+      *) grant_failure_reason=ruling-fetch; grant_failure_detail="could not verify ruling comment $ruling belongs to $repo#$issue" ;;
+    esac
+    rm -f "$grant_comment_json" "$grant_comment_error" "$grant_ruling_json" "$grant_ruling_error"
+    emit "GRANT-REFUSED reason=$grant_failure_reason" 1 "$grant_failure_detail" "$grant_route"
+  fi
+  rm -f "$grant_comment_json" "$grant_comment_error" "$grant_ruling_json" "$grant_ruling_error"
+
   t set granted_by "$who"
   t set granted_comment "$comment"
   t set granted_used ""

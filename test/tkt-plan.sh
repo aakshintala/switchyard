@@ -216,7 +216,13 @@ set -uo pipefail
 printf 'gh|%s\n' "\$*" >>"$T/gh.log"
 if [ "\${1:-}" = api ]; then
   case "\${2:-}" in
-    repos/*/issues/comments/*) [ -f "$T/comment.json" ] || exit 1; cat "$T/comment.json"; exit 0 ;;
+    repos/*/issues/comments/*)
+      comment_file="$T/comment-\${2##*/}.json"
+      if [ -f "\$comment_file" ]; then cat "\$comment_file"; exit 0; fi
+      [ -f "$T/comment.json" ] || exit 1
+      cat "$T/comment.json"
+      exit 0
+      ;;
     *) echo "gh stub: unexpected API endpoint \${2:-}" >&2; exit 2 ;;
   esac
 fi
@@ -292,6 +298,8 @@ setup_case() {
     printf 'plan=%s\n' "$CDIR/plan.md"
     printf 'model.verifier=%s\n' test-model
   } >"$S"
+  rm -f "$T"/comment-*.json
+  set_ruling_comment 'Valid OWNER grant comment.'
 }
 
 # Point the case plan at the current HEAD, so the stale check passes.
@@ -328,8 +336,8 @@ expect_verdict() {
 state_get() { bash "$TKT_STATE" "$S" get "$1" 2>/dev/null || true; }
 
 set_ruling_comment() {
-  local body="$1" created_at="${2:-2099-01-01T00:00:00Z}" comment_issue="${3:-518}" author_association="${4:-OWNER}"
-  jq -n --arg body "$body" --arg url "https://api.github.com/repos/switchyard/issues/$comment_issue" --arg created_at "$created_at" --arg author_association "$author_association" '{body:$body,author_association:$author_association,issue_url:$url,created_at:$created_at}' >"$T/comment.json"
+  local body="$1" created_at="${2:-2099-01-01T00:00:00Z}" comment_issue="${3:-518}" author_association="${4:-OWNER}" comment_file="${5:-$T/comment.json}"
+  jq -n --arg body "$body" --arg url "https://api.github.com/repos/switchyard/issues/$comment_issue" --arg created_at "$created_at" --arg author_association "$author_association" '{body:$body,author_association:$author_association,issue_url:$url,created_at:$created_at}' >"$comment_file"
 }
 
 seed_triaged_stop() {
@@ -917,6 +925,55 @@ expect_verdict "TKT tkt-plan SET grant=switchyard:1234 log=*" "valid grant"
 [ "$(bash "$TKT_STATE" "$S" get granted_comment)" = "1234" ] || fail "valid grant records the comment"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_used 2>/dev/null || true)" ] || fail "valid grant starts unused"
 [ -z "$(bash "$TKT_STATE" "$S" get granted_owner 2>/dev/null || true)" ] || fail "plain grant has no owner approval"
+
+grant_refusal_setup() {
+  local label="$1" with_prior_grant="${2:-no}"
+  setup_case "$label"
+  rebase_plan
+  bash "$TKT_STATE" "$S" set confirmed_for 2 || fail "$label seed confirm"
+  if [ "$with_prior_grant" = yes ]; then
+    bash "$TKT_STATE" "$S" set granted_by previous || fail "$label seed existing grant author"
+    bash "$TKT_STATE" "$S" set granted_comment previous-comment || fail "$label seed existing grant comment"
+    bash "$TKT_STATE" "$S" set granted_used 1 || fail "$label seed consumed grant"
+    bash "$TKT_STATE" "$S" add grant 'round=2 by=previous via= comment=previous-comment ruling=' || fail "$label seed grant list"
+  fi
+  grant_before_by="$(state_get granted_by)"
+  grant_before_comment="$(state_get granted_comment)"
+  grant_before_list="$(bash "$TKT_STATE" "$S" list grant)"
+}
+
+grant_refusal_expect() {
+  local label="$1" reason="$2" failed_detail="$3" route="$4"
+  [ "$RC" -eq 1 ] || fail "$label refuses invalid comment (rc=$RC): $OUT"
+  expect_verdict "TKT tkt-plan GRANT-REFUSED reason=$reason log=*" "$label"
+  grep -Fq "$failed_detail" <<<"$OUT" || fail "$label names the failed id: $OUT"
+  grep -Fq "$route" <<<"$OUT" || fail "$label prints a runnable route: $OUT"
+  [ "$(state_get granted_by)" = "$grant_before_by" ] || fail "$label changes granted_by"
+  [ "$(state_get granted_comment)" = "$grant_before_comment" ] || fail "$label changes granted_comment"
+  [ "$(bash "$TKT_STATE" "$S" list grant)" = "$grant_before_list" ] || fail "$label changes the grant list"
+}
+
+# A grant comment must be fetched, belong to this issue and have an authorized author.
+grant_refusal_setup grant-missing-comment
+rm -f "$T/comment.json"
+run_plan grant-round --by switchyard --comment 9001
+grant_refusal_expect 'grant-missing-comment' comment-fetch 'could not verify that comment 9001' "post the grant as a comment on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001"
+
+grant_refusal_setup grant-comment-other-issue
+set_ruling_comment 'Grant this extra confirm round.' 2099-01-01T00:00:00Z 519
+run_plan grant-round --by switchyard --comment 9001
+grant_refusal_expect 'grant-comment-other-issue' comment-issue 'comment 9001 is not on switchyard#518' "post the grant as a comment on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001"
+
+grant_refusal_setup grant-comment-author-none
+set_ruling_comment 'Grant this extra confirm round.' 2099-01-01T00:00:00Z 518 NONE
+run_plan grant-round --by switchyard --comment 9001
+grant_refusal_expect 'grant-comment-author-none' comment-author 'comment 9001 is not from a repository owner' "post the grant as a comment on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001"
+
+grant_refusal_setup grant-ruling-author-none yes
+set_ruling_comment 'Grant this extra confirm round.'
+set_ruling_comment 'The ruling comment is not from a trusted author.' 2099-01-01T00:00:00Z 518 NONE "$T/comment-9002.json"
+run_plan grant-round --by switchyard --comment 9001 --ruling 9002
+grant_refusal_expect 'grant-ruling-author-none' ruling-author 'ruling comment 9002 is not from a repository owner' "post the grant and ruling as comments on switchyard#518 from an owner, member or collaborator, then rerun: tkt-plan $S grant-round --by switchyard --comment 9001 --ruling 9002"
 
 setup_case grant-invalid
 rebase_plan
