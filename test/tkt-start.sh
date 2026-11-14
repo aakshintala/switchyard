@@ -72,11 +72,46 @@ cat >"$T/tktbin/tkt-job" <<EOF
 #!/usr/bin/env bash
 printf 'tkt-job|%s\n' "\$*" >>"$T/calls.log"
 if [ -f "$T/job-fail" ]; then echo "tkt-job: boom" >&2; exit 3; fi
-out=""; prev=""
-for a in "\$@"; do [ "\$prev" = "--out-file" ] && out="\$a"; prev="\$a"; done
-[ -n "\$out" ] && cat "$T/jobout" >"\$out"
-if [ -f "$T/job-blocked" ]; then echo "TKT tkt-job BLOCKED id=j1 log=x"; exit 1; fi
-if [ -f "$T/job-concerns" ]; then [ -f "$T/job-noise" ] && { echo "watch noise" >&2; echo >&2; }; echo "TKT tkt-job CONCERNS id=j1 log=x"; echo "reviewer is uneasy"; exit 1; fi
+state="\$1"
+out=""; resume_id=""; prev=""
+for a in "\$@"; do
+  [ "\$prev" = "--out-file" ] && out="\$a"
+  [ "\$prev" = "--resume" ] && resume_id="\$a"
+  prev="\$a"
+done
+if [ -n "\$resume_id" ]; then
+  printf 'tkt-job-resume|%s\n' "\$*" >>"$T/calls.log"
+  if [ -f "$T/job-resume-fail" ]; then echo "TKT tkt-job ERROR id=\$resume_id log=x"; exit 3; fi
+  resume_count="\$(cat "$T/job-resume.count" 2>/dev/null || printf 0)"
+  resume_count=\$((resume_count + 1)); printf '%s\n' "\$resume_count" >"$T/job-resume.count"
+  old_report="$T/job-\$resume_id.out"
+  [ -f "\$old_report" ] || old_report="$T/jobout"
+  if [ -f "$T/jobresumeout" ]; then cp "$T/jobresumeout" "\$old_report"; fi
+  jobid="stub-resume-\$resume_count"
+  report="$T/job-\$jobid.out"; cp "\$old_report" "\$report"
+  bash "$SCRIPT_DIR/../bin/tkt-state" "\$state" set job.preflight "\$jobid"
+  printf 'TKT tkt-job DONE id=%s resumed_from=%s log=x\n' "\$jobid" "\$resume_id" >>"$T/job-results.log"
+else
+  jobid="\$(bash "$SCRIPT_DIR/../bin/tkt-state" "\$state" get job.preflight 2>/dev/null || true)"
+  case "\$jobid" in *[![:space:]]*)
+    report="$T/job-\$jobid.out"
+    [ -f "\$report" ] || report="$T/jobout"
+    printf 'TKT tkt-job DONE reused=%s log=x\n' "\$jobid" >>"$T/job-results.log"
+    ;;
+    *)
+    dispatch="\$(cat "$T/job-dispatch.count" 2>/dev/null || printf 0)"
+    dispatch=\$((dispatch + 1)); printf '%s\n' "\$dispatch" >"$T/job-dispatch.count"
+    jobid="stub-\$dispatch"; report="$T/job-\$jobid.out"
+    bash "$SCRIPT_DIR/../bin/tkt-state" "\$state" set job.preflight "\$jobid"
+    bash "$SCRIPT_DIR/../bin/tkt-state" "\$state" set job.preflight.prompt "stub-prompt-\$jobid"
+    cp "$T/jobout" "\$report"
+    printf 'TKT tkt-job DONE id=%s log=x\n' "\$jobid" >>"$T/job-results.log"
+    ;;
+  esac
+fi
+[ -n "\$out" ] && cat "\$report" >"\$out"
+if [ -f "$T/job-blocked" ]; then echo "TKT tkt-job BLOCKED id=\$jobid log=x"; exit 1; fi
+if [ -f "$T/job-concerns" ]; then [ -f "$T/job-noise" ] && { echo "watch noise" >&2; echo >&2; }; echo "TKT tkt-job CONCERNS id=\$jobid log=x"; echo "reviewer is uneasy"; exit 1; fi
 exit 0
 EOF
 chmod +x "$T/tktbin/tkt-job"
@@ -145,7 +180,7 @@ build_case_template "$TEMPLATES/TWO" yes
 # setup NAME ONE|TWO AGAINST|FILING|SKIP: copy a private seed, origin and
 # clone from the matching common fixture. Sets CDIR CLONE WT RUN FILING.
 setup() {
-  : >"$T/calls.log"; rm -f "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
+  : >"$T/calls.log"; : >"$T/job-results.log"; rm -f "$T/job-dispatch.count" "$T/job-resume.count" "$T/jobresumeout" "$T/job-resume-fail" "$T/gh-fail" "$T/prlist-fail" "$T/api-fail" "$T/api-files" "$T/sweep-fail" "$T/sweep-fail1" "$T/sweep-mixed" "$T/sweep-pure" "$T/job-fail" "$T/job-concerns" "$T/job-noise" "$T/job-blocked" "$T/issue-fail"
   printf 'null\n' >"$T/edited"; : >"$T/prhead"; : >"$T/prstate"; printf '[]\n' >"$T/prlist"
   printf '%s\n' '{"state":"OPEN","comments":[]}' >"$T/issue"
   printf 'two core lines\n1. core -- first\n2. **core** -- second\n3. non-blocking -- other\nCore items: 2\nNon-blocking items: 1\nSTATUS: DONE\n' >"$T/jobout"
@@ -568,9 +603,109 @@ run_start
 want "PREFLIGHT core=0 nonblocking=1 out=" 0 fieldruled
 setup fieldmissing TWO FILING
 printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
+printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobresumeout"
 run_start
 want "PREFLIGHT core=unknown out=" 1 fieldmissing
 case "$OUT" in *"no 'Core items:' line"*) ;; *) fail "fieldmissing: digest misses the missing-field message" ;; esac
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "fieldmissing: preflight job slot was not cleared after a bad resume"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight.prompt)" = "" ] \
+  || fail "fieldmissing: preflight prompt slot was not cleared after a bad resume"
+[ "$(grep -cF 'tkt-start preflight cleared job=stub-resume-1' "$RUN/widget-42.journal")" -eq 1 ] \
+  || fail "fieldmissing: journal does not name the cleared resumed job exactly once"
+[ "$(printf '%s\n' "$OUT" | sed -n '2p')" = 'tkt-start: rerun tkt-start for a fresh preflight' ] \
+  || fail "fieldmissing: next step does not immediately ask for a fresh preflight"
+[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
+  || fail "fieldmissing: missing-footer job was not resumed exactly once"
+printf '1. non-blocking -- clear report\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"
+run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 fieldmissing-rerun
+[ "$(grep -cF 'TKT tkt-job DONE id=stub-2 log=x' "$T/job-results.log")" -eq 1 ] \
+  || fail "fieldmissing-rerun: did not dispatch a new preflight job"
+
+setup resume-fixed TWO FILING
+printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
+printf '1. non-blocking -- repaired\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 resume-fixed
+[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] || fail "resume-fixed: no resume call"
+grep -qF -- "--resume stub-1 --prompt $RUN/widget-42-preflight-footer-repair.md" "$T/calls.log" \
+  || fail "resume-fixed: tkt-job did not receive the stored job and run-dir prompt"
+[ "$(cat "$RUN/widget-42-preflight-footer-repair.md")" = 'Append the required footer lines exactly as skills/planning/briefs/preflight.md asks: Core items: <n> and Non-blocking items: <n>, using decimal counts. Do not change the findings.' ] \
+  || fail "resume-fixed: repair prompt is not the required one-line request"
+grep -qF 'tkt-start preflight resume job=stub-1' "$RUN/widget-42.journal" \
+  || fail "resume-fixed: journal misses the resume"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get preflight.resume_attempted)" = 'stub-1 stub-resume-1' ] \
+  || fail "resume-fixed: original and resumed job ids were not recorded"
+# A later reused result for this slot cannot trigger a second resume.
+printf '1. core -- still missing footer\nNon-blocking items: 1\n' >"$T/job-stub-resume-1.out"
+run_start
+want "PREFLIGHT core=unknown out=" 1 resume-no-second
+[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
+  || fail "resume-no-second: rerun resumed the same preflight job twice"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-no-second: refusal did not clear the slot"
+
+setup resume-failure TWO FILING
+printf '1. core -- first\n2. non-blocking -- other\nNon-blocking items: 1\n' >"$T/jobout"
+touch "$T/job-resume-fail"
+run_start
+want "PREFLIGHT core=unknown out=" 1 resume-failure
+[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
+  || fail "resume-failure: did not try one resume"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-failure: failed resume did not clear the slot"
+
+setup resume-mismatch TWO FILING
+printf '1. core -- first\nNon-blocking items: 0\n' >"$T/jobout"
+printf 'core: none\nCore items: 1\nNon-blocking items: 0\n' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 resume-mismatch
+[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
+  || fail "resume-mismatch: no single resume"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "resume-mismatch: mismatch after resume did not clear the slot"
+
+setup footer-alternative TWO FILING
+printf 'Core: 0 | Non-blocking: 4\n' >"$T/jobout"
+printf '1. non-blocking -- repaired\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobresumeout"
+run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 footer-alternative
+[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 1 ] \
+  || fail "footer-alternative: Core: n | Non-blocking: n was accepted instead of resumed"
+
+setup mismatch-rerun TWO FILING
+printf '%s\n' 'core: none' 'Core items: 1' 'Non-blocking items: 0' >"$T/jobout"
+run_start
+want "PREFLIGHT core=mismatch footer=1 tagged=0 out=" 1 mismatch-rerun
+[ "$(grep -c '^tkt-job-resume|' "$T/calls.log")" -eq 0 ] \
+  || fail "mismatch-rerun: mismatch unexpectedly resumed the preflight job"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight)" = "" ] \
+  || fail "mismatch-rerun: preflight job slot was not cleared"
+[ "$(bash "$SCRIPT_DIR/../bin/tkt-state" "$RUN/widget-42.state" get job.preflight.prompt)" = "" ] \
+  || fail "mismatch-rerun: preflight prompt slot was not cleared"
+[ "$(grep -cF 'tkt-start preflight cleared job=stub-1' "$RUN/widget-42.journal")" -eq 1 ] \
+  || fail "mismatch-rerun: journal does not name the cleared job exactly once"
+[ "$(printf '%s\n' "$OUT" | sed -n '2p')" = 'tkt-start: rerun tkt-start for a fresh preflight' ] \
+  || fail "mismatch-rerun: next step does not immediately ask for a fresh preflight"
+printf '1. non-blocking -- clear report\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"
+run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 mismatch-rerun-retry
+[ "$(grep -cF 'TKT tkt-job DONE id=stub-2 log=x' "$T/job-results.log")" -eq 1 ] \
+  || fail "mismatch-rerun: did not dispatch a new preflight job"
+if grep -qF 'reused=' "$T/job-results.log"; then fail "mismatch-rerun: reused the mismatched preflight job"; fi
+
+setup valid-reuse TWO FILING
+printf '1. non-blocking -- valid report\nCore items: 0\nNon-blocking items: 1\n' >"$T/jobout"
+run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 valid-reuse-first
+run_start
+want "PREFLIGHT core=0 nonblocking=1 out=" 0 valid-reuse-second
+[ "$(grep -cF 'TKT tkt-job DONE id=stub-1 log=x' "$T/job-results.log")" -eq 1 ] \
+  || fail "valid-reuse: first report did not dispatch"
+[ "$(grep -cF 'TKT tkt-job DONE reused=stub-1 log=x' "$T/job-results.log")" -eq 1 ] \
+  || fail "valid-reuse: valid report was not reused"
+[ "$(cat "$T/job-dispatch.count")" = 1 ] || fail "valid-reuse: rerun dispatched another job"
 # stale with no --files: the sweep is skipped, the preflight still runs.
 setup nofiles TWO FILING
 reload --files; run_start
