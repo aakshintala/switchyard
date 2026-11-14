@@ -33,6 +33,10 @@ namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-verify: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$namebase_lib"
+history_lib="$script_dir/lib/findings-history.sh"
+if [ ! -r "$history_lib" ]; then echo "tkt-verify: cannot read shared lib: $history_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$history_lib"
 reviewpr="$bin_dir/review-pr"
 t() { "$tkt_state" "$state" "$@"; }
 
@@ -83,16 +87,18 @@ if grep -qE '^P[123] ' "$findings"; then has_p_lines=1; fi
 if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ]; then
   emit "ROUND-LIMIT" 1 "round=$round; send the open findings to triage"
 fi
+fixslot="$(t get fixslot 2>/dev/null || printf '0')"
+case "$fixslot" in ''|*[!0-9]*) fixslot=0 ;; esac
+if [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot + 1)); fi
 
 mkdir -p "$run"
 issue="$(t get issue 2>/dev/null || true)"
 if [ -n "$issue" ]; then set_namebase "$repo" "$issue"; else namebase="${repo##*/}"; fi
+part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
+history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-verify.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verifymodel" --verify "$findings" --since "$reviewed")
-vrc=0
-"$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
-fixline="$(grep -m 1 '^FIX-' "$tmp/verify.out" || true)"
 
 advance_round() {
   if [ "$has_p_lines" -eq 1 ]; then
@@ -101,8 +107,42 @@ advance_round() {
   fi
 }
 
+restore_slot_key() {
+  local key="$1" was_set="$2" value="$3" restore_tmp
+  if [ "$was_set" -eq 1 ]; then
+    t set "$key" "$value"
+    return
+  fi
+  restore_tmp="$(mktemp "${state}.tkt-verify.XXXXXX")"
+  awk -v prefix="$key=" 'index($0, prefix) != 1' "$state" >"$restore_tmp"
+  mv "$restore_tmp" "$state"
+}
+
+slot_start_key="fix_round.$knum.start"
+slot_head_key="fix_round.$knum.head"
+slot_findings_key="fix_round.$knum.findings"
+slot_start_was_set=0; slot_start_before=""
+if slot_start_before="$(t get "$slot_start_key" 2>/dev/null)"; then slot_start_was_set=1; fi
+slot_head_was_set=0; slot_head_before=""
+if slot_head_before="$(t get "$slot_head_key" 2>/dev/null)"; then slot_head_was_set=1; fi
+slot_findings_was_set=0; slot_findings_before=""
+if slot_findings_before="$(t get "$slot_findings_key" 2>/dev/null)"; then slot_findings_was_set=1; fi
+fixslot_was_set=0; fixslot_before=""
+if fixslot_before="$(t get fixslot 2>/dev/null)"; then fixslot_was_set=1; fi
+
+# Record the reviewed..HEAD range before review-pr so a later tkt-fix --verify
+# can account for the commits using its standard fix-round coverage rules.
+t set "$slot_start_key" "$reviewed"
+t set "$slot_head_key" "$head"
+t set "$slot_findings_key" "$findings"
+t set fixslot "$knum"
+printf '%s\n' "$knum" >"$tmp/verify-rounds"
+
+vrc=0
+"$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
+fixline="$(grep -m 1 '^FIX-' "$tmp/verify.out" || true)"
+
 if [ "$vrc" -ne 0 ]; then
-  advance_round
   [ ! -s "$tmp/verify.err" ] || cat "$tmp/verify.err" >&2
   emit "VERIFY-FAIL rc=$vrc" 1 "$(head -n 40 "$tmp/verify.out")"
 fi
@@ -112,14 +152,15 @@ case "$fixline" in
     short_head="$(git -C "$worktree" rev-parse --short=12 "$head")"
     verify_output="$run/$namebase-tkt-verify-$short_head.md"
     cp "$tmp/verify.out" "$verify_output"
+    write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
     t set findings "$verify_output"
     advance_round
     open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
     emit "FIX-INCOMPLETE" 1 "$open"
     ;;
   FIX-OK*)
-    # A slot is deliberately absent here. review-pr covers the complete
-    # reviewed..HEAD range, so slot-ownership validation from tkt-fix is N/A.
+    # The standalone review covers the complete reviewed..HEAD range; recheck
+    # every head after FIX-OK before acknowledging it.
     post_fetch_rc=0
     git -C "$worktree" fetch origin >/dev/null 2>&1 || post_fetch_rc=$?
     post_worktree_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
@@ -132,16 +173,20 @@ case "$fixline" in
       || [ "$post_worktree_head" != "$head" ] \
       || [ "$post_origin_head" != "$head" ] \
       || [ "$post_pr_head" != "$head" ]; then
+      restore_slot_key "$slot_start_key" "$slot_start_was_set" "$slot_start_before"
+      restore_slot_key "$slot_head_key" "$slot_head_was_set" "$slot_head_before"
+      restore_slot_key "$slot_findings_key" "$slot_findings_was_set" "$slot_findings_before"
+      restore_slot_key fixslot "$fixslot_was_set" "$fixslot_before"
       emit "HEAD-MOVED head=$head worktree=$post_worktree_head origin/$branch=$post_origin_head pr=$post_pr_head" 1
     fi
     advance_round
     t set reviewed "$head"
     t set head "$head"
+    write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
     t journal "tkt-verify FIX-OK reviewed=$head"
     emit "FIX-OK reviewed=$head" 0
     ;;
   *)
-    advance_round
     [ ! -s "$tmp/verify.err" ] || cat "$tmp/verify.err" >&2
     emit "VERIFY-FAIL" 1 "$(head -n 40 "$tmp/verify.out")"
     ;;

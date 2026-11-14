@@ -132,6 +132,11 @@ assert_no_review() {
   ! grep -q '^review-pr|' "$T/calls.log" || fail "$1 called review-pr: $(cat "$T/calls.log")"
 }
 
+assert_no_slot() {
+  ! grep -q '^fix_round\.' "$S" || fail "$1 wrote fix-round state before refusing: $(grep '^fix_round\.' "$S")"
+  ! grep -q '^fixslot=' "$S" || fail "$1 wrote fixslot before refusing: $(grep '^fixslot=' "$S")"
+}
+
 # FIX-OK records the exact reviewed head and the command passes the findings delta.
 setup_case fix-ok
 run_verify
@@ -141,6 +146,12 @@ grep -Fq "reviewed=$HEAD" <<<"$OUT" || fail "FIX-OK omitted reviewed SHA: $OUT"
 [ "$(read_state reviewed)" = "$HEAD" ] || fail "FIX-OK did not advance reviewed to the exact head"
 [ "$(read_state head)" = "$HEAD" ] || fail "FIX-OK did not advance head to the exact head"
 [ "$(read_state round)" = 1 ] || fail "FIX-OK did not count the P-line findings round"
+[ "$(read_state fix_round.1.start)" = "$OLD" ] || fail "FIX-OK did not record the slot start"
+[ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "FIX-OK did not record the slot head"
+[ "$(read_state fix_round.1.findings)" = "$F" ] || fail "FIX-OK did not record the input findings file"
+[ "$(read_state fixslot)" = 1 ] || fail "FIX-OK did not close the fix-round slot"
+[ -r "$(read_state findings_history)" ] || fail "FIX-OK did not write findings history"
+[ "$(read_state fix_round.1.history)" = "$(read_state findings_history)" ] || fail "FIX-OK did not associate history with its slot"
 grep -Fq -- "--head $HEAD --model state-verify-model --verify $F --since $OLD" "$T/calls.log" || fail "review-pr did not receive the expected head, model, findings and since"
 grep -Fq "tkt-verify FIX-OK reviewed=$HEAD" "${S%.state}.journal" || fail "FIX-OK was not journalled"
 
@@ -160,22 +171,27 @@ assert_first_verdict FIX-INCOMPLETE 'FIX-INCOMPLETE'
 [ "$(read_state findings)" = "$RUN/switchyard-1756-tkt-verify-${HEAD:0:12}.md" ] || fail "FIX-INCOMPLETE did not store its verify output path"
 grep -Fq 'P1 src/main.sh:1 — finding remains open' "$(read_state findings)" || fail "FIX-INCOMPLETE output file omitted open findings"
 [ "$(read_state round)" = 1 ] || fail "FIX-INCOMPLETE did not count the P-line findings round"
+[ "$(read_state fix_round.1.start)" = "$OLD" ] || fail "FIX-INCOMPLETE did not record the slot start"
+[ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "FIX-INCOMPLETE did not record the slot head"
+[ "$(read_state fix_round.1.findings)" = "$F" ] || fail "FIX-INCOMPLETE did not record the input findings file"
+[ "$(read_state fixslot)" = 1 ] || fail "FIX-INCOMPLETE did not close the fix-round slot"
+[ -r "$(read_state findings_history)" ] || fail "FIX-INCOMPLETE did not write findings history"
 
-# Review failure and missing FIX verdict both leave reviewed unchanged, and a P-line round is counted.
+# VERIFY-FAIL paths never count a round, even with P-line input.
 setup_case verify-fail
 printf 'fail\n' >"$T/vermode"
 run_verify
 [ "$RC" = 1 ] || fail "non-zero review-pr exited $RC, want 1: $OUT"
 assert_first_verdict VERIFY-FAIL 'non-zero review-pr'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "non-zero review-pr changed reviewed"
-[ "$(read_state round)" = 1 ] || fail "non-zero review-pr did not count the P-line findings round"
+[ "$(read_state round)" = 0 ] || fail "non-zero review-pr counted a P-line round on VERIFY-FAIL"
 setup_case no-verdict
 printf 'no-verdict\n' >"$T/vermode"
 run_verify
 [ "$RC" = 1 ] || fail "missing FIX line exited $RC, want 1: $OUT"
 assert_first_verdict VERIFY-FAIL 'missing FIX line'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "missing FIX line changed reviewed"
-
+[ "$(read_state round)" = 0 ] || fail "missing FIX line counted a P-line round on VERIFY-FAIL"
 # A worktree commit during review is not acknowledged as reviewed.
 setup_case worktree-moves
 printf 'worktree-moves\n' >"$T/vermode"
@@ -185,6 +201,7 @@ assert_first_verdict HEAD-MOVED 'worktree move'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "worktree move changed reviewed"
 [ "$(read_state head)" = "$HEAD" ] || fail "worktree move changed state head"
 [ "$(read_state round)" = 0 ] || fail "worktree move changed round state"
+assert_no_slot 'worktree move'
 [ "$(git -C "$WT" rev-parse HEAD)" != "$HEAD" ] || fail "review stub did not move the worktree"
 [ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "worktree-move path did not re-read the PR head after verify"
 [ ! -e "${S%.state}.journal" ] || fail "worktree move wrote the state journal"
@@ -198,6 +215,7 @@ assert_first_verdict HEAD-MOVED 'origin move'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "origin move changed reviewed"
 [ "$(read_state head)" = "$HEAD" ] || fail "origin move changed state head"
 [ "$(read_state round)" = 0 ] || fail "origin move changed round state"
+assert_no_slot 'origin move'
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD" ] || fail "origin move also changed the worktree"
 [ "$(git --git-dir="$BARE" rev-parse "refs/heads/$BRANCH")" != "$HEAD" ] || fail "review stub did not move bare origin"
 [ "$(git -C "$WT" rev-parse "refs/remotes/origin/$BRANCH")" != "$HEAD" ] || fail "post-review fetch did not refresh origin/$BRANCH"
@@ -213,6 +231,7 @@ run_verify
 [ "$RC" = 1 ] || fail "NOT-PUSHED exited $RC, want 1: $OUT"
 assert_first_verdict NOT-PUSHED 'NOT-PUSHED'
 assert_no_review NOT-PUSHED
+assert_no_slot NOT-PUSHED
 [ "$(read_state reviewed)" = "$OLD" ] || fail "NOT-PUSHED changed reviewed"
 
 setup_case pr-head-mismatch
@@ -221,6 +240,7 @@ run_verify
 [ "$RC" = 1 ] || fail "PR-HEAD-MISMATCH exited $RC, want 1: $OUT"
 assert_first_verdict PR-HEAD-MISMATCH 'PR-HEAD-MISMATCH'
 assert_no_review PR-HEAD-MISMATCH
+assert_no_slot PR-HEAD-MISMATCH
 
 setup_case fix-open
 set_state fixopen 1
@@ -228,6 +248,7 @@ run_verify
 [ "$RC" = 1 ] || fail "FIX-OPEN exited $RC, want 1: $OUT"
 assert_first_verdict FIX-OPEN 'FIX-OPEN'
 assert_no_review FIX-OPEN
+assert_no_slot FIX-OPEN
 
 setup_case nothing-to-verify
 set_state reviewed "$HEAD"
@@ -235,6 +256,7 @@ run_verify
 [ "$RC" = 1 ] || fail "NOTHING-TO-VERIFY exited $RC, want 1: $OUT"
 assert_first_verdict NOTHING-TO-VERIFY 'NOTHING-TO-VERIFY'
 assert_no_review NOTHING-TO-VERIFY
+assert_no_slot NOTHING-TO-VERIFY
 
 setup_case since-not-ancestor
 set_state reviewed 0000000000000000000000000000000000000000
@@ -242,6 +264,7 @@ run_verify
 [ "$RC" = 1 ] || fail "SINCE-NOT-ANCESTOR exited $RC, want 1: $OUT"
 assert_first_verdict SINCE-NOT-ANCESTOR 'SINCE-NOT-ANCESTOR'
 assert_no_review SINCE-NOT-ANCESTOR
+assert_no_slot SINCE-NOT-ANCESTOR
 
 setup_case round-limit
 set_state round 2
@@ -249,6 +272,7 @@ run_verify
 [ "$RC" = 1 ] || fail "ROUND-LIMIT exited $RC, want 1: $OUT"
 assert_first_verdict ROUND-LIMIT 'ROUND-LIMIT'
 assert_no_review ROUND-LIMIT
+assert_no_slot ROUND-LIMIT
 
 # A merge-only note does not count as another round even at round 2.
 setup_case note-only
