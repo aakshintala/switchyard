@@ -812,7 +812,7 @@ cp "$FG" "$T/missinglib/fence-grant"
 if bash "$T/missinglib/fence-grant" --require 77 --phase plan >"$T/out" 2>"$T/err"; then RC=0; else RC=$?; fi
 assert_rc 2 'fence-grant refuses a missing ticket-state library'
 assert_out '' 'missing ticket-state library stdout'
-assert_stderr "fence-grant: cannot read shared lib: $T/missinglib/lib/ticket-state.sh" 'missing ticket-state library stderr'
+assert_stderr "fence-grant: cannot read shared lib: $(cd "$T/missinglib" && pwd)/lib/ticket-state.sh" 'missing ticket-state library stderr'
 
 # Called through a relative symlink from a directory with no siblings (as
 # flywheel's bin/fence-grant is), it finds file-claim and fw-sess-lanes beside
