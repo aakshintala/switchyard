@@ -384,6 +384,18 @@ run_plan rule-questions --comment 654321
 [ "$RC" -eq 1 ] || fail "ruling comment before the QUESTIONS verdict is refused (rc=$RC)"
 expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=comment-time log=*" "reject pre-verdict ruling comment"
 [ -z "$(state_get plan_questions_comment)" ] || fail "pre-verdict comment is not recorded as a ruling"
+jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,author_association:"NONE",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
+run_plan rule-questions --comment 654321
+[ "$RC" -eq 1 ] || fail "NONE author ruling comment is refused (rc=$RC)"
+expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=ruling-author log=*" "reject NONE author ruling comment"
+[ -z "$(state_get plan_questions_comment)" ] || fail "NONE author comment is not recorded as a ruling"
+[ -z "$(state_get plan_questions_hash)" ] || fail "NONE author comment does not record a question hash"
+jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,author_association:"CONTRIBUTOR",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
+run_plan rule-questions --comment 654321
+[ "$RC" -eq 1 ] || fail "CONTRIBUTOR author ruling comment is refused (rc=$RC)"
+expect_verdict "TKT tkt-plan QUESTIONS-REFUSED reason=ruling-author log=*" "reject CONTRIBUTOR author ruling comment"
+[ -z "$(state_get plan_questions_comment)" ] || fail "CONTRIBUTOR author comment is not recorded as a ruling"
+[ -z "$(state_get plan_questions_hash)" ] || fail "CONTRIBUTOR author comment does not record a question hash"
 jq -n --arg body 'Use the documented fallback when the primary path is missing. Resume the planner once after a plan-check failure.' --arg url 'https://api.github.com/repos/switchyard/issues/518' --arg created_at '2099-01-01T00:00:00Z' '{body:$body,author_association:"OWNER",issue_url:$url,created_at:$created_at}' >"$T/comment.json"
 run_plan rule-questions --comment 654321
 [ "$RC" -eq 0 ] || fail "record ruling for all questions (rc=$RC): $(cat "$CDIR/stderr.txt")"
