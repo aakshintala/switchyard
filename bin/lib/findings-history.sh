@@ -2,6 +2,9 @@
 # Source after namebase.sh; callers provide state, run, namebase, part_suffix,
 # findings, history_file, knum and t().
 
+# history_path K: the findings-history file for fix slot K.
+history_path() { printf '%s' "$run/$namebase$part_suffix-findings-history-r$1.md"; }
+
 # Return the visible finding row without its tkt-history metadata suffix.
 findings_row_base() {
   local row="$1"
