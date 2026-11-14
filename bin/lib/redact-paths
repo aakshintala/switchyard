@@ -10,12 +10,14 @@ REDACT_PATHS_MAC_TOP="$mac_top" REDACT_PATHS_LINUX_TOP="$linux_top" perl -pe '
   BEGIN {
     my $mac = quotemeta($ENV{REDACT_PATHS_MAC_TOP});
     my $linux = quotemeta($ENV{REDACT_PATHS_LINUX_TOP});
-    # A user segment stops at a path or prose boundary and never ends in a dot,
-    # so `/<top>/<user>.` keeps its sentence-ending period.
+    # A lane segment stops at a path or prose boundary.
     $seg = q{[^/\s\x60\x27"<>(),;:!?]*[^/\s\x60\x27"<>(),;:!?.]};
+    # A user segment takes only username bytes and never ends in a dot, so
+    # `/<top>/<user>.` keeps its period and `[/<top>/<user>]` its bracket.
+    $user = q{[A-Za-z0-9._-]*[A-Za-z0-9_-]};
     $lb = q{(?<![A-Za-z0-9._-])};
-    $home = qq{(?:/(?:$mac|$linux)/$seg|/root)};
-    $end = q{(?![^/\s\x60\x27"<>(),;:!?.])};
+    $home = qq{(?:/(?:$mac|$linux)/$user|/root)};
+    $end = q{(?![A-Za-z0-9_-])};
   }
   s{$lb$home/work/fiber-worktrees/flywheel/run$end}{run}g;
   s{$lb/srv/lanes/$seg/$seg}{<lane worktree>}g;

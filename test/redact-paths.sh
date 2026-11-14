@@ -36,6 +36,8 @@ run=work/fiber-worktrees/flywheel/run
     "$mac_home" "$linux_home" "$root_home"
   printf 'bare homes %s, `%s` and %s.\n' "$mac_home" "$linux_home" "$root_home"
   printf 'other cache %s/.cache/agents/run/x.md\n' "$mac_home"
+  printf 'punct [%s] **%s** %s#frag %s]/y [%s/%s]\n' \
+    "$mac_home" "$linux_home" "$mac_home" "$mac_home" "$mac_home" "$run"
   printf 'not homes /%sx/a /%s/b/c /%sfs/d\n' "$mac_top" "srv" "$root_top"
 } >"$T/input"
 "$FILTER" <"$T/input" >"$T/actual" || fail "filter accepts path examples"
@@ -49,6 +51,7 @@ box lane <lane worktree>/x and <lane worktree>.
 homes ~/project/file.txt ~/project/file.txt ~/etc/config
 bare homes ~, `~` and ~.
 other cache ~/.cache/agents/run/x.md
+punct [~] **~** ~#frag ~]/y [run]
 not homes /Usersx/a /srv/b/c /rootfs/d
 EOF
 cmp -s "$T/expected" "$T/actual" || fail "the three host path kinds are redacted in order"
