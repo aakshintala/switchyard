@@ -270,7 +270,6 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         keep=1
       elif [ -n "$fjob" ] && [ "$prhead" != "$actual" ] \
         && [ "$clean" -eq 1 ] \
-        && { [ "$stored" = "$prhead" ] || [ "$stored" = "$actual" ]; } \
         && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null; then
         # Ownership: the ahead commits must be the open job's own. Its
         # delegate record carries changeSet.headAfter, located the same way
@@ -278,10 +277,16 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         # proves no outside commit landed on top.
         rec="$(bash "$script_dir/job-record" "$fjob" 2>/dev/null || true)"
         owned=""
+        owned_before=""
         if [ -n "$rec" ] && [ -f "$rec" ]; then
           owned="$(jq -r '.result.changeSet.headAfter // ""' "$rec" 2>/dev/null || true)"
+          owned_before="$(jq -r '.result.changeSet.headBefore // ""' "$rec" 2>/dev/null || true)"
         fi
-        if [ -n "$owned" ] && [ "$owned" = "$actual" ]; then
+        if [ -n "$owned" ] && [ "$owned" = "$actual" ] \
+          && { { [ "$stored" = "$prhead" ] || [ "$stored" = "$actual" ]; } \
+            || { [ "$owned_before" = "$stored" ] \
+              && git -C "$worktree" merge-base --is-ancestor "$prhead" "$stored" 2>/dev/null \
+              && git -C "$worktree" merge-base --is-ancestor "$stored" "$actual" 2>/dev/null; }; }; then
           # Carry the validated recovery through tkt-job's head-drift guard
           # the same way a normal job end does. fixopen stays on the open
           # slot: its commits are still unpushed, and the dispatch below

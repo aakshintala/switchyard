@@ -1480,6 +1480,107 @@ grep -q "job|" "$T/calls.log" && fail "E dispatched a job"
 grep -q "tkt-fix: worktree is ahead of the PR head by open fix job fix1's unpushed commits" "$T/stderr" || fail "E stderr line missing: $(cat "$T/stderr")"
 fi
 
+# C-a. The open job's record proves a chain from the intermediate stored head.
+if want C-a; then
+setup_case c-a
+fixture_commit fix.txt "first unpushed fix" "fix: first unpushed"
+SHEAD="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second unpushed fix" "fix: second unpushed"
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$SHEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixopen 2 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+write_job_record j2 "$SHEAD" "$A"
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "C-a exited 0"
+rc=$?; [ "$rc" = "3" ] || fail "C-a exited $rc, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix RECOVER" || fail "C-a bad verdict: $(head -n 1 <<<"$out")"
+grep -q "job=j2" <<<"$out" || fail "C-a job id missing from RECOVER digest"
+grep -q "slot=fix2" <<<"$out" || fail "C-a slot missing from RECOVER digest"
+grep -q "DRIFT" <<<"$out" && fail "C-a returned DRIFT"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A" ] || fail "C-a state head did not advance"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "2" ] || fail "C-a fixopen changed"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "C-a round changed"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "C-a pushed"
+grep -q "job|" "$T/calls.log" && fail "C-a dispatched a fix job"
+grep -q "tkt-fix: worktree is ahead of the PR head by open fix job fix2's unpushed commits" "$T/stderr" || fail "C-a stderr line missing: $(cat "$T/stderr")"
+fi
+
+# C-b. A headBefore that differs from the stored intermediate head is rejected.
+if want C-b; then
+setup_case c-b
+fixture_commit fix.txt "first unpushed fix" "fix: first unpushed"
+SHEAD="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second unpushed fix" "fix: second unpushed"
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$SHEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixopen 2 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+write_job_record j2 "$OLD" "$A"
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "C-b exited 0"
+rc=$?; [ "$rc" = "3" ] || fail "C-b exited $rc, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "C-b bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$SHEAD" ] || fail "C-b state head moved"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "2" ] || fail "C-b fixopen changed"
+grep -q "job|" "$T/calls.log" && fail "C-b dispatched a fix job"
+fi
+
+# C-c. An outside commit above the job's headAfter is rejected.
+if want C-c; then
+setup_case c-c
+fixture_commit fix.txt "first unpushed fix" "fix: first unpushed"
+SHEAD="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second unpushed fix" "fix: second unpushed"
+A="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit outside.txt "outside commit" "outside: on top"
+OUTHEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$SHEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixopen 2 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+write_job_record j2 "$SHEAD" "$A"
+printf '%s' "$OLD" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "C-c exited 0"
+rc=$?; [ "$rc" = "3" ] || fail "C-c exited $rc, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "C-c bad verdict: $(head -n 1 <<<"$out")"
+grep -q "worktree HEAD=$OUTHEAD" <<<"$out" || fail "C-c DRIFT digest omits outside HEAD"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$SHEAD" ] || fail "C-c state head moved"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "2" ] || fail "C-c fixopen changed"
+grep -q "job|" "$T/calls.log" && fail "C-c dispatched a fix job"
+fi
+
+# C-d. A moved PR head outside the stored-head chain is rejected.
+if want C-d; then
+setup_case c-d
+fixture_commit fix.txt "first unpushed fix" "fix: first unpushed"
+SHEAD="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second unpushed fix" "fix: second unpushed"
+A="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" checkout -q --detach "$OLD"
+fixture_commit other.txt "moved PR branch" "other: moved PR head"
+Q="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" checkout -q tkt-529
+bash "$TKT_STATE" "$S" set head "$SHEAD" >/dev/null
+bash "$TKT_STATE" "$S" set round 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixopen 2 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix2 j2 >/dev/null
+write_job_record j2 "$SHEAD" "$A"
+printf '%s' "$Q" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" && fail "C-d exited 0"
+rc=$?; [ "$rc" = "3" ] || fail "C-d exited $rc, want 3"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "C-d bad verdict: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$SHEAD" ] || fail "C-d state head moved"
+[ "$(bash "$TKT_STATE" "$S" get fixopen)" = "2" ] || fail "C-d fixopen changed"
+grep -q "job|" "$T/calls.log" && fail "C-d dispatched a fix job"
+fi
+
 # 10a. Missing PR and head are filled from the branch's open PR before dispatch.
 setup_case fill-both-ask
 drop_state_key pr
