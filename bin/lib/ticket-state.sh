@@ -76,8 +76,8 @@ ticket_states_run_dir() {
 
 # Per-state runs are immediate children of the shared run named
 # <name>-bound-<part> (tkt-start stores the supplied --run unchanged in state).
-# Prefer that structural suffix; otherwise use FW_RUN/RUN_DIR when it contains
-# the requested directory, falling back to the requested run unchanged.
+# Map that suffix only when the parent is configured as the shared run or has
+# a roster; otherwise retain the existing configured-prefix handling below.
 ticket_states_shared_run_dir() {
   local requested="${1:-}" configured base bound parent
   configured="${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}"
@@ -95,7 +95,8 @@ ticket_states_shared_run_dir() {
         *)
           parent="${requested%/*}"
           [ -n "$parent" ] || parent="/"
-          if [ "$parent" != "$requested" ]; then
+          if [ "$parent" != "$requested" ] \
+            && { [ "$parent" = "$configured" ] || [ -f "$parent/roster" ]; }; then
             printf '%s' "$parent"
             return 0
           fi

@@ -684,6 +684,17 @@ expected_roster_done=$(printf '2026-11-09\t77\t%s/retired-state' "$T/box-home")
   || fail "box-push copies and rewrites roster-done: $(cat "$BOX_RUN/roster-done" 2>/dev/null)"
 [ ! -e "$BOX_RUN/roster.tmp" ] && [ ! -e "$BOX_RUN/roster-done.tmp" ] \
   || fail 'box-push leaves no roster temporary files after rename'
+
+state_run="$MAC_RUN/fiber-77-bound-2"
+mkdir -p "$state_run"
+printf '2026-11-09 shared\t77\tbox\tfiber-77-build\tabcdef123456\n' >"$MAC_RUN/roster"
+printf 'state-local roster\n' >"$state_run/roster"
+BOX_SSH="$FW_SSH" FW_RUN="$state_run" FW_BOX_RUN="$BOX_RUN" \
+  FW_MAC_HOME="$T/mac-home" FW_BOX_HOME="$T/box-home" \
+  bash "$SCRIPT_DIR/../bin/box-push.sh" 77 >"$T/box-push-bound.out" 2>"$T/box-push-bound.err" \
+  || fail "box-push accepts a bound state run: $(cat "$T/box-push-bound.err")"
+[ "$(cat "$BOX_RUN/roster")" = "$(printf '2026-11-09 shared\t77\tbox\tfiber-77-build\tabcdef123456')" ] \
+  || fail "box-push sends the shared roster from a bound state run: $(cat "$BOX_RUN/roster" 2>/dev/null)"
 DSESS_JSON='{"ok":true,"sessions":[{"id":"abcdef123456","status":"running"}]}'
 FILE_CLAIM_LIST="$(printf 'docs/tui.md\tfiber-77\tgrant\t0\tt:stub\t\n')"
 export DSESS_JSON FILE_CLAIM_LIST
@@ -793,6 +804,15 @@ assert_line 'WOULD-GRANT docs/tui.md' 'dry path output'
 assert_line 'WOULD-GRANT' 'dry closing output'
 assert_out "$(printf 'WIDE docs/tui.md is granted whole (no --ranges): a lane needing one line of it will see an OVERLAP.\nWOULD-GRANT docs/tui.md\nWOULD-GRANT')" 'free dry output'
 assert_no_grant 'free dry run'
+
+# A missing ticket-state library is reported with the shared-lib diagnostic.
+reset_case
+mkdir -p "$T/missinglib/lib"
+cp "$FG" "$T/missinglib/fence-grant"
+if bash "$T/missinglib/fence-grant" --require 77 --phase plan >"$T/out" 2>"$T/err"; then RC=0; else RC=$?; fi
+assert_rc 2 'fence-grant refuses a missing ticket-state library'
+assert_out '' 'missing ticket-state library stdout'
+assert_stderr "fence-grant: cannot read shared lib: $T/missinglib/lib/ticket-state.sh" 'missing ticket-state library stderr'
 
 # Called through a relative symlink from a directory with no siblings (as
 # flywheel's bin/fence-grant is), it finds file-claim and fw-sess-lanes beside
@@ -2541,6 +2561,23 @@ FW_RUN="$T/run" bash "$FG" --require 9876 --phase build >/dev/null 2>&1 \
 # sweep holder still refuses the grant.
 . "$SCRIPT_DIR/../bin/lib/fw-lib.sh"
 reset_case
+configured_run="$T/configured-shared"
+resolved_run=$(FW_RUN="$configured_run/" ticket_states_shared_run_dir "$configured_run/fiber-1798-bound-4")
+[ "$resolved_run" = "$configured_run" ] \
+  || fail "bound run maps to its configured shared parent after trimming slashes: $resolved_run"
+roster_parent="$T/roster-shared"
+mkdir -p "$roster_parent" "$T/unrelated-configured"
+: >"$roster_parent/roster"
+resolved_run=$(FW_RUN="$T/unrelated-configured" ticket_states_shared_run_dir "$roster_parent/fiber-1798-bound-5")
+[ "$resolved_run" = "$roster_parent" ] \
+  || fail "bound run maps to its parent when the parent has a roster: $resolved_run"
+no_roster_run="$T/no-roster-parent/fiber-1798-bound-6"
+mkdir -p "${no_roster_run%/*}"
+resolved_run=$(FW_RUN="$no_roster_run" ticket_states_shared_run_dir "$no_roster_run")
+[ "$resolved_run" = "$no_roster_run" ] \
+  || fail "bound configured run without a parent roster stays as given: $resolved_run"
+
+reset_case
 shared_run="$FW_RUN"
 state_run="$shared_run/fiber-1798-bound-2"
 mkdir -p "$state_run"
@@ -2573,6 +2610,18 @@ grep -qF 'HELD docs/tui.md by lane sweep-1798-holder' "$T/nested-overlap.out" \
   || fail "nested-run self-grant refusal identifies the holder: $(cat "$T/nested-overlap.out")"
 [ ! -e "$shared_run/fiber-1798-fence-grant-1.md" ] || fail 'refused nested self-grant writes no shared grant'
 [ ! -e "$state_run/fiber-1798-fence-grant-1.md" ] || fail 'refused nested self-grant writes no state-local grant'
+
+printf 'Grant 1\n\nTicket: 1798\nPaths:\n- docs/events.md\nRanges: none\n' >"$state_run/fiber-1798-fence-grant-1.md"
+[ ! -e "$shared_run/fiber-1798-fence-grant-1.md" ] || fail 'state-only require fixture has no shared grant'
+if FW_RUN="$state_run" bash "$FG" --require 1798 --phase build >"$T/state-only.out" 2>"$T/state-only.err"; then
+  fail 'fence-grant --require refuses a grant found only in the state run'
+else
+  state_only_rc=$?
+fi
+[ "$state_only_rc" = 2 ] || fail "state-only require exits 2: $state_only_rc"
+grep -qF "matching $shared_run/fiber-1798-fence-grant*.md" "$T/state-only.err" \
+  || fail "state-only require searches the shared run: $(cat "$T/state-only.err")"
+rm "$state_run/fiber-1798-fence-grant-1.md"
 
 FILE_CLAIM_LIST=''
 export FILE_CLAIM_LIST
