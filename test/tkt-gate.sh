@@ -1647,6 +1647,17 @@ bash "$TKT_STATE" "$S" journal 'tkt-job gate slot=fix1 job=stub-1 cmd=gate-ok en
 cp "$CDIR/tkt.journal" "$CDIR/journal-before"
 expect_from_job_refusal old-9 'gate command/environment'
 
+# --- a newest resumed job cannot borrow an older job's gate journal row ---
+setup_from_job_case from-job-no-newest-row
+plant_job_record job-old present 0 "$H" false
+jq '.supersededBy = "job-new"' "$DELEGATE_JOBS_DIR/job-old.json" >"$CDIR/record.tmp" || fail "link resumed job without own gate row"
+mv "$CDIR/record.tmp" "$DELEGATE_JOBS_DIR/job-old.json" || fail "link resumed job without own gate row"
+plant_job_record job-new present 0 "$H" false
+jq '. + {resume:{gate:"cargo test -p x"}}' "$DELEGATE_JOBS_DIR/job-new.json" >"$CDIR/record.tmp" || fail "record narrower resumed gate"
+mv "$CDIR/record.tmp" "$DELEGATE_JOBS_DIR/job-new.json" || fail "record narrower resumed gate"
+journal_job_gate job-old gate-ok
+expect_from_job_refusal job-old 'gate command check failed: newest job has no gate journal line of its own: job-new (newest row is for job-old)'
+
 # --- --from-job journals the newest job in a superseded chain ---
 setup_from_job_case from-job-superseded
 plant_job_record job-old present 0 "$H" false
