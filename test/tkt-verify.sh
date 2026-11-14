@@ -185,6 +185,37 @@ run_verify
 assert_first_verdict VERIFY-FAIL 'non-zero review-pr'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "non-zero review-pr changed reviewed"
 [ "$(read_state round)" = 0 ] || fail "non-zero review-pr counted a P-line round on VERIFY-FAIL"
+[ "$(read_state fixslot)" = 1 ] || fail "non-zero review-pr did not record its fix-round slot"
+[ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "non-zero review-pr did not record its fix-round head"
+# Retrying the same reviewed..HEAD range reuses its slot rather than creating slot 2.
+printf 'ok\n' >"$T/vermode"
+run_verify
+[ "$RC" = 0 ] || fail "same-range retry exited $RC: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-OK 'same-range retry'
+[ "$(read_state fixslot)" = 1 ] || fail "same-range retry advanced fixslot"
+[ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "same-range retry changed slot 1 head"
+! grep -q '^fix_round\.2\.' "$S" || fail "same-range retry created slot 2: $(grep '^fix_round\.2\.' "$S")"
+[ "$(read_state round)" = 1 ] || fail "same-range retry did not count the successful P-line review"
+
+# A different head over the same reviewed start gets a new slot.
+setup_case changed-head-retry
+printf 'fail\n' >"$T/vermode"
+run_verify
+[ "$RC" = 1 ] || fail "initial changed-head retry setup exited $RC: $OUT"
+[ "$(read_state fixslot)" = 1 ] || fail "initial changed-head retry did not record slot 1"
+printf 'new change\n' >"$WT/new-change.txt"
+git -C "$WT" add new-change.txt
+git -C "$WT" commit --quiet -m 'test: change head before retry'
+git -C "$WT" push --quiet origin "$BRANCH" || fail "push changed-head retry fixture"
+NEW_HEAD="$(git -C "$WT" rev-parse HEAD)"
+printf '%s\n' "$NEW_HEAD" >"$PR_HEAD"
+run_verify
+[ "$RC" = 1 ] || fail "changed-head retry exited $RC, want 1: $OUT"
+[ "$(read_state fixslot)" = 2 ] || fail "changed-head retry did not allocate slot 2"
+[ "$(read_state fix_round.2.start)" = "$OLD" ] || fail "changed-head retry recorded the wrong slot 2 start"
+[ "$(read_state fix_round.2.head)" = "$NEW_HEAD" ] || fail "changed-head retry recorded the wrong slot 2 head"
+[ "$(read_state round)" = 0 ] || fail "changed-head VERIFY-FAIL counted a P-line round"
+
 setup_case no-verdict
 printf 'no-verdict\n' >"$T/vermode"
 run_verify
@@ -200,7 +231,7 @@ run_verify
 assert_first_verdict HEAD-MOVED 'worktree move'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "worktree move changed reviewed"
 [ "$(read_state head)" = "$HEAD" ] || fail "worktree move changed state head"
-[ "$(read_state round)" = 0 ] || fail "worktree move changed round state"
+[ "$(read_state round)" = 1 ] || fail "worktree move did not count the P-line findings round"
 [ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "worktree move did not keep the slot it recorded"
 [ "$(git -C "$WT" rev-parse HEAD)" != "$HEAD" ] || fail "review stub did not move the worktree"
 [ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "worktree-move path did not re-read the PR head after verify"
@@ -214,13 +245,28 @@ run_verify
 assert_first_verdict HEAD-MOVED 'origin move'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "origin move changed reviewed"
 [ "$(read_state head)" = "$HEAD" ] || fail "origin move changed state head"
-[ "$(read_state round)" = 0 ] || fail "origin move changed round state"
+[ "$(read_state round)" = 1 ] || fail "origin move did not count the P-line findings round"
 [ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "origin move did not keep the slot it recorded"
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD" ] || fail "origin move also changed the worktree"
 [ "$(git --git-dir="$BARE" rev-parse "refs/heads/$BRANCH")" != "$HEAD" ] || fail "review stub did not move bare origin"
 [ "$(git -C "$WT" rev-parse "refs/remotes/origin/$BRANCH")" != "$HEAD" ] || fail "post-review fetch did not refresh origin/$BRANCH"
 [ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "origin-move path did not re-read the PR head after verify"
 [ ! -e "${S%.state}.journal" ] || fail "origin move wrote the state journal"
+
+# A HEAD-MOVED review with only notes does not count a round.
+setup_case worktree-moves-note-only
+printf 'merge-only review note\n' >"$F"
+printf 'worktree-moves\n' >"$T/vermode"
+run_verify
+[ "$RC" = 1 ] || fail "note-only worktree move exited $RC, want 1: $OUT"
+assert_first_verdict HEAD-MOVED 'note-only worktree move'
+[ "$(read_state reviewed)" = "$OLD" ] || fail "note-only worktree move changed reviewed"
+[ "$(read_state head)" = "$HEAD" ] || fail "note-only worktree move changed state head"
+[ "$(read_state round)" = 0 ] || fail "note-only worktree move changed round state"
+[ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "note-only worktree move did not keep the slot it recorded"
+[ "$(git -C "$WT" rev-parse HEAD)" != "$HEAD" ] || fail "review stub did not move the note-only worktree"
+[ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "note-only worktree-move path did not re-read the PR head after verify"
+[ ! -e "${S%.state}.journal" ] || fail "note-only worktree move wrote the state journal"
 
 # Pre-review refusal paths must not call review-pr or alter state.
 setup_case not-pushed
