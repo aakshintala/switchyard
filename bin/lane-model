@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# lane-model: choose a box lane's session model from quota headroom and live load.
+# Candidates: openai/gpt-6-luna:medium, opencode-go/muse-spark-1.3-contributor,
+# and claude-haiku-5-5. muse/* needs --model-ruling and is not a candidate.
+# Usage: lane-model [--explain]   (prints '<model> <launcher>')
+# LANE_MODEL_QUOTA, LANE_MODEL_DELEGATE, and LANE_MODEL_CLAUDE override the probes.
+set -euo pipefail
+
+script_path=$0
+while [ -L "$script_path" ]; do
+  script_dir=$(cd "$(dirname "$script_path")" && pwd)
+  link=$(readlink "$script_path")
+  case "$link" in /*) script_path=$link;; *) script_path=$script_dir/$link;; esac
+done
+script_dir=$(cd "$(dirname "$script_path")" && pwd)
+
+explain=0
+case "$#:${1:-}" in
+  0:) ;;
+  1:--explain) explain=1 ;;
+  *) echo 'usage: lane-model [--explain]' >&2; exit 2 ;;
+esac
+
+quota_cmd=${LANE_MODEL_QUOTA:-$script_dir/quota}
+delegate_cmd=${LANE_MODEL_DELEGATE:-${FW_DELEGATE:-$HOME/.local/bin/delegate}}
+claude_cmd=${LANE_MODEL_CLAUDE:-${FW_CLAUDE:-claude}}
+run_dir=${FW_RUN:-${RUN_DIR:-$HOME/work/fiber-worktrees/flywheel/run}}
+host=${FW_BOX_HOST:-roundhouse-7010-plus-1.local}
+FW_LOCAL_BOX=${FW_LOCAL_BOX:-}
+if [ -z "$FW_LOCAL_BOX" ]; then
+  FW_LOCAL_BOX=0
+  if [ -z "${BOX_SSH:-${FW_SSH:-}}" ] && [ "$(uname -s)" != Darwin ]; then FW_LOCAL_BOX=1; fi
+fi
+if [ "$FW_LOCAL_BOX" = 1 ]; then
+  boxssh=${FW_BOX_LOCAL:-$script_dir/box-local.sh}
+else
+  boxssh=${BOX_SSH:-${FW_SSH:-ssh}}
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/lane-model.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+quota_ok=1
+quota_error=''
+if ! "$quota_cmd" --json >"$work/quota.json" 2>"$work/quota.err"; then
+  quota_ok=0
+  quota_error='quota command failed'
+elif ! jq -c '[.providers[]? | select(type == "object") | {
+    id: .id,
+    status: .status,
+    unavailable: (.unavailable != null),
+    headroom: ([.quotas[]?.percentRemaining | select(type == "number")] | if length == 0 then null else min end)
+  }]' "$work/quota.json" >"$work/providers.json" 2>"$work/jq.err"; then
+  quota_ok=0
+  quota_error='quota JSON could not be parsed'
+fi
+if [ "$quota_ok" -ne 1 ]; then
+  printf '[]\n' >"$work/providers.json"
+fi
+
+delegate_ok=1
+if ! "$delegate_cmd" session list --json >"$work/delegate.json" 2>"$work/delegate.err"; then
+  delegate_ok=0
+  printf '{"sessions":[]}\n' >"$work/delegate.json"
+fi
+claude_ok=1
+if ! "$claude_cmd" agents --json >"$work/claude.json" 2>"$work/claude.err"; then
+  claude_ok=0
+  printf '[]\n' >"$work/claude.json"
+fi
+
+box_delegate_ok=1
+if ! "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+    "PATH=\$HOME/.local/bin:\$PATH delegate session list --json" \
+    </dev/null >"$work/box-delegate.json" 2>"$work/box-delegate.err"; then
+  box_delegate_ok=0
+  printf '{"sessions":[]}\n' >"$work/box-delegate.json"
+fi
+box_claude_ok=1
+if ! "$boxssh" -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+    "PATH=\$HOME/.local/bin:\$PATH claude agents --json" \
+    </dev/null >"$work/box-claude.json" 2>"$work/box-claude.err"; then
+  box_claude_ok=0
+  printf '[]\n' >"$work/box-claude.json"
+fi
+
+python3 - "$work/providers.json" "$work/delegate.json" "$work/claude.json" \
+  "$work/box-delegate.json" "$work/box-claude.json" \
+  "$run_dir/roster" "$run_dir/roster-done" "$quota_ok" "$quota_error" \
+  "$delegate_ok" "$claude_ok" "$box_delegate_ok" "$box_claude_ok" "$explain" <<'PY'
+import json
+import math
+import sys
+
+(providers_path, delegate_path, claude_path, box_delegate_path, box_claude_path,
+ roster_path, retired_path, quota_ok, quota_error, delegate_ok, claude_ok,
+ box_delegate_ok, box_claude_ok, explain) = sys.argv[1:]
+quota_ok = quota_ok == "1"
+delegate_ok = delegate_ok == "1"
+claude_ok = claude_ok == "1"
+box_delegate_ok = box_delegate_ok == "1"
+box_claude_ok = box_claude_ok == "1"
+explain = explain == "1"
+
+candidates = [
+    ("openai/gpt-6-luna:medium", "codex", "muselaunch"),
+    ("opencode-go/muse-spark-1.3-contributor", "opencode-go", "muselaunch"),
+    ("claude-haiku-5-5", "claude", "boxlaunch"),
+]
+
+
+def load_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as stream:
+            return json.load(stream), None
+    except (OSError, ValueError) as exc:
+        return default, str(exc)
+
+
+provider_rows, provider_error = load_json(providers_path, [])
+if not isinstance(provider_rows, list):
+    provider_rows, provider_error = [], "quota providers are not a list"
+providers = {}
+for row in provider_rows:
+    if isinstance(row, dict) and isinstance(row.get("id"), str):
+        providers[row["id"]] = row
+
+# Match lanecheck's ticket/session retirement rules: ticket-wide rows retire
+# entries at or before their timestamp; session rows also match roster names
+# and delegate IDs (including the same prefix matching lanecheck uses).
+retired_by_ticket = {}
+retired_by_session = {}
+try:
+    with open(retired_path, encoding="utf-8") as stream:
+        for line in stream:
+            fields = [field.strip() for field in line.rstrip("\n").split("\t")]
+            if len(fields) > 2 and fields[2]:
+                key = (fields[1], fields[2])
+                retired_by_session[key] = max(fields[0], retired_by_session.get(key, ""))
+            elif len(fields) > 1:
+                retired_by_ticket[fields[1]] = max(fields[0], retired_by_ticket.get(fields[1], ""))
+except FileNotFoundError:
+    pass
+except OSError:
+    pass
+
+roster_rows = []
+roster_missing = False
+try:
+    with open(roster_path, encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 4 or not fields[3]:
+                continue
+            timestamp, ticket, host, name = fields[:4]
+            session_id = fields[4] if len(fields) > 4 else "?"
+            cutoff = retired_by_ticket.get(ticket, "")
+            for (done_ticket, key), done_at in retired_by_session.items():
+                if done_ticket != ticket:
+                    continue
+                if (key == name or key == session_id or
+                        (session_id not in ("", "?") and
+                         (session_id.startswith(key) or key.startswith(session_id)))):
+                    cutoff = max(cutoff, done_at)
+            if cutoff and timestamp.split()[0] <= cutoff:
+                continue
+            roster_rows.append((host, name, session_id))
+except FileNotFoundError:
+    roster_missing = True
+except OSError:
+    roster_missing = True
+
+
+def session_rows(path, source, command_ok):
+    if not command_ok:
+        return [], f"{source} probe failed"
+    data, error = load_json(path, None)
+    if error:
+        return [], f"{source} JSON unavailable"
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = data.get("sessions") or data.get("agents") or []
+    else:
+        rows = []
+    if not isinstance(rows, list):
+        return [], f"{source} JSON has no session list"
+    return [row for row in rows if isinstance(row, dict)], None
+
+
+delegate_rows, delegate_error = session_rows(delegate_path, "delegate", delegate_ok)
+claude_rows, claude_error = session_rows(claude_path, "claude", claude_ok)
+box_delegate_rows, box_delegate_error = session_rows(
+    box_delegate_path, "box delegate", box_delegate_ok)
+box_claude_rows, box_claude_error = session_rows(
+    box_claude_path, "box claude", box_claude_ok)
+# A box probe that fails or prints unusable JSON always warns, not only with
+# --explain: the pick then rests on Mac-only load.
+for box_error in (box_delegate_error, box_claude_error):
+    if box_error:
+        print(f"lane-model: warning: {box_error}; using Mac-only load", file=sys.stderr)
+
+# A box's delegate sessions are rostered as host=muse and use the roster's
+# fifth-column session ID. Claude box sessions are rostered as host=box and
+# use the fourth-column session name. Mac and box views can overlap, so count
+# each live session only once by its ID or name.
+rostered_delegate_ids = {
+    session_id for host, _name, session_id in roster_rows
+    if host == "muse" and session_id not in ("", "?")
+}
+rostered_claude_names = {
+    name for host, name, _session_id in roster_rows if host == "box"
+}
+
+loads = {model: 0 for model, _provider, _launcher in candidates}
+seen_delegate_ids = set()
+seen_delegate_names = set()
+for row in delegate_rows + box_delegate_rows:
+    if row.get("status") not in ("running", "idle"):
+        continue
+    session_id = row.get("id")
+    model = row.get("model")
+    name = row.get("name")
+    if not isinstance(session_id, str) or not isinstance(model, str) or model not in loads:
+        continue
+    if not any(session_id == roster_id or session_id.startswith(roster_id) or
+               roster_id.startswith(session_id) for roster_id in rostered_delegate_ids):
+        continue
+    if ((session_id and session_id in seen_delegate_ids) or
+            (isinstance(name, str) and name and name in seen_delegate_names)):
+        continue
+    seen_delegate_ids.add(session_id)
+    if isinstance(name, str) and name:
+        seen_delegate_names.add(name)
+    loads[model] += 1
+seen_claude_ids = set()
+seen_claude_names = set()
+for row in claude_rows + box_claude_rows:
+    if row.get("status") not in ("busy", "idle"):
+        continue
+    name = row.get("name")
+    if name not in rostered_claude_names:
+        continue
+    session_id = row.get("id") or row.get("sessionId")
+    if ((isinstance(session_id, str) and session_id and session_id in seen_claude_ids) or
+            (isinstance(name, str) and name in seen_claude_names)):
+        continue
+    if isinstance(session_id, str) and session_id:
+        seen_claude_ids.add(session_id)
+    if isinstance(name, str):
+        seen_claude_names.add(name)
+    loads["claude-haiku-5-5"] += 1
+
+ranked = []
+for order, (model, provider, launcher) in enumerate(candidates):
+    row = providers.get(provider)
+    headroom = row.get("headroom") if row else None
+    status = row.get("status") if row else None
+    unavailable = row.get("unavailable", False) if row else False
+    usable = (quota_ok and row is not None and not unavailable and
+              status not in ("depleted", "critical") and
+              isinstance(headroom, (int, float)) and math.isfinite(headroom))
+    score = headroom / (1 + loads[model]) if usable else None
+    reason = ""
+    if not quota_ok:
+        reason = quota_error or "quota unavailable"
+    elif row is None:
+        reason = "provider missing"
+    elif unavailable:
+        reason = "provider unavailable"
+    elif status in ("depleted", "critical"):
+        reason = f"provider {status}"
+    elif not isinstance(headroom, (int, float)) or not math.isfinite(headroom):
+        reason = "headroom missing"
+    source_errors = []
+    if provider == "claude":
+        if claude_error:
+            source_errors.append(f"{claude_error}; load treated as 0")
+        if box_claude_error:
+            source_errors.append(f"{box_claude_error}; using Mac-only load")
+    else:
+        if delegate_error:
+            source_errors.append(f"{delegate_error}; load treated as 0")
+        if box_delegate_error:
+            source_errors.append(f"{box_delegate_error}; using Mac-only load")
+    if source_errors:
+        reason = (reason + "; " if reason else "") + "; ".join(source_errors)
+    item = {
+        "model": model, "provider": provider, "launcher": launcher,
+        "headroom": headroom if usable else None, "load": loads[model],
+        "score": score, "usable": usable, "order": order, "reason": reason,
+    }
+    ranked.append(item)
+
+eligible = [item for item in ranked if item["usable"]]
+non_haiku_above_floor = any(
+    item["usable"] and item["provider"] != "claude" and item["headroom"] > 20
+    for item in ranked
+)
+# pool.md reserves claude-* for the roles: Haiku competes on score only when
+# no other candidate has more than 20% headroom.
+if non_haiku_above_floor:
+    eligible = [item for item in eligible if item["provider"] != "claude"]
+
+if explain:
+    for item in ranked:
+        headroom = "unavailable" if item["headroom"] is None else f"{item['headroom']:g}%"
+        score = "unavailable" if item["score"] is None else f"{item['score']:g}"
+        details = []
+        if item["reason"]:
+            details.append(item["reason"])
+        if item["provider"] == "claude" and non_haiku_above_floor:
+            details.append("excluded by haiku floor (>20% non-Claude headroom)")
+        if roster_missing:
+            details.append("roster missing; load is 0")
+        print(
+            f"lane-model: candidate model={item['model']} provider={item['provider']} "
+            f"headroom={headroom} live lanes={item['load']} score={score}"
+            + (f" ({'; '.join(details)})" if details else ""),
+            file=sys.stderr,
+        )
+
+if not eligible:
+    if quota_ok:
+        message = "lane-model: no usable candidates (providers are missing, unavailable, depleted, critical, or have no percent headroom)"
+    else:
+        message = f"lane-model: no usable candidates ({quota_error or 'quota unavailable'})"
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+winner = max(eligible, key=lambda item: (item["score"], -item["order"]))
+print(f"{winner['model']} {winner['launcher']}")
+PY
