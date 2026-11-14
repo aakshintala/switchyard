@@ -120,7 +120,8 @@
 #        after the merge attempt, the error says the merge status could not be confirmed.
 #        --known-flake <ticket>... is opt-in only with --by flywheel. If the gate
 #        is red, CI must be green on the exact pinned head; each test name must be
-#        named in a supplied open ticket's body or a comment; no file in its Cargo crate
+#        named in a supplied open ticket's body or a comment, bare or behind its own
+#        crate as `<crate>::<test>`; no file in its Cargo crate
 #        directory may be in the PR diff; and a fresh gate must have failed
 #        only on parsed test failures. The gate must be fail-fast and end in a
 #        nextest run: its raw exit status must be 100, and the final Summary's
@@ -702,7 +703,7 @@ known_ci_run_id() {
 
 known_flake_accept() {
   local output_file="$1" gate_exit="$2" gate_head="$3" expected_gate_head="$4" pin="$5" ci_run="$6"
-  local actual_head test ticket_data ticket_state name_found closed_ticket chosen
+  local actual_head test crate ticket_data ticket_state name_found closed_ticket chosen
   local base diff_paths gate_base i j found=0 package package_root diff_path red_test_names summary_failures distinct_failures
   local -a chosen_tickets=()
 
@@ -739,14 +740,17 @@ known_flake_accept() {
     || refuse KNOWN-FLAKE "known-flake check 4 failed: final nextest Summary reports $summary_failures failing tests but $distinct_failures distinct failures were parsed"
 
   # Check 2: require an exact name on an open ticket in the PR's repository.
+  # The name may carry the red test's own crate as a `<crate>::` prefix
+  # (`-` read as `_`, as in a Rust path); no other prefix widens the match.
   for i in "${!known_red_tests[@]}"; do
     test="${known_red_tests[$i]}"
+    crate="${known_red_packages[$i]}"
     name_found=0 closed_ticket="" chosen=""
     for ticket in "${known_flakes[@]}"; do
       ticket_data="$(gh issue view "$ticket" --repo "$repo" --json state,body,comments 2>/dev/null)" \
         || refuse KNOWN-FLAKE "known-flake check 2 failed: cannot read ticket #$ticket for red test '$test'"
       ticket_state="$(jq -r '.state // ""' <<<"$ticket_data")"
-      if [ "$(jq -r --arg test "$test" '
+      if [ "$(jq -r --arg test "$test" --arg crate "$crate" '
         def has_test_name($text; $name):
           ($name | length) as $n
           | [range(0; ($text | length)) as $i
@@ -754,7 +758,11 @@ known_flake_accept() {
              | select($i == 0 or (($text[($i - 1):$i] | test("[A-Za-z0-9_:]")) | not))
              | select(($i + $n) >= ($text | length) or (($text[($i + $n):($i + $n + 1)] | test("[A-Za-z0-9_:]")) | not))
             ] | length > 0;
-        has_test_name((.body // ""); $test) or any(.comments[]?; has_test_name((.body // ""); $test))
+        def has_any_name($text):
+          has_test_name($text; $test)
+          or ($crate != "" and (has_test_name($text; $crate + "::" + $test)
+            or has_test_name($text; ($crate | gsub("-"; "_")) + "::" + $test)));
+        has_any_name(.body // "") or any(.comments[]?; has_any_name(.body // ""))
       ' <<<"$ticket_data")" = true ]; then
         name_found=1
         if [ "$ticket_state" = OPEN ]; then chosen="$ticket"; break; else closed_ticket="$ticket"; fi

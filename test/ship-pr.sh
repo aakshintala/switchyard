@@ -2786,6 +2786,30 @@ ship --known-flake 166 --by flywheel --gate "$FOO_GATE" --keep-branch
 expect 0 "known-flake exact test-name token"
 [ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "exact test-name token merged output: [$OUT]"
 
+# A ticket may qualify the name with the red test's own crate (#1680).
+REGISTRY_GATE="printf '%s\\n' 'FAIL [ 0.001s] crate_name::integration_tests registry::tests::x' 'Summary [ 0.001s] 1 test run: 0 passed, 1 failed'; exit 100"
+prepare_known_flake
+jq -nc '{state:"OPEN",body:"known flake: crate_name::registry::tests::x",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+ship --known-flake 166 --by flywheel --gate "$REGISTRY_GATE" --keep-branch
+expect 0 "known-flake own-crate prefix"
+[ "$(tail -n 1 <<<"$OUT")" = "merged $MERGE_SHA" ] || fail "own-crate prefix merged output: [$OUT]"
+
+# A different crate's prefix names a different test.
+prepare_known_flake
+jq -nc '{state:"OPEN",body:"known flake: jobs::registry::tests::x",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+ship --known-flake 166 --by flywheel --gate "$REGISTRY_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq "check 2 failed: red test 'registry::tests::x' is not named" <<<"$ERR" || fail "wrong crate prefix: [$ERR]"
+no_merge "wrong crate prefix"
+
+# A partial path segment is not the test's name, with or without the crate.
+prepare_known_flake
+jq -nc '{state:"OPEN",body:"known flake: xregistry::tests::x and crate_name::xregistry::tests::x",createdAt:"2026-11-01T00:00:00Z",comments:[]}' >"$ST/ticket-166.json"
+ship --known-flake 166 --by flywheel --gate "$REGISTRY_GATE" --keep-branch
+expect_refused KNOWN-FLAKE
+grep -Fq "check 2 failed: red test 'registry::tests::x' is not named" <<<"$ERR" || fail "partial segment: [$ERR]"
+no_merge "partial path segment"
+
 # Any file under the red test's Cargo package directory is excluded, not only its source.
 prepare_known_flake
 printf 'touched\n' >"$WT/crates/main/README.md"
