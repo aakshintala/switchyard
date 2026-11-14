@@ -147,18 +147,24 @@ printf '0' >"$T/verify-count"
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
 printf 'review-pr|%s\n' "\$*" >>"$T/calls.log"
-verify_file=""; previous=""
+verify_file=""; previous=""; context_files=()
 for arg in "\$@"; do
   if [ "\$previous" = "--verify" ]; then verify_file="\$arg"; fi
+  if [ "\$previous" = "--context" ]; then context_files+=("\$arg"); fi
   previous="\$arg"
 done
 if [ -n "\$verify_file" ]; then
   n="\$((\$(cat "$T/verify-count") + 1))"
   printf '%s' "\$n" >"$T/verify-count"
   cp "\$verify_file" "$T/verify-input-\$n.md"
+  for context_file in "\${context_files[@]}"; do
+    cp "\$context_file" "$T/verify-context-\$n-\$(basename "\$context_file")"
+  done
 fi
 case "\$(cat "$T/vermode")" in
   ok|history-two) printf 'FIX-OK\n';;
+  ruling)
+    printf 'FIX-INCOMPLETE round=1\nP1 fix.txt:1 — a\n';;
   incomplete)
     printf 'FIX-INCOMPLETE round=2\nP1 open finding in fix.txt\nP2 second finding\n';;
   history-one)
@@ -177,6 +183,11 @@ printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 case " \$* " in *" pr list "*)
   cat "$T/prlist"
   exit "\$(cat "$T/prlistrc")";;
+  *" api repos/"*"/issues/comments/"*)
+  comment_id="\${2##*/}"
+  [ -r "$T/comment-\$comment_id.json" ] || exit 1
+  cat "$T/comment-\$comment_id.json"
+  exit 0;;
   *" headRefOid "*)
   content="\$(cat "$T/prhead")"
   case "\$content" in
@@ -334,6 +345,35 @@ write_job_record() {
 
 # Selector for the new cases below: empty or unset runs all of them.
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
+
+# A ruling closes only the named finding, and is passed as recorded context.
+if want ruling-refutes-one; then
+setup_case ruling-refutes-one
+printf 'P1 fix.txt:1 — a\nP2 fix.txt:2 — b\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+repo="$(bash "$TKT_STATE" "$S" get repo)"
+issue="$(bash "$TKT_STATE" "$S" get issue)"
+html_url="https://github.com/switchyard/switchyard/issues/$issue#issuecomment-99"
+jq -n --arg body 'refutes: P2 fix.txt:2' \
+  --arg issue_url "https://api.github.com/repos/$repo/issues/$issue" \
+  --arg html_url "$html_url" \
+  '{body:$body, issue_url:$issue_url, html_url:$html_url, created_at:"2026-11-14T00:00:00Z"}' \
+  >"$T/comment-99.json"
+printf 'ruling' >"$T/vermode"
+out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || fail "ruling-refutes-one exited $?: $out $(cat "$T/stderr")"
+grep -Fq "P2 fix.txt:2 — b" "$T/verify-input-1.md" || fail "ruling-refutes-one verify input lost P2"
+awk '/^P2 fix.txt:2 — b/ { if (getline <= 0 || $0 !~ /^refuted: recorded ruling /) exit 1; found=1 } END { exit !found }' "$T/verify-input-1.md" || fail "ruling-refutes-one did not put its ruling directly under P2"
+! awk '/^P1 fix.txt:1 — a/ { if (getline > 0 && $0 ~ /^refuted:/) exit 1 }' "$T/verify-input-1.md" || fail "ruling-refutes-one attached a ruling to P1"
+grep -Fq 'refuted: recorded ruling' "$T/verify-input-1.md" || fail "ruling-refutes-one verify input has no recorded ruling"
+grep -Fq 'refuted: recorded ruling' "$SCRIPT_DIR/../skills/review-loop/briefs/verify.md" || fail "ruling-refutes-one verify brief lacks the recorded-ruling rule"
+grep -Fq 'refutes: P2 fix.txt:2' "$T/verify-context-1-ruling-99.md" || fail "ruling-refutes-one did not pass ruling body as context"
+grep -Fq 'refutes: P2 fix.txt:2' "$T/job-findings.md" || fail "ruling-refutes-one fix job did not receive ruling text"
+history="$(bash "$TKT_STATE" "$S" get findings_history)"
+grep -Fq 'P2 fix.txt:2 — b' "$history" && grep -Fq 'status=closed in fix round 1' "$history" || fail "ruling-refutes-one did not close P2 in history"
+grep -Fq 'P1 fix.txt:1 — a' "$history" && grep -Fq 'status=open' "$history" || fail "ruling-refutes-one did not leave P1 open"
+grep -Fq "ruling: $html_url" <<<"$out" || fail "ruling-refutes-one output lacks ruling URL: $out"
+grep -Fq "ruling $html_url refutes P2 fix.txt:2" "$S.journal" || fail "ruling-refutes-one journal lacks ruling record"
+fi
 
 # A standalone verify's incomplete range must be owned before the next fix
 # round checks coverage from the original reviewed commit.
