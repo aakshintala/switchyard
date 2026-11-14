@@ -456,6 +456,7 @@ mod tests {
             "fiber/codex/gpt-6-luna:xhigh",
             "claude-haiku-5-5",
             "claude-sonnet-5-5",
+            "opencode-go/muse-spark-1.3-contributor",
         ]
         .into_iter()
         .collect();
@@ -475,7 +476,6 @@ mod tests {
             "composer-2.5",
             "grok-4.7-high",
             "grok-4.7-xhigh",
-            "opencode-go/muse-spark-1.3-contributor",
             "opencode-go/glm-5.3-flash",
             "opencode-go/deepseek-v4.1-flash",
             "codex/gpt-6.1-terra",
