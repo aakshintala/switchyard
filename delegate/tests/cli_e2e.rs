@@ -2371,6 +2371,49 @@ impl Env {
 }
 
 #[test]
+fn resumed_job_refuses_to_watch_its_ancestor() {
+    let e = Env::new("resume-watch-ancestor");
+    let a = e.run("first brief");
+    assert_eq!(e.wait_terminal(&a)["status"], "DONE");
+
+    let b = e.resume_ok(&a, &[], "follow up");
+    assert_eq!(e.wait_terminal(&b)["status"], "DONE");
+    let env = std::fs::read_to_string(e.dir.join("job-env.txt")).unwrap();
+    let mut lines = env.lines();
+    let job_id = lines.next().unwrap();
+    let chain = lines.next().unwrap();
+    assert_eq!(job_id, b);
+
+    let watch = e.delegate_env(
+        &["watch", &a],
+        None,
+        &[("DELEGATE_JOB_ID", job_id), ("DELEGATE_JOB_CHAIN", chain)],
+    );
+    assert_eq!(watch.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(watch.stderr).unwrap(),
+        format!(
+            "delegate watch: refusing to watch {a}: it is the job this process runs inside (DELEGATE_JOB_ID/DELEGATE_JOB_CHAIN); report to your orchestrator instead\n"
+        )
+    );
+}
+
+#[test]
+fn resume_lineage_accumulates_across_multiple_resumes() {
+    let e = Env::new("resume-lineage");
+    let a = e.run("first brief");
+    assert_eq!(e.wait_terminal(&a)["status"], "DONE");
+
+    let b = e.resume_ok(&a, &[], "second brief");
+    assert_eq!(e.wait_terminal(&b)["status"], "DONE");
+
+    let c = e.resume_ok(&b, &[], "third brief");
+    assert_eq!(e.wait_terminal(&c)["status"], "DONE");
+    let env = std::fs::read_to_string(e.dir.join("job-env.txt")).unwrap();
+    assert_eq!(env, format!("{c}\n{a} {b} {c}\n"));
+}
+
+#[test]
 fn resume_continues_session_and_links_chain() {
     let e = Env::new("resume");
     let a = e.run("first brief");

@@ -447,12 +447,47 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
         discard_locator();
         LaunchErr::Usage(format!("cannot write cargo-mutants shim: {e}"))
     })?;
-    let chain = std::env::var("DELEGATE_JOB_CHAIN")
+    let mut chain = std::env::var("DELEGATE_JOB_CHAIN")
         .ok()
-        .map(|chain| chain.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|chain| !chain.is_empty())
-        .map(|chain| format!("{chain} {id}"))
-        .unwrap_or_else(|| id.clone());
+        .map(|chain| {
+            chain
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut chain_ids = chain
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    if let Some(old_id) = p.resumed_from {
+        let mut lineage = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut current = Some(old_id.to_string());
+        for _ in 0..64 {
+            let Some(job_id) = current.as_deref() else {
+                break;
+            };
+            if !visited.insert(job_id.to_string()) {
+                break;
+            }
+            lineage.push(job_id.to_string());
+            let Some(raw) = read_record(job_id) else {
+                break;
+            };
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                break;
+            };
+            current = record["resumedFrom"].as_str().map(str::to_string);
+        }
+        for ancestor in lineage.into_iter().rev() {
+            if chain_ids.insert(ancestor.clone()) {
+                chain.push(ancestor);
+            }
+        }
+    }
+    chain.push(id.clone());
+    let chain = chain.join(" ");
     // debt: fiber workers do not see these (the hub daemon, not __supervise, owns their
     // tools); upgrade when fiber#4822 ships FIBER_SESSION_ID, map it to the job record
     // whose sessionId matches and extend DELEGATE_JOB_CHAIN from it.

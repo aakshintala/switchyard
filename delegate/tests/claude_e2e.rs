@@ -180,7 +180,7 @@ fn run_watch_resume_and_auto_argv() {
     assert_eq!(resumed["status"], "DONE");
     assert_eq!(
         std::fs::read_to_string(e.dir.join("job-env.2")).unwrap(),
-        format!("{next}\n{next}\n")
+        format!("{next}\n{id} {next}\n")
     );
     let argv = e.last_argv();
     assert!(
