@@ -30,7 +30,7 @@ pub(crate) const USAGE: &str =
        delegate resume <jobId> [--model M] [--model-ruling URL] [--gate CMD] [--tool-idle-ms N] [--idle-ms N] [--wall-ms N] [--prompt-file F | stdin]
        delegate model-check <model> [--model-ruling URL]
        delegate cancel <jobId>
-       delegate watch <jobId>... [--timeout S]  (exit 1: timed out; jobs still RUNNING)
+       delegate watch <jobId>... [--timeout S]  (exit 1: timed out; exit 2: refusing to watch a job this process runs inside)
        delegate status <jobId>  (print state and finished job result summary without waiting)
        delegate ack <jobId>... [--any]  (mark one or more job reports as read)
        delegate models
@@ -114,6 +114,12 @@ fn parse(args: &[String], flags: &[&str]) -> Result<(Vec<(String, String)>, Vec<
 
 fn flag<'a>(kv: &'a [(String, String)], name: &str) -> Option<&'a str> {
     kv.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+}
+
+fn current_job_contains(id: &str) -> bool {
+    std::env::var("DELEGATE_JOB_ID").is_ok_and(|own| !own.is_empty() && own == id)
+        || std::env::var("DELEGATE_JOB_CHAIN")
+            .is_ok_and(|chain| chain.split_whitespace().any(|entry| entry == id))
 }
 
 fn flag_values<'a>(kv: &'a [(String, String)], name: &str) -> Vec<&'a str> {
@@ -441,6 +447,14 @@ fn launch(p: LaunchParams<'_>) -> Result<String, LaunchErr> {
         discard_locator();
         LaunchErr::Usage(format!("cannot write cargo-mutants shim: {e}"))
     })?;
+    let chain = std::env::var("DELEGATE_JOB_CHAIN")
+        .ok()
+        .map(|chain| chain.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|chain| !chain.is_empty())
+        .map(|chain| format!("{chain} {id}"))
+        .unwrap_or_else(|| id.clone());
+    cmd.env("DELEGATE_JOB_ID", &id)
+        .env("DELEGATE_JOB_CHAIN", chain); // debt: fiber workers do not see these (the hub daemon, not __supervise, owns their tools); upgrade when fiber's hub run request takes an env field, pass DELEGATE_JOB_ID and DELEGATE_JOB_CHAIN on it.
     let mut child = unsafe {
         cmd.args(&supervise_args)
             .stdin(Stdio::null())
@@ -1375,6 +1389,11 @@ fn watch(args: &[String]) -> Result<i32, Usage> {
     let (kv, ids) = parse(args, &["--timeout"])?;
     if ids.is_empty() {
         return usage(USAGE);
+    }
+    if let Some(id) = ids.iter().find(|id| current_job_contains(id)) {
+        return usage(format!(
+            "delegate watch: refusing to watch {id}: it is the job this process runs inside (DELEGATE_JOB_ID/DELEGATE_JOB_CHAIN); report to your orchestrator instead"
+        ));
     }
     let timeout_arg = flag(&kv, "--timeout");
     let secs = match timeout_arg {

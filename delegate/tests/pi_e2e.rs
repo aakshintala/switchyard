@@ -19,6 +19,7 @@ const FAKE_PI: &str = r#"#!/bin/sh
 d="$(dirname "$0")"
 n=$(cat "$d/count" 2>/dev/null || echo 0)
 n=$((n + 1)); printf '%s' "$n" > "$d/count"
+env > "$d/env-$n.txt"
 {
   printf '%s\n' "$@"
   printf '%s\n' '---'
@@ -105,6 +106,8 @@ impl Env {
             .env("TMPDIR", &self.dir)
             .env("XDG_CACHE_HOME", self.dir.join("xdg-cache"))
             .env_remove("CLAUDECODE")
+            .env_remove("DELEGATE_JOB_ID")
+            .env_remove("DELEGATE_JOB_CHAIN")
             .env("PI_BIN", self.dir.join("pi.sh"))
             .env("DELEGATE_TEST_PI_FIXTURE", fixture)
             .env("DELEGATE_HEARTBEAT_MS", "100")
@@ -204,6 +207,17 @@ fn pi_run_finishes_with_pi_reported_cost() {
     let id = e.run_write("What is 17 * 23?");
     assert_eq!(id.len(), 36);
     let done = e.wait_terminal(&id);
+    let agent_env = std::fs::read_to_string(e.dir.join("env-1.txt")).unwrap();
+    assert!(
+        agent_env
+            .lines()
+            .any(|line| line == format!("DELEGATE_JOB_ID={id}"))
+    );
+    assert!(
+        agent_env
+            .lines()
+            .any(|line| line == format!("DELEGATE_JOB_CHAIN={id}"))
+    );
     assert_eq!(done["status"], "DONE");
     assert_eq!(done["result"]["text"], "391\nSTATUS: DONE");
     assert_eq!(done["result"]["backend"], "pi");

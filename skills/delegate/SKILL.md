@@ -166,7 +166,7 @@ job reads `CANCELLED`, and `tkt-job` prints it as `WALL-CAP`. `text` is the agen
 |---|---|
 | 0 | ok |
 | 1 | `watch` timed out, or `doctor` hard failure |
-| 2 | bad input or unknown job |
+| 2 | bad input, unknown job, or `watch` refusing the job this process runs inside |
 
 ## Sessions (Muse and pi)
 
