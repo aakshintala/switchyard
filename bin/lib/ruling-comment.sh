@@ -4,7 +4,9 @@
 fetch_issue_comment() {
   local comment_id="$1" comment_json="$2" comment_error="$3"
   ruling_comment_failure=""
+  ruling_comment_error=""
   if ! gh api "repos/$repo/issues/comments/$comment_id" >"$comment_json" 2>"$comment_error"; then
+    ruling_comment_error="$(head -n 1 "$comment_error" 2>/dev/null || true)"
     rm -f "$comment_json" "$comment_error"
     ruling_comment_failure=fetch
     return 1
