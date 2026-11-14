@@ -84,7 +84,7 @@ if [ "$part_given" -eq 1 ]; then
   part="$((10#$part))"
   if [ "$part" -lt 2 ]; then echo "tkt-start: --part needs an integer of 2 or more: $part" >&2; exit 2; fi
 fi
-if [ "$part_given" -eq 1 ] && printf '%s\n' "$closing" | grep -qiE '^[[:space:]]*(resolves|closes|fixes)([^[:alpha:]]|$)'; then
+if [ "$part_given" -eq 1 ] && printf '%s\n' "$closing" | grep -qiE '^[[:space:]]*(close[sd]?|fix(e[sd])?|resolve[sd]?)([^[:alpha:]]|$)'; then
   echo "tkt-start: warning: --part $part uses a closing keyword in --closing; use 'Part of #<n>' for a part that isn't the last" >&2
 fi
 if [ "$spec_issue_given" -eq 1 ]; then
@@ -164,12 +164,22 @@ state_has_planner_model() {
   done <"$state"
   return 1
 }
+if [ -f "$state" ]; then
+  stored_plan="$(sed -n 's/^plan=//p' "$state" | head -n 1)"
+else
+  stored_plan=""
+fi
 if [ "$no_preflight" -eq 0 ] && [ "$takeover_given" -eq 0 ]; then
   planner_available="$planner_flag_available"
   if [ "$planner_flag_seen" -eq 0 ] && state_has_planner_model; then planner_available=1; fi
   if [ "$planner_available" -eq 0 ]; then
-    echo "tkt-start: missing required role: model.planner" >&2
-    exit 2
+    case "$stored_plan" in
+      "takeover "*) ;;
+      *)
+        echo "tkt-start: missing required role: model.planner" >&2
+        exit 2
+        ;;
+    esac
   fi
 fi
 mkdir -p "$run"

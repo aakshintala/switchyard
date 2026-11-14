@@ -1249,6 +1249,20 @@ remove_model_role planner
 run_start
 want "CURRENT " 0 planner-resume
 
+# A part without a supplied or stored planner refuses before archiving its predecessor.
+setup part-planner-missing ONE AGAINST; part_seed_pr part-planner-missing
+S="$RUN/widget-42.state"
+grep -v '^model\.planner=' "$S" >"$CDIR/state.no-planner" || fail "part-planner-missing: could not filter planner"
+mv "$CDIR/state.no-planner" "$S"
+cp "$S" "$CDIR/state.before"
+printf 'MERGED\n' >"$T/prstate"
+reload --model; remove_model_role planner; run_start --part 2
+[ "$RC" -eq 2 ] || fail "part-planner-missing: exit $RC, want 2"
+grep -Fxq 'tkt-start: missing required role: model.planner' "$CDIR/stderr" \
+  || fail "part-planner-missing: stderr does not name model.planner: $(cat "$CDIR/stderr")"
+cmp -s "$S" "$CDIR/state.before" || fail "part-planner-missing: earlier state changed"
+[ ! -e "$S.part1" ] || fail "part-planner-missing: earlier state was archived"
+
 # --no-preflight makes the plan phase unreachable, so it needs no planner.
 setup planner-no-preflight ONE AGAINST
 remove_model_role planner
@@ -1265,12 +1279,32 @@ want "CURRENT " 0 planner-takeover
 grep -qF 'plan=takeover #123' "$RUN/widget-42.state" \
   || fail "planner-takeover: state does not record the takeover"
 
+# Resuming a stored takeover plan does not enter planning or require a planner.
+setup planner-takeover-resume ONE AGAINST
+remove_model_role planner
+printf 'plan=takeover #123\n' >"$RUN/widget-42.state"
+run_start
+! grep -qF 'tkt-start: missing required role: model.planner' "$CDIR/stderr" \
+  || fail "planner-takeover-resume: refused a stored takeover plan without a planner"
+want "CURRENT " 0 planner-takeover-resume
+
 # A part may use a closing keyword, but tkt-start must warn rather than refuse it.
 setup part-closing-warning ONE AGAINST
 run_start --no-preflight --part 2
 want "SKIPPED filing=" 0 part-closing-warning
 [ "$(grep -ci 'warning.*--part.*closing' "$CDIR/stderr")" -gt 0 ] \
   || fail "part-closing-warning: stderr misses the warning: $(cat "$CDIR/stderr")"
+setup part-closing-fixed ONE AGAINST
+run_start --no-preflight --part 2 --closing 'Fixed #42'
+want "SKIPPED filing=" 0 part-closing-fixed
+[ "$(grep -ci 'warning.*--part.*closing' "$CDIR/stderr")" -gt 0 ] \
+  || fail "part-closing-fixed: stderr misses the warning: $(cat "$CDIR/stderr")"
+setup part-closing-no-warning ONE AGAINST
+printf 'Batch part.\n\nPart of #42\n' >"$CDIR/spec.md"
+run_start --no-preflight --part 2 --spec "$CDIR/spec.md" --closing 'Part of #42'
+want "SKIPPED filing=" 0 part-closing-no-warning
+[ "$(grep -ci 'warning.*--part.*closing' "$CDIR/stderr")" -eq 0 ] \
+  || fail "part-closing-no-warning: Part of closing warned: $(cat "$CDIR/stderr")"
 
 # OpenAI ids need their pool-listed effort suffix; other providers are unaffected.
 setup openai-bare ONE AGAINST
