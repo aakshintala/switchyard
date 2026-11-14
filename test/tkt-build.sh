@@ -2057,7 +2057,7 @@ EOF
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "ruling-verdict-precondition: seed LINES"
 bash "$TKT_STATE" "$S" set plan_verdict_hash "$(git -C "$WT" hash-object -w "$CDIR/plan.md")" || fail "ruling-verdict-precondition: seed plan snapshot"
 bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2000-01-01T00:00:00Z || fail "ruling-verdict-precondition: seed stop time"
-jq -n '{body:"Ruling comment 721473 settles the open line.",issue_url:"https://api.github.com/repos/switchyard/issues/528",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
+jq -n '{body:"Ruling comment 721473 settles the open line.",issue_url:"https://api.github.com/repos/switchyard/issues/528",author_association:"OWNER",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
 awk '{ if ($0 == "- Open line: use the default behavior.") print "- Ruling comment 721473 settles the open line."; else print }' "$CDIR/plan.md" >"$CDIR/plan.tmp" && mv "$CDIR/plan.tmp" "$CDIR/plan.md"
 TKT_PLAN_OUT="$(bash "$TKT_PLAN" "$S" triaged --comment 721473 2>"$CDIR/ruling-stderr.txt")"; TKT_PLAN_RC=$?
 [ "$TKT_PLAN_RC" -eq 0 ] || fail "ruling-verdict-precondition: ruling is recorded (rc=$TKT_PLAN_RC): $(head -n 1 <<<"$TKT_PLAN_OUT") $(cat "$CDIR/ruling-stderr.txt")"
@@ -2072,7 +2072,7 @@ setup_case ruled-verdict-build
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "ruled-verdict-build: seed LINES"
 bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "ruled-verdict-build: seed plan verdict time"
 bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2001-01-01T00:00:00Z || fail "ruled-verdict-build: seed stop verdict time"
-jq -n '{body:"Steward ruling RULING-1604 approves this plan.",issue_url:"https://api.github.com/repos/switchyard/issues/528",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
+jq -n '{body:"Steward ruling RULING-1604 approves this plan.",issue_url:"https://api.github.com/repos/switchyard/issues/528",author_association:"OWNER",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
 RULE_OUT="$(bash "$TKT_PLAN" "$S" rule-ok --by surveyor --ruling RULING-1604 --comment 721474 2>"$CDIR/rule-stderr.txt")"; RULE_RC=$?
 [ "$RULE_RC" -eq 0 ] || fail "ruled-verdict-build: rule-ok records the ruling (rc=$RULE_RC): $(cat "$CDIR/rule-stderr.txt")"
 expect_state plan_verdict ok "ruled-verdict-build"
@@ -2088,7 +2088,7 @@ grep -q '^PLAN-VERDICT ruled by=surveyor ruling=RULING-1604 comment=721474$' <<<
 setup_case ruled-verdict-edited-plan
 bash "$TKT_STATE" "$S" set plan_verdict lines || fail "ruled-verdict-edited-plan: seed LINES"
 bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "ruled-verdict-edited-plan: seed plan verdict time"
-jq -n '{body:"Steward ruling RULING-1604 approves this plan.",issue_url:"https://api.github.com/repos/switchyard/issues/528",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
+jq -n '{body:"Steward ruling RULING-1604 approves this plan.",issue_url:"https://api.github.com/repos/switchyard/issues/528",author_association:"OWNER",created_at:"2099-01-01T00:00:00Z"}' >"$T/comment.json"
 RULE_OUT="$(bash "$TKT_PLAN" "$S" rule-ok --by flywheel --ruling RULING-1604 --comment 721475 2>"$CDIR/rule-stderr.txt")"; RULE_RC=$?
 [ "$RULE_RC" -eq 0 ] || fail "ruled-verdict-edited-plan: rule-ok records the ruling (rc=$RULE_RC): $(cat "$CDIR/rule-stderr.txt")"
 printf '\n<!-- later plan edit -->\n' >>"$CDIR/plan.md"

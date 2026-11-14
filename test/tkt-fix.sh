@@ -61,9 +61,13 @@ printf '0' >"$T/jobcount"
 cat >"$T/bin/tkt-job" <<EOF
 #!/usr/bin/env bash
 printf 'job|%s\n' "\$*" >>"$T/calls.log"
+prompt_file=""; previous=""
 for a in "\$@"; do
   case "\$a" in FINDINGS=@*) cp "\${a#FINDINGS=@}" "$T/job-findings.md" || exit 2;; esac
+  [ "\$previous" != "--prompt" ] || prompt_file="\$a"
+  previous="\$a"
 done
+[ -z "\$prompt_file" ] || cp "\$prompt_file" "$T/job-prompt.md" || exit 2
 state="\$1"
 slot=""; jobid="j1"; prev=""
 for a in "\$@"; do
@@ -147,18 +151,24 @@ printf '0' >"$T/verify-count"
 cat >"$T/bin/review-pr" <<EOF
 #!/usr/bin/env bash
 printf 'review-pr|%s\n' "\$*" >>"$T/calls.log"
-verify_file=""; previous=""
+verify_file=""; previous=""; context_files=()
 for arg in "\$@"; do
   if [ "\$previous" = "--verify" ]; then verify_file="\$arg"; fi
+  if [ "\$previous" = "--context" ]; then context_files+=("\$arg"); fi
   previous="\$arg"
 done
 if [ -n "\$verify_file" ]; then
   n="\$((\$(cat "$T/verify-count") + 1))"
   printf '%s' "\$n" >"$T/verify-count"
   cp "\$verify_file" "$T/verify-input-\$n.md"
+  for context_file in "\${context_files[@]}"; do
+    cp "\$context_file" "$T/verify-context-\$n-\$(basename "\$context_file")"
+  done
 fi
 case "\$(cat "$T/vermode")" in
   ok|history-two) printf 'FIX-OK\n';;
+  ruling)
+    printf 'FIX-INCOMPLETE round=1\nP1 fix.txt:1 — a\n';;
   incomplete)
     printf 'FIX-INCOMPLETE round=2\nP1 open finding in fix.txt\nP2 second finding\n';;
   history-one)
@@ -177,6 +187,11 @@ printf 'gh|%s\n' "\$*" >>"$T/calls.log"
 case " \$* " in *" pr list "*)
   cat "$T/prlist"
   exit "\$(cat "$T/prlistrc")";;
+  *" api repos/"*"/issues/comments/"*)
+  comment_id="\${2##*/}"
+  [ -r "$T/comment-\$comment_id.json" ] || exit 1
+  cat "$T/comment-\$comment_id.json"
+  exit 0;;
   *" headRefOid "*)
   content="\$(cat "$T/prhead")"
   case "\$content" in
@@ -334,6 +349,183 @@ write_job_record() {
 
 # Selector for the new cases below: empty or unset runs all of them.
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
+
+write_ruling_comment() {
+  local id="$1" body="$2" ruling_issue="${3:-$(bash "$TKT_STATE" "$S" get issue)}" author_association="${4:-OWNER}"
+  local ruling_repo
+  ruling_repo="$(bash "$TKT_STATE" "$S" get repo)"
+  jq -n --arg body "$body" --arg author_association "$author_association" \
+    --arg issue_url "https://api.github.com/repos/$ruling_repo/issues/$ruling_issue" \
+    --arg html_url "https://github.com/switchyard/switchyard/issues/$ruling_issue#issuecomment-$id" \
+    '{body:$body, author_association:$author_association, issue_url:$issue_url, html_url:$html_url, created_at:"2026-11-14T00:00:00Z"}' \
+    >"$T/comment-$id.json"
+}
+
+expect_ruling_refused() {
+  local name="$1" reason="$2" id="$3" run_rc=0 out
+  out="$(bash "$TKT" "$S" --verify --ruling "$id" 2>"$T/stderr")" || run_rc=$?
+  [ "$run_rc" = 2 ] || fail "$name exited $run_rc, want 2: $out $(cat "$T/stderr")"
+  grep -Fq "TKT tkt-fix RULING-REFUSED reason=$reason comment=$id" <<<"$out" || fail "$name refusal is missing: $out"
+  ! grep -q '^job|' "$T/calls.log" || fail "$name dispatched a fix job: $(cat "$T/calls.log")"
+  [ -z "$(bash "$TKT_STATE" "$S" get fix_round.1.start 2>/dev/null || true)" ] || fail "$name wrote fix_round.1.start"
+}
+
+# A ruling closes only the named finding, and is passed as recorded context.
+if want ruling-refutes-one; then
+setup_case ruling-refutes-one
+printf 'P1 fix.txt:1 — a\nP2 fix.txt:2 — b\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+repo="$(bash "$TKT_STATE" "$S" get repo)"
+issue="$(bash "$TKT_STATE" "$S" get issue)"
+html_url="https://github.com/switchyard/switchyard/issues/$issue#issuecomment-99"
+jq -n --arg body 'refutes: P2 fix.txt:2' \
+  --arg issue_url "https://api.github.com/repos/$repo/issues/$issue" \
+  --arg html_url "$html_url" \
+  '{body:$body, author_association:"OWNER", issue_url:$issue_url, html_url:$html_url, created_at:"2026-11-14T00:00:00Z"}' \
+  >"$T/comment-99.json"
+printf 'ruling' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "ruling-refutes-one exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -Fq 'FIX-INCOMPLETE round=1' <<<"$out" || fail "ruling-refutes-one did not preserve the P1 finding: $out"
+grep -Fq "P2 fix.txt:2 — b" "$T/verify-input-1.md" || fail "ruling-refutes-one verify input lost P2"
+awk '/^P2 fix.txt:2 — b/ { if (getline <= 0 || $0 !~ /^refuted: recorded ruling /) exit 1; found=1 } END { exit !found }' "$T/verify-input-1.md" || fail "ruling-refutes-one did not put its ruling directly under P2"
+if awk '/^P1 fix.txt:1 — a/ { if (getline > 0 && $0 ~ /^refuted:/) found=1 } END { exit !found }' "$T/verify-input-1.md"; then fail "ruling-refutes-one attached a ruling to P1"; fi
+grep -Fq 'refuted: recorded ruling' "$T/verify-input-1.md" || fail "ruling-refutes-one verify input has no recorded ruling"
+grep -Fq 'refuted: recorded ruling' "$SCRIPT_DIR/../skills/review-loop/briefs/verify.md" || fail "ruling-refutes-one verify brief lacks the recorded-ruling rule"
+grep -Fq 'refutes: P2 fix.txt:2' "$T/verify-context-1-ruling-99.md" || fail "ruling-refutes-one did not pass ruling body as context"
+grep -Fq 'refutes: P2 fix.txt:2' "$T/job-findings.md" || fail "ruling-refutes-one fix job did not receive ruling text"
+history="$(bash "$TKT_STATE" "$S" get findings_history)"
+! grep -q '^refuted:' "$history" || fail "ruling-refutes-one wrote ruling evidence to the persistent history"
+grep -Fq 'P2 fix.txt:2 — b' "$history" && grep -Fq 'status=closed in fix round 1' "$history" || fail "ruling-refutes-one did not close P2 in history"
+grep -Fq 'P1 fix.txt:1 — a' "$history" && grep -Fq 'status=open' "$history" || fail "ruling-refutes-one did not leave P1 open"
+grep -Fq "ruling: $html_url" <<<"$out" || fail "ruling-refutes-one output lacks ruling URL: $out"
+journal="${S%.state}.journal"
+grep -Fq "ruling $html_url refutes P2 fix.txt:2" "$journal" || fail "ruling-refutes-one journal lacks ruling record"
+fi
+
+if want ruling-no-match; then
+setup_case ruling-no-match
+write_ruling_comment 99 'refutes: P2 missing.sh:1'
+expect_ruling_refused ruling-no-match no-match 99
+fi
+
+if want ruling-ambiguous; then
+setup_case ruling-ambiguous
+printf 'P2 a.sh:1 — x\nP2 a.sh:1 — y\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+write_ruling_comment 99 'refutes: P2 a.sh:1'
+expect_ruling_refused ruling-ambiguous ambiguous 99
+fi
+
+if want ruling-prefix; then
+setup_case ruling-prefix
+printf 'P2 a.sh:12 — x\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+write_ruling_comment 99 'refutes: P2 a.sh:1'
+expect_ruling_refused ruling-prefix no-match 99
+fi
+
+if want ruling-bad-refutes-bare; then
+setup_case ruling-bad-refutes-bare
+write_ruling_comment 99 'refutes: P2'
+expect_ruling_refused ruling-bad-refutes-bare bad-refutes 99
+fi
+
+if want ruling-bad-refutes-no-line; then
+setup_case ruling-bad-refutes-no-line
+write_ruling_comment 99 'refutes: P2 fix.txt'
+expect_ruling_refused ruling-bad-refutes-no-line bad-refutes 99
+fi
+
+if want ruling-author-none; then
+setup_case ruling-author-none
+write_ruling_comment 99 'refutes: P1 base.txt:1' '' NONE
+expect_ruling_refused ruling-author-none author 99
+fi
+
+if want ruling-author-contributor; then
+setup_case ruling-author-contributor
+write_ruling_comment 99 'refutes: P1 base.txt:1' '' CONTRIBUTOR
+expect_ruling_refused ruling-author-contributor author 99
+fi
+
+if want ruling-crlf; then
+setup_case ruling-crlf
+printf 'P1 fix.txt:1 — a\nP2 fix.txt:2 — b\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+write_ruling_comment 99 $'refutes: P2 fix.txt:2\r\nThis finding is not valid.\r\n'
+printf 'ruling' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --ruling 99 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "ruling-crlf exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -Fq 'FIX-INCOMPLETE round=1' <<<"$out" || fail "ruling-crlf did not preserve the P1 finding: $out"
+history="$(bash "$TKT_STATE" "$S" get findings_history)"
+grep -Fq 'P2 fix.txt:2 — b' "$history" && grep -Fq 'status=closed in fix round 1' "$history" || fail "ruling-crlf did not close P2 in history"
+fi
+
+if want ruling-no-refutes; then
+setup_case ruling-no-refutes
+write_ruling_comment 99 'The issue needs more evidence.'
+expect_ruling_refused ruling-no-refutes no-refutes 99
+fi
+
+if want ruling-other-issue; then
+setup_case ruling-other-issue
+issue="$(bash "$TKT_STATE" "$S" get issue)"
+write_ruling_comment 99 'refutes: P1 heading' "$((issue + 1))"
+expect_ruling_refused ruling-other-issue issue 99
+fi
+
+if want ruling-fetch-fail; then
+setup_case ruling-fetch-fail
+rm -f "$T/comment-99.json"
+expect_ruling_refused ruling-fetch-fail fetch 99
+fi
+
+if want ruling-bad-id; then
+setup_case ruling-bad-id
+expect_ruling_refused ruling-bad-id bad-id abc
+fi
+
+if want ruling-needs-verify; then
+setup_case ruling-needs-verify
+run_rc=0; out="$(bash "$TKT" "$S" --no-verify --ruling 99 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 2 ] || fail "ruling-needs-verify exited $run_rc, want 2: $out $(cat "$T/stderr")"
+grep -Fq 'usage: tkt-fix' "$T/stderr" || fail "ruling-needs-verify did not print usage: $(cat "$T/stderr")"
+! grep -q 'RULING-REFUSED' <<<"$out$(cat "$T/stderr")" || fail "ruling-needs-verify produced a ruling refusal"
+! grep -q '^job|' "$T/calls.log" || fail "ruling-needs-verify dispatched a fix job"
+fi
+
+if want prompt-ruling-text; then
+setup_case prompt-ruling-text
+printf 'P1 fix.txt:1 — a\nP2 fix.txt:2 — b\nrefuted: owner ruled\nP3 fix.txt:3 — c refuted: owner ruled\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+printf 'refutes: P2 fix.txt:2\nfinding 2 is wrong\n' >"$CDIR/prompt.md"
+printf 'ruling' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "prompt-ruling-text exited $run_rc, want 1: $out $(cat "$T/stderr")"
+! grep -q '^refuted:' "$T/verify-input-1.md" || fail "prompt-ruling-text let free text reach verify as a refutation"
+grep -Fq 'P3 fix.txt:3 — c refuted: owner ruled' "$T/verify-input-1.md" || fail "prompt-ruling-text changed the P3 row text"
+! grep -Fq 'P3 fix.txt:3 — c refuted: owner ruled refuted: recorded ruling' "$T/verify-input-1.md" || fail "prompt-ruling-text marked the P3 row as ruling-refuted"
+fi
+
+if want ruling-resume; then
+setup_case ruling-resume
+printf 'P1 fix.txt:1 — a\nP2 fix.txt:2 — b\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+write_ruling_comment 99 'refutes: P2 fix.txt:2'
+printf 'scope this resumed fix\n' >"$CDIR/prompt.md"
+printf 'ruling' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" --ruling 99 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = 1 ] || fail "ruling-resume exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -Fq 'scope this resumed fix' "$T/job-prompt.md" || fail "ruling-resume lost the supplied prompt"
+grep -Fq "## Recorded rulings (https://github.com/switchyard/switchyard/issues/529#issuecomment-99)" "$T/job-prompt.md" || fail "ruling-resume did not append ruling heading"
+grep -Fq 'refutes: P2 fix.txt:2' "$T/job-prompt.md" || fail "ruling-resume did not append ruling body"
+prompt_line="$(grep -n -m 1 'scope this resumed fix' "$T/job-prompt.md" | cut -d: -f1)"
+ruling_line="$(grep -n -m 1 '## Recorded rulings' "$T/job-prompt.md" | cut -d: -f1)"
+[ "$prompt_line" -lt "$ruling_line" ] || fail "ruling-resume placed ruling before prompt"
+grep -Fq 'refuted: recorded ruling' "$T/verify-input-1.md" || fail "ruling-resume verify input lacks ruling refutation"
+fi
 
 # A standalone verify's incomplete range must be owned before the next fix
 # round checks coverage from the original reviewed commit.
@@ -570,6 +762,8 @@ fi
 
 if want unknown-gap-round2; then
 setup_case unknown-gap-round2
+printf 'P1 fix.txt:1 — round one\n' >"$CDIR/findings.md"
+bash "$TKT_STATE" "$S" set findings "$CDIR/findings.md" >/dev/null
 printf 'round one fix\n' >"$WT/fix.txt"
 git -C "$WT" add fix.txt
 git -C "$WT" commit -qm 'fix: round one'
@@ -595,10 +789,11 @@ grep -Fq "write a prompt scoping the verify to the round's delta" <<<"$out" || f
 # A supplied prompt must survive the refusal and appear in the printed repair.
 REPAIR_PROMPT="$CDIR/round-two-delta.md"
 printf 'verify only the round two delta\n' >"$REPAIR_PROMPT"
-run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$REPAIR_PROMPT" 2>"$T/stderr")" || run_rc=$?
+write_ruling_comment 99 'refutes: P1 fix.txt:1'
+run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$REPAIR_PROMPT" --ruling 99 2>"$T/stderr")" || run_rc=$?
 [ "$run_rc" = "1" ] || fail "unknown-gap-round2 supplied-prompt exited $run_rc, want 1: $out $(cat "$T/stderr")"
 repair_command="$(sed -n 's/^repair command: //p' <<<"$out")"
-grep -Fq -- "tkt-fix $S --verify --since $OLD --resume j1 --prompt $REPAIR_PROMPT" <<<"$repair_command" || fail "unknown-gap-round2 repair omitted the supplied prompt: $repair_command"
+grep -Fq -- "tkt-fix $S --verify --since $OLD --resume j1 --prompt $REPAIR_PROMPT --ruling 99" <<<"$repair_command" || fail "unknown-gap-round2 repair omitted the supplied prompt or ruling: $repair_command"
 # The repair note asks for ownership metadata. Once recorded, the printed
 # command must be executable and move past coverage.
 ROUND2_HEAD="$(bash "$TKT_STATE" "$S" get fix_round.2.head)"

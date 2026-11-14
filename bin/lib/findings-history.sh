@@ -2,6 +2,25 @@
 # Source after namebase.sh; callers provide state, run, namebase, part_suffix,
 # findings, history_file, knum and t().
 
+# Return the visible finding row without its tkt-history metadata suffix.
+findings_row_base() {
+  local row="$1"
+  case "$row" in
+    *" [tkt-history:"*) printf '%s' "${row%% [tkt-history:*}" ;;
+    *) printf '%s' "$row" ;;
+  esac
+}
+
+# Return the status field from a finding row's tkt-history metadata, if present.
+findings_row_status() {
+  local row="$1" meta=""
+  case "$row" in
+    *" [tkt-history:"*)
+      meta="${row#* [tkt-history: }"; meta="${meta%]}" ;;
+  esac
+  sed -n 's/.*status=\([^;]*\).*/\1/p' <<<"$meta"
+}
+
 # Store every finding supplied to a scoped verify, with its origin and later
 # closure, separately from the open-only file the next fix job consumes.
 write_findings_history() {
@@ -12,14 +31,13 @@ write_findings_history() {
   history_add_row() {
     local mode="$1" default_raised="$2" row="$3" base meta parsed_raised parsed_status parsed_unverified raised status unverified i
     case "$row" in P1\ *|P2\ *|P3\ *) ;; *) return 0;; esac
-    base="$row"; meta=""
+    base="$(findings_row_base "$row")"
+    meta=""
     case "$row" in
-      *" [tkt-history:"*)
-        base="${row%% [tkt-history:*}"
-        meta="${row#* [tkt-history: }"; meta="${meta%]}" ;;
+      *" [tkt-history:"*) meta="${row#* [tkt-history: }"; meta="${meta%]}" ;;
     esac
     parsed_raised="$(sed -n 's/.*raised=\([^;]*\).*/\1/p' <<<"$meta")"
-    parsed_status="$(sed -n 's/.*status=\([^;]*\).*/\1/p' <<<"$meta")"
+    parsed_status="$(findings_row_status "$row")"
     parsed_unverified="$(sed -n 's/.*unverified=\([^;]*\).*/\1/p' <<<"$meta")"
     case "$mode" in
       history)
