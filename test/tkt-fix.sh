@@ -504,6 +504,7 @@ fi
 if want ruling-bad-id; then
 setup_case ruling-bad-id
 expect_ruling_refused ruling-bad-id bad-id abc
+! grep -q '^gh|api ' "$T/calls.log" || fail "ruling-bad-id fetched a non-numeric comment id: $(cat "$T/calls.log")"
 fi
 
 if want ruling-needs-verify; then

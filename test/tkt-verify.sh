@@ -394,6 +394,55 @@ grep -Fq 'round=3' <<<"$OUT" || fail "next round hint omitted the current round:
 assert_no_review 'next round without grant'
 fi
 
+# Resetting grant keys opens a fresh review cycle: the old comment is stale,
+# rounds 1 and 2 run again, and a new round-3 grant can be consumed.
+if [ -z "${CASE:-}" ] || [ "$CASE" = grant-cycle-reset ]; then
+setup_case grant-cycle-reset
+set_state round 2
+set_state verdict_at '2026-11-10T00:00:00Z'
+write_ruling_comment 940 'grants: round 3' OWNER 1756 '2026-11-11T00:00:00Z'
+printf 'incomplete\n' >"$T/vermode"
+run_verify_ruling 940
+[ "$RC" = 1 ] || fail "grant-cycle-reset initial grant exited $RC: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'grant-cycle-reset initial grant'
+[ "$(read_state round)" = 3 ] || fail "grant-cycle-reset initial grant did not count round 3"
+[ "$(read_state grant.3)" != '' ] || fail "grant-cycle-reset initial grant was not stored"
+
+bash "$TKT_STATE" "$S" unset grants || fail "grant-cycle-reset clears previous grant keys"
+set_state round 0
+set_state verdict_at '2026-11-15T00:00:00Z'
+assert_no_grant 'grant-cycle-reset after reset'
+grep -Fq 'body_has=Recorded ruling: https://github.com/switchyard/switchyard/issues/1756#issuecomment-940' "$S" || fail "grant-cycle-reset reset removed the PR-body audit line"
+run_verify
+[ "$RC" = 1 ] || fail "grant-cycle-reset round 1 exited $RC: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'grant-cycle-reset round 1'
+[ "$(read_state round)" = 1 ] || fail "grant-cycle-reset did not count round 1"
+run_verify
+[ "$RC" = 1 ] || fail "grant-cycle-reset round 2 exited $RC: $OUT"
+assert_first_verdict FIX-INCOMPLETE 'grant-cycle-reset round 2'
+[ "$(read_state round)" = 2 ] || fail "grant-cycle-reset did not count round 2"
+set_state verdict_at '2026-11-15T00:00:00Z'
+: >"$T/calls.log"
+run_verify_ruling 940
+[ "$RC" = 2 ] || fail "grant-cycle-reset old grant after reset exited $RC, want 2: $OUT"
+grep -Fq 'RULING-REFUSED reason=stale comment=940' <<<"$OUT" || fail "grant-cycle-reset old grant after reset was not stale: $OUT"
+assert_no_review 'grant-cycle-reset old grant after reset'
+[ "$(read_state round)" = 2 ] || fail "grant-cycle-reset old grant after reset changed round"
+write_ruling_comment 941 'grants: round 3' OWNER 1756 '2026-11-16T00:00:00Z'
+printf 'incomplete\n' >"$T/vermode"
+run_verify_ruling 941
+[ "$RC" = 1 ] || fail "grant-cycle-reset fresh grant exited $RC: $OUT $(cat "$T/stderr")"
+assert_first_verdict FIX-INCOMPLETE 'grant-cycle-reset fresh grant'
+[ "$(read_state round)" = 3 ] || fail "grant-cycle-reset fresh grant did not count round 3"
+[ "$(read_state grant.3)" = '941 https://github.com/switchyard/switchyard/issues/1756#issuecomment-941' ] || fail "grant-cycle-reset fresh grant did not replace grant.3"
+: >"$T/calls.log"
+run_verify_ruling 940
+[ "$RC" = 2 ] || fail "grant-cycle-reset old grant after fresh acceptance exited $RC, want 2: $OUT"
+grep -Fq 'RULING-REFUSED reason=stale comment=940' <<<"$OUT" || fail "grant-cycle-reset old grant after fresh acceptance was not stale: $OUT"
+assert_no_review 'grant-cycle-reset old grant after fresh acceptance'
+[ "$(read_state round)" = 3 ] || fail "grant-cycle-reset old grant changed round after fresh acceptance"
+fi
+
 # VERIFY-FAIL leaves the counted slot and grant available for a retry.
 if [ -z "${CASE:-}" ] || [ "$CASE" = grant-retry ]; then
 setup_case grant-retry
