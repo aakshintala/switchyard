@@ -893,6 +893,25 @@ run_build
 expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "prempty"
 grep -q "^gate|" "$T/calls.log" && fail "prempty: the gate never runs"
 
+setup_case prempty-no-lane
+touch "$T/empty-pr"
+run_build --from gate
+[ "$RC" -eq 2 ] || fail "prempty-no-lane exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "prempty-no-lane"
+grep -Fqx "Repair command: tkt-build $S --from lane (create the branch PR, then resume with --from review)" <<<"$OUT" \
+  || fail "prempty-no-lane: unset job.lane keeps the existing repair hint"
+grep -q "^gate|" "$T/calls.log" && fail "prempty-no-lane: the gate never runs"
+
+setup_case prempty-resumed-lane
+bash "$TKT_STATE" "$S" set job.lane lane-resumable || fail "prempty-resumed-lane: set lane job"
+touch "$T/empty-pr"
+run_build --from gate
+[ "$RC" -eq 2 ] || fail "prempty-resumed-lane exits 2 (rc=$RC)"
+expect_verdict "TKT tkt-build PRECONDITION missing=pr log=*" "prempty-resumed-lane"
+grep -Fqx "Repair command: tkt-job $S --slot lane --resume lane-resumable --prompt <file> --gate-from-plan --expect-commits, then tkt-build $S --from gate" <<<"$OUT" \
+  || fail "prempty-resumed-lane: repair hint resumes the stored lane"
+grep -q "^gate|" "$T/calls.log" && fail "prempty-resumed-lane: the gate never runs"
+
 # --- a failing gate stops the build, which passes its verdict through ---
 setup_case gate-fail
 {

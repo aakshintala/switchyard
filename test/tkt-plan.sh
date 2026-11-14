@@ -3727,6 +3727,8 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
   bash "$TKT_STATE" "$S" set plan_verdict_at 2000-01-01T00:00:00Z || fail "seed rule-ok success verdict time"
   bash "$TKT_STATE" "$S" set plan_stop_verdict_at 2001-01-01T00:00:00Z || fail "seed rule-ok success stop time"
   set_ruling_comment 'Steward ruling RULING-1604: dispatch this exact plan.'
+  spaced_state="$CDIR/tkt state.state"
+  cp "$S" "$spaced_state" || fail "copy rule-ok success state to spaced path"
   run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654010
   [ "$RC" -eq 0 ] || fail "rule-ok-success records PLAN-OK (rc=$RC): $(cat "$CDIR/stderr.txt")"
   expect_verdict "TKT tkt-plan RULE-OK by=surveyor ruling=RULING-1604 comment=654010 log=*" "rule-ok-success"
@@ -3737,6 +3739,16 @@ if [ -z "${TKT_PLAN_TEST_ONLY:-}" ] || [ "$TKT_PLAN_TEST_ONLY" = rule-ok ]; then
   [ "$(state_get plan_verdict_comment)" = 654010 ] || fail "rule-ok-success records comment provenance"
   grep -Fq "next: tkt-build $S" <<<"$OUT" || fail "rule-ok-success prints tkt-build as the next step"
   grep -Fq 'tkt-plan rule-ok by=surveyor ruling=RULING-1604 comment=654010' "$CDIR/tkt.journal" || fail "rule-ok-success journals its ruling provenance"
+
+  S="$spaced_state"
+  run_plan rule-ok --by surveyor --ruling RULING-1604 --comment 654010
+  [ "$RC" -eq 0 ] || fail "rule-ok-success-spaced-state records PLAN-OK (rc=$RC): $(cat "$CDIR/stderr.txt")"
+  expect_verdict "TKT tkt-plan RULE-OK by=surveyor ruling=RULING-1604 comment=654010 log=*" "rule-ok-success-spaced-state"
+  printf -v quoted_state '%q' "$S"
+  grep -Fqx "next: tkt-build $quoted_state" <<<"$OUT" \
+    || fail "rule-ok-success-spaced-state prints the %q-quoted tkt-build route"
+  grep -Fq 'tkt-plan rule-ok by=surveyor ruling=RULING-1604 comment=654010' "$CDIR/tkt state.journal" \
+    || fail "rule-ok-success-spaced-state journals its ruling provenance"
 fi
 
 echo "tkt-plan: all cases passed"
