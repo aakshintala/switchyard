@@ -12,7 +12,8 @@
 # Usage:
 #   review-pr start <pr> --repo OWNER/NAME --cwd CLONE [--issue N]... [--spec N] [--state PATH] --model M [--overbuild-model M2] [--axes LIST] [--context PATH]... [--workflow-doc PATH] [--head SHA] [--full-rereview REASON]
 #     LIST is standards[,spec][,overbuild], default all three: one job per
-#     axis. Review mode fetches the diff and tickets into each review worktree.
+#     axis. Review mode fetches the diff and tickets into each review worktree;
+#     review and verify also fetch the PR body and provide it as context.
 #     --state supplies the ticket state whose fence is shown to reviewers.
 #     --overbuild-model is required only when overbuild is listed.
 #     --full-rereview is review mode only; it skips the comment check.
@@ -28,7 +29,8 @@
 #     delegation tool's wait command (delegate watch), in the wait mode your
 #     harness instructions prescribe.
 #     --verify ignores --issue, --spec and --overbuild-model, one stderr note each
-#     (--axes too, when passed).
+#     (--axes too, when passed). A non-empty PR body is provided automatically;
+#     --context files are added alongside it.
 #   review-pr collect <job-id>... [--findings-out PATH]
 #     posts the one PR comment with the patch-id, prints the verdict digest,
 #     writes the open findings (or "no open findings") to PATH when asked,
@@ -820,22 +822,25 @@ cmd_start() {
     fi
   fi
 
+  review_context="$run_dir/review-context"
+  mkdir -p "$review_context"
   if [ "$mode" = "review" ]; then
-    review_context="$run_dir/review-context"
-    mkdir -p "$review_context"
     cp "$pr_diff" "$review_context/pr.diff"
     if [ ! -s "$review_context/pr.diff" ]; then
       echo "review-pr: could not fetch the diff of PR $pr" >&2
       exit 1
     fi
-    if ! gh pr view "$pr" --repo "$repo" --json body -q .body >"$review_context/pr-body.md"; then
-      echo "review-pr: could not fetch the body of PR $pr" >&2
-      exit 1
-    fi
-    if ! grep -q '[^[:space:]]' "$review_context/pr-body.md"; then
-      rm -f "$review_context/pr-body.md"
-    fi
+  fi
+  # debt: FIX-OK pins the head, not the PR body; record the body's sha256 in the verify comment when a body edit after FIX-OK removes a line a finding required.
+  if ! gh pr view "$pr" --repo "$repo" --json body -q .body >"$review_context/pr-body.md"; then
+    echo "review-pr: could not fetch the body of PR $pr" >&2
+    exit 1
+  fi
+  if ! grep -q '[^[:space:]]' "$review_context/pr-body.md"; then
+    rm -f "$review_context/pr-body.md"
+  fi
 
+  if [ "$mode" = "review" ]; then
     ticket_numbers=()
     if [ "$issue_count" -eq 0 ]; then
       ticket_numbers[0]="$pr"
@@ -1010,12 +1015,19 @@ cmd_start() {
     # context directory so it can name exactly what the verifier receives.
     if [ "$mode" = "verify" ]; then
       rm -rf "$wt/.review-context"
+      mkdir -p "$wt/.review-context"
+      if [ -f "$review_context/pr-body.md" ]; then
+        cp "$review_context/pr-body.md" "$wt/.review-context/pr-body.md"
+      fi
     fi
-    if [ "${#context_files[@]}" -gt 0 ]; then
+    if [ "${#context_files[@]}" -gt 0 ] || { [ "$mode" = "verify" ] && [ -f "$review_context/pr-body.md" ]; }; then
       mkdir -p "$wt/.review-context"
       {
         if [ "$mode" = "verify" ]; then
           printf '\nFiles in .review-context/ for this verify:\n'
+          if [ -f "$review_context/pr-body.md" ]; then
+            printf '.review-context/pr-body.md\n'
+          fi
         else
           printf '\nContext files outside the checkout, copied into your working directory (read them as needed):\n'
         fi
