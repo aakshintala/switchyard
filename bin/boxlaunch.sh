@@ -4,6 +4,8 @@
 # Run bin/mkbrief.sh first. Box lanes report by inbox-send; the flywheel answers by SendMessage (works) or a fiber-<n>-fence-grant.md.
 # the brief is rewritten so a lane reports through ~/flywheel-inbox and stops when it needs a path outside its fence.
 set -euo pipefail
+# A session is not a delegate job: drop a job's DELEGATE_JOB_ID/CHAIN inherited from the caller's shell (#1748).
+unset DELEGATE_JOB_ID DELEGATE_JOB_CHAIN
 script_path=$0
 while [ -L "$script_path" ]; do
   script_dir=$(cd "$(dirname "$script_path")" && pwd)
