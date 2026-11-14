@@ -28,6 +28,10 @@ namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-plan: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$namebase_lib"
+ruling_comment_lib="$script_dir/lib/ruling-comment.sh"
+if [ ! -r "$ruling_comment_lib" ]; then echo "tkt-plan: cannot read shared lib: $ruling_comment_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$ruling_comment_lib"
 tokens_lib="$script_dir/lib/plan-tokens.sh"
 if [ ! -r "$tokens_lib" ]; then echo "tkt-plan: cannot read shared lib: $tokens_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
@@ -585,19 +589,7 @@ check_ruling_comment() {
   local comment_id="$1" comment_json="$2" comment_error="$3"
   local stop_verdict_at plan_verdict_at ruling_after_verdict_at
   ruling_comment_failure=""
-  if ! gh api "repos/$repo/issues/comments/$comment_id" >"$comment_json" 2>"$comment_error"; then
-    rm -f "$comment_json" "$comment_error"
-    ruling_comment_failure=fetch
-    return 1
-  fi
-  if ! jq -e --arg repo "$repo" --arg issue "$issue" '
-    type == "object" and (.body | type == "string")
-      and (.issue_url | type == "string")
-      and (.issue_url | contains("/repos/" + $repo + "/"))
-      and (.issue_url | endswith("/issues/" + $issue))
-  ' "$comment_json" >/dev/null 2>&1; then
-    rm -f "$comment_json" "$comment_error"
-    ruling_comment_failure=issue
+  if ! fetch_issue_comment "$comment_id" "$comment_json" "$comment_error"; then
     return 1
   fi
   stop_verdict_at="$(t get plan_stop_verdict_at 2>/dev/null || true)"

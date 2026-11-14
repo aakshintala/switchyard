@@ -956,7 +956,7 @@ cmd_start() {
           exit unrefuted ? 0 : 1
         }
       ' "$verify"; then
-        echo "review-pr: verify has an empty repair diff and an unrefuted finding; push the repair, add a refuted: <evidence> line to each finding the ruling answered, or for a recorded ruling with no code change run ship-pr --unverified-fixes <findings file>" >&2
+        echo "review-pr: verify has an empty repair diff and an unrefuted finding; push the repair, add a refuted: <evidence> line to each finding refuted by evidence, or for a recorded issue-comment ruling run tkt-fix <state> --verify --ruling <comment id>, or for a recorded ruling with no code change run ship-pr --unverified-fixes <findings file>" >&2
         exit 1
       fi
     fi

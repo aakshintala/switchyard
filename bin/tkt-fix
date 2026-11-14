@@ -3,13 +3,14 @@
 # rounds apart: tkt-job re-prints a terminal slot's digest.
 # A lane blocked before its PR resumes with tkt-job --resume <job.lane> followed by tkt-build --from gate, or with tkt-build --from lane when no lane ran.
 # Usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>]
-#   [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]
+#   [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>]
+#   [--fix-model <id>] [--verify-model <id>]
 #   --prompt appends orchestrator context to a fresh fix job; --resume requires --prompt.
 #   --fix-model overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model.
 set -euo pipefail
 
 usage() {
-  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>] [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
+  echo "usage: tkt-fix <state> (--verify [--since <sha>] | --no-verify) [--findings <file>] [--ruling <comment id>]... [--prompt <file>] [--resume <job id> --prompt <file>] [--fix-model <id>] [--verify-model <id>]" >&2
   echo "  --fix-model <id> overrides the stored model on --resume (same backend only; else start a fresh fix job); omit it to keep the stored model." >&2
   exit 2
 }
@@ -17,11 +18,13 @@ usage() {
 [ $# -ge 2 ] || usage
 state="$1"; shift
 verify=0; noverify=0; findings=""; since=""; resume=""; prompt=""; fixmodel=""; verifymodel=""
+ruling_requested=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --verify) verify=1; shift ;;
     --no-verify) noverify=1; shift ;;
     --findings) [ $# -ge 2 ] && [ -n "$2" ] || usage; findings="$2"; shift 2 ;;
+    --ruling) [ $# -ge 2 ] && [ -n "$2" ] || usage; ruling_requested+=("$2"); shift 2 ;;
     --since) [ $# -ge 2 ] && [ -n "$2" ] || usage; since="$2"; shift 2 ;;
     --resume) [ $# -ge 2 ] && [ -n "$2" ] || usage; resume="$2"; shift 2 ;;
     --prompt) [ $# -ge 2 ] && [ -n "$2" ] || usage; prompt="$2"; shift 2 ;;
@@ -31,6 +34,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ "$verify" -ne "$noverify" ] || usage
+[ "${#ruling_requested[@]}" -eq 0 ] || [ "$verify" -eq 1 ] || usage
 [ -z "$since" ] || [ "$verify" -eq 1 ] || usage
 [ -z "$resume" ] || [ -n "$prompt" ] || usage
 
@@ -51,6 +55,10 @@ namebase_lib="$script_dir/lib/namebase.sh"
 if [ ! -r "$namebase_lib" ]; then echo "tkt-fix: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
 # shellcheck disable=SC1090
 . "$namebase_lib"
+ruling_comment_lib="$script_dir/lib/ruling-comment.sh"
+if [ ! -r "$ruling_comment_lib" ]; then echo "tkt-fix: cannot read shared lib: $ruling_comment_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$ruling_comment_lib"
 history_lib="$script_dir/lib/findings-history.sh"
 # shellcheck disable=SC1090
 . "$history_lib"
@@ -76,6 +84,38 @@ fbrief="$HOME/.agents/skills/review-loop/briefs/fix.md"
 t() { "$tkt_state" "$state" "$@"; }
 # history_path K: the findings-history file for fix slot K.
 history_path() { printf '%s' "$run/$namebase$part_suffix-findings-history-r$1.md"; }
+
+ruling_match_begin() {
+  ruling_match_seen=()
+  ruling_match_count=0
+  ruling_match_base=""
+}
+
+ruling_match_file() {
+  local prefix="$1" path="$2" kind="$3" row base status prior duplicate
+  [ -n "$path" ] && [ -r "$path" ] || return 0
+  while IFS= read -r row; do
+    case "$row" in P1\ *|P2\ *|P3\ *) ;; *) continue;; esac
+    base="$(findings_row_base "$row")"
+    duplicate=0
+    for prior in ${ruling_match_seen[@]+"${ruling_match_seen[@]}"}; do
+      if [ "$prior" = "$base" ]; then duplicate=1; break; fi
+    done
+    [ "$duplicate" -eq 0 ] || continue
+    ruling_match_seen+=("$base")
+    status=open
+    if [ "$kind" = history ]; then
+      status="$(findings_row_status "$row")"
+      [ -n "$status" ] || status=open
+    fi
+    [ "$status" = open ] || continue
+    case "$base" in
+      "$prefix"|"$prefix "*)
+        ruling_match_count=$((ruling_match_count + 1))
+        [ "$ruling_match_count" -ne 1 ] || ruling_match_base="$base" ;;
+    esac
+  done <"$path"
+}
 
 # close_slot K: record slot fix<K> closed; the highest closed slot never drops.
 close_slot() {
@@ -243,12 +283,65 @@ trap 'rm -rf "$tmp"' EXIT
 limited=0
 if [ "$round" -ge 2 ] && [ -z "$resume" ]; then limited=1; fi
 
+ruling_ids=(); ruling_urls=(); ruling_bodies=(); ruling_notes=()
+ruling_refute_ids=(); ruling_refute_urls=(); ruling_refute_prefixes=(); ruling_refute_bases=()
+if [ "${#ruling_requested[@]}" -gt 0 ] && [ -z "$findings" ]; then
+  findings="$(t get findings 2>/dev/null || true)"
+fi
+
 emit() {
   verdict="$1"; ec="$2"; shift 2
   logpath="$run/$namebase-tkt-fix-$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf 'nohead')-$(date +%H%M%S).log"
-  { printf 'TKT tkt-fix %s log=%s\n' "$verdict" "$logpath"; [ $# -eq 0 ] || printf '%s\n' "$@" | head -n 40; } >"$logpath"
+  { printf 'TKT tkt-fix %s log=%s\n' "$verdict" "$logpath"
+    for ruling_note in ${ruling_notes[@]+"${ruling_notes[@]}"}; do printf '%s\n' "$ruling_note"; done
+    [ $# -eq 0 ] || printf '%s\n' "$@" | head -n 40
+  } >"$logpath"
   cat "$logpath"; t journal "tkt-fix $verdict"; exit "$ec"
 }
+
+ruling_refuse() {
+  emit "RULING-REFUSED reason=$1 comment=$2" 2
+}
+
+if [ "${#ruling_requested[@]}" -gt 0 ]; then
+  ruling_history_source="$(t get findings_history 2>/dev/null || true)"
+  for ruling_id in ${ruling_requested[@]+"${ruling_requested[@]}"}; do
+    case "$ruling_id" in
+      ''|*[!0-9]*) ruling_refuse bad-id "$ruling_id" ;;
+    esac
+    ruling_json="$tmp/ruling-$ruling_id.json"
+    ruling_error="$tmp/ruling-$ruling_id.err"
+    if ! fetch_issue_comment "$ruling_id" "$ruling_json" "$ruling_error"; then
+      ruling_refuse "$ruling_comment_failure" "$ruling_id"
+    fi
+    ruling_body="$tmp/ruling-$ruling_id.md"
+    jq -r '.body' "$ruling_json" >"$ruling_body" || ruling_refuse fetch "$ruling_id"
+    ruling_url="$(jq -r '.html_url // ""' "$ruling_json")"
+    ruling_ids+=("$ruling_id"); ruling_urls+=("$ruling_url"); ruling_bodies+=("$ruling_body")
+    ruling_refutes_file="$tmp/ruling-$ruling_id.refutes"
+    grep '^refutes:' "$ruling_body" >"$ruling_refutes_file" || true
+    [ -s "$ruling_refutes_file" ] || ruling_refuse no-refutes "$ruling_id"
+    while IFS= read -r ruling_line; do
+      case "$ruling_line" in
+        'refutes: '*) ruling_prefix="${ruling_line#refutes: }" ;;
+        *) ruling_prefix="${ruling_line#refutes:}" ;;
+      esac
+      ruling_match_begin
+      ruling_match_file "$ruling_prefix" "$ruling_history_source" history
+      ruling_match_file "$ruling_prefix" "$findings" current
+      [ "$ruling_match_count" -gt 0 ] || ruling_refuse no-match "$ruling_id"
+      [ "$ruling_match_count" -eq 1 ] || ruling_refuse ambiguous "$ruling_id"
+      ruling_refute_ids+=("$ruling_id"); ruling_refute_urls+=("$ruling_url")
+      ruling_refute_prefixes+=("$ruling_prefix"); ruling_refute_bases+=("$ruling_match_base")
+    done <"$ruling_refutes_file"
+  done
+  for ruling_index in "${!ruling_refute_ids[@]}"; do
+    t journal "ruling ${ruling_refute_urls[$ruling_index]} refutes ${ruling_refute_prefixes[$ruling_index]}"
+  done
+  for ruling_index in "${!ruling_ids[@]}"; do
+    ruling_notes+=("ruling: ${ruling_urls[$ruling_index]}")
+  done
+fi
 
 round_limit() {
   emit "ROUND-LIMIT round=$round" 1 "resume a job with: tkt-fix $state --verify --resume <job id> --prompt <file> (works with no open slot); otherwise send the open findings to triage"
@@ -492,7 +585,7 @@ is_clean_main_merge() {
 verify_round_coverage() {
   local round_list_file="$1" unaccounted_file="$2" commits commit owner limit n round_start round_head round_findings
   local sha_list missing_rounds repair_command state_arg since_arg path_arg first_round_start first_round_commit concrete_start any_round_start
-  local replacement_path replacement_index repair_resume repair_prompt repair_prompt_arg repair_resume_arg repair_resume_args verify_command repair_note_rounds
+  local replacement_path replacement_index repair_resume repair_prompt repair_prompt_arg repair_resume_arg repair_resume_args verify_command repair_note_rounds ruling_id
   local -a repair_notes=()
   repair_note_rounds="," # comma-delimited round numbers
   : >"$round_list_file"; : >"$unaccounted_file"
@@ -575,6 +668,9 @@ verify_round_coverage() {
       repair_resume_args=" --resume $repair_resume_arg --prompt $repair_prompt_arg"
     fi
     verify_command="tkt-fix $state_arg --verify --since $since_arg$repair_resume_args"
+    for ruling_id in ${ruling_ids[@]+"${ruling_ids[@]}"}; do
+      verify_command="$verify_command --ruling $(printf '%q' "$ruling_id")"
+    done
     if [ -n "$missing_rounds" ]; then
       repair_command=""
       for n in $(tr ',' ' ' <<<"$missing_rounds"); do
@@ -740,7 +836,23 @@ if [ "$recover_unpushed" -eq 1 ]; then
   echo "tkt-fix: pushed unpushed fix job head $recover_old_head -> $recover_new_head" >&2
 else
   if [ -n "$resume" ]; then
-    args=(--slot "$slot" --resume "$resume" --prompt "$prompt")
+    resume_prompt="$prompt"
+    if [ "${#ruling_ids[@]}" -gt 0 ]; then
+      [ -r "$prompt" ] || { echo "tkt-fix: cannot read prompt: $prompt" >&2; exit 2; }
+      resume_prompt="$tmp/resume-prompt.md"
+      if ! {
+        cat "$prompt" \
+          && { [ ! -s "$prompt" ] || [ "$(tail -c 1 "$prompt" | wc -l)" -gt 0 ] || printf '\n'; } \
+          && for ruling_index in "${!ruling_ids[@]}"; do
+            printf '\n## Recorded rulings (%s)\n\n' "${ruling_urls[$ruling_index]}" \
+              && cat "${ruling_bodies[$ruling_index]}" || exit 1
+          done
+      } >"$resume_prompt"; then
+        echo "tkt-fix: cannot build combined resume prompt: $resume_prompt" >&2
+        exit 2
+      fi
+    fi
+    args=(--slot "$slot" --resume "$resume" --prompt "$resume_prompt")
     [ -z "$fixmodel" ] || args+=(--model "$fixmodel")
     if [ "$takeover" -eq 1 ]; then
       args+=(--gate "$takeover_gate_arg")
@@ -752,14 +864,24 @@ else
   else
     [ -n "$fixmodel" ] || fixmodel="$(t get model.fix 2>/dev/null)" || { echo "tkt-fix: missing key: model.fix (no --fix-model and no state model.fix)" >&2; exit 2; }
     dispatch_findings="$findings"
-    if [ -n "$prompt" ]; then
-      [ -r "$prompt" ] || { echo "tkt-fix: cannot read prompt: $prompt" >&2; exit 2; }
+    if [ -n "$prompt" ] || [ "${#ruling_ids[@]}" -gt 0 ]; then
+      if [ -n "$prompt" ]; then
+        [ -r "$prompt" ] || { echo "tkt-fix: cannot read prompt: $prompt" >&2; exit 2; }
+      fi
       dispatch_findings="$(mktemp "$run/$namebase$part_suffix-fix-round-$knum-findings-context-XXXXXX")"
       if ! {
         cat "$findings" \
           && { [ ! -s "$findings" ] || [ "$(tail -c 1 "$findings" | wc -l)" -gt 0 ] || printf '\n'; } \
-          && printf '\n## Context from the orchestrator\n\nContext, not findings: do not fix or report these lines as findings.\n\n' \
-          && cat "$prompt"
+          && {
+            if [ -n "$prompt" ]; then
+              printf '\n## Context from the orchestrator\n\nContext, not findings: do not fix or report these lines as findings.\n\n' \
+                && cat "$prompt" || exit 1
+            fi
+            for ruling_index in "${!ruling_ids[@]}"; do
+              printf '\n## Recorded rulings (%s)\n\n' "${ruling_urls[$ruling_index]}" \
+                && cat "${ruling_bodies[$ruling_index]}" || exit 1
+            done
+          }
       } >"$dispatch_findings"; then
         rm -f "$dispatch_findings"
         echo "tkt-fix: cannot build combined findings and prompt: $dispatch_findings" >&2
@@ -857,8 +979,43 @@ fi
 [ -n "$verifymodel" ] || verifymodel="$(t get model.verify 2>/dev/null)" || { echo "tkt-fix: missing key: model.verify (no --verify-model and no state model.verify)" >&2; exit 2; }
 verify_round_coverage "$tmp/verify-rounds" "$tmp/unaccounted"
 write_findings_history prepare "" "$tmp/verify-rounds"
-vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$history_file" --since "$verify_since")
+verify_history="$history_file"
+if [ "${#ruling_refute_ids[@]}" -gt 0 ]; then
+  verify_history="$tmp/verify-history.md"
+  cp "$history_file" "$verify_history" || emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot copy findings history for recorded rulings"
+  for ruling_index in "${!ruling_refute_ids[@]}"; do
+    ruling_match_begin
+    ruling_match_file "${ruling_refute_prefixes[$ruling_index]}" "$verify_history" history
+    if [ "$ruling_match_count" -ne 1 ] || [ "$ruling_match_base" != "${ruling_refute_bases[$ruling_index]}" ]; then
+      emit "VERIFY-FAIL reason=ruling-drift" 1 \
+        "comment=${ruling_refute_ids[$ruling_index]}" \
+        "refutes=${ruling_refute_prefixes[$ruling_index]}"
+    fi
+  done
+  verify_history_with_rulings="$tmp/verify-history-with-rulings.md"
+  {
+    while IFS= read -r row; do
+      printf '%s\n' "$row"
+      case "$row" in P1\ *|P2\ *|P3\ *) ;; *) continue;; esac
+      row_base="$(findings_row_base "$row")"
+      row_status="$(findings_row_status "$row")"
+      [ -n "$row_status" ] || row_status=open
+      [ "$row_status" = open ] || continue
+      for ruling_index in "${!ruling_refute_ids[@]}"; do
+        if [ "$row_base" = "${ruling_refute_bases[$ruling_index]}" ]; then
+          printf 'refuted: recorded ruling %s (refutes: %s); text in .review-context/ruling-%s.md\n' \
+            "${ruling_refute_urls[$ruling_index]}" \
+            "${ruling_refute_prefixes[$ruling_index]}" \
+            "${ruling_refute_ids[$ruling_index]}"
+        fi
+      done
+    done <"$verify_history"
+  } >"$verify_history_with_rulings"
+  mv "$verify_history_with_rulings" "$verify_history" || emit "VERIFY-FAIL reason=ruling-drift" 1 "cannot prepare findings history for recorded rulings"
+fi
+vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$new_head" --model "$verifymodel" --verify "$verify_history" --since "$verify_since")
 if [ -n "$concerns_file" ]; then vargs+=(--context "$concerns_file"); fi
+for ruling_index in "${!ruling_ids[@]}"; do vargs+=(--context "${ruling_bodies[$ruling_index]}"); done
 vrc=0; "$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
 if [ -s "$tmp/verify.err" ]; then cat "$tmp/verify.err" >&2; fi
 [ "$vrc" -eq 0 ] || emit "VERIFY-FAIL rc=$vrc" 1 "$(cat "$tmp/verify.out")" ${notes[@]+"${notes[@]}"}
