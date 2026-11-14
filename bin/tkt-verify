@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# tkt-verify: review an already-pushed head without starting a fix job.
+# Usage: tkt-verify <state> --findings <file> [--verify-model <id>]
+set -euo pipefail
+
+usage() {
+  echo "usage: tkt-verify <state> --findings <file> [--verify-model <id>]" >&2
+  exit 2
+}
+
+[ $# -ge 3 ] || usage
+state="$1"; shift
+findings=""; verifymodel=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --findings) [ $# -ge 2 ] && [ -n "$2" ] || usage; findings="$2"; shift 2 ;;
+    --verify-model) [ $# -ge 2 ] && [ -n "$2" ] || usage; verifymodel="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+[ -n "$findings" ] || usage
+
+script_path="$0"
+case "$script_path" in */*) ;; *) script_path="$(command -v "$script_path")" ;; esac
+while [ -L "$script_path" ]; do
+  link_dir="$(cd "$(dirname "$script_path")" && pwd)"
+  link="$(readlink "$script_path")"
+  case "$link" in /*) script_path="$link" ;; *) script_path="$link_dir/$link" ;; esac
+done
+script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+tkt_state="$script_dir/tkt-state"; bin_dir="${TKT_BIN:-$HOME/.agents/bin}"
+namebase_lib="$script_dir/lib/namebase.sh"
+if [ ! -r "$namebase_lib" ]; then echo "tkt-verify: cannot read shared lib: $namebase_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$namebase_lib"
+history_lib="$script_dir/lib/findings-history.sh"
+if [ ! -r "$history_lib" ]; then echo "tkt-verify: cannot read shared lib: $history_lib" >&2; exit 2; fi
+# shellcheck disable=SC1090
+. "$history_lib"
+reviewpr="$bin_dir/review-pr"
+t() { "$tkt_state" "$state" "$@"; }
+
+emit() {
+  local message="$1" status="$2"
+  shift 2
+  printf 'TKT tkt-verify %s\n' "$message"
+  [ "$#" -eq 0 ] || printf '%s\n' "$@"
+  exit "$status"
+}
+
+lockdir="$state.lock"
+require_state_file tkt-verify "$state"
+take_state_lock tkt-verify "$lockdir"
+rmdir "$lockdir"
+
+t require repo pr branch worktree run reviewed
+repo="$(t get repo)"; pr="$(t get pr)"; branch="$(t get branch)"
+worktree="$(t get worktree)"; run="$(t get run)"; reviewed="$(t get reviewed)"
+[ -n "$verifymodel" ] || verifymodel="$(t get model.verify 2>/dev/null)" || {
+  echo 'tkt-verify: missing key: model.verify (no --verify-model and no state model.verify)' >&2
+  exit 2
+}
+[ -r "$findings" ] || { echo "tkt-verify: cannot read findings: $findings" >&2; exit 2; }
+
+fixopen="$(t get fixopen 2>/dev/null || printf '0')"
+case "$fixopen" in *[!0]*) emit "FIX-OPEN" 1 "finish the open fix job with tkt-fix before verifying" ;; esac
+
+head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)" || emit "VERIFY-FAIL" 1 "cannot read worktree HEAD: $worktree"
+if ! git -C "$worktree" fetch origin >/dev/null 2>&1; then
+  emit "NOT-PUSHED" 1 "fetch failed; cannot confirm origin/$branch"
+fi
+origin_head="$(git -C "$worktree" rev-parse --verify "refs/remotes/origin/$branch" 2>/dev/null || true)"
+[ "$head" = "$origin_head" ] || emit "NOT-PUSHED" 1 "worktree HEAD=$head origin/$branch=$origin_head"
+
+pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid 2>/dev/null)" || emit "VERIFY-FAIL" 1 "cannot read PR head: pr=$pr"
+pr_head="$(jq -r '.headRefOid // empty' <<<"$pr_json" 2>/dev/null || true)"
+[ "$head" = "$pr_head" ] || emit "PR-HEAD-MISMATCH" 1 "worktree HEAD=$head PR head=$pr_head"
+[ "$head" != "$reviewed" ] || emit "NOTHING-TO-VERIFY" 1 "HEAD=$head is already reviewed"
+if ! git -C "$worktree" merge-base --is-ancestor "$reviewed" "$head" 2>/dev/null; then
+  emit "SINCE-NOT-ANCESTOR" 1 "reviewed=$reviewed HEAD=$head"
+fi
+
+round="$(t get round 2>/dev/null || printf '0')"
+case "$round" in ''|*[!0-9]*) round=0 ;; esac
+has_p_lines=0
+if grep -qE '^P[123] ' "$findings"; then has_p_lines=1; fi
+if [ "$has_p_lines" -eq 1 ] && [ "$round" -ge 2 ]; then
+  emit "ROUND-LIMIT" 1 "round=$round; send the open findings to triage"
+fi
+fixslot="$(t get fixslot 2>/dev/null || printf '0')"
+case "$fixslot" in ''|*[!0-9]*) fixslot=0 ;; esac
+if [ "$round" -gt "$fixslot" ]; then knum=$((round + 1)); else knum=$((fixslot + 1)); fi
+
+mkdir -p "$run"
+issue="$(t get issue 2>/dev/null || true)"
+if [ -n "$issue" ]; then set_namebase "$repo" "$issue"; else namebase="${repo##*/}"; fi
+part_suffix="$(part_findings_suffix "$(t get part 2>/dev/null || true)")"
+history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/tkt-verify.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+vargs=(run "$pr" --repo "$repo" --cwd "$worktree" --head "$head" --model "$verifymodel" --verify "$findings" --since "$reviewed")
+
+advance_round() {
+  if [ "$has_p_lines" -eq 1 ]; then
+    round=$((round + 1))
+    t set round "$round"
+  fi
+}
+
+slot_start_key="fix_round.$knum.start"
+slot_head_key="fix_round.$knum.head"
+slot_findings_key="fix_round.$knum.findings"
+
+# Record the reviewed..HEAD range before review-pr so a later tkt-fix --verify
+# can account for the commits using its standard fix-round coverage rules.
+t set "$slot_start_key" "$reviewed"
+t set "$slot_head_key" "$head"
+t set "$slot_findings_key" "$findings"
+t set fixslot "$knum"
+printf '%s\n' "$knum" >"$tmp/verify-rounds"
+
+vrc=0
+"$reviewpr" "${vargs[@]}" >"$tmp/verify.out" 2>"$tmp/verify.err" || vrc=$?
+fixline="$(grep -m 1 '^FIX-' "$tmp/verify.out" || true)"
+
+if [ "$vrc" -ne 0 ]; then
+  [ ! -s "$tmp/verify.err" ] || cat "$tmp/verify.err" >&2
+  emit "VERIFY-FAIL rc=$vrc" 1 "$(head -n 40 "$tmp/verify.out")"
+fi
+
+case "$fixline" in
+  FIX-INCOMPLETE*)
+    short_head="$(git -C "$worktree" rev-parse --short=12 "$head")"
+    verify_output="$run/$namebase-tkt-verify-$short_head.md"
+    cp "$tmp/verify.out" "$verify_output"
+    write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
+    t set findings "$verify_output"
+    advance_round
+    open="$(grep '^P[123] ' "$tmp/verify.out" | head -n 30 || true)"
+    emit "FIX-INCOMPLETE" 1 "$open"
+    ;;
+  FIX-OK*)
+    # The standalone review covers the complete reviewed..HEAD range; recheck
+    # every head after FIX-OK before acknowledging it.
+    post_fetch_rc=0
+    git -C "$worktree" fetch origin >/dev/null 2>&1 || post_fetch_rc=$?
+    post_worktree_head="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+    post_origin_head="$(git -C "$worktree" rev-parse --verify "refs/remotes/origin/$branch" 2>/dev/null || true)"
+    post_pr_json=""
+    post_pr_rc=0
+    post_pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid 2>/dev/null)" || post_pr_rc=$?
+    post_pr_head="$(jq -r '.headRefOid // empty' <<<"$post_pr_json" 2>/dev/null || true)"
+    if [ "$post_fetch_rc" -ne 0 ] || [ "$post_pr_rc" -ne 0 ] \
+      || [ "$post_worktree_head" != "$head" ] \
+      || [ "$post_origin_head" != "$head" ] \
+      || [ "$post_pr_head" != "$head" ]; then
+      # The slot stays recorded: it names the reviewed..head range that review-pr read.
+      emit "HEAD-MOVED head=$head worktree=$post_worktree_head origin/$branch=$post_origin_head pr=$post_pr_head" 1
+    fi
+    advance_round
+    t set reviewed "$head"
+    t set head "$head"
+    write_findings_history verified "$tmp/verify.out" "$tmp/verify-rounds"
+    t journal "tkt-verify FIX-OK reviewed=$head"
+    emit "FIX-OK reviewed=$head" 0
+    ;;
+  *)
+    [ ! -s "$tmp/verify.err" ] || cat "$tmp/verify.err" >&2
+    emit "VERIFY-FAIL" 1 "$(head -n 40 "$tmp/verify.out")"
+    ;;
+esac

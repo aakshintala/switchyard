@@ -11,6 +11,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TKT="$SCRIPT_DIR/../bin/tkt-fix"
+TKT_VERIFY="$SCRIPT_DIR/../bin/tkt-verify"
 REAL_BIN="$SCRIPT_DIR/../bin"
 TKT_STATE="$REAL_BIN/tkt-state"
 
@@ -182,6 +183,7 @@ esac
 exit 0
 EOF
 chmod +x "$T/bin/gh"
+cp "$T/bin/gh" "$T/gh-original"
 cat >"$T/bin/file-claim" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FILE_CLAIM_CALLS"
@@ -327,6 +329,51 @@ write_job_record() {
 
 # Selector for the new cases below: empty or unset runs all of them.
 want() { [ -z "${CASE:-}" ] || [ "$CASE" = "$1" ]; }
+
+# A standalone verify's incomplete range must be owned before the next fix
+# round checks coverage from the original reviewed commit.
+if want verify-slot-coverage; then
+setup_case verify-slot-coverage
+fixture_commit reviewed.txt 'pushed before standalone verify' 'review: standalone verify head'
+git -C "$WT" push -q origin tkt-529
+VERIFY_HEAD="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$VERIFY_HEAD" >/dev/null
+printf '%s' "$VERIFY_HEAD" >"$T/prhead"
+cat >"$T/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf 'gh|%s\\n' "\$*" >>"$T/calls.log"
+if [ "\${1:-}" = pr ] && [ "\${2:-}" = view ]; then
+  n="\$((\$(cat "$T/gh-count") + 1))"
+  printf '%s' "\$n" >"$T/gh-count"
+  printf 'gh-count=%s\\n' "\$n" >>"$T/calls.log"
+  content="\$(cat "$T/prhead")"
+  case "\$content" in
+    WT:*) head="\$(git -C "\${content#WT:}" rev-parse HEAD)";;
+    *) head="\$content";;
+  esac
+  if [ "\$n" = 1 ]; then jq -cn --arg head "\$head" '{headRefOid:\$head}'
+  else printf '%s\\n' "\$head"; fi
+  exit \$?
+fi
+exit 2
+EOF
+chmod +x "$T/bin/gh"
+printf '0' >"$T/gh-count"
+printf 'incomplete' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT_VERIFY" "$S" --findings "$CDIR/findings.md" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "standalone incomplete verify exited $run_rc, want 1: $out $(cat "$T/stderr")"
+grep -q 'TKT tkt-verify FIX-INCOMPLETE' <<<"$out" || fail "standalone verify did not return FIX-INCOMPLETE: $out calls=$(cat "$T/calls.log")"
+[ "$(cat "$T/gh-count")" = 1 ] || fail "standalone verify made unexpected gh calls: $(cat "$T/calls.log")"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.start)" = "$OLD" ] || fail "standalone verify did not record round 1 start"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.head)" = "$VERIFY_HEAD" ] || fail "standalone verify did not record round 1 head"
+[ "$(bash "$TKT_STATE" "$S" get fix_round.1.findings)" = "$CDIR/findings.md" ] || fail "standalone verify did not record its input findings"
+printf 'WT:%s' "$WT" >"$T/prhead"
+printf 'incomplete' >"$T/vermode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "tkt-fix after standalone verify exited $run_rc, want 1: $out $(cat "$T/stderr") gh-count=$(cat "$T/gh-count") calls=$(cat "$T/calls.log")"
+! grep -q 'FINDINGS-UNACCOUNTED' <<<"$out" || fail "standalone verify slot did not account for the reviewed..HEAD commits: $out"
+cp "$T/gh-original" "$T/bin/gh"
+fi
 
 # History: a later verify receives round 0's finding with its original round
 # label, alongside findings raised by the first verify round.

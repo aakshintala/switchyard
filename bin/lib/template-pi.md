@@ -52,7 +52,7 @@ Models and reviews:
 - Reviews: `tkt-build` and `tkt-fix` use role models stored by `tkt-start` in `--model` flags; the pool determines them. Scoped verifies use the pool's model. Never review with the code author's family. Reviewers read the plan from the ticket, not run/: post it there (planning does) or link it in the PR body.
 - A review round runs on a complete branch: every task the plan names is built, or you review a slice the plan names as shippable on its own. A lane that stopped early reports the stop and the task number it stopped on and runs no review (confirmed by surveyor: a review of a branch with 7 of 11 tasks built returned only the unbuilt wiring, restated as P1s).
 - Quota (owner 2026-10-23): no review round beyond what the review loop requires, no speculative re-runs. If a job fails on quota, report it to flywheel.
-- A delta answering findings: `review-pr run <pr> --verify <findings file> --since <old head>`.
+- A delta answering findings in a tkt run: `tkt-verify <state> --findings <file>`; otherwise: `review-pr run <pr> --verify <findings file> --since <old head>`.
 
 Briefs you send:
 - Fill a brief with `fill-brief ... --out <abs path>`, never `> file`: the shell creates the file before fill-brief can refuse, leaving a partial brief. Use a fresh --out path for each fill, and dispatch only the path it prints; a file at an old path is an earlier fill. Put every --out under __HOME__/work/fiber-worktrees/flywheel/run/ as fiber-__N__-<kind>-<k>.md, never under ~/.cache/agents: you may edit files under run/, but auto mode denies edits under ~/.cache (#2395). Pass `EXTRA=` on every lane.md and fix.md fill, with the PR lines and test rules the ticket notes give (the mutants label, the clock sentence), or empty.

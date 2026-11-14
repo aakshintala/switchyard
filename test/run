@@ -80,7 +80,7 @@ SERIAL_BEFORE_PARALLEL=(
 )
 PARALLEL_SUITES=(
   "$D"/ship-pr.sh "$D"/tkt-build.sh "$D"/tkt-start.sh "$D"/tkt-plan.sh
-  "$D"/tkt-fix.sh "$D"/file-claim.sh "$D"/review-pr.sh "$D"/fence-grant.sh
+  "$D"/tkt-fix.sh "$D"/tkt-verify.sh "$D"/file-claim.sh "$D"/review-pr.sh "$D"/fence-grant.sh
   "$D"/tkt-job.sh "$D"/delegate-canary.sh "$D"/tkt-gate.sh "$D"/gh-ci.sh
   "$D"/tkt-ship.sh "$D"/lanestat.sh "$D"/plan-sweep.sh "$D"/ci-friction.sh
   "$D"/git-hook-guard.sh "$D"/ci-health.sh
@@ -202,7 +202,7 @@ fi
 run_full_suite() {
   failed=0
   run_serial "${SERIAL_BEFORE_PARALLEL[@]}"
-  # Allowlist (exactly these 18 isolated suites run in parallel, at most 3),
+  # Allowlist (exactly these 19 isolated suites run in parallel, at most 3),
   # longest first by the 2026-11-07 profile; the array is shared with --since.
   PAR_T="$(mktemp -d "${TMPDIR:-/tmp}/test-run-parallel.XXXXXX")"
   trap 'rm -rf "$PAR_T"' EXIT
