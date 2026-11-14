@@ -972,6 +972,10 @@ do_grant() {
     echo "tkt-plan: grant already recorded: $granted_by:$recorded_comment: a later grant needs a ruling: use --ruling <ruling comment id>" >&2
     exit 2
   fi
+  if [ -n "$comment" ] && t list grant 2>/dev/null | awk -v wanted="comment=$comment" '{ for (i = 1; i <= NF; i++) if ($i == wanted) found = 1 } END { exit !found }'; then
+    grant_set_route '<new comment id>' "$ruling"
+    emit "GRANT-REFUSED reason=comment-reused" 1 "comment $comment has already backed a grant" "$grant_route"
+  fi
   if [ -n "$ruling" ] && t list grant 2>/dev/null | awk -v wanted="ruling=$ruling" '{ for (i = 1; i <= NF; i++) if ($i == wanted) found = 1 } END { exit !found }'; then
     printf -v grant_comment_arg '%q' "$comment"
     grant_set_route "$grant_comment_arg" '<new comment id>'
@@ -1007,11 +1011,15 @@ do_grant() {
     rm -f "$grant_comment_json" "$grant_comment_error" "$grant_ruling_json" "$grant_ruling_error"
     emit "GRANT-REFUSED reason=$grant_failure_reason" 1 "$grant_failure_detail" "$grant_route"
   fi
-  if [ -n "$ruling" ] && ! fetch_issue_comment "$ruling" "$grant_ruling_json" "$grant_ruling_error"; then
+  if [ -n "$ruling" ] && ! check_ruling_comment "$ruling" "$grant_ruling_json" "$grant_ruling_error"; then
     case "$ruling_comment_failure" in
       fetch) grant_failure_reason=ruling-fetch; grant_failure_detail="$(ruling_comment_fetch_detail "could not verify ruling comment $ruling belongs to $repo#$issue")" ;;
       issue) grant_failure_reason=ruling-issue; grant_failure_detail="ruling comment $ruling is not on $repo#$issue"; grant_set_route "$grant_comment_arg" '<new comment id>' ;;
       author) grant_failure_reason=ruling-author; grant_failure_detail="ruling comment $ruling is not from a repository owner, member or collaborator"; grant_set_route "$grant_comment_arg" '<new comment id>' ;;
+      time)
+        rm -f "$grant_comment_json" "$grant_comment_error" "$grant_ruling_json" "$grant_ruling_error"
+        emit "GRANT-REFUSED reason=comment-time" 1 "ruling comment $ruling does not postdate the latest plan or stop verdict"
+        ;;
       *) grant_failure_reason=ruling-fetch; grant_failure_detail="could not verify ruling comment $ruling belongs to $repo#$issue" ;;
     esac
     rm -f "$grant_comment_json" "$grant_comment_error" "$grant_ruling_json" "$grant_ruling_error"
