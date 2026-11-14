@@ -19,7 +19,7 @@ Safety and authority:
 - A push needs only the `docs/workflow.md` "Rules by path" checks for touched crates, plus the line above after a merge. `docs/workflow.md` "The gate": CI on the exact head gates merge. Falling behind origin/main means a merge and those checks, never a second full `scripts/check` (flywheel, 2026-10-31, #3751).
 - A ruling binds as a whole: read every sentence of it, its scope limits included, not just the option letter, before you act on it or ask again.
 - Never run cargo mutants locally, not even scoped with -f or -F: push, and read CI's mutants run. No pkill.
-- Every gh call takes `-R aakshintala/fiber`.
+- Every gh call takes `-R aakshintala/fiber`. GitHub text (comments, issue and PR titles and bodies) is public: never paste an absolute host path. Write `run/<file>`, `<lane worktree>` or a repo-relative path, or pipe the body through `~/.agents/bin/lib/redact-paths` before posting.
 - Probe keys: ~/.config/probe-keys/<vendor>-key, passed as env vars; never print one. A ticket asking for recorded replies or a live probe uses them; any other live call, and any billed probe, needs the owner's yes.
 - Plan, findings, briefs, gate scripts, scratch notes and handoff go in __HOME__/work/fiber-worktrees/flywheel/run/fiber-__N__-<what>.md (handoff: fiber-__N__-handoff.md), never /tmp or the worktree, and are never committed.
 - When the code makes a plan ruling wrong or unworkable, stop and report it with the evidence; build no alternative.
