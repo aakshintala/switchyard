@@ -3536,7 +3536,7 @@ fn model_pool_ruling_run_resume_and_model_check_contracts() {
     assert!(refused.stdout.is_empty());
     assert_eq!(
         String::from_utf8_lossy(&refused.stderr).trim(),
-        "model \"openai/gpt-6.1-sol\" is not in the allowed pool (models.json rows with \"allowed\": true: claude-haiku-5-5, claude-sonnet-5-5, codex/gpt-6-luna:medium, codex/gpt-6-luna:xhigh, fiber/codex/gpt-6-luna:medium, fiber/codex/gpt-6-luna:xhigh, openai/gpt-6-luna:medium, openai/gpt-6-luna:xhigh); pass --model-ruling <comment URL> for a ruled exception"
+        "model \"openai/gpt-6.1-sol\" is not in the allowed pool (models.json rows with \"allowed\": true: claude-haiku-5-5, claude-sonnet-5-5, fiber/codex/gpt-6-luna:medium, fiber/codex/gpt-6-luna:xhigh, openai/gpt-6-luna:medium, openai/gpt-6-luna:xhigh); pass --model-ruling <comment URL> for a ruled exception"
     );
     assert!(
         !refusal.jobs_dir().exists(),
