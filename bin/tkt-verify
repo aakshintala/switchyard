@@ -107,28 +107,9 @@ advance_round() {
   fi
 }
 
-restore_slot_key() {
-  local key="$1" was_set="$2" value="$3" restore_tmp
-  if [ "$was_set" -eq 1 ]; then
-    t set "$key" "$value"
-    return
-  fi
-  restore_tmp="$(mktemp "${state}.tkt-verify.XXXXXX")"
-  awk -v prefix="$key=" 'index($0, prefix) != 1' "$state" >"$restore_tmp"
-  mv "$restore_tmp" "$state"
-}
-
 slot_start_key="fix_round.$knum.start"
 slot_head_key="fix_round.$knum.head"
 slot_findings_key="fix_round.$knum.findings"
-slot_start_was_set=0; slot_start_before=""
-if slot_start_before="$(t get "$slot_start_key" 2>/dev/null)"; then slot_start_was_set=1; fi
-slot_head_was_set=0; slot_head_before=""
-if slot_head_before="$(t get "$slot_head_key" 2>/dev/null)"; then slot_head_was_set=1; fi
-slot_findings_was_set=0; slot_findings_before=""
-if slot_findings_before="$(t get "$slot_findings_key" 2>/dev/null)"; then slot_findings_was_set=1; fi
-fixslot_was_set=0; fixslot_before=""
-if fixslot_before="$(t get fixslot 2>/dev/null)"; then fixslot_was_set=1; fi
 
 # Record the reviewed..HEAD range before review-pr so a later tkt-fix --verify
 # can account for the commits using its standard fix-round coverage rules.
@@ -173,10 +154,7 @@ case "$fixline" in
       || [ "$post_worktree_head" != "$head" ] \
       || [ "$post_origin_head" != "$head" ] \
       || [ "$post_pr_head" != "$head" ]; then
-      restore_slot_key "$slot_start_key" "$slot_start_was_set" "$slot_start_before"
-      restore_slot_key "$slot_head_key" "$slot_head_was_set" "$slot_head_before"
-      restore_slot_key "$slot_findings_key" "$slot_findings_was_set" "$slot_findings_before"
-      restore_slot_key fixslot "$fixslot_was_set" "$fixslot_before"
+      # The slot stays recorded: it names the reviewed..head range that review-pr read.
       emit "HEAD-MOVED head=$head worktree=$post_worktree_head origin/$branch=$post_origin_head pr=$post_pr_head" 1
     fi
     advance_round

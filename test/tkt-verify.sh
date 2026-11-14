@@ -201,7 +201,7 @@ assert_first_verdict HEAD-MOVED 'worktree move'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "worktree move changed reviewed"
 [ "$(read_state head)" = "$HEAD" ] || fail "worktree move changed state head"
 [ "$(read_state round)" = 0 ] || fail "worktree move changed round state"
-assert_no_slot 'worktree move'
+[ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "worktree move did not keep the slot it recorded"
 [ "$(git -C "$WT" rev-parse HEAD)" != "$HEAD" ] || fail "review stub did not move the worktree"
 [ "$(grep -c '^gh|' "$T/calls.log")" = 2 ] || fail "worktree-move path did not re-read the PR head after verify"
 [ ! -e "${S%.state}.journal" ] || fail "worktree move wrote the state journal"
@@ -215,7 +215,7 @@ assert_first_verdict HEAD-MOVED 'origin move'
 [ "$(read_state reviewed)" = "$OLD" ] || fail "origin move changed reviewed"
 [ "$(read_state head)" = "$HEAD" ] || fail "origin move changed state head"
 [ "$(read_state round)" = 0 ] || fail "origin move changed round state"
-assert_no_slot 'origin move'
+[ "$(read_state fix_round.1.head)" = "$HEAD" ] || fail "origin move did not keep the slot it recorded"
 [ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD" ] || fail "origin move also changed the worktree"
 [ "$(git --git-dir="$BARE" rev-parse "refs/heads/$BRANCH")" != "$HEAD" ] || fail "review stub did not move bare origin"
 [ "$(git -C "$WT" rev-parse "refs/remotes/origin/$BRANCH")" != "$HEAD" ] || fail "post-review fetch did not refresh origin/$BRANCH"
