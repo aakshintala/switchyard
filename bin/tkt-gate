@@ -4,8 +4,8 @@
 # history checks. The normal path checks origin/<branch> (and --expect-head),
 # checks git diff --name-only --no-renames origin/main...HEAD against the plan's
 # Files or the state's fence list, then runs the plan gate. From-job evidence
-# uses cmd64=/env64= jq base64 fields and prefers the newest job's own journal
-# line when present; it then shares the normal head update and PASS path.
+# uses cmd64=/env64= jq base64 fields and requires the newest job's own journal
+# line before sharing the normal head update and PASS path.
 # For takeovers, the gate comes from state key `gate` when the plan value is
 # `takeover <ref>`, and the file fence comes from the state's `fence` list.
 # Files and the state's fence cover changed paths except new Cargo dependencies.
@@ -131,6 +131,7 @@ from_job_refuse() {
 from_job_pass() {
   local jobid record gate_exit expected_gate journal_path
   local command_match head_after pr pr_repo pr_head dirty candidate_id chain current_env selected_cmd selected_env
+  local job_gate_journal_found=0 job_gate_journal_id=""
   local -a seen=()
   chain="$(job_walk_superseded "$from_job")" || from_job_refuse "job record supersededBy cycle in chain starting at id=$from_job"
   while IFS=$'\t' read -r candidate_id record; do
@@ -163,6 +164,9 @@ from_job_pass() {
 
   journal_path="${state%.state}.journal"
   job_gate_journal_match "$journal_path" "${seen[@]}"
+  if [ "$job_gate_journal_found" -eq 1 ] && [ "$job_gate_journal_id" != "$jobid" ]; then
+    from_job_refuse "gate command check failed: newest job has no gate journal line of its own: $jobid (newest row is for $job_gate_journal_id)"
+  fi
   current_env="$(tkt get env 2>/dev/null || true)"
   command_match=0
   if [ "$job_gate_journal_found" -eq 1 ]; then
