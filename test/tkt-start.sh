@@ -98,9 +98,20 @@ reload() {
   for a in --run "$RUN" --repo acme/widget --issue 42 --spec 42 --branch tkt-start \
     --worktree "$WT" --workflow-doc "$CDIR/wf.md" --closing "Resolves #42" --env "FOO=1" \
     --body-has "Resolves #42" --body-has "Co-authored with Claude Code." --extra "$CDIR/extra.md" \
-    --merge-gate ci --merge-check 'cargo check --all-targets' --mutant-job Selection --model lane=sol --model preflight=luna --files f.txt; do
+    --merge-gate ci --merge-check 'cargo check --all-targets' --mutant-job Selection --model lane=sol --model planner=plan --model preflight=luna --files f.txt; do
     if [ "$skip" -eq 1 ]; then skip=0; elif [ "$a" = "${1:-}" ]; then skip=1; else ARGS+=("$a"); fi
   done
+}
+remove_model_role() {
+  local role="$1" idx=0
+  local filtered=()
+  while [ "$idx" -lt "${#ARGS[@]}" ]; do
+    if [ "${ARGS[$idx]}" = --model ] && [ "${ARGS[$((idx + 1))]%%=*}" = "$role" ]; then
+      idx=$((idx + 2)); continue
+    fi
+    filtered+=("${ARGS[$idx]}"); idx=$((idx + 1))
+  done
+  ARGS=("${filtered[@]}")
 }
 build_case_template() {
   local dir="$1" add_change="$2" filing
@@ -175,6 +186,7 @@ expect_state() {
   [ "$(grep -c '^body_has=' "$S")" -eq 2 ] || fail "$1: state wants 2 body_has lines"
   grep -qF "body_has=Resolves #42" "$S" || fail "$1: state misses body line 1"
   [ "$(grep -c '^model\.lane=' "$S")" -eq 1 ] || fail "$1: state wants 1 model.lane"
+  [ "$(grep -c '^model\.planner=' "$S")" -eq 1 ] || fail "$1: state wants 1 model.planner"
   [ "$(grep -c '^model\.preflight=' "$S")" -eq 1 ] || fail "$1: state wants 1 model.preflight"
   j="${S%.state}.journal"
   for step in "state " "worktree " "check "; do
@@ -1209,9 +1221,122 @@ for bad in one x missing; do
   [ ! -e "$RUN/widget-42.state" ] || fail "partbad $bad: state was written"
 done
 
+# A missing planner model refuses before creating state or starting preflight.
+setup planner-missing ONE AGAINST
+remove_model_role planner
+: >"$T/calls.log"
+run_start
+[ "$RC" -eq 2 ] || fail "planner-missing: exit $RC, want 2"
+grep -Fxq 'tkt-start: missing required role: model.planner' "$CDIR/stderr" \
+  || fail "planner-missing: stderr does not name model.planner: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "planner-missing: state was written"
+[ ! -e "$WT" ] || fail "planner-missing: worktree was created"
+[ ! -s "$T/calls.log" ] || fail "planner-missing: external calls ran before refusal"
+
+# A planner explicitly supplied on start is accepted.
+setup planner-given ONE AGAINST
+remove_model_role planner
+run_start --model planner=custom-planner
+want "CURRENT " 0 planner-given
+[ "$(grep -c '^model\.planner=custom-planner$' "$RUN/widget-42.state")" -eq 1 ] \
+  || fail "planner-given: state misses the supplied planner"
+
+# A planner stored by an earlier run remains available when a resumed start omits it.
+setup planner-resume ONE AGAINST
+run_start
+want "CURRENT " 0 planner-resume-first
+remove_model_role planner
+run_start
+want "CURRENT " 0 planner-resume
+
+# A part without a supplied or stored planner refuses before archiving its predecessor.
+setup part-planner-missing ONE AGAINST; part_seed_pr part-planner-missing
+S="$RUN/widget-42.state"
+grep -v '^model\.planner=' "$S" >"$CDIR/state.no-planner" || fail "part-planner-missing: could not filter planner"
+mv "$CDIR/state.no-planner" "$S"
+cp "$S" "$CDIR/state.before"
+printf 'MERGED\n' >"$T/prstate"
+reload --model; remove_model_role planner; run_start --part 2
+[ "$RC" -eq 2 ] || fail "part-planner-missing: exit $RC, want 2"
+grep -Fxq 'tkt-start: missing required role: model.planner' "$CDIR/stderr" \
+  || fail "part-planner-missing: stderr does not name model.planner: $(cat "$CDIR/stderr")"
+cmp -s "$S" "$CDIR/state.before" || fail "part-planner-missing: earlier state changed"
+[ ! -e "$S.part1" ] || fail "part-planner-missing: earlier state was archived"
+
+# --no-preflight makes the plan phase unreachable, so it needs no planner.
+setup planner-no-preflight ONE AGAINST
+remove_model_role planner
+run_start --no-preflight
+want "SKIPPED filing=" 0 planner-no-preflight
+! grep -q '^model\.planner=' "$RUN/widget-42.state" \
+  || fail "planner-no-preflight: unexpectedly stored a planner model"
+
+# A takeover bypasses the plan phase, so it also needs no planner.
+setup planner-takeover ONE AGAINST
+remove_model_role planner
+run_start --takeover '#123' --gate 'bash scripts/check'
+want "CURRENT " 0 planner-takeover
+grep -qF 'plan=takeover #123' "$RUN/widget-42.state" \
+  || fail "planner-takeover: state does not record the takeover"
+
+# Resuming a stored takeover plan does not enter planning or require a planner.
+setup planner-takeover-resume ONE AGAINST
+remove_model_role planner
+printf 'plan=takeover #123\n' >"$RUN/widget-42.state"
+run_start
+! grep -qF 'tkt-start: missing required role: model.planner' "$CDIR/stderr" \
+  || fail "planner-takeover-resume: refused a stored takeover plan without a planner"
+want "CURRENT " 0 planner-takeover-resume
+
+# A part may use a closing keyword, but tkt-start must warn rather than refuse it.
+setup part-closing-warning ONE AGAINST
+run_start --no-preflight --part 2
+want "SKIPPED filing=" 0 part-closing-warning
+[ "$(grep -ci 'warning.*--part.*closing' "$CDIR/stderr")" -gt 0 ] \
+  || fail "part-closing-warning: stderr misses the warning: $(cat "$CDIR/stderr")"
+setup part-closing-fixed ONE AGAINST
+run_start --no-preflight --part 2 --closing 'Fixed #42'
+want "SKIPPED filing=" 0 part-closing-fixed
+[ "$(grep -ci 'warning.*--part.*closing' "$CDIR/stderr")" -gt 0 ] \
+  || fail "part-closing-fixed: stderr misses the warning: $(cat "$CDIR/stderr")"
+setup part-closing-no-warning ONE AGAINST
+printf 'Batch part.\n\nPart of #42\n' >"$CDIR/spec.md"
+run_start --no-preflight --part 2 --spec "$CDIR/spec.md" --closing 'Part of #42'
+want "SKIPPED filing=" 0 part-closing-no-warning
+[ "$(grep -ci 'warning.*--part.*closing' "$CDIR/stderr")" -eq 0 ] \
+  || fail "part-closing-no-warning: Part of closing warned: $(cat "$CDIR/stderr")"
+
+# OpenAI bare ids pass only when the pool lists that exact id; effort ids still pass.
+setup openai-pool-bare ONE AGAINST
+run_start --model lane=openai/gpt-6.1-sol
+want "CURRENT " 0 openai-pool-bare
+[ "$(grep -c '^model\.lane=openai/gpt-6.1-sol$' "$RUN/widget-42.state")" -eq 1 ] \
+  || fail "openai-pool-bare: state misses the listed bare model"
+
+setup openai-bare ONE AGAINST
+run_start --model lane=openai/gpt-6-luna
+[ "$RC" -eq 2 ] || fail "openai-bare: exit $RC, want 2"
+grep -qF "tkt-start: --model role 'lane' requires an openai effort suffix" "$CDIR/stderr" \
+  || fail "openai-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "openai-bare: state was written"
+
+setup openai-prefix-bare ONE AGAINST
+run_start --model lane=openai/gpt-6.1
+[ "$RC" -eq 2 ] || fail "openai-prefix-bare: exit $RC, want 2"
+grep -qF "tkt-start: --model role 'lane' requires an openai effort suffix" "$CDIR/stderr" \
+  || fail "openai-prefix-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "openai-prefix-bare: state was written"
+
+setup openai-suffixed ONE AGAINST
+remove_model_role planner
+run_start --no-preflight --model planner=openai/gpt-6-luna:medium
+want "SKIPPED filing=" 0 openai-suffixed
+[ "$(grep -c '^model\.planner=openai/gpt-6-luna:medium$' "$RUN/widget-42.state")" -eq 1 ] \
+  || fail "openai-suffixed: state misses the suffixed planner model"
+
 setup modelrole ONE AGAINST; run_start --model bogus=x
 [ "$RC" -eq 2 ] || fail "modelrole: unknown --model role exits $RC, want 2"
-grep -qF 'known roles: lane, fix, map, verifier, verify, review, overbuild, preflight' "$CDIR/stderr" \
+grep -qF 'known roles: lane, fix, map, verifier, verify, review, overbuild, preflight, planner' "$CDIR/stderr" \
   || fail "modelrole: stderr does not print the known roles"
 model_roles="$(sed -n 's/^model_roles=(\(.*\))$/\1/p' "$TKT")"
 [ -n "$model_roles" ] || fail "modelrole: tkt-start has no known model roles"
@@ -1273,9 +1398,9 @@ case "$OUT" in *carried*) fail "partcarry: a run without --part must print no ca
 S="$RUN/widget-42.state"
 bash "$SCRIPT_DIR/../bin/tkt-state" "$S" set model.fix fixm
 printf 'MERGED\n' >"$T/prstate"
-reload --model; run_start --part 2
+reload --model; remove_model_role planner; run_start --part 2
 want "CURRENT " 0 partcarry
-for line in model.lane=sol model.fix=fixm model.preflight=luna; do
+for line in model.lane=sol model.fix=fixm model.planner=plan model.preflight=luna; do
   note="carried $line from part 1; pass --model ${line#model.} to change it"
   [ "$(printf '%s\n' "$OUT" | grep -cxF -- "$note")" -eq 1 ] || fail "partcarry: output wants one [$note]"
 done
