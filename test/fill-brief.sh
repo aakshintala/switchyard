@@ -34,6 +34,11 @@ for tpl in template-pi.md template-tkt.md; do
   if grep -qE -- 'file-claim claim [^`]*--plan [^`]*<plan' "$tpl_path"; then fail "$tpl still says --plan <plan ...>"; fi
 done
 
+# The determined path's flake line matches both CI title forms (#1828).
+for tpl in template-pi.md template.md template-tkt.md; do
+  grep -qF -- '`Flaky test:` and `Flaky tests:` tickets' "$SCRIPT_DIR/../bin/lib/$tpl" || fail "$tpl flake line names both Flaky test: and Flaky tests:"
+done
+
 # Model routing has one source: the pool injected into each filled brief.
 for tpl in template-pi.md template.md template-tkt.md; do
   tpl_path="$SCRIPT_DIR/../bin/lib/$tpl"

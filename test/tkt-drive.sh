@@ -204,7 +204,7 @@ run_drive
 [ "$RC" -eq 5 ] || fail "missing plan should report NEEDS-PLAN with reserved rc 5 (rc=$RC; out=$(cat "$OUT"); err=$(cat "$ERR"))"
 printf 'TKT tkt-drive NEEDS-PLAN\n' >"$CASE_DIR/expected.out"
 cmp -s "$CASE_DIR/expected.out" "$OUT" || fail "missing plan verdict mismatch: $(cat "$OUT")"
-printf 'NEEDS-PLAN is not a block: do not report it. Run the planning skill now (planner, Verifier, `tkt-plan <state> set <plan>`), then rerun tkt-drive.\n' >"$CASE_DIR/expected.err"
+printf 'NEEDS-PLAN is not a block: do not report it. Run the planning skill now (planner, Verifier, `tkt-plan <state> set <plan>`), then rerun tkt-drive. For a `Flaky test:` or `Flaky tests:` ticket, take the determined path instead: the repro is the plan, so run `tkt-plan <state> set <plan> --no-verifier` with no planner and no Verifier, then rerun tkt-drive.\n' >"$CASE_DIR/expected.err"
 cmp -s "$CASE_DIR/expected.err" "$ERR" || fail "missing plan next step mismatch: $(cat "$ERR")"
 grep -q ' tkt-drive NEEDS-PLAN trigger=state$' "${STATE%.state}.journal" || fail 'missing plan verdict was not journaled'
 assert_no_merge
