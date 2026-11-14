@@ -849,7 +849,7 @@ else
       if ! {
         cat "$findings" \
           && { [ ! -s "$findings" ] || [ "$(tail -c 1 "$findings" | wc -l)" -gt 0 ] || printf '\n'; } \
-          && printf '\n## Context from the orchestrator\n\n' \
+          && printf '\n## Context from the orchestrator\n\nContext, not findings: do not fix or report these lines as findings.\n\n' \
           && cat "$prompt"
       } >"$dispatch_findings"; then
         rm -f "$dispatch_findings"

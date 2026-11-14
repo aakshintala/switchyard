@@ -818,6 +818,8 @@ Additional findings detail
 
 ## Context from the orchestrator
 
+Context, not findings: do not fix or report these lines as findings.
+
 Orchestrator context that must guide this fresh fix.
 A second context line.
 EOF
