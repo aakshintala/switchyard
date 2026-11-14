@@ -26,8 +26,19 @@ mkdir -p "$T/home" "$T/tmp" "$T/bin" "$T/cases"
 export HOME="$T/home" TMPDIR="$T/tmp" XDG_CACHE_HOME="$T/cache" TKT_BIN="$T/bin"
 export PATH="$T/bin:$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 
-ln -s "$REAL_BIN/tkt-gate" "$T/bin/tkt-gate" || fail "symlink tkt-gate"
 ln -s "$REAL_BIN/plan-gate" "$T/bin/plan-gate" || fail "symlink plan-gate"
+printf '0' >"$T/gatemode"
+cat >"$T/bin/tkt-gate" <<EOF
+#!/usr/bin/env bash
+printf 'tkt-gate|%s\\n' "\$*" >>"$T/calls.log"
+if [[ " \$* " == *" --checks-only "* ]] && [ "\$(cat "$T/gatemode")" = "2" ]; then
+  printf '0' >"$T/gatemode"
+  printf 'TKT tkt-gate UNKNOWN check fixture\\n'
+  exit 2
+fi
+exec "$REAL_BIN/tkt-gate" "\$@"
+EOF
+chmod +x "$T/bin/tkt-gate"
 ln -s "$REAL_BIN/fill-brief" "$T/bin/fill-brief" || fail "symlink fill-brief"
 ln -s "$REAL_BIN/tkt-state" "$T/bin/tkt-state" || fail "symlink tkt-state"
 ln -s "$REAL_BIN/tkt-fix" "$T/bin/tkt-fix" || fail "symlink tkt-fix"
@@ -113,7 +124,7 @@ EOF
 chmod +x "$T/bin/tkt-job"
 cp "$T/bin/tkt-job" "$T/tkt-job-stub"
 
-# Stub gh-ci: $T/cimode holds the wait exit (0 or 1); $T/ciout holds stdout.
+# Stub gh-ci: $T/cimode holds the wait exit (0, 1 or 2); $T/ciout holds stdout.
 printf '0' >"$T/cimode"
 : >"$T/ciout"
 cat >"$T/bin/gh-ci" <<EOF
@@ -188,6 +199,7 @@ reset_stubs() {
   printf 'done' >"$T/jobmode"
   printf '0' >"$T/jobcount"
   printf '0' >"$T/cimode"
+  printf '0' >"$T/gatemode"
   : >"$T/ciout"
   printf 'ok' >"$T/vermode"
   printf '0' >"$T/verify-count"
@@ -1681,6 +1693,150 @@ grep -q "DRIFT" <<<"$out" && fail "C-a returned DRIFT"
 [ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "C-a pushed"
 grep -q "job|" "$T/calls.log" && fail "C-a dispatched a fix job"
 grep -q "tkt-fix: worktree is ahead of the PR head by open fix job fix2's unpushed commits" "$T/stderr" || fail "C-a stderr line missing: $(cat "$T/stderr")"
+fi
+
+# PUSH-FAIL leaves a closed fix job's commit recoverable on the next run.
+if want recover-push-fail; then
+setup_case recover-push-fail
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+cat >"$CDIR/origin.git/hooks/pre-receive" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$CDIR/origin.git/hooks/pre-receive"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "recover-push-fail first run exited $run_rc, want PUSH-FAIL 1: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix PUSH-FAIL' || fail "recover-push-fail first verdict missing: $(head -n 1 <<<"$out")"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+write_job_record j1 "$OLD" "$NEW"
+rm "$CDIR/origin.git/hooks/pre-receive"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "recover-push-fail recovery exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "recover-push-fail recovery verdict missing: $(head -n 1 <<<"$out")"
+grep -q 'DRIFT\|RECOVER' <<<"$out" && fail "recover-push-fail recovery reported drift or RECOVER: $out"
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-529)" = "$NEW" ] || fail "recover-push-fail did not push NEW to origin"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "recover-push-fail state head is not NEW"
+[ "$(bash "$TKT_STATE" "$S" get fixslot)" = "1" ] || fail "recover-push-fail did not close fix1"
+grep -q '^job|' "$T/calls.log" && fail "recover-push-fail dispatched another fix job"
+fi
+
+# CI-WAIT rc=2 leaves the same closed fix job recoverable without another wait failure.
+if want recover-ci-wait-2; then
+setup_case recover-ci-wait-2
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+printf '2' >"$T/cimode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "recover-ci-wait-2 first run exited $run_rc, want CI-WAIT 1: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix CI-WAIT rc=2' || fail "recover-ci-wait-2 first verdict missing: $(head -n 1 <<<"$out")"
+grep -q 'gh-ci|wait 7 --repo switchyard' "$T/calls.log" || fail "recover-ci-wait-2 did not wait for CI"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+write_job_record j1 "$OLD" "$NEW"
+printf '0' >"$T/cimode"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "recover-ci-wait-2 recovery exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "recover-ci-wait-2 recovery verdict missing: $(head -n 1 <<<"$out")"
+grep -q 'DRIFT\|RECOVER' <<<"$out" && fail "recover-ci-wait-2 recovery reported drift or RECOVER: $out"
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-529)" = "$NEW" ] || fail "recover-ci-wait-2 did not push NEW to origin"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$NEW" ] || fail "recover-ci-wait-2 state head is not NEW"
+[ "$(bash "$TKT_STATE" "$S" get fixslot)" = "1" ] || fail "recover-ci-wait-2 did not close fix1"
+grep -q '^job|' "$T/calls.log" && fail "recover-ci-wait-2 dispatched another fix job"
+fi
+
+# A skipped slot is recovered by scanning from fresh slot 5 down, not from fixslot 3.
+if want recover-skipped-slot; then
+setup_case recover-skipped-slot
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+bash "$TKT_STATE" "$S" set round 4 >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+printf 'resume slot five\\n' >"$CDIR/prompt.md"
+cat >"$CDIR/origin.git/hooks/pre-receive" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$CDIR/origin.git/hooks/pre-receive"
+run_rc=0; out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "recover-skipped-slot first run exited $run_rc, want PUSH-FAIL 1: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix PUSH-FAIL' || fail "recover-skipped-slot first verdict missing: $(head -n 1 <<<"$out")"
+grep -q 'job|.*--slot fix5' "$T/calls.log" || fail "recover-skipped-slot did not dispatch fix5"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+write_job_record j1 "$OLD" "$NEW"
+rm "$CDIR/origin.git/hooks/pre-receive"
+printf 'resume recovered job\n' >"$CDIR/prompt.md"
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify --resume j1 --prompt "$CDIR/prompt.md" 2>"$T/stderr")" || fail "recover-skipped-slot recovery exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "recover-skipped-slot recovery verdict missing: $(head -n 1 <<<"$out")"
+grep -q 'DRIFT\|RECOVER' <<<"$out" && fail "recover-skipped-slot recovery reported drift or RECOVER: $out"
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-529)" = "$NEW" ] || fail "recover-skipped-slot did not push NEW to origin"
+[ "$(bash "$TKT_STATE" "$S" get fixslot)" = "5" ] || fail "recover-skipped-slot did not close fix5"
+grep -q '^job|' "$T/calls.log" && fail "recover-skipped-slot dispatched another fix job"
+fi
+
+# A recovery-gate FAIL closes slot 1; the following recovery must write history for slot 1, not fresh slot 2.
+if want recover-history-slot; then
+setup_case recover-history-slot
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+fixture_commit fix.txt "unpublished fix" "fix: unpushed fix"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$NEW" >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 1 >/dev/null
+bash "$TKT_STATE" "$S" set fixopen 0 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix1 j1 >/dev/null
+write_job_record j1 "$OLD" "$NEW"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `fix.txt`
+
+## Gate
+
+`false`
+EOF
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "recover-history-slot failed-gate run exited $run_rc, want 1: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FAIL rc=1' || fail "recover-history-slot did not fail its recovery gate: $(head -n 1 <<<"$out")"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "recover-history-slot gate failure did not bump round"
+[ "$(bash "$TKT_STATE" "$S" get fixslot)" = "1" ] || fail "recover-history-slot gate failure did not close fix1"
+cat >"$CDIR/plan.md" <<'EOF'
+# Plan
+
+## Files
+
+- `base.txt`
+- `fix.txt`
+
+## Gate
+
+`true`
+EOF
+: >"$T/calls.log"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "recover-history-slot second recovery exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix FIX-OK' || fail "recover-history-slot second recovery verdict missing: $(head -n 1 <<<"$out")"
+[ -f "$CDIR/run/switchyard-529-findings-history-r1.md" ] || fail "recover-history-slot did not write findings-history-r1.md"
+[ ! -e "$CDIR/run/switchyard-529-findings-history-r2.md" ] || fail "recover-history-slot wrote history for fresh slot r2 instead of recovered slot r1"
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-529)" = "$NEW" ] || fail "recover-history-slot did not push NEW to origin"
+grep -q '^job|' "$T/calls.log" && fail "recover-history-slot dispatched another fix job"
+fi
+
+# A checks-only gate rc=2 after a pushed fix leaves the same slot at RECOVER.
+if want recover-checks-only-2; then
+setup_case recover-checks-only-2
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+printf '2' >"$T/gatemode"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "2" ] || fail "recover-checks-only-2 first run exited $run_rc, want 2: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix UNKNOWN' || fail "recover-checks-only-2 first verdict missing: $(head -n 1 <<<"$out")"
+NEW="$(git -C "$WT" rev-parse HEAD)"
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/tkt-529)" = "$NEW" ] || fail "recover-checks-only-2 first run did not push its fix"
+[ "$(bash "$TKT_STATE" "$S" get fixslot 2>/dev/null || printf '0')" = "0" ] || fail "recover-checks-only-2 gate error advanced fixslot"
+: >"$T/calls.log"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "recover-checks-only-2 second run exited $run_rc, want RECOVER 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q 'TKT tkt-fix RECOVER' || fail "recover-checks-only-2 second verdict missing: $(head -n 1 <<<"$out")"
+grep -q 'slot=fix1' <<<"$out" || fail "recover-checks-only-2 did not RECOVER on slot fix1"
+grep -q '^job|' "$T/calls.log" && fail "recover-checks-only-2 dispatched another fix job"
 fi
 
 # C-b. A headBefore that differs from the stored intermediate head is rejected.

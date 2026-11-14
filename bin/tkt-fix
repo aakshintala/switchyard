@@ -339,6 +339,15 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         fi
       fi
     fi
+    # Closed slots may be ahead of fixslot when a round skipped a slot.
+    # Start at this run's fresh slot and recover the highest recorded fix job.
+    newest="$fixslot"
+    scan="$n"
+    while [ "$scan" -gt "$fixslot" ]; do
+      newest_job="$(t get "job.fix$scan" 2>/dev/null || true)"
+      if [ -n "$newest_job" ]; then newest="$scan"; break; fi
+      scan=$((scan - 1))
+    done
     # Closed slots recover unpushed commits on a clean tree whose HEAD
     # descends from the PR head, in either stored-head arm. Every round now
     # requires the same complete fix-slot ownership chain back to the PR head;
@@ -346,15 +355,16 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
     if [ "$keep" -eq 0 ] && [ "$openk" -eq 0 ] && [ "$clean" -eq 1 ] && [ "$prhead" != "$actual" ] \
       && { git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null || [ "$stored" = "$actual" ]; } \
       && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null \
-      && { [ "$limited" -eq 0 ] || [ "$fixslot" -ge 1 ]; }; then
+      && { [ "$limited" -eq 0 ] || [ "$newest" -ge 1 ]; }; then
       closed_owned=0
-      if chain_owned "$fixslot" "$prhead" "$actual"; then closed_owned=1; fi
+      if chain_owned "$newest" "$prhead" "$actual"; then closed_owned=1; fi
       if [ "$closed_owned" -eq 1 ]; then
-        recovery_slot="$fixslot"
+        recovery_slot="$newest"
         [ "$openk" -le 0 ] || recovery_slot="$openk"
         [ "$recovery_slot" -gt 0 ] || recovery_slot="$n"
         slot="fix$recovery_slot"
         knum="$recovery_slot"
+        history_file="$run/$namebase$part_suffix-findings-history-r$knum.md"
         recover_unpushed=1
         recover_old_head="$prhead"
         recover_new_head="$actual"
