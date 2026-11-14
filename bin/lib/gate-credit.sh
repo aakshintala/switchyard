@@ -16,7 +16,9 @@ gate_credit_refuse() {
 # gate_credit_check RECORD JOURNAL JOB_CHAIN EXPECTED_CMD ENV HEAD
 # JOB_CHAIN is newline-separated ids oldest to newest, as job_walk_superseded prints them.
 # Prints one refusal reason to stderr and returns 1 unless the job record and
-# the newest gate journal row for the chain prove the expected full gate at HEAD.
+# the newest chain id's own gate journal row prove the expected full gate at HEAD.
+# An older id's row never stands in for the newest: a resume outside tkt-job can
+# change the gate and journal no row, so the record and the row must be one job's.
 gate_credit_check() {
   [ "$#" -eq 6 ] || gate_credit_refuse 'invalid gate-credit check arguments' || return 1
   local record="$1" journal="$2" job_chain="$3" expected_cmd="$4" expected_env="$5" head="$6"
@@ -45,6 +47,10 @@ gate_credit_check() {
   [ -r "$journal" ] || { gate_credit_refuse "job gate journal is not readable: $jobid"; return 1; }
   job_gate_journal_match "$journal" "${chain_ids[@]}"
   [ "$job_gate_journal_found" -eq 1 ] || { gate_credit_refuse "job gate journal line is missing: $jobid"; return 1; }
+  [ "$job_gate_journal_id" = "$jobid" ] || {
+    gate_credit_refuse "newest job has no gate journal line of its own: $jobid (newest row is for $job_gate_journal_id)"
+    return 1
+  }
   recorded_cmd="$job_gate_journal_cmd"
   recorded_env="$job_gate_journal_env"
   [ "$recorded_cmd" = "$expected_cmd" ] || {

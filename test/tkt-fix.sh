@@ -77,7 +77,7 @@ for a in "\$@"; do
   if [ "\$a" = "--gate-from-plan" ]; then gate_from_plan=1; fi
   prev="\$a"
 done
-if [ -r "$T/job-credit-mode" ] && [ "\$(cat "$T/job-credit-mode")" = earlier-chain ]; then
+if [ -r "$T/job-credit-mode" ] && { [ "\$(cat "$T/job-credit-mode")" = earlier-chain ] || [ "\$(cat "$T/job-credit-mode")" = chain-own-row ]; }; then
   stored_jobid=j1
   jobid=j2
 else
@@ -159,6 +159,9 @@ if [ -r "$T/job-credit-mode" ]; then
     env64="\$(printf '%s' "\$env_value" | jq -Rrs '@base64')"
     journal_jobid="\$jobid"
     if [ "\$credit_mode" = earlier-chain ]; then journal_jobid=j1; fi
+    if [ "\$credit_mode" = chain-own-row ]; then
+      "$TKT_STATE" "\$state" journal "tkt-job gate slot=\$slot job=j1 cmd64=\$cmd64 env64=\$env64" >/dev/null
+    fi
     "$TKT_STATE" "\$state" journal "tkt-job gate slot=\$slot job=\$journal_jobid cmd64=\$cmd64 env64=\$env64" >/dev/null
   fi
   mkdir -p "$TMPDIR/delegate-jobs"
@@ -167,6 +170,11 @@ if [ -r "$T/job-credit-mode" ]; then
     '{status:"DONE",result:{status:"DONE",gateResult:({command:"bash gate.sh",exitCode:\$exit,passed:\$passed,outputTail:"ok"} + (if \$refused then {refused:true} else {} end) + (if \$error == "" then {} else {error:\$error} end)),changeSet:{headAfter:\$head,dirtyAfter:\$dirty}}}' \\
     >"$TMPDIR/delegate-jobs/\$jobid.json"
   if [ "\$credit_mode" = earlier-chain ]; then
+    # A resume outside tkt-job changed the gate and journaled no row for j2.
+    jq '. + {resume:{gate:"cargo test -p x"}}' "$TMPDIR/delegate-jobs/\$jobid.json" >"$TMPDIR/delegate-jobs/\$jobid.json.tmp" \
+      && mv "$TMPDIR/delegate-jobs/\$jobid.json.tmp" "$TMPDIR/delegate-jobs/\$jobid.json"
+  fi
+  if [ "\$credit_mode" = earlier-chain ] || [ "\$credit_mode" = chain-own-row ]; then
     jq -n --arg next "\$jobid" '{supersededBy:\$next}' >"$TMPDIR/delegate-jobs/j1.json"
   fi
 fi
@@ -3055,21 +3063,26 @@ EOF
   [ "$run_rc" -eq 0 ] || fail "$name exited $run_rc: $out $(cat "$T/stderr")"
   grep -q '^TKT tkt-fix FIX-OK ' <<<"$out" || fail "$name changed tkt-fix verdict: $out"
   journal="${S%.state}.journal"
-  if [ "$mode" = accepted ] || [ "$mode" = takeover-no-env ] || [ "$mode" = earlier-chain ]; then
+  if [ "$mode" = accepted ] || [ "$mode" = takeover-no-env ] || [ "$mode" = chain-own-row ]; then
     new_head="$(git -C "$WT" rev-parse HEAD)"
     hash="$(printf '%s' 'true' | shasum -a 256 | awk '{print $1}')"
     grep -Fq "tkt-fix gate PASS head=$new_head cmd=$hash" "$journal" || fail "$name did not journal the exact gate credit: $(cat "$journal")"
     ! grep -Eq 'tkt-gate PASS head=[0-9a-fA-F]{40}$' "$journal" || fail "$name wrote a full tkt-gate PASS line: $(cat "$journal")"
-    if [ "$mode" = accepted ] || [ "$mode" = earlier-chain ]; then
+    if [ "$mode" = accepted ] || [ "$mode" = chain-own-row ]; then
       grep -Fq 'tkt-job gate slot=fix1 job=j1 cmd64=' "$journal" || fail "$name lacks its full-gate job journal row"
-      if [ "$mode" = earlier-chain ]; then
-        jq -e '.supersededBy == "j2"' "$TMPDIR/delegate-jobs/j1.json" >/dev/null || fail "$name lacks the supersededBy link to j2"
-        ! grep -Fq 'tkt-job gate slot=fix1 job=j2 ' "$journal" || fail "$name unexpectedly journals the newest chain id"
-      fi
+    fi
+    if [ "$mode" = chain-own-row ]; then
+      jq -e '.supersededBy == "j2"' "$TMPDIR/delegate-jobs/j1.json" >/dev/null || fail "$name lacks the supersededBy link to j2"
+      grep -Fq 'tkt-job gate slot=fix1 job=j2 cmd64=' "$journal" || fail "$name lacks the newest job's own journal row"
     fi
   else
     ! grep -q 'tkt-fix gate PASS ' "$journal" || fail "$name wrote a credit after refusal: $(cat "$journal")"
     grep -Fq 'tkt-fix: gate not credited:' "$T/stderr" || fail "$name omitted its stderr-only refusal: $(cat "$T/stderr")"
+    if [ "$mode" = earlier-chain ]; then
+      jq -e '.supersededBy == "j2"' "$TMPDIR/delegate-jobs/j1.json" >/dev/null || fail "$name lacks the supersededBy link to j2"
+      ! grep -Fq 'tkt-job gate slot=fix1 job=j2 ' "$journal" || fail "$name unexpectedly journals the newest chain id"
+      grep -Fq 'newest job has no gate journal line of its own: j2' "$T/stderr" || fail "$name refused for the wrong reason: $(cat "$T/stderr")"
+    fi
   fi
 }
 
@@ -3078,6 +3091,9 @@ if want gate-credit-accepted; then
 fi
 if want gate-credit-earlier-chain; then
   run_gate_credit_test gate-credit-earlier-chain earlier-chain
+fi
+if want gate-credit-chain-own-row; then
+  run_gate_credit_test gate-credit-chain-own-row chain-own-row
 fi
 if want gate-credit-scoped; then
   run_gate_credit_test gate-credit-scoped scoped
