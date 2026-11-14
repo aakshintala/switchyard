@@ -313,26 +313,30 @@ if pr_body_text="$(gh pr view "$pr" --repo "$repo" --json body --jq '.body // ""
     fi
     new_body="$(tkt_local_gate_body_insert "$pr_body_text" "$gate_line" "$attr" "$attr_mode")"
     if tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-ship-body.XXXXXX" 2>/dev/null)"; then
-      if printf '%s\n' "$new_body" >"$tmp_body" \
-        && gh pr edit "$pr" --repo "$repo" --body-file "$tmp_body" 2>/dev/null; then
+      tmp_redacted="$(mktemp "${TMPDIR:-/tmp}/tkt-ship-redacted.XXXXXX" 2>/dev/null)" || tmp_redacted=""
+      if [ -n "$tmp_redacted" ] && printf '%s\n' "$new_body" >"$tmp_body" \
+        && "$script_dir/lib/redact-paths" <"$tmp_body" >"$tmp_redacted" \
+        && gh pr edit "$pr" --repo "$repo" --body-file "$tmp_redacted" 2>/dev/null; then
         body_changed=0
       else
         printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
       fi
-      rm -f "$tmp_body"
+      rm -f "$tmp_body" "$tmp_redacted"
     else
       printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
     fi
   fi
   if [ "$body_changed" -eq 1 ]; then
     if tmp_body="$(mktemp "${TMPDIR:-/tmp}/tkt-ship-body.XXXXXX" 2>/dev/null)"; then
-      if printf '%s\n' "$pr_body_text" >"$tmp_body" \
-        && gh pr edit "$pr" --repo "$repo" --body-file "$tmp_body" 2>/dev/null; then
+      tmp_redacted="$(mktemp "${TMPDIR:-/tmp}/tkt-ship-redacted.XXXXXX" 2>/dev/null)" || tmp_redacted=""
+      if [ -n "$tmp_redacted" ] && printf '%s\n' "$pr_body_text" >"$tmp_body" \
+        && "$script_dir/lib/redact-paths" <"$tmp_body" >"$tmp_redacted" \
+        && gh pr edit "$pr" --repo "$repo" --body-file "$tmp_redacted" 2>/dev/null; then
         body_changed=0
       else
         printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
       fi
-      rm -f "$tmp_body"
+      rm -f "$tmp_body" "$tmp_redacted"
     else
       printf 'tkt-ship: warning: cannot update PR %s body; leaving it unchanged\n' "$pr" >&2
     fi

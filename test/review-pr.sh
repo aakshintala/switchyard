@@ -481,6 +481,24 @@ grep -q 'workflow doc is none' "$T/state/prompt-spec.md" || fail "workflow doc d
 [ -z "$(ls -d "$REVIEW_PR_RUN_ROOT"/review-pr.run.* 2>/dev/null)" ] || fail "collect removes the run dir"
 [ ! -e "$T/state/watch.txt" ] || fail "collect does not wait"
 
+# --- case: posted review comments redact host and lane worktree paths
+reset_state
+printf 'ci\tpass\n' >"$T/checks.txt"
+mac_top=Users
+mac_home="/$mac_top/fixture"
+write_record standards DONE "VERDICT standards: APPROVE
+Host: $mac_home/project/file and /srv/lanes/sample-worktrees/lane-a/src/file
+STATUS: DONE" 0
+start_review 7 --repo O/N --cwd "$T/clone" --axes standards --model M >/dev/null 2>&1 \
+  || fail "path review starts"
+bash "$REVIEW" collect job-standards >/dev/null 2>&1 || fail "path review collects"
+grep -Fq 'Host: ~/project/file and <lane worktree>/src/file' "$T/state/comment.md" \
+  || fail "posted review body redacts both host path kinds"
+! grep -Fq "/$mac_top/" "$T/state/comment.md" || fail "posted review body has no home prefix"
+! grep -Fq '/srv/lanes' "$T/state/comment.md" || fail "posted review body has no lane prefix"
+grep -Fq "review-pr: patch-id $EXPECTED_PID, head $FAKE_SHA" "$T/state/comment.md" \
+  || fail "path redaction preserves the review patch marker"
+
 # --- case: an off-pool role is refused before any job or worktree starts
 reset_state
 st=0

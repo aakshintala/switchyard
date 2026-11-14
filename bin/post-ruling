@@ -77,8 +77,17 @@ if [ -n "$inbox" ]; then
   fi
 fi
 
-# Step 1: post the file as a comment; the URL is gh's last stdout line.
-comment_out="$(gh issue comment "$issue" --repo "$repo" --body-file "$file")" || {
+# Step 1: post the redacted body; the URL is gh's last stdout line.
+comment_body="$(mktemp "${TMPDIR:-/tmp}/post-ruling-body.XXXXXX")" || {
+  echo "post-ruling: cannot create a temporary comment body" >&2
+  exit 1
+}
+trap 'rm -f "$comment_body"' EXIT
+"$script_dir/lib/redact-paths" <"$file" >"$comment_body" || {
+  echo "post-ruling: cannot redact the comment body" >&2
+  exit 1
+}
+comment_out="$(gh issue comment "$issue" --repo "$repo" --body-file "$comment_body")" || {
   echo "post-ruling: gh issue comment failed for $repo issue $issue" >&2
   exit 1
 }

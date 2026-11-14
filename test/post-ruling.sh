@@ -58,8 +58,9 @@ stage() {
   rm -rf "$T/fbin" "$T/gh.log" "$T/inbox.log" "$T/inbox-body.txt" "$T/posted.md"
   rm -f "$T/comment-fail" "$T/edit-fail" "$T/inbox-fail"
   rm -f "$T/stdout.txt" "$T/stderr.txt"
-  mkdir -p "$T/fbin"
+  mkdir -p "$T/fbin/lib"
   cp "$POST" "$T/fbin/post-ruling" || fail "cannot stage post-ruling"
+  cp "$SCRIPT_DIR/../bin/lib/redact-paths" "$T/fbin/lib/redact-paths" || fail "cannot stage redact-paths"
   cat >"$T/fbin/inbox-send" <<STUB
 #!/usr/bin/env bash
 set -euo pipefail
@@ -92,7 +93,9 @@ COPY="$RUN/switchyard-504-ruling-1.md"
 cmp -s "$T/ruling-a.md" "$COPY" || fail "the copy holds identical bytes"
 cmp -s "$T/ruling-a.md" "$T/posted.md" || fail "the comment body equals the file"
 [ "$(cat "$T/stdout.txt")" = "RULING url=$URL copy=$COPY" ] || fail "stdout names the url and the copy (got: $(cat "$T/stdout.txt"))"
-grep -q -F "gh issue comment 504 --repo aakshintala/switchyard --body-file $T/ruling-a.md" "$T/gh.log" || fail "step 1 posts the file as a comment"
+grep -Fq "gh issue comment 504 " "$T/gh.log" \
+  && grep -Fq -- "--body-file $T/tmp/post-ruling-body." "$T/gh.log" \
+  || fail "step 1 posts the temporary body file as a comment"
 grep -q -F "gh issue edit 504 --repo aakshintala/switchyard --remove-label needs-ruling" "$T/gh.log" || fail "step 3 removes the label"
 [ "$(cat "$T/inbox-body.txt")" = "ruling for #504 posted: $URL; copy: $COPY" ] || fail "step 4 sends the inbox line (got: $(cat "$T/inbox-body.txt"))"
 grep -q -F "inbox-send $INBOX surveyor" "$T/inbox.log" || fail "step 4 calls inbox-send with the dir and sender"
@@ -109,6 +112,22 @@ run_post 505 "$T/ruling-b.md" --repo aakshintala/switchyard --run "$RUN" --remov
 [ ! -e "$T/inbox.log" ] || fail "no inbox makes no inbox call"
 [ ! -e "$T/inbox-body.txt" ] || fail "no inbox sends no inbox line"
 [ -f "$RUN/switchyard-505-ruling-1.md" ] || fail "no inbox still writes the copy"
+
+# --- case: the posted ruling body redacts home and lane worktree paths
+stage
+RUN="$T/run-redact"; mkdir -p "$RUN"
+mac_top=Users
+mac_home="/$mac_top/fixture"
+printf 'Host: %s/project/file and /srv/lanes/sample-worktrees/lane-a/src/file\n' \
+  "$mac_home" >"$T/ruling-redact.md"
+run_post 514 "$T/ruling-redact.md" --repo example/switchyard --run "$RUN"
+[ "$rc" = "0" ] || fail "redacted ruling exits 0 (got $rc: $(cat "$T/stderr.txt"))"
+grep -Fq 'Host: ~/project/file and <lane worktree>/src/file' "$T/posted.md" \
+  || fail "posted ruling body redacts both host path kinds"
+! grep -Fq "/$mac_top/" "$T/posted.md" || fail "posted ruling body has no home prefix"
+! grep -Fq '/srv/lanes' "$T/posted.md" || fail "posted ruling body has no lane prefix"
+cmp -s "$T/ruling-redact.md" "$RUN/switchyard-514-ruling-1.md" \
+  || fail "the local ruling copy remains unchanged"
 
 # --- case (c): a failing comment stops before the copy
 stage

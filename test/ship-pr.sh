@@ -842,6 +842,42 @@ grep -qF 'P3 first open finding' "$ST/comment.txt" && grep -qF 'P3 second open f
   "$(grep -n '^gh pr merge' "$ST/gh.log" | head -n 1 | cut -d: -f1)" ] \
   || fail "P3 issues are linked before the merge"
 
+# The P3 issue body and its PR link both redact host paths.
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+p3_top=Users
+p3_home="/$p3_top/fixture"
+p3_finding="P3 host path $p3_home/project/file and /srv/lanes/sample-worktrees/lane-a/src/file"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg finding "$p3_finding" '[
+  {created_at:"2026-11-04T11:00:00Z",id:118,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE path findings\n" + $finding)}
+]' >"$ST/review-comments"
+ship; expect 0 "P3 issue and link redact host paths"
+jq -e '.[0].body | contains("P3 host path ~/project/file and <lane worktree>/src/file")' \
+  "$ST/created-issues" >/dev/null || fail "P3 issue body redacts both host path kinds"
+grep -Fq 'P3 host path ~/project/file and <lane worktree>/src/file' "$ST/comment.txt" \
+  || fail "P3 PR comment redacts both host path kinds"
+jq -e --arg prefix "/$p3_top/" '[.[].body] | join("\\n") | contains($prefix) | not' \
+  "$ST/created-issues" >/dev/null || fail "P3 issue bodies have no home prefix"
+jq -e '[.[].body] | join("\\n") | contains("/srv/lanes") | not' \
+  "$ST/created-issues" >/dev/null || fail "P3 issue bodies have no lane prefix"
+! grep -Fq "/$p3_top/" "$ST/comment.txt" || fail "P3 PR comment has no home prefix"
+! grep -Fq '/srv/lanes' "$ST/comment.txt" || fail "P3 PR comment has no lane prefix"
+jq -e --arg prefix "/$p3_top/" '[.[].title] | join("\\n") | (contains($prefix) or contains("/srv/lanes")) | not' \
+  "$ST/created-issues" >/dev/null || fail "P3 issue titles have no host path prefix"
+! grep -E '^gh issue list' "$ST/gh.log" | grep -Fq -e "/$p3_top/" -e '/srv/lanes' \
+  || fail "P3 issue search query has no host path prefix"
+# A rerun finds the issue it filed (whose body holds the redacted finding) instead of a duplicate.
+cp "$ST/issues" "$T/p3-issues-after-first-run"
+setup
+REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
+cp "$T/p3-issues-after-first-run" "$ST/issues"
+jq -nc --arg pid "$REVIEW_PID" --arg head "$HEAD0" --arg finding "$p3_finding" '[
+  {created_at:"2026-11-04T11:00:00Z",id:118,body:("review-pr: patch-id " + $pid + ", head " + $head + "\n\n## verify (test)\n\nFIX-INCOMPLETE path findings\n" + $finding)}
+]' >"$ST/review-comments"
+ship; expect 0 "P3 rerun with host paths reuses its issue"
+[ "$(jq 'length' "$ST/created-issues" 2>/dev/null || echo 0)" = 0 ] \
+  || fail "P3 rerun with host paths files no duplicate: [$(cat "$ST/created-issues")]"
+
 # A decorated verify heading is normalised the same way as review-pr's parser.
 setup
 REVIEW_PID="$(git -C "$WT" diff "origin/main...$HEAD0" | git patch-id --stable | awk '{print $1}')"
@@ -2135,6 +2171,20 @@ grep -qx 'Findings:' "$ST/comment.txt" && grep -q 'P2: missing test for x' "$ST/
 grep -qx 'Changed since review:' "$ST/comment.txt" && grep -q 'feature.txt' "$ST/comment.txt" || fail "comment holds the stat: [$(cat "$ST/comment.txt")]"
 grep -q '^gh pr merge' "$ST/gh.log" || fail "unverified fixes: merged"
 [ ! -e "$WT" ] || fail "unverified fixes: worktree removed"
+
+# The unverified-fixes comment redacts paths from findings before posting.
+setup
+echo changed >"$WT/feature.txt"; git -C "$WT" commit -qam "fix nit"; git -C "$WT" push -q origin feature
+mac_top=Users
+mac_home="/$mac_top/fixture"
+printf 'P2: no real bug; host %s/project/file and /srv/lanes/sample-worktrees/lane-a/src/file\n' \
+  "$mac_home" >"$T/redacted-findings.txt"
+run 7 --repo O/N --reviewed "$HEAD0" --worktree "$WT" --unverified-fixes "$T/redacted-findings.txt"
+expect 0 "unverified comment redacts host paths"
+grep -Fq 'host ~/project/file and <lane worktree>/src/file' "$ST/comment.txt" \
+  || fail "unverified comment redacts both host path kinds"
+! grep -Fq "/$mac_top/" "$ST/comment.txt" || fail "unverified comment has no home prefix"
+! grep -Fq '/srv/lanes' "$ST/comment.txt" || fail "unverified comment has no lane prefix"
 
 # 1b. a repair that merges main: the stat lists the repair's files, not the base's
 setup

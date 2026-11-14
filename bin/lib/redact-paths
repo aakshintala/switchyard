@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Redact host-local paths from text passed on stdin; preserve all other bytes.
+# Order: the flywheel run dir to `run`, lane worktrees to `<lane worktree>`,
+# then any home directory (macOS, Linux or /root), bare or with a subpath, to `~`.
+set -euo pipefail
+
+mac_top=Users
+linux_top=home
+REDACT_PATHS_MAC_TOP="$mac_top" REDACT_PATHS_LINUX_TOP="$linux_top" perl -pe '
+  BEGIN {
+    my $mac = quotemeta($ENV{REDACT_PATHS_MAC_TOP});
+    my $linux = quotemeta($ENV{REDACT_PATHS_LINUX_TOP});
+    # A user segment stops at a path or prose boundary and never ends in a dot,
+    # so `/<top>/<user>.` keeps its sentence-ending period.
+    $seg = q{[^/\s\x60\x27"<>(),;:!?]*[^/\s\x60\x27"<>(),;:!?.]};
+    $lb = q{(?<![A-Za-z0-9._-])};
+    $home = qq{(?:/(?:$mac|$linux)/$seg|/root)};
+    $end = q{(?![^/\s\x60\x27"<>(),;:!?.])};
+  }
+  s{$lb$home/work/fiber-worktrees/flywheel/run$end}{run}g;
+  s{$lb/srv/lanes/$seg/$seg}{<lane worktree>}g;
+  s{$lb$home$end}{~}g;
+'

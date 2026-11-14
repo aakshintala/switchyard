@@ -1467,6 +1467,26 @@ run_gate
 grep -qx "Local gate: pass at $H (gate-ok)" "$T/pr-body" || fail "second PASS replaces the sha"
 grep -q "0000000000000000000000000000000000000000" "$T/pr-body" && fail "second PASS drops the old sha"
 
+# --- a posted gate body redacts home and lane worktree paths
+setup_case gate-body-redact
+write_plan
+commit_file base.txt "base changed"
+push_branch
+H="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$H" || fail "set redaction head"
+bash "$TKT_STATE" "$S" set pr 518 || fail "set redaction PR"
+printf '%s\n' "$H" >"$T/pr-head"
+mac_top=Users
+mac_home="/$mac_top/fixture"
+printf 'Title\n\nHost: %s/project/file and /srv/lanes/sample-worktrees/lane-a/src/file\nImplemented by: m/a\n' \
+  "$mac_home" >"$T/pr-body"
+run_gate
+[ "$RC" -eq 0 ] || fail "gate body path redaction exits 0 (rc=$RC): $(cat "$CDIR/stderr.txt")"
+grep -Fq 'Host: ~/project/file and <lane worktree>/src/file' "$T/pr-body" \
+  || fail "posted gate body redacts both host path kinds"
+! grep -Fq "/$mac_top/" "$T/pr-body" || fail "posted gate body has no home prefix"
+! grep -Fq '/srv/lanes' "$T/pr-body" || fail "posted gate body has no lane prefix"
+
 # --- --from-job journals a delegate's full-gate PASS for tkt-ship ---
 setup_from_job_case from-job-pass
 bash "$TKT_STATE" "$S" set reviewed 1111111111111111111111111111111111111111 || fail "from-job set reviewed"

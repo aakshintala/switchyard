@@ -244,12 +244,14 @@ while [ "$i" -le "$n" ]; do
   body="$tmp/body-$i.md"
   printf '%s\n' "$(header "$i" "$n")" >"$body"
   cat "$(partfile "$i")" >>"$body"
+  redacted_body="$tmp/redacted-body-$i.md"
+  "$script_dir/lib/redact-paths" <"$body" >"$redacted_body"
   if [ "$i" -le "$total_ids" ]; then
     id="$(sed -n "${i}p" "$tmp/ids.txt")"
-    resp="$(gh api -X PATCH "repos/$repo/issues/comments/$id" -F "body=@$body")" \
+    resp="$(gh api -X PATCH "repos/$repo/issues/comments/$id" -F "body=@$redacted_body")" \
       || { echo "post-plan: cannot edit comment $id" >&2; exit 1; }
   else
-    resp="$(gh api "repos/$repo/issues/$issue/comments" -F "body=@$body")" \
+    resp="$(gh api "repos/$repo/issues/$issue/comments" -F "body=@$redacted_body")" \
       || { echo "post-plan: cannot post part $i of $n" >&2; exit 1; }
   fi
   url="$(jq -r '.html_url // empty' <<<"$resp")" \

@@ -132,6 +132,35 @@ grep -q 'repo view' "$T/calls.log" || fail "without --repo the repo comes from g
 [ "$(sed -n '1p' "$T/created-1.md")" = "<!-- post-plan 1/1 -->" ] || fail "created body starts with the 1/1 marker"
 tail -n +2 "$T/created-1.md" | cmp -s - "$T/plan1.md" || fail "created body after the marker equals the plan"
 
+# --- case: posted plan bodies redact home and lane worktree paths
+reset_state
+mac_top=Users
+mac_home="/$mac_top/fixture"
+printf '# Paths\n\nHost: %s/project/file and /srv/lanes/sample-worktrees/lane-a/src/file\n\n## Gate\n\nbash test/run\n' \
+  "$mac_home" >"$T/path-plan.md"
+run_post 7 "$T/path-plan.md" --repo "$REPO"
+[ "$rc" = "0" ] || fail "path plan exits 0 (got $rc: $(cat "$T/stderr.txt"))"
+grep -Fq 'Host: ~/project/file and <lane worktree>/src/file' "$T/created-1.md" \
+  || fail "posted plan body redacts both host path kinds"
+! grep -Fq "/$mac_top/" "$T/created-1.md" || fail "posted plan body has no Mac home prefix"
+! grep -Fq '/srv/lanes' "$T/created-1.md" || fail "posted plan body has no lane prefix"
+grep -Fq '<!-- post-plan 1/1 -->' "$T/created-1.md" || fail "path redaction preserves the post-plan marker"
+
+# The same redaction applies when a marked comment is patched.
+reset_state
+cat >"$T/comments.json" <<'EOF'
+[
+  {"id":502,"body":"<!-- post-plan 1/1 -->\nold part","user":{"login":"plan-bot"},"html_url":"https://example.invalid/comment/502"}
+]
+EOF
+run_post 7 "$T/path-plan.md" --repo "$REPO"
+[ "$rc" = "0" ] || fail "path plan patch exits 0 (got $rc: $(cat "$T/stderr.txt"))"
+grep -Fq 'Host: ~/project/file and <lane worktree>/src/file' "$T/patched-502.md" \
+  || fail "patched plan body redacts both host path kinds"
+! grep -Fq "/$mac_top/" "$T/patched-502.md" || fail "patched plan body has no home prefix"
+! grep -Fq '/srv/lanes' "$T/patched-502.md" || fail "patched plan body has no lane prefix"
+grep -Fq '<!-- post-plan 1/1 -->' "$T/patched-502.md" || fail "path redaction preserves the patched marker"
+
 # --- case: about 150k chars across many ## sections posts three parts
 reset_state
 run_post 7 "$T/plan2.md" --repo "$REPO"
