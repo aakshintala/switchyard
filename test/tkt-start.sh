@@ -1327,6 +1327,13 @@ grep -qF "tkt-start: --model role 'lane' requires an openai effort suffix" "$CDI
   || fail "openai-prefix-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
 [ ! -e "$RUN/widget-42.state" ] || fail "openai-prefix-bare: state was written"
 
+setup openai-dot-prefix-bare ONE AGAINST
+run_start --model lane=openai/gpt-6
+[ "$RC" -eq 2 ] || fail "openai-dot-prefix-bare: exit $RC, want 2"
+grep -qF "tkt-start: --model role 'lane' requires an openai effort suffix" "$CDIR/stderr" \
+  || fail "openai-dot-prefix-bare: stderr does not name the role: $(cat "$CDIR/stderr")"
+[ ! -e "$RUN/widget-42.state" ] || fail "openai-dot-prefix-bare: state was written"
+
 setup openai-suffixed ONE AGAINST
 remove_model_role planner
 run_start --no-preflight --model planner=openai/gpt-6-luna:medium

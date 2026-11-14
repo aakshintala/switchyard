@@ -112,7 +112,7 @@ pool_has_bare_model() {
         *) remaining="$after"; continue ;;
       esac
       case "$after" in
-        ""|[[:space:]]*|';'*|','*|'.'*|')'*) return 0 ;;
+        ""|[[:space:]]*|';'*|','*|'.'|'.'[[:space:]]*|')'*) return 0 ;;
       esac
       remaining="$after"
     done
