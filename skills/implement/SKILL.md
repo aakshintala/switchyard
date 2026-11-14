@@ -38,7 +38,7 @@ When the ticket's spec is another issue, pass its number with `tkt-start --spec-
 - `review`: step 4 correctness review job.
 - `overbuild`: step 4 over-engineering review job.
 - `preflight`: step 2 preflight job.
-- `planner`: step 3 plan writer (`--slot planner`). tkt-start refuses to start without it unless `--no-preflight` or `--takeover` is given.
+- `planner`: step 3 plan writer (`--slot planner`). tkt-start refuses to start without it unless `--no-preflight` or `--takeover` is given or the state already stores a plan; a later `--slot planner` job still refuses without it.
 
 The `tkt-job --slot` map is `lane` → `lane`, `preflight` → `preflight`, `verifier-rN` and `verifier-rN-drift` → `verifier`, `confirm` → `verifier`, `planner` → `planner`, and `fixN` → `fix`. `verifier` is the plan Verifier; `verify` is review-loop's scoped verify.
 
