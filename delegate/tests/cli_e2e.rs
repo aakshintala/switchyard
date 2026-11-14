@@ -1298,6 +1298,44 @@ fn ack_refuses_cwd_unrelated_to_job_and_caller_cwd() {
 }
 
 #[test]
+fn ack_refuses_ancestor_of_job_cwd_unrelated_to_caller_cwd() {
+    let e = Env::new("ack-ancestor-job-cwd-unrelated-to-caller-cwd");
+    let worker = e.dir.join("worker");
+    std::fs::create_dir_all(&worker).unwrap();
+    let id = e.ok(
+        &[
+            "run",
+            "--model",
+            "composer-2.5",
+            "--cwd",
+            worker.to_str().unwrap(),
+        ],
+        "known report",
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", "/dispatcher"),
+        ],
+    );
+    assert_eq!(e.wait_terminal(&id)["status"], "DONE");
+    let record = e.record(&id);
+    let job_cwd = record["resume"]["cwd"].as_str().unwrap();
+
+    let out = e.delegate_env(
+        &["ack", &id],
+        None,
+        &[
+            ("DELEGATE_CALLER", "lane-a"),
+            ("DELEGATE_CALLER_CWD", e.dir.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(job_cwd), "{stderr}");
+    assert_ack_refusal_hint(&stderr);
+    assert!(!e.dir.join("xdg-cache/delegate/read").join(&id).exists());
+}
+
+#[test]
 fn ack_canonicalizes_symlinked_caller_cwd() {
     let e = Env::new("ack-cwd-symlink");
     let clone = e.dir.join("clone");

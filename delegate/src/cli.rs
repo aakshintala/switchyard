@@ -323,6 +323,12 @@ fn cwd_paths_related(record_cwd: &str, ack_cwd: &str) -> bool {
     record_path.starts_with(&ack_path) || ack_path.starts_with(&record_path)
 }
 
+fn cwd_inside(record_cwd: &str, ack_cwd: &str) -> bool {
+    let record_path = canonicalize_with_missing_tail(std::path::Path::new(record_cwd));
+    let ack_path = canonicalize_with_missing_tail(std::path::Path::new(ack_cwd));
+    ack_path.starts_with(&record_path)
+}
+
 fn caller_label_matches(record_caller: &str, ack_caller: &str) -> bool {
     record_caller == ack_caller || record_caller.starts_with(&format!("{ack_caller}/"))
 }
@@ -1367,9 +1373,9 @@ fn ack(args: &[String]) -> Result<i32, Usage> {
                     Some(ack_cwd)
                         if caller_cwd
                             .is_some_and(|cwd| cwd_paths_related(cwd, ack_cwd))
-                            || job_cwd.is_some_and(|cwd| cwd_paths_related(cwd, ack_cwd)) => {}
+                            || job_cwd.is_some_and(|cwd| cwd_inside(cwd, ack_cwd)) => {}
                     Some(ack_cwd) => errors.push(format!(
-                        "job {id} cwd check failed: caller cwd {ack_cwd} is unrelated to job cwd {} and record callerCwd {}; use --any to override",
+                        "job {id} cwd check failed: caller cwd {ack_cwd} is not inside job cwd {} and is unrelated to record callerCwd {}; use --any to override",
                         job_cwd.unwrap_or("<missing>"),
                         caller_cwd.unwrap_or("<missing>")
                     )),
