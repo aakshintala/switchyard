@@ -297,15 +297,19 @@ if stored="$(t get head 2>/dev/null || true)" && [ -n "$stored" ]; then
         fi
       fi
     fi
-    # Closed slots may use this broader recovery; open slots still need the
-    # exact job-record ownership proved above.
+    # Closed slots recover unpushed commits on a clean tree whose HEAD
+    # descends from the PR head, in two arms. Arm 1: stored is at or behind
+    # the PR head; the job.fix<fixslot> record check runs only under the
+    # round limit. Arm 2: stored == actual, so the state head itself claims
+    # the commits; the record's headAfter must equal actual at every round.
+    # Open slots still need the exact job-record ownership proved above.
     # debt: round<2 closed-slot recovery can push without job-record ownership; tighten when a round<2 closed-slot recovery pushes a commit no job record owns.
     if [ "$keep" -eq 0 ] && [ "$openk" -eq 0 ] && [ "$clean" -eq 1 ] && [ "$prhead" != "$actual" ] \
-      && git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null \
+      && { git -C "$worktree" merge-base --is-ancestor "$stored" "$prhead" 2>/dev/null || [ "$stored" = "$actual" ]; } \
       && git -C "$worktree" merge-base --is-ancestor "$prhead" "$actual" 2>/dev/null \
       && { [ "$limited" -eq 0 ] || [ "$fixslot" -ge 1 ]; }; then
       closed_owned=1
-      if [ "$limited" -eq 1 ]; then
+      if [ "$limited" -eq 1 ] || [ "$stored" = "$actual" ]; then
         closed_job="$(t get "job.fix$fixslot" 2>/dev/null || true)"
         closed_rec=""
         if [ -n "$closed_job" ]; then closed_rec="$(bash "$script_dir/job-record" "$closed_job" 2>/dev/null || true)"; fi

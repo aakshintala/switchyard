@@ -1007,6 +1007,166 @@ head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "R10 bad
 grep -q "job|" "$T/calls.log" && fail "R10 dispatched a fix job"
 fi
 
+# H1: state-owned closed-slot commits recover at round 0 with a matching record.
+if want H1; then
+setup_case h1
+set_closed_round 0
+fixture_commit fix.txt "first owned fix" "fix: first owned"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second owned fix" "fix: second owned"
+A2="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$A2" >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix3 j3 >/dev/null
+write_job_record j3 "$A2" "$A2"
+record_test_round 3 "$A2"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "H1 exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$A2" || fail "H1 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$A2" ] || fail "H1 did not push the recovery commits"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A2" ] || fail "H1 state head did not advance"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "1" ] || fail "H1 round did not advance to 1"
+grep -q "job|" "$T/calls.log" && fail "H1 dispatched a fix job"
+fi
+
+# H2: a mismatched headAfter does not prove ownership of state-owned commits.
+if want H2; then
+setup_case h2
+set_closed_round 0
+fixture_commit fix.txt "first owned fix" "fix: first owned"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second owned fix" "fix: second owned"
+A2="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$A2" >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix3 j3 >/dev/null
+write_job_record j3 "$A2" "$A1"
+record_test_round 3 "$A2"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "H2 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "H2 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "H2 pushed without ownership"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A2" ] || fail "H2 changed state head"
+grep -q "job|" "$T/calls.log" && fail "H2 dispatched a fix job"
+fi
+
+# H3: a missing job record does not prove ownership of state-owned commits.
+if want H3; then
+setup_case h3
+set_closed_round 0
+fixture_commit fix.txt "first owned fix" "fix: first owned"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second owned fix" "fix: second owned"
+A2="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$A2" >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix3 j3 >/dev/null
+rm -f "$TMPDIR/delegate-jobs/j3.json"
+record_test_round 3 "$A2"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "H3 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "H3 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "H3 pushed without a job record"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A2" ] || fail "H3 changed state head"
+grep -q "job|" "$T/calls.log" && fail "H3 dispatched a fix job"
+fi
+
+# H4: owned state-head recovery remains exempt at round 2 and advances to 3.
+if want H4; then
+setup_case h4
+set_closed_round 2
+fixture_commit fix.txt "first owned fix" "fix: first owned"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second owned fix" "fix: second owned"
+A2="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$A2" >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix3 j3 >/dev/null
+write_job_record j3 "$A2" "$A2"
+record_test_round 3 "$A2"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || fail "H4 exited $?: $(head -n 1 <<<"$out"): $(cat "$T/stderr")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix FIX-OK reviewed=$A2" || fail "H4 bad verdict: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q "ROUND-LIMIT" && fail "H4 was blocked by ROUND-LIMIT"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$A2" ] || fail "H4 did not push the recovery commits"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A2" ] || fail "H4 state head did not advance"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "3" ] || fail "H4 round did not advance from 2 to 3"
+grep -q "job|" "$T/calls.log" && fail "H4 dispatched a fix job"
+fi
+
+# H5: round-2 state-head recovery without its job record remains limited.
+if want H5; then
+setup_case h5
+set_closed_round 2
+fixture_commit fix.txt "first owned fix" "fix: first owned"
+A1="$(git -C "$WT" rev-parse HEAD)"
+fixture_commit fix.txt "second owned fix" "fix: second owned"
+A2="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$A2" >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix3 j3 >/dev/null
+rm -f "$TMPDIR/delegate-jobs/j3.json"
+record_test_round 3 "$A2"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "1" ] || fail "H5 exited $run_rc, want ROUND-LIMIT: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix ROUND-LIMIT round=2" || fail "H5 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "H5 pushed without a job record"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A2" ] || fail "H5 changed state head"
+[ "$(bash "$TKT_STATE" "$S" get round)" = "2" ] || fail "H5 changed the round"
+grep -q "job|" "$T/calls.log" && fail "H5 dispatched a fix job"
+fi
+
+# H6: state ownership does not recover when the PR head is a sibling commit.
+if want H6; then
+setup_case h6
+set_closed_round 0
+fixture_commit sibling.txt "sibling PR head" "pr: sibling head"
+PPR="$(git -C "$WT" rev-parse HEAD)"
+git -C "$WT" push -q origin HEAD:pr-head
+git -C "$WT" reset -q --hard "$OLD"
+fixture_commit fix.txt "state-owned sibling" "fix: state-owned sibling"
+A="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$A" >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix3 j3 >/dev/null
+write_job_record j3 "$A" "$A"
+record_test_round 3 "$A"
+printf 'ORIGIN:%s:refs/heads/pr-head' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "H6 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "H6 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git --git-dir="$CDIR/origin.git" rev-parse refs/heads/pr-head)" = "$PPR" ] || fail "H6 PR head changed"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "H6 pushed a non-descendant"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A" ] || fail "H6 changed state head"
+grep -q "job|" "$T/calls.log" && fail "H6 dispatched a fix job"
+fi
+
+# H7: the H1 state on a dirty tree drifts; arm 2 still requires a clean tree.
+if want H7; then
+setup_case h7
+set_closed_round 0
+fixture_commit fix.txt "first owned fix" "fix: first owned"
+fixture_commit fix.txt "second owned fix" "fix: second owned"
+A2="$(git -C "$WT" rev-parse HEAD)"
+bash "$TKT_STATE" "$S" set head "$A2" >/dev/null
+bash "$TKT_STATE" "$S" set fixslot 3 >/dev/null
+bash "$TKT_STATE" "$S" set job.fix3 j3 >/dev/null
+write_job_record j3 "$A2" "$A2"
+record_test_round 3 "$A2"
+printf 'untracked\n' >"$WT/untracked.txt"
+printf 'ORIGIN:%s:refs/heads/tkt-529' "$CDIR/origin.git" >"$T/prhead"
+run_rc=0; out="$(bash "$TKT" "$S" --verify 2>"$T/stderr")" || run_rc=$?
+[ "$run_rc" = "3" ] || fail "H7 exited $run_rc, want DRIFT 3: $(head -n 1 <<<"$out")"
+head -n 1 <<<"$out" | grep -q "TKT tkt-fix DRIFT" || fail "H7 bad verdict: $(head -n 1 <<<"$out")"
+[ "$(git -C "$WT" rev-parse origin/tkt-529)" = "$OLD" ] || fail "H7 pushed from a dirty tree"
+[ "$(bash "$TKT_STATE" "$S" get head)" = "$A2" ] || fail "H7 changed state head"
+[ -f "$WT/untracked.txt" ] || fail "H7 dirty worktree changed"
+grep -q "job|" "$T/calls.log" && fail "H7 dispatched a fix job"
+fi
+
 # 7b. A takeover uses its recorded gate without a plan file.
 setup_case takeover
 rm -f "$CDIR/plan.md"
