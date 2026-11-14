@@ -1518,6 +1518,13 @@ jq '.result.gateResult.exitCode = "0"' "$DELEGATE_JOBS_DIR/job-noninteger.json" 
 journal_job_gate job-noninteger gate-ok
 expect_from_job_refusal job-noninteger 'delegate gateResult'
 
+# --- --from-job refuses a passing record when no gate journal row exists ---
+setup_from_job_case from-job-no-gate-row
+plant_job_record job-no-gate-row present 0 "$H" false
+: >"$CDIR/tkt.journal"
+cp "$CDIR/tkt.journal" "$CDIR/journal-before"
+expect_from_job_refusal job-no-gate-row 'gate command/environment check failed: newest job journal line does not match'
+
 # --- --from-job requires the gate command to match the current plan exactly ---
 setup_from_job_case from-job-command
 plant_job_record job-command present 0 "$H" false
