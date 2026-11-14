@@ -1262,7 +1262,10 @@ review_verdict() {
   IFS=$'\t' read -r created id header verdicts axes body64 <<<"$last"
   case ",$verdicts," in *,INVALID,*) printf 'invalid'; return 0 ;; esac
   if [[ ",$verdicts," == *,verify:FIX-OK,* ]]; then
-    [ "$verdicts" = "verify:FIX-OK" ] && printf 'approved' || printf 'invalid'
+    # A verify may repeat its FIX-OK line; any other entry beside it is invalid.
+    local rest="${verdicts},"
+    rest="${rest//verify:FIX-OK,/}"
+    [ -z "$rest" ] && printf 'approved' || printf 'invalid'
     return 0
   fi
   case ",$verdicts," in *,verify:FIX-INCOMPLETE,*)
