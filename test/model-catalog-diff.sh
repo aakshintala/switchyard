@@ -202,6 +202,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     {"name": "models/gemini-9-flash-tts", "supportedGenerationMethods": ["generateContent"]},
                     {"name": "models/gemini-9-transcribe", "supportedGenerationMethods": ["generateContent"]},
                     {"name": "models/lyria-9", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/nano-banana-9-preview", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemini-nano-banana-9", "supportedGenerationMethods": ["generateContent"]},
                     {"name": "models/gemini-9-imageable", "supportedGenerationMethods": ["generateContent"], "inputTokenLimit": 200},
                 ]})
             else:
@@ -410,7 +412,7 @@ try:
     expect("| gemini-tools | mismatch | context | 200 | 100 |" in gemini_filter_report, "text Gemini model with tool calls was not diffed")
     expect("| gemini-unclassified | mismatch | context | 200 | 100 |" in gemini_filter_report, "Gemini model without modality/tool-call fields was not diffed")
     expect("| gemini-unlisted | missing |" in gemini_filter_report, "unlisted Gemini model did not retain its missing row")
-    for identifier in ("gemini-9-pro-image-preview", "gemini-9-flash-tts", "gemini-9-transcribe", "lyria-9"):
+    for identifier in ("gemini-9-pro-image-preview", "gemini-9-flash-tts", "gemini-9-transcribe", "lyria-9", "nano-banana-9-preview", "gemini-nano-banana-9"):
         expect(f"| {identifier} |" not in gemini_filter_report, f"non-text Gemini model {identifier} produced a row")
     expect("| gemini-9-imageable | mismatch | context | 200 | 100 |" in gemini_filter_report, "Gemini ID containing a non-text word outside its segment was filtered")
 

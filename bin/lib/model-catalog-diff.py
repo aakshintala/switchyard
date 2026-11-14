@@ -26,7 +26,7 @@ CODEX_CLIENT_VERSION = "0.1.0"
 USER_AGENT = "model-catalog-diff/1"
 OPENAI_NON_CHAT = re.compile(r"embedding|tts|whisper|dall-e|moderation|transcribe|image|realtime|audio|search", re.I)
 # models.dev doesn't list these ids, so its modality filter can't see them.
-GEMINI_NON_TEXT = re.compile(r"(?:^lyria-|-(?:image|tts|transcribe)(?:-|$))", re.I)
+GEMINI_NON_TEXT = re.compile(r"(?:^lyria-|(?:^|-)nano-banana(?:-|$)|-(?:image|tts|transcribe)(?:-|$))", re.I)
 VENDORS = (
     {
         "name": "anthropic",
